@@ -16,10 +16,11 @@ Plan: `specs/plans/2026-08-19-compiler-file-decomposition.md`
   to `lib/tir/llvm_emit.ml` kept it GREEN; changing `int_arith_op`'s `"+" ->
   "add"` to `"add nsw"` turned it RED (131 of 240 programs changed hash, exit 1);
   reverting returned it to GREEN.
-- Task 0.2 — full-suite baseline at `8d2b22fb`: **2,739 tests, 0 failures,
+- Task 0.2 — full-suite baseline at `8d2b22fb`: **2,759 tests, 0 failures,
   exit 0** (`run_compiler` 936, `run_eval` 273, `run_codegen` 591, `run_stdlib`
-  878, `test_stdlib_march` 61). TIR snapshots: 33 tests, exit 0. **There are no
-  pre-existing failures to inherit.**
+  878, `test_stdlib_march` 61, `test_jit` 20 — the last measured separately,
+  since #347 added it to `scripts/run-tests.sh` mid-pass). TIR snapshots: 33
+  tests, exit 0. **There are no pre-existing failures to inherit.**
 - Task 0.3 — interpreter-performance baseline (tag `decomp-baseline-8d2b22fb`
   in `bench/results/2026-08-25-interp-arm64.jsonl`). Added because the IR oracle
   cannot see `lib/eval/eval.ml` — the interpreter is never emitted as LLVM IR,

@@ -10,7 +10,7 @@
 
 ---
 
-## Re-anchored 2026-08-25 (at `8d2b22fb`)
+## Re-anchored 2026-08-25 (at `8d2b22fb`, merged onto `origin/main` `7f91ea5d`)
 
 **Read this before executing any task below.** This plan was drafted on 2026-08-19 against
 `1f5a0111` and reviewed on 2026-08-23 against `e9adc190`. Between then and now the
@@ -23,8 +23,8 @@ code inside the two files this plan cuts up hardest:
   cache (`install_global_tail`, `assoc_str`, a rewritten `lookup`) at the top of the
   `Evaluation` section — i.e. *below* `base_env`, so every Phase-1 range **above** it is
   untouched but `base_env`'s **end** moved by 117 lines.
-- `bin/main.ml` **5,162 → 5,390** lines. `--jit` mode and `get_stdlib_tc_env` shifted both
-  `cas_flags` construction sites down by ~76 and ~163 lines respectively.
+- `bin/main.ml` **5,162 → 5,402** lines. `--jit` mode and `get_stdlib_tc_env` shifted the
+  second `cas_flags` construction site down by ~175 lines (the first did not move).
 - `lib/tir/llvm_emit.ml` **5,255 → 5,719** lines, and `emit_expr`'s body start moved from
   ~1222 to **1348** — so *every* `llvm_emit.ml` line number in Phase 2 is stale by ~126.
 - `lib/typecheck/typecheck.ml` **14,908 → 14,957** lines.
@@ -72,7 +72,7 @@ drift is visible; the `8d2b22fb` column is what the tasks below are anchored to.
 | File | Lines @`1f5a0111` | Lines @`8d2b22fb` | Largest single def @`8d2b22fb` | % of file | § headers | `.mli` |
 |---|---|---|---|---|---|---|
 | `lib/tir/llvm_emit.ml` | 5,255 | **5,719** | `emit_expr` **4,319** (`:1348–5666`) | **76%** | 0 | no |
-| `bin/main.ml` | 5,162 | **5,390** | `compile` **2,498** (`:2298–4795`) | 46% | 10 | no |
+| `bin/main.ml` | 5,162 | **5,402** | `compile` **2,510** (`:2298–4807`) | 46% | 10 | no |
 | `lib/eval/eval.ml` | 12,112 | **12,264** | `base_env` **5,274** (`:4235–9508`) | 43% | 70 | no |
 | `lsp/lib/analysis.ml` | 8,132 | 8,132 *(unchanged)* | 3 fns ≈3,000 | 37% | 49 | no |
 | `lib/desugar/desugar.ml` | 3,320 | 3,320 *(unchanged)* | `derive_impl` 942 | 28% | 8 | no |
@@ -236,7 +236,15 @@ Recorded at `8d2b22fb`, **exit 0, zero failures**:
 | `run_codegen` | 591 |
 | `run_stdlib` | 878 |
 | `test_stdlib_march` | 61 |
-| **total** | **2,739** |
+| `test_jit` | 20 |
+| **total** | **2,759** |
+
+`test_jit` joined `scripts/run-tests.sh` in #347, which merged into this branch after the
+first baseline run; its 20 tests were measured separately (exit 0). Note the runner's own
+warning: invoked outside `dune runtest`, `test_jit.ml` **silently skips** unless `HOME` and
+`MARCH_BIN` are pinned — `scripts/run-tests.sh` pins them, a bare
+`./_build/default/test/test_jit.exe` does not. A "20 passed" from the wrong invocation is
+the vacuous kind.
 
 **There are no pre-existing failures to carry.** Any failure a later task sees is that task's own — this baseline removes the usual "it was already broken" escape hatch. Wall time ~11 min on a loaded box (the plan's `~17s` in CLAUDE.md is an unloaded number).
 
@@ -1494,15 +1502,15 @@ Order matters — diagnostic actions came first in the original. Verify against 
 
 ## Phase 5 — `bin/main.ml`: one CAS-key site, not two
 
-**[corrected 2026-08-25]** — `bin/main.ml` is **5,390** lines (the draft said 5,162): `--jit` mode (#344) and the stdlib typecheck-env cache (#342) landed in between. `compile` is **2,498** lines (`:2298–4795`, was "2,360"), and both `cas_flags` sites moved.
+**[corrected 2026-08-25]** — `bin/main.ml` is **5,402** lines (the draft said 5,162): `--jit` mode (#344), the stdlib typecheck-env cache (#342) and #347 landed in between. `compile` is **2,510** lines (`:2298–4807`, was "2,360"), and the second `cas_flags` site moved.
 
-`compile` is 2,498 lines, but linear driver code is the *friendliest* shape to work in — no hidden coupling, read the window you need. This phase does **not** split it. It fixes one thing: `cas_flags` is constructed at **two** sites (**`main.ml:2401`** and **`main.ml:3769`**, was :2325 / :3606), and a codegen flag added to one and not the other silently produces cache hits across semantically different builds.
+`compile` is 2,510 lines, but linear driver code is the *friendliest* shape to work in — no hidden coupling, read the window you need. This phase does **not** split it. It fixes one thing: `cas_flags` is constructed at **two** sites (**`main.ml:2401`** and **`main.ml:3781`**, was :2325 / :3606), and a codegen flag added to one and not the other silently produces cache hits across semantically different builds.
 
 Derive both, never paste them:
 
 ```bash
-grep -n 'let cas_flags' bin/main.ml            # 2401, 3769 at 8d2b22fb
-grep -n 'MARCH_DEBUG_CASFLAGS' bin/main.ml     # 3788 at 8d2b22fb (site 2 only)
+grep -n 'let cas_flags' bin/main.ml            # 2401, 3781
+grep -n 'MARCH_DEBUG_CASFLAGS' bin/main.ml     # 3800 (site 2 only)
 ```
 
 ### Task 5.1: Extract `cas_flags` construction
@@ -1517,7 +1525,7 @@ B=$(grep -n 'let cas_flags' bin/main.ml | sed -n 2p | cut -d: -f1)
 diff <(sed -n "${A},$((A+22))p" bin/main.ml) <(sed -n "${B},$((B+22))p" bin/main.ml)
 ```
 
-Record every difference. Some are legitimate (the second site adds sysroot `.so` digests per the comment just above it at **:3758**, was :3595); those become parameters, not divergence.
+Record every difference. Some are legitimate (the second site adds sysroot `.so` digests per the comment just above it at **:3770**, was :3595); those become parameters, not divergence.
 
 - [ ] **Step 2: Write a single constructor above both sites**
 
@@ -1534,13 +1542,13 @@ let build_cas_flags ~(extra : string list) : string list =
      to [extra].  Copy verbatim from main.ml:2325 and :3606 — do not retype. *)
 ```
 
-Move the existing `MARCH_DEBUG_CASFLAGS` debug print (**`main.ml:3788-3790`**, was :3625-3627) **into** this function so that every call site logs its flag list identically — that print is what Step 3 verifies against.
+Move the existing `MARCH_DEBUG_CASFLAGS` debug print (**`main.ml:3800-3802`**, was :3625-3627) **into** this function so that every call site logs its flag list identically — that print is what Step 3 verifies against.
 
 - [ ] **Step 3: Prove the flag LIST is unchanged — never compare cache keys across compiler builds**
 
 The CAS key includes the digest of the compiler executable itself. Any comparison that spans "rebuild the compiler" therefore **always** yields different keys — an artifact-count check is structurally incapable of validating this refactor, and a naive reading of its inevitable failure invites a wrong "fix". Compare the flag *list* instead.
 
-Site 2 (**`main.ml:3788`**) already has an env-gated print; site 1 (**`:2419`**, the `let ch = … compilation_hash …` line — was :2343) has none. So first, as a print-only preparatory change, copy the same three-line `eprintf` to site 1, directly after its `let ch = … compilation_hash …` line. A print cannot alter the key. Build and capture the "before" flag lists with a flag that must be key-distinct (`--cap-strict`) in one run and not the other:
+Site 2 (**`main.ml:3800`**) already has an env-gated print; site 1 (**`:2419`**, the `let ch = … compilation_hash …` line — was :2343) has none. So first, as a print-only preparatory change, copy the same three-line `eprintf` to site 1, directly after its `let ch = … compilation_hash …` line. A print cannot alter the key. Build and capture the "before" flag lists with a flag that must be key-distinct (`--cap-strict`) in one run and not the other:
 
 ```bash
 dune build --root . bin/main.exe 2>&1 | tail -3
@@ -1706,6 +1714,15 @@ Recorded here so a later reader knows what was checked, not merely what was chan
 **Verified unchanged:** the Task 1.0 type block (`17–142`, no interleaved `let`); `Eval_types` still does not exist; all five hook refs and `Eval_error`/`eval_error` line numbers; the simd/net/session section anchors; `eval.ml:3496`'s http ordering constraint; `eval.ml:2249`'s `spawn_child_actor` hook call; the `Actor runtime`/`Dynamic Supervisor state`/`Monitors` section lines; all of Phase 3 (`refine_check.ml` 7,416 lines, `check_call` `:3371–4731`, three call sites); all of Phase 4 (`analysis.ml` 8,132 lines, `:5675`/`:6764`/`:7755`); the `--emit-llvm`-bypasses-CAS design, re-proved structurally and empirically; and IR determinism across differently-named source copies.
 
 **Added:** Task 0.3 (interpreter-performance baseline) and Task 1.5 (Phase 1's exit gate), because the IR oracle is structurally blind to the interpreter — the one file Phase 1 exists to dismantle.
+
+**Post-merge re-check.** After this pass, `origin/main` `7f91ea5d` (#347) was merged in. It
+touched `bin/main.ml` (+12 lines), so all Phase-5 numbers above are stated **post-merge**;
+`llvm_emit.ml`, `eval.ml`, `typecheck.ml`, `refine_check.ml` and `analysis.ml` were
+untouched by it, and `scripts/ir-oracle.sh check` came back `IR IDENTICAL across 240
+programs` on the merge — the oracle's first real use, confirming the merge changed no
+emitted code. That `bin/main.ml` moved *again* inside a single day is the argument for the
+`grep` derivations: a plan that hard-codes line numbers into this repo is stale before it
+is executed.
 
 ## Review revisions (2026-08-23)
 
