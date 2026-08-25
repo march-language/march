@@ -321,7 +321,8 @@ let test_repl_session_redefine_then_call_orc () =
 
    Uses the same per-pid [session_home] as the REPL harnesses, so the
    stdlib prelude .so is precompiled at most once per test run. *)
-let run_jit_file ?home ?(lib_path = "") ~env_prefix (src : string) : string * int =
+let run_jit_file ?home ?(lib_path = "") ?(extra_flags = "") ~env_prefix
+    (src : string) : string * int =
   let home = match home with Some h -> h | None -> Lazy.force session_home in
   let f = Filename.temp_file "march_jit_file" ".march" in
   let oc = open_out f in
@@ -332,9 +333,11 @@ let run_jit_file ?home ?(lib_path = "") ~env_prefix (src : string) : string * in
     if lib_path = "" then ""
     else Printf.sprintf "MARCH_LIB_PATH=%s " (Filename.quote lib_path) in
   let cmd =
-    Printf.sprintf "HOME=%s %s%s %s --jit %s > %s 2>&1"
+    Printf.sprintf "HOME=%s %s%s %s --jit%s %s > %s 2>&1"
       (Filename.quote home)
-      lib_env env_prefix (Filename.quote main_exe) (Filename.quote f)
+      lib_env env_prefix (Filename.quote main_exe)
+      (if extra_flags = "" then "" else " " ^ extra_flags)
+      (Filename.quote f)
       (Filename.quote out_path) in
   let code = Sys.command cmd in
   let ic = open_in_bin out_path in
@@ -424,6 +427,23 @@ let test_jit_file_actor_falls_back () =
     check_jit_file ~label:"--jit actor fallback"
       (run_jit_file ~env_prefix:"" jit_file_actor_src)
       [ "--jit does not support actor programs yet"; "checksum=2" ]
+
+(* `--jit --debug` must not silently drop the time-travel debugger.  The
+   debugger only exists in the tree-walking interpreter ([March_debug.Debug]
+   hooks the eval loop), so --jit must fall back to the interpreter with a
+   notice, same as the actor and stdlib-shadowing arms above, and the
+   debugger banner + the program's own output must both still appear.  Pins
+   BOTH halves — a silent fallback (--jit's pre-fix behavior: nothing printed,
+   JIT ran anyway) would be indistinguishable from --jit having grown
+   debugger support. *)
+let test_jit_file_debug_falls_back () =
+  if not (clang_available ()) then ()
+  else
+    check_jit_file ~label:"--jit --debug fallback"
+      (run_jit_file ~env_prefix:"" ~extra_flags:"--debug" jit_file_fib_src)
+      [ "--jit does not support the debugger; running interpreted";
+        "[debug] Trace recording enabled";
+        "checksum=6765" ]
 
 (* ── Fix round 1 regressions ──────────────────────────────────────────── *)
 
@@ -587,6 +607,9 @@ let () =
         test_jit_file_clang;
       Alcotest.test_case "march --jit falls back to the interpreter for actors"
         `Slow test_jit_file_actor_falls_back;
+      Alcotest.test_case
+        "march --jit --debug falls back to the interpreter for the debugger"
+        `Slow test_jit_file_debug_falls_back;
       Alcotest.test_case
         "march --jit flushes host diagnostics before JIT'd code exits"
         `Slow test_jit_file_flushes_diagnostics;
