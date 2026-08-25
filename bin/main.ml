@@ -2891,6 +2891,20 @@ let compile filename =
     && not compile_mode && not !do_check && not !check_migration
     && not (has_user_errors || has_parse_errors || has_resolve_errors
             || has_desugar_errors)
+    (* A program that shadows a stdlib module must NOT be JIT'd.  The --jit arm
+       feeds [get_stdlib_tc_env]'s seed env into [run_program]'s typecheck, and
+       [no_shadowing] is exactly the condition under which that seed env is
+       sound (see its definition above: when a user module shadows a stdlib
+       one, the seed is unsound whether cached or not, which is why the
+       typecheck above falls back to a from-scratch combined check).  Here the
+       consequence would be worse than wrong diagnostics: run_program's
+       type_map feeds LOWERING. *)
+    && (if no_shadowing then true
+        else begin
+          Printf.eprintf
+            "march: --jit does not support stdlib-shadowing programs yet; running interpreted\n%!";
+          false
+        end)
     && (let rec has_actor (ds : March_ast.Ast.decl list) =
           List.exists (function
             | March_ast.Ast.DActor _ -> true
@@ -4617,13 +4631,31 @@ let compile filename =
        produce the type_map that lowering needs. *)
     let runtime_so = ensure_runtime_so () in
     let jit_ctx = March_jit.Repl_jit.create ~runtime_so () in
-    Fun.protect
-      ~finally:(fun () -> March_jit.Repl_jit.cleanup jit_ctx)
-      (fun () ->
-         March_repl.Repl.maybe_precompile_stdlib (Some jit_ctx)
-           ~stdlib_decls ~type_map;
-         let tc_env = get_stdlib_tc_env ~for_js:false stdlib_decls in
-         March_jit.Repl_jit.run_program jit_ctx ~tc_env user_only_desugared)
+    (try
+       Fun.protect
+         ~finally:(fun () -> March_jit.Repl_jit.cleanup jit_ctx)
+         (fun () ->
+            March_repl.Repl.maybe_precompile_stdlib (Some jit_ctx)
+              ~stdlib_decls ~type_map;
+            let tc_env = get_stdlib_tc_env ~for_js:false stdlib_decls in
+            (* JIT'd code writes through the C runtime's own stdout and can
+               terminate the process with C `exit()` (panic_, exit_, a fatal
+               signal), which never runs OCaml's at_exit — so anything still
+               sitting in OCaml's stdout/stderr buffers, INCLUDING every
+               warning and hint printed by the diagnostics pass above, is lost.
+               Measured: a two-warning program printed both warnings
+               interpreted and neither under --jit.  Drain the host buffers
+               here so --jit output is byte-identical to interpreted. *)
+            flush stdout;
+            flush stderr;
+            March_jit.Repl_jit.run_program jit_ctx ~tc_env user_only_desugared)
+     with Failure msg ->
+       (* A JIT failure is a compiler-side limitation, not a bug in the user's
+          program: report it as one clean line.  Without this the user gets
+          `Fatal error: exception Failure(...)` plus an OCaml backtrace and
+          rc=2, which reads like an internal compiler error. *)
+       Printf.eprintf "march --jit: %s\n%!" msg;
+       exit 1)
   end
   else begin
     (* Set up the on-demand module loader so qualified access like Map.get()

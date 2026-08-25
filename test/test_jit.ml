@@ -321,16 +321,20 @@ let test_repl_session_redefine_then_call_orc () =
 
    Uses the same per-pid [session_home] as the REPL harnesses, so the
    stdlib prelude .so is precompiled at most once per test run. *)
-let run_jit_file ~env_prefix (src : string) : string * int =
+let run_jit_file ?home ?(lib_path = "") ~env_prefix (src : string) : string * int =
+  let home = match home with Some h -> h | None -> Lazy.force session_home in
   let f = Filename.temp_file "march_jit_file" ".march" in
   let oc = open_out f in
   output_string oc src;
   close_out oc;
   let out_path = Filename.temp_file "march_jit_file" ".out" in
+  let lib_env =
+    if lib_path = "" then ""
+    else Printf.sprintf "MARCH_LIB_PATH=%s " (Filename.quote lib_path) in
   let cmd =
-    Printf.sprintf "HOME=%s %s %s --jit %s > %s 2>&1"
-      (Filename.quote (Lazy.force session_home))
-      env_prefix (Filename.quote main_exe) (Filename.quote f)
+    Printf.sprintf "HOME=%s %s%s %s --jit %s > %s 2>&1"
+      (Filename.quote home)
+      lib_env env_prefix (Filename.quote main_exe) (Filename.quote f)
       (Filename.quote out_path) in
   let code = Sys.command cmd in
   let ic = open_in_bin out_path in
@@ -421,6 +425,131 @@ let test_jit_file_actor_falls_back () =
       (run_jit_file ~env_prefix:"" jit_file_actor_src)
       [ "--jit does not support actor programs yet"; "checksum=2" ]
 
+(* ── Fix round 1 regressions ──────────────────────────────────────────── *)
+
+(* Finding 1: OCaml's buffered diagnostics were DROPPED when the JIT'd program
+   terminated through the C runtime's own `exit()` (panic_, exit_, a fatal
+   signal), which never runs OCaml's at_exit.  Measured pre-fix on exactly
+   this shape: warnings printed interpreted, ZERO printed under --jit, same
+   exit code — so the warning was invisible precisely in the runs where the
+   user most needs it.  `main` here warns (structurally-recursive `fib`) and
+   then panics; both the warning and the program's own output must survive. *)
+let jit_file_warn_then_panic_src = {|mod JitFileWarnPanic do
+  needs IO.Console
+
+  fn fib(n : Int) : Int do
+    if n < 2 do n else fib(n - 1) + fib(n - 2) end
+  end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    println("checksum=" ++ int_to_string(fib(10)))
+    panic_("boom")
+  end
+end
+|}
+
+(* This one case gets a PRIVATE HOME rather than the shared [session_home].
+   Non-vacuousness depends on it: the REPL harnesses above leave the shared
+   home holding a stdlib prelude .so whose install-name points at a dead
+   subprocess's runtime .so, so every later run there prints "stdlib cache
+   load failed …, recompiling" — and that notice is written with an explicit
+   flush, which incidentally drains the very stderr buffer this test exists to
+   check.  Confirmed: on the shared home the pre-fix binary PASSES this test;
+   on a private home it fails (warnings dropped), which is the point.  The
+   extra cost is one stdlib precompile. *)
+let flush_test_home = lazy (
+  let dir = Filename.concat (Filename.get_temp_dir_name ())
+      (Printf.sprintf "march_jit_flush_home.%d" (Unix.getpid ())) in
+  List.iter
+    (fun d -> try Unix.mkdir d 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ())
+    [dir; Filename.concat dir ".cache"];
+  dir)
+
+let test_jit_file_flushes_diagnostics () =
+  if not (clang_available ()) then ()
+  else begin
+    let (out, code) =
+      run_jit_file ~home:(Lazy.force flush_test_home) ~env_prefix:""
+        jit_file_warn_then_panic_src in
+    (* panic_ exits nonzero — that is the whole point of this shape. *)
+    Alcotest.(check int)
+      (Printf.sprintf "--jit warn-then-panic: exit code (output: %s)" out) 1 code;
+    List.iter (fun needle ->
+        if not (contains ~needle out) then
+          Alcotest.failf
+            "--jit warn-then-panic: expected %S in output (host buffers not \
+             flushed before handing control to JIT'd code?), got:\n%s"
+            needle out)
+      [ "not tail-recursive"; "checksum=55"; "panic: boom" ]
+  end
+
+(* Finding 2: a file with no `main` raised out of run_program as
+   `Fatal error: exception Failure(...)` + an OCaml backtrace with rc=2.
+   The interpreter is silent and exits 0 for such a file; --jit must match
+   it exactly, and must decide that BEFORE emitting IR or spawning the
+   scheduler. *)
+let jit_file_no_main_src = {|mod JitFileNoMain do
+  fn double(n : Int) : Int do n * 2 end
+end
+|}
+
+let test_jit_file_no_main () =
+  if not (clang_available ()) then ()
+  else begin
+    let (out, code) = run_jit_file ~env_prefix:"" jit_file_no_main_src in
+    Alcotest.(check int)
+      (Printf.sprintf "--jit no-main: exit code (output: %s)" out) 0 code;
+    (* The program itself must contribute NOTHING — no crash, no backtrace.
+       Asserted as "none of these appear" rather than out = "" on purpose:
+       [precompile_stdlib] legitimately prints infrastructure notices ("stdlib
+       cache load failed …, recompiling") whenever the shared session cache is
+       cold or stale, and pinning byte-emptiness would make this test fail for
+       a reason that has nothing to do with the no-main path.  Pre-fix output
+       was `Fatal error: exception Failure("--jit: no `main` …")` + an OCaml
+       backtrace with rc=2, so every needle below is decisive. *)
+    List.iter (fun needle ->
+        if contains ~needle out then
+          Alcotest.failf
+            "--jit no-main: output must not contain %S, got:\n%s" needle out)
+      [ "Fatal error"; "Raised at"; "no `main`" ]
+  end
+
+(* Finding 3: --jit fed [get_stdlib_tc_env]'s seed env into run_program's
+   typecheck unconditionally, bypassing the `no_shadowing` guard — and here
+   the resulting type_map feeds LOWERING, so an unsound seed is worse than
+   the wrong-diagnostics hazard the guard was originally added for.  A
+   stdlib-shadowing program must fall back to the interpreter with a notice.
+
+   Fixture is the shadowed-`Json` shape from test_tcenv_cli_cache.ml. *)
+let jit_file_shadow_entry_src = {|mod JitFileShadowEntry do
+  needs IO.Console
+
+  fn main(_cap : Cap(IO.Console)) do
+    println(Json.greet())
+  end
+end
+|}
+
+let test_jit_file_shadowing_falls_back () =
+  if not (clang_available ()) then ()
+  else begin
+    let lib_dir =
+      Filename.concat (Filename.get_temp_dir_name ())
+        (Printf.sprintf "march_jit_shadow_lib.%d" (Unix.getpid ())) in
+    (try Unix.mkdir lib_dir 0o755
+     with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+    let shadow = Filename.concat lib_dir "json.march" in
+    let oc = open_out shadow in
+    output_string oc "mod Json do\n  fn greet() do\n    \"shadow json\"\n  end\nend\n";
+    close_out oc;
+    let res =
+      run_jit_file ~lib_path:lib_dir ~env_prefix:"" jit_file_shadow_entry_src in
+    (try Sys.remove shadow with _ -> ());
+    (try Unix.rmdir lib_dir with _ -> ());
+    check_jit_file ~label:"--jit stdlib-shadowing fallback" res
+      [ "--jit does not support stdlib-shadowing programs yet"; "shadow json" ]
+  end
+
 let () =
   Alcotest.run "march_jit" [
     "jit", [
@@ -458,5 +587,13 @@ let () =
         test_jit_file_clang;
       Alcotest.test_case "march --jit falls back to the interpreter for actors"
         `Slow test_jit_file_actor_falls_back;
+      Alcotest.test_case
+        "march --jit flushes host diagnostics before JIT'd code exits"
+        `Slow test_jit_file_flushes_diagnostics;
+      Alcotest.test_case "march --jit on a file with no main is silent, exit 0"
+        `Slow test_jit_file_no_main;
+      Alcotest.test_case
+        "march --jit falls back to the interpreter when stdlib is shadowed"
+        `Slow test_jit_file_shadowing_falls_back;
     ];
   ]

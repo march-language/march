@@ -92,8 +92,12 @@ val register_module_decl :
     Does NOT propagate [main]'s value as the process exit code — neither does
     the native build, whose `@main` returns a hard 0.
 
-    Raises [Failure] on compile or link error, and if the module has no
-    [main]. *)
+    A module with no [main] is a no-op returning [()] — the interpreter is
+    silent and exits 0 for such a file, and --jit must not differ.  Detected
+    before any emission or scheduler spawn.
+
+    Raises [Failure] on compile or link error; [bin/main.ml]'s --jit arm turns
+    that into one `march --jit: <msg>` line and exit 1, never a backtrace. *)
 val run_program :
   t ->
   tc_env:March_typecheck.Typecheck.env ->

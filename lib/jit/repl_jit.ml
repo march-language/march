@@ -976,9 +976,17 @@ let run_program ctx ~tc_env (m : March_ast.Ast.module_) : unit =
             tir.March_tir.Tir.tm_fns with
     | Some f -> Some f
     | None -> List.find_opt is_main tir.March_tir.Tir.tm_fns in
-  let main_fn = match main_fn with
-    | Some f -> f
-    | None -> failwith "--jit: no `main` function to run in this file" in
+  match main_fn with
+  | None ->
+    (* A library module with no entry point: there is nothing to run.  Mirrors
+       BOTH [Llvm_toplevel.emit_module]'s `| None ->` branch (which no-ops into
+       a stub `@main` returning 0) and, decisively, the tree-walking
+       interpreter, which prints nothing and exits 0 for such a file — a --jit
+       run must not differ.  Deliberately detected HERE, before any IR
+       emission, dlopen, or [march_spawn_main], so the no-main path costs
+       nothing and can never half-start a scheduler. *)
+    ()
+  | Some main_fn ->
   let n = next_id ctx in
   (* A bare `main` MUST be renamed before it reaches [partition_fns].
      [mangle_extern "main"] is "march_main" — the native entry symbol — so
