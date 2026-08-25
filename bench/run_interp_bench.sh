@@ -6,7 +6,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MARCH="$ROOT/_build/default/bin/main.exe"
-MODES="interp,compiled,repl-clang,repl-orc"; ONLY=""; RUNS=3; TAG="$(git -C "$ROOT" rev-parse --short HEAD)"
+MODES="interp,jit,compiled,repl-clang,repl-orc"; ONLY=""; RUNS=3; TAG="$(git -C "$ROOT" rev-parse --short HEAD)"
 while [ $# -gt 0 ]; do case "$1" in
   --modes) MODES="$2"; shift 2;; --only) ONLY="$2"; shift 2;; --runs) RUNS="$2"; shift 2;;
   --march) MARCH="$2"; shift 2;; --tag) TAG="$2"; shift 2;; *) echo "unknown arg $1" >&2; exit 2;; esac; done
@@ -26,27 +26,42 @@ for src in "$ROOT"/bench/interp/*.march; do
   b="$(basename "$src" .march)"; want "$b" || continue
   [ "$b" = http_server ] && continue
   # bash 3.2 (macOS default) has no associative arrays; use plain vars, reset per benchmark.
-  sum_interp=""; sum_compiled=""
+  sum_interp=""; sum_jit=""; sum_compiled=""
+  ok_interp=""; ok_jit=""; ok_compiled=""
   if has_mode compiled; then
     "$MARCH" --compile --opt 2 "$src" -o "$TMP/$b.bin" > "$TMP/$b.compile.log" 2>&1 \
       || { echo "compile failed for $b (see $TMP/$b.compile.log)" >&2; exit 1; }
   fi
   for run in $(seq 1 "$RUNS"); do
-    for mode in interp compiled; do
+    for mode in interp jit compiled; do
       has_mode "$mode" || continue
       t0=$(ms_now)
       if [ "$mode" = interp ]; then "$MARCH" "$src" > "$TMP/$b.$mode.out" 2>&1 || true
+      elif [ "$mode" = jit ]; then "$MARCH" --jit "$src" > "$TMP/$b.$mode.out" 2>&1 || true
       else "$TMP/$b.bin" > "$TMP/$b.$mode.out" 2>&1 || true; fi
       t1=$(ms_now)
       ck="$(grep -o 'checksum=[-0-9]*' "$TMP/$b.$mode.out" | head -1 || true)"
-      if [ "$mode" = interp ]; then sum_interp="$ck"; else sum_compiled="$ck"; fi
       ok=true; [ -n "$ck" ] || ok=false
+      if [ "$mode" = interp ]; then sum_interp="$ck"; ok_interp="$ok"
+      elif [ "$mode" = jit ]; then sum_jit="$ck"; ok_jit="$ok"
+      else sum_compiled="$ck"; ok_compiled="$ok"; fi
       emit "$b" "$mode" "$run" "$((t1 - t0))" "$ck" "$ok"
     done
   done
-  if has_mode interp && has_mode compiled && [ "$sum_interp" != "$sum_compiled" ]; then
-    echo "CHECKSUM MISMATCH $b: interp=${sum_interp:-none} compiled=${sum_compiled:-none}" >&2; exit 1
-  fi
+  # Cross-check checksums across modes that actually produced output (ok=true).
+  # A crashing mode (ok=false, e.g. a JIT SIGBUS) is reported as a FAILED row but
+  # excluded from the mismatch comparison — only a DIFFERING checksum between two
+  # modes that both succeeded is a hard failure.
+  ref=""; ref_name=""
+  for pair in "interp:$sum_interp:$ok_interp" "jit:$sum_jit:$ok_jit" "compiled:$sum_compiled:$ok_compiled"; do
+    m="${pair%%:*}"; rest="${pair#*:}"; ck="${rest%%:*}"; ok="${rest#*:}"
+    has_mode "$m" || continue
+    [ "$ok" = true ] || continue
+    if [ -z "$ref_name" ]; then ref="$ck"; ref_name="$m"
+    elif [ "$ck" != "$ref" ]; then
+      echo "CHECKSUM MISMATCH $b: $ref_name=$ref $m=$ck" >&2; exit 1
+    fi
+  done
 done
 
 # --- http server -------------------------------------------------------------
@@ -98,7 +113,7 @@ rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
 rows = [r for r in rows if r["tag"] == sys.argv[2]]
 by = collections.defaultdict(list)
 for r in rows: by[(r["bench"], r["mode"])].append(r["ms"])
-benches = sorted({b for b, _ in by}); modes = ["interp", "compiled", "repl-clang", "repl-orc"]
+benches = sorted({b for b, _ in by}); modes = ["interp", "jit", "compiled", "repl-clang", "repl-orc"]
 print(f"\n| bench | " + " | ".join(f"{m} min/median ms" for m in modes) + " |")
 print("|---|" + "---:|" * len(modes))
 for b in benches:
