@@ -58,6 +58,15 @@ type t = {
      ones emit a `declare`.  Lives on [t] (never global) because a NEW session
      gets a new dylib namespace in which none of these symbols exist. *)
   wrap_defined : (string, unit) Hashtbl.t;
+  (* bind_name -> Digest of the declaration's marshaled AST, recorded when a
+     REPL-typed `fn` compiles successfully (run_decl ~is_fn_decl:true only —
+     stdlib-prelude and :load fns are compiled elsewhere and have no entry).
+     Distinguishes a :reset scroll-replay of the identical cell (same digest
+     → skip, closure slot still valid) from a genuine REDEFINITION (digest
+     differs → recompile and rebind the slot).  Each REPL input is parsed
+     from its own fresh [Lexing.from_string], so identical source text
+     yields a byte-identical marshaled AST. *)
+  fn_fingerprints : (string, string) Hashtbl.t;
   global_tir_tys : (string, March_tir.Tir.ty) Hashtbl.t;  (* bare_name -> TIR type, for display *)
   global_type_defs : (string, March_tir.Tir.type_def) Hashtbl.t;  (* type name -> TDVariant/TDRecord for display *)
   mutable stdlib_decls : March_ast.Ast.decl list;  (* cached for incremental lowering context *)
@@ -180,6 +189,7 @@ let create ~runtime_so ?(clang="clang") () =
     handles = [rt_handle];
     compiled_fns = Hashtbl.create 256;
     wrap_defined = Hashtbl.create 64;
+    fn_fingerprints = Hashtbl.create 64;
     global_tir_tys = Hashtbl.create 16;
     global_type_defs = Hashtbl.create 16;
     stdlib_decls = [];
@@ -216,6 +226,9 @@ let next_id ctx =
   let n = ctx.counter in
   ctx.counter <- n + 1;
   n
+
+(* See the .mli — test-only observability for the replay skip fast path. *)
+let fragment_count ctx = ctx.counter
 
 let profile_enabled = Sys.getenv_opt "MARCH_JIT_PROFILE" <> None
 let time_phase name f =
@@ -382,6 +395,77 @@ let fresh_wrap_state ctx : March_tir.Llvm_emit.session_wraps =
     drops the state: it is a local value, so there is nothing to roll back. *)
 let commit_wraps ctx (sw : March_tir.Llvm_emit.session_wraps) =
   Hashtbl.iter (fun k () -> Hashtbl.replace ctx.wrap_defined k ()) sw.sw_pending
+module SS = Set.Make (String)
+
+(** Rename every reference to the top-level fn [old_name] to [new_name]
+    across a fragment's fn_defs (used when REDEFINING a REPL fn: the new
+    version must be emitted under a session-unique symbol so it can't
+    collide with the earlier fragment's definition — a hard duplicate-
+    definition error in the ORC backend's single JITDylib, and a latent
+    flat-namespace shadowing hazard under clang+dlopen).
+
+    Capture-avoiding: a locally bound [old_name] (param, let, case binder,
+    letrec) shadows the top-level fn, so references under such a binder are
+    left alone.  Both [EApp] heads (direct calls, incl. self-recursion) and
+    [AVar] atoms (the fn taken as a first-class value — emit_atom's top-fns
+    wrap path) are renamed; [ADefRef]/literals are untouched.  Runs post-
+    defun, so helper lambdas are separate fn_defs in the same list and get
+    the same treatment. *)
+let rename_top_fn_refs ~old_name ~new_name
+    (fns : March_tir.Tir.fn_def list) : March_tir.Tir.fn_def list =
+  let open March_tir.Tir in
+  let rename_var bound (v : var) =
+    if v.v_name = old_name && not (SS.mem old_name bound)
+    then { v with v_name = new_name } else v
+  in
+  let rename_atom bound = function
+    | AVar v -> AVar (rename_var bound v)
+    | (ADefRef _ | ALit _) as a -> a
+  in
+  let bind bound (v : var) = SS.add v.v_name bound in
+  let rec go bound e =
+    let ra = rename_atom bound in
+    match e with
+    | EAtom a -> EAtom (ra a)
+    | EApp (v, args) -> EApp (rename_var bound v, List.map ra args)
+    | ECallPtr (f, args) -> ECallPtr (ra f, List.map ra args)
+    | ELet (v, e1, e2) -> ELet (v, go bound e1, go (bind bound v) e2)
+    | ELetRec (lfns, e2) ->
+      (* The letrec's own names shadow throughout (bodies and continuation). *)
+      let bound' = List.fold_left (fun b (f : fn_def) ->
+        SS.add f.fn_name b) bound lfns in
+      let lfns' = List.map (fun (f : fn_def) ->
+        let fb = List.fold_left bind bound' f.fn_params in
+        { f with fn_body = go fb f.fn_body }) lfns in
+      ELetRec (lfns', go bound' e2)
+    | ECase (scrut, branches, dflt) ->
+      let branches' = List.map (fun (b : branch) ->
+        let bb = List.fold_left bind bound b.br_vars in
+        { b with br_body = go bb b.br_body }) branches in
+      ECase (ra scrut, branches', Option.map (go bound) dflt)
+    | ETuple atoms -> ETuple (List.map ra atoms)
+    | ERecord fields -> ERecord (List.map (fun (n, a) -> (n, ra a)) fields)
+    | EField (a, n) -> EField (ra a, n)
+    | EUpdate (a, fields) ->
+      EUpdate (ra a, List.map (fun (n, x) -> (n, ra x)) fields)
+    | EAlloc (ty, atoms) -> EAlloc (ty, List.map ra atoms)
+    | EStackAlloc (ty, atoms) -> EStackAlloc (ty, List.map ra atoms)
+    | EFree a -> EFree (ra a)
+    | EIncRC a -> EIncRC (ra a)
+    | EDecRC a -> EDecRC (ra a)
+    | EAtomicIncRC a -> EAtomicIncRC (ra a)
+    | EAtomicDecRC a -> EAtomicDecRC (ra a)
+    | EReuse (a, ty, atoms) -> EReuse (ra a, ty, List.map ra atoms)
+    | ESeq (e1, e2) -> ESeq (go bound e1, go bound e2)
+    | EAllocHole (tok, ty, atoms, hole) ->
+      EAllocHole (Option.map ra tok, ty, List.map ra atoms, hole)
+    | ESetField (obj, i, v) -> ESetField (ra obj, i, ra v)
+  in
+  List.map (fun (f : fn_def) ->
+    let bound = List.fold_left bind SS.empty f.fn_params in
+    { f with
+      fn_name = (if f.fn_name = old_name then new_name else f.fn_name);
+      fn_body = go bound f.fn_body }) fns
 
 (** Build the [repl_slot_info list] passed to LLVM emit functions from
     the current [ctx.var_slots] list. *)
@@ -489,14 +573,96 @@ let rec subst_ty (bindings : (string * March_tir.Tir.ty) list) (t : March_tir.Ti
   | TRecord fs -> TRecord (List.map (fun (n, t) -> (n, subst_ty bindings t)) fs)
   | TInt | TFloat | TBool | TString | TUnit as t -> t
 
+(** Representation of the variant type [name] as codegen sees it.
+
+    The pretty-printer MUST agree with [Repr] here: an expression fragment is
+    emitted with the same type_defs, so a niche/newtype value never reaches
+    the printer as a heap cell at all — it arrives as the raw payload word
+    (e.g. `X(7)` of `type T = X(Int) | Y` is the tagged integer 15, with no
+    cell to read a tag from).  Reading such a word as a pointer prints
+    nonsense at best and faults at worst.
+
+    [repr_of_ty] reads a generic type's payload out of the TCon's type args, so
+    a NON-generic Option-shaped type (no args) comes back [Boxed]; that is what
+    [niche_repr_of_concrete] recovers, exactly as codegen's own decode sites do. *)
+let variant_repr ~type_defs (name : string) (args : March_tir.Tir.ty list)
+    : March_tir.Repr.repr =
+  let defs = Hashtbl.fold (fun _ td acc -> td :: acc) type_defs [] in
+  match March_tir.Repr.repr_of_ty defs (March_tir.Tir.TCon (name, args)) with
+  | March_tir.Repr.Boxed when args = [] ->
+    (match March_tir.Repr.niche_repr_of_concrete defs name with
+     | Some r -> r
+     | None -> March_tir.Repr.Boxed)
+  (* Abstract-arg niche path, mirroring [Llvm_case]'s [effective_repr]: a
+     niche-shaped type applied to a still-abstract argument (e.g. a bare
+     `Nothing2` whose element type never got resolved) is Boxed by
+     [repr_of_ty] — [niche_payload_ok] is false for a TVar — but codegen
+     emits Niche anyway, under the erased convention. *)
+  | March_tir.Repr.Boxed
+    when args <> []
+      && List.exists (function March_tir.Tir.TVar _ -> true | _ -> false) args
+      && March_tir.Repr.is_niche_shaped defs name ->
+    March_tir.Repr.Niche { payload = March_tir.Tir.TVar "_"; tagged = false }
+  | r -> r
+
+(** Split an Option-shaped variant's ctors into (nullary name, single name). *)
+let niche_ctor_names (ctors : (string * March_tir.Tir.ty list) list) =
+  match ctors with
+  | [ (n, []); (s, [_]) ] -> Some (n, s)
+  | [ (s, [_]); (n, []) ] -> Some (n, s)
+  | _ -> None
+
+(** A constructor payload slot is low-bit tagged exactly when the DECLARED
+    field type is erased (a TVar): those slots are `ptr`-typed, so a scalar
+    stored there is coerced to (v<<1)|1.  A field declared at a concrete
+    scalar type gets a real i64/double slot and is stored raw.  The decision
+    must be made on the declaration's own type, BEFORE substituting the
+    TCon's type args in — the substituted type is what the value means, not
+    how it is stored. *)
+let field_is_tagged (declared : March_tir.Tir.ty) =
+  match declared with March_tir.Tir.TVar _ -> true | _ -> false
+
 (** Pretty-print a March heap value given its TIR type.
     [type_defs] provides user-declared TDVariant/TDRecord lookups for
     non-builtin TCon names.  Recursion is bounded to depth 64. *)
 let rec pp_heap_value ?(depth=0) ~type_defs (ty : March_tir.Tir.ty) (ptr : nativeint) : string =
   if depth > 64 then "#<...>"
-  else if ptr = Nativeint.zero then "#<null>"
   else
   let open March_tir.Tir in
+  match ty with
+  (* Niche / newtype types are NOT heap cells: [ptr] is the raw payload word
+     (or 0 for a niche's nullary ctor), so these must be decoded before the
+     null guard and before any tag read. *)
+  | TCon (name, args) when (match Hashtbl.find_opt type_defs name with
+                            | Some (TDVariant _) -> true | _ -> false)
+                        && (match variant_repr ~type_defs name args with
+                            | March_tir.Repr.Boxed -> false | _ -> true) ->
+    let ctors = match Hashtbl.find type_defs name with
+      | TDVariant (_, cs) -> cs | _ -> [] in
+    let bindings =
+      try List.combine (collect_tvars (Hashtbl.find type_defs name)) args
+      with Invalid_argument _ -> [] in
+    (match variant_repr ~type_defs name args with
+     | March_tir.Repr.Niche { payload; tagged } ->
+       (match niche_ctor_names ctors with
+        | None -> Printf.sprintf "#<niche:%nd>" ptr
+        | Some (nullary, single) ->
+          if ptr = Nativeint.zero then nullary
+          else Printf.sprintf "%s(%s)" single
+                 (pp_word ~depth ~type_defs ~tagged (subst_ty bindings payload) ptr))
+     | March_tir.Repr.Newtype payload ->
+       (match ctors with
+        | [ (ctor, [ declared ]) ] ->
+          Printf.sprintf "%s(%s)" ctor
+            (pp_word ~depth ~type_defs ~tagged:(field_is_tagged declared)
+               (subst_ty bindings payload) ptr)
+        | _ -> Printf.sprintf "#<newtype:%nd>" ptr)
+     (* Unreachable: the guard above already excluded Boxed.  Rendered rather
+        than asserted — a printer must never take the REPL down. *)
+     | March_tir.Repr.Boxed -> Printf.sprintf "#<%s:%nd>" name ptr)
+  | _ ->
+  if ptr = Nativeint.zero then "#<null>"
+  else
   match ty with
   | TString ->
     (* march_string layout: {rc:i64, tag:i32, pad:i32, len:i64, data:char[]} *)
@@ -531,11 +697,11 @@ let rec pp_heap_value ?(depth=0) ~type_defs (ty : March_tir.Tir.ty) (ptr : nativ
             try List.combine tvars args
             with Invalid_argument _ -> []
           in
-          let payload_tys = List.map (subst_ty bindings) payload_tys in
           if payload_tys = [] then ctor_name
           else
-            let fields = List.mapi (fun i t ->
-              pp_field ~depth ~type_defs ~tagged:true t ptr i
+            let fields = List.mapi (fun i declared ->
+              pp_field ~depth ~type_defs ~tagged:(field_is_tagged declared)
+                (subst_ty bindings declared) ptr i
             ) payload_tys in
             Printf.sprintf "%s(%s)" ctor_name (String.concat ", " fields))
      | TDRecord (_, fs) ->
@@ -583,22 +749,55 @@ and pp_list ?(depth=0) ~type_defs elem_ty (ptr : nativeint) : string =
 
 and pp_field ?(depth=0) ~type_defs ~tagged (ty : March_tir.Tir.ty) (ptr : nativeint) (i : int) : string =
   let open March_tir.Tir in
-  (* When [tagged] is true the scalar slot holds (value<<1)|1 — shift right by 1.
-     When false (tuple fields) the raw int64 is the value. *)
-  let untag_i64 v = if tagged then Int64.shift_right_logical v 1 else v in
   match ty with
-  | TInt  -> Int64.to_string (untag_i64 (field_i64 ptr i))
-  | TBool -> if untag_i64 (field_i64 ptr i) = 0L then "false" else "true"
-  | TUnit -> "()"
   | TFloat ->
-    (* Floats are stored as raw double bits via bitcast — no tag bit. *)
-    let bits = field_i64 ptr i in
-    Printf.sprintf "%g" (Int64.float_of_bits bits)
+    (* Floats are stored as raw double bits via bitcast — no tag bit, and the
+       bit pattern is not a meaningful nativeint, so read the slot directly. *)
+    Printf.sprintf "%g" (Int64.float_of_bits (field_i64 ptr i))
+  | TInt | TBool | TUnit ->
+    pp_word ~depth ~type_defs ~tagged ty (Int64.to_nativeint (field_i64 ptr i))
+  | _ -> pp_word ~depth ~type_defs ~tagged ty (field_ptr ptr i)
+
+(** Render a value held in a single machine word — a constructor field just
+    read out of a cell, or the whole value of a niche/newtype type.
+    [tagged] says the word holds a low-bit-tagged scalar (value<<1)|1. *)
+and pp_word ?(depth=0) ~type_defs ~tagged (ty : March_tir.Tir.ty) (w : nativeint) : string =
+  let open March_tir.Tir in
+  let scalar () =
+    let v = Int64.of_nativeint w in
+    if tagged then Int64.shift_right_logical v 1 else v
+  in
+  match ty with
+  | TInt  -> Int64.to_string (scalar ())
+  | TBool -> if scalar () = 0L then "false" else "true"
+  | TUnit -> "()"
+  | TFloat -> Printf.sprintf "%g" (Int64.float_of_bits (Int64.of_nativeint w))
+  | TVar _ ->
+    (* Erased slot: a scalar is low-bit tagged, a heap value is an aligned
+       pointer.  Decide from the word itself — dereferencing a tagged scalar
+       as a cell would read unmapped memory. *)
+    if Nativeint.logand w 1n = 1n then
+      Int64.to_string (Int64.shift_right_logical (Int64.of_nativeint w) 1)
+    else if w = Nativeint.zero then "null"
+    else Printf.sprintf "#<tag:%d>" (heap_tag w)
   | _ ->
-    (* Pointer field: read the child pointer, then recurse *)
-    let child = field_ptr ptr i in
-    if child = Nativeint.zero then "null"
-    else pp_heap_value ~depth:(depth + 1) ~type_defs ty child
+    if w = Nativeint.zero then "null"
+    else pp_heap_value ~depth:(depth + 1) ~type_defs ty w
+
+(** True when a value of [ty] is NOT a heap pointer but the raw payload word
+    of a niche/newtype representation — the two cases where the "small word =
+    plain integer" fallback in [run_expr] would print `15` instead of `X(7)`,
+    and where a raw 0 means the nullary constructor rather than a null value. *)
+let is_raw_word_ty ~type_defs (ty : March_tir.Tir.ty) =
+  match ty with
+  | March_tir.Tir.TCon (name, args) ->
+    (match Hashtbl.find_opt type_defs name with
+     | Some (March_tir.Tir.TDVariant _) ->
+       (match variant_repr ~type_defs name args with
+        | March_tir.Repr.Boxed -> false
+        | _ -> true)
+     | _ -> false)
+  | _ -> false
 
 (* ── run_expr ──────────────────────────────────────────────────────── *)
 
@@ -615,16 +814,52 @@ let register_type_defs ctx (types : March_tir.Tir.type_def list) =
     | March_tir.Tir.TDClosure _ -> ()
   ) types
 
+let type_def_name (td : March_tir.Tir.type_def) =
+  match td with
+  | March_tir.Tir.TDVariant (n, _) | March_tir.Tir.TDRecord (n, _)
+  | March_tir.Tir.TDClosure (n, _) -> n
+
 (** Register a user type declaration from the REPL so subsequent expressions
-    can pretty-print values of that type.  DType decls otherwise never reach
-    the JIT — the REPL loop evaluates them in the tree-walking interpreter
-    and sends only DFn/DLet/ReplExpr through run_decl/run_expr. *)
+    can pretty-print values of that type AND construct them with the right
+    constructor tags.  DType decls otherwise never reach the JIT — the REPL
+    loop evaluates them in the tree-walking interpreter and sends only
+    DFn/DLet/ReplExpr through run_decl/run_expr.
+
+    Three registrations, all required:
+    - [register_type_defs] feeds [ctx.global_type_defs], which the heap
+      pretty-printer reads to turn a tag back into a constructor name.
+    - [ctx.loaded_tir_types] is passed as the [~types] of every subsequent
+      expression fragment, and codegen's [build_ctor_info] numbers constructor
+      tags from exactly that list.  Without it the fragment's [ctor_entry]
+      lookup misses and falls back to its `ce_tag = 0` default, so EVERY
+      nullary constructor is allocated with tag 0 and prints as the type's
+      first variant (`Green` and `Blue` both showing as `Red`).
+    - [ctx.stdlib_decls] is the lowering context, so [lower_module] knows
+      which type each bare constructor belongs to and emits the type-qualified
+      "Color.Green" key that [ctor_info] is keyed by.
+
+    Re-declaring a type at the prompt replaces the previous registration
+    rather than appending: [build_ctor_info] is first-wins, so a stale entry
+    would keep handing out the OLD variant numbering. *)
 let register_user_type_decl ctx (d : March_ast.Ast.decl) =
   match d with
   | March_ast.Ast.DType (_, name, params, td, _)
   | March_ast.Ast.DAlwaysLinearType (_, name, params, td, _) ->
     (match March_tir.Lower.lower_type_def name params td with
-     | Some td' -> register_type_defs ctx [td']
+     | Some td' ->
+       register_type_defs ctx [td'];
+       ctx.loaded_tir_types <-
+         List.filter (fun t -> type_def_name t <> type_def_name td')
+           ctx.loaded_tir_types
+         @ [td'];
+       ctx.stdlib_decls <-
+         List.filter (fun (d0 : March_ast.Ast.decl) ->
+           match d0 with
+           | March_ast.Ast.DType (_, n, _, _, _)
+           | March_ast.Ast.DAlwaysLinearType (_, n, _, _, _) ->
+             n.March_ast.Ast.txt <> name.March_ast.Ast.txt
+           | _ -> true) ctx.stdlib_decls
+         @ [d]
      | None -> ())
   | _ -> ()
 
@@ -769,7 +1004,9 @@ let run_expr ctx ~tc_env m =
          Int64.to_string (Jit.call_void_to_int fptr)
        | Some ty ->
          let ptr = Jit.call_void_to_ptr fptr in
-         if ptr = Nativeint.zero then "null"
+         if is_raw_word_ty ~type_defs:ctx.global_type_defs ty then
+           pp_heap_value ~type_defs:ctx.global_type_defs ty ptr
+         else if ptr = Nativeint.zero then "null"
          else pp_heap_value ~type_defs:ctx.global_type_defs ty ptr
        | None ->
          (* No type information — call as ptr (safer than int for heap objects).
@@ -781,6 +1018,11 @@ let run_expr ctx ~tc_env m =
            Int64.to_string raw
          else
            Printf.sprintf "#<0x%Lx>" raw)
+    | ty when is_raw_word_ty ~type_defs:ctx.global_type_defs ty ->
+      (* Niche/newtype: the returned word IS the value (0 = nullary ctor),
+         so neither the null check nor the small-integer fallback applies. *)
+      pp_heap_value ~type_defs:ctx.global_type_defs ty
+        (Jit.call_void_to_ptr fptr)
     | ty ->
       let ptr = Jit.call_void_to_ptr fptr in
       if ptr = Nativeint.zero then "null"
@@ -817,15 +1059,70 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
     f.fn_name <> "main") tir.March_tir.Tir.tm_fns in
   let (user_fns, extern_fns) = partition_fns ctx all_support_fns in
   if is_fn_decl then begin
-    (* JIT context persists across :reset.  When the scroll system resends prior
-       cells, the function is already compiled and its closure slot is still valid.
-       Skip recompilation entirely — helper lambdas may have new defun UIDs but
-       the compiled closure is unchanged. *)
-    if Hashtbl.mem ctx.compiled_fns bind_name then ()
+    (* JIT context persists across :reset.  When the scroll system resends
+       prior cells, the function is already compiled and its closure slot is
+       still valid — skip recompilation entirely (helper lambdas may have new
+       defun UIDs but the compiled closure is unchanged).  A REPLAY is
+       recognized by its AST fingerprint matching the recorded one; a genuine
+       REDEFINITION (same name, different body) has a different fingerprint
+       and must recompile and rebind the closure slot, matching interpreter-
+       mode's Elixir-style rebinding.  A compiled name with NO fingerprint on
+       record was compiled outside run_decl (stdlib prelude, :load): calls to
+       those resolve as direct extern calls, not through a slot, so a
+       redefinition could never take effect — keep the historical skip. *)
+    let fingerprint = Digest.to_hex (Digest.string (Marshal.to_string m [])) in
+    let already_compiled = Hashtbl.mem ctx.compiled_fns bind_name in
+    let is_replay =
+      already_compiled &&
+      (match Hashtbl.find_opt ctx.fn_fingerprints bind_name with
+       | Some fp -> fp = fingerprint
+       | None -> true)
+    in
+    if is_replay then ()
     else begin
+    let is_redefinition = already_compiled in
+    (* partition_fns classified the freshly lowered [bind_name] as extern
+       (its OLD version is in compiled_fns); pull it back so the new body is
+       defined in this fragment rather than declared. *)
+    let (user_fns, extern_fns) =
+      if is_redefinition then
+        let (redef, ext) = List.partition
+          (fun (f : March_tir.Tir.fn_def) -> f.fn_name = bind_name)
+          extern_fns in
+        (user_fns @ redef, ext)
+      else (user_fns, extern_fns)
+    in
+    (* Emit a redefinition under a session-unique symbol: the earlier
+       fragment already defined [bind_name], and the ORC backend's single
+       JITDylib hard-errors on a duplicate definition (clang+dlopen would
+       merely shadow ambiguously in the flat namespace).  Calls resolve
+       through the closure SLOT, not the symbol, so only the slot binding
+       below needs the bare name.  [ctx.counter] is monotonic and the
+       primary emit below advances it, so successive redefinitions get
+       distinct names. *)
+    let emit_name =
+      if is_redefinition then
+        Printf.sprintf "%s$redef$%d" bind_name ctx.counter
+      else bind_name
+    in
+    let user_fns =
+      if is_redefinition then
+        rename_top_fn_refs ~old_name:bind_name ~new_name:emit_name user_fns
+      else user_fns
+    in
+    (* On redefinition, drop the OLD binding's slot from prev_slots: the
+       emitter would otherwise emit a slot-loader `define @<bind_name>()`
+       that collides with the original fragment's definition under ORC, and
+       the new body must not silently resolve its own name to the old
+       closure anyway (self-recursion was renamed to [emit_name] above). *)
+    let prev_slots =
+      List.filter (fun (si : March_tir.Llvm_emit.repl_slot_info) ->
+        not (is_redefinition && si.rs_bare = bind_name))
+        (prev_slots_of ctx)
+    in
     let primary_fn =
       match List.find_opt (fun (f : March_tir.Tir.fn_def) ->
-        f.fn_name = bind_name) user_fns with
+        f.fn_name = emit_name) user_fns with
       | Some f -> f
       | None -> List.hd user_fns
     in
@@ -855,22 +1152,31 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
     let slot = alloc_slot ctx in
     let sw = fresh_wrap_state ctx in
     let ir = March_tir.Llvm_emit.emit_repl_fn_with_closure_slot
-      ~n:pn ~bind_name ~dest_slot:slot ~prev_slots:(prev_slots_of ctx)
+      ~n:pn ~bind_name ~dest_slot:slot ~prev_slots
       ~extern_fns:(extern_fns @ helper_fns) ~session_wraps:sw
       ~types:(ctx.loaded_tir_types @ tir.March_tir.Tir.tm_types)
       primary_fn in
     let handle = compile_fragment ctx ir in
     mark_compiled_fns ctx [primary_fn];
     commit_wraps ctx sw;
+    (* Record the declaration's fingerprint only after the fragment compiled
+       and loaded — a failed compile must leave the previous state (and its
+       fingerprint) intact so the user's retry recompiles cleanly, mirroring
+       the mark_compiled_fns discipline. *)
+    Hashtbl.replace ctx.fn_fingerprints bind_name fingerprint;
     let init_name = Printf.sprintf "repl_%d_init" pn in
     let fptr = lookup_sym ctx handle init_name in
     Jit.call_void_to_void fptr;
     (* Register the slot so future fragments can load the closure as a value.
        The type is TFn (closures are heap pointers), which causes emit_prev_slot_bridges
-       to emit inttoptr when loading the closure from the slot. *)
+       to emit inttoptr when loading the closure from the slot.  On a
+       redefinition this REBINDS the bare name to the fresh slot holding the
+       new closure — later fragments resolve calls through this binding, so
+       they pick up the new body.  (The old slot keeps the old closure alive;
+       one abandoned closure per redefinition, same shape as `let` rebinding.) *)
     ctx.var_slots <- (bind_name, slot, March_tir.Tir.TFn ([], March_tir.Tir.TUnit)) ::
       List.filter (fun (b, _, _) -> b <> bind_name) ctx.var_slots
-    end (* if user_fns <> [] *)
+    end (* not is_replay *)
   end else begin
     (* Let binding: compute value and store in a fresh slot. *)
     let main_fn = match List.find_opt (fun (f : March_tir.Tir.fn_def) ->

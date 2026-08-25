@@ -22,11 +22,44 @@ git log is authoritative for exact commits.
   error path, turning that recoverable error into a hard crash. The default
   clang backend was unaffected; each REPL/JIT session owns its own LLJIT
   instance (multiple sessions per process no longer collide).
+- REPL: redefining a `fn` at the prompt now takes effect under both JIT
+  backends (clang and ORC), matching interpreter mode's rebinding — the new
+  body was previously silently ignored and calls kept answering with the
+  first definition. `:reset` scroll-replay of unchanged cells still skips
+  recompilation.
 
 ### Changed
 
 - Interpreter: variable lookup no longer scans the builtin environment per reference (monomorphic comparison + hashed global scope). Interpreted programs run ~11x faster (fib(25): 16.6 s -> 1.5 s); REPL interpreter-mode lookups stay fast across prompts.
 - REPL: expressions now compile in-process through LLVM ORC when libLLVM is installed (~200x lower per-line compile latency, whole-session ~3x); set MARCH_JIT_BACKEND=clang to restore the previous clang-subprocess backend. Unrecognized MARCH_JIT_BACKEND values fall back to clang as before.
+
+### Fixed
+
+- **REPL: a constructor of a type declared at the prompt evaluated as the
+  type's FIRST variant.** With `type Color = Red | Green | Blue`, both `Green`
+  and `Blue` answered `Red` — and, because the same wrong constructor tag
+  reached pattern matching, `match Blue do Red -> 1 Green -> 2 Blue -> 3 end`
+  answered `1`. A type declared at the prompt was registered with the REPL's
+  JIT for pretty-printing only, never as an input to code generation, so every
+  constructor of it was compiled with tag 0. `MARCH_REPL_INTERP=1` was
+  unaffected.
+- **REPL: values of Option-shaped and single-constructor types printed as raw
+  words.** `Some(1)` displayed as `3`, `None` as `null`, and `Some("hi")` took
+  the REPL down; a user `type T = X(Int) | Y` showed `X(7)` as `15` and `Y` as
+  `null`. These representations are not heap cells — the value IS the payload
+  word — and the REPL's printer was reading them as though they were.
+  Constructor payloads of ordinary types now also print at their declared type
+  rather than assuming every field is a tagged scalar (`P1(7)` was showing as
+  `P1(3)`).
+- **The REPL now actually caches its stdlib typecheck env.** Saving it had been
+  failing on every start since the cache was introduced — the env holds an
+  import-tracker closure that `Marshal` refuses to write, and the failure was
+  swallowed — so each REPL launch re-typechecked the whole stdlib and left a
+  zero-byte `stdlib_tcenv_*.tmp` file behind in `~/.cache/march` (1,132 of them
+  had accumulated on one machine). Start-up now hits the cache on the second and
+  later launches, a save that fails says so on stderr instead of degrading
+  silently, and both the REPL and the CLI sweep stale staging files left by
+  processes that died mid-write.
 
 ## [0.3.0] - 2026-08-23
 
