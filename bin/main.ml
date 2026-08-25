@@ -663,8 +663,52 @@ let get_stdlib_tc_env ~for_js (stdlib_decls : March_ast.Ast.decl list) =
         let (cached_env : March_typecheck.Typecheck.env) = Marshal.from_channel ic in
         let (cached_tm : (March_ast.Ast.span * March_typecheck.Typecheck.ty) list) =
           Marshal.from_channel ic in
+        (* Restore the two PROCESS-GLOBAL side-tables a from-scratch stdlib
+           check would have advanced/populated as a side effect, and that a
+           cache hit otherwise skips entirely:
+             - [Typecheck._counter]: the fresh-metavar id source. Checking
+               stdlib alone burns ~2000 ids; skip that on a cache hit and
+               pass 2 (the user's own file) starts allocating from near 0
+               instead of continuing where a from-scratch run would have
+               left off. The raw id VALUES differ either way (harmless —
+               golden fixtures compare via canonical renumbering — see
+               test/test_emit_core_ast.ml's [canonicalize]), but which of
+               two user-file schemes happens to get the SMALLER raw id can
+               flip depending on the counter's starting point, and THAT
+               flips their relative order in the emitted `schemes` array
+               (sorted by raw id, then canonicalized — canonicalization
+               renumbers id VALUES but never reorders arrays). Confirmed via
+               a three-way diff (cold / warm / pre-Task-3.1 binary) on
+               `--emit-core-ast` of specs/lang/types/accept/
+               t07_generic_option_two_types.march: cold and the pre-3.1
+               binary agree on scheme order, warm alone disagrees — see
+               specs/progress/2026-08-24-interp-perf-phase-3-startup-tcenv-cache.md's
+               "Fix round 2" section. [max] rather than a blind overwrite:
+               never let a cache read move the counter BACKWARD, which
+               could mint an id that collides with one already allocated
+               earlier in this same process.
+             - [Typecheck._record_names]: a display-only signature->name
+               index (never consulted by --emit-core-ast's JSON emitter,
+               confirmed by reading [Ast_json.resolved_ty_to_json]'s TRecord
+               case — it never touches this table) but DOES feed [pp_ty],
+               which renders type names into ordinary diagnostic text. Left
+               unrestored, a cache-hit run could render a record type
+               structurally where a cold run renders it nominally (or vice
+               versa) purely because stdlib's own record declarations never
+               ran through [register_record_name] on this process — a
+               latent diagnostic-text divergence beyond what actually
+               reproduced in the golden corpus. Restored defensively for
+               the same reason the round-1 fix insisted on byte-identical
+               diagnostics rather than "close enough". *)
+        let (cached_counter : int) = Marshal.from_channel ic in
+        let (cached_record_names : (string * string option) list) =
+          Marshal.from_channel ic in
         close_in ic;
         List.iter (fun (k, v) -> Hashtbl.replace type_map k v) cached_tm;
+        if cached_counter > !March_typecheck.Typecheck._counter then
+          March_typecheck.Typecheck._counter := cached_counter;
+        List.iter (fun (k, v) -> Hashtbl.replace March_typecheck.Typecheck._record_names k v)
+          cached_record_names;
         Some { cached_env with
                March_typecheck.Typecheck.errors = March_errors.Errors.create ();
                type_map }
@@ -703,6 +747,16 @@ let get_stdlib_tc_env ~for_js (stdlib_decls : March_ast.Ast.decl list) =
           let tm_list = Hashtbl.fold (fun k v acc -> (k, v) :: acc)
             final_env.March_typecheck.Typecheck.type_map [] in
           Marshal.to_channel oc tm_list [];
+          (* Snapshot the two process-global side-tables RIGHT NOW — the
+             point where a from-scratch run would hand off from "stdlib
+             checked" to "start checking the user's own file" — so a later
+             cache hit can restore them to this exact point. See the long
+             comment on [load_from_cache] above for why both matter. *)
+          Marshal.to_channel oc !March_typecheck.Typecheck._counter [];
+          let record_names_list =
+            Hashtbl.fold (fun k v acc -> (k, v) :: acc)
+              March_typecheck.Typecheck._record_names [] in
+          Marshal.to_channel oc record_names_list [];
           close_out oc;
           Sys.rename tmp cache_path)
     with e ->

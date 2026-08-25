@@ -128,3 +128,81 @@ Full detail, including the shadowing-witness reproduction attempts (both
 successful and inconclusive) and the exact `dune build`/test output, is in
 `.superpowers/sdd/2026-08-23-interpreter-and-repl-jit-performance/task-3.1-report.md`'s
 "Fix round 1" section.
+
+## Fix round 2 (2026-08-24, same day)
+
+CI on both platforms failed on `test/test_emit_core_ast.exe`'s
+`emit_core_ast` suite — a dune-rule test (`(rule (alias runtest) ...)` in
+`test/dune`, ~line 954) that `scripts/run-tests.sh` never runs (a known
+gap: the script only builds and runs the five alcotest binaries directly;
+CI's `dune runtest`/`dune build @types-check @grammar-check` alias-based
+rules are invisible to it). Reproduced locally once built and run directly.
+
+**Root cause**: `Typecheck._counter` (`lib/typecheck/typecheck.ml:147`) is
+a process-global `ref`, NOT a field of `Typecheck.env` — so it is outside
+everything Fix round 1's `get_stdlib_tc_env` cache marshals. A from-scratch
+run burns ~2000 fresh-metavar ids checking stdlib before it ever reaches
+the user's own file; a cache-hit run skips that entirely, so pass 2 (the
+user file) starts allocating ids from wherever the counter happened to be
+at process start (near 0) instead of continuing where stdlib left off. The
+resulting raw id VALUES differing is harmless on its own — golden fixtures
+compare through `test_emit_core_ast.ml`'s `canonicalize`, which renumbers
+metavar ids by first textual occurrence — but `--emit-core-ast`'s `schemes`
+array is sorted by RAW id before canonicalization
+(`bin/main.ml`: `List.sort (fun (ids1,_,_) (ids2,_,_) -> compare ids1 ids2)`),
+and canonicalization only rewrites id VALUES, never reorders arrays. Which
+of two user-file schemes happens to get the smaller raw id can flip
+depending on where the counter starts, flipping their relative position in
+the array — a real byte-level divergence canonical renumbering cannot
+paper over.
+
+Confirmed via a three-way diff on `specs/lang/types/accept/
+t07_generic_option_two_types.march --emit-core-ast`: the pre-Task-3.1
+binary (`368181a7`) and a COLD run of the current tree agree with the
+golden fixture's canonical scheme order; only a WARM (cache-hit) run
+disagrees — cold's raw scheme ids were `[1909]`/`[39941]` (continuing a
+counter already advanced by a full stdlib check), warm's were
+`[166]`/`[1909]` (continuing from near-zero), and the semantic scheme that
+lands on the smaller number differs between the two, flipping their array
+order after the ascending sort.
+
+Investigated the reviewer's other suspect, `Typecheck._record_names`
+(`typecheck.ml:229`, also process-global, also skipped on cache hit): read
+`lib/dump/ast_json.ml`'s `resolved_ty_to_json`, whose `TRecord` case never
+touches this table — `--emit-core-ast` serializes `TRecord` structurally
+always, by design, so this table cannot be the cause of the observed
+failure. It DOES feed `pp_ty` (ordinary diagnostic-text rendering), so a
+cache-hit run could still render a record type structurally where a
+from-scratch run renders it nominally (or vice versa) in an error message
+— a latent diagnostic-text divergence never actually observed in this
+corpus but real in principle, given round 1's hard constraint that
+diagnostics be byte-identical cold vs warm.
+
+**Fix**: `get_stdlib_tc_env`'s cache file now marshals two more values
+after the env and type_map — `!Typecheck._counter` and an assoc-list dump
+of `Typecheck._record_names` — captured at exactly the point a from-scratch
+run hands off from "stdlib checked" to "about to check the user's file".
+On a cache hit, after reading them back: the counter is restored via `if
+cached_counter > !_counter then _counter := cached_counter` (never move it
+backward — that could mint an id colliding with one already allocated
+earlier in the same process), and `_record_names`' entries are merged in
+via `Hashtbl.replace` per key. Old (round-1/round-2-pre-fix) two-value
+cache files fail to read the two new values, raise inside
+`load_from_cache`'s `try`, and fall through to a full rebuild that
+overwrites the file in the new four-value format — no migration code
+needed, same self-healing shape the corruption-tolerance design already
+had.
+
+Also ran the other CI-only, run-tests.sh-invisible dune-rule gates the
+task flagged as worth checking for the same class of gap: `@types-check`
+(303/303), `@grammar-check` (48/48), `run_snapshots.exe -e` (33/33, a
+library-level TIR test that never touches `bin/main.ml`'s cache and was
+unaffected as expected). `@oracle` (the interp-vs-compile differential
+sweep) was also kicked off; see the task report for its result if it
+completed before this doc was written.
+
+Validation: `test_emit_core_ast.exe -e` 5/5 (not 6 — the suite has 5
+cases, not the 6 the initial report guessed) exit 0, both cold and warm
+cache; `tcenv_cli_cache` suite still green; `run_compiler.exe -e` 936
+tests, exit 0. Full three-way diff transcript and file-by-file breakdown
+in the task report's "Fix round 2" section.
