@@ -457,8 +457,18 @@ jobs:
 ### Creating a Stable Release
 
 1. Update the version in `dune-project` and any other version references.
-2. Commit and push to `main`.
-3. Tag the commit and push the tag:
+2. Regenerate the committed dune-generated opam files so they pick up the new
+   version, and include them in the same release commit — otherwise every later
+   `dune build` dirties the tree with the version diff (this bit the 0.3.0
+   release; see commit `3206b316` and its follow-up):
+
+```bash
+dune build forge.opam march.opam march-lsp.opam
+git add forge.opam march.opam march-lsp.opam
+```
+
+3. Commit and push to `main`.
+4. Tag the commit and push the tag:
 
 ```bash
 git tag v0.1.0

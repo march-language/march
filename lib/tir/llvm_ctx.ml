@@ -29,6 +29,35 @@
 (** Constructor info: ctor_name → (tag_index, field_tir_types) *)
 type ctor_entry = { ce_tag : int; ce_fields : Tir.ty list }
 
+(** REPL/JIT cross-FRAGMENT bookkeeping for `$clo_wrap` trampolines.
+
+    [emitted_wraps] on the ctx is scoped to ONE fragment, which is exactly right
+    natively (one module) but wrong under the JIT, where every fragment of a
+    session is materialized into a SINGLE symbol namespace: a second fragment
+    that also uses `double` as a first-class value would re-define
+    `@double$clo_wrap`, which ORC's shared JITDylib rejects outright ("duplicate
+    definition of symbol") and clang's per-.so flat namespace merely tolerated.
+
+    Two tables, for the same reason [Repl_jit.partition_fns] and
+    [Repl_jit.mark_compiled_fns] are two separate steps:
+
+    - [sw_defined] — wrappers a PREVIOUSLY SUCCEEDED fragment actually
+      materialized. Read-only here; a hit means "emit a `declare`".
+    - [sw_pending] — the [`Define] decisions THIS fragment just made. Emission
+      writes only here; [Repl_jit] promotes them into [sw_defined] only after
+      [compile_fragment] + dlopen succeed, and drops them otherwise.
+
+    Committing at emission time instead would be a real bug, not a nicety: a
+    fragment can emit a define and then FAIL to compile (the REPL prints the
+    error and continues). A session table already claiming the wrapper exists
+    would make the next fragment emit a `declare` against a symbol that was
+    never materialized — an unresolved symbol, where the pre-change code
+    recovered by simply redefining it. *)
+type session_wraps = {
+  sw_defined : (string, unit) Hashtbl.t;
+  sw_pending : (string, unit) Hashtbl.t;
+}
+
 type ctx = {
   buf       : Buffer.t;
   preamble  : Buffer.t;
@@ -112,6 +141,10 @@ type ctx = {
   local_names : (string, int) Hashtbl.t;
   (* Tracks which closure wrappers have been generated for top-level fns *)
   emitted_wraps : (string, unit) Hashtbl.t;
+  (* REPL/JIT cross-fragment `$clo_wrap` bookkeeping — see the [session_wraps]
+     type above and [wrap_emit_kind] below.  [None] on the AOT path
+     ([emit_module]), which therefore behaves exactly as it did before. *)
+  mutable session_wraps : session_wraps option;
   (* Memo: mangled fn name -> emitted static-closure global symbol.
      One immortal closure object per top-level function used as a value,
      replacing a fresh march_alloc(24) at every materialization site. *)
@@ -140,6 +173,15 @@ type ctx = {
      calls that are not resolved at compile time due to type erasure). Maps
      function LLVM name → declare string to avoid duplicate declarations. *)
   unknown_decls : (string, unit) Hashtbl.t;
+  (* REPL fn-fragment prev-slot loaders (bare binding name → ()).  Populated by
+     Llvm_repl.emit_slot_loader_fns for each `define @<name>()` loader it emits.
+     The EApp/ECallPtr paths consult this so a call to a prior REPL binding
+     dispatches through the loader's closure value instead of falling into the
+     unknown-function fallback — which would `declare @<name>` the very symbol
+     the loader defines in the same module (invalid redefinition), and would
+     also pin the callee version compiled at definition time rather than
+     following the slot. *)
+  repl_slot_fns : (string, unit) Hashtbl.t;
   (* Unqualified suffix → qualified TIR name for cross-module function refs
      that lower.ml emits without the module prefix (e.g. "base64_encode" →
      "Crypto.base64_encode").  Populated during emit_module init. *)
@@ -268,6 +310,7 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   poly_ctors  = Hashtbl.create 64;
   type_params = Hashtbl.create 16;
   emitted_wraps = Hashtbl.create 8;
+  session_wraps = None;
   static_clos = Hashtbl.create 16;
   extra_fns = Buffer.create 1024;
   emitted_eq_fns = Hashtbl.create 16;
@@ -276,6 +319,7 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   blocking_externs = Hashtbl.create 4;
   raises_externs = Hashtbl.create 4;
   unknown_decls = Hashtbl.create 8;
+  repl_slot_fns = Hashtbl.create 8;
   unqualified_fns = Hashtbl.create 32;
   hr_config = hot_reload;
   hr_names;
@@ -741,6 +785,37 @@ let intern_static_closure ?(pad = 0) ctx fn_name wrap_name =
          g pad wrap_name);
     Hashtbl.replace ctx.static_clos fn_name g;
     g
+
+(** Decide how this fragment should provide [wrap_name] (a `$clo_wrap`
+    trampoline), and record the decision.  Replaces the bare
+    check-then-add-[emitted_wraps] guard that every `$clo_wrap` call site used
+    to inline:
+
+    - [`Skip]    — this fragment already emitted it; nothing more to do.
+    - [`Define]  — emit the body ([Llvm_calls.clo_wrap_define]).
+    - [`Declare] — an EARLIER fragment of this REPL/JIT session already defined
+                   it, so emit only [Llvm_calls.clo_wrap_declare] and let the
+                   linker/JITDylib bind the reference.  Only ever returned when
+                   a session table is installed (see [session_wraps]); the AOT
+                   path never sees it.
+
+    A [`Define] is recorded in [sw_pending], NOT [sw_defined]: this fragment has
+    only decided to emit the wrapper, and may still fail to compile.  Promotion
+    to [sw_defined] belongs to [Repl_jit], next to [mark_compiled_fns], once the
+    fragment actually materialized.
+
+    Repeats within ONE fragment are caught by [emitted_wraps] before either
+    session table is consulted, so a fragment can never define the same wrapper
+    twice regardless of what the session tables hold. *)
+let wrap_emit_kind ctx (wrap_name : string) : [ `Skip | `Define | `Declare ] =
+  if Hashtbl.mem ctx.emitted_wraps wrap_name then `Skip
+  else begin
+    Hashtbl.add ctx.emitted_wraps wrap_name ();
+    match ctx.session_wraps with
+    | Some sw when Hashtbl.mem sw.sw_defined wrap_name -> `Declare
+    | Some sw -> Hashtbl.replace sw.sw_pending wrap_name (); `Define
+    | None -> `Define
+  end
 
 (* ── Repr-consistency audit (MARCH_REPR_AUDIT=1) ─────────────────────────
    Every site that COMMITS to a value representation (EAlloc, EReuse,

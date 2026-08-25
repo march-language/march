@@ -11,9 +11,40 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- REPL JIT: referencing the same top-level function as a value across multiple lines no longer fails with "duplicate definition of symbol '<fn>$clo_wrap'" (ORC backend).
+- JIT REPL (both backends): defining a function that calls a previously
+  REPL-defined function (`fn f(x) do x + 1 end` then `fn g(x) do f(x) end`)
+  failed with an invalid-IR "redefinition of function" error and the new
+  function was lost ("I cannot find `g`"). Calls to prior REPL bindings —
+  `fn`s and `let`-bound lambdas alike — now dispatch through the binding's
+  persistent slot, so they also follow the slot's current value rather than
+  pinning the version seen at definition time.
+
+- REPL, experimental ORC JIT backend (`MARCH_JIT_BACKEND=orc`): defining a
+  second function in a session crashed the process with SIGSEGV. Each `fn`
+  fragment re-emitted its prior-binding slot loaders with external linkage,
+  colliding in ORC's single shared JITDylib with the real definition of the
+  same name; and the ORC binding double-freed the module on the add-module
+  error path, turning that recoverable error into a hard crash. The default
+  clang backend was unaffected; each REPL/JIT session owns its own LLJIT
+  instance (multiple sessions per process no longer collide).
+  clang backend was unaffected.
+
+- REPL: redefining a `fn` at the prompt now takes effect under both JIT
+  backends (clang and ORC), matching interpreter mode's rebinding — the new
+  body was previously silently ignored and calls kept answering with the
+  first definition. `:reset` scroll-replay of unchanged cells still skips
+  recompilation.
+  recompilation. Combined with the slot-routed call fix above, this matches
+  interpreter mode exactly: a direct call gets the new body, while a function
+  defined earlier keeps calling the definition it was compiled against.
+
 ### Changed
 
 - Interpreter: variable lookup no longer scans the builtin environment per reference (monomorphic comparison + hashed global scope). Interpreted programs run ~11x faster (fib(25): 16.6 s -> 1.5 s); REPL interpreter-mode lookups stay fast across prompts.
+- REPL: expressions now compile in-process through LLVM ORC when libLLVM is installed (~200x lower per-line compile latency, whole-session ~3x); set MARCH_JIT_BACKEND=clang to restore the previous clang-subprocess backend. Unrecognized MARCH_JIT_BACKEND values fall back to clang as before.
 
 ### Fixed
 
@@ -45,6 +76,15 @@ git log is authoritative for exact commits.
   Constructor payloads of ordinary types now also print at their declared type
   rather than assuming every field is a tagged scalar (`P1(7)` was showing as
   `P1(3)`).
+- **The REPL now actually caches its stdlib typecheck env.** Saving it had been
+  failing on every start since the cache was introduced — the env holds an
+  import-tracker closure that `Marshal` refuses to write, and the failure was
+  swallowed — so each REPL launch re-typechecked the whole stdlib and left a
+  zero-byte `stdlib_tcenv_*.tmp` file behind in `~/.cache/march` (1,132 of them
+  had accumulated on one machine). Start-up now hits the cache on the second and
+  later launches, a save that fails says so on stderr instead of degrading
+  silently, and both the REPL and the CLI sweep stale staging files left by
+  processes that died mid-write.
 
 ## [0.3.0] - 2026-08-23
 

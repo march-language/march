@@ -625,6 +625,19 @@ let read_file_contents path =
   with Sys_error _ -> ""
 
 let setup_jit_runtime () =
+  (* Pin the clang backend for every in-process Repl_jit test that goes
+     through this gate.  These tests construct several independent Repl_jit
+     sessions inside ONE process, and the ORC backend (the default whenever
+     libLLVM is present, since the 2026-08-24 backend-selector change) keeps
+     one process-global LLJIT: the second session's first fragment re-defines
+     prelude-synthesized symbols (Eq$Int.eq, ...) in the same shared JITDylib
+     and fails with "duplicate definition of symbol".  Multi-session-per-
+     process ORC is a real open limitation tracked in
+     specs/todos/ (ORC-default in-process test failures task); until it is
+     fixed, in-process tests exercise the clang + dlopen pipeline they were
+     written against.  The subprocess session tests in test_jit.ml cover the
+     ORC backend end-to-end. *)
+  March_jit.Repl_jit.set_backend_for_tests `Clang;
   let home = Sys.getenv "HOME" in
   let dot_cache = Filename.concat home ".cache" in
   let cache_dir = Filename.concat dot_cache "march" in
@@ -1885,6 +1898,15 @@ let jit_eval_simple_expr ~runtime_so src =
       ignore exn; None) with
     | r -> r)
   | _ -> None
+
+(** Run [f] with the REPL JIT backend forced to [backend] for the duration.
+    Repl_jit resolves the backend lazily and caches it, so the override must
+    go through [Repl_jit.set_backend_for_tests]; restores the previously
+    resolved backend afterward, even if [f] raises. *)
+let with_jit_backend backend f =
+  let prev = March_jit.Repl_jit.current_backend () in
+  March_jit.Repl_jit.set_backend_for_tests backend;
+  Fun.protect ~finally:(fun () -> March_jit.Repl_jit.set_backend_for_tests prev) f
 
 (** Assert that interpreter and JIT produce identical output for [src].
     Skips when JIT is unavailable. *)

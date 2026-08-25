@@ -233,6 +233,27 @@ let fail_if_unresolved_iface_method ctx (bare_name : string) : unit =
     exactly one leaked object per materialization).  Dropping at entry is safe
     because the wrapper never reads [%_clo] again — it captures nothing, and
     the dispatch already loaded the code pointer before the call. *)
+(* The uniform-ptr ABI parameter types a [$clo_wrap] presents, derived from the
+   concrete target's param types.  Shared by [clo_wrap_define] (which emits the
+   definition) and [clo_wrap_declare] (which emits a matching declaration) so
+   the two can never drift: `double`/`i64` cross BOXED/TAGGED as `ptr`. *)
+let clo_wrap_param_tys (param_ltys : string list) =
+  List.map (fun t -> if t = "double" || t = "i64" then "ptr" else t) param_ltys
+
+(** External declaration of a [$clo_wrap] trampoline defined in ANOTHER LLVM
+    module.  Under the REPL/JIT a session compiles many fragments into one
+    symbol namespace (ORC's shared JITDylib), so only the FIRST fragment that
+    needs a given wrapper may [clo_wrap_define] it — every later fragment
+    references the same symbol through this declaration.  The signature must
+    match [clo_wrap_define]'s exactly: `ptr` return (the generic closure-call
+    ABI), leading `ptr %_clo`, then [clo_wrap_param_tys] of the target's
+    params.  Works on both JIT backends: with clang each fragment is its own
+    .so and the declare binds at dlopen via -undefined dynamic_lookup; with
+    ORC it resolves inside the shared JITDylib. *)
+let clo_wrap_declare wrap_name (param_ltys : string list) =
+  Printf.sprintf "declare ptr @%s(%s)\n\n" wrap_name
+    (String.concat ", " ("ptr" :: clo_wrap_param_tys param_ltys))
+
 let clo_wrap_define ?(drop_clo = false) wrap_name (param_ltys : string list)
     target_ret fn_name =
   let arg_names = List.mapi (fun i _ -> Printf.sprintf "%%a%d" i) param_ltys in
@@ -243,8 +264,7 @@ let clo_wrap_define ?(drop_clo = false) wrap_name (param_ltys : string list)
      (float-boxing, Stage 2).  The wrapper takes ptr and UNBOXES to double
      before forwarding to the concrete target; likewise a Float return is BOXED
      before entering the erased ptr ABI. *)
-  let wrapper_tys =
-    List.map (fun t -> if t = "double" || t = "i64" then "ptr" else t) param_ltys in
+  let wrapper_tys = clo_wrap_param_tys param_ltys in
   let decl_str =
     String.concat ", "
       ("ptr %_clo" :: List.map2 (fun t n -> t ^ " " ^ n) wrapper_tys arg_names) in

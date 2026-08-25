@@ -1895,6 +1895,74 @@ let run_repl_jit_fn_lambda_session ~fn_src ~expr_src ~expected ~label =
      with exn ->
        March_jit.Repl_jit.cleanup jit; raise exn)
 
+(** Regression: redefining a REPL `fn` must take effect (Elixir-style
+    rebinding, matching interpreter mode).  run_decl's is_fn_decl path used
+    to early-return whenever [bind_name] was already in [compiled_fns] — a
+    guard meant only for :reset scroll-replay (which resends identical
+    cells) — so a genuine redefinition never recompiled or rebound the
+    closure slot and `f(1)` kept answering with the FIRST body.  The fix
+    fingerprints the declaration AST: an identical resend still takes the
+    replay fast path (asserted below via [fragment_count]), while a changed
+    body recompiles under a fresh unique symbol and rebinds the slot. *)
+let test_repl_jit_fn_redefinition () =
+  match setup_jit_runtime () with
+  | None -> ()  (* counted skip: no clang on PATH (anything else fails loudly, W2.0) *)
+  | Some runtime_so ->
+    let jit = March_jit.Repl_jit.create ~runtime_so () in
+    (try
+       let type_map = Hashtbl.create 16 in
+       let tc_env = ref (March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map) in
+       let run_fn_decl src =
+         match parse_repl src with
+         | March_ast.Ast.ReplDecl d ->
+           let d' = March_desugar.Desugar.desugar_decl d in
+           let bind_name = match d' with
+             | March_ast.Ast.DFn (def, _) -> def.March_ast.Ast.fn_name.txt
+             | _ -> failwith ("expected DFn for: " ^ src)
+           in
+           let s = March_ast.Ast.dummy_span in
+           let m = { March_ast.Ast.mod_name = { txt = "Repl"; span = s };
+                     mod_decls = [d'] } in
+           March_jit.Repl_jit.run_decl jit ~tc_env:!tc_env ~is_fn_decl:true ~bind_name m;
+           let new_env = March_typecheck.Typecheck.check_decl
+             { !tc_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () } d' in
+           tc_env := { new_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () };
+           (bind_name, m)
+         | _ -> failwith ("expected ReplDecl for: " ^ src)
+       in
+       let eval_expr src expected label =
+         match parse_repl src with
+         | March_ast.Ast.ReplExpr e ->
+           let e' = March_desugar.Desugar.desugar_expr e in
+           let m = make_jit_test_module e' in
+           let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env:!tc_env m in
+           Alcotest.(check string) label expected result
+         | _ -> failwith ("expected ReplExpr for: " ^ src)
+       in
+       ignore (run_fn_decl "fn f(x) do x + 1 end");
+       eval_expr "f(1)" "2" "original f(1) = 2";
+       (* Genuine redefinition: different body, same name. *)
+       let (bind_name, m2) = run_fn_decl "fn f(x) do x + 100 end" in
+       eval_expr "f(1)" "101" "redefined f(1) = 101 (not silently ignored)";
+       (* :reset scroll-replay resends the identical cell: must stay a
+          fast-path skip (no new fragment compiled) and keep the binding. *)
+       let frags_before = March_jit.Repl_jit.fragment_count jit in
+       March_jit.Repl_jit.run_decl jit ~tc_env:!tc_env ~is_fn_decl:true ~bind_name m2;
+       Alcotest.(check int) "identical replay compiles no new fragment"
+         frags_before (March_jit.Repl_jit.fragment_count jit);
+       eval_expr "f(1)" "101" "f(1) = 101 after identical replay";
+       (* Self-recursive redefinition: the recursive call must reach the NEW
+          body (the renamed fragment-local symbol), not the old one. *)
+       ignore (run_fn_decl
+         "fn f(n) do if n < 1 do 0 else 10 + f(n - 1) end end");
+       eval_expr "f(3)" "30" "self-recursive redefined f(3) = 30";
+       (* Arity-changing redefinition through the same closure slot. *)
+       ignore (run_fn_decl "fn f(a, b) do a + b end");
+       eval_expr "f(3, 4)" "7" "arity-changed f(3, 4) = 7";
+       March_jit.Repl_jit.cleanup jit
+     with exn ->
+       March_jit.Repl_jit.cleanup jit; raise exn)
+
 (** Regression (two stacked bugs, both fixed together):
 
     1. Defun capture-shadowing: the fn is named `f` — the SAME name as
@@ -1995,6 +2063,65 @@ let test_repl_jit_topfn_first_class_value () =
        March_jit.Repl_jit.cleanup jit
      with exn ->
        March_jit.Repl_jit.cleanup jit; raise exn)
+
+(* The session-level `$clo_wrap` table must be committed only AFTER a fragment
+   actually compiles (see [Repl_jit.commit_wraps]), never at emission time —
+   the same discipline [mark_compiled_fns] follows for [compiled_fns], and for
+   the same reason.  A fragment can emit a `define` and then FAIL to compile:
+   the REPL prints the error and keeps going, and NOTHING was materialized.  If
+   that decision had already landed in the session table, the next fragment
+   would emit a `declare` against a symbol that does not exist — an unresolved
+   symbol, in a spot where the pre-dedupe code recovered by simply redefining
+   the wrapper.  So a failure must leave the session table untouched.
+
+   Driving a genuine clang/ORC failure through [Repl_jit] would need a fragment
+   that typechecks and lowers cleanly but then fails at the LLVM stage, which
+   there is no cheap handle on from here (and [Repl_jit.t] is abstract, so the
+   table could not be inspected anyway).  This pins the decision function the
+   whole discipline rests on instead, driving the same four states a session
+   walks through: define-but-fail, retry, commit, declare. *)
+let test_clo_wrap_session_commit_is_deferred () =
+  let open March_tir.Llvm_ctx in
+  let w = "double$clo_wrap" in
+  (* The session's committed set — [Repl_jit.t.wrap_defined]. *)
+  let session = Hashtbl.create 8 in
+  let fragment () =
+    let sw = { sw_defined = session; sw_pending = Hashtbl.create 8 } in
+    let c = make_ctx ~repl:true () in
+    c.session_wraps <- Some sw;
+    (c, sw)
+  in
+  (* Mirrors [Repl_jit.commit_wraps], which runs only where mark_compiled_fns
+     does — i.e. after compile_fragment + dlopen succeed. *)
+  let commit sw = Hashtbl.iter (fun k () -> Hashtbl.replace session k ()) sw.sw_pending in
+  (* Fragment 1 decides to DEFINE, then "fails to compile" — never commits. *)
+  let (c1, sw1) = fragment () in
+  Alcotest.(check bool) "fragment 1 defines" true (wrap_emit_kind c1 w = `Define);
+  Alcotest.(check bool) "the define is PENDING, not yet committed" true
+    (Hashtbl.mem sw1.sw_pending w);
+  Alcotest.(check bool) "emission must not touch the session table" false
+    (Hashtbl.mem session w);
+  Alcotest.(check bool) "one fragment never defines the same wrapper twice" true
+    (wrap_emit_kind c1 w = `Skip);
+  (* Fragment 2, after that failure, must DEFINE again — never declare a
+     phantom symbol.  This is the regression the deferral exists for. *)
+  let (c2, sw2) = fragment () in
+  Alcotest.(check bool) "after a FAILED fragment: redefine, no phantom declare"
+    true (wrap_emit_kind c2 w = `Define);
+  (* This time the fragment compiles, so the session records it. *)
+  commit sw2;
+  Alcotest.(check bool) "commit promotes pending into the session" true
+    (Hashtbl.mem session w);
+  (* Fragment 3 now sees a genuinely materialized wrapper and declares. *)
+  let (c3, _) = fragment () in
+  Alcotest.(check bool) "after a SUCCEEDED fragment: declare" true
+    (wrap_emit_kind c3 w = `Declare);
+  (* The AOT path installs no session table and must be untouched by all of
+     this: always Define, never Declare. *)
+  let aot = make_ctx () in
+  Alcotest.(check bool) "AOT ctx always defines" true (wrap_emit_kind aot w = `Define);
+  Alcotest.(check bool) "AOT ctx skips its own repeat" true
+    (wrap_emit_kind aot w = `Skip)
 
 (* REPL/JIT counterpart of [test_lambda_static_closure_materialization_no_leak_
    compiled].  Natively a capture-free closure is one immortal global
@@ -14260,7 +14387,9 @@ let codegen_suites =
         Alcotest.test_case "hof with fn and let cross-line" `Quick test_repl_jit_cross_line_hof;
         Alcotest.test_case "B11: stored closure returns untagged Int" `Quick test_repl_jit_stored_closure_returns_untagged_int;
         Alcotest.test_case "B11: self-referencing fn no duplicate clo_wrap" `Quick test_repl_jit_selfref_fn_no_duplicate_wrapper;
+        Alcotest.test_case "fn redefinition rebinds (replay still skips)" `Quick test_repl_jit_fn_redefinition;
         Alcotest.test_case "top-level fn as first-class value" `Quick test_repl_jit_topfn_first_class_value;
+        Alcotest.test_case "session wrap record is committed only after compile" `Quick test_clo_wrap_session_commit_is_deferred;
         Alcotest.test_case "capture-free closure materialization does not leak" `Quick test_repl_jit_capture_free_closure_no_leak;
         Alcotest.test_case "stdlib List.length via precompile" `Quick test_repl_jit_stdlib_list_length;
         Alcotest.test_case "B12: niche ADT cross-fragment (:load DMod then match)" `Quick test_repl_jit_niche_adt_cross_fragment;

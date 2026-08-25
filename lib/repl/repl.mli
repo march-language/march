@@ -46,6 +46,16 @@ val load_decls_into_env :
   March_ast.Ast.decl list ->
   March_eval.Eval.env * March_typecheck.Typecheck.env
 
+(** Delete `<name>.<pid>.tmp` staging files in the given cache directory whose
+    owning process is no longer alive.  Never raises. *)
+val sweep_stale_cache_tmps : string -> unit
+
+(** Strip the typecheck-env fields [Marshal] cannot write (the import tracker
+    and its index, whose entries hold closures).  Callers that persist an env
+    must go through this. *)
+val marshalable_tc_env :
+  March_typecheck.Typecheck.env -> March_typecheck.Typecheck.env
+
 (** Load a cached typecheck env from disk. *)
 val load_cached_tc_env :
   content_hash:string ->

@@ -3,10 +3,30 @@
 (** Persistent state for the compiled REPL. *)
 type t
 
+(** Which code-generation pipeline the REPL JIT uses for a fragment.
+    [`Clang] emits a .so and dlopens it; [`Orc] parses IR directly into an
+    in-process LLJIT. See [current_backend] / [set_backend_for_tests]. *)
+type backend = [ `Clang | `Orc ]
+
+(** The backend that will be used for the next fragment. Resolved lazily
+    on first use (env var, else ORC iff libLLVM is present, else clang) and
+    cached; see [repl_jit.ml] for the exact resolution order. *)
+val current_backend : unit -> backend
+
+(** Test-only override of the resolved backend, e.g. to run the same test
+    against both backends. *)
+val set_backend_for_tests : backend -> unit
+
 (** Create a JIT context.
     [runtime_so] is the path to the pre-compiled march_runtime.so.
     [clang] is the clang binary path (default "clang"). *)
 val create : runtime_so:string -> ?clang:string -> unit -> t
+
+(** Number of IR fragments compiled so far in this session.  Exposed for
+    tests: it lets them assert that an identical :reset-style replay of a
+    declaration takes the skip fast path (count unchanged) rather than
+    recompiling. *)
+val fragment_count : t -> int
 
 (** Compile and execute a REPL expression.
     Returns the LLVM IR return type and a string representation of the result.

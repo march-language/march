@@ -108,18 +108,14 @@ shared `~/.cache/march` prelude gets poisoned by concurrent sessions and
 manufactures four extra phantom failures. `bench/list_ops.march` (the
 closure/HOF benchmark this pass covers) compiles and runs correctly at ~0.06s.
 
-## Follow-up noticed, NOT fixed here
+## Follow-up noticed, and fixed independently upstream
 
-Defining a fn that calls a fn defined on an EARLIER REPL line still fails, on
-both backends and independently of lambdas:
-
-```
-march(1)> fn a1(x : Int) : Int do x + 1 end
-march(2)> fn b1(x : Int) : Int do a1(x) * 2 end
-jit error: clang failed: error: invalid redefinition of function 'a1'
-```
-
-`emit_slot_loader_fns` emits a zero-arg `define ptr @a1()` slot loader into
-`b1`'s fragment while `extern_fns` has already `declare`d `@a1` with its real
-arity. Pre-existing (reproduced on the reverted sources), filed as
-`specs/todos/2026-08-24-repl-jit-prior-fn-slot-loader-redefinition.md`.
+While debugging, defining a fn that calls a fn from an EARLIER REPL line also
+failed (`invalid redefinition of function 'a1'`): `emit_slot_loader_fns` emits a
+zero-arg `define ptr @a1()` slot loader into the new fragment while `extern_fns`
+has already `declare`d `@a1` at its real arity. Filed as a todo at the time;
+`4946a914` ("a REPL fn calling a prior REPL binding no longer emits invalid IR")
+landed on main independently and fixes it by routing such calls through the
+loader + closure dispatch, so the todo was dropped rather than merged. Verified
+against the merged tree: `fn a1` then `fn b1` calling it then `b1(5)` answers
+`12`.
