@@ -351,11 +351,21 @@ let emit_repl_fn ~emit_expr ?(fast_math=false) ~(n : int)
 (** Emit a REPL function declaration as a .ll fragment, and also store a
     first-class closure value in slot [dest_slot] via @march_repl_set.
     The init function [@repl_<n>_init] allocates the closure and writes it
-    to the slot so later fragments can load it via @march_repl_get. *)
+    to the slot so later fragments can load it via @march_repl_get.
+
+    [helper_fns] are DEFINED in this same fragment (not merely declared):
+    the defun'd lambda helpers of a REPL `fn` must live in the same module
+    as the fn itself, because a lambda body may reference the fn being
+    defined (self-recursion through a lambda, `fn g(n) do ... fn y -> g(..)
+    ... end`).  Compiling helpers in a separate fragment loaded FIRST left
+    that reference dangling — macOS dlopen binds eagerly and fails with
+    "symbol not found in flat namespace '_g'" even though the symbol's
+    defining fragment was about to be loaded next. *)
 let emit_repl_fn_with_closure_slot ~emit_expr ?(fast_math=false) ~(n : int)
     ~(bind_name : string)
     ~(dest_slot : int)
     ~(prev_slots : repl_slot_info list)
+    ?(helper_fns : Tir.fn_def list = [])
     ?(extern_fns : Tir.fn_def list = [])
     ?(session_wraps : Llvm_ctx.session_wraps option)
     ~(types : Tir.type_def list)
@@ -363,19 +373,17 @@ let emit_repl_fn_with_closure_slot ~emit_expr ?(fast_math=false) ~(n : int)
   ignore bind_name;
   let ctx = Llvm_ctx.make_ctx ~fast_math ~repl:true ~type_defs:types () in
   ctx.Llvm_ctx.session_wraps <- session_wraps;
-  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = [fn]; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
+  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = fn :: helper_fns; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
   Llvm_toplevel.build_ctor_info ctx pseudo_mod;
-  Hashtbl.replace ctx.Llvm_ctx.top_fns fn.Tir.fn_name true;
-  Hashtbl.replace ctx.Llvm_ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
-  Hashtbl.replace ctx.Llvm_ctx.top_fn_nparams fn.Tir.fn_name (List.length fn.Tir.fn_params);
-  if fn.Tir.fn_params = [] then Hashtbl.replace ctx.Llvm_ctx.zero_arg_fns fn.Tir.fn_name true;
   List.iter (fun f ->
       Hashtbl.replace ctx.Llvm_ctx.top_fns f.Tir.fn_name true;
       Hashtbl.replace ctx.Llvm_ctx.top_fn_ret_ty f.Tir.fn_name f.Tir.fn_ret_ty;
       Hashtbl.replace ctx.Llvm_ctx.top_fn_nparams f.Tir.fn_name (List.length f.Tir.fn_params);
-      if f.Tir.fn_params = [] then Hashtbl.replace ctx.Llvm_ctx.zero_arg_fns f.Tir.fn_name true) extern_fns;
+      if f.Tir.fn_params = [] then Hashtbl.replace ctx.Llvm_ctx.zero_arg_fns f.Tir.fn_name true)
+    ((fn :: helper_fns) @ extern_fns);
   emit_slot_loader_fns ctx prev_slots;
   Llvm_toplevel.emit_fn ~emit_expr ctx fn;
+  List.iter (Llvm_toplevel.emit_fn ~emit_expr ctx) helper_fns;
   (* Build a thin closure wrapper: @<fn>$clo_wrap(ptr %_clo, <concrete args>)
      via the canonical [clo_wrap_define] (see its doc comment) so this
      wrapper honors the SAME generic ptr ABI as every other closure-dispatch
