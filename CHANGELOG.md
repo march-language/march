@@ -17,6 +17,26 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- `--jit`: a whole-program run now prunes functions unreachable from `main`
+  before emitting code, as the ahead-of-time pipeline already did. Without it,
+  merely calling one function of a stdlib module dragged in every other
+  function of that module, and a program using `JsonStream` failed to start
+  with "Symbols not found: [ _from_json ]".
+- `--jit` and the REPL JIT: mutually tail-recursive functions are now compiled
+  into a loop, as they already were when compiled ahead of time. Previously a
+  JIT fragment emitted each function separately, so a mutual tail-call cycle
+  became real native recursion and burned one stack frame per iteration —
+  enough iterations exhausted the green thread's stack and killed the process
+  with a bare exit 138 and no output. Reached by any code shaped like
+  `JsonStream`'s byte-at-a-time tokenizer.
+- `--jit` and the REPL JIT: when the cached stdlib prelude could not be loaded,
+  the compiler printed "stdlib cache load failed …, recompiling" and then did
+  not recompile, silently continuing with no prelude. That produced untyped
+  stdlib signatures and miscompiled code (a crash, not just a slowdown). The
+  fallback now really does recompile.
+- `--jit` and the REPL JIT: the stdlib prelude cache is now keyed on the
+  compiler as well as on the stdlib source, so upgrading the compiler no longer
+  reuses a prelude built by the previous one.
 - REPL JIT: referencing the same top-level function as a value across multiple lines no longer fails with "duplicate definition of symbol '<fn>$clo_wrap'" (ORC backend).
 - JIT REPL (both backends): defining a function that calls a previously
   REPL-defined function (`fn f(x) do x + 1 end` then `fn g(x) do f(x) end`)
