@@ -2891,6 +2891,18 @@ let compile filename =
     && not compile_mode && not !do_check && not !check_migration
     && not (has_user_errors || has_parse_errors || has_resolve_errors
             || has_desugar_errors)
+    (* The time-travel debugger (--debug / --debug-tui) only exists in the
+       tree-walking interpreter: [March_debug.Debug.install] hooks the eval
+       loop below, and the JIT has no equivalent hook.  Route back to the
+       interpreter with a notice, same pattern as the shadowing/actor arms
+       below, rather than silently dropping the user's explicit --debug
+       request.  Checked first so it takes precedence over those arms. *)
+    && (if not (!debug_mode || !debug_tui_mode) then true
+        else begin
+          Printf.eprintf
+            "march: --jit does not support the debugger; running interpreted\n%!";
+          false
+        end)
     (* A program that shadows a stdlib module must NOT be JIT'd.  The --jit arm
        feeds [get_stdlib_tc_env]'s seed env into [run_program]'s typecheck, and
        [no_shadowing] is exactly the condition under which that seed env is
