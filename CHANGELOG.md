@@ -17,6 +17,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- macOS: the REPL / `--jit` stdlib prelude cache could never be reused across
+  sessions, so every start silently paid a full stdlib precompile (~9.5s) instead
+  of a ~0.01s cache hit. Cached `.so`s are built at a pid-suffixed `.tmp` path and
+  renamed into place, and the macOS linker stamped that now-dead path as the
+  library's install name — so the prelude recorded an unloadable dependency on the
+  runtime `.so`. They are now linked with `-install_name` pointing at the path the
+  file actually lands at.
 - `march --jit --debug` (and `--jit --debug-tui`) no longer silently drops the time-travel debugger and JIT-compiles instead; it now falls back to the interpreter with a notice, the same as the existing actor and stdlib-shadowing fallbacks.
 - REPL JIT: referencing the same top-level function as a value across multiple lines no longer fails with "duplicate definition of symbol '<fn>$clo_wrap'" (ORC backend).
 - JIT REPL (both backends): defining a function that calls a previously

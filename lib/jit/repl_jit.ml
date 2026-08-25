@@ -1357,9 +1357,9 @@ let precompile_stdlib ctx
   let cache_dir = Filename.concat home ".cache/march" in
   let short_hash = String.sub content_hash 0 16 in
   let so_path    = Filename.concat cache_dir
-    ("stdlib_prelude_O1_tln_" ^ short_hash ^ ".so") in
+    ("stdlib_prelude_O1_tln2_" ^ short_hash ^ ".so") in
   let names_path = Filename.concat cache_dir
-    ("stdlib_prelude_O1_tln_" ^ short_hash ^ ".names") in
+    ("stdlib_prelude_O1_tln2_" ^ short_hash ^ ".names") in
   (* ── Cache hit path ───────────────────────────────────────────────────── *)
   if Sys.file_exists so_path && Sys.file_exists names_path then begin
     (try
@@ -1426,8 +1426,21 @@ let precompile_stdlib ctx
            macOS flat-namespace -undefined dynamic_lookup, which macOS 15's dyld
            resolves WRONG for the short-literal path (specs/todos JIT miscompile).
            dynamic_lookup stays for any symbol not defined in the runtime .so. *)
-        let cmd = Printf.sprintf "%s -shared -fPIC -O1%s%s -o %s %s 2>&1"
-          ctx.clang ctx.undef_flag ctx.rt_link so_tmp ll_path in
+        (* -install_name: clang otherwise stamps LC_ID_DYLIB with so_tmp — the
+           pid-suffixed path this is BUILT at, which ceases to exist the moment
+           the rename below publishes the .so.  Harmless for our own dlopen
+           (we pass an absolute path), but it is exactly the bug that made the
+           RUNTIME .so unusable as a link dependency across sessions; don't
+           reintroduce it here. *)
+        (* -Xlinker rather than -Wl,: clang splits -Wl, arguments on commas,
+           which would tear a cache path containing one into bogus flags. *)
+        let install_name =
+          if is_macos ()
+          then Printf.sprintf " -Xlinker -install_name -Xlinker %s"
+                 (Filename.quote so_path)
+          else "" in
+        let cmd = Printf.sprintf "%s -shared -fPIC -O1%s%s%s -o %s %s 2>&1"
+          ctx.clang ctx.undef_flag ctx.rt_link install_name so_tmp ll_path in
         let ic = Unix.open_process_in cmd in
         let errbuf = Buffer.create 256 in
         (try while true do Buffer.add_char errbuf (input_char ic) done

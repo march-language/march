@@ -838,6 +838,24 @@ let linux_arch_str = function
   | March_tir.Llvm_emit.(LinuxGnu { arch = Arm64; _ })  -> Some "arm64"
   | _ -> None
 
+(* Every cached .so in ~/.cache/march is compiled to a pid-suffixed temp and
+   renamed into place.  On macOS the linker stamps LC_ID_DYLIB with the path
+   the file was BUILT at, i.e. the now-deleted "<name>.<pid>.tmp" — and every
+   later dylib linked against it records that dead path as its dependency, so
+   a fresh process can no longer dlopen the dependent (the JIT stdlib prelude
+   silently fell back to a full recompile on every REPL/--jit start).  Stamp
+   the ID with the path the file actually lands at instead.  Linux ld records
+   the link-line path (or DT_SONAME) and needs nothing here.
+
+   -Xlinker rather than -Wl,: clang splits a -Wl, argument on COMMAS, so a
+   cache path containing one (a home directory named "Doe, J", say) would be
+   torn into two bogus linker arguments and fail the link outright. *)
+let install_name_flag (final_path : string) : string =
+  if Sys.file_exists "/System/Library/CoreServices"
+  then Printf.sprintf " -Xlinker -install_name -Xlinker %s"
+         (Filename.quote final_path)
+  else ""
+
 (** Pre-compile the C runtime to a shared library.
     Cached at ~/.cache/march/libmarch_runtime_<hash>.so, where <hash> covers
     every C source/header that goes into the build plus the clang flags.
@@ -997,6 +1015,11 @@ let ensure_runtime_so () =
       evloop_flag so_dbg_flag so_san_flag runtime_dir runtime_c extra_files openssl_flags compress_flags blake3_flags in
     let key_buf = Buffer.create 256 in
     Buffer.add_string key_buf flags_sig;
+    (* Not part of [flags_sig] itself: the -install_name argument is the .so
+       path, which is derived from this very key.  Version-stamp it instead so
+       caches built before the fix (whose LC_ID_DYLIB is a dead .tmp path) get
+       a new key and are rebuilt rather than silently reused. *)
+    Buffer.add_string key_buf "|install_name=v1";
     let c_inputs =
       runtime_c ::
       (String.split_on_char ' ' extra_files
@@ -1020,7 +1043,8 @@ let ensure_runtime_so () =
          dlopen a half-written .so, and same-key racers converge on
          identical bytes regardless of who wins the rename. *)
       let tmp = Printf.sprintf "%s.%d.tmp" so_path (Unix.getpid ()) in
-      let cmd = Printf.sprintf "%s -o %s 2>&1" flags_sig tmp in
+      let cmd = Printf.sprintf "%s%s -o %s 2>&1"
+        flags_sig (install_name_flag so_path) tmp in
       let rc = Sys.command cmd in
       if rc <> 0 then begin
         (try Sys.remove tmp with Sys_error _ -> ());
@@ -1122,8 +1146,8 @@ let setup_interpreter_ffi () =
           else ""
       in
       let cmd = Printf.sprintf
-        "cc -shared -O2 -fno-strict-aliasing -fwrapv -fPIC%s%s %s -o %s %s 2>&1"
-        platform_flags inc_flag src_files tmp link_flags in
+        "cc -shared -O2 -fno-strict-aliasing -fwrapv -fPIC%s%s%s %s -o %s %s 2>&1"
+        platform_flags (install_name_flag so_path) inc_flag src_files tmp link_flags in
       let rc = Sys.command cmd in
       if rc <> 0 then
         Printf.eprintf "march: warning: failed to compile FFI shim sources \

@@ -469,14 +469,20 @@ end
 |}
 
 (* This one case gets a PRIVATE HOME rather than the shared [session_home].
-   Non-vacuousness depends on it: the REPL harnesses above leave the shared
-   home holding a stdlib prelude .so whose install-name points at a dead
-   subprocess's runtime .so, so every later run there prints "stdlib cache
-   load failed …, recompiling" — and that notice is written with an explicit
-   flush, which incidentally drains the very stderr buffer this test exists to
-   check.  Confirmed: on the shared home the pre-fix binary PASSES this test;
-   on a private home it fails (warnings dropped), which is the point.  The
-   extra cost is one stdlib precompile. *)
+   Non-vacuousness originally depended on it: the shared home used to hold a
+   stdlib prelude .so whose install-name pointed at a dead subprocess's
+   runtime .so, so every later run there printed "stdlib cache load failed …,
+   recompiling" — and that notice is written with an explicit flush, which
+   incidentally drained the very stderr buffer this test exists to check.  On
+   the shared home a pre-fix binary PASSED this test for that reason; on a
+   private home it failed (warnings dropped), which is the point.
+
+   That install-name bug is fixed (see
+   specs/progress/2026-08-25-macos-install-name-dead-tmp-path.md and
+   [test_prelude_so_loads_cross_process] below), so the shared home no longer
+   emits the notice.  The private home stays anyway: it costs one stdlib
+   precompile and keeps this test's stderr assertion independent of whatever
+   the shared cache happens to print. *)
 let flush_test_home = lazy (
   let dir = Filename.concat (Filename.get_temp_dir_name ())
       (Printf.sprintf "march_jit_flush_home.%d" (Unix.getpid ())) in
@@ -570,11 +576,64 @@ let test_jit_file_shadowing_falls_back () =
       [ "--jit does not support stdlib-shadowing programs yet"; "shadow json" ]
   end
 
+(* ── Cached stdlib prelude must be loadable from a DIFFERENT process ──────
+
+   Regression for
+   specs/progress/2026-08-25-macos-install-name-dead-tmp-path.md.
+
+   Every cached .so in ~/.cache/march is compiled to a pid-suffixed
+   "<name>.<pid>.tmp" and renamed into place (atomic publish; a concurrent
+   session can never dlopen a half-written file).  The macOS linker stamps
+   LC_ID_DYLIB with the path the file was BUILT at — the .tmp, which stops
+   existing the instant the rename lands — and the prelude links against the
+   runtime .so explicitly, so it recorded that dead path as its dependency and
+   NO later process could ever dlopen it.  The failure was silent: the
+   cache-hit path swallows the dlopen error and falls back to a full stdlib
+   precompile, costing ~9.5s on every REPL / --jit start.
+
+   Run a REPL session to populate the cache, then dlopen the published prelude
+   .so from THIS process — a different process than the one that linked it,
+   which is precisely what the bug broke.  Platform-neutral: it asserts the
+   property (cross-process loadability), not the macOS mechanism. *)
+let test_prelude_so_loads_cross_process () =
+  match march_bin () with
+  | None ->
+    Alcotest.(check pass) "prelude cross-process dlopen (skipped: no main.exe)" () ()
+  | Some bin ->
+    let (code, out) = run_jit_repl ~backend:"clang" bin ["1 + 1"; ":quit"] in
+    Alcotest.(check int)
+      (Printf.sprintf "populating REPL session exits 0 (output: %s)" out) 0 code;
+    let cache_dir = Filename.concat (Lazy.force session_home) ".cache/march" in
+    let preludes =
+      (try Sys.readdir cache_dir with Sys_error _ -> [||])
+      |> Array.to_list
+      |> List.filter (fun f ->
+          contains ~needle:"stdlib_prelude" f && Filename.check_suffix f ".so")
+      |> List.map (Filename.concat cache_dir) in
+    (* No prelude at all means the session never got as far as caching one
+       (e.g. no clang on this box) — nothing to regress against. *)
+    if preludes = [] then
+      Alcotest.(check pass) "prelude cross-process dlopen (skipped: no cached prelude)" () ()
+    else
+      List.iter (fun so ->
+        match March_jit.Jit.dlopen so with
+        | handle -> March_jit.Jit.dlclose handle
+        | exception exn ->
+          Alcotest.failf
+            "cached stdlib prelude %s cannot be dlopen'd from another process \
+             (the prelude cache is therefore dead weight and every session \
+             silently recompiles the stdlib): %s"
+            so (Printexc.to_string exn))
+        preludes
+
+
 let () =
   Alcotest.run "march_jit" [
     "jit", [
       Alcotest.test_case "dlopen_libc" `Quick test_dlopen_libc;
       Alcotest.test_case "orc_available" `Quick test_orc_available_never_raises;
+      Alcotest.test_case "prelude .so loads cross-process" `Slow
+        test_prelude_so_loads_cross_process;
       Alcotest.test_case "orc_two_consecutive_fns" `Slow
         test_orc_two_consecutive_fns;
       Alcotest.test_case "orc_fn_after_let_lambda" `Slow
