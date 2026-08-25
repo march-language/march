@@ -53,6 +53,18 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A function whose body contains a lambda miscompiled when its name collided
+  with a stdlib higher-order function's parameter.** `fn f(xs) do List.map(xs,
+  fn y -> y + 1) end` segfaulted when compiled and failed at the REPL with
+  `symbol not found in flat namespace '_f'` (losing the binding); renaming `f`
+  to anything else worked. `List.map`'s own parameter is named `f`, and
+  defunctionalization mistook it for the user's top-level function, so the
+  lambda that closes over it captured nothing and called the wrong code.
+- **REPL: defining a function whose lambda calls the function being defined.**
+  `fn g(n) do ... List.map([n], fn y -> g(y - 1)) ... end` failed at the prompt
+  with `symbol not found in flat namespace '_g'`. The lifted lambda was
+  compiled into a separate fragment loaded before `g` itself; it now shares one
+  fragment with the function it belongs to.
 - **REPL: a constructor of a type declared at the prompt evaluated as the
   type's FIRST variant.** With `type Color = Red | Green | Blue`, both `Green`
   and `Blue` answered `Red` — and, because the same wrong constructor tag

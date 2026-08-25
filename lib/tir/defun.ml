@@ -393,14 +393,33 @@ let get_lambda_counter () = !lambda_counter
     prelude-compiled UIDs so fresh REPL fragments never reuse a prelude UID). *)
 let set_lambda_counter n = lambda_counter := n
 
-(** Collect all lambdas from all top-level fn bodies. *)
+(** Collect all lambdas from all top-level fn bodies.
+
+    [bound] tracks every name bound in the ENCLOSING lexical scope at the
+    current point (the host fn's params, lets, case-arm vars, outer lambda
+    names/params).  A lambda's free-var analysis must treat such a name as
+    capturable even when a top-level fn shares it: local binders shadow
+    top-level fns.  Before this, a stdlib HOF param captured by an inner
+    lambda (e.g. `List.map`'s `f`, closed over by its `go` accumulator) was
+    silently NOT captured whenever the user program defined a top-level fn
+    of the same name — phase 3 then left the call as a direct `@f`, linking
+    to the user's unrelated function (segfault when compiled; undefined
+    `_f` at REPL-JIT dlopen).  Sibling of the phase-3 case-B shadowing fix
+    below — this is the capture-side half. *)
 let collect_lambdas (m : Tir.tir_module) (top_level : StringSet.t) : lambda_info list =
   let lambdas = ref [] in
 
-  let rec collect_expr (e : Tir.expr) =
+  let add_bound bound (vs : Tir.var list) =
+    List.fold_left (fun s (v : Tir.var) -> StringSet.add v.Tir.v_name s) bound vs
+  in
+
+  let rec collect_expr (bound : StringSet.t) (e : Tir.expr) =
     match e with
     | Tir.ELetRec ([fn], Tir.EAtom (Tir.AVar ref_var))
       when fn.Tir.fn_name = ref_var.Tir.v_name ->
+      (* Names bound in the enclosing scope shadow same-named top-level fns,
+         so they must stay eligible for capture. *)
+      let top_level_eff = StringSet.diff top_level bound in
       (* Check for self-recursion before excluding self from free vars.
          Detect recursion with fn.fn_name REMOVED from the top-level exclusion
          set: a local fn whose name collides with a top-level fn (e.g. a stdlib
@@ -409,11 +428,11 @@ let collect_lambdas (m : Tir.tir_module) (top_level : StringSet.t) : lambda_info
          undetected — the lifted apply then never binds `self = $clo` and the
          self-call links to the SAME-NAMED top-level function (silently calling
          the wrong code). The capture set [fvs_raw] still uses the full
-         [top_level] so genuine top-level refs are not captured. *)
-      let rec_fvs = free_vars_of_expr (StringSet.remove fn.Tir.fn_name top_level)
+         [top_level_eff] so genuine top-level refs are not captured. *)
+      let rec_fvs = free_vars_of_expr (StringSet.remove fn.Tir.fn_name top_level_eff)
                       fn.Tir.fn_body fn.Tir.fn_params in
       let is_recursive = List.exists (fun (v : Tir.var) -> v.Tir.v_name = fn.Tir.fn_name) rec_fvs in
-      let fvs_raw = free_vars_of_expr top_level fn.Tir.fn_body fn.Tir.fn_params in
+      let fvs_raw = free_vars_of_expr top_level_eff fn.Tir.fn_body fn.Tir.fn_params in
       (* Exclude the function's own name from free variables: recursive
          calls use $clo in the lifted apply fn, so self-capture would
          create a circular allocation. *)
@@ -421,27 +440,36 @@ let collect_lambdas (m : Tir.tir_module) (top_level : StringSet.t) : lambda_info
                                   v_ty = Tir.TPtr Tir.TUnit;
                                   v_lin = Tir.Unr } in
       let fvs = if is_recursive
-                then free_vars_of_expr top_level fn.Tir.fn_body
+                then free_vars_of_expr top_level_eff fn.Tir.fn_body
                        (self_var :: fn.Tir.fn_params)
                 else fvs_raw in
       lambdas := { lam_fn = fn; lam_fvs = fvs; lam_is_recursive = is_recursive;
                    lam_uid = fresh_lambda_uid () } :: !lambdas;
-      (* Recurse into the lambda body too *)
-      collect_expr fn.Tir.fn_body
+      (* Recurse into the lambda body too — its own name and params are in
+         scope there, on top of everything the enclosing scope bound. *)
+      collect_expr (add_bound (StringSet.add fn.Tir.fn_name bound) fn.Tir.fn_params)
+        fn.Tir.fn_body
     | Tir.ELetRec (fns, body) ->
-      List.iter (fun fn -> collect_expr fn.Tir.fn_body) fns;
-      collect_expr body
-    | Tir.ELet (_, e1, e2) ->
-      collect_expr e1; collect_expr e2
+      let bound' = List.fold_left (fun s fn -> StringSet.add fn.Tir.fn_name s)
+          bound fns in
+      List.iter (fun fn ->
+        collect_expr (add_bound bound' fn.Tir.fn_params) fn.Tir.fn_body) fns;
+      collect_expr bound' body
+    | Tir.ELet (v, e1, e2) ->
+      collect_expr bound e1;
+      collect_expr (StringSet.add v.Tir.v_name bound) e2
     | Tir.ECase (_, brs, def) ->
-      List.iter (fun (br : Tir.branch) -> collect_expr br.Tir.br_body) brs;
-      (match def with Some e -> collect_expr e | None -> ())
+      List.iter (fun (br : Tir.branch) ->
+        collect_expr (add_bound bound br.Tir.br_vars) br.Tir.br_body) brs;
+      (match def with Some e -> collect_expr bound e | None -> ())
     | Tir.ESeq (e1, e2) ->
-      collect_expr e1; collect_expr e2
+      collect_expr bound e1; collect_expr bound e2
     | _ -> ()
   in
 
-  List.iter (fun fn -> collect_expr fn.Tir.fn_body) m.Tir.tm_fns;
+  List.iter (fun fn ->
+    collect_expr (add_bound StringSet.empty fn.Tir.fn_params) fn.Tir.fn_body)
+    m.Tir.tm_fns;
   List.rev !lambdas
 
 (* ── Phase 2: closure struct + lifted fn generation ──────────────── *)

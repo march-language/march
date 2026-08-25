@@ -5707,9 +5707,9 @@ let emit_repl_fn ?fast_math ~n ~prev_slots ?extern_fns ~types (fn : Tir.fn_def) 
   Llvm_repl.emit_repl_fn ~emit_expr ?fast_math ~n ~prev_slots ?extern_fns ~types fn
 
 let emit_repl_fn_with_closure_slot ?fast_math ~n ~bind_name ~dest_slot
-    ~prev_slots ?extern_fns ?session_wraps ~types (fn : Tir.fn_def) : string =
+    ~prev_slots ?helper_fns ?extern_fns ?session_wraps ~types (fn : Tir.fn_def) : string =
   Llvm_repl.emit_repl_fn_with_closure_slot ~emit_expr
-    ?fast_math ~n ~bind_name ~dest_slot ~prev_slots ?extern_fns
+    ?fast_math ~n ~bind_name ~dest_slot ~prev_slots ?helper_fns ?extern_fns
     ?session_wraps ~types fn
 
 let emit_fns_fragment ~types ~fns ?extern_fns ?session_wraps ~repl () : string =
