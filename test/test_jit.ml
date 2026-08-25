@@ -594,7 +594,32 @@ let test_jit_file_shadowing_falls_back () =
    Run a REPL session to populate the cache, then dlopen the published prelude
    .so from THIS process — a different process than the one that linked it,
    which is precisely what the bug broke.  Platform-neutral: it asserts the
-   property (cross-process loadability), not the macOS mechanism. *)
+   property (cross-process loadability), not the macOS mechanism.
+
+   The prelude's own runtime symbols (e.g. native_float_arr_sum) are left
+   undefined at link time and resolved at dlopen against the runtime .so.  The
+   two platforms differ in HOW, and that difference decides both the bug and
+   this test:
+
+     - macOS: the prelude records an LC_LOAD_DYLIB dependency naming the
+       runtime .so by its install-name (LC_ID_DYLIB).  THIS is what the bug
+       corrupts — the runtime's install-name was the dead ".tmp" build path,
+       so the prelude depended on a file that no longer exists.  A real
+       Repl_jit session dlopens the runtime first, but that does NOT rescue a
+       poisoned prelude: dyld matches an already-loaded image by install-name,
+       and pre-fix BOTH the runtime's own ID and the prelude's dependency are
+       the same ".tmp" string — so preloading the runtime would satisfy the
+       dependency and mask the bug.  Hence on macOS we deliberately do NOT
+       preload: the prelude must stand on the install-name path recorded in
+       it, which is exactly the property under test.
+
+     - Linux: the prelude has NO recorded path dependency on the runtime at
+       all — just undefined symbols resolved via RTLD_GLOBAL, with the runtime
+       dlopen'd first into the global namespace.  There is no stale path to go
+       bad, so the macOS bug cannot occur here; the test only needs the
+       runtime symbols present, so we preload the runtime .so to mirror the
+       real load order (without it a HEALTHY prelude fails under RTLD_NOW
+       purely for the missing symbol). *)
 let test_prelude_so_loads_cross_process () =
   match march_bin () with
   | None ->
@@ -604,12 +629,22 @@ let test_prelude_so_loads_cross_process () =
     Alcotest.(check int)
       (Printf.sprintf "populating REPL session exits 0 (output: %s)" out) 0 code;
     let cache_dir = Filename.concat (Lazy.force session_home) ".cache/march" in
-    let preludes =
-      (try Sys.readdir cache_dir with Sys_error _ -> [||])
-      |> Array.to_list
+    let entries =
+      (try Sys.readdir cache_dir with Sys_error _ -> [||]) |> Array.to_list in
+    let matching pfx =
+      entries
       |> List.filter (fun f ->
-          contains ~needle:"stdlib_prelude" f && Filename.check_suffix f ".so")
+          contains ~needle:pfx f && Filename.check_suffix f ".so")
       |> List.map (Filename.concat cache_dir) in
+    let is_macos = Sys.file_exists "/System/Library/CoreServices" in
+    (* Linux ONLY: load the runtime .so first (RTLD_GLOBAL, via Jit.dlopen) so
+       the prelude's undefined runtime symbols resolve.  On macOS this would
+       mask the very regression under test (see the note above), so skip it. *)
+    if not is_macos then
+      List.iter (fun so ->
+        try ignore (March_jit.Jit.dlopen so) with _ -> ())
+        (matching "libmarch_runtime");
+    let preludes = matching "stdlib_prelude" in
     (* No prelude at all means the session never got as far as caching one
        (e.g. no clang on this box) — nothing to regress against. *)
     if preludes = [] then

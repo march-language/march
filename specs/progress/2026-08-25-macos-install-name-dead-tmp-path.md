@@ -102,9 +102,28 @@ Zero `stdlib cache load failed` messages across all three.
 Regression test: `test/test_jit.ml` → `jit / "prelude .so loads cross-process"`.
 It runs a REPL session in a subprocess to populate a private-`HOME` cache, then
 `dlopen`s the published prelude `.so` from the test process itself — a different
-process than the one that linked it, which is exactly what the bug broke. It
-asserts the property (cross-process loadability), not the macOS mechanism, so it
-is meaningful on Linux too. Non-vacuousness confirmed against a pre-fix binary:
+process than the one that linked it, which is exactly what the bug broke.
+
+The two platforms need opposite handling, because the runtime symbols the
+prelude leaves undefined (e.g. `native_float_arr_sum`) resolve differently:
+
+- **macOS** — the prelude records an `LC_LOAD_DYLIB` dependency naming the
+  runtime `.so` by its install-name, and *that* is what the bug corrupts. The
+  test must NOT preload the runtime: dyld matches an already-loaded image by
+  install-name, and on a pre-fix binary both the runtime's own ID and the
+  prelude's dependency are the same dead `.tmp` string — so preloading would
+  satisfy the dependency and mask the regression. The prelude has to stand on
+  the recorded install-name path, which is the property under test.
+- **Linux** — the prelude has no recorded path dependency on the runtime at
+  all, only undefined symbols resolved via `RTLD_GLOBAL`. The macOS bug can't
+  occur, so the test preloads the runtime `.so` first (mirroring a real
+  `Repl_jit` session), or a *healthy* prelude would fail under `RTLD_NOW`
+  purely for the missing symbol. This surfaced as the CI-only failure
+  `undefined symbol: native_float_arr_sum` on `test (ubuntu-24.04)` and
+  `trmc-suite`; the platform-split load order fixes it.
+
+Non-vacuousness confirmed against a pre-fix binary on macOS (still fails after
+the split, since macOS does not preload):
 
 ```
 [FAIL] jit  2  prelude .so loads cross-process.
@@ -112,4 +131,4 @@ is meaningful on Linux too. Non-vacuousness confirmed against a pre-fix binary:
 ```
 
 Full suite green afterwards: compiler 936, eval 273, codegen 591, stdlib 878,
-stdlib_march 61, test_jit 21 — zero failures.
+stdlib_march 61, test_jit 22 — zero failures.
