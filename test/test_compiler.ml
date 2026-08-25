@@ -14727,6 +14727,7 @@ let compiler_suites =
       sigil_interp_suite;
       csrf_suite;
       ("repl_cache", Test_repl_cache.tests);
+      ("tcenv_cli_cache", Test_tcenv_cli_cache.tests);
       ("cap_strip", Test_cap_strip.tests);
       ("cap_symbols", Test_cap_symbols.tests);
       ("cap_markers", Test_cap_markers.tests);

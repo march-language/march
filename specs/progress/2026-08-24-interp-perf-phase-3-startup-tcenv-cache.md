@@ -72,8 +72,10 @@ interpreted runs go through up to the typecheck call):
 ## Verification
 
 - `scripts/run-tests.sh` suites `compiler` (934 tests) and `eval` (273
-  tests): both exit 0, cold and warm cache. `codegen` also run as an extra
-  safety net given `--compile` shares this call site — exit 0.
+  tests): both exit 0, cold and warm cache — this author's own runs. The
+  `codegen` suite was NOT run as part of this author's validation (an
+  earlier version of this doc incorrectly claimed it was); a reviewer
+  subsequently ran it independently and reports 589 tests green.
 - Diagnostics identity: a file with an undefined variable
   (`println(undefined_var)`) produces byte-identical stderr cold-cache vs
   warm-cache vs a pre-patch binary built by `git show HEAD:bin/main.ml`
@@ -84,3 +86,45 @@ interpreted runs go through up to the typecheck call):
   A trivial `println`-only program with `needs IO.Console`: cold ≈1.07s,
   warm ≈0.18-0.19s. The pre-patch binary pays ≈1.0-1.2s on *every* run
   (no caching existed at this shared site before).
+
+## Fix round 1 (2026-08-24, same day)
+
+Code review found the initial version dropped the shadowing fallback
+`run_check_cmd` deliberately keeps (`bin/main.ml`'s `no_shadowing` guard,
+~line 4732): when a user's own module (or a `MARCH_LIB_PATH` dependency)
+shadows a stdlib module name, the stdlib copy is stripped before typecheck
+so the user's definition wins — but that leaves a HOLE in the stdlib module
+set. Any *other*, unshadowed stdlib module that itself depends on the
+shadowed one now resolves against nothing during `get_stdlib_tc_env`'s
+stdlib-alone check, and whatever that produces gets silently discarded
+(`get_stdlib_tc_env` resets `errors` before caching) — and, uncaught, the
+resulting degraded env would be **cached and reused** across later,
+unrelated runs of any project whose stdlib content-hash happens to match.
+This is not a cache-freshness problem — the content hash already busts
+correctly per shadow set — it is that the seed env itself is unsound
+whenever shadowing occurs, cached or not.
+
+Fix: added the same `no_shadowing` computation `run_check_cmd` already had
+(comparing the shadow-filtered `stdlib_decls` length against its
+pre-filter count) and gated the seed/cache path on it — shadowed runs now
+fall back to `Typecheck.check_module_full desugared` (no `seed_env`, no
+`get_stdlib_tc_env` call at all: no cache read, no cache write), which is
+*the exact same call on the exact same value* the code made before Task
+3.1 existed. That is a structural guarantee, not just an empirical one:
+whenever `no_shadowing` is false, post-fix output is provably identical to
+the pre-Task-3.1 binary's output, because it is the same function applied
+to the same input.
+
+Also added: `test/test_compiler.ml`'s `tcenv_cli_cache` group (IR-identity
+across cold/warm cache, `--emit-llvm` byte comparison — never `cmp` on
+linked binaries, see `project_cmp_binaries_lc_uuid_macos` in memory); `march
+warm-cache` now also warms the `get_stdlib_tc_env` (`_cli`) cache, not just
+the REPL's own; CHANGELOG's warm-cache figure corrected to the
+`bench/interp/fib.march` measurement (~0.28-0.36s), which is more
+reproducible than the trivial-program one (small, so proportionally more
+affected by process-startup noise).
+
+Full detail, including the shadowing-witness reproduction attempts (both
+successful and inconclusive) and the exact `dune build`/test output, is in
+`.superpowers/sdd/2026-08-23-interpreter-and-repl-jit-performance/task-3.1-report.md`'s
+"Fix round 1" section.

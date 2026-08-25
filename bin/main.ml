@@ -2487,6 +2487,7 @@ let compile filename =
      to the external version: strip the stdlib copy so the external one is
      the sole definition. *)
   let stdlib_decls = load_stdlib ~for_js:is_js_target () in
+  let stdlib_decls_unshadowed_count = List.length stdlib_decls in
   let extern_mod_names =
     (* The ENTRY module's own name must shadow a same-named stdlib module
        too: its declarations live at the top level (not as a DMod in
@@ -2508,6 +2509,22 @@ let compile filename =
       | _ -> true
     ) stdlib_decls
   in
+  (* Mirrors [run_check_cmd]'s [no_shadowing] guard.  A shadowed stdlib copy
+     is stripped above so the user's own definition wins, but that leaves a
+     HOLE in the stdlib module set: any unshadowed stdlib module that itself
+     depends on the shadowed one now resolves against nothing, and whatever
+     that produces (missing bindings, spurious errors) gets swallowed by
+     [get_stdlib_tc_env]'s cache — which strips its errors before caching
+     (see `{ final_env with errors = March_errors.Errors.create () }`) and,
+     worse, would otherwise be REUSED across later runs against unrelated
+     projects with no shadowing at all, degrading a valid cache into a
+     poisoned one. This is not a cache-freshness problem (the content hash
+     already busts correctly per shadow set) — it is that the seed-env
+     itself is unsound whenever shadowing occurs, cached or not. So: no
+     cache read or write in that case, same from-scratch combined check as
+     before this optimization existed. *)
+  let no_shadowing =
+    List.length stdlib_decls = stdlib_decls_unshadowed_count in
   (* [desugared] is also what gets LOWERED further down (TIR needs stdlib's
      own function bodies too, not just their types, to emit a working
      binary) — so unlike [run_check_cmd] (--check only, no lowering), stdlib
@@ -2555,20 +2572,24 @@ let compile filename =
   (* Seed pass 1 from the cached stdlib typecheck env instead of
      re-typechecking [stdlib_decls] from scratch every run — stdlib
      typecheck alone is the dominant fixed cost of a `march file.march`
-     interpreted start.  [get_stdlib_tc_env] hashes on [stdlib_decls]'
-     exact content (already shadow-filtered above), so a shadowed stdlib
-     module naturally busts the cache instead of needing a separate
-     fallback.  Checking [user_only_desugared] (no stdlib decls) against
-     that seed is behaviorally identical to combined-checking [desugared]
-     for the user's own portion — same [check_module_core] pass 1/1b/2
-     machinery either way (see [get_stdlib_tc_env]'s docstring) — and the
-     returned [type_map] is the seed's own hashtable with the user decls'
-     entries added into it, so it still carries stdlib's span entries for
-     the lowering pass below. [desugared] (stdlib-prepended) is untouched
-     and still what gets lowered. *)
+     interpreted start.  Checking [user_only_desugared] (no stdlib decls)
+     against that seed is behaviorally identical to combined-checking
+     [desugared] for the user's own portion — same [check_module_core] pass
+     1/1b/2 machinery either way (see [get_stdlib_tc_env]'s docstring) — and
+     the returned [type_map] is the seed's own hashtable with the user
+     decls' entries added into it, so it still carries stdlib's span entries
+     for the lowering pass below. [desugared] (stdlib-prepended) is
+     untouched and still what gets lowered.
+
+     ONLY when [no_shadowing]: see the comment on [no_shadowing] above for
+     why a shadowed stdlib module set makes the seed itself unsound, not
+     just cache-stale — mirrors [run_check_cmd]'s identical fallback. *)
   let (errors, type_map, typecheck_env) =
-    let seed_env = get_stdlib_tc_env ~for_js:is_js_target stdlib_decls in
-    March_typecheck.Typecheck.check_module_full ~seed_env user_only_desugared
+    if no_shadowing then
+      let seed_env = get_stdlib_tc_env ~for_js:is_js_target stdlib_decls in
+      March_typecheck.Typecheck.check_module_full ~seed_env user_only_desugared
+    else
+      March_typecheck.Typecheck.check_module_full desugared
   in
   (* Phase A1b: discharge refinement-precondition VCs at call sites. *)
   March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
@@ -5019,6 +5040,18 @@ let () =
        March_repl.Repl.save_cached_tc_env ~content_hash tc0;
        let t2 = Unix.gettimeofday () in
        Printf.printf "tc_env:          %.3fs (built + cached)\n%!" (t2 -. t1));
+    (* 2b. Typecheck stdlib via [get_stdlib_tc_env] too — the SEPARATE cache
+       `march file.march` actually reads (see the perf-startup comment on
+       [get_stdlib_tc_env] above): the REPL's cache warmed just above is a
+       different cache/mechanism (fold-based, its own filename prefix), so
+       warming only that one left `march warm-cache` NOT warming the cache
+       the CLI file-run path depends on — its own hit/miss timing already
+       happens inside [get_stdlib_tc_env] via [load_from_cache], so this
+       call alone is enough to populate it on a miss. *)
+    let t2b_0 = Unix.gettimeofday () in
+    ignore (get_stdlib_tc_env ~for_js:false stdlib_decls);
+    let t2b_1 = Unix.gettimeofday () in
+    Printf.printf "tc_env (cli):    %.3fs\n%!" (t2b_1 -. t2b_0);
     (* 3. Compile C runtime .so *)
     let t3 = Unix.gettimeofday () in
     let runtime_so = ensure_runtime_so () in
