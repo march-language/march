@@ -663,8 +663,52 @@ let get_stdlib_tc_env ~for_js (stdlib_decls : March_ast.Ast.decl list) =
         let (cached_env : March_typecheck.Typecheck.env) = Marshal.from_channel ic in
         let (cached_tm : (March_ast.Ast.span * March_typecheck.Typecheck.ty) list) =
           Marshal.from_channel ic in
+        (* Restore the two PROCESS-GLOBAL side-tables a from-scratch stdlib
+           check would have advanced/populated as a side effect, and that a
+           cache hit otherwise skips entirely:
+             - [Typecheck._counter]: the fresh-metavar id source. Checking
+               stdlib alone burns ~2000 ids; skip that on a cache hit and
+               pass 2 (the user's own file) starts allocating from near 0
+               instead of continuing where a from-scratch run would have
+               left off. The raw id VALUES differ either way (harmless —
+               golden fixtures compare via canonical renumbering — see
+               test/test_emit_core_ast.ml's [canonicalize]), but which of
+               two user-file schemes happens to get the SMALLER raw id can
+               flip depending on the counter's starting point, and THAT
+               flips their relative order in the emitted `schemes` array
+               (sorted by raw id, then canonicalized — canonicalization
+               renumbers id VALUES but never reorders arrays). Confirmed via
+               a three-way diff (cold / warm / pre-Task-3.1 binary) on
+               `--emit-core-ast` of specs/lang/types/accept/
+               t07_generic_option_two_types.march: cold and the pre-3.1
+               binary agree on scheme order, warm alone disagrees — see
+               specs/progress/2026-08-24-interp-perf-phase-3-startup-tcenv-cache.md's
+               "Fix round 2" section. [max] rather than a blind overwrite:
+               never let a cache read move the counter BACKWARD, which
+               could mint an id that collides with one already allocated
+               earlier in this same process.
+             - [Typecheck._record_names]: a display-only signature->name
+               index (never consulted by --emit-core-ast's JSON emitter,
+               confirmed by reading [Ast_json.resolved_ty_to_json]'s TRecord
+               case — it never touches this table) but DOES feed [pp_ty],
+               which renders type names into ordinary diagnostic text. Left
+               unrestored, a cache-hit run could render a record type
+               structurally where a cold run renders it nominally (or vice
+               versa) purely because stdlib's own record declarations never
+               ran through [register_record_name] on this process — a
+               latent diagnostic-text divergence beyond what actually
+               reproduced in the golden corpus. Restored defensively for
+               the same reason the round-1 fix insisted on byte-identical
+               diagnostics rather than "close enough". *)
+        let (cached_counter : int) = Marshal.from_channel ic in
+        let (cached_record_names : (string * string option) list) =
+          Marshal.from_channel ic in
         close_in ic;
         List.iter (fun (k, v) -> Hashtbl.replace type_map k v) cached_tm;
+        if cached_counter > !March_typecheck.Typecheck._counter then
+          March_typecheck.Typecheck._counter := cached_counter;
+        List.iter (fun (k, v) -> Hashtbl.replace March_typecheck.Typecheck._record_names k v)
+          cached_record_names;
         Some { cached_env with
                March_typecheck.Typecheck.errors = March_errors.Errors.create ();
                type_map }
@@ -703,6 +747,16 @@ let get_stdlib_tc_env ~for_js (stdlib_decls : March_ast.Ast.decl list) =
           let tm_list = Hashtbl.fold (fun k v acc -> (k, v) :: acc)
             final_env.March_typecheck.Typecheck.type_map [] in
           Marshal.to_channel oc tm_list [];
+          (* Snapshot the two process-global side-tables RIGHT NOW — the
+             point where a from-scratch run would hand off from "stdlib
+             checked" to "start checking the user's own file" — so a later
+             cache hit can restore them to this exact point. See the long
+             comment on [load_from_cache] above for why both matter. *)
+          Marshal.to_channel oc !March_typecheck.Typecheck._counter [];
+          let record_names_list =
+            Hashtbl.fold (fun k v acc -> (k, v) :: acc)
+              March_typecheck.Typecheck._record_names [] in
+          Marshal.to_channel oc record_names_list [];
           close_out oc;
           Sys.rename tmp cache_path)
     with e ->
@@ -2474,12 +2528,20 @@ let compile filename =
     { desugared with
       March_ast.Ast.mod_decls = extra_decls @ desugared.March_ast.Ast.mod_decls }
   in
+  (* Snapshot of the user's own decls (entry file + resolved imports) BEFORE
+     stdlib gets prepended below.  Used to typecheck against the cached
+     stdlib env (see [get_stdlib_tc_env]) instead of re-typechecking stdlib
+     from scratch on every invocation — [desugared] itself keeps the stdlib
+     prepend it always had, since lowering further down still needs stdlib's
+     own bodies physically present (see the comment at the prepend site). *)
+  let user_only_desugared = desugared in
   stamp "resolve-imports";
   (* Inject stdlib declarations before user declarations.
      If MARCH_LIB_PATH provided a module that also ships in the stdlib, defer
      to the external version: strip the stdlib copy so the external one is
      the sole definition. *)
   let stdlib_decls = load_stdlib ~for_js:is_js_target () in
+  let stdlib_decls_unshadowed_count = List.length stdlib_decls in
   let extern_mod_names =
     (* The ENTRY module's own name must shadow a same-named stdlib module
        too: its declarations live at the top level (not as a DMod in
@@ -2501,6 +2563,22 @@ let compile filename =
       | _ -> true
     ) stdlib_decls
   in
+  (* Mirrors [run_check_cmd]'s [no_shadowing] guard.  A shadowed stdlib copy
+     is stripped above so the user's own definition wins, but that leaves a
+     HOLE in the stdlib module set: any unshadowed stdlib module that itself
+     depends on the shadowed one now resolves against nothing, and whatever
+     that produces (missing bindings, spurious errors) gets swallowed by
+     [get_stdlib_tc_env]'s cache — which strips its errors before caching
+     (see `{ final_env with errors = March_errors.Errors.create () }`) and,
+     worse, would otherwise be REUSED across later runs against unrelated
+     projects with no shadowing at all, degrading a valid cache into a
+     poisoned one. This is not a cache-freshness problem (the content hash
+     already busts correctly per shadow set) — it is that the seed-env
+     itself is unsound whenever shadowing occurs, cached or not. So: no
+     cache read or write in that case, same from-scratch combined check as
+     before this optimization existed. *)
+  let no_shadowing =
+    List.length stdlib_decls = stdlib_decls_unshadowed_count in
   (* [desugared] is also what gets LOWERED further down (TIR needs stdlib's
      own function bodies too, not just their types, to emit a working
      binary) — so unlike [run_check_cmd] (--check only, no lowering), stdlib
@@ -2545,7 +2623,28 @@ let compile filename =
      (`march check`/`march caps`) and the LSP deliberately do NOT set it: they
      never run refinecheck, so they keep the old unconditional ban. *)
   March_typecheck.Typecheck.proof_based_panic_surface := true;
-  let (errors, type_map, typecheck_env) = March_typecheck.Typecheck.check_module_full desugared in
+  (* Seed pass 1 from the cached stdlib typecheck env instead of
+     re-typechecking [stdlib_decls] from scratch every run — stdlib
+     typecheck alone is the dominant fixed cost of a `march file.march`
+     interpreted start.  Checking [user_only_desugared] (no stdlib decls)
+     against that seed is behaviorally identical to combined-checking
+     [desugared] for the user's own portion — same [check_module_core] pass
+     1/1b/2 machinery either way (see [get_stdlib_tc_env]'s docstring) — and
+     the returned [type_map] is the seed's own hashtable with the user
+     decls' entries added into it, so it still carries stdlib's span entries
+     for the lowering pass below. [desugared] (stdlib-prepended) is
+     untouched and still what gets lowered.
+
+     ONLY when [no_shadowing]: see the comment on [no_shadowing] above for
+     why a shadowed stdlib module set makes the seed itself unsound, not
+     just cache-stale — mirrors [run_check_cmd]'s identical fallback. *)
+  let (errors, type_map, typecheck_env) =
+    if no_shadowing then
+      let seed_env = get_stdlib_tc_env ~for_js:is_js_target stdlib_decls in
+      March_typecheck.Typecheck.check_module_full ~seed_env user_only_desugared
+    else
+      March_typecheck.Typecheck.check_module_full desugared
+  in
   (* Phase A1b: discharge refinement-precondition VCs at call sites. *)
   March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
     ~stdlib_files:(stdlib_span_files stdlib_decls) errors desugared;
@@ -4995,6 +5094,18 @@ let () =
        March_repl.Repl.save_cached_tc_env ~content_hash tc0;
        let t2 = Unix.gettimeofday () in
        Printf.printf "tc_env:          %.3fs (built + cached)\n%!" (t2 -. t1));
+    (* 2b. Typecheck stdlib via [get_stdlib_tc_env] too — the SEPARATE cache
+       `march file.march` actually reads (see the perf-startup comment on
+       [get_stdlib_tc_env] above): the REPL's cache warmed just above is a
+       different cache/mechanism (fold-based, its own filename prefix), so
+       warming only that one left `march warm-cache` NOT warming the cache
+       the CLI file-run path depends on — its own hit/miss timing already
+       happens inside [get_stdlib_tc_env] via [load_from_cache], so this
+       call alone is enough to populate it on a miss. *)
+    let t2b_0 = Unix.gettimeofday () in
+    ignore (get_stdlib_tc_env ~for_js:false stdlib_decls);
+    let t2b_1 = Unix.gettimeofday () in
+    Printf.printf "tc_env (cli):    %.3fs\n%!" (t2b_1 -. t2b_0);
     (* 3. Compile C runtime .so *)
     let t3 = Unix.gettimeofday () in
     let runtime_so = ensure_runtime_so () in
