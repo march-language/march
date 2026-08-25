@@ -7,6 +7,17 @@ measurements.
 
 **Implementation:** `lib/` directory — `typecheck/`, `tir/`, `jit/`, `repl/`, `cas/`, `debug/`, `scheduler/`
 
+> **Parenthetical line numbers are historical and unverified.** Many sections
+> below still carry pointers of the form "(lines 212-330)" or "(line 65)". These
+> date from the March 2026 draft and were **not** re-derived during the
+> 2026-08-25 claim audit; several that were spot-checked were stale by tens of
+> lines (in §14, for instance, `free_vars`/`called_fns`/`reachable_fns` were
+> cited at lines 11/55/71 against actual 12/61/123). They have been stripped from
+> the sections this audit corrected and left alone elsewhere. **Locate things by
+> name — `forge search "<name>"` — not by the numbers in this file.** New line
+> numbers must not be added; see the deliberate no-sizes decision recorded at the
+> Implementation Status Summary.
+
 ## Overview
 
 The March compiler transforms source code through a series of passes, from surface syntax to LLVM IR emission. The pipeline emphasizes type safety (bidirectional Hindley-Milner type checking), memory safety (linear/affine types, reference counting), and performance (escape analysis, defunctionalization, optimization).
@@ -54,12 +65,18 @@ Source Code
     ↓
 [Escape Analysis] (lib/tir/escape.ml — Escape.escape_analysis)   ← AFTER Perceus
     ↓
-[Optimization Loop] (lib/tir/opt.ml)  ← fixed-point over passes
-  ├─ [Inlining] (lib/tir/inline.ml)
-  ├─ [Constant Folding] (lib/tir/fold.ml)
-  ├─ [Simplification] (lib/tir/simplify.ml)
-  ├─ [Dead Code Elimination] (lib/tir/dce.ml)
-  └─ [Purity Analysis] (lib/tir/purity.ml)  ← gates inlining decisions
+[Optimization Loop] (lib/tir/opt.ml)  ← fixed-point over NINE passes, in this order
+  ├─ [Join points]        (lib/tir/join_points.ml)
+  ├─ [Known-call]         (lib/tir/known_call.ml)
+  ├─ [Inlining]           (lib/tir/inline.ml)
+  ├─ [Single-use inline]  (lib/tir/single_use_inline.ml)
+  ├─ [Constant propagation] (lib/tir/cprop.ml)
+  ├─ [Constant Folding]   (lib/tir/fold.ml)
+  ├─ [Simplification]     (lib/tir/simplify.ml)
+  ├─ [Struct fusion]      (lib/tir/fusion.ml — Fusion.run_struct)
+  └─ [Dead Code Elimination] (lib/tir/dce.ml)
+  (+ [Purity Analysis] (lib/tir/purity.ml) — not a loop member; an oracle
+     consulted by Inline, Fusion and DCE)
     ↓
 [LLVM IR Emission] (lib/tir/llvm_emit.ml — Llvm_emit.emit_module)
     ↓
@@ -72,8 +89,41 @@ Source Code
 > for the three paths side by side.
 
 > **Pass-order note.** The actual ordering enforced by `bin/main.ml` is
-> **Lower → Mono → Fusion → Defun → Known_call → Beta_adt → Join_points → Perceus → Escape → Opt → Llvm_emit.**
+>
+> **Lower → Vectorize_mark → Trmc → Mono → Fusion → *(Policy-DCE audit)* → Defun → Known_call → Beta_adt → Join_points.run_pre → Simplify(pre-Perceus) → Perceus → Drop → Escape → Opt → Llvm_emit.**
+>
 > In particular **Perceus runs *before* Escape** (see `bin/main.ml`, `Perceus.perceus` then `Escape.escape_analysis`). Earlier revisions of this document had the two reversed; that was wrong.
+>
+> **Correction (2026-08-25 claim audit).** The version of this note immediately
+> above read *Lower → Mono → Fusion → Defun → Known_call → Beta_adt →
+> Join_points → Perceus → Escape → Opt → Llvm_emit*, omitting five real steps.
+> That was wrong, and the omissions matter to anyone inserting a pass:
+> - **`Vectorize_mark.mark`** runs immediately after Lower, and *must*: it is the
+>   only point where a TIR function's name is still exactly its source name
+>   (Mono has not mangled anything, Defun has not lifted anything), so
+>   `@[vectorize]` attributes can be matched by name equality. Skipped for the
+>   JS target.
+> - **`Trmc.report` + `Trmc.transform_module`** run between Lower and Mono. The
+>   transform is **off by default** (gated on `--trmc` / `MARCH_TRMC`); the
+>   report is gated on `MARCH_TRMC_REPORT`. It must run this early because by
+>   Perceus the stdlib's nested `go` helpers are closures invoked via
+>   `ECallPtr`, so self-recursion is no longer syntactically visible.
+> - **`Policy_dce.audit`** runs after Fusion. It is an audit, not a transform —
+>   it reports policy-tag violations and `exit 1`s on any.
+> - **`Simplify.run ~pre_perceus:true`** runs just before Perceus, applying only
+>   the rewrites that are sound *before* RC insertion (currently the empty-string
+>   concat identities). The post-Perceus `Opt` loop runs Simplify with
+>   `pre_perceus:false` and never applies these.
+> - **`Drop.run`** runs *between* Perceus and Escape (deep-drop synthesis: routes
+>   a bare `EDecRC` on a heap-owning aggregate through a generated destructuring
+>   drop so children are released too). Skipped for the JS target, whose runtime
+>   is GC'd. A reader who believed Escape immediately followed Perceus would
+>   place a new pass on the wrong side of this.
+>
+> Also note that **Fusion, Known_call, Beta_adt, Join_points.run_pre and the
+> pre-Perceus Simplify are all conditional on `!opt_enabled`** — at `--opt 0`
+> they do not run at all. Lower, Mono, Defun, Perceus, Drop and Escape are
+> unconditional.
 
 ---
 
@@ -345,9 +395,22 @@ type expr = EAtom of atom
           | EFree of atom
           | EIncRC of atom
           | EDecRC of atom
+          | EAtomicIncRC of atom          (* actor-shared values *)
+          | EAtomicDecRC of atom
           | EReuse of atom * ty * atom list
           | ESeq of expr * expr
+          | EAllocHole of atom option * ty * atom list * int   (* TRMC *)
+          | ESetField  of atom * int * atom                    (* TRMC hole-fill *)
 ```
+
+> **Correction (2026-08-25 claim audit).** The listing above previously omitted
+> four constructors: `EAtomicIncRC`, `EAtomicDecRC`, `EAllocHole` and
+> `ESetField`. A pass author writing a `match` over `Tir.expr` from this
+> document would have written a non-exhaustive one. The atomic RC pair is the
+> actor-shared-value counterpart to `EIncRC`/`EDecRC`; `EAllocHole`/`ESetField`
+> are the destination-passing pair introduced by the TRMC transform, and
+> `ESetField` is the one expression form the purity oracle must treat as impure
+> (§20). This listing is a reading aid, not a substitute for `lib/tir/tir.ml`.
 
 ### Type Definitions
 
@@ -410,7 +473,7 @@ Eliminate lambdas (higher-order functions) by:
 
 ### Phases
 
-1. **Collect top-level names** (lines 59-62): User functions + builtins (63+ names)
+1. **Collect top-level names**: User functions ∪ `builtin_names`
 2. **Free variable analysis** (lines 70-149):
    - `free_vars_of_expr`: Collect unbound variable names used in lambda body
    - Excludes parameters, bound variables, and top-level names
@@ -428,9 +491,24 @@ Eliminate lambdas (higher-order functions) by:
 
 ### Data Structures
 
-- `builtin_names`: Set of 56 known operators and library functions
+- `builtin_names`: the set of operator and builtin names that defun must **not**
+  treat as first-class functions. Several hundred entries (548 distinct names as
+  of 2026-08-25 — a figure that moves with every new builtin, so treat it as a
+  scale, not a constant; the list itself is the source of truth).
 - `lambda_info`: `lam_fn`, `lam_fvs`, `lam_is_recursive`, `lam_uid`
 - `lambda_counter`: Global UID generator
+
+> **Correction (2026-08-25 claim audit).** This document gave two mutually
+> contradictory sizes for `builtin_names` — "63+ names" in the Phases list and
+> "Set of 56" here — and both understate it by roughly an order of magnitude.
+> The list is not a small table of arithmetic operators; it spans arithmetic,
+> string, math, float, IO, task/cancellation, signal and actor builtins. That
+> matters because **a missing entry is a codegen bug, not a missed
+> optimization**: `defun.ml` carries a worked example in a comment where an
+> absent `task_cancel_by_id` caused defun to emit a `@task_cancel_by_id$clo_wrap`
+> trampoline calling a non-existent `@task_cancel_by_id`, producing LLVM "use of
+> undefined value". See also the "adding one builtin touches nine sites" note in
+> the repo's builtin skill.
 
 ---
 
@@ -455,13 +533,33 @@ Stack-promote heap allocations whose lifetimes don't escape the current function
      - Heap allocations (constructor args)
      - Tuples, records, updates
      - Closure captures
-3. **Stack allocation** (lines 222+): Replace escaped `EAlloc` with `EStackAlloc`
-4. **RC cleanup** (lines 222+): Remove dead RC ops on stack-allocated vars
+3. **Stack allocation** (`promote_expr`): Replace the `EAlloc` of each
+   **non-escaping** candidate with `EStackAlloc`
+4. **RC cleanup**: Remove dead RC ops on stack-allocated vars
+
+> **Correction (2026-08-25 claim audit).** Step 3 previously read "Replace
+> **escaped** `EAlloc` with `EStackAlloc`". That was exactly backwards, and it
+> describes a use-after-return bug rather than the optimization: stack-promoting
+> a value that escapes the frame is precisely what escape analysis exists to
+> prevent. `escape_fn` computes `promotable = candidates − (escaping ∪
+> with_incrc)` and rewrites only that set.
+
+Two further conditions the earlier prose omitted:
+
+- The `with_incrc` exclusion — a candidate that has any `EIncRC` taken on it is
+  **not** promotable even if it does not otherwise escape.
+- Only allocations that actually emit a heap cell are candidates at all
+  (`alloc_emits_heap_cell`): Niche- and Newtype-repr constructors are skipped.
+  `escape_analysis` derives a `collision_set` from the module's own `tm_types`
+  so this Boxed/Niche/Newtype classification agrees with what codegen will emit
+  for a same-short-name colliding type.
 
 ### Key Functions
 
-- `collect_alloc_candidates` (line 65): Find EAlloc binding candidates
-- `escaping_vars` (line 93): Subset of candidates that escape
+- `collect_alloc_candidates`: Find EAlloc binding candidates
+- `escaping_vars`: Subset of candidates that escape
+- `escape_fn`: Per-function driver computing the promotable set
+- `escape_analysis`: Module entry point
 
 ---
 
@@ -490,10 +588,18 @@ Insert reference-counting instructions (EIncRC, EDecRC) and linear/affine cleanu
    - Linear/affine vars → `EFree` instead of RC
    - Unrestricted vars → `EIncRC` at definition, `EDecRC` at last use
 
-4. **FBIP detection** (lines 212+):
-   - **Function Body Inlining and Partial Application**: Reuses dead heap objects
-   - When constructing same type as a dead var, reuse its allocation
+4. **FBIP detection** (`lib/tir/perceus_fbip.ml`):
+   - **FBIP = "Functional But In-Place"** (Reinking/Xie/Leijen, the Koka Perceus
+     line of work): reuse dead heap objects rather than free-then-allocate
+   - When constructing a value of the same shape as a var that just died, reuse
+     its allocation
    - Emits `EReuse` instead of `EAlloc`
+
+> **Correction (2026-08-25 claim audit).** An earlier revision expanded FBIP as
+> "Function Body Inlining and Partial Application". That is not what FBIP stands
+> for and describes a different optimization entirely; nothing in
+> `lib/tir/perceus_fbip.ml` inlines function bodies or handles partial
+> application. The acronym is "Functional But In-Place".
 
 5. **Optimization** (lines 330+):
    - Adjacent EIncRC/EDecRC pairs cancel
@@ -514,8 +620,21 @@ Insert reference-counting instructions (EIncRC, EDecRC) and linear/affine cleanu
 
 ### Heuristics
 
-- **Size threshold**: 15 TIR nodes (line 6)
-- **Purity**: Function must be pure (no side effects)
+- **Size threshold**: `inline_size_threshold = 50` TIR nodes. Single-expression
+  functions (node count 1) are always eligible regardless of the threshold.
+
+  > **Correction (2026-08-25 claim audit).** This previously read "15 TIR
+  > nodes". That was the *original* value; `lib/tir/inline.ml` says so in as
+  > many words ("Set higher than the original 15 to capture typical HTTP
+  > middleware helpers"). The live threshold is 50 — more than 3× the figure
+  > this document reported, which materially changes what a reader expects to
+  > be inlined.
+
+- **Purity**: Function must be pure (no side effects) — see §20, and note that
+  purity here is a *blacklist* judgement, not a proof
+- **Hot Code Reload**: when `Opt.run` is given a `~hot_reload` config, boundary
+  (reloadable) functions are excluded from the candidate set so
+  boundary→boundary calls survive to codegen as dispatch-table edges
 - **Non-recursive**: Avoids infinite loops
 - **Non-mutually-recursive**: Filters functions calling other candidates
 
@@ -549,9 +668,14 @@ Insert reference-counting instructions (EIncRC, EDecRC) and linear/affine cleanu
 
 - Arithmetic: `+`, `-`, `*`, `/`, `%`, `+.`, `-.`, `*.`, `/.` (integer and float)
 - Comparisons: `==`, `!=`, `<`, `<=`, `>`, `>=`
-- Logical: `&&`, `||`, `!` (not)
-- String: `++` (concatenation)
-- Type checks: `is_int`, `is_float`, `is_string`, `is_bool`
+- Logical: `&&`, `||`, and `not` (the builtin is spelled `not`, not `!`)
+- String: `++` / `string_concat` (concatenation)
+
+> **Correction (2026-08-25 claim audit).** This list previously ended with a
+> line reading "**Type checks**: `is_int`, `is_float`, `is_string`, `is_bool`".
+> Those four names do not appear anywhere in `lib/tir/fold.ml` and no such
+> folding happens. The line was removed rather than fixed, because there is no
+> corresponding behavior to describe.
 
 ### Algorithm
 
@@ -568,16 +692,37 @@ Insert reference-counting instructions (EIncRC, EDecRC) and linear/affine cleanu
 
 ### Simplifications
 
-- **Trivial applications**: `f(atom)` where f is an identity or constant builtin
-- **ECase simplification**: Single-branch cases → direct body
-- **Dead tuple/record fields**: Unused fields
-- **Redundant operations**: e.g., `not(true)` → `false`
-- **ELet optimization**: Unused bindings
+Algebraic peephole rewrites on expression *shape*. All results stay in ANF; any
+new operation is bound to a fresh let (`let_wrap`).
 
-### Algorithm
+- **Arithmetic identities**: `x + 0`, `0 + x`, `x - 0`, `x * 1`, `1 * x`,
+  `x / 1` → `x`; `x * 0`, `0 * x` → `0`; `x - x` → `0` (integer only);
+  `0 / x` → `0` only when `x` is a known non-zero literal
+- **Boolean case collapse**: `if x then true else false` → `x`;
+  `if x then false else true` → `not x`
+- **Reflexive comparison**: `x == x` → `true`, `x != x` → `false`, **guarded by
+  `is_float_free`** — IEEE 754 mandates `NaN ≠ NaN`, so these are unsound for
+  any type that might contain a float. `TCon` and `TVar` are conservatively
+  treated as float-*containing*.
+- **`~pre_perceus` mode**: a separate invocation before Perceus applies only the
+  rewrites that are sound before RC insertion (currently the empty-string concat
+  identities `x ++ "" → x`, `"" ++ x → x`). The post-Perceus `Opt` loop passes
+  `pre_perceus:false` and never applies these.
 
-- Pattern match on common trivial forms
-- Rewrite → simpler equivalent
+> **Correction (2026-08-25 claim audit).** The previous list here was largely
+> not describing this pass. It claimed five items; three were wrong:
+> - "**Trivial applications**: `f(atom)` where f is an identity or constant
+>   builtin" — no such rewrite exists in `simplify.ml`.
+> - "**Dead tuple/record fields**: Unused fields" and "**ELet optimization**:
+>   Unused bindings" — these are **DCE's** job (§14), not Simplify's;
+>   `simplify.ml` recurses through `ELet` without ever dropping one.
+> - "**Redundant operations**: e.g. `not(true)` → `false`" — that specific fold
+>   lives in `lib/tir/fold.ml` (§12), not here.
+>
+> Only "ECase simplification" was in the right neighbourhood, and even it was
+> imprecise: the pass collapses the two *boolean-literal* case shapes above, not
+> "single-branch cases" in general. The float-freeness guard on `x == x`, which
+> is the one genuinely subtle thing about this pass, went unmentioned entirely.
 
 ---
 
@@ -591,16 +736,43 @@ Insert reference-counting instructions (EIncRC, EDecRC) and linear/affine cleanu
 1. **Dead let removal**:
    - If var not used in body → drop `ELet` (if pure) or replace with `ESeq`
 
-2. **Unreachable function removal**:
-   - Build reachability graph from `main` entry point
-   - If no `main`, seed with all functions
-   - Remove unreachable functions from module
+2. **Unreachable function removal** (`root_names` → `reachable_fns` →
+   `prune_unreachable`). The root set is, in order:
+   - every function named `main` or `*.main`
+   - the setup / setup-all / migrate functions (`Tir_names.setup_fn_name`,
+     `setup_all_fn_name`, `is_migrate_fn_name`)
+   - everything in `tm_exports` and everything in `tm_tests`
+   - **only if the above is empty**, the caller-supplied `~extra_root` names
+   - **only if it is still empty and `~fail_open` is true**, every function
+
+   Reachability is then computed with `free_vars`, *not* `called_fns`, so that
+   closure apply-function pointers stored in `EAlloc` args count as references.
+
+> **Correction (2026-08-25 claim audit).** This previously read "Build
+> reachability graph from `main` entry point / If no `main`, seed with all
+> functions". Both halves were wrong in ways that matter:
+> - Exports, tests and the setup/migrate functions are roots too. A reader who
+>   believed only `main` roots the graph would expect DCE to delete a module's
+>   test functions and its `tm_exports`, which it does not.
+> - The all-functions fallback is **not** simply "no `main`". It is gated on
+>   `~fail_open`, and `extra_root` gets a turn first. `fail_open:false` is used
+>   deliberately for *analysis* callers, where the honest answer for a module
+>   with no entry point is that it reaches nothing — the code comment records
+>   that failing open there made the capability ceiling report the entire
+>   prepended stdlib for a file containing a single `assert true`.
+>
+> DCE also consults `Purity.is_pure_ext` with the module's transitive
+> impure-function set (§20) — not the plain `is_pure` — so that a binding like
+> `let _ = System.put_env(…)`, whose impurity is invisible at the call site, is
+> not deleted.
 
 ### Key Functions
 
-- `free_vars` (line 11): Free variables in expression
-- `called_fns` (line 55): Functions called from expression
-- `reachable_fns` (line 71): Transitive reachability from entry points
+- `free_vars`: Free variables in expression
+- `called_fns`: Functions called from expression
+- `root_names`: Entry-point root set (see above)
+- `reachable_fns`: Transitive reachability from those roots
+- `prune_unreachable` / `run`: Module-level drivers
 
 ---
 
@@ -611,19 +783,49 @@ Insert reference-counting instructions (EIncRC, EDecRC) and linear/affine cleanu
 
 ### Fixed-Point Loop
 
-Runs **Inline → Fold → Simplify → DCE** in sequence, repeating up to 5 times until no pass makes changes.
+`Opt.named_passes` runs **nine** passes in this order, repeating the whole
+sequence up to 5 times, stopping early when an iteration makes no change:
 
-```ocaml
-let run (m : Tir.tir_module) : Tir.tir_module =
-  let passes = [Inline.run; Fold.run; Simplify.run; Dce.run] in
-  let loop p n =
-    if n = 0 then p
-    else let p' = (apply passes p) in
-         if not !changed then p'
-         else loop p' (n - 1)
-  in
-  loop m 5
-```
+| # | Pass | Why it sits here |
+|---|------|------------------|
+| 1 | `Join_points.run` | hoists common leading lets above `ECase`, exposing shared structure to everything downstream **in the same iteration** |
+| 2 | `Known_call.run` | `ECallPtr` → `EApp` for statically-known closures, so Inline can see and inline the lifted apply functions |
+| 3 | `Inline.run` | exposes literal arguments at inlined call sites |
+| 4 | `Single_use_inline.run` | inlines functions down to one remaining call site |
+| 5 | `Cprop.run` | propagates those literals through let chains |
+| 6 | `Fold.run` | evaluates the now-literal arithmetic |
+| 7 | `Simplify.run` (`~pre_perceus:false`) | identity laws / strength reduction on folded results |
+| 8 | `Fusion.run_struct` | collapses chains of record-update operations |
+| 9 | `Dce.run` | removes let bindings made dead by folding/simplification |
+
+`run` also takes an optional `~snap` callback, invoked after each individual
+pass with a label `"tir-opt-{iter}-{pass}"`, and an optional `~hot_reload`
+config that it installs into `Inline.boundary_config` for the duration of the
+run (restored via `Fun.protect`).
+
+> **Correction (2026-08-25 claim audit) — this was the worst error in the
+> document after §17.** The previous text claimed the loop runs
+> "**Inline → Fold → Simplify → DCE**", and illustrated it with a block of
+> OCaml presented as the body of `Opt.run`:
+>
+> ```ocaml
+> let passes = [Inline.run; Fold.run; Simplify.run; Dce.run] in
+> ```
+>
+> **No such code exists in `lib/tir/opt.ml`, and it never did in this shape.**
+> Five of the nine real passes — `Join_points`, `Known_call`,
+> `Single_use_inline`, `Cprop` and `Fusion.run_struct` — were missing entirely.
+> The fabricated snippet was the damaging part: a plausible-looking verbatim
+> quotation invites a reader to trust it over the source, and someone adding an
+> optimization would have inserted it into a four-element list that is not there.
+>
+> **`Beta_adt` is deliberately NOT in this loop** — it runs once, pre-Perceus
+> (see the pass-order note at the top). `opt.ml` carries a long comment
+> explaining that this placement is load-bearing for `Single_use_inline`'s
+> capture guard, and that moving `Beta_adt` into the loop (or adding any other
+> post-Perceus case-of-known-constructor reduction) would make a
+> currently-unreachable variable-capture bug reachable. Read that comment and
+> the guard in `lib/tir/single_use_inline.ml` before changing pass membership.
 
 ---
 
@@ -811,7 +1013,29 @@ check, because the shadow-stripped seed environment would be incomplete.
 **File**: `lib/effects/effects.ml` (`Effects.check_capabilities`)
 **Status**: Enforced
 
-Capabilities **are** enforced. `lib/effects/effects.ml` is a thin wrapper whose `check_capabilities` delegates to `Typecheck.check_module`, which embeds capability checking in `check_module_needs`. `bin/main.ml` runs this as part of typechecking (`Typecheck.check_module_full`). Enforcement includes: transitive `needs` checking (a module that imports another module declaring `needs X` must itself declare `X` or a parent capability), and a requirement that `extern` blocks declare their capability via `needs`. This matches `type-system.md` §9 (capability hierarchy and `needs` checking); the previous "stub / not enforced" claim here was wrong.
+Capabilities **are** enforced. Enforcement lives in `Typecheck.check_module_needs`, embedded in `Typecheck.check_module`, which `bin/main.ml` runs on both the eval and compile paths via `Typecheck.check_module_full`. Enforcement includes: transitive `needs` checking (a module that imports another module declaring `needs X` must itself declare `X` or a parent capability), and a requirement that `extern` blocks declare their capability via `needs`. This matches `type-system.md` §9 (capability hierarchy and `needs` checking); the "stub / not enforced" claim an earlier revision carried here was wrong.
+
+> **Correction (2026-08-25 claim audit) — `lib/effects/effects.ml` is not on the
+> compile path.** The previous wording ("`lib/effects/effects.ml` is a thin
+> wrapper whose `check_capabilities` … `bin/main.ml` runs this") implied that
+> `bin/main.ml` calls `Effects.check_capabilities`. It does not. Searching for
+> callers of that function finds exactly three: two assertions in
+> `test/test_codegen.ml`, and a bare mention inside a `bin/main.ml` **comment**
+> ("See also: March_effects.Effects.check_capabilities"). No production code path
+> calls it.
+>
+> The *status* — Enforced — is nonetheless correct, because enforcement does not
+> depend on this module: `bin/main.ml` reaches `check_module_needs` directly
+> through `Typecheck.check_module_full`. So this is a wiring claim that was
+> wrong, not a capability claim. Practically, `effects.ml` occupies the same
+> category as `lib/codegen/codegen.ml` (§17): a named module that a reader
+> reasonably assumes is the implementation, which is in fact a bypassed shim.
+>
+> Note also that `effects.ml`'s **own doc comment is wrong** in the same way —
+> it asserts "All paths (eval and compile) pass through this function via
+> [bin/main.ml]". Fixing that comment is a code change and therefore out of
+> scope for this docs-only audit; it is filed as
+> `specs/todos/2026-08-25-effects-ml-docstring-claims-a-call-path-that-does-not-exist.md`.
 
 ---
 
@@ -822,15 +1046,55 @@ Capabilities **are** enforced. `lib/effects/effects.ml` is a thin wrapper whose 
 
 ### Definition
 
+Purity is decided by a **blacklist**, not a proof. `impure_builtins` enumerates
+the builtins with observable effects (console/file IO, network/TLS, randomness,
+time, actors/tasks/processes, mutable state, and — importantly — `int_div`,
+`int_mod`, `/` and `%`, which *trap* on a zero divisor and so must not be
+reordered or deleted). **Any builtin not on that list is assumed pure.** The
+oracle is conservative in the sense that it returns `false` when uncertain about
+*structure*, but it is not conservative about unknown builtin names.
+
 A TIR expression is "pure" if it:
-- Contains no EApp calls (except to pure functions)
-- Contains no heap allocations (EAlloc, EStackAlloc)
-- Contains no free operations
-- Contains no RC operations
+- makes no `ECallPtr` (indirect call — unknown target ⇒ always impure)
+- contains no RC or ownership ops (`EIncRC`, `EDecRC`, `EAtomicIncRC`,
+  `EAtomicDecRC`, `EFree`, `EReuse`)
+- contains no `ESetField` (mutates an already-constructed cell; treating it as
+  pure would let the optimizer duplicate, sink or drop the hole-fill that makes
+  a TRMC loop produce its result)
+- makes no `EApp` to a name on `impure_builtins`, or to a user function known
+  to be transitively impure
+
+**Allocation is pure.** `EAlloc`, `EStackAlloc` and `EAllocHole` all return
+`true`.
+
+> **Correction (2026-08-25 claim audit).** The previous "Definition" listed
+> "Contains no heap allocations (EAlloc, EStackAlloc)" as a condition for
+> purity. That is the **opposite** of what `lib/tir/purity.ml` does — the code
+> says `| Tir.EAlloc _ -> true (* allocation is pure, side-effect-free *)`.
+> Believing the old text would lead a reader to conclude that essentially no
+> allocating function is inlinable, which is not how the inliner behaves. The
+> same list also framed purity as a whitelist ("except to pure functions") when
+> it is a blacklist, and omitted the `ECallPtr`, `ESetField` and trapping-division
+> cases entirely.
+
+Monomorphization rewrites builtin calls to specialized names (`println` →
+`println$String`), so `is_pure_ext` matches against
+`Tir_names.strip_specialization_suffix` of the call-site name. An exact match
+would silently reclassify every specialized impure builtin as pure.
 
 ### Usage
 
-Used by inlining pass to decide which functions are safe to inline.
+- **`is_pure`** (empty impure-function set) — used by **Fusion** and **Inline**,
+  which only reason about expressions built from known stdlib combinators.
+- **`is_pure_ext`** with `impure_fns_of_module` (a fixed point over the module's
+  call graph) — used by **DCE**, which inspects raw call sites such as
+  `EApp(System.put_env, …)` whose impurity is invisible at the call site.
+
+> **Correction (2026-08-25 claim audit).** The previous "Usage" section said
+> only "Used by inlining pass to decide which functions are safe to inline".
+> DCE is the consumer with the sharpest correctness requirement here, and it is
+> the reason the two-variant API exists at all: using plain `is_pure` from DCE
+> would delete observable side effects.
 
 ---
 
@@ -843,9 +1107,16 @@ Renders TIR expressions and types as readable text for debugging (`--dump-tir`).
 
 ### Functions
 
-- `pp_expr`: Expression → string
-- `pp_ty`: Type → string
-- `pp_var`: Variable → string
+- `string_of_expr`: Expression → string
+- `string_of_ty`: Type → string
+- `string_of_var`: Variable → string
+- `string_of_atom`, `string_of_linearity`, `string_of_fn_def`,
+  `string_of_type_def`
+
+> **Correction (2026-08-25 claim audit).** These were previously listed as
+> `pp_expr` / `pp_ty` / `pp_var`. No function by any of those three names exists
+> in `lib/tir/pp.ml`; the module uses the `string_of_*` convention throughout.
+> (The *file* is named `pp.ml`, which is presumably where the guess came from.)
 
 ---
 
@@ -912,6 +1183,16 @@ Renders TIR expressions and types as readable text for debugging (`--dump-tir`).
 > of truth for file sizes and feeds
 > `specs/plans/2026-08-19-compiler-file-decomposition.md`.
 
+> **Status column audited 2026-08-25.** Two rows read as functional gaps but are
+> not: `lib/codegen/codegen.ml` ("Stub") and `lib/effects/effects.ml` are both
+> **bypassed shims whose functionality ships elsewhere** — the §17 failure mode.
+> Their rows now say so inline, because a reader scanning this table for "what
+> is missing" is exactly the reader who was misled last time. Conversely `TRMC`
+> is a genuine "present but off" case and is now marked as such. Six passes that
+> exist and run (`single_use_inline`, `cprop`, `drop`, `vectorize_mark`,
+> `policy_dce`, `trmc`) were missing from this table entirely and have been
+> added; the table is not, however, guaranteed exhaustive against `lib/tir/`.
+
 | Pass | File | Status |
 |------|------|--------|
 | Lexer | `lib/lexer/lexer.mll` | ✓ Complete |
@@ -938,10 +1219,16 @@ Renders TIR expressions and types as readable text for debugging (`--dump-tir`).
 | Constant Folding | `lib/tir/fold.ml` | ✓ Complete |
 | Simplification | `lib/tir/simplify.ml` | ✓ Complete |
 | DCE | `lib/tir/dce.ml` | ✓ Complete |
-| Optimization Loop | `lib/tir/opt.ml` | ✓ Complete |
+| Optimization Loop | `lib/tir/opt.ml` | ✓ Complete (9 passes, ≤5 iterations — see §15) |
+| Single-use inline | `lib/tir/single_use_inline.ml` | ✓ Complete (Opt loop member) |
+| Constant propagation | `lib/tir/cprop.ml` | ✓ Complete (Opt loop member) |
+| Deep-drop synthesis | `lib/tir/drop.ml` | ✓ Complete (runs between Perceus and Escape) |
+| Vectorize marking | `lib/tir/vectorize_mark.ml` | ✓ Complete (runs immediately after Lower) |
+| Policy-DCE audit | `lib/tir/policy_dce.ml` | ✓ Complete (audit only — reports and exits, does not transform) |
+| TRMC | `lib/tir/trmc.ml` | ⚠ **Off by default** — opt-in via `--trmc` / `MARCH_TRMC`; report gated on `MARCH_TRMC_REPORT` |
 | LLVM Emission | `lib/tir/llvm_emit.ml` | ✓ Substantial (constructor collision & arity mismatch fixed) |
-| Code Generation | `lib/codegen/codegen.ml` | ⚠ Stub |
-| Effects System | `lib/effects/effects.ml` | ✓ Enforced (delegates to `Typecheck.check_module_needs`) |
+| Code Generation | `lib/codegen/codegen.ml` | ⚠ Stub — **but see §17: code generation ships, it just does not live here** |
+| Effects System | `lib/effects/effects.ml` | ⚠ Shim, not on the compile path — capabilities **are** enforced, via `Typecheck.check_module_needs` (§19) |
 | Purity Analysis | `lib/tir/purity.ml` | ✓ Complete |
 | Pretty Printing | `lib/tir/pp.ml` | ✓ Complete |
 | Main CLI | `bin/main.ml` | ✓ Complete |
@@ -951,12 +1238,61 @@ Renders TIR expressions and types as readable text for debugging (`--dump-tir`).
 
 ## Known Limitations
 
-1. **Code generation**: `lib/codegen/codegen.ml` is a thin shim; linking/assembly is driven from `bin/main.ml` (clang invocation), not from a single codegen module
-3. **Module system**: No higher-kinded polymorphism; interfaces use simple parameter `a`
-4. **Gradual typing**: Type-level naturals (`Nat`, `NatOp`) mostly unused; dynamic type-level computation not implemented
-5. **Linearity checking**: Enforced at type check time but no sophisticated "must use linearly" analysis during lowering
-6. **Polymorphic recursion**: Not fully supported; monomorphization works only on call-site types
-7. **Associated types**: Declared in interfaces but not fully integrated with impl resolution
+> **Each entry below was re-verified against the code on 2026-08-25.** A
+> "limitation" that has quietly been fixed is the most expensive kind of error
+> in this document — it makes people build workarounds for problems that no
+> longer exist — so each item now carries its verification verdict. (The list
+> previously ran 1, 3, 4, 5, 6, 7: item 2 had been deleted without renumbering.
+> Renumbered here.)
+
+1. **Code generation** — *verified, and note the phrasing.* `lib/codegen/codegen.ml`
+   is a thin shim; LLVM IR emission lives in `lib/tir/llvm_emit.ml` and the
+   assembly/link step is a clang invocation driven from `bin/main.ml`. This is a
+   **structural** observation, not a functional gap: native binaries are produced
+   today. See §17, which corrects an earlier revision that read this as "code
+   generation not yet implemented".
+
+2. **Module system: no higher-kinded polymorphism** — *verified true.*
+   `Ast.interface_def` carries a single `iface_param : name`, so an interface is
+   parameterized by exactly one type, and it cannot abstract over a type
+   constructor.
+
+3. **Gradual typing / type-level naturals** — ⚠️ **this entry was stale and has
+   been rewritten.** It previously read "Type-level naturals (`Nat`, `NatOp`)
+   *mostly unused*; dynamic type-level computation not implemented". The first
+   half is no longer true: a **constraint solver for type-level naturals (v1)**
+   landed on 2026-07-31 — `normalize_tnat` reduces concrete arithmetic plus
+   identity/annihilation laws, `solve_nat_eq` solves linear equations such as
+   `a + 2 = 5 ⇒ a = 3`, the parser gained `ty_nat_add`/`ty_nat_mul` precedence
+   levels and accepts `INT` as a `TyNat`, and there is a `type_level_nat` test
+   group in `test/test_stdlib_suite.ml`. `TNat` is referenced ~66 times in
+   `lib/typecheck/typecheck.ml`. See
+   `specs/progress/2026-07-31-constraint-solver-for-type-level-naturals-v1.md`.
+   What remains genuinely limited: the solver is v1 and linear, and general
+   *dynamic* type-level computation is still not implemented.
+
+4. **Linearity checking** — *not fully verified as of 2026-08-25.* The claim that
+   there is "no sophisticated must-use-linearly analysis during lowering" was not
+   confirmed or refuted within this audit; deciding it requires reading the
+   linearity paths in `typecheck.ml` and `lower.ml` in depth. Note that work in
+   this area has landed since the claim was written — see
+   `specs/progress/2026-07-31-linear-affine-propagation-through-record-fields.md`,
+   `specs/progress/2026-08-12-branch-facts-and-linearity-symmetry.md` and
+   `specs/progress/2026-07-31-check-linear-all-consumed-never-fires-for-let-with-match-arm.md`
+   — and at least one linearity gap remains open in
+   `specs/todos/2026-07-10-p2-compiler-linearity-found-during-core-march-widening-slice-7.md`.
+   **Treat this entry as unverified rather than as current fact.**
+
+5. **Polymorphic recursion** — *verified true.* `lib/tir/mono.ml` is a worklist
+   monomorphizer that derives each specialization from concrete argument types at
+   call sites (`build_subst` / `match_ty`), so a function whose recursive call
+   instantiates itself at a *different* type has no fixed point to reach.
+
+6. **Associated types** — *verified true.* `Ast.interface_def` has
+   `iface_assoc_types` and `Ast.impl_def` has `impl_assoc_types`, so the syntax
+   is carried through the AST — but the only reference to `iface_assoc_types` in
+   `lib/typecheck/typecheck.ml` is a construction site initializing it to `[]`.
+   Nothing consumes it during impl resolution.
 
 ---
 
@@ -970,22 +1306,35 @@ Type Checking → (type_map)
                ↓
            Lowering to TIR
                ↓
+         Vectorize_mark (names still == source names here)
+               ↓
+            TRMC (off by default; --trmc / MARCH_TRMC)
+               ↓
          Monomorphization (eliminates TVar)
                ↓
             Fusion
                ↓
+        Policy-DCE audit (reports + exits; does not transform)
+               ↓
         Defunctionalization (lifts lambdas)
                ↓
-       Known_call → Beta_adt → Join_points.run_pre
+       Known_call → Beta_adt → Join_points.run_pre → Simplify(pre-Perceus)
                ↓
        Perceus RC Analysis (inserts RC ops)
                ↓
-         Escape Analysis (stack-promotes)
+            Drop (deep-drop synthesis)
                ↓
-      Optimization Loop (fixed-point)
+         Escape Analysis (stack-promotes non-escaping allocs)
+               ↓
+      Optimization Loop (fixed-point, NINE passes — see §15)
+         ├─ Join points
+         ├─ Known-call
          ├─ Inlining
+         ├─ Single-use inline
+         ├─ Constant propagation
          ├─ Constant Folding
          ├─ Simplification
+         ├─ Struct fusion
          └─ DCE
                ↓
          LLVM IR Emission
@@ -993,11 +1342,21 @@ Type Checking → (type_map)
       Code Generation (clang link, driven from bin/main.ml)
 ```
 
+> **Correction (2026-08-25 claim audit).** This diagram previously showed the
+> optimization loop as four passes (Inlining / Folding / Simplification / DCE)
+> and omitted Vectorize_mark, TRMC, the Policy-DCE audit, the pre-Perceus
+> Simplify and — most consequentially — **Drop**, which sits *between* Perceus
+> and Escape. See the pass-order note at the top of this document for why each
+> one is where it is.
+
 **Critical invariants**:
 - Type checking must precede lowering (type_map required); refinement checking runs right after typecheck
 - Monomorphization must precede defunctionalization (TVar → concrete types)
 - Known_call, Beta_adt, and Join_points.run_pre run **before** Perceus so RC is inserted once over their simplified output. In particular Known_call must precede Perceus because the closure-apply ABI consumes the closure argument, so Perceus must not insert a post-decrement on apply functions.
 - **Perceus must precede Escape analysis** (Escape removes dead RC ops on stack-promoted values)
+- **`Drop` must run between Perceus and Escape** — it rewrites the bare `EDecRC`s Perceus just inserted into destructuring drops, and Escape's `with_incrc` exclusion inspects the RC ops that survive
+- **`Beta_adt` must stay out of the `Opt` loop** — it runs once, pre-Perceus. Moving it (or any other post-Perceus case-of-known-constructor reduction) into the loop makes a currently-unreachable variable-capture bug reachable; see §15 and the guard comment in `lib/tir/single_use_inline.ml`
+- **`Vectorize_mark` must run immediately after Lower** — it is the only point at which a TIR function's name is still exactly its source name
 - Optimization loop assumes purity + recursion info stable
 - DCE assumes defun + mono complete (no polymorphic/lambda code)
 
@@ -1005,12 +1364,24 @@ Type Checking → (type_map)
 
 ## Performance Characteristics
 
-- **Lexing**: O(n) scan, one-pass
-- **Parsing**: O(n) Menhir LR(1), linear shift/reduce
-- **Type checking**: O(n × m) where m = number of unification steps (typically m << n)
-- **Lowering**: O(n) recursive descent + CPS continuation threading
-- **Monomorphization**: O(m × k) where m = functions, k = specializations per function
-- **Optimization**: O(5 × Σ(pass_i)) with early termination when no change
+> **Unverified as of 2026-08-25.** These are asymptotic sketches carried over
+> from the March 2026 draft. The claim audit of that date confirmed only the one
+> item below that is checkable by reading code (the iteration bound); the
+> complexity classes themselves were **not** derived from the implementations
+> and **not** measured. Do not cite them as established. For real numbers, use
+> the benchmark corpus and the mapping in `specs/benchmarks.md`, and measure
+> compiled (`march --compile --opt 2 …`) — interpreted runs of `fib`-shaped
+> benchmarks can take hours.
+
+- **Lexing**: O(n) scan, one-pass *(unverified)*
+- **Parsing**: O(n) Menhir LR(1), linear shift/reduce *(unverified)*
+- **Type checking**: O(n × m) where m = number of unification steps (typically m << n) *(unverified)*
+- **Lowering**: O(n) recursive descent + CPS continuation threading *(unverified)*
+- **Monomorphization**: O(m × k) where m = functions, k = specializations per function *(unverified)*
+- **Optimization**: bounded at **5** iterations of the nine-pass sequence, with
+  early termination when an iteration makes no change — *verified* against
+  `Opt.run`'s `loop m 5`. Note the per-iteration cost is Σ over **nine** passes,
+  not the four this document used to list (§15).
 
 ---
 
@@ -1042,7 +1413,30 @@ Type Checking → (type_map)
 
 ---
 
-**Last Updated**: August 25, 2026 — §18.1 added (three execution modes: interpreter,
-`--jit`, `--compile`), `bin/main.ml` size and flag list corrected, interpreter and
-JIT modules added to the module reference. Earlier body sections still carry their
-March 2026 review dates.
+**Last Updated**: August 25, 2026.
+
+Two revisions landed that day. First: §18.1 added (three execution modes:
+interpreter, `--jit`, `--compile`), `bin/main.ml` size and flag list corrected,
+interpreter and JIT modules added to the module reference.
+
+Second, a **substantive claim audit** — the first this document has had. Its
+predecessor pass had checked only for mechanical rot (stale sizes and pointers);
+the single substantive claim that had been spot-checked, §17's "full code
+generation not yet implemented", turned out to be badly false, which is what
+prompted auditing the rest. Roughly 95 claims were checked against the code:
+**19 were wrong** and are corrected in place with a `Correction (2026-08-25
+claim audit)` note explaining what was claimed and why it was false; about 9
+could not be verified in reasonable time and are now explicitly marked
+unverified rather than left reading as fact.
+
+The worst of the 19 was §15's description of the optimization loop, which named
+four passes when there are nine and illustrated them with a block of OCaml
+presented as `Opt.run`'s body that does not exist in the source. Runners-up:
+§9 described escape analysis as stack-promoting the values that *escape*
+(exactly backwards), §20 listed heap allocation as making an expression impure
+when `purity.ml` explicitly says the opposite, and §11 gave an inline threshold
+of 15 against an actual 50.
+
+Earlier body sections not touched by that audit still carry their March 2026
+review dates, and their parenthetical line numbers remain unverified — see the
+note at the top of this document.
