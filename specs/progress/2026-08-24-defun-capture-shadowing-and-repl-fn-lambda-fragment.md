@@ -100,8 +100,10 @@ closure) — that requirement is unchanged, just widened to include the primary.
 Both backends verified by hand on the two repros (`MARCH_JIT_BACKEND=orc` and
 the default clang path).
 
-Full suite green: 932 compiler / 273 eval / 589 codegen / 869 stdlib (incl. Slow)
-/ 61 stdlib_march. `test/repl_smoke_test.sh` is unchanged at 48 pass / 6 fail —
+Full suite green after merging main: 934 compiler / 273 eval / 591 codegen /
+878 stdlib (incl. Slow) / 61 stdlib_march, plus `@types-check` (303) and
+`@grammar-check` (48), which `scripts/run-tests.sh` does not cover, and
+`test_jit.exe` (13, the ORC subprocess sessions). `test/repl_smoke_test.sh` is unchanged at 48 pass / 6 fail —
 identical on a reverted-source control, so those 6 are pre-existing (three use
 the `then` keyword March does not accept). Run it with a private `HOME`: the
 shared `~/.cache/march` prelude gets poisoned by concurrent sessions and
