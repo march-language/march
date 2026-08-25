@@ -1841,6 +1841,101 @@ let test_repl_jit_selfref_fn_no_duplicate_wrapper () =
      with exn ->
        March_jit.Repl_jit.cleanup jit; raise exn)
 
+(** Shared driver for the two fn-body-lambda REPL-JIT session regressions
+    below: precompiles list.march as the stdlib prelude (mirroring the real
+    REPL's [precompile_stdlib], which also seeds [ctx.stdlib_decls] so the
+    fragment lowering can resolve the List module), builds a tc env that knows the
+    List module, defines [fn_src] via [run_decl ~is_fn_decl:true] exactly
+    like lib/repl/repl.ml's DFn arm (module = the single decl), then
+    evaluates [expr_src] with [run_expr] and checks the printed result. *)
+let run_repl_jit_fn_lambda_session ~fn_src ~expr_src ~expected ~label =
+  match setup_jit_runtime () with
+  | None -> ()  (* counted skip: no clang on PATH (anything else fails loudly, W2.0) *)
+  | Some runtime_so ->
+    let list_decl = load_stdlib_file_for_test "list.march" in
+    let stdlib_decls = [list_decl] in
+    let content_hash =
+      Digest.to_hex (Digest.string (Marshal.to_string stdlib_decls [])) in
+    let type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t =
+      Hashtbl.create 16 in
+    let base_tc = March_typecheck.Typecheck.base_env
+        (March_errors.Errors.create ()) type_map in
+    let tc_pre = March_repl.Repl.preregister_stdlib_types base_tc stdlib_decls in
+    let (_ev, tc0) = March_repl.Repl.load_decls_into_env
+        March_eval.Eval.base_env tc_pre stdlib_decls in
+    let tc_env = ref { tc0 with March_typecheck.Typecheck.errors =
+                                  March_errors.Errors.create () } in
+    let jit = March_jit.Repl_jit.create ~runtime_so () in
+    (try
+       March_jit.Repl_jit.precompile_stdlib jit
+         ~content_hash ~stdlib_decls ~type_map;
+       (match parse_repl fn_src with
+        | March_ast.Ast.ReplDecl d ->
+          let d' = March_desugar.Desugar.desugar_decl d in
+          let bind_name = match d' with
+            | March_ast.Ast.DFn (def, _) -> def.March_ast.Ast.fn_name.txt
+            | _ -> failwith "expected DFn"
+          in
+          let s = March_ast.Ast.dummy_span in
+          let m = { March_ast.Ast.mod_name = { txt = "Repl"; span = s };
+                    mod_decls = [d'] } in
+          March_jit.Repl_jit.run_decl jit ~tc_env:!tc_env ~is_fn_decl:true ~bind_name m;
+          let new_env = March_typecheck.Typecheck.check_decl
+            { !tc_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () } d' in
+          tc_env := { new_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () }
+        | _ -> failwith "expected ReplDecl");
+       (match parse_repl expr_src with
+        | March_ast.Ast.ReplExpr e ->
+          let e' = March_desugar.Desugar.desugar_expr e in
+          let m = make_jit_test_module e' in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env:!tc_env m in
+          Alcotest.(check string) label expected result
+        | _ -> failwith "expected ReplExpr");
+       March_jit.Repl_jit.cleanup jit
+     with exn ->
+       March_jit.Repl_jit.cleanup jit; raise exn)
+
+(** Regression (two stacked bugs, both fixed together):
+
+    1. Defun capture-shadowing: the fn is named `f` — the SAME name as
+       List.map's function parameter.  [Defun.free_vars_of_expr] excluded any
+       free var whose name matched a top-level fn of the module being
+       lowered, even when that name was really a binder of the enclosing
+       scope (map's param `f`, closed over by its inner `go` accumulator).
+       With a user top-level `f` in the module, the fragment's re-lowered
+       `go$apply$N` dropped the capture and phase 3 left `f(h)` as a DIRECT
+       call to the user's `f` — an undefined `_f` in the helpers fragment
+       (dlopen error at the REPL) and a segfault when compiled AOT.
+
+    2. Fragment ordering: run_decl used to compile the defun'd helper
+       lambdas in a SEPARATE fragment loaded BEFORE the primary fn, so any
+       legitimate helper→primary reference (see the selfrec test below) hit
+       macOS dlopen's eager binding.  Helpers and primary now share one
+       fragment.
+
+    Pre-fix this raised Failure "dlopen(...): symbol not found in flat
+    namespace '_f'" from run_decl and the binding was lost. *)
+let test_repl_jit_fn_lambda_shadows_hof_param () =
+  run_repl_jit_fn_lambda_session
+    ~fn_src:"fn f(xs : List(Int)) : List(Int) do\n  List.map(xs, fn y -> y + 1)\nend"
+    ~expr_src:"f([1, 2, 3])"
+    ~expected:"[2, 3, 4]"
+    ~label:"fn f with lambda (name collides with List.map's param): f([1,2,3])"
+
+(** Regression (bug 2 of the pair above, isolated): the lambda inside the fn
+    body calls the fn BEING DEFINED (`g`), so the lifted lambda helper
+    legitimately references the primary fn's symbol.  With helpers compiled
+    in their own fragment first, macOS dlopen's eager binding failed with
+    "symbol not found in flat namespace '_g'" even though `g`'s fragment was
+    loaded immediately after.  One combined fragment resolves it in both the
+    clang and ORC backends. *)
+let test_repl_jit_fn_selfrec_via_lambda () =
+  run_repl_jit_fn_lambda_session
+    ~fn_src:"fn g(n : Int) : Int do\n  if n <= 0 do\n    0\n  else\n    List.length(List.map([n], fn y -> g(y - 1)))\n  end\nend"
+    ~expr_src:"g(3)"
+    ~expected:"1"
+    ~label:"fn g whose lambda calls g (self-recursion through helper): g(3)"
+
 (** Regression: a top-level function referenced as a first-class VALUE (not
     called) from a plain REPL expression or `let` RHS.  emit_atom wraps such a
     reference in a @<fn>$clo_wrap trampoline whose definition is appended to
@@ -14169,6 +14264,8 @@ let codegen_suites =
         Alcotest.test_case "capture-free closure materialization does not leak" `Quick test_repl_jit_capture_free_closure_no_leak;
         Alcotest.test_case "stdlib List.length via precompile" `Quick test_repl_jit_stdlib_list_length;
         Alcotest.test_case "B12: niche ADT cross-fragment (:load DMod then match)" `Quick test_repl_jit_niche_adt_cross_fragment;
+        Alcotest.test_case "fn with lambda shadowing List.map's param compiles + runs" `Quick test_repl_jit_fn_lambda_shadows_hof_param;
+        Alcotest.test_case "fn self-recursive through its lambda helper" `Quick test_repl_jit_fn_selfrec_via_lambda;
       ];
       "repl_jit_regression", [
         Alcotest.test_case "list literal compiles" `Quick test_repl_list_literal;

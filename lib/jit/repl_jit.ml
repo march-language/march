@@ -884,30 +884,22 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
     let helper_fns = List.filter
       (fun (f : March_tir.Tir.fn_def) -> f.fn_name <> primary_fn.fn_name)
       user_fns in
-    (* Compile all helper lambdas in ONE combined fragment so they can freely
-       reference each other (e.g., outer lambda creates inner lambda's closure).
-       Compiling helpers separately caused cross-reference failures when the
-       outer lambda's IR referenced the inner lambda before it was declared. *)
-    (if helper_fns <> [] then begin
-      ignore (next_id ctx);  (* advance counter so compile_fragment uses right id *)
-      let ir = March_tir.Llvm_emit.emit_fns_fragment
-        ~types:(ctx.loaded_tir_types @ tir.March_tir.Tir.tm_types) ~fns:helper_fns ~extern_fns ~repl:true () in
-      (* Wrap in compile_fragment — uses counter (= hn) for the file name. *)
-      (try
-        ignore (compile_fragment ctx ir);
-        mark_compiled_fns ctx helper_fns
-      with exn ->
-        raise exn)
-    end);
-    (* Emit primary function AND store closure in a persistent slot. *)
+    (* Emit the primary function, its helper lambdas, AND the closure-slot
+       init in ONE fragment.  Helpers must share a module with each other
+       (outer lambda creates inner lambda's closure) and with the PRIMARY:
+       a lambda body may call the fn being defined (self-recursion through
+       a lambda), so a helpers-only fragment loaded first carries a dangling
+       reference to the primary's symbol — macOS dlopen binds eagerly and
+       fails with "symbol not found in flat namespace" even though the
+       primary's fragment would have been loaded right after. *)
     let pn = next_id ctx in
     let slot = alloc_slot ctx in
     let ir = March_tir.Llvm_emit.emit_repl_fn_with_closure_slot
       ~n:pn ~bind_name ~dest_slot:slot ~prev_slots:(prev_slots_of ctx)
-      ~extern_fns:(extern_fns @ helper_fns) ~types:(ctx.loaded_tir_types @ tir.March_tir.Tir.tm_types)
+      ~helper_fns ~extern_fns ~types:(ctx.loaded_tir_types @ tir.March_tir.Tir.tm_types)
       primary_fn in
     let handle = compile_fragment ctx ir in
-    mark_compiled_fns ctx [primary_fn];
+    mark_compiled_fns ctx (primary_fn :: helper_fns);
     let init_name = Printf.sprintf "repl_%d_init" pn in
     let fptr = lookup_sym handle init_name in
     Jit.call_void_to_void fptr;

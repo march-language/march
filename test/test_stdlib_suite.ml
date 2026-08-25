@@ -12116,6 +12116,50 @@ let test_compiled_helper_name_collision () =
     Alcotest.(check int)
       "stdlib List.length works despite a user top-level `go`" 0 run_rc
 
+(* Regression (capture-side sibling of the `go` collision above): a user
+   top-level fn named `f` — the SAME name as List.map's function PARAMETER.
+   Defun's free-variable analysis excluded any name matching a top-level fn
+   from a lambda's capture set, even when the name was really a binder of the
+   lambda's ENCLOSING scope: map's param `f` is closed over by its inner `go`
+   accumulator, and with a user top-level `f` in the module the capture was
+   silently dropped.  Phase 3 then left go's `f(h)` as a DIRECT call to the
+   user's `f` (wrong arity/type entirely) — this program segfaulted when
+   compiled.  The fix subtracts enclosing-scope binders from the top-level
+   exclusion set during capture analysis (collect_lambdas threads a `bound`
+   set).  End-to-end guard: map with a lambda inside a top-level `f` must
+   produce the right elements (exit 0). *)
+let test_compiled_toplevel_fn_shadows_hof_param () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_shadowparam" "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "sp.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod ShadowParam do\n\
+    \  needs IO.Process\n\
+    \  fn f(xs : List(Int)) : List(Int) do\n\
+    \    List.map(xs, fn y -> y + 1)\n\
+    \  end\n\
+    \  fn main(_cap_process : Cap(IO.Process)) : Unit do\n\
+    \    match f([1, 2, 3]) do\n\
+    \      Cons(a, Cons(b, Cons(c, Nil))) ->\n\
+    \        if a == 2 && b == 3 && c == 4 do () else process_exit(1) end\n\
+    \      _ -> process_exit(1)\n\
+    \    end\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let bin = Filename.concat tmp "spbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_rc = Sys.command (Printf.sprintf "%s >/dev/null 2>&1"
+                                (Filename.quote bin)) in
+    Alcotest.(check int)
+      "List.map with a lambda inside a user top-level `f` maps correctly" 0 run_rc
+
 (* Regression: a builtin passed as a first-class value and later invoked
    through call_ptr SIGBUSed when compiled.  Root cause: the emit_atom arm
    for "builtin used as a first-class value" emitted the bare C-extern
@@ -14355,6 +14399,8 @@ let stdlib_suites =
           test_compiled_aliased_arg_no_double_free;
         Alcotest.test_case "stdlib helper works despite user top-level name collision (go)" `Slow
           test_compiled_helper_name_collision;
+        Alcotest.test_case "lambda capture survives user fn shadowing a HOF param (f)" `Slow
+          test_compiled_toplevel_fn_shadows_hof_param;
         Alcotest.test_case "builtin passed as first-class value + call_ptr: no SIGBUS" `Slow
           test_compiled_builtin_first_class_value;
         Alcotest.test_case "P12 copy-prop type-preserving: List.length(range(0,5))==5 compiled" `Slow
