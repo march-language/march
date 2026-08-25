@@ -37,6 +37,7 @@ git log is authoritative for exact commits.
 - `--jit` and the REPL JIT: the stdlib prelude cache is now keyed on the
   compiler as well as on the stdlib source, so upgrading the compiler no longer
   reuses a prelude built by the previous one.
+- `march --jit --debug` (and `--jit --debug-tui`) no longer silently drops the time-travel debugger and JIT-compiles instead; it now falls back to the interpreter with a notice, the same as the existing actor and stdlib-shadowing fallbacks.
 - REPL JIT: referencing the same top-level function as a value across multiple lines no longer fails with "duplicate definition of symbol '<fn>$clo_wrap'" (ORC backend).
 - JIT REPL (both backends): defining a function that calls a previously
   REPL-defined function (`fn f(x) do x + 1 end` then `fn g(x) do f(x) end`)

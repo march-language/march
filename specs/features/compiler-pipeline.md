@@ -64,6 +64,11 @@ Source Code
 [Code Generation] (lib/codegen/codegen.ml)  ← thin shim, clang invoked from bin/main.ml
 ```
 
+> **This diagram is the `--compile` (AOT) path only.** March has three execution
+> modes and they do not share one pipeline: the interpreter never builds TIR at
+> all, and `--jit` runs a shorter TIR pipeline than `--compile` does. See §18.1
+> for the three paths side by side.
+
 > **Pass-order note.** The actual ordering enforced by `bin/main.ml` is
 > **Lower → Mono → Fusion → Defun → Known_call → Beta_adt → Join_points → Perceus → Escape → Opt → Llvm_emit.**
 > In particular **Perceus runs *before* Escape** (see `bin/main.ml`, `Perceus.perceus` then `Escape.escape_analysis`). Earlier revisions of this document had the two reversed; that was wrong.
@@ -698,7 +703,8 @@ Currently a stub. Full code generation (linking, assembly) not yet implemented.
 
 ## 18. Main CLI Entry Point
 
-**File**: `bin/main.ml` (334 lines)
+**File**: `bin/main.ml` (5,390 lines as of 2026-08-25; an earlier revision of this
+document said 334, which was stale by more than an order of magnitude)
 **Status**: Complete
 
 ### Key Functions
@@ -717,15 +723,73 @@ Currently a stub. Full code generation (linking, assembly) not yet implemented.
    - Error filtering: Show only user file diagnostics
    - Diagnostic rendering with source snippets
 
-4. **Command-line flags**:
+4. **Command-line flags** (the execution-relevant subset; `bin/main.ml` declares
+   roughly thirty in total, and `march --help` is the authoritative list):
+   - *(no flag)*: run the file in the tree-walking interpreter (§18.1)
+   - `--compile`: AOT-compile to a native binary via LLVM IR + clang
+   - `--jit`: run the whole program in-process through the ORC JIT (§18.1)
+   - `--check`: typecheck only, emit no code
    - `--dump-tir`: Print TIR after lowering
    - `--emit-llvm`: Print LLVM IR
-   - `-c`: Emit LLVM IR without executing
+   - `--emit-core-ast`: Print the typechecked core AST as JSON
    - `-o file`: Output file
-   - `-O0..3`: Optimization levels
+   - `--opt <N>`: Optimization level passed to clang (0-3)
    - `--fast-math`: Enable unsafe math optimizations
    - `--debug`: Enable debugging
    - `--debug-tui`: TUI debugger (REPL-based)
+
+   Two entries in an earlier revision of this list — `-c` and `-O0..3` — do not
+   exist; the real spellings are `--emit-llvm` and `--opt <N>`.
+
+### 18.1 Execution modes
+
+Everything above describes one pipeline, but `bin/main.ml` dispatches a source
+file to one of **three** engines, and they do not run the same passes. Choosing
+the wrong mental model here is the most common way to misread this document.
+
+| Mode | Invocation | Pipeline actually run |
+|---|---|---|
+| Interpreter | `march file.march` (default) | Parse → Desugar → Typecheck → Refine-check → **eval**. **No TIR at all** — §§5–17 do not apply. |
+| In-process JIT | `march --jit file.march` | Parse → Desugar → Typecheck → Lower → TRMC → Mono → Policy-DCE audit → Defun → Perceus → Escape → LLVM IR → **ORC LLJIT**, run in this process. |
+| AOT | `march --compile file.march` | The full pipeline diagrammed at the top of this document, ending in a clang link. |
+
+**Interpreter** (`lib/eval/eval.ml`, `Eval.run_module`). The tree-walking
+evaluator, and still the default. It consumes the desugared AST directly, so no
+TIR pass ever runs. Variable lookup resolves against a `(string * value) list`
+environment whose shared builtin/module suffix is additionally indexed by a hash
+table, so only the local prefix is scanned (2026-08-25; previously a full linear
+scan with polymorphic comparison, which dominated interpreted runtime).
+
+**In-process JIT** (`lib/jit/repl_jit.ml`, `Repl_jit.run_program`). Reuses the
+REPL's *fragment* pipeline rather than the AOT one — note what is **absent**
+relative to `--compile`: Fusion, Known-call, Beta-ADT, Join-points and the
+`Opt` fixed-point loop. `--jit` code is therefore less optimized than
+`--compile` code even though both go through `Llvm_emit`. After emission it
+calls the same three-symbol entry sequence the native build emits
+(`march_remote_init` → `march_spawn_main` → `march_run_scheduler`), which is why
+tasks, the scheduler and HTTP servers behave as they do in compiled binaries.
+
+`--jit` is **experimental and opt-in**. It falls back to the interpreter, with a
+notice on stderr, for programs that declare actors or that shadow a stdlib
+module; a file with no `main` exits 0 silently, matching the interpreter. Known
+gaps at the time of writing: `argv` is empty, `--debug` is not routed back to the
+interpreter, and one program in the benchmark corpus still faults
+(`specs/todos/2026-08-25-jit-whole-program-json-stream-sigbus.md`). See
+`specs/progress/2026-08-25-interp-perf-phase-4-whole-program-orc.md` for the
+criteria that would have to hold before `--jit` could become the default.
+
+**REPL.** `lib/repl/repl.ml` drives the same fragment pipeline per input line
+against a persistent JIT session. Since 2026-08-25 the default backend is the
+in-process ORC LLJIT; `MARCH_JIT_BACKEND=clang` restores the previous
+clang-subprocess-plus-`dlopen` backend, and any unrecognized value also selects
+clang. Details in `specs/features/repl.md`.
+
+**Stdlib typecheck cache.** The "File compilation" step above no longer
+re-typechecks the 116 stdlib modules on every invocation: `get_stdlib_tc_env`
+seeds the check from a cache under `~/.cache/march/`, keyed by the compiler
+binary's own content hash plus a hash of the stdlib sources. A file that shadows
+a stdlib module bypasses the cache entirely and takes the from-scratch combined
+check, because the shadow-stripped seed environment would be incomplete.
 
 ---
 
@@ -949,7 +1013,12 @@ Type Checking → (type_map)
 | `March_dce` | `lib/tir/dce.ml` | Dead code elimination |
 | `March_opt` | `lib/tir/opt.ml` | Optimization orchestration |
 | `March_llvm_emit` | `lib/tir/llvm_emit.ml` | LLVM code generation |
+| `March_eval` | `lib/eval/eval.ml` | Tree-walking interpreter (default run mode, §18.1) |
+| `March_jit` | `lib/jit/repl_jit.ml` | REPL + `--jit` fragment compilation, ORC LLJIT session (§18.1) |
 
 ---
 
-**Last Updated**: March 20, 2026
+**Last Updated**: August 25, 2026 — §18.1 added (three execution modes: interpreter,
+`--jit`, `--compile`), `bin/main.ml` size and flag list corrected, interpreter and
+JIT modules added to the module reference. Earlier body sections still carry their
+March 2026 review dates.
