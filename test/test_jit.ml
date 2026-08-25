@@ -626,6 +626,87 @@ let test_prelude_so_loads_cross_process () =
             so (Printexc.to_string exn))
         preludes
 
+(* Regression: mutually tail-recursive functions must become a LOOP under
+   --jit, exactly as they do when compiled.
+
+   [Llvm_repl.emit_fns_fragment] used to emit every function individually,
+   never calling [Llvm_tco.find_mutual_tco_groups] /
+   [emit_mutual_tco_group] the way [Llvm_toplevel.emit_module] does.  A
+   mutual tail-call cycle therefore compiled to real native recursion in a
+   JIT fragment, burning one frame per iteration.  Fragments run on a green
+   thread capped at MARCH_STACK_MAX (1 MiB, runtime/march_scheduler.h), so a
+   few thousand iterations ran off the stack reservation and the scheduler's
+   guard-page handler killed the process via `_exit(128 + sig)` — a bare exit
+   138 with NO output and no backtrace.
+
+   `JsonStream`'s tokenizer (`go` / `free_byte` / `str_byte` / `num_byte` /
+   `lit_byte` / …) is exactly such a cycle, advancing one input byte per
+   mutual tail call, so the default 64 KiB `feed` chunk below needs ~65k
+   iterations — far past the cliff.  This is the reduced
+   bench/interp/json_stream.march, kept at ITS record count and chunk size so
+   the assertion below is the benchmark's own cross-checked value.
+
+   The assertion must pin BOTH halves: exit 0 (the crash was a signal death,
+   which produces no output at all) and the checksum (a stack-starved run
+   that somehow limped to completion would still be wrong). *)
+let jit_file_json_stream_src = {|mod JitFileJsonStream do
+  needs IO.Console
+
+pfn build_records(n, acc) do
+  if n <= 0 do acc
+  else
+    build_records(n - 1,
+      Cons("{\"id\": " ++ to_string(n) ++ ", \"name\": \"user-" ++ to_string(n)
+           ++ "\", \"active\": true, \"tags\": [1, 2, 3]}\n", acc))
+  end
+end
+
+fn main(_cap_console : Cap(IO.Console)) do
+  let n = 2000
+  let src = string_join(build_records(n, Nil), "")
+  let total = run_chunked(src, 0, JsonStream.start_ndjson(), 0)
+  println("checksum=" ++ to_string(total))
+end
+
+pfn run_chunked(src, off, st, n) do
+  let sz = string_byte_length(src)
+  if off >= sz do
+    match JsonStream.finish(st) do
+    Err(_) -> 0 - 1
+    Ok(evs) -> n + count_list(evs)
+    end
+  else
+    let take = if sz - off < 65536 do sz - off else 65536 end
+    match JsonStream.feed(st, string_slice(src, off, take)) do
+    Err(_) -> 0 - 1
+    Ok((evs, st2)) -> run_chunked(src, off + take, st2, n + count_list(evs))
+    end
+  end
+end
+
+pfn count_list(evs) do
+  count_go(evs, 0)
+end
+
+pfn count_go(evs, acc) do
+  match evs do
+  Nil -> acc
+  Cons(_, t) -> count_go(t, acc + 1)
+  end
+end
+
+end
+|}
+
+let test_jit_file_mutual_tco_no_stack_overflow () =
+  if not (clang_available ()) then ()
+  else begin
+    let (out, code) = run_jit_file ~env_prefix:"" jit_file_json_stream_src in
+    if contains ~needle:"libLLVM not found" out then ()
+    else
+      check_jit_file ~label:"--jit mutual-TCO (JsonStream tokenizer)"
+        (out, code) ["checksum=28000"]
+  end
 
 let () =
   Alcotest.run "march_jit" [
@@ -677,5 +758,8 @@ let () =
       Alcotest.test_case
         "march --jit falls back to the interpreter when stdlib is shadowed"
         `Slow test_jit_file_shadowing_falls_back;
+      Alcotest.test_case
+        "march --jit loops mutual tail calls instead of overflowing the stack"
+        `Slow test_jit_file_mutual_tco_no_stack_overflow;
     ];
   ]

@@ -10,6 +10,48 @@
 
 ---
 
+## Target selection revised 2026-08-25 — read with the analysis
+
+**`specs/2026-08-25-file-decomposition-analysis.md` supersedes this plan's choice
+of targets and their order.** This plan picked its six files in August from sizes
+that were already stale, and ranked them without measuring how often anyone edits
+them. The analysis measures three axes — size, concentration (share of the file in
+its single largest definition) and **churn** (commits per six months) — and churn
+changes the answer materially. Four conclusions bear directly on the phases below:
+
+1. **`typecheck.ml` is the highest-payoff target, not the lowest.** It is the
+   largest file in the compiler (14,958 lines) *and* the most edited (387 commits
+   in six months, more than `bin/main.ml` or `llvm_emit.ml`). Phase 6 currently
+   downscopes it to "cold data only". The downscoping rationale is real — at 10%
+   concentration there is no single clean seam, and inference is mutually
+   recursive — but that is an argument about technique and sequencing, not value.
+   Phase 6 needs a real plan and should not be last.
+2. **Concentration without churn is not worth fixing.** `llvm_case.ml` is 95% one
+   function, the worst ratio in the tree, and changed 11 times in six months.
+   Ranking by concentration promotes cold code; it is the reason `typecheck.ml`'s
+   diffuse but expensive bulk was ranked below files nobody edits.
+3. **Three actively-edited files are missing from this plan entirely:**
+   `lib/tir/lower.ml` (2,001 lines, 134 commits — more churn than
+   `refine_check.ml`, which gets a whole phase), `lib/desugar/desugar.ml` (3,321,
+   76) and `lib/tir/perceus.ml` (1,998, 66). Each has one dominant function and a
+   clear seam. They warrant a phase.
+4. **Only 2 of 31 files over 800 lines have an `.mli`.** Adding interface files to
+   the highest-churn targets is the cheapest real boundary available — it makes
+   accidental coupling a compile error and shrinks the surface a reader must hold,
+   without moving a line. Do it *before* the corresponding extraction; it makes
+   the extraction safer by declaring what the current surface actually is.
+
+Also worth re-testing: Phase 5 declines to split `bin/main.ml` because "linear
+driver code is the friendliest shape to work in". At 337 commits in six months and
+a 2,510-line `compile`, that judgement deserves evidence — three separate defects
+were found inside that one function during the perf project.
+
+File sizes are no longer recorded in `specs/features/compiler-pipeline.md`; its
+status table carried figures stale by 3–7× and now points at the analysis, which
+is the single source of truth and carries the commands to re-derive every number.
+
+---
+
 ## Re-anchored 2026-08-25 (at `8d2b22fb`, merged onto `origin/main` `7f91ea5d`)
 
 **Read this before executing any task below.** This plan was drafted on 2026-08-19 against

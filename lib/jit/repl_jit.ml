@@ -964,6 +964,26 @@ let run_program ctx ~tc_env (m : March_ast.Ast.module_) : unit =
     refs = ref []; current_decl = ref "" } in
   let (_, type_map) = March_typecheck.Typecheck.check_module_with_env env m in
   let tir = lower_module ~type_map ~stdlib_context:ctx.stdlib_decls m in
+  (* Prune functions unreachable from `main`, exactly as the ahead-of-time
+     pipeline does immediately before LLVM emit (see [Dce.prune_unreachable]'s
+     call in bin/main.ml).  This is a LINKABILITY requirement here, not an
+     optimization, and it is what makes a whole-program --jit run link the same
+     set of symbols the native build does.
+
+     [Lower.lower_module] pulls in stdlib modules at MODULE granularity: the
+     first qualified reference to `JsonStream.feed` lowers EVERY function in
+     `stdlib/json_stream.march`, including `typed_events`, whose body calls the
+     bare `from_json` that a `derive Json` is supposed to supply at the call
+     site.  With no user `derive Json` in the program, `from_json` has no
+     definition anywhere — the AOT build never noticed because DCE dropped
+     `typed_events` before emit, while --jit emitted it and the JIT linker
+     failed to materialize `_from_json`, taking down the whole module.
+
+     Safe ONLY on this whole-program path: a `main` is present, so
+     [root_names] roots reachability at it. The REPL's per-fragment paths
+     ([run_expr]/[run_decl]) must NOT prune — a fragment has no `main`, and
+     anything it defines may be called by a LATER fragment. *)
+  let tir = March_tir.Dce.prune_unreachable tir in
   register_type_defs ctx tir.March_tir.Tir.tm_types;
   let all_types = ctx.loaded_tir_types @ tir.March_tir.Tir.tm_types in
   (* Same entry-point rule as [Llvm_toplevel.emit_module]: a bare `main` or a
@@ -1355,15 +1375,62 @@ let precompile_stdlib ctx
   ctx.stdlib_decls <- stdlib_decls;
   let home = (try Sys.getenv "HOME" with Not_found -> ".") in
   let cache_dir = Filename.concat home ".cache/march" in
-  let short_hash = String.sub content_hash 0 16 in
+  (* Key the prelude cache on the COMPILER as well as the stdlib source.
+     [content_hash] digests only stdlib_decls, so a compiler whose codegen
+     changed while the stdlib text did not reuses the previous build's .so —
+     and the prelude is ordinary compiled code, not data, so that is a
+     mismatched-codegen hazard rather than a stale-but-valid cache.  Hit
+     twice while fixing the mutual-TCO gap below: a compiler that emitted the
+     combined dispatch function happily loaded a cached prelude that did NOT,
+     and json_stream went on dying at exit 138 as if the fix had not landed.
+
+     Identity comes from the executable's size + mtime, not [Digest.file]:
+     the binary is ~15 MB and this runs on every --jit/REPL startup, so
+     hashing it would put a file read of that size on the warm path to save
+     nothing this cheaper key does not already catch (any rebuild rewrites
+     the file and moves its mtime). *)
+  let compiler_id =
+    (try
+       let st = Unix.stat Sys.executable_name in
+       Printf.sprintf "%d:%.0f" st.Unix.st_size st.Unix.st_mtime
+     with _ -> "unknown") in
+  let short_hash =
+    String.sub
+      (Digest.to_hex (Digest.string (content_hash ^ "|" ^ compiler_id))) 0 16 in
   let so_path    = Filename.concat cache_dir
     ("stdlib_prelude_O1_tln2_" ^ short_hash ^ ".so") in
   let names_path = Filename.concat cache_dir
     ("stdlib_prelude_O1_tln2_" ^ short_hash ^ ".names") in
   (* ── Cache hit path ───────────────────────────────────────────────────── *)
+  (* [loaded] records whether the cached .so was ACTUALLY adopted.  A failed
+     load must fall through to the compile branch below, which is what this
+     function's own "recompiling" message has always promised.
+
+     It used to promise it without doing it: the load lived in the `then` arm
+     of an if/else, so an exception was caught, reported, and then simply fell
+     out of the whole conditional with [ctx.compiled_fns] still EMPTY.  That
+     is not a slow path, it is a miscompiling one.  With no prelude adopted,
+     every stdlib module reaches the fragment through [Lower]'s lazy
+     [_ensure_module_lowered] hook, which re-reads the module WITHOUT a
+     type_map and so gives every function all-`TVar "_"` signatures.  Callers
+     and callees then disagree about representation — measured on
+     `JsonStream.is_ws`, emitted as `ptr -> ptr` returning a TAGGED immediate
+     while its call site in `JsonStream.free_byte` loaded a heap tag from the
+     result — i.e. a load from address 0x9, tagged `false` plus the 8-byte tag
+     offset.  Exit 139 out of the scheduler's fault handler, no diagnostic.
+
+     This path is reached routinely, not rarely: on macOS the cached runtime
+     .so is built at a `<name>.<pid>.tmp` path and renamed into place, so its
+     LC_ID_DYLIB still names the temp file, and the prelude .so linked against
+     it records that now-nonexistent path.  Every session after the one that
+     built it therefore fails to dlopen the prelude.  Fixing THAT belongs with
+     the runtime-.so builder (bin/main.ml) and only costs the cache hit;
+     falling through correctly is what keeps the miss safe. *)
+  let loaded = ref false in
   if Sys.file_exists so_path && Sys.file_exists names_path then begin
     (try
       let handle = Jit.dlopen so_path in
+      loaded := true;
       ctx.handles <- handle :: ctx.handles;
       (* Read function names and mark as compiled.
          The last line of the .names file may be "lambda_counter=N" — if so,
@@ -1385,9 +1452,15 @@ let precompile_stdlib ctx
             Hashtbl.replace ctx.compiled_fns line ()
         done with End_of_file -> ())
     with exn ->
+      (* Drop anything a partial load recorded, so the recompile below starts
+         from a clean slate rather than a half-populated compiled_fns that
+         would send some prelude functions to `extern` with no definition. *)
+      loaded := false;
+      Hashtbl.reset ctx.compiled_fns;
       Printf.eprintf "march JIT: stdlib cache load failed (%s), recompiling\n%!"
         (Printexc.to_string exn))
-  end else begin
+  end;
+  if not !loaded then begin
     (* ── Cache miss: lower stdlib to TIR, compile, cache ─────────────────── *)
     (* Ensure cache directory exists — first run or non-standard XDG layout. *)
     (try Unix.mkdir cache_dir 0o755

@@ -1,7 +1,9 @@
 # March Language Compiler Pipeline
 
-**Document Date**: March 22, 2026
-**Total Lines Analyzed**: ~18,500 (across 30+ source files)
+**Document Date**: March 22, 2026 (body); execution modes and status table revised 2026-08-25
+**Scope**: the compiler pipeline, stage by stage. Deliberately no file sizes —
+see `specs/2026-08-25-file-decomposition-analysis.md` for current, re-derivable
+measurements.
 
 **Implementation:** `lib/` directory — `typecheck/`, `tir/`, `jit/`, `repl/`, `cas/`, `debug/`, `scheduler/`
 
@@ -14,11 +16,11 @@ The March compiler transforms source code through a series of passes, from surfa
 ```
 Source Code
     ↓
-[Lexer] (lib/lexer/lexer.mll:1-183)
+[Lexer] (lib/lexer/lexer.mll)
     ↓
-[Parser] (lib/parser/parser.mly:1-688)
+[Parser] (lib/parser/parser.mly)
     ↓
-[Desugaring] (lib/desugar/desugar.ml:1-263)
+[Desugaring] (lib/desugar/desugar.ml)
     ↓
 [Type Checking] (lib/typecheck/typecheck.ml — Typecheck.check_module / check_module_full)
     ↓
@@ -77,7 +79,7 @@ Source Code
 
 ## 1. Lexical Analysis
 
-**File**: `lib/lexer/lexer.mll` (183 lines, OCamllex)
+**File**: `lib/lexer/lexer.mll`
 **Status**: Complete
 
 ### Key Features
@@ -102,7 +104,7 @@ Source Code
 
 ## 2. Parsing
 
-**File**: `lib/parser/parser.mly` (688 lines, Menhir)
+**File**: `lib/parser/parser.mly`
 **Status**: Complete
 
 ### Key Features
@@ -137,7 +139,7 @@ end
 
 ## 3. Desugaring Pass
 
-**File**: `lib/desugar/desugar.ml` (263 lines)
+**File**: `lib/desugar/desugar.ml`
 **Status**: Complete
 
 ### Transformations
@@ -201,7 +203,7 @@ end
 
 ## 4. Type Checking
 
-**File**: `lib/typecheck/typecheck.ml` (~7700 lines)
+**File**: `lib/typecheck/typecheck.ml`
 **Status**: Complete, heavily featured
 
 Entry points: `Typecheck.check_module` and `check_module_full` (the latter also returns the typecheck env). Capability/`needs` enforcement is embedded here via `check_module_needs`. Pattern-match exhaustiveness (`check_exhaustiveness`/`find_missing_mc`) and redundancy (`check_redundant_arms`) checks run during declaration checking. Type-level naturals are reduced by `normalize_tnat`. Immediately after typecheck, `bin/main.ml` runs `Refine_check.check_module` for refinement-type verification.
@@ -264,7 +266,7 @@ Hashtbl mapping expression span → inferred type. Used by lowering to produce c
 
 ## 5. Lowering to TIR
 
-**File**: `lib/tir/lower.ml` (1122 lines)
+**File**: `lib/tir/lower.ml`
 **Status**: Complete
 
 ### Target Intermediate Representation
@@ -312,7 +314,7 @@ Hashtbl mapping expression span → inferred type. Used by lowering to produce c
 
 ## 6. TIR Types and Structures
 
-**File**: `lib/tir/tir.ml` (107 lines)
+**File**: `lib/tir/tir.ml`
 **Status**: Complete
 
 ### ANF-Based IR
@@ -361,7 +363,7 @@ type expr = EAtom of atom
 
 ## 7. Monomorphization Pass
 
-**File**: `lib/tir/mono.ml` (314 lines)
+**File**: `lib/tir/mono.ml`
 **Status**: Complete
 
 ### Purpose
@@ -395,7 +397,7 @@ Eliminates all `TVar` type variables by specializing polymorphic functions at ca
 
 ## 8. Defunctionalization Pass
 
-**File**: `lib/tir/defun.ml` (336 lines)
+**File**: `lib/tir/defun.ml`
 **Status**: Complete
 
 ### Purpose
@@ -507,7 +509,7 @@ Insert reference-counting instructions (EIncRC, EDecRC) and linear/affine cleanu
 
 ## 11. Inlining Pass
 
-**File**: `lib/tir/inline.ml` (179 lines)
+**File**: `lib/tir/inline.ml`
 **Status**: Complete
 
 ### Heuristics
@@ -540,7 +542,7 @@ Insert reference-counting instructions (EIncRC, EDecRC) and linear/affine cleanu
 
 ## 12. Constant Folding Pass
 
-**File**: `lib/tir/fold.ml` (91 lines)
+**File**: `lib/tir/fold.ml`
 **Status**: Complete
 
 ### Operations Folded
@@ -561,7 +563,7 @@ Insert reference-counting instructions (EIncRC, EDecRC) and linear/affine cleanu
 
 ## 13. Simplification Pass
 
-**File**: `lib/tir/simplify.ml` (107 lines)
+**File**: `lib/tir/simplify.ml`
 **Status**: Complete
 
 ### Simplifications
@@ -581,7 +583,7 @@ Insert reference-counting instructions (EIncRC, EDecRC) and linear/affine cleanu
 
 ## 14. Dead Code Elimination Pass
 
-**File**: `lib/tir/dce.ml` (130 lines)
+**File**: `lib/tir/dce.ml`
 **Status**: Complete
 
 ### Two Phases
@@ -604,7 +606,7 @@ Insert reference-counting instructions (EIncRC, EDecRC) and linear/affine cleanu
 
 ## 15. Optimization Coordinator
 
-**File**: `lib/tir/opt.ml` (19 lines)
+**File**: `lib/tir/opt.ml`
 **Status**: Complete
 
 ### Fixed-Point Loop
@@ -627,7 +629,7 @@ let run (m : Tir.tir_module) : Tir.tir_module =
 
 ## 16. LLVM IR Emission
 
-**File**: `lib/tir/llvm_emit.ml` (1659 lines)
+**File**: `lib/tir/llvm_emit.ml`
 **Status**: Substantially complete
 
 ### Object Layout
@@ -688,23 +690,34 @@ Allocation size = 16 + arity × 8 bytes.
 
 ---
 
-## 17. Code Generation Stub
+## 17. `lib/codegen` — a vestigial shim, not the code generator
 
-**File**: `lib/codegen/codegen.ml` (10 lines)
-**Status**: Placeholder
+**File**: `lib/codegen/codegen.ml`
+**Status**: Empty placeholder. **Code generation itself is implemented and shipping** — it simply does not live here.
+
+This module is a leftover:
 
 ```ocaml
 let compile _module_ = ()  (* TODO: Implement *)
 ```
 
-Currently a stub. Full code generation (linking, assembly) not yet implemented.
+An earlier revision of this document read that literally and reported "full code
+generation (linking, assembly) not yet implemented", which is false and badly
+misleading: March emits LLVM IR and links native binaries today. The real path
+is `lib/tir/llvm_emit.ml` (+ the `llvm_*` family) for IR, and `bin/main.ml` for
+the clang invocation that assembles and links it. See §16 and §18.
+
+The shim is retained only because the `march_codegen` library name is still
+referenced by the build; nothing calls into it.
 
 ---
 
 ## 18. Main CLI Entry Point
 
-**File**: `bin/main.ml` (5,390 lines as of 2026-08-25; an earlier revision of this
-document said 334, which was stale by more than an order of magnitude)
+**File**: `bin/main.ml` — one of the largest and most-edited files in the tree.
+An earlier revision claimed 334 lines, understating it by more than an order of
+magnitude; a figure added on 2026-08-25 to correct that went stale within a day.
+Sizes now live only in `specs/2026-08-25-file-decomposition-analysis.md`.
 **Status**: Complete
 
 ### Key Functions
@@ -804,7 +817,7 @@ Capabilities **are** enforced. `lib/effects/effects.ml` is a thin wrapper whose 
 
 ## 20. Purity Analysis
 
-**File**: `lib/tir/purity.ml` (25 lines)
+**File**: `lib/tir/purity.ml`
 **Status**: Complete
 
 ### Definition
@@ -823,7 +836,7 @@ Used by inlining pass to decide which functions are safe to inline.
 
 ## 21. Pretty Printing
 
-**File**: `lib/tir/pp.ml` (98 lines)
+**File**: `lib/tir/pp.ml`
 **Status**: Complete
 
 Renders TIR expressions and types as readable text for debugging (`--dump-tir`).
@@ -888,40 +901,51 @@ Renders TIR expressions and types as readable text for debugging (`--dump-tir`).
 
 ## Implementation Status Summary
 
-| Pass | File | Lines | Status |
-|------|------|-------|--------|
-| Lexer | `lib/lexer/lexer.mll` | 183 | ✓ Complete |
-| Parser | `lib/parser/parser.mly` | 688 | ✓ Complete |
-| AST | `lib/ast/ast.ml` | 306 | ✓ Complete |
-| Desugaring | `lib/desugar/desugar.ml` | 263 | ✓ Complete |
-| Type Checking | `lib/typecheck/typecheck.ml` | 2006 | ✓ Complete |
-| Lowering to TIR | `lib/tir/lower.ml` | 1122 | ✓ Complete |
-| TIR Types | `lib/tir/tir.ml` | 107 | ✓ Complete |
-| Monomorphization | `lib/tir/mono.ml` | 314 | ✓ Complete |
-| Defunctionalization | `lib/tir/defun.ml` | 336 | ✓ Complete |
-| Perceus RC | `lib/tir/perceus.ml` | — | ✓ Complete (runs before Escape) |
-| Escape Analysis | `lib/tir/escape.ml` | — | ✓ Complete (runs after Perceus) |
-| Fusion | `lib/tir/fusion.ml` | — | ✓ Complete |
-| Known-call | `lib/tir/known_call.ml` | — | ✓ Complete |
-| Beta-ADT | `lib/tir/beta_adt.ml` | — | ✓ Complete |
-| Join points | `lib/tir/join_points.ml` | — | ✓ Complete |
-| Refinement check | `lib/refinecheck/refine_check.ml` | ~1069 | ✓ Complete (post-typecheck) |
-| Division safety | `lib/refinecheck/division_safety.ml` | ~307 | ✓ Complete (`cap no_panic`: proves divisors ≠ 0 via Z3) |
-| No-alloc check | `lib/refinecheck/no_alloc.ml` | ~87 | ✓ Complete (`cap no_alloc`: bans heap-allocating exprs) |
-| Capability inference | `lib/refinecheck/cap_infer.ml` | ~120 | ✓ Complete (emits `needs` hint at call sites missing cap decl) |
-| Return refinement inference | `lib/refinecheck/return_infer.ml` | ~238 | ✓ Complete (Z3 sign-candidate probing for return type hints) |
-| Inlining | `lib/tir/inline.ml` | 179 | ✓ Complete |
-| Constant Folding | `lib/tir/fold.ml` | 91 | ✓ Complete |
-| Simplification | `lib/tir/simplify.ml` | 107 | ✓ Complete |
-| DCE | `lib/tir/dce.ml` | 130 | ✓ Complete |
-| Optimization Loop | `lib/tir/opt.ml` | 19 | ✓ Complete |
-| LLVM Emission | `lib/tir/llvm_emit.ml` | 1659 | ✓ Substantial (constructor collision & arity mismatch fixed) |
-| Code Generation | `lib/codegen/codegen.ml` | 10 | ⚠ Stub |
-| Effects System | `lib/effects/effects.ml` | — | ✓ Enforced (delegates to `Typecheck.check_module_needs`) |
-| Purity Analysis | `lib/tir/purity.ml` | 25 | ✓ Complete |
-| Pretty Printing | `lib/tir/pp.ml` | 98 | ✓ Complete |
-| Main CLI | `bin/main.ml` | 334 | ✓ Complete |
-| Tests | `test/test_compiler.ml`, `test_eval.ml`, `test_codegen.ml`, `test_stdlib_suite.ml` | — | ✓ Comprehensive |
+> **File sizes deliberately removed (2026-08-25).** This table used to carry a
+> `Lines` column. Every figure in it had drifted — `typecheck.ml` was listed at
+> 2,006 lines against an actual 14,958, and the document contradicted itself
+> (§4 said ~7,700 for the same file). Because this is the table a reader
+> consults when asking "what is too big to work in?", a stale answer here is
+> worse than no answer. Current, re-derivable measurements — size, largest
+> definition, concentration and churn — live in
+> `specs/2026-08-25-file-decomposition-analysis.md`, which is the single source
+> of truth for file sizes and feeds
+> `specs/plans/2026-08-19-compiler-file-decomposition.md`.
+
+| Pass | File | Status |
+|------|------|--------|
+| Lexer | `lib/lexer/lexer.mll` | ✓ Complete |
+| Parser | `lib/parser/parser.mly` | ✓ Complete |
+| AST | `lib/ast/ast.ml` | ✓ Complete |
+| Desugaring | `lib/desugar/desugar.ml` | ✓ Complete |
+| Type Checking | `lib/typecheck/typecheck.ml` | ✓ Complete |
+| Lowering to TIR | `lib/tir/lower.ml` | ✓ Complete |
+| TIR Types | `lib/tir/tir.ml` | ✓ Complete |
+| Monomorphization | `lib/tir/mono.ml` | ✓ Complete |
+| Defunctionalization | `lib/tir/defun.ml` | ✓ Complete |
+| Perceus RC | `lib/tir/perceus.ml` | ✓ Complete (runs before Escape) |
+| Escape Analysis | `lib/tir/escape.ml` | ✓ Complete (runs after Perceus) |
+| Fusion | `lib/tir/fusion.ml` | ✓ Complete |
+| Known-call | `lib/tir/known_call.ml` | ✓ Complete |
+| Beta-ADT | `lib/tir/beta_adt.ml` | ✓ Complete |
+| Join points | `lib/tir/join_points.ml` | ✓ Complete |
+| Refinement check | `lib/refinecheck/refine_check.ml` | ✓ Complete (post-typecheck) |
+| Division safety | `lib/refinecheck/division_safety.ml` | ✓ Complete (`cap no_panic`: proves divisors ≠ 0 via Z3) |
+| No-alloc check | `lib/refinecheck/no_alloc.ml` | ✓ Complete (`cap no_alloc`: bans heap-allocating exprs) |
+| Capability inference | `lib/refinecheck/cap_infer.ml` | ✓ Complete (emits `needs` hint at call sites missing cap decl) |
+| Return refinement inference | `lib/refinecheck/return_infer.ml` | ✓ Complete (Z3 sign-candidate probing for return type hints) |
+| Inlining | `lib/tir/inline.ml` | ✓ Complete |
+| Constant Folding | `lib/tir/fold.ml` | ✓ Complete |
+| Simplification | `lib/tir/simplify.ml` | ✓ Complete |
+| DCE | `lib/tir/dce.ml` | ✓ Complete |
+| Optimization Loop | `lib/tir/opt.ml` | ✓ Complete |
+| LLVM Emission | `lib/tir/llvm_emit.ml` | ✓ Substantial (constructor collision & arity mismatch fixed) |
+| Code Generation | `lib/codegen/codegen.ml` | ⚠ Stub |
+| Effects System | `lib/effects/effects.ml` | ✓ Enforced (delegates to `Typecheck.check_module_needs`) |
+| Purity Analysis | `lib/tir/purity.ml` | ✓ Complete |
+| Pretty Printing | `lib/tir/pp.ml` | ✓ Complete |
+| Main CLI | `bin/main.ml` | ✓ Complete |
+| Tests | `test/test_compiler.ml`, `test_eval.ml`, `test_codegen.ml`, `test_stdlib_suite.ml` | ✓ Comprehensive |
 
 ---
 
