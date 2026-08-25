@@ -151,6 +151,11 @@ let emit_slot_loader_fns ctx (prev_slots : repl_slot_info list) =
       let fname  = Llvm_ctx.llvm_name si.rs_bare in
       let ret_ty = Llvm_ctx.llvm_ret_ty ty in
       Hashtbl.replace ctx.Llvm_ctx.top_fn_ret_ty si.rs_bare ty;
+      (* Let the EApp/ECallPtr paths route calls to this binding through the
+         loader (closure dispatch) instead of direct-calling an extern @<name>
+         — the direct path's unknown-fn fallback would `declare` the symbol
+         this loader defines, an invalid redefinition within the module. *)
+      Hashtbl.replace ctx.Llvm_ctx.repl_slot_fns si.rs_bare ();
       let (conv_instr, retval) = match ty with
         | Tir.TInt | Tir.TBool -> ("", "%raw")
         | Tir.TFloat -> ("  %fv = bitcast i64 %raw to double\n", "%fv")
@@ -162,8 +167,24 @@ let emit_slot_loader_fns ctx (prev_slots : repl_slot_info list) =
              fragment's entry block), so it needs its own incrc. *)
           ("  %pv = inttoptr i64 %raw to ptr\n  call void @march_incrc(ptr %pv)\n", "%pv")
       in
+      (* `internal` linkage is load-bearing, not cosmetic.  This loader is
+         named after the BARE binding (`@fib`), and when that binding is a
+         REPL `fn` an earlier fragment already emitted the real
+         `define i64 @fib(i64)` under the very same symbol.  Every reference
+         to it is inside this same module, so keeping it module-local costs
+         nothing — and it is the only thing that keeps the two definitions
+         from colliding.
+
+         Under the clang backend each fragment is its own .so, so the
+         collision was invisible (the local definition won within the .so).
+         Under MARCH_JIT_BACKEND=orc all fragments share ONE LLJIT
+         JITDylib, where a second external definition of `_fib` is a hard
+         "duplicate definition of symbol" error from addIRModule — and
+         re-emitting `@fib()` in each later fn fragment would collide with
+         itself as well.  `internal` symbols are module-local and never
+         enter the JITDylib symbol table, so neither collision can arise. *)
       Printf.bprintf ctx.Llvm_ctx.buf
-        "\ndefine %s @%s() {\nentry:\n  %%raw = call i64 @march_repl_get(i64 %d)\n%s  ret %s %s\n}\n"
+        "\ndefine internal %s @%s() {\nentry:\n  %%raw = call i64 @march_repl_get(i64 %d)\n%s  ret %s %s\n}\n"
         ret_ty fname si.rs_slot conv_instr ret_ty retval
   ) prev_slots
 

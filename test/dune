@@ -5,7 +5,7 @@
  (modules test_helpers)
  (ocamlopt_flags (:standard -w -32-26-27))
  (ocamlc_flags   (:standard -w -32-26-27))
- (libraries march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_modules march_resolver march_forge march_lint march_refactor alcotest str unix threads.posix))
+ (libraries march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_jit march_debug march_scheduler march_cas march_modules march_resolver march_forge march_lint march_refactor alcotest str unix threads.posix))
 
 ; ── Per-suite test libraries ──────────────────────────────────────────────
 (library
@@ -802,15 +802,25 @@
  (modules test_supervision)
  (libraries march_lexer march_parser march_ast march_desugar march_eval alcotest unix))
 
+; test_jit drives a real REPL session as a SUBPROCESS (see the ORC-backend
+; regression test in test_jit.ml): the bug it pins was a SIGSEGV, which
+; in-process would take the whole runner down instead of reporting a failure,
+; and the crash only reproduces through the full REPL path (prelude
+; precompile + run_decl sequencing).  Hence the main.exe / stdlib / runtime
+; deps.  HOME is redirected so the stdlib-prelude .so cache is per-build,
+; not shared with the developer's interactive sessions.
 (test
  (name test_jit)
  (modules test_jit)
  (libraries march_jit alcotest unix)
- ; The repl_session tests spawn the real compiler binary and need the staged
+ ; The session tests spawn the real compiler binary and need the staged
  ; stdlib + runtime trees next to it (same dep shape as the bench_gate rule).
+ ; MARCH_BIN serves the check_session harness; the repl_session harness
+ ; resolves the binary from its own executable path instead.
  (deps (source_tree ../stdlib) (source_tree ../runtime)
        (file %{exe:../bin/main.exe}))
- (action (setenv HOME %{project_root}/_build/jit_home (run %{test}))))
+ (action (setenv HOME %{project_root}/_build/jit_home
+          (setenv MARCH_BIN %{exe:../bin/main.exe} (run %{test})))))
 
 (test
  (name test_cas)

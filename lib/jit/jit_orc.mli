@@ -26,3 +26,9 @@ val lookup : t -> string -> nativeint
 (** Tear down the LLJIT instance.  Frees all code produced from
     [add_ir] calls. *)
 val dispose : t -> unit
+
+(** [true] iff libLLVM can be dlopened (or was already loaded by a prior
+    successful [create]).  Cached after the first call.  Never raises —
+    use this to probe availability before deciding whether to fall back
+    to the clang-driver JIT backend. *)
+val available : unit -> bool

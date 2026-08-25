@@ -140,6 +140,15 @@ type ctx = {
      calls that are not resolved at compile time due to type erasure). Maps
      function LLVM name → declare string to avoid duplicate declarations. *)
   unknown_decls : (string, unit) Hashtbl.t;
+  (* REPL fn-fragment prev-slot loaders (bare binding name → ()).  Populated by
+     Llvm_repl.emit_slot_loader_fns for each `define @<name>()` loader it emits.
+     The EApp/ECallPtr paths consult this so a call to a prior REPL binding
+     dispatches through the loader's closure value instead of falling into the
+     unknown-function fallback — which would `declare @<name>` the very symbol
+     the loader defines in the same module (invalid redefinition), and would
+     also pin the callee version compiled at definition time rather than
+     following the slot. *)
+  repl_slot_fns : (string, unit) Hashtbl.t;
   (* Unqualified suffix → qualified TIR name for cross-module function refs
      that lower.ml emits without the module prefix (e.g. "base64_encode" →
      "Crypto.base64_encode").  Populated during emit_module init. *)
@@ -276,6 +285,7 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   blocking_externs = Hashtbl.create 4;
   raises_externs = Hashtbl.create 4;
   unknown_decls = Hashtbl.create 8;
+  repl_slot_fns = Hashtbl.create 8;
   unqualified_fns = Hashtbl.create 32;
   hr_config = hot_reload;
   hr_names;
