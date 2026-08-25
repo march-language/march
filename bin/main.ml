@@ -2474,6 +2474,13 @@ let compile filename =
     { desugared with
       March_ast.Ast.mod_decls = extra_decls @ desugared.March_ast.Ast.mod_decls }
   in
+  (* Snapshot of the user's own decls (entry file + resolved imports) BEFORE
+     stdlib gets prepended below.  Used to typecheck against the cached
+     stdlib env (see [get_stdlib_tc_env]) instead of re-typechecking stdlib
+     from scratch on every invocation — [desugared] itself keeps the stdlib
+     prepend it always had, since lowering further down still needs stdlib's
+     own bodies physically present (see the comment at the prepend site). *)
+  let user_only_desugared = desugared in
   stamp "resolve-imports";
   (* Inject stdlib declarations before user declarations.
      If MARCH_LIB_PATH provided a module that also ships in the stdlib, defer
@@ -2545,7 +2552,24 @@ let compile filename =
      (`march check`/`march caps`) and the LSP deliberately do NOT set it: they
      never run refinecheck, so they keep the old unconditional ban. *)
   March_typecheck.Typecheck.proof_based_panic_surface := true;
-  let (errors, type_map, typecheck_env) = March_typecheck.Typecheck.check_module_full desugared in
+  (* Seed pass 1 from the cached stdlib typecheck env instead of
+     re-typechecking [stdlib_decls] from scratch every run — stdlib
+     typecheck alone is the dominant fixed cost of a `march file.march`
+     interpreted start.  [get_stdlib_tc_env] hashes on [stdlib_decls]'
+     exact content (already shadow-filtered above), so a shadowed stdlib
+     module naturally busts the cache instead of needing a separate
+     fallback.  Checking [user_only_desugared] (no stdlib decls) against
+     that seed is behaviorally identical to combined-checking [desugared]
+     for the user's own portion — same [check_module_core] pass 1/1b/2
+     machinery either way (see [get_stdlib_tc_env]'s docstring) — and the
+     returned [type_map] is the seed's own hashtable with the user decls'
+     entries added into it, so it still carries stdlib's span entries for
+     the lowering pass below. [desugared] (stdlib-prepended) is untouched
+     and still what gets lowered. *)
+  let (errors, type_map, typecheck_env) =
+    let seed_env = get_stdlib_tc_env ~for_js:is_js_target stdlib_decls in
+    March_typecheck.Typecheck.check_module_full ~seed_env user_only_desugared
+  in
   (* Phase A1b: discharge refinement-precondition VCs at call sites. *)
   March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
     ~stdlib_files:(stdlib_span_files stdlib_decls) errors desugared;
