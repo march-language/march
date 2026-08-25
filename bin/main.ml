@@ -4655,7 +4655,23 @@ let compile filename =
           `Fatal error: exception Failure(...)` plus an OCaml backtrace and
           rc=2, which reads like an internal compiler error. *)
        Printf.eprintf "march --jit: %s\n%!" msg;
-       exit 1)
+       exit 1
+     | exn ->
+       (* Same reasoning as the compile_mode `| exn ->` handler above: any
+          OCaml exception other than `Failure` that escapes the shared
+          Lower -> Mono -> Perceus -> Llvm_emit pipeline (reused wholesale
+          here by run_program) is, per the Oracle Task 2 survey, always a
+          compiler bug and never a "this construct isn't supported"
+          signal. Render it like a diagnostic instead of letting OCaml
+          print a raw "Fatal error: exception ..." with no span and no
+          guidance, and exit with the same distinct, documented code. *)
+       let bt = Printexc.get_backtrace () in
+       Printf.eprintf "march: internal compiler error: %s\n" (Printexc.to_string exn);
+       if bt <> "" then Printf.eprintf "%s" bt;
+       Printf.eprintf
+         "This is a compiler bug, not a problem with your program. Please file \
+          an issue with a minimal reproduction.\n%!";
+       exit internal_compiler_error_exit_code)
   end
   else begin
     (* Set up the on-demand module loader so qualified access like Map.get()

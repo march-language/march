@@ -13,7 +13,7 @@ git log is authoritative for exact commits.
 
 ### Added
 
-- `march --jit file.march` runs a whole program through the in-process ORC JIT — near-compiled speed without the clang/link step (experimental; actors fall back to the interpreter).
+- `march --jit file.march` runs a whole program through the in-process ORC JIT — near-compiled speed without the clang/link step (experimental; actors fall back to the interpreter); programs that read command-line arguments see an empty argv under --jit.
 
 ### Fixed
 
