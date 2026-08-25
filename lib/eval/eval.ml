@@ -763,15 +763,10 @@ let log_value_to_string = function
    Set by run_tests around each test body; None during normal execution. *)
 let test_capture_buf : Buffer.t option ref = ref None
 
-(** Platform hook for HTTP client requests.  Native builds leave this [None]
-    and use the socket transport (tcp_connect/tcp_send_all/...).  The
-    js_of_ocaml browser build sets it to a synchronous-XHR implementation.
-    Given (method, url, header_block, body) it returns [Ok raw_response] — a
-    synthesized raw "HTTP/1.1 ..." response string for [http_parse_response] —
-    or [Error msg] on a network/CORS failure. *)
-let http_fetch_hook
-  : (string -> string -> string -> string -> (string, string) result) option ref
-  = ref None
+(* Moved to eval_prim.ml; re-exported here so [Eval.http_fetch_hook] keeps
+   working for existing call sites (the js_of_ocaml build installs it).
+   Aliasing a [ref] shares the same mutable cell. *)
+let http_fetch_hook = Eval_prim.http_fetch_hook
 
 (* Flushed on every call, not just at exit: a long-running program (e.g. an
    HTTP server started via `forge run`, interpreted rather than compiled)
@@ -971,7 +966,10 @@ let debug_ctx : debug_ctx option ref = ref None
 (* ------------------------------------------------------------------ *)
 
 exception Match_failure of string
-exception Eval_error of string
+
+(* [Eval_error] moved to eval_prim.ml; rebound here so [Eval.Eval_error]
+   stays matchable at existing call sites. *)
+exception Eval_error = Eval_prim.Eval_error
 
 (** Bounded consolation diagnostic for task 7 of the 2026-08-03
     refinement-followups-seven plan (see
@@ -1114,7 +1112,8 @@ let check_reductions () : unit =
       raise Yield
   | None -> ()
 
-let eval_error fmt = Printf.ksprintf (fun s -> raise (Eval_error s)) fmt
+(* Moved to eval_prim.ml; re-exported so [Eval.eval_error] keeps working. *)
+let eval_error = Eval_prim.eval_error
 
 (** Decode an internal vault key string back to a March value.
     Mirrors vault_key_of_value.  Complex keys (Tuple, Ctor) are returned
@@ -1392,11 +1391,8 @@ let register_type_ctors (name_txt : string) (variants : variant list) : unit =
       end
     ) variants
 
-(** Forward-reference hook for dispatch in comparison operators.
-    Interface dispatch needs [apply] but [cmp_op] is defined before [apply].
-    Set to the real [apply] after it is defined (see [apply_hook] pattern). *)
-let iface_dispatch_hook : (value -> value list -> value) ref =
-  ref (fun _fn _args -> eval_error "iface_dispatch not yet initialized")
+(* Moved to eval_prim.ml; re-exported here (same mutable cell). *)
+let iface_dispatch_hook = Eval_prim.iface_dispatch_hook
 
 let cmp_op op_i op_f op_s op_b name = VBuiltin (name, function
     | [VInt a;    VInt b]    -> VBool (op_i a b)
@@ -1687,20 +1683,10 @@ let fresh_monitor_id () =
   next_monitor_id := id + 1;
   id
 
-(** Forward reference for evaluating an expression — set after [eval_expr]
-    is defined so that [crash_actor] can call it for supervisor restarts. *)
-let eval_expr_hook : (env -> expr -> value) ref =
-  ref (fun _env _expr -> eval_error "eval_expr not yet initialized")
-
-(** Forward reference for running the scheduler — set after [run_scheduler]
-    is defined so that [base_env] builtins can call it. *)
-let run_scheduler_hook : (unit -> unit) ref =
-  ref (fun () -> eval_error "run_scheduler not yet initialized")
-
-(** Forward reference for [apply] — set after [apply] is defined
-    so that [register_resource_ocaml] can call closures at crash time. *)
-let apply_hook : (value -> value list -> value) ref =
-  ref (fun _fn _args -> eval_error "apply not yet initialized")
+(* Moved to eval_prim.ml; re-exported here (same mutable cells). *)
+let eval_expr_hook = Eval_prim.eval_expr_hook
+let run_scheduler_hook = Eval_prim.run_scheduler_hook
+let apply_hook = Eval_prim.apply_hook
 
 (* ------------------------------------------------------------------ *)
 (* FFI extern stub table                                               *)
