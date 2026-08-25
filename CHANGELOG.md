@@ -17,6 +17,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- macOS: the REPL / `--jit` stdlib prelude cache could never be reused across
+  sessions, so every start silently paid a full stdlib precompile (~9.5s) instead
+  of a ~0.01s cache hit. Cached `.so`s are built at a pid-suffixed `.tmp` path and
+  renamed into place, and the macOS linker stamped that now-dead path as the
+  library's install name — so the prelude recorded an unloadable dependency on the
+  runtime `.so`. They are now linked with `-install_name` pointing at the path the
+  file actually lands at.
 - `--jit`: a whole-program run now prunes functions unreachable from `main`
   before emitting code, as the ahead-of-time pipeline already did. Without it,
   merely calling one function of a stdlib module dragged in every other
