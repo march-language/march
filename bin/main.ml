@@ -1043,6 +1043,10 @@ let dump_phases    = ref false
 let do_timings     = ref false
 let emit_llvm      = ref false
 let do_compile     = ref false
+(* --jit: run a whole program through the in-process ORC JIT (the REPL's
+   backend) instead of the tree-walking interpreter.  Experimental; see the
+   [jit_run] guard in [compile] for what falls back to the interpreter. *)
+let jit_mode       = ref false
 (* FFI Phase 5: extra C sources / linker flags from forge.toml [[ffi]] blocks,
    compiled + linked into the native binary alongside the runtime. *)
 let ffi_c_files    = ref []      (* C source paths, in declaration order (reversed) *)
@@ -2871,6 +2875,48 @@ let compile filename =
       end
     ) diags;
   let compile_mode = !dump_tir || !emit_llvm || !do_compile || !dump_phases in
+  (* --jit: replace the tree-walking interpreter with the in-process ORC JIT
+     for this run.  Every diagnostic above has already been produced and
+     printed exactly as in interpreted mode — this flag only swaps the
+     execution engine underneath, never the checking.
+
+     Actor programs fall back to the interpreter with a notice, mirroring the
+     REPL's own [actors_declared] guard: actor lowering emits dispatch tables
+     the incremental fragment path does not yet set up.  The check walks
+     nested modules too, and looks at [user_only_desugared] so a stdlib actor
+     could never trigger it.  Suppressed on an error/compile/check run so the
+     notice can't appear on a program that is about to exit 1 anyway. *)
+  let jit_run =
+    !jit_mode
+    && not compile_mode && not !do_check && not !check_migration
+    && not (has_user_errors || has_parse_errors || has_resolve_errors
+            || has_desugar_errors)
+    (* A program that shadows a stdlib module must NOT be JIT'd.  The --jit arm
+       feeds [get_stdlib_tc_env]'s seed env into [run_program]'s typecheck, and
+       [no_shadowing] is exactly the condition under which that seed env is
+       sound (see its definition above: when a user module shadows a stdlib
+       one, the seed is unsound whether cached or not, which is why the
+       typecheck above falls back to a from-scratch combined check).  Here the
+       consequence would be worse than wrong diagnostics: run_program's
+       type_map feeds LOWERING. *)
+    && (if no_shadowing then true
+        else begin
+          Printf.eprintf
+            "march: --jit does not support stdlib-shadowing programs yet; running interpreted\n%!";
+          false
+        end)
+    && (let rec has_actor (ds : March_ast.Ast.decl list) =
+          List.exists (function
+            | March_ast.Ast.DActor _ -> true
+            | March_ast.Ast.DMod (_, _, inner, _) -> has_actor inner
+            | _ -> false) ds
+        in
+        if has_actor user_only_desugared.March_ast.Ast.mod_decls then begin
+          Printf.eprintf
+            "march: --jit does not support actor programs yet; running interpreted\n%!";
+          false
+        end else true)
+  in
   (* In compile mode, abort on user-file errors only.  Stdlib errors
      (e.g. http_client) are tolerated since those modules are WIP. *)
   if has_user_errors || has_parse_errors || has_resolve_errors || has_desugar_errors then exit 1
@@ -4576,6 +4622,57 @@ let compile filename =
         an issue with a minimal reproduction.\n%!";
      exit internal_compiler_error_exit_code
   end
+  else if jit_run then begin
+    (* Whole-program JIT.  Reuses the REPL's machinery wholesale: the same
+       runtime .so, the same cached stdlib prelude .so, and the same
+       [get_stdlib_tc_env] seed environment the typecheck above ran against —
+       so [run_program]'s internal re-check of the user module is the exact
+       check_module_full call made at the top of this function, just re-run to
+       produce the type_map that lowering needs. *)
+    let runtime_so = ensure_runtime_so () in
+    let jit_ctx = March_jit.Repl_jit.create ~runtime_so () in
+    (try
+       Fun.protect
+         ~finally:(fun () -> March_jit.Repl_jit.cleanup jit_ctx)
+         (fun () ->
+            March_repl.Repl.maybe_precompile_stdlib (Some jit_ctx)
+              ~stdlib_decls ~type_map;
+            let tc_env = get_stdlib_tc_env ~for_js:false stdlib_decls in
+            (* JIT'd code writes through the C runtime's own stdout and can
+               terminate the process with C `exit()` (panic_, exit_, a fatal
+               signal), which never runs OCaml's at_exit — so anything still
+               sitting in OCaml's stdout/stderr buffers, INCLUDING every
+               warning and hint printed by the diagnostics pass above, is lost.
+               Measured: a two-warning program printed both warnings
+               interpreted and neither under --jit.  Drain the host buffers
+               here so --jit output is byte-identical to interpreted. *)
+            flush stdout;
+            flush stderr;
+            March_jit.Repl_jit.run_program jit_ctx ~tc_env user_only_desugared)
+     with Failure msg ->
+       (* A JIT failure is a compiler-side limitation, not a bug in the user's
+          program: report it as one clean line.  Without this the user gets
+          `Fatal error: exception Failure(...)` plus an OCaml backtrace and
+          rc=2, which reads like an internal compiler error. *)
+       Printf.eprintf "march --jit: %s\n%!" msg;
+       exit 1
+     | exn ->
+       (* Same reasoning as the compile_mode `| exn ->` handler above: any
+          OCaml exception other than `Failure` that escapes the shared
+          Lower -> Mono -> Perceus -> Llvm_emit pipeline (reused wholesale
+          here by run_program) is, per the Oracle Task 2 survey, always a
+          compiler bug and never a "this construct isn't supported"
+          signal. Render it like a diagnostic instead of letting OCaml
+          print a raw "Fatal error: exception ..." with no span and no
+          guidance, and exit with the same distinct, documented code. *)
+       let bt = Printexc.get_backtrace () in
+       Printf.eprintf "march: internal compiler error: %s\n" (Printexc.to_string exn);
+       if bt <> "" then Printf.eprintf "%s" bt;
+       Printf.eprintf
+         "This is a compiler bug, not a problem with your program. Please file \
+          an issue with a minimal reproduction.\n%!";
+       exit internal_compiler_error_exit_code)
+  end
   else begin
     (* Set up the on-demand module loader so qualified access like Map.get()
        can trigger loading a stdlib module even if it wasn't explicitly imported.
@@ -5203,6 +5300,8 @@ let () =
     ("--timings",      Arg.Set do_timings,   " Print per-stage compilation times to stderr");
     ("--emit-llvm",  Arg.Set emit_llvm,   " Emit LLVM IR to <file>.ll");
     ("--compile",    Arg.Set do_compile,  " Compile to native binary via clang");
+    ("--jit",        Arg.Set jit_mode,
+     " Run the program through the in-process ORC JIT instead of the interpreter (experimental)");
     ("--compile-so", Arg.Set compile_so,
      " Compile as a shared library for hot reload patching (no @main, no dispatch init)");
     ("--hot-reload", Arg.String (fun p -> hot_reload_prefix := Some p),

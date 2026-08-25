@@ -80,5 +80,29 @@ val register_module_decl :
   March_ast.Ast.decl ->
   unit
 
+(** Whole-program JIT — the engine behind `march --jit file.march`.
+
+    Lowers the user module (the stdlib prelude must already be in place via
+    [precompile_stdlib]), compiles it through the active backend, and runs
+    [main] the way the native build does: [march_spawn_main] on a thunk that
+    supplies one erased (null) capability per declared parameter, then
+    [march_run_scheduler].  [tc_env] is the pre-user typecheck environment
+    (the stdlib seed env).
+
+    Does NOT propagate [main]'s value as the process exit code — neither does
+    the native build, whose `@main` returns a hard 0.
+
+    A module with no [main] is a no-op returning [()] — the interpreter is
+    silent and exits 0 for such a file, and --jit must not differ.  Detected
+    before any emission or scheduler spawn.
+
+    Raises [Failure] on compile or link error; [bin/main.ml]'s --jit arm turns
+    that into one `march --jit: <msg>` line and exit 1, never a backtrace. *)
+val run_program :
+  t ->
+  tc_env:March_typecheck.Typecheck.env ->
+  March_ast.Ast.module_ ->
+  unit
+
 (** Clean up: close all open dl handles, remove temp files. *)
 val cleanup : t -> unit
