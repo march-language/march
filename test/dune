@@ -815,10 +815,8 @@
  (libraries march_jit alcotest unix)
  ; The session tests spawn the real compiler binary and need the staged
  ; stdlib + runtime trees next to it (same dep shape as the bench_gate rule).
- ; MARCH_BIN serves the check_session harness; the repl_session harness
- ; resolves the binary from its own executable path instead.
- (deps (source_tree ../stdlib) (source_tree ../runtime)
-       (file %{exe:../bin/main.exe}))
+ ; MARCH_BIN serves the check_session and redefinition harnesses.
+ (deps %{exe:../bin/main.exe} (source_tree ../runtime) (source_tree ../stdlib))
  (action (setenv HOME %{project_root}/_build/jit_home
           (setenv MARCH_BIN %{exe:../bin/main.exe} (run %{test})))))
 

@@ -44,6 +44,20 @@ type t = {
   mutable next_slot : int;
   mutable handles : Jit.dl_handle list;      (* open dl handles *)
   compiled_fns : (string, unit) Hashtbl.t;  (* fns already compiled in prior fragments *)
+  (* `$clo_wrap` trampolines DEFINED by a prior fragment of this session that
+     ACTUALLY COMPILED.  Sibling of [compiled_fns] in every respect, including
+     its commit discipline (see [commit_wraps]): every fragment of one session
+     is materialized into a single symbol namespace, so a symbol emitted twice
+     is a duplicate definition.  Codegen's own [emitted_wraps] table is
+     per-FRAGMENT and cannot see across that boundary, so a second fragment
+     using the same top-level fn as a first-class value re-defined
+     `@<fn>$clo_wrap` — ORC's shared JITDylib rejects that outright
+     ("duplicate definition of symbol"), while clang's per-.so flat namespace
+     happened to tolerate it.  Reached by the emitters through
+     [~session_wraps]: the first fragment to need a wrapper defines it, later
+     ones emit a `declare`.  Lives on [t] (never global) because a NEW session
+     gets a new dylib namespace in which none of these symbols exist. *)
+  wrap_defined : (string, unit) Hashtbl.t;
   (* bind_name -> Digest of the declaration's marshaled AST, recorded when a
      REPL-typed `fn` compiles successfully (run_decl ~is_fn_decl:true only —
      stdlib-prelude and :load fns are compiled elsewhere and have no entry).
@@ -57,6 +71,16 @@ type t = {
   global_type_defs : (string, March_tir.Tir.type_def) Hashtbl.t;  (* type name -> TDVariant/TDRecord for display *)
   mutable stdlib_decls : March_ast.Ast.decl list;  (* cached for incremental lowering context *)
   mutable loaded_tir_types : March_tir.Tir.type_def list;  (* TIR type_defs from :load-ed modules, for ctor_info in expression fragments *)
+  (* Per-session LLJIT (ORC backend only; [None] under clang, or before the
+     first fragment if pre-warm failed).  This is deliberately NOT a
+     module-level global: a process that creates several sessions (the test
+     suites do; an embedder would) would otherwise share one JITDylib, and the
+     second session's stdlib fragment would collide with the first's
+     ("duplicate definition of symbol '_Eq$Int.eq'"), or — worse — silently
+     resolve a stale definition left behind by a torn-down session.  One LLJIT
+     per session mirrors the clang backend's natural per-session semantics
+     (per-fragment .so + per-session dl handles closed by [cleanup]). *)
+  mutable orc : Jit_orc.t option;
 }
 
 (* Backend selector — see the plan file for the motivation.
@@ -71,7 +95,7 @@ type t = {
 
    Defined ABOVE [create] (moved from its original position further down this
    file) so that [create] can pre-warm the LLJIT at the end of construction —
-   see the call to [get_orc ()] there. *)
+   see the call to [get_orc t] there. *)
 type backend = [ `Clang | `Orc ]
 
 let backend : backend option ref = ref None
@@ -94,16 +118,17 @@ let current_backend () = resolve_backend ()
 let set_backend_for_tests b = backend := Some b
 let backend_is_orc () = resolve_backend () = `Orc
 
-(* Lazy-initialised LLJIT.  Only touched when backend_is_orc () is true;
-   libLLVM.dylib is loaded on first create(), so non-ORC builds pay no
-   startup cost. *)
-let orc_instance : Jit_orc.t option ref = ref None
-let get_orc () =
-  match !orc_instance with
+(* Lazy-initialised, PER-SESSION LLJIT.  Only touched when backend_is_orc ()
+   is true; libLLVM.dylib is loaded (process-wide, RTLD_GLOBAL) on the first
+   Jit_orc.create in the process, so non-ORC builds pay no startup cost.
+   Cached on the session record so each [t] owns exactly one LLJIT, disposed
+   by [cleanup]. *)
+let get_orc ctx =
+  match ctx.orc with
   | Some j -> j
   | None ->
     let j = Jit_orc.create () in
-    orc_instance := Some j; j
+    ctx.orc <- Some j; j
 
 let create ~runtime_so ?(clang="clang") () =
   (* Per-process artifact dir.  A single shared "march_jit" dir raced when
@@ -163,12 +188,14 @@ let create ~runtime_so ?(clang="clang") () =
     counter = 0; var_slots = []; next_slot = 0;
     handles = [rt_handle];
     compiled_fns = Hashtbl.create 256;
+    wrap_defined = Hashtbl.create 64;
     fn_fingerprints = Hashtbl.create 64;
     global_tir_tys = Hashtbl.create 16;
     global_type_defs = Hashtbl.create 16;
     stdlib_decls = [];
-    loaded_tir_types = [] } in
-  (* Pre-warm the shared LLJIT so its one-time libLLVM-load + JIT-target-machine
+    loaded_tir_types = [];
+    orc = None } in
+  (* Pre-warm this session's LLJIT so its one-time libLLVM-load + JIT-target-machine
      setup cost (~80-90 ms, previously paid on the FIRST REPL fragment) happens
      here at startup instead, overlapping with the rest of [create]'s work.
      Only touches [backend_is_orc ()] — defined below, referencing this
@@ -184,10 +211,10 @@ let create ~runtime_so ?(clang="clang") () =
      repl.ml's per-expression `try ... with _ -> eval_via_interp ()`
      fallback — a graceful degrade to the interpreter, not a crash. Swallow
      the exception here so [create] can't kill REPL startup; on failure
-     [orc_instance] stays [None] and the first fragment's own [get_orc ()]
+     [t.orc] stays [None] and the first fragment's own [get_orc ctx]
      call retries construction and hits that same pre-existing fallback,
      preserving the pre-change failure surface exactly. *)
-  if backend_is_orc () then (try ignore (get_orc ()) with _ -> ());
+  if backend_is_orc () then (try ignore (get_orc t) with _ -> ());
   t
 
 let alloc_slot ctx =
@@ -221,10 +248,12 @@ type fragment_handle =
   | HClang of Jit.dl_handle
   | HOrc
 
-let lookup_sym (fh : fragment_handle) (sym : string) : nativeint =
+(* Takes [ctx] because the ORC branch resolves against THIS session's LLJIT
+   (see the [orc] field on [t]) — there is no process-wide instance. *)
+let lookup_sym ctx (fh : fragment_handle) (sym : string) : nativeint =
   match fh with
   | HClang h -> Jit.dlsym h sym
-  | HOrc     -> Jit_orc.lookup (get_orc ()) sym
+  | HOrc     -> Jit_orc.lookup (get_orc ctx) sym
 
 let compile_fragment_clang ctx (ir : string) : Jit.dl_handle =
   let n = ctx.counter - 1 in
@@ -290,7 +319,7 @@ let compile_fragment_clang ctx (ir : string) : Jit.dl_handle =
   ctx.handles <- handle :: ctx.handles;
   handle
 
-(* Backend dispatcher. In ORC mode we parse the IR straight into the shared
+(* Backend dispatcher. In ORC mode we parse the IR straight into the session's
    LLJIT — no shared object, no dlopen, no per-fragment handle. The counter
    is assumed to already have been advanced (next_id called) by the caller,
    matching the clang path's invariant. *)
@@ -299,7 +328,7 @@ let compile_fragment ctx (ir : string) : fragment_handle =
     let n = ctx.counter - 1 in
     let name = Printf.sprintf "repl_%d" n in
     let t0 = if profile_enabled then Unix.gettimeofday () else 0. in
-    Jit_orc.add_ir (get_orc ()) ~ir ~name;
+    Jit_orc.add_ir (get_orc ctx) ~ir ~name;
     if profile_enabled then
       Printf.eprintf "[jit-prof]   orc_add_ir         %6.1fms\n%!"
         ((Unix.gettimeofday () -. t0) *. 1000.);
@@ -346,6 +375,26 @@ let mark_compiled_fns ctx (fns : March_tir.Tir.fn_def list) =
     Hashtbl.replace ctx.compiled_fns f.fn_name ()
   ) fns
 
+(** Fresh per-fragment `$clo_wrap` bookkeeping to hand to an emit entry point:
+    the session's committed definitions to read, plus an empty pending set for
+    this fragment's own [`Define] decisions.  Pure — nothing on [ctx] changes
+    until [commit_wraps]. *)
+let fresh_wrap_state ctx : March_tir.Llvm_emit.session_wraps =
+  { sw_defined = ctx.wrap_defined; sw_pending = Hashtbl.create 8 }
+
+(** Promote a fragment's pending `$clo_wrap` definitions into the session.
+
+    EXACTLY the same discipline as [mark_compiled_fns], and it must be called in
+    exactly the same places: AFTER [compile_fragment] + dlopen succeed.  A
+    fragment that emitted a wrapper and then failed to compile materialized
+    NOTHING, and the REPL keeps going (the failure is printed, not fatal) — so
+    recording it at emission time would make the NEXT fragment emit a `declare`
+    against a symbol that does not exist, turning a recoverable compile error
+    into an unresolved-symbol failure, in a spot where the pre-dedupe code
+    recovered by simply redefining the wrapper.  On the failure path the caller
+    drops the state: it is a local value, so there is nothing to roll back. *)
+let commit_wraps ctx (sw : March_tir.Llvm_emit.session_wraps) =
+  Hashtbl.iter (fun k () -> Hashtbl.replace ctx.wrap_defined k ()) sw.sw_pending
 module SS = Set.Make (String)
 
 (** Rename every reference to the top-level fn [old_name] to [new_name]
@@ -846,11 +895,14 @@ let register_module_decl ctx ~tc_env (d : March_ast.Ast.decl) =
       let (new_fns, extern_fns) = partition_fns ctx tir.March_tir.Tir.tm_fns in
       if new_fns <> [] then begin
         ignore (next_id ctx);
+        let sw = fresh_wrap_state ctx in
         let ir = March_tir.Llvm_emit.emit_fns_fragment
-          ~types:tir.March_tir.Tir.tm_types ~fns:new_fns ~extern_fns ~repl:true () in
+          ~types:tir.March_tir.Tir.tm_types ~fns:new_fns ~extern_fns
+          ~session_wraps:sw ~repl:true () in
         (try
           ignore (compile_fragment ctx ir);
-          mark_compiled_fns ctx new_fns
+          mark_compiled_fns ctx new_fns;
+          commit_wraps ctx sw
         with Failure msg ->
           Printf.eprintf "jit: module compile failed: %s\n%!" msg)
       end
@@ -890,6 +942,7 @@ let run_expr ctx ~tc_env m =
   in
   (* Advance counter only when we are about to emit — keeps counter in sync with artifacts. *)
   let n = next_id ctx in
+  let sw = fresh_wrap_state ctx in
   let ir = time_phase "emit_ir" (fun () ->
     March_tir.Llvm_emit.emit_repl_expr
       ~n ~ret_ty
@@ -897,13 +950,15 @@ let run_expr ctx ~tc_env m =
       ~fns:new_fns
       ~extern_fns
       ~store_as_slot:(Some v_slot)
+      ~session_wraps:sw
       ~types:(ctx.loaded_tir_types @ tir.March_tir.Tir.tm_types)
       main_fn.fn_body) in
   let handle = time_phase "clang+dlopen"
     (fun () -> compile_fragment ctx ir) in
   mark_compiled_fns ctx new_fns;
+  commit_wraps ctx sw;
   let sym_name = Printf.sprintf "repl_%d" n in
-  let fptr = lookup_sym handle sym_name in
+  let fptr = lookup_sym ctx handle sym_name in
   let result_str = match ret_ty with
     | March_tir.Tir.TInt ->
       let v = Jit.call_void_to_int fptr in
@@ -1080,31 +1135,37 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
        outer lambda's IR referenced the inner lambda before it was declared. *)
     (if helper_fns <> [] then begin
       ignore (next_id ctx);  (* advance counter so compile_fragment uses right id *)
+      let sw = fresh_wrap_state ctx in
       let ir = March_tir.Llvm_emit.emit_fns_fragment
-        ~types:(ctx.loaded_tir_types @ tir.March_tir.Tir.tm_types) ~fns:helper_fns ~extern_fns ~repl:true () in
+        ~types:(ctx.loaded_tir_types @ tir.March_tir.Tir.tm_types) ~fns:helper_fns
+        ~extern_fns ~session_wraps:sw ~repl:true () in
       (* Wrap in compile_fragment — uses counter (= hn) for the file name. *)
       (try
         ignore (compile_fragment ctx ir);
-        mark_compiled_fns ctx helper_fns
+        mark_compiled_fns ctx helper_fns;
+        commit_wraps ctx sw
       with exn ->
         raise exn)
     end);
     (* Emit primary function AND store closure in a persistent slot. *)
     let pn = next_id ctx in
     let slot = alloc_slot ctx in
+    let sw = fresh_wrap_state ctx in
     let ir = March_tir.Llvm_emit.emit_repl_fn_with_closure_slot
       ~n:pn ~bind_name ~dest_slot:slot ~prev_slots
-      ~extern_fns:(extern_fns @ helper_fns) ~types:(ctx.loaded_tir_types @ tir.March_tir.Tir.tm_types)
+      ~extern_fns:(extern_fns @ helper_fns) ~session_wraps:sw
+      ~types:(ctx.loaded_tir_types @ tir.March_tir.Tir.tm_types)
       primary_fn in
     let handle = compile_fragment ctx ir in
     mark_compiled_fns ctx [primary_fn];
+    commit_wraps ctx sw;
     (* Record the declaration's fingerprint only after the fragment compiled
        and loaded — a failed compile must leave the previous state (and its
        fingerprint) intact so the user's retry recompiles cleanly, mirroring
        the mark_compiled_fns discipline. *)
     Hashtbl.replace ctx.fn_fingerprints bind_name fingerprint;
     let init_name = Printf.sprintf "repl_%d_init" pn in
-    let fptr = lookup_sym handle init_name in
+    let fptr = lookup_sym ctx handle init_name in
     Jit.call_void_to_void fptr;
     (* Register the slot so future fragments can load the closure as a value.
        The type is TFn (closures are heap pointers), which causes emit_prev_slot_bridges
@@ -1126,6 +1187,7 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
     let slot = alloc_slot ctx in
     (* Advance counter only when about to emit. *)
     let n = next_id ctx in
+    let sw = fresh_wrap_state ctx in
     let ir = March_tir.Llvm_emit.emit_repl_decl
       ~n ~name:bind_name
       ~val_ty:main_fn.fn_ret_ty
@@ -1133,12 +1195,14 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
       ~prev_slots:(prev_slots_of ctx)
       ~fns:user_fns
       ~extern_fns
+      ~session_wraps:sw
       ~types:(ctx.loaded_tir_types @ tir.March_tir.Tir.tm_types)
       main_fn.fn_body in
     let handle = compile_fragment ctx ir in
     mark_compiled_fns ctx user_fns;
+    commit_wraps ctx sw;
     let init_name = Printf.sprintf "repl_%d_init" n in
-    let fptr = lookup_sym handle init_name in
+    let fptr = lookup_sym ctx handle init_name in
     Jit.call_void_to_void fptr;
     (* Register slot for future references to bind_name. *)
     ctx.var_slots <- (bind_name, slot, main_fn.fn_ret_ty) ::
@@ -1222,8 +1286,10 @@ let precompile_stdlib ctx
           not (Hashtbl.mem ctx.compiled_fns f.fn_name))
         tir.March_tir.Tir.tm_fns in
       if stdlib_fns <> [] then begin
+        let sw = fresh_wrap_state ctx in
         let ir = March_tir.Llvm_emit.emit_fns_fragment
-          ~types:tir.March_tir.Tir.tm_types ~fns:stdlib_fns ~repl:true () in
+          ~types:tir.March_tir.Tir.tm_types ~fns:stdlib_fns
+          ~session_wraps:sw ~repl:true () in
         let n = next_id ctx in
         let ll_path = Filename.concat ctx.tmp_dir
           (Printf.sprintf "stdlib_prelude_%d.ll" n) in
@@ -1283,7 +1349,8 @@ let precompile_stdlib ctx
              ctx.handles <- handle :: ctx.handles;
              List.iter (fun (f : March_tir.Tir.fn_def) ->
                Hashtbl.replace ctx.compiled_fns f.fn_name ()
-             ) stdlib_fns
+             ) stdlib_fns;
+             commit_wraps ctx sw
            with exn ->
              Printf.eprintf "march JIT: stdlib .so dlopen failed (%s)\n%!"
                (Printexc.to_string exn))
@@ -1298,6 +1365,20 @@ let precompile_stdlib ctx
   end
 
 let cleanup ctx =
+  (* Dispose this session's LLJIT (if it ever created one — clang mode and
+     JIT-less tests leave it [None]) BEFORE closing the dl handles, so JIT'd
+     code is torn down while the runtime/prelude .sos it references are still
+     mapped.  LLVMOrcDisposeLLJIT frees all code produced by [add_ir]; that is
+     exactly the right lifetime here, since a session's fragments must die with
+     the session — the same contract dlclose gives the clang path.  [cleanup]
+     is terminal for a ctx (all callers drop it immediately: bin/main.ml's
+     Fun.protect finallys, test/test_codegen.ml's protect-and-reraise pairs,
+     test/test_helpers.ml), so the disposed handle can never be reused; clear
+     it anyway to make a double [cleanup] a no-op rather than a double free. *)
+  (match ctx.orc with
+   | Some j -> (try Jit_orc.dispose j with _ -> ())
+   | None -> ());
+  ctx.orc <- None;
   List.iter (fun h -> try Jit.dlclose h with _ -> ()) ctx.handles;
   if Sys.getenv_opt "MARCH_KEEP_LL" <> None then ()
   else begin

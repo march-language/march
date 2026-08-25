@@ -13,6 +13,7 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- REPL JIT: referencing the same top-level function as a value across multiple lines no longer fails with "duplicate definition of symbol '<fn>$clo_wrap'" (ORC backend).
 - JIT REPL (both backends): defining a function that calls a previously
   REPL-defined function (`fn f(x) do x + 1 end` then `fn g(x) do f(x) end`)
   failed with an invalid-IR "redefinition of function" error and the new
@@ -27,12 +28,15 @@ git log is authoritative for exact commits.
   colliding in ORC's single shared JITDylib with the real definition of the
   same name; and the ORC binding double-freed the module on the add-module
   error path, turning that recoverable error into a hard crash. The default
+  clang backend was unaffected; each REPL/JIT session owns its own LLJIT
+  instance (multiple sessions per process no longer collide).
   clang backend was unaffected.
 
 - REPL: redefining a `fn` at the prompt now takes effect under both JIT
   backends (clang and ORC), matching interpreter mode's rebinding — the new
   body was previously silently ignored and calls kept answering with the
   first definition. `:reset` scroll-replay of unchanged cells still skips
+  recompilation.
   recompilation. Combined with the slot-routed call fix above, this matches
   interpreter mode exactly: a direct call gets the new body, while a function
   defined earlier keeps calling the definition it was compiled against.

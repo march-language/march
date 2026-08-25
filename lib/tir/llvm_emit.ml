@@ -117,6 +117,10 @@ let _repr_audit = Llvm_ctx._repr_audit
    here; the ~9-site consolidation below calls them by their bare names. *)
 
 type ctor_entry = Llvm_ctx.ctor_entry = { ce_tag : int; ce_fields : Tir.ty list }
+type session_wraps = Llvm_ctx.session_wraps = {
+  sw_defined : (string, unit) Hashtbl.t;
+  sw_pending : (string, unit) Hashtbl.t;
+}
 type ctx = Llvm_ctx.ctx = {
   buf       : Buffer.t;
   preamble  : Buffer.t;
@@ -141,6 +145,7 @@ type ctx = Llvm_ctx.ctx = {
   var_slot  : (string, string) Hashtbl.t;
   local_names : (string, int) Hashtbl.t;
   emitted_wraps : (string, unit) Hashtbl.t;
+  mutable session_wraps : Llvm_ctx.session_wraps option;
   static_clos : (string, string) Hashtbl.t;
   extra_fns : Buffer.t;
   emitted_eq_fns : (string, unit) Hashtbl.t;
@@ -413,8 +418,9 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
     (* Determine the wrapper name *)
     let wrap_name = fn_name ^ "$clo_wrap" in
     (* Register wrapper if not already generated *)
-    if not (Hashtbl.mem ctx.emitted_wraps wrap_name) then begin
-      Hashtbl.add ctx.emitted_wraps wrap_name ();
+    (match Llvm_ctx.wrap_emit_kind ctx wrap_name with
+     | `Skip -> ()
+     | (`Define | `Declare) as wrap_kind ->
       (* We'll generate the wrapper function at the end.  For now, declare it.
          When the AVar's type is erased (TVar "_"), fall back to the param-count
          registered in top_fn_nparams at function-definition time. *)
@@ -431,8 +437,10 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
          concrete forwarding call (boxing/unboxing Float params + return). *)
       let param_tys = List.map llvm_ty ps_tirs in
       Buffer.add_string ctx.extra_fns
-        (clo_wrap_define ~drop_clo:ctx.repl wrap_name param_tys target_ret fn_name)
-    end;
+        (match wrap_kind with
+         | `Declare -> Llvm_calls.clo_wrap_declare wrap_name param_tys
+         | `Define  ->
+           clo_wrap_define ~drop_clo:ctx.repl wrap_name param_tys target_ret fn_name));
     (* Allocate closure: header(16) + fn_ptr(8) = 24 bytes *)
     if static_closure_ok ctx v.Tir.v_name then
       ("ptr", Llvm_ctx.intern_static_closure
@@ -543,8 +551,9 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
        runtime global @march_kill. *)
     let fn_name = llvm_name (mangle_extern v.Tir.v_name) in
     let wrap_name = fn_name ^ "$clo_wrap" in
-    if not (Hashtbl.mem ctx.emitted_wraps wrap_name) then begin
-      Hashtbl.add ctx.emitted_wraps wrap_name ();
+    (match Llvm_ctx.wrap_emit_kind ctx wrap_name with
+     | `Skip -> ()
+     | (`Define | `Declare) as wrap_kind ->
       let param_ltys =
         match Llvm_builtins.builtin_param_llvm_tys v.Tir.v_name with
         | Some ps -> ps
@@ -559,8 +568,10 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
         | None -> llvm_ret_ty (fn_ret_tir v.Tir.v_ty)
       in
       Buffer.add_string ctx.extra_fns
-        (clo_wrap_define ~drop_clo:ctx.repl wrap_name param_ltys target_ret fn_name)
-    end;
+        (match wrap_kind with
+         | `Declare -> Llvm_calls.clo_wrap_declare wrap_name param_ltys
+         | `Define  ->
+           clo_wrap_define ~drop_clo:ctx.repl wrap_name param_ltys target_ret fn_name));
     if static_closure_ok ctx v.Tir.v_name then
       ("ptr", Llvm_ctx.intern_static_closure
                 ~pad:(Clo_flags.pad_for v.Tir.v_name) ctx fn_name wrap_name)
@@ -606,14 +617,17 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
           dispatch can call it uniformly.  Mirrors lines 972–1030. *)
        let fn_name   = llvm_name fname in
        let wrap_name = fn_name ^ "$clo_wrap" in
-       if not (Hashtbl.mem ctx.emitted_wraps wrap_name) then begin
-         Hashtbl.add ctx.emitted_wraps wrap_name ();
-         let ret_tir     = fn_ret_tir v.Tir.v_ty in
-         let target_ret  = llvm_ret_ty ret_tir in
-         let param_tys   = List.map llvm_ty ps in
-         Buffer.add_string ctx.extra_fns
-           (clo_wrap_define ~drop_clo:ctx.repl wrap_name param_tys target_ret fn_name)
-       end;
+       (match Llvm_ctx.wrap_emit_kind ctx wrap_name with
+        | `Skip -> ()
+        | (`Define | `Declare) as wrap_kind ->
+          let ret_tir     = fn_ret_tir v.Tir.v_ty in
+          let target_ret  = llvm_ret_ty ret_tir in
+          let param_tys   = List.map llvm_ty ps in
+          Buffer.add_string ctx.extra_fns
+            (match wrap_kind with
+             | `Declare -> Llvm_calls.clo_wrap_declare wrap_name param_tys
+             | `Define  ->
+               clo_wrap_define ~drop_clo:ctx.repl wrap_name param_tys target_ret fn_name));
        if static_closure_ok ctx resolved then
          ("ptr", Llvm_ctx.intern_static_closure
                    ~pad:(Clo_flags.pad_for resolved) ctx fn_name wrap_name)
@@ -5678,24 +5692,28 @@ let emit_slot_loader_fns = Llvm_repl.emit_slot_loader_fns
 let emit_prev_global_bridges = Llvm_repl.emit_prev_global_bridges
 
 let emit_repl_expr ?fast_math ~n ~ret_ty ~prev_slots ~fns ?extern_fns
-    ?store_as_slot ~types (body : Tir.expr) : string =
+    ?store_as_slot ?session_wraps ~types (body : Tir.expr) : string =
   Llvm_repl.emit_repl_expr ~emit_expr
-    ?fast_math ~n ~ret_ty ~prev_slots ~fns ?extern_fns ?store_as_slot ~types body
+    ?fast_math ~n ~ret_ty ~prev_slots ~fns ?extern_fns ?store_as_slot
+    ?session_wraps ~types body
 
 let emit_repl_decl ?fast_math ~n ~name ~val_ty ~dest_slot ~prev_slots ~fns
-    ?extern_fns ~types (body : Tir.expr) : string =
+    ?extern_fns ?session_wraps ~types (body : Tir.expr) : string =
   Llvm_repl.emit_repl_decl ~emit_expr
-    ?fast_math ~n ~name ~val_ty ~dest_slot ~prev_slots ~fns ?extern_fns ~types body
+    ?fast_math ~n ~name ~val_ty ~dest_slot ~prev_slots ~fns ?extern_fns
+    ?session_wraps ~types body
 
 let emit_repl_fn ?fast_math ~n ~prev_slots ?extern_fns ~types (fn : Tir.fn_def) : string =
   Llvm_repl.emit_repl_fn ~emit_expr ?fast_math ~n ~prev_slots ?extern_fns ~types fn
 
 let emit_repl_fn_with_closure_slot ?fast_math ~n ~bind_name ~dest_slot
-    ~prev_slots ?extern_fns ~types (fn : Tir.fn_def) : string =
+    ~prev_slots ?extern_fns ?session_wraps ~types (fn : Tir.fn_def) : string =
   Llvm_repl.emit_repl_fn_with_closure_slot ~emit_expr
-    ?fast_math ~n ~bind_name ~dest_slot ~prev_slots ?extern_fns ~types fn
+    ?fast_math ~n ~bind_name ~dest_slot ~prev_slots ?extern_fns
+    ?session_wraps ~types fn
 
-let emit_fns_fragment ~types ~fns ?extern_fns ~repl () : string =
-  Llvm_repl.emit_fns_fragment ~emit_expr ~types ~fns ?extern_fns ~repl ()
+let emit_fns_fragment ~types ~fns ?extern_fns ?session_wraps ~repl () : string =
+  Llvm_repl.emit_fns_fragment ~emit_expr ~types ~fns ?extern_fns ?session_wraps
+    ~repl ()
 
 let llvm_ty_of_tir = Llvm_repl.llvm_ty_of_tir
