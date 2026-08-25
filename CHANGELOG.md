@@ -11,6 +11,10 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- `march --jit file.march` runs a whole program through the in-process ORC JIT — near-compiled speed without the clang/link step (experimental; actors fall back to the interpreter).
+
 ### Fixed
 
 - REPL JIT: referencing the same top-level function as a value across multiple lines no longer fails with "duplicate definition of symbol '<fn>$clo_wrap'" (ORC backend).

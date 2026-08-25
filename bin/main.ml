@@ -1043,6 +1043,10 @@ let dump_phases    = ref false
 let do_timings     = ref false
 let emit_llvm      = ref false
 let do_compile     = ref false
+(* --jit: run a whole program through the in-process ORC JIT (the REPL's
+   backend) instead of the tree-walking interpreter.  Experimental; see the
+   [jit_run] guard in [compile] for what falls back to the interpreter. *)
+let jit_mode       = ref false
 (* FFI Phase 5: extra C sources / linker flags from forge.toml [[ffi]] blocks,
    compiled + linked into the native binary alongside the runtime. *)
 let ffi_c_files    = ref []      (* C source paths, in declaration order (reversed) *)
@@ -2871,6 +2875,34 @@ let compile filename =
       end
     ) diags;
   let compile_mode = !dump_tir || !emit_llvm || !do_compile || !dump_phases in
+  (* --jit: replace the tree-walking interpreter with the in-process ORC JIT
+     for this run.  Every diagnostic above has already been produced and
+     printed exactly as in interpreted mode — this flag only swaps the
+     execution engine underneath, never the checking.
+
+     Actor programs fall back to the interpreter with a notice, mirroring the
+     REPL's own [actors_declared] guard: actor lowering emits dispatch tables
+     the incremental fragment path does not yet set up.  The check walks
+     nested modules too, and looks at [user_only_desugared] so a stdlib actor
+     could never trigger it.  Suppressed on an error/compile/check run so the
+     notice can't appear on a program that is about to exit 1 anyway. *)
+  let jit_run =
+    !jit_mode
+    && not compile_mode && not !do_check && not !check_migration
+    && not (has_user_errors || has_parse_errors || has_resolve_errors
+            || has_desugar_errors)
+    && (let rec has_actor (ds : March_ast.Ast.decl list) =
+          List.exists (function
+            | March_ast.Ast.DActor _ -> true
+            | March_ast.Ast.DMod (_, _, inner, _) -> has_actor inner
+            | _ -> false) ds
+        in
+        if has_actor user_only_desugared.March_ast.Ast.mod_decls then begin
+          Printf.eprintf
+            "march: --jit does not support actor programs yet; running interpreted\n%!";
+          false
+        end else true)
+  in
   (* In compile mode, abort on user-file errors only.  Stdlib errors
      (e.g. http_client) are tolerated since those modules are WIP. *)
   if has_user_errors || has_parse_errors || has_resolve_errors || has_desugar_errors then exit 1
@@ -4576,6 +4608,23 @@ let compile filename =
         an issue with a minimal reproduction.\n%!";
      exit internal_compiler_error_exit_code
   end
+  else if jit_run then begin
+    (* Whole-program JIT.  Reuses the REPL's machinery wholesale: the same
+       runtime .so, the same cached stdlib prelude .so, and the same
+       [get_stdlib_tc_env] seed environment the typecheck above ran against —
+       so [run_program]'s internal re-check of the user module is the exact
+       check_module_full call made at the top of this function, just re-run to
+       produce the type_map that lowering needs. *)
+    let runtime_so = ensure_runtime_so () in
+    let jit_ctx = March_jit.Repl_jit.create ~runtime_so () in
+    Fun.protect
+      ~finally:(fun () -> March_jit.Repl_jit.cleanup jit_ctx)
+      (fun () ->
+         March_repl.Repl.maybe_precompile_stdlib (Some jit_ctx)
+           ~stdlib_decls ~type_map;
+         let tc_env = get_stdlib_tc_env ~for_js:false stdlib_decls in
+         March_jit.Repl_jit.run_program jit_ctx ~tc_env user_only_desugared)
+  end
   else begin
     (* Set up the on-demand module loader so qualified access like Map.get()
        can trigger loading a stdlib module even if it wasn't explicitly imported.
@@ -5203,6 +5252,8 @@ let () =
     ("--timings",      Arg.Set do_timings,   " Print per-stage compilation times to stderr");
     ("--emit-llvm",  Arg.Set emit_llvm,   " Emit LLVM IR to <file>.ll");
     ("--compile",    Arg.Set do_compile,  " Compile to native binary via clang");
+    ("--jit",        Arg.Set jit_mode,
+     " Run the program through the in-process ORC JIT instead of the interpreter (experimental)");
     ("--compile-so", Arg.Set compile_so,
      " Compile as a shared library for hot reload patching (no @main, no dispatch init)");
     ("--hot-reload", Arg.String (fun p -> hot_reload_prefix := Some p),

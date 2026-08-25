@@ -308,6 +308,119 @@ let test_repl_session_redefine_then_call_orc () =
     else check_redefine_then_call ~label:"orc backend" (out, code)
   end
 
+(* ── `march --jit file.march` (whole-program JIT) ─────────────────────────
+
+   Task 4.1: --jit runs a whole program through the in-process ORC JIT
+   (Repl_jit.run_program) instead of the tree-walking interpreter.
+
+   Driven as a SUBPROCESS, like [check_session] above, for two reasons:
+   --jit is a CLI flag, so a subprocess IS the unit under test; and
+   run_program calls the program's `main` on a green thread through
+   march_spawn_main/march_run_scheduler, so a miscompile shows up as a
+   fatal signal that must not be able to take the test runner with it.
+
+   Uses the same per-pid [session_home] as the REPL harnesses, so the
+   stdlib prelude .so is precompiled at most once per test run. *)
+let run_jit_file ~env_prefix (src : string) : string * int =
+  let f = Filename.temp_file "march_jit_file" ".march" in
+  let oc = open_out f in
+  output_string oc src;
+  close_out oc;
+  let out_path = Filename.temp_file "march_jit_file" ".out" in
+  let cmd =
+    Printf.sprintf "HOME=%s %s %s --jit %s > %s 2>&1"
+      (Filename.quote (Lazy.force session_home))
+      env_prefix (Filename.quote main_exe) (Filename.quote f)
+      (Filename.quote out_path) in
+  let code = Sys.command cmd in
+  let ic = open_in_bin out_path in
+  let out = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  (try Sys.remove f with _ -> ());
+  (try Sys.remove out_path with _ -> ());
+  (out, code)
+
+let jit_file_fib_src = {|mod JitFileTest do
+  needs IO.Console
+
+  fn fib(n : Int) : Int do
+    if n < 2 do n else fib(n - 1) + fib(n - 2) end
+  end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    println("checksum=" ++ int_to_string(fib(20)))
+  end
+end
+|}
+
+let check_jit_file ~label (out, code) needles =
+  Alcotest.(check int)
+    (Printf.sprintf "%s: exit code (output: %s)" label out) 0 code;
+  List.iter (fun needle ->
+      if not (contains ~needle out) then
+        Alcotest.failf "%s: expected %S in output, got:\n%s" label needle out)
+    needles
+
+let test_jit_file_orc () =
+  if not (clang_available ()) then ()  (* skip: stdlib precompile needs clang *)
+  else begin
+    let (out, code) =
+      run_jit_file ~env_prefix:"MARCH_JIT_BACKEND=orc" jit_file_fib_src in
+    if contains ~needle:"libLLVM not found" out then ()
+    else check_jit_file ~label:"--jit (ORC backend)" (out, code) ["checksum=6765"]
+  end
+
+let test_jit_file_clang () =
+  if not (clang_available ()) then ()
+  else
+    check_jit_file ~label:"--jit (clang backend)"
+      (run_jit_file ~env_prefix:"MARCH_JIT_BACKEND=clang" jit_file_fib_src)
+      ["checksum=6765"]
+
+(* An actor program must not be JIT-compiled yet: it falls back to the
+   interpreter with a notice on stderr, and still produces the right answer.
+   Pins BOTH halves — a silent fallback would be indistinguishable from
+   --jit having grown actor support. *)
+let jit_file_actor_src = {|mod JitFileActorTest do
+  needs IO.Console
+  needs IO.Spawn
+
+  actor Counter do
+    state { n : Int }
+    init  { n: 0 }
+
+    on Total(reply_to) do
+      Actor.reply(reply_to, state.n)
+      state
+    end
+
+    on Ping(k : Int) do
+      { n: state.n + k }
+    end
+  end
+
+  type TotalReq = TotalReq
+
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+    let pid = spawn(Counter)
+    send(pid, Ping(1))
+    send(pid, Ping(1))
+    run_until_idle()
+    match Actor.call(pid, TotalReq, 30000) do
+      Ok(n)  -> println("checksum=" ++ int_to_string(n))
+      Err(e) -> println("call failed: " ++ e)
+    end
+  end
+end
+|}
+
+let test_jit_file_actor_falls_back () =
+  if not (clang_available ()) then ()
+  else
+    check_jit_file ~label:"--jit actor fallback"
+      (run_jit_file ~env_prefix:"" jit_file_actor_src)
+      [ "--jit does not support actor programs yet"; "checksum=2" ]
+
 let () =
   Alcotest.run "march_jit" [
     "jit", [
@@ -337,5 +450,13 @@ let () =
         test_repl_session_redefine_then_call_clang;
       Alcotest.test_case "redefine then call through prior fn (ORC JIT)" `Slow
         test_repl_session_redefine_then_call_orc;
+    ];
+    "jit_file", [
+      Alcotest.test_case "march --jit runs a whole program (ORC JIT)" `Slow
+        test_jit_file_orc;
+      Alcotest.test_case "march --jit runs a whole program (clang JIT)" `Slow
+        test_jit_file_clang;
+      Alcotest.test_case "march --jit falls back to the interpreter for actors"
+        `Slow test_jit_file_actor_falls_back;
     ];
   ]

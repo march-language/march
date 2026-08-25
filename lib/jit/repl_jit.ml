@@ -910,6 +910,126 @@ let register_module_decl ctx ~tc_env (d : March_ast.Ast.decl) =
       Printf.eprintf "jit: module registration failed: %s\n%!" (Printexc.to_string exn))
   | _ -> ()
 
+(* ── Whole-program JIT (`march --jit file.march`) ───────────────────────── *)
+
+(** Substring test (no Str dependency in this library).  Iterative on purpose:
+    the haystack is a whole IR fragment (hundreds of KB), so a recursive
+    scan would be a stack-depth hazard. *)
+let contains_sub (hay : string) (needle : string) : bool =
+  let n = String.length needle and h = String.length hay in
+  if n = 0 then true
+  else begin
+    let found = ref false and i = ref 0 in
+    while (not !found) && !i + n <= h do
+      if String.sub hay !i n = needle then found := true else incr i
+    done;
+    !found
+  end
+
+(** LLVM rejects a duplicate `declare` of a symbol, and the REPL preamble
+    declares [march_run_scheduler] / [march_remote_init] only CONDITIONALLY
+    (see [Llvm_builtins]'s PDeclare table — the set emitted depends on which
+    builtins the fragment actually uses).  So each entry-thunk declare is
+    emitted only when the fragment does not already carry it. *)
+let declare_if_absent (ir : string) (decl : string) : string =
+  if contains_sub ir decl then "" else decl ^ "\n"
+
+(** Whole-program JIT: lower [m] (the user module only — the stdlib prelude is
+    already compiled and recorded in [ctx.stdlib_decls] / [ctx.compiled_fns] by
+    [precompile_stdlib]) and run its [main].
+
+    Entry shape mirrors the NATIVE build's `@main` (lib/tir/llvm_toplevel.ml),
+    not a bare call into the mangled `main`:
+
+      march_remote_init(); march_spawn_main(thunk); march_run_scheduler()
+
+    That matters for two independent reasons.  (1) [march_spawn_main]'s ABI is
+    a 0-arg void function pointer, while a March `main` may take any number of
+    capability parameters; the thunk supplies one ERASED capability per
+    parameter — a null pointer, the same value [Llvm_emit]'s `root_cap` atom
+    and llvm_toplevel's `march_main_entry_thunk` use (Cap(_) compiles to a null
+    ptr; see specs/lang/capabilities.md "Runtime behaviour").  (2) a compiled
+    `main` IS a green thread: running it on the host thread instead would leave
+    the scheduler unstarted, so anything that spawns a task or blocks would
+    deadlock rather than run.
+
+    Like the native build, the process exit code does not carry `main`'s
+    result: [march_spawn_main]'s void ABI drops it and native `@main` returns
+    a hard 0. *)
+let run_program ctx ~tc_env (m : March_ast.Ast.module_) : unit =
+  let errors = March_errors.Errors.create () in
+  let env = { tc_env with March_typecheck.Typecheck.errors;
+    (* Same per-call reset as [register_module_decl]/[run_expr]: [tc_env] is a
+       long-lived, reused environment. *)
+    refs = ref []; current_decl = ref "" } in
+  let (_, type_map) = March_typecheck.Typecheck.check_module_with_env env m in
+  let tir = lower_module ~type_map ~stdlib_context:ctx.stdlib_decls m in
+  register_type_defs ctx tir.March_tir.Tir.tm_types;
+  let all_types = ctx.loaded_tir_types @ tir.March_tir.Tir.tm_types in
+  (* Same entry-point rule as [Llvm_toplevel.emit_module]: a bare `main` or a
+     module-qualified `Mod.main`. *)
+  let is_main (f : March_tir.Tir.fn_def) =
+    f.March_tir.Tir.fn_name = "main"
+    || String.ends_with ~suffix:".main" f.March_tir.Tir.fn_name in
+  let main_fn =
+    match List.find_opt (fun f -> f.March_tir.Tir.fn_name = "main")
+            tir.March_tir.Tir.tm_fns with
+    | Some f -> Some f
+    | None -> List.find_opt is_main tir.March_tir.Tir.tm_fns in
+  let main_fn = match main_fn with
+    | Some f -> f
+    | None -> failwith "--jit: no `main` function to run in this file" in
+  let n = next_id ctx in
+  (* A bare `main` MUST be renamed before it reaches [partition_fns].
+     [mangle_extern "main"] is "march_main" — the native entry symbol — so
+     [is_c_runtime_fn] classifies it as a C-runtime function and drops it from
+     BOTH the define list and the declare list, leaving the entry thunk calling
+     an undefined @march_main.  Renaming to a fragment-unique symbol also keeps
+     the definition out of the way of the runtime .so's own symbols. *)
+  let jit_main = Printf.sprintf "march_jit_user_main_%d" n in
+  let all_fns =
+    rename_top_fn_refs ~old_name:main_fn.March_tir.Tir.fn_name
+      ~new_name:jit_main tir.March_tir.Tir.tm_fns in
+  let (new_fns, extern_fns) = partition_fns ctx all_fns in
+  let sw = fresh_wrap_state ctx in
+  let ir = March_tir.Llvm_emit.emit_fns_fragment
+      ~types:all_types ~fns:new_fns ~extern_fns ~session_wraps:sw ~repl:true () in
+  let mangled = March_tir.Llvm_emit.mangle_extern jit_main in
+  let ret_ty = March_tir.Llvm_ctx.llvm_ret_ty main_fn.March_tir.Tir.fn_ret_ty in
+  let erased_args =
+    String.concat ", "
+      (List.map (fun (v : March_tir.Tir.var) ->
+           let ty = March_tir.Llvm_ctx.llvm_ty v.March_tir.Tir.v_ty in
+           (* Capability parameters are pointer-shaped; keep the fallback
+              honest for any non-ptr parameter rather than emitting `null`
+              against an integer type (an LLVM verifier error). *)
+           if ty = "ptr" then ty ^ " null" else ty ^ " 0")
+         main_fn.March_tir.Tir.fn_params) in
+  let thunk = Printf.sprintf "march_jit_main_thunk_%d" n in
+  let entry = Printf.sprintf "march_jit_program_%d" n in
+  let ir =
+    ir
+    ^ "\n" ^ declare_if_absent ir "declare void @march_remote_init()"
+    ^ declare_if_absent ir "declare void @march_run_scheduler()"
+    ^ "declare void @march_spawn_main(ptr)\n"
+    ^ Printf.sprintf
+        "\ndefine private void @%s() {\nentry:\n  %scall %s @%s(%s)\n  ret void\n}\n"
+        thunk
+        (if ret_ty = "void" then "" else "%_r = ")
+        ret_ty mangled erased_args
+    ^ Printf.sprintf
+        "\ndefine void @%s() {\nentry:\n\
+        \  call void @march_remote_init()\n\
+        \  call void @march_spawn_main(ptr @%s)\n\
+        \  call void @march_run_scheduler()\n\
+        \  ret void\n}\n" entry thunk in
+  let handle = compile_fragment ctx ir in
+  mark_compiled_fns ctx new_fns;
+  commit_wraps ctx sw;
+  ctx.loaded_tir_types <- all_types;
+  let fptr = lookup_sym ctx handle entry in
+  Jit.call_void_to_void fptr
+
 let run_expr ctx ~tc_env m =
   (* Typecheck and lower BEFORE advancing the counter so a failure leaves no gap. *)
   let repl_vars = List.map (fun (bare, _, _) -> bare) ctx.var_slots in
