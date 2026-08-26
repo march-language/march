@@ -12,6 +12,28 @@
       fills the stubs with real closures.
     - Pattern matching raises [Match_failure] when no branch matches. *)
 
+(* Sections (grep for "§N" to jump):
+     §1  Actor runtime
+     §2  Tap bus — thread-safe value inspector (Clojure tap> model)
+     §3  Exceptions
+     §4  Built-in environment
+     §5  Phase 1: Monitors, Links, and crash_actor (must precede base_env)
+     §6  FFI extern stub table
+     §7  FFI Marshal Layer — see specs/plans/2026-06-22-ffi-interpreter-full.md
+     §8  Evaluation
+     §9  Phase 2/3: Initialize eval_expr_hook for supervisor restarts
+     §10  Task builtins
+     §11  App / Supervisor machinery
+     §12  App / Supervisor machinery
+     §13  Module evaluation
+     §14  Test runner
+     §15  Doctest runner
+
+   The builtin table, the protocol runtimes, the shared runtime state and
+   the value/env types live in sibling modules — see eval_builtins.ml,
+   eval_net.ml, eval_session.ml, eval_simd.ml, eval_runtime.ml,
+   eval_prim.ml and eval_types.ml. *)
+
 open March_ast.Ast
 
 (* Value and environment types moved to eval_types.ml.  Re-exported so
@@ -39,9 +61,9 @@ include Eval_session
    eval.ml keep calling [tcp_send_all] / [csv_open_impl] / … by bare name. *)
 include Eval_net
 
-(* ------------------------------------------------------------------ *)
-(* Actor runtime                                                       *)
-(* ------------------------------------------------------------------ *)
+(* =================================================================
+   §1  Actor runtime
+   ================================================================= *)
 
 
 
@@ -421,9 +443,9 @@ let effective_module_prefix () =
   | Some p -> p
   | None -> current_doc_prefix ()
 
-(* ------------------------------------------------------------------ *)
-(* Tap bus — thread-safe value inspector (Clojure tap> model)         *)
-(* ------------------------------------------------------------------ *)
+(* =================================================================
+   §2  Tap bus — thread-safe value inspector (Clojure tap> model)
+   ================================================================= *)
 
 
 
@@ -650,9 +672,9 @@ let restore_actors (snap : actor_state_snapshot) : unit =
 (** Module-level debug context. None = no overhead. *)
 let debug_ctx : debug_ctx option ref = ref None
 
-(* ------------------------------------------------------------------ *)
-(* Exceptions                                                          *)
-(* ------------------------------------------------------------------ *)
+(* =================================================================
+   §3  Exceptions
+   ================================================================= *)
 
 
 (* [Eval_error] moved to eval_prim.ml; rebound here so [Eval.Eval_error]
@@ -920,9 +942,9 @@ and match_list (pats : pattern list) (vs : value list) : (string * value) list o
         | Some new_bs -> Some (new_bs @ bs)
     ) (Some []) pats vs
 
-(* ------------------------------------------------------------------ *)
-(* Built-in environment                                                *)
-(* ------------------------------------------------------------------ *)
+(* =================================================================
+   §4  Built-in environment
+   ================================================================= *)
 
 let arith_int op name = VBuiltin (name, function
     | [VInt a; VInt b] -> VInt (op a b)
@@ -1080,9 +1102,9 @@ let list_actors () =
   ) actor_registry []
   |> List.sort (fun a b -> compare a.ai_pid b.ai_pid)
 
-(* ------------------------------------------------------------------ *)
-(* Phase 1: Monitors, Links, and crash_actor (must precede base_env)  *)
-(* ------------------------------------------------------------------ *)
+(* =================================================================
+   §5  Phase 1: Monitors, Links, and crash_actor (must precede base_env)
+   ================================================================= *)
 
 
 
@@ -1092,9 +1114,9 @@ let eval_expr_hook = Eval_prim.eval_expr_hook
 let run_scheduler_hook = Eval_prim.run_scheduler_hook
 let apply_hook = Eval_prim.apply_hook
 
-(* ------------------------------------------------------------------ *)
-(* FFI extern stub table                                               *)
-(* ------------------------------------------------------------------ *)
+(* =================================================================
+   §6  FFI extern stub table
+   ================================================================= *)
 
 (** Table of OCaml-side stubs for extern functions.
     Key: (lib_name, symbol_name).
@@ -1212,9 +1234,9 @@ let _ffi_get_handle () : nativeint =
      | _ -> ());
     _ffi_handle := Some h; h
 
-(* ------------------------------------------------------------------ *)
-(* FFI Marshal Layer — see specs/plans/2026-06-22-ffi-interpreter-full.md *)
-(* ------------------------------------------------------------------ *)
+(* =================================================================
+   §7  FFI Marshal Layer — see specs/plans/2026-06-22-ffi-interpreter-full.md
+   ================================================================= *)
 
 (* Shape descriptor "name:k;…" sorted by field name; must match forge's logic. *)
 let ffi_shape_desc (fields : field list) : string =
@@ -1525,9 +1547,9 @@ let dynamic_ffi_call (lib : string) (sym : string)
    test suite. *)
 let base_env = Eval_builtins.base_env
 
-(* ------------------------------------------------------------------ *)
-(* Evaluation                                                          *)
-(* ------------------------------------------------------------------ *)
+(* =================================================================
+   §8  Evaluation
+   ================================================================= *)
 
 (* ── Global-tail lookup cache ─────────────────────────────────────────
    [env] is a cons list whose suffix (builtins + loaded module fns) is
@@ -2291,19 +2313,19 @@ and eval_expr (env : env) (e : expr) : value =
      | `Ok v   -> v
      | `Err exn -> raise exn)
 
-(* ------------------------------------------------------------------ *)
-(* Phase 2/3: Initialize eval_expr_hook for supervisor restarts       *)
-(* ------------------------------------------------------------------ *)
+(* =================================================================
+   §9  Phase 2/3: Initialize eval_expr_hook for supervisor restarts
+   ================================================================= *)
 
 let () = eval_expr_hook := eval_expr
 let () = apply_hook := apply
 let () = iface_dispatch_hook := apply
 
 
-(* ------------------------------------------------------------------ *)
-(* Task builtins                                                       *)
-(* These are defined after [apply] so they can call it directly.      *)
-(* ------------------------------------------------------------------ *)
+(* =================================================================
+   §10  Task builtins
+   These are defined after [apply] so they can call it directly.
+   ================================================================= *)
 
 (** The number of reductions consumed during the most recent call to
     [eval_with_reduction_tracking]. *)
@@ -2499,9 +2521,9 @@ let run_scheduler () =
 
 let () = run_scheduler_hook := run_scheduler
 
-(* ------------------------------------------------------------------ *)
-(* App / Supervisor machinery                                          *)
-(* ------------------------------------------------------------------ *)
+(* =================================================================
+   §11  App / Supervisor machinery
+   ================================================================= *)
 
 (** Internal helper: create a task entry for an already-completed result. *)
 let make_task_entry tid result thunk =
@@ -2916,9 +2938,9 @@ let eval_with_reduction_tracking (thunk : value) : value * int =
   last_reduction_count := consumed;
   (result, consumed)
 
-(* ------------------------------------------------------------------ *)
-(* App / Supervisor machinery                                          *)
-(* ------------------------------------------------------------------ *)
+(* =================================================================
+   §12  App / Supervisor machinery
+   ================================================================= *)
 
 (** Convert a March list value (VCon Cons/Nil) to an OCaml list of values. *)
 let rec march_list_to_list = function
@@ -3035,9 +3057,9 @@ let spawn_from_spec (spec : value) : unit =
   | other -> eval_error "spawn_from_spec: expected supervisor spec record, got %s"
                (value_to_string other)
 
-(* ------------------------------------------------------------------ *)
-(* Module evaluation                                                   *)
-(* ------------------------------------------------------------------ *)
+(* =================================================================
+   §13  Module evaluation
+   ================================================================= *)
 
 (** A mutable stub: lets us install a forward reference for a name and
     later fill it with the real closure. *)
@@ -3981,9 +4003,9 @@ let run_module (m : module_) : unit =
       let _ = apply v args in
       run_scheduler ()
 
-(* ------------------------------------------------------------------ *)
-(* Test runner                                                         *)
-(* ------------------------------------------------------------------ *)
+(* =================================================================
+   §14  Test runner
+   ================================================================= *)
 
 (** Result of running a single test. *)
 type test_result =
@@ -4139,9 +4161,9 @@ let run_tests ?(verbose=false) ?(quiet=false) ?(dot_stream=false) ?(filter="") ?
   end;
   (total, n_failed, List.rev !failures)
 
-(* ------------------------------------------------------------------ *)
-(* Doctest runner                                                      *)
-(* ------------------------------------------------------------------ *)
+(* =================================================================
+   §15  Doctest runner
+   ================================================================= *)
 
 (** Run all doctests extracted from [fn_doc] fields in the module.
 
