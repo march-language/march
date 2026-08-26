@@ -13255,6 +13255,36 @@ declare void @march_yield_from_compiled()
     time. A declare with no definition still fails, just later and with a
     linker error instead of an IR one — `test/native/builtin_link_backing`
     covers that half by running a compiled program. *)
+(* ── Builtin_name round-trip ────────────────────────────────────────────
+   [Builtin_name.t] names the exact set of builtins Llvm_emit.emit_expr
+   dispatches.  The count literal is the tripwire: a new emit arm added
+   without a constructor (or vice versa) fails here.  Re-derive it with
+     S=$(grep -n '^let rec emit_expr ctx' lib/tir/llvm_emit.ml | cut -d: -f1)
+     awk -v s=$S 'NR>s && /^let |^and /{print NR; exit}' lib/tir/llvm_emit.ml
+   and the v_name grep over that window (see the decomposition plan, Task 2.1). *)
+let test_builtin_name_roundtrip () =
+  List.iter
+    (fun c ->
+      let s = March_tir.Builtin_name.to_string c in
+      Alcotest.(check bool) (s ^ ": is c s") true (March_tir.Builtin_name.is c s);
+      match March_tir.Builtin_name.of_string s with
+      | Some c' when c' = c -> ()
+      | Some _ ->
+        Alcotest.failf "builtin %S round-tripped to a different constructor" s
+      | None -> Alcotest.failf "builtin %S has no of_string entry" s)
+    March_tir.Builtin_name.all;
+  Alcotest.(check int) "constructor count" 57
+    (List.length March_tir.Builtin_name.all);
+  (* Distinct names: two constructors mapping to one string would make the
+     Hashtbl silently drop one direction of the round trip. *)
+  let names = List.map March_tir.Builtin_name.to_string March_tir.Builtin_name.all in
+  Alcotest.(check int) "names are distinct" (List.length names)
+    (List.length (List.sort_uniq compare names));
+  (* root_cap is dispatched in emit_atom, not emit_expr, so it is
+     deliberately NOT a constructor. *)
+  Alcotest.(check bool) "root_cap absent" true
+    (March_tir.Builtin_name.of_string "root_cap" = None)
+
 let test_every_builtin_c_name_is_declared () =
   let declared =
     List.fold_left
@@ -15139,6 +15169,8 @@ let codegen_suites =
       ( "llvm_builtins_preamble_golden", [
           Alcotest.test_case "every builtin c_name is declared in some preamble" `Quick
             test_every_builtin_c_name_is_declared;
+          Alcotest.test_case "Builtin_name round-trips and covers emit_expr" `Quick
+            test_builtin_name_roundtrip;
           Alcotest.test_case "native, non-repl preamble byte-identical (W3C2.4 / H2)" `Quick
             test_preamble_byte_identical_native;
           Alcotest.test_case "native, REPL preamble byte-identical (W3C2.4 / H2)" `Quick
