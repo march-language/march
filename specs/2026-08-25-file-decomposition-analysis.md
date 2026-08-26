@@ -31,6 +31,19 @@ Three axes, measured 2026-08-25 at `1e5bafcf`:
 Reproduce with `git log --oneline --since="6 months ago" -- <file> | wc -l` and
 the line/concentration scan in the appendix.
 
+> **Correction, 2026-08-26 — the concentration metric undercounts recursion groups.**
+> The scan below measures the largest *top-level definition*, treating a col-0 `and`
+> as a boundary. In OCaml a `let rec f … and g … and h …` group is a single unit that
+> must move together, so the metric stops at the first `and` and reports less than the
+> real figure. Found while writing the Phase 6 plan: `typecheck.ml`'s `infer_expr`
+> chain is **2,217 lines across 14 mutually recursive functions** (`:5724–7941`), not
+> the 1,500 first reported here — a 48% undercount, and it is the number a
+> decomposition actually faces. Re-checked against the other large files: `lower.ml`
+> is understated by 6% (896 → 949) and `perceus.ml`, `mono.ml` and `desugar.ml` are
+> exact, so `typecheck.ml` is the only row this materially changed. The appendix
+> command still measures per-definition; measure the enclosing group before planning
+> any extraction.
+
 A fourth, qualitative axis matters for *risk*, not priority: whether the large
 definition is **logic** or a **data table**. `eval.ml`'s `base_env` (5,290
 lines) and `llvm_builtins.ml`'s `builtins` (893) are tables — long, simple, and
@@ -41,7 +54,7 @@ logic, where extraction can change behaviour.
 
 | File | Lines | Largest definition | Conc. | Commits/6mo | Pain score |
 |---|---:|---|---:|---:|---:|
-| `lib/typecheck/typecheck.ml` | 14,958 | `infer_expr` 1,500 | 10% | **387** | **5,789** |
+| `lib/typecheck/typecheck.ml` | 14,958 | `infer_expr` group **2,217** [see note] | 15% | **387** | **5,789** |
 | `lib/eval/eval.ml` | 12,265 | `base_env` 5,290 *(table)* | 43% | 262 | 3,214 |
 | `bin/main.ml` | 5,403 | `compile` 2,510 | 46% | **337** | 1,820 |
 | `lib/tir/llvm_emit.ml` | 5,720 | `emit_expr` 4,319 | **76%** | 299 | 1,710 |
