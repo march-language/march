@@ -3458,11 +3458,54 @@ let arg_span (fallback : A.span) : A.expr -> A.span = function
    §15 check_call — precondition checking at a call site
    ================================================================= *)
 
-let check_call ~root errctx ~span ~(callee : string) ?(subject = Argument)
-    ?(verdict_out : Obligation.verdict option ref option) ~(lets : launder)
-    ~(postcond : string -> A.expr list -> (string * A.expr * string option) option)
-    (sg : fn_sig) (args : A.expr list)
-    (path : (A.expr * bool) list) (rp : rparam) (sc : scope) (re : recenv) : unit =
+(* The environment [check_call] discharges an obligation IN, as opposed to the
+   obligation itself.  Every field is threaded unchanged through the whole of
+   [visit]'s walk of one call node, so bundling them stops a twelve-parameter
+   signature from having to be re-read at each of the three call sites — and
+   gives each thread a place to say what it is, which is the documentation
+   this function has never had.
+
+   The four things that differ per obligation stay explicit parameters:
+   [~span] / [~callee] (which call), [sg] / [args] (its signature and actuals)
+   and [rp] (which refined parameter of it), plus [?subject] / [?verdict_out],
+   which only the `let`-annotation caller sets. *)
+type call_ctx = {
+  root : string;
+      (* Project root — passed to [Refine.discharge] so the SMT bridge can
+         place its scratch files and resolve solver configuration. *)
+  errctx : Err.ctx;
+      (* Diagnostic sink.  [check_call] is a REPORTING site: every exit path
+         records an outcome through [note], and violations are emitted here. *)
+  postcond :
+    string -> A.expr list -> (string * A.expr * string option) option;
+      (* Return refinement of a callee, by name and actuals — how a nested
+         call's postcondition becomes a premise for this one.  Always
+         [postcond_of ctx defs] at every call site; it is a parameter rather
+         than a direct call because [rctx]/[defs] are not in scope here. *)
+  path : (A.expr * bool) list;
+      (* Path facts: the guards (and their polarity) reaching this call site.
+         One of the two fact channels — see the shadowing discipline note in
+         §10: a name rebound in between must retire from BOTH this and
+         [sc], or a stale fact proves a goal about a different value. *)
+  lets : launder;
+      (* Laundering `let`s: bindings whose RHS lets a guard about one name be
+         re-attributed to another.  Retires on rebinding of either the key or
+         any name its RHS mentions. *)
+  sc : scope;
+      (* The other fact channel: refined locals and parameters in scope, name
+         -> (binder, predicate, sort). *)
+  re : recenv;
+      (* Record-typed variables in scope, name -> SMT sort name, so a
+         predicate's `v.field` projections can be resolved through that
+         sort's selectors. *)
+}
+
+let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
+    ?(verdict_out : Obligation.verdict option ref option)
+    (sg : fn_sig) (args : A.expr list) (rp : rparam) : unit =
+  (* Destructured to the names the body has always used: this is a signature
+     change, not a rewrite of 1,361 lines. *)
+  let { root; errctx; postcond; path; lets; sc; re } = cx in
   let subject_noun = match subject with Argument -> "argument" | Bound_expr -> "bound expression" in
   let obligation_noun =
     match subject with Argument -> "precondition" | Bound_expr -> "type annotation"
@@ -5798,14 +5841,23 @@ let check_let_annotation ~root errctx defs (ctx : rctx) (path : (A.expr * bool) 
       }
     in
     let out = ref None in
-    check_call ~root errctx ~span:n.A.span
+    (* Every fact channel is shadowed by the names this binding introduces —
+       see [call_ctx]'s note: all of them, or none. *)
+    let cx =
+      { root
+      ; errctx
+      ; postcond = postcond_of ctx defs
+      ; path = path_shadow path names
+      ; lets = launder_shadow lets names
+      ; sc = scope_shadow sc names
+      ; re = recenv_shadow re names
+      }
+    in
+    check_call cx ~span:n.A.span
       ~callee:(Printf.sprintf "let %s" name)
-      ~subject:Bound_expr ~verdict_out:out ~lets:(launder_shadow lets names)
-      ~postcond:(postcond_of ctx defs) sg
+      ~subject:Bound_expr ~verdict_out:out sg
       [ b.A.bind_expr ]
-      (path_shadow path names)
-      { idx = 0; binder; pred; sort }
-      (scope_shadow sc names) (recenv_shadow re names);
+      { idx = 0; binder; pred; sort };
     Some (!out = Some Obligation.Proved)
   | _ -> None
 
@@ -5819,24 +5871,16 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
   | A.EApp (A.EVar { A.txt = fname; _ }, args, sp) ->
     (match resolve_call ctx defs fname with
      | Some (Some sg) ->
-       let postcond = postcond_of ctx defs in
-       List.iter
-         (fun rp ->
-           check_call ~root errctx ~span:sp ~callee:fname ~lets ~postcond sg args path rp
-             sc re)
-         sg.refined
+       let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets; sc; re } in
+       List.iter (fun rp -> check_call cx ~span:sp ~callee:fname sg args rp) sg.refined
      | _ ->
        (* Not a resolvable NAMED callee: fall back to the callee env — a call
           made through a refined function-typed parameter, or through a local
           alias of a named function (see [cbenv]). *)
        (match List.assoc_opt fname cb with
         | Some sg ->
-          let postcond = postcond_of ctx defs in
-          List.iter
-            (fun rp ->
-              check_call ~root errctx ~span:sp ~callee:fname ~lets ~postcond sg args path
-                rp sc re)
-            sg.refined
+          let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets; sc; re } in
+          List.iter (fun rp -> check_call cx ~span:sp ~callee:fname sg args rp) sg.refined
         | None -> ()));
     List.iter go args
   | A.EApp (f, args, _) -> go f; List.iter go args
