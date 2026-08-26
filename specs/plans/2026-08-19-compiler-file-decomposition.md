@@ -26,6 +26,13 @@ changes the answer materially. Four conclusions bear directly on the phases belo
    concentration there is no single clean seam, and inference is mutually
    recursive — but that is an argument about technique and sequencing, not value.
    Phase 6 needs a real plan and should not be last.
+   **Done 2026-08-26:** Phase 6 below is re-scoped from one task to nine, moving
+   6,721 lines (14,957 → ~8,300) in five code-motion tasks plus a new oracle,
+   with two optional stretch tasks taking it to ~6,400. The seam the earlier
+   passes could not find is structural: OCaml forbids top-level forward
+   references, so every contiguous prefix of the file is already
+   dependency-closed, and the mutual recursion is confined to enumerable
+   `let rec … and` chains rather than diffused through the file.
 2. **Concentration without churn is not worth fixing.** `llvm_case.ml` is 95% one
    function, the worst ratio in the tree, and changed 11 times in six months.
    Ranking by concentration promotes cold code; it is the reason `typecheck.ml`'s
@@ -130,6 +137,15 @@ wc -l lib/tir/llvm_emit.ml bin/main.ml lib/eval/eval.ml lsp/lib/analysis.ml \
 
 **`typecheck.ml` is the best-decomposed file of the set** — longest, but most evenly divided. It is therefore *last* in this plan, not first. Length is not the problem; a 4,000-line single function is.
 
+**[superseded 2026-08-26]** — that judgement ranked by concentration alone and is
+wrong for this file. `typecheck.ml` is the most-edited file in the compiler (387
+commits in six months, 68 in the last thirty) and its evenness is what makes it
+*easy* to cut, not a reason not to: nine of its regions were measured to have
+zero dependencies on anything defined below them. Phase 6 is now a nine-task
+decomposition. The `infer_expr` figure in the table above is also understated —
+it is the head of an 18-function `let rec … and` chain running to `:7940`,
+**2,217** lines, not 1,500.
+
 **Correction to an earlier hypothesis:** `analysis.ml`'s two ~1,000-line code-action functions were suspected duplicates. They are not. `ast_code_actions` is called exactly once, at `analysis.ml:7755`, appended to `code_actions_at`'s result, and their action-title sets do not intersect. They are complementary (diagnostic-driven vs AST-driven). Phase 4 is therefore a plain split, not a dedup.
 
 ---
@@ -146,6 +162,8 @@ wc -l lib/tir/llvm_emit.ml bin/main.ml lib/eval/eval.ml lsp/lib/analysis.ml \
 This makes IR hashing a sound oracle for code motion. It is the linchpin of the plan: a task that claims "I only moved code" must *prove* it, because this repo has a documented history of vacuous-green results (stale `_build` staging, warm-CAS short-circuit, skip-on-compile-failure).
 
 Corpus **[corrected 2026-08-25]**: **181** `test/native/*.march` (was 165) + 16 `test/snapshots/src/*.march` + 46 `bench/*.march` = **243 programs**, of which **240 emit IR** and **3 skip** (`bench/http_get*.march` — they need a live server). The script's `emitted < 100` guard is what makes a shrunken corpus loud rather than silent; do not tighten it to an equality against 240, because the corpus grows.
+
+**The oracle is half-blind to `lib/typecheck/typecheck.ml`, and `@types-check` does not close the gap.** TIR lowering consumes typecheck's `type_map` and scheme witnesses, so a change to inference *results* does move the IR — but a change to *diagnostics* moves nothing, and `dune build @types-check` only asserts that each `reject/` fixture's output contains one annotated substring and each `accept/` fixture exits 0. Phase 6 therefore builds `scripts/types-oracle.sh` (Task 6.1) as its own oracle, and **every instruction that runs `@types-check` judges the log's contents, never the exit code: without `--force` the alias exits 0 with a zero-byte log.**
 
 **The oracle is blind to `lib/eval/eval.ml`.** The interpreter is never lowered to LLVM IR, so a Phase-1 extraction that mangles the interpreter emits byte-identical IR and the oracle stays green. Phase 1's proof is the eval/stdlib suites **plus** the interpreter-performance control in Task 0.3 — not this oracle.
 
@@ -172,7 +190,16 @@ New files created by this plan. Each has one responsibility; files that change t
 | `lib/tir/llvm_emit_task.ml` | task_*, actor, signal, channel, MPST arms | `llvm_emit.ml` | ~900 |
 | `lib/tir/llvm_emit_record.ml` | record_*, vault_*, html_*, to_string arms | `llvm_emit.ml` | ~800 |
 | `lib/refinecheck/refine_check.mli` | Public API of the refinement checker | — | ~40 |
-| `lib/typecheck/builtin_caps.ml` | `builtin_cap_table` — 115-line pure string-pair list | `typecheck.ml:1967` **[corrected 2026-08-25;** was `~1025`**]** | ~145 |
+| ~~`lib/typecheck/builtin_caps.ml`~~ | **cancelled 2026-08-26** — `builtin_cap_table` now rides inside `typecheck_builtins.ml` (Task 6.4); extracting it alone would have to be undone | — | — |
+| `scripts/types-oracle.sh` | Two-tier typecheck oracle: `--emit-core-ast` sha per fixture + `--check` diagnostic text; the Phase-6 linchpin | — | ~120 |
+| `lib/typecheck/typecheck_types.ml` | `ty`/`session_ty`/`scheme`/`reason`, `repr`, `occurs`, `pp_ty`, `message_part` (PREREQUISITE for all of Phase 6) | `typecheck.ml:32–394` | ~363 |
+| `lib/typecheck/typecheck_env.ml` | `type env` (392 lines) + `make_env`, the `lookup_*`/`resolve_*`/`suggest_*` family, `bind_*`, `generalize`, `instantiate` | `typecheck.ml:397–1901` | ~1,505 |
+| `lib/typecheck/typecheck_builtins.ml` | `builtin_bindings` (1,134), the builtin interfaces/impls/types/ctors, `builtin_cap_table`, `base_env` | `typecheck.ml:1904–3540` | ~1,637 |
+| `lib/typecheck/typecheck_exhaustive.ml` | §E pattern exhaustiveness + redundancy (Maranget) | `typecheck.ml:4934–5721` | ~818 |
+| `lib/typecheck/typecheck_caps.ml` | `check_module_needs` (1,296) + the capability closure/narrowing/mint checks + `free_vars_expr` | `typecheck.ml:7941–8029`, `:8967–10697` | ~1,820 |
+| `lib/typecheck/typecheck_tailcall.ml` | §16 tail-call enforcement — a pure AST pass with **zero** dependencies on the checker | `typecheck.ml:13047–13623` | ~576 |
+| `lib/typecheck/typecheck_unify.ml` *(stretch)* | §10/§11 `unify`, `report_mismatch`, `surface_ty`, `instantiate_ctor` | `typecheck.ml:3543–4327` | ~785 |
+| `lib/typecheck/typecheck_session.ml` *(stretch)* | §16a session-type projection and duality | `typecheck.ml:10700–11793` | ~1,094 |
 | `lsp/lib/code_actions_ast.ml` | AST-driven refactorings (pipe, extract, …) | `analysis.ml:5675–6763` **[verified 2026-08-25]** | ~1,090 |
 | `lsp/lib/code_actions_diag.ml` | Diagnostic-driven quick fixes | `analysis.ml:6764–7760` **[verified 2026-08-25]** | ~1,000 |
 
@@ -1702,60 +1729,784 @@ git add bin/main.ml && git commit -m "refactor(main): construct CAS cache-key fl
 
 ---
 
-## Phase 6 — `typecheck.ml`: cold data only (DOWNSCOPED)
+## Phase 6 — `typecheck.ml`: 14,957 → ~8,300 lines by peeling the layers below inference
 
-**[corrected 2026-08-25]** — `typecheck.ml` is **14,957** lines (was 14,908) and `infer_expr` is **1,500** lines at `:5724–7223` (was "1,473"). `builtin_cap_table` is at **`typecheck.ml:1967`**, not `~1025`.
+**Re-scoped 2026-08-26, at `cde69dfb`.** Everything below replaces the
+single-task "cold data only" Phase 6. What that version said, and why it is
+gone, is recorded in "What the downscoping got right and wrong" below — read
+it before executing, because two of its findings are still load-bearing.
 
-Done last, deliberately. This is the **best-decomposed** file in the set (223 top-level definitions, 21 § sections, largest function only 10% of the file) and the **most contended** (34 of the last 300 commits). Every line moved here is a rebase risk for concurrent work.
+**Not last.** `typecheck.ml` is the largest file in the compiler and the most
+edited: **387** commits in six months, **68** in the last thirty
+(`git log --oneline --since="6 months ago" -- lib/typecheck/typecheck.ml | wc -l`
+→ 387). Every day this phase waits is another day the cost is paid. It is also
+the reason each task below is its own commit and each is landable alone: a
+long-lived branch across this file will conflict.
 
-**Downscoped at review (2026-08-23).** The first draft extracted `builtin_bindings` and `pp_ty`. Both are coupled to the `ty`/`scheme` types defined *inside* `typecheck.ml` — measured: the `builtin_bindings` range uses `TArrow` ×956, `TCon` ×539, `Mono` ×451, plus `Poly`/`TTuple`/`TVar`; `pp_ty` pretty-prints `ty` and reads the `_tvar_names`/`_record_names` tables. Extracting either therefore requires *first* extracting the core type definitions to a `typecheck_types.ml` — a structural change to the hottest file in the repo, for a navigation win its 21 § headers already mostly deliver. The earlier "zero coupling" claim checked only for calls into the inference core and missed the type constructors; it was wrong. Not worth the rebase risk now. If a `typecheck_types.ml` ever exists for other reasons, revisit both extractions. Verification recipe for that day: the IR oracle, the full suite, **and** `dune build @types-check --force` judged by its log contents — `pp_ty` feeds diagnostic text, that CI-only alias asserts exact message strings, and without `--force` it exits 0 with a zero-byte log (vacuous).
+`lib/typecheck/dune` has **no `(modules …)` field** — new files there are picked
+up automatically, unlike `lib/tir` and `lib/refinecheck`.
 
-What remains in scope is the one genuinely uncoupled item.
+### What the downscoping got right and wrong
 
-`lib/typecheck/dune` has no `(modules …)` field — new files are picked up automatically.
+The 2026-08-23 review dropped `builtin_bindings` and `pp_ty` from Phase 6 on the
+grounds that both are coupled to the `ty`/`scheme` types defined *inside*
+`typecheck.ml`, so extracting either "requires *first* extracting the core type
+definitions to a `typecheck_types.ml` — a structural change to the hottest file
+in the repo".
 
-### Task 6.1: Extract `builtin_cap_table`
+**That coupling analysis was correct and is confirmed here.** What was wrong was
+the conclusion. The review treated the prerequisite as a reason to stop; the
+measurement below shows the prerequisite is the *cheapest* extraction in the
+file (zero external dependencies, pure code motion) and that it unlocks
+**6,700 lines** of further movement, not 115. `typecheck_types.ml` is now
+Task 6.3, and it is a hard prerequisite exactly as the review predicted.
 
-`builtin_cap_table` is a **115**-line pure `(string * string) list` literal (`typecheck.ml:1967–2081` at `8d2b22fb`) — no `ty`, no `scheme`, no helper calls. **[corrected 2026-08-25]** — the draft said "140-line" at `~1025`; the coupling premise re-checked clean (the Step-1 grep prints **0**).
+Two things the downscoped version got right and this version keeps:
+
+1. **`@types-check` asserts diagnostic text and is CI-only**, and
+   `dune build @types-check` *without* `--force` is **vacuous** — it exits 0
+   with a zero-byte log. Every instruction below that mentions it judges the
+   **log contents**, never the exit code.
+2. **`builtin_cap_table` is at `typecheck.ml:1967–2081`, 115 lines, zero type
+   coupling.** Re-verified 2026-08-26; the Step-1 grep still prints 0. It is no
+   longer its own task only because Task 6.4 moves the whole §9/§9b block it
+   sits inside, which is strictly more valuable and no riskier once Task 6.3
+   has landed. **Task 6.1 of the old Phase 6 is therefore cancelled, not
+   deferred** — do not extract `builtin_caps.ml` separately, it would have to be
+   un-done by 6.4.
+
+### The structural finding this phase rests on
+
+The analysis says `typecheck.ml` has "no single clean seam" because inference is
+mutually recursive and `infer_expr` is only 10% of the file. Both halves of that
+are true. The conclusion drawn from them — that the file therefore cannot be
+decomposed — does not follow, and the reason is a property of OCaml the earlier
+passes did not use:
+
+**OCaml forbids forward references at the top level, so `typecheck.ml` is
+already a topologically sorted dependency graph. Every contiguous prefix of it
+is downward-closed by construction.** The only thing that can bind a cut is a
+`let rec … and …` chain straddling it, and those are enumerable
+(`grep -n '^let rec \|^and ' lib/typecheck/typecheck.ml` → 57 lines, forming 20
+chains). The mutual recursion is *confined* to those chains; it does not diffuse
+through the file the way "inference is mutually recursive" suggests.
+
+That was measured, not assumed. `dep.py` (below) maps every top-level value to
+its definition line and, for a candidate region, lists every top-level name the
+region references that is defined outside it:
+
+```python
+# save as dep.py at the repo root, run as: python3 dep.py <start> <end>
+import re,sys
+L=open('lib/typecheck/typecheck.ml').read().split('\n')
+defs={}
+pat=re.compile(r'^(?:let|and)\s+(?:rec\s+)?(_?[a-z][A-Za-z0-9_\']*)')
+for i,l in enumerate(L):
+    m=pat.match(l)
+    if m: defs.setdefault(m.group(1),i+1)
+a,b=int(sys.argv[1]),int(sys.argv[2])
+txt=re.sub(r'\(\*.*?\*\)','','\n'.join(L[a-1:b]),flags=re.S)
+r=sorted((defs[n],n) for n in set(re.findall(r"\b[a-z_][A-Za-z0-9_']*\b",txt))
+         if n in defs and not a<=defs[n]<=b)
+print(f"region {a}-{b}: {len(r)} external deps, "
+      f"{len([x for x in r if x[0]>b])} of them BELOW the region")
+for ln,n in r: print(f"  :{ln:6} {n}{'   <-- BELOW' if ln>b else ''}")
+```
+
+Measured at `cde69dfb` (`dep.py` strips comments first — the raw greps that
+produced the earlier "self-contained checker" claims did **not**, and three of
+the hits they would have reported are doc-comment mentions of `infer_expr`,
+`check_decl` and `surface_ty`, not calls):
+
+| Region | Lines | External deps | Deps *below* it | Verdict |
+|---|---:|---:|---:|---|
+| `32–1901` types + env + generalize/instantiate | 1,870 | **0** | 0 | prerequisite, movable now |
+| `1904–3540` §9/§9b builtins + interfaces | 1,637 | 4 (all in the head) | 0 | movable after the head |
+| `3543–4327` §10/§11 unify + surface types | 785 | 21 (head + `t_unit`) | 0 | movable, higher risk |
+| `4934–5721` §E exhaustiveness | 788 | 6 (head + `span_of_expr`) | 0 | movable |
+| `5724–7940` `infer_expr … bind_lam_param` | **2,217** | **55** | 0 | **the knot — leave it** |
+| `7941–8029` `free_vars_expr` group | 89 | **0** | 0 | rides with 6.6 |
+| `8967–10697` capability / `needs` band | 1,731 | 10 | 0 | movable |
+| `10700–11793` §16a session projection | 1,094 | 8 | 0 | movable after 6.7 |
+| `13048–13623` §16 tail-call enforcement | 576 | **0** | 0 | movable **now**, no prerequisite |
+
+Two entries deserve their own sentence.
+
+**§16 tail-call enforcement has zero external dependencies of any kind** — not
+even `env` or `ty` appear in it
+(`sed -n '13048,13623p' … | grep -cE '\b(env|ty|scheme|TCon|TArrow|Mono|Poly)\b'`
+→ **0**). It is a pure AST pass that has been sitting inside the type checker.
+It can be extracted before anything else, which is why it is Task 6.2: it
+validates the oracle, the reassembly check and the `include` re-export idiom on
+the cheapest change available.
+
+**The inference knot is real and is 2,217 lines, not 1,500.** `infer_expr` is
+the head of an 18-function `let rec … and` chain running to `bind_lam_param` at
+`:7879`; the 1,500-line figure in the Measured Baseline counts only the head.
+The chain reaches 55 definitions spread across every layer above it. See "What
+should not be decomposed" at the end of this phase.
+
+### What this phase does and does not buy
+
+Tasks 6.2–6.6 move **6,721** lines out of `typecheck.ml`, leaving ~**8,300**.
+Tasks 6.7–6.8 are a stretch that would take it to ~**6,400**; they are last and
+optional because they touch `unify`, the most contended code in the file.
+
+It does **not** make `infer_expr` smaller, and after the peel `infer_expr`'s
+chain is ~27% of what remains. That is the honest ceiling of this phase.
+
+---
+
+### Task 6.1: Build the typecheck diagnostic oracle — **DO THIS FIRST**
+
+**Files:** Create `scripts/types-oracle.sh`
+
+**This oracle does not exist.** `scripts/ir-oracle.sh` and
+`scripts/refine-oracle.sh` do; neither covers this file, and the two existing
+type-side harnesses are both weaker than they look:
+
+- **`dune build @types-check` is a pass/fail conformance gate, not a diagnostic
+  pin.** Read `specs/lang/types/check_types.sh`: for the 157 `reject/` programs
+  it asserts only that the output *contains* the one substring in that file's
+  `-- EXPECT-ERROR:` annotation, and for the 146 `accept/` programs only that
+  the exit code is 0. A refactor that reworded every hint, dropped every
+  "the expected type comes from here" reason chain, moved every span by a
+  column and lost every warning would still pass it. Keep running it — it is a
+  real regression gate and it is the thing that breaks in CI when message text
+  changes — but do not mistake it for proof of code motion.
+- **`scripts/ir-oracle.sh` covers the accept path only, and indirectly.** TIR
+  lowering consumes `typecheck`'s `type_map` and scheme witnesses, so inference
+  that changed *result* would move the IR. Inference that changed only
+  *diagnostics* would not move a byte. Run it; do not rely on it alone.
+
+**Design.** Two tiers, because the two available outputs are complementary and
+neither subsumes the other. Both facts below were measured 2026-08-26, not
+assumed:
+
+- **Tier 1 — `--emit-core-ast`.** Emits one JSON document per program with
+  `verdict`, `diagnostics`, the desugared module with `resolved_ty` on nodes,
+  plus `schemes`, `instantiations` and `module_caps`. This is the whole
+  typechecker's result, and it pins the **accept** path, where `--check` prints
+  nothing at all (verified: `--check` on `test/native/actor_call_canonical.march`
+  produces zero bytes and exit 0). There is precedent that it is sensitive to
+  typecheck internals: the 2026-08-24 tcenv-cache defect was diagnosed by a
+  three-way `--emit-core-ast` diff (see `bin/main.ml:680–697`).
+- **Tier 2 — plain `--check` text.** The JSON `diagnostics` array carries only
+  the first line of each message. Measured on
+  `specs/lang/types/reject/t01_int_vs_string.march`: the JSON gives two objects
+  whose `message` is `"expected \`Int\` but got \`String\`."` and nothing more,
+  while the text output additionally carries the source excerpt, the
+  `This is the declared return type of \`f\`.` provenance line, the
+  `the expected type comes from here:` reason chain and the
+  `Use \`int_to_string(x)\` to convert…` hint. All of that is produced by
+  `pp_ty` / `message_part` / `render_parts` — code Task 6.3 moves. Tier 2 is
+  the tier whose diff you actually read.
+
+Store Tier 1 as one **sha256 per fixture** (a full-JSON manifest over ~600
+fixtures is ~10 MB and unreadable as a diff) and, on a mismatch, re-emit the
+offending fixtures' JSON into the diff directory so the change is
+investigable. Store Tier 2 as full text, tagged per fixture and sorted, exactly
+as `refine-oracle.sh` does.
+
+**Corpus:** `specs/lang/types/accept/*.march` (146) +
+`specs/lang/types/reject/*.march` (157) + `test/native/*.march` (181) +
+`stdlib/*.march` (116) ≈ 600 fixtures. Measured cost: **0.23 s/fixture**
+(20 accept fixtures in 4.5 s wall), so budget ~4–6 minutes for Tier 1 plus
+Tier 2 over the reject corpus. `check_types.sh`'s `xargs -P` + `sort` pattern
+parallelises this safely if it proves too slow; do not parallelise without the
+sort.
+
+- [ ] **Step 1: Write the script, reusing `refine-oracle.sh`'s hard-won shape**
+
+Read `scripts/refine-oracle.sh` first and copy its structure. Four things it
+learned the hard way apply here unchanged:
+
+1. **`${x:?msg}` must contain no `}`.** Bash ends the expansion at the first
+   one, so `"usage: … {baseline|check} <dir>"` silently sets the variable to
+   `baseline <dir>}` and every invocation dies with `unknown mode` before
+   touching a fixture. Both this plan's Task 0.1 draft and its Task 3.1 draft
+   shipped that bug. Keep the usage text in a `}`-free `USAGE` variable.
+2. **Run under a private `HOME`.** `~/.cache/march` holds the Marshal'd stdlib
+   AST and typecheck env, shared by every worktree on this box, and its spans
+   carry the populating worktree's absolute paths.
+3. **`mkdir -p "$DIR/home/.cache"`, not just `"$DIR/home"`.** Measured
+   2026-08-26: with only `home` present, every single fixture's output is
+   prefixed with
+   `[warn] could not save the stdlib typecheck cache (Unix.Unix_error(Unix.ENOENT, "mkdir", …/.cache/march)); stdlib will be re-typechecked on every invocation`
+   — 177 bytes of noise per fixture *and* the stdlib is re-typechecked on every
+   invocation, several-fold slower. (This is a real compiler defect, filed at
+   `specs/todos/2026-08-26-stdlib-cache-mkdir-not-recursive.md`; do not fix it
+   here, just work around it.)
+4. **Normalise the repo root out of every path**, and collapse any directory
+   prefix on a `stdlib/` path — the compiler reaches `prelude.march` as either
+   the staged `_build/default/bin/../stdlib/…` copy or the source tree, and
+   which spelling appears is not a property of the checker.
+
+Non-vacuity guards, in the same spirit as the other two oracles: refuse to
+record a baseline with fewer than **400** fixtures or fewer than **500** Tier-2
+report lines. Do not tighten these to equalities — the corpora grow.
+
+Clear `.march/cas/artifacts-v2` once before the sweep (`--check` is not the
+compile path, but `--emit-core-ast` shares plumbing with it; clearing costs
+nothing and rules the class out). Do **not** clear `.march/cas/vc` — that is
+the refinement oracle's concern and clearing it here only slows the run.
+
+Determinism was checked before writing any of this: three consecutive
+`--emit-core-ast` runs of `specs/lang/types/accept/t07_generic_option_two_types.march`
+under a private `HOME` are byte-identical, and identical to the run under the
+real (warm-cache) `HOME` once the `[warn]` line is stripped. The
+2026-08-24 cache-ordering fix holds.
+
+- [ ] **Step 2: Record the baseline**
+
+```bash
+dune build --root . bin/main.exe 2>&1 | tail -3
+chmod +x scripts/types-oracle.sh
+scripts/types-oracle.sh baseline /tmp/types-base-$SLUG; echo "exit=$?"
+```
+
+Record the printed `fixtures=` / `report_lines=` numbers here when you run it.
+A `FATAL:` line means a guard fired — investigate, do not lower the guard.
+
+- [ ] **Step 3: Prove RED, then prove GREEN — before any other task starts**
+
+An oracle nobody has seen fail is not evidence. Both probes are required and
+both must be reverted before Task 6.2.
+
+*RED* — two perturbations in `lib/typecheck/typecheck.ml`, one that only a
+Tier-2 diff can see and one that only Tier 1 can:
+
+- reword a hint that never appears in any `EXPECT-ERROR` annotation, e.g. the
+  `Use \`int_to_string(x)\` to convert an Int to a String.` suggestion →
+  append `PROBE`. This is the case `@types-check` is blind to; the oracle must
+  not be.
+- change an inference *result* without changing any message: in `generalize`
+  (`typecheck.ml:1789`), stop generalizing at one level (e.g. return `Mono t`
+  unconditionally for a chosen shape). Tier 1's `schemes` must move.
+
+Rebuild and run `scripts/types-oracle.sh check /tmp/types-base-$SLUG`. It must
+exit non-zero and name both tiers. Record the differing-line counts here.
+
+*GREEN* — revert both probes, append a comment-only line to the same file,
+rebuild, re-run. It must print the identical-manifest line and exit 0. Record
+the numbers.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add scripts/types-oracle.sh && git commit -m "test: add typecheck diagnostic+inference oracle for typecheck.ml refactors"
+```
+
+**Done means:** the script is committed, a baseline exists, and this document
+records a measured RED and a measured GREEN. Nothing in 6.2–6.9 may start
+before that.
+
+---
+
+### Task 6.2: Extract §16 tail-call enforcement → `typecheck_tailcall.ml`
+
+**Kind: code motion.** All three oracles must be byte-identical.
 
 **Files:**
-- Create: `lib/typecheck/builtin_caps.ml`
+- Create: `lib/typecheck/typecheck_tailcall.ml` (~576 lines)
 - Modify: `lib/typecheck/typecheck.ml`
 
 **Interfaces:**
-- Produces: `Builtin_caps.table : (string * string) list`. `typecheck.ml` keeps `let builtin_cap_table = Builtin_caps.table` at the original position so no other line in the file changes.
+- Produces `Typecheck_tailcall.enforce_tail_calls_in_decls` and its five
+  helpers. `typecheck.ml` regains them with **`include Typecheck_tailcall`**,
+  not `open` — see Step 3.
 
-- [ ] **Step 1: Confirm zero type coupling before moving**
+Deliberately first among the extractions, and deliberately the smallest with a
+real payoff: it has **zero** dependencies on anything else in the file, so if
+anything goes wrong the cause is the *method*, not the coupling. Get the method
+right here.
+
+- [ ] **Step 1: Derive the boundary from anchors, never from the numbers above**
 
 ```bash
-S=$(grep -n '^let builtin_cap_table' lib/typecheck/typecheck.ml | cut -d: -f1)
-E=$(awk -v s=$S 'NR>s && /^\]/{print NR; exit}' lib/typecheck/typecheck.ml)
-echo "table = $S..$E"      # 1967..2081 at 8d2b22fb
-sed -n "${S},${E}p" lib/typecheck/typecheck.ml | grep -cE '\b(Mono|Poly|TArrow|TCon|TVar|TTuple|scheme)\b'
+F=lib/typecheck/typecheck.ml
+S=$(grep -n '§16  Tail-call enforcement' $F | cut -d: -f1); S=$((S-1))   # the (* line above the header
+E=$(grep -n '§17  Module entry point' $F | cut -d: -f1); E=$((E-2))
+echo "band = $S..$E  ($((E-S+1)) lines)"     # 13047..13623, 577 at cde69dfb
+python3 dep.py $S $E                          # must print: 0 external deps
 ```
 
-Expected: **0**. Non-zero means the premise changed since `1f5a0111` — stop and report rather than extracting.
+If `dep.py` prints anything other than 0, the file has moved under you. Stop
+and re-derive the band; do not extract a region with unlisted dependencies.
 
-- [ ] **Step 2: Move the table verbatim, re-export**
+- [ ] **Step 2: Cut with a comment-depth mask, not a line-number `sed`**
 
-```bash
-E=$(awk -v s=$S 'NR>s && /^\]/{print NR; exit}' lib/typecheck/typecheck.ml)
-{ echo '(** Builtin capability table — which builtin requires which capability.'
-  echo '    Pure data; extracted verbatim from typecheck.ml.  No behavior change. *)'
-  echo
-  sed -n "${S},${E}p" lib/typecheck/typecheck.ml | sed '1s/^let builtin_cap_table/let table/'
-} > lib/typecheck/builtin_caps.ml
+This is the trap that bit Phase 1 and Phase 4 and it will bite here: a doc
+comment containing a **blank line** defeats any "walk back over the preceding
+comment lines" heuristic, and the previous definition's range swallows half of
+it. Build a real per-line inside-a-comment mask by scanning with a nested
+`(* *)` depth counter, and **assert every range's text has balanced comment
+delimiters before writing anything**. Also: trailing blank lines are content —
+do not `.rstrip('\n')` a block.
+
+- [ ] **Step 3: Re-export with `include`, and understand why**
+
+```ocaml
+(* in typecheck.ml, at the position the band used to occupy *)
+include Typecheck_tailcall
 ```
 
-Then replace lines `S`–`E` in `typecheck.ml` with `let builtin_cap_table = Builtin_caps.table`, keeping the original doc comment above it.
+`open` makes a name visible *inside* `typecheck.ml`; only `include` re-exports
+it to `Typecheck.*` consumers. Phase 1 learned this by breaking
+`test/test_stdlib_suite.ml`, which calls into `Eval` under a `let open`, and
+**a grep for `Typecheck.<name>` does not find those call sites.** `typecheck.mli`
+also constrains the result, so an `include` that fails to supply a declared
+`val` is a build error that names it exactly — that is a feature, use it.
 
-- [ ] **Step 3: Verify and commit**
+- [ ] **Step 4: Prove the motion was verbatim, by machine**
+
+Reassemble: walk `git show HEAD:lib/typecheck/typecheck.ml` top to bottom and
+consume each line from whichever of the two resulting files matches next,
+preferring the longest run. Every original line must appear exactly once, in
+order, byte-identical; the only additions permitted are the `include` line and
+its comment. Print the per-file attribution and the unconsumed count. This is
+the check that caught the dropped-trailing-blank-line bug in Phase 4; an
+eyeball would not have.
+
+- [ ] **Step 5: Verify and commit**
 
 ```bash
-dune build --root . bin/main.exe 2>&1 | tail -5 && scripts/ir-oracle.sh check /tmp/ir-base-$SLUG; echo "ir_exit=$?"
+dune build --root . bin/main.exe 2>&1 | tail -5; echo "build=$?"
+scripts/types-oracle.sh check /tmp/types-base-$SLUG; echo "types_exit=$?"
+scripts/ir-oracle.sh   check /tmp/ir-base-$SLUG;    echo "ir_exit=$?"
+dune build @types-check --force > /tmp/typescheck-$SLUG.log 2>&1; echo "alias_exit=$?"
+tail -3 /tmp/typescheck-$SLUG.log      # MUST show "=== core-march-types: N passed, 0 failed ==="
+test -s /tmp/typescheck-$SLUG.log || echo "VACUOUS — the log is empty, --force did not take"
 scripts/run-tests.sh compiler eval; echo "suite_exit=$?"
-git add lib/typecheck/builtin_caps.ml lib/typecheck/typecheck.ml && git commit -m "refactor(typecheck): extract builtin_cap_table to builtin_caps.ml"
+git add lib/typecheck/typecheck_tailcall.ml lib/typecheck/typecheck.ml
+git commit -m "refactor(typecheck): move tail-call enforcement to typecheck_tailcall.ml"
 ```
+
+**Done means:** all four oracles green, the `@types-check` log non-empty and
+reporting `0 failed`, and the reassembly check reporting zero unconsumed lines.
+
+---
+
+### Task 6.3: Extract the type and environment core — **PREREQUISITE**
+
+**Kind: code motion.** Oracles byte-identical.
+
+**Files:**
+- Create: `lib/typecheck/typecheck_types.ml` (~363 lines: `reason`, `ty`,
+  `session_ty`, `tvar`, `constraint_`, `scheme`, `fresh_var`, `repr`, `occurs`,
+  the tvar/record display tables, `pp_ty`, `pp_ty_pretty`, `pp_session_ty`,
+  `message_part`, `render_parts`)
+- Create: `lib/typecheck/typecheck_env.ml` (~1,505 lines: `lin_entry`,
+  `ctor_info`, `import_entry`, `import_index`, `proto_info`, `StrMap`,
+  `ref_record`, **`type env`** (392 lines), `make_env`, the `lookup_*` /
+  `resolve_qualified_*` / `suggest_*` family, `bind_*`, `generalize`,
+  `instantiate`)
+- Modify: `lib/typecheck/typecheck.ml`
+
+This is the extraction the 2026-08-23 review named as the blocker. It is also,
+measured, the *easiest* one in the file: `python3 dep.py 32 1901` prints
+**0 external deps**. Split in two rather than one because `typecheck_types.ml`
+is the part other modules will want and `typecheck_env.ml` is the part they
+mostly will not.
+
+- [ ] **Step 1: Derive both boundaries from anchors**
+
+```bash
+F=lib/typecheck/typecheck.ml
+A=$(grep -n '§7  Type environment' $F | cut -d: -f1); A=$((A-1))
+B=$(grep -n '§9  Built-in types' $F | cut -d: -f1);   B=$((B-2))
+echo "types = 32..$((A-1))   env = $A..$B"     # 32..394 / 397..1901 at cde69dfb
+python3 dep.py 32 $B                            # must print 0 external deps
+```
+
+- [ ] **Step 2: Move, with `open March_ast.Ast` where needed**
+
+Phase 1 hit this twice: an extracted file naming an AST type needs its own
+`open`/qualification, and conversely an extracted file that carries an `open` it
+no longer uses fails warning 33. Expect one build round-trip per file for this.
+
+- [ ] **Step 3: `include` both, in order, at the top of `typecheck.ml`**
+
+```ocaml
+include Typecheck_types
+include Typecheck_env
+```
+
+**The mutable state must be *aliased*, never re-declared.** `_counter`,
+`_tvar_names`, `_record_names`, `offer_catchall_depth`,
+`inject_iface_exports_ref`, `stdlib_source_files` and `cap_strict_ceiling` are
+`ref`s and `Hashtbl`s; `include` re-exports the same physical cells, which is
+what you want. `bin/main.ml` marshals `March_typecheck.Typecheck._counter` and
+`._record_names` into the stdlib typecheck-env cache (`bin/main.ml:755–759`),
+and a duplicated cell there reproduces exactly the cross-run nondeterminism
+documented in
+`specs/progress/2026-08-24-interp-perf-phase-3-startup-tcenv-cache.md`. Assert
+it: after the move, a two-line probe that mutates `Typecheck_types._counter`
+and reads `Typecheck._counter` must observe the change.
+
+- [ ] **Step 4: `typecheck.mli` must not change**
+
+`include` of a module whose types are structurally the definitions the `.mli`
+declares satisfies it unchanged. If the build asks you to edit `typecheck.mli`
+in this task, something was copied rather than re-exported — fix the `include`,
+do not edit the interface. (Task 6.9 is where the interface legitimately
+changes.)
+
+- [ ] **Step 5: Verify and commit** — same command block as Task 6.2 Step 5,
+plus the reassembly check across three files, plus `scripts/run-tests.sh lsp`
+(the LSP reads `Tc.ty`, `Tc.env`, `Tc.repr`, `Tc.pp_ty` through a module alias,
+which a `Typecheck.` grep does not find).
+
+```bash
+git add lib/typecheck/typecheck_types.ml lib/typecheck/typecheck_env.ml lib/typecheck/typecheck.ml
+git commit -m "refactor(typecheck): extract the type and environment core (prerequisite)"
+```
+
+**Done means:** oracles green, `typecheck.mli` unmodified, and the shared-cell
+probe passes.
+
+---
+
+### Task 6.4: Extract §9/§9b builtins → `typecheck_builtins.ml`
+
+**Kind: code motion.** Oracles byte-identical.
+
+**Files:**
+- Create: `lib/typecheck/typecheck_builtins.ml` (~1,637 lines)
+- Modify: `lib/typecheck/typecheck.ml`
+
+This is the `eval.ml` `base_env` analogue: long, mostly literal, low-risk, high
+volume. It carries the type constants (`t_int` … `t_vault`), `span_is_stdlib`,
+**`builtin_cap_table`** (115 lines — this is where the old Task 6.1's target
+ends up), `locally_declared_names_of`, the capability-path primitives
+(`cap_subsumes`, `cap_path_of_names`, `cap_paths_in_surface_ty`), the §9b
+builtin interfaces/impls, `builtin_bindings` (**1,134 lines**, the second-largest
+definition in the file), `builtin_types`, `builtin_ctors` and `base_env`.
+
+`python3 dep.py 1904 3540` → **4** external deps, all in the Task 6.3 head:
+`fresh_var`, `make_env`, `add_ctor`, `bind_vars`.
+
+- [ ] **Step 1: Derive the boundary**
+
+```bash
+F=lib/typecheck/typecheck.ml
+S=$(grep -n '§9  Built-in types' $F | cut -d: -f1); S=$((S-1))
+E=$(grep -n '§10  Unification' $F | cut -d: -f1);   E=$((E-2))
+echo "band = $S..$E"; python3 dep.py $S $E    # expect exactly the 4 head deps
+```
+
+- [ ] **Step 2: Move; `include Typecheck_builtins` at the band's old position**
+
+`base_env` is declared in `typecheck.mli` and has **33** external call sites —
+the `include` must supply it, and the build will say so if it does not.
+
+- [ ] **Step 3: Reassembly check, oracles, commit** — as Task 6.2.
+
+```bash
+git add lib/typecheck/typecheck_builtins.ml lib/typecheck/typecheck.ml
+git commit -m "refactor(typecheck): move the builtin bindings and interface tables to typecheck_builtins.ml"
+```
+
+**Done means:** oracles green. Note that this task is where the IR oracle earns
+its keep — a mangled `builtin_bindings` scheme changes inferred types, which
+moves emitted IR.
+
+---
+
+### Task 6.5: Extract §E pattern exhaustiveness → `typecheck_exhaustive.ml`
+
+**Kind: code motion.** Oracles byte-identical.
+
+**Files:**
+- Create: `lib/typecheck/typecheck_exhaustive.ml` (~818 lines)
+- Modify: `lib/typecheck/typecheck.ml`
+
+The analysis suggested exhaustiveness is not part of the inference recursion.
+**Verified:** `python3 dep.py 4934 5721` → 6 external deps, none below, and the
+only occurrence of the string `infer_expr` in the band is the doc comment on
+line `5722` — which belongs to the *next* definition, not to this one. A naive
+`grep infer_expr` over the band reports a hit and would have concluded the
+opposite. `check_exhaustiveness` is *called from* `infer_expr`, i.e. it is a
+dependency of inference, not a dependent — which is why it sits above it and
+why it moves cleanly.
+
+- [ ] **Step 1: Move `span_of_expr` first, as its own commit**
+
+`span_of_expr` (`typecheck.ml:4903–4932`, 30 lines including its doc comment)
+sits under the §14 header, above §E, and the exhaustiveness band needs it. It is
+a pure AST accessor with **zero** dependencies. Move it into
+`typecheck_types.ml` — this is a *reorder*, not a prefix cut, so verify
+explicitly that nothing between its old and new positions calls it (it is
+declared in `typecheck.mli` and has 7 external call sites, 4 of them through the
+`Tc.` alias).
+
+- [ ] **Step 2: Derive the band**
+
+```bash
+F=lib/typecheck/typecheck.ml
+S=$(grep -n '§E  Pattern exhaustiveness checking' $F | cut -d: -f1); S=$((S-1))
+E=$(grep -n '^(\*\* \[infer_expr env e\]' $F | cut -d: -f1); E=$((E-2))
+echo "band = $S..$E"; python3 dep.py $S $E
+```
+
+`E` is derived from `infer_expr`'s doc comment deliberately: the band's end is
+"the line before inference's documentation begins", and cutting at
+`grep -n '^let rec infer_expr'` instead would leave that comment orphaned above
+an `include`.
+
+- [ ] **Step 3: Move, `include`, reassemble, verify, commit** — as Task 6.2.
+
+```bash
+git add lib/typecheck/typecheck_exhaustive.ml lib/typecheck/typecheck.ml
+git commit -m "refactor(typecheck): move pattern-exhaustiveness checking to typecheck_exhaustive.ml"
+```
+
+**Done means:** oracles green. Exhaustiveness emits *warnings*, which
+`@types-check` does not assert on at all — Tier 2 of the new oracle is the only
+thing watching them. If Tier 2 moves here and Tier 1 does not, you changed a
+warning, and that is a semantic change, not motion.
+
+---
+
+### Task 6.6: Extract the capability / `needs` band → `typecheck_caps.ml`
+
+**Kind: code motion.** Oracles byte-identical.
+
+**Files:**
+- Create: `lib/typecheck/typecheck_caps.ml` (~1,820 lines)
+- Modify: `lib/typecheck/typecheck.ml`
+
+The largest single win in the phase and the one the analysis flagged. Verified:
+`python3 dep.py 8967 10697` → **10** external deps, none below, none of them the
+inference knot. `check_module_needs` alone is **1,296 lines** — the
+second-largest *function* in the file — and its only contact with inference is a
+single call to `repr`.
+
+The band is `cap_annots_in_expr` (`:8967`) through
+`fn_transitive_capability_closures` (`:10694`), ending at the §16a header, and
+carries `check_module_needs`, `cap_in_solved_ty`, `check_cap_narrow_sites`,
+`check_json_cap_sites`, `check_mint_cap_sites` and the four
+`fn_*_capability_closures` accessors — six of which are declared in
+`typecheck.mli`.
+
+- [ ] **Step 1: `free_vars_expr` rides along**
+
+`free_vars_expr` / `free_vars_block` / `free_vars_pattern` (`:7941–8029`, 89
+lines, one `let rec … and` chain, `dep.py` → **0** external deps) sit above the
+band and are used by it. Carry them into `typecheck_caps.ml` in the same commit
+— splitting a helper from its caller across two commits is what made Phase 1's
+shared/exclusive classification collapse into "move all 75 in source order".
+They are used elsewhere in `typecheck.ml` too, so the `include` must re-export
+them.
+
+- [ ] **Step 2: Derive the band**
+
+```bash
+F=lib/typecheck/typecheck.ml
+S=$(grep -n '^let rec cap_annots_in_expr' $F | cut -d: -f1); S=$((S-3))  # keep its doc comment
+E=$(grep -n '§16a  Session type projection' $F | cut -d: -f1); E=$((E-2))
+echo "band = $S..$E"; python3 dep.py $S $E
+```
+
+Check the `S` adjustment against the comment mask rather than assuming 3 lines.
+
+- [ ] **Step 3: Move, `include`, reassemble, verify, commit**
+
+Add `scripts/run-tests.sh` in full here, not just `compiler eval`: the
+capability surface is asserted by `test_caps.ml`, `test_cap_ceiling.ml`,
+`test_cap_scope.ml`, `test_cap_package.ml`, `test_cap_markers.ml` and six more
+`test_cap_*` suites.
+
+```bash
+git add lib/typecheck/typecheck_caps.ml lib/typecheck/typecheck.ml
+git commit -m "refactor(typecheck): move the capability and needs checker to typecheck_caps.ml"
+```
+
+**Done means:** oracles green and the full suite matches the Phase 0 baseline.
+
+---
+
+### Task 6.7 *(stretch)*: Extract §10/§11 unify + surface-type conversion
+
+**Kind: code motion**, but the highest-risk task in the phase. Do not start it
+unless 6.2–6.6 have all landed on `main` and you can finish and land 6.7 the
+same day.
+
+**Files:** Create `lib/typecheck/typecheck_unify.ml` (~785 lines); modify
+`lib/typecheck/typecheck.ml`.
+
+`unify` (`:3788`, 164 lines), `report_mismatch` (`:3555`, 142),
+`session_ty_equal`, `normalize_tnat`, `surface_ty` (`:4000`, 211),
+`instantiate_ctor`, `expand_record` and the linearity-sentinel helpers.
+`python3 dep.py 3543 4327` → 21 external deps, all above, none below.
+
+**The specific hazard here is module-initialisation order, and it exists
+nowhere else in this phase.** The band contains two forward-hook installations:
+`let () = inject_iface_exports_ref := …` (`:4211`) and
+`let () = expand_record_ref := …` (`:4307`). Both `ref`s are *defined* inside
+the extracted set (`:1447` in Task 6.3's head, `:3782` in this band), so moving
+the band moves the assignment into a module that is initialised **before**
+`Typecheck`. Nothing reads either hook at initialisation time today — they are
+read from `load_module_into_env` and from `unify`, both of which only run during
+`check_module` — but that must be **verified by reading both read sites**, not
+assumed. If a future edit ever reads one at module init, this reordering is a
+silent behaviour change that no oracle in this plan would catch, because the
+corpus never exercises init-time ordering.
+
+- [ ] Steps as Task 6.2, plus an explicit written check of both hook read sites.
+
+```bash
+git add lib/typecheck/typecheck_unify.ml lib/typecheck/typecheck.ml
+git commit -m "refactor(typecheck): move unification and surface-type conversion to typecheck_unify.ml"
+```
+
+---
+
+### Task 6.8 *(stretch, depends on 6.7)*: Extract §16a session projection
+
+**Kind: code motion.**
+
+**Files:** Create `lib/typecheck/typecheck_session.ml` (~1,094 lines); modify
+`lib/typecheck/typecheck.ml`.
+
+`project_steps`, `subst_svar`, `dual_session_ty`, `project_protocol`,
+`module_refs_in_decls`, `unqualified_module_deps`, the two
+`dependency_order_*_run` passes and `check_no_panic_module`.
+`python3 dep.py 10700 11793` → 8 external deps: `pp_session_ty`,
+`builtin_cap_table`, `locally_declared_names_of`, `session_ty_equal`,
+`session_ty_exact_equal`, **`surface_ty`**, `unfold_srec`, `free_vars_expr` —
+which is why it depends on 6.7 (`surface_ty`) as well as 6.4, 6.5 and 6.6.
+
+The band ends at `let rec check_decl` (`:11794`); `check_decl` itself calls
+`check_fn` calls `infer_expr` and **stays**.
+
+- [ ] Steps as Task 6.2. Run `scripts/run-tests.sh` in full — session types have
+their own suites.
+
+```bash
+git add lib/typecheck/typecheck_session.ml lib/typecheck/typecheck.ml
+git commit -m "refactor(typecheck): move session-type projection to typecheck_session.ml"
+```
+
+---
+
+### Task 6.9: Re-derive `typecheck.mli` and renumber the § headers
+
+**Kind: semantic change** to the interface (the oracles must still be
+byte-identical — nothing executable moves — but the exported surface
+legitimately shrinks, and that is the diff to review).
+
+**Files:** Modify `lib/typecheck/typecheck.mli`, `lib/typecheck/typecheck.ml`
+(comments only), and add one small `.mli` per extracted module where it buys
+something.
+
+- [ ] **Step 1: `typecheck.mli`'s section comment is now wrong**
+
+The interface's docstring says inference's helpers "are not exported: they are
+mutually recursive, they read and write module-level state". After this phase
+much of what it describes lives in sibling modules. Rewrite the docstring to
+say where things now are; leave the 50 `val`s alone unless the build says
+otherwise.
+
+- [ ] **Step 2: Add `.mli` files where the win is real, not everywhere**
+
+`typecheck_builtins.mli` (`val base_env`, `val builtin_cap_table`,
+`val builtin_interface_bindings`, `val builtin_types`, …) and
+`typecheck_exhaustive.mli` (`val check_exhaustiveness`, `val check_redundant_arms`,
+`type spat`) are worth writing — they turn a thousand-line file into a
+five-line contract. `typecheck_types.mli` is **not**: its whole content is the
+type language, which is already the module's contract. Do not write an `.mli`
+that is a verbatim copy of the inferred one; that is churn with no boundary.
+
+Caution learned in the `.mli` pass (2026-08-25): a re-export nothing calls
+becomes an unused-value **error** under warnings-as-errors if you hide it, so it
+has to be declared anyway with a comment saying it is not API. Prefer deleting
+the dead re-export.
+
+- [ ] **Step 3: Renumber the § headers and the module docstring's table of
+contents**
+
+`typecheck.ml`'s header block still lists §1–§16 and the file's real numbering
+already has gaps and a duplicate ordering problem (§9b, §E, §16a, and §16
+appearing *after* §16a). Renumber the survivors contiguously and rewrite the
+table of contents. Verify comments-only by masking every line inside a comment
+and diffing what is left — Phase 1 did exactly this and reported
+"2,835 code lines, byte-identical".
+
+- [ ] **Step 4: Verify and commit**
+
+```bash
+dune build --root . bin/main.exe 2>&1 | tail -5
+dune build @check 2>&1 | tail -20     # expect only the 19 pre-existing forge/test + js errors
+scripts/types-oracle.sh check /tmp/types-base-$SLUG; echo "types_exit=$?"
+scripts/ir-oracle.sh   check /tmp/ir-base-$SLUG;    echo "ir_exit=$?"
+scripts/run-tests.sh; echo "suite_exit=$?"
+git add lib/typecheck/*.mli lib/typecheck/typecheck.ml
+git commit -m "refactor(typecheck): refresh the interface and renumber the section headers"
+```
+
+**Done means:** `wc -l lib/typecheck/typecheck.ml` is ≤ 8,400 (≤ 6,500 if 6.7
+and 6.8 landed), every oracle green, and the full suite matching the Phase 0
+baseline.
+
+---
+
+### What should NOT be decomposed, and why
+
+This is a conclusion of the investigation, not an omission.
+
+**The `infer_expr … bind_lam_param` chain (`:5724–7940`, 2,217 lines, 18
+mutually recursive functions) stays whole.** It is tempting to compare it to
+Phase 2's `emit_expr`, which was successfully split with its siblings receiving
+`~emit_expr` as a labelled callback. The comparison does not hold:
+
+- `emit_expr` was **76%** of its file and dispatched on *strings*, so Phase 2
+  could convert the dispatch to a closed variant and let the compiler prove the
+  split exhaustive. `infer_expr` is 10% of its file (≈27% after this phase) and
+  dispatches on AST constructors that are already exhaustive — there is no
+  equivalent hardening step to hang the split on.
+- Its arms are not independent. They thread and mutate `env` (linearity `used`
+  flags, `pending_constraints`, `type_map`, `mint_cap_sites`, the offer-refinement
+  stack), and they call each other directly. Splitting them means passing a
+  record of mutually recursive callbacks through every module — trading 2,200
+  lines of locality for an indirection layer that makes the control flow
+  *harder* to follow, not easier.
+- The measured payoff is small. After 6.2–6.6 the file is ~8,300 lines with 21
+  navigable sections; the phase's stated goal is already met without touching
+  it.
+
+Revisit only if the chain itself grows past ~3,000 lines, or if a *behavioural*
+reason appears (e.g. wanting a second inference entry point). Not for size.
+
+**`check_decl` (`:11794`, 1,247 lines) and §17 module entry (`:13626`, 1,331)
+stay.** They are consumers, not dependencies: `check_decl` → `check_fn` →
+`infer_expr`, and `check_module_core` calls everything. A module holding them
+would have to be compiled *after* `Typecheck`, but `check_module_core` — which
+`Typecheck` must export — calls them. That is a cycle with no split that breaks
+it short of moving inference itself. Leave them.
+
+**§12 linearity (`:4330–4510`, 180 lines) stays.** `dep.py` says it is nearly
+free-standing, and the analysis lists it as a decomposition candidate. It is
+180 lines. Extracting it would create a module smaller than the `include` glue
+is worth, and it interleaves with §11's `bind_linear_field_sentinels`. Not
+worth a file.
+
+### What this investigation could not determine
+
+- **Whether `--emit-core-ast` is sensitive to *every* inference change.** It
+  pins `resolved_ty`, `schemes`, `instantiations`, `module_caps`, `verdict` and
+  `diagnostics`, and the RED probe in Task 6.1 Step 3 must confirm it moves for
+  a `generalize` perturbation. It does not obviously pin linearity `used` flags
+  or the offer-refinement stack, whose only observable is a diagnostic — which
+  is Tier 2's job. If a task's Tier 2 moves while Tier 1 does not, treat that
+  as a real finding, not oracle noise.
+- **The runtime of a full 600-fixture sweep.** 0.23 s/fixture was measured warm
+  over 20 fixtures; the first run under a private `HOME` re-typechecks the
+  stdlib and will be slower. Record the real number in Task 6.1 Step 2.
+- **Whether the `include` chain has an OCaml compile-time cost worth caring
+  about.** Six `include`s of large module types in one file is more than
+  anything else in this repo does. If `typecheck.ml`'s own compile time
+  regresses noticeably after Task 6.4, measure before continuing.
 
 ---
 
@@ -1778,7 +2529,7 @@ Put the before/after table in the `specs/progress/` entry.
 
 - [ ] **Step 2: Update `CLAUDE.md`'s project-layout block**
 
-The `lib/tir/` line must name `builtin_name`, `llvm_emit_arith`, `llvm_emit_task`, `llvm_emit_record`; the `lib/eval/` entry must reflect the split. `scripts/check-docs.sh` lints current-truth docs for dead compiler-source pointers, so a stale layout line will fail CI.
+The `lib/tir/` line must name `builtin_name`, `llvm_emit_arith`, `llvm_emit_task`, `llvm_emit_record`; the `lib/eval/` entry must reflect the split; and the `lib/typecheck/typecheck.ml` line must become a directory line naming `typecheck_types`, `typecheck_env`, `typecheck_builtins`, `typecheck_exhaustive`, `typecheck_caps`, `typecheck_tailcall` (plus `typecheck_unify` / `typecheck_session` if the stretch tasks landed). `scripts/check-docs.sh` lints current-truth docs for dead compiler-source pointers, so a stale layout line will fail CI.
 
 - [ ] **Step 3: Run the doc lint**
 
@@ -1807,7 +2558,9 @@ git add CHANGELOG.md CLAUDE.md && git mv specs/todos/2026-08-19-compiler-file-de
 
 ## Risks
 
-**Rebase pressure is the dominant risk, and it was accepted deliberately.** `typecheck.ml` alone takes 34 of every 300 commits; `eval.ml`, `llvm_emit.ml`, and `main.ml` add another 44 between them. A single long-lived branch touching all six files will conflict with concurrent work. Mitigations built into the plan: every task is its own commit; phases are independent and can land separately; `typecheck.ml` (most contended) is last and touches least. If conflicts appear, land the completed phases and re-cut the branch rather than carrying the whole set.
+**Rebase pressure is the dominant risk, and it was accepted deliberately.** `typecheck.ml` alone takes 34 of every 300 commits; `eval.ml`, `llvm_emit.ml`, and `main.ml` add another 44 between them. A single long-lived branch touching all six files will conflict with concurrent work. Mitigations built into the plan: every task is its own commit; phases are independent and can land separately. If conflicts appear, land the completed phases and re-cut the branch rather than carrying the whole set.
+
+**[revised 2026-08-26]** — "`typecheck.ml` is last and touches least" is no longer the mitigation; Phase 6 now moves 6,721 lines out of the most-contended file in the tree (387 commits in six months, **68 in the last thirty**). The mitigation is instead: land each of Tasks 6.2–6.6 *separately and immediately*, never carry two of them on one branch, and re-derive every boundary by `grep` anchor at the start of each task rather than trusting a line number written here. Tasks 6.7 and 6.8 are explicitly gated on the first five having already landed, because they touch `unify`.
 
 **Codegen is where this repo's bugs hide.** Phase 2 touches the LLVM emitter, and the failure mode here is historically a *compiled-only* miscompile that interpreted tests never see. This is why Phase 2 asserts byte-identical IR at every batch rather than relying on the test suite, and why Task 2.2 Step 3 stops after a single converted arm.
 
@@ -1847,7 +2600,7 @@ is executed.
 A verification pass against the codebase — checking the plan's load-bearing claims rather than its prose — found five defects in the first draft. All are fixed inline above; they are recorded here so an executing agent understands *why* the structure looks the way it does, and does not "simplify" it back into a bug.
 
 1. **Module cycle in Phase 1 (critical — would not compile).** Every extraction block referenced `eval_error` (base_env ×717, session ×10, net ×4, simd ×1) and the hook refs (base_env ×41, net ×4), all of which the first draft left in `eval.ml`. Since `eval.ml` depends on the extracted modules, that is a cycle. The draft's "leaf check" also tested the wrong direction (references *below* the block, when the real rule is references to *anything remaining in `eval.ml`*). Fixes: new Task 1.0b (`eval_prim.ml`); Task 1.3 rewritten as a shared/exclusive split with `eval_runtime.ml` (27 shared helpers measured, 85 exclusive); dependency-check criteria corrected in Tasks 1.1–1.2.
-2. **Phase 6 downscoped (critical — would not compile).** `builtin_bindings` uses `TArrow` ×956 / `TCon` ×539 / `Mono` ×451; `pp_ty` prints `ty`. Both need the type definitions extracted first, in the most contended file. The draft's "zero coupling" verification only looked for calls into the inference core. Dropped; only the genuinely uncoupled `builtin_cap_table` remains.
+2. **Phase 6 downscoped (critical — would not compile).** `builtin_bindings` uses `TArrow` ×956 / `TCon` ×539 / `Mono` ×451; `pp_ty` prints `ty`. Both need the type definitions extracted first, in the most contended file. The draft's "zero coupling" verification only looked for calls into the inference core. Dropped; only the genuinely uncoupled `builtin_cap_table` remains. **[re-scoped 2026-08-26]** — the coupling finding was right and is confirmed; the *conclusion* was wrong. Extracting the type core turns out to be the cheapest move in the file (`dep.py 32 1901` → zero external dependencies) and unlocks 6,700 further lines, not 115. It is now Task 6.3, a hard prerequisite, exactly as this review predicted it would have to be.
 3. **`check_call` has three call sites** (`:5695`, `:5719`, `:5731`), not one — the draft's grep was `head`-truncated. Task 3.3's classification and threading corrected.
 4. **`code_actions_at` signature.** The draft's composition dropped `?(diagnostics = [])` and the trailing `()`, which would break every `test_lsp.ml` call site and the server. Now preserved verbatim.
 5. **Phase 5 verification method was structurally unable to pass.** The CAS key includes the compiler's own digest, so comparing keys across two compiler builds always differs. Replaced the artifact-count comparison with a `MARCH_DEBUG_CASFLAGS` flag-list diff; that env-gated print already existed at `main.ml:3625` and now lives inside `build_cas_flags` so both sites log.
