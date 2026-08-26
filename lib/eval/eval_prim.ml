@@ -17,6 +17,9 @@ exception Eval_error of string
 
 let eval_error fmt = Printf.ksprintf (fun s -> raise (Eval_error s)) fmt
 
+(** Flag set when graceful shutdown has been requested (SIGTERM, App.stop). *)
+let shutdown_requested : bool ref = ref false
+
 (* Hook refs — copied verbatim from eval.ml, including their placeholder
    bodies and the comments explaining who installs them. *)
 
