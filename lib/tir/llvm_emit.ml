@@ -79,14 +79,9 @@ type target_config = Llvm_toplevel.target_config =
   | Js
 
 let is_wasm_target = Llvm_toplevel.is_wasm_target
-let is_wasm32 = Llvm_toplevel.is_wasm32
 let target_triple = Llvm_toplevel.target_triple
-let target_arch = Llvm_toplevel.target_arch
 let target_is_linux = Llvm_toplevel.target_is_linux
 let zig_target = Llvm_toplevel.zig_target
-let target_ptr_size = Llvm_toplevel.target_ptr_size
-let target_ptr_ty = Llvm_toplevel.target_ptr_ty
-let target_int_ty = Llvm_toplevel.target_int_ty
 
 (* Type defs live on ctx (ctx.type_defs) — threaded per emission context so
    REPL/JIT fragments never see stale representations (B12). *)
@@ -100,7 +95,6 @@ let target_int_ty = Llvm_toplevel.target_int_ty
    all four modules already depend on.  Re-exported bare here — [emit_module]
    below resets the table per module and prints the report. *)
 let repr_audit_record = Llvm_ctx.repr_audit_record
-let repr_audit_report = Llvm_ctx.repr_audit_report
 let _repr_audit = Llvm_ctx._repr_audit
 
 (* ── Context ─────────────────────────────────────────────────────────── *)
@@ -182,7 +176,6 @@ type ctx = Llvm_ctx.ctx = {
   atom_names : (int64, string) Hashtbl.t;
 }
 
-let make_ctx = Llvm_ctx.make_ctx
 let module_of_name = Llvm_ctx.module_of_name
 let fresh = Llvm_ctx.fresh
 let fresh_block = Llvm_ctx.fresh_block
@@ -190,14 +183,10 @@ let emit = Llvm_ctx.emit
 let emit_label = Llvm_ctx.emit_label
 let emit_term = Llvm_ctx.emit_term
 let llvm_name = Llvm_ctx.llvm_name
-let fnv1a_64 = Llvm_ctx.fnv1a_64
 let atom_hash = Llvm_ctx.atom_hash
 let llvm_ty = Llvm_ctx.llvm_ty
-let llvm_param_ty = Llvm_ctx.llvm_param_ty
-let alloc_size = Llvm_ctx.alloc_size
 let emit_tag_scalar = Llvm_ctx.emit_tag_scalar
 let emit_untag_scalar = Llvm_ctx.emit_untag_scalar
-let emit_untag_known_scalar = Llvm_ctx.emit_untag_known_scalar
 let coerce = Llvm_ctx.coerce
 let is_vec_ty = Llvm_ctx.is_vec_ty
 
@@ -214,8 +203,6 @@ let release_temp_boxes (ctx : Llvm_ctx.ctx) (boxes : string list ref) : unit =
     (fun b -> Llvm_ctx.emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" b))
     !boxes;
   boxes := []
-let simd_kind_of_vec = Llvm_ctx.simd_kind_of_vec
-let llvm_escape_string = Llvm_ctx.llvm_escape_string
 let intern_string = Llvm_ctx.intern_string
 
 (* llvm_ret_ty moved to [Llvm_ctx] (Wave 3 Task 6, chunk 2): [Llvm_calls] and
@@ -227,7 +214,6 @@ let llvm_ret_ty = Llvm_ctx.llvm_ret_ty
    caller besides emit_module's one use below is [emit_raises_wrapper].
    Re-exported bare for that one remaining call site (in emit_module,
    Task 7's territory). *)
-let ok_payload_ty = Llvm_calls.ok_payload_ty
 
 (** Return type of a function variable's type. *)
 let fn_ret_tir (ty : Tir.ty) : Tir.ty =
@@ -288,7 +274,6 @@ let atom_is_builtin (atom : Tir.atom) =
 (* emit_reduction_check moved to [Llvm_ctx] (Wave 3 Task 6, chunk 2):
    [emit_mutual_tco_group] (now in [Llvm_tco]) needed it alongside [emit_fn]
    here — re-export bare since emit_fn calls it unqualified below. *)
-let emit_reduction_check = Llvm_ctx.emit_reduction_check
 
 (** TIR return type for known builtin/extern functions, overriding type info.
 
@@ -670,8 +655,6 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
     emit ctx (Printf.sprintf "%s = load %s, ptr %%%s.addr" tmp ty slot);
     (ty, tmp)
 
-let emit_atom_val ctx a = snd (emit_atom ctx a)
-
 (** Emit atom and coerce result to [ty]. Handles TVar→ptr mismatches. *)
 let emit_atom_as ctx ty a =
   let (actual_ty, v) = emit_atom ctx a in
@@ -686,29 +669,23 @@ let emit_atom_as ctx ty a =
    EAlloc/EStackAlloc/EReuse/ETuple/ERecord/EField/EUpdate arms below (and
    emit_case, now in [Llvm_case]) call them unqualified — same re-export
    pattern as [Llvm_ctx]'s Wave 3 Task 3 split. *)
-let emit_load_tag = Llvm_data.emit_load_tag
 let emit_store_tag = Llvm_data.emit_store_tag
 let emit_store_field = Llvm_data.emit_store_field
 let emit_load_field = Llvm_data.emit_load_field
 let emit_heap_alloc = Llvm_data.emit_heap_alloc
 let emit_stack_alloc = Llvm_data.emit_stack_alloc
 let ctor_entry = Llvm_data.ctor_entry
-let resolve_ctor_fields = Llvm_data.resolve_ctor_fields
 let get_record_fields = Llvm_data.get_record_fields
 let field_index_for = Llvm_data.field_index_for
 let atom_tir_ty = Llvm_data.atom_tir_ty
 let shape_kind_char = Llvm_data.shape_kind_char
-let shape_desc = Llvm_data.shape_desc
-let ensure_shape_globals = Llvm_data.ensure_shape_globals
 let emit_set_shape = Llvm_data.emit_set_shape
 
 (* ── ADT structural equality generation ───────────────────────────────
    Moved to [Llvm_eq] (Wave 3 Task 5, chunk 2): apply_ty_subst,
    mangle_ty_for_eq, field_load_llty, ensure_adt_eq_fn.  Re-exported bare
    here for the same reason as above. *)
-let apply_ty_subst = Llvm_eq.apply_ty_subst
 let mangle_ty_for_eq = Llvm_eq.mangle_ty_for_eq
-let field_load_llty = Llvm_eq.field_load_llty
 let ensure_adt_eq_fn = Llvm_eq.ensure_adt_eq_fn
 
 (* emit_raises_wrapper moved to [Llvm_calls] (Wave 3 Task 6, chunk 2): the
@@ -4782,10 +4759,6 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
    (bin/main.ml, lib/jit/repl_jit.ml, test/) see the exact same signatures
    as before this split. *)
 
-let emit_fn ctx fn = Llvm_toplevel.emit_fn ~emit_expr ctx fn
-let fn_declare_str = Llvm_toplevel.fn_declare_str
-let build_ctor_info = Llvm_toplevel.build_ctor_info
-let emit_main_wrapper = Llvm_toplevel.emit_main_wrapper
 let emit_preamble = Llvm_toplevel.emit_preamble
 
 let emit_module ?fast_math ?pmap_threshold ?target ?hot_reload ?impl_hashes
@@ -4795,19 +4768,12 @@ let emit_module ?fast_math ?pmap_threshold ?target ?hot_reload ?impl_hashes
     ?fast_math ?pmap_threshold ?target ?hot_reload ?impl_hashes
     ?remote_impl_hashes ?remote_sig_hashes ?emit_main ?cap_attrib ?cap_decls m
 
-type repl_globals = Llvm_repl.repl_globals
-let emit_repl_globals_decl = Llvm_repl.emit_repl_globals_decl
 
 type repl_slot_info = Llvm_repl.repl_slot_info = {
   rs_bare : string;
   rs_slot : int;
   rs_ty : Tir.ty;
 }
-
-let emit_prev_slot_bridges = Llvm_repl.emit_prev_slot_bridges
-let emit_store_to_slot = Llvm_repl.emit_store_to_slot
-let emit_slot_loader_fns = Llvm_repl.emit_slot_loader_fns
-let emit_prev_global_bridges = Llvm_repl.emit_prev_global_bridges
 
 let emit_repl_expr ?fast_math ~n ~ret_ty ~prev_slots ~fns ?extern_fns
     ?store_as_slot ?session_wraps ~types (body : Tir.expr) : string =
@@ -4821,9 +4787,6 @@ let emit_repl_decl ?fast_math ~n ~name ~val_ty ~dest_slot ~prev_slots ~fns
     ?fast_math ~n ~name ~val_ty ~dest_slot ~prev_slots ~fns ?extern_fns
     ?session_wraps ~types body
 
-let emit_repl_fn ?fast_math ~n ~prev_slots ?extern_fns ~types (fn : Tir.fn_def) : string =
-  Llvm_repl.emit_repl_fn ~emit_expr ?fast_math ~n ~prev_slots ?extern_fns ~types fn
-
 let emit_repl_fn_with_closure_slot ?fast_math ~n ~bind_name ~dest_slot
     ~prev_slots ?helper_fns ?extern_fns ?session_wraps ~types (fn : Tir.fn_def) : string =
   Llvm_repl.emit_repl_fn_with_closure_slot ~emit_expr
@@ -4833,5 +4796,3 @@ let emit_repl_fn_with_closure_slot ?fast_math ~n ~bind_name ~dest_slot
 let emit_fns_fragment ~types ~fns ?extern_fns ?session_wraps ~repl () : string =
   Llvm_repl.emit_fns_fragment ~emit_expr ~types ~fns ?extern_fns ?session_wraps
     ~repl ()
-
-let llvm_ty_of_tir = Llvm_repl.llvm_ty_of_tir
