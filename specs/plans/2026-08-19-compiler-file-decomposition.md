@@ -1365,72 +1365,62 @@ git add lib/tir/llvm_emit_arith.ml lib/tir/llvm_emit_task.ml lib/tir/llvm_emit_r
 
 **Files:** Create `scripts/refine-oracle.sh`
 
-- [ ] **Step 1: Write the script**
+- [x] **Step 1: Write the script**
+
+The script now lives in the repo — **read `scripts/refine-oracle.sh`, do not re-type
+the draft that used to sit inline here.** That draft **could never run**: it repeated,
+verbatim, the `${x:?…}` bug already documented one phase up in Task 0.1 —
 
 ```bash
-#!/usr/bin/env bash
-# Refinement-diagnostic oracle.  refine_check affects DIAGNOSTICS, not emitted
-# code, so the IR oracle cannot see its regressions.
-#
-# Both caches below produce vacuous green if left warm:
-#   .march/cas/artifacts-v2  -> --refine-report prints NOTHING on a hit
-#   .march/cas/vc            -> verification conditions are reused, masking
-#                               a checker that stopped checking
-# Cleared ONCE here, before the run — never between fixtures.
-set -uo pipefail
-MODE="${1:?usage: refine-oracle.sh {baseline|check} <dir>}"
-DIR="${2:?usage: refine-oracle.sh {baseline|check} <dir>}"
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-EXE="$ROOT/_build/default/bin/main.exe"
-OUT="$DIR/refine.txt"
-
-[ -x "$EXE" ] || { echo "FATAL: $EXE not built"; exit 2; }
-rm -rf "$ROOT/.march/cas/artifacts-v2" "$ROOT/.march/cas/vc"
-mkdir -p "$DIR"; : > "$DIR/run.tmp"
-
-n=0
-for f in "$ROOT"/test/native/*.march "$ROOT"/stdlib/*.march; do
-  [ -e "$f" ] || continue
-  tag="$(basename "$(dirname "$f")")_$(basename "$f" .march)"
-  # Normalise absolute paths so the manifest is machine-independent.
-  "$EXE" --check --refine-report "$f" 2>&1 | sed "s|$ROOT/||g" \
-    | sed "s|^|$tag: |" >> "$DIR/run.tmp"
-  n=$((n+1))
-done
-sort "$DIR/run.tmp" > "$DIR/run.sorted"
-lines=$(wc -l < "$DIR/run.sorted")
-echo "fixtures=$n report_lines=$lines"
-
-if [ "$lines" -lt 50 ]; then
-  echo "FATAL: only $lines report lines — the refinement checker is not running"
-  echo "(warm cache? --refine-report short-circuited?).  Refusing to record."
-  exit 2
-fi
-
-case "$MODE" in
-  baseline) cp "$DIR/run.sorted" "$OUT"; echo "baseline recorded: $OUT" ;;
-  check)
-    [ -f "$OUT" ] || { echo "FATAL: no baseline at $OUT"; exit 2; }
-    if diff -u "$OUT" "$DIR/run.sorted" > "$DIR/refine.diff"; then
-      echo "REFINEMENT DIAGNOSTICS IDENTICAL ($lines lines)"; exit 0
-    else
-      echo "DIAGNOSTICS CHANGED:"; head -40 "$DIR/refine.diff"; exit 1
-    fi ;;
-  *) echo "unknown mode: $MODE"; exit 2 ;;
-esac
+MODE="${1:?usage: refine-oracle.sh {baseline|check} <dir>}"   # BROKEN
 ```
 
-- [ ] **Step 2: Record the baseline and prove it is non-vacuous**
+Bash ends a `${x:?word}` expansion at the **first** `}`, which here is the one inside
+`{baseline|check}`, so `MODE` came out as `baseline <dir>}` and every invocation died
+with `unknown mode` before touching a fixture. Task 0.1's copy was annotated `# BROKEN`
+on 2026-08-25; **this copy was missed and stayed live until 2026-08-26**. The committed
+script keeps the usage text in a `}`-free `USAGE` variable. **[corrected 2026-08-26]**
+
+The committed version differs from the draft in two further ways, both found by running it:
+
+- **It runs under a private `HOME`.** `~/.cache/march` holds the Marshal'd stdlib AST and
+  typecheck env (`bin/main.ml`'s `stdlib_decls` / `get_stdlib_tc_env`), keyed by stdlib
+  content plus compiler build id and **shared by every worktree on the box**. The
+  marshalled spans carry the absolute paths of whichever worktree populated the blob, so
+  stdlib diagnostics print *another agent's directory* and the manifest moves with nobody
+  touching the checker — measured as 14 phantom `stdlib_prelude` lines on the first
+  green control run. This is a third shared cache beyond the two the draft names, and it
+  does not live under `.march/`.
+- **It normalises stdlib path prefixes**, because the compiler reaches `prelude.march`
+  as either the staged `_build/default/bin/../stdlib/…` copy or the source tree and the
+  spelling is not a property of the checker.
+
+It also guards on fixture count as well as line count: a sweep that visits fewer than
+100 fixtures is refused, not just one that prints fewer than 50 lines.
+
+- [x] **Step 2: Record the baseline and prove it is non-vacuous**
 
 ```bash
 chmod +x scripts/refine-oracle.sh && scripts/refine-oracle.sh baseline /tmp/refine-base-$SLUG; echo "exit=$?"
 ```
 
-Expected: `report_lines=` a number **≥ 50**, exit 0. A `FATAL: only N report lines` means the cache clear did not take — investigate before proceeding.
+Measured 2026-08-26: `fixtures=297 report_lines=5638`, exit 0, **6m12s**. A
+`FATAL:` line means the cache clear did not take — investigate before proceeding.
+Let it finish; a half-run baseline is worse than none.
 
-Runtime note: ~280 fixtures, each a z3-backed check — expect **minutes, not seconds**. Let it finish. A half-run baseline is worse than none: the guard catches `< 50` lines, but it cannot tell a truncated-yet-large baseline from a complete one.
+**Non-vacuity, executed 2026-08-26** (an oracle nobody has seen fail is not evidence):
 
-- [ ] **Step 3: Commit**
+*RED probe* — two perturbations inside `refine_check.ml`, one message and one verdict:
+`"was NOT verified here"` → `"was NOT PROBEVERIFIED here"`, and in `check_call`'s
+discharge, `| Refine.Verified -> note Obligation.Proved` →
+`note (Obligation.Skipped Obligation.Solver_undecided)`. Result:
+`DIAGNOSTICS CHANGED — 1528 differing lines`, exit 1 (33 of them the reworded message,
+the rest proved/skipped counts across the corpus).
+
+*GREEN control* — probe reverted, a comment-only line appended to the same file, rebuilt:
+`REFINEMENT DIAGNOSTICS IDENTICAL (5638 lines over 297 fixtures)`, exit 0.
+
+- [x] **Step 3: Commit**
 
 ```bash
 git add scripts/refine-oracle.sh && git commit -m "test: add refinement-diagnostic oracle for refine_check refactors"
