@@ -94,7 +94,6 @@ let zig_target = Llvm_toplevel.zig_target
    here) records into the same shared table, so it lives at the common base
    all four modules already depend on.  Re-exported bare here — [emit_module]
    below resets the table per module and prints the report. *)
-let repr_audit_record = Llvm_ctx.repr_audit_record
 let _repr_audit = Llvm_ctx._repr_audit
 
 (* ── Context ─────────────────────────────────────────────────────────── *)
@@ -176,7 +175,6 @@ type ctx = Llvm_ctx.ctx = {
   atom_names : (int64, string) Hashtbl.t;
 }
 
-let module_of_name = Llvm_ctx.module_of_name
 let fresh = Llvm_ctx.fresh
 let fresh_block = Llvm_ctx.fresh_block
 let emit = Llvm_ctx.emit
@@ -185,25 +183,12 @@ let emit_term = Llvm_ctx.emit_term
 let llvm_name = Llvm_ctx.llvm_name
 let atom_hash = Llvm_ctx.atom_hash
 let llvm_ty = Llvm_ctx.llvm_ty
-let emit_tag_scalar = Llvm_ctx.emit_tag_scalar
-let emit_untag_scalar = Llvm_ctx.emit_untag_scalar
 let coerce = Llvm_ctx.coerce
 let is_vec_ty = Llvm_ctx.is_vec_ty
 
-(** Release the call-scoped SIMD vector temp boxes collected for one call site.
+(* [release_temp_boxes] (the call-scoped SIMD vector temp-box release) moved to
+   [Llvm_emit_call] with the general EApp arm body, its only caller. *)
 
-    Emitted in the SAME basic block as the call, immediately after it (and
-    after the result register is captured), so there is no control flow between
-    the call and the release and every path that reached the call reaches the
-    release.  Only ever non-empty for callees listed in
-    [ctx.native_vec_params] — see the invariant comment in the EApp arm for why
-    that restriction is load-bearing. *)
-let release_temp_boxes (ctx : Llvm_ctx.ctx) (boxes : string list ref) : unit =
-  List.iter
-    (fun b -> Llvm_ctx.emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" b))
-    !boxes;
-  boxes := []
-let intern_string = Llvm_ctx.intern_string
 
 (* llvm_ret_ty moved to [Llvm_ctx] (Wave 3 Task 6, chunk 2): [Llvm_calls] and
    [Llvm_tco] both need it too; re-exported bare since ~20 call sites in this
@@ -215,13 +200,15 @@ let llvm_ret_ty = Llvm_ctx.llvm_ret_ty
    Re-exported bare for that one remaining call site (in emit_module,
    Task 7's territory). *)
 
-(** Return type of a function variable's type. *)
-let fn_ret_tir (ty : Tir.ty) : Tir.ty =
-  match ty with
-  | Tir.TFn (_, ret) -> ret
-  | other -> other
+(* [fn_ret_tir] moved to [Llvm_emit_call] with the call-arm bodies that were
+   most of its callers; [emit_atom] below still uses it, re-exported bare. *)
+let fn_ret_tir = Llvm_emit_call.fn_ret_tir
 
-(** True for defunctionalized closure apply wrappers ("<fn>$apply$<uid>").
+(* [is_apply_fn] ([Tir_names]) is no longer named in this file: its call sites
+   were the call-arm bodies, now in [Llvm_emit_call].  The convention it
+   encodes is still what those bodies depend on, so the note stays here.
+
+   True for defunctionalized closure apply wrappers ("<fn>$apply$<uid>").
 
     These are dispatched indirectly through a closure struct whose fn-pointer
     is type-erased, so all wrappers for a given source `(a) -> b` MUST share one
@@ -242,7 +229,6 @@ let fn_ret_tir (ty : Tir.ty) : Tir.ty =
     [Tir_names] (Wave 3 Task 1 — was a byte-identical duplicate of
     [Perceus.is_apply_fn] before this move; see [Tir_names.is_apply_fn] for
     the diff verdict). *)
-let is_apply_fn = Tir_names.is_apply_fn
 
 (* clo_wrap_define moved to [Llvm_calls] (Wave 3 Task 6, chunk 2): a pure
    string-building helper (no ctx dependency) called from emit_atom's two
@@ -293,19 +279,10 @@ let is_int_arith name   = List.mem name ["+"; "-"; "*"; "/"; "%"]
 let is_int_cmp name     = List.mem name ["=="; "!="; "<"; "<="; ">"; ">="]
 let is_float_arith name = List.mem name ["+."; "-."; "*."; "/."]
 
-let int_arith_op = function
-  | "+" -> "add" | "-" -> "sub" | "*" -> "mul"
-  | "/" -> "sdiv" | "%" -> "srem" | s -> failwith ("unknown int op: " ^ s)
-
-let int_cmp_pred = function
-  | "==" -> "eq"  | "!=" -> "ne"
-  | "<"  -> "slt" | "<=" -> "sle"
-  | ">"  -> "sgt" | ">=" -> "sge"
-  | s -> failwith ("unknown cmp: " ^ s)
-
-let float_arith_op = function
-  | "+." -> "fadd" | "-." -> "fsub"
-  | "*." -> "fmul" | "/." -> "fdiv" | s -> failwith ("unknown float op: " ^ s)
+(* The three operator-string tables these guards feed ([int_arith_op],
+   [int_cmp_pred], [float_arith_op]) moved to [Llvm_emit_arith] with the arm
+   bodies that were their only callers.  The guards stay here: they are
+   evaluated in [emit_expr]'s `when` clauses, whose order is load-bearing. *)
 
 let is_int_bitwise name = List.mem name ["int_and"; "int_or"; "int_xor"; "int_shl"; "int_shr"]
 
@@ -666,32 +643,24 @@ let emit_atom_as ctx ty a =
    ctor_entry, resolve_ctor_fields/get_record_fields/field_index_for, and the
    record-shape-metadata family (atom_tir_ty/shape_kind_char/shape_desc/
    ensure_shape_globals/emit_set_shape).  Re-exported bare here since the
-   EAlloc/EStackAlloc/EReuse/ETuple/ERecord/EField/EUpdate arms below (and
-   emit_case, now in [Llvm_case]) call them unqualified — same re-export
-   pattern as [Llvm_ctx]'s Wave 3 Task 3 split. *)
-let emit_store_tag = Llvm_data.emit_store_tag
+   remaining arms (and emit_case, now in [Llvm_case]) call them unqualified —
+   same re-export pattern as [Llvm_ctx]'s Wave 3 Task 3 split.  The
+   EAlloc/EStackAlloc/EReuse bodies now live in [Llvm_emit_alloc] and the
+   ETuple/ERecord/EField/EUpdate bodies in [Llvm_emit_data]; both reach for
+   [Llvm_data] directly, which is why only five re-exports are left. *)
 let emit_store_field = Llvm_data.emit_store_field
-let emit_load_field = Llvm_data.emit_load_field
 let emit_heap_alloc = Llvm_data.emit_heap_alloc
-let emit_stack_alloc = Llvm_data.emit_stack_alloc
 let ctor_entry = Llvm_data.ctor_entry
-let get_record_fields = Llvm_data.get_record_fields
-let field_index_for = Llvm_data.field_index_for
 let atom_tir_ty = Llvm_data.atom_tir_ty
-let shape_kind_char = Llvm_data.shape_kind_char
-let emit_set_shape = Llvm_data.emit_set_shape
 
 (* ── ADT structural equality generation ───────────────────────────────
    Moved to [Llvm_eq] (Wave 3 Task 5, chunk 2): apply_ty_subst,
    mangle_ty_for_eq, field_load_llty, ensure_adt_eq_fn.  Re-exported bare
-   here for the same reason as above. *)
-let mangle_ty_for_eq = Llvm_eq.mangle_ty_for_eq
-let ensure_adt_eq_fn = Llvm_eq.ensure_adt_eq_fn
-
-(* emit_raises_wrapper moved to [Llvm_calls] (Wave 3 Task 6, chunk 2): the
-   EApp/ECallPtr `raises`-extern call sites below (both stay in this file's
-   [emit_expr]) call it unqualified — re-export bare. *)
-let emit_raises_wrapper = Llvm_calls.emit_raises_wrapper
+   here for the same reason as above.  Nothing in this file names them any
+   more: [ensure_adt_eq_fn]'s caller was the `==`/`!=` arm body, now in
+   [Llvm_emit_arith], and [mangle_ty_for_eq]'s were the [EAlloc]/[EReuse] arm
+   bodies, now in [Llvm_emit_alloc].  Both modules reach for [Llvm_eq]
+   directly. *)
 
 (* is_trivial_dec_chain_returning / is_trivial_dec_chain moved to [Llvm_tco]
    (Wave 3 Task 6, chunk 2), alongside the mutual-TCO analysis section that
@@ -704,25 +673,13 @@ let emit_raises_wrapper = Llvm_calls.emit_raises_wrapper
 let is_trivial_dec_chain_returning = Llvm_tco.is_trivial_dec_chain_returning
 let is_trivial_dec_chain = Llvm_tco.is_trivial_dec_chain
 
-(* fail_if_unresolved_iface_method moved to [Llvm_calls] (Wave 3 Task 6,
-   chunk 2): called from BOTH unqualified_fns consumers in [emit_expr] below
-   (the general EApp call path and the ECallPtr no-var-slot catch-all) —
-   re-export bare. *)
-let fail_if_unresolved_iface_method = Llvm_calls.fail_if_unresolved_iface_method
-
-
 (* ── SIMD vector types: see [Llvm_emit_simd] ─────────────────────────
    The decoder, the per-type shape table, the lane widen/narrow helpers and
-   the intercept arm's body moved verbatim to llvm_emit_simd.ml.  The two
-   re-exports below are what the REST of this file still needs: the record's
-   field names, for the vector-equality arm's per-lane lowering, and the
-   decoder, for the intercept arm's guard and the general EApp arm's
-   unresolved-builtin check. *)
-type simd_ty = Llvm_emit_simd.simd_ty = {
-  s_vec : string; s_kind : int; s_lanes : int;
-  s_elem : string; s_boundary_float : bool; s_arr_prefix : string }
-
-let simd_tys = Llvm_emit_simd.simd_tys
+   the intercept arm's body moved verbatim to llvm_emit_simd.ml.  The one
+   re-export below is what the REST of this file still needs: the decoder,
+   for the intercept arm's guard and the general EApp arm's unresolved-builtin
+   check.  The shape record's field names went with the vector-equality
+   lowering into [Llvm_emit_arith]. *)
 let decode_simd_call = Llvm_emit_simd.decode_simd_call
 
 (* ── NativeArray map inline loops: see [Llvm_emit_nmap] ──────────────
@@ -898,36 +855,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
             | Tir.ESeq (_, rest) -> has_fv_field rest
             | _ -> false
           in has_fv_field rhs) ->
-    (* Emit any leading ESeq (IncRC) ops, then extract the inner EField. *)
-    let rec peel_seqs e = match e with
-      | Tir.EField (obj_atom, field_name) -> (obj_atom, field_name)
-      | Tir.ESeq (e1, rest) ->
-        ignore (emit_expr ctx e1);
-        peel_seqs rest
-      | _ -> assert false
-    in
-    let (obj_atom, field_name) = peel_seqs rhs in
-    let field_idx =
-      int_of_string (String.sub field_name 3 (String.length field_name - 3)) in
-    let (_, obj_val) = emit_atom ctx obj_atom in
-    let field_ty = llvm_ty v.Tir.v_ty in
-    (* Tuple fields are stored low-bit tagged (the unified slot convention): a
-       direct native-typed load (e.g. `load i64`) reads the tagged value
-       verbatim — Int 5 -> 11.  When the object is a tuple, load the slot as ptr
-       and conditionally untag to the field's concrete type via `coerce`.
-       Closure free-vars (the other `$fv` producer) keep the direct native load,
-       so this is inert for defun-generated apply fns. *)
-    let fv = match atom_tir_ty obj_atom with
-      | Tir.TTuple _ ->
-        let raw = emit_load_field ctx obj_val field_idx "ptr" in
-        coerce ctx "ptr" raw field_ty
-      | _ -> emit_load_field ctx obj_val field_idx field_ty
-    in
-    let slot = alloca_name ctx (llvm_name v.Tir.v_name) in
-    emit ctx (Printf.sprintf "%%%s.addr = alloca %s" slot field_ty);
-    emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr" field_ty fv slot);
-    Hashtbl.replace ctx.var_llvm_ty slot field_ty;
-    emit_expr ctx body
+    Llvm_emit_tcoarm.emit_fv_load ~emit_atom ~emit_expr ctx v rhs body
 
   (* ── Perceus-wrapped TCO self-call ────────────────────────────────── *)
   (* Perceus may wrap a self-tail-call as ELet(tmp, EApp(self, args), decrcs→tmp)
@@ -946,67 +874,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          && (match ctx.tco_fn_name with Some n -> String.equal n f.Tir.v_name | None -> false)
          && List.length args = List.length ctx.tco_param_info
          && is_trivial_dec_chain_returning tmp_v.Tir.v_name body ->
-    (* 1. Evaluate every new argument value while old parameter slots are valid. *)
-    let new_vals = List.map2 (fun (_vname, _slot, param_ty) a ->
-        let (arg_ty, arg_val) = emit_atom ctx a in
-        coerce ctx arg_ty arg_val param_ty
-      ) ctx.tco_param_info args in
-    (* 2. Emit the DecRC/Free chain before overwriting slots: these ops reference
-          old slot values (the consumed container wrappers) which are still valid.
-          Suppress tco_in_tail so nested EDecRC/EFree calls don't misfire.
-          EXCEPTION: a Dec/IncRC target that is itself one of [args] is not an
-          "old container being released" — it is the SAME value being forwarded
-          into the next iteration's parameter slot. Under real (non-TCO)
-          recursion this DecRC only fires once the whole nested call has fully
-          returned, by which point nothing below still needs that reference; in
-          the flattened loop there is no such delay, so executing it here would
-          drop a freshly-owned, uncompensated value (no matching prior IncRC) to
-          refcount 0 immediately before it is reused as the next iteration's
-          value — a use-after-free. Skip RC ops on these variables; ownership is
-          transferred into the new slot instead.
-          EXCEPTION TO THE EXCEPTION: a forwarded argument that is DUP-BOUND
-          (its binding RHS is `inc_rc x; x` — see Llvm_tco.dup_bound_vars) does
-          have a matching prior IncRC, so its DecRC is the closing half of a
-          balanced pair rather than an early release. Skipping it strands the
-          +1 and leaks one cell per iteration (a `Cons(_, t)` list walk leaks
-          the entire list). Emit those. *)
-    let arg_var_names =
-      List.filter_map (fun a -> match a with
-        | Tir.AVar v when not (List.mem v.Tir.v_name ctx.tco_dup_bound) ->
-          Some v.Tir.v_name
-        | _ -> None) args
-    in
-    let saved_tail = ctx.tco_in_tail in
-    ctx.tco_in_tail <- false;
-    let skip op =
-      match Llvm_tco.cleanup_target op with
-      | Some n -> List.mem n arg_var_names
-      | None -> false
-    in
-    let rec emit_dec_chain = function
-      | Tir.ESeq (op, rest) when Llvm_tco.is_cleanup_op op ->
-        if not (skip op) then ignore (emit_expr ctx op);
-        emit_dec_chain rest
-      | _ -> ()   (* EAtom(AVar tmp_v) — trailing return value, nothing to emit *)
-    in
-    emit_dec_chain body;
-    ctx.tco_in_tail <- saved_tail;
-    (* 3. Store each new argument into the corresponding parameter alloca slot. *)
-    List.iter2 (fun (_vname, slot, param_ty) new_v ->
-        emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr" param_ty new_v slot)
-      ) ctx.tco_param_info new_vals;
-    (* 4. Free any per-iteration `alloca` stack space before looping back —
-          see tco_stack_save's doc comment for why this is required. *)
-    if ctx.tco_stack_save <> "" then
-      emit ctx (Printf.sprintf "call void @llvm.stackrestore(ptr %s)" ctx.tco_stack_save);
-    (* 5. Back-edge to the TCO loop header. *)
-    emit_term ctx (Printf.sprintf "br label %%%s" ctx.tco_loop_label);
-    emit_label ctx (fresh_block ctx "tco_perceus_cont");
-    let dummy_ty = llvm_ret_ty ctx.ret_ty in
-    (match dummy_ty with
-     | "double" -> ("double", "0x0000000000000000")
-     | "void"   -> ("i64",    "0")
-     | _        -> ("i64",    "0"))
+    Llvm_emit_tcoarm.emit_self_tco_let ~emit_atom ~emit_expr ctx args body
 
   (* ── Perceus-wrapped TCO self-call, no-temp ESeq shape ──────────────── *)
   (* Sibling of the ELet-wrapped case above: when the consumed pattern only
@@ -1023,64 +891,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          && (match ctx.tco_fn_name with Some n -> String.equal n f.Tir.v_name | None -> false)
          && List.length args = List.length ctx.tco_param_info
          && is_trivial_dec_chain dec_chain ->
-    (* 1. Evaluate every new argument value while old parameter slots are valid. *)
-    let new_vals = List.map2 (fun (_vname, _slot, param_ty) a ->
-        let (arg_ty, arg_val) = emit_atom ctx a in
-        coerce ctx arg_ty arg_val param_ty
-      ) ctx.tco_param_info args in
-    (* 2. Emit the dec/inc-RC chain before overwriting slots — same
-          ordering rationale as the ELet-wrapped case above.
-          EXCEPTION: a Dec/IncRC target that is itself one of [args] is the
-          SAME value being forwarded into the next iteration's parameter slot,
-          not an old container being released — see the matching guard and
-          explanation in the ELet-wrapped case above. Skip RC ops on these
-          variables so a freshly-owned, uncompensated argument (e.g. the
-          result of a fresh allocation with no prior IncRC, as opposed to a
-          borrowed field promoted via IncRC) isn't dropped to refcount 0 and
-          freed immediately before being reused as the next iteration's value.
-          The "as opposed to" half of that sentence is the DUP-BOUND case, and
-          it must NOT be skipped: there the DecRC balances the IncRC that
-          materialised the local, so dropping it leaks one cell per iteration
-          (see Llvm_tco.dup_bound_vars — this is the `Cons(_, t)` walk that
-          leaked its whole list). *)
-    let arg_var_names =
-      List.filter_map (fun a -> match a with
-        | Tir.AVar v when not (List.mem v.Tir.v_name ctx.tco_dup_bound) ->
-          Some v.Tir.v_name
-        | _ -> None) args
-    in
-    let saved_tail = ctx.tco_in_tail in
-    ctx.tco_in_tail <- false;
-    let skip op =
-      match Llvm_tco.cleanup_target op with
-      | Some n -> List.mem n arg_var_names
-      | None -> false
-    in
-    let rec emit_dec_chain = function
-      | Tir.ESeq (op, rest) when Llvm_tco.is_cleanup_op op ->
-        if not (skip op) then ignore (emit_expr ctx op);
-        emit_dec_chain rest
-      | op when Llvm_tco.is_cleanup_op op ->
-        if not (skip op) then ignore (emit_expr ctx op)
-      | _ -> ()
-    in
-    emit_dec_chain dec_chain;
-    ctx.tco_in_tail <- saved_tail;
-    (* 3. Store each new argument into the corresponding parameter alloca slot. *)
-    List.iter2 (fun (_vname, slot, param_ty) new_v ->
-        emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr" param_ty new_v slot)
-      ) ctx.tco_param_info new_vals;
-    (* 4. Free any per-iteration `alloca` stack space before looping back. *)
-    if ctx.tco_stack_save <> "" then
-      emit ctx (Printf.sprintf "call void @llvm.stackrestore(ptr %s)" ctx.tco_stack_save);
-    (* 5. Back-edge to the TCO loop header. *)
-    emit_term ctx (Printf.sprintf "br label %%%s" ctx.tco_loop_label);
-    emit_label ctx (fresh_block ctx "tco_seq_cont");
-    let dummy_ty = llvm_ret_ty ctx.ret_ty in
-    (match dummy_ty with
-     | "double" -> ("double", "0x0000000000000000")
-     | "void"   -> ("i64",    "0")
-     | _        -> ("i64",    "0"))
+    Llvm_emit_tcoarm.emit_self_tco_seq ~emit_atom ~emit_expr ctx args dec_chain
 
   (* ── Perceus-wrapped mutual-TCO tail call ───────────────────────────── *)
   (* Mutual-group twin of the self-TCO ELet-wrapped case above (B7). Perceus
@@ -1103,47 +914,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     when ctx.mutual_tco_group <> []
          && List.mem f.Tir.v_name ctx.mutual_tco_group
          && is_trivial_dec_chain_returning tmp_v.Tir.v_name body ->
-    let target     = f.Tir.v_name in
-    let target_tag = List.assoc target ctx.mutual_tco_fn_tags in
-    let target_slots =
-      try List.assoc target ctx.mutual_tco_fn_params
-      with Not_found -> [] in
-    (* 1. Evaluate every new argument value while old parameter slots are valid. *)
-    let new_vals = List.map2 (fun (_vname, _slot, param_ty) a ->
-        let (arg_ty, arg_val) = emit_atom ctx a in
-        coerce ctx arg_ty arg_val param_ty
-      ) target_slots args in
-    (* 2. Emit the DecRC/Free chain before overwriting slots — same ordering
-          rationale as the self-TCO ELet-wrapped case. *)
-    let saved_tail = ctx.tco_in_tail in
-    ctx.tco_in_tail <- false;
-    let rec emit_dec_chain = function
-      | Tir.ESeq (op, rest) when Llvm_tco.is_cleanup_op op ->
-        ignore (emit_expr ctx op);
-        emit_dec_chain rest
-      | _ -> ()   (* EAtom(AVar tmp_v) — trailing return value, nothing to emit *)
-    in
-    emit_dec_chain body;
-    ctx.tco_in_tail <- saved_tail;
-    (* 3. Update the dispatch tag. *)
-    emit ctx (Printf.sprintf "store i64 %d, ptr %%%s.addr"
-      target_tag ctx.mutual_tco_tag_slot);
-    (* 4. Store new argument values into the target function's param slots. *)
-    List.iter2 (fun (_vname, slot, param_ty) new_v ->
-        emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr"
-          param_ty new_v slot)
-      ) target_slots new_vals;
-    (* 5. Free any per-iteration `alloca` stack space before looping back. *)
-    if ctx.mutual_tco_stack_save <> "" then
-      emit ctx (Printf.sprintf "call void @llvm.stackrestore(ptr %s)" ctx.mutual_tco_stack_save);
-    (* 6. Back-edge to the shared mutual-TCO loop header. *)
-    emit_term ctx (Printf.sprintf "br label %%%s" ctx.mutual_tco_loop_label);
-    emit_label ctx (fresh_block ctx "mutco_perceus_cont");
-    let dummy_ty = llvm_ret_ty ctx.ret_ty in
-    (match dummy_ty with
-     | "double" -> ("double", "0x0000000000000000")
-     | "void"   -> ("i64",    "0")
-     | _        -> ("i64",    "0"))
+    Llvm_emit_tcoarm.emit_mutual_tco_let ~emit_atom ~emit_expr ctx f args body
 
   (* ── Perceus-wrapped mutual-TCO tail call, no-temp ESeq shape ───────── *)
   (* Mutual-group twin of the self-TCO no-temp ESeq case above (B7): sibling
@@ -1156,48 +927,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     when ctx.mutual_tco_group <> []
          && List.mem f.Tir.v_name ctx.mutual_tco_group
          && is_trivial_dec_chain dec_chain ->
-    let target     = f.Tir.v_name in
-    let target_tag = List.assoc target ctx.mutual_tco_fn_tags in
-    let target_slots =
-      try List.assoc target ctx.mutual_tco_fn_params
-      with Not_found -> [] in
-    (* 1. Evaluate every new argument value while old parameter slots are valid. *)
-    let new_vals = List.map2 (fun (_vname, _slot, param_ty) a ->
-        let (arg_ty, arg_val) = emit_atom ctx a in
-        coerce ctx arg_ty arg_val param_ty
-      ) target_slots args in
-    (* 2. Emit the dec/inc-RC chain before overwriting slots — same ordering
-          rationale as the ELet-wrapped case above. *)
-    let saved_tail = ctx.tco_in_tail in
-    ctx.tco_in_tail <- false;
-    let rec emit_dec_chain = function
-      | Tir.ESeq (op, rest) when Llvm_tco.is_cleanup_op op ->
-        ignore (emit_expr ctx op);
-        emit_dec_chain rest
-      | op when Llvm_tco.is_cleanup_op op -> ignore (emit_expr ctx op)
-      | _ -> ()
-    in
-    emit_dec_chain dec_chain;
-    ctx.tco_in_tail <- saved_tail;
-    (* 3. Update the dispatch tag. *)
-    emit ctx (Printf.sprintf "store i64 %d, ptr %%%s.addr"
-      target_tag ctx.mutual_tco_tag_slot);
-    (* 4. Store new argument values into the target function's param slots. *)
-    List.iter2 (fun (_vname, slot, param_ty) new_v ->
-        emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr"
-          param_ty new_v slot)
-      ) target_slots new_vals;
-    (* 5. Free any per-iteration `alloca` stack space before looping back. *)
-    if ctx.mutual_tco_stack_save <> "" then
-      emit ctx (Printf.sprintf "call void @llvm.stackrestore(ptr %s)" ctx.mutual_tco_stack_save);
-    (* 6. Back-edge to the shared mutual-TCO loop header. *)
-    emit_term ctx (Printf.sprintf "br label %%%s" ctx.mutual_tco_loop_label);
-    emit_label ctx (fresh_block ctx "mutco_seq_cont");
-    let dummy_ty = llvm_ret_ty ctx.ret_ty in
-    (match dummy_ty with
-     | "double" -> ("double", "0x0000000000000000")
-     | "void"   -> ("i64",    "0")
-     | _        -> ("i64",    "0"))
+    Llvm_emit_tcoarm.emit_mutual_tco_seq ~emit_atom ~emit_expr ctx f args dec_chain
 
   (* ── Let binding ───────────────────────────────────────────────────── *)
   | Tir.ELet (v, rhs, body) ->
@@ -1267,235 +997,13 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
 
   (* ── Arithmetic builtins ───────────────────────────────────────────── *)
   | Tir.EApp (f, [a; b]) when is_int_arith f.Tir.v_name ->
-    (* +, -, *, /, % are polymorphic over Int and Float in March.
-       Detect float operands by checking the actual LLVM type of the first arg;
-       if double, use floating-point ops instead of integer ops. *)
-    let (ty_a, va) = emit_atom ctx a in
-    if ty_a = "double" then begin
-      let vb = emit_atom_as ctx "double" b in
-      let r  = fresh ctx "ar" in
-      (* Division uses march_checked_fdiv so that x / 0.0 aborts with an error
-         rather than silently returning infinity (IEEE 754 default for fdiv).
-         All other float ops use native LLVM instructions directly. *)
-      if f.Tir.v_name = "/" then begin
-        emit ctx (Printf.sprintf "%s = call double @march_checked_fdiv(double %s, double %s)" r va vb)
-      end else begin
-        let fop = match f.Tir.v_name with
-          | "+" -> "fadd" | "-" -> "fsub" | "*" -> "fmul"
-          | _ -> "fmul"
-        in
-        let op_str = if ctx.fast_math then fop ^ " fast" else fop in
-        emit ctx (Printf.sprintf "%s = %s double %s, %s" r op_str va vb)
-      end;
-      ("double", r)
-    end else begin
-      let va' = coerce ctx ty_a va "i64" in
-      let vb = emit_atom_as ctx "i64" b in
-      let r  = fresh ctx "ar" in
-      (* / and % on Int route through checked helpers so a zero divisor traps
-         (matching the interpreter) instead of emitting a raw sdiv/srem that
-         returns garbage.  The helpers use the bare operator messages
-         ("division by zero" / "modulo by zero"); other ops stay native. *)
-      (match f.Tir.v_name with
-       | "/" -> emit ctx (Printf.sprintf "%s = call i64 @march_checked_div_op(i64 %s, i64 %s)" r va' vb)
-       | "%" -> emit ctx (Printf.sprintf "%s = call i64 @march_checked_mod_op(i64 %s, i64 %s)" r va' vb)
-       | _   -> emit ctx (Printf.sprintf "%s = %s i64 %s, %s" r (int_arith_op f.Tir.v_name) va' vb));
-      ("i64", r)
-    end
+    Llvm_emit_arith.emit_int_arith ~emit_atom ctx f a b
 
   | Tir.EApp (f, [a; b]) when is_int_cmp f.Tir.v_name ->
-    let (ty_a, va) = emit_atom ctx a in
-    let (ty_b, vb) = emit_atom ctx b in
-    if (is_vec_ty ty_a || is_vec_ty ty_b) && (f.Tir.v_name = "==" || f.Tir.v_name = "!=") then begin
-      (* SIMD vector `==`/`!=`: [ensure_adt_eq_fn] below synthesizes structural
-         equality by walking a `type_def`'s fields, but the 5 SIMD vector
-         types are opaque compiler primitives (TCon with no type_def/fields —
-         their "fields" are vector lanes, invisible to that walk), so the
-         general ADT path can't handle them and would otherwise fall through
-         to the raw i64/ptr fallback below and reinterpret the vector
-         register as a scalar (an LLVM type-mismatch, not just a wrong
-         answer). Lower directly: per-lane compare (`fcmp oeq` for the float
-         families — NaN-sensitive, a NaN lane always compares unequal, the
-         same semantics [impl Eq(F32x4)]'s hand-written per-lane `==` chain
-         gives interpreted) then AND all lanes together. *)
-      let vv_ty = if is_vec_ty ty_a then ty_a else ty_b in
-      let sty = snd (List.find (fun (_, s) -> s.s_vec = vv_ty) simd_tys) in
-      let av = coerce ctx ty_a va vv_ty and bv = coerce ctx ty_b vb vv_ty in
-      let cmp = fresh ctx "veq" in
-      (if sty.s_boundary_float then
-         emit ctx (Printf.sprintf "%s = fcmp oeq %s %s, %s" cmp vv_ty av bv)
-       else
-         emit ctx (Printf.sprintf "%s = icmp eq %s %s, %s" cmp vv_ty av bv));
-      let packed = fresh ctx "veq" in
-      emit ctx (Printf.sprintf "%s = bitcast <%d x i1> %s to i%d" packed sty.s_lanes cmp sty.s_lanes);
-      let alleq = fresh ctx "veq" in
-      emit ctx (Printf.sprintf "%s = icmp eq i%d %s, -1" alleq sty.s_lanes packed);
-      let r64 = coerce ctx "i1" alleq "i64" in
-      let final =
-        if f.Tir.v_name = "!=" then begin
-          let nr = fresh ctx "veq" in
-          emit ctx (Printf.sprintf "%s = xor i64 %s, 1" nr r64); nr
-        end else r64
-      in
-      ("i64", final)
-    end else
-    (* Only route through march_string_eq when we are sure the operand is an
-       actual String.  ty_a = "ptr" may also occur for polymorphic values
-       (TVar "_" after mono leaks) that happen to carry an Int via inttoptr —
-       calling march_string_eq on such a value dereferences it as a march_string
-       struct and crashes.  Check the TIR type of either operand instead. *)
-    let atom_is_string = function
-      | Tir.AVar v    -> (match v.Tir.v_ty with Tir.TString -> true | _ -> false)
-      | Tir.ALit (March_ast.Ast.LitString _) -> true
-      | _             -> false
-    in
-    let is_string_eq =
-      ty_a = "ptr"
-      && (f.Tir.v_name = "==" || f.Tir.v_name = "!=")
-      && (atom_is_string a || atom_is_string b)
-    in
-    (* String ordering (<, <=, >, >=): the inline icmp fallback would compare
-       the string struct POINTERS as integers, which has nothing to do with
-       lexicographic order.  Route through march_compare_string (returns
-       -1/0/1) and compare the result against 0 with the same predicate. *)
-    let is_string_ord =
-      ty_a = "ptr"
-      && List.mem f.Tir.v_name ["<"; "<="; ">"; ">="]
-      && (atom_is_string a || atom_is_string b)
-    in
-    if is_string_eq then begin
-      (* String equality: call march_string_eq which returns i64 (0 or 1).
-         Coerce both operands to ptr — vb may be an i64 literal (e.g. "0" for
-         false/unit) which is invalid as a bare ptr argument in LLVM IR. *)
-      let va_ptr = coerce ctx ty_a va "ptr" in
-      let vb_ptr = coerce ctx ty_b vb "ptr" in
-      let r = fresh ctx "cr" in
-      emit ctx (Printf.sprintf "%s = call i64 @march_string_eq(ptr %s, ptr %s)" r va_ptr vb_ptr);
-      if f.Tir.v_name = "!=" then begin
-        let nr = fresh ctx "ar" in
-        emit ctx (Printf.sprintf "%s = xor i64 %s, 1" nr r);
-        ("i64", nr)
-      end else
-        ("i64", r)
-    end else if is_string_ord then begin
-      (* String ordering: compare(a, b) <pred> 0. *)
-      let va_ptr = coerce ctx ty_a va "ptr" in
-      let vb_ptr = coerce ctx ty_b vb "ptr" in
-      let c   = fresh ctx "scmp" in
-      let cmp = fresh ctx "cmp" in
-      let r   = fresh ctx "ar" in
-      emit ctx (Printf.sprintf "%s = call i64 @march_compare_string(ptr %s, ptr %s)" c va_ptr vb_ptr);
-      emit ctx (Printf.sprintf "%s = icmp %s i64 %s, 0" cmp (int_cmp_pred f.Tir.v_name) c);
-      emit ctx (Printf.sprintf "%s = zext i1 %s to i64" r cmp);
-      ("i64", r)
-    end else begin
-      (* Fallback comparison: float or i64 (pointer coercion). *)
-      let fallback_cmp () =
-        let cmp = fresh ctx "cmp" in
-        let r   = fresh ctx "ar" in
-        if ty_a = "double" || ty_b = "double" then begin
-          (* Float comparison: use fcmp ordered predicates.
-             Coerce both sides to double in case one came from a boxed ptr. *)
-          let fpred = match f.Tir.v_name with
-            (* "!=" must match IEEE `<>` semantics used by the interpreter
-               (OCaml's polymorphic `<>` on floats is true whenever either
-               operand is NaN), i.e. "unordered or not equal" ("une"), not
-               "one" (ordered and not equal, which is false for any NaN
-               operand). See eval.ml's cmp_op float branch. *)
-            | "==" -> "oeq" | "!=" -> "une"
-            | "<"  -> "olt" | "<=" -> "ole"
-            | ">"  -> "ogt" | ">=" -> "oge"
-            | s -> failwith ("unknown cmp: " ^ s)
-          in
-          let va_f = coerce ctx ty_a va "double" in
-          let vb_f = coerce ctx ty_b vb "double" in
-          emit ctx (Printf.sprintf "%s = fcmp %s double %s, %s" cmp fpred va_f vb_f);
-        end else if ty_a = "ptr" || ty_b = "ptr" then begin
-          (* Erased operand(s): the static type is TVar, so the runtime value may
-             be a tagged int, a boxed Float (tag -3), or a string.  A raw
-             ptr→i64 + icmp mis-orders boxed floats (float-boxing, Stage 2 —
-             and, pre-boxing, negative-float bits: mechanism 2).  Dispatch on the
-             runtime tag via march_poly_compare (returns -1/0/1) and apply the
-             requested ordering vs 0.  A concrete i64 operand coerces to a tagged
-             immediate ptr, which march_poly_compare's odd→int arm handles. *)
-          let va_p = coerce ctx ty_a va "ptr" in
-          let vb_p = coerce ctx ty_b vb "ptr" in
-          let c = fresh ctx "pcmp" in
-          emit ctx (Printf.sprintf "%s = call i64 @march_poly_compare(ptr %s, ptr %s)" c va_p vb_p);
-          emit ctx (Printf.sprintf "%s = icmp %s i64 %s, 0" cmp (int_cmp_pred f.Tir.v_name) c)
-        end else begin
-          (* Both concrete i64: fast integer compare. *)
-          let va' = coerce ctx ty_a va "i64" in
-          let vb' = coerce ctx ty_b vb "i64" in
-          emit ctx (Printf.sprintf "%s = icmp %s i64 %s, %s" cmp (int_cmp_pred f.Tir.v_name) va' vb')
-        end;
-        emit ctx (Printf.sprintf "%s = zext i1 %s to i64" r cmp);
-        ("i64", r)
-      in
-      (* ADT structural equality: when both operands are heap-allocated ADT values
-         (ty_a = "ptr", TCon type, not String) generate a structural comparison
-         instead of the pointer comparison that icmp eq i64 would produce. *)
-      let atom_adt_ty = function
-        | Tir.AVar v -> (match v.Tir.v_ty with
-          | Tir.TCon ("Atom", []) -> None
-          | Tir.TCon _ as t -> Some t
-          | (Tir.TTuple _ | Tir.TRecord _) as t -> Some t
-          | _ -> None)
-        | _ -> None
-      in
-      if ty_a = "ptr" && (f.Tir.v_name = "==" || f.Tir.v_name = "!=") then
-        let adt_ty_opt = match atom_adt_ty a with
-          | Some _ as t -> t
-          | None -> atom_adt_ty b
-        in
-        (match adt_ty_opt with
-         | Some adt_ty ->
-           (match ensure_adt_eq_fn ctx adt_ty with
-            | Some eq_fn ->
-              let r = fresh ctx "ar" in
-              let va_ptr = coerce ctx ty_a va "ptr" in
-              let vb_ptr = coerce ctx ty_b vb "ptr" in
-              emit ctx (Printf.sprintf "%s = call i64 @%s(ptr %s, ptr %s)" r eq_fn va_ptr vb_ptr);
-              if f.Tir.v_name = "!=" then begin
-                let nr = fresh ctx "nr" in
-                emit ctx (Printf.sprintf "%s = xor i64 %s, 1" nr r);
-                ("i64", nr)
-              end else
-                ("i64", r)
-            | None -> fallback_cmp ())
-         | None ->
-           (* Polymorphic ptr comparison: the TIR type is TVar (e.g. the result
-              of a polymorphic function like root_hash).  Pointer identity
-              (fallback_cmp) compares addresses, not content — always false for
-              two distinct string allocations with equal content.  Use
-              march_poly_eq which checks string tags at runtime and delegates to
-              march_string_eq for strings, giving correct content equality. *)
-           let r = fresh ctx "ar" in
-           let va_ptr = coerce ctx ty_a va "ptr" in
-           let vb_ptr = coerce ctx ty_b vb "ptr" in
-           emit ctx (Printf.sprintf "%s = call i64 @march_poly_eq(ptr %s, ptr %s)" r va_ptr vb_ptr);
-           if f.Tir.v_name = "!=" then begin
-             let nr = fresh ctx "nr" in
-             emit ctx (Printf.sprintf "%s = xor i64 %s, 1" nr r);
-             ("i64", nr)
-           end else
-             ("i64", r))
-      else fallback_cmp ()
-    end
+    Llvm_emit_arith.emit_int_cmp ~emit_atom ctx f a b
 
   | Tir.EApp (f, [a; b]) when is_float_arith f.Tir.v_name ->
-    let va = emit_atom_as ctx "double" a in
-    let vb = emit_atom_as ctx "double" b in
-    let r  = fresh ctx "ar" in
-    (* /. uses march_checked_fdiv for the same reason as / above. *)
-    if f.Tir.v_name = "/." then
-      emit ctx (Printf.sprintf "%s = call double @march_checked_fdiv(double %s, double %s)" r va vb)
-    else begin
-      let op = float_arith_op f.Tir.v_name in
-      let op_str = if ctx.fast_math then op ^ " fast" else op in
-      emit ctx (Printf.sprintf "%s = %s double %s, %s" r op_str va vb)
-    end;
-    ("double", r)
+    Llvm_emit_arith.emit_float_arith ~emit_atom ctx f a b
 
   (* ── Boolean operators ───────────────────────────────────────────── *)
   | Tir.EApp (f, [a; b]) when f.Tir.v_name = "&&" ->
@@ -1560,12 +1068,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
                                 | Tir.TCon ("Safe", _) ->
                                   not (Collision_set.is_colliding ctx.collision_set "Safe")
                                 | _ -> false) ->
-    let vp = emit_atom_as ctx "ptr" a in
-    let fp = fresh ctx "safe_fp" in
-    emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp vp);
-    let r = fresh ctx "safe_s" in
-    emit ctx (Printf.sprintf "%s = load ptr, ptr %s" r fp);
-    ("ptr", r)
+    Llvm_emit_html.emit_html_auto_escape_safe ~emit_atom ctx a
 
   (* Every OTHER type: the runtime's polymorphic dispatch is only safe for the
      three representations it can actually recognise — a low-bit-tagged
@@ -1581,46 +1084,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      above — goes through `march_value_to_string` first, then escapes the
      resulting real String. *)
   | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Html_auto_escape f.Tir.v_name ->
-    let runtime_safe =
-      match atom_tir_ty a with
-      | Tir.TString | Tir.TInt | Tir.TFloat | Tir.TBool -> true
-      | Tir.TCon ("IOList", _) -> true
-      (* An unresolved type variable is the genuinely undecidable case, and it
-         is NOT hypothetical: a value reaching this hole through a closure
-         stored in a container (defunctionalized dispatch, e.g.
-         `Bx(Cons(fn x -> ~H"<p>${x}</p>", Nil))`) is not specialised by mono
-         and arrives as TVar.  Neither answer is right for it — an IOList
-         wants flattening, an ADT must not be flattened, and nothing at
-         runtime can tell them apart, which is the whole defect.
-
-         So choose the failure that is not a vulnerability: stringify.  A
-         genuine IOList partial reaching a polymorphic hole renders as
-         `#<tag:2>` instead of its markup — visibly wrong, and a real
-         regression for that (rare) pattern.  Routing it to the runtime
-         instead would leave a tag-1 ADT emitting its String field raw and
-         unescaped, and a tag-2 ADT segfaulting.  A wrong-looking page beats
-         an XSS and a crash.
-
-         Fixing this properly means giving the runtime a way to identify the
-         type — march_hdr.pad is free for non-record ADTs and could carry a
-         type id — which is out of scope here; see
-         specs/todos/2026-08-05-boxed-adt-type-id.md. *)
-      | Tir.TVar _ -> false
-      | _ -> false
-    in
-    let v = emit_atom_as ctx "ptr" a in
-    let v =
-      if runtime_safe then v
-      else begin
-        let s = fresh ctx "hae_str" in
-        emit ctx
-          (Printf.sprintf "%s = call ptr @march_value_to_string(ptr %s)" s v);
-        s
-      end
-    in
-    let r = fresh ctx "hae" in
-    emit ctx (Printf.sprintf "%s = call ptr @march_html_auto_escape(ptr %s)" r v);
-    ("ptr", r)
+    Llvm_emit_html.emit_html_auto_escape ~emit_atom ctx a
 
   (* ── ~H sigil: html_escape_ctx(id, v) ─────────────────────────────────
      The contextual successor to html_auto_escape. The escaper id is chosen at
@@ -1644,100 +1108,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      "verbatim only when the escaper is EscHtml". *)
   | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitInt id); a])
     when Builtin_name.is Builtin_name.Html_escape_ctx f.Tir.v_name ->
-    let is_html_ctx = id = 0 (* Context.escaper_id EscHtml *) in
-    (* Html.Safe and IOList are both already-safe HTML, but they are UNWRAPPED
-       differently. march_html_auto_escape's C body does not understand Safe at
-       all — Task 0 fixed that case in the emitter, by loading field 0 — so
-       handing it a Safe returns the empty string. Keep the two apart. *)
-    (* Context-indexed trust. Each Trusted* type names the ONE context its
-       string may be inserted into verbatim; anywhere else it is escaped like
-       any other value. `Safe` is the legacy context-free form and is treated
-       as HTML trust.
-
-       This is resolved entirely here, at compile time: the type is static and
-       the escaper id was folded by the desugar, so a mismatch costs nothing at
-       runtime -- it just takes the escaping path. That is why these are
-       separate types rather than one type carrying a context tag; a tag would
-       be runtime data and could not be resolved statically.
-
-       All are single-field ADTs, so unwrapping is the same field-0 load the
-       Safe path already used.
-
-       Escaper ids are Context.escaper_id / MARCH_ESC_* (see
-       runtime/march_ctx_escape.h). A url trust covers both the whole-URL and
-       component escapers, and a css trust both the value and declaration
-       ones, because those pairs differ in POSITION within one language, not in
-       which language the string is. *)
-    let trusted_for name =
-      if Collision_set.is_colliding ctx.collision_set name then None
-      else
-        match name with
-        | "Safe" | "TrustedHtml" -> Some [ 0 ]
-        | "TrustedAttr" -> Some [ 1 ]
-        | "TrustedUrl" -> Some [ 2; 3 ]
-        | "TrustedCss" -> Some [ 4; 7 ]
-        (* A js trust covers BOTH JS escapers. 5 is a hole inside a string
-           literal, 9 a hole at an expression position; they differ in
-           POSITION within one language, exactly as the url and css pairs
-           above do, and trusting a string as JS trusts it as JS wherever JS
-           is being written. This is also what keeps `Html.trust_js` usable at
-           all after the 2026-08-20 fix: expression position is the only place
-           trusted JS is ever worth inserting, and it is precisely the place
-           an untrusted value now gets quoted into inertness. *)
-        | "TrustedJs" -> Some [ 5; 9 ]
-        | _ -> None
-    in
-    let trusted_ids =
-      match atom_tir_ty a with
-      | Tir.TCon (n, _) -> trusted_for n
-      | _ -> None
-    in
-    let is_safe = trusted_ids <> None in
-    let is_iolist =
-      match atom_tir_ty a with Tir.TCon ("IOList", _) -> true | _ -> false in
-    let v = emit_atom_as ctx "ptr" a in
-    (* Normalise to a real String first, by whichever route actually works for
-       this type. `march_value_to_string` CANNOT flatten an IOList — it renders
-       the constructor spine as `#<tag:2>` — so a known IOList/Safe must go
-       through `march_html_auto_escape`, whose IOList path flattens verbatim.
-       Everything else, including TVar (the undecidable case), takes
-       to_string. *)
-    let v =
-      match atom_tir_ty a with
-      | Tir.TString -> v
-      | _ when is_safe ->
-        (* Boxed single-field ADT: the wrapped String is at offset +16. *)
-        let fp = fresh ctx "hec_safe_fp" in
-        emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp v);
-        let sv = fresh ctx "hec_safe_s" in
-        emit ctx (Printf.sprintf "%s = load ptr, ptr %s" sv fp);
-        sv
-      | _ when is_iolist ->
-        let fv = fresh ctx "hec_flat" in
-        emit ctx
-          (Printf.sprintf "%s = call ptr @march_html_auto_escape(ptr %s)" fv v);
-        fv
-      | _ ->
-        let sv = fresh ctx "hec_str" in
-        emit ctx
-          (Printf.sprintf "%s = call ptr @march_value_to_string(ptr %s)" sv v);
-        sv
-    in
-    let trust_covers_this_context =
-      match trusted_ids with
-      | Some ids -> List.mem id ids
-      | None -> is_html_ctx && is_iolist
-    in
-    if trust_covers_this_context then
-      (* The value is trusted for exactly this context: insert verbatim. *)
-      ("ptr", v)
-    else begin
-      let r = fresh ctx "hec" in
-      emit ctx
-        (Printf.sprintf
-           "%s = call ptr @march_html_escape_ctx(i64 %d, ptr %s)" r id v);
-      ("ptr", r)
-    end
+    Llvm_emit_html.emit_html_escape_ctx_static ~emit_atom ctx id a
 
   (* A RUNTIME escaper id.
      
@@ -1757,22 +1128,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      one it does not know, so a wrong id fails loudly rather than silently
      skipping an escaper. *)
   | Tir.EApp (f, [idx; a]) when Builtin_name.is Builtin_name.Html_escape_ctx f.Tir.v_name ->
-    let id_v = emit_atom_as ctx "i64" idx in
-    let v = emit_atom_as ctx "ptr" a in
-    let v =
-      match atom_tir_ty a with
-      | Tir.TString -> v
-      | _ ->
-        let sv = fresh ctx "hecd_str" in
-        emit ctx
-          (Printf.sprintf "%s = call ptr @march_value_to_string(ptr %s)" sv v);
-        sv
-    in
-    let r = fresh ctx "hecd" in
-    emit ctx
-      (Printf.sprintf "%s = call ptr @march_html_escape_ctx(i64 %s, ptr %s)"
-         r id_v v);
-    ("ptr", r)
+    Llvm_emit_html.emit_html_escape_ctx_dynamic ~emit_atom ctx idx a
 
   (* ── Bitwise integer builtins ─────────────────────────────────────── *)
   | Tir.EApp (f, [a; b]) when is_int_bitwise f.Tir.v_name ->
@@ -1876,145 +1232,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      @march_task_await_value performs the same task_wait_done and returns
      task[3] directly, which is the whole point of the _value variant. *)
   | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Task_await_unwrap f.Tir.v_name ->
-    let (_, task_ptr) = emit_atom ctx a in
-    let inner_ty = match a with
-      | Tir.AVar v ->
-        (match v.Tir.v_ty with
-         | Tir.TCon ("Task", [inner]) -> llvm_ty inner
-         | _ -> "ptr")
-      | _ -> "ptr"
-    in
-    (* Spin-wait and return tagged raw result from task[3]; no Ok wrapper. *)
-    let tv = fresh ctx "tv" in
-    emit ctx (Printf.sprintf "%s = call ptr @march_task_await_value(ptr %s)" tv task_ptr);
-    (* Untag: task[3] holds (llvm_ret << 1) | 1.  For ptr results llvm_ret is a
-       heap address → one conditional ashr restores it; inttoptr recovers the ptr.
-       For i64 results llvm_ret is already a tagged scalar (2*n+1), so task[3]
-       holds 4*n+3 — double-tagged.  One coerce ptr→i64 yields 2*n+1; a second
-       conditional ashr gives the raw n. *)
-    let r_i64 = coerce ctx "ptr" tv "i64" in
-    let r = if inner_ty = "ptr" then begin
-      let p = fresh ctx "r" in
-      emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" p r_i64);
-      p
-    end else if inner_ty = "i64" then
-      emit_untag_scalar ctx ~and_pfx:"cv" ~ashr_pfx:"cv" ~icmp_pfx:"cv" ~sel_pfx:"r" r_i64
-    else if inner_ty = "double" then begin
-      (* r_i64 is a march_float_box pointer: the closure's apply fn already
-         boxed its double result via the generic "double"->"ptr" coerce
-         (march_alloc_float, float-boxing stage 2) before returning it to the
-         trampoline, so — like the "ptr" case above — the tag/untag round
-         trip through task[3] is over a genuine heap pointer and lossless.
-         Recover the pointer the same way, then unbox with the paired
-         march_unbox_float (mirrors coerce's "ptr"->"double" arm). *)
-      let p = fresh ctx "r" in
-      emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" p r_i64);
-      let d = fresh ctx "tfv" in
-      emit ctx (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" d p);
-      d
-    end else r_i64 in
-    (* Release the caller's Task handle.  task_await_unwrap is a CONSUMING
-       builtin (it is absent from borrow.ml's extern_borrow_table, whose
-       default is "owned"), so Perceus transfers the caller's reference here
-       and emits an EIncRC at every earlier use — a double-await dups the
-       handle first, so releasing once per await stays balanced.  Nothing else
-       ever dropped it: march_task_spawn_thunk hands back RC=2 (caller +
-       trampoline) and the trampoline drops only its own hold, leaving the
-       48-byte Task immortal.  Atomic march_decrc, not the _local variant: the
-       trampoline's own drop runs on a scheduler thread and can race this one.
-       The read of task[3] above is complete by now, and the free is shallow,
-       so a ptr payload the caller now owns is unaffected.  (A Float payload's
-       box is still aliased from task[3] and still leaks — that is the
-       remaining half of specs/todos/2026-08-12-float-boxing-task-trampoline-leak.md,
-       which needs a tag-guarded release in the task's free path.) *)
-    emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" task_ptr);
-    (inner_ty, r)
-
-  (* task_await(task_ptr) → delegate to march_task_await C runtime.
-     march_task_await returns Ok(task[3]).  The thunk trampoline stored
-     task[3] = (apply_ret << 1) | 1 — i.e. the apply-wrapper's uniform-slot
-     return value tagged exactly once.  A boxed-ADT (Ok) field must hold that
-     uniform value *verbatim*, and the two representations pull in opposite
-     directions relative to the raw task[3]:
-       • i64 payload — apply_ret is already a tagged scalar (2*n+1), so
-         task[3] = 4*n+3 (double-tagged); the Ok(n) destructure untags once
-         and would leave 2*n+1 (await(async(6*7)) → Ok(85), not 42).
-       • ptr payload — apply_ret is a raw heap address; the Ok(x) destructure
-         loads a ptr field *raw* (no untag), but task[3] holds (addr<<1)|1, so
-         the field would carry a wild ~2*addr pointer → incrc/decrc misfire and
-         the payload deref SIGSEGVs / OOMs.
-       • double payload (Float) — apply_ret is a march_float_box pointer, NOT
-         the double itself: the closure's apply fn already boxed its result
-         through the generic "double"->"ptr" coerce (march_alloc_float,
-         float-boxing stage 2) before returning it to the trampoline.  So a
-         Float payload is a *heap address* and behaves exactly like the ptr
-         case above — the box, not the value, is the uniform representation
-         the Ok(v) destructure expects.
-     In ALL cases the correct field value is apply_ret == task[3] >> 1, and
-     task[3] is always odd (trampoline sets the low bit), so a single
-     unconditional ashr-1 of the freshly-allocated Ok payload (field 0, offset
-     16) is the exact inverse — for every llvm_ty (i64 / ptr / double are the
-     only three it produces).  The i64 half mirrors task_await_unwrap
-     (291f6b5f) and the await i64 fix (f89b8711); the ptr half fixes the
-     heap-payload crash f89b8711's comment wrongly assumed was already correct.
-
-     Do NOT unbox the double here.  This site normalizes an ADT *field* into
-     the uniform representation; it does not produce the scalar.  The paired
-     decode is the Ok(v) destructure's own "ptr"->"double" coerce, which loads
-     the field raw and calls march_unbox_float — so unboxing here and storing
-     the raw double bits back into the field made the destructure unbox a
-     second time, dereferencing the IEEE-754 bit pattern as an address (2.5 →
-     deref 0x4004000000000000 → SIGSEGV).  That is the whole of the
-     "any Float-returning task segfaults" bug; see
-     specs/progress/2026-08-21-float-returning-task-compiled.md.  Contrast
-     task_await_unwrap's "double" branch, which DOES unbox — correctly, because
-     it yields the scalar as its expression value rather than an ADT field. *)
+    Llvm_emit_task.emit_task_await_unwrap ~emit_atom ctx a
   | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Task_await f.Tir.v_name ->
-    let (_, tp) = emit_atom ctx a in
-    let r = fresh ctx "tawait" in
-    emit ctx (Printf.sprintf "%s = call ptr @march_task_await(ptr %s)" r tp);
-    let fp = fresh ctx "tawf" in
-    emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp r);
-    let v  = fresh ctx "tawv" in
-    emit ctx (Printf.sprintf "%s = load i64, ptr %s, align 8" v fp);
-    let v2 = fresh ctx "tawv" in
-    emit ctx (Printf.sprintf "%s = ashr i64 %s, 1" v2 v);
-    emit ctx (Printf.sprintf "store i64 %s, ptr %s, align 8" v2 fp);
-    (* A Float payload is a march_float_box smuggled through task[3], and
-       march_task_await's mk_ok stored that SAME pointer into this fresh Ok
-       cell without taking a reference for it.  task[3] keeps aliasing the box
-       for the life of the Task — double-await is legal and hands a second Ok
-       cell the identical pointer — so the Ok cell must own a reference of its
-       own, or whoever releases the field first frees it under the other
-       holder.  That "whoever" is now real: the Ok(v) destructure releases an
-       erased-slot Float box on its unique path (Llvm_case), and without this
-       +1 the second `match task_await(t)` on one Float task read freed memory
-       (measured: r2 printed 0, then SIGTRAP).
-
-       Only the "double" arm takes the +1.  A ptr payload's Ok(v) destructure
-       binds a heap variable and Perceus drops it, which consumes task[3]'s
-       one reference exactly as it does today; adding a +1 there would convert
-       today's balance into a per-await leak, so that arm is left alone.  The
-       residual here is that task[3]'s own reference to the box is still never
-       released — the Task's free is shallow — i.e. the unchanged remainder of
-       specs/todos/2026-08-12-float-boxing-task-trampoline-leak.md, which wants
-       a tag-guarded release in the task free path.  This +1 does not add to
-       that: it is balanced by the destructure's release. *)
-    (match a with
-     | Tir.AVar av when (match av.Tir.v_ty with
-                         | Tir.TCon ("Task", [inner]) -> llvm_ty inner = "double"
-                         | _ -> false) ->
-       let bp = fresh ctx "tawbox" in
-       emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" bp v2);
-       emit ctx (Printf.sprintf "call void @march_incrc(ptr %s)" bp)
-     | _ -> ());
-    (* Release the caller's Task handle — same ownership argument as
-       task_await_unwrap above (consuming builtin, Perceus dups for every
-       earlier use, nothing else ever dropped the handle).  Emitted after the
-       Ok payload has been read and normalised; the free is shallow, so the
-       payload the Ok cell now carries is untouched. *)
-    emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" tp);
-    ("ptr", r)
+    Llvm_emit_task.emit_task_await ~emit_atom ctx a
 
   (* task_yield() → cooperative yield via march_sched_yield *)
   | Tir.EApp (f, []) when Builtin_name.is Builtin_name.Task_yield f.Tir.v_name ->
@@ -2047,32 +1267,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      the module prefix (fn_name = "fib"), while stdlib/nested module functions
      are stored with it (fn_name = "String.from_int").  Try both forms. *)
   | Tir.EApp (f, [mod_atom; fn_atom]) when Builtin_name.is Builtin_name.Remote_ref_hashes f.Tir.v_name ->
-    let get_str_lit a = match a with
-      | Tir.ALit (March_ast.Ast.LitString s) -> s
-      | _ -> "" in
-    let mod_name = get_str_lit mod_atom in
-    let fn_name  = get_str_lit fn_atom in
-    let qualified_key = mod_name ^ "." ^ fn_name in
-    let find_h tbl =
-      match Hashtbl.find_opt tbl qualified_key with
-      | Some h -> h
-      | None   -> Option.value ~default:"" (Hashtbl.find_opt tbl fn_name)
-    in
-    let sig_h  = find_h ctx.remote_sig_hashes in
-    let impl_h = find_h ctx.remote_impl_hashes in
-    let emit_str_lit s =
-      let g = intern_string ctx s in
-      let tmp = fresh ctx "rrhsl" in
-      emit ctx (Printf.sprintf "%s = call ptr @march_string_lit(ptr %s, i64 %d)"
-                  tmp g (String.length s));
-      tmp
-    in
-    let sg_ptr  = emit_str_lit sig_h in
-    let im_ptr  = emit_str_lit impl_h in
-    let tup = emit_heap_alloc ctx 0 2 in
-    emit_store_field ctx tup 0 "ptr" sg_ptr;
-    emit_store_field ctx tup 1 "ptr" im_ptr;
-    ("ptr", tup)
+    Llvm_emit_task.emit_remote_ref_hashes ctx mod_atom fn_atom
 
   (* task_reductions() → read TLS reduction counter (no-op 0 in REPL mode) *)
   | Tir.EApp (f, []) when Builtin_name.is Builtin_name.Task_reductions f.Tir.v_name ->
@@ -2130,80 +1325,19 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     when (match f.Tir.v_name with
           | "record_keys" | "record_values" | "record_entries" -> true
           | _ -> false) ->
-    let (rt, rv) = emit_atom ctx r in
-    let rp = coerce ctx rt rv "ptr" in
-    let res = fresh ctx "cr" in
-    emit ctx (Printf.sprintf "%s = call ptr @march_%s(ptr %s)"
-                res f.Tir.v_name rp);
-    ("ptr", res)
+    Llvm_emit_data.emit_record_walk ~emit_atom ctx f r
 
   | Tir.EApp (f, [r; k]) when Builtin_name.is Builtin_name.Record_get f.Tir.v_name ->
-    let (rt, rv) = emit_atom ctx r in
-    let rp = coerce ctx rt rv "ptr" in
-    let (kt, kv) = emit_atom ctx k in
-    let kp = coerce ctx kt kv "ptr" in
-    let res = fresh ctx "cr" in
-    (* Pass the payload kind so march_record_get returns the right None encoding
-       (niche null for scalar/ptr kinds; boxed heap cell for Float/generic). *)
-    let payload_kind = match f.Tir.v_ty with
-      | Tir.TFn (_, Tir.TCon ("Option", [p])) ->
-        Char.code (shape_kind_char p)
-      | _ -> Char.code 'g'
-    in
-    emit ctx (Printf.sprintf "%s = call ptr @march_record_get(ptr %s, ptr %s, i64 %d)"
-                res rp kp payload_kind);
-    ("ptr", res)
+    Llvm_emit_data.emit_record_get ~emit_atom ctx f r k
 
   | Tir.EApp (f, [r; k]) when Builtin_name.is Builtin_name.Record_has_key f.Tir.v_name ->
-    let (rt, rv) = emit_atom ctx r in
-    let rp = coerce ctx rt rv "ptr" in
-    let (kt, kv) = emit_atom ctx k in
-    let kp = coerce ctx kt kv "ptr" in
-    let res = fresh ctx "cr" in
-    emit ctx (Printf.sprintf "%s = call i64 @march_record_has_key(ptr %s, ptr %s)"
-                res rp kp);
-    ("i64", res)
+    Llvm_emit_data.emit_record_has_key ~emit_atom ctx r k
 
   | Tir.EApp (f, [r; k; v]) when Builtin_name.is Builtin_name.Record_put f.Tir.v_name ->
-    let (rt, rv) = emit_atom ctx r in
-    let rp = coerce ctx rt rv "ptr" in
-    let (kt, kv) = emit_atom ctx k in
-    let kp = coerce ctx kt kv "ptr" in
-    let (vt, vv) = emit_atom ctx v in
-    (* Pass the value in UNIFORM representation as a ptr-sized word: scalars
-       low-bit tagged (coerce i64→ptr), raw bits for floats, ptr as-is.
-       Natural repr is ambiguous — an even Int >= 4096 is bit-identical to a
-       heap pointer, so the runtime's plausible-heap sniff would incrc
-       (dereference) the integer's value.  Tagged scalars are always odd and
-       untag unambiguously in rec_field_norm_uniform. *)
-    let vp = (match vt with
-      | "i64" -> coerce ctx "i64" vv "ptr"
-      | "double" ->
-        let b = fresh ctx "cv" in
-        let t = fresh ctx "cv" in
-        emit ctx (Printf.sprintf "%s = bitcast double %s to i64" b vv);
-        emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" t b);
-        t
-      | _ -> vv) in
-    let kind = shape_kind_char (atom_tir_ty v) in
-    let res = fresh ctx "cr" in
-    emit ctx (Printf.sprintf
-      "%s = call ptr @march_record_put(ptr %s, ptr %s, ptr %s, i64 %d)"
-      res rp kp vp (Char.code kind));
-    ("ptr", res)
+    Llvm_emit_data.emit_record_put ~emit_atom ctx r k v
 
   | Tir.EApp (f, [l]) when Builtin_name.is Builtin_name.Record_from_list f.Tir.v_name ->
-    let (lt, lv) = emit_atom ctx l in
-    let lp = coerce ctx lt lv "ptr" in
-    (* Kind hint for the pair values, from the list's element tuple type. *)
-    let kind = (match atom_tir_ty l with
-      | Tir.TCon ("List", [Tir.TTuple [_; b]]) -> shape_kind_char b
-      | _ -> 'g') in
-    let res = fresh ctx "cr" in
-    emit ctx (Printf.sprintf
-      "%s = call ptr @march_record_from_list_k(ptr %s, i64 %d)"
-      res lp (Char.code kind));
-    ("ptr", res)
+    Llvm_emit_data.emit_record_from_list ~emit_atom ctx l
 
   (* ── to_string: dispatch on argument TIR type ──────────────────────── *)
   | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.To_string f.Tir.v_name ->
@@ -2759,426 +1893,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
 
   (* ── General function call ─────────────────────────────────────────── *)
   | Tir.EApp (f, args) ->
-    (* Emit each arg once, collecting both type and value strings. *)
-    let arg_pairs = List.map (fun a -> emit_atom ctx a) args in
-    let arg_strs  = List.map (fun (ty, v) -> ty ^ " " ^ v) arg_pairs in
-    (* Resolve unqualified cross-module references: lower.ml may emit a
-       function reference without its module prefix (e.g. "base64_encode"
-       for "Crypto.base64_encode").  Look up the qualified name first.
-       Guard: if the bare name is already a direct top-level function, use
-       it as-is — a same-module function shadows any cross-module match. *)
-    let resolved_name =
-      if Hashtbl.mem ctx.top_fns f.Tir.v_name then f.Tir.v_name
-      else match Hashtbl.find_opt ctx.unqualified_fns f.Tir.v_name with
-        | Some q -> q
-        | None -> f.Tir.v_name
-    in
-    (* Guard against the coerce-catch-all class of bug: every simd_<t>_<op>
-       builtin, including `load`/`store` (real lowerings now, not a
-       deferred failwith — see the intercept arm's header comment above),
-       must be caught by the [decode_simd_call] guard on the dedicated SIMD
-       arm above and never reach this generic call path — reaching here for
-       one means that arm's pattern/guard let it slip through, which would
-       otherwise silently degrade to an unresolved
-       `call ptr @simd_..._add(...)` auto-declared extern (or worse, corrupt
-       via the ("ptr", scalar) coerce catch-all). Cheap insurance, unreachable
-       by construction. *)
-    if decode_simd_call resolved_name <> None then
-      failwith ("simd builtin reached generic call path: " ^ resolved_name);
-    (* ── Call-scoped SIMD vector temp boxes ────────────────────────────
-       A vector argument whose ACTUAL emitted type is native (`<N x T>` — an
-       ELet vector slot or a SIMD builtin result) is boxed here, by [coerce]'s
-       (vec, "ptr") arm, into a fresh `march_simd_alloc` cell with rc=1.  That
-       box is CALL-SCOPED: it never enters a TIR variable — it exists only
-       between this argument coerce and the call — so Perceus accounting never
-       sees it and no other party holds a reference to it.
-
-       INVARIANT that makes releasing it after the call sound: the callee must
-       provably not RETAIN the pointer.  That is true for, and ONLY for, a
-       callee whose parameter got a native vector TCO slot
-       ([Llvm_toplevel.emit_fn]'s `native_vec_slot` arm, tabulated in
-       [ctx.native_vec_params] by a pre-pass): its entry prologue does one
-       GEP + load of the payload and drops the pointer on the floor.  Releasing
-       the box after the call therefore closes the per-call leak recorded in
-       specs/progress/2026-08-11-simd-tco-entry-box-leak.md.
-
-       It is NOT true in general.  A callee whose vector parameter stays `ptr`
-       (any non-TCO fn, an apply fn, a mutual-TCO group member) is free to
-       store that exact pointer into a heap aggregate which then owns it —
-       `fn wrap(v) = [v]` compiles to `store ptr %v.arg, ptr %cons.field`.
-       Releasing there frees a live list element: measured segfault, guarded by
-       test/native/simd_vector_escape_arg.march.  Hence the table lookup rather
-       than "release every box I created".
-
-       Arguments that were ALREADY `ptr` before the coerce (a vector at rest in
-       a variable/field) are never recorded: no box was created, [coerce] was
-       the identity, and the box belongs to whoever owns the at-rest value.
-
-       Scope note: this closes the leak for native-slot callees only.  Non-TCO
-       vector params still leak one box per call on BOTH sides (neither caller
-       nor callee releases) — that needs Perceus-level accounting, tracked in
-       specs/todos/2026-08-12-simd-nontco-vector-param-leak.md. *)
-    let native_vec_idxs =
-      (* ARITY GUARD, not a formality: the indices are positional, so they only
-         mean anything if this call site passes exactly the callee's declared
-         parameter list.  The top_fn_param_tys coercion branch below already
-         refuses to coerce on a length mismatch; the apply-fn (Boundary B)
-         branch indexes positionally with no such check, so the guard lives
-         here, where BOTH branches inherit it.  On any mismatch we record
-         nothing and simply keep leaking — the safe direction. *)
-      match Hashtbl.find_opt ctx.native_vec_params resolved_name with
-      | Some idxs
-        when Hashtbl.find_opt ctx.top_fn_nparams resolved_name
-             = Some (List.length arg_pairs) -> idxs
-      | Some _ | None -> []
-    in
-    let temp_boxes : string list ref = ref [] in
-    let record_temp_box i ~from_ty ~to_ty boxed =
-      if is_vec_ty from_ty && to_ty = "ptr" && List.mem i native_vec_idxs then
-        temp_boxes := boxed :: !temp_boxes
-    in
-    (* Boundary B: a direct call to an apply fn (known_call rewrote a
-       non-escaping ECallPtr into EApp(apply_fn, ...)) must pass every scalar
-       arg through the uniform ptr closure ABI — tag Int/Bool via (n<<1)|1,
-       box Float via march_alloc_float, box a SIMD vector via march_simd_alloc
-       — because the apply fn's params are now `ptr` (Task 4).  Ordinary
-       top-level direct calls keep their concrete ABI, so guard the remap on
-       is_apply_fn.
-
-       The vector case (Task 4b) is the SAME defect the Float case documents,
-       one representation later.  A locally-defined recursive `fn` threading a
-       SIMD accumulator is reached by TWO call sites that must agree: this
-       direct kickoff call (known_call rewrote the first, non-escaping
-       ECallPtr into EApp(go$apply$N, ...)) and the closure's own indirect
-       self-call through the fn-pointer field.  The indirect path derives its
-       argument types from the callee's DECLARED params (all `ptr`) and so
-       boxes correctly; this direct path derives them from each argument's
-       ACTUAL emitted type, which for a vector-typed accumulator is the native
-       `<4 x float>` register value (the register-residency form).  Without
-       the remap the call read
-         call ptr @go$apply$N(ptr %clo, ptr %i, <4 x float> %acc)
-       against a definition taking `ptr %acc.arg`, so the callee dereferenced
-       a register vector as a box pointer: SEGFAULT at every --opt level
-       (specs/progress/2026-08-11-simd-nested-closure-vector-accumulator-
-       segfault.md).  The uniform ptr ABI is not optional here — the same
-       compiled body serves both call sites — so vectors box at this boundary
-       exactly like Floats do.  Keeping a vector NATIVE across a call would
-       require a whole cross-call vector ABI; the fast path for the shape that
-       actually matters (a self-tail-recursive accumulator) is instead the
-       native TCO slot in [Llvm_toplevel.emit_fn], which never crosses a real
-       call at all. *)
-    (* Float boxes created at THIS call site for a direct apply-fn call
-       (Boundary B) are released right after the call — the Float sibling of
-       the SIMD [record_temp_box] machinery above, with the same soundness
-       key: the release happens only when the CALLEE DEFINITION's declared
-       parameter is genuinely `double`, in which case its entry prologue
-       (Llvm_toplevel.emit_fn's is_apply_wrapper arm) unboxes the incoming
-       pointer once and never reads it again — the box has no owner but this
-       call site.  A param that stayed generic (`ptr` — an erased/polymorphic
-       apply fn) may RETAIN the argument, so its index is never listed and
-       that box still leaks (the safe direction); same arity guard as
-       [native_vec_idxs], since the indices are positional.  Measured before
-       this release: one leaked march_float_box per Float param per call,
-       unbounded (test/native/native_float_box_abi_leak_probe.march). *)
-    let apply_float_param_idxs =
-      if is_apply_fn resolved_name
-         (* Direct devirtualized SELF-call (known_call rewrote the recursive
-            back-edge): post-call instructions would defeat LLVM's tail-call
-            elimination and stack-overflow deep recursion — same exemption,
-            same rationale, as the ECallPtr arm's is_potential_self_call. *)
-         && resolved_name <> ctx.cur_emit_fn
-         && Hashtbl.find_opt ctx.top_fn_nparams resolved_name
-            = Some (List.length arg_pairs)
-      then
-        match Hashtbl.find_opt ctx.top_fn_param_tys resolved_name with
-        | Some param_tirs ->
-          List.mapi (fun i t -> (i, llvm_ty t = "double")) param_tirs
-          |> List.filter (fun (_, is_dbl) -> is_dbl)
-          |> List.map fst
-        | None -> []
-      else []
-    in
-    let float_temp_boxes : string list ref = ref [] in
-    let release_float_temp_boxes () =
-      List.iter
-        (fun b ->
-           emit ctx (Printf.sprintf "call void @march_decrc_local(ptr %s)" b))
-        !float_temp_boxes;
-      float_temp_boxes := []
-    in
-    let arg_strs =
-      if is_apply_fn resolved_name then
-        List.mapi (fun i (ty, v) ->
-          if ty = "i64" || ty = "double" || is_vec_ty ty then
-            let v' = coerce ctx ty v "ptr" in
-            record_temp_box i ~from_ty:ty ~to_ty:"ptr" v';
-            if ty = "double" && List.mem i apply_float_param_idxs then
-              float_temp_boxes := v' :: !float_temp_boxes;
-            "ptr " ^ v'
-          else ty ^ " " ^ v) arg_pairs
-      else
-        (* Coerce each argument's ACTUAL emitted representation to the
-           callee's declared parameter type when known and arity matches.
-           A value whose static var type is a generic/polymorphic ADT field
-           (always "ptr" — boxed for scalars — under the uniform-slot
-           convention; see Llvm_case's ce_fields-driven field extraction)
-           flowing directly into a monomorphic callee's native scalar
-           parameter (e.g. Float → "double") otherwise passes through
-           un-coerced, producing an LLVM call with mismatched argument
-           types that reads garbage at the callee (the
-           Array.from_list$..$Float compiled-wrong-value bug: pushing a
-           list element extracted from a generic Cons field into a
-           concrete Array.push$..$Float always read 0.0 for the element). *)
-        match Hashtbl.find_opt ctx.top_fn_param_tys resolved_name with
-        | Some param_tirs when List.length param_tirs = List.length arg_pairs ->
-          List.mapi (fun i (param_tir, (ty, v)) ->
-            let param_ty = llvm_ty param_tir in
-            let v' = coerce ctx ty v param_ty in
-            record_temp_box i ~from_ty:ty ~to_ty:param_ty v';
-            param_ty ^ " " ^ v'
-          ) (List.combine param_tirs arg_pairs)
-        | _ ->
-          (* Compiler builtins (int_to_string, math_sqrt, ...) are never
-             registered in top_fn_param_tys — that table only covers
-             user-defined fns/externs.  Without this, a builtin whose C
-             signature takes a native scalar (i64/double) called with an
-             argument bound via the uniform ptr-slot convention (e.g. a
-             tuple or ADT field, always "ptr", tagged/boxed) passes through
-             un-coerced: the raw tagged bits (e.g. (3<<1)|1 = 7) land in the
-             native param verbatim instead of being untagged, so
-             `Some((top, _)) -> int_to_string(top)` printed "7" instead of
-             "3" compiled-only (interpreter unaffected — no such repr
-             split there). Reuse the builtin's own declare_sig (single
-             source of truth, already used for the preamble) rather than a
-             second hand-maintained param-type table that could drift.
-
-             Only the "ptr" (generic/erased slot) -> "i64"/"double" (native
-             scalar) direction is coerced — the one the bug above needs.
-             The REVERSE direction ("i64"/"double" arg -> a declared "ptr"
-             param) must NOT go through [coerce]: several builtins
-             (csv_next_row/csv_close, file_close, ...) declare a "ptr" C
-             parameter for an opaque native handle whose March-level type
-             is plain Int, purely as a typechecking convention — the value
-             already IS a raw pointer, not a generic scalar needing the
-             boxed-slot tag.  [coerce]'s ("i64","ptr") case unconditionally
-             applies (v<<1)|1 (the boxing convention for a genuine Int
-             entering a generic slot), which corrupts such handles: passed
-             to their own runtime accessor, the tagged/shifted bit pattern
-             no longer resolves to the handle's real heap address (found
-             via bisection to this commit — Csv.read_all read every row's
-             fields off a bogus tagged "handle", nondeterministically
-             misreading it as EOF or as a wild pointer, exit 138/139).
-             LLVM's opaque-pointer calls don't require the call-site's
-             argument types to match the callee's declared prototype
-             (i64 and ptr share the same register/ABI class), so leaving
-             the value's own type/representation untouched here reproduces
-             the pre-regression, correct behavior exactly. *)
-          (match Llvm_builtins.builtin_param_llvm_tys resolved_name with
-           | Some param_llvm_tys when List.length param_llvm_tys = List.length arg_pairs ->
-             List.mapi (fun i (param_ty, (ty, v)) ->
-               if ty = "ptr" && (param_ty = "i64" || param_ty = "double") then
-                 let v' = coerce ctx ty v param_ty in
-                 param_ty ^ " " ^ v'
-               (* Reverse direction — a raw scalar (i64/double) flowing into a
-                  declared "ptr" param — is skipped in general (opaque handles),
-                  but ENABLED for slots whose March type is a generic TVar: the
-                  erased uniform slot needs the BOXED scalar (Int tagged, Float
-                  boxed), else an inlined raw literal is stored at the wrong
-                  representation. See builtin_boxed_generic_params_tbl. *)
-               else if param_ty = "ptr" && (ty = "i64" || ty = "double")
-                       && Llvm_builtins.builtin_param_is_boxed_generic resolved_name i then
-                 let v' = coerce ctx ty v "ptr" in
-                 "ptr " ^ v'
-               else ty ^ " " ^ v
-             ) (List.combine param_llvm_tys arg_pairs)
-           | _ -> arg_strs)
-    in
-    let args_str = String.concat ", " arg_strs in
-    let fname    = match Hashtbl.find_opt ctx.extern_map resolved_name with
-      | Some c_name -> c_name
-      | None -> mangle_extern resolved_name in
-    (* Determine return type: check known builtins first, then the registered
-       fn_def return type (if any), then fall back to the call-site TFn annotation.
-       The call-site type may be TVar "_" in JIT mode (empty type_map), so
-       top_fn_ret_ty gives the concrete type from the function's definition. *)
-    let ret_tir  = match builtin_ret_ty f.Tir.v_name with
-      | Some t -> t
-      | None   ->
-        (match Hashtbl.find_opt ctx.top_fn_ret_ty resolved_name with
-         (* The function IS registered but with an unresolved TVar return, so
-            its definition emits `ret ptr` (the generic representation).  The
-            call site MUST therefore read the result as ptr and let the
-            consumer coerce/untag to its concrete type — using the call-site
-            scalar type here would emit `call i64` against a `ret ptr` body,
-            reinterpreting a tagged generic value as a raw scalar (e.g. a
-            dynamic record-field read returning `(n<<1)|1` read back as `3`).
-            Mirrors the zero-arg AVar path. *)
-         | Some (Tir.TVar _) -> Tir.TVar "_"
-         (* Unregistered (extern/interface dispatch): the call-site annotation
-            is the only type info; the forward declaration uses it too. *)
-         | None -> fn_ret_tir f.Tir.v_ty
-         | Some t -> t)
-    in
-    (* Apply wrappers use the generic ptr ABI (see [is_apply_fn]); known_call
-       rewrites ECallPtr→EApp(apply_fn, ...) for non-escaping closures, so this
-       direct path must read the result as ptr too. *)
-    let ret_ty =
-      if is_apply_fn resolved_name then "ptr" else llvm_ret_ty ret_tir in
-    (* If the function is not known (not in top_fns, not a builtin, not an extern),
-       emit a forward declaration into the preamble so LLVM does not reject the IR
-       with "use of undefined value".  This covers interface dispatch calls that were
-       not resolved at compile time due to type erasure (e.g. Conduit.Storage.X when
-       the storage value has type TVar "_").
-       NOTE: skip if fname starts with "march_" — those are always pre-declared
-       in the hardcoded preamble string (emit_preamble). *)
-    let is_runtime_builtin = Tir_names.has_runtime_prefix fname in
-    let is_known_fn =
-      is_runtime_builtin
-      || Hashtbl.mem ctx.top_fns resolved_name
-      || Hashtbl.mem ctx.extern_map resolved_name
-      || builtin_ret_ty f.Tir.v_name <> None
-      || (match f.Tir.v_name with
-          | "panic" | "panic_" | "todo_" | "unreachable_" | "println"
-          | "print" | "print_stderr" | "io_read_line" | "read_line"
-          | "io_read_byte" | "read_byte" -> true
-          | _ -> false)
-    in
-    (* Unresolved bare interface-method guard — see
-       [fail_if_unresolved_iface_method]; the ECallPtr no-var-slot catch-all
-       applies the identical guard. *)
-    if not is_known_fn then
-      fail_if_unresolved_iface_method ctx f.Tir.v_name;
-    if not is_known_fn && not (Hashtbl.mem ctx.unknown_decls fname) then begin
-      Hashtbl.replace ctx.unknown_decls fname ();
-      let param_strs = List.mapi (fun i (ty, _) ->
-          Printf.sprintf "%s %%arg%d" ty i) arg_pairs in
-      Buffer.add_string ctx.preamble
-        (Printf.sprintf "declare %s @%s(%s)\n" ret_ty fname (String.concat ", " param_strs))
-    end;
-    if Hashtbl.mem ctx.raises_externs resolved_name then
-      emit_raises_wrapper ctx ~fname ~ret_tir ~arg_pairs
-    else if Hashtbl.mem ctx.blocking_externs resolved_name then
-      Llvm_calls.emit_blocking_call ctx ~fname ~ret_ty ~arg_pairs ~resolved_name
-    else if (match ctx.hr_config with
-             | None -> false
-             | Some cfg ->
-               (* Boundary→boundary call: route through the versioned dispatch
-                  table so the callee can be hot-swapped at runtime. *)
-               Hashtbl.mem ctx.top_fns resolved_name
-               && Hot_reload.needs_dispatch cfg ~caller_module:ctx.hr_cur_module
-                    ~callee_module:(module_of_name resolved_name)
-               && Hot_reload.Name_table.id_of ctx.hr_names resolved_name <> None)
-    then begin
-      let name_id =
-        match Hot_reload.Name_table.id_of ctx.hr_names resolved_name with
-        | Some i -> i + 1 | None -> 0 in  (* 1-based; 0 = sentinel *)
-      let vslot = fresh ctx "hrver" in
-      emit ctx (Printf.sprintf "%s = alloca i32" vslot);
-      let fp = fresh ctx "hrfp" in
-      if ctx.compile_so then begin
-        (* Phase 9: in a .so patch, read the per-.so epoch cell and use the
-           epoch-aware enter so old callers route to the version they were
-           deployed with rather than always the newest slot. *)
-        let epoch = fresh ctx "hrepoch" in
-        emit ctx (Printf.sprintf "%s = load i32, ptr @__march_hcr_epoch" epoch);
-        emit ctx (Printf.sprintf
-          "%s = call ptr @march_dispatch_enter_gen(i32 %d, i32 %s, ptr %s)"
-          fp name_id epoch vslot)
-      end else
-        emit ctx (Printf.sprintf
-          "%s = call ptr @march_dispatch_enter(i32 %d, ptr %s)" fp name_id vslot);
-      (* Startup-warmup guard.  march_dispatch_enter returns NULL when the target
-         slot has not been published yet (or the publish is not yet visible to
-         this thread) — e.g. an HTTP worker thread serving a request during the
-         first few seconds while the dispatch table is still being filled in.
-         In that window fall back to a DIRECT static call to the baseline symbol
-         (the exact fn we would have published), rather than jumping through a
-         NULL fn_ptr.  No leave is issued on this path: enter did not pin a
-         version when it returned NULL. *)
-      let is_null = fresh ctx "hrnull" in
-      emit ctx (Printf.sprintf "%s = icmp eq ptr %s, null" is_null fp);
-      let blk_direct = fresh_block ctx "hr_direct" in
-      let blk_disp   = fresh_block ctx "hr_disp" in
-      let blk_cont   = fresh_block ctx "hr_cont" in
-      emit ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
-                  is_null blk_direct blk_disp);
-      (* Direct (baseline) path — table not ready. *)
-      emit_label ctx blk_direct;
-      let direct_r =
-        if ret_ty = "void" then begin
-          emit ctx (Printf.sprintf "call void @%s(%s)" fname args_str);
-          None
-        end else begin
-          let r = fresh ctx "crd" in
-          emit ctx (Printf.sprintf "%s = call %s @%s(%s)"
-                      r ret_ty fname args_str);
-          Some r
-        end
-      in
-      emit ctx (Printf.sprintf "br label %%%s" blk_cont);
-      (* Dispatched path — pinned to a published version; must leave after. *)
-      emit_label ctx blk_disp;
-      let disp_r =
-        if ret_ty = "void" then begin
-          emit ctx (Printf.sprintf "call void %s(%s)" fp args_str);
-          None
-        end else begin
-          let r = fresh ctx "cr" in
-          emit ctx (Printf.sprintf "%s = call %s %s(%s)" r ret_ty fp args_str);
-          Some r
-        end
-      in
-      let v = fresh ctx "hrv" in
-      emit ctx (Printf.sprintf "%s = load i32, ptr %s" v vslot);
-      emit ctx (Printf.sprintf
-        "call void @march_dispatch_leave(i32 %d, i32 %s)" name_id v);
-      emit ctx (Printf.sprintf "br label %%%s" blk_cont);
-      (* Continuation — merge the two call results. *)
-      emit_label ctx blk_cont;
-      let result =
-        match direct_r, disp_r with
-        | Some rd, Some rs ->
-          let phi = fresh ctx "hrphi" in
-          emit ctx (Printf.sprintf "%s = phi %s [ %s, %%%s ], [ %s, %%%s ]"
-                      phi ret_ty rd blk_direct rs blk_disp);
-          (ret_ty, phi)
-        | _ -> ("i64", "0")
-      in
-      result
-    end
-    else if ret_ty = "void" then begin
-      emit ctx (Printf.sprintf "call void @%s(%s)" fname args_str);
-      release_temp_boxes ctx temp_boxes;
-      release_float_temp_boxes ();
-      ("i64", "0")
-    end else begin
-      let r = fresh ctx "cr" in
-      emit ctx (Printf.sprintf "%s = call %s @%s(%s)" r ret_ty fname args_str);
-      release_temp_boxes ctx temp_boxes;
-      release_float_temp_boxes ();
-      (* A Float-returning apply fn ALWAYS hands back a freshly-allocated
-         march_float_box: its `double` result has no other route into the
-         erased ptr slot than the return-path coerce / clo_wrap's
-         double-return arm, and that box goes straight to `ret` without being
-         stored anywhere.  This call site is therefore its sole owner: unbox
-         here and release the box, yielding the raw double (a consumer that
-         needs the erased form re-boxes fresh via coerce — Float is
-         immutable, so the copy is unobservable).  Before this release the
-         box leaked, one per call, unbounded — the return half of
-         test/native/native_float_box_abi_leak_probe.march.  The hot-reload
-         dispatch branch above deliberately skips this (and the temp-box
-         releases): dispatched apply-fn calls keep the old leak rather than
-         risk releasing across a version boundary — the safe direction. *)
-      if is_apply_fn resolved_name && llvm_ret_ty ret_tir = "double"
-         && resolved_name <> ctx.cur_emit_fn (* self-tail-call exemption *)
-      then begin
-        let d = fresh ctx "crf" in
-        emit ctx (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" d r);
-        emit ctx (Printf.sprintf "call void @march_decrc_local(ptr %s)" r);
-        ("double", d)
-      end else
-        (ret_ty, r)
-    end
+    Llvm_emit_call.emit_generic_app ~emit_atom ctx f args
 
   (* ── ECallPtr to a `raises` extern: env-routed error wrapper ─────────── *)
   (* defun may emit extern calls as ECallPtr.  Catch `raises` externs here —
@@ -3191,16 +1906,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
             else match Hashtbl.find_opt ctx.unqualified_fns f.Tir.v_name with
               | Some q -> q | None -> f.Tir.v_name in
           Hashtbl.mem ctx.raises_externs rn) ->
-    let arg_pairs = List.map (fun a -> emit_atom ctx a) args in
-    let rn =
-      if Hashtbl.mem ctx.top_fns f.Tir.v_name then f.Tir.v_name
-      else match Hashtbl.find_opt ctx.unqualified_fns f.Tir.v_name with
-        | Some q -> q | None -> f.Tir.v_name in
-    let fname = match Hashtbl.find_opt ctx.extern_map rn with
-      | Some c_name -> c_name | None -> mangle_extern rn in
-    let ret_tir = match Hashtbl.find_opt ctx.top_fn_ret_ty rn with
-      | Some t -> t | None -> fn_ret_tir f.Tir.v_ty in
-    emit_raises_wrapper ctx ~fname ~ret_tir ~arg_pairs
+    Llvm_emit_call.emit_callptr_raises ~emit_atom ctx f args
 
   (* ── ECallPtr to a `blocking` extern: OS-thread dispatch ─────────────── *)
   (* Exactly the same situation as the `raises` arm above: defun may emit
@@ -3219,18 +1925,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
             else match Hashtbl.find_opt ctx.unqualified_fns f.Tir.v_name with
               | Some q -> q | None -> f.Tir.v_name in
           Hashtbl.mem ctx.blocking_externs rn) ->
-    let arg_pairs = List.map (fun a -> emit_atom ctx a) args in
-    let rn =
-      if Hashtbl.mem ctx.top_fns f.Tir.v_name then f.Tir.v_name
-      else match Hashtbl.find_opt ctx.unqualified_fns f.Tir.v_name with
-        | Some q -> q | None -> f.Tir.v_name in
-    let fname = match Hashtbl.find_opt ctx.extern_map rn with
-      | Some c_name -> c_name | None -> mangle_extern rn in
-    let ret_tir = match Hashtbl.find_opt ctx.top_fn_ret_ty rn with
-      | Some t -> t | None -> fn_ret_tir f.Tir.v_ty in
-    let ret_ty = llvm_ret_ty ret_tir in
-    Llvm_calls.emit_blocking_call ctx ~fname ~ret_ty ~arg_pairs
-      ~resolved_name:rn
+    Llvm_emit_call.emit_callptr_blocking ~emit_atom ctx f args
 
   (* ── ECallPtr where callee is an unqualified cross-module user function ── *)
   (* lower.ml may emit function references without their module prefix (e.g.
@@ -3245,29 +1940,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
           not (Hashtbl.mem ctx.var_slot base))
       && (not (Hashtbl.mem ctx.top_fns f.Tir.v_name))
       && Hashtbl.mem ctx.unqualified_fns f.Tir.v_name ->
-    let qualified = Hashtbl.find ctx.unqualified_fns f.Tir.v_name in
-    let arg_strs = List.map (fun a ->
-        let (ty, v) = emit_atom ctx a in ty ^ " " ^ v
-      ) args in
-    let args_str = String.concat ", " arg_strs in
-    let fname = match Hashtbl.find_opt ctx.extern_map qualified with
-      | Some c_name -> c_name
-      | None -> mangle_extern qualified in
-    let ret_tir = match Hashtbl.find_opt ctx.top_fn_ret_ty qualified with
-      (* TVar-registered fn emits `ret ptr`; call as ptr, consumer coerces. *)
-      | Some (Tir.TVar _) -> Tir.TVar "_"
-      | None -> fn_ret_tir f.Tir.v_ty
-      | Some t -> t
-    in
-    let ret_ty = llvm_ret_ty ret_tir in
-    if ret_ty = "void" then begin
-      emit ctx (Printf.sprintf "call void @%s(%s)" fname args_str);
-      ("i64", "0")
-    end else begin
-      let r = fresh ctx "cr" in
-      emit ctx (Printf.sprintf "%s = call %s @%s(%s)" r ret_ty fname args_str);
-      (ret_ty, r)
-    end
+    Llvm_emit_call.emit_callptr_unqualified ~emit_atom ctx f args
 
   (* ── ECallPtr to a record introspection builtin: redirect to the EApp
      special cases above so kind hints and signatures stay correct. *)
@@ -3315,66 +1988,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          whose emit_atom of the callee calls the loader (see repl_slot_fns). *)
       && not (Hashtbl.mem ctx.repl_slot_fns f.Tir.v_name
               && not (Hashtbl.mem ctx.top_fns f.Tir.v_name)) ->
-    let arg_pairs = List.map (fun a -> emit_atom ctx a) args in
-    let arg_strs  = List.map (fun (ty, v) -> ty ^ " " ^ v) arg_pairs in
-    let args_str  = String.concat ", " arg_strs in
-    let resolved_name = match Hashtbl.find_opt ctx.unqualified_fns f.Tir.v_name with
-      | Some q -> q
-      | None -> f.Tir.v_name
-    in
-    let fname = match Hashtbl.find_opt ctx.extern_map resolved_name with
-      | Some c_name -> c_name
-      | None -> mangle_extern resolved_name in
-    let ret_tir =
-      match builtin_ret_ty f.Tir.v_name with
-      | Some t -> t
-      | None ->
-        (match Hashtbl.find_opt ctx.top_fn_ret_ty resolved_name with
-         (* TVar-registered fn emits `ret ptr`; call as ptr, consumer coerces. *)
-         | Some (Tir.TVar _) -> Tir.TVar "_"
-         | None -> fn_ret_tir f.Tir.v_ty
-         | Some t -> t)
-    in
-    let ret_ty = llvm_ret_ty ret_tir in
-    (* Emit a forward declare if the function is not known (not in top_fns,
-       not a builtin, not an extern).  This covers interface-dispatch calls
-       where the storage value has a type-erased type (TVar "_") and march
-       did not monomorphize the call — e.g. @Conduit.Storage.checkpoint_load_all
-       appears as a call but has no define/declare in the generated IR.
-       NOTE: skip if fname starts with "march_" — those are always pre-declared
-       in the hardcoded preamble string (emit_preamble). *)
-    let is_runtime_builtin = Tir_names.has_runtime_prefix fname in
-    let is_known_fn =
-      is_runtime_builtin
-      || Hashtbl.mem ctx.top_fns resolved_name
-      || Hashtbl.mem ctx.extern_map resolved_name
-      || builtin_ret_ty f.Tir.v_name <> None
-      || (match f.Tir.v_name with
-          | "panic" | "panic_" | "todo_" | "unreachable_" | "println"
-          | "print" | "print_stderr" | "io_read_line" | "read_line"
-          | "io_read_byte" | "read_byte" -> true
-          | _ -> false)
-    in
-    (* Unresolved bare interface-method guard — see
-       [fail_if_unresolved_iface_method]; the EApp general-call path applies
-       the identical guard. *)
-    if not is_known_fn then
-      fail_if_unresolved_iface_method ctx f.Tir.v_name;
-    if not is_known_fn && not (Hashtbl.mem ctx.unknown_decls fname) then begin
-      Hashtbl.replace ctx.unknown_decls fname ();
-      let param_strs = List.mapi (fun i (ty, _) ->
-          Printf.sprintf "%s %%arg%d" ty i) arg_pairs in
-      Buffer.add_string ctx.preamble
-        (Printf.sprintf "declare %s @%s(%s)\n" ret_ty fname (String.concat ", " param_strs))
-    end;
-    if ret_ty = "void" then begin
-      emit ctx (Printf.sprintf "call void @%s(%s)" fname args_str);
-      ("i64", "0")
-    end else begin
-      let r = fresh ctx "cr" in
-      emit ctx (Printf.sprintf "%s = call %s @%s(%s)" r ret_ty fname args_str);
-      (ret_ty, r)
-    end
+    Llvm_emit_call.emit_callptr_global ~emit_atom ctx f args
 
   | Tir.ECallPtr (Tir.AVar f, [a; b])
     when Builtin_name.(is Int_mod f.Tir.v_name || is Int_div f.Tir.v_name
@@ -3399,212 +2013,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      Field 0 of the closure is the apply fn ptr.
      Convention: apply fn takes (ptr $clo, original_params…). *)
   | Tir.ECallPtr (fn_atom, args) ->
-    (* The callee may surface as i64 when its TIR type is an unconstrained
-       TVar (e.g. a closure captured through an erased env slot or passed to
-       an erased i64 param).  Under the conditional-untag convention
-       (coerce ptr→i64 ashr's ONLY odd/tagged values), a heap pointer
-       flowing through a scalar-typed view is preserved verbatim — the i64
-       holds the full even pointer.  Restore it with a bare inttoptr.
-       NEVER use coerce i64→ptr here: its (n<<1)|1 immediate tagging would
-       corrupt the pointer and the fn-ptr load below would jump to garbage. *)
-    let (clo_ty, clo_val) = emit_atom ctx fn_atom in
-    let clo_ptr =
-      if clo_ty = "ptr" then clo_val
-      else begin
-        let v64 = if clo_ty = "i64" then clo_val
-                  else coerce ctx clo_ty clo_val "i64" in
-        let r = fresh ctx "cv" in
-        emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" r v64);
-        r
-      end
-    in
-    let fn_ptr = emit_load_field ctx clo_ptr 0 "ptr" in
-    let nargs = List.length args in
-    let ret_tir = match fn_atom with
-      | Tir.AVar v ->
-        (match v.Tir.v_ty with
-         | Tir.TFn (ps, ret) when List.length ps = nargs -> ret
-         | Tir.TFn _ as ty ->
-           (* Uncurry the TFn chain: TFn([a], TFn([b], R)) with 2 args → R.
-              Defun flattens curried apply functions but keeps the original
-              curried type on the variable, so nargs > List.length ps.
-              Walk the chain consuming one param per arg until we've matched
-              all args or run out of TFn wrappers. *)
-           let rec uncurry_ret n t =
-             if n = 0 then t
-             else match t with
-               | Tir.TFn ([_], ret) -> uncurry_ret (n - 1) ret
-               | Tir.TFn (ps, ret) when n >= List.length ps ->
-                 uncurry_ret (n - List.length ps) ret
-               | _ -> Tir.TVar "_"
-           in
-           (match ty with
-            | Tir.TFn (ps, ret) -> uncurry_ret (nargs - List.length ps) ret
-            | _ -> Tir.TVar "_")
-         | other -> other)
-      | _ -> Tir.TVar "_"
-    in
-    (* Self-recursive closure calls surface as TFn(known_params) -> '_: the
-       return type was left as an unresolved tyvar during recursive inference
-       in lowering, even though the lifted apply fn has a concrete return type
-       (e.g. a local [fn go(mi, acc) -> Int] whose body self-calls [go]).  With
-       an erased return we'd emit `call ptr` and read the apply fn's raw scalar
-       i64 return as a tagged pointer; the enclosing case-merge / return
-       coercion then conditional-untags it (ashr on odd values), corrupting odd
-       Int results.  A self-recursive call returns the enclosing function's own
-       return type, so fall back to ctx.ret_ty when it is concrete.  Guarded to
-       the TFn-with-known-params shape so fully-erased closure values (genuine
-       TVar callees that may return heap pointers) keep the ptr ABI. *)
-    let callee_is_tfn = match fn_atom with
-      | Tir.AVar v -> (match v.Tir.v_ty with Tir.TFn _ -> true | _ -> false)
-      | _ -> false
-    in
-    let ret_tir =
-      match ret_tir with
-      | Tir.TVar _ when callee_is_tfn ->
-        (match ctx.ret_ty with Tir.TVar _ -> ret_tir | concrete -> concrete)
-      | _ -> ret_tir
-    in
-    (* This is the indirect closure-struct dispatch: the fn-pointer always
-       targets a closure apply wrapper, which uses the generic ptr ABI (see
-       [is_apply_fn]).  Read the result as ptr regardless of the call-site Fn
-       annotation (which may say a concrete scalar like Bool) and let the
-       consumer untag via coerce.  void wrappers keep void. *)
-    let ret_ty =
-      let base = llvm_ret_ty ret_tir in
-      if base = "void" then "void" else "ptr"
-    in
-    let orig_param_llvm_tys = match fn_atom with
-      | Tir.AVar v ->
-        (match v.Tir.v_ty with
-         | Tir.TFn (ps, _) when List.length ps = nargs -> List.map llvm_ty ps
-         | Tir.TFn _ as ty ->
-           (* Uncurry the param type chain for curried calls, collecting
-              all parameter types across nested TFn wrappers. *)
-           let rec collect_params n t acc =
-             if n = 0 then List.rev acc
-             else match t with
-               | Tir.TFn (ps, ret) ->
-                 let take = min n (List.length ps) in
-                 let taken = List.filteri (fun i _ -> i < take) ps in
-                 collect_params (n - take) ret (List.rev_append (List.map llvm_ty taken) acc)
-               | _ -> List.rev acc @ List.init n (fun _ -> "ptr")
-           in
-           collect_params nargs ty []
-         | _ -> List.map (fun _ -> "ptr") args)
-      | _ -> List.map (fun _ -> "ptr") args
-    in
-    (* Closure dispatch uses a uniform ptr ABI (the apply wrapper always takes
-       ptr params — see is_apply_fn / clo_wrap).  A `double` param type would
-       compile the arg into an FP register while the wrapper reads a GP register
-       (integer scalars coincide across the two classes, floats do NOT) — so a
-       Float closure argument must cross as a BOXED ptr (float-boxing, Stage 2),
-       matching coerce's ("double","ptr") arm.  clo_wrap unboxes on the far side
-       for named-fn targets; lambda apply bodies unbox lazily via coerce. *)
-    let declared_param_llvm_tys = orig_param_llvm_tys in
-    let orig_param_llvm_tys =
-      List.map (fun t -> if t = "double" || t = "i64" then "ptr" else t) orig_param_llvm_tys in
-    let fn_ty_str = Printf.sprintf "%s (%s)" ret_ty
-        (String.concat ", " ("ptr" :: orig_param_llvm_tys)) in
-    (* Float ARGUMENT boxes created by this call site's own coerce (declared
-       param `double`, argument actually emitted as `double` — so the
-       ("double","ptr") arm just allocated a march_float_box) are released
-       right after the call.  Sole-ownership argument: a callee whose param
-       is genuinely `double` unboxes the pointer in its entry prologue and
-       never reads it again; a callee whose param slot stayed generic `ptr`
-       treats it as an opaque value and, under the borrowed-param discipline,
-       either leaves it alone or IncRCs it before storing it — either way the
-       call site's reference is still the box's own.  The one legal way the
-       box can come back to us is as the call's RESULT (a borrowed
-       flow-through alias, `fn x -> x` at an erased param — the shape that
-       made a plain call-site release a measured use-after-free on
-       2026-08-20, see specs/progress on this fix), hence the pointer-
-       equality guard against the raw returned value below: an aliased box is
-       skipped here and released once by the return-path release instead.
-       An argument that was ALREADY `ptr` at rest is never recorded — no box
-       was created, and the at-rest box belongs to whoever owns the value.
-       Measured before: one leaked box per Float arg per indirect call,
-       unbounded (test/native/native_float_box_abi_leak_probe.march). *)
-    (* SELF-TAIL-CALL EXEMPTION.  Inside an apply fn, a call through the
-       recursive self-binding (defun's [let go = $clo]; the callee variable's
-       name is exactly the lambda's source name) is the loop back-edge of a
-       local recursive fn.  Emitting ANY instruction between that call and
-       the merge/return — even the releases below — defeats LLVM's tail-call
-       elimination, and the recursion becomes O(n) real stack frames: a
-       measured green-thread stack overflow (SIGBUS) at 20,000 iterations on
-       a shape that ran 1,000,000 deep before.  So for a (potential)
-       self-call, skip every post-call release and hand the raw ptr result
-       through unchanged, exactly as before this fix — those per-iteration
-       boxes still leak (the pre-existing behavior; a false positive from
-       name shadowing also only leaks).  The real fix for that edge is
-       march-level TCO for self-recursive apply fns (native double slots, no
-       boxes at all) — tracked in specs/todos. *)
-    let is_potential_self_call =
-      match fn_atom with
-      | Tir.AVar v ->
-        (match Tir_names.apply_fn_base ctx.cur_emit_fn with
-         | Some base -> base = v.Tir.v_name
-         | None -> false)
-      | _ -> false
-    in
-    let float_arg_boxes : string list ref = ref [] in
-    let orig_arg_strs = List.map2 (fun (decl_ty, pty) a ->
-        let (actual_ty, v) = emit_atom ctx a in
-        let v' = coerce ctx actual_ty v pty in
-        if decl_ty = "double" && actual_ty = "double"
-           && not is_potential_self_call then
-          float_arg_boxes := v' :: !float_arg_boxes;
-        pty ^ " " ^ v'
-      ) (List.combine declared_param_llvm_tys orig_param_llvm_tys) args in
-    let all_arg_strs = Printf.sprintf "ptr %s" clo_ptr :: orig_arg_strs in
-    let release_float_arg_boxes ~(alias_of : string option) : unit =
-      List.iter (fun b ->
-        match alias_of with
-        | None ->
-          emit ctx (Printf.sprintf "call void @march_decrc_local(ptr %s)" b)
-        | Some r ->
-          let eq  = fresh ctx "fbaq" in
-          emit ctx (Printf.sprintf "%s = icmp eq ptr %s, %s" eq b r);
-          let rel  = fresh_block ctx "fbrel" in
-          let cont = fresh_block ctx "fbcont" in
-          emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
-                           eq cont rel);
-          emit_label ctx rel;
-          emit ctx (Printf.sprintf "call void @march_decrc_local(ptr %s)" b);
-          emit_term ctx (Printf.sprintf "br label %%%s" cont);
-          emit_label ctx cont
-      ) !float_arg_boxes;
-      float_arg_boxes := []
-    in
-    if ret_ty = "void" then begin
-      emit ctx (Printf.sprintf "call %s %s(%s)"
-                  fn_ty_str fn_ptr (String.concat ", " all_arg_strs));
-      release_float_arg_boxes ~alias_of:None;
-      ("i64", "0")
-    end else begin
-      let r = fresh ctx "cr" in
-      emit ctx (Printf.sprintf "%s = call %s %s(%s)"
-                  r fn_ty_str fn_ptr (String.concat ", " all_arg_strs));
-      release_float_arg_boxes ~alias_of:(Some r);
-      (* Float RESULT: the value in the erased ptr slot is a march_float_box
-         freshly allocated by the callee's return path — either its body's
-         ("double","ptr") coerce or clo_wrap_define's double-return arm; a
-         flow-through of an argument box re-boxes too whenever the callee's
-         param is a real `double` (unbox at entry, re-box at return), and a
-         GENERIC flow-through alias was left un-released by the guard above
-         precisely so this release is its single one.  Unbox and release
-         here, yielding the raw double; a consumer that needs the erased form
-         re-boxes fresh (Float is immutable, the copy is unobservable).
-         Before: one leaked box per Float-returning indirect call, unbounded
-         (the fret_leg of the probe above). *)
-      if llvm_ret_ty ret_tir = "double" && not is_potential_self_call then begin
-        let d = fresh ctx "crf" in
-        emit ctx (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" d r);
-        emit ctx (Printf.sprintf "call void @march_decrc_local(ptr %s)" r);
-        ("double", d)
-      end else
-        (ret_ty, r)
-    end
+    Llvm_emit_call.emit_callptr_closure ~emit_atom ctx fn_atom args
 
   (* ── Capture-free lambda closure: static immortal global ────────────
      defun.ml:441 lifts EVERY lambda to
@@ -3645,304 +2054,13 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          && (match fn_ptr_atom with
              | Tir.AVar _ | Tir.ADefRef _ -> true
              | Tir.ALit _ -> false) ->
-    let apply_tir_name =
-      match fn_ptr_atom with
-      | Tir.AVar v    -> v.Tir.v_name
-      | Tir.ADefRef d -> d.Tir.did_name
-      | Tir.ALit _    -> assert false
-    in
-    let apply_sym =
-      match fn_ptr_atom with
-      | Tir.AVar v    -> llvm_name v.Tir.v_name
-      | Tir.ADefRef d -> llvm_name d.Tir.did_name
-      | Tir.ALit _    ->
-        (* Excluded by the match guard above — defun.ml always builds
-           fn_ptr_atom as an AVar naming the lifted apply function, never a
-           literal. Kept as a hard failure (not a silent fallback) so a
-           future defun.ml change that violates the invariant is caught
-           here rather than miscompiling silently. *)
-        assert false
-    in
-    ("ptr", Llvm_ctx.intern_static_closure
-              ~pad:(Clo_flags.pad_for apply_tir_name)
-              ctx (llvm_name tcon_name) apply_sym)
+    Llvm_emit_alloc.emit_static_closure ctx tcon_name fn_ptr_atom
 
   (* ── Heap allocation ───────────────────────────────────────────────── *)
   | Tir.EAlloc (Tir.TCon (ctor, alloc_params), args) ->
-    (* EAlloc ctor key is "TypeName.CtorName"; repr_of_ty needs the TypeName. *)
-    let alloc_type_name = match String.rindex_opt ctor '.' with
-      | Some i -> String.sub ctor 0 i
-      | None -> ctor
-    in
-    (* Repr audit hook — records the encoding this alloc site commits to. *)
-    let audit fam site =
-      repr_audit_record ~ty:alloc_type_name
-        ~payload:(match alloc_params with
-          | [] -> "?"
-          | ps -> String.concat "," (List.map mangle_ty_for_eq ps))
-        ~family:fam ~site:(site ^ ":" ^ ctor ^ " in " ^ ctx.cur_emit_fn)
-    in
-    let alloc_result =
-     (match Repr.repr_of_ty ~collision_set:ctx.collision_set ctx.type_defs (Tir.TCon (alloc_type_name, [])) with
-     | Repr.Newtype payload ->
-       audit "Newtype" "alloc";
-       (* Newtype: no allocation. Emit the single payload atom directly. *)
-       if List.length args <> 1 then
-         failwith (Printf.sprintf
-           "LLVM emit: newtype constructor %s expects 1 arg, got %d \
-            (arity mismatch — malformed TIR)"
-           ctor (List.length args));
-       let (v_ty, v_val) = emit_atom ctx (List.hd args) in
-       if Repr.payload_needs_tag ~collision_set:ctx.collision_set ctx.type_defs payload then begin
-         (* Scalar payload: tag (v<<1)|1 so it's odd → IS_HEAP_PTR = false *)
-         let i64v = coerce ctx v_ty v_val "i64" in
-         let as_ptr = emit_tag_scalar ctx ~sh:"nt_sh" ~tag:"nt_tag" ~ptr:"nt_ptr" i64v in
-         ("ptr", as_ptr)
-       end else
-         (* Pointer payload: pass through raw *)
-         ("ptr", coerce ctx v_ty v_val "ptr")
-     | _ when Repr.is_niche_shaped ~collision_set:ctx.collision_set ctx.type_defs alloc_type_name ->
-       (* Niche (Option-shaped): None=0, Some(x)=x.
-          repr_of_ty returns Boxed here because EAlloc's ctor key carries no type
-          params; we use the actual arg TIR type to determine tagging. *)
-       let emit_niche_payload arg =
-         let arg_tir_ty = match arg with
-           | Tir.AVar v -> v.Tir.v_ty
-           | Tir.ALit (March_ast.Ast.LitInt _) -> Tir.TInt
-           | Tir.ALit (March_ast.Ast.LitBool _) -> Tir.TBool
-           | Tir.ALit (March_ast.Ast.LitFloat _) -> Tir.TFloat
-           | Tir.ALit (March_ast.Ast.LitString _) -> Tir.TString
-           | _ -> Tir.TUnit
-         in
-         let arg_niche_ok =
-           Repr.niche_payload_ok ~collision_set:ctx.collision_set ctx.type_defs arg_tir_ty
-           (* Erased (TVar) payload: the rest of the erased convention —
-              emit_case's abstract-arg niche path, ensure_adt_eq_fn, and the
-              nullary-None alloc — treats Option(TVar) as NICHE, and a TVar
-              slot value is already uniform (heap ptr raw / scalar tagged), so
-              pass it through raw.  Boxing here made e.g. alist_get's
-              Some(field) a heap cell that its niche-matching callers read as
-              the payload itself (caught by MARCH_REPR_AUDIT:
-              alloc-some-boxed(?) vs case=Niche(Any)). *)
-           || (match arg_tir_ty with Tir.TVar _ -> true | _ -> false)
-         in
-         if not arg_niche_ok then None
-         else begin
-           let (v_ty, v_val) = emit_atom ctx arg in
-           if Repr.payload_needs_tag ~collision_set:ctx.collision_set ctx.type_defs arg_tir_ty then begin
-             let i64v = coerce ctx v_ty v_val "i64" in
-             let as_ptr = emit_tag_scalar ctx ~sh:"niche_sh" ~tag:"niche_tag" ~ptr:"niche_ptr" i64v in
-             Some ("ptr", as_ptr)
-           end else
-             Some ("ptr", coerce ctx v_ty v_val "ptr")
-         end
-       in
-       (match args with
-        | [] ->
-          (* Nullary ctor (None).  For a niche-SAFE payload it is raw 0 (null).
-             But when the payload is niche-UNSAFE (e.g. Option(Option(_)) or
-             Option(Float)), the Some case above is emitted BOXED (its
-             emit_niche_payload returns None → the boxed-Some fallthrough), so
-             None must ALSO be boxed — otherwise the value is inconsistently
-             encoded (Some=heap cell, None=null) and the match, which uses the
-             concrete Boxed repr, loads a ctor tag from the null None → SIGSEGV
-             (Preload.extract_values_at over Option(Option(String)) rows). The
-             EAlloc ctor key has no payload, so use the TCon type params. *)
-          let payload_niche_safe = match alloc_params with
-            | [p] ->
-              Repr.niche_payload_ok ~collision_set:ctx.collision_set ctx.type_defs p
-              (* Abstract (erased) payload: emit_case's abstract-arg niche path
-                 and ensure_adt_eq_fn both treat Option(TVar) as NICHE, so the
-                 alloc must too — boxing None here would make a niche match read
-                 the non-null cell as Some (caught by MARCH_REPR_AUDIT:
-                 case=Niche(Any) vs alloc-none-boxed=Boxed(Any)). *)
-              || (match p with Tir.TVar _ -> true | _ -> false)
-            | _ ->
-              (* Non-generic type (no params on the ctor key): the variant DEF
-                 carries the concrete payload type — key the encode on the same
-                 classification the decode (emit_case) uses, so None and Some
-                 stay consistently encoded (both niche, or both boxed). *)
-              (match Repr.niche_repr_of_concrete ~collision_set:ctx.collision_set ctx.type_defs alloc_type_name with
-               | Some _ -> true
-               | None   -> false)
-          in
-          if payload_niche_safe then begin
-            audit "Niche" "alloc-none";
-            (* Distinct prefix from the niche-None BLOCK label (fresh_block ctx
-               "niche_none").  fresh/fresh_block use independent counters, so a
-               shared prefix can mint an SSA value and a block label with the same
-               name (e.g. %niche_none10 and block niche_none10) — LLVM shares the
-               value/label namespace, so the branch target then resolves to the
-               value: "'%niche_none10' is not a basic block". *)
-            let z = fresh ctx "niche_nullval" in
-            emit ctx (Printf.sprintf "%s = inttoptr i64 0 to ptr" z);
-            ("ptr", z)
-          end else begin
-            audit "Boxed" "alloc-none-boxed";
-            (* Boxed None: a tag-0 heap cell with no fields, matching the boxed
-               Some encoding for this niche-unsafe Option. *)
-            let entry = ctor_entry ctx ctor 0 in
-            let ptr = emit_heap_alloc ctx entry.ce_tag 0 in
-            ("ptr", ptr)
-          end
-        | [arg] ->
-          (* Key the audit by the ARG's type — for a single-field ctor that IS
-             the payload, and far more attributable than the "?" the paramless
-             EAlloc key would give. *)
-          let audit_arg fam site =
-            let arg_key = mangle_ty_for_eq (match arg with
-              | Tir.AVar v -> v.Tir.v_ty
-              | Tir.ALit (March_ast.Ast.LitInt _) -> Tir.TInt
-              | Tir.ALit (March_ast.Ast.LitBool _) -> Tir.TBool
-              | Tir.ALit (March_ast.Ast.LitFloat _) -> Tir.TFloat
-              | Tir.ALit (March_ast.Ast.LitString _) -> Tir.TString
-              | _ -> Tir.TUnit) in
-            repr_audit_record ~ty:alloc_type_name ~payload:arg_key
-              ~family:fam ~site:(site ^ ":" ^ ctor ^ " in " ^ ctx.cur_emit_fn)
-          in
-          (match emit_niche_payload arg with
-           | Some result -> audit_arg "Niche" "alloc-some"; result
-           | None ->
-             audit_arg "Boxed" "alloc-some-boxed";
-             (* Payload not niche-safe (Float/Unit/Bool) — fall through to boxed *)
-             let entry = ctor_entry ctx ctor (List.length args) in
-             let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
-             let field_ty = match List.nth_opt entry.ce_fields 0 with
-               | Some t -> llvm_ty t | None -> "ptr" in
-             let (v_ty, v_val) = emit_atom ctx arg in
-             emit_store_field ctx ptr 0 field_ty (coerce ctx v_ty v_val field_ty);
-             ("ptr", ptr))
-        | _ ->
-          audit "Boxed" "alloc-multi";
-          (* Multi-arg ctor that happens to share the type name — boxed *)
-          let entry = ctor_entry ctx ctor (List.length args) in
-          let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
-          List.iteri (fun i atom ->
-            let field_ty = match List.nth_opt entry.ce_fields i with
-              | Some t -> llvm_ty t | None -> "ptr" in
-            let (v_ty, v_val) = emit_atom ctx atom in
-            emit_store_field ctx ptr i field_ty (coerce ctx v_ty v_val field_ty)
-          ) args;
-          ("ptr", ptr))
-     | _ ->
-       audit "Boxed" "alloc";
-       let entry = ctor_entry ctx ctor (List.length args) in
-       let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
-       List.iteri (fun i atom ->
-         let field_ty = match List.nth_opt entry.ce_fields i with
-           | Some t -> llvm_ty t
-           | None ->
-             failwith (Printf.sprintf
-               "LLVM emit: constructor %s has %d field(s) but field index %d \
-                was requested (arity mismatch — cascading from a ctor_info collision?)"
-               ctor (List.length entry.ce_fields) i)
-         in
-         let (v_ty, v_val) = emit_atom ctx atom in
-         let v_coerced = coerce ctx v_ty v_val field_ty in
-         emit_store_field ctx ptr i field_ty v_coerced
-       ) args;
-       (* Actor structs get a runtime shape id stamped into the header pad
-          word so get_actor_field's C implementation (march_get_actor_field,
-          runtime/march_extras.c) can look up a named state field by the
-          actor's own shape at runtime, regardless of whether the caller's
-          static Pid(a) type is concrete at that call site (it usually is
-          NOT — a call routed through a small generic helper like
-          child_int(sup, field) never resolves `a` past an abstract type
-          variable, since nothing in get_actor_field's own signature forces
-          monomorphization on it). Scoped to actor structs only via
-          is_actor_struct_name — not a general shape-stamping change for
-          every Boxed EAlloc/ctor-application site. *)
-       if Tir_names.is_actor_struct_name alloc_type_name then
-         emit_set_shape ctx ptr (get_record_fields ctx (Tir.TCon (alloc_type_name, [])));
-       (* HCR: if this is a known actor type, wire the dispatch slot ID immediately
-          after allocation so the actor green thread uses the hot-reload table.
-          Counter_spawn() is inlined+DCE'd by mono, so we can't rely on a spawn
-          wrapper; injecting here survives all IR transformations.
-          Actor types are named <Base>_Actor; dispatch functions are <Base>_dispatch. *)
-       let actor_sfx = Tir_names.actor_struct_suffix in
-       let atn_len = String.length alloc_type_name in
-       let sfx_len = String.length actor_sfx in
-       if ctx.hr_config <> None
-          && Tir_names.is_actor_struct_name alloc_type_name
-       then begin
-         let actor_base = String.sub alloc_type_name 0 (atn_len - sfx_len) in
-         let dispatch_fn = actor_base ^ Tir_names.actor_dispatch_suffix in
-         match Hot_reload.Name_table.id_of ctx.hr_names dispatch_fn with
-         | Some id0 ->
-           let slot_id = id0 + 1 in  (* 1-based; 0 = "not set" sentinel *)
-           emit ctx (Printf.sprintf
-             "call void @march_actor_set_dispatch_id(ptr %s, i32 %d)" ptr slot_id)
-         | None -> ()
-       end;
-       (* Actor.call tag-base registration. F19 (build_ctor_info) gives actor
-          _Msg ctors GLOBALLY-unique tags (base 0x0100_0000 + declaration
-          index) so cross-actor sends can't misroute — but march_actor_call
-          stamps the augmented call message with the SENTINEL's per-type
-          0-based tag (= handler index). Register this actor's first-msg-ctor
-          global tag so the runtime can translate index → global tag; without
-          it every compiled Actor.call falls to the dispatch default arm and
-          is dropped (the caller blocks forever / times out). Emitted at the
-          alloc (like the shape stamp above) so supervisor respawns, which
-          re-run the March-level spawn closure, re-register the fresh record. *)
-       if Tir_names.is_actor_struct_name alloc_type_name then begin
-         let actor_base = String.sub alloc_type_name 0 (atn_len - sfx_len) in
-         let msg_ty_name = actor_base ^ Tir_names.actor_msg_suffix in
-         let first_ctor = List.find_map (function
-           | Tir.TDVariant (n, (c, _) :: _) when n = msg_ty_name -> Some c
-           | _ -> None) ctx.type_defs
-         in
-         match first_ctor with
-         | Some c ->
-           (match Hashtbl.find_opt ctx.ctor_info (msg_ty_name ^ "." ^ c) with
-            | Some e ->
-              emit ctx (Printf.sprintf
-                "call void @march_actor_set_call_base(ptr %s, i64 %d)"
-                ptr e.ce_tag)
-            | None -> ())
-         | None -> ()
-       end;
-       ("ptr", ptr))
-    in
-    (* Closure objects carry ONE bit of borrow information about the function
-       they dispatch to, stamped into the header pad word (offset 12, the same
-       otherwise-unused slot the actor-shape stamp above uses): whether the
-       callee leaves its first user argument BORROWED.  The C runtime's fold
-       helpers read it back (MARCH_CLO_ARG0_BORROWED, runtime/march_runtime.h)
-       to decide whether they still own the accumulator they passed in — a
-       question no dynamic test can answer; see [Clo_flags] for the full
-       argument.  Scoped to closure structs only ("$Clo_..."), like the actor
-       stamp above, and emitted only when the bit is SET, so the common
-       no-information case costs nothing. *)
-    (match alloc_result with
-     (* "ptr" specifically: a closure struct is always Boxed, and a
-        non-pointer result would mean the repr classification changed under
-        us — GEPing into it would be nonsense, so fall through instead. *)
-     | ("ptr", clo_ptr) when Tir_names.is_clo_struct ctor ->
-       let pad =
-         match args with
-         | Tir.AVar v :: _    -> Clo_flags.pad_for v.Tir.v_name
-         | Tir.ADefRef d :: _ -> Clo_flags.pad_for d.Tir.did_name
-         | _ -> 0
-       in
-       if pad <> 0 then begin
-         let pp = fresh ctx "clopad" in
-         emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 12" pp clo_ptr);
-         emit ctx (Printf.sprintf "store i32 %d, ptr %s, align 4" pad pp)
-       end
-     | _ -> ());
-    alloc_result
-
+    Llvm_emit_alloc.emit_alloc_ctor ~emit_atom ctx ctor alloc_params args
   | Tir.EAlloc (_, args) ->
-    (* Non-TCon allocation (tuples / erased cells): UNIFORM slots — readers
-       go through ctor_entry fallbacks that load ptr and untag conditionally. *)
-    let n = List.length args in
-    let ptr = emit_heap_alloc ctx 0 n in
-    List.iteri (fun i atom ->
-      let (ty, v) = emit_atom ctx atom in
-      let vp = coerce ctx ty v "ptr" in
-      emit_store_field ctx ptr i "ptr" vp
-    ) args;
-    ("ptr", ptr)
+    Llvm_emit_alloc.emit_alloc_uniform ~emit_atom ctx args
 
   (* ── TRMC hole allocation / hole fill ──────────────────────────────── *)
   (* [EAllocHole (ty, filled, hole)] is [EAlloc] with field [hole] left
@@ -3952,97 +2070,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      That is the property the whole TRMC scheme leans on for the window between
      allocation and fill. *)
   | Tir.EAllocHole (tok, Tir.TCon (ctor, _), args, hole) ->
-    (* Same repr guard as EStackAlloc: this arm builds a BOXED cell
-       unconditionally, so a Newtype-/Niche-repr type would be constructed
-       boxed and decoded erased.  TRMC must never select such a type. *)
-    let ah_type_name = match String.rindex_opt ctor '.' with
-      | Some i -> String.sub ctor 0 i
-      | None -> ctor
-    in
-    (match Repr.repr_of_ty ~collision_set:ctx.collision_set ctx.type_defs (Tir.TCon (ah_type_name, [])) with
-     | Repr.Newtype _ | Repr.Niche _ ->
-       failwith (Printf.sprintf
-         "LLVM emit: EAllocHole of erased-repr type %s (ctor %s) — a hole needs \
-          a real heap cell; TRMC must not select an erased-repr constructor"
-         ah_type_name ctor)
-     | Repr.Boxed ->
-       if Repr.is_niche_shaped ~collision_set:ctx.collision_set ctx.type_defs ah_type_name then
-         failwith (Printf.sprintf
-           "LLVM emit: EAllocHole of niche-shaped type %s (ctor %s) — same \
-            erased-vs-boxed split as Newtype"
-           ah_type_name ctor));
-    let arity = List.length args + 1 in
-    if hole < 0 || hole >= arity then
-      failwith (Printf.sprintf
-        "LLVM emit: EAllocHole of %s has hole index %d outside arity %d"
-        ctor hole arity);
-    let entry = ctor_entry ctx ctor arity in
-    (* [args] carries only the FILLED fields, in order, with the hole's slot
-       skipped.  Pair each with its destination index and LLVM field type, and
-       evaluate the operands ONCE here — before any branch — so the reuse and
-       fresh paths below store already-materialised SSA values (same discipline
-       as EReuse; evaluating inside a branch would define values in one block
-       and use them in another). *)
-    let slot_vals =
-      let rest = ref args in
-      List.filter_map (fun i ->
-        if i = hole then None
-        else match !rest with
-          | atom :: tl ->
-            rest := tl;
-            let field_ty = match List.nth_opt entry.ce_fields i with
-              | Some t -> llvm_ty t | None -> "ptr" in
-            let (v_ty, v_val) = emit_atom ctx atom in
-            Some (i, field_ty, coerce ctx v_ty v_val field_ty)
-          | [] ->
-            failwith (Printf.sprintf
-              "LLVM emit: EAllocHole of %s supplies %d filled field(s) for arity %d"
-              ctor (List.length args) arity)
-      ) (List.init arity (fun i -> i))
-    in
-    let store_slots p =
-      List.iter (fun (i, field_ty, v) -> emit_store_field ctx p i field_ty v)
-        slot_vals
-    in
-    (match tok with
-     | None ->
-       let ptr = emit_heap_alloc ctx entry.ce_tag arity in
-       store_slots ptr;
-       ("ptr", ptr)
-     | Some reuse_atom ->
-       (* Same discipline as EReuse: take the cell over when it is unique at
-          runtime, otherwise release it and allocate fresh. *)
-       let (_, rv) = emit_atom ctx reuse_atom in
-       let rc = fresh ctx "rhrc" in
-       emit ctx (Printf.sprintf
-                   "%s = load atomic i64, ptr %s monotonic, align 8" rc rv);
-       let uniq = fresh ctx "rhuniq" in
-       emit ctx (Printf.sprintf "%s = icmp eq i64 %s, 1" uniq rc);
-       let reuse_lbl = fresh_block ctx "rhole_reuse" in
-       let fresh_lbl = fresh_block ctx "rhole_fresh" in
-       let merge_lbl = fresh_block ctx "rhole_merge" in
-       emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
-                        uniq reuse_lbl fresh_lbl);
-       emit_label ctx reuse_lbl;
-       emit_store_tag ctx rv entry.ce_tag;
-       store_slots rv;
-       (* A fresh cell comes from calloc and is already zero.  A REUSED cell is
-          not: its hole slot still holds the old child pointer, whose ownership
-          has already moved to the match's branch variables.  Leaving it there
-          would let any drop in the window before the fill walk into a child
-          someone else now owns — so clear it explicitly. *)
-       emit_store_field ctx rv hole "ptr" "null";
-       emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl);
-       emit_label ctx fresh_lbl;
-       emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" rv);
-       let hp = emit_heap_alloc ctx entry.ce_tag arity in
-       store_slots hp;
-       emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl);
-       emit_label ctx merge_lbl;
-       let result = fresh ctx "rhole_r" in
-       emit ctx (Printf.sprintf "%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]"
-                   result rv reuse_lbl hp fresh_lbl);
-       ("ptr", result))
+    Llvm_emit_alloc.emit_alloc_hole ~emit_atom ctx tok ctor args hole
 
   (* TRMC only ever selects a data constructor, so a non-TCon hole allocation
      is a bug in the transformation rather than a shape to support. *)
@@ -4069,410 +2097,20 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
 
   (* ── Stack allocation ──────────────────────────────────────────────── *)
   | Tir.EStackAlloc (Tir.TCon (ctor, _), args) ->
-    (* Repr guard (slice-7 L7): this arm builds a BOXED stack cell
-       unconditionally, so it must never receive a Newtype- or Niche-repr
-       type — those "allocs" are erased immediates, and every consumer
-       decodes them under the erased convention (an ECase would untag the
-       stack POINTER → garbage). Escape.alloc_emits_heap_cell keeps such
-       allocs out of stack promotion; fail loudly if one slips through. *)
-    let sa_type_name = match String.rindex_opt ctor '.' with
-      | Some i -> String.sub ctor 0 i
-      | None -> ctor
-    in
-    (match Repr.repr_of_ty ~collision_set:ctx.collision_set ctx.type_defs (Tir.TCon (sa_type_name, [])) with
-     | Repr.Newtype _ | Repr.Niche _ ->
-       failwith (Printf.sprintf
-         "LLVM emit: EStackAlloc of erased-repr type %s (ctor %s) — \
-          construction would be boxed but consumers decode erased; \
-          escape analysis must not promote this alloc (finding L7)"
-         sa_type_name ctor)
-     | Repr.Boxed ->
-       if Repr.is_niche_shaped ~collision_set:ctx.collision_set ctx.type_defs sa_type_name then
-         failwith (Printf.sprintf
-           "LLVM emit: EStackAlloc of niche-shaped type %s (ctor %s) — \
-            same erased-vs-boxed split as Newtype (finding L7)"
-           sa_type_name ctor));
-    let entry = ctor_entry ctx ctor (List.length args) in
-    let ptr = emit_stack_alloc ctx (List.length args) in
-    emit_store_tag ctx ptr entry.ce_tag;
-    List.iteri (fun i atom ->
-      let field_ty = match List.nth_opt entry.ce_fields i with
-        | Some t -> llvm_ty t
-        | None ->
-          failwith (Printf.sprintf
-            "LLVM emit: constructor %s has %d field(s) but field index %d \
-             was requested (arity mismatch — cascading from a ctor_info collision?)"
-            ctor (List.length entry.ce_fields) i)
-      in
-      let (v_ty, v_val) = emit_atom ctx atom in
-      let v_coerced = coerce ctx v_ty v_val field_ty in
-      emit_store_field ctx ptr i field_ty v_coerced
-    ) args;
-    ("ptr", ptr)
+    Llvm_emit_alloc.emit_stack_alloc_ctor ~emit_atom ctx ctor args
 
   | Tir.EStackAlloc (_, args) ->
-    (* Non-TCon stack allocation: UNIFORM slots, mirroring EAlloc above. *)
-    let n = List.length args in
-    let ptr = emit_stack_alloc ctx n in
-    List.iteri (fun i atom ->
-      let (ty, v) = emit_atom ctx atom in
-      let vp = coerce ctx ty v "ptr" in
-      emit_store_field ctx ptr i "ptr" vp
-    ) args;
-    ("ptr", ptr)
+    Llvm_emit_alloc.emit_stack_alloc_uniform ~emit_atom ctx args
 
   (* ── FBIP reuse (conditional: check RC=1 before reusing in-place) ──── *)
   (* EReuse semantics: if RC=1, reuse in-place; else DecRC + alloc fresh.
      This is critical for correctness when the caller holds extra references
      (e.g. after IncRC before passing to a function). *)
   | Tir.EReuse (reuse_atom, Tir.TCon (ctor, _), args) ->
-    (* Newtype fast path: no heap cell to reuse. Emit new payload directly.
-       The old reuse_atom is a tagged scalar or pointer; release it via
-       march_decrc (IS_HEAP_PTR guards make it a no-op on tagged scalars). *)
-    let reuse_type_name = match String.rindex_opt ctor '.' with
-      | Some i -> String.sub ctor 0 i
-      | None -> ctor
-    in
-    (match Repr.repr_of_ty ~collision_set:ctx.collision_set ctx.type_defs (Tir.TCon (reuse_type_name, [])) with
-     | Repr.Newtype payload ->
-       let (_, rv) = emit_atom ctx reuse_atom in
-       emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" rv);
-       let (v_ty, v_val) = emit_atom ctx (List.hd args) in
-       if Repr.payload_needs_tag ~collision_set:ctx.collision_set ctx.type_defs payload then begin
-         let i64v = coerce ctx v_ty v_val "i64" in
-         let as_ptr = emit_tag_scalar ctx ~sh:"nt_sh" ~tag:"nt_tag" ~ptr:"nt_ptr" i64v in
-         ("ptr", as_ptr)
-       end else
-         ("ptr", coerce ctx v_ty v_val "ptr")
-     | _ when Repr.is_niche_shaped ~collision_set:ctx.collision_set ctx.type_defs reuse_type_name ->
-       (* Niche reuse: old value is itself a niche value (0, tagged-int, or ptr).
-          march_decrc's IS_HEAP_PTR guard makes it a no-op on 0 and tagged ints. *)
-       let (_, old_v) = emit_atom ctx reuse_atom in
-       emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" old_v);
-       let emit_niche_payload arg =
-         let arg_tir_ty = match arg with
-           | Tir.AVar v -> v.Tir.v_ty
-           | Tir.ALit (March_ast.Ast.LitInt _) -> Tir.TInt
-           | Tir.ALit (March_ast.Ast.LitBool _) -> Tir.TBool
-           | Tir.ALit (March_ast.Ast.LitFloat _) -> Tir.TFloat
-           | Tir.ALit (March_ast.Ast.LitString _) -> Tir.TString
-           | _ -> Tir.TUnit
-         in
-         let arg_niche_ok =
-           Repr.niche_payload_ok ~collision_set:ctx.collision_set ctx.type_defs arg_tir_ty
-           (* Erased (TVar) payload: the rest of the erased convention —
-              emit_case's abstract-arg niche path, ensure_adt_eq_fn, and the
-              nullary-None alloc — treats Option(TVar) as NICHE, and a TVar
-              slot value is already uniform (heap ptr raw / scalar tagged), so
-              pass it through raw.  Boxing here made e.g. alist_get's
-              Some(field) a heap cell that its niche-matching callers read as
-              the payload itself (caught by MARCH_REPR_AUDIT:
-              alloc-some-boxed(?) vs case=Niche(Any)). *)
-           || (match arg_tir_ty with Tir.TVar _ -> true | _ -> false)
-         in
-         if not arg_niche_ok then None
-         else begin
-           let (v_ty, v_val) = emit_atom ctx arg in
-           if Repr.payload_needs_tag ~collision_set:ctx.collision_set ctx.type_defs arg_tir_ty then begin
-             let i64v = coerce ctx v_ty v_val "i64" in
-             let as_ptr = emit_tag_scalar ctx ~sh:"niche_sh" ~tag:"niche_tag" ~ptr:"niche_ptr" i64v in
-             Some ("ptr", as_ptr)
-           end else
-             Some ("ptr", coerce ctx v_ty v_val "ptr")
-         end
-       in
-       (match args with
-        | [] when (match Repr.niche_repr_of_concrete ~collision_set:ctx.collision_set ctx.type_defs reuse_type_name with
-                   | Some _ -> true
-                   (* Payload not niche-safe (e.g. Float): the Some side is
-                      encoded BOXED (emit_niche_payload returns None), so None
-                      must be boxed too — fall through to the boxed path below,
-                      mirroring EAlloc's alloc-none-boxed. *)
-                   | None -> false) ->
-          (* Distinct prefix from the niche-None BLOCK label (fresh_block ctx
-             "niche_none").  fresh/fresh_block use independent counters, so a
-             shared prefix can mint an SSA value and a block label with the same
-             name (e.g. %niche_none10 and block niche_none10) — LLVM shares the
-             value/label namespace, so the branch target then resolves to the
-             value: "'%niche_none10' is not a basic block". *)
-          let z = fresh ctx "niche_nullval" in
-          emit ctx (Printf.sprintf "%s = inttoptr i64 0 to ptr" z);
-          ("ptr", z)
-        | [arg] ->
-          (match emit_niche_payload arg with
-           | Some result -> result
-           | None ->
-             let entry = ctor_entry ctx ctor (List.length args) in
-             let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
-             let field_ty = match List.nth_opt entry.ce_fields 0 with
-               | Some t -> llvm_ty t | None -> "ptr" in
-             let (v_ty, v_val) = emit_atom ctx arg in
-             emit_store_field ctx ptr 0 field_ty (coerce ctx v_ty v_val field_ty);
-             ("ptr", ptr))
-        | _ ->
-          let entry = ctor_entry ctx ctor (List.length args) in
-          let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
-          List.iteri (fun i atom ->
-            let field_ty = match List.nth_opt entry.ce_fields i with
-              | Some t -> llvm_ty t | None -> "ptr" in
-            let (v_ty, v_val) = emit_atom ctx atom in
-            emit_store_field ctx ptr i field_ty (coerce ctx v_ty v_val field_ty)
-          ) args;
-          ("ptr", ptr))
-     | _ ->
-    (* Guard: if the reuse_atom's own type is niche-shaped (e.g. Option.Some),
-       the scrutinee IS the payload — no wrapper object was allocated.
-       FBIP reuse would overwrite the payload's own memory with the new
-       object's tag/fields, corrupting whatever type the payload holds.
-       Additionally, for patterns like [Some(result) -> Ok(result)], the
-       branch variable 'result' and dec_v are the same runtime pointer, so
-       calling march_decrc(dec_v) in the fresh branch would decrement the
-       very value we're about to store as Ok's field (use-after-free).
-       Skip FBIP: allocate fresh without touching reuse_atom's RC. *)
-    let reuse_atom_parent_type = match reuse_atom with
-      | Tir.AVar v ->
-        (match v.Tir.v_ty with
-         | Tir.TCon (name, _) ->
-           (match String.rindex_opt name '.' with
-            | Some i -> String.sub name 0 i
-            | None -> name)
-         | _ -> "")
-      | _ -> ""
-    in
-    if reuse_atom_parent_type <> ""
-       && Repr.is_niche_shaped ~collision_set:ctx.collision_set ctx.type_defs reuse_atom_parent_type
-    then begin
-      let entry = ctor_entry ctx ctor (List.length args) in
-      let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
-      List.iteri (fun i atom ->
-        let field_ty = match List.nth_opt entry.ce_fields i with
-          | Some t -> llvm_ty t
-          | None -> failwith (Printf.sprintf
-              "LLVM emit: constructor %s has %d field(s) but field index %d \
-               was requested (arity mismatch)"
-              ctor (List.length entry.ce_fields) i)
-        in
-        let (v_ty, v_val) = emit_atom ctx atom in
-        emit_store_field ctx ptr i field_ty (coerce ctx v_ty v_val field_ty)
-      ) args;
-      ("ptr", ptr)
-    end
-    else if Repr.is_actor_struct_type ctx.type_defs reuse_type_name then begin
-      (* Actor-state update (finding 20): an actor's message handler writes its
-         new state back into the actor struct via EReuse (see
-         lib/tir/lower_actor.ml).  The actor object is a stable, long-lived
-         singleton mutated SOLELY by its own daemon green thread — the RC of the
-         actor *handle* (how many `Pid` references exist) has nothing to do with
-         whether an in-place state write is safe.  The generic RC-conditional
-         FBIP path below is actively WRONG here: the main thread legitimately
-         does atomic incrc/decrc on the actor handle as it passes the Pid to
-         successive `send`s, so the handler's `rc == 1` check races that and can
-         observe rc > 1, taking the "fresh" branch — which allocates a COPY,
-         writes the new state into the copy, and DISCARDS it (the handler's
-         result is unit), silently LOSING the state update (memory-safe: no
-         crash, just a wrong-but-valid count).  actor_green_thread's
-         `a[0]=1` force to defeat the check is itself racy against that concurrent
-         incrc and cannot be made safe.  The fix: for an actor struct, ALWAYS
-         mutate in place — no RC load, no branch, no decrc, no fresh alloc.
-
-         Gate MUST be structural, not name-based: an adversarial review found
-         that a name-suffix check (the type con name ending in "_Actor") false-
-         positive-matched a user type coincidentally named e.g. `Tree_Actor`,
-         silently corrupting it under a shared (RC>1) FBIP reuse by skipping the
-         refcount check that shared-value safety depends on. [Repr.is_actor_struct_type]
-         instead confirms the type's field 0 is literally named "$d_dispatch" —
-         a name only [lower_actor.ml] can ever construct (user identifiers can
-         never start with `$`), so this cannot false-positive on user code. *)
-      let (_, rv) = emit_atom ctx reuse_atom in
-      let entry = ctor_entry ctx ctor (List.length args) in
-      emit_store_tag ctx rv entry.ce_tag;
-      List.iteri (fun i atom ->
-        let field_ty = match List.nth_opt entry.ce_fields i with
-          | Some t -> llvm_ty t
-          | None -> failwith (Printf.sprintf
-              "LLVM emit: actor-struct reuse %s has %d field(s) but field index \
-               %d was requested (arity mismatch)"
-              ctor (List.length entry.ce_fields) i)
-        in
-        let (v_ty, v_val) = emit_atom ctx atom in
-        emit_store_field ctx rv i field_ty (coerce ctx v_ty v_val field_ty)
-      ) args;
-      ("ptr", rv)
-    end
-    else begin
-    let (_, rv) = emit_atom ctx reuse_atom in
-    let entry = ctor_entry ctx ctor (List.length args) in
-    (* FULL-OVERWRITE invariant (fail-loudly): the reuse's arg count must
-       equal the resolved constructor's declared field count.  The
-       reuse-preserves-semantics rule (core-march.md §4.16) rests on the
-       reuse branch overwriting the ENTIRE payload — tag + every field — so
-       the reused cell is observationally identical to a fresh allocation.
-       An UNDER-write (fewer args than ce_fields) would silently leave the
-       OLD cell's trailing fields visible through the new value; the
-       per-index nth_opt failwith below only catches the OVER-index
-       direction, and [ctor_entry]'s suffix-fallback can genuinely resolve
-       to an entry of a different arity when two types share a ctor name
-       and no arity-exact candidate exists.  Perceus_fbip's [same_arity]
-       ($fbip$-encoded freed-cell arity = new arg count) makes the SIZES
-       match; this check pins the remaining leg (arg count = resolved
-       ctor's field count) at emission time. *)
-    if List.length args <> List.length entry.ce_fields then
-      failwith (Printf.sprintf
-        "LLVM emit: EReuse of constructor %s supplies %d arg(s) but the \
-         resolved ctor_info entry declares %d field(s) — an under-write \
-         would leak the reused cell's stale fields (type-incorrect TIR or \
-         a ctor_info suffix-fallback collision reached codegen)"
-        ctor (List.length args) (List.length entry.ce_fields));
-    (* Pre-compute all arg values before branching *)
-    let arg_vals = List.mapi (fun i atom ->
-      let field_ty = match List.nth_opt entry.ce_fields i with
-        | Some t -> llvm_ty t
-        | None ->
-          failwith (Printf.sprintf
-            "LLVM emit: constructor %s has %d field(s) but field index %d \
-             was requested (arity mismatch — cascading from a ctor_info collision?)"
-            ctor (List.length entry.ce_fields) i)
-      in
-      let (v_ty, v_val) = emit_atom ctx atom in
-      let v_coerced = coerce ctx v_ty v_val field_ty in
-      (field_ty, v_coerced)
-    ) args in
-    (* Load RC and check if uniquely owned.  Use atomic monotonic load so
-       this is data-race-free even if borrow inference's "process-local" proof
-       is later weakened — the cost of a relaxed atomic load is negligible
-       relative to the march_decrc on the fresh-branch path. *)
-    let rc = fresh ctx "rc" in
-    emit ctx (Printf.sprintf "%s = load atomic i64, ptr %s monotonic, align 8" rc rv);
-    let is_unique = fresh ctx "uniq" in
-    emit ctx (Printf.sprintf "%s = icmp eq i64 %s, 1" is_unique rc);
-    let reuse_lbl = fresh_block ctx "fbip_reuse" in
-    let fresh_lbl = fresh_block ctx "fbip_fresh" in
-    let merge_lbl = fresh_block ctx "fbip_merge" in
-    emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
-                     is_unique reuse_lbl fresh_lbl);
-    (* Reuse branch: write tag/fields to original pointer.  Neither
-       emit_store_tag nor emit_store_field nor emit_heap_alloc emit a label,
-       so reuse_lbl / fresh_lbl ARE the immediate predecessors of merge_lbl
-       — safe to use as phi source labels.  Audit L6: phi instead of
-       alloca/store/load slot. *)
-    emit_label ctx reuse_lbl;
-    emit_store_tag ctx rv entry.ce_tag;
-    List.iteri (fun i (field_ty, v_coerced) ->
-      emit_store_field ctx rv i field_ty v_coerced
-    ) arg_vals;
-    emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl);
-    (* Fresh branch: DecRC original, alloc fresh, write tag/fields *)
-    emit_label ctx fresh_lbl;
-    emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" rv);
-    let hp = emit_heap_alloc ctx entry.ce_tag (List.length args) in
-    List.iteri (fun i (field_ty, v_coerced) ->
-      emit_store_field ctx hp i field_ty v_coerced
-    ) arg_vals;
-    emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl);
-    (* Merge via phi *)
-    emit_label ctx merge_lbl;
-    let result = fresh ctx "fbip_r" in
-    emit ctx (Printf.sprintf "%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]"
-                result rv reuse_lbl hp fresh_lbl);
-    ("ptr", result)
-    end)
+    Llvm_emit_alloc.emit_reuse_ctor ~emit_atom ctx reuse_atom ctor args
 
   | Tir.EReuse (reuse_atom, reuse_ty, args) ->
-    (* Non-TCon reuse (e.g. reusing a dead cell as a join-point closure): same
-       conditional logic without ctor-specific fields. *)
-    let arg_vals_of () = List.map (fun atom ->
-      let (ty, v) = emit_atom ctx atom in
-      (* Records keep NATURAL slot repr (shape descriptors record the kind);
-         tuples / erased cells use the UNIFORM convention (scalars tagged),
-         matching ETuple and the ptr-typed destructure fallbacks. *)
-      (match reuse_ty with
-       | Tir.TRecord _ -> (ty, v)
-       | _ -> ("ptr", coerce ctx ty v "ptr"))
-    ) args in
-    (* Guard (mirrors the TCon branch above): if reuse_atom's own type is
-       niche-shaped (e.g. Option.Some over a pointer), the scrutinee IS its
-       payload — no wrapper cell exists.  FBIP-reusing that memory for a
-       different object (here a closure) overwrites the payload, so a later
-       use of the payload (or its fields) reads corrupted/freed memory.
-       This is exactly the `Some((a, b)) -> ... reuse Option as $Clo ...`
-       pattern emitted for join points: reusing the Option cell would clobber
-       the tuple it points to.  Skip FBIP and allocate fresh, without touching
-       reuse_atom's RC (the payload stays live for its own consumers). *)
-    let reuse_atom_parent_type = match reuse_atom with
-      | Tir.AVar v ->
-        (match v.Tir.v_ty with
-         | Tir.TCon (name, _) ->
-           (match String.rindex_opt name '.' with
-            | Some i -> String.sub name 0 i
-            | None -> name)
-         | _ -> "")
-      | _ -> ""
-    in
-    if reuse_atom_parent_type <> ""
-       && Repr.is_niche_shaped ~collision_set:ctx.collision_set ctx.type_defs reuse_atom_parent_type
-    then begin
-      let arg_vals = arg_vals_of () in
-      let hp = emit_heap_alloc ctx 0 (List.length args) in
-      List.iteri (fun i (ty, v) -> emit_store_field ctx hp i ty v) arg_vals;
-      (match reuse_ty with
-       | Tir.TRecord fields -> emit_set_shape ctx hp fields
-       | _ -> ());
-      ("ptr", hp)
-    end else begin
-    let (_, rv) = emit_atom ctx reuse_atom in
-    let arg_vals = arg_vals_of () in
-    let rc = fresh ctx "rc" in
-    emit ctx (Printf.sprintf "%s = load atomic i64, ptr %s monotonic, align 8" rc rv);
-    let is_unique = fresh ctx "uniq" in
-    emit ctx (Printf.sprintf "%s = icmp eq i64 %s, 1" is_unique rc);
-    let reuse_lbl = fresh_block ctx "fbip_reuse" in
-    let fresh_lbl = fresh_block ctx "fbip_fresh" in
-    let merge_lbl = fresh_block ctx "fbip_merge" in
-    emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
-                     is_unique reuse_lbl fresh_lbl);
-    emit_label ctx reuse_lbl;
-    (* Write tag=0 to match the fresh-branch allocation (emit_heap_alloc below
-       passes tag_int=0).  Without this, the reused cell would carry whatever
-       tag was previously stored — semantically inconsistent with the
-       same-shape value the fresh branch produces. *)
-    emit_store_tag ctx rv 0;
-    List.iteri (fun i (ty, v) ->
-      emit_store_field ctx rv i ty v
-    ) arg_vals;
-    emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl);
-    emit_label ctx fresh_lbl;
-    emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" rv);
-    let hp = emit_heap_alloc ctx 0 (List.length args) in
-    List.iteri (fun i (ty, v) ->
-      emit_store_field ctx hp i ty v
-    ) arg_vals;
-    emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl);
-    emit_label ctx merge_lbl;
-    let result = fresh ctx "fbip_r" in
-    emit ctx (Printf.sprintf "%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]"
-                result rv reuse_lbl hp fresh_lbl);
-    (* Records: stamp the shape id on the result (the fresh-branch cell has
-       pad=0; the reuse-branch cell may have been a different record shape). *)
-    (match reuse_ty with
-     | Tir.TRecord fields -> emit_set_shape ctx result fields
-     | _ -> ());
-    ("ptr", result)
-    end
-
-  (* ── RC ops ────────────────────────────────────────────────────────── *)
-  (* Skip RC ops on builtins AND on top-level function references.
-     Function addresses live in the code segment, not the heap, so calling
-     march_incrc_local/decrc_local/free on them would corrupt memory or crash.
-     EIncRC/EDecRC use non-atomic local RC (fast path, single-owner values).
-     EAtomicIncRC/EAtomicDecRC use C11-atomic RC for actor-shared values.
-     A LOCAL binding of the same name (var_slot entry) shadows the builtin
-     or top-level fn — mirrors emit_atom's two analogous guards (:1422-1424
-     top-fns arm, :1499-1500 builtin arm, whose comment cites heap
-     corruption).  Without this check a local heap value named e.g. `link`
-     (also the actor-linking builtin) silently gets ZERO RC ops: it is
-     never inc/dec'd or freed, leaking or (worse, if the same name is later
-     reused for a different shape) corrupting memory the same way the
-     emit_atom bug did. *)
+    Llvm_emit_alloc.emit_reuse_uniform ~emit_atom ctx reuse_atom reuse_ty args
   | Tir.EIncRC atom
     when (atom_is_builtin atom ||
           (match atom with Tir.AVar v -> Hashtbl.mem ctx.top_fns v.Tir.v_name | _ -> false)) &&
@@ -4532,184 +2170,19 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   | Tir.ETuple [] -> ("i64", "0")
 
   | Tir.ETuple atoms ->
-    (* Tuple slots use the UNIFORM convention: scalars low-bit tagged via
-       coerce i64→ptr, heap values raw.  Every destructure path reads tuple
-       fields as ptr (ctor_entry "$TupleN" is never registered, so its
-       fallback yields TVar fields) and untags scalar views conditionally —
-       storing naturals here silently halved odd ints / flipped true→false
-       the moment a tuple passed through any pattern match. *)
-    let n = List.length atoms in
-    let ptr = emit_heap_alloc ctx 0 n in
-    List.iteri (fun i atom ->
-      let (ty, v) = emit_atom ctx atom in
-      let vp = coerce ctx ty v "ptr" in
-      emit_store_field ctx ptr i "ptr" vp
-    ) atoms;
-    ("ptr", ptr)
+    Llvm_emit_data.emit_tuple ~emit_atom ctx atoms
 
   (* ── Records ───────────────────────────────────────────────────────── *)
   | Tir.ERecord fields ->
-    (* Sort by field name so layout matches TRecord (sorted by name) *)
-    let sorted = List.sort (fun (a, _) (b, _) -> String.compare a b) fields in
-    let n = List.length sorted in
-    let ptr = emit_heap_alloc ctx 0 n in
-    List.iteri (fun i (_, atom) ->
-      let (ty, v) = emit_atom ctx atom in
-      emit_store_field ctx ptr i ty v
-    ) sorted;
-    (* Stamp the shape id so record introspection builtins can recover the
-       field names at runtime. *)
-    emit_set_shape ctx ptr
-      (List.map (fun (nm, atom) -> (nm, atom_tir_ty atom)) sorted);
-    ("ptr", ptr)
+    Llvm_emit_data.emit_record ~emit_atom ctx fields
 
   (* ── Field access ──────────────────────────────────────────────────── *)
   | Tir.EField (obj_atom, field_name) ->
-    let obj_ty = match obj_atom with
-      | Tir.AVar v    -> v.Tir.v_ty
-      | Tir.ADefRef _ -> Tir.TVar "_"
-      | Tir.ALit _    -> Tir.TVar "_"
-    in
-    (* Closure free-variable fields: "$fvN" — parse index from name directly
-       since the closure pointer is opaque (TPtr TUnit) with no field_map. *)
-    if Tir_names.is_fv_field field_name then begin
-      let i = Tir_names.fv_field_index field_name in
-      let (_, obj_val) = emit_atom ctx obj_atom in
-      let fv = emit_load_field ctx obj_val i (llvm_ty (Tir.TPtr Tir.TUnit)) in
-      (llvm_ty (Tir.TPtr Tir.TUnit), fv)
-    end else begin
-      match get_record_fields ctx obj_ty with
-      | [] when ctx.shape_meta ->
-        (* Statically-unknown record shape (type-erased generic flow, or a
-           record extended at runtime by record_put): look the field up by
-           name via the shape id.  Result follows the generic ADT-slot
-           convention (ints low-bit tagged) — consumers coerce ptr→i64 with
-           an untagging ashr.  Cells without shape metadata fall back to the
-           legacy raw slot-0 read inside the C helper. *)
-        let (_, obj_val) = emit_atom ctx obj_atom in
-        let ng = intern_string ctx field_name in
-        let res = fresh ctx "cr" in
-        emit ctx (Printf.sprintf
-          "%s = call ptr @march_record_field_dyn(ptr %s, ptr %s, i64 %d)"
-          res obj_val ng (String.length field_name));
-        ("ptr", res)
-      | _ ->
-        let (idx, field_ty) = field_index_for ctx obj_ty field_name in
-        (match field_ty with
-         | Tir.TVar _ when ctx.shape_meta ->
-           (* The record's shape is statically known but THIS field's type is
-              still an unresolved type variable — monomorphisation did not
-              reach it (e.g. a record rebuilt inside a generic `List.map`
-              lambda and consumed by a separate function).  A TVar says
-              nothing about the field's representation, so a direct typed load
-              is unsound: emitting one loads the slot as `ptr` and the ptr->i64
-              coercion then untags it, which silently HALVES any odd integer
-              (35 read back as 17) while leaving even ones intact.
-
-              Fall back to the by-name shape lookup used for wholly-unknown
-              records.  It consults the runtime shape recorded at construction
-              and returns ints low-bit tagged, which is exactly the generic
-              ADT-slot convention the consuming coercion expects. *)
-           let (_, obj_val) = emit_atom ctx obj_atom in
-           let ng = intern_string ctx field_name in
-           let res = fresh ctx "cr" in
-           emit ctx (Printf.sprintf
-             "%s = call ptr @march_record_field_dyn(ptr %s, ptr %s, i64 %d)"
-             res obj_val ng (String.length field_name));
-           ("ptr", res)
-         | _ ->
-           let (_, obj_val) = emit_atom ctx obj_atom in
-           let fv = emit_load_field ctx obj_val idx (llvm_ty field_ty) in
-           (llvm_ty field_ty, fv))
-    end
+    Llvm_emit_data.emit_field ~emit_atom ctx obj_atom field_name
 
   (* ── Record update ─────────────────────────────────────────────────── *)
   | Tir.EUpdate (base_atom, updates) ->
-    let base_ty = match base_atom with
-      | Tir.AVar v    -> v.Tir.v_ty
-      | Tir.ADefRef _ -> Tir.TVar "_"
-      | Tir.ALit _    -> Tir.TVar "_"
-    in
-    let all_fields = get_record_fields ctx base_ty in
-    let (_, base_val) = emit_atom ctx base_atom in
-    if all_fields = [] && updates <> [] then begin
-      (* Statically-unknown record shape (type-erased generic flow, e.g. the
-         result of record_put/record_from_list): field offsets can't be
-         computed at compile time, so [field_index_for]'s "(0, TVar _)"
-         fallback would make every update write field 0 of a header-only
-         cell (n=0 from emit_heap_alloc) — corrupting memory past the
-         allocation.  Mirror the EField dyn fallback above: a single call
-         to march_record_update_dyn (by-name, shape-registry-aware), which
-         copies the base cell ONCE and overwrites the named fields — no
-         per-field intermediate allocations.  NOTE: unlike the
-         statically-known case, the typechecker CANNOT validate the update
-         names here (its TVar branch builds a partial record constraint
-         from the update's own names — it never sees the base's actual
-         fields), so the runtime panics on a missing name (mirroring
-         march_record_field_dyn) instead of silently fabricating a new
-         field (march_record_put's new-key behavior) or writing out of
-         bounds. *)
-      let args = List.concat_map (fun (fname, atom) ->
-        let ng = intern_string ctx fname in
-        let (vt, vv) = emit_atom ctx atom in
-        (* Pass the value in UNIFORM representation, matching record_put's
-           EApp call convention: scalars low-bit tagged (coerce i64→ptr),
-           raw bits for floats, ptr as-is.  Natural repr is ambiguous — an
-           even Int >= 4096 is bit-identical to a heap pointer, so
-           rec_field_norm_in's plausible-heap sniff would incrc
-           (dereference) the integer's value. *)
-        let vp = (match vt with
-          | "i64" -> coerce ctx "i64" vv "ptr"
-          | "double" ->
-            let b = fresh ctx "ruv" in
-            let t = fresh ctx "ruv" in
-            emit ctx (Printf.sprintf "%s = bitcast double %s to i64" b vv);
-            emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" t b);
-            t
-          | _ -> vv) in
-        let kind = shape_kind_char (atom_tir_ty atom) in
-        [ Printf.sprintf "ptr %s" ng;
-          Printf.sprintf "i64 %d" (String.length fname);
-          Printf.sprintf "ptr %s" vp;
-          Printf.sprintf "i64 %d" (Char.code kind) ]
-      ) updates in
-      let res = fresh ctx "ru" in
-      emit ctx (Printf.sprintf
-        "%s = call ptr (ptr, i64, ...) @march_record_update_dyn(ptr %s, i64 %d, %s)"
-        res base_val (List.length updates) (String.concat ", " args));
-      ("ptr", res)
-    end else begin
-    let n = List.length all_fields in
-    (* Allocate new record of same size *)
-    let ptr = emit_heap_alloc ctx 0 n in
-    (* Copy all fields from base *)
-    List.iteri (fun i (_, fty) ->
-      let fv = emit_load_field ctx base_val i (llvm_ty fty) in
-      emit_store_field ctx ptr i (llvm_ty fty) fv
-    ) all_fields;
-    (* Overwrite updated fields *)
-    List.iter (fun (fname, atom) ->
-      let (idx, _) = field_index_for ctx base_ty fname in
-      let (aty, av) = emit_atom ctx atom in
-      emit_store_field ctx ptr idx aty av
-    ) updates;
-    (* Stamp the shape id on the copy.  When the static shape is known, use
-       it; otherwise copy the base record's shape id (header pad word). *)
-    if ctx.shape_meta then begin
-      if all_fields <> [] then
-        emit_set_shape ctx ptr all_fields
-      else begin
-        let sp = fresh ctx "shp" in
-        let sv = fresh ctx "shv" in
-        let dp = fresh ctx "shp" in
-        emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 12" sp base_val);
-        emit ctx (Printf.sprintf "%s = load i32, ptr %s, align 4" sv sp);
-        emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 12" dp ptr);
-        emit ctx (Printf.sprintf "store i32 %s, ptr %s, align 4" sv dp)
-      end
-    end;
-    ("ptr", ptr)
-    end
+    Llvm_emit_data.emit_update ~emit_atom ctx base_atom updates
 
   (* ── Case expression ───────────────────────────────────────────────── *)
   | Tir.ECase (scrut_atom, branches, default_opt) ->
