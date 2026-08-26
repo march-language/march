@@ -9,7 +9,16 @@ Plan: `specs/plans/2026-08-19-compiler-file-decomposition.md`
 
 ## Status
 
-**Phase 0 landed (2026-08-25, at `8d2b22fb`). Phases 1-6 open.**
+**Phases 0 and 1 landed (2026-08-25). Phases 2-6 open.**
+
+- **Phase 1 complete** — `lib/eval/eval.ml` **12,264 → 4,304 lines** (target
+  ~5,000), split into `eval_builtins.ml` (5,294), `eval_runtime.ml` (1,242),
+  `eval_net.ml` (1,183), `eval_simd.ml`, `eval_session.ml`, `eval_types.ml`,
+  `eval_prim.ml`. Exit gate: full suite 2,761 tests exit 0, and an interleaved
+  A/B against a compiler built at `f31145eb` shows +1.0% on `fib` and +1.0% on
+  `binary_trees` — inside noise, under the 5% gate. Details and the two places
+  the plan's shape had to change:
+  `specs/progress/2026-08-25-eval-decomposition-phase1.md`.
 
 - Task 0.1 — `scripts/ir-oracle.sh`, the LLVM-IR hashing oracle over the
   243-program corpus (240 emit, 3 skip). Proven non-vacuous: a comment-only edit
@@ -34,4 +43,7 @@ the plan was written, invalidating many of its hard-coded `sed`/`awk` ranges.
 See the plan's "Re-anchored 2026-08-25" and "Re-anchoring pass" sections for what
 was corrected versus what re-measured clean.
 
-Phase 1 must not start until an executing agent re-reads that section.
+Phase 2 must not start until an executing agent re-reads that section. Note also
+that Phase 1's ranges were stale again by the time it executed — re-derive every
+`sed`/`awk` boundary by `grep` anchor, and assert balanced comment delimiters
+before cutting (see the Phase 1 progress note's "doc-comment trap").
