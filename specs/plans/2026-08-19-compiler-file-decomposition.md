@@ -1916,7 +1916,7 @@ Tier 2 over the reject corpus. `check_types.sh`'s `xargs -P` + `sort` pattern
 parallelises this safely if it proves too slow; do not parallelise without the
 sort.
 
-- [ ] **Step 1: Write the script, reusing `refine-oracle.sh`'s hard-won shape**
+- [x] **Step 1: Write the script, reusing `refine-oracle.sh`'s hard-won shape**
 
 Read `scripts/refine-oracle.sh` first and copy its structure. Four things it
 learned the hard way apply here unchanged:
@@ -1957,7 +1957,7 @@ under a private `HOME` are byte-identical, and identical to the run under the
 real (warm-cache) `HOME` once the `[warn]` line is stripped. The
 2026-08-24 cache-ordering fix holds.
 
-- [ ] **Step 2: Record the baseline**
+- [x] **Step 2: Record the baseline**
 
 ```bash
 dune build --root . bin/main.exe 2>&1 | tail -3
@@ -1965,10 +1965,18 @@ chmod +x scripts/types-oracle.sh
 scripts/types-oracle.sh baseline /tmp/types-base-$SLUG; echo "exit=$?"
 ```
 
-Record the printed `fixtures=` / `report_lines=` numbers here when you run it.
+**Measured 2026-08-26 at `0d798ff9`:** `fixtures=600 report_lines=7252`, no
+guard fired. The serial loop the draft described was tracking to **~16 minutes**
+(measured: 340 fixtures in ~9 min), which is too slow to run five times, so the
+sweep is `xargs -P 8` over a one-fixture serial warm-up that populates the
+private `HOME`'s stdlib cache before any worker starts; both manifests are
+sorted, so worker interleaving cannot move a byte. Warm parallel wall time is
+**~40 s**. Two consecutive `check` runs against the same baseline are
+byte-identical in both tiers, so the manifest is deterministic.
+
 A `FATAL:` line means a guard fired — investigate, do not lower the guard.
 
-- [ ] **Step 3: Prove RED, then prove GREEN — before any other task starts**
+- [x] **Step 3: Prove RED, then prove GREEN — before any other task starts**
 
 An oracle nobody has seen fail is not evidence. Both probes are required and
 both must be reverted before Task 6.2.
@@ -1987,11 +1995,29 @@ Tier-2 diff can see and one that only Tier 1 can:
 Rebuild and run `scripts/types-oracle.sh check /tmp/types-base-$SLUG`. It must
 exit non-zero and name both tiers. Record the differing-line counts here.
 
+**Measured RED 2026-08-26**, both probes applied at once, `exit=1`:
+`TIER1 CORE-AST CHANGED — 175 fixtures` and
+`TIER2 DIAGNOSTICS CHANGED — 10 differing lines`. The two probes are cleanly
+separated, which is the point of having two tiers: **all 10** Tier-2 lines are
+the five `int_to_string` hint sites appearing once as `-` and once as `+`
+(`grep '^[+-][^+-]' diagnostics.diff | grep -vc PROBE` → 5, i.e. only the
+unmodified originals), so the `generalize` perturbation moved **175 Tier-1
+fixtures while contributing zero Tier-2 lines**, and the hint reword moved
+Tier 2 while contributing nothing to Tier 1 beyond those same fixtures'
+`diagnostics` arrays. Neither probe is visible to `@types-check`'s
+substring assertions.
+
 *GREEN* — revert both probes, append a comment-only line to the same file,
 rebuild, re-run. It must print the identical-manifest line and exit 0. Record
 the numbers.
 
-- [ ] **Step 4: Commit**
+**Measured GREEN 2026-08-26**, both probes reverted (`git diff --stat` empty)
+plus one appended comment line, rebuilt: `exit=0`,
+`TIER1 CORE-AST IDENTICAL (600 fixtures)`,
+`TIER2 DIAGNOSTICS IDENTICAL (7252 lines over 600 fixtures)` — the same
+baseline the RED run failed against.
+
+- [x] **Step 4: Commit**
 
 ```bash
 git add scripts/types-oracle.sh && git commit -m "test: add typecheck diagnostic+inference oracle for typecheck.ml refactors"
