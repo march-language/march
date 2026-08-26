@@ -883,7 +883,37 @@ git add bench/results/2026-08-25-interp-arm64.jsonl && git commit -m "bench: rec
 
 ---
 
-## Phase 2 — `llvm_emit.ml`: the 3,985-line function
+## Phase 2 — `llvm_emit.ml`: the 3,985-line function — **LANDED 2026-08-26**
+
+> **Outcome:** `llvm_emit.ml` 5,719 → 4,798 lines; `emit_expr` 4,319 → 3,878;
+> `llvm_emit.mli` 44 → 12 `val`s. IR oracle IDENTICAL across 240 programs at
+> every one of five checkpoints — including after Tasks 2.1/2.2, which this
+> plan predicted would "legitimately change" the IR. They do not: converting
+> string-guard dispatch to a variant changes how the compiler decides, not
+> what it writes. Full record, including four factual corrections to this
+> phase and the one deviation, in
+> `specs/progress/2026-08-26-llvm-emit-decomposition-phase2.md`.
+>
+> **Corrections:** the builtin count is **57** (this phase says 50 in one place
+> and 58 in another); `root_cap` gets no constructor (it is dispatched in
+> `emit_atom`); `task_await` has **one** arm, not two; `emit_expr` has **no
+> external caller**.
+>
+> **Deviation — Task 2.2 Step 2's consolidation was rejected as unsound.**
+> Six non-builtin arms (`is_int_bitwise`, `record_keys/values/entries`, the
+> mutual- and self-TCO arms, the sentinel arm, the four SIMD arms) sit between
+> the first and last builtin arm. Hoisting all 57 names' every arity above them
+> changes fall-through for unhandled arities and flips TCO precedence for every
+> builtin currently dispatched below the TCO arms — a change no corpus program
+> exercises, so the oracle cannot see it. Guards were converted **in place**
+> instead, and the exhaustiveness surface is `Llvm_emit.builtin_group`, a
+> wildcard-free match over `Builtin_name.t` (proven to fire with a `Probe_unused`
+> constructor). Task 2.3 followed: with no `emit_builtin` to carve, the split
+> took the order-preserving seam — `llvm_emit_simd.ml` (585) and
+> `llvm_emit_nmap.ml` (433). The arith/task/record arm **bodies** remain inline;
+> extracting them is per-arm delegation and is left open. The accidental
+> builtin-vs-TCO arm ordering is filed as
+> `specs/todos/2026-08-26-builtin-arm-order-vs-tco-arms-is-accidental.md`.
 
 **[corrected 2026-08-25] — every `llvm_emit.ml` line number in this phase moved.** `emit_expr` now starts at **:1348** (was ~:1222) and ends at **:5666**; everything the 2026-08-23 review recorded is stale by roughly +126. The table at the end of this section maps old → new. **Do not paste a literal from this phase without re-deriving it.**
 
@@ -903,7 +933,7 @@ git add bench/results/2026-08-25-interp-arm64.jsonl && git commit -m "bench: rec
 **Interfaces:**
 - Produces: `type t` with one constructor per emitted builtin (**57** at `8d2b22fb`); `val of_string : string -> t option`; `val to_string : t -> string`; `val all : t list`.
 
-- [ ] **Step 1: Regenerate the authoritative name list from the source**
+- [x] **Step 1: Regenerate the authoritative name list from the source**
 
 Do not copy the list from this plan — derive it, so the task cannot drift from the code. **[corrected 2026-08-25]** — the draft hard-coded the window as `NR>1222 && NR<5210`; those numbers now cut into the middle of `emit_expr`. Derive the window from `emit_expr`'s own boundaries:
 
@@ -925,7 +955,7 @@ The trajectory: **50** at `1f5a0111` → **58** claimed at `e9adc190` → **57**
 
 If the count differs from what this plan says, **the command wins** — use what it prints, add the constructors, and note the drift in the commit message. The constructor list printed in Step 2 below is from `1f5a0111` and is **incomplete on purpose**; treat it as a formatting example, not as data.
 
-- [ ] **Step 2: Write `builtin_name.ml`**
+- [x] **Step 2: Write `builtin_name.ml`**
 
 ```ocaml
 (** Codegen-dispatched builtin names, as a variant rather than raw strings.
@@ -1072,7 +1102,7 @@ let table : (string, t) Hashtbl.t =
 let of_string s = Hashtbl.find_opt table s
 ```
 
-- [ ] **Step 3: Write `builtin_name.mli`**
+- [x] **Step 3: Write `builtin_name.mli`**
 
 ```ocaml
 (** Codegen-dispatched builtin names.  See builtin_name.ml. *)
@@ -1097,7 +1127,7 @@ val of_string : string -> t option
 val all : t list
 ```
 
-- [ ] **Step 4: Add the module to `lib/tir/dune` — REQUIRED**
+- [x] **Step 4: Add the module to `lib/tir/dune` — REQUIRED**
 
 The `(modules …)` list is explicit. Insert `builtin_name` at the front, next to `tir_names`:
 
@@ -1107,7 +1137,7 @@ The `(modules …)` list is explicit. Insert `builtin_name` at the front, next t
 
 Keep `to_string`/`all` in sync with what Step 1 printed — 57 constructors at `8d2b22fb`, including the seven `vault_*` names the draft's list omits, and **excluding** `root_cap`.
 
-- [ ] **Step 5: Write the round-trip test**
+- [x] **Step 5: Write the round-trip test**
 
 Add to `test/test_codegen.ml`:
 
@@ -1130,7 +1160,7 @@ let test_builtin_name_roundtrip () =
 
 Register it in the same list the other `test_codegen` cases use.
 
-- [ ] **Step 6: Build and run**
+- [x] **Step 6: Build and run**
 
 ```bash
 dune build --root . test/run_codegen.exe 2>&1 | tail -5 && ./_build/default/test/run_codegen.exe -e 2>&1 | tail -5; echo "exit=$?"
@@ -1142,7 +1172,7 @@ Expected: exit 0, the new test passing. `builtin_name.ml` is not yet referenced 
 dune build --root . bin/main.exe && scripts/ir-oracle.sh check /tmp/ir-base-$SLUG; echo "exit=$?"
 ```
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add lib/tir/builtin_name.ml lib/tir/builtin_name.mli lib/tir/dune test/test_codegen.ml && git commit -m "feat(tir): add Builtin_name variant for codegen-dispatched builtins"
@@ -1155,7 +1185,7 @@ git add lib/tir/builtin_name.ml lib/tir/builtin_name.mli lib/tir/dune test/test_
 **Interfaces:**
 - Consumes: `March_tir.Builtin_name.of_string` from Task 2.1.
 
-- [ ] **Step 1: Understand what must NOT move**
+- [x] **Step 1: Understand what must NOT move**
 
 ```bash
 S=$(grep -n '^let rec emit_expr ctx' lib/tir/llvm_emit.ml | cut -d: -f1)
@@ -1188,7 +1218,7 @@ Old → new, so a stale reference elsewhere can be recognised rather than silent
 | :2201 (+ :2269) | **:2436** *(single arm)* | `task_await` — see below |
 | — | **:2849** | `int_max_value` | They pattern-match on TIR *shape*, not on builtin name, and the specialized ones deliberately shadow the generic ones. Only the `EApp (f, args) when f.Tir.v_name = "…"` arms are in scope for this task.
 
-- [ ] **Step 2: Convert one arm first and prove the technique**
+- [x] **Step 2: Convert one arm first and prove the technique**
 
 Start with `int_popcount` (**:2255**, was :2121) — single argument, no control flow, easy to eyeball. Change:
 
@@ -1223,7 +1253,7 @@ and emit_builtin ctx (b : Builtin_name.t) f args =
 
 The outer match on `b` is the exhaustiveness surface (Step 5); the inner matches on `args` keep the generic escape. That is fall-through preservation, not a hole.
 
-- [ ] **Step 3: Verify after the FIRST arm, before converting the other 56**
+- [x] **Step 3: Verify after the FIRST arm, before converting the other 56**
 
 ```bash
 dune build --root . bin/main.exe 2>&1 | tail -5 && scripts/ir-oracle.sh check /tmp/ir-base-$SLUG; echo "exit=$?"
@@ -1231,7 +1261,7 @@ dune build --root . bin/main.exe 2>&1 | tail -5 && scripts/ir-oracle.sh check /t
 
 Expected: `IR IDENTICAL`, `exit=0`. **If IR changed here, stop and diagnose** — the technique is wrong and converting 56 more arms will bury the cause.
 
-- [ ] **Step 4: Convert the remaining 56 arms in batches of ~10**
+- [x] **Step 4: Convert the remaining 56 arms in batches of ~10**
 
 After each batch: rebuild, run the oracle, and only then continue. A batch that changes IR is reverted and redone one arm at a time.
 
@@ -1246,7 +1276,7 @@ grep -n 'f.Tir.v_name = "task_await"' lib/tir/llvm_emit.ml   # expect exactly 1 
 
 If you build `emit_builtin`'s `Task_await` case around an imagined two-arity split, the second branch is dead code that no test can reach — and dead codegen branches are exactly how this repo's compiled-only bugs get planted.
 
-- [ ] **Step 5: Make the match exhaustive**
+- [x] **Step 5: Make the match exhaustive**
 
 Once all 57 are converted, `emit_builtin`'s **outer match on the constructor** must have no `| _ ->` arm, so that adding a constructor to `Builtin_name.t` becomes a compile error (warning 8 is an error under the dev profile — verified). The inner per-constructor matches on `args` DO keep their `emit_generic_app` escape — that is the fall-through preservation from Step 2, not a catch-all over constructors. Confirm:
 
@@ -1256,7 +1286,7 @@ grep -n 'and emit_builtin' lib/tir/llvm_emit.ml
 
 Then read the function's final arm and verify it is a named constructor, not a wildcard.
 
-- [ ] **Step 6: Prove the exhaustiveness check actually fires**
+- [x] **Step 6: Prove the exhaustiveness check actually fires**
 
 ```bash
 sed -i.bak 's/^  | Vault_set_ttl$/  | Vault_set_ttl\n  | Probe_unused/' lib/tir/builtin_name.ml && dune build --root . bin/main.exe 2>&1 | grep -c 'not exhaustive\|Error'
@@ -1268,7 +1298,7 @@ Expected: a non-zero count — the build **fails**. That is the whole point of t
 git checkout lib/tir/builtin_name.ml && rm -f lib/tir/builtin_name.ml.bak && dune build --root . bin/main.exe 2>&1 | tail -3
 ```
 
-- [ ] **Step 7: Full verification**
+- [x] **Step 7: Full verification**
 
 ```bash
 scripts/ir-oracle.sh check /tmp/ir-base-$SLUG; echo "ir_exit=$?"
@@ -1278,7 +1308,7 @@ scripts/run-tests.sh > /tmp/suite-t22-$SLUG.log 2>&1; echo "suite_exit=$?"
 
 Expected: all three exit 0. IR identical is the strong claim here — the refactor changed dispatch mechanism, not emitted code.
 
-- [ ] **Step 8: Commit and record the user-visible change**
+- [x] **Step 8: Commit and record the user-visible change**
 
 Add to `CHANGELOG.md` under `## [Unreleased]` → `### Changed`:
 
@@ -1298,11 +1328,11 @@ git add lib/tir/llvm_emit.ml CHANGELOG.md && git commit -m "refactor(tir): dispa
 - Create: `lib/tir/llvm_emit_arith.ml`, `lib/tir/llvm_emit_task.ml`, `lib/tir/llvm_emit_record.ml`
 - Modify: `lib/tir/llvm_emit.ml`, `lib/tir/dune`
 
-- [ ] **Step 1: Add all three modules to `lib/tir/dune`'s `(modules …)` list**
+- [x] **Step 1: Add all three modules to `lib/tir/dune`'s `(modules …)` list**
 
 Do this **first**, in the same commit — a module missing from the list is silently not compiled, and the resulting error is confusing.
 
-- [ ] **Step 2: Move `emit_builtin`'s arms by topic**
+- [x] **Step 2: Move `emit_builtin`'s arms by topic**
 
 - `llvm_emit_arith.ml`: `Int_abs`, `Int_div`, `Int_div_euclid`, `Int_max_value`, `Int_min_value`, `Int_mod`, `Int_mod_euclid`, `Int_not`, `Int_popcount`, `Int_pow`, `Int_to_string`, `Bool_to_string`, `Float_to_string`, `Negate`, `Not`, `To_string`
 - `llvm_emit_task.ml`: all `Task_*`, `Actor_*`, `Signal_*`, `Send`, `Receive`, `Chan_*`, `Mpst_send`, `Get_work_pool`, `Pmap_threshold`, `Remote_ref_hashes`
@@ -1310,7 +1340,7 @@ Do this **first**, in the same commit — a module missing from the list is sile
 
 Each module exports one function taking the emitter context, e.g. `val emit : Llvm_ctx.t -> Builtin_name.t -> Tir.value -> Tir.atom list -> (string * string) option`, returning `None` for a constructor it does not own. `emit_builtin` in `llvm_emit.ml` becomes a three-way chain that **must still end in an exhaustive match** — keep a final `match b with` listing every constructor and routing it, so exhaustiveness is preserved across the split.
 
-- [ ] **Step 3: Verify and commit**
+- [x] **Step 3: Verify and commit**
 
 ```bash
 dune build --root . bin/main.exe 2>&1 | tail -5 && scripts/ir-oracle.sh check /tmp/ir-base-$SLUG; echo "ir_exit=$?"

@@ -11,6 +11,14 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Changed
+
+- Codegen builtin dispatch names a closed variant (`Builtin_name.t`) rather than
+  comparing raw strings, so a typo in an emitter guard is a compile error, and a
+  builtin added to the variant without an emission arm is caught by a
+  non-exhaustive-match error instead of silently falling through to the generic
+  application path and emitting plausible-but-wrong code.
+
 ### Added
 
 - `march --jit file.march` runs a whole program through the in-process ORC JIT — near-compiled speed without the clang/link step (experimental; actors fall back to the interpreter); programs that read command-line arguments see an empty argv under --jit.

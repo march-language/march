@@ -79,14 +79,9 @@ type target_config = Llvm_toplevel.target_config =
   | Js
 
 let is_wasm_target = Llvm_toplevel.is_wasm_target
-let is_wasm32 = Llvm_toplevel.is_wasm32
 let target_triple = Llvm_toplevel.target_triple
-let target_arch = Llvm_toplevel.target_arch
 let target_is_linux = Llvm_toplevel.target_is_linux
 let zig_target = Llvm_toplevel.zig_target
-let target_ptr_size = Llvm_toplevel.target_ptr_size
-let target_ptr_ty = Llvm_toplevel.target_ptr_ty
-let target_int_ty = Llvm_toplevel.target_int_ty
 
 (* Type defs live on ctx (ctx.type_defs) — threaded per emission context so
    REPL/JIT fragments never see stale representations (B12). *)
@@ -100,7 +95,6 @@ let target_int_ty = Llvm_toplevel.target_int_ty
    all four modules already depend on.  Re-exported bare here — [emit_module]
    below resets the table per module and prints the report. *)
 let repr_audit_record = Llvm_ctx.repr_audit_record
-let repr_audit_report = Llvm_ctx.repr_audit_report
 let _repr_audit = Llvm_ctx._repr_audit
 
 (* ── Context ─────────────────────────────────────────────────────────── *)
@@ -182,7 +176,6 @@ type ctx = Llvm_ctx.ctx = {
   atom_names : (int64, string) Hashtbl.t;
 }
 
-let make_ctx = Llvm_ctx.make_ctx
 let module_of_name = Llvm_ctx.module_of_name
 let fresh = Llvm_ctx.fresh
 let fresh_block = Llvm_ctx.fresh_block
@@ -190,14 +183,10 @@ let emit = Llvm_ctx.emit
 let emit_label = Llvm_ctx.emit_label
 let emit_term = Llvm_ctx.emit_term
 let llvm_name = Llvm_ctx.llvm_name
-let fnv1a_64 = Llvm_ctx.fnv1a_64
 let atom_hash = Llvm_ctx.atom_hash
 let llvm_ty = Llvm_ctx.llvm_ty
-let llvm_param_ty = Llvm_ctx.llvm_param_ty
-let alloc_size = Llvm_ctx.alloc_size
 let emit_tag_scalar = Llvm_ctx.emit_tag_scalar
 let emit_untag_scalar = Llvm_ctx.emit_untag_scalar
-let emit_untag_known_scalar = Llvm_ctx.emit_untag_known_scalar
 let coerce = Llvm_ctx.coerce
 let is_vec_ty = Llvm_ctx.is_vec_ty
 
@@ -214,8 +203,6 @@ let release_temp_boxes (ctx : Llvm_ctx.ctx) (boxes : string list ref) : unit =
     (fun b -> Llvm_ctx.emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" b))
     !boxes;
   boxes := []
-let simd_kind_of_vec = Llvm_ctx.simd_kind_of_vec
-let llvm_escape_string = Llvm_ctx.llvm_escape_string
 let intern_string = Llvm_ctx.intern_string
 
 (* llvm_ret_ty moved to [Llvm_ctx] (Wave 3 Task 6, chunk 2): [Llvm_calls] and
@@ -227,7 +214,6 @@ let llvm_ret_ty = Llvm_ctx.llvm_ret_ty
    caller besides emit_module's one use below is [emit_raises_wrapper].
    Re-exported bare for that one remaining call site (in emit_module,
    Task 7's territory). *)
-let ok_payload_ty = Llvm_calls.ok_payload_ty
 
 (** Return type of a function variable's type. *)
 let fn_ret_tir (ty : Tir.ty) : Tir.ty =
@@ -288,7 +274,6 @@ let atom_is_builtin (atom : Tir.atom) =
 (* emit_reduction_check moved to [Llvm_ctx] (Wave 3 Task 6, chunk 2):
    [emit_mutual_tco_group] (now in [Llvm_tco]) needed it alongside [emit_fn]
    here — re-export bare since emit_fn calls it unqualified below. *)
-let emit_reduction_check = Llvm_ctx.emit_reduction_check
 
 (** TIR return type for known builtin/extern functions, overriding type info.
 
@@ -670,8 +655,6 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
     emit ctx (Printf.sprintf "%s = load %s, ptr %%%s.addr" tmp ty slot);
     (ty, tmp)
 
-let emit_atom_val ctx a = snd (emit_atom ctx a)
-
 (** Emit atom and coerce result to [ty]. Handles TVar→ptr mismatches. *)
 let emit_atom_as ctx ty a =
   let (actual_ty, v) = emit_atom ctx a in
@@ -686,29 +669,23 @@ let emit_atom_as ctx ty a =
    EAlloc/EStackAlloc/EReuse/ETuple/ERecord/EField/EUpdate arms below (and
    emit_case, now in [Llvm_case]) call them unqualified — same re-export
    pattern as [Llvm_ctx]'s Wave 3 Task 3 split. *)
-let emit_load_tag = Llvm_data.emit_load_tag
 let emit_store_tag = Llvm_data.emit_store_tag
 let emit_store_field = Llvm_data.emit_store_field
 let emit_load_field = Llvm_data.emit_load_field
 let emit_heap_alloc = Llvm_data.emit_heap_alloc
 let emit_stack_alloc = Llvm_data.emit_stack_alloc
 let ctor_entry = Llvm_data.ctor_entry
-let resolve_ctor_fields = Llvm_data.resolve_ctor_fields
 let get_record_fields = Llvm_data.get_record_fields
 let field_index_for = Llvm_data.field_index_for
 let atom_tir_ty = Llvm_data.atom_tir_ty
 let shape_kind_char = Llvm_data.shape_kind_char
-let shape_desc = Llvm_data.shape_desc
-let ensure_shape_globals = Llvm_data.ensure_shape_globals
 let emit_set_shape = Llvm_data.emit_set_shape
 
 (* ── ADT structural equality generation ───────────────────────────────
    Moved to [Llvm_eq] (Wave 3 Task 5, chunk 2): apply_ty_subst,
    mangle_ty_for_eq, field_load_llty, ensure_adt_eq_fn.  Re-exported bare
    here for the same reason as above. *)
-let apply_ty_subst = Llvm_eq.apply_ty_subst
 let mangle_ty_for_eq = Llvm_eq.mangle_ty_for_eq
-let field_load_llty = Llvm_eq.field_load_llty
 let ensure_adt_eq_fn = Llvm_eq.ensure_adt_eq_fn
 
 (* emit_raises_wrapper moved to [Llvm_calls] (Wave 3 Task 6, chunk 2): the
@@ -733,528 +710,36 @@ let is_trivial_dec_chain = Llvm_tco.is_trivial_dec_chain
    re-export bare. *)
 let fail_if_unresolved_iface_method = Llvm_calls.fail_if_unresolved_iface_method
 
-(** Narrow-widths task (2026-08) — per-width descriptor resolved from an
-    inline-loop synthetic name's stripped prefix (see
-    [Native_map_inline.inline_name_of]/[decode_nmap_inline_name] below).
-    [nw_mem_ty]/[nw_elem_size] describe the array's IN-MEMORY element
-    representation; the callback ("boundary") ABI the apply fn is called
-    at is always either `i64` (tagged immediate, for the three int-shaped
-    widths) or `double` (float-boxing family, for float/f32) regardless of
-    memory width — see [nw_boundary_float]. When the memory type differs
-    from the boundary type, the loop needs a widen after the load (before
-    the callback) and a narrow before the store (after the callback); see
-    [nmap_widen]/[nmap_narrow] and their use in [emit_native_map_inline_loop]
-    / [emit_native_map2_inline_loop]. For the two legacy widths (int/float)
-    memory type == boundary type, so widen/narrow are no-ops and the
-    emitted IR is byte-identical to before this task. *)
-type nmap_width = {
-  nw_len_fn : string;
-  nw_alloc_fn : string;
-  nw_mem_ty : string;
-  nw_elem_size : int;
-  nw_boundary_float : bool;
-}
 
-(** [None] for anything other than the five known width prefixes — the
-    caller must treat that as "not one of our synthetic inline names" and
-    fall through to the general EApp arm, NOT crash the compiler. This is
-    total by construction: [decode_nmap_inline_name] recognizes the
-    synthetic-name SHAPE only (prefix/suffix pattern), so a user-defined
-    function that happens to match that shape (e.g. a hand-written
-    [__my_map_inline]) can reach here with an unknown prefix. *)
-let nmap_width_of_prefix = function
-  | "native_int_arr"   -> Some { nw_len_fn = "native_int_arr_length";
-                                  nw_alloc_fn = "native_int_arr_alloc_raw";
-                                  nw_mem_ty = "i64"; nw_elem_size = 8; nw_boundary_float = false }
-  | "native_float_arr" -> Some { nw_len_fn = "native_float_arr_length";
-                                  nw_alloc_fn = "native_float_arr_alloc_raw";
-                                  nw_mem_ty = "double"; nw_elem_size = 8; nw_boundary_float = true }
-  | "native_f32_arr"   -> Some { nw_len_fn = "native_f32_arr_length";
-                                  nw_alloc_fn = "native_f32_arr_alloc_raw";
-                                  nw_mem_ty = "float"; nw_elem_size = 4; nw_boundary_float = true }
-  | "native_i32_arr"   -> Some { nw_len_fn = "native_i32_arr_length";
-                                  nw_alloc_fn = "native_i32_arr_alloc_raw";
-                                  nw_mem_ty = "i32"; nw_elem_size = 4; nw_boundary_float = false }
-  | "native_u8_arr"    -> Some { nw_len_fn = "native_u8_arr_length";
-                                  nw_alloc_fn = "native_u8_arr_alloc_raw";
-                                  nw_mem_ty = "i8"; nw_elem_size = 1; nw_boundary_float = false }
-  | _ -> None
+(* ── SIMD vector types: see [Llvm_emit_simd] ─────────────────────────
+   The decoder, the per-type shape table, the lane widen/narrow helpers and
+   the intercept arm's body moved verbatim to llvm_emit_simd.ml.  The two
+   re-exports below are what the REST of this file still needs: the record's
+   field names, for the vector-equality arm's per-lane lowering, and the
+   decoder, for the intercept arm's guard and the general EApp arm's
+   unresolved-builtin check. *)
+type simd_ty = Llvm_emit_simd.simd_ty = {
+  s_vec : string; s_kind : int; s_lanes : int;
+  s_elem : string; s_boundary_float : bool; s_arr_prefix : string }
 
-(** Widen a just-loaded memory-typed value [v] up to [width]'s callback
-    boundary type (`i64` for the int-shaped widths, `double` for the
-    float-boxing widths); identity (no instruction emitted) when memory
-    type already equals boundary type -- the legacy i64/f64 widths, where
-    this must be a true no-op to keep their IR byte-identical. u8 widens
-    with `zext` (loads are 0..255, matching [NativeArray.get_u8]'s
-    documented zero-extend contract and the runtime's DEF_NARROW_INT_ARR
-    `(int64_t)(uint8_t)` cast); i32 widens with `sext`. *)
-let nmap_widen ctx (width : nmap_width) (v : string) : string =
-  match width.nw_mem_ty with
-  | "i64" | "double" -> v
-  | "float" ->
-    let r = fresh ctx "nmap_w" in
-    emit ctx (Printf.sprintf "%s = fpext float %s to double" r v); r
-  | "i32" ->
-    let r = fresh ctx "nmap_w" in
-    emit ctx (Printf.sprintf "%s = sext i32 %s to i64" r v); r
-  | "i8" ->
-    let r = fresh ctx "nmap_w" in
-    emit ctx (Printf.sprintf "%s = zext i8 %s to i64" r v); r
-  | other -> failwith ("nmap_widen: unexpected mem type " ^ other)
+let simd_tys = Llvm_emit_simd.simd_tys
+let decode_simd_call = Llvm_emit_simd.decode_simd_call
 
-(** Narrow a boundary-typed callback result [v] down to [width]'s memory
-    type before storing it (mirrors the runtime's DEF_NARROW_INT_ARR/f32
-    `(CTYPE)`/`(float)` truncating casts: two's-complement wrap for i32/u8,
-    round-to-nearest-even for f32); identity for the legacy i64/f64 widths. *)
-let nmap_narrow ctx (width : nmap_width) (v : string) : string =
-  match width.nw_mem_ty with
-  | "i64" | "double" -> v
-  | "float" ->
-    let r = fresh ctx "nmap_n" in
-    emit ctx (Printf.sprintf "%s = fptrunc double %s to float" r v); r
-  | "i32" ->
-    let r = fresh ctx "nmap_n" in
-    emit ctx (Printf.sprintf "%s = trunc i64 %s to i32" r v); r
-  | "i8" ->
-    let r = fresh ctx "nmap_n" in
-    emit ctx (Printf.sprintf "%s = trunc i64 %s to i8" r v); r
-  | other -> failwith ("nmap_narrow: unexpected mem type " ^ other)
+(* ── NativeArray map inline loops: see [Llvm_emit_nmap] ──────────────
+   The per-width descriptor, the synthetic-name decoder and the two loop
+   emitters moved verbatim to llvm_emit_nmap.ml.  The re-exports below are
+   what the four driving arms in [emit_expr] still name directly.  The
+   [nmap_width] record itself stays private to [Llvm_emit_nmap]: the arms
+   only pass it through, never read a field. *)
+let decode_nmap_inline_call = Llvm_emit_nmap.decode_nmap_inline_call
 
-(** Decompose an inline-loop synthetic name (produced by
-    [Native_map_inline.inline_name_of]) back into (width_prefix, is_map2,
-    unboxed), e.g. ["__native_f32_arr_map2_inline_unboxed"] ->
-    [("native_f32_arr", true, true)]. [None] for anything that isn't one of
-    these synthetic names (the general EApp arm's problem). *)
-let decode_nmap_inline_name (name : string) : (string * bool * bool) option =
-  let has_prefix pre s =
-    let lp = String.length pre and ln = String.length s in
-    ln >= lp && String.sub s 0 lp = pre
-  in
-  let has_suffix suf s =
-    let ls = String.length suf and ln = String.length s in
-    ln >= ls && String.sub s (ln - ls) ls = suf
-  in
-  let strip_suffix suf s = String.sub s 0 (String.length s - String.length suf) in
-  if not (has_prefix "__" name) then None
-  else
-    let rest = String.sub name 2 (String.length name - 2) in
-    let (rest, unboxed) =
-      if has_suffix "_unboxed" rest then (strip_suffix "_unboxed" rest, true) else (rest, false)
-    in
-    if has_suffix "_map2_inline" rest then Some (strip_suffix "_map2_inline" rest, true, unboxed)
-    else if has_suffix "_map_inline" rest then Some (strip_suffix "_map_inline" rest, false, unboxed)
-    else None
+let emit_native_map_inline_loop ctx ~width ~unboxed ~arr_atom ~apply_name ~clo_reg =
+  Llvm_emit_nmap.emit_native_map_inline_loop ~emit_atom ctx ~width ~unboxed
+    ~arr_atom ~apply_name ~clo_reg
 
-(** Combines [decode_nmap_inline_name] (name-SHAPE recognition) with
-    [nmap_width_of_prefix] (prefix-is-a-known-width lookup) into one total
-    function: [None] unless BOTH the name shape matches AND the decoded
-    prefix is one of the five known widths. The dispatch arms below use
-    this (not [decode_nmap_inline_name] alone) as their [when] guard, so a
-    name that merely LOOKS like a synthetic inline name but carries an
-    unrecognized width prefix falls through to the general EApp arm instead
-    of reaching [nmap_width_of_prefix] partial-match failure. *)
-let decode_nmap_inline_call (name : string) : (nmap_width * bool * bool) option =
-  match decode_nmap_inline_name name with
-  | None -> None
-  | Some (prefix, is_map2, unboxed) ->
-    (match nmap_width_of_prefix prefix with
-     | None -> None
-     | Some width -> Some (width, is_map2, unboxed))
-
-(* ── SIMD vector types (Task 2): name decoder + per-type LLVM shape table.
-   127 `simd_<t>_<op>` builtins (Task 1, interpreter path) map onto 5 vector
-   types; this table is the compiled side's single source of truth for each
-   type's LLVM vector-type string, runtime `kind` tag (see
-   runtime/march_runtime.c's [march_simd_alloc]), lane count, LLVM element
-   type name, and whether the March-level boundary type for scalar lane
-   traffic (splat/extract/replace/shl-count/sum/hmin/hmax) is `double`
-   (float families) or `i64` (int families, including u8 — u8 lanes widen
-   ZERO-extended, see [simd_widen]). *)
-type simd_ty = { s_vec : string; s_kind : int; s_lanes : int;
-                 s_elem : string (* "float" "double" "i32" "i64" "i8" *);
-                 s_boundary_float : bool;
-                 s_arr_prefix : string (* Task 3: runtime native-array fn prefix for load/store *) }
-
-let simd_tys = [
-  "f32x4", { s_vec = "<4 x float>";  s_kind = 0; s_lanes = 4;  s_elem = "float";  s_boundary_float = true;  s_arr_prefix = "native_f32_arr" };
-  "f64x2", { s_vec = "<2 x double>"; s_kind = 1; s_lanes = 2;  s_elem = "double"; s_boundary_float = true;  s_arr_prefix = "native_float_arr" };
-  "i32x4", { s_vec = "<4 x i32>";    s_kind = 2; s_lanes = 4;  s_elem = "i32";    s_boundary_float = false; s_arr_prefix = "native_i32_arr" };
-  "i64x2", { s_vec = "<2 x i64>";    s_kind = 3; s_lanes = 2;  s_elem = "i64";    s_boundary_float = false; s_arr_prefix = "native_int_arr" };
-  "u8x16", { s_vec = "<16 x i8>";    s_kind = 4; s_lanes = 16; s_elem = "i8";     s_boundary_float = false; s_arr_prefix = "native_u8_arr" };
-]
-
-(** Decode a builtin call name like ["simd_f32x4_add"] into (type record,
-    "add"). Total: any name that isn't shaped "simd_<known-type>_<op>"
-    returns [None] and the general [EApp] arm handles it (this can only
-    happen for a genuinely unrelated user- or extern-defined name that
-    happens to start with "simd_", never for one of the 127 known builtins). *)
-let decode_simd_call (name : string) : (simd_ty * string) option =
-  if not (String.length name > 5 && String.sub name 0 5 = "simd_") then None
-  else
-    let rest = String.sub name 5 (String.length name - 5) in
-    match String.index_opt rest '_' with
-    | None -> None
-    | Some i ->
-      let t = String.sub rest 0 i and op = String.sub rest (i + 1) (String.length rest - i - 1) in
-      (match List.assoc_opt t simd_tys with Some r -> Some (r, op) | None -> None)
-
-(** Element bit-width, derived from [s_elem] rather than stored redundantly. *)
-let simd_elem_bits (sty : simd_ty) : int =
-  match sty.s_elem with
-  | "float" | "i32" -> 32
-  | "double" | "i64" -> 64
-  | "i8" -> 8
-  | other -> failwith ("simd_elem_bits: unexpected elem ty " ^ other)
-
-(** The all-integer vector type of the same lane count/width as [sty.s_vec] —
-    identity for the already-integer families, the bitcast target for the
-    float families' bitwise/compare/mask ops (which have no native float
-    bitwise instruction). *)
-let simd_int_vec_ty (sty : simd_ty) : string =
-  match sty.s_elem with
-  | "float"  -> Printf.sprintf "<%d x i32>" sty.s_lanes
-  | "double" -> Printf.sprintf "<%d x i64>" sty.s_lanes
-  | _        -> sty.s_vec
-
-(** `vNeT` intrinsic name suffix (e.g. "v4f32", "v2i64") shared by the
-    per-vector intrinsics (minnum/maxnum/smin/smax/fma/sqrt/reduce). *)
-let simd_intrinsic_suffix (sty : simd_ty) : string =
-  let et = match sty.s_elem with
-    | "float" -> "f32" | "double" -> "f64"
-    | "i32" -> "i32" | "i64" -> "i64" | "i8" -> "i8"
-    | other -> failwith ("simd_intrinsic_suffix: unexpected elem ty " ^ other)
-  in
-  Printf.sprintf "v%d%s" sty.s_lanes et
-
-(** Narrow a boundary-typed scalar (`double` or `i64`, per [s_boundary_float])
-    down to the vector's element type — the inverse of [simd_widen]. f64x2/
-    i64x2 are no-ops (element IS the boundary type). *)
-let simd_narrow ctx (sty : simd_ty) (b_v : string) : string =
-  match sty.s_elem with
-  | "float" ->
-    let r = fresh ctx "vnrw" in
-    emit ctx (Printf.sprintf "%s = fptrunc double %s to float" r b_v); r
-  | "double" -> b_v
-  | "i32" ->
-    let r = fresh ctx "vnrw" in
-    emit ctx (Printf.sprintf "%s = trunc i64 %s to i32" r b_v); r
-  | "i64" -> b_v
-  | "i8" ->
-    let r = fresh ctx "vnrw" in
-    emit ctx (Printf.sprintf "%s = trunc i64 %s to i8" r b_v); r
-  | other -> failwith ("simd_narrow: unexpected elem ty " ^ other)
-
-(** Widen an element-typed scalar back up to the boundary type. u8's widen is
-    a ZERO-extend (the interpreter's u8 lanes are unsigned magnitudes 0..255,
-    [simd_u8_is_highbit]/comparisons treat them that way) — every other int
-    family sign-extends. *)
-let simd_widen ctx (sty : simd_ty) (e_v : string) : string =
-  match sty.s_elem with
-  | "float" ->
-    let r = fresh ctx "vwid" in
-    emit ctx (Printf.sprintf "%s = fpext float %s to double" r e_v); r
-  | "double" -> e_v
-  | "i32" ->
-    let r = fresh ctx "vwid" in
-    emit ctx (Printf.sprintf "%s = sext i32 %s to i64" r e_v); r
-  | "i64" -> e_v
-  | "i8" ->
-    let r = fresh ctx "vwid" in
-    emit ctx (Printf.sprintf "%s = zext i8 %s to i64" r e_v); r
-  | other -> failwith ("simd_widen: unexpected elem ty " ^ other)
-
-(** Declare an LLVM intrinsic into the module preamble on first use. Reuses
-    [ctx.unknown_decls] (the same dedup table the general [EApp] arm's
-    auto-declare path uses) so a given intrinsic is declared at most once per
-    module regardless of how many call sites in the SIMD intercept arm need
-    it. Intrinsic declares are per-module (not part of the fixed hand-written
-    preamble string), so they never affect the golden-preamble byte test. *)
-let ensure_intrinsic_declared ctx ~(name : string) ~(sig_ : string) : unit =
-  if not (Hashtbl.mem ctx.unknown_decls name) then begin
-    Hashtbl.replace ctx.unknown_decls name ();
-    Buffer.add_string ctx.preamble (Printf.sprintf "declare %s\n" sig_)
-  end
-
-(** P10 Phase 2/2c — shared codegen for the NativeArray map inline loop.
-    Emits: length -> uninitialized alloc -> for-loop (load elem, tag/box to
-    the wire ptr ABI, DIRECT call to [apply_name], untag/unbox, store).
-    [clo_reg] is the LLVM value to pass as the apply fn's $clo argument —
-    the literal ["null"] for a non-capturing closure (Phase 2; the apply
-    body never reads $clo), or a real closure-struct pointer register for a
-    capturing one (Phase 2c; the apply body loads free vars from it). See
-    [Native_map_inline] for which shape produces which.
-
-    [unboxed] (Float only; ignored for Int) selects Stage 4 Option B: call
-    an unboxed clone of the apply fn (see [Native_map_inline.try_unboxed_variant])
-    that takes/returns a raw `double` directly instead of the generic boxed
-    `ptr` ABI — no march_alloc_float/march_unbox_float anywhere, argument
-    or return. This is what actually lets the loop vectorize; the
-    argument-box-reuse path above (still used when [unboxed] is false,
-    e.g. a still-generic signature) only cuts allocation traffic. *)
-let emit_native_map_inline_loop ctx ~(width : nmap_width) ~unboxed ~arr_atom ~apply_name ~clo_reg
-    : string * string =
-  let is_float = width.nw_boundary_float in
-  let boundary_ty = if is_float then "double" else "i64" in
-  let mem_ty = width.nw_mem_ty in
-  let elem_size = width.nw_elem_size in
-  let len_fn = width.nw_len_fn in
-  let alloc_fn = width.nw_alloc_fn in
-  (* Open a dedicated preheader so its label is known for the loop phi,
-     regardless of what block was open before this arm ran. *)
-  let preheader = fresh_block ctx "nmap_pre" in
-  emit_term ctx (Printf.sprintf "br label %%%s" preheader);
-  emit_label ctx preheader;
-  let (arr_ty0, arr_v0) = emit_atom ctx arr_atom in
-  let arr_v = coerce ctx arr_ty0 arr_v0 "ptr" in
-  let len = fresh ctx "nmap_len" in
-  emit ctx (Printf.sprintf "%s = call i64 @%s(ptr %s)" len len_fn arr_v);
-  let new_arr = fresh ctx "nmap_out" in
-  emit ctx (Printf.sprintf "%s = call ptr @%s(i64 %s)" new_arr alloc_fn len);
-  (* Float, non-unboxed only: allocate ONE reusable wire-argument box before
-     the loop, instead of a fresh march_alloc_float per element. Safe
-     because every (boxed-ABI) apply function unconditionally unboxes its
-     argument as its very first instruction and never touches the pointer
-     again — the generated prologue is always `call double
-     @march_unbox_float(ptr %x.arg)` before any user code runs (verified
-     via -emit-llvm on a compiled lambda), so nothing can observe or retain
-     this box's identity across calls. Overwriting its .val field between
-     iterations is therefore indistinguishable from fresh-boxing each time,
-     at 1/N the allocation cost. march_float_box layout is
-     [rc:8][tag:4][pad:4][val:8] (24 bytes, runtime/march_runtime.h) — val
-     is at byte offset 16. When [unboxed] is true there is no box at all —
-     the callee takes/returns a raw double directly (Stage 4 Option B) —
-     so this allocation is skipped entirely rather than merely reused.
-     Int has no equivalent box either way — its wire value is a tagged
-     immediate (coerce's "i64"/"ptr" arm), not an allocation. *)
-  let arg_box = if is_float && not unboxed then begin
-      let b = fresh ctx "nmap_argbox" in
-      emit ctx (Printf.sprintf "%s = call ptr @march_alloc_float(double 0.000000e+00)" b);
-      Some b
-    end else None in
-  let cond_lbl = fresh_block ctx "nmap_cond" in
-  let body_lbl = fresh_block ctx "nmap_body" in
-  let exit_lbl = fresh_block ctx "nmap_exit" in
-  emit_term ctx (Printf.sprintf "br label %%%s" cond_lbl);
-
-  emit_label ctx cond_lbl;
-  let i = fresh ctx "nmap_i" in
-  let i_next = fresh ctx "nmap_inext" in
-  emit ctx (Printf.sprintf "%s = phi i64 [ 0, %%%s ], [ %s, %%%s ]" i preheader i_next body_lbl);
-  let cmp = fresh ctx "nmap_cmp" in
-  emit ctx (Printf.sprintf "%s = icmp slt i64 %s, %s" cmp i len);
-  emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s" cmp body_lbl exit_lbl);
-
-  emit_label ctx body_lbl;
-  (* Both source and dest arrays share the same NATIVE_ARR_HDR=32 layout
-     (the #define lives in march_runtime.h), so one offset serves both
-     GEPs. The multiplier and the load/store alignment are the width's own
-     element size (8 for the legacy i64/f64 widths -- unchanged -- 4 for
-     f32/i32, 1 for u8). *)
-  let soff = fresh ctx "nmap_soff" in
-  emit ctx (Printf.sprintf "%s = mul i64 %s, %d" soff i elem_size);
-  let byte_off = fresh ctx "nmap_off" in
-  emit ctx (Printf.sprintf "%s = add i64 %s, 32" byte_off soff);
-  let sptr = fresh ctx "nmap_sptr" in
-  emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" sptr arr_v byte_off);
-  let x = fresh ctx "nmap_x" in
-  emit ctx (Printf.sprintf "%s = load %s, ptr %s, align %d" x mem_ty sptr elem_size);
-  (* Widen the just-loaded memory-typed value up to the callback boundary
-     type (no-op for the legacy i64/f64 widths). *)
-  let x = nmap_widen ctx width x in
-  (* RC contract: [apply_name] is called once per element with the SAME
-     [clo_reg] throughout the loop.  For a capturing closure (clo_reg <>
-     "null"), lib/tir/perceus.ml's insert_apply_fn_clo_drop makes every one
-     of those calls release $clo internally — so without this incrc,
-     element 0's call already frees the closure and every later element
-     calls through freed memory.  Mirrors the identical fix applied to the
-     C-runtime map/fold helpers (native_int_arr_map et al.,
-     runtime/march_runtime.c) for the general (non-inlined) path; this is
-     the inlined-loop counterpart, since Phase 2c's whole point is to call
-     [apply_name] directly and never go through those helpers at all.
-
-     [clo_reg] itself arrives here as ONE transferred reference: per
-     [Native_map_inline]'s own doc comment, this rewrite fires ONLY when
-     the closure var is single-use with no Perceus-inserted RC op anywhere
-     else in the TIR (any other use — e.g. the closure captured AND called
-     again elsewhere — makes the pass decline and fall back to the general
-     path, which owns the same contract in the C runtime). That single use
-     being "last use, no incref" is exactly Perceus's ordinary
-     transfer-on-call convention: the callee (originally
-     native_int_arr_map/native_float_arr_map; now this inlined loop
-     standing in for it) is trusted to consume the one reference. So this
-     loop must fully consume it too — [march_decrc] after the loop below,
-     matching the C-runtime fix's final decrc exactly, not merely balance
-     each call's internal drop.
-
-     "null" (Phase 2, non-capturing) skips both the per-call incrc and the
-     final decrc: the apply function never reads $clo, so
-     insert_apply_fn_clo_drop's fv-extraction guard means no drop ever
-     fires, and there is no reference to release — matching how this
-     function was already exempt before the $clo ownership work. *)
-  if clo_reg <> "null" then
-    emit ctx (Printf.sprintf "call void @march_incrc(ptr %s)" clo_reg);
-  let y_boundary =
-    if unboxed then begin
-      (* No box either side: raw double in, raw double out. This is the
-         shape that actually vectorizes — no allocation call anywhere in
-         the loop for the vectorizer to trip over. *)
-      let y = fresh ctx "nmap_y" in
-      emit ctx (Printf.sprintf "%s = call double @%s(ptr %s, double %s)" y apply_name clo_reg x);
-      y
-    end else begin
-      let wire_arg = match arg_box with
-        | Some b ->
-          let vfield = fresh ctx "nmap_argval" in
-          emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" vfield b);
-          emit ctx (Printf.sprintf "store double %s, ptr %s, align 8" x vfield);
-          b
-        | None -> coerce ctx boundary_ty x "ptr"
-      in
-      let y = fresh ctx "nmap_y" in
-      emit ctx (Printf.sprintf "%s = call ptr @%s(ptr %s, ptr %s)" y apply_name clo_reg wire_arg);
-      coerce ctx "ptr" y boundary_ty
-    end
-  in
-  (* Narrow the boundary-typed result back down to the memory type before
-     storing it (no-op for the legacy i64/f64 widths). *)
-  let y_native = nmap_narrow ctx width y_boundary in
-  let dptr = fresh ctx "nmap_dptr" in
-  emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" dptr new_arr byte_off);
-  emit ctx (Printf.sprintf "store %s %s, ptr %s, align %d" mem_ty y_native dptr elem_size);
-  emit ctx (Printf.sprintf "%s = add i64 %s, 1" i_next i);
-  emit_term ctx (Printf.sprintf "br label %%%s" cond_lbl);
-
-  emit_label ctx exit_lbl;
-  (* Release the one transferred reference to [clo_reg] — see the RC
-     contract comment above the incrc inside the loop body. *)
-  if clo_reg <> "null" then
-    emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" clo_reg);
-  ("ptr", new_arr)
-
-(** [Native_map_inline]'s two-array counterpart to [emit_native_map_inline_loop]
-    above (map2 added 2026-07-27 to unblock [DataFrame.col_add_col]). Same
-    trick, same wire ABI, same [~unboxed] Stage 4 Option B path — just two
-    source arrays read per iteration and a 2-argument call to [apply_name]
-    instead of one. One addition with no equivalent in the single-array
-    case: [native_int_arr_map2]/[native_float_arr_map2]'s own length-mismatch
-    panic (`NativeArray.map2_*`'s documented contract) has to be reproduced
-    here explicitly, since this loop calls the lifted apply fn directly and
-    never goes through those functions at all — see
-    [native_arr_map2_check_len] (runtime/march_runtime.c). It's emitted once
-    in the preheader (not per-iteration), so it costs nothing in the hot
-    loop and doesn't touch anything the vectorizer looks at. *)
-let emit_native_map2_inline_loop ctx ~(width : nmap_width) ~unboxed ~arr1_atom ~arr2_atom ~apply_name ~clo_reg
-    : string * string =
-  let is_float = width.nw_boundary_float in
-  let boundary_ty = if is_float then "double" else "i64" in
-  let mem_ty = width.nw_mem_ty in
-  let elem_size = width.nw_elem_size in
-  let len_fn = width.nw_len_fn in
-  let alloc_fn = width.nw_alloc_fn in
-  let preheader = fresh_block ctx "nmap2_pre" in
-  emit_term ctx (Printf.sprintf "br label %%%s" preheader);
-  emit_label ctx preheader;
-  let (arr1_ty0, arr1_v0) = emit_atom ctx arr1_atom in
-  let arr1_v = coerce ctx arr1_ty0 arr1_v0 "ptr" in
-  let (arr2_ty0, arr2_v0) = emit_atom ctx arr2_atom in
-  let arr2_v = coerce ctx arr2_ty0 arr2_v0 "ptr" in
-  let len1 = fresh ctx "nmap2_len1" in
-  emit ctx (Printf.sprintf "%s = call i64 @%s(ptr %s)" len1 len_fn arr1_v);
-  let len2 = fresh ctx "nmap2_len2" in
-  emit ctx (Printf.sprintf "%s = call i64 @%s(ptr %s)" len2 len_fn arr2_v);
-  emit ctx (Printf.sprintf "call void @native_arr_map2_check_len(i64 %s, i64 %s)" len1 len2);
-  let new_arr = fresh ctx "nmap2_out" in
-  emit ctx (Printf.sprintf "%s = call ptr @%s(i64 %s)" new_arr alloc_fn len1);
-  (* Float, non-unboxed only: reuse two wire-argument boxes (one per source
-     array) across iterations instead of a fresh march_alloc_float per
-     element per array — same reasoning as [emit_native_map_inline_loop]'s
-     single [arg_box]. Skipped entirely when [unboxed] (no box at all, Stage
-     4 Option B) or for Int (tagged immediate, no allocation either way). *)
-  let arg_boxes = if is_float && not unboxed then begin
-      let b1 = fresh ctx "nmap2_argbox1" in
-      emit ctx (Printf.sprintf "%s = call ptr @march_alloc_float(double 0.000000e+00)" b1);
-      let b2 = fresh ctx "nmap2_argbox2" in
-      emit ctx (Printf.sprintf "%s = call ptr @march_alloc_float(double 0.000000e+00)" b2);
-      Some (b1, b2)
-    end else None in
-  let cond_lbl = fresh_block ctx "nmap2_cond" in
-  let body_lbl = fresh_block ctx "nmap2_body" in
-  let exit_lbl = fresh_block ctx "nmap2_exit" in
-  emit_term ctx (Printf.sprintf "br label %%%s" cond_lbl);
-
-  emit_label ctx cond_lbl;
-  let i = fresh ctx "nmap2_i" in
-  let i_next = fresh ctx "nmap2_inext" in
-  emit ctx (Printf.sprintf "%s = phi i64 [ 0, %%%s ], [ %s, %%%s ]" i preheader i_next body_lbl);
-  let cmp = fresh ctx "nmap2_cmp" in
-  emit ctx (Printf.sprintf "%s = icmp slt i64 %s, %s" cmp i len1);
-  emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s" cmp body_lbl exit_lbl);
-
-  emit_label ctx body_lbl;
-  (* Both source arrays and the dest array share the same
-     NATIVE_ARR_HDR=32 layout (the #define lives in march_runtime.h), so one
-     offset serves all three GEPs. The multiplier and the load/store alignment are the
-     width's own element size (8 for the legacy i64/f64 widths --
-     unchanged -- 4 for f32/i32, 1 for u8). *)
-  let soff = fresh ctx "nmap2_soff" in
-  emit ctx (Printf.sprintf "%s = mul i64 %s, %d" soff i elem_size);
-  let byte_off = fresh ctx "nmap2_off" in
-  emit ctx (Printf.sprintf "%s = add i64 %s, 32" byte_off soff);
-  let sptr1 = fresh ctx "nmap2_sptr1" in
-  emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" sptr1 arr1_v byte_off);
-  let x = fresh ctx "nmap2_x" in
-  emit ctx (Printf.sprintf "%s = load %s, ptr %s, align %d" x mem_ty sptr1 elem_size);
-  let sptr2 = fresh ctx "nmap2_sptr2" in
-  emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" sptr2 arr2_v byte_off);
-  let y = fresh ctx "nmap2_y" in
-  emit ctx (Printf.sprintf "%s = load %s, ptr %s, align %d" y mem_ty sptr2 elem_size);
-  (* Widen both just-loaded memory-typed values up to the callback boundary
-     type (no-op for the legacy i64/f64 widths). *)
-  let x = nmap_widen ctx width x in
-  let y = nmap_widen ctx width y in
-  (* Same RC contract as [emit_native_map_inline_loop] above: incrc before
-     each call to balance that call's internal $clo drop for a capturing
-     closure, matched by a final decrc after the loop (below) that
-     releases the one transferred reference. *)
-  if clo_reg <> "null" then
-    emit ctx (Printf.sprintf "call void @march_incrc(ptr %s)" clo_reg);
-  let z_boundary =
-    if unboxed then begin
-      let z = fresh ctx "nmap2_z" in
-      emit ctx (Printf.sprintf "%s = call double @%s(ptr %s, double %s, double %s)" z apply_name clo_reg x y);
-      z
-    end else begin
-      let (wire_x, wire_y) = match arg_boxes with
-        | Some (b1, b2) ->
-          let vfield1 = fresh ctx "nmap2_argval1" in
-          emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" vfield1 b1);
-          emit ctx (Printf.sprintf "store double %s, ptr %s, align 8" x vfield1);
-          let vfield2 = fresh ctx "nmap2_argval2" in
-          emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" vfield2 b2);
-          emit ctx (Printf.sprintf "store double %s, ptr %s, align 8" y vfield2);
-          (b1, b2)
-        | None -> (coerce ctx boundary_ty x "ptr", coerce ctx boundary_ty y "ptr")
-      in
-      let z = fresh ctx "nmap2_z" in
-      emit ctx (Printf.sprintf "%s = call ptr @%s(ptr %s, ptr %s, ptr %s)" z apply_name clo_reg wire_x wire_y);
-      coerce ctx "ptr" z boundary_ty
-    end
-  in
-  (* Narrow the boundary-typed result back down to the memory type before
-     storing it (no-op for the legacy i64/f64 widths). *)
-  let z_native = nmap_narrow ctx width z_boundary in
-  let dptr = fresh ctx "nmap2_dptr" in
-  emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" dptr new_arr byte_off);
-  emit ctx (Printf.sprintf "store %s %s, ptr %s, align %d" mem_ty z_native dptr elem_size);
-  emit ctx (Printf.sprintf "%s = add i64 %s, 1" i_next i);
-  emit_term ctx (Printf.sprintf "br label %%%s" cond_lbl);
-
-  emit_label ctx exit_lbl;
-  if clo_reg <> "null" then
-    emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" clo_reg);
-  ("ptr", new_arr)
-
-(* ── Vault reads: niche → call-site Option encoding ───────────────────── *)
+let emit_native_map2_inline_loop ctx ~width ~unboxed ~arr1_atom ~arr2_atom ~apply_name ~clo_reg =
+  Llvm_emit_nmap.emit_native_map2_inline_loop ~emit_atom ctx ~width ~unboxed
+    ~arr1_atom ~arr2_atom ~apply_name ~clo_reg
 
 (** [march_vault_get] / [march_vault_ns_get] return the NICHE encoding of
     [Option] UNCONDITIONALLY — [None] is a raw null, [Some v] is [v] itself (see
@@ -1345,6 +830,57 @@ let emit_vault_opt_reencode ctx (v : string) (ret_ty : Tir.ty) : string =
 (* ── Core expression emitter ─────────────────────────────────────────── *)
 
 (** Emit [e] and return (llvm_type, llvm_value). Unit → ("i64","0"). *)
+(* ── Builtin dispatch: exhaustiveness surface ──────────────────────────────
+   [emit_expr] selects a builtin's emit arm with a per-arm
+   [when Builtin_name.is Builtin_name.Task_await f.Tir.v_name] guard.  Guards
+   are opaque to the compiler: nothing checks that every constructor of
+   [Builtin_name.t] actually HAS an arm, which is the failure mode the variant
+   exists to catch.
+
+   This match closes that gap.  It has no wildcard, so adding a constructor to
+   [Builtin_name.t] without classifying it here is a non-exhaustive-match
+   error (warning 8 is an error under the dev profile).  The classification is
+   the topic grouping the arms are organised by, so it also documents where in
+   this file a given builtin is emitted. *)
+type builtin_group =
+  | Bg_arith   (* integer/float/bool scalar ops and the to_string family *)
+  | Bg_task    (* tasks, actors, signals, channels, MPST, work pools *)
+  | Bg_record  (* records, vaults, HTML escaping *)
+
+let builtin_group : Builtin_name.t -> builtin_group = function
+  | Builtin_name.Bool_to_string | Builtin_name.Float_to_string
+  | Builtin_name.Int_abs | Builtin_name.Int_div
+  | Builtin_name.Int_div_euclid | Builtin_name.Int_max_value
+  | Builtin_name.Int_min_value | Builtin_name.Int_mod
+  | Builtin_name.Int_mod_euclid | Builtin_name.Int_not
+  | Builtin_name.Int_popcount | Builtin_name.Int_pow
+  | Builtin_name.Int_to_string | Builtin_name.Negate | Builtin_name.Not
+  | Builtin_name.To_string ->
+    Bg_arith
+  | Builtin_name.Actor_register | Builtin_name.Actor_reply
+  | Builtin_name.Chan_choose | Builtin_name.Chan_send
+  | Builtin_name.Get_work_pool | Builtin_name.Mpst_send
+  | Builtin_name.Pmap_threshold | Builtin_name.Receive
+  | Builtin_name.Remote_ref_hashes | Builtin_name.Send
+  | Builtin_name.Signal_raise_self | Builtin_name.Signal_unwatch
+  | Builtin_name.Signal_watch | Builtin_name.Task_await
+  | Builtin_name.Task_await_unwrap | Builtin_name.Task_cancel
+  | Builtin_name.Task_cancel_by_id | Builtin_name.Task_cancel_token_new
+  | Builtin_name.Task_is_cancelled | Builtin_name.Task_reductions
+  | Builtin_name.Task_spawn | Builtin_name.Task_spawn_steal
+  | Builtin_name.Task_spawn_with_cancel | Builtin_name.Task_yield ->
+    Bg_task
+  | Builtin_name.Html_auto_escape | Builtin_name.Html_escape_ctx
+  | Builtin_name.Record_from_list | Builtin_name.Record_get
+  | Builtin_name.Record_has_key | Builtin_name.Record_put
+  | Builtin_name.Vault_drop | Builtin_name.Vault_get
+  | Builtin_name.Vault_incr | Builtin_name.Vault_ns_drop
+  | Builtin_name.Vault_ns_get | Builtin_name.Vault_ns_set
+  | Builtin_name.Vault_push_capped | Builtin_name.Vault_put_new
+  | Builtin_name.Vault_set | Builtin_name.Vault_set_ttl
+  | Builtin_name.Vault_update ->
+    Bg_record
+
 let rec emit_expr ctx (e : Tir.expr) : string * string =
   match e with
 
@@ -1976,13 +1512,13 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     emit ctx (Printf.sprintf "%s = or i64 %s, %s" r va vb);
     ("i64", r)
 
-  | Tir.EApp (f, [a]) when f.Tir.v_name = "not" ->
+  | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Not f.Tir.v_name ->
     let va = emit_atom_as ctx "i64" a in
     let r  = fresh ctx "ar" in
     emit ctx (Printf.sprintf "%s = xor i64 %s, 1" r va);
     ("i64", r)
 
-  | Tir.EApp (f, [a]) when f.Tir.v_name = "negate" ->
+  | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Negate f.Tir.v_name ->
     let (ty, va) = emit_atom ctx a in
     let r = fresh ctx "ar" in
     if ty = "double" then
@@ -2019,7 +1555,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      (offset +16, the standard Boxed-ADT single-field layout) and pass it
      through unescaped — verbatim insertion is exactly `Html.Safe`'s
      contract, so no runtime call is needed at all. *)
-  | Tir.EApp (f, [a]) when f.Tir.v_name = "html_auto_escape"
+  | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Html_auto_escape f.Tir.v_name
                             && (match atom_tir_ty a with
                                 | Tir.TCon ("Safe", _) ->
                                   not (Collision_set.is_colliding ctx.collision_set "Safe")
@@ -2044,7 +1580,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      tuples, and the `Safe`-name-collision case that falls through the arm
      above — goes through `march_value_to_string` first, then escapes the
      resulting real String. *)
-  | Tir.EApp (f, [a]) when f.Tir.v_name = "html_auto_escape" ->
+  | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Html_auto_escape f.Tir.v_name ->
     let runtime_safe =
       match atom_tir_ty a with
       | Tir.TString | Tir.TInt | Tir.TFloat | Tir.TBool -> true
@@ -2107,7 +1643,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      (Html.Trusted) makes this precise in a later task; until then the rule is
      "verbatim only when the escaper is EscHtml". *)
   | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitInt id); a])
-    when f.Tir.v_name = "html_escape_ctx" ->
+    when Builtin_name.is Builtin_name.Html_escape_ctx f.Tir.v_name ->
     let is_html_ctx = id = 0 (* Context.escaper_id EscHtml *) in
     (* Html.Safe and IOList are both already-safe HTML, but they are UNWRAPPED
        differently. march_html_auto_escape's C body does not understand Safe at
@@ -2220,7 +1756,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      Safety is unchanged: march_html_escape_ctx validates the id and aborts on
      one it does not know, so a wrong id fails loudly rather than silently
      skipping an escaper. *)
-  | Tir.EApp (f, [idx; a]) when f.Tir.v_name = "html_escape_ctx" ->
+  | Tir.EApp (f, [idx; a]) when Builtin_name.is Builtin_name.Html_escape_ctx f.Tir.v_name ->
     let id_v = emit_atom_as ctx "i64" idx in
     let v = emit_atom_as ctx "ptr" a in
     let v =
@@ -2246,13 +1782,13 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     emit ctx (Printf.sprintf "%s = %s i64 %s, %s" r (int_bitwise_op f.Tir.v_name) va vb);
     ("i64", r)
 
-  | Tir.EApp (f, [a]) when f.Tir.v_name = "int_not" ->
+  | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Int_not f.Tir.v_name ->
     let va = emit_atom_as ctx "i64" a in
     let r  = fresh ctx "bw" in
     emit ctx (Printf.sprintf "%s = xor i64 %s, -1" r va);
     ("i64", r)
 
-  | Tir.EApp (f, [a]) when f.Tir.v_name = "int_popcount" ->
+  | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Int_popcount f.Tir.v_name ->
     let va = emit_atom_as ctx "i64" a in
     let r  = fresh ctx "bw" in
     emit ctx (Printf.sprintf "%s = call i64 @llvm.ctpop.i64(i64 %s)" r va);
@@ -2272,19 +1808,19 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      and so prints the raw tagged bits verbatim (5 -> "11") instead of
      coercing. Coerce explicitly here, matching every other scalar builtin
      (int_not, is_int_bitwise, …) in this file. *)
-  | Tir.EApp (f, [a]) when f.Tir.v_name = "int_to_string" ->
+  | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Int_to_string f.Tir.v_name ->
     let va = emit_atom_as ctx "i64" a in
     let r  = fresh ctx "its" in
     emit ctx (Printf.sprintf "%s = call ptr @march_int_to_string(i64 %s)" r va);
     ("ptr", r)
 
-  | Tir.EApp (f, [a]) when f.Tir.v_name = "bool_to_string" ->
+  | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Bool_to_string f.Tir.v_name ->
     let va = emit_atom_as ctx "i64" a in
     let r  = fresh ctx "bts" in
     emit ctx (Printf.sprintf "%s = call ptr @march_bool_to_string(i64 %s)" r va);
     ("ptr", r)
 
-  | Tir.EApp (f, [a]) when f.Tir.v_name = "float_to_string" ->
+  | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Float_to_string f.Tir.v_name ->
     let va = emit_atom_as ctx "double" a in
     let r  = fresh ctx "fts" in
     emit ctx (Printf.sprintf "%s = call ptr @march_float_to_string(double %s)" r va);
@@ -2301,7 +1837,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      2), so the closure hands the trampoline a genuine heap pointer here; no
      dedicated spawn variant is needed. See task_await_unwrap's "double"
      branch for the matching unbox. *)
-  | Tir.EApp (f, [clo_atom]) when f.Tir.v_name = "task_spawn" ->
+  | Tir.EApp (f, [clo_atom]) when Builtin_name.is Builtin_name.Task_spawn f.Tir.v_name ->
     let (_, clo_ptr) = emit_atom ctx clo_atom in
     let result = fresh ctx "tsres" in
     emit ctx (Printf.sprintf "%s = call ptr @march_task_spawn_thunk(ptr %s)"
@@ -2312,7 +1848,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      watcher, or raise a signal to self.  The `code` is an Int (untag to raw
      i64); the watcher closure is passed OWNED (borrow.ml marks the arg
      consuming) so the runtime keeps its reference across drains. *)
-  | Tir.EApp (f, [code_atom; clo_atom]) when f.Tir.v_name = "signal_watch" ->
+  | Tir.EApp (f, [code_atom; clo_atom]) when Builtin_name.is Builtin_name.Signal_watch f.Tir.v_name ->
     let (code_ty, code_v) = emit_atom ctx code_atom in
     let code_i64 = coerce ctx code_ty code_v "i64" in
     let (clo_ty, clo_v) = emit_atom ctx clo_atom in
@@ -2320,12 +1856,12 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     emit ctx (Printf.sprintf "call void @march_signal_watch(i64 %s, ptr %s)"
                 code_i64 clo_ptr);
     ("ptr", "null")
-  | Tir.EApp (f, [code_atom]) when f.Tir.v_name = "signal_unwatch" ->
+  | Tir.EApp (f, [code_atom]) when Builtin_name.is Builtin_name.Signal_unwatch f.Tir.v_name ->
     let (code_ty, code_v) = emit_atom ctx code_atom in
     let code_i64 = coerce ctx code_ty code_v "i64" in
     emit ctx (Printf.sprintf "call void @march_signal_unwatch(i64 %s)" code_i64);
     ("ptr", "null")
-  | Tir.EApp (f, [code_atom]) when f.Tir.v_name = "signal_raise_self" ->
+  | Tir.EApp (f, [code_atom]) when Builtin_name.is Builtin_name.Signal_raise_self f.Tir.v_name ->
     let (code_ty, code_v) = emit_atom ctx code_atom in
     let code_i64 = coerce ctx code_ty code_v "i64" in
     emit ctx (Printf.sprintf "call void @march_signal_raise_self(i64 %s)" code_i64);
@@ -2339,7 +1875,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      it — one leaked Result cell per await, on top of the leaked Task below.
      @march_task_await_value performs the same task_wait_done and returns
      task[3] directly, which is the whole point of the _value variant. *)
-  | Tir.EApp (f, [a]) when f.Tir.v_name = "task_await_unwrap" ->
+  | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Task_await_unwrap f.Tir.v_name ->
     let (_, task_ptr) = emit_atom ctx a in
     let inner_ty = match a with
       | Tir.AVar v ->
@@ -2433,7 +1969,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      specs/progress/2026-08-21-float-returning-task-compiled.md.  Contrast
      task_await_unwrap's "double" branch, which DOES unbox — correctly, because
      it yields the scalar as its expression value rather than an ADT field. *)
-  | Tir.EApp (f, [a]) when f.Tir.v_name = "task_await" ->
+  | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Task_await f.Tir.v_name ->
     let (_, tp) = emit_atom ctx a in
     let r = fresh ctx "tawait" in
     emit ctx (Printf.sprintf "%s = call ptr @march_task_await(ptr %s)" r tp);
@@ -2481,18 +2017,18 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("ptr", r)
 
   (* task_yield() → cooperative yield via march_sched_yield *)
-  | Tir.EApp (f, []) when f.Tir.v_name = "task_yield" ->
+  | Tir.EApp (f, []) when Builtin_name.is Builtin_name.Task_yield f.Tir.v_name ->
     emit ctx "call void @march_sched_yield()";
     ("i64", "0")
 
   (* receive() → cooperative blocking mailbox pop via march_sched_recv *)
-  | Tir.EApp (f, []) when f.Tir.v_name = "receive" ->
+  | Tir.EApp (f, []) when Builtin_name.is Builtin_name.Receive f.Tir.v_name ->
     let r = fresh ctx "recv_msg" in
     emit ctx (Printf.sprintf "%s = call ptr @march_sched_recv()" r);
     ("ptr", r)
 
   (* task_spawn_steal(pool, thunk_closure) → spawn as async green thread *)
-  | Tir.EApp (f, [_pool; clo_atom]) when f.Tir.v_name = "task_spawn_steal" ->
+  | Tir.EApp (f, [_pool; clo_atom]) when Builtin_name.is Builtin_name.Task_spawn_steal f.Tir.v_name ->
     let (_, clo_ptr) = emit_atom ctx clo_atom in
     let result = fresh ctx "tsres" in
     emit ctx (Printf.sprintf "%s = call ptr @march_task_spawn_thunk(ptr %s)"
@@ -2500,7 +2036,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("ptr", result)
 
   (* pmap_threshold() → compile-time constant i64 from --pmap-threshold *)
-  | Tir.EApp (f, []) when f.Tir.v_name = "pmap_threshold" ->
+  | Tir.EApp (f, []) when Builtin_name.is Builtin_name.Pmap_threshold f.Tir.v_name ->
     ("i64", string_of_int ctx.pmap_threshold)
 
   (* remote_ref_hashes(module, fn) → constant-fold to (sig_hash, impl_hash) pair.
@@ -2510,7 +2046,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      Key lookup strategy: top-level user module functions are stored without
      the module prefix (fn_name = "fib"), while stdlib/nested module functions
      are stored with it (fn_name = "String.from_int").  Try both forms. *)
-  | Tir.EApp (f, [mod_atom; fn_atom]) when f.Tir.v_name = "remote_ref_hashes" ->
+  | Tir.EApp (f, [mod_atom; fn_atom]) when Builtin_name.is Builtin_name.Remote_ref_hashes f.Tir.v_name ->
     let get_str_lit a = match a with
       | Tir.ALit (March_ast.Ast.LitString s) -> s
       | _ -> "" in
@@ -2539,7 +2075,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("ptr", tup)
 
   (* task_reductions() → read TLS reduction counter (no-op 0 in REPL mode) *)
-  | Tir.EApp (f, []) when f.Tir.v_name = "task_reductions" ->
+  | Tir.EApp (f, []) when Builtin_name.is Builtin_name.Task_reductions f.Tir.v_name ->
     if ctx.repl then ("i64", "0")
     else begin
       let r = fresh ctx "reds" in
@@ -2548,26 +2084,26 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     end
 
   (* task_cancel_token_new() → allocate a new cancel token *)
-  | Tir.EApp (f, []) when f.Tir.v_name = "task_cancel_token_new" ->
+  | Tir.EApp (f, []) when Builtin_name.is Builtin_name.Task_cancel_token_new f.Tir.v_name ->
     let r = fresh ctx "ctok" in
     emit ctx (Printf.sprintf "%s = call ptr @march_cancel_token_new()" r);
     ("ptr", r)
 
   (* task_cancel(tok) → cancel the token *)
-  | Tir.EApp (f, [tok]) when f.Tir.v_name = "task_cancel" ->
+  | Tir.EApp (f, [tok]) when Builtin_name.is Builtin_name.Task_cancel f.Tir.v_name ->
     let (_, tp) = emit_atom ctx tok in
     emit ctx (Printf.sprintf "call void @march_cancel_token_cancel(ptr %s)" tp);
     ("i64", "0")
 
   (* task_is_cancelled(tok) → check if token is cancelled *)
-  | Tir.EApp (f, [tok]) when f.Tir.v_name = "task_is_cancelled" ->
+  | Tir.EApp (f, [tok]) when Builtin_name.is Builtin_name.Task_is_cancelled f.Tir.v_name ->
     let (_, tp) = emit_atom ctx tok in
     let r = fresh ctx "isc" in
     emit ctx (Printf.sprintf "%s = call i64 @march_cancel_token_is_cancelled(ptr %s)" r tp);
     ("i64", r)
 
   (* task_spawn_with_cancel(clo, tok) → spawn with cancel token *)
-  | Tir.EApp (f, [clo; tok]) when f.Tir.v_name = "task_spawn_with_cancel" ->
+  | Tir.EApp (f, [clo; tok]) when Builtin_name.is Builtin_name.Task_spawn_with_cancel f.Tir.v_name ->
     let (_, cp) = emit_atom ctx clo in
     let (_, tp) = emit_atom ctx tok in
     let r = fresh ctx "tswc" in
@@ -2575,13 +2111,13 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("ptr", r)
 
   (* task_cancel_by_id(task) → mark task's proc as DEAD *)
-  | Tir.EApp (f, [t]) when f.Tir.v_name = "task_cancel_by_id" ->
+  | Tir.EApp (f, [t]) when Builtin_name.is Builtin_name.Task_cancel_by_id f.Tir.v_name ->
     let (_, tp) = emit_atom ctx t in
     emit ctx (Printf.sprintf "call void @march_task_cancel_by_id(ptr %s)" tp);
     ("i64", "0")
 
   (* get_work_pool() → null sentinel in Phase 1 *)
-  | Tir.EApp (f, []) when f.Tir.v_name = "get_work_pool" ->
+  | Tir.EApp (f, []) when Builtin_name.is Builtin_name.Get_work_pool f.Tir.v_name ->
     ("ptr", "null")
 
   (* ── Record introspection builtins (native lowering) ───────────────── *)
@@ -2601,7 +2137,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
                 res f.Tir.v_name rp);
     ("ptr", res)
 
-  | Tir.EApp (f, [r; k]) when f.Tir.v_name = "record_get" ->
+  | Tir.EApp (f, [r; k]) when Builtin_name.is Builtin_name.Record_get f.Tir.v_name ->
     let (rt, rv) = emit_atom ctx r in
     let rp = coerce ctx rt rv "ptr" in
     let (kt, kv) = emit_atom ctx k in
@@ -2618,7 +2154,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
                 res rp kp payload_kind);
     ("ptr", res)
 
-  | Tir.EApp (f, [r; k]) when f.Tir.v_name = "record_has_key" ->
+  | Tir.EApp (f, [r; k]) when Builtin_name.is Builtin_name.Record_has_key f.Tir.v_name ->
     let (rt, rv) = emit_atom ctx r in
     let rp = coerce ctx rt rv "ptr" in
     let (kt, kv) = emit_atom ctx k in
@@ -2628,7 +2164,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
                 res rp kp);
     ("i64", res)
 
-  | Tir.EApp (f, [r; k; v]) when f.Tir.v_name = "record_put" ->
+  | Tir.EApp (f, [r; k; v]) when Builtin_name.is Builtin_name.Record_put f.Tir.v_name ->
     let (rt, rv) = emit_atom ctx r in
     let rp = coerce ctx rt rv "ptr" in
     let (kt, kv) = emit_atom ctx k in
@@ -2656,7 +2192,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       res rp kp vp (Char.code kind));
     ("ptr", res)
 
-  | Tir.EApp (f, [l]) when f.Tir.v_name = "record_from_list" ->
+  | Tir.EApp (f, [l]) when Builtin_name.is Builtin_name.Record_from_list f.Tir.v_name ->
     let (lt, lv) = emit_atom ctx l in
     let lp = coerce ctx lt lv "ptr" in
     (* Kind hint for the pair values, from the list's element tuple type. *)
@@ -2670,7 +2206,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("ptr", res)
 
   (* ── to_string: dispatch on argument TIR type ──────────────────────── *)
-  | Tir.EApp (f, [a]) when f.Tir.v_name = "to_string" ->
+  | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.To_string f.Tir.v_name ->
     let (arg_ty, arg_val) = emit_atom ctx a in
     let tir_ty = (match a with
       | Tir.AVar v -> v.Tir.v_ty
@@ -2795,7 +2331,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      This is the Phase 5 linear-type optimization: zero-copy inter-process
      message passing for linearly-typed messages. *)
   | Tir.EApp (f, [actor_atom; msg_atom])
-    when f.Tir.v_name = "send"
+    when Builtin_name.is Builtin_name.Send f.Tir.v_name
       && (match msg_atom with
           | Tir.AVar v -> v.Tir.v_lin = Tir.Lin
           | _ -> false) ->
@@ -2812,8 +2348,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      so they stay as EApp (not converted to ECallPtr).  Handle them here
      BEFORE the var_slot guard so the specific match takes priority. *)
   | Tir.EApp (f, [a; b])
-    when f.Tir.v_name = "int_mod" || f.Tir.v_name = "int_div"
-      || f.Tir.v_name = "int_mod_euclid" || f.Tir.v_name = "int_div_euclid" ->
+    when Builtin_name.(is Int_mod f.Tir.v_name || is Int_div f.Tir.v_name
+                       || is Int_mod_euclid f.Tir.v_name
+                       || is Int_div_euclid f.Tir.v_name) ->
     let va = emit_atom_as ctx "i64" a in
     let vb = emit_atom_as ctx "i64" b in
     let r  = fresh ctx "ar" in
@@ -2831,7 +2368,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", r)
 
   | Tir.EApp (f, [a; b])
-    when f.Tir.v_name = "int_pow" ->
+    when Builtin_name.is Builtin_name.Int_pow f.Tir.v_name ->
     let va = emit_atom_as ctx "i64" a in
     let vb = emit_atom_as ctx "i64" b in
     let r  = fresh ctx "ar" in
@@ -2839,18 +2376,18 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", r)
 
   | Tir.EApp (f, [a])
-    when f.Tir.v_name = "int_abs" ->
+    when Builtin_name.is Builtin_name.Int_abs f.Tir.v_name ->
     let va = emit_atom_as ctx "i64" a in
     let r  = fresh ctx "ar" in
     emit ctx (Printf.sprintf "%s = call i64 @llvm.abs.i64(i64 %s, i1 false)" r va);
     ("i64", r)
 
   | Tir.EApp (f, _)
-    when f.Tir.v_name = "int_max_value" ->
+    when Builtin_name.is Builtin_name.Int_max_value f.Tir.v_name ->
     ("i64", "9223372036854775807")
 
   | Tir.EApp (f, _)
-    when f.Tir.v_name = "int_min_value" ->
+    when Builtin_name.is Builtin_name.Int_min_value f.Tir.v_name ->
     ("i64", "-9223372036854775808")
 
   (* ── Vault stores: the value is a heterogeneous void pointer and MUST be the
@@ -2862,7 +2399,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      via (n<<1)|1, leaves heap pointers unchanged); table/key are already ptr,
      trailing ttl/max stay i64. *)
   | Tir.EApp (f, [tbl; key; value])
-    when f.Tir.v_name = "vault_set" ->
+    when Builtin_name.is Builtin_name.Vault_set f.Tir.v_name ->
     let vt = emit_atom_as ctx "ptr" tbl in
     let vk = emit_atom_as ctx "ptr" key in
     let vv = emit_atom_as ctx "ptr" value in
@@ -2871,7 +2408,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", "0")
 
   | Tir.EApp (f, [tbl; key; value; ttl])
-    when f.Tir.v_name = "vault_set_ttl" ->
+    when Builtin_name.is Builtin_name.Vault_set_ttl f.Tir.v_name ->
     let vt = emit_atom_as ctx "ptr" tbl in
     let vk = emit_atom_as ctx "ptr" key in
     let vv = emit_atom_as ctx "ptr" value in
@@ -2881,7 +2418,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", "0")
 
   | Tir.EApp (f, [tbl; key; value; ttl])
-    when f.Tir.v_name = "vault_put_new" ->
+    when Builtin_name.is Builtin_name.Vault_put_new f.Tir.v_name ->
     let vt = emit_atom_as ctx "ptr" tbl in
     let vk = emit_atom_as ctx "ptr" key in
     let vv = emit_atom_as ctx "ptr" value in
@@ -2898,7 +2435,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      boundary (the runtime would read the Pid as the name string and vice
      versa). Swap explicitly here, same shape as the vault_set arm above. *)
   | Tir.EApp (f, [pid; name])
-    when f.Tir.v_name = "actor_register" ->
+    when Builtin_name.is Builtin_name.Actor_register f.Tir.v_name ->
     let vp = emit_atom_as ctx "ptr" pid in
     let vn = emit_atom_as ctx "ptr" name in
     let r  = fresh ctx "ar" in
@@ -2907,7 +2444,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", r)
 
   | Tir.EApp (f, [tbl; key; value; maxn])
-    when f.Tir.v_name = "vault_push_capped" ->
+    when Builtin_name.is Builtin_name.Vault_push_capped f.Tir.v_name ->
     let vt = emit_atom_as ctx "ptr" tbl in
     let vk = emit_atom_as ctx "ptr" key in
     let vv = emit_atom_as ctx "ptr" value in
@@ -2928,7 +2465,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      trailing scalar args (delta) stay i64.
      See specs/progress/2026-08-20-vault-non-string-key-native-crash.md. *)
   | Tir.EApp (f, [tbl; key])
-    when f.Tir.v_name = "vault_get" ->
+    when Builtin_name.is Builtin_name.Vault_get f.Tir.v_name ->
     let vt = emit_atom_as ctx "ptr" tbl in
     let vk = emit_atom_as ctx "ptr" key in
     let r  = fresh ctx "vg" in
@@ -2937,7 +2474,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("ptr", emit_vault_opt_reencode ctx r (fn_ret_tir f.Tir.v_ty))
 
   | Tir.EApp (f, [tbl; key])
-    when f.Tir.v_name = "vault_drop" ->
+    when Builtin_name.is Builtin_name.Vault_drop f.Tir.v_name ->
     let vt = emit_atom_as ctx "ptr" tbl in
     let vk = emit_atom_as ctx "ptr" key in
     emit ctx (Printf.sprintf
@@ -2945,7 +2482,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", "0")
 
   | Tir.EApp (f, [tbl; key; fn_atom])
-    when f.Tir.v_name = "vault_update" ->
+    when Builtin_name.is Builtin_name.Vault_update f.Tir.v_name ->
     let vt = emit_atom_as ctx "ptr" tbl in
     let vk = emit_atom_as ctx "ptr" key in
     let vf = emit_atom_as ctx "ptr" fn_atom in
@@ -2954,7 +2491,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", "0")
 
   | Tir.EApp (f, [tbl; key; delta])
-    when f.Tir.v_name = "vault_incr" ->
+    when Builtin_name.is Builtin_name.Vault_incr f.Tir.v_name ->
     let vt = emit_atom_as ctx "ptr" tbl in
     let vk = emit_atom_as ctx "ptr" key in
     let vd = emit_atom_as ctx "i64" delta in
@@ -2964,7 +2501,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", r)
 
   | Tir.EApp (f, [ns; key; value])
-    when f.Tir.v_name = "vault_ns_set" ->
+    when Builtin_name.is Builtin_name.Vault_ns_set f.Tir.v_name ->
     let vn = emit_atom_as ctx "ptr" ns in
     let vk = emit_atom_as ctx "ptr" key in
     let vv = emit_atom_as ctx "ptr" value in
@@ -2973,7 +2510,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", "0")
 
   | Tir.EApp (f, [ns; key])
-    when f.Tir.v_name = "vault_ns_get" ->
+    when Builtin_name.is Builtin_name.Vault_ns_get f.Tir.v_name ->
     let vn = emit_atom_as ctx "ptr" ns in
     let vk = emit_atom_as ctx "ptr" key in
     let r  = fresh ctx "vng" in
@@ -2982,7 +2519,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("ptr", emit_vault_opt_reencode ctx r (fn_ret_tir f.Tir.v_ty))
 
   | Tir.EApp (f, [ns; key])
-    when f.Tir.v_name = "vault_ns_drop" ->
+    when Builtin_name.is Builtin_name.Vault_ns_drop f.Tir.v_name ->
     let vn = emit_atom_as ctx "ptr" ns in
     let vk = emit_atom_as ctx "ptr" key in
     emit ctx (Printf.sprintf
@@ -2998,7 +2535,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      tagged before being enqueued, matching the ptr→i64 conditional-untag on the
      receive side. *)
   | Tir.EApp (f, [ref_atom; result_atom])
-    when f.Tir.v_name = "actor_reply" ->
+    when Builtin_name.is Builtin_name.Actor_reply f.Tir.v_name ->
     let vref = emit_atom_as ctx "ptr" ref_atom in
     let vres = emit_atom_as ctx "ptr" result_atom in
     emit ctx (Printf.sprintf "call void @march_actor_reply(ptr %s, ptr %s)" vref vres);
@@ -3022,7 +2559,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      Return type mirrors the general path: these builtins return `Chan`
      (TCon("Chan",[]) → "ptr"). *)
   | Tir.EApp (f, [ep; value])
-    when f.Tir.v_name = "chan_send" ->
+    when Builtin_name.is Builtin_name.Chan_send f.Tir.v_name ->
     let vep = emit_atom_as ctx "ptr" ep in
     let vv  = emit_atom_as ctx "ptr" value in
     let r = fresh ctx "cr" in
@@ -3031,7 +2568,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("ptr", r)
 
   | Tir.EApp (f, [ep; label])
-    when f.Tir.v_name = "chan_choose" ->
+    when Builtin_name.is Builtin_name.Chan_choose f.Tir.v_name ->
     let vep = emit_atom_as ctx "ptr" ep in
     let vl  = emit_atom_as ctx "ptr" label in
     let r = fresh ctx "cr" in
@@ -3040,7 +2577,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("ptr", r)
 
   | Tir.EApp (f, [ep; role; value])
-    when f.Tir.v_name = "mpst_send" ->
+    when Builtin_name.is Builtin_name.Mpst_send f.Tir.v_name ->
     let vep   = emit_atom_as ctx "ptr" ep in
     let vrole = emit_atom_as ctx "ptr" role in
     let vv    = emit_atom_as ctx "ptr" value in
@@ -3218,450 +2755,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      "(ptr, scalar)"/"(scalar, ptr)" generic catch-alls) handle both
      uniformly. *)
   | Tir.EApp (f, args) when decode_simd_call f.Tir.v_name <> None ->
-    let (sty, op) = Option.get (decode_simd_call f.Tir.v_name) in
-    let v_ty = sty.s_vec in
-    let boundary_ty = if sty.s_boundary_float then "double" else "i64" in
-    let arg_pairs = List.map (fun a -> emit_atom ctx a) args in
-    let vec_arg i =
-      let (ty, v) = List.nth arg_pairs i in coerce ctx ty v v_ty in
-    let scalar_arg i =
-      let (ty, v) = List.nth arg_pairs i in coerce ctx ty v boundary_ty in
-    let idx_arg i =
-      let (ty, v) = List.nth arg_pairs i in coerce ctx ty v "i64" in
-    (* Lane-index bounds check for extract/replace. A bare
-       extractelement/insertelement with an out-of-range index is `poison`
-       in LLVM — and for insertelement the poison is the WHOLE result
-       vector, not one lane — so an OOB dynamic lane index silently
-       produced garbage while the interpreter raised a clean error. The
-       refinement checker is NOT a backstop: an obligation it cannot prove
-       is silently Skipped. So gate on the same icmp+branch+panic pattern
-       load/store use (below), against @march_simd_lane_panic (rule:
-       0 <= i < lanes; the load/store triple would misdescribe it).
-
-       A STATICALLY in-range literal index — the refinement-typed common
-       case, e.g. `Simd.extract_f32x4(v, 0)` after inlining — skips the
-       branch entirely and emits exactly what it did before. *)
-    let static_lane_in_range (i : int) : bool =
-      match List.nth args i with
-      | Tir.ALit (March_ast.Ast.LitInt n) -> n >= 0 && n < sty.s_lanes
-      | _ -> false
-    in
-    let check_lane_idx (argi : int) (iv : string) : unit =
-      if not (static_lane_in_range argi) then begin
-        let ok1 = fresh ctx "vlok" in
-        emit ctx (Printf.sprintf "%s = icmp sge i64 %s, 0" ok1 iv);
-        let ok2 = fresh ctx "vlok" in
-        emit ctx (Printf.sprintf "%s = icmp slt i64 %s, %d" ok2 iv sty.s_lanes);
-        let ok = fresh ctx "vlok" in
-        emit ctx (Printf.sprintf "%s = and i1 %s, %s" ok ok1 ok2);
-        let panic_lbl = fresh_block ctx "vln_panic" in
-        let ok_lbl = fresh_block ctx "vln_ok" in
-        emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s" ok ok_lbl panic_lbl);
-        emit_label ctx panic_lbl;
-        emit ctx (Printf.sprintf "call void @march_simd_lane_panic(i64 %s, i64 %d)" iv sty.s_lanes);
-        emit_term ctx "unreachable";
-        emit_label ctx ok_lbl
-      end
-    in
-    let emit_splat_from_elem (e_v : string) : string =
-      (* insertelement lane 0, then a zero-mask shufflevector broadcasts it
-         to every lane — used by both `splat` and the shl/shr count. *)
-      let ins = fresh ctx "vspl" in
-      emit ctx (Printf.sprintf "%s = insertelement %s poison, %s %s, i32 0" ins v_ty sty.s_elem e_v);
-      let r = fresh ctx "vspl" in
-      let mask = String.concat ", " (List.init sty.s_lanes (fun _ -> "i32 0")) in
-      emit ctx (Printf.sprintf "%s = shufflevector %s %s, %s poison, <%d x i32> <%s>"
-                  r v_ty ins v_ty sty.s_lanes mask);
-      r
-    in
-    (* Shared by select/any/all/first_set: bitcast a (possibly float) vector
-       to its all-integer counterpart, then per-lane sign-bit test against
-       zero — matches the interpreter's is_highbit/is_allones mask
-       convention (a compare's all-ones/zero lanes always agree with both
-       readings; see eval.ml's simd_f32_is_highbit et al.). *)
-    let mask_cond (vv : string) : string * string (* int_vty, <L x i1> reg *) =
-      let int_vty = simd_int_vec_ty sty in
-      let mi =
-        if sty.s_boundary_float then begin
-          let r = fresh ctx "vbc" in
-          emit ctx (Printf.sprintf "%s = bitcast %s %s to %s" r v_ty vv int_vty); r
-        end else vv
-      in
-      let cond = fresh ctx "vmc" in
-      emit ctx (Printf.sprintf "%s = icmp slt %s %s, zeroinitializer" cond int_vty mi);
-      (int_vty, cond)
-    in
-    (match op with
-     | "splat" ->
-       let ev = simd_narrow ctx sty (scalar_arg 0) in
-       (v_ty, emit_splat_from_elem ev)
-     | "make" ->
-       let cur = ref "poison" in
-       List.iteri (fun i _ ->
-         let ev = simd_narrow ctx sty (scalar_arg i) in
-         let r = fresh ctx "vmk" in
-         emit ctx (Printf.sprintf "%s = insertelement %s %s, %s %s, i32 %d" r v_ty !cur sty.s_elem ev i);
-         cur := r
-       ) args;
-       (v_ty, !cur)
-     | "extract" ->
-       let vv = vec_arg 0 and iv = idx_arg 1 in
-       check_lane_idx 1 iv;
-       let ev = fresh ctx "vext" in
-       emit ctx (Printf.sprintf "%s = extractelement %s %s, i64 %s" ev v_ty vv iv);
-       (boundary_ty, simd_widen ctx sty ev)
-     | "replace" ->
-       let vv = vec_arg 0 and iv = idx_arg 1 in
-       check_lane_idx 1 iv;
-       let ev = simd_narrow ctx sty (scalar_arg 2) in
-       let r = fresh ctx "vrep" in
-       emit ctx (Printf.sprintf "%s = insertelement %s %s, %s %s, i64 %s" r v_ty vv sty.s_elem ev iv);
-       (v_ty, r)
-     | "add" | "sub" | "mul" | "div" ->
-       let av = vec_arg 0 and bv = vec_arg 1 in
-       let opname = match op, sty.s_boundary_float with
-         | "add", true -> "fadd" | "add", false -> "add"
-         | "sub", true -> "fsub" | "sub", false -> "sub"
-         | "mul", true -> "fmul" | "mul", false -> "mul"
-         | "div", true -> "fdiv"
-         | "div", false -> failwith "simd: int div not in the op grid"
-         | _ -> assert false
-       in
-       let r = fresh ctx "vop" in
-       emit ctx (Printf.sprintf "%s = %s %s %s, %s" r opname v_ty av bv);
-       (v_ty, r)
-     | "min" | "max" ->
-       let av = vec_arg 0 and bv = vec_arg 1 in
-       let iname = match op, sty.s_boundary_float with
-         | "min", true -> "minnum" | "max", true -> "maxnum"
-         | "min", false -> "smin" | "max", false -> "smax"
-         | _ -> assert false
-       in
-       let name = Printf.sprintf "llvm.%s.%s" iname (simd_intrinsic_suffix sty) in
-       ensure_intrinsic_declared ctx ~name ~sig_:(Printf.sprintf "%s @%s(%s, %s)" v_ty name v_ty v_ty);
-       let r = fresh ctx "vmm" in
-       emit ctx (Printf.sprintf "%s = call %s @%s(%s %s, %s %s)" r v_ty name v_ty av v_ty bv);
-       (v_ty, r)
-     | "fma" ->
-       (* f32x4: llvm.fma.v4f32 is a SINGLE binary32-fused rounding. The
-          interpreter matches it by construction — eval.ml's
-          [fma32_single_round] emulates a single-rounded binary32 fma via
-          round-to-odd rather than double-rounding a binary64 Float.fma (which
-          it used to do, and which diverged in the last ulp; boundary triples
-          are pinned by t15 in test/test_stdlib_suite.ml and fuzzed against
-          this lowering by test/native/simd_fma_fuzz.march).
-          f64x2 needs no emulation: Float.fma IS binary64-fused. *)
-       let av = vec_arg 0 and bv = vec_arg 1 and cv = vec_arg 2 in
-       let name = Printf.sprintf "llvm.fma.%s" (simd_intrinsic_suffix sty) in
-       ensure_intrinsic_declared ctx ~name ~sig_:(Printf.sprintf "%s @%s(%s, %s, %s)" v_ty name v_ty v_ty v_ty);
-       let r = fresh ctx "vfma" in
-       emit ctx (Printf.sprintf "%s = call %s @%s(%s %s, %s %s, %s %s)" r v_ty name v_ty av v_ty bv v_ty cv);
-       (v_ty, r)
-     | "sqrt" ->
-       let av = vec_arg 0 in
-       let name = Printf.sprintf "llvm.sqrt.%s" (simd_intrinsic_suffix sty) in
-       ensure_intrinsic_declared ctx ~name ~sig_:(Printf.sprintf "%s @%s(%s)" v_ty name v_ty);
-       let r = fresh ctx "vsqrt" in
-       emit ctx (Printf.sprintf "%s = call %s @%s(%s %s)" r v_ty name v_ty av);
-       (v_ty, r)
-     | "shl" | "shr" ->
-       let av = vec_arg 0 in
-       let cnt_b = scalar_arg 1 in
-       let bits = simd_elem_bits sty in
-       let cnt_e = simd_narrow ctx sty cnt_b in
-       let masked = fresh ctx "vshm" in
-       emit ctx (Printf.sprintf "%s = and %s %s, %d" masked sty.s_elem cnt_e (bits - 1));
-       let splatv = emit_splat_from_elem masked in
-       let opname = if op = "shl" then "shl" else "ashr" in
-       let r = fresh ctx "vsh" in
-       emit ctx (Printf.sprintf "%s = %s %s %s, %s" r opname v_ty av splatv);
-       (v_ty, r)
-     | "eq" | "lt" | "gt" ->
-       let av = vec_arg 0 and bv = vec_arg 1 in
-       let bits = simd_elem_bits sty in
-       let cmp = fresh ctx "vcmp" in
-       (if sty.s_boundary_float then
-          let pred = match op with "eq" -> "oeq" | "lt" -> "olt" | "gt" -> "ogt" | _ -> assert false in
-          emit ctx (Printf.sprintf "%s = fcmp %s %s %s, %s" cmp pred v_ty av bv)
-        else
-          let pred = match op, sty.s_elem with
-            | "eq", _   -> "eq"
-            | "lt", "i8" -> "ult" | "gt", "i8" -> "ugt"
-            | "lt", _   -> "slt" | "gt", _ -> "sgt"
-            | _ -> assert false
-          in
-          emit ctx (Printf.sprintf "%s = icmp %s %s %s, %s" cmp pred v_ty av bv));
-       let int_vty = Printf.sprintf "<%d x i%d>" sty.s_lanes bits in
-       let sext_r = fresh ctx "vcmp" in
-       emit ctx (Printf.sprintf "%s = sext <%d x i1> %s to %s" sext_r sty.s_lanes cmp int_vty);
-       let r =
-         if sty.s_boundary_float then begin
-           let r = fresh ctx "vcmp" in
-           emit ctx (Printf.sprintf "%s = bitcast %s %s to %s" r int_vty sext_r v_ty); r
-         end else sext_r
-       in
-       (v_ty, r)
-     | "and" | "or" | "xor" ->
-       let av = vec_arg 0 and bv = vec_arg 1 in
-       let opname = op in
-       if sty.s_boundary_float then begin
-         let int_vty = simd_int_vec_ty sty in
-         let a_i = fresh ctx "vbc" in
-         emit ctx (Printf.sprintf "%s = bitcast %s %s to %s" a_i v_ty av int_vty);
-         let b_i = fresh ctx "vbc" in
-         emit ctx (Printf.sprintf "%s = bitcast %s %s to %s" b_i v_ty bv int_vty);
-         let r_i = fresh ctx "vbop" in
-         emit ctx (Printf.sprintf "%s = %s %s %s, %s" r_i opname int_vty a_i b_i);
-         let r = fresh ctx "vbc" in
-         emit ctx (Printf.sprintf "%s = bitcast %s %s to %s" r int_vty r_i v_ty);
-         (v_ty, r)
-       end else begin
-         let r = fresh ctx "vbop" in
-         emit ctx (Printf.sprintf "%s = %s %s %s, %s" r opname v_ty av bv);
-         (v_ty, r)
-       end
-     | "not" ->
-       let av = vec_arg 0 in
-       if sty.s_boundary_float then begin
-         let int_vty = simd_int_vec_ty sty in
-         let int_elem = match sty.s_elem with "float" -> "i32" | _ -> "i64" in
-         let a_i = fresh ctx "vbc" in
-         emit ctx (Printf.sprintf "%s = bitcast %s %s to %s" a_i v_ty av int_vty);
-         let allones = String.concat ", " (List.init sty.s_lanes (fun _ -> Printf.sprintf "%s -1" int_elem)) in
-         let r_i = fresh ctx "vnot" in
-         emit ctx (Printf.sprintf "%s = xor %s %s, <%s>" r_i int_vty a_i allones);
-         let r = fresh ctx "vbc" in
-         emit ctx (Printf.sprintf "%s = bitcast %s %s to %s" r int_vty r_i v_ty);
-         (v_ty, r)
-       end else begin
-         let allones = String.concat ", " (List.init sty.s_lanes (fun _ -> Printf.sprintf "%s -1" sty.s_elem)) in
-         let r = fresh ctx "vnot" in
-         emit ctx (Printf.sprintf "%s = xor %s %s, <%s>" r v_ty av allones);
-         (v_ty, r)
-       end
-     | "select" ->
-       let mv = vec_arg 0 and av = vec_arg 1 and bv = vec_arg 2 in
-       let (_, cond) = mask_cond mv in
-       let r = fresh ctx "vsel" in
-       emit ctx (Printf.sprintf "%s = select <%d x i1> %s, %s %s, %s %s" r sty.s_lanes cond v_ty av v_ty bv);
-       (v_ty, r)
-     | "any" | "all" ->
-       let av = vec_arg 0 in
-       let (_, cond) = mask_cond av in
-       let packed = fresh ctx "vaa" in
-       emit ctx (Printf.sprintf "%s = bitcast <%d x i1> %s to i%d" packed sty.s_lanes cond sty.s_lanes);
-       let r = fresh ctx "vaa" in
-       (if op = "any" then
-          emit ctx (Printf.sprintf "%s = icmp ne i%d %s, 0" r sty.s_lanes packed)
-        else
-          emit ctx (Printf.sprintf "%s = icmp eq i%d %s, -1" r sty.s_lanes packed));
-       ("i64", coerce ctx "i1" r "i64")
-     | "first_set" ->
-       let av = vec_arg 0 in
-       let (_, cond) = mask_cond av in
-       let packed = fresh ctx "vfs" in
-       emit ctx (Printf.sprintf "%s = bitcast <%d x i1> %s to i%d" packed sty.s_lanes cond sty.s_lanes);
-       let z64 = fresh ctx "vfs" in
-       emit ctx (Printf.sprintf "%s = zext i%d %s to i64" z64 sty.s_lanes packed);
-       ensure_intrinsic_declared ctx ~name:"llvm.cttz.i64" ~sig_:"i64 @llvm.cttz.i64(i64, i1)";
-       let ctz = fresh ctx "vfs" in
-       emit ctx (Printf.sprintf "%s = call i64 @llvm.cttz.i64(i64 %s, i1 false)" ctz z64);
-       let isz = fresh ctx "vfs" in
-       emit ctx (Printf.sprintf "%s = icmp eq i64 %s, 0" isz z64);
-       let r = fresh ctx "vfs" in
-       emit ctx (Printf.sprintf "%s = select i1 %s, i64 -1, i64 %s" r isz ctz);
-       ("i64", r)
-     | "sum" ->
-       let av = vec_arg 0 in
-       if sty.s_boundary_float then begin
-         let ext_ty = Printf.sprintf "<%d x double>" sty.s_lanes in
-         let ext =
-           if sty.s_elem = "double" then av
-           else begin
-             let r = fresh ctx "vsum" in
-             emit ctx (Printf.sprintf "%s = fpext %s %s to %s" r v_ty av ext_ty); r
-           end
-         in
-         (* Ordered (no reassoc flags) reduce.fadd WITH a start operand is
-            defined by LangRef as sequential left-to-right — matches
-            eval.ml's simd_hfold-free `Array.fold_left (+.) 0.0` for sum. *)
-         let name = Printf.sprintf "llvm.vector.reduce.fadd.v%df64" sty.s_lanes in
-         ensure_intrinsic_declared ctx ~name ~sig_:(Printf.sprintf "double @%s(double, %s)" name ext_ty);
-         let r = fresh ctx "vsum" in
-         emit ctx (Printf.sprintf "%s = call double @%s(double 0.0, %s %s)" r name ext_ty ext);
-         ("double", r)
-       end else begin
-         let ext_ty = Printf.sprintf "<%d x i64>" sty.s_lanes in
-         let ext =
-           if sty.s_elem = "i64" then av
-           else begin
-             let r = fresh ctx "vsum" in
-             emit ctx (Printf.sprintf "%s = sext %s %s to %s" r v_ty av ext_ty); r
-           end
-         in
-         let name = Printf.sprintf "llvm.vector.reduce.add.v%di64" sty.s_lanes in
-         ensure_intrinsic_declared ctx ~name ~sig_:(Printf.sprintf "i64 @%s(%s)" name ext_ty);
-         let r = fresh ctx "vsum" in
-         emit ctx (Printf.sprintf "%s = call i64 @%s(%s %s)" r name ext_ty ext);
-         ("i64", r)
-       end
-     | "hmin" | "hmax" ->
-       let av = vec_arg 0 in
-       let lane i =
-         let r = fresh ctx "vhf" in
-         emit ctx (Printf.sprintf "%s = extractelement %s %s, i64 %d" r v_ty av i); r
-       in
-       let iname = match op, sty.s_boundary_float with
-         | "hmin", true -> "minnum" | "hmax", true -> "maxnum"
-         | "hmin", false -> "smin" | "hmax", false -> "smax"
-         | _ -> assert false
-       in
-       let scalar_suffix = match sty.s_elem with
-         | "float" -> "f32" | "double" -> "f64" | "i32" -> "i32" | "i64" -> "i64"
-         | other -> failwith ("simd hmin/hmax: unexpected elem ty " ^ other)
-       in
-       let name = Printf.sprintf "llvm.%s.%s" iname scalar_suffix in
-       ensure_intrinsic_declared ctx ~name ~sig_:(Printf.sprintf "%s @%s(%s, %s)" sty.s_elem name sty.s_elem sty.s_elem);
-       let acc = ref (lane 0) in
-       for i = 1 to sty.s_lanes - 1 do
-         let li = lane i in
-         let r = fresh ctx "vhf" in
-         emit ctx (Printf.sprintf "%s = call %s @%s(%s %s, %s %s)" r sty.s_elem name sty.s_elem !acc sty.s_elem li);
-         acc := r
-       done;
-       (boundary_ty, simd_widen ctx sty !acc)
-     | "load" ->
-       (* Bounds check (0 <= i && i + lanes <= len), matching
-          [simd_bounds_check] in eval.ml, then a plain GEP+load at
-          arr+32+i*elem_size (NATIVE_ARR_HDR=32, #define'd in
-          march_runtime.h). Every `native_<w>_arr_length` used here is
-          unconditionally declared in the native preamble
-          (llvm_builtins.ml's [native_net_io_items]), same as every other
-          NativeArray builtin call site. *)
-       let (arr_ty0, arr_v0) = List.nth arg_pairs 0 in
-       let arr_v = coerce ctx arr_ty0 arr_v0 "ptr" in
-       let iv = idx_arg 1 in
-       let elem_size = simd_elem_bits sty / 8 in
-       let len_fn = sty.s_arr_prefix ^ "_length" in
-       let len = fresh ctx "vlen" in
-       emit ctx (Printf.sprintf "%s = call i64 @%s(ptr %s)" len len_fn arr_v);
-       let endi = fresh ctx "vend" in
-       emit ctx (Printf.sprintf "%s = add i64 %s, %d" endi iv sty.s_lanes);
-       let ok1 = fresh ctx "vok" in
-       emit ctx (Printf.sprintf "%s = icmp sle i64 %s, %s" ok1 endi len);
-       let ok2 = fresh ctx "vok" in
-       emit ctx (Printf.sprintf "%s = icmp sge i64 %s, 0" ok2 iv);
-       let ok = fresh ctx "vok" in
-       emit ctx (Printf.sprintf "%s = and i1 %s, %s" ok ok1 ok2);
-       let panic_lbl = fresh_block ctx "vld_panic" in
-       let ok_lbl = fresh_block ctx "vld_ok" in
-       emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s" ok ok_lbl panic_lbl);
-       emit_label ctx panic_lbl;
-       emit ctx (Printf.sprintf "call void @march_simd_bounds_panic(i64 %s, i64 %d, i64 %s)" iv sty.s_lanes len);
-       emit_term ctx "unreachable";
-       emit_label ctx ok_lbl;
-       let byte_off = fresh ctx "voff" in
-       emit ctx (Printf.sprintf "%s = mul i64 %s, %d" byte_off iv elem_size);
-       let base = fresh ctx "vbase" in
-       emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 32" base arr_v);
-       let elemp = fresh ctx "velem" in
-       emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" elemp base byte_off);
-       let r = fresh ctx "vld" in
-       emit ctx (Printf.sprintf "%s = load %s, ptr %s, align %d" r v_ty elemp elem_size);
-       (v_ty, r)
-     | "store" ->
-       (* Same bounds check as `load`, then the FBIP contract exactly as
-          `native_f32_arr_set` (march_runtime.c): rc==1 -> in-place vector
-          store, return the same array; rc>1 -> alloc a fresh array,
-          memcpy the whole payload, vector-store into the copy, decrc the
-          original, return the copy. The rc==1 test mirrors EReuse's
-          "load atomic i64 ... monotonic" + `icmp eq i64 %rc, 1` pattern
-          (see the EAlloc/EReuse FBIP arm above, ~L4496-4499). *)
-       let (arr_ty0, arr_v0) = List.nth arg_pairs 0 in
-       let arr_v = coerce ctx arr_ty0 arr_v0 "ptr" in
-       let iv = idx_arg 1 in
-       let vv = vec_arg 2 in
-       let elem_size = simd_elem_bits sty / 8 in
-       let len_fn = sty.s_arr_prefix ^ "_length" in
-       let alloc_fn = sty.s_arr_prefix ^ "_alloc_raw" in
-       let len = fresh ctx "vlen" in
-       emit ctx (Printf.sprintf "%s = call i64 @%s(ptr %s)" len len_fn arr_v);
-       let endi = fresh ctx "vend" in
-       emit ctx (Printf.sprintf "%s = add i64 %s, %d" endi iv sty.s_lanes);
-       let ok1 = fresh ctx "vok" in
-       emit ctx (Printf.sprintf "%s = icmp sle i64 %s, %s" ok1 endi len);
-       let ok2 = fresh ctx "vok" in
-       emit ctx (Printf.sprintf "%s = icmp sge i64 %s, 0" ok2 iv);
-       let ok = fresh ctx "vok" in
-       emit ctx (Printf.sprintf "%s = and i1 %s, %s" ok ok1 ok2);
-       let panic_lbl = fresh_block ctx "vst_panic" in
-       let ok_lbl = fresh_block ctx "vst_ok" in
-       emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s" ok ok_lbl panic_lbl);
-       emit_label ctx panic_lbl;
-       emit ctx (Printf.sprintf "call void @march_simd_bounds_panic(i64 %s, i64 %d, i64 %s)" iv sty.s_lanes len);
-       emit_term ctx "unreachable";
-       emit_label ctx ok_lbl;
-       let byte_off = fresh ctx "voff" in
-       emit ctx (Printf.sprintf "%s = mul i64 %s, %d" byte_off iv elem_size);
-       (* rc==1 fast path — same FBIP contract as native_f32_arr_set, which
-          gates on `IS_HEAP_PTR(arr) && rc == 1`. `arr_v` statically can only
-          ever be a genuine heap array (never a tagged scalar — its March
-          type is NativeF32Arr/etc), but the check is reproduced verbatim
-          (IS_HEAP_PTR = untagged, >= one page, sign bit clear) rather than
-          assumed, matching the C helper's own defensiveness exactly. *)
-       let arr_i = fresh ctx "varri" in
-       emit ctx (Printf.sprintf "%s = ptrtoint ptr %s to i64" arr_i arr_v);
-       let tagbit = fresh ctx "vhtag" in
-       emit ctx (Printf.sprintf "%s = and i64 %s, 1" tagbit arr_i);
-       let not_tagged = fresh ctx "vhnt" in
-       emit ctx (Printf.sprintf "%s = icmp eq i64 %s, 0" not_tagged tagbit);
-       let above_page = fresh ctx "vhpg" in
-       emit ctx (Printf.sprintf "%s = icmp uge i64 %s, 4096" above_page arr_i);
-       let positive = fresh ctx "vhpos" in
-       emit ctx (Printf.sprintf "%s = icmp sgt i64 %s, 0" positive arr_i);
-       let heap1 = fresh ctx "vheap" in
-       emit ctx (Printf.sprintf "%s = and i1 %s, %s" heap1 not_tagged above_page);
-       let is_heap = fresh ctx "vheap" in
-       emit ctx (Printf.sprintf "%s = and i1 %s, %s" is_heap heap1 positive);
-       let rc = fresh ctx "vrc" in
-       emit ctx (Printf.sprintf "%s = load atomic i64, ptr %s monotonic, align 8" rc arr_v);
-       let rc_uniq = fresh ctx "vrcu" in
-       emit ctx (Printf.sprintf "%s = icmp eq i64 %s, 1" rc_uniq rc);
-       let uniq = fresh ctx "vuniq" in
-       emit ctx (Printf.sprintf "%s = and i1 %s, %s" uniq is_heap rc_uniq);
-       let reuse_lbl = fresh_block ctx "vst_reuse" in
-       let fresh_lbl = fresh_block ctx "vst_fresh" in
-       let merge_lbl = fresh_block ctx "vst_merge" in
-       emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s" uniq reuse_lbl fresh_lbl);
-       emit_label ctx reuse_lbl;
-       let base0 = fresh ctx "vbase" in
-       emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 32" base0 arr_v);
-       let elemp0 = fresh ctx "velem" in
-       emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" elemp0 base0 byte_off);
-       emit ctx (Printf.sprintf "store %s %s, ptr %s, align %d" v_ty vv elemp0 elem_size);
-       emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl);
-       emit_label ctx fresh_lbl;
-       let newp = fresh ctx "vnew" in
-       emit ctx (Printf.sprintf "%s = call ptr @%s(i64 %s)" newp alloc_fn len);
-       let src = fresh ctx "vsrc" in
-       emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 32" src arr_v);
-       let dst = fresh ctx "vdst" in
-       emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 32" dst newp);
-       let bytelen = fresh ctx "vbytelen" in
-       emit ctx (Printf.sprintf "%s = mul i64 %s, %d" bytelen len elem_size);
-       ensure_intrinsic_declared ctx ~name:"llvm.memcpy.p0.p0.i64"
-         ~sig_:"void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)";
-       emit ctx (Printf.sprintf "call void @llvm.memcpy.p0.p0.i64(ptr %s, ptr %s, i64 %s, i1 false)" dst src bytelen);
-       let elemp1 = fresh ctx "velem" in
-       emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" elemp1 dst byte_off);
-       emit ctx (Printf.sprintf "store %s %s, ptr %s, align %d" v_ty vv elemp1 elem_size);
-       emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" arr_v);
-       emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl);
-       emit_label ctx merge_lbl;
-       let result = fresh ctx "vst_r" in
-       emit ctx (Printf.sprintf "%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]" result arr_v reuse_lbl newp fresh_lbl);
-       ("ptr", result)
-     | other -> failwith ("simd_intercept: unrecognized op " ^ other))
+    Llvm_emit_simd.emit_simd_call ~emit_atom ctx f args
 
   (* ── General function call ─────────────────────────────────────────── *)
   | Tir.EApp (f, args) ->
@@ -4283,8 +3377,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     end
 
   | Tir.ECallPtr (Tir.AVar f, [a; b])
-    when f.Tir.v_name = "int_mod" || f.Tir.v_name = "int_div"
-      || f.Tir.v_name = "int_mod_euclid" || f.Tir.v_name = "int_div_euclid" ->
+    when Builtin_name.(is Int_mod f.Tir.v_name || is Int_div f.Tir.v_name
+                       || is Int_mod_euclid f.Tir.v_name
+                       || is Int_div_euclid f.Tir.v_name) ->
     let va = emit_atom_as ctx "i64" a in
     let vb = emit_atom_as ctx "i64" b in
     let r  = fresh ctx "ar" in
@@ -5664,10 +4759,6 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
    (bin/main.ml, lib/jit/repl_jit.ml, test/) see the exact same signatures
    as before this split. *)
 
-let emit_fn ctx fn = Llvm_toplevel.emit_fn ~emit_expr ctx fn
-let fn_declare_str = Llvm_toplevel.fn_declare_str
-let build_ctor_info = Llvm_toplevel.build_ctor_info
-let emit_main_wrapper = Llvm_toplevel.emit_main_wrapper
 let emit_preamble = Llvm_toplevel.emit_preamble
 
 let emit_module ?fast_math ?pmap_threshold ?target ?hot_reload ?impl_hashes
@@ -5677,19 +4768,12 @@ let emit_module ?fast_math ?pmap_threshold ?target ?hot_reload ?impl_hashes
     ?fast_math ?pmap_threshold ?target ?hot_reload ?impl_hashes
     ?remote_impl_hashes ?remote_sig_hashes ?emit_main ?cap_attrib ?cap_decls m
 
-type repl_globals = Llvm_repl.repl_globals
-let emit_repl_globals_decl = Llvm_repl.emit_repl_globals_decl
 
 type repl_slot_info = Llvm_repl.repl_slot_info = {
   rs_bare : string;
   rs_slot : int;
   rs_ty : Tir.ty;
 }
-
-let emit_prev_slot_bridges = Llvm_repl.emit_prev_slot_bridges
-let emit_store_to_slot = Llvm_repl.emit_store_to_slot
-let emit_slot_loader_fns = Llvm_repl.emit_slot_loader_fns
-let emit_prev_global_bridges = Llvm_repl.emit_prev_global_bridges
 
 let emit_repl_expr ?fast_math ~n ~ret_ty ~prev_slots ~fns ?extern_fns
     ?store_as_slot ?session_wraps ~types (body : Tir.expr) : string =
@@ -5703,9 +4787,6 @@ let emit_repl_decl ?fast_math ~n ~name ~val_ty ~dest_slot ~prev_slots ~fns
     ?fast_math ~n ~name ~val_ty ~dest_slot ~prev_slots ~fns ?extern_fns
     ?session_wraps ~types body
 
-let emit_repl_fn ?fast_math ~n ~prev_slots ?extern_fns ~types (fn : Tir.fn_def) : string =
-  Llvm_repl.emit_repl_fn ~emit_expr ?fast_math ~n ~prev_slots ?extern_fns ~types fn
-
 let emit_repl_fn_with_closure_slot ?fast_math ~n ~bind_name ~dest_slot
     ~prev_slots ?helper_fns ?extern_fns ?session_wraps ~types (fn : Tir.fn_def) : string =
   Llvm_repl.emit_repl_fn_with_closure_slot ~emit_expr
@@ -5715,5 +4796,3 @@ let emit_repl_fn_with_closure_slot ?fast_math ~n ~bind_name ~dest_slot
 let emit_fns_fragment ~types ~fns ?extern_fns ?session_wraps ~repl () : string =
   Llvm_repl.emit_fns_fragment ~emit_expr ~types ~fns ?extern_fns ?session_wraps
     ~repl ()
-
-let llvm_ty_of_tir = Llvm_repl.llvm_ty_of_tir
