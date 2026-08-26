@@ -9,7 +9,21 @@ Plan: `specs/plans/2026-08-19-compiler-file-decomposition.md`
 
 ## Status
 
-**Phases 0 and 1 landed (2026-08-25). Phases 2-6 open.**
+**Phases 0-3 landed. Phases 4-6 open.**
+
+- **Phase 3 complete (2026-08-26)** — `lib/refinecheck/refine_check.ml` gains 23
+  § section headers and a table of contents (comments only), `check_call` goes
+  from 13 parameters to 8 behind a documented `call_ctx` record, and a new
+  `refine_check.mli` cuts 198 inferred vals to 17 (91% was internal). New
+  oracle: `scripts/refine-oracle.sh`, 297 fixtures / 5,638 pinned diagnostic
+  lines, proven non-vacuous (RED 1,528 differing lines for a perturbed
+  message + verdict, GREEN for a comment-only edit). Note it needs a private
+  `HOME`: `~/.cache/march`'s Marshal'd stdlib typecheck env is shared across
+  worktrees and its spans carry the populating worktree's paths. Details:
+  `specs/progress/2026-08-26-refine-check-decomposition-phase3.md`.
+
+- **Phase 2 complete (2026-08-26)** — see
+  `specs/progress/2026-08-26-llvm-emit-decomposition-phase2.md`.
 
 - **Phase 1 complete** — `lib/eval/eval.ml` **12,264 → 4,304 lines** (target
   ~5,000), split into `eval_builtins.ml` (5,294), `eval_runtime.ml` (1,242),

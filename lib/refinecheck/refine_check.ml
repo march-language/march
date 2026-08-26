@@ -14,10 +14,44 @@
    a complex expression) is conservatively SKIPPED — no false positives.
    Scope: direct (named) calls only, no path sensitivity. *)
 
+(* Table of contents — the § markers below are greppable:
+     grep -n '§' lib/refinecheck/refine_check.ml
+
+     §1  Refined parameters and base-type classification
+     §2  SMT sorts: strings, scalars, measures, well-sortedness
+     §3  Predicate scope and parameter substitution
+     §4  Function signatures, measures, and stdlib-provided names
+     §5  ADT and record sorts: registry and SMT preamble builders
+     §6  AST traversal helpers and measure gating
+     §7  Reflection: March expressions into SMT terms
+     §8  Rendering: predicates, models, counterexamples
+     §9  Scope — the refined bindings in scope
+     §10 The other fact channels: path, launder, recenv, cbenv
+     §11 Signature extraction and definition collection
+     §12 Name resolution: module paths, aliases, call targets
+     §13 Reflecting actual arguments: fields, records, scalars
+     §14 Verdict state and withdrawal diagnostics
+     §15 check_call — precondition checking at a call site
+     §16 Postcondition checking
+     §17 Postconditions by induction
+     §18 Function-level postcondition entry points and gating
+     §19 The visit traversal
+     §20 Refinement-placement warnings
+     §21 The declaration walk
+     §22 Registration and stdlib-shape validation
+     §23 Entry point: check_module
+
+   §15 is `check_call`, 1,361 lines and the single largest thing here;
+   §16-§18 are its postcondition counterpart. *)
+
 module A = March_ast.Ast
 module Smt = March_refine.Smt
 module Refine = March_refine.Refine
 module Err = March_errors.Errors
+
+(* =================================================================
+   §1  Refined parameters and base-type classification
+   ================================================================= *)
 
 (* A refined parameter: position, predicate binder, predicate expression, and
    the SMT sort of its base type when that base is NOT `Int`:
@@ -52,6 +86,10 @@ let is_bool_base : A.ty -> bool = function
 let is_float_base : A.ty -> bool = function
   | A.TyCon ({ A.txt = "Float"; _ }, []) -> true
   | _ -> false
+
+(* =================================================================
+   §2  SMT sorts: strings, scalars, measures, well-sortedness
+   ================================================================= *)
 
 (* ── The String encoding ───────────────────────────────────────────────────
    `String` is modelled as an UNINTERPRETED SORT and `len` as an uninterpreted
@@ -323,6 +361,10 @@ let rec formula_wellsorted (sort_of : string -> Smt.sort option) (t : Smt.term) 
   | Smt.App _ | Smt.IntLit _ | Smt.FloatLit _ | Smt.Add _ | Smt.Sub _
   | Smt.MulLit _ | Smt.Mul _ | Smt.Neg _ -> false
 
+(* =================================================================
+   §3  Predicate scope and parameter substitution
+   ================================================================= *)
+
 (* How a return refinement's predicate relates to the callee's parameters.
 
    [Closed]      — mentions only the refinement binder; usable as-is (Tier 0).
@@ -399,6 +441,10 @@ let rec subst_params (env : (string * A.expr) list) (e : A.expr) : A.expr =
   | A.EField (r, n, sp) -> A.EField (go r, n, sp)
   | A.EAnnot (inner, t, sp) -> A.EAnnot (go inner, t, sp)
   | _ -> e
+
+(* =================================================================
+   §4  Function signatures, measures, and stdlib-provided names
+   ================================================================= *)
 
 (* A function's signature: parameter names by position, its refined params, and
    its declared return refinement (binder + predicate) when the return type is
@@ -641,6 +687,10 @@ let measure_body_nonneg (self : string) (known : string list) (body : A.expr) : 
     | _ -> false (* variables, subtraction, arbitrary calls: unknown sign *)
   in
   go body
+
+(* =================================================================
+   §5  ADT and record sorts: registry and SMT preamble builders
+   ================================================================= *)
 
 (* ── Measure axioms (M-a): datatype model + recursion-equation preamble ───── *)
 (* ctor name -> field sorts as the measure sees them (recursive self -> SData adt,
@@ -1229,6 +1279,10 @@ let record_vc_preamble () : string =
   | m, "" -> m
   | m, t -> m ^ "\n" ^ t
 
+(* =================================================================
+   §6  AST traversal helpers and measure gating
+   ================================================================= *)
+
 (* ── M-b: the @[measure] soundness gate ─────────────────────────────────────
    `@[measure]` is a promise that the function is a TOTAL, TERMINATING, PURE
    mathematical function.  The axiom encoding trusts that promise: axiomatising a
@@ -1372,6 +1426,10 @@ let measure_gate_errors (fd : A.fn_def) : string list =
     fd.A.fn_clauses;
   List.rev !errs
 
+(* =================================================================
+   §7  Reflection: March expressions into SMT terms
+   ================================================================= *)
+
 (* ── Translate the decidable predicate fragment to an SMT term ────────────── *)
 (* [resolve_var] maps a scalar variable to its SMT term; [resolve_measure]
    maps a (measure-name, argument-name) to its measure term.  None => outside
@@ -1491,6 +1549,10 @@ let rec smt_of ~resolve_var ~resolve_measure ?(resolve_field = fun _ _ -> None)
      | _, A.ELit (A.LitInt k, _) -> Option.map (fun x -> Smt.MulLit (k, x)) (r a)
      | _ -> None)
   | _ -> None
+
+(* =================================================================
+   §8  Rendering: predicates, models, counterexamples
+   ================================================================= *)
 
 (* User-facing infix rendering of a predicate (best-effort). *)
 let rec pred_str (e : A.expr) : string =
@@ -1627,6 +1689,10 @@ let cx_block (model : (string * string) list) : string =
     String.concat "\n    " (List.map render_model_entry model)
 
 let model_of = function Refine.Refuted m -> m | _ -> []
+
+(* =================================================================
+   §9  Scope — the refined bindings in scope
+   ================================================================= *)
 
 (* ── Scope of refined locals/params: name -> (binder, predicate) ─────────── *)
 type scope = (string * (string * A.expr * string option)) list
@@ -1965,6 +2031,10 @@ let arm_excludes_tag (br : A.branch) : string option =
 let path_shadow (path : (A.expr * bool) list) (names : string list) : (A.expr * bool) list =
   if names = [] then path else List.filter (fun (c, _) -> not (expr_mentions names c)) path
 
+(* =================================================================
+   §10 The other fact channels: path, launder, recenv, cbenv
+   ================================================================= *)
+
 (* ── Laundered guards: name -> the application it was let-bound to ─────────
    [visit] records, per program point, which local names are ONE `let` away
    from a direct application: `let n = List.length(ys)` records
@@ -2195,6 +2265,10 @@ let scope_add_binding
      | _ -> sc)
   | _ -> sc
 
+(* =================================================================
+   §11 Signature extraction and definition collection
+   ================================================================= *)
+
 (* ── Collect signatures, keyed by bare + qualified name ──────────────────── *)
 let param_name_of : A.fn_param -> string = function
   | A.FPNamed p | A.FPDefault (p, _) -> p.A.param_name.A.txt
@@ -2376,6 +2450,10 @@ let strip_param_refinements (fd : A.fn_def) : A.fn_def =
       List.map
         (fun (c : A.fn_clause) -> { c with A.fc_params = List.map fp c.A.fc_params })
         fd.A.fn_clauses }
+
+(* =================================================================
+   §12 Name resolution: module paths, aliases, call targets
+   ================================================================= *)
 
 (* ── Use/alias-aware call resolution ───────────────────────────────────────
    Resolve a call name the way the typechecker does: a bare name binds to the
@@ -2581,6 +2659,10 @@ let postcond_of (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (fname :
           else None)
      | _ -> None)
   | _ -> None
+
+(* =================================================================
+   §13 Reflecting actual arguments: fields, records, scalars
+   ================================================================= *)
 
 (* Fresh-name counter for SMT constants standing in for a call's return value.
    Monotonic per compilation; freshness is all that is required. *)
@@ -2897,6 +2979,10 @@ let sort_of_ctor (ctor : string) : string option =
   with
   | [ s ] -> Some s
   | _ -> None
+
+(* =================================================================
+   §14 Verdict state and withdrawal diagnostics
+   ================================================================= *)
 
 (* ── `cap verified`: a skipped obligation becomes an error ───────────────── *)
 (* March's default stance is DEFINITE FAILURE ONLY — an obligation the checker
@@ -3368,11 +3454,58 @@ let arg_span (fallback : A.span) : A.expr -> A.span = function
   | A.EVar name -> name.A.span
   | _ -> fallback
 
-let check_call ~root errctx ~span ~(callee : string) ?(subject = Argument)
-    ?(verdict_out : Obligation.verdict option ref option) ~(lets : launder)
-    ~(postcond : string -> A.expr list -> (string * A.expr * string option) option)
-    (sg : fn_sig) (args : A.expr list)
-    (path : (A.expr * bool) list) (rp : rparam) (sc : scope) (re : recenv) : unit =
+(* =================================================================
+   §15 check_call — precondition checking at a call site
+   ================================================================= *)
+
+(* The environment [check_call] discharges an obligation IN, as opposed to the
+   obligation itself.  Every field is threaded unchanged through the whole of
+   [visit]'s walk of one call node, so bundling them stops a twelve-parameter
+   signature from having to be re-read at each of the three call sites — and
+   gives each thread a place to say what it is, which is the documentation
+   this function has never had.
+
+   The four things that differ per obligation stay explicit parameters:
+   [~span] / [~callee] (which call), [sg] / [args] (its signature and actuals)
+   and [rp] (which refined parameter of it), plus [?subject] / [?verdict_out],
+   which only the `let`-annotation caller sets. *)
+type call_ctx = {
+  root : string;
+      (* Project root — passed to [Refine.discharge] so the SMT bridge can
+         place its scratch files and resolve solver configuration. *)
+  errctx : Err.ctx;
+      (* Diagnostic sink.  [check_call] is a REPORTING site: every exit path
+         records an outcome through [note], and violations are emitted here. *)
+  postcond :
+    string -> A.expr list -> (string * A.expr * string option) option;
+      (* Return refinement of a callee, by name and actuals — how a nested
+         call's postcondition becomes a premise for this one.  Always
+         [postcond_of ctx defs] at every call site; it is a parameter rather
+         than a direct call because [rctx]/[defs] are not in scope here. *)
+  path : (A.expr * bool) list;
+      (* Path facts: the guards (and their polarity) reaching this call site.
+         One of the two fact channels — see the shadowing discipline note in
+         §10: a name rebound in between must retire from BOTH this and
+         [sc], or a stale fact proves a goal about a different value. *)
+  lets : launder;
+      (* Laundering `let`s: bindings whose RHS lets a guard about one name be
+         re-attributed to another.  Retires on rebinding of either the key or
+         any name its RHS mentions. *)
+  sc : scope;
+      (* The other fact channel: refined locals and parameters in scope, name
+         -> (binder, predicate, sort). *)
+  re : recenv;
+      (* Record-typed variables in scope, name -> SMT sort name, so a
+         predicate's `v.field` projections can be resolved through that
+         sort's selectors. *)
+}
+
+let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
+    ?(verdict_out : Obligation.verdict option ref option)
+    (sg : fn_sig) (args : A.expr list) (rp : rparam) : unit =
+  (* Destructured to the names the body has always used: this is a signature
+     change, not a rewrite of 1,361 lines. *)
+  let { root; errctx; postcond; path; lets; sc; re } = cx in
   let subject_noun = match subject with Argument -> "argument" | Bound_expr -> "bound expression" in
   let obligation_noun =
     match subject with Argument -> "precondition" | Bound_expr -> "type annotation"
@@ -4721,6 +4854,10 @@ let check_call ~root errctx ~span ~(callee : string) ?(subject = Argument)
                  labels; notes = []; code = None; fix = None }
            | _ -> note (Obligation.Skipped Obligation.Solver_undecided))))
 
+(* =================================================================
+   §16 Postcondition checking
+   ================================================================= *)
+
 (* ── Postconditions: a function's return value must satisfy its return
    refinement.  We check each *tail* expression (a return position) under the
    path/scope reaching it, with the same definite-failure soundness stance. ── *)
@@ -5135,6 +5272,10 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
           else note (Obligation.Skipped Obligation.Solver_undecided);
           false))
 
+(* =================================================================
+   §17 Postconditions by induction
+   ================================================================= *)
+
 (* ══ Tier 2: structural induction over a recursive function ═════════════════
 
    A RELATIONAL postcondition on a recursive function — `fn insert(t, x) :
@@ -5531,6 +5672,10 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
       | _ -> false))
   | _ -> false
 
+(* =================================================================
+   §18 Function-level postcondition entry points and gating
+   ================================================================= *)
+
 (* Check every return-position tail of every clause of [fd] against its declared
    return refinement.  Returns true iff ALL of them positively verified (a
    function with no clauses, or a clause with no reachable tail, counts as NOT
@@ -5622,6 +5767,10 @@ let gate_unverified_posts ~root errctx (defs : (string, fn_sig option) Hashtbl.t
   in
   go "" decls
 
+(* =================================================================
+   §19 The visit traversal
+   ================================================================= *)
+
 (* ── An annotated `let`'s refinement is an OBLIGATION, not a promise ───────
 
    `let ys : {List(Int) | len(_) > 0} = []` used to be believed on sight:
@@ -5692,14 +5841,23 @@ let check_let_annotation ~root errctx defs (ctx : rctx) (path : (A.expr * bool) 
       }
     in
     let out = ref None in
-    check_call ~root errctx ~span:n.A.span
+    (* Every fact channel is shadowed by the names this binding introduces —
+       see [call_ctx]'s note: all of them, or none. *)
+    let cx =
+      { root
+      ; errctx
+      ; postcond = postcond_of ctx defs
+      ; path = path_shadow path names
+      ; lets = launder_shadow lets names
+      ; sc = scope_shadow sc names
+      ; re = recenv_shadow re names
+      }
+    in
+    check_call cx ~span:n.A.span
       ~callee:(Printf.sprintf "let %s" name)
-      ~subject:Bound_expr ~verdict_out:out ~lets:(launder_shadow lets names)
-      ~postcond:(postcond_of ctx defs) sg
+      ~subject:Bound_expr ~verdict_out:out sg
       [ b.A.bind_expr ]
-      (path_shadow path names)
-      { idx = 0; binder; pred; sort }
-      (scope_shadow sc names) (recenv_shadow re names);
+      { idx = 0; binder; pred; sort };
     Some (!out = Some Obligation.Proved)
   | _ -> None
 
@@ -5713,24 +5871,16 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
   | A.EApp (A.EVar { A.txt = fname; _ }, args, sp) ->
     (match resolve_call ctx defs fname with
      | Some (Some sg) ->
-       let postcond = postcond_of ctx defs in
-       List.iter
-         (fun rp ->
-           check_call ~root errctx ~span:sp ~callee:fname ~lets ~postcond sg args path rp
-             sc re)
-         sg.refined
+       let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets; sc; re } in
+       List.iter (fun rp -> check_call cx ~span:sp ~callee:fname sg args rp) sg.refined
      | _ ->
        (* Not a resolvable NAMED callee: fall back to the callee env — a call
           made through a refined function-typed parameter, or through a local
           alias of a named function (see [cbenv]). *)
        (match List.assoc_opt fname cb with
         | Some sg ->
-          let postcond = postcond_of ctx defs in
-          List.iter
-            (fun rp ->
-              check_call ~root errctx ~span:sp ~callee:fname ~lets ~postcond sg args path
-                rp sc re)
-            sg.refined
+          let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets; sc; re } in
+          List.iter (fun rp -> check_call cx ~span:sp ~callee:fname sg args rp) sg.refined
         | None -> ()));
     List.iter go args
   | A.EApp (f, args, _) -> go f; List.iter go args
@@ -6032,6 +6182,10 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
       sc re cb e2
   | A.EDbg (Some e, _) -> go e
   | A.ELit _ | A.EVar _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> ()
+
+(* =================================================================
+   §20 Refinement-placement warnings
+   ================================================================= *)
 
 (* Render a dotted MODULE path (`List.length`, `M.N.f`, …) back to a string, or
    [None] for anything else.  Mirrors [desugar_expr]'s [flatten_module_path]
@@ -6419,6 +6573,10 @@ let rec warn_predicate_decls (errctx : Err.ctx) ~(strict : bool) (decls : A.decl
       | A.DUse _ | A.DAlias _ -> ())
     decls
 
+(* =================================================================
+   §21 The declaration walk
+   ================================================================= *)
+
 (* [assume_params:false] walks the body with the parameter refinements erased,
    so none of them can discharge anything.  Used for an `impl` method whose
    contract [collect_all_defs] could not adopt unambiguously: with no caller
@@ -6582,6 +6740,10 @@ and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
   | A.DSatisfy _             (* likewise desugared into DImpl *)
   | A.DUse _                 (* import: read into [ctx.uses] above *)
   | A.DAlias _ -> ()         (* alias: read into [ctx.aliases] above *)
+
+(* =================================================================
+   §22 Registration and stdlib-shape validation
+   ================================================================= *)
 
 (** Register ADT/record sorts for a list of declarations without running the full
     VC pass.  Called by [--check-migration] mode to prime the type tables before
@@ -7273,6 +7435,10 @@ let bare_builtin_undefined ?(mod_name = "") (name : string) (decls : A.decl list
   in
   go decls;
   (not !taken, !cause)
+
+(* =================================================================
+   §23 Entry point: check_module
+   ================================================================= *)
 
 (* [measure_axioms] (default true) gates the whole measure-axiom machinery —
    datatype modelling, recursion-equation axioms, AND the M-b soundness gate (the
