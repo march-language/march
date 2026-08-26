@@ -1352,6 +1352,26 @@ git add lib/tir/llvm_emit_arith.ml lib/tir/llvm_emit_task.ml lib/tir/llvm_emit_r
 
 ## Phase 3 — `refine_check.ml`: navigation and the 12-parameter flood
 
+**LANDED 2026-08-26** on `claude/refine-check-phase3` — see
+[`specs/progress/2026-08-26-refine-check-decomposition-phase3.md`](../progress/2026-08-26-refine-check-decomposition-phase3.md).
+Four commits: the oracle, 23 § headers + a TOC (comments only, 122 insertions /
+0 deletions), `check_call`'s 13 parameters down to 8 behind a documented
+`call_ctx`, and a `.mli` cutting 198 inferred vals to 17.
+
+Three corrections to what is written below:
+
+1. **The inline draft of `scripts/refine-oracle.sh` could never have run** — it
+   repeated the `${x:?…}` bug fixed in `ir-oracle.sh` on 2026-08-25. Task 3.1
+   Step 1 now points at the committed script instead. **[corrected 2026-08-26]**
+2. **A third cache makes the oracle vacuous or flaky, and it is not under
+   `.march/`:** `~/.cache/march`'s Marshal'd stdlib typecheck env is shared
+   across worktrees and its spans carry the populating worktree's absolute
+   paths. The sweep runs under a private `HOME`. **[corrected 2026-08-26]**
+3. **Task 3.3's field list is wrong in both directions.** `rp` varies per
+   iteration at both `visit` sites and is therefore a parameter, not context;
+   `path` is threaded and shadowed exactly like `lets`/`sc`/`re` and belongs in
+   the record with them. **[corrected 2026-08-26]**
+
 **[verified 2026-08-25]** — `refine_check.ml` is untouched by the perf project: still 7,416 lines, `check_call` still at `:3371–4731` (1,361 lines), still three call sites at `:5695` / `:5719` / `:5731`. Every number in this phase re-measured correct.
 
 7,416 lines with **zero section headers** — the only file in this set with no navigational structure at all. `check_call` is 1,361 lines behind a twelve-parameter signature. It has **three** call sites, all inside the `visit` traversal (`refine_check.ml:5695`, `:5719`, `:5731`), so the parameter bundle can be changed with a bounded blast radius — but all three must be read, not one.
@@ -1430,7 +1450,7 @@ git add scripts/refine-oracle.sh && git commit -m "test: add refinement-diagnost
 
 **Files:** Modify `lib/refinecheck/refine_check.ml`
 
-- [ ] **Step 1: Identify natural boundaries**
+- [x] **Step 1: Identify natural boundaries**
 
 ```bash
 grep -n '^let [a-z_]*' lib/refinecheck/refine_check.ml | head -60
@@ -1438,7 +1458,7 @@ grep -n '^let [a-z_]*' lib/refinecheck/refine_check.ml | head -60
 
 Group the 197 top-level definitions into ~12 sections by concern (SMT sort management, path/scope fact channels, record sorts, precondition checking, postcondition checking, induction, capability walks, the `visit` traversal, entry points).
 
-- [ ] **Step 2: Insert numbered headers in the same style as `typecheck.ml`**
+- [x] **Step 2: Insert numbered headers in the same style as `typecheck.ml`**
 
 ```ocaml
 (* =================================================================
@@ -1446,9 +1466,9 @@ Group the 197 top-level definitions into ~12 sections by concern (SMT sort manag
    ================================================================= *)
 ```
 
-- [ ] **Step 3: Add a table of contents below the module docstring**
+- [x] **Step 3: Add a table of contents below the module docstring**
 
-- [ ] **Step 4: Verify comments-only and commit**
+- [x] **Step 4: Verify comments-only and commit**
 
 ```bash
 dune build --root . bin/main.exe 2>&1 | tail -3 && scripts/refine-oracle.sh check /tmp/refine-base-$SLUG; echo "exit=$?"
@@ -1462,7 +1482,7 @@ git add lib/refinecheck/refine_check.ml && git commit -m "docs(refinecheck): add
 **Interfaces:**
 - Produces: `type call_ctx = { root : …; errctx : …; lets : launder; postcond : string -> A.expr list -> (string * A.expr * string option) option; rp : rparam; sc : scope; re : recenv }` — the seven parameters that are *constant across the whole traversal*. The four that vary per call (`~span`, `~callee`, `sg`, `args`, `path`) stay as explicit parameters.
 
-- [ ] **Step 1: Read the current signature and classify each parameter**
+- [x] **Step 1: Read the current signature and classify each parameter**
 
 ```bash
 S=$(grep -n '^let check_call ' lib/refinecheck/refine_check.ml | cut -d: -f1)
@@ -1473,15 +1493,15 @@ Current: `~root errctx ~span ~(callee : string) ?(subject = Argument) ?(verdict_
 
 Classify by tracing **all three call sites** — `refine_check.ml:5695`, `:5719`, `:5731`, all inside the `visit` traversal: a parameter passed unchanged at every site on every iteration is *context*; one that varies at **any** site is a *parameter*. Do not guess, and do not stop after the first site — an argument constant at one can vary at another.
 
-- [ ] **Step 2: Define the record next to `check_call`, with a docstring per field**
+- [x] **Step 2: Define the record next to `check_call`, with a docstring per field**
 
 Each field's comment says what it is and why it is threaded — this is the documentation that does not exist today and is the main reason the function is hard to edit.
 
-- [ ] **Step 3: Change the signature and all three call sites**
+- [x] **Step 3: Change the signature and all three call sites**
 
 Build the record once, where `visit` binds the traversal-constant values, and pass it at `:5695`, `:5719`, and `:5731`.
 
-- [ ] **Step 4: Verify diagnostics are unchanged**
+- [x] **Step 4: Verify diagnostics are unchanged**
 
 ```bash
 dune build --root . bin/main.exe 2>&1 | tail -5 && scripts/refine-oracle.sh check /tmp/refine-base-$SLUG; echo "refine_exit=$?"
@@ -1490,7 +1510,7 @@ scripts/run-tests.sh compiler; echo "suite_exit=$?"
 
 Expected: both exit 0. A diagnostic-text change here would also break the CI-only `@types-check` alias, which asserts on exact message text.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add lib/refinecheck/refine_check.ml && git commit -m "refactor(refinecheck): bundle check_call's traversal-constant params into a record"
@@ -1500,17 +1520,17 @@ git add lib/refinecheck/refine_check.ml && git commit -m "refactor(refinecheck):
 
 **Files:** Create `lib/refinecheck/refine_check.mli`; modify `lib/refinecheck/dune` if needed (`.mli` files do not need a `(modules …)` entry — the `.ml` already has one).
 
-- [ ] **Step 1: Find the actual public surface**
+- [x] **Step 1: Find the actual public surface**
 
 ```bash
 grep -rhoE '\bRefine_check\.[a-z_][a-zA-Z0-9_]*' --include='*.ml' . | sort | uniq -c | sort -rn
 ```
 
-- [ ] **Step 2: Write an `.mli` exporting only those names**
+- [x] **Step 2: Write an `.mli` exporting only those names**
 
 Do not export all 197 definitions. If the externally-used set is small (likely under 10), the `.mli` is the single most valuable artifact in this phase: it turns "197 top-level lets" into a readable API.
 
-- [ ] **Step 3: Build, verify, commit**
+- [x] **Step 3: Build, verify, commit**
 
 ```bash
 dune build --root . bin/main.exe 2>&1 | tail -5 && scripts/refine-oracle.sh check /tmp/refine-base-$SLUG && scripts/run-tests.sh compiler; echo "exit=$?"
