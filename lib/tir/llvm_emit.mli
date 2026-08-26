@@ -51,6 +51,20 @@ val emit_preamble : ?target:target_config -> ?repl:bool -> Buffer.t -> unit
 (** Symbol name an [extern] declaration links against. *)
 val mangle_extern : string -> string
 
+(** {1 Builtin dispatch}
+
+    [emit_expr] selects a builtin's emit arm with a
+    [when Builtin_name.is Builtin_name.Task_await f.Tir.v_name] guard. Guards
+    are opaque to the compiler, so [builtin_group] exists as the
+    exhaustiveness surface they cannot provide: it has no wildcard, and adding
+    a constructor to [Builtin_name.t] without classifying it there is a
+    non-exhaustive-match error. It doubles as documentation of which topic
+    section of [llvm_emit.ml] emits a given builtin. *)
+
+type builtin_group = Bg_arith | Bg_task | Bg_record
+
+val builtin_group : Builtin_name.t -> builtin_group
+
 (** {1 REPL / JIT fragment emission}
 
     Driven by [lib/jit/repl_jit.ml], which compiles one entry at a time into a

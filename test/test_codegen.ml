@@ -13262,6 +13262,21 @@ declare void @march_yield_from_compiled()
      S=$(grep -n '^let rec emit_expr ctx' lib/tir/llvm_emit.ml | cut -d: -f1)
      awk -v s=$S 'NR>s && /^let |^and /{print NR; exit}' lib/tir/llvm_emit.ml
    and the v_name grep over that window (see the decomposition plan, Task 2.1). *)
+(* Every Builtin_name constructor is classified by Llvm_emit.builtin_group.
+   That match is the exhaustiveness surface emit_expr's [when] guards cannot
+   provide; this test is its caller, and pins the per-group counts so a
+   constructor silently migrating between groups shows up as a diff. *)
+let test_builtin_group_total () =
+  let count g =
+    List.length
+      (List.filter
+         (fun c -> March_tir.Llvm_emit.builtin_group c = g)
+         March_tir.Builtin_name.all)
+  in
+  Alcotest.(check int) "arith" 16 (count March_tir.Llvm_emit.Bg_arith);
+  Alcotest.(check int) "task" 24 (count March_tir.Llvm_emit.Bg_task);
+  Alcotest.(check int) "record" 17 (count March_tir.Llvm_emit.Bg_record)
+
 let test_builtin_name_roundtrip () =
   List.iter
     (fun c ->
@@ -15171,6 +15186,8 @@ let codegen_suites =
             test_every_builtin_c_name_is_declared;
           Alcotest.test_case "Builtin_name round-trips and covers emit_expr" `Quick
             test_builtin_name_roundtrip;
+          Alcotest.test_case "every Builtin_name has an emit group" `Quick
+            test_builtin_group_total;
           Alcotest.test_case "native, non-repl preamble byte-identical (W3C2.4 / H2)" `Quick
             test_preamble_byte_identical_native;
           Alcotest.test_case "native, REPL preamble byte-identical (W3C2.4 / H2)" `Quick

@@ -1345,6 +1345,57 @@ let emit_vault_opt_reencode ctx (v : string) (ret_ty : Tir.ty) : string =
 (* ── Core expression emitter ─────────────────────────────────────────── *)
 
 (** Emit [e] and return (llvm_type, llvm_value). Unit → ("i64","0"). *)
+(* ── Builtin dispatch: exhaustiveness surface ──────────────────────────────
+   [emit_expr] selects a builtin's emit arm with a per-arm
+   [when Builtin_name.is Builtin_name.Task_await f.Tir.v_name] guard.  Guards
+   are opaque to the compiler: nothing checks that every constructor of
+   [Builtin_name.t] actually HAS an arm, which is the failure mode the variant
+   exists to catch.
+
+   This match closes that gap.  It has no wildcard, so adding a constructor to
+   [Builtin_name.t] without classifying it here is a non-exhaustive-match
+   error (warning 8 is an error under the dev profile).  The classification is
+   the topic grouping the arms are organised by, so it also documents where in
+   this file a given builtin is emitted. *)
+type builtin_group =
+  | Bg_arith   (* integer/float/bool scalar ops and the to_string family *)
+  | Bg_task    (* tasks, actors, signals, channels, MPST, work pools *)
+  | Bg_record  (* records, vaults, HTML escaping *)
+
+let builtin_group : Builtin_name.t -> builtin_group = function
+  | Builtin_name.Bool_to_string | Builtin_name.Float_to_string
+  | Builtin_name.Int_abs | Builtin_name.Int_div
+  | Builtin_name.Int_div_euclid | Builtin_name.Int_max_value
+  | Builtin_name.Int_min_value | Builtin_name.Int_mod
+  | Builtin_name.Int_mod_euclid | Builtin_name.Int_not
+  | Builtin_name.Int_popcount | Builtin_name.Int_pow
+  | Builtin_name.Int_to_string | Builtin_name.Negate | Builtin_name.Not
+  | Builtin_name.To_string ->
+    Bg_arith
+  | Builtin_name.Actor_register | Builtin_name.Actor_reply
+  | Builtin_name.Chan_choose | Builtin_name.Chan_send
+  | Builtin_name.Get_work_pool | Builtin_name.Mpst_send
+  | Builtin_name.Pmap_threshold | Builtin_name.Receive
+  | Builtin_name.Remote_ref_hashes | Builtin_name.Send
+  | Builtin_name.Signal_raise_self | Builtin_name.Signal_unwatch
+  | Builtin_name.Signal_watch | Builtin_name.Task_await
+  | Builtin_name.Task_await_unwrap | Builtin_name.Task_cancel
+  | Builtin_name.Task_cancel_by_id | Builtin_name.Task_cancel_token_new
+  | Builtin_name.Task_is_cancelled | Builtin_name.Task_reductions
+  | Builtin_name.Task_spawn | Builtin_name.Task_spawn_steal
+  | Builtin_name.Task_spawn_with_cancel | Builtin_name.Task_yield ->
+    Bg_task
+  | Builtin_name.Html_auto_escape | Builtin_name.Html_escape_ctx
+  | Builtin_name.Record_from_list | Builtin_name.Record_get
+  | Builtin_name.Record_has_key | Builtin_name.Record_put
+  | Builtin_name.Vault_drop | Builtin_name.Vault_get
+  | Builtin_name.Vault_incr | Builtin_name.Vault_ns_drop
+  | Builtin_name.Vault_ns_get | Builtin_name.Vault_ns_set
+  | Builtin_name.Vault_push_capped | Builtin_name.Vault_put_new
+  | Builtin_name.Vault_set | Builtin_name.Vault_set_ttl
+  | Builtin_name.Vault_update ->
+    Bg_record
+
 let rec emit_expr ctx (e : Tir.expr) : string * string =
   match e with
 
@@ -1976,13 +2027,13 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     emit ctx (Printf.sprintf "%s = or i64 %s, %s" r va vb);
     ("i64", r)
 
-  | Tir.EApp (f, [a]) when f.Tir.v_name = "not" ->
+  | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Not f.Tir.v_name ->
     let va = emit_atom_as ctx "i64" a in
     let r  = fresh ctx "ar" in
     emit ctx (Printf.sprintf "%s = xor i64 %s, 1" r va);
     ("i64", r)
 
-  | Tir.EApp (f, [a]) when f.Tir.v_name = "negate" ->
+  | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Negate f.Tir.v_name ->
     let (ty, va) = emit_atom ctx a in
     let r = fresh ctx "ar" in
     if ty = "double" then
@@ -2019,7 +2070,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      (offset +16, the standard Boxed-ADT single-field layout) and pass it
      through unescaped — verbatim insertion is exactly `Html.Safe`'s
      contract, so no runtime call is needed at all. *)
-  | Tir.EApp (f, [a]) when f.Tir.v_name = "html_auto_escape"
+  | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Html_auto_escape f.Tir.v_name
                             && (match atom_tir_ty a with
                                 | Tir.TCon ("Safe", _) ->
                                   not (Collision_set.is_colliding ctx.collision_set "Safe")
@@ -2044,7 +2095,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      tuples, and the `Safe`-name-collision case that falls through the arm
      above — goes through `march_value_to_string` first, then escapes the
      resulting real String. *)
-  | Tir.EApp (f, [a]) when f.Tir.v_name = "html_auto_escape" ->
+  | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Html_auto_escape f.Tir.v_name ->
     let runtime_safe =
       match atom_tir_ty a with
       | Tir.TString | Tir.TInt | Tir.TFloat | Tir.TBool -> true
@@ -2107,7 +2158,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      (Html.Trusted) makes this precise in a later task; until then the rule is
      "verbatim only when the escaper is EscHtml". *)
   | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitInt id); a])
-    when f.Tir.v_name = "html_escape_ctx" ->
+    when Builtin_name.is Builtin_name.Html_escape_ctx f.Tir.v_name ->
     let is_html_ctx = id = 0 (* Context.escaper_id EscHtml *) in
     (* Html.Safe and IOList are both already-safe HTML, but they are UNWRAPPED
        differently. march_html_auto_escape's C body does not understand Safe at
@@ -2220,7 +2271,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      Safety is unchanged: march_html_escape_ctx validates the id and aborts on
      one it does not know, so a wrong id fails loudly rather than silently
      skipping an escaper. *)
-  | Tir.EApp (f, [idx; a]) when f.Tir.v_name = "html_escape_ctx" ->
+  | Tir.EApp (f, [idx; a]) when Builtin_name.is Builtin_name.Html_escape_ctx f.Tir.v_name ->
     let id_v = emit_atom_as ctx "i64" idx in
     let v = emit_atom_as ctx "ptr" a in
     let v =
@@ -2246,13 +2297,13 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     emit ctx (Printf.sprintf "%s = %s i64 %s, %s" r (int_bitwise_op f.Tir.v_name) va vb);
     ("i64", r)
 
-  | Tir.EApp (f, [a]) when f.Tir.v_name = "int_not" ->
+  | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Int_not f.Tir.v_name ->
     let va = emit_atom_as ctx "i64" a in
     let r  = fresh ctx "bw" in
     emit ctx (Printf.sprintf "%s = xor i64 %s, -1" r va);
     ("i64", r)
 
-  | Tir.EApp (f, [a]) when f.Tir.v_name = "int_popcount" ->
+  | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Int_popcount f.Tir.v_name ->
     let va = emit_atom_as ctx "i64" a in
     let r  = fresh ctx "bw" in
     emit ctx (Printf.sprintf "%s = call i64 @llvm.ctpop.i64(i64 %s)" r va);
@@ -2272,19 +2323,19 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      and so prints the raw tagged bits verbatim (5 -> "11") instead of
      coercing. Coerce explicitly here, matching every other scalar builtin
      (int_not, is_int_bitwise, …) in this file. *)
-  | Tir.EApp (f, [a]) when f.Tir.v_name = "int_to_string" ->
+  | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Int_to_string f.Tir.v_name ->
     let va = emit_atom_as ctx "i64" a in
     let r  = fresh ctx "its" in
     emit ctx (Printf.sprintf "%s = call ptr @march_int_to_string(i64 %s)" r va);
     ("ptr", r)
 
-  | Tir.EApp (f, [a]) when f.Tir.v_name = "bool_to_string" ->
+  | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Bool_to_string f.Tir.v_name ->
     let va = emit_atom_as ctx "i64" a in
     let r  = fresh ctx "bts" in
     emit ctx (Printf.sprintf "%s = call ptr @march_bool_to_string(i64 %s)" r va);
     ("ptr", r)
 
-  | Tir.EApp (f, [a]) when f.Tir.v_name = "float_to_string" ->
+  | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Float_to_string f.Tir.v_name ->
     let va = emit_atom_as ctx "double" a in
     let r  = fresh ctx "fts" in
     emit ctx (Printf.sprintf "%s = call ptr @march_float_to_string(double %s)" r va);
@@ -2301,7 +2352,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      2), so the closure hands the trampoline a genuine heap pointer here; no
      dedicated spawn variant is needed. See task_await_unwrap's "double"
      branch for the matching unbox. *)
-  | Tir.EApp (f, [clo_atom]) when f.Tir.v_name = "task_spawn" ->
+  | Tir.EApp (f, [clo_atom]) when Builtin_name.is Builtin_name.Task_spawn f.Tir.v_name ->
     let (_, clo_ptr) = emit_atom ctx clo_atom in
     let result = fresh ctx "tsres" in
     emit ctx (Printf.sprintf "%s = call ptr @march_task_spawn_thunk(ptr %s)"
@@ -2312,7 +2363,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      watcher, or raise a signal to self.  The `code` is an Int (untag to raw
      i64); the watcher closure is passed OWNED (borrow.ml marks the arg
      consuming) so the runtime keeps its reference across drains. *)
-  | Tir.EApp (f, [code_atom; clo_atom]) when f.Tir.v_name = "signal_watch" ->
+  | Tir.EApp (f, [code_atom; clo_atom]) when Builtin_name.is Builtin_name.Signal_watch f.Tir.v_name ->
     let (code_ty, code_v) = emit_atom ctx code_atom in
     let code_i64 = coerce ctx code_ty code_v "i64" in
     let (clo_ty, clo_v) = emit_atom ctx clo_atom in
@@ -2320,12 +2371,12 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     emit ctx (Printf.sprintf "call void @march_signal_watch(i64 %s, ptr %s)"
                 code_i64 clo_ptr);
     ("ptr", "null")
-  | Tir.EApp (f, [code_atom]) when f.Tir.v_name = "signal_unwatch" ->
+  | Tir.EApp (f, [code_atom]) when Builtin_name.is Builtin_name.Signal_unwatch f.Tir.v_name ->
     let (code_ty, code_v) = emit_atom ctx code_atom in
     let code_i64 = coerce ctx code_ty code_v "i64" in
     emit ctx (Printf.sprintf "call void @march_signal_unwatch(i64 %s)" code_i64);
     ("ptr", "null")
-  | Tir.EApp (f, [code_atom]) when f.Tir.v_name = "signal_raise_self" ->
+  | Tir.EApp (f, [code_atom]) when Builtin_name.is Builtin_name.Signal_raise_self f.Tir.v_name ->
     let (code_ty, code_v) = emit_atom ctx code_atom in
     let code_i64 = coerce ctx code_ty code_v "i64" in
     emit ctx (Printf.sprintf "call void @march_signal_raise_self(i64 %s)" code_i64);
@@ -2339,7 +2390,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      it — one leaked Result cell per await, on top of the leaked Task below.
      @march_task_await_value performs the same task_wait_done and returns
      task[3] directly, which is the whole point of the _value variant. *)
-  | Tir.EApp (f, [a]) when f.Tir.v_name = "task_await_unwrap" ->
+  | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Task_await_unwrap f.Tir.v_name ->
     let (_, task_ptr) = emit_atom ctx a in
     let inner_ty = match a with
       | Tir.AVar v ->
@@ -2433,7 +2484,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      specs/progress/2026-08-21-float-returning-task-compiled.md.  Contrast
      task_await_unwrap's "double" branch, which DOES unbox — correctly, because
      it yields the scalar as its expression value rather than an ADT field. *)
-  | Tir.EApp (f, [a]) when f.Tir.v_name = "task_await" ->
+  | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Task_await f.Tir.v_name ->
     let (_, tp) = emit_atom ctx a in
     let r = fresh ctx "tawait" in
     emit ctx (Printf.sprintf "%s = call ptr @march_task_await(ptr %s)" r tp);
@@ -2481,18 +2532,18 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("ptr", r)
 
   (* task_yield() → cooperative yield via march_sched_yield *)
-  | Tir.EApp (f, []) when f.Tir.v_name = "task_yield" ->
+  | Tir.EApp (f, []) when Builtin_name.is Builtin_name.Task_yield f.Tir.v_name ->
     emit ctx "call void @march_sched_yield()";
     ("i64", "0")
 
   (* receive() → cooperative blocking mailbox pop via march_sched_recv *)
-  | Tir.EApp (f, []) when f.Tir.v_name = "receive" ->
+  | Tir.EApp (f, []) when Builtin_name.is Builtin_name.Receive f.Tir.v_name ->
     let r = fresh ctx "recv_msg" in
     emit ctx (Printf.sprintf "%s = call ptr @march_sched_recv()" r);
     ("ptr", r)
 
   (* task_spawn_steal(pool, thunk_closure) → spawn as async green thread *)
-  | Tir.EApp (f, [_pool; clo_atom]) when f.Tir.v_name = "task_spawn_steal" ->
+  | Tir.EApp (f, [_pool; clo_atom]) when Builtin_name.is Builtin_name.Task_spawn_steal f.Tir.v_name ->
     let (_, clo_ptr) = emit_atom ctx clo_atom in
     let result = fresh ctx "tsres" in
     emit ctx (Printf.sprintf "%s = call ptr @march_task_spawn_thunk(ptr %s)"
@@ -2500,7 +2551,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("ptr", result)
 
   (* pmap_threshold() → compile-time constant i64 from --pmap-threshold *)
-  | Tir.EApp (f, []) when f.Tir.v_name = "pmap_threshold" ->
+  | Tir.EApp (f, []) when Builtin_name.is Builtin_name.Pmap_threshold f.Tir.v_name ->
     ("i64", string_of_int ctx.pmap_threshold)
 
   (* remote_ref_hashes(module, fn) → constant-fold to (sig_hash, impl_hash) pair.
@@ -2510,7 +2561,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      Key lookup strategy: top-level user module functions are stored without
      the module prefix (fn_name = "fib"), while stdlib/nested module functions
      are stored with it (fn_name = "String.from_int").  Try both forms. *)
-  | Tir.EApp (f, [mod_atom; fn_atom]) when f.Tir.v_name = "remote_ref_hashes" ->
+  | Tir.EApp (f, [mod_atom; fn_atom]) when Builtin_name.is Builtin_name.Remote_ref_hashes f.Tir.v_name ->
     let get_str_lit a = match a with
       | Tir.ALit (March_ast.Ast.LitString s) -> s
       | _ -> "" in
@@ -2539,7 +2590,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("ptr", tup)
 
   (* task_reductions() → read TLS reduction counter (no-op 0 in REPL mode) *)
-  | Tir.EApp (f, []) when f.Tir.v_name = "task_reductions" ->
+  | Tir.EApp (f, []) when Builtin_name.is Builtin_name.Task_reductions f.Tir.v_name ->
     if ctx.repl then ("i64", "0")
     else begin
       let r = fresh ctx "reds" in
@@ -2548,26 +2599,26 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     end
 
   (* task_cancel_token_new() → allocate a new cancel token *)
-  | Tir.EApp (f, []) when f.Tir.v_name = "task_cancel_token_new" ->
+  | Tir.EApp (f, []) when Builtin_name.is Builtin_name.Task_cancel_token_new f.Tir.v_name ->
     let r = fresh ctx "ctok" in
     emit ctx (Printf.sprintf "%s = call ptr @march_cancel_token_new()" r);
     ("ptr", r)
 
   (* task_cancel(tok) → cancel the token *)
-  | Tir.EApp (f, [tok]) when f.Tir.v_name = "task_cancel" ->
+  | Tir.EApp (f, [tok]) when Builtin_name.is Builtin_name.Task_cancel f.Tir.v_name ->
     let (_, tp) = emit_atom ctx tok in
     emit ctx (Printf.sprintf "call void @march_cancel_token_cancel(ptr %s)" tp);
     ("i64", "0")
 
   (* task_is_cancelled(tok) → check if token is cancelled *)
-  | Tir.EApp (f, [tok]) when f.Tir.v_name = "task_is_cancelled" ->
+  | Tir.EApp (f, [tok]) when Builtin_name.is Builtin_name.Task_is_cancelled f.Tir.v_name ->
     let (_, tp) = emit_atom ctx tok in
     let r = fresh ctx "isc" in
     emit ctx (Printf.sprintf "%s = call i64 @march_cancel_token_is_cancelled(ptr %s)" r tp);
     ("i64", r)
 
   (* task_spawn_with_cancel(clo, tok) → spawn with cancel token *)
-  | Tir.EApp (f, [clo; tok]) when f.Tir.v_name = "task_spawn_with_cancel" ->
+  | Tir.EApp (f, [clo; tok]) when Builtin_name.is Builtin_name.Task_spawn_with_cancel f.Tir.v_name ->
     let (_, cp) = emit_atom ctx clo in
     let (_, tp) = emit_atom ctx tok in
     let r = fresh ctx "tswc" in
@@ -2575,13 +2626,13 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("ptr", r)
 
   (* task_cancel_by_id(task) → mark task's proc as DEAD *)
-  | Tir.EApp (f, [t]) when f.Tir.v_name = "task_cancel_by_id" ->
+  | Tir.EApp (f, [t]) when Builtin_name.is Builtin_name.Task_cancel_by_id f.Tir.v_name ->
     let (_, tp) = emit_atom ctx t in
     emit ctx (Printf.sprintf "call void @march_task_cancel_by_id(ptr %s)" tp);
     ("i64", "0")
 
   (* get_work_pool() → null sentinel in Phase 1 *)
-  | Tir.EApp (f, []) when f.Tir.v_name = "get_work_pool" ->
+  | Tir.EApp (f, []) when Builtin_name.is Builtin_name.Get_work_pool f.Tir.v_name ->
     ("ptr", "null")
 
   (* ── Record introspection builtins (native lowering) ───────────────── *)
@@ -2601,7 +2652,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
                 res f.Tir.v_name rp);
     ("ptr", res)
 
-  | Tir.EApp (f, [r; k]) when f.Tir.v_name = "record_get" ->
+  | Tir.EApp (f, [r; k]) when Builtin_name.is Builtin_name.Record_get f.Tir.v_name ->
     let (rt, rv) = emit_atom ctx r in
     let rp = coerce ctx rt rv "ptr" in
     let (kt, kv) = emit_atom ctx k in
@@ -2618,7 +2669,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
                 res rp kp payload_kind);
     ("ptr", res)
 
-  | Tir.EApp (f, [r; k]) when f.Tir.v_name = "record_has_key" ->
+  | Tir.EApp (f, [r; k]) when Builtin_name.is Builtin_name.Record_has_key f.Tir.v_name ->
     let (rt, rv) = emit_atom ctx r in
     let rp = coerce ctx rt rv "ptr" in
     let (kt, kv) = emit_atom ctx k in
@@ -2628,7 +2679,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
                 res rp kp);
     ("i64", res)
 
-  | Tir.EApp (f, [r; k; v]) when f.Tir.v_name = "record_put" ->
+  | Tir.EApp (f, [r; k; v]) when Builtin_name.is Builtin_name.Record_put f.Tir.v_name ->
     let (rt, rv) = emit_atom ctx r in
     let rp = coerce ctx rt rv "ptr" in
     let (kt, kv) = emit_atom ctx k in
@@ -2656,7 +2707,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       res rp kp vp (Char.code kind));
     ("ptr", res)
 
-  | Tir.EApp (f, [l]) when f.Tir.v_name = "record_from_list" ->
+  | Tir.EApp (f, [l]) when Builtin_name.is Builtin_name.Record_from_list f.Tir.v_name ->
     let (lt, lv) = emit_atom ctx l in
     let lp = coerce ctx lt lv "ptr" in
     (* Kind hint for the pair values, from the list's element tuple type. *)
@@ -2670,7 +2721,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("ptr", res)
 
   (* ── to_string: dispatch on argument TIR type ──────────────────────── *)
-  | Tir.EApp (f, [a]) when f.Tir.v_name = "to_string" ->
+  | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.To_string f.Tir.v_name ->
     let (arg_ty, arg_val) = emit_atom ctx a in
     let tir_ty = (match a with
       | Tir.AVar v -> v.Tir.v_ty
@@ -2795,7 +2846,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      This is the Phase 5 linear-type optimization: zero-copy inter-process
      message passing for linearly-typed messages. *)
   | Tir.EApp (f, [actor_atom; msg_atom])
-    when f.Tir.v_name = "send"
+    when Builtin_name.is Builtin_name.Send f.Tir.v_name
       && (match msg_atom with
           | Tir.AVar v -> v.Tir.v_lin = Tir.Lin
           | _ -> false) ->
@@ -2812,8 +2863,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      so they stay as EApp (not converted to ECallPtr).  Handle them here
      BEFORE the var_slot guard so the specific match takes priority. *)
   | Tir.EApp (f, [a; b])
-    when f.Tir.v_name = "int_mod" || f.Tir.v_name = "int_div"
-      || f.Tir.v_name = "int_mod_euclid" || f.Tir.v_name = "int_div_euclid" ->
+    when Builtin_name.(is Int_mod f.Tir.v_name || is Int_div f.Tir.v_name
+                       || is Int_mod_euclid f.Tir.v_name
+                       || is Int_div_euclid f.Tir.v_name) ->
     let va = emit_atom_as ctx "i64" a in
     let vb = emit_atom_as ctx "i64" b in
     let r  = fresh ctx "ar" in
@@ -2831,7 +2883,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", r)
 
   | Tir.EApp (f, [a; b])
-    when f.Tir.v_name = "int_pow" ->
+    when Builtin_name.is Builtin_name.Int_pow f.Tir.v_name ->
     let va = emit_atom_as ctx "i64" a in
     let vb = emit_atom_as ctx "i64" b in
     let r  = fresh ctx "ar" in
@@ -2839,18 +2891,18 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", r)
 
   | Tir.EApp (f, [a])
-    when f.Tir.v_name = "int_abs" ->
+    when Builtin_name.is Builtin_name.Int_abs f.Tir.v_name ->
     let va = emit_atom_as ctx "i64" a in
     let r  = fresh ctx "ar" in
     emit ctx (Printf.sprintf "%s = call i64 @llvm.abs.i64(i64 %s, i1 false)" r va);
     ("i64", r)
 
   | Tir.EApp (f, _)
-    when f.Tir.v_name = "int_max_value" ->
+    when Builtin_name.is Builtin_name.Int_max_value f.Tir.v_name ->
     ("i64", "9223372036854775807")
 
   | Tir.EApp (f, _)
-    when f.Tir.v_name = "int_min_value" ->
+    when Builtin_name.is Builtin_name.Int_min_value f.Tir.v_name ->
     ("i64", "-9223372036854775808")
 
   (* ── Vault stores: the value is a heterogeneous void pointer and MUST be the
@@ -2862,7 +2914,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      via (n<<1)|1, leaves heap pointers unchanged); table/key are already ptr,
      trailing ttl/max stay i64. *)
   | Tir.EApp (f, [tbl; key; value])
-    when f.Tir.v_name = "vault_set" ->
+    when Builtin_name.is Builtin_name.Vault_set f.Tir.v_name ->
     let vt = emit_atom_as ctx "ptr" tbl in
     let vk = emit_atom_as ctx "ptr" key in
     let vv = emit_atom_as ctx "ptr" value in
@@ -2871,7 +2923,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", "0")
 
   | Tir.EApp (f, [tbl; key; value; ttl])
-    when f.Tir.v_name = "vault_set_ttl" ->
+    when Builtin_name.is Builtin_name.Vault_set_ttl f.Tir.v_name ->
     let vt = emit_atom_as ctx "ptr" tbl in
     let vk = emit_atom_as ctx "ptr" key in
     let vv = emit_atom_as ctx "ptr" value in
@@ -2881,7 +2933,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", "0")
 
   | Tir.EApp (f, [tbl; key; value; ttl])
-    when f.Tir.v_name = "vault_put_new" ->
+    when Builtin_name.is Builtin_name.Vault_put_new f.Tir.v_name ->
     let vt = emit_atom_as ctx "ptr" tbl in
     let vk = emit_atom_as ctx "ptr" key in
     let vv = emit_atom_as ctx "ptr" value in
@@ -2898,7 +2950,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      boundary (the runtime would read the Pid as the name string and vice
      versa). Swap explicitly here, same shape as the vault_set arm above. *)
   | Tir.EApp (f, [pid; name])
-    when f.Tir.v_name = "actor_register" ->
+    when Builtin_name.is Builtin_name.Actor_register f.Tir.v_name ->
     let vp = emit_atom_as ctx "ptr" pid in
     let vn = emit_atom_as ctx "ptr" name in
     let r  = fresh ctx "ar" in
@@ -2907,7 +2959,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", r)
 
   | Tir.EApp (f, [tbl; key; value; maxn])
-    when f.Tir.v_name = "vault_push_capped" ->
+    when Builtin_name.is Builtin_name.Vault_push_capped f.Tir.v_name ->
     let vt = emit_atom_as ctx "ptr" tbl in
     let vk = emit_atom_as ctx "ptr" key in
     let vv = emit_atom_as ctx "ptr" value in
@@ -2928,7 +2980,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      trailing scalar args (delta) stay i64.
      See specs/progress/2026-08-20-vault-non-string-key-native-crash.md. *)
   | Tir.EApp (f, [tbl; key])
-    when f.Tir.v_name = "vault_get" ->
+    when Builtin_name.is Builtin_name.Vault_get f.Tir.v_name ->
     let vt = emit_atom_as ctx "ptr" tbl in
     let vk = emit_atom_as ctx "ptr" key in
     let r  = fresh ctx "vg" in
@@ -2937,7 +2989,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("ptr", emit_vault_opt_reencode ctx r (fn_ret_tir f.Tir.v_ty))
 
   | Tir.EApp (f, [tbl; key])
-    when f.Tir.v_name = "vault_drop" ->
+    when Builtin_name.is Builtin_name.Vault_drop f.Tir.v_name ->
     let vt = emit_atom_as ctx "ptr" tbl in
     let vk = emit_atom_as ctx "ptr" key in
     emit ctx (Printf.sprintf
@@ -2945,7 +2997,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", "0")
 
   | Tir.EApp (f, [tbl; key; fn_atom])
-    when f.Tir.v_name = "vault_update" ->
+    when Builtin_name.is Builtin_name.Vault_update f.Tir.v_name ->
     let vt = emit_atom_as ctx "ptr" tbl in
     let vk = emit_atom_as ctx "ptr" key in
     let vf = emit_atom_as ctx "ptr" fn_atom in
@@ -2954,7 +3006,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", "0")
 
   | Tir.EApp (f, [tbl; key; delta])
-    when f.Tir.v_name = "vault_incr" ->
+    when Builtin_name.is Builtin_name.Vault_incr f.Tir.v_name ->
     let vt = emit_atom_as ctx "ptr" tbl in
     let vk = emit_atom_as ctx "ptr" key in
     let vd = emit_atom_as ctx "i64" delta in
@@ -2964,7 +3016,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", r)
 
   | Tir.EApp (f, [ns; key; value])
-    when f.Tir.v_name = "vault_ns_set" ->
+    when Builtin_name.is Builtin_name.Vault_ns_set f.Tir.v_name ->
     let vn = emit_atom_as ctx "ptr" ns in
     let vk = emit_atom_as ctx "ptr" key in
     let vv = emit_atom_as ctx "ptr" value in
@@ -2973,7 +3025,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", "0")
 
   | Tir.EApp (f, [ns; key])
-    when f.Tir.v_name = "vault_ns_get" ->
+    when Builtin_name.is Builtin_name.Vault_ns_get f.Tir.v_name ->
     let vn = emit_atom_as ctx "ptr" ns in
     let vk = emit_atom_as ctx "ptr" key in
     let r  = fresh ctx "vng" in
@@ -2982,7 +3034,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("ptr", emit_vault_opt_reencode ctx r (fn_ret_tir f.Tir.v_ty))
 
   | Tir.EApp (f, [ns; key])
-    when f.Tir.v_name = "vault_ns_drop" ->
+    when Builtin_name.is Builtin_name.Vault_ns_drop f.Tir.v_name ->
     let vn = emit_atom_as ctx "ptr" ns in
     let vk = emit_atom_as ctx "ptr" key in
     emit ctx (Printf.sprintf
@@ -2998,7 +3050,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      tagged before being enqueued, matching the ptr→i64 conditional-untag on the
      receive side. *)
   | Tir.EApp (f, [ref_atom; result_atom])
-    when f.Tir.v_name = "actor_reply" ->
+    when Builtin_name.is Builtin_name.Actor_reply f.Tir.v_name ->
     let vref = emit_atom_as ctx "ptr" ref_atom in
     let vres = emit_atom_as ctx "ptr" result_atom in
     emit ctx (Printf.sprintf "call void @march_actor_reply(ptr %s, ptr %s)" vref vres);
@@ -3022,7 +3074,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      Return type mirrors the general path: these builtins return `Chan`
      (TCon("Chan",[]) → "ptr"). *)
   | Tir.EApp (f, [ep; value])
-    when f.Tir.v_name = "chan_send" ->
+    when Builtin_name.is Builtin_name.Chan_send f.Tir.v_name ->
     let vep = emit_atom_as ctx "ptr" ep in
     let vv  = emit_atom_as ctx "ptr" value in
     let r = fresh ctx "cr" in
@@ -3031,7 +3083,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("ptr", r)
 
   | Tir.EApp (f, [ep; label])
-    when f.Tir.v_name = "chan_choose" ->
+    when Builtin_name.is Builtin_name.Chan_choose f.Tir.v_name ->
     let vep = emit_atom_as ctx "ptr" ep in
     let vl  = emit_atom_as ctx "ptr" label in
     let r = fresh ctx "cr" in
@@ -3040,7 +3092,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("ptr", r)
 
   | Tir.EApp (f, [ep; role; value])
-    when f.Tir.v_name = "mpst_send" ->
+    when Builtin_name.is Builtin_name.Mpst_send f.Tir.v_name ->
     let vep   = emit_atom_as ctx "ptr" ep in
     let vrole = emit_atom_as ctx "ptr" role in
     let vv    = emit_atom_as ctx "ptr" value in
@@ -4283,8 +4335,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     end
 
   | Tir.ECallPtr (Tir.AVar f, [a; b])
-    when f.Tir.v_name = "int_mod" || f.Tir.v_name = "int_div"
-      || f.Tir.v_name = "int_mod_euclid" || f.Tir.v_name = "int_div_euclid" ->
+    when Builtin_name.(is Int_mod f.Tir.v_name || is Int_div f.Tir.v_name
+                       || is Int_mod_euclid f.Tir.v_name
+                       || is Int_div_euclid f.Tir.v_name) ->
     let va = emit_atom_as ctx "i64" a in
     let vb = emit_atom_as ctx "i64" b in
     let r  = fresh ctx "ar" in
