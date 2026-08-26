@@ -124,18 +124,38 @@ failures** unless that binary has been built — a `dune build lsp/test/…` alo
 is not enough. Build `lsp/bin/main.exe` explicitly before believing a red run
 there.
 
+The LSP suites are also **cwd-sensitive**: run `test_lsp.exe` from `/tmp` and
+"introduce pipe offered" fails. Setting `MARCH_STDLIB` does *not* fix it — the
+fixtures resolve relative to the invocation directory, not just the stdlib. Run
+them from the repo root.
+
 `dune build --root . @check` (which typechecks `test/` and `lsp/`) sits at
 **17 errors both before and after**, all pre-existing, all under `forge/test/`
 and `js/` from a missing optional opam dependency. `scripts/run-tests.sh` was
-also run to confirm nothing outside the LSP moved.
+also run to confirm nothing outside the LSP moved: 2,763 tests, exit 0. With
+the LSP suites now included (below) a full `scripts/run-tests.sh` is **3,161
+tests across 11 suites**, exit 0.
+
+One caution from doing that: **do not edit `scripts/run-tests.sh` while it is
+running.** bash re-reads a script from a byte offset, so an edit mid-run
+corrupts the tail of the executing instance — the first full run here ended in
+`line 167: ib: command not found`, exit 127, after every suite had actually
+passed. The verdict was garbage; it had to be redone.
+
+## Also landed: LSP suites in `scripts/run-tests.sh`
+
+Separate commit. `ALL_RUNNERS` grows from six to eleven, and the exe path
+becomes per-runner because the LSP suites live under `lsp/test/`, not `test/`;
+`lsp/bin/main.exe` is added as an explicit build target when `test_jsonrpc`
+runs. Shown to actually execute rather than vacuously pass: deleting
+`_build/default/lsp/bin/main.exe` and re-running still reports 22 tests, and
+renaming a single code-action title in `code_actions_ast.ml` turns the run red.
 
 ## Follow-ups not done here
 
-- `analysis.ml` still has no `.mli` at 5,201 lines. The four new modules do not
-  either. `analysis_util.ml` in particular is a grab-bag by construction — an
+- `analysis.ml` still has no `.mli` at 5,201 lines, and neither do the four new
+  modules. `analysis_util.ml` in particular is a grab-bag by construction — an
   interface would be the place to say which of its 37 definitions are really
-  shared surface and which are engine-only.
-- `scripts/run-tests.sh` still has no LSP suite. Adding the five executables the
-  way `test_jit` was added in PR #347 would close a real coverage gap: today an
-  agent can break every LSP feature in the tree and see a green
-  `scripts/run-tests.sh`.
+  shared surface and which are engine-only. Note that an `analysis.mli` has to
+  restate what `include Analysis_util` and `include Code_actions_diag` bring in,
+  so it is a larger and less obviously-profitable job than the ones in PR #354.
