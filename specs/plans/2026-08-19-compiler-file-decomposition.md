@@ -334,9 +334,30 @@ Recorded at `8d2b22fb` (tag `decomp-baseline-8d2b22fb`, appended to `bench/resul
 
 ---
 
-## Phase 1 — `eval.ml`: 12,264 → ~5,000 lines
+## Phase 1 — `eval.ml`: 12,264 → ~5,000 lines — **LANDED 2026-08-25**
 
 **[corrected 2026-08-25]** — the header used to read `12,112 → ~4,900`.
+
+**Done.** `eval.ml` is **4,304 lines** (target ~5,000). Tasks 1.0/1.0b landed in
+#353; Tasks 1.1–1.5 landed on `claude/eval-decomp-phase1-finish`. See
+`specs/progress/2026-08-25-eval-decomposition-phase1.md` for what each task
+actually moved, where the plan's shape had to be adjusted, and the exit-gate
+numbers. Two deviations worth knowing before reading the tasks below:
+
+- Extractions are re-exported from `eval.ml` with **`include`**, not `open` —
+  the test suite reaches these names through `let open March_eval.Eval in`, so
+  `open Eval_simd` compiles `eval.ml` but breaks `test/test_stdlib_suite.ml`.
+- Task 1.3's "table-exclusive helpers stay inside `eval_builtins.ml`" split was
+  **not** used. The table's dependency closure inside `eval.ml` is 75
+  definitions that reference each other; splitting them across two new modules
+  buys hiding at the cost of a fragile shared/exclusive judgement the build can
+  only arbitrate one error at a time. All 75 went to `eval_runtime.ml`, and
+  `eval_builtins.mli` still exports `base_env` and nothing else.
+
+Task 1.5 Step 3 (committing the `bench/results/*.jsonl` record) was
+deliberately **not** done — the exit-gate A/B was run as a direct interleaved
+comparison of two `main.exe` copies, not through `bench/run_interp_bench.sh`,
+so there is no JSONL row to append. The numbers are in the progress note.
 
 Highest ROI and lowest risk. `base_env` (**5,274** lines, **595** entries — was 5,187/590) references `eval_expr`/`eval_decl` **zero times** — the dependency runs strictly one way. The cycle-breaking machinery already exists in the file: `http_fetch_hook` (:894), `iface_dispatch_hook` (:1520), `eval_expr_hook` (:1814), `run_scheduler_hook` (:1819), `apply_hook` (:1824) — **all five [verified 2026-08-25]**, because #335's insertion landed *below* `base_env` and shifted nothing above it. Extraction reuses that established pattern rather than inventing one.
 
@@ -363,7 +384,7 @@ echo "block = $S..$E"      # 17..142 at 8d2b22fb
 **Interfaces:**
 - Produces: `type value`, `and env = (string * value) list`, plus the mutually-recursive record types `chan_endpoint` (:85), `mpst_endpoint` (:99), `timer_entry` (:117) and the ring-buffer type at :17. All keep their current names and shapes verbatim.
 
-- [ ] **Step 1: Confirm the block contains no value bindings**
+- [x] **Step 1: Confirm the block contains no value bindings**
 
 ```bash
 awk 'NR>=17 && NR<=142' lib/eval/eval.ml | grep -nE '^\s*let '
@@ -371,7 +392,7 @@ awk 'NR>=17 && NR<=142' lib/eval/eval.ml | grep -nE '^\s*let '
 
 Expected: **no output**. Any hit means a function is interleaved with the types and must stay behind.
 
-- [ ] **Step 2: Move lines 17-142 verbatim**
+- [x] **Step 2: Move lines 17-142 verbatim**
 
 ```bash
 { echo '(** Interpreter value and environment types.'
@@ -385,7 +406,7 @@ Expected: **no output**. Any hit means a function is interleaved with the types 
 sed -i.bak '17,142d' lib/eval/eval.ml && rm lib/eval/eval.ml.bak
 ```
 
-- [ ] **Step 3: Re-export the types from `eval.ml`**
+- [x] **Step 3: Re-export the types from `eval.ml`**
 
 `Eval.value` and `Eval.env` are referenced across the compiler and test suite. Add at the top of `eval.ml`, where the block used to be:
 
@@ -397,7 +418,7 @@ include Eval_types
 
 `include` (not `open`) is required — `open` would make the constructors visible inside `eval.ml` but would NOT re-export them to `Eval.*` consumers.
 
-- [ ] **Step 4: Build and verify**
+- [x] **Step 4: Build and verify**
 
 ```bash
 dune build --root . bin/main.exe 2>&1 | tail -5 && scripts/ir-oracle.sh check /tmp/ir-base-$SLUG; echo "ir_exit=$?"
@@ -406,7 +427,7 @@ scripts/run-tests.sh eval; echo "suite_exit=$?"
 
 Expected: both exit 0. `include` changes no runtime behavior, so IR must be identical.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add lib/eval/eval_types.ml lib/eval/eval.ml && git commit -m "refactor(eval): extract value and env types to eval_types.ml"
@@ -424,7 +445,7 @@ git add lib/eval/eval_types.ml lib/eval/eval.ml && git commit -m "refactor(eval)
 - Consumes: `Eval_types` (Task 1.0).
 - Produces: `exception Eval_error of string`; `val eval_error : ('a, unit, string, 'b) format4 -> 'a`; and every hook ref — `iface_dispatch_hook`, `eval_expr_hook`, `run_scheduler_hook`, `apply_hook`, `http_fetch_hook` — each with its current type and placeholder initializer verbatim.
 
-- [ ] **Step 1: Enumerate what must move — do not trust the list above**
+- [x] **Step 1: Enumerate what must move — do not trust the list above**
 
 ```bash
 grep -nE '^let [a-z_]*_hook\b' lib/eval/eval.ml
@@ -441,7 +462,7 @@ awk 'NR>=2691 && NR<9394' lib/eval/eval.ml | grep -oE 'raise \(?[A-Z][A-Za-z_]*'
 
 Any exception in that output that is defined in `eval.ml` joins `Eval_error` in `eval_prim.ml`.
 
-- [ ] **Step 2: Write `eval_prim.ml`**
+- [x] **Step 2: Write `eval_prim.ml`**
 
 Move the definitions by name (they are one-liners scattered across sections — not a contiguous range). The file should read:
 
@@ -471,7 +492,7 @@ let eval_error fmt = Printf.ksprintf (fun s -> raise (Eval_error s)) fmt
 
 followed by the hook definitions copied verbatim from the lines Step 1 printed. Then delete those definitions from `eval.ml`.
 
-- [ ] **Step 3: Re-export from `eval.ml` at the original positions**
+- [x] **Step 3: Re-export from `eval.ml` at the original positions**
 
 `Eval.Eval_error` may be matched externally and the hooks are installed by `eval.ml` itself, so keep every name resolvable under `Eval.`:
 
@@ -487,7 +508,7 @@ let http_fetch_hook = Eval_prim.http_fetch_hook
 
 Aliasing a `ref` is safe — alias and original are the same mutable cell, so the startup installation (`eval_expr_hook := …`) in `eval.ml` keeps working unchanged.
 
-- [ ] **Step 4: Build, verify IR, run the eval suite**
+- [x] **Step 4: Build, verify IR, run the eval suite**
 
 ```bash
 dune build --root . bin/main.exe 2>&1 | tail -5 && scripts/ir-oracle.sh check /tmp/ir-base-$SLUG; echo "ir_exit=$?"
@@ -496,7 +517,7 @@ scripts/run-tests.sh eval; echo "suite_exit=$?"
 
 Expected: both exit 0.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add lib/eval/eval_prim.ml lib/eval/eval.ml && git commit -m "refactor(eval): extract Eval_error and hook refs to eval_prim.ml"
@@ -513,7 +534,7 @@ git add lib/eval/eval_prim.ml lib/eval/eval.ml && git commit -m "refactor(eval):
 - Consumes: `Eval_types.value` (already a separate concern in `eval.ml`'s §Value type at :29 — if it is not yet its own module, keep the type in `eval.ml` and have `eval_simd.ml` take it as a functor-free direct dependency by placing `eval_simd.ml` *after* the value type; see Step 2).
 - Produces: `simd_all`, `simd_any`, `simd_bounds_check`, `simd_first_set`, `simd_hfold`, `simd_select`, `simd_maxnum_f`, `simd_minnum_f`, `simd_f32_{and,or,xor,not,zero,allones,is_highbit}`, `simd_f64_{and,or,xor,not,zero,allones,is_highbit}`, `simd_i32_is_highbit`, `simd_i64_is_highbit`, `simd_u8_is_highbit`, `f32_round`, `fma32_single_round`, `i32_wrap`, `u8_wrap`. All keep their current signatures verbatim.
 
-- [ ] **Step 1: Confirm the exact boundary before touching anything**
+- [x] **Step 1: Confirm the exact boundary before touching anything**
 
 Derive the bounds; do not paste the literals. **[verified 2026-08-25 — these anchors still resolve to 4054 / 4117 / 4207, unchanged since `1f5a0111`, because #335's insertion landed below `base_env`.]**
 
@@ -528,7 +549,7 @@ Expected: `$S` opens the `NativeArray narrow-width helpers` comment, the `Simd` 
 
 **[corrected 2026-08-25]** — the draft said `4054–4206`, one line too many: 4206 is the *opening* rule of the `Base environment` header, so moving it would leave that header with no top rule and put a stray rule at the bottom of `eval_simd.ml`. The correct end is **4205** (the blank line before that rule). Use the derivation above and this class of off-by-one cannot recur.
 
-- [ ] **Step 2: Check the block's upward dependencies**
+- [x] **Step 2: Check the block's upward dependencies**
 
 ```bash
 sed -n "${S},${E}p" lib/eval/eval.ml | grep -oE '\b[a-z_][a-z0-9_]{3,}\b' | sort -u > /tmp/simd-ids-$SLUG.txt
@@ -540,7 +561,7 @@ comm -12 /tmp/simd-ids-$SLUG.txt /tmp/eval-defs-$SLUG.txt
 
 The direction that matters: `eval.ml` will depend on `eval_simd`, so the block may reference **nothing that remains in `eval.ml`** — whether it is defined above or below the block is irrelevant. Every name the `comm` prints must resolve to `Eval_types` (Task 1.0) or `Eval_prim` (Task 1.0b). Measured at review: the block's only `eval.ml` dependency is `eval_error` ×1, which Task 1.0b already moved. If other names appear, they move with the block or the block stays — stop and report.
 
-- [ ] **Step 3: Move the block verbatim**
+- [x] **Step 3: Move the block verbatim**
 
 ```bash
 { echo '(** Simd 128-bit vector ops and NativeArray narrow-width (f32/i32/u8)'
@@ -554,7 +575,7 @@ The direction that matters: `eval.ml` will depend on `eval_simd`, so the block m
 sed -i.bak "${S},${E}d" lib/eval/eval.ml && rm lib/eval/eval.ml.bak
 ```
 
-- [ ] **Step 4: Re-point the use sites**
+- [x] **Step 4: Re-point the use sites**
 
 `base_env` calls these unqualified. Add at the top of `eval.ml`, immediately after its existing `open` lines:
 
@@ -564,7 +585,7 @@ open Eval_simd
 
 `open Eval_types` resolves because Task 1.0 created that module. If it does not compile, Task 1.0 was skipped — go back and land it first rather than working around it here.
 
-- [ ] **Step 5: Build and verify IR is untouched**
+- [x] **Step 5: Build and verify IR is untouched**
 
 ```bash
 dune build --root . bin/main.exe 2>&1 | tail -5 && scripts/ir-oracle.sh check /tmp/ir-base-$SLUG; echo "exit=$?"
@@ -572,7 +593,7 @@ dune build --root . bin/main.exe 2>&1 | tail -5 && scripts/ir-oracle.sh check /t
 
 Expected: `IR IDENTICAL across N programs`, `exit=0`, with N matching the baseline exactly.
 
-- [ ] **Step 6: Run the eval suite**
+- [x] **Step 6: Run the eval suite**
 
 ```bash
 scripts/run-tests.sh eval; echo "exit=$?"
@@ -580,7 +601,7 @@ scripts/run-tests.sh eval; echo "exit=$?"
 
 Expected: exit 0, same counts as `/tmp/suite-base-$SLUG.log`.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add lib/eval/eval_simd.ml lib/eval/eval.ml && git commit -m "refactor(eval): extract Simd and NativeArray narrow-width helpers"
@@ -608,7 +629,7 @@ echo "net = $NS..$((SS-1))   session = $SS..$SE"   # 2690..3860  3861..3986 at 8
 - Produces from `eval_net.ml`: `csv_open_impl`, `csv_next_row_impl`, `csv_close_impl`, `handle_http_connection`, `run_http_event_loop`, `tcp_send_all`, `ws_send_frame`, `ws_recv_frame`.
 - Produces from `eval_session.ml`: `chan_new`, `chan_send`, `chan_recv`, `chan_close`, `mpst_new`, `mpst_send`, `mpst_recv`, `mpst_close`.
 
-- [ ] **Step 1: Verify both blocks are leaves**
+- [x] **Step 1: Verify both blocks are leaves**
 
 Run the Step-2 dependency check from Task 1.1 against ranges `$NS,$((SS-1))` and `$SS,$SE`. Same rule as Task 1.1: every dependency must resolve to `Eval_types`, `Eval_prim`, or `Eval_simd` — nothing may remain in `eval.ml`. Measured at review: net uses `eval_error` ×4 and hook refs ×4; session uses `eval_error` ×10 — all satisfied by `Eval_prim`.
 
@@ -616,7 +637,7 @@ Mind the reverse direction too: a helper defined *inside* these blocks that the 
 
 Note the ordering constraint recorded in the file at `eval.ml:3496` **[verified 2026-08-25]**: `handle_http_connection` is the blocking implementation and the non-blocking multiplexer below it references it. Keep both in `eval_net.ml`, in their current relative order.
 
-- [ ] **Step 2: Move `eval_session.ml` first (the smaller, cleaner block)**
+- [x] **Step 2: Move `eval_session.ml` first (the smaller, cleaner block)**
 
 ```bash
 { echo '(** Session-typed channel runtime and multi-party (MPST) runtime.'
@@ -628,14 +649,14 @@ sed -i.bak "${SS},${SE}d" lib/eval/eval.ml && rm lib/eval/eval.ml.bak
 dune build --root . bin/main.exe 2>&1 | tail -5
 ```
 
-- [ ] **Step 3: Verify, then commit separately**
+- [x] **Step 3: Verify, then commit separately**
 
 ```bash
 scripts/ir-oracle.sh check /tmp/ir-base-$SLUG && scripts/run-tests.sh eval; echo "exit=$?"
 git add lib/eval/eval_session.ml lib/eval/eval.ml && git commit -m "refactor(eval): extract session-typed and MPST channel runtimes"
 ```
 
-- [ ] **Step 4: Move `eval_net.ml`**
+- [x] **Step 4: Move `eval_net.ml`**
 
 Line numbers have shifted by the Step-2 deletion. Re-locate before cutting:
 
@@ -645,7 +666,7 @@ grep -n 'CSV parser state\|Session-typed channel runtime' lib/eval/eval.ml
 
 Use the CSV line as the new start and the line before the session marker (now the `Show dispatch helper` section) as the end. Move that range with the same pattern as Step 2.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 ```bash
 dune build --root . bin/main.exe 2>&1 | tail -5 && scripts/ir-oracle.sh check /tmp/ir-base-$SLUG && scripts/run-tests.sh eval; echo "exit=$?"
@@ -670,7 +691,7 @@ git add lib/eval/eval_net.ml lib/eval/eval.ml && git commit -m "refactor(eval): 
 - Produces from `eval_builtins.ml`: `val base_env : Eval_types.env` — the **only** export; the ~85 exclusive helpers are internal.
 - **`Eval.base_env` has 28 external call sites** **[corrected 2026-08-25;** was 27 — re-count with `grep -rhoE '\bEval\.base_env\b' --include='*.ml' . | wc -l`**]** (distinct from `Typecheck.base_env`, which also exists and is unrelated). `eval.ml` MUST keep `let base_env = Eval_builtins.base_env`.
 
-- [ ] **Step 0: Classify the table's helper dependencies as shared or exclusive**
+- [x] **Step 0: Classify the table's helper dependencies as shared or exclusive**
 
 ```bash
 S=$(grep -n '^let base_env : env' lib/eval/eval.ml | cut -d: -f1)
@@ -686,7 +707,7 @@ The number is how often the name appears in `eval.ml` *outside* the table. **≥
 
 The threshold is a starting classification, not an oracle. **The build is the arbiter:** an "exclusive" helper that `dune build` then reports missing from `eval.ml` was actually shared — move it to `eval_runtime.ml` and rebuild. Do not paper over it with a re-export from `eval_builtins`.
 
-- [ ] **Step 1: Extract `eval_runtime.ml` (the SHARED cluster), as its own commit**
+- [x] **Step 1: Extract `eval_runtime.ml` (the SHARED cluster), as its own commit**
 
 Move every SHARED name from Step 0 — definitions plus the state cells they close over (the actor registry hashtable, the pid counters, the timer queue, the type tables). These are scattered across the `Actor runtime` (:144), `Dynamic Supervisor state` (:247), `Phase 1: Monitors, Links, and crash_actor` (:1796), and FFI-table sections **[all three [verified 2026-08-25]]**; move by name, not by range, and keep each moved definition's doc comment.
 
@@ -707,7 +728,7 @@ scripts/run-tests.sh eval; echo "suite_exit=$?"
 git add lib/eval/eval_runtime.ml lib/eval/eval.ml && git commit -m "refactor(eval): extract shared runtime state to eval_runtime.ml"
 ```
 
-- [ ] **Step 2: Confirm the table's one-way dependency on the evaluator still holds**
+- [x] **Step 2: Confirm the table's one-way dependency on the evaluator still holds**
 
 ```bash
 S=$(grep -n '^let base_env : env' lib/eval/eval.ml | cut -d: -f1)
@@ -717,7 +738,7 @@ awk -v s=$S -v e=$E 'NR>=s && NR<e' lib/eval/eval.ml | grep -cE '\beval_(expr|de
 
 Expected: **0**. This is the load-bearing premise of the table move. If non-zero, the offending references must go through `!Eval_prim.eval_expr_hook` / `!Eval_prim.apply_hook` before proceeding.
 
-- [ ] **Step 3: Move the table AND its exclusive helpers into `eval_builtins.ml`**
+- [x] **Step 3: Move the table AND its exclusive helpers into `eval_builtins.ml`**
 
 ```bash
 { echo '(** [base_env] — the delta-rule builtin table (core-march.md §4.4).'
@@ -745,7 +766,7 @@ sed -i.bak "${S},$((E-1))d" lib/eval/eval.ml && rm lib/eval/eval.ml.bak
 
 Then move each EXCLUSIVE helper from Step 0 into `eval_builtins.ml` **above** the table (by name, with its doc comment), deleting it from `eval.ml`. The build will name any you missed.
 
-- [ ] **Step 4: Write the interface file — export ONLY the table**
+- [x] **Step 4: Write the interface file — export ONLY the table**
 
 ```ocaml
 (** The delta-rule builtin environment.  See eval_builtins.ml.
@@ -759,7 +780,7 @@ val base_env : Eval_types.env
 
 `Eval_types.env` is `(string * value) list`, created in Task 1.0. This signature is exact.
 
-- [ ] **Step 5: Add the re-export to `eval.ml`**
+- [x] **Step 5: Add the re-export to `eval.ml`**
 
 At the position the table used to occupy:
 
@@ -770,7 +791,7 @@ At the position the table used to occupy:
 let base_env = Eval_builtins.base_env
 ```
 
-- [ ] **Step 6: Build, verify IR, run the FULL suite**
+- [x] **Step 6: Build, verify IR, run the FULL suite**
 
 This is the largest single move in the plan; the eval suite alone is not enough.
 
@@ -781,7 +802,7 @@ scripts/run-tests.sh > /tmp/suite-t13-$SLUG.log 2>&1; echo "suite_exit=$?"; diff
 
 Expected: `ir_exit=0`, `suite_exit=0`, and an empty diff of the pass/fail counts.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add lib/eval/eval_builtins.ml lib/eval/eval_builtins.mli lib/eval/eval.ml && git commit -m "refactor(eval): extract 590-entry base_env builtin table to eval_builtins.ml"
@@ -791,7 +812,7 @@ git add lib/eval/eval_builtins.ml lib/eval/eval_builtins.mli lib/eval/eval.ml &&
 
 **Files:** Modify `lib/eval/eval.ml`
 
-- [ ] **Step 1: Number the existing section headers**
+- [x] **Step 1: Number the existing section headers**
 
 `eval.ml` already has 70 header comments but they are unnumbered rules (`(* ---- *)`), so they cannot be jumped to by name. Convert the ~34 titled ones to the numbered form `typecheck.ml` uses:
 
@@ -803,11 +824,11 @@ git add lib/eval/eval_builtins.ml lib/eval/eval_builtins.mli lib/eval/eval.ml &&
 
 Keep the existing titles verbatim (`Value type`, `Actor runtime`, `Dynamic Supervisor state`, `Tap bus`, `Ring buffer helpers`, `Debug trace types`, `Exceptions`, `March call stack for backtraces`, `Pattern matching`, `Built-in environment`, `FFI extern stub table`, `Dynamic FFI`, `FFI Marshal Layer`, `Show dispatch helper`, `Evaluation`, `Task builtins`, `App / Supervisor machinery`, `Module evaluation`, `Test runner`, `Doctest runner`). Number them in file order.
 
-- [ ] **Step 2: Add a table of contents at the top of the file**
+- [x] **Step 2: Add a table of contents at the top of the file**
 
 Immediately below the module docstring, list every § with its title. This is what makes the file greppable by concept rather than by symbol.
 
-- [ ] **Step 3: Verify comments-only, then commit**
+- [x] **Step 3: Verify comments-only, then commit**
 
 ```bash
 dune build --root . bin/main.exe 2>&1 | tail -3 && scripts/ir-oracle.sh check /tmp/ir-base-$SLUG; echo "exit=$?"
@@ -820,7 +841,7 @@ git add lib/eval/eval.ml && git commit -m "docs(eval): number section headers an
 
 Phase 1 is the one phase the IR oracle cannot police (Task 0.3). Do not declare Phase 1 done on a green suite alone.
 
-- [ ] **Step 1: Re-run the interpreted benchmarks and compare against the Task 0.3 baseline**
+- [x] **Step 1: Re-run the interpreted benchmarks and compare against the Task 0.3 baseline**
 
 ```bash
 bash bench/run_interp_bench.sh --modes interp --runs 3 --tag decomp-phase1-$(git rev-parse --short HEAD)
@@ -832,7 +853,7 @@ Compare median-ms per benchmark against the `decomp-baseline-8d2b22fb` rows in
 **Pass condition:** no benchmark's median is more than **5%** slower than the baseline.
 A pure code move must cost nothing; 5% is headroom for this box's noise, not a budget to spend.
 
-- [ ] **Step 2: If a benchmark regressed, look for a hook that used to be a direct call**
+- [x] **Step 2: If a benchmark regressed, look for a hook that used to be a direct call**
 
 The specific mechanism to suspect — the one Phase 1's own design introduces — is an extracted
 function reaching the evaluator through `!Eval_prim.eval_expr_hook` / `!apply_hook` where the
@@ -854,7 +875,7 @@ loaded. Slow-but-flat RSS means load, not regression; check `uptime` before and 
 first timed variant in a run pays ~25% warmup — compare like position to like position, or
 re-run with the order reversed.
 
-- [ ] **Step 3: Commit the record**
+- [x] **Step 3: Commit the record**
 
 ```bash
 git add bench/results/2026-08-25-interp-arm64.jsonl && git commit -m "bench: record interpreter timings after eval.ml decomposition"
