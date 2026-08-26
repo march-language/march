@@ -1541,6 +1541,21 @@ git add lib/refinecheck/refine_check.mli && git commit -m "refactor(refinecheck)
 
 ## Phase 4 — `analysis.ml`: split the code-action engines
 
+**LANDED 2026-08-26** on `claude/lsp-analysis-phase4` — see
+[`specs/progress/2026-08-26-lsp-analysis-decomposition-phase4.md`](../progress/2026-08-26-lsp-analysis-decomposition-phase4.md).
+Three commits, all pure code motion: `analysis.ml` **8,132 → 5,201** lines,
+split into `analysis_types.ml` (302), `analysis_util.ml` (574),
+`code_actions_ast.ml` (1,097) and `code_actions_diag.ml` (1,019). No consumer
+changed. Two corrections to the task below, both found while executing it:
+**(a)** extracting `type t` is not enough — the engines reach back for **37**
+top-level helpers as well (`find_uses`, `iter_expr`, `lambda_free_vars`,
+`offset_of_pos`, the fix registry, `rename_at` and its callees, …), so the
+closure needs its own module (`analysis_util.ml`) or the cycle stays; **(b)**
+Step 5's `diag @ ast` composition would **reorder the result** — the single
+`ast_code_actions` call site is in the *middle* of `code_actions_at`'s
+concatenation with four groups after it, so the AST engine is spliced at its
+original position, not appended.
+
 **[verified 2026-08-25]** — `lsp/lib/analysis.ml` is untouched by the perf project: still 8,132 lines, `ast_code_actions` at `:5675`, `code_actions_at` at `:6764`, composition at `:7755`. Every number in this phase re-measured correct.
 
 **These two functions are NOT duplicates** — verified: `ast_code_actions` is called exactly once, at `analysis.ml:7755`, appended to `code_actions_at`'s result, and their action-title sets do not intersect. They are complementary engines (AST-driven refactorings vs diagnostic-driven quick fixes) that happen to share a file. This is a plain split.
@@ -1556,7 +1571,7 @@ git add lib/refinecheck/refine_check.mli && git commit -m "refactor(refinecheck)
 **Interfaces:**
 - Produces: `Code_actions_ast.actions : Analysis.t -> line:int -> character:int -> Lsp.Types.CodeAction.t list` and `Code_actions_diag.actions : Analysis.t -> line:int -> character:int -> diagnostics:Lsp.Types.Diagnostic.t list -> Lsp.Types.CodeAction.t list` (the diagnostic engine consumes the pushed diagnostics; the AST engine never did). `Analysis.code_actions_at` keeps its **exact** current signature — `~line ~character ?(diagnostics = []) ()`, trailing unit included — and becomes a composition. It has 9+ call sites in `lsp/test/test_lsp.ml` passing `()` that must not change.
 
-- [ ] **Step 1: Confirm the boundaries and the composition point**
+- [x] **Step 1: Confirm the boundaries and the composition point**
 
 ```bash
 grep -n '^let ast_code_actions\|^let code_actions_at\|ast_code_actions a ~line' lsp/lib/analysis.ml
@@ -1564,7 +1579,7 @@ grep -n '^let ast_code_actions\|^let code_actions_at\|ast_code_actions a ~line' 
 
 Expected: definitions at 5675 and 6764, composition at 7755.
 
-- [ ] **Step 2: Check for a circular dependency**
+- [x] **Step 2: Check for a circular dependency**
 
 Both engines take `Analysis.t`. If `t` is defined in `analysis.ml`, the new modules cannot `open Analysis` without a cycle. Check:
 
@@ -1574,19 +1589,19 @@ grep -n '^type t = \|^and t = ' lsp/lib/analysis.ml | head
 
 If `t` lives in `analysis.ml`, extract it to `lsp/lib/analysis_types.ml` **first**, as its own commit, before moving either engine. Do not attempt both in one step.
 
-- [ ] **Step 3: Move `code_actions_ast.ml`, build, test**
+- [x] **Step 3: Move `code_actions_ast.ml`, build, test**
 
 ```bash
 dune build --root . lsp/ 2>&1 | tail -5 && dune build --root . lsp/test/test_lsp.exe && ./_build/default/lsp/test/test_lsp.exe -e 2>&1 | tail -5; echo "exit=$?"
 ```
 
-- [ ] **Step 4: Commit, then repeat for `code_actions_diag.ml`**
+- [x] **Step 4: Commit, then repeat for `code_actions_diag.ml`**
 
 ```bash
 git add lsp/lib/code_actions_ast.ml lsp/lib/analysis.ml && git commit -m "refactor(lsp): extract AST-driven code actions to code_actions_ast.ml"
 ```
 
-- [ ] **Step 5: Reduce `code_actions_at` to a composition and commit**
+- [x] **Step 5: Reduce `code_actions_at` to a composition and commit**
 
 The signature below is copied from `analysis.ml:6764-6767`. The `?diagnostics` default and the trailing `()` are load-bearing — every `test_lsp.ml` call site passes `()` and the server passes `~diagnostics`. Dropping either breaks the API.
 

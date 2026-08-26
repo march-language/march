@@ -12,12 +12,14 @@
 #   scripts/run-tests.sh -q stdlib       # quick subset
 #   scripts/run-tests.sh stdlib_march    # the .march stdlib test files
 #   scripts/run-tests.sh test_jit        # the REPL-JIT / --jit alcotest suite
+#   scripts/run-tests.sh lsp             # the LSP analysis suite (lsp/test/)
 #
-# Suites: compiler, eval, codegen, stdlib, stdlib_march, test_jit.  The first
-# four are test/run_<name>.exe; stdlib_march is test/test_stdlib_march.exe,
-# which runs the .march test files under test/stdlib/; test_jit is
-# test/test_jit.exe, which drives the REPL JIT / `march --jit` as subprocesses
-# of a freshly built bin/main.exe.
+# Suites: compiler, eval, codegen, stdlib, stdlib_march, test_jit, lsp, utf16,
+# jsonrpc, incremental, query_cli.  The first four are test/run_<name>.exe;
+# stdlib_march is test/test_stdlib_march.exe, which runs the .march test files
+# under test/stdlib/; test_jit is test/test_jit.exe, which drives the REPL JIT
+# / `march --jit` as subprocesses of a freshly built bin/main.exe.  The last
+# five live under lsp/test/, not test/ — see LSP_RUNNERS below.
 #
 # Slow tests skipped by -q: repl_compiler_parity (JIT parity, ~5s),
 #   compiled adversarial regressions (~5s), pbkdf2 key derivation (~3s), and
@@ -82,8 +84,29 @@ fi
 # never ran under this script no matter which subset argument was passed, and a
 # fully green run said nothing about it.  `dune runtest` did cover it, which is
 # exactly why the gap was easy to miss locally.
-ALL_RUNNERS=(run_compiler run_eval run_codegen run_stdlib test_stdlib_march test_jit)
+#
+# The LSP suites were missing for the same reason and with worse consequences:
+# `dune runtest` covers them, this script did not, and this script is what the
+# CLAUDE.md workflow tells an agent to run.  A refactor could break every LSP
+# feature in the tree and still see a fully green `scripts/run-tests.sh`.  They
+# live under lsp/test/, not test/, so the exe path is per-runner from here on.
+ALL_RUNNERS=(run_compiler run_eval run_codegen run_stdlib test_stdlib_march test_jit
+             test_lsp test_utf16 test_jsonrpc test_incremental test_query_cli)
+# Suites whose executable is lsp/test/<name>.exe rather than test/<name>.exe.
+LSP_RUNNERS=(test_lsp test_utf16 test_jsonrpc test_incremental test_query_cli)
 QUICK_FLAG=""
+
+is_lsp_runner() {
+  local r
+  for r in "${LSP_RUNNERS[@]}"; do [[ "$r" == "$1" ]] && return 0; done
+  return 1
+}
+
+# Path of a runner's executable, relative to _build/default (and to the source
+# tree, which is what `dune build` wants).
+runner_target() {
+  if is_lsp_runner "$1"; then echo "lsp/test/$1.exe"; else echo "test/$1.exe"; fi
+}
 
 # Map a suite name to its executable.  Accepts the bare name ("compiler",
 # "stdlib_march"), or the exact exe name ("run_compiler").  An unknown name is
@@ -138,7 +161,14 @@ echo "==> dune build"
 # Neither looks like a stale binary; both cost a real debugging detour.
 BUILD_TARGETS=("@test/stage-source-trees" "bin/main.exe")
 for r in "${RUNNERS[@]}"; do
-  BUILD_TARGETS+=("test/${r}.exe")
+  BUILD_TARGETS+=("$(runner_target "$r")")
+  # test_jsonrpc drives a REAL march-lsp process over stdio.  Its dune stanza
+  # declares `(deps %{exe:../bin/main.exe})`, which `dune runtest` honours but
+  # building lsp/test/test_jsonrpc.exe alone does NOT — and the binary is only
+  # resolved at run time, relative to the test exe.  Without this, all 22 cases
+  # fail with Unix.ENOENT on create_process, which reads like a broken server
+  # rather than a missing build target.
+  [[ "$r" == "test_jsonrpc" ]] && BUILD_TARGETS+=("lsp/bin/main.exe")
 done
 $DUNE build "${DUNE_ROOT[@]}" "${BUILD_TARGETS[@]}"
 
@@ -159,7 +189,14 @@ for runner in "${RUNNERS[@]}"; do
       FAILED=1
     fi
   else
-    if ! $TIMEOUT_CMD ./_build/default/test/${runner}.exe -e $QUICK_FLAG; then
+    # The LSP suites are cwd-sensitive: test_lsp resolves the stdlib through
+    # Analysis.find_stdlib_dir (a relative "stdlib" unless $MARCH_STDLIB is
+    # set) and reads fixtures relative to the invocation directory.  Run from
+    # the repo root and they are fine; run test_lsp.exe from /tmp and
+    # "introduce pipe offered" fails.  This script already runs everything
+    # from $PWD, which is where DUNE_ROOT points, so nothing extra is needed
+    # here -- but do not "fix" a red LSP run by cd-ing somewhere else.
+    if ! $TIMEOUT_CMD ./_build/default/"$(runner_target "$runner")" -e $QUICK_FLAG; then
       FAILED=1
     fi
   fi

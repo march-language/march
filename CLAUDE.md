@@ -57,8 +57,11 @@ scripts/run-tests.sh compiler eval     # subset by name
 scripts/run-tests.sh -q stdlib         # quick subset
 scripts/run-tests.sh stdlib_march      # the .march test files under test/stdlib/
 scripts/run-tests.sh test_jit          # REPL-JIT / --jit alcotest suite
+scripts/run-tests.sh lsp               # the LSP analysis suite (lsp/test/)
 
-# Suites: compiler, eval, codegen, stdlib, stdlib_march, test_jit. An unknown
+# Suites: compiler, eval, codegen, stdlib, stdlib_march, test_jit, lsp, utf16,
+# jsonrpc, incremental, query_cli. The last five are the LSP suites and live
+# under lsp/test/, not test/. An unknown
 # name is a hard error listing the known suites, not a confusing dune build
 # failure.
 
@@ -73,6 +76,12 @@ dune build test/run_compiler.exe test/run_eval.exe test/run_codegen.exe test/run
 # silently skip (reported as passing) — scripts/run-tests.sh sets this for
 # you; direct invocation needs it explicitly:
 MARCH_BIN="$PWD/_build/default/bin/main.exe" ./_build/default/test/test_jit.exe -e
+# The LSP suites live under lsp/test/. test_jsonrpc drives a real march-lsp
+# process over stdio, so lsp/bin/main.exe must be built or all 22 of its cases
+# die with Unix.ENOENT; and they are cwd-sensitive -- run them from the repo
+# root or test_lsp's "introduce pipe offered" case fails spuriously.
+dune build lsp/bin/main.exe lsp/test/test_lsp.exe lsp/test/test_utf16.exe lsp/test/test_jsonrpc.exe lsp/test/test_incremental.exe lsp/test/test_query_cli.exe
+./_build/default/lsp/test/test_lsp.exe -e
 
 # 3. Standard dune flags for one-off runs
 dune runtest --no-buffer   # real-time output (lines appear as they're written)
