@@ -44,6 +44,18 @@ the line/concentration scan in the appendix.
 > command still measures per-definition; measure the enclosing group before planning
 > any extraction.
 
+> **Second correction, 2026-08-27 — the scan also *over*counts around `class`.**
+> The metric treats only `let`/`type`/`module`/`external` at column 0 as boundaries,
+> so an OCaml `class` is invisible to it. In `lsp/lib/server.ml` that made
+> `semantic_tokens_data` (really **123** lines, `:245–368`) appear to absorb
+> everything to EOF and report **1,313 lines / 84%** — the worst concentration in
+> the original table, and an artefact. The real largest unit is
+> `dispatch_by_method` at 644 lines (41%). Found while planning the remaining
+> targets. Combined with the `let rec … and` undercount noted above, this metric
+> has now erred in **both** directions: it splits recursion groups that must move
+> together, and merges anything separated by a construct it does not recognise.
+> Treat its output as a shortlist to verify, never as a measurement to plan from.
+
 A fourth, qualitative axis matters for *risk*, not priority: whether the large
 definition is **logic** or a **data table**. `eval.ml`'s `base_env` (5,290
 lines) and `llvm_builtins.ml`'s `builtins` (893) are tables — long, simple, and
@@ -65,7 +77,7 @@ logic, where extraction can change behaviour.
 | `lib/repl/repl.ml` | 2,290 | `run_tui` 1,109 | 48% | 71 | 163 |
 | `lib/tir/perceus.ml` | 1,998 | `insert_rc_expr` 856 | 43% | 66 | 132 |
 | `lib/tir/llvm_builtins.ml` | 1,851 | `builtins` 893 *(table)* | 48% | 54 | 100 |
-| `lsp/lib/server.ml` | 1,557 | `semantic_tokens_data` 1,313 | **84%** | 33 | 51 |
+| `lsp/lib/server.ml` | 1,557 | `dispatch_by_method` **644** [see note] | 41% | 33 | 51 |
 | `lib/tir/mono.ml` | 1,327 | `rewrite_calls` 675 | 51% | 34 | 45 |
 | `lib/tir/llvm_toplevel.ml` | 1,521 | `emit_module` 787 | 52% | 24 | 36 |
 | `lib/tir/llvm_case.ml` | 1,093 | `emit_case` 1,040 | **95%** | 11 | 12 |
