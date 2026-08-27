@@ -26,14 +26,6 @@
     ([llvm_emit_simd.ml] reads it), which is why the [preamble_item] type
     itself stays manifest rather than going private with its siblings.
 
-    {2 [reserved_ctor_tag_limit] is declared but is not API}
-
-    It has no reference anywhere — not in this file, not outside it.  It is
-    declared here only because hiding a value nothing mentions turns it into
-    an unused-value error under warnings-as-errors.  Deleting the [let] and
-    this [val] together is the right follow-up; #368 left the same note
-    against three re-exports in [lower.ml] and thirty-three in [llvm_emit.ml].
-
     {2 What stays}
 
     [builtins] has 53 referencing files and [mangle_extern] 13; the tag
@@ -58,7 +50,6 @@ val monitor_down_tag : int
 val monitor_reason_normal_tag : int
 val monitor_reason_killed_tag : int
 val monitor_reason_crash_tag : int
-val reserved_ctor_tag_limit : int
 val builtins : builtin list
 type preamble_item =
     PComment of string
