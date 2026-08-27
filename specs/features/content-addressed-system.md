@@ -110,7 +110,8 @@ Orchestrates CAS integration with the compilation pipeline. This is **Phase 6** 
   - **Cache-hit fast path:** Computes `compilation_hash` from impl_hash, target, and flags; looks up artifact
   - **Cache miss:** Calls injected `compile` function and stores result
   - Stores all definitions in the CAS before returning artifact path
-  - This is the key integration point: it wraps the actual compiler phases (mono → defun → llvm)
+  - **Not called by the driver** — see "Current Wiring Status" below. Its only callers are
+    `test/test_cas.ml` and `test/test_stdlib_suite.ml`.
 
 ### SCC Module: `lib/cas/scc.ml` (132 lines)
 
@@ -137,14 +138,33 @@ Strongly-Connected Component detection for function dependency graphs using Tarj
 
 ~~**In codegen:** No explicit CAS usage yet~~ → CAS is now active in the compilation pipeline.
 
-~~**In main:** No explicit CAS invocation~~ → The driver initializes the CAS store and routes compilation through `Pipeline.compile_scc`.
+~~**In main:** No explicit CAS invocation~~ → The driver initializes the CAS store and caches
+compiled binaries.
 
-The `Pipeline.compile_scc` function is now called from the driver with:
-1. ✅ CAS store instantiated at compilation startup
-2. ✅ Store passed to `compile_scc` along with target and flags
-3. ✅ `~compile` callback defined (the actual mono → defun → llvm phases)
+**Correction (2026-08-26): the driver caches at *whole-module* granularity, not per SCC.**
+An earlier revision of this document claimed compilation was routed through
+`Pipeline.compile_scc`; it never was. What `bin/main.ml` actually does:
 
-Cache-hit detection is active: unchanged definitions are served from the CAS without recompilation.
+1. ✅ CAS store instantiated at compilation startup (`Cas.create ~project_root`)
+2. ✅ `Pipeline.hash_module` computes the hashed SCCs, and `Pipeline.scc_impl_hash` folds
+   every SCC hash into one module-wide source hash
+3. ✅ That hash plus target and codegen flags goes through `Cas.compilation_hash`, and the
+   linked binary is stored/looked up as a single artifact
+
+`Pipeline.compile_scc` — the per-SCC cache-hit fast path — is **not called by the driver**.
+It is exercised only by `test/test_cas.ml` and `test/test_stdlib_suite.ml`, and it is
+retained deliberately rather than dead by accident.
+
+The blocker is *not* hash granularity. `hash_module` makes `impl_hash` a true Merkle root
+over the call graph and over type layout (commit `3e84c2c0`, "make impl_hash a Merkle root
+over the call graph"), so a per-SCC key is sound. The stale-cross-SCC-inline hazard raised
+against `compile_scc` in `specs/hot-code-reload.md` predates that fold and is stale on that
+point. The actual blocker is that codegen emits one LLVM module and links one binary, so
+there is no per-SCC artifact to store or serve; wiring `compile_scc` up requires
+separately-emitted per-SCC objects plus a link step. The doc comment on `compile_scc` in
+`lib/cas/pipeline.ml` records the same rationale at the definition site.
+
+Cache-hit detection is active: an unchanged module is served from the CAS without recompilation.
 
 ## Test Coverage
 
