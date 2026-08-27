@@ -1644,7 +1644,8 @@ let compile filename =
      Capability enforcement is embedded in check_module via check_module_needs:
        - transitive needs propagation across module imports
        - extern block capability gating
-     See also: March_effects.Effects.check_capabilities *)
+     See also March_effects.Effects.check_capabilities — a thin wrapper over the
+     same check, used by tests only. This file does NOT call it. *)
   (* Tell the typechecker which files are stdlib BEFORE checking: Check 1b's
      body scan must not attribute prelude's own capability uses to the entry
      module (prelude is unwrapped into global scope, so its decls ride in the

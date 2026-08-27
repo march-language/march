@@ -59,3 +59,36 @@ cd <repo>
 grep -rn "check_capabilities" lib bin test
 # observe: zero non-comment callers outside test/
 ```
+
+---
+
+# Fixed 2026-08-27
+
+Landed alongside Target A of
+`specs/plans/2026-08-27-remaining-decomposition-targets.md`.
+
+**Documentation only. Nothing was rewired** — the report's alternative ("wire
+`bin/main.ml` through it so the comment becomes true") is deliberately not taken,
+because it is a behavior change that would duplicate the typecheck.
+
+The claim was re-verified before the edit, not assumed:
+
+```
+$ grep -rn "check_capabilities" lib bin test lsp forge js
+lib/effects/effects.ml:19      the definition
+bin/main.ml:1647               inside a comment
+test/test_codegen.ml:9411,9419,9420,9428,9429   the only real callers
+```
+
+`lib/effects/effects.ml`'s header now says what is true: enforcement lives in
+`Typecheck.check_module_needs`, which `check_module_core` calls unconditionally
+(`typecheck.ml:7873`), so every path that typechecks a module enforces
+capabilities; this module is a thin convenience wrapper used by tests, not a
+pipeline stage. The `check_capabilities` doc comment's "All paths (eval and
+compile) pass through this function via `bin/main.ml`" line is replaced by a
+pointer to that header.
+
+The sibling half of the same false impression is fixed too: `bin/main.ml`'s
+"See also: March_effects.Effects.check_capabilities" now says explicitly that
+this file does **not** call it. Left as a pointer rather than deleted — the
+cross-reference is genuinely useful, it was only the implied call that was wrong.
