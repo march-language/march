@@ -227,13 +227,13 @@ B2 (which will precede them as a module) and nothing in B3 depends on them, so
 removing B2 and B3 around them preserves ordering. Verify that claim by grep
 before moving, not by reading this sentence.
 
-- [ ] **Step 1** — cut B1, B2, B3 (in that order) into `bin/toolchain.ml`.
-- [ ] **Step 2** — add `open Toolchain` at the top of `bin/main.ml`. Use `open`,
+- [x] **Step 1** — cut B1, B2, B3 (in that order) into `bin/toolchain.ml`.
+- [x] **Step 2** — add `open Toolchain` at the top of `bin/main.ml`. Use `open`,
   not `include`: nothing outside the executable consumes `Main`, so re-export is
   not needed, and `open` keeps every existing call site (`ensure_runtime_so ()`,
   `find_stdlib_dir ()`, …) unchanged — a zero-rename diff.
-- [ ] **Step 3** — machine-check verbatim-ness of all three bands.
-- [ ] **Step 4** — verify:
+- [x] **Step 3** — machine-check verbatim-ness of all three bands.
+- [x] **Step 4** — verify:
 
 ```bash
 dune build --root . bin/main.exe
@@ -262,7 +262,7 @@ This buys ~45 lines on its own. Its value is that it is the precondition for
 every later extraction out of `compile`: a `bin/*.ml` module cannot see
 `main.ml`'s refs, so without it A3/A4/A5 each become a 15-argument function.
 
-- [ ] **Step 1** — move exactly the lines matched by
+- [x] **Step 1** — move exactly the lines matched by
 
 ```bash
 grep -n "^let [a-z_0-9]* *\(: [^=]*\)\?= ref " bin/main.ml
@@ -270,12 +270,12 @@ grep -n "^let [a-z_0-9]* *\(: [^=]*\)\?= ref " bin/main.ml
 
   **minus** `caps_env` (`:4835` — not a flag, and it is defined after `compile`
   on purpose), carrying each line's trailing comment. Preserve declaration order.
-- [ ] **Step 2** — `open Flags` in `bin/main.ml`, above the first use. Zero
+- [x] **Step 2** — `open Flags` in `bin/main.ml`, above the first use. Zero
   renames: `!do_compile` continues to resolve.
-- [ ] **Step 3** — confirm `refine_suggest_budget`'s RHS
+- [x] **Step 3** — confirm `refine_suggest_budget`'s RHS
   (`March_refinecheck.Precond_infer.default_budget`) still resolves; it is the
   only non-literal initialiser.
-- [ ] **Step 4** — verify as Task A1.
+- [x] **Step 4** — verify as Task A1.
 
 ```bash
 git add bin/flags.ml bin/main.ml
@@ -310,11 +310,11 @@ Its only external needs are the three flags `check_migration`, `prior_schema_pat
 `new_schema_path` (satisfied by A2) plus `desugared` and `filename`, which become
 the extracted entry point's two parameters.
 
-- [ ] **Step 1** — move the helper band, then the arm body, into
+- [x] **Step 1** — move the helper band, then the arm body, into
   `Schema_migration.run ~filename ~desugared`.
-- [ ] **Step 2** — the arm in `compile` becomes
+- [x] **Step 2** — the arm in `compile` becomes
   `else if !check_migration then Schema_migration.run ~filename ~desugared`.
-- [ ] **Step 3** — verify as A1, **plus** an explicit end-to-end run of the
+- [x] **Step 3** — verify as A1, **plus** an explicit end-to-end run of the
   subcommand on the fixture the test suite uses, since no oracle exercises this
   arm:
 
@@ -356,7 +356,7 @@ call site exactly as `verdict` computes it today.
 `--emit-core-ast` over ~600 fixtures. A byte-identical Tier 1 is a strong proof
 for this task specifically.
 
-- [ ] Steps as A3; verification as A1.
+- [x] Steps as A3; verification as A1.
 
 ```bash
 git add bin/emit_core_ast.ml bin/main.ml

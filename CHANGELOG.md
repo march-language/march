@@ -13,6 +13,12 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- `bin/main.ml` is 1,231 lines smaller (5,429 -> 4,198): host/stdlib/runtime
+  discovery and link flags, the command-line flag cells, the `--check-migration`
+  tool and the `--emit-core-ast` writer now live in their own `bin/` modules. No
+  behavior change -- the IR and typecheck oracles are byte-identical across 240
+  programs and 600 fixtures.
+
 - Codegen builtin dispatch names a closed variant (`Builtin_name.t`) rather than
   comparing raw strings, so a typo in an emitter guard is a compile error, and a
   builtin added to the variant without an emission arm is caught by a
@@ -24,6 +30,14 @@ git log is authoritative for exact commits.
 - `march --jit file.march` runs a whole program through the in-process ORC JIT — near-compiled speed without the clang/link step (experimental; actors fall back to the interpreter); programs that read command-line arguments see an empty argv under --jit.
 
 ### Fixed
+
+- The stdlib AST and typecheck-env caches silently disabled themselves on any
+  machine (or under any `HOME` override) where `~/.cache` did not already exist:
+  `Unix.mkdir` is not recursive and only `EEXIST` was caught, so `ENOENT` on the
+  missing parent escaped and every invocation re-parsed and re-typechecked the
+  stdlib while printing a `[warn] could not save the stdlib typecheck cache`
+  line ahead of its own output. All four cache-directory sites now share one
+  recursive `mkdir_p`.
 
 - Compiled code: a top-level function whose name collides with a compiler
   builtin the code generator dispatches specially (`int_mod`, `int_not`,
