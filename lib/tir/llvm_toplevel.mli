@@ -48,6 +48,23 @@ val emit_fn :
   Llvm_ctx.ctx -> Tir.fn_def -> unit
 val fn_declare_str : Tir.fn_def -> string
 val emit_atom_show_table : Llvm_ctx.ctx -> unit
+
+(** Per-constructor heap tags for a [type_def list], in declaration order,
+    exactly as {!build_ctor_info} installs them: [type_name -> tag list].
+
+    Exported for the REPL's heap pretty-printer, which reads a tag out of a
+    live value and must map it back to a constructor name.  "tag = index in
+    the ctor list" holds only for ordinary variants; actor-message types and
+    same-short-name colliding types are numbered from global counters that
+    walk the list front to back, so the caller must pass the SAME list in the
+    SAME order the code being interpreted was compiled with.
+
+    {!build_ctor_info} consumes this function, so the two cannot drift. *)
+val variant_ctor_tags :
+  collision_set:(string, string list) Hashtbl.t ->
+  Tir.type_def list ->
+  (string, int list) Hashtbl.t
+
 val build_ctor_info :
   Llvm_ctx.ctx -> Tir.tir_module -> unit
 val emit_module :
