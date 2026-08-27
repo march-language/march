@@ -540,6 +540,82 @@ let emit_atom_show_table ctx =
 
 (* ── Module emitter ──────────────────────────────────────────────────── *)
 
+(** Per-constructor heap tags for [types], in declaration order, exactly as
+    {!build_ctor_info} installs them: [type_name -> tag list], one tag per
+    constructor of that [TDVariant].
+
+    Extracted so that a SECOND consumer — the REPL's heap pretty-printer,
+    which must turn a tag read out of a live value back into a constructor
+    name — can ask for the numbering instead of assuming "tag = index in the
+    ctor list".  That assumption is false for the two global-tag ranges
+    below, and the REPL only started tripping over it once stdlib's
+    [type_def]s became visible to expression fragments — which is what puts a
+    prompt-declared `Color` in a collision set with stdlib's `Color` and
+    `Plot.Color` in the first place.
+
+    Order-sensitive by construction: both global ranges are handed out by
+    counters walking [types] front to back, so a caller must pass the SAME
+    list, in the SAME order, that the code it is interpreting was compiled
+    with.  Duplicated type names consume counter values here exactly as they
+    do in [build_ctor_info] — the counter advances before the first-wins
+    check there, so the two walks stay in lockstep.
+
+    Reserved monitor-ABI types are reported with their canonical tags rather
+    than a counter's; [build_ctor_info] seeds those separately and only
+    validates the declaration it later meets. *)
+let variant_ctor_tags
+    ~(collision_set : (string, string list) Hashtbl.t)
+    (types : Tir.type_def list) : (string, int list) Hashtbl.t =
+  let out : (string, int list) Hashtbl.t = Hashtbl.create 64 in
+  let actor_msg_tag = ref Llvm_builtins.actor_message_tag_base in
+  let collision_tag = ref Llvm_builtins.collision_tag_base in
+  let reserve ~kind ~limit next =
+    let tag = !next in
+    if tag >= limit then
+      failwith (Printf.sprintf
+        "%s constructor tag range exhausted before reserved monitor ABI (next=0x%08x, limit=0x%08x)"
+        kind tag limit);
+    incr next;
+    tag
+  in
+  List.iter (fun td ->
+    match td with
+    | Tir.TDVariant (name, ctors) when name = "Down" || name = "DownReason" ->
+      let tags =
+        List.map (fun (ctor_name, _) ->
+          match name, ctor_name with
+          | "Down", "Down" -> Llvm_builtins.monitor_down_tag
+          | "DownReason", "Normal" -> Llvm_builtins.monitor_reason_normal_tag
+          | "DownReason", "Killed" -> Llvm_builtins.monitor_reason_killed_tag
+          | "DownReason", "Crash" -> Llvm_builtins.monitor_reason_crash_tag
+          (* An incompatible redeclaration: [build_ctor_info] raises on it.
+             Report -1 rather than raising, so a display-only caller of this
+             function cannot take the REPL down over it. *)
+          | _ -> (-1)) ctors in
+      if not (Hashtbl.mem out name) then Hashtbl.replace out name tags
+    | Tir.TDVariant (name, ctors) when Tir_names.is_actor_msg_name name ->
+      let tags = List.map (fun _ ->
+        reserve ~kind:"actor-message"
+          ~limit:Llvm_builtins.actor_message_tag_limit actor_msg_tag) ctors in
+      if not (Hashtbl.mem out name) then Hashtbl.replace out name tags
+    | Tir.TDVariant (name, ctors)
+      when Collision_set.is_colliding collision_set name ->
+      let tags = List.map (fun _ ->
+        reserve ~kind:"colliding-user-type"
+          ~limit:Llvm_builtins.collision_tag_limit collision_tag) ctors in
+      if not (Hashtbl.mem out name) then Hashtbl.replace out name tags
+    | Tir.TDVariant (name, ctors) ->
+      let tags = List.mapi (fun i _ ->
+        if i >= Llvm_builtins.ordinary_ctor_tag_limit then
+          failwith (Printf.sprintf
+            "ordinary constructor numbering for %s reached reserved global tag space at index %d"
+            name i);
+        i) ctors in
+      if not (Hashtbl.mem out name) then Hashtbl.replace out name tags
+    | Tir.TDRecord _ | Tir.TDClosure _ -> ()
+  ) types;
+  out
+
 let build_ctor_info ctx (m : Tir.tir_module) =
   (* Runtime-originated monitor values exist even when source never declares
      their nominal types. Seed their canonical lowering metadata before
@@ -582,22 +658,18 @@ let build_ctor_info ctx (m : Tir.tir_module) =
      default arm and is dropped (parity with the interpreter's silent drop).
      Base is well clear of small-ADT tags and of MARCH_MIGRATE_TAG
      (0x4D494752); i32 header field, so ~0x60000000 headroom remains. *)
-  let actor_msg_tag = ref Llvm_builtins.actor_message_tag_base in
-  (* Same idea as [actor_msg_tag], for same-short-name types declared by >=2
-     modules (see [Collision_set.compute]'s doc comment). A DISTINCT counter
-     from [actor_msg_tag]: an actor-message ctor and a colliding user-type
-     ctor must never share a tag either, so the two global ranges are kept
-     well apart (0x0100_0000 vs 0x0200_0000) even though only one collision
-     kind can apply to any given TDVariant. *)
-  let collision_tag = ref Llvm_builtins.collision_tag_base in
-  let reserve_global_tag ~kind ~limit next =
-    let tag = !next in
-    if tag >= limit then
-      failwith (Printf.sprintf
-        "%s constructor tag range exhausted before reserved monitor ABI (next=0x%08x, limit=0x%08x)"
-        kind tag limit);
-    incr next;
-    tag
+  (* Both global tag counters, and ordinary 0-based numbering, now come from
+     [variant_ctor_tags] above — the SAME walk in the SAME order, so that the
+     REPL's pretty-printer can ask for this numbering rather than reproduce
+     it.  [tag_of name i] is total: a name the table has no row for falls back
+     to the declaration index, which is what the ordinary arm would have
+     assigned anyway. *)
+  let tag_table =
+    variant_ctor_tags ~collision_set:ctx.Llvm_ctx.collision_set m.Tir.tm_types in
+  let tag_of name i =
+    match Hashtbl.find_opt tag_table name with
+    | Some tags -> (match List.nth_opt tags i with Some t -> t | None -> i)
+    | None -> i
   in
   List.iter (fun td ->
     match td with
@@ -628,9 +700,8 @@ let build_ctor_info ctx (m : Tir.tir_module) =
       in
       List.iter (fun (_, field_tys) -> List.iter collect_tvars field_tys) ctors;
       Hashtbl.replace ctx.Llvm_ctx.type_params _name (List.rev !params);
-      List.iter (fun (ctor_name, field_tys) ->
-        let g = reserve_global_tag ~kind:"actor-message"
-            ~limit:Llvm_builtins.actor_message_tag_limit actor_msg_tag in
+      List.iteri (fun i (ctor_name, field_tys) ->
+        let g = tag_of _name i in
         let key = _name ^ "." ^ ctor_name in
         if not (Hashtbl.mem ctx.Llvm_ctx.ctor_info key) then
           Hashtbl.replace ctx.Llvm_ctx.ctor_info key { Llvm_ctx.ce_tag = g; ce_fields = field_tys };
@@ -663,9 +734,8 @@ let build_ctor_info ctx (m : Tir.tir_module) =
       in
       List.iter (fun (_, field_tys) -> List.iter collect_tvars field_tys) ctors;
       Hashtbl.replace ctx.Llvm_ctx.type_params _name (List.rev !params);
-      List.iter (fun (ctor_name, field_tys) ->
-        let g = reserve_global_tag ~kind:"colliding-user-type"
-            ~limit:Llvm_builtins.collision_tag_limit collision_tag in
+      List.iteri (fun i (ctor_name, field_tys) ->
+        let g = tag_of _name i in
         let key = _name ^ "." ^ ctor_name in
         if not (Hashtbl.mem ctx.Llvm_ctx.ctor_info key) then
           Hashtbl.replace ctx.Llvm_ctx.ctor_info key { Llvm_ctx.ce_tag = g; ce_fields = field_tys };
@@ -691,11 +761,8 @@ let build_ctor_info ctx (m : Tir.tir_module) =
       List.iter (fun (_, field_tys) -> List.iter collect_tvars field_tys) ctors;
       let param_names = List.rev !params in
       Hashtbl.replace ctx.Llvm_ctx.type_params _name param_names;
-      List.iteri (fun tag_idx (ctor_name, field_tys) ->
-        if tag_idx >= Llvm_builtins.ordinary_ctor_tag_limit then
-          failwith (Printf.sprintf
-            "ordinary constructor numbering for %s reached reserved global tag space at index %d"
-            _name tag_idx);
+      List.iteri (fun idx (ctor_name, field_tys) ->
+        let tag_idx = tag_of _name idx in
         (* Use a type-qualified key "TypeName.CtorName" so that two different
            ADTs with the same constructor name (e.g. List.Cons and Tree.Cons)
            never collide in ctor_info.  lower.ml embeds the same qualified key

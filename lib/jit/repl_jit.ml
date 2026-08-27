@@ -573,6 +573,57 @@ let rec subst_ty (bindings : (string * March_tir.Tir.ty) list) (t : March_tir.Ti
   | TRecord fs -> TRecord (List.map (fun (n, t) -> (n, subst_ty bindings t)) fs)
   | TInt | TFloat | TBool | TString | TUnit as t -> t
 
+(** Resolve a TIR type-constructor name to the key [type_defs] is actually
+    stored under.
+
+    A type declared inside a module is registered by [Lower] under its
+    module-qualified name ("Logger.Level"), but a TIR type referring to it —
+    the `fn_ret_ty` of a REPL expression fragment, or a constructor's declared
+    field type — is spelled with the BARE name ("Level").  Every printer
+    lookup is by exact name, so before stdlib type_defs were registered at all
+    this mismatch was invisible: the lookup missed either way.  With them
+    registered it is the whole difference between `Warn` and `#<tag:2>` — and
+    worse for a niche/enum type, where a missed lookup means [is_raw_word_ty]
+    says "heap cell" about a raw word and the printer dereferences an integer.
+
+    Exact match wins.  Otherwise accept a suffix match only when it is
+    UNIQUE: stdlib has several modules declaring a `Level` or an `Error`, and
+    guessing between them would print a confidently wrong constructor name.
+    Ambiguous (or absent) resolves to the original name, which lands on the
+    pre-existing `#<tag:N>` rendering — uninformative, but not a lie.
+
+    Display only.  Codegen's own numbering is keyed by the type-qualified
+    ctor name that [Lower] emits and never goes through here. *)
+let canonical_type_name ~type_defs (name : string) : string =
+  (* Never re-point a name the printer special-cases: `TCon ("Option", _)` has
+     its own arm, and a stdlib module that happened to declare its own
+     `Foo.Option` would otherwise steal the builtin's rendering. *)
+  if List.mem name [ "List"; "Option"; "Result"; "Map"; "Set"; "Array" ] then name
+  else if Hashtbl.mem type_defs name then name
+  else begin
+    let suffix = "." ^ name in
+    let sl = String.length suffix in
+    let matches =
+      Hashtbl.fold (fun k _ acc ->
+        let kl = String.length k in
+        if kl > sl && String.sub k (kl - sl) sl = suffix then k :: acc else acc)
+        type_defs [] in
+    match matches with [ k ] -> k | _ -> name
+  end
+
+(** [canonical_type_name] lifted over a whole type, so nested field types
+    ([Option(Level)], a record field, a tuple element) resolve too. *)
+let rec qualify_ty ~type_defs (t : March_tir.Tir.ty) : March_tir.Tir.ty =
+  let open March_tir.Tir in
+  let q = qualify_ty ~type_defs in
+  match t with
+  | TCon (n, args) -> TCon (canonical_type_name ~type_defs n, List.map q args)
+  | TTuple args -> TTuple (List.map q args)
+  | TFn (args, r) -> TFn (List.map q args, q r)
+  | TPtr t -> TPtr (q t)
+  | TRecord fs -> TRecord (List.map (fun (n, t) -> (n, q t)) fs)
+  | TVar _ | TInt | TFloat | TBool | TString | TUnit -> t
+
 (** Representation of the variant type [name] as codegen sees it.
 
     The pretty-printer MUST agree with [Repr] here: an expression fragment is
@@ -622,13 +673,42 @@ let niche_ctor_names (ctors : (string * March_tir.Tir.ty list) list) =
 let field_is_tagged (declared : March_tir.Tir.ty) =
   match declared with March_tir.Tir.TVar _ -> true | _ -> false
 
+(** Which constructor of [name] carries heap tag [tag]?
+
+    NOT simply [tag] itself.  Ordinary variants are numbered 0..n-1, so the
+    tag is the index — but an actor-message type, or a type whose SHORT name
+    is declared by two or more modules, is numbered from a global counter
+    (0x0100_0000 / 0x0200_0000 upward) precisely so its constructors cannot
+    be confused with another type's.  [ctor_tags] is that numbering, obtained
+    from the same [Llvm_toplevel.variant_ctor_tags] the fragment was compiled
+    through, so the two cannot disagree.
+
+    This only started biting the REPL when stdlib's type_defs became visible
+    to expression fragments: stdlib declares both a `Color` and a
+    `Plot.Color`, so a prompt-declared `type Color = Red | Green | Blue` lands
+    in a collision set the moment stdlib is in the list, so its tags jump into the global range and "tag = index" silently
+    became false.  A type absent from [ctor_tags] keeps the ordinary reading. *)
+let ctor_index_of_tag ~ctor_tags (name : string) (tag : int) : int option =
+  match Hashtbl.find_opt ctor_tags name with
+  | None -> Some tag
+  | Some tags ->
+    let rec go i = function
+      | [] -> None
+      | t :: rest -> if t = tag then Some i else go (i + 1) rest in
+    go 0 tags
+
 (** Pretty-print a March heap value given its TIR type.
     [type_defs] provides user-declared TDVariant/TDRecord lookups for
     non-builtin TCon names.  Recursion is bounded to depth 64. *)
-let rec pp_heap_value ?(depth=0) ~type_defs (ty : March_tir.Tir.ty) (ptr : nativeint) : string =
+let rec pp_heap_value ?(depth=0) ~type_defs ~ctor_tags (ty : March_tir.Tir.ty) (ptr : nativeint) : string =
   if depth > 64 then "#<...>"
   else
   let open March_tir.Tir in
+  (* Resolve bare module-type names to their registered keys before ANY
+     lookup below, including [variant_repr]'s — a missed lookup here decides
+     heap-cell-vs-raw-word, not just which name gets printed.  Idempotent, so
+     the recursive calls re-entering here cost only a hash hit. *)
+  let ty = qualify_ty ~type_defs ty in
   match ty with
   (* Niche / newtype types are NOT heap cells: [ptr] is the raw payload word
      (or 0 for a niche's nullary ctor), so these must be decoded before the
@@ -649,12 +729,12 @@ let rec pp_heap_value ?(depth=0) ~type_defs (ty : March_tir.Tir.ty) (ptr : nativ
         | Some (nullary, single) ->
           if ptr = Nativeint.zero then nullary
           else Printf.sprintf "%s(%s)" single
-                 (pp_word ~depth ~type_defs ~tagged (subst_ty bindings payload) ptr))
+                 (pp_word ~depth ~type_defs ~ctor_tags ~tagged (subst_ty bindings payload) ptr))
      | March_tir.Repr.Newtype payload ->
        (match ctors with
         | [ (ctor, [ declared ]) ] ->
           Printf.sprintf "%s(%s)" ctor
-            (pp_word ~depth ~type_defs ~tagged:(field_is_tagged declared)
+            (pp_word ~depth ~type_defs ~ctor_tags ~tagged:(field_is_tagged declared)
                (subst_ty bindings payload) ptr)
         | _ -> Printf.sprintf "#<newtype:%nd>" ptr)
      (* Unreachable: the guard above already excluded Boxed.  Rendered rather
@@ -668,28 +748,29 @@ let rec pp_heap_value ?(depth=0) ~type_defs (ty : March_tir.Tir.ty) (ptr : nativ
     (* march_string layout: {rc:i64, tag:i32, pad:i32, len:i64, data:char[]} *)
     Printf.sprintf "%S" (Jit.read_march_string ptr)
   | TCon ("List", [elem_ty]) ->
-    pp_list ~depth ~type_defs elem_ty ptr
+    pp_list ~depth ~type_defs ~ctor_tags elem_ty ptr
   | TCon ("Option", [inner_ty]) ->
     let tag = heap_tag ptr in
     if tag = 0 then "None"
     else
-      let v = pp_field ~depth ~type_defs ~tagged:true inner_ty ptr 0 in
+      let v = pp_field ~depth ~type_defs ~ctor_tags ~tagged:true inner_ty ptr 0 in
       Printf.sprintf "Some(%s)" v
   | TCon ("Result", [ok_ty; err_ty]) ->
     let tag = heap_tag ptr in
-    if tag = 0 then Printf.sprintf "Ok(%s)" (pp_field ~depth ~type_defs ~tagged:true ok_ty ptr 0)
-    else         Printf.sprintf "Err(%s)" (pp_field ~depth ~type_defs ~tagged:true err_ty ptr 0)
+    if tag = 0 then Printf.sprintf "Ok(%s)" (pp_field ~depth ~type_defs ~ctor_tags ~tagged:true ok_ty ptr 0)
+    else         Printf.sprintf "Err(%s)" (pp_field ~depth ~type_defs ~ctor_tags ~tagged:true err_ty ptr 0)
   | TTuple tys ->
     (* Tuple fields use the uniform slot convention: scalars are low-bit
        tagged (matching ETuple's coerce-to-ptr store), so untag scalar views. *)
-    let fields = List.mapi (fun i ty -> pp_field ~depth ~type_defs ~tagged:true ty ptr i) tys in
+    let fields = List.mapi (fun i ty -> pp_field ~depth ~type_defs ~ctor_tags ~tagged:true ty ptr i) tys in
     Printf.sprintf "(%s)" (String.concat ", " fields)
   | TCon (name, args) when Hashtbl.mem type_defs name ->
     let td = Hashtbl.find type_defs name in
     (match td with
      | TDVariant (_, ctors) ->
        let tag = heap_tag ptr in
-       (match List.nth_opt ctors tag with
+       (match Option.bind (ctor_index_of_tag ~ctor_tags name tag)
+                (List.nth_opt ctors) with
         | None -> Printf.sprintf "#<tag:%d>" tag
         | Some (ctor_name, payload_tys) ->
           let tvars = collect_tvars td in
@@ -700,7 +781,7 @@ let rec pp_heap_value ?(depth=0) ~type_defs (ty : March_tir.Tir.ty) (ptr : nativ
           if payload_tys = [] then ctor_name
           else
             let fields = List.mapi (fun i declared ->
-              pp_field ~depth ~type_defs ~tagged:(field_is_tagged declared)
+              pp_field ~depth ~type_defs ~ctor_tags ~tagged:(field_is_tagged declared)
                 (subst_ty bindings declared) ptr i
             ) payload_tys in
             Printf.sprintf "%s(%s)" ctor_name (String.concat ", " fields))
@@ -709,7 +790,7 @@ let rec pp_heap_value ?(depth=0) ~type_defs (ty : March_tir.Tir.ty) (ptr : nativ
          (* Record scalar fields are stored UNTAGGED (same layout as tuples),
             not payload-tagged like ADT constructor args. *)
          Printf.sprintf "%s: %s" fname
-           (pp_field ~depth ~type_defs ~tagged:false fty ptr i)
+           (pp_field ~depth ~type_defs ~ctor_tags ~tagged:false fty ptr i)
        ) fs in
        Printf.sprintf "{%s}" (String.concat ", " fields)
      | TDClosure _ -> Printf.sprintf "#<tag:%d>" (heap_tag ptr))
@@ -719,7 +800,7 @@ let rec pp_heap_value ?(depth=0) ~type_defs (ty : March_tir.Tir.ty) (ptr : nativ
        payload-tagged ADT fields. *)
     let fields = List.mapi (fun i (fname, fty) ->
       Printf.sprintf "%s: %s" fname
-        (pp_field ~depth ~type_defs ~tagged:false fty ptr i)
+        (pp_field ~depth ~type_defs ~ctor_tags ~tagged:false fty ptr i)
     ) fs in
     Printf.sprintf "{%s}" (String.concat ", " fields)
   | _ ->
@@ -727,7 +808,7 @@ let rec pp_heap_value ?(depth=0) ~type_defs (ty : March_tir.Tir.ty) (ptr : nativ
     if ptr = Nativeint.zero then "#<null>"
     else Printf.sprintf "#<tag:%d>" (heap_tag ptr)
 
-and pp_list ?(depth=0) ~type_defs elem_ty (ptr : nativeint) : string =
+and pp_list ?(depth=0) ~type_defs ~ctor_tags elem_ty (ptr : nativeint) : string =
   let buf = Buffer.create 32 in
   Buffer.add_char buf '[';
   let cur = ref ptr in
@@ -739,7 +820,7 @@ and pp_list ?(depth=0) ~type_defs elem_ty (ptr : nativeint) : string =
     if not !first then Buffer.add_string buf ", ";
     first := false;
     (* Cons payload scalars ARE tagged — pass tagged:true. *)
-    Buffer.add_string buf (pp_field ~depth ~type_defs ~tagged:true elem_ty !cur 0);
+    Buffer.add_string buf (pp_field ~depth ~type_defs ~ctor_tags ~tagged:true elem_ty !cur 0);
     cur := field_ptr !cur 1;  (* tail is field 1 of Cons *)
     incr count
   done;
@@ -747,7 +828,7 @@ and pp_list ?(depth=0) ~type_defs elem_ty (ptr : nativeint) : string =
   Buffer.add_char buf ']';
   Buffer.contents buf
 
-and pp_field ?(depth=0) ~type_defs ~tagged (ty : March_tir.Tir.ty) (ptr : nativeint) (i : int) : string =
+and pp_field ?(depth=0) ~type_defs ~ctor_tags ~tagged (ty : March_tir.Tir.ty) (ptr : nativeint) (i : int) : string =
   let open March_tir.Tir in
   match ty with
   | TFloat ->
@@ -755,13 +836,13 @@ and pp_field ?(depth=0) ~type_defs ~tagged (ty : March_tir.Tir.ty) (ptr : native
        bit pattern is not a meaningful nativeint, so read the slot directly. *)
     Printf.sprintf "%g" (Int64.float_of_bits (field_i64 ptr i))
   | TInt | TBool | TUnit ->
-    pp_word ~depth ~type_defs ~tagged ty (Int64.to_nativeint (field_i64 ptr i))
-  | _ -> pp_word ~depth ~type_defs ~tagged ty (field_ptr ptr i)
+    pp_word ~depth ~type_defs ~ctor_tags ~tagged ty (Int64.to_nativeint (field_i64 ptr i))
+  | _ -> pp_word ~depth ~type_defs ~ctor_tags ~tagged ty (field_ptr ptr i)
 
 (** Render a value held in a single machine word — a constructor field just
     read out of a cell, or the whole value of a niche/newtype type.
     [tagged] says the word holds a low-bit-tagged scalar (value<<1)|1. *)
-and pp_word ?(depth=0) ~type_defs ~tagged (ty : March_tir.Tir.ty) (w : nativeint) : string =
+and pp_word ?(depth=0) ~type_defs ~ctor_tags ~tagged (ty : March_tir.Tir.ty) (w : nativeint) : string =
   let open March_tir.Tir in
   let scalar () =
     let v = Int64.of_nativeint w in
@@ -782,14 +863,17 @@ and pp_word ?(depth=0) ~type_defs ~tagged (ty : March_tir.Tir.ty) (w : nativeint
     else Printf.sprintf "#<tag:%d>" (heap_tag w)
   | _ ->
     if w = Nativeint.zero then "null"
-    else pp_heap_value ~depth:(depth + 1) ~type_defs ty w
+    else pp_heap_value ~depth:(depth + 1) ~type_defs ~ctor_tags ty w
 
 (** True when a value of [ty] is NOT a heap pointer but the raw payload word
     of a niche/newtype representation — the two cases where the "small word =
     plain integer" fallback in [run_expr] would print `15` instead of `X(7)`,
     and where a raw 0 means the nullary constructor rather than a null value. *)
 let is_raw_word_ty ~type_defs (ty : March_tir.Tir.ty) =
-  match ty with
+  (* Same resolution [pp_heap_value] applies: a bare `Level` that fails to
+     find `Logger.Level` reports Boxed, and the caller then dereferences an
+     enum's raw word as a pointer. *)
+  match qualify_ty ~type_defs ty with
   | March_tir.Tir.TCon (name, args) ->
     (match Hashtbl.find_opt type_defs name with
      | Some (March_tir.Tir.TDVariant _) ->
@@ -798,6 +882,18 @@ let is_raw_word_ty ~type_defs (ty : March_tir.Tir.ty) =
         | _ -> true)
      | _ -> false)
   | _ -> false
+
+(** The constructor numbering the next expression fragment will be compiled
+    with — [ctx.loaded_tir_types] is exactly the `~types` prefix handed to it,
+    and the numbering is order-sensitive, so it is derived from that list
+    rather than from the (unordered) [global_type_defs] table.
+
+    Recomputed per printed value: it is a walk over a few hundred type_defs,
+    once, against a REPL round-trip that has already paid a clang invocation. *)
+let ctor_tags_of ctx =
+  let types = ctx.loaded_tir_types in
+  March_tir.Llvm_toplevel.variant_ctor_tags
+    ~collision_set:(March_tir.Collision_set.compute types) types
 
 (* ── run_expr ──────────────────────────────────────────────────────── *)
 
@@ -1153,9 +1249,9 @@ let run_expr ctx ~tc_env m =
        | Some ty ->
          let ptr = Jit.call_void_to_ptr fptr in
          if is_raw_word_ty ~type_defs:ctx.global_type_defs ty then
-           pp_heap_value ~type_defs:ctx.global_type_defs ty ptr
+           pp_heap_value ~type_defs:ctx.global_type_defs ~ctor_tags:(ctor_tags_of ctx) ty ptr
          else if ptr = Nativeint.zero then "null"
-         else pp_heap_value ~type_defs:ctx.global_type_defs ty ptr
+         else pp_heap_value ~type_defs:ctx.global_type_defs ~ctor_tags:(ctor_tags_of ctx) ty ptr
        | None ->
          (* No type information — call as ptr (safer than int for heap objects).
             Small values that fit in a tagged integer are displayed as integers;
@@ -1169,7 +1265,7 @@ let run_expr ctx ~tc_env m =
     | ty when is_raw_word_ty ~type_defs:ctx.global_type_defs ty ->
       (* Niche/newtype: the returned word IS the value (0 = nullary ctor),
          so neither the null check nor the small-integer fallback applies. *)
-      pp_heap_value ~type_defs:ctx.global_type_defs ty
+      pp_heap_value ~type_defs:ctx.global_type_defs ~ctor_tags:(ctor_tags_of ctx) ty
         (Jit.call_void_to_ptr fptr)
     | ty ->
       let ptr = Jit.call_void_to_ptr fptr in
@@ -1179,7 +1275,7 @@ let run_expr ctx ~tc_env m =
         if Int64.compare raw 0x100000000L < 0 && Int64.compare raw 0L >= 0 then
           Int64.to_string raw
         else
-          pp_heap_value ~type_defs:ctx.global_type_defs ty ptr
+          pp_heap_value ~type_defs:ctx.global_type_defs ~ctor_tags:(ctor_tags_of ctx) ty ptr
   in
   (* Update the "v" slot entry (type may change with each expression). *)
   ctx.var_slots <- ("v", v_slot, ret_ty) ::
@@ -1355,11 +1451,17 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
     Two-tier cache in ~/.cache/march/:
       stdlib_prelude_<hash>.so    — compiled shared library
       stdlib_prelude_<hash>.names — newline-separated list of function names
+      stdlib_prelude_<hash>.types — Marshal'd [Tir.type_def list], the exact
+                                    `~types` list the .so was compiled with
 
-    On cache hit: dlopen the .so, read function names from the .names file,
-      mark all functions as compiled — NO TIR lowering needed.
+    On cache hit: dlopen the .so, read function names from the .names file and
+      type_defs from the .types file, mark all functions as compiled — NO TIR
+      lowering needed.
     On cache miss: lower [stdlib_decls] to TIR, compile to a .so, write the
-      .names file, then dlopen.
+      .names and .types files, then dlopen.
+
+    All three files are required for a hit; a missing or unreadable one falls
+    through to the recompile branch.
 
     [content_hash] must be a hex string derived from the stdlib source content
     (see [stdlib_content_hash] in the caller).  Using source-level hashing
@@ -1397,10 +1499,23 @@ let precompile_stdlib ctx
   let short_hash =
     String.sub
       (Digest.to_hex (Digest.string (content_hash ^ "|" ^ compiler_id))) 0 16 in
-  let so_path    = Filename.concat cache_dir
-    ("stdlib_prelude_O1_tln2_" ^ short_hash ^ ".so") in
-  let names_path = Filename.concat cache_dir
-    ("stdlib_prelude_O1_tln2_" ^ short_hash ^ ".names") in
+  (* The `ty1` generation tag marks "this cache entry has a .types companion".
+     [compiler_id] above already makes a pre-change compiler's blobs
+     unreachable to this one (any rebuild moves the executable's size/mtime),
+     but the generation tag states the format dependency explicitly rather
+     than leaving it to that side effect — the .types file is Marshal'd
+     [Tir.type_def list], and reading an old blob under a new shape is the
+     failure mode this repo has been bitten by before.  Bump it whenever the
+     companion-file set or its encoding changes. *)
+  let prefix = "stdlib_prelude_O1_tln2_ty1_" in
+  let so_path    = Filename.concat cache_dir (prefix ^ short_hash ^ ".so") in
+  let names_path = Filename.concat cache_dir (prefix ^ short_hash ^ ".names") in
+  (* Marshal'd [March_tir.Tir.type_def list] — exactly the `~types` list the
+     .so was compiled with.  Constructor tags are numbered from this list by
+     [Llvm_emit]'s [build_ctor_info] (first-wins, order-sensitive), so every
+     later expression fragment must be handed the SAME list in the SAME order
+     or its constructors get tags that disagree with the compiled prelude. *)
+  let types_path = Filename.concat cache_dir (prefix ^ short_hash ^ ".types") in
   (* ── Cache hit path ───────────────────────────────────────────────────── *)
   (* [loaded] records whether the cached .so was ACTUALLY adopted.  A failed
      load must fall through to the compile branch below, which is what this
@@ -1427,10 +1542,30 @@ let precompile_stdlib ctx
      the runtime-.so builder (bin/main.ml) and only costs the cache hit;
      falling through correctly is what keeps the miss safe. *)
   let loaded = ref false in
-  if Sys.file_exists so_path && Sys.file_exists names_path then begin
+  if Sys.file_exists so_path && Sys.file_exists names_path
+     && Sys.file_exists types_path then begin
     (try
+      (* Read the type_defs BEFORE adopting anything: a missing or unreadable
+         .types file must fall through to the recompile branch, not leave us
+         with a prelude whose constructor numbering nothing else can see. *)
+      let cached_types : March_tir.Tir.type_def list =
+        let ic = open_in_bin types_path in
+        Fun.protect ~finally:(fun () -> close_in_noerr ic)
+          (fun () -> Marshal.from_channel ic) in
       let handle = Jit.dlopen so_path in
       loaded := true;
+      (* Hand stdlib's type_defs to both consumers of constructor numbering:
+         [ctx.loaded_tir_types] is the `~types` prefix of every subsequent
+         expression fragment (codegen), and [ctx.global_type_defs] is what the
+         heap pretty-printer reads to turn a tag back into a ctor name.
+         Without this the warm-cache path — the common one — never lowers
+         stdlib to TIR at all, so a fragment mentioning `Http.Post` misses in
+         [ctor_entry] and takes its `ce_tag = 0` default: every stdlib
+         constructor is BUILT with tag 0 and every [match] arm COMPARED
+         against 0, so the first arm always wins.  A wrong answer, not just a
+         wrong rendering. *)
+      register_type_defs ctx cached_types;
+      ctx.loaded_tir_types <- cached_types @ ctx.loaded_tir_types;
       ctx.handles <- handle :: ctx.handles;
       (* Read function names and mark as compiled.
          The last line of the .names file may be "lambda_counter=N" — if so,
@@ -1457,6 +1592,11 @@ let precompile_stdlib ctx
          would send some prelude functions to `extern` with no definition. *)
       loaded := false;
       Hashtbl.reset ctx.compiled_fns;
+      (* Same reasoning for the type_defs a partial load may have registered:
+         the recompile below installs its own list, and two copies would make
+         [build_ctor_info]'s first-wins numbering depend on which came first. *)
+      ctx.loaded_tir_types <- [];
+      Hashtbl.reset ctx.global_type_defs;
       Printf.eprintf "march JIT: stdlib cache load failed (%s), recompiling\n%!"
         (Printexc.to_string exn))
   end;
@@ -1541,6 +1681,21 @@ let precompile_stdlib ctx
                     (March_tir.Defun.get_lambda_counter ())));
              Sys.rename names_tmp names_path
            with _ -> ());
+           (* Companion .types: the `~types` list this .so was compiled with,
+              so a warm-cache session can hand the identical list (identical
+              ORDER — [build_ctor_info] is first-wins) to its expression
+              fragments and to the pretty-printer.  Published before the .so
+              for the same reason .names is: the hit path requires all three
+              files, so renaming the .so last means no reader ever pairs it
+              with a partial companion. *)
+           (try
+             let types_tmp =
+               Printf.sprintf "%s.%d.tmp" types_path (Unix.getpid ()) in
+             let tc = open_out_bin types_tmp in
+             Fun.protect ~finally:(fun () -> close_out_noerr tc) (fun () ->
+               Marshal.to_channel tc tir.March_tir.Tir.tm_types []);
+             Sys.rename types_tmp types_path
+           with _ -> ());
            (* Publish the .so atomically; fall back to loading the temp
               directly if the rename is refused. *)
            let load_path =
@@ -1555,6 +1710,14 @@ let precompile_stdlib ctx
              List.iter (fun (f : March_tir.Tir.fn_def) ->
                Hashtbl.replace ctx.compiled_fns f.fn_name ()
              ) stdlib_fns;
+             (* Mirror of the cache-hit path: the cold path lowered stdlib to
+                TIR but was dropping [tm_types] on the floor once the fragment
+                was emitted, so a COLD session mis-tagged stdlib constructors
+                exactly like a warm one.  Register the same list the .so was
+                compiled with, in the same order. *)
+             register_type_defs ctx tir.March_tir.Tir.tm_types;
+             ctx.loaded_tir_types <-
+               tir.March_tir.Tir.tm_types @ ctx.loaded_tir_types;
              commit_wraps ctx sw
            with exn ->
              Printf.eprintf "march JIT: stdlib .so dlopen failed (%s)\n%!"

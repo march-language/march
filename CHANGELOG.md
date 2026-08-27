@@ -31,6 +31,20 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- REPL (JIT, the default): a stdlib constructor evaluated as the FIRST variant
+  of its type, so `match Logger.Warn do Logger.Debug -> 0 | Logger.Info -> 1 |
+  Logger.Warn -> 2 | ... end` answered `0`, and `Http.Post` matched the
+  `Http.Get` arm. A wrong answer, not just the `= #<tag:0>` rendering it was
+  reported as. The prelude's constructor numbering is now cached alongside the
+  compiled prelude and loaded on the warm-cache startup path (and kept on the
+  cold one), so REPL expressions are compiled with the same tags the prelude
+  was. `MARCH_REPL_INTERP=1` was always correct.
+
+- REPL (JIT): stdlib ADT values printed as `#<tag:N>` instead of their
+  constructor name — `Http.Post` now prints `Post`. A type declared inside a
+  module is registered under its qualified name but referred to by its bare
+  one; the printer now resolves the two when the bare name is unambiguous.
+
 - The stdlib AST and typecheck-env caches silently disabled themselves on any
   machine (or under any `HOME` override) where `~/.cache` did not already exist:
   `Unix.mkdir` is not recursive and only `EEXIST` was caught, so `ENOENT` on the

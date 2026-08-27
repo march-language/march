@@ -743,6 +743,67 @@ let test_jit_file_mutual_tco_no_stack_overflow () =
         (out, code) ["checksum=28000"]
   end
 
+(* ── stdlib ADT constructor tags ─────────────────────────────────────
+   A stdlib constructor typed at the REPL used to be built with tag 0 and
+   every `match` arm compared against 0, so the FIRST arm always won:
+
+     match Logger.Warn do Logger.Debug -> 0 | Logger.Info -> 1
+                        | Logger.Warn -> 2 | Logger.Error -> 3 end
+       JIT:    0   (wrong — and wrong for Info and Error too)
+       interp: 2
+
+   A wrong answer, not a rendering defect.  Cause: the warm-cache startup
+   path dlopens the prelude .so without lowering stdlib to TIR, so no stdlib
+   type_def reached the expression fragment's `~types` list and codegen's
+   ctor_entry lookup took its `ce_tag = 0` default; the cold path lowered but
+   then dropped tm_types on the floor.  See
+   specs/progress/2026-08-24-repl-jit-stdlib-adt-ctor-tags.md.
+
+   Run TWICE against the same HOME on purpose: the first session may build
+   the prelude cache (cold), the second is guaranteed to hit it (warm), and
+   the warm path is the one that was broken. *)
+
+let stdlib_ctor_tags_session =
+  [ "match Logger.Debug do Logger.Debug -> 0 | Logger.Info -> 1 | Logger.Warn -> 2 | Logger.Error -> 3 end";
+    "match Logger.Info do Logger.Debug -> 0 | Logger.Info -> 1 | Logger.Warn -> 2 | Logger.Error -> 3 end";
+    "match Logger.Warn do Logger.Debug -> 0 | Logger.Info -> 1 | Logger.Warn -> 2 | Logger.Error -> 3 end";
+    "match Logger.Error do Logger.Debug -> 0 | Logger.Info -> 1 | Logger.Warn -> 2 | Logger.Error -> 3 end";
+    "match Http.Post do Http.Get -> \"get\" | Http.Post -> \"post\" | _ -> \"other\" end";
+    "Http.Post" ]
+
+let check_stdlib_ctor_tags ~label (out, code) =
+  Alcotest.(check int) (label ^ ": REPL exit code") 0 code;
+  (* Each level must reach its OWN arm.  All four asserted together: with the
+     bug every one of them answered 0, so checking only Debug (which answers
+     0 correctly by luck, being variant 0) would pass on the broken build. *)
+  List.iter (fun (needle, what) ->
+    if not (contains ~needle out) then
+      Alcotest.failf "%s: expected %s (%s) in session output, got:\n%s"
+        label needle what out)
+    [ "= 0", "Logger.Debug -> 0";
+      "= 1", "Logger.Info -> 1";
+      "= 2", "Logger.Warn -> 2";
+      "= 3", "Logger.Error -> 3";
+      "= \"post\"", "match Http.Post takes the Post arm";
+      "= Post", "Http.Post renders as its constructor, not #<tag:N>" ]
+
+let test_repl_stdlib_ctor_tags_jit () =
+  if not (clang_available ()) then ()  (* skip: stdlib precompile needs clang *)
+  else begin
+    (* Cold (or at least first) session — also writes the prelude cache. *)
+    check_stdlib_ctor_tags ~label:"JIT, first session"
+      (run_repl_session ~env_prefix:"" stdlib_ctor_tags_session);
+    (* Warm session against the same HOME: the cache-hit path. *)
+    check_stdlib_ctor_tags ~label:"JIT, warm cache"
+      (run_repl_session ~env_prefix:"" stdlib_ctor_tags_session)
+  end
+
+(* Parity control: the tree-walking interpreter was always right here, so a
+   failure in THIS case means the witness itself broke, not the JIT. *)
+let test_repl_stdlib_ctor_tags_interp () =
+  check_stdlib_ctor_tags ~label:"interpreter mode"
+    (run_repl_session ~env_prefix:"MARCH_REPL_INTERP=1" stdlib_ctor_tags_session)
+
 let () =
   Alcotest.run "march_jit" [
     "jit", [
@@ -774,6 +835,10 @@ let () =
         test_repl_session_redefine_then_call_clang;
       Alcotest.test_case "redefine then call through prior fn (ORC JIT)" `Slow
         test_repl_session_redefine_then_call_orc;
+      Alcotest.test_case "stdlib ADT ctor tags, cold and warm cache (JIT)" `Slow
+        test_repl_stdlib_ctor_tags_jit;
+      Alcotest.test_case "stdlib ADT ctor tags (interpreter)" `Quick
+        test_repl_stdlib_ctor_tags_interp;
     ];
     "jit_file", [
       Alcotest.test_case "march --jit runs a whole program (ORC JIT)" `Slow
