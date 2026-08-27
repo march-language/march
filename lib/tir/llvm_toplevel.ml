@@ -66,11 +66,6 @@ let target_triple = function
   | Wasm32Unknown   -> "wasm32-unknown-unknown"
   | Js              -> "js"
 
-(** Architecture, when meaningful (native's arch is the host, decided by clang). *)
-let target_arch = function
-  | LinuxGnu { arch; _ } -> Some arch
-  | Native | Wasm64Wasi | Wasm32Wasi | Wasm32Unknown | Js -> None
-
 let target_is_linux = function
   | LinuxGnu _ -> true
   | Native | Wasm64Wasi | Wasm32Wasi | Wasm32Unknown | Js -> false
@@ -718,19 +713,6 @@ let build_ctor_info ctx (m : Tir.tir_module) =
       Hashtbl.replace ctx.Llvm_ctx.ctor_info _name
         { Llvm_ctx.ce_tag = 0; ce_fields = field_tys }
   ) m.Tir.tm_types
-
-(** Dead code, carried verbatim from [llvm_emit.ml] (Wave 3 Task 7 move):
-    no caller exists anywhere in the tree (grepped at move time). Not a
-    behavior change to leave in place — see specs/todos.md filing. *)
-let emit_main_wrapper (buf : Buffer.t) =
-  Buffer.add_string buf
-    "\ndeclare void @march_process_argv_init(i32 %argc, ptr %argv)\n\
-     declare void @march_spawn_main(ptr %fn)\n\
-     define i32 @main(i32 %argc, ptr %argv) {\nentry:\n\
-       call void @march_process_argv_init(i32 %argc, ptr %argv)\n\
-       call void @march_spawn_main(ptr @march_main)\n\
-       call void @march_run_scheduler()\n\
-       ret i32 0\n}\n"
 
 let emit_module ~emit_expr
     ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)

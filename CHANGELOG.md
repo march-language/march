@@ -13,6 +13,11 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- Removed three uncalled `lib/tir` values (`emit_main_wrapper`, `target_arch`,
+  `reserved_ctor_tag_limit`) left over from an earlier `.mli`-only pass that
+  could not edit `.ml` files. No behavior change -- the IR oracle is
+  byte-identical across 241 programs.
+
 - `bin/main.ml` is 1,231 lines smaller (5,429 -> 4,198): host/stdlib/runtime
   discovery and link flags, the command-line flag cells, the `--check-migration`
   tool and the `--emit-core-ast` writer now live in their own `bin/` modules. No
