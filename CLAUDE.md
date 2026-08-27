@@ -121,6 +121,38 @@ artifact. See the workflow/design comment at the top of `test/test_snapshots.ml`
 for the full detail (printer choice, prelude-noise filtering, fresh-name-counter
 determinism).
 
+### Refactor oracles — prove a change moved nothing
+
+Three scripts exist to prove a refactor changed no observable behaviour. Each
+records a baseline, then compares. **Prove any oracle goes RED on a deliberate
+perturbation before you trust a GREEN** — two of these three shipped broken
+(a `${1:?usage … {a|b} …}` bash expansion ends at the *first* `}`, so the mode
+argument was mangled and every run died before touching a fixture), and one of
+them was certified "verified" by a review while in that state.
+
+```
+scripts/ir-oracle.sh     baseline|check <dir>   # hashes --emit-llvm over ~240 programs
+scripts/refine-oracle.sh baseline|check <dir>   # refinement diagnostics over ~297 fixtures
+scripts/types-oracle.sh  baseline|check <dir>   # two-tier: core-AST inference results + diagnostic text
+```
+
+What they do **not** cover, which matters when choosing one:
+- `ir-oracle` is blind to `lib/eval/` (the interpreter is never emitted as IR) and
+  to `lsp/` — a green there proves nothing about those trees. For interpreter
+  changes use the test suite plus `bench/run_interp_bench.sh --modes interp`.
+- `types-oracle` is two-tier because neither channel suffices alone: `--check`
+  prints nothing on an accepting program, and `--emit-core-ast`'s JSON keeps only
+  each diagnostic's first line, dropping provenance and hint text.
+- No oracle sees **match-arm order**, **module-initialisation order**, or any
+  behaviour the corpus does not exercise. A reordering refactor can be green and
+  wrong; check those properties directly.
+- Run oracles under a **private `HOME`**: `~/.cache/march` is shared across
+  worktrees and its cached spans carry the populating worktree's absolute paths,
+  which produces phantom diffs naming someone else's directory.
+
+Related: `dune build @types-check` **without `--force` is vacuous** — it exits 0
+with a zero-byte log. Assert on the log's contents, never on the exit code.
+
 ## Multi-file compilation (MARCH_LIB_PATH)
 
 March accepts exactly ONE input file per invocation. Multi-file projects (apps + library deps) use the `MARCH_LIB_PATH` environment variable to auto-discover all `.march` files in dependency directories.
@@ -169,15 +201,21 @@ lib/ast/ast.ml              AST types (span, expr, pattern, decl, …)
 lib/lexer/lexer.mll         ocamllex lexer
 lib/parser/parser.mly       menhir parser
 lib/desugar/desugar.ml      pipe desugar, multi-head fn → single EMatch clause
-lib/typecheck/typecheck.ml  bidirectional HM type inference
-lib/eval/eval.ml            tree-walking interpreter (1180+ tests)
+lib/typecheck/                bidirectional HM type inference: typecheck (inference core),
+                             +typecheck_{env,types,builtins,exhaustive,caps,tailcall}
+lib/eval/                     tree-walking interpreter: eval (evaluator),
+                             +eval_{types,prim,builtins,runtime,net,session,simd}
 lib/tir/                    typed IR: lower (+lower_state/types/match/decls/actor/tests), mono, defun,
                              perceus (+perceus_liveness/elide/fbip/scrut), borrow, fusion,
-                             llvm_emit (+llvm_ctx/builtins/eq/data/case/calls/tco/toplevel/repl),
+                             llvm_emit (+llvm_ctx/builtins/eq/data/case/calls/tco/toplevel/repl,
+                             and the per-arm bodies in llvm_emit_{arith,alloc,call,data,html,task,tcoarm,simd,nmap}),
+                             builtin_name (closed variant for builtin dispatch),
                              tir_names (cross-pass name contracts), rc_types (needs_rc/borrow_eligible)
 lib/jit/                    REPL JIT compiler
 lib/errors/errors.ml        diagnostic type (Error/Warning/Hint + span)
 lib/search/search.ml        Hoogle-style type/name search engine
+lsp/lib/                    LSP analysis: analysis + analysis_{types,util},
+                             code_actions_{ast,diag} (the two code-action engines)
 stdlib/                     116 March stdlib modules (list, map, enum, sort, crypto, http, json, distributed-OTP, …)
 runtime/                    C runtime (GC, scheduler, HTTP, TLS, WASM)
 forge/                      build tool (new, build, run, test, deps, search, publish subcommands)
