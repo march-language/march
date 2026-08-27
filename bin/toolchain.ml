@@ -258,6 +258,29 @@ let b64_decode_pubkey b64 =
     end
   end
 
+(** Create [dir] and every missing parent, ignoring races.
+
+    [Unix.mkdir] is NOT recursive, and every cache-writing site here catches
+    only [EEXIST].  So on a machine — or under a HOME override — where
+    [~/.cache] does not already exist, [ENOENT] on the missing parent escaped
+    to the enclosing handler and SILENTLY DISABLED the cache: a
+    "could not save the stdlib typecheck cache" warning ahead of the program's
+    own output (which also corrupted [--emit-core-ast]'s one-document contract)
+    and a full stdlib re-parse and re-typecheck on every single invocation.
+    See specs/progress/2026-08-27-stdlib-cache-mkdir-not-recursive.md.
+
+    [EEXIST] is ignored rather than pre-checked because the cache directory is
+    shared across concurrent sessions: two racing processes must both succeed.
+    Any other error is left to the caller's handler — a cache that genuinely
+    cannot be created should still degrade to "no cache", not crash. *)
+let rec mkdir_p (dir : string) : unit =
+  if dir <> "" && dir <> "/" && dir <> Filename.current_dir_name
+     && not (Sys.file_exists dir) then begin
+    mkdir_p (Filename.dirname dir);
+    try Unix.mkdir dir 0o755
+    with Unix.Unix_error (Unix.EEXIST, _, _) -> ()
+  end
+
 (* ------------------------------------------------------------------ *)
 (* Stdlib loader                                                       *)
 (* ------------------------------------------------------------------ *)
@@ -547,8 +570,7 @@ let load_stdlib ?(for_js=false) () =
           load_stdlib_file (Filename.concat stdlib_dir name)
         ) file_list in
       (try
-        (try Unix.mkdir cache_dir 0o755
-         with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+        mkdir_p cache_dir;
         (* Write-to-temp + rename: the cache dir is shared across concurrent
            sessions; a reader must never see a half-written Marshal blob. *)
         let tmp = Printf.sprintf "%s.%d.tmp" cache_path (Unix.getpid ()) in
@@ -665,10 +687,7 @@ let ensure_runtime_so () =
   let dot_cache = Filename.concat home ".cache" in
   let cache_dir = Filename.concat dot_cache "march" in
   (* Create parent directories recursively *)
-  List.iter (fun d ->
-    try Unix.mkdir d 0o755
-    with Unix.Unix_error (Unix.EEXIST, _, _) -> ()
-  ) [dot_cache; cache_dir];
+  mkdir_p cache_dir;
   (* Find runtime source *)
   let runtime_c_opt = find_runtime_file "march_runtime.c" in
   match runtime_c_opt with

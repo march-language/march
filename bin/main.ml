@@ -184,8 +184,7 @@ let get_stdlib_tc_env ~for_js (stdlib_decls : March_ast.Ast.decl list) =
     let (_errs, _tm, final_env) =
       March_typecheck.Typecheck.check_module_core ~errors synthetic in
     (try
-      (try Unix.mkdir cache_dir 0o755
-       with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+      mkdir_p cache_dir;
       let tmp = Printf.sprintf "%s.%d.tmp" cache_path (Unix.getpid ()) in
       let oc = open_out_bin tmp in
       (* Same staging discipline as [March_repl.Repl.save_cached_tc_env], and
@@ -260,8 +259,7 @@ let setup_interpreter_ffi () =
     (* Build a content-addressed temp path for the shim .so *)
     let home = (try Sys.getenv "HOME" with Not_found -> ".") in
     let cache_dir = Filename.concat home ".cache/march" in
-    (try Unix.mkdir cache_dir 0o755
-     with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+    mkdir_p cache_dir;
     let key_buf = Buffer.create 256 in
     List.iter (fun f ->
       Buffer.add_string key_buf f;

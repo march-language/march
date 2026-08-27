@@ -25,6 +25,14 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- The stdlib AST and typecheck-env caches silently disabled themselves on any
+  machine (or under any `HOME` override) where `~/.cache` did not already exist:
+  `Unix.mkdir` is not recursive and only `EEXIST` was caught, so `ENOENT` on the
+  missing parent escaped and every invocation re-parsed and re-typechecked the
+  stdlib while printing a `[warn] could not save the stdlib typecheck cache`
+  line ahead of its own output. All four cache-directory sites now share one
+  recursive `mkdir_p`.
+
 - macOS: the REPL / `--jit` stdlib prelude cache could never be reused across
   sessions, so every start silently paid a full stdlib precompile (~9.5s) instead
   of a ~0.01s cache hit. Cached `.so`s are built at a pid-suffixed `.tmp` path and
