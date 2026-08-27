@@ -1266,6 +1266,39 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/default_args_nested.expected native_default_args_nested.out)))
 
+; ── Regression: a user fn shadowing a codegen-dispatched builtin name ──
+; emit_expr's ~57 builtin arms dispatch on the callee's BARE name, so a
+; top-level `fn int_mod(a, b)` (shadowing a builtin is a supported feature --
+; only the names Prelude's own bodies call unqualified are rejected, see
+; lib/modules/prelude_collision.ml) compiled its CALL SITES into
+; @march_checked_imod and left the emitted @int_mod dead.  Same for int_not
+; (a Builtin_name arm) and int_and (the is_int_bitwise guard).  Interpreted
+; output was always right; only the compiled binary was wrong -- silently, no
+; crash, no diagnostic.  The .expected IS the interpreter's output.
+; See specs/progress/2026-08-26-builtin-arm-order-vs-tco-arms-is-accidental.md.
+(rule
+ (targets native_shadowed_builtin_name native_shadowed_builtin_name.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/shadowed_builtin_name.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_shadowed_builtin_name
+        native/shadowed_builtin_name.march)
+   (with-stdout-to native_shadowed_builtin_name.out
+        (system "./native_shadowed_builtin_name")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/shadowed_builtin_name.expected native_shadowed_builtin_name.out)))
+
 ; ── Regression: lazy-loaded module + niche-Option match must not segfault ──
 ; LazyNicheProbe is a stdlib module deliberately NOT in stdlib_file_list, so it
 ; loads lazily (signatures only, no body typecheck).  Its `match List.nth_opt`

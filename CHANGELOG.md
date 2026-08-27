@@ -25,6 +25,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- Compiled code: a top-level function whose name collides with a compiler
+  builtin the code generator dispatches specially (`int_mod`, `int_not`,
+  `int_and`, `int_abs`, `record_get`, `vault_*`, `chan_*`, …) was never called —
+  every call site compiled into the builtin instead, while the interpreter ran
+  the user's function. Shadowing such a name is a supported feature, and it now
+  behaves the same compiled as interpreted.
 - macOS: the REPL / `--jit` stdlib prelude cache could never be reused across
   sessions, so every start silently paid a full stdlib precompile (~9.5s) instead
   of a ~0.01s cache hit. Cached `.so`s are built at a pid-suffixed `.tmp` path and

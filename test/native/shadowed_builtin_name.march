@@ -1,0 +1,42 @@
+-- Regression: a user top-level fn whose bare name collides with one of
+-- llvm_emit's codegen-dispatched builtins must be CALLED, not silently
+-- replaced by the builtin at every call site.
+--
+-- Shadowing a builtin name from the entry module is a supported feature
+-- (March_modules.Prelude_collision rejects only the names Prelude's own
+-- bodies call unqualified; `int_mod` / `int_not` / `int_and` are not among
+-- them), but emit_expr dispatched on the bare name, so the calls below used
+-- to compile into @march_checked_imod / an `xor -1` / an `and` and the
+-- emitted @int_mod, @int_not, @int_and were dead code.  Interpreted output
+-- was already correct; only the compiled binary was wrong.
+--
+-- Each shadow returns a value the real builtin cannot: 17 mod 5 = 2 but the
+-- user fn returns 102; int_not(5) = -6 but the user fn returns 55;
+-- int_and(12, 10) = 8 but the user fn returns 22.
+--
+-- int_mod is deliberately self-tail-recursive: it also pins the precedence
+-- of the self-TCO arm over the builtin arm.
+mod ShadowedBuiltinName do
+  needs IO
+
+  fn int_mod(a, b) do
+    if a < b do a + 100 else int_mod(a - b, b) end
+  end
+
+  fn int_not(x) do
+    if x < 1 do 50 else int_not(x - 1) end
+  end
+
+  fn int_and(a, b) do
+    if a < 1 do b + 10 else int_and(a - 1, b) end
+  end
+
+  fn main(cap : Cap(IO)) do
+    print(int_to_string(int_mod(17, 5)))
+    print(" ")
+    print(int_to_string(int_not(5)))
+    print(" ")
+    print(int_to_string(int_and(12, 10)))
+    print("\n")
+  end
+end
