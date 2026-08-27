@@ -9,7 +9,18 @@ Plan: `specs/plans/2026-08-19-compiler-file-decomposition.md`
 
 ## Status
 
-**Phases 0-3 landed. Phases 4-6 open.**
+**Phases 0-3 and 5 landed. Phases 4 and 6 open.**
+
+- **Phase 5 complete (2026-08-26)** — `bin/main.ml`'s CAS cache key is built in
+  exactly one place (`build_cas_key`), alongside `cas_target_label` and
+  `effective_opt`, which were duplicated the same way. The two flag lists were
+  **byte-identical**, so no live cache-collision bug existed — the hazard was
+  latent, waiting for the next codegen flag. Phase 5 deliberately does not split
+  `compile`. Verified by flag-list diff (the CAS key includes the compiler's own
+  digest, so cross-build key comparison is structurally meaningless), by a direct
+  distinct-vs-reused CAS test with a value-revealing program, and by the IR oracle
+  (IDENTICAL across 240 programs). Details:
+  `specs/progress/2026-08-26-cas-flags-single-constructor.md`.
 
 - **Phase 3 complete (2026-08-26)** — `lib/refinecheck/refine_check.ml` gains 23
   § section headers and a table of contents (comments only), `check_call` goes

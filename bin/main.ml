@@ -1631,6 +1631,88 @@ let parse_target s =
     exit 1
 
 (* ------------------------------------------------------------------ *)
+(* CAS cache key                                                       *)
+(* ------------------------------------------------------------------ *)
+
+(** The clang -O level actually used: [!opt_level] when explicitly set in
+    range, 2 otherwise.  Shared by [build_cas_key] and the clang invocation so
+    the cached-under level and the compiled-at level cannot drift apart. *)
+let effective_opt () =
+  if !opt_level >= 0 && !opt_level <= 3 then !opt_level else 2
+
+(** Stable string name for a target, used as the CAS key's [~target] component.
+
+    Distinct from [!target_str]: the glibc floor is folded in here, so bumping
+    it invalidates cached cross binaries. *)
+let cas_target_label (target : March_tir.Llvm_emit.target_config) : string =
+  match target with
+  | March_tir.Llvm_emit.Native -> "native"
+  | March_tir.Llvm_emit.LinuxGnu { arch = March_tir.Llvm_emit.X86_64; glibc_min } ->
+    "linux-x86_64-gnu-" ^ glibc_min
+  | March_tir.Llvm_emit.LinuxGnu { arch = March_tir.Llvm_emit.Arm64; glibc_min } ->
+    "linux-arm64-gnu-" ^ glibc_min
+  | March_tir.Llvm_emit.Wasm64Wasi -> "wasm64-wasi"
+  | March_tir.Llvm_emit.Wasm32Wasi -> "wasm32-wasi"
+  | March_tir.Llvm_emit.Wasm32Unknown -> "wasm32-unknown-unknown"
+  | March_tir.Llvm_emit.Js -> "js"
+
+(** Build the CAS cache key: the flag list plus the compilation hash.
+
+    THE only place codegen flags enter the cache key.  A flag that affects the
+    emitted binary but is missing from this list makes two semantically
+    different builds collide on one cache entry, and the cache then serves the
+    wrong binary — a silently stale result, not an error.  Adding a codegen
+    flag anywhere in this file means adding it *here*, once.
+
+    Two call sites use this, at two different cache layers: the early
+    source-level check in [compile] (keyed on the source digest, before parsing)
+    and the post-TIR check (keyed on the module's per-SCC impl hashes).  They
+    differ only in [src_hash]; every flag is shared.  The cross-sysroot digest
+    is computed here rather than passed in, because it is a pure function of
+    [target] and so cannot legitimately diverge between the layers either.
+
+    [MARCH_DEBUG_CASFLAGS=1] prints the resulting key, from both sites. *)
+let build_cas_key ~(target : March_tir.Llvm_emit.target_config)
+      ~(target_label : string) ~(src_hash : string) : string list * string =
+  (* Cross-toolchain identity: the target OpenSSL/zlib .so live OUTSIDE the
+     repo (~/.cache/march/cross-sysroot), so runtime_identity (which digests
+     only runtime/*.c/*.h) does NOT cover them.  Fold a digest of the three
+     sysroot .so files into cas_flags so re-fetching a different
+     OpenSSL/zlib version invalidates cached cross binaries.  The glibc
+     floor is already in target_label. *)
+  let cross_sysroot_tag =
+    match linux_arch_str target with
+    | None -> []
+    | Some arch ->
+      (match cross_sysroot_dir arch with
+       | Some d -> ["xsysroot:" ^ cross_sysroot_digest d]
+       | None -> [])
+  in
+  let cas_flags =
+    (if !opt_enabled then Printf.sprintf "O%d" (effective_opt ()) else "no-opt")
+    :: Printf.sprintf "pmt%d" !pmap_threshold
+    :: (hr_cas_tag () @ ffi_cas_tag () @ codegen_cas_tags ()
+        @ (if !compile_so then ["compile-so"] else [])
+        (* capstrip: the dead-strip link mode (strip_flag/section_cflags
+           below) changes the emitted binary's contents; a pre-strip
+           cached artifact must never satisfy a post-strip build or the
+           cap inspect silently reports every capability. Mirrors the
+           eligibility condition on strip_flag. *)
+        @ (if !compile_so || !hot_reload_prefix <> None
+           then [] else ["capstrip"])
+        (* --cap-sandbox changes the emitted binary (a -D define), so a
+           non-sandboxed cached artifact must never satisfy it. *)
+        @ (if !cap_sandbox then ["capsandbox"] else [])
+        @ (if !cap_strict then ["capstrict"] else [])
+        @ cross_sysroot_tag
+        @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])) in
+  let ch = March_cas.Cas.compilation_hash src_hash ~target:target_label ~flags:cas_flags in
+  (if Sys.getenv_opt "MARCH_DEBUG_CASFLAGS" <> None then
+     Printf.eprintf "MARCH_CASFLAGS: target=%s flags=[%s] ch=%s\n%!"
+       target_label (String.concat "," cas_flags) ch);
+  (cas_flags, ch)
+
+(* ------------------------------------------------------------------ *)
 (* Formatter helpers                                                   *)
 (* ------------------------------------------------------------------ *)
 
@@ -2398,49 +2480,12 @@ let compile filename =
         Some (store, ch)
       end else begin (* !do_compile *)
         let target_parsed = parse_target !target_str in
-        let target_label  = match target_parsed with
-          | March_tir.Llvm_emit.Native          -> "native"
-          | March_tir.Llvm_emit.LinuxGnu { arch = March_tir.Llvm_emit.X86_64; glibc_min } ->
-            "linux-x86_64-gnu-" ^ glibc_min
-          | March_tir.Llvm_emit.LinuxGnu { arch = March_tir.Llvm_emit.Arm64; glibc_min } ->
-            "linux-arm64-gnu-" ^ glibc_min
-          | March_tir.Llvm_emit.Wasm64Wasi      -> "wasm64-wasi"
-          | March_tir.Llvm_emit.Wasm32Wasi      -> "wasm32-wasi"
-          | March_tir.Llvm_emit.Wasm32Unknown   -> "wasm32-unknown-unknown"
-          | March_tir.Llvm_emit.Js              -> "js"
-        in
-        let effective_opt = if !opt_level >= 0 && !opt_level <= 3 then !opt_level else 2 in
-        (* Cross target OpenSSL/zlib .so live outside the repo, so fold a digest of
-           them into the key (mirrors the inner CAS check below) — otherwise this
-           source-level early cache would serve a stale cross binary after a
-           sysroot re-fetch changed the linked libs. *)
-        let cross_sysroot_tag =
-          match linux_arch_str target_parsed with
-          | None -> []
-          | Some arch ->
-            (match cross_sysroot_dir arch with
-             | Some d -> ["xsysroot:" ^ cross_sysroot_digest d]
-             | None -> [])
-        in
-        let cas_flags =
-          (if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt")
-          :: Printf.sprintf "pmt%d" !pmap_threshold
-          :: (hr_cas_tag () @ ffi_cas_tag () @ codegen_cas_tags ()
-              @ (if !compile_so then ["compile-so"] else [])
-              (* capstrip: the dead-strip link mode (strip_flag/section_cflags
-                 below) changes the emitted binary's contents; a pre-strip
-                 cached artifact must never satisfy a post-strip build or the
-                 cap inspect silently reports every capability. Mirrors the
-                 eligibility condition on strip_flag. *)
-              @ (if !compile_so || !hot_reload_prefix <> None
-                 then [] else ["capstrip"])
-              (* --cap-sandbox changes the emitted binary (a -D define), so a
-                 non-sandboxed cached artifact must never satisfy it. *)
-              @ (if !cap_sandbox then ["capsandbox"] else [])
-              @ (if !cap_strict then ["capstrict"] else [])
-              @ cross_sysroot_tag
-              @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])) in
-        let ch = March_cas.Cas.compilation_hash src_hash ~target:target_label ~flags:cas_flags in
+        let target_label  = cas_target_label target_parsed in
+        (* Source-level early cache: same key construction as the post-TIR check
+           below (build_cas_key), keyed on the source digest instead of the
+           module's impl hashes. *)
+        let (_, ch) =
+          build_cas_key ~target:target_parsed ~target_label ~src_hash in
         let is_wasm  = March_tir.Llvm_emit.is_wasm_target target_parsed in
         let basename = Filename.remove_extension filename in
         let out_bin  =
@@ -3707,17 +3752,7 @@ let compile filename =
           Printf.eprintf "compiled %s\n" out_bin
         end else begin
         (* CAS: check for a cached binary before running clang *)
-        let target_label = match target with
-          | March_tir.Llvm_emit.Native -> "native"
-          | March_tir.Llvm_emit.LinuxGnu { arch = March_tir.Llvm_emit.X86_64; glibc_min } ->
-            "linux-x86_64-gnu-" ^ glibc_min
-          | March_tir.Llvm_emit.LinuxGnu { arch = March_tir.Llvm_emit.Arm64; glibc_min } ->
-            "linux-arm64-gnu-" ^ glibc_min
-          | March_tir.Llvm_emit.Wasm64Wasi -> "wasm64-wasi"
-          | March_tir.Llvm_emit.Wasm32Wasi -> "wasm32-wasi"
-          | March_tir.Llvm_emit.Wasm32Unknown -> "wasm32-unknown-unknown"
-          | March_tir.Llvm_emit.Js -> "js"
-        in
+        let target_label = cas_target_label target in
         let store = March_cas.Cas.create ~project_root:(Sys.getcwd ()) in
         let h_sccs = March_cas.Pipeline.hash_module tir in
         let mod_hash = String.concat "" (List.map March_cas.Pipeline.scc_impl_hash h_sccs) in
@@ -3787,43 +3822,11 @@ let compile filename =
             end
           ) pre_fns
         in
-        let effective_opt = if !opt_level >= 0 && !opt_level <= 3 then !opt_level else 2 in
-        (* Cross-toolchain identity: the target OpenSSL/zlib .so live OUTSIDE the
-           repo (~/.cache/march/cross-sysroot), so runtime_identity (which digests
-           only runtime/*.c/*.h) does NOT cover them.  Fold a digest of the three
-           sysroot .so files into cas_flags so re-fetching a different
-           OpenSSL/zlib version invalidates cached cross binaries.  The glibc
-           floor is already in target_label. *)
-        let cross_sysroot_tag =
-          match linux_arch_str target with
-          | None -> []
-          | Some arch ->
-            (match cross_sysroot_dir arch with
-             | Some d -> ["xsysroot:" ^ cross_sysroot_digest d]
-             | None -> [])
-        in
-        let cas_flags =
-          (if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt")
-          :: Printf.sprintf "pmt%d" !pmap_threshold
-          :: (hr_cas_tag () @ ffi_cas_tag () @ codegen_cas_tags ()
-              @ (if !compile_so then ["compile-so"] else [])
-              (* capstrip: the dead-strip link mode (strip_flag/section_cflags
-                 below) changes the emitted binary's contents; a pre-strip
-                 cached artifact must never satisfy a post-strip build or the
-                 cap inspect silently reports every capability. Mirrors the
-                 eligibility condition on strip_flag. *)
-              @ (if !compile_so || !hot_reload_prefix <> None
-                 then [] else ["capstrip"])
-              (* --cap-sandbox changes the emitted binary (a -D define), so a
-                 non-sandboxed cached artifact must never satisfy it. *)
-              @ (if !cap_sandbox then ["capsandbox"] else [])
-              @ (if !cap_strict then ["capstrict"] else [])
-              @ cross_sysroot_tag
-              @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])) in
-        let ch = March_cas.Cas.compilation_hash mod_hash ~target:target_label ~flags:cas_flags in
-        (if Sys.getenv_opt "MARCH_DEBUG_CASFLAGS" <> None then
-           Printf.eprintf "MARCH_CASFLAGS: target=%s flags=[%s] ch=%s\n%!"
-             target_label (String.concat "," cas_flags) ch);
+        (* Post-TIR cache: same key construction as the source-level early
+           check above (build_cas_key), keyed on the module's per-SCC impl
+           hashes instead of the source digest. *)
+        let (_, ch) =
+          build_cas_key ~target ~target_label ~src_hash:mod_hash in
         let cached_ok =
           match March_cas.Cas.lookup_artifact store ch with
           | Some cached_bin ->
@@ -3852,7 +3855,7 @@ let compile filename =
                    Printf.eprintf "march: cannot find runtime for WASM target\n"; exit 1)
             in
             let triple = March_tir.Llvm_emit.target_triple target in
-            let opt_flag = Printf.sprintf " -O%d" effective_opt in
+            let opt_flag = Printf.sprintf " -O%d" (effective_opt ()) in
             (* Locate wasi-sdk for WASI targets, or use system clang for wasm32-unknown-unknown *)
             let clang, sysroot_flag = match target with
               | March_tir.Llvm_emit.Wasm64Wasi | March_tir.Llvm_emit.Wasm32Wasi ->
@@ -3908,7 +3911,7 @@ let compile filename =
               | None ->
                 Printf.eprintf "march: cannot find runtime/march_runtime.c\n"; exit 1
             in
-            let opt_flag = Printf.sprintf " -O%d" effective_opt in
+            let opt_flag = Printf.sprintf " -O%d" (effective_opt ()) in
             let runtime_dir = Filename.dirname runtime in
             let http_c      = Filename.concat runtime_dir "march_http.c" in
             let extras_c2   = Filename.concat runtime_dir "march_extras.c" in
