@@ -390,3 +390,44 @@ let render_parts parts =
   in
   List.iter go parts;
   Buffer.contents buf
+
+(* ─────────────────────────────────────────────────────────────────
+   [span_of_expr] was §14's first definition in typecheck.ml.  It is a pure
+   AST accessor with zero dependencies, and the pattern-exhaustiveness band
+   (Typecheck_exhaustive) — which sits ABOVE inference and therefore above
+   §14 — needs it.  Moved here rather than into Typecheck_exhaustive because
+   typecheck.ml itself still has seven call sites for it and it is declared in
+   typecheck.mli.  This is a REORDER, not a prefix cut: verified that nothing
+   between its old and new positions references it (Typecheck_types,
+   Typecheck_env and Typecheck_builtins all contain zero occurrences).
+   ───────────────────────────────────────────────────────────────── *)
+
+(** Extract a source span from an expression (outermost node). *)
+let span_of_expr : Ast.expr -> Ast.span = function
+  | Ast.ELit  (_, sp)           -> sp
+  | Ast.EVar  name              -> name.span
+  | Ast.EApp  (_, _, sp)        -> sp
+  | Ast.ECon  (_, _, sp)        -> sp
+  | Ast.ELam  (_, _, sp)        -> sp
+  | Ast.EBlock (_, sp)          -> sp
+  | Ast.ELet  (_, sp)           -> sp
+  | Ast.EMatch (_, _, sp)       -> sp
+  | Ast.ETuple (_, sp)          -> sp
+  | Ast.ERecord (_, sp)         -> sp
+  | Ast.ERecordUpdate (_, _, sp) -> sp
+  | Ast.EField (_, _, sp)       -> sp
+  | Ast.EIf   (_, _, _, sp)     -> sp
+  | Ast.ECond (_, sp)           -> sp
+  | Ast.EPipe (_, _, sp)        -> sp
+  | Ast.EAnnot (_, _, sp)       -> sp
+  | Ast.EHole (_, sp)           -> sp
+  | Ast.EAtom (_, _, sp)        -> sp
+  | Ast.ESend (_, _, sp)        -> sp
+  | Ast.ESpawn (_, sp)          -> sp
+  | Ast.EResultRef _            -> Ast.dummy_span
+  | Ast.EDbg (_, sp)            -> sp
+  | Ast.ELetFn (_, _, _, _, sp) -> sp
+  | Ast.ELetQ  (_, _, _, sp)   -> sp
+  | Ast.ELetStar (_, _, _, sp) -> sp
+  | Ast.EAssert (_, sp)         -> sp
+  | Ast.ESigil (_, _, sp)       -> sp
