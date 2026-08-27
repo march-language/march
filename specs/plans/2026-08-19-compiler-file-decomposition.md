@@ -1645,7 +1645,18 @@ Order matters — diagnostic actions came first in the original. Verify against 
 
 ---
 
-## Phase 5 — `bin/main.ml`: one CAS-key site, not two
+## Phase 5 — `bin/main.ml`: one CAS-key site, not two — **LANDED 2026-08-26**
+
+**LANDED 2026-08-26** on `claude/cas-flags-phase5` — see
+`specs/progress/2026-08-26-cas-flags-single-constructor.md`. The two flag-list
+expressions turned out to be **byte-identical**, so there was no live
+cache-collision bug to fix — the hazard was latent. `target_label` (also part of
+the key) and `effective_opt` (which feeds both the key and the clang command
+line) were duplicated too and are now single-sourced alongside it. The
+cross-sysroot digest is a pure function of the parsed target, so it moved
+*inside* the constructor rather than becoming the planned `~extra` parameter;
+the only genuine per-site parameters are the hash input (`src_hash` vs
+`mod_hash`) and the target. IR oracle: IDENTICAL across 240 programs.
 
 **[corrected 2026-08-25]** — `bin/main.ml` is **5,402** lines (the draft said 5,162): `--jit` mode (#344), the stdlib typecheck-env cache (#342) and #347 landed in between. `compile` is **2,510** lines (`:2298–4807`, was "2,360"), and the second `cas_flags` site moved.
 
@@ -1662,7 +1673,7 @@ grep -n 'MARCH_DEBUG_CASFLAGS' bin/main.ml     # 3800 (site 2 only)
 
 **Files:** Modify `bin/main.ml`
 
-- [ ] **Step 1: Diff the two sites**
+- [x] **Step 1: Diff the two sites**
 
 ```bash
 A=$(grep -n 'let cas_flags' bin/main.ml | sed -n 1p | cut -d: -f1)
@@ -1672,7 +1683,7 @@ diff <(sed -n "${A},$((A+22))p" bin/main.ml) <(sed -n "${B},$((B+22))p" bin/main
 
 Record every difference. Some are legitimate (the second site adds sysroot `.so` digests per the comment just above it at **:3770**, was :3595); those become parameters, not divergence.
 
-- [ ] **Step 2: Write a single constructor above both sites**
+- [x] **Step 2: Write a single constructor above both sites**
 
 ```ocaml
 (** Build the CAS cache-key flag list.  THE only place codegen flags enter the
@@ -1689,7 +1700,7 @@ let build_cas_flags ~(extra : string list) : string list =
 
 Move the existing `MARCH_DEBUG_CASFLAGS` debug print (**`main.ml:3800-3802`**, was :3625-3627) **into** this function so that every call site logs its flag list identically — that print is what Step 3 verifies against.
 
-- [ ] **Step 3: Prove the flag LIST is unchanged — never compare cache keys across compiler builds**
+- [x] **Step 3: Prove the flag LIST is unchanged — never compare cache keys across compiler builds**
 
 The CAS key includes the digest of the compiler executable itself. Any comparison that spans "rebuild the compiler" therefore **always** yields different keys — an artifact-count check is structurally incapable of validating this refactor, and a naive reading of its inevitable failure invites a wrong "fix". Compare the flag *list* instead.
 
@@ -1720,7 +1731,7 @@ diff <(grep -o 'flags=\[[^]]*\]' /tmp/casflags-before-b-$SLUG.log) <(grep -o 'fl
 
 Expected: `a_exit=0` and `b_exit=0` — the flag lists are byte-identical, so the key is unchanged for any fixed compiler binary. The `ch=` hashes in the before/after logs **will** differ because the compiler was rebuilt between captures; that is the compiler-digest component doing its job, not a regression. Also confirm the `b` list contains `capstrict` and the `a` list does not — otherwise the probe is not exercising flag-sensitivity.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 ```bash
 dune build --root . bin/main.exe 2>&1 | tail -5 && scripts/ir-oracle.sh check /tmp/ir-base-$SLUG && scripts/run-tests.sh codegen; echo "exit=$?"
