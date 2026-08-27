@@ -21,6 +21,11 @@ git log is authoritative for exact commits.
   across 601 fixtures, 241 programs and 298 fixtures respectively, and
   `typecheck.mli`, the public contract, is unchanged.
 
+- Removed three uncalled `lib/tir` values (`emit_main_wrapper`, `target_arch`,
+  `reserved_ctor_tag_limit`) left over from an earlier `.mli`-only pass that
+  could not edit `.ml` files. No behavior change -- the IR oracle is
+  byte-identical across 241 programs.
+
 - `bin/main.ml` is 1,231 lines smaller (5,429 -> 4,198): host/stdlib/runtime
   discovery and link flags, the command-line flag cells, the `--check-migration`
   tool and the `--emit-core-ast` writer now live in their own `bin/` modules. No
@@ -38,6 +43,20 @@ git log is authoritative for exact commits.
 - `march --jit file.march` runs a whole program through the in-process ORC JIT — near-compiled speed without the clang/link step (experimental; actors fall back to the interpreter); programs that read command-line arguments see an empty argv under --jit.
 
 ### Fixed
+
+- REPL (JIT, the default): a stdlib constructor evaluated as the FIRST variant
+  of its type, so `match Logger.Warn do Logger.Debug -> 0 | Logger.Info -> 1 |
+  Logger.Warn -> 2 | ... end` answered `0`, and `Http.Post` matched the
+  `Http.Get` arm. A wrong answer, not just the `= #<tag:0>` rendering it was
+  reported as. The prelude's constructor numbering is now cached alongside the
+  compiled prelude and loaded on the warm-cache startup path (and kept on the
+  cold one), so REPL expressions are compiled with the same tags the prelude
+  was. `MARCH_REPL_INTERP=1` was always correct.
+
+- REPL (JIT): stdlib ADT values printed as `#<tag:N>` instead of their
+  constructor name — `Http.Post` now prints `Post`. A type declared inside a
+  module is registered under its qualified name but referred to by its bare
+  one; the printer now resolves the two when the bare name is unambiguous.
 
 - The stdlib AST and typecheck-env caches silently disabled themselves on any
   machine (or under any `HOME` override) where `~/.cache` did not already exist:
