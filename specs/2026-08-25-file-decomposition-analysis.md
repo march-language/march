@@ -6,6 +6,36 @@
 Implementation Status Summary, which was stale by 3–7× and has been removed in
 favour of this document.
 
+> ## Status, 2026-08-27 — most of this has since been done
+>
+> This document selected the targets; the work then happened. Read the findings
+> below as **the reasoning that drove it**, not as open recommendations. What
+> changed:
+>
+> | File | At analysis | Now |
+> |---|---:|---:|
+> | `typecheck.ml` | 14,958 | 8,272 |
+> | `eval.ml` | 12,265 | 4,304 |
+> | `analysis.ml` | 8,133 | 5,201 |
+> | `llvm_emit.ml` | 5,720 | 2,271 (`emit_expr` 4,319 → 1,394) |
+> | `bin/main.ml` | 5,403 | 4,198 |
+>
+> - **Finding 4 is closed.** "Only 2 of 31 files over 800 lines have an `.mli`" —
+>   it is now 22 of 34. Two interface passes curated ~680 inferred values to ~380.
+> - **Finding 5 is closed, with a better answer than either side had.** `bin/main.ml`
+>   was re-examined: the 579-line TIR pass sequence *is* the linear driver code
+>   Phase 5 defended and stays; the build plumbing beside it went. 49% of six months'
+>   hunks land inside `compile`.
+> - **Finding 1 is closed.** Phase 6 was re-scoped from "cold data only" to nine
+>   tasks and executed.
+> - **Finding 3 is partly open.** `lower.ml`, `desugar.ml` and `perceus.ml` still
+>   have no decomposition phase, though all three now have interfaces.
+> - **Finding 2 stands** as a method result: concentration without churn is not
+>   worth fixing. `llvm_case.ml` remains untouched, correctly.
+>
+> Remaining work lives in `specs/plans/2026-08-27-remaining-decomposition-targets.md`.
+> Outcomes are recorded in `specs/progress/2026-08-26-compiler-file-decomposition-complete.md`.
+
 ## Why this exists
 
 The decomposition plan picked its targets in August 2026 from sizes that were
