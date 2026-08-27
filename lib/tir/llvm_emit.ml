@@ -286,6 +286,13 @@ let is_float_arith name = List.mem name ["+."; "-."; "*."; "/."]
 
 let is_int_bitwise name = List.mem name ["int_and"; "int_or"; "int_xor"; "int_shl"; "int_shr"]
 
+(* True when [name] is a user-defined top-level function whose bare name also
+   names one of [emit_expr]'s codegen-dispatched builtins.  See the
+   "User top-level fn shadowing a codegen-dispatched builtin name" arm. *)
+let shadows_dispatched_builtin (ctx : ctx) (name : string) : bool =
+  Hashtbl.mem ctx.top_fns name
+  && (Builtin_name.of_string name <> None || is_int_bitwise name)
+
 let int_bitwise_op = function
   | "int_and" -> "and" | "int_or" -> "or" | "int_xor" -> "xor"
   | "int_shl" -> "shl" | "int_shr" -> "ashr"
@@ -995,6 +1002,117 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       emit_expr ctx e2
     end
 
+  (* ── Mutual TCO: tail call to another member of the current group ──── *)
+  (* When we are inside emit_mutual_tco_group and the call target is any
+     function in the mutual group (including self), we redirect it to the
+     shared loop header by: updating the dispatch tag + the target's param
+     slots, then branching back to mutual_loop. *)
+  | Tir.EApp (f, args)
+    when ctx.mutual_tco_group <> []
+         && List.mem f.Tir.v_name ctx.mutual_tco_group ->
+    let target     = f.Tir.v_name in
+    let target_tag = List.assoc target ctx.mutual_tco_fn_tags in
+    let target_slots =
+      try List.assoc target ctx.mutual_tco_fn_params
+      with Not_found -> [] in
+    (* 1. Evaluate all new argument values first (read before write). *)
+    let new_vals = List.map2 (fun (_vname, _slot, param_ty) a ->
+        let (arg_ty, arg_val) = emit_atom ctx a in
+        coerce ctx arg_ty arg_val param_ty
+      ) target_slots args in
+    (* 2. Update the dispatch tag. *)
+    emit ctx (Printf.sprintf "store i64 %d, ptr %%%s.addr"
+      target_tag ctx.mutual_tco_tag_slot);
+    (* 3. Store new argument values into the target function's param slots. *)
+    List.iter2 (fun (_vname, slot, param_ty) new_v ->
+        emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr"
+          param_ty new_v slot)
+      ) target_slots new_vals;
+    (* 4. Free any per-iteration `alloca` stack space before looping back —
+          see tco_stack_save's doc comment for why this is required. *)
+    if ctx.mutual_tco_stack_save <> "" then
+      emit ctx (Printf.sprintf "call void @llvm.stackrestore(ptr %s)" ctx.mutual_tco_stack_save);
+    (* 5. Branch back to the shared loop header. *)
+    emit_term ctx (Printf.sprintf "br label %%%s" ctx.mutual_tco_loop_label);
+    (* 6. Open a dead continuation block for syntactic validity. *)
+    emit_label ctx (fresh_block ctx "mutco_cont");
+    let dummy_ty = llvm_ret_ty ctx.ret_ty in
+    (match dummy_ty with
+     | "double" -> ("double", "0x0000000000000000")
+     | "void"   -> ("i64",    "0")
+     | _        -> ("i64",    "0"))
+
+  (* ── TCO self-call: back-edge instead of a call instruction ────────── *)
+  (* When TCO is active for the current function and this EApp targets it,
+     store the new argument values into the parameter alloca slots and
+     jump to the loop header.  The instructions emitted after the br
+     (from the calling emit_case / emit_fn context) land in a dead block —
+     valid LLVM IR but never executed; the optimizer removes them. *)
+  | Tir.EApp (f, args)
+    when ctx.tco_in_tail
+         && (match ctx.tco_fn_name with
+          | Some n -> String.equal n f.Tir.v_name
+          | None   -> false)
+         && List.length args = List.length ctx.tco_param_info ->
+    (* 1. Evaluate every new argument while the old parameter slots are
+          still live — read all inputs before writing any outputs. *)
+    let new_vals = List.map2 (fun (_vname, _slot, param_ty) a ->
+        let (arg_ty, arg_val) = emit_atom ctx a in
+        coerce ctx arg_ty arg_val param_ty
+      ) ctx.tco_param_info args in
+    (* 2. Store each new value into the corresponding parameter slot. *)
+    List.iter2 (fun (_vname, slot, param_ty) new_v ->
+        emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr" param_ty new_v slot)
+      ) ctx.tco_param_info new_vals;
+    (* 3. Free any per-iteration `alloca` stack space before looping back —
+          see tco_stack_save's doc comment for why this is required. *)
+    if ctx.tco_stack_save <> "" then
+      emit ctx (Printf.sprintf "call void @llvm.stackrestore(ptr %s)" ctx.tco_stack_save);
+    (* 4. Loop back — this is the terminator for the current basic block. *)
+    emit_term ctx (Printf.sprintf "br label %%%s" ctx.tco_loop_label);
+    (* 5. Open a dead block so that any instructions the caller emits after
+          us (e.g., emit_case's store-to-result-slot + br-to-merge) are
+          syntactically valid LLVM IR even though they are unreachable. *)
+    emit_label ctx (fresh_block ctx "tco_cont");
+    (* 5. Return a dummy value.  The caller may coerce / store it, but since
+          we are in a dead block the value is never observed. *)
+    let dummy_ty = llvm_ret_ty ctx.ret_ty in
+    let dummy = match dummy_ty with
+      | "double" -> ("double", "0x0000000000000000")
+      | "void"   -> ("i64",    "0")
+      | _        -> ("i64",    "0")
+    in
+    dummy
+
+  (* ── User top-level fn shadowing a codegen-dispatched builtin name ──── *)
+  (* Every arm below dispatches on the callee's BARE name.  Shadowing a
+     builtin name with an entry-module top-level `fn` is a supported,
+     regression-tested feature (see [March_modules.Prelude_collision]'s
+     header: only the names Prelude's own bodies call unqualified are
+     rejected, everything else must resolve to the user's definition) — so
+     without this arm a program defining e.g. `fn int_mod(a, b)` compiles
+     its CALL SITES into @march_checked_imod and never reaches the emitted
+     @int_mod at all, while the interpreter runs the user's function.  That
+     was a real, silent wrong-answer miscompile (test/native/
+     shadowed_builtin_name.march is the witness).
+
+     Builtins are never registered in [top_fns] (they have no March
+     definition — see the ECallPtr arm's "Builtins (e.g. vault_update) are
+     not in top_fns" note), so membership there is a sound discriminator:
+     true means a user function of that name exists and owns the name.
+
+     PRECEDENCE, chosen deliberately (specs/progress/2026-08-26-builtin-arm-
+     order-vs-tco-arms-is-accidental.md) — do not reorder these three tiers:
+       1. the TCO arms above (they only ever fire for the user function
+          currently being emitted, so they are always about a user fn);
+       2. this arm — a user top-level fn owns its name;
+       3. the builtin name arms below.
+     The two bare-EApp TCO arms were moved above the builtin arms for
+     exactly this reason; previously roughly half the builtin arms sat
+     above them and half below, so which one won was append order. *)
+  | Tir.EApp (f, args) when shadows_dispatched_builtin ctx f.Tir.v_name ->
+    Llvm_emit_call.emit_generic_app ~emit_atom ctx f args
+
   (* ── Arithmetic builtins ───────────────────────────────────────────── *)
   | Tir.EApp (f, [a; b]) when is_int_arith f.Tir.v_name ->
     Llvm_emit_arith.emit_int_arith ~emit_atom ctx f a b
@@ -1374,88 +1492,6 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
        let r = fresh ctx "cr" in
        emit ctx (Printf.sprintf "%s = call ptr @march_value_to_string(ptr %s)" r v);
        ("ptr", r))
-
-  (* ── Mutual TCO: tail call to another member of the current group ──── *)
-  (* When we are inside emit_mutual_tco_group and the call target is any
-     function in the mutual group (including self), we redirect it to the
-     shared loop header by: updating the dispatch tag + the target's param
-     slots, then branching back to mutual_loop. *)
-  | Tir.EApp (f, args)
-    when ctx.mutual_tco_group <> []
-         && List.mem f.Tir.v_name ctx.mutual_tco_group ->
-    let target     = f.Tir.v_name in
-    let target_tag = List.assoc target ctx.mutual_tco_fn_tags in
-    let target_slots =
-      try List.assoc target ctx.mutual_tco_fn_params
-      with Not_found -> [] in
-    (* 1. Evaluate all new argument values first (read before write). *)
-    let new_vals = List.map2 (fun (_vname, _slot, param_ty) a ->
-        let (arg_ty, arg_val) = emit_atom ctx a in
-        coerce ctx arg_ty arg_val param_ty
-      ) target_slots args in
-    (* 2. Update the dispatch tag. *)
-    emit ctx (Printf.sprintf "store i64 %d, ptr %%%s.addr"
-      target_tag ctx.mutual_tco_tag_slot);
-    (* 3. Store new argument values into the target function's param slots. *)
-    List.iter2 (fun (_vname, slot, param_ty) new_v ->
-        emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr"
-          param_ty new_v slot)
-      ) target_slots new_vals;
-    (* 4. Free any per-iteration `alloca` stack space before looping back —
-          see tco_stack_save's doc comment for why this is required. *)
-    if ctx.mutual_tco_stack_save <> "" then
-      emit ctx (Printf.sprintf "call void @llvm.stackrestore(ptr %s)" ctx.mutual_tco_stack_save);
-    (* 5. Branch back to the shared loop header. *)
-    emit_term ctx (Printf.sprintf "br label %%%s" ctx.mutual_tco_loop_label);
-    (* 6. Open a dead continuation block for syntactic validity. *)
-    emit_label ctx (fresh_block ctx "mutco_cont");
-    let dummy_ty = llvm_ret_ty ctx.ret_ty in
-    (match dummy_ty with
-     | "double" -> ("double", "0x0000000000000000")
-     | "void"   -> ("i64",    "0")
-     | _        -> ("i64",    "0"))
-
-  (* ── TCO self-call: back-edge instead of a call instruction ────────── *)
-  (* When TCO is active for the current function and this EApp targets it,
-     store the new argument values into the parameter alloca slots and
-     jump to the loop header.  The instructions emitted after the br
-     (from the calling emit_case / emit_fn context) land in a dead block —
-     valid LLVM IR but never executed; the optimizer removes them. *)
-  | Tir.EApp (f, args)
-    when ctx.tco_in_tail
-         && (match ctx.tco_fn_name with
-          | Some n -> String.equal n f.Tir.v_name
-          | None   -> false)
-         && List.length args = List.length ctx.tco_param_info ->
-    (* 1. Evaluate every new argument while the old parameter slots are
-          still live — read all inputs before writing any outputs. *)
-    let new_vals = List.map2 (fun (_vname, _slot, param_ty) a ->
-        let (arg_ty, arg_val) = emit_atom ctx a in
-        coerce ctx arg_ty arg_val param_ty
-      ) ctx.tco_param_info args in
-    (* 2. Store each new value into the corresponding parameter slot. *)
-    List.iter2 (fun (_vname, slot, param_ty) new_v ->
-        emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr" param_ty new_v slot)
-      ) ctx.tco_param_info new_vals;
-    (* 3. Free any per-iteration `alloca` stack space before looping back —
-          see tco_stack_save's doc comment for why this is required. *)
-    if ctx.tco_stack_save <> "" then
-      emit ctx (Printf.sprintf "call void @llvm.stackrestore(ptr %s)" ctx.tco_stack_save);
-    (* 4. Loop back — this is the terminator for the current basic block. *)
-    emit_term ctx (Printf.sprintf "br label %%%s" ctx.tco_loop_label);
-    (* 5. Open a dead block so that any instructions the caller emits after
-          us (e.g., emit_case's store-to-result-slot + br-to-merge) are
-          syntactically valid LLVM IR even though they are unreachable. *)
-    emit_label ctx (fresh_block ctx "tco_cont");
-    (* 5. Return a dummy value.  The caller may coerce / store it, but since
-          we are in a dead block the value is never observed. *)
-    let dummy_ty = llvm_ret_ty ctx.ret_ty in
-    let dummy = match dummy_ty with
-      | "double" -> ("double", "0x0000000000000000")
-      | "void"   -> ("i64",    "0")
-      | _        -> ("i64",    "0")
-    in
-    dummy
 
   (* ── Send with linear message: emit march_send_linear (zero-copy move) ─ *)
   (* When the message argument is a linear value (v_lin = Lin), the compiler
