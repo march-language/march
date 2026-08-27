@@ -794,6 +794,372 @@ let test_no_response_describes_a_line_past_the_document () =
           label m doc_lines)
     (Lazy.force per_feature)
 
+(* ── The dispatch branches nothing exercised end-to-end ──────────────────────
+   `dispatch_by_method` in `lsp/lib/server.ml` is a 22-method `if/else if`
+   chain. The sessions above reach 16 of those methods; the ones below are the
+   remainder, and they were the only branches in the file that no end-to-end
+   test had ever executed:
+
+     textDocument/semanticTokens/full        (reached by the reachability sweep,
+                                              which asserts no content)
+     textDocument/semanticTokens/full/delta
+     textDocument/prepareRename
+     callHierarchy/incomingCalls
+     callHierarchy/outgoingCalls
+     workspace/diagnostic
+     completionItem/resolve
+     textDocument/onTypeFormatting
+
+   `semanticTokens/full/delta` is the reason this matters more than the count
+   suggests: it is the ONLY branch in the chain with cross-request state
+   (`sem_tokens_cache`, keyed by the `resultId` a previous `full` handed out).
+   A refactor that moves the chain away from that cache — or that reorders the
+   two semanticTokens arms, `full` being a strict prefix of `full/delta` in an
+   `if` chain — breaks it silently, and no other test in this repo notices.
+
+   As above, each branch gets a POSITIVE case and, where the branch has a
+   meaningful "nothing" answer, a REJECT case, so that neither a handler that
+   always answers empty nor one that answers everything can pass. *)
+
+let cov_dir =
+  Filename.concat (Filename.get_temp_dir_name ()) "march_lsp_dispatch_cov"
+
+(* 0-indexed layout, asserted literally below:
+     0  mod C do
+     1    fn helper(x : Int) : Int do      `helper` at chars 5..11
+     2      x + 1
+     3    end
+     4
+     5    fn main() : Int do
+     6      helper(2)                      the call at chars 4..10
+     7    end
+     8  end                                                             *)
+let cov_text =
+  "mod C do\n\
+  \  fn helper(x : Int) : Int do\n\
+  \    x + 1\n\
+  \  end\n\
+   \n\
+  \  fn main() : Int do\n\
+  \    helper(2)\n\
+  \  end\n\
+   end\n"
+
+(* A second file, deliberately ill-typed, so `workspace/diagnostic` has
+   something to report — and the clean file above gives that same response a
+   zero to report, which is what stops "attributes everything to everyone"
+   from passing. *)
+let cov_bad_text = "mod CBad do\n  fn f() : Int do true end\nend\n"
+
+(* Two ~H sigils in two files: one that must auto-close, one void element that
+   must not. *)
+let cov_html_text =
+  "mod CHtml do\n\
+  \  fn page() : IOList do\n\
+  \    ~H\"<div>\"\n\
+  \  end\n\
+   end\n"
+
+let cov_void_text =
+  "mod CVoid do\n\
+  \  fn page() : IOList do\n\
+  \    ~H\"<br>\"\n\
+  \  end\n\
+   end\n"
+
+let cov_path name = Filename.concat cov_dir name
+let cov_uri name = "file://" ^ cov_path name
+
+let write_file path text =
+  let ch = open_out path in
+  output_string ch text;
+  close_out ch
+
+let cov_decl_pos = `Assoc [ "line", `Int 1; "character", `Int 6 ]
+let cov_blank_pos = `Assoc [ "line", `Int 4; "character", `Int 0 ]
+
+(* One session for all of them: each server spawn costs seconds, and the delta
+   branch needs two requests in the SAME process anyway. *)
+let run_dispatch_coverage_session () : (string * Yojson.Safe.t) list =
+  Sys.set_signal Sys.sigalrm
+    (Sys.Signal_handle (fun _ -> failwith "march-lsp did not respond (timeout)"));
+  ignore (Unix.alarm 120);
+  (try Unix.mkdir cov_dir 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+  write_file (cov_path "fixture.march") cov_text;
+  write_file (cov_path "broken.march") cov_bad_text;
+  write_file (cov_path "html.march") cov_html_text;
+  write_file (cov_path "void.march") cov_void_text;
+  let (ic, oc, ec) = Unix.open_process_args_full exe [| exe |] (Unix.environment ()) in
+  let uri = cov_uri "fixture.march" in
+  let html_uri = cov_uri "html.march" in
+  let void_uri = cov_uri "void.march" in
+  send oc (`Assoc [
+    "jsonrpc", `String "2.0"; "id", `Int 1; "method", `String "initialize";
+    "params", `Assoc [ "processId", `Null;
+                       "rootUri", `String ("file://" ^ cov_dir);
+                       "capabilities", `Assoc [] ] ]);
+  ignore (read_until ic ~max:30 (is_id 1));
+  send oc (`Assoc [ "jsonrpc", `String "2.0"; "method", `String "initialized";
+                    "params", `Assoc [] ]);
+  let open_doc u text =
+    send oc (`Assoc [
+      "jsonrpc", `String "2.0"; "method", `String "textDocument/didOpen";
+      "params", `Assoc [ "textDocument", `Assoc [
+        "uri", `String u; "languageId", `String "march";
+        "version", `Int 1; "text", `String text ] ] ]);
+    ignore (read_until ic ~max:30 (is_method "textDocument/publishDiagnostics"))
+  in
+  open_doc uri cov_text;
+  open_doc html_uri cov_html_text;
+  open_doc void_uri cov_void_text;
+  let next_id = ref 700 in
+  let ask meth params =
+    let id = !next_id in
+    incr next_id;
+    send oc (`Assoc [ "jsonrpc", `String "2.0"; "id", `Int id;
+                      "method", `String meth; "params", params ]);
+    match read_until ic ~max:60 (is_id id) with
+    | None -> `Null
+    | Some j ->
+      (* A protocol error is exactly the failure this file exists to catch;
+         surface it as `Null so the per-branch assertion names the branch. *)
+      (match member "error" j with `Null -> member "result" j | _ -> `Null)
+  in
+  let td u = `Assoc [ "uri", `String u ] in
+  let out = ref [] in
+  let record label j = out := (label, j) :: !out in
+
+  (* semanticTokens/full first, then the delta that depends on its resultId. *)
+  let full = ask "textDocument/semanticTokens/full" (`Assoc [ "textDocument", td uri ]) in
+  record "semtok-full" full;
+  let prev_id = match member "resultId" full with `String s -> s | _ -> "" in
+  record "semtok-delta"
+    (ask "textDocument/semanticTokens/full/delta"
+       (`Assoc [ "textDocument", td uri; "previousResultId", `String prev_id ]));
+  (* A baseline the server never issued must fall back to a FULL response.
+     Sent after the real delta, by which point the cache holds a different id. *)
+  record "semtok-delta-stale"
+    (ask "textDocument/semanticTokens/full/delta"
+       (`Assoc [ "textDocument", td uri;
+                 "previousResultId", `String "no-such-result-id" ]));
+
+  record "prepare-rename"
+    (ask "textDocument/prepareRename"
+       (`Assoc [ "textDocument", td uri; "position", cov_decl_pos ]));
+  record "prepare-rename-blank"
+    (ask "textDocument/prepareRename"
+       (`Assoc [ "textDocument", td uri; "position", cov_blank_pos ]));
+
+  (* The client echoes back the item prepareCallHierarchy produced. *)
+  let item name =
+    `Assoc [ "name", `String name; "kind", `Int 12; "uri", `String uri;
+             "range", `Assoc [ "start", `Assoc [ "line", `Int 1; "character", `Int 2 ];
+                               "end",   `Assoc [ "line", `Int 3; "character", `Int 5 ] ];
+             "selectionRange",
+             `Assoc [ "start", `Assoc [ "line", `Int 1; "character", `Int 5 ];
+                      "end",   `Assoc [ "line", `Int 1; "character", `Int 11 ] ] ]
+  in
+  record "incoming"
+    (ask "callHierarchy/incomingCalls" (`Assoc [ "item", item "helper" ]));
+  record "incoming-leaf"
+    (ask "callHierarchy/incomingCalls" (`Assoc [ "item", item "main" ]));
+  record "outgoing"
+    (ask "callHierarchy/outgoingCalls" (`Assoc [ "item", item "main" ]));
+  record "outgoing-leaf"
+    (ask "callHierarchy/outgoingCalls" (`Assoc [ "item", item "helper" ]));
+
+  (* `previousResultIds` is not optional in the protocol type, and linol DECODES
+     this request before routing it, so omitting it fails the decode rather than
+     reaching the handler. Same reason `options` appears on the two
+     onTypeFormatting requests below. *)
+  record "workspace-diagnostic"
+    (ask "workspace/diagnostic" (`Assoc [ "previousResultIds", `List [] ]));
+
+  record "resolve"
+    (ask "completionItem/resolve"
+       (`Assoc [ "label", `String "map"; "kind", `Int 3;
+                 "data", `Assoc [ "uri", `String uri;
+                                  "autoImport",
+                                  `Assoc [ "module", `String "List";
+                                           "name", `String "map" ] ] ]));
+  record "resolve-plain"
+    (ask "completionItem/resolve" (`Assoc [ "label", `String "map"; "kind", `Int 3 ]));
+
+  (* Cursor just past the '>' of `<div>` on line 2 (`    ~H"<div>"`). *)
+  record "ontype"
+    (ask "textDocument/onTypeFormatting"
+       (`Assoc [ "textDocument", td html_uri;
+                 "position", `Assoc [ "line", `Int 2; "character", `Int 12 ];
+                 "ch", `String ">";
+                 "options", `Assoc [ "tabSize", `Int 2; "insertSpaces", `Bool true ] ]));
+  (* `<br>` is void: past its '>' (character 11) there is nothing to close. *)
+  record "ontype-void"
+    (ask "textDocument/onTypeFormatting"
+       (`Assoc [ "textDocument", td void_uri;
+                 "position", `Assoc [ "line", `Int 2; "character", `Int 11 ];
+                 "ch", `String ">";
+                 "options", `Assoc [ "tabSize", `Int 2; "insertSpaces", `Bool true ] ]));
+
+  send oc (`Assoc [ "jsonrpc", `String "2.0"; "id", `Int 998;
+                    "method", `String "shutdown"; "params", `Null ]);
+  send oc (`Assoc [ "jsonrpc", `String "2.0"; "method", `String "exit";
+                    "params", `Null ]);
+  (try ignore (Unix.close_process_full (ic, oc, ec)) with _ -> ());
+  ignore (Unix.alarm 0);
+  List.rev !out
+
+let dispatch_cov : (string * Yojson.Safe.t) list Lazy.t =
+  lazy (run_dispatch_coverage_session ())
+
+let cov label =
+  try List.assoc label (Lazy.force dispatch_cov) with Not_found -> `Null
+
+let int_list j = List.map (function `Int n -> n | _ -> -1) (items j)
+
+let test_semantic_tokens_full_returns_a_token_stream () =
+  let r = cov "semtok-full" in
+  (match member "resultId" r with
+   | `String s -> Alcotest.(check bool) "full response carries a resultId" true (s <> "")
+   | _ -> Alcotest.fail "semanticTokens/full returned no resultId");
+  let data = int_list (member "data" r) in
+  Alcotest.(check bool) "the token stream is non-empty" true (data <> []);
+  (* The LSP encoding is five integers per token; a stream that is not a whole
+     number of 5-tuples is malformed whatever it contains. *)
+  Alcotest.(check int) "the stream is a whole number of 5-tuples"
+    0 (List.length data mod 5);
+  (* deltaLine values are relative, so their sum is the last token's line. Past
+     the end of the document means the response describes the prelude-injected
+     analysis rather than the open file — the leak this suite already pins for
+     the other per-document responses. *)
+  let rec last_line acc = function
+    | dl :: _ :: _ :: _ :: _ :: rest -> last_line (acc + dl) rest
+    | _ -> acc
+  in
+  Alcotest.(check bool) "no token starts past the last line of the document" true
+    (last_line 0 data < List.length (String.split_on_char '\n' cov_text))
+
+let test_semantic_tokens_delta_against_its_own_baseline_is_an_empty_edit () =
+  let r = cov "semtok-delta" in
+  (* The assertion this whole case exists for: given the resultId that the
+     `full` request handed out, the server must answer in DELTA form. Losing
+     the shared `sem_tokens_cache` degrades this to a full response, which every
+     client still renders correctly — so nothing but this notices. *)
+  (match items (member "edits" r) with
+   | [ e ] ->
+     Alcotest.(check int) "an unmodified document deletes nothing"
+       0 (match member "deleteCount" e with `Int n -> n | _ -> -1);
+     Alcotest.(check (list int)) "and inserts nothing" [] (int_list (member "data" e))
+   | l -> Alcotest.failf "expected exactly one delta edit, got %d" (List.length l));
+  Alcotest.(check bool) "a delta response carries no full `data` array" true
+    (member "data" r = `Null)
+
+let test_semantic_tokens_delta_with_an_unknown_baseline_falls_back_to_full () =
+  let r = cov "semtok-delta-stale" in
+  Alcotest.(check bool) "an unknown previousResultId returns a full stream" true
+    (member "edits" r = `Null && int_list (member "data" r) <> [])
+
+let test_prepare_rename_selects_the_identifier () =
+  let pt k f =
+    match member f (member k (cov "prepare-rename")) with `Int n -> n | _ -> -1
+  in
+  Alcotest.(check (list int)) "prepareRename selects exactly `helper`"
+    [ 1; 5; 1; 11 ]
+    [ pt "start" "line"; pt "start" "character";
+      pt "end" "line"; pt "end" "character" ]
+
+let test_prepare_rename_on_a_blank_line_rejects () =
+  (* `null` is how prepareRename says "this cannot be renamed"; a handler that
+     always returns a range makes every position in the file look renameable. *)
+  Alcotest.(check bool) "prepareRename on a blank line rejects the rename" true
+    (cov "prepare-rename-blank" = `Null)
+
+let call_names key side =
+  List.sort compare
+    (List.filter_map
+       (fun j -> match member "name" (member side j) with `String s -> Some s | _ -> None)
+       (items (cov key)))
+
+let test_incoming_calls_names_the_caller () =
+  Alcotest.(check (list string)) "helper is called from main"
+    [ "main" ] (call_names "incoming" "from");
+  match items (cov "incoming") with
+  | [ c ] ->
+    (* `fromRanges` holds bare Ranges, not objects with a `range` member, so
+       this cannot reuse [range_of]. *)
+    let pt r k f = match member f (member k r) with `Int n -> n | _ -> -1 in
+    (* The whole call expression `helper(2)`, not just the callee name. *)
+    Alcotest.(check (list (list int))) "and the fromRanges point at the call site"
+      [ [ 6; 4; 6; 13 ] ]
+      (List.map
+         (fun r -> [ pt r "start" "line"; pt r "start" "character";
+                     pt r "end" "line"; pt r "end" "character" ])
+         (items (member "fromRanges" c)))
+  | l -> Alcotest.failf "expected one incoming call, got %d" (List.length l)
+
+let test_incoming_calls_for_an_uncalled_function_is_empty () =
+  Alcotest.(check int) "main is called by nobody"
+    0 (List.length (items (cov "incoming-leaf")))
+
+let test_outgoing_calls_names_the_callee () =
+  Alcotest.(check (list string)) "main calls helper"
+    [ "helper" ] (call_names "outgoing" "to")
+
+let test_outgoing_calls_for_a_leaf_is_empty () =
+  Alcotest.(check int) "helper calls nothing"
+    0 (List.length (items (cov "outgoing-leaf")))
+
+let test_workspace_diagnostic_reports_the_broken_file_and_only_it () =
+  let reports =
+    List.filter_map
+      (fun j ->
+        match member "uri" j with
+        | `String u -> Some (Filename.basename u, List.length (items (member "items" j)))
+        | _ -> None)
+      (items (member "items" (cov "workspace-diagnostic")))
+  in
+  Alcotest.(check bool) "the project report covers every file under the root" true
+    (List.mem_assoc "broken.march" reports && List.mem_assoc "fixture.march" reports);
+  Alcotest.(check bool) "the ill-typed file reports at least one diagnostic" true
+    (match List.assoc_opt "broken.march" reports with Some n -> n > 0 | None -> false);
+  (* Without this, a handler that attributes every diagnostic to every file — or
+     that reports the prelude's — passes the assertion above. *)
+  Alcotest.(check int) "the clean file reports none"
+    0 (match List.assoc_opt "fixture.march" reports with Some n -> n | None -> -1)
+
+let test_completion_item_resolve_attaches_the_auto_import_edit () =
+  let r = cov "resolve" in
+  Alcotest.(check string) "the resolved item is still the item that was sent"
+    "map" (match member "label" r with `String s -> s | _ -> "");
+  match items (member "additionalTextEdits" r) with
+  | [ e ] ->
+    Alcotest.(check string) "resolve inserts the missing import"
+      "  use List.{map}\n" (match member "newText" e with `String s -> s | _ -> "")
+  | l ->
+    Alcotest.failf "expected exactly one additionalTextEdit, got %d" (List.length l)
+
+let test_completion_item_resolve_without_data_is_an_echo () =
+  (* The pass-through arm: an item carrying no `autoImport` payload must come
+     back unchanged rather than gaining an edit for an unrelated import. *)
+  let r = cov "resolve-plain" in
+  Alcotest.(check string) "the item round-trips"
+    "map" (match member "label" r with `String s -> s | _ -> "");
+  Alcotest.(check bool) "and gains no edits" true
+    (member "additionalTextEdits" r = `Null)
+
+let test_on_type_formatting_closes_the_open_tag () =
+  match items (cov "ontype") with
+  | [ e ] ->
+    Alcotest.(check string) "typing `>` after `<div>` inserts the closing tag"
+      "</div>" (match member "newText" e with `String s -> s | _ -> "");
+    Alcotest.(check (list int)) "the edit is a zero-width insert at the cursor"
+      [ 2; 12; 2; 12 ]
+      (let (a, b, c, d) = range_of e in [ a; b; c; d ])
+  | l -> Alcotest.failf "expected exactly one onTypeFormatting edit, got %d" (List.length l)
+
+let test_on_type_formatting_does_not_close_a_void_element () =
+  Alcotest.(check int) "`<br>` is void: there is nothing to close"
+    0 (List.length (items (cov "ontype-void")))
+
 let () =
   Alcotest.run "jsonrpc"
     [ "stdio",
@@ -810,6 +1176,35 @@ let () =
           test_every_advertised_capability_answers;
         Alcotest.test_case "a document with no project root does not hang" `Quick
           test_no_project_root_does_not_hang ];
+      "dispatch branches",
+      [ Alcotest.test_case "semanticTokens/full returns a token stream" `Quick
+          test_semantic_tokens_full_returns_a_token_stream;
+        Alcotest.test_case "semanticTokens/full/delta against its own baseline" `Quick
+          test_semantic_tokens_delta_against_its_own_baseline_is_an_empty_edit;
+        Alcotest.test_case "semanticTokens/full/delta falls back on an unknown baseline"
+          `Quick test_semantic_tokens_delta_with_an_unknown_baseline_falls_back_to_full;
+        Alcotest.test_case "prepareRename selects the identifier" `Quick
+          test_prepare_rename_selects_the_identifier;
+        Alcotest.test_case "prepareRename on a blank line rejects" `Quick
+          test_prepare_rename_on_a_blank_line_rejects;
+        Alcotest.test_case "callHierarchy/incomingCalls names the caller" `Quick
+          test_incoming_calls_names_the_caller;
+        Alcotest.test_case "callHierarchy/incomingCalls of an uncalled fn is empty"
+          `Quick test_incoming_calls_for_an_uncalled_function_is_empty;
+        Alcotest.test_case "callHierarchy/outgoingCalls names the callee" `Quick
+          test_outgoing_calls_names_the_callee;
+        Alcotest.test_case "callHierarchy/outgoingCalls of a leaf is empty" `Quick
+          test_outgoing_calls_for_a_leaf_is_empty;
+        Alcotest.test_case "workspace/diagnostic reports the broken file only" `Quick
+          test_workspace_diagnostic_reports_the_broken_file_and_only_it;
+        Alcotest.test_case "completionItem/resolve attaches the auto-import edit" `Quick
+          test_completion_item_resolve_attaches_the_auto_import_edit;
+        Alcotest.test_case "completionItem/resolve without data is an echo" `Quick
+          test_completion_item_resolve_without_data_is_an_echo;
+        Alcotest.test_case "onTypeFormatting closes the open tag" `Quick
+          test_on_type_formatting_closes_the_open_tag;
+        Alcotest.test_case "onTypeFormatting does not close a void element" `Quick
+          test_on_type_formatting_does_not_close_a_void_element ];
       "per-feature correctness",
       [ Alcotest.test_case "references names both sites" `Quick
           test_references_names_both_sites;

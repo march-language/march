@@ -781,6 +781,11 @@ touches only comments.
 
 # Target C — `lsp/lib/server.ml`
 
+> **DONE (2026-08-27).** C1, C2 and C3 all landed; `server.ml` **1,556 → 569**
+> lines, against a predicted ≈560. Write-up, including the two places the plan
+> below turned out to be wrong and the RED-proof for each new test, in
+> `specs/progress/2026-08-27-lsp-server-target-c-decomposition.md`.
+
 **Lowest priority of the three: 33 commits in six months against 339 and 388.**
 Land A and B first. C is here because the extraction is unusually clean, not
 because anyone is suffering.
@@ -865,12 +870,12 @@ refactoring. **Strict prerequisite for C2 and C3.**
 
 **Files:** modify `lsp/test/test_jsonrpc.ml`.
 
-- [ ] **Step 1** — add one request/response case per branch above, following the
+- [x] **Step 1** — add one request/response case per branch above, following the
   existing cases' shape. For `semanticTokens/full/delta`, the case must send a
   `full` request first so `sem_tokens_cache` and `next_result_id` are populated —
   the delta path is the only branch with cross-request state, and it is exactly
   the one an extraction can break silently.
-- [ ] **Step 2** — verify the new cases **fail** if the branch is deliberately
+- [x] **Step 2** — verify the new cases **fail** if the branch is deliberately
   broken (comment out its body, confirm RED, restore). A test that passes against
   a broken branch is the LSP equivalent of the dead oracle this project already
   shipped once.
@@ -910,14 +915,14 @@ grep -n '^let semantic_tokens_data' $F   # 245  (band ends 362)
 The module aliases (`Lsp`, `S`, `Pos`, `Jsonrpc`, `:3–6`) are **duplicated**, not
 moved — both files need them.
 
-- [ ] **Step 1** — move `12–362`; keep declaration order (the caches are mutable
+- [x] **Step 1** — move `12–362`; keep declaration order (the caches are mutable
   globals and `versions = make_version_table ()` is an initialiser).
-- [ ] **Step 2** — `open Server_state` in `server.ml`. `open`, not `include`:
+- [x] **Step 2** — `open Server_state` in `server.ml`. `open`, not `include`: **[landed as `include`, not `open`:** that grep is non-empty — `lsp/test/test_lsp.ml` reaches `semantic_tokens_data`, `token_delta`, `param_name_hints_from_settings` and `perf_annotations_from_settings` through `Server.`. With `include` the four module aliases cannot be duplicated — a second copy is `Multiple definition of the module name "Lsp"` — so they MOVED instead and reach `server.ml` through the same include.**
   `lsp/lib/` is a library, but nothing outside `Server` consumes these names —
   confirm with `grep -rn 'Server\.' lsp/ | grep -v _build` before choosing, and if
   that grep is non-empty, use `include`.
-- [ ] **Step 3** — machine-check verbatim-ness.
-- [ ] **Step 4** — verify. **Do not report an oracle here; there isn't one.**
+- [x] **Step 3** — machine-check verbatim-ness.
+- [x] **Step 4** — verify. **Do not report an oracle here; there isn't one.**
 
 ```bash
 dune build lsp/bin/main.exe lsp/lib/
@@ -940,11 +945,11 @@ git commit -m "refactor(lsp): move server caches, settings and semantic tokens t
 **Files:** create `lsp/lib/server_dispatch.ml` (~650 lines); modify
 `lsp/lib/server.ml`.
 
-- [ ] **Step 1** — move `912–1555`'s body into
+- [x] **Step 1** — move `912–1555`'s body into
   `let dispatch ~meth ~params = …`, keeping the four local helpers as
   module-level `let`s at the top of the new file and the `if/else if` chain
   verbatim below them.
-- [ ] **Step 2** — the method collapses to:
+- [x] **Step 2** — the method collapses to: **[landed threading `notify_back` through rather than `ignore`-ing it: the body's first line is `ignore _notify_back;`, so the parameter has to exist for that line to move verbatim. Behaviour is identical — nothing in the chain uses it.]**
 
 ```ocaml
 method private dispatch_by_method ~notify_back:(_notify_back : _) meth params =
@@ -952,7 +957,7 @@ method private dispatch_by_method ~notify_back:(_notify_back : _) meth params =
   Server_dispatch.dispatch ~meth ~params
 ```
 
-- [ ] **Step 3 — preserve branch order literally.** The chain is `if/else if`, so
+- [x] **Step 3 — preserve branch order literally.** The chain is `if/else if`, so
   order is semantics: `textDocument/semanticTokens/full` must stay ahead of
   `.../full/delta` and `callHierarchy/incomingCalls` ahead of the shared
   `incomingCalls || outgoingCalls` arm. **No oracle and no test sees arm order** —
@@ -965,7 +970,7 @@ grep -o 'meth = "[^"]*"' lsp/lib/server_dispatch.ml > /tmp/after-<slug>
 diff /tmp/before-<slug> /tmp/after-<slug>    # must be empty
 ```
 
-- [ ] **Step 4** — verify as C2.
+- [x] **Step 4** — verify as C2.
 
 ```bash
 git add lsp/lib/server_dispatch.ml lsp/lib/server.ml
@@ -984,7 +989,7 @@ green.
 |---|---:|---|---|
 | A `bin/main.ml` | 5 (A5 gated) | 5,429 → **≈3,990** (A1–A4), **≈3,050** with A5; `compile` 2,431 → **≈1,280** | `ir-oracle` + `types-oracle` for A1–A4; for A5 the full alcotest suite plus a cold/warm CAS output check — no oracle reaches it |
 | B `typecheck.ml` | 5 (B5 comments) | 8,272 → **≈6,400** | `types-oracle` (direct), `refine-oracle` for B2, `ir-oracle` secondary; init-order asserted by a two-line grep, not by an oracle |
-| C `lsp/lib/server.ml` | 3 (C1 is tests) | 1,556 → **≈560** | no oracle exists; `lsp/test/test_jsonrpc.ml` after C1 extends it to all 22 branches, plus an explicit branch-order diff |
+| C `lsp/lib/server.ml` | 3 (C1 is tests) — **all landed 2026-08-27** | 1,556 → **569** (predicted ≈560) | no oracle exists; `lsp/test/test_jsonrpc.ml` after C1 extends it to all 22 branches (22 → 36 cases, each shown RED against a broken branch), plus an explicit branch-order diff — empty, 23 occurrences either side |
 
 **Riskiest task: A5** (`bin/emit_native.ml`). It is the largest single move in the
 plan (945 lines, 18 inputs), it is the one region `ir-oracle` cannot see *by
