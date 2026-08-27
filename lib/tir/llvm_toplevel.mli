@@ -1,0 +1,81 @@
+(** Top-level LLVM emission: target configuration, function emission, the
+    constructor-tag table, and the module driver.
+
+    Interface for {!Llvm_toplevel}, added 2026-08-27 by the pass that gave the
+    highest-churn compiler files one (see
+    [specs/progress/2026-08-25-mli-interfaces-top-churn-files.md]).
+
+    21 values were exported before this file existed; 18 still are.
+    [Llvm_toplevel] is not [include]d by anything, so hiding here is local and
+    checkable.
+
+    {2 What is hidden}
+
+    Three values, each with an internal caller and no external one:
+    [buffer_contains] (an idempotence guard used before appending to the
+    preamble), [native_triple] (the lazy host-triple probe behind
+    {!target_triple}), and [native_vec_param_idxs] (a vector-ABI helper used
+    by {!emit_fn}).
+
+    {2 Two values are declared here but are dead code}
+
+    [target_arch] and [emit_main_wrapper] have no reference anywhere — not in
+    this file, not in any other, not in the tests.  A grep of
+    [bin/ lib/ lsp/ test/] finds only their own [let] lines.  They are declared
+    only because hiding a value nothing mentions turns it into an unused-value
+    error under warnings-as-errors, and this pass does not edit [.ml] files.
+
+    [emit_main_wrapper] is the interesting one: it is a real function body at
+    [llvm_toplevel.ml:725], not a one-line re-export, and the compiler has
+    evidently been emitting its main wrapper by some other path.  Deleting it,
+    or finding out why it was orphaned, is a worthwhile follow-up — compare
+    [specs/progress/] on [march_println]'s [writev] path, which was dead for
+    thirteen months behind a live-looking declaration.
+
+    {2 What stays}
+
+    [emit_module] has 17 referencing files and [build_ctor_info] 15; the
+    [target_*] family is read by [bin/main.ml] and pinned in
+    [llvm_emit.mli]. *)
+
+type arch = X86_64 | Arm64
+type target_config =
+    Native
+  | LinuxGnu of { arch : arch; glibc_min : string; }
+  | Wasm64Wasi
+  | Wasm32Wasi
+  | Wasm32Unknown
+  | Js
+val is_wasm_target : target_config -> bool
+val is_wasm32 : target_config -> bool
+external get_native_triple : unit -> string = "march_tir_native_triple"
+val target_triple : target_config -> string
+val target_arch : target_config -> arch option
+val target_is_linux : target_config -> bool
+val zig_target : target_config -> string option
+val target_ptr_size : target_config -> int
+val target_ptr_ty : target_config -> string
+val target_int_ty : target_config -> string
+val emit_preamble : ?target:target_config -> ?repl:bool -> Buffer.t -> unit
+val is_leaf_callee : string -> bool
+val expr_has_call : Tir.expr -> bool
+val emit_fn :
+  emit_expr:(Llvm_ctx.ctx -> Tir.expr -> string * string) ->
+  Llvm_ctx.ctx -> Tir.fn_def -> unit
+val fn_declare_str : Tir.fn_def -> string
+val emit_atom_show_table : Llvm_ctx.ctx -> unit
+val build_ctor_info :
+  Llvm_ctx.ctx -> Tir.tir_module -> unit
+val emit_main_wrapper : Buffer.t -> unit
+val emit_module :
+  emit_expr:(Llvm_ctx.ctx -> Tir.expr -> string * string) ->
+  ?fast_math:bool ->
+  ?pmap_threshold:int ->
+  ?target:target_config ->
+  ?hot_reload:Hot_reload.config option ->
+  ?impl_hashes:(string, string) Hashtbl.t ->
+  ?remote_impl_hashes:(string, string) Hashtbl.t ->
+  ?remote_sig_hashes:(string, string) Hashtbl.t ->
+  ?emit_main:bool ->
+  ?cap_attrib:(String.t * string) list ->
+  ?cap_decls:(string * string) list -> Tir.tir_module -> string
