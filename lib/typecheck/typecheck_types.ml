@@ -431,3 +431,111 @@ let span_of_expr : Ast.expr -> Ast.span = function
   | Ast.ELetStar (_, _, _, sp) -> sp
   | Ast.EAssert (_, sp)         -> sp
   | Ast.ESigil (_, _, sp)       -> sp
+
+(* ─────────────────────────────────────────────────────────────────
+   [free_vars_expr] / [free_vars_block] / [free_vars_pattern] were §15's first
+   definitions in typecheck.ml.  Like [span_of_expr] above they are pure AST
+   walkers with zero dependencies ([dep.py] → 0), and the capability / [needs]
+   band (Typecheck_caps) needs them.
+
+   The decomposition plan proposed carrying them INTO Typecheck_caps in the
+   same commit.  That does not work and the plan did not check it:
+   [warn_unused_params] sits between these definitions and the capability
+   band and calls [free_vars_expr], so moving them down past it would leave
+   that call unresolved.  They go here instead — a module included at the TOP
+   of typecheck.ml — which serves every caller on both sides of the caps
+   band.  Verified: the only definitions between their old and new positions
+   are in Typecheck_types, Typecheck_env, Typecheck_builtins,
+   Typecheck_exhaustive and Typecheck_tailcall, none of which references them.
+   ───────────────────────────────────────────────────────────────── *)
+
+(** Collect all free variable names referenced in [e].
+    Every [EVar] node is collected, QUALIFIED (dotted) names included.
+    Re-bindings introduced by [ELet]/[EMatch]/[ELam] are accounted for so
+    we never report a variable that is shadowed by an inner binding. *)
+let rec free_vars_expr (bound : string list) (e : Ast.expr) : string list =
+  match e with
+  | Ast.EVar n ->
+    (* Keep DOTTED names too (e.g. `App.id`, produced by desugar's
+       [qualify_module_refs] for an intra-nested-module reference).  Do NOT
+       "clean this up" to bare names — dotted entries are LOAD-BEARING for one
+       of the three callers:
+       - [dependency_order_dfn_run]'s [deps_of] maps a dotted name's suffix to a
+         local fn so a nested-module forward reference is ordered helper-first
+         (closing the qualified-prebind type-erasure forward-ref hole);
+       - [warn_unused_params] only compares against bare param names;
+       - [record_fn_refs] feeds the per-function transitive CAPABILITY closure,
+         where a dropped dotted name silently truncates the closure of every
+         nested-module reference (pinned by
+         [test_transitive_cap_nested_module_dotted_refs]).
+       A bound name is still dropped. *)
+    if List.mem n.txt bound then [] else [n.txt]
+  | Ast.ELit _ | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _) -> []
+  | Ast.EDbg (Some inner, _) -> free_vars_expr bound inner
+  | Ast.EApp (f, args, _) ->
+    free_vars_expr bound f @ List.concat_map (free_vars_expr bound) args
+  | Ast.ECon (_, args, _) -> List.concat_map (free_vars_expr bound) args
+  | Ast.ELam (ps, body, _) ->
+    let inner_bound = List.filter_map (fun (p : Ast.param) ->
+        Some p.param_name.txt) ps @ bound in
+    free_vars_expr inner_bound body
+  | Ast.EBlock (es, _) -> free_vars_block bound es
+  | Ast.ELet (b, _) -> free_vars_expr bound b.Ast.bind_expr
+  | Ast.EMatch (scrut, branches, _) ->
+    free_vars_expr bound scrut @
+    List.concat_map (fun br ->
+      let pat_bound = free_vars_pattern br.Ast.branch_pat in
+      let inner = pat_bound @ bound in
+      Option.fold ~none:[] ~some:(free_vars_expr inner) br.Ast.branch_guard @
+      free_vars_expr inner br.Ast.branch_body
+    ) branches
+  | Ast.ETuple (es, _) -> List.concat_map (free_vars_expr bound) es
+  | Ast.ERecord (fields, _) ->
+    List.concat_map (fun (_, ex) -> free_vars_expr bound ex) fields
+  | Ast.ERecordUpdate (base, fields, _) ->
+    free_vars_expr bound base @
+    List.concat_map (fun (_, ex) -> free_vars_expr bound ex) fields
+  | Ast.EField (ex, _, _) -> free_vars_expr bound ex
+  | Ast.EIf (c, t, f, _) ->
+    free_vars_expr bound c @ free_vars_expr bound t @ free_vars_expr bound f
+  | Ast.ECond (arms, _) ->
+    List.concat_map (fun (ce, be) ->
+        free_vars_expr bound ce @ free_vars_expr bound be) arms
+  | Ast.EAnnot (ex, _, _) -> free_vars_expr bound ex
+  | Ast.EAtom (_, args, _) -> List.concat_map (free_vars_expr bound) args
+  | Ast.ESend (a, b, _) ->
+    free_vars_expr bound a @ free_vars_expr bound b
+  | Ast.ESpawn (e, _) -> free_vars_expr bound e
+  | Ast.ELetFn (name, params, _, body, _) ->
+    let inner_bound = name.txt :: List.map (fun p -> p.Ast.param_name.txt) params @ bound in
+    free_vars_expr inner_bound body
+  | Ast.ELetQ (p, result, cont, _) | Ast.ELetStar (p, result, cont, _) ->
+    let pat_bound = free_vars_pattern p in
+    free_vars_expr bound result @
+    free_vars_expr (pat_bound @ bound) cont
+  | Ast.EPipe (l, r, _) ->
+    free_vars_expr bound l @ free_vars_expr bound r
+  | Ast.EAssert (e, _) -> free_vars_expr bound e
+  | Ast.ESigil (_, content, _) -> free_vars_expr bound content
+
+and free_vars_block (bound : string list) (es : Ast.expr list) : string list =
+  match es with
+  | [] -> []
+  | Ast.ELet (b, _) :: rest ->
+    let used_in_rhs = free_vars_expr bound b.Ast.bind_expr in
+    let pat_bound = free_vars_pattern b.Ast.bind_pat in
+    used_in_rhs @ free_vars_block (pat_bound @ bound) rest
+  | e :: rest ->
+    free_vars_expr bound e @ free_vars_block bound rest
+
+and free_vars_pattern (p : Ast.pattern) : string list =
+  match p with
+  | Ast.PatVar n -> [n.txt]
+  | Ast.PatWild _ -> []
+  | Ast.PatLit _ -> []
+  | Ast.PatCon (_, ps) -> List.concat_map free_vars_pattern ps
+  | Ast.PatTuple (ps, _) -> List.concat_map free_vars_pattern ps
+  | Ast.PatRecord (fields, _) -> List.concat_map (fun (_, p) -> free_vars_pattern p) fields
+  | Ast.PatAs (p, n, _) -> n.txt :: free_vars_pattern p
+  | Ast.PatAtom (_, ps, _) -> List.concat_map free_vars_pattern ps
+  | Ast.PatOr (ps, _) -> List.concat_map free_vars_pattern ps
