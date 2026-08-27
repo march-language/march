@@ -13,6 +13,14 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- `lib/typecheck/typecheck.ml` is 1,824 lines smaller (8,272 -> 6,448):
+  unification and surface-type conversion, session-type projection, declaration
+  dependency ordering, and the module-level `cap` checkers (`no_panic`, `pure`,
+  `no_extern`, `deterministic`) now live in four new modules beside it. No
+  behavior change -- the typecheck, IR and refinement oracles are byte-identical
+  across 601 fixtures, 241 programs and 298 fixtures respectively, and
+  `typecheck.mli`, the public contract, is unchanged.
+
 - `bin/main.ml` is 1,231 lines smaller (5,429 -> 4,198): host/stdlib/runtime
   discovery and link flags, the command-line flag cells, the `--check-migration`
   tool and the `--emit-core-ast` writer now live in their own `bin/` modules. No

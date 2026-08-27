@@ -606,14 +606,14 @@ grep -n '^let panic_surface_direct'     $F   # 5288  (band ends 5287)
 Carries `dependency_order_dfn_run`, `module_refs_in_decls`,
 `unqualified_module_deps`, `dependency_order_dmod_run`, `reorder_decls`.
 
-- [ ] **Step 1** — cut the band; `include Typecheck_reorder` at the band's former
+- [x] **Step 1** — cut the band; `include Typecheck_reorder` at the band's former
   position. **`include`, not `open`** — consumers reach these through `let open`
   and through the `Tc.` / `TC.` / `T.` aliases that no grep can see, and only
   `include` re-exports them as part of `Typecheck`'s surface.
-- [ ] **Step 2** — `typecheck.mli` must **not** change. If the build asks you to
+- [x] **Step 2** — `typecheck.mli` must **not** change. If the build asks you to
   edit it, something was copied instead of re-exported.
-- [ ] **Step 3** — machine-check verbatim-ness.
-- [ ] **Step 4** — verify:
+- [x] **Step 3** — machine-check verbatim-ness.
+- [x] **Step 4** — verify:
 
 ```bash
 dune build --root . bin/main.exe
@@ -657,7 +657,7 @@ low-risk half of Target B.
 `refine_oracle` matters here as well as `types-oracle`: `check_no_panic_module`
 interacts with the `cap no_panic` / panic-surface-by-proof pipeline.
 
-- [ ] Steps as B1, plus `scripts/refine-oracle.sh check`.
+- [x] Steps as B1, plus `scripts/refine-oracle.sh check`.
 
 ```bash
 git add lib/typecheck/typecheck_modcaps.ml lib/typecheck/typecheck.ml
@@ -687,13 +687,13 @@ The band spans §1 and §2 as a unit: `pp_ty` helpers, `session_ty_equal`,
 `surface_ty`, `expand_record`, `instantiate_ctor`, and **both** hook
 installations (`:745`, `:841`).
 
-- [ ] **Step 1** — cut `76–862` into `lib/typecheck/typecheck_unify.ml`.
-- [ ] **Step 2** — `include Typecheck_unify` at the band's former position, i.e.
+- [x] **Step 1** — cut `76–862` into `lib/typecheck/typecheck_unify.ml`.
+- [x] **Step 2** — `include Typecheck_unify` at the band's former position, i.e.
   immediately **after** `include Typecheck_builtins` (`:75`) and before §3. The
   band consumes names from `Typecheck_types`, `Typecheck_env` and
   `Typecheck_builtins`, so `typecheck_unify.ml` opens with the same three
   `include`s, in the same order.
-- [ ] **Step 3 — the written init-order check.** Record in the commit message,
+- [x] **Step 3 — the written init-order check.** Record in the commit message,
   as prose, that (a) `grep -n '^let () =' lib/typecheck/*.ml` returns exactly two
   hits and both moved together, (b) `grep -rn 'inject_iface_exports' lib/ lsp/
   bin/ forge/ test/` still shows no dereference, and (c)
@@ -701,8 +701,8 @@ installations (`:745`, `:841`).
   three inside `typecheck_unify.ml`. If (b) has changed since this plan was
   written — someone finished the todo — **stop**: the hazard is live again and
   needs a real init-order test before B3 can proceed.
-- [ ] **Step 4** — machine-check verbatim-ness; `typecheck.mli` must not change.
-- [ ] **Step 5** — verify as B1, **plus** the shared-mutable-cell probe from
+- [x] **Step 4** — machine-check verbatim-ness; `typecheck.mli` must not change.
+- [x] **Step 5** — verify as B1, **plus** the shared-mutable-cell probe from
   Phase 6 Task 6.3: `bin/main.ml` marshals `Typecheck._counter` and
   `._record_names` into the stdlib typecheck-env cache, so a duplicated cell
   reproduces the cross-run nondeterminism documented in
@@ -736,7 +736,7 @@ grep -n '^let dependency_order_dfn_run'      $F   # 4809  (band ends 4808; gone 
 
 `project_steps`, `subst_svar`, `dual_session_ty`, `project_protocol`.
 
-- [ ] Steps as B1. Run `scripts/run-tests.sh` in **full** — session types have
+- [x] Steps as B1. Run `scripts/run-tests.sh` in **full** — session types have
   their own suites and several are `Slow`.
 
 ```bash
@@ -765,6 +765,34 @@ across `lib/typecheck/`. Check first.**
 
 **Done means:** every `§` header names what is actually under it, and `git diff`
 touches only comments.
+
+---
+
+## Target B: EXECUTED 2026-08-27 — B1–B5 all landed
+
+`lib/typecheck/typecheck.ml` **8,272 → 6,448**. Write-up, including the runnable
+form of the init-order assertion, in
+`specs/progress/2026-08-27-typecheck-target-b-decomposition.md`.
+
+Three corrections to this plan, found while executing it:
+
+1. **The per-band dependency table was one name short, twice.** B2's
+   `is_nondeterministic_cap` reads `builtin_cap_table` (`Typecheck_builtins`),
+   and B4's `project_protocol` calls `unfold_srec` (`Typecheck_exhaustive`).
+   Both are *unqualified value* references, invisible to a module-prefix grep.
+   The build caught both on the first compile. Neither changed include order.
+2. **B3's standing check `grep -c 'expand_record_ref' typecheck_unify.ml #
+   must be 3` reports 7**, because a bare count also picks up prose mentions
+   once the file has a doc comment — and a literal grep pattern written into
+   the file it greps matches itself. The assertion is restated by code site in
+   the progress entry.
+3. **B1's band `4809–5287` would have carried B2's section header** into
+   `typecheck_reorder.ml`; the executed bands are `4792–5284` (starting at the
+   doc comment, which contains a blank line) and `4801–5192`.
+
+`typecheck.mli` was unmodified through B1–B4. B5 did update its docstring: the
+last `.mli` work across `lib/typecheck/` was #370, already landed, so nothing
+was mid-flight.
 
 ---
 

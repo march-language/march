@@ -1,14 +1,17 @@
 (** March type checker — bidirectional Hindley-Milner with provenance.
 
     Architecture — what is still in this file:
-      §1  Unification
-      §2  Surface-type → internal-type conversion
       §3  Linearity tracking
       §4  Pattern inference
       §5  Expression checking (bidirectional: infer / check)
       §6  Declaration checking
-      §7  Session type projection and duality
+      §7  Top-level declaration dispatch and import warnings
       §8  Module entry point
+
+    §1 (unification) and §2 (surface-type → internal-type conversion) left
+    this file for [Typecheck_unify] on 2026-08-27.  The surviving sections
+    keep their original numbers rather than closing the gap, so that the §
+    references in commit messages, specs and code comments keep resolving.
 
     …and what now lives beside it, each re-entering this module through an
     [include] at the position its band used to occupy (see Phase 6 of
@@ -27,6 +30,15 @@
       [Typecheck_exhaustive]  pattern exhaustiveness and redundancy
       [Typecheck_caps]        the capability / [needs] checker
       [Typecheck_tailcall]    tail-call enforcement
+      [Typecheck_unify]       §1 unification and §2 surface-type conversion:
+                              [unify], [report_mismatch], [surface_ty],
+                              [expand_record], [instantiate_ctor], and both
+                              of this library's top-level hook installations
+      [Typecheck_session]     session-type projection and duality
+      [Typecheck_reorder]     declaration dependency ordering
+      [Typecheck_modcaps]     the module-level [cap] checkers (no_panic, pure,
+                              no_extern, deterministic) and the panic-surface
+                              tables
 
     The inference chain ([infer_expr] … [bind_lam_param]) and its consumers
     ([check_decl], [check_module_core]) deliberately stay: they are 18 and 2
@@ -3805,7 +3817,13 @@ let validate_island_protocol (env : env) (mod_name : Ast.name) (decls : Ast.decl
    ================================================================= *)
 include Typecheck_caps
 (* =================================================================
-   §7  Session type projection and duality
+   §7  Top-level declaration dispatch and import warnings
+
+   [check_decl] — the per-declaration dispatcher the module entry point folds
+   over — and [warn_unused_imports].  The session-type projection this header
+   used to name moved to lib/typecheck/typecheck_session.ml on 2026-08-27
+   (see the include just below); the header was renumbered by Phase 6's task
+   6.9 and had been describing the wrong band ever since.
    ================================================================= *)
 
 (* =================================================================

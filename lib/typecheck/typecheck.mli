@@ -16,12 +16,17 @@
     [check_module_with_env] or one of its siblings instead, and if something
     here really must become public, widen this file on purpose.
 
-    Since Phase 6 of the file decomposition (2026-08-26) much of what this
-    interface fronts is no longer defined in [typecheck.ml]: the type language
-    and the AST walkers are [Typecheck_types], the environment is
-    [Typecheck_env], the builtin tables are [Typecheck_builtins],
-    exhaustiveness is [Typecheck_exhaustive], the capability / [needs] checker
-    is [Typecheck_caps] and tail-call enforcement is [Typecheck_tailcall].
+    Since Phase 6 of the file decomposition (2026-08-26) and Target B of its
+    follow-up (2026-08-27) much of what this interface fronts is no longer
+    defined in [typecheck.ml]: the type language and the AST walkers are
+    [Typecheck_types], the environment is [Typecheck_env], the builtin tables
+    are [Typecheck_builtins], exhaustiveness is [Typecheck_exhaustive], the
+    capability / [needs] checker is [Typecheck_caps], tail-call enforcement is
+    [Typecheck_tailcall], unification and surface-type conversion are
+    [Typecheck_unify], session-type projection is [Typecheck_session],
+    declaration dependency ordering is [Typecheck_reorder], and the
+    module-level [cap] checkers with their panic-surface tables are
+    [Typecheck_modcaps].
     Each is [include]d back into [Typecheck] at the position its band used to
     occupy, so THIS file remains the single contract and nothing below moved,
     was renamed or changed meaning — including the mutable cells
