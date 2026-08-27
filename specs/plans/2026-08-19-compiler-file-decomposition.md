@@ -2047,7 +2047,7 @@ real payoff: it has **zero** dependencies on anything else in the file, so if
 anything goes wrong the cause is the *method*, not the coupling. Get the method
 right here.
 
-- [ ] **Step 1: Derive the boundary from anchors, never from the numbers above**
+- [x] **Step 1: Derive the boundary from anchors, never from the numbers above**
 
 ```bash
 F=lib/typecheck/typecheck.ml
@@ -2060,7 +2060,7 @@ python3 dep.py $S $E                          # must print: 0 external deps
 If `dep.py` prints anything other than 0, the file has moved under you. Stop
 and re-derive the band; do not extract a region with unlisted dependencies.
 
-- [ ] **Step 2: Cut with a comment-depth mask, not a line-number `sed`**
+- [x] **Step 2: Cut with a comment-depth mask, not a line-number `sed`**
 
 This is the trap that bit Phase 1 and Phase 4 and it will bite here: a doc
 comment containing a **blank line** defeats any "walk back over the preceding
@@ -2070,7 +2070,7 @@ it. Build a real per-line inside-a-comment mask by scanning with a nested
 delimiters before writing anything**. Also: trailing blank lines are content —
 do not `.rstrip('\n')` a block.
 
-- [ ] **Step 3: Re-export with `include`, and understand why**
+- [x] **Step 3: Re-export with `include`, and understand why**
 
 ```ocaml
 (* in typecheck.ml, at the position the band used to occupy *)
@@ -2084,7 +2084,7 @@ it to `Typecheck.*` consumers. Phase 1 learned this by breaking
 also constrains the result, so an `include` that fails to supply a declared
 `val` is a build error that names it exactly — that is a feature, use it.
 
-- [ ] **Step 4: Prove the motion was verbatim, by machine**
+- [x] **Step 4: Prove the motion was verbatim, by machine**
 
 Reassemble: walk `git show HEAD:lib/typecheck/typecheck.ml` top to bottom and
 consume each line from whichever of the two resulting files matches next,
@@ -2094,7 +2094,7 @@ its comment. Print the per-file attribution and the unconsumed count. This is
 the check that caught the dropped-trailing-blank-line bug in Phase 4; an
 eyeball would not have.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 ```bash
 dune build --root . bin/main.exe 2>&1 | tail -5; echo "build=$?"
@@ -2135,7 +2135,7 @@ measured, the *easiest* one in the file: `python3 dep.py 32 1901` prints
 is the part other modules will want and `typecheck_env.ml` is the part they
 mostly will not.
 
-- [ ] **Step 1: Derive both boundaries from anchors**
+- [x] **Step 1: Derive both boundaries from anchors**
 
 ```bash
 F=lib/typecheck/typecheck.ml
@@ -2145,13 +2145,13 @@ echo "types = 32..$((A-1))   env = $A..$B"     # 32..394 / 397..1901 at cde69dfb
 python3 dep.py 32 $B                            # must print 0 external deps
 ```
 
-- [ ] **Step 2: Move, with `open March_ast.Ast` where needed**
+- [x] **Step 2: Move, with `open March_ast.Ast` where needed**
 
 Phase 1 hit this twice: an extracted file naming an AST type needs its own
 `open`/qualification, and conversely an extracted file that carries an `open` it
 no longer uses fails warning 33. Expect one build round-trip per file for this.
 
-- [ ] **Step 3: `include` both, in order, at the top of `typecheck.ml`**
+- [x] **Step 3: `include` both, in order, at the top of `typecheck.ml`**
 
 ```ocaml
 include Typecheck_types
@@ -2170,7 +2170,7 @@ documented in
 it: after the move, a two-line probe that mutates `Typecheck_types._counter`
 and reads `Typecheck._counter` must observe the change.
 
-- [ ] **Step 4: `typecheck.mli` must not change**
+- [x] **Step 4: `typecheck.mli` must not change**
 
 `include` of a module whose types are structurally the definitions the `.mli`
 declares satisfies it unchanged. If the build asks you to edit `typecheck.mli`
@@ -2178,7 +2178,7 @@ in this task, something was copied rather than re-exported — fix the `include`
 do not edit the interface. (Task 6.9 is where the interface legitimately
 changes.)
 
-- [ ] **Step 5: Verify and commit** — same command block as Task 6.2 Step 5,
+- [x] **Step 5: Verify and commit** — same command block as Task 6.2 Step 5,
 plus the reassembly check across three files, plus `scripts/run-tests.sh lsp`
 (the LSP reads `Tc.ty`, `Tc.env`, `Tc.repr`, `Tc.pp_ty` through a module alias,
 which a `Typecheck.` grep does not find).
@@ -2212,7 +2212,7 @@ definition in the file), `builtin_types`, `builtin_ctors` and `base_env`.
 `python3 dep.py 1904 3540` → **4** external deps, all in the Task 6.3 head:
 `fresh_var`, `make_env`, `add_ctor`, `bind_vars`.
 
-- [ ] **Step 1: Derive the boundary**
+- [x] **Step 1: Derive the boundary**
 
 ```bash
 F=lib/typecheck/typecheck.ml
@@ -2221,12 +2221,12 @@ E=$(grep -n '§10  Unification' $F | cut -d: -f1);   E=$((E-2))
 echo "band = $S..$E"; python3 dep.py $S $E    # expect exactly the 4 head deps
 ```
 
-- [ ] **Step 2: Move; `include Typecheck_builtins` at the band's old position**
+- [x] **Step 2: Move; `include Typecheck_builtins` at the band's old position**
 
 `base_env` is declared in `typecheck.mli` and has **33** external call sites —
 the `include` must supply it, and the build will say so if it does not.
 
-- [ ] **Step 3: Reassembly check, oracles, commit** — as Task 6.2.
+- [x] **Step 3: Reassembly check, oracles, commit** — as Task 6.2.
 
 ```bash
 git add lib/typecheck/typecheck_builtins.ml lib/typecheck/typecheck.ml
@@ -2256,7 +2256,7 @@ opposite. `check_exhaustiveness` is *called from* `infer_expr`, i.e. it is a
 dependency of inference, not a dependent — which is why it sits above it and
 why it moves cleanly.
 
-- [ ] **Step 1: Move `span_of_expr` first, as its own commit**
+- [x] **Step 1: Move `span_of_expr` first, as its own commit**
 
 `span_of_expr` (`typecheck.ml:4903–4932`, 30 lines including its doc comment)
 sits under the §14 header, above §E, and the exhaustiveness band needs it. It is
@@ -2266,7 +2266,7 @@ explicitly that nothing between its old and new positions calls it (it is
 declared in `typecheck.mli` and has 7 external call sites, 4 of them through the
 `Tc.` alias).
 
-- [ ] **Step 2: Derive the band**
+- [x] **Step 2: Derive the band**
 
 ```bash
 F=lib/typecheck/typecheck.ml
@@ -2280,7 +2280,7 @@ echo "band = $S..$E"; python3 dep.py $S $E
 `grep -n '^let rec infer_expr'` instead would leave that comment orphaned above
 an `include`.
 
-- [ ] **Step 3: Move, `include`, reassemble, verify, commit** — as Task 6.2.
+- [x] **Step 3: Move, `include`, reassemble, verify, commit** — as Task 6.2.
 
 ```bash
 git add lib/typecheck/typecheck_exhaustive.ml lib/typecheck/typecheck.ml
@@ -2315,7 +2315,7 @@ carries `check_module_needs`, `cap_in_solved_ty`, `check_cap_narrow_sites`,
 `fn_*_capability_closures` accessors — six of which are declared in
 `typecheck.mli`.
 
-- [ ] **Step 1: `free_vars_expr` rides along**
+- [x] **Step 1: `free_vars_expr` rides along**
 
 `free_vars_expr` / `free_vars_block` / `free_vars_pattern` (`:7941–8029`, 89
 lines, one `let rec … and` chain, `dep.py` → **0** external deps) sit above the
@@ -2325,7 +2325,17 @@ shared/exclusive classification collapse into "move all 75 in source order".
 They are used elsewhere in `typecheck.ml` too, so the `include` must re-export
 them.
 
-- [ ] **Step 2: Derive the band**
+**Corrected on execution, 2026-08-26.** The destination above does not work and
+this step did not check it: `warn_unused_params` sits BETWEEN these definitions
+and the capability band and calls `free_vars_expr`, so carrying them down into
+`typecheck_caps.ml` leaves that call unresolved — as does a call site on the
+far side of the band. They went into `typecheck_types.ml` instead, which is
+`include`d at the TOP of `typecheck.ml` and therefore serves callers on both
+sides, in their own commit immediately before the band. The step's *reasoning*
+— never split a helper from its caller across two commits — is right and was
+honoured; only the named destination was wrong.
+
+- [x] **Step 2: Derive the band**
 
 ```bash
 F=lib/typecheck/typecheck.ml
@@ -2336,7 +2346,11 @@ echo "band = $S..$E"; python3 dep.py $S $E
 
 Check the `S` adjustment against the comment mask rather than assuming 3 lines.
 
-- [ ] **Step 3: Move, `include`, reassemble, verify, commit**
+**Measured 2026-08-26: it is 21, not 3.** `cap_annots_in_expr`'s doc comment
+contains a blank line, so any "walk back over the preceding comment" heuristic
+cuts it in half. The mask found the real boundary.
+
+- [x] **Step 3: Move, `include`, reassemble, verify, commit**
 
 Add `scripts/run-tests.sh` in full here, not just `compiler eval`: the
 capability surface is asserted by `test_caps.ml`, `test_cap_ceiling.ml`,
@@ -2426,7 +2440,7 @@ legitimately shrinks, and that is the diff to review).
 (comments only), and add one small `.mli` per extracted module where it buys
 something.
 
-- [ ] **Step 1: `typecheck.mli`'s section comment is now wrong**
+- [x] **Step 1: `typecheck.mli`'s section comment is now wrong**
 
 The interface's docstring says inference's helpers "are not exported: they are
 mutually recursive, they read and write module-level state". After this phase
@@ -2434,7 +2448,7 @@ much of what it describes lives in sibling modules. Rewrite the docstring to
 say where things now are; leave the 50 `val`s alone unless the build says
 otherwise.
 
-- [ ] **Step 2: Add `.mli` files where the win is real, not everywhere**
+- [x] **Step 2: Add `.mli` files where the win is real, not everywhere**
 
 `typecheck_builtins.mli` (`val base_env`, `val builtin_cap_table`,
 `val builtin_interface_bindings`, `val builtin_types`, …) and
@@ -2449,7 +2463,7 @@ becomes an unused-value **error** under warnings-as-errors if you hide it, so it
 has to be declared anyway with a comment saying it is not API. Prefer deleting
 the dead re-export.
 
-- [ ] **Step 3: Renumber the § headers and the module docstring's table of
+- [x] **Step 3: Renumber the § headers and the module docstring's table of
 contents**
 
 `typecheck.ml`'s header block still lists §1–§16 and the file's real numbering
@@ -2459,7 +2473,7 @@ table of contents. Verify comments-only by masking every line inside a comment
 and diffing what is left — Phase 1 did exactly this and reported
 "2,835 code lines, byte-identical".
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 ```bash
 dune build --root . bin/main.exe 2>&1 | tail -5

@@ -1,22 +1,37 @@
 (** March type checker — bidirectional Hindley-Milner with provenance.
 
-    Architecture:
-      §1   Provenance (reason chains for error messages)
-      §2   Internal type representation (ty, tvar, scheme)
-      §3   Fresh variable generation + level management
-      §4   Type utilities (repr, occurs, free_ids)
-      §5   Pretty-printing
-      §6   Elm-style error message parts
-      §7   Type environment
-      §8   Generalization and instantiation
-      §9   Built-in types + base environment
-      §10  Unification
-      §11  Surface-type → internal-type conversion
-      §12  Linearity tracking
-      §13  Pattern inference
-      §14  Expression checking (bidirectional: infer / check)
-      §15  Declaration checking
-      §16  Module entry point
+    Architecture — what is still in this file:
+      §1  Unification
+      §2  Surface-type → internal-type conversion
+      §3  Linearity tracking
+      §4  Pattern inference
+      §5  Expression checking (bidirectional: infer / check)
+      §6  Declaration checking
+      §7  Session type projection and duality
+      §8  Module entry point
+
+    …and what now lives beside it, each re-entering this module through an
+    [include] at the position its band used to occupy (see Phase 6 of
+    specs/plans/2026-08-19-compiler-file-decomposition.md):
+      [Typecheck_types]       the type language ([reason], [ty], [session_ty],
+                              [scheme]), [repr] / [occurs], the printers, the
+                              Elm-style message renderer, and the two pure AST
+                              walkers [span_of_expr] and [free_vars_expr]
+      [Typecheck_env]         [env] and everything that enters or leaves it:
+                              [make_env], the [lookup_*] / [resolve_*] /
+                              [suggest_*] family, the [bind_*] binders,
+                              [generalize] and [instantiate]
+      [Typecheck_builtins]    the type constants, [builtin_cap_table], the
+                              standard interfaces, [builtin_bindings] and
+                              [base_env]
+      [Typecheck_exhaustive]  pattern exhaustiveness and redundancy
+      [Typecheck_caps]        the capability / [needs] checker
+      [Typecheck_tailcall]    tail-call enforcement
+
+    The inference chain ([infer_expr] … [bind_lam_param]) and its consumers
+    ([check_decl], [check_module_core]) deliberately stay: they are 18 and 2
+    mutually recursive definitions that thread and mutate [env], and splitting
+    them would trade locality for a callback record.
 
     Key design choices:
     - Bidirectional: [infer_expr] synthesises a type; [check_expr] verifies
@@ -30,8 +45,8 @@
       "used" flags in the environment. *)
 
 (* =================================================================
-   §1–§6  The type language, its printer and the message renderer — now
-   lib/typecheck/typecheck_types.ml.  §7–§8, the environment, follow it in
+   The type language, its printer and the message renderer — now
+   lib/typecheck/typecheck_types.ml.  The environment follows it in
    lib/typecheck/typecheck_env.ml.
 
    [include], not [open]: only [include] re-exports these names as part of
@@ -45,13 +60,13 @@
 include Typecheck_types
 
 (* =================================================================
-   §7–§8  Type environment, generalization and instantiation — now
+   Type environment, generalization and instantiation — now
    lib/typecheck/typecheck_env.ml.  [include] for the same reason as
    [Typecheck_types] above.
    ================================================================= *)
 include Typecheck_env
 (* =================================================================
-   §9/§9b  Built-in types, capability tables, standard interfaces and the base
+   Built-in types, capability tables, standard interfaces and the base
    environment — now lib/typecheck/typecheck_builtins.ml.  [include] for the
    same reason as the two modules above; [base_env] in particular is declared
    in typecheck.mli and has 33 external call sites, so the build says so
@@ -59,7 +74,7 @@ include Typecheck_env
    ================================================================= *)
 include Typecheck_builtins
 (* =================================================================
-   §10  Unification
+   §1  Unification
    ================================================================= *)
 
 (** Format a type for display in an error message.
@@ -486,7 +501,7 @@ and solve_nat_eq env ~span ~reason op a b n =
     report_mismatch env ~span ~reason (TNatOp (op, a, b)) (TNat n)
 
 (* =================================================================
-   §11  Surface-type → internal-type conversion
+   §2  Surface-type → internal-type conversion
    ================================================================= *)
 
 (** True when [name] denotes a variant/sum type in scope — i.e. some
@@ -846,7 +861,7 @@ let bind_linear_field_sentinels varname ty env =
   | _ -> env
 
 (* =================================================================
-   §12  Linearity tracking
+   §3  Linearity tracking
    ================================================================= *)
 
 (** Record a use of variable [name].  Errors if a linear var is used
@@ -1029,7 +1044,7 @@ let check_linear_all_consumed env ~scope_span in_scope_names =
     ) env.lin
 
 (* =================================================================
-   §13  Pattern inference
+   §4  Pattern inference
    ================================================================= *)
 
 (** Infer the type that a pattern *expects*, and return the list of
@@ -1417,11 +1432,11 @@ and ty_of_lit = function
   | Ast.LitAtom   _ -> t_atom
 
 (* =================================================================
-   §14  Expression checking — bidirectional
+   §5  Expression checking — bidirectional
    ================================================================= *)
 
 (* =================================================================
-   §E  Pattern exhaustiveness checking — now
+   Pattern exhaustiveness checking — now
    lib/typecheck/typecheck_exhaustive.ml.  [include] for the same reason as
    the modules above.
    ================================================================= *)
@@ -3639,7 +3654,7 @@ and bind_lam_param env _sp (p : Ast.param) ann_ty =
   | lin -> bind_linear p.param_name.txt lin bind_ty env
 
 (* =================================================================
-   §15  Declaration checking
+   §6  Declaration checking
    ================================================================= *)
 
 (** Emit unused-variable warnings for fn params not referenced in the body.
@@ -4567,7 +4582,7 @@ let validate_island_protocol (env : env) (mod_name : Ast.name) (decls : Ast.decl
    ================================================================= *)
 include Typecheck_caps
 (* =================================================================
-   §16a  Session type projection and duality
+   §7  Session type projection and duality
    ================================================================= *)
 
 (** [project_steps env ~proto_name ~multiparty steps role cont] projects a
@@ -6915,7 +6930,7 @@ let warn_unused_imports env =
   ) !(env.import_tracker)
 
 (* =================================================================
-   §16  Tail-call enforcement — now lib/typecheck/typecheck_tailcall.ml.
+   Tail-call enforcement — now lib/typecheck/typecheck_tailcall.ml.
    [include], not [open]: only [include] re-exports these names as part of
    [Typecheck]'s own surface, and consumers reach this module through
    [let open] and through aliases (Tc., TC., T.) that no grep can see.
@@ -6923,7 +6938,7 @@ let warn_unused_imports env =
 include Typecheck_tailcall
 
 (* =================================================================
-   §17  Module entry point
+   §8  Module entry point
    ================================================================= *)
 
 (** Build a function's declared type scheme from its annotations, for pass-1
