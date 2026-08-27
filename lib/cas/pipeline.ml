@@ -215,6 +215,23 @@ let hash_module (m : tir_module) : hashed_scc list =
     [~compile] is the actual compiler (mono → defun → llvm) injected by the
     caller. It receives the [hashed_scc] and returns an artifact path.
 
+    {b Retained, but deliberately not wired into the driver.}  As of
+    2026-08-26 the only callers are [test/test_cas.ml] and
+    [test/test_stdlib_suite.ml].  [bin/main.ml] caches at {i whole-module}
+    granularity instead: it calls [hash_module], folds every SCC hash into a
+    single source hash via [scc_impl_hash], and stores/serves one artifact —
+    the linked executable — under that key.
+
+    The blocker is not hashing.  [hash_module] above already makes
+    [impl_hash] a true Merkle root over both the call graph and type layout,
+    so a per-SCC key is sound (the cross-SCC stale-inline hazard described
+    against [compile_scc] in specs/hot-code-reload.md predates that fold and
+    is stale on this point).  The blocker is that codegen emits one LLVM
+    module and links one binary, so there is no per-SCC artifact to store or
+    serve.  Wiring this up requires separately-emitted per-SCC objects plus a
+    link step; this function is the tested reference implementation for that
+    day.
+
     On cache hit: returns the stored artifact path, [~compile] is NOT called.
     On cache miss: calls [~compile], stores the result, returns the path. *)
 let compile_scc
