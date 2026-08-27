@@ -13,6 +13,12 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- `bin/main.ml` is 1,231 lines smaller (5,429 -> 4,198): host/stdlib/runtime
+  discovery and link flags, the command-line flag cells, the `--check-migration`
+  tool and the `--emit-core-ast` writer now live in their own `bin/` modules. No
+  behavior change -- the IR and typecheck oracles are byte-identical across 240
+  programs and 600 fixtures.
+
 - Codegen builtin dispatch names a closed variant (`Builtin_name.t`) rather than
   comparing raw strings, so a typo in an emitter guard is a compile error, and a
   builtin added to the variant without an emission arm is caught by a
