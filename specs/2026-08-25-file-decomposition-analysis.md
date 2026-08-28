@@ -34,6 +34,12 @@ favour of this document.
 >   examined and DECLINED — the `~H` sigil cluster and the qualification tail both
 >   create cycles — see
 >   `specs/progress/2026-08-27-lower-desugar-perceus-decomposition.md`.
+> - **`refine_check.ml` is done too (2026-08-28), 7,583 → 1,881.** It was the one
+>   target this document ranked (#6, "as planned") that no phase ever executed, and
+>   it GREW 7,416 → 7,583 in the meantime — the table above understates it. Five
+>   layers came out as `refine_{encode,scope,resolve,call,post}`; see
+>   `specs/progress/2026-08-28-refine-check-decomposition.md`, which also records
+>   why `ir-oracle` proves nothing about that file.
 > - **Finding 2 stands** as a method result: concentration without churn is not
 >   worth fixing. `llvm_case.ml` remains untouched, correctly.
 >
