@@ -212,6 +212,10 @@ lib/tir/                    typed IR: lower (+lower_state/types/match/decls/expr
                              and the per-arm bodies in llvm_emit_{arith,alloc,call,data,html,task,tcoarm,simd,nmap}),
                              builtin_name (closed variant for builtin dispatch),
                              tir_names (cross-pass name contracts), rc_types (needs_rc/borrow_eligible)
+lib/refinecheck/            refinement/contract checking (SMT): refine_check (orchestrator),
+                             +refine_{encode,scope,resolve,call,post} — the pipeline in
+                             dependency order, each including the one before it; plus
+                             division_safety, precond/postcond/return/cap_infer, obligation
 lib/jit/                    REPL JIT compiler
 lib/errors/errors.ml        diagnostic type (Error/Warning/Hint + span)
 lib/search/search.ml        Hoogle-style type/name search engine
