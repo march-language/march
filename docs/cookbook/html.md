@@ -7,7 +7,7 @@ scrollmd: true
 
 # HTML
 
-March's `~H` sigil generates HTML with **contextual auto-escaping**: every `${...}` is escaped for the exact place it lands — element content, an attribute, a URL, CSS, or JavaScript — worked out at compile time. You never pick an escaper. The `Html.trust_*` functions opt out for content you produced yourself. See [Sigils & Templating]({{ site.baseurl }}/docs/sigils/) for the full picture.
+March's `~H` sigil generates HTML with **contextual auto-escaping**: every `${...}` is escaped for the exact place it lands (element content, an attribute, a URL, CSS, or JavaScript), worked out at compile time. You never pick an escaper. The `Html.trust_*` functions opt out for content you produced yourself. See [Sigils & Templating]({{ site.baseurl }}/docs/sigils/) for the full picture.
 
 ---
 
@@ -50,7 +50,7 @@ let col = "var(--accent)"
 ```
 
 A URL that fails the scheme allowlist becomes `about:invalid#zSoyz`. Positions no
-escaping can make safe — an attribute name, an element name, inside a comment — are
+escaping can make safe (an attribute name, an element name, inside a comment) are
 compile errors.
 
 ## Trusted HTML
@@ -63,7 +63,7 @@ let html = ~H"<button>${icon} Click me</button>"
 ```
 
 **Trust names a context and does not travel out of it.** The same value in an `href` is
-still escaped, because trusting something as HTML says nothing about it being a safe
+still escaped, because trusting something as HTML makes no claim about it being a safe
 URL. Use `Html.trust_url`, `trust_css`, `trust_js` or `trust_attr` when the target is
 one of those.
 

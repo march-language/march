@@ -7,15 +7,15 @@ permalink: /docs/session-types/
 
 # Session Types
 
-A protocol is an agreement about *who sends what, and in what order*. Two programs that disagree — one sends before the other is ready, or a channel is used after it's closed — deadlock or corrupt data at runtime, usually under load, usually in production.
+A protocol is an agreement about *who sends what, and in what order*. Two programs that disagree (one sends before the other is ready, or a channel is used after it's closed) deadlock or corrupt data at runtime, usually under load, usually in production.
 
-March's **session types** turn those agreements into types the compiler checks. You declare a `protocol`, the compiler derives each side's obligations, and any program that breaks the protocol **fails to compile**. Two guarantees are hard and unconditional: if your program compiles, **every send and receive happens in the protocol's declared order**, and **no endpoint is ever used after it's closed**. A handful of related properties (closing a channel you abandoned midway, handling every branch a peer might choose) are weaker — they hold *usually*, not mechanically — and are collected once in [The guarantees, in one place](#the-guarantees-in-one-place).
+March's **session types** turn those agreements into types the compiler checks. You declare a `protocol`, the compiler derives each side's obligations, and any program that breaks the protocol **fails to compile**. Two guarantees are hard and unconditional: if your program compiles, **every send and receive happens in the protocol's declared order**, and **no endpoint is used after it's closed**. A handful of related properties (closing a channel you abandoned midway, handling every branch a peer might choose) are weaker (they hold *usually*, not mechanically) and are collected once in [The guarantees, in one place](#the-guarantees-in-one-place).
 
-These are *binary* session types: a protocol describes exactly two roles talking over one channel. (For data-parallel fan-out across a whole collection, see [Parallel Collections]({{ site.baseurl }}/docs/parallel-collections/); for actor mailboxes, see [Actors]({{ site.baseurl }}/docs/actors/) — and the [section below](#session-types-and-actors) on how the two relate.)
+These are *binary* session types: a protocol describes exactly two roles talking over one channel. (For data-parallel fan-out across a whole collection, see [Parallel Collections]({{ site.baseurl }}/docs/parallel-collections/); for actor mailboxes, see [Actors]({{ site.baseurl }}/docs/actors/), and the [section below](#session-types-and-actors) on how the two relate.)
 
 **Binary vs multi-party, and what's safe to compile today.** The **binary channel plane**
 (`Chan.*`) with `Int`/`Bool`/`String` payloads, correctly interleaved, works identically
-interpreted and compiled — this is the production-ready surface, and every example on
+interpreted and compiled; this is the production-ready surface, and every example on
 this page uses it. **Multi-party session types (`MPST.*`) are typing-only right now**:
 every `MPST.*` program crashes compiled even though the interpreter runs it correctly.
 Stick to binary (two-role) protocols if you need a compiled binary.
@@ -24,20 +24,20 @@ Stick to binary (two-role) protocols if you need a compiled binary.
 
 ## The idea
 
-Without session types, a channel is just a pipe: nothing stops you from reading when you should write, or closing while the other side is still talking. With them, the channel carries a **linear type that advances at every operation**. After you `send`, the type says "now receive"; after you `receive`, it says "now send" or "now close." The compiler reads that type and rejects code that does the wrong thing next.
+Without session types, a channel is just a pipe: there is no protection against reading when you should write, or closing while the other side is still talking. With them, the channel is given a **linear type that advances at every operation**. After you `send`, the type states "now receive"; after you `receive`, it states "now send" or "now close." The compiler reads that type and rejects code that does the wrong thing next.
 
 Two classes of bug become compile errors:
 
-- **Wrong-order / wrong-direction communication.** `Chan.send` on a channel whose protocol says "receive next" doesn't type-check.
-- **Use-after-close.** The channel is *linear* — you cannot keep using an endpoint after `Chan.close`, or use the same continuation twice.
+- **Wrong-order / wrong-direction communication.** `Chan.send` on a channel with a protocol that states "receive next" doesn't type-check.
+- **Use-after-close.** The channel is *linear*: you cannot keep using an endpoint after `Chan.close`, or use the same continuation twice.
 
-These two are the hard guarantees: if your program compiles, the two sides agree on the conversation and the channel is never used after close. The narrower, weaker properties — unhandled `offer` branches, and abandoning a channel before it reaches `end` — are collected in [The guarantees, in one place](#the-guarantees-in-one-place) below.
+These two are the hard guarantees: if your program compiles, the two sides agree on the conversation and the channel is never used after close. The narrower, weaker properties (unhandled `offer` branches, and abandoning a channel before it reaches `end`) are collected in [The guarantees, in one place](#the-guarantees-in-one-place) below.
 
 ---
 
 ## Declaring a protocol
 
-A protocol is declared with the `protocol` keyword (not `session`). Each step is `Role -> Role : Type`, read as "this role sends a value of this type to that role." Roles are **inferred** from the steps — there is no `between A, B` clause to write.
+A protocol is declared with the `protocol` keyword (not `session`). Each step is `Role -> Role : Type`, read as "this role sends a value of this type to that role." Roles are **inferred** from the steps; there is no `between A, B` clause to write.
 
 ```march
 protocol Echo do
@@ -46,7 +46,7 @@ protocol Echo do
 end
 ```
 
-This reads: Alice sends a `String` to Bob, then Bob sends a `String` back to Alice. The compiler **projects** the global protocol onto each role's local view and checks **duality** — that one side's "send" is exactly the other side's "receive." For `Echo`:
+This reads: Alice sends a `String` to Bob, then Bob sends a `String` back to Alice. The compiler **projects** the global protocol onto each role's local view and checks **duality**: that one side's "send" is exactly the other side's "receive." For `Echo`:
 
 - Alice's view: `send String`, then `recv String`, then end.
 - Bob's view: `recv String`, then `send String`, then end.
@@ -59,11 +59,11 @@ These are duals, so the protocol is well-formed. If they weren't (say both roles
 
 A session-typed channel is created from a protocol and used through five operations. Each one advances the channel's linear type, so the idiomatic style is to **rebind the channel** at every step (`let ch = Chan.send(ch, …)`), threading the freshly-advanced endpoint forward.
 
-A channel endpoint's type is written `Chan(Role, Protocol)` — for example `Chan(Alice, Echo)` is Alice's end of the `Echo` protocol. That annotation is what lets the compiler project the protocol onto the role and check each operation; a bare `Chan` carries no role and can't be checked.
+A channel endpoint's type is written `Chan(Role, Protocol)`; for example, `Chan(Alice, Echo)` is Alice's end of the `Echo` protocol. That annotation is what lets the compiler project the protocol onto the role and check each operation; a bare `Chan` has no role and can't be checked.
 
 | Operation | Type transition | Returns |
 |-----------|-----------------|---------|
-| `Chan.new(Proto)` | creates two **dual** endpoints (protocol named bare, not as a string) | `(Chan, Chan)` — one per role |
+| `Chan.new(Proto)` | creates two **dual** endpoints (protocol named bare, not as a string) | `(Chan, Chan)`, one per role |
 | `Chan.send(ch, v)` | `send T, then S` ⟶ `S` | the advanced `Chan` |
 | `Chan.recv(ch)` | `recv T, then S` ⟶ `S` | `(value, advanced Chan)` |
 | `Chan.choose(ch, :label)` | `choose {…}` ⟶ the chosen branch | the advanced `Chan` |
@@ -73,15 +73,15 @@ A channel endpoint's type is written `Chan(Role, Protocol)` — for example `Cha
 A few rules the type checker enforces, so they never reach runtime:
 
 - **`Chan.new(proto)` returns the two endpoints.** Hand one to each role. They are linked: what one side sends, the other receives.
-- **`send`/`recv` must match the protocol's next step.** Calling `Chan.send` when the protocol says "receive next" is a type error.
-- **`Chan.close` only type-checks at the end of the protocol.** If there are still steps left, closing is rejected — you can't hang up mid-conversation.
-- **The endpoint is linear.** Each rebinding consumes the previous one, so you can't accidentally reuse a stale (pre-advance) handle — including a channel parameter, whose re-use is tracked as affine. A `let`-bound channel that reaches the end of the protocol and is then dropped without `Chan.close` is also rejected. See [The guarantees, in one place](#the-guarantees-in-one-place) for the precise shape of what this check does and doesn't cover.
+- **`send`/`recv` must match the protocol's next step.** Calling `Chan.send` when the protocol states "receive next" is a type error.
+- **`Chan.close` only type-checks at the end of the protocol.** If there are still steps left, closing is rejected: you can't hang up mid-conversation.
+- **The endpoint is linear.** Each rebinding consumes the previous one, so you can't accidentally reuse a stale (pre-advance) handle, including a channel parameter (its re-use is tracked as affine). A `let`-bound channel that reaches the end of the protocol and is then dropped without `Chan.close` is also rejected. See [The guarantees, in one place](#the-guarantees-in-one-place) for the precise shape of what this check does and doesn't cover.
 
 ---
 
 ## A worked example: request–reply
 
-Here is the `Echo` protocol, fully implemented and **runnable**. Because a channel's two directional queues have no scheduler behind them — `Chan.recv` never suspends (see the Runtime note below) — a working program interleaves both sides' *steps* into a single control flow, so every `send` runs before its matching `recv`:
+Here is the `Echo` protocol, fully implemented and **runnable**. Because a channel's two directional queues have no scheduler behind them (`Chan.recv` never suspends; see the Runtime note below), a working program interleaves both sides' *steps* into a single control flow, so every `send` runs before its matching `recv`:
 
 ```march
 fn main() do
@@ -100,7 +100,7 @@ end
 
 ### Each role's view
 
-The same protocol can be written as two functions, one per role — each takes its own endpoint as `Chan(Role, Echo)` and threads it through `send` → `recv` → `close`. This is the shape you'd use if each side ran as its own actor or under an external scheduler:
+The same protocol can be written as two functions, one per role; each takes its own endpoint as `Chan(Role, Echo)` and threads it through `send` → `recv` → `close`. This is the shape you'd use if each side ran as its own actor or under an external scheduler:
 
 ```march
 mod EchoDemo do
@@ -127,11 +127,11 @@ mod EchoDemo do
 end
 ```
 
-Each function documents *one role's own view* of the protocol, enforced structurally rather than by discipline. If `client` tried to `Chan.recv` before `Chan.send`, the projected type for Alice's endpoint says "send next," so the receive is a type error; if `server` forgot to `Chan.close`, the linear endpoint would be left unconsumed — also an error.
+Each function documents *one role's own view* of the protocol, enforced through the type system rather than by discipline. If `client` tried to `Chan.recv` before `Chan.send`, the projected type for Alice's endpoint states "send next," so the receive is a type error; if `server` forgot to `Chan.close`, the linear endpoint would be left unconsumed, also an error.
 
-**But these two functions are not, by themselves, a call sequence you can drop into one `main`.** `client` starts with a `send`, `server` with a `recv`; because `Chan.recv` never suspends, calling them as two ordinary uninterrupted calls — in *either* order — crashes at the first `recv` whose value hasn't been sent yet, on both backends. The two-function form documents each role's view; the interleaved `main` above is the form that actually runs. (The function-structured form is exactly that interleaving split across two functions — it does not run the two sides concurrently on separate green threads.)
+**But these two functions are not, by themselves, a call sequence you can drop into one `main`.** `client` starts with a `send`, `server` with a `recv`; because `Chan.recv` never suspends, calling them as two ordinary uninterrupted calls, in *either* order, crashes at the first `recv` for which the value hasn't been sent yet, on both backends. The two-function form documents each role's view; the interleaved `main` above is the form that actually runs. (The function-structured form is exactly that interleaving split across two functions; it does not run the two sides concurrently on separate green threads.)
 
-> **Runtime note.** A channel is backed by two directional queues (one per direction), on **both** backends. Session *safety* — correct order, no use-after-close — is checked entirely at compile time; the runtime does not re-verify it. `Chan.recv` does **not** block or suspend on *either* backend: if the matching value hasn't been sent yet, `recv` fails immediately with a runtime error (interpreted) or aborts (compiled) — there is no scheduler backing channels the way there is for actor mailboxes. Session types here are a linear protocol-conformance checker over a same-thread mailbox, not a concurrent scheduler — the compiler checks that operations happen in the right order, not that they happen on different threads at the same time.
+> **Runtime note.** A channel is backed by two directional queues (one per direction), on **both** backends. Session *safety* (correct order, no use-after-close) is checked entirely at compile time; the runtime does not re-verify it. `Chan.recv` does **not** block or suspend on *either* backend: if the matching value hasn't been sent yet, `recv` fails immediately with a runtime error (interpreted) or aborts (compiled); there is no scheduler backing channels the way there is for actor mailboxes. Session types here are a linear protocol-conformance checker over a same-thread mailbox, not a concurrent scheduler: the compiler checks that operations happen in the right order, not that they happen on different threads at the same time.
 
 ---
 
@@ -171,7 +171,7 @@ fn client_side(ch : Chan(Client, Decision)) : Unit do
 end
 ```
 
-`Chan.choose(ch, :label)` advances the channel into the chosen branch; `Chan.offer(ch)` returns `(picked_label, advanced_channel)`. An invalid label passed to `choose` (one the protocol didn't declare) is rejected at typecheck time. Handling the picked label is an ordinary `match` on the returned `Atom`, so ordinary `match` rules apply — including that a missing arm is only a warning (see [The guarantees, in one place](#the-guarantees-in-one-place)), not the hard error you might expect from "the compiler enforces the protocol."
+`Chan.choose(ch, :label)` advances the channel into the chosen branch; `Chan.offer(ch)` returns `(picked_label, advanced_channel)`. An invalid label passed to `choose` (one the protocol didn't declare) is rejected at typecheck time. Handling the picked label is an ordinary `match` on the returned `Atom`, so ordinary `match` rules apply, including that a missing arm is only a warning (see [The guarantees, in one place](#the-guarantees-in-one-place)), not the hard error you might expect from "the compiler enforces the protocol."
 
 ---
 
@@ -183,7 +183,7 @@ If a program using session-typed channels compiles, then:
 - **No use-after-close.** The channel is linear; an endpoint cannot be used after `Chan.close`, and `close` only type-checks once the protocol is complete.
 - **A `let`-bound endpoint that reaches the end of the protocol must be closed.** Dropping it unclosed at that point is rejected, and re-using a channel *parameter* (not just a `let`-bound continuation) is also caught.
 
-These properties are the same ones you'd otherwise chase with runtime assertions and integration tests — promoted to compile-time checks that hold for *all* executions, not just the ones your tests happened to hit.
+These properties are the same ones you'd otherwise chase with runtime assertions and integration tests, promoted to compile-time checks that hold for *all* executions, not just the ones your tests happened to hit.
 
 **Two things that sound like guarantees but aren't, yet:**
 
@@ -199,21 +199,21 @@ Session types and [actors]({{ site.baseurl }}/docs/actors/) are **complementary*
 | | Actors (mailboxes) | Session-typed channels |
 |---|---|---|
 | **Shape** | identity + state + a mailbox; many senders, one receiver | a two-party conversation over one linear channel |
-| **Typing** | each `on Msg(...)` handler is typed, but message *order* is unconstrained — any actor can `send` any message at any time | the *sequence* of sends/receives is typed; order is enforced |
+| **Typing** | each `on Msg(...)` handler is typed, but message *order* is unconstrained: any actor can `send` any message at any time | the *sequence* of sends/receives is typed; order is enforced |
 | **Multiplicity** | one mailbox, fan-in from anywhere | exactly two endpoints, point-to-point |
-| **Lifetime** | long-lived process; mailbox always open | the channel *ends*, `close` is checked once the protocol is complete, and (see above) dropping it unclosed once it gets there is now also rejected — though nothing forces the conversation to *reach* the end in the first place |
+| **Lifetime** | long-lived process; mailbox always open | the channel *ends*, `close` is checked once the protocol is complete, and (see above) dropping it unclosed once it gets there is now also rejected, though no check forces the conversation to *reach* the end in the first place |
 | **Best for** | stateful services, supervision, fan-in event handling | strict request/reply or multi-step handshakes where ordering correctness matters |
 
-The mental model: **an actor's mailbox guarantees each message is well-typed; a session channel additionally guarantees the sends and receives that do happen arrive in the agreed order.** Reach for an actor when you have a stateful entity that many parties talk to (a counter, a connection, a supervised worker). Reach for a session channel when two parties run a fixed protocol and you want the compiler to prove they follow it — a login handshake, a request/reply exchange, a negotiation with branches.
+The mental model: **an actor's mailbox guarantees each message is well-typed; a session channel additionally guarantees the sends and receives that do happen arrive in the agreed order.** Reach for an actor when you have a stateful entity that many parties talk to (a counter, a connection, a supervised worker). Reach for a session channel when two parties run a fixed protocol and you want the compiler to prove they follow it: a login handshake, a request/reply exchange, a negotiation with branches.
 
-**The two do not layer as freely as they might first appear.** An actor's mailbox is backed by the scheduler — `receive()` genuinely suspends the actor's green thread until a message arrives, so two actors can `send`/`receive` in whatever order and the scheduler sorts it out. A session channel has no such backing: `Chan.recv` never suspends (see the Runtime note above), so a session conducted between two actor handlers still needs its `send`s and `recv`s to land in the right order relative to each other — the channel does not gain scheduler-backed blocking just because its endpoints happen to live inside actors. An actor handler *can* open a session channel to conduct a typed sub-conversation with another actor, but only if the two handlers' message-driven control flow already guarantees each `send` happens before its matching `recv` is attempted.
+**The two do not layer as freely as they might first appear.** An actor's mailbox is backed by the scheduler: `receive()` truly suspends the actor's green thread until a message arrives, so two actors can `send`/`receive` in whatever order and the scheduler sorts it out. A session channel has no such backing: `Chan.recv` never suspends (see the Runtime note above), so a session conducted between two actor handlers still needs its `send`s and `recv`s to land in the right order relative to each other; the channel does not gain scheduler-backed blocking just because its endpoints happen to live inside actors. An actor handler *can* open a session channel to conduct a typed sub-conversation with another actor, but only if the two handlers' message-driven control flow already guarantees each `send` happens before its matching `recv` is attempted.
 
 ### Worked example: handing an endpoint to an actor
 
 An endpoint is an ordinary (linear) value, so it can ride inside an actor message. This
 is the safe composition pattern, verified on both backends: the requester advances its
-side of the session *before* handing the peer endpoint over, so mailbox causality —
-messages are processed after they are sent — guarantees the responder's `recv` finds its
+side of the session *before* handing the peer endpoint over, so mailbox causality (
+messages are processed after they are sent) guarantees the responder's `recv` finds its
 value waiting:
 
 ```march
@@ -259,23 +259,23 @@ Two disciplines make this correct, and both generalize:
    happen *before* the actor message that delivers the endpoint. The mailbox's
    sent-before-processed ordering then does the work a channel scheduler would.
 2. **Synchronize before the reply direction.** The requester must not `Chan.recv` the
-   response until the responder has demonstrably run — here `run_until_idle()` provides
+   response until the responder has demonstrably run; here `run_until_idle()` provides
    that; in a live system, an `Actor.call` round-trip to the responder (or a completion
    message back) is the equivalent causal fence.
 
-Linearity survives the handoff: after `send(pid, Serve(bob))`, the endpoint is consumed —
+Linearity persists across the handoff: after `send(pid, Serve(bob))`, the endpoint is consumed;
 any further use of `bob` in the sender is rejected at compile time (`The linear value
-`bob` is used more than once`), so the protocol's exactly-once discipline holds even
+`bob` is used more than once`), so the protocol's exactly-once discipline is maintained even
 though the conversation now spans two actors. What the compiler does *not* check is the
 causal ordering itself: skip discipline 1 or 2 and the program still typechecks, then
-dies at runtime with `Chan.recv: … no pending value` — that footgun is the scope
-boundary described above, restated concretely.
+dies at runtime with `Chan.recv: … no pending value`; that footgun is the scope
+boundary described above, repeated in concrete terms.
 
 
 ---
 
 ## See also
 
-- [Actors]({{ site.baseurl }}/docs/actors/) — mailboxes, `spawn`/`send`, and the scheduler these channels run on.
-- [Linear Types]({{ site.baseurl }}/docs/linear-types/) — the linearity discipline that makes "use exactly once, then close" checkable.
-- [Choosing a concurrency primitive]({{ site.baseurl }}/docs/actors/#choosing-a-concurrency-primitive) — where session channels fit among the other concurrency tools.
+- [Actors]({{ site.baseurl }}/docs/actors/): mailboxes, `spawn`/`send`, and the scheduler these channels run on.
+- [Linear Types]({{ site.baseurl }}/docs/linear-types/): the linearity discipline that makes "use exactly once, then close" checkable.
+- [Choosing a concurrency primitive]({{ site.baseurl }}/docs/actors/#choosing-a-concurrency-primitive): where session channels fit among the other concurrency tools.

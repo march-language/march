@@ -10,7 +10,7 @@ scrollmd: true
 
 This guide walks you from zero to a working March program. See [Installation](installation.md) first if you haven't installed March yet.
 
-> **How to run March.** Use `march file.march` to run a single file, and `forge run` inside a `forge` project. If you built March from source instead of installing a binary, prefix the compiler invocations with `dune exec` — e.g. `dune exec march -- hello.march`, `dune exec forge -- run` — everywhere this guide writes `march …` or `forge …`.
+> **How to run March.** Use `march file.march` to run a single file, and `forge run` inside a `forge` project. If you built March from source instead of installing a binary, prefix the compiler invocations with `dune exec` (e.g. `dune exec march -- hello.march`, `dune exec forge -- run`) everywhere this guide writes `march …` or `forge …`.
 
 ---
 
@@ -148,7 +148,7 @@ march(6)> v + 1
 ```
 
 Run `:set +t` to also print each result's inferred type (`:set -t` to turn it
-back off) — see the [REPL guide](repl.md) for the full command list.
+back off); see the [REPL guide](repl.md) for the full command list.
 
 ---
 
@@ -245,18 +245,18 @@ Both are valid. The compiler will catch type errors either way.
 
 Learn the language:
 
-- [Language Tour](tour.md) — a comprehensive walkthrough of all syntax
-- [Type System](types.md) — algebraic data types, generics, Option/Result
-- [Pattern Matching](pattern-matching.md) — destructuring and exhaustiveness checking
-- [Actors](actors.md) — concurrent programming with the actor model, and the jumping-off point for supervision, clustering, and hot code reload
+- [Language Tour](tour.md): a comprehensive walkthrough of all syntax
+- [Type System](types.md): algebraic data types, generics, Option/Result
+- [Pattern Matching](pattern-matching.md): destructuring and exhaustiveness checking
+- [Actors](actors.md): concurrent programming with the actor model, and the jumping-off point for supervision, clustering, and hot code reload
 
 Curious about March's compile-time safety guarantees? These go beyond a standard ML-family type system:
 
-- [Interfaces](interfaces.md) — ad-hoc polymorphism with `interface`/`impl`
-- [Linear Types](linear-types.md) — resources the compiler proves are used exactly once, at zero runtime cost
-- [Refinement Types](refinement-types.md) — value predicates (`{Int | _ >= 0}`) checked by an SMT solver
-- [Capabilities](capabilities.md) — IO permissions tracked in the type system
-- [Safety by Construction](safety-by-construction.md) — how these layers compose on one function
-- [Memory Model](memory-model.md) — why March has no garbage collector or pauses
+- [Interfaces](interfaces.md): ad-hoc polymorphism with `interface`/`impl`
+- [Linear Types](linear-types.md): resources the compiler proves are used exactly once, at zero runtime cost
+- [Refinement Types](refinement-types.md): value predicates (`{Int | _ >= 0}`) checked by an SMT solver
+- [Capabilities](capabilities.md): IO permissions tracked in the type system
+- [Safety by Construction](safety-by-construction.md): how these layers compose on one function
+- [Memory Model](memory-model.md): why March has no garbage collector or pauses
 
 Coming from another language? [Python](coming-from-python.md) · [TypeScript](coming-from-typescript.md) · [Haskell/Elixir/OCaml](coming-from-fp.md).

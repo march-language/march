@@ -29,7 +29,7 @@ forge search "map"
 
 ---
 
-## forge — Build Tool
+## forge: Build Tool
 
 `forge` is the official project manager for March.
 
@@ -140,7 +140,7 @@ In HTML, import the output as an ES module:
 <script type="module" src="dist/app.mjs"></script>
 ```
 
-The `Js.Dom` module is JS-only — calling DOM functions in a native build is a compile-time error at the capability level, but a runtime panic if you bypass the type system with FFI.
+The `Js.Dom` module is JS-only: calling DOM functions in a native build is a compile-time error at the capability level, but a runtime panic if you bypass the type system with FFI.
 
 #### forge build and watch with --target js
 
@@ -154,7 +154,7 @@ forge watch run --target js      # rebuild + re-run with node on change
 
 #### JS FFI: calling npm packages
 
-Import any npm package via an `extern` block. Use the bare npm package name (no `npm:` prefix — Node.js resolves those directly):
+Import any npm package via an `extern` block. Use the bare npm package name (no `npm:` prefix; Node.js resolves those directly):
 
 ```march
 mod App do
@@ -173,11 +173,11 @@ lodash = "^4.17.21"
 react  = "^18.3.0"
 ```
 
-The generated `package.json` sets `"type": "module"` so your `.mjs` output loads cleanly. For Deno or Bun, use their native specifiers (`npm:lodash`, `jsr:@std/path`) directly in the `extern` lib name — no `[js_deps]` needed since those runtimes fetch packages on demand.
+The generated `package.json` sets `"type": "module"` so your `.mjs` output loads cleanly. For Deno or Bun, use their native specifiers (`npm:lodash`, `jsr:@std/path`) directly in the `extern` lib name; no `[js_deps]` needed since those runtimes fetch packages on demand.
 
 ### Cross-compiling to Linux
 
-March can build a **Linux** binary from any host — including macOS — the way Go's
+March can build a **Linux** binary from any host (including macOS) the way Go's
 `GOOS=linux go build` does. Pass a `linux/*` target and you get a native Linux
 ELF without a Linux box, VM, or Docker build step:
 
@@ -192,9 +192,9 @@ forge build --target linux/arm64
 Accepted aliases: `linux/amd64` (= `linux/x86_64`) and `linux/arm64`
 (= `linux/aarch64`).
 
-**Prerequisite — `zig`.** Cross-compilation uses [`zig cc`](https://ziglang.org)
+**Prerequisite: `zig`.** Cross-compilation uses [`zig cc`](https://ziglang.org)
 as the C cross-compiler (it bundles a clang plus the Linux sysroots, so there's
-nothing else to install). Put `zig` on your `PATH`:
+no further install step). Put `zig` on your `PATH`:
 
 ```sh
 brew install zig          # macOS
@@ -213,7 +213,7 @@ clobber your host binary:
 .march/build/linux-arm64/release/<name>
 ```
 
-**What you get.** A **dynamically-linked glibc** binary (minimum glibc 2.31 —
+**What you get.** A **dynamically-linked glibc** binary (minimum glibc 2.31,
 Ubuntu 20.04 / Debian 11 and newer). It runs on mainstream distributions and in
 glibc-based containers (`debian:*-slim`, `ubuntu:*`, distroless-cc), e.g.:
 
@@ -232,21 +232,21 @@ docker run --rm --platform linux/amd64 -v "$PWD/app":/app:ro debian:bookworm-sli
 **Scope (current).** Cross-compilation currently targets **compute and CLI
 workloads**. Not yet included in a cross build:
 
-- **TLS/HTTPS** and **compression** (zstd/brotli/zlib) — these runtime modules are
+- **TLS/HTTPS** and **compression** (zstd/brotli/zlib): these runtime modules are
   omitted from cross builds for now.
-- **Hot code reload** — the reload `.so` path is host-only today; deploy a
+- **Hot code reload**: the reload `.so` path is host-only today; deploy a
   pre-built artifact instead (see [Hot Code Reload](hot-code-reload.md)).
-- **Rust FFI** (`[ffi.rust]`) — `forge build --target linux/…` fails with a clear
+- **Rust FFI** (`[ffi.rust]`): `forge build --target linux/…` fails with a clear
   message rather than mislinking a host-architecture static library.
 - **Concurrency/actor programs** are not yet validated on cross targets.
 
 Correctness is guarded by a differential test that cross-compiles a corpus and
-checks each program's output against the native build byte-for-byte, so a
+checks each program's output against the native build to the exact byte, so a
 codegen regression on a cross target is caught in CI.
 
 ### Checking Types
 
-`forge check` typechecks every `.march` file in the project without producing a binary. It's fast — use it for pre-commit checks or continuous editor feedback:
+`forge check` typechecks every `.march` file in the project without producing a binary. It's fast; use it for pre-commit checks or continuous editor feedback:
 
 ```sh
 forge check
@@ -256,7 +256,7 @@ This catches type errors in every file under `lib/` (including orphaned modules 
 
 ### Auto-fixing Diagnostics
 
-`forge fix` reads compiler warnings and applies mechanically-determined fixes automatically — no human judgment needed, no ambiguity. It's the equivalent of `cargo fix` or `eslint --fix`.
+`forge fix` reads compiler warnings and applies mechanically-determined fixes automatically: no human judgment needed, no ambiguity. It's the equivalent of `cargo fix` or `eslint --fix`.
 
 ```sh
 forge fix              # apply all auto-fixable warnings in the project
@@ -272,7 +272,7 @@ forge fix --dry-run    # show what would change without writing any files
 | Unused function parameter | Prefixes the parameter name with `_` |
 | Redundant (unreachable) match arm | Deletes the entire arm (pattern + body) |
 
-`forge fix` refuses to apply any fixes if the project has errors — fix those first. It only touches files inside your project root, applies edits bottom-up so earlier line offsets stay valid, and deduplicates identical fixes before writing.
+`forge fix` will not apply any fixes if the project has errors; fix those first. It only touches files inside your project root, applies edits bottom-up so earlier line offsets stay valid, and deduplicates identical fixes before writing.
 
 ### Testing
 
@@ -323,7 +323,7 @@ missing_doc          = "off"
 
 ### Watch Mode
 
-`forge watch` reruns a command whenever a source file changes. It never exits on failure — it reports and keeps watching. Press Ctrl-C to stop.
+`forge watch` reruns a command whenever a source file changes. It never exits on failure; it reports and keeps watching. Press Ctrl-C to stop.
 
 ```sh
 forge watch                     # rebuild on change (default)
@@ -363,7 +363,7 @@ forge i
 
 ---
 
-## forge search — Hoogle-style Search
+## forge search: Hoogle-style Search
 
 `forge search` lets you find functions by name, type signature, or documentation keyword.
 
@@ -417,13 +417,13 @@ The search index is cached at `.march/search-index.json` and rebuilt when source
 
 ---
 
-## AI assistant search — spec-search Claude Skill
+## AI assistant search: spec-search Claude Skill
 
-`forge search` (above) finds *code* — functions, types, signatures. `spec-search`
+`forge search` (above) finds *code*: functions, types, signatures. `spec-search`
 is its counterpart for *documentation*: a Claude Code skill that full-text
 searches March's language reference (`specs/lang/`), internals reference
-(`specs/impl/`), and feature design docs (`specs/features/`) — roughly 44
-files, 20-25k lines — via a bundled SQLite [FTS5](https://sqlite.org/fts5.html)
+(`specs/impl/`), and feature design docs (`specs/features/`), roughly 44
+files, 20-25k lines, via a bundled SQLite [FTS5](https://sqlite.org/fts5.html)
 index.
 
 It's fully self-contained: the markdown docs and the prebuilt index ship
@@ -442,13 +442,13 @@ cp -R march/.claude/skills/spec-search ~/.claude/skills/spec-search
 ```
 
 (Vendoring a copy into a specific project's own `.claude/skills/` instead
-also works, if you want that project pinned to a particular spec snapshot —
+also works, if you want that project pinned to a particular spec snapshot;
 the directory is self-contained either way.)
 
 ### Using it
 
 Claude invokes the skill automatically for March language/design questions
-that go beyond syntax basics — actor supervision semantics, refinement
+that go beyond syntax basics: actor supervision semantics, refinement
 types, session types, capabilities, module resolution, etc. You can also
 run the query script directly:
 
@@ -458,8 +458,8 @@ run the query script directly:
 ```
 
 Output is ranked by relevance (SQLite's `bm25()`), one hit per matched
-markdown section — file, heading path, line range, and a highlighted
-snippet — so answers are grounded in a precise slice of the docs rather
+markdown section (file, heading path, line range, and a highlighted
+snippet), so answers are grounded in a precise slice of the docs rather
 than a whole 1000-line chapter.
 
 ### Rebuilding the index
@@ -473,9 +473,9 @@ repo after `specs/lang/`, `specs/impl/`, or `specs/features/` change:
 
 This vendors the current docs and rebuilds `.claude/skills/spec-search/spec-search.db`
 in place. Review the diff, commit it, then re-copy the directory to
-`~/.claude/skills/spec-search/` to pick up the change. The index carries a
-`meta` table stamping the source commit and build date — check it if search
-results ever look out of date:
+`~/.claude/skills/spec-search/` to pick up the change. The index includes a
+`meta` table stamping the source commit and build date; check it if search
+results look out of date:
 
 ```bash
 sqlite3 ~/.claude/skills/spec-search/spec-search.db "SELECT * FROM meta;"
@@ -483,10 +483,10 @@ sqlite3 ~/.claude/skills/spec-search/spec-search.db "SELECT * FROM meta;"
 
 ---
 
-## forge refine — Suggest a refinement type
+## forge refine: Suggest a refinement type
 
 `forge refine <fn>` proposes the parameter refinement that discharges the
-refinement obligations a function's body leaves unproven. If `n` is handed to a
+refinement obligations a function's body leaves unproven. If `n` is passed to a
 callee declaring `{Int | _ > 0}`, the contract `n` itself has to carry is the
 thing the tool works out for you:
 
@@ -497,9 +497,9 @@ forge refine --all           # sweep every function in the project
 forge refine --all --apply --fixpoint   # …and keep going until nothing changes
 ```
 
-A contract only becomes visible to a *caller* once the callee carries it, so one
+A contract only becomes visible to a *caller* once the callee bears it, so one
 `--apply` pass propagates exactly one call hop. `--fixpoint` repeats until a round
-applies nothing (bounded at 10 rounds; hitting the bound is reported as such, not
+applies no change (bounded at 10 rounds; hitting the bound is reported as such, not
 mistaken for convergence).
 
 ```
@@ -514,9 +514,9 @@ candidate is proposed only if the checker discharges obligations under it and
 introduces no new violation. So `march check` after `--apply` agrees with what
 was printed, and there is no second implementation of the prover to drift.
 
-When several candidates work, the **weakest** wins — a divisor contract is
+When several candidates work, the **weakest** wins: a divisor contract is
 reported as `_ != 0` rather than `_ > 0`, so accepting the suggestion does not
-quietly reject callers the function would have accepted.
+invisibly reject callers the function would have accepted.
 
 Silence is never ambiguous. Every function reports one of:
 
@@ -524,22 +524,22 @@ Silence is never ambiguous. Every function reports one of:
 |---|---|
 | a proposal | the listed annotations discharge the listed obligations |
 | `nothing to prove` | the body has no unproven obligation |
-| `no candidate…` | there is debt, but nothing in the grammar shifts it |
+| `no candidate…` | there is debt, but no candidate in the grammar shifts it |
 | partial | some obligations discharged; the rest are counted |
-| `search stopped at the probe budget…` | the search was **truncated**, not exhausted — raise `--budget` and ask again |
+| `search stopped at the probe budget…` | the search was **truncated**, not exhausted; raise `--budget` and ask again |
 
 **A contract that contradicts the function is not proposed.** A `_safe` wrapper that
-matches `Nil -> Err(...)` and does the real work in the other arm carries genuine
-unproven debt, and `{List(a) | len(_) > 0}` would discharge it — by forbidding the
+matches `Nil -> Err(...)` and does the real work in the other arm bears real
+unproven debt, and `{List(a) | len(_) > 0}` would discharge it, by forbidding the
 exact input the function exists to accept. `forge refine` suppresses that: if the
 function handles the excluded case **non-fatally**, no contract is proposed. If it
-handles it by **panicking**, the contract still is — turning that panic into a compile
+handles it by **panicking**, the contract still is; turning that panic into a compile
 error is the whole point.
 
 The candidate grammar covers sign and non-zero contracts on `Int` and `Float`,
 `len(_) > 0` on `List`/`String`, and index contracts (`_ >= 0 && _ < len(xs)`)
 against each list or string parameter in the same signature. A parameter with
-no type annotation, or one that is already refined, is left alone.
+no type annotation, or one that is already refined, is left as-is.
 
 Requires Z3 on `PATH`, like the rest of refinement checking. `--budget N` caps
 how many hypothesis re-checks the inference may spend **per function** (default
@@ -552,7 +552,7 @@ identical edit.
 
 ---
 
-## forge cap — Capability and typestate inspection
+## forge cap: Capability and typestate inspection
 
 `forge cap query` prints a capability and typestate summary across all `.march` files in your project. It parses (but does not typecheck) each file and reports every `needs`, `always_linear type`, `transitions`, and `proof cap` declaration.
 
@@ -583,9 +583,9 @@ Example output for a project with a typestate database handle:
     Db.Migrated
 ```
 
-This gives you a top-level map of what your codebase touches and what resource lifecycles it manages — useful during code review, security audits, or onboarding a new contributor.
+This gives you a top-level map of what your codebase touches and what resource lifecycles it manages, useful during code review, security audits, or onboarding a new contributor.
 
-`forge cap coverage` reports which of the capabilities your project holds are exercised by tests and which are not — a `Covered` / `Uncovered` list and an `N/M capabilities covered (X%)` summary — so a capability that no test ever drives is easy to spot.
+`forge cap coverage` reports which of the capabilities your project possesses are exercised by tests and which are not (a `Covered` / `Uncovered` list and an `N/M capabilities covered (X%)` summary), so a capability that no test exercises is easy to spot.
 
 ### Reading and enforcing a compiled binary
 
@@ -599,7 +599,7 @@ forge cap run ./build/myapp                               # run it under a sandb
 forge cap run --allow-only IO.Console ./untrusted          # run untrusted code with a policy YOU choose
 ```
 
-`forge cap inspect` cross-checks capability markers the compiler emitted, capability-bearing runtime symbols that survived dead-stripping, and an embedded manifest when present; `--deny`/`--allow-only` are **fail-closed** (they fail on a binary whose coverage is not full, and foreign code requires `--allow-foreign`). `forge cap run` is the enforcing counterpart — it launches the binary under an OS sandbox before the program gets control. Both are covered in depth on the [Capability Audit](capability-audit.md) page and under [OS-level enforcement]({{ site.baseurl }}/docs/capability-enforcement/#os-level-enforcement-sandboxing-the-compiled-binary); a binary can also sandbox *itself* at startup when compiled with `march --compile --cap-sandbox`.
+`forge cap inspect` cross-checks capability markers the compiler emitted, capability-bearing runtime symbols that persisted through dead-stripping, and an embedded manifest when present; `--deny`/`--allow-only` are **fail-closed** (they fail on a binary with coverage that is not full, and foreign code requires `--allow-foreign`). `forge cap run` is the enforcing counterpart: it launches the binary under an OS sandbox before the program gets control. Both are covered in depth on the [Capability Audit](capability-audit.md) page and under [OS-level enforcement]({{ site.baseurl }}/docs/capability-enforcement/#os-level-enforcement-sandboxing-the-compiled-binary); a binary can also sandbox *itself* at startup when compiled with `march --compile --cap-sandbox`.
 
 ---
 
@@ -795,7 +795,7 @@ socket     = "/tmp/app.sock"  # Unix socket path on the remote
 public_key = "base64key="     # ed25519 public key
 ```
 
-When actor state changes, provide a `<actor>_migrate_state` function to upgrade live actors. If the actor carries an `@invariant`, the compiler verifies the migration preserves it before anything is uploaded.
+When actor state changes, provide a `<actor>_migrate_state` function to upgrade live actors. If the actor bears an `@invariant`, the compiler verifies the migration preserves it before anything is uploaded.
 
 See [Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/) for the full guide.
 
@@ -842,7 +842,7 @@ When `--old-source` is provided, forge computes the API surface diff and errors 
 
 ## Archive Management
 
-Archives are globally installed forge extensions — tools, task runners, and generators.
+Archives are globally installed forge extensions: tools, task runners, and generators.
 
 ```sh
 # Install from the registry or a git URL
@@ -1096,6 +1096,6 @@ Each `bench/*.march` file is a standalone benchmark program with a `main()` func
 
 ## Next Steps
 
-- [Getting Started](getting-started.md) — set up your first project with forge
-- [REPL](repl.md) — interactive exploration
-- [Standard Library](stdlib.md) — what you can search with `forge search`
+- [Getting Started](getting-started.md): set up your first project with forge
+- [REPL](repl.md): interactive exploration
+- [Standard Library](stdlib.md): what you can search with `forge search`

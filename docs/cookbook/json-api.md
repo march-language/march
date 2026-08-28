@@ -7,10 +7,10 @@ scrollmd: true
 
 # Call a JSON API and parse the response
 
-Make an HTTP request, parse the JSON body, and pull typed fields out of it —
+Make an HTTP request, parse the JSON body, and pull typed fields out of it,
 turning an untyped response into a value your program can trust. Uses
 `HttpClient`, `Http`, and `Json`. (The [HTTP recipe]({{ site.baseurl }}/docs/cookbook/http/)
-covers building requests and servers; this is the missing half: decoding a
+covers building requests and servers; this is the missing part: decoding a
 response.)
 
 ---
@@ -30,7 +30,7 @@ type JsonValue =
   | Object(List((String, JsonValue)))
 ```
 
-You decode by pattern-matching this ADT — there's no reflection, so a malformed
+You decode by pattern-matching this ADT; there's no reflection, so a malformed
 or wrong-typed field is a branch you handle, not a crash.
 
 ---
@@ -111,6 +111,6 @@ This returns `Some(JsonValue.Str("Paris"))`.
 
 ## See also
 
-- [HTTP]({{ site.baseurl }}/docs/cookbook/http/) — building requests, headers, and servers.
-- [Pattern Matching]({{ site.baseurl }}/docs/pattern-matching/) — exhaustiveness when decoding ADTs.
-- [Standard Library → Json]({{ site.baseurl }}/docs/stdlib/) — the full accessor list.
+- [HTTP]({{ site.baseurl }}/docs/cookbook/http/): building requests, headers, and servers.
+- [Pattern Matching]({{ site.baseurl }}/docs/pattern-matching/): exhaustiveness when decoding ADTs.
+- [Standard Library → Json]({{ site.baseurl }}/docs/stdlib/): the full accessor list.

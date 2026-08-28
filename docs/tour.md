@@ -56,7 +56,7 @@ end
 
 ## Variables
 
-`let` binds a name in the current block. No `in` is needed — subsequent expressions in the block see the binding:
+`let` binds a name in the current block. No `in` is needed; subsequent expressions in the block see the binding:
 
 ```march
 fn main() do
@@ -84,7 +84,7 @@ end
 
 ### Result propagation with `let?`
 
-`let? p = e` binds the `Ok` payload of a `Result` and automatically propagates `Err` upward — the function returns the error immediately without touching the rest of the block:
+`let? p = e` binds the `Ok` payload of a `Result` and automatically propagates `Err` upward: the function returns the error immediately without touching the rest of the block:
 
 ```march
 fn parse_and_add(a : String, b : String) : Result(Int, String) do
@@ -112,7 +112,7 @@ end
 Rules:
 - The right-hand side must be `Result(T, E)`.
 - All `let?` bindings in a block must share the same error type `E`.
-- `let?` cannot be the last expression in a block — something must follow it.
+- `let?` cannot be the last expression in a block; something must follow it.
 
 `let?` works anywhere a `let` binding is valid: function bodies, match arms, and lambda bodies.
 
@@ -170,8 +170,8 @@ let html = """
 Useful conversions live on the `String` module: `String.from_int`,
 `String.from_float`, and `to_string` (the generic `Show` renderer for any type).
 
-> The prelude also exposes bare aliases for the common conversions —
-> `int_to_string`, `float_to_string`, `string_to_int`, `string_length` — which are
+> The prelude also exposes bare aliases for the common conversions
+> (`int_to_string`, `float_to_string`, `string_to_int`, `string_length`), which are
 > the same functions as `String.from_int`, `String.from_float`, `String.to_int`,
 > and `String.byte_size`. This guide uses the `String.*` module forms throughout;
 > the bare names are interchangeable if you prefer them.
@@ -273,7 +273,7 @@ fn x ->
   z
 ```
 
-**Note:** `fn _` is a *one-argument* lambda that discards its argument — not zero-arg. Calling `fn _ -> 42` with no arguments is an arity error.
+**Note:** `fn _` is a *one-argument* lambda that discards its argument, not zero-arg. Calling `fn _ -> 42` with no arguments is an arity error.
 
 ---
 
@@ -287,7 +287,7 @@ else
 end
 ```
 
-`else` is mandatory — an `if` without `else` is a parse error ("March `if` expressions always need an `else` branch").
+`else` is mandatory; an `if` without `else` is a parse error ("March `if` expressions always need an `else` branch").
 
 Both branches can contain multiple expressions:
 
@@ -301,9 +301,9 @@ else
 end
 ```
 
-There is no `then` keyword in March — `if c then e1 else e2` is rejected with "I don't recognize `then` here — March uses do/end blocks instead."
+There is no `then` keyword in March; `if c then e1 else e2` is rejected with "I don't recognize `then` here — March uses do/end blocks instead."
 
-> **Prefer [`match`](#match) for anything beyond a single two-way choice.** `if`/`else` is fine for one boolean condition, but pattern matching is March's primary control-flow construct — it branches on multiple cases and destructures data, checked for exhaustiveness by the compiler.
+> **Prefer [`match`](#match) for anything beyond a single two-way choice.** `if`/`else` is fine for one boolean condition, but pattern matching is March's primary control-flow construct: it branches on multiple cases and destructures data, checked for exhaustiveness by the compiler.
 
 ---
 
@@ -355,7 +355,7 @@ end
 
 ## With Expressions
 
-`with` chains `Result`/`Option` bindings — short-circuits on failure:
+`with` chains `Result`/`Option` bindings; it short-circuits on failure:
 
 ```march
 with Ok(user) <- fetch_user(id),
@@ -570,19 +570,19 @@ forge test
 
 Go deeper:
 
-- [Type System](types.md) — algebraic data types and generics in depth
-- [Pattern Matching](pattern-matching.md) — exhaustiveness, guards, nested patterns
-- [Modules](modules.md) — organizing code across files
-- [Actors](actors.md) — concurrent programming, and the jumping-off point for supervision, clustering, and hot code reload
+- [Type System](types.md): algebraic data types and generics in depth
+- [Pattern Matching](pattern-matching.md): exhaustiveness, guards, nested patterns
+- [Modules](modules.md): organizing code across files
+- [Actors](actors.md): concurrent programming, and the jumping-off point for supervision, clustering, and hot code reload
 
 March's compile-time safety goes further than a standard ML-family type system:
 
-- [Interfaces](interfaces.md) — ad-hoc polymorphism with `interface`/`impl`
-- [Linear Types](linear-types.md) — resources the compiler proves are used exactly once, at zero runtime cost
-- [Refinement Types](refinement-types.md) — value predicates (`{Int | _ >= 0}`) checked by an SMT solver
-- [Capabilities](capabilities.md) — IO permissions tracked in the type system
-- [Safety by Construction](safety-by-construction.md) — how these layers compose on one function
-- [Memory Model](memory-model.md) — why March has no garbage collector or pauses
-- [Sigils & Templating](sigils.md) — `~H` HTML templates and the general `~Name"..."` mechanism
+- [Interfaces](interfaces.md): ad-hoc polymorphism with `interface`/`impl`
+- [Linear Types](linear-types.md): resources the compiler proves are used exactly once, at zero runtime cost
+- [Refinement Types](refinement-types.md): value predicates (`{Int | _ >= 0}`) checked by an SMT solver
+- [Capabilities](capabilities.md): IO permissions tracked in the type system
+- [Safety by Construction](safety-by-construction.md): how these layers compose on one function
+- [Memory Model](memory-model.md): why March has no garbage collector or pauses
+- [Sigils & Templating](sigils.md): `~H` HTML templates and the general `~Name"..."` mechanism
 
 Coming from another language? [Python](coming-from-python.md) · [TypeScript](coming-from-typescript.md) · [Haskell/Elixir/OCaml](coming-from-fp.md).

@@ -71,7 +71,7 @@ end
 
 ### list_lib.march
 
-A custom integer list type built with recursive ADTs. Implements `length`, `sum`, `product`, `max`, `reverse`, `append`, and `range` from scratch — a clean exercise in pattern matching and recursion.
+A custom integer list type built with recursive ADTs. Implements `length`, `sum`, `product`, `max`, `reverse`, `append`, and `range` from scratch, a clean exercise in pattern matching and recursion.
 
 ```march
 type IntList = INil | ICons(Int, IntList)
@@ -151,7 +151,7 @@ end
 
 ### tasks_fork_join.march
 
-Recursive divide-and-conquer parallelism. Forks at a midpoint, spawns tasks for each half, and joins results. Demonstrates the canonical pattern for tree-structured parallel work.
+Recursive divide-and-conquer parallelism. Forks at a midpoint, spawns tasks for each portion, and joins results. Demonstrates the canonical pattern for tree-structured parallel work.
 
 ```march
 fn par_sum(lo : Int, hi : Int, threshold : Int) : Int do
@@ -211,7 +211,7 @@ Actor monitoring and `Down` messages. Shows how to watch for actor death, handle
 
 ### supervision_linear_drop.march
 
-Resource cleanup with user-defined `Drop` implementations. Resources registered via `own()` are released in reverse acquisition order when their actor crashes — the RAII pattern for actors.
+Resource cleanup with user-defined `Drop` implementations. Resources registered via `own()` are released in reverse acquisition order when their actor crashes: the RAII pattern for actors.
 
 ```march
 interface Drop(a) do
@@ -293,7 +293,7 @@ Integration test pattern: spawn a server subprocess, make real HTTP requests (`G
 
 ### counter_server.march
 
-An actor-backed HTTP API. A `Counter` actor holds state; HTTP routes `GET /count`, `POST /increment`, `POST /decrement` message it directly. Shows the standard actor+HTTP integration pattern.
+An actor-backed HTTP API. A `Counter` actor keeps state; HTTP routes `GET /count`, `POST /increment`, `POST /decrement` message it directly. Shows the standard actor+HTTP integration pattern.
 
 ---
 
@@ -449,6 +449,6 @@ Seven debugging workflows in one file: `dbg(expr)` logging, conditional breakpoi
 
 ## Next Steps
 
-- [Language Tour](tour.md) — the syntax and concepts behind these examples
-- [Build a CLI Tool](build-a-cli.md) — a start-to-finish tutorial: scaffold, args, files, test, build
-- [Cookbook](cookbook/) — goal-oriented recipes for CLI, HTTP, JSON, files, and config
+- [Language Tour](tour.md): the syntax and concepts behind these examples
+- [Build a CLI Tool](build-a-cli.md): a start-to-finish tutorial, scaffold, args, files, test, build
+- [Cookbook](cookbook/): goal-oriented recipes for CLI, HTTP, JSON, files, and config

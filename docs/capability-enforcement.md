@@ -9,13 +9,13 @@ permalink: /docs/capability-enforcement/
 
 A module's declared capability set is checked and then *erased* at compile time
 (see [Capabilities]({{ site.baseurl }}/docs/capabilities/), where capabilities
-themselves are defined). That verifies your March code. It says nothing about
+themselves are defined). That verifies your March code. It states no fact about
 what the process may do once it is running, or what a node accepts when you
 hot-patch it in production. This page covers the two mechanisms that turn a
 *declared* capability set into an *enforced* one: an OS-level sandbox that
 confines the compiled binary at startup, and a deploy-time admission gate that
 governs hot-patched functions. Both turn what you declare into a boundary that
-the runtime, or the deploying node, actually holds you to.
+the runtime, or the deploying node, actually makes binding on you.
 
 A related but different question: has a dependency's declared capability set
 changed since you last checked? [`forge audit`]({{ site.baseurl }}/docs/capability-audit/)
@@ -32,8 +32,8 @@ FFI is the part of this the compiler can never see: an `extern` C call, a
 no matter how good the checker gets. That's the [`IO.Foreign`]({{ site.baseurl }}/docs/capabilities/#ioforeign--calling-unverified-c)
 boundary, and the gap [`forge audit`]({{ site.baseurl }}/docs/capability-audit/#what-this-does-and-does-not-prove)
 is explicit about not closing. But `--cap-sandbox` isn't only about FFI. It's
-also a backstop for ordinary March code: a capability-inference bug, or a
-dependency that's quietly wrong about what it touches, gets caught the same
+also a safety net for ordinary March code: a capability-inference bug, or a
+dependency that's wrong, with no visible sign, about what it touches, gets caught the same
 way an opaque C call does. March can close both cases at the OS level,
 turning the declared capability set into an actual confinement.
 
@@ -41,7 +41,7 @@ turning the declared capability set into an actual confinement.
 
 | Option | What you do | What you get | Caveat |
 |---|---|---|---|
-| Nothing (the type system alone) | Just write March; `needs`/`Cap(X)` are required to reach any IO builtin | Compile-time proof of what the *code* can reach, for anything flowing through a signature or a direct body call | Proves nothing about the running binary. `extern`/FFI C code is invisible past `IO.Foreign`. A call routed through a stdlib wrapper (`File.read` rather than `file_read`) slips past `--check` too, though `march --compile`'s capability ceiling still catches it. |
+| No extra step (only the type system) | Just write March; `needs`/`Cap(X)` are required to reach any IO builtin | Compile-time proof of what the *code* can reach, for anything flowing through a signature or a direct body call | Proves no property of the running binary. `extern`/FFI C code is invisible past `IO.Foreign`. A call routed through a stdlib wrapper (`File.read` rather than `file_read`) slips past `--check` too, though `march --compile`'s capability upper limit still catches it. |
 | [`forge cap inspect`]({{ site.baseurl }}/docs/capability-audit/#auditing-a-compiled-binary) | Run it against a compiled binary | An audit of what capabilities the binary appears to need | Read-only. Reports, doesn't confine. |
 | `--cap-sandbox` (below) | Add the flag at compile time | The binary sandboxes *itself* at startup, from its own declared/used capabilities | Self-imposed and opt-in: a binary built without it is simply unconfined. Protects against your own bugs and compromised dependencies, not a hostile publisher. |
 | `forge cap run ./binary` (below) | Run through forge instead of directly | Forge installs the sandbox from *outside* the process, before it starts | Policy still derives from the binary's own claimed capabilities. An under-reporting binary gets an under-scoped policy. |
@@ -60,7 +60,7 @@ $ forge cap run ./build/myapp                        # policy from the binary's 
 $ forge cap run --allow-only IO.Console ./untrusted   # policy YOU choose
 ```
 
-For a binary you do **not** trust, pass `--allow-only`. Deriving the policy from the binary's own claim only tells you what it admits to, which is worthless against code trying to hide. Where a capability cannot be enforced by the platform's available primitive, `forge cap run` reports it as **advisory** per capability rather than pretending to enforce it. This is the stronger of the two mechanisms, because the launcher chooses the policy, not the code being confined.
+For a binary you do **not** trust, pass `--allow-only`. Deriving the policy from the binary's own claim only tells you what it concedes, which is worthless against code trying to hide. Where a capability cannot be enforced by the platform's available primitive, `forge cap run` reports it as **advisory** per capability rather than pretending to enforce it. This is the stronger of the two mechanisms, because the launcher chooses the policy, not the code being confined.
 
 ### `--cap-sandbox`, self-imposed (defense in depth)
 
@@ -73,15 +73,15 @@ $ march --compile --cap-sandbox -o build/myapp app.march
 - **macOS**: a Seatbelt (SBPL) profile via `sandbox_init()`. Deny-default, then each declared capability opens a specific hole: `IO.FileWrite` allows writes (narrowed to the path scopes you declared, otherwise blanket), `IO.Network` allows the `network*` operation class, `IO.Process` allows `process-fork`. `IO.FileRead` is **advisory** here: dyld must map system libraries before any user code exists, so the baseline allows reads unconditionally, and a scoped read rule would be decorative.
 - **Linux**: an unprivileged in-process **seccomp-bpf** filter (`PR_SET_NO_NEW_PRIVS` + `PR_SET_SECCOMP`). One syscall class is denied per *withheld* capability: no `IO.Network` blocks `socket`/`socketpair`, no `IO.Process` blocks `execve`/`execveat`, no `IO.FileWrite` blocks the write path. Denied calls return `EPERM`. `IO.FileRead` is not enforced here either, because seccomp filters syscall *numbers*, not paths; path-scoped reads come from `forge cap run`'s mount namespace instead.
 
-Installation **fails closed**: if the sandbox cannot be installed, the program refuses to run rather than continue unconfined.
+Installation **fails closed**: if the sandbox cannot be installed, the program will not run rather than continue unconfined.
 
-`--cap-sandbox` is **opt-in defense-in-depth**, not a guarantee against a hostile *publisher*. Whoever builds the binary chooses whether to compile it in, so a malicious author simply omits it. Its purpose is a binary *you* built and trust, deployed somewhere `forge` is not the launcher: under systemd, a supervisor, a container entrypoint. That's the exact case `forge cap run` cannot reach. When you control the launcher, prefer `forge cap run`.
+`--cap-sandbox` is **opt-in defense-in-depth**, not a guarantee against a hostile *publisher*. The party building the binary chooses whether to compile it in, so a malicious author simply omits it. Its purpose is a binary *you* built and trust, deployed somewhere `forge` is not the launcher: under systemd, a supervisor, a container entrypoint. That's the exact case `forge cap run` cannot reach. When you control the launcher, prefer `forge cap run`.
 
-Because both mechanisms confine the **whole process**, they bound even the code the compiler cannot see: `extern` C, `dlopen`, raw syscalls. They are the enforcement counterpart to [`forge cap inspect`]({{ site.baseurl }}/docs/capability-audit/#auditing-a-compiled-binary). `inspect` *reads* what a binary holds; these *enforce* what it may do.
+Because both mechanisms confine the **whole process**, they bound even the code the compiler cannot see: `extern` C, `dlopen`, raw syscalls. They are the enforcement complement to [`forge cap inspect`]({{ site.baseurl }}/docs/capability-audit/#auditing-a-compiled-binary). `inspect` *reads* what a binary possesses; these *enforce* what it may do.
 
 **Two platform asymmetries, confirmed against real running binaries rather than assumed from source:**
 
-- On macOS, `IO.Network`'s `network*` grant does not gate `socket()` creation itself. It only gates the actual network operation: `bind()`/`connect()`. A withheld `IO.Network` still lets a program open a socket; it just can't do anything with it. Linux denies `socket`/`socketpair` outright.
+- On macOS, `IO.Network`'s `network*` grant does not gate `socket()` creation itself. It only gates the actual network operation: `bind()`/`connect()`. A withheld `IO.Network` still lets a program open a socket; it just can't do anything with it. Linux denies `socket`/`socketpair` entirely.
 - On macOS, `IO.Process`'s `process-fork` grant gates `fork()` only. `process-exec` is unconditionally allowed in the baseline regardless of capability, so a withheld `IO.Process` still lets a program `execve()` a new one. Linux is the reverse: `execve`/`execveat` are denied, `fork`/`clone` never are (the scheduler needs threads). Tracked as an open question, not settled behavior: [specs/todos/2026-08-12-cap-sandbox-macos-process-exec-not-gated.md](https://github.com/march-language/march/blob/main/specs/todos/2026-08-12-cap-sandbox-macos-process-exec-not-gated.md).
 
 ### OS primitives, capability by capability
@@ -92,7 +92,7 @@ The prose above names the operation classes. This is the full map, including cap
 
 | Capability | macOS (Seatbelt) | Linux (seccomp-bpf) |
 |---|---|---|
-| `IO.Network` | `network*`: gates `bind`/`connect`, **not** `socket()` creation | denies `socket`, `socketpair` outright |
+| `IO.Network` | `network*`: gates `bind`/`connect`, **not** `socket()` creation | denies `socket`, `socketpair` entirely |
 | `IO.Process` | `process-fork`: gates `fork()` only; `process-exec` always allowed | denies `execve`, `execveat`; `fork`/`clone` never gated |
 | `IO.FileWrite` | `file-write*` (blanket, or `subpath`-scoped to a declared `@[scope]`) | denies write-flagged `openat` (`O_WRONLY`/`O_RDWR`/`O_CREAT`/`O_TRUNC`/`O_APPEND`) plus the unambiguous mutators (`unlink*`, `rename*`, `mkdir*`, `rmdir`, `truncate*`, `chmod*`) |
 | `IO.FileRead` | Advisory. Baseline unconditionally allows `file-read*`/`file-read-metadata` (dyld needs it before user code exists) | Advisory. Seccomp filters syscall *numbers*, not path arguments |
@@ -103,10 +103,10 @@ The prose above names the operation classes. This is the full map, including cap
 |---|---|---|
 | `IO.FileWrite` / `IO.FileSystem` | `file-write*` | `--ro-bind / /` (whole tree read-only) unless granted, then full read-write |
 | `IO.Network` / `IO.NetConnect` / `.TLS` / `IO.WebSocket` / `IO.Database` | `network*` | `--unshare-net` (network namespace) |
-| `IO.NetListen` | Folded into `network*`. Enforced, no separate bind/listen split | Advisory. A network namespace isolates rather than refuses: `bind()` still succeeds, it's just unreachable |
+| `IO.NetListen` | Folded into `network*`. Enforced, no separate bind/listen split | Advisory. A network namespace isolates rather than denies: `bind()` still succeeds, it's just unreachable |
 | `IO.Process` | `process-fork` (Enforced overall, but exec of the target itself can't be denied, the same underlying gap as `--cap-sandbox`) | `--unshare-pid` |
-| `IO.FileRead` | Advisory. dyld must read system libraries before user code runs | Enforced. An allow-list mount namespace (`--ro-bind-try` on only the loader's paths and the binary); anything else is *absent*, not merely forbidden |
-| `IO.Clock`, `IO.Spawn`, `IO.Console`, `IO.Random`, `IO.Foreign`(`.Blocking`) | Advisory everywhere, both platforms. Each is indistinguishable from the runtime's own baseline traffic (`clock_gettime`, thread creation, stdout/stderr needed to report violations, `/dev/urandom` read at startup, foreign C code being outside the capability model entirely) | (same) |
+| `IO.FileRead` | Advisory. dyld must read system libraries before user code runs | Enforced. An allow-list mount namespace (`--ro-bind-try` on only the loader's paths and the binary); anything else is *absent*, not just forbidden |
+| `IO.Clock`, `IO.Spawn`, `IO.Console`, `IO.Random`, `IO.Foreign`(`.Blocking`) | Advisory everywhere, both platforms. No way to tell each one from the runtime's own baseline traffic (`clock_gettime`, thread creation, stdout/stderr needed to report violations, `/dev/urandom` read at startup, foreign C code being outside the capability model entirely) | (same) |
 
 ---
 
@@ -123,7 +123,7 @@ A hot deploy activates only the **functions that changed**; each is sent as a se
 The receiving node, for each activated function:
 
 1. **Recomputes the capability set**: normalizes the function's declared caps and hashes them with BLAKE3, reproducing the digest that was signed during the deploy.
-2. **Tamper-checks**: compares its computed digest to the signed value; a mismatch (`ERR cap_tamper`) aborts before dlopen. The tamper check is **unconditional** even when the function declares no capabilities: a genuinely cap-free function has the fixed digest `blake3("")`, so a stripped capability field on a signed message is detected rather than silently admitted.
+2. **Tamper-checks**: compares its computed digest to the signed value; a mismatch (`ERR cap_tamper`) aborts before dlopen. The tamper check is **unconditional** even when the function declares no capabilities: a truly cap-free function has the fixed digest `blake3("")`, so a stripped capability field on a signed message is detected rather than silently admitted.
 3. **Applies the deployment policy**: if `MARCH_DEPLOY_POLICY` is set (a file path), the node verifies that every capability the activated function declares is subsumed by a capability listed in the policy; a capability outside policy (`ERR cap_policy <cap>`) aborts.
 
 ### Configuring the policy
@@ -165,6 +165,6 @@ It does **not** prove that the code actually *uses* only those capabilities, onl
 - [Capability Audit]({{ site.baseurl }}/docs/capability-audit/): `forge audit`
   reads *declared* capabilities from source and flags when a dependency's
   capabilities change; `forge cap inspect` reads what a *compiled binary*
-  actually holds. Both read. The mechanisms here *enforce*.
+  actually possesses. Both read. The mechanisms here *enforce*.
 - [Safety by Construction]({{ site.baseurl }}/docs/safety-by-construction/): how
   capabilities sit alongside the other safety axes.

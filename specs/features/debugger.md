@@ -4,11 +4,11 @@
 **Status:** Complete (interpreter path). Not wired to compiled/LLVM path.
 
 **Implementation:**
-- `lib/debug/debug.ml` (37 lines) — debug context type, `dbg()` handler registration
-- `lib/debug/debug_repl.ml` (47 lines) — debug REPL entry point; builds `debug_handlers` record and invokes debug loop
-- `lib/debug/trace.ml` — execution trace capture, actor history, `goto`/trace navigation, `save_trace`/`load_trace`
-- `lib/debug/replay.ml` — step replay engine (re-evaluate from a snapshot)
-- `lib/eval/eval.ml` — `on_dbg` callback hook in evaluator; `dbg(expr)` builtin
+- `lib/debug/debug.ml` (37 lines): debug context type, `dbg()` handler registration
+- `lib/debug/debug_repl.ml` (47 lines): debug REPL entry point; builds `debug_handlers` record and invokes debug loop
+- `lib/debug/trace.ml`: execution trace capture, actor history, `goto`/trace navigation, `save_trace`/`load_trace`
+- `lib/debug/replay.ml`: step replay engine (re-evaluate from a snapshot)
+- `lib/eval/eval.ml`: `on_dbg` callback hook in evaluator; `dbg(expr)` builtin
 
 ---
 
@@ -79,7 +79,7 @@ The `dbg(expr)` function is registered in `eval.ml`'s `base_env`. When called:
 
 1. Evaluates `expr` to get the current value
 2. Records a trace frame with the current environment snapshot
-3. Calls `on_dbg` (if registered — debug mode must be enabled)
+3. Calls `on_dbg` (if registered; debug mode must be enabled)
 4. Returns the value of `expr` unchanged (passthrough)
 
 Usage:
@@ -111,7 +111,7 @@ The `actor_history` function returns all messages sent to/from a given actor PID
 
 ### Save/Load
 
-Traces are serialized (format TBD — likely S-expression or JSON) for deferred analysis. `tload` restores the trace and enters the debug REPL without running the program.
+Traces are serialized (format TBD, likely S-expression or JSON) for deferred analysis. `tload` restores the trace and enters the debug REPL without running the program.
 
 ---
 
@@ -125,8 +125,8 @@ To enable debug mode in the REPL, pass `--debug` flag or use `:debug on` command
 
 ## 6. Known Limitations
 
-- **Interpreter only** — `dbg()` has no effect in compiled (LLVM) mode; the `on_dbg` callback is never called
-- **No source stepping** — debug navigates by trace step number, not by source line
-- **No watchpoints** — `watch` searches existing trace but doesn't set future breakpoints
-- **Trace size** — unbounded trace can consume large memory for long-running programs
-- **Actor history** — only captures messages, not actor state diffs between messages
+- **Interpreter only**: `dbg()` has no effect in compiled (LLVM) mode; the `on_dbg` callback is never called
+- **No source stepping**: debug navigates by trace step number, not by source line
+- **No watchpoints**: `watch` searches existing trace but doesn't set future breakpoints
+- **Trace size**: unbounded trace can consume large memory for long-running programs
+- **Actor history**: only captures messages, not actor state diffs between messages

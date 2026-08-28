@@ -7,8 +7,8 @@ The March Content-Addressed Store (CAS) is a two-tier caching system that elimin
 ### Architecture
 
 **Two storage layers:**
-- **Project-local:** `<project_root>/.march/cas/` — mutable, project-specific cache
-- **Global (read-through):** `~/.march/cas/` — shared across projects, acts as a persistent read-only cache
+- **Project-local:** `<project_root>/.march/cas/`: mutable, project-specific cache
+- **Global (read-through):** `~/.march/cas/`: shared across projects, acts as a persistent read-only cache
 
 Objects are stored Git-style: first 2 hex chars of hash form a directory prefix, remainder forms the filename. Example: `objects/a3/b4c5d6...` for hash `a3b4c5d6...`.
 
@@ -23,7 +23,7 @@ Objects are stored Git-style: first 2 hex chars of hash form a directory prefix,
 **Key types:**
 - `def_id` (lines 15–18): Human-readable name + 64-char hex impl_hash
 - `def_kind` (lines 20–22): `FnDef of fn_def | TypeDef of type_def`
-- `hashed_def` (lines 24–28): Carries both sig_hash and impl_hash alongside the definition
+- `hashed_def` (lines 24–28): Includes both sig_hash and impl_hash alongside the definition
 - `t` (lines 32–39): Store state with local/global roots, in-memory index, and artifact map
 
 **Public API:**
@@ -42,7 +42,7 @@ Objects are stored Git-style: first 2 hex chars of hash form a directory prefix,
 Computes content-based hashes for function definitions.
 
 **Type:**
-- `hashed_fn` (lines 5–8): Carries `sig_hash` (signature only) and `impl_hash` (full definition)
+- `hashed_fn` (lines 5–8): Includes `sig_hash` (signature only) and `impl_hash` (full definition)
 
 **Public API:**
 - `hash_fn_def fd` (lines 15–21):
@@ -61,7 +61,7 @@ FFI wrapper around libblake3 C stubs.
 
 ### Serialization Module: `lib/cas/serialize.ml` (310 lines)
 
-Canonical deterministic serialization of TIR nodes suitable for hashing. **No spans, source locations, or comments—structural content only.**
+Canonical deterministic serialization of TIR nodes suitable for hashing. **No spans, source locations, or comments; structural content only.**
 
 **Format version:** 1
 
@@ -110,7 +110,7 @@ Orchestrates CAS integration with the compilation pipeline. This is **Phase 6** 
   - **Cache-hit fast path:** Computes `compilation_hash` from impl_hash, target, and flags; looks up artifact
   - **Cache miss:** Calls injected `compile` function and stores result
   - Stores all definitions in the CAS before returning artifact path
-  - **Not called by the driver** — see "Current Wiring Status" below. Its only callers are
+  - **Not called by the driver**; see "Current Wiring Status" below. Its only callers are
     `test/test_cas.ml` and `test/test_stdlib_suite.ml`.
 
 ### SCC Module: `lib/cas/scc.ml` (132 lines)
@@ -146,14 +146,14 @@ An earlier revision of this document claimed compilation was routed through
 `Pipeline.compile_scc`; it never was. What `bin/main.ml` actually does:
 
 1. ✅ CAS store instantiated at compilation startup (`Cas.create ~project_root`)
-2. ✅ `Pipeline.hash_module` computes the hashed SCCs, and `Pipeline.scc_impl_hash` folds
+2. ✅ `Pipeline.hash_module` computes the hashed SCCs, and `Pipeline.scc_impl_hash` combines
    every SCC hash into one module-wide source hash
 3. ✅ That hash plus target and codegen flags goes through `Cas.compilation_hash`, and the
    linked binary is stored/looked up as a single artifact
 
-`Pipeline.compile_scc` — the per-SCC cache-hit fast path — is **not called by the driver**.
+`Pipeline.compile_scc`, the per-SCC cache-hit fast path, is **not called by the driver**.
 It is exercised only by `test/test_cas.ml` and `test/test_stdlib_suite.ml`, and it is
-retained deliberately rather than dead by accident.
+retained intentionally rather than dead by accident.
 
 The blocker is *not* hash granularity. `hash_module` makes `impl_hash` a true Merkle root
 over the call graph and over type layout (commit `3e84c2c0`, "make impl_hash a Merkle root

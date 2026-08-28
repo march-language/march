@@ -5,11 +5,11 @@ nav_order: 5.1
 permalink: /docs/types/
 ---
 
-> Part of the March Language Reference — see [specs/lang/index.md](https://github.com/march-language/march/blob/main/specs/lang/index.md).
+> Part of the March Language Reference; see [specs/lang/index.md](https://github.com/march-language/march/blob/main/specs/lang/index.md).
 > This chapter is the **tutorial-register companion** to
 > [`core-march-types.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md), which has the FORMAL typing
 > rules (the `Γ ⊢ e : τ` judgment, cited arm-for-arm against
-> `lib/typecheck/typecheck.ml`) for the core fragment — literals, `let`,
+> `lib/typecheck/typecheck.ml`) for the core fragment: literals, `let`,
 > lambda/application, `if`, ADT constructors and `match`, tuples/records,
 > atoms, guards, and interface-constraint discharge (`Num`/`Eq`/`Ord`/`Show`).
 > Where this chapter and `core-march-types.md` cover the same ground, this
@@ -108,7 +108,7 @@ let moved = { p with x: 5.0 }
 let dist = p.x +. p.y
 ```
 
-Records and variants can be combined — a variant constructor can carry a record:
+Records and variants can be combined; a variant constructor can carry a record:
 
 ```march
 type Config =
@@ -120,7 +120,7 @@ type Config =
 
 ## Working with Records
 
-Update fields with `{ base with field: value }` — this creates a new record; the original is unchanged:
+Update fields with `{ base with field: value }`: this creates a new record; the original is unchanged:
 
 ```march
 let p2 = { p with x: 5.0 }  -- new Point, y unchanged
@@ -128,14 +128,14 @@ let u2 = { u with age: 31 } -- new User, name/email unchanged
 ```
 
 **Record patterns are not yet supported by the parser** (`{ x, y } -> ...` in
-a `match` is a parse error) — use field access in a guard instead. See
+a `match` is a parse error); use field access in a guard instead. See
 [Pattern Matching](pattern-matching.md#record-patterns) for the workaround.
 
 ---
 
 ## Atoms
 
-An atom is a named constant whose value is its own name. Atoms are written with a leading colon:
+An atom is a named constant with a value that is its own name. Atoms are written with a leading colon:
 
 ```march
 :ok
@@ -145,7 +145,7 @@ An atom is a named constant whose value is its own name. Atoms are written with 
 ```
 
 Atoms are commonly used as tags in supervision strategies, HTTP methods, and
-protocol states — an `Atom`-typed value that carries one of a few expected
+protocol states: an `Atom`-typed value that stores one of a few expected
 names:
 
 ```march
@@ -159,7 +159,7 @@ fn describe(status : Atom) : String do
 end
 ```
 
-All atom literals share the single type `Atom` — `:ok` and `:oke` (a typo)
+All atom literals share the single type `Atom`: `:ok` and `:oke` (a typo)
 both typecheck fine as `Atom`, so a misspelled atom is **not** caught at the
 type level (unlike a misspelled ADT constructor, which is a compile error).
 See `core-march-types.md` §2.2 (P-Atom) for the formal rule: an atom pattern's
@@ -168,13 +168,13 @@ arity.
 
 The grammar also accepts atoms as variant-constructor names in a `type`
 declaration (`type Status = :ok | :error | :pending`, parsed the same as
-`:ok(String)`-style payload variants) — but, verified live 2026-07-22, this
+`:ok(String)`-style payload variants); but, verified live 2026-07-22, this
 does not build a nominal sum type the way an `UPPER_IDENT`-constructor
 `type` does: a binding annotated `: Status` cannot be constructed or matched
 with `:ok`-style syntax (`` expected `Status` but got `Atom` ``), because
 `:ok` in expression/pattern position always denotes the one ambient `Atom`
 type, and match exhaustiveness against such a `type` declaration is not
-enforced — a `match` over an atom value still needs its own `_` catch-all
+enforced: a `match` over an atom value still needs its own `_` catch-all
 regardless of what `type` declarations exist. Prefer plain ADTs
 (capitalized constructors) when you want an actual closed, exhaustively-
 checked sum type; reserve atoms for open-ended tags as shown above.
@@ -225,7 +225,7 @@ type DB   = Map(String, List(Int))
 ```
 
 A type alias expands to its definition, so a value declared as the alias can be
-used where the underlying type is expected — e.g. a `Name` flows into a function
+used where the underlying type is expected, e.g. a `Name` flows into a function
 taking a `String`. The reverse is not always accepted: passing a bare `String`
 where the alias `Name` is expected can be rejected, so don't rely on aliases
 being freely interchangeable in both directions. Use aliases for readability,
@@ -345,11 +345,11 @@ end
 ```
 
 **There is no postfix `?` unwrap operator on arbitrary expressions** (e.g.
-`f()?`) — only the `let?` binding form above exists. A bare `?` in expression
+`f()?`); only the `let?` binding form above exists. A bare `?` in expression
 position is a distinct, unrelated feature (a typed hole for
 incomplete-program tooling), not an unwrap shorthand; see
 [`let-propagation.md`](https://github.com/march-language/march/blob/main/specs/lang/let-propagation.md) §12 for the full list of
-deliberately out-of-scope `let?`-adjacent forms, including postfix `?`.
+intentionally out-of-scope `let?`-adjacent forms, including postfix `?`.
 
 `let?` only works with `Result(a, e)`. For `Option(a)`, use `match` or the
 `with` construct (or convert first with `Option.to_result`).
@@ -428,13 +428,13 @@ Http.Method
 
 ## Dependent Types
 
-A **dependent type** is a type that depends on a *value* — not just on other
+A **dependent type** is a type that depends on a *value*, not just on other
 types. March has two flavours, each with different trade-offs.
 
-### Refinement Types — value predicates
+### Refinement Types: value predicates
 
 A **refinement type** `{T | predicate}` constrains what values a type can hold.
-The predicate is checked by an SMT solver (Z3) at compile time — so a whole
+The predicate is checked by an SMT solver (Z3) at compile time, so a whole
 class of bugs (negative sizes, out-of-bounds indices, division by zero) becomes
 a compile error instead of a runtime panic.
 
@@ -450,7 +450,7 @@ chunks([1,2,3,4,5], 2)   -- ok
 ```
 
 Checking follows **definite-failure semantics**: a diagnostic is emitted only
-when the predicate can *never* hold — never for unknown or possibly-valid
+when the predicate can *never* hold, never for unknown or possibly-valid
 values. This means no false positives, but also no proof obligation: if the
 solver can't decide, it stays silent.
 
@@ -460,7 +460,7 @@ fn f(n : Int) : Int do
 end
 ```
 
-Refinements support **path sensitivity** — a guard you write becomes an
+Refinements support **path sensitivity**: a guard you write becomes an
 assumption the solver can use:
 
 ```march
@@ -473,8 +473,8 @@ fn safe_chunks(xs : List(a), n : Int) : List(List(a)) do
 end
 ```
 
-For predicates over data structures, define a **`@[measure]`** — a total,
-terminating function the solver axiomatises structurally:
+For predicates over data structures, define a **`@[measure]`**: a total,
+terminating function the solver axiomatises by structure:
 
 ```march
 @[measure]
@@ -491,7 +491,7 @@ fn get(t : Tree(a), i : {Int | _ >= 0 && _ < size(t)}) : a do ... end
 See the [Refinement Types guide](refinement-types.md) for the full syntax,
 measure soundness gate, `--no-measure-axioms` flag, and limitations.
 
-### Type-Level Naturals — dimension constraints
+### Type-Level Naturals: dimension constraints
 
 `Nat` in a type parameter threads a *compile-time* natural number through the
 type, making shape mismatches impossible to express:
@@ -511,7 +511,7 @@ Arithmetic on naturals is supported at the type level:
 type Doubled(n, a) = Array(n * 2, a)
 ```
 
-This is resolved entirely during type inference — no Z3 involved. It is
+This is resolved entirely during type inference; no Z3 involved. It is
 appropriate for **structural shape constraints** (array lengths, matrix
 dimensions) where the relationship is fixed at the call site. Refinements are
 appropriate for **value-range constraints** (non-negative, bounded, non-zero)
@@ -546,7 +546,7 @@ mod Token do
 end
 ```
 
-Outside `Token`, callers can use `Token` as a type but cannot construct or pattern-match it directly — only through the module's public API.
+Outside `Token`, callers can use `Token` as a type but cannot construct or pattern-match it directly, only through the module's public API.
 
 For completely hidden types, use `ptype`:
 
@@ -561,16 +561,16 @@ ptype Internal = Foo | Bar(Int)
 
 | Operator | Types | Description |
 |----------|-------|-------------|
-| `+` `-` `*` `/` | any `Num` (`Int` or `Float`) | Arithmetic — polymorphic, works on either |
-| `%` | `Int` | Integer modulo (monomorphic — `Int` only) |
-| `+.` `-.` `*.` `/.` | `Float` | Float arithmetic (monomorphic — `Float` only) |
+| `+` `-` `*` `/` | any `Num` (`Int` or `Float`) | Arithmetic: polymorphic, works on either |
+| `%` | `Int` | Integer modulo (monomorphic, `Int` only) |
+| `+.` `-.` `*.` `/.` | `Float` | Float arithmetic (monomorphic, `Float` only) |
 | `==` `!=` | any `Eq` | Equality / inequality |
 | `<` `>` `<=` `>=` | any `Ord` (`Int`, `Float`, `String`) | Ordering |
 | `&&` `\|\|` `!` | `Bool` | Boolean and / or / not |
 | `++` | `String` | String concatenation |
 | `\|>` | any | Pipe: `x \|> f` is `f(x)` |
 
-**`+` `-` `*` `/` are `Num`-polymorphic — they work on both `Int` and `Float`
+**`+` `-` `*` `/` are `Num`-polymorphic: they work on both `Int` and `Float`
 without a dot suffix.** The dot-suffixed forms (`+.` etc.) are the
 *monomorphic* Float-only versions, useful when you want to pin a type down;
 they reject an `Int` operand rather than converting it. `%` has no dot form
@@ -606,7 +606,7 @@ guarantee:
 | A value stays in a numeric/logical range (`>= 0`, `!= 0`, `< len`) | Refinement `{T \| pred}` | SMT solver (Z3), compile time | Per value |
 | A dimension/length matches across values | Type-level natural `Vector(n, a)` | Type inference, compile time | Per value |
 | A value can only be built through a vetted constructor | Smart-constructor / opaque `ptype` | Type checker (private constructor) | Per value |
-| Validate data whose shape isn't known until runtime | Runtime validator returning `Result` | Your code, run time | Per value |
+| Validate data with a shape that isn't known until runtime | Runtime validator returning `Result` | Your code, run time | Per value |
 | A resource is used the right number of times | `linear` (exactly once) / `affine` (at most once) | Type checker, compile time | Per value |
 | A resource is used in the right order (open → read → close) | Typestate (`always_linear type` + `transitions`) | Type checker, compile time | Per value |
 | Code may only touch resources it was granted | Capability `needs` / `Cap(X)` | Type checker (transitive), compile time | Per module / call |
@@ -616,7 +616,7 @@ guarantee:
 
 **Refinement vs. smart-constructor.** A refinement `{Int | _ > 0}` checks a
 *predicate the solver can read* every time the value flows into a refined
-position — great for arithmetic ranges and bounds. A smart-constructor (`ptype`
+position, great for arithmetic ranges and bounds. A smart-constructor (`ptype`
 with a private constructor) enforces an invariant the solver *can't* express
 (`Email` is well-formed, `Sanitized` has been escaped): the only way to get the
 type is to go through the function that establishes the invariant. Use a
@@ -625,9 +625,9 @@ structural or semantic.
 
 **Refinement vs. runtime validator.** They live at different boundaries:
 **refine internals, validate untrusted input at the edge.** A refinement is a
-*static* contract between functions you control — it disappears at runtime. A
+*static* contract between functions you control; it disappears at runtime. A
 runtime validator returning `Result` is for data crossing a trust boundary (a
-request body, a file, a CLI argument) where you genuinely don't know the value
+request body, a file, a CLI argument) where you truly don't know the value
 until it arrives. Validate once at the edge, then carry the proof inward as a
 smart-constructor or a refined type.
 
@@ -644,22 +644,22 @@ verify against your code).**
 
 | | What March does | Examples |
 |---|---|---|
-| **Inferred** (you write nothing) | Reconstructed from the code | Types of `let` locals; lambda parameter types; generic instantiation at call sites |
+| **Inferred** (you write no annotation) | Reconstructed from the code | Types of `let` locals; lambda parameter types; generic instantiation at call sites |
 | **Optional** (write for docs/clarity) | Inferred, but you may pin it | Function parameter and return signatures |
 | **NOT inferred** (you declare, compiler verifies) | A claim the compiler checks but won't guess | Interface constraints (`when Ord(a)`); refinement predicates (`{Int \| _ >= 0}`); capabilities (`needs IO.FileRead`) |
 
-The asymmetry is deliberate. A *fact* like "this local is an `Int`" the compiler
+The imbalance is intentional. A *fact* like "this local is an `Int`" the compiler
 can simply read off the expression. A *claim* like "this argument is always
-positive" or "this module may read files" is a contract you're asserting — the
-compiler can't invent the contract for you, but once you state it, it holds you
+positive" or "this module may read files" is a contract you're asserting: the
+compiler can't invent the contract for you, but once you state it, it commits you
 (and your callers) to it.
 
 ---
 
 ## What the Type System Buys at Runtime
 
-The static guarantees aren't just for catching bugs — they let the compiler
-*delete* runtime machinery that dynamic languages pay for on every call:
+The static guarantees aren't just for catching bugs: they let the compiler
+*delete* runtime apparatus that dynamic languages pay for on every call:
 
 - **Whole-program monomorphization → no dynamic dispatch.** Generic code is
   specialized to concrete types, so interface calls become direct calls with no
@@ -671,7 +671,7 @@ The static guarantees aren't just for catching bugs — they let the compiler
   after construction, so there's no GC write barrier on the common path. (See
   [memory model](memory-model.md).)
 - **Linear / affine → static free.** Values with statically known lifetimes get a
-  compiler-inserted `free` at last use — no reference-count bookkeeping at all.
+  compiler-inserted `free` at last use, no reference-count bookkeeping at all.
   (See [memory model](memory-model.md).)
 
 ---
@@ -697,7 +697,7 @@ Types
 
 ## Next Steps
 
-- [Pattern Matching](pattern-matching.md) — destructuring all these types
-- [Linear Types](linear-types.md) — ownership and resource safety
-- [Refinement Types](refinement-types.md) — types that carry a predicate (`{Int | _ >= 0}`), checked by an SMT solver
-- [Interfaces](interfaces.md) — ad-hoc polymorphism with `interface`/`impl`
+- [Pattern Matching](pattern-matching.md): destructuring all these types
+- [Linear Types](linear-types.md): ownership and resource safety
+- [Refinement Types](refinement-types.md): types that carry a predicate (`{Int | _ >= 0}`), checked by an SMT solver
+- [Interfaces](interfaces.md): ad-hoc polymorphism with `interface`/`impl`

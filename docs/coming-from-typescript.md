@@ -6,13 +6,13 @@ permalink: /docs/coming-from-typescript/
 
 # Coming from TypeScript
 
-You already think in types. March's type system will feel familiar — the main differences are syntax, how errors are handled, and what replaces classes.
+You already think in types. March's type system will feel familiar; the main differences are syntax, how errors are handled, and what replaces classes.
 
 ---
 
 ## Functions
 
-TypeScript and March functions look similar. The key syntax difference: `do...end` instead of `{}`, no `return` keyword — the last expression is the result.
+TypeScript and March functions look similar. The key syntax difference: `do...end` instead of `{}`, no `return` keyword; the last expression is the result.
 
 ```march
 -- TS:   const add = (x: number, y: number): number => x + y
@@ -68,7 +68,7 @@ type Shape =
   | { kind: "rect"; w: number; h: number }
 ```
 
-March sum types are cleaner — no discriminant field needed:
+March sum types are cleaner: no discriminant field needed:
 
 ```march
 type Shape = Circle(Float) | Rect(Float, Float) | Point
@@ -88,7 +88,7 @@ end
 
 ---
 
-## No `null` / `undefined` — use `Option`
+## No `null` / `undefined`: use `Option`
 
 March has no nullable types. A value that might be absent is `Option(a)`:
 
@@ -111,7 +111,7 @@ Option.unwrap_or(find_user(42), default_user)
 
 ---
 
-## No `try/catch` — use `Result`
+## No `try/catch`: use `Result`
 
 TypeScript exceptions are invisible in types. March errors are explicit:
 
@@ -126,7 +126,7 @@ fn fetch_user(id : Int) : Result(User, String) do
 end
 ```
 
-`let?` chains fallible operations — it short-circuits on `Err` and returns early, like `try/catch` but tracked in the type system:
+`let?` chains fallible operations: it short-circuits on `Err` and returns early, like `try/catch` but tracked in the type system:
 
 ```march
 fn load(id : Int) : Result(Profile, String) do
@@ -140,7 +140,7 @@ This is the same as TypeScript's `async/await` + `try/catch` pattern, but withou
 
 ---
 
-## No classes — modules + record types
+## No classes: modules + record types
 
 TypeScript:
 
@@ -180,7 +180,7 @@ interface Printable { toString(): string; }
 function print<T extends Printable>(x: T) { console.log(x.toString()); }
 ```
 
-March uses nominal interfaces with explicit impl blocks — more like Rust traits than TypeScript interfaces:
+March uses nominal interfaces with explicit impl blocks, more like Rust traits than TypeScript interfaces:
 
 ```march
 interface Show(a) do
@@ -234,7 +234,7 @@ let results = Task.await_many([t1, t2])   -- waits for both
 ```
 
 For mutable, long-lived state (what you'd put in a class instance field), use an
-**actor** — a process that owns its state and receives messages:
+**actor**: a process that owns its state and receives messages:
 
 | TypeScript | March |
 |------------|-------|
@@ -254,5 +254,5 @@ See [Actors](actors.md) and [Parallelism](parallelism.md).
 - Union types → sum types (pattern matching instead of narrowing)
 - Modules / namespacing
 - Type inference everywhere
-- `List.map`, `List.filter`, `List.reduce` — same idea, different name
+- `List.map`, `List.filter`, `List.reduce`: same idea, different name
 - Arrow functions: `fn x -> x + 1` vs `x => x + 1`

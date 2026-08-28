@@ -17,7 +17,7 @@ You know Python: dynamic types, exceptions, `for` loops, classes. March keeps th
 fn add(x, y) do x + y end
 ```
 
-No `return` keyword — the last expression is the result. No colon. No indentation rules — `do...end` delimits the body.
+No `return` keyword: the last expression is the result. No colon. No indentation rules: `do...end` delimits the body.
 
 Type annotations are optional (the compiler infers them) but good for documentation:
 
@@ -25,7 +25,7 @@ Type annotations are optional (the compiler infers them) but good for documentat
 fn add(x : Int, y : Int) : Int do x + y end
 ```
 
-Private functions use `pfn` — enforced by the compiler, not just a `_` naming convention:
+Private functions use `pfn`, enforced by the compiler, not just a `_` naming convention:
 
 ```march
 pfn helper(s : String) : String do String.to_uppercase(s) end
@@ -33,7 +33,7 @@ pfn helper(s : String) : String do String.to_uppercase(s) end
 
 ---
 
-## No `None` — use `Option`
+## No `None`: use `Option`
 
 There's no `None` that silently infects your program. A value that might be absent has type `Option(a)`:
 
@@ -58,7 +58,7 @@ Option.unwrap_or(find_user(42), default_user)
 
 ---
 
-## No exceptions — use `Result`
+## No exceptions: use `Result`
 
 Instead of `try/except`, functions that can fail return `Result(ok, err)`:
 
@@ -68,7 +68,7 @@ fn parse_int(s : String) : Result(Int, String) do
 end
 ```
 
-Chain fallible operations with `let?` — it propagates the error up and returns early, like a `try` block that's in the type:
+Chain fallible operations with `let?`: it propagates the error up and returns early, like a `try` block that's in the type:
 
 ```march
 fn run(input : String) : Result(Int, String) do
@@ -78,11 +78,11 @@ fn run(input : String) : Result(Int, String) do
 end
 ```
 
-If `parse_int` returns `Err("not a valid integer")`, `run` immediately returns that error — `fetch_user` never runs. No exception handler needed.
+If `parse_int` returns `Err("not a valid integer")`, `run` immediately returns that error; `fetch_user` never runs. No exception handler needed.
 
 ---
 
-## No classes — modules + record types
+## No classes: modules + record types
 
 ```python
 # Python
@@ -102,11 +102,11 @@ fn increment(c : Counter) : Counter do { c with count: c.count + 1 } end
 fn get(c : Counter) : Int do c.count end
 ```
 
-`{ c with count: ... }` creates a new record with one field changed — values are immutable by default. For mutable shared state, use `actor` or `Vault`.
+`{ c with count: ... }` creates a new record with one field changed; values are immutable by default. For mutable shared state, use `actor` or `Vault`.
 
 ---
 
-## No `for` loops — higher-order functions
+## No `for` loops: higher-order functions
 
 ```python
 # Python
@@ -121,7 +121,7 @@ let total   = List.fold_left(nums, 0, fn (acc, x) -> acc + x)
 let first   = List.find(nums, fn x -> x > 10)
 ```
 
-`|>` is the pipe operator — it passes the left side as the first argument to the right side.
+`|>` is the pipe operator: it passes the left side as the first argument to the right side.
 
 ---
 
@@ -145,7 +145,7 @@ match shape do
 end
 ```
 
-The compiler checks exhaustiveness — if you add a new constructor to `Shape` later, every `match` that doesn't cover it becomes a compile error.
+The compiler checks exhaustiveness: if you add a new constructor to `Shape` later, every `match` that doesn't cover it becomes a compile error.
 
 `match do` without a subject replaces `if/elif/else` chains:
 
@@ -180,7 +180,7 @@ fn fetch(id : Int) : Result(User, String) do ... end
 ## Concurrency & shared state
 
 Python reaches for a class with mutable `self` state, plus `threading` or
-`asyncio` for concurrency. March has no mutable objects — **state that changes
+`asyncio` for concurrency. March has no mutable objects: **state that changes
 over time lives in an actor**, a process you talk to by message.
 
 ```python
@@ -220,7 +220,7 @@ See [Actors](actors.md) and [Choosing a concurrency primitive](actors.md#choosin
 ## Numeric arrays (NumPy users)
 
 Python's list comprehensions are fine for everyday code, but for large
-numeric workloads you reach for NumPy. March's equivalent is `NativeArray` —
+numeric workloads you reach for NumPy. March's equivalent is `NativeArray`:
 a flat, contiguous array (not `List`'s linked cells or `Array`'s trie) that
 `march --compile` can auto-vectorize into real SIMD instructions:
 
@@ -237,16 +237,16 @@ let doubled = NativeArray.map_float(arr, fn x -> x *. 2.0)
 let total = NativeArray.sum_float(doubled)
 ```
 
-The honest comparison, not an overclaim: on a same-machine benchmark at 5M
+The accurate comparison, not an overclaim: on a same-machine benchmark at 5M
 elements, March **ties or beats** NumPy on `sum` and is **competitive**
 (within 3x, and beating hand-written OCaml/Rust) on `map`; narrowing to
-`NativeArray`'s `f32` element width — half the bytes, double the SIMD lanes
-— closes most of the remaining gap, beating NumPy on `sum` and `map` and
+`NativeArray`'s `f32` element width (50% of the bytes, double the SIMD lanes)
+closes most of the remaining gap, beating NumPy on `sum` and `map` and
 reaching parity on `map2`. See [SIMD Benchmarks](/docs/simd-benchmarks/) for
 the full numbers and methodology, and [SIMD & Native Arrays](/docs/simd/)
 for what does and doesn't vectorize. There's also an explicit `Simd` module
 (128-bit vector types) for when you need guaranteed vector codegen instead
-of an optimizer decision — covered in the same guide.
+of an optimizer decision, covered in the same guide.
 
 ---
 

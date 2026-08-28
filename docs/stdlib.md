@@ -7,13 +7,13 @@ permalink: /docs/stdlib-guide/
 
 # Standard Library Guide
 
-> **Looking for the full API reference?** Every stdlib module, type, and function — with
-> signatures and docstrings, generated from source — lives at **[/docs/stdlib/](/docs/stdlib/)**.
+> **Looking for the full API reference?** Every stdlib module, type, and function, with
+> signatures and docstrings generated from source, lives at **[/docs/stdlib/](/docs/stdlib/)**.
 > This page is a hand-written tour of the most commonly used modules.
 
 March ships with 116 stdlib modules covering collections, strings, I/O, HTTP, cryptography, and more. This page provides an overview and quick reference for the most commonly used modules.
 
-All stdlib modules are available without any import statement — use qualified access (`List.map`, `String.length`, etc.) or `import`/`use` to bring names into scope.
+All stdlib modules are available without any import statement: use qualified access (`List.map`, `String.length`, etc.) or `import`/`use` to bring names into scope.
 
 ---
 
@@ -30,19 +30,19 @@ You know the task; this maps it to the module(s) that do it. (Don't see your tas
 | Parse a JSON response | `Json` | [JSON API](/docs/cookbook/json-api/) |
 | Parse TOML / YAML config | `Toml`, `Yaml` | [Config](/docs/cookbook/config/) |
 | Read environment variables | `Env`, `Config` | [Config](/docs/cookbook/config/) |
-| Run a subprocess | `Process` (`run`, `run_stream`) | — |
-| Hash / encode data | `Crypto`, `Base64` | — |
-| Work with dates / durations | `DateTime`, `Duration` | — |
-| Structured logging | `Logger` | — |
+| Run a subprocess | `Process` (`run`, `run_stream`) | none |
+| Hash / encode data | `Crypto`, `Base64` | none |
+| Work with dates / durations | `DateTime`, `Duration` | none |
+| Structured logging | `Logger` | none |
 | Run work concurrently | `Task`, `actor`, `Flow` | [Concurrency](/docs/cookbook/concurrency/) |
-| Transform a big collection in parallel | `List.pmap` / `pmap_n` | — |
+| Transform a big collection in parallel | `List.pmap` / `pmap_n` | none |
 | Process a large numeric array fast | `NativeArray`, `Simd` | [Numeric Data](/docs/cookbook/numeric-data/) |
 
 ---
 
 ## NativeArray and Simd
 
-For numeric hot loops — summing a column, scaling an array, scanning bytes —
+For numeric hot loops (summing a column, scaling an array, scanning bytes),
 reach for `NativeArray` instead of `List`/`Array`. It's a flat, contiguous
 numeric array (`Int`/`Float`/`f32`/`i32`/`u8` element widths) that
 `march --compile` can auto-vectorize: `NativeArray.sum_float`,
@@ -55,14 +55,14 @@ let doubled = NativeArray.map_float(arr, fn x -> x *. 2.0)
 let total = NativeArray.sum_float(doubled)
 ```
 
-When you need guaranteed vector codegen rather than an optimizer decision —
-cross-lane structure (masks, `select`), a fused multiply-add, or byte-level
-scanning — reach for the `Simd` module instead: five 128-bit vector types
+When you need guaranteed vector codegen rather than an optimizer decision
+(cross-lane structure with masks and `select`, a fused multiply-add, or byte-level
+scanning), reach for the `Simd` module instead: five 128-bit vector types
 (`F32x4`, `F64x2`, `I32x4`, `I64x2`, `U8x16`) with 127 operations between
 them, register-resident in compiled code.
 
 See [SIMD & Native Arrays](/docs/simd/) for the full guide (what vectorizes,
-how to trigger it, the honest performance story) and
+how to trigger it, the unvarnished performance story) and
 [SIMD Benchmarks](/docs/simd-benchmarks/) for the numbers, or jump straight
 to the API references: [`NativeArray`](/docs/stdlib/NativeArray.html),
 [`Simd`](/docs/stdlib/Simd.html).
@@ -100,7 +100,7 @@ const(x)                      -- fn _ -> x
 
 ## List
 
-`list.march` — the standard singly-linked list.
+`list.march`: the standard singly-linked list.
 
 ```march
 -- Construction
@@ -171,17 +171,17 @@ The parallel operations are order-preserving and return exactly what their
 sequential counterparts (`map`/`filter`/`fold_left`) do. Below a configurable
 cutoff they fall back to the sequential version (no task-spawn overhead); above
 it the list is split into chunks, one task per chunk, run on the multithreaded
-scheduler. Real CPU parallelism happens in **compiled** code — the interpreter
+scheduler. Real CPU parallelism happens in **compiled** code; the interpreter
 runs the tasks eagerly on one thread (correct, but sequential).
 
 - The cutoff is `pmap_threshold()` (default **1024**), set at compile time with
   `--pmap-threshold=N` (forge passes it through via `MARCH_PMAP_THRESHOLD`).
-- `pmap_n` caps concurrency explicitly — use it when each element does heavy
+- `pmap_n` caps concurrency explicitly; use it when each element does heavy
   work (few elements, expensive per-element) so the size heuristic doesn't apply.
 - `preduce` is a **tree reduction**: `combine` must be associative
   (`combine(combine(x, y), z) == combine(x, combine(y, z))`) with `identity` as
   its unit. Sum, product, max, min, string concat, set union qualify;
-  subtraction and average do not. The compiler cannot check this — it's the
+  subtraction and average do not. The compiler cannot check this; it's the
   caller's contract.
 
 > **Tip:** the LSP flags a pure `List.map`/`List.filter` as a `pmap`/`pfilter`
@@ -195,7 +195,7 @@ editor-driven detection.
 
 ## String
 
-`string.march` — String operations.
+`string.march`: String operations.
 
 ```march
 string_length("hello")              -- 5  (bare builtin, not under the String module)
@@ -222,13 +222,13 @@ String.reverse("hello")             -- "olleh"
 
 ## Map
 
-`map.march` — HAMT-backed persistent map. O(log n) amortized operations.
+`map.march`: HAMT-backed persistent map. O(log n) amortized operations.
 
 Map operations that need key identity take an explicit comparator:
 `cmp : k -> k -> Bool` where `cmp(a)(b) = true` means `a < b`.
 
 > **No comparator?** If your keys are strings, ints, or any type where structural
-> `==` is the right equality, use [`HashMap`](#hashmap) instead — identical API,
+> `==` is the right equality, use [`HashMap`](#hashmap) instead: identical API,
 > no `cmp` argument anywhere.
 
 ```march
@@ -270,13 +270,13 @@ Map.to_list(m3)   -- [("a", 1), ("b", 2), ("c", 3)]
 
 ## HashMap
 
-`hash_map.march` — HAMT-backed persistent map using structural `==` for key
+`hash_map.march`: HAMT-backed persistent map using structural `==` for key
 equality and the built-in polymorphic `hash` function. No comparator needed at
 any call site. Key iteration order is hash-traversal order (not sorted, not
 insertion order).
 
 Use `Map` when you need sorted output or a custom comparator. Use `HashMap`
-when you don't want to thread a comparator everywhere — especially for
+when you don't want to thread a comparator everywhere, especially for
 string/int keys or for Enum.uniq / Enum.frequencies patterns.
 
 ```march
@@ -325,7 +325,7 @@ HashMap.to_list(m2)  -- [("a", 1), ("b", 2), ("c", 3)] (hash order)
 
 ## Set
 
-`set.march` — HAMT-backed persistent set. The set is always the **first**
+`set.march`: HAMT-backed persistent set. The set is always the **first**
 argument, and operations that need element identity take a trailing comparator
 `cmp : a -> a -> Bool` where `cmp(a)(b) = true` means `a < b` (same convention
 as `Map`).
@@ -355,7 +355,7 @@ Set.fold(s, 0, fn (acc, x) -> acc + x)  -- 15
 
 ## Option
 
-`option.march` — `Option(a) = None | Some(a)`.
+`option.march`: `Option(a) = None | Some(a)`.
 
 ```march
 Option.map(Some(5), fn x -> x + 1)     -- Some(6)
@@ -376,7 +376,7 @@ Option.filter(Some(2), fn x -> x > 3)  -- None
 
 ## Result
 
-`result.march` — `Result(a, e) = Ok(a) | Err(e)`.
+`result.march`: `Result(a, e) = Ok(a) | Err(e)`.
 
 ```march
 Result.map(Ok(5), fn x -> x + 1)      -- Ok(6)
@@ -410,7 +410,7 @@ end
 
 ## IO
 
-`io.march` — Explicit I/O operations.
+`io.march`: Explicit I/O operations.
 
 ```march
 IO.puts("Hello, World!")         -- print with newline
@@ -427,7 +427,7 @@ The `println` and `print` builtins are also always available.
 
 ## Math
 
-`math.march` — Mathematical functions.
+`math.march`: Mathematical functions.
 
 ```march
 int_abs(-5)                  -- 5  (Int abs is a bare builtin, not under Math)
@@ -456,7 +456,7 @@ float_is_nan(float_nan())    -- true  (bare builtins; `0.0 /. 0.0` panics with "
 
 ## Crypto
 
-`crypto.march` — Cryptographic primitives.
+`crypto.march`: Cryptographic primitives.
 
 ```march
 -- Hashing
@@ -486,7 +486,7 @@ Crypto.secure_compare(a, b)         -- Bool
 
 ## UUID
 
-`uuid.march` — UUID generation and parsing.
+`uuid.march`: UUID generation and parsing.
 
 ```march
 UUID.v4()                     -- generate a random UUID (a `UUID` value, not a bare String)
@@ -502,7 +502,7 @@ UUID.to_string(UUID.nil())    -- "00000000-0000-0000-0000-000000000000"
 
 ## JSON
 
-`json.march` — JSON encoding and decoding.
+`json.march`: JSON encoding and decoding.
 
 ```march
 type JsonValue =
@@ -518,7 +518,7 @@ Json.to_string(Object([("x", Number(1.0))]))  -- "{\"x\":1}"
 Json.get(obj, "key")                      -- Option(JsonValue)
 ```
 
-The module is `Json` (not `JSON`), and there is no `encode`/`encode_pretty` —
+The module is `Json` (not `JSON`), and there is no `encode`/`encode_pretty`;
 `to_string` renders a `JsonValue` back to JSON text. `encode_null`/`encode_bool`/
 `encode_number`/`encode_int`/`encode_string`/`encode_array`/`encode_object` are
 constructor helpers for building a `JsonValue` from a primitive, not string
@@ -528,9 +528,9 @@ serializers.
 
 ## HTTP Client
 
-`http_client.march` — Make HTTP requests.
+`http_client.march`: Make HTTP requests.
 
-`Http.get`/`Http.post`/etc are pure — they just parse a URL into a `Request`
+`Http.get`/`Http.post`/etc are pure: they just parse a URL into a `Request`
 (`Result(Request(b), UrlError)`), no network I/O. Actually performing a
 request goes through an `HttpClient` client value:
 
@@ -587,7 +587,7 @@ Path.is_absolute("/usr/bin")       -- true
 
 ## System
 
-`system.march` — OS and runtime information.
+`system.march`: OS and runtime information.
 
 ```march
 System.os()                -- "macos" | "linux" | "windows"
@@ -608,7 +608,7 @@ System.cmd("ls", ["-la"])  -- Result(ProcessResult, String)
 
 ## Logger
 
-`logger.march` — Structured logging.
+`logger.march`: Structured logging.
 
 ```march
 Logger.info("server started")
@@ -626,9 +626,9 @@ Logger.with_context(fn () ->
 
 ## Vault
 
-`vault.march` — Process-local key-value store backed by a mutable hash table. Used extensively in the stdlib for global mutable state.
+`vault.march`: Process-local key-value store backed by a mutable hash table. Used extensively in the stdlib for global mutable state.
 
-A handle is `Vault(v)`, phantom in the type of the values the table holds, so
+A handle is `Vault(v)`, phantom in the type of the values the table stores, so
 a table written at one type cannot be read back at another.
 
 ```march
@@ -644,7 +644,7 @@ Vault.all(t)                     -- List((String, Int))
 
 The element type is fixed where the handle is bound: a `let`-bound handle does
 not let-generalize, because a Vault is a process-global mutable cell. Two
-doors stay element-erased on purpose — `new`/`open`/`whereis`, which mint a
+doors stay element-erased on purpose: `new`/`open`/`whereis`, which mint a
 handle from a *name* and so choose `v` rather than check it, and the
 `ns_set`/`ns_get`/`ns_drop` namespace-string API, which has no handle to carry
 `v`. `Config` (a heterogeneous store by design) opts out explicitly with a
@@ -654,7 +654,7 @@ handle from a *name* and so choose `v` rather than check it, and the
 
 ## Enum
 
-`enum.march` — Elixir-inspired lazy enumeration over any `Iterable`.
+`enum.march`: Elixir-inspired lazy enumeration over any `Iterable`.
 
 ```march
 Enum.map(items, fn x -> x * 2)
@@ -681,7 +681,7 @@ Enum.max_by(items, fn x -> x.score)   -- Option(a)
 
 ## Duration
 
-`duration.march` — Time-span arithmetic.
+`duration.march`: Time-span arithmetic.
 
 ```march
 let d = Duration.seconds(30)
@@ -700,7 +700,7 @@ Duration.to_milliseconds(d)  -- 30000  (Duration.milliseconds(n) is a *construct
 
 ## URI
 
-`uri.march` — URI parsing and construction. The module is `Uri` (not `URI`).
+`uri.march`: URI parsing and construction. The module is `Uri` (not `URI`).
 
 ```march
 let u = Uri.parse("https://example.com/path?k=v")
@@ -719,7 +719,7 @@ Uri.decode_query("k=v&a=b")   -- [("k", "v"), ("a", "b")]
 
 ## Js.Dom (JS only)
 
-`dom.march` — Browser DOM bindings for `--target js` builds. Auto-loaded; no import needed.
+`dom.march`: Browser DOM bindings for `--target js` builds. Auto-loaded; no import needed.
 
 ```march
 -- Query
@@ -773,7 +773,7 @@ Js.Dom.window_size()              -- (Int, Int) — window.innerWidth/innerHeigh
 
 ## Js.Canvas (JS only)
 
-`canvas.march` — 2D drawing bindings for `--target js` builds, wrapping the browser's `CanvasRenderingContext2D`. Auto-loaded; no import needed.
+`canvas.march`: 2D drawing bindings for `--target js` builds, wrapping the browser's `CanvasRenderingContext2D`. Auto-loaded; no import needed.
 
 ```march
 -- Setup
@@ -826,7 +826,7 @@ Js.Canvas.draw_image_scaled(ctx, img, 0.0, 0.0, 64.0, 64.0)
 
 ## Js.Audio (JS only)
 
-`audio.march` — procedural sound-effect synthesis for `--target js` builds, wrapping the browser's Web Audio API. Sounds are synthesized on the fly (tones, sweeps, filtered noise) rather than loaded from files — no assets, no licensing. Auto-loaded; no import needed.
+`audio.march`: procedural sound-effect synthesis for `--target js` builds, wrapping the browser's Web Audio API. Sounds are synthesized on the fly (tones, sweeps, filtered noise) rather than loaded from files: no assets, no licensing. Auto-loaded; no import needed.
 
 ```march
 Js.Audio.create()                                 -- Ctx
@@ -837,7 +837,7 @@ Js.Audio.noise_burst(actx, 0.15, 600.0)            -- filtered white noise (impa
 Js.Audio.set_volume(actx, 0.5)                     -- master gain 0.0 (mute) to 1.0
 ```
 
-`Js.Audio` requires `needs Ffi` and is only valid in `--target js` builds. Browsers block audio output until a user gesture occurs on the page — call `resume` from inside your first tap/click handler (game loops that already gate their first frame on a tap, like a "tap to start" screen, get this for free).
+`Js.Audio` requires `needs Ffi` and is only valid in `--target js` builds. Browsers block audio output until a user gesture occurs on the page; call `resume` from inside your first tap/click handler (game loops that already gate their first frame on a tap, like a "tap to start" screen, get this for free).
 
 ---
 
@@ -847,7 +847,7 @@ These modules implement the distributed-OTP transport layer (P1). They are stdli
 
 ### NodeIdentity
 
-`node_identity.march` — A node's stable identity for the cluster.
+`node_identity.march`: A node's stable identity for the cluster.
 
 ```march
 type Identity = { name : String, node_id : String, incarnation : Int }
@@ -861,7 +861,7 @@ NodeIdentity.decode(bytes)     -- Result(Identity, String)
 
 ### NetFrame
 
-`net_frame.march` — Length-prefixed framing over TCP.
+`net_frame.march`: Length-prefixed framing over TCP.
 
 ```march
 NetFrame.encode(payload)       -- List(Int)  (4-byte header + payload)
@@ -870,7 +870,7 @@ NetFrame.decode(buf)           -- Option((List(Int), List(Int)))
 
 ### ClusterAuth
 
-`cluster_auth.march` — Shared-secret HMAC challenge/response.
+`cluster_auth.march`: Shared-secret HMAC challenge/response.
 
 ```march
 ClusterAuth.prove(secret, nonce)         -- String (HMAC-SHA256 hex)
@@ -879,7 +879,7 @@ ClusterAuth.verify(secret, nonce, proof) -- Bool
 
 ### Handshake
 
-`handshake.march` — Pure authenticated handshake protocol (no I/O).
+`handshake.march`: Pure authenticated handshake protocol (no I/O).
 
 ```march
 Handshake.make_hello(identity, nonce)    -- Handshake.Hello
@@ -891,7 +891,7 @@ Handshake.authenticate(secret, our_nonce, peer, peer_proof)
 
 ### PeerRegistry
 
-`peer_registry.march` — One-connection-per-peer table.
+`peer_registry.march`: One-connection-per-peer table.
 
 ```march
 type Peer = { node_id : String, identity : NodeIdentity.Identity, fd : Int }
@@ -906,7 +906,7 @@ PeerRegistry.peers(reg)               -- List(Peer)
 
 ### NetKernel
 
-`net_kernel.march` — TCP socket transport for the net-kernel (framing + handshake).
+`net_kernel.march`: TCP socket transport for the net-kernel (framing + handshake).
 
 ```march
 NetKernel.fresh_nonce()               -- String (random hex)
@@ -918,7 +918,7 @@ NetKernel.handshake(fd, my_id, secret, my_nonce)
 
 ### ClusterConn
 
-`cluster_conn.march` — Connection lifecycle: dial or accept, handshake, register.
+`cluster_conn.march`: Connection lifecycle: dial or accept, handshake, register.
 
 Requires `needs IO.NetListen` (for `tcp_listen`/`tcp_accept` builtins).
 
@@ -998,7 +998,7 @@ tcp_accept(listen_fd)  : Result(Int, String)  -- block until client, return fd
 
 ## Next Steps
 
-- [Property Testing]({{ site.baseurl }}/docs/property-testing/) — write property-based tests with `Gen` and `Check`
-- [REPL]({{ site.baseurl }}/docs/repl/) — explore the stdlib interactively
-- [Interfaces]({{ site.baseurl }}/docs/interfaces/) — how stdlib types implement interfaces
-- [Tooling]({{ site.baseurl }}/docs/tooling/) — `forge search` to find functions by type or name
+- [Property Testing]({{ site.baseurl }}/docs/property-testing/): write property-based tests with `Gen` and `Check`
+- [REPL]({{ site.baseurl }}/docs/repl/): explore the stdlib interactively
+- [Interfaces]({{ site.baseurl }}/docs/interfaces/): how stdlib types implement interfaces
+- [Tooling]({{ site.baseurl }}/docs/tooling/): `forge search` to find functions by type or name

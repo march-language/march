@@ -7,7 +7,7 @@ scrollmd: true
 
 # Vault
 
-`Vault` is an in-memory key-value store — think ETS from Erlang. Values are shared across all actors in a process and persist across function calls. Good for caches, counters, session state, and coordination between concurrent tasks.
+`Vault` is an in-memory key-value store; think ETS from Erlang. Values are shared across all actors in a process and persist across function calls. Good for caches, counters, session state, and coordination between concurrent tasks.
 
 ---
 
@@ -27,7 +27,7 @@ Vault.get(v, "name")    -- None
 
 ## Atomic update
 
-`Vault.update` applies a function to the current value atomically — no race between get and set. The callback receives the unwrapped value and is only called when the key exists:
+`Vault.update` applies a function to the current value atomically: no race between get and set. The callback receives the unwrapped value and is only called when the key exists:
 
 ```march
 let counter = Vault.new("counters")
@@ -42,7 +42,7 @@ Multiple actors can call `update` concurrently without conflict. If the key does
 
 ## TTL (time-to-live)
 
-`Vault.set_ttl` sets a key with an expiry. It takes `(store, key, value, ttl_secs)` — TTL is in **seconds**:
+`Vault.set_ttl` sets a key with an expiry. It takes `(store, key, value, ttl_secs)`; TTL is in **seconds**:
 
 ```march
 Vault.set_ttl(v, "token", "abc123", 60)   -- expires after 60 seconds

@@ -1,21 +1,21 @@
-> Part of the March Language Reference — see [specs/lang/index.md](index.md).
+> Part of the March Language Reference; see [specs/lang/index.md](index.md).
 
-# `let?` — Result Propagation Binding
+# `let?`: Result Propagation Binding
 
 **Status:** Implemented, shipped, and **conformance-tested** (widening slice 8,
 2026-07-10). `let? p = e` binds the `Ok` payload of a `Result`-typed `e` and
-short-circuits — returning `Err(err)` immediately on the first `Err`. The RHS
+short-circuits, returning `Err(err)` immediately on the first `Err`. The RHS
 must be a `Result`, the continuation must be a `Result` with the same error
 type, and a `let?` cannot be the last expression in a block. The normative
-rules are in `core-march-types.md` §2.10 (typing — `(T-LetQ)` + three
-diagnostics) and `core-march.md` §4.13 (operational — `(E-LetQ-Ok)` /
+rules are in `core-march-types.md` §2.10 (typing: `(T-LetQ)` + three
+diagnostics) and `core-march.md` §4.13 (operational: `(E-LetQ-Ok)` /
 `(E-LetQ-Err)` short-circuit), with corpus `types/{accept/t70–t72,
 reject/t67–t70}` and golden `g42`. This chapter is the tutorial companion.
 
-> **Implementation note — §4–§8 below read as a design/plan.** That material
+> **Implementation note: §4–§8 below read as a design/plan.** That material
 > was written as the *implementation spec*. `let?` shipped exactly as its
 > design describes: an `ELetQ` AST node typechecked natively (`typecheck.ml`
-> `infer_expr`) and evaluated natively (`eval.ml`) — with ONE deviation: the
+> `infer_expr`) and evaluated natively (`eval.ml`), with ONE deviation: the
 > dedicated "`let?` cannot have a type annotation" parser production shown in
 > §5.2 was never implemented. `let? x : T = e` is still correctly rejected,
 > but by the generic missing-`=` recovery (`` I was expecting `=` in the let?
@@ -31,7 +31,7 @@ reject/t67–t70}` and golden `g42`. This chapter is the tutorial companion.
 March already has `with ... do ... else ... end` for multi-step Result chaining
 (fully implemented). But there is a sharp, **verified** gap:
 
-> **`with` without an `else` clause does not propagate — it crashes.**
+> **`with` without an `else` clause does not propagate; it crashes.**
 >
 > ```march
 > with Ok(a) <- divide(10, 0) do Ok(a + 1) end
@@ -54,15 +54,15 @@ else
 end
 ```
 
-`let?` is sugar for exactly this common case — bind the `Ok` payload, propagate
-`Err` upward — fitting March's let-chain block style. (The stdlib module is
+`let?` is sugar for exactly this common case (bind the `Ok` payload, propagate
+`Err` upward), fitting March's let-chain block style. (The stdlib module is
 `Json`, not `JSON`; `Json.get` returns `Option`, not `Result`, so it needs
-`Option.to_result` per §9.4 below. Also note — a real, verified compiler bug,
+`Option.to_result` per §9.4 below. Also note: a real, verified compiler bug,
 not a `let?`-specific one: `File.read`'s builtin type signature registers its
 error type as an unconstrained type variable rather than the concrete
 `File.FileError` it actually produces at runtime, so `let? content =
 File.read(path)` inside a function declared to return `Result(_, String)`
-**typechecks with no error** and then panics at runtime — `++`ing the bound
+**typechecks with no error** and then panics at runtime: `++`ing the bound
 error value fails with `builtin ++: expected two strings`, because the value
 is actually a `FileError` constructor, not a `String`. `Result.map_err`
 converts it explicitly, which also happens to route around the bug):
@@ -105,7 +105,7 @@ brevity win.
 | Gleam | `use x <- f(cb)` | Zero new syntax; needs callback-last APIs |
 
 `let?` follows the F#/OCaml `let!` shape because it slots into the existing
-block model with no new conceptual machinery.
+block model with no new conceptual apparatus.
 
 ---
 
@@ -115,7 +115,7 @@ block model with no new conceptual machinery.
 let? <simple_pattern> = <expr>
 ```
 
-- The `?` immediately follows `let` (lexed as `LET` then `QUESTION` — **no new
+- The `?` immediately follows `let` (lexed as `LET` then `QUESTION`; **no new
   token**; see §5.1).
 - The pattern is a `simple_pattern`, identical to what plain `let` accepts.
 - **No type annotation** is permitted: `let? x : T = e` is a parse error. The
@@ -141,7 +141,7 @@ let? { host } = f()      -- PARSE ERROR — record patterns not in simple_patter
 let? Some(v)  = f()      -- PARSE ERROR — constructor patterns not in simple_pattern
 ```
 
-This is the *same* restriction plain `let` already has — it is not new behaviour,
+This is the *same* restriction plain `let` already has; it is not new behaviour,
 and it keeps the bound pattern irrefutable (the `Ok` arm cannot fail to match).
 
 ---
@@ -159,7 +159,7 @@ Add to `lib/ast/ast.ml`, in the `expr` type, after `ELet`:
         - Typechecked NATIVELY (see §6); lowered to EMatch at eval/TIR (§7). *)
 ```
 
-**Design choice: continuation-carrying, not a flat marker.** `ELetQ` holds the
+**Design choice: continuation-carrying, not a flat marker.** `ELetQ` stores the
 *rest of the block* as its third field. This is what lets the typechecker reason
 about `let?` natively (and produce good errors) instead of seeing an already-
 lowered `match`. The right-nesting is assembled in the parser (§5.2).
@@ -260,23 +260,23 @@ lambda_body:
 ```
 
 Because `lambda_body` always ends in a real `expr`, a trailing `let?` is
-structurally impossible in a lambda — the "let? as last" error can only arise in
+impossible by construction in a lambda; the "let? as last" error can only arise in
 `block_body`.
 
 ---
 
-## 6. Typechecking (native — this is where safety + good errors live)
+## 6. Typechecking (native: this is where safety + good errors live)
 
 `ELetQ` is typechecked directly by `lib/typecheck/typecheck.ml` in both
 `infer_expr` and `check_expr`. **It is not desugared before typechecking.** This
-is the deliberate change from the first draft of this spec: the whole point of a
-distinct node is that the typechecker can speak about `let?` precisely.
+is the intentional change from the first draft of this spec: the whole point of a
+distinct node is that the typechecker can speak about `let?` with precision.
 
 Let `ELetQ (p, result, body, sp)` and let the enclosing expected return type be
 `Result(R, E)` (in checking mode) or a fresh `Result(R, E)` to be unified (in
 synthesis mode).
 
-### 6.1 Checking mode — `check_expr env (ELetQ ...) expected`
+### 6.1 Checking mode: `check_expr env (ELetQ ...) expected`
 
 This is the common case: a function body checked against its declared return
 type. Here `expected` **is** the function's return type, which gives the best
@@ -289,13 +289,13 @@ errors.
 3. Unify `E' = E`. On failure emit **E-LETQ-ERRTY** (the propagated error type
    does not match the function's error type).
 4. Bind the variables of `p` at type `T` (irrefutable, like `let`), giving `env'`.
-5. `check_expr env' body expected` — the continuation must also yield `Result(R, E)`.
+5. `check_expr env' body expected`: the continuation must also yield `Result(R, E)`.
 6. Result type of the whole `ELetQ` is `expected`.
 
-### 6.2 Synthesis mode — `infer_expr env (ELetQ ...)`
+### 6.2 Synthesis mode: `infer_expr env (ELetQ ...)`
 
 Used when there is no annotation to push down (e.g. a `let?` inside a lambda
-whose result type is being inferred).
+with a result type still being inferred).
 
 1. `t_result = infer_expr env result`; require `t_result = Result(T, E)`
    (fresh `T`, `E` if it is a metavariable resolved to `Result`); else **E-LETQ-RHS**.
@@ -317,9 +317,9 @@ typechecker can therefore report the *second* mismatching binding against the
 > `Result.map_err(Json.parse(content), fn e -> parse_err_to_string(e))`, or
 > handle it with `with ... else`.
 
-(Illustrative diagnostic text — the real stdlib `Json.parse`'s error type is
+(Illustrative diagnostic text; the real stdlib `Json.parse`'s error type is
 plain `String`, not a distinct `ParseError`; the sample message just shows the
-diagnostic's shape for a genuinely mismatched error type.)
+diagnostic's shape for a truly mismatched error type.)
 
 Implementation: track the first-resolved `E` and its span in the local
 environment while checking a function body (a small field threaded through the
@@ -365,7 +365,7 @@ Add a case to `eval_expr_inner`:
 
 **Why returning `err` directly is correct and free:** runtime values are
 type-erased `VCon(tag, payload)`. The `Err` value is *representationally
-identical* whether typed `Result(T, E)` or `Result(R, E)` — only the (erased)
+identical* whether typed `Result(T, E)` or `Result(R, E)`; only the (erased)
 Ok-type parameter differs. So no reconstruction, no allocation, no copy.
 
 ### 7.2 Compiled path (`lib/tir/lower.ml`)
@@ -388,13 +388,13 @@ own erasure/representation selection, this rewrap compiles to a tag-and-pointer
 that Perceus can do in place (§8.3), so it is free at runtime too.
 
 Reuse the existing `Ok`/`Err` constructor lowering and the existing match
-compiler — no new TIR node.
+compiler; no new TIR node.
 
 ### 7.3 `EBlock` handling note
 
 The parser fold (§5.2) already nests `let?` continuations, so by the time eval
 and TIR see an `EBlock`, any `let?` is an `ELetQ` node *containing* its
-continuation — it is **not** a loose statement in the block list. This mirrors how
+continuation; it is **not** a loose statement in the block list. This mirrors how
 `ELetFn` is special-cased in `lower.ml:388`, but `ELetQ` needs no block-level
 special case at all because the continuation is already inside the node.
 
@@ -405,10 +405,10 @@ special case at all because the continuation is already inside the node.
 ### 8.1 Irrefutability
 
 `p` comes from `simple_pattern`, so it is irrefutable (var/wildcard/tuple/literal/
-list — and literals in binding position are already rejected by the existing
+list, and literals in binding position are already rejected by the existing
 let-binding checks the same way). The `Ok(p)` arm therefore cannot fail to match,
 and the only other reachable constructor is `Err`, so the generated match is
-exhaustive — unlike a bare `with`.
+exhaustive, unlike a bare `with`.
 
 ### 8.2 Why `Err(e) -> Err(e)` must reconstruct (not pass through)
 
@@ -421,12 +421,12 @@ match result do  Ok(p) -> body  | (Err(_) as whole) -> whole  end
 **This is ill-typed.** `result : Result(T, E)`, so `whole : Result(T, E)`. But
 the match must yield `Result(R, E)` (the continuation's type), and in general
 `T ≠ R`. There is no subtyping in March, so `whole` cannot be returned where
-`Result(R, E)` is expected. Rewrapping `Err(e)` works precisely because the
+`Result(R, E)` is expected. Rewrapping `Err(e)` works exactly because the
 `Err` constructor is polymorphic in the Ok-type parameter: `Err(e) : Result(α, E)`
 unifies `α := R`. So reconstruction is a **soundness requirement of the source
 type system**, not a stylistic choice.
 
-(At the *value* level the distinction vanishes — see §7.1 — so the interpreter is
+(At the *value* level the distinction vanishes (see §7.1), so the interpreter is
 free to short-circuit with the original value. Only the typed TIR form must
 reconstruct.)
 
@@ -458,13 +458,13 @@ else
 end
 ```
 
-A `with` *without* `else` is **not** equivalent — it is non-exhaustive and
+A `with` *without* `else` is **not** equivalent; it is non-exhaustive and
 panics on `Err`. `let?` always has the passthrough.
 
 ### 9.2 Free mixing with `let`, `match`, `with`
 
-(As in §1 — a literal `File.read(path)` here would hit the same `file_read`
-error-type compiler bug and needs a `Result.map_err` wrapper to be genuinely
+(As in §1, a literal `File.read(path)` here would hit the same `file_read`
+error-type compiler bug and needs a `Result.map_err` wrapper to be truly
 type-safe; omitted here to keep the scoping example focused.)
 
 ```march
@@ -481,8 +481,8 @@ end
 
 ### 9.3 `let?` inside a lambda propagates from the lambda
 
-`let?` propagates to the nearest enclosing function **or lambda** whose result is
-a `Result`. It does not jump to the outer function.
+`let?` propagates to the nearest enclosing function **or lambda** with a result
+that is a `Result`. It does not jump to the outer function.
 
 ```march
 fn process_all(paths : List(String)) : Result(List(Config), String) do
@@ -512,7 +512,7 @@ A future `let??` for `Option` is noted in §12 but not specified here.
 `let?` is block-scoped. A module-level `let?` is a syntax error (it is only
 produced inside `block_body` / `lambda_body`). Consistent with `with`.
 
-### 9.6 `let? _ = e` — discarding the Ok value
+### 9.6 `let? _ = e`: discarding the Ok value
 
 Legal and useful: run a fallible effect for its error, ignore its success value,
 continue.
@@ -552,7 +552,7 @@ mismatch message can now suggest the fix by name:
 ### 10.3 Error-type coherence (§6.3)
 
 Mismatched error types in a `let?` chain are reported at the offending binding
-against the first fixed error type, with a `Result.map_err` suggestion — far
+against the first fixed error type, with a `Result.map_err` suggestion, far
 better than a bare unification failure deep in a desugared match.
 
 ### 10.4 `match` → `let?` simplification hint (lint, LSP code action)
@@ -589,7 +589,7 @@ exhaustiveness warning can now cross-reference the feature:
 2. **In-place `Err` rewrap.** Already free under Perceus when refcount = 1 (§8.3).
    No new work.
 3. **Tail position.** When the final continuation is in tail position, both the
-   `Ok` and the `Err` paths are in tail position — no frame growth on the error
+   `Ok` and the `Err` paths are in tail position: no frame growth on the error
    path.
 4. **No monomorphisation impact.** `ELetQ` lowers to an ordinary match before/at
    TIR; mono sees only matches.
@@ -598,11 +598,11 @@ exhaustiveness warning can now cross-reference the feature:
 
 ## 12. Out of scope (V1)
 
-- **`Option` support** — convert with `Option.to_result`. (`let??` reserved.)
-- **Error coercion** — no `From`-style auto-conversion; error types must unify.
-- **Postfix `?`** — `f()?` on arbitrary expressions; different parse story.
-- **Type annotations on `let?`** — rejected (§3, §5.2).
-- **`let?` at module top level** — block-scoped only.
+- **`Option` support**: convert with `Option.to_result`. (`let??` reserved.)
+- **Error coercion**: no `From`-style auto-conversion; error types must unify.
+- **Postfix `?`**: `f()?` on arbitrary expressions; different parse story.
+- **Type annotations on `let?`**: rejected (§3, §5.2).
+- **`let?` at module top level**: block-scoped only.
 
 ---
 
@@ -611,29 +611,29 @@ exhaustiveness warning can now cross-reference the feature:
 Adding a surface `expr` constructor touches every pass that traverses
 expressions. **Critical:** most of these passes have wildcard `| _ ->` arms
 (lint: 25, LSP analysis: 162, refactor: 16, format: 11), so **OCaml's
-exhaustiveness checker will NOT flag a missing `ELetQ` case** — the failure mode
-is silent mishandling, not a build error. Each must be audited deliberately.
+exhaustiveness checker will NOT flag a missing `ELetQ` case**; the failure mode
+is silent mishandling, not a build error. Each must be audited explicitly.
 
 | File | Has catch-all? | Required action |
 |---|---|---|
-| `lib/ast/ast.ml` | — | Define `ELetQ`. |
-| `lib/parser/parser.mly` | — | Produce `ELetQ`; `fold_letq`; error recovery (§5). |
-| `lib/typecheck/typecheck.ml` | (exhaustive — will fail to build until handled) | Native `infer_expr` + `check_expr` rules (§6). **Primary correctness + safety.** |
+| `lib/ast/ast.ml` | none | Define `ELetQ`. |
+| `lib/parser/parser.mly` | none | Produce `ELetQ`; `fold_letq`; error recovery (§5). |
+| `lib/typecheck/typecheck.ml` | (exhaustive; will fail to build until handled) | Native `infer_expr` + `check_expr` rules (§6). **Primary correctness + safety.** |
 | `lib/eval/eval.ml` | (exhaustive) | `eval_expr_inner` case (§7.1). **Required for run.** |
 | `lib/tir/lower.ml` | (exhaustive) | Lower to match (§7.2). **Required for compile.** |
 | `lib/desugar/desugar.ml` | per-constructor recursion | **Must recurse** into `result` and `body`: `ELetQ (p, desugar_expr r, desugar_expr b, sp)`. Missing this silently skips pipe/sugar desugaring inside `let?`. |
 | `lib/ast/span_remap.ml` | 1 catch-all | **Must recurse** into both subexprs, or REPL/incremental span remapping breaks for any code containing `let?`. Silent if forgotten. |
-| `lib/format/format.ml` | 11 catch-alls | **Must handle** — `forge format` runs on the surface AST; without a case it will mis-format or drop `let?`. Print `let? p = e` then the body. Round-trip test required (§14.7). |
+| `lib/format/format.ml` | 11 catch-alls | **Must handle**: `forge format` runs on the surface AST; without a case it will mis-format or drop `let?`. Print `let? p = e` then the body. Round-trip test required (§14.7). |
 | `lib/dump/dump.ml` | 2 catch-alls | Add a printable form for `--dump-phases` / AST debugging. |
 | `lib/lint/lint.ml` | 25 catch-alls | Recurse into subexprs; optionally add §10.4 hint. |
 | `lib/refactor/refactor.ml` | 16 catch-alls | Recurse into subexprs so rename/extract work inside `let?`. |
 | `lib/coverage/coverage.ml` | 1 catch-all | Count the `result` and `body` as coverable. |
 | `lsp/lib/analysis.ml` | 162 catch-alls | Recurse for hover/goto/completion inside `let?` bodies (UX, not correctness). |
-| `lsp/lib/workspace.ml`, `lsp/lib/depot.ml` | — | Audit for expr traversal; recurse as needed. |
+| `lsp/lib/workspace.ml`, `lsp/lib/depot.ml` | none | Audit for expr traversal; recurse as needed. |
 
 Recommended guard: a single shared `map_expr` / `fold_expr` traversal would have
 made most of these automatic. Since the codebase hand-rolls traversals, each must
-be checked by hand — grep `EMatch` across `lib/` and `lsp/` to find them all
+be checked by hand; grep `EMatch` across `lib/` and `lsp/` to find them all
 (this list was produced that way).
 
 ---
@@ -646,32 +646,32 @@ to each.
 
 ### 14.1 Parser
 - [ ] `let? x = Ok(1)` then `x` parses to `ELetQ(PatVar, …, …)`.
-- [ ] `let? (a, b) = f()` — tuple pattern OK.
-- [ ] `let? _ = f()` — wildcard OK.
-- [ ] `let? x : Int = f()` — parse error (no annotation), good message.
-- [ ] `let? x` (missing `=`) — parse error, good message.
-- [ ] `let? { host } = f()` — parse error (record pattern not in simple_pattern).
-- [ ] `let? x = f()` as the **last** block expr — `E-LETQ-LAST` parse error.
+- [ ] `let? (a, b) = f()`: tuple pattern OK.
+- [ ] `let? _ = f()`: wildcard OK.
+- [ ] `let? x : Int = f()`: parse error (no annotation), good message.
+- [ ] `let? x` (missing `=`): parse error, good message.
+- [ ] `let? { host } = f()`: parse error (record pattern not in simple_pattern).
+- [ ] `let? x = f()` as the **last** block expr: `E-LETQ-LAST` parse error.
 - [ ] Nesting: `let?` continuation correctly captures all following statements
       (inspect that `body` field contains the rest).
 
-### 14.2 Eval — happy path
+### 14.2 Eval: happy path
 - [ ] `let? x = Ok(42)  ; Ok(x)` → `Ok(42)`.
 - [ ] chain all-Ok: `let? a = Ok(1); let? b = Ok(2); Ok(a+b)` → `Ok(3)`.
 - [ ] tuple bind: `let? (x, y) = Ok((3, 4)); Ok(x+y)` → `Ok(7)`.
-- [ ] `let?` after a plain `let`, and before a `match` — mixed chain.
+- [ ] `let?` after a plain `let`, and before a `match`: mixed chain.
 
-### 14.3 Eval — propagation
+### 14.3 Eval: propagation
 - [ ] first step `Err`: returns that `Err` unchanged (identity on the value).
 - [ ] **short-circuit**: a later step with an observable side effect is **not**
       evaluated when an earlier step is `Err` (use a ref/counter).
-- [ ] propagated `Err` payload is byte-for-byte the original.
+- [ ] propagated `Err` payload matches the original to the exact byte.
 - [ ] `let?` inside a lambda propagates from the lambda; `Result.collect`
       composes (the §9.3 example).
 
 ### 14.4 Exhaustiveness / safety
 - [ ] A `let?` chain over a function that can `Err` **never** raises
-      `Match_failure` (contrast: the bare-`with` crash in §1 — keep a regression
+      `Match_failure` (contrast: the bare-`with` crash in §1; keep a regression
       test that the bare `with` still warns, to lock in the distinction).
 
 ### 14.5 Compiled (`test_compiler.ml`)
@@ -679,7 +679,7 @@ to each.
 - [ ] compiled propagation returns correct `Err`.
 - [ ] compiled `let?`-in-lambda + `Result.collect`.
 
-### 14.6 Type errors (negative — assert exact diagnostic code/message)
+### 14.6 Type errors (negative: assert exact diagnostic code/message)
 - [ ] RHS not Result (`let? x = 42`) → **E-LETQ-RHS**.
 - [ ] heterogeneous error types → **E-LETQ-ERRTY**, reported at the 2nd binding,
       mentions the first error type and `Result.map_err`.
@@ -687,7 +687,7 @@ to each.
 - [ ] continuation not a Result → **E-LETQ-BODY**.
 
 ### 14.7 Formatter round-trip
-- [ ] `forge format` on a file using `let?` reproduces `let?` verbatim (does not
+- [ ] `forge format` on a file using `let?` preserves `let?` verbatim (does not
       rewrite it to `match`/`with`, does not drop it). This guards the §13
       formatter requirement.
 
@@ -700,22 +700,22 @@ to each.
 
 ## 15. Implementation order
 
-1. `lib/ast/ast.ml` — add `ELetQ`.
-2. `lib/parser/parser.mly` — `block_expr` / `lambda_stmts` cases, `fold_letq`,
+1. `lib/ast/ast.ml`: add `ELetQ`.
+2. `lib/parser/parser.mly`: `block_expr` / `lambda_stmts` cases, `fold_letq`,
    `block_body` / `lambda_body` actions, error recovery.
-3. `lib/desugar/desugar.ml` — structural recursion into `ELetQ` subexprs.
-4. `lib/typecheck/typecheck.ml` — native `infer_expr` + `check_expr` rules; new
+3. `lib/desugar/desugar.ml`: structural recursion into `ELetQ` subexprs.
+4. `lib/typecheck/typecheck.ml`: native `infer_expr` + `check_expr` rules; new
    diagnostics in `lib/errors/errors.ml`.
-5. `lib/eval/eval.ml` — `eval_expr_inner` case.
-6. `lib/tir/lower.ml` — lower to match.
+5. `lib/eval/eval.ml`: `eval_expr_inner` case.
+6. `lib/tir/lower.ml`: lower to match.
 7. Traversal passes: `span_remap.ml`, `format.ml`, `dump.ml`, `lint.ml`,
-   `refactor.ml`, `coverage.ml`, `lsp/lib/*.ml` — add real cases (do **not** rely
+   `refactor.ml`, `coverage.ml`, `lsp/lib/*.ml`: add real cases (do **not** rely
    on their catch-alls; see §13).
 8. Tests (§14).
 9. Docs: `CLAUDE.md`, `surface-syntax.md`, `docs/tour.md` (§16).
 
 Steps 1–6 are the functional core and can land together (the build will fail
-until typecheck/eval/tir are handled — those have no catch-all). Step 7 is the
+until typecheck/eval/tir are handled; those have no catch-all). Step 7 is the
 "silent breakage" tail and must not be skipped. Steps 8–9 follow.
 
 After landing: `git mv` the item's file from `specs/todos/` to `specs/progress/`
@@ -727,7 +727,7 @@ After landing: `git mv` the item's file from `specs/todos/` to `specs/progress/`
 
 ### `CLAUDE.md` (surface-syntax notes, near the lambda section)
 
-> ### `let?` — Result propagation
+> ### `let?`: Result propagation
 > `let? p = expr` binds the `Ok` value and returns the `Err` immediately.
 > RHS must be `Result(T, E)`; the enclosing function must return `Result(_, E)`
 > with the same `E`. For per-step handling use `with … else …`. `let?` cannot be

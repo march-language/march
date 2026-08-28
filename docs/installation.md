@@ -21,7 +21,7 @@ curl -fsSL https://raw.githubusercontent.com/march-language/march/main/install.s
 
 The installer downloads the latest release into `~/.march`, verifies its checksum, and installs `march` and `forge` into `~/.march/bin`. Add that directory to your `PATH` (the installer prints the exact line). Use `MARCH_VERSION=nightly` for the latest nightly or `MARCH_VERSION=<tag>` to pin a version.
 
-The binaries are self-contained (macOS statically links `blake3`/`zstd`/`brotli`; Linux builds are static), so interpreting programs needs nothing extra. To use `march --compile`, install a C toolchain — `clang` + LLVM (macOS: `xcode-select --install`; Linux: e.g. `clang llvm`).
+The binaries are self-contained (macOS statically links `blake3`/`zstd`/`brotli`; Linux builds are static), so interpreting programs requires no extra setup. To use `march --compile`, install a C toolchain: `clang` + LLVM (macOS: `xcode-select --install`; Linux: e.g. `clang llvm`).
 
 Switch between installed versions with `forge`:
 
@@ -33,7 +33,7 @@ forge toolchain list           # show installed versions
 
 See the [README](https://github.com/march-language/march#install-a-prebuilt-binary) for the manual-download alternative and details.
 
-> **Just want to try it?** With a prebuilt binary installed you're done — head straight to [Getting Started](getting-started.md) and write your first program. Everything below is for contributors building the compiler from source, and can be skipped.
+> **Just want to try it?** With a prebuilt binary installed you're done; head straight to [Getting Started](getting-started.md) and write your first program. Everything below is for contributors building the compiler from source, and can be skipped.
 
 ---
 
@@ -90,7 +90,7 @@ March uses a dedicated opam switch pinned to OCaml 5.3.0. This keeps its depende
 opam switch create march 5.3.0
 ```
 
-This downloads and compiles OCaml — it takes a few minutes the first time.
+This downloads and compiles OCaml; it takes a few minutes the first time.
 
 ---
 
@@ -210,7 +210,7 @@ Run `opam switch march` (or `eval $(opam env --switch=march)`) to activate the s
 Your LLVM version is too old. Install LLVM 18+.
 
 **`dune build` fails with missing `menhir`**  
-Run `opam install . --deps-only -y` again — the switch may not have been active when you first ran it.
+Run `opam install . --deps-only -y` again; the switch may not have been active when you first ran it.
 
 **Tests fail on Linux with `libffi` errors**  
 ```sh
@@ -221,8 +221,8 @@ sudo apt-get install libffi-dev
 
 ## Next Steps
 
-- [Getting Started](getting-started.md) — write your first real program
-- [Language Tour](tour.md) — a guided introduction to the language
-- [Tooling](tooling.md) — forge, LSP, and the debugger
+- [Getting Started](getting-started.md): write your first real program
+- [Language Tour](tour.md): a guided introduction to the language
+- [Tooling](tooling.md): forge, LSP, and the debugger
 
 Coming from another language? [Python](coming-from-python.md) · [TypeScript](coming-from-typescript.md) · [Haskell/Elixir/OCaml](coming-from-fp.md).

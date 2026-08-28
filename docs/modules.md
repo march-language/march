@@ -22,7 +22,7 @@ end
 ```
 
 Modules can be dotted for hierarchical organization. **Each of these lives in
-its own file** — a `.march` file may have only one top-level `mod` — so this
+its own file** (a `.march` file may have only one top-level `mod`), so this
 is two files' contents shown together, not one file to paste verbatim (see
 "Multi-File Projects" below for the name-to-filename convention):
 
@@ -76,7 +76,7 @@ end
 ```
 
 `pfn` functions (and private module-level `let` values) cannot be called or
-referenced from outside their declaring module — a qualified cross-module
+referenced from outside their declaring module: a qualified cross-module
 reference to one is a hard typecheck error, `` Function `name` is private to
 module `Mod`. `` This is enforced identically whether the private member lives
 in the same file (a nested `mod`) or a separate file reached by qualification.
@@ -84,7 +84,7 @@ in the same file (a nested `mod`) or a separate file reached by qualification.
 **`ptype` hides less than the name suggests, and does not hide the constructor
 at all.** A `ptype`'s bare type NAME is always usable in a cross-module type
 annotation regardless of its declared visibility. And a plain `ptype`'s
-constructor is **not private either** — every variant defaults to public
+constructor is **not private either**: every variant defaults to public
 visibility unless you use the separate `opaque type` form (below), which does
 force its variants private. In practice, a plain `ptype` and a public `type`
 are today observably identical to code outside the module. Use `opaque type`
@@ -145,9 +145,9 @@ end
 ```
 
 (`Math` is nested inside `Main` here because a single `.march` file may have
-only **one** top-level `mod` — see "A Full Example" below. Two truly
+only **one** top-level `mod`; see "A Full Example" below. Two truly
 separate, same-named-at-top-level modules like `Math` and `Main` would
-instead each live in their own file, resolved via `MARCH_LIB_PATH` — see
+instead each live in their own file, resolved via `MARCH_LIB_PATH`; see
 "Multi-File Projects" below.)
 
 Nested module access chains:
@@ -208,7 +208,7 @@ use List.map                  -- import single name
 use A.B.C.*                   -- dotted path, all names
 ```
 
-The difference between `use` and `import` is primarily stylistic — `import` is Elixir-style with keyword options (`only:`, `except:`), while `use` is ML-style with glob and brace selectors.
+The difference between `use` and `import` is primarily stylistic: `import` is Elixir-style with keyword options (`only:`, `except:`), while `use` is ML-style with glob and brace selectors.
 
 ---
 
@@ -244,8 +244,8 @@ Aliases are useful when a module name is long or conflicts with another name in 
 ## A Full Example
 
 This example demonstrates qualified access **together with** `import`/`alias`. One
-subtlety to know: `import`/`use`/`alias` only ever resolve an actual `.march` FILE, never
-an in-file nested `mod` — so the nested `MathUtils` below can only be reached by
+subtlety to know: `import`/`use`/`alias` only resolve an actual `.march` FILE, never
+an in-file nested `mod`, so the nested `MathUtils` below can only be reached by
 qualification, and the `import`/`alias` demos instead target `List`, a real stdlib
 module:
 
@@ -298,7 +298,7 @@ end
 
 ## Module Signatures
 
-A `sig` declaration defines an abstract interface for a module — a named signature separate from the implementation:
+A `sig` declaration defines an abstract interface for a module: a named signature separate from the implementation:
 
 ```march
 sig Collection do
@@ -308,7 +308,7 @@ sig Collection do
 end
 ```
 
-Signatures are used for compile-time abstraction and caching — downstream code that depends on a `sig` only needs to recompile when the signature changes, not when the implementation changes.
+Signatures are used for compile-time abstraction and caching: downstream code that depends on a `sig` only needs to recompile when the signature changes, not when the implementation changes.
 
 ---
 
@@ -361,16 +361,16 @@ end
 
 **`opaque type` doesn't stop a cross-file bypass.** Constructor-hiding is enforced
 for a same-file reference, but not yet against a qualified reference to the
-constructor from a *separate* file reached via `MARCH_LIB_PATH`/auto-discovery —
+constructor from a *separate* file reached via `MARCH_LIB_PATH`/auto-discovery;
 e.g. `OqToken.Token("bypass")` from an unrelated sibling file will typecheck and
 construct a real value today, even though `Token`'s constructor is declared
-`opaque`. Don't rely on `opaque type` alone for encapsulation across a multi-file
+`opaque`. Don't rely on `opaque type` by itself for encapsulation across a multi-file
 project until this is closed.
 
 ---
 
 ## Next Steps
 
-- [Interfaces](interfaces.md) — `interface` and `impl` for ad-hoc polymorphism
-- [Getting Started](getting-started.md) — creating a project with forge
-- [Standard Library](stdlib.md) — modules you get for free
+- [Interfaces](interfaces.md): `interface` and `impl` for ad-hoc polymorphism
+- [Getting Started](getting-started.md): creating a project with forge
+- [Standard Library](stdlib.md): modules you get for free

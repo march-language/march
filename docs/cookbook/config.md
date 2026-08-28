@@ -60,7 +60,7 @@ host = "0.0.0.0"
 port = 9000
 ```
 
-`load` returns `Ok(Settings("0.0.0.0", 9000))` — or `Ok(Settings("0.0.0.0", 3000))`
+`load` returns `Ok(Settings("0.0.0.0", 9000))`, or `Ok(Settings("0.0.0.0", 3000))`
 if `PORT=3000` is set in the environment.
 
 ---
@@ -97,9 +97,9 @@ unset variables don't fail:
 - `Env.get(name, default) : String`
 - `Env.get_int(name, default) : Int`
 - `Env.get_bool(name, default) : Bool`
-- `Env.require(name) : String` — panics if unset (use for must-have secrets)
+- `Env.require(name) : String`: panics if unset (use for must-have secrets)
 
-The pattern above — `Env.get_int("PORT", default_port(tv))` — gives the standard
+The pattern above, `Env.get_int("PORT", default_port(tv))`, gives the standard
 precedence: **environment overrides file, file overrides hard-coded default.**
 
 > Prefer YAML? `Yaml.parse` mirrors this API (`Yaml.get`, `Yaml.get_str`, …), so
@@ -124,5 +124,5 @@ This returns `Some("prod.example.com")`.
 
 ## See also
 
-- [Standard Library → Toml / Env]({{ site.baseurl }}/docs/stdlib/) — full accessor lists.
-- [Capabilities]({{ site.baseurl }}/docs/capabilities/) — gate config-file reads behind `needs IO.FileRead`.
+- [Standard Library → Toml / Env]({{ site.baseurl }}/docs/stdlib/): full accessor lists.
+- [Capabilities]({{ site.baseurl }}/docs/capabilities/): gate config-file reads behind `needs IO.FileRead`.

@@ -50,9 +50,9 @@ The REPL shows both the value and its type.
 
 ---
 
-## `v` — The Last Result
+## `v`: The Last Result
 
-The special variable `v` always holds the most recent result:
+The special variable `v` always contains the most recent result:
 
 ```
 march> 6 * 7
@@ -72,7 +72,7 @@ This makes it easy to pipe results into the next expression without rebinding.
 
 ---
 
-## `tap>` — Tracing
+## `tap>`: Tracing
 
 When a `tap>` appears in the output, it's a debug trace from a `|> IO.inspect` or explicit `tap` call. Example:
 
@@ -158,7 +158,7 @@ Similarly for match expressions, if/else, and other block constructs.
 
 All commands start with `:`:
 
-### `:help` — Show Help
+### `:help`: Show Help
 
 ```
 march> :help
@@ -173,7 +173,7 @@ march> :help
   :reset              — reset all bindings to stdlib baseline
 ```
 
-### `:type` / `:t` — Show Type Without Evaluating
+### `:type` / `:t`: Show Type Without Evaluating
 
 ```
 march> :type List.map
@@ -186,7 +186,7 @@ march> :t fn x -> x + 1
 Int -> Int
 ```
 
-### `:inspect` / `:i` — Show Type and Value
+### `:inspect` / `:i`: Show Type and Value
 
 ```
 march> :inspect [1, 2, 3]
@@ -198,7 +198,7 @@ value: "hello"
 type:  String
 ```
 
-### `:doc` — Show Documentation
+### `:doc`: Show Documentation
 
 ```
 march> :doc List.map
@@ -212,7 +212,7 @@ unwrap : Option(a) -> a
 Extracts the value from Some(x), panicking if None.
 ```
 
-### `:env` — List Bindings in Scope
+### `:env`: List Bindings in Scope
 
 Shows all user-defined names and their types (stdlib names are filtered out for clarity):
 
@@ -227,7 +227,7 @@ ys     : List(Int)   = [1, 2, 3]
 double : Int -> Int  = <function>
 ```
 
-### `:load` — Load a File
+### `:load`: Load a File
 
 Load a `.march` file into the REPL session. The module's names become available under the module name:
 
@@ -238,7 +238,7 @@ march> Example.demo_qualified()
 43 : Int
 ```
 
-### `:reload` — Reload the Last File
+### `:reload`: Reload the Last File
 
 After editing a file, reload it without retyping the path:
 
@@ -247,7 +247,7 @@ march> :reload
 -- reloaded: examples/modules.march
 ```
 
-### `:reset` — Clear All Bindings
+### `:reset`: Clear All Bindings
 
 Reset to the stdlib baseline, discarding all user-defined names:
 
@@ -256,7 +256,7 @@ march> :reset
 -- session reset
 ```
 
-### `:quit` / `:q` — Exit
+### `:quit` / `:q`: Exit
 
 ```
 march> :quit
@@ -275,16 +275,16 @@ If the terminal doesn't support Notty (e.g., piped input, non-TTY), the REPL fal
 ## Tab Completion
 
 Press `Tab` to complete:
-- **Module names** — type `Li` and tab to complete `List`
-- **Qualified names** — type `List.` and tab to see all `List.*` functions
-- **Keywords** — `fn`, `let`, `match`, `do`, `end`, etc.
-- **In-scope names** — any `let`-bound name or function defined in the session
+- **Module names**: type `Li` and tab to complete `List`
+- **Qualified names**: type `List.` and tab to see all `List.*` functions
+- **Keywords**: `fn`, `let`, `match`, `do`, `end`, etc.
+- **In-scope names**: any `let`-bound name or function defined in the session
 
 ---
 
 ## History Navigation
 
-- **↑ / ↓** — navigate through command history
+- **↑ / ↓**: navigate through command history
 - History is persisted to `~/.march_history` across sessions
 - Set `MARCH_HISTORY_FILE` to change the path
 - Set `MARCH_HISTORY_SIZE` to change how many entries are saved (default: 1000)
@@ -350,6 +350,6 @@ march> MyModule.main()
 
 ## Next Steps
 
-- [Getting Started]({{ site.baseurl }}/docs/getting-started/) — first programs
-- [Standard Library]({{ site.baseurl }}/docs/stdlib-guide/) — what's available in the REPL
-- [Tooling]({{ site.baseurl }}/docs/tooling/) — LSP for editor integration
+- [Getting Started]({{ site.baseurl }}/docs/getting-started/): first programs
+- [Standard Library]({{ site.baseurl }}/docs/stdlib-guide/): what's available in the REPL
+- [Tooling]({{ site.baseurl }}/docs/tooling/): LSP for editor integration

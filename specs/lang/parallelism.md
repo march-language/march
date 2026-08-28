@@ -5,7 +5,7 @@ nav_order: 9.5
 permalink: /docs/parallel-collections/
 ---
 
-> Part of the March Language Reference — see [specs/lang/index.md](https://github.com/march-language/march/blob/main/specs/lang/index.md).
+> Part of the March Language Reference; see [specs/lang/index.md](https://github.com/march-language/march/blob/main/specs/lang/index.md).
 
 # Parallel Collections
 
@@ -35,7 +35,7 @@ List.pmap(rows, fn r -> render_row(r))     -- each row rendered on a worker
 
 ### `List.pmap_n(xs, f, max_concurrency)`
 
-Like `pmap`, but caps the number of tasks running at once. Use it when each element is **expensive** — a network call, a heavy computation — and you want to bound how many run simultaneously (rate-limiting, connection pools, memory pressure).
+Like `pmap`, but caps the number of tasks running at once. Use it when each element is **expensive** (a network call, a heavy computation) and you want to bound how many run simultaneously (rate-limiting, connection pools, memory pressure).
 
 ```march
 -- Fetch up to 8 URLs at a time, no matter how long the list is
@@ -59,7 +59,7 @@ List.preduce([1, 2, 3, 4], 0, fn (a, b) -> a + b)   -- 10
 List.preduce(words, "", fn (a, b) -> a ++ b)        -- concatenation
 ```
 
-> **Contract:** `combine` **must be associative** — `combine(combine(x, y), z)` must equal `combine(x, combine(y, z))` — and `identity` must be its unit. Sum, product, max, min, string/list concatenation, and set union all qualify. Subtraction, division, and average **do not** (you'd get a different answer depending on how the work was split). The compiler cannot verify associativity, so this is your responsibility.
+> **Contract:** `combine` **must be associative** (`combine(combine(x, y), z)` must equal `combine(x, combine(y, z))`) and `identity` must be its unit. Sum, product, max, min, string/list concatenation, and set union all qualify. Subtraction, division, and average **do not** (you'd get a different answer depending on how the work was split). The compiler cannot verify associativity, so this is your responsibility.
 
 ---
 
@@ -67,7 +67,7 @@ List.preduce(words, "", fn (a, b) -> a ++ b)        -- concatenation
 
 ### Chunking, not element-per-task
 
-A naïve parallel map would spawn one task per element — a million elements would mean a million tasks, and the scheduling overhead would dwarf the actual work. Instead, `pmap` **splits the list into chunks**, spawns one task per chunk, runs each chunk's elements sequentially inside its task, awaits the tasks in order, and concatenates the results:
+A naïve parallel map would spawn one task per element: a million elements would mean a million tasks, and the scheduling overhead would dwarf the actual work. Instead, `pmap` **splits the list into chunks**, spawns one task per chunk, runs each chunk's elements sequentially inside its task, awaits the tasks in order, and concatenates the results:
 
 ```
 xs = [................................................]   (say 4000 elements)
@@ -83,15 +83,15 @@ Because the number of tasks tracks the chunk count (not the element count), the 
 
 ### The scheduler
 
-In **compiled** code, tasks run on March's M:N green-thread scheduler: several OS threads (4 by default), each running many lightweight green threads, with work-stealing to keep cores busy. This is the same runtime described in [Actors]({{ site.baseurl }}/docs/actors/). Reference counting is atomic and each actor/task owns a private arena heap, so there is **no stop-the-world GC pause** — parallel work scales cleanly.
+In **compiled** code, tasks run on March's M:N green-thread scheduler: several OS threads (4 by default), each running many lightweight green threads, with work-stealing to keep cores busy. This is the same runtime described in [Actors]({{ site.baseurl }}/docs/actors/). Reference counting is atomic and each actor/task owns a private arena heap, so there is **no stop-the-world GC pause**; parallel work scales cleanly.
 
 ### Why parallel FBIP needs no locks
 
-The reason `preduce` over a tree — or any divide-and-conquer over a uniquely-owned structure — scales without a single mutex comes down to **ownership**. March's [memory model]({{ site.baseurl }}/docs/memory-model/) tracks each value's reference count; a structure whose root has `RC == 1` is *uniquely owned*. When you split a uniquely-owned tree at its root, the left and right subtrees are themselves uniquely owned and **disjoint** — no node is reachable from both halves.
+The reason `preduce` over a tree (or any divide-and-conquer over a uniquely-owned structure) scales without a single mutex comes down to **ownership**. March's [memory model]({{ site.baseurl }}/docs/memory-model/) tracks each value's reference count; a structure with root at `RC == 1` is *uniquely owned*. When you split a uniquely-owned tree at its root, the left and right subtrees are themselves uniquely owned and **disjoint**: no node is reachable from both subtrees.
 
-That disjointness is the whole game. Hand each subtree to a different task and the two tasks rewrite their nodes **in place** (functional-but-in-place, FBIP) on separate cores. Because no node is shared, there is nothing to race over: no lock, no atomic fence on the data, no cache-line ping-pong. The only synchronization is the join at the end, when the parent task collects two already-finished results and combines them. Reference counting is needed only where sharing is *possible*; unique ownership proves it isn't, so the fast path is lock-free by construction.
+That disjointness is the whole game. Hand each subtree to a different task and the two tasks rewrite their nodes **in place** (functional-but-in-place, FBIP) on separate cores. Because no node is shared, there is no data to race over: no lock, no atomic fence on the data, no cache-line ping-pong. The only synchronization is the join at the end, when the parent task collects two already-finished results and combines them. Reference counting is needed only where sharing is *possible*; unique ownership proves it isn't, so the fast path is lock-free by construction.
 
-This is exactly what the **depth-24 parallel tree-sum benchmark** exercises: a ~16-million-node tree is split top-down, each task sums its disjoint subtree in place, and partial sums combine on the way up. The speedup tracks core count almost linearly precisely because there is zero contention between tasks — the structure's own shape guarantees they never touch the same memory.
+This is exactly what the **depth-24 parallel tree-sum benchmark** exercises: a ~16-million-node tree is split top-down, each task sums its disjoint subtree in place, and partial sums combine on the way up. The speedup tracks core count almost linearly exactly because there is zero contention between tasks; the structure's own shape guarantees they never touch the same memory.
 
 ### Interpreter vs. compiled
 
@@ -106,7 +106,7 @@ The interpreter executes spawned tasks eagerly, so `pmap` there is *correct but 
 
 ## The threshold and the `--pmap-threshold` flag
 
-Parallelism isn't free: spawning and joining tasks costs something. For a short list, sequential `map` wins outright. So `pmap`, `pfilter`, and `preduce` consult a **cutoff** before deciding:
+Parallelism isn't free: spawning and joining tasks costs something. For a short list, sequential `map` wins decisively. So `pmap`, `pfilter`, and `preduce` consult a **cutoff** before deciding:
 
 - **Below the cutoff** → they delegate to the plain sequential version. No tasks, no overhead.
 - **At or above the cutoff** → they chunk and parallelize as described above.
@@ -119,16 +119,16 @@ march --compile --pmap-threshold=256 -o app app.march
 MARCH_PMAP_THRESHOLD=256 forge build
 ```
 
-The value is baked into the binary as a compile-time constant — there's no per-call runtime configuration to read.
+The value is baked into the binary as a compile-time constant; there's no per-call runtime configuration to read.
 
 ### Why a runtime cutoff instead of the type system?
 
-A natural question: can't the compiler decide statically whether a list is "big enough"? In practice, no — and not because the type system is too weak:
+A natural question: can't the compiler decide statically whether a list is "big enough"? In practice, no, and not because the type system is too weak:
 
 1. **List length is almost always a runtime property.** The lists worth parallelizing come from files, sockets, databases, user input. Their size simply isn't known at compile time.
-2. **Profitability is `length × cost-per-element`, not length alone.** Eight elements that each make a 200&nbsp;ms HTTP call are very worth parallelizing; a million elements that each do `x + 1` are not. The type system can't see how expensive a closure body is.
+2. **Profitability is `length × cost-per-element`, not length by itself.** Eight elements that each make a 200&nbsp;ms HTTP call are very worth parallelizing; a million elements that each do `x + 1` are not. The type system can't see how expensive a closure body is.
 
-So March decides at runtime, on the actual data, with a single cheap length check — the same approach used by Rust's Rayon, Java parallel streams, and .NET PLINQ. The default of 1024 is a safe floor for cheap per-element work; `pmap_n` is the precise override when per-element cost is what matters.
+So March chooses at runtime, on the actual data, with a single cheap length check, the same approach used by Rust's Rayon, Java parallel streams, and .NET PLINQ. The default of 1024 is a safe floor for cheap per-element work; `pmap_n` is the precise override when per-element cost is what matters.
 
 ---
 
@@ -145,12 +145,12 @@ So March decides at runtime, on the actual data, with a single cheap length chec
 Rules of thumb:
 
 - **Prefer the sequential version by default.** Reach for the parallel one when you have evidence (a large dataset, a profiler, a slow loop) that it'll pay off.
-- **The function must be safe to run concurrently.** Pure functions — ones that only compute from their arguments — always are. A function that prints, sends actor messages, writes a file, or depends on shared mutable state is *not*, and the runtime won't stop you from misusing it. For those, keep the sequential version (or restructure so the parallel part is pure).
+- **The function must be safe to run concurrently.** Pure functions (ones that only compute from their arguments) always are. A function that prints, sends actor messages, writes a file, or depends on shared mutable state is *not*, and the runtime won't stop you from misusing it. For those, keep the sequential version (or restructure so the parallel part is pure).
 - **Measure in a compiled build.** The interpreter won't show a speedup (see above).
 
 ---
 
-## Automatic detection — the "magic," explained
+## Automatic detection: the "magic," explained
 
 March will tell you when a `map` or `filter` is a parallelization candidate. Open a file in an editor with the [March language server]({{ site.baseurl }}/docs/lsp/) and a pure `List.map` / `List.filter` gets a **Hint**:
 
@@ -158,35 +158,35 @@ March will tell you when a `map` or `filter` is a parallelization candidate. Ope
 
 …together with a one-click **"Convert to `List.pmap`"** quick-fix that rewrites just the call.
 
-Here's what is — and isn't — happening, so the behavior never feels mysterious:
+Here's what is, and isn't, happening, so the behavior never feels mysterious:
 
-- **It's detection, not silent rewriting.** The compiler does **not** secretly turn your `map` into a `pmap` behind your back. Your code runs exactly as written; the suggestion is advisory, and you opt in by accepting the fix. Performance stays predictable and your stack traces stay honest.
-- **It only fires when it's provably safe.** The analysis checks that the mapped function is **pure** — no I/O, no message sends, no mutation — reusing the same purity oracle the optimizer uses internally. If it can't prove purity, it stays quiet. False positives (suggesting an unsafe parallelization) are designed out; the cost is the occasional false negative (staying silent on something that *was* safe).
-- **`fold` / `reduce` are never suggested.** Purity is enough to parallelize a `map`, but a parallel *reduce* also needs an **associative** combiner — and associativity isn't something the compiler can check. So the detector never nudges you toward `preduce`; that one is always a deliberate, you-asserted-the-contract choice.
+- **It's detection, not silent rewriting.** The compiler does **not** secretly turn your `map` into a `pmap` behind your back. Your code runs exactly as written; the suggestion is advisory, and you opt in by accepting the fix. Performance stays predictable and your stack traces stay truthful.
+- **It only fires when it can prove safety.** The analysis checks that the mapped function is **pure** (no I/O, no message sends, no mutation), reusing the same purity oracle the optimizer uses internally. If it can't prove purity, it stays quiet. False positives (suggesting an unsafe parallelization) are designed out; the cost is the occasional false negative (staying silent on something that *was* safe).
+- **`fold` / `reduce` are never suggested.** Purity is enough to parallelize a `map`, but a parallel *reduce* also needs an **associative** combiner, and associativity isn't something the compiler can check. So the detector never nudges you toward `preduce`; that one is always an intentional, you-vouched-for-the-contract choice.
 
 ### Why advisory instead of fully automatic?
 
-Whether to parallelize is a judgment call that depends on data size and per-element cost — exactly the things a static analysis can't know (see the threshold discussion above). Silently rewriting every pure `map` into a `pmap` would make small-list code *slower* and scatter task-scheduling through programs that never wanted it. Surfacing the opportunity and letting you decide keeps the speedups where they matter and the behavior easy to reason about.
+Whether to parallelize is a judgment call that depends on data size and per-element cost, exactly the things a static analysis can't know (see the threshold discussion above). Silently rewriting every pure `map` into a `pmap` would make small-list code *slower* and scatter task-scheduling through programs that never wanted it. Surfacing the opportunity and letting you decide keeps the speedups where they matter and the behavior easy to reason about.
 
-> **Roadmap:** a fully-automatic, opt-in rewrite mode (a `--auto-parallel` compiler flag, off by default) has been designed to reuse the same purity analysis and runtime threshold. It is **not yet available** — today, parallelization is always either explicit (you call `pmap`) or accepted from a suggestion (you click the quick-fix).
+> **Roadmap:** a fully-automatic, opt-in rewrite mode (a `--auto-parallel` compiler flag, off by default) has been designed to reuse the same purity analysis and runtime threshold. It is **not yet available**; today, parallelization is always either explicit (you call `pmap`) or accepted from a suggestion (you click the quick-fix).
 
 ---
 
 ## Correctness guarantees, in one place
 
-- `pmap`, `pmap_n`, and `pfilter` return results **identical** to `map` / `filter` — same elements, same order — for any function safe to run concurrently.
+- `pmap`, `pmap_n`, and `pfilter` return results **identical** to `map` / `filter` (same elements, same order) for any function safe to run concurrently.
 - `preduce` returns a result identical to `fold_left` **iff** `combine` is associative with `identity` as its unit.
 - Compiled and interpreted runs produce the **same output**; only wall-clock time differs.
 - Below `pmap_threshold()`, every parallel function is exactly its sequential equivalent.
 
 **Conformance status (widening slice 9):** this guarantee is a mechanically
-tested part of the language reference — `core-march.md` §4.14 and
+tested part of the language reference: `core-march.md` §4.14 and
 `core-march-types.md` §2.11 (data parallelism adds no new typing rules).
 Golden `g43_parallel_determinism` witnesses `List.pmap == List.map` plus the
-RRB `Parallel.psum`/`pcount`/`pany`/`pall`/`preduce` byte-identical
-interpreted and compiled (stress-verified 0/15 crashes) — the first compiled
+RRB `Parallel.psum`/`pcount`/`pany`/`pall`/`preduce` matching to the exact
+byte interpreted and compiled (stress-verified 0/15 crashes), the first compiled
 witness for the `Parallel` module. One documented exception: **`psum_float`
-is not backend-portable** — IEEE-754 `+.` is not associative, and the two
+is not backend-portable**: IEEE-754 `+.` is not associative, and the two
 backends pick different worker/chunk counts, so results can differ in the
 last bit (finding P1, `specs/todos/`). Prefer `psum`/integer accumulation,
 or pin `psum_float` inputs that are exact in binary, when portability matters.
@@ -222,7 +222,7 @@ examples including word frequency, image processing, and statistics.
 
 ## See also
 
-- [Actors]({{ site.baseurl }}/docs/actors/) — the scheduler, `Task.async` / `Task.await`, and message-passing concurrency these functions build on.
-- [Parallel Data cookbook]({{ site.baseurl }}/docs/cookbook/parallel-data/) — `RRB.Vec` and `Parallel` with copy-and-run examples.
-- [Standard Library → List]({{ site.baseurl }}/docs/stdlib/List.html) — the full `List` API reference.
-- [LSP & Editors]({{ site.baseurl }}/docs/lsp/) — set up the language server to get the parallelization hints and quick-fix.
+- [Actors]({{ site.baseurl }}/docs/actors/): the scheduler, `Task.async` / `Task.await`, and message-passing concurrency these functions build on.
+- [Parallel Data cookbook]({{ site.baseurl }}/docs/cookbook/parallel-data/): `RRB.Vec` and `Parallel` with copy-and-run examples.
+- [Standard Library → List]({{ site.baseurl }}/docs/stdlib/List.html): the full `List` API reference.
+- [LSP & Editors]({{ site.baseurl }}/docs/lsp/): set up the language server to get the parallelization hints and quick-fix.

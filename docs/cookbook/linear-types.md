@@ -6,13 +6,13 @@ permalink: /docs/cookbook/linear-types/
 
 # Linear Types
 
-A linear value must be used exactly once — the compiler rejects code that drops it without consuming it, or uses it twice. This makes resource leaks and double-frees impossible to write.
+A linear value must be used exactly once: the compiler rejects code that drops it without consuming it, or uses it twice. This makes resource leaks and double-frees impossible to write.
 
 ---
 
 ## Declaring a linear type
 
-A plain `type` is unrestricted by default — any binding of it can be copied, dropped, or used any number of times. Linearity is requested at the *binding site*, with `linear let`, or on a function parameter with `linear`:
+A plain `type` is unrestricted by default: any binding of it can be copied, dropped, or used any number of times. Linearity is requested at the *binding site*, with `linear let`, or on a function parameter with `linear`:
 
 ```march
 type FileHandle = FileHandle(Int)
@@ -71,7 +71,7 @@ tag Closed
 tag Open
 ```
 
-State transitions are declared with `transitions`. Each `via` function must take the handle in its `from` state and return the handle — and *only* the handle, with no `Result` wrapper and no tuple — in its `to` state:
+State transitions are declared with `transitions`. Each `via` function must take the handle in its `from` state and return the handle (and *only* the handle, with no `Result` wrapper and no tuple) in its `to` state:
 
 ```march
 fn open_conn(h : FileHandle(Closed)) : FileHandle(Open) do
@@ -88,11 +88,11 @@ transitions FileHandle do
 end
 ```
 
-Calling `close_file` on a `FileHandle(Closed)` — or `open_conn` on a `FileHandle(Open)` — is a compile error: the compiler tracks exactly which state the handle is in and rejects the call before it ever runs.
+Calling `close_file` on a `FileHandle(Closed)`, or `open_conn` on a `FileHandle(Open)`, is a compile error: the compiler tracks exactly which state the handle is in and rejects the call before it runs at all.
 
 Two things fall out of `via`'s "handle in, bare handle out" shape:
 
-1. **Acquiring the first handle is not itself a transition.** `open_file` takes a `String`, not a `FileHandle` — the `transitions` block only covers moves between states of a value you already hold, not creating that value in the first place. It's an ordinary function, free to return `Result` for the acquisition to fail:
+1. **Acquiring the first handle is not itself a transition.** `open_file` takes a `String`, not a `FileHandle`: the `transitions` block only covers moves between states of a value you already hold, not creating that value in the first place. It's an ordinary function, free to return `Result` for the acquisition to fail:
 
    ```march
    fn open_file(path : String) : Result(FileHandle(Closed), String) do
@@ -100,7 +100,7 @@ Two things fall out of `via`'s "handle in, bare handle out" shape:
    end
    ```
 
-2. **An operation that also returns data can't be declared as a `via` transition** — its return type would be a tuple, not a bare handle — but it's still typestate-checked, for free, by its argument type. `read_chunk` only accepts a `FileHandle(Open)`, so calling it before `open_conn` is exactly as much a compile error as calling `close_file` twice would be; it just isn't *listed* under `transitions`, since it can't be:
+2. **An operation that also returns data can't be declared as a `via` transition** (its return type would be a tuple, not a bare handle), but it's still typestate-checked, for free, by its argument type. `read_chunk` only accepts a `FileHandle(Open)`, so calling it before `open_conn` is exactly as much a compile error as calling `close_file` twice would be; it just isn't *listed* under `transitions`, since it can't be:
 
    ```march
    fn read_chunk(h : FileHandle(Open)) : (String, FileHandle(Open)) do
@@ -135,7 +135,7 @@ expected `Open` but got `Closed`.
 
 ## `with` for linear resource scopes
 
-`with` pairs acquisition with guaranteed cleanup — useful when you want RAII-style deterministic release. It's an alternative to `let?` for the same kind of Result-returning acquisition; here it drives the same state machine as `process` above:
+`with` pairs acquisition with guaranteed cleanup, useful when you want RAII-style deterministic release. It's an alternative to `let?` for the same kind of Result-returning acquisition; here it drives the same state machine as `process` above:
 
 ```march
 fn process_with(path : String) : Result(String, String) do
@@ -201,4 +201,4 @@ mod Net do
 end
 ```
 
-`recv_bytes` consumes `sock0` and returns `(msg, Socket(Connected))` — a fresh handle. Using `sock0` again after that — say, passing it to a second `recv_bytes` call — is a compile error: `sock0` is linear, and it was already consumed. Forgetting to call `disconnect` at the end would also be a compile error — the final handle would be dropped without being consumed. And calling `send_bytes` or `recv_bytes` *after* `disconnect` fails too: their parameter type is `Socket(Connected)`, and by then all you have is a `Socket(Disconnected)`.
+`recv_bytes` consumes `sock0` and returns `(msg, Socket(Connected))`, a fresh handle. Using `sock0` again after that (say, passing it to a second `recv_bytes` call) is a compile error: `sock0` is linear, and it was already consumed. Forgetting to call `disconnect` at the end would also be a compile error: the final handle would be dropped without being consumed. And calling `send_bytes` or `recv_bytes` *after* `disconnect` fails too: their parameter type is `Socket(Connected)`, and by then all you have is a `Socket(Disconnected)`.

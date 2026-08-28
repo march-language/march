@@ -3,12 +3,12 @@ layout: docs
 title: Try It Out
 nav_order: 2.3
 permalink: /docs/playground/
-description: "Interactive March REPL — try March expressions in your browser, no install needed."
+description: "Interactive March REPL: try March expressions in your browser, no install needed."
 ---
 
 # Try March in your browser
 
-The playground below runs a full March interpreter compiled to WebAssembly-friendly JavaScript via js_of_ocaml. No install, no account — just type and run.
+The playground below runs a full March interpreter compiled to WebAssembly-friendly JavaScript via js_of_ocaml. No install, no account: just type and run.
 
 {% include playground.html %}
 

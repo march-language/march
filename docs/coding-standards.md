@@ -8,13 +8,13 @@ permalink: /docs/coding-standards/
 # March Coding Standards
 
 Canonical reference for March style, safety, and idiom rules. This document is the
-single source of truth — the linter (`forge lint`), the LSP, and LLM tooling all derive
+single source of truth: the linter (`forge lint`), the LSP, and LLM tooling all derive
 their rule definitions from here.
 
 Each rule has:
 - A stable **slug** used as the diagnostic code in the linter and LSP
-- A **severity** — `error`, `warning`, or `hint`
-- An **auto-fix** flag — whether the LSP can fix it automatically
+- A **severity**: `error`, `warning`, or `hint`
+- An **auto-fix** flag: whether the LSP can fix it automatically
 
 ---
 
@@ -31,13 +31,13 @@ Each rule has:
 
 ## Naming
 
-> **Some violations never reach the linter — the parser rejects them first.** March
+> **Some violations never reach the linter; the parser rejects them first.** March
 > reserves leading-*uppercase* identifiers for types, modules, and constructors, and
 > leading-*lowercase* identifiers for values, so several "Bad" examples below (an
 > uppercase function name, a lowercase type/module/constructor name, an untyped state
-> field) are hard parse errors, not lint findings you'll ever see. The rules here exist
-> for the cases that *do* parse — a `camelCase` function name, a `snake_case`
-> constructor written where the parser happens to allow it — and it's those the linter
+> field) are hard parse errors, not lint findings you will see at all. The rules here exist
+> for the cases that *do* parse (a `camelCase` function name, a `snake_case`
+> constructor written where the parser happens to allow it), and it's those the linter
 > and LSP flag. Individual rules no longer repeat this caveat.
 
 ### `naming/snake-case-functions`
@@ -112,7 +112,7 @@ end
 **Auto-fix:** yes (rename)
 
 Variant constructors within a type definition must use `PascalCase`. Lowercase or
-`snake_case` constructors are visually indistinguishable from variable names, which
+`snake_case` constructors look the same as variable names on the page, which
 makes pattern matches harder to read.
 
 ```march
@@ -187,7 +187,7 @@ end
 **Severity:** hint  
 **Auto-fix:** no
 
-A `match` arm whose body contains another `match` or an `if/else` should be extracted
+A `match` arm with a body that contains another `match` or an `if/else` should be extracted
 into a private function with multiple heads. Deeply nested branching is hard to read
 and test.
 
@@ -221,9 +221,9 @@ pfn dispatch({kind: Command, ..} = v) do run_command(v) end
 ```
 
 This rule triggers on:
-- A match arm whose body is a `match` expression
-- A match arm whose body is an `if/else` with two or more branches (single
-  `if` without `else` is allowed — it often reads as a guard)
+- A match arm with a body that is a `match` expression
+- A match arm with a body that is an `if/else` with two or more branches (single
+  `if` without `else` is allowed; it often reads as a guard)
 
 ---
 
@@ -313,7 +313,7 @@ end
 Every public function (non-`pfn`) should have a `doc` annotation. Use triple-quoted
 `doc """ ... """` for multi-line descriptions; `doc "..."` is fine for one-liners.
 
-**Why:** Doc strings are first-class in March — queryable in the REPL with `h(fn_name)`,
+**Why:** Doc strings are first-class in March: queryable in the REPL with `h(fn_name)`,
 surfaced in LSP hover, and the basis for future `march doc` generation. An undocumented
 public function is a missing contract.
 
@@ -408,7 +408,7 @@ A `let` binding that uses an irrefutable pattern on a fallible (multi-constructo
 will panic at runtime if the value does not match. Use `match` instead.
 
 **Why:** `let Some(x) = expr` is a runtime panic if `expr` is `None`. The exhaustiveness
-checker cannot catch this at the `let` site — it must be a lint rule.
+checker cannot catch this at the `let` site; it must be a lint rule.
 
 ```march
 -- Bad
@@ -456,7 +456,7 @@ end
 ```
 
 Detection: a `panic` call in a file that is not the application entry point
-(`main.march`) and is not test code — i.e. neither a `_test.march` file nor a
+(`main.march`) and is not test code, i.e. neither a `_test.march` file nor a
 file under a `test/` (or `tests/`) directory.
 
 ---
@@ -491,10 +491,10 @@ fn public_api(x : Int) : Int do x + 1 end
 **Severity:** warning  
 **Auto-fix:** no
 
-Code that follows a diverging call (a call that never returns — `panic`, `exit`, or a
+Code that follows a diverging call (a call that never returns: `panic`, `exit`, or a
 function with return type `Never`) is unreachable and should be removed.
 
-**Why:** Unreachable code is confusing and often indicates a logic error — either the
+**Why:** Unreachable code is confusing and often indicates a logic error: either the
 diverging call is wrong, or the code after it was left behind from a refactor.
 
 ```march
@@ -515,7 +515,7 @@ panic("unrecoverable")
 **Severity:** warning  
 **Auto-fix:** no
 
-Actor `on` handler bodies should be thin — a single delegating call or a state update
+Actor `on` handler bodies should be thin: a single delegating call or a state update
 expression. Complex logic (nested `match`, `if/else`, or more than three `let`
 bindings) belongs in a `pfn`, which can be called from the handler and tested
 independently without sending a message.
@@ -594,8 +594,8 @@ end
 **Severity:** warning  
 **Auto-fix:** no
 
-Do not call `spawn` inside an `on` handler body. Process topology — which actors
-create which other actors — should be declared in `init` or via the `supervise`
+Do not call `spawn` inside an `on` handler body. Process topology (which actors
+create which other actors) should be declared in `init` or via the `supervise`
 config, not wired up dynamically in response to messages.
 
 **Why:** Spawns inside handlers make the process tree implicit and hard to reason
@@ -635,7 +635,7 @@ end
 
 All fields in an actor's `state { ... }` block must have explicit type annotations.
 Actor state is long-lived, potentially serialised, and inspected by supervision
-tooling — implicit types are a maintenance hazard.
+tooling; implicit types are a maintenance hazard.
 
 ```march
 -- Bad (illustrative only — untyped state fields don't parse; see the note at

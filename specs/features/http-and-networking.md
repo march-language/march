@@ -56,7 +56,7 @@ Low-level TCP and HTTP/1.1 request-response handling. Does **not** close connect
 High-level composable client with Req-style pipeline (request steps → transport → response steps).
 
 **Key Types** (lines 15-34):
-- `Client`: Holds request steps, response steps, error steps, redirect/retry config
+- `Client`: Stores request steps, response steps, error steps, redirect/retry config
 - `HttpError`: Wraps transport errors, step errors, redirect limits
 
 **Step Pipeline**:
@@ -120,7 +120,7 @@ WebSocket frame handling and multiplexed I/O.
 
 **Key Types** (lines 9-13):
 - `WsFrame`: TextFrame(String) | BinaryFrame(String) | Ping | Pong | Close(Int, String)
-- `WsSocket`: WsSocket(Int) — wraps socket fd
+- `WsSocket`: WsSocket(Int), wraps socket fd
 - `SelectResult`: WsData(WsFrame) | ActorMsg | Timeout
 
 **Key Functions** (lines 17-50):
@@ -156,9 +156,9 @@ All heavy lifting is in C for performance. March code calls these builtins which
 ### HTTP Parsing and Serialization
 
 > **Additional C modules.** Beyond `march_http.c`, the runtime splits performance-critical HTTP work into:
-> - `runtime/march_http_parse_simd.c` — SIMD (SSE4.2 `PCMPESTRI`) request parser; the default request-reception path delegates here unless built with `MARCH_HTTP_DISABLE_SIMD`
-> - `runtime/march_http_io.c` — non-blocking I/O state machines (`march_set_nonblocking`, `march_recv_nonblocking`) used by the event loop
-> - `runtime/march_http_response.c` — zero-copy HTTP/1.1 response builder with cached status lines and a cached `Date` header
+> - `runtime/march_http_parse_simd.c`: SIMD (SSE4.2 `PCMPESTRI`) request parser; the default request-reception path delegates here unless built with `MARCH_HTTP_DISABLE_SIMD`
+> - `runtime/march_http_io.c`: non-blocking I/O state machines (`march_set_nonblocking`, `march_recv_nonblocking`) used by the event loop
+> - `runtime/march_http_response.c`: zero-copy HTTP/1.1 response builder with cached status lines and a cached `Date` header
 
 **Request Parsing** (`march_http_parse_request`, lines 265-351):
 - Input: Raw HTTP request string
@@ -185,12 +185,12 @@ All heavy lifting is in C for performance. March code calls these builtins which
 ### HTTP Server Accept Loop (`march_http_server_listen`)
 
 **Architecture**:
-- **Default: thread pool** (`runtime/march_http.c`). A `select()` accept loop enqueues accepted fds onto a bounded work queue; pool workers dequeue them and run `connection_thread`, which owns the connection for its whole keep-alive lifetime. Because a worker is occupied for that lifetime, **the worker count is the concurrent-connection limit**, so the pool is elastic: it starts at `ncpus*2` and grows on demand up to `max_connections` (default `MARCH_HTTP_POOL_MAX_SIZE` = 1024) as connections arrive. Workers are ordinary blocking OS threads, so a handler may do blocking I/O — a synchronous DB call — without stalling other connections. That is why this, not the event loop, is the default.
-- **Opt-in: event loop** (`runtime/march_http_evloop.c`, `march_evloop_server_listen`). Selected by setting `MARCH_HTTP_EVLOOP=1` **at run time** — both implementations are compiled into every March binary, so no rebuild is needed. (`-DMARCH_HTTP_USE_EVLOOP` at build time still forces it on unconditionally.) It uses **kqueue (macOS/BSD) / epoll (Linux)** with one thread per core, each owning a private `SO_REUSEPORT` listener and its own loop that accepts, reads non-blocking (`march_http_io.c`), runs the pipeline, and writes the response.
+- **Default: thread pool** (`runtime/march_http.c`). A `select()` accept loop enqueues accepted fds onto a bounded work queue; pool workers dequeue them and run `connection_thread`, which owns the connection for its whole keep-alive lifetime. Because a worker is occupied for that lifetime, **the worker count is the concurrent-connection limit**, so the pool is elastic: it starts at `ncpus*2` and grows on demand up to `max_connections` (default `MARCH_HTTP_POOL_MAX_SIZE` = 1024) as connections arrive. Workers are ordinary blocking OS threads, so a handler may do blocking I/O (a synchronous DB call) without stalling other connections. That is why this, not the event loop, is the default.
+- **Opt-in: event loop** (`runtime/march_http_evloop.c`, `march_evloop_server_listen`). Selected by setting `MARCH_HTTP_EVLOOP=1` **at run time**; both implementations are compiled into every March binary, so no rebuild is needed. (`-DMARCH_HTTP_USE_EVLOOP` at build time still forces it on unconditionally.) It uses **kqueue (macOS/BSD) / epoll (Linux)** with one thread per core, each owning a private `SO_REUSEPORT` listener and its own loop that accepts, reads non-blocking (`march_http_io.c`), runs the pipeline, and writes the response.
 
-  **On Linux it is substantially faster** — measured on an idle 4-vCPU Ubuntu 24.04 box (kernel 6.8), wrk `-c256`, order-swapped, switching implementation at runtime within one binary: thread pool 45,990/51,018 req/s at 47.46/43.04 CPU-µs per request; event loop **76,488/80,416 req/s at 27.35/24.76 CPU-µs** — +61% throughput and −42% CPU per request. The macOS/kqueue gap is much smaller (21% CPU, and the event loop loses on req/s to a scheduling artifact), so this is a Linux-specific win.
+  **On Linux it is substantially faster**: measured on an idle 4-vCPU Ubuntu 24.04 box (kernel 6.8), wrk `-c256`, order-swapped, switching implementation at runtime within one binary: thread pool 45,990/51,018 req/s at 47.46/43.04 CPU-µs per request; event loop **76,488/80,416 req/s at 27.35/24.76 CPU-µs**; +61% throughput and −42% CPU per request. The macOS/kqueue gap is much smaller (21% CPU, and the event loop loses on req/s to a scheduling artifact), so this is a Linux-specific win.
 
-  **The constraint that keeps it off by default is real:** loop threads must never block. A handler performing synchronous I/O — a blocking database call — stalls every other connection sharing that thread. Enable it for I/O-light, high-concurrency services; leave it off when handlers block.
+  **The constraint that keeps it off by default is real:** loop threads must never block. A handler performing synchronous I/O (a blocking database call) stalls every other connection sharing that thread. Enable it for I/O-light, high-concurrency services; leave it off when handlers block.
 
   > This document previously described the event loop as the default. It has not been since it was made opt-in; every March HTTP server runs the thread pool unless `MARCH_HTTP_EVLOOP` is set.
 
@@ -262,12 +262,12 @@ All heavy lifting is in C for performance. March code calls these builtins which
 ### TLS / HTTPS (`runtime/march_tls.c`)
 
 HTTPS is supported via an **OpenSSL-backed TLS layer**:
-- `march_tls_client_ctx` / `march_tls_server_ctx` — create SSL contexts
-- `march_tls_connect(fd, ctx, hostname)` — wrap a connected socket as a TLS client (SNI via `hostname`)
-- `march_tls_accept(fd, ctx)` — wrap an accepted socket as a TLS server
-- `march_tls_read` / `march_tls_write` — TLS I/O
+- `march_tls_client_ctx` / `march_tls_server_ctx`: create SSL contexts
+- `march_tls_connect(fd, ctx, hostname)`: wrap a connected socket as a TLS client (SNI via `hostname`)
+- `march_tls_accept(fd, ctx)`: wrap an accepted socket as a TLS server
+- `march_tls_read` / `march_tls_write`: TLS I/O
 
-These are wired into the compiler in `lib/tir/llvm_emit.ml` (`mangle_extern` maps `tls_connect → march_tls_connect`, `tls_accept → march_tls_accept`, etc.). On the stdlib side, `stdlib/http_transport.march` deliberately refuses `https://` requests with `SchemeNotSupported` and directs callers to the **`Tls` module** (`stdlib/tls.march`), which provides `Tls.connect` and `Tls.https_get` and routes `https://` traffic through the TLS runtime.
+These are wired into the compiler in `lib/tir/llvm_emit.ml` (`mangle_extern` maps `tls_connect → march_tls_connect`, `tls_accept → march_tls_accept`, etc.). On the stdlib side, `stdlib/http_transport.march` intentionally turns down `https://` requests with `SchemeNotSupported` and directs callers to the **`Tls` module** (`stdlib/tls.march`), which provides `Tls.connect` and `Tls.https_get` and routes `https://` traffic through the TLS runtime.
 
 ## Heap Object Layout
 
@@ -429,14 +429,14 @@ Performance benchmarks under `bench/`:
 | `stdlib/http_client.march` | Layer 3: Composable client pipeline | 1-441 |
 | `stdlib/http_server.march` | Server with Plug middleware | 1-234 |
 | `stdlib/websocket.march` | WebSocket frame types and API | 1-53 |
-| `stdlib/tls.march` | `Tls` module — `Tls.connect`, `Tls.https_get` | 1- |
-| `runtime/march_http.c` | TCP, request reception, fallback thread-per-conn loop, keep-alive detection | — |
-| `runtime/march_http_evloop.c` | Default event-loop server (kqueue/epoll) | — |
-| `runtime/march_http_parse_simd.c` | SIMD HTTP/1.x request parser | — |
-| `runtime/march_http_io.c` | Non-blocking I/O state machines | — |
-| `runtime/march_http_response.c` | Zero-copy HTTP/1.1 response builder | — |
-| `runtime/march_tls.c` | OpenSSL TLS (`march_tls_connect`/`accept`) | — |
-| `runtime/march_http.h` | C API declarations | — |
+| `stdlib/tls.march` | `Tls` module: `Tls.connect`, `Tls.https_get` | 1- |
+| `runtime/march_http.c` | TCP, request reception, fallback thread-per-conn loop, keep-alive detection | none |
+| `runtime/march_http_evloop.c` | Default event-loop server (kqueue/epoll) | none |
+| `runtime/march_http_parse_simd.c` | SIMD HTTP/1.x request parser | none |
+| `runtime/march_http_io.c` | Non-blocking I/O state machines | none |
+| `runtime/march_http_response.c` | Zero-copy HTTP/1.1 response builder | none |
+| `runtime/march_tls.c` | OpenSSL TLS (`march_tls_connect`/`accept`) | none |
+| `runtime/march_http.h` | C API declarations | none |
 | `runtime/sha1.c` | SHA-1 for WebSocket handshake | 1-72 |
 | `runtime/base64.c` | Base64 for WebSocket | 1-50 |
 | `lib/tir/llvm_emit.ml` | LLVM code generation | 268-279, 1432-1443 |
@@ -523,4 +523,4 @@ WebSocket can multiplex on actor notification pipes:
 
 ### With Threads
 
-The default event-loop server uses a fixed set of threads (one per core), each draining its own kqueue/epoll — connection count is bounded by fd limits, not by thread count. The fallback thread-per-connection path uses a bounded work queue. The pipeline closure is shared (reference-counted) across threads in both modes.
+The default event-loop server uses a fixed set of threads (one per core), each draining its own kqueue/epoll; connection count is bounded by fd limits, not by thread count. The fallback thread-per-connection path uses a bounded work queue. The pipeline closure is shared (reference-counted) across threads in both modes.

@@ -14,7 +14,7 @@ layer to the exact bug class it eliminates and when.
 
 The example: a **bounded file-chunk reader**. It must (1) only run in code allowed
 to read files, (2) use its file handle in the right order and exactly once, and
-(3) only ever be asked for a non-negative offset and a page-sized chunk. Each of
+(3) only be asked for a non-negative offset and a page-sized chunk. Each of
 those is a separate layer.
 
 ---
@@ -66,7 +66,7 @@ A module that never declares `needs IO.FileRead` cannot call `open` at all. The
 build fails and names the missing cap. And because `open` *takes* a
 `Cap(IO.FileRead)`, you cannot conjure one: it has to be threaded down from
 `main`'s root capability. There is no ambient "just read a file": the
-permission is a value you must be handed.
+permission is a value you must be given.
 
 ### What the typestate layer rejects
 
