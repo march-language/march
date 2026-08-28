@@ -201,12 +201,13 @@ lib/ast/ast.ml              AST types (span, expr, pattern, decl, …)
 lib/lexer/lexer.mll         ocamllex lexer
 lib/parser/parser.mly       menhir parser
 lib/desugar/desugar.ml      pipe desugar, multi-head fn → single EMatch clause
+                             (+desugar_derive: derive/satisfy expansion + span uniquification)
 lib/typecheck/                bidirectional HM type inference: typecheck (inference core),
-                             +typecheck_{env,types,builtins,exhaustive,caps,tailcall}
+                             +typecheck_{env,types,builtins,exhaustive,caps,tailcall,unify,reorder,modcaps,session}
 lib/eval/                     tree-walking interpreter: eval (evaluator),
                              +eval_{types,prim,builtins,runtime,net,session,simd}
-lib/tir/                    typed IR: lower (+lower_state/types/match/decls/actor/tests), mono, defun,
-                             perceus (+perceus_liveness/elide/fbip/scrut), borrow, fusion,
+lib/tir/                    typed IR: lower (+lower_state/types/match/decls/expr/actor/tests), mono, defun,
+                             perceus (+perceus_core/liveness/elide/fbip/scrut), borrow, fusion,
                              llvm_emit (+llvm_ctx/builtins/eq/data/case/calls/tco/toplevel/repl,
                              and the per-arm bodies in llvm_emit_{arith,alloc,call,data,html,task,tcoarm,simd,nmap}),
                              builtin_name (closed variant for builtin dispatch),

@@ -28,8 +28,12 @@ favour of this document.
 >   hunks land inside `compile`.
 > - **Finding 1 is closed.** Phase 6 was re-scoped from "cold data only" to nine
 >   tasks and executed.
-> - **Finding 3 is partly open.** `lower.ml`, `desugar.ml` and `perceus.ml` still
->   have no decomposition phase, though all three now have interfaces.
+> - **Finding 3 is now CLOSED (2026-08-27).** `desugar.ml` 3,320 → 2,141,
+>   `lower.ml` 2,000 → 1,046, `perceus.ml` 1,997 → 743, into `desugar_derive.ml`,
+>   `lower_expr.ml` and `perceus_core.ml`. Two further `desugar.ml` clusters were
+>   examined and DECLINED — the `~H` sigil cluster and the qualification tail both
+>   create cycles — see
+>   `specs/progress/2026-08-27-lower-desugar-perceus-decomposition.md`.
 > - **Finding 2 stands** as a method result: concentration without churn is not
 >   worth fixing. `llvm_case.ml` remains untouched, correctly.
 >
