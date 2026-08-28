@@ -6,5 +6,5 @@
  ; the two passes (syntactic ban, proof-based check) reported it.  No cycle:
  ; march_typecheck depends on ast/errors/modules/caps only.
  (libraries march_ast march_errors march_refine march_caps march_typecheck)
- (modules refine_check division_safety no_alloc return_infer precond_infer postcond_infer cap_infer
+ (modules refine_check refine_encode division_safety no_alloc return_infer precond_infer postcond_infer cap_infer
           obligation panic_surface_by_proof))
