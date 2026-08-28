@@ -37,7 +37,7 @@ shape. `_exe` discards the program name.
 ## Usage messages and exit codes
 
 Send usage and errors to **stderr** with `IO.warn` (it adds a newline), keeping
-stdout clean for real output. Set the process exit code with `System.exit(n)` —
+stdout clean for real output. Set the process exit code with `System.exit(n)`;
 returning an `Int` from `main` does *not* affect the exit status.
 
 <!-- scroll:skip -->

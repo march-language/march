@@ -7,20 +7,20 @@ scrollmd: true
 
 # Numeric Data
 
-How to process large numeric arrays fast — the `NativeArray` auto-vectorized
+How to process large numeric arrays fast: the `NativeArray` auto-vectorized
 path for everyday numeric loops, the `Simd` module for guaranteed vector
 codegen, and how to tell which one you need. Uses the `NativeArray` and
 `Simd` modules.
 
 > Each snippet below is one module. Put your own `main` (or a `test` block)
-> *inside* the module to run it — a file has a single top-level `mod`.
+> *inside* the module to run it; a file has a single top-level `mod`.
 
 ---
 
 ## From a List to a NativeArray
 
 `List` and `Array` are the right default for everyday code, but a numeric
-hot loop over a large collection wants `NativeArray` instead — a flat,
+hot loop over a large collection wants `NativeArray` instead: a flat,
 contiguous array that `march --compile` can auto-vectorize into real SIMD
 instructions. Build one with `from_list_*`, and convert back with `to_list_*`
 if you need a `List` again:
@@ -39,18 +39,18 @@ mod NumFast do
 end
 ```
 
-`sum_float`/`map_float`/`map2_float` auto-vectorize under a compiled build —
+`sum_float`/`map_float`/`map2_float` auto-vectorize under a compiled build;
 see [SIMD & Native Arrays]({{ site.baseurl }}/docs/simd/#what-vectorizes) for
 exactly which shapes qualify (short, single-use, concrete-`Float` callbacks).
 This is a fast path you opt into for numeric hot loops, not the default
-representation for numeric data — reach for `List`/`Array` everywhere else.
+representation for numeric data; reach for `List`/`Array` everywhere else.
 
 ---
 
-## Narrow widths: half the bytes, double the lanes
+## Narrow widths: 50% of the bytes, double the lanes
 
 Beyond `Int`/`Float` (i64/f64), `NativeArray` also supports narrower element
-widths — **f32**, **i32**, **u8** — with the same shape of API (`make_*`,
+widths, **f32**, **i32**, and **u8**, with the same shape of API (`make_*`,
 `map_*`, `sum_*`, `map2_*`) plus conversions to/from the wider types. Halving
 the element width doubles how many lanes fit in one SIMD vector, which is
 where the extra speed comes from:
@@ -76,7 +76,7 @@ end
 
 **Boundary rule:** integer stores truncate mod 2^w two's-complement, float
 stores round to nearest-even binary32, loads widen exactly (`u8`
-zero-extends, `i32` sign-extends) — none of this ever traps. See [SIMD &
+zero-extends, `i32` sign-extends); none of this traps, in any case. See [SIMD &
 Native Arrays → Narrow element widths]({{ site.baseurl
 }}/docs/simd/#narrow-element-widths) for the full boundary contract and the
 f32-vs-f64 speedup numbers (~2.0-2.4x at N=5M).
@@ -86,7 +86,7 @@ f32-vs-f64 speedup numbers (~2.0-2.4x at N=5M).
 ## Aggregating a CSV column the fast-path way
 
 The [Files cookbook]({{ site.baseurl }}/docs/cookbook/files/#aggregating-a-column)
-sums a CSV column with `List.fold_left` over `List(List(String))` — simple
+sums a CSV column with `List.fold_left` over `List(List(String))`: simple
 and fine for small-to-medium files. For a large column, convert the parsed
 cells to a `NativeArray` first and let `sum_int`/`sum_float` do the
 reduction instead of a hand-written fold:
@@ -124,8 +124,8 @@ mod SalesFast do
 end
 ```
 
-Same shape as `Sales.sum_column` in the Files cookbook — parse cells, locate
-the column by header, fold — just with the reduction handed to
+Same shape as `Sales.sum_column` in the Files cookbook (parse cells, locate
+the column by header, fold), just with the reduction given to
 `NativeArray.sum_int` instead of a hand-written `List.fold_left`. Worth the
 extra `from_list_int` conversion once the row count gets large enough that
 the reduction itself, not the CSV parse, dominates.
@@ -135,12 +135,12 @@ the reduction itself, not the CSV parse, dominates.
 ## When `NativeArray` isn't enough: the `Simd` module
 
 `NativeArray`'s `map`/`map2`/`sum` compile to SIMD *when the optimizer
-decides to* — a short, single-use, concretely-typed callback qualifies, but
+chooses to*: a short, single-use, concretely-typed callback qualifies, but
 it's still an optimizer decision, not a language guarantee. The `Simd`
 module is the opposite trade: five 128-bit vector types
 (`F32x4`/`F64x2`/`I32x4`/`I64x2`/`U8x16`) you construct and operate on
 directly, so the vector lowering is **guaranteed**. Reach for it when you
-need something `NativeArray`'s builtin ops don't express — cross-lane
+need something `NativeArray`'s builtin ops don't express: cross-lane
 structure (masks, `select`), a fused multiply-add, or byte-level scanning.
 
 ### Dot product: a register-resident accumulator loop
@@ -183,28 +183,28 @@ end
 ```
 
 `dot_loop` is a self-tail-recursive top-level function threading the
-`F32x4` accumulator as its own parameter — the shape the compiler keeps
+`F32x4` accumulator as its own parameter: the shape the compiler keeps
 register-resident across iterations with zero allocation (see [SIMD & Native
 Arrays → The register-residency contract]({{ site.baseurl
 }}/docs/simd/#the-register-residency-contract)). The scalar `dot_tail` at
 the end handles any remainder that doesn't fill a full 4-lane group.
 
-**Don't reach for this by default.** For exactly this shape — multiply two
-arrays elementwise, then reduce — composing `NativeArray.map2_f32` +
+**Don't reach for this by default.** For exactly this shape (multiply two
+arrays elementwise, then reduce), composing `NativeArray.map2_f32` +
 `sum_f32` currently *beats* a hand-written `Simd` accumulator loop doing the
 same computation (2.55 ms vs. 10.0 ms at N=5M, ~3.9x). The gap isn't a SIMD
 cost; it's general per-iteration overhead every hand-written `NativeArray`
 index loop pays (a preemption check, a stack save/restore, RC bookkeeping),
-not specific to vectors — see [SIMD Benchmarks → Simd module
+not specific to vectors; see [SIMD Benchmarks → Simd module
 kernels]({{ site.baseurl }}/docs/simd-benchmarks/#simd-module-kernels) for
 the full breakdown. Use the pattern above when you need `fma` fused into one
-instruction, or cross-lane structure `map2`/`sum` can't express — not as a
+instruction, or cross-lane structure `map2`/`sum` can't express, not as a
 default replacement for `map2` + `sum`.
 
 ### Byte scanning: where `Simd` is a clear win
 
 Unlike the dot-product case, byte-level scanning is where `Simd` wins
-outright — no `NativeArray` op does 16-lane-at-a-time comparison:
+completely: no `NativeArray` op does 16-lane-at-a-time comparison:
 
 ```march
 mod ScanKernel do
@@ -252,7 +252,7 @@ end
 zero otherwise); `first_set_u8x16` reads that mask's lanes and returns the
 index of the first match, or `-1` if none of the 16 bytes in this stride
 matched, in which case the loop advances by a full 16-byte stride and tries
-again. This is the classic memchr-shaped SIMD workload — measured **~11.5x
+again. This is the classic memchr-shaped SIMD workload: measured **~11.5x
 faster** than the equivalent byte-at-a-time scalar loop over 16MB of data.
 See [SIMD Benchmarks → Simd module kernels]({{ site.baseurl
 }}/docs/simd-benchmarks/#simd-module-kernels) for the numbers.
@@ -261,7 +261,7 @@ See [SIMD Benchmarks → Simd module kernels]({{ site.baseurl
 
 ## See also
 
-- [SIMD & Native Arrays]({{ site.baseurl }}/docs/simd/) — the full guide: what vectorizes, how to trigger it, the honest performance story, known limitations.
-- [SIMD Benchmarks]({{ site.baseurl }}/docs/simd-benchmarks/) — the numbers behind every claim on this page.
-- [Parallel Data]({{ site.baseurl }}/docs/cookbook/parallel-data/) — combining vectorization within a chunk with parallelism across chunks.
-- [Standard Library → NativeArray]({{ site.baseurl }}/docs/stdlib/NativeArray.html) · [Standard Library → Simd]({{ site.baseurl }}/docs/stdlib/Simd.html) — full API references.
+- [SIMD & Native Arrays]({{ site.baseurl }}/docs/simd/): the full guide, what vectorizes, how to trigger it, the unvarnished performance story, known limitations.
+- [SIMD Benchmarks]({{ site.baseurl }}/docs/simd-benchmarks/): the numbers behind every claim on this page.
+- [Parallel Data]({{ site.baseurl }}/docs/cookbook/parallel-data/): combining vectorization within a chunk with parallelism across chunks.
+- [Standard Library → NativeArray]({{ site.baseurl }}/docs/stdlib/NativeArray.html) · [Standard Library → Simd]({{ site.baseurl }}/docs/stdlib/Simd.html): full API references.

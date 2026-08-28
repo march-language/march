@@ -7,10 +7,10 @@ permalink: /docs/interfaces/
 
 # Interfaces
 
-Interfaces (typeclasses) provide ad-hoc polymorphism — the ability to write code that works for any type that satisfies a contract, without inheritance.
+Interfaces (typeclasses) provide ad-hoc polymorphism: the ability to write code that works for any type that satisfies a contract, without inheritance.
 
 **The bug they kill:** duplication that drifts out of sync. Without interfaces
-you write `show_color`, `show_user`, `show_order` — N near-identical functions
+you write `show_color`, `show_user`, `show_order`, N near-identical functions
 that every new caller has to know about and every refactor has to update in
 lockstep. One `show` constraint collapses them into a single contract: callers
 write `show(x)`, and the compiler routes to the right implementation. Add a new
@@ -99,8 +99,8 @@ Now you can call `show(Red)` or `eq(Red, Blue)` and the dispatch is resolved by 
 ## Conditional Implementations
 
 Implement an interface for a generic type with constraints. (`List(a)` itself
-already has `Show`/`Eq` in the stdlib — writing these exact impls for `List`
-now hits impl coherence, "Overlapping implementation" — so the example below
+already has `Show`/`Eq` in the stdlib; writing these exact impls for `List`
+now hits impl coherence, "Overlapping implementation", so the example below
 wraps a list in a small custom type instead; the mechanics are identical.)
 
 ```march
@@ -147,14 +147,14 @@ end
 
 **Multiple constraints on one function are not supported directly.** A
 function's `when`-clause parses as a single expression, and the constraint
-detector only recognizes one bare `Interface(tyvar)` call — `when Ord(a),
+detector only recognizes one bare `Interface(tyvar)` call; `when Ord(a),
 Show(a)` is a parse error (the comma isn't valid outside parens/lists), and
 `when Ord(a) && Show(a)` gets type-checked as an ordinary boolean guard
 expression and fails with `I don't know a constructor called `Show``.
 Verified live: both forms are rejected by the current compiler.
 
-The workaround is to declare a superinterface that `requires` the others —
-`requires` itself *does* accept a comma-separated list — and constrain on
+The workaround is to declare a superinterface that `requires` the others
+(`requires` itself *does* accept a comma-separated list) and constrain on
 that instead. This needs an (even empty) `impl` for the umbrella interface on
 each concrete type, but then dispatches correctly, interpreted and compiled:
 
@@ -174,7 +174,7 @@ end
 
 ## Standard Interfaces
 
-### `Eq(a)` — Equality
+### `Eq(a)`: Equality
 
 ```march
 interface Eq(a) do
@@ -183,9 +183,9 @@ interface Eq(a) do
 end
 ```
 
-Usage — `eq` is a compiler built-in and works standalone on any `Eq`-comparable
-type. `neq` is a *default method*: merely declaring `interface Eq` (as above)
-does not make `neq` callable — a type needs a concrete `impl Eq(T)` in scope
+Usage: `eq` is a compiler built-in and works standalone on any `Eq`-comparable
+type. `neq` is a *default method*: just declaring `interface Eq` (as above)
+does not make `neq` callable; a type needs a concrete `impl Eq(T)` in scope
 before `neq` resolves for it. Verified live: with the interface declared but
 no `impl Eq(Int)` anywhere, `neq(1, 2)` is `unbound variable: neq` in both
 backends; once an `impl Eq(Int)` exists, it works and gives the right answer
@@ -200,7 +200,7 @@ end
 neq(1, 2)          -- true (once `impl Eq(Int)` above is in scope)
 ```
 
-### `Ord(a)` — Ordering
+### `Ord(a)`: Ordering
 
 ```march
 interface Ord(a) requires Eq(a) do
@@ -213,7 +213,7 @@ end
 ```
 
 Usage (once the `interface Ord` above, or an equivalent, is declared and
-implemented for the type in question — `cmp`/`lt`/`gt`/`le`/`ge` are not
+implemented for the type in question; `cmp`/`lt`/`gt`/`le`/`ge` are not
 compiler built-ins the way `eq` and `show` are):
 ```march
 cmp(1, 2)    -- -1
@@ -222,7 +222,7 @@ cmp(3, 2)    -- 1
 lt(1, 2)     -- true
 ```
 
-### `Show(a)` — String Representation
+### `Show(a)`: String Representation
 
 ```march
 interface Show(a) do
@@ -237,7 +237,7 @@ show(true)    -- "true"
 show([1,2,3]) -- "[1, 2, 3]"  (if List has Show)
 ```
 
-### `Hash(a)` — Hashing
+### `Hash(a)`: Hashing
 
 ```march
 interface Hash(a) do
@@ -249,11 +249,11 @@ Required for keys in `Map` and elements in `Set`.
 
 ---
 
-## `derive` — Automatic Implementations
+## `derive`: Automatic Implementations
 
 **The bug `derive` kills:** field drift. A hand-written `eq` or `show` that
-enumerates a record's fields silently goes stale the moment you add a field —
-the new field just isn't compared or printed, and nothing complains. `derive`
+enumerates a record's fields silently goes stale the moment you add a field:
+the new field just isn't compared or printed, and no error appears. `derive`
 regenerates the implementation from the type definition on every build, so adding
 a field automatically extends every derived instance. The structure is the single
 source of truth.
@@ -271,14 +271,14 @@ derive Eq, Ord, Show, Hash for Status
 After `derive Eq for Point`, you can use `eq` on `Point` values.
 
 `derive` works for:
-- **`Eq`** — structural equality, comparing all fields/constructors
-- **`Ord`** — lexicographic ordering by fields, constructor order for variants
-- **`Show`** — pretty-printed representation
-- **`Hash`** — consistent hash based on structure. The `hash()` VALUE is
+- **`Eq`**: structural equality, comparing all fields/constructors
+- **`Ord`**: lexicographic ordering by fields, constructor order for variants
+- **`Show`**: pretty-printed representation
+- **`Hash`**: consistent hash based on structure. The `hash()` VALUE is
   cross-backend equal: the interpreter reimplements the compiled runtime's
   hash primitives bit-for-bit (splitmix64 for ints, FNV-1a for strings,
   masked to 62 bits so the result fits the interpreter's native int), so
-  `hash(v)` agrees interpreted-vs-compiled for every value — safe to compare
+  `hash(v)` agrees interpreted-vs-compiled for every value, safe to compare
   across backends. (Hash values are still not a stable serialization format
   across compiler versions, but within one version the two backends agree.)
 
@@ -312,7 +312,7 @@ A file may have only one top-level `mod`, so `main` lives inside `MyStack`
 here (a separate entry file could instead `import MyStack` and call the
 qualified names from outside). The `pop` match arm below binds the returned
 pair with a separate `let` rather than destructuring it inline in the
-constructor pattern — this sidesteps a compiled-backend bug described in
+constructor pattern; this sidesteps a compiled-backend bug described in
 [Known limitations](#known-limitations) at the end of this page.
 
 ```march
@@ -372,18 +372,18 @@ end
 ## Interface Dispatch
 
 On the **compiled backend**, interface dispatch is resolved at compile time.
-After whole-program monomorphization, a call site whose argument type is known
-statically compiles to a direct call to the concrete implementation — no vtable,
+After whole-program monomorphization, a call site with an argument type known
+statically compiles to a direct call to the concrete implementation: no vtable,
 no boxing for primitive types, no per-call overhead, and the compiler can inline
 across the interface boundary. The **interpreter** instead dispatches through a
-genuine runtime lookup keyed by the argument's dynamic type, so treat the
+true runtime lookup keyed by the argument's dynamic type, so treat the
 zero-overhead claims as scoped to the compiled backend's common case, not a
 universal guarantee.
 
 **Impl coherence** is checked at declaration: a second `impl Speak(Dog)` for the
 same `(interface, type)` pair is a compile error ("Overlapping implementation ...
 A type may implement an interface at most once"), so conflicts surface as
-diagnostics rather than silent shadowing. Two distinct types that merely share a
+diagnostics rather than silent shadowing. Two distinct types that only share a
 short name across modules can each `impl` the same interface and dispatch
 correctly by runtime type on both backends. One interpreter-only gap remains:
 calling an interface method unqualified from a module other than the one that
@@ -391,8 +391,8 @@ declared the `impl` can occasionally fail to resolve even when the identical cal
 compiles and runs correctly.
 
 **Interface method names are not module-qualifiable** in either backend:
-`Foo.speak(x)` never resolves — dispatch works through the method's bare name,
-not module-member lookup — so the working spelling is always the unqualified
+`Foo.speak(x)` never resolves (dispatch works through the method's bare name,
+not module-member lookup), so the working spelling is always the unqualified
 `speak(x)`. This is a known won't-fix (the naive fix was measured to regress
 working code; see
 `specs/progress/2026-08-03-interface-method-names-qualifiability-disposition.md`).
@@ -404,8 +404,8 @@ The interpreter recognizes this failure shape and appends a hint to the
 ## Known limitations
 
 **Tuple destructured inline inside a constructor pattern (compiled backend).**
-Destructuring a tuple pattern nested directly inside a constructor pattern —
-`Some((top, rest)) -> ...` — silently reads the tuple elements' raw tagged
+Destructuring a tuple pattern nested directly inside a constructor pattern,
+`Some((top, rest)) -> ...`, silently reads the tuple elements' raw tagged
 representation instead of untagging them on the compiled backend only (e.g. an
 `Int` `3` comes back as `7`); the interpreter is correct. Bind the whole payload
 first and destructure it with a separate `let`, as the stack example above does
@@ -416,6 +416,6 @@ backends.
 
 ## Next Steps
 
-- [Types](types.md) — types you implement interfaces for
-- [Standard Library](stdlib.md) — stdlib types and their interface implementations
-- [Pattern Matching](pattern-matching.md) — using `match` with interface-dispatched values
+- [Types](types.md): types you implement interfaces for
+- [Standard Library](stdlib.md): stdlib types and their interface implementations
+- [Pattern Matching](pattern-matching.md): using `match` with interface-dispatched values

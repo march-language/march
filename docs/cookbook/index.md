@@ -36,9 +36,9 @@ Practical recipes for getting things done in March. Each chapter covers one topi
 
 Start with one of these orientation guides:
 
-- [Coming from Python](../coming-from-python/) — dynamic to static typing, no exceptions, no classes
-- [Coming from TypeScript](../coming-from-typescript/) — sum types, `Result` vs `try/catch`, modules instead of classes
-- [Coming from Haskell, Elixir, or OCaml](../coming-from-fp/) — syntax cheatsheet and key differences
+- [Coming from Python](../coming-from-python/): dynamic to static typing, no exceptions, no classes
+- [Coming from TypeScript](../coming-from-typescript/): sum types, `Result` vs `try/catch`, modules instead of classes
+- [Coming from Haskell, Elixir, or OCaml](../coming-from-fp/): syntax cheatsheet and key differences
 
 ---
 
@@ -46,4 +46,4 @@ Start with one of these orientation guides:
 
 Every `march` code block has **copy** and **run** buttons that appear on hover. Clicking **run** opens the interactive interpreter panel on the right and evaluates the snippet immediately. You can edit the code in the panel and press **run** again to try variations.
 
-The panel is lazy — the interpreter bundle only loads on your first **run** click.
+The panel is lazy: the interpreter bundle only loads on your first **run** click.

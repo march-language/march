@@ -9,7 +9,7 @@ permalink: /docs/simd-benchmarks/
 
 Cross-language numbers for the numeric-array operations described in
 [SIMD & Native Arrays]({{ site.baseurl }}/docs/simd/). This page covers three
-stories, in order: (1) the original cross-language comparison — March vs.
+stories, in order: (1) the original cross-language comparison: March vs.
 hand-written OCaml and Rust, idiomatic Elixir, naive interpreted Python, and
 NumPy (a hand-tuned, BLAS-backed reference implementation) on three
 `Float`(f64)-array operations, all three now competitive (`map2` wasn't
@@ -17,8 +17,8 @@ always one of them; see [Fix history: map2](#fix-history-map2) for the
 before/after); (2) a March-only, same-box **f32 vs. f64** narrow-width
 comparison, plus a like-for-like f32 rematch against NumPy (see [Narrow
 element widths: f32 vs. f64](#narrow-element-widths-f32-vs-f64)); and (3) the
-explicit `Simd` module's own validation kernels — a byte-scanning win and an
-honest dot-product loss against `NativeArray`'s composed fast path (see
+explicit `Simd` module's own validation kernels: a byte-scanning win and an
+candid dot-product loss against `NativeArray`'s composed fast path (see
 [Simd module kernels](#simd-module-kernels)).
 
 ---
@@ -26,10 +26,10 @@ honest dot-product loss against `NativeArray`'s composed fast path (see
 ## Read this before the numbers
 
 **This is a shared development machine, not a dedicated benchmark box.**
-The run below shared the machine with several other active sessions — load
+The run below shared the machine with several other active sessions; load
 average was **7.9–11.1** at the time, on a 14-core machine. That mostly
 washes out for the SIMD numbers specifically (each program self-times only
-its own operation over up to a few milliseconds — see Methodology), but
+its own operation over up to a few milliseconds; see Methodology), but
 treat everything here as directional, not authoritative. Run it yourself on
 your own hardware if the exact numbers matter to you; the reproduction
 command is at the bottom of this page.
@@ -40,11 +40,11 @@ Where March loses or is only mid-pack, that's shown too (`map` loses to Rust
 here; `map2` did too, along with everything else, before the fix below).
 
 **Reproducing this.** `bench/run_benchmarks.sh` now prints its own provenance
-before it times anything — date, host, CPU, core count, load average, and the
+before it times anything: date, host, CPU, core count, load average, and the
 version of every compiler it resolved, including March's taken from the
 `dune exec` compiler that actually builds the benchmarks rather than from
-whatever `march` sits on `PATH`. If a comparison language is missing it says so
-loudly and names the rows that will be absent, because the old failure mode was
+whatever `march` sits on `PATH`. If a comparison language is missing it announces
+this visibly and names the rows that will be absent, because the old failure mode was
 quiet: a missing tool dropped that language's row and produced a smaller table
 with no indication it was smaller. The tables below and the profile beneath them
 were transcribed from such a run; the run prints them so you never have to take
@@ -58,7 +58,7 @@ this page's word for it.
 | Cores | 14 (10 performance + 4 efficiency) |
 | Memory | 36 GB |
 | OS | macOS 26.5.2 (Darwin 25.5.0, arm64) |
-| Load average at run time | 7.89, 11.10, 10.28 (1m/5m/15m) — **not idle** |
+| Load average at run time | 7.89, 11.10, 10.28 (1m/5m/15m), **not idle** |
 | Date | 2026-07-27 |
 
 ## Versions
@@ -78,33 +78,33 @@ this page's word for it.
 ## Methodology
 
 Every benchmark operates on 5,000,000 `Float`s. **Each program self-times
-only the operation under test** — data generation and (for interpreters)
+only the operation under test**; data generation and (for interpreters)
 process startup are excluded from the reported number. This isn't the usual
 whole-process wall-clock this project's other benchmarks use (see
 [the fib/binary-trees/tree-transform/list-ops results](https://github.com/march-language/march/blob/main/bench/RESULTS.md));
 it's necessary here because building the input dominates the operation
 itself at this scale. Building a 5M-element `List` of boxed floats in March
 (the natural way to construct one, then convert with
-`NativeArray.from_list_float`) costs ~200ms on its own — that's ~150x the
+`NativeArray.from_list_float`) costs ~200ms on its own; that's ~150x the
 ~1ms the vectorized `sum` actually takes. Measuring the whole process would
 report "how fast March allocates a linked list," not the SIMD claim under
 test, and every other language would face the same distortion from its own
-input-construction cost, which has nothing to do with vectorization either.
+input-construction cost, which is likewise unrelated to vectorization.
 
 Two per-language notes, both to keep the comparison fair rather than to flatter
 March: OCaml's `Array.fold_left`/`Array.map` box every float through a
-polymorphic accumulator (confirmed ~5x slower than a manual loop) — not what
+polymorphic accumulator (confirmed ~5x slower than a manual loop), not what
 a performance-conscious OCaml numeric loop looks like, so the OCaml sources
 use manual `for` loops instead. Rust's iterator-based `.sum()`/`.map()`/`.zip()`
-were checked against a manual-loop control and found already at parity — Rust's
-zero-cost-abstraction claim holds here, so the idiomatic iterator form is used
+were checked against a manual-loop control and found already at parity; Rust's
+zero-cost-abstraction claim applies here, so the idiomatic iterator form is used
 as-is.
 
 Run 10 times per language per benchmark; median, min, max reported.
 
 ## Results
 
-### `sum(arr)` — Float array reduction
+### `sum(arr)`: Float array reduction
 
 | Language | Median | Min | Max |
 |----------|-------:|----:|----:|
@@ -115,7 +115,7 @@ Run 10 times per language per benchmark; median, min, max reported.
 | Python | 296.9 ms | 283.0 ms | 319.3 ms |
 | NumPy | 1.0 ms | 1.0 ms | 1.0 ms |
 
-`native_float_arr_sum` auto-vectorizes under `clang -O2` — see
+`native_float_arr_sum` auto-vectorizes under `clang -O2`; see
 [SIMD & Native Arrays]({{ site.baseurl }}/docs/simd/#what-vectorizes) for the
 `#pragma clang fp reassociate(on)` this needed. March ties NumPy here.
 
@@ -126,7 +126,7 @@ Run 10 times per language per benchmark; median, min, max reported.
 [`bench/python/simd_sum.py`](https://github.com/march-language/march/blob/main/bench/python/simd_sum.py) ·
 [`bench/python/simd_sum_numpy.py`](https://github.com/march-language/march/blob/main/bench/python/simd_sum_numpy.py)
 
-### `map(x -> x * 2.0 + 1.0)` — elementwise Float map
+### `map(x -> x * 2.0 + 1.0)`: elementwise Float map
 
 | Language | Median | Min | Max |
 |----------|-------:|----:|----:|
@@ -139,9 +139,9 @@ Run 10 times per language per benchmark; median, min, max reported.
 
 This one needs a compiler-side trick, not just clang: March's closure-call
 ABI heap-boxes every `Float` crossing a call boundary, which blocks
-vectorization outright. For a concrete-`Float`, single-use callback like this
+vectorization entirely. For a concrete-`Float`, single-use callback like this
 one, a dedicated pass inlines the callback and drops the boxing so the loop
-vectorizes — without it, this number would look like `map2`'s pre-fix numbers
+vectorizes; without it, this number would look like `map2`'s before-the-fix numbers
 below, not like this (the pass details are in
 [Compiler internals](#compiler-internals)). March is competitive with
 hand-written OCaml/Rust and within 3x of NumPy.
@@ -153,7 +153,7 @@ hand-written OCaml/Rust and within 3x of NumPy.
 [`bench/python/simd_map.py`](https://github.com/march-language/march/blob/main/bench/python/simd_map.py) ·
 [`bench/python/simd_map_numpy.py`](https://github.com/march-language/march/blob/main/bench/python/simd_map_numpy.py)
 
-### `map2(a, b, (x, y) -> x + y)` — elementwise two-array zip
+### `map2(a, b, (x, y) -> x + y)`: elementwise two-array zip
 
 | Language | Median | Min | Max |
 |----------|-------:|----:|----:|
@@ -164,8 +164,8 @@ hand-written OCaml/Rust and within 3x of NumPy.
 | Python | 197.1 ms | 189.3 ms | 207.5 ms |
 | NumPy | 1.6 ms | 1.5 ms | 1.6 ms |
 
-`NativeArray.map2_int`/`map2_float` — added to unblock
-`DataFrame.col_add_col` (column-column arithmetic) — now gets the same
+`NativeArray.map2_int`/`map2_float` (added to unblock
+`DataFrame.col_add_col`, column-column arithmetic) now gets the same
 inlining/boxing-elimination treatment `map` does, so a concrete-`Float`
 callback vectorizes the same way. Beats OCaml, within 3x of NumPy.
 ([Compiler internals](#compiler-internals) covers how the pass was extended to
@@ -173,7 +173,7 @@ the two-array shape.)
 
 ### Fix history: map2
 
-This wasn't always true. `map2` originally shipped **correctness-first** —
+This wasn't always true. `map2` originally shipped **correctness-first**:
 the primitive itself (runtime, interpreter, typechecker, compiled-path
 registration) landed without the inlining pass most other `NativeArray`
 operations get, a known, explicitly-documented scoping decision. The numbers
@@ -185,7 +185,7 @@ made the cost of that gap concrete rather than a caveat:
 
 Before the fix, every element dispatched through the general closure-call
 path (heap-box each argument, indirect call through the closure's function
-pointer, unbox the result) — 299ms, **slower than naive interpreted
+pointer, unbox the result): 299ms, **slower than naive interpreted
 Python**, and ~47x slower than March's own `map` doing essentially the same
 arithmetic. The inlining pass was extended to the two-array `map2` shape the
 same day these numbers were first published; [Compiler
@@ -203,20 +203,20 @@ internals](#compiler-internals) covers what that took.
 ## Narrow element widths: f32 vs. f64
 
 Added 2026-08-10 alongside `NativeArray.make_f32`/`map_f32`/`map2_f32`/`sum_f32`
-(narrow `f32` element storage — half the width of the `f64`/`Float` element
+(narrow `f32` element storage, 50% of the width of the `f64`/`Float` element
 storage every table above uses). `bench/simd_f32.march` runs the same three
-shapes as `simd-sum`/`simd-map`/`simd-map2` above — `sum`,
-`map(fn x -> x *. 2.0 +. 1.0)`, `map2(fn (x, y) -> x +. y)` — at the same
+shapes as `simd-sum`/`simd-map`/`simd-map2` above (`sum`,
+`map(fn x -> x *. 2.0 +. 1.0)`, `map2(fn (x, y) -> x +. y)`) at the same
 N=5M, self-timed the same way (data generation excluded; see Methodology
 above). Unlike the tables above, this one is **March-only, same-box,
 same-build, f32 vs. f64**: the point isn't a cross-language comparison, it's
 whether halving the element width (and doubling the SIMD lane count) actually
 pays off. Absolute ms are not a regression baseline across machine/load
-states — the f32/f64 *ratio* measured in the same run is what matters.
+states; the f32/f64 *ratio* measured in the same run is what matters.
 
 Methodology: 6 timed samples per operation (two 3-run round-robins, one
 `f32, f64-sum, f64-map, f64-map2` ordered and one reversed, to cancel the
-first-timed-variant warmup bias this page's other tables also control for —
+first-timed-variant warmup bias this page's other tables also control for;
 neither f32 nor f64 was consistently first).
 
 | N=5M | f32 | f64 | Speedup |
@@ -225,17 +225,17 @@ neither f32 nor f64 was consistently first).
 | `map(x -> x*2+1)` | 2.27 ms | 4.54 ms | ~2.0x |
 | `map2(a, b, +)` | 2.67 ms | 6.40 ms | ~2.4x |
 
-`map`'s ~2.0x sits right at the theoretical ceiling from doubling the lane
+`map`'s ~2.0x sits right at the theoretical upper limit from doubling the lane
 count; `sum`/`map2` beat that ratio slightly, within the noise of a shared,
 loaded benchmark machine. `map_f32`/`map2_f32`/`sum_f32` get the identical
 inline-loop vectorization treatment `map_float`/`map2_float`/`sum_float` get
-above — confirmed via `-emit-llvm` to compile to real `<4 x float>` NEON
+above, confirmed via `-emit-llvm` to compile to real `<4 x float>` NEON
 vector instructions, not just scalar unrolling.
 
 ### Cross-language f32 rematch: March vs. NumPy
 
 A second run after the narrow-widths work merged, this time including NumPy
-at both element widths — the NumPy rows in the `sum`/`map`/`map2` tables
+at both element widths; the NumPy rows in the `sum`/`map`/`map2` tables
 above are float64 (`np.arange(n) / 100.0` yields float64), so
 `bench/python/simd_{sum,map,map2}_numpy_f32.py` (explicit
 `.astype(np.float32)`, float32 scalar operands) exist to make the f32
@@ -251,7 +251,7 @@ of 5, interleaved.
 
 March f32/f64 ratios in this run track the table above (sum 2.5x, map 2.0x,
 map2 2.6x). Like-for-like at f32, **March beats NumPy on `sum` (1.8x) and
-`map` (~13%), and ties it on `map2` (~5%)** — the pre-narrow-widths 4x `map2`
+`map` (~13%), and ties it on `map2` (~5%)**; the pre-narrow-widths 4x `map2`
 gap (6.4 ms vs 1.6 ms, see [Fix history: map2](#fix-history-map2)) is gone.
 Don't overclaim past that: this is one comparison on one shared machine, not
 a universal "March beats NumPy" result, and `map` on f64 still trails NumPy
@@ -267,7 +267,7 @@ full methodology and load-state notes in
 ## Simd module kernels
 
 Added 2026-08-11 as the validation kernels for the explicit `Simd` module
-(128-bit vector types — see [SIMD & Native Arrays → Explicit SIMD]({{
+(128-bit vector types; see [SIMD & Native Arrays → Explicit SIMD]({{
 site.baseurl }}/docs/simd/#explicit-simd--the-simd-module)).
 `bench/simd_kernels.march` runs two explicit-`Simd`-vs-baseline pairs,
 compiled only (`--compile --opt 2`), self-timed the same way as every other
@@ -280,7 +280,7 @@ coefficient of variation stayed under 5%.
 | `scan_simd` (`Simd.eq_u8x16` + `first_set_u8x16`) | 19.28 ms | 19.07 ms | 20.41 ms |
 | `scan_scalar` (byte-at-a-time March loop) | 221.32 ms | 221.14 ms | 222.97 ms |
 
-**`scan_simd` is ~11.5x faster** than the scalar byte-at-a-time loop — the
+**`scan_simd` is ~11.5x faster** than the scalar byte-at-a-time loop: the
 classic memchr-shaped SIMD win: `--emit-llvm` confirms the loop never
 allocates (the mask value is consumed immediately by `first_set_u8x16`
 within the same iteration, never escaping as a call argument).
@@ -290,7 +290,7 @@ within the same iteration, never escaping as a call argument).
 | `dot_simd` (hand-written `Simd` accumulator loop) | 10.01 ms | 9.96 ms | 10.13 ms |
 | `dot_composed` (`NativeArray.map2_f32` + `sum_f32`) | 2.55 ms | 2.40 ms | 2.72 ms |
 
-**`dot_simd` is ~3.9x *slower*** than `dot_composed` — and that gap is not a
+**`dot_simd` is ~3.9x *slower*** than `dot_composed`, and that gap is not a
 SIMD cost. Holding the loop framework constant and comparing only the vector
 lowering isolates why:
 
@@ -301,30 +301,30 @@ lowering isolates why:
 | `map2_f32` + `sum_f32` (one C call) | 2.34 |
 
 The **SIMD index loop is 4.0x faster than the equivalent scalar March index
-loop** over the same 5M pairs — the vector lowering is doing its job.
+loop** over the same 5M pairs; the vector lowering is doing its job.
 `dot_composed` wins for an unrelated reason: it's a single call into a tight
-C runtime pipeline, while any hand-written March index loop — `Simd`-driven
-or not — pays per-iteration overhead that has nothing to do with vectors (a
+C runtime pipeline, while any hand-written March index loop, `Simd`-driven
+or not, pays per-iteration overhead unrelated to vectors (a
 preemption check, a stack save/restore, RC bookkeeping on locals, an
 unhoisted length call). That overhead is general to every hand-written
 `NativeArray` index loop and is tracked separately at
-`specs/todos/2026-08-11-march-index-loop-per-iteration-overhead.md` — `dot_simd`
+`specs/todos/2026-08-11-march-index-loop-per-iteration-overhead.md`; `dot_simd`
 keeps its straightforward accumulator-loop shape rather than being
-rewritten around the gap, so the comparison stays honest.
+rewritten around the gap, so the comparison stays fair.
 
 **Recommendation** (same as [SIMD & Native Arrays]({{ site.baseurl
 }}/docs/simd/#the-honest-performance-story)): for a simple
 elementwise-then-reduce pipeline, reach for `NativeArray.map`/`map2`/`sum`
 first. Reach for `Simd` directly for cross-lane structure (masks, `select`,
-scans), fused multi-op kernels (`fma`), or byte-level scanning — where, as
+scans), fused multi-op kernels (`fma`), or byte-level scanning, where, as
 the scan numbers above show, it's a clear and large win.
 
 `DataFrame`'s `Min`/`Max` aggregation was evaluated against a `Simd`-based
-migration on the same shape and deliberately **not** migrated: a
+migration on the same shape and intentionally **not** migrated: a
 `Simd.min_i64x2`/`max_i64x2` accumulator loop measured ~8.2x slower than the
 existing `native_int_arr_min`/`native_float_arr_min` C reduction, for the
-same index-loop-overhead reason above (and with a lower ceiling even once
-that's fixed — `i64x2`/`f64x2` are only 2 lanes wide, vs. 4 for the
+same index-loop-overhead reason above (and with a lower upper limit even once
+that's fixed: `i64x2`/`f64x2` are only 2 lanes wide, vs. 4 for the
 `f32x4`/`i32x4`/`u8x16` families used above).
 
 **Source:** [`bench/simd_kernels.march`](https://github.com/march-language/march/blob/main/bench/simd_kernels.march) ·
@@ -336,22 +336,22 @@ full methodology, load-state notes, and the DataFrame Min/Max probe in
 
 ## Compiler internals
 
-> For compiler hackers — you don't need any of this to *use* `NativeArray`. It records
-> the machinery behind the boxing-free numeric fast path the benchmarks above exercise.
+> For compiler hackers: you don't need any of this to *use* `NativeArray`. It records
+> the infrastructure behind the boxing-free numeric fast path the benchmarks above exercise.
 
 The inlining and boxing-elimination live in the `Native_map_inline.ml` pass. It
-recognizes a `map`/`map2` call whose callback is fresh, single-use, and either
+recognizes a `map`/`map2` call with a callback that is fresh, single-use, and either
 non-capturing or single-capture (the same eligibility bar for both shapes), inlines that
-callback into the loop, and — when the callback's signature is concretely all-`Float` —
+callback into the loop, and, when the callback's signature is concretely all-`Float`,
 clones it under natural `double` parameters and return with zero heap boxing (internally
 "`Float`-boxing Stage 4, Option B"). The two-array `map2` support reuses the identical
 synthetic-call-name mechanism and unboxed-clone path as single-array `map`; it just
 matches a 3-argument call shape (two arrays + closure) instead of `map`'s 2-argument one.
 
 Because the inlined loop bypasses the `native_int_arr_map2` / `native_float_arr_map2`
-runtime helpers entirely, it carries its own length-mismatch guard
+runtime helpers entirely, it includes its own length-mismatch guard
 (`native_arr_map2_check_len` in `runtime/march_runtime.c`) so it still panics on a length
-mismatch exactly like the non-inlined path — covered by a dedicated regression test, not
+mismatch exactly like the non-inlined path, covered by a dedicated regression test, not
 just the happy path.
 
 ---
@@ -373,17 +373,17 @@ python3 -m venv bench/.venv
 bench/.venv/bin/pip install numpy
 ```
 
-Every other row and benchmark runs without it — the script detects
+Every other row and benchmark runs without it; the script detects
 `bench/.venv` and skips the NumPy row if it's absent.
 
 The runner ([`bench/run_benchmarks.sh`](https://github.com/march-language/march/blob/main/bench/run_benchmarks.sh))
 also compares `fib(40)`, `binary-trees(15)`, `tree-transform`, and `list-ops`
-against OCaml/Rust/Elixir — allocation, recursion, and HOF-pipeline shaped
+against OCaml/Rust/Elixir: allocation, recursion, and HOF-pipeline shaped
 workloads unrelated to SIMD. Full results, including those, are in
 [`bench/RESULTS.md`](https://github.com/march-language/march/blob/main/bench/RESULTS.md).
 
 ## See also
 
-- [SIMD & Native Arrays]({{ site.baseurl }}/docs/simd/) — what vectorizes, how to trigger it, known limitations.
-- [Standard Library → NativeArray]({{ site.baseurl }}/docs/stdlib/NativeArray.html) — full API reference.
-- [Standard Library → Simd]({{ site.baseurl }}/docs/stdlib/Simd.html) — full API reference for the explicit 128-bit vector types.
+- [SIMD & Native Arrays]({{ site.baseurl }}/docs/simd/): what vectorizes, how to trigger it, known limitations.
+- [Standard Library → NativeArray]({{ site.baseurl }}/docs/stdlib/NativeArray.html): full API reference.
+- [Standard Library → Simd]({{ site.baseurl }}/docs/stdlib/Simd.html): full API reference for the explicit 128-bit vector types.

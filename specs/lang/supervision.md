@@ -5,7 +5,7 @@ nav_order: 10
 permalink: /docs/supervision/
 ---
 
-> Part of the March Language Reference — see [specs/lang/index.md](https://github.com/march-language/march/blob/main/specs/lang/index.md).
+> Part of the March Language Reference; see [specs/lang/index.md](https://github.com/march-language/march/blob/main/specs/lang/index.md).
 
 # Supervision Trees
 
@@ -44,9 +44,9 @@ end
 ```
 
 The `supervise` block:
-- `strategy` — restart policy (see below)
-- `max_restarts N within S` — if more than N restarts occur in S seconds, the supervisor itself crashes (escalates to its own supervisor)
-- Each line `ActorName field_name` — a child to supervise, with `field_name` being the state field that stores its current `Pid`
+- `strategy`: restart policy (see below)
+- `max_restarts N within S`: if more than N restarts occur in S seconds, the supervisor itself crashes (escalates to its own supervisor)
+- Each line `ActorName field_name`: a child to supervise, with `field_name` being the state field that stores its current `Pid`
 
 When the supervisor starts (via `spawn(AppSupervisor)`), it automatically spawns all listed children.
 
@@ -90,7 +90,7 @@ Use `one_for_all` when children are tightly coupled and must be in sync.
 
 ### `rest_for_one`
 
-When a child crashes, it and all children **started after it** are restarted. Children started before it are left alone.
+When a child crashes, it and all children **started after it** are restarted. Children started before it are left as they were.
 
 ```march
 supervise do
@@ -210,16 +210,16 @@ This prevents restart storms from grinding the system to a halt. The escalation 
 
 ## Restart Backoff
 
-A child's **first** crash restarts immediately (zero added delay) — the same
+A child's **first** crash restarts immediately (zero added delay), the same
 synchronous, zero-delay behavior as before backoff existed, so a single
 crash-and-recover cycle is unaffected. Only a **repeat** crash of the same
 child slot (its `crash_streak` exceeds 1) is delayed: the delay is
-`25ms << min(streak - 1, 7)` — 50, 100, 200, 400, 800, 1600, then capped at
+`25ms << min(streak - 1, 7)`: 50, 100, 200, 400, 800, 1600, then capped at
 3200ms pre-jitter (the shift itself saturates at 7, so 3200ms is the true
-ceiling, not 5000ms) — with ±25% jitter on top (observed max ~4000ms) to
+upper limit, not 5000ms), with ±25% jitter on top (observed max ~4000ms) to
 de-synchronize a crash storm's retries. The streak resets to
-0 once the child survives a full `max_restarts ... within N` window without
-crashing again — a healed child goes back to immediate-restart behavior on
+0 once the child completes a full `max_restarts ... within N` window without
+crashing again; a healed child goes back to immediate-restart behavior on
 its next isolated crash.
 
 For the batch strategies (`one_for_all`/`rest_for_one`), a pending delayed
@@ -228,7 +228,7 @@ before it fires, instead of scheduling a second overlapping restart; the
 restart's child range widens (never narrows) to cover every sibling that
 crashed during the pending window.
 
-Set `MARCH_SUP_TRACE=1` to print each restart decision to stderr —
+Set `MARCH_SUP_TRACE=1` to print each restart decision to stderr:
 `march: supervisor backoff child=<idx> streak=<n> delay_ms=<ms>`, plus a
 ` (batch restart already pending, skipped)` suffix when a crash was absorbed
 into an already-pending batch restart instead of scheduling its own.
@@ -316,23 +316,23 @@ end
 
 ## Strategies for Supervision Design
 
-**Start with `one_for_one`** — it's the most common and most isolated strategy.
+**Start with `one_for_one`**: it's the most common and most isolated strategy.
 
-**Use `one_for_all` when children share state** — for example, a group of actors that all read from a shared config loaded at startup. If one crashes, the shared state might be stale and all should reload.
+**Use `one_for_all` when children share state**: for example, a group of actors that all read from a shared config loaded at startup. If one crashes, the shared state might be stale and all should reload.
 
-**Use `rest_for_one` for pipelines** — if actor B depends on actor A having started first, use `rest_for_one` so a crash in A also restarts B.
+**Use `rest_for_one` for pipelines**: if actor B depends on actor A having started first, use `rest_for_one` so a crash in A also restarts B.
 
-**Keep supervisors thin** — a supervisor's job is supervision, not business logic. Don't add handlers to a supervisor actor beyond what's needed to manage children.
+**Keep supervisors thin**: a supervisor's job is supervision, not business logic. Don't add handlers to a supervisor actor beyond what's needed to manage children.
 
-**Budget restarts conservatively** — `max_restarts 3 within 5` is aggressive; `max_restarts 10 within 60` is more lenient. Match the budget to how often legitimate transient failures are expected.
+**Budget restarts conservatively**: `max_restarts 3 within 5` is aggressive; `max_restarts 10 within 60` is more lenient. Match the budget to how often legitimate transient failures are expected.
 
 ---
 
 ## Capstone: a crash-tolerant job processor
 
-Let's build something real by layering the pieces one at a time — each step adds exactly one capability, and you can stop at whichever level your problem needs.
+Let's build something real by layering the pieces one at a time; each step adds exactly one capability, and you can stop at whichever level your problem needs.
 
-### Step 1 — one worker
+### Step 1: one worker
 
 Start with a single actor that processes jobs. On a bad job it just crashes; we'll make that survivable in the next step.
 
@@ -360,9 +360,9 @@ mod JobProcessorV1 do
 end
 ```
 
-That's the whole job processor — but if `Process` ever crashes, the worker is gone and every later job is dropped.
+That's the whole job processor, but if `Process` crashes at any point, the worker is gone and every later job is dropped.
 
-### Step 2 — put it under a supervisor (crash recovery)
+### Step 2: put it under a supervisor (crash recovery)
 
 Wrap the worker in a `one_for_one` supervisor. Now a crash is *recovered from*: the supervisor restarts the worker (with fresh state) instead of losing it.
 
@@ -416,9 +416,9 @@ end
 
 `one_for_one` is the right strategy here: one worker, independent of anything else, restarted on its own. See [Restart Strategies](#restart-strategies) for when to escalate to `one_for_all` or `rest_for_one`.
 
-### Step 3 — fan out to N workers
+### Step 3: fan out to N workers
 
-One worker is a bottleneck. Spawn a pool and spread jobs across it. Each worker is the same supervised actor; we just spawn several and round-robin work to them. The data-parallel shortcut for "run this over a whole list across the pool" is [`List.pmap`]({{ site.baseurl }}/docs/parallel-collections/) — same scheduler, order-preserving results:
+One worker is a bottleneck. Spawn a pool and spread jobs across it. Each worker is the same supervised actor; we just spawn several and round-robin work to them. The data-parallel shortcut for "run this over a whole list across the pool" is [`List.pmap`]({{ site.baseurl }}/docs/parallel-collections/); same scheduler, order-preserving results:
 
 ```march
 -- Dispatch a batch of jobs across N workers, in parallel.
@@ -428,11 +428,11 @@ fn dispatch_all(jobs : List(Int)) do
 end
 ```
 
-Under a supervisor you'd list several `Worker` children (`Worker w1`, `Worker w2`, …, each its own state field) so a crash in one doesn't disturb the others — that's exactly what `one_for_one` gives a pool.
+Under a supervisor you'd list several `Worker` children (`Worker w1`, `Worker w2`, …, each its own state field) so a crash in one doesn't disturb the others; that's exactly what `one_for_one` gives a pool.
 
-### Step 4 — add backpressure so a fast producer can't flood the pool
+### Step 4: add backpressure so a fast producer can't flood the pool
 
-The missing piece: if jobs arrive faster than the pool drains them, an unbounded queue grows until memory runs out. Put a [`Flow`]({{ site.baseurl }}/docs/flow/) pipeline in front so the *consumer* (the pool) sets the pace — the producer only runs as far ahead as there's capacity:
+The missing piece: if jobs arrive faster than the pool drains them, an unbounded queue grows until memory runs out. Put a [`Flow`]({{ site.baseurl }}/docs/flow/) pipeline in front so the *consumer* (the pool) sets the pace; the producer only runs as far ahead as there's capacity:
 
 ```march
 fn process_stream(jobs : List(Int)) do
@@ -443,16 +443,16 @@ fn process_stream(jobs : List(Int)) do
 end
 ```
 
-If you'd rather bound concurrency on a plain list without a pipeline, [`List.pmap_n(jobs, handle_job, 4)`]({{ site.baseurl }}/docs/parallel-collections/) caps in-flight work the same way. Either way, the chain is now complete: **one worker → supervised (survives crashes) → a pool (throughput) → backpressured (bounded memory under load).** That progression — start simple, add exactly the resilience you need — is the heart of how March systems are built.
+If you'd rather bound concurrency on a plain list without a pipeline, [`List.pmap_n(jobs, handle_job, 4)`]({{ site.baseurl }}/docs/parallel-collections/) caps in-flight work the same way. Either way, the chain is now complete: **one worker → supervised (persists through crashes) → a pool (throughput) → backpressured (bounded memory under load).** That progression (start simple, add exactly the resilience you need) is the heart of how March systems are built.
 
-> **What runs where.** The plain actor/supervisor programs (Steps 1–2) execute in the interpreter via `run_until_idle()`. The `Flow` / `pmap` stages (Steps 3–4) produce identical *results* in the interpreter but only parallelise when **compiled** — see [Parallel Collections → Interpreter vs. compiled]({{ site.baseurl }}/docs/parallel-collections/) and [Flow & Backpressure]({{ site.baseurl }}/docs/flow/).
+> **What runs where.** The plain actor/supervisor programs (Steps 1–2) execute in the interpreter via `run_until_idle()`. The `Flow` / `pmap` stages (Steps 3–4) produce identical *results* in the interpreter but only parallelise when **compiled**; see [Parallel Collections → Interpreter vs. compiled]({{ site.baseurl }}/docs/parallel-collections/) and [Flow & Backpressure]({{ site.baseurl }}/docs/flow/).
 
 ---
 
 ## Next Steps
 
-- [Actors]({{ site.baseurl }}/docs/actors/) — the actor model basics and the concurrency decision guide.
-- [Parallel Collections]({{ site.baseurl }}/docs/parallel-collections/) — `pmap` / `pmap_n` for fanning work across a pool.
-- [Flow & Backpressure]({{ site.baseurl }}/docs/flow/) — bounded streaming so a fast producer can't flood your workers.
-- [Clustering & RPC]({{ site.baseurl }}/docs/clustering/) — take a supervised app from one node to a cluster.
-- [Linear Types]({{ site.baseurl }}/docs/linear-types/) — how linear types support safe actor messaging.
+- [Actors]({{ site.baseurl }}/docs/actors/): the actor model basics and the concurrency decision guide.
+- [Parallel Collections]({{ site.baseurl }}/docs/parallel-collections/): `pmap` / `pmap_n` for fanning work across a pool.
+- [Flow & Backpressure]({{ site.baseurl }}/docs/flow/): bounded streaming so a fast producer can't flood your workers.
+- [Clustering & RPC]({{ site.baseurl }}/docs/clustering/): take a supervised app from one node to a cluster.
+- [Linear Types]({{ site.baseurl }}/docs/linear-types/): how linear types support safe actor messaging.

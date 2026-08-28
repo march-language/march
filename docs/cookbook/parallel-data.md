@@ -23,7 +23,7 @@ minimal ceremony. This chapter walks through every public function with copy-and
 
 ---
 
-## RRB.Vec — the persistent sequence
+## RRB.Vec: the persistent sequence
 
 ### Building a Vec
 
@@ -58,7 +58,7 @@ RRB.to_list(v)   -- [10, 20, 30]
 
 ### Modifying a Vec
 
-`Vec` is persistent — every operation returns a new `Vec`. The original is unchanged.
+`Vec` is persistent: every operation returns a new `Vec`. The original is unchanged.
 
 ```march
 let v  = RRB.from_list([1, 2, 3])
@@ -101,7 +101,7 @@ Indices are clamped: `slice(v, -99, 999)` covers the whole `Vec` without panicki
 
 ---
 
-## Parallel — map-reduce on Vec
+## Parallel: map-reduce on Vec
 
 Every `Parallel` function follows this pattern:
 
@@ -111,7 +111,7 @@ Every `Parallel` function follows this pattern:
 
 The number of workers defaults to `System.cpu_count()`. Use the `_n` variants for a custom count.
 
-### Parallel.pmap — order-preserving parallel transform
+### Parallel.pmap: order-preserving parallel transform
 
 ```march
 let nums = RRB.range(1, 1000001)
@@ -126,7 +126,7 @@ let result = Parallel.pmap_n(nums, fn n -> n * n, 4)
 `pmap` is equivalent to `RRB.map` on the interpreter (single-threaded). Real parallelism kicks in
 when you compile with `forge build`.
 
-### Parallel.preduce — parallel transform + reduce
+### Parallel.preduce: parallel transform + reduce
 
 ```march
 let scores = RRB.from_list([88, 92, 75, 95, 60, 84])
@@ -247,12 +247,12 @@ work each element does**:
 |-----------------|---------|------------------------------|
 | Trivial (add, compare) | `psum` on 1 M ints | ~1.4× |
 | Moderate (10 Collatz calls) | `preduce` on 100 K ints | ~2.5× |
-| Heavy (rendering, crypto, simulation) | — | approaching 4× |
+| Heavy (rendering, crypto, simulation) | none | approaching 4× |
 
-The task machinery itself adds only ~2 % overhead (measured: par-1 worker ≈ sequential).
+The task infrastructure itself adds only ~2 % overhead (measured: par-1 worker ≈ sequential).
 The limiting factor for light workloads is **trie traversal**: `RRB.fold` calls `Array.get`
 for every element, and `Array.get` is O(log₃₂ n) pointer hops through the backing trie.
-For a trivial reduction like `psum`, that pointer-chasing *is* the work — parallelising it
+For a trivial reduction like `psum`, that pointer-chasing *is* the work; parallelising it
 doesn't help much because all workers are chasing the same shared branch nodes.
 
 **Rule of thumb:** reach for `Parallel` when each element requires at least a few dozen
@@ -273,13 +273,13 @@ Parallel.preduce_n(v, 0, expensive_fn, merge, System.cpu_count() * 4)
 ### Merge cost
 
 The final `fold_left` over partial results runs on the main thread sequentially.  For numeric
-reductions (sum, max, count) this is negligible.  For `RRB.concat` chains — e.g. `pfilter`
-or `pmap` returning a new `Vec` — the merge cost grows with output size.
+reductions (sum, max, count) this is negligible.  For `RRB.concat` chains (e.g. `pfilter`
+or `pmap` returning a new `Vec`) the merge cost grows with output size.
 
 ### Ordering
 
 `pmap` preserves element order.  `preduce` merges left-to-right: chunk 0 merges with chunk 1,
-then chunk 2, and so on — so the final value is the same as a sequential `fold_left` over the
+then chunk 2, and so on, so the final value is the same as a sequential `fold_left` over the
 whole input (assuming an associative, identity-having `merge`).
 
 ---
@@ -288,7 +288,7 @@ whole input (assuming an associative, identity-having `merge`).
 
 Vectorizing and parallelizing are different axes: `Simd`/`NativeArray`
 speed up work *within* one core, `Parallel`/`Task` spread work *across*
-cores. They compose — split a `Vec` into chunks with `RRB.chunk`, spawn one
+cores. They compose: split a `Vec` into chunks with `RRB.chunk`, spawn one
 task per chunk, and let each task reduce its chunk with the vectorized
 `NativeArray` fast path instead of a plain fold:
 
@@ -323,7 +323,7 @@ end
 
 `RRB.chunk(v, workers)` does the same "one contiguous slice per worker"
 split `Parallel`'s own functions do internally, but as a zero-copy `Slice`
-per chunk rather than a scalar-only reduction — that's what leaves room to
+per chunk rather than a scalar-only reduction; that's what leaves room to
 plug in a vectorized reduction per chunk. Reach for this combination when
 each chunk's per-element work is itself the kind of tight numeric loop
 `NativeArray`/`Simd` speed up (see the [Numeric Data

@@ -1,6 +1,6 @@
 # March Syntax Quick Reference
 
-> Part of the March Language Reference — see [specs/lang/index.md](index.md)
+> Part of the March Language Reference; see [specs/lang/index.md](index.md)
 
 A terse example of every construct. See `lib/parser/parser.mly` for authoritative grammar, or [`grammar.md`](grammar.md) for the normative, resolved grammar reference (precedence/associativity made explicit, the lexer + `token_filter` preprocessing layers formalized, backed by a parse/reject conformance corpus).
 
@@ -49,7 +49,7 @@ pfn helper(x) do              -- pfn = private
 end
 ```
 
-Multi-head pattern matching — consecutive clauses with the same name are merged:
+Multi-head pattern matching: consecutive clauses with the same name are merged:
 
 ```march
 fn len(Nil) do 0 end
@@ -76,7 +76,7 @@ greet("World")           -- "Hello, World!"
 greet("World", "Hi")    -- "Hi, World!"
 ```
 
-Multiple defaults — all must be trailing parameters:
+Multiple defaults: all must be trailing parameters:
 
 ```march
 fn make(x, y \\ 10, z \\ 20) do x + y + z end
@@ -107,7 +107,7 @@ fn () -> compute()            -- zero-arg explicit form (identical)
 ```
 
 Multi-statement lambda bodies are supported with leading `let` bindings followed by
-a final expression — identical to match arm block bodies:
+a final expression, identical to match arm block bodies:
 
 ```march
 fn x ->
@@ -126,15 +126,15 @@ fn () ->
 ```
 
 The body is: zero or more `let`/`linear let` bindings, then a final expression.
-Single-expression lambdas are unchanged — no `let` bindings means no `EBlock` wrapper.
+Single-expression lambdas are unchanged: no `let` bindings means no `EBlock` wrapper.
 
-Both `fn -> expr` and `fn () -> expr` are valid zero-arg lambdas — they are identical.
+Both `fn -> expr` and `fn () -> expr` are valid zero-arg lambdas; they are identical.
 
 ---
 
 ## Let Bindings
 
-Block-level `let` — no `in`; subsequent exprs in the block see the binding:
+Block-level `let`: no `in`; subsequent exprs in the block see the binding:
 
 ```march
 fn main() do
@@ -179,7 +179,7 @@ end
 Rules:
 - The right-hand side must be `Result(T, E)`.
 - The pattern binds the `T` (Ok payload).
-- The code after the `let?` must also produce `Result(R, E)` — the error type `E` must match across all `let?` bindings in the block.
+- The code after the `let?` must also produce `Result(R, E)`; the error type `E` must match across all `let?` bindings in the block.
 - `let?` cannot be the last expression in a block (there must be something after it).
 
 Works in function bodies, match arms, and lambda bodies:
@@ -196,7 +196,7 @@ end
 
 ## Types
 
-Variant (ADT) — no leading `|`:
+Variant (ADT), no leading `|`:
 
 ```march
 type Color = Red | Green | Blue
@@ -223,7 +223,7 @@ Private type (type and constructors both private):
 ptype Internal = Foo | Bar(Int)
 ```
 
-Phantom label type (`tag` — zero-arg type used as a state or resource marker):
+Phantom label type (`tag`, a zero-arg type used as a state or resource marker):
 
 ```march
 tag ConnTag    -- equivalent to: type ConnTag = ConnTag
@@ -231,7 +231,7 @@ tag Open       -- equivalent to: type Open = Open
 tag Closed     -- equivalent to: type Closed = Closed
 ```
 
-Always-linear type (every binding is automatically tracked as linear — no per-site annotation needed):
+Always-linear type (every binding is automatically tracked as linear; no per-site annotation needed):
 
 ```march
 always_linear type Handle(r, s) = Handle(Int)
@@ -340,7 +340,7 @@ Used as parameter (precondition) or return (postcondition) types. A return
 refinement the checker can **prove** propagates to call sites, so
 `takepos(neg())` is rejected when `neg` promises `{Int | _ < 0}`.
 
-A `@[measure]` function (total, terminating, pure, structurally recursive) may
+A `@[measure]` function (total, terminating, pure, recursive by structure) may
 be used in predicates:
 
 ```march
@@ -353,12 +353,12 @@ fn size(t : Tree(a)) : Int do
 end
 ```
 
-Checking is definite-failure — it flags only what can *never* hold, so there
+Checking is definite-failure: it flags only what can *never* hold, so there
 are no false positives, and silence means "not disproved", never "verified".
 It runs only when `z3` is on `PATH`. A predicate calling a name the checker
-does not know produces a **warning** rather than silently enforcing nothing.
+does not know produces a **warning** rather than silently enforcing no check at all.
 
-`Float` predicates are **comparisons only** — float *arithmetic* in a predicate
+`Float` predicates are **comparisons only**; float *arithmetic* in a predicate
 (`_ +. 1.0 > 0.0`) is out of scope and makes the obligation skipped rather than
 guessed at. They are discharged through Z3's bit-precise IEEE-754 theory, never
 by modelling floats as reals: over reals `not (x >= 0.0) && not (x <= 0.0)` is
@@ -417,7 +417,7 @@ let { x: px, y: py } = point   -- let: every field still required
 fn area({ w: w, h: h }) do w * h end   -- fn param: every field still required
 ```
 
-An or-pattern's alternatives may **not** bind variables — `A(x) | B(x) -> x`
+An or-pattern's alternatives may **not** bind variables: `A(x) | B(x) -> x`
 is a compile error, because every alternative shares one arm body:
 
 ```march
@@ -529,13 +529,13 @@ else
 end
 ```
 
-`else` is **mandatory** — omitting it is a parse error:
+`else` is **mandatory**; omitting it is a parse error:
 
 ```
 March `if` expressions always need an `else` branch:
 ```
 
-There is no `then` keyword — `if c then e1 else e2` is rejected with a targeted parse error:
+There is no `then` keyword; `if c then e1 else e2` is rejected with a targeted parse error:
 
 ```
 I don't recognize `then` here — March uses do/end blocks instead.
@@ -553,7 +553,7 @@ Logic: `&&`, `||`, `!` (prefix not), unary `-` (negate)
 
 Each `++` allocates and copies both operands into a new string/list. A chain
 of them (`a ++ b ++ c`) is collapsed into three-way concats by the compiler, so
-k parts cost `ceil((k-1)/2)` allocations rather than k-1 — but using `++` as a
+k parts cost `ceil((k-1)/2)` allocations rather than k-1. But using `++` as a
 loop accumulator (`acc = acc ++ x`) still copies `acc` again on every iteration,
 which is O(n²) overall. String interpolation (`"${a}${b}"`) desugars to exactly
 the same `++` chain and gets the same treatment. For accumulating many segments
@@ -1027,7 +1027,7 @@ dbg(some_expr)                -- trace / conditional
 ## Semantics notes
 
 Behaviors real users hit that aren't obvious from the syntax above. Each was
-verified against HEAD with a runnable probe program — not carried over from
+verified against HEAD with a runnable probe program, not brought over from
 an older finding without re-checking.
 
 ### Top-level `let` RHS: re-evaluated once per referencing function (compiled), once total (interpreter)
@@ -1037,13 +1037,13 @@ backends give it different evaluation counts when `rhs` has a side effect and
 multiple functions reference `name`. The interpreter evaluates `rhs` exactly
 once (during module env construction) and every function sees the same
 value. The compiled backend has no shared module-init step for top-level
-lets — instead, the top-level-let injection post-pass in `lib/tir/lower.ml`
+lets; instead, the top-level-let injection post-pass in `lib/tir/lower.ml`
 (the `fn_body_uses` scan, marked by the comment "Inject top-level let
 bindings into function bodies that reference them") walks each function body
 and, for every top-level let it references, injects a fresh
 `ELet (v, rhs, body)` at the top of *that function*. If two functions and
 `main` all reference the binding, the compiled binary re-evaluates `rhs`
-three times — once per injection site.
+three times, once per injection site.
 
 ```march
 mod Main do
@@ -1068,7 +1068,7 @@ mod Main do
 end
 ```
 
-Interpreter output — one evaluation:
+Interpreter output, one evaluation:
 
 ```
 evaluating shared RHS
@@ -1077,10 +1077,10 @@ use_b sees: 42
 main sees: 42
 ```
 
-Compiled (`--compile`) — `evaluating shared RHS` prints **three times**, one
+Compiled (`--compile`): `evaluating shared RHS` prints **three times**, one
 per referencing function (verified with `| grep -c`). The exact interleaving
 of the injected evaluations relative to the other output lines is not
-guaranteed and has been observed to differ across builds — the invariant is
+guaranteed and has been observed to differ across builds; the invariant is
 the *count*: one evaluation per function that references the binding, versus
 exactly one total in the interpreter.
 
@@ -1091,14 +1091,14 @@ code.
 ### Newline-glom: a continuation token on the next line joins the previous expression
 
 Outside `match` bodies, `lib/parser/token_filter.ml`'s NL filter
-unconditionally swallows newline tokens (the `NL` dispatch arm whose fallback
-reads `next lexbuf  (* outside match body — swallow *)`) — the parser never
+unconditionally swallows newline tokens (the `NL` dispatch arm with a fallback that
+reads `next lexbuf  (* outside match body — swallow *)`); the parser never
 sees them. Statement separation inside `block_body` (the
 `block_body: nonempty_list(block_expr)` production in
 `lib/parser/parser.mly`) is therefore purely a side effect of where
 Menhir's grammar happens to close one `expr` and open the next. A line that
-*starts* with a token that can continue the prior expression — `(` (call/tuple),
-`-` (binary minus), or any infix operator (`++`, `+`, etc.) — gloms onto the
+*starts* with a token that can continue the prior expression, `(` (call/tuple),
+`-` (binary minus), or any infix operator (`++`, `+`, etc.), gloms onto the
 previous line instead of starting a new statement.
 
 ```march
@@ -1116,7 +1116,7 @@ let f = identity
 -- desugars to `let f = identity(5)`  (f = 5), not `f = identity` then a bare `(5)`
 ```
 
-The sharpest trap is when the previous line's value isn't callable — the
+The sharpest trap is when the previous line's value isn't callable: the
 error surfaces far from the real mistake:
 
 ```march
@@ -1128,7 +1128,7 @@ println("...")
 ```
 
 fails to typecheck with `This is not a function — it has type Int`, pointing
-at `let b = 10` — because `let b = 10 \n (negate(b))` glommed into
+at `let b = 10`, because `let b = 10 \n (negate(b))` glommed into
 `let b = 10(negate(b))`. The fix is to make the continuation impossible:
 start the next line with something that cannot extend an expression (another
 `let`, a bare identifier call with no leading operator/paren ambiguity), or
@@ -1136,20 +1136,20 @@ parenthesize/terminate the prior expression so the next line can't attach.
 
 ### Derived `Ord`/`Hash` ignore constructor payloads
 
-(The compiled-crash half of this section — named `eq`/`compare`/`hash` on
-`Newtype`-repr variants SIGSEGV'ing or panicking — was fixed 2026-07-04; see
+(The compiled-crash part of this section, named `eq`/`compare`/`hash` on
+`Newtype`-repr variants SIGSEGV'ing or panicking, was fixed 2026-07-04; see
 `specs/progress/` for the root cause and fix. The
 payload-ignoring `Ord`/`Hash` *semantics* below are unchanged and intentional.)
 
 **Semantics (interpreter, and compiled where it doesn't crash):** `derive Ord
 for T` and `derive Hash for T` on a variant type only look at the
-constructor's declared index — never its payload fields. `expand_derive` in
+constructor's declared index, never its payload fields. `expand_derive` in
 `lib/desugar/desugar.ml` builds the derived `compare` body (its `"Ord"` case)
 as `ctor_index(a) - ctor_index(b)`, matching each constructor with wildcard
 patterns (`PatWild`) that discard the arguments; the derived `hash` body (the
 `"Hash"` case) does the same, returning the bare constructor index. Two
 values built from the *same* constructor always compare equal and hash equal,
-regardless of payload. Derived `Eq` is different — it IS payload-aware
+regardless of payload. Derived `Eq` is different: it IS payload-aware
 (`eq(Wrap(1), Wrap(2))` is `false`), so a type deriving both `Eq` and `Ord`
 reports `eq(a, b) == false` yet `compare(a, b) == 0` for same-constructor
 values with different payloads.
@@ -1168,14 +1168,14 @@ mod Main do
 end
 ```
 
-Interpreter output: `0` / `0` / `0` — payload ignored. Compiled output is
-identical (this used to crash on single-ctor single-field — `Newtype`-repr —
+Interpreter output: `0` / `0` / `0`, payload ignored. Compiled output is
+identical (this used to crash on single-ctor single-field (`Newtype`-repr)
 variants; fixed 2026-07-04, see `specs/progress/`).
 
 Records are unaffected: derived `Ord`/`Hash` for `TDRecord` compares/hashes
 field-by-field as expected. Do not rely on derived `Ord`/`Hash` for any
-variant type whose constructors carry payload data that should affect
-ordering or hashing — write a manual `impl` instead.
+variant type with constructors that include payload data that should affect
+ordering or hashing; write a manual `impl` instead.
 
 ### Nested-module default-arg functions (fixed 2026-07-15)
 
@@ -1204,17 +1204,17 @@ mod Main do
 end
 ```
 
-### Reserved soft-keyword asymmetry: bindable but not referenceable
+### Reserved soft-keyword imbalance: bindable but not referenceable
 
-A handful of identifiers double as keywords elsewhere in the grammar —
-`init`, `loop`, `on`, `state`, `protocol`, `app`, `as`, `with`, `when`, `use`,
-`in`, `for` — and are listed in the `soft_lower_name` production
+A handful of identifiers double as keywords elsewhere in the grammar
+(`init`, `loop`, `on`, `state`, `protocol`, `app`, `as`, `with`, `when`, `use`,
+`in`, `for`) and are listed in the `soft_lower_name` production
 (`lib/parser/parser.mly`) so they can be used in *binding* positions:
 function params, patterns, and `let` bindings. They are **not** listed in
 the primary-expression rule for a bare variable reference (the
 `id = LOWER_IDENT { EVar (mk_name id $loc) }` production in the same file),
-so referencing one of them in expression position — even a bare reference,
-not just inside an arithmetic expression — is a parse error:
+so referencing one of them in expression position (even a bare reference,
+not just inside an arithmetic expression) is a parse error:
 
 ```march
 let init = 3           -- parses: `init` accepted as a binding name
@@ -1223,15 +1223,15 @@ println(int_to_string(init + 1))   -- same error
 ```
 
 The same restriction blocks declaring a function named `init` (`fn init(x)
-do ... end` — function names use the plain `lower_name` rule, not
-`soft_lower_name`, so this is also a parse error) — it is the identical root
+do ... end`: function names use the plain `lower_name` rule, not
+`soft_lower_name`, so this is also a parse error); it is the identical root
 cause as the expression-position gap, not a separate bug.
 
 `tag` is the one exception: commit `4bb0e87c` promoted it to a full soft
 keyword by adding it to *both* the `lower_name` production (declarations,
 dot-access, record fields) and the primary-expression variable-reference
 rule, so `let tag = 3` followed by `tag + 1` works end-to-end. The other
-soft keywords above have not received the same treatment — the asymmetry is
+soft keywords above have not received the same treatment; the imbalance is
 current behavior, not a stale finding.
 
 ---

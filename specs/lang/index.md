@@ -6,28 +6,28 @@
 
 ## How this reference is organized
 
-This is the umbrella index over `specs/lang/` — the versioned, structured
+This is the umbrella index over `specs/lang/`: the versioned, structured
 *set* of documents that together form the normative March language
 reference. It replaces ~21 scattered current-truth docs (spread across
 `specs/features/*.md`, `docs/*.md`, and root guides) with one coherent
 structure, organized by altitude:
 
 - **Two conformance-tested core references** sit at the foundation:
-  [`core-march.md`](core-march.md) (operational semantics — "what programs
+  [`core-march.md`](core-march.md) (operational semantics, "what programs
   mean," grounded arm-for-arm in `eval.ml` and checked against a golden
   interpreter-vs-compiled corpus in [`golden/`](golden/)) and
-  [`core-march-types.md`](core-march-types.md) (static semantics — "which
+  [`core-march-types.md`](core-march-types.md) (static semantics, "which
   programs are well-typed," grounded in `typecheck.ml` and checked against
   an accept/reject corpus in [`types/`](types/)). These cover the core
   expression fragment only; each is versioned and cites the implementation
   by line.
 - **[`surface-syntax.md`](surface-syntax.md)** is the grammar quick-reference
-  chapter — a terse cheatsheet over nearly the entire surface grammar (the
+  chapter: a terse cheatsheet over nearly the entire surface grammar (the
   layer above the core fragment: pipe, multi-head fn surface form, `let?`,
   sigils, etc.), plus a "Semantics notes" appendix of verified non-obvious
   behaviors. It explicitly defers to `lib/parser/parser.mly` as the
   authoritative grammar.
-- **Per-topic chapters** — one canonical chapter per language topic
+- **Per-topic chapters**: one canonical chapter per language topic
   (modules, pattern matching, interfaces, actors, capabilities, and so on),
   migrating in from `docs/` and `specs/features/` per the chapter map below.
 
@@ -39,16 +39,16 @@ merge: compiler-internal material is referenced from language chapters where
 relevant, not duplicated into them.
 
 For a gentler, narrative introduction to the language, see README's
-["Language tour"](../../README.md) section — it stays in README by design
-(the survey judged it low-value to merge verbatim) and is a good starting
+["Language tour"](../../README.md) section; it stays in README by design
+(the survey assessed it as low-value to merge verbatim) and is a good starting
 point before diving into this reference.
 
-### How it's kept honest
+### How it's kept accurate
 
 - The two core references are checked against their conformance corpora
-  (`golden/` for `core-march.md`, `types/` for `core-march-types.md`) —
+  (`golden/` for `core-march.md`, `types/` for `core-march-types.md`):
   every rule in those documents is exercised by a runnable program, not
-  merely asserted.
+  just stated.
 - `scripts/check-docs.sh` (run in CI) lints every file under `specs/lang/`
   (via a `find specs/lang -name '*.md'` glob) for dead compiler-source
   pointers and stale stdlib-module-count claims, the same freshness
@@ -93,11 +93,11 @@ document outside `specs/lang/` and linked from here rather than duplicated.
 
 ## Conformance corpora
 
-- [`golden/`](golden/) — differential interpreter-vs-compiled programs
+- [`golden/`](golden/): differential interpreter-vs-compiled programs
   backing `core-march.md`.
-- [`types/`](types/) — `accept/`/`reject`-split typechecking programs backing
+- [`types/`](types/): `accept/`/`reject`-split typechecking programs backing
   `core-march-types.md`.
-- [`grammar/`](grammar/) — `parse/`/`reject`-split parsing programs (41
+- [`grammar/`](grammar/): `parse/`/`reject`-split parsing programs (41
   total) backing `grammar.md`'s core-grammar chapters (§2–§8: preprocessing
   layers, expressions, blocks, patterns, types, declarations), wired into CI
   as its own `grammar-check` dune alias (`dune build @grammar-check`,

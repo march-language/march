@@ -19,29 +19,29 @@ end
 ## Features
 
 **Type system**
-- Hindley-Milner inference with bidirectional checking at function boundaries — annotations are optional except where inference fails
+- Hindley-Milner inference with bidirectional checking at function boundaries; annotations are optional except where inference fails
 - Algebraic data types with pattern matching
 - Records with functional update syntax (`{ r with field: value }`)
 - Polymorphic functions monomorphized at compile time (no boxing overhead)
 - Linear and affine types for ownership, safe mutation, and actor message-passing isolation
 
 **Syntax**
-- `fn name(x, y) do ... end` — named functions
-- `fn x -> x + 1` / `fn (x, y) -> expr` — lambdas
-- `let x = expr` — block-scoped bindings, no `in`
-- `match expr do Pat -> body end` — pattern matching
-- `if cond do e1 else e2 end` — conditionals
-- `x |> f |> g` — pipe operator
-- `mod Name do ... end` — modules
+- `fn name(x, y) do ... end`: named functions
+- `fn x -> x + 1` / `fn (x, y) -> expr`: lambdas
+- `let x = expr`: block-scoped bindings, no `in`
+- `match expr do Pat -> body end`: pattern matching
+- `if cond do e1 else e2 end`: conditionals
+- `x |> f |> g`: pipe operator
+- `mod Name do ... end`: modules
 - `--` line comments, `{- -}` nested block comments
 - Multi-head functions (Elixir-style): consecutive `fn` clauses grouped automatically
 - `when` guards on function heads and match branches
 
 **Backend**
-- Compiles to LLVM IR, linked to native binaries via `clang` — or to `.wasm` via `--target wasm64-wasi`
+- Compiles to LLVM IR, linked to native binaries via `clang`, or to `.wasm` via `--target wasm64-wasi`
 - Cross-compiles Linux binaries (`linux/amd64`, `linux/arm64`) from any host via `zig cc`, Go's `GOOS=linux` style
-- Perceus reference counting — deterministic memory management: no tracing collector and no collection pauses, though freeing a large structure is inline work proportional to its size, at a point you control
-- **FBIP (Functional But In-Place)** — when the reference count on a pattern-matched value is 1, destructured nodes are reused in-place rather than freed and reallocated (see below)
+- Perceus reference counting, giving deterministic memory management: no tracing collector and no collection pauses, though freeing a large structure is inline work proportional to its size, at a point you control
+- **FBIP (Functional But In-Place)**: when the reference count on a pattern-matched value is 1, destructured nodes are reused in-place rather than freed and reallocated (see below)
 - Escape analysis promotes allocations to the stack where possible
 - Defunctionalization: closures compiled to structs + dispatch, no indirect call overhead
 - Tree-walking interpreter available for fast iteration
@@ -54,7 +54,7 @@ end
 
 ## FBIP: Functional But In-Place
 
-One of March's most distinctive performance features is **FBIP (Functional But In-Place)**, derived from the [Perceus reference counting paper](https://www.microsoft.com/en-us/research/publication/perceus-garbage-free-reference-counting-with-reuse/). March code that recursively transforms a data structure can automatically run as fast as — or faster than — equivalent imperative C code that mutates in-place.
+One of March's most distinctive performance features is **FBIP (Functional But In-Place)**, derived from the [Perceus reference counting paper](https://www.microsoft.com/en-us/research/publication/perceus-garbage-free-reference-counting-with-reuse/). March code that recursively transforms a data structure can automatically run as fast as (or faster than) equivalent imperative C code that mutates in-place.
 
 ### How it works
 
@@ -78,7 +78,7 @@ fn inc_leaves(t : Tree) : Tree do
 end
 ```
 
-With FBIP active, after the initial tree is built, every subsequent pass of `inc_leaves` does **zero heap allocations** — it rewrites the tree's nodes in-place.
+With FBIP active, after the initial tree is built, every subsequent pass of `inc_leaves` does **zero heap allocations**: it rewrites the tree's nodes in-place.
 
 ### Benchmark: `bench/tree_transform.march`
 
@@ -86,13 +86,13 @@ Depth-20 binary tree (1,048,576 leaves), 100 passes of `inc_leaves`:
 
 | Implementation | Time | Allocations per pass |
 |---|---|---|
-| March (FBIP off, pre-fix) | 11.0 s | 2 × 2^20 = 2M |
+| March (FBIP off, before the fix) | 11.0 s | 2 × 2^20 = 2M |
 | C (`malloc` / `free`) | 8.8 s | 2 × 2^20 = 2M |
 | Rust (`Box`) | 9.5 s | 2 × 2^20 = 2M |
 | OCaml (GC) | ~3.65 s | 2 × 2^20 = 2M (amortized) |
 | **March (FBIP on)** | **1.3 s** | 0 (after pass 1) |
 
-March is **7× faster than C** on this benchmark — not because C is slow, but because `malloc`/`free` carry real overhead (bookkeeping, potential locks, cache pressure). 200M allocator calls across 100 passes add up. March avoids all of them with in-place reuse.
+March is **7× faster than C** on this benchmark, not because C is slow, but because `malloc`/`free` carry real overhead (bookkeeping, potential locks, cache pressure). 200M allocator calls across 100 passes add up. March avoids all of them with in-place reuse.
 
 ### What patterns benefit
 
@@ -104,7 +104,7 @@ FBIP fires automatically on any function that:
 
 This covers `map` over lists, any tree traversal/transformation, and most structural recursion patterns. Functions that alias the original correctly take the RC > 1 fallback path, which allocates fresh.
 
-For the full technical description — including how `shape_matches` works, the TIR `EReuse` node, and the LLVM codegen for the conditional reuse — see the language reference (`specs/lang/index.md`) and the compiler-internals reference (`specs/impl/index.md`).
+For the full technical description (including how `shape_matches` works, the TIR `EReuse` node, and the LLVM codegen for the conditional reuse) see the language reference (`specs/lang/index.md`) and the compiler-internals reference (`specs/impl/index.md`).
 
 ## Quick start
 
@@ -136,7 +136,7 @@ march
 
 Prebuilt binaries are published as [GitHub releases](https://github.com/march-language/march/releases) for `darwin-arm64`, `linux-x86_64`, and `linux-aarch64`. Each archive bundles the `march` compiler, the `forge` build tool, the standard library, and the C runtime sources.
 
-The binaries are self-contained — the macOS build statically links `blake3`/`zstd`/`brotli` and the Linux builds are statically linked — so **running** March (interpreting programs) needs no extra packages.
+The binaries are self-contained (the macOS build statically links `blake3`/`zstd`/`brotli` and the Linux builds are statically linked), so **running** March (interpreting programs) needs no extra packages.
 
 > **To use `march --compile`** you also need a C toolchain installed: `clang` + LLVM. On macOS install the Xcode Command Line Tools (`xcode-select --install`); on Linux install e.g. `clang llvm`. The compiler shells out to `clang` to build the bundled runtime.
 
@@ -162,7 +162,7 @@ forge toolchain uninstall <version>
 
 Both the installer and `forge toolchain` share the `~/.march/versions/<tag>` layout and switch the active toolchain via the `~/.march/current` symlink.
 
-> **Note:** `forge toolchain`, the bundled runtime (native compile), and static linking ship in releases built from the current sources. Nightlies published earlier predate them — installing one still works for interpreting, but those features require a newer release. The manual download below works against any release.
+> **Note:** `forge toolchain`, the bundled runtime (native compile), and static linking ship in releases built from the current sources. Nightlies published earlier predate them; installing one still works for interpreting, but those features require a newer release. The manual download below works against any release.
 
 ### Manual download
 
@@ -240,7 +240,7 @@ dune install
 
 ## WebAssembly target
 
-March can compile pure functional programs to `.wasm` via the `--target wasm64-wasi` flag. Actors, networking, and file I/O are not yet available in WASM builds (Tier 1 — pure compute only).
+March can compile pure functional programs to `.wasm` via the `--target wasm64-wasi` flag. Actors, networking, and file I/O are not yet available in WASM builds (Tier 1, pure compute only).
 
 **Install prerequisites**
 
@@ -269,7 +269,7 @@ Available targets: `native` (default), `linux/amd64`, `linux/arm64`, `wasm64-was
 
 ## Cross-compilation to Linux
 
-Build a Linux binary from any host — including macOS — the way Go's `GOOS=linux go build` does, using [`zig cc`](https://ziglang.org) as the C cross-compiler:
+Build a Linux binary from any host, including macOS, the way Go's `GOOS=linux go build` does, using [`zig cc`](https://ziglang.org) as the C cross-compiler:
 
 ```bash
 brew install zig          # macOS; or download from https://ziglang.org/download/
@@ -289,7 +289,7 @@ dune runtest
 
 ## Development workflow
 
-`forge watch` reruns a build, test run, or program on every source change — it
+`forge watch` reruns a build, test run, or program on every source change; it
 watches `lib/`, `src/`, `test/`, `config/`, and `forge.toml`:
 
 ```bash
@@ -299,7 +299,7 @@ forge watch run      # rerun the program on change
 forge watch --clear --interval 200
 ```
 
-It never exits on a build/test failure — it reports and keeps watching. Ctrl-C stops it.
+It never exits on a build/test failure; it reports and keeps watching. Ctrl-C stops it.
 
 `forge bench` compiles and runs every benchmark under `bench/` (each `bench/*.march`
 is a standalone program), built at `--opt 2`, reporting wall-clock times:
@@ -331,7 +331,7 @@ forge build --frozen         # CI: fail if forge.lock is out of date (don't re-r
 
 March ships a portable Claude Code skill, `spec-search`, that full-text
 searches the language reference and design docs (`specs/lang/`,
-`specs/impl/`, `specs/features/`) via a bundled SQLite FTS5 index — no
+`specs/impl/`, `specs/features/`) via a bundled SQLite FTS5 index; no
 network access, no dependency on the compiler repo being checked out in
 whatever project you're working in:
 

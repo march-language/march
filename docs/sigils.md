@@ -7,11 +7,11 @@ permalink: /docs/sigils/
 
 # Sigils & Templating
 
-Some kinds of text aren't really "just a string" — a chunk of TOML, an HTML template, an
+Some kinds of text aren't really "just a string": a chunk of TOML, an HTML template, an
 XML document. March's **sigils** let you write that text as a literal, right in your
 source, and have the compiler hand it to a parser or template builder instead of
 treating it as a plain `String`. The most-used one, `~H`, builds HTML with
-**contextual auto-escaping** — every interpolation is escaped for the exact place it
+**contextual auto-escaping**: every interpolation is escaped for the exact place it
 lands, worked out at compile time. The rest of this page starts with the general
 mechanism, then goes deep on `~H`.
 
@@ -30,7 +30,7 @@ host = "localhost"
 ```
 
 Under the hood, `~Name"content"` is sugar for a plain function call: `~toml"..."`
-becomes `Sigil.toml("...")`, `~xml"..."` becomes `Sigil.xml("...")`, and so on — a
+becomes `Sigil.toml("...")`, `~xml"..."` becomes `Sigil.xml("...")`, and so on; a
 sigil is just a call with unusual syntax around the argument, not a separate kind of
 value. That means you can always see exactly what a sigil does by looking up
 `Sigil.<name>` in the stdlib.
@@ -43,7 +43,7 @@ March ships three general-purpose sigils out of the box:
 | `~xml"..."` | `Xml.parse_exn` | a parsed XML document |
 | `~yaml"..."` | `Yaml.parse_exn` | a parsed YAML document |
 
-All three **panic if the content doesn't parse** — they're meant for literals you
+All three **panic if the content doesn't parse**: they're meant for literals you
 control (embedding a known-good config as source, not parsing untrusted input at
 runtime). If you need to handle a malformed document gracefully, parse a runtime string
 with the ordinary `Toml.parse`/`Xml.parse`/`Yaml.parse` functions instead, which return
@@ -51,7 +51,7 @@ a `Result` rather than panicking.
 
 **They do not accept interpolation.** `~toml`, `~xml` and `~yaml` hand their content to
 a parser, so a `${...}` hole would be spliced into the source text *before* parsing and
-could change the parsed structure rather than appear as a value in it — an interpolated
+could change the parsed structure rather than appear as a value in it; an interpolated
 `</name><admin>true</admin><name>` would add a whole element. That is a compile error:
 
 ```march
@@ -61,8 +61,8 @@ could change the parsed structure rather than appear as a value in it — an int
 -- the parsed structure rather than appear as a value in it.
 ```
 
-Build the value programmatically instead — parse a literal document and set fields on
-it — so the value arrives as *data* rather than as source text. `~H` is the exception,
+Build the value programmatically instead (parse a literal document and set fields on
+it), so the value arrives as *data* rather than as source text. `~H` is the exception,
 and the next section explains why it can afford to be.
 
 ```march
@@ -78,9 +78,9 @@ host = "localhost"
 
 ## The `~H` sigil: HTML templates
 
-`~H` is the one sigil with genuinely special treatment: instead of calling a
+`~H` is the one sigil with truly special treatment: instead of calling a
 `Sigil.h` function at runtime, the compiler builds the HTML directly into an efficient
-multi-segment structure (an `IOList`) at compile time — there's no intermediate string
+multi-segment structure (an `IOList`) at compile time; there's no intermediate string
 concatenation, even for a template with many interpolated pieces.
 
 ```march
@@ -101,13 +101,13 @@ The same `${name}` is treated differently depending on where you put it:
 
 | Where the hole is | What `~H` does |
 |---|---|
-| element content — `<p>${x}</p>` | HTML entity-encoding |
-| an attribute value — `<div class="${x}">` | entity-encoding, plus a backtick |
-| the start of a URL attribute — `<a href="${x}">` | **URL scheme allowlist** |
-| later in a URL — `<a href="/s?q=${x}">` | percent-encoding |
-| a `style` attribute — `<div style="color:${x}">` | CSS escaping, allowlisted functions |
-| a CSS `url()` — `style="background:url(${x})"` | URL rules that also survive CSS |
-| inside `<script>` — `<script>var n="${x}"</script>` | JavaScript string escaping |
+| element content: `<p>${x}</p>` | HTML entity-encoding |
+| an attribute value: `<div class="${x}">` | entity-encoding, plus a backtick |
+| the start of a URL attribute: `<a href="${x}">` | **URL scheme allowlist** |
+| later in a URL: `<a href="/s?q=${x}">` | percent-encoding |
+| a `style` attribute: `<div style="color:${x}">` | CSS escaping, allowlisted functions |
+| a CSS `url()`: `style="background:url(${x})"` | URL rules that also survive CSS |
+| inside `<script>`: `<script>var n="${x}"</script>` | JavaScript string escaping |
 
 Worked through:
 
@@ -122,7 +122,7 @@ let col = "var(--accent)"
 ~H"<div style=\"color:${col}\">"  -- <div style="color:var(--accent)">
 ```
 
-A URL that fails the scheme allowlist becomes `about:invalid#zSoyz` — inert, and
+A URL that fails the scheme allowlist becomes `about:invalid#zSoyz`: inert, and
 visible in the page source so the problem is obvious rather than silent. `http`,
 `https`, `mailto`, `tel`, `ftp` and any relative reference are allowed.
 
@@ -131,7 +131,7 @@ visible in the page source so the problem is obvious rather than silent. `http`,
 
 ### What will not compile
 
-Some positions cannot be made safe by escaping at all — an attacker-chosen attribute
+Some positions cannot be made safe by escaping at all; an attacker-chosen attribute
 name like `onerror` contains no character an encoder could touch. Those are compile
 errors rather than silently-wrong output:
 
@@ -163,7 +163,7 @@ end
 
 ### Trusted content, and why trust does not travel
 
-Sometimes you *want* to interpolate real markup — an icon's `<svg>`, or HTML you
+Sometimes you *want* to interpolate real markup: an icon's `<svg>`, or HTML you
 produced yourself. The `Html.trust_*` functions say so, and each names the context the
 trust applies to:
 
@@ -173,7 +173,7 @@ let icon = Html.trust_html("<svg>...</svg>")
 ```
 
 **The context matters, and this is the part worth internalising.** Trusting a string as
-HTML says nothing about whether it is a safe URL, so the same value in an `href` is
+HTML states no fact about whether it is a safe URL, so the same value in an `href` is
 still escaped:
 
 ```march
@@ -189,30 +189,30 @@ going:
 |---|---|
 | `Html.trust_html` | element content |
 | `Html.trust_attr` | an ordinary attribute value |
-| `Html.trust_url` | a URL attribute — **bypasses the scheme allowlist** |
+| `Html.trust_url` | a URL attribute; **bypasses the scheme allowlist** |
 | `Html.trust_css` | a `style` attribute or `<style>` body |
 | `Html.trust_js` | inside `<script>` |
 
 Each has a matching `Html.untrust_*` to get the plain `String` back.
 
-Only reach for these on content you generated or verified yourself — never on user
+Only reach for these on content you generated or verified yourself, never on user
 input, since that is exactly the escaping `~H` exists to give you automatically. Most
 templates need none of them.
 
 > **`Html.raw` is deprecated.** It still works and is treated as HTML trust, so
-> `Html.raw` in element content behaves as it always did. But it is context-free — it
-> cannot say *where* the content is trusted — so `Html.raw("javascript:...")` in an
+> `Html.raw` in element content behaves as it always did. But it is context-free (it
+> cannot say *where* the content is trusted), so `Html.raw("javascript:...")` in an
 > `href` is escaped to `about:invalid#zSoyz` rather than inserted. Prefer
-> `Html.trust_html`, which says what it means.
+> `Html.trust_html`, which states what it means.
 
 > **`Html.tag` is deprecated too.** It builds markup outside the sigil, so it never gets
-> this analysis and has to validate at runtime instead — it refuses element and
-> attribute names it cannot prove safe, and rejects `on*` handlers outright. Use `~H`.
+> this analysis and has to validate at runtime instead: it will not accept element
+> and attribute names it cannot prove safe, and rejects `on*` handlers entirely. Use `~H`.
 
 ### Composing templates
 
 A `~H` template returns an `IOList`, and an `IOList` interpolates cleanly into another
-`~H` template without being re-escaped or double-wrapped — so partials compose the way
+`~H` template without being re-escaped or double-wrapped, so partials compose the way
 you'd expect:
 
 ```march
@@ -233,7 +233,7 @@ fn render_list(users : List(User)) : IOList do
 end
 ```
 
-There's no template-level `for` loop inside `~H` itself — `Html.list` (map a render
+There's no template-level `for` loop inside `~H` itself; `Html.list` (map a render
 function over a list, producing one combined `IOList`) is the idiomatic way to render a
 collection, and ordinary recursion works too for anything more custom. See [HTML
 cookbook]({{ site.baseurl }}/docs/cookbook/html/) for a complete worked example
@@ -242,16 +242,16 @@ cookbook]({{ site.baseurl }}/docs/cookbook/html/) for a complete worked example
 ### A gotcha worth knowing: CSRF injection
 
 If you're building a web app with March's HTTP framework, `~H` automatically injects a
-CSRF protection tag into `<form method="post|put|patch|delete">` tags it emits — but
+CSRF protection tag into `<form method="post|put|patch|delete">` tags it emits, but
 **only when a `conn` binding is lexically in scope** at that `~H` call site. If you're
 rendering a form outside of a request-handling context (no `conn` in scope), the tag
-isn't injected and you won't get a compile error about it — so if you rely on this
+isn't injected and you won't get a compile error about it; so if you rely on this
 protection, make sure the form-rendering function actually has `conn` available, rather
 than assuming every `~H` form is automatically protected.
 
 **Do not add your own token as well.** Injection is automatic, so writing
 `${CSRF.tag(conn)}` inside the form used to emit two hidden inputs. `~H` now notices an
-explicit token and skips its own injection, warning that yours is redundant — but the
+explicit token and skips its own injection, warning that yours is redundant, but the
 clean form is simply to leave it out:
 
 ```march
@@ -259,15 +259,15 @@ clean form is simply to leave it out:
 ```
 
 Explicit token helpers are for markup built *outside* `~H`, by string concatenation,
-where nothing is injected.
+where no content is injected.
 
 ---
 
 ## Next Steps
 
-- [HTML cookbook]({{ site.baseurl }}/docs/cookbook/html/) — this page covers the
+- [HTML cookbook]({{ site.baseurl }}/docs/cookbook/html/): this page covers the
   mechanism; the cookbook shows you how to build a full page with it (layouts, partials,
   a complete example).
-- [Type System](types.md) — what `TomlValue` and friends look like as ordinary ADTs.
-- [Capabilities]({{ site.baseurl }}/docs/capabilities/) — the permission system that
+- [Type System](types.md): what `TomlValue` and friends look like as ordinary ADTs.
+- [Capabilities]({{ site.baseurl }}/docs/capabilities/): the permission system that
   guards the file/network access templating code often sits next to.

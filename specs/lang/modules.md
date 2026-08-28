@@ -5,7 +5,7 @@ nav_order: 5.0
 permalink: /docs/modules/
 ---
 
-> Part of the March Language Reference — see [specs/lang/index.md](https://github.com/march-language/march/blob/main/specs/lang/index.md)
+> Part of the March Language Reference; see [specs/lang/index.md](https://github.com/march-language/march/blob/main/specs/lang/index.md)
 
 # Module System
 
@@ -17,7 +17,7 @@ March has an Elixir-inspired module system. Modules are the primary unit of code
 > §4.7 ("Module declaration, nesting, and name resolution") and §4.7.1
 > (`use`/`import`/`alias` selectors and the file-based resolver pre-pass)
 > document the OPERATIONAL rules; `specs/lang/core-march-types.md` §2.5
-> ("Module visibility, the opaque-type asymmetry, and the
+> ("Module visibility, the opaque-type imbalance, and the
 > no-per-module-type-namespace design point") documents the TYPING rules,
 > including the precise visibility enforcement described below and the
 > opaque-type constructor-hiding gap noted in the "Opaque Types" section.
@@ -35,8 +35,8 @@ end
 ```
 
 Modules can be dotted for hierarchical organization. **Each of these lives in
-its own file** (one top-level `mod` per file — see "One-mod-per-file" via
-`core-march.md` §4.7 — so this is two files' contents shown together, not one
+its own file** (one top-level `mod` per file, see "One-mod-per-file" via
+`core-march.md` §4.7, so this is two files' contents shown together, not one
 file to paste verbatim; see "Multi-File Projects" below for the
 name-to-filename convention):
 
@@ -89,7 +89,7 @@ end
 ```
 
 `pfn` functions (and private module-level `let` values) cannot be called or
-referenced from outside their declaring module — a qualified cross-module
+referenced from outside their declaring module: a qualified cross-module
 reference to one is a hard typecheck error, `` Function `name` is private to
 module `Mod`. `` (`load_module_into_env`'s `ex_public` gate,
 `lib/typecheck/typecheck.ml:657–692`; cross-referenced in full, with the
@@ -98,18 +98,18 @@ This is enforced identically whether the private member lives in the same
 file (a nested `mod`) or a separate file reached by qualification.
 
 **`ptype` hides the type from OUTSIDE annotation use less than the name
-above suggests, and does not hide the constructor at all.** Precisely, per
+above suggests, and does not hide the constructor at all.** Specifically, per
 live verification (`core-march-types.md` §2.5): a `ptype`'s bare type NAME is
-never gated (`ExType` stays deliberately ungated in `load_module_into_env`,
+never gated (`ExType` is intentionally left with no gate in `load_module_into_env`,
 so it remains usable in a cross-module annotation regardless of `Public`/
-`Private`) — this is the "opaque-type asymmetry" the typing reference names
+`Private`); this is the "opaque-type imbalance" the typing reference names
 explicitly. And a plain `ptype`'s constructor is **not actually private
 either**: the grammar defaults every variant's own visibility (`var_vis`) to
-`Public` regardless of the enclosing type's `Private` marking — only the
+`Public` regardless of the enclosing type's `Private` marking; only the
 separate `opaque type` form (below) forces `var_vis = Private` on its
 variants. So a plain `ptype`'s privacy currently only affects whether the
-bare type name is added to its module's `pub_set` — which the `ExType` gate
-ignores anyway — meaning a plain `ptype` and a public `type` are, today,
+bare type name is added to its module's `pub_set` (which the `ExType` gate
+ignores anyway), meaning a plain `ptype` and a public `type` are, today,
 observably identical to code outside the module. Use `opaque type` (below)
 if hiding the constructor is the actual goal.
 
@@ -144,9 +144,9 @@ end
 > `Token` type `Token.make` returns, in both directions (`9001e4c0`,
 > `core-march-types.md` §2.5's "Qualified-type-path unification"). Writing
 > the qualified annotation explicitly is no longer necessary to work around
-> a unification failure — either form works.
+> a unification failure; either form works.
 
-> **Known enforcement gap (filed, not fixed — `specs/todos/`):**
+> **Known enforcement gap (logged, not fixed; `specs/todos/`):**
 > `opaque type`'s constructor-hiding is intended (and, for a same-file
 > reference, believed correct) but is **not actually enforced against a
 > qualified reference to the constructor from a separate file** reached via
@@ -157,7 +157,7 @@ end
 > forward-reference pass (`prebind_mod_members`, `typecheck.ml:8032–8087`)
 > registers the qualified constructor key unconditionally on `var_vis`,
 > before the later, correctly `ci_vis`-filtered `DMod` export step's result
-> is merged in — the same class of bug the cross-module `pfn`/value gate
+> is merged in; the same class of bug the cross-module `pfn`/value gate
 > above was fixed for, but on a different registration path and for the
 > `ExCtor`/`ci_vis` check instead of `ExFn`/`ExValue`. See
 > `core-march-types.md` §2.5 for the full trace.
@@ -184,11 +184,11 @@ end
 ```
 
 (`Math` is nested inside `Main` here because a single `.march` file may have
-only **one** top-level `mod` — see "A Full Example" below, and
+only **one** top-level `mod`; see "A Full Example" below, and
 `core-march.md` §4.7's "One-mod-per-file" rule, for the precise grammar-level
 rejection this produces if two top-level `mod`s appear in the same file.
 Two truly separate, same-named-at-top-level modules like `Math` and `Main`
-would instead each live in their own file, resolved via `MARCH_LIB_PATH` —
+would instead each live in their own file, resolved via `MARCH_LIB_PATH`;
 see "Multi-File Projects" below.)
 
 Nested module access chains:
@@ -249,7 +249,7 @@ use List.map                  -- import single name
 use A.B.C.*                   -- dotted path, all names
 ```
 
-The difference between `use` and `import` is primarily stylistic — `import` is Elixir-style with keyword options (`only:`, `except:`), while `use` is ML-style with glob and brace selectors.
+The difference between `use` and `import` is primarily stylistic: `import` is Elixir-style with keyword options (`only:`, `except:`), while `use` is ML-style with glob and brace selectors.
 
 ---
 
@@ -286,10 +286,10 @@ Aliases are useful when a module name is long or conflicts with another name in 
 
 A companion, narrower example lives at `examples/modules.march` (qualified
 access + two-level nesting + `pfn` visibility, no `import`/`use`/`alias`).
-The example below is deliberately different from that file: it demonstrates
+The example below is intentionally different from that file: it demonstrates
 qualified access **together with** `import`/`alias`, which means it must
-respect the file-vs-in-file resolver distinction (`core-march.md` §4.7.1) —
-`import`/`use`/`alias` only ever resolve an actual `.march` FILE, never an
+respect the file-vs-in-file resolver distinction (`core-march.md` §4.7.1):
+`import`/`use`/`alias` only resolve an actual `.march` FILE, never an
 in-file nested `mod`, so `MathUtils` (nested inside `Example` here) can only
 be reached by qualification; the `import`/`alias` demos below instead target
 `List`, a real stdlib module (any real file works identically):
@@ -342,7 +342,7 @@ end
 
 ## Module Signatures
 
-A `sig` declaration defines an abstract interface for a module — a named signature separate from the implementation:
+A `sig` declaration defines an abstract interface for a module, a named signature separate from the implementation:
 
 ```march
 sig Collection do
@@ -352,7 +352,7 @@ sig Collection do
 end
 ```
 
-Signatures are used for compile-time abstraction and caching — downstream code that depends on a `sig` only needs to recompile when the signature changes, not when the implementation changes.
+Signatures are used for compile-time abstraction and caching: downstream code that depends on a `sig` only needs to recompile when the signature changes, not when the implementation changes.
 
 ---
 
@@ -402,6 +402,6 @@ end
 
 ## Next Steps
 
-- [Interfaces](interfaces.md) — `interface` and `impl` for ad-hoc polymorphism
-- [Getting Started](../../docs/getting-started.md) — creating a project with forge
-- [Standard Library](../../docs/stdlib.md) — modules you get for free
+- [Interfaces](interfaces.md): `interface` and `impl` for ad-hoc polymorphism
+- [Getting Started](../../docs/getting-started.md): creating a project with forge
+- [Standard Library](../../docs/stdlib.md): modules you get for free

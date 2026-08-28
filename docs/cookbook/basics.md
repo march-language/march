@@ -13,7 +13,7 @@ March is expression-oriented: almost everything returns a value. This chapter co
 
 ## Functions
 
-`fn name(params) do ... end` defines a named function. The last expression in the body is the return value — no `return` keyword.
+`fn name(params) do ... end` defines a named function. The last expression in the body is the return value; there is no `return` keyword.
 
 <!-- scroll:skip -->
 ```march
@@ -22,7 +22,7 @@ fn add(x : Int, y : Int) : Int do
 end
 ```
 
-Type annotations are optional everywhere — the compiler infers them:
+Type annotations are optional everywhere: the compiler infers them:
 
 <!-- scroll:skip -->
 ```march
@@ -49,7 +49,7 @@ end
 
 ## Let bindings
 
-`let` binds a name. No `in` keyword — subsequent expressions in the block see the binding automatically:
+`let` binds a name. No `in` keyword: subsequent expressions in the block see the binding automatically:
 
 <!-- scroll:skip -->
 ```march
@@ -127,7 +127,7 @@ match n do
 end
 ```
 
-`match do` without a subject is a cond — works like chained if/else:
+`match do` without a subject is a cond; it works like chained if/else:
 
 <!-- scroll:skip -->
 ```march
@@ -227,7 +227,7 @@ end
 
 ---
 
-## HashMap — key-value store without a comparator
+## HashMap: key-value store without a comparator
 
 `HashMap(k, v)` is like `Map` but uses structural `==` and the built-in `hash`
 function instead of an explicit comparator. This means you never pass a `cmp`
@@ -271,7 +271,7 @@ end
 ```
 
 The same pattern is why `Enum.frequencies` and `Enum.uniq` are now O(n)
-instead of O(n²) — they use `HashMap` internally.
+instead of O(n²): they use `HashMap` internally.
 
 ### Merging two maps
 

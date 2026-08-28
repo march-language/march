@@ -14,17 +14,17 @@ The JS backend sits **alongside** the existing WebAssembly target
 (`--target wasm32-unknown-unknown`); it does not replace it. The two serve
 different purposes and are expected to coexist long-term:
 
-- **JS target** — interactive UI logic: DOM access, awaiting async work,
+- **JS target**: interactive UI logic (DOM access, awaiting async work,
   holding live JS object references, debuggable output, tiny payloads for
-  small programs.
-- **WASM target** — compute-heavy, boundary-light kernels (e.g. the
+  small programs).
+- **WASM target**: compute-heavy, boundary-light kernels (e.g. the
   `native_int_arr` / `native_float_arr` SIMD-style paths) where raw numeric
   throughput and full language fidelity (scheduler, deterministic RC) matter.
 
 ### Why JS rather than WASM for this use case
 
-The two product decisions that frame this work — **async/await** as the
-concurrency model and a **JS FFI for the DOM** — are precisely where WASM is
+The two product decisions that frame this work, **async/await** as the
+concurrency model and a **JS FFI for the DOM**, are exactly where WASM is
 weakest:
 
 - WASM has no native async; it requires Asyncify (≈2× binary, slow stack
@@ -62,7 +62,7 @@ silently miscompiling:
 - `spawn` / actors / green threads / supervision trees
 - `Chan` / MPST session channels
 - Blocking OS-thread externs (`blocking fn` in a C `extern` block)
-- The full native stdlib — only builtins with a JS shim are supported
+- The full native stdlib; only builtins with a JS shim are supported
 - True 64-bit `Int` (see [Integer Semantics](#integer-semantics)); v1 uses
   safe 53-bit integers
 - WasmGC interop
@@ -90,7 +90,7 @@ Lower → Mono ─┬─ (native / wasm) → Defun → Perceus → Opt  → Llvm
   closure value lowers to a direct JS call.
 - **Skip Perceus.** JavaScript is garbage-collected, so no reference-counting
   nodes (`EIncRC`, `EDecRC`, `EAtomicIncRC`, `EAtomicDecRC`, `EFree`,
-  `EReuse`) are ever inserted. The JS emitter treats any such node as a
+  `EReuse`) are inserted at any point. The JS emitter treats any such node as a
   no-op for defensiveness, but in the normal path they are absent.
 - **Opt'** reuses the existing `Opt.run` passes (join-points, known-call,
   inline, cprop, fold, simplify, fusion, dce), which operate on
@@ -100,7 +100,7 @@ Lower → Mono ─┬─ (native / wasm) → Defun → Perceus → Opt  → Llvm
 
 `lib/tir/js_emit.ml`, a sibling of `lib/tir/llvm_emit.ml`, consuming the same
 `Tir.tir_module`. A new target variant `Js` is added to
-`Llvm_emit.target_config` (or a shared target type if that proves cleaner —
+`Llvm_emit.target_config` (or a shared target type if that proves cleaner;
 see Open Questions), threaded through `bin/main.ml`'s `parse_target` and the
 CAS target label.
 
@@ -148,17 +148,17 @@ Notes:
   via a deterministic scheme (`Crypto$base64_encode`). The mangler must be a
   total, injective function over the set of TIR names in the module.
 
-## Runtime Shim — `march_runtime.js`
+## Runtime Shim: `march_runtime.js`
 
 A small, hand-written ES module providing the builtins that `llvm_emit.ml`
 currently lowers to LLVM instructions or runtime calls. The emitted module
 imports the subset it uses. Contents:
 
-- Arithmetic / comparison — mostly inlined as native JS operators at emit
-  time; the shim holds only those needing helper logic (e.g. integer
+- Arithmetic / comparison: mostly inlined as native JS operators at emit
+  time; the shim contains only those needing helper logic (e.g. integer
   division/modulo semantics, see Integer Semantics).
-- String builtins — `string_concat`, length, slice, comparison, etc.
-- Collection constructors / helpers — `List` (cons/nil), `Option`, `Result`.
+- String builtins: `string_concat`, length, slice, comparison, etc.
+- Collection constructors / helpers: `List` (cons/nil), `Option`, `Result`.
 - `print` → `console.log`.
 - Generic structural-equality helper, if a shared one is cleaner than
   per-type generated functions.
@@ -186,12 +186,12 @@ externs (which dispatch on an OS thread via `march_run_blocking_*`). In the
 JS world "blocking" becomes "awaitable".
 
 Constraint: an async function cannot be called from a context that the
-coloring did not mark async — by construction the fixpoint prevents this, but
+coloring did not mark async; by construction the fixpoint prevents this, but
 the pass must assert it and emit a clear diagnostic if an async value escapes
 into a synchronous position (e.g. stored in a data structure and later called
 synchronously). v1 may conservatively reject such programs.
 
-## JavaScript FFI — `js_extern`
+## JavaScript FFI: `js_extern`
 
 A JS-specific FFI form so a binding can declare its JS target symbol and
 whether it is asynchronous. This is distinct from the existing C `extern`
@@ -237,7 +237,7 @@ to 2^53 − 1. **v1 uses safe 53-bit integers** (`number`):
   and degrades output readability.
 - The limitation is documented and the boundary is explicit.
 - **Future:** a `--js-bigint` flag (M4) switches `Int` to `BigInt` for
-  programs that genuinely need full 64-bit range.
+  programs that truly need full 64-bit range.
 
 Integer division and modulo emit through shim helpers that reproduce March's
 semantics (truncation toward zero, sign of modulo) rather than relying on raw
@@ -249,7 +249,7 @@ JS `/` and `%`.
   `parse_target`.
 - Output filename: `<basename>.mjs`. The runtime shim is copied or
   referenced by relative import alongside it.
-- No native toolchain is invoked — the backend emits text and writes the
+- No native toolchain is invoked: the backend emits text and writes the
   file. (Contrast: native/WASM invoke `clang` / `wasm-ld`.)
 - CAS: `target_label = "js"`, folded into the existing
   `Cas.compilation_hash` logic so JS builds cache and short-circuit like
@@ -264,13 +264,13 @@ JS `/` and `%`.
   Node, assert stdout / return values. Reuse existing example programs that
   fall within the v1 subset.
 - **FFI / async test.** A Node harness supplying a fake imports map (stubs or
-  jsdom) exercises `js_extern` and async coloring end-to-end — a sync DOM
+  jsdom) exercises `js_extern` and async coloring end-to-end: a sync DOM
   binding and an `async fetch_text`.
 - Wire all of the above into `forge test` / CI.
 
 ## Milestones
 
-### M1 — Pure core
+### M1: Pure core
 `--target js`, `lib/tir/js_emit.ml`, the pipeline branch (skip Defun /
 Perceus), `march_runtime.js`. Supports pure functions, ADTs, pattern
 matching, records, tuples, closures, recursion, strings, `List` / `Option` /
@@ -278,15 +278,15 @@ matching, records, tuples, closures, recursion, strings, `List` / `Option` /
 
 Includes the validation task: confirm no `Opt.run` pass assumes Perceus ran.
 
-### M2 — `js_extern` (synchronous)
+### M2: `js_extern` (synchronous)
 FFI plumbing through parser → typecheck → lower → emit. `march_dom.js` with
 synchronous DOM / console bindings. Capability checking on `js_extern`.
 
-### M3 — Async
+### M3: Async
 `AsyncColor` pass; `async fn` in `js_extern`; `fetch` / timer bindings;
 async-position escape diagnostics.
 
-### M4 — Polish
+### M4: Polish
 Source-map comments, `--js-bigint` flag, broader stdlib shims, dead-export
 elimination, ergonomics of the imports-map resolution.
 

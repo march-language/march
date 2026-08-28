@@ -10,7 +10,7 @@ permalink: /docs/clustering/
 March's distributed layer lets multiple nodes form a cluster, discover each other, detect failures, and call functions across node boundaries with type-safety guarantees. The full stack is built from composable pure modules layered on top of the [actor runtime]({{ site.baseurl }}/docs/actors/) and its [supervision trees]({{ site.baseurl }}/docs/supervision/).
 
 > **This page is an API reference, not a runnable quickstart.** The code below shows how
-> the layers fit together, but the end-to-end examples are *skeletons* — two things can
+> the layers fit together, but the end-to-end examples are *skeletons*; two things can
 > only come from a real build, not from copy-paste: the actual byte transport over each
 > socket, and the `sig_hash` / `impl_hash` values the compiler bakes into your binary for
 > the specific functions you enroll (see [Putting It Together](#putting-it-together)). For
@@ -19,7 +19,7 @@ March's distributed layer lets multiple nodes form a cluster, discover each othe
 >
 > **New to March concurrency?** Don't start here. Begin with
 > [Actors]({{ site.baseurl }}/docs/actors/) (`spawn` / `send`) and
-> [Supervision Trees]({{ site.baseurl }}/docs/supervision/) — clustering is the
+> [Supervision Trees]({{ site.baseurl }}/docs/supervision/): clustering is the
 > distributed generalization of those, and this page assumes them throughout.
 
 ---
@@ -28,7 +28,7 @@ March's distributed layer lets multiple nodes form a cluster, discover each othe
 
 Start from where [Supervision Trees]({{ site.baseurl }}/docs/supervision/) leaves off: a supervised actor app running on a single machine. You `spawn` a worker, it gets a `Pid`, and locally you might register it under a name so other parts of the program can find it without threading the `Pid` around.
 
-**Clustering is that exact pattern, stretched across machines.** `GlobalRegistry` is *the distributed version of spawning and registering an actor*: instead of a name → `Pid` map living in one process, it's a cluster-wide, gossip-replicated name → `{node_id, pid}` map that every node converges on. Register a worker under a cluster name on Node A, and Node B can look that name up and call it — without ever holding A's raw `Pid`.
+**Clustering is that exact pattern, stretched across machines.** `GlobalRegistry` is *the distributed version of spawning and registering an actor*: instead of a name → `Pid` map living in one process, it's a cluster-wide, gossip-replicated name → `{node_id, pid}` map that every node converges on. Register a worker under a cluster name on Node A, and Node B can look that name up and call it, without holding A's raw `Pid` at any point.
 
 Here's the whole arc in miniature. On Node A, a supervised worker registers itself under a cluster-wide name:
 
@@ -59,9 +59,9 @@ match GlobalRegistry.lookup(reg, "image-resizer") do
 end
 ```
 
-The rest of this page is the machinery that makes those two snippets safe: how nodes authenticate (handshake), how they agree on who's alive (membership + SWIM), how a name resolves to a node (`GlobalRegistry`), and how a call is type-checked before the remote body runs (`RemoteCall` / `NodeRpc`). Read it top-to-bottom for the layered model, or jump to [Putting It Together](#putting-it-together) for an end-to-end two-node skeleton.
+The rest of this page is the infrastructure that makes those two snippets safe: how nodes authenticate (handshake), how they agree on who's alive (membership + SWIM), how a name resolves to a node (`GlobalRegistry`), and how a call is type-checked before the remote body runs (`RemoteCall` / `NodeRpc`). Read it top-to-bottom for the layered model, or jump to [Putting It Together](#putting-it-together) for an end-to-end two-node skeleton.
 
-> `GlobalRegistry.lookup` returns `Option((String, Int))` — the holder's `node_id` and its **local** `pid` on that node. You address remote calls with a `GlobalPid` (node + local pid + creation counter), which is what survives a restart unambiguously.
+> `GlobalRegistry.lookup` returns `Option((String, Int))`: the holder's `node_id` and its **local** `pid` on that node. You address remote calls with a `GlobalPid` (node + local pid + creation counter), which is what persists across a restart unambiguously.
 
 ---
 
@@ -118,7 +118,7 @@ The secret is just a `String`; `ClusterAuth.prove(secret, nonce)` signs a challe
 
 ### Performing the handshake
 
-`Handshake` is a pure state machine — call it once per new connection:
+`Handshake` is a pure state machine; call it once per new connection:
 
 ```march
 -- Initiator side
@@ -163,7 +163,7 @@ end
 
 ### Membership CRDT
 
-`Membership` maintains the set of known cluster members as a last-write-wins CRDT. Each member carries a `MemberStatus` (`Alive`, `Suspect`, or `Dead`) and an `incarnation` counter for causal ordering. You build a `Member` value with `alive`/`suspect`/`dead`, then fold it into the view with `observe`.
+`Membership` maintains the set of known cluster members as a last-write-wins CRDT. Each member stores a `MemberStatus` (`Alive`, `Suspect`, or `Dead`) and an `incarnation` counter for causal ordering. You build a `Member` value with `alive`/`suspect`/`dead`, then fold it into the view with `observe`.
 
 ```march
 let members = Membership.empty()
@@ -181,7 +181,7 @@ let member = Membership.get(members, "alice@192.168.1.10")   -- Option(Member)
 
 ### SWIM failure detection
 
-`Swim` implements the SWIM gossip protocol as a pure state machine. It produces `Action` values that tell the runtime what to send — no sockets inside.
+`Swim` implements the SWIM gossip protocol as a pure state machine. It produces `Action` values that tell the runtime what to send; no sockets inside.
 
 ```march
 let cfg   = Swim.config(200, 2000, 3)   -- ack_timeout_ms, suspect_timeout_ms, indirect_k
@@ -241,13 +241,13 @@ let names = GlobalRegistry.names(reg)   -- List(String)
 let n     = GlobalRegistry.size(reg)
 ```
 
-Merge is idempotent: applying the same remote view twice produces the same result. This makes gossip-based propagation safe — broadcast to all peers and let them forward.
+Merge is idempotent: applying the same remote view twice produces the same result. This makes gossip-based propagation safe: broadcast to all peers and let them forward.
 
 ---
 
 ## Remote Calls
 
-### GlobalPid — cluster-wide process identifiers
+### GlobalPid: cluster-wide process identifiers
 
 A `GlobalPid` uniquely identifies a process across the cluster:
 
@@ -262,7 +262,7 @@ let pid2 = GlobalPid.of_value(v)   -- Result(GlobalPid.Pid, String)
 
 The `creation` counter lets the runtime distinguish a new process at the same local pid from a restarted one.
 
-### RemoteRef — type-safe function references
+### RemoteRef: type-safe function references
 
 A `RemoteRef` pins a remote function by both its type signature hash and its implementation hash:
 
@@ -312,8 +312,8 @@ end
 | `DeadlineExceeded` | No reply before the deadline |
 | `NoConnection` | The peer is unreachable or has disconnected |
 | `RemoteExit(msg)` | The target function raised an error |
-| `TypeMismatch` | `sig_hash` did not match — type API changed |
-| `VersionSkew` | `sig_hash` matched but `impl_hash` did not — different body version |
+| `TypeMismatch` | `sig_hash` did not match; type API changed |
+| `VersionSkew` | `sig_hash` matched but `impl_hash` did not; different body version |
 | `NoTarget` | No function enrolled under that module/function name |
 
 `TypeMismatch` and `VersionSkew` are safe: the remote body was **never invoked**.
@@ -385,7 +385,7 @@ end
 
 ## Putting It Together
 
-> **This is a layered API-reference skeleton, not a runnable program.** It shows how the pieces connect — identity, listen/connect, handshake, then a `RemoteCall` — but elides two things you must supply for real: (1) the actual byte transport over the socket `fd`, and (2) concrete `sig_hash` / `impl_hash` values, which the compiler bakes into your binary for the specific functions you enroll. The send/recv framing is `NetFrame`'s job (length-prefixed frames); see the *Wiring up the transport* note after the skeleton for how to close the loop.
+> **This is a layered API-reference skeleton, not a runnable program.** It shows how the pieces connect (identity, listen/connect, handshake, then a `RemoteCall`) but elides two things you must supply for real: (1) the actual byte transport over the socket `fd`, and (2) concrete `sig_hash` / `impl_hash` values, which the compiler bakes into your binary for the specific functions you enroll. The send/recv framing is `NetFrame`'s job (length-prefixed frames); see the *Wiring up the transport* note after the skeleton for how to close the loop.
 
 A minimal two-node cluster:
 
@@ -443,7 +443,7 @@ end
 
 To turn the skeleton into a running program, close the two gaps the note above flagged:
 
-1. **Framing.** `RemoteCall.encode_request(req)` gives you a `List(Int)` of bytes. Wrap it in a length prefix with `NetFrame` and write it to the socket `fd`; on the other end, read a length-prefixed frame back and hand the bytes to `RemoteCall.decode_reply` (caller side) or `NodeRpc.handle_frame` (responder side). The accept/recv loop is the same shape as the `ClusterConn.listen` example in [Starting the listener](#starting-the-listener) — receive a frame, dispatch, write the reply.
+1. **Framing.** `RemoteCall.encode_request(req)` gives you a `List(Int)` of bytes. Wrap it in a length prefix with `NetFrame` and write it to the socket `fd`; on the other end, read a length-prefixed frame back and hand the bytes to `RemoteCall.decode_reply` (caller side) or `NodeRpc.handle_frame` (responder side). The accept/recv loop is the same shape as the `ClusterConn.listen` example in [Starting the listener](#starting-the-listener): receive a frame, dispatch, write the reply.
 2. **Hashes.** `sig_hash` and `impl_hash` are produced by the compiler for the enrolled function (`Image.resize`, `Math.add`, …) and recorded in the binary; you reference the compiler-provided values rather than inventing them. A mismatch is caught *before* the remote body runs (`TypeMismatch` / `VersionSkew`), which is the whole point of the type-safe call path.
 
 For a complete, executing example, see the cluster integration tests under the project's `test/` tree (search with `forge search` for `ClusterConn`, `NodeRpc`, and `GlobalRegistry`), which exercise the full accept → handshake → enroll → call → reply loop end to end.
@@ -466,14 +466,14 @@ conformance suite covering the CRDT merge laws (commutative, associative, idempo
 handshake, synchronous RPC transport, SWIM gossip dispatch to peer file descriptors, and
 cross-node monitor firing require two real nodes and are covered by native multi-process
 integration tests rather than the same conformance corpus as the pure logic above. True
-multi-*machine* failure semantics — netsplit, node restart/incarnation, clock skew across
-hosts — aren't yet covered by an automated test at all; treat them as less battle-tested
+multi-*machine* failure semantics (netsplit, node restart/incarnation, clock skew across
+hosts) aren't yet covered by an automated test at all; treat them as less battle-tested
 than the single-process core.
 
 ---
 
 ## See also
 
-- [Actors]({{ site.baseurl }}/docs/actors/) — `spawn` / `send` and the mailbox model the cluster layers on; `GlobalRegistry` is the distributed counterpart of registering a `Pid` under a name.
-- [Supervision Trees]({{ site.baseurl }}/docs/supervision/) — start from a supervised actor app on one node, then register its workers in the cluster as shown in [From one node to a cluster](#from-one-node-to-a-cluster).
-- [Session Types]({{ site.baseurl }}/docs/session-types/) — typed two-party protocols, the in-process analogue of a type-safe `RemoteCall`.
+- [Actors]({{ site.baseurl }}/docs/actors/): `spawn` / `send` and the mailbox model the cluster layers on; `GlobalRegistry` is the distributed counterpart of registering a `Pid` under a name.
+- [Supervision Trees]({{ site.baseurl }}/docs/supervision/): start from a supervised actor app on one node, then register its workers in the cluster as shown in [From one node to a cluster](#from-one-node-to-a-cluster).
+- [Session Types]({{ site.baseurl }}/docs/session-types/): typed two-party protocols, the in-process analogue of a type-safe `RemoteCall`.

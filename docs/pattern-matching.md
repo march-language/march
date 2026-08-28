@@ -140,7 +140,7 @@ fn describe_point(p : Point) : String do
 end
 ```
 
-A field written as a bare name is shorthand — punning — for `name: name`,
+A field written as a bare name is shorthand (punning) for `name: name`,
 mirroring record-literal punning: `{ x, y }` binds `x` and `y` to the
 record's `x` and `y` fields, exactly like `{ x: x, y: y }`. The example
 above could equally be written `{ x: x, y: y } -> ...` or, punned, as
@@ -150,7 +150,7 @@ struct shape rather than matching in the body.
 #### Field lists are open
 
 A record pattern need only name the fields it cares about. `{ x: a }` matches
-any record that has (at least) an `x` field, whatever else it carries; fields
+any record that has (at least) an `x` field, whatever else it includes; fields
 the pattern doesn't mention are simply not bound. The y-axis check above, for
 instance, needn't mention `y` at all:
 
@@ -164,12 +164,12 @@ let { x: px } = p            -- `p` may have any number of other fields
 let? { x: px } = fetch()     -- likewise, against the Ok payload's type
 ```
 
-This works wherever the pattern is matched against a value whose type is
-already known — a `match` scrutinee, a `let` or `let?` right-hand side, a
+This works wherever the pattern is matched against a value with a type that is
+already known: a `match` scrutinee, a `let` or `let?` right-hand side, a
 constructor argument, a tuple element.
 
 Naming a field the record does **not** have is a compile error, not a silent
-no-op, so a typo is caught rather than quietly matching nothing:
+no-op, so a typo is caught rather than invisibly matching no values:
 
 ```
 This record has no field `xx`.
@@ -193,7 +193,7 @@ fn where_to(r : Route) : String do
 end
 ```
 
-A record inside a constructor payload — the common shape when a record comes
+A record inside a constructor payload, the common shape when a record comes
 back wrapped in `Option` or `Result`:
 
 ```march
@@ -248,7 +248,7 @@ end
 
 #### The one exception: a bare pattern as a parameter
 
-A pattern written directly as a parameter — `fn get_w({ w: w })` — is the one
+A pattern written directly as a parameter (`fn get_w({ w: w })`) is the one
 place a record pattern is *closed*, matching exactly the fields it names.
 Parameter patterns can't carry a type annotation (only `name : Type` can), so
 the pattern is the sole source of its own type: `get_w` is inferred as taking
@@ -287,7 +287,7 @@ already covered by an earlier one is reported unreachable.
 
 ### Atom Patterns
 
-Atoms are named constants written with a leading colon — each atom is its own type (see the Type System page for a full introduction).
+Atoms are named constants written with a leading colon; each atom is its own type (see the Type System page for a full introduction).
 
 ```march
 match status do
@@ -300,10 +300,10 @@ end
 ### Qualified Constructor Patterns
 
 When multiple modules define constructors with the same name, qualify them
-(`TypeName.Ctor` also works — the diagnostic below suggests that spelling —
+(`TypeName.Ctor` also works; the diagnostic below suggests that spelling,
 but the module-qualified form shown here is equally valid). Note a single
-`match` can only ever see ONE of the colliding constructors per scrutinee (a
-scrutinee has one concrete type), so — unlike the sketch above might suggest —
+`match` can only see ONE of the colliding constructors per scrutinee (a
+scrutinee has one concrete type), so, unlike the sketch above might suggest,
 qualification shows up as two separate matches over two separately-typed
 values, not as alternate arms of the same match:
 
@@ -333,7 +333,7 @@ end
 The qualified form above is reliably safe because both colliding `Ok`/`Err`
 constructors carry a `String` payload (same runtime representation). When the
 colliding constructors carry payloads of *different* representations, the
-compiled backend has an open bug — see [Known limitations](#known-limitations)
+compiled backend has an open bug; see [Known limitations](#known-limitations)
 at the end of this page.
 
 ### Negative Integer Patterns
@@ -365,14 +365,14 @@ match o do
 end
 ```
 
-The inner pattern can be anything — a bare variable (`x as y` binds both `x`
+The inner pattern can be anything: a bare variable (`x as y` binds both `x`
 and `y` to the same value), a literal, a tuple, or an arbitrarily nested
 constructor pattern. As-patterns work in `match` arms, `let` bindings (`let
 (n as whole) = compute()`), and function parameters, since all three desugar
 through the same pattern grammar.
 
 Chaining aliases directly (`p as a as b`) is a parse error. Parenthesize to
-bind two names to the same value — `(x as a) as b` is accepted — though one
+bind two names to the same value (`(x as a) as b` is accepted), though one
 alias per pattern is almost always what you want.
 
 Note the parentheses in the `let` example above: `let` takes a *simple*
@@ -399,7 +399,7 @@ end
 ```
 
 Alternatives can be literals, nullary/atom constructors, or any other
-pattern shape, and they **may bind variables** — provided every alternative
+pattern shape, and they **may bind variables**, provided every alternative
 binds the same names at the same types:
 
 ```march
@@ -429,7 +429,7 @@ match e2 do
 end
 ```
 
-If alternatives genuinely need to bind different things, split them into
+If alternatives truly need to bind different things, split them into
 separate arms:
 
 ```march
@@ -445,7 +445,7 @@ three-constructor `Color`, `Some(1 | 2)` covers exactly `Some(1)` and
 `Some(2)` (so a match with only that arm and `None` is still reported
 non-exhaustive), and an arm that only repeats alternatives already covered
 by an earlier arm is flagged as unreachable exactly as any other redundant
-arm would be. An arm whose nested alternatives multiply out to a
+arm would be. An arm with nested alternatives that multiply out to a
 pathologically large number of shapes (more than a few hundred) falls back
 to being treated as a wildcard for coverage purposes, which can only
 suppress a diagnostic, never invent one.
@@ -482,7 +482,7 @@ fn classify(n)              do "positive" end
 ## Exhaustiveness Checking
 
 The compiler verifies that every possible value is matched. If you miss a
-case, you get a diagnostic pointing at exactly what's missing — verified
+case, you get a diagnostic pointing at exactly what's missing. Verified
 live, it is currently a **warning**, not a hard compile error (the program
 still typechecks at exit 0 and still runs; a value that actually hits the
 missing case panics at runtime, same as any other non-exhaustive match):
@@ -509,11 +509,11 @@ end
 
 Exhaustiveness extends to nested patterns. The compiler understands which combinations are possible.
 
-**Why this matters — refactoring safety.** Exhaustiveness turns "add a variant"
+**Why this matters: refactoring safety.** Exhaustiveness turns "add a variant"
 from a silent hazard into a guided checklist. Add a `Blue` case to a `Color` that
 already had `Red` and `Green`, and the compiler flags **every** `match` in the
-codebase that forgot to handle it — each one a precise diagnostic (currently a
-warning, not a hard error — see above) pointing at the spot to update. (The LSP
+codebase that forgot to handle it, each one a precise diagnostic (currently a
+warning, not a hard error; see above) pointing at the spot to update. (The LSP
 even offers an "Add all N missing cases" quick fix.) A stale match arm doesn't
 fail the build, but it also can't hide silently; the type that changed pulls
 every dependent decision back into view.
@@ -551,7 +551,7 @@ end
 
 ## Multi-Expression Arms
 
-Match arms support multiple expressions — any number of `let` bindings followed by a final expression:
+Match arms support multiple expressions: any number of `let` bindings followed by a final expression:
 
 ```march
 match result do
@@ -582,7 +582,7 @@ end
 
 ## Cond (Pattern-Free Multi-Way If)
 
-When `match` has no scrutinee expression, each arm is a boolean guard — this is equivalent to `cond` in other languages:
+When `match` has no scrutinee expression, each arm is a boolean guard; this is equivalent to `cond` in other languages:
 
 ```march
 match do
@@ -620,7 +620,7 @@ Each `<-` binding: if the expression matches the pattern, execution continues wi
 
 ## Patterns in Let Bindings
 
-Patterns work directly in `let` — but a bare constructor pattern needs an
+Patterns work directly in `let`, but a bare constructor pattern needs an
 extra pair of parens (`let Some(x) = ...` is a parse error; `let (Some(x)) =
 ...` is not). A tuple pattern doesn't need the extra parens,
 since `let (a, b) = ...` is its own grammar production:
@@ -664,7 +664,7 @@ end
 Clauses are checked top to bottom; the first matching clause wins. The compiler warns if later clauses are unreachable.
 
 Multi-head functions work with any pattern in the parameter list that `match`
-itself supports — constructors, literals, tuples, and record patterns
+itself supports: constructors, literals, tuples, and record patterns
 (see "Record Patterns" above):
 
 ```march
@@ -695,14 +695,14 @@ match score do
 end
 ```
 
-A guard that fails causes the clause to be skipped and the next clause is tried. A function with no matching clause (after guards) panics at runtime — make the last clause unconditional or use a wildcard to ensure exhaustiveness.
+A guard that fails causes the clause to be skipped and the next clause is tried. A function with no matching clause (after guards) panics at runtime; make the last clause unconditional or use a wildcard to ensure exhaustiveness.
 
 ---
 
 ## Known limitations
 
 **Qualified constructor patterns with differently-shaped payloads (compiled
-backend).** When two modules define a same-named constructor whose payloads have
+backend).** When two modules define a same-named constructor with payloads that have
 *different* runtime representations (e.g. one module's `Ok(Int)` versus another's
 `Ok(String)`), the compiled backend has an open bug: matching the qualified
 constructor nondeterministically crashes (`march: out of memory`) or returns
@@ -718,6 +718,6 @@ so the qualified patterns shown earlier on this page are safe.
 
 ## Next Steps
 
-- [Type System](types.md) — the types you're matching against
-- [Tour](../../docs/tour.md) — language overview with more examples
-- [Interfaces](interfaces.md) — polymorphic dispatch with `interface`
+- [Type System](types.md): the types you're matching against
+- [Tour](../../docs/tour.md): language overview with more examples
+- [Interfaces](interfaces.md): polymorphic dispatch with `interface`

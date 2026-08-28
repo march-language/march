@@ -7,15 +7,15 @@ permalink: /docs/ffi/
 
 # Foreign Function Interface (FFI)
 
-March binds to native libraries through a stable C ABI — the same idea as BEAM's
+March binds to native libraries through a stable C ABI, the same idea as BEAM's
 `erl_nif.h`. You declare an `extern` block in March, write (or generate) a thin C
 shim against `runtime/march_ffi.h`, and link it through `forge.toml`. Rust crates
-bind through the ergonomic `march` crate, which rides the same C ABI.
+bind through the ergonomic `march` crate, which goes through the same C ABI.
 
 The payoff over a hand-written FFI is that ownership crosses the boundary
 *checked*: each heap argument is either `borrow`ed (March keeps it and frees it
 after the call) or `consume`d (ownership transfers into the binding), and the
-compiler threads the reference counts for you — so the common case needs no
+compiler threads the reference counts for you, so the common case needs no
 manual `march_dup`/`march_drop` and can't leak or double-free. The marshalling
 mechanics below are what make that ownership contract concrete for each type.
 
@@ -23,7 +23,7 @@ mechanics below are what make that ownership contract concrete for each type.
 
 ## Declaring externs
 
-An `extern` block names a C library, carries an FFI capability, and lists the
+An `extern` block names a C library, brings an FFI capability, and lists the
 foreign functions with their March types and C symbol names:
 
 ```march
@@ -53,7 +53,7 @@ The `= "symbol"` gives the exact C symbol; omit it and the default is
 
 ## Marshalling tiers
 
-Values cross the boundary by their static type — there is no universal runtime
+Values cross the boundary by their static type; there is no universal runtime
 tag, so each side accesses a value by the type the signature declares.
 
 | March type | C side (`march_ffi.h`) |
@@ -66,7 +66,7 @@ tag, so each side accesses a value by the type the signature declares.
 | record / variant | the generated codecs (`march_decode_T` / `march_encode_T`, see below) |
 | `resource R` | an opaque native handle (`march_resource_new` / `march_resource_get`) |
 
-Strings and bytes are **borrowed** for the duration of the call — copy them with
+Strings and bytes are **borrowed** for the duration of the call; copy them with
 `march_str_new` if you need to keep them.
 
 ---
@@ -76,7 +76,7 @@ Strings and bytes are **borrowed** for the duration of the call — copy them wi
 Heap arguments are **borrowed** by default: March still owns them and frees them
 after the call, so a binding may read but must not retain them. Prefix a
 parameter with `consume` to transfer ownership to the binding (March will not
-free it — the binding must drop or store it):
+free it; the binding must drop or store it):
 
 ```march
 extern "store" : Cap(Ffi) do
@@ -94,7 +94,7 @@ correct with no manual `march_dup`/`march_drop` in the common case.
 A `Result`-returning binding can build the result itself with `march_ok` /
 `march_err`. Or mark it `raises` to use the **env-routed** protocol: the binding
 takes a hidden `march_env *`, returns the bare `Ok` payload on success, and calls
-`march_raise(env, e)` to fail — the compiler materializes `Ok`/`Err`:
+`march_raise(env, e)` to fail; the compiler materializes `Ok`/`Err`:
 
 ```march
 extern "rt" : Cap(Ffi) do
@@ -132,8 +132,8 @@ end
 C shim skeleton: correct signatures, `march_str_borrow` slices for `String`/
 `Bytes`, resource-get + `consume`-drop hints, typed `Result`/`Option` return
 stubs, and a `TODO` for the actual library call. For every record/variant type
-reachable from a signature it also generates **codecs** — a repr-C mirror struct
-plus `march_decode_T` / `march_encode_T` — so you work with plain C structs
+reachable from a signature it also generates **codecs** (a repr-C mirror struct
+plus `march_decode_T` / `march_encode_T`), so you work with plain C structs
 instead of poking value slots:
 
 ```march
@@ -209,7 +209,7 @@ link    = ["-lz"]              # extra linker flags
 ```
 
 For a Rust binding, `[ffi.rust]` triggers `cargo build --release` automatically
-and passes the resulting `.a` to the linker — no manual build step needed:
+and passes the resulting `.a` to the linker; no manual build step needed:
 
 ```toml
 [ffi.rust]
@@ -230,7 +230,7 @@ layer**: `Int`/`Bool`/`Float` args, `String`/`Bytes` args (heap-allocated for th
 call duration), `Option(T)`/`Result(T,E)` returns, `raises` externs, and
 variant/record args and returns. Project-specific C shims (from `[ffi] sources`
 in `forge.toml`) are compiled to a shared library on first use and loaded
-automatically — no `--compile` required.
+automatically; no `--compile` required.
 
 The one interpreter gap is **closures/upcalls as arguments**: if a binding takes
 a function-typed parameter (`fn(Int) -> Int`), the interpreter reports a clear
@@ -248,7 +248,7 @@ it as a plain function pointer. Args use the **native slot representation** (raw
 
 - `blocking` spawns a fresh OS thread per call (no pool; fine for occasional long
   calls, not for high-frequency ones).
-- Recursive and generic record/variant types have no generated codec — they fall
+- Recursive and generic record/variant types have no generated codec; they fall
   back to raw `march_value` passthrough.
 - `forge ffi import <header.h>` (C header → draft `extern` block) is not yet
   implemented; it needs a C-header parser (libclang).

@@ -6,7 +6,7 @@ permalink: /docs/cookbook/capabilities/
 
 # Capabilities
 
-The capability system lets you express resource requirements in function types. A module that declares `needs IO` can only be used by code that also holds that capability — enforced at compile time with no runtime cost.
+The capability system lets you express resource requirements in function types. A module that declares `needs IO` can only be used by code that also possesses that capability, enforced at compile time with no runtime cost.
 
 ---
 
@@ -27,7 +27,7 @@ A caller that doesn't declare `needs IO` will get a compile error if it tries to
 
 ## Proof capabilities
 
-`proof cap` declares a capability that can only be *created* inside one module — useful for authority tokens. Minting goes through the gated `mint_cap` builtin, which only typechecks inside a public function of the declaring module and takes the ambient `Cap(IO)` (or a narrower cap) to authorize the mint. Proof-cap types are always referred to by their qualified `Module.Name` form, even from inside the declaring module:
+`proof cap` declares a capability that can only be *created* inside one module, useful for authority tokens. Minting goes through the gated `mint_cap` builtin, which only typechecks inside a public function of the declaring module and takes the ambient `Cap(IO)` (or a narrower cap) to authorize the mint. Proof-cap types are always referred to by their qualified `Module.Name` form, even from inside the declaring module:
 
 ```march
 mod Admin do
@@ -106,4 +106,4 @@ mod PluginDemo do
 end
 ```
 
-The `PluginCap` ensures that only code explicitly granted the capability can invoke the sandbox runner. Untrusted code paths can never call `Plugin.run` — not because of a runtime check, but because the type won't compile without the cap.
+The `PluginCap` ensures that only code explicitly granted the capability can invoke the sandbox runner. Untrusted code paths can never call `Plugin.run`: not because of a runtime check, but because the type won't compile without the cap.

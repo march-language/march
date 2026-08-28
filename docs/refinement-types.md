@@ -7,25 +7,25 @@ permalink: /docs/refinement-types/
 
 # Refinement Types
 
-Normally, a type like `Int` only tells the compiler "this is a whole number" — it says
-nothing about *which* whole numbers are actually valid here. A **refinement type** lets
+Normally, a type like `Int` only tells the compiler "this is a whole number": it gives
+no hint about *which* whole numbers are actually valid here. A **refinement type** lets
 you attach an extra condition to a type, so `{Int | _ >= 0}` means "an `Int`, and
 specifically one that's never negative." The condition (`_ >= 0` here) is called a
-**predicate** — just a true/false check on the value.
+**predicate**, just a true/false check on the value.
 
-The clever part is that March doesn't just remember the condition as documentation — it
+The clever part is that March doesn't just remember the condition as documentation: it
 actually *proves* it, at compile time, using an automated reasoning tool called an
 **SMT solver** (specifically [Z3](https://github.com/Z3Prover/z3)). An SMT solver is
 software that can mechanically work out whether a set of logical/arithmetic statements
-is possible or is a contradiction — the same kind of tool used to verify hardware
+is possible or is a contradiction, the same kind of tool used to verify hardware
 designs and cryptographic protocols. In March, it's put to work checking your function
-contracts, so a whole class of bugs — out-of-bounds indices, negative sizes, division by
-zero, broken invariants — becomes a **compile error** instead of a runtime panic.
+contracts, so a whole class of bugs (out-of-bounds indices, negative sizes, division by
+zero, broken invariants) becomes a **compile error** instead of a runtime panic.
 
-If you've heard the term **dependent typing** — types that depend on *values*, not just
-other types — refinements are March's practical, restricted slice of it. You get the
+If you've heard the term **dependent typing** (types that depend on *values*, not just
+other types), refinements are March's practical, restricted slice of it. You get the
 safety where it pays off (preconditions, bounds, postconditions) without a proof
-assistant's ceremony — and, crucially, **without false positives**: if the checker can't
+assistant's ceremony; and, crucially, **without false positives**: if the checker can't
 prove a value is definitely wrong, it stays silent rather than guessing.
 
 > **Requires Z3.** Refinement checking runs only when the `z3` solver is on your
@@ -33,9 +33,9 @@ prove a value is definitely wrong, it stays silent rather than guessing.
 > refinement diagnostics are produced (the build still succeeds).
 
 **New to this?** Read [Syntax](#syntax) through
-[Contracts Compose](#contracts-compose--a-parameters-promise-holds-inside-its-body)
+[Contracts Compose](#contracts-compose-a-parameters-promise-applies-inside-its-body)
 and you'll be able to write and read everyday refinements. Everything after
-[Postconditions](#postconditions) goes deeper — measures over your own data
+[Postconditions](#postconditions) goes deeper: measures over your own data
 structures, `Bool`/`Float`/tag refinements, the strict `cap verified` /
 `cap no_panic` modes, and the full [Limitations](#limitations) list. If you
 just want to know why a specific contract *isn't* catching something, jump
@@ -86,7 +86,7 @@ You can name the value instead of using `_`:
 {v : Int | v >= 0 && v < 100}
 ```
 
-Refinements appear anywhere a type does — **parameters** (preconditions) and
+Refinements appear anywhere a type does, **parameters** (preconditions) and
 **return types** (postconditions):
 
 ```march
@@ -100,12 +100,12 @@ fn count(xs : List(a)) : {Int | _ >= 0} do List.length(xs) end
 The supported predicate fragment is **`Int`/`Bool` linear arithmetic**:
 `+ - *` (multiplication by a literal), the comparisons `== != < <= > >=`, the
 connectives `&& || not`, integer/bool literals, and **measures** (below).
-`Bool` and `Float` values are refinable too — see
+`Bool` and `Float` values are refinable too; see
 [Bool and Float Refinements](#bool-and-float-refinements).
 
 ---
 
-## How Checking Works — Definite Failure
+## How Checking Works: Definite Failure
 
 Think of the checker as a cautious lawyer rather than an eager one: it only objects when
 it can prove, beyond doubt, that you're wrong. There are exactly three outcomes for a
@@ -127,15 +127,15 @@ fn f(k : Int) : Int do
 end
 ```
 
-The consequence: **no false positives, by design — but incomplete.** The
+The consequence: **no false positives, by design, but incomplete.** The
 checker never flags correct code, and never blocks a build over something it
 can't disprove. It also won't *prove* everything you might hope; facts it can't
-establish are conservatively let through. This trade is deliberate — a
+establish are conservatively let through. This trade is intentional: a
 refinement checker that cries wolf is one developers turn off.
 
 ---
 
-## Path Sensitivity — Guards Establish Facts
+## Path Sensitivity: Guards Establish Facts
 
 A guard you write becomes a fact the solver can use for the rest of that branch. The
 then-branch learns the condition is true; the else-branch learns it's false:
@@ -151,21 +151,21 @@ end
 ```
 
 (`len`, used in earlier examples, is a special name usable only inside a `{...}`
-refinement predicate — you can't call it as an ordinary function. In plain code, like
+refinement predicate; you can't call it as an ordinary function. In plain code, like
 the guard above, use `List.length` instead; the solver knows they mean the same thing.)
 
-> **Length guards count.** A guard you'd write anyway — `if List.length(ys) > 0`,
-> or `if String.byte_size(s) > 0` — establishes exactly the fact a `len`-bearing
+> **Length guards count.** A guard you'd write anyway (`if List.length(ys) > 0`,
+> or `if String.byte_size(s) > 0`) establishes exactly the fact a `len`-bearing
 > contract like `{List(Int) | len(_) > 0}` asks for: the checker treats the qualified
 > `List.length`, `String.byte_size`, and the `string_byte_length` builtin as spellings
 > of the `len` measure (a bare `length`, `String.codepoint_count`, or `string_length`
-> does **not** count). The same holds for a qualified spelling written *inside* the
+> does **not** count). The same applies to a qualified spelling written *inside* the
 > braces. The connection is narrow and occasionally withdrawn for a whole compilation
-> unit — see [Limitations](#limitations) for the summary and
+> unit; see [Limitations](#limitations) for the summary and
 > [the appendix](#the-solver-really-does-connect-listlength-to-len) for the exact rules.
 
 `match` arm guards (`when`) work the same way. An `assert(p)` acts as an
-**assume** — it injects `p` as a fact for the code that follows:
+**assume**: it injects `p` as a fact for the code that follows:
 
 ```march
 fn g(i : Int) : Int do
@@ -179,19 +179,19 @@ Use `assert` as the escape hatch for facts the checker can't derive on its own
 
 ---
 
-## Contracts Compose — A Parameter's Promise Holds Inside Its Body
+## Contracts Compose: A Parameter's Promise Applies Inside Its Body
 
 There are two different ways a fact gets established, and it's worth keeping them
 apart in your head:
 
-- a **guard** — a runtime test you wrote, like `if List.length(ys) > 0 do …`, which
+- a **guard**: a runtime test you wrote, like `if List.length(ys) > 0 do …`, which
   is what the section above is about; and
-- a **declared contract** — a refinement on a parameter's *type*, which the caller
+- a **declared contract**: a refinement on a parameter's *type*, which the caller
   already had to satisfy before the function could be entered.
 
-The second one is a promise you were handed, so you shouldn't have to check it again.
+The second one is a promise you were given, so you shouldn't have to check it again.
 And you don't: a refined parameter's own predicate is a fact inside the function's
-body. Which means contracts **compose** — a function that requires something can pass
+body. Which means contracts **compose**: a function that requires something can pass
 its own parameter straight on to another function requiring the same thing, no guard
 anywhere:
 
@@ -201,7 +201,7 @@ fn outer(ys : {List(Int) | len(_) > 0}) : Int do inner(ys) end
 fn main() : Int do outer([1]) end
 ```
 
-Both calls are *proved* — `--refine-report` says `2 proved, 0 violated, 0 trusted, 0 skipped`.
+Both calls are *proved*: `--refine-report` reports `2 proved, 0 violated, 0 trusted, 0 skipped`.
 A contract can be threaded through as many hops as you like without re-guarding a list
 you'd already promised was non-empty. That's what makes the standard library's contracts
 worth having:
@@ -223,14 +223,14 @@ every undischarged obligation into an error.
 This works for every refinement shape: `Int`, `Float`, `Bool`, `String`
 lengths, record fields, list `len`, your own `@[measure]` over a tree, and a
 **constructor tag** (`{Option(Int) | is_Some(_)}`) all compose. The tag shape
-composes only for the constructor you actually promised — promising
+composes only for the constructor you actually promised: promising
 `is_None(_)` does not discharge a callee wanting `is_Some(_)`. See
 [Limitations](#limitations).
 
-Two things it deliberately won't do for you. First, a **weaker** promise can't
-launder a stronger requirement. Declare `outer(ys : {List(Int) | len(_) >= 0})` —
-which is true of every list and therefore says nothing — and the inner call goes back
-to being *skipped*: not proved, and not reported either, because nothing here is
+Two things it intentionally won't do for you. First, a **weaker** promise can't
+launder a stronger requirement. Declare `outer(ys : {List(Int) | len(_) >= 0})`
+(which is true of every list and therefore states no fact) and the inner call goes back
+to being *skipped*: not proved, and not reported either, because no value here is
 definitely wrong. Second, **rebinding the name drops the fact**, since the promise
 belongs to the value, not the spelling:
 
@@ -242,7 +242,7 @@ end
 ```
 
 A `match` arm that binds the same name (`Cons(_, ys) -> inner(ys)`) behaves the same.
-Both leave the call quiet rather than flagged — the checker never guesses.
+Both leave the call quiet rather than flagged; the checker never guesses.
 
 One related gap, which predates all of this and is easy to trip over: a fact does
 **not** travel through a local `let`, for any type at all. `let u = 5` followed by
@@ -251,7 +251,7 @@ it. Pass the value directly, or state the fact with `assert`.
 
 ### An annotation on a `let` is checked, not assumed
 
-You *can* write a refinement on a local binding, and it carries a fact forward — but
+You *can* write a refinement on a local binding, and it brings a fact forward, but
 it has to earn it first:
 
 ```march
@@ -275,7 +275,7 @@ expression actually satisfies it.
 
 The usual stance still applies at the other end: an annotation the checker can
 neither prove nor refute is **skipped**, never reported. But it then grants no fact
-either, so it can't quietly prop up a later call:
+either, so it can't invisibly prop up a later call:
 
 ```march
 fn go(zs : List(Int)) : Int do
@@ -284,7 +284,7 @@ fn go(zs : List(Int)) : Int do
 end
 ```
 
-All three spellings of the value work the same way — `_`, a declared binder
+All three spellings of the value work the same way: `_`, a declared binder
 (`{v : List(Int) | len(v) > 0}`), or the bound name itself (`len(ys) > 0`).
 
 ---
@@ -304,7 +304,7 @@ fn bad(n : Int) : {Int | _ >= 0} do
 end
 ```
 
-A postcondition is checked the same way a precondition is — a **compile
+A postcondition is checked the same way a precondition is: a **compile
 error** when it can never hold, silent **proof** when it always does, and a
 silent **skip** when the checker can't decide either way. It also counts
 toward [`--refine-report`](#seeing-what-got-checked---refine-report) (tagged
@@ -322,22 +322,22 @@ mod Checked do
 end
 ```
 
-`@[trusted]` rescues a postcondition the same way it rescues a precondition —
-see [`cap verified`](#cap-verified--making-silence-an-error) below.
+`@[trusted]` rescues a postcondition the same way it rescues a precondition;
+see [`cap verified`](#cap-verified-making-silence-an-error) below.
 
 **What doesn't carry through:** proving a *plain* postcondition (as above) is
 different from proving a **relational** one that relates a measure across an
-operation — `size(insert(t, x)) == size(t) + 1` — which needs the checker to
+operation (`size(insert(t, x)) == size(t) + 1`), which needs the checker to
 supply an induction hypothesis at each structurally-recursive call. That
 narrower, more powerful case is covered in [Limitations](#limitations), under
 "Relational postconditions work, within structural recursion."
 
 ---
 
-## Measures — Refining over Data Structures
+## Measures: Refining over Data Structures
 
 Every predicate so far has been about a single plain number, like `i >= 0`. But often
-the bound you actually care about depends on the *shape* of a data structure — "the
+the bound you actually care about depends on the *shape* of a data structure: "the
 index must be less than the list's length," say. A **measure** is how you bring that
 into a predicate: it's an ordinary-looking function from a value to an `Int` (or
 `Bool`), except the compiler is allowed to reason about it symbolically, not just run
@@ -347,7 +347,7 @@ it. The built-in `len` measures a list this way:
 fn at(xs : List(Int), i : {Int | _ >= 0 && _ < len(xs)}) : Int do ... end
 ```
 
-You can define your own with the `@[measure]` attribute — for example the size
+You can define your own with the `@[measure]` attribute, for example the size
 of a tree:
 
 ```march
@@ -365,7 +365,7 @@ fn get(t : Tree(a), i : {Int | _ >= 0 && _ < size(t)}) : a do ... end
 ```
 
 Once a function is marked `@[measure]`, the solver treats its own definition as a set of
-rules it's allowed to use — so for a value whose shape it can see (a literal list, an
+rules it's allowed to use, so for a value with a shape it can see (a literal list, an
 explicit `Node`/`Leaf` tree), it can effectively "run" the measure symbolically:
 from the equations above it works out `size(Node(Leaf, x, Leaf)) = 1`, so an
 out-of-bounds index into a literal tree is caught, and `size(t) >= 0` is known for any
@@ -375,7 +375,7 @@ out-of-bounds index into a literal tree is caught, and `size(t) >= 0` is known f
 
 ### Requiring a non-empty collection
 
-In the examples above the measure describes a *different* parameter — `len(xs)`
+In the examples above the measure describes a *different* parameter: `len(xs)`
 bounds the index `i`. A measure can just as well describe the refined value
 **itself**, which is how you say "this list must not be empty":
 
@@ -384,7 +384,7 @@ fn head(xs : {List(a) | len(_) > 0}) : a do ... end
 ```
 
 Inside the predicate you can name the refined value three ways, and they all mean
-the same thing and are checked identically — the anonymous `_`, your own binder,
+the same thing and are checked identically: the anonymous `_`, your own binder,
 or the parameter's name:
 
 ```march
@@ -394,7 +394,7 @@ fn head(xs : {List(a)     | len(xs) > 0}) : a do ... end
 ```
 
 Pass a list the compiler can see is empty and you get an error; pass one it can
-see is non-empty and it says nothing; pass one it can't see into and it stays
+see is non-empty and it reports no issue; pass one it can't see into and it stays
 quiet rather than guessing:
 
 ```march
@@ -404,14 +404,14 @@ fn f(ys : List(Int)) : Int do head(ys) end   -- skipped: length unknown
 ```
 
 Thirteen standard-library functions that panic on an empty argument now carry
-this contract — `List.head`, `tail`, `last`, `minimum_int`, `maximum_int`, the
+this contract (`List.head`, `tail`, `last`, `minimum_int`, `maximum_int`, the
 prelude's `head`/`tail`, `Stats.mean`/`min_val`/`max_val`, `Gen.element`/`one_of`,
-and `Random.choice` — so `List.head([])` is a compile error rather than a crash.
+and `Random.choice`), so `List.head([])` is a compile error rather than a crash.
 Each contract is taken from that function's own panic message, so it never
 demands more than the code already checked, and every `panic` stays in place to
 catch the cases the compiler skips.
 
-`List.nth` is the fourteenth, and the only one whose contract talks about a
+`List.nth` is the fourteenth, and the only one with a contract that talks about a
 *different* parameter rather than the refined value itself:
 
 ```march
@@ -419,23 +419,23 @@ fn nth(xs : List(a), n : {Int | _ >= 0 && _ < len(xs)}) : a do ... end
 ```
 
 So `List.nth([1, 2, 3], 7)` and `List.nth([1, 2, 3], -1)` are compile errors
-now. An index the compiler can't pin down — by far the common case — stays
+now. An index the compiler can't pin down (by far the common case) stays
 silent, just as `head(ys)` does for a list it can't see into. Before this
 shipped the whole standard library and four real projects (`forgepm`,
 `bastion`, `conduit`, `depot`) were swept for it: zero calls became errors.
 Under `cap verified`, though, that same unbindable index is a hard error
-instead of a silent skip — that mode's whole premise is that every obligation
+instead of a silent skip: that mode's whole promise is that every obligation
 gets discharged, so "can't tell" is no longer good enough.
 
 An ordinary `List.length(xs) > 0` guard **does** satisfy the requirement, so these
-contracts bite on a list you checked at runtime and not just on literals — see
+contracts bite on a list you checked at runtime and not just on literals; see
 [the solver really does connect `List.length` to
 `len`](#the-solver-really-does-connect-listlength-to-len) for exactly when that
 connection applies, and the (narrow) circumstances in which it's dropped.
 
 And you don't need a guard at all when the *enclosing* function already declares the
-same contract — that's a separate mechanism, and it's what
-[Contracts Compose](#contracts-compose--a-parameters-promise-holds-inside-its-body)
+same contract: that's a separate mechanism, and it's what
+[Contracts Compose](#contracts-compose-a-parameters-promise-applies-inside-its-body)
 is about.
 
 Your own measures work in this position too, not just the built-in `len`:
@@ -452,32 +452,32 @@ Both directions are checked: the checker reasons about the actual argument, so
 
 ### The measure soundness gate
 
-The solver trusts a `@[measure]` completely — it treats the function's body as a fact
+The solver trusts a `@[measure]` completely: it treats the function's body as a fact
 about the world. That means a badly-behaved measure (one that never finishes, divides
 by zero, or skips a case) could let the solver "prove" something false. To prevent that,
-the compiler requires every measure to be provably well-behaved before it's allowed to
-be used at all — a **hard compile error** if it isn't. A `@[measure]` is rejected if it:
+the compiler requires every measure to be verifiably well-behaved before it's allowed to
+be used at all: a **hard compile error** if it isn't. A `@[measure]` is rejected if it:
 
-- has an **effect** (`spawn`, `send`, `dbg`, `assert`) — it must be pure,
-- can **diverge or abort** (`panic`, `todo`, `exit`) — it must always finish,
-- is **non-total** — a non-exhaustive `match` on its parameter, or a `/` / `%`
-  that could divide by zero — it must handle every case,
-- is **not structurally recursive** — a recursive call whose argument isn't a
-  component of the matched parameter — each call must work on a strictly smaller piece
+- has an **effect** (`spawn`, `send`, `dbg`, `assert`); it must be pure,
+- can **diverge or abort** (`panic`, `todo`, `exit`); it must always finish,
+- is **non-total** (a non-exhaustive `match` on its parameter, or a `/` / `%`
+  that could divide by zero); it must handle every case,
+- is **not recursive over the structure** (a recursive call with an argument that isn't a
+  component of the matched parameter); each call must work on a strictly smaller piece
   of the input, so it's guaranteed to terminate.
 
 A measure that is sound but outside what the encoding can model (see
-limitations, below) isn't an error — it simply falls back to weaker, symbolic
-reasoning. "Weaker" can mean *nothing at all*: a measure whose value is a
+limitations, below) isn't an error: it simply falls back to weaker, symbolic
+reasoning. "Weaker" can mean *no reasoning at all*: a measure with a value that is a
 scalar constructor field discharges neither a predicate nor its negation. See
-[Limitations](#limitations) — that case is not always warned about.
+[Limitations](#limitations); that case is not always warned about.
 
 ---
 
 ## Bool and Float Refinements
 
-A `Bool` parameter or return carries a predicate over the ordinary boolean
-operators — `==`, `!=`, `&&`, `||`, `not` — against `true` and `false`:
+A `Bool` parameter or return takes a predicate over the ordinary boolean
+operators (`==`, `!=`, `&&`, `||`, `not`) against `true` and `false`:
 
 ```march
 fn commit(confirmed : {Bool | _ == true}) : Int do ... end
@@ -488,10 +488,10 @@ commit(true)    -- fine
 
 Write the **operator form**: `{Bool | not _}` does not parse, so use
 `{Bool | _ == false}`. An unknown `Bool` is skipped, and a guard works as you'd
-expect — `if k do commit(k) else 0 end` passes.
+expect: `if k do commit(k) else 0 end` passes.
 
-A `Float` parameter or return carries a **comparison** — `>=`, `>`, `<=`, `<`,
-`==`, `!=` — against float literals or another float value:
+A `Float` parameter or return takes a **comparison** (`>=`, `>`, `<=`, `<`,
+`==`, `!=`) against float literals or another float value:
 
 ```march
 fn sqrtish(x : {Float | _ >= 0.0}) : Float do ... end
@@ -508,18 +508,18 @@ Float predicates go to Z3's **bit-precise IEEE-754 FloatingPoint** theory:
 `Float64`, `fp.geq` / `fp.gt` / `fp.leq` / `fp.lt`, and `fp.eq` for equality.
 Modelling floats as mathematical **reals** would break the no-false-positives
 promise. Consider `not (x >= 0.0) && not (x <= 0.0)`. Over reals, trichotomy
-makes that **impossible** — and since the checker objects exactly when a
+makes that **impossible**; and since the checker objects exactly when a
 predicate can *never* hold, it would flag this contract on every argument. Over
 floats it is perfectly possible, witnessed by `NaN`, which compares false
 against everything; so the checker correctly stays silent.
 
 Equality is `fp.eq` (IEEE equality), not bitwise identity. Under bitwise
 identity `-0.0` would differ from `0.0` and `{Float | _ != 0.0}` would accept a
-negative zero — just as bad a divisor as a positive one. Under `fp.eq`,
-`-0.0 == 0.0` holds (so a negative zero **is** rejected) and `NaN` equals
-nothing, not even itself.
+negative zero, just as bad a divisor as a positive one. Under `fp.eq`,
+`-0.0 == 0.0` is true (so a negative zero **is** rejected) and `NaN` equals
+no value, not even itself.
 
-Float **arithmetic inside a predicate** — `{Float | _ +. 1.0 > 0.0}` — is out of
+Float **arithmetic inside a predicate** (`{Float | _ +. 1.0 > 0.0}`) is out of
 scope: modelling it needs rounding-mode reasoning, so the whole predicate is
 skipped rather than approximated. Arithmetic over float *literals* is different:
 `0.0 -. 1.0` is folded to a constant first and is fully checked, which is how a
@@ -527,11 +527,11 @@ negative literal (which March has no direct spelling for) still works.
 
 ---
 
-## Constructor Tags — Refining over ADT Variants
+## Constructor Tags: Refining over ADT Variants
 
 Refinements aren't limited to numbers and sizes. You can also require that a
-value is a *particular variant* of a union type. Every constructor — in your own
-types, and in the built-in `Option`, `Result` and `List` — implicitly comes with
+value is a *particular variant* of a union type. Every constructor (in your own
+types, and in the built-in `Option`, `Result` and `List`) implicitly comes with
 an `is_<Ctor>` **tester** you can use inside a predicate. You don't declare
 these; writing `type Shape = Circle(Int) | Square(Int)` gives you `is_Circle`
 and `is_Square` for free.
@@ -550,7 +550,7 @@ This is what backs the standard library's `Option.unwrap`/`expect` and
 `Result.unwrap(Err("boom"))` are now compile errors rather than runtime panics.
 
 The tester name is **exact-case**. `is_Some` is the tester for the constructor
-`Some`; `is_some` is *not* a tester — it's the lowercase stdlib helper
+`Some`; `is_some` is *not* a tester: it's the lowercase stdlib helper
 `Option.is_some`. Get the case wrong and you don't silently get a different
 meaning, you get a warning that the refinement isn't being checked:
 
@@ -572,25 +572,25 @@ fn f(x : Option(Int)) : Int do
 end
 ```
 
-This narrowing is deliberately conservative. Where it stops, the checker goes
-quiet rather than guessing — so these are all *silence*, never false alarms:
+This narrowing is intentionally conservative. Where it stops, the checker goes
+quiet rather than guessing, so these are all *silence*, never false alarms:
 
 - **The scrutinee has to be a plain variable.** `match mk() do …` matches an
-  expression, and there's no stable name to attach a fact to, so nothing inside
+  expression, and there's no stable name to attach a fact to, so no code inside
   the arms is narrowed. Bind it with a `let` first if you want the fact.
 - **A pattern that rebinds the name ends it.** Matching `y` with `Some(x) ->`
-  tells you nothing about `x` — that `x` is a fresh name for the payload, not
+  gives you no fact about `x`: that `x` is a fresh name for the payload, not
   for the scrutinee.
 - **An `as` pattern isn't narrowed.** `None as z ->` binds the whole scrutinee
   under a second name, but the arm's head is an `as` pattern rather than a bare
-  constructor pattern, so no tag fact is recorded — not for `z`, and not for the
+  constructor pattern, so no tag fact is recorded: not for `z`, and not for the
   scrutinee. Write `None ->` if you want the narrowing.
 - **An ambiguous constructor name is skipped.** If two types in scope both
   declare a constructor `Row`, then `is_Row` doesn't identify a particular type
   and isn't checked.
 - **Rebinding the name discards the fact.** A narrowing is recorded against a
-  *name*, so anything that rebinds that name inside the arm — a `let`, a `let?`,
-  a lambda parameter, an inner `match` binder — drops it:
+  *name*, so anything that rebinds that name inside the arm (a `let`, a `let?`,
+  a lambda parameter, an inner `match` binder) drops it:
 
   ```march
   match x do
@@ -605,11 +605,11 @@ quiet rather than guessing — so these are all *silence*, never false alarms:
   it's what keeps a fact about an outer value from being wrongly attributed to
   an inner one.
 
-As everywhere else, the definite-failure stance applies: an `Option` whose tag
+As everywhere else, the definite-failure stance applies: an `Option` with a tag
 the checker can't determine is not an error.
 
 Later arms also learn what the earlier ones ruled out. Reaching an arm means
-every arm above it failed to match, so for each of those whose failure is
+every arm above it failed to match, so for each of those with a failure
 decided purely by the tag, the scrutinee is known *not* to carry it:
 
 ```march
@@ -621,15 +621,15 @@ fn mean_safe(xs : List(Float)) : Result(Float, String) do
 end
 ```
 
-For a **list**, a tag test is a statement about length — `is_Nil(xs)` means
-`len(xs) = 0` and `is_Cons(xs)` means `len(xs) > 0` — so the exclusion above
+For a **list**, a tag test is a statement about length (`is_Nil(xs)` means
+`len(xs) = 0` and `is_Cons(xs)` means `len(xs) > 0`), so the exclusion above
 discharges a `len`-bearing precondition directly. This is what makes the
 safe-wrapper idiom (match the empty case, return `Err`/`None`, do the real work
 in the other arm) check out. The same idea generalizes to a user `@[measure]`:
-a base-case arm whose body is a literal gets an axiom linking its constructor's
+a base-case arm with a body that is a literal gets an axiom linking its constructor's
 tester directly to the measure's value, so the exclusion connects there too.
 
-An earlier arm licenses **nothing** if it carries a guard or a refutable
+An earlier arm licenses **no fact** if it includes a guard or a refutable
 sub-pattern, because either can fail with the tag still matching:
 `Cons(0, _)` does not match `Cons(1, [])`, which is nonetheless a `Cons`, and
 `Nil when flag` fails whenever `flag` is false. So
@@ -642,16 +642,16 @@ _ -> Ok(std_dev(xs))     -- knows only len > 0, NOT len > 1
 end
 ```
 
-still abstains on a `len > 1` requirement, which is the honest answer.
+still abstains on a `len > 1` requirement, which is the accurate answer.
 
 ---
 
-## Seeing What Got Checked — `--refine-report`
+## Seeing What Got Checked: `--refine-report`
 
 Because March stays quiet about anything it can't decide, silence has two very
-different meanings: "I proved this" and "I couldn't tell, so I said nothing." From the
-outside they look identical — which is exactly how a `{List(a) | len(_) > 0}` contract
-once shipped enforcing nothing while every test stayed green.
+different meanings: "I proved this" and "I couldn't tell, so I kept quiet." From the
+outside they look identical, which is exactly how a `{List(a) | len(_) > 0}` contract
+once shipped with zero enforcement while every test stayed green.
 
 `--refine-report` turns the checked fraction into a number you can look at:
 
@@ -667,35 +667,35 @@ refinement obligations (user + stdlib): 8 proved, 0 violated, 0 trusted, 28 skip
 ```
 
 One wrinkle to know before you run it: clear `.march/cas/artifacts-v2` first. A
-`--check` whose sources are already in the build cache exits straight away, before
-anything is parsed — so the report never runs and you get **no output at all**, while
-still exiting 0. That looks exactly like "nothing to report", which is the very
+`--check` with sources already in the build cache exits straight away, before
+anything is parsed, so the report never runs and you get **no output at all**, while
+still exiting 0. That looks exactly like "no obligations to report", which is the very
 confusion this flag exists to clear up. (`.march/cas/vc` is a different cache, holding
 solver verdicts; clearing that one makes z3 re-decide, but doesn't change whether the
 report prints.)
 
-You get two counts because the compiler quietly prepends the whole standard library to
-every compilation. **User code** counts only the call sites in the file you named —
+You get two counts because, behind the scenes, the compiler prepends the whole standard library to
+every compilation. **User code** counts only the call sites in the file you named;
 that's the one to watch while writing a module. **User + stdlib** counts everything
 raised in the run, which makes a good whole-program coverage number.
 
-March's own CI ratchets on both directions: a **ceiling** on skips (more skips means
+March's own CI ratchets on both directions: an **upper limit** on skips (more skips means
 less is being checked) and a **floor** on proofs. The floor matters more than it
-sounds — a ceiling on its own is satisfied perfectly by a checker that raises no
-obligations at all, and the floor is read from a small fixture whose one obligation is
+sounds: an upper limit on its own is satisfied perfectly by a checker that raises no
+obligations at all, and the floor is read from a small fixture with one obligation,
 *proved* by a `List.length` guard, so it collapses to zero the instant the measure
 alias stops working. This is the failure mode the report exists to expose: a skip and a
 proof both exit 0, and only the count can tell them apart.
 
-Every skip says *why*: the predicate uses vocabulary the checker can't translate
+Every skip states *why*: the predicate uses vocabulary the checker can't translate
 (`unreflectable-predicate`), the argument's own value didn't translate
 (`unreflectable-subject`), a symbol would have needed two different sorts
 (`sort-conflict`), the float wellsortedness gate rejected it (`float-sort-gate`), a
-measure alias the guard relied on had been withdrawn (`alias-withdrawn` — see below),
+measure alias the guard relied on had been withdrawn (`alias-withdrawn`; see below),
 or the solver simply didn't decide (`solver-undecided`).
 
 The counts include both **preconditions checked at call sites** and
-**postconditions** — a function's own return value checked against its declared
+**postconditions**: a function's own return value checked against its declared
 return type. Each obligation is tagged with its kind, shown as a `by kind`
 breakdown line under each slice; a proved postcondition counts toward the same
 "proved" headline as a proved precondition, and [`cap verified`](#cap-verified--making-silence-an-error)
@@ -703,14 +703,14 @@ breakdown line under each slice; a proved postcondition counts toward the same
 
 ---
 
-## `cap verified` — Making Silence an Error
+## `cap verified`: Making Silence an Error
 
 Everything above is built around never crying wolf: if March can't prove something is
 *definitely* wrong, it keeps quiet. That's the right default, but it means a contract
 can be technically legal and practically inert.
 
-If you want the opposite deal for a particular module — "I want these contracts to be
-a guarantee, and I want to be told when they aren't" — declare `cap verified`. Inside
+If you want the opposite deal for a particular module ("I want these contracts to be
+a guarantee, and I want to be told when they aren't"), declare `cap verified`. Inside
 that module, a precondition at a call site that the checker can't discharge becomes a
 compile error:
 
@@ -746,9 +746,9 @@ module — it asks for every obligation to be discharged
 
 The length aliases (`List.length`, `String.byte_size`, `string_byte_length`) are
 withdrawn for the **whole compilation unit** as soon as anything in it binds that
-name — the check is syntactic and doesn't ask whether the competing binding could
-actually win where you called it. Normally that costs you nothing but a proof. Inside
-`cap verified` it costs you a build, so the message says so rather than blaming the
+name: the check is syntactic and doesn't ask whether the competing binding could
+actually win where you called it. Normally the only cost is a proof. Inside
+`cap verified` it costs you a build, so the message reports it rather than blaming the
 solver:
 
 ```
@@ -763,7 +763,7 @@ note: at least one binding of `List.length` in this compilation unit
 The culprit can be somewhere you'd never suspect: a nested `mod Internal do mod List
 do fn length …` that nothing can even call as `List.length`, an unrelated function's
 `let string_byte_length = n + 1`, or a definition inside a `MARCH_LIB_PATH` dependency
-you never opened. The span in the note is where to look — it names *at least one* such
+you never opened. The span in the note is where to look: it names *at least one* such
 binding, and the alias only comes back when every one of them is gone. Rename them, or
 state the fact you need as a refinement instead of a runtime guard.
 
@@ -772,7 +772,7 @@ the predicate has to use the affected measure, and this call's own argument has 
 guarded by the withdrawn spelling, positively, on the matching kind of value. A guard
 on a *different* list, a `List.length` guard in front of a *string* contract, a guard
 on the `else` side (which disproves the predicate rather than failing to prove it), and
-an unguarded call all keep the plain `solver-undecided` message — because in each of
+an unguarded call all keep the plain `solver-undecided` message, because in each of
 those the binding you'd be sent to rename is not the reason anything failed.
 
 The price of that caution is coverage: a guard laundered through a local
@@ -783,25 +783,25 @@ confusion, not to claim every skip.
 
 **Know the edges before you reach for it.** It's strictly opt-in and scoped to the
 module that writes it: a `cap verified` module calling an ordinary one doesn't make
-the callee strict, and nested modules don't inherit it (they can't — the standard
+the callee strict, and nested modules don't inherit it (they can't: the standard
 library arrives as sibling modules, and inheriting would turn all of it strict at
 once).
 
-It reaches every declaration form in the module it's written in — a call inside an
+It reaches every declaration form in the module it's written in: a call inside an
 `impl` method, an `interface` default body, a top-level `let`, an actor handler or a
 `test` all raise obligations that get escalated. Both this walk and `cap no_panic`'s are
 exhaustive over the declaration forms, so a future one is a compile error in the compiler
 rather than a new silent hole.
 
 It also covers **postconditions**: an undischarged return refinement is a
-compile error under `cap verified` too, exactly as a precondition is — see
+compile error under `cap verified` too, exactly as a precondition is; see
 [Postconditions](#postconditions) above for the example.
 
 One real limitation, and one escape hatch, worth knowing before you rely on it:
 
-- **A refinement in an `interface`'s own method signature isn't enforced —
+- **A refinement in an `interface`'s own method signature isn't enforced,
   and the compiler tells you so.** Write `fn run : a -> {Int | _ > 0} -> Int`
-  in the interface and no call site is obliged by it. Nothing assumes it
+  in the interface and no call site is obliged by it. No body assumes it
   either, so it's a missing check rather than an unsound one. Writing a
   refinement there produces a warning:
 
@@ -815,7 +815,7 @@ One real limitation, and one escape hatch, worth knowing before you rely on it:
 
   **Inside a `cap verified` module this is an error, not a warning.**
   `cap verified`'s escalation otherwise fires only on undischarged obligations
-  in the ledger, and an inert interface signature raises none — but the
+  in the ledger, and an inert interface signature raises none, but the
   capability's whole promise is "if it compiles, it is proved," and this is
   exactly the shape of silent-no-op contract it exists to catch, the same
   reasoning that already made the `sig`/`extern` case below a warning
@@ -824,12 +824,12 @@ One real limitation, and one escape hatch, worth knowing before you rely on it:
 
   The same silent-no-op shape exists for a `sig` ascription and an `extern`
   declaration, and both warn too: `sig Store do fn put :
-  Int -> {Int | _ > 0} end` compiles clean while enforcing nothing, because
+  Int -> {Int | _ > 0} end` compiles clean while enforcing no contract, because
   a `sig` is an ascription on what a module exports, not a body a call could
-  be checked against — write the refinement on the module's own `fn`
+  be checked against; write the refinement on the module's own `fn`
   instead. An `extern` refinement is the more fundamental case: the callee
   isn't March code, so there's no body to check a return value against, and
-  no amount of rewiring makes it enforceable in principle. The remedy there
+  no amount of rewiring makes it enforceable in principle. The fix there
   is a thin March wrapper around the extern call that checks the foreign
   result itself.
 
@@ -840,34 +840,34 @@ One real limitation, and one escape hatch, worth knowing before you rely on it:
   here by *name* while it dispatches by *type*, and checking correct code
   against a predicate it never touches is the one failure this subsystem
   must never have. When the name is ambiguous the refinement binds
-  **nobody** — it's stripped from the body too, so it can't discharge
+  **no one**: it's stripped from the body too, so it can't discharge
   anything either. Unenforced means unusable in both directions, never
-  "assumed inside the body but demanded of no caller" — which would otherwise let
+  "assumed inside the body but demanded of no caller", which would otherwise let
   `fn run(b, k : {Int | k != 0})` make `m / k` provable under `cap no_panic`
   while `run(Box(4), 0)` compiled and then divided by zero.
 - **`@[trusted]` is a per-function escape hatch.** Annotate a
   single function `@[trusted]` and any obligation inside it that the checker
   could not otherwise discharge is accepted as an assertion instead of an
-  error — recorded as its own `Trusted` verdict in `--refine-report`, never
+  error, recorded as its own `Trusted` verdict in `--refine-report`, never
   folded into `proved`. It never suppresses a definite violation (a predicate
   the solver proved can never hold is a bug in the annotation, not something to
-  wave through), and it is scoped to the one function that carries it — a
+  wave through), and it is scoped to the one function that has it: a
   sibling function in the same `cap verified` module is unaffected. Putting
   `@[trusted]` on a function outside `cap verified` warns, since it would
-  otherwise silently do nothing.
+  otherwise have no effect and give no sign.
 
 That makes `cap verified` viable for a whole module even when one call site
-genuinely cannot be proved, without switching off verification for everything
+truly cannot be proved, without switching off verification for everything
 else in it.
 
 ---
 
-## `cap no_panic` — Divisions That Can't Panic
+## `cap no_panic`: Divisions That Can't Panic {#cap-no_panic--divisions-that-cant-panic}
 
 `cap verified`'s sibling takes the same "silence is not good enough" stance and points
 it at one specific runtime panic: integer division by zero. Declare `cap no_panic` in a
 module and **every** `/` and `%` in it must have a divisor the checker can prove
-non-zero. Anything short of a proof is a compile error — that's the whole promise, and
+non-zero. Anything short of a proof is a compile error: that's the whole promise, and
 it's why this capability fails closed where the default refinement stance fails open.
 
 A divisor is discharged by a literal, by a path condition, or by a refinement on the
@@ -893,15 +893,15 @@ end
 ```
 
 Both of those are accepted. `v * v > 0` is exactly `v != 0` over the integers, and the
-checker now hands such a predicate to the solver rather than refusing to read it —
+checker now passes such a predicate to the solver rather than declining to read it:
 rejecting a *complete* proof for being written unusually was a false positive on
 correct code. The stance itself hasn't moved: a predicate that reflects but proves
-nothing (`v * v >= 0`, true of every integer) is still an error, and so is one the
+no fact (`v * v >= 0`, true of every integer) is still an error, and so is one the
 solver can't settle. And on the `else` side of `if d == 0` the fact in scope is
 `not (d == 0)`, which discharges the division on its own.
 
 **It covers the whole module.** The division walk descends into every declaration form,
-not just `fn` and nested `mod` bodies — so this program is a compile error rather than a
+not just `fn` and nested `mod` bodies, so this program is a compile error rather than a
 runtime "division by zero":
 
 ```march
@@ -929,13 +929,13 @@ mod ImplDiv do
 end
 ```
 
-It's a compile error. Add the `if n != 0` guard and it's accepted — the walk
+It's a compile error. Add the `if n != 0` guard and it's accepted: the walk
 reads the body, it doesn't just distrust it. Top-level `let`s, `interface` defaults,
 actor handlers, `app` hooks and `test` bodies are covered the same way.
 
-**A rebound name knows nothing about the old one.** Every fact the divisor check reads
-is keyed by a bare variable name — the path condition, the parameter's refinement, a
-`let`'s value — so rebinding that name retires all of them. Each of these is caught
+**A rebound name inherits no fact from the old one.** Every fact the divisor check reads
+is keyed by a bare variable name (the path condition, the parameter's refinement, a
+`let`'s value), so rebinding that name retires all of them. Each of these is caught
 rather than silently accepted:
 
 ```march
@@ -945,28 +945,28 @@ if d == 0 do 0 else ap(fn d -> 10 / d) end      -- lambda parameter
 if d == 0 do 0 else match o do Some(d) -> 10 / d ... end   -- match binder
 ```
 
-(Compressed onto one line each for comparison — March has no `;`, so the `let` really
+(Compressed onto one line each for comparison; March has no `;`, so the `let` really
 sits on its own line inside the branch.)
 
 A `let`, a local `fn`, a lambda parameter, a `let?` pattern or a `match` binder
 drops everything known about the outer variable of that name. Note which way this
 errs: in the ordinary refinement checker, losing a fact means silence, but here it
-means an *error*, so the retirement is deliberately over-eager. If you need the guard
-inside the rebinding scope, re-state it there. Correct code is unaffected —
+means an *error*, so the retirement is intentionally over-eager. If you need the guard
+inside the rebinding scope, re-state it there. Correct code is unaffected:
 `let d = 5` followed by `10 / d` still passes, because the new binding replaces the old
-fact rather than merely erasing it.
+fact rather than just erasing it.
 
-**One asymmetry to know:** a refinement on an `impl` method's parameter can discharge a
+**One imbalance to know:** a refinement on an `impl` method's parameter can discharge a
 division inside that method's body only when callers are actually obliged to establish
-it — the two passes share one adoption rule so they can't drift apart. See
-[the `cap verified` edges](#cap-verified--making-silence-an-error) for when that
+it; the two passes share one adoption rule so they can't drift apart. See
+[the `cap verified` edges](#cap-verified-making-silence-an-error) for when that
 adoption happens.
 
 ---
 
 ## Limitations
 
-No refinement system is complete — this one is intentionally a *pragmatic slice* of
+No refinement system is complete; this one is intentionally a *pragmatic slice* of
 dependent typing. Know the edges:
 
 - **`Int`, `Bool`, `Float`, `String` (narrowly), records and ADT tags.**
@@ -974,7 +974,7 @@ dependent typing. Know the edges:
   **comparisons only**; float arithmetic inside one is skipped rather than
   guessed at, and a `Float` sitting inside a record or a constructor is opaque.
   See [Bool and Float Refinements](#bool-and-float-refinements) and
-  [Constructor Tags](#constructor-tags--refining-over-adt-variants).
+  [Constructor Tags](#constructor-tags-refining-over-adt-variants).
 - **Tag narrowing stops at several ordinary shapes.** A `match` on an
   expression rather than a variable, an `as` pattern, a pattern that rebinds the
   name, an ambiguous constructor name, and any rebinding of the name inside the
@@ -985,7 +985,7 @@ dependent typing. Know the edges:
   proved. A *different* tag is not assumed: with
   `outer(p : {Option(Int) | is_None(_)})`, a call needing `is_Some(_)` is
   skipped rather than reported, even though the two are exclusive. See [Contracts
-  Compose](#contracts-compose--a-parameters-promise-holds-inside-its-body).
+  Compose](#contracts-compose-a-parameters-promise-applies-inside-its-body).
 - **A fact doesn't survive a local `let`, for any type.** `let u = 5` then
   `take_pos(u)` against `{Int | _ > 0}` is skipped. Pass the value directly, or
   restate it with `assert`. (This is also why rebinding a refined parameter drops
@@ -993,8 +993,8 @@ dependent typing. Know the edges:
 - **Only preconditions compose automatically.** A parameter's promise reaches
   *calls* in the body; it does not flow into a refined **return** type the same
   way. A postcondition is still checked on every return path, counted by
-  `--refine-report`, and escalated by `cap verified` — see
-  [Postconditions](#postconditions) — but composing a measure *through* one
+  `--refine-report`, and escalated by `cap verified` (see
+  [Postconditions](#postconditions)), but composing a measure *through* one
   (proving a caller's obligation from a callee's return contract) is the
   narrower, structural-recursion-only case described a few bullets down.
 - **Incomplete (by the definite-failure stance).** The checker catches values
@@ -1003,69 +1003,69 @@ dependent typing. Know the edges:
   "unknown" and are skipped. This never produces a false positive, but it does
   mean some real guarantees go unchecked.
 - **Higher-order: two shapes are checked, the rest are not.** A call made
-  through a parameter whose declared type carries a refinement —
-  `f : ({Int | _ >= 0}) -> Int` — is checked, and so is a call through a local
+  through a parameter with a declared type that includes a refinement
+  (`f : ({Int | _ >= 0}) -> Int`) is checked, and so is a call through a local
   alias of a named refined function (`let g = takepos` then `g(-3)`). NOT
-  checked: a callback parameter whose own type is unrefined (so
+  checked: a callback parameter with an unrefined declared type (so
   `apply(take_n, -3)` with `apply(f : Int -> Int, x : Int)` still passes),
   inferring a higher-order function's requirement from its body, dispatch
   through an `interface`/`impl`, and multi-argument callback types. To
   constrain a caller today, refine the higher-order function's *own* parameter.
 - **Measures see structure, not elements.** Element values inside a data
   structure are opaque to a measure (`size`/`len`/`depth` never inspect them).
-  Measures are single-argument, structurally recursive, and return `Int`/`Bool`.
+  Measures are single-argument, recursive over structure, and return `Int`/`Bool`.
 - **Only *some* length spellings are connected to `len`.** The qualified
   `List.length`, `String.byte_size`, and the `string_byte_length` builtin discharge a
   `len` obligation; a bare `length`, `String.codepoint_count`, and `string_length` do
   not, and a guard written with those leaves the call *skipped* rather than proved.
-  The connection is also dropped for the whole **compilation unit** — every prepended
-  stdlib module and every `MARCH_LIB_PATH` dependency included — if a single binding
+  The connection is also dropped for the whole **compilation unit** (every prepended
+  stdlib module and every `MARCH_LIB_PATH` dependency included) if a single binding
   anywhere in it could make the name denote something other than the standard library's
   own function. See [the solver really does connect
   `List.length` to `len`](#the-solver-really-does-connect-listlength-to-len).
 - **Relational postconditions work, within structural recursion.** A predicate
-  that relates a measure across an operation — `size(insert(t, x)) == size(t) + 1`
-  — is proven by supplying the induction hypothesis at each recursive call whose
-  argument is a proper component of the matched parameter, then discharging each
+  that relates a measure across an operation (`size(insert(t, x)) == size(t) + 1`)
+  is proven by supplying the induction hypothesis at each recursive call with an
+  argument that is a proper component of the matched parameter, then discharging each
   `match` arm against the measure's recursion equations. A body that is a bare
-  **constructor application** — `fn push(t, x) : {Tree | size(_) == size(t) + 1}
-  do Node(t, x, Leaf) end` — is proven too, and needs no induction at all: there
+  **constructor application** (`fn push(t, x) : {Tree | size(_) == size(t) + 1}
+  do Node(t, x, Leaf) end`) is proven too, and needs no induction at all: there
   is no recursive call to hypothesise over, only one unfolding of the measure's
   recursion equation. That shape also records its verdict in the obligation
   ledger, so `--refine-report` shows it as attempted rather than absent. Only a
   postcondition actually *proved* propagates, so an unprovable one stays legal
-  but tells callers nothing. Still silent: mutual recursion, a recursive call
+  but gives callers no fact. Still silent: mutual recursion, a recursive call
   inside a lambda or behind a nested `match`, and any non-structural recursion.
-- **A measure whose value is a *scalar constructor field* never discharges
-  anything.** A measure that reads a field out of its constructor —
-  `fn length(v) do match v do PVec(n, _, _, _) -> n end end`, the natural way to
-  write `length` for a container that stores its own count — is accepted, passes
-  the soundness gate, and gets a correct axiom, and yet proves nothing in
+- **A measure with a value that is a *scalar constructor field* never discharges
+  anything.** A measure that reads a field out of its constructor
+  (`fn length(v) do match v do PVec(n, _, _, _) -> n end end`, the natural way to
+  write `length` for a container that stores its own count) is accepted, passes
+  the soundness gate, and gets a correct axiom, and yet proves no goal in
   *either* direction. When the checker reflects a constructor at a call site, it
   replaces every field that is not itself a data type with a fresh unconstrained
-  constant (`reflect_field`): sound for a structurally recursive measure, whose
-  value depends only on tags and sub-measures, and fatal for one whose value
+  constant (`reflect_field`): sound for a measure recursive over structure, with a
+  value depending only on tags and sub-measures, and fatal for one with a value that
   *is* the field. So `length(PVec(3, 0, TrieEmpty, Nil))` reaches the solver as
   an unknown `Int`, and an obviously in-range index is neither proved nor
-  refuted — it is `solver-undecided` and silently accepted. This is why
+  refuted: it is `solver-undecided` and silently accepted. This is why
   `Array.get`/`set`/`pop` carry no bounds contract today and stay on the
   `cap no_panic` ban list instead.
 
   The compiler **warns** at the measure's definition when it sees this, but the
-  warning fires **only on a bare field read** (`-> n`). A body that merely
-  *computes* with the erased field — `-> n + 1`, `-> n * 2` — is equally inert
-  and draws **no warning at all**: the check is deliberately narrow, because a
+  warning fires **only on a bare field read** (`-> n`). A body that only
+  *computes* with the erased field (`-> n + 1`, `-> n * 2`) is equally inert
+  and draws **no warning at all**: the check is intentionally narrow, because a
   broader one flagged bodies like `-> 0 * n` that mention the field without
-  depending on it, and a false positive is worse. **Silence here does not mean
+  depending on it, and a false positive is the greater harm. **Silence here does not mean
   your measure works.** If a measure's value depends on a scalar constructor
-  field in any way, expect it to prove nothing.
+  field in any way, expect it to prove no goal.
 - **A measure over a built-in `List` with a non-scalar element does not
   axiomatise.** `List(Int)` is fine; `List(SomeAdt)` collapses the element to an
   opaque sort and the measure is never usable. A user-defined list type with the
-  same shape works. This is the first obstacle between this machinery and the
+  same shape works. This is the first obstacle between this infrastructure and the
   stdlib's HAMT-based `Map`.
 - **`Bool` predicates need an operator form.** `{Bool | _ == true}` is checked;
-  the bare-binder spelling `{Bool | not _}` is a parse error — write
+  the bare-binder spelling `{Bool | not _}` is a parse error; write
   `{Bool | _ == false}`.
 - **No float special values.** There is no `is_nan` / `is_finite` vocabulary, so
   a predicate cannot mention them (NaN is still modelled correctly *inside* the
@@ -1073,7 +1073,7 @@ dependent typing. Know the edges:
 - **Performance: measures can be slow on a cold cache.** Quantified + datatype
   reasoning is far more expensive per query than plain arithmetic. Verdicts are
   content-addressed and cached (warm rebuilds are fast), and the cost is
-  isolated to call sites that actually mention a measure — but a cold build of
+  isolated to call sites that actually mention a measure, but a cold build of
   measure-heavy code pays for it. See the flag below.
 
 ---
@@ -1081,13 +1081,13 @@ dependent typing. Know the edges:
 ## Practical Rules
 
 1. **Refine the contract, not the convenience.** Add `{Int | _ > 0}` where a
-   non-positive value is a genuine bug (a chunk size, an unguarded divisor), not
+   non-positive value is a real bug (a chunk size, an unguarded divisor), not
    to every `Int`. Many March APIs already clamp defensively and have no real
    precondition.
 2. **Guard, then call.** A precondition you can't satisfy with a literal is
    discharged by an `if`/`when` guard right before the call.
 3. **Reach for `assert` as your lemma.** When you *know* a fact the checker
-   can't derive, `assert(p)` makes it available — and documents the assumption.
+   can't derive, `assert(p)` makes it available, and documents the assumption.
 4. **Annotate measures you'll reason about.** A `@[measure]` only earns its
    keep if a predicate mentions it; keep them total, exhaustive, and structural
    so they pass the gate.
@@ -1097,14 +1097,14 @@ dependent typing. Know the edges:
 ## Appendix: the `List.length`↔`len` alias, in full
 
 *Skip unless a length guard you expected to work isn't discharging. Referenced from
-[Path Sensitivity](#path-sensitivity--guards-establish-facts) and
+[Path Sensitivity](#path-sensitivity-guards-establish-facts) and
 [Limitations](#limitations). This is the exact rule for when a length guard counts as
 the `len` measure.*
 
 ### The solver really does connect `List.length` to `len`
 
 The checker treats the qualified `List.length` as another name for the `len` measure, so
-a guard you'd write anyway — `if List.length(ys) > 0` — establishes exactly the fact the
+a guard you'd write anyway (`if List.length(ys) > 0`) establishes exactly the fact the
 contract `{List(Int) | len(_) > 0}` is asking for:
 
 ```march
@@ -1118,23 +1118,23 @@ end
 ```
 
 The second is a compile error because under `len(ys) == 0` the predicate `len(ys) > 0`
-can *never* hold — a definite failure, which is the bar March requires before it says
+can *never* hold: a definite failure, which is the bar March requires before it reports
 anything.
 
-The connection is deliberately narrow, since attaching `len`'s meaning to the wrong
+The connection is intentionally narrow, since attaching `len`'s meaning to the wrong
 function is how you'd get a false alarm on correct code. Only the **qualified**
-`List.length` counts (a bare `length` is left alone), and only while it still resolves to
-the standard library's own. If your program defines its own `List.length` — however it
+`List.length` counts (a bare `length` is left as-is), and only while it still resolves to
+the standard library's own. If your program defines its own `List.length` (however it
 spells the definition: a `fn`, a module-level `let`, an `extern` block, an interface or
-impl method — or ships a forked `List` via `MARCH_LIB_PATH`, the connection is dropped
-and you're back to the obligation being skipped, quietly, rather than proved.
+impl method) or ships a forked `List` via `MARCH_LIB_PATH`, the connection is dropped
+and you're back to the obligation being skipped, with no message, rather than proved.
 
 **"Dropped" means dropped for the whole compilation unit, not just the file you're
 editing.** The check is syntactic and unit-global: it doesn't ask whether the competing
-binding could ever win at your call site, because answering that needs a resolver this
-pass doesn't have. One genuine competitor anywhere in the unit — including inside a
+binding could win at your call site at all, because answering that needs a resolver this
+pass doesn't have. One real competitor anywhere in the unit (including inside a
 `MARCH_LIB_PATH` dependency you never opened, and remembering that the compiler prepends
-the entire standard library to every compilation — disables the alias program-wide.
+the entire standard library to every compilation) disables the alias program-wide.
 That's a real cost, and it's the direction the checker errs in on purpose:
 over-withdrawing loses a proof (silence), while under-withdrawing would put a wrong fact
 in the assumption set and flag correct code.
@@ -1143,18 +1143,18 @@ The withdrawal rules for the specific import forms:
 
 - A selector-less `use Foo.List` (importing the module itself, not a member of it)
   resolves its target: `use Analytics.List` where `Analytics.List` only has a `size`
-  function leaves `List.length` connected to `len`; a `use` whose target really does
+  function leaves `List.length` connected to `len`; a `use` with a target that really does
   define `length` withdraws it.
 - `alias Foo.List as List` and a named import (`use Foo.{List}`) withdraw the alias
   unconditionally.
 - A glob import (`import Foo`, `use Foo.*`) withdraws the alias only if `Foo`
   **actually provides** a competing `List`, resolved by walking the unit's own module
   structure; if the glob's target can't be resolved, it still withdraws.
-- Either half of the guard applies only to the **program's** own bindings, never the
+- Either side of the guard applies only to the **program's** own bindings, never the
   standard library's own. The two conditions are ANDed, so a glob withdraws only when it
-  is your code *and* its target really carries a competitor.
+  is your code *and* its target really provides a competitor.
 
-### The same for strings — but only the byte-valued names
+### The same for strings, but only the byte-valued names
 
 `len` measures a `String` too, and the same connection is made for `String.byte_size`
 and the `string_byte_length` builtin:
@@ -1171,15 +1171,15 @@ Swap the guard for `String.byte_size(t) == 0` and that call becomes a compile er
 same way it does for lists.
 
 The catch is that `len` on a String counts **bytes**, so only byte-valued names get this
-treatment. `String.codepoint_count` counts codepoints — it returns 1 for `"é"` where
-`String.byte_size` returns 2 — and is left alone. So is `string_length`: it happens to be
+treatment. `String.codepoint_count` counts codepoints (it returns 1 for `"é"` where
+`String.byte_size` returns 2) and is left as-is. So is `string_length`: it happens to be
 a byte length today, but the *name* suggests characters, and a connection made on a name
 that might later be corrected is a bug waiting to happen. Reach for `String.byte_size` in
-a guard; it says what it means.
+a guard; it states what it means.
 
 ### A qualified spelling *inside* the predicate itself
 
-Everything above is about a **guard** — ordinary code, outside the `{...}`. Writing the
+Everything above is about a **guard**: ordinary code, outside the `{...}`. Writing the
 qualified name **inside** the braces enforces the same contract as the bare `len`:
 
 ```march
@@ -1188,23 +1188,23 @@ fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
 ```
 
 A refinement predicate is not run through the general expression desugarer the way a
-function body is — no pipe desugaring, no multi-head-fn desugaring — but the one
+function body is (no pipe desugaring, no multi-head-fn desugaring), but the one
 transformation that matters here, flattening a module-path call head (`List.length(_)`)
 into the dotted form the `len` alias keys on, runs over every `TyRefine` predicate
-(parameter, return, `let`-annotation — top-level and block-level alike — and
-record/variant field types alike). When the alias is live — no competing `List.length`
-in scope — the qualified spelling means exactly what `len` means, so `inner([])` is
-rejected as a genuine precondition violation.
+(parameter, return, `let`-annotation, top-level and block-level alike, and
+record/variant field types alike). When the alias is live (no competing `List.length`
+in scope), the qualified spelling means exactly what `len` means, so `inner([])` is
+rejected as a real precondition violation.
 
 If a unit has withdrawn the alias by defining its own competing `List.length`, the
-qualified spelling enforces nothing (correctly — the alias genuinely doesn't hold there),
+qualified spelling enforces no contract (correctly: the alias truly doesn't apply there),
 and the checker warns, still recommending the bare `len(_)` spelling:
 
 > `List.length` is a qualified call inside a refinement predicate. This spelling is
 > never reflected here, so the refinement enforces nothing. Use the bare spelling
 > `len` instead.
 
-The same applies to `String.byte_size`. Two shapes remain genuinely unhandled and still
+The same applies to `String.byte_size`. Two shapes remain truly unhandled and still
 warn/stay silent: a record **field** call (`{Cfg | c.cb(1) > 0}`, never treated as a
 qualified call) and a receiver that is itself a call (`f(x).g(y)`, not rendered as a
 path).
@@ -1233,7 +1233,7 @@ A bare call resolves at the scope that actually owns it: a `use` written
 **inside** a nested module is consulted before the checker falls outward to an
 enclosing module's own definition of the same name, matching how the call
 really dispatches. An enclosing module's `use`, on the other hand, still loses
-to a nested module's *own* definition of the name — an import never reaches
+to a nested module's *own* definition of the name: an import never reaches
 in and overrides a local one.
 
 ```march
@@ -1251,14 +1251,14 @@ end
 ```
 
 Checking this call against the *enclosing* `App.take_pos` instead would be a false
-positive on correct code, since `Inner.go` never actually calls it — so the checker
+positive on correct code, since `Inner.go` never actually calls it, so the checker
 resolves it the way the call really dispatches.
 
 ---
 
 ## Appendix: The `--no-measure-axioms` Flag
 
-*Also a niche knob — only relevant if a measure-heavy build feels slow.*
+*Also a niche knob, only relevant if a measure-heavy build feels slow.*
 
 Pass `--no-measure-axioms` to reflect `@[measure]` functions **symbolically**
 instead of axiomatising them. This skips the datatype/quantifier reasoning (and
@@ -1274,6 +1274,6 @@ march --check --no-measure-axioms app.march
 
 ## Next Steps
 
-- [Type System](types.md) — the types refinements attach to
-- [Linear Types](linear-types.md) — the other compile-time safety layer
-- [Pattern Matching](pattern-matching.md) — `match` guards feed path sensitivity
+- [Type System](types.md): the types refinements attach to
+- [Linear Types](linear-types.md): the other compile-time safety layer
+- [Pattern Matching](pattern-matching.md): `match` guards feed path sensitivity

@@ -58,7 +58,7 @@ The runtime uses **atomic reference counting** for thread-safe heap management. 
 
 > **Update (March 20, 2026, Track C):** RC operations are now fully atomic with proper memory ordering. `march_incrc` has been upgraded from `memory_order_relaxed` to proper atomic semantics, fixing the ABA race condition (H2 in correctness audit). All RC changes have passed ThreadSanitizer validation.
 
-#### `march_alloc(int64_t sz)` — Lines 12-20
+#### `march_alloc(int64_t sz)`: Lines 12-20
 - **Purpose**: Allocate `sz` bytes on the heap (zeroed)
 - **Returns**: Pointer to allocated block with `rc = 1`, `tag = 0`
 - **Behavior**: Calls `calloc()`, initializes header, exits with error message on failure
@@ -68,7 +68,7 @@ The runtime uses **atomic reference counting** for thread-safe heap management. 
 void *march_alloc(int64_t sz);
 ```
 
-#### `march_incrc(void *p)` — Lines 24-27
+#### `march_incrc(void *p)`: Lines 24-27
 - **Purpose**: Increment reference count of heap object
 - **Behavior**: No-op if `p == NULL`
 - **Thread-safe**: Yes (atomic fetch-add with relaxed memory order)
@@ -77,7 +77,7 @@ void *march_alloc(int64_t sz);
 void march_incrc(void *p);
 ```
 
-#### `march_decrc(void *p)` — Lines 29-33
+#### `march_decrc(void *p)`: Lines 29-33
 - **Purpose**: Decrement reference count and free object if count hits zero
 - **Behavior**: No-op if `p == NULL`; uses `acquire-release` memory ordering for thread safety
 - **Thread-safe**: Yes
@@ -86,7 +86,7 @@ void march_incrc(void *p);
 void march_decrc(void *p);
 ```
 
-#### `march_decrc_freed(void *p)` — Lines 35-40
+#### `march_decrc_freed(void *p)`: Lines 35-40
 - **Purpose**: Decrement RC and return 1 if object was freed, 0 if still alive
 - **Returns**: 1 (freed) or 0 (alive)
 - **Use case**: Pattern matching when conditionally incrementing extracted child pointers
@@ -96,7 +96,7 @@ void march_decrc(void *p);
 int64_t march_decrc_freed(void *p);
 ```
 
-#### `march_free(void *p)` — Lines 42-44
+#### `march_free(void *p)`: Lines 42-44
 - **Purpose**: Direct free (bypass reference counting)
 - **Rarely used**: Most deallocation goes through `march_decrc()`
 
@@ -122,7 +122,7 @@ typedef struct {
 
 ### String Creation and Conversion
 
-#### `march_string_lit(const char *utf8, int64_t len)` — Lines 49-57
+#### `march_string_lit(const char *utf8, int64_t len)`: Lines 49-57
 - **Purpose**: Create a string from UTF-8 bytes
 - **Parameters**: `utf8` pointer (not necessarily null-terminated), `len` byte count
 - **Returns**: `march_string*` with `rc = 1`
@@ -131,7 +131,7 @@ typedef struct {
 void *march_string_lit(const char *utf8, int64_t len);
 ```
 
-#### `march_int_to_string(int64_t n)` — Lines 59-63
+#### `march_int_to_string(int64_t n)`: Lines 59-63
 - **Purpose**: Convert integer to string (base 10)
 - **Returns**: Allocated `march_string*`
 
@@ -139,7 +139,7 @@ void *march_string_lit(const char *utf8, int64_t len);
 void *march_int_to_string(int64_t n);
 ```
 
-#### `march_float_to_string(double f)` — Lines 65-69
+#### `march_float_to_string(double f)`: Lines 65-69
 - **Purpose**: Convert float to string (format: `%g`)
 - **Returns**: Allocated `march_string*`
 
@@ -147,7 +147,7 @@ void *march_int_to_string(int64_t n);
 void *march_float_to_string(double f);
 ```
 
-#### `march_bool_to_string(int64_t b)` — Lines 71-73
+#### `march_bool_to_string(int64_t b)`: Lines 71-73
 - **Purpose**: Convert boolean (0 or nonzero) to "true" or "false"
 - **Returns**: Allocated `march_string*`
 
@@ -155,7 +155,7 @@ void *march_float_to_string(double f);
 void *march_bool_to_string(int64_t b);
 ```
 
-#### `march_string_concat(void *a, void *b)` — Lines 75-87
+#### `march_string_concat(void *a, void *b)`: Lines 75-87
 - **Purpose**: Concatenate two strings
 - **Returns**: New string with combined content
 - **Note**: Both `a` and `b` should be `march_string*` pointers
@@ -164,7 +164,7 @@ void *march_bool_to_string(int64_t b);
 void *march_string_concat(void *a, void *b);
 ```
 
-#### `march_string_eq(void *a, void *b)` — Lines 89-93
+#### `march_string_eq(void *a, void *b)`: Lines 89-93
 - **Purpose**: Check if two strings are equal
 - **Returns**: 1 (equal) or 0 (not equal)
 
@@ -174,21 +174,21 @@ int64_t march_string_eq(void *a, void *b);
 
 ### String Query Operations
 
-#### `march_string_byte_length(void *s)` — Lines 95-97
+#### `march_string_byte_length(void *s)`: Lines 95-97
 - **Returns**: Byte count (UTF-8 length)
 
 ```c
 int64_t march_string_byte_length(void *s);
 ```
 
-#### `march_string_is_empty(void *s)` — Lines 99-101
+#### `march_string_is_empty(void *s)`: Lines 99-101
 - **Returns**: 1 if empty or NULL, 0 otherwise
 
 ```c
 int64_t march_string_is_empty(void *s);
 ```
 
-#### `march_string_grapheme_count(void *s)` — Lines 774-782
+#### `march_string_grapheme_count(void *s)`: Lines 774-782
 - **Purpose**: Count Unicode grapheme clusters (approximate: counts non-continuation bytes)
 - **Returns**: Grapheme count
 
@@ -196,21 +196,21 @@ int64_t march_string_is_empty(void *s);
 int64_t march_string_grapheme_count(void *s);
 ```
 
-#### `march_string_contains(void *s, void *sub)` — Lines 518-527
+#### `march_string_contains(void *s, void *sub)`: Lines 518-527
 - **Returns**: 1 if substring found, 0 otherwise; empty substring returns 1
 
 ```c
 int64_t march_string_contains(void *s, void *sub);
 ```
 
-#### `march_string_starts_with(void *s, void *prefix)` — Lines 529-534
+#### `march_string_starts_with(void *s, void *prefix)`: Lines 529-534
 - **Returns**: 1 if string starts with prefix, 0 otherwise
 
 ```c
 int64_t march_string_starts_with(void *s, void *prefix);
 ```
 
-#### `march_string_ends_with(void *s, void *suffix)` — Lines 536-541
+#### `march_string_ends_with(void *s, void *suffix)`: Lines 536-541
 - **Returns**: 1 if string ends with suffix, 0 otherwise
 
 ```c
@@ -219,7 +219,7 @@ int64_t march_string_ends_with(void *s, void *suffix);
 
 ### String Transformation Operations
 
-#### `march_string_slice(void *s, int64_t start, int64_t len)` — Lines 543-551
+#### `march_string_slice(void *s, int64_t start, int64_t len)`: Lines 543-551
 - **Purpose**: Extract substring from `start` with length `len`
 - **Behavior**: Clamps out-of-bounds parameters; negative `start` becomes 0
 - **Returns**: New `march_string*`
@@ -228,7 +228,7 @@ int64_t march_string_ends_with(void *s, void *suffix);
 void *march_string_slice(void *s, int64_t start, int64_t len);
 ```
 
-#### `march_string_split(void *s, void *sep)` — Lines 554-588
+#### `march_string_split(void *s, void *sep)`: Lines 554-588
 - **Purpose**: Split string on separator, return `List(String)`
 - **Behavior**: Empty separator splits into individual characters
 - **Returns**: March List (Cons-Nil linked list) of strings
@@ -237,7 +237,7 @@ void *march_string_slice(void *s, int64_t start, int64_t len);
 void *march_string_split(void *s, void *sep);
 ```
 
-#### `march_string_split_first(void *s, void *sep)` — Lines 591-604
+#### `march_string_split_first(void *s, void *sep)`: Lines 591-604
 - **Purpose**: Split on first occurrence only
 - **Returns**: `Option(Tuple(String, String))` (None if separator not found)
 
@@ -245,7 +245,7 @@ void *march_string_split(void *s, void *sep);
 void *march_string_split_first(void *s, void *sep);
 ```
 
-#### `march_string_replace(void *s, void *old, void *new_)` — Lines 607-629
+#### `march_string_replace(void *s, void *old, void *new_)`: Lines 607-629
 - **Purpose**: Replace first occurrence of `old` with `new_`
 - **Returns**: New `march_string*` (or copy of original if not found)
 
@@ -253,7 +253,7 @@ void *march_string_split_first(void *s, void *sep);
 void *march_string_replace(void *s, void *old, void *new_);
 ```
 
-#### `march_string_replace_all(void *s, void *old, void *new_)` — Lines 632-664
+#### `march_string_replace_all(void *s, void *old, void *new_)`: Lines 632-664
 - **Purpose**: Replace all occurrences
 - **Returns**: New `march_string*`
 
@@ -261,7 +261,7 @@ void *march_string_replace(void *s, void *old, void *new_);
 void *march_string_replace_all(void *s, void *old, void *new_);
 ```
 
-#### `march_string_to_lowercase(void *s)` — Lines 666-676
+#### `march_string_to_lowercase(void *s)`: Lines 666-676
 - **Purpose**: Convert ASCII characters to lowercase (UTF-8 aware)
 - **Returns**: New `march_string*`
 
@@ -269,7 +269,7 @@ void *march_string_replace_all(void *s, void *old, void *new_);
 void *march_string_to_lowercase(void *s);
 ```
 
-#### `march_string_to_uppercase(void *s)` — Lines 678-688
+#### `march_string_to_uppercase(void *s)`: Lines 678-688
 - **Purpose**: Convert ASCII characters to uppercase
 - **Returns**: New `march_string*`
 
@@ -277,7 +277,7 @@ void *march_string_to_lowercase(void *s);
 void *march_string_to_uppercase(void *s);
 ```
 
-#### `march_string_trim(void *s)` — Lines 694-700
+#### `march_string_trim(void *s)`: Lines 694-700
 - **Purpose**: Remove leading and trailing whitespace
 - **Returns**: New `march_string*`
 
@@ -285,7 +285,7 @@ void *march_string_to_uppercase(void *s);
 void *march_string_trim(void *s);
 ```
 
-#### `march_string_trim_start(void *s)` — Lines 702-707
+#### `march_string_trim_start(void *s)`: Lines 702-707
 - **Purpose**: Remove leading whitespace only
 - **Returns**: New `march_string*`
 
@@ -293,7 +293,7 @@ void *march_string_trim(void *s);
 void *march_string_trim_start(void *s);
 ```
 
-#### `march_string_trim_end(void *s)` — Lines 709-714
+#### `march_string_trim_end(void *s)`: Lines 709-714
 - **Purpose**: Remove trailing whitespace only
 - **Returns**: New `march_string*`
 
@@ -301,7 +301,7 @@ void *march_string_trim_start(void *s);
 void *march_string_trim_end(void *s);
 ```
 
-#### `march_string_repeat(void *s, int64_t n)` — Lines 716-728
+#### `march_string_repeat(void *s, int64_t n)`: Lines 716-728
 - **Purpose**: Repeat string `n` times
 - **Behavior**: Returns empty string if `n <= 0`
 - **Returns**: New `march_string*`
@@ -310,7 +310,7 @@ void *march_string_trim_end(void *s);
 void *march_string_repeat(void *s, int64_t n);
 ```
 
-#### `march_string_reverse(void *s)` — Lines 730-740
+#### `march_string_reverse(void *s)`: Lines 730-740
 - **Purpose**: Reverse string (byte-level, not grapheme-aware)
 - **Returns**: New `march_string*`
 
@@ -318,7 +318,7 @@ void *march_string_repeat(void *s, int64_t n);
 void *march_string_reverse(void *s);
 ```
 
-#### `march_string_pad_left(void *s, int64_t width, void *fill)` — Lines 742-756
+#### `march_string_pad_left(void *s, int64_t width, void *fill)`: Lines 742-756
 - **Purpose**: Left-pad to `width` with character from `fill` string
 - **Returns**: New `march_string*` (or copy if already >= width)
 
@@ -326,7 +326,7 @@ void *march_string_reverse(void *s);
 void *march_string_pad_left(void *s, int64_t width, void *fill);
 ```
 
-#### `march_string_pad_right(void *s, int64_t width, void *fill)` — Lines 758-772
+#### `march_string_pad_right(void *s, int64_t width, void *fill)`: Lines 758-772
 - **Purpose**: Right-pad to `width`
 - **Returns**: New `march_string*`
 
@@ -336,7 +336,7 @@ void *march_string_pad_right(void *s, int64_t width, void *fill);
 
 ### String Parsing and Search
 
-#### `march_string_to_int(void *s)` — Lines 106-121
+#### `march_string_to_int(void *s)`: Lines 106-121
 - **Purpose**: Parse string as decimal integer
 - **Returns**: `Option(Int)` (None if invalid, Some(n) if valid)
 - **Implementation**: Uses `strtoll()`, checks for trailing non-digit characters
@@ -345,7 +345,7 @@ void *march_string_pad_right(void *s, int64_t width, void *fill);
 void *march_string_to_int(void *s);
 ```
 
-#### `march_string_to_float(void *s)` — Lines 813-827
+#### `march_string_to_float(void *s)`: Lines 813-827
 - **Purpose**: Parse string as float
 - **Returns**: `Option(Float)` (None if invalid, Some(f) if valid)
 
@@ -353,7 +353,7 @@ void *march_string_to_int(void *s);
 void *march_string_to_float(void *s);
 ```
 
-#### `march_string_index_of(void *s, void *sub)` — Lines 785-796
+#### `march_string_index_of(void *s, void *sub)`: Lines 785-796
 - **Purpose**: Find index of first occurrence
 - **Returns**: `Option(Int)` (None if not found, Some(index) if found)
 - **Behavior**: Empty substring returns `Some(0)`
@@ -362,7 +362,7 @@ void *march_string_to_float(void *s);
 void *march_string_index_of(void *s, void *sub);
 ```
 
-#### `march_string_last_index_of(void *s, void *sub)` — Lines 799-810
+#### `march_string_last_index_of(void *s, void *sub)`: Lines 799-810
 - **Purpose**: Find index of last occurrence
 - **Returns**: `Option(Int)` (None if not found, Some(index) if found)
 - **Behavior**: Empty substring returns `Some(len)`
@@ -371,7 +371,7 @@ void *march_string_index_of(void *s, void *sub);
 void *march_string_last_index_of(void *s, void *sub);
 ```
 
-#### `march_string_join(void *list, void *sep)` — Lines 130-171
+#### `march_string_join(void *list, void *sep)`: Lines 130-171
 - **Purpose**: Join list of strings with separator
 - **Parameters**: `list` is `List(String)`, `sep` is separator string
 - **Returns**: New `march_string*`
@@ -383,7 +383,7 @@ void *march_string_join(void *list, void *sep);
 
 ## List Operations
 
-### `march_list_append(void *a, void *b)` — Lines 832-840
+### `march_list_append(void *a, void *b)`: Lines 832-840
 - **Purpose**: Append list `b` to list `a`
 - **Parameters**: Both are March `List` values (Cons-Nil linked lists)
 - **Returns**: New list (or `b` if `a` is Nil)
@@ -393,7 +393,7 @@ void *march_string_join(void *list, void *sep);
 void *march_list_append(void *a, void *b);
 ```
 
-### `march_list_concat(void *lists)` — Lines 843-850
+### `march_list_concat(void *lists)`: Lines 843-850
 - **Purpose**: Flatten `List(List(a))` to `List(a)`
 - **Returns**: Single flattened list
 
@@ -403,7 +403,7 @@ void *march_list_concat(void *lists);
 
 ## Input/Output
 
-### `march_print(void *s)` — Lines 175-178
+### `march_print(void *s)`: Lines 175-178
 - **Purpose**: Write string to stdout without newline
 - **Behavior**: Uses `fwrite()` directly on string data
 
@@ -411,7 +411,7 @@ void *march_list_concat(void *lists);
 void march_print(void *s);
 ```
 
-### `march_println(void *s)` — Lines 180-184
+### `march_println(void *s)`: Lines 180-184
 - **Purpose**: Write string to stdout with trailing newline
 - **Behavior**: `fwrite()` + `putchar('\n')`
 
@@ -419,7 +419,7 @@ void march_print(void *s);
 void march_println(void *s);
 ```
 
-### `march_panic(void *s)` — Lines 188-195
+### `march_panic(void *s)`: Lines 188-195
 - **Purpose**: Print error message to stderr and exit with status 1
 - **Behavior**: Outputs "panic: " prefix, then message, then newline
 
@@ -429,7 +429,7 @@ void march_panic(void *s);
 
 ## Actor Runtime
 
-The actor runtime implements **lightweight processes with message-passing concurrency**. Each actor is a heap object containing state and a dispatch function. Actors run as **green threads** on the M:N work-stealing scheduler in `runtime/march_scheduler.c`. The public actor API (`march_spawn`/`march_send`/`march_kill`/`march_is_alive`) lives in `runtime/march_runtime.c` and is declared in `march_runtime.h` — all of these take a `void *actor` (the actor heap object), not a separate handle struct.
+The actor runtime implements **lightweight processes with message-passing concurrency**. Each actor is a heap object containing state and a dispatch function. Actors run as **green threads** on the M:N work-stealing scheduler in `runtime/march_scheduler.c`. The public actor API (`march_spawn`/`march_send`/`march_kill`/`march_is_alive`) lives in `runtime/march_runtime.c` and is declared in `march_runtime.h`; all of these take a `void *actor` (the actor heap object), not a separate handle struct.
 
 > **Note (architecture).** An earlier design used a `struct march_process` with a per-process mutex/condvar mailbox, a global run queue, and a fixed pool of `scheduler_worker()` threads tuned by `MARCH_SCHEDULER_THREADS`. **That design has been deleted.** None of `march_process`, `msg_node` (the run-queue node), `scheduler_worker`, or `MARCH_SCHEDULER_THREADS` exist in the runtime any longer. The current design is the green-thread scheduler described below.
 
@@ -437,7 +437,7 @@ The actor runtime implements **lightweight processes with message-passing concur
 
 #### Actor Layout
 An actor is a heap object with this layout:
-- Field 0 (offset 16): `dispatch` — pointer to closure for message handling
+- Field 0 (offset 16): `dispatch`, a pointer to closure for message handling
 - Field 1+ (offset 24+): **state fields** (user-defined)
 
 `march_spawn` returns the actor pointer itself; there is no separate handle object.
@@ -467,7 +467,7 @@ Pushes `msg` into the target process's mailbox and wakes it if WAITING. This is 
 
 ### Spawn and Send
 
-#### `march_spawn(void *actor)` — `runtime/march_runtime.c`
+#### `march_spawn(void *actor)`: `runtime/march_runtime.c`
 - **Purpose**: Create the green thread that runs an actor's message loop
 - **Parameters**: `actor` is a March heap object with a dispatch field
 - **Returns**: the `actor` pointer (no wrapper handle)
@@ -477,7 +477,7 @@ Pushes `msg` into the target process's mailbox and wakes it if WAITING. This is 
 void *march_spawn(void *actor);
 ```
 
-#### `march_send(void *actor, void *msg)` — `runtime/march_runtime.c`
+#### `march_send(void *actor, void *msg)`: `runtime/march_runtime.c`
 - **Purpose**: Deliver a message to the actor's mailbox
 - **Returns**: the result of dispatch (or a synchronous reply for call-style sends)
 - **Behavior**: finds the actor's `march_actor_meta`, then calls `march_sched_send(meta->green_thread, msg)` to enqueue and wake the green thread
@@ -490,21 +490,21 @@ void *march_send(void *actor, void *msg);
 
 ### Query and Control
 
-#### `march_is_alive(void *actor)` — `runtime/march_runtime.h`
+#### `march_is_alive(void *actor)`: `runtime/march_runtime.h`
 - **Returns**: 1 (alive) or 0 (dead)
 
 ```c
 int64_t march_is_alive(void *actor);
 ```
 
-#### `march_kill(void *actor)` — `runtime/march_runtime.h`
+#### `march_kill(void *actor)`: `runtime/march_runtime.h`
 - **Purpose**: Mark the actor dead so its green thread stops processing messages
 
 ```c
 void march_kill(void *actor);
 ```
 
-#### `march_actor_get_int(void *actor, int64_t index)` — `runtime/march_runtime.c`
+#### `march_actor_get_int(void *actor, int64_t index)`: `runtime/march_runtime.c`
 - **Purpose**: Drain pending messages, then read an integer state field by index
 
 ```c
@@ -515,34 +515,34 @@ int64_t march_actor_get_int(void *actor, int64_t index);
 
 ### Float Conversions
 
-#### `march_int_to_float(int64_t n)` — Line 442
+#### `march_int_to_float(int64_t n)`: Line 442
 ```c
 double march_int_to_float(int64_t n);
 ```
 
 ### Float Arithmetic and Rounding
 
-#### `march_float_abs(double f)` — Line 437
+#### `march_float_abs(double f)`: Line 437
 ```c
 double march_float_abs(double f);
 ```
 
-#### `march_float_ceil(double f)` — Line 438
+#### `march_float_ceil(double f)`: Line 438
 ```c
 int64_t march_float_ceil(double f);
 ```
 
-#### `march_float_floor(double f)` — Line 439
+#### `march_float_floor(double f)`: Line 439
 ```c
 int64_t march_float_floor(double f);
 ```
 
-#### `march_float_round(double f)` — Line 440
+#### `march_float_round(double f)`: Line 440
 ```c
 int64_t march_float_round(double f);
 ```
 
-#### `march_float_truncate(double f)` — Line 441
+#### `march_float_truncate(double f)`: Line 441
 ```c
 int64_t march_float_truncate(double f);
 ```
@@ -583,7 +583,7 @@ double march_math_pow(double b, double e);
 
 ## File System Operations
 
-### `march_file_exists(void *s)` — Lines 854-859
+### `march_file_exists(void *s)`: Lines 854-859
 - **Purpose**: Check if file exists and is a regular file
 - **Parameters**: `s` is a `march_string*` path
 - **Returns**: 1 (exists) or 0 (does not exist)
@@ -593,7 +593,7 @@ double march_math_pow(double b, double e);
 int64_t march_file_exists(void *s);
 ```
 
-### `march_dir_exists(void *s)` — Lines 861-866
+### `march_dir_exists(void *s)`: Lines 861-866
 - **Purpose**: Check if directory exists
 - **Returns**: 1 (exists) or 0 (does not exist)
 - **Implementation**: Uses `stat()` and `S_ISDIR()` macro
@@ -604,7 +604,7 @@ int64_t march_dir_exists(void *s);
 
 ## Value Pretty-Printing
 
-### `march_value_to_string(void *v)` — Lines 873-880
+### `march_value_to_string(void *v)`: Lines 873-880
 - **Purpose**: Convert arbitrary March value to string representation
 - **Current implementation**: Returns "nil" for NULL, "#<tag:N>" for heap objects
 - **Returns**: New `march_string*`
@@ -748,11 +748,11 @@ This allows actors to mutate their state in-place efficiently while maintaining 
 
 ## Phase 5: Per-Process Heap and Message Passing (2026-03-25)
 
-This phase adds Layer 3 of the stratified GC design (`specs/gc_design.md`) — per-actor arena heaps — along with cross-heap message passing and a per-process semi-space GC.
+This phase adds Layer 3 of the stratified GC design (`specs/gc_design.md`), per-actor arena heaps, along with cross-heap message passing and a per-process semi-space GC.
 
 ### Per-Process Bump Allocator (`runtime/march_heap.h`, `runtime/march_heap.c`)
 
-Each process owns a `march_heap_t` with a linked list of 64 KiB arena blocks.  All allocation uses a bump pointer — no locks, no synchronization.
+Each process owns a `march_heap_t` with a linked list of 64 KiB arena blocks.  All allocation uses a bump pointer: no locks, no synchronization.
 
 ```c
 march_heap_t h;
@@ -780,13 +780,13 @@ Key properties:
 
 Two operations for value transfer between process heaps:
 
-**`march_msg_copy(src, dst, value)`** — deep copy for non-linear values:
+**`march_msg_copy(src, dst, value)`**: deep copy for non-linear values:
 - Recursively copies all reachable values from `src` into `dst`
 - Uses a hash-table forwarding map to handle DAG sharing (prevents exponential blowup on shared subgraphs)
 - String objects (tag = -1) are copied as raw byte arrays
 - Unboxed scalars (values < 4096) are returned unchanged
 
-**`march_msg_move(src, dst, value)`** — zero-copy transfer for linear values:
+**`march_msg_move(src, dst, value)`**: zero-copy transfer for linear values:
 - Pointer is unchanged (same address, no data movement)
 - Only updates heap accounting: `src.live_bytes -= size`, `dst.live_bytes += size`
 - The linear type system guarantees no other references exist in `src` after the move
@@ -824,7 +824,7 @@ When `march_heap_should_gc` returns true, `march_gc_collect` runs a two-pass sem
 
 Properties:
 - **Per-process only**: never pauses other processes
-- **Only runs at safe points**: the owning process must be yielded (PROC_WAITING or similar) — Perceus RC ensures all live objects have `rc > 0`
+- **Only runs at safe points**: the owning process must be yielded (PROC_WAITING or similar); Perceus RC ensures all live objects have `rc > 0`
 - **Exact pointer scan**: uses `n_fields` from `march_alloc_meta` to bound the field scan; the forwarding-table lookup guards against scalar field confusion
 
 ### Linear Send Optimization in the LLVM Emitter

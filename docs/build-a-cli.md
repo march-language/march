@@ -10,7 +10,7 @@ scrollmd: true
 
 This tutorial builds a real command-line program from scratch: **`mcount`**, a
 small clone of `wc` that counts the lines, words, and bytes in a file. Along the
-way you'll touch every part of the workflow — scaffolding a project with
+way you'll touch every part of the workflow: scaffolding a project with
 `forge`, reading command-line arguments, reading a file, processing text,
 writing tests, and compiling a native binary.
 
@@ -88,7 +88,7 @@ end
 Two things worth calling out:
 
 - **`IO.warn` writes to stderr** (with a trailing newline), which is where usage
-  and error messages belong — that keeps them out of any pipe consuming stdout.
+  and error messages belong; that keeps them out of any pipe consuming stdout.
 - **`System.exit(n)` sets the process exit code.** Returning an `Int` from
   `main` does *not* set the exit code, so reach for `System.exit` when you want a
   non-zero status. We use `2` for "wrong usage", matching the Unix convention.
@@ -101,7 +101,7 @@ branch.
 
 ## 3. Read the file
 
-`File.read` returns a `Result(String, FileError)` — `Ok` with the contents, or
+`File.read` returns a `Result(String, FileError)`: `Ok` with the contents, or
 `Err` if the file is missing or unreadable. Match on it so a bad path produces a
 clean error instead of a crash:
 
@@ -148,7 +148,7 @@ destructures with a tuple pattern.
 
 ## 5. The full program
 
-Putting it together — replace `lib/mcount.march` with:
+Putting it together, replace `lib/mcount.march` with:
 
 ```march
 mod Mcount do
@@ -233,7 +233,7 @@ end
 
 `List.fold_left(list, init, fn)` threads the `Map` accumulator through every
 word. `Map.get_or(m, key, default, cmp)` reads the running count (defaulting to
-`0`), and `Map.insert(m, key, val, cmp)` returns an updated map — March's `Map`
+`0`), and `Map.insert(m, key, val, cmp)` returns an updated map; March's `Map`
 is immutable and takes an explicit comparator (`Map.str_cmp` for string keys).
 `List.sort_by(xs, cmp)` calls `cmp(a, b)` and keeps `a` first when it returns
 `true`; comparing `ca > cb` puts the biggest count first.
@@ -246,7 +246,7 @@ cat: 2
 mat: 1
 ```
 
-Since `TopWords.main` works on an inline string literal — no argv, no files — you
+Since `TopWords.main` works on an inline string literal (no argv, no files), you
 can drop it in its own file and run it directly; `main()` is invoked
 automatically:
 
@@ -310,7 +310,7 @@ both `main` and the test; we inline it here to keep the example self-contained.)
 
 ## 8. Build the binary
 
-`forge build` compiles a standalone native executable via LLVM — no runtime, no
+`forge build` compiles a standalone native executable via LLVM: no runtime, no
 interpreter:
 
 ```sh
@@ -338,10 +338,10 @@ distinct exit codes, a test suite, and a native binary.
 
 ## Where to go next
 
-- [CLI recipe](/docs/cookbook/cli/) — flags, multiple files, and error handling
+- [CLI recipe](/docs/cookbook/cli/): flags, multiple files, and error handling
   patterns for larger tools
-- [Read a CSV and aggregate it](/docs/cookbook/files/) — process structured data files
-- [Parse a config file](/docs/cookbook/config/) — TOML/YAML config with env overrides
-- [Standard Library](/docs/stdlib-guide/) — the "What do I use for…?" index and full module
+- [Read a CSV and aggregate it](/docs/cookbook/files/): process structured data files
+- [Parse a config file](/docs/cookbook/config/): TOML/YAML config with env overrides
+- [Standard Library](/docs/stdlib-guide/): the "What do I use for…?" index and full module
   reference
-- [Cookbook](/docs/cookbook/) — task-focused recipes for everything else
+- [Cookbook](/docs/cookbook/): task-focused recipes for everything else

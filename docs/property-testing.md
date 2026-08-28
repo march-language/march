@@ -9,7 +9,7 @@ permalink: /docs/property-testing/
 
 March includes a built-in property testing library inspired by [Hedgehog](https://hedgehog.qa/). Instead of writing individual test cases with specific inputs, you describe **properties** that should hold for all values of a type, and the library generates hundreds of random inputs to verify them.
 
-When a property fails, the library automatically **shrinks** the failing input to the smallest counterexample that still fails — without any extra work from you.
+When a property fails, the library automatically **shrinks** the failing input to the smallest counterexample that still fails, without any extra work from you.
 
 ---
 
@@ -57,11 +57,11 @@ Every generator returns not just a value, but a **rose tree** of shrink candidat
 └── 86
 ```
 
-Each of those nodes has its own children, recursively. This is called **integrated shrinking** — the shrink strategy is embedded in the generator, not bolted on as a separate step.
+Each of those nodes has its own children, recursively. This is called **integrated shrinking**: the shrink strategy is embedded in the generator, not bolted on as a separate step.
 
 ### Why integrated shrinking matters
 
-When you compose generators with `Gen.bind`, the shrinking automatically stays coherent. If you generate a list and then an index into that list, shrinking the list won't produce an invalid index — the index is re-derived from the same random bits as the original.
+When you compose generators with `Gen.bind`, the shrinking automatically stays coherent. If you generate a list and then an index into that list, shrinking the list won't produce an invalid index; the index is recomputed from the same random bits as the original.
 
 This is the key advantage over QuickCheck-style property testing, where shrinking is separate and can produce invalid combinations from dependent generators.
 
@@ -166,7 +166,7 @@ If `safe_divide` panics for some input, the runner finds the minimal crashing in
 
 ## Combinators in depth
 
-### `Gen.map` — transform values
+### `Gen.map`: transform values
 
 ```march
 -- Generate even numbers
@@ -179,7 +179,7 @@ let gen_point = Gen.map(
 )
 ```
 
-### `Gen.bind` — dependent generators
+### `Gen.bind`: dependent generators
 
 When the second generator depends on the first value:
 
@@ -193,7 +193,7 @@ let gen_list_and_index = Gen.bind(
 
 Shrinking the list automatically re-derives a valid index.
 
-### `Gen.string_of` — custom string alphabets
+### `Gen.string_of`: custom string alphabets
 
 ```march
 -- Hex strings
@@ -205,7 +205,7 @@ let gen_hex = Gen.string_of(hex_char)
 let gen_digits = Gen.string_of(Gen.int(48, 57))
 ```
 
-### `Gen.sized` — size-dependent generation
+### `Gen.sized`: size-dependent generation
 
 The runner grows the `size` parameter from 0 to 100 across runs. Use `Gen.sized` to access it:
 

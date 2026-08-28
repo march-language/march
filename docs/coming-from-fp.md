@@ -6,7 +6,7 @@ permalink: /docs/coming-from-fp/
 
 # Coming from Haskell / Elixir / OCaml
 
-March sits in the ML/Elixir family. Most concepts map directly — the main differences are syntax, the actor model, and the absence of laziness and typeclasses.
+March sits in the ML/Elixir family. Most concepts map directly; the main differences are syntax, the actor model, and the absence of laziness and typeclasses.
 
 ---
 
@@ -19,10 +19,10 @@ March sits in the ML/Elixir family. Most concepts map directly — the main diff
 | Lambda | `\x -> x + 1` | `fn x -> x + 1 end` | `fun x -> x + 1` | `fn x -> x + 1` |
 | Pattern match | `case x of` | `case x do` | `match x with` | `match x do` |
 | ADT | `data Shape = Circle Float \| Rect Float Float` | `{:circle, r} \| {:rect, w, h}` | `type shape = Circle of float \| Rect of float * float` | `type Shape = Circle(Float) \| Rect(Float, Float)` |
-| Type params | `data Maybe a = Nothing \| Just a` | — | `type 'a option = None \| Some of 'a` | `type Option(a) = None \| Some(a)` |
+| Type params | `data Maybe a = Nothing \| Just a` | none | `type 'a option = None \| Some of 'a` | `type Option(a) = None \| Some(a)` |
 | Result | `Either e a` | `{:ok, v} \| {:error, e}` | `('a, 'e) result` | `Result(a, e)` |
 | Let binding | `let x = 42 in ...` | `x = 42` | `let x = 42 in ...` | `let x = 42` (no `in`) |
-| Pipe | `f $ g x` | `x \|> g \|> f` | — | `g(x) \|> f   -- or: f(g(x))` |
+| Pipe | `f $ g x` | `x \|> g \|> f` | none | `g(x) \|> f   -- or: f(g(x))` |
 | Record update | `r { field = v }` | `%{r \| field: v}` | `{ r with field = v }` | `{ r with field: v }` |
 | Private fn | module boundary | `defp` | `let` (vs `let ... in sig`) | `pfn` |
 
@@ -30,7 +30,7 @@ March sits in the ML/Elixir family. Most concepts map directly — the main diff
 
 ## Key differences
 
-### No typeclasses / no protocols by name — use `interface`/`impl`
+### No typeclasses / no protocols by name: use `interface`/`impl`
 
 ```march
 interface Eq(a) do
@@ -42,7 +42,7 @@ impl Eq(Int) do
 end
 ```
 
-The coherence rules are the same as Haskell's — one impl per type per interface per program.
+The coherence rules are the same as Haskell's: one impl per type per interface per program.
 
 ### `let?` instead of `do`-notation / `>>=`
 
@@ -65,11 +65,11 @@ fn run(s : String) : Result(Int, String) do
 end
 ```
 
-`let?` is not a monad — it's a first-class desugaring specific to `Result`. `Option` and custom types don't get it (yet).
+`let?` is not a monad; it's a first-class desugaring specific to `Result`. `Option` and custom types don't get it (yet).
 
 ### Actors instead of OTP GenServers
 
-March actors are structurally similar to Elixir GenServers but without the boilerplate:
+March actors are similar in structure to Elixir GenServers but without the boilerplate:
 
 ```march
 actor Counter do
@@ -87,7 +87,7 @@ actor Counter do
 end
 ```
 
-`spawn(Counter)` returns a pid. `send(pid, Inc(5))` sends a message. No `handle_cast`/`handle_call` distinction — all messages are async by default.
+`spawn(Counter)` returns a pid. `send(pid, Inc(5))` sends a message. No `handle_cast`/`handle_call` distinction; all messages are async by default.
 
 ### No laziness
 
@@ -95,7 +95,7 @@ March is strict. `List` is a linked list, not a lazy sequence. For streaming/laz
 
 ### Perceus RC instead of GC
 
-No garbage collector — reference counting with in-place reuse (FBIP). Deterministic latency, no stop-the-world pauses. The `linear type` and `always_linear type` features give you Rust-style ownership at compile time when you need it.
+No garbage collector: reference counting with in-place reuse (FBIP). Deterministic latency, no stop-the-world pauses. The `linear type` and `always_linear type` features give you Rust-style ownership at compile time when you need it.
 
 ---
 
@@ -103,7 +103,7 @@ No garbage collector — reference counting with in-place reuse (FBIP). Determin
 
 If you're coming from Haskell, mutable references (`IORef`, `MVar`, `TVar`) and
 `async`/`Async` map onto March's two concurrency tools. If you're coming from
-Elixir, you'll find the model familiar — actors *are* GenServers.
+Elixir, you'll find the model familiar; actors *are* GenServers.
 
 | Haskell / Elixir / OCaml | March |
 |---|---|
@@ -112,11 +112,11 @@ Elixir, you'll find the model familiar — actors *are* GenServers.
 | `mapConcurrently` / `Async.Parallel` | `List.pmap` or `Task.await_many` |
 | Elixir `GenServer` (`handle_call`/`cast`) | `actor` with `on Msg do … end` handlers |
 | Elixir supervision tree | [Supervision](supervision.md) (`one_for_one`, …) |
-| `bracket` / `with` / `withFile` | a `linear` resource — the compiler *checks* it's released, no runtime wrapper |
+| `bracket` / `with` / `withFile` | a `linear` resource; the compiler *checks* it's released, no runtime wrapper |
 
 The last row is the interesting one: where Haskell's `bracket` guarantees cleanup
 at runtime via an exception handler, March's [linear types](linear-types.md) make
-"this handle must be consumed exactly once" a **compile-time** property — forget to
+"this handle must be consumed exactly once" a **compile-time** property; forget to
 close it and the program doesn't build. For streaming with backpressure (GenStage
 territory), see [Flow](flow.md).
 

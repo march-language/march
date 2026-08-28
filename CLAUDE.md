@@ -5,13 +5,13 @@ March is a statically-typed functional language (ML/Elixir hybrid) compiled with
 ## Keeping specs up to date
 
 **IMPORTANT:** When implementing a feature, always update `specs/todos/` and `specs/progress/` in the same commit:
-- `specs/todos/` holds one open item per file, named `YYYY-MM-DD-slug.md` (date filed). See `specs/todos/README.md`.
-- `specs/progress/` holds one completed item per file, same naming convention. See `specs/progress/README.md`.
+- `specs/todos/` contains one open item per file, named `YYYY-MM-DD-slug.md` (date logged). See `specs/todos/README.md`.
+- `specs/progress/` contains one completed item per file, same naming convention. See `specs/progress/README.md`.
 - When an item is finished, `git mv` its file from `specs/todos/` to `specs/progress/` (or delete it and add a new
-  dated file in `specs/progress/`) in the same commit that lands the fix — don't leave a stale open file behind.
+  dated file in `specs/progress/`) in the same commit that lands the fix; don't leave a stale open file behind.
 - Don't hand-maintain a running "Current State" test count anywhere; run `scripts/run-tests.sh` for the live number.
 
-These directories are the canonical record of what exists. Do not let them go stale. One item, one file — this
+These directories are the canonical record of what exists. Do not let them go stale. One item, one file; this
 structure exists specifically so two PRs filing or closing different items never conflict with each other.
 
 **Doc freshness lint.** `scripts/check-docs.sh` (run in CI) guards the current-truth docs
@@ -20,22 +20,22 @@ compiler-source pointers (e.g. a path that moved) and stale stdlib module counts
 **not** lint the historical corpus (`specs/plans/`, dated design specs, `specs/todos/`,
 `specs/progress/`). If a current doc must reference a since-removed file or a frozen
 count, say so in words ("no longer exists", "removed") or add a `doc-lint:ignore-count` /
-`doc-lint:ignore-file` marker — don't silently let the pointer rot.
+`doc-lint:ignore-file` marker; don't silently let the pointer rot.
 
 ## Maintaining the changelog
 
 `CHANGELOG.md` (repo root, [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format)
-is the user-facing digest of what shipped — a different audience than `specs/progress/`
+is the user-facing digest of what shipped, a different audience than `specs/progress/`
 (implementer-level detail, one file per fix). When a user-visible fix, feature, or
 behavior change lands, add a bullet under `## [Unreleased]` in the same commit (`### Added`
-/ `### Fixed` / `### Changed` / `### Documentation` as appropriate — see existing entries).
+/ `### Fixed` / `### Changed` / `### Documentation` as appropriate; see existing entries).
 Skip purely internal refactors with no observable effect. When a release is tagged, rename
 `[Unreleased]` to the new version + date and start a fresh empty `[Unreleased]` above it;
 don't backfill history for versions that predate the file.
 
 ## Build & test
 
-The opam switch is `march`. `opam` and `dune` are available directly in PATH — no wrapper needed.
+The opam switch is `march`. `opam` and `dune` are available directly in PATH; no wrapper needed.
 
 **NEVER use `eval $(opam env ...)` or any opam env setup prefix.** Run `dune`, `opam`, etc. directly without any preamble.
 
@@ -92,7 +92,7 @@ To unstick a stale daemon: `dune shutdown` (dune 3.x).
 
 **Shared dune cache.** Dune's build cache is enabled user-globally
 (`~/.config/dune/config`), so identical compilation actions are reused across
-all worktrees and sessions instead of recompiled — a fresh worktree's build is
+all worktrees and sessions instead of recompiled; a fresh worktree's build is
 mostly cache hits. If you suspect the cache during compiler debugging, bypass
 it with `DUNE_CACHE=disabled dune build ...`. Bound its growth occasionally
 with `dune cache trim --size 20GB`.
@@ -104,30 +104,30 @@ before merging to main.
 
 After implementing or completing a feature, `git mv` its file from `specs/todos/` to `specs/progress/` (or file a new dated entry in `specs/progress/`) to keep them current.
 
-After changing a feature, run the benchmark(s) that exercise it to catch regressions — see `specs/benchmarks.md` for the mapping. Quick reference: Perceus/FBIP changes → `bench/tree_transform.march`; closure/HOF changes → `bench/list_ops.march`; allocation/GC changes → `bench/binary_trees.march`. **Always run benchmarks compiled** (`march --compile --opt 2 bench/<name>.march -o /tmp/<name> && /tmp/<name>`) — interpreted (`dune exec march --`) can take hours on `fib`-shaped benchmarks.
+After changing a feature, run the benchmark(s) that exercise it to catch regressions; see `specs/benchmarks.md` for the mapping. Quick reference: Perceus/FBIP changes → `bench/tree_transform.march`; closure/HOF changes → `bench/list_ops.march`; allocation/GC changes → `bench/binary_trees.march`. **Always run benchmarks compiled** (`march --compile --opt 2 bench/<name>.march -o /tmp/<name> && /tmp/<name>`); interpreted (`dune exec march --`) can take hours on `fib`-shaped benchmarks.
 
 ### TIR golden-snapshot tests
 
 `test/run_snapshots.exe` pins the pretty-printed TIR (`lib/tir/pp.ml`) for a small
-hand-picked corpus (`test/snapshots/src/*.march`) at two pipeline stages —
+hand-picked corpus (`test/snapshots/src/*.march`) at two pipeline stages,
 post-lower (`test/snapshots/lower/*.expected`) and post-Perceus/RC-insertion
-(`test/snapshots/perceus/*.expected`) — so a lowering/monomorphization/
+(`test/snapshots/perceus/*.expected`), so a lowering/monomorphization/
 defunctionalization/Perceus refactor that changes the emitted IR shape shows up
 as a readable diff instead of only surfacing later as a runtime regression.
-Regenerate deliberately after an intentional TIR-shape change with
+Regenerate on purpose after an intentional TIR-shape change with
 `UPDATE_SNAPSHOTS=1 ./_build/default/test/run_snapshots.exe -e`, then review
-`git diff test/snapshots/` before committing — the diff IS the code review
+`git diff test/snapshots/` before committing; the diff IS the code review
 artifact. See the workflow/design comment at the top of `test/test_snapshots.ml`
 for the full detail (printer choice, prelude-noise filtering, fresh-name-counter
 determinism).
 
-### Refactor oracles — prove a change moved nothing
+### Refactor oracles: prove a change moved no behaviour
 
 Three scripts exist to prove a refactor changed no observable behaviour. Each
-records a baseline, then compares. **Prove any oracle goes RED on a deliberate
-perturbation before you trust a GREEN** — two of these three shipped broken
+records a baseline, then compares. **Prove any oracle goes RED on an intentional
+perturbation before you trust a GREEN**; two of these three shipped broken
 (a `${1:?usage … {a|b} …}` bash expansion ends at the *first* `}`, so the mode
-argument was mangled and every run died before touching a fixture), and one of
+argument was mangled and every run crashed before touching a fixture), and one of
 them was certified "verified" by a review while in that state.
 
 ```
@@ -138,10 +138,10 @@ scripts/types-oracle.sh  baseline|check <dir>   # two-tier: core-AST inference r
 
 What they do **not** cover, which matters when choosing one:
 - `ir-oracle` is blind to `lib/eval/` (the interpreter is never emitted as IR) and
-  to `lsp/` — a green there proves nothing about those trees. For interpreter
+  to `lsp/`; a green there proves no property of those trees. For interpreter
   changes use the test suite plus `bench/run_interp_bench.sh --modes interp`.
-- `types-oracle` is two-tier because neither channel suffices alone: `--check`
-  prints nothing on an accepting program, and `--emit-core-ast`'s JSON keeps only
+- `types-oracle` is two-tier because neither channel suffices on its own: `--check`
+  prints no output on an accepting program, and `--emit-core-ast`'s JSON keeps only
   each diagnostic's first line, dropping provenance and hint text.
 - No oracle sees **match-arm order**, **module-initialisation order**, or any
   behaviour the corpus does not exercise. A reordering refactor can be green and
@@ -150,7 +150,7 @@ What they do **not** cover, which matters when choosing one:
   worktrees and its cached spans carry the populating worktree's absolute paths,
   which produces phantom diffs naming someone else's directory.
 
-Related: `dune build @types-check` **without `--force` is vacuous** — it exits 0
+Related: `dune build @types-check` **without `--force` is an empty check**: it exits 0
 with a zero-byte log. Assert on the log's contents, never on the exit code.
 
 ## Multi-file compilation (MARCH_LIB_PATH)
@@ -165,7 +165,7 @@ MARCH_LIB_PATH=/path/to/dep1/lib:/path/to/dep2/src \
 
 March walks ALL `.march` files in each `MARCH_LIB_PATH` directory recursively and loads their modules automatically. The entry file is the single `.march` file passed on the command line.
 
-**CAS cache:** Compiled binaries are content-hash cached in `<project>/.march/cas/artifacts-v2/` (**not** `artifacts/` — that is the inert v1 pointer store; deleting only it clears nothing). The cache key includes digests of the compiler executable and the runtime C sources (`runtime/*.c`, `runtime/*.h`) **of the runtime directory the compiler actually compiles** — the driver resolves it once (exe-relative first, `MARCH_RUNTIME_DIR` overrides) and registers it with the CAS — so editing the runtime or rebuilding the compiler invalidates it automatically. Note that "the runtime the compiler compiles" is the *staged* one, `_build/default/runtime`, which a targeted `dune build bin/main.exe` does **not** refresh: after editing `runtime/*.c`, build a target that restages it (e.g. `dune build --root .` or any rule with a `runtime` dep) or the edit is simply not in the build at all. If a cache ever looks wrong anyway, clear it with:
+**CAS cache:** Compiled binaries are content-hash cached in `<project>/.march/cas/artifacts-v2/` (**not** `artifacts/`; that is the inert v1 pointer store; deleting only it clears no artifacts). The cache key includes digests of the compiler executable and the runtime C sources (`runtime/*.c`, `runtime/*.h`) **of the runtime directory the compiler actually compiles**; the driver resolves it once (exe-relative first, `MARCH_RUNTIME_DIR` overrides) and registers it with the CAS, so editing the runtime or rebuilding the compiler invalidates it automatically. Note that "the runtime the compiler compiles" is the *staged* one, `_build/default/runtime`, which a targeted `dune build bin/main.exe` does **not** refresh: after editing `runtime/*.c`, build a target that restages it (e.g. `dune build --root .` or any rule with a `runtime` dep) or the edit is simply not in the build at all. If a cache looks wrong anyway, clear it with:
 
 ```bash
 rm -rf /Users/80197052/code/march/.march/cas/artifacts-v2/
@@ -230,21 +230,21 @@ specs/                      design specs, progress tracking, feature plans
 See [specs/lang/surface-syntax.md](specs/lang/surface-syntax.md) for a complete quick-reference of all March syntax.
 
 - Module: `mod Name do ... end` (not `module`)
-- Type variants: `type Foo = A | B(Int)` — no leading `|`
-- Conditionals: `if cond do ... else ... end` — `else` is MANDATORY (omitting it: "March `if` expressions always need an `else` branch"); `then` is rejected ("I don't recognize `then` here — March uses do/end blocks instead.")
+- Type variants: `type Foo = A | B(Int)`, with no leading `|`
+- Conditionals: `if cond do ... else ... end`; `else` is MANDATORY (omitting it: "March `if` expressions always need an `else` branch"); `then` is rejected ("I don't recognize `then` here — March uses do/end blocks instead.")
 - **`else if` chains need one `end` per `if`, not one for the chain.** A two-branch
   chain ends `end end`, a three-branch chain `end end end`. There is no
-  `elif`/`elsif`, and `else if` is genuinely a nested `if` in the else position:
+  `elif`/`elsif`, and `else if` is truly a nested `if` in the else position:
   ```march
   if a do 1 else if b do 2 else 3 end end          -- two ifs, two ends
   ```
   Getting this wrong gives a confusing "I got stuck here" pointing at the NEXT
-  declaration, not at the `if` — the parser only notices when it runs out of
+  declaration, not at the `if`; the parser only notices when it runs out of
   input. See `stdlib/uri.march:62` (`else -1 end end end`) for a real one.
 - Block lets: `let x = expr` with no `in`; subsequent block exprs see the binding
 - Result propagation: `let? p = e` binds the `Ok` payload and returns `Err(e)` immediately; RHS must be `Result`; cannot be the last expr in a block
-- No `;` — use newlines to separate block expressions
-- Match arms use `block_body` — multi-expression arms with `let` bindings are supported:
+- No `;`: use newlines to separate block expressions
+- Match arms use `block_body`; multi-expression arms with `let` bindings are supported:
   ```march
   match x do
     Some(v) ->
@@ -256,11 +256,11 @@ See [specs/lang/surface-syntax.md](specs/lang/surface-syntax.md) for a complete 
   ```
   The token filter uses lookahead to distinguish arm boundaries from block continuations. A `do...end` wrapper also works: `Some(v) -> do ... end`
 
-### Lambda syntax (critical — common source of bugs)
+### Lambda syntax (critical, a common source of bugs)
 
 Lambdas use `fn ... -> body` (arrow form only, NO `do...end` block form).
 The body is a single expression, OR zero or more `let` bindings followed by a
-final expression — identical to match arm block bodies:
+final expression, identical to match arm block bodies:
 
 ```march
 fn x -> x + 1                     -- single param, single expr
@@ -281,21 +281,21 @@ fn ->
 ```
 
 **Common mistakes:**
-- `fn _ -> expr` when you want zero-arg — WRONG. `_` is a 1-arg lambda; calling it with 0 args gives "arity mismatch: expected 1 args, got 0"
-- `task_spawn(fn -> f())` — WRONG if `task_spawn` passes 1 arg to the callback. Use `fn _ -> f()` (1-arg discard).
+- `fn _ -> expr` when you want zero-arg: WRONG. `_` is a 1-arg lambda; calling it with 0 args gives "arity mismatch: expected 1 args, got 0"
+- `task_spawn(fn -> f())`: WRONG if `task_spawn` passes 1 arg to the callback. Use `fn _ -> f()` (1-arg discard).
 
 ### Visibility
 
-- `fn name(...)` — public (default)
-- `pfn name(...)` — private (module-internal)
-- `type Foo = ...` — public type (no `pub` keyword needed)
+- `fn name(...)`: public (default)
+- `pfn name(...)`: private (module-internal)
+- `type Foo = ...`: public type (no `pub` keyword needed)
 
 ## Pipeline
 
 1. Parse (`March_parser.Parser.module_`)
 2. Desugar (`March_desugar.Desugar.desugar_module`)
-3. Typecheck (`March_typecheck.Typecheck.check_module`) — prints diagnostics, exits 1 on errors
-4. Eval (`March_eval.Eval.run_module`) — calls `main()` if present
+3. Typecheck (`March_typecheck.Typecheck.check_module`): prints diagnostics, exits 1 on errors
+4. Eval (`March_eval.Eval.run_module`): calls `main()` if present
 
 <!-- deciduous:start -->
 ## Decision Graph Workflow

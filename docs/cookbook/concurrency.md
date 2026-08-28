@@ -29,7 +29,7 @@ let tasks = List.map(urls, fn url -> Task.async(fn () -> fetch(url)))
 let results = Task.await_many(tasks)
 ```
 
-Race — first to finish wins, others are cancelled:
+Race: first to finish wins, others are cancelled:
 
 <!-- scroll:skip -->
 ```march
@@ -46,7 +46,7 @@ end
 
 ## Actors
 
-An actor has isolated state and processes messages one at a time. No shared memory — data races are impossible by construction:
+An actor has isolated state and processes messages one at a time. No shared memory means data races are impossible by construction:
 
 <!-- scroll:skip -->
 ```march
@@ -90,7 +90,7 @@ let results = Task.async_stream(urls, fn url ->
 )
 ```
 
-For structured coordination, use an actor as a mailbox — tasks send to it, it accumulates results:
+For structured coordination, use an actor as a mailbox: tasks send to it, it accumulates results:
 
 <!-- scroll:skip -->
 ```march

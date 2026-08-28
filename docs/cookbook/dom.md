@@ -7,7 +7,7 @@ permalink: /docs/cookbook/dom/
 # DOM
 
 March can target the browser via `--target js`. The `Js.Dom` stdlib module exposes
-the browser's Document Object Model as typed March functions — no JavaScript
+the browser's Document Object Model as typed March functions, no JavaScript
 required on your side.
 
 ---
@@ -51,7 +51,7 @@ and a call to the exported `main` function:
 ```
 
 Your `main` function runs when the module loads. Because it is a module,
-it runs after the DOM is parsed — no `DOMContentLoaded` listener needed.
+it runs after the DOM is parsed; no `DOMContentLoaded` listener needed.
 
 You also need two runtime files alongside the `.mjs`:
 
@@ -124,11 +124,11 @@ elements without wrapping them in a container.
 | `Js.Dom.remove(el)` | Detach `el` from its parent |
 | `Js.Dom.remove_child(parent, child)` | Remove a known direct child |
 | `Js.Dom.clear(el)` | Remove all children |
-| `Js.Dom.parent(el)` | `Option(Node)` — parent or `None` |
-| `Js.Dom.children(el)` | `List(Node)` — direct element children |
+| `Js.Dom.parent(el)` | `Option(Node)`: parent or `None` |
+| `Js.Dom.children(el)` | `List(Node)`: direct element children |
 | `Js.Dom.clone(el)` | Deep-copy a node |
 
-Moving a node is just `remove` + `append` — or `append` alone if you
+Moving a node is just `remove` + `append`, or only `append` if you
 know the parent (the browser removes it from the old position automatically):
 
 ```march

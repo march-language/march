@@ -12,14 +12,14 @@ walk a directory to process every `.csv` in a folder. Uses the `Csv`, `Dir`, and
 `Path` modules.
 
 > Each snippet below is one module. Put your own `main` (or a `test` block)
-> *inside* the module to run it — a file has a single top-level `mod`.
+> *inside* the module to run it; a file has a single top-level `mod`.
 
 ---
 
 ## Streaming rows with a header
 
 `Csv.each_row_with_header(path, delimiter, mode, callback)` reads the first row
-as the header and then invokes `callback(header, row)` for every remaining row —
+as the header and then invokes `callback(header, row)` for every remaining row;
 both `header` and `row` are `List(String)`. It closes the file on EOF and never
 loads the whole file into memory, so it's the right tool for large files.
 
@@ -123,5 +123,5 @@ column across every CSV in a directory.
 
 ## See also
 
-- [Build a CLI tool]({{ site.baseurl }}/docs/build-a-cli/) — wraps file processing in a runnable command.
-- [Standard Library → Csv]({{ site.baseurl }}/docs/stdlib/) — the full CSV API.
+- [Build a CLI tool]({{ site.baseurl }}/docs/build-a-cli/): wraps file processing in a runnable command.
+- [Standard Library → Csv]({{ site.baseurl }}/docs/stdlib/): the full CSV API.
