@@ -9746,6 +9746,23 @@ let witness_e2e_suite =
             (decl "  fn fpos(x : {Int | _ > 0}) : {Int | _ >= 5} do x end") in
         Alcotest.(check bool) "never blames the excluded input" false
           (contains text "fpos(0)"))
+  ; gated "cap verified: a confirmed violation reports the witness, not cannot-verify" (fun () ->
+        (* One error, the strong one: the witness proves the contract is
+           WRONG, which supersedes "the checker could not verify it".  The
+           design doc's site table originally planned an appended "In fact…"
+           sentence on the cannot-verify message; the Violated verdict makes
+           that message unreachable here, which is strictly better. *)
+        let text =
+          refine_error_text_d
+            {|mod CV do
+  cap verified
+  fn clamp(x : Int) : {Int | _ >= 0} do x - 1 end
+  fn main() : Int do clamp(5) end
+end|} in
+        Alcotest.(check bool) "witness error" true
+          (contains text "but clamp(0) returns -1.");
+        Alcotest.(check bool) "no cannot-verify for this contract" false
+          (contains text "cannot verify return type constraint `_ >= 0`"))
   ; gated "divergent execution falls back silently" (fun () ->
         let text =
           refine_error_text_d
