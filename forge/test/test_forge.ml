@@ -1512,6 +1512,70 @@ let test_callers_respects_limit () =
                 1 (List.length items)
             | _ -> Alcotest.fail "expected a JSON list from --callers --json"))
 
+(* ------------------------------------------------- interpreted-run commands *)
+
+(* Regression: `forge run` (interpreted) used to build its `march` invocation
+   without ever calling [Cmd_build.ffi_flags_full], so no --ffi-c/--ffi-link
+   reached the compiler.  [setup_interpreter_ffi] is gated on ffi_c_files being
+   non-empty, so it built no shim .so, and every extern declared by a
+   dependency's [[ffi]] C sources died at the call site with "symbol not found
+   for interpreter FFI" — while `forge run --compiled`, `forge build` and
+   `forge test` all worked.  These pin the flags into the command string. *)
+
+let index_of haystack needle =
+  let nl = String.length needle and hl = String.length haystack in
+  let rec at i =
+    if i + nl > hl then -1
+    else if String.sub haystack i nl = needle then i
+    else at (i + 1)
+  in at 0
+
+let ffi_flags_sample = " --ffi-c '/dep/native/sqlite_shim.c' --ffi-link '-lsqlite3'"
+
+let test_interp_command_includes_ffi_flags () =
+  let cmd =
+    Cmd_run.interp_command ~lib_path_env:"MARCH_LIB_PATH=/p/lib "
+      ~dump_flag:"" ~ffi_flags:ffi_flags_sample ~entry:"/p/lib/app.march"
+  in
+  Alcotest.(check bool) "--ffi-c reaches march" true
+    (contains cmd "--ffi-c '/dep/native/sqlite_shim.c'");
+  Alcotest.(check bool) "--ffi-link reaches march" true
+    (contains cmd "--ffi-link '-lsqlite3'");
+  Alcotest.(check bool) "entry file is still passed" true
+    (contains cmd "'/p/lib/app.march'")
+
+let test_interp_command_no_ffi_is_unchanged () =
+  (* A project without [[ffi]] gets the empty string from ffi_flags_full; the
+     command must not grow a stray separator. *)
+  let cmd =
+    Cmd_run.interp_command ~lib_path_env:"MARCH_LIB_PATH=/p/lib "
+      ~dump_flag:"" ~ffi_flags:"" ~entry:"/p/lib/app.march"
+  in
+  Alcotest.(check string) "no-ffi command shape"
+    "MARCH_LIB_PATH=/p/lib march '/p/lib/app.march'" cmd
+
+let test_repl_command_includes_ffi_flags_after_entry () =
+  let cmd =
+    Cmd_interactive.repl_command ~lib_path_env:"MARCH_LIB_PATH=/p/lib"
+      ~ffi_flags:ffi_flags_sample ~entry:(Some "/p/lib/app.march")
+  in
+  Alcotest.(check bool) "--ffi-c reaches march repl" true
+    (contains cmd "--ffi-c '/dep/native/sqlite_shim.c'");
+  (* The preload file must stay in argv.(2): an older `march repl` reads that
+     slot positionally and would take "--ffi-c" as the file to load. *)
+  let entry_pos = index_of cmd "'/p/lib/app.march'" in
+  let flag_pos  = index_of cmd "--ffi-c" in
+  Alcotest.(check bool) "entry precedes the ffi flags" true
+    (entry_pos >= 0 && flag_pos > entry_pos)
+
+let test_repl_command_bare_includes_ffi_flags () =
+  let cmd =
+    Cmd_interactive.repl_command ~lib_path_env:"MARCH_LIB_PATH=/p/lib"
+      ~ffi_flags:ffi_flags_sample ~entry:None
+  in
+  Alcotest.(check string) "bare REPL still gets the shims"
+    ("MARCH_LIB_PATH=/p/lib march" ^ ffi_flags_sample) cmd
+
 (* -------------------------------------------------------------------- suite *)
 
 let () =
@@ -1673,6 +1737,16 @@ let () =
       Alcotest.test_case "branch: caps present, no flag -> ACTIVATE4" `Quick test_branch_caps_present_no_flag_selects_activate4;
       Alcotest.test_case "branch: --no-cap-gate forces ACTIVATE3" `Quick test_branch_no_cap_gate_flag_forces_activate3;
       Alcotest.test_case "branch: legacy manifest forces ACTIVATE3" `Quick test_branch_legacy_manifest_forces_activate3;
+    ];
+    "interp_command", [
+      Alcotest.test_case "forge run threads [ffi] flags to march" `Quick
+        test_interp_command_includes_ffi_flags;
+      Alcotest.test_case "no [ffi] leaves the command unchanged" `Quick
+        test_interp_command_no_ffi_is_unchanged;
+      Alcotest.test_case "forge interactive puts ffi flags after the entry" `Quick
+        test_repl_command_includes_ffi_flags_after_entry;
+      Alcotest.test_case "bare REPL still gets the ffi flags" `Quick
+        test_repl_command_bare_includes_ffi_flags;
     ];
     "search_index_cache", [
       Alcotest.test_case "stale version cache is rebuilt" `Quick
