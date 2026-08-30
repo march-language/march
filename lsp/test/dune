@@ -1,6 +1,8 @@
 (test
  (name test_lsp)
- (modules test_lsp)
+ (modules test_lsp test_lsp_harness test_lsp_analysis test_lsp_actions
+          test_lsp_perf test_lsp_features test_lsp_refactor test_lsp_html
+          test_lsp_depot)
  (libraries
   march_ast
   march_parser
