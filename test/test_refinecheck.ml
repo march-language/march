@@ -9786,6 +9786,19 @@ end|} in
           (contains text "refinement violation");
         Alcotest.(check bool) "source-syntax value" true
           (contains text "(e.g. ys = [])"))
+  ; gated "division: counterexample names the concrete zero divisor" (fun () ->
+        (* The witness assignment satisfies the divisor's own refinement
+           (_ >= 0 admits 0) and every path fact — a concrete admissible
+           input, not just "may be zero". *)
+        let errs =
+          divsafety_error_texts
+            "mod DW do\n\
+            \  cap no_panic\n\
+            \  fn f(n : Int, d : {Int | _ >= 0}) : Int do n / d end\n\
+             end\n"
+        in
+        Alcotest.(check bool) "concrete divisor witness" true
+          (List.exists (fun m -> contains m "(e.g. d = 0)") errs))
   ; gated "divergent execution falls back silently" (fun () ->
         let text =
           refine_error_text_d

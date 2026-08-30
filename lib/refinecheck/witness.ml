@@ -821,6 +821,57 @@ let render_entries (entries : (string * V.value) list) : string option =
     Some (String.concat ", " (List.map Option.get rs))
   else None
 
+(* =================================================================
+   §9  Division safety
+
+   Confirm that an ADMISSIBLE assignment (params satisfy their own Int
+   refinements, path facts hold) makes the divisor variable zero.  All
+   division-safety obligations are over Int-refined parameters, so the
+   assignment is Int-only; the informative entry is the divisor itself. *)
+
+let confirm_div ~(params : (string * string * A.expr) list)
+    ~(path : (A.expr * bool) list) ~(divisor : string)
+    ~(model : (string * string) list) : (string * V.value) list option =
+  let t_int = A.TyCon ({ A.txt = "Int"; A.span = A.dummy_span }, []) in
+  let ident_ok n =
+    n <> "" && (match n.[0] with 'a' .. 'z' | 'A' .. 'Z' | '_' -> true | _ -> false)
+  in
+  let domain =
+    List.sort_uniq compare
+      ((divisor :: List.map (fun (n, _, _) -> n) params)
+      @ List.filter (fun k -> ident_ok k && not (String.contains k '$')) (List.map fst model))
+  in
+  let assignment =
+    List.map
+      (fun n ->
+        match Option.bind (List.assoc_opt n model) (decode_smt t_int) with
+        | Some v -> (n, v)
+        | None -> (n, V.VInt 0))
+      domain
+  in
+  let ok (asg : (string * V.value) list) : bool =
+    let lookup n = List.assoc_opt n asg in
+    List.assoc_opt divisor asg = Some (V.VInt 0)
+    && List.for_all
+         (fun (name, b, p) ->
+           match List.assoc_opt name asg with
+           | None -> false
+           | Some self ->
+             let lk n = if n = b || n = "_" then Some self else lookup n in
+             eval_pred ~lookup:lk p = Some true)
+         params
+    && List.for_all
+         (fun (cond, negated) -> eval_pred ~lookup cond = Some (not negated))
+         path
+  in
+  if not (ok assignment) then None
+  else
+    let run cand = if ok cand then Some V.VUnit else None in
+    let shrunk, _ = shrink ~run assignment V.VUnit in
+    match List.assoc_opt divisor shrunk with
+    | Some v -> Some [ (divisor, v) ]
+    | None -> None
+
 (* Confirm a Refuted model against a return contract: decoded, admissible,
    executed, observed to violate the predicate, then shrunk — or [None]. *)
 let confirm_post ~(fn_name : string) ~(fn_params : (string * A.ty option) list)

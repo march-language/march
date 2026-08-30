@@ -514,9 +514,21 @@ and check_var_divisor_inner ~root errctx span var_name all_params (c : dctx) =
           ; goal = Smt.Ne (Smt.Const var_name, Smt.IntLit 0)
           }
       in
+      (* A Refuted verdict carries a model; when the witness validator
+         confirms it (params satisfy their own refinements, path facts hold,
+         divisor evaluates to zero), the error names the concrete admissible
+         input.  An unconfirmable model keeps the bare wording. *)
+      let div_cx model =
+        match Witness.confirm_div ~params ~path ~divisor:var_name ~model with
+        | Some entries ->
+          (match Witness.render_entries entries with
+           | Some s -> Printf.sprintf " (e.g. %s)" s
+           | None -> "")
+        | None -> ""
+      in
       match Refine.discharge ~root vc, refinement with
       | Refine.Verified, _ -> () (* z3: the facts in scope prove divisor ≠ 0 *)
-      | (Refine.Refuted _ | Refine.Unverified), None ->
+      | Refine.Refuted model, None ->
         (* An unreflectable predicate is NOT a proof.  Treating it as one made a
            meaningless refinement more permissive than no refinement at all —
            `{Int | is_prime(_)}` passed while a bare `Int` divisor correctly
@@ -525,14 +537,21 @@ and check_var_divisor_inner ~root errctx span var_name all_params (c : dctx) =
           (Printf.sprintf
              "division by `%s` in `cap no_panic` module: the refinement on \
               `%s` is outside the checkable fragment, so it cannot prove \
+              `%s != 0`.%s%s"
+             var_name var_name var_name (div_cx model) division_suggestion)
+      | Refine.Unverified, None ->
+        Err.error errctx ~span
+          (Printf.sprintf
+             "division by `%s` in `cap no_panic` module: the refinement on \
+              `%s` is outside the checkable fragment, so it cannot prove \
               `%s != 0`.%s"
              var_name var_name var_name division_suggestion)
-      | Refine.Refuted _, Some _ ->
+      | Refine.Refuted model, Some _ ->
         Err.error errctx ~span
           (Printf.sprintf
              "division by `%s` in `cap no_panic` module: refinement \
-              does not rule out zero.%s"
-             var_name division_suggestion)
+              does not rule out zero%s.%s"
+             var_name (div_cx model) division_suggestion)
       | Refine.Unverified, Some _ ->
         (* Z3 absent or unknown — be conservative *)
         Err.error errctx ~span
@@ -668,4 +687,8 @@ and check_decl ~root errctx ~no_panic ~adoptable (d : A.decl) : unit =
   | A.DAlias _ -> ()         (* alias: no expressions *)
 
 let check_module ?(root = Sys.getcwd ()) (errctx : Err.ctx) (m : A.module_) : unit =
+  (* No-op when [Refine_check.check_module] already registered this module
+     (the production pipeline); makes the pass self-sufficient when driven
+     directly (tests, tools). *)
+  Witness.set_module m;
   check_decls ~root errctx m.A.mod_decls
