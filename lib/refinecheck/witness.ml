@@ -706,6 +706,63 @@ let shrink ~(run : (string * V.value) list -> V.value option)
   pass args ret
 
 (* =================================================================
+   §7b Enumerative battery
+
+   For obligations the solver never sees (an unreflectable tail such as
+   `x * y`, or an unreflectable predicate) there is no model to confirm —
+   but the same execute+check oracle can probe a fixed, ordered battery of
+   small inputs.  First confirmed combination wins and is then shrunk, so
+   the reported witness is canonical regardless of battery order details.
+   Bounded: at most [battery_cap] combinations, each fuel-limited. *)
+
+let battery_cap = 48
+
+let battery_values (ty : A.ty) : V.value list =
+  match strip_refine ty with
+  | A.TyCon ({ A.txt = "Int"; _ }, []) ->
+    [ V.VInt 0; V.VInt 1; V.VInt (-1); V.VInt 2; V.VInt 10 ]
+  | A.TyCon ({ A.txt = "Float"; _ }, []) ->
+    [ V.VFloat 0.0; V.VFloat 1.0; V.VFloat (-1.0) ]
+  | A.TyCon ({ A.txt = "Bool"; _ }, []) -> [ V.VBool false; V.VBool true ]
+  | A.TyCon ({ A.txt = "String"; _ }, []) -> [ V.VString ""; V.VString "a" ]
+  | A.TyCon ({ A.txt = "List"; _ }, [ elt ]) as t ->
+    (match zero_value ~depth:3 elt with
+     | Some z ->
+       [ V.VCon ("Nil", []); V.VCon ("Cons", [ z; V.VCon ("Nil", []) ]) ]
+     | None -> (match zero_value ~depth:3 t with Some v -> [ v ] | None -> []))
+  | t -> (match zero_value ~depth:3 t with Some v -> [ v ] | None -> [])
+
+(* Cartesian product in declaration order, last parameter varying fastest,
+   truncated to [battery_cap]. *)
+let battery ~(params : (string * A.ty) list) : (string * V.value) list list =
+  let rec product = function
+    | [] -> [ [] ]
+    | (n, vs) :: rest ->
+      let tails = product rest in
+      List.concat_map (fun v -> List.map (fun t -> (n, v) :: t) tails) vs
+  in
+  let all = product (List.map (fun (n, t) -> (n, battery_values t)) params) in
+  List.filteri (fun i _ -> i < battery_cap) all
+
+let confirm_enumerative ~(fn_name : string)
+    ~(fn_params : (string * A.ty option) list) ~(binder : string)
+    ~(ret_pred : A.expr) : ((string * V.value) list * V.value) option =
+  match annotated_params fn_params with
+  | None -> None
+  | Some params ->
+    if params = [] then None
+    else
+      let run cand =
+        if admissible ~params cand then
+          violates_post ~fn_name ~binder ~ret_pred cand
+        else None
+      in
+      List.find_map
+        (fun cand -> Option.map (fun ret -> (cand, ret)) (run cand))
+        (battery ~params)
+      |> Option.map (fun (args, ret) -> shrink ~run args ret)
+
+(* =================================================================
    §8  Call-site preconditions
 
    Different shape from return contracts: the violation verdict is already

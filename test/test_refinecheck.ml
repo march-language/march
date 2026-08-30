@@ -1451,15 +1451,16 @@ let tier0_suite =
               end\n"));
 
     gated "an UNVERIFIED postcondition does not propagate (no false positive)" (fun () ->
-        (* `score`'s declared `_ < 0` is stale: `helper(x)` is opaque, so the
-           definition side can neither prove nor refute it.  An unproven
-           postcondition stays legal at the definition and must NOT travel to
-           call sites — believing it here would flag the CORRECT call
-           `takepos(score(5))` (score(5) = 6, which satisfies `_ >= 0`). *)
+        (* `score`'s declared `_ < 0` is TRUE (helper returns -x²-1) but
+           unprovable: `helper(x)` is opaque to the definition-side check,
+           and the witness battery finds no violating input.  An unproven
+           postcondition stays legal at the definition and must NOT travel
+           to call sites — believing it at `takepos(score(5))` would let a
+           fact nobody proved discharge (or flag) the call. *)
         Alcotest.(check bool) "no error" false
           (has_refine_error
              "mod Stale do\n\
-             \  fn helper(x : Int) : Int do x + 1 end\n\
+             \  fn helper(x : Int) : Int do 0 - (x * x) - 1 end\n\
              \  fn score(x : Int) : {Int | _ < 0} do helper(x) end\n\
              \  fn takepos(n : {Int | _ >= 0}) : Int do n end\n\
              \  fn main() : Int do takepos(score(5)) end\n\
@@ -2074,12 +2075,14 @@ end|}));
 end|}));
 
     gated "an unverified relational postcondition does not propagate" (fun () ->
-        (* `_ < n` is not provable from an unanalysable body, so the gate clears
-           it and callers learn nothing.  The Tier 0 guarantee, inherited. *)
+        (* `_ < n` is TRUE (blackbox returns n - 1) but not provable from an
+           unanalysable body — and the witness battery finds no violating
+           input — so the gate clears it and callers learn nothing.  The
+           Tier 0 guarantee, inherited. *)
         Alcotest.(check bool) "no error" false
           (has_refine_error
              {|mod M do
-  fn blackbox(n : Int) : Int do n end
+  fn blackbox(n : Int) : Int do n - 1 end
   fn shady(n : Int) : {Int | _ < n} do blackbox(n) end
   fn takepos(k : {Int | _ >= 0}) : Int do k end
   fn usit() : Int do takepos(shady(0)) end
@@ -9799,6 +9802,25 @@ end|} in
         in
         Alcotest.(check bool) "concrete divisor witness" true
           (List.exists (fun m -> contains m "(e.g. d = 0)") errs))
+  ; gated "unreflectable contract: enumeration finds the witness" (fun () ->
+        (* `x * y` never reaches the solver (nonlinear), so no model exists;
+           the fixed small-value battery finds an admissible violating input
+           and the shrunk result is canonical. *)
+        let text =
+          refine_error_text_d
+            (decl
+               "  fn scale(x : {Int | _ > 0}, y : {Int | _ > 0}) : {Int | _ > 100} do x * y end") in
+        Alcotest.(check bool) "violation" true
+          (contains text "does not satisfy its return type constraint");
+        Alcotest.(check bool) "admissible minimal witness" true
+          (contains text "but scale(1, 1) returns 1."))
+  ; gated "unreflectable contract that HOLDS stays silent" (fun () ->
+        (* The battery must not manufacture errors: x*x+1 > 0 for every
+           probe, so this stays a skip exactly as before. *)
+        let text =
+          refine_error_text_d
+            (decl "  fn sq(x : Int) : {Int | _ > 0} do x * x + 1 end") in
+        Alcotest.(check bool) "no witness claim" false (contains text "but sq("))
   ; gated "divergent execution falls back silently" (fun () ->
         let text =
           refine_error_text_d

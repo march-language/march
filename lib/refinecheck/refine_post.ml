@@ -226,6 +226,40 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
            (Obligation.reason_detail r) remedy)
     | _ -> ()
   in
+  (* Obligation the solver never sees (unreflectable tail or predicate):
+     probe the fixed small-value battery through the interpreter.  A
+     confirmed, admissible, shrunk witness reports exactly like the
+     model-confirmed case; anything else leaves the skip untouched.
+     Emitting pass only — the pre-pass treats the verdict as unproven
+     either way. *)
+  let enum_witness_error () : bool =
+    if not emit then false
+    else
+      match fn_name with
+      | None -> false
+      | Some fname ->
+        (match
+           Witness.confirm_enumerative ~fn_name:fname ~fn_params ~binder ~ret_pred
+         with
+         | Some (args, ret) ->
+           (match Witness.render_call fname args, Witness.render_value ret with
+            | Some call, Some ret_str ->
+              let pred = pred_str ret_pred in
+              let msg = Printf.sprintf
+                "`%s` does not satisfy its return type constraint on all code paths.\n\nThe return type requires:\n\n    %s\n\nbut %s returns %s."
+                fname pred call ret_str
+              in
+              let hint = Printf.sprintf
+                "Every branch must produce a return value satisfying `%s`." pred
+              in
+              Err.report errctx
+                { March_errors.Errors.severity = March_errors.Errors.Error
+                ; span; message = msg; labels = []
+                ; notes = [hint]; code = None; fix = None };
+              true
+            | _ -> false)
+         | None -> false)
+  in
   let base_decls, base_assume, scope_has_record, scope_has_string = scope_facts sc in
   let decls = ref base_decls and assume = ref base_assume in
   (* Scope names already declared into the `Str` sort by [scope_facts].  Both
@@ -324,7 +358,10 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
     | None -> scalar tail_e
   in
   match tail_term_opt with
-  | None -> note (Obligation.Skipped Obligation.Unreflectable_predicate); false
+  | None ->
+    if enum_witness_error () then note Obligation.Violated
+    else note (Obligation.Skipped Obligation.Unreflectable_predicate);
+    false
   | Some tail_term ->
     let resolve_field = match record_sort with
       | Some sort_name -> make_field_resolver binder sort_name tail_term
@@ -367,7 +404,10 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
         | None -> ())
       path;
     (match smt_of ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app ret_pred with
-     | None -> note (Obligation.Skipped Obligation.Unreflectable_predicate); false
+     | None ->
+       if enum_witness_error () then note Obligation.Violated
+       else note (Obligation.Skipped Obligation.Unreflectable_predicate);
+       false
      | Some goal ->
        let decls =
          List.fold_left (fun acc d -> if List.mem d acc then acc else d :: acc) [] !decls
