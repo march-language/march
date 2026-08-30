@@ -1,6 +1,33 @@
 # Counterexample surfacing for refinement failures — design
 
-Date: 2026-08-30. Status: designed, not implemented.
+Date: 2026-08-30. Status: **implemented** (same day); see
+`specs/progress/2026-08-30-counterexample-surfacing.md`.
+
+Implementation deviations from the text below:
+
+- **Effect denial** is a builtin-name guard at the evaluator's single
+  `VBuiltin` application chokepoint (`Eval_prim.builtin_guard`, checked in
+  `apply_inner`), vetoing the typechecker's capability-table names plus
+  runtime-family prefixes (`tcp_`, `task_`, `actor_`, …) — not per-builtin
+  stub replacement, which cannot reach closures that captured the original
+  environment.
+- **Division confirmation** checks that the divisor expression's variable is
+  zero under an admissible assignment (params' refinements + path facts
+  evaluated structurally), rather than executing to the panic — equivalent
+  and cheaper.
+- The **predicate evaluator** does not apply user measure functions in v1;
+  an unknown application makes the obligation unconfirmable, never guessed.
+- Under **`cap verified`**, a confirmed violation reports the strong
+  Violated error INSTEAD of the "cannot verify" message — the planned
+  appended "In fact…" sentence is unreachable, which is strictly better
+  (one error, the decisive one).
+- **Shrinking** required a strict structural-weight ordering to terminate
+  (fixed probes 1 and -1 both confirm in symmetric cases and would
+  otherwise oscillate); negatives weigh one more than their magnitude, so
+  1 canonically beats -1.
+- **`@[trusted]`** keeps rescuing skips (incompleteness) but does not
+  suppress a witness-confirmed violation, matching the pre-existing rule
+  that Violated is never rescued.
 
 ## Motivation
 
