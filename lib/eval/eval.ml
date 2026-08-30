@@ -797,13 +797,6 @@ let set_reduction_counting (enabled : bool) : unit =
     reduction_ctx := None
 
 (** Reset the reduction budget (call between scheduling quanta). *)
-let reset_reduction_budget () : unit =
-  match !reduction_ctx with
-  | Some ctx -> March_scheduler.Scheduler.reset_budget ctx
-  | None -> ()
-
-(** Check the reduction counter and raise Yield if exhausted.
-    Called at every yield point: EApp, EMatch, ESend. *)
 let check_reductions () : unit =
   match !reduction_ctx with
   | Some ctx ->
@@ -946,26 +939,6 @@ and match_list (pats : pattern list) (vs : value list) : (string * value) list o
    §4  Built-in environment
    ================================================================= *)
 
-let arith_int op name = VBuiltin (name, function
-    | [VInt a; VInt b] -> VInt (op a b)
-    | _ -> eval_error "builtin %s: expected two ints" name)
-
-
-
-(** Constructor -> declaring-module-QUALIFIED type name, populated ONLY for
-    a ctor whose type's short name collides (see [type_collision_set]).
-    Deliberately a SEPARATE table from [ctor_type_tbl] (which stays bare
-    for every ctor, colliding or not) rather than qualifying [ctor_type_tbl]
-    itself in place: [ctor_type_tbl]/[type_name_of_value] are also consulted
-    by [impl_tbl] (Eq/Ord/Show/Hash/Json/`own` dispatch), [ffi_type_decl_tbl]
-    (actor message tag-index routing) and [record_type_tbl] (Json
-    record-decode) — none of which key their OWN tables by the qualified
-    name, so qualifying the shared bare lookup in place would silently break
-    those unrelated round-trips for a colliding type. Keeping this table
-    separate and additive-only means a non-colliding program is byte-for-byte
-    unaffected, and [iface_method_tbl] (general-interface dispatch, the only
-    consumer of [dispatch_type_name_of_value] below) is the only thing that
-    sees the qualified identity. *)
 let ctor_qualified_type_tbl : (string, string) Hashtbl.t = Hashtbl.create 8
 
 (** Like [type_name_of_value], but a colliding [VCon]'s type resolves to its
@@ -3550,17 +3523,6 @@ let rec eval_decl (env : env) (d : decl) : env =
     List.iter (fun (k, v) -> Hashtbl.replace module_registry k v) reg_additions;
     (env_additions @ reg_additions) @ env
 
-and eval_decls (env : env) (decls : decl list) : env =
-  List.fold_left eval_decl env decls
-
-(** Two-pass module evaluation.
-
-    Pass 1: For every top-level [DFn], install a stub closure in the
-            environment.  This lets mutually-recursive functions refer
-            to each other by name.
-
-    Pass 2: Re-evaluate each [DFn] so that its closure captures the
-            fully-populated environment (including all stubs). *)
 let eval_module_env (m : module_) : env =
   (* Reset global actor and task state for this module run *)
   closure_prefix_override := None;
@@ -3706,7 +3668,7 @@ let eval_module_env (m : module_) : env =
     | DMod _ as d :: rest ->
       (* Evaluate nested module via eval_decl (which handles module_stack push/pop
          and exposes prefixed bindings). Docs inside nested modules are registered
-         as a side effect of eval_decl → eval_decls → eval_decl(DFn). *)
+         as a side effect of eval_decl recursing into the module body. *)
       let env' = eval_decl env d in
       env_ref := env';
       make_recursive_env rest env'

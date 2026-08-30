@@ -219,8 +219,10 @@ lib/refinecheck/            refinement/contract checking (SMT): refine_check (or
 lib/jit/                    REPL JIT compiler
 lib/errors/errors.ml        diagnostic type (Error/Warning/Hint + span)
 lib/search/search.ml        Hoogle-style type/name search engine
-lsp/lib/                    LSP analysis: analysis + analysis_{types,util},
+lsp/lib/                    LSP analysis: analysis (+.mli) + analysis_{types,util},
                              code_actions_{ast,diag} (the two code-action engines)
+lsp/test/                   test_lsp (Alcotest registration only) + the test bodies in
+                             test_lsp_{harness,analysis,actions,perf,features,refactor,html,depot}
 stdlib/                     116 March stdlib modules (list, map, enum, sort, crypto, http, json, distributed-OTP, …)
 runtime/                    C runtime (GC, scheduler, HTTP, TLS, WASM)
 forge/                      build tool (new, build, run, test, deps, search, publish subcommands)
