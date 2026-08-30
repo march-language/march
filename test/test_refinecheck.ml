@@ -9715,10 +9715,18 @@ let witness_e2e_suite =
             (decl "  fn clamp(x : Int) : {Int | _ >= 0} do x - 1 end") in
         Alcotest.(check bool) "violation reported" true
           (contains text "does not satisfy its return type constraint");
-        Alcotest.(check bool) "executed witness" true
-          (contains text "but clamp(") ;
-        Alcotest.(check bool) "actual result shown" true
-          (contains text "returns -"))
+        (* EXACT text: shrinking makes the witness canonical, so a flaky
+           model, probe order, or shrink order breaks this immediately. *)
+        Alcotest.(check bool) "executed minimal witness" true
+          (contains text "but clamp(0) returns -1."))
+  ; gated "witness shrinks to the smallest admissible input" (fun () ->
+        (* 0 is excluded by the param's own refinement; the fixed probe order
+           (0, 1, -1, …) then lands on 1 whatever model Z3 returned. *)
+        let text =
+          refine_error_text_d
+            (decl "  fn g(x : {Int | _ != 0}) : {Int | _ >= 10} do x end") in
+        Alcotest.(check bool) "minimal witness" true
+          (contains text "but g(1) returns 1."))
   ; gated "spurious model is rejected, no witness claim" (fun () ->
         (* `x * x` is unreflectable, so the else-branch's path condition is
            dropped from the VC and the raw model refutes via a branch the

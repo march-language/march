@@ -575,8 +575,138 @@ let annotated_params (fn_params : (string * A.ty option) list)
   let ps = List.map (fun (n, t) -> Option.map (fun t -> (n, t)) t) fn_params in
   if List.for_all Option.is_some ps then Some (List.map Option.get ps) else None
 
+(* =================================================================
+   §7  Shrinking
+
+   QuickCheck-style minimisation with the confirmation pipeline itself as
+   the oracle: a candidate replaces the current witness only if it is still
+   admissible AND still observed to violate.  Fully deterministic — fixed
+   probe order, no randomness — because the witness text is pinned by test
+   fixtures and the types-oracle.  Bounded by [shrink_attempts] oracle
+   invocations. *)
+
+let shrink_attempts = 64
+
+(* Candidate replacements for one value, most-preferred first. *)
+let rec shrink_candidates (v : V.value) : V.value list =
+  match v with
+  | V.VInt 0 -> []
+  | V.VInt n ->
+    (* Fixed probes make the endpoint independent of the model Z3 chose
+       (any start converges to the first violating probe), then halving
+       covers the far cases. *)
+    let probes = [ 0; 1; -1; 2; -2 ] in
+    let halves =
+      let rec go n acc = if n = 0 || n = -1 || n = 1 then List.rev acc else go (n / 2) (n / 2 :: acc) in
+      go n []
+    in
+    List.filter_map
+      (fun i -> if i = n then None else Some (V.VInt i))
+      (probes @ halves)
+  | V.VFloat 0.0 -> []
+  | V.VFloat f ->
+    List.filter (fun c -> c <> v)
+      [ V.VFloat 0.0; V.VFloat 1.0; V.VFloat (-1.0); V.VFloat (f /. 2.0) ]
+  | V.VString "" -> []
+  | V.VString s ->
+    [ V.VString ""; V.VString (String.sub s 0 (String.length s - 1)) ]
+  | V.VCon ("Nil", []) -> []
+  | V.VCon ("Cons", [ h; t ]) ->
+    (* Drop the whole list, drop the head, then shrink head/tail pointwise. *)
+    (V.VCon ("Nil", []) :: (if t <> V.VCon ("Nil", []) then [ t ] else []))
+    @ List.map (fun h' -> V.VCon ("Cons", [ h'; t ])) (shrink_candidates h)
+    @ List.map (fun t' -> V.VCon ("Cons", [ h; t' ])) (shrink_candidates t)
+  | V.VCon (c, args) ->
+    List.concat
+      (List.mapi
+         (fun i a ->
+           List.map
+             (fun a' -> V.VCon (c, List.mapi (fun j x -> if j = i then a' else x) args))
+             (shrink_candidates a))
+         args)
+  | V.VTuple args ->
+    List.concat
+      (List.mapi
+         (fun i a ->
+           List.map
+             (fun a' -> V.VTuple (List.mapi (fun j x -> if j = i then a' else x) args))
+             (shrink_candidates a))
+         args)
+  | V.VRecord fields ->
+    List.concat
+      (List.map
+         (fun (f, a) ->
+           List.map
+             (fun a' ->
+               V.VRecord (List.map (fun (g, x) -> (g, if g = f then a' else x)) fields))
+             (shrink_candidates a))
+         fields)
+  | _ -> []
+
+(* Structural size of a value; the shrink loop only accepts a candidate of
+   STRICTLY smaller total weight, which is what makes it terminate (probes
+   like 1 and -1 can each confirm, and without an ordering the loop would
+   oscillate between them forever).  Negatives weigh one more than their
+   absolute value so 1 canonically beats -1. *)
+let rec weight (v : V.value) : int =
+  match v with
+  | V.VInt n -> (2 * abs n) + (if n < 0 then 1 else 0)
+  | V.VFloat f ->
+    if f = 0.0 then 0
+    else if f = 1.0 then 2
+    else if f = -1.0 then 3
+    else 4 + (if f < 0.0 then 1 else 0)
+  | V.VBool b -> if b then 1 else 0
+  | V.VString s -> String.length s
+  | V.VUnit -> 0
+  | V.VCon ("Nil", []) -> 0
+  | V.VCon (_, args) -> 1 + List.fold_left (fun a v -> a + weight v) 0 args
+  | V.VTuple args -> List.fold_left (fun a v -> a + weight v) 0 args
+  | V.VRecord fields -> List.fold_left (fun a (_, v) -> a + weight v) 0 fields
+  | _ -> 0
+
+let args_weight (args : (string * V.value) list) : int =
+  List.fold_left (fun a (_, v) -> a + weight v) 0 args
+
+(* Greedy outer loop: repeatedly take the first strictly-smaller confirming
+   candidate at the first position that has one, until a full pass finds
+   none or the attempt budget runs out.  [run] returns [Some ret] iff the
+   candidate is a confirmed witness. *)
+let shrink ~(run : (string * V.value) list -> V.value option)
+    (args : (string * V.value) list) (ret : V.value)
+    : (string * V.value) list * V.value =
+  let budget = ref shrink_attempts in
+  let rec pass args ret =
+    let w = args_weight args in
+    let rec try_positions before after =
+      match after with
+      | [] -> None
+      | (pname, v) :: rest ->
+        let try_cand c =
+          if !budget <= 0 then None
+          else begin
+            let cand = List.rev_append before ((pname, c) :: rest) in
+            if args_weight cand >= w then None
+            else begin
+              decr budget;
+              Option.map (fun r -> (cand, r)) (run cand)
+            end
+          end
+        in
+        (match List.find_map try_cand (shrink_candidates v) with
+         | Some improved -> Some improved
+         | None -> try_positions ((pname, v) :: before) rest)
+    in
+    if !budget <= 0 then (args, ret)
+    else
+      match try_positions [] args with
+      | Some (args', ret') -> pass args' ret'
+      | None -> (args, ret)
+  in
+  pass args ret
+
 (* Confirm a Refuted model against a return contract: decoded, admissible,
-   executed, and observed to violate the predicate — or [None]. *)
+   executed, observed to violate the predicate, then shrunk — or [None]. *)
 let confirm_post ~(fn_name : string) ~(fn_params : (string * A.ty option) list)
     ~(binder : string) ~(ret_pred : A.expr)
     ~(model : (string * string) list)
@@ -587,7 +717,22 @@ let confirm_post ~(fn_name : string) ~(fn_params : (string * A.ty option) list)
     (match decode_model ~params ~model with
      | None -> None
      | Some args ->
+       let run cand =
+         let dbg = Sys.getenv_opt "MARCH_WITNESS_DEBUG" <> None in
+         if dbg then
+           Printf.eprintf "[witness] run cand: %s adm=%b\n%!"
+             (Option.value ~default:"?" (render_call fn_name cand))
+             (admissible ~params cand);
+         if admissible ~params cand then begin
+           let r = violates_post ~fn_name ~binder ~ret_pred cand in
+           if dbg then
+             Printf.eprintf "[witness]   violates -> %s\n%!"
+               (match r with Some v -> Option.value ~default:"?" (render_value v) | None -> "no");
+           r
+         end
+         else None
+       in
        if not (admissible ~params args) then None
        else
-         Option.map (fun ret -> (args, ret))
+         Option.map (fun ret -> shrink ~run args ret)
            (violates_post ~fn_name ~binder ~ret_pred args))
