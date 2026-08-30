@@ -705,6 +705,122 @@ let shrink ~(run : (string * V.value) list -> V.value option)
   in
   pass args ret
 
+(* =================================================================
+   §8  Call-site preconditions
+
+   Different shape from return contracts: the violation verdict is already
+   sound (it requires the negated goal to be VALID), so no function is
+   executed — the job is to turn the raw model into a validated, shrunk,
+   source-syntax example.  The assignment must satisfy every refinement in
+   the caller's scope and every path fact, and the argument expression
+   evaluated under it must violate the predicate; anything unevaluable
+   falls back to the raw rendering at the site. *)
+
+let free_vars (e : A.expr) : string list =
+  let acc = ref [] in
+  let add n = if n <> "_" && not (List.mem n !acc) then acc := n :: !acc in
+  let rec go = function
+    | A.EVar { A.txt; _ } -> add txt
+    | A.EApp (f, args, _) -> go f; List.iter go args
+    | A.ECon (_, args, _) -> List.iter go args
+    | A.EField (r, _, _) -> go r
+    | A.ETuple (es, _) -> List.iter go es
+    | _ -> ()
+  in
+  go e;
+  List.rev !acc
+
+(* Decode ONE caller-scope variable from the model, guided by its scope sort
+   marker ([None] = Int for a refined scalar; "$Str"/"$Bool"/"$Float"; a
+   [len$name] fact marks a sequence).  Unrefined names fall back to what the
+   model literally says, or 0. *)
+let decode_scope_var ~(sc : (string * (string * A.expr * string option)) list)
+    ~(model : (string * string) list) (name : string) : V.value option =
+  let marker = Option.map (fun (_, _, s) -> s) (List.assoc_opt name sc) in
+  let direct ty = Option.bind (List.assoc_opt name model) (decode_smt ty) in
+  let t_int = A.TyCon ({ A.txt = "Int"; A.span = A.dummy_span }, []) in
+  let t_bool = A.TyCon ({ A.txt = "Bool"; A.span = A.dummy_span }, []) in
+  let t_float = A.TyCon ({ A.txt = "Float"; A.span = A.dummy_span }, []) in
+  match marker with
+  | Some (Some "$Str") ->
+    Some (V.VString (String.make (Option.value ~default:0 (len_fact model name)) 'a'))
+  | _ when len_fact model name = Some 0 ->
+    (* A `len$name = 0` fact identifies an empty sequence whatever sort the
+       scope declared it at (lists ride the ADT sorts). *)
+    Some (V.VCon ("Nil", []))
+  | _ when len_fact model name <> None ->
+    (* A non-empty sequence with unknown element type would have to be
+       rendered with guessed elements — refuse rather than lie. *)
+    None
+  | Some (Some "$Bool") -> Some (Option.value ~default:(V.VBool false) (direct t_bool))
+  | Some (Some "$Float") -> Some (Option.value ~default:(V.VFloat 0.0) (direct t_float))
+  | Some (Some _) -> None (* ADT/record-sorted scope var: not decoded in v1 *)
+  | Some None | None ->
+    (match direct t_int with
+     | Some v -> Some v
+     | None ->
+       (match direct t_bool with
+        | Some v -> Some v
+        | None -> Some (V.VInt 0)))
+
+let confirm_precond ~(sc : (string * (string * A.expr * string option)) list)
+    ~(path : (A.expr * bool) list) ~(pred : A.expr) ~(binder : string)
+    ~(arg : A.expr) ~(model : (string * string) list)
+    : (string * V.value) list option =
+  let ident_ok n =
+    n <> "" && (match n.[0] with 'a' .. 'z' | 'A' .. 'Z' | '_' -> true | _ -> false)
+  in
+  let domain =
+    List.sort_uniq compare
+      (List.map fst sc
+      @ free_vars arg
+      @ List.filter (fun k -> ident_ok k && not (String.contains k '$')) (List.map fst model))
+  in
+  let render_set = free_vars arg in
+  if render_set = [] then None
+  else
+    let decoded = List.map (fun n -> Option.map (fun v -> (n, v)) (decode_scope_var ~sc ~model n)) domain in
+    if not (List.for_all Option.is_some decoded) then None
+    else
+      let assignment = List.map Option.get decoded in
+      let ok (asg : (string * V.value) list) : bool =
+        let lookup n = List.assoc_opt n asg in
+        (* Every scope refinement must hold under its own binder… *)
+        List.for_all
+          (fun (name, (b, p, _)) ->
+            match List.assoc_opt name asg with
+            | None -> false
+            | Some self ->
+              let lk n = if n = b || n = "_" then Some self else lookup n in
+              eval_pred ~lookup:lk p = Some true)
+          sc
+        (* …every path fact must hold with its recorded polarity… *)
+        && List.for_all
+             (fun (cond, negated) -> eval_pred ~lookup cond = Some (not negated))
+             path
+        (* …and the argument must genuinely violate the predicate. *)
+        &&
+        match eval_operand ~lookup arg with
+        | None -> false
+        | Some av ->
+          let lk n = if n = binder || n = "_" then Some av else lookup n in
+          eval_pred ~lookup:lk pred = Some false
+      in
+      if not (ok assignment) then None
+      else
+        let run cand = if ok cand then Some V.VUnit else None in
+        let shrunk, _ = shrink ~run assignment V.VUnit in
+        let entries = List.filter (fun (n, _) -> List.mem n render_set) shrunk in
+        if entries = [] then None else Some entries
+
+let render_entries (entries : (string * V.value) list) : string option =
+  let rs =
+    List.map (fun (n, v) -> Option.map (fun s -> n ^ " = " ^ s) (render_value v)) entries
+  in
+  if List.for_all Option.is_some rs then
+    Some (String.concat ", " (List.map Option.get rs))
+  else None
+
 (* Confirm a Refuted model against a return contract: decoded, admissible,
    executed, observed to violate the predicate, then shrunk — or [None]. *)
 let confirm_post ~(fn_name : string) ~(fn_params : (string * A.ty option) list)

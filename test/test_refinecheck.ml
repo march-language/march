@@ -9763,6 +9763,29 @@ end|} in
           (contains text "but clamp(0) returns -1.");
         Alcotest.(check bool) "no cannot-verify for this contract" false
           (contains text "cannot verify return type constraint `_ >= 0`"))
+  ; gated "precondition cx is validated and minimal" (fun () ->
+        (* The inline example is re-derived through the witness pipeline:
+           admissible under the caller's own refinement (k < 0), evaluated
+           against the violated predicate, shrunk to the smallest weight. *)
+        let text =
+          refine_error_text_d
+            (decl "  fn fk(k : {Int | _ < 0}) : Int do take_n(k) end") in
+        Alcotest.(check bool) "violation" true
+          (contains text "refinement violation");
+        Alcotest.(check bool) "minimal validated example" true
+          (contains text "(e.g. k = -1)"))
+  ; gated "precondition cx renders an empty list in source syntax" (fun () ->
+        (* Today this prints the measure fact `len(ys) = 0`; the concrete
+           value `ys = []` is what the user can actually paste. *)
+        let text =
+          refine_error_text_d
+            (decl
+               "  fn hd(xs : {List(Int) | len(_) > 0}) : Int do 0 end\n\
+               \  fn fy(ys : {List(Int) | len(_) == 0}) : Int do hd(ys) end") in
+        Alcotest.(check bool) "violation" true
+          (contains text "refinement violation");
+        Alcotest.(check bool) "source-syntax value" true
+          (contains text "(e.g. ys = [])"))
   ; gated "divergent execution falls back silently" (fun () ->
         let text =
           refine_error_text_d
