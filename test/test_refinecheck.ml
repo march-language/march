@@ -9608,6 +9608,61 @@ let witness_harness_suite =
         Alcotest.(check bool) "fuel exhausted" true out)
   ]
 
+(* Witness core: model decoding, structural predicate evaluation, and
+   source-syntax rendering — the pure stages of lib/refinecheck/witness.ml.
+   Also ungated: no solver, no interpreter run. *)
+
+let witness_core_suite =
+  let module W = March_refinecheck.Witness in
+  let module A = March_ast.Ast in
+  let module V = March_eval.Eval_types in
+  let dsp = A.dummy_span in
+  let nm t = { A.txt = t; A.span = dsp } in
+  let evar t = A.EVar (nm t) in
+  let eint n = A.ELit (A.LitInt n, dsp) in
+  let eapp f args = A.EApp (evar f, args, dsp) in
+  let tycon t args = A.TyCon (nm t, args) in
+  let t_int = tycon "Int" [] in
+  let render v = Option.value ~default:"<none>" (W.render_value v) in
+  [ Alcotest.test_case "decode: negative int model value" `Quick (fun () ->
+        match W.decode_model ~params:[ ("x", t_int) ] ~model:[ ("x", "(- 3)") ] with
+        | Some [ ("x", V.VInt -3) ] -> ()
+        | _ -> Alcotest.fail "expected x = -3")
+  ; Alcotest.test_case "decode: string from its len fact" `Quick (fun () ->
+        match
+          W.decode_model ~params:[ ("s", tycon "String" []) ]
+            ~model:[ ("len$s", "2"); ("s", "Str!val!0") ]
+        with
+        | Some [ ("s", V.VString "aa") ] -> ()
+        | _ -> Alcotest.fail "expected s = \"aa\"")
+  ; Alcotest.test_case "decode: list zero-filled to its len fact" `Quick (fun () ->
+        match
+          W.decode_model ~params:[ ("xs", tycon "List" [ t_int ]) ]
+            ~model:[ ("len$xs", "2") ]
+        with
+        | Some [ ("xs", v) ] -> Alcotest.(check string) "render" "[0, 0]" (render v)
+        | _ -> Alcotest.fail "expected xs decoded")
+  ; Alcotest.test_case "decode: absent param zero-fills" `Quick (fun () ->
+        match W.decode_model ~params:[ ("b", tycon "Bool" []) ] ~model:[] with
+        | Some [ ("b", V.VBool false) ] -> ()
+        | _ -> Alcotest.fail "expected b = false")
+  ; Alcotest.test_case "eval_pred: _ >= 0 is false at -1" `Quick (fun () ->
+        let pred = eapp ">=" [ evar "_"; eint 0 ] in
+        let lookup n = if n = "_" then Some (V.VInt (-1)) else None in
+        Alcotest.(check (option bool)) "verdict" (Some false)
+          (W.eval_pred ~lookup pred))
+  ; Alcotest.test_case "eval_pred: unknown application is None, not false" `Quick
+      (fun () ->
+        let pred = eapp "is_prime" [ evar "_" ] in
+        let lookup _ = Some (V.VInt 7) in
+        Alcotest.(check (option bool)) "verdict" None (W.eval_pred ~lookup pred))
+  ; Alcotest.test_case "render: cons list in source syntax" `Quick (fun () ->
+        let v =
+          V.VCon ("Cons", [ V.VInt 1; V.VCon ("Cons", [ V.VInt 2; V.VCon ("Nil", []) ]) ])
+        in
+        Alcotest.(check string) "render" "[1, 2]" (render v))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -9676,4 +9731,5 @@ let () =
       ("no-panic-by-proof", no_panic_proof_suite);
       ("no-panic-verdict-filter", verdict_filter_suite);
       ("no-panic-syntactic-fallback", syntactic_fallback_suite);
-      ("witness-harness", witness_harness_suite) ]
+      ("witness-harness", witness_harness_suite);
+      ("witness-core", witness_core_suite) ]

@@ -5,6 +5,10 @@
  ; no_panic` user sees is written in exactly ONE place regardless of which of
  ; the two passes (syntactic ban, proof-based check) reported it.  No cycle:
  ; march_typecheck depends on ast/errors/modules/caps only.
- (libraries march_ast march_errors march_refine march_caps march_typecheck)
+ ; march_eval + march_scheduler: [witness] executes counterexample candidates
+ ; through the interpreter (fuel via the scheduler's reduction budget) to
+ ; validate them before they are reported.  No cycle: march_eval depends on
+ ; ast/ctxesc/modules/scheduler/coverage/doctest only.
+ (libraries march_ast march_errors march_refine march_caps march_typecheck march_eval march_scheduler)
  (modules refine_check refine_encode refine_scope refine_resolve refine_call refine_post division_safety no_alloc return_infer precond_infer postcond_infer cap_infer
-          obligation panic_surface_by_proof))
+          obligation panic_surface_by_proof witness))
