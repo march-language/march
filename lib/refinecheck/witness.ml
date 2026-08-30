@@ -410,3 +410,184 @@ let render_call (fn : string) (args : (string * V.value) list) : string option =
   if List.for_all Option.is_some rs then
     Some (fn ^ "(" ^ String.concat ", " (List.map Option.get rs) ^ ")")
   else None
+
+(* =================================================================
+   §5  Execution: fuel-limited, effect-denied interpretation
+   ================================================================= *)
+
+(* Builtin names vetoed during witness execution.  Exact names come from the
+   typechecker's capability table (the canonical list of IO builtins); the
+   prefixes cover the runtime families (sockets, processes, tasks, actors,
+   websockets, TLS) wholesale — over-blocking is safe, it only widens
+   "unconfirmable".  Time and randomness are blocked for determinism, not
+   safety. *)
+let blocked_prefixes =
+  [ "tcp_"; "tls_"; "ws_"; "http_"; "process_"; "task_"; "actor_"; "file_"
+  ; "dir_"; "socket_"; "udp_"; "signal_"; "vault_"; "channel_" ]
+
+let blocked_exact =
+  [ "random_bytes"; "stdlib_random_bytes"; "unix_time"; "unix_time_ms"
+  ; "sys_uptime_ms"; "send_checked"; "mint_cap"; "cap_narrow" ]
+
+let blocked_name : string -> bool =
+  let table = lazy (
+    let t = Hashtbl.create 256 in
+    List.iter
+      (fun (n, _) -> Hashtbl.replace t n ())
+      March_typecheck.Typecheck_builtins.builtin_cap_table;
+    List.iter (fun n -> Hashtbl.replace t n ()) blocked_exact;
+    t)
+  in
+  fun name ->
+    Hashtbl.mem (Lazy.force table) name
+    || List.exists
+         (fun p ->
+           String.length name > String.length p
+           && String.sub name 0 (String.length p) = p)
+         blocked_prefixes
+
+type exec_result =
+  | Ret of V.value
+  | Panicked of string
+  | Unconfirmable  (* blocked effect, fuel out, eval error, missing fn, … *)
+
+(* Run [f] with the guard installed and [per_call_fuel] reductions available,
+   charging the module-wide [wall_budget].  Restores both hooks on every
+   path — the caller may be the LSP or a test binary that goes on to run the
+   real interpreter. *)
+let with_harness (f : unit -> 'a) : ('a, exec_result) result =
+  if !wall_budget <= 0 then Error Unconfirmable
+  else begin
+    let fuel = min per_call_fuel !wall_budget in
+    March_eval.Eval_prim.builtin_guard :=
+      Some (fun name ->
+        if blocked_name name then
+          raise (March_eval.Eval_prim.Blocked_builtin name));
+    March_eval.Eval.set_reduction_counting true;
+    let ctx = match !March_eval.Eval.reduction_ctx with Some c -> Some c | None -> None in
+    (match ctx with
+     | Some c -> c.March_scheduler.Scheduler.remaining <- fuel
+     | None -> ());
+    Fun.protect
+      ~finally:(fun () ->
+        (* Charge what this execution actually used. *)
+        (match ctx with
+         | Some c ->
+           let used = fuel - max 0 c.March_scheduler.Scheduler.remaining in
+           wall_budget := !wall_budget - max 1 used
+         | None -> ());
+        March_eval.Eval.set_reduction_counting false;
+        March_eval.Eval_prim.builtin_guard := None)
+      (fun () ->
+        try Ok (f ())
+        with
+        | March_eval.Eval.Yield -> Error Unconfirmable
+        | March_eval.Eval_prim.Blocked_builtin _ -> Error Unconfirmable
+        | March_eval.Eval_prim.Eval_error msg -> Error (Panicked msg)
+        | _ -> Error Unconfirmable)
+  end
+
+(* The interpreter environment for [current_module], built on first use under
+   the harness (module initialisation itself must be inert and bounded). *)
+let module_env () : V.env option =
+  match !env_state with
+  | `Ready env -> Some env
+  | `Failed -> None
+  | `Unset ->
+    (match !current_module with
+     | None -> env_state := `Failed; None
+     | Some m ->
+       (match with_harness (fun () -> March_eval.Eval.eval_module_env m) with
+        | Ok env -> env_state := `Ready env; Some env
+        | Error _ -> env_state := `Failed; None))
+
+(* Find a function value by bare name: an exact binding wins; otherwise a
+   single qualified "Mod.name" binding is unambiguous; several such bindings
+   mean we cannot tell which definition the obligation is about — skip. *)
+let lookup_fn (env : V.env) (name : string) : V.value option =
+  match List.assoc_opt name env with
+  | Some v -> Some v
+  | None ->
+    let suffix = "." ^ name in
+    let sl = String.length suffix in
+    let matches =
+      List.filter
+        (fun (k, _) ->
+          let kl = String.length k in
+          kl > sl && String.sub k (kl - sl) sl = suffix)
+        env
+    in
+    (* Deduplicate by key: the assoc list carries shadowed rebindings. *)
+    let keys = List.sort_uniq compare (List.map fst matches) in
+    (match keys with
+     | [ k ] -> List.assoc_opt k env
+     | _ -> None)
+
+let call_fn ~(name : string) ~(args : V.value list) : exec_result =
+  match module_env () with
+  | None -> Unconfirmable
+  | Some env ->
+    (match lookup_fn env name with
+     | None -> Unconfirmable
+     | Some f ->
+       (match with_harness (fun () -> March_eval.Eval.apply f args) with
+        | Ok v -> Ret v
+        | Error e -> e))
+
+(* =================================================================
+   §6  Confirmation: admissibility + execute + check
+   ================================================================= *)
+
+(* Every parameter whose declared type carries a refinement must satisfy it —
+   a "witness" the contract already excludes would blame the caller for an
+   input the function never promises to handle.  Zero-filled don't-cares are
+   exactly how such inputs arise. *)
+let admissible ~(params : (string * A.ty) list) (args : (string * V.value) list) : bool =
+  List.for_all
+    (fun (pname, ty) ->
+      match ty with
+      | A.TyRefine (_, binder, pred) ->
+        let bname = match binder with Some b -> b.A.txt | None -> "_" in
+        let self = List.assoc_opt pname args in
+        let lookup n =
+          if n = bname || n = "_" then self else List.assoc_opt n args
+        in
+        (match self with
+         | None -> false
+         | Some _ -> eval_pred ~lookup pred = Some true)
+      | _ -> true)
+    params
+
+(* One execute+check round: run the function on [args] and decide whether the
+   return predicate is VIOLATED by the actual result. *)
+let violates_post ~(fn_name : string) ~(binder : string) ~(ret_pred : A.expr)
+    (args : (string * V.value) list) : V.value option =
+  match call_fn ~name:fn_name ~args:(List.map snd args) with
+  | Ret v ->
+    let lookup n =
+      if n = binder || n = "_" then Some v else List.assoc_opt n args
+    in
+    if eval_pred ~lookup ret_pred = Some false then Some v else None
+  | Panicked _ | Unconfirmable -> None
+
+let annotated_params (fn_params : (string * A.ty option) list)
+    : (string * A.ty) list option =
+  let ps = List.map (fun (n, t) -> Option.map (fun t -> (n, t)) t) fn_params in
+  if List.for_all Option.is_some ps then Some (List.map Option.get ps) else None
+
+(* Confirm a Refuted model against a return contract: decoded, admissible,
+   executed, and observed to violate the predicate — or [None]. *)
+let confirm_post ~(fn_name : string) ~(fn_params : (string * A.ty option) list)
+    ~(binder : string) ~(ret_pred : A.expr)
+    ~(model : (string * string) list)
+    : ((string * V.value) list * V.value) option =
+  match annotated_params fn_params with
+  | None -> None
+  | Some params ->
+    (match decode_model ~params ~model with
+     | None -> None
+     | Some args ->
+       if not (admissible ~params args) then None
+       else
+         Option.map (fun ret -> (args, ret))
+           (violates_post ~fn_name ~binder ~ret_pred args))

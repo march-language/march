@@ -176,6 +176,7 @@ let scope_facts (sc : scope) : (string * Smt.sort) list * Smt.term list * bool *
 let check_post ~root errctx ~span ?(record_sort : string option = None)
     ?(scalar_env : (string * Smt.sort) list = [])
     ?(fn_name : string option = None) ?(emit = true) ?(record = true)
+    ?(fn_params : (string * A.ty option) list = [])
     (sc : scope) (binder : string) (ret_pred : A.expr)
     ((path, tail_e) : (A.expr * bool) list * A.expr) : bool =
   (* Mirrors [check_call]'s [note]: every exit records an outcome, so a return
@@ -425,6 +426,34 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
                 ; notes = [hint]; code = None; fix = None }
             end
           in
+          (* An executed-and-confirmed witness reports with the failing call
+             itself rather than the raw model block. *)
+          let emit_witness_error (args, ret) =
+            if emit then begin
+              let pred = pred_str ret_pred in
+              let fn_prefix = match fn_name with
+                | Some n -> Printf.sprintf "`%s` does not satisfy" n
+                | None   -> "The return value does not satisfy"
+              in
+              match fn_name, Witness.render_value ret with
+              | Some fname, Some ret_str ->
+                (match Witness.render_call fname args with
+                 | Some call ->
+                   let msg = Printf.sprintf
+                     "%s its return type constraint on all code paths.\n\nThe return type requires:\n\n    %s\n\nbut %s returns %s."
+                     fn_prefix pred call ret_str
+                   in
+                   let hint = Printf.sprintf
+                     "Every branch must produce a return value satisfying `%s`." pred
+                   in
+                   Err.report errctx
+                     { March_errors.Errors.severity = March_errors.Errors.Error
+                     ; span; message = msg; labels = []
+                     ; notes = [hint]; code = None; fix = None }
+                 | None -> emit_error ())
+              | _ -> emit_error ()
+            end
+          in
           (* Whether this IS a violation is independent of [emit] — [emit_error]
              merely gates whether we tell the user; [note] below must still
              record the true verdict either way. *)
@@ -436,7 +465,23 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
             else
               (match Refine.discharge ~root ~preamble { vc with Smt.goal = Smt.Not goal } with
                | Refine.Verified -> emit_error (); true
-               | _ -> false)
+               | _ ->
+                 (* Refuted-for-SOME-input: the positive discharge's model is a
+                    candidate counterexample.  It only counts once the
+                    interpreter confirms it (the VC drops unreflectable path
+                    conditions, so a raw model can describe an unreachable
+                    input).  Confirmation only runs on the emitting pass —
+                    the [gate_unverified_posts] pre-pass already treats this
+                    verdict as unproven either way. *)
+                 (match fn_name, first with
+                  | Some fname, Refine.Refuted model when emit ->
+                    (match
+                       Witness.confirm_post ~fn_name:fname ~fn_params ~binder
+                         ~ret_pred ~model
+                     with
+                     | Some witness -> emit_witness_error witness; true
+                     | None -> false)
+                  | _ -> false))
           in
           (* Not [Verified] on the positive goal ⇒ not proven, whatever the
              refutation attempt said. *)
@@ -880,11 +925,15 @@ let check_fn_post_verdict ~root errctx ?(emit = true) (fd : A.fn_def) : bool =
       let ts = tails base c.A.fc_body in
       (* Fold (not List.for_all): every tail must be checked so every
          diagnostic is emitted — short-circuiting would hide errors. *)
+      let fn_params =
+        List.map (fun fp -> (param_name_of fp, param_ty_of fp)) c.A.fc_params
+      in
       ts <> []
       && List.fold_left
            (fun acc t ->
              check_post ~root errctx ~span:c.A.fc_span ~record_sort ~scalar_env
-               ~fn_name:(Some fd.A.fn_name.A.txt) ~emit ~record:emit sc binder ret_pred t
+               ~fn_name:(Some fd.A.fn_name.A.txt) ~emit ~record:emit ~fn_params
+               sc binder ret_pred t
              && acc)
            true ts
     in
