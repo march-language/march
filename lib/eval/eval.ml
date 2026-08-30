@@ -1716,7 +1716,12 @@ and apply_inner (fn_val : value) (args : value list) : value =
       ~finally:(fun () -> closure_prefix_override := saved)
       (fun () -> eval_expr env' body)
 
-  | VBuiltin (_, f) -> f args
+  | VBuiltin (name, f) ->
+    (* Witness-validation effect guard — see [Eval_prim.builtin_guard]. *)
+    (match !Eval_prim.builtin_guard with
+     | Some g -> g name
+     | None -> ());
+    f args
 
   | VForeign (lib, sym, ef_raises, param_tys, ret_ty) ->
     (* 1. Static OCaml stub (libm/libc math etc.). Keyed by both the C symbol

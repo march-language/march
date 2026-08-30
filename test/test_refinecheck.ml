@@ -9557,6 +9557,57 @@ let verdict_filter_suite =
           (March_refinecheck.Panic_surface_by_proof.is_proved vf_span "List.tail"))
   ]
 
+(* =========================================================================
+   Witness harness (counterexample surfacing): the two evaluator hooks the
+   validation harness in lib/refinecheck/witness.ml stands on.  Not gated:
+   no solver is involved — these drive the interpreter directly.
+
+   The guard test proves an effectful builtin is vetoed THROUGH a normal
+   apply chain (not just at top level), and the fuel test proves a divergent
+   March function is bounded by the reduction budget rather than hanging the
+   compiler.  Both restore the global hook state on every path — the other
+   suites in this binary run the real pipeline and must never see a stale
+   guard. *)
+
+let witness_harness_suite =
+  [ Alcotest.test_case "builtin guard blocks a named builtin through apply" `Quick
+      (fun () ->
+        let m = March_desugar.Desugar.desugar_module (parse
+          "mod M do\n  fn shout() : Unit do println(\"hi\") end\nend\n") in
+        let env = March_eval.Eval.eval_module_env m in
+        let f = List.assoc "shout" env in
+        March_eval.Eval_prim.builtin_guard :=
+          Some (fun name ->
+            if name = "println" then
+              raise (March_eval.Eval_prim.Blocked_builtin name));
+        let blocked =
+          Fun.protect
+            ~finally:(fun () -> March_eval.Eval_prim.builtin_guard := None)
+            (fun () ->
+              try ignore (March_eval.Eval.apply f []); false
+              with March_eval.Eval_prim.Blocked_builtin _ -> true)
+        in
+        Alcotest.(check bool) "println blocked" true blocked)
+  ; Alcotest.test_case "fuel bounds a divergent function" `Quick
+      (fun () ->
+        let m = March_desugar.Desugar.desugar_module (parse
+          "mod M do\n  fn spin(n : Int) : Int do spin(n) end\nend\n") in
+        let env = March_eval.Eval.eval_module_env m in
+        let f = List.assoc "spin" env in
+        March_eval.Eval.set_reduction_counting true;
+        (match !March_eval.Eval.reduction_ctx with
+         | Some ctx -> ctx.March_scheduler.Scheduler.remaining <- 10_000
+         | None -> ());
+        let out =
+          Fun.protect
+            ~finally:(fun () -> March_eval.Eval.set_reduction_counting false)
+            (fun () ->
+              try ignore (March_eval.Eval.apply f [March_eval.Eval.VInt 0]); false
+              with March_eval.Eval.Yield -> true)
+        in
+        Alcotest.(check bool) "fuel exhausted" true out)
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -9624,4 +9675,5 @@ let () =
       ("verdict-query", verdict_query_suite);
       ("no-panic-by-proof", no_panic_proof_suite);
       ("no-panic-verdict-filter", verdict_filter_suite);
-      ("no-panic-syntactic-fallback", syntactic_fallback_suite) ]
+      ("no-panic-syntactic-fallback", syntactic_fallback_suite);
+      ("witness-harness", witness_harness_suite) ]

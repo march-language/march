@@ -33,6 +33,16 @@ let http_fetch_hook
   : (string -> string -> string -> string -> (string, string) result) option ref
   = ref None
 
+(** Effect guard for compile-time witness validation
+    (lib/refinecheck/witness.ml).  When set, called with the builtin's name
+    before every [VBuiltin] application; the guard raises [Blocked_builtin]
+    to veto effectful builtins while a counterexample candidate is being
+    executed.  [None] — the normal state — costs one ref read per builtin
+    call. *)
+exception Blocked_builtin of string
+
+let builtin_guard : (string -> unit) option ref = ref None
+
 (** Forward-reference hook for dispatch in comparison operators.
     Interface dispatch needs [apply] but [cmp_op] is defined before [apply].
     Set to the real [apply] after it is defined (see [apply_hook] pattern). *)
