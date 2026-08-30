@@ -13,10 +13,17 @@ specs/plans/2026-08-28-refine-check-decomposition.md:
     very cells being counted — during the finding-3 work that made an
     `install_lower_expr` invariant report 2/2 when the true code count was 1/0.
 
-Handles NESTED `(* ... *)` (OCaml comments nest) and string literals with
-backslash escapes, so a `"(*"` inside a string does not open a comment and a
-`"\\"` does not swallow the closing quote.  Blank lines are dropped so that
-reflowing whitespace cannot show up as a diff.
+Handles NESTED `(* ... *)` (OCaml comments nest), ordinary string literals
+with backslash escapes, and QUOTED string literals `{id|...|id}` -- so a
+`"(*"` inside a string does not open a comment, a `"\\"` does not swallow the
+closing quote, and neither does a `(*` inside a `{|...|}` fixture.  Blank
+lines are dropped so that reflowing whitespace cannot show up as a diff.
+
+The quoted-string case is not hypothetical: lsp/test/test_lsp.ml embeds 297
+`{|...|}` March fixtures, several containing `(*`.  Without this the stripper
+enters comment mode inside a fixture and swallows to the next `*)`, which
+makes its output depend on where a file happens to be CUT -- exactly the
+property a splice check assumes it does not have.
 
 Usage:  scripts/strip-comments.py FILE
 """
@@ -45,6 +52,22 @@ def strip(src: str) -> str:
             i += 1
             continue
         c = src[i]
+        if c == '{':
+            # OCaml quoted string literal: {id|...|id} with an optional
+            # lowercase identifier.  Scan for the matching |id} terminator.
+            j = i + 1
+            while j < n and (src[j].islower() or src[j] == '_'):
+                j += 1
+            if j < n and src[j] == '|':
+                tag = src[i + 1:j]
+                close = '|' + tag + '}'
+                k = src.find(close, j + 1)
+                if k == -1:
+                    k = n
+                seg = src[i:k + len(close)]
+                out.append(seg)
+                i = k + len(close)
+                continue
         if c == '"':
             out.append(c)
             i += 1
