@@ -11,6 +11,13 @@ This spec defines how March compiler binaries are built, packaged, and published
 > illustrative rather than current — `.github/workflows/build.yml` is the
 > source of truth for what actually builds. Intel macOS has no prebuilt;
 > `install.sh` detects it and points at building from source.
+>
+> **Update 2026-08-31:** the AArch64 row above is corrected (it is a native
+> arm64 runner now, not `ubuntu-22.04` + QEMU), but the YAML further down is
+> still the old illustrative snapshot and does not match the workflow: it
+> quotes `alpine:3.19`, a `matrix.cross` flag, `docker/setup-qemu-action` and
+> `--platform linux/arm64`, none of which exist any more. Read
+> `.github/workflows/build.yml`, not the snippet.
 
 
 All builds target OCaml 5.3.0 and produce native binaries for four platforms:
@@ -19,7 +26,7 @@ All builds target OCaml 5.3.0 and produce native binaries for four platforms:
 |-------|-------------|---------------------|------------------|------------|
 | macOS | Apple Silicon | `macos-14`          | `darwin-arm64`   | dynamic    |
 | Linux | x86-64       | `ubuntu-22.04`      | `linux-x86_64`   | static (musl) |
-| Linux | AArch64      | `ubuntu-22.04` + QEMU | `linux-aarch64`  | static (musl) |
+| Linux | AArch64      | `ubuntu-24.04-arm`  | `linux-aarch64`  | static (musl) |
 
 Platform strings match the forge version manager's platform detection table exactly (see `forge_version_manager.md § Platform Detection`).
 

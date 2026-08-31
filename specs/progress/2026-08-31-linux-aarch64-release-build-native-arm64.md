@@ -1,4 +1,4 @@
-`[P1]` # Every linux-aarch64 release archive ships with an empty `bin/`
+# Every linux-aarch64 release archive ships with an empty `bin/` — RESOLVED 2026-08-31
 
 Found 2026-08-23 while checking the v0.3.0 release assets, after noticing the
 aarch64 archive was 692 KB against 11 MB for linux-x86_64.
@@ -190,7 +190,10 @@ B2 (fixed guard >= 21):     compiled clean
 So the LLVM fix is now compile-verified against LLVM 19, not merely inferred
 from reading upstream headers.
 
-## Why this stays open
+## Why this stayed open (superseded — see the resolution below)
+
+*Everything in this section was true when written and is kept for the record.
+All three conditions it lists were met on 2026-08-31.*
 
 The blake3 and LLVM-guard fixes are verified in isolation but
 **unverified end to end against the real leg**. It cannot be reproduced or tested locally (no arm64
@@ -211,11 +214,103 @@ failure. Even with the git fix, this leg is very slow and is a plausible future
 timeout; caching the container's opam root, or moving to a native arm64 runner,
 is worth considering separately.
 
-## Acceptance
+## Resolution 2026-08-31: native arm64 runner, verified end to end
+
+The "fourth failure behind these two" the section above warned about did not
+materialise. With the three fixes in place — `safe.directory`, the LLVM 21
+guard, and blake3 NEON — the leg builds clean.
+
+### The leg moved off QEMU onto a native arm64 runner
+
+`ubuntu-24.04-arm` is available to this repo (public repo, free-plan org), and
+that was confirmed on a live run rather than assumed: runner image
+`ubuntu24-arm64/20260823.101`, `uname -m` = `aarch64`, docker server arch
+`arm64`.
+
+The Alpine container **stays** — it is what makes the artifact musl — but on an
+arm64 host it is a plain native `docker run`, so `docker/setup-qemu-action` and
+`--platform linux/arm64` are both gone. They only ever made sense together with
+an x86_64 `os:`; the workflow now carries a comment saying so, because
+reintroducing either one alone would silently re-emulate.
+
+The `cross: true` matrix flag became `alpine: true`. Nothing about this leg is
+a cross-compile any more; what the flag actually selects — and always actually
+selected — is "built inside the container" versus "built on the runner host".
+The `!matrix.cross` → `!matrix.alpine` gates preserve the exact same partition
+(host legs get `opam-deps` and the native build steps, the container leg does
+not). `Install musl toolchain` is now additionally skipped on this leg, where
+installing musl-tools on the host was pure waste.
+
+**Wall-clock.** Installing `ocaml-compiler.5.3.0` alone took **52 minutes**
+under emulation. The whole leg — apk, blake3 from source, opam init, a
+from-source 5.3.0 switch, every opam dep, and `dune build` of both binaries —
+now takes **4m51s** (run 33410265258). The 100-minute CI round trip per attempt
+that made this item so expensive to work on is gone.
+
+This also removes the motivation for caching the container's opam root across
+the docker-run boundary: the switch is cheap to rebuild natively.
+
+## Acceptance — met
 
 A `linux-aarch64` archive whose `bin/march` and `bin/forge` are present,
 non-empty, and executable; and a deliberately broken build leg fails the job
 rather than publishing.
+
+Verified on run 33410265258 (all three legs green, so the LLVM guard change
+regressed neither x86_64 nor macOS), artifact `march-probe-linux-aarch64.tar.gz`
+— **12.8 MB**, against 692 KB for the empty v0.3.0 one:
+
+```
+bin/march  24,113,976 bytes  ELF 64-bit LSB pie executable, ARM aarch64,
+                             interpreter /lib/ld-musl-aarch64.so.1
+bin/forge  16,457,880 bytes  (same)
+```
+
+Both binaries were then actually **run** — not merely inspected — in a native
+arm64 `alpine:3.21` container on an Apple Silicon host, the same local-repro
+technique recorded above: `march --version` → `march 0.3.0`, `forge --version`
+→ `0.3.0`, and a hello-world module interpreted correctly
+(`hello from aarch64`).
+
+This is the first working ARM Linux build artifact the project has produced.
+
+Verification deliberately did **not** go through a `nightly.yml` dispatch: that
+publishes a public release tag, and `nightly.yml` hardcodes `ref: main`, so it
+would have built main's source rather than the branch's. A temporary workflow
+called `build.yml` directly instead, and was removed afterwards. (The
+`TEMP(test scaffold)` edit to `nightly.yml` on the fix branch solves the same
+problem a different way and is still marked REVERT BEFORE MERGE.)
+
+## Three things found while verifying — all pre-existing, all still open
+
+None of these were introduced by this work and none block the acceptance above,
+but they were observed directly and should not be lost.
+
+1. **Neither Linux leg is actually statically linked**, despite `static: true`.
+   Both come out `dynamically linked` with `NEEDED` entries for
+   `libLLVM.so.{18,19}.1`, `libblake3.so`, `libz`, `libzstd` and brotli —
+   `libblake3.so` being one the workflow itself builds from source and that
+   exists on no user's machine. On a bare `alpine:3.21` the aarch64 binary
+   aborts with ~20 `symbol not found` relocations; it runs once those libraries
+   are installed. `static: true` today gates only the `musl-tools` install.
+   Since x86_64 has the identical shape and has shipped that way for two
+   releases, this is a general release-portability problem, not an ARM one.
+   → `specs/todos/2026-08-31-linux-release-binaries-are-not-static.md`
+
+2. **`strip` silently does nothing on the container leg.** `_dist` is written
+   by root inside the container as mode `-r-xr-xr-x`; the host `strip` runs as
+   uid 1001, cannot write the files, and the failure is eaten by `|| true` —
+   the same swallowing pattern this item was originally filed about. The step
+   reports success and the binaries ship `not stripped` with debug_info, hence
+   24 MB.
+
+3. **The bundled C runtime does not compile on musl**, so `march --compile`
+   from the aarch64 prebuilt fails at `march_runtime.c:27: fatal error:
+   'execinfo.h' file not found`. `execinfo.h` is a glibc extension. Confirmed
+   to be the *only* remaining blocker once zlib/openssl/zstd dev headers are
+   present. The interpreter is unaffected — the prebuilt can interpret March
+   but not compile it.
+   → `specs/todos/2026-08-31-runtime-execinfo-h-breaks-musl-compile.md`
 
 ## Note on the currently-published assets
 
