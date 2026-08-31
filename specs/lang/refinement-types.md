@@ -94,14 +94,17 @@ theory rather than reals ([Float Refinements](#float-refinements)).
 
 ## How Checking Works: Definite Failure
 
-March reports a refinement violation **only when the predicate can *never*
-hold** under everything it knows at that point. This "definite-failure" stance
-is the heart of the design:
+March reports a refinement violation **only when it can demonstrate one**.
+This "definite-failure" stance is the heart of the design:
 
-- The argument **always** satisfies the predicate → **pass**, silently.
-- The argument **never** satisfies it → **compile error** with a counterexample.
-- It **might** satisfy it (the value is unknown / the solver is unsure) →
-  **skipped**, silently.
+- The value **always** satisfies the predicate → **pass**, silently.
+- The predicate is **demonstrably violated** → **compile error** with a
+  counterexample. There are two routes to a demonstration: the solver proves
+  the predicate can never hold, or the checker finds a concrete input, *runs
+  it*, and watches the contract fail (see
+  [Counterexamples](#counterexamples-the-failing-input-in-source-terms)).
+- Neither is established (the value is unknown, the solver is unsure, and no
+  failing input was found) → **skipped**, silently.
 
 ```march
 fn take_pos(n : {Int | _ >= 0}) : Int do n end
@@ -119,6 +122,99 @@ checker never flags correct code, and never blocks a build over something it
 can't disprove. It also won't *prove* everything you might hope; facts it can't
 establish are conservatively let through. This trade is intentional: a
 refinement checker that cries wolf is one developers turn off.
+
+---
+
+## Counterexamples: the failing input, in source terms
+
+A refutation is only useful if you can act on it. When March reports a
+violation it names a **concrete input**, and — for a function body — the value
+that input actually produced:
+
+```march
+fn clamp(x : Int) : {Int | _ >= 0} do
+  x - 1
+end
+```
+
+```
+`clamp` does not satisfy its return type constraint on all code paths.
+
+The return type requires:
+
+    _ >= 0
+
+but clamp(0) returns -1.
+```
+
+That last line is not a solver artifact. The checker decoded the solver's
+model into a real March value, **called `clamp(0)` through the interpreter**,
+and observed `-1` come back and fail the predicate. Everything it prints, it
+ran.
+
+### Why execution, and not just the model
+
+A verification condition is an *approximation* of your program: predicates the
+checker cannot translate to SMT (nonlinear arithmetic, an opaque call) are
+dropped from the query rather than guessed at. That keeps the checker sound
+when it *proves* things, but it means a raw "here is a failing input" model
+can describe a state your program never reaches:
+
+```march
+fn always_one(x : Int) : {Int | _ >= 0} do
+  if x * x >= 0 do 1 else x end     -- the else branch is unreachable
+end
+```
+
+`x * x >= 0` is nonlinear, so the guard is dropped and the solver happily
+"refutes" the contract through the `else` branch. Printing that model would
+be a false positive on correct code — the exact failure mode this design
+exists to avoid. Running the candidate returns `1`, the predicate holds, the
+model is discarded, and **the checker stays silent.**
+
+The rule is therefore simple, and worth trusting: **every counterexample you
+see was executed and observed to fail.** Candidates that cannot be executed —
+a function needing real I/O, one that diverges, a value the checker cannot
+construct — are not reported at all; the obligation stays skipped, exactly as
+before.
+
+### Witnesses respect your other contracts
+
+A counterexample is only fair if the function actually promised to handle it.
+Witness inputs must satisfy the parameters' own refinements:
+
+```march
+fn scale(x : {Int | _ > 0}, y : {Int | _ > 0}) : {Int | _ > 100} do
+  x * y
+end
+```
+
+```
+but scale(1, 1) returns 1.
+```
+
+`scale(0, 0)` would be a simpler refutation, but `0` is excluded by
+`{Int | _ > 0}`, so it is never blamed. Witnesses are also **shrunk** — the
+smallest failing input, not whatever the solver happened to pick — and
+deterministic, so the same program reports the same counterexample every time.
+
+Note that `x * y` never reaches the solver at all. When a contract falls
+outside the checkable fragment, March probes a small battery of inputs through
+the same execute-and-check pipeline; a confirmed failure is reported, and
+finding nothing leaves the obligation skipped. So a contract that is
+unprovable *and* true — `{Int | _ > 0}` over `x * x + 1` — stays silent rather
+than being guessed at in either direction.
+
+### Where counterexamples appear
+
+| Site | What the diagnostic adds |
+|---|---|
+| Return contract | ``but clamp(0) returns -1.`` |
+| Call-site precondition | ``(e.g. ys = [])`` |
+| `cap no_panic` division | ``(e.g. count = 0)`` |
+
+Values print in **source syntax** — `[]`, `[1, 2]`, `"ab"`, `Some(3)`,
+`{ port: 0 }` — so a counterexample can be pasted straight into a test.
 
 ---
 
@@ -1351,8 +1447,9 @@ for the full command surface, including `--apply` and the editor code action.
 March's default stance is **definite failure only**: a false positive on correct
 code is the cardinal sin, so anything the checker cannot decide stays silent. A
 module that wants the opposite bargain ("these contracts are a guarantee, not a
-best effort") declares `cap verified`, and every **precondition obligation at a
-call site** the checker cannot discharge inside it becomes a compile error:
+best effort") declares `cap verified`, and every obligation the checker cannot
+discharge inside it — a **precondition at a call site**, or a **return
+refinement** at a definition — becomes a compile error:
 
 ```march
 mod Checked do
@@ -1524,10 +1621,13 @@ refinement obligations (user code): 0 proved, 0 violated, 1 trusted, 0 skipped
 possible on purpose:**
 
 - **Only a `Skipped` obligation is eligible.** `@[trusted]` never suppresses a
-  `Violated`: a predicate the solver *proved* can never hold is a bug in the
+  `Violated`: a predicate demonstrably violated — proved impossible by the
+  solver, or refuted by a [counterexample that was actually
+  run](#counterexamples-the-failing-input-in-source-terms) — is a bug in the
   annotation, not an incompleteness to wave through. `go() do inner(0 - 5) end`
   under `@[trusted]` still reports the refinement violation exactly as it
-  would without the attribute.
+  would without the attribute; so does a `@[trusted]` function whose body a
+  witness proves violates its own return contract.
 - **Scoped to the one function that has the attribute.** A sibling
   function in the same `cap verified` module that is not itself `@[trusted]`
   is unaffected: one annotation does not silently disarm the module.
@@ -1671,7 +1771,17 @@ sense; each is a check that does not happen.
    `check_post` records an obligation at every exit (proved, violated, or
    skipped with a reason), so `--refine-report` counts return refinements too,
    and `cap verified` now escalates an undischarged **return** refinement
-   exactly as it already escalated an undischarged precondition. The
+   exactly as it already escalated an undischarged precondition.
+
+   Since 2026-08-30 a return refinement that is violated for *some* input is
+   an error in **every** module, not only a `cap verified` one, whenever a
+   [counterexample](#counterexamples-the-failing-input-in-source-terms)
+   confirms it by execution — `fn f(n : Int) : {Int | _ >= 0} do n end` no
+   longer compiles anywhere. That is not a widening of the definite-failure
+   stance but a stronger refutation search under it: the failing input was
+   run and observed to fail, so it is a demonstrated bug rather than an
+   undecided obligation. Contracts that remain genuinely undecided are
+   untouched, and stay silent outside `cap verified` as before. The
    2026-07-29 composition work remains confined to `check_call`, though: a
    parameter's promise composes into a *call* in the body, but `check_post`
    still composes no list or ADT measure through a **postcondition**; that is

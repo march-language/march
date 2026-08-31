@@ -111,10 +111,13 @@ Think of the checker as a cautious lawyer rather than an eager one: it only obje
 it can prove, beyond doubt, that you're wrong. There are exactly three outcomes for a
 predicate at a given point in your code:
 
-- The argument **always** satisfies the predicate → **pass**, silently.
-- The argument **never** satisfies it → **compile error** with a counterexample.
-- It **might or might not** satisfy it (the value is unknown, or the solver can't
-  decide) → **skipped**, silently.
+- The value **always** satisfies the predicate → **pass**, silently.
+- The predicate is **demonstrably violated** → **compile error** with a counterexample.
+  The checker has two ways to demonstrate that: the solver proves the predicate can
+  never hold, or it finds a concrete input, *runs it*, and watches the contract fail
+  (see [Counterexamples](#counterexamples-the-failing-input-in-source-terms)).
+- Neither is established (the value is unknown, the solver can't decide, and no failing
+  input was found) → **skipped**, silently.
 
 ```march
 fn take_pos(n : {Int | _ >= 0}) : Int do n end
@@ -132,6 +135,101 @@ checker never flags correct code, and never blocks a build over something it
 can't disprove. It also won't *prove* everything you might hope; facts it can't
 establish are conservatively let through. This trade is intentional: a
 refinement checker that cries wolf is one developers turn off.
+
+---
+
+## Counterexamples: the failing input, in source terms
+
+Being told a contract is broken is only half an answer; the useful half is *which
+input breaks it*. When March reports a violation, it names a concrete input — and,
+for a function body, the value that input actually produced:
+
+```march
+fn clamp(x : Int) : {Int | _ >= 0} do
+  x - 1
+end
+```
+
+```
+`clamp` does not satisfy its return type constraint on all code paths.
+
+The return type requires:
+
+    _ >= 0
+
+but clamp(0) returns -1.
+```
+
+That last line is not a guess from the solver. The checker turned the solver's model
+into a real March value, **called `clamp(0)`**, and watched `-1` come back and fail
+the predicate. Everything it prints, it ran.
+
+### Why running it matters
+
+The formula the solver sees is an *approximation* of your program. Anything March
+can't translate into logic — nonlinear arithmetic, a call it can't see inside — is
+dropped from the question rather than guessed at. That keeps proofs honest, but it
+means a raw "here's a failing input" answer can describe a situation your program
+never actually reaches:
+
+```march
+fn always_one(x : Int) : {Int | _ >= 0} do
+  if x * x >= 0 do 1 else x end     -- the else branch can never run
+end
+```
+
+`x * x >= 0` is nonlinear, so the guard is dropped, and the solver duly "finds" a
+failure down the `else` branch. Printing that would be a false alarm on correct
+code — the one thing this design refuses to do. Running the candidate returns `1`,
+the predicate holds, the answer is thrown away, and **the checker stays quiet**.
+
+So the rule is simple, and worth trusting: **every counterexample you see was
+actually executed and observed to fail.** Candidates that can't be run — a function
+needing real I/O, one that loops forever, a value the checker can't build — are not
+reported at all; the obligation stays skipped, exactly as before.
+
+### Counterexamples respect your other contracts
+
+A counterexample is only fair if your function ever promised to handle that input.
+Witnesses must satisfy the parameters' own refinements:
+
+```march
+fn scale(x : {Int | _ > 0}, y : {Int | _ > 0}) : {Int | _ > 100} do
+  x * y
+end
+```
+
+```
+but scale(1, 1) returns 1.
+```
+
+`scale(0, 0)` would be an easier counterexample, but `0` is ruled out by
+`{Int | _ > 0}`, so it's never blamed. Counterexamples are also **shrunk** to the
+smallest failing input rather than whatever the solver happened to pick, and they're
+deterministic: the same program reports the same counterexample every time.
+
+Note that `x * y` never reaches the solver at all. When a contract falls outside what
+March can translate, it tries a small batch of likely inputs through the same
+run-and-check process. A confirmed failure gets reported; finding nothing leaves the
+contract skipped. So a contract that is unprovable *and* true — `{Int | _ > 0}` over
+`x * x + 1` — stays silent rather than being guessed at in either direction.
+
+### Where they show up
+
+| Site | What the diagnostic adds |
+|---|---|
+| Return contract | ``but clamp(0) returns -1.`` |
+| Call-site precondition | ``(e.g. ys = [])`` |
+| `cap no_panic` division | ``(e.g. count = 0)`` |
+
+Values are printed in **March syntax** — `[]`, `[1, 2]`, `"ab"`, `Some(3)`,
+`{ port: 0 }` — so you can paste a counterexample straight into a test.
+
+> **One consequence worth knowing.** A function whose return contract is broken for
+> *some* input is now a compile error in every module, not just a `cap verified` one,
+> whenever a counterexample confirms it: `fn f(n : Int) : {Int | _ >= 0} do n end` no
+> longer compiles. The checker hasn't become less cautious — it demonstrated the bug
+> by running it. Contracts that stay genuinely undecided are unaffected.
 
 ---
 
@@ -711,8 +809,8 @@ can be technically legal and practically inert.
 
 If you want the opposite deal for a particular module ("I want these contracts to be
 a guarantee, and I want to be told when they aren't"), declare `cap verified`. Inside
-that module, a precondition at a call site that the checker can't discharge becomes a
-compile error:
+that module, an obligation the checker can't discharge — a precondition at a call
+site, or a return refinement at a definition — becomes a compile error:
 
 ```march
 mod Checked do
