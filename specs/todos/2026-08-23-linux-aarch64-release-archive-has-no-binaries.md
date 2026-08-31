@@ -60,6 +60,57 @@ QEMU inside `alpine:3.21`, and the real error was never surfaced. With `set -e`
 in place, the next release run will fail at the true error instead of
 publishing an empty archive — that log is the next step.
 
+## Update 2026-08-31: the true error, surfaced
+
+The `set -e` guard worked as intended. Nightly run 33358635235, job
+99385548165 (`build / build (ubuntu-24.04, linux-aarch64, …)`) failed loudly:
+
+```
+[WARNING] Running as root is not recommended
+[ERROR] Command "/usr/bin/git ls-files" failed:
+"/usr/bin/git ls-files" exited with code 128
+```
+
+The failure is **earlier than `dune build`** — it is `opam install --deps-only
+-y .`, so the guess above (a missing Alpine dependency breaking the compile)
+was wrong. The deps never install at all.
+
+**Root cause.** `/work` is the host checkout bind-mounted into the container.
+It is owned by the runner user (uid 1001) while the container runs as root, so
+git rejects it under its `safe.directory` ownership check and exits 128 on any
+plumbing command. `opam install .` shells out to `git ls-files` to enumerate
+the pinned local package, so the deps install dies there. `actions/checkout`
+does register a `safe.directory` entry (visible in the job log), but that is on
+the host: different user, different `HOME`, and a different path (`/work`, not
+`/home/runner/work/march/march`). None of it reaches the container.
+
+opam swallows git's stderr, so the log never prints `detected dubious
+ownership` verbatim — the attribution is from the exit code plus the
+root-in-a-bind-mount context, not a quoted git message.
+
+**Fix applied** in `.github/workflows/build.yml`, one line before the opam
+calls in the Alpine block:
+
+```
+git config --global --add safe.directory /work
+```
+
+## Why this stays open
+
+The fix is **unverified**. It cannot be reproduced or tested locally (no arm64
+Alpine runner, and Docker Desktop's bind mounts do not reproduce the host uid
+mismatch), so the next nightly or release run is the first real test. Two
+things must still be seen before this item closes:
+
+1. the aarch64 leg getting past `opam install` and through `dune build`, and
+2. a published archive whose `bin/march` and `bin/forge` are non-empty.
+
+A further hazard is visible in the same log: installing `ocaml-compiler.5.3.0`
+under QEMU took **52 minutes** (04:57 → 05:49) before the leg even reached the
+failure. Even with the git fix, this leg is very slow and is a plausible future
+timeout; caching the container's opam root, or moving to a native arm64 runner,
+is worth considering separately.
+
 ## Acceptance
 
 A `linux-aarch64` archive whose `bin/march` and `bin/forge` are present,

@@ -72,6 +72,15 @@ jobs:
             # follows it) failed here and the job still reported success.
             set -euo pipefail
             apk add --no-cache bash opam ocaml build-base git llvm19-dev llvm19 brotli-dev brotli-libs
+            # /work is the host checkout bind-mounted in; it is owned by the
+            # runner user (uid 1001) while this container runs as root, so git
+            # refuses it as "dubious ownership" and every plumbing command exits
+            # 128. `opam install .` shells out to `git ls-files` to enumerate the
+            # pinned local package, so without this the deps install dies with a
+            # bare `"/usr/bin/git ls-files" exited with code 128`. The host
+            # runner's own safe.directory entry does not carry over: different
+            # user, different HOME, different path (/work, not the host path).
+            git config --global --add safe.directory /work
             # Build blake3 from source (portable C only — no x86 SIMD on aarch64)
             git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
             gcc -O2 -shared -fPIC -o /usr/lib/libblake3.so \
