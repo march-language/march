@@ -463,19 +463,13 @@ let with_harness (f : unit -> 'a) : ('a, exec_result) result =
       Some (fun name ->
         if blocked_name name then
           raise (March_eval.Eval_prim.Blocked_builtin name));
-    March_eval.Eval.set_reduction_counting true;
-    let ctx = match !March_eval.Eval.reduction_ctx with Some c -> Some c | None -> None in
-    (match ctx with
-     | Some c -> c.March_scheduler.Scheduler.remaining <- fuel
-     | None -> ());
+    March_eval.Eval.arm_reduction_budget fuel;
     Fun.protect
       ~finally:(fun () ->
-        (* Charge what this execution actually used. *)
-        (match ctx with
-         | Some c ->
-           let used = fuel - max 0 c.March_scheduler.Scheduler.remaining in
-           wall_budget := !wall_budget - max 1 used
-         | None -> ());
+        (* Charge what this execution actually used, so a module full of
+           expensive candidates still terminates. *)
+        wall_budget :=
+          !wall_budget - max 1 (March_eval.Eval.reductions_used fuel);
         March_eval.Eval.set_reduction_counting false;
         March_eval.Eval_prim.builtin_guard := None)
       (fun () ->

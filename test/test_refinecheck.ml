@@ -9637,10 +9637,7 @@ let witness_harness_suite =
           "mod M do\n  fn spin(n : Int) : Int do spin(n) end\nend\n") in
         let env = March_eval.Eval.eval_module_env m in
         let f = List.assoc "spin" env in
-        March_eval.Eval.set_reduction_counting true;
-        (match !March_eval.Eval.reduction_ctx with
-         | Some ctx -> ctx.March_scheduler.Scheduler.remaining <- 10_000
-         | None -> ());
+        March_eval.Eval.arm_reduction_budget 10_000;
         let out =
           Fun.protect
             ~finally:(fun () -> March_eval.Eval.set_reduction_counting false)

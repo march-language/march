@@ -26,6 +26,13 @@ git log is authoritative for exact commits.
   satisfy the parameters' own refinements — spurious solver models are
   rejected, never shown.
 
+### Fixed
+
+- `forge interactive` (and `march repl` / a bare `march` REPL) now build and load
+  the `forge.toml` `[ffi]` shim, so a project whose dependencies declare native
+  FFI sources no longer fails at the first extern call with "symbol not found for
+  interpreter FFI". This is the REPL sibling of the `forge run` fix.
+
 ### Changed
 
 - A function whose declared return refinement is violated for **some**

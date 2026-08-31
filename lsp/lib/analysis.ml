@@ -1041,19 +1041,6 @@ let camel_to_snake name =
   Buffer.contents buf
 
 (** True if [name] starts with a lowercase letter — not PascalCase (for type names). *)
-let is_non_pascal name =
-  String.length name > 0 &&
-  Char.code name.[0] >= Char.code 'a' && Char.code name.[0] <= Char.code 'z'
-
-(** Convert snake_case (or lowercase) to PascalCase. *)
-let to_pascal name =
-  let parts = String.split_on_char '_' name in
-  String.concat "" (List.map (fun p ->
-    if String.length p = 0 then ""
-    else String.make 1 (Char.uppercase_ascii p.[0])
-         ^ String.sub p 1 (String.length p - 1)
-  ) parts)
-
 (* ------------------------------------------------------------------ *)
 (* Performance insights (Phase 1, AST level)                          *)
 (* ------------------------------------------------------------------ *)

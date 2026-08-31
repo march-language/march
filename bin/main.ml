@@ -4026,7 +4026,26 @@ let () =
     exit 0
   end;
   if Array.length argv >= 2 && argv.(1) = "repl" then begin
-    let preload_file = if Array.length argv >= 3 then Some argv.(2) else None in
+    (* `march repl [file.march] [--ffi-c C] [--ffi-link FLAG] [--ffi-so SO]`.
+       This branch runs before Arg.parse, so the FFI flags are peeled off here
+       the same way the `test` subcommand does it; the first non-flag argument
+       is the preload file.  Without this, a REPL preloading a project whose
+       deps declare [[ffi]] sources (forge interactive) resolves no extern
+       symbols. *)
+    let preload_file = ref None in
+    let rec parse_repl_args = function
+      | [] -> ()
+      | "--ffi-c" :: v :: rest -> ffi_c_files := v :: !ffi_c_files; parse_repl_args rest
+      | "--ffi-link" :: v :: rest -> ffi_link_flags := v :: !ffi_link_flags; parse_repl_args rest
+      | "--ffi-so" :: v :: rest -> March_eval.Eval.ffi_shim_so := Some v; parse_repl_args rest
+      | a :: rest ->
+        if !preload_file = None then preload_file := Some a;
+        parse_repl_args rest
+    in
+    parse_repl_args
+      (Array.to_list (Array.sub argv 2 (Array.length argv - 2)));
+    let preload_file = !preload_file in
+    setup_interpreter_ffi ();
     let runtime_so = ensure_runtime_so () in
     let jit_ctx = March_jit.Repl_jit.create ~runtime_so () in
     Fun.protect
@@ -4188,6 +4207,9 @@ let () =
    | None -> ());
   match !files with
   | []  ->
+    (* Same FFI wiring as every other interpreter entry point, so a REPL
+       started with --ffi-c can resolve extern symbols too. *)
+    setup_interpreter_ffi ();
     let runtime_so = ensure_runtime_so () in
     let jit_ctx = March_jit.Repl_jit.create ~runtime_so () in
     Fun.protect
