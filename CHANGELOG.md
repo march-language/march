@@ -11,6 +11,13 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- `forge interactive` (and `march repl` / a bare `march` REPL) now build and load
+  the `forge.toml` `[ffi]` shim, so a project whose dependencies declare native
+  FFI sources no longer fails at the first extern call with "symbol not found for
+  interpreter FFI". This is the REPL sibling of the `forge run` fix.
+
 ### Changed
 
 - `lib/typecheck/typecheck.ml` is 1,824 lines smaller (8,272 -> 6,448):

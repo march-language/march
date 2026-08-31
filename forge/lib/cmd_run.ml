@@ -1,5 +1,17 @@
 (** forge run — run app through the March interpreter (fast for development) *)
 
+(** The shell command for an interpreted `forge run`.
+
+    Split out of [run] so the FFI flags are pinned by a unit test
+    (forge/test/test_forge.ml, "interp_command"): dropping them here is
+    invisible to every project without [[ffi]] sources, and fatal — with an
+    unhelpful "symbol not found for interpreter FFI" — to every project with
+    them.  [ffi_flags] and [dump_flag] already carry their own leading space
+    (see [Cmd_build.ffi_flags_of]). *)
+let interp_command ~lib_path_env ~dump_flag ~ffi_flags ~entry =
+  Printf.sprintf "%smarch%s%s %s"
+    lib_path_env dump_flag ffi_flags (Filename.quote entry)
+
 let run ?(dump_phases=false) ?(compiled=false) ?target () =
   if compiled then begin
     match Cmd_build.build ~release:false ~dump_phases ?target () with
@@ -47,8 +59,7 @@ let run ?(dump_phases=false) ?(compiled=false) ?target () =
         match Cmd_build.ffi_flags_full proj with
         | Error msg -> Error msg
         | Ok ffi_flags ->
-        let cmd = Printf.sprintf "%smarch%s%s %s"
-          lib_path_env dump_flag ffi_flags (Filename.quote entry) in
+        let cmd = interp_command ~lib_path_env ~dump_flag ~ffi_flags ~entry in
         let rc = Sys.command cmd in
         if rc = 0 then Ok ()
         else Error (Printf.sprintf "program exited with code %d" rc)
