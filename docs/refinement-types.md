@@ -145,24 +145,44 @@ input breaks it*. When March reports a violation, it names a concrete input — 
 for a function body, the value that input actually produced:
 
 ```march
-fn clamp(x : Int) : {Int | _ >= 0} do
-  x - 1
+fn bump_progress(pct : {Int | _ >= 0 && _ <= 100}) : {Int | _ <= 100} do
+  pct + 1
 end
 ```
 
 ```
-`clamp` does not satisfy its return type constraint on all code paths.
+`bump_progress` does not satisfy its return type constraint on all code paths.
 
 The return type requires:
 
-    _ >= 0
+    _ <= 100
 
-but clamp(0) returns -1.
+but bump_progress(100) returns 101.
+
+3 |   fn bump_progress(pct : {Int | _ >= 0 && _ <= 100}) : {Int | _ <= 100} do
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    Every branch must produce a return value satisfying `_ <= 100`.
 ```
 
-That last line is not a guess from the solver. The checker turned the solver's model
-into a real March value, **called `clamp(0)`**, and watched `-1` come back and fail
-the predicate. Everything it prints, it ran.
+`bump_progress(100)` isn't a guess from the solver, and it isn't a random probe: it
+is *the* input that breaks this function, sitting exactly on the boundary — the case
+a reviewer skims past and the tests forget. The checker turned the solver's model
+into a real March value, **called `bump_progress(100)`**, and watched `101` come back
+and fail the predicate. Everything it prints, it ran.
+
+Off-by-one bugs are where this earns its keep, because the counterexample *is* the
+edge case:
+
+```march
+fn next_slot(i : {Int | _ >= 0 && _ < 16}) : {Int | _ < 16} do
+  i + 1
+end
+```
+
+```
+but next_slot(15) returns 16.
+```
 
 ### Why running it matters
 
@@ -204,9 +224,25 @@ but scale(1, 1) returns 1.
 ```
 
 `scale(0, 0)` would be an easier counterexample, but `0` is ruled out by
-`{Int | _ > 0}`, so it's never blamed. Counterexamples are also **shrunk** to the
-smallest failing input rather than whatever the solver happened to pick, and they're
-deterministic: the same program reports the same counterexample every time.
+`{Int | _ > 0}`, so it's never blamed.
+
+Counterexamples are also **shrunk** to the smallest failing input rather than
+whatever the solver happened to pick — which is often the most useful number in the
+whole message, because it's the *threshold* where things start going wrong:
+
+```march
+fn backoff_ms(attempt : {Int | _ >= 0}) : {Int | _ <= 30000} do
+  attempt * 1000
+end
+```
+
+```
+but backoff_ms(31) returns 31000.
+```
+
+Every attempt from 31 up blows the cap; you're told the first one, so the fix (clamp
+at 30) reads straight off the diagnostic. Shrinking is deterministic, so the same
+program always reports the same counterexample.
 
 Note that `x * y` never reaches the solver at all. When a contract falls outside what
 March can translate, it tries a small batch of likely inputs through the same
@@ -214,16 +250,53 @@ run-and-check process. A confirmed failure gets reported; finding nothing leaves
 contract skipped. So a contract that is unprovable *and* true — `{Int | _ > 0}` over
 `x * x + 1` — stays silent rather than being guessed at in either direction.
 
+### Records and lists print the way you'd write them
+
+```march
+type Config = { port : Int, workers : Int }
+
+fn with_port(cfg : Config, p : Int) : {v : Config | v.port >= 1024} do
+  { port: p, workers: cfg.workers }
+end
+```
+
+```
+but with_port({ port: 0, workers: 0 }, 0) returns { port: 0, workers: 0 }.
+```
+
+At a **call site**, the example is given in terms of the caller's own variables:
+
+```march
+fn median(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+
+fn report(samples : {List(Int) | len(_) == 0}) : Int do
+  median(samples)
+end
+```
+
+```
+refinement violation: argument `xs` of `median` does not satisfy precondition
+`len(_) > 0` (e.g. samples = [])
+```
+
+`samples = []` is the offending value itself. March used to print
+`len(samples) = 0` — a true statement *about* the value that you then had to work
+backwards from.
+
 ### Where they show up
 
 | Site | What the diagnostic adds |
 |---|---|
-| Return contract | ``but clamp(0) returns -1.`` |
-| Call-site precondition | ``(e.g. ys = [])`` |
+| Return contract | ``but bump_progress(100) returns 101.`` |
+| Call-site precondition | ``(e.g. samples = [])`` |
 | `cap no_panic` division | ``(e.g. count = 0)`` |
 
-Values are printed in **March syntax** — `[]`, `[1, 2]`, `"ab"`, `Some(3)`,
-`{ port: 0 }` — so you can paste a counterexample straight into a test.
+Those are the two places March emits refinement diagnostics: the definition (return
+contracts over `Int`, `Bool`, `Float` and records) and the call site (preconditions
+of any checkable type, lists and strings included). A return contract over a
+collection goes down a different path that stays quiet either way, so a broken
+`{List(Int) | len(_) > 0}` return gets caught where the value is *used* rather than
+where it's built.
 
 > **One consequence worth knowing.** A function whose return contract is broken for
 > *some* input is now a compile error in every module, not just a `cap verified` one,

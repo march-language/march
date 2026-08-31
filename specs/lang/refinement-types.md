@@ -132,25 +132,45 @@ violation it names a **concrete input**, and — for a function body — the val
 that input actually produced:
 
 ```march
-fn clamp(x : Int) : {Int | _ >= 0} do
-  x - 1
+fn bump_progress(pct : {Int | _ >= 0 && _ <= 100}) : {Int | _ <= 100} do
+  pct + 1
 end
 ```
 
 ```
-`clamp` does not satisfy its return type constraint on all code paths.
+`bump_progress` does not satisfy its return type constraint on all code paths.
 
 The return type requires:
 
-    _ >= 0
+    _ <= 100
 
-but clamp(0) returns -1.
+but bump_progress(100) returns 101.
+
+3 |   fn bump_progress(pct : {Int | _ >= 0 && _ <= 100}) : {Int | _ <= 100} do
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    Every branch must produce a return value satisfying `_ <= 100`.
 ```
 
-That last line is not a solver artifact. The checker decoded the solver's
-model into a real March value, **called `clamp(0)` through the interpreter**,
-and observed `-1` come back and fail the predicate. Everything it prints, it
-ran.
+`bump_progress(100)` is not a solver artifact and not a random probe: it is
+the *one* input that breaks this function, and it sits exactly on the
+boundary — the case a reviewer skims past and a test suite forgets. The
+checker decoded the solver's model into a real March value, **called
+`bump_progress(100)` through the interpreter**, and observed `101` come back
+and fail the predicate. Everything it prints, it ran.
+
+Off-by-one errors are where this pays off most, because the counterexample
+*is* the edge case:
+
+```march
+fn next_slot(i : {Int | _ >= 0 && _ < 16}) : {Int | _ < 16} do
+  i + 1
+end
+```
+
+```
+but next_slot(15) returns 16.
+```
 
 ### Why execution, and not just the model
 
@@ -194,9 +214,27 @@ but scale(1, 1) returns 1.
 ```
 
 `scale(0, 0)` would be a simpler refutation, but `0` is excluded by
-`{Int | _ > 0}`, so it is never blamed. Witnesses are also **shrunk** — the
-smallest failing input, not whatever the solver happened to pick — and
-deterministic, so the same program reports the same counterexample every time.
+`{Int | _ > 0}`, so it is never blamed.
+
+Witnesses are also **shrunk** to the smallest failing input rather than
+whatever the solver happened to pick, and that is often the most informative
+number in the diagnostic — it is the *threshold* at which the contract starts
+failing:
+
+```march
+fn backoff_ms(attempt : {Int | _ >= 0}) : {Int | _ <= 30000} do
+  attempt * 1000
+end
+```
+
+```
+but backoff_ms(31) returns 31000.
+```
+
+Every attempt count from 31 up violates the cap; the report names the first
+one, so the fix (clamp at 30) reads straight off the diagnostic. Shrinking is
+deterministic, so the same program reports the same counterexample every time
+— which is also what lets tests pin the exact text.
 
 Note that `x * y` never reaches the solver at all. When a contract falls
 outside the checkable fragment, March probes a small battery of inputs through
@@ -205,16 +243,57 @@ finding nothing leaves the obligation skipped. So a contract that is
 unprovable *and* true — `{Int | _ > 0}` over `x * x + 1` — stays silent rather
 than being guessed at in either direction.
 
+### Structured values print in source syntax
+
+Records, lists and constructors are rendered the way you would write them, so
+a counterexample can be pasted straight into a test:
+
+```march
+type Config = { port : Int, workers : Int }
+
+fn with_port(cfg : Config, p : Int) : {v : Config | v.port >= 1024} do
+  { port: p, workers: cfg.workers }
+end
+```
+
+```
+but with_port({ port: 0, workers: 0 }, 0) returns { port: 0, workers: 0 }.
+```
+
+At a **call site**, the example names the caller's own variables:
+
+```march
+fn median(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+
+fn report(samples : {List(Int) | len(_) == 0}) : Int do
+  median(samples)
+end
+```
+
+```
+refinement violation: argument `xs` of `median` does not satisfy precondition
+`len(_) > 0` (e.g. samples = [])
+```
+
+`samples = []` is the value itself; the pre-2026-08-30 rendering was
+`len(samples) = 0`, a fact *about* the value that you then had to work
+backwards from.
+
 ### Where counterexamples appear
 
 | Site | What the diagnostic adds |
 |---|---|
-| Return contract | ``but clamp(0) returns -1.`` |
-| Call-site precondition | ``(e.g. ys = [])`` |
+| Return contract | ``but bump_progress(100) returns 101.`` |
+| Call-site precondition | ``(e.g. samples = [])`` |
 | `cap no_panic` division | ``(e.g. count = 0)`` |
 
-Values print in **source syntax** — `[]`, `[1, 2]`, `"ab"`, `Some(3)`,
-`{ port: 0 }` — so a counterexample can be pasted straight into a test.
+Counterexamples come from the two sites that emit diagnostics: the
+**definition** (return contracts over `Int`/`Bool`/`Float`/records) and the
+**call site** (preconditions of any checkable type, `List` and `String`
+included). A return refinement over a collection takes the Tier 2 structural
+induction path instead, which emits no diagnostic either way (see
+[Limitations](#limitations)), so a broken `{List(Int) | len(_) > 0}` return is
+caught where the value is *used*, not where it is produced.
 
 ---
 
