@@ -87,10 +87,19 @@ jobs:
             # runner's own safe.directory entry does not carry over: different
             # user, different HOME, different path (/work, not the host path).
             git config --global --add safe.directory /work
-            # Build blake3 from source (portable C only — no x86 SIMD on aarch64)
+            # Build blake3 from source. The x86 .S files are of course out,
+            # but blake3_neon.c is REQUIRED, not optional: blake3_dispatch.c
+            # defaults BLAKE3_USE_NEON on for aarch64 and then calls
+            # blake3_hash_many_neon, so a "portable C only" build links fine
+            # and fails at the FIRST executable that uses it with
+            # `undefined reference to blake3_hash_many_neon`. (It did — that
+            # was the second of the two errors this leg hit the first time it
+            # ever got as far as building anything.) The macOS leg below
+            # already compiles blake3_neon.c for the same reason.
             git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
             gcc -O2 -shared -fPIC -o /usr/lib/libblake3.so \
-              /tmp/blake3/c/blake3.c /tmp/blake3/c/blake3_dispatch.c /tmp/blake3/c/blake3_portable.c
+              /tmp/blake3/c/blake3.c /tmp/blake3/c/blake3_dispatch.c \
+              /tmp/blake3/c/blake3_portable.c /tmp/blake3/c/blake3_neon.c
             cp /tmp/blake3/c/blake3.h /usr/include/blake3.h
             # NOT covered by .github/actions/opam-deps (which the host-built
             # legs below use): this runs inside an ephemeral Alpine container

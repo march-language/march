@@ -167,8 +167,20 @@ CAMLprim value march_orc_add_ir(value v_J, value v_ir, value v_name) {
     char *errmsg = NULL;
     LLVMOrcThreadSafeContextRef TSCtx = NULL;
 
-#if defined(LLVM_MAJOR_VERSION) && LLVM_MAJOR_VERSION >= 19
-    /* LLVM 19+: LLVMOrcThreadSafeContextGetContext was removed; create the
+/* The boundary is 21, not 19. LLVMOrcThreadSafeContextGetContext survives
+   through LLVM 20 and is replaced by LLVMOrcCreateNewThreadSafeContext-
+   FromLLVMContext in 21. This read `>= 19` until 2026-08-31, which is wrong
+   for exactly LLVM 19 and 20: it takes the branch below and fails to compile
+   with "implicit declaration of function
+   'LLVMOrcCreateNewThreadSafeContextFromLLVMContext'".
+
+   Nothing caught it because no build leg used a 19/20 toolchain: macOS gets
+   Homebrew llvm (21+), ubuntu-24.04's llvm-dev is 18, and the aarch64 leg —
+   the one Alpine 3.21 gives llvm19 — never reached `dune build` at all (it
+   died earlier under QEMU, see specs/progress/). Moving it to a native arm64
+   runner is what surfaced this. */
+#if defined(LLVM_MAJOR_VERSION) && LLVM_MAJOR_VERSION >= 21
+    /* LLVM 21+: LLVMOrcThreadSafeContextGetContext was removed; create the
        LLVMContext first, parse IR into it, then wrap it in a TSCtx which
        takes ownership. */
     LLVMContextRef Ctx = LLVMContextCreate();
@@ -183,7 +195,7 @@ CAMLprim value march_orc_add_ir(value v_J, value v_ir, value v_name) {
     TSCtx = LLVMOrcCreateNewThreadSafeContextFromLLVMContext(Ctx);
     /* TSCtx now owns Ctx; do not call LLVMContextDispose on it. */
 #else
-    /* LLVM 18 and earlier: create a ThreadSafeContext first (which allocates
+    /* LLVM 20 and earlier: create a ThreadSafeContext first (which allocates
        its own inner LLVMContext), obtain that context, then parse IR into it. */
     TSCtx = LLVMOrcCreateNewThreadSafeContext();
     LLVMContextRef Ctx = LLVMOrcThreadSafeContextGetContext(TSCtx);
