@@ -150,9 +150,50 @@ one CI already covered. The 19/20 path is verified by the upstream header
 inspection above, not by a compile; no LLVM 19 or 20 toolchain is available
 locally to build against.
 
+## This leg IS reproducible locally — natively, in minutes
+
+The claim earlier in this file that it "cannot be diagnosed from here without an
+arm64 runner" is wrong, and cost a 100-minute CI round trip per attempt. This
+Mac is arm64, so `alpine:3.21` runs **natively** under Docker — no QEMU, no
+emulation penalty — with the exact toolchain the CI leg uses
+(`llvm19-dev` = LLVM 19.1.4, gcc 14 aarch64-alpine-linux-musl):
+
+```bash
+open -a Docker                       # daemon is not running by default
+docker run --rm --platform linux/arm64 -v "$PWD:/work" -w /work alpine:3.21 sh -c '...'
+```
+
+Both fixes below were verified this way in under two minutes each, with a RED
+control proving the check actually fires before trusting the GREEN. Note the
+bind-mount ownership bug (the `safe.directory` one) does **not** reproduce here
+— Docker Desktop's virtiofs maps ownership to the container user, so that fix
+still rests on the CI run.
+
+**Test A — blake3 NEON.** The first attempt at a control was worthless: it
+linked a `int main(void){return 0;}` that never references blake3, so the
+linker had no reason to resolve anything and the broken `.so` "passed". With a
+program that actually calls `blake3_hasher_update`:
+
+```
+A1 (portable-only .so):     undefined reference to `blake3_hash_many_neon'   <- exact CI error
+A2 (+ blake3_neon.c):       linked, ran, correct digest
+```
+
+**Test B — the LLVM guard**, compiled against real LLVM 19.1.4 headers:
+
+```
+B1 (pre-fix guard >= 19):   error: implicit declaration of function
+                            'LLVMOrcCreateNewThreadSafeContextFromLLVMContext'  <- exact CI error
+B2 (fixed guard >= 21):     compiled clean
+```
+
+So the LLVM fix is now compile-verified against LLVM 19, not merely inferred
+from reading upstream headers.
+
 ## Why this stays open
 
-The blake3 and LLVM-guard fixes are **unverified against the real leg**. It cannot be reproduced or tested locally (no arm64
+The blake3 and LLVM-guard fixes are verified in isolation but
+**unverified end to end against the real leg**. It cannot be reproduced or tested locally (no arm64
 Alpine runner, and Docker Desktop's bind mounts do not reproduce the host uid
 mismatch), so the next nightly or release run is the first real test. Two
 things must still be seen before this item closes:
