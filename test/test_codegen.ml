@@ -13146,6 +13146,9 @@ declare ptr  @march_csv_close(ptr %handle)
 declare void @march_own(ptr %pid, ptr %value)
 ; Capability builtins
 declare ptr  @march_cap_narrow(ptr %cap)
+declare ptr  @march_mint_cap(ptr %cap)
+declare ptr  @march_cap_impl(ptr %cap, ptr %dict)
+declare ptr  @march_cap_dict(ptr %cap)
 ; Monitor/supervision builtins
 declare void @march_demonitor(i64 %ref)
 declare i64  @march_monitor(ptr %watcher, ptr %target)

@@ -764,6 +764,24 @@ let builtin_bindings : (string * scheme) list =
        Runtime-erased: aliases cap_narrow in eval/defun/llvm (caps compile to
        null/VUnit). *)
     ("mint_cap",   poly1 (fun a -> TArrow (TCon ("Cap", [TCon ("IO", [])]), TCon ("Cap", [a]))));
+    (* cap_impl: attach a runtime DICTIONARY to a capability that declared one
+       (`proof cap Live with Ops`).  The scheme is deliberately loose in the
+       dictionary position — the dictionary's type is checked against the
+       capability's declared `with` type by [check_cap_impl_sites], because the
+       result cap is not pinned until later unification (typically the
+       enclosing fn's return annotation), exactly as for [mint_cap].  The GATE
+       (declaring-module + public fn; IO caps refused outside a --test build)
+       lives in that sweep too, not in this scheme. *)
+    ("cap_impl",   poly2 (fun a b ->
+       TArrow (TCon ("Cap", [a]), TArrow (b, TCon ("Cap", [a])))));
+    (* cap_dict: read a capability's dictionary back.  [Option], not the bare
+       dictionary: [None] is "no dictionary — ambient/default implementation",
+       which is every capability that has ever existed, so the read is total and
+       the default path stays visible in the source.  The scheme here is only
+       for bare references; an APPLICATION is typed by the [cap_dict] arm in
+       [infer_expr], which resolves the result from the capability's declared
+       `with` type and therefore needs the argument's type known at the site. *)
+    ("cap_dict",   poly2 (fun a b -> TArrow (TCon ("Cap", [a]), t_option b)));
     (* Phase 1: Monitor/link builtins *)
     ("monitor",      poly2 (fun a b -> TArrow (TCon ("Pid", [a]), TArrow (TCon ("Pid", [b]), t_int))));
     ("demonitor",    Mono (TArrow (t_int, t_unit)));

@@ -842,11 +842,23 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare void @march_own(ptr %pid, ptr %value)" };
   { march_name = "cap_narrow"; c_name = Some "march_cap_narrow"; ret_ty = Some (Tir.TCon ("Cap", [Tir.TVar "a"]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_cap_narrow(ptr %cap)" };
-  (* mint_cap — gated proof-cap mint; runtime-erased alias of cap_narrow. Reuses
-     the march_cap_narrow C symbol (declare emitted by the cap_narrow entry
-     above), so no new PDeclare/runtime symbol is needed. *)
-  { march_name = "mint_cap"; c_name = Some "march_cap_narrow"; ret_ty = Some (Tir.TCon ("Cap", [Tir.TVar "a"]));
-    in_is_builtin = true; declare_sig = None };
+  (* mint_cap — the gated proof-cap mint.  It has its OWN symbol rather than
+     aliasing march_cap_narrow: a mint must not inherit the dictionary of the
+     Cap(IO) it was minted from (see march_mint_cap), and the alias returned
+     its argument.  That agreed with the interpreter only while a Cap(IO) was
+     always NULL. *)
+  { march_name = "mint_cap"; c_name = Some "march_mint_cap"; ret_ty = Some (Tir.TCon ("Cap", [Tir.TVar "a"]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_mint_cap(ptr %cap)" };
+  (* cap_impl / cap_dict — capability runtime dictionaries.  Both are
+     identity-shaped at the machine level: a capability is NULL-or-dictionary,
+     and Option is niche-encoded (None = 0, Some(x) = x, lib/tir/repr.ml), so
+     [cap_dict] needs no encoding step at all.  The shims exist for the
+     REFERENCE COUNTING, not the value — see the ownership note in
+     runtime/march_runtime.c. *)
+  { march_name = "cap_impl"; c_name = Some "march_cap_impl"; ret_ty = Some (Tir.TCon ("Cap", [Tir.TVar "a"]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_cap_impl(ptr %cap, ptr %dict)" };
+  { march_name = "cap_dict"; c_name = Some "march_cap_dict"; ret_ty = Some (Tir.TCon ("Option", [Tir.TVar "a"]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_cap_dict(ptr %cap)" };
   { march_name = "demonitor"; c_name = Some "march_demonitor"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_demonitor(i64 %ref)" };
   { march_name = "monitor"; c_name = Some "march_monitor"; ret_ty = Some Tir.TInt;
@@ -1563,6 +1575,9 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_own";
   PComment "; Capability builtins";
   PDeclare "march_cap_narrow";
+  PDeclare "march_mint_cap";
+  PDeclare "march_cap_impl";
+  PDeclare "march_cap_dict";
   PComment "; Monitor/supervision builtins";
   PDeclare "march_demonitor";
   PDeclare "march_monitor";

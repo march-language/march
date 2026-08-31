@@ -13,6 +13,21 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- Capabilities can now carry a **runtime dictionary** — a record of the
+  operations they authorize — so a capability's implementation can be swapped at
+  a binding site. Declare one with `proof cap Live with Ops`, attach with
+  `cap_impl(cap, dict)`, and read it back with `cap_dict(cap)`, which yields an
+  `Option` whose `None` is "no dictionary, use the ambient implementation" —
+  what every capability written so far does. `cap_narrow` carries a dictionary
+  across attenuation. Supplying a dictionary is gated exactly like `mint_cap`
+  (a public function of the declaring module), because deciding what a
+  capability *does* is at least as much authority as minting one.
+  Works on both backends, with compiled/interpreted parity pinned by a native
+  golden; the compiled representation costs nothing, since `Option`'s niche
+  encoding makes `cap_dict` the identity function. Mocking an *IO* capability is
+  not yet reachable — IO builtins do not take their capability as an argument,
+  so a dictionary attached to one would never be consulted.
+
 - Refinement failures now come with concrete, interpreter-validated
   counterexamples rendered in source terms. A return contract violated for
   some input reports the executed failing call — `but clamp(0) returns -1.` —

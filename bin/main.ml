@@ -1279,7 +1279,7 @@ let cap_ceiling_module_spans ~entry_owner ~entry_span
         | March_ast.Ast.DImpl (_, sp)
         | March_ast.Ast.DExtern (_, sp) | March_ast.Ast.DUse (_, sp)
         | March_ast.Ast.DAlias (_, sp)
-        | March_ast.Ast.DNeeds (_, sp) | March_ast.Ast.DProofCap (_, sp)
+        | March_ast.Ast.DNeeds (_, sp) | March_ast.Ast.DProofCap (_, _, sp)
         | March_ast.Ast.DTransitions (_, _, sp)
         | March_ast.Ast.DApp (_, sp) | March_ast.Ast.DDeriving (_, _, sp)
         | March_ast.Ast.DSatisfy (_, _, sp)
@@ -4162,6 +4162,7 @@ let () =
     ("--refine-suggest-budget", Arg.Set_int refine_suggest_budget,
      "<N>  Cap the hypothesis re-checks --refine-suggest may spend per function (default 200)");
     ("--test",       Arg.Set do_test,     " Compile test blocks into a standalone test-runner binary (use with --compile)");
+    ("--emit-io-ops", Arg.Set emit_io_ops, " Print the generated per-IO-capability dictionary module (stdlib/io_ops.march) and exit");
     ("--target",     Arg.Set_string target_str,  "<target>  Compilation target: native, wasm64-wasi, wasm32-wasi, wasm32-unknown-unknown");
     ("-o",           Arg.Set_string output_file, "<file>  Output binary name (with --compile)");
     ("--no-opt",    Arg.Clear opt_enabled,  " Skip TIR optimization passes");
@@ -4195,7 +4196,17 @@ let () =
   if !target_str = "js" || !target_str = "javascript" then do_compile := true;
   (* Propagate --pmap-threshold to the interpreter (codegen reads it via
      emit_module's ~pmap_threshold argument below). *)
+  (* --emit-io-ops regenerates stdlib/io_ops.march from builtin_cap_table; the
+     drift test diffs the committed file against a fresh render. *)
+  if !emit_io_ops then begin
+    print_string (March_typecheck.Io_ops_gen.render ());
+    exit 0
+  end;
   March_eval.Eval.pmap_threshold_value := !pmap_threshold;
+  (* Propagate --test to the typechecker's build-mode flag.  [cap_impl] on an
+     IO capability (mocking an IO effect) is admitted only in a test build; see
+     [Typecheck_env.test_build] and [check_cap_impl_sites]. *)
+  March_typecheck.Typecheck.test_build := !do_test;
   (* --emit-core-ast takes its target file as its own flag argument (not a
      positional file), so route it into the normal [f] :: compile dispatch
      below rather than falling through to the REPL branch. *)

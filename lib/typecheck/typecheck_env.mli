@@ -176,6 +176,14 @@ type env = {
     (int, Typecheck_types.Ast.span) Hashtbl.t;
   cap_narrow_factory_fns :
     (string, Typecheck_types.Ast.span) Hashtbl.t;
+  cap_dicts : (string * string) list;
+  cap_dict_decl_sites :
+    (Typecheck_types.Ast.span * string * string) list ref;
+  cap_impl_sites :
+    (Typecheck_types.Ast.span *
+     Typecheck_types.ty * Typecheck_types.ty * bool * string)
+    list ref;
+  cap_dict_sites : Typecheck_types.Ast.span list ref;
   mint_cap_sites :
     (Typecheck_types.Ast.span *
      Typecheck_types.ty * bool * string)
@@ -235,9 +243,13 @@ val tag_cap_producer_result :
   Typecheck_types.Ast.span -> unit
 val ty_has_tagged_cap_producer :
   env -> Typecheck_types.ty -> bool
+val test_build : bool ref
+
 val lookup_var :
   StrMap.key -> env -> Typecheck_types.scheme option
 val lookup_type : StrMap.key -> env -> int option
+val cap_bare_name : string -> string
+val resolve_cap_dict_type : env -> string -> string option
 val resolves_always_linear : string -> env -> bool
 val lookup_ctor : StrMap.key -> env -> ctor_info option
 val lookup_ctor_same_module : string -> env -> ctor_info option

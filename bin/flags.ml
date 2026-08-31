@@ -60,6 +60,7 @@ let refine_suggest_post : string option ref = ref None
 let refine_suggest_post_all = ref false
 
 let do_test        = ref false   (* --test: compile test blocks into a test-runner binary *)
+let emit_io_ops    = ref false   (* --emit-io-ops: print the generated stdlib/io_ops.march *)
 let output_file    = ref ""
 let debug_mode     = ref false
 let debug_tui_mode = ref false
