@@ -2,7 +2,8 @@
 # the linux-aarch64 leg can be verified without publishing a nightly release.
 name: ARM probe
 on:
-  workflow_dispatch:
+  push:
+    branches: [claude/relaxed-sutherland-4b908d]
 jobs:
   probe:
     runs-on: ubuntu-24.04-arm
