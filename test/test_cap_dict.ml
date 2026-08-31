@@ -310,12 +310,58 @@ module G = March_typecheck.Io_ops_gen
 
 let field_names cap = List.map fst (G.dict_fields cap)
 
+(* `println` is NOT a field: stdlib/prelude.march defines `fn println(x) do
+   print_line(show(x)) end`, so the builtin the table types `(String) -> ()` is
+   dead and a user's `println(42)` resolves to the polymorphic March function.
+   A field derived from the table would be typed for something nothing calls —
+   which looks like a working mock and silently is not.  What IS interceptable
+   is the `print_line` it delegates to. *)
 let io_console_shape =
-  Alcotest.test_case "IO.Console's dictionary is exactly its three builtins" `Quick
+  Alcotest.test_case "IO.Console excludes the stdlib-shadowed println" `Quick
     (fun () ->
       Alcotest.(check (list string)) "fields"
-        [ "print"; "print_line"; "println" ] (field_names "IO.Console");
-      Alcotest.(check (list string)) "nothing excluded" [] (G.excluded_ops "IO.Console"))
+        [ "print"; "print_line" ] (field_names "IO.Console");
+      Alcotest.(check (list string)) "println is reported as excluded"
+        [ "println" ] (G.excluded_ops "IO.Console"))
+
+(* The shadowed-builtin list is hand-maintained, which is exactly the shape
+   that drifts, so check it against the stdlib sources.  A new stdlib function
+   that shadows a cap-requiring builtin silently kills that builtin's field;
+   this fails and says which name to add. *)
+let shadow_list_matches_stdlib =
+  Alcotest.test_case "shadowed_by_stdlib matches the stdlib sources" `Quick
+    (fun () ->
+      let stdlib_dir =
+        List.find Sys.file_exists [ "stdlib"; "../../../stdlib"; "../../stdlib" ]
+      in
+      let defined = Hashtbl.create 512 in
+      let re = Str.regexp "^[ \t]*p?fn[ \t]+\\([a-z_][A-Za-z0-9_]*\\)[ \t]*(" in
+      let rec walk dir =
+        Array.iter
+          (fun e ->
+             let path = Filename.concat dir e in
+             if Sys.is_directory path then walk path
+             else if Filename.check_suffix e ".march" then begin
+               let ic = open_in path in
+               (try
+                  while true do
+                    let line = input_line ic in
+                    if Str.string_match re line 0 then
+                      Hashtbl.replace defined (Str.matched_group 1 line) ()
+                  done
+                with End_of_file -> ());
+               close_in ic
+             end)
+          (Sys.readdir dir)
+      in
+      walk stdlib_dir;
+      let actual =
+        List.map fst March_typecheck.Typecheck_builtins.builtin_cap_table
+        |> List.sort_uniq String.compare
+        |> List.filter (Hashtbl.mem defined)
+      in
+      Alcotest.(check (list string)) "cap-requiring builtins shadowed by stdlib"
+        (List.sort String.compare G.shadowed_by_stdlib) actual)
 
 (* Zero-arg builtins are the interesting case: March auto-applies a zero-arg
    function as soon as it is named, so `unix_time` cannot be stored in a field
@@ -372,6 +418,6 @@ let tests = [
   dict_reads_option; dict_not_bare; dict_no_declaration;
   narrow_keeps_dict_type;
   rt_dispatch; rt_swap; rt_default; rt_narrow_propagates;
-  io_console_shape; io_clock_zero_arg; io_mut_has_no_dictionary;
+  io_console_shape; shadow_list_matches_stdlib; io_clock_zero_arg; io_mut_has_no_dictionary;
   excluded_ops_are_documented; dict_fields_sorted;
 ]

@@ -14,10 +14,15 @@ val ops_of_cap : string -> string list
 val dict_fields : string -> (string * ty) list
 (** The capability's dictionary as sorted [(field, Option(op_ty))] pairs. *)
 
+val shadowed_by_stdlib : string list
+(** Builtins a stdlib March function shadows, so the builtin is dead and the
+    table's type is not the operation a user's call resolves to.  Cross-checked
+    against the stdlib sources by a test. *)
+
 val excluded_ops : string -> string list
 (** Operations of this capability that cannot be intercepted — polymorphic
-    builtins, which would need rank-2 types.  A mock silently does not cover
-    these. *)
+    builtins (rank-2 types) and builtins shadowed by a stdlib March function
+    (dead as builtins).  A mock silently does not cover these. *)
 
 val dict_ty : string -> ty option
 (** The dictionary record type, or [None] when nothing is interceptable. *)

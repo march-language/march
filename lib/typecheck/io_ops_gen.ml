@@ -43,7 +43,18 @@
     [*_spawn*] family.  They can never be intercepted and always take the
     ambient path.  That is a real hole in a mock, so [excluded_ops] reports
     them and [render] prints them rather than letting them go silently
-    missing. *)
+    missing.
+
+    SHADOWED BUILTINS ARE EXCLUDED.  A builtin whose name is also defined as a
+    March function in the stdlib is DEAD as a builtin — the March definition is
+    what a user's call resolves to, and it may have a different type entirely.
+    [println] is the case that matters: the table types it [(String) -> ()],
+    but `stdlib/prelude.march` defines `fn println(x) do print_line(show(x))
+    end`, so the operation users actually call is polymorphic and accepts
+    [println(42)].  A field derived from the table would be typed for a builtin
+    nothing ever calls — worse than an absent field, because it looks like a
+    working mock.  See [shadowed_by_stdlib]; a test cross-checks that list
+    against the stdlib sources so it cannot drift. *)
 
 open Typecheck_types
 
@@ -80,12 +91,25 @@ let ops_of_cap (cap : string) : string list =
     Typecheck_builtins.builtin_cap_table
   |> List.sort_uniq String.compare
 
+(** Builtins that a stdlib March function shadows, so the table's type is NOT
+    the operation a user's call resolves to.  Cross-checked against the stdlib
+    sources by a test rather than trusted, because this list is exactly the
+    kind of hand-maintained set that drifts.
+
+    Intercepting these needs the elaboration to cover the stdlib as well as
+    user code — `println` is only interceptable via the `print_line` it
+    delegates to — which is a scope decision for that pass, not for this
+    table. *)
+let shadowed_by_stdlib : string list = [ "println"; "random_bytes" ]
+
 (** [field_ty_of_builtin op] is the [ty] a dictionary field for [op] carries,
     or [None] when [op] cannot be a field at all (polymorphic, or a shape
     [march_ty] cannot render).  A zero-arg builtin already has the shape
     [TArrow (TTuple [], r)], which is exactly the explicit-unit field type the
     call site needs — no adjustment required. *)
 let field_ty_of_builtin (op : string) : ty option =
+  if List.mem op shadowed_by_stdlib then None
+  else
   match List.assoc_opt op Typecheck_builtins.builtin_bindings with
   | Some (Mono t) -> (try ignore (march_ty t); Some t with Unsupported _ -> None)
   | _ -> None
@@ -139,8 +163,15 @@ let render () : string =
        (match excluded_ops cap with
         | [] -> ()
         | ex ->
-          p "--   NOT interceptable (polymorphic; a field would need rank-2 types):\n";
-          List.iter (fun op -> p "--     %s\n" op) ex);
+          p "--   NOT interceptable:\n";
+          List.iter
+            (fun op ->
+               if List.mem op shadowed_by_stdlib then
+                 p "--     %s (shadowed by a stdlib March fn; the builtin is dead, so a\n\
+                    --       field for it would never be called -- intercept what it\n\
+                    --       delegates to instead)\n" op
+               else p "--     %s (polymorphic; a field would need rank-2 types)\n" op)
+            ex);
        match dict_fields cap with
        | [] -> p "--   (no interceptable operations - this capability has no dictionary)\n"
        | flds ->
