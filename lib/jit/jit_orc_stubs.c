@@ -167,18 +167,15 @@ CAMLprim value march_orc_add_ir(value v_J, value v_ir, value v_name) {
     char *errmsg = NULL;
     LLVMOrcThreadSafeContextRef TSCtx = NULL;
 
-/* The boundary is 21, not 19. LLVMOrcThreadSafeContextGetContext survives
-   through LLVM 20 and is replaced by LLVMOrcCreateNewThreadSafeContext-
-   FromLLVMContext in 21. This read `>= 19` until 2026-08-31, which is wrong
-   for exactly LLVM 19 and 20: it takes the branch below and fails to compile
-   with "implicit declaration of function
-   'LLVMOrcCreateNewThreadSafeContextFromLLVMContext'".
-
-   Nothing caught it because no build leg used a 19/20 toolchain: macOS gets
-   Homebrew llvm (21+), ubuntu-24.04's llvm-dev is 18, and the aarch64 leg —
-   the one Alpine 3.21 gives llvm19 — never reached `dune build` at all (it
-   died earlier under QEMU, see specs/progress/). Moving it to a native arm64
-   runner is what surfaced this. */
+/* The threshold is 21, NOT 19. Verified against llvm-c/Orc.h on the release
+   branches: LLVMOrcThreadSafeContextGetContext is present in 18/19/20 and gone
+   in 21; LLVMOrcCreateNewThreadSafeContextFromLLVMContext is absent in 18/19/20
+   and present from 21. A `>= 19` guard here sent LLVM 19 and 20 down the branch
+   below and broke the build with "implicit declaration of
+   LLVMOrcCreateNewThreadSafeContextFromLLVMContext" — which nothing caught,
+   because CI only ever built against LLVM 18 (Ubuntu) and 22 (Homebrew), one
+   either side of the broken range. The Alpine aarch64 release leg is llvm19 and
+   was the first build to land inside it. */
 #if defined(LLVM_MAJOR_VERSION) && LLVM_MAJOR_VERSION >= 21
     /* LLVM 21+: LLVMOrcThreadSafeContextGetContext was removed; create the
        LLVMContext first, parse IR into it, then wrap it in a TSCtx which

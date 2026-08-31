@@ -14,13 +14,11 @@ git log is authoritative for exact commits.
 ### Fixed
 
 - ARM Linux (`linux-aarch64`) has a working release artifact for the first
-  time. Every v0.2.0 and v0.3.0 ARM archive shipped with an empty `bin/`; the
-  build leg is now fixed and produces both `march` and `forge`. Three defects
-  were stacked behind one another: git refusing the bind-mounted checkout in
-  the Alpine container (`safe.directory`), an LLVM version guard in the JIT C
-  stubs set at 19 when the API change it guards landed in 21 (so it failed to
-  compile against exactly LLVM 19 and 20), and libblake3 built without
-  `blake3_neon.c` on aarch64, which links but leaves
+  time. Every v0.2.0 and v0.3.0 ARM archive shipped with an empty `bin/` and no
+  compiler at all. Three defects were stacked behind one another: git refusing
+  the bind-mounted checkout inside the Alpine build container
+  (`safe.directory`), the LLVM 19/20 guard bug noted below, and libblake3 built
+  without `blake3_neon.c` on aarch64, which links but leaves
   `blake3_hash_many_neon` undefined in every executable that uses it.
 
 ### Changed
@@ -47,6 +45,14 @@ git log is authoritative for exact commits.
   rejected, never shown.
 
 ### Fixed
+
+- The REPL JIT now compiles against LLVM 19 and 20. `jit_orc_stubs.c` guarded
+  its ThreadSafeContext API choice on `LLVM_MAJOR_VERSION >= 19`, but the C API
+  actually swapped `LLVMOrcThreadSafeContextGetContext` for
+  `LLVMOrcCreateNewThreadSafeContextFromLLVMContext` in LLVM **21** — so a build
+  against 19 or 20 took the newer branch and died with "implicit declaration of
+  `LLVMOrcCreateNewThreadSafeContextFromLLVMContext`". Building against LLVM 18
+  or 21+ was unaffected, which is why it went unnoticed.
 
 - `forge interactive` (and `march repl` / a bare `march` REPL) now build and load
   the `forge.toml` `[ffi]` shim, so a project whose dependencies declare native
