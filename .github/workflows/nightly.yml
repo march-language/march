@@ -111,17 +111,9 @@ jobs:
     uses: ./.github/workflows/build.yml
     with:
       version: ${{ needs.version.outputs.version }}
-      # TEMPORARY TEST SCAFFOLD — REVERT BEFORE MERGE.
-      # Normally `main`. Pointed at this branch so a manual dispatch actually
-      # builds the branch's SOURCE, not just its workflow files. Without this,
-      # a dispatch tests workflow-level changes only and silently ignores every
-      # source fix on the branch.
-      ref: claude/git-ls-files-error-12a534
+      ref: main
 
   publish:
-    # TEMPORARY TEST SCAFFOLD — REVERT BEFORE MERGE.
-    # Never publish a public nightly release built from an unmerged branch.
-    if: false
     needs: [version, build]
     runs-on: ubuntu-24.04
     steps:
