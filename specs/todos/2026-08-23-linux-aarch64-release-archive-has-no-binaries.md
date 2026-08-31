@@ -95,15 +95,74 @@ calls in the Alpine block:
 git config --global --add safe.directory /work
 ```
 
+## Update 2026-08-31 (later): safe.directory confirmed, two more failures behind it
+
+Dispatched Nightly manually on the fix branch — run 33393710751, job
+99493165055. The `safe.directory` fix **works**: no `git ls-files` exit 128
+anywhere in the log, `opam install` completed, and the leg ran 101 minutes (vs
+55) before failing further downstream, inside `dune build`. `publish` was
+skipped, so no release was cut.
+
+Two more failures, independent of each other and of the git one. Both are now
+fixed on the same branch:
+
+**(a) blake3 built without NEON.**
+
+```
+libblake3.so: undefined reference to `blake3_hash_many_neon'
+```
+
+The Alpine block compiled only `blake3.c blake3_dispatch.c blake3_portable.c`
+under the comment "portable C only — no x86 SIMD on aarch64". Dropping the x86
+SIMD units is right; dropping `blake3_neon.c` is not. NEON is baseline on
+aarch64, so `blake3_dispatch.c` references `blake3_hash_many_neon`
+unconditionally with no runtime check to skip it. The resulting `.so` links
+fine and breaks every consumer. The macOS leg 40 lines below already compiled
+`blake3_neon.c`; the aarch64 one now does too.
+
+**(b) `lib/jit/jit_orc_stubs.c` cannot compile against LLVM 19 or 20.**
+
+```
+error: implicit declaration of function 'LLVMOrcCreateNewThreadSafeContextFromLLVMContext'
+```
+
+The version guard was `LLVM_MAJOR_VERSION >= 19`. The real threshold is **21**.
+Verified directly against `llvm/include/llvm-c/Orc.h` on the upstream release
+branches:
+
+| LLVM | `…ThreadSafeContextGetContext` | `…CreateNewThreadSafeContextFromLLVMContext` |
+|------|-------------------------------|----------------------------------------------|
+| 18   | present                       | absent                                        |
+| 19   | present                       | absent                                        |
+| 20   | present                       | absent                                        |
+| 21   | absent                        | present                                       |
+
+So 19 and 20 took the newer branch and referenced a function that does not
+exist yet. **This is not aarch64-specific** — any build against LLVM 19 or 20
+on any platform hits it. It survived this long because CI only ever built
+against LLVM 18 (Ubuntu) and 22 (Homebrew), one either side of the broken
+range; the Alpine `llvm19-dev` leg is the first build to land inside it.
+
+Guard corrected to `>= 21`, with the branch comments and `detect_llvm.sh`'s
+header comment fixed to match. Local `dune build` and all 24 `test_jit` cases
+still pass on LLVM 22 — but note that only re-exercises the `>= 21` path, the
+one CI already covered. The 19/20 path is verified by the upstream header
+inspection above, not by a compile; no LLVM 19 or 20 toolchain is available
+locally to build against.
+
 ## Why this stays open
 
-The fix is **unverified**. It cannot be reproduced or tested locally (no arm64
+The blake3 and LLVM-guard fixes are **unverified against the real leg**. It cannot be reproduced or tested locally (no arm64
 Alpine runner, and Docker Desktop's bind mounts do not reproduce the host uid
 mismatch), so the next nightly or release run is the first real test. Two
 things must still be seen before this item closes:
 
-1. the aarch64 leg getting past `opam install` and through `dune build`, and
+1. the aarch64 leg getting through `dune build` (past `opam install` is now
+   confirmed), and
 2. a published archive whose `bin/march` and `bin/forge` are non-empty.
+
+There may of course be a fourth failure behind these two; nothing has ever
+built this leg to completion, so each fix only reveals the next error.
 
 A further hazard is visible in the same log: installing `ocaml-compiler.5.3.0`
 under QEMU took **52 minutes** (04:57 → 05:49) before the leg even reached the

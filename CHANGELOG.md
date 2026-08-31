@@ -28,6 +28,14 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- The REPL JIT now compiles against LLVM 19 and 20. `jit_orc_stubs.c` guarded
+  its ThreadSafeContext API choice on `LLVM_MAJOR_VERSION >= 19`, but the C API
+  actually swapped `LLVMOrcThreadSafeContextGetContext` for
+  `LLVMOrcCreateNewThreadSafeContextFromLLVMContext` in LLVM **21** — so a build
+  against 19 or 20 took the newer branch and died with "implicit declaration of
+  `LLVMOrcCreateNewThreadSafeContextFromLLVMContext`". Building against LLVM 18
+  or 21+ was unaffected, which is why it went unnoticed.
+
 - `forge interactive` (and `march repl` / a bare `march` REPL) now build and load
   the `forge.toml` `[ffi]` shim, so a project whose dependencies declare native
   FFI sources no longer fails at the first extern call with "symbol not found for
