@@ -4,7 +4,9 @@
 #        sh detect_llvm.sh link_flags
 #
 # Emits LLVM_MAJOR_VERSION=N as a compile-time define so jit_orc_stubs.c
-# can switch between the LLVM 18 and LLVM 19+ ThreadSafeContext APIs.
+# can switch between the pre-21 and 21+ ThreadSafeContext APIs (the C API
+# swapped LLVMOrcThreadSafeContextGetContext for
+# LLVMOrcCreateNewThreadSafeContextFromLLVMContext in LLVM 21).
 WHAT="${1:-c_flags}"
 if uname | grep -q Darwin; then
     PREFIX=$(brew --prefix llvm 2>/dev/null || echo /opt/homebrew/opt/llvm)

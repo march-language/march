@@ -167,8 +167,17 @@ CAMLprim value march_orc_add_ir(value v_J, value v_ir, value v_name) {
     char *errmsg = NULL;
     LLVMOrcThreadSafeContextRef TSCtx = NULL;
 
-#if defined(LLVM_MAJOR_VERSION) && LLVM_MAJOR_VERSION >= 19
-    /* LLVM 19+: LLVMOrcThreadSafeContextGetContext was removed; create the
+/* The threshold is 21, NOT 19. Verified against llvm-c/Orc.h on the release
+   branches: LLVMOrcThreadSafeContextGetContext is present in 18/19/20 and gone
+   in 21; LLVMOrcCreateNewThreadSafeContextFromLLVMContext is absent in 18/19/20
+   and present from 21. A `>= 19` guard here sent LLVM 19 and 20 down the branch
+   below and broke the build with "implicit declaration of
+   LLVMOrcCreateNewThreadSafeContextFromLLVMContext" — which nothing caught,
+   because CI only ever built against LLVM 18 (Ubuntu) and 22 (Homebrew), one
+   either side of the broken range. The Alpine aarch64 release leg is llvm19 and
+   was the first build to land inside it. */
+#if defined(LLVM_MAJOR_VERSION) && LLVM_MAJOR_VERSION >= 21
+    /* LLVM 21+: LLVMOrcThreadSafeContextGetContext was removed; create the
        LLVMContext first, parse IR into it, then wrap it in a TSCtx which
        takes ownership. */
     LLVMContextRef Ctx = LLVMContextCreate();
@@ -183,7 +192,7 @@ CAMLprim value march_orc_add_ir(value v_J, value v_ir, value v_name) {
     TSCtx = LLVMOrcCreateNewThreadSafeContextFromLLVMContext(Ctx);
     /* TSCtx now owns Ctx; do not call LLVMContextDispose on it. */
 #else
-    /* LLVM 18 and earlier: create a ThreadSafeContext first (which allocates
+    /* LLVM 20 and earlier: create a ThreadSafeContext first (which allocates
        its own inner LLVMContext), obtain that context, then parse IR into it. */
     TSCtx = LLVMOrcCreateNewThreadSafeContext();
     LLVMContextRef Ctx = LLVMOrcThreadSafeContextGetContext(TSCtx);

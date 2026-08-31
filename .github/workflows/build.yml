@@ -25,11 +25,18 @@ jobs:
             platform: linux-x86_64
             ocaml-compiler: 5.3.0
             static: true
-          - os: ubuntu-24.04
+          # Native arm64 host (GitHub-hosted `ubuntu-24.04-arm`, free for
+          # public repos). This leg used to run on an x86_64 runner with
+          # docker/setup-qemu-action and `--platform linux/arm64`; building
+          # ocaml-base-compiler.5.3.0 from source under that emulation took 52
+          # minutes on its own (nightly run 33358635235). The Alpine container
+          # stays — it is what provides musl for the `static: true` artifact —
+          # but on an arm64 host it runs natively, with no QEMU.
+          - os: ubuntu-24.04-arm
             platform: linux-aarch64
             ocaml-compiler: 5.3.0
             static: true
-            cross: true
+            alpine: true
 
     runs-on: ${{ matrix.os }}
 
@@ -41,27 +48,26 @@ jobs:
 
       # --- Linux static builds (musl) ---
 
+      # Only the x86_64 leg builds musl-static on the runner host. The
+      # aarch64 leg builds inside Alpine, which is musl-native already, so
+      # installing musl-tools on its host would be pure waste.
       - name: Install musl toolchain (Linux)
-        if: matrix.static
+        if: matrix.static && !matrix.alpine
         run: |
           sudo apt-get update
           sudo apt-get install -y musl-tools
 
-      - name: Set up QEMU (Linux aarch64 cross)
-        if: matrix.cross
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
-
-      # For aarch64, we build inside Alpine (musl-native) under QEMU.
-      # This avoids cross-compilation complexity with OCaml.
+      # aarch64 builds inside Alpine because the artifact must be
+      # musl-static, not because of any cross-compilation: the runner is
+      # already arm64, so the container is a plain native `docker run` with no
+      # `--platform` and no QEMU. Do not reintroduce either without also moving
+      # this leg back to an x86_64 `os:` — they only made sense together.
       - name: Build in Alpine container (Linux aarch64)
-        if: matrix.cross
+        if: matrix.alpine
         uses: addnab/docker-run-action@v3
         with:
           image: alpine:3.21
           options: >-
-            --platform linux/arm64
             -v ${{ github.workspace }}:/work
             -w /work
           run: |
@@ -72,16 +78,34 @@ jobs:
             # follows it) failed here and the job still reported success.
             set -euo pipefail
             apk add --no-cache bash opam ocaml build-base git llvm19-dev llvm19 brotli-dev brotli-libs
-            # Build blake3 from source (portable C only — no x86 SIMD on aarch64)
+            # /work is the host checkout bind-mounted in; it is owned by the
+            # runner user (uid 1001) while this container runs as root, so git
+            # refuses it as "dubious ownership" and every plumbing command exits
+            # 128. `opam install .` shells out to `git ls-files` to enumerate the
+            # pinned local package, so without this the deps install dies with a
+            # bare `"/usr/bin/git ls-files" exited with code 128`. The host
+            # runner's own safe.directory entry does not carry over: different
+            # user, different HOME, different path (/work, not the host path).
+            git config --global --add safe.directory /work
+            # Build blake3 from source. The x86 SIMD units are correctly omitted
+            # here, but blake3_neon.c is NOT optional on aarch64: blake3_dispatch.c
+            # dispatches to blake3_hash_many_neon unconditionally on this target
+            # (NEON is baseline for aarch64, so upstream has no runtime check to
+            # skip), and leaving it out produces a libblake3.so that links fine and
+            # then fails every consumer with `undefined reference to
+            # blake3_hash_many_neon`. The macOS leg below already compiles it.
             git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
             gcc -O2 -shared -fPIC -o /usr/lib/libblake3.so \
-              /tmp/blake3/c/blake3.c /tmp/blake3/c/blake3_dispatch.c /tmp/blake3/c/blake3_portable.c
+              /tmp/blake3/c/blake3.c /tmp/blake3/c/blake3_dispatch.c \
+              /tmp/blake3/c/blake3_portable.c /tmp/blake3/c/blake3_neon.c
             cp /tmp/blake3/c/blake3.h /usr/include/blake3.h
-            # NOT covered by .github/actions/opam-deps (which the native legs
-            # below use): this runs inside an ephemeral Alpine container and
-            # creates a GLOBAL switch in the container's own opam root, not the
-            # `_opam` local switch that action caches. Caching across the
-            # docker-run boundary would be a separate mechanism; left uncached.
+            # NOT covered by .github/actions/opam-deps (which the host-built
+            # legs below use): this runs inside an ephemeral Alpine container
+            # and creates a GLOBAL switch in the container's own opam root, not
+            # the `_opam` local switch that action caches. Caching across the
+            # docker-run boundary would be a separate mechanism; left uncached
+            # — tolerable now that the switch is built natively rather than
+            # emulated.
             opam init --disable-sandboxing --bare -y
             opam switch create 5.3.0 ocaml-base-compiler.5.3.0
             eval $(opam env)
@@ -95,8 +119,13 @@ jobs:
             cp runtime/*.c runtime/*.h _dist/runtime/
             cp LICENSE _dist/ 2>/dev/null || true
 
-      # --- macOS and Linux x86_64 native builds ---
+      # --- macOS and Linux x86_64: built on the runner host ---
 
+      # Runs on the two legs that build directly on the runner host, i.e.
+      # everything except the Alpine-container leg above (every leg is now
+      # native-arch, so `!matrix.alpine` is a host-vs-container distinction,
+      # not a native-vs-emulated one).
+      #
       # Sets up OCaml (pinning setup-ocaml@v3.7.0 — the first release with a
       # stable-opam entry for macos-15, our minimum macOS target; the older @v3
       # failed with "no matching opam release" on darwin-arm64, and forcing a
@@ -109,15 +138,15 @@ jobs:
       # is deliberately NOT the common one, because release artifacts need a
       # STATIC libblake3.a (no Homebrew dylib dependency on the user's machine)
       # rather than ci.yml's plain `brew install blake3`.
-      - name: Set up OCaml + install opam dependencies (cached, native)
-        if: "!matrix.cross"
+      - name: Set up OCaml + install opam dependencies (cached, host)
+        if: "!matrix.alpine"
         timeout-minutes: 12
         uses: ./.github/actions/opam-deps
         with:
           ocaml-compiler: ${{ matrix.ocaml-compiler }}
 
-      - name: Install system dependencies (native)
-        if: "!matrix.cross"
+      - name: Install system dependencies (host)
+        if: "!matrix.alpine"
         run: |
           if [ "$RUNNER_OS" = "macOS" ]; then
             brew install blake3 zstd brotli llvm
@@ -145,7 +174,7 @@ jobs:
           fi
 
       - name: Build (Linux x86_64)
-        if: matrix.static && !matrix.cross
+        if: matrix.static && !matrix.alpine
         run: |
           eval $(opam env)
           dune build --force bin/main.exe forge/bin/main.exe

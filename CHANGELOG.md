@@ -11,6 +11,24 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- ARM Linux (`linux-aarch64`) has a working release artifact for the first
+  time. Every v0.2.0 and v0.3.0 ARM archive shipped with an empty `bin/` and no
+  compiler at all. Three defects were stacked behind one another: git refusing
+  the bind-mounted checkout inside the Alpine build container
+  (`safe.directory`), the LLVM 19/20 guard bug noted below, and libblake3 built
+  without `blake3_neon.c` on aarch64, which links but leaves
+  `blake3_hash_many_neon` undefined in every executable that uses it.
+
+### Changed
+
+- The `linux-aarch64` release leg builds on a native arm64 runner
+  (`ubuntu-24.04-arm`) instead of QEMU emulation on an x86_64 host. It still
+  builds inside Alpine, which is what makes the artifact musl. Building the
+  OCaml 5.3.0 switch alone took 52 minutes under emulation; the entire leg now
+  takes under 5 minutes.
+
 ### Added
 
 - Capabilities can now carry a **runtime dictionary** — a record of the
@@ -42,6 +60,14 @@ git log is authoritative for exact commits.
   rejected, never shown.
 
 ### Fixed
+
+- The REPL JIT now compiles against LLVM 19 and 20. `jit_orc_stubs.c` guarded
+  its ThreadSafeContext API choice on `LLVM_MAJOR_VERSION >= 19`, but the C API
+  actually swapped `LLVMOrcThreadSafeContextGetContext` for
+  `LLVMOrcCreateNewThreadSafeContextFromLLVMContext` in LLVM **21** — so a build
+  against 19 or 20 took the newer branch and died with "implicit declaration of
+  `LLVMOrcCreateNewThreadSafeContextFromLLVMContext`". Building against LLVM 18
+  or 21+ was unaffected, which is why it went unnoticed.
 
 - `forge interactive` (and `march repl` / a bare `march` REPL) now build and load
   the `forge.toml` `[ffi]` shim, so a project whose dependencies declare native
