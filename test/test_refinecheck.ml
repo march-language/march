@@ -335,8 +335,12 @@ let post_suite =
           (has_refine_error
              (post "  fn f(n : {Int | _ >= 0}) : {Int | _ >= 0} do n end")));
 
-    gated "unconstrained return is conservatively skipped" (fun () ->
-        Alcotest.(check bool) "no error" false
+    (* Until counterexample surfacing, this was "conservatively skipped": the
+       solver can refute `n >= 0` for SOME n but not for ALL n, and a raw
+       model was not trusted.  The witness validator now EXECUTES the model
+       (f(-1) returns -1), so the identity body is a confirmed violation. *)
+    gated "unconstrained return with a confirmed witness is rejected" (fun () ->
+        Alcotest.(check bool) "error" true
           (has_refine_error (post "  fn f(n : Int) : {Int | _ >= 0} do n end")));
 
     gated "guarded branches each satisfy the postcondition" (fun () ->
@@ -361,15 +365,20 @@ let post_suite =
 
        Here the guard `v < 0` is about the PARAMETER `v`; misread as the return
        value it becomes `k < 0`, which makes `v > 0` (i.e. `k > 0`) definitely
-       false and reports correct code.  The right answer is SILENCE: `k` is
-       unconstrained, so the postcondition is neither proven nor refuted. *)
+       false and reports correct code.  Under counterexample surfacing this
+       program DOES error — but via an EXECUTED witness (f(-1, 0) really
+       returns 0), never via the conflated definitely-false reading.  The
+       witness sentence in the message is what distinguishes the two: the
+       misattribution bug produced the bare definite-violation report. *)
     gated "a named return binder colliding with a parameter is not misattributed" (fun () ->
-        Alcotest.(check bool) "no error" false
-          (has_refine_error
-             (post
-                "  fn f(v : Int, k : Int) : {v : Int | v > 0} do\n\
-                \    if v < 0 do k else 1 end\n\
-                \  end")));
+        let text =
+          refine_error_text_d
+            (post
+               "  fn f(v : Int, k : Int) : {v : Int | v > 0} do\n\
+               \    if v < 0 do k else 1 end\n\
+               \  end") in
+        Alcotest.(check bool) "reported via an executed witness" true
+          (contains text "but f("));
 
     (* Control: the SAME collision, with a tail that definitely violates.  Had
        the fix worked by simply dropping the path conditions (or the binder),
@@ -836,8 +845,11 @@ end|} in
         Alcotest.(check bool) "no error" false (has_refine_error ok_src));
     gated "record postcondition: literal violates" (fun () ->
         Alcotest.(check bool) "has error" true (has_refine_error bad_src));
-    gated "record postcondition: unknown value skipped conservatively" (fun () ->
-        Alcotest.(check bool) "no error" false (has_refine_error skip_src));
+    (* Was "unknown value skipped conservatively" before counterexample
+       surfacing: `{ count: x }` with x unconstrained is a confirmed
+       violation at x = -1, and the witness validator can execute records. *)
+    gated "record postcondition: confirmed witness on an unknown value" (fun () ->
+        Alcotest.(check bool) "has error" true (has_refine_error skip_src));
     gated "measure over field: user @[measure] mlength holds for Nil/0" (fun () ->
         Alcotest.(check bool) "no error" false (has_refine_error meas_ok_src));
     gated "measure over field: user @[measure] mlength violated by Nil/1" (fun () ->
@@ -1439,15 +1451,16 @@ let tier0_suite =
               end\n"));
 
     gated "an UNVERIFIED postcondition does not propagate (no false positive)" (fun () ->
-        (* `score`'s declared `_ < 0` is stale: `helper(x)` is opaque, so the
-           definition side can neither prove nor refute it.  An unproven
-           postcondition stays legal at the definition and must NOT travel to
-           call sites — believing it here would flag the CORRECT call
-           `takepos(score(5))` (score(5) = 6, which satisfies `_ >= 0`). *)
+        (* `score`'s declared `_ < 0` is TRUE (helper returns -x²-1) but
+           unprovable: `helper(x)` is opaque to the definition-side check,
+           and the witness battery finds no violating input.  An unproven
+           postcondition stays legal at the definition and must NOT travel
+           to call sites — believing it at `takepos(score(5))` would let a
+           fact nobody proved discharge (or flag) the call. *)
         Alcotest.(check bool) "no error" false
           (has_refine_error
              "mod Stale do\n\
-             \  fn helper(x : Int) : Int do x + 1 end\n\
+             \  fn helper(x : Int) : Int do 0 - (x * x) - 1 end\n\
              \  fn score(x : Int) : {Int | _ < 0} do helper(x) end\n\
              \  fn takepos(n : {Int | _ >= 0}) : Int do n end\n\
              \  fn main() : Int do takepos(score(5)) end\n\
@@ -2062,12 +2075,14 @@ end|}));
 end|}));
 
     gated "an unverified relational postcondition does not propagate" (fun () ->
-        (* `_ < n` is not provable from an unanalysable body, so the gate clears
-           it and callers learn nothing.  The Tier 0 guarantee, inherited. *)
+        (* `_ < n` is TRUE (blackbox returns n - 1) but not provable from an
+           unanalysable body — and the witness battery finds no violating
+           input — so the gate clears it and callers learn nothing.  The
+           Tier 0 guarantee, inherited. *)
         Alcotest.(check bool) "no error" false
           (has_refine_error
              {|mod M do
-  fn blackbox(n : Int) : Int do n end
+  fn blackbox(n : Int) : Int do n - 1 end
   fn shady(n : Int) : {Int | _ < n} do blackbox(n) end
   fn takepos(k : {Int | _ >= 0}) : Int do k end
   fn usit() : Int do takepos(shady(0)) end
@@ -2935,11 +2950,16 @@ let b2_suite =
        unknown), so the postcondition is never proven and must not travel.
        Bypassing the gate here would turn a legal program into an error. *)
     gated "an UNPROVEN record postcondition does not propagate" (fun () ->
+        (* `x * x + 1 >= 1` is TRUE but unprovable (nonlinear), so the
+           postcondition stays unproven without being witness-confirmable —
+           the original `{ port: x }` body became a confirmed def-site
+           violation once counterexample surfacing landed, which is a
+           different property than the propagation gating pinned here. *)
         Alcotest.(check bool) "no error" false
           (has_refine_error
              {|mod T do
   type Cfg = { port : Int }
-  fn mk_bad(x : Int) : {v : Cfg | v.port >= 1} do { port: x } end
+  fn mk_bad(x : Int) : {v : Cfg | v.port >= 1} do { port: x * x + 1 } end
   fn needLow(c : {v : Cfg | v.port <= 0}) : Int do 0 end
   fn probe(y : Int) : Int do needLow(mk_bad(y)) end
 end|}));
@@ -6656,11 +6676,15 @@ end|});
 
   ; gated "an UNDECIDABLE postcondition is recorded as skipped" (fun () ->
         (* PRE-FIX: 0 proved, 0 violated, 0 skipped, exit 0. This is the case
-           Task 3 will escalate; it must be countable first. *)
+           Task 3 will escalate; it must be countable first.
+           `z * z + 1 > 0` is TRUE but unprovable — the earlier `do z end`
+           body became a witness-CONFIRMED violation (recorded as such) once
+           counterexample surfacing landed; the skip accounting pinned here
+           needs a contract that stays genuinely undecided. *)
         March_refinecheck.Obligation.reset ();
         ignore (has_refine_error_d {|
 mod PL3 do
-  fn mk(z : Int) : {Int | _ > 0} do z end
+  fn mk(z : Int) : {Int | _ > 0} do z * z + 1 end
   fn main() : Int do mk(1) end
 end|});
         let proved, violated, skips = summary () in
@@ -6808,10 +6832,26 @@ end|}))
 
   ; gated "@[trusted] rescues an undischarged postcondition" (fun () ->
         (* Arc A's payoff: the escape hatch has to reach the newly-strict
-           obligations, or Task 3 makes cap verified less adoptable. *)
+           obligations, or Task 3 makes cap verified less adoptable.
+           `z * z + 1 > 0` is TRUE but unprovable — an incompleteness skip,
+           which is exactly the class @[trusted] exists to wave through. *)
         Alcotest.(check bool) "no error" false
           (has_refine_error_d {|
 mod PS3 do
+  cap verified
+  @[trusted]
+  fn mk(z : Int) : {Int | _ > 0} do z * z + 1 end
+  fn main() : Int do mk(1) end
+end|}))
+
+  ; gated "@[trusted] does NOT suppress a witness-confirmed violation" (fun () ->
+        (* @[trusted] rescues SKIPS (incompleteness), never a Violated —
+           same rule as the pre-existing definite-violation case.  Here the
+           interpreter proves the promise false (mk(0) returns 0), so the
+           annotation is factually wrong and silence would be a lie. *)
+        Alcotest.(check bool) "error" true
+          (has_refine_error_d {|
+mod PS3b do
   cap verified
   @[trusted]
   fn mk(z : Int) : {Int | _ > 0} do z end
@@ -6819,10 +6859,13 @@ mod PS3 do
 end|}))
 
   ; gated "a non-cap-verified module is unaffected" (fun () ->
+        (* The strictness boundary pinned here is about cap verified's
+           ESCALATION of skips; the body must therefore stay a genuine skip
+           (true-but-unprovable), not a witness-confirmable violation. *)
         Alcotest.(check bool) "no error" false
           (has_refine_error_d {|
 mod PS4 do
-  fn mk(z : Int) : {Int | _ > 0} do z end
+  fn mk(z : Int) : {Int | _ > 0} do z * z + 1 end
   fn main() : Int do mk(1) end
 end|}))
   ]
@@ -9557,6 +9600,233 @@ let verdict_filter_suite =
           (March_refinecheck.Panic_surface_by_proof.is_proved vf_span "List.tail"))
   ]
 
+(* =========================================================================
+   Witness harness (counterexample surfacing): the two evaluator hooks the
+   validation harness in lib/refinecheck/witness.ml stands on.  Not gated:
+   no solver is involved — these drive the interpreter directly.
+
+   The guard test proves an effectful builtin is vetoed THROUGH a normal
+   apply chain (not just at top level), and the fuel test proves a divergent
+   March function is bounded by the reduction budget rather than hanging the
+   compiler.  Both restore the global hook state on every path — the other
+   suites in this binary run the real pipeline and must never see a stale
+   guard. *)
+
+let witness_harness_suite =
+  [ Alcotest.test_case "builtin guard blocks a named builtin through apply" `Quick
+      (fun () ->
+        let m = March_desugar.Desugar.desugar_module (parse
+          "mod M do\n  fn shout() : Unit do println(\"hi\") end\nend\n") in
+        let env = March_eval.Eval.eval_module_env m in
+        let f = List.assoc "shout" env in
+        March_eval.Eval_prim.builtin_guard :=
+          Some (fun name ->
+            if name = "println" then
+              raise (March_eval.Eval_prim.Blocked_builtin name));
+        let blocked =
+          Fun.protect
+            ~finally:(fun () -> March_eval.Eval_prim.builtin_guard := None)
+            (fun () ->
+              try ignore (March_eval.Eval.apply f []); false
+              with March_eval.Eval_prim.Blocked_builtin _ -> true)
+        in
+        Alcotest.(check bool) "println blocked" true blocked)
+  ; Alcotest.test_case "fuel bounds a divergent function" `Quick
+      (fun () ->
+        let m = March_desugar.Desugar.desugar_module (parse
+          "mod M do\n  fn spin(n : Int) : Int do spin(n) end\nend\n") in
+        let env = March_eval.Eval.eval_module_env m in
+        let f = List.assoc "spin" env in
+        March_eval.Eval.arm_reduction_budget 10_000;
+        let out =
+          Fun.protect
+            ~finally:(fun () -> March_eval.Eval.set_reduction_counting false)
+            (fun () ->
+              try ignore (March_eval.Eval.apply f [March_eval.Eval.VInt 0]); false
+              with March_eval.Eval.Yield -> true)
+        in
+        Alcotest.(check bool) "fuel exhausted" true out)
+  ]
+
+(* Witness core: model decoding, structural predicate evaluation, and
+   source-syntax rendering — the pure stages of lib/refinecheck/witness.ml.
+   Also ungated: no solver, no interpreter run. *)
+
+let witness_core_suite =
+  let module W = March_refinecheck.Witness in
+  let module A = March_ast.Ast in
+  let module V = March_eval.Eval_types in
+  let dsp = A.dummy_span in
+  let nm t = { A.txt = t; A.span = dsp } in
+  let evar t = A.EVar (nm t) in
+  let eint n = A.ELit (A.LitInt n, dsp) in
+  let eapp f args = A.EApp (evar f, args, dsp) in
+  let tycon t args = A.TyCon (nm t, args) in
+  let t_int = tycon "Int" [] in
+  let render v = Option.value ~default:"<none>" (W.render_value v) in
+  [ Alcotest.test_case "decode: negative int model value" `Quick (fun () ->
+        match W.decode_model ~params:[ ("x", t_int) ] ~model:[ ("x", "(- 3)") ] with
+        | Some [ ("x", V.VInt -3) ] -> ()
+        | _ -> Alcotest.fail "expected x = -3")
+  ; Alcotest.test_case "decode: string from its len fact" `Quick (fun () ->
+        match
+          W.decode_model ~params:[ ("s", tycon "String" []) ]
+            ~model:[ ("len$s", "2"); ("s", "Str!val!0") ]
+        with
+        | Some [ ("s", V.VString "aa") ] -> ()
+        | _ -> Alcotest.fail "expected s = \"aa\"")
+  ; Alcotest.test_case "decode: list zero-filled to its len fact" `Quick (fun () ->
+        match
+          W.decode_model ~params:[ ("xs", tycon "List" [ t_int ]) ]
+            ~model:[ ("len$xs", "2") ]
+        with
+        | Some [ ("xs", v) ] -> Alcotest.(check string) "render" "[0, 0]" (render v)
+        | _ -> Alcotest.fail "expected xs decoded")
+  ; Alcotest.test_case "decode: absent param zero-fills" `Quick (fun () ->
+        match W.decode_model ~params:[ ("b", tycon "Bool" []) ] ~model:[] with
+        | Some [ ("b", V.VBool false) ] -> ()
+        | _ -> Alcotest.fail "expected b = false")
+  ; Alcotest.test_case "eval_pred: _ >= 0 is false at -1" `Quick (fun () ->
+        let pred = eapp ">=" [ evar "_"; eint 0 ] in
+        let lookup n = if n = "_" then Some (V.VInt (-1)) else None in
+        Alcotest.(check (option bool)) "verdict" (Some false)
+          (W.eval_pred ~lookup pred))
+  ; Alcotest.test_case "eval_pred: unknown application is None, not false" `Quick
+      (fun () ->
+        let pred = eapp "is_prime" [ evar "_" ] in
+        let lookup _ = Some (V.VInt 7) in
+        Alcotest.(check (option bool)) "verdict" None (W.eval_pred ~lookup pred))
+  ; Alcotest.test_case "render: cons list in source syntax" `Quick (fun () ->
+        let v =
+          V.VCon ("Cons", [ V.VInt 1; V.VCon ("Cons", [ V.VInt 2; V.VCon ("Nil", []) ]) ])
+        in
+        Alcotest.(check string) "render" "[1, 2]" (render v))
+  ]
+
+(* Witness end-to-end: a Refuted model that survives interpreter validation
+   becomes a definite return-contract error carrying the executed failing
+   call; every unconfirmable candidate leaves today's behavior untouched.
+   Gated: these need the solver to produce the candidate model. *)
+
+let witness_e2e_suite =
+  [ gated "return contract: confirmed witness becomes an error" (fun () ->
+        let text =
+          refine_error_text_d
+            (decl "  fn clamp(x : Int) : {Int | _ >= 0} do x - 1 end") in
+        Alcotest.(check bool) "violation reported" true
+          (contains text "does not satisfy its return type constraint");
+        (* EXACT text: shrinking makes the witness canonical, so a flaky
+           model, probe order, or shrink order breaks this immediately. *)
+        Alcotest.(check bool) "executed minimal witness" true
+          (contains text "but clamp(0) returns -1."))
+  ; gated "witness shrinks to the smallest admissible input" (fun () ->
+        (* 0 is excluded by the param's own refinement; the fixed probe order
+           (0, 1, -1, …) then lands on 1 whatever model Z3 returned. *)
+        let text =
+          refine_error_text_d
+            (decl "  fn g(x : {Int | _ != 0}) : {Int | _ >= 10} do x end") in
+        Alcotest.(check bool) "minimal witness" true
+          (contains text "but g(1) returns 1."))
+  ; gated "spurious model is rejected, no witness claim" (fun () ->
+        (* `x * x` is unreflectable, so the else-branch's path condition is
+           dropped from the VC and the raw model refutes via a branch the
+           program can never take.  Validation runs weird(model) -> 1 ->
+           predicate holds -> stays silent. *)
+        let text =
+          refine_error_text_d
+            (decl
+               "  fn weird(x : Int) : {Int | _ >= 0} do if x * x >= 0 do 1 \
+                else x end end") in
+        Alcotest.(check bool) "no witness claim" false (contains text "but weird("))
+  ; gated "witness inputs must satisfy the param's own refinement" (fun () ->
+        (* Any reported witness for f must respect {Int | _ > 0} on x —
+           x = 0 would blame an input the contract already excludes. *)
+        let text =
+          refine_error_text_d
+            (decl "  fn fpos(x : {Int | _ > 0}) : {Int | _ >= 5} do x end") in
+        Alcotest.(check bool) "never blames the excluded input" false
+          (contains text "fpos(0)"))
+  ; gated "cap verified: a confirmed violation reports the witness, not cannot-verify" (fun () ->
+        (* One error, the strong one: the witness proves the contract is
+           WRONG, which supersedes "the checker could not verify it".  The
+           design doc's site table originally planned an appended "In fact…"
+           sentence on the cannot-verify message; the Violated verdict makes
+           that message unreachable here, which is strictly better. *)
+        let text =
+          refine_error_text_d
+            {|mod CV do
+  cap verified
+  fn clamp(x : Int) : {Int | _ >= 0} do x - 1 end
+  fn main() : Int do clamp(5) end
+end|} in
+        Alcotest.(check bool) "witness error" true
+          (contains text "but clamp(0) returns -1.");
+        Alcotest.(check bool) "no cannot-verify for this contract" false
+          (contains text "cannot verify return type constraint `_ >= 0`"))
+  ; gated "precondition cx is validated and minimal" (fun () ->
+        (* The inline example is re-derived through the witness pipeline:
+           admissible under the caller's own refinement (k < 0), evaluated
+           against the violated predicate, shrunk to the smallest weight. *)
+        let text =
+          refine_error_text_d
+            (decl "  fn fk(k : {Int | _ < 0}) : Int do take_n(k) end") in
+        Alcotest.(check bool) "violation" true
+          (contains text "refinement violation");
+        Alcotest.(check bool) "minimal validated example" true
+          (contains text "(e.g. k = -1)"))
+  ; gated "precondition cx renders an empty list in source syntax" (fun () ->
+        (* Today this prints the measure fact `len(ys) = 0`; the concrete
+           value `ys = []` is what the user can actually paste. *)
+        let text =
+          refine_error_text_d
+            (decl
+               "  fn hd(xs : {List(Int) | len(_) > 0}) : Int do 0 end\n\
+               \  fn fy(ys : {List(Int) | len(_) == 0}) : Int do hd(ys) end") in
+        Alcotest.(check bool) "violation" true
+          (contains text "refinement violation");
+        Alcotest.(check bool) "source-syntax value" true
+          (contains text "(e.g. ys = [])"))
+  ; gated "division: counterexample names the concrete zero divisor" (fun () ->
+        (* The witness assignment satisfies the divisor's own refinement
+           (_ >= 0 admits 0) and every path fact — a concrete admissible
+           input, not just "may be zero". *)
+        let errs =
+          divsafety_error_texts
+            "mod DW do\n\
+            \  cap no_panic\n\
+            \  fn f(n : Int, d : {Int | _ >= 0}) : Int do n / d end\n\
+             end\n"
+        in
+        Alcotest.(check bool) "concrete divisor witness" true
+          (List.exists (fun m -> contains m "(e.g. d = 0)") errs))
+  ; gated "unreflectable contract: enumeration finds the witness" (fun () ->
+        (* `x * y` never reaches the solver (nonlinear), so no model exists;
+           the fixed small-value battery finds an admissible violating input
+           and the shrunk result is canonical. *)
+        let text =
+          refine_error_text_d
+            (decl
+               "  fn scale(x : {Int | _ > 0}, y : {Int | _ > 0}) : {Int | _ > 100} do x * y end") in
+        Alcotest.(check bool) "violation" true
+          (contains text "does not satisfy its return type constraint");
+        Alcotest.(check bool) "admissible minimal witness" true
+          (contains text "but scale(1, 1) returns 1."))
+  ; gated "unreflectable contract that HOLDS stays silent" (fun () ->
+        (* The battery must not manufacture errors: x*x+1 > 0 for every
+           probe, so this stays a skip exactly as before. *)
+        let text =
+          refine_error_text_d
+            (decl "  fn sq(x : Int) : {Int | _ > 0} do x * x + 1 end") in
+        Alcotest.(check bool) "no witness claim" false (contains text "but sq("))
+  ; gated "divergent execution falls back silently" (fun () ->
+        let text =
+          refine_error_text_d
+            (decl
+               "  fn spin(n : Int) : Int do spin(n) end\n\
+               \  fn fdiv(x : Int) : {Int | _ >= 0} do spin(x) end") in
+        Alcotest.(check bool) "no witness claim" false (contains text "but fdiv("))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -9624,4 +9894,7 @@ let () =
       ("verdict-query", verdict_query_suite);
       ("no-panic-by-proof", no_panic_proof_suite);
       ("no-panic-verdict-filter", verdict_filter_suite);
-      ("no-panic-syntactic-fallback", syntactic_fallback_suite) ]
+      ("no-panic-syntactic-fallback", syntactic_fallback_suite);
+      ("witness-harness", witness_harness_suite);
+      ("witness-core", witness_core_suite);
+      ("witness-e2e", witness_e2e_suite) ]

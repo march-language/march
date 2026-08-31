@@ -277,6 +277,8 @@ type march_frame = { mf_name : string; mf_file : string; mf_line : int; }
 val get_march_stack : unit -> march_frame list
 val clear_march_stack : unit -> unit
 val set_reduction_counting : bool -> unit
+val arm_reduction_budget : int -> unit
+val reductions_used : int -> int
 val eval_error : ('a, unit, string, 'b) format4 -> 'a
 val match_pattern :
   value -> March_ast.Ast.pattern -> (string * value) list option

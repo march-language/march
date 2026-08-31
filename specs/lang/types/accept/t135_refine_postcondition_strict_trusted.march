@@ -7,10 +7,13 @@
 --
 -- `mk` is identical to the reject companion
 -- `reject/t134_refine_postcondition_strict_undischarged` -- same signature,
--- same body, same undecidable obligation -- except `mk` now carries
--- `@[trusted]`. The postcondition is still SKIPPED (the checker still cannot
--- decide it), but that skip is now recorded as `Trusted` -- an assertion,
--- not a proof -- and the escalation is suppressed.
+-- same body (`z * z + 1`: nonlinear, so unreflectable; TRUE on every input,
+-- so the 2026-08-30 witness battery cannot refute it either), same
+-- undecidable obligation -- except `mk` now carries `@[trusted]`. The
+-- postcondition is still SKIPPED (the checker still cannot decide it), but
+-- that skip is now recorded as `Trusted` -- an assertion, not a proof --
+-- and the escalation is suppressed.  (`@[trusted]` rescues SKIPS only: a
+-- witness-CONFIRMED violation is never rescued.)
 --
 -- See specs/lang/refinement-types.md, "`@[trusted]` — a scoped, loud escape
 -- hatch".
@@ -20,7 +23,7 @@ mod T135 do
 
   @[trusted]
   fn mk(z : Int) : {Int | _ > 0} do
-    z
+    z * z + 1
   end
 
   fn main() : Int do

@@ -796,6 +796,24 @@ let set_reduction_counting (enabled : bool) : unit =
   else
     reduction_ctx := None
 
+(** Arm the reduction counter with an explicit budget, for callers that want a
+    HARD step ceiling rather than the scheduler's per-quantum preemption:
+    compile-time witness validation (lib/refinecheck/witness.ml) executes
+    counterexample candidates, which may be arbitrary user code, and needs
+    divergence to surface as [Yield] instead of hanging the compiler.
+    Returns the reductions actually consumed since the arming, so a caller can
+    charge a wall budget across many runs. *)
+let arm_reduction_budget (budget : int) : unit =
+  set_reduction_counting true;
+  match !reduction_ctx with
+  | Some ctx -> ctx.March_scheduler.Scheduler.remaining <- budget
+  | None -> ()
+
+let reductions_used (budget : int) : int =
+  match !reduction_ctx with
+  | Some ctx -> budget - max 0 ctx.March_scheduler.Scheduler.remaining
+  | None -> 0
+
 (** Reset the reduction budget (call between scheduling quanta). *)
 let check_reductions () : unit =
   match !reduction_ctx with
@@ -1689,7 +1707,12 @@ and apply_inner (fn_val : value) (args : value list) : value =
       ~finally:(fun () -> closure_prefix_override := saved)
       (fun () -> eval_expr env' body)
 
-  | VBuiltin (_, f) -> f args
+  | VBuiltin (name, f) ->
+    (* Witness-validation effect guard — see [Eval_prim.builtin_guard]. *)
+    (match !Eval_prim.builtin_guard with
+     | Some g -> g name
+     | None -> ());
+    f args
 
   | VForeign (lib, sym, ef_raises, param_tys, ret_ty) ->
     (* 1. Static OCaml stub (libm/libc math etc.). Keyed by both the C symbol

@@ -1770,6 +1770,10 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
      reuse for every VC within the module; the content-addressed VC cache still
      preserves cross-module results. *)
   March_refine.Refine.shutdown ();
+  (* Register the module with the witness validator so a Refuted model can be
+     confirmed by execution before it is reported (its interpreter env is
+     built lazily, on the first candidate that needs it). *)
+  Witness.set_module m;
   (* The ledger is per-module: without this, counts accumulate across every
      compilation in one process (the test binary today, an LSP session
      tomorrow) and a report would describe every module ever checked. *)

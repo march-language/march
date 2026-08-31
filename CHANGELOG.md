@@ -11,6 +11,21 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- Refinement failures now come with concrete, interpreter-validated
+  counterexamples rendered in source terms. A return contract violated for
+  some input reports the executed failing call — `but clamp(0) returns -1.` —
+  with the witness shrunk to a canonical small value; call-site precondition
+  errors show validated source-syntax examples (`(e.g. ys = [])` instead of
+  `len(ys) = 0`); `cap no_panic` division errors name the concrete admissible
+  zero divisor (`(e.g. d = 0)`); and contracts outside the solver's fragment
+  (`x * y`) are probed with a small input battery, so `fn scale(x, y): {Int |
+  _ > 100}` reports `but scale(1, 1) returns 1.` instead of staying silent.
+  Every reported witness was actually executed and observed to fail, and must
+  satisfy the parameters' own refinements — spurious solver models are
+  rejected, never shown.
+
 ### Fixed
 
 - `forge interactive` (and `march repl` / a bare `march` REPL) now build and load
@@ -19,6 +34,13 @@ git log is authoritative for exact commits.
   interpreter FFI". This is the REPL sibling of the `forge run` fix.
 
 ### Changed
+
+- A function whose declared return refinement is violated for **some**
+  admissible input is now a compile **error** when the violation is confirmed
+  by execution (previously: silent outside `cap verified`, "cannot verify"
+  inside it). Code like `fn f(n : Int) : {Int | _ >= 0} do n end` no longer
+  compiles. `@[trusted]` continues to rescue unproven-but-unrefuted
+  contracts; it does not suppress a witness-confirmed violation.
 
 - `lib/typecheck/typecheck.ml` is 1,824 lines smaller (8,272 -> 6,448):
   unification and surface-type conversion, session-type projection, declaration

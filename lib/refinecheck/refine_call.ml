@@ -1880,12 +1880,31 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                           (pred_str rp.pred) }]
                | _ -> []
              in
+             (* The inline example: prefer a witness-validated, shrunk,
+                source-syntax assignment over the raw model rendering —
+                fall back to the raw one whenever anything in the pipeline
+                (an undecodable sort, an unevaluable path fact) refuses. *)
+             let cx_str =
+               let fallback () = format_cx (model_of first) in
+               match subject, List.nth_opt args rp.idx with
+               | Argument, Some arg ->
+                 (match
+                    Witness.confirm_precond ~sc ~path ~pred:rp.pred
+                      ~binder:rp.binder ~arg ~model:(model_of first)
+                  with
+                  | Some entries ->
+                    (match Witness.render_entries entries with
+                     | Some s -> Printf.sprintf " (e.g. %s)" s
+                     | None -> fallback ())
+                  | None -> fallback ())
+               | _ -> fallback ()
+             in
              Err.report errctx
                { Err.severity = Err.Error; span;
                  message = Printf.sprintf
                    "refinement violation: %s does not satisfy %s `%s`%s\n%s"
                    param_label obligation_noun (pred_str rp.pred)
-                   (format_cx (model_of first))
+                   cx_str
                    (match subject with
                     | Argument ->
                       Printf.sprintf

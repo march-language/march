@@ -7,10 +7,13 @@
 -- whose entire premise is "if it compiles, it is proved". A `cap verified`
 -- module with an undischargeable return contract exited 0.
 --
--- `mk` declares `{Int | _ > 0}` as its return type but simply returns its
--- unconstrained parameter `z`. The checker cannot decide whether `z` is
--- positive (no guard, no fact), so the obligation is SKIPPED
--- (solver-undecided) -- and under `cap verified` that skip is now an error,
+-- `mk` declares `{Int | _ > 0}` as its return type over a body the checker
+-- cannot decide: `z * z + 1` is nonlinear, outside the reflectable fragment,
+-- and TRUE on every input so the witness battery finds no counterexample
+-- either (2026-08-30: the original body `z` became a witness-CONFIRMED
+-- violation -- a different, stronger error that no longer mentions `cap
+-- verified`). The obligation is therefore SKIPPED
+-- -- and under `cap verified` that skip is now an error,
 -- exactly as an undischarged precondition already was (see
 -- `check_call`'s escalation, which this mirrors for the return position).
 --
@@ -24,7 +27,7 @@ mod T134 do
   cap verified
 
   fn mk(z : Int) : {Int | _ > 0} do
-    z
+    z * z + 1
   end
 
   fn main() : Int do

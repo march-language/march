@@ -30,10 +30,19 @@
 -- positive on code that was never wrong; this witness exists to catch it the
 -- moment it happens. Do not "fix" this file by editing `shady` to make its
 -- postcondition provable -- that would defeat the point of the test.
+--
+-- (2026-08-30, counterexample surfacing: the body must also make the
+-- postcondition TRUE, not just unprovable -- `shady` returning `opaque_id(n)`
+-- unchanged was refutable by execution (shady(0) = 0, and 0 < 0 fails), so
+-- the witness validator correctly rejected the DEFINITION and this file
+-- stopped exiting 0 for an unrelated reason. `opaque_id(n) - 1` satisfies
+-- `_ < n` on every input while staying unprovable through the opaque call,
+-- and the instantiated `_ < 0` at `shady(0)` still contradicts `takepos`'s
+-- `_ >= 0`, so the propagation trap is exactly as armed as before.)
 mod M do
   needs IO.Console
   fn opaque_id(n : Int) : Int do n end
-  fn shady(n : Int) : {Int | _ < n} do opaque_id(n) end
+  fn shady(n : Int) : {Int | _ < n} do opaque_id(n) - 1 end
   fn takepos(k : {Int | _ >= 0}) : Int do k end
   fn main(_cap_console : Cap(IO.Console)) do
     println(int_to_string(takepos(shady(0))))

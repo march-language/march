@@ -111,10 +111,13 @@ Think of the checker as a cautious lawyer rather than an eager one: it only obje
 it can prove, beyond doubt, that you're wrong. There are exactly three outcomes for a
 predicate at a given point in your code:
 
-- The argument **always** satisfies the predicate → **pass**, silently.
-- The argument **never** satisfies it → **compile error** with a counterexample.
-- It **might or might not** satisfy it (the value is unknown, or the solver can't
-  decide) → **skipped**, silently.
+- The value **always** satisfies the predicate → **pass**, silently.
+- The predicate is **demonstrably violated** → **compile error** with a counterexample.
+  The checker has two ways to demonstrate that: the solver proves the predicate can
+  never hold, or it finds a concrete input, *runs it*, and watches the contract fail
+  (see [Counterexamples](#counterexamples-the-failing-input-in-source-terms)).
+- Neither is established (the value is unknown, the solver can't decide, and no failing
+  input was found) → **skipped**, silently.
 
 ```march
 fn take_pos(n : {Int | _ >= 0}) : Int do n end
@@ -132,6 +135,174 @@ checker never flags correct code, and never blocks a build over something it
 can't disprove. It also won't *prove* everything you might hope; facts it can't
 establish are conservatively let through. This trade is intentional: a
 refinement checker that cries wolf is one developers turn off.
+
+---
+
+## Counterexamples: the failing input, in source terms
+
+Being told a contract is broken is only half an answer; the useful half is *which
+input breaks it*. When March reports a violation, it names a concrete input — and,
+for a function body, the value that input actually produced:
+
+```march
+fn bump_progress(pct : {Int | _ >= 0 && _ <= 100}) : {Int | _ <= 100} do
+  pct + 1
+end
+```
+
+```
+`bump_progress` does not satisfy its return type constraint on all code paths.
+
+The return type requires:
+
+    _ <= 100
+
+but bump_progress(100) returns 101.
+
+3 |   fn bump_progress(pct : {Int | _ >= 0 && _ <= 100}) : {Int | _ <= 100} do
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    Every branch must produce a return value satisfying `_ <= 100`.
+```
+
+`bump_progress(100)` isn't a guess from the solver, and it isn't a random probe: it
+is *the* input that breaks this function, sitting exactly on the boundary — the case
+a reviewer skims past and the tests forget. The checker turned the solver's model
+into a real March value, **called `bump_progress(100)`**, and watched `101` come back
+and fail the predicate. Everything it prints, it ran.
+
+Off-by-one bugs are where this earns its keep, because the counterexample *is* the
+edge case:
+
+```march
+fn next_slot(i : {Int | _ >= 0 && _ < 16}) : {Int | _ < 16} do
+  i + 1
+end
+```
+
+```
+but next_slot(15) returns 16.
+```
+
+### Why running it matters
+
+The formula the solver sees is an *approximation* of your program. Anything March
+can't translate into logic — nonlinear arithmetic, a call it can't see inside — is
+dropped from the question rather than guessed at. That keeps proofs honest, but it
+means a raw "here's a failing input" answer can describe a situation your program
+never actually reaches:
+
+```march
+fn always_one(x : Int) : {Int | _ >= 0} do
+  if x * x >= 0 do 1 else x end     -- the else branch can never run
+end
+```
+
+`x * x >= 0` is nonlinear, so the guard is dropped, and the solver duly "finds" a
+failure down the `else` branch. Printing that would be a false alarm on correct
+code — the one thing this design refuses to do. Running the candidate returns `1`,
+the predicate holds, the answer is thrown away, and **the checker stays quiet**.
+
+So the rule is simple, and worth trusting: **every counterexample you see was
+actually executed and observed to fail.** Candidates that can't be run — a function
+needing real I/O, one that loops forever, a value the checker can't build — are not
+reported at all; the obligation stays skipped, exactly as before.
+
+### Counterexamples respect your other contracts
+
+A counterexample is only fair if your function ever promised to handle that input.
+Witnesses must satisfy the parameters' own refinements:
+
+```march
+fn scale(x : {Int | _ > 0}, y : {Int | _ > 0}) : {Int | _ > 100} do
+  x * y
+end
+```
+
+```
+but scale(1, 1) returns 1.
+```
+
+`scale(0, 0)` would be an easier counterexample, but `0` is ruled out by
+`{Int | _ > 0}`, so it's never blamed.
+
+Counterexamples are also **shrunk** to the smallest failing input rather than
+whatever the solver happened to pick — which is often the most useful number in the
+whole message, because it's the *threshold* where things start going wrong:
+
+```march
+fn backoff_ms(attempt : {Int | _ >= 0}) : {Int | _ <= 30000} do
+  attempt * 1000
+end
+```
+
+```
+but backoff_ms(31) returns 31000.
+```
+
+Every attempt from 31 up blows the cap; you're told the first one, so the fix (clamp
+at 30) reads straight off the diagnostic. Shrinking is deterministic, so the same
+program always reports the same counterexample.
+
+Note that `x * y` never reaches the solver at all. When a contract falls outside what
+March can translate, it tries a small batch of likely inputs through the same
+run-and-check process. A confirmed failure gets reported; finding nothing leaves the
+contract skipped. So a contract that is unprovable *and* true — `{Int | _ > 0}` over
+`x * x + 1` — stays silent rather than being guessed at in either direction.
+
+### Records and lists print the way you'd write them
+
+```march
+type Config = { port : Int, workers : Int }
+
+fn with_port(cfg : Config, p : Int) : {v : Config | v.port >= 1024} do
+  { port: p, workers: cfg.workers }
+end
+```
+
+```
+but with_port({ port: 0, workers: 0 }, 0) returns { port: 0, workers: 0 }.
+```
+
+At a **call site**, the example is given in terms of the caller's own variables:
+
+```march
+fn median(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+
+fn report(samples : {List(Int) | len(_) == 0}) : Int do
+  median(samples)
+end
+```
+
+```
+refinement violation: argument `xs` of `median` does not satisfy precondition
+`len(_) > 0` (e.g. samples = [])
+```
+
+`samples = []` is the offending value itself. March used to print
+`len(samples) = 0` — a true statement *about* the value that you then had to work
+backwards from.
+
+### Where they show up
+
+| Site | What the diagnostic adds |
+|---|---|
+| Return contract | ``but bump_progress(100) returns 101.`` |
+| Call-site precondition | ``(e.g. samples = [])`` |
+| `cap no_panic` division | ``(e.g. count = 0)`` |
+
+Those are the two places March emits refinement diagnostics: the definition (return
+contracts over `Int`, `Bool`, `Float` and records) and the call site (preconditions
+of any checkable type, lists and strings included). A return contract over a
+collection goes down a different path that stays quiet either way, so a broken
+`{List(Int) | len(_) > 0}` return gets caught where the value is *used* rather than
+where it's built.
+
+> **One consequence worth knowing.** A function whose return contract is broken for
+> *some* input is now a compile error in every module, not just a `cap verified` one,
+> whenever a counterexample confirms it: `fn f(n : Int) : {Int | _ >= 0} do n end` no
+> longer compiles. The checker hasn't become less cautious — it demonstrated the bug
+> by running it. Contracts that stay genuinely undecided are unaffected.
 
 ---
 
@@ -711,8 +882,8 @@ can be technically legal and practically inert.
 
 If you want the opposite deal for a particular module ("I want these contracts to be
 a guarantee, and I want to be told when they aren't"), declare `cap verified`. Inside
-that module, a precondition at a call site that the checker can't discharge becomes a
-compile error:
+that module, an obligation the checker can't discharge — a precondition at a call
+site, or a return refinement at a definition — becomes a compile error:
 
 ```march
 mod Checked do
