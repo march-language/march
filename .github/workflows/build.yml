@@ -72,10 +72,26 @@ jobs:
             # follows it) failed here and the job still reported success.
             set -euo pipefail
             apk add --no-cache bash opam ocaml build-base git llvm19-dev llvm19 brotli-dev brotli-libs
-            # Build blake3 from source (portable C only — no x86 SIMD on aarch64)
+            # /work is the host checkout bind-mounted in; it is owned by the
+            # runner user (uid 1001) while this container runs as root, so git
+            # refuses it as "dubious ownership" and every plumbing command exits
+            # 128. `opam install .` shells out to `git ls-files` to enumerate the
+            # pinned local package, so without this the deps install dies with a
+            # bare `"/usr/bin/git ls-files" exited with code 128`. The host
+            # runner's own safe.directory entry does not carry over: different
+            # user, different HOME, different path (/work, not the host path).
+            git config --global --add safe.directory /work
+            # Build blake3 from source. The x86 SIMD units are correctly omitted
+            # here, but blake3_neon.c is NOT optional on aarch64: blake3_dispatch.c
+            # dispatches to blake3_hash_many_neon unconditionally on this target
+            # (NEON is baseline for aarch64, so upstream has no runtime check to
+            # skip), and leaving it out produces a libblake3.so that links fine and
+            # then fails every consumer with `undefined reference to
+            # blake3_hash_many_neon`. The macOS leg below already compiles it.
             git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
             gcc -O2 -shared -fPIC -o /usr/lib/libblake3.so \
-              /tmp/blake3/c/blake3.c /tmp/blake3/c/blake3_dispatch.c /tmp/blake3/c/blake3_portable.c
+              /tmp/blake3/c/blake3.c /tmp/blake3/c/blake3_dispatch.c \
+              /tmp/blake3/c/blake3_portable.c /tmp/blake3/c/blake3_neon.c
             cp /tmp/blake3/c/blake3.h /usr/include/blake3.h
             # NOT covered by .github/actions/opam-deps (which the native legs
             # below use): this runs inside an ephemeral Alpine container and
