@@ -141,6 +141,22 @@ let rec scan (f : facts) (owner : string) (bound : StrSet.t) (e : T.expr) : unit
     go e1;
     scan f owner (StrSet.add v.T.v_name bound) e2
   | T.ELetRec (fns, body) ->
+    (* A local function's calls and operations belong to the ENCLOSING
+       top-level function, not to the local's own name.
+
+       This is the SIGBUS.  Attributing them to the local name puts that name
+       in the `need` table, but a local is not in [tm_fns], so [elaborate]
+       never adds parameters to it while [thread] happily adds an argument at
+       its call sites — an arity mismatch that dies at runtime.  Defun lifts
+       these to top level LATER, which is why `--dump-tir` shows `fn do_lines`
+       and made it look top-level.  `File.with_lines` is the witness: its local
+       `do_lines` calls `file_read_line`.
+
+       Attributing upward is also the semantically right answer — a local
+       function's IO is its enclosing function's IO — so it closes a missed
+       -threading hole at the same time. The local's own name and parameters
+       still enter [bound] so that references to them are not mistaken for
+       references to a top-level function of the same name. *)
     let bound' =
       List.fold_left (fun acc (fd : T.fn_def) -> StrSet.add fd.T.fn_name acc) bound fns
     in
@@ -149,7 +165,7 @@ let rec scan (f : facts) (owner : string) (bound : StrSet.t) (e : T.expr) : unit
          let inner =
            List.fold_left (fun acc (p : T.var) -> StrSet.add p.T.v_name acc) bound' fd.T.fn_params
          in
-         scan f fd.T.fn_name inner fd.T.fn_body)
+         scan f owner inner fd.T.fn_body)
       fns;
     scan f owner bound' body
   | T.ECase (a, brs, def) ->
@@ -211,6 +227,12 @@ let needed_caps (m : T.tir_module) : (string, string list) Hashtbl.t =
          if merged <> get me then begin Hashtbl.replace need me merged; changed := true end)
       m.T.tm_fns
   done;
+  (* Invariant: [need] may only ever name a TOP-LEVEL function.  Anything else
+     cannot have parameters added ([elaborate] maps over [tm_fns]) while its
+     call sites would still gain arguments. *)
+  Hashtbl.iter
+    (fun k _ -> if not (Hashtbl.mem f.toplevel k) then Hashtbl.remove need k)
+    (Hashtbl.copy need);
   (* Drop anything whose arity must not change, and anything left needing
      nothing. *)
   Hashtbl.iter
@@ -218,6 +240,42 @@ let needed_caps (m : T.tir_module) : (string, string list) Hashtbl.t =
     (Hashtbl.copy need);
   Hashtbl.iter (fun k v -> if v = [] then Hashtbl.remove need k) (Hashtbl.copy need);
   need
+
+(** Diagnostic: every name that appears as an [ADefRef], with no filtering at
+    all.  [scan]'s [unsafe] rule only marks such a name when [did_name] matches
+    a top-level [fn_name] and is not locally bound; if those spellings ever
+    disagree, a function can be threaded AND still reached indirectly, and an
+    indirect call passes the OLD arity. *)
+let all_defrefs (m : T.tir_module) : (string, unit) Hashtbl.t =
+  let h = Hashtbl.create 256 in
+  let rec go (e : T.expr) =
+    let atom (a : T.atom) =
+      match a with
+      | T.ADefRef d -> Hashtbl.replace h d.T.did_name ()
+      | T.AVar _ | T.ALit _ -> ()
+    in
+    let atoms = List.iter atom in
+    match e with
+    | T.EApp (_, args) -> atoms args
+    | T.ECallPtr (f, args) -> atom f; atoms args
+    | T.EAtom a -> atom a
+    | T.ELet (_, a, b) -> go a; go b
+    | T.ELetRec (fns, b) -> List.iter (fun (fd : T.fn_def) -> go fd.T.fn_body) fns; go b
+    | T.ECase (a, brs, d) ->
+      atom a; List.iter (fun (br : T.branch) -> go br.T.br_body) brs; Option.iter go d
+    | T.ETuple ats -> atoms ats
+    | T.ERecord fl -> List.iter (fun (_, a) -> atom a) fl
+    | T.EField (a, _) -> atom a
+    | T.EUpdate (a, fl) -> atom a; List.iter (fun (_, x) -> atom x) fl
+    | T.EAlloc (_, ats) | T.EStackAlloc (_, ats) -> atoms ats
+    | T.EReuse (a, _, ats) -> atom a; atoms ats
+    | T.EFree a | T.EIncRC a | T.EDecRC a | T.EAtomicIncRC a | T.EAtomicDecRC a -> atom a
+    | T.ESeq (a, b) -> go a; go b
+    | T.EAllocHole (t, _, ats, _) -> Option.iter atom t; atoms ats
+    | T.ESetField (o, _, v) -> atom o; atom v
+  in
+  List.iter (fun (fd : T.fn_def) -> go fd.T.fn_body) m.T.tm_fns;
+  h
 
 (** Human-readable analysis dump, behind [MARCH_DUMP_CAP_PASSING=1].  The
     threading is only as good as this table, and the table is derived from a
@@ -250,6 +308,16 @@ let dump (m : T.tir_module) : unit =
     Hashtbl.fold (fun k v acc -> (k, v) :: acc) need []
     |> List.sort (fun (a, _) (b, _) -> String.compare a b)
   in
+  (* The invariant that keeps threading sound: nothing threaded may also be
+     reachable indirectly.  Report violations rather than assuming. *)
+  let refs = all_defrefs m in
+  let leaked =
+    List.filter (fun (k, _) -> Hashtbl.mem refs k) rows |> List.map fst
+  in
+  if leaked <> [] then
+    Printf.eprintf
+      "=== cap-passing: %d THREADED FUNCTIONS ALSO APPEAR AS ADefRef: %s ===\n"
+      (List.length leaked) (String.concat ", " leaked);
   Printf.eprintf "=== cap-passing: %d of %d functions need a threaded capability ===\n"
     (List.length rows) (List.length m.T.tm_fns);
   List.iter (fun (k, v) -> Printf.eprintf "  %-52s %s\n" k (String.concat ", " v)) rows

@@ -419,6 +419,59 @@ let dict_fields_sorted =
       in
       Alcotest.(check (list string)) "caps with unsorted fields" [] unsorted)
 
+(* ── capability-passing analysis invariants ───────────────────────────── *)
+
+(* Regression: a nested local function that performs IO.
+
+   `File.with_lines` has a local `fn do_lines(a, f)` calling `file_read_line`.
+   Attributing that operation to the LOCAL's name put "do_lines" in the
+   analysis table -- but a local is not in [tm_fns], so the elaboration never
+   added parameters to it while the threading happily added an ARGUMENT at its
+   call sites.  The compiled binary died with SIGBUS (rc=138).  Defun lifts
+   such locals to top level later, which is why `--dump-tir` showed
+   `fn do_lines` and made it look top-level all along.
+
+   Two assertions, because either alone would have missed it: no entry may
+   name something that is not a top-level function (the crash), and the
+   ENCLOSING function must have picked the capability up (the missed
+   threading that attributing upward also fixes). *)
+let analysis_attributes_locals_to_their_owner =
+  Alcotest.test_case "a nested local fn's IO is charged to its enclosing fn" `Quick
+    (fun () ->
+      let m =
+        parse_and_desugar {|mod L do
+  needs IO.FileRead
+  fn outer(path : String) : Int do
+    fn inner(n : Int) : Int do
+      match file_read(path) do
+        Ok(_)  -> n + 1
+        Err(_) -> n
+      end
+    end
+    inner(0)
+  end
+end|}
+      in
+      let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+      let tir =
+        March_tir.Lower.lower_module ~type_map ~test_mode:false ~hot_reload:false m
+      in
+      let need = March_tir.Cap_passing.needed_caps tir in
+      let toplevel =
+        List.map (fun (fd : March_tir.Tir.fn_def) -> fd.March_tir.Tir.fn_name)
+          tir.March_tir.Tir.tm_fns
+      in
+      let non_toplevel =
+        Hashtbl.fold (fun k _ acc -> if List.mem k toplevel then acc else k :: acc)
+          need []
+      in
+      Alcotest.(check (list string))
+        "no entry names a non-top-level function" [] (List.sort compare non_toplevel);
+      Alcotest.(check bool) "the enclosing fn picked up IO.FileRead" true
+        (match Hashtbl.find_opt need "outer" with
+         | Some caps -> List.mem "IO.FileRead" caps
+         | None -> false))
+
 let tests = [
   decl_ok; decl_unknown_type; decl_non_record;
   impl_ok; impl_pfn; impl_external; impl_wrong_dict; impl_no_dict_declared;
@@ -428,4 +481,5 @@ let tests = [
   rt_dispatch; rt_swap; rt_default; rt_narrow_propagates;
   io_console_shape; shadow_list_matches_stdlib; io_clock_zero_arg; io_mut_has_no_dictionary;
   excluded_ops_are_documented; dict_fields_sorted;
+  analysis_attributes_locals_to_their_owner;
 ]
