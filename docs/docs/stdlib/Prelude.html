@@ -1669,7 +1669,8 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Prelude.html#fn-todo"><span class="sb-kind" style="color:var(--fn)">F</span>todo</a>
 <a class="sl" href="Prelude.html#fn-unreachable"><span class="sb-kind" style="color:var(--fn)">F</span>unreachable</a>
 <a class="sl" href="Prelude.html#fn-unwrap"><span class="sb-kind" style="color:var(--fn)">F</span>unwrap</a>
-<a class="sl" href="Prelude.html#fn-unwrap_or"><span class="sb-kind" style="color:var(--fn)">F</span>unwrap_or</a></div></div>
+<a class="sl" href="Prelude.html#fn-unwrap_or"><span class="sb-kind" style="color:var(--fn)">F</span>unwrap_or</a>
+<a class="sl" href="Prelude.html#fn-with_cap"><span class="sb-kind" style="color:var(--fn)">F</span>with_cap</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Presence.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Presence.html">Presence</a></div><div class="sb-sub"><a class="sl" href="Presence.html#type-PresenceMeta"><span class="sb-kind" style="color:var(--ty)">T</span>PresenceMeta</a>
 <a class="sl" href="Presence.html#type-PresenceEntry"><span class="sb-kind" style="color:var(--ty)">T</span>PresenceEntry</a>
 <a class="sl" href="Presence.html#type-PresenceState"><span class="sb-kind" style="color:var(--ty)">T</span>PresenceState</a>
@@ -2377,7 +2378,11 @@ absence of a generic `length` prevents silent type confusion.</code></pre><ul><l
 <div class="item" id="fn-todo"><div class="ih"><span class="badge bfn">fn</span><span class="name">todo</span><span class="sig">todo(msg : String) : a</span><a class="anchor-link" href="#fn-todo" title="Link">#</a></div><div class="ib"><p>Marks code as not yet implemented. Typechecks as any type so you can sketch a program top-down. Never valid in production.</p></div></div>
 <div class="item" id="fn-unreachable"><div class="ih"><span class="badge bfn">fn</span><span class="name">unreachable</span><span class="sig">unreachable() : a</span><a class="anchor-link" href="#fn-unreachable" title="Link">#</a></div><div class="ib"><p>Asserts that a code path is unreachable.</p></div></div>
 <div class="item" id="fn-unwrap"><div class="ih"><span class="badge bfn">fn</span><span class="name">unwrap</span><span class="sig">unwrap(opt : {Option(a) | is_Some(_)}) : a</span><a class="anchor-link" href="#fn-unwrap" title="Link">#</a></div><div class="ib"><p>Extracts the value from Some(x), panicking if None.</p></div></div>
-<div class="item" id="fn-unwrap_or"><div class="ih"><span class="badge bfn">fn</span><span class="name">unwrap_or</span><span class="sig">unwrap_or(opt : Option(a), default : a) : a</span><a class="anchor-link" href="#fn-unwrap_or" title="Link">#</a></div><div class="ib"><p>Returns the contained value, or <code>default</code> if None.</p></div></div></main></div><script>
+<div class="item" id="fn-unwrap_or"><div class="ih"><span class="badge bfn">fn</span><span class="name">unwrap_or</span><span class="sig">unwrap_or(opt : Option(a), default : a) : a</span><a class="anchor-link" href="#fn-unwrap_or" title="Link">#</a></div><div class="ib"><p>Returns the contained value, or <code>default</code> if None.</p></div></div>
+<div class="item" id="fn-with_cap"><div class="ih"><span class="badge bfn">fn</span><span class="name">with_cap</span><span class="sig">with_cap(_c, f) do f(()) end</span><a class="anchor-link" href="#fn-with_cap" title="Link">#</a></div><div class="ib"><p>Runs <code>f</code> with <code>c</code> installed as the capability its operations dispatch through, so a test can substitute an implementation:</p><pre><code class="language-march">  with_cap(mock, <span class="tok-kw">fn</span> _ -&gt; code_under_test())</code></pre><pre><code>At runtime this simply calls `f` — the capability is consumed by the
+compiler's capability-passing elaboration, which rewrites calls inside `f`
+to route through `c`'s dictionary. Outside a `--test` build the elaboration
+does not run and this is exactly `f(())`.</code></pre></div></div></main></div><script>
 /* Theme toggle */
 function getTheme(){var t=localStorage.getItem('march-doc-theme');
 if(t)return t;return window.matchMedia('(prefers-color-scheme:light)').matches?'light':'dark';}
