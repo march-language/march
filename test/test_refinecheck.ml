@@ -4561,6 +4561,43 @@ end|}
           (contains msg "established here");
         Alcotest.(check bool) "never leaks the SMT symbol" false (contains msg "len$xs"));
 
+    (* DISCRIMINATING fixture (found in review round 1 of this task): every
+       other case above has a real risk of passing even if the per-conjunct
+       discharge is changed to run against [vc_for_diagnose] (Task 1's
+       diagnosis-narrowed assumption set, which drops the encoder's own
+       [push_structural] well-formedness axioms) instead of the FULL [vc] the
+       whole-goal proof attempt uses — none of them depend on a structural
+       axiom to prove a CONJUNCT.  This one does: there is no user guard on
+       `xs` or `i` anywhere, so `len(xs) >= 0` can only be established by
+       [measure_of_var]'s structural non-negativity axiom (emitted via
+       [push_structural], never in [user_assume]).  `i > 100` has no support
+       at all and is correctly the missing half.
+       If this test ever goes RED, look first at whether the per-conjunct
+       discharge in [Refine_call.check_call]'s fall-through still reads
+       `{ vc with Smt.goal = g }` — [vc] and [vc_for_diagnose] are bound a
+       few lines apart and a copy-paste substitution of one for the other is
+       an easy mistake.  Swapping to [vc_for_diagnose] would NOT flip the
+       slug (still "partial-conjunct") and would NOT fail any test above —
+       it silently reports `len(xs) >= 0` as unestablished when the checker
+       can in fact prove it, which is exactly the class of defect this whole
+       project exists to remove.  Only the MESSAGE TEXT below catches it. *)
+    gated "a structural axiom (not a user guard) can establish a conjunct"
+      (fun () ->
+        let msg =
+          refine_error_text_d
+            {|mod AxTest do
+  cap verified
+  fn f(xs : List(Int), i : {Int | len(xs) >= 0 && i > 100}) : Int do 0 end
+  fn g(xs : List(Int), i : Int) : Int do f(xs, i) end
+end|}
+        in
+        Alcotest.(check bool) "partial-conjunct fires" true
+          (contains msg "partial-conjunct");
+        Alcotest.(check bool) "the structurally-established conjunct is on the held side" true
+          (contains msg "`len(xs) >= 0` established here");
+        Alcotest.(check bool) "the genuinely unsupported conjunct is on the missing side" true
+          (contains msg "`i > 100` not"));
+
     (* A third variant, [Nonlinear_goal], was drafted here and cut: the only
        [smt_of] used to build a goal never produces [Smt.Mul] for two
        non-literal operands, so a fixture like `pos(a * b)` never reaches
