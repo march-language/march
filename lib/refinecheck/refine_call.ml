@@ -682,30 +682,68 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
            "`cap verified` module: cannot verify %s `%s` on `%s` (%s: %s)\n%s"
            obligation_noun (pred_str rp.pred) callee (Obligation.reason_name r)
            (Obligation.reason_detail r) remedy)
-    (* Outside `cap verified`, a skip stays non-fatal — but say once per module
-       that it happened, so "no diagnostic" cannot be read as "checked". A
-       withdrawn alias is excluded: it has its own dedicated explanation and is
-       not the checker running out of road. *)
+    (* Outside `cap verified`, a skip stays non-fatal. A DIAGNOSED cause is
+       specific and actionable, so it reports at every call site; the residual
+       reasons keep the once-per-module throttle, whose rationale — "advice
+       repeated per call site would be worse than silence" — is about a
+       message that says the same thing everywhere. "Nothing in scope
+       constrains `n`" and "`_ >= 0` held here, `_ < len(xs)` did not" are
+       different facts about different calls, so suppressing the second
+       because the first already printed is a bug, not the throttle working.
+       A withdrawn alias is excluded from both halves: it has its own
+       dedicated explanation and is not the checker running out of road. *)
     | Obligation.Skipped r
-      when (not !strict_verified) && (not !unverified_hinted)
-           && (match r with Obligation.Alias_withdrawn _ -> false | _ -> true) ->
-      unverified_hinted := true;
-      Err.hint errctx ~span
-        (* Hard-wrapped near 78 columns. The renderer does not reflow, so a
-           single long line is left to the terminal to break wherever it
-           happens to run out of width — mid-token, and differently in every
-           window. *)
-        (Printf.sprintf
-           "%s `%s` on `%s` was NOT verified here.\n\
-            reason: %s — %s\n\
-            note: March reports only definite failures, so a contract it \
-            cannot decide\n\
-            is accepted in silence. Add `cap verified` to this module to make \
-            every\n\
-            unverifiable obligation an error instead; `--refine-report` lists \
-            them all."
-           obligation_noun (pred_str rp.pred) callee
-           (Obligation.reason_name r) (Obligation.reason_detail r))
+      when (not !strict_verified)
+           && (match r with
+               | Obligation.Alias_withdrawn _ -> false
+               | Obligation.Unconstrained_subject _
+               | Obligation.Opaque_application _
+               | Obligation.Partial_conjunct _ -> true
+               | Obligation.Solver_undecided
+               | Obligation.Unreflectable_predicate
+               | Obligation.Unreflectable_subject
+               | Obligation.Sort_conflict
+               | Obligation.Float_sort_gate -> not !unverified_hinted) ->
+      (match r with
+       | Obligation.Solver_undecided
+       | Obligation.Unreflectable_predicate
+       | Obligation.Unreflectable_subject
+       | Obligation.Sort_conflict
+       | Obligation.Float_sort_gate -> unverified_hinted := true
+       | Obligation.Unconstrained_subject _
+       | Obligation.Opaque_application _
+       | Obligation.Partial_conjunct _
+       | Obligation.Alias_withdrawn _ -> ());
+      let body =
+        match r with
+        | Obligation.Unconstrained_subject _
+        | Obligation.Opaque_application _
+        | Obligation.Partial_conjunct _ ->
+          Printf.sprintf "%s `%s` on `%s` was NOT verified here.\n%s"
+            obligation_noun (pred_str rp.pred) callee (Obligation.reason_detail r)
+        | Obligation.Solver_undecided
+        | Obligation.Unreflectable_predicate
+        | Obligation.Unreflectable_subject
+        | Obligation.Sort_conflict
+        | Obligation.Float_sort_gate
+        | Obligation.Alias_withdrawn _ ->
+          (* Hard-wrapped near 78 columns. The renderer does not reflow, so a
+             single long line is left to the terminal to break wherever it
+             happens to run out of width — mid-token, and differently in every
+             window. *)
+          Printf.sprintf
+            "%s `%s` on `%s` was NOT verified here.\n\
+             reason: %s — %s\n\
+             note: March reports only definite failures, so a contract it \
+             cannot decide\n\
+             is accepted in silence. Add `cap verified` to this module to make \
+             every\n\
+             unverifiable obligation an error instead; `--refine-report` lists \
+             them all."
+            obligation_noun (pred_str rp.pred) callee
+            (Obligation.reason_name r) (Obligation.reason_detail r)
+      in
+      Err.hint errctx ~span body
     | _ -> ()
   in
   match List.nth_opt args rp.idx with

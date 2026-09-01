@@ -117,6 +117,47 @@ let refine_hints src =
       then Some d.March_errors.Errors.message else None)
     ctx.March_errors.Errors.diagnostics
 
+(* Same as [refine_hints], but DESUGARED first — needed whenever the fixture
+   uses a qualified call like `List.length(ys)`: desugar flattens `EField`
+   into a single dotted `EVar`, which is what the `List.length` measure alias
+   actually keys on (see [has_refine_error_d]).  Skipping desugar here doesn't
+   just miss the alias — it changes the DIAGNOSIS: `List.length(ys) < 100`
+   goes from "a guard the checker cannot connect to `len(_)`" (solver-undecided)
+   to "no guard the checker even parses" (unconstrained-subject), a different
+   reason entirely. Use this whenever pairing with [skip_reasons], which
+   always desugars, on the same fixture. *)
+let refine_hints_d src =
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module ctx
+    (March_desugar.Desugar.desugar_module (parse src));
+  List.filter_map
+    (fun (d : March_errors.Errors.diagnostic) ->
+      if d.March_errors.Errors.severity = March_errors.Errors.Hint
+      then Some d.March_errors.Errors.message else None)
+    ctx.March_errors.Errors.diagnostics
+
+(* Reason each surviving [Skipped] obligation was filed under, in traversal
+   order.  Moved up from beside [reason_suite] below (where it originated) so
+   the throttle tests just below can pin a fixture's classification before
+   asserting on the hints it produces — see the "diagnosed cause is reported
+   at every site" pair.  Gating notes: only the [Solver_undecided] case
+   reaches the solver; the other three are decided at reflection / sort-gate
+   time, BEFORE [Refine.discharge], so gating them would disable them on a
+   z3-less machine for no reason — and worse, [Solver_undecided] is the
+   fallthrough every obligation lands in when there is no solver, so an
+   ungated reason test would pass by accident there.  Verified empirically
+   with z3 off PATH. *)
+let skip_reasons src =
+  March_refinecheck.Obligation.reset ();
+  ignore (has_refine_error_d src);
+  List.filter_map
+    (fun (o : March_refinecheck.Obligation.t) ->
+      match o.March_refinecheck.Obligation.verdict with
+      | March_refinecheck.Obligation.Skipped r ->
+        Some (March_refinecheck.Obligation.reason_name r)
+      | _ -> None)
+    (March_refinecheck.Obligation.all ())
+
 (* Most of this suite needs a solver, so a z3-less machine cannot run it.  What
    it must NOT do is report those cases as PASSING.  [gated] used to print a
    "[skip]" line and then return unit, which alcotest scores as `[OK]`: on a
@@ -196,27 +237,78 @@ let suite =
           (contains text "e.g. k = "));
 
     (* An undecidable obligation stays non-fatal, but silence is
-       indistinguishable from "checked and fine". One hint per module says so
-       and names the escalation. *)
-    gated "an unverified contract is announced once" (fun () ->
+       indistinguishable from "checked and fine". A hint says so.
+       `take_n(k)` with `k : Int` unconstrained is [Unconstrained_subject], a
+       DIAGNOSED cause (Task 3's per-site rule), so its message is the
+       specific "nothing in scope constrains" text rather than the residual's
+       `cap verified` boilerplate paragraph — the latter is module-level
+       advice that Task 3 deliberately drops for diagnosed causes. *)
+    gated "an unverified contract is announced" (fun () ->
         let hints =
           refine_hints (decl "  fn f(k : Int) : Int do take_n(k) end") in
         Alcotest.(check bool) "a hint is emitted" true
           (List.exists (fun h -> contains h "was NOT verified here") hints);
-        Alcotest.(check bool) "it points at `cap verified`" true
-          (List.exists (fun h -> contains h "cap verified") hints));
+        Alcotest.(check bool) "it names what's unconstrained" true
+          (List.exists (fun h -> contains h "nothing in scope constrains") hints));
 
-    (* Advice repeated per call site would be worse than silence. *)
-    gated "the unverified hint is emitted at most once per module" (fun () ->
+    (* A DIAGNOSED cause is specific and actionable, so it reports at every
+       site.  The throttle exists to stop a vague message repeating; it must
+       not also suppress three different pieces of real advice. *)
+    gated "a diagnosed cause is reported at every site" (fun () ->
         let hints =
           refine_hints
             (decl
                "  fn f(k : Int) : Int do take_n(k) end\n\
                \  fn g(k : Int) : Int do take_n(k) end\n\
                \  fn h(k : Int) : Int do take_n(k) end") in
-        Alcotest.(check int) "exactly one unverified hint" 1
+        Alcotest.(check int) "one hint per site" 3
           (List.length
              (List.filter (fun h -> contains h "was NOT verified here") hints)));
+
+    (* …and the residual keeps the throttle, because repeating "the solver
+       proved neither" three times is exactly the noise it was added for.
+       This fixture must produce a BARE solver-undecided; if the taxonomy ever
+       learns to diagnose it, this test starts failing and the right fix is a
+       new fixture, not deleting the throttle.
+
+       The brief's original UD4 fixture (guard `a > b` before `pos(a - b) :
+       {Int | _ > 0}`) turned out to reflect as [unreflectable-predicate], not
+       [solver-undecided] — verified by running [skip_reasons] on it before
+       touching any source, per the task's own instruction to replace rather
+       than weaken the assertion. Swapped for the "insufficiently guarded
+       measure" shape already pinned genuinely solver-undecided a few hundred
+       lines below, in "an unrefined parameter passed straight into a measured
+       one is diagnosed as unconstrained" (the `guarded` half): the caller's
+       `List.length(ys) < 100` guard is real but does not entail `len(_) > 0`,
+       so the solver receives a goal it cannot decide either way, with no
+       structural axiom involved.
+
+       The `List.length` alias only resolves post-desugar (`EField` ->
+       dotted `EVar`, see [has_refine_error_d]), so the hint assertion below
+       uses [refine_hints_d], not the non-desugaring [refine_hints]: on the
+       first pass this fixture was checked with the un-desugared helper and
+       silently landed on [unconstrained-subject] instead — same slug family
+       of bug the desugar helpers exist to avoid, caught here only because
+       [skip_reasons] (which always desugars) and the hint assertion
+       disagreed on the SAME source. *)
+    gated "the residual solver-undecided hint stays once per module" (fun () ->
+        let src =
+          {|mod UD4 do
+  fn head_of(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn f(ys : List(Int)) : Int do
+    if List.length(ys) < 100 do head_of(ys) else 0 end
+  end
+  fn g(ys : List(Int)) : Int do
+    if List.length(ys) < 100 do head_of(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check (list string)) "the fixture is a bare residual"
+          [ "solver-undecided"; "solver-undecided" ] (skip_reasons src);
+        Alcotest.(check int) "exactly one hint" 1
+          (List.length
+             (List.filter (fun h -> contains h "was NOT verified here")
+                (refine_hints_d src))));
 
     (* The hint is about the checker giving up. Code it can discharge must stay
        completely silent, or every clean project grows advisory noise. *)
@@ -4171,18 +4263,8 @@ let obligation_suite =
    so gating them would disable them on a z3-less machine for no reason — and
    worse, [Solver_undecided] is the fallthrough every obligation lands in when
    there is no solver, so an ungated reason test would pass by accident there.
-   Verified empirically with z3 off PATH. *)
-let skip_reasons src =
-  March_refinecheck.Obligation.reset ();
-  ignore (has_refine_error_d src);
-  List.filter_map
-    (fun (o : March_refinecheck.Obligation.t) ->
-      match o.March_refinecheck.Obligation.verdict with
-      | March_refinecheck.Obligation.Skipped r ->
-        Some (March_refinecheck.Obligation.reason_name r)
-      | _ -> None)
-    (March_refinecheck.Obligation.all ())
-
+   Verified empirically with z3 off PATH.  [skip_reasons] itself now lives up
+   near [refine_hints], where the once-per-module-throttle tests need it. *)
 let reason_suite =
   [ (* A RECORD subject whose actual cannot be reflected: `mk()` is a call, so
        [record_self] finds no term for it and no goal is built at all.  The
