@@ -844,8 +844,12 @@ return-contract witnesses — Task 9's CHANGELOG entry must mention it.
    argument (`List({Int | _ > 0})`), inside a record field, or under a
    `TyLinear` wrapper (which `strip_refine` sees through and `admissible` does
    not) is silently unchecked — all three parse today. A zero-filled decode
-   could then execute a value no caller could construct and blame the caller
-   for it. The shipped gate walks the parameter type (`refinement_free`,
+   could then execute a value the DECLARED type excludes and report a
+   requirement the caller never had. Stated precisely: the checker does not
+   enforce nested refinements today (`g([0, -5])` against `List({Int | _ > 0})`
+   passes `--check` in silence), so this is defence-in-depth that becomes live
+   when nested enforcement lands. The shipped gate walks the parameter type
+   (`refinement_free`,
    following registered ADT/record definitions with a visited set) and declines
    on any refinement below the outermost position, treating an unregistered
    type name as unsafe. This is the answer to "can `admissible` accept
