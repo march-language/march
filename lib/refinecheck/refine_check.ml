@@ -49,7 +49,7 @@
    The four module aliases (A, Smt, Refine, Err) moved with the band and
    arrive through the include, so they are no longer declared above.
    The SMT encoding and sort discipline moved VERBATIM into [Refine_encode].
-   [include], not aliases: that band owns 16 of this pass's 20 mutable cells
+   [include], not aliases: that band owns 16 of this pass's 22 mutable cells
    and they are written from the far end of this file, so the SAME ref cell
    must be in scope here — see [Refine_encode]'s header. *)
 (* ── §1–§11 moved out ─────────────────────────────────────────────────────
@@ -61,7 +61,7 @@
    brings both back, in their original order.  The four module aliases
    (A, Smt, Refine, Err) arrive through it too.
 
-   [include], not aliases: those bands own 16 of this pass's 20 mutable cells
+   [include], not aliases: those bands own 16 of this pass's 22 mutable cells
    and they are written from the far end of this file, so the SAME ref cell
    must be in scope here. *)
 include Refine_post
@@ -904,6 +904,9 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
   let saved_enclosing = !enclosing_fn in
   trusted_fn := is_trusted;
   enclosing_fn := Some fd;
+  (match !enclosing_fn_probe with
+   | Some probe -> probe fd
+   | None -> ());
   Fun.protect
     ~finally:(fun () ->
       trusted_fn := saved_trusted;

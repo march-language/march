@@ -318,17 +318,50 @@ end|}
           (List.length
              (List.filter (fun h -> contains h "was NOT verified here") hints)));
 
-    (* The enclosing function must be restored on the way out, or a sibling
-       decl inherits a stale identity and the promotion in Task 6 executes the
-       WRONG function.  Save/restore mirrors [trusted_fn]. *)
-    gated "enclosing_fn is None outside any function body" (fun () ->
-        ignore (has_refine_error_d
-          {|mod EF1 do
+    (* The enclosing function must be POPULATED while its body is walked, not
+       just left at its [None] default and restored to it afterward — a test
+       that only checks the post-walk value would still pass if
+       [enclosing_fn := Some fd] were deleted outright.  A probe installed via
+       [enclosing_fn_probe] samples the ref DURING the walk, once per
+       function, so we can pin both that it fires the right number of times
+       and that each firing sees that function's OWN [fd] rather than a
+       sibling's left behind.  The enclosing function must also be restored
+       on the way out, or a sibling decl inherits a stale identity and the
+       promotion in Task 6 executes the WRONG function.  Save/restore mirrors
+       [trusted_fn]. *)
+    gated "enclosing_fn is populated during each function's own walk" (fun () ->
+        let module RC = March_refinecheck.Refine_call in
+        let observed = ref [] in
+        let saved_probe = !RC.enclosing_fn_probe in
+        RC.enclosing_fn_probe :=
+          Some
+            (fun fd ->
+              observed :=
+                (fd.March_ast.Ast.fn_name.March_ast.Ast.txt, !RC.enclosing_fn)
+                :: !observed);
+        Fun.protect
+          ~finally:(fun () -> RC.enclosing_fn_probe := saved_probe)
+          (fun () ->
+            ignore (has_refine_error_d
+              {|mod EF1 do
   fn take_n(n : {Int | _ > 0}) : Int do n end
   fn go(k : Int) : Int do take_n(k) end
-end|});
+end|}));
+        let observed = List.rev !observed in
+        Alcotest.(check int) "the probe fired exactly twice" 2
+          (List.length observed);
+        List.iter
+          (fun (name, seen) ->
+            Alcotest.(check bool)
+              (Printf.sprintf "%s saw its own fd, not a sibling's" name) true
+              (match seen with
+               | Some fd -> fd.March_ast.Ast.fn_name.March_ast.Ast.txt = name
+               | None -> false))
+          observed;
+        Alcotest.(check (list string)) "each function saw its own name"
+          [ "take_n"; "go" ] (List.map fst observed);
         Alcotest.(check bool) "restored to None after the walk" true
-          (!March_refinecheck.Refine_call.enclosing_fn = None)) ]
+          (!RC.enclosing_fn = None)) ]
 
 (* A2: the `len` measure + cross-argument bounds.  `at` indexes a list with a
    bounds-refined index; we check calls against list literals (statically sized). *)

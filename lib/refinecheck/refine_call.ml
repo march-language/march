@@ -11,14 +11,17 @@
     callee, reflect the actual argument, assemble the facts in scope, and ask
     the solver whether they entail the parameter's predicate.
 
-    Four of the pass's mutable cells live here — [strict_verified],
-    [unverified_hinted], [trusted_fn] and [enclosing_fn] — and all four are
-    written from §21 (the declaration walk), which is still in
-    [Refine_check].  They therefore reach that writer through [include], as
-    the same ref cells.  Re-declaring any of them would leave the writer
-    setting a ref nobody reads, and since they only ever RELAX or TIGHTEN
-    reporting, an accepting corpus would not notice: [strict_verified] turns a
-    skipped obligation into an error, and [trusted_fn] suppresses one.
+    Five of the pass's mutable cells live here — [strict_verified],
+    [unverified_hinted], [trusted_fn], [enclosing_fn] and
+    [enclosing_fn_probe] — and all five are written from §21 (the
+    declaration walk), which is still in [Refine_check].  They therefore
+    reach that writer through [include], as the same ref cells.
+    Re-declaring any of them would leave the writer setting a ref nobody
+    reads, and since they only ever RELAX or TIGHTEN reporting, an accepting
+    corpus would not notice: [strict_verified] turns a skipped obligation
+    into an error, and [trusted_fn] suppresses one. [enclosing_fn_probe] is
+    the exception — it is test-only instrumentation with no effect on
+    reporting; see its own comment.
 
     Verify changes here against the REJECT corpus
     (`dune build @types-check --force`), not only [scripts/refine-oracle.sh]. *)
@@ -77,6 +80,14 @@ let trusted_fn = ref false
    adding it to the record would touch all three construction sites in
    refine_check.ml for a value none of them varies. *)
 let enclosing_fn : A.fn_def option ref = ref None
+
+(* Test-only observation hook: when set, [visit_fn] invokes it with [fd]
+   immediately after setting [enclosing_fn], so a test can sample the ref
+   DURING the walk rather than only after it — the walk's own [None]
+   default is otherwise indistinguishable from a ref that was never
+   populated at all. Production cost is one [match] against [None]. Never
+   set outside a test. *)
+let enclosing_fn_probe : (A.fn_def -> unit) option ref = ref None
 
 (* Does [e] ever APPLY the function spelled [name]?  Applications only: a bare
    mention (`let f = List.length`) is not a guard, and counting it would let an
