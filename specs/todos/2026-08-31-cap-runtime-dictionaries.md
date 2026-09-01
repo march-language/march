@@ -612,6 +612,159 @@ consulted — worse than the current refusal.
 
    Elaborate bottom-up in one pass so the ambient arm is never re-elaborated.
 
+### (b) implementation notes, from starting it
+
+Two things were settled by attempting the pass; both changed the plan above.
+
+**IT BELONGS IN TIR, NOT THE AST.** The AST has 58 expression constructors and
+no generic map, so an AST rewriter must be total over all 58 by hand — and a
+missed constructor is SILENT: a call site inside it keeps its old arity while
+the callee gained a parameter. TIR has ~21, is in ANF (so every call is
+`EApp (var, atoms)` or `ECallPtr` — no calls nested inside arbitrary
+expressions), and `lib/tir/` already contains passes that change arity (mono,
+defun). Writing the match without a `_` arm then makes exhaustiveness a
+compile error rather than a runtime surprise.
+
+The insertion point is immediately after `Lower.lower_module`, which
+`bin/main.ml` already documents as "the one point in the pipeline where a TIR
+fn's name is still exactly its source name — Mono hasn't mangled/duplicated
+anything yet, Defun hasn't lifted any lambdas yet". That is exactly what
+matching against the capability closure needs.
+
+**THE MOCK NEEDS A BINDING SITE, which the plan above did not have.** Threading
+alone is not enough: the implicit parameter has to be bound to the user's mock
+*somewhere*, and a `let mock = cap_impl(...)` in a test body is just a local
+the pass knows nothing about. The binding site is
+
+```march
+with_cap(mock, fn _ -> code_under_test())
+```
+
+Inside the lambda, the implicit parameter for `mock`'s capability is `mock`.
+Written as an ordinary application rather than new syntax, so the pass needs no
+parser change. Everywhere else an elaborated call passes `root_cap`, the plain
+sentinel, which reads back as `None` and takes the ambient path — i.e. exactly
+today's behaviour. (`root_cap` is banned in source outside a test body by
+reject/t152, but the pass runs after typechecking and emits it directly, so the
+ban is not in play. Do not re-typecheck the elaborated program without
+accounting for that.)
+
+**Restrictions for a first version**, each of which costs interception and never
+correctness — an un-elaborated function keeps today's behaviour exactly:
+
+- Actor handlers are skipped: the scheduler invokes them, not an elaborated
+  caller, so there is nobody to thread from.
+- A function whose name is referenced anywhere except as a call head is not
+  elaborated; changing its arity would break the reference, and eta-expanding
+  every such site is more than a first version needs.
+
+### (b) progress and the open bug
+
+Landed, all behind `MARCH_CAP_PASSING=1` (and `MARCH_CAP_DISPATCH=1` for the
+dispatch half). **Not wired to `--test`** — see the bug below.
+
+- **Analysis** (`lib/tir/cap_passing.ml`): which functions must carry which
+  capability, from the TIR call graph. 162 of 2752 across a whole program
+  including stdlib.
+- **Threading**: implicit parameters added and passed; a caller that cannot
+  supply one passes `root_cap`, the ambient sentinel, so un-elaborated callers
+  stay correct for free.
+- **Dispatch wrappers**: generated as March SOURCE and injected before
+  typechecking (`Io_ops_gen.dispatch_wrappers_source`, 652 lines), so they are
+  typechecked rather than hand-built as TIR. They typecheck clean, including
+  the stdlib-owned types (`FileError`, `Csv.CsvRow`, `FileStat`) that killed
+  the generated-stdlib-module approach — an entry-module injection sees them,
+  a standalone stdlib module cannot.
+- **`cap_ops_empty`**: the all-`None` base a mock overrides one field of.
+
+A benefit of rewriting in TIR that was not anticipated: the wrappers are NOT
+reachable from `main` at typecheck time, so injecting 69 of them does not widen
+any program's capability closure and a narrow `main` grant still checks. An
+AST-level rewrite would have made them reachable and blown the ceiling.
+
+**OPEN BUG — threading `File.with_lines` gives SIGBUS (rc=138).** Reduced
+repro: read a file via `File.with_lines(path, fn(lines) -> ...)` and compile.
+Correct with the pass off, rc=138 with it on. `dispatch` plays no part — this
+is the threading alone. Caught by `try_call_capture_ownership_codegen`, whose
+name is already about the fd `Option` niche contract.
+
+The shape is a lazy `Seq` whose step is a closure, so the likely cause is a
+threaded function reaching a closure the pass did not classify as
+arity-frozen: the `unsafe` rule keys on an `ADefRef`'s `did_name` matching a
+top-level `fn_name`, and if lower spells those differently the function is
+never excluded — an indirect call then passes the OLD arity. Check that
+correspondence first.
+
+### The binding site: `with_cap` — LANDED
+
+`with_cap(mock, fn _ -> body)` is an ordinary prelude function,
+`fn with_cap(_c, f) do f(()) end`, so it needs no parser change. At runtime it
+just calls `f`; the capability is consumed by the elaboration, which rewrites
+calls inside the lambda to route through `mock` instead of the ambient
+sentinel.
+
+Lower emits the thunk as `let v = letrec [lam] in lam ... with_cap(mock, v)`,
+so the lambda's `fn_def` is reachable from the `let` that binds it, and the
+capability is read off the mock's own TYPE — which is what lets this be a
+function call rather than syntax.
+
+`thread`'s `avail : StrSet.t` became a `(cap * atom) list` so a capability can
+be supplied by something other than the enclosing parameter.
+
+`cap_ops_empty(c)` resolves to a generated `__march_ops_empty_<CAP>()`, also
+emitted as March source, for the same reason the wrappers are: building the
+record in TIR would mean re-deriving `None`'s constructor type and duplicating
+lower's typecheck-ty -> TIR-ty translation.
+
+**End-to-end, compiled, under plain `--test`** (test/cap_mock/cap_mock_io.march):
+
+```
+REAL:x            -- before
+MOCK[REAL:x]      -- inside with_cap
+REAL:x            -- after
+```
+
+Three calls to the same function, none of which names a capability. One
+dictionary would not distinguish interception from a hard-coded
+implementation; the calls either side pin that the swap is lexically scoped.
+
+### ONE predicate gates all three
+
+The dictionary types resolving for IO capabilities, the wrapper injection, and
+the rewrite must agree. They did not: injection was `--test`-gated while the
+rewrite was env-var-gated, so a build with the rewrite on and injection off
+emitted calls to `__march_dispatch_print_line` and failed at link with an
+undefined symbol — 76 codegen failures. `Flags.cap_mocking ()` is now the
+single predicate for all three.
+
+Also: neither `MARCH_CAP_PASSING` nor the mocking predicate was in `cas_flags`,
+so a build with the pass on shared a CAS entry with one without — the
+"pass off" run printed the mocked output. Same omission as `--test` itself,
+found the same way.
+
+### Still open
+
+`with_cap(mock, fn _ -> body)` is designed but not built, so nothing can yet
+say "run this code with that mock". Until it exists, `cap_impl` on an IO
+capability typechecks under `--test` and has no runtime effect. Pinned by
+`impl_io_cap_test_build` so the gap stays visible.
+
+At TIR the binding site needs the lambda's `fn_def`, which ANF has hoisted into
+a `let`-bound `ELetRec`. That wants a two-pass shape: find
+`EApp(with_cap, [mock; AVar v])` and record `v -> mock`, then rewrite the
+`ELetRec` bound to `v` with the extra binding. `thread`'s `avail : StrSet.t`
+should become a `(cap * atom) list` so a capability can be supplied by
+something other than the enclosing parameter.
+
+### Incidental fix: `--test` was not in the CAS cache key
+
+`--test` changes the emitted program (`lower_module ~test_mode` builds a
+test-runner entry point), but `cas_flags` did not include it, so a `--test`
+build and a plain build of the same source shared a cache entry and whichever
+ran first won — `forge build` could hand you the test runner, or `forge test`
+the plain binary. Pre-existing and unrelated to dictionaries; found by
+compiling the same file both ways and getting the same artifact. Fixed.
+
 **Risks to price before starting.** The pass changes the arity of most
 functions in a test build, so it lands on defun, mono, Perceus, the CAS cache
 key, hot-reload dispatch tables and FFI boundaries. `cap_rows` gets worse in the

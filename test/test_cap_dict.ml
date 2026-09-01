@@ -168,15 +168,14 @@ let narrow_keeps_dict_type = ok "cap_narrow of a dictionaried cap still reads it
   fn consume(_c : Cap(IO.Console)) : Int do 1 end
 end|}
 
-(* The --test build-mode gate ADMITS an IO capability — and then mocking it
-   still does not work, for a reason upstream of dictionaries: an IO builtin
-   does not consume its capability ([println : String -> ()]), so there is no
-   declaration site to hang a dictionary type on and nothing would consult one
-   anyway.  Pinned here so a reader does not conclude from the gate's existence
-   that IO mocking is available.  Closing this needs the cap-first migration of
-   the builtins; see specs/todos/2026-08-31-cap-runtime-dictionaries.md. *)
+(* Under --test the gate now OPENS: an IO capability's dictionary type is
+   derived from the compiler's own builtin tables ([Io_ops_gen]), so `cap_impl`
+   on one typechecks.  What is still missing is the BINDING SITE — nothing yet
+   lets a test say "run this code with that mock" — so attaching one has no
+   runtime effect.  Pinned so the change is deliberate rather than discovered
+   later, and so the remaining gap stays visible. *)
 let impl_io_cap_test_build =
-  Alcotest.test_case "--test admits an IO cap but mocking it is still unreachable"
+  Alcotest.test_case "--test admits cap_impl on an IO capability"
     `Quick (fun () ->
       let saved = !March_typecheck.Typecheck.test_build in
       March_typecheck.Typecheck.test_build := true;
@@ -185,26 +184,12 @@ let impl_io_cap_test_build =
           ~finally:(fun () -> March_typecheck.Typecheck.test_build := saved)
           (fun () -> typecheck {|mod App do
   needs IO.Console
-  type Ops = { write : (String) -> () }
   fn boot(c : Cap(IO.Console)) : Cap(IO.Console) do
-    cap_impl(c, { write: fn s -> println(s) })
+    cap_impl(c, { cap_ops_empty(c) with print_line: Some(fn s -> print(s)) })
   end
 end|})
       in
-      Alcotest.(check bool) "still an error under --test" true (has_errors ctx);
-      let msgs =
-        List.map (fun d -> d.March_errors.Errors.message)
-          (March_errors.Errors.sorted ctx)
-      in
-      (* and for the RIGHT reason: no declaration site, not the gate *)
-      Alcotest.(check bool) "refused for want of a declaration site, not by the gate"
-        true
-        (List.exists (fun m ->
-             try
-               ignore (Str.search_forward
-                         (Str.regexp_string "no way to declare a dictionary type") m 0);
-               true
-             with Not_found -> false) msgs))
+      Alcotest.(check bool) "admitted under --test" false (has_errors ctx))
 
 (* ── runtime: the dictionary actually dispatches ──────────────────────── *)
 
@@ -434,6 +419,59 @@ let dict_fields_sorted =
       in
       Alcotest.(check (list string)) "caps with unsorted fields" [] unsorted)
 
+(* ── capability-passing analysis invariants ───────────────────────────── *)
+
+(* Regression: a nested local function that performs IO.
+
+   `File.with_lines` has a local `fn do_lines(a, f)` calling `file_read_line`.
+   Attributing that operation to the LOCAL's name put "do_lines" in the
+   analysis table -- but a local is not in [tm_fns], so the elaboration never
+   added parameters to it while the threading happily added an ARGUMENT at its
+   call sites.  The compiled binary died with SIGBUS (rc=138).  Defun lifts
+   such locals to top level later, which is why `--dump-tir` showed
+   `fn do_lines` and made it look top-level all along.
+
+   Two assertions, because either alone would have missed it: no entry may
+   name something that is not a top-level function (the crash), and the
+   ENCLOSING function must have picked the capability up (the missed
+   threading that attributing upward also fixes). *)
+let analysis_attributes_locals_to_their_owner =
+  Alcotest.test_case "a nested local fn's IO is charged to its enclosing fn" `Quick
+    (fun () ->
+      let m =
+        parse_and_desugar {|mod L do
+  needs IO.FileRead
+  fn outer(path : String) : Int do
+    fn inner(n : Int) : Int do
+      match file_read(path) do
+        Ok(_)  -> n + 1
+        Err(_) -> n
+      end
+    end
+    inner(0)
+  end
+end|}
+      in
+      let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+      let tir =
+        March_tir.Lower.lower_module ~type_map ~test_mode:false ~hot_reload:false m
+      in
+      let need = March_tir.Cap_passing.needed_caps tir in
+      let toplevel =
+        List.map (fun (fd : March_tir.Tir.fn_def) -> fd.March_tir.Tir.fn_name)
+          tir.March_tir.Tir.tm_fns
+      in
+      let non_toplevel =
+        Hashtbl.fold (fun k _ acc -> if List.mem k toplevel then acc else k :: acc)
+          need []
+      in
+      Alcotest.(check (list string))
+        "no entry names a non-top-level function" [] (List.sort compare non_toplevel);
+      Alcotest.(check bool) "the enclosing fn picked up IO.FileRead" true
+        (match Hashtbl.find_opt need "outer" with
+         | Some caps -> List.mem "IO.FileRead" caps
+         | None -> false))
+
 let tests = [
   decl_ok; decl_unknown_type; decl_non_record;
   impl_ok; impl_pfn; impl_external; impl_wrong_dict; impl_no_dict_declared;
@@ -443,4 +481,5 @@ let tests = [
   rt_dispatch; rt_swap; rt_default; rt_narrow_propagates;
   io_console_shape; shadow_list_matches_stdlib; io_clock_zero_arg; io_mut_has_no_dictionary;
   excluded_ops_are_documented; dict_fields_sorted;
+  analysis_attributes_locals_to_their_owner;
 ]

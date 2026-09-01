@@ -706,6 +706,20 @@ let codegen_cas_tags () =
      then ["evloop"] else [])
   @ (if !fast_math then ["fast-math"] else [])
   @ (if !debug_mode || !debug_tui_mode then ["dbg"] else [])
+  (* --test changes the emitted program: [lower_module ~test_mode] builds a
+     test-runner entry point instead of the ordinary one, and the
+     capability-passing elaboration runs only in a test build.  Without this
+     the two share a cache entry and whichever built first wins — `forge build`
+     could hand you the test runner, or `forge test` the plain binary.  (This
+     predates capability passing; it was found by compiling the same file both
+     ways and getting the same artifact.) *)
+  @ (if !do_test then ["test"] else [])
+  (* The capability-passing pass changes the emitted program, so a build with
+     it on must not share a CAS entry with one without.  Found the same way the
+     --test omission was: the same file built both ways returned the same
+     artifact, so the "pass off" run printed the mocked output. *)
+  @ (if Sys.getenv_opt "MARCH_CAP_PASSING" = Some "1" then ["cappass"] else [])
+  @ (if cap_mocking () then ["capdisp"] else [])
 
 (** Parse --target string into Llvm_emit.target_config. *)
 let parse_target s =
@@ -1574,6 +1588,28 @@ let compile filename =
      from scratch on every invocation — [desugared] itself keeps the stdlib
      prepend it always had, since lowering further down still needs stdlib's
      own bodies physically present (see the comment at the prepend site). *)
+  (* Inject the capability-dispatch wrappers in a --test build.  Generated as
+     March SOURCE and injected here, before typechecking, so they are checked
+     like any other code: the shape leans on Option's niche encoding twice, and
+     a wrong decode built directly as TIR would be a silent miscompile.  See
+     [Io_ops_gen.dispatch_wrappers_source]. *)
+  let desugared =
+    if not (cap_mocking ()) then desugared
+    else begin
+      let src = March_typecheck.Io_ops_gen.dispatch_wrappers_source () in
+      let lexbuf = Lexing.from_string src in
+      lexbuf.Lexing.lex_curr_p <-
+        { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = "<cap-dispatch>" };
+      let m =
+        March_parser.Parser.module_
+          (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+      in
+      let d = March_desugar.Desugar.desugar_module m in
+      { desugared with
+        March_ast.Ast.mod_decls =
+          desugared.March_ast.Ast.mod_decls @ d.March_ast.Ast.mod_decls }
+    end
+  in
   let user_only_desugared = desugared in
   stamp "resolve-imports";
   (* Inject stdlib declarations before user declarations.
@@ -1891,6 +1927,36 @@ let compile filename =
     (if !dump_phases then
        phases := March_dump.Dump.ast_phase user_ast "parse" :: !phases);
     let tir = March_tir.Lower.lower_module ~type_map ~test_mode:!do_test ~hot_reload:(Option.is_some !hot_reload_prefix) desugared in
+    (* Capability-passing analysis dump.  Immediately after lowering is the one
+       point where a TIR fn's name is still exactly its source name, which is
+       what the analysis keys on. *)
+    if Sys.getenv_opt "MARCH_DUMP_CAP_PASSING" = Some "1" then
+      March_tir.Cap_passing.dump tir;
+    (* Capability-passing threading.  Forced on by MARCH_CAP_PASSING=1 while it
+       is being validated: with nothing consuming the new parameters the
+       program must behave identically, which makes the whole test suite a
+       check on the arity change flowing through Defun/Mono/Perceus and the CAS
+       key.  It becomes `--test`-gated once the dispatch half exists. *)
+    (* NOT enabled by --test yet: the threading half has a known crash (see
+       below), so wiring it into `forge test` would break every project's test
+       run.  Enabled only by MARCH_CAP_PASSING=1, with MARCH_CAP_DISPATCH=1
+       additionally routing operations through their dictionary wrappers.
+
+       Open bug: threading a capability into `File.with_lines` produces a
+       compiled binary that dies with SIGBUS (rc=138).  Reduced repro: read a
+       file through `File.with_lines(path, fn(lines) -> ...)` and compile —
+       correct with the pass off, rc=138 with it on, and `dispatch` plays no
+       part (this is the threading alone).  The shape is a lazy `Seq` whose
+       step is a closure, so the likely cause is a threaded function reaching a
+       closure this pass did not classify as arity-frozen: the `unsafe` rule
+       keys on `ADefRef`'s [did_name] matching a top-level [fn_name], and if
+       lower spells those differently the function is never excluded and an
+       indirect call then passes the OLD arity. *)
+    let tir =
+      if Sys.getenv_opt "MARCH_CAP_PASSING" = Some "1" || cap_mocking () then
+        March_tir.Cap_passing.elaborate ~dispatch:(cap_mocking ()) tir
+      else tir
+    in
     (* @[vectorize]/@[vectorize(warn)]: this is the one point in the
        pipeline where a TIR fn's name is still exactly its source name —
        Mono hasn't mangled/duplicated anything yet, Defun hasn't lifted
@@ -4202,11 +4268,15 @@ let () =
     print_string (March_typecheck.Io_ops_gen.render ());
     exit 0
   end;
+  if Sys.getenv_opt "MARCH_DUMP_CAP_DISPATCH" = Some "1" then begin
+    print_string (March_typecheck.Io_ops_gen.dispatch_wrappers_source ());
+    exit 0
+  end;
   March_eval.Eval.pmap_threshold_value := !pmap_threshold;
   (* Propagate --test to the typechecker's build-mode flag.  [cap_impl] on an
      IO capability (mocking an IO effect) is admitted only in a test build; see
      [Typecheck_env.test_build] and [check_cap_impl_sites]. *)
-  March_typecheck.Typecheck.test_build := !do_test;
+  March_typecheck.Typecheck.test_build := cap_mocking ();
   (* --emit-core-ast takes its target file as its own flag argument (not a
      positional file), so route it into the normal [f] :: compile dispatch
      below rather than falling through to the REPL branch. *)

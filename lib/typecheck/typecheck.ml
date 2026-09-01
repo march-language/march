@@ -1378,6 +1378,38 @@ let rec infer_expr env (e : Ast.expr) : ty =
        already been checked against.  In practice the argument is an annotated
        parameter, so its type is known; when it is not, say so rather than
        silently yielding an unconstrained [Option(a)]. *)
+    (* cap_ops_empty: resolves exactly like cap_dict, but yields the dictionary
+       record itself rather than an Option of it — it is the all-None BASE, not
+       a read. *)
+    | Ast.EApp (Ast.EVar { txt = "cap_ops_empty"; _ }, [cap_arg], sp) ->
+      env.cap_dict_sites := sp :: !(env.cap_dict_sites);
+      let arg_ty = infer_expr env cap_arg in
+      (match repr arg_ty with
+       | TError -> TError
+       | TCon ("Cap", [inner]) ->
+         (match repr inner with
+          | TCon (p, []) ->
+            (match Cap_dict_resolve.dict_ty_of_cap env p with
+             | Some dict -> dict
+             | None ->
+               Err.error env.errors ~span:sp
+                 (render_parts [
+                   MPCode ("Cap(" ^ p ^ ")");
+                   MPText " has no dictionary, so there is no base for ";
+                   MPCode "cap_ops_empty"; MPText " to produce." ]);
+               TError)
+          | _ ->
+            Err.error env.errors ~span:sp
+              (render_parts [
+                MPCode "cap_ops_empty";
+                MPText " needs to know which capability it is building a base \
+                        for, but the argument's type is undetermined here." ]);
+            TError)
+       | _ ->
+         Err.error env.errors ~span:sp
+           (render_parts [ MPCode "cap_ops_empty"; MPText " expects a capability." ]);
+         TError)
+
     | Ast.EApp (Ast.EVar { txt = "cap_dict"; _ }, [cap_arg], sp) ->
       env.cap_dict_sites := sp :: !(env.cap_dict_sites);
       let arg_ty = infer_expr env cap_arg in
@@ -1387,8 +1419,8 @@ let rec infer_expr env (e : Ast.expr) : ty =
        | TCon ("Cap", [inner]) ->
          (match repr inner with
           | TCon (p, []) ->
-            (match resolve_cap_dict_type env p with
-             | Some rec_name -> TCon ("Option", [TCon (rec_name, [])])
+            (match Cap_dict_resolve.dict_ty_of_cap env p with
+             | Some dict -> TCon ("Option", [dict])
              | None ->
                reject [
                  MPCode ("Cap(" ^ p ^ ")");
