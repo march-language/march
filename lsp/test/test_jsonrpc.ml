@@ -977,8 +977,13 @@ let run_dispatch_coverage_session () : (string * Yojson.Safe.t) list =
 
   record "resolve"
     (ask "completionItem/resolve"
+       (* [version] must match the document's current version (1, from the
+          single [didOpen] above — [on_notif_doc_did_open] bumps from 0) or
+          the staleness guard in [completionItem/resolve] refuses to answer;
+          see [server_state.ml]'s [is_current] and its call site in
+          [server_dispatch.ml]. *)
        (`Assoc [ "label", `String "map"; "kind", `Int 3;
-                 "data", `Assoc [ "uri", `String uri;
+                 "data", `Assoc [ "uri", `String uri; "version", `Int 1;
                                   "autoImport",
                                   `Assoc [ "module", `String "List";
                                            "name", `String "map" ] ] ]));

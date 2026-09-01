@@ -285,6 +285,12 @@ let test_selection_range_empty_off_token () =
   Alcotest.(check int) "no ranges off the document" 0 (List.length ranges)
 
 let test_linked_editing_ranges () =
+  (* An ordinary identifier must NOT be linked. The client edits every range
+     `linkedEditingRange` returns on every keystroke, with no confirmation, so
+     returning a symbol's other occurrences makes typing silently rewrite them
+     — the "typing on one line overwrites other lines" corruption. Symbol
+     renaming belongs to `textDocument/rename`; see the comment on
+     [linked_editing_ranges_at]. *)
   let src = {|mod M do
   fn f() : Int do
     let x = 1
@@ -294,7 +300,8 @@ end|} in
   let a = analyse src in
   let (l, c) = pos_of src "x + x" in
   let ranges = An.query_linked_editing_ranges_at a ~line:l ~utf16_char:c in
-  Alcotest.(check int) "links the binding and both uses of x" 3 (List.length ranges)
+  Alcotest.(check int) "an ordinary identifier is not linked-edited" 0
+    (List.length ranges)
 
 let test_tag_pair_linked_edit () =
   let src = {|mod M do
