@@ -35,6 +35,16 @@ than assumed.
   (`unreflectable-predicate`, `unreflectable-subject`, `sort-conflict`,
   `float-sort-gate`, `solver-undecided`, `alias-withdrawn`). New slugs only.
 - Hint text is hard-wrapped near 78 columns. The renderer does not reflow.
+- **Assert on message TEXT, not only on the reason slug.** Every pre-existing
+  test in `reason_suite` checks the slug string, which is why a message reading
+  ``nothing in scope constrains `len$ys` `` — leaking the encoder's internal
+  symbol, a name absent from the user's program — survived two review rounds
+  AND a scoped re-review that reproduced the wrong string without noticing it.
+  A slug assertion proves the classification, never the sentence.
+- **A payload that reaches user text must be in the user's vocabulary.** SMT
+  symbols (`len$ys`, `$strlen`, `m$appN`) are encoder-internal spellings. Where
+  a check needs the symbol and the message needs the source name, those are two
+  values, not one — carry both rather than reusing one for both jobs.
 - Never `git stash` in this repo — the stash stack is shared across worktrees.
 - Never `git add -A` / `git add .`. Stage files explicitly by name.
 - No `Co-Authored-By` trailers.
