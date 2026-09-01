@@ -163,8 +163,19 @@ Extend `reason_detail` (`:199`):
 ```
 
 `reason_name` and `reason_detail` are the only exhaustive matches on `reason`
-in `lib/`, `bin/`, `lsp/` and `forge/` — verified by grep. `bin/main.ml`'s
-`print_refine_report` keys a `Hashtbl` on the whole reason and needs no change.
+in `lib/`, `bin/`, `lsp/` and `forge/` — verified by grep.
+
+**Correction (found in Task 1 review, round 2).** An earlier draft of this plan
+said `bin/main.ml`'s `print_refine_report` "keys a `Hashtbl` on the whole reason
+and needs no change". That was wrong. Keying on the whole reason means a
+payload-carrying variant gets one bucket PER PAYLOAD — a single fixture printed
+nine separate `skipped (unconstrained-subject)` lines, one per variable name.
+`obligation.ml`'s `Alias_withdrawn` comment predicted this and judged it
+cosmetic, which is fair for a rare cause and wrong for the most common one; it
+also defeats Task 8's measurement, which counts the per-bucket distribution.
+Group on `Obligation.reason_name` instead — the slug is payload-free for exactly
+this purpose. The fix touches TWO places, `print_refine_report` and
+`Obligation.summary` (the latter used only by tests), so they cannot disagree.
 
 - [ ] **Step 4: Write the detection helpers**
 
@@ -1355,7 +1366,12 @@ done | grep -oE "skipped \([a-z-]+\): [0-9]+" | sort | uniq -c | sort -rn
 ```
 
 Record the table. Compare against the pre-change baseline (run the same
-command on a build of `origin/main`). **If `solver-undecided` is still the
+command on a build of `origin/main`).
+
+This count is only meaningful if `--refine-report` groups by cause rather than
+by payload — see the correction in Task 1. If you see the same slug on several
+consecutive lines with different counts, the grouping regressed and the
+distribution is not measuring what it claims to. **If `solver-undecided` is still the
 largest bucket, the taxonomy is wrong** — report that rather than shipping it,
 and the three variants need revisiting before Task 9.
 
