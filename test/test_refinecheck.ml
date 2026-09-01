@@ -10393,19 +10393,51 @@ end|}
 let reachable_unit_suite =
   let module W = March_refinecheck.Witness in
   let module A = March_ast.Ast in
+  let dsp = A.dummy_span in
+  let nm t = { A.txt = t; A.span = dsp } in
+  let evar t = A.EVar (nm t) in
+  let eint n = A.ELit (A.LitInt n, dsp) in
+  let eapp f args = A.EApp (evar f, args, dsp) in
+  (* The obligation every fixture below is about: `len(_) > 0`, the callee's
+     precondition, with the call-site argument named per case. *)
+  let len_pos = eapp ">" [ eapp "len" [ evar "_" ]; eint 0 ] in
+  let confirm ?(pred = len_pos) ?(binder = "_") ~arg fn model =
+    W.confirm_precond_reachable ~fn ~pred ~binder ~arg:(evar arg) ~model
+  in
   (* Register [src] as the module under witness execution and hand back the
-     desugared definition of [name]. *)
-  let fn_named src name =
+     desugared definition of [name] — [path] is the enclosing `mod` chain, so
+     a nested definition can be reached. *)
+  let fn_at src path name =
     let m = March_desugar.Desugar.desugar_module (parse src) in
     W.set_module m;
-    List.find_map
-      (function
-        | A.DFn (fd, _) when fd.A.fn_name.A.txt = name -> Some fd
-        | _ -> None)
-      m.A.mod_decls
-    |> function
+    let rec dig decls = function
+      | [] ->
+        List.find_map
+          (function
+            | A.DFn (fd, _) when fd.A.fn_name.A.txt = name -> Some fd
+            | _ -> None)
+          decls
+      | p :: rest ->
+        List.find_map
+          (function
+            | A.DMod (n, _, inner, _) when n.A.txt = p -> dig inner rest
+            | _ -> None)
+          decls
+    in
+    match dig m.A.mod_decls path with
     | Some fd -> fd
-    | None -> Alcotest.fail ("no fn " ^ name)
+    | None -> Alcotest.fail ("no fn " ^ String.concat "." (path @ [ name ]))
+  in
+  let fn_named src name = fn_at src [] name in
+  (* A callee that panics on exactly the inputs its precondition rejects. *)
+  let head_decl =
+    {|  fn head(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil        -> panic("empty list")
+    Cons(h, _) -> h
+    end
+  end
+|}
   in
   let last_src =
     {|mod U1 do
@@ -10418,98 +10450,189 @@ let reachable_unit_suite =
   end
 end|}
   in
-  [ Alcotest.test_case "reachable: parameter model confirms and shrinks" `Quick
-      (fun () ->
+  [ Alcotest.test_case "reachable: parameter model confirms" `Quick (fun () ->
         let fn =
           fn_named
-            {|mod U2 do
-  fn head(xs : {List(Int) | len(_) > 0}) : Int do
-    match xs do
-    Nil        -> panic("empty list")
-    Cons(h, _) -> h
-    end
-  end
-  fn go(ys : List(Int)) : Int do head(ys) end
-end|}
+            ({|mod U2 do
+|} ^ head_decl ^ {|  fn go(ys : List(Int)) : Int do head(ys) end
+end|})
             "go"
         in
         (* The model names `ys`, a parameter of the enclosing function; the
-           decoded empty list is admissible (`go` declares no refinement) and
-           executing `go` from its entry really panics. *)
-        match W.confirm_precond_reachable ~fn ~model:[ ("len$ys", "0") ] with
+           decoded empty list is admissible (`go` declares no refinement), it
+           really violates `len(_) > 0`, executing `go` panics, and repairing
+           only `ys` makes the panic go away. *)
+        match confirm ~arg:"ys" fn [ ("len$ys", "0") ] with
         | None -> Alcotest.fail "expected a confirmed reachable witness"
         | Some (args, msg) ->
           Alcotest.(check (option string))
             "the failing argument" (Some "ys = []") (W.render_entries args);
-          Alcotest.(check bool) "panic quoted" true (contains msg "empty list"))
+          (* VERBATIM the user's own text: the `panic: ` marker the builtin
+             adds is stripped, so Task 6 can quote this directly. *)
+          Alcotest.(check string) "panic quoted" "empty list" msg)
 
   ; Alcotest.test_case "reachable: the confirmed witness is shrunk" `Quick
       (fun () ->
-        (* A three-element model is confirmed and then MINIMISED, with the
-           same execute-and-panic gate as the oracle. *)
+        (* The don't-care `n` starts at 5 and is minimised by the same
+           admissible-violating-panicking oracle. *)
         let fn =
           fn_named
-            {|mod U5 do
-  fn f(ys : List(Int)) : Int do panic("boom") end
-end|}
-            "f"
+            ({|mod U5 do
+|} ^ head_decl
+           ^ {|  fn go(ys : List(Int), n : Int) : Int do head(ys) + n end
+end|})
+            "go"
         in
-        match W.confirm_precond_reachable ~fn ~model:[ ("len$ys", "3") ] with
+        match confirm ~arg:"ys" fn [ ("len$ys", "0"); ("n", "5") ] with
         | None -> Alcotest.fail "expected a confirmed reachable witness"
         | Some (args, _) ->
           Alcotest.(check (option string))
-            "shrunk to the empty list" (Some "ys = []") (W.render_entries args))
+            "shrunk" (Some "ys = [], n = 0") (W.render_entries args))
 
   ; Alcotest.test_case "reachable: the List.last shape declines" `Quick
       (fun () ->
-        (* THE case the gate exists for.  The model assigns the match binder
-           `t`, not a parameter; `last`'s only parameter zero-fills to `[]`,
-           which its OWN refinement excludes, so nothing admissible is left to
-           execute.  Were this confirmed against recorded path facts instead,
-           `last([])` panics and correct code would be reported. *)
+        (* THE case the gate exists for.  The obligation's argument is the
+           match binder `t`, which is not a parameter of `last`, so the entry
+           cannot control it; and `last`'s only parameter zero-fills to `[]`,
+           which its OWN refinement excludes.  Two independent gates, either
+           of which is enough.  Were this confirmed against recorded path
+           facts instead, `last([])` panics and correct code is reported. *)
         let fn = fn_named last_src "last" in
         Alcotest.(check bool) "declined" true
-          (W.confirm_precond_reachable ~fn ~model:[ ("len$t", "0") ] = None))
+          (confirm ~arg:"t" fn [ ("len$t", "0") ] = None))
 
   ; Alcotest.test_case "reachable: an inadmissible model declines" `Quick
       (fun () ->
-        (* Same function, and this time the model does name the parameter —
-           with a value the parameter's own contract forbids.  Executing it
-           panics, so only the admissibility check stands between this and a
-           false positive. *)
+        (* Same function, and this time the obligation is about the parameter
+           itself — with a value the parameter's own contract forbids.
+           Executing it panics, so only the admissibility check stands between
+           this and a false positive. *)
         let fn = fn_named last_src "last" in
         Alcotest.(check bool) "declined" true
-          (W.confirm_precond_reachable ~fn ~model:[ ("len$xs", "0") ] = None))
+          (confirm ~arg:"xs" fn [ ("len$xs", "0") ] = None))
 
   ; Alcotest.test_case "reachable: a hidden nested refinement declines" `Quick
       (fun () ->
         (* [admissible] only inspects a refinement at the TOP of the declared
            type, so the one on the element type here is invisible to it and a
-           zero-filled decode could hand the function a list the language
-           forbids.  The body panics unconditionally, so this returns [Some]
-           the moment the witness-safety walk stops rejecting the type. *)
+           zero-filled decode could hand the function a value the declared
+           type excludes.  Everything else about this fixture confirms, so it
+           returns [Some] the moment the witness-safety walk stops rejecting
+           the type. *)
         let fn =
           fn_named
-            {|mod U3 do
-  fn f(xs : List({Int | _ > 0})) : Int do panic("boom") end
-end|}
+            ({|mod U3 do
+|} ^ head_decl
+           ^ {|  fn f(xs : List({Int | _ > 0})) : Int do head(xs) end
+end|})
             "f"
         in
         Alcotest.(check bool) "declined" true
-          (W.confirm_precond_reachable ~fn ~model:[ ("len$xs", "1") ] = None))
+          (confirm ~arg:"xs" fn [ ("len$xs", "0") ] = None))
 
   ; Alcotest.test_case "reachable: a non-panicking function declines" `Quick
       (fun () ->
         (* The oracle is an OBSERVED panic, not a decoded model. *)
         let fn =
-          fn_named
-            {|mod U4 do
+          fn_named {|mod U4 do
   fn f(ys : List(Int)) : Int do 0 end
+end|} "f"
+        in
+        Alcotest.(check bool) "declined" true
+          (confirm ~arg:"ys" fn [ ("len$ys", "0") ] = None))
+
+  ; (* C1.  `lookup_fn` prefers an exact BARE-name binding, so resolving the
+       enclosing function by its short name runs the top-level `f` and
+       attributes its panic to `Inner.f`, which returns 0 on every input.
+       Both halves are asserted: the nested one must decline AND the
+       top-level one must still confirm, or "declines" proves only that the
+       lookup broke. *)
+    (let collision_src =
+      {|mod P7 do
+|} ^ head_decl
+      ^ {|  fn f(ys : List(Int)) : Int do head(ys) end
+  mod Inner do
+    fn f(ys : List(Int)) : Int do 0 end
+  end
+end|}
+    in
+    Alcotest.test_case "reachable: a nested namesake is not executed" `Quick
+      (fun () ->
+        let inner = fn_at collision_src [ "Inner" ] "f" in
+        Alcotest.(check bool) "nested namesake declines" true
+          (confirm ~arg:"ys" inner [ ("len$ys", "0") ] = None);
+        let outer = fn_at collision_src [] "f" in
+        match confirm ~arg:"ys" outer [ ("len$ys", "0") ] with
+        | Some (_, msg) ->
+          Alcotest.(check string) "the top-level one still confirms"
+            "empty list" msg
+        | None -> Alcotest.fail "expected the top-level `f` to confirm"))
+
+  ; Alcotest.test_case "reachable: an unrelated panic declines" `Quick
+      (fun () ->
+        (* I2.  The don't-care `n` zero-fills to 0 and the panic comes from a
+           branch that never evaluates `head(ys)`.  The interpreter cannot
+           tell us where a panic came from, so the gate demonstrates
+           attribution instead: repairing only the subject leaves this one
+           panicking, so it declines. *)
+        let fn =
+          fn_named
+            ({|mod U6 do
+|} ^ head_decl
+           ^ {|  fn go(ys : List(Int), n : Int) : Int do
+    if n == 0 do panic("unrelated: n is zero") else head(ys) end
+  end
+end|})
+            "go"
+        in
+        Alcotest.(check bool) "declined" true
+          (confirm ~arg:"ys" fn [ ("len$ys", "0"); ("n", "0") ] = None))
+
+  ; Alcotest.test_case "reachable: a satisfied precondition declines" `Quick
+      (fun () ->
+        (* The panic is real and IS attributable to the subject — repairing
+           `n` to 2 removes it — but `n = 1` SATISFIES `pos`'s requirement, so
+           this call is not the failure and reporting it would name a
+           precondition the input already meets.  The only gate that rejects
+           it is the requirement that the decoded argument genuinely violate
+           the predicate. *)
+        let fn =
+          fn_named
+            {|mod U8 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn go(n : Int) : Int do
+    if n == 1 do panic("one") else pos(n) end
+  end
+end|}
+            "go"
+        in
+        Alcotest.(check bool) "declined" true
+          (confirm ~pred:(eapp ">" [ evar "_"; eint 0 ]) ~arg:"n" fn
+             [ ("n", "1") ]
+           = None))
+
+  ; Alcotest.test_case "reachable: an internal evaluator error declines" `Quick
+      (fun () ->
+        (* I3.  `Eval_error` is the evaluator's GENERAL failure channel, not
+           the panic exception: an unbound variable raises exactly what
+           `panic` does.  Only the message prefix separates them, so this
+           fixture is what keeps that convention honest — reverting the
+           classification in [with_harness] confirms
+           "unbound variable: nope" as a program panic. *)
+        let fn =
+          fn_named
+            {|mod U7 do
+  fn f(ys : List(Int)) : Int do
+    match ys do
+    Nil        -> nope
+    Cons(h, _) -> h
+    end
+  end
 end|}
             "f"
         in
         Alcotest.(check bool) "declined" true
-          (W.confirm_precond_reachable ~fn ~model:[ ("len$ys", "0") ] = None))
+          (confirm ~arg:"ys" fn [ ("len$ys", "0") ] = None))
   ]
 
 let () =
