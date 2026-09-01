@@ -331,8 +331,24 @@ let io_console_shape =
 let shadow_list_matches_stdlib =
   Alcotest.test_case "shadowed_by_stdlib matches the stdlib sources" `Quick
     (fun () ->
+      (* Identify the stdlib by a MARKER FILE, not by the directory name.
+         `stdlib` alone matched `test/stdlib` — 97 stdlib TEST fixtures — when
+         dune runs the suite with cwd = _build/default/test, which is how this
+         passed locally (run from the repo root) and failed on both CI
+         platforms.  `../stdlib` is the staged copy that test/dune declares as
+         `(source_tree ../stdlib)`, so it is the one that is guaranteed to be
+         there. *)
       let stdlib_dir =
-        List.find Sys.file_exists [ "stdlib"; "../../../stdlib"; "../../stdlib" ]
+        let candidates = [ "../stdlib"; "stdlib"; "../../../stdlib"; "../../stdlib" ] in
+        match
+          List.find_opt
+            (fun d -> Sys.file_exists (Filename.concat d "prelude.march"))
+            candidates
+        with
+        | Some d -> d
+        | None ->
+          Alcotest.failf "cannot find the stdlib (no prelude.march in: %s); cwd=%s"
+            (String.concat ", " candidates) (Sys.getcwd ())
       in
       let defined = Hashtbl.create 512 in
       let re = Str.regexp "^[ \t]*p?fn[ \t]+\\([a-z_][A-Za-z0-9_]*\\)[ \t]*(" in
@@ -355,6 +371,13 @@ let shadow_list_matches_stdlib =
           (Sys.readdir dir)
       in
       walk stdlib_dir;
+      (* Guard against a vacuous pass: if the walk ever finds nothing, an empty
+         [shadowed_by_stdlib] would compare equal to an empty [actual] and this
+         test would go green while checking nothing. *)
+      Alcotest.(check bool)
+        (Printf.sprintf "the walk found a plausible stdlib (%d fn definitions in %s)"
+           (Hashtbl.length defined) stdlib_dir)
+        true (Hashtbl.length defined > 500);
       let actual =
         List.map fst March_typecheck.Typecheck_builtins.builtin_cap_table
         |> List.sort_uniq String.compare
