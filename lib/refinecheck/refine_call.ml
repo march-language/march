@@ -11,14 +11,14 @@
     callee, reflect the actual argument, assemble the facts in scope, and ask
     the solver whether they entail the parameter's predicate.
 
-    Three of the pass's twenty mutable cells live here — [strict_verified],
-    [unverified_hinted] and [trusted_fn] — and all three are written from §21
-    (the declaration walk), which is still in [Refine_check].  They therefore
-    reach that writer through [include], as the same ref cells.  Re-declaring
-    any of them would leave the writer setting a ref nobody reads, and since
-    they only ever RELAX or TIGHTEN reporting, an accepting corpus would not
-    notice: [strict_verified] turns a skipped obligation into an error, and
-    [trusted_fn] suppresses one.
+    Four of the pass's mutable cells live here — [strict_verified],
+    [unverified_hinted], [trusted_fn] and [enclosing_fn] — and all four are
+    written from §21 (the declaration walk), which is still in
+    [Refine_check].  They therefore reach that writer through [include], as
+    the same ref cells.  Re-declaring any of them would leave the writer
+    setting a ref nobody reads, and since they only ever RELAX or TIGHTEN
+    reporting, an accepting corpus would not notice: [strict_verified] turns a
+    skipped obligation into an error, and [trusted_fn] suppresses one.
 
     Verify changes here against the REJECT corpus
     (`dune build @types-check --force`), not only [scripts/refine-oracle.sh]. *)
@@ -70,6 +70,13 @@ let unverified_hinted = ref false
    carry `@[trusted]`.  Consulted only by [check_call]'s [note] — see there for
    why [check_post] does not (yet) need to. *)
 let trusted_fn = ref false
+
+(* The function whose body is being walked, set and restored by [visit_fn]
+   exactly as [trusted_fn] is.  A ref rather than a [call_ctx] field because
+   it is not a fact channel: it never shadows, never retires on rebinding, and
+   adding it to the record would touch all three construction sites in
+   refine_check.ml for a value none of them varies. *)
+let enclosing_fn : A.fn_def option ref = ref None
 
 (* Does [e] ever APPLY the function spelled [name]?  Applications only: a bare
    mention (`let f = List.length`) is not a guard, and counting it would let an

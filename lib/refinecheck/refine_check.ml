@@ -901,8 +901,14 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
      in March, but a fresh call into [visit_fn] for a sibling clearly must not
      inherit this) never sees a stale `true` left behind by a caller. *)
   let saved_trusted = !trusted_fn in
+  let saved_enclosing = !enclosing_fn in
   trusted_fn := is_trusted;
-  Fun.protect ~finally:(fun () -> trusted_fn := saved_trusted) (fun () ->
+  enclosing_fn := Some fd;
+  Fun.protect
+    ~finally:(fun () ->
+      trusted_fn := saved_trusted;
+      enclosing_fn := saved_enclosing)
+    (fun () ->
     check_fn_post ~root errctx fd;
     let walked = if assume_params then fd else strip_param_refinements fd in
     List.iter

@@ -316,7 +316,19 @@ end|}
         let hints = refine_hints (decl "  fn main() : Int do take_n(5) end") in
         Alcotest.(check int) "no unverified hints on proved code" 0
           (List.length
-             (List.filter (fun h -> contains h "was NOT verified here") hints))) ]
+             (List.filter (fun h -> contains h "was NOT verified here") hints)));
+
+    (* The enclosing function must be restored on the way out, or a sibling
+       decl inherits a stale identity and the promotion in Task 6 executes the
+       WRONG function.  Save/restore mirrors [trusted_fn]. *)
+    gated "enclosing_fn is None outside any function body" (fun () ->
+        ignore (has_refine_error_d
+          {|mod EF1 do
+  fn take_n(n : {Int | _ > 0}) : Int do n end
+  fn go(k : Int) : Int do take_n(k) end
+end|});
+        Alcotest.(check bool) "restored to None after the walk" true
+          (!March_refinecheck.Refine_call.enclosing_fn = None)) ]
 
 (* A2: the `len` measure + cross-argument bounds.  `at` indexes a list with a
    bounds-refined index; we check calls against list literals (statically sized). *)
