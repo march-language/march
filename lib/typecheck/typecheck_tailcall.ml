@@ -308,12 +308,23 @@ let rec check_tail_position
                   for O(n) performance."
                  fn_name)
           else
+            (* The loop is NOT automatic.  TRMC (lib/tir/trmc.ml) does perform
+               exactly this transformation and is correct on eligible shapes,
+               but `Trmc.enabled` defaults to false, so on the default pipeline
+               a constructor-wrapped recursive call really does keep O(depth)
+               stack and really does overflow on deep input.  This message once
+               promised the loop unconditionally — it was reworded ahead of a
+               default flip (specs/plans/2026-08-10-trmc-on-by-default.md) that
+               never landed.  State the opt-in, not the promise. *)
             Err.warning errors ~span:sp
               (Printf.sprintf
                  "Warning: function `%s` is structurally recursive but not \
-                  tail-recursive. This is safe for bounded input but may use \
-                  O(depth) stack space; when the recursive call is the direct \
-                  argument of a constructor, the compiler turns it into a loop."
+                  tail-recursive. This is safe for bounded input but uses \
+                  O(depth) stack space, so deep input can overflow the stack. \
+                  Consider an accumulator parameter. Tail-recursion-modulo-cons \
+                  can compile a recursive call that is the direct argument of a \
+                  constructor into a loop instead, but it is off by default; \
+                  enable it with `--trmc`."
                  fn_name)
         end
       end;
