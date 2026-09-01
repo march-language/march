@@ -324,6 +324,28 @@ is told nothing about which half.
 - Consumes: `Undecided.diagnose` from Task 1; `Refine.discharge ~root ~preamble`
   and the `preamble` bound at `refine_call.ml:1839`
 
+**Task 1's shipped interface.** `Undecided.diagnose` gained a `~subject_name`
+parameter during review: the CHECK runs against the SMT symbol (`subject_sym`,
+e.g. `len$ys`) while the message PAYLOAD is the source spelling
+(`subject_name`, e.g. `ys`). Both must be `Some` for `Unconstrained_subject` to
+fire, so a non-variable actual stays silent rather than inventing a name. The
+signature is therefore:
+
+```
+Undecided.diagnose :
+  subject_sym:string option -> subject_name:string option -> Smt.vc ->
+  Obligation.reason option
+```
+
+**`Opaque_application` is deliberately unreachable — do not remove it.** It
+fires zero times across stdlib and `test/native`, because `known_head`
+currently enumerates every `App` head the encoder builds. That completeness is
+a property of today's encoder, not an architectural limit, so the variant is
+kept as a safety net for the first encoder addition that escapes it. Its
+suppression logic IS exercised (removing `known_head`'s `is_measure` branch
+reproduces a `$strlen`-style false positive, mutation-tested). Reviewers: this
+is a ruling, not an oversight.
+
 **Established by Task 1 — preserve this precedence.** The fall-through selects a
 reason most-specific-first, and `note` then runs `alias_withdrawal_cause` on
 whatever came out, which can OVERRIDE it. Task 2 inserts `Partial_conjunct` at
