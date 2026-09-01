@@ -612,6 +612,52 @@ consulted — worse than the current refusal.
 
    Elaborate bottom-up in one pass so the ambient arm is never re-elaborated.
 
+### (b) implementation notes, from starting it
+
+Two things were settled by attempting the pass; both changed the plan above.
+
+**IT BELONGS IN TIR, NOT THE AST.** The AST has 58 expression constructors and
+no generic map, so an AST rewriter must be total over all 58 by hand — and a
+missed constructor is SILENT: a call site inside it keeps its old arity while
+the callee gained a parameter. TIR has ~21, is in ANF (so every call is
+`EApp (var, atoms)` or `ECallPtr` — no calls nested inside arbitrary
+expressions), and `lib/tir/` already contains passes that change arity (mono,
+defun). Writing the match without a `_` arm then makes exhaustiveness a
+compile error rather than a runtime surprise.
+
+The insertion point is immediately after `Lower.lower_module`, which
+`bin/main.ml` already documents as "the one point in the pipeline where a TIR
+fn's name is still exactly its source name — Mono hasn't mangled/duplicated
+anything yet, Defun hasn't lifted any lambdas yet". That is exactly what
+matching against the capability closure needs.
+
+**THE MOCK NEEDS A BINDING SITE, which the plan above did not have.** Threading
+alone is not enough: the implicit parameter has to be bound to the user's mock
+*somewhere*, and a `let mock = cap_impl(...)` in a test body is just a local
+the pass knows nothing about. The binding site is
+
+```march
+with_cap(mock, fn _ -> code_under_test())
+```
+
+Inside the lambda, the implicit parameter for `mock`'s capability is `mock`.
+Written as an ordinary application rather than new syntax, so the pass needs no
+parser change. Everywhere else an elaborated call passes `root_cap`, the plain
+sentinel, which reads back as `None` and takes the ambient path — i.e. exactly
+today's behaviour. (`root_cap` is banned in source outside a test body by
+reject/t152, but the pass runs after typechecking and emits it directly, so the
+ban is not in play. Do not re-typecheck the elaborated program without
+accounting for that.)
+
+**Restrictions for a first version**, each of which costs interception and never
+correctness — an un-elaborated function keeps today's behaviour exactly:
+
+- Actor handlers are skipped: the scheduler invokes them, not an elaborated
+  caller, so there is nobody to thread from.
+- A function whose name is referenced anywhere except as a call head is not
+  elaborated; changing its arity would break the reference, and eta-expanding
+  every such site is more than a first version needs.
+
 **Risks to price before starting.** The pass changes the arity of most
 functions in a test build, so it lands on defun, mono, Perceus, the CAS cache
 key, hot-reload dispatch tables and FFI boundaries. `cap_rows` gets worse in the
