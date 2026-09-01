@@ -826,6 +826,17 @@ a suggested precondition that does not remove it. The shipped code requires the
 panic to be attributable to the obligation (see the Task 5 report for which
 mechanism the interpreter made available). Do not reintroduce either.
 
+(3) `with_harness` mapped EVERY `Eval_error` to `Panicked`, but `eval_error` is
+the evaluator's general failure helper (~860 sites — unbound name, arity,
+desugar residue), while only the `panic`/`panic_` builtins format `"panic: %s"`
+(`todo_`: `"todo: %s"`), and the genuine March panics `Match_failure` /
+`Assert_failure` are separate exceptions that fell to `Unconfirmable`. So an
+internal evaluator error on a decoded value was CONFIRMED as a program panic.
+The shipped code classifies by the user-panic prefix (stripped for the quoted
+text) and declines every other `Eval_error`. `with_harness` is shared with
+`confirm_post` and `confirm_enumerative`, so this also tightens the earlier
+return-contract witnesses — Task 9's CHANGELOG entry must mention it.
+
 **Shipped (2026-09-01), with three declines beyond the sketch below.**
 
 1. *Hidden refinements.* `admissible` pattern-matches a single `A.TyRefine` at
