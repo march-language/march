@@ -859,11 +859,41 @@ return-contract witnesses — Task 9's CHANGELOG entry must mention it.
    no parameter for the suggested precondition to land on, matching
    `confirm_enumerative`. Decline.
 
+**Review round 1 changed the signature.** Task 6 must call:
+
+```ocaml
+Witness.confirm_precond_reachable :
+  fn:March_ast.Ast.fn_def ->
+  pred:March_ast.Ast.expr -> binder:string -> arg:March_ast.Ast.expr ->
+  model:(string * string) list ->
+  ((string * V.value) list * string) option
+```
+
+`pred` / `binder` / `arg` are the same three the existing `confirm_precond`
+takes. Three further defects were fixed in that round:
+
+- **C1** — `call_fn` takes a NAME and `lookup_fn` prefers an exact bare-name
+  binding, so a nested-module function colliding with a top-level namesake
+  executed the wrong definition. Resolved by identity: `qualified_fn_name`
+  locates the `fn_def` in the module tree and qualifies it with that path
+  (how `Eval`'s `DMod` arm exports nested members); ambiguous or not found
+  declines.
+- **I2** — a zero-filled don't-care parameter can panic on a branch that never
+  reaches the call. `Eval_error` carries a string and nothing else — no span,
+  no function identity — so "the panic came from this call" is unanswerable.
+  The gate instead requires (a) the decoded argument to genuinely violate
+  `pred`, and (b) repairing ONLY the subject to a satisfying value to remove
+  the panic. Residual: attribution to the subject, not to the call site.
+- **I3** — `with_harness` mapped every `Eval_error` to `Panicked`, but that is
+  the evaluator's general failure channel; an unbound variable was confirmed
+  as a program panic. Only the user-panic builtins' message prefixes count
+  now, stripped so the quoted text is the user's own. `Match_failure` /
+  `Assert_failure` still decline (coverage gap, not soundness).
+
 Nothing calls the function until Task 6, so it also ships with a direct unit
-suite (`precond-reachable-unit`, 6 ungated cases, models supplied by hand).
-Mutation-tested: removing the admissibility check reddens the `List.last` and
-inadmissible-model cases, removing the witness-safety walk reddens the nested-
-refinement case. `W2` is RED at this commit by design — Task 6 wires the gate.
+suite (`precond-reachable-unit`, 10 ungated cases, models supplied by hand).
+Every gate is mutation-tested: reverting each one reddens exactly the case
+written for it. `W2` is RED at this commit by design — Task 6 wires the gate.
 
 The soundness core. **Read `specs/2026-09-01-refinement-error-diagnosis-design.md`
 §2 before writing any code in this task** — the obvious implementation (reuse
