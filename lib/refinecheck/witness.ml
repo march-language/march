@@ -472,9 +472,10 @@ type exec_result =
    suite pins BOTH directions: a real `panic("…")` confirms with the user's
    text, and a provoked internal error declines.
 
-   Deliberately NOT classified as panics: [Eval_prim.Match_failure] and
-   [Eval_prim.Assert_failure], which are separate exceptions and genuinely ARE
-   user-level failures.  They keep declining (via the catch-all below).  That
+   Deliberately NOT classified as panics: [Eval.Match_failure] and
+   [Eval.Assert_failure] (declared in `lib/eval/eval.ml`, not in `eval_prim.ml`
+   which declares only [Eval_error] and [Blocked_builtin]), which are separate
+   exceptions and genuinely ARE user-level failures.  They keep declining (via the catch-all below).  That
    is a coverage gap, not a soundness one, and closing it means deciding
    whether "let binding pattern failed: …" is a requirement a caller can be
    asked to declare — a Task 6 question, not this one. *)
@@ -942,8 +943,8 @@ let render_entries (entries : (string * V.value) list) : string option =
    specs/2026-09-01-refinement-error-diagnosis-design.md §2.
 
    Placed here rather than beside [violates_post] because it consumes
-   [annotated_params] (:567), [shrink] (:669), [battery] (:735) and
-   [free_vars] (:770), all defined below that point.
+   [annotated_params], [shrink], [battery] and [free_vars], all defined below
+   that point.  (Names, not line numbers: the numbers rot on every edit.)
    ================================================================= *)
 
 (* A parameter type is *witness-safe* when [admissible] genuinely decides it.
@@ -1181,7 +1182,21 @@ let confirm_precond_reachable ~(fn : A.fn_def) ~(pred : A.expr)
                    in
                    admissible ~params cand
                    && holds cand = Some true
-                   && panic_of cand = None
+                   (* An actual RETURN, not merely "no panic observed".
+                      [panic_of] collapses [Unconfirmable] into [None], and a
+                      repaired run can be unconfirmable for reasons that say
+                      nothing about the panic: fuel exhaustion, a blocked
+                      builtin, an internal [Eval_error], or — the nastiest —
+                      a spent [wall_budget], after which EVERY later call
+                      short-circuits to [Unconfirmable].  Scoring any of those
+                      as "the panic went away" makes the demonstration
+                      vacuous and restores the unrelated-branch false
+                      positive this check exists to stop. *)
+                   && (match
+                         call_fn ~name:fname ~args:(List.map snd cand)
+                       with
+                       | Ret _ -> true
+                       | Panicked _ | Unconfirmable -> false)
                  in
                  if not (List.exists repaired_runs_clean (battery ~params:subjects))
                  then None

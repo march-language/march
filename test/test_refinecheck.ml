@@ -10568,6 +10568,33 @@ end|}
             "empty list" msg
         | None -> Alcotest.fail "expected the top-level `f` to confirm"))
 
+  ; (* C1, positive half.  Case 6 above shows the NESTED namesake declining,
+       which on its own is equally consistent with the identity lookup never
+       finding a nested definition at all — and every stdlib module is a
+       `DMod`, so that failure mode would silently kill the whole feature.
+       Here the working definition is the nested one and the top-level
+       namesake is inert, so only a lookup that really resolves `Inner.f` can
+       confirm. *)
+    (let nested_src =
+       {|mod P8 do
+|} ^ head_decl
+       ^ {|  fn f(ys : List(Int)) : Int do 0 end
+  mod Inner do
+    fn f(ys : List(Int)) : Int do head(ys) end
+  end
+end|}
+     in
+     Alcotest.test_case "reachable: a nested function is resolved" `Quick
+       (fun () ->
+         let inner = fn_at nested_src [ "Inner" ] "f" in
+         (match confirm ~arg:"ys" inner [ ("len$ys", "0") ] with
+          | Some (_, msg) ->
+            Alcotest.(check string) "the nested one confirms" "empty list" msg
+          | None -> Alcotest.fail "expected `Inner.f` to confirm");
+         let outer = fn_at nested_src [] "f" in
+         Alcotest.(check bool) "the inert top-level namesake declines" true
+           (confirm ~arg:"ys" outer [ ("len$ys", "0") ] = None)))
+
   ; Alcotest.test_case "reachable: an unrelated panic declines" `Quick
       (fun () ->
         (* I2.  The don't-care `n` zero-fills to 0 and the panic comes from a
@@ -10610,6 +10637,38 @@ end|}
           (confirm ~pred:(eapp ">" [ evar "_"; eint 0 ]) ~arg:"n" fn
              [ ("n", "1") ]
            = None))
+
+  ; Alcotest.test_case "reachable: an unconfirmable repair declines" `Quick
+      (fun () ->
+        (* The repair check must demand an actual RETURN, not merely "no panic
+           observed".  A repaired run can come back [Unconfirmable] for
+           reasons that say nothing about the panic — fuel exhaustion, a
+           blocked builtin, an internal [Eval_error], or a spent
+           [wall_budget], after which every later call short-circuits — and
+           scoring those as "the panic went away" makes the demonstration
+           vacuous and restores the unrelated-branch false positive.
+
+           Here the panic is guarded solely by `n`, so `head(ys)` is never
+           evaluated and repairing `ys` cannot remove it; the repaired run
+           takes the `Cons` branch into an unbound name and comes back
+           unconfirmable rather than returning.  An internal error is used
+           rather than a fuel-out loop so the case costs nothing to run. *)
+        let fn =
+          fn_named
+            ({|mod U9 do
+|} ^ head_decl
+           ^ {|  fn go(ys : List(Int), n : Int) : Int do
+    let z = match ys do
+    Nil        -> 0
+    Cons(_, _) -> nope
+    end
+    if n == 0 do panic("unrelated: n is zero") else head(ys) + z end
+  end
+end|})
+            "go"
+        in
+        Alcotest.(check bool) "declined" true
+          (confirm ~arg:"ys" fn [ ("len$ys", "0"); ("n", "0") ] = None))
 
   ; Alcotest.test_case "reachable: an internal evaluator error declines" `Quick
       (fun () ->
