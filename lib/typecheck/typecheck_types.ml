@@ -207,6 +207,21 @@ let tvar_display_name id =
     in
     Hashtbl.add _tvar_names id n; n
 
+(** Reset the tvar → display-name cache. Display names are purely
+    presentational (unlike [_counter], the actual fresh-id source, which
+    must stay monotonic for unification correctness and is intentionally
+    never reset — see the file header). A one-shot CLI run never needs this:
+    the process exits after one [check_module]. A long-lived process that
+    calls [check_module] repeatedly against an unchanging id space — the
+    LSP, re-typechecking on every edit — does: left alone, [_tvar_ctr] climbs
+    for the process's entire lifetime, so an unresolved type variable in a
+    20-line file can print as `y55` instead of `a`. Call this once per
+    analysis pass, before rendering its diagnostics, so each pass's fresh
+    variables again start naming from "a". *)
+let reset_tvar_display_names () =
+  Hashtbl.reset _tvar_names;
+  _tvar_ctr := 0
+
 (* -----------------------------------------------------------------
    Nominal-name recovery for structural record types.
 
