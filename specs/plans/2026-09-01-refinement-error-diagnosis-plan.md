@@ -302,6 +302,29 @@ is told nothing about which half.
 **Interfaces:**
 - Consumes: `Undecided.diagnose` from Task 1; `Refine.discharge ~root ~preamble`
   and the `preamble` bound at `refine_call.ml:1839`
+
+**Established by Task 1 — preserve this precedence.** The fall-through selects a
+reason most-specific-first, and `note` then runs `alias_withdrawal_cause` on
+whatever came out, which can OVERRIDE it. Task 2 inserts `Partial_conjunct` at
+the front of the `diagnose` half; it must not disturb the rest:
+
+1. `Partial_conjunct` (Task 2 — added ahead of `diagnose`)
+2. `Opaque_application` (inside `diagnose`)
+3. `Unconstrained_subject` (inside `diagnose`, only if 2 did not fire)
+4. `Alias_withdrawn` — computed in `note` AFTER `diagnose`, and overrides it.
+   An early Task 1 draft ran diagnosis ahead of this and mislabelled 16
+   pre-existing tests; do not reorder it.
+5. `Solver_undecided` — the residual.
+
+**Namespace hazard, learned the hard way in Task 1.** A subject's SOURCE name is
+not its SMT symbol. A measure-typed subject reflects through `measure_of_var`
+(`refine_call.ml:1049`) to `Const "len$ys"`, never `Const "ys"`. Task 1 shipped
+a version comparing the raw AST name against VC symbols, which silently made
+`Unconstrained_subject` fire for every `List` subject — a message asserting
+"nothing in scope constrains `ys`" where a real guard existed. Any new
+comparison between a source-level name and a VC symbol must resolve through the
+same path the VC builder used. Never bridge the gap with a substring, prefix or
+suffix match on `$`.
 - Produces: `Obligation.Partial_conjunct of { held : string list; missing : string list }`
   — rendered predicate fragments, source syntax, in goal order
 
