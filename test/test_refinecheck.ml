@@ -4239,33 +4239,34 @@ end|}
         in
         Alcotest.(check (list string)) "float-sort-gate" [ "float-sort-gate" ] rs);
 
-    (* The genuine solver outcome, with a CONTROL.  Without the control this
-       test would pass on a z3-less machine for the wrong reason: with no
-       solver EVERY obligation falls through to a skip.  The control — the
+    (* An unguarded MEASURE-typed call, with a CONTROL.  Without the control
+       this test would pass on a z3-less machine for the wrong reason: with
+       no solver EVERY obligation falls through to a skip.  The control — the
        same call under a guard that discharges it — can only be [Proved] when
        a solver actually ran and decided, so the pair together says "z3 ran,
        and on the unguarded call it declined".
 
-       This stays [Solver_undecided], NOT [Unconstrained_subject], even
-       though the call is completely unguarded: [measure_of_var] asserts
-       `len$ys >= 0` as a side effect of reflecting `len(_)` on the GOAL side
-       alone (see its own comment), so `vc.assumptions` always mentions
-       `len$ys` for a `len`-measured subject, whether or not the caller wrote
-       any guard at all.  [Undecided.diagnose]'s unconstrained check is
-       syntactic and honest about that: something DOES reference the symbol,
-       so claiming otherwise would be the same false-attribution class the
-       fix for the measure-symbol-mismatch bug exists to prevent (see
-       lib/refinecheck/undecided.ml's [mark_self] and this file's
-       "a constrained MEASURE subject is not called unconstrained, even
-       though the guard is insufficient" case below for the general form of
-       that class).  [Unconstrained_subject] fires for `len`-measured
-       subjects only when the predicate's own reflection is skipped
-       entirely (an unreflectable actual); for a plain scalar Int/Bool/Float
-       subject, which carries no such auto-assumption, it fires exactly on
-       "no guard at all" — see "an unconstrained subject is diagnosed" above.
-       Mutation that fails THIS test: replace the final
-       `| _ -> note (Skipped Solver_undecided)` arm with any other reason. *)
-    gated "a genuinely undecided obligation is filed as solver-undecided" (fun () ->
+       This is [Unconstrained_subject], not [Solver_undecided]: nothing the
+       USER wrote constrains `ys`.  [measure_of_var] DOES assert `len$ys >=
+       0` unconditionally as a side effect of reflecting `len(_)` on the
+       goal side, so a naive check over the full [vc.assumptions] would see
+       SOMETHING mentioning `len$ys` and wrongly stay silent (this was this
+       task's round-2 review finding: the fix landed correct but too
+       narrow, and this exact fixture is what proved it).  `len$ys >= 0` is
+       a well-formedness axiom about the ENCODER's own representation — true
+       of every list, unconditionally — not a fact the user's code
+       establishes, so [Undecided.diagnose] is handed [user_assumptions]
+       (assembled in [Refine_call.check_one], filtering out exactly the
+       axioms marked [push_structural] at their emission sites), not the raw
+       [vc.assumptions].  See lib/refinecheck/refine_call.ml's [user_assume]
+       comment for the full account, and "a constrained MEASURE subject is
+       not called unconstrained, even though the guard is insufficient"
+       below for the paired control that proves this doesn't just make the
+       check fire unconditionally again.
+       Mutation that fails THIS test: make [push_structural] behave like
+       [push_user] (i.e. add the well-formedness axiom to [user_assume] too)
+       — the slug reverts to "solver-undecided". *)
+    gated "a genuinely unguarded MEASURE-typed subject is diagnosed as unconstrained" (fun () ->
         let control =
           {|mod RS4b do
   fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
@@ -4283,7 +4284,7 @@ end|}
   fn go(ys : List(Int)) : Int do head(ys) end
 end|}
         in
-        Alcotest.(check (list string)) "solver-undecided" [ "solver-undecided" ] rs);
+        Alcotest.(check (list string)) "unconstrained-subject" [ "unconstrained-subject" ] rs);
 
     (* [Alias_withdrawn] is checked in [alias_attribution_suite] through the
        `cap verified` MESSAGE text, which is the user-facing surface.  It is
@@ -4374,6 +4375,43 @@ end|}
         Alcotest.(check bool) "not unconstrained" false
           (List.mem "unconstrained-subject" rs));
 
+    (* CRITICAL regression, round 2 of review: the fix above (UD1c) landed
+       correct but too narrow.  [measure_of_var] asserts `len$x >= 0`
+       unconditionally as a side effect of reflecting `len(_)`, so a naive
+       "does any assumption mention the symbol" check saw that boilerplate
+       axiom and stayed silent EVEN WITH NO GUARD AT ALL — the exact shape
+       this whole project opened with (an unrefined parameter passed
+       straight into a refined one) kept reporting the useless
+       `solver-undecided`.  Pin BOTH halves in one fixture pair, per the
+       review: the unguarded call must be [unconstrained-subject], and the
+       insufficiently-guarded one (mirroring UD1c) must NOT be — proving the
+       fix filters out only the STRUCTURAL axiom, not every assumption.
+       Mutation that fails this: make [push_structural] add to [user_assume]
+       too (the unguarded case wrongly reverts to solver-undecided), or
+       delete the [is_self]/[mark_self] machinery so `subject_sym` goes back
+       to the raw source name (both halves break, differently). *)
+    gated "an unrefined parameter passed straight into a measured one is diagnosed as unconstrained"
+      (fun () ->
+        let unguarded =
+          skip_reasons
+            {|mod Motiv do
+  fn head_of(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn caller(ys : List(Int)) : Int do head_of(ys) end
+end|}
+        in
+        Alcotest.(check (list string)) "unconstrained-subject"
+          [ "unconstrained-subject" ] unguarded;
+        let guarded =
+          skip_reasons
+            {|mod MotivGuarded do
+  fn head_of(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn caller(ys : List(Int)) : Int do
+    if List.length(ys) < 100 do head_of(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check (list string)) "solver-undecided" [ "solver-undecided" ] guarded);
+
     (* IMPORTANT regression (found in review of this task): [known_head]'s
        [Refine_encode.is_measure] arm looked unreachable from the `$strlen`
        fixture alone — a `len` application never appears as an [App] head
@@ -4404,7 +4442,36 @@ end|}
 end|}
         in
         Alcotest.(check bool) "not opaque" false
-          (List.mem "opaque-application" rs))
+          (List.mem "opaque-application" rs));
+
+    (* IMPORTANT regression, round 2 of review: [bin/main.ml]'s
+       [print_refine_report] and [Obligation.summary] both used to key their
+       skip-count [Hashtbl] on the raw [reason] value.  [Unconstrained_
+       subject] carries the unconstrained symbol's NAME in its payload, so
+       three obligations skipped for the SAME cause but three DIFFERENT
+       variable names produced three separate `skipped (unconstrained-
+       subject)` report lines instead of one summed line — defeating the
+       per-bucket distribution count a later task relies on to judge this
+       taxonomy.  [reason_name] exists precisely to be the payload-free key;
+       this pins that [summary] actually uses it, not just that
+       [reason_name] itself works (that half was never broken).
+       Mutation that fails this: change [summary]'s [Hashtbl.replace skips
+       name …] back to keying on the raw [Skipped r] payload — three buckets
+       reappear. *)
+    gated "several differently-named unconstrained subjects report ONE summed bucket"
+      (fun () ->
+        March_refinecheck.Obligation.reset ();
+        ignore
+          (has_refine_error_d
+             {|mod Bucket do
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn a(ys : List(Int)) : Int do head(ys) end
+  fn b(zs : List(Int)) : Int do head(zs) end
+  fn c(ws : List(Int)) : Int do head(ws) end
+end|});
+        let _, _, skips = March_refinecheck.Obligation.summary () in
+        Alcotest.(check (list (pair string int)))
+          "one bucket, summed" [ ("unconstrained-subject", 3) ] skips)
 
     (* A third variant, [Nonlinear_goal], was drafted here and cut: the only
        [smt_of] used to build a goal never produces [Smt.Mul] for two
@@ -5522,7 +5589,7 @@ end|}
        DOES have a withdrawn alias but at a call the alias could not have
        helped, must both keep the general message.  Without these, "never says
        solver-undecided" would pass trivially. *)
-    gated "a genuinely undecided obligation still says solver-undecided"
+    gated "a genuinely unguarded obligation is diagnosed as unconstrained"
       (fun () ->
         let msg =
           refine_error_text_d
@@ -5534,8 +5601,8 @@ end|}
         in
         Alcotest.(check bool) "reported at all" true (msg <> "");
         Alcotest.(check bool)
-          "still says solver-undecided" true
-          (contains msg "solver-undecided"));
+          "still says unconstrained-subject" true
+          (contains msg "unconstrained-subject"));
     gated "a withdrawn alias is not blamed for an UNGUARDED call"
       (fun () ->
         (* Same competing `mod List` as the first case, so the alias IS
@@ -5556,8 +5623,8 @@ end|}
         in
         Alcotest.(check bool) "reported at all" true (msg <> "");
         Alcotest.(check bool)
-          "still says solver-undecided" true
-          (contains msg "solver-undecided");
+          "still says unconstrained-subject" true
+          (contains msg "unconstrained-subject");
         Alcotest.(check bool)
           "does not name the alias" false
           (contains msg "alias-withdrawn"));
@@ -5595,13 +5662,13 @@ end|}
            the call is undischarged all the same. *)
         Alcotest.(check bool)
           "control is undischarged too" true
-          (contains control "solver-undecided");
+          (contains control "unconstrained-subject");
         Alcotest.(check bool)
           "so the withdrawal is not blamed" false
           (contains witness "alias-withdrawn");
         Alcotest.(check bool)
           "and the honest message stands" true
-          (contains witness "solver-undecided"));
+          (contains witness "unconstrained-subject"));
     gated "a withdrawn LIST alias is not blamed for a STRING obligation"
       (fun () ->
         (* All three spellings route to the single measure name `len`, so
@@ -5723,8 +5790,8 @@ end|}
         in
         Alcotest.(check bool) "reported at all" true (msg <> "");
         Alcotest.(check bool)
-          "stays general (solver-undecided)" true
-          (contains msg "solver-undecided"));
+          "stays general (unconstrained-subject)" true
+          (contains msg "unconstrained-subject"));
     gated "a FREE occurrence under a non-colliding binder still attributes"
       (fun () ->
         (* Companion control to LA7 (the colliding-binder case, just above):
@@ -5799,8 +5866,8 @@ end|}
           "no longer misattributed to the withdrawal" false
           (contains msg "alias-withdrawn");
         Alcotest.(check bool)
-          "stays general (solver-undecided)" true
-          (contains msg "solver-undecided"));
+          "stays general (unconstrained-subject)" true
+          (contains msg "unconstrained-subject"));
     gated "a laundered guard on a DIFFERENT collection is not this guard"
       (fun () ->
         (* The laundered analogue of the WA control: the walk must consult
@@ -5827,7 +5894,7 @@ end|}
         Alcotest.(check bool)
           "the withdrawal is not blamed" false (contains msg "alias-withdrawn");
         Alcotest.(check bool)
-          "stays general" true (contains msg "solver-undecided"));
+          "stays general" true (contains msg "unconstrained-subject"));
     gated "a REBOUND laundering name is not the launder"
       (fun () ->
         (* `let n = 5` between the laundering `let` and the guard: the guard's
@@ -5855,7 +5922,7 @@ end|}
         Alcotest.(check bool)
           "the withdrawal is not blamed" false (contains msg "alias-withdrawn");
         Alcotest.(check bool)
-          "stays general" true (contains msg "solver-undecided"));
+          "stays general" true (contains msg "unconstrained-subject"));
     gated "a REBOUND collection retires the laundered fact"
       (fun () ->
         (* The collection itself rebinds between the `let` and the call: `n`
@@ -5884,7 +5951,7 @@ end|}
         Alcotest.(check bool)
           "the withdrawal is not blamed" false (contains msg "alias-withdrawn");
         Alcotest.(check bool)
-          "stays general" true (contains msg "solver-undecided"));
+          "stays general" true (contains msg "unconstrained-subject"));
     gated "a NEGATED laundered guard is not read as a guard that proved nothing"
       (fun () ->
         (* The laundered analogue of WC: in the else-branch the guard
@@ -5967,8 +6034,8 @@ end|}
 end|}
         in
         Alcotest.(check bool)
-          "still falls back to solver-undecided" true
-          (contains msg "solver-undecided"));
+          "still falls back to unconstrained-subject" true
+          (contains msg "unconstrained-subject"));
     gated "a guard's lambda param colliding with the subject name is not evidence"
       (fun () ->
         (* Mirror-image of probe PE (2026-07-31), on the DIRECT path instead of
@@ -5992,8 +6059,8 @@ end|}
 end|}
         in
         Alcotest.(check bool)
-          "stays general (solver-undecided)" true
-          (contains msg "solver-undecided"));
+          "stays general (unconstrained-subject)" true
+          (contains msg "unconstrained-subject"));
     gated "a FREE occurrence of the subject under a non-colliding binder still attributes"
       (fun () ->
         (* Companion control: a genuine free use of the withdrawn spelling
@@ -6047,8 +6114,8 @@ end|}
 end|}
         in
         Alcotest.(check bool)
-          "stays general (solver-undecided)" true
-          (contains msg "solver-undecided"));
+          "stays general (unconstrained-subject)" true
+          (contains msg "unconstrained-subject"));
     gated "LA14: a guard that could never discharge is NOT blamed on the withdrawal"
       (fun () ->
         (* `List.length(ys) >= 0` is a tautology over a non-negative measure; it
@@ -6077,8 +6144,8 @@ end|}
           "does not claim the withdrawal caused this" false
           (contains msg "alias-withdrawn");
         Alcotest.(check bool)
-          "stays general (solver-undecided)" true
-          (contains msg "solver-undecided"));
+          "stays general (unconstrained-subject)" true
+          (contains msg "unconstrained-subject"));
     gated "LA15: CONTROL — a guard that WOULD have discharged is still blamed"
       (fun () ->
         (* The discrimination must be real: `List.length(ys) > 0` is exactly the
@@ -6138,8 +6205,8 @@ end|}
           "the shadowed launder is not read as evidence" false
           (contains msg "alias-withdrawn");
         Alcotest.(check bool)
-          "stays general (solver-undecided)" true
-          (contains msg "solver-undecided"));
+          "stays general (unconstrained-subject)" true
+          (contains msg "unconstrained-subject"));
     gated "LA16 CONTROL: a non-colliding param leaves the launder readable"
       (fun () ->
         (* Same shape as LA16, but the lambda binds `q` instead of `n`, so

@@ -241,9 +241,20 @@ let reason_detail = function
    existing caller destructures it that way, and [Trusted] does not belong in
    any of those three buckets — it is neither a proof nor a skip nor a
    violation.  Its own count is queried directly off [all ()] (see
-   bin/main.ml's [print_refine_report], which keeps its own tally). *)
+   bin/main.ml's [print_refine_report], which keeps its own tally).
+
+   The skip bucket is keyed on [reason_name] (a payload-free string), NOT the
+   raw [reason]: [Alias_withdrawn] and [Unconstrained_subject] both carry a
+   NAME in their payload, so keying on the variant itself splits one cause
+   into one bucket per distinct name — exactly the bug this comment used to
+   predict and dismiss as cosmetic for [Alias_withdrawn] alone.  It is not
+   cosmetic for [Unconstrained_subject], the far more common cause, where it
+   defeated a later task's per-bucket distribution count.  [print_refine_
+   report] in bin/main.ml keeps its own separate tally and must key the same
+   way, or the two can disagree. *)
 let summary () =
-  let proved = ref 0 and violated = ref 0 and skips = Hashtbl.create 8 in
+  let proved = ref 0 and violated = ref 0 in
+  let skips : (string, int) Hashtbl.t = Hashtbl.create 8 in
   List.iter
     (fun o ->
       match o.verdict with
@@ -251,6 +262,7 @@ let summary () =
       | Violated -> incr violated
       | Trusted -> ()
       | Skipped r ->
-        Hashtbl.replace skips r (1 + Option.value ~default:0 (Hashtbl.find_opt skips r)))
+        let name = reason_name r in
+        Hashtbl.replace skips name (1 + Option.value ~default:0 (Hashtbl.find_opt skips name)))
     !log;
-  (!proved, !violated, Hashtbl.fold (fun r n acc -> (r, n) :: acc) skips [])
+  (!proved, !violated, Hashtbl.fold (fun name n acc -> (name, n) :: acc) skips [])

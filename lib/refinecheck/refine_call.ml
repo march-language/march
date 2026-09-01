@@ -712,6 +712,41 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
   | None -> ()
   | Some self_actual ->
     let decls = ref [] and assume = ref [] in
+    (* Assumptions the ENCODER emits about its own representation — a
+       well-formedness axiom true of every value at a sort, not a fact
+       derived from anything the user wrote (a path guard, a declared
+       refinement, a callee's proven postcondition).  `len$x >= 0` is the
+       running example: [measure_of_var] asserts it unconditionally as a
+       side effect of reflecting `len(_)` even when there is NO guard at
+       all, so `vc.assumptions` always mentions the subject's measure
+       symbol — which made [Undecided.diagnose]'s "nothing constrains it"
+       check trivially, permanently false for every `len`-measured subject.
+       [user_assume] mirrors [assume] but omits exactly these: every
+       `assume := … :: !assume` site in this function pushes to BOTH unless
+       it is one of the three well-formedness sites marked [push_structural]
+       below (the measure-application non-negativity axiom, at its three
+       emission points).  [diagnose] is handed a VC built from
+       [user_assume]'s content, run through the identical wellsortedness/
+       float-rewrite pipeline as [assume] — never the raw list, and never a
+       shape-based filter over [assume] itself, which would silently drop a
+       genuine user guard that happens to look like `len(xs) >= 0`. *)
+    let user_assume = ref [] in
+    let push_user (t : Smt.term) : unit =
+      assume := t :: !assume;
+      user_assume := t :: !user_assume
+    in
+    let push_user_list (ts : Smt.term list) : unit =
+      assume := ts @ !assume;
+      user_assume := ts @ !user_assume
+    in
+    (* A well-formedness axiom about the encoder's OWN representation — see
+       [user_assume]'s comment.  Marked at its emission site, where the
+       encoder knows what it is emitting, rather than pattern-matched by
+       shape later: that would risk swallowing a genuine user fact that
+       happens to have the same shape (an explicit `len(xs) >= 0` guard,
+       say), and it would rot silently the moment the encoder started
+       emitting a differently-shaped axiom. *)
+    let push_structural (t : Smt.term) : unit = assume := t :: !assume in
     (* ── Caller-scope scalar sorts ─────────────────────────────────────────
        A path condition mentions CALLER variables and reflects each to
        `Const name`; so does an argument that IS that variable.  The two must
@@ -784,12 +819,11 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
           let c = Printf.sprintf "$str%d" (Hashtbl.length str_lit_tbl) in
           Hashtbl.replace str_lit_tbl s c;
           declare_str_const c;
-          assume :=
-            Smt.Eq (Smt.App (strlen_fn, [ Smt.Const c ]), Smt.IntLit (String.length s))
-            :: !assume;
+          push_structural
+            (Smt.Eq (Smt.App (strlen_fn, [ Smt.Const c ]), Smt.IntLit (String.length s)));
           Hashtbl.iter
             (fun s' c' ->
-              if s' <> s then assume := Smt.Ne (Smt.Const c, Smt.Const c') :: !assume)
+              if s' <> s then push_structural (Smt.Ne (Smt.Const c, Smt.Const c')))
             str_lit_tbl;
           Some (Smt.Const c)
     in
@@ -820,7 +854,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                  in
                  (match smt_of ~resolve_var:rv ~resolve_measure:rm
                           ~resolve_str_lit:str_lit_const q with
-                  | Some qa -> assume := qa :: !assume
+                  | Some qa -> push_user qa
                   | None -> ())
                | _ -> ());
               Some xc
@@ -832,7 +866,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
         result
     in
     let absorb = function
-      | Some (t, d, a) -> decls := d @ !decls; assume := a @ !assume; Some t
+      | Some (t, d, a) -> decls := d @ !decls; push_user_list a; Some t
       | None -> None
     in
     (* `a.rem` appearing as an ACTUAL argument.  Deliberately the same
@@ -932,7 +966,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
            let rf = make_field_resolver b sort_name c in
            (match smt_of ~resolve_var:rv ~resolve_measure:(fun _ _ -> None)
                     ~resolve_field:rf q with
-            | Some qa -> assume := qa :: !assume
+            | Some qa -> push_user qa
             (* Untranslatable predicate: the constant stays unconstrained, so
                neither the goal nor its negation can be proven and the call is
                skipped.  Sound, just weaker. *)
@@ -984,7 +1018,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
           let rf = make_field_resolver b sort_name c in
           (match smt_of ~resolve_var:rv ~resolve_measure:(fun _ _ -> None)
                    ~resolve_field:rf q with
-           | Some qa -> assume := qa :: !assume
+           | Some qa -> push_user qa
            (* Untranslatable predicate: the constant stays unconstrained, so
               neither the goal nor its negation is provable and the call is
               simply skipped. *)
@@ -1055,7 +1089,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
         decls := (nm, Smt.SInt) :: !decls;
         (* `len` is known non-negative; user measures get no axiom in v1 (sound;
            guarded uses still discharge via the path context). *)
-        if is_nonneg_measure m then assume := Smt.Ge (c, Smt.IntLit 0) :: !assume;
+        if is_nonneg_measure m then push_structural (Smt.Ge (c, Smt.IntLit 0));
         let r = Some c in
         Hashtbl.replace measure_var_cache nm r;
         r
@@ -1300,7 +1334,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
             else measure_of_var m' x
           in
           (match smt_of ~resolve_var:rv ~resolve_measure:rm q with
-           | Some qa -> assume := qa :: !assume
+           | Some qa -> push_user qa
            | None -> ())
         | _ -> ()
       end
@@ -1366,7 +1400,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
             | Some ctor when ctor = goal_ctor && sort_of_ctor ctor = Some adt ->
               decls := (x, Smt.SData adt) :: !decls;
               if not (List.mem adt !adt_sorts) then adt_sorts := adt :: !adt_sorts;
-              assume := Smt.IsCtor (ctor, Smt.Const x) :: !assume
+              push_user (Smt.IsCtor (ctor, Smt.Const x))
             | _ -> ())
           | _ -> ())
         | _ -> ()
@@ -1430,7 +1464,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
               | None -> uses_axiom := true; Some (Smt.App (m, [ arg_term ]))
           in
           (match smt_of ~resolve_var:rv ~resolve_measure:rm ~resolve_measure_app:rma q with
-           | Some qa -> assume := qa :: !assume
+           | Some qa -> push_user qa
            (* Untranslatable predicate: the constant stays unconstrained, which
               proves nothing in either direction — the call is simply skipped. *)
            | None -> ());
@@ -1604,7 +1638,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
               incr mapp_ctr;
               let nm = Printf.sprintf "len$app%d" !mapp_ctr in
               decls := (nm, Smt.SInt) :: !decls;
-              assume := Smt.Ge (Smt.Const nm, Smt.IntLit 0) :: !assume;
+              push_structural (Smt.Ge (Smt.Const nm, Smt.IntLit 0));
               Some (Smt.Const nm)
           else if is_axiom_measure m then
             match concrete_measure_app m arg_term with
@@ -1618,8 +1652,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
             incr mapp_ctr;
             let nm = Printf.sprintf "%s$app%d" m !mapp_ctr in
             decls := (nm, Smt.SInt) :: !decls;
-            if is_nonneg_measure m then
-              assume := Smt.Ge (Smt.Const nm, Smt.IntLit 0) :: !assume;
+            if is_nonneg_measure m then push_structural (Smt.Ge (Smt.Const nm, Smt.IntLit 0));
             Some (Smt.Const nm)
           end
         in
@@ -1774,7 +1807,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
             ~resolve_measure_app ~resolve_tester:path_resolve_tester
             ~resolve_str_lit:str_lit_const cond
         with
-        | Some t -> assume := (if negated then Smt.Not t else t) :: !assume
+        | Some t -> push_user (if negated then Smt.Not t else t)
         | None -> ())
       path;
     (* [`Skip]: a record parameter whose actual could not be reflected — build
@@ -1845,6 +1878,27 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
            assumptions
        in
        let vc = { Smt.decls; assumptions; goal } in
+       (* [user_assumptions]: the SAME two-step filter (sort-wellsortedness,
+          then float-rewrite-and-wellsortedness) applied to [user_assume]
+          instead of [assume] — i.e. every USER-derived assumption that
+          survived exactly the same gates the real [vc.assumptions] did,
+          minus the encoder's own well-formedness axioms (see
+          [user_assume]'s comment above).  This is what [Undecided.diagnose]
+          gets handed for its "nothing constrains it" check, so a `len$x >=
+          0` axiom the CHECKER emitted can never make a genuinely-unguarded
+          subject look constrained, while a real user guard of the exact
+          same shape (`if List.length(xs) >= 0 do …`, however redundant)
+          still counts — it was pushed at the path-condition site, not the
+          measure's well-formedness site, so it lands in [user_assume]
+          regardless of what it looks like. *)
+       let user_assumptions =
+         List.filter_map
+           (fun a ->
+             let a = fp_rewrite is_float a in
+             if float_wellsorted is_float a && formula_wellsorted sort_of a then Some a
+             else None)
+           (List.filter (wellsorted (Hashtbl.mem str_names)) !user_assume)
+       in
        (* Attach the (expensive) axiom preamble only when an axiomatised
           measure was reflected, the datatype declarations only when a
           constructor tester was, and the `$Str` sort only when a string was.
@@ -1955,10 +2009,19 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                 typed subject reflects to `Const "len$x"`, not `Const "x"`;
                 handing [Undecided.diagnose] the source name would search the
                 assumptions for a symbol the goal itself never uses, and call
-                a genuinely-guarded subject "unconstrained". *)
+                a genuinely-guarded subject "unconstrained".
+
+                [vc_for_diagnose], NOT [vc]: the unconstrained check must see
+                only USER-derived assumptions, never the encoder's own
+                well-formedness axioms about its own representation — see
+                [user_assumptions]'s comment above.  [Refine.discharge]
+                already ran against the real [vc] (full assumption set,
+                correctly) before this arm is ever reached; only the
+                DIAGNOSIS, not the proof attempt, uses the narrowed one. *)
+             let vc_for_diagnose = { vc with Smt.assumptions = user_assumptions } in
              note
                (Obligation.Skipped
-                  (match Undecided.diagnose ~subject_sym:!self_symbol vc with
+                  (match Undecided.diagnose ~subject_sym:!self_symbol vc_for_diagnose with
                    | Some r -> r
                    | None -> Obligation.Solver_undecided)))))
 
