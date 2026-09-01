@@ -873,6 +873,150 @@ let render_entries (entries : (string * V.value) list) : string option =
   else None
 
 (* =================================================================
+   §8b  Reachable call-site precondition confirmation
+
+   [confirm_precond] above validates a candidate against the RECORDED path
+   facts.  That is sound where the solver already settled the verdict — the
+   witness is illustrative decoration on a proof.  It is unsound as a
+   PROMOTION gate for the undecided bucket, and unsound exactly where that
+   bucket is most populated: undecidedness there is caused by a MISSING fact,
+   and a missing fact is by definition not in [path] to be checked against, so
+   a candidate violating it sails through.  `stdlib/list.march`'s `last` is the
+   worked case: `t = Nil` satisfies every recorded fact in the `Cons(_, t)`
+   arm, and the arm exclusion that rules it out is precisely the fact the
+   checker never derived.
+
+   The gate below never assumes reachability, it demonstrates it: run the
+   ENCLOSING function from its entry on arguments the model assigns to that
+   function's own parameters, and confirm only on an actual panic.  See
+   specs/2026-09-01-refinement-error-diagnosis-design.md §2.
+
+   Placed here rather than beside [violates_post] because it consumes
+   [annotated_params], [shrink] and [render_value]'s neighbours, all defined
+   below that point.
+   ================================================================= *)
+
+(* A parameter type is *witness-safe* when [admissible] genuinely decides it.
+
+   [admissible] pattern-matches a single [A.TyRefine] at the top of the
+   declared type; a refinement anywhere else is silently unchecked.  Three
+   such places exist and all three parse today: a type argument
+   (`List({Int | _ > 0})`), a record field (`type Box = { v : {Int | _ > 0} }`)
+   and a [TyLinear] wrapper around the outer refinement (which [strip_refine]
+   sees through and [admissible] does not).  A zero-filled decode may then
+   produce a value no caller could ever construct; executing it and observing
+   a panic would blame the caller for an input the language forbids.  So this
+   walk rejects any refinement below the outermost position, and treats an
+   unknown type name as unsafe — an unregistered name may expand to anything.
+
+   A type VARIABLE carries no refinement and is allowed here; a parameter
+   actually typed by one is declined further down by [decode_model], which has
+   no zero value for it. *)
+let rec refinement_free ~(seen : string list) (ty : A.ty) : bool =
+  match ty with
+  | A.TyRefine _ -> false
+  | A.TyLinear (_, t) -> refinement_free ~seen t
+  | A.TyVar _ | A.TyArrow _ | A.TyNat _ | A.TyNatOp _ | A.TyChan _ -> true
+  | A.TyTuple ts -> List.for_all (refinement_free ~seen) ts
+  | A.TyRecord fs -> List.for_all (fun (_, t) -> refinement_free ~seen t) fs
+  | A.TyCon (n, args) ->
+    List.for_all (refinement_free ~seen) args
+    && named_refinement_free ~seen n.A.txt
+
+and named_refinement_free ~(seen : string list) (name : string) : bool =
+  match name with
+  (* Structural in their arguments, which the caller already walked. *)
+  | "Int" | "Float" | "Bool" | "String" | "Char" | "Bytes" | "Unit"
+  | "List" | "Option" -> true
+  (* A recursive type is being proved by the frame that pushed it. *)
+  | _ when List.mem name seen -> true
+  | _ ->
+    let seen = name :: seen in
+    (match Hashtbl.find_opt type_ctors name with
+     | Some ctors ->
+       List.for_all
+         (fun (_, ats) -> List.for_all (refinement_free ~seen) ats)
+         ctors
+     | None ->
+       (match Hashtbl.find_opt record_fields name with
+        | Some fs -> List.for_all (fun (_, t) -> refinement_free ~seen t) fs
+        | None -> false))
+
+(* [admissible] decides this parameter, and nothing below it hides a
+   refinement it cannot see. *)
+let witness_safe_param ((_, ty) : string * A.ty) : bool =
+  match ty with
+  | A.TyRefine (base, _, _) -> refinement_free ~seen:[] base
+  | t -> refinement_free ~seen:[] t
+
+(* One clause parameter as [annotated_params] wants it. *)
+let clause_param (fp : A.fn_param) : string * A.ty option =
+  match fp with
+  | A.FPNamed p | A.FPDefault (p, _) -> (p.A.param_name.A.txt, p.A.param_ty)
+  (* A pattern head binds no name we could hand an argument to; the [None]
+     type makes [annotated_params] decline. *)
+  | A.FPPat _ -> ("_", None)
+
+(* Confirm a call-site precondition failure by DEMONSTRATING reachability:
+   run the enclosing function on arguments the model assigns to its own
+   parameters and observe an actual panic.  Returns the shrunk argument
+   assignment paired with the panic message, or [None].
+
+   Three things must hold and none is assumed:
+     - the model assigns the enclosing function's own PARAMETERS (a match
+       binder or a let-bound temporary is not one, which is what makes the
+       `List.last` shape decline),
+     - those arguments are admissible under the function's OWN refinements
+       (else we would blame a caller for an input the function never promised
+       to accept), and
+     - executing it actually panics. *)
+let confirm_precond_reachable ~(fn : A.fn_def) ~(model : (string * string) list)
+    : ((string * V.value) list * string) option =
+  match fn.A.fn_clauses with
+  | [ clause ] when clause.A.fc_guard = None ->
+    (* A guard is a second acceptance condition that [admissible] does not
+       model: a candidate failing it crashes with a clause-match error rather
+       than with the requirement we would be reporting.  Decline. *)
+    (match annotated_params (List.map clause_param clause.A.fc_params) with
+     | None -> None
+     | Some params ->
+       (* Nullary: there is no argument for a caller to have got wrong, and no
+          parameter for the suggested precondition to land on. *)
+       if params = [] then None
+       else if not (List.for_all witness_safe_param params) then None
+       else
+         (match decode_model ~params ~model with
+          | None -> None
+          | Some args ->
+            if not (admissible ~params args) then None
+            else
+              let panic_of cand =
+                match
+                  call_fn ~name:fn.A.fn_name.A.txt ~args:(List.map snd cand)
+                with
+                | Panicked msg -> Some msg
+                | Ret _ | Unconfirmable -> None
+              in
+              (match panic_of args with
+               | None -> None
+               | Some _ ->
+                 (* Shrink with the same oracle, then re-read the panic from
+                    the shrunk candidate: a smaller input may panic in a
+                    different place, and quoting the original message beside
+                    the shrunk arguments would be a lie. *)
+                 let run cand =
+                   if admissible ~params cand then
+                     Option.map (fun _ -> V.VUnit) (panic_of cand)
+                   else None
+                 in
+                 let shrunk, _ = shrink ~run args V.VUnit in
+                 Option.map (fun msg -> (shrunk, msg)) (panic_of shrunk))))
+  (* A multi-head function is several clauses after desugar; executing it is
+     still well defined, but which clause the panic came from is not, and the
+     message would have to guess.  Decline rather than guess. *)
+  | _ -> None
+
+(* =================================================================
    §9  Division safety
 
    Confirm that an ADMISSIBLE assignment (params satisfy their own Int

@@ -136,6 +136,25 @@ let refine_hints_d src =
       then Some d.March_errors.Errors.message else None)
     ctx.March_errors.Errors.diagnostics
 
+(* Warnings emitted by the refinement pass, as (message) list.  DESUGARED, for
+   the same reasons [refine_hints_d] is: the promotion path this feeds runs on
+   qualified calls, and a fixture checked through an undesugared pipeline can
+   disagree with the obligation ledger about the same source.
+
+   Distinct from [has_refine_warning] above, which answers only "any?" — the
+   promotion fixtures assert an exact COUNT, because "zero warnings" is the
+   whole assertion in three of the four and a bare existence check cannot
+   catch an over-firing gate that also emits something unrelated. *)
+let refine_warnings src =
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module ctx
+    (March_desugar.Desugar.desugar_module (parse src));
+  List.filter_map
+    (fun (d : March_errors.Errors.diagnostic) ->
+      if d.March_errors.Errors.severity = March_errors.Errors.Warning
+      then Some d.March_errors.Errors.message else None)
+    ctx.March_errors.Errors.diagnostics
+
 (* Reason each surviving [Skipped] obligation was filed under, in traversal
    order.  Moved up from beside [reason_suite] below (where it originated) so
    the throttle tests just below can pin a fixture's classification before
@@ -10268,6 +10287,231 @@ end|} in
         Alcotest.(check bool) "no witness claim" false (contains text "but fdiv("))
   ]
 
+(* Call-site precondition PROMOTION (design doc §2).
+
+   Task 5 builds [Witness.confirm_precond_reachable]; Task 6 wires it into
+   `refine_call`.  Until then nothing here can promote, so the three SILENCE
+   cases are green by construction — that is deliberate.  They are the
+   regression guards for the wiring: an accept-only fixture cannot tell
+   "correctly declining" from "the promotion path is dead", so the negatives
+   have to be in place BEFORE the code that could break them.  If W1 ever goes
+   red, fix the gate; do not adjust the fixture. *)
+let promotion_suite =
+  [ (* THE false-positive guard.  `List.last`'s recursive call is safe because
+       the previous arm rules out the singleton — a fact the checker does not
+       derive, so the model happily assigns `t = Nil`.  Confirming that model
+       against RECORDED path facts "proves" a failure in correct code.
+       Executing `last` from its entry cannot: `t` is a match binder, not a
+       parameter, and `last`'s own contract excludes every `xs` that would
+       reach the call with `t = Nil`. *)
+    gated "a safe recursive call is not promoted (List.last shape)" (fun () ->
+        let src =
+          {|mod W1 do
+  fn last(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil          -> 0
+    Cons(x, Nil) -> x
+    Cons(_, t)   -> last(t)
+    end
+  end
+end|}
+        in
+        Alcotest.(check int) "no warnings" 0
+          (List.length (refine_warnings src));
+        Alcotest.(check bool) "no errors" false (has_refine_error_d src))
+
+  ; (* The positive: an unrefined parameter passed straight into a refined one.
+       `go([])` is a real, reachable panic and the model assigns `ys` — a
+       PARAMETER of the enclosing function — so execution can demonstrate it.
+
+       EXPECTED RED until Task 6 wires the gate in; Task 5 only builds the
+       function. *)
+    gated "an unconstrained parameter reaching a panic is promoted" (fun () ->
+        let src =
+          {|mod W2 do
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil        -> panic("empty")
+    Cons(h, _) -> h
+    end
+  end
+  fn go(ys : List(Int)) : Int do head(ys) end
+end|}
+        in
+        Alcotest.(check int) "exactly one warning" 1
+          (List.length (refine_warnings src));
+        Alcotest.(check bool) "and it is not an error by default" false
+          (has_refine_error_d src))
+
+  ; (* An effectful enclosing function cannot be executed under the veto, so
+       no panic can be observed and nothing is promoted.  Without this the
+       veto could be removed and every test above would still pass. *)
+    gated "an effectful enclosing function is not promoted" (fun () ->
+        let src =
+          {|mod W5 do
+  needs IO.Console
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil        -> panic("empty")
+    Cons(h, _) -> h
+    end
+  end
+  fn go(ys : List(Int)) : Int do
+    print("side effect")
+    head(ys)
+  end
+end|}
+        in
+        Alcotest.(check int) "no warnings" 0 (List.length (refine_warnings src)))
+
+  ; (* A subject that is a LET-BOUND temporary rather than a parameter: the
+       model assigns `n`, which `decode_model` cannot map onto `go`'s own
+       parameters, so there is nothing admissible to execute.  This is the
+       same mechanism that makes the List.last shape decline, exercised
+       without recursion so a failure here localises. *)
+    gated "a let-bound subject is not promoted" (fun () ->
+        let src =
+          {|mod W6 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn go(k : Int) : Int do
+    let n = k - k
+    pos(n)
+  end
+end|}
+        in
+        Alcotest.(check int) "no warnings" 0 (List.length (refine_warnings src)))
+  ]
+
+(* Direct unit coverage for [Witness.confirm_precond_reachable].
+
+   Task 5 ships the function with no caller (Task 6 wires it), so without
+   these the whole implementation would be untested-by-construction in this
+   commit and a broken gate would be invisible until the wiring landed.  No
+   solver is involved — the model is supplied by hand, which is also the only
+   way to pin the DECLINE paths against a model that a real solver may or may
+   not produce on any given day.  Hence [Alcotest.test_case], not [gated]. *)
+let reachable_unit_suite =
+  let module W = March_refinecheck.Witness in
+  let module A = March_ast.Ast in
+  (* Register [src] as the module under witness execution and hand back the
+     desugared definition of [name]. *)
+  let fn_named src name =
+    let m = March_desugar.Desugar.desugar_module (parse src) in
+    W.set_module m;
+    List.find_map
+      (function
+        | A.DFn (fd, _) when fd.A.fn_name.A.txt = name -> Some fd
+        | _ -> None)
+      m.A.mod_decls
+    |> function
+    | Some fd -> fd
+    | None -> Alcotest.fail ("no fn " ^ name)
+  in
+  let last_src =
+    {|mod U1 do
+  fn last(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil          -> panic("List.last: empty list")
+    Cons(x, Nil) -> x
+    Cons(_, t)   -> last(t)
+    end
+  end
+end|}
+  in
+  [ Alcotest.test_case "reachable: parameter model confirms and shrinks" `Quick
+      (fun () ->
+        let fn =
+          fn_named
+            {|mod U2 do
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil        -> panic("empty list")
+    Cons(h, _) -> h
+    end
+  end
+  fn go(ys : List(Int)) : Int do head(ys) end
+end|}
+            "go"
+        in
+        (* The model names `ys`, a parameter of the enclosing function; the
+           decoded empty list is admissible (`go` declares no refinement) and
+           executing `go` from its entry really panics. *)
+        match W.confirm_precond_reachable ~fn ~model:[ ("len$ys", "0") ] with
+        | None -> Alcotest.fail "expected a confirmed reachable witness"
+        | Some (args, msg) ->
+          Alcotest.(check (option string))
+            "the failing argument" (Some "ys = []") (W.render_entries args);
+          Alcotest.(check bool) "panic quoted" true (contains msg "empty list"))
+
+  ; Alcotest.test_case "reachable: the confirmed witness is shrunk" `Quick
+      (fun () ->
+        (* A three-element model is confirmed and then MINIMISED, with the
+           same execute-and-panic gate as the oracle. *)
+        let fn =
+          fn_named
+            {|mod U5 do
+  fn f(ys : List(Int)) : Int do panic("boom") end
+end|}
+            "f"
+        in
+        match W.confirm_precond_reachable ~fn ~model:[ ("len$ys", "3") ] with
+        | None -> Alcotest.fail "expected a confirmed reachable witness"
+        | Some (args, _) ->
+          Alcotest.(check (option string))
+            "shrunk to the empty list" (Some "ys = []") (W.render_entries args))
+
+  ; Alcotest.test_case "reachable: the List.last shape declines" `Quick
+      (fun () ->
+        (* THE case the gate exists for.  The model assigns the match binder
+           `t`, not a parameter; `last`'s only parameter zero-fills to `[]`,
+           which its OWN refinement excludes, so nothing admissible is left to
+           execute.  Were this confirmed against recorded path facts instead,
+           `last([])` panics and correct code would be reported. *)
+        let fn = fn_named last_src "last" in
+        Alcotest.(check bool) "declined" true
+          (W.confirm_precond_reachable ~fn ~model:[ ("len$t", "0") ] = None))
+
+  ; Alcotest.test_case "reachable: an inadmissible model declines" `Quick
+      (fun () ->
+        (* Same function, and this time the model does name the parameter —
+           with a value the parameter's own contract forbids.  Executing it
+           panics, so only the admissibility check stands between this and a
+           false positive. *)
+        let fn = fn_named last_src "last" in
+        Alcotest.(check bool) "declined" true
+          (W.confirm_precond_reachable ~fn ~model:[ ("len$xs", "0") ] = None))
+
+  ; Alcotest.test_case "reachable: a hidden nested refinement declines" `Quick
+      (fun () ->
+        (* [admissible] only inspects a refinement at the TOP of the declared
+           type, so the one on the element type here is invisible to it and a
+           zero-filled decode could hand the function a list the language
+           forbids.  The body panics unconditionally, so this returns [Some]
+           the moment the witness-safety walk stops rejecting the type. *)
+        let fn =
+          fn_named
+            {|mod U3 do
+  fn f(xs : List({Int | _ > 0})) : Int do panic("boom") end
+end|}
+            "f"
+        in
+        Alcotest.(check bool) "declined" true
+          (W.confirm_precond_reachable ~fn ~model:[ ("len$xs", "1") ] = None))
+
+  ; Alcotest.test_case "reachable: a non-panicking function declines" `Quick
+      (fun () ->
+        (* The oracle is an OBSERVED panic, not a decoded model. *)
+        let fn =
+          fn_named
+            {|mod U4 do
+  fn f(ys : List(Int)) : Int do 0 end
+end|}
+            "f"
+        in
+        Alcotest.(check bool) "declined" true
+          (W.confirm_precond_reachable ~fn ~model:[ ("len$ys", "0") ] = None))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -10338,4 +10582,6 @@ let () =
       ("no-panic-syntactic-fallback", syntactic_fallback_suite);
       ("witness-harness", witness_harness_suite);
       ("witness-core", witness_core_suite);
-      ("witness-e2e", witness_e2e_suite) ]
+      ("witness-e2e", witness_e2e_suite);
+      ("precond-promotion", promotion_suite);
+      ("precond-reachable-unit", reachable_unit_suite) ]
