@@ -31,7 +31,12 @@ git log is authoritative for exact commits.
   `--test` emits a different program (a test-runner entry point) but was absent
   from the cache key, so whichever ran first won: `forge build` could hand you
   the test runner, or `forge test` the plain binary.
-
+- The non-tail-recursion warning no longer promises a loop that does not
+  happen. It used to end "when the recursive call is the direct argument of a
+  constructor, the compiler turns it into a loop" — but tail-recursion-modulo-cons
+  is off by default, so code written in exactly that shape still overflowed the
+  stack on deep input. The warning now says deep input can overflow, and
+  describes TRMC as the opt-in it is (`--trmc`).
 
 - ARM Linux (`linux-aarch64`) has a working release artifact for the first
   time. Every v0.2.0 and v0.3.0 ARM archive shipped with an empty `bin/` and no
