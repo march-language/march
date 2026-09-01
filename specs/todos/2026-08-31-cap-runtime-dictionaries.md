@@ -742,6 +742,18 @@ so a build with the pass on shared a CAS entry with one without — the
 "pass off" run printed the mocked output. Same omission as `--test` itself,
 found the same way.
 
+### The end-to-end test is now wired in
+
+`test/cap_mock/cap_mock_io.march` runs under `@test/runtest`, compiled with
+`--test` and diffed against `.expected`. Proved non-vacuous by disabling the
+dispatch rewrite and watching the diff fail, then restoring.
+
+The fixture stays OUT of `test/native/`: that directory is swept by the LLVM IR
+validity gate (`test_ir_verify.ml`), which compiles every `.march` in it
+WITHOUT `--test` — and without `--test` there is no implementation of
+`cap_ops_empty` to link, so the sweep would fail on it. Anything needing
+`--test` to compile belongs elsewhere.
+
 ### Still open
 
 `with_cap(mock, fn _ -> body)` is designed but not built, so nothing can yet
