@@ -85,24 +85,35 @@ let known_head (f : string) : bool =
          suffix <> "" && String.for_all (fun c -> c >= '0' && c <= '9') suffix)
        Refine_encode.ctor_field_names false
 
-(* Ordered most-specific-first.  [subject_sym] must be the actual SMT symbol
-   the subject reflected to IN THIS GOAL — e.g. `"len$ys"` for a
-   `len`-measured `ys`, never the source argument's own spelling `"ys"` (see
-   [Refine_call.mark_self], the only producer this module trusts).  [None]
-   when the goal-building resolvers never pinned the subject to a single
-   stable symbol (a record/ADT term, a non-variable actual, or a predicate
-   that never references the binder at all) — there is no one name to search
-   the assumptions for, so the unconstrained check below stays silent rather
-   than guess. *)
-let diagnose ~(subject_sym : string option) (vc : Smt.vc) : Obligation.reason option =
+(* Ordered most-specific-first.
+
+   [subject_sym] must be the actual SMT symbol the subject reflected to IN
+   THIS GOAL — e.g. `"len$ys"` for a `len`-measured `ys`, never the source
+   argument's own spelling `"ys"` (see [Refine_call.mark_self], the only
+   producer this module trusts).  This is what the CHECK runs against: the
+   assumptions are keyed by SMT symbol, not by source name, so there is no
+   other way to ask "does anything constrain it" that is not a guess.
+
+   [subject_name] is a SEPARATE string, for the MESSAGE rather than the
+   check: the source spelling the user actually typed, e.g. `"ys"`.
+   [Unconstrained_subject]'s payload is [subject_name], never [subject_sym]
+   — printing the SMT symbol in `reason_detail` leaked `len$ys` into
+   user-facing text, a symbol that appears nowhere in the user's program.
+   Both must be [Some] to report [Unconstrained_subject]: a [subject_sym]
+   with no [subject_name] means the actual was not a bare variable (a call,
+   a field access, a literal), which has no single name to show the user —
+   staying silent there is the same "do not guess" discipline as [None]
+   already gets for [subject_sym] itself. *)
+let diagnose ~(subject_sym : string option) ~(subject_name : string option)
+    (vc : Smt.vc) : Obligation.reason option =
   let declared = List.map fst vc.Smt.decls in
   let goal_heads = List.sort_uniq compare (app_heads vc.Smt.goal) in
   match List.find_opt (fun f -> not (List.mem f declared) && not (known_head f)) goal_heads with
   | Some f -> Some (Obligation.Opaque_application f)
   | None ->
-    (match subject_sym with
-     | Some s
+    (match subject_sym, subject_name with
+     | Some s, Some name
        when not
               (List.exists (fun a -> List.mem s (consts a)) vc.Smt.assumptions) ->
-       Some (Obligation.Unconstrained_subject s)
+       Some (Obligation.Unconstrained_subject name)
      | _ -> None)

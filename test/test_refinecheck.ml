@@ -4412,6 +4412,44 @@ end|}
         in
         Alcotest.(check (list string)) "solver-undecided" [ "solver-undecided" ] guarded);
 
+    (* IMPORTANT regression, round 3 of review: every test above this one
+       asserts the SLUG ("unconstrained-subject"), never the MESSAGE TEXT —
+       which is exactly how the previous fix shipped through two review
+       rounds and a re-review with `reason_detail` printing the internal
+       SMT symbol `len$ys` instead of the source name `ys` the user actually
+       typed.  A slug-only assertion cannot catch a leaked internal string;
+       only the rendered text can.  Pin both halves on TEXT, using the same
+       Motiv/guarded pair as above.
+       Mutation that fails this: make [Undecided.diagnose] build
+       [Unconstrained_subject] from [subject_sym] instead of [subject_name]
+       — the slug-only tests above stay green, this one does not. *)
+    gated "the unconstrained message names the SOURCE variable, never the internal SMT symbol"
+      (fun () ->
+        let unguarded_msg =
+          refine_error_text_d
+            {|mod MotivCV do
+  cap verified
+  fn head_of(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn caller(ys : List(Int)) : Int do head_of(ys) end
+end|}
+        in
+        Alcotest.(check bool) "names the source variable" true
+          (contains unguarded_msg "nothing in scope constrains `ys`");
+        Alcotest.(check bool) "never prints the internal SMT symbol" false
+          (contains unguarded_msg "len$ys");
+        let guarded_msg =
+          refine_error_text_d
+            {|mod MotivGuardedCV do
+  cap verified
+  fn head_of(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn caller(ys : List(Int)) : Int do
+    if List.length(ys) < 100 do head_of(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "insufficiently-guarded stays solver-undecided" true
+          (contains guarded_msg "solver-undecided"));
+
     (* IMPORTANT regression (found in review of this task): [known_head]'s
        [Refine_encode.is_measure] arm looked unreachable from the `$strlen`
        fixture alone — a `len` application never appears as an [App] head

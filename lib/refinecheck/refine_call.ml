@@ -1129,13 +1129,29 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        top-level symbol (a bare [Const], or a single-arg [App] wrapping one,
        e.g. the `$strlen` wrapper).  Deliberately NOT the source argument's
        own spelling: a measure-typed subject (`len(_) > 0`) reflects to
-       `Const "len$x"`, never `Const "x"` (see [measure_of_var]) — a
-       diagnosis that searched assumptions for the wrong symbol would call a
-       genuinely-guarded subject "unconstrained", a false claim and strictly
-       worse than the vague [Solver_undecided] it would replace.
-       [Undecided.diagnose] must be handed THIS symbol, never the actual
-       argument's raw AST spelling. *)
+       `Const "len$x"`, never `Const "x"` (see [measure_of_var]) — the
+       UNCONSTRAINED CHECK has to compare against this, or it cannot work at
+       all (it would search the assumptions for a symbol the goal itself
+       never uses, and call a genuinely-guarded subject "unconstrained").
+
+       [self_source_name] is the OTHER half, for the MESSAGE rather than the
+       check: what the user actually typed, e.g. `"ys"`.  These are
+       deliberately two different strings carried separately — printing
+       [self_symbol] in `reason_detail` leaked `len$ys` into user-facing
+       text (round 3 of this task's review): a symbol that appears nowhere
+       in the user's program, which sends them looking for something that
+       does not exist.  [self_source_name] is computed once, statically,
+       from [self_actual] — not tracked dynamically like [self_symbol],
+       because the source spelling does not depend on which reflection
+       branch fired, only on whether the actual is a bare variable at all;
+       an actual that is not (a call, a field access, a literal) has no
+       single name to show the user, so this stays [None] and
+       [Undecided.diagnose] must not report [Unconstrained_subject] without
+       one — see its own comment. *)
     let self_symbol : string option ref = ref None in
+    let self_source_name : string option =
+      match self_actual with A.EVar { A.txt = x; _ } -> Some x | _ -> None
+    in
     let mark_self (name : string) (t : Smt.term option) : Smt.term option =
       if is_self name then
         (match t with
@@ -2004,12 +2020,14 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                        it, or weaken the annotation");
                  labels; notes = []; code = None; fix = None }
            | _ ->
-             (* [!self_symbol], NOT the actual argument's raw AST spelling:
-                see [mark_self]'s comment above [resolve_var].  A measure-
-                typed subject reflects to `Const "len$x"`, not `Const "x"`;
-                handing [Undecided.diagnose] the source name would search the
-                assumptions for a symbol the goal itself never uses, and call
-                a genuinely-guarded subject "unconstrained".
+             (* [!self_symbol] is what the CHECK runs against — see
+                [mark_self]'s comment above [resolve_var].  [self_source_name]
+                is what the MESSAGE prints — see its own comment.  Two
+                different strings, on purpose: printing the symbol
+                (`len$ys`) instead of the source name (`ys`) was round 3's
+                review finding — a symbol that appears nowhere in the user's
+                program, sent them looking for something that does not
+                exist.
 
                 [vc_for_diagnose], NOT [vc]: the unconstrained check must see
                 only USER-derived assumptions, never the encoder's own
@@ -2021,7 +2039,10 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
              let vc_for_diagnose = { vc with Smt.assumptions = user_assumptions } in
              note
                (Obligation.Skipped
-                  (match Undecided.diagnose ~subject_sym:!self_symbol vc_for_diagnose with
+                  (match
+                     Undecided.diagnose ~subject_sym:!self_symbol
+                       ~subject_name:self_source_name vc_for_diagnose
+                   with
                    | Some r -> r
                    | None -> Obligation.Solver_undecided)))))
 
