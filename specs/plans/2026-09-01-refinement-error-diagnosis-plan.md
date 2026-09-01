@@ -1161,6 +1161,14 @@ the missing fact is by definition unrecorded."
   false under the decoded arguments AND that repairing only the subject removes
   the panic (Task 5 review, finding I2). Pass `rp.pred`, `rp.binder`, and the
   argument at `rp.idx`.
+- **Wording constraint from Task 5's residual.** The gate proves the ENCLOSING
+  function panics on an input that violates the callee's precondition, and that
+  repairing that input removes the panic. It does NOT prove the panic was raised
+  by the callee: `fn go(ys) = match ys do Nil -> panic("go refuses empty") |
+  Cons(_,_) -> head(ys) end` confirms, and the quoted panic is `go`'s own. So
+  the message must say `caller([]) panics — "..."`, never `head_of panics` or
+  "the call to `head_of` panics". The design's template already has this shape;
+  do not "improve" it into a callee attribution.
 - Consumes (unchanged):
   `Refine_call.enclosing_fn` (Task 4), `Undecided.diagnose` (Task 1),
   `Refine.discharge`'s `Sat` model accessor (`model_of first`, already used
