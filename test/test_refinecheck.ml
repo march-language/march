@@ -4509,7 +4509,57 @@ end|}
 end|});
         let _, _, skips = March_refinecheck.Obligation.summary () in
         Alcotest.(check (list (pair string int)))
-          "one bucket, summed" [ ("unconstrained-subject", 3) ] skips)
+          "one bucket, summed" [ ("unconstrained-subject", 3) ] skips);
+
+    (* Half a bounds contract is established.  "the solver proved neither the
+       predicate nor its negation" is true and useless; naming the surviving
+       conjunct is the whole difference between advice and noise.
+       Mutation that fails this: drop the per-conjunct discharge and return
+       Unconstrained_subject — `i` IS constrained here, by the guard. *)
+    gated "a partially established conjunction names the missing half"
+      (fun () ->
+        let rs =
+          skip_reasons
+            {|mod UD3 do
+  fn at(xs : List(Int), i : {Int | _ >= 0 && _ < len(xs)}) : Int do 0 end
+  fn go(xs : List(Int), i : Int) : Int do
+    if i >= 0 do at(xs, i) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check (list string)) "partial-conjunct" [ "partial-conjunct" ] rs);
+
+    (* Slug-only assertions cannot catch a leaked internal string (see round 3
+       of Task 1's review, above) — pin the rendered TEXT too.  `i >= 0` must
+       read back as the user's own guard, `i < len(xs)` as the missing half,
+       and neither the SMT symbol (`len$xs`) nor any encoder-internal spelling
+       may appear.
+       Mutation that fails this: build [Partial_conjunct]'s payload from the
+       SMT term's rendering instead of [pred_str] on the paired source
+       fragment. *)
+    gated "the partial-conjunct message quotes the user's own syntax for both halves"
+      (fun () ->
+        let msg =
+          refine_error_text_d
+            {|mod UD3CV do
+  cap verified
+  fn at(xs : List(Int), i : {Int | _ >= 0 && _ < len(xs)}) : Int do 0 end
+  fn go(xs : List(Int), i : Int) : Int do
+    if i >= 0 do at(xs, i) else 0 end
+  end
+end|}
+        in
+        (* Rendered as WRITTEN in [at]'s own signature, `_`-binder and all —
+           [pred_str] quotes the predicate's own source text, not the
+           caller's argument name; the other obligation-reasons messages
+           above do the same (see the `cap verified` message at
+           [refine_call.ml:2009]). *)
+        Alcotest.(check bool) "names the held conjunct" true (contains msg "`_ >= 0`");
+        Alcotest.(check bool) "names the missing conjunct" true
+          (contains msg "`_ < len(xs)`");
+        Alcotest.(check bool) "says which side is established" true
+          (contains msg "established here");
+        Alcotest.(check bool) "never leaks the SMT symbol" false (contains msg "len$xs"));
 
     (* A third variant, [Nonlinear_goal], was drafted here and cut: the only
        [smt_of] used to build a goal never produces [Smt.Mul] for two

@@ -52,6 +52,20 @@ type reason =
      skips. *)
   | Unconstrained_subject of string  (* the subject appears in no assumption *)
   | Opaque_application of string     (* goal names an undeclared function symbol *)
+  (* The goal is a top-level conjunction and the per-conjunct discharge (over
+     the SAME assumption set as the whole-goal proof attempt — no new facts,
+     no precision change) proved some conjuncts and not others.  This is the
+     costliest diagnosis to compute (one extra [Refine.discharge] per
+     conjunct) and the highest-value one to report: a `List.nth`-shaped
+     bounds contract with the lower bound guarded and the upper bound not is
+     exactly "the solver proved neither the predicate nor its negation", and
+     that sentence gives the reader no way to tell their guard partially
+     worked.
+     Payload is rendered SOURCE syntax, not SMT: it goes straight into user
+     text.  Both lists are kept because "`i >= 0` holds" and "`i < len(xs)`
+     does not" are both load-bearing — the first tells the reader their guard
+     worked and stops them rewriting it. *)
+  | Partial_conjunct of { held : string list; missing : string list }
 
 (* [Trusted]: the obligation was [Skipped] for some ordinary reason, but the
    enclosing function carries `@[trusted]`, so under `cap verified` it is
@@ -208,6 +222,7 @@ let reason_name = function
   | Alias_withdrawn _ -> "alias-withdrawn"
   | Unconstrained_subject _ -> "unconstrained-subject"
   | Opaque_application _ -> "opaque-application"
+  | Partial_conjunct _ -> "partial-conjunct"
 
 (* One clause of plain English per reason, for the `cap verified` error text.
    [reason_name] alone is a debug-report slug; once a reason reaches a USER it
@@ -236,6 +251,10 @@ let reason_detail = function
   | Opaque_application name ->
     Printf.sprintf
       "the checker has no meaning for `%s`, so it cannot reason through it" name
+  | Partial_conjunct { held; missing } ->
+    Printf.sprintf "%s established here; %s not"
+      (String.concat " and " (List.map (Printf.sprintf "`%s`") held))
+      (String.concat " and " (List.map (Printf.sprintf "`%s`") missing))
 
 (* Deliberately still a 3-tuple: (proved, violated, skips-by-reason).  Every
    existing caller destructures it that way, and [Trusted] does not belong in

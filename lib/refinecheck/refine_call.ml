@@ -2037,12 +2037,62 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                 correctly) before this arm is ever reached; only the
                 DIAGNOSIS, not the proof attempt, uses the narrowed one. *)
              let vc_for_diagnose = { vc with Smt.assumptions = user_assumptions } in
+             (* [Partial_conjunct]: the goal is a top-level conjunction and the
+                whole-goal discharge above failed both ways.  Flatten the
+                goal's `&&` spine, pair each SMT conjunct with the source
+                fragment it came from, and discharge each SEPARATELY against
+                the FULL assumption set — [vc], the same one the whole-goal
+                proof attempt above used, not [vc_for_diagnose]'s narrowed
+                one, since this is a real proof attempt per conjunct, not a
+                diagnosis.  Only meaningful when the two spines line up in
+                length: if reflection reassociated or dropped a conjunct the
+                pairing is wrong, and quoting the user a fragment that does
+                not correspond to the conjunct tested is worse than the vague
+                message. *)
+             let rec spine = function
+               | Smt.And (a, b) -> spine a @ spine b
+               | t -> [ t ]
+             in
+             let rec pred_spine (e : A.expr) =
+               match e with
+               | A.EApp (A.EVar { A.txt = "&&"; _ }, [ a; b ], _) ->
+                 pred_spine a @ pred_spine b
+               | e -> [ e ]
+             in
+             let goal_parts = spine goal and pred_parts = pred_spine rp.pred in
+             let partial =
+               if List.length goal_parts < 2
+                  || List.length goal_parts <> List.length pred_parts
+               then None
+               else
+                 let judged =
+                   List.map2
+                     (fun g p ->
+                       let holds =
+                         Refine.discharge ~root ~preamble { vc with Smt.goal = g }
+                         = Refine.Verified
+                       in
+                       (holds, pred_str p))
+                     goal_parts pred_parts
+                 in
+                 let held = List.filter_map (fun (h, s) -> if h then Some s else None) judged
+                 and missing =
+                   List.filter_map (fun (h, s) -> if h then None else Some s) judged
+                 in
+                 (* Every conjunct failing is not "partial" — it is whatever
+                    the syntactic diagnosis says. *)
+                 if held = [] || missing = [] then None
+                 else Some (Obligation.Partial_conjunct { held; missing })
+             in
              note
                (Obligation.Skipped
-                  (match
-                     Undecided.diagnose ~subject_sym:!self_symbol
-                       ~subject_name:self_source_name vc_for_diagnose
-                   with
+                  (match partial with
                    | Some r -> r
-                   | None -> Obligation.Solver_undecided)))))
+                   | None ->
+                     (match
+                        Undecided.diagnose ~subject_sym:!self_symbol
+                          ~subject_name:self_source_name vc_for_diagnose
+                      with
+                      | Some r -> r
+                      | None -> Obligation.Solver_undecided))))))
 
