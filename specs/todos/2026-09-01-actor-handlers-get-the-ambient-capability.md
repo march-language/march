@@ -63,22 +63,59 @@ So the wrapper is called with `root_cap`, the ambient sentinel, and reads back
 `None`. Nothing is broken; the dispatch function simply has no capability to
 supply.
 
-## The fix, and why it is not a one-liner
+## Two ways to get the capability there
 
 The capability must reach the dispatch function from somewhere the scheduler
 does not mediate. The natural source is the SPAWN SITE: `spawn(Logger)` runs in
 a scope that does have the threaded capability (in the reproducer it is inside
-`with_cap`). Capture it there into the actor record and have `Logger_dispatch`
-read `$actor.$cap_IO_Console` instead of passing `root_cap`.
+`with_cap`). Capture it there, and have `Logger_dispatch` read it instead of
+passing `root_cap`.
 
-There is precedent for the shape — the actor record already carries synthetic
-fields (`$d_dispatch`, `$e_alive`) alongside the user's declared state.
+The question is where "there" is.
 
-What makes it more than a table entry: the actor STATE RECORD is reasoned about
-by `migrate_state`, hot reload and `@compat`, so adding a hidden field per
-capability is a layout change with three consumers that all have opinions about
-layout. That is the work, and it wants its own design pass rather than a
-bolt-on.
+### Rejected: a hidden field on the actor record
+
+The obvious shape — the actor record already carries synthetic fields
+(`$d_dispatch`, `$e_alive`) alongside the user's state — and the wrong one.
+
+`lib/tir/lower_actor.ml` is explicit that this layout is load-bearing beyond
+the compiler: field names are `$`-prefixed so that alphabetical sort
+(`$d < $e < $f < letters`) "matches the alloc/reuse arg order and the C
+runtime's **hardcoded word indices** (a[2]=dispatch, a[3]=alive)". A capability
+field would also have to sort after `$f_state` to avoid displacing them, and a
+per-capability count makes the field list variable.
+
+Worse, the actor STATE RECORD is what `migrate_state`, hot reload and `@compat`
+all reason about. A hidden field there is a layout change with three
+opinionated consumers plus a hardcoded C offset.
+
+### Preferred: `march_actor_meta`
+
+`march_actor_meta` (`runtime/march_runtime.c:1844`) already holds per-actor
+runtime metadata keyed by actor pointer — green thread, pid index, hash-table
+chains. It is **runtime-internal**: `migrate_state`, `@compat` and hot reload
+do not see it, because none of them reason about anything but the state record.
+
+So: carry the spawn-site capabilities there, and have the dispatch read them
+back. Nothing about the actor record, its sort order, or the C runtime's
+hardcoded `a[2]`/`a[3]` offsets moves.
+
+Sketch, in the order it would land:
+
+1. `march_actor_meta` gains one pointer — a compiler-built record whose fields
+   are the capabilities the actor's handlers need, in the same sorted order the
+   elaboration already uses for parameters. One pointer rather than N keeps the
+   struct and the spawn ABI fixed regardless of how many capabilities an actor
+   needs.
+2. The `spawn` lowering builds that record from the caps in scope at the spawn
+   site (which the elaboration has already threaded there) and passes it to
+   `march_spawn`.
+3. The dispatch lowering reads it back and projects the field it needs, in
+   place of today's `ambient_atom`.
+
+Still real work — a runtime struct change plus a spawn ABI change plus dispatch
+lowering — but it touches none of the three consumers that make the
+record-field approach expensive.
 
 ## Scope note
 
