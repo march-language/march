@@ -231,6 +231,15 @@ Two numbers, over the real corpus rather than the six-module sample:
    the split.  This also tells us whether the three variants are the right three,
    or whether the residual is still the largest slice — in which case the
    taxonomy is wrong and should be revised before shipping.
+   Two caveats established during implementation, which any quoted number
+   must carry: (a) a promotion is recorded as `Obligation.Violated`, the same
+   verdict the solver uses for "can never hold" — `refine_post` already did
+   this for some-input return failures — so `--refine-report`'s `violated`
+   total conflates the two shapes; (b) promotion is not attempted for spans in
+   `stdlib_files`, whose diagnostics are filtered from output, because doing
+   so produced an unexplained `violated` count and paid the interpreter cost
+   for nothing (four true-but-invisible sites in `stdlib/stats.march`).
+
 2. **Promotion count, hand-audited line by line.**  This number should be
    small.  If it is large, the reachability gate is wrong; stop rather than
    ship.
