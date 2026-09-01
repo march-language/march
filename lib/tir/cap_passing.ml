@@ -248,3 +248,107 @@ let dump (m : T.tir_module) : unit =
   Printf.eprintf "=== cap-passing: %d of %d functions need a threaded capability ===\n"
     (List.length rows) (List.length m.T.tm_fns);
   List.iter (fun (k, v) -> Printf.eprintf "  %-52s %s\n" k (String.concat ", " v)) rows
+
+(* ── threading ────────────────────────────────────────────────────────── *)
+
+(** Functions whose arity must not change because something outside this pass
+    calls them: the runtime entry point, the test runner's targets, and
+    anything exported for DCE/hot-reload to reach.  They stay as they are and
+    pass the ambient sentinel to whatever they call.
+
+    (Actor handlers are reached through a dispatch table, so they appear as
+    [ADefRef] and the [unsafe] rule already excludes them; they are not
+    special-cased here.) *)
+let roots (m : T.tir_module) : (string, unit) Hashtbl.t =
+  let h = Hashtbl.create 32 in
+  let add n = Hashtbl.replace h n () in
+  List.iter (fun (fd : T.fn_def) ->
+      let n = fd.T.fn_name in
+      if n = "main" || Filename.check_suffix n ".main" then add n)
+    m.T.tm_fns;
+  List.iter (fun (fn, _) -> add fn) m.T.tm_tests;
+  List.iter add m.T.tm_exports;
+  h
+
+(** Rewrite every call to an elaborated function so it carries the capabilities
+    that function now expects.
+
+    [avail] is what the ENCLOSING function can supply: the capabilities it
+    itself carries.  Anything it cannot supply is passed as the ambient
+    sentinel, which reads back as [None] — i.e. exactly today's behaviour.
+    That is why this half is safe to land before any dispatch exists.
+
+    No wildcard arm, for the same reason as [scan]: a call site inside an
+    unhandled constructor would keep its old arity while its callee gained
+    parameters. *)
+let rec thread (need : (string, string list) Hashtbl.t)
+    (avail : StrSet.t) (e : T.expr) : T.expr =
+  let go = thread need avail in
+  match e with
+  | T.EApp (v, args) ->
+    (match Hashtbl.find_opt need v.T.v_name with
+     | None -> e
+     | Some caps ->
+       let extra =
+         List.map
+           (fun c -> if StrSet.mem c avail then T.AVar (cap_var c) else ambient_atom c)
+           caps
+       in
+       (* Keep the callee var's own type in step with its new arity: a stale
+          TFn here would misreport the callee's shape to any later pass that
+          reads it rather than the fn_def. *)
+       let v =
+         match v.T.v_ty with
+         | T.TFn (ps, r) -> { v with T.v_ty = T.TFn (List.map cap_ty caps @ ps, r) }
+         | _ -> v
+       in
+       T.EApp (v, extra @ args))
+  | T.ELet (v, e1, e2) -> T.ELet (v, go e1, go e2)
+  | T.ELetRec (fns, body) ->
+    (* A lambda body sees the enclosing function's capability parameters as
+       free variables; Defun captures them when it lifts the lambda. *)
+    T.ELetRec
+      (List.map (fun (fd : T.fn_def) -> { fd with T.fn_body = go fd.T.fn_body }) fns,
+       go body)
+  | T.ECase (a, brs, def) ->
+    T.ECase (a,
+             List.map (fun (b : T.branch) -> { b with T.br_body = go b.T.br_body }) brs,
+             Option.map go def)
+  | T.ESeq (e1, e2) -> T.ESeq (go e1, go e2)
+  | T.EAtom _ | T.ECallPtr _ | T.ETuple _ | T.ERecord _ | T.EField _
+  | T.EUpdate _ | T.EAlloc _ | T.EStackAlloc _ | T.EFree _ | T.EIncRC _
+  | T.EDecRC _ | T.EAtomicIncRC _ | T.EAtomicDecRC _ | T.EReuse _
+  | T.EAllocHole _ | T.ESetField _ -> e
+
+(** [elaborate m] gives every function that performs interceptable IO an
+    implicit capability parameter and threads it from its callers.
+
+    THREADING ONLY: nothing yet consumes the parameters, so an elaborated
+    program must behave exactly as it did before.  That is the point — it makes
+    the whole test suite a check on arity changes flowing through Defun, Mono,
+    Perceus and the CAS key, before any behaviour rides on them. *)
+let elaborate (m : T.tir_module) : T.tir_module =
+  let need = needed_caps m in
+  let rts = roots m in
+  Hashtbl.iter (fun k _ -> if Hashtbl.mem rts k then Hashtbl.remove need k)
+    (Hashtbl.copy need);
+  if Hashtbl.length need = 0 then m
+  else
+    let changed = ref 0 in
+    let fns =
+      List.map
+        (fun (fd : T.fn_def) ->
+           let caps = Option.value ~default:[] (Hashtbl.find_opt need fd.T.fn_name) in
+           if caps <> [] then incr changed;
+           let avail = StrSet.of_list caps in
+           { fd with
+             T.fn_params = List.map cap_var caps @ fd.T.fn_params;
+             T.fn_body = thread need avail fd.T.fn_body })
+        m.T.tm_fns
+    in
+    (* Report what was actually rewritten.  Without this the only evidence the
+       pass ran is the absence of a difference, which is exactly what a pass
+       that silently did nothing also looks like. *)
+    if Sys.getenv_opt "MARCH_DUMP_CAP_PASSING" = Some "1" then
+      Printf.eprintf "=== cap-passing: threaded %d functions ===\n" !changed;
+    { m with T.tm_fns = fns }

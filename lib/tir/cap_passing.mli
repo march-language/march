@@ -25,6 +25,11 @@ val needed_caps : Tir.tir_module -> (string, string list) Hashtbl.t
 (** Each function that must carry capabilities, mapped to them (sorted).
     Functions whose arity cannot safely change are excluded. *)
 
+val elaborate : Tir.tir_module -> Tir.tir_module
+(** Add the implicit capability parameters and thread them from callers.
+    Threading only: nothing consumes them yet, so the program must behave
+    exactly as before. *)
+
 val dump : Tir.tir_module -> unit
 (** Human-readable analysis dump, behind [MARCH_DUMP_CAP_PASSING=1].  Set
     [MARCH_DUMP_CAP_PASSING_FN=<name>] to trace one function's classification. *)

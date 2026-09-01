@@ -1896,6 +1896,15 @@ let compile filename =
        what the analysis keys on. *)
     if Sys.getenv_opt "MARCH_DUMP_CAP_PASSING" = Some "1" then
       March_tir.Cap_passing.dump tir;
+    (* Capability-passing threading.  Forced on by MARCH_CAP_PASSING=1 while it
+       is being validated: with nothing consuming the new parameters the
+       program must behave identically, which makes the whole test suite a
+       check on the arity change flowing through Defun/Mono/Perceus and the CAS
+       key.  It becomes `--test`-gated once the dispatch half exists. *)
+    let tir =
+      if Sys.getenv_opt "MARCH_CAP_PASSING" = Some "1"
+      then March_tir.Cap_passing.elaborate tir else tir
+    in
     (* @[vectorize]/@[vectorize(warn)]: this is the one point in the
        pipeline where a TIR fn's name is still exactly its source name —
        Mono hasn't mangled/duplicated anything yet, Defun hasn't lifted
