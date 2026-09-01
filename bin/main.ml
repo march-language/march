@@ -706,6 +706,14 @@ let codegen_cas_tags () =
      then ["evloop"] else [])
   @ (if !fast_math then ["fast-math"] else [])
   @ (if !debug_mode || !debug_tui_mode then ["dbg"] else [])
+  (* --test changes the emitted program: [lower_module ~test_mode] builds a
+     test-runner entry point instead of the ordinary one, and the
+     capability-passing elaboration runs only in a test build.  Without this
+     the two share a cache entry and whichever built first wins — `forge build`
+     could hand you the test runner, or `forge test` the plain binary.  (This
+     predates capability passing; it was found by compiling the same file both
+     ways and getting the same artifact.) *)
+  @ (if !do_test then ["test"] else [])
 
 (** Parse --target string into Llvm_emit.target_config. *)
 let parse_target s =
@@ -1574,6 +1582,28 @@ let compile filename =
      from scratch on every invocation — [desugared] itself keeps the stdlib
      prepend it always had, since lowering further down still needs stdlib's
      own bodies physically present (see the comment at the prepend site). *)
+  (* Inject the capability-dispatch wrappers in a --test build.  Generated as
+     March SOURCE and injected here, before typechecking, so they are checked
+     like any other code: the shape leans on Option's niche encoding twice, and
+     a wrong decode built directly as TIR would be a silent miscompile.  See
+     [Io_ops_gen.dispatch_wrappers_source]. *)
+  let desugared =
+    if not !do_test then desugared
+    else begin
+      let src = March_typecheck.Io_ops_gen.dispatch_wrappers_source () in
+      let lexbuf = Lexing.from_string src in
+      lexbuf.Lexing.lex_curr_p <-
+        { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = "<cap-dispatch>" };
+      let m =
+        March_parser.Parser.module_
+          (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+      in
+      let d = March_desugar.Desugar.desugar_module m in
+      { desugared with
+        March_ast.Ast.mod_decls =
+          desugared.March_ast.Ast.mod_decls @ d.March_ast.Ast.mod_decls }
+    end
+  in
   let user_only_desugared = desugared in
   stamp "resolve-imports";
   (* Inject stdlib declarations before user declarations.
@@ -1901,9 +1931,26 @@ let compile filename =
        program must behave identically, which makes the whole test suite a
        check on the arity change flowing through Defun/Mono/Perceus and the CAS
        key.  It becomes `--test`-gated once the dispatch half exists. *)
+    (* NOT enabled by --test yet: the threading half has a known crash (see
+       below), so wiring it into `forge test` would break every project's test
+       run.  Enabled only by MARCH_CAP_PASSING=1, with MARCH_CAP_DISPATCH=1
+       additionally routing operations through their dictionary wrappers.
+
+       Open bug: threading a capability into `File.with_lines` produces a
+       compiled binary that dies with SIGBUS (rc=138).  Reduced repro: read a
+       file through `File.with_lines(path, fn(lines) -> ...)` and compile —
+       correct with the pass off, rc=138 with it on, and `dispatch` plays no
+       part (this is the threading alone).  The shape is a lazy `Seq` whose
+       step is a closure, so the likely cause is a threaded function reaching a
+       closure this pass did not classify as arity-frozen: the `unsafe` rule
+       keys on `ADefRef`'s [did_name] matching a top-level [fn_name], and if
+       lower spells those differently the function is never excluded and an
+       indirect call then passes the OLD arity. *)
     let tir =
-      if Sys.getenv_opt "MARCH_CAP_PASSING" = Some "1"
-      then March_tir.Cap_passing.elaborate tir else tir
+      if Sys.getenv_opt "MARCH_CAP_PASSING" = Some "1" then
+        March_tir.Cap_passing.elaborate
+          ~dispatch:(Sys.getenv_opt "MARCH_CAP_DISPATCH" = Some "1") tir
+      else tir
     in
     (* @[vectorize]/@[vectorize(warn)]: this is the one point in the
        pipeline where a TIR fn's name is still exactly its source name —
@@ -4214,6 +4261,10 @@ let () =
      drift test diffs the committed file against a fresh render. *)
   if !emit_io_ops then begin
     print_string (March_typecheck.Io_ops_gen.render ());
+    exit 0
+  end;
+  if Sys.getenv_opt "MARCH_DUMP_CAP_DISPATCH" = Some "1" then begin
+    print_string (March_typecheck.Io_ops_gen.dispatch_wrappers_source ());
     exit 0
   end;
   March_eval.Eval.pmap_threshold_value := !pmap_threshold;

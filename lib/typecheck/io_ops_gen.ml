@@ -136,6 +136,89 @@ let excluded_ops (cap : string) : string list =
 let dict_ty (cap : string) : ty option =
   match dict_fields cap with [] -> None | flds -> Some (TRecord flds)
 
+(* ── dispatch wrappers ────────────────────────────────────────────────── *)
+
+(** The prefix on a generated dispatch wrapper.  Leading underscores keep it
+    out of the way of user code while staying a legal lower identifier — a `$`
+    name, which the rest of the compiler uses for synthesized values, is not
+    parseable as a source function name. *)
+let dispatch_prefix = "__march_dispatch_"
+
+let dispatch_name (op : string) : string = dispatch_prefix ^ op
+
+(** True for a function this pass generated.  The capability-passing pass must
+    skip these: a wrapper CALLS the very operation it wraps, so rewriting that
+    call would make it dispatch to itself forever. *)
+let is_dispatch_name (n : string) : bool =
+  String.length n > String.length dispatch_prefix
+  && String.sub n 0 (String.length dispatch_prefix) = dispatch_prefix
+
+(** March source for one operation's dispatch wrapper.
+
+    Generated as SOURCE and injected before typechecking, rather than built as
+    TIR.  Hand-built TIR cannot be typechecked, and this shape leans on
+    [Option]'s niche encoding twice over; getting the decode subtly wrong would
+    be a silent miscompile rather than an error.  As source it is checked like
+    anything else.
+
+    The [None] arms call the operation itself — that is the ambient path, and
+    it is why an un-mocked program behaves exactly as before. *)
+let dispatch_wrapper (cap : string) (op : string) (op_ty : ty) : string option =
+  match flatten_arrow op_ty with
+  | ([], _) -> None   (* not a function: nothing to wrap *)
+  | (args, ret) ->
+    (* A zero-arg builtin has the shape [TArrow (TTuple [], r)], so its single
+       "argument" is unit: the wrapper takes no parameter of its own, calls the
+       operation with no arguments, and passes an explicit [()] to the field —
+       which is why the field type is [(()) -> r] rather than [() -> r] (March
+       auto-applies a zero-arg function the moment it is named, so a field
+       could not hold one). *)
+    let zero_arg = (match args with [ TTuple [] ] -> true | _ -> false) in
+    let params =
+      if zero_arg then []
+      else List.mapi (fun i t -> Printf.sprintf "a%d : %s" i (march_ty t)) args
+    in
+    let actuals =
+      if zero_arg then [] else List.mapi (fun i _ -> Printf.sprintf "a%d" i) args
+    in
+    let call_args = String.concat ", " actuals in
+    let field_args = if zero_arg then "()" else call_args in
+    let all_params =
+      String.concat ", " (Printf.sprintf "c : Cap(%s)" cap :: params)
+    in
+    Some
+      (Printf.sprintf
+         "  pfn %s(%s) : %s do\n\
+         \    match cap_dict(c) do\n\
+         \      Some(d) ->\n\
+         \        match d.%s do\n\
+         \          Some(f) -> f(%s)\n\
+         \          None    -> %s(%s)\n\
+         \        end\n\
+         \      None -> %s(%s)\n\
+         \    end\n\
+         \  end\n"
+         (dispatch_name op) all_params (march_ty ret)
+         op field_args op call_args op call_args)
+
+(** Every dispatch wrapper, as the body of a module the driver injects into a
+    `--test` build. *)
+let dispatch_wrappers_source () : string =
+  let b = Buffer.create 8192 in
+  Buffer.add_string b "mod MarchCapDispatch do\n";
+  List.iter
+    (fun cap ->
+       List.iter
+         (fun (field, opt_ty) ->
+            let op_ty = match opt_ty with TCon ("Option", [ t ]) -> t | t -> t in
+            match dispatch_wrapper cap field op_ty with
+            | Some src -> Buffer.add_string b src
+            | None -> ())
+         (dict_fields cap))
+    (all_caps ());
+  Buffer.add_string b "end\n";
+  Buffer.contents b
+
 (* ── human-readable documentation (`march --emit-io-ops`) ─────────────── *)
 
 let render () : string =

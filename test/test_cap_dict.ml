@@ -168,15 +168,14 @@ let narrow_keeps_dict_type = ok "cap_narrow of a dictionaried cap still reads it
   fn consume(_c : Cap(IO.Console)) : Int do 1 end
 end|}
 
-(* The --test build-mode gate ADMITS an IO capability — and then mocking it
-   still does not work, for a reason upstream of dictionaries: an IO builtin
-   does not consume its capability ([println : String -> ()]), so there is no
-   declaration site to hang a dictionary type on and nothing would consult one
-   anyway.  Pinned here so a reader does not conclude from the gate's existence
-   that IO mocking is available.  Closing this needs the cap-first migration of
-   the builtins; see specs/todos/2026-08-31-cap-runtime-dictionaries.md. *)
+(* Under --test the gate now OPENS: an IO capability's dictionary type is
+   derived from the compiler's own builtin tables ([Io_ops_gen]), so `cap_impl`
+   on one typechecks.  What is still missing is the BINDING SITE — nothing yet
+   lets a test say "run this code with that mock" — so attaching one has no
+   runtime effect.  Pinned so the change is deliberate rather than discovered
+   later, and so the remaining gap stays visible. *)
 let impl_io_cap_test_build =
-  Alcotest.test_case "--test admits an IO cap but mocking it is still unreachable"
+  Alcotest.test_case "--test admits cap_impl on an IO capability"
     `Quick (fun () ->
       let saved = !March_typecheck.Typecheck.test_build in
       March_typecheck.Typecheck.test_build := true;
@@ -185,26 +184,12 @@ let impl_io_cap_test_build =
           ~finally:(fun () -> March_typecheck.Typecheck.test_build := saved)
           (fun () -> typecheck {|mod App do
   needs IO.Console
-  type Ops = { write : (String) -> () }
   fn boot(c : Cap(IO.Console)) : Cap(IO.Console) do
-    cap_impl(c, { write: fn s -> println(s) })
+    cap_impl(c, { cap_ops_empty(c) with print_line: Some(fn s -> print(s)) })
   end
 end|})
       in
-      Alcotest.(check bool) "still an error under --test" true (has_errors ctx);
-      let msgs =
-        List.map (fun d -> d.March_errors.Errors.message)
-          (March_errors.Errors.sorted ctx)
-      in
-      (* and for the RIGHT reason: no declaration site, not the gate *)
-      Alcotest.(check bool) "refused for want of a declaration site, not by the gate"
-        true
-        (List.exists (fun m ->
-             try
-               ignore (Str.search_forward
-                         (Str.regexp_string "no way to declare a dictionary type") m 0);
-               true
-             with Not_found -> false) msgs))
+      Alcotest.(check bool) "admitted under --test" false (has_errors ctx))
 
 (* ── runtime: the dictionary actually dispatches ──────────────────────── *)
 

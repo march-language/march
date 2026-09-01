@@ -782,6 +782,13 @@ let builtin_bindings : (string * scheme) list =
        [infer_expr], which resolves the result from the capability's declared
        `with` type and therefore needs the argument's type known at the site. *)
     ("cap_dict",   poly2 (fun a b -> TArrow (TCon ("Cap", [a]), t_option b)));
+    (* cap_ops_empty: the all-None dictionary for a capability — the base a
+       mock overrides one field of, `{ cap_ops_empty(c) with print_line: ... }`.
+       March records unify EXACTLY (no width subtyping), so without a base every
+       mock would have to spell out every operation of the capability.  Typed by
+       the [cap_ops_empty] arm in [infer_expr], which resolves the record from
+       the capability. *)
+    ("cap_ops_empty", poly2 (fun a b -> TArrow (TCon ("Cap", [a]), b)));
     (* Phase 1: Monitor/link builtins *)
     ("monitor",      poly2 (fun a b -> TArrow (TCon ("Pid", [a]), TArrow (TCon ("Pid", [b]), t_int))));
     ("demonitor",    Mono (TArrow (t_int, t_unit)));

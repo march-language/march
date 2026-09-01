@@ -27,5 +27,19 @@ val excluded_ops : string -> string list
 val dict_ty : string -> ty option
 (** The dictionary record type, or [None] when nothing is interceptable. *)
 
+val dispatch_prefix : string
+val dispatch_name : string -> string
+
+val is_dispatch_name : string -> bool
+(** True for a generated dispatch wrapper.  The capability-passing pass must
+    skip these: a wrapper calls the operation it wraps, so rewriting that call
+    would make it dispatch to itself forever. *)
+
+val dispatch_wrappers_source : unit -> string
+(** March source for the dispatch wrappers, injected into a `--test` build.
+    Source rather than hand-built TIR so that it is typechecked: the shape
+    leans on Option's niche encoding twice and a wrong decode would be a silent
+    miscompile. *)
+
 val render : unit -> string
 (** Human-readable listing behind `march --emit-io-ops`. *)

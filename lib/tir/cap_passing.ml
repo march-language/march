@@ -182,11 +182,16 @@ let needed_caps (m : T.tir_module) : (string, string list) Hashtbl.t =
   List.iter (fun (fd : T.fn_def) -> Hashtbl.replace f.toplevel fd.T.fn_name ()) m.T.tm_fns;
   List.iter
     (fun (fd : T.fn_def) ->
-       let bound =
-         List.fold_left (fun acc (p : T.var) -> StrSet.add p.T.v_name acc)
-           StrSet.empty fd.T.fn_params
-       in
-       scan f fd.T.fn_name bound fd.T.fn_body)
+       (* A dispatch wrapper CALLS the operation it wraps — that call is the
+          ambient path, not a reason to give the wrapper a capability. It
+          already takes one as its first parameter, so scanning it here would
+          hand it a second. *)
+       if not (March_typecheck.Io_ops_gen.is_dispatch_name fd.T.fn_name) then
+         let bound =
+           List.fold_left (fun acc (p : T.var) -> StrSet.add p.T.v_name acc)
+             StrSet.empty fd.T.fn_params
+         in
+         scan f fd.T.fn_name bound fd.T.fn_body)
     m.T.tm_fns;
   let need = Hashtbl.create 64 in
   let get k = Option.value ~default:[] (Hashtbl.find_opt need k) in
@@ -281,19 +286,27 @@ let roots (m : T.tir_module) : (string, unit) Hashtbl.t =
     No wildcard arm, for the same reason as [scan]: a call site inside an
     unhandled constructor would keep its old arity while its callee gained
     parameters. *)
-let rec thread (need : (string, string list) Hashtbl.t)
+let rec thread ?(dispatch = false) (need : (string, string list) Hashtbl.t)
     (avail : StrSet.t) (e : T.expr) : T.expr =
-  let go = thread need avail in
+  let go = thread ~dispatch need avail in
+  let supply c = if StrSet.mem c avail then T.AVar (cap_var c) else ambient_atom c in
   match e with
+  | T.EApp (v, args) when dispatch && cap_of_interceptable_op v.T.v_name <> None ->
+    (* Route the operation through its generated wrapper, which consults the
+       capability's dictionary and falls back to the operation itself. *)
+    let cap = Option.get (cap_of_interceptable_op v.T.v_name) in
+    let name = March_typecheck.Io_ops_gen.dispatch_name v.T.v_name in
+    let v =
+      match v.T.v_ty with
+      | T.TFn (ps, r) -> { v with T.v_name = name; T.v_ty = T.TFn (cap_ty cap :: ps, r) }
+      | _ -> { v with T.v_name = name }
+    in
+    T.EApp (v, supply cap :: args)
   | T.EApp (v, args) ->
     (match Hashtbl.find_opt need v.T.v_name with
      | None -> e
      | Some caps ->
-       let extra =
-         List.map
-           (fun c -> if StrSet.mem c avail then T.AVar (cap_var c) else ambient_atom c)
-           caps
-       in
+       let extra = List.map supply caps in
        (* Keep the callee var's own type in step with its new arity: a stale
           TFn here would misreport the callee's shape to any later pass that
           reads it rather than the fn_def. *)
@@ -327,7 +340,7 @@ let rec thread (need : (string, string list) Hashtbl.t)
     program must behave exactly as it did before.  That is the point — it makes
     the whole test suite a check on arity changes flowing through Defun, Mono,
     Perceus and the CAS key, before any behaviour rides on them. *)
-let elaborate (m : T.tir_module) : T.tir_module =
+let elaborate ?(dispatch = false) (m : T.tir_module) : T.tir_module =
   let need = needed_caps m in
   let rts = roots m in
   Hashtbl.iter (fun k _ -> if Hashtbl.mem rts k then Hashtbl.remove need k)
@@ -341,9 +354,11 @@ let elaborate (m : T.tir_module) : T.tir_module =
            let caps = Option.value ~default:[] (Hashtbl.find_opt need fd.T.fn_name) in
            if caps <> [] then incr changed;
            let avail = StrSet.of_list caps in
-           { fd with
-             T.fn_params = List.map cap_var caps @ fd.T.fn_params;
-             T.fn_body = thread need avail fd.T.fn_body })
+           if March_typecheck.Io_ops_gen.is_dispatch_name fd.T.fn_name then fd
+           else
+             { fd with
+               T.fn_params = List.map cap_var caps @ fd.T.fn_params;
+               T.fn_body = thread ~dispatch need avail fd.T.fn_body })
         m.T.tm_fns
     in
     (* Report what was actually rewritten.  Without this the only evidence the

@@ -1778,7 +1778,7 @@ let check_cap_impl_sites (env : env) : unit =
                end
            in
            if gate_ok then begin
-             match resolve_cap_dict_type env p with
+             match Cap_dict_resolve.dict_ty_of_cap env p with
              | None when declaring = None ->
                (* Reachable only under [--test]: the build-mode gate admitted an
                   IO capability, and then there is no declaration to check the
@@ -1815,7 +1815,7 @@ let check_cap_impl_sites (env : env) : unit =
                  MPBreak;
                  MPText "hint: declare one on the capability — ";
                  MPCode ("proof cap " ^ cap_bare_name p ^ " with SomeRecordType"); MPText "." ]
-             | Some rec_name ->
+             | Some dict_decl ->
                (* Compare by UNIFICATION, not by name.  A record literal infers
                   to a structural [TRecord], while the declaration gives a
                   nominal [TCon], and a record type is registered under both its
@@ -1824,7 +1824,7 @@ let check_cap_impl_sites (env : env) : unit =
                   useless diagnostic "declares its dictionary as `Ops`, but this
                   one is `Ops`"; [unify] already reconciles the two shapes via
                   [expand_record] and reports a precise per-field mismatch. *)
-               Typecheck_unify.unify env ~span:sp (TCon (rec_name, [])) dict_ty
+               Typecheck_unify.unify env ~span:sp dict_decl dict_ty
            end
          | _ ->
            err [
