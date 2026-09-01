@@ -355,10 +355,26 @@ let roots (m : T.tir_module) : (string, unit) Hashtbl.t =
     unhandled constructor would keep its old arity while its callee gained
     parameters. *)
 let rec thread ?(dispatch = false) (need : (string, string list) Hashtbl.t)
-    (avail : StrSet.t) (e : T.expr) : T.expr =
-  let go = thread ~dispatch need avail in
-  let supply c = if StrSet.mem c avail then T.AVar (cap_var c) else ambient_atom c in
+    (binds : (string * T.atom) list) (e : T.expr) : T.expr =
+  let go = thread ~dispatch need binds in
+  (* What this scope can supply for a capability: the enclosing function's own
+     parameter, a `with_cap` mock, or — failing both — the ambient sentinel. *)
+  let supply c =
+    match List.assoc_opt c binds with Some a -> a | None -> ambient_atom c
+  in
   match e with
+  | T.EApp (v, [ cap_atom ]) when v.T.v_name = "cap_ops_empty" ->
+    (* Resolve to the generated all-None base for the capability the argument
+       carries.  A generated March function rather than a record built here:
+       constructing it would mean re-deriving None's constructor type and
+       duplicating lower's ty translation. *)
+    (match cap_atom with
+     | T.AVar mv ->
+       (match mv.T.v_ty with
+        | T.TCon ("Cap", [ T.TCon (c, []) ]) ->
+          T.EApp ({ v with T.v_name = March_typecheck.Io_ops_gen.ops_empty_name c }, [])
+        | _ -> e)
+     | _ -> e)
   | T.EApp (v, args) when dispatch && cap_of_interceptable_op v.T.v_name <> None ->
     (* Route the operation through its generated wrapper, which consults the
        capability's dictionary and falls back to the operation itself. *)
@@ -384,7 +400,26 @@ let rec thread ?(dispatch = false) (need : (string, string list) Hashtbl.t)
          | _ -> v
        in
        T.EApp (v, extra @ args))
-  | T.ELet (v, e1, e2) -> T.ELet (v, go e1, go e2)
+  | T.ELet (v, e1, e2) ->
+    (* `with_cap(mock, fn _ -> body)`: inside that lambda, the capability is
+       the MOCK rather than whatever the enclosing scope was supplying.  Lower
+       emits the thunk as
+         let v = letrec [lam] in lam  ...  with_cap(mock, v)
+       so the lambda's fn_def is reachable from the let that binds it, and the
+       capability is read off the mock's own type. *)
+    let e1' =
+      match (e1, List.assoc_opt v.T.v_name (with_cap_thunks e2)) with
+      | (T.ELetRec (fns, inner), Some (cap, mock)) ->
+        let binds' = (cap, mock) :: List.remove_assoc cap binds in
+        T.ELetRec
+          (List.map
+             (fun (fd : T.fn_def) ->
+                { fd with T.fn_body = thread ~dispatch need binds' fd.T.fn_body })
+             fns,
+           thread ~dispatch need binds' inner)
+      | _ -> go e1
+    in
+    T.ELet (v, e1', go e2)
   | T.ELetRec (fns, body) ->
     (* A lambda body sees the enclosing function's capability parameters as
        free variables; Defun captures them when it lifts the lambda. *)
@@ -400,6 +435,41 @@ let rec thread ?(dispatch = false) (need : (string, string list) Hashtbl.t)
   | T.EUpdate _ | T.EAlloc _ | T.EStackAlloc _ | T.EFree _ | T.EIncRC _
   | T.EDecRC _ | T.EAtomicIncRC _ | T.EAtomicDecRC _ | T.EReuse _
   | T.EAllocHole _ | T.ESetField _ -> e
+
+(** Every `with_cap(mock, thunk)` in [e], as [thunk_var -> (capability, mock)].
+
+    The capability is read off the mock's own type rather than declared
+    anywhere, which is what lets `with_cap` be an ordinary function call
+    instead of new syntax. *)
+and with_cap_thunks (e : T.expr) : (string * (string * T.atom)) list =
+  let acc = ref [] in
+  let rec go (e : T.expr) =
+    (match e with
+     | T.EApp (v, [ mock; T.AVar t ]) when v.T.v_name = "with_cap" ->
+       let cap =
+         match mock with
+         | T.AVar mv ->
+           (match mv.T.v_ty with
+            | T.TCon ("Cap", [ T.TCon (c, []) ]) -> Some c
+            | _ -> None)
+         | _ -> None
+       in
+       (match cap with
+        | Some c -> acc := (t.T.v_name, (c, mock)) :: !acc
+        | None -> ())
+     | _ -> ());
+    match e with
+    | T.ELet (_, a, b) | T.ESeq (a, b) -> go a; go b
+    | T.ELetRec (fns, b) ->
+      List.iter (fun (fd : T.fn_def) -> go fd.T.fn_body) fns; go b
+    | T.ECase (_, brs, d) ->
+      List.iter (fun (br : T.branch) -> go br.T.br_body) brs; Option.iter go d
+    | T.EApp _ | T.ECallPtr _ | T.EAtom _ | T.ETuple _ | T.ERecord _
+    | T.EField _ | T.EUpdate _ | T.EAlloc _ | T.EStackAlloc _ | T.EFree _
+    | T.EIncRC _ | T.EDecRC _ | T.EAtomicIncRC _ | T.EAtomicDecRC _
+    | T.EReuse _ | T.EAllocHole _ | T.ESetField _ -> ()
+  in
+  go e; !acc
 
 (** [elaborate m] gives every function that performs interceptable IO an
     implicit capability parameter and threads it from its callers.
@@ -421,12 +491,12 @@ let elaborate ?(dispatch = false) (m : T.tir_module) : T.tir_module =
         (fun (fd : T.fn_def) ->
            let caps = Option.value ~default:[] (Hashtbl.find_opt need fd.T.fn_name) in
            if caps <> [] then incr changed;
-           let avail = StrSet.of_list caps in
+           let binds = List.map (fun c -> (c, T.AVar (cap_var c))) caps in
            if March_typecheck.Io_ops_gen.is_dispatch_name fd.T.fn_name then fd
            else
              { fd with
                T.fn_params = List.map cap_var caps @ fd.T.fn_params;
-               T.fn_body = thread ~dispatch need avail fd.T.fn_body })
+               T.fn_body = thread ~dispatch need binds fd.T.fn_body })
         m.T.tm_fns
     in
     (* Report what was actually rewritten.  Without this the only evidence the

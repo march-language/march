@@ -35,6 +35,9 @@ val is_dispatch_name : string -> bool
     skip these: a wrapper calls the operation it wraps, so rewriting that call
     would make it dispatch to itself forever. *)
 
+val ops_empty_name : string -> string
+(** Name of the generated all-[None] dictionary base for a capability. *)
+
 val dispatch_wrappers_source : unit -> string
 (** March source for the dispatch wrappers, injected into a `--test` build.
     Source rather than hand-built TIR so that it is typechecked: the shape

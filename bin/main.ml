@@ -714,6 +714,12 @@ let codegen_cas_tags () =
      predates capability passing; it was found by compiling the same file both
      ways and getting the same artifact.) *)
   @ (if !do_test then ["test"] else [])
+  (* The capability-passing pass changes the emitted program, so a build with
+     it on must not share a CAS entry with one without.  Found the same way the
+     --test omission was: the same file built both ways returned the same
+     artifact, so the "pass off" run printed the mocked output. *)
+  @ (if Sys.getenv_opt "MARCH_CAP_PASSING" = Some "1" then ["cappass"] else [])
+  @ (if cap_mocking () then ["capdisp"] else [])
 
 (** Parse --target string into Llvm_emit.target_config. *)
 let parse_target s =
@@ -1588,7 +1594,7 @@ let compile filename =
      a wrong decode built directly as TIR would be a silent miscompile.  See
      [Io_ops_gen.dispatch_wrappers_source]. *)
   let desugared =
-    if not !do_test then desugared
+    if not (cap_mocking ()) then desugared
     else begin
       let src = March_typecheck.Io_ops_gen.dispatch_wrappers_source () in
       let lexbuf = Lexing.from_string src in
@@ -1947,9 +1953,8 @@ let compile filename =
        lower spells those differently the function is never excluded and an
        indirect call then passes the OLD arity. *)
     let tir =
-      if Sys.getenv_opt "MARCH_CAP_PASSING" = Some "1" then
-        March_tir.Cap_passing.elaborate
-          ~dispatch:(Sys.getenv_opt "MARCH_CAP_DISPATCH" = Some "1") tir
+      if Sys.getenv_opt "MARCH_CAP_PASSING" = Some "1" || cap_mocking () then
+        March_tir.Cap_passing.elaborate ~dispatch:(cap_mocking ()) tir
       else tir
     in
     (* @[vectorize]/@[vectorize(warn)]: this is the one point in the
@@ -4271,7 +4276,7 @@ let () =
   (* Propagate --test to the typechecker's build-mode flag.  [cap_impl] on an
      IO capability (mocking an IO effect) is admitted only in a test build; see
      [Typecheck_env.test_build] and [check_cap_impl_sites]. *)
-  March_typecheck.Typecheck.test_build := !do_test;
+  March_typecheck.Typecheck.test_build := cap_mocking ();
   (* --emit-core-ast takes its target file as its own flag argument (not a
      positional file), so route it into the normal [f] :: compile dispatch
      below rather than falling through to the REPL branch. *)

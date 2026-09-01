@@ -695,7 +695,54 @@ top-level `fn_name`, and if lower spells those differently the function is
 never excluded — an indirect call then passes the OLD arity. Check that
 correspondence first.
 
-### Still missing: the binding site
+### The binding site: `with_cap` — LANDED
+
+`with_cap(mock, fn _ -> body)` is an ordinary prelude function,
+`fn with_cap(_c, f) do f(()) end`, so it needs no parser change. At runtime it
+just calls `f`; the capability is consumed by the elaboration, which rewrites
+calls inside the lambda to route through `mock` instead of the ambient
+sentinel.
+
+Lower emits the thunk as `let v = letrec [lam] in lam ... with_cap(mock, v)`,
+so the lambda's `fn_def` is reachable from the `let` that binds it, and the
+capability is read off the mock's own TYPE — which is what lets this be a
+function call rather than syntax.
+
+`thread`'s `avail : StrSet.t` became a `(cap * atom) list` so a capability can
+be supplied by something other than the enclosing parameter.
+
+`cap_ops_empty(c)` resolves to a generated `__march_ops_empty_<CAP>()`, also
+emitted as March source, for the same reason the wrappers are: building the
+record in TIR would mean re-deriving `None`'s constructor type and duplicating
+lower's typecheck-ty -> TIR-ty translation.
+
+**End-to-end, compiled, under plain `--test`** (test/cap_mock/cap_mock_io.march):
+
+```
+REAL:x            -- before
+MOCK[REAL:x]      -- inside with_cap
+REAL:x            -- after
+```
+
+Three calls to the same function, none of which names a capability. One
+dictionary would not distinguish interception from a hard-coded
+implementation; the calls either side pin that the swap is lexically scoped.
+
+### ONE predicate gates all three
+
+The dictionary types resolving for IO capabilities, the wrapper injection, and
+the rewrite must agree. They did not: injection was `--test`-gated while the
+rewrite was env-var-gated, so a build with the rewrite on and injection off
+emitted calls to `__march_dispatch_print_line` and failed at link with an
+undefined symbol — 76 codegen failures. `Flags.cap_mocking ()` is now the
+single predicate for all three.
+
+Also: neither `MARCH_CAP_PASSING` nor the mocking predicate was in `cas_flags`,
+so a build with the pass on shared a CAS entry with one without — the
+"pass off" run printed the mocked output. Same omission as `--test` itself,
+found the same way.
+
+### Still open
 
 `with_cap(mock, fn _ -> body)` is designed but not built, so nothing can yet
 say "run this code with that mock". Until it exists, `cap_impl` on an IO

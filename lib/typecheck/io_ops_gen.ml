@@ -201,11 +201,36 @@ let dispatch_wrapper (cap : string) (op : string) (op_ty : ty) : string option =
          (dispatch_name op) all_params (march_ty ret)
          op field_args op call_args op call_args)
 
+(** The generated all-[None] base for a capability's dictionary — what
+    `cap_ops_empty(c)` resolves to.
+
+    Also generated as SOURCE rather than built as TIR: constructing the record
+    directly would mean re-deriving [None]'s constructor type and duplicating
+    lower's typecheck-ty -> TIR-ty translation, both of which already exist and
+    neither of which is worth a second, unchecked copy. *)
+let ops_empty_name (cap : string) : string =
+  "__march_ops_empty_" ^ String.map (fun c -> if c = '.' then '_' else c) cap
+
+let ops_empty_fn (cap : string) : string option =
+  match dict_fields cap with
+  | [] -> None
+  | flds ->
+    Some
+      (Printf.sprintf "  pfn %s() do\n    { %s }\n  end\n"
+         (ops_empty_name cap)
+         (String.concat ", " (List.map (fun (n, _) -> n ^ ": None") flds)))
+
 (** Every dispatch wrapper, as the body of a module the driver injects into a
     `--test` build. *)
 let dispatch_wrappers_source () : string =
   let b = Buffer.create 8192 in
   Buffer.add_string b "mod MarchCapDispatch do\n";
+  List.iter
+    (fun cap ->
+       match ops_empty_fn cap with
+       | Some src -> Buffer.add_string b src
+       | None -> ())
+    (all_caps ());
   List.iter
     (fun cap ->
        List.iter
