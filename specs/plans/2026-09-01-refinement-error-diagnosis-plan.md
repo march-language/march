@@ -812,6 +812,20 @@ reachability for call-site witness promotion."
 
 ### Task 5: `Witness.confirm_precond_reachable`
 
+**Two defects in the sketch below, found in review — the shipped code differs.**
+(1) `call_fn ~name:fn.A.fn_name.A.txt` passes the BARE short name, and
+`lookup_fn` prefers an exact bare binding: a function in a nested `mod` whose
+short name collides with a top-level one executes the top-level one and
+attributes its panic to the nested one. The stdlib is prepended as `DMod`s, so
+this collision is the normal shape of the AST. The shipped code resolves the
+qualified name or declines on ambiguity — never executes an unqualified guess.
+(2) The oracle accepted ANY panic: a zero-filled don't-care parameter can take
+an unrelated branch (`if n == 0 do panic(...)`) before the obligation's call is
+ever reached, so a real requirement would be paired with an unrelated panic and
+a suggested precondition that does not remove it. The shipped code requires the
+panic to be attributable to the obligation (see the Task 5 report for which
+mechanism the interpreter made available). Do not reintroduce either.
+
 **Shipped (2026-09-01), with three declines beyond the sketch below.**
 
 1. *Hidden refinements.* `admissible` pattern-matches a single `A.TyRefine` at
