@@ -812,6 +812,34 @@ reachability for call-site witness promotion."
 
 ### Task 5: `Witness.confirm_precond_reachable`
 
+**Shipped (2026-09-01), with three declines beyond the sketch below.**
+
+1. *Hidden refinements.* `admissible` pattern-matches a single `A.TyRefine` at
+   the TOP of a declared parameter type, so a refinement nested inside a type
+   argument (`List({Int | _ > 0})`), inside a record field, or under a
+   `TyLinear` wrapper (which `strip_refine` sees through and `admissible` does
+   not) is silently unchecked — all three parse today. A zero-filled decode
+   could then execute a value no caller could construct and blame the caller
+   for it. The shipped gate walks the parameter type (`refinement_free`,
+   following registered ADT/record definitions with a visited set) and declines
+   on any refinement below the outermost position, treating an unregistered
+   type name as unsafe. This is the answer to "can `admissible` accept
+   something no caller could pass"; refined type ALIASES do not parse, so that
+   variant of the hole does not exist.
+2. *Guarded clause.* A single clause carrying an `fc_guard` has a second
+   acceptance condition `admissible` does not model; a candidate failing it
+   crashes with a clause-match error rather than with the requirement being
+   reported. Decline.
+3. *Nullary.* `params = []` has no argument for a caller to have got wrong and
+   no parameter for the suggested precondition to land on, matching
+   `confirm_enumerative`. Decline.
+
+Nothing calls the function until Task 6, so it also ships with a direct unit
+suite (`precond-reachable-unit`, 6 ungated cases, models supplied by hand).
+Mutation-tested: removing the admissibility check reddens the `List.last` and
+inadmissible-model cases, removing the witness-safety walk reddens the nested-
+refinement case. `W2` is RED at this commit by design — Task 6 wires the gate.
+
 The soundness core. **Read `specs/2026-09-01-refinement-error-diagnosis-design.md`
 §2 before writing any code in this task** — the obvious implementation (reuse
 `confirm_precond`) is unsound, and the reason is subtle.
