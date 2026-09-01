@@ -1891,6 +1891,11 @@ let compile filename =
     (if !dump_phases then
        phases := March_dump.Dump.ast_phase user_ast "parse" :: !phases);
     let tir = March_tir.Lower.lower_module ~type_map ~test_mode:!do_test ~hot_reload:(Option.is_some !hot_reload_prefix) desugared in
+    (* Capability-passing analysis dump.  Immediately after lowering is the one
+       point where a TIR fn's name is still exactly its source name, which is
+       what the analysis keys on. *)
+    if Sys.getenv_opt "MARCH_DUMP_CAP_PASSING" = Some "1" then
+      March_tir.Cap_passing.dump tir;
     (* @[vectorize]/@[vectorize(warn)]: this is the one point in the
        pipeline where a TIR fn's name is still exactly its source name —
        Mono hasn't mangled/duplicated anything yet, Defun hasn't lifted
