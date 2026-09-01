@@ -872,7 +872,7 @@ let collect_fold_ranges (m : Ast.module_) : (int * int * string) list =
      Returns the run kind and the declaration's own span. *)
   let compact_group = function
     | Ast.DUse (_, sp) | Ast.DAlias (_, sp) -> Some (`Imports, sp)
-    | Ast.DNeeds (_, sp) | Ast.DProofCap (_, sp) | Ast.DOpts (_, sp) ->
+    | Ast.DNeeds (_, sp) | Ast.DProofCap (_, _, sp) | Ast.DOpts (_, sp) ->
       Some (`Caps, sp)
     | _ -> None
   in
@@ -2473,7 +2473,7 @@ let analyse ~filename ~src : t =
             | Ast.DUse (_, sp)      -> sp
             | Ast.DAlias (_, sp)    -> sp
             | Ast.DNeeds (_, sp)    -> sp
-            | Ast.DProofCap (_, sp) -> sp
+            | Ast.DProofCap (_, _, sp) -> sp
             | Ast.DOpts (_, sp)     -> sp
             | Ast.DTransitions (_, _, sp) -> sp
             | Ast.DAlwaysLinearType (_, _, _, _, sp) -> sp
@@ -2522,7 +2522,7 @@ let analyse ~filename ~src : t =
     (* Phase 1: register proof cap defs (go-to-def target), recursing into DMod. *)
     let rec register_proof_caps decls =
       List.iter (function
-        | Ast.DProofCap (name, _) ->
+        | Ast.DProofCap (name, _, _) ->
           Hashtbl.replace def_map name.txt name.span;
           Hashtbl.replace proof_cap_defs name.txt name.span
         | Ast.DMod (_, _, inner, _) -> register_proof_caps inner

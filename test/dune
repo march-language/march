@@ -11,7 +11,7 @@
 (library
  (name march_test_compiler)
  (wrapped false)
- (modules test_compiler test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_ceiling test_cap_unforgeable test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_ctxesc)
+ (modules test_compiler test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_ceiling test_cap_unforgeable test_cap_dict test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_ctxesc)
  (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_refinecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_ctxesc march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
 
 (library
@@ -1265,6 +1265,36 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/default_args_nested.expected native_default_args_nested.out)))
+
+; ── Capability runtime dictionaries, compiled ─────────────────────────────
+; Compiled/interpreted parity for cap_impl / cap_dict / mint_cap.  See the
+; header comment in native/cap_dictionary.march for what each line witnesses;
+; the short version is that the compiled representation leans on TWO facts
+; that live outside this feature — Option's niche encoding (None = 0,
+; Some(x) = x) and capabilities being a nullable pointer — so a change to
+; either shows up here rather than as a silent wrong answer.
+(rule
+ (targets native_cap_dictionary native_cap_dictionary.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/cap_dictionary.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_cap_dictionary
+        native/cap_dictionary.march)
+   (with-stdout-to native_cap_dictionary.out
+        (system "./native_cap_dictionary")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/cap_dictionary.expected native_cap_dictionary.out)))
 
 ; ── Regression: a user fn shadowing a codegen-dispatched builtin name ──
 ; emit_expr's ~57 builtin arms dispatch on the callee's BARE name, so a

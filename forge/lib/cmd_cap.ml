@@ -50,7 +50,7 @@ and extract_one acc = function
     { acc with always_linear = acc.always_linear @ [name.Ast.txt] }
   | Ast.DTransitions (name, arms, _) ->
     { acc with transitions = acc.transitions @ [(name.Ast.txt, arms)] }
-  | Ast.DProofCap (name, _) ->
+  | Ast.DProofCap (name, _, _) ->
     { acc with proof_caps = acc.proof_caps @ [name.Ast.txt] }
   | Ast.DMod (_, _, inner, _) ->
     extract_decls inner acc

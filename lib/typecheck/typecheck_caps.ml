@@ -1671,6 +1671,175 @@ let check_json_cap_sites (env : env) : unit =
             MPText " places no constraint on the type it produces, so it would fabricate authority from data. Receive the capability as a parameter and pass it through instead." ])
     ) !(env.json_cap_sites)
 
+(** Validate every `proof cap X with T` clause.  Deferred rather than checked
+    at the declaration because a capability may name a record type declared
+    LATER in the same module, and [check_decl] folds declarations in source
+    order.
+
+    Silence when the clause resolves; otherwise say which of the two ways it
+    failed, because "unknown type" and "declared, but not a record" want
+    different fixes. *)
+let check_cap_dict_decls (env : env) : unit =
+  List.iter (fun (sp, cap_path, dict_name) ->
+      match resolve_cap_dict_type env cap_path with
+      | Some _ -> ()
+      | None ->
+        let qual =
+          match List.assoc_opt cap_path env.proof_caps with
+          | Some m when m <> "" -> m ^ "." ^ dict_name
+          | _ -> dict_name
+        in
+        let known_type =
+          StrMap.mem dict_name env.types || StrMap.mem qual env.types
+        in
+        if known_type then
+          Err.error env.errors ~span:sp
+            (render_parts [
+              MPText "A capability's dictionary type must be a RECORD type, but ";
+              MPCode dict_name; MPText " is not one.";
+              MPBreak;
+              MPText "hint: a dictionary is the set of operations the capability \
+                      authorizes, one function per field — e.g. ";
+              MPCode "type Ops = { send : (Int) -> Int }"; MPText "." ])
+        else
+          Err.error env.errors ~span:sp
+            (render_parts [
+              MPText "I don't know a type named "; MPCode dict_name;
+              MPText " for the dictionary of "; MPCode ("Cap(" ^ cap_path ^ ")");
+              MPText ".";
+              MPBreak;
+              MPText "hint: declare the record type in the same module as the \
+                      capability." ])
+    ) !(env.cap_dict_decl_sites)
+
+(** Post-checking sweep: enforce the [cap_impl] gate.
+
+    Supplying a dictionary is forging a capability's BEHAVIOUR — the same
+    threat model [check_mint_cap_sites] defeats — so the rule starts from that
+    gate as precedent and splits by capability kind:
+
+    - PROOF CAP: allowed only inside a public [fn] of the declaring module.
+      [mint_cap]'s rule, unchanged.  A dictionary is strictly MORE authority
+      than a mint (it decides what the capability does, not merely that it
+      exists), so it cannot be looser; and the declaring module already defines
+      the meaning of its own operations, so it is not an escalation either.
+    - IO CAP: there is no declaring module, so the rule above has nothing to
+      bind to.  Admitted only under [--test] ([Typecheck_env.test_build]).
+
+    An UNPINNED result is rejected, not ignored — unlike [check_cap_narrow_sites],
+    where silence is right.  The difference: a [cap_impl] whose result never gets
+    pinned is precisely the polymorphic-supplier forge ([forall a. _ -> Cap(a)]),
+    a supplier that could re-implement every capability at once.  This mirrors
+    [check_mint_cap_sites]'s third arm. *)
+let check_cap_impl_sites (env : env) : unit =
+  List.iter (fun (sp, rty, dict_ty, cur_fn_public, current_module) ->
+      let err parts = Err.error env.errors ~span:sp (render_parts parts) in
+      match repr rty with
+      | TCon ("Cap", [inner]) ->
+        (match repr inner with
+         | TCon (p, []) ->
+           let declaring = List.assoc_opt p env.proof_caps in
+           (* Gate first: on a refused site the dictionary's own type is not
+              worth a second diagnostic. *)
+           let gate_ok =
+             match declaring with
+             | Some declaring_mod ->
+               if declaring_mod = current_module && cur_fn_public then true
+               else begin
+                 err [
+                   MPText "cap_impl "; MPCode ("Cap(" ^ p ^ ")");
+                   MPText " is only allowed inside a public function of its declaring module ";
+                   MPCode declaring_mod; MPText ".";
+                   MPBreak;
+                   MPText "hint: supplying a dictionary decides what the capability \
+                           DOES, so it is gated exactly like ";
+                   MPCode "mint_cap"; MPText ". Expose a public factory in ";
+                   MPCode declaring_mod; MPText " and call that instead." ];
+                 false
+               end
+             | None ->
+               (* Not a proof cap — an IO capability, which has no declaring
+                  module to bind the rule to. *)
+               if !test_build then true
+               else begin
+                 err [
+                   MPText "cap_impl "; MPCode ("Cap(" ^ p ^ ")");
+                   MPText " is not allowed here: an IO capability has no declaring \
+                           module, so there is no module that owns the right to say \
+                           what it does.";
+                   MPBreak;
+                   MPText "hint: mocking an IO capability is admitted only in a test \
+                           build ("; MPCode "--test";
+                   MPText "). To swap behaviour in ordinary code, declare your own \
+                           capability with a dictionary (";
+                   MPCode "proof cap Name with Ops";
+                   MPText ") and route the operations through it." ];
+                 false
+               end
+           in
+           if gate_ok then begin
+             match resolve_cap_dict_type env p with
+             | None when declaring = None ->
+               (* Reachable only under [--test]: the build-mode gate admitted an
+                  IO capability, and then there is no declaration to check the
+                  dictionary against, because an IO cap has no declaration site
+                  a user owns.  Say so precisely rather than reusing the
+                  proof-cap message, whose hint does not apply.
+
+                  This is where mocking IO actually stops today, and the reason
+                  is upstream of dictionaries: an IO builtin does not CONSUME
+                  its capability ([println : String -> ()]; the requirement
+                  lives in [Typecheck_builtins.builtin_cap_table]), so even a
+                  dictionary that could be attached would never be consulted.
+                  Closing this needs the cap-first migration of the builtins,
+                  not more machinery here.  See
+                  specs/todos/2026-08-31-cap-runtime-dictionaries.md. *)
+               err [
+                 MPText "There is no way to declare a dictionary type for ";
+                 MPCode ("Cap(" ^ p ^ ")");
+                 MPText " — an IO capability has no declaration site to carry a ";
+                 MPCode "with"; MPText " clause.";
+                 MPBreak;
+                 MPText "hint: IO builtins do not take their capability as an \
+                         argument (";
+                 MPCode "println : (String) -> ()";
+                 MPText "), so a dictionary attached here would never be \
+                         consulted. Declare your own capability instead (";
+                 MPCode "proof cap Name with Ops";
+                 MPText ") and route the operations through it." ]
+             | None ->
+               err [
+                 MPCode ("Cap(" ^ p ^ ")");
+                 MPText " declares no runtime dictionary, so there is nothing for ";
+                 MPCode "cap_impl"; MPText " to attach.";
+                 MPBreak;
+                 MPText "hint: declare one on the capability — ";
+                 MPCode ("proof cap " ^ cap_bare_name p ^ " with SomeRecordType"); MPText "." ]
+             | Some rec_name ->
+               (* Compare by UNIFICATION, not by name.  A record literal infers
+                  to a structural [TRecord], while the declaration gives a
+                  nominal [TCon], and a record type is registered under both its
+                  bare and its module-qualified spelling
+                  (typecheck.ml:5900-5901).  Comparing names produced the
+                  useless diagnostic "declares its dictionary as `Ops`, but this
+                  one is `Ops`"; [unify] already reconciles the two shapes via
+                  [expand_record] and reports a precise per-field mismatch. *)
+               Typecheck_unify.unify env ~span:sp (TCon (rec_name, [])) dict_ty
+           end
+         | _ ->
+           err [
+             MPText "cap_impl here does not have a determinable capability result type.";
+             MPBreak;
+             MPText "hint: cap_impl must produce a specific ";
+             MPCode "Cap(Mod.Name)";
+             MPText " fixed at the call site. A cap_impl captured in a generalized \
+                     (let-bound) lambda is polymorphic in the capability — a supplier \
+                     that could re-implement every capability at once — and is \
+                     rejected. Attach directly, or fix the capability type (e.g. \
+                     annotate the return)." ])
+      | _ -> ()
+    ) !(env.cap_impl_sites)
+
 (** Post-checking sweep (Part 2): enforce the [mint_cap] gate for every recorded
     site, now that its result type is pinned by later unification.  [mint_cap(x)]
     typechecks iff its pinned result is [Cap(P)] with [P] a proof cap whose
