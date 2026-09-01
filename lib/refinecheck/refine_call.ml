@@ -2105,9 +2105,23 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
 
                 [Bound_expr] is excluded: there is no callee whose requirement
                 the enclosing function could be propagating, so the sentence
-                below would not be true of it. *)
+                below would not be true of it.
+
+                So is anything at a STDLIB span.  Those diagnostics are filtered
+                out of the printed stream, so promoting there is all cost and no
+                message: `--refine-report` would grow a `violated` count with no
+                diagnostic anywhere to explain it (measured: four true-but-mute
+                promotions in `stdlib/stats.march`, and +0.12s on a cold
+                `--check` of a three-line program, spent executing stdlib
+                functions to produce warnings nobody is shown).  Declining falls
+                straight through to the Task 1/2 reason chain, which is where
+                those obligations already were.  [is_stdlib_source_file] is the
+                same predicate the measure-alias gates use — an identity
+                supplied by the caller, never a path pattern; see its comment in
+                [Refine_encode]. *)
              let promoted =
                match subject, !enclosing_fn, model_of first with
+               | _ when is_stdlib_source_file span.A.file -> None
                | Argument, Some fd, (_ :: _ as model) ->
                  (match List.nth_opt args rp.idx with
                   | Some arg ->

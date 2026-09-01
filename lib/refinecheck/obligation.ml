@@ -80,7 +80,7 @@ type reason =
    [Violated] covers two shapes, both decided and both reported at the call
    site.  The original one is "the solver proved the predicate can NEVER hold"
    — a bug in the annotation.  The second, added with the call-site promotion
-   (design doc Â§2), is "SOME input demonstrably fails": the enclosing
+   (design doc §2), is "SOME input demonstrably fails": the enclosing
    function was executed on decoded arguments and observed to panic, and to
    return once the offending argument was repaired.  The two are not the same
    strength of claim, and a future report that wants to distinguish them will

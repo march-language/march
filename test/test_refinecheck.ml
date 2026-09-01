@@ -44,17 +44,37 @@ let has_refine_error_d src =
    alias: the alias is allowed only when a `List.length` in scope came from a
    file the caller identified as stdlib, and no string-parsed fixture (whose
    span file is "") can ever reach that branch. *)
-let has_refine_error_from ?(stdlib_files = []) ~file src =
+let parse_as ~file src =
   let lexbuf = Lexing.from_string src in
   lexbuf.Lexing.lex_curr_p <- { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = file };
-  let m =
-    March_parser.Parser.module_
-      (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
-  in
+  March_parser.Parser.module_
+    (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+
+let has_refine_error_from ?(stdlib_files = []) ~file src =
   let ctx = March_errors.Errors.create () in
   March_refinecheck.Refine_check.check_module ~stdlib_files ctx
-    (March_desugar.Desugar.desugar_module m);
+    (March_desugar.Desugar.desugar_module (parse_as ~file src));
   March_errors.Errors.has_errors ctx
+
+(* [refine_warnings], but through the same parse-as-[file] / declare-[stdlib_files]
+   path as [has_refine_error_from] above — the only way to reach a code path
+   that keys on a span's SOURCE FILE, since a plain string-parsed fixture has
+   the empty file name and can never be anyone's stdlib.  Shares [parse_as]
+   with the error helper so there is one parsing path, not two that could
+   drift; a WARNING view is needed because the call-site promotion this pins
+   is a warning by default, and adding `cap verified` to make it an error
+   would defeat the test — a DECLINED promotion falls back to a skip, which
+   `cap verified` escalates to an error too, so the two outcomes would be
+   indistinguishable. *)
+let refine_warnings_from ?(stdlib_files = []) ~file src =
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module ~stdlib_files ctx
+    (March_desugar.Desugar.desugar_module (parse_as ~file src));
+  List.filter_map
+    (fun (d : March_errors.Errors.diagnostic) ->
+      if d.March_errors.Errors.severity = March_errors.Errors.Warning
+      then Some d.March_errors.Errors.message else None)
+    ctx.March_errors.Errors.diagnostics
 
 (* Number of ERRORS the refinement pass reports on [src].  A plain boolean
    cannot tell "both violations found" from "one found, one silently lost",
@@ -10412,6 +10432,41 @@ end|}
   end
   fn go(ys : List(Int)) : Int do head(ys) end
 end|}))
+
+  ; (* A promotion-shaped call in a file the CALLER declared to be the standard
+       library's own source does not promote.  Stdlib-span diagnostics are
+       filtered out of the printed stream, so a promotion there is invisible to
+       the reader while still growing `--refine-report`'s `violated` count and
+       still paying for the interpreter run that produced it — measured as four
+       true-but-mute promotions in `stdlib/stats.march` and +0.12s on a cold
+       `--check` of a three-line program.  Declining puts those obligations back
+       where they already were, at `Skipped unconstrained-subject`.
+
+       The second half is the non-vacuity control, and it is the whole reason
+       this test is written as a pair: with the SAME source and the SAME file
+       name, but the file no longer declared as stdlib, the promotion fires.
+       Without it, "zero warnings" is equally consistent with the fixture not
+       being promotion-shaped at all, with a typo in the module, or with the
+       promotion path being dead — and this suite's own history is that a
+       silence assertion which cannot fail is worse than no assertion. *)
+    gated "a stdlib-span call is not promoted" (fun () ->
+        let src =
+          {|mod W4 do
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil        -> panic("empty")
+    Cons(h, _) -> h
+    end
+  end
+  fn go(ys : List(Int)) : Int do head(ys) end
+end|}
+        in
+        Alcotest.(check int) "no warnings at a stdlib span" 0
+          (List.length
+             (refine_warnings_from ~stdlib_files:[ "stdlib/w4.march" ]
+                ~file:"stdlib/w4.march" src));
+        Alcotest.(check int) "but the same source DOES promote when it is not stdlib" 1
+          (List.length (refine_warnings_from ~file:"stdlib/w4.march" src)))
 
   ; (* An effectful enclosing function cannot be executed under the veto, so
        no panic can be observed and nothing is promoted.  Without this the

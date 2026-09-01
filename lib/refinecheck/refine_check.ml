@@ -1125,7 +1125,11 @@ let rec collect_measure_fns (decls : A.decl list) : (string * A.fn_def) list =
 
    `alias Foo as List` and `use Some.List` can also make the spelling denote
    someone else's function, so either withdraws the alias too. *)
-let is_stdlib_source_file (f : string) : bool = List.mem f !stdlib_source_files
+(* [is_stdlib_source_file] itself lives in [Refine_encode], beside the
+   [stdlib_source_files] ref it reads — the promotion gate in [Refine_call]
+   needs the same predicate and sits upstream of this file.  The reasoning
+   above is about WHY the test is an identity rather than a path pattern, and
+   applies wherever it is called from. *)
 
 (* ── Glob imports: LOOK instead of assuming ────────────────────────────────
    `import X` / `use X.*` can only make a spelling denote something else if X
