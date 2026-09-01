@@ -1152,7 +1152,16 @@ the missing fact is by definition unrecorded."
 - Test: `test/test_refinecheck.ml`
 
 **Interfaces:**
-- Consumes: `Witness.confirm_precond_reachable` (Task 5),
+- Consumes: `Witness.confirm_precond_reachable` (Task 5) — **shipped
+  signature, which differs from Task 5's sketch:**
+  `fn:A.fn_def -> pred:A.expr -> binder:string -> arg:A.expr -> model:(string * string) list -> ((string * V.value) list * string) option`.
+  The three extra arguments are the obligation's predicate, its binder, and the
+  checked actual — the same trio `confirm_precond` already takes at the
+  `Violated` site — because the gate now also requires the predicate to be
+  false under the decoded arguments AND that repairing only the subject removes
+  the panic (Task 5 review, finding I2). Pass `rp.pred`, `rp.binder`, and the
+  argument at `rp.idx`.
+- Consumes (unchanged):
   `Refine_call.enclosing_fn` (Task 4), `Undecided.diagnose` (Task 1),
   `Refine.discharge`'s `Sat` model accessor (`model_of first`, already used
   at `:1888`)
@@ -1210,7 +1219,11 @@ from Tasks 1–2:
              let promoted =
                match !enclosing_fn, model_of first with
                | Some fd, Some model ->
-                 Witness.confirm_precond_reachable ~fn:fd ~model
+                 (match List.nth_opt args rp.idx with
+                  | Some arg ->
+                    Witness.confirm_precond_reachable ~fn:fd ~pred:rp.pred
+                      ~binder:rp.binder ~arg ~model
+                  | None -> None)
                | _ -> None
              in
              match promoted with
