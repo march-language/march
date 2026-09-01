@@ -33,6 +33,25 @@ type reason =
      places, because [summary] below is used only by the tests: bin/main.ml's
      [print_refine_report] keeps its own `Hashtbl` keyed on the whole reason. *)
   | Alias_withdrawn of string
+  (* Refinements of [Solver_undecided], split out because they are different
+     pieces of advice.  The residual keeps the old constructor: a reason we
+     cannot name must not be dressed up as one we can.
+
+     Payload discipline follows [Alias_withdrawn]: the NAME rides in the
+     detail, not the slug, so `--refine-report` groups all unconstrained
+     subjects into one bucket instead of one bucket per variable.
+
+     A third variant, [Nonlinear_goal], was cut before it shipped: the only
+     [smt_of] used to build a goal never produces [Smt.Mul] for two
+     non-literal operands (it returns [None], so such a predicate fails
+     earlier as [Unreflectable_predicate]), so the diagnosis was dead code
+     with no reachable fixture.  Making it reachable would mean teaching
+     [smt_of] to reflect general multiplication, which sends previously
+     unreflectable predicates to z3 for the first time — an improvement in
+     checker PRECISION, out of scope for a task that only explains existing
+     skips. *)
+  | Unconstrained_subject of string  (* the subject appears in no assumption *)
+  | Opaque_application of string     (* goal names an undeclared function symbol *)
 
 (* [Trusted]: the obligation was [Skipped] for some ordinary reason, but the
    enclosing function carries `@[trusted]`, so under `cap verified` it is
@@ -187,6 +206,8 @@ let reason_name = function
      groups skips by reason, and a per-spelling slug would split one cause into
      as many buckets as there are names.  The spelling belongs in the detail. *)
   | Alias_withdrawn _ -> "alias-withdrawn"
+  | Unconstrained_subject _ -> "unconstrained-subject"
+  | Opaque_application _ -> "opaque-application"
 
 (* One clause of plain English per reason, for the `cap verified` error text.
    [reason_name] alone is a debug-report slug; once a reason reaches a USER it
@@ -210,6 +231,11 @@ let reason_detail = function
        the checker withdrew its built-in measure meaning and the guard proved \
        nothing"
       spelling
+  | Unconstrained_subject name ->
+    Printf.sprintf "nothing in scope constrains `%s`" name
+  | Opaque_application name ->
+    Printf.sprintf
+      "the checker has no meaning for `%s`, so it cannot reason through it" name
 
 (* Deliberately still a 3-tuple: (proved, violated, skips-by-reason).  Every
    existing caller destructures it that way, and [Trusted] does not belong in

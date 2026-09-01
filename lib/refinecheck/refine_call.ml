@@ -173,11 +173,18 @@ let rec expr_applies_to_free (name : string) (subject : string) (e : A.expr) : b
    and it hides the real cause.  So this is deliberately conjunctive — all
    four conditions, or we keep the honest general message:
 
-   1. the reason is [Solver_undecided].  A withdrawal cannot cause any other
-      skip: it removes an ASSUMPTION, so the VC is still built, still
-      well-sorted, and still reaches the solver — it just arrives without the
-      fact that would have discharged it.  An unreflectable predicate or a sort
-      conflict failed strictly earlier, for reasons the alias cannot touch.
+   1. the reason is [Solver_undecided] or its syntactic refinement
+      [Unconstrained_subject] (see [Undecided.diagnose]).  A withdrawal
+      cannot cause any other skip: it removes an ASSUMPTION, so the VC is
+      still built, still well-sorted, and still reaches the solver — it just
+      arrives without the fact that would have discharged it, which is
+      exactly what [Unconstrained_subject] also names from the syntax alone.
+      An unreflectable predicate or a sort conflict failed strictly earlier,
+      for reasons the alias cannot touch — and neither does
+      [Opaque_application], which describes the GOAL's own shape, not the
+      assumption set a withdrawal thins.  Where both could describe the same
+      skip, the withdrawal wins: it names a decision made elsewhere in the
+      unit, which is more actionable than "nothing constrains it".
    2. the predicate actually mentions the measure the alias routes to.  A
       withdrawn `len` alias is irrelevant to `{Int | _ != 0}`.
    3. a POSITIVE path condition applies the withdrawn spelling TO THIS
@@ -260,7 +267,7 @@ let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
     ~(subject_is_str : bool) ~(path : (A.expr * bool) list) ~(lets : launder)
     (r : Obligation.reason) : withdrawal option =
   match (r, subject) with
-  | Obligation.Solver_undecided, Some (A.EVar sn) ->
+  | (Obligation.Solver_undecided | Obligation.Unconstrained_subject _), Some (A.EVar sn) ->
     let guard_applies (w : withdrawal) (cond : A.expr) : bool =
       (* FREE occurrence only, on both the direct condition and the laundered
          RHS: this is an ACCEPTING position, so a shadow-blind, discard-only
@@ -1916,5 +1923,15 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                        expression it annotates, not assumed — bind a value that satisfies \
                        it, or weaken the annotation");
                  labels; notes = []; code = None; fix = None }
-           | _ -> note (Obligation.Skipped Obligation.Solver_undecided))))
+           | _ ->
+             let subject_sym =
+               match List.nth_opt args rp.idx with
+               | Some (A.EVar { A.txt = x; _ }) -> Some x
+               | _ -> None
+             in
+             note
+               (Obligation.Skipped
+                  (match Undecided.diagnose ~subject_sym vc with
+                   | Some r -> r
+                   | None -> Obligation.Solver_undecided)))))
 
