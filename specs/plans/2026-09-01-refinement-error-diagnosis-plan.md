@@ -894,8 +894,17 @@ takes. Three further defects were fixed in that round:
   now, stripped so the quoted text is the user's own. `Match_failure` /
   `Assert_failure` still decline (coverage gap, not soundness).
 
+**Round 2** found the repair gate scoring an `Unconfirmable` repaired run as
+"the panic went away" — `panic_of` collapses `Unconfirmable` into `None`, so a
+fuel-out, a spent `wall_budget`, a blocked builtin or an internal `Eval_error`
+made the causality demonstration vacuous and restored the I2 false positive.
+The repaired run must now return `Ret`. Also pinned the POSITIVE half of the
+nested-name resolution (a nested definition that confirms while an inert
+top-level namesake declines), without which "declines" is equally consistent
+with never resolving any nested function — i.e. any stdlib `DMod`.
+
 Nothing calls the function until Task 6, so it also ships with a direct unit
-suite (`precond-reachable-unit`, 10 ungated cases, models supplied by hand).
+suite (`precond-reachable-unit`, 12 ungated cases, models supplied by hand).
 Every gate is mutation-tested: reverting each one reddens exactly the case
 written for it. `W2` is RED at this commit by design — Task 6 wires the gate.
 
