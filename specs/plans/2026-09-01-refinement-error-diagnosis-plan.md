@@ -1535,6 +1535,17 @@ distribution is not measuring what it claims to. **If `solver-undecided` is stil
 largest bucket, the taxonomy is wrong** — report that rather than shipping it,
 and the three variants need revisiting before Task 9.
 
+**Two things Task 6 established that this measurement must state.** (a) A
+promotion is recorded as `Obligation.Violated`, the same verdict the solver
+uses for "can NEVER hold"; `refine_post` already did this for some-input
+return failures, so the `violated` total in `--refine-report` conflates the
+two shapes and any number quoted from it must say so. (b) Promotion is NOT
+attempted for spans in `stdlib_files`: their diagnostics are filtered from the
+printed stream, so a promotion there produced an unexplained `violated` count
+and paid the interpreter cost for nothing — four true-but-invisible sites in
+`stdlib/stats.march` were the measured case. The stdlib slice of the report
+therefore reflects the pre-promotion baseline by design.
+
 - [ ] **Step 2: Count and hand-audit every promotion**
 
 ```bash
