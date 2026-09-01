@@ -13,6 +13,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- The non-tail-recursion warning no longer promises a loop that does not
+  happen. It used to end "when the recursive call is the direct argument of a
+  constructor, the compiler turns it into a loop" — but tail-recursion-modulo-cons
+  is off by default, so code written in exactly that shape still overflowed the
+  stack on deep input. The warning now says deep input can overflow, and
+  describes TRMC as the opt-in it is (`--trmc`).
+
 - ARM Linux (`linux-aarch64`) has a working release artifact for the first
   time. Every v0.2.0 and v0.3.0 ARM archive shipped with an empty `bin/` and no
   compiler at all. Three defects were stacked behind one another: git refusing
