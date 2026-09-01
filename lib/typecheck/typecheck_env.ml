@@ -372,6 +372,30 @@ type env = {
       report's Critical-fix section; it is retained as it closes same-module
       factory calls and is harmless.)  Shared hashtable so every env copy sees the
       same factory set. *)
+  cap_dicts : (string * string) list;
+      (** Capability path -> the DICTIONARY TYPE it declares, as written in the
+          `proof cap Live with SessionOps` clause.  A capability absent from
+          this list is runtime-erased exactly as every capability was before
+          dictionaries existed; [cap_impl]/[cap_dict] on one is an error.
+          Populated by [DProofCap] during check_decl, read by the [cap_dict]
+          inference arm and by [check_cap_impl_sites]. *)
+  cap_dict_decl_sites : (Ast.span * string * string) list ref;
+      (** (span, cap path, dictionary type name as written) for every `with`
+          clause.  Validated by [check_cap_dict_decls] as a post-checking sweep
+          rather than at the declaration, because a `proof cap` may name a
+          record type declared LATER in the same module. *)
+  cap_impl_sites : (Ast.span * ty * ty * bool * string) list ref;
+      (** (span, result type, dictionary-argument type, enclosing fn is public,
+          enclosing module) for every [cap_impl] application.  Swept by
+          [check_cap_impl_sites].  Deferred for exactly the reason
+          [mint_cap_sites] is: the result cap is pinned by LATER unification
+          (typically the enclosing fn's return annotation), so the gate cannot
+          be decided at the application. *)
+  cap_dict_sites : Ast.span list ref;
+      (** Every [cap_dict] application.  Not used for any CHECK — the [cap_dict]
+          arm resolves at the site — but the driver reads it, together with
+          [cap_impl_sites], to refuse a COMPILED build with a proper diagnostic:
+          capability dictionaries run interpreted only for now. *)
   mint_cap_sites : (Ast.span * ty * bool * string) list ref;
   (** Every [mint_cap(_)] application site, recorded as
       (span, result_type, cur_fn_public, current_module).  The mint GATE is
@@ -589,6 +613,10 @@ let make_env errors type_map = {
   nonexhaustive_match_spans = ref [];
   cap_producer_ivars = Hashtbl.create 16;
   cap_narrow_factory_fns = Hashtbl.create 16;
+  cap_dicts = [];
+  cap_dict_decl_sites = ref [];
+  cap_impl_sites = ref [];
+  cap_dict_sites = ref [];
   mint_cap_sites = ref [];
   cap_narrow_sites = ref [];
   json_cap_sites = ref [];
@@ -803,8 +831,47 @@ let ty_has_tagged_cap_producer (env : env) (ty : ty) : bool =
     | TChan _ | TNat _ | TError -> false
   in go ty
 
+(** True when the compiler was invoked with [--test] (the test-runner build).
+
+    Read by [check_cap_impl_sites]: an IO capability has no declaring module —
+    IO caps are compiler-owned and rooted at [main]'s grant — so the
+    declaring-module rule that gates a dictionary on a proof cap has nothing to
+    bind to.  Supplying a mock implementation for one is admitted only in a
+    test build.  This is a BUILD-MODE gate, not a type-level one, and it is
+    weaker in kind than the declaring-module rule: `forge publish` must refuse
+    an artifact built with [--test], or a library can ship its own mock. *)
+let test_build = ref false
+
 let lookup_var  name env = StrMap.find_opt name env.vars
 let lookup_type name env = StrMap.find_opt name env.types
+
+(** The last segment of a capability path: the name as WRITTEN in its
+    declaration.  A `proof cap Live` inside `mod Session` has the path
+    "Session.Live", so a hint spelled from the path suggests
+    `proof cap Session.Live with ...`, which does not parse. *)
+let cap_bare_name (cap_path : string) : string =
+  match String.rindex_opt cap_path '.' with
+  | None -> cap_path
+  | Some i -> String.sub cap_path (i + 1) (String.length cap_path - i - 1)
+
+(** [resolve_cap_dict_type env cap_path] — the record-type name, as registered
+    in [env.records], of the runtime dictionary [cap_path] declares via
+    `proof cap X with T`.  [None] when the capability declares no dictionary,
+    or when the type it names is not a record in scope.
+
+    Tries the bare spelling first and then the declaring module's
+    qualification, because [DType] registers a record under both spellings
+    depending on how deeply the module is nested (typecheck.ml:5900-5901). *)
+let resolve_cap_dict_type env cap_path =
+  match List.assoc_opt cap_path env.cap_dicts with
+  | None -> None
+  | Some d ->
+    if StrMap.mem d env.records then Some d
+    else
+      match List.assoc_opt cap_path env.proof_caps with
+      | Some m when m <> "" && StrMap.mem (m ^ "." ^ d) env.records ->
+        Some (m ^ "." ^ d)
+      | _ -> None
 
 (** True iff the bare type name [name] resolves to an `always_linear` type *here*
     — i.e. it is registered always_linear AND the current module does NOT declare

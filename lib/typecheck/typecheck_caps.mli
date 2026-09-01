@@ -27,6 +27,8 @@ val check_module_needs :
 
 val check_cap_narrow_sites : env -> unit
 val check_json_cap_sites : env -> unit
+val check_cap_dict_decls : env -> unit
+val check_cap_impl_sites : env -> unit
 val check_mint_cap_sites : env -> unit
 
 (** Per-function capability sets, as computed by the walk above. [own] is what

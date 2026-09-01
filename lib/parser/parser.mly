@@ -820,8 +820,26 @@ cap_path:
   | id = upper_name; DOT; rest = cap_path { id :: rest }
 
 proof_cap_decl:
-  | PROOFCAP; name = upper_name
-    { DProofCap (name, mk_span ($loc)) }
+  | PROOFCAP; name = upper_name; dict = proof_cap_dict
+    { DProofCap (name, dict, mk_span ($loc)) }
+
+(** Optional runtime-dictionary type on a proof-cap declaration:
+    `proof cap Live with SessionOps`.  Absent means the capability stays
+    runtime-erased, which is every capability written before this existed.
+
+    KNOWN CONFLICT (verified 2026-08-31: this rule takes the grammar from 10
+    shift/reduce conflicts to 11).  After `PROOFCAP upper_name` with `WITH`
+    ahead, menhir cannot decide between reducing the empty `proof_cap_dict`
+    and shifting, because the REPL entry point's `repl_sequence` can itself
+    BEGIN with `WITH`.  Menhir resolves it by shifting, which is the reading
+    this rule wants; the only casualty is a REPL session that types
+    `proof cap X` and then opens a fresh `with ...` sequence on the next token,
+    where the `with` binds to the capability.  Restructuring into two explicit
+    productions does not remove it — the ambiguity is in `repl_sequence`'s
+    first set, not in this rule's shape. *)
+proof_cap_dict:
+  |                          { None }
+  | WITH; t = upper_name     { Some t }
 
 cap_no_panic_decl:
   | CAP_NO_PANIC

@@ -244,6 +244,21 @@ mod Prelude do
     print_line(show(x))
   end
 
+  doc """
+  Runs `f` with `c` installed as the capability its operations dispatch
+  through, so a test can substitute an implementation:
+
+  ```march
+  with_cap(mock, fn _ -> code_under_test())
+  ```
+
+  At runtime this simply calls `f` — the capability is consumed by the
+  compiler's capability-passing elaboration, which rewrites calls inside `f`
+  to route through `c`'s dictionary. Outside a `--test` build the elaboration
+  does not run and this is exactly `f(())`.
+  """
+  fn with_cap(_c, f) do f(()) end
+
   doc "Short alias for to_string."
   fn str(x) do to_string(x) end
 

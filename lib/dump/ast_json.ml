@@ -719,7 +719,7 @@ let rec decl_to_json (d : decl) : string =
            | Some sc -> Dump.json_string sc) paths));
       ("span", span_to_json span);
     ]
-  | DProofCap (n, span) ->
+  | DProofCap (n, _dict, span) ->
     Dump.json_obj [
       ("kind", Dump.json_string "DProofCap");
       ("name", name_to_json n);

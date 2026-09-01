@@ -188,8 +188,8 @@ let rec remap_decl tbl = function
     Ast.DAlias (a, remap_span tbl sp)
   | Ast.DNeeds (paths, sp) ->
     Ast.DNeeds (paths, remap_span tbl sp)
-  | Ast.DProofCap (name, sp) ->
-    Ast.DProofCap (name, remap_span tbl sp)
+  | Ast.DProofCap (name, dict, sp) ->
+    Ast.DProofCap (name, dict, remap_span tbl sp)
   | Ast.DAlwaysLinearType (vis, name, params, td, sp) ->
     Ast.DAlwaysLinearType (vis, remap_name tbl name, List.map (remap_name tbl) params, td, remap_span tbl sp)
   | Ast.DTransitions (handle_ty, arms, sp) ->

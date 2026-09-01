@@ -6536,9 +6536,63 @@ void *march_csv_next_row(void *handle_ptr) {
 
 /* ── Capability builtins ─────────────────────────────────────────────── */
 
-/* cap_narrow: attenuates a capability to a sub-capability.
-   In compiled mode, capabilities are opaque pointers (just pass through). */
+/* Capabilities are a NULLABLE POINTER: NULL is the plain sentinel (every
+   capability that carries no dictionary, which is all of them unless
+   `cap_impl` attached one), and otherwise the pointer IS the dictionary
+   record.  All three operations below are therefore identity-shaped; the only
+   real work is reference counting.
+ *
+ * OWNERSHIP.  Perceus passes a capability ARGUMENT borrowed and treats a
+ * builtin RESULT as owned (it emits a dec for the result and no inc for the
+ * argument — visible in `--dump-tir` on any `let d = cap_narrow(c)`).  So a
+ * shim that hands its argument straight back must INCREMENT, or the result's
+ * dec has no matching inc and the count underflows the moment a capability is
+ * a real pointer rather than NULL.  march_incrc is a no-op on non-heap
+ * pointers, so this costs nothing for the NULL sentinel — i.e. for every
+ * capability in every program that predates dictionaries. */
+
+/* cap_narrow: attenuates a capability to a sub-capability.  Attenuation is a
+   compile-time check, so this is the identity — which is also what PROPAGATES
+   an attached dictionary across a narrow.
+ *
+ * NO march_incrc here, deliberately, and the reason is worth keeping: a
+ * let-bound cap_narrow result DOES receive a dec_rc (visible in --dump-tir),
+ * so if a dictionaried capability ever reached this shim the dec would free a
+ * record that the original binding still aliases.  It cannot reach it today:
+ * cap_narrow may not produce a proof capability (typecheck_unify.ml's
+ * proof-cap forge arm) and an IO capability cannot carry a dictionary
+ * (check_cap_impl_sites), so no dictionaried capability is well-typed here.
+ * An inc would therefore be an UNTESTABLE guess baked into the runtime.  When
+ * IO capabilities gain dictionaries, this ownership question must be
+ * re-answered against a program that actually exercises it. */
 void *march_cap_narrow(void *cap) {
+    return cap;
+}
+
+/* mint_cap: a mint produces a NEW capability, not an attenuation of the
+   Cap(IO) it was minted from, so it must NOT inherit that capability's
+   dictionary — it starts as the plain sentinel.  This used to alias
+   march_cap_narrow (identity), which agreed with the interpreter only because
+   a Cap(IO) is always NULL today; the moment one could carry a dictionary the
+   two backends would silently disagree, compiled inheriting it and
+   interpreted not.  Same rule as eval.ml's mint_cap. */
+void *march_mint_cap(void *cap) {
+    (void)cap;
+    return NULL;
+}
+
+/* cap_impl: attach a dictionary.  The dictionary becomes the capability's
+   runtime value; the capability argument carries nothing else. */
+void *march_cap_impl(void *cap, void *dict) {
+    (void)cap;
+    return dict;
+}
+
+/* cap_dict: read the dictionary back as an Option.  Option is NICHE-encoded
+   (None = 0, Some(x) = x — see lib/tir/repr.ml), and a capability is already
+   NULL-or-pointer, so the Option this returns is bit-identical to its
+   argument and no encoding step exists. */
+void *march_cap_dict(void *cap) {
     return cap;
 }
 

@@ -14735,6 +14735,7 @@ let compiler_suites =
       ("cap_scope", Test_cap_scope.tests);
       ("cap_ceiling", Test_cap_ceiling.tests);
       ("cap_unforgeable", Test_cap_unforgeable.tests);
+      ("cap_dict", Test_cap_dict.tests);
       ("cap_attrib_agreement", Test_cap_attrib_agreement.tests);
       ("cap_sandbox_profile", Test_cap_sandbox_profile.tests);
       ("cap_sandbox_runtime", Test_cap_sandbox_runtime.tests);
