@@ -824,7 +824,7 @@ end
 
 ## Runtime behaviour
 
-All `Cap(X)` values are **runtime-erased**. They compile to `null` in LLVM IR and to `VUnit` in the interpreter. No allocation, no indirection, no overhead. Enforcement of the capability *types* is purely at compile time, but a compiled binary can additionally turn its declared set into a kernel-enforced sandbox at startup; see [OS-level enforcement](#os-level-enforcement--sandboxing-the-compiled-binary) below.
+A `Cap(X)` is a **nullable pointer**. By default it is null — compiling to `null` in LLVM IR and `VUnit` in the interpreter, with no allocation, no indirection and no overhead — and that is what every capability is unless something explicitly attaches a [runtime dictionary](#runtime-dictionaries-swapping-what-a-capability-does) to it. Enforcement of the capability *types* is purely at compile time. Enforcement of the capability *types* is purely at compile time, but a compiled binary can additionally turn its declared set into a kernel-enforced sandbox at startup; see [OS-level enforcement](#os-level-enforcement--sandboxing-the-compiled-binary) below.
 
 ---
 
@@ -1146,6 +1146,100 @@ The LSP shows typestate hover: hovering any `Handle(R, S)` expression displays t
 
 ---
 
+## Runtime dictionaries: swapping what a capability *does*
+{: #runtime-dictionaries-swapping-what-a-capability-does}
+
+A capability proves permission. A **dictionary** attached to one also decides
+what the permitted operations *do*, so an implementation can be swapped at a
+binding site — for mocking in tests, for tracing, or for pointing a transport
+somewhere else.
+
+### Your own capabilities
+
+Declare the dictionary type on the capability, then attach one:
+
+```march
+mod Session do
+  type Ops = { emit : (String) -> Int }
+  proof cap Live with Ops
+  needs IO
+
+  fn boot(c : Cap(IO)) : Cap(Session.Live) do
+    cap_impl(mint_cap(c), { emit: fn s -> String.length(s) })
+  end
+
+  fn emit(c : Cap(Session.Live), s : String) : Int do
+    match cap_dict(c) do
+      Some(d) -> d.emit(s)
+      None    -> String.length(s)   -- no dictionary: the ambient behaviour
+    end
+  end
+end
+```
+
+`cap_dict` yields an `Option`, and `None` means "no dictionary — use the
+ambient implementation". That is what every capability written before
+dictionaries existed reads as, which is why the default path stays visible in
+the source rather than being implied.
+
+`cap_narrow` carries a dictionary across attenuation: a narrowed capability is
+the same authority, reduced. `mint_cap` does **not** — a mint produces a *new*
+capability, so inheriting the dictionary of the `Cap(IO)` it was minted from
+would give it operations belonging to something else.
+
+**Who may attach one.** Supplying a dictionary decides what a capability does,
+which is at least as much authority as minting one, so it is gated exactly like
+[`mint_cap`](#proof-caps-encoding-initialization-order): only a public `fn` of
+the declaring module, with the capability fixed at the call site. A supplier
+whose result type is left polymorphic is rejected — it could re-implement every
+capability at once.
+
+### Mocking an IO capability in tests
+
+IO capabilities have no declaring module, so the rule above has nothing to bind
+to; attaching a dictionary to one is admitted **only in a test build**. There
+is also nothing to hand-write: an IO capability's dictionary is derived from the
+compiler's own tables, one field per interceptable operation, each an `Option`
+that is `None` when not overridden. `march --emit-io-ops` prints the shapes.
+
+```march
+fn main(c : Cap(IO.Console)) do
+  let mock = cap_impl(c, { cap_ops_empty(c) with
+    print_line: Some(fn s -> print("MOCK[" ++ s ++ "]\n")) })
+  with_cap(mock, fn _ -> code_under_test())
+end
+```
+
+`cap_ops_empty(c)` is the all-`None` base to override one field of — March
+records unify exactly, so without it every mock would have to spell out every
+operation. `with_cap(mock, fn _ -> …)` is the binding site: inside that lambda
+the mock is in force, and nowhere else.
+
+The code under test needs no capability parameter and names no capability. A
+cap-requiring builtin does not take its capability as an argument — the
+requirement is checked against `needs`, not passed — so in a test build the
+compiler threads one in for you and routes the operation through the
+dictionary. Outside a test build none of this runs and the program is exactly
+what it always was.
+
+### What cannot be intercepted
+
+Each of these costs interception, never correctness: an operation that is not
+intercepted behaves exactly as it does today.
+
+| Not interceptable | Why |
+|---|---|
+| Polymorphic builtins — all of `vault_*`, so `IO.Mut` entirely | A dictionary field would need rank-2 types |
+| `println`, `random_bytes` | Shadowed by a stdlib March function, so the builtin is dead — intercept the `print_line` it delegates to |
+| Operations inside actor handlers | The scheduler invokes a handler, so there is no caller to thread a capability from |
+| Functions used as values rather than called directly | Their arity cannot change |
+
+Fully mockable today: `IO.Console`, `IO.Clock`, `IO.Random`, `IO.FileRead`,
+`IO.FileWrite`, `IO.NetConnect`, `IO.NetConnect.TLS`, `IO.WebSocket`,
+`IO.Signal`, `IO.FileSystem`, `IO.Network`.
+
+---
+
 ## Advanced patterns
 
 ### Specialization tags: realtime exclusion
@@ -1208,7 +1302,9 @@ end
 
 ### Testing with capability environment records
 
-`Cap(X)` values are runtime-erased, so you cannot swap them in tests. Pair the cap with a function field for swappable runtime behaviour:
+This pattern predates [runtime dictionaries](#runtime-dictionaries-swapping-what-a-capability-does) and is still the right tool when you want the swap to be **visible in the signature** — a `LogEnv` parameter says outright that the caller chooses the logger. Reach for a dictionary instead when you want the swap to be invisible: a function taking `Cap(IO.Console)` can be mocked without changing its type.
+
+Pair the cap with a function field for swappable runtime behaviour:
 
 ```march
 type LogEnv = {
