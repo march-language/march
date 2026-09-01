@@ -1089,6 +1089,27 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
     let foreign_measure m name = measure_of_var m name in
     let self_dt_sym = "$self" in
     let self_is_str = rp_is_str rp in
+    (* The SMT symbol the subject ("_"/[rp.binder]) actually reflects to in
+       THIS goal — populated by [mark_self] wherever [resolve_var] or
+       [resolve_measure] resolves a self reference to a term with a stable
+       top-level symbol (a bare [Const], or a single-arg [App] wrapping one,
+       e.g. the `$strlen` wrapper).  Deliberately NOT the source argument's
+       own spelling: a measure-typed subject (`len(_) > 0`) reflects to
+       `Const "len$x"`, never `Const "x"` (see [measure_of_var]) — a
+       diagnosis that searched assumptions for the wrong symbol would call a
+       genuinely-guarded subject "unconstrained", a false claim and strictly
+       worse than the vague [Solver_undecided] it would replace.
+       [Undecided.diagnose] must be handed THIS symbol, never the actual
+       argument's raw AST spelling. *)
+    let self_symbol : string option ref = ref None in
+    let mark_self (name : string) (t : Smt.term option) : Smt.term option =
+      if is_self name then
+        (match t with
+         | Some (Smt.Const c) -> self_symbol := Some c
+         | Some (Smt.App (_, [ Smt.Const c ])) -> self_symbol := Some c
+         | _ -> ());
+      t
+    in
     let resolve_var name =
       (* A String-typed subject reflects into the `Str` sort, never `Int`.  The
          choice is driven by a DECLARED type (the refinement's own base type for
@@ -1098,17 +1119,19 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
       (* The refined value is a record: it stands for the datatype term, not
          for anything [reflect_scalar] could produce.  Records and strings are
          disjoint sorts, so this cannot shadow the String path. *)
-      | `Record (_, t) when is_self name -> Some t
+      | `Record (_, t) when is_self name -> mark_self name (Some t)
       | _ ->
-      if is_self name && self_is_str then reflect_str "$self" self_actual
+      if is_self name && self_is_str then
+        mark_self name (reflect_str "$self" self_actual)
       else if (not (is_self name)) && name_is_str name then
         (match actual_of_name name with Some a -> reflect_str name a | None -> None)
       else if is_self name then
-        absorb
-          (reflect_cached "$self" (fun () ->
-               reflect_scalar ~postcond ~foreign_var ~foreign_measure
-                 ~foreign_field:arg_resolve_field
-                 ~sort:self_scalar sc self_actual))
+        mark_self name
+          (absorb
+             (reflect_cached "$self" (fun () ->
+                  reflect_scalar ~postcond ~foreign_var ~foreign_measure
+                    ~foreign_field:arg_resolve_field
+                    ~sort:self_scalar sc self_actual)))
       else
         match actual_of_name name with
         | Some a ->
@@ -1466,9 +1489,10 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
       then
         let key = if is_self name then "$self" else name in
         let actual = if is_self name then Some self_actual else actual_of_name name in
-        (match actual with
-         | Some a -> Option.map (fun t -> Smt.App (strlen_fn, [ t ])) (reflect_str key a)
-         | None -> None)
+        mark_self name
+          (match actual with
+           | Some a -> Option.map (fun t -> Smt.App (strlen_fn, [ t ])) (reflect_str key a)
+           | None -> None)
       else if is_axiom_measure m then (
         uses_axiom := true;
         let adt = Hashtbl.find axiom_measures m in
@@ -1504,14 +1528,15 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
           Some (Smt.App (m, [ Smt.Const name ]))
         | Some a ->
           (match a with A.EVar { A.txt = x; _ } -> load_scope_measure_facts x | _ -> ());
-          (match reflect_dt adt a with
-           | Some t -> Some (Smt.App (m, [ t ]))
-           | None ->
-             if is_self name then begin
-               decls := (self_dt_sym, Smt.SData adt) :: !decls;
-               Some (Smt.App (m, [ Smt.Const self_dt_sym ]))
-             end
-             else None))
+          mark_self name
+            (match reflect_dt adt a with
+             | Some t -> Some (Smt.App (m, [ t ]))
+             | None ->
+               if is_self name then begin
+                 decls := (self_dt_sym, Smt.SData adt) :: !decls;
+                 Some (Smt.App (m, [ Smt.Const self_dt_sym ]))
+               end
+               else None))
       else
         (* A measure with no axioms (a user measure, or list `len`).  All three
            spellings of the refined value — the anonymous `_`, the named binder
@@ -1526,24 +1551,25 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
            renaming a parameter silently unenforced a working contract. *)
         let actual = if is_self name then Some self_actual else actual_of_name name in
         match actual with
-        | Some a -> (
-            match (if m = "len" then list_len a else None) with
-            | Some n -> Some (Smt.IntLit n)
-            | None -> (
-                match a with
-                (* The actual is a bare name.  Load whatever the CALLER's own
-                   signature promises about its measures first, so the promise
-                   and the goal meet on the one memoized `m$x` symbol. *)
-                | A.EVar { A.txt = x; _ } ->
-                  load_scope_measure_facts x;
-                  measure_of_var m x
-                (* A non-variable, non-literal actual (a call, a field…): no
-                   symbol to share with the caller's facts.  For the binder
-                   spellings keep the fresh non-negative constant — it is what
-                   the two spellings resolved to before, and it stays SAT, so
-                   the outcome is silence either way. *)
-                | _ when is_self name -> measure_of_var m self_dt_sym
-                | _ -> None))
+        | Some a ->
+          mark_self name
+            (match (if m = "len" then list_len a else None) with
+             | Some n -> Some (Smt.IntLit n)
+             | None -> (
+                 match a with
+                 (* The actual is a bare name.  Load whatever the CALLER's own
+                    signature promises about its measures first, so the promise
+                    and the goal meet on the one memoized `m$x` symbol. *)
+                 | A.EVar { A.txt = x; _ } ->
+                   load_scope_measure_facts x;
+                   measure_of_var m x
+                 (* A non-variable, non-literal actual (a call, a field…): no
+                    symbol to share with the caller's facts.  For the binder
+                    spellings keep the fresh non-negative constant — it is what
+                    the two spellings resolved to before, and it stays SAT, so
+                    the outcome is silence either way. *)
+                 | _ when is_self name -> measure_of_var m self_dt_sym
+                 | _ -> None))
         | None -> measure_of_var m name (* a caller-scope variable *)
     in
     (* [resolve_field] turns the predicate's `v.port` into the record's SMT
@@ -1924,14 +1950,15 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                        it, or weaken the annotation");
                  labels; notes = []; code = None; fix = None }
            | _ ->
-             let subject_sym =
-               match List.nth_opt args rp.idx with
-               | Some (A.EVar { A.txt = x; _ }) -> Some x
-               | _ -> None
-             in
+             (* [!self_symbol], NOT the actual argument's raw AST spelling:
+                see [mark_self]'s comment above [resolve_var].  A measure-
+                typed subject reflects to `Const "len$x"`, not `Const "x"`;
+                handing [Undecided.diagnose] the source name would search the
+                assumptions for a symbol the goal itself never uses, and call
+                a genuinely-guarded subject "unconstrained". *)
              note
                (Obligation.Skipped
-                  (match Undecided.diagnose ~subject_sym vc with
+                  (match Undecided.diagnose ~subject_sym:!self_symbol vc with
                    | Some r -> r
                    | None -> Obligation.Solver_undecided)))))
 

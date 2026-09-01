@@ -51,7 +51,23 @@ let rec app_heads (t : Smt.term) : string list =
    one of them "opaque".  That would be wrong: the preamble gives each of
    them a meaning, the checker just could not connect a proof through it this
    time — which is exactly the false positive that fired on `$strlen` before
-   this existed. *)
+   this existed.
+
+   [Refine_encode.is_measure] is NOT dead weight, even though a `len`
+   application never reaches here as an [App] head — [measure_of_var]
+   (refine_call.ml) flattens `len(_)` straight to `Const "len$x"`, so `"len"`
+   itself can never be an [app_heads] entry.  But an AXIOMATISED user measure
+   (`@[measure] fn size(t : Tree(a)) : Int do … end` over a declared ADT)
+   reflects the OTHER way: [resolve_measure]'s axiom branch builds
+   `App(m, [t])` — literally `App ("size", [...])` — because the solver needs
+   the recursion equations, not a flat opaque constant.  Confirmed with a
+   fixture (`get(t : Tree(a), i : {Int | _ >= 0 && _ < size(t)})` called
+   unguarded): with [is_measure] removed here, "size" misfires
+   `opaque-application`, the same class of false positive `$strlen` did.
+   [ctor_field_sorts] does not cover it — that table holds CONSTRUCTOR names
+   (`Leaf`, `Node`), not measure function names. See
+   test/test_refinecheck.ml's "an axiomatised measure's own name is not
+   opaque" for the pinned regression. *)
 let known_head (f : string) : bool =
   f = Refine_encode.strlen_fn
   || Refine_encode.is_measure f
@@ -69,9 +85,15 @@ let known_head (f : string) : bool =
          suffix <> "" && String.for_all (fun c -> c >= '0' && c <= '9') suffix)
        Refine_encode.ctor_field_names false
 
-(* Ordered most-specific-first.  [subject_sym] is the SMT symbol the checked
-   ACTUAL reflected to, or [None] when the actual is not a bare symbol (an
-   arbitrary expression has no single name to report as unconstrained). *)
+(* Ordered most-specific-first.  [subject_sym] must be the actual SMT symbol
+   the subject reflected to IN THIS GOAL — e.g. `"len$ys"` for a
+   `len`-measured `ys`, never the source argument's own spelling `"ys"` (see
+   [Refine_call.mark_self], the only producer this module trusts).  [None]
+   when the goal-building resolvers never pinned the subject to a single
+   stable symbol (a record/ADT term, a non-variable actual, or a predicate
+   that never references the binder at all) — there is no one name to search
+   the assumptions for, so the unconstrained check below stays silent rather
+   than guess. *)
 let diagnose ~(subject_sym : string option) (vc : Smt.vc) : Obligation.reason option =
   let declared = List.map fst vc.Smt.decls in
   let goal_heads = List.sort_uniq compare (app_heads vc.Smt.goal) in
