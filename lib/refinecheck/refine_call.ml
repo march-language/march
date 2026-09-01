@@ -2093,62 +2093,126 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                 correctly) before this arm is ever reached; only the
                 DIAGNOSIS, not the proof attempt, uses the narrowed one. *)
              let vc_for_diagnose = { vc with Smt.assumptions = user_assumptions } in
-             (* [Partial_conjunct]: the goal is a top-level conjunction and the
-                whole-goal discharge above failed both ways.  Flatten the
-                goal's `&&` spine, pair each SMT conjunct with the source
-                fragment it came from, and discharge each SEPARATELY against
-                the FULL assumption set — [vc], the same one the whole-goal
-                proof attempt above used, not [vc_for_diagnose]'s narrowed
-                one, since this is a real proof attempt per conjunct, not a
-                diagnosis.  Only meaningful when the two spines line up in
-                length: if reflection reassociated or dropped a conjunct the
-                pairing is wrong, and quoting the user a fragment that does
-                not correspond to the conjunct tested is worse than the vague
-                message. *)
-             let rec spine = function
-               | Smt.And (a, b) -> spine a @ spine b
-               | t -> [ t ]
+             (* Before filing a skip: try to PROMOTE this to a demonstrated
+                failure.  A model consistent with everything the checker knows
+                may still describe an unreachable state — the assumption set is
+                an over-approximation, and the missing fact is by definition
+                not in it (`List.last`'s `t = Nil` is the worked example).  So
+                this does not TRUST the model: it uses it to propose arguments
+                for the ENCLOSING function, runs that function from its entry,
+                and promotes only on an observed panic that repairing the
+                subject removes.  Reachability is demonstrated, never assumed.
+
+                [Bound_expr] is excluded: there is no callee whose requirement
+                the enclosing function could be propagating, so the sentence
+                below would not be true of it. *)
+             let promoted =
+               match subject, !enclosing_fn, model_of first with
+               | Argument, Some fd, (_ :: _ as model) ->
+                 (match List.nth_opt args rp.idx with
+                  | Some arg ->
+                    Option.map
+                      (fun r -> (fd, r))
+                      (Witness.confirm_precond_reachable ~fn:fd ~pred:rp.pred
+                         ~binder:rp.binder ~arg ~model)
+                  | None -> None)
+               | _ -> None
              in
-             let rec pred_spine (e : A.expr) =
-               match e with
-               | A.EApp (A.EVar { A.txt = "&&"; _ }, [ a; b ], _) ->
-                 pred_spine a @ pred_spine b
-               | e -> [ e ]
-             in
-             let goal_parts = spine goal and pred_parts = pred_spine rp.pred in
-             let partial =
-               if List.length goal_parts < 2
-                  || List.length goal_parts <> List.length pred_parts
-               then None
-               else
-                 let judged =
-                   List.map2
-                     (fun g p ->
-                       let holds =
-                         Refine.discharge ~root ~preamble { vc with Smt.goal = g }
-                         = Refine.Verified
-                       in
-                       (holds, pred_str p))
-                     goal_parts pred_parts
-                 in
-                 let held = List.filter_map (fun (h, s) -> if h then Some s else None) judged
-                 and missing =
-                   List.filter_map (fun (h, s) -> if h then None else Some s) judged
-                 in
-                 (* Every conjunct failing is not "partial" — it is whatever
-                    the syntactic diagnosis says. *)
-                 if held = [] || missing = [] then None
-                 else Some (Obligation.Partial_conjunct { held; missing })
-             in
-             note
-               (Obligation.Skipped
-                  (match partial with
-                   | Some r -> r
-                   | None ->
-                     (match
-                        Undecided.diagnose ~subject_sym:!self_symbol
-                          ~subject_name:self_source_name vc_for_diagnose
-                      with
-                      | Some r -> r
-                      | None -> Obligation.Solver_undecided))))))
+             (match promoted with
+              | Some (fd, (wargs, panic_msg)) ->
+                (* The ledger records a DECIDED verdict, not a skip: a failure
+                   that was executed and observed is not an incompleteness, and
+                   `--refine-report` must not count it as one.  [note]'s
+                   `@[trusted]` and `cap verified` branches both key on
+                   [Skipped], so a promotion flows through neither — the
+                   severity choice below is the only report, made exactly
+                   once. *)
+                note Obligation.Violated;
+                (* Rendered in source syntax: the reader has to be able to
+                   paste the call back into their program. *)
+                let call =
+                  match Witness.render_call fd.A.fn_name.A.txt wargs with
+                  | Some c -> c
+                  | None -> "this call"
+                in
+                (* What is DEMONSTRATED is that the enclosing function panics
+                   on an input violating the callee's requirement, and that
+                   repairing that input removes the panic — NOT that the callee
+                   raised the panic.  [Eval_error] carries no identity, so that
+                   stronger claim is not available; do not reword this into
+                   "the call to `%s` panics".  Hard-wrapped near 78 columns:
+                   the renderer does not reflow. *)
+                let text =
+                  Printf.sprintf
+                    "`%s` propagates a requirement it doesn't declare.\n\n\
+                     `%s` requires  %s\n\
+                     but %s panics — \"%s\""
+                    fd.A.fn_name.A.txt callee (pred_str rp.pred) call panic_msg
+                in
+                (* Warning by default: "propagates an undeclared requirement"
+                   is a design choice a user is allowed to make, and nearly
+                   every unrefined wrapper around a panicking function is in
+                   that category.  `cap verified` is the established opt-in for
+                   turning unverifiable obligations into errors. *)
+                if !strict_verified then Err.error errctx ~span text
+                else Err.warning errctx ~span text
+              | None ->
+               (* [Partial_conjunct]: the goal is a top-level conjunction and the
+                  whole-goal discharge above failed both ways.  Flatten the
+                  goal's `&&` spine, pair each SMT conjunct with the source
+                  fragment it came from, and discharge each SEPARATELY against
+                  the FULL assumption set — [vc], the same one the whole-goal
+                  proof attempt above used, not [vc_for_diagnose]'s narrowed
+                  one, since this is a real proof attempt per conjunct, not a
+                  diagnosis.  Only meaningful when the two spines line up in
+                  length: if reflection reassociated or dropped a conjunct the
+                  pairing is wrong, and quoting the user a fragment that does
+                  not correspond to the conjunct tested is worse than the vague
+                  message. *)
+               let rec spine = function
+                 | Smt.And (a, b) -> spine a @ spine b
+                 | t -> [ t ]
+               in
+               let rec pred_spine (e : A.expr) =
+                 match e with
+                 | A.EApp (A.EVar { A.txt = "&&"; _ }, [ a; b ], _) ->
+                   pred_spine a @ pred_spine b
+                 | e -> [ e ]
+               in
+               let goal_parts = spine goal and pred_parts = pred_spine rp.pred in
+               let partial =
+                 if List.length goal_parts < 2
+                    || List.length goal_parts <> List.length pred_parts
+                 then None
+                 else
+                   let judged =
+                     List.map2
+                       (fun g p ->
+                         let holds =
+                           Refine.discharge ~root ~preamble { vc with Smt.goal = g }
+                           = Refine.Verified
+                         in
+                         (holds, pred_str p))
+                       goal_parts pred_parts
+                   in
+                   let held = List.filter_map (fun (h, s) -> if h then Some s else None) judged
+                   and missing =
+                     List.filter_map (fun (h, s) -> if h then None else Some s) judged
+                   in
+                   (* Every conjunct failing is not "partial" — it is whatever
+                      the syntactic diagnosis says. *)
+                   if held = [] || missing = [] then None
+                   else Some (Obligation.Partial_conjunct { held; missing })
+               in
+               note
+                 (Obligation.Skipped
+                    (match partial with
+                     | Some r -> r
+                     | None ->
+                       (match
+                          Undecided.diagnose ~subject_sym:!self_symbol
+                            ~subject_name:self_source_name vc_for_diagnose
+                        with
+                        | Some r -> r
+                        | None -> Obligation.Solver_undecided)))))))
 

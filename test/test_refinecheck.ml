@@ -10343,6 +10343,76 @@ end|}
         Alcotest.(check bool) "and it is not an error by default" false
           (has_refine_error_d src))
 
+  ; (* The SENTENCE, pinned verbatim.  Counting warnings cannot tell a correct
+       promotion from one that attributes the panic to the wrong function, and
+       that distinction is the whole residual imprecision of Task 5's gate:
+       what was demonstrated is that `go` panics on an input violating `head`'s
+       requirement and returns once that input is repaired — NOT that `head`
+       raised the panic.  A rewording to "the call to `head` panics" would
+       claim something the gate does not prove, and only a text assertion
+       catches it.  The rendered argument comes from [Witness.render_call], so
+       it is in the user's own syntax (`[]`, not an internal value dump). *)
+    gated "the promoted warning states exactly what was demonstrated" (fun () ->
+        let src =
+          {|mod W2t do
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil        -> panic("empty")
+    Cons(h, _) -> h
+    end
+  end
+  fn go(ys : List(Int)) : Int do head(ys) end
+end|}
+        in
+        Alcotest.(check (list string)) "the warning, verbatim"
+          [ "`go` propagates a requirement it doesn't declare.\n\n"
+            ^ "`head` requires  len(_) > 0\n"
+            ^ "but go([]) panics \xe2\x80\x94 \"empty\"" ]
+          (refine_warnings src))
+
+  ; (* Warning by default because "propagates an undeclared requirement" is a
+       design choice a user may make; Error under `cap verified`, which is the
+       established opt-in for turning unverifiable obligations into errors.
+       Both halves are pinned: a promotion that is always an error would break
+       every unrefined wrapper around a panicking stdlib function. *)
+    gated "a promoted failure escalates to an error under cap verified" (fun () ->
+        let src =
+          {|mod W3 do
+  cap verified
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil        -> panic("empty")
+    Cons(h, _) -> h
+    end
+  end
+  fn go(ys : List(Int)) : Int do head(ys) end
+end|}
+        in
+        Alcotest.(check bool) "error under cap verified" true
+          (has_refine_error_d src);
+        (* The SAME sentence as the warning, not the generic `cap verified`
+           boilerplate: the escalation changes the severity, not the finding. *)
+        Alcotest.(check bool) "and it is the promotion's own text" true
+          (contains (refine_error_text_d src) "propagates a requirement it doesn't declare"))
+
+  ; (* A promotion notes [Violated], not [Skipped], so it must not ALSO flow
+       through the `cap verified` escalation in [note] and report twice.  A
+       boolean cannot tell "reported once" from "reported twice", which is why
+       this counts. *)
+    gated "a promoted failure under cap verified reports exactly once" (fun () ->
+        Alcotest.(check int) "one diagnostic, not a doubled report" 1
+          (refine_error_count
+             {|mod W3b do
+  cap verified
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil        -> panic("empty")
+    Cons(h, _) -> h
+    end
+  end
+  fn go(ys : List(Int)) : Int do head(ys) end
+end|}))
+
   ; (* An effectful enclosing function cannot be executed under the veto, so
        no panic can be observed and nothing is promoted.  Without this the
        veto could be removed and every test above would still pass. *)

@@ -73,9 +73,20 @@ type reason =
    deliberate soundness hole and therefore its own verdict, never folded into
    [Proved] — a reader of `--refine-report` must be able to tell how much of a
    module's "verification" is actually a trusted assertion.  It can only ever
-   replace a [Skipped _]: a [Violated] (the solver proved the predicate can
-   NEVER hold) is a bug in the annotation, not an incompleteness to wave
-   through, so [Trusted] must never be produced from one. *)
+   replace a [Skipped _]: a [Violated] is a DECIDED failure, not an
+   incompleteness to wave through, so [Trusted] must never be produced from
+   one.
+
+   [Violated] covers two shapes, both decided and both reported at the call
+   site.  The original one is "the solver proved the predicate can NEVER hold"
+   — a bug in the annotation.  The second, added with the call-site promotion
+   (design doc Â§2), is "SOME input demonstrably fails": the enclosing
+   function was executed on decoded arguments and observed to panic, and to
+   return once the offending argument was repaired.  The two are not the same
+   strength of claim, and a future report that wants to distinguish them will
+   need a third verdict rather than a payload — but neither is a skip, and
+   `--refine-report` must not count either as an incompleteness, which is what
+   sharing the constructor buys. *)
 type verdict = Proved | Violated | Trusted | Skipped of reason
 
 (* [Precondition]: an argument checked against a callee's declared param
