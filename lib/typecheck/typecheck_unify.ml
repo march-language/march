@@ -69,7 +69,7 @@ let format_ty_for_error t =
   else "`" ^ flat ^ "`"
 
 (** Report a type mismatch with a conversational Elm-style message. *)
-let report_mismatch env ~span ~reason expected found =
+let report_mismatch env ~span ?(occurs_violation = false) ~reason expected found =
   (* Build headline, using pretty-printing for long types.
      Convention: `expected` = inferred type of the expression (what was provided);
                  `found`    = required type from context (what was needed).
@@ -204,9 +204,27 @@ let report_mismatch env ~span ~reason expected found =
        | _ -> [])
     | None -> []
   in
+  (* An occurs-check failure is a fundamentally different situation than an
+     ordinary mismatch: the type variable would have to equal a type that
+     contains itself (e.g. a self-referential record field inferred without
+     a type annotation to anchor it, so the compiler discovers the recursion
+     structurally instead of stopping at a nominal type name). The plain
+     "expected X but got Y" headline above is technically accurate but reads
+     as a random-looking, unmemorable variable name mismatching an unrelated
+     type — nothing about it says "this can't ever be finite" or suggests
+     the fix. Lead with that explanation instead. *)
+  let occurs_note =
+    if occurs_violation then
+      [ "This type would have to be infinitely recursive to satisfy every \
+         use — it isn't possible to infer it automatically. Add an explicit \
+         type annotation (e.g. on the function parameter or `let` binding) \
+         naming the recursive type by its declared name." ]
+    else []
+  in
   Err.report env.errors
     { Err.severity = Error; span; message = headline;
-      labels; notes = why_note @ mismatch_note @ common_hint @ same_name_note;
+      labels;
+      notes = occurs_note @ why_note @ mismatch_note @ common_hint @ same_name_note;
       code = None; fix = None }
 
 (** Structural equality for session types (used by [unify] for [TChan] cases).
@@ -316,7 +334,7 @@ let rec unify env ~span ?(reason = None) t1 t2 =
     (match !r with
      | Unbound (id, level) ->
        if occurs id level t then begin
-         report_mismatch env ~span ~reason t1 t2;
+         report_mismatch env ~span ~reason ~occurs_violation:true t1 t2;
          r := Link TError
        end else begin
          (* Proof-cap forge hook: if [r] is a tagged [cap_narrow]-result inner
@@ -510,6 +528,16 @@ let name_is_variant env name =
     (fun _ cis -> List.exists (fun (ci : ctor_info) -> matches ci.ci_type) cis)
     env.ctors
 
+(* Names of records currently being structurally expanded on the current
+   [surface_ty]/[expand_record] call path. A record field that mentions its
+   own type — directly (`type Tr = { left : Option(Tr), ... }`) or through a
+   cycle of records — would otherwise make expansion require expanding the
+   same record again, forever: expanding [Tr]'s fields expands [Option(Tr)],
+   which expands its argument [Tr], which re-enters the very branch that
+   started this. Shared between [surface_ty] and [expand_record] since a
+   chain can pass through either. *)
+let expanding_records : StringSet.t ref = ref StringSet.empty
+
 (** Convert a surface [Ast.ty] to an internal [ty].
     [tvars] accumulates a mapping from type-variable *names* to fresh
     unification-variable ids (so that two mentions of [a] in the same
@@ -616,11 +644,28 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
      | Some (params, field_decls)
        when List.length params = List.length args'
             && not (name_is_variant env name.txt) ->
-       let saved = !tvars in
-       List.iter2 (fun pname arg -> tvars := (pname, arg) :: !tvars) params args';
-       let flds = List.map (fun (fn, fty) -> (fn, surface_ty env ~tvars fty)) field_decls in
-       tvars := saved;
-       TRecord (List.sort (fun (a, _) (b, _) -> String.compare a b) flds)
+       if StringSet.mem name.txt !expanding_records then
+         (* Already expanding this record on the current path — a directly
+            or mutually self-referential field. Stop unfolding and return
+            the plain nominal type instead of recursing forever; [unify]'s
+            lazy TCon<->TRecord reconciliation (via [expand_record_ref])
+            expands one level on demand wherever a field is actually used,
+            so this loses no precision the caller needed right now. *)
+         TCon (canon_name, args')
+       else begin
+         let saved = !tvars in
+         List.iter2 (fun pname arg -> tvars := (pname, arg) :: !tvars) params args';
+         expanding_records := StringSet.add name.txt !expanding_records;
+         let flds =
+           Fun.protect
+             ~finally:(fun () ->
+                 expanding_records := StringSet.remove name.txt !expanding_records)
+             (fun () ->
+                List.map (fun (fn, fty) -> (fn, surface_ty env ~tvars fty)) field_decls)
+         in
+         tvars := saved;
+         TRecord (List.sort (fun (a, _) (b, _) -> String.compare a b) flds)
+       end
      | _ ->
        (* For qualified names not in env.records, check the module registry for
           ExRecord entries. This handles record types in modules loaded lazily
@@ -807,9 +852,23 @@ let expand_record env ty =
     in
     (match record_info with
      | Some (params, field_decls) when List.length params = List.length args ->
-       let tvars = ref (List.combine params args) in
-       let flds = List.map (fun (fn, fty) -> (fn, surface_ty env ~tvars fty)) field_decls in
-       Some (TRecord (List.sort (fun (a, _) (b, _) -> String.compare a b) flds))
+       if StringSet.mem name !expanding_records then
+         (* Same self-referential-record guard as [surface_ty]'s own
+            record-expansion branch (they share [expanding_records]): don't
+            re-expand a record already being expanded on this path. *)
+         Some (TCon (name, args))
+       else begin
+         let tvars = ref (List.combine params args) in
+         expanding_records := StringSet.add name !expanding_records;
+         let flds =
+           Fun.protect
+             ~finally:(fun () ->
+                 expanding_records := StringSet.remove name !expanding_records)
+             (fun () ->
+                List.map (fun (fn, fty) -> (fn, surface_ty env ~tvars fty)) field_decls)
+         in
+         Some (TRecord (List.sort (fun (a, _) (b, _) -> String.compare a b) flds))
+       end
      | _ -> None)
   | _ -> None
 

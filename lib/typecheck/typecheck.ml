@@ -1832,10 +1832,67 @@ let rec infer_expr env (e : Ast.expr) : ty =
                A row-polymorphism extension would constrain this properly. *)
             fresh_var env.level
           | other ->
-            Err.error env.errors ~span:sp
-              (Printf.sprintf
-                 "I cannot access field `%s` because this expression has \
-                  type `%s`, which is not a record." name.txt (pp_ty other));
+            (* Name what the user actually wrote when we can. A bare variable
+               is by far the common shape (`l.value`), and "`l` has type ..."
+               with a copy-pasteable `match l do ...` beats "this expression"
+               plus an abstract `<expr>` template the reader has to
+               re-instantiate by hand. *)
+            let subject = match e with
+              | Ast.EVar v -> Some v.txt
+              | _ -> None
+            in
+            let subj_desc = match subject with
+              | Some v -> Printf.sprintf "`%s`" v
+              | None   -> "this expression"
+            in
+            let subj_code = match subject with
+              | Some v -> v
+              | None   -> "<expr>"
+            in
+            (* An unresolved payload renders as an internal fresh-variable
+               name (`Option(l2)`), which means nothing to the reader and
+               changes from run to run. Print `_` for it instead — "some
+               Option, contents not yet known" is the honest reading, and it
+               keeps the reader's attention on the wrapper, which is the
+               actual problem. *)
+            let shown_ty =
+              match other with
+              | TCon (("Option" | "Result") as c, (_ :: _ as args)) ->
+                let arg_str a =
+                  match repr a with TVar _ -> "_" | t -> pp_ty t in
+                Printf.sprintf "%s(%s)" c
+                  (String.concat ", " (List.map arg_str args))
+              | t -> pp_ty t
+            in
+            (* `Option`/`Result` are the overwhelmingly common case someone
+               hits this on: the field access itself is right, it is just
+               aimed at the wrapper instead of the payload inside it. Say why
+               (it may be absent) and hand over working code. *)
+            let unwrap_note =
+              match other with
+              | TCon ("Option", [_]) ->
+                [ Printf.sprintf
+                    "%s may be `None`, so there is not always a value to read \
+                     `%s` from. Handle both cases: `match %s do Some(x) -> \
+                     x.%s  None -> ... end`. Or, to keep the result wrapped: \
+                     `Option.map(%s, fn x -> x.%s)`."
+                    subj_desc name.txt subj_code name.txt subj_code name.txt ]
+              | TCon ("Result", [_; _]) ->
+                [ Printf.sprintf
+                    "%s may be an `Err`, so there is not always a value to \
+                     read `%s` from. Handle both cases: `match %s do Ok(x) -> \
+                     x.%s  Err(e) -> ... end`. Or, to keep the result wrapped: \
+                     `Result.map(%s, fn x -> x.%s)`."
+                    subj_desc name.txt subj_code name.txt subj_code name.txt ]
+              | _ -> []
+            in
+            Err.report env.errors
+              { Err.severity = Error; span = sp;
+                message =
+                  Printf.sprintf
+                    "I cannot access field `%s` because %s has type `%s`, \
+                     which is not a record." name.txt subj_desc shown_ty;
+                labels = []; notes = unwrap_note; code = None; fix = None };
             TError))
       (* close the None branch of mod_access match *)
       )

@@ -249,7 +249,7 @@ let rec fmt_pat = function
   | PatRecord (flds, _)           ->
     let f (n, p) =
       let ps = fmt_pat p in
-      if ps = n.txt then n.txt else Printf.sprintf "%s = %s" n.txt ps
+      if ps = n.txt then n.txt else Printf.sprintf "%s: %s" n.txt ps
     in
     Printf.sprintf "{ %s }" (String.concat ", " (List.map f flds))
   | PatAs (p, n, _)               -> Printf.sprintf "%s as %s" (fmt_pat p) n.txt
