@@ -3,13 +3,13 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the single undifferentiated `solver-undecided` refinement skip
-with four diagnosed causes reported per site, and promote the sub-case that can
+with three diagnosed causes reported per site, and promote the sub-case that can
 be *proven* a real failure — by executing the enclosing function from its entry
 — to a warning carrying an inferred precondition fix.
 
-**Architecture:** Four new `Obligation.reason` variants are computed lazily at
+**Architecture:** Three new `Obligation.reason` variants are computed lazily at
 the existing fall-through in `check_call`, reached only after the positive
-discharge has already failed, so a proved obligation pays nothing.  Three are
+discharge has already failed, so a proved obligation pays nothing.  Two are
 purely syntactic over the built `Smt.vc`; one costs extra Z3 queries.  The
 promotion reuses `Witness`'s existing execute-and-observe machinery
 (`decode_model` / `admissible` / `call_fn`), which already exists for the
@@ -44,7 +44,7 @@ than assumed.
 
 ---
 
-### Task 1: Three syntactic reason variants
+### Task 1: Two syntactic reason variants
 
 The zero-cost half of the taxonomy: causes readable straight off the built
 `Smt.vc` with no extra solver work.
@@ -61,7 +61,6 @@ The zero-cost half of the taxonomy: causes readable straight off the built
 - Consumes: `March_refine.Smt.{term, vc, sort}` (`lib/refine/smt.ml:20-72`)
 - Produces:
   - `Obligation.Unconstrained_subject of string`
-  - `Obligation.Nonlinear_goal`
   - `Obligation.Opaque_application of string`
   - `Undecided.diagnose : subject_sym:string option -> Smt.vc -> Obligation.reason option`
     — returns `None` when no syntactic cause applies, so the caller falls
@@ -107,19 +106,6 @@ end|}
         in
         Alcotest.(check bool) "not unconstrained" false
           (List.mem "unconstrained-subject" rs));
-
-    (* A goal multiplying two unknowns leaves LIA, where z3 is complete, for a
-       fragment where it is not.  The user's predicate is fine; the checker is
-       incomplete, and saying so is different advice from "guard the call". *)
-    gated "a non-linear goal is diagnosed as such" (fun () ->
-        let rs =
-          skip_reasons
-            {|mod UD2 do
-  fn pos(n : {Int | _ > 0}) : Int do n end
-  fn go(a : Int, b : Int) : Int do pos(a * b) end
-end|}
-        in
-        Alcotest.(check (list string)) "nonlinear-goal" [ "nonlinear-goal" ] rs);
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -128,25 +114,34 @@ end|}
 dune build --root . test/run_compiler.exe && ./_build/default/test/run_compiler.exe -e
 ```
 
-Expected: FAIL. The first and third report `["solver-undecided"]` against
-expected `["unconstrained-subject"]` / `["nonlinear-goal"]`. The second (a
-control) PASSES already — that is correct and expected; it only becomes
-load-bearing after Step 3.
+Expected: FAIL. The first reports `["solver-undecided"]` against expected
+`["unconstrained-subject"]`. The second (a control) PASSES already — that is
+correct and expected; it only becomes load-bearing after Step 3.
+
+**A dropped variant.** An earlier draft of this task carried a third variant,
+`Nonlinear_goal`, for a goal multiplying two unknowns. It was cut during
+implementation because it is unreachable: `smt_of`
+(`lib/refinecheck/refine_scope.ml:143`) returns `None` for a product of two
+non-literals, so such a predicate never reflects and the obligation is filed
+`unreflectable-predicate` long before `check_call`'s fall-through. `Smt.Mul`
+is built only by `division_safety` and `return_infer`, neither of which feeds
+this ledger. Making it reachable would mean extending reflection, which is a
+precision change and out of scope per the Global Constraints. Do not
+reintroduce it.
 
 - [ ] **Step 3: Add the reason variants**
 
 In `lib/refinecheck/obligation.ml`, after the `Solver_undecided` line (`:15`):
 
 ```ocaml
-  (* Refinements of [Solver_undecided], split out because they are four
-     different pieces of advice.  The residual keeps the old constructor: a
-     reason we cannot name must not be dressed up as one we can.
+  (* Refinements of [Solver_undecided], split out because they are different
+     pieces of advice.  The residual keeps the old constructor: a reason we
+     cannot name must not be dressed up as one we can.
 
      Payload discipline follows [Alias_withdrawn]: the NAME rides in the
      detail, not the slug, so `--refine-report` groups all unconstrained
      subjects into one bucket instead of one bucket per variable. *)
   | Unconstrained_subject of string  (* the subject appears in no assumption *)
-  | Nonlinear_goal                   (* goal leaves linear arithmetic *)
   | Opaque_application of string     (* goal names an undeclared function symbol *)
 ```
 
@@ -154,7 +149,6 @@ Extend `reason_name` (`:180`):
 
 ```ocaml
   | Unconstrained_subject _ -> "unconstrained-subject"
-  | Nonlinear_goal -> "nonlinear-goal"
   | Opaque_application _ -> "opaque-application"
 ```
 
@@ -163,9 +157,6 @@ Extend `reason_detail` (`:199`):
 ```ocaml
   | Unconstrained_subject name ->
     Printf.sprintf "nothing in scope constrains `%s`" name
-  | Nonlinear_goal ->
-    "the goal multiplies or divides two unknowns, which leaves the arithmetic \
-     fragment the solver decides completely"
   | Opaque_application name ->
     Printf.sprintf
       "the checker has no meaning for `%s`, so it cannot reason through it" name
@@ -223,24 +214,6 @@ let rec app_heads (t : Smt.term) : string list =
   | Smt.FpEq (a, b) | Smt.FpLt (a, b) | Smt.FpLe (a, b)
   | Smt.FpGt (a, b) | Smt.FpGe (a, b) -> app_heads a @ app_heads b
 
-(* [Mul] is the general (possibly non-linear) product; [MulLit] is the linear
-   one and is deliberately NOT a hit.  See the constructor comments in
-   lib/refine/smt.ml — the driver emits no `(set-logic)`, so z3 decides many
-   [Mul] goals instantly; this is a diagnosis of a LIKELY cause, offered only
-   once the solver has already declined. *)
-let rec nonlinear (t : Smt.term) : bool =
-  match t with
-  | Smt.Mul (_, _) -> true
-  | Smt.Const _ | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ -> false
-  | Smt.App (_, ts) -> List.exists nonlinear ts
-  | Smt.IsCtor (_, a) | Smt.Neg a | Smt.Not a | Smt.MulLit (_, a) -> nonlinear a
-  | Smt.Add (a, b) | Smt.Sub (a, b)
-  | Smt.And (a, b) | Smt.Or (a, b) | Smt.Implies (a, b)
-  | Smt.Eq (a, b) | Smt.Ne (a, b)
-  | Smt.Lt (a, b) | Smt.Le (a, b) | Smt.Gt (a, b) | Smt.Ge (a, b)
-  | Smt.FpEq (a, b) | Smt.FpLt (a, b) | Smt.FpLe (a, b)
-  | Smt.FpGt (a, b) | Smt.FpGe (a, b) -> nonlinear a || nonlinear b
-
 (* Ordered most-specific-first.  [subject_sym] is the SMT symbol the checked
    ACTUAL reflected to, or [None] when the actual is not a bare symbol (an
    arbitrary expression has no single name to report as unconstrained). *)
@@ -250,14 +223,11 @@ let diagnose ~(subject_sym : string option) (vc : Smt.vc) : Obligation.reason op
   match List.find_opt (fun f -> not (List.mem f declared)) goal_heads with
   | Some f -> Some (Obligation.Opaque_application f)
   | None ->
-    if nonlinear vc.Smt.goal then Some Obligation.Nonlinear_goal
-    else
-      match subject_sym with
-      | Some s
-        when not
-               (List.exists (fun a -> List.mem s (consts a)) vc.Smt.assumptions) ->
-        Some (Obligation.Unconstrained_subject s)
-      | _ -> None
+    (match subject_sym with
+     | Some s
+       when not (List.exists (fun a -> List.mem s (consts a)) vc.Smt.assumptions) ->
+       Some (Obligation.Unconstrained_subject s)
+     | _ -> None)
 ```
 
 Check `lib/refinecheck/dune` for an explicit `(modules ...)` field. If present,
@@ -570,7 +540,6 @@ Replace the throttle term with a per-reason decision:
            && (match r with
                | Obligation.Alias_withdrawn _ -> false
                | Obligation.Unconstrained_subject _
-               | Obligation.Nonlinear_goal
                | Obligation.Opaque_application _
                | Obligation.Partial_conjunct _ -> true
                | _ -> not !unverified_hinted) ->
@@ -595,7 +564,6 @@ that does not bear repeating per site:
       let body =
         match r with
         | Obligation.Unconstrained_subject _
-        | Obligation.Nonlinear_goal
         | Obligation.Opaque_application _
         | Obligation.Partial_conjunct _ ->
           Printf.sprintf "%s `%s` on `%s` was NOT verified here.\n%s"
@@ -1366,7 +1334,7 @@ done | grep -oE "skipped \([a-z-]+\): [0-9]+" | sort | uniq -c | sort -rn
 Record the table. Compare against the pre-change baseline (run the same
 command on a build of `origin/main`). **If `solver-undecided` is still the
 largest bucket, the taxonomy is wrong** — report that rather than shipping it,
-and the four variants need revisiting before Task 9.
+and the three variants need revisiting before Task 9.
 
 - [ ] **Step 2: Count and hand-audit every promotion**
 
@@ -1463,7 +1431,7 @@ Add under `## [Unreleased]`:
 ### Changed
 - Refinement obligations the checker cannot discharge now report *why*:
   an unconstrained subject, a partially established conjunction (naming which
-  half holds), a non-linear goal, or an opaque application, instead of a single
+  half holds), or an opaque application, instead of a single
   `solver-undecided` message. Diagnosed causes report at every call site;
   the undiagnosable residual keeps its once-per-module hint.
 

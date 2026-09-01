@@ -59,6 +59,17 @@ This design does **not** close the precision gaps that cause those skips.  It
 splits the bucket so the reader learns *which* thing went wrong and what to do,
 and it promotes the one sub-case that can be proven a real failure.
 
+### Dropped during implementation: `Nonlinear_goal`
+
+A fourth variant, for a goal multiplying two unknowns, was specified and then
+cut: it is unreachable.  `smt_of` (`lib/refinecheck/refine_scope.ml:143`)
+returns `None` for a product of two non-literals, so such a predicate never
+reflects at all and the obligation is filed `unreflectable-predicate` long
+before `check_call`'s fall-through.  `Smt.Mul` is built only by
+`division_safety` and `return_infer`, neither of which feeds that ledger.
+Making it reachable would require extending reflection — a precision change,
+which §Non-goals rules out.  Recorded here so it is not re-proposed.
+
 ## Non-goals
 
 - No new facts are derived.  Let-bound constants are still not propagated;
@@ -81,15 +92,15 @@ committed to not proving, so a proved obligation pays nothing.
 | `Opaque_application of string` | goal names a function symbol the VC preamble never declared | syntactic, free |
 | `Solver_undecided` | none of the above | — |
 
-`reason_name` gains four slugs and `reason_detail` one clause each.  The slug
+`reason_name` gains three slugs and `reason_detail` one clause each.  The slug
 split is the deliverable for `--refine-report`: it stops saying "32
 solver-undecided" and starts saying which 32.
 
 Note this cuts against the existing comment on `reason_name`, which
 deliberately does *not* interpolate a spelling into the `alias-withdrawn` slug
 to avoid splitting one cause into as many buckets as there are names.  That
-reasoning is sound and still applies: the four variants here are four distinct
-*causes*, not four spellings of one, and `Unconstrained_subject` /
+reasoning is sound and still applies: the variants here are distinct *causes*,
+not several spellings of one, and `Unconstrained_subject` /
 `Opaque_application` carry their name in the detail rather than the slug for
 exactly that reason.
 
@@ -217,7 +228,7 @@ Two numbers, over the real corpus rather than the six-module sample:
 
 1. **Bucket distribution across all 116 stdlib modules plus `test/native`,
    before and after.**  "94% of skips are one bucket" becomes a table naming
-   the split.  This also tells us whether the four variants are the right four,
+   the split.  This also tells us whether the three variants are the right three,
    or whether the residual is still the largest slice — in which case the
    taxonomy is wrong and should be revised before shipping.
 2. **Promotion count, hand-audited line by line.**  This number should be
