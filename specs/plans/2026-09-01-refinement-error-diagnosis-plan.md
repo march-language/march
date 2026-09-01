@@ -713,6 +713,17 @@ cannot demonstrate reachability without one.
 
 - [ ] **Step 1: Write the failing test**
 
+**Correction (Task 4 review).** The test as first written below is
+NON-DISCRIMINATING: it asserts the ref is `None` after the walk, which is the
+ref's initial value, so deleting `enclosing_fn := Some fd` leaves it green. It
+proves the ref exists, not that it is ever populated. The shipped version adds
+a test-only probe hook invoked by `visit_fn` right after the assignment, and
+asserts (1) it fires once per function, (2) each firing observes `Some fd`
+naming THAT function — so siblings do not see a stale predecessor — and (3) the
+ref is `None` afterwards. It was mutation-tested: deleting the assignment makes
+it fail. Keep that shape; the snippet below is the inadequate original, left so
+the correction is legible.
+
 The ref is internal, so pin it through an observable: a promotion cannot fire
 without it, and Task 6 depends on it. Add a direct unit assertion now so the
 plumbing is testable on its own:
