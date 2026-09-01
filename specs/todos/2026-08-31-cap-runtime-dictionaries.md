@@ -419,21 +419,45 @@ must refuse an artifact built with `--test`. The failure mode is a library that
 mocks IO for its own tests and ships the mock. It is not as strong as rule 2, and
 should not be described as if it were.
 
-## Interaction with `lib/caps/cap_rows.ml` — worse, and load-bearing (do not fix here)
+## Interaction with `lib/caps/cap_rows.ml` — narrower than first claimed
 
-`d.send(…)` has a field projection as its head. `cls_of_rhs` has no `EField` arm,
-so it falls to `COpaque`; `app`'s `Some COpaque` branch sets `sd_unknown := true`.
-Per `cap_rows.mli`, a narrow grant over a function whose row has `unknown` is
-**refused**, not granted.
+**This section previously said the effect would fire on ordinary code. Measured,
+it does not.** The correction is recorded rather than quietly edited, because
+the original reasoning was sound for an AST-level rewrite and only stopped being
+true when the pass moved to TIR.
 
-So dictionaries make cap-row precision strictly **worse**, and worse in a way that
-matters: dictionary dispatch would become the ordinary way to *use* a capability,
-so a refusal that today fires on unusual code would fire on ordinary code.
+The mechanism is real: `d.emit(s)` has a field projection as its head,
+`cls_of_rhs` has no `EField` arm so it falls to `COpaque`, and `app`'s
+`Some COpaque` branch sets `sd_unknown := true`. Per `cap_rows.mli`, a narrow
+grant over a function whose row has `unknown` is **refused**.
 
-Two directions for the separate fix, recorded only:
+What was wrong was the blast radius. Measured with `MARCH_DUMP_CAP_ROWS=1`,
+which exists for exactly this question:
 
-- Classify a projection off a known cap-typed value as `CParams`/`CCharged` rather
-  than `COpaque` — the dictionary's origin *is* traceable; it is a `cap_impl` site.
+| | total rows | `unknown` |
+|---|---|---|
+| baseline | 2733 | 127 |
+| under `--test` (69 wrappers + 15 bases injected) | 2812 | 192 |
+
+All 65 of the added `unknown` rows are the generated `__march_dispatch_*`
+wrappers. **None reaches user code**, because the operation rewrite happens in
+TIR: at the point `cap_rows` runs, nothing in the AST calls a wrapper, so there
+is no reference edge to propagate along. A program that mocks IO has no
+`unknown` on its own functions — `test/cap_mock/cap_mock_clock.march`'s `stamp`
+reads `caps=[IO.Clock] deps=[]`.
+
+So the real scope is: **hand-written dictionary dispatch marks the function
+that performs it `unknown`** — `Rows.run` above does, with or without `--test`.
+Declaring `proof cap X with Ops` and dispatching through it costs that function
+its narrow-grant certification. IO mocking costs nothing.
+
+That is a much smaller problem than "ordinary code", and it argues for fixing
+the `EField` arm on its own merits rather than as a prerequisite for anything
+here. Two directions, unchanged:
+
+- Classify a projection off a known cap-typed value as `CParams`/`CCharged`
+  rather than `COpaque` — the dictionary's origin *is* traceable; it is a
+  `cap_impl` site.
 - Charge the dictionary's fields at the `cap_impl` site, the way `CCharged`
   charges a lambda literal's body at the site that built it.
 
