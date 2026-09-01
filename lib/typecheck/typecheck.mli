@@ -127,6 +127,7 @@ type scheme = Mono of ty | Poly of int list * constraint_ list * ty
 val _counter : int ref
 val fresh_var : int -> ty
 val repr : ty -> ty
+val reset_tvar_display_names : unit -> unit
 val _record_names : (string, string option) Hashtbl.t
 val pp_ty : ?parens:bool -> ty -> string
 val pp_ty_pretty : ?indent:int -> ?width:int -> ty -> string

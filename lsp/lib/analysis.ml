@@ -110,11 +110,30 @@ let diag_to_lsp ~filename (d : Err.diagnostic) =
   if not is_user then None
   else
     let range = Pos.span_to_lsp_range d.span in
+    (* Editors render diagnostics in a hover popover, and at least Zed shows
+       only the FIRST LINE of the message there — which is where most people
+       actually read a diagnostic. A note placed after a newline is therefore
+       invisible exactly where it is most useful (it still shows in the
+       project-diagnostics panel, which is a different, rarely-open view).
+       The motivating case is the `Option`/`Result` field-access hint, whose
+       entire purpose is to say how to unwrap: telling the reader only that
+       their expression "is not a record" while hiding the fix defeats it.
+
+       So flatten the message and its notes onto ONE line — clients soft-wrap
+       it — including newlines *inside* a note, which would truncate at the
+       same place. The CLI renderer reads [d.notes] directly and keeps its own
+       indented multi-line layout, so this is a client-presentation change
+       only. *)
+    let flatten s =
+      String.concat " "
+        (List.filter (fun x -> x <> "")
+           (List.map String.trim (String.split_on_char '\n' s)))
+    in
     let message =
       if d.notes = [] then d.message
       else
-        d.message ^ "\n" ^
-        String.concat "\n" (List.map (fun n -> "note: " ^ n) d.notes)
+        String.concat " "
+          (flatten d.message :: List.map (fun n -> "note: " ^ flatten n) d.notes)
     in
     let code = Option.map (fun s -> `String s) d.code in
     let relatedInformation =
@@ -2291,6 +2310,13 @@ let resolve_lens_command ~command ~(args : Yojson.Safe.t list) : lens_command =
 (* ------------------------------------------------------------------ *)
 
 let analyse ~filename ~src : t =
+  (* [Tc]'s tvar display-name cache (`a`, `b`, … `y55`, …) is otherwise never
+     reset for the LSP's lifetime — a long-lived process re-typechecking on
+     every edit, unlike a one-shot compiler run. Left alone it climbs for as
+     long as the server stays up, so an unresolved type variable in a small
+     file can print a name like `y55` instead of `a`. Reset once per analysis
+     pass so each pass's fresh variables again name from "a". *)
+  Tc.reset_tvar_display_names ();
   let lexbuf = Lexing.from_string src in
   lexbuf.Lexing.lex_curr_p <-
     { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = filename };
@@ -4530,12 +4556,27 @@ let linked_editing_ranges_at (a : t) ~line ~character : Ast.span list =
   in
   match tag_pair_result with
   | Some spans -> spans
-  | None ->
-  match symbol_spans_at a ~line ~character with
   | None -> []
-  | Some (def_opt, use_spans) ->
-    (match def_opt with Some d -> d :: use_spans | None -> use_spans)
-    |> List.filter (fun sp -> sp <> Ast.dummy_span && span_in_user_file a sp)
+  (* Deliberately NOTHING else — in particular NOT "the definition and every
+     use of the symbol under the cursor", which this used to return.
+
+     `linkedEditingRange` is not "find all occurrences". The client applies
+     every keystroke to ALL returned ranges simultaneously, with no prompt and
+     no confirmation, so the protocol is only safe for ranges that must be
+     identical by construction — an open/close tag pair, which is the case
+     handled above. Returning a symbol's uses turns ordinary typing into an
+     implicit, un-asked-for rename: putting the cursor on `a` in
+     `{ left: Some(a), ... } -> ... has_val(a, target)` returned both `a`
+     spans, so typing one character silently rewrote the other occurrence too,
+     on that line and on any other line a use appeared. Ranges that drift even
+     slightly out of date then land mid-token and eat neighbouring characters
+     (`Some(a)` becoming `Somea)`), which is how this surfaced: "typing on one
+     line overwrites other lines".
+
+     Renaming a symbol is `textDocument/rename`'s job — explicit, invoked by
+     the user, and already supported here with a prepare step
+     (`renameProvider` with `prepareProvider = true`), so nothing is lost by
+     refusing to do it silently. *)
 
 (* textDocument/selectionRange: the chain of nested AST spans containing the
    position, innermost first. Built from the spans the analysis already records

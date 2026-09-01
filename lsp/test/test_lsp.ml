@@ -146,7 +146,7 @@ let () =
     "selection + linked editing", [
       "selection range widens outward", `Quick, test_selection_range_widens_outward;
       "selection range empty off token", `Quick, test_selection_range_empty_off_token;
-      "linked editing links all occurrences", `Quick, test_linked_editing_ranges;
+      "linked editing does not link plain identifiers", `Quick, test_linked_editing_ranges;
       "linked editing links ~H open+close tag pair", `Quick, test_tag_pair_linked_edit;
     ];
     "semantic tokens", [

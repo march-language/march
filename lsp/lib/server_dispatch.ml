@@ -598,14 +598,22 @@ let dispatch ~notify_back:(_notify_back : _) ~meth ~params =
 
       end else if meth = "completionItem/resolve" then begin
         (* Lazily compute the auto-import additionalTextEdit for the accepted
-           item, using the (module, name, uri) stashed in its `data`. *)
+           item, using the (module, name, uri, version) stashed in its
+           `data`. The import-insertion edit targets the file's first
+           declaration line, not the cursor (see [Analysis.import_text_edit]),
+           so if the document has changed since the completion list was
+           computed, re-fetching `get_analysis` here would compute that edit
+           against a DIFFERENT buffer than the one currently open, landing it
+           on whatever now occupies that unrelated line. Refuse to answer
+           once the document has moved on, rather than risk that. *)
         match params with
         | Some (`Assoc fields) ->
           let edit =
             match List.assoc_opt "data" fields with
             | Some (`Assoc data) ->
-              (match List.assoc_opt "autoImport" data, List.assoc_opt "uri" data with
-               | Some (`Assoc ai), Some (`String u) ->
+              (match List.assoc_opt "autoImport" data, List.assoc_opt "uri" data,
+                     List.assoc_opt "version" data with
+               | Some (`Assoc ai), Some (`String u), Some (`Int v) ->
                  let g k = match List.assoc_opt k ai with
                    | Some (`String s) -> s | _ -> "" in
                  let m = g "module" and n = g "name" in
@@ -613,9 +621,12 @@ let dispatch ~notify_back:(_notify_back : _) ~meth ~params =
                    if String.length u >= 7 && String.sub u 0 7 = "file://"
                    then String.sub u 7 (String.length u - 7) else u in
                  let uri = Lsp.Types.DocumentUri.of_path path in
-                 (match get_analysis uri with
-                  | Some a -> Analysis.query_import_text_edit a ~module_:m ~name:n
-                  | None -> None)
+                 let uri_str = Lsp.Types.DocumentUri.to_string uri in
+                 if not (is_current versions uri_str v) then None
+                 else
+                   (match get_analysis uri with
+                    | Some a -> Analysis.query_import_text_edit a ~module_:m ~name:n
+                    | None -> None)
                | _ -> None)
             | _ -> None
           in
