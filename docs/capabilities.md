@@ -1096,7 +1096,7 @@ intercepted behaves exactly as it does today.
 |---|---|
 | Polymorphic builtins — all of `vault_*`, so `IO.Mut` entirely | A dictionary field would need rank-2 types |
 | `println`, `random_bytes` | Shadowed by a stdlib March function, so the builtin is dead — intercept the `print_line` it delegates to |
-| Operations inside actor handlers | The scheduler invokes a handler, so there is no caller to thread a capability from |
+| Operations inside actor handlers | The scheduler reaches the handler through a function pointer in the actor record, so that function's arity is frozen and it supplies the ambient capability. The operation *is* routed through the dictionary — there is simply nothing to route it to. See `specs/todos/2026-09-01-actor-handlers-get-the-ambient-capability.md` |
 | Functions used as values rather than called directly | Their arity cannot change |
 
 Fully mockable today: `IO.Console`, `IO.Clock`, `IO.Random`, `IO.FileRead`,
