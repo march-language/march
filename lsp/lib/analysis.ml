@@ -1174,6 +1174,17 @@ let ctor_blocks name = Printf.sprintf "constructor `%s` wraps it" name
 let is_ctor_blocked (b : string) =
   String.length b > 12 && String.sub b 0 12 = "constructor "
 
+(** Was the call blocked by a short-circuit-shaped boolean operator? Those get
+    different advice than the generic accumulator suggestion — see the message
+    site in [tco_check]. *)
+let is_boolop_blocked (b : string) =
+  let has sub =
+    let n = String.length sub and m = String.length b in
+    let rec go i = i + n <= m && (String.sub b i n = sub || go (i + 1)) in
+    go 0
+  in
+  has "`||`" || has "`&&`"
+
 (** Walk [e] looking for calls to [fn_name] that are not in tail position.
     [blocking] is [None] when the expression is in tail position, or
     [Some description] when there is pending work after it returns. *)
@@ -1188,7 +1199,19 @@ let rec tco_check (fn_name : string) (blocking : string option) (e : Ast.expr) a
         let msg =
           if is_ctor_blocked b then
             Printf.sprintf
-              "This recursive call is not in tail position — %s. The compiler transforms this shape (tail-recursion-modulo-cons): the constructor is allocated first with a hole, and the call fills it, so this compiles to a loop rather than growing the stack. No rewrite needed."
+              "This recursive call is not in tail position — %s, so the stack grows by one frame per call and deep input can overflow it. TRMC can turn a call wrapped in a constructor into a loop, but it is OFF BY DEFAULT; enable it with `--trmc`. (This message used to say no rewrite was needed — it was wrong: the loop is not automatic.)"
+              b
+          else if is_boolop_blocked b then
+            (* `&&`/`||` are STRICT in March (specs/lang/core-march.md 4.4.1):
+               both operands are always evaluated, so the call really is not in
+               tail position and the checker is right. But "use an accumulator"
+               is the wrong fix for a branching search — there is no work to
+               move before the call. Rewriting `a || b` as `if a do true else b
+               end` puts the right-hand call in genuine tail position (an `if`
+               branch inherits tail position) and skips it when the left side
+               already decides the answer. *)
+            Printf.sprintf
+              "This recursive call is not in tail position — %s, so the stack grows by one frame per call. `&&`/`||` are strict in March: both sides are always evaluated. Rewrite `a || b` as `if a do true else b end` (and `a && b` as `if a do b else false end`) to put the right-hand call in tail position."
               b
           else
             Printf.sprintf
@@ -1296,6 +1319,13 @@ let rec tco_check (fn_name : string) (blocking : string option) (e : Ast.expr) a
 
 (** Check all clauses of a function definition for non-tail recursive calls. *)
 let tco_check_fn (fn : Ast.fn_def) acc =
+  (* `@[no_warn_recursion]` is the author asserting this recursion's depth is
+     bounded. The compiler's own tail-call checker honours it, so the editor
+     must too: otherwise the attribute silences the build while the hint keeps
+     underlining every recursive call, which is worse than either behaviour on
+     its own — the user has already answered, and we keep asking. *)
+  if List.mem "no_warn_recursion" fn.Ast.fn_attrs then acc
+  else
   let fn_name = fn.Ast.fn_name.txt in
   List.fold_left (fun acc (cl : Ast.fn_clause) ->
       tco_check fn_name None cl.Ast.fc_body acc
