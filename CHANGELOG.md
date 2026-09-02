@@ -27,10 +27,30 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- The formatter no longer deletes compiler attributes. `format.ml` never read
+  `fn_attrs`, so every `@[...]` was silently dropped — and that is not
+  cosmetic: `@[no_warn_recursion]` suppresses a hard error, so format-on-save
+  turned a compiling file into one that no longer builds.
+
+- A non-tail recursive call is no longer reported twice. The typechecker's
+  tail-call checker already reports every one of them, and the LSP emitted its
+  own `perf/non-tail-call` diagnostic at the same span, so the editor showed
+  two near-identical messages in one hover. The compiler's is kept — it is the
+  authority on error-vs-warning and it honours `@[no_warn_recursion]`.
+
+- Both non-tail-recursion hints now mention `@[no_warn_recursion]` as the
+  option when the depth is bounded and the stack use is acceptable.
+
 - `forge build` and `forge test` no longer share a compilation-cache entry.
   `--test` emits a different program (a test-runner entry point) but was absent
   from the cache key, so whichever ran first won: `forge build` could hand you
   the test runner, or `forge test` the plain binary.
+- Completions now offer what you defined in the file you are editing before
+  anything from the standard library. Ranking was by category alone — locals,
+  keywords, values, types, constructors — so every stdlib function outranked
+  your own types and constructors, and typing `B` in a module declaring
+  `BTree`/`Branch` offered all of `Base64` and `BigInt` first. Ranking is now
+  by origin first, then category.
 
 - Typing in the editor no longer silently rewrites the same identifier
   elsewhere in the file. The LSP answered `textDocument/linkedEditingRange`
@@ -157,6 +177,20 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- Capabilities can now carry a **runtime dictionary** — a record of the
+  operations they authorize — so a capability's implementation can be swapped at
+  a binding site. Declare one with `proof cap Live with Ops`, attach with
+  `cap_impl(cap, dict)`, and read it back with `cap_dict(cap)`, which yields an
+  `Option` whose `None` is "no dictionary, use the ambient implementation" —
+  what every capability written so far does. `cap_narrow` carries a dictionary
+  across attenuation. Supplying a dictionary is gated exactly like `mint_cap`
+  (a public function of the declaring module), because deciding what a
+  capability *does* is at least as much authority as minting one.
+  Works on both backends, with compiled/interpreted parity pinned by a native
+  golden; the compiled representation costs nothing, since `Option`'s niche
+  encoding makes `cap_dict` the identity function. Mocking an *IO* capability is
+  not yet reachable — IO builtins do not take their capability as an argument,
+  so a dictionary attached to one would never be consulted.
 - A function that propagates a refinement requirement it does not declare is
   now reported, and the report ends in the signature to write rather than the
   panic to fear. When a call-site precondition failure can be *demonstrated* —
@@ -185,20 +219,6 @@ git log is authoritative for exact commits.
   this confirmation; any other `Eval_error` (unbound name, arity mismatch,
   desugar residue, …) declines to confirm, so an internal evaluator error can
   never be reported as a demonstrated failure.
-- Capabilities can now carry a **runtime dictionary** — a record of the
-  operations they authorize — so a capability's implementation can be swapped at
-  a binding site. Declare one with `proof cap Live with Ops`, attach with
-  `cap_impl(cap, dict)`, and read it back with `cap_dict(cap)`, which yields an
-  `Option` whose `None` is "no dictionary, use the ambient implementation" —
-  what every capability written so far does. `cap_narrow` carries a dictionary
-  across attenuation. Supplying a dictionary is gated exactly like `mint_cap`
-  (a public function of the declaring module), because deciding what a
-  capability *does* is at least as much authority as minting one.
-  Works on both backends, with compiled/interpreted parity pinned by a native
-  golden; the compiled representation costs nothing, since `Option`'s niche
-  encoding makes `cap_dict` the identity function. Mocking an *IO* capability is
-  not yet reachable — IO builtins do not take their capability as an argument,
-  so a dictionary attached to one would never be consulted.
 
 - Refinement failures now come with concrete, interpreter-validated
   counterexamples rendered in source terms. A return contract violated for
