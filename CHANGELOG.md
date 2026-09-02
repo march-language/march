@@ -23,6 +23,33 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- Refinement obligations the checker cannot discharge now report *why*. The
+  single `solver-undecided` message has been split into three diagnosed causes —
+  an **unconstrained subject** (nothing in scope constrains the value the
+  predicate talks about), a **partially established conjunction** (naming which
+  half holds and which does not), and an **opaque application** (the goal
+  depends on a call the checker cannot see through) — with `solver-undecided`
+  kept as the honest residual for "the solver returned unknown". A diagnosed
+  cause reports at every call site that has one; the undiagnosable residual
+  keeps its previous once-per-module hint, so the common case gains detail
+  without the rare one gaining noise. `--refine-report` now groups its skipped
+  counts by *cause* rather than by message payload, so a bucket is one line
+  instead of one line per distinct variable name.
+
+- Witness confirmation is stricter about what counts as a panic. The
+  interpreter's `Eval_error` is its general failure helper (unbound name, arity
+  mismatch, desugar residue, …), and the harness previously treated every one
+  of them as a March panic. Only the user-facing panic builtins are classified
+  as panics now; any other evaluator failure declines to confirm. This also
+  tightens the return-contract counterexamples added above — an internal
+  evaluator error can no longer be reported as a demonstrated failure.
+
+- Promotion of a call-site precondition failure to a warning is not attempted
+  at `stdlib/` spans. Diagnostics at stdlib spans are filtered out of the
+  printed stream, so a promotion there paid the reachability cost to produce a
+  count nobody could explain. Compiling a stdlib module directly still reports
+  its own sites, because then they are user spans.
+
 - The `linux-aarch64` release leg builds on a native arm64 runner
   (`ubuntu-24.04-arm`) instead of QEMU emulation on an x86_64 host. It still
   builds inside Alpine, which is what makes the artifact musl. Building the

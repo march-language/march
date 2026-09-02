@@ -1,6 +1,12 @@
 # Diagnosing the `solver-undecided` bucket
 
-Filed 2026-09-01.  Status: design approved, not implemented.
+Filed 2026-09-01.  Status: LANDED 2026-09-01 (branch
+`claude/refinement-errors-improvement-de2bdc`).  Implementation notes, and every
+deviation from this document, are in
+`specs/progress/2026-09-01-refinement-solver-undecided-diagnosis.md`; measured
+results are in `specs/2026-09-01-refinement-error-diagnosis-measurements.md`.
+Note in particular that the fourth cause proposed below, `Nonlinear_goal`, was
+CUT as unreachable — three diagnosed causes shipped.
 
 ## Problem
 

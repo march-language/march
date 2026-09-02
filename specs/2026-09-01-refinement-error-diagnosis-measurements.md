@@ -278,3 +278,74 @@ Two follow-ups, neither blocking:
    demonstrably fails" in the `violated` count (caveat 1 above).
 2. `quantile_default` gets a true promotion with no `help:` signature because
    its callee has two unforwarded preconditions (audit item 2).
+
+## Task 9 — oracle classification and the CI-only gates
+
+### `refine-oracle`: RED proof first
+
+`scripts/refine-oracle.sh` was expected to move on this branch (hint text
+changed on nearly every skip, `--refine-report` slugs regrouped, four
+promotions appeared), so it is not a pass/fail gate here.  An oracle that
+cannot go red proves nothing either way, so its sensitivity to a *verdict*
+change — not merely to text — was established before the real diff was read.
+
+Baseline recorded from the merge-base `3ba190548d793adcf4dd5ff15d5f72d7c7cb8f47`
+built in a throwaway worktree under the session scratchpad:
+**5476 report lines over 298 fixtures**.
+
+| build | report lines | vs baseline |
+|---|---:|---|
+| baseline `3ba19054` | 5476 | — (recorded) |
+| branch HEAD | 6512 | 1710 differing lines |
+| branch HEAD + deliberate perturbation | 5036 | **1080 differing lines** |
+
+The perturbation was one line in `lib/refinecheck/refine_call.ml`: the
+precondition discharge was forced to `Refine.Verified`, so every obligation is
+noted `Proved`.  It produces a diff that is different from the branch's own
+(1080 lines, and a report-line total 1476 lines *below* the branch's), which is
+the RED evidence: the oracle discriminates verdicts, not just message text.
+The perturbation was reverted (`git checkout lib/refinecheck/refine_call.ml`,
+tree clean) and the compiler rebuilt before any other measurement.
+
+### Classification of all 1710 moved lines
+
+Every moved line was assigned to exactly one category, computed
+programmatically over the diff rather than by eye.
+
+| category | lines | what it is |
+|---|---:|---|
+| **A — expected text change** | **439** | 409 added lines of per-site diagnosed hints (40 `-- HINT --` headers, 40 `precondition … was NOT verified here.`, 41 `nothing in scope constrains …`, 6 partial-conjunct lines, 2 `reason:` lines, plus their source snippets, carets and blanks) and 30 removed lines of the canned residual paragraph they replace (9 `reason: solver-undecided`, 21 lines of the three-line `note: March reports only definite failures…` block over 7 modules) |
+| **B — expected regroup** | **1211** | `--refine-report` bucket lines: 902 added (`unconstrained-subject` 308, `partial-conjunct` 299, `solver-undecided` 295) against 305 removed `solver-undecided` lines, plus the 2 added / 2 removed `refinement obligations (…)` summary lines, which move in exactly one fixture (`stdlib/stats.march`, where 4 skips became violations) |
+| **C — intended promotion** | **60** | the four `-- WARNING --` blocks in `stdlib/stats.march` audited in Deliverable 2: 4 headers, 4 `propagates a requirement it doesn't declare`, 4 `requires`, 4 `but … panics`, 3 `help: declare what` + 3 signature + 3 `` `forge fix` can apply this. `` (the fourth, `quantile_default`, carries no `help:` — the gap recorded above), plus the blocks' own snippets, carets and blanks |
+| **none** | **0** | — |
+
+439 + 1211 + 60 = 1710.  A shape tally over the added lines returned zero
+`OTHER` lines, and `grep -c opaque-application` over the diff is **0**, as
+expected: that variant fires nowhere on this corpus.
+
+Only `stdlib/stats.march` gained `-- WARNING --` lines, confirming that
+promotion did not fire anywhere else in 298 fixtures.
+
+### Gates the local alcotest suite does not reach
+
+| gate | result |
+|---|---|
+| `scripts/run-tests.sh` (FULL, not `-q`) | all 11 suites passed — **3177 tests run, 0 FAIL**, 4 `[SKIP]` (3 `cap_sandbox_runtime` linux-only, 1 `adversarial-regressions` `MARCH_SANITIZE`-gated; none z3-related) |
+| `./_build/default/test/test_refinecheck.exe -e` | **588 `[OK]`, 0 SKIP, 0 FAIL** in 271s |
+| `dune build --root . @types-check --force` | **303 passed, 0 failed** (log 25508 bytes — asserted non-empty; the check is vacuous and zero-byte without `--force`) |
+| `dune build --root . @grammar-check --force` | **48 passed, 0 failed** (log 3309 bytes) |
+| `scripts/check-docs.sh` | passed (checks A, B, C all ok) |
+
+Both dune rules pin diagnostic TEXT, which this branch rewrites, so they are
+the real risk here; neither moved.
+
+**Apparatus note worth recording:** `scripts/run-tests.sh` does **not** run
+`test/test_refinecheck.exe`.  Its suite list is
+`compiler eval codegen stdlib stdlib_march test_jit lsp utf16 jsonrpc
+incremental query_cli`, and the run's own banner lines confirm
+`march-refinecheck` is not among the eleven Alcotest runs it launches.  The 588
+refinement cases — the ones this whole branch is about — therefore have to be
+invoked directly, exactly like `@types-check`/`@grammar-check`.  A green
+`run-tests.sh` alone would have said nothing about them.  `.march/cas/vc` was
+cleared once before the run (a warm VC cache lets a checker that stopped
+checking still "prove").
