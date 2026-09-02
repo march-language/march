@@ -1627,8 +1627,29 @@ let test_output_ext_by_target () =
     the same failure mode forge/test/test_cap_sandbox.ml's
     setup_hermetic_toolchain works around. Point it at the already-staged
     _build/default/{runtime,stdlib} directly via the override env vars.
-    Restores PATH and the env var overrides, and removes the shim dir, in
-    [Fun.protect]'s cleanup regardless of how [f] exits. *)
+
+    Prepending to PATH is NOT enough by itself: Cmd_run.run ~compiled:true ()
+    with no FILE goes through Cmd_build.lib_path_env ->
+    Toolchain.path_prefix, which -- whenever a toolchain resolves, via a
+    project .march-version pin or the $MARCH_HOME/current symlink -- prepends
+    that resolved toolchain's OWN bin dir ahead of $PATH in the shell command
+    it builds, outranking anything this shim put on PATH. On a machine with a
+    global toolchain installed (`march-version-manager`'s `~/.march/current`)
+    that silently compiles with whatever toolchain happens to be current
+    there instead of the dev compiler under test. Neutralize it by pointing
+    MARCH_HOME at a fresh, empty temp dir for the duration: Toolchain.
+    global_version reads $MARCH_HOME/current (toolchain.ml's march_home
+    checks MARCH_HOME before $HOME/.march), so an empty MARCH_HOME with no
+    `current` symlink makes it resolve to None and path_prefix return "",
+    leaving this shim's `march` as the only one anything can find. A project
+    `.march-version` pin would outrank the shim the same way, by a different
+    path (Toolchain.find_pin, independent of MARCH_HOME) -- callers must run
+    from a directory with no such pin in its ancestry (true of every fresh
+    Filename.temp_dir used here and by the tests below).
+
+    Restores PATH and the env var overrides, and removes the shim dir and the
+    scratch MARCH_HOME, in [Fun.protect]'s cleanup regardless of how [f]
+    exits. *)
 let with_dev_march_on_path (f : unit -> 'a) : 'a =
   let compiler_exe =
     let exe_dir = Filename.dirname Sys.executable_name in
@@ -1662,6 +1683,13 @@ let with_dev_march_on_path (f : unit -> 'a) : 'a =
   let old_stdlib_dir = Sys.getenv_opt "MARCH_STDLIB" in
   Unix.putenv "MARCH_RUNTIME_DIR" staged_runtime_dir;
   Unix.putenv "MARCH_STDLIB" staged_stdlib_dir;
+  (* Neutralize Toolchain.path_prefix's own PATH-prepend: an empty, freshly
+     made MARCH_HOME has no `current` symlink, so Toolchain.global_version
+     resolves None and path_prefix contributes nothing -- see the doc comment
+     above for why PATH alone can't win this. *)
+  let march_home_dir = Filename.temp_dir "forge_march_home_" "" in
+  let old_march_home = Sys.getenv_opt "MARCH_HOME" in
+  Unix.putenv "MARCH_HOME" march_home_dir;
   Fun.protect
     ~finally:(fun () ->
         Unix.putenv "PATH" old_path;
@@ -1670,7 +1698,12 @@ let with_dev_march_on_path (f : unit -> 'a) : 'a =
            an empty value as absent (`when d <> ""`). *)
         Unix.putenv "MARCH_RUNTIME_DIR" (Option.value old_runtime_dir ~default:"");
         Unix.putenv "MARCH_STDLIB" (Option.value old_stdlib_dir ~default:"");
-        let _ = Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote shim_dir)) in
+        Unix.putenv "MARCH_HOME" (Option.value old_march_home ~default:"");
+        let _ =
+          Sys.command
+            (Printf.sprintf "rm -rf %s %s" (Filename.quote shim_dir)
+               (Filename.quote march_home_dir))
+        in
         ())
     f
 
