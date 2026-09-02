@@ -10270,6 +10270,45 @@ let witness_e2e_suite =
             (decl "  fn fpos(x : {Int | _ > 0}) : {Int | _ >= 5} do x end") in
         Alcotest.(check bool) "never blames the excluded input" false
           (contains text "fpos(0)"))
+  ; gated "a refinement hidden in a record field declines the witness" (fun () ->
+        (* [admissible] sees only a refinement at the TOP of the parameter
+           type.  The one on `v` is invisible to it, so before the
+           witness-safety gate a zero-filled decode reported
+           "but f({ v: 0 }) returns 0." — blaming an input the declared type
+           excludes.  A declined witness leaves the obligation
+           solver-undecided, which is silent outside `cap verified`. *)
+        let text =
+          refine_error_text_d
+            {|mod P9 do
+  type Box = { v : {Int | _ > 0} }
+  fn f(b : Box) : {Int | _ >= 5} do b.v end
+end|} in
+        Alcotest.(check bool) "no witness naming the excluded input" false
+          (contains text "but f(");
+        Alcotest.(check bool) "no definite violation either" false
+          (contains text "does not satisfy its return type constraint"))
+  ; gated "a refinement hidden in a type argument declines the witness" (fun () ->
+        let text =
+          refine_error_text_d
+            {|mod P10 do
+  fn f(xs : List({Int | _ > 0})) : {Int | _ >= 5} do
+    match xs do
+    Nil -> 0
+    Cons(h, _) -> h
+    end
+  end
+end|} in
+        Alcotest.(check bool) "no witness naming the excluded input" false
+          (contains text "but f("))
+  ; gated "positive control: a top-level refined parameter still confirms" (fun () ->
+        (* The same shape with the refinement where [admissible] CAN see it.
+           Without this the two declines above would also pass if the gate
+           simply declined everything. *)
+        let text =
+          refine_error_text_d
+            (decl "  fn gpos(x : {Int | _ > 0}) : {Int | _ >= 5} do x end") in
+        Alcotest.(check bool) "witness confirmed" true
+          (contains text "but gpos(1) returns 1."))
   ; gated "cap verified: a confirmed violation reports the witness, not cannot-verify" (fun () ->
         (* One error, the strong one: the witness proves the contract is
            WRONG, which supersedes "the checker could not verify it".  The
@@ -11042,6 +11081,68 @@ end|}
           (confirm ~arg:"ys" fn [ ("len$ys", "0") ] = None))
   ]
 
+(* Direct, solver-free coverage for the witness-safety gate on the RETURN
+   contract path.  [confirm_enumerative] needs no model, so a hand-built
+   parameter type exercises the gate exactly; the e2e cases above depend on
+   z3 producing a model and skip without one. *)
+let post_nested_unit_suite =
+  let module W = March_refinecheck.Witness in
+  let module A = March_ast.Ast in
+  let module V = March_eval.Eval_types in
+  let dsp = A.dummy_span in
+  let nm t = { A.txt = t; A.span = dsp } in
+  let evar t = A.EVar (nm t) in
+  let eint n = A.ELit (A.LitInt n, dsp) in
+  let eapp f args = A.EApp (evar f, args, dsp) in
+  let ge5 = eapp ">=" [ evar "_"; eint 5 ] in
+  let int_ty = A.TyCon (nm "Int", []) in
+  let pos_int = A.TyRefine (int_ty, None, eapp ">" [ evar "_"; eint 0 ]) in
+  let register src = W.set_module (March_desugar.Desugar.desugar_module (parse src)) in
+  let confirm fn_name fn_params =
+    W.confirm_enumerative ~fn_name ~fn_params ~binder:"_" ~ret_pred:ge5
+  in
+  [ Alcotest.test_case "enumerative: a refined record field declines" `Quick
+      (fun () ->
+        register
+          {|mod Q1 do
+  type Box = { v : {Int | _ > 0} }
+  fn f(b : Box) : {Int | _ >= 5} do b.v end
+end|};
+        Alcotest.(check bool) "declined" true
+          (confirm "f" [ ("b", Some (A.TyCon (nm "Box", []))) ] = None))
+  ; Alcotest.test_case "enumerative: a refined type argument declines" `Quick
+      (fun () ->
+        register
+          {|mod Q2 do
+  fn f(xs : List(Int)) : {Int | _ >= 5} do
+    match xs do
+    Nil -> 0
+    Cons(h, _) -> h
+    end
+  end
+end|};
+        Alcotest.(check bool) "declined" true
+          (confirm "f" [ ("xs", Some (A.TyCon (nm "List", [ pos_int ]))) ] = None))
+  ; Alcotest.test_case "enumerative: a refinement under a linear wrapper declines" `Quick
+      (fun () ->
+        register {|mod Q3 do
+  fn f(x : Int) : {Int | _ >= 5} do x end
+end|};
+        Alcotest.(check bool) "declined" true
+          (confirm "f" [ ("x", Some (A.TyLinear (A.Linear, pos_int))) ] = None))
+  ; Alcotest.test_case "enumerative: a top-level refined parameter still confirms" `Quick
+      (fun () ->
+        (* Discriminating control: the gate must pass what [admissible] can
+           decide, or the three declines above prove nothing. *)
+        register {|mod Q4 do
+  fn f(x : Int) : {Int | _ >= 5} do x end
+end|};
+        match confirm "f" [ ("x", Some pos_int) ] with
+        | Some ((_, V.VInt 1) :: [], V.VInt 1) -> ()
+        | Some _ -> Alcotest.fail "confirmed, but not the minimal witness f(1)"
+        | None -> Alcotest.fail "the top-level refined parameter was declined")
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -11114,4 +11215,5 @@ let () =
       ("witness-core", witness_core_suite);
       ("witness-e2e", witness_e2e_suite);
       ("precond-promotion", promotion_suite);
-      ("precond-reachable-unit", reachable_unit_suite) ]
+      ("precond-reachable-unit", reachable_unit_suite);
+      ("post-nested-unit", post_nested_unit_suite) ]
