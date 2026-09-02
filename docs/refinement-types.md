@@ -838,11 +838,12 @@ refinement obligations (user + stdlib): 16 proved, 0 violated, 0 trusted, 34 ski
   by kind: 50 precondition, 0 postcondition, 0 division
 ```
 
-The `violated` count is not only "a contract the solver proved can never hold."
-A [promoted call-site failure](#promoting-a-skip-a-demonstrated-precondition-failure)
-counts there too, so a nonzero `violated` on a module with no `cap verified`
-annotation is not necessarily a bug in an annotation; it can be a demonstrated
-failure the checker found on its own.
+`--refine-report` records a [promoted call-site failure](#promoting-a-skip-a-demonstrated-precondition-failure)
+under `violated`, the same bucket used for a contract the solver proved can
+never hold. A nonzero `violated` count on a module with no `cap verified`
+annotation is therefore not necessarily a bad annotation; it can be a
+demonstrated call-site failure the checker found on its own. The report does
+not currently distinguish the two shapes.
 
 One wrinkle to know before you run it: clear `.march/cas/artifacts-v2` first. A
 `--check` with sources already in the build cache exits straight away, before
@@ -883,12 +884,18 @@ only where the VC was built and the solver ran, and each names a narrower
 reason the proof didn't go through.
 
 These three diagnosed reasons print at *every* call site that has one, not
-once per module. The residual reasons (`solver-undecided` and the rest) keep
-the older behavior: one hint per module, because the message says the same
-thing regardless of which call triggered it. A diagnosed reason does not:
-"nothing constrains `n`" and "`_ >= 0` held here, `_ < len(xs)` did not" are
-different facts about different calls, so printing only the first one found
-would hide the rest.
+once per module. Five of the residual reasons (`solver-undecided`,
+`unreflectable-predicate`, `unreflectable-subject`, `sort-conflict`, and
+`float-sort-gate`) keep the older behavior: one hint per module, because their
+message says the same thing regardless of which call triggered it. A diagnosed
+reason does not: "nothing constrains `n`" and "`_ >= 0` held here, `_ < len(xs)`
+did not" are different facts about different calls, so printing only the first
+one found would hide the rest.
+
+`alias-withdrawn` follows neither rule: outside `cap verified` it prints no
+hint at all, not even once per module. It is still counted in
+`--refine-report`, and under `cap verified` it becomes its own error; see
+[below](#when-the-guard-is-right-and-the-error-still-fires).
 
 The counts include both **preconditions checked at call sites** and
 **postconditions**: a function's own return value checked against its declared

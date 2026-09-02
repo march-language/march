@@ -1475,13 +1475,19 @@ below.
 
 **Where a skip is reported differs by reason.** `unconstrained-subject`,
 `partial-conjunct`, and `opaque-application` print at every call site that has
-one. The residual reasons keep the older, once-per-module throttle: one hint
-per module, because their message says the same thing regardless of which call
-raised it: repeating it at every site would be noise, not information. A
-diagnosed reason's message does not repeat: "no fact ... constrains `n`" and
-"`_ >= 0` established here; `_ < len(xs)` not" describe different calls, so
-suppressing the second because the first already printed would hide a real
-finding.
+one. Five residual reasons (`solver-undecided`, `unreflectable-predicate`,
+`unreflectable-subject`, `sort-conflict`, `float-sort-gate`) keep the older,
+once-per-module throttle: one hint per module, because their message says the
+same thing regardless of which call raised it, so repeating it at every site
+would be noise, not information. A diagnosed reason's message does not repeat:
+"no fact ... constrains `n`" and "`_ >= 0` established here; `_ < len(xs)` not"
+describe different calls, so suppressing the second because the first already
+printed would hide a real finding.
+
+`alias-withdrawn` follows neither rule: outside `cap verified` it prints no
+hint at all, not even once per module. It still counts toward
+`--refine-report`'s skip totals, and under `cap verified` it becomes its own
+error; see [the alias-withdrawal note](#a-withdrawn-alias-names-itself) below.
 
 ```
 $ march --check <file>
