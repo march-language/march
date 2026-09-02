@@ -46,7 +46,7 @@ git log is authoritative for exact commits.
   but go([]) panics — "empty"
 
   help: declare what `go` actually needs —
-          fn go(ys : {List(Int) | len(_) > 0})
+          fn go(ys : {List(Int) | len(_) > 0}) : Int
   `forge fix` can apply this.
   ```
 

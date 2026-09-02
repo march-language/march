@@ -10395,11 +10395,14 @@ end|}
             ^ "but go([]) panics \xe2\x80\x94 \"empty\"\n\n"
             (* Task 7 ADDS the help block; the sentence above is unchanged,
                which is the point — the finding is the same, it now ends in
-               the signature to write.  The suggested annotation is rendered
-               from the SAME string the [FReplace] fix carries, so this also
-               pins that the offer and the payload cannot diverge. *)
+               the signature to write.  The parameter list printed here is
+               the SAME string the [FReplace] fix carries, so this pins that
+               the offer and the payload cannot diverge; the return type is
+               appended for display only, so what the user reads is a
+               signature they could type, while the fix stays scoped to the
+               one span there is to rewrite. *)
             ^ "help: declare what `go` actually needs \xe2\x80\x94\n"
-            ^ "        fn go(ys : {List(Int) | len(_) > 0})\n"
+            ^ "        fn go(ys : {List(Int) | len(_) > 0}) : Int\n"
             ^ "`forge fix` can apply this." ]
           (refine_warnings src))
 
@@ -10450,6 +10453,121 @@ end|}
           Alcotest.(check string) "rewrites the parameter list"
             "(ys : {List(Int) | len(_) > 0})" text
         | _ -> Alcotest.fail "the promoted warning carried no FReplace fix")
+
+  ; (* THE hijack guard.  [Precond_infer.matches_target] accepts any dotted
+       SUFFIX of a qualified name — that rule is why `forge refine chunks`
+       finds `Text.Split.chunks` — and an entry file's top-level function is
+       qualified by nothing, so `~target:"go"` also matches `Inner.go`.
+       [suggest] returns one result per hit, in decl order, so selecting the
+       HEAD lets an unrelated same-named helper decide this signature: its
+       refinement is applied to the recorded function's parameters BY NAME,
+       which rewrites the BASE TYPE too.  Here that turns `ys : List(Int)`
+       into `ys : Int` and `forge fix` writes a signature no caller
+       typechecks against — strictly worse than offering no fix at all.
+
+       Both functions promote, so this also pins the positive half: each
+       `go` must get its OWN refinement, not the other's. *)
+    gated "a same-named function in another module cannot hijack the fix" (fun () ->
+        let ws =
+          refine_warnings
+            {|mod Amb3 do
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil        -> panic("empty")
+    Cons(h, _) -> h
+    end
+  end
+  mod Inner do
+    fn hd(n : {Int | _ > 0}) : Int do
+      if n > 0 do n else panic("nonpos") end
+    end
+    fn go(ys : Int) : Int do hd(ys) end
+  end
+  fn go(ys : List(Int)) : Int do head(ys) end
+end|}
+        in
+        Alcotest.(check int) "both sites promoted" 2 (List.length ws);
+        Alcotest.(check bool) "the list `go` is offered the list refinement" true
+          (List.exists
+             (fun w ->
+               contains w "`head` requires"
+               && contains w "fn go(ys : {List(Int) | len(_) > 0})")
+             ws);
+        Alcotest.(check bool) "and never the Int one" false
+          (List.exists
+             (fun w -> contains w "`head` requires" && contains w "fn go(ys : {Int")
+             ws);
+        Alcotest.(check bool) "the Int `go` keeps its own" true
+          (List.exists
+             (fun w ->
+               contains w "`Inner.hd` requires"
+               && contains w "fn go(ys : {Int | _ > 0})")
+             ws))
+
+  ; (* The [Solved]-only rule, which nothing else pins: every other promotion
+       fixture has a single obligation, so [Partial] never arises and relaxing
+       the match to `Solved | Partial` leaves the whole group green.
+
+       `go` carries two INDEPENDENT obligations.  `len(_) > 0` on `ys`
+       discharges the first; nothing in the candidate grammar implies `_ == 7`,
+       so `k`'s survives and the status is `partial` (debt 2 -> 1, verified
+       through `--refine-suggest-json`).  A `Partial` proposal is a signature
+       that does NOT remove the failure being reported, so it must be offered
+       neither as help text nor as a fix. *)
+    gated "a partial suggestion is not offered" (fun () ->
+        let src =
+          {|mod P1 do
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil        -> panic("empty")
+    Cons(h, _) -> h
+    end
+  end
+  fn seven(n : {Int | _ == 7}) : Int do n end
+  fn go(ys : List(Int), k : Int) : Int do head(ys) + seven(k) end
+end|}
+        in
+        let ctx = March_errors.Errors.create () in
+        let m = March_desugar.Desugar.desugar_module (parse src) in
+        March_refinecheck.Refine_check.check_module ctx m;
+        March_refinecheck.Precond_infer.attach_promoted_fixes ctx m;
+        let ws =
+          List.filter
+            (fun (d : March_errors.Errors.diagnostic) ->
+              d.March_errors.Errors.severity = March_errors.Errors.Warning)
+            ctx.March_errors.Errors.diagnostics
+        in
+        Alcotest.(check int) "the promotion still fires" 1 (List.length ws);
+        let w = List.hd ws in
+        Alcotest.(check bool) "no help block" false
+          (contains w.March_errors.Errors.message "help: declare what");
+        Alcotest.(check bool) "and no fix payload" false
+          (w.March_errors.Errors.fix <> None))
+
+  ; (* `forge fix` applies an [FReplace] only when it stays on ONE line
+       (`forge/lib/cmd_fix.ml`'s `start_line = end_line` guard) and silently
+       DROPS it otherwise, without counting it.  A parameter list broken
+       across lines would therefore advertise `forge fix` for a fix that never
+       arrives — the anti-pattern this task exists to avoid — so it must be
+       declined.  The finding itself still stands. *)
+    gated "a multi-line parameter list is not offered a fix" (fun () ->
+        let src =
+          {|mod ML do
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil        -> panic("empty")
+    Cons(h, _) -> h
+    end
+  end
+  fn go(
+    ys : List(Int)
+  ) : Int do head(ys) end
+end|}
+        in
+        let ws = refine_warnings src in
+        Alcotest.(check int) "the promotion still fires" 1 (List.length ws);
+        Alcotest.(check bool) "but nothing is advertised" false
+          (List.exists (fun w -> contains w "forge fix") ws))
 
   ; (* Warning by default because "propagates an undeclared requirement" is a
        design choice a user may make; Error under `cap verified`, which is the
