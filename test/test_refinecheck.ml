@@ -167,8 +167,13 @@ let refine_hints_d src =
    catch an over-firing gate that also emits something unrelated. *)
 let refine_warnings src =
   let ctx = March_errors.Errors.create () in
-  March_refinecheck.Refine_check.check_module ctx
-    (March_desugar.Desugar.desugar_module (parse src));
+  let m = March_desugar.Desugar.desugar_module (parse src) in
+  March_refinecheck.Refine_check.check_module ctx m;
+  (* The same post-pass the driver runs (bin/main.ml, both pipelines): a
+     promoted warning is upgraded, after the walk, with the precondition its
+     enclosing function should declare.  Running it here and not there — or
+     there and not here — is how the promoted message and its test drift. *)
+  March_refinecheck.Precond_infer.attach_promoted_fixes ctx m;
   List.filter_map
     (fun (d : March_errors.Errors.diagnostic) ->
       if d.March_errors.Errors.severity = March_errors.Errors.Warning
@@ -10387,8 +10392,64 @@ end|}
         Alcotest.(check (list string)) "the warning, verbatim"
           [ "`go` propagates a requirement it doesn't declare.\n\n"
             ^ "`head` requires  len(_) > 0\n"
-            ^ "but go([]) panics \xe2\x80\x94 \"empty\"" ]
+            ^ "but go([]) panics \xe2\x80\x94 \"empty\"\n\n"
+            (* Task 7 ADDS the help block; the sentence above is unchanged,
+               which is the point — the finding is the same, it now ends in
+               the signature to write.  The suggested annotation is rendered
+               from the SAME string the [FReplace] fix carries, so this also
+               pins that the offer and the payload cannot diverge. *)
+            ^ "help: declare what `go` actually needs \xe2\x80\x94\n"
+            ^ "        fn go(ys : {List(Int) | len(_) > 0})\n"
+            ^ "`forge fix` can apply this." ]
           (refine_warnings src))
+
+  ; (* The message should end in the signature to write, not the panic to
+       fear.  [Precond_infer] is assume-and-recheck against the real checker,
+       so a suggestion is correct by construction; it is affordable here
+       precisely because promotion is rare. *)
+    gated "a promoted failure suggests the precondition to declare" (fun () ->
+        let ws =
+          refine_warnings
+            {|mod W4 do
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil        -> panic("empty")
+    Cons(h, _) -> h
+    end
+  end
+  fn go(ys : List(Int)) : Int do head(ys) end
+end|}
+        in
+        Alcotest.(check bool) "names the refinement to add" true
+          (List.exists (fun w -> contains w "len(_) > 0" && contains w "ys") ws))
+
+  ; (* A message that advertises `forge fix` MUST carry something `forge fix`
+       can apply — its only input is `march --check-json`, which serialises
+       exactly this field.  Advertising without a payload is worse than not
+       advertising, and only inspecting the payload catches that; the text
+       assertion above passes either way. *)
+    gated "the promoted warning carries the fix it advertises" (fun () ->
+        let src =
+          {|mod W4f do
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil        -> panic("empty")
+    Cons(h, _) -> h
+    end
+  end
+  fn go(ys : List(Int)) : Int do head(ys) end
+end|}
+        in
+        let ctx = March_errors.Errors.create () in
+        let m = March_desugar.Desugar.desugar_module (parse src) in
+        March_refinecheck.Refine_check.check_module ctx m;
+        March_refinecheck.Precond_infer.attach_promoted_fixes ctx m;
+        match ctx.March_errors.Errors.diagnostics with
+        | [ { March_errors.Errors.fix =
+                Some (March_errors.Errors.FReplace { text; _ }); _ } ] ->
+          Alcotest.(check string) "rewrites the parameter list"
+            "(ys : {List(Int) | len(_) > 0})" text
+        | _ -> Alcotest.fail "the promoted warning carried no FReplace fix")
 
   ; (* Warning by default because "propagates an undeclared requirement" is a
        design choice a user may make; Error under `cap verified`, which is the

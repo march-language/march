@@ -1794,6 +1794,10 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   (* Hygiene: [visit_decls] sets this per decl list, but a prior module must
      never be able to leave it on. *)
   strict_verified := false;
+  (* Same hygiene, same reason: [Precond_infer.attach_promoted_fixes] drains
+     this after the walk, and a site left over from a previous module would
+     send it looking for a diagnostic this context never had. *)
+  promoted_sites := [];
   stdlib_source_files := stdlib_files;
   let mod_name = m.A.mod_name.A.txt in
   (* Each gate answers "is the alias still safe?"; a `false` is a WITHDRAWAL,

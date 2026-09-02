@@ -599,3 +599,129 @@ let suggest_all ?(root = Sys.getcwd ()) ?(budget = default_budget)
          with
          | Some r when r.rs_suggestions <> [] -> Some r
          | _ -> None)
+
+(* ── Attaching the suggestion to a promoted call-site failure ─────────────── *)
+
+(* Re-spell a clause's parameter list, substituting [refined]'s annotation for
+   the parameters it names.  This is BOTH the text `forge fix` writes and the
+   text the help block prints — one rendering, so the message can never
+   advertise a signature different from the one the fix applies.
+
+   Deliberately partial, exactly as [ty_text] is: a pattern parameter, a
+   default argument, a linearity annotation or an unannotated parameter is
+   something this cannot re-spell faithfully, and re-writing a parameter list
+   approximately is worse than printing no fix at all. *)
+let params_text (c : A.fn_clause) ~(refined : (string * string) list) :
+    string option =
+  let one (p : A.fn_param) =
+    match p with
+    | A.FPNamed { A.param_name; A.param_ty = Some t; A.param_lin = A.Unrestricted }
+      -> (
+      match List.assoc_opt param_name.A.txt refined with
+      | Some annot -> Some (param_name.A.txt ^ " : " ^ annot)
+      | None -> Option.map (fun bt -> param_name.A.txt ^ " : " ^ bt) (ty_text t))
+    | _ -> None
+  in
+  let parts = List.map one c.A.fc_params in
+  if List.exists (fun p -> p = None) parts then None
+  else Some ("(" ^ String.concat ", " (List.map Option.get parts) ^ ")")
+
+(** Upgrade every promoted call-site diagnostic in [errctx] with the
+    precondition its enclosing function should declare, as help text AND as a
+    machine-applicable [Err.FReplace] over that function's parameter list.
+
+    Runs as a POST-PASS: [Refine_check.check_module] must have completed, and
+    this must not be called from inside its walk — see
+    [Refine_check.promoted_sites].  Cost is confined to promotion: with no
+    promoted site this returns without probing anything.
+
+    Silent when the suggestion is not [Solved].  [Partial] leaves debt behind,
+    so applying it would not remove the failure that was just reported, and a
+    `forge fix` that does not fix the thing is worse than no offer. *)
+let attach_promoted_fixes ?(root = Sys.getcwd ()) ?(budget = default_budget)
+    (errctx : Err.ctx) (m : A.module_) : unit =
+  match List.rev !RC.promoted_sites with
+  | [] -> ()
+  | sites ->
+    RC.promoted_sites := [];
+    (* The checker's own notion of "not the user's code", snapshotted rather
+       than read per call: probing re-walks hypothesis trees, and a second
+       definition of "user code" here is exactly the drift [suggest]'s own
+       [~is_user] parameter exists to avoid. *)
+    let stdlib = !RC.stdlib_source_files in
+    let is_user (sp : A.span) = not (List.mem sp.A.file stdlib) in
+    let upgrades =
+      List.filter_map
+        (fun (span, qname, (fd : A.fn_def)) ->
+          let short = fd.A.fn_name.A.txt in
+          let solved =
+            match suggest ~root ~budget ~is_user ~target:qname m with
+            | r :: _ -> (
+              (* Every constructor named, no wildcard: [status] exists so that
+                 "nothing in the grammar fits" ([No_candidate]) and "I stopped
+                 looking" ([Budget_exhausted]) are never conflated, and a `_`
+                 here would re-conflate them.  Only [Solved] discharges the
+                 debt this diagnostic is about. *)
+              match r.rs_status with
+              | Solved -> Some r.rs_suggestions
+              | Partial | No_debt | No_candidate | Budget_exhausted | Not_found
+                -> None)
+            | [] -> None
+          in
+          match solved with
+          | None | Some [] -> None
+          | Some sugs -> (
+            let refined =
+              List.map
+                (fun s ->
+                  (s.sg_param, Printf.sprintf "{%s | %s}" s.sg_base s.sg_pred))
+                sugs
+            in
+            match fd.A.fn_clauses with
+            | [] -> None
+            | c :: _ ->
+              let psp = c.A.fc_params_span in
+              (* A clause SYNTHESIZED by desugar carries its own [fc_span] here
+                 rather than a real parameter list — see [fc_params_span]'s
+                 comment — and rewriting that span would overwrite the body.
+                 Decline instead; the Task 6 finding still stands, it just
+                 comes without the offer. *)
+              if psp = c.A.fc_span || psp.A.start_line <= 0 || not (is_user psp)
+              then None
+              else
+                Option.map
+                  (fun ptext ->
+                    ( span,
+                      short,
+                      (* Hard-wrapped near 78 columns: the renderer does not
+                         reflow. *)
+                      Printf.sprintf
+                        "\n\nhelp: declare what `%s` actually needs —\n\
+                        \        fn %s%s\n\
+                         `forge fix` can apply this."
+                        short short ptext,
+                      Err.FReplace { span = psp; text = ptext } ))
+                  (params_text c ~refined)))
+        sites
+    in
+    (* Probing re-walks hypothesis trees through [Refine_check.visit_decls],
+       which can promote inside them; those sites describe a signature the user
+       never wrote, so discard whatever the loop above accumulated. *)
+    RC.promoted_sites := [];
+    if upgrades <> [] then
+      errctx.Err.diagnostics <-
+        List.map
+          (fun (d : Err.diagnostic) ->
+            match
+              List.find_opt
+                (fun (sp, short, _, _) ->
+                  d.Err.span = sp
+                  && String.length d.Err.message > String.length short + 2
+                  && String.sub d.Err.message 0 (String.length short + 2)
+                     = "`" ^ short ^ "`")
+                upgrades
+            with
+            | Some (_, _, help, fix) when d.Err.fix = None ->
+              { d with Err.message = d.Err.message ^ help; Err.fix = Some fix }
+            | _ -> d)
+          errctx.Err.diagnostics

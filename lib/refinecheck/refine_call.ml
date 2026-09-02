@@ -89,6 +89,25 @@ let enclosing_fn : A.fn_def option ref = ref None
    set outside a test. *)
 let enclosing_fn_probe : (A.fn_def -> unit) option ref = ref None
 
+(* Call sites this walk PROMOTED to a demonstrated failure, in emission order:
+   the call span the warning was reported at, the enclosing function's
+   qualified name, and the [fn_def] itself.
+
+   Drained AFTER the walk by [Precond_infer.attach_promoted_fixes], never
+   during it.  [Precond_infer.suggest] is [Ob.with_scratch @@ fun () -> …] and
+   every probe inside it re-walks a hypothesis tree through
+   [Refine_check.visit_decls]: calling it from here would reset the obligation
+   ledger this walk is filling, refill the per-call-site verdict index from a
+   speculative contract, and re-enter [strict_verified] / [trusted_fn] /
+   [unverified_hinted] / [enclosing_fn] underneath their own save/restore
+   frames.  So the promotion below emits its message unchanged and only
+   RECORDS the site; the suggestion — and the machine-applicable fix it
+   carries — is attached afterwards, when nothing is mid-walk.
+
+   Cleared by [check_module] (§21) alongside the ledger, so a prior module's
+   sites can never leak into this one's. *)
+let promoted_sites : (A.span * string * A.fn_def) list ref = ref []
+
 (* Does [e] ever APPLY the function spelled [name]?  Applications only: a bare
    mention (`let f = List.length`) is not a guard, and counting it would let an
    unrelated line decide what a call site is told. *)
@@ -2169,7 +2188,15 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                    that category.  `cap verified` is the established opt-in for
                    turning unverifiable obligations into errors. *)
                 if !strict_verified then Err.error errctx ~span text
-                else Err.warning errctx ~span text
+                else Err.warning errctx ~span text;
+                (* Record the site for the post-walk suggestion pass.  The
+                   qualified name is resolved HERE, while [Witness]'s module
+                   snapshot still describes the program (a probe re-walk swaps
+                   it for a hypothesis tree), and declining when it is
+                   ambiguous costs only the help block, never the finding. *)
+                (match Witness.qualified_fn_name fd with
+                 | Some q -> promoted_sites := (span, q, fd) :: !promoted_sites
+                 | None -> ())
               | None ->
                (* [Partial_conjunct]: the goal is a top-level conjunction and the
                   whole-goal discharge above failed both ways.  Flatten the

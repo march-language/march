@@ -1050,6 +1050,15 @@ let run_test_cmd args =
     March_refinecheck.No_alloc.check_module errors desugared;
     (* Cap-infer: emit hints at call sites missing a `needs` declaration. *)
     March_refinecheck.Cap_infer.check_module errors desugared;
+    (* A promoted call-site failure (a requirement the enclosing function
+       propagates without declaring) ends in the signature to write, not the
+       panic to fear: infer the precondition that discharges it and attach it as
+       a machine-applicable fix. Costs nothing when nothing was promoted, and
+       must run LAST among the refinement passes for the same reason the
+       suggestion printers do — every probe refills the per-call-site verdict
+       index from a hypothesis module. Before [shutdown]: the probes need the
+       solver. *)
+    March_refinecheck.Precond_infer.attach_promoted_fixes errors desugared;
     (* Solving scope ends here: reap the shared z3 child now rather than
        holding an idle solver process for the rest of the run. *)
     March_refine.Refine.shutdown ();
@@ -1733,6 +1742,15 @@ let compile filename =
   March_refinecheck.No_alloc.check_module errors desugared;
   (* Cap-infer: emit hints at call sites missing a `needs` declaration. *)
   March_refinecheck.Cap_infer.check_module errors desugared;
+  (* A promoted call-site failure (a requirement the enclosing function
+     propagates without declaring) ends in the signature to write, not the
+     panic to fear: infer the precondition that discharges it and attach it as
+     a machine-applicable fix. Costs nothing when nothing was promoted, and
+     must run LAST among the refinement passes for the same reason the
+     suggestion printers do — every probe refills the per-call-site verdict
+     index from a hypothesis module. Before [shutdown]: the probes need the
+     solver. *)
+  March_refinecheck.Precond_infer.attach_promoted_fixes errors desugared;
   (* Solving scope ends here: reap the shared z3 child now rather than holding
      an idle solver for the rest of the run (eval servers live indefinitely).
      --check-migration below lazily respawns; its child is reaped by at_exit. *)

@@ -31,6 +31,31 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- A function that propagates a refinement requirement it does not declare is
+  now reported, and the report ends in the signature to write rather than the
+  panic to fear. When a call-site precondition failure can be *demonstrated* —
+  the enclosing function is executed, a real panic observed, and repairing the
+  argument shown to remove it — March infers the precondition that discharges
+  the obligation and prints it as a `help:` block, carrying a machine-applicable
+  fix so `forge fix` rewrites the parameter list for you:
+
+  ```
+  `go` propagates a requirement it doesn't declare.
+
+  `head` requires  len(_) > 0
+  but go([]) panics — "empty"
+
+  help: declare what `go` actually needs —
+          fn go(ys : {List(Int) | len(_) > 0})
+  `forge fix` can apply this.
+  ```
+
+  The suggestion is offered only when the checker itself proved it discharges
+  the whole debt, so applying it really does silence the warning. A warning by
+  default (propagating an undeclared requirement is a design choice); an error
+  under `cap verified`. Cost is confined to promotion, which is rare: a program
+  with no demonstrated failure runs no inference at all.
+
 - Refinement failures now come with concrete, interpreter-validated
   counterexamples rendered in source terms. A return contract violated for
   some input reports the executed failing call — `but clamp(0) returns -1.` —
