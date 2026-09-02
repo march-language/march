@@ -1410,13 +1410,14 @@ passes look identical from outside.
 
 ```
 $ march --check --refine-report stdlib/list.march
-refinement obligations (user code): 0 proved, 0 violated, 0 trusted, 5 skipped
-  skipped (solver-undecided): 5
-  by kind: 5 precondition, 0 postcondition
-refinement obligations (user + stdlib): 8 proved, 0 violated, 0 trusted, 28 skipped
+refinement obligations (user code): 0 proved, 0 violated, 0 trusted, 6 skipped
+  skipped (unconstrained-subject): 5
   skipped (unreflectable-predicate): 1
-  skipped (solver-undecided): 27
-  by kind: 36 precondition, 0 postcondition
+  by kind: 6 precondition, 0 postcondition, 0 division
+refinement obligations (user + stdlib): 16 proved, 0 violated, 0 trusted, 34 skipped
+  skipped (unconstrained-subject): 32
+  skipped (unreflectable-predicate): 2
+  by kind: 50 precondition, 0 postcondition, 0 division
 ```
 
 > **Clear `.march/cas/artifacts-v2` first.** A `--check` run with sources that hash to
@@ -1447,7 +1448,7 @@ moment the measure alias stops working, which is exactly what the unit-global
 glob-import bug did to every March program, invisibly, while `t118` still exited
 0 (a skip and a proof are both exit 0; only the count tells them apart).
 
-Each skip is attributed to one of six reasons:
+Each skip is attributed to one of nine reasons:
 
 | Reason | What happened |
 |---|---|
@@ -1456,13 +1457,59 @@ Each skip is attributed to one of six reasons:
 | `sort-conflict` | reflecting it would declare one symbol at two different sorts |
 | `float-sort-gate` | the float wellsortedness gate rejected the formula |
 | `alias-withdrawn` | the guard used a measure alias (`List.length`, `String.byte_size`, `string_byte_length`), directly or through one `let` (`let n = List.length(ys)` then `if n > 0`), that this compilation unit had withdrawn, because something in the unit binds that name |
+| `unconstrained-subject` | no fact the checker derived constrains the argument the predicate talks about |
+| `partial-conjunct` | the predicate is a top-level `&&`, and the checker proved some conjuncts but not others; the message names which held and which did not |
+| `opaque-application` | the goal names a function the checker has no meaning for, so it cannot reason through it |
 | `solver-undecided` | the solver proved neither the predicate nor its negation |
 
-`alias-withdrawn` is a refinement of `solver-undecided`, not a separate failure:
-the VC was built and the solver ran, it just arrived without the fact that would
-have discharged it. It is reported separately because the *action* differs: the
-call is already guarded, and what has to change is a name binding elsewhere in
-the unit. See [the alias-withdrawal note](#a-withdrawn-alias-names-itself) below.
+`unconstrained-subject`, `partial-conjunct`, and `opaque-application` are also
+refinements of `solver-undecided`: the VC was built and the solver ran, and each
+names a more specific reason the solver could not decide it.
+
+`alias-withdrawn` is a further refinement of `solver-undecided`, not a separate
+failure: the VC was built and the solver ran, it just arrived without the fact
+that would have discharged it. It is reported separately because the *action*
+differs: the call is already guarded, and what has to change is a name binding
+elsewhere in the unit. See [the alias-withdrawal note](#a-withdrawn-alias-names-itself)
+below.
+
+**Where a skip is reported differs by reason.** `unconstrained-subject`,
+`partial-conjunct`, and `opaque-application` print at every call site that has
+one. The residual reasons keep the older, once-per-module throttle: one hint
+per module, because their message says the same thing regardless of which call
+raised it: repeating it at every site would be noise, not information. A
+diagnosed reason's message does not repeat: "no fact ... constrains `n`" and
+"`_ >= 0` established here; `_ < len(xs)` not" describe different calls, so
+suppressing the second because the first already printed would hide a real
+finding.
+
+```
+$ march --check <file>
+
+-- HINT -- <file>
+
+precondition `len(_) > 0` on `head` was NOT verified here.
+no fact the checker derived constrains `ys`
+
+10 |     head(ys)
+         ^^^^^^^^
+```
+
+The residual reasons still print the longer canned paragraph, unchanged:
+
+```
+-- HINT -- <file>
+
+precondition `len(_) > 0` on `head_of` was NOT verified here.
+reason: solver-undecided — the solver proved neither the predicate nor its negation
+note: March reports only definite failures, so a contract it cannot decide
+is accepted in silence. Add `cap verified` to this module to make every
+unverifiable obligation an error instead; `--refine-report` lists them all.
+```
+
+Under `cap verified` the same split holds, just escalated to an error instead
+of a hint; see [`cap verified`](#cap-verified-turning-silence-into-an-error)
+below for the exact rendering.
 
 The ledger records both **precondition obligations raised at call sites** and
 **postcondition obligations**: a function's own return value checked against
@@ -1521,6 +1568,79 @@ for the full command surface, including `--apply` and the editor code action.
 
 ---
 
+## Promoting a skip: a demonstrated precondition failure
+
+Most skips stay silent because the checker cannot *prove* anything either way.
+A narrow slice is different: the checker can show the skip is a real bug. When
+an argument reaches a refined parameter and the obligation is skipped, the
+checker executes the *enclosing* function on the solver's model, watches for a
+genuine `panic`, and then checks whether repairing just that one argument makes
+the function return instead. If both hold, the skip is promoted to a warning
+(an error under `cap verified`) instead of staying silent.
+
+```march
+mod Stats do
+  fn percentile(xs : {List(Float) | len(_) > 0}, p : {Float | _ >= 0.0 && _ <= 100.0}) : Float do
+    match xs do
+    Nil -> panic("Stats.percentile: empty list")
+    _   -> percentile_sorted(sort_floats(xs), p)
+    end
+  end
+
+  fn median(xs : List(Float)) : Float do
+    percentile(xs, 50.0)
+  end
+end
+```
+
+```
+`median` propagates a requirement it doesn't declare.
+
+`percentile` requires  len(_) > 0
+but median([]) panics — "Stats.percentile: empty list"
+
+help: declare what `median` actually needs —
+        fn median(xs : {List(Float) | len(_) > 0}) : Float
+`forge fix` can apply this.
+```
+
+**What the warning claims, precisely.** It says `median` panics on some input
+(`[]`), a fact about the caller. It does not say `percentile` raised that
+panic incorrectly; `percentile`'s own contract, `len(_) > 0`, is exactly what
+rules `[]` out, and `percentile` is not at fault for panicking on an input it
+declared it does not accept. The bug is that `median` does not forward the
+requirement it relies on.
+
+**Status and offer.** Outside `cap verified` the promotion is a warning; inside
+it, the same message is a compile error, worded identically apart from the
+`WARNING`/`ERROR` banner. The `help:` block shows the precondition to declare
+on the caller, and `forge fix` can rewrite the signature for you. Not every
+promotion gets a `help:` block: when the callee has more than one unforwarded
+precondition and no single-parameter fix is unambiguously correct, the
+promotion still fires but the `help:` is omitted. `Stats.quantile_default`
+(`stdlib/stats.march`) is exactly this shape: `quantile` requires both
+`len(_) > 0` on its list and `_ >= 0.0 && _ <= 1.0` on its float, and it reports
+with no `help:` block.
+
+### Promotion and the standard library
+
+Promotion is not attempted at spans inside the standard library when the
+stdlib is merely imported: those diagnostics are filtered from the printed
+stream before promotion ever runs, so paying the execution cost there would
+produce a count nobody could see. Compiling a stdlib file directly as the
+entry file is different: its own spans are then user spans, not filtered
+stdlib spans, and it reports its own promotions the same as any other module.
+
+### The `violated` count
+
+`--refine-report` records a promotion under `violated`, the same bucket used
+for a contract the solver proved can never hold. A nonzero `violated` count on
+a module without `cap verified` is therefore not necessarily a bad annotation;
+it can be a demonstrated call-site failure the checker found on its own. The
+report does not currently distinguish the two shapes.
+
+---
+
 ## `cap verified`: turning silence into an error
 
 March's default stance is **definite failure only**: a false positive on correct
@@ -1537,7 +1657,7 @@ mod Checked do
   fn head_of(xs : {List(Int) | len(_) > 0}) : Int do
     match xs do
     Cons(h, _) -> h
-    Nil        -> panic("empty")
+    Nil        -> 0
     end
   end
 
@@ -1547,8 +1667,21 @@ mod Checked do
 end
 ```
 
-Dropping the guard turns the same call into an error naming the precondition,
-the callee, and why it could not be discharged:
+Dropping the guard entirely turns the same call into an error naming the
+precondition, the callee, and why it could not be discharged. With nothing at
+all constraining `ys`, the reason is `unconstrained-subject`:
+
+```
+`cap verified` module: cannot verify precondition `len(_) > 0` on `head_of`
+(unconstrained-subject: no fact the checker derived constrains `ys`)
+note: guard the call or strengthen what is known here, rewrite the predicate
+into the fragment the checker supports, or remove `cap verified` from this
+module — it asks for every obligation to be discharged
+```
+
+Weakening the guard instead of dropping it (`if List.length(ys) >= 0 do
+head_of(ys) else 0 end`, which is always true and proves nothing) leaves a fact
+in scope, so the reason falls back to the residual `solver-undecided`:
 
 ```
 `cap verified` module: cannot verify precondition `len(_) > 0` on `head_of`
@@ -1558,8 +1691,11 @@ into the fragment the checker supports, or remove `cap verified` from this
 module — it asks for every obligation to be discharged
 ```
 
-Both forms verified 2026-07-28 (guarded: exit 0; unguarded: exit 1 with the
-message above).
+Note that if `head_of`'s `Nil` arm panics instead of returning a value, dropping
+the guard produces a different error altogether: the checker can demonstrate
+the panic, and the skip is *promoted* rather than reported as
+`unconstrained-subject`. See
+[Promoting a skip](#promoting-a-skip-a-demonstrated-precondition-failure) above.
 
 ### A withdrawn alias names itself
 
@@ -1651,9 +1787,13 @@ intended trade: the reason exists to explain one specific confusion, not to
 claim every skip.
 
 Verified 2026-07-29 (both triggers report `alias-withdrawn` with the causing
-span; an unguarded call, a guard on a different variable, a cross-measure guard,
-and a negated guard all still report `solver-undecided`, each matched against a
-control with the competing binding deleted). The one-`let` laundered walk was
+span; a guard on a different variable, a cross-measure guard, and a negated
+guard all still report `solver-undecided`, each matched against a control with
+the competing binding deleted). An unguarded call was `solver-undecided` too at
+the time; since the diagnosed causes shipped it reports `unconstrained-subject`
+instead, and `unconstrained-subject` is excluded from alias-withdrawal
+attribution by condition 1 above the same way `solver-undecided` is. The
+one-`let` laundered walk was
 added and verified 2026-07-31: the laundered witness reports `alias-withdrawn`,
 and its four wrong-attribution controls (a laundered guard on a *different*
 collection, a rebound laundering name, a rebound collection, and a two-level
