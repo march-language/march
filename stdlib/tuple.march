@@ -52,7 +52,13 @@ mod Tuple do
     (a, b)
   end
 
-  doc "Applies a function that takes two separate args to a pair."
+  doc """
+  Applies `f` to the pair `t` as a single tuple argument: `f(t)`.
+
+  `(a, b) -> c` is a function of ONE argument that is a pair — not a
+  two-argument function, which March spells curried, `a -> b -> c`. To apply
+  a two-argument function to a pair, destructure it: `let (x, y) = t`.
+  """
   fn apply(t : (a, b), f : (a, b) -> c) : c do
     f(t)
   end

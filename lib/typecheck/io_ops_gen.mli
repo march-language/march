@@ -5,6 +5,11 @@
 
 open Typecheck_types
 
+val march_ty : ?arg:bool -> Typecheck_types.ty -> string
+(** Render a type as March SURFACE syntax. A multi-argument function is spelled
+    curried ([A -> B -> C]); [(A, B) -> C] would be a function of one tuple.
+    [~arg:true] parenthesises an arrow in argument position. *)
+
 val all_caps : unit -> string list
 (** Every IO capability owning at least one builtin, sorted. *)
 
