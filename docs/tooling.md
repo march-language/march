@@ -78,13 +78,11 @@ forge build
 forge build --release
 
 # Build and run
-forge run
-
-# Run with arguments
-forge run -- --port 8080
-
-# Compile to native binary via LLVM (instead of the interpreter)
-forge run --compiled
+forge run                        # run the project entry (interpreted)
+forge run --compiled             # compile via LLVM, then run the binary
+forge run foo.march              # run a single file
+forge run --compiled foo.march   # compile and run a single file
+forge run foo.march -- a b       # pass a and b to the program as its argv
 
 # Dump compiler IR phases to trace/phases/phases.json
 forge build --dump-phases
@@ -93,6 +91,12 @@ forge run --dump-phases
 # Fail if forge.lock is out of sync with forge.toml
 forge build --frozen
 ```
+
+A file named on the command line still sees the surrounding project's modules
+and FFI shims when it is inside a project, so a scratch file can import your own
+code; outside a project it runs standalone. Arguments after `--` reach the
+program as `System.argv()`, with `argv[0]` the script path when interpreted and
+the binary path when compiled. Passing arguments requires naming a FILE.
 
 In a workspace, build a single member:
 

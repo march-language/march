@@ -1535,7 +1535,7 @@ let ffi_flags_sample = " --ffi-c '/dep/native/sqlite_shim.c' --ffi-link '-lsqlit
 let test_interp_command_includes_ffi_flags () =
   let cmd =
     Cmd_run.interp_command ~lib_path_env:"MARCH_LIB_PATH=/p/lib "
-      ~dump_flag:"" ~ffi_flags:ffi_flags_sample ~entry:"/p/lib/app.march"
+      ~dump_flag:"" ~ffi_flags:ffi_flags_sample ~entry:"/p/lib/app.march" ()
   in
   Alcotest.(check bool) "--ffi-c reaches march" true
     (contains cmd "--ffi-c '/dep/native/sqlite_shim.c'");
@@ -1549,10 +1549,452 @@ let test_interp_command_no_ffi_is_unchanged () =
      command must not grow a stray separator. *)
   let cmd =
     Cmd_run.interp_command ~lib_path_env:"MARCH_LIB_PATH=/p/lib "
-      ~dump_flag:"" ~ffi_flags:"" ~entry:"/p/lib/app.march"
+      ~dump_flag:"" ~ffi_flags:"" ~entry:"/p/lib/app.march" ()
   in
   Alcotest.(check string) "no-ffi command shape"
     "MARCH_LIB_PATH=/p/lib march '/p/lib/app.march'" cmd
+
+let test_interp_command_passes_program_args () =
+  (* The program's own arguments ride behind --args, which must come LAST:
+     the compiler collects every remaining token there (Arg.Rest_all), so a
+     flag emitted after it would be swallowed as a program argument. *)
+  let cmd =
+    Cmd_run.interp_command ~lib_path_env:"MARCH_LIB_PATH=/p/lib "
+      ~dump_flag:"" ~ffi_flags:"" ~args:(Some ["alpha"; "two words"])
+      ~entry:"/p/lib/app.march" ()
+  in
+  Alcotest.(check string) "args follow the entry behind --args"
+    "MARCH_LIB_PATH=/p/lib march '/p/lib/app.march' --args 'alpha' 'two words'"
+    cmd
+
+let test_interp_command_empty_args_adds_nothing () =
+  (* [args:None] (the project-entry path with nothing to pass) must not grow
+     a stray "--args": the no-args command is what every existing caller
+     (and forge watch) emits. *)
+  let cmd =
+    Cmd_run.interp_command ~lib_path_env:"MARCH_LIB_PATH=/p/lib "
+      ~dump_flag:"" ~ffi_flags:"" ~args:None ~entry:"/p/lib/app.march" ()
+  in
+  Alcotest.(check string) "identical to the no-args command"
+    "MARCH_LIB_PATH=/p/lib march '/p/lib/app.march'" cmd
+
+let test_interp_command_file_with_no_args_still_emits_args_flag () =
+  (* Regression for the argv-leak finding: a single named FILE with no
+     program arguments must still emit a bare "--args" so the interpreted
+     program's argv[0] is the script path, not the march binary itself
+     (`march f.march --args` with nothing after --args yields exactly
+     [f.march] -- test/test_prog_argv.ml's
+     test_args_with_nothing_after_is_script_only pins that compiler
+     behavior). [Some []] is the FILE path's "no args" spelling, distinct
+     from the project-entry path's [None] used just above. *)
+  let cmd =
+    Cmd_run.interp_command ~lib_path_env:"MARCH_LIB_PATH=/p/lib "
+      ~dump_flag:"" ~ffi_flags:"" ~args:(Some []) ~entry:"/p/lib/app.march" ()
+  in
+  Alcotest.(check string) "bare --args is still emitted"
+    "MARCH_LIB_PATH=/p/lib march '/p/lib/app.march' --args" cmd
+
+let test_output_ext_by_target () =
+  (* Pinned because the single-file compiled run names a temp output with this,
+     and running a .mjs as if it were a native binary fails confusingly. *)
+  Alcotest.(check string) "native has no extension" "" (Cmd_build.output_ext None);
+  Alcotest.(check string) "js" ".mjs" (Cmd_build.output_ext (Some "js"));
+  Alcotest.(check string) "javascript" ".mjs" (Cmd_build.output_ext (Some "javascript"));
+  Alcotest.(check string) "wasm" ".wasm" (Cmd_build.output_ext (Some "wasm32"));
+  Alcotest.(check string) "an unknown target is native" ""
+    (Cmd_build.output_ext (Some "aarch64-linux"))
+
+(** Point PATH's `march` at the just-built dev compiler under test, instead of
+    whatever `march` (if any) happens to be on PATH or globally installed
+    under $HOME/.march -- a CI runner has neither, so a test that skips this
+    exits 127, and a machine that DOES have a global toolchain would
+    otherwise silently exercise a different, possibly months-old compiler
+    instead of this branch's. Every test that shells out to `march` should
+    run its body inside this.
+
+    Exe-relative, for the same reason as test/test_cap_markers.ml: a
+    CWD-relative path returns 127 under dune's test runner. Two levels up
+    from _build/default/forge/test/ (vs. one for test/test_cap_markers.ml,
+    which sits directly under _build/default/test/) lands on
+    _build/default/bin/main.exe. Fails loudly (never skips silently) if
+    bin/main.exe hasn't been built.
+
+    Shims a private bin dir with a `march` symlink onto the just-built
+    main.exe (it is literally named main.exe, not march) and prepends it to
+    PATH. Invoked as a bare `march` through a PATH symlink, the compiler's
+    own exe-relative runtime/stdlib resolution (bin/toolchain.ml) resolves
+    against the SYMLINK's directory, not the real bin/main.exe location --
+    the same failure mode forge/test/test_cap_sandbox.ml's
+    setup_hermetic_toolchain works around. Point it at the already-staged
+    _build/default/{runtime,stdlib} directly via the override env vars.
+
+    Prepending to PATH is NOT enough by itself: Cmd_run.run ~compiled:true ()
+    with no FILE goes through Cmd_build.lib_path_env ->
+    Toolchain.path_prefix, which -- whenever a toolchain resolves, via a
+    project .march-version pin or the $MARCH_HOME/current symlink -- prepends
+    that resolved toolchain's OWN bin dir ahead of $PATH in the shell command
+    it builds, outranking anything this shim put on PATH. On a machine with a
+    global toolchain installed (`march-version-manager`'s `~/.march/current`)
+    that silently compiles with whatever toolchain happens to be current
+    there instead of the dev compiler under test. Neutralize it by pointing
+    MARCH_HOME at a fresh, empty temp dir for the duration: Toolchain.
+    global_version reads $MARCH_HOME/current (toolchain.ml's march_home
+    checks MARCH_HOME before $HOME/.march), so an empty MARCH_HOME with no
+    `current` symlink makes it resolve to None and path_prefix return "",
+    leaving this shim's `march` as the only one anything can find. A project
+    `.march-version` pin would outrank the shim the same way, by a different
+    path (Toolchain.find_pin, independent of MARCH_HOME) -- callers must run
+    from a directory with no such pin in its ancestry (true of every fresh
+    Filename.temp_dir used here and by the tests below).
+
+    Restores PATH and the env var overrides, and removes the shim dir and the
+    scratch MARCH_HOME, in [Fun.protect]'s cleanup regardless of how [f]
+    exits. *)
+let with_dev_march_on_path (f : unit -> 'a) : 'a =
+  let compiler_exe =
+    let exe_dir = Filename.dirname Sys.executable_name in
+    Filename.concat exe_dir "../../bin/main.exe"
+  in
+  if not (Sys.file_exists compiler_exe) then
+    Alcotest.failf
+      "compiler not found at %s -- build bin/main.exe before running this test"
+      compiler_exe;
+  let compiler_exe_abs =
+    if Filename.is_relative compiler_exe then
+      Filename.concat (Sys.getcwd ()) compiler_exe
+    else compiler_exe
+  in
+  let shim_dir = Filename.temp_dir "forge_march_shim_" "" in
+  let march_link = Filename.concat shim_dir "march" in
+  Unix.symlink compiler_exe_abs march_link;
+  let old_path = try Sys.getenv "PATH" with Not_found -> "" in
+  Unix.putenv "PATH" (shim_dir ^ ":" ^ old_path);
+  let staged_runtime_dir =
+    Filename.concat (Filename.dirname compiler_exe_abs) "../runtime"
+  in
+  let staged_stdlib_dir =
+    Filename.concat (Filename.dirname compiler_exe_abs) "../stdlib"
+  in
+  if not (Sys.file_exists (Filename.concat staged_runtime_dir "march_runtime.c"))
+  then Alcotest.failf "staged runtime not found at %s" staged_runtime_dir;
+  if not (Sys.file_exists (Filename.concat staged_stdlib_dir "prelude.march"))
+  then Alcotest.failf "staged stdlib not found at %s" staged_stdlib_dir;
+  let old_runtime_dir = Sys.getenv_opt "MARCH_RUNTIME_DIR" in
+  let old_stdlib_dir = Sys.getenv_opt "MARCH_STDLIB" in
+  Unix.putenv "MARCH_RUNTIME_DIR" staged_runtime_dir;
+  Unix.putenv "MARCH_STDLIB" staged_stdlib_dir;
+  (* Neutralize Toolchain.path_prefix's own PATH-prepend: an empty, freshly
+     made MARCH_HOME has no `current` symlink, so Toolchain.global_version
+     resolves None and path_prefix contributes nothing -- see the doc comment
+     above for why PATH alone can't win this. *)
+  let march_home_dir = Filename.temp_dir "forge_march_home_" "" in
+  let old_march_home = Sys.getenv_opt "MARCH_HOME" in
+  Unix.putenv "MARCH_HOME" march_home_dir;
+  Fun.protect
+    ~finally:(fun () ->
+        Unix.putenv "PATH" old_path;
+        (* Unix.unsetenv is unavailable in this toolchain's Unix module;
+           putenv "" is equivalent here since both toolchain.ml checks treat
+           an empty value as absent (`when d <> ""`). *)
+        Unix.putenv "MARCH_RUNTIME_DIR" (Option.value old_runtime_dir ~default:"");
+        Unix.putenv "MARCH_STDLIB" (Option.value old_stdlib_dir ~default:"");
+        Unix.putenv "MARCH_HOME" (Option.value old_march_home ~default:"");
+        let _ =
+          Sys.command
+            (Printf.sprintf "rm -rf %s %s" (Filename.quote shim_dir)
+               (Filename.quote march_home_dir))
+        in
+        ())
+    f
+
+(** Full end-to-end pipeline: compile a single file through the real LLVM
+    backend and run the resulting binary, exactly the path
+    [forge run --compiled FILE] takes with no forge.toml in scope
+    ([resolve_entry] falls back to [empty_context], so `march` is resolved
+    off PATH by [Cmd_build.compile_entry] -- see [run]'s [Some _] branch in
+    cmd_run.ml).  [test_output_ext_by_target] above only unit-tests the
+    extension helper; this is the one test that actually exercises the
+    temp-file lifecycle (pre-compile removal, [Fun.protect] cleanup on
+    success and on failure) and [exec_output]'s dispatch -- a regression in
+    either would otherwise pass the whole suite untouched. Marked [`Slow]:
+    this pays a real clang compile, so it must not land in the quick
+    suite ([scripts/run-tests.sh -q] skips [`Slow]). *)
+let test_compiled_run_end_to_end () =
+ with_dev_march_on_path (fun () ->
+  (* Run from a directory with no forge.toml in scope, so resolve_entry takes
+     the no-project fallback (empty_context) -- a genuine no-project
+     single-file compiled run, not one riding a project's lib path/FFI. *)
+  let tmpdir = Filename.temp_dir "forge_run_e2e_" "" in
+  let file = Filename.concat tmpdir "hello.march" in
+  let oc = open_out file in
+  output_string oc
+    (String.concat "\n"
+       [ "mod ForgeRunE2e do";
+         "  needs IO.Console";
+         "";
+         "  fn main(_cap : Cap(IO.Console)) : () do";
+         "    println(\"forge-run-e2e-ok\")";
+         "  end";
+         "end";
+         "" ]);
+  close_out oc;
+  let old_cwd = Sys.getcwd () in
+  let forge_run_temp_files () =
+    Sys.readdir (Filename.get_temp_dir_name ())
+    |> Array.to_list
+    |> List.filter (fun n ->
+        String.length n >= 10 && String.sub n 0 10 = "forge-run-")
+  in
+  let baseline = forge_run_temp_files () in
+  Fun.protect
+    ~finally:(fun () ->
+        Unix.chdir old_cwd;
+        let _ = Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote tmpdir)) in
+        ())
+    (fun () ->
+       Unix.chdir tmpdir;
+       (* exec_output shells out via Sys.command, which inherits this
+          process's real stdout fd -- redirect it to a file around the call
+          to capture the program's own printed output. *)
+       flush stdout;
+       let capture = Filename.temp_file "forge_run_e2e_stdout_" ".tmp" in
+       let saved_stdout = Unix.dup Unix.stdout in
+       let out_fd =
+         Unix.openfile capture [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC ] 0o600
+       in
+       Unix.dup2 out_fd Unix.stdout;
+       Unix.close out_fd;
+       let result =
+         try Cmd_run.run ~compiled:true ~file:"hello.march" ~args:[] ()
+         with e ->
+           flush stdout;
+           Unix.dup2 saved_stdout Unix.stdout;
+           Unix.close saved_stdout;
+           raise e
+       in
+       flush stdout;
+       Unix.dup2 saved_stdout Unix.stdout;
+       Unix.close saved_stdout;
+       let ic = open_in capture in
+       let n = in_channel_length ic in
+       let out = really_input_string ic n in
+       close_in ic;
+       (try Sys.remove capture with Sys_error _ -> ());
+       (match result with
+        | Error msg -> Alcotest.failf "compiled single-file run failed: %s" msg
+        | Ok () -> ());
+       Alcotest.(check bool) "program's own stdout was captured" true
+         (contains out "forge-run-e2e-ok");
+       let after = forge_run_temp_files () in
+       let leftover = List.filter (fun n -> not (List.mem n baseline)) after in
+       Alcotest.(check (list string)) "no leftover forge-run-* temp file" []
+         leftover))
+
+let test_resolve_entry_missing_file () =
+  match Cmd_run.resolve_entry ~file:"/definitely/not/here.march" () with
+  | Ok _ -> Alcotest.fail "a missing file must not resolve"
+  | Error msg ->
+    Alcotest.(check bool) "error names the file" true
+      (contains msg "/definitely/not/here.march")
+
+let test_resolve_entry_directory_is_rejected () =
+  match Cmd_run.resolve_entry ~file:(Filename.get_temp_dir_name ()) () with
+  | Ok _ -> Alcotest.fail "a directory must not resolve as an entry"
+  | Error msg ->
+    Alcotest.(check bool) "error explains it is not a file" true
+      (contains msg "not a file")
+
+let test_resolve_entry_outside_a_project_runs_bare () =
+  (* Outside a project there is no forge.toml to read, so the file runs with no
+     MARCH_LIB_PATH and no FFI flags — the same fallback Cmd_test.run_files
+     already uses for ad-hoc test files. *)
+  let tmpdir = Filename.temp_dir "resolve_bare_" "" in
+  let file = Filename.concat tmpdir "scratch.march" in
+  let oc = open_out file in
+  output_string oc "mod Scratch do\n  fn main() do\n    ()\n  end\nend\n";
+  close_out oc;
+  let old_cwd = Sys.getcwd () in
+  Fun.protect
+    ~finally:(fun () ->
+        Unix.chdir old_cwd;
+        let _ = Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote tmpdir)) in ())
+    (fun () ->
+       Unix.chdir tmpdir;
+       match Cmd_run.resolve_entry ~file:"scratch.march" () with
+       | Error msg -> Alcotest.failf "expected a bare resolution, got: %s" msg
+       | Ok (entry, ctx) ->
+         Alcotest.(check string) "entry is the file as given" "scratch.march" entry;
+         Alcotest.(check string) "no lib path" "" ctx.Cmd_run.lib_path_env;
+         Alcotest.(check string) "no ffi flags" "" ctx.Cmd_run.ffi_flags)
+
+(** End-to-end confirmation of finding 1, exercised through the real
+    interpreted [run] path -- not just [interp_command]'s own unit tests,
+    which call it directly and so cannot catch a regression in how [run]
+    itself decides what to pass as [~args]. `forge run FILE` with no program
+    arguments must show the script as [System.argv()]'s only element: before
+    the fix, the compiler fell back to its own [Sys.argv] whenever [~args]
+    came out [None], so the program saw the march binary itself as
+    argv[0]. *)
+let test_interpreted_file_run_argv_excludes_compiler () =
+  (* Uses a shimmed `march` on PATH pointing at the freshly built dev
+     compiler, same as test_compiled_run_end_to_end: the opam-installed
+     `march` normally resolved off PATH predates the --args flag entirely
+     ("unknown option '--args'"), which would fail this test for a reason
+     that has nothing to do with the argv contract under test. *)
+  let compiler_exe =
+    let exe_dir = Filename.dirname Sys.executable_name in
+    Filename.concat exe_dir "../../bin/main.exe"
+  in
+  if not (Sys.file_exists compiler_exe) then
+    Alcotest.failf
+      "compiler not found at %s -- build bin/main.exe before running this test"
+      compiler_exe;
+  let compiler_exe_abs =
+    if Filename.is_relative compiler_exe then
+      Filename.concat (Sys.getcwd ()) compiler_exe
+    else compiler_exe
+  in
+  let shim_dir = Filename.temp_dir "forge_run_argv_march_shim_" "" in
+  let march_link = Filename.concat shim_dir "march" in
+  Unix.symlink compiler_exe_abs march_link;
+  let old_path = try Sys.getenv "PATH" with Not_found -> "" in
+  Unix.putenv "PATH" (shim_dir ^ ":" ^ old_path);
+  (* Invoked as a bare `march` through a PATH symlink, exe-relative stdlib
+     resolution resolves against the symlink's directory, not the real
+     bin/main.exe location -- point it at the already-staged stdlib
+     directly, same workaround as test_compiled_run_end_to_end. *)
+  let staged_stdlib_dir =
+    Filename.concat (Filename.dirname compiler_exe_abs) "../stdlib"
+  in
+  if not (Sys.file_exists (Filename.concat staged_stdlib_dir "prelude.march"))
+  then Alcotest.failf "staged stdlib not found at %s" staged_stdlib_dir;
+  let old_stdlib_dir = Sys.getenv_opt "MARCH_STDLIB" in
+  Unix.putenv "MARCH_STDLIB" staged_stdlib_dir;
+  let tmpdir = Filename.temp_dir "forge_run_argv_" "" in
+  let file = Filename.concat tmpdir "argv_check.march" in
+  write_file file
+    (String.concat "\n"
+       [ "mod ArgvCheck do";
+         "  needs IO";
+         "";
+         "  fn main(_cap : Cap(IO)) : () do";
+         "    println(to_string(List.length(System.argv())))";
+         "  end";
+         "end";
+         "" ]);
+  let old_cwd = Sys.getcwd () in
+  Fun.protect
+    ~finally:(fun () ->
+        Unix.chdir old_cwd;
+        Unix.putenv "PATH" old_path;
+        Unix.putenv "MARCH_STDLIB" (Option.value old_stdlib_dir ~default:"");
+        let _ =
+          Sys.command
+            (Printf.sprintf "rm -rf %s %s" (Filename.quote shim_dir)
+               (Filename.quote tmpdir))
+        in
+        ())
+    (fun () ->
+       Unix.chdir tmpdir;
+       (* Cmd_run.run shells out via Sys.command, which inherits this
+          process's real stdout fd -- redirect it to a file around the call
+          to capture the program's own printed output, same technique as
+          test_compiled_run_end_to_end. *)
+       flush stdout;
+       let capture = Filename.temp_file "forge_run_argv_stdout_" ".tmp" in
+       let saved_stdout = Unix.dup Unix.stdout in
+       let out_fd =
+         Unix.openfile capture [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC ] 0o600
+       in
+       Unix.dup2 out_fd Unix.stdout;
+       Unix.close out_fd;
+       let result =
+         try Cmd_run.run ~compiled:false ~file:"argv_check.march" ~args:[] ()
+         with e ->
+           flush stdout;
+           Unix.dup2 saved_stdout Unix.stdout;
+           Unix.close saved_stdout;
+           raise e
+       in
+       flush stdout;
+       Unix.dup2 saved_stdout Unix.stdout;
+       Unix.close saved_stdout;
+       let ic = open_in capture in
+       let n = in_channel_length ic in
+       let out = really_input_string ic n in
+       close_in ic;
+       (try Sys.remove capture with Sys_error _ -> ());
+       (match result with
+        | Error msg -> Alcotest.failf "interpreted single-file run failed: %s" msg
+        | Ok () -> ());
+       Alcotest.(check string)
+         "argv has exactly the script, not [march-binary; script]" "1"
+         (String.trim out))
+
+(** End-to-end confirmation of the same finding: a project whose forge.toml
+    [entrypoint] names a file a [[preprocessors]] command generates does not
+    exist on disk until [Cmd_build.build] runs that preprocessor.  Before the
+    fix, [Cmd_run.run ~compiled:true ()] (no FILE) called [resolve_entry]
+    first, which [Sys.file_exists]-checks the entry BEFORE any preprocessor
+    has run and fails with "entry point not found"; after the fix that call
+    is skipped entirely and [Cmd_build.build] itself runs the preprocessor
+    before checking anything, so the same project typechecks clean. The
+    project is [type = "app"], so this exercises a real `march check` AND a
+    real compile+link of the generated entry -- both real subprocesses,
+    resolved via [with_dev_march_on_path] onto the just-built dev compiler
+    (never PATH or a globally-installed toolchain: neither exists in CI, and
+    either would silently test a different, possibly stale, compiler).
+    Marked [`Slow] because of the real link. *)
+let test_compiled_project_build_generated_entrypoint () =
+ with_dev_march_on_path (fun () ->
+  let tmpdir = Filename.temp_dir "forge_run_genentry_" "" in
+  let lib_dir = Filename.concat tmpdir "lib" in
+  Project.mkdir_p lib_dir;
+  let gen_sh = Filename.concat tmpdir "gen.sh" in
+  write_file gen_sh "#!/bin/sh\ncp \"$1\" \"$2\"\ntouch \"$3\"\n";
+  Unix.chmod gen_sh 0o755;
+  write_file (Filename.concat lib_dir "genentry.mx")
+    (String.concat "\n"
+       [ "mod GenEntry do";
+         "  fn main() do";
+         "    ()";
+         "  end";
+         "end";
+         "" ]);
+  write_file (Filename.concat tmpdir "forge.toml")
+    (Printf.sprintf
+       {|[package]
+name = "genentry"
+type = "app"
+entrypoint = ".forge/generated/lib/genentry.march"
+
+[preprocessors]
+.mx = "%s"
+|} gen_sh);
+  let old_cwd = Sys.getcwd () in
+  Fun.protect
+    ~finally:(fun () ->
+        Unix.chdir old_cwd;
+        let _ = Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote tmpdir)) in
+        ())
+    (fun () ->
+       Unix.chdir tmpdir;
+       (* Confirm the premise: resolve_entry alone, run directly against this
+          project before any preprocessor has run, really does fail with
+          "entry point not found" -- otherwise this test would prove nothing. *)
+       (match Cmd_run.resolve_entry () with
+        | Ok _ ->
+          Alcotest.fail
+            "expected resolve_entry to fail before preprocessing generates the entry"
+        | Error msg ->
+          Alcotest.(check bool) "resolve_entry alone rejects the ungenerated entry"
+            true (contains msg "entry point not found"));
+       match Cmd_run.run ~compiled:true () with
+       | Error msg ->
+         Alcotest.failf
+           "compiled project build with a generated entrypoint should succeed \
+            once preprocessors run, got: %s" msg
+       | Ok () -> ()))
 
 let test_repl_command_includes_ffi_flags_after_entry () =
   let cmd =
@@ -1743,10 +2185,30 @@ let () =
         test_interp_command_includes_ffi_flags;
       Alcotest.test_case "no [ffi] leaves the command unchanged" `Quick
         test_interp_command_no_ffi_is_unchanged;
+      Alcotest.test_case "program args ride behind --args" `Quick
+        test_interp_command_passes_program_args;
+      Alcotest.test_case "no program args leaves the command unchanged" `Quick
+        test_interp_command_empty_args_adds_nothing;
+      Alcotest.test_case "a named FILE with no args still emits --args" `Quick
+        test_interp_command_file_with_no_args_still_emits_args_flag;
+      Alcotest.test_case "a missing FILE is rejected" `Quick
+        test_resolve_entry_missing_file;
+      Alcotest.test_case "a directory FILE is rejected" `Quick
+        test_resolve_entry_directory_is_rejected;
+      Alcotest.test_case "a FILE outside a project runs bare" `Quick
+        test_resolve_entry_outside_a_project_runs_bare;
+      Alcotest.test_case "interpreted FILE run with no args: argv excludes march" `Quick
+        test_interpreted_file_run_argv_excludes_compiler;
       Alcotest.test_case "forge interactive puts ffi flags after the entry" `Quick
         test_repl_command_includes_ffi_flags_after_entry;
       Alcotest.test_case "bare REPL still gets the ffi flags" `Quick
         test_repl_command_bare_includes_ffi_flags;
+      Alcotest.test_case "output extension follows the target" `Quick
+        test_output_ext_by_target;
+      Alcotest.test_case "compiled single-file run: real compile, real run" `Slow
+        test_compiled_run_end_to_end;
+      Alcotest.test_case "compiled project build with a generated entrypoint" `Slow
+        test_compiled_project_build_generated_entrypoint;
     ];
     "search_index_cache", [
       Alcotest.test_case "stale version cache is rebuilt" `Quick

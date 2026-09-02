@@ -34,6 +34,12 @@ git log is authoritative for exact commits.
   is polymorphic, and a dictionary field would need rank-2 types), and
   operations inside actor handlers are not reached.
 
+- `forge run FILE` runs a single `.march` file, interpreted or (with
+  `--compiled`) through the LLVM pipeline. A file inside a project still
+  resolves that project's modules and FFI shims. Arguments after `--` reach the
+  program as `System.argv()`; the compiler gained `march --args` to make that
+  work for interpreted runs too.
+
 ### Fixed
 
 - Multi-head function heads now count as structural recursion, so an ordinary

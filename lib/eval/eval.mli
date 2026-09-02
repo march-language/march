@@ -308,6 +308,7 @@ external _ffi_dyncall_fd :
 external _ffi_dlopen_extra : string -> unit = "march_eval_dlopen_extra"
 val ffi_runtime_so : (unit -> string option) ref
 val ffi_shim_so : string option ref
+val program_argv : string list option ref
 val base_env : Eval_types.env
 val global_tail : env ref
 val global_tbl : (string, value) Hashtbl.t

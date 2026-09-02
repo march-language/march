@@ -1,3 +1,9 @@
+; test_forge.ml's test_compiled_run_end_to_end shells out to a real, just-built
+; `march --compile` (exe-relative from test_forge.exe to ../../bin/main.exe,
+; the same convention as test/test_cap_markers.ml's compiler_exe). The `deps`
+; below makes `dune runtest`/CI build bin/main.exe before running this suite,
+; so the test's own "compiler not found" guard never fires just because
+; nothing else happened to build it first.
 (tests
  (names test_forge test_resolver test_solver test_cas_package test_patch
         test_api_surface test_properties test_regression test_cap_binary test_cap_inspect
@@ -5,6 +11,7 @@
  (modules test_forge test_resolver test_solver test_cas_package test_patch
           test_api_surface test_properties test_regression test_cap_binary test_cap_inspect
           test_audit test_cap_package test_dep_dir)
+ (deps ../../bin/main.exe)
  (libraries march_forge march_search march_caps str alcotest unix qcheck-core qcheck-alcotest march_cas))
 
 ; test_cap_sandbox.ml's test_scaffolded_app_builds_clean and

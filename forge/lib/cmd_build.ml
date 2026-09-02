@@ -469,6 +469,14 @@ let ffi_flags_full ?(target_is_cross=false) (proj : Project.project) : (string, 
   | Ok rust_link_flags ->
     Ok (ffi_flags_of ~root:proj.Project.root proj ^ rust_link_flags)
 
+(** Filename extension for a build's output, by target.  Shared by the project
+    build and by the single-file [forge run FILE --compiled] path, which names
+    a temp output the same way. *)
+let output_ext = function
+  | Some ("js" | "javascript") -> ".mjs"
+  | Some t when String.length t >= 4 && String.sub t 0 4 = "wasm" -> ".wasm"
+  | _ -> ""
+
 (** Compile the entry file to [output]. [target] is passed as --target <t>;
     omitting it compiles to a native binary.
     Returns [(exit_code, n_errors, n_warnings)]. *)
@@ -740,12 +748,8 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target () =
           print_build_summary ~t0 ~errors:te ~warnings:tw;
           Error "typecheck failed"
         end else begin
-          let output_ext = match target with
-            | Some ("js" | "javascript") -> ".mjs"
-            | Some t when String.length t >= 4 && String.sub t 0 4 = "wasm" -> ".wasm"
-            | _ -> ""
-          in
-          let output = Filename.concat build_dir (proj.Project.name ^ output_ext) in
+          let output =
+            Filename.concat build_dir (proj.Project.name ^ output_ext target) in
           (* FFI shim flags: [[ffi]] C sources/links plus, if declared, a built
              [[ffi.rust]] staticlib archive (shared with [forge test]). *)
           match ffi_flags_full ~target_is_cross:(target_subdir <> "") proj with
