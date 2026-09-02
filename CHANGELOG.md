@@ -27,6 +27,20 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- Multi-head function heads now count as structural recursion, so an ordinary
+  recursive tree walk written with function heads compiles. Desugar merges
+  multiple parameters into a tuple scrutinee, which the tail-call checker did
+  not recognise as a parameter, so every head binder lost its
+  structurally-smaller status and the same code that compiles as an explicit
+  `match` was a hard error in head form. The two spellings now reach the same
+  verdict.
+
+- The tail-call checker no longer accepts recursion that cannot terminate. A
+  match arm binder naming the WHOLE scrutinee — `match x do y -> f(y) end`,
+  where `y` is `x` — was treated as structurally smaller and accepted.
+  Arithmetic reduction on such a binder (`f(y - 1)`, as in `fib`) is still
+  accepted, since that genuinely decreases.
+
 - The formatter no longer deletes compiler attributes. `format.ml` never read
   `fn_attrs`, so every `@[...]` was silently dropped — and that is not
   cosmetic: `@[no_warn_recursion]` suppresses a hard error, so format-on-save
