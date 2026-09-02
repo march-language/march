@@ -13,17 +13,27 @@
 #   scripts/run-tests.sh stdlib_march    # the .march stdlib test files
 #   scripts/run-tests.sh test_jit        # the REPL-JIT / --jit alcotest suite
 #   scripts/run-tests.sh lsp             # the LSP analysis suite (lsp/test/)
+#   scripts/run-tests.sh refinecheck     # the z3-backed refinement-check suite
 #
 # Suites: compiler, eval, codegen, stdlib, stdlib_march, test_jit, lsp, utf16,
-# jsonrpc, incremental, query_cli.  The first four are test/run_<name>.exe;
-# stdlib_march is test/test_stdlib_march.exe, which runs the .march test files
-# under test/stdlib/; test_jit is test/test_jit.exe, which drives the REPL JIT
-# / `march --jit` as subprocesses of a freshly built bin/main.exe.  The last
-# five live under lsp/test/, not test/ — see LSP_RUNNERS below.
+# jsonrpc, incremental, query_cli, refinecheck.  The first four are
+# test/run_<name>.exe; stdlib_march is test/test_stdlib_march.exe, which runs
+# the .march test files under test/stdlib/; test_jit is test/test_jit.exe,
+# which drives the REPL JIT / `march --jit` as subprocesses of a freshly built
+# bin/main.exe; refinecheck is test/test_refinecheck.exe, the z3-gated
+# refinement-checker corpus (~550 cases, ~3.5-4.5 min with z3 present — see
+# the z3 checks below). The next five live under lsp/test/, not test/ — see
+# LSP_RUNNERS below.
 #
 # Slow tests skipped by -q: repl_compiler_parity (JIT parity, ~5s),
 #   compiled adversarial regressions (~5s), pbkdf2 key derivation (~3s), and
 #   test_jit's ORC/clang REPL-session and --jit-file cases (~5-10s).
+#   test_refinecheck is FULL-RUN-ONLY: none of its cases carry a `Slow tag (so
+#   -q would not shorten it anyway; it takes -e/-q like every alcotest binary,
+#   but every case is `Quick), and at ~4 minutes it dominates a "quick" loop's
+#   budget for no savings.  -q with no suite names therefore excludes it from
+#   the default set; name it explicitly (`scripts/run-tests.sh refinecheck` or
+#   `-q refinecheck`) to run it anyway.
 #
 # test_jit is NOT a plain alcotest exe: `dune runtest` normally runs it with
 # HOME and MARCH_BIN pinned (see the `(test (name test_jit) ...)` stanza in
@@ -91,9 +101,13 @@ fi
 # feature in the tree and still see a fully green `scripts/run-tests.sh`.  They
 # live under lsp/test/, not test/, so the exe path is per-runner from here on.
 ALL_RUNNERS=(run_compiler run_eval run_codegen run_stdlib test_stdlib_march test_jit
-             test_lsp test_utf16 test_jsonrpc test_incremental test_query_cli)
+             test_lsp test_utf16 test_jsonrpc test_incremental test_query_cli test_refinecheck)
 # Suites whose executable is lsp/test/<name>.exe rather than test/<name>.exe.
 LSP_RUNNERS=(test_lsp test_utf16 test_jsonrpc test_incremental test_query_cli)
+# Runners excluded from the DEFAULT (no suite names given) set under -q; see
+# the "test_refinecheck is FULL-RUN-ONLY" note above.  Naming a runner
+# explicitly always runs it, -q or not — this list only affects defaulting.
+QUICK_DEFAULT_EXCLUDE=(test_refinecheck)
 QUICK_FLAG=""
 
 is_lsp_runner() {
@@ -135,7 +149,18 @@ for arg in "$@"; do
     exit 2
   fi
 done
-[[ ${#RUNNERS[@]} -eq 0 ]] && RUNNERS=("${ALL_RUNNERS[@]}")
+if [[ ${#RUNNERS[@]} -eq 0 ]]; then
+  RUNNERS=("${ALL_RUNNERS[@]}")
+  if [[ -n "$QUICK_FLAG" ]]; then
+    FILTERED=()
+    for r in "${RUNNERS[@]}"; do
+      excluded=0
+      for e in "${QUICK_DEFAULT_EXCLUDE[@]}"; do [[ "$r" == "$e" ]] && excluded=1; done
+      [[ $excluded -eq 0 ]] && FILTERED+=("$r")
+    done
+    RUNNERS=("${FILTERED[@]}")
+  fi
+fi
 
 # Optionally clear stale daemon before starting (useful after a crashed session)
 if [[ -n "${MARCH_DUNE_SHUTDOWN:-}" ]]; then
@@ -177,7 +202,32 @@ FAILED=0
 for runner in "${RUNNERS[@]}"; do
   echo ""
   echo "==> ${runner}"
-  if [[ "$runner" == "test_jit" ]]; then
+  if [[ "$runner" == "test_refinecheck" ]]; then
+    # test_refinecheck's ~550 z3-gated cases call Alcotest.skip when no z3
+    # binary is found (see the `gated` helper and its comment in
+    # test/test_refinecheck.ml). Alcotest.skip is reported as [SKIP], not
+    # [OK], so it does not lie case-by-case -- but alcotest still EXITS 0 and
+    # prints "Test Successful" when EVERY test it ran was a skip, so a bare
+    # `run-tests.sh` on a z3-less machine would show this suite as green
+    # while verifying almost nothing about lib/refinecheck/. Check for z3
+    # directly (the same signal test/test_refinecheck.ml's z3_available ()
+    # uses) rather than parsing alcotest's text output, and fail the whole
+    # script loudly instead of letting that silently pass as "All suites
+    # passed."
+    if ! command -v z3 &>/dev/null; then
+      echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" >&2
+      echo "!! z3 not found on PATH.  test_refinecheck's ~550 z3-gated cases"     >&2
+      echo "!! will ALL report [SKIP], and alcotest still exits 0 ('Test"         >&2
+      echo "!! Successful') on an all-skipped run -- this run verifies almost"    >&2
+      echo "!! NOTHING about lib/refinecheck/.  Install z3 (see"                  >&2
+      echo "!! .github/actions/march-setup/action.yml) and re-run."               >&2
+      echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" >&2
+      FAILED=1
+    fi
+    if ! $TIMEOUT_CMD ./_build/default/test/${runner}.exe -e $QUICK_FLAG; then
+      FAILED=1
+    fi
+  elif [[ "$runner" == "test_jit" ]]; then
     # test_jit spawns bin/main.exe as a subprocess for REPL/--jit sessions
     # (see test/dune's `(test (name test_jit) ...)` stanza) and silently
     # SKIPS those cases — reported as passing — if MARCH_BIN doesn't resolve

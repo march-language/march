@@ -58,15 +58,16 @@ scripts/run-tests.sh -q stdlib         # quick subset
 scripts/run-tests.sh stdlib_march      # the .march test files under test/stdlib/
 scripts/run-tests.sh test_jit          # REPL-JIT / --jit alcotest suite
 scripts/run-tests.sh lsp               # the LSP analysis suite (lsp/test/)
+scripts/run-tests.sh refinecheck       # z3-backed refinement-check suite (full-run only, ~4min)
 
 # Suites: compiler, eval, codegen, stdlib, stdlib_march, test_jit, lsp, utf16,
-# jsonrpc, incremental, query_cli. The last five are the LSP suites and live
-# under lsp/test/, not test/. An unknown
+# jsonrpc, incremental, query_cli, refinecheck. The five before refinecheck are
+# the LSP suites and live under lsp/test/, not test/. An unknown
 # name is a hard error listing the known suites, not a confusing dune build
 # failure.
 
 # 2. Direct binary invocation (no dune RPC at execution time)
-dune build test/run_compiler.exe test/run_eval.exe test/run_codegen.exe test/run_stdlib.exe test/test_stdlib_march.exe test/test_jit.exe
+dune build test/run_compiler.exe test/run_eval.exe test/run_codegen.exe test/run_stdlib.exe test/test_stdlib_march.exe test/test_jit.exe test/test_refinecheck.exe
 ./_build/default/test/run_compiler.exe -e
 ./_build/default/test/run_eval.exe -e
 ./_build/default/test/run_codegen.exe -e
@@ -76,6 +77,11 @@ dune build test/run_compiler.exe test/run_eval.exe test/run_codegen.exe test/run
 # silently skip (reported as passing) — scripts/run-tests.sh sets this for
 # you; direct invocation needs it explicitly:
 MARCH_BIN="$PWD/_build/default/bin/main.exe" ./_build/default/test/test_jit.exe -e
+# test_refinecheck needs z3 on PATH or its ~550 z3-gated cases all report
+# [SKIP] while alcotest still exits 0 ("Test Successful") — scripts/run-tests.sh
+# checks for z3 and fails loudly if it's missing; direct invocation does not,
+# so check `command -v z3` yourself first.
+./_build/default/test/test_refinecheck.exe -e
 # The LSP suites live under lsp/test/. test_jsonrpc drives a real march-lsp
 # process over stdio, so lsp/bin/main.exe must be built or all 22 of its cases
 # die with Unix.ENOENT; and they are cwd-sensitive -- run them from the repo
