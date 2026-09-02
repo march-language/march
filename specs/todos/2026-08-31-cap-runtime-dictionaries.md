@@ -419,25 +419,84 @@ must refuse an artifact built with `--test`. The failure mode is a library that
 mocks IO for its own tests and ships the mock. It is not as strong as rule 2, and
 should not be described as if it were.
 
-## Interaction with `lib/caps/cap_rows.ml` — worse, and load-bearing (do not fix here)
+## Interaction with `lib/caps/cap_rows.ml` — nothing to fix; the behaviour is right
 
-`d.send(…)` has a field projection as its head. `cls_of_rhs` has no `EField` arm,
-so it falls to `COpaque`; `app`'s `Some COpaque` branch sets `sd_unknown := true`.
-Per `cap_rows.mli`, a narrow grant over a function whose row has `unknown` is
-**refused**, not granted.
+**This section has now been wrong twice.** Both corrections are kept, because
+the errors are more instructive than the conclusion: it was written from
+reading the code's shape rather than running it, twice, and was wrong about the
+mechanism, the blast radius, and the remedy.
 
-So dictionaries make cap-row precision strictly **worse**, and worse in a way that
-matters: dictionary dispatch would become the ordinary way to *use* a capability,
-so a refusal that today fires on unusual code would fire on ordinary code.
+### Correction 1: the blast radius (measured)
 
-Two directions for the separate fix, recorded only:
+It first claimed dictionaries make precision worse "in a way that matters:
+dictionary dispatch would become the ordinary way to use a capability, so a
+refusal that today fires on unusual code would fire on ordinary code."
 
-- Classify a projection off a known cap-typed value as `CParams`/`CCharged` rather
-  than `COpaque` — the dictionary's origin *is* traceable; it is a `cap_impl` site.
-- Charge the dictionary's fields at the `cap_impl` site, the way `CCharged`
-  charges a lambda literal's body at the site that built it.
+Measured with `MARCH_DUMP_CAP_ROWS=1`, a hook whose own comment says it exists
+to make this refusal's blast radius measurable rather than assumed:
 
-Both are `cap_rows` work, not dictionary work.
+| | rows | `unknown` |
+|---|---|---|
+| baseline | 2733 | 127 |
+| under `--test` | 2812 | 192 |
+
+All 65 added rows are generated `__march_dispatch_*` wrappers, and **none
+reaches user code**: the operation rewrite happens in TIR, so at the point
+`cap_rows` runs nothing in the AST calls a wrapper and there is no reference
+edge to propagate along. IO mocking costs nothing. Only HAND-WRITTEN dictionary
+dispatch marks the function performing it `unknown`.
+
+### Correction 2: the mechanism, and why there is no fix
+
+It then said: "`cls_of_rhs` has no `EField` arm, so it falls to `COpaque`;
+`app`'s `Some COpaque` branch sets `sd_unknown := true`", and proposed two
+fixes on that basis.
+
+Both halves are wrong. `d.emit(s)` has head `EField (EVar d, "emit")`, which is
+neither `EVar` nor `ELam`, so it hits `app`'s catch-all:
+
+```ocaml
+| _ -> unknown := true; charge_unknown_callee shapes
+```
+
+`cls_of_rhs` is not consulted for a call head at all — only for `let`-bound
+right-hand sides. And adding an `EField` arm would change nothing anyway: the
+base is a match binder, and `EMatch` classifies binders `COpaque`
+(`cap_rows.ml:138`), so the arm would derive `COpaque` and set `unknown`
+regardless.
+
+**More importantly, the proposed fixes were UNSOUND.** `unknown` means "this
+function's reach cannot be determined statically, so refuse to certify a narrow
+grant over it". For a function dispatching through a dictionary that is exactly
+true: what it reaches is whatever dictionary someone else installed. Certifying
+it console-only would be a lie.
+
+The system is nonetheless sound overall, and it is worth knowing why — a
+dictionary closure cannot smuggle capabilities past `needs`. Verified:
+
+```march
+mod Attrib do
+  needs IO.Console
+  type Ops = { emit : (String) -> Int }
+  fn mk() : Ops do
+    { emit: fn s -> do let _ = file_write("/tmp/x", s)  string_length(s) end }
+  end
+end
+```
+
+```
+function bodies in `Attrib` call builtins that require `Cap(IO.FileWrite)`,
+but `Attrib` declares no matching `needs`.
+```
+
+So a mock's capabilities are charged to the module that WRITES it, and the
+dispatcher's `unknown` is a correct description of the dispatcher rather than
+the only thing standing between a mock and unchecked authority.
+
+**Conclusion: do not "fix" this.** The conservative refusal is the intended
+semantics. If a future change makes hand-written dictionary dispatch common
+enough that the refusal chafes, the question to ask is whether a narrow grant
+over such a function is meaningful at all — not how to make `cap_rows` say yes.
 
 ## Is this an effect system? No — and the missing half is the larger half
 
@@ -741,6 +800,18 @@ Also: neither `MARCH_CAP_PASSING` nor the mocking predicate was in `cas_flags`,
 so a build with the pass on shared a CAS entry with one without — the
 "pass off" run printed the mocked output. Same omission as `--test` itself,
 found the same way.
+
+### The end-to-end test is now wired in
+
+`test/cap_mock/cap_mock_io.march` runs under `@test/runtest`, compiled with
+`--test` and diffed against `.expected`. Proved non-vacuous by disabling the
+dispatch rewrite and watching the diff fail, then restoring.
+
+The fixture stays OUT of `test/native/`: that directory is swept by the LLVM IR
+validity gate (`test_ir_verify.ml`), which compiles every `.march` in it
+WITHOUT `--test` — and without `--test` there is no implementation of
+`cap_ops_empty` to link, so the sweep would fail on it. Anything needing
+`--test` to compile belongs elsewhere.
 
 ### Still open
 

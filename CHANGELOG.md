@@ -11,7 +11,26 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- **Mock an IO effect in a test.** `with_cap(mock, fn _ -> code_under_test())`
+  swaps a capability's implementation for a lexical region, and the code under
+  test needs no capability parameter and names no capability — in a `--test`
+  build the compiler threads one in and routes the operation through the
+  capability's dictionary. An IO capability's dictionary shape is derived from
+  the compiler's own tables (`march --emit-io-ops`), so there is nothing to
+  hand-write: start from `cap_ops_empty(c)` and override the one operation you
+  care about. Release builds are untouched. Console, clock, randomness,
+  filesystem and network are fully mockable; `IO.Mut` is not (every `vault_*`
+  is polymorphic, and a dictionary field would need rank-2 types), and
+  operations inside actor handlers are not reached.
+
 ### Fixed
+
+- `forge build` and `forge test` no longer share a compilation-cache entry.
+  `--test` emits a different program (a test-runner entry point) but was absent
+  from the cache key, so whichever ran first won: `forge build` could hand you
+  the test runner, or `forge test` the plain binary.
 
 - Typing in the editor no longer silently rewrites the same identifier
   elsewhere in the file. The LSP answered `textDocument/linkedEditingRange`

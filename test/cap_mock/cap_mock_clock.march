@@ -1,0 +1,36 @@
+mod CapMockClock do
+  -- Capability mocking as a user actually writes it: inside a `test` block,
+  -- with the assertions doing the checking.
+  --
+  -- The determinism claim is the point, so this proves the MOCK is what
+  -- produces it rather than the call being trivial: the same `stamp()` is
+  -- called before, inside, and after `with_cap`. The outer two must return a
+  -- real epoch-millisecond clock reading; only the middle one is 1234. A test
+  -- that asserted the mocked value alone would also pass if `unix_time_ms`
+  -- simply returned 1234 always.
+  --
+  -- `root_cap` is nameable in a test body and nowhere else (accept/t146,
+  -- reject/t152), which is what gives a test something to attenuate from.
+  needs IO.Console
+  needs IO.Clock
+
+  -- code under test: takes no capability and names none
+  pfn stamp() : Int do
+    unix_time_ms()
+  end
+
+  test "a clock mock is scoped to with_cap" do
+    let c : Cap(IO.Clock) = cap_narrow(root_cap)
+    let before = stamp()
+    let mock = cap_impl(c, { cap_ops_empty(c) with
+      unix_time_ms: Some(fn _ -> 1234) })
+    let mocked = with_cap(mock, fn _ -> stamp())
+    let after = stamp()
+    -- Test.assert_eq is (expected, actual) -- note this is the OPPOSITE order
+    -- from Test.assert_eq_int(got, expected) in the same module, so getting it
+    -- backwards prints a failure that reads inside out.
+    Test.assert_eq(1234, mocked, "inside with_cap the mock is in force")
+    Test.assert_true(before > 1700000000000, "before with_cap: the real clock")
+    Test.assert_true(after > 1700000000000, "after with_cap: the real clock again")
+  end
+end
