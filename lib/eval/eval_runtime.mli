@@ -208,3 +208,7 @@ val recv_timeout_msg : string
 
 val tcp_wait_readable :
   Unix.file_descr -> float option -> [ `Error of string | `Ready | `Timeout ]
+
+(** {1 Program argv override} *)
+
+val program_argv : string list option ref

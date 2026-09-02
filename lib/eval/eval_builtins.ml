@@ -3195,7 +3195,10 @@ let base_env : env =
         | _ -> eval_error "process_exit: expected Int"))
   ; ("process_argv", VBuiltin ("process_argv", function
         | [] ->
-          let args = Array.to_list Sys.argv in
+          let args = match !program_argv with
+            | Some argv -> argv
+            | None -> Array.to_list Sys.argv
+          in
           List.fold_right (fun s acc -> VCon ("Cons", [VString s; acc]))
             args (VCon ("Nil", []))
         | _ -> eval_error "process_argv: no arguments expected"))

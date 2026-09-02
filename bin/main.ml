@@ -4187,6 +4187,7 @@ let () =
     exit 0
   end;
   let files = ref [] in
+  let prog_args = ref None in
   let specs = [
     ("--dump-tir",     Arg.Set dump_tir,     " Print TIR instead of evaluating");
     ("--dump-phases",  Arg.Set dump_phases,  " Serialize each IR stage to march-phases/phases.json");
@@ -4207,6 +4208,8 @@ let () =
                      "<flag>  Extra linker flag for FFI (e.g. -lz); repeatable");
     ("--ffi-so",     Arg.String (fun p -> March_eval.Eval.ffi_shim_so := Some p),
                      "<path.so>  Pre-compiled FFI shim .so to dlopen in interpreter mode");
+    ("--args",       Arg.Rest_all (fun l -> prog_args := Some l),
+                     " Pass every remaining argument to the program as its argv; must come last");
     ("--check",      Arg.Set do_check,    " Typecheck only — parse, resolve imports, typecheck, then exit (no codegen or eval)");
     ("--cap-strict", Arg.Set cap_strict, " Treat `needs` as a hard ceiling (the DEFAULT since 2026-08-08; accepted for compatibility and to state the intent explicitly)");
     ("--no-cap-strict", Arg.Clear cap_strict, " Do not enforce `needs` as a ceiling: allow a module's emitted code to use capabilities it does not declare");
@@ -4297,5 +4300,13 @@ let () =
       ~finally:(fun () -> March_jit.Repl_jit.cleanup jit_ctx)
       (fun () ->
         March_repl.Repl.run ~stdlib_decls:(load_stdlib ()) ~jit_ctx:(Some jit_ctx) ())
-  | [f] -> compile f
+  | [f] ->
+    (* --args makes the program's argv explicit; leaving [program_argv] as None
+       preserves the historical behaviour (the compiler's own Sys.argv) for
+       every caller that does not pass it.  Inert under --compile/--check,
+       where argv comes from the executed binary or is never read. *)
+    (match !prog_args with
+     | Some args -> March_eval.Eval.program_argv := Some (f :: args)
+     | None -> ());
+    compile f
   | _   -> Printf.eprintf "Usage: march [options] [file.march]\n"; exit 1

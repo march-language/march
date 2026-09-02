@@ -1240,3 +1240,17 @@ let tcp_wait_readable (sock : Unix.file_descr) (deadline : float option)
        with
        | Unix.Unix_error (Unix.EINTR, _, _) -> `Ready  (* re-poll on the next recv *)
        | Unix.Unix_error (err, _, _) -> `Error (Unix.error_message err))
+
+(** argv the running March program should see, when the driver supplies one.
+
+    [None] — the default, and what a bare `march f.march` still does — means
+    [process_argv] falls back to the compiler process's own [Sys.argv].
+    `march f.march --args a b` sets [Some ["f.march"; "a"; "b"]] so a script run
+    by `forge run f.march -- a b` sees its own arguments, matching what the same
+    program sees compiled and executed directly.
+
+    It lives here rather than in eval.ml beside [ffi_shim_so] because
+    [Eval_builtins] must read it, and [Eval_builtins] only opens the modules
+    earlier in the include chain.  eval.ml's [include Eval_runtime] re-exports
+    it, so bin/main.ml still reaches it as [March_eval.Eval.program_argv]. *)
+let program_argv : string list option ref = ref None
