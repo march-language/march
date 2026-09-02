@@ -1896,6 +1896,26 @@ typedef struct march_actor_meta {
      * march_send_checked. Release-store on write, acquire-load on every
      * cross-thread read — same shape as pid_index/green_thread (Tasks 10/15). */
     _Atomic int64_t              epoch;    /* Current epoch; incremented on revocation */
+    /* Capability-passing (--test builds only): the capability captured at the
+     * SPAWN site, so that an actor handler can dispatch through its dictionary.
+     *
+     * A handler is entered from the scheduler, not from an elaborated caller,
+     * so there is nobody to thread a capability parameter from — the dispatch
+     * function's arity is frozen because the actor record holds it as
+     * $d_dispatch.  The spawn site DOES have the capability in scope, so it is
+     * captured here and read back by the dispatch.
+     *
+     * Kept on the meta rather than as a field on the actor record on purpose:
+     * the record's layout is pinned by the C runtime's hardcoded word indices
+     * (a[2]=dispatch, a[3]=alive) AND is what migrate_state, hot reload and
+     * @compat all reason about.  The meta is runtime-internal and none of them
+     * see it.
+     *
+     * NULL — the overwhelming case, every release build — means "no captured
+     * capability", which reads back as the plain sentinel and takes the
+     * ambient path. _Atomic for the same reason as green_thread: written on
+     * the spawning thread, read on the actor's own. */
+    _Atomic(void *)             spawn_cap;
     /* Phase 5: non-zero for actors compiled with --hot-reload.
      * Holds the dispatch-table NAME_ID of the actor's _dispatch function.
      * Used by actor_green_thread for dispatch-table lookup (enabling function
@@ -4137,6 +4157,25 @@ static void *march_spawn_common(void *actor, int defer_activation) {
      * the background thread before returning. */
     march_ensure_sched_started();
     return actor;
+}
+
+/* Capability-passing: attach the spawn-site capability to an actor, and read
+ * it back from inside the actor's dispatch.  Both take the ACTOR pointer,
+ * which is what march_actor_meta is keyed by and what the spawn lowering has
+ * in hand (`let $raw_actor = Name_spawn() in spawn($raw_actor)`).
+ *
+ * Set is called AFTER march_spawn, because march_spawn is what creates the
+ * meta.  Reading an actor with no meta, or one spawned outside a --test build,
+ * yields NULL — the plain sentinel — so the ambient path runs. */
+void march_set_actor_caps(void *actor, void *caps) {
+    march_actor_meta *m = find_meta(actor);
+    if (m) atomic_store_explicit(&m->spawn_cap, caps, memory_order_release);
+}
+
+void *march_actor_caps(void *actor) {
+    march_actor_meta *m = find_meta(actor);
+    if (!m) return NULL;
+    return atomic_load_explicit(&m->spawn_cap, memory_order_acquire);
 }
 
 void *march_spawn(void *actor) {

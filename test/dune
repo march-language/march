@@ -1304,6 +1304,41 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff cap_mock/cap_mock_io.expected cap_mock_io.out)))
 
+; ── Capability mocking reaching an actor handler ──────────────────────────
+; The handler is entered from the scheduler, so the capability cannot be
+; threaded in as a parameter -- the dispatch function's arity is frozen because
+; the actor record holds it as $d_dispatch. It is captured at the SPAWN site
+; onto the actor's runtime metadata (march_actor_meta) and read back by the
+; dispatch.
+;
+; Two actors, and which one is mocked is the point: `outside` is spawned before
+; the mock exists but SENT TO after the with_cap block closes, so a global or
+; dynamically-scoped slot would give the wrong answer for the wrong reason.
+; Capturing per-actor at spawn makes it depend on where each actor was created,
+; not on when it runs.
+(rule
+ (targets cap_mock_actor_bin cap_mock_actor.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (source_tree ../stdlib)
+       (file cap_mock/cap_mock_actor.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --test -o cap_mock_actor_bin
+        cap_mock/cap_mock_actor.march)
+   (with-stdout-to cap_mock_actor.out (system "./cap_mock_actor_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff cap_mock/cap_mock_actor.expected cap_mock_actor.out)))
+
 ; ── Capability mocking as a user writes it: inside a `test` block ─────────
 ; Companion to cap_mock_io above, which drives `main` and diffs stdout. This
 ; one uses the real API surface -- a `test` block, `root_cap` attenuated to the

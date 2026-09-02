@@ -1,0 +1,39 @@
+mod CapMockActor do
+  -- Capability mocking reaching an ACTOR handler.
+  --
+  -- The handler is entered from the scheduler, not from an elaborated caller,
+  -- and the dispatch function's arity is frozen because the actor record holds
+  -- it as `$d_dispatch`. So the capability cannot be threaded in as a
+  -- parameter; it is captured at the SPAWN site onto the actor's runtime
+  -- metadata and read back by the dispatch.
+  --
+  -- Two actors, and which one is mocked is the whole test. `outside` is
+  -- spawned before the mock exists; `inside` is spawned within `with_cap`.
+  -- `outside` is then sent its message AFTER the `with_cap` block has closed,
+  -- so a global or dynamically-scoped capability slot would leave it unmocked
+  -- for the wrong reason. Capturing per-actor at spawn is what makes the
+  -- answer depend on where each actor was created rather than on when it runs.
+  needs IO.Console
+
+  actor Logger do
+    state { n : Int }
+    init  { n: 0 }
+    on Say(s : String) do
+      print_line("A:" ++ s)
+      { state with n: state.n + 1 }
+    end
+  end
+
+  fn main(c : Cap(IO.Console)) do
+    let outside = spawn(Logger)
+    let mock = cap_impl(c, { cap_ops_empty(c) with
+      print_line: Some(fn s -> print("MOCK[" ++ s ++ "]\n")) })
+    with_cap(mock, fn _ -> do
+      let inside = spawn(Logger)
+      send(inside, Say("in"))
+      run_until_idle()
+    end)
+    send(outside, Say("out"))
+    run_until_idle()
+  end
+end

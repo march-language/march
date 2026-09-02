@@ -13,6 +13,15 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- Capability mocking now reaches **actor handlers**. A handler runs on the
+  scheduler rather than under the caller that spawned it, so there was no
+  parameter to thread a capability through and an actor's IO stayed real while
+  everything around it was mocked. The capability is now captured at the
+  **spawn site**, so a mock reaches an actor spawned inside `with_cap` and not
+  one spawned outside it — regardless of when either actually runs. One
+  capability per actor for now; an actor whose handlers reach two keeps the
+  previous behaviour rather than a partly-wrong one.
+
 - **Mock an IO effect in a test.** `with_cap(mock, fn _ -> code_under_test())`
   swaps a capability's implementation for a lexical region, and the code under
   test needs no capability parameter and names no capability — in a `--test`

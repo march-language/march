@@ -859,6 +859,15 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_cap_impl(ptr %cap, ptr %dict)" };
   { march_name = "cap_dict"; c_name = Some "march_cap_dict"; ret_ty = Some (Tir.TCon ("Option", [Tir.TVar "a"]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_cap_dict(ptr %cap)" };
+  (* Capability capture across the actor boundary.  A handler is entered from
+     the scheduler, so there is no elaborated caller to thread a capability
+     from; the spawn site captures one onto the actor's runtime metadata and
+     the dispatch reads it back.  See march_set_actor_caps in the runtime for
+     why this lives on the meta rather than the actor record. *)
+  { march_name = "set_actor_caps"; c_name = Some "march_set_actor_caps"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void @march_set_actor_caps(ptr %actor, ptr %caps)" };
+  { march_name = "actor_caps"; c_name = Some "march_actor_caps"; ret_ty = Some (Tir.TCon ("Cap", [Tir.TVar "a"]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_actor_caps(ptr %actor)" };
   { march_name = "demonitor"; c_name = Some "march_demonitor"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_demonitor(i64 %ref)" };
   { march_name = "monitor"; c_name = Some "march_monitor"; ret_ty = Some Tir.TInt;
@@ -1578,6 +1587,8 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_mint_cap";
   PDeclare "march_cap_impl";
   PDeclare "march_cap_dict";
+  PDeclare "march_set_actor_caps";
+  PDeclare "march_actor_caps";
   PComment "; Monitor/supervision builtins";
   PDeclare "march_demonitor";
   PDeclare "march_monitor";

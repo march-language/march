@@ -1231,8 +1231,15 @@ intercepted behaves exactly as it does today.
 |---|---|
 | Polymorphic builtins — all of `vault_*`, so `IO.Mut` entirely | A dictionary field would need rank-2 types |
 | `println`, `random_bytes` | Shadowed by a stdlib March function, so the builtin is dead — intercept the `print_line` it delegates to |
-| Operations inside actor handlers | The scheduler reaches the handler through a function pointer in the actor record, so that function's arity is frozen and it supplies the ambient capability. The operation *is* routed through the dictionary — there is simply nothing to route it to. See `specs/todos/2026-09-01-actor-handlers-get-the-ambient-capability.md` |
+| An actor whose handlers reach **more than one** capability | The capability is captured at the spawn site onto the actor's runtime metadata, and that carries one. An actor reaching two would need a record of them captured instead — additive, not yet built |
 | Functions used as values rather than called directly | Their arity cannot change |
+
+**Actors are reached.** A handler runs on the scheduler, not under the caller
+that spawned it, so there is no parameter to thread a capability through — the
+dispatch function's arity is frozen because the actor record holds it. The
+capability is instead captured at the **spawn site** and read back by the
+dispatch, which means a mock reaches an actor spawned inside `with_cap` and
+does not reach one spawned outside it, regardless of when either actually runs.
 
 Fully mockable today: `IO.Console`, `IO.Clock`, `IO.Random`, `IO.FileRead`,
 `IO.FileWrite`, `IO.NetConnect`, `IO.NetConnect.TLS`, `IO.WebSocket`,
