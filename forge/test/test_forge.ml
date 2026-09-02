@@ -1535,7 +1535,7 @@ let ffi_flags_sample = " --ffi-c '/dep/native/sqlite_shim.c' --ffi-link '-lsqlit
 let test_interp_command_includes_ffi_flags () =
   let cmd =
     Cmd_run.interp_command ~lib_path_env:"MARCH_LIB_PATH=/p/lib "
-      ~dump_flag:"" ~ffi_flags:ffi_flags_sample ~entry:"/p/lib/app.march"
+      ~dump_flag:"" ~ffi_flags:ffi_flags_sample ~entry:"/p/lib/app.march" ()
   in
   Alcotest.(check bool) "--ffi-c reaches march" true
     (contains cmd "--ffi-c '/dep/native/sqlite_shim.c'");
@@ -1549,10 +1549,70 @@ let test_interp_command_no_ffi_is_unchanged () =
      command must not grow a stray separator. *)
   let cmd =
     Cmd_run.interp_command ~lib_path_env:"MARCH_LIB_PATH=/p/lib "
-      ~dump_flag:"" ~ffi_flags:"" ~entry:"/p/lib/app.march"
+      ~dump_flag:"" ~ffi_flags:"" ~entry:"/p/lib/app.march" ()
   in
   Alcotest.(check string) "no-ffi command shape"
     "MARCH_LIB_PATH=/p/lib march '/p/lib/app.march'" cmd
+
+let test_interp_command_passes_program_args () =
+  (* The program's own arguments ride behind --args, which must come LAST:
+     the compiler collects every remaining token there (Arg.Rest_all), so a
+     flag emitted after it would be swallowed as a program argument. *)
+  let cmd =
+    Cmd_run.interp_command ~lib_path_env:"MARCH_LIB_PATH=/p/lib "
+      ~dump_flag:"" ~ffi_flags:"" ~args:["alpha"; "two words"]
+      ~entry:"/p/lib/app.march" ()
+  in
+  Alcotest.(check string) "args follow the entry behind --args"
+    "MARCH_LIB_PATH=/p/lib march '/p/lib/app.march' --args 'alpha' 'two words'"
+    cmd
+
+let test_interp_command_empty_args_adds_nothing () =
+  (* An empty arg list must not grow a stray "--args": the no-args command is
+     what every existing caller (and forge watch) emits. *)
+  let cmd =
+    Cmd_run.interp_command ~lib_path_env:"MARCH_LIB_PATH=/p/lib "
+      ~dump_flag:"" ~ffi_flags:"" ~args:[] ~entry:"/p/lib/app.march" ()
+  in
+  Alcotest.(check string) "identical to the no-args command"
+    "MARCH_LIB_PATH=/p/lib march '/p/lib/app.march'" cmd
+
+let test_resolve_entry_missing_file () =
+  match Cmd_run.resolve_entry ~file:"/definitely/not/here.march" () with
+  | Ok _ -> Alcotest.fail "a missing file must not resolve"
+  | Error msg ->
+    Alcotest.(check bool) "error names the file" true
+      (contains msg "/definitely/not/here.march")
+
+let test_resolve_entry_directory_is_rejected () =
+  match Cmd_run.resolve_entry ~file:(Filename.get_temp_dir_name ()) () with
+  | Ok _ -> Alcotest.fail "a directory must not resolve as an entry"
+  | Error msg ->
+    Alcotest.(check bool) "error explains it is not a file" true
+      (contains msg "not a file")
+
+let test_resolve_entry_outside_a_project_runs_bare () =
+  (* Outside a project there is no forge.toml to read, so the file runs with no
+     MARCH_LIB_PATH and no FFI flags — the same fallback Cmd_test.run_files
+     already uses for ad-hoc test files. *)
+  let tmpdir = Filename.temp_dir "resolve_bare_" "" in
+  let file = Filename.concat tmpdir "scratch.march" in
+  let oc = open_out file in
+  output_string oc "mod Scratch do\n  fn main() do\n    ()\n  end\nend\n";
+  close_out oc;
+  let old_cwd = Sys.getcwd () in
+  Fun.protect
+    ~finally:(fun () ->
+        Unix.chdir old_cwd;
+        let _ = Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote tmpdir)) in ())
+    (fun () ->
+       Unix.chdir tmpdir;
+       match Cmd_run.resolve_entry ~file:"scratch.march" () with
+       | Error msg -> Alcotest.failf "expected a bare resolution, got: %s" msg
+       | Ok (entry, ctx) ->
+         Alcotest.(check string) "entry is the file as given" "scratch.march" entry;
+         Alcotest.(check string) "no lib path" "" ctx.Cmd_run.lib_path_env;
+         Alcotest.(check string) "no ffi flags" "" ctx.Cmd_run.ffi_flags)
 
 let test_repl_command_includes_ffi_flags_after_entry () =
   let cmd =
@@ -1743,6 +1803,16 @@ let () =
         test_interp_command_includes_ffi_flags;
       Alcotest.test_case "no [ffi] leaves the command unchanged" `Quick
         test_interp_command_no_ffi_is_unchanged;
+      Alcotest.test_case "program args ride behind --args" `Quick
+        test_interp_command_passes_program_args;
+      Alcotest.test_case "no program args leaves the command unchanged" `Quick
+        test_interp_command_empty_args_adds_nothing;
+      Alcotest.test_case "a missing FILE is rejected" `Quick
+        test_resolve_entry_missing_file;
+      Alcotest.test_case "a directory FILE is rejected" `Quick
+        test_resolve_entry_directory_is_rejected;
+      Alcotest.test_case "a FILE outside a project runs bare" `Quick
+        test_resolve_entry_outside_a_project_runs_bare;
       Alcotest.test_case "forge interactive puts ffi flags after the entry" `Quick
         test_repl_command_includes_ffi_flags_after_entry;
       Alcotest.test_case "bare REPL still gets the ffi flags" `Quick
