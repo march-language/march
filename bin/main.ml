@@ -2877,6 +2877,9 @@ let compile filename =
               end
             in
             let math_flag = if Sys.unix then " -lm" else "" in
+            (* musl needs an explicit -lucontext for the scheduler's green
+               threads; glibc has them in libc. See ucontext_link_flags. *)
+            let ucontext_flag = ucontext_link_flags () in
             let dbg_flag = if !debug_mode || !debug_tui_mode then " -g" else "" in
             let san_flag =
               match Sys.getenv_opt "MARCH_SANITIZE" with
@@ -3216,8 +3219,8 @@ let compile filename =
               | None      -> runtime ^ extra_c_files
             in
             let cmd = Printf.sprintf
-              "%s%s%s%s%s%s%s%s -Wno-unused-command-line-argument -fno-strict-aliasing -fwrapv%s%s%s%s %s%s%s%s%s %s -o %s%s%s%s"
-              cc_driver opt_flag dbg_flag san_flag rdynamic_flag so_flag arch_cflags section_cflags evloop_flag ffi_inc signing_define cap_sandbox_define runtime_inputs openssl_flags2 compress_flags2 blake3_flags2 ffi_link ll_file out_bin math_flag reload_ldl strip_flag in
+              "%s%s%s%s%s%s%s%s -Wno-unused-command-line-argument -fno-strict-aliasing -fwrapv%s%s%s%s %s%s%s%s%s %s -o %s%s%s%s%s"
+              cc_driver opt_flag dbg_flag san_flag rdynamic_flag so_flag arch_cflags section_cflags evloop_flag ffi_inc signing_define cap_sandbox_define runtime_inputs openssl_flags2 compress_flags2 blake3_flags2 ffi_link ll_file out_bin math_flag ucontext_flag reload_ldl strip_flag in
             (if Sys.getenv_opt "MARCH_ECHO_CC" <> None then
                Printf.eprintf "MARCH_CC_CMD: %s\n%!" cmd);
             let rc = Sys.command cmd in
