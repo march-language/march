@@ -494,9 +494,11 @@ let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
        can hold on the encoder's own axioms (`len(_) >= 0` needs no guard at
        all) while another is the one the withdrawn alias actually would have
        discharged.  [atomic_cmp] only recognises a single comparison, so
-       flatten [pred]'s `&&` spine here and test each conjunct in turn — a
-       single-comparison predicate is just a one-element spine, so this
-       subsumes the non-conjunctive case rather than special-casing it. *)
+       flatten [pred]'s `&&` spine here — same split [pred_spine] performs
+       at the promotion arm below, over the same [pred] (== [rp.pred]),
+       so the rendered fragments line up with [Partial_conjunct]'s own
+       [held]/[missing] strings, which [pred_str] produced from that exact
+       spine. *)
     let rec pred_conjuncts (e : A.expr) : A.expr list =
       match e with
       | A.EApp (A.EVar { A.txt = "&&"; _ }, [ a; b ], _) -> pred_conjuncts a @ pred_conjuncts b
@@ -504,27 +506,54 @@ let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
     in
     (* Does the guard fact [cond] — already known to apply [w]'s spelling to
        this subject, and already filtered to a POSITIVE path entry by the
-       caller below — actually ENTAIL some conjunct of [pred]?  The laundered
-       spelling (`if n > 0 …` after `let n = List.length(ys)`) is handled by
-       substituting the laundering name's bound expression in wherever
-       [cond] free-mentions it, one hop only — mirroring [guard_applies]'s
-       own laundered arm.  Only ONE conjunct needs the guard: the others, if
-       any, discharge some other way (an axiom, another fact) or the skip
-       would not be [Partial_conjunct] to begin with — [Partial_conjunct]
-       already means "the rest is decided", so this only has to place the
-       withdrawal at the one comparison it actually bears on. *)
+       caller below — actually ENTAIL the relevant conjunct(s) of [pred]?
+       The laundered spelling (`if n > 0 …` after `let n = List.length(ys)`)
+       is handled by substituting the laundering name's bound expression in
+       wherever [cond] free-mentions it, one hop only — mirroring
+       [guard_applies]'s own laundered arm.
+
+       [Partial_conjunct]'s [missing] is precisely the part the solver did
+       NOT discharge — [held] proved some other way (an axiom, most often),
+       so a guard that only reaches a HELD conjunct says nothing about
+       whether the withdrawal stopped anything: that was the round 4 review
+       finding (probe `ProbeA` — `len(_) >= 0 && len(_) < 5` under the same
+       withdrawn `List.length`, where the guard `List.length(ys) > 0`
+       entails only the axiom-held `len(_) >= 0`, leaves the missing
+       `len(_) < 5` untouched, and the prior version of this function still
+       said `alias-withdrawn`).  So for [Partial_conjunct], restrict the
+       conjuncts under test to [missing] ONLY, and require the guard to
+       discharge EVERY missing conjunct that even mentions the withdrawn
+       measure — not just one — or a guard covering only part of a
+       multi-conjunct [missing] would send the reader to rename a binding
+       that silences nothing.  A [missing] with no measured conjunct at all
+       means the withdrawal cannot be the cause; fail closed (`[]` is not
+       vacuously "all discharged").
+
+       [Solver_undecided] and [Unconstrained_subject] are not
+       conjunct-diagnosed — they carry no [missing] to restrict to — so they
+       keep the ORIGINAL whole-predicate test unchanged: a real match on
+       [pred] itself, `None` (never attributed) the moment [pred] is not a
+       single comparison. *)
     let guard_discharges (w : withdrawal) (cond : A.expr) : bool =
-      List.exists
-        (fun conjunct ->
-          match atomic_cmp (is_measured_pred w) conjunct with
-          | None -> false
-          | Some (op2, n2) ->
-            exists_discharging w (op2, n2) ~shadowed:[] cond
-            || List.exists
-                 (fun (m, rhs) ->
-                   expr_mentions_free m cond && exists_discharging w (op2, n2) ~shadowed:[] rhs)
-                 lets)
-        (pred_conjuncts pred)
+      let discharges_one (op2, n2) =
+        exists_discharging w (op2, n2) ~shadowed:[] cond
+        || List.exists
+             (fun (m, rhs) ->
+               expr_mentions_free m cond && exists_discharging w (op2, n2) ~shadowed:[] rhs)
+             lets
+      in
+      match r with
+      | Obligation.Partial_conjunct { missing; _ } ->
+        let measured_missing =
+          pred_conjuncts pred
+          |> List.filter (fun c -> List.mem (pred_str c) missing)
+          |> List.filter_map (atomic_cmp (is_measured_pred w))
+        in
+        measured_missing <> [] && List.for_all discharges_one measured_missing
+      | _ -> (
+        match atomic_cmp (is_measured_pred w) pred with
+        | None -> false
+        | Some cmp -> discharges_one cmp)
     in
     List.find_opt
       (fun w ->

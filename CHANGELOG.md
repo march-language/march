@@ -25,8 +25,8 @@ git log is authoritative for exact commits.
 
 - Refinement obligations the checker cannot discharge now report *why*. The
   single `solver-undecided` message has been split into three diagnosed causes —
-  an **unconstrained subject** (nothing in scope constrains the value the
-  predicate talks about), a **partially established conjunction** (naming which
+  an **unconstrained subject** (no fact the checker derived constrains the
+  value the predicate talks about), a **partially established conjunction** (naming which
   half holds and which does not), and an **opaque application** (the goal
   depends on a call the checker cannot see through) — with `solver-undecided`
   kept as the honest residual for "the solver returned unknown". A diagnosed

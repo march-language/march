@@ -5863,10 +5863,14 @@ end|}
        conjunct] in that function's guard this reports `partial-conjunct`
        ("guard the call") instead of `alias-withdrawn` ("rename the
        binding") — losing the attribution to the withdrawn alias even though
-       the withdrawal is exactly what stopped both conjuncts.  Per the
-       doc comment's own rule, "where both could describe the same skip, the
-       withdrawal wins".
-       Mutation that fails this: drop `Partial_conjunct _` from
+       the withdrawal is exactly what stopped the MISSING conjunct here.
+       `len(_) >= 0` is discharged by the encoder's own non-negativity
+       axiom regardless of any guard, so the withdrawal stops exactly ONE
+       conjunct, `len(_) > 0` — not both, and [guard_discharges] must only
+       ever be asked about that one ([Partial_conjunct]'s own [missing]).
+       Per the doc comment's own rule, "where both could describe the same
+       skip, the withdrawal wins".
+       Mutation (b) that fails this: drop `Partial_conjunct _` from
        [alias_withdrawal_cause]'s guard — this case goes RED (reports
        `partial-conjunct`) while the single-conjunct case above stays GREEN. *)
     gated "a withdrawn alias is attributed even when the predicate is a conjunction"
@@ -5896,6 +5900,51 @@ end|}
         Alcotest.(check bool)
           "names the withdrawn spelling" true
           (contains msg "List.length"));
+    (* The OVER-attribution guard (round 4 review, probe `ProbeA`): a guard
+       that only reaches the HELD conjunct must NOT be credited with
+       discharging the MISSING one.  `len(_) >= 0` is held on the
+       non-negativity axiom alone — no guard needed — so `List.length(ys) >
+       0` entails only that held half; the missing `len(_) < 5` is
+       completely untouched by the withdrawal (`List.length` returning
+       anything `> 0` says nothing about whether it is `< 5`).  Reporting
+       `alias-withdrawn` here would send the reader to rename a binding
+       that silences nothing — exactly what the doc comment's fail-closed
+       stance ("undecided means do not blame the withdrawal") exists to
+       prevent.  The competing `mod List` binding stays PRESENT in this
+       fixture on purpose: deleting it and finding the obligation STILL
+       undischarged (see the plain [partial_conjunct_suite] / [Undecided]
+       coverage of the same predicate without a withdrawal in scope) is
+       the proof that the withdrawal was never the cause — this fixture
+       pins that the checker does not even need that control to get it
+       right the first time.
+       Mutation (c) that fails this: change [guard_discharges] back to
+       testing ALL conjuncts of [pred] (today's pre-fix behaviour, not
+       just [missing]) — this case goes RED (reports `alias-withdrawn`)
+       while the case above stays GREEN. *)
+    gated "a withdrawn alias is NOT blamed when the guard only reaches the held conjunct"
+      (fun () ->
+        let msg =
+          refine_error_text_d
+            {|mod ProbeA do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) >= 0 && len(_) < 5}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) > 0 do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "attributes to the undischarged conjunct, not the withdrawal" true
+          (contains msg "partial-conjunct");
+        Alcotest.(check bool)
+          "does not over-attribute to the withdrawal" false
+          (contains msg "alias-withdrawn"));
     gated "an unrelated Int local named string_byte_length names itself"
       (fun () ->
         let msg =

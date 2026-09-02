@@ -49,11 +49,13 @@
    The four module aliases (A, Smt, Refine, Err) moved with the band and
    arrive through the include, so they are no longer declared above.
    The SMT encoding and sort discipline moved VERBATIM into [Refine_encode].
-   [include], not aliases: the included chain owns all 16 of this pass's
-   mutable cells (9 in [Refine_encode], 1 in [Refine_resolve], 6 in
-   [Refine_call]; [Refine_scope] and [Refine_post] declare none at top
-   level) and they are written from the far end of this file, so the SAME
-   ref cell must be in scope here — see [Refine_encode]'s header. *)
+   [include], not aliases: the included chain owns all 16 of the cells
+   reached through this include (9 in [Refine_encode], 1 in
+   [Refine_resolve], 6 in [Refine_call]; [Refine_scope] and [Refine_post]
+   declare none at top level — [Obligation.log] and [Witness]'s three cells
+   are pass state too, but they live outside this include chain) and they
+   are written from the far end of this file, so the SAME ref cell must be
+   in scope here — see [Refine_encode]'s header. *)
 (* ── §1–§11 moved out ─────────────────────────────────────────────────────
    §1–§6 (the SMT encoding and sort discipline) live in [Refine_encode];
    §7–§11 (reflection, rendering, and the two fact channels) live in
@@ -63,11 +65,12 @@
    brings both back, in their original order.  The four module aliases
    (A, Smt, Refine, Err) arrive through it too.
 
-   [include], not aliases: those bands own all 16 of this pass's mutable
-   cells (9 in [Refine_encode], 1 in [Refine_resolve], 6 in [Refine_call];
-   [Refine_scope] and [Refine_post] declare none at top level) and they are
-   written from the far end of this file, so the SAME ref cell must be in
-   scope here. *)
+   [include], not aliases: those bands own all 16 of the cells reached
+   through this include (9 in [Refine_encode], 1 in [Refine_resolve], 6 in
+   [Refine_call]; [Refine_scope] and [Refine_post] declare none at top
+   level — [Obligation.log] and [Witness]'s three cells are pass state too,
+   but they live outside this include chain) and they are written from the
+   far end of this file, so the SAME ref cell must be in scope here. *)
 include Refine_post
 
 (* =================================================================
