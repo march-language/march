@@ -27,6 +27,20 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- The formatter no longer deletes compiler attributes. `format.ml` never read
+  `fn_attrs`, so every `@[...]` was silently dropped — and that is not
+  cosmetic: `@[no_warn_recursion]` suppresses a hard error, so format-on-save
+  turned a compiling file into one that no longer builds.
+
+- A non-tail recursive call is no longer reported twice. The typechecker's
+  tail-call checker already reports every one of them, and the LSP emitted its
+  own `perf/non-tail-call` diagnostic at the same span, so the editor showed
+  two near-identical messages in one hover. The compiler's is kept — it is the
+  authority on error-vs-warning and it honours `@[no_warn_recursion]`.
+
+- Both non-tail-recursion hints now mention `@[no_warn_recursion]` as the
+  option when the depth is bounded and the stack use is acceptable.
+
 - `forge build` and `forge test` no longer share a compilation-cache entry.
   `--test` emits a different program (a test-runner entry point) but was absent
   from the cache key, so whichever ran first won: `forge build` could hand you

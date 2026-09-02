@@ -3196,7 +3196,28 @@ let analyse ~filename ~src : t =
          @ List.filter_map make_diag (Depot.fk_column_diagnostics depot_schemas ops))
     in
     let diags =
-      (Err.sorted errors |> List.filter_map (diag_to_lsp ~filename))
+      let compiler_diags =
+        Err.sorted errors |> List.filter_map (diag_to_lsp ~filename)
+      in
+      (* The typechecker's own tail-call checker already reports every
+         non-tail recursive call, at the same span, saying the same thing —
+         so emitting the `perf/non-tail-call` insight as well put two
+         near-identical messages in one hover. Keep the compiler's (it is the
+         authority on whether this is an error or a warning, and it honours
+         `@[no_warn_recursion]`) and drop the duplicate. Other perf insights
+         have no compiler counterpart and are unaffected. *)
+      let perf_diags =
+        let covered (d : Lsp.Types.Diagnostic.t) =
+          List.exists (fun (c : Lsp.Types.Diagnostic.t) -> c.range = d.range)
+            compiler_diags
+        in
+        List.filter (fun (d : Lsp.Types.Diagnostic.t) ->
+            match d.code with
+            | Some (`String "perf/non-tail-call") -> not (covered d)
+            | _ -> true)
+          perf_diags
+      in
+      compiler_diags
       @ !dead_code_diags
       @ unused_fn_diags
       @ perf_diags

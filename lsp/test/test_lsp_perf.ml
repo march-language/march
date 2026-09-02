@@ -210,13 +210,29 @@ mod Test do
 end
 |} in
   let a = analyse src in
-  let has_warning = List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
-      match d.code with
-      | Some (`String "perf/non-tail-call") -> true
-      | _ -> false
-    ) a.An.diagnostics
+  (* This used to assert a diagnostic carrying the `perf/non-tail-call` code.
+     That code is the LSP's own perf insight, and the typechecker's tail-call
+     checker ALREADY reports every non-tail recursive call at the same span —
+     so asserting the LSP's copy was asserting a duplicate, and the editor
+     showed the same complaint twice in one hover. What matters is that the
+     call is reported, once. Assert that instead of a particular producer. *)
+  let mentions_tail (d : Lsp.Types.Diagnostic.t) =
+    match d.message with
+    | `String m ->
+      let needle = "tail" in
+      let n = String.length needle and l = String.length m in
+      let rec go i = i + n <= l && (String.sub m i n = needle || go (i + 1)) in
+      go 0
+    | _ -> false
   in
-  Alcotest.(check bool) "non_tail_call warning in diagnostics" true has_warning
+  let tail_diags = List.filter mentions_tail a.An.diagnostics in
+  Alcotest.(check bool) "the non-tail call is reported" true
+    (List.length tail_diags >= 1);
+  (* No two reports of it at the same span — that was the duplication. *)
+  let spans = List.map (fun (d : Lsp.Types.Diagnostic.t) -> d.range) tail_diags in
+  let uniq = List.sort_uniq compare spans in
+  Alcotest.(check int) "reported once per span, not duplicated"
+    (List.length uniq) (List.length spans)
 
 let test_perf_non_tail_not_flagged_for_non_recursive () =
   (* foo calls bar, not itself — no TCO warning *)
