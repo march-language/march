@@ -908,10 +908,25 @@ end|} in
   Alcotest.(check bool) "in-scope param offered"  true  (has "alpha");
   Alcotest.(check bool) "in-scope let offered"    true  (has "beta");
   Alcotest.(check bool) "out-of-scope local hidden" false (has "gamma");
-  let alpha = List.find (fun (i : Lsp.Types.CompletionItem.t) ->
-      i.Lsp.Types.CompletionItem.label = "alpha") items in
-  Alcotest.(check (option string)) "locals rank first (sortText 0)"
-    (Some "0") alpha.Lsp.Types.CompletionItem.sortText
+  (* Assert the PROPERTY (a local outranks a non-local), not a literal
+     sortText. The literal was "0" until origin-aware ranking widened these to
+     two-character bands ("00" for locals) so that symbols defined in the file
+     being edited sort above imported/stdlib ones — an assertion on the exact
+     string breaks on any such re-banding while telling you nothing about
+     whether ordering is still correct. Clients sort lexicographically, so
+     compare the way a client would. *)
+  let sort_text_of label =
+    let it = List.find (fun (i : Lsp.Types.CompletionItem.t) ->
+        i.Lsp.Types.CompletionItem.label = label) items in
+    match it.Lsp.Types.CompletionItem.sortText with
+    | Some s -> s
+    | None -> Alcotest.fail (label ^ ": expected a sortText")
+  in
+  let alpha_rank = sort_text_of "alpha" in
+  (* `f` is a top-level fn in the same file: still ranked, but below locals. *)
+  let f_rank = sort_text_of "f" in
+  Alcotest.(check bool) "locals rank first (before same-file top-level fns)"
+    true (String.compare alpha_rank f_rank < 0)
 
 (* ------------------------------------------------------------------ *)
 (* Semantic tokens: ownership modifiers + use-site fidelity           *)

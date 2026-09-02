@@ -405,7 +405,7 @@ let () =
       "tail-recursive call not flagged",          `Quick, test_perf_tail_call_not_flagged;
       "non-tail inside constructor detected",     `Quick, test_perf_non_tail_inside_constructor;
       "ctor-wrapped advice states TRMC is opt-in",   `Quick, test_perf_constructor_wrapped_advice_is_not_accumulator;
-      "non-tail produces warning diagnostic",     `Quick, test_perf_non_tail_produces_warning_diagnostic;
+      "non-tail reported once, not duplicated",     `Quick, test_perf_non_tail_produces_warning_diagnostic;
       "non-recursive call not flagged",           `Quick, test_perf_non_tail_not_flagged_for_non_recursive;
     ];
     "perf insights: closure captures", [

@@ -303,8 +303,13 @@ let rec check_tail_position
             if is_boolop then
               "Hint: `&&`/`||` evaluate both sides in March. Rewrite `a || b` as \
                `if a do true else b end` (and `a && b` as `if a do b else false end`) \
-               to put the right-hand call in tail position."
-            else "Hint: Consider using an accumulator parameter."
+               to put the right-hand call in tail position.\n\
+               If the depth is bounded and you accept the stack use, annotate \
+               the function with `@[no_warn_recursion]`."
+            else
+              "Hint: Consider using an accumulator parameter.\n\
+               If the depth is bounded and you accept the stack use, annotate \
+               the function with `@[no_warn_recursion]`."
           in
           Err.error errors ~span:sp
             (Printf.sprintf
