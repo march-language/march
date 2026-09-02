@@ -140,6 +140,12 @@ git log is authoritative for exact commits.
   stack on deep input. The warning now says deep input can overflow, and
   describes TRMC as the opt-in it is (`--trmc`).
 
+- A return-contract counterexample no longer names an input the parameter's
+  own type excludes when the refinement sits below the top of the type (a
+  refined record field such as `{ v : {Int | _ > 0} }`, a refined type
+  argument, or a refinement under a linear wrapper). Such witnesses are now
+  declined, the same rule the call-site precondition path already applied;
+  a refinement at the top of the parameter type still confirms as before.
 - ARM Linux (`linux-aarch64`) has a working release artifact for the first
   time. Every v0.2.0 and v0.3.0 ARM archive shipped with an empty `bin/` and no
   compiler at all. Three defects were stacked behind one another: git refusing

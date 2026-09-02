@@ -583,6 +583,77 @@ let call_fn ~(name : string) ~(args : V.value list) : exec_result =
    §6  Confirmation: admissibility + execute + check
    ================================================================= *)
 
+(* A parameter type is *witness-safe* when [admissible] genuinely decides it.
+
+   [admissible] pattern-matches a single [A.TyRefine] at the top of the
+   declared type; a refinement anywhere else is silently unchecked.  Three
+   such places exist and all three parse today: a type argument
+   (`List({Int | _ > 0})`), a record field (`type Box = { v : {Int | _ > 0} }`)
+   and a [TyLinear] wrapper around the outer refinement (which [strip_refine]
+   sees through and [admissible] does not).  A zero-filled decode may then
+   produce a value the DECLARED type excludes, and confirming a panic on it
+   would report a requirement the caller never had.
+
+   Stated precisely, because the obvious phrasing overclaims: the checker does
+   not enforce nested refinements TODAY — `g([0, -5])` against
+   `List({Int | _ > 0})` passes `--check` in silence — so such a value is not
+   currently unconstructible, and this walk is defence-in-depth rather than a
+   live bug fix.  It closes the hole the moment nested enforcement lands, at
+   the cost of declining a witness (return-contract or call-site promotion)
+   whose parameters carry one.  Shared by [confirm_enumerative],
+   [confirm_post] and [confirm_precond_reachable].
+
+   So the walk rejects any refinement below the outermost position, and treats
+   an unknown type name as unsafe — an unregistered name may expand to
+   anything.
+
+   A type VARIABLE carries no refinement and is allowed here; a parameter
+   actually typed by one is declined further down by [decode_model], which has
+   no zero value for it. *)
+let rec refinement_free ~(seen : string list) (ty : A.ty) : bool =
+  match ty with
+  | A.TyRefine _ -> false
+  | A.TyLinear (_, t) -> refinement_free ~seen t
+  | A.TyVar _ | A.TyArrow _ | A.TyNat _ | A.TyNatOp _ | A.TyChan _ -> true
+  | A.TyTuple ts -> List.for_all (refinement_free ~seen) ts
+  | A.TyRecord fs -> List.for_all (fun (_, t) -> refinement_free ~seen t) fs
+  | A.TyCon (n, args) ->
+    List.for_all (refinement_free ~seen) args
+    && named_refinement_free ~seen n.A.txt
+
+(* A REGISTERED definition always wins over the built-in allowlist below: a
+   user is free to declare `type Option = Weird({Int | _ > 0})`, and
+   [zero_value] would build `Weird(0)` from that definition, so answering from
+   the allowlist would declare safe a type whose own definition is refined. *)
+and named_refinement_free ~(seen : string list) (name : string) : bool =
+  (* A recursive type is being proved by the frame that pushed it. *)
+  if List.mem name seen then true
+  else
+    let seen' = name :: seen in
+    match Hashtbl.find_opt type_ctors name with
+    | Some ctors ->
+      List.for_all
+        (fun (_, ats) -> List.for_all (refinement_free ~seen:seen') ats)
+        ctors
+    | None ->
+      (match Hashtbl.find_opt record_fields name with
+       | Some fs -> List.for_all (fun (_, t) -> refinement_free ~seen:seen' t) fs
+       | None ->
+         (* Not declared in this program: the primitives and the containers
+            [zero_value] builds structurally, whose arguments the caller
+            already walked.  Anything else may expand to anything. *)
+         (match name with
+          | "Int" | "Float" | "Bool" | "String" | "Char" | "Bytes" | "Unit"
+          | "List" | "Option" -> true
+          | _ -> false))
+
+(* [admissible] decides this parameter, and nothing below it hides a
+   refinement it cannot see. *)
+let witness_safe_param ((_, ty) : string * A.ty) : bool =
+  match ty with
+  | A.TyRefine (base, _, _) -> refinement_free ~seen:[] base
+  | t -> refinement_free ~seen:[] t
+
 (* Every parameter whose declared type carries a refinement must satisfy it —
    a "witness" the contract already excludes would blame the caller for an
    input the function never promises to handle.  Zero-filled don't-cares are
@@ -796,6 +867,7 @@ let confirm_enumerative ~(fn_name : string)
   | None -> None
   | Some params ->
     if params = [] then None
+    else if not (List.for_all witness_safe_param params) then None
     else
       let run cand =
         if admissible ~params cand then
@@ -946,75 +1018,6 @@ let render_entries (entries : (string * V.value) list) : string option =
    [annotated_params], [shrink], [battery] and [free_vars], all defined below
    that point.  (Names, not line numbers: the numbers rot on every edit.)
    ================================================================= *)
-
-(* A parameter type is *witness-safe* when [admissible] genuinely decides it.
-
-   [admissible] pattern-matches a single [A.TyRefine] at the top of the
-   declared type; a refinement anywhere else is silently unchecked.  Three
-   such places exist and all three parse today: a type argument
-   (`List({Int | _ > 0})`), a record field (`type Box = { v : {Int | _ > 0} }`)
-   and a [TyLinear] wrapper around the outer refinement (which [strip_refine]
-   sees through and [admissible] does not).  A zero-filled decode may then
-   produce a value the DECLARED type excludes, and confirming a panic on it
-   would report a requirement the caller never had.
-
-   Stated precisely, because the obvious phrasing overclaims: the checker does
-   not enforce nested refinements TODAY — `g([0, -5])` against
-   `List({Int | _ > 0})` passes `--check` in silence — so such a value is not
-   currently unconstructible, and this walk is defence-in-depth rather than a
-   live bug fix.  It closes the hole the moment nested enforcement lands, at
-   the cost of declining a promotion whose parameters carry one.
-
-   So the walk rejects any refinement below the outermost position, and treats
-   an unknown type name as unsafe — an unregistered name may expand to
-   anything.
-
-   A type VARIABLE carries no refinement and is allowed here; a parameter
-   actually typed by one is declined further down by [decode_model], which has
-   no zero value for it. *)
-let rec refinement_free ~(seen : string list) (ty : A.ty) : bool =
-  match ty with
-  | A.TyRefine _ -> false
-  | A.TyLinear (_, t) -> refinement_free ~seen t
-  | A.TyVar _ | A.TyArrow _ | A.TyNat _ | A.TyNatOp _ | A.TyChan _ -> true
-  | A.TyTuple ts -> List.for_all (refinement_free ~seen) ts
-  | A.TyRecord fs -> List.for_all (fun (_, t) -> refinement_free ~seen t) fs
-  | A.TyCon (n, args) ->
-    List.for_all (refinement_free ~seen) args
-    && named_refinement_free ~seen n.A.txt
-
-(* A REGISTERED definition always wins over the built-in allowlist below: a
-   user is free to declare `type Option = Weird({Int | _ > 0})`, and
-   [zero_value] would build `Weird(0)` from that definition, so answering from
-   the allowlist would declare safe a type whose own definition is refined. *)
-and named_refinement_free ~(seen : string list) (name : string) : bool =
-  (* A recursive type is being proved by the frame that pushed it. *)
-  if List.mem name seen then true
-  else
-    let seen' = name :: seen in
-    match Hashtbl.find_opt type_ctors name with
-    | Some ctors ->
-      List.for_all
-        (fun (_, ats) -> List.for_all (refinement_free ~seen:seen') ats)
-        ctors
-    | None ->
-      (match Hashtbl.find_opt record_fields name with
-       | Some fs -> List.for_all (fun (_, t) -> refinement_free ~seen:seen' t) fs
-       | None ->
-         (* Not declared in this program: the primitives and the containers
-            [zero_value] builds structurally, whose arguments the caller
-            already walked.  Anything else may expand to anything. *)
-         (match name with
-          | "Int" | "Float" | "Bool" | "String" | "Char" | "Bytes" | "Unit"
-          | "List" | "Option" -> true
-          | _ -> false))
-
-(* [admissible] decides this parameter, and nothing below it hides a
-   refinement it cannot see. *)
-let witness_safe_param ((_, ty) : string * A.ty) : bool =
-  match ty with
-  | A.TyRefine (base, _, _) -> refinement_free ~seen:[] base
-  | t -> refinement_free ~seen:[] t
 
 (* One clause parameter as [annotated_params] wants it. *)
 let clause_param (fp : A.fn_param) : string * A.ty option =
@@ -1266,6 +1269,13 @@ let confirm_post ~(fn_name : string) ~(fn_params : (string * A.ty option) list)
   match annotated_params fn_params with
   | None -> None
   | Some params ->
+    (* Same gate as [confirm_precond_reachable]: [admissible] cannot see a
+       refinement below the outermost position, so a zero-filled decode of
+       `Box = { v : {Int | _ > 0} }` yields `{ v: 0 }` and the reported
+       "but f({ v: 0 }) returns 0" blames an input the declared type
+       excludes.  Decline rather than duplicate the check. *)
+    if not (List.for_all witness_safe_param params) then None
+    else
     (match decode_model ~params ~model with
      | None -> None
      | Some args ->

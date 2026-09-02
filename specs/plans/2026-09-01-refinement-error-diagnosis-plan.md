@@ -855,6 +855,10 @@ return-contract witnesses — Task 9's CHANGELOG entry must mention it.
    type name as unsafe. This is the answer to "can `admissible` accept
    something no caller could pass"; refined type ALIASES do not parse, so that
    variant of the hole does not exist.
+   Follow-up (2026-09-01): `confirm_post` and `confirm_enumerative` had the
+   same hole (`but f({ v: 0 }) returns 0.` against `Box = { v : {Int | _ > 0} }`)
+   and now share this gate; the walk lives in §6 beside `admissible`. See
+   `specs/progress/2026-09-01-witness-nested-refinement-guard-return-contracts.md`.
 2. *Guarded clause.* A single clause carrying an `fc_guard` has a second
    acceptance condition `admissible` does not model; a candidate failing it
    crashes with a clause-match error rather than with the requirement being
