@@ -42,6 +42,33 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **The Linux release binaries are now actually statically linked.** Both Linux
+  archives were labelled `static: true` and promised "zero runtime
+  dependencies", but nothing ever passed `-static`: they shipped needing
+  libLLVM, libblake3, libz, libzstd, libbrotli{enc,dec} and libc, and the
+  aarch64 binary would not start on a bare `alpine:3.21` — ~20 `Error
+  relocating ... symbol not found` lines before `main`. libblake3 is built from
+  source by the release workflow and is packaged by no distro, so it was on no
+  user's machine. Both Linux legs now build inside Alpine and link statically
+  for real, and a new CI step runs the produced `march` and `forge` inside bare
+  `alpine:3.21` and `debian:stable-slim` before publishing, so a dynamically
+  linked archive can no longer ship. One consequence, on the Linux prebuilts
+  only: a static musl binary has no `dlopen`, so interpreted `extern` FFI does
+  not work there and the REPL's `--jit` falls back to the interpreter.
+  Interpreting, `--compile` and `forge` are unaffected, as are macOS builds and
+  builds from source.
+
+- **`march --compile` works on musl (Alpine).** Two separate breakages, so the
+  musl-targeted `linux-aarch64` prebuilt could interpret March but not compile
+  it. `runtime/march_runtime.c` included `<execinfo.h>` unconditionally — a
+  glibc extension musl lacks — so compiling the bundled runtime died at the
+  first header; it is now guarded, and the only thing lost on musl is the
+  symbolic C backtrace inside the opt-in `MARCH_DEBUG_OOM` forensics (March's
+  own stack trace is built from its own frame table and is unaffected).
+  Then the link failed on `getcontext`/`makecontext`/`swapcontext`, which musl
+  declares but does not define; on a musl host the compiler now links
+  `-lucontext`, where Alpine keeps them.
+
 - Multi-head function heads now count as structural recursion, so an ordinary
   recursive tree walk written with function heads compiles. Desugar merges
   multiple parameters into a tuple scrutinee, which the tail-call checker did

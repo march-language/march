@@ -24,7 +24,19 @@
 #include <signal.h>
 #include <netdb.h>
 #include <arpa/inet.h>
+/* <execinfo.h> (backtrace/backtrace_symbols_fd) is a glibc/BSD/Darwin
+ * extension, not POSIX; musl does not ship it, so an unconditional include
+ * breaks `march --compile` of the bundled runtime on Alpine and every other
+ * musl distro.  glibc defines __GLIBC__ via <features.h>, which the <stdio.h>
+ * above has already pulled in, so this test is decided by the time we get
+ * here.  On musl the only casualty is the symbolic C backtrace in the opt-in
+ * MARCH_DEBUG_OOM forensics below; March's own call-stack backtrace
+ * (march_print_backtrace) is built from our own frame table and is
+ * unaffected. */
+#if !defined(__linux__) || defined(__GLIBC__)
+#define MARCH_HAVE_EXECINFO 1
 #include <execinfo.h>
+#endif
 #include <pthread.h>
 
 /* Optional OOM forensics: set MARCH_DEBUG_OOM=1 to print the requested size
@@ -48,10 +60,14 @@ static void march_debug_report_oom(const char *where, int64_t requested) {
     fprintf(stderr, "  requested size: %lld (0x%llx)\n",
             (long long)requested, (unsigned long long)requested);
     fprintf(stderr, "  pthread_self:   %p\n", (void *)pthread_self());
+#ifdef MARCH_HAVE_EXECINFO
     void *bt[64];
     int n = backtrace(bt, 64);
     fprintf(stderr, "  backtrace (%d frames):\n", n);
     backtrace_symbols_fd(bt, n, 2 /* stderr */);
+#else
+    fprintf(stderr, "  backtrace:      unavailable (no <execinfo.h> on this libc)\n");
+#endif
     fprintf(stderr, "=== end DEBUG OOM ===\n\n");
     fflush(stderr);
 }

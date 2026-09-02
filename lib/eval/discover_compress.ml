@@ -29,5 +29,14 @@ let () =
       C.Flags.write_sexp "compress_libs.sexp" libs
     end else begin
       C.Flags.write_sexp "compress_cflags.sexp" defines;
-      C.Flags.write_sexp "compress_libs.sexp" [ "-lz"; "-lzstd"; "-lbrotlienc"; "-lbrotlidec" ]
+      (* -lbrotlicommon, last, is load-bearing for a STATIC link and a no-op
+         for a dynamic one.  libbrotlienc/libbrotlidec both call into
+         libbrotlicommon (BrotliDefaultAllocFunc, _kBrotliPrefixCodeRanges,
+         BrotliTransformDictionaryWord, ...); when they are shared objects the
+         loader follows their own DT_NEEDED and pulls it in for us, which is
+         why omitting it went unnoticed.  Against the .a archives there is no
+         such chain and the link dies with ~30 undefined references.  The macOS
+         branch above already lists common last for exactly this reason. *)
+      C.Flags.write_sexp "compress_libs.sexp"
+        [ "-lz"; "-lzstd"; "-lbrotlienc"; "-lbrotlidec"; "-lbrotlicommon" ]
     end)
