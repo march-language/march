@@ -8978,6 +8978,26 @@ end|}
 end|}
         in
         Alcotest.(check (pair int int)) "both proved" (2, 0) (proved, skipped))
+
+  ; (* Record arm of the same hole.  `bump`'s promise `r.port == c.port + 1`
+       under the rebound `c` is again a contradiction.
+       Mutation that fails this: drop the guard on the record arm. *)
+    gated "REJECT: a record postcond-let that rebinds a mentioned name is not a proof"
+      (fun () ->
+        let proved, skipped =
+          ledger_counts
+            {|mod PreRecord do
+  type Config = { port : Int }
+  fn bump(c : Config) : {r : Config | r.port == c.port + 1} do { port: c.port + 1 } end
+  fn needs_port_lt(u : Int, c : {v : Config | v.port < u}) : Int do 0 end
+  fn go(c : Config, u : Int) : Int do
+    let c = bump(c)
+    needs_port_lt(u, c)
+  end
+end|}
+        in
+        Alcotest.(check bool) "the impossible call is not proved" true
+          (skipped >= 1 || proved < 2))
   ]
 
 (* ── `List.nth` carries a bounds contract ──────────────────────────────────
