@@ -766,6 +766,16 @@ let scope_add_fnparam (sc : scope) : A.fn_param -> scope = function
   | A.FPNamed p | A.FPDefault (p, _) -> scope_add_param sc p
   | A.FPPat pat -> scope_shadow sc (pat_binders pat)
 
+(* A postcondition-derived entry whose predicate mentions the `let`'s own
+   binder denotes the PRE-binding value under the post-binding name (the
+   actuals were substituted by [postcond_of] before the binding took effect).
+   Filing it would collapse two values onto one SMT symbol and, for a
+   relational promise like `_ == n + 1`, manufacture a contradiction that
+   proves every goal.  Declining is the only sound choice: the pre-binding
+   symbol has already been retired by [scope_shadow]. *)
+let self_mentioning (pat : A.pattern) (pred : A.expr) : bool =
+  expr_mentions (pat_binders pat) pred
+
 (* [postcond] resolves a callee name AND the call's actual arguments to the
    callee's return refinement, already instantiated in the CALLER's namespace.
    An explicit annotation always wins; only an UNANNOTATED `let` whose RHS is a
@@ -843,20 +853,24 @@ let scope_add_binding
           masked — before it, `size(u)` was untranslatable and [smt_of] dropped
           the predicate whole.
 
-          Deliberately on THIS arm only.  The scalar and record arms above have
-          the same shape and the same latent hole (reachable on the parent
-          commit through [reflect_scalar]'s `foreign_var` channel, which never
-          went through [load_scope_measure_facts] at all), but they are older,
-          broader, and out of scope here — recorded with repros in
-          `specs/todos/2026-08-04-postcond-let-self-rebinding-holes.md`. *)
+          The guard ([self_mentioning], defined above) applies to all THREE
+          arms below, not just this ADT one.  The scalar and record arms have
+          the identical shape and the identical latent hole (reachable on the
+          parent commit through [reflect_scalar]'s `foreign_var` channel,
+          which never went through [load_scope_measure_facts] at all); there
+          is nothing ADT-specific about the hazard, so there is nothing
+          ADT-specific about the fix. *)
        (match postcond fname args with
-        | Some (binder, pred, m) when scalar_sort_of_marker m <> None ->
+        | Some (binder, pred, m)
+          when scalar_sort_of_marker m <> None
+               && not (self_mentioning b.A.bind_pat pred) ->
           (n.A.txt, (binder, pred, m)) :: sc
-        | Some (binder, pred, Some srt) when is_record_sort srt ->
+        | Some (binder, pred, Some srt)
+          when is_record_sort srt && not (self_mentioning b.A.bind_pat pred) ->
           (n.A.txt, (binder, pred, Some srt)) :: sc
         | Some (binder, pred, Some srt)
           when Hashtbl.mem adt_ctors srt
-               && not (expr_mentions (pat_binders b.A.bind_pat) pred) ->
+               && not (self_mentioning b.A.bind_pat pred) ->
           (n.A.txt, (binder, pred, Some (meas_sort_prefix ^ srt))) :: sc
         | Some _ | None -> sc)
      | _ -> sc)

@@ -202,6 +202,24 @@ let skip_reasons src =
       | _ -> None)
     (March_refinecheck.Obligation.all ())
 
+(* (proved, skipped) obligation counts for [src] — a ledger, not a boolean,
+   because a self-mentioning postcond-let manufactures a false PROOF, and
+   "has_refine_error" would report that outcome identically to a legitimate
+   proof: both are "no error".  Mirrors [skip_reasons]'s reset/run/fold shape
+   and, like it, runs on the DESUGARED module via [has_refine_error_d] so a
+   qualified call in a fixture is checked the same way the compiler checks
+   it. *)
+let ledger_counts src =
+  March_refinecheck.Obligation.reset ();
+  ignore (has_refine_error_d src);
+  List.fold_left
+    (fun (proved, skipped) (o : March_refinecheck.Obligation.t) ->
+      match o.March_refinecheck.Obligation.verdict with
+      | March_refinecheck.Obligation.Proved -> (proved + 1, skipped)
+      | March_refinecheck.Obligation.Skipped _ -> (proved, skipped + 1)
+      | _ -> (proved, skipped))
+    (0, 0) (March_refinecheck.Obligation.all ())
+
 (* Most of this suite needs a solver, so a z3-less machine cannot run it.  What
    it must NOT do is report those cases as PASSING.  [gated] used to print a
    "[skip]" line and then return unit, which alcotest scores as `[OK]`: on a
@@ -8920,6 +8938,46 @@ end|}
         Alcotest.(check bool)
           "an IMPOSSIBLE goal is never proved from a self-rebinding promise"
           true (violated >= 1 || skipped >= 1))
+  ; (* THE hole.  `incr`'s promise, filed under `n` after the actual `n` was
+       substituted, reads `n == n + 1` once `n` is rebound: a contradiction,
+       and a contradiction proves every goal.  The ledger, not a boolean,
+       because the postcondition of `incr` legitimately proves and would mask
+       a boolean.  Mutation that fails this: drop the guard on the scalar arm. *)
+    gated "REJECT: a scalar postcond-let that rebinds a mentioned name is not a proof"
+      (fun () ->
+        let proved, skipped =
+          ledger_counts
+            {|mod PreScalar do
+  fn incr(n : Int) : {Int | _ == n + 1} do n + 1 end
+  fn needs_lt(u : Int, v : {Int | _ < u}) : Int do 0 end
+  fn go(n : Int, u : Int) : Int do
+    let n = incr(n)
+    needs_lt(u, n)
+  end
+end|}
+        in
+        Alcotest.(check (pair int int)) "1 proved (incr's own postcondition), 1 skipped"
+          (1, 1) (proved, skipped));
+
+    (* POSITIVE CONTROL: the same promise under a FRESH name keeps its fact.
+       Without this the guard could be widened to "always decline" and the
+       suite would stay green. *)
+    gated "ACCEPT CONTROL: a postcond-let under a fresh name keeps its fact"
+      (fun () ->
+        let proved, skipped =
+          ledger_counts
+            {|mod PreScalarOk do
+  fn incr(n : Int) : {Int | _ == n + 1} do n + 1 end
+  fn take_pos(v : {Int | _ > 0}) : Int do v end
+  fn go(n : Int) : Int do
+    if n >= 0 do
+      let m = incr(n)
+      take_pos(m)
+    else 0 end
+  end
+end|}
+        in
+        Alcotest.(check (pair int int)) "both proved" (2, 0) (proved, skipped))
   ]
 
 (* ── `List.nth` carries a bounds contract ──────────────────────────────────
