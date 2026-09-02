@@ -110,11 +110,30 @@ let diag_to_lsp ~filename (d : Err.diagnostic) =
   if not is_user then None
   else
     let range = Pos.span_to_lsp_range d.span in
+    (* Editors render diagnostics in a hover popover, and at least Zed shows
+       only the FIRST LINE of the message there — which is where most people
+       actually read a diagnostic. A note placed after a newline is therefore
+       invisible exactly where it is most useful (it still shows in the
+       project-diagnostics panel, which is a different, rarely-open view).
+       The motivating case is the `Option`/`Result` field-access hint, whose
+       entire purpose is to say how to unwrap: telling the reader only that
+       their expression "is not a record" while hiding the fix defeats it.
+
+       So flatten the message and its notes onto ONE line — clients soft-wrap
+       it — including newlines *inside* a note, which would truncate at the
+       same place. The CLI renderer reads [d.notes] directly and keeps its own
+       indented multi-line layout, so this is a client-presentation change
+       only. *)
+    let flatten s =
+      String.concat " "
+        (List.filter (fun x -> x <> "")
+           (List.map String.trim (String.split_on_char '\n' s)))
+    in
     let message =
       if d.notes = [] then d.message
       else
-        d.message ^ "\n" ^
-        String.concat "\n" (List.map (fun n -> "note: " ^ n) d.notes)
+        String.concat " "
+          (flatten d.message :: List.map (fun n -> "note: " ^ flatten n) d.notes)
     in
     let code = Option.map (fun s -> `String s) d.code in
     let relatedInformation =
@@ -1155,6 +1174,17 @@ let ctor_blocks name = Printf.sprintf "constructor `%s` wraps it" name
 let is_ctor_blocked (b : string) =
   String.length b > 12 && String.sub b 0 12 = "constructor "
 
+(** Was the call blocked by a short-circuit-shaped boolean operator? Those get
+    different advice than the generic accumulator suggestion — see the message
+    site in [tco_check]. *)
+let is_boolop_blocked (b : string) =
+  let has sub =
+    let n = String.length sub and m = String.length b in
+    let rec go i = i + n <= m && (String.sub b i n = sub || go (i + 1)) in
+    go 0
+  in
+  has "`||`" || has "`&&`"
+
 (** Walk [e] looking for calls to [fn_name] that are not in tail position.
     [blocking] is [None] when the expression is in tail position, or
     [Some description] when there is pending work after it returns. *)
@@ -1169,7 +1199,19 @@ let rec tco_check (fn_name : string) (blocking : string option) (e : Ast.expr) a
         let msg =
           if is_ctor_blocked b then
             Printf.sprintf
-              "This recursive call is not in tail position — %s. The compiler transforms this shape (tail-recursion-modulo-cons): the constructor is allocated first with a hole, and the call fills it, so this compiles to a loop rather than growing the stack. No rewrite needed."
+              "This recursive call is not in tail position — %s, so the stack grows by one frame per call and deep input can overflow it. TRMC can turn a call wrapped in a constructor into a loop, but it is OFF BY DEFAULT; enable it with `--trmc`. (This message used to say no rewrite was needed — it was wrong: the loop is not automatic.)"
+              b
+          else if is_boolop_blocked b then
+            (* `&&`/`||` are STRICT in March (specs/lang/core-march.md 4.4.1):
+               both operands are always evaluated, so the call really is not in
+               tail position and the checker is right. But "use an accumulator"
+               is the wrong fix for a branching search — there is no work to
+               move before the call. Rewriting `a || b` as `if a do true else b
+               end` puts the right-hand call in genuine tail position (an `if`
+               branch inherits tail position) and skips it when the left side
+               already decides the answer. *)
+            Printf.sprintf
+              "This recursive call is not in tail position — %s, so the stack grows by one frame per call. `&&`/`||` are strict in March: both sides are always evaluated. Rewrite `a || b` as `if a do true else b end` (and `a && b` as `if a do b else false end`) to put the right-hand call in tail position."
               b
           else
             Printf.sprintf
@@ -1277,6 +1319,13 @@ let rec tco_check (fn_name : string) (blocking : string option) (e : Ast.expr) a
 
 (** Check all clauses of a function definition for non-tail recursive calls. *)
 let tco_check_fn (fn : Ast.fn_def) acc =
+  (* `@[no_warn_recursion]` is the author asserting this recursion's depth is
+     bounded. The compiler's own tail-call checker honours it, so the editor
+     must too: otherwise the attribute silences the build while the hint keeps
+     underlining every recursive call, which is worse than either behaviour on
+     its own — the user has already answered, and we keep asking. *)
+  if List.mem "no_warn_recursion" fn.Ast.fn_attrs then acc
+  else
   let fn_name = fn.Ast.fn_name.txt in
   List.fold_left (fun acc (cl : Ast.fn_clause) ->
       tco_check fn_name None cl.Ast.fc_body acc
@@ -2291,6 +2340,13 @@ let resolve_lens_command ~command ~(args : Yojson.Safe.t list) : lens_command =
 (* ------------------------------------------------------------------ *)
 
 let analyse ~filename ~src : t =
+  (* [Tc]'s tvar display-name cache (`a`, `b`, … `y55`, …) is otherwise never
+     reset for the LSP's lifetime — a long-lived process re-typechecking on
+     every edit, unlike a one-shot compiler run. Left alone it climbs for as
+     long as the server stays up, so an unresolved type variable in a small
+     file can print a name like `y55` instead of `a`. Reset once per analysis
+     pass so each pass's fresh variables again name from "a". *)
+  Tc.reset_tvar_display_names ();
   let lexbuf = Lexing.from_string src in
   lexbuf.Lexing.lex_curr_p <-
     { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = filename };
@@ -3140,7 +3196,28 @@ let analyse ~filename ~src : t =
          @ List.filter_map make_diag (Depot.fk_column_diagnostics depot_schemas ops))
     in
     let diags =
-      (Err.sorted errors |> List.filter_map (diag_to_lsp ~filename))
+      let compiler_diags =
+        Err.sorted errors |> List.filter_map (diag_to_lsp ~filename)
+      in
+      (* The typechecker's own tail-call checker already reports every
+         non-tail recursive call, at the same span, saying the same thing —
+         so emitting the `perf/non-tail-call` insight as well put two
+         near-identical messages in one hover. Keep the compiler's (it is the
+         authority on whether this is an error or a warning, and it honours
+         `@[no_warn_recursion]`) and drop the duplicate. Other perf insights
+         have no compiler counterpart and are unaffected. *)
+      let perf_diags =
+        let covered (d : Lsp.Types.Diagnostic.t) =
+          List.exists (fun (c : Lsp.Types.Diagnostic.t) -> c.range = d.range)
+            compiler_diags
+        in
+        List.filter (fun (d : Lsp.Types.Diagnostic.t) ->
+            match d.code with
+            | Some (`String "perf/non-tail-call") -> not (covered d)
+            | _ -> true)
+          perf_diags
+      in
+      compiler_diags
       @ !dead_code_diags
       @ unused_fn_diags
       @ perf_diags
@@ -4111,18 +4188,42 @@ let completions_at (a : t) ~line ~character =
                           `Assoc [("module", `String m); ("name", `String short)])])
           ())
   in
-  (* Rank by category via sortText: locals < keywords < top-level/stdlib values
-     < types < constructors < interfaces < sigils < auto-imports. *)
+  (* Rank by ORIGIN first, then category.
+     
+     This used to rank by category alone — locals, keywords, values, types,
+     constructors, ... — which put every stdlib function above the user's own
+     types and constructors, because values outrank both. Typing `B` in a
+     module declaring `BTree` and `Branch` therefore offered `Base64.decode`
+     and the whole of `BigInt` first, and the two names actually in scope were
+     below the fold. What you defined in the file you are editing is almost
+     always what you mean, so it goes first regardless of category.
+
+     Match the edited file exactly rather than reusing [span_in_user_file],
+     which also accepts empty / "<unknown>" spans — those belong to builtins,
+     and promoting the entire builtin surface is the bug over again. *)
+  let defined_here name =
+    a.filename <> "" && a.filename <> "<unknown>" &&
+    (match Hashtbl.find_opt a.def_map name with
+     | Some sp -> sp.Ast.file = a.filename
+     | None -> false)
+  in
   let rank s items =
     List.map (fun it -> { it with CompletionItem.sortText = Some s }) items
   in
-  rank "0" local_items
-  @ rank "1" kw_items
-  @ rank "2" var_items
-  @ rank "3" type_items
-  @ rank "4" ctor_items
-  @ rank "5" iface_items
-  @ rank "6" sigil_items
+  (* [cat] is the within-band category digit; the leading digit is the band:
+     0 = defined in this file, 1 = language-level, 2 = imported/stdlib. *)
+  let rank_by_origin cat items =
+    List.map (fun (it : CompletionItem.t) ->
+        let band = if defined_here it.CompletionItem.label then "0" else "2" in
+        { it with CompletionItem.sortText = Some (band ^ cat) }) items
+  in
+  rank "00" local_items
+  @ rank "10" kw_items
+  @ rank_by_origin "2" var_items
+  @ rank_by_origin "3" type_items
+  @ rank_by_origin "4" ctor_items
+  @ rank_by_origin "5" iface_items
+  @ rank "16" sigil_items
   @ auto_items
   ) (* end match island_items *)
   ) (* end match depot_table_items *)
@@ -4530,12 +4631,27 @@ let linked_editing_ranges_at (a : t) ~line ~character : Ast.span list =
   in
   match tag_pair_result with
   | Some spans -> spans
-  | None ->
-  match symbol_spans_at a ~line ~character with
   | None -> []
-  | Some (def_opt, use_spans) ->
-    (match def_opt with Some d -> d :: use_spans | None -> use_spans)
-    |> List.filter (fun sp -> sp <> Ast.dummy_span && span_in_user_file a sp)
+  (* Deliberately NOTHING else — in particular NOT "the definition and every
+     use of the symbol under the cursor", which this used to return.
+
+     `linkedEditingRange` is not "find all occurrences". The client applies
+     every keystroke to ALL returned ranges simultaneously, with no prompt and
+     no confirmation, so the protocol is only safe for ranges that must be
+     identical by construction — an open/close tag pair, which is the case
+     handled above. Returning a symbol's uses turns ordinary typing into an
+     implicit, un-asked-for rename: putting the cursor on `a` in
+     `{ left: Some(a), ... } -> ... has_val(a, target)` returned both `a`
+     spans, so typing one character silently rewrote the other occurrence too,
+     on that line and on any other line a use appeared. Ranges that drift even
+     slightly out of date then land mid-token and eat neighbouring characters
+     (`Some(a)` becoming `Somea)`), which is how this surfaced: "typing on one
+     line overwrites other lines".
+
+     Renaming a symbol is `textDocument/rename`'s job — explicit, invoked by
+     the user, and already supported here with a prepare step
+     (`renameProvider` with `prepareProvider = true`), so nothing is lost by
+     refusing to do it silently. *)
 
 (* textDocument/selectionRange: the chain of nested AST spans containing the
    position, innermost first. Built from the spans the analysis already records

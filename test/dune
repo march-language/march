@@ -1266,6 +1266,78 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/default_args_nested.expected native_default_args_nested.out)))
 
+; ── Capability mocking, end to end, compiled ──────────────────────────────
+; The one test that exercises what compiler-inserted capability passing exists
+; for: an operation performed by code that names no capability is intercepted
+; by a dictionary installed for a lexical region, and only there.
+;
+; Compiled with --test, which is what enables the elaboration. The fixture
+; deliberately does NOT live in test/native/: that directory is swept by the
+; LLVM IR validity gate (test_ir_verify.ml), which compiles every .march in it
+; WITHOUT --test -- and without --test `cap_ops_empty` has no implementation to
+; link against, so the sweep would fail on it.
+;
+; Three calls to the same function, the middle one inside `with_cap`. One
+; dictionary alone would not distinguish interception from a hard-coded
+; implementation; the calls either side pin that the swap is lexically scoped
+; rather than global.
+(rule
+ (targets cap_mock_io_bin cap_mock_io.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (source_tree ../stdlib)
+       (file cap_mock/cap_mock_io.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --test -o cap_mock_io_bin
+        cap_mock/cap_mock_io.march)
+   (with-stdout-to cap_mock_io.out (system "./cap_mock_io_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff cap_mock/cap_mock_io.expected cap_mock_io.out)))
+
+; ── Capability mocking as a user writes it: inside a `test` block ─────────
+; Companion to cap_mock_io above, which drives `main` and diffs stdout. This
+; one uses the real API surface -- a `test` block, `root_cap` attenuated to the
+; capability, assertions doing the checking -- because that is how anyone would
+; actually reach for this, and it is a different path through the elaboration
+; (a test entry point is a ROOT: its arity is frozen because the test runner
+; calls it, so the capability arrives through `with_cap` rather than through a
+; threaded parameter).
+;
+; The fixture asserts the unmocked clock on BOTH sides of `with_cap`, so it
+; cannot pass if `unix_time_ms` merely returned the mocked value always.
+(rule
+ (targets cap_mock_clock_bin cap_mock_clock.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (source_tree ../stdlib)
+       (file cap_mock/cap_mock_clock.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --test -o cap_mock_clock_bin
+        cap_mock/cap_mock_clock.march)
+   (with-stdout-to cap_mock_clock.out (system "./cap_mock_clock_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff cap_mock/cap_mock_clock.expected cap_mock_clock.out)))
+
 ; ── Capability runtime dictionaries, compiled ─────────────────────────────
 ; Compiled/interpreted parity for cap_impl / cap_dict / mint_cap.  See the
 ; header comment in native/cap_dictionary.march for what each line witnesses;

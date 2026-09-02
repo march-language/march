@@ -340,8 +340,19 @@ class march_server =
              let a2 = Analysis.run_tir_pass a in
              if is_current versions uri_str v then begin
                Hashtbl.replace doc_cache uri_str a2;
-               notify_back#send_diagnostic
-                 (List.map (Pos.remap_diagnostic a2.Analysis.doc) a2.Analysis.diagnostics)
+               (* [run_tir_pass] returns [a] PHYSICALLY UNCHANGED when the
+                  source has errors (it skips the TIR pipeline entirely rather
+                  than run it on broken input) — so [a2.diagnostics] is then
+                  the exact same list already published below. Re-publishing
+                  it anyway doesn't just waste a round trip: a client that
+                  doesn't treat publishDiagnostics as a full replacement (or
+                  that surfaces overlapping-range diagnostics from more than
+                  one publish in its hover UI) shows the same message stacked
+                  twice. Only publish again when the TIR pass actually ran. *)
+               if a2 != a then
+                 notify_back#send_diagnostic
+                   (List.map (Pos.remap_diagnostic a2.Analysis.doc) a2.Analysis.diagnostics)
+               else Lwt.return_unit
              end else Lwt.return_unit
            end else Lwt.return_unit)
         (fun exn ->
@@ -412,8 +423,16 @@ class march_server =
                       let a2 = Analysis.run_tir_pass a in
                       if is_current versions uri_str v then begin
                         Hashtbl.replace doc_cache uri_str a2;
-                        notify_back#send_diagnostic
-                          (List.map (Pos.remap_diagnostic a2.Analysis.doc) a2.Analysis.diagnostics)
+                        (* See the matching comment in [on_notif_doc_did_open]:
+                           [run_tir_pass] returns [a] unchanged when the
+                           source has errors, so re-publishing [a2.diagnostics]
+                           then republishes the exact list already sent above
+                           — the visible symptom being a diagnostic shown
+                           stacked twice in the editor. *)
+                        if a2 != a then
+                          notify_back#send_diagnostic
+                            (List.map (Pos.remap_diagnostic a2.Analysis.doc) a2.Analysis.diagnostics)
+                        else Lwt.return_unit
                       end else Lwt.return_unit
                     end else Lwt.return_unit)
              end))
@@ -485,12 +504,22 @@ class march_server =
         | Some a -> Analysis.query_completions_at a ~line ~utf16_char
       in
       (* Auto-import items need the document URI so completionItem/resolve can
-         re-fetch the analysis and compute the import edit. *)
+         re-fetch the analysis and compute the import edit. The document
+         version is stashed alongside it so resolve can refuse to answer
+         against a buffer that has since changed underneath it — resolve is
+         a separate, unordered request the client can fire per-keystroke
+         while filtering the completion list, well after the user has moved
+         on to typing elsewhere; computing an import-insertion edit (whose
+         target line is the file's first declaration, not the cursor —
+         see [Analysis.import_text_edit]) against a stale analysis lands
+         the edit on whatever now occupies that unrelated line. *)
+      let v = (match Hashtbl.find_opt versions uri_str with Some n -> n | None -> 0) in
       let items =
         List.map (fun (it : Lsp.Types.CompletionItem.t) ->
             match it.data with
             | Some (`Assoc fs) when List.mem_assoc "autoImport" fs ->
-              { it with data = Some (`Assoc (("uri", `String uri_str) :: fs)) }
+              { it with data = Some (`Assoc
+                  (("uri", `String uri_str) :: ("version", `Int v) :: fs)) }
             | _ -> it)
           items
       in

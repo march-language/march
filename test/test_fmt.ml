@@ -220,6 +220,50 @@ end|} in
   check_parses "record literal" src;
   check_idempotent "record literal" src
 
+let test_record_pattern () =
+  let src = {|mod Test do
+fn has_val({ left: l, right: r }, value : Int) : Bool do
+  match l == value do
+  true -> true
+  false -> false
+  end
+end
+end|} in
+  check_parses "record pattern" src;
+  check_idempotent "record pattern" src
+
+let test_fn_attribute_preserved () =
+  (* `@[no_warn_recursion]` is load-bearing: it suppresses a HARD ERROR, so a
+     formatter that drops it turns a compiling file into one that does not
+     build. The attribute was silently discarded (format.ml never read
+     [fn_attrs]) — format-on-save ate it on every save. Multi-head, because
+     each clause is printed as its own `fn` declaration and the attribute has
+     to reappear on every one of them. *)
+  let src = {|mod Test do
+type BTree = Tip | Branch(BTree, Int, BTree)
+@[no_warn_recursion]
+fn has_val(Tip, _target : Int) : Bool do
+  false
+end
+@[no_warn_recursion]
+fn has_val(Branch(l, v, r), target : Int) : Bool do
+  v == target || has_val(l, target) || has_val(r, target)
+end
+end|} in
+  check_parses "fn attribute" src;
+  check_idempotent "fn attribute" src;
+  let out = fmt src in
+  let count_attrs s =
+    let needle = "@[no_warn_recursion]" in
+    let n = String.length needle and l = String.length s in
+    let rec go i acc =
+      if i + n > l then acc
+      else go (i + 1) (if String.sub s i n = needle then acc + 1 else acc)
+    in
+    go 0 0
+  in
+  Alcotest.(check int) "attribute kept on every clause" 2 (count_attrs out)
+
 let test_local_fn () =
   let src = {|mod Test do
 fn fib(n : Int) : Int do
@@ -462,6 +506,8 @@ let () =
       test_case "nested match"    `Quick test_nested_match;
       test_case "tuple"           `Quick test_tuple;
       test_case "record literal"  `Quick test_record_literal;
+      test_case "record pattern"  `Quick test_record_pattern;
+      test_case "fn attribute"    `Quick test_fn_attribute_preserved;
       test_case "local fn"        `Quick test_local_fn;
       test_case "use decl"        `Quick test_use_decl;
       test_case "doc comment"     `Quick test_doc_comment;

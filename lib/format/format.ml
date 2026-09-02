@@ -249,7 +249,7 @@ let rec fmt_pat = function
   | PatRecord (flds, _)           ->
     let f (n, p) =
       let ps = fmt_pat p in
-      if ps = n.txt then n.txt else Printf.sprintf "%s = %s" n.txt ps
+      if ps = n.txt then n.txt else Printf.sprintf "%s: %s" n.txt ps
     in
     Printf.sprintf "{ %s }" (String.concat ", " (List.map f flds))
   | PatAs (p, n, _)               -> Printf.sprintf "%s as %s" (fmt_pat p) n.txt
@@ -1150,6 +1150,15 @@ and emit_fn ctx fn =
      in
      line ctx (Printf.sprintf "doc \"\"\"%s\"\"\"" escaped)
   );
+  (* Compiler attributes (`@[no_warn_recursion]`, …). Dropping these is not a
+     cosmetic loss: `@[no_warn_recursion]` suppresses a HARD ERROR, so a
+     format-on-save that ate it turned a compiling file into one that no longer
+     builds. Emitted for every clause because a multi-head function is printed
+     as one `fn` declaration per clause, and the attribute binds to the
+     declaration in the grammar (`nonempty_list(fn_attr); fn_decl`). *)
+  let emit_attrs () =
+    List.iter (fun a -> line ctx (Printf.sprintf "@[%s]" a)) fn.fn_attrs
+  in
   match fn.fn_clauses with
   | [] -> ()
   | [clause] ->
@@ -1158,6 +1167,7 @@ and emit_fn ctx fn =
       | None   -> ""
       | Some g -> " when " ^ expr_inline g
     in
+    emit_attrs ();
     line ctx (Printf.sprintf "%s %s(%s)%s%s do" kw fn.fn_name.txt ps ret guard);
     indented ctx (fun () -> emit_body ctx clause.fc_body);
     line ctx "end"
@@ -1170,6 +1180,7 @@ and emit_fn ctx fn =
         | None   -> ""
         | Some g -> " when " ^ expr_inline g
       in
+      emit_attrs ();
       line ctx (Printf.sprintf "%s %s(%s)%s%s do" kw fn.fn_name.txt ps ret guard);
       indented ctx (fun () -> emit_body ctx clause.fc_body);
       line ctx "end";

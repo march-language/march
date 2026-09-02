@@ -146,7 +146,7 @@ let () =
     "selection + linked editing", [
       "selection range widens outward", `Quick, test_selection_range_widens_outward;
       "selection range empty off token", `Quick, test_selection_range_empty_off_token;
-      "linked editing links all occurrences", `Quick, test_linked_editing_ranges;
+      "linked editing does not link plain identifiers", `Quick, test_linked_editing_ranges;
       "linked editing links ~H open+close tag pair", `Quick, test_tag_pair_linked_edit;
     ];
     "semantic tokens", [
@@ -404,8 +404,8 @@ let () =
       "non-tail recursive call detected",         `Quick, test_perf_non_tail_call_detected;
       "tail-recursive call not flagged",          `Quick, test_perf_tail_call_not_flagged;
       "non-tail inside constructor detected",     `Quick, test_perf_non_tail_inside_constructor;
-      "ctor-wrapped advice is not accumulator",   `Quick, test_perf_constructor_wrapped_advice_is_not_accumulator;
-      "non-tail produces warning diagnostic",     `Quick, test_perf_non_tail_produces_warning_diagnostic;
+      "ctor-wrapped advice states TRMC is opt-in",   `Quick, test_perf_constructor_wrapped_advice_is_not_accumulator;
+      "non-tail reported once, not duplicated",     `Quick, test_perf_non_tail_produces_warning_diagnostic;
       "non-recursive call not flagged",           `Quick, test_perf_non_tail_not_flagged_for_non_recursive;
     ];
     "perf insights: closure captures", [
