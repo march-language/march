@@ -1555,6 +1555,15 @@ done | grep -oE "skipped \([a-z-]+\): [0-9]+" | sort | uniq -c | sort -rn
 Record the table. Compare against the pre-change baseline (run the same
 command on a build of `origin/main`).
 
+**Correction (Task 8).** The `grep -oE … | sort | uniq -c` pipeline above is
+WRONG: `--refine-report` prints a `user code` block and a `user + stdlib` block
+with identically formatted `skipped (<slug>): N` lines, so the pipeline sums
+both slices into one number — and the stdlib slice is re-counted once per entry
+file, so the sum is dominated by inflation. Aggregate section-aware (the shipped
+measurement used a short Python pass keyed on the preceding summary line) and
+report the `user code` slice as the clean number, the `user + stdlib` slice
+labelled as not-a-corpus-count.
+
 This count is only meaningful if `--refine-report` groups by cause rather than
 by payload — see the correction in Task 1. If you see the same slug on several
 consecutive lines with different counts, the grouping regressed and the
