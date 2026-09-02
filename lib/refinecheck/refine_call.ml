@@ -11,9 +11,9 @@
     callee, reflect the actual argument, assemble the facts in scope, and ask
     the solver whether they entail the parameter's predicate.
 
-    Five of the pass's mutable cells live here — [strict_verified],
-    [unverified_hinted], [trusted_fn], [enclosing_fn] and
-    [enclosing_fn_probe] — and all five are written from §21 (the
+    Six of the pass's mutable cells live here — [strict_verified],
+    [unverified_hinted], [trusted_fn], [enclosing_fn], [enclosing_fn_probe]
+    and [promoted_sites] — and all six are written from §21 (the
     declaration walk), which is still in [Refine_check].  They therefore
     reach that writer through [include], as the same ref cells.
     Re-declaring any of them would leave the writer setting a ref nobody
@@ -210,14 +210,15 @@ let rec expr_applies_to_free (name : string) (subject : string) (e : A.expr) : b
    and it hides the real cause.  So this is deliberately conjunctive — all
    four conditions, or we keep the honest general message:
 
-   1. the reason is [Solver_undecided] or its syntactic refinement
-      [Unconstrained_subject] (see [Undecided.diagnose]).  A withdrawal
-      cannot cause any other skip: it removes an ASSUMPTION, so the VC is
-      still built, still well-sorted, and still reaches the solver — it just
-      arrives without the fact that would have discharged it, which is
-      exactly what [Unconstrained_subject] also names from the syntax alone.
-      An unreflectable predicate or a sort conflict failed strictly earlier,
-      for reasons the alias cannot touch — and neither does
+   1. the reason is [Solver_undecided] or one of its syntactic refinements,
+      [Unconstrained_subject] or [Partial_conjunct] (see [Undecided.diagnose]).
+      A withdrawal cannot cause any other skip: it removes an ASSUMPTION, so
+      the VC is still built, still well-sorted, and still reaches the solver
+      — it just arrives without the fact that would have discharged it, which
+      is exactly what [Unconstrained_subject] also names from the syntax
+      alone, and [Partial_conjunct] names for one conjunct of a goal that
+      splits.  An unreflectable predicate or a sort conflict failed strictly
+      earlier, for reasons the alias cannot touch — and neither does
       [Opaque_application], which describes the GOAL's own shape, not the
       assumption set a withdrawal thins.  Where both could describe the same
       skip, the withdrawal wins: it names a decision made elsewhere in the
@@ -304,7 +305,10 @@ let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
     ~(subject_is_str : bool) ~(path : (A.expr * bool) list) ~(lets : launder)
     (r : Obligation.reason) : withdrawal option =
   match (r, subject) with
-  | (Obligation.Solver_undecided | Obligation.Unconstrained_subject _), Some (A.EVar sn) ->
+  | ( ( Obligation.Solver_undecided
+      | Obligation.Unconstrained_subject _
+      | Obligation.Partial_conjunct _ )
+    , Some (A.EVar sn) ) ->
     let guard_applies (w : withdrawal) (cond : A.expr) : bool =
       (* FREE occurrence only, on both the direct condition and the laundered
          RHS: this is an ACCEPTING position, so a shadow-blind, discard-only
@@ -485,21 +489,42 @@ let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
       | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _)
       | A.EDbg (Some e, _) -> recur e
     in
+    (* [pred] itself may be a top-level conjunction (`len(_) >= 0 && len(_) >
+       0`), which is exactly the shape [Partial_conjunct] names: one conjunct
+       can hold on the encoder's own axioms (`len(_) >= 0` needs no guard at
+       all) while another is the one the withdrawn alias actually would have
+       discharged.  [atomic_cmp] only recognises a single comparison, so
+       flatten [pred]'s `&&` spine here and test each conjunct in turn — a
+       single-comparison predicate is just a one-element spine, so this
+       subsumes the non-conjunctive case rather than special-casing it. *)
+    let rec pred_conjuncts (e : A.expr) : A.expr list =
+      match e with
+      | A.EApp (A.EVar { A.txt = "&&"; _ }, [ a; b ], _) -> pred_conjuncts a @ pred_conjuncts b
+      | e -> [ e ]
+    in
     (* Does the guard fact [cond] — already known to apply [w]'s spelling to
        this subject, and already filtered to a POSITIVE path entry by the
-       caller below — actually ENTAIL [pred]?  The laundered spelling (`if n
-       > 0 …` after `let n = List.length(ys)`) is handled by substituting the
-       laundering name's bound expression in wherever [cond] free-mentions
-       it, one hop only — mirroring [guard_applies]'s own laundered arm. *)
+       caller below — actually ENTAIL some conjunct of [pred]?  The laundered
+       spelling (`if n > 0 …` after `let n = List.length(ys)`) is handled by
+       substituting the laundering name's bound expression in wherever
+       [cond] free-mentions it, one hop only — mirroring [guard_applies]'s
+       own laundered arm.  Only ONE conjunct needs the guard: the others, if
+       any, discharge some other way (an axiom, another fact) or the skip
+       would not be [Partial_conjunct] to begin with — [Partial_conjunct]
+       already means "the rest is decided", so this only has to place the
+       withdrawal at the one comparison it actually bears on. *)
     let guard_discharges (w : withdrawal) (cond : A.expr) : bool =
-      match atomic_cmp (is_measured_pred w) pred with
-      | None -> false
-      | Some (op2, n2) ->
-        exists_discharging w (op2, n2) ~shadowed:[] cond
-        || List.exists
-             (fun (m, rhs) ->
-               expr_mentions_free m cond && exists_discharging w (op2, n2) ~shadowed:[] rhs)
-             lets
+      List.exists
+        (fun conjunct ->
+          match atomic_cmp (is_measured_pred w) conjunct with
+          | None -> false
+          | Some (op2, n2) ->
+            exists_discharging w (op2, n2) ~shadowed:[] cond
+            || List.exists
+                 (fun (m, rhs) ->
+                   expr_mentions_free m cond && exists_discharging w (op2, n2) ~shadowed:[] rhs)
+                 lets)
+        (pred_conjuncts pred)
     in
     List.find_opt
       (fun w ->
@@ -2142,13 +2167,10 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                match subject, !enclosing_fn, model_of first with
                | _ when is_stdlib_source_file span.A.file -> None
                | Argument, Some fd, (_ :: _ as model) ->
-                 (match List.nth_opt args rp.idx with
-                  | Some arg ->
-                    Option.map
-                      (fun r -> (fd, r))
-                      (Witness.confirm_precond_reachable ~fn:fd ~pred:rp.pred
-                         ~binder:rp.binder ~arg ~model)
-                  | None -> None)
+                 Option.map
+                   (fun r -> (fd, r))
+                   (Witness.confirm_precond_reachable ~fn:fd ~pred:rp.pred
+                      ~binder:rp.binder ~arg:self_actual ~model)
                | _ -> None
              in
              (match promoted with

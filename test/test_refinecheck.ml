@@ -284,7 +284,7 @@ let suite =
        indistinguishable from "checked and fine". A hint says so.
        `take_n(k)` with `k : Int` unconstrained is [Unconstrained_subject], a
        DIAGNOSED cause (Task 3's per-site rule), so its message is the
-       specific "nothing in scope constrains" text rather than the residual's
+       specific "no fact the checker derived constrains" text rather than the residual's
        `cap verified` boilerplate paragraph — the latter is module-level
        advice that Task 3 deliberately drops for diagnosed causes. *)
     gated "an unverified contract is announced" (fun () ->
@@ -293,7 +293,7 @@ let suite =
         Alcotest.(check bool) "a hint is emitted" true
           (List.exists (fun h -> contains h "was NOT verified here") hints);
         Alcotest.(check bool) "it names what's unconstrained" true
-          (List.exists (fun h -> contains h "nothing in scope constrains") hints));
+          (List.exists (fun h -> contains h "no fact the checker derived constrains") hints));
 
     (* A DIAGNOSED cause is specific and actionable, so it reports at every
        site.  The throttle exists to stop a vague message repeating; it must
@@ -4605,7 +4605,7 @@ end|}
 end|}
         in
         Alcotest.(check bool) "names the source variable" true
-          (contains unguarded_msg "nothing in scope constrains `ys`");
+          (contains unguarded_msg "no fact the checker derived constrains `ys`");
         Alcotest.(check bool) "never prints the internal SMT symbol" false
           (contains unguarded_msg "len$ys");
         let guarded_msg =
@@ -5854,6 +5854,45 @@ end|}
         Alcotest.(check bool)
           "does not blame the solver" false
           (contains msg "solver-undecided");
+        Alcotest.(check bool)
+          "names the withdrawn spelling" true
+          (contains msg "List.length"));
+    (* Same withdrawal shape as the case above, but the predicate is now a
+       top-level CONJUNCTION.  Task 2's per-conjunct discharge runs before
+       [alias_withdrawal_cause] ever sees the skip, so without [Partial_
+       conjunct] in that function's guard this reports `partial-conjunct`
+       ("guard the call") instead of `alias-withdrawn` ("rename the
+       binding") — losing the attribution to the withdrawn alias even though
+       the withdrawal is exactly what stopped both conjuncts.  Per the
+       doc comment's own rule, "where both could describe the same skip, the
+       withdrawal wins".
+       Mutation that fails this: drop `Partial_conjunct _` from
+       [alias_withdrawal_cause]'s guard — this case goes RED (reports
+       `partial-conjunct`) while the single-conjunct case above stays GREEN. *)
+    gated "a withdrawn alias is attributed even when the predicate is a conjunction"
+      (fun () ->
+        let msg =
+          refine_error_text_d
+            {|mod Ver3Conj do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) >= 0 && len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) > 0 do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "attributes to the withdrawal, not the conjunct split" true
+          (contains msg "alias-withdrawn");
+        Alcotest.(check bool)
+          "does not fall back to partial-conjunct" false
+          (contains msg "partial-conjunct");
         Alcotest.(check bool)
           "names the withdrawn spelling" true
           (contains msg "List.length"));
@@ -10328,13 +10367,18 @@ let promotion_suite =
        against RECORDED path facts "proves" a failure in correct code.
        Executing `last` from its entry cannot: `t` is a match binder, not a
        parameter, and `last`'s own contract excludes every `xs` that would
-       reach the call with `t = Nil`. *)
+       reach the call with `t = Nil`.
+
+       This fixture carries the REAL `List.last`'s `Nil -> panic(...)` arm
+       (not a silent `Nil -> 0` stand-in), so "0 warnings" actually tests the
+       gate's DECLINE — a harness that always returns "no panic" would look
+       identical against a panic-free fixture, but not against this one. *)
     gated "a safe recursive call is not promoted (List.last shape)" (fun () ->
         let src =
           {|mod W1 do
   fn last(xs : {List(Int) | len(_) > 0}) : Int do
     match xs do
-    Nil          -> 0
+    Nil          -> panic("List.last: empty list")
     Cons(x, Nil) -> x
     Cons(_, t)   -> last(t)
     end

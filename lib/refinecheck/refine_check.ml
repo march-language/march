@@ -49,9 +49,11 @@
    The four module aliases (A, Smt, Refine, Err) moved with the band and
    arrive through the include, so they are no longer declared above.
    The SMT encoding and sort discipline moved VERBATIM into [Refine_encode].
-   [include], not aliases: that band owns 16 of this pass's 22 mutable cells
-   and they are written from the far end of this file, so the SAME ref cell
-   must be in scope here — see [Refine_encode]'s header. *)
+   [include], not aliases: the included chain owns all 16 of this pass's
+   mutable cells (9 in [Refine_encode], 1 in [Refine_resolve], 6 in
+   [Refine_call]; [Refine_scope] and [Refine_post] declare none at top
+   level) and they are written from the far end of this file, so the SAME
+   ref cell must be in scope here — see [Refine_encode]'s header. *)
 (* ── §1–§11 moved out ─────────────────────────────────────────────────────
    §1–§6 (the SMT encoding and sort discipline) live in [Refine_encode];
    §7–§11 (reflection, rendering, and the two fact channels) live in
@@ -61,9 +63,11 @@
    brings both back, in their original order.  The four module aliases
    (A, Smt, Refine, Err) arrive through it too.
 
-   [include], not aliases: those bands own 16 of this pass's 22 mutable cells
-   and they are written from the far end of this file, so the SAME ref cell
-   must be in scope here. *)
+   [include], not aliases: those bands own all 16 of this pass's mutable
+   cells (9 in [Refine_encode], 1 in [Refine_resolve], 6 in [Refine_call];
+   [Refine_scope] and [Refine_post] declare none at top level) and they are
+   written from the far end of this file, so the SAME ref cell must be in
+   scope here. *)
 include Refine_post
 
 (* =================================================================
@@ -1798,6 +1802,9 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
      this after the walk, and a site left over from a previous module would
      send it looking for a diagnostic this context never had. *)
   promoted_sites := [];
+  (* Same hygiene: a prior module's enclosing function must never leak into
+     this module's promotion checks. *)
+  enclosing_fn := None;
   stdlib_source_files := stdlib_files;
   let mod_name = m.A.mod_name.A.txt in
   (* Each gate answers "is the alias still safe?"; a `false` is a WITHDRAWAL,

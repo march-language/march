@@ -258,7 +258,7 @@ let reason_detail = function
        nothing"
       spelling
   | Unconstrained_subject name ->
-    Printf.sprintf "nothing in scope constrains `%s`" name
+    Printf.sprintf "no fact the checker derived constrains `%s`" name
   | Opaque_application name ->
     Printf.sprintf
       "the checker has no meaning for `%s`, so it cannot reason through it" name

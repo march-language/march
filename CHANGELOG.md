@@ -36,14 +36,6 @@ git log is authoritative for exact commits.
   counts by *cause* rather than by message payload, so a bucket is one line
   instead of one line per distinct variable name.
 
-- Witness confirmation is stricter about what counts as a panic. The
-  interpreter's `Eval_error` is its general failure helper (unbound name, arity
-  mismatch, desugar residue, …), and the harness previously treated every one
-  of them as a March panic. Only the user-facing panic builtins are classified
-  as panics now; any other evaluator failure declines to confirm. This also
-  tightens the return-contract counterexamples added above — an internal
-  evaluator error can no longer be reported as a demonstrated failure.
-
 - Promotion of a call-site precondition failure to a warning is not attempted
   at `stdlib/` spans. Diagnostics at stdlib spans are filtered out of the
   printed stream, so a promotion there paid the reachability cost to produce a
@@ -81,7 +73,11 @@ git log is authoritative for exact commits.
   the whole debt, so applying it really does silence the warning. A warning by
   default (propagating an undeclared requirement is a design choice); an error
   under `cap verified`. Cost is confined to promotion, which is rare: a program
-  with no demonstrated failure runs no inference at all.
+  with no demonstrated failure runs no inference at all. Only evaluator
+  failures prefixed `panic:`, `todo:`, or `unreachable:` count as a panic for
+  this confirmation; any other `Eval_error` (unbound name, arity mismatch,
+  desugar residue, …) declines to confirm, so an internal evaluator error can
+  never be reported as a demonstrated failure.
 
 - Refinement failures now come with concrete, interpreter-validated
   counterexamples rendered in source terms. A return contract violated for
