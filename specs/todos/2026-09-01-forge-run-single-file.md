@@ -30,8 +30,14 @@ forge run                        # unchanged: project entry, interpreted
 forge run foo.march              # run that file
 forge run --compiled foo.march   # LLVM pipeline, then exec the binary
 forge run foo.march -- a b c     # a b c become the program's argv
-forge run -- a b c               # project entry, with argv
 ```
+
+The first positional is always the file; everything after it is the program's
+own arguments. There is deliberately no way to pass argv to the *project*
+entry: cmdliner records only the positionals, not where `--` sat, so
+`forge run -- a b` is indistinguishable from a file `a` with one argument.
+Rather than guess (e.g. "treat it as a file only if it exists"), that spelling
+is simply not supported — `forge run -- a b` fails with `file not found: a`.
 
 If the first positional is not an existing file, fail before doing any work.
 
@@ -41,8 +47,9 @@ If the first positional is not an existing file, fail before doing any work.
 
 The organising idea: **`Cmd_run` resolves an *entry* plus a *context*, then runs
 it.** Whether the entry came from `forge.toml` or from the command line is a
-detail below that. This is what lets argv work on the project path too, instead
-of leaving a hole there.
+detail below that. `Cmd_run.run` therefore takes `?file` and `~args`
+orthogonally; only the CLI ties them together, by requiring a FILE before any
+program argument.
 
 One resolver:
 
