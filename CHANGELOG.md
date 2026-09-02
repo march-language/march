@@ -11,7 +11,114 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- **Mock an IO effect in a test.** `with_cap(mock, fn _ -> code_under_test())`
+  swaps a capability's implementation for a lexical region, and the code under
+  test needs no capability parameter and names no capability — in a `--test`
+  build the compiler threads one in and routes the operation through the
+  capability's dictionary. An IO capability's dictionary shape is derived from
+  the compiler's own tables (`march --emit-io-ops`), so there is nothing to
+  hand-write: start from `cap_ops_empty(c)` and override the one operation you
+  care about. Release builds are untouched. Console, clock, randomness,
+  filesystem and network are fully mockable; `IO.Mut` is not (every `vault_*`
+  is polymorphic, and a dictionary field would need rank-2 types), and
+  operations inside actor handlers are not reached.
+
 ### Fixed
+
+- `forge build` and `forge test` no longer share a compilation-cache entry.
+  `--test` emits a different program (a test-runner entry point) but was absent
+  from the cache key, so whichever ran first won: `forge build` could hand you
+  the test runner, or `forge test` the plain binary.
+
+- Typing in the editor no longer silently rewrites the same identifier
+  elsewhere in the file. The LSP answered `textDocument/linkedEditingRange`
+  with a symbol's definition *and every use*, but that request is not a
+  query: the editor applies each keystroke to all returned ranges at once,
+  with no prompt. Putting the cursor on a variable therefore turned ordinary
+  typing into an un-asked-for rename, and ranges that were even slightly out
+  of date landed mid-token and ate neighbouring characters (`Some(a)`
+  becoming `Somea)`). Only genuine open/close pairs — `~H` sigil tags — are
+  linked now; renaming a symbol remains `textDocument/rename`, which is
+  explicit and already supported.
+
+- The "cannot access field" diagnostic (accessing `.field` on an
+  `Option`/`Result` value directly, before unwrapping it) now says how to fix
+  it instead of only naming the type. It names the variable the reader
+  actually wrote (`` `l` may be `None` ``) rather than "this expression", and
+  the suggested `match l do Some(x) -> x.value  None -> ... end` /
+  `Option.map(l, fn x -> x.value)` is copy-pasteable as-is rather than an
+  `<expr>` template to re-instantiate by hand. It also explains *why* — the
+  value may be absent — rather than restating that the type is not a record.
+
+- Diagnostics no longer show an inference-internal fresh-type-variable name
+  for an unresolved `Option`/`Result` payload. `Option(l2)` — meaningless to
+  the reader, and different from run to run — now prints as `Option(_)`.
+
+- Editor diagnostics no longer hide their notes. The LSP put a diagnostic's
+  notes after a newline, and editors that render only the first line of the
+  message in the hover popover — where diagnostics are actually read — showed
+  the note nowhere except the separate, rarely-open project-diagnostics
+  panel, so guidance like the unwrap hint above was invisible in practice.
+  Notes are now flattened onto one line for LSP clients; the CLI keeps its
+  indented multi-line layout.
+
+- The LSP could publish the exact same diagnostics twice for one edit,
+  showing as the same message stacked twice in the editor (e.g. hovering a
+  line with a type error). The TIR-pass phase of `did_change`/`did_open`
+  skips re-running when the source already has errors — correctly, since
+  the TIR pipeline can't run on broken input — but returns the SAME
+  `Analysis.t` it was given rather than a new one, and the calling code
+  published its diagnostics again regardless, republishing the identical
+  list already sent moments earlier. Now skipped whenever the TIR pass was
+  a no-op.
+
+- Typechecking a self-referential record type used without an annotation
+  (e.g. a multi-head function whose only parameter is a record pattern
+  destructuring `type Tree = { left : Option(Tree), ... }`) no longer hangs
+  the compiler at 100% CPU. Expanding the record's fields for type inference
+  recursed into itself with no base case — `Tree`'s `left` field mentions
+  `Option(Tree)`, which requires expanding `Tree` again, forever. A guard now
+  stops re-expanding a record already being expanded on the current path.
+
+- The resulting "expected `Tree` but got `a`" style message — for the same
+  self-referential-type case, when it doesn't hang — pointed at the wrong
+  line and gave no indication of what was actually wrong (an internal,
+  unresolved type-variable name like `a` or `y55` leaking into the text).
+  This is an occurs-check failure (the type would have to contain itself),
+  not an ordinary mismatch; it's now reported as such, with a hint to add an
+  explicit type annotation naming the recursive type.
+
+- The LSP's completion-resolve request (`completionItem/resolve`, which
+  computes the auto-import edit for an accepted completion) could insert
+  that edit at the wrong place in the buffer if it fired against a document
+  version that had since changed underneath it — the import's insertion
+  point is the file's first declaration line, not the cursor, so a stale
+  computation landed text on an unrelated line while the user kept typing
+  elsewhere. It now checks the document version and refuses to answer once
+  the buffer has moved on, instead of answering against stale state.
+
+- The LSP's diagnostic messages could show an internal, ever-growing
+  fresh-type-variable name (`y55`, `b53`, …) for an unresolved type,
+  instead of a short, stable one (`a`, `b`, …). The display-name counter
+  backing these was never reset for the server's lifetime, so it climbed
+  for as long as the process stayed open — a one-shot compiler run never
+  hit this since it exits after a single pass. It's now reset once per
+  analysis, so names stay small and predictable.
+
+- `--fmt` (and the LSP's formatting request) no longer corrupts record
+  patterns whose binder differs from the field name, e.g.
+  `{ left: l, right: r }`. It reprinted them using record-construction
+  syntax (`{ left = l, right = r }`), which the parser rejects — every
+  reformat of such a pattern broke the file. Record-literal shorthand fields
+  (`{ x, y }`, where the binder matches the field name) were unaffected.
+- The non-tail-recursion warning no longer promises a loop that does not
+  happen. It used to end "when the recursive call is the direct argument of a
+  constructor, the compiler turns it into a loop" — but tail-recursion-modulo-cons
+  is off by default, so code written in exactly that shape still overflowed the
+  stack on deep input. The warning now says deep input can overflow, and
+  describes TRMC as the opt-in it is (`--trmc`).
 
 - ARM Linux (`linux-aarch64`) has a working release artifact for the first
   time. Every v0.2.0 and v0.3.0 ARM archive shipped with an empty `bin/` and no
@@ -78,6 +185,20 @@ git log is authoritative for exact commits.
   this confirmation; any other `Eval_error` (unbound name, arity mismatch,
   desugar residue, …) declines to confirm, so an internal evaluator error can
   never be reported as a demonstrated failure.
+- Capabilities can now carry a **runtime dictionary** — a record of the
+  operations they authorize — so a capability's implementation can be swapped at
+  a binding site. Declare one with `proof cap Live with Ops`, attach with
+  `cap_impl(cap, dict)`, and read it back with `cap_dict(cap)`, which yields an
+  `Option` whose `None` is "no dictionary, use the ambient implementation" —
+  what every capability written so far does. `cap_narrow` carries a dictionary
+  across attenuation. Supplying a dictionary is gated exactly like `mint_cap`
+  (a public function of the declaring module), because deciding what a
+  capability *does* is at least as much authority as minting one.
+  Works on both backends, with compiled/interpreted parity pinned by a native
+  golden; the compiled representation costs nothing, since `Option`'s niche
+  encoding makes `cap_dict` the identity function. Mocking an *IO* capability is
+  not yet reachable — IO builtins do not take their capability as an argument,
+  so a dictionary attached to one would never be consulted.
 
 - Refinement failures now come with concrete, interpreter-validated
   counterexamples rendered in source terms. A return contract violated for

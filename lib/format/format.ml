@@ -249,7 +249,7 @@ let rec fmt_pat = function
   | PatRecord (flds, _)           ->
     let f (n, p) =
       let ps = fmt_pat p in
-      if ps = n.txt then n.txt else Printf.sprintf "%s = %s" n.txt ps
+      if ps = n.txt then n.txt else Printf.sprintf "%s: %s" n.txt ps
     in
     Printf.sprintf "{ %s }" (String.concat ", " (List.map f flds))
   | PatAs (p, n, _)               -> Printf.sprintf "%s as %s" (fmt_pat p) n.txt
@@ -779,7 +779,7 @@ let get_span = function
   | DFn (_, s) | DLet (_, _, s) | DType (_, _, _, _, s) | DAlwaysLinearType (_, _, _, _, s)
   | DMod (_, _, _, s) | DProtocol (_, _, s) | DActor (_, _, _, s)
   | DSig (_, _, s) | DInterface (_, s) | DImpl (_, s) | DExtern (_, s)
-  | DUse (_, s) | DAlias (_, s) | DNeeds (_, s) | DProofCap (_, s) | DApp (_, s)
+  | DUse (_, s) | DAlias (_, s) | DNeeds (_, s) | DProofCap (_, _, s) | DApp (_, s)
   | DDeriving (_, _, s) | DSatisfy (_, _, s) | DTest (_, s) | DDescribe (_, _, s) | DSetup (_, s) | DSetupAll (_, s)
   | DTransitions (_, _, s) | DOpts (_, s) -> s
 
@@ -1001,8 +1001,13 @@ and emit_decl ctx = function
          | Some sc -> Printf.sprintf "%s(%S)" path sc) caps in
     line ctx (Printf.sprintf "needs %s" (String.concat ", " cs))
 
-  | DProofCap (name, _) ->
-    line ctx (Printf.sprintf "proof cap %s" name.txt)
+  | DProofCap (name, dict, _) ->
+    (* The `with <DictType>` clause must round-trip: dropping it here would
+       silently erase a capability's dictionary type on every `--fmt`. *)
+    line ctx
+      (match dict with
+       | None -> Printf.sprintf "proof cap %s" name.txt
+       | Some d -> Printf.sprintf "proof cap %s with %s" name.txt d.txt)
 
   | DOpts (opts, _) ->
     (* The only surface spelling is `cap no_panic` and friends; there is no

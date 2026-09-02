@@ -4184,12 +4184,17 @@ let test_nested_actor_bare_spawn_from_entry_is_charged () =
     "a bare cross-module spawn still charges the handler to main's grant"
     true (has_error_with ctx "granted `Cap(IO.Console)`")
 
-(* TRMC (Task 9): constructor-wrapped structural recursion — `Succ(bump(k))` —
-   is compiled into a loop by TRMC, so the warning must NOT prescribe an
-   accumulator parameter, and must say the compiler handles this shape.
+(* TRMC: constructor-wrapped structural recursion — `Succ(bump(k))` — is the
+   shape TRMC transforms, but `Trmc.enabled` is false by default, so on the
+   default pipeline this function DOES keep O(depth) stack and DOES overflow on
+   deep input (verified: 400k-element repro exits 138 without `--trmc`, 0 with
+   it).  An earlier revision of this test asserted the opposite — it pinned the
+   promise "the compiler turns it into a loop", which was written ahead of a
+   default flip that never landed.  The warning must therefore describe the
+   transformation as OPT-IN and must not promise it happens automatically.
    The detection itself is unchanged: the warning still fires (the typechecker
    has no TIR-level eligibility information), only the wording moved. *)
-let test_structural_recursion_warning_does_not_prescribe_accumulator () =
+let test_structural_recursion_warning_states_trmc_is_opt_in () =
   let ctx = typecheck {|mod W do
   type Nat = Zero | Succ(Nat)
   fn bump(n : Nat) : Nat do
@@ -4208,11 +4213,17 @@ end|} in
     ) diags
   in
   Alcotest.(check bool)
-    "constructor-wrapped recursion is not told to use an accumulator"
-    false (mentions "accumulator parameter");
+    "the warning does not promise an automatic loop"
+    false (mentions "the compiler turns it into a loop");
   Alcotest.(check bool)
-    "constructor-wrapped recursion is told the compiler loops it"
-    true (mentions "turns it into a loop")
+    "the warning says deep input can overflow the stack"
+    true (mentions "overflow the stack");
+  Alcotest.(check bool)
+    "the warning names the opt-in flag that does perform the transformation"
+    true (mentions "`--trmc`");
+  Alcotest.(check bool)
+    "the warning says that transformation is off by default"
+    true (mentions "off by default")
 
 (* ── Cap(IO.NetListen) body-scan enforcement (item 1380) ─────────────────
    tcp_listen / tcp_accept / http_server_listen are classified IO.NetListen in
@@ -14735,6 +14746,7 @@ let compiler_suites =
       ("cap_scope", Test_cap_scope.tests);
       ("cap_ceiling", Test_cap_ceiling.tests);
       ("cap_unforgeable", Test_cap_unforgeable.tests);
+      ("cap_dict", Test_cap_dict.tests);
       ("cap_attrib_agreement", Test_cap_attrib_agreement.tests);
       ("cap_sandbox_profile", Test_cap_sandbox_profile.tests);
       ("cap_sandbox_runtime", Test_cap_sandbox_runtime.tests);
@@ -15643,7 +15655,7 @@ let compiler_suites =
           Alcotest.test_case "negative param: x < 0 → r < 0, r <= -1"      `Quick test_return_infer_negative_param;
         ] );
       ( "error_improvements", [
-          Alcotest.test_case "structural recursion warning: no accumulator advice" `Quick test_structural_recursion_warning_does_not_prescribe_accumulator;
+          Alcotest.test_case "structural recursion warning: TRMC stated as opt-in" `Quick test_structural_recursion_warning_states_trmc_is_opt_in;
           Alcotest.test_case "#1 label rendered in render_diagnostic"       `Quick test_label_rendered_in_output;
           Alcotest.test_case "#2 if-branch type mismatch has label"         `Quick test_if_branch_mismatch_has_label;
           Alcotest.test_case "#2 match-arm type mismatch has label"         `Quick test_match_arm_mismatch_has_label;

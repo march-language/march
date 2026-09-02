@@ -381,7 +381,7 @@ let decl_span (d : Ast.decl) : Ast.span =
   | Ast.DActor (_, _, _, sp) | Ast.DProtocol (_, _, sp) | Ast.DMod (_, _, _, sp)
   | Ast.DSig (_, _, sp) | Ast.DInterface (_, sp) | Ast.DImpl (_, sp)
   | Ast.DExtern (_, sp) | Ast.DUse (_, sp) | Ast.DAlias (_, sp)
-  | Ast.DNeeds (_, sp) | Ast.DProofCap (_, sp) | Ast.DTransitions (_, _, sp)
+  | Ast.DNeeds (_, sp) | Ast.DProofCap (_, _, sp) | Ast.DTransitions (_, _, sp)
   | Ast.DApp (_, sp) | Ast.DDeriving (_, _, sp) | Ast.DSatisfy (_, _, sp)
   | Ast.DTest (_, sp) | Ast.DDescribe (_, _, sp) | Ast.DSetup (_, sp)
   | Ast.DSetupAll (_, sp) | Ast.DOpts (_, sp) -> sp

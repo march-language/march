@@ -2647,16 +2647,44 @@ let task_builtins : env =
       | _ -> eval_error "task_cancel_by_id: expected 1 argument (a Task)"))
 
   ; ("get_work_pool", VWorkPool)
-  (* Capability builtins — at runtime caps are opaque unit sentinels *)
+  (* Capability builtins.
+
+     A capability is either the opaque sentinel [VUnit] — which is what every
+     capability was before dictionaries existed, and still is unless something
+     attaches one — or the DICTIONARY RECORD itself.  Representing a
+     dictionaried capability AS its dictionary needs no new value constructor
+     and mirrors the compiled representation exactly, where [Cap(X)] is a
+     nullable pointer and [VUnit] is the null. *)
   ; ("root_cap",   VUnit)
+  (* cap_narrow: attenuation is a compile-time check, so the runtime is the
+     IDENTITY — which is also what PROPAGATES a dictionary across a narrow.
+     This used to return [VUnit] unconditionally, discarding its argument;
+     that was invisible while every capability was [VUnit] and would silently
+     drop the dictionary now.  (march_cap_narrow, the compiled half, has always
+     been `return cap;`.) *)
   ; ("cap_narrow", VBuiltin ("cap_narrow", function
-    | [_cap] -> VUnit   (* attenuation is a compile-time check; runtime is a no-op *)
+    | [cap] -> cap
     | _ -> eval_error "cap_narrow: expected 1 argument"))
-  (* mint_cap — the gated proof-cap mint. Gating is a compile-time check; at
-     runtime it is a no-op alias of cap_narrow (caps are opaque unit sentinels). *)
+  (* mint_cap — the gated proof-cap mint.  Gating is a compile-time check.
+     Unlike cap_narrow this does NOT propagate: the minted proof capability is
+     a NEW capability, not an attenuation of the [Cap(IO)] it was minted from,
+     and inheriting that capability's dictionary would give it operations
+     belonging to something else. *)
   ; ("mint_cap", VBuiltin ("mint_cap", function
     | [_cap] -> VUnit
     | _ -> eval_error "mint_cap: expected 1 argument"))
+  (* cap_impl: attach a dictionary.  The dictionary IS the capability's runtime
+     value from here on; the capability argument carries no other content. *)
+  ; ("cap_impl", VBuiltin ("cap_impl", function
+    | [_cap; dict] -> dict
+    | _ -> eval_error "cap_impl: expected 2 arguments"))
+  (* cap_dict: read the dictionary back.  [None] — the sentinel case — is "no
+     dictionary, use the ambient/default implementation", which keeps the read
+     total and keeps the default path visible in the source. *)
+  ; ("cap_dict", VBuiltin ("cap_dict", function
+    | [VUnit] -> VCon ("None", [])
+    | [dict]  -> VCon ("Some", [dict])
+    | _ -> eval_error "cap_dict: expected 1 argument"))
 
   (* Signal.watch — register/remove a deferred OS-signal watcher.  [code] is
      the stable 0-4 signal code produced by stdlib/signal.march.  The handler

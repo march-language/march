@@ -1,0 +1,35 @@
+mod CapMockIO do
+  -- End-to-end IO mocking through a capability dictionary.
+  --
+  -- The point of the whole capability-passing pass: `work` and `shout` take no
+  -- capability and name none. `shout` calls `print_line`, an interceptable
+  -- operation whose capability requirement lives in a side table, not in its
+  -- signature -- which is exactly why a dictionary attached to a capability
+  -- could not be consulted before this pass existed.
+  --
+  -- Three calls to the SAME function, with the middle one inside `with_cap`:
+  -- one dictionary alone would not distinguish interception from a hard-coded
+  -- implementation, and the calls either side pin that the swap is lexically
+  -- scoped rather than global.
+  --
+  -- Requires MARCH_CAP_PASSING=1 and MARCH_CAP_DISPATCH=1; without them this
+  -- prints REAL three times, which is the ambient path and also what every
+  -- program that predates dictionaries does.
+  needs IO.Console
+
+  pfn shout(s : String) : () do
+    print_line("REAL:" ++ s)
+  end
+
+  pfn work() : () do
+    shout("x")
+  end
+
+  fn main(c : Cap(IO.Console)) do
+    work()
+    let mock = cap_impl(c, { cap_ops_empty(c) with
+      print_line: Some(fn s -> print("MOCK[" ++ s ++ "]\n")) })
+    with_cap(mock, fn _ -> work())
+    work()
+  end
+end

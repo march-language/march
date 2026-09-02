@@ -137,6 +137,7 @@ val repr : ty -> ty
 val occurs : int -> int -> ty -> bool
 val _tvar_names : (int, string) Hashtbl.t
 val _tvar_ctr : int ref
+val reset_tvar_display_names : unit -> unit
 val _record_names : (string, string option) Hashtbl.t
 val register_record_name : name:string -> string list -> unit
 val pp_ty : ?parens:bool -> ty -> string

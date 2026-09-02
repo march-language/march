@@ -1346,6 +1346,103 @@ let rec infer_expr env (e : Ast.expr) : ty =
         (sp, rty, env.cur_fn_public, env.current_module) :: !(env.mint_cap_sites);
       rty
 
+    (* cap_impl (dictionaries): attach a runtime dictionary to a capability.
+       Supplying a dictionary IS forging the capability's BEHAVIOUR, so the gate
+       is [mint_cap]'s gate and it is enforced by the same kind of post-checking
+       sweep, for the same reason: the result cap is pinned by LATER
+       unification (usually the enclosing fn's return annotation), so neither
+       the gate nor the dictionary's declared type can be decided here.  We
+       capture the enclosing fn/module context now because it is unavailable at
+       sweep time. *)
+    | Ast.EApp (Ast.EVar { txt = "cap_impl"; _ } as fv, [cap_arg; dict_arg], sp) ->
+      let f_ty = infer_expr env fv in
+      let rty = infer_app env sp f_ty [cap_arg; dict_arg] 0 in
+      (* The dictionary argument's own type, read back solved at sweep time.
+         Inferring it here (rather than re-walking at sweep time) is what lets
+         the sweep compare it against the capability's declared `with` type. *)
+      let dict_ty = infer_expr env dict_arg in
+      (* Same value restriction as mint_cap: a cap_impl application is
+         expansive and must not let-generalize, or the sweep would see an
+         unbound quantified var instead of the concrete pinned capability —
+         which is the polymorphic-supplier forge vector. *)
+      demote_to_monomorphic rty;
+      env.cap_impl_sites :=
+        (sp, rty, dict_ty, env.cur_fn_public, env.current_module)
+        :: !(env.cap_impl_sites);
+      rty
+
+    (* cap_dict: read a capability's dictionary back as an [Option].  Unlike
+       cap_impl this resolves AT THE SITE, because the result type is PRODUCED
+       (from the capability's declared `with` type) rather than checked, and a
+       deferred sweep cannot produce a type that the surrounding expression has
+       already been checked against.  In practice the argument is an annotated
+       parameter, so its type is known; when it is not, say so rather than
+       silently yielding an unconstrained [Option(a)]. *)
+    (* cap_ops_empty: resolves exactly like cap_dict, but yields the dictionary
+       record itself rather than an Option of it — it is the all-None BASE, not
+       a read. *)
+    | Ast.EApp (Ast.EVar { txt = "cap_ops_empty"; _ }, [cap_arg], sp) ->
+      env.cap_dict_sites := sp :: !(env.cap_dict_sites);
+      let arg_ty = infer_expr env cap_arg in
+      (match repr arg_ty with
+       | TError -> TError
+       | TCon ("Cap", [inner]) ->
+         (match repr inner with
+          | TCon (p, []) ->
+            (match Cap_dict_resolve.dict_ty_of_cap env p with
+             | Some dict -> dict
+             | None ->
+               Err.error env.errors ~span:sp
+                 (render_parts [
+                   MPCode ("Cap(" ^ p ^ ")");
+                   MPText " has no dictionary, so there is no base for ";
+                   MPCode "cap_ops_empty"; MPText " to produce." ]);
+               TError)
+          | _ ->
+            Err.error env.errors ~span:sp
+              (render_parts [
+                MPCode "cap_ops_empty";
+                MPText " needs to know which capability it is building a base \
+                        for, but the argument's type is undetermined here." ]);
+            TError)
+       | _ ->
+         Err.error env.errors ~span:sp
+           (render_parts [ MPCode "cap_ops_empty"; MPText " expects a capability." ]);
+         TError)
+
+    | Ast.EApp (Ast.EVar { txt = "cap_dict"; _ }, [cap_arg], sp) ->
+      env.cap_dict_sites := sp :: !(env.cap_dict_sites);
+      let arg_ty = infer_expr env cap_arg in
+      let reject parts = Err.error env.errors ~span:sp (render_parts parts); TError in
+      (match repr arg_ty with
+       | TError -> TError
+       | TCon ("Cap", [inner]) ->
+         (match repr inner with
+          | TCon (p, []) ->
+            (match Cap_dict_resolve.dict_ty_of_cap env p with
+             | Some dict -> TCon ("Option", [dict])
+             | None ->
+               reject [
+                 MPCode ("Cap(" ^ p ^ ")");
+                 MPText " declares no runtime dictionary, so there is nothing for ";
+                 MPCode "cap_dict"; MPText " to read.";
+                 MPBreak;
+                 MPText "hint: declare one on the capability — ";
+                 MPCode ("proof cap " ^ cap_bare_name p ^ " with SomeRecordType");
+                 MPText " — where the record type is declared in the same module." ])
+          | _ ->
+            reject [
+              MPCode "cap_dict";
+              MPText " needs to know which capability it is reading here, but the \
+                      argument's type is still undetermined at this point.";
+              MPBreak;
+              MPText "hint: annotate the capability (e.g. ";
+              MPCode "c : Cap(Mod.Name)"; MPText ")." ])
+       | _ ->
+         reject [
+           MPCode "cap_dict"; MPText " expects a capability, but got ";
+           MPCode (pp_ty arg_ty); MPText "." ])
+
     (* Capability unforgeability (R3): record the three unconstrained JSON
        builtins for the post-checking sweep.  [f_ty] is the FRESHLY
        INSTANTIATED [a -> b]; [infer_app] unifies [a] with the argument and
@@ -1832,10 +1929,67 @@ let rec infer_expr env (e : Ast.expr) : ty =
                A row-polymorphism extension would constrain this properly. *)
             fresh_var env.level
           | other ->
-            Err.error env.errors ~span:sp
-              (Printf.sprintf
-                 "I cannot access field `%s` because this expression has \
-                  type `%s`, which is not a record." name.txt (pp_ty other));
+            (* Name what the user actually wrote when we can. A bare variable
+               is by far the common shape (`l.value`), and "`l` has type ..."
+               with a copy-pasteable `match l do ...` beats "this expression"
+               plus an abstract `<expr>` template the reader has to
+               re-instantiate by hand. *)
+            let subject = match e with
+              | Ast.EVar v -> Some v.txt
+              | _ -> None
+            in
+            let subj_desc = match subject with
+              | Some v -> Printf.sprintf "`%s`" v
+              | None   -> "this expression"
+            in
+            let subj_code = match subject with
+              | Some v -> v
+              | None   -> "<expr>"
+            in
+            (* An unresolved payload renders as an internal fresh-variable
+               name (`Option(l2)`), which means nothing to the reader and
+               changes from run to run. Print `_` for it instead — "some
+               Option, contents not yet known" is the honest reading, and it
+               keeps the reader's attention on the wrapper, which is the
+               actual problem. *)
+            let shown_ty =
+              match other with
+              | TCon (("Option" | "Result") as c, (_ :: _ as args)) ->
+                let arg_str a =
+                  match repr a with TVar _ -> "_" | t -> pp_ty t in
+                Printf.sprintf "%s(%s)" c
+                  (String.concat ", " (List.map arg_str args))
+              | t -> pp_ty t
+            in
+            (* `Option`/`Result` are the overwhelmingly common case someone
+               hits this on: the field access itself is right, it is just
+               aimed at the wrapper instead of the payload inside it. Say why
+               (it may be absent) and hand over working code. *)
+            let unwrap_note =
+              match other with
+              | TCon ("Option", [_]) ->
+                [ Printf.sprintf
+                    "%s may be `None`, so there is not always a value to read \
+                     `%s` from. Handle both cases: `match %s do Some(x) -> \
+                     x.%s  None -> ... end`. Or, to keep the result wrapped: \
+                     `Option.map(%s, fn x -> x.%s)`."
+                    subj_desc name.txt subj_code name.txt subj_code name.txt ]
+              | TCon ("Result", [_; _]) ->
+                [ Printf.sprintf
+                    "%s may be an `Err`, so there is not always a value to \
+                     read `%s` from. Handle both cases: `match %s do Ok(x) -> \
+                     x.%s  Err(e) -> ... end`. Or, to keep the result wrapped: \
+                     `Result.map(%s, fn x -> x.%s)`."
+                    subj_desc name.txt subj_code name.txt subj_code name.txt ]
+              | _ -> []
+            in
+            Err.report env.errors
+              { Err.severity = Error; span = sp;
+                message =
+                  Printf.sprintf
+                    "I cannot access field `%s` because %s has type `%s`, \
+                     which is not a record." name.txt subj_desc shown_ty;
+                labels = []; notes = unwrap_note; code = None; fix = None };
             TError))
       (* close the None branch of mod_access match *)
       )
@@ -4371,6 +4525,7 @@ let rec check_decl env (d : Ast.decl) : env =
       qual_fn_names = StrMap.union (fun _k a _ -> Some a) new_fn_quals env'.qual_fn_names;
       module_caps = module_caps';
       proof_caps = inner_env.proof_caps;
+      cap_dicts = inner_env.cap_dicts;
       always_linear_types = inner_env.always_linear_types;
       no_panic_modules = no_panic_modules';
       local_mods =
@@ -4923,7 +5078,7 @@ let rec check_decl env (d : Ast.decl) : env =
     { env with mod_needs = paths @ env.mod_needs;
                mod_need_scopes = scoped @ env.mod_need_scopes }
 
-  | Ast.DProofCap (name, _sp) ->
+  | Ast.DProofCap (name, dict, sp) ->
     (* Register proof cap: full qualified path → declaring module name.
        Also register the cap name as a 0-arity type so Cap(Mod.Name) is
        valid in type annotations (just like Cap(IO.Network)). *)
@@ -4931,8 +5086,20 @@ let rec check_decl env (d : Ast.decl) : env =
       if env.current_module = "" then name.txt
       else env.current_module ^ "." ^ name.txt
     in
+    (* `with <DictType>`: the capability carries a runtime dictionary of this
+       record type.  The type is NOT resolved here — a `proof cap` may name a
+       record declared later in the same module — so the site is recorded and
+       [check_cap_dict_decls] validates it after the module is checked. *)
+    (match dict with
+     | None -> ()
+     | Some d ->
+       env.cap_dict_decl_sites := (sp, full_path, d.Ast.txt) :: !(env.cap_dict_decl_sites));
     { env with
       proof_caps = (full_path, env.current_module) :: env.proof_caps;
+      cap_dicts =
+        (match dict with
+         | None -> env.cap_dicts
+         | Some d -> (full_path, d.Ast.txt) :: env.cap_dicts);
       types = StrMap.add full_path 0 env.types }
 
   | Ast.DAlwaysLinearType (vis, name, params, typedef, sp) ->
@@ -6037,6 +6204,8 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
      enclosing fn/module context captured at record time). Shared ref → one sweep
      at the entry module covers every nested module's sites. *)
   check_mint_cap_sites final_env;
+  check_cap_dict_decls final_env;
+  check_cap_impl_sites final_env;
   check_json_cap_sites final_env;
   check_cap_narrow_sites final_env;
   (* Validate capability declarations for the top-level module *)

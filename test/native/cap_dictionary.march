@@ -1,0 +1,54 @@
+mod CapDict do
+  -- Capability runtime dictionaries, compiled.  Pins the two things the
+  -- COMPILED representation gets right by construction and could silently
+  -- lose in a codegen refactor:
+  --
+  --  1. A capability is a NULLABLE POINTER: NULL is the plain sentinel and
+  --     otherwise the pointer IS the dictionary record.  Because Option is
+  --     niche-encoded (None = 0, Some(x) = x, lib/tir/repr.ml), `cap_dict`
+  --     needs no encoding step at all — it is bit-identical to its argument.
+  --     If Option ever stops being niche-shaped for this payload, the `None`
+  --     line below starts printing garbage or crashing.
+  --
+  --  2. `mint_cap` does NOT inherit the dictionary of the Cap(IO) it was
+  --     minted from — a mint is a NEW capability, not an attenuation.  The
+  --     `plain` line witnesses that: it mints without attaching and must read
+  --     back None.  This used to alias march_cap_narrow (identity), which
+  --     agreed with the interpreter only because a Cap(IO) is always NULL.
+  --
+  -- Expected output equals the interpreter's, which is the point: run the
+  -- same file with `march` and with `march --compile` and diff.
+  needs IO.Console
+  needs IO
+
+  type Ops = { tick : (Int) -> Int }
+  proof cap Live with Ops
+
+  fn with_add(c : Cap(IO), k : Int) : Cap(CapDict.Live) do
+    cap_impl(mint_cap(c), { tick: fn n -> n + k })
+  end
+
+  fn with_mul(c : Cap(IO), k : Int) : Cap(CapDict.Live) do
+    cap_impl(mint_cap(c), { tick: fn n -> n * k })
+  end
+
+  fn plain(c : Cap(IO)) : Cap(CapDict.Live) do
+    mint_cap(c)
+  end
+
+  fn run(c : Cap(CapDict.Live), n : Int) : Int do
+    match cap_dict(c) do
+      Some(d) -> d.tick(n)
+      None    -> n
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    -- one dictionary proves dispatch reaches it; TWO prove the swap is real
+    -- and not a hard-coded implementation
+    println(int_to_string(run(with_add(c, 100), 5)))
+    println(int_to_string(run(with_mul(c, 3), 5)))
+    -- no dictionary: the sentinel reads back as None and the default path runs
+    println(int_to_string(run(plain(c), 7)))
+  end
+end

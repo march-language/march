@@ -281,13 +281,37 @@ let rec check_tail_position
         let is_structural =
           List.exists (is_structurally_smaller fn_params smaller) args
         in
-        if not is_structural then
+        if not is_structural then begin
+          (* The advice has to match the blocker. An accumulator moves work
+             that happens AFTER the call to before it — the right fix when a
+             result is combined arithmetically, and useless for a branching
+             search joined by `||`/`&&`. Those are strict in March
+             (specs/lang/core-march.md 4.4.1), so the call genuinely is not in
+             tail position, but the fix is to branch instead: an `if` branch
+             inherits tail position, so `a || b` written as
+             `if a do true else b end` puts the right-hand call in tail
+             position (and skips it when the left already decides). *)
+          let is_boolop =
+            let has sub =
+              let n = String.length sub and m = String.length ctx in
+              let rec go i = i + n <= m && (String.sub ctx i n = sub || go (i + 1)) in
+              go 0
+            in
+            has "`||`" || has "`&&`"
+          in
+          let hint =
+            if is_boolop then
+              "Hint: `&&`/`||` evaluate both sides in March. Rewrite `a || b` as \
+               `if a do true else b end` (and `a && b` as `if a do b else false end`) \
+               to put the right-hand call in tail position."
+            else "Hint: Consider using an accumulator parameter."
+          in
           Err.error errors ~span:sp
             (Printf.sprintf
                "Function `%s`: recursive call to `%s` is not in tail position \
-                (%s).\n\
-                Hint: Consider using an accumulator parameter."
-               fn_name (display fn.txt) ctx)
+                (%s).\n%s"
+               fn_name (display fn.txt) ctx hint)
+        end
         else begin
           (* Structural recursion: warn but allow — distinguish arithmetic
              reductions (n-1, n-2) from pattern-bound sub-components. *)
@@ -308,12 +332,23 @@ let rec check_tail_position
                   for O(n) performance."
                  fn_name)
           else
+            (* The loop is NOT automatic.  TRMC (lib/tir/trmc.ml) does perform
+               exactly this transformation and is correct on eligible shapes,
+               but `Trmc.enabled` defaults to false, so on the default pipeline
+               a constructor-wrapped recursive call really does keep O(depth)
+               stack and really does overflow on deep input.  This message once
+               promised the loop unconditionally — it was reworded ahead of a
+               default flip (specs/plans/2026-08-10-trmc-on-by-default.md) that
+               never landed.  State the opt-in, not the promise. *)
             Err.warning errors ~span:sp
               (Printf.sprintf
                  "Warning: function `%s` is structurally recursive but not \
-                  tail-recursive. This is safe for bounded input but may use \
-                  O(depth) stack space; when the recursive call is the direct \
-                  argument of a constructor, the compiler turns it into a loop."
+                  tail-recursive. This is safe for bounded input but uses \
+                  O(depth) stack space, so deep input can overflow the stack. \
+                  Consider an accumulator parameter. Tail-recursion-modulo-cons \
+                  can compile a recursive call that is the direct argument of a \
+                  constructor into a loop instead, but it is off by default; \
+                  enable it with `--trmc`."
                  fn_name)
         end
       end;

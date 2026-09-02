@@ -127,6 +127,7 @@ type scheme = Mono of ty | Poly of int list * constraint_ list * ty
 val _counter : int ref
 val fresh_var : int -> ty
 val repr : ty -> ty
+val reset_tvar_display_names : unit -> unit
 val _record_names : (string, string option) Hashtbl.t
 val pp_ty : ?parens:bool -> ty -> string
 val pp_ty_pretty : ?indent:int -> ?width:int -> ty -> string
@@ -264,6 +265,10 @@ type env = {
   nonexhaustive_match_spans : Ast.span list ref;
   cap_producer_ivars : (int, Ast.span) Hashtbl.t;
   cap_narrow_factory_fns : (string, Ast.span) Hashtbl.t;
+  cap_dicts : (string * string) list;
+  cap_dict_decl_sites : (Ast.span * string * string) list ref;
+  cap_impl_sites : (Ast.span * ty * ty * bool * string) list ref;
+  cap_dict_sites : Ast.span list ref;
   mint_cap_sites : (Ast.span * ty * bool * string) list ref;
   cap_narrow_sites : (Ast.span * ty) list ref;
   json_cap_sites : (Ast.span * ty * string) list ref;
@@ -329,6 +334,8 @@ val render_cap_chain : string list -> string
 val check_module_core :
   ?errors:Err.ctx ->
   ?seed_env:env -> Ast.module_ -> Err.ctx * (Ast.span, ty) Hashtbl.t * env
+val test_build : bool ref
+
 val check_module :
   ?errors:Err.ctx -> Ast.module_ -> Err.ctx * (Ast.span, ty) Hashtbl.t
 val check_module_with_refs :

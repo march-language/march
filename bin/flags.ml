@@ -60,6 +60,18 @@ let refine_suggest_post : string option ref = ref None
 let refine_suggest_post_all = ref false
 
 let do_test        = ref false   (* --test: compile test blocks into a test-runner binary *)
+let emit_io_ops    = ref false   (* --emit-io-ops: print the generated stdlib/io_ops.march *)
+
+(** Capability MOCKING: the dictionary types resolve for IO capabilities, the
+    dispatch wrappers are injected, and operations are rewritten to route
+    through them.  ONE predicate for all three, because they must agree: the
+    wrappers were once injected only under --test while the rewrite was gated
+    separately, so a build with the rewrite on and the injection off emitted
+    calls to `__march_dispatch_print_line` and failed at link with an
+    undefined symbol. *)
+let cap_mocking () =
+  !do_test || Sys.getenv_opt "MARCH_CAP_DISPATCH" = Some "1"
+
 let output_file    = ref ""
 let debug_mode     = ref false
 let debug_tui_mode = ref false

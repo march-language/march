@@ -174,9 +174,15 @@ type decl =
       [None] means unscoped — any path — which is what every capability
       declared without a scope means, so existing source keeps its meaning.
       Only filesystem capabilities accept a scope; see [March_caps.Cap_scope]. *)
-  | DProofCap of name * span
-  (** Proof capability declaration: [proof cap Migrated]
-      Registers an unforgeable capability that can only be minted inside the declaring module. *)
+  | DProofCap of name * name option * span
+  (** Proof capability declaration: [proof cap Migrated], optionally with a
+      runtime DICTIONARY type: [proof cap Live with SessionOps].
+      Registers an unforgeable capability that can only be minted inside the
+      declaring module.  The optional second component names a record type
+      declared in the same module: the type of the dictionary [cap_impl] may
+      attach to this capability and [cap_dict] reads back.  [None] — every
+      capability written before dictionaries existed — means the capability is
+      runtime-erased exactly as before. *)
   | DOpts of string list * span
   (** Module-level capability directives: [`"no_panic"`] from `cap no_panic`.
       The list allows multiple future directives; Phase 3c only uses `"no_panic"`. *)
