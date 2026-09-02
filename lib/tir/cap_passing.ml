@@ -322,6 +322,64 @@ let dump (m : T.tir_module) : unit =
     (List.length rows) (List.length m.T.tm_fns);
   List.iter (fun (k, v) -> Printf.eprintf "  %-52s %s\n" k (String.concat ", " v)) rows
 
+(* ── the actor boundary ───────────────────────────────────────────────── *)
+
+(** Capabilities [e] reaches: what it performs directly, plus what anything it
+    calls needs.
+
+    The callee half is the important one and was easy to get wrong. A
+    dispatch's handlers are NOT inlined into it at this point in the pipeline —
+    that happens later, in the optimizer — so at this point the body reads
+
+      case $msg of Say($Say_s) -> Logger_Say(root_cap, $actor, $Say_s)
+
+    i.e. a CALL to an already-threaded handler that the dispatch is supplying
+    the ambient sentinel to. Scanning only for operations finds nothing, which
+    is exactly what the first version did. *)
+let caps_reached (need : (string, string list) Hashtbl.t) (e : T.expr) : string list =
+  let acc = ref [] in
+  let f = { calls = Hashtbl.create 8; ops = Hashtbl.create 8;
+            unsafe = Hashtbl.create 8; toplevel = Hashtbl.create 8 } in
+  scan f "$probe" StrSet.empty e;
+  Hashtbl.iter (fun _ v -> acc := v @ !acc) f.ops;
+  Hashtbl.iter
+    (fun _ callees ->
+       List.iter
+         (fun c ->
+            match Hashtbl.find_opt need c with
+            | Some caps -> acc := caps @ !acc
+            | None -> ())
+         callees)
+    f.calls;
+  List.sort_uniq String.compare !acc
+
+(** [actor_of_spawn n] is the actor name when [n] is a spawn glue function. *)
+let actor_of_spawn (n : string) : string option =
+  let sfx = Tir_names.actor_spawn_suffix in
+  let ls = String.length sfx and ln = String.length n in
+  if ln > ls && String.sub n (ln - ls) ls = sfx
+  then Some (String.sub n 0 (ln - ls)) else None
+
+(** [actor_of_dispatch n] is the actor name when [n] is a dispatch function. *)
+let actor_of_dispatch (n : string) : string option =
+  let sfx = Tir_names.actor_dispatch_suffix in
+  let ls = String.length sfx and ln = String.length n in
+  if ln > ls && String.sub n (ln - ls) ls = sfx
+  then Some (String.sub n 0 (ln - ls)) else None
+
+(** The single capability an actor's dispatch needs, if there is exactly one.
+
+    v1 deliberately handles ONE.  An actor performing two different
+    capabilities' operations would need a record of them captured at spawn, and
+    that is additive; one capability covers the ordinary actor (it logs, or it
+    reads the clock) and proves the whole path — spawn-site capture, runtime
+    metadata, dispatch read — end to end. *)
+let dispatch_cap (need : (string, string list) Hashtbl.t) (fd : T.fn_def)
+  : string option =
+  match actor_of_dispatch fd.T.fn_name with
+  | None -> None
+  | Some _ -> (match caps_reached need fd.T.fn_body with [ c ] -> Some c | _ -> None)
+
 (* ── threading ────────────────────────────────────────────────────────── *)
 
 (** Functions whose arity must not change because something outside this pass
@@ -354,9 +412,10 @@ let roots (m : T.tir_module) : (string, unit) Hashtbl.t =
     No wildcard arm, for the same reason as [scan]: a call site inside an
     unhandled constructor would keep its old arity while its callee gained
     parameters. *)
-let rec thread ?(dispatch = false) (need : (string, string list) Hashtbl.t)
+let rec thread ?(dispatch = false) ?(spawn_caps = Hashtbl.create 1)
+    (need : (string, string list) Hashtbl.t)
     (binds : (string * T.atom) list) (e : T.expr) : T.expr =
-  let go = thread ~dispatch need binds in
+  let go = thread ~dispatch ~spawn_caps need binds in
   (* What this scope can supply for a capability: the enclosing function's own
      parameter, a `with_cap` mock, or — failing both — the ambient sentinel. *)
   let supply c =
@@ -400,6 +459,29 @@ let rec thread ?(dispatch = false) (need : (string, string list) Hashtbl.t)
          | _ -> v
        in
        T.EApp (v, extra @ args))
+  (* Spawn-site capture.  Lower emits
+       let $raw_actor = Name_spawn() in spawn($raw_actor)
+     and `march_spawn` is what CREATES the actor's runtime metadata, so the
+     capability has to be attached after it, not before:
+       let $raw_actor = Name_spawn() in
+       let $pid = spawn($raw_actor) in
+       set_actor_caps($raw_actor, <cap>); $pid
+     The actor's dispatch reads it back — see [ops_in]/[dispatch_cap]. *)
+  | T.ELet (raw, (T.EApp (sf, []) as spawn_call), T.EApp (sp, [ T.AVar raw' ]))
+    when sp.T.v_name = "spawn" && raw'.T.v_name = raw.T.v_name
+      && (match actor_of_spawn sf.T.v_name with Some _ -> true | None -> false) ->
+    let actor = Option.get (actor_of_spawn sf.T.v_name) in
+    (match Hashtbl.find_opt spawn_caps actor with
+     | None -> e
+     | Some cap ->
+       let pid = { T.v_name = "$pid_cap"; T.v_ty = T.TPtr T.TUnit; T.v_lin = T.Unr } in
+       let setter =
+         { T.v_name = "set_actor_caps"; T.v_ty = T.TPtr T.TUnit; T.v_lin = T.Unr }
+       in
+       T.ELet (raw, spawn_call,
+         T.ELet (pid, T.EApp (sp, [ T.AVar raw ]),
+           T.ESeq (T.EApp (setter, [ T.AVar raw; supply cap ]),
+                   T.EAtom (T.AVar pid)))))
   | T.ELet (v, e1, e2) ->
     (* `with_cap(mock, fn _ -> body)`: inside that lambda, the capability is
        the MOCK rather than whatever the enclosing scope was supplying.  Lower
@@ -414,9 +496,9 @@ let rec thread ?(dispatch = false) (need : (string, string list) Hashtbl.t)
         T.ELetRec
           (List.map
              (fun (fd : T.fn_def) ->
-                { fd with T.fn_body = thread ~dispatch need binds' fd.T.fn_body })
+                { fd with T.fn_body = thread ~dispatch ~spawn_caps need binds' fd.T.fn_body })
              fns,
-           thread ~dispatch need binds' inner)
+           thread ~dispatch ~spawn_caps need binds' inner)
       | _ -> go e1
     in
     T.ELet (v, e1', go e2)
@@ -485,6 +567,15 @@ let elaborate ?(dispatch = false) (m : T.tir_module) : T.tir_module =
     (Hashtbl.copy need);
   if Hashtbl.length need = 0 then m
   else
+    (* Which capability each actor's dispatch needs, so a spawn site knows what
+       to capture and the dispatch knows what to read back. *)
+    let spawn_caps : (string, string) Hashtbl.t = Hashtbl.create 8 in
+    List.iter
+      (fun (fd : T.fn_def) ->
+         match actor_of_dispatch fd.T.fn_name, dispatch_cap need fd with
+         | Some actor, Some cap -> Hashtbl.replace spawn_caps actor cap
+         | _ -> ())
+      m.T.tm_fns;
     let changed = ref 0 in
     let fns =
       List.map
@@ -494,9 +585,32 @@ let elaborate ?(dispatch = false) (m : T.tir_module) : T.tir_module =
            let binds = List.map (fun c -> (c, T.AVar (cap_var c))) caps in
            if March_typecheck.Io_ops_gen.is_dispatch_name fd.T.fn_name then fd
            else
+             (* An actor's dispatch is entered from the scheduler, so its arity
+                is frozen and it has no capability parameter to supply.  Read
+                the one captured at the spawn site off the actor's runtime
+                metadata instead, and bind it for the body — the handler bodies
+                are already inlined here, so this reaches their operations. *)
+             let (extra_binds, wrap) =
+               match actor_of_dispatch fd.T.fn_name, dispatch_cap need fd with
+               | Some actor, Some cap when Hashtbl.mem spawn_caps actor ->
+                 (match fd.T.fn_params with
+                  | actor_param :: _ ->
+                    let cv =
+                      { T.v_name = "$spawn_cap"; T.v_ty = cap_ty cap; T.v_lin = T.Unr }
+                    in
+                    let reader =
+                      { T.v_name = "actor_caps"; T.v_ty = cap_ty cap; T.v_lin = T.Unr }
+                    in
+                    ([ (cap, T.AVar cv) ],
+                     fun body ->
+                       T.ELet (cv, T.EApp (reader, [ T.AVar actor_param ]), body))
+                  | [] -> ([], fun b -> b))
+               | _ -> ([], fun b -> b)
+             in
+             let binds = extra_binds @ binds in
              { fd with
                T.fn_params = List.map cap_var caps @ fd.T.fn_params;
-               T.fn_body = thread ~dispatch need binds fd.T.fn_body })
+               T.fn_body = wrap (thread ~dispatch ~spawn_caps need binds fd.T.fn_body) })
         m.T.tm_fns
     in
     (* Report what was actually rewritten.  Without this the only evidence the

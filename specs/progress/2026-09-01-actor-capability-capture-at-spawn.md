@@ -1,9 +1,10 @@
-# Capability mocking does not reach an actor handler
+# Capability mocking now reaches an actor handler (capture at spawn)
 
-Filed 2026-09-01, out of the capability-passing work (#389). The doc table in
-`specs/lang/capabilities.md` lists this as a known hole; this is the precise
-mechanism, because the hole is much narrower than "actors cannot be threaded"
-and the fix is correspondingly smaller.
+Filed and fixed 2026-09-01, out of the capability-passing work (#389).
+
+**Resolved.** The capability is captured at the spawn site onto
+`march_actor_meta` and read back by the dispatch. Below is the original
+diagnosis, then what shipped.
 
 ## Reproducer
 
@@ -121,3 +122,60 @@ record-field approach expensive.
 
 Only `--test` builds are affected, since that is the only place the elaboration
 runs. In a release build an actor handler behaves exactly as it always has.
+
+
+---
+
+## What shipped
+
+`march_actor_meta` gained `_Atomic(void *) spawn_cap`, with
+`march_set_actor_caps` / `march_actor_caps` keyed by the actor pointer. The
+spawn lowering is rewritten from
+
+```
+let $raw_actor = Name_spawn() in spawn($raw_actor)
+```
+
+to
+
+```
+let $raw_actor = Name_spawn() in
+let $pid = spawn($raw_actor) in
+set_actor_caps($raw_actor, <cap>); $pid
+```
+
+— after `march_spawn`, because that is what creates the meta — and the dispatch
+opens with `let $spawn_cap = actor_caps($actor) in …`, bound for the body so
+the call it already makes to the threaded handler supplies it instead of the
+ambient sentinel.
+
+### The bug worth remembering
+
+The first version scanned the dispatch BODY for interceptable operations and
+found none, so nothing fired. Handlers are **not inlined into the dispatch at
+this point in the pipeline** — that happens later, in the optimizer. At the
+point this pass runs the body is
+
+```
+case $msg of Say($Say_s) -> Logger_Say(root_cap, $actor, $Say_s)
+```
+
+a CALL to an already-threaded handler that the dispatch is handing the ambient
+sentinel to. `--dump-tir` shows the post-optimizer form, where the handler IS
+inlined, which is what made the wrong shape look right. `MARCH_DUMP_TXT=lower`
+shows the form the pass actually sees. The fix reads the callee's needs out of
+the analysis table rather than scanning for operations.
+
+### Scope
+
+One capability per actor. An actor whose handlers reach two would need a record
+of them captured instead — additive. `dispatch_cap` returns `None` for that
+case, so such an actor keeps today's behaviour rather than getting a wrong one.
+
+### Test
+
+`test/cap_mock/cap_mock_actor.march`. Two actors: one spawned inside
+`with_cap`, one outside but **sent to after the block closes**, so a global or
+dynamically-scoped slot would give the right answer for the wrong reason.
+Proved non-vacuous by disabling the spawn capture and watching `MOCK[A:in]`
+become `A:in`.

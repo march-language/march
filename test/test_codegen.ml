@@ -13149,6 +13149,8 @@ declare ptr  @march_cap_narrow(ptr %cap)
 declare ptr  @march_mint_cap(ptr %cap)
 declare ptr  @march_cap_impl(ptr %cap, ptr %dict)
 declare ptr  @march_cap_dict(ptr %cap)
+declare void @march_set_actor_caps(ptr %actor, ptr %caps)
+declare ptr  @march_actor_caps(ptr %actor)
 ; Monitor/supervision builtins
 declare void @march_demonitor(i64 %ref)
 declare i64  @march_monitor(ptr %watcher, ptr %target)
