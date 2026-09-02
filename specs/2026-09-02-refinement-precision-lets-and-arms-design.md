@@ -49,6 +49,19 @@ verifies. Neither should be sold as a large corpus win.
 - No change to reporting. Every obligation that moves must move to `proved`
   or `violated`; a skip that changes bucket is a bug.
 
+**Corrections made while planning (2026-09-02), before implementation.**
+Both designs below simplify once the existing path-fact machinery is read
+closely. (A) A `let` equality needs no new channel: pushing `n == rhs` as an
+ordinary PATH fact reuses the path translator, which already reflects
+arithmetic over variables, the `path_shadow` rule, which already retires a
+fact when `n` or any mentioned name rebinds, and `push_user`, so
+`Undecided.diagnose` sees it. (B) The nested-pattern fact can be phrased over
+the current arm's BINDER, `not is_Nil(t)`, which `path_resolve_tester`
+already bridges to `len(t) > 0` for a bare variable; no selector aliasing and
+no bridge extension are needed for the `Cons(x, Nil)` shape. The plan
+implements the simplified forms; the original text is kept below for the
+record.
+
 ## Design A: a `let` equality channel
 
 Add `lets_eq : (string * A.expr) list` to `call_ctx` (all three construction
