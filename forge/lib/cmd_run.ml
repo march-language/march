@@ -88,23 +88,24 @@ let interp_command ~lib_path_env ~dump_flag ~ffi_flags ?(args = []) ~entry () =
   Printf.sprintf "%smarch%s%s %s%s"
     lib_path_env dump_flag ffi_flags (Filename.quote entry) args_flag
 
+(** Execute a built artifact with the program's own arguments. *)
+let exec_output ~target ~args output =
+  let quoted = String.concat " " (List.map Filename.quote args) in
+  let sep = if args = [] then "" else " " in
+  let cmd = match target with
+    | Some ("js" | "javascript") ->
+      Printf.sprintf "node %s%s%s" (Filename.quote output) sep quoted
+    | _ -> Printf.sprintf "%s%s%s" (Filename.quote output) sep quoted
+  in
+  let rc = Sys.command cmd in
+  if rc = 0 then Ok ()
+  else Error (Printf.sprintf "program exited with code %d" rc)
+
 let run ?(dump_phases = false) ?(compiled = false) ?target ?file ?(args = []) () =
-  if compiled then
-    (* Task 3 replaces this branch. *)
-    match Cmd_build.build ~release:false ~dump_phases ?target () with
-    | Error msg -> Error msg
-    | Ok output ->
-      let cmd = match target with
-        | Some ("js" | "javascript") -> "node " ^ Filename.quote output
-        | _ -> Filename.quote output
-      in
-      let rc = Sys.command cmd in
-      if rc = 0 then Ok ()
-      else Error (Printf.sprintf "program exited with code %d" rc)
-  else
-    match resolve_entry ?file () with
-    | Error msg -> Error msg
-    | Ok (entry, ctx) ->
+  match resolve_entry ?file () with
+  | Error msg -> Error msg
+  | Ok (entry, ctx) ->
+    if not compiled then begin
       let dump_flag = if dump_phases then " --dump-phases" else "" in
       let cmd =
         interp_command ~lib_path_env:ctx.lib_path_env ~dump_flag
@@ -113,3 +114,32 @@ let run ?(dump_phases = false) ?(compiled = false) ?target ?file ?(args = []) ()
       let rc = Sys.command cmd in
       if rc = 0 then Ok ()
       else Error (Printf.sprintf "program exited with code %d" rc)
+    end else
+      match file with
+      | None ->
+        (* Project build: go through Cmd_build.build so the target dir, the CAS
+           and workspace semantics stay exactly as they were. *)
+        (match Cmd_build.build ~release:false ~dump_phases ?target () with
+         | Error msg -> Error msg
+         | Ok output -> exec_output ~target ~args output)
+      | Some _ ->
+        (* Single file: compile straight to a temp output.  The CAS caches the
+           real work, so the artifact itself is disposable and is removed after
+           the run rather than littering the cwd. *)
+        let output =
+          Filename.temp_file "forge-run-" (Cmd_build.output_ext target) in
+        (* temp_file creates the file; the compiler wants to write it itself. *)
+        (try Sys.remove output with Sys_error _ -> ());
+        Fun.protect
+          ~finally:(fun () ->
+              try if Sys.file_exists output then Sys.remove output
+              with Sys_error _ -> ())
+          (fun () ->
+             let (rc, _errors, _warnings) =
+               Cmd_build.compile_entry ~lib_path_env:ctx.lib_path_env
+                 ~ffi_flags:ctx.ffi_flags ~output ~release:false ~dump_phases
+                 ?target entry
+             in
+             if rc <> 0 then
+               Error (Printf.sprintf "march compiler exited with code %d" rc)
+             else exec_output ~target ~args output)

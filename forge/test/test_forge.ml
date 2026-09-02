@@ -1577,6 +1577,16 @@ let test_interp_command_empty_args_adds_nothing () =
   Alcotest.(check string) "identical to the no-args command"
     "MARCH_LIB_PATH=/p/lib march '/p/lib/app.march'" cmd
 
+let test_output_ext_by_target () =
+  (* Pinned because the single-file compiled run names a temp output with this,
+     and running a .mjs as if it were a native binary fails confusingly. *)
+  Alcotest.(check string) "native has no extension" "" (Cmd_build.output_ext None);
+  Alcotest.(check string) "js" ".mjs" (Cmd_build.output_ext (Some "js"));
+  Alcotest.(check string) "javascript" ".mjs" (Cmd_build.output_ext (Some "javascript"));
+  Alcotest.(check string) "wasm" ".wasm" (Cmd_build.output_ext (Some "wasm32"));
+  Alcotest.(check string) "an unknown target is native" ""
+    (Cmd_build.output_ext (Some "aarch64-linux"))
+
 let test_resolve_entry_missing_file () =
   match Cmd_run.resolve_entry ~file:"/definitely/not/here.march" () with
   | Ok _ -> Alcotest.fail "a missing file must not resolve"
@@ -1817,6 +1827,8 @@ let () =
         test_repl_command_includes_ffi_flags_after_entry;
       Alcotest.test_case "bare REPL still gets the ffi flags" `Quick
         test_repl_command_bare_includes_ffi_flags;
+      Alcotest.test_case "output extension follows the target" `Quick
+        test_output_ext_by_target;
     ];
     "search_index_cache", [
       Alcotest.test_case "stale version cache is rebuilt" `Quick
