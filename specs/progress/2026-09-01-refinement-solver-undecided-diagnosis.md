@@ -162,3 +162,19 @@ unclassified lines and zero `opaque-application` slugs.  Full
 `scripts/run-tests.sh` green; `test_refinecheck` 588 [OK] (run directly — `scripts/run-tests.sh` does not
 include it); `@types-check` 303/0, `@grammar-check` 48/0 and
 `scripts/check-docs.sh` all green.
+
+Two further notes from the final-review fix rounds (2026-09-02):
+
+- Alias-withdrawal attribution under a conjunctive predicate now tests the
+  guard only against the conjuncts the whole-goal split judged *missing*, and
+  requires every measure-mentioning missing conjunct to be discharged by it
+  (`guard_discharges`, `refine_call.ml`). A withdrawal is therefore never
+  blamed for a conjunct it could not have stopped — verified by a control that
+  deletes the competing binding and is still undischarged. Documented trade:
+  when a measured missing conjunct IS stopped by the withdrawal but a
+  non-measured one also remains undischarged, the message reports the
+  withdrawal (true of the measured half) though renaming the binding will not
+  fully silence the call.
+- `pred_str`'s `<predicate>` fallback can reach user-facing text (e.g.
+  `_ != <predicate>` for a string-literal comparison inside a conjunct).
+  Pre-existing, not introduced here.
