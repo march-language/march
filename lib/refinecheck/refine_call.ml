@@ -11,14 +11,17 @@
     callee, reflect the actual argument, assemble the facts in scope, and ask
     the solver whether they entail the parameter's predicate.
 
-    Three of the pass's twenty mutable cells live here — [strict_verified],
-    [unverified_hinted] and [trusted_fn] — and all three are written from §21
-    (the declaration walk), which is still in [Refine_check].  They therefore
-    reach that writer through [include], as the same ref cells.  Re-declaring
-    any of them would leave the writer setting a ref nobody reads, and since
-    they only ever RELAX or TIGHTEN reporting, an accepting corpus would not
-    notice: [strict_verified] turns a skipped obligation into an error, and
-    [trusted_fn] suppresses one.
+    Six of the pass's mutable cells live here — [strict_verified],
+    [unverified_hinted], [trusted_fn], [enclosing_fn], [enclosing_fn_probe]
+    and [promoted_sites] — and all six are written from §21 (the
+    declaration walk), which is still in [Refine_check].  They therefore
+    reach that writer through [include], as the same ref cells.
+    Re-declaring any of them would leave the writer setting a ref nobody
+    reads, and since they only ever RELAX or TIGHTEN reporting, an accepting
+    corpus would not notice: [strict_verified] turns a skipped obligation
+    into an error, and [trusted_fn] suppresses one. [enclosing_fn_probe] is
+    the exception — it is test-only instrumentation with no effect on
+    reporting; see its own comment.
 
     Verify changes here against the REJECT corpus
     (`dune build @types-check --force`), not only [scripts/refine-oracle.sh]. *)
@@ -70,6 +73,40 @@ let unverified_hinted = ref false
    carry `@[trusted]`.  Consulted only by [check_call]'s [note] — see there for
    why [check_post] does not (yet) need to. *)
 let trusted_fn = ref false
+
+(* The function whose body is being walked, set and restored by [visit_fn]
+   exactly as [trusted_fn] is.  A ref rather than a [call_ctx] field because
+   it is not a fact channel: it never shadows, never retires on rebinding, and
+   adding it to the record would touch all three construction sites in
+   refine_check.ml for a value none of them varies. *)
+let enclosing_fn : A.fn_def option ref = ref None
+
+(* Test-only observation hook: when set, [visit_fn] invokes it with [fd]
+   immediately after setting [enclosing_fn], so a test can sample the ref
+   DURING the walk rather than only after it — the walk's own [None]
+   default is otherwise indistinguishable from a ref that was never
+   populated at all. Production cost is one [match] against [None]. Never
+   set outside a test. *)
+let enclosing_fn_probe : (A.fn_def -> unit) option ref = ref None
+
+(* Call sites this walk PROMOTED to a demonstrated failure, in emission order:
+   the call span the warning was reported at, the enclosing function's
+   qualified name, and the [fn_def] itself.
+
+   Drained AFTER the walk by [Precond_infer.attach_promoted_fixes], never
+   during it.  [Precond_infer.suggest] is [Ob.with_scratch @@ fun () -> …] and
+   every probe inside it re-walks a hypothesis tree through
+   [Refine_check.visit_decls]: calling it from here would reset the obligation
+   ledger this walk is filling, refill the per-call-site verdict index from a
+   speculative contract, and re-enter [strict_verified] / [trusted_fn] /
+   [unverified_hinted] / [enclosing_fn] underneath their own save/restore
+   frames.  So the promotion below emits its message unchanged and only
+   RECORDS the site; the suggestion — and the machine-applicable fix it
+   carries — is attached afterwards, when nothing is mid-walk.
+
+   Cleared by [check_module] (§21) alongside the ledger, so a prior module's
+   sites can never leak into this one's. *)
+let promoted_sites : (A.span * string * A.fn_def) list ref = ref []
 
 (* Does [e] ever APPLY the function spelled [name]?  Applications only: a bare
    mention (`let f = List.length`) is not a guard, and counting it would let an
@@ -173,11 +210,19 @@ let rec expr_applies_to_free (name : string) (subject : string) (e : A.expr) : b
    and it hides the real cause.  So this is deliberately conjunctive — all
    four conditions, or we keep the honest general message:
 
-   1. the reason is [Solver_undecided].  A withdrawal cannot cause any other
-      skip: it removes an ASSUMPTION, so the VC is still built, still
-      well-sorted, and still reaches the solver — it just arrives without the
-      fact that would have discharged it.  An unreflectable predicate or a sort
-      conflict failed strictly earlier, for reasons the alias cannot touch.
+   1. the reason is [Solver_undecided] or one of its syntactic refinements,
+      [Unconstrained_subject] or [Partial_conjunct] (see [Undecided.diagnose]).
+      A withdrawal cannot cause any other skip: it removes an ASSUMPTION, so
+      the VC is still built, still well-sorted, and still reaches the solver
+      — it just arrives without the fact that would have discharged it, which
+      is exactly what [Unconstrained_subject] also names from the syntax
+      alone, and [Partial_conjunct] names for one conjunct of a goal that
+      splits.  An unreflectable predicate or a sort conflict failed strictly
+      earlier, for reasons the alias cannot touch — and neither does
+      [Opaque_application], which describes the GOAL's own shape, not the
+      assumption set a withdrawal thins.  Where both could describe the same
+      skip, the withdrawal wins: it names a decision made elsewhere in the
+      unit, which is more actionable than "nothing constrains it".
    2. the predicate actually mentions the measure the alias routes to.  A
       withdrawn `len` alias is irrelevant to `{Int | _ != 0}`.
    3. a POSITIVE path condition applies the withdrawn spelling TO THIS
@@ -260,7 +305,10 @@ let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
     ~(subject_is_str : bool) ~(path : (A.expr * bool) list) ~(lets : launder)
     (r : Obligation.reason) : withdrawal option =
   match (r, subject) with
-  | Obligation.Solver_undecided, Some (A.EVar sn) ->
+  | ( ( Obligation.Solver_undecided
+      | Obligation.Unconstrained_subject _
+      | Obligation.Partial_conjunct _ )
+    , Some (A.EVar sn) ) ->
     let guard_applies (w : withdrawal) (cond : A.expr) : bool =
       (* FREE occurrence only, on both the direct condition and the laundered
          RHS: this is an ACCEPTING position, so a shadow-blind, discard-only
@@ -441,21 +489,71 @@ let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
       | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _)
       | A.EDbg (Some e, _) -> recur e
     in
+    (* [pred] itself may be a top-level conjunction (`len(_) >= 0 && len(_) >
+       0`), which is exactly the shape [Partial_conjunct] names: one conjunct
+       can hold on the encoder's own axioms (`len(_) >= 0` needs no guard at
+       all) while another is the one the withdrawn alias actually would have
+       discharged.  [atomic_cmp] only recognises a single comparison, so
+       flatten [pred]'s `&&` spine here — same split [pred_spine] performs
+       at the promotion arm below, over the same [pred] (== [rp.pred]),
+       so the rendered fragments line up with [Partial_conjunct]'s own
+       [held]/[missing] strings, which [pred_str] produced from that exact
+       spine. *)
+    let rec pred_conjuncts (e : A.expr) : A.expr list =
+      match e with
+      | A.EApp (A.EVar { A.txt = "&&"; _ }, [ a; b ], _) -> pred_conjuncts a @ pred_conjuncts b
+      | e -> [ e ]
+    in
     (* Does the guard fact [cond] — already known to apply [w]'s spelling to
        this subject, and already filtered to a POSITIVE path entry by the
-       caller below — actually ENTAIL [pred]?  The laundered spelling (`if n
-       > 0 …` after `let n = List.length(ys)`) is handled by substituting the
-       laundering name's bound expression in wherever [cond] free-mentions
-       it, one hop only — mirroring [guard_applies]'s own laundered arm. *)
+       caller below — actually ENTAIL the relevant conjunct(s) of [pred]?
+       The laundered spelling (`if n > 0 …` after `let n = List.length(ys)`)
+       is handled by substituting the laundering name's bound expression in
+       wherever [cond] free-mentions it, one hop only — mirroring
+       [guard_applies]'s own laundered arm.
+
+       [Partial_conjunct]'s [missing] is precisely the part the solver did
+       NOT discharge — [held] proved some other way (an axiom, most often),
+       so a guard that only reaches a HELD conjunct says nothing about
+       whether the withdrawal stopped anything: that was the round 4 review
+       finding (probe `ProbeA` — `len(_) >= 0 && len(_) < 5` under the same
+       withdrawn `List.length`, where the guard `List.length(ys) > 0`
+       entails only the axiom-held `len(_) >= 0`, leaves the missing
+       `len(_) < 5` untouched, and the prior version of this function still
+       said `alias-withdrawn`).  So for [Partial_conjunct], restrict the
+       conjuncts under test to [missing] ONLY, and require the guard to
+       discharge EVERY missing conjunct that even mentions the withdrawn
+       measure — not just one — or a guard covering only part of a
+       multi-conjunct [missing] would send the reader to rename a binding
+       that silences nothing.  A [missing] with no measured conjunct at all
+       means the withdrawal cannot be the cause; fail closed (`[]` is not
+       vacuously "all discharged").
+
+       [Solver_undecided] and [Unconstrained_subject] are not
+       conjunct-diagnosed — they carry no [missing] to restrict to — so they
+       keep the ORIGINAL whole-predicate test unchanged: a real match on
+       [pred] itself, `None` (never attributed) the moment [pred] is not a
+       single comparison. *)
     let guard_discharges (w : withdrawal) (cond : A.expr) : bool =
-      match atomic_cmp (is_measured_pred w) pred with
-      | None -> false
-      | Some (op2, n2) ->
+      let discharges_one (op2, n2) =
         exists_discharging w (op2, n2) ~shadowed:[] cond
         || List.exists
              (fun (m, rhs) ->
                expr_mentions_free m cond && exists_discharging w (op2, n2) ~shadowed:[] rhs)
              lets
+      in
+      match r with
+      | Obligation.Partial_conjunct { missing; _ } ->
+        let measured_missing =
+          pred_conjuncts pred
+          |> List.filter (fun c -> List.mem (pred_str c) missing)
+          |> List.filter_map (atomic_cmp (is_measured_pred w))
+        in
+        measured_missing <> [] && List.for_all discharges_one measured_missing
+      | _ -> (
+        match atomic_cmp (is_measured_pred w) pred with
+        | None -> false
+        | Some cmp -> discharges_one cmp)
     in
     List.find_opt
       (fun w ->
@@ -675,36 +773,109 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
            "`cap verified` module: cannot verify %s `%s` on `%s` (%s: %s)\n%s"
            obligation_noun (pred_str rp.pred) callee (Obligation.reason_name r)
            (Obligation.reason_detail r) remedy)
-    (* Outside `cap verified`, a skip stays non-fatal — but say once per module
-       that it happened, so "no diagnostic" cannot be read as "checked". A
-       withdrawn alias is excluded: it has its own dedicated explanation and is
-       not the checker running out of road. *)
+    (* Outside `cap verified`, a skip stays non-fatal. A DIAGNOSED cause is
+       specific and actionable, so it reports at every call site; the residual
+       reasons keep the once-per-module throttle, whose rationale — "advice
+       repeated per call site would be worse than silence" — is about a
+       message that says the same thing everywhere. "Nothing in scope
+       constrains `n`" and "`_ >= 0` held here, `_ < len(xs)` did not" are
+       different facts about different calls, so suppressing the second
+       because the first already printed is a bug, not the throttle working.
+       A withdrawn alias is excluded from both halves: it has its own
+       dedicated explanation and is not the checker running out of road. *)
     | Obligation.Skipped r
-      when (not !strict_verified) && (not !unverified_hinted)
-           && (match r with Obligation.Alias_withdrawn _ -> false | _ -> true) ->
-      unverified_hinted := true;
-      Err.hint errctx ~span
-        (* Hard-wrapped near 78 columns. The renderer does not reflow, so a
-           single long line is left to the terminal to break wherever it
-           happens to run out of width — mid-token, and differently in every
-           window. *)
-        (Printf.sprintf
-           "%s `%s` on `%s` was NOT verified here.\n\
-            reason: %s — %s\n\
-            note: March reports only definite failures, so a contract it \
-            cannot decide\n\
-            is accepted in silence. Add `cap verified` to this module to make \
-            every\n\
-            unverifiable obligation an error instead; `--refine-report` lists \
-            them all."
-           obligation_noun (pred_str rp.pred) callee
-           (Obligation.reason_name r) (Obligation.reason_detail r))
+      when (not !strict_verified)
+           && (match r with
+               | Obligation.Alias_withdrawn _ -> false
+               | Obligation.Unconstrained_subject _
+               | Obligation.Opaque_application _
+               | Obligation.Partial_conjunct _ -> true
+               | Obligation.Solver_undecided
+               | Obligation.Unreflectable_predicate
+               | Obligation.Unreflectable_subject
+               | Obligation.Sort_conflict
+               | Obligation.Float_sort_gate -> not !unverified_hinted) ->
+      (match r with
+       | Obligation.Solver_undecided
+       | Obligation.Unreflectable_predicate
+       | Obligation.Unreflectable_subject
+       | Obligation.Sort_conflict
+       | Obligation.Float_sort_gate -> unverified_hinted := true
+       | Obligation.Unconstrained_subject _
+       | Obligation.Opaque_application _
+       | Obligation.Partial_conjunct _
+       | Obligation.Alias_withdrawn _ -> ());
+      let body =
+        match r with
+        | Obligation.Unconstrained_subject _
+        | Obligation.Opaque_application _
+        | Obligation.Partial_conjunct _ ->
+          Printf.sprintf "%s `%s` on `%s` was NOT verified here.\n%s"
+            obligation_noun (pred_str rp.pred) callee (Obligation.reason_detail r)
+        | Obligation.Solver_undecided
+        | Obligation.Unreflectable_predicate
+        | Obligation.Unreflectable_subject
+        | Obligation.Sort_conflict
+        | Obligation.Float_sort_gate
+        | Obligation.Alias_withdrawn _ ->
+          (* Hard-wrapped near 78 columns. The renderer does not reflow, so a
+             single long line is left to the terminal to break wherever it
+             happens to run out of width — mid-token, and differently in every
+             window. *)
+          Printf.sprintf
+            "%s `%s` on `%s` was NOT verified here.\n\
+             reason: %s — %s\n\
+             note: March reports only definite failures, so a contract it \
+             cannot decide\n\
+             is accepted in silence. Add `cap verified` to this module to make \
+             every\n\
+             unverifiable obligation an error instead; `--refine-report` lists \
+             them all."
+            obligation_noun (pred_str rp.pred) callee
+            (Obligation.reason_name r) (Obligation.reason_detail r)
+      in
+      Err.hint errctx ~span body
     | _ -> ()
   in
   match List.nth_opt args rp.idx with
   | None -> ()
   | Some self_actual ->
     let decls = ref [] and assume = ref [] in
+    (* Assumptions the ENCODER emits about its own representation — a
+       well-formedness axiom true of every value at a sort, not a fact
+       derived from anything the user wrote (a path guard, a declared
+       refinement, a callee's proven postcondition).  `len$x >= 0` is the
+       running example: [measure_of_var] asserts it unconditionally as a
+       side effect of reflecting `len(_)` even when there is NO guard at
+       all, so `vc.assumptions` always mentions the subject's measure
+       symbol — which made [Undecided.diagnose]'s "nothing constrains it"
+       check trivially, permanently false for every `len`-measured subject.
+       [user_assume] mirrors [assume] but omits exactly these: every
+       `assume := … :: !assume` site in this function pushes to BOTH unless
+       it is one of the three well-formedness sites marked [push_structural]
+       below (the measure-application non-negativity axiom, at its three
+       emission points).  [diagnose] is handed a VC built from
+       [user_assume]'s content, run through the identical wellsortedness/
+       float-rewrite pipeline as [assume] — never the raw list, and never a
+       shape-based filter over [assume] itself, which would silently drop a
+       genuine user guard that happens to look like `len(xs) >= 0`. *)
+    let user_assume = ref [] in
+    let push_user (t : Smt.term) : unit =
+      assume := t :: !assume;
+      user_assume := t :: !user_assume
+    in
+    let push_user_list (ts : Smt.term list) : unit =
+      assume := ts @ !assume;
+      user_assume := ts @ !user_assume
+    in
+    (* A well-formedness axiom about the encoder's OWN representation — see
+       [user_assume]'s comment.  Marked at its emission site, where the
+       encoder knows what it is emitting, rather than pattern-matched by
+       shape later: that would risk swallowing a genuine user fact that
+       happens to have the same shape (an explicit `len(xs) >= 0` guard,
+       say), and it would rot silently the moment the encoder started
+       emitting a differently-shaped axiom. *)
+    let push_structural (t : Smt.term) : unit = assume := t :: !assume in
     (* ── Caller-scope scalar sorts ─────────────────────────────────────────
        A path condition mentions CALLER variables and reflects each to
        `Const name`; so does an argument that IS that variable.  The two must
@@ -777,12 +948,11 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
           let c = Printf.sprintf "$str%d" (Hashtbl.length str_lit_tbl) in
           Hashtbl.replace str_lit_tbl s c;
           declare_str_const c;
-          assume :=
-            Smt.Eq (Smt.App (strlen_fn, [ Smt.Const c ]), Smt.IntLit (String.length s))
-            :: !assume;
+          push_structural
+            (Smt.Eq (Smt.App (strlen_fn, [ Smt.Const c ]), Smt.IntLit (String.length s)));
           Hashtbl.iter
             (fun s' c' ->
-              if s' <> s then assume := Smt.Ne (Smt.Const c, Smt.Const c') :: !assume)
+              if s' <> s then push_structural (Smt.Ne (Smt.Const c, Smt.Const c')))
             str_lit_tbl;
           Some (Smt.Const c)
     in
@@ -813,7 +983,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                  in
                  (match smt_of ~resolve_var:rv ~resolve_measure:rm
                           ~resolve_str_lit:str_lit_const q with
-                  | Some qa -> assume := qa :: !assume
+                  | Some qa -> push_user qa
                   | None -> ())
                | _ -> ());
               Some xc
@@ -825,7 +995,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
         result
     in
     let absorb = function
-      | Some (t, d, a) -> decls := d @ !decls; assume := a @ !assume; Some t
+      | Some (t, d, a) -> decls := d @ !decls; push_user_list a; Some t
       | None -> None
     in
     (* `a.rem` appearing as an ACTUAL argument.  Deliberately the same
@@ -925,7 +1095,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
            let rf = make_field_resolver b sort_name c in
            (match smt_of ~resolve_var:rv ~resolve_measure:(fun _ _ -> None)
                     ~resolve_field:rf q with
-            | Some qa -> assume := qa :: !assume
+            | Some qa -> push_user qa
             (* Untranslatable predicate: the constant stays unconstrained, so
                neither the goal nor its negation can be proven and the call is
                skipped.  Sound, just weaker. *)
@@ -977,7 +1147,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
           let rf = make_field_resolver b sort_name c in
           (match smt_of ~resolve_var:rv ~resolve_measure:(fun _ _ -> None)
                    ~resolve_field:rf q with
-           | Some qa -> assume := qa :: !assume
+           | Some qa -> push_user qa
            (* Untranslatable predicate: the constant stays unconstrained, so
               neither the goal nor its negation is provable and the call is
               simply skipped. *)
@@ -1048,7 +1218,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
         decls := (nm, Smt.SInt) :: !decls;
         (* `len` is known non-negative; user measures get no axiom in v1 (sound;
            guarded uses still discharge via the path context). *)
-        if is_nonneg_measure m then assume := Smt.Ge (c, Smt.IntLit 0) :: !assume;
+        if is_nonneg_measure m then push_structural (Smt.Ge (c, Smt.IntLit 0));
         let r = Some c in
         Hashtbl.replace measure_var_cache nm r;
         r
@@ -1082,6 +1252,43 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
     let foreign_measure m name = measure_of_var m name in
     let self_dt_sym = "$self" in
     let self_is_str = rp_is_str rp in
+    (* The SMT symbol the subject ("_"/[rp.binder]) actually reflects to in
+       THIS goal — populated by [mark_self] wherever [resolve_var] or
+       [resolve_measure] resolves a self reference to a term with a stable
+       top-level symbol (a bare [Const], or a single-arg [App] wrapping one,
+       e.g. the `$strlen` wrapper).  Deliberately NOT the source argument's
+       own spelling: a measure-typed subject (`len(_) > 0`) reflects to
+       `Const "len$x"`, never `Const "x"` (see [measure_of_var]) — the
+       UNCONSTRAINED CHECK has to compare against this, or it cannot work at
+       all (it would search the assumptions for a symbol the goal itself
+       never uses, and call a genuinely-guarded subject "unconstrained").
+
+       [self_source_name] is the OTHER half, for the MESSAGE rather than the
+       check: what the user actually typed, e.g. `"ys"`.  These are
+       deliberately two different strings carried separately — printing
+       [self_symbol] in `reason_detail` leaked `len$ys` into user-facing
+       text (round 3 of this task's review): a symbol that appears nowhere
+       in the user's program, which sends them looking for something that
+       does not exist.  [self_source_name] is computed once, statically,
+       from [self_actual] — not tracked dynamically like [self_symbol],
+       because the source spelling does not depend on which reflection
+       branch fired, only on whether the actual is a bare variable at all;
+       an actual that is not (a call, a field access, a literal) has no
+       single name to show the user, so this stays [None] and
+       [Undecided.diagnose] must not report [Unconstrained_subject] without
+       one — see its own comment. *)
+    let self_symbol : string option ref = ref None in
+    let self_source_name : string option =
+      match self_actual with A.EVar { A.txt = x; _ } -> Some x | _ -> None
+    in
+    let mark_self (name : string) (t : Smt.term option) : Smt.term option =
+      if is_self name then
+        (match t with
+         | Some (Smt.Const c) -> self_symbol := Some c
+         | Some (Smt.App (_, [ Smt.Const c ])) -> self_symbol := Some c
+         | _ -> ());
+      t
+    in
     let resolve_var name =
       (* A String-typed subject reflects into the `Str` sort, never `Int`.  The
          choice is driven by a DECLARED type (the refinement's own base type for
@@ -1091,17 +1298,19 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
       (* The refined value is a record: it stands for the datatype term, not
          for anything [reflect_scalar] could produce.  Records and strings are
          disjoint sorts, so this cannot shadow the String path. *)
-      | `Record (_, t) when is_self name -> Some t
+      | `Record (_, t) when is_self name -> mark_self name (Some t)
       | _ ->
-      if is_self name && self_is_str then reflect_str "$self" self_actual
+      if is_self name && self_is_str then
+        mark_self name (reflect_str "$self" self_actual)
       else if (not (is_self name)) && name_is_str name then
         (match actual_of_name name with Some a -> reflect_str name a | None -> None)
       else if is_self name then
-        absorb
-          (reflect_cached "$self" (fun () ->
-               reflect_scalar ~postcond ~foreign_var ~foreign_measure
-                 ~foreign_field:arg_resolve_field
-                 ~sort:self_scalar sc self_actual))
+        mark_self name
+          (absorb
+             (reflect_cached "$self" (fun () ->
+                  reflect_scalar ~postcond ~foreign_var ~foreign_measure
+                    ~foreign_field:arg_resolve_field
+                    ~sort:self_scalar sc self_actual)))
       else
         match actual_of_name name with
         | Some a ->
@@ -1270,7 +1479,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
             else measure_of_var m' x
           in
           (match smt_of ~resolve_var:rv ~resolve_measure:rm q with
-           | Some qa -> assume := qa :: !assume
+           | Some qa -> push_user qa
            | None -> ())
         | _ -> ()
       end
@@ -1336,7 +1545,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
             | Some ctor when ctor = goal_ctor && sort_of_ctor ctor = Some adt ->
               decls := (x, Smt.SData adt) :: !decls;
               if not (List.mem adt !adt_sorts) then adt_sorts := adt :: !adt_sorts;
-              assume := Smt.IsCtor (ctor, Smt.Const x) :: !assume
+              push_user (Smt.IsCtor (ctor, Smt.Const x))
             | _ -> ())
           | _ -> ())
         | _ -> ()
@@ -1400,7 +1609,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
               | None -> uses_axiom := true; Some (Smt.App (m, [ arg_term ]))
           in
           (match smt_of ~resolve_var:rv ~resolve_measure:rm ~resolve_measure_app:rma q with
-           | Some qa -> assume := qa :: !assume
+           | Some qa -> push_user qa
            (* Untranslatable predicate: the constant stays unconstrained, which
               proves nothing in either direction — the call is simply skipped. *)
            | None -> ());
@@ -1459,9 +1668,10 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
       then
         let key = if is_self name then "$self" else name in
         let actual = if is_self name then Some self_actual else actual_of_name name in
-        (match actual with
-         | Some a -> Option.map (fun t -> Smt.App (strlen_fn, [ t ])) (reflect_str key a)
-         | None -> None)
+        mark_self name
+          (match actual with
+           | Some a -> Option.map (fun t -> Smt.App (strlen_fn, [ t ])) (reflect_str key a)
+           | None -> None)
       else if is_axiom_measure m then (
         uses_axiom := true;
         let adt = Hashtbl.find axiom_measures m in
@@ -1497,14 +1707,15 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
           Some (Smt.App (m, [ Smt.Const name ]))
         | Some a ->
           (match a with A.EVar { A.txt = x; _ } -> load_scope_measure_facts x | _ -> ());
-          (match reflect_dt adt a with
-           | Some t -> Some (Smt.App (m, [ t ]))
-           | None ->
-             if is_self name then begin
-               decls := (self_dt_sym, Smt.SData adt) :: !decls;
-               Some (Smt.App (m, [ Smt.Const self_dt_sym ]))
-             end
-             else None))
+          mark_self name
+            (match reflect_dt adt a with
+             | Some t -> Some (Smt.App (m, [ t ]))
+             | None ->
+               if is_self name then begin
+                 decls := (self_dt_sym, Smt.SData adt) :: !decls;
+                 Some (Smt.App (m, [ Smt.Const self_dt_sym ]))
+               end
+               else None))
       else
         (* A measure with no axioms (a user measure, or list `len`).  All three
            spellings of the refined value — the anonymous `_`, the named binder
@@ -1519,24 +1730,25 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
            renaming a parameter silently unenforced a working contract. *)
         let actual = if is_self name then Some self_actual else actual_of_name name in
         match actual with
-        | Some a -> (
-            match (if m = "len" then list_len a else None) with
-            | Some n -> Some (Smt.IntLit n)
-            | None -> (
-                match a with
-                (* The actual is a bare name.  Load whatever the CALLER's own
-                   signature promises about its measures first, so the promise
-                   and the goal meet on the one memoized `m$x` symbol. *)
-                | A.EVar { A.txt = x; _ } ->
-                  load_scope_measure_facts x;
-                  measure_of_var m x
-                (* A non-variable, non-literal actual (a call, a field…): no
-                   symbol to share with the caller's facts.  For the binder
-                   spellings keep the fresh non-negative constant — it is what
-                   the two spellings resolved to before, and it stays SAT, so
-                   the outcome is silence either way. *)
-                | _ when is_self name -> measure_of_var m self_dt_sym
-                | _ -> None))
+        | Some a ->
+          mark_self name
+            (match (if m = "len" then list_len a else None) with
+             | Some n -> Some (Smt.IntLit n)
+             | None -> (
+                 match a with
+                 (* The actual is a bare name.  Load whatever the CALLER's own
+                    signature promises about its measures first, so the promise
+                    and the goal meet on the one memoized `m$x` symbol. *)
+                 | A.EVar { A.txt = x; _ } ->
+                   load_scope_measure_facts x;
+                   measure_of_var m x
+                 (* A non-variable, non-literal actual (a call, a field…): no
+                    symbol to share with the caller's facts.  For the binder
+                    spellings keep the fresh non-negative constant — it is what
+                    the two spellings resolved to before, and it stays SAT, so
+                    the outcome is silence either way. *)
+                 | _ when is_self name -> measure_of_var m self_dt_sym
+                 | _ -> None))
         | None -> measure_of_var m name (* a caller-scope variable *)
     in
     (* [resolve_field] turns the predicate's `v.port` into the record's SMT
@@ -1571,7 +1783,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
               incr mapp_ctr;
               let nm = Printf.sprintf "len$app%d" !mapp_ctr in
               decls := (nm, Smt.SInt) :: !decls;
-              assume := Smt.Ge (Smt.Const nm, Smt.IntLit 0) :: !assume;
+              push_structural (Smt.Ge (Smt.Const nm, Smt.IntLit 0));
               Some (Smt.Const nm)
           else if is_axiom_measure m then
             match concrete_measure_app m arg_term with
@@ -1585,8 +1797,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
             incr mapp_ctr;
             let nm = Printf.sprintf "%s$app%d" m !mapp_ctr in
             decls := (nm, Smt.SInt) :: !decls;
-            if is_nonneg_measure m then
-              assume := Smt.Ge (Smt.Const nm, Smt.IntLit 0) :: !assume;
+            if is_nonneg_measure m then push_structural (Smt.Ge (Smt.Const nm, Smt.IntLit 0));
             Some (Smt.Const nm)
           end
         in
@@ -1741,7 +1952,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
             ~resolve_measure_app ~resolve_tester:path_resolve_tester
             ~resolve_str_lit:str_lit_const cond
         with
-        | Some t -> assume := (if negated then Smt.Not t else t) :: !assume
+        | Some t -> push_user (if negated then Smt.Not t else t)
         | None -> ())
       path;
     (* [`Skip]: a record parameter whose actual could not be reflected — build
@@ -1812,6 +2023,27 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
            assumptions
        in
        let vc = { Smt.decls; assumptions; goal } in
+       (* [user_assumptions]: the SAME two-step filter (sort-wellsortedness,
+          then float-rewrite-and-wellsortedness) applied to [user_assume]
+          instead of [assume] — i.e. every USER-derived assumption that
+          survived exactly the same gates the real [vc.assumptions] did,
+          minus the encoder's own well-formedness axioms (see
+          [user_assume]'s comment above).  This is what [Undecided.diagnose]
+          gets handed for its "nothing constrains it" check, so a `len$x >=
+          0` axiom the CHECKER emitted can never make a genuinely-unguarded
+          subject look constrained, while a real user guard of the exact
+          same shape (`if List.length(xs) >= 0 do …`, however redundant)
+          still counts — it was pushed at the path-condition site, not the
+          measure's well-formedness site, so it lands in [user_assume]
+          regardless of what it looks like. *)
+       let user_assumptions =
+         List.filter_map
+           (fun a ->
+             let a = fp_rewrite is_float a in
+             if float_wellsorted is_float a && formula_wellsorted sort_of a then Some a
+             else None)
+           (List.filter (wellsorted (Hashtbl.mem str_names)) !user_assume)
+       in
        (* Attach the (expensive) axiom preamble only when an axiomatised
           measure was reflected, the datatype declarations only when a
           constructor tester was, and the `$Str` sort only when a string was.
@@ -1916,5 +2148,163 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                        expression it annotates, not assumed — bind a value that satisfies \
                        it, or weaken the annotation");
                  labels; notes = []; code = None; fix = None }
-           | _ -> note (Obligation.Skipped Obligation.Solver_undecided))))
+           | _ ->
+             (* [!self_symbol] is what the CHECK runs against — see
+                [mark_self]'s comment above [resolve_var].  [self_source_name]
+                is what the MESSAGE prints — see its own comment.  Two
+                different strings, on purpose: printing the symbol
+                (`len$ys`) instead of the source name (`ys`) was round 3's
+                review finding — a symbol that appears nowhere in the user's
+                program, sent them looking for something that does not
+                exist.
+
+                [vc_for_diagnose], NOT [vc]: the unconstrained check must see
+                only USER-derived assumptions, never the encoder's own
+                well-formedness axioms about its own representation — see
+                [user_assumptions]'s comment above.  [Refine.discharge]
+                already ran against the real [vc] (full assumption set,
+                correctly) before this arm is ever reached; only the
+                DIAGNOSIS, not the proof attempt, uses the narrowed one. *)
+             let vc_for_diagnose = { vc with Smt.assumptions = user_assumptions } in
+             (* Before filing a skip: try to PROMOTE this to a demonstrated
+                failure.  A model consistent with everything the checker knows
+                may still describe an unreachable state — the assumption set is
+                an over-approximation, and the missing fact is by definition
+                not in it (`List.last`'s `t = Nil` is the worked example).  So
+                this does not TRUST the model: it uses it to propose arguments
+                for the ENCLOSING function, runs that function from its entry,
+                and promotes only on an observed panic that repairing the
+                subject removes.  Reachability is demonstrated, never assumed.
+
+                [Bound_expr] is excluded: there is no callee whose requirement
+                the enclosing function could be propagating, so the sentence
+                below would not be true of it.
+
+                So is anything at a STDLIB span.  Those diagnostics are filtered
+                out of the printed stream, so promoting there is all cost and no
+                message: `--refine-report` would grow a `violated` count with no
+                diagnostic anywhere to explain it (measured: four true-but-mute
+                promotions in `stdlib/stats.march`, and +0.12s on a cold
+                `--check` of a three-line program, spent executing stdlib
+                functions to produce warnings nobody is shown).  Declining falls
+                straight through to the Task 1/2 reason chain, which is where
+                those obligations already were.  [is_stdlib_source_file] is the
+                same predicate the measure-alias gates use — an identity
+                supplied by the caller, never a path pattern; see its comment in
+                [Refine_encode]. *)
+             let promoted =
+               match subject, !enclosing_fn, model_of first with
+               | _ when is_stdlib_source_file span.A.file -> None
+               | Argument, Some fd, (_ :: _ as model) ->
+                 Option.map
+                   (fun r -> (fd, r))
+                   (Witness.confirm_precond_reachable ~fn:fd ~pred:rp.pred
+                      ~binder:rp.binder ~arg:self_actual ~model)
+               | _ -> None
+             in
+             (match promoted with
+              | Some (fd, (wargs, panic_msg)) ->
+                (* The ledger records a DECIDED verdict, not a skip: a failure
+                   that was executed and observed is not an incompleteness, and
+                   `--refine-report` must not count it as one.  [note]'s
+                   `@[trusted]` and `cap verified` branches both key on
+                   [Skipped], so a promotion flows through neither — the
+                   severity choice below is the only report, made exactly
+                   once. *)
+                note Obligation.Violated;
+                (* Rendered in source syntax: the reader has to be able to
+                   paste the call back into their program. *)
+                let call =
+                  match Witness.render_call fd.A.fn_name.A.txt wargs with
+                  | Some c -> c
+                  | None -> "this call"
+                in
+                (* What is DEMONSTRATED is that the enclosing function panics
+                   on an input violating the callee's requirement, and that
+                   repairing that input removes the panic — NOT that the callee
+                   raised the panic.  [Eval_error] carries no identity, so that
+                   stronger claim is not available; do not reword this into
+                   "the call to `%s` panics".  Hard-wrapped near 78 columns:
+                   the renderer does not reflow. *)
+                let text =
+                  Printf.sprintf
+                    "`%s` propagates a requirement it doesn't declare.\n\n\
+                     `%s` requires  %s\n\
+                     but %s panics — \"%s\""
+                    fd.A.fn_name.A.txt callee (pred_str rp.pred) call panic_msg
+                in
+                (* Warning by default: "propagates an undeclared requirement"
+                   is a design choice a user is allowed to make, and nearly
+                   every unrefined wrapper around a panicking function is in
+                   that category.  `cap verified` is the established opt-in for
+                   turning unverifiable obligations into errors. *)
+                if !strict_verified then Err.error errctx ~span text
+                else Err.warning errctx ~span text;
+                (* Record the site for the post-walk suggestion pass.  The
+                   qualified name is resolved HERE, while [Witness]'s module
+                   snapshot still describes the program (a probe re-walk swaps
+                   it for a hypothesis tree), and declining when it is
+                   ambiguous costs only the help block, never the finding. *)
+                (match Witness.qualified_fn_name fd with
+                 | Some q -> promoted_sites := (span, q, fd) :: !promoted_sites
+                 | None -> ())
+              | None ->
+               (* [Partial_conjunct]: the goal is a top-level conjunction and the
+                  whole-goal discharge above failed both ways.  Flatten the
+                  goal's `&&` spine, pair each SMT conjunct with the source
+                  fragment it came from, and discharge each SEPARATELY against
+                  the FULL assumption set — [vc], the same one the whole-goal
+                  proof attempt above used, not [vc_for_diagnose]'s narrowed
+                  one, since this is a real proof attempt per conjunct, not a
+                  diagnosis.  Only meaningful when the two spines line up in
+                  length: if reflection reassociated or dropped a conjunct the
+                  pairing is wrong, and quoting the user a fragment that does
+                  not correspond to the conjunct tested is worse than the vague
+                  message. *)
+               let rec spine = function
+                 | Smt.And (a, b) -> spine a @ spine b
+                 | t -> [ t ]
+               in
+               let rec pred_spine (e : A.expr) =
+                 match e with
+                 | A.EApp (A.EVar { A.txt = "&&"; _ }, [ a; b ], _) ->
+                   pred_spine a @ pred_spine b
+                 | e -> [ e ]
+               in
+               let goal_parts = spine goal and pred_parts = pred_spine rp.pred in
+               let partial =
+                 if List.length goal_parts < 2
+                    || List.length goal_parts <> List.length pred_parts
+                 then None
+                 else
+                   let judged =
+                     List.map2
+                       (fun g p ->
+                         let holds =
+                           Refine.discharge ~root ~preamble { vc with Smt.goal = g }
+                           = Refine.Verified
+                         in
+                         (holds, pred_str p))
+                       goal_parts pred_parts
+                   in
+                   let held = List.filter_map (fun (h, s) -> if h then Some s else None) judged
+                   and missing =
+                     List.filter_map (fun (h, s) -> if h then None else Some s) judged
+                   in
+                   (* Every conjunct failing is not "partial" — it is whatever
+                      the syntactic diagnosis says. *)
+                   if held = [] || missing = [] then None
+                   else Some (Obligation.Partial_conjunct { held; missing })
+               in
+               note
+                 (Obligation.Skipped
+                    (match partial with
+                     | Some r -> r
+                     | None ->
+                       (match
+                          Undecided.diagnose ~subject_sym:!self_symbol
+                            ~subject_name:self_source_name vc_for_diagnose
+                        with
+                        | Some r -> r
+                        | None -> Obligation.Solver_undecided)))))))
 

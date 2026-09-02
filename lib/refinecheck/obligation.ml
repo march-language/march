@@ -33,6 +33,39 @@ type reason =
      places, because [summary] below is used only by the tests: bin/main.ml's
      [print_refine_report] keeps its own `Hashtbl` keyed on the whole reason. *)
   | Alias_withdrawn of string
+  (* Refinements of [Solver_undecided], split out because they are different
+     pieces of advice.  The residual keeps the old constructor: a reason we
+     cannot name must not be dressed up as one we can.
+
+     Payload discipline follows [Alias_withdrawn]: the NAME rides in the
+     detail, not the slug, so `--refine-report` groups all unconstrained
+     subjects into one bucket instead of one bucket per variable.
+
+     A third variant, [Nonlinear_goal], was cut before it shipped: the only
+     [smt_of] used to build a goal never produces [Smt.Mul] for two
+     non-literal operands (it returns [None], so such a predicate fails
+     earlier as [Unreflectable_predicate]), so the diagnosis was dead code
+     with no reachable fixture.  Making it reachable would mean teaching
+     [smt_of] to reflect general multiplication, which sends previously
+     unreflectable predicates to z3 for the first time — an improvement in
+     checker PRECISION, out of scope for a task that only explains existing
+     skips. *)
+  | Unconstrained_subject of string  (* the subject appears in no assumption *)
+  | Opaque_application of string     (* goal names an undeclared function symbol *)
+  (* The goal is a top-level conjunction and the per-conjunct discharge (over
+     the SAME assumption set as the whole-goal proof attempt — no new facts,
+     no precision change) proved some conjuncts and not others.  This is the
+     costliest diagnosis to compute (one extra [Refine.discharge] per
+     conjunct) and the highest-value one to report: a `List.nth`-shaped
+     bounds contract with the lower bound guarded and the upper bound not is
+     exactly "the solver proved neither the predicate nor its negation", and
+     that sentence gives the reader no way to tell their guard partially
+     worked.
+     Payload is rendered SOURCE syntax, not SMT: it goes straight into user
+     text.  Both lists are kept because "`i >= 0` holds" and "`i < len(xs)`
+     does not" are both load-bearing — the first tells the reader their guard
+     worked and stops them rewriting it. *)
+  | Partial_conjunct of { held : string list; missing : string list }
 
 (* [Trusted]: the obligation was [Skipped] for some ordinary reason, but the
    enclosing function carries `@[trusted]`, so under `cap verified` it is
@@ -40,9 +73,20 @@ type reason =
    deliberate soundness hole and therefore its own verdict, never folded into
    [Proved] — a reader of `--refine-report` must be able to tell how much of a
    module's "verification" is actually a trusted assertion.  It can only ever
-   replace a [Skipped _]: a [Violated] (the solver proved the predicate can
-   NEVER hold) is a bug in the annotation, not an incompleteness to wave
-   through, so [Trusted] must never be produced from one. *)
+   replace a [Skipped _]: a [Violated] is a DECIDED failure, not an
+   incompleteness to wave through, so [Trusted] must never be produced from
+   one.
+
+   [Violated] covers two shapes, both decided and both reported at the call
+   site.  The original one is "the solver proved the predicate can NEVER hold"
+   — a bug in the annotation.  The second, added with the call-site promotion
+   (design doc §2), is "SOME input demonstrably fails": the enclosing
+   function was executed on decoded arguments and observed to panic, and to
+   return once the offending argument was repaired.  The two are not the same
+   strength of claim, and a future report that wants to distinguish them will
+   need a third verdict rather than a payload — but neither is a skip, and
+   `--refine-report` must not count either as an incompleteness, which is what
+   sharing the constructor buys. *)
 type verdict = Proved | Violated | Trusted | Skipped of reason
 
 (* [Precondition]: an argument checked against a callee's declared param
@@ -187,6 +231,9 @@ let reason_name = function
      groups skips by reason, and a per-spelling slug would split one cause into
      as many buckets as there are names.  The spelling belongs in the detail. *)
   | Alias_withdrawn _ -> "alias-withdrawn"
+  | Unconstrained_subject _ -> "unconstrained-subject"
+  | Opaque_application _ -> "opaque-application"
+  | Partial_conjunct _ -> "partial-conjunct"
 
 (* One clause of plain English per reason, for the `cap verified` error text.
    [reason_name] alone is a debug-report slug; once a reason reaches a USER it
@@ -210,14 +257,34 @@ let reason_detail = function
        the checker withdrew its built-in measure meaning and the guard proved \
        nothing"
       spelling
+  | Unconstrained_subject name ->
+    Printf.sprintf "no fact the checker derived constrains `%s`" name
+  | Opaque_application name ->
+    Printf.sprintf
+      "the checker has no meaning for `%s`, so it cannot reason through it" name
+  | Partial_conjunct { held; missing } ->
+    Printf.sprintf "%s established here; %s not"
+      (String.concat " and " (List.map (Printf.sprintf "`%s`") held))
+      (String.concat " and " (List.map (Printf.sprintf "`%s`") missing))
 
 (* Deliberately still a 3-tuple: (proved, violated, skips-by-reason).  Every
    existing caller destructures it that way, and [Trusted] does not belong in
    any of those three buckets — it is neither a proof nor a skip nor a
    violation.  Its own count is queried directly off [all ()] (see
-   bin/main.ml's [print_refine_report], which keeps its own tally). *)
+   bin/main.ml's [print_refine_report], which keeps its own tally).
+
+   The skip bucket is keyed on [reason_name] (a payload-free string), NOT the
+   raw [reason]: [Alias_withdrawn] and [Unconstrained_subject] both carry a
+   NAME in their payload, so keying on the variant itself splits one cause
+   into one bucket per distinct name — exactly the bug this comment used to
+   predict and dismiss as cosmetic for [Alias_withdrawn] alone.  It is not
+   cosmetic for [Unconstrained_subject], the far more common cause, where it
+   defeated a later task's per-bucket distribution count.  [print_refine_
+   report] in bin/main.ml keeps its own separate tally and must key the same
+   way, or the two can disagree. *)
 let summary () =
-  let proved = ref 0 and violated = ref 0 and skips = Hashtbl.create 8 in
+  let proved = ref 0 and violated = ref 0 in
+  let skips : (string, int) Hashtbl.t = Hashtbl.create 8 in
   List.iter
     (fun o ->
       match o.verdict with
@@ -225,6 +292,7 @@ let summary () =
       | Violated -> incr violated
       | Trusted -> ()
       | Skipped r ->
-        Hashtbl.replace skips r (1 + Option.value ~default:0 (Hashtbl.find_opt skips r)))
+        let name = reason_name r in
+        Hashtbl.replace skips name (1 + Option.value ~default:0 (Hashtbl.find_opt skips name)))
     !log;
-  (!proved, !violated, Hashtbl.fold (fun r n acc -> (r, n) :: acc) skips [])
+  (!proved, !violated, Hashtbl.fold (fun name n acc -> (name, n) :: acc) skips [])

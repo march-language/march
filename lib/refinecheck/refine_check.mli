@@ -148,6 +148,21 @@ val visit_decls :
   A.decl list ->
   unit
 
+(** Call sites the last walk PROMOTED to a demonstrated precondition failure:
+    the span the warning was reported at, the enclosing function's qualified
+    name, and its [fn_def]. Most recent first; [check_module] clears it.
+
+    Exposed for [Precond_infer.attach_promoted_fixes], which drains it AFTER
+    the walk to attach the precondition each site should declare. It is
+    deliberately not drained during the walk — see the ref's own comment in
+    [Refine_call]. *)
+val promoted_sites : (A.span * string * A.fn_def) list ref
+
+(** Source files the caller declared to be the stdlib's, as handed to
+    [check_module ~stdlib_files]. The one notion of "not the user's code" the
+    pass has; exposed so a post-pass reuses it rather than inventing a second. *)
+val stdlib_source_files : string list ref
+
 (** Check one function's postcondition and report it. *)
 val check_fn_post : root:string -> Err.ctx -> A.fn_def -> unit
 

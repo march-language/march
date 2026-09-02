@@ -57,6 +57,42 @@ let rec collect_pattern_vars (pat : Ast.pattern) : StringSet.t =
     List.fold_left (fun acc p -> StringSet.union acc (collect_pattern_vars p))
       StringSet.empty pats
 
+(** Binders of a PARAMETER pattern that name a strict sub-component of the
+    argument, rather than the argument itself.
+
+    A destructuring parameter is a match on that parameter, so its nested
+    binders are exactly as structurally smaller as the arm binders of
+    [match p do ...] — and must be treated the same, or the identical program
+    is accepted in one spelling and rejected in the other:
+
+      fn f(x : T, ..) do match x do C(a) -> .. f(a) ..     (* accepted *)
+      fn f(C(a), ..) do .. f(a) ..                          (* was rejected *)
+
+    A top-level [PatVar] (and the name bound by [as]) names the WHOLE value,
+    so it is deliberately NOT included: [fn f(x) do f(x) end] must keep
+    failing. For [PatOr], a name counts only if it is a sub-component in
+    EVERY alternative — an intersection, since a name that binds the whole
+    value in any branch is not smaller on that path. *)
+let rec pattern_subcomponent_vars (pat : Ast.pattern) : StringSet.t =
+  match pat with
+  | Ast.PatWild _ | Ast.PatLit _ | Ast.PatVar _ -> StringSet.empty
+  (* `p as n`: n names the whole value; anything inside p is still nested. *)
+  | Ast.PatAs (p, _, _) -> pattern_subcomponent_vars p
+  (* Everything under a constructor / tuple / record is a proper component. *)
+  | Ast.PatCon (_, pats) | Ast.PatAtom (_, pats, _) | Ast.PatTuple (pats, _) ->
+    List.fold_left (fun acc p -> StringSet.union acc (collect_pattern_vars p))
+      StringSet.empty pats
+  | Ast.PatRecord (fields, _) ->
+    List.fold_left (fun acc (_, p) -> StringSet.union acc (collect_pattern_vars p))
+      StringSet.empty fields
+  | Ast.PatOr (pats, _) ->
+    (match pats with
+     | [] -> StringSet.empty
+     | first :: rest ->
+       List.fold_left
+         (fun acc p -> StringSet.inter acc (pattern_subcomponent_vars p))
+         (pattern_subcomponent_vars first) rest)
+
 (** Collect all names from [fn_names] that are called directly (not through
     lambdas or local [ELetFn] bodies) in [e].  Used to build the call graph
     for SCC / mutual-recursion detection.
@@ -244,6 +280,72 @@ let scrutinee_is_param_or_smaller (params : StringSet.t) (smaller : StringSet.t)
   | Ast.EVar v -> StringSet.mem v.txt params || StringSet.mem v.txt smaller
   | _ -> false
 
+(** Binders of a pattern that name the WHOLE matched value rather than a part
+    of it: a bare [PatVar], and the name introduced by [as].
+
+    These are not structurally smaller — recursing on one does not decrease
+    anything — but they ARE another name for the value being matched, so
+    arithmetic reduction on them is still decreasing. `fn fib(n)` merges to
+    `match $a0 do n -> fib(n - 1) + fib(n - 2)`, where `n` names all of `$a0`:
+    `fib(n)` must be rejected while `fib(n - 1)` must be accepted. They are
+    therefore added to the PARAMETER set, never to the smaller set. *)
+let rec pattern_whole_vars (pat : Ast.pattern) : StringSet.t =
+  match pat with
+  | Ast.PatVar v -> StringSet.singleton v.txt
+  | Ast.PatAs (p, v, _) -> StringSet.add v.txt (pattern_whole_vars p)
+  | Ast.PatOr (pats, _) ->
+    List.fold_left (fun acc p -> StringSet.union acc (pattern_whole_vars p))
+      StringSet.empty pats
+  | Ast.PatWild _ | Ast.PatLit _
+  | Ast.PatCon _ | Ast.PatAtom _ | Ast.PatTuple _ | Ast.PatRecord _ ->
+    StringSet.empty
+
+(** Arm binders that are genuinely structurally smaller than the scrutinee.
+
+    Two shapes matter:
+
+    - A tuple scrutinee against a tuple pattern is paired POSITION BY
+      POSITION. This is what the desugarer builds for a multi-parameter
+      function whose clauses destructure — `fn f(C(x), y)` becomes
+      `match ($a0, $a1) do (C(x), y) -> …` — and the positions differ in
+      kind: `x` is a component of `$a0` and is smaller, while `y` is bound to
+      the whole of `$a1` and is not. Treating the synthesised tuple as one
+      destructuring would wrongly call `y` smaller and accept
+      `f(something, y)` as decreasing.
+
+    - Otherwise, if the scrutinee is a parameter (or already known smaller),
+      only the pattern's SUB-COMPONENT binders are smaller — not a binder
+      that names the whole value. `match x do y -> f(y) end` binds `y` to `x`
+      itself; calling `f(y)` does not decrease anything. *)
+let rec arm_smaller_vars (params : StringSet.t) (smaller : StringSet.t)
+    (scrut : Ast.expr) (pat : Ast.pattern) : StringSet.t =
+  match scrut, pat with
+  | Ast.ETuple (es, _), Ast.PatTuple (ps, _)
+    when List.length es = List.length ps ->
+    List.fold_left2
+      (fun acc e p -> StringSet.union acc (arm_smaller_vars params smaller e p))
+      StringSet.empty es ps
+  | _ ->
+    if scrutinee_is_param_or_smaller params smaller scrut
+    then pattern_subcomponent_vars pat
+    else StringSet.empty
+
+(** Arm binders that alias the whole scrutinee, paired by tuple position the
+    same way [arm_smaller_vars] is. See [pattern_whole_vars] for why these go
+    to the parameter set rather than the smaller set. *)
+let rec arm_whole_vars (params : StringSet.t) (smaller : StringSet.t)
+    (scrut : Ast.expr) (pat : Ast.pattern) : StringSet.t =
+  match scrut, pat with
+  | Ast.ETuple (es, _), Ast.PatTuple (ps, _)
+    when List.length es = List.length ps ->
+    List.fold_left2
+      (fun acc e p -> StringSet.union acc (arm_whole_vars params smaller e p))
+      StringSet.empty es ps
+  | _ ->
+    if scrutinee_is_param_or_smaller params smaller scrut
+    then pattern_whole_vars pat
+    else StringSet.empty
+
 (** Verify that every call to any name in [recursive_names] within [body]
     is either in tail position OR is structurally recursive (guaranteed to
     terminate because every argument is provably smaller than a parameter).
@@ -257,6 +359,7 @@ let scrutinee_is_param_or_smaller (params : StringSet.t) (smaller : StringSet.t)
     same-named recursive function. *)
 let rec check_tail_position
     ?(display = fun (n : string) -> n)
+    ?(init_smaller = StringSet.empty)
     (errors : Err.ctx)
     (recursive_names : StringSet.t)
     (fn_name : string)
@@ -270,7 +373,7 @@ let rec check_tail_position
      inner-`fn` recursion below, whose names are local and never qualified. *)
   (* [smaller] accumulates variables known to be structurally smaller than a
      function parameter (introduced by pattern-matching on a parameter). *)
-  let rec chk in_tail (names : StringSet.t) (smaller : StringSet.t) ctx expr =
+  let rec chk in_tail (names : StringSet.t) (params : StringSet.t) (smaller : StringSet.t) ctx expr =
     match expr with
     (* ── Recursive call ── *)
     | Ast.EApp (Ast.EVar fn, args, sp) when StringSet.mem fn.txt names ->
@@ -279,7 +382,7 @@ let rec check_tail_position
            this covers structural recursion on sub-trees/sub-lists and
            arithmetic reductions like n-1, n-2. *)
         let is_structural =
-          List.exists (is_structurally_smaller fn_params smaller) args
+          List.exists (is_structurally_smaller params smaller) args
         in
         if not is_structural then begin
           (* The advice has to match the blocker. An accumulator moves work
@@ -325,7 +428,7 @@ let rec check_tail_position
             | Ast.EApp (Ast.EVar op, [lhs; _], _) when op.txt = "-" ->
               (match lhs with
                | Ast.EVar v ->
-                 StringSet.mem v.txt fn_params || StringSet.mem v.txt smaller
+                 StringSet.mem v.txt params || StringSet.mem v.txt smaller
                | _ -> false)
             | _ -> false
           ) args in
@@ -358,7 +461,7 @@ let rec check_tail_position
         end
       end;
       List.iteri (fun i arg ->
-        chk false names smaller
+        chk false names params smaller
           (Printf.sprintf "argument #%d in call to `%s`" (i + 1) fn.txt)
           arg
       ) args
@@ -370,37 +473,41 @@ let rec check_tail_position
         | Ast.EVar fn_n -> Printf.sprintf "passed as argument to `%s`" fn_n.txt
         | _ -> "passed as argument to a function"
       in
-      chk false names smaller "function part of application" f;
-      List.iter (chk false names smaller arg_ctx) args
+      chk false names params smaller "function part of application" f;
+      List.iter (chk false names params smaller arg_ctx) args
     (* ── Constructor ── *)
     | Ast.ECon (name, args, _) ->
       let arg_ctx = Printf.sprintf "wrapped in constructor `%s`" name.txt in
-      List.iter (chk false names smaller arg_ctx) args
+      List.iter (chk false names params smaller arg_ctx) args
     (* ── if/do/else/end: condition not tail; branches inherit ── *)
     | Ast.EIf (cond, then_, else_, _) ->
-      chk false names smaller "condition of `if`" cond;
-      chk in_tail names smaller ctx then_;
-      chk in_tail names smaller ctx else_
+      chk false names params smaller "condition of `if`" cond;
+      chk in_tail names params smaller ctx then_;
+      chk in_tail names params smaller ctx else_
     (* ── match do cond_arm* end ── *)
     | Ast.ECond (arms, _) ->
       List.iter (fun (ce, be) ->
-        chk false names smaller "condition in `match do`" ce;
-        chk in_tail names smaller ctx be
+        chk false names params smaller "condition in `match do`" ce;
+        chk in_tail names params smaller ctx be
       ) arms
     (* ── match: scrutinee not tail; if scrutinee is a parameter or smaller
           variable, extend [smaller] with all vars bound in each arm's pattern ── *)
     | Ast.EMatch (scrut, branches, _) ->
-      chk false names smaller "scrutinee of `match`" scrut;
-      let scrut_is_smaller = scrutinee_is_param_or_smaller fn_params smaller scrut in
+      chk false names params smaller "scrutinee of `match`" scrut;
       List.iter (fun (br : Ast.branch) ->
         let arm_pat_vars = collect_pattern_vars br.branch_pat in
         let arm_smaller =
-          if scrut_is_smaller then StringSet.union smaller arm_pat_vars else smaller
+          StringSet.union smaller
+            (arm_smaller_vars params smaller scrut br.branch_pat)
+        in
+        let arm_params =
+          StringSet.union params
+            (arm_whole_vars params smaller scrut br.branch_pat)
         in
         (* Arm-bound names shadow the recursive names inside the arm. *)
         let arm_names = StringSet.diff names arm_pat_vars in
-        Option.iter (chk false arm_names arm_smaller "match guard") br.branch_guard;
-        chk in_tail arm_names arm_smaller ctx br.branch_body
+        Option.iter (chk false arm_names arm_params arm_smaller "match guard") br.branch_guard;
+        chk in_tail arm_names arm_params arm_smaller ctx br.branch_body
       ) branches
     (* ── block: only last expression is in tail position.
           Propagate structural smallness: if a let binding assigns a variable
@@ -408,9 +515,9 @@ let rec check_tail_position
     | Ast.EBlock (exprs, _) ->
       let rec go ns s = function
         | [] -> ()
-        | [last] -> chk in_tail ns s ctx last
+        | [last] -> chk in_tail ns params s ctx last
         | hd :: tl ->
-          chk false ns s "non-final expression in block" hd;
+          chk false ns params s "non-final expression in block" hd;
           let s' = match hd with
             | Ast.ELet (b, _) ->
               (match b.Ast.bind_pat with
@@ -432,7 +539,7 @@ let rec check_tail_position
       go names smaller exprs
     (* ── let binding: RHS is never tail ── *)
     | Ast.ELet (b, _) ->
-      chk false names smaller "right-hand side of `let` binding" b.Ast.bind_expr
+      chk false names params smaller "right-hand side of `let` binding" b.Ast.bind_expr
     (* ── inner named function: check its own self-recursion in its own scope ── *)
     | Ast.ELetFn (iname, iparams, _, ibody, _) ->
       let iparams_set =
@@ -443,32 +550,32 @@ let rec check_tail_position
     (* ── lambda: new scope, skip outer recursive-name check ── *)
     | Ast.ELam _ -> ()
     (* ── transparent ── *)
-    | Ast.EAnnot (ex, _, _) -> chk in_tail names smaller ctx ex
+    | Ast.EAnnot (ex, _, _) -> chk in_tail names params smaller ctx ex
     (* ── non-tail contexts ── *)
     | Ast.ETuple (es, _) ->
-      List.iter (chk false names smaller "tuple element") es
+      List.iter (chk false names params smaller "tuple element") es
     | Ast.ERecord (fields, _) ->
       List.iter (fun ((nm : Ast.name), ex) ->
-        chk false names smaller (Printf.sprintf "value of record field `%s`" nm.txt) ex
+        chk false names params smaller (Printf.sprintf "value of record field `%s`" nm.txt) ex
       ) fields
     | Ast.ERecordUpdate (base, fields, _) ->
-      chk false names smaller "base of record update" base;
+      chk false names params smaller "base of record update" base;
       List.iter (fun ((nm : Ast.name), ex) ->
-        chk false names smaller (Printf.sprintf "value of record field `%s`" nm.txt) ex
+        chk false names params smaller (Printf.sprintf "value of record field `%s`" nm.txt) ex
       ) fields
-    | Ast.EField (ex, _, _)  -> chk false names smaller "object of field access" ex
-    | Ast.EPipe  (l, r, _)   -> chk false names smaller "left side of pipe" l;
-                                 chk false names smaller "right side of pipe" r
-    | Ast.EAtom (_, args, _) -> List.iter (chk false names smaller "atom argument") args
+    | Ast.EField (ex, _, _)  -> chk false names params smaller "object of field access" ex
+    | Ast.EPipe  (l, r, _)   -> chk false names params smaller "left side of pipe" l;
+                                 chk false names params smaller "right side of pipe" r
+    | Ast.EAtom (_, args, _) -> List.iter (chk false names params smaller "atom argument") args
     | Ast.ESend (cap, msg, _) ->
-      chk false names smaller "capability in `send`" cap;
-      chk false names smaller "message in `send`" msg
-    | Ast.ESpawn (ex, _)      -> chk false names smaller "argument to `spawn`" ex
-    | Ast.EDbg (Some ex, _)   -> chk false names smaller "argument to `dbg`" ex
+      chk false names params smaller "capability in `send`" cap;
+      chk false names params smaller "message in `send`" msg
+    | Ast.ESpawn (ex, _)      -> chk false names params smaller "argument to `spawn`" ex
+    | Ast.EDbg (Some ex, _)   -> chk false names params smaller "argument to `dbg`" ex
     | Ast.ELetQ (pat, r, cont, _) ->
-      chk false names smaller "right-hand side of `let?`" r;
+      chk false names params smaller "right-hand side of `let?`" r;
       chk in_tail (StringSet.diff names (collect_pattern_vars pat))
-        smaller ctx cont
+        params smaller ctx cont
     (* `let*` desugars to `M.flat_map(r, fn pat -> cont end)` (TIR lowering) --
        unlike `let?` (a direct `match`, no call-frame boundary), `cont` ends
        up INSIDE a callback lambda handed to `flat_map`, so it is never in
@@ -478,14 +585,14 @@ let rec check_tail_position
        inside `cont` is an ordinary non-tail call through a closure, not a
        tail-position violation. *)
     | Ast.ELetStar (_, r, _, _) ->
-      chk false names smaller "right-hand side of `let*`" r
-    | Ast.EAssert (ex, _)     -> chk false names smaller "assert expression" ex
-    | Ast.ESigil (_, content, _) -> chk false names smaller "sigil content" content
+      chk false names params smaller "right-hand side of `let*`" r
+    | Ast.EAssert (ex, _)     -> chk false names params smaller "assert expression" ex
+    | Ast.ESigil (_, content, _) -> chk false names params smaller "sigil content" content
     (* ── leaves ── *)
     | Ast.EDbg (None, _) | Ast.ELit _ | Ast.EVar _ | Ast.EHole _
     | Ast.EResultRef _ -> ()
   in
-  chk true recursive_names StringSet.empty "" body
+  chk true recursive_names fn_params init_smaller "" body
 
 (** Run tail-call enforcement for all [DFn] declarations in [decls]
     (at a single scope level).  Recurses into [DMod] sub-modules.
@@ -635,10 +742,24 @@ let rec enforce_tail_calls_in_decls
                | Ast.FPPat pat -> StringSet.union acc (collect_pattern_vars pat)
              ) StringSet.empty clause.Ast.fc_params
            in
+           (* A destructuring parameter is a match on that parameter, so its
+              nested binders start out structurally smaller — the same status
+              [EMatch] gives arm binders when the scrutinee is a parameter.
+              Without this, multi-head clauses (which are exactly destructuring
+              parameters) rejected structural recursion that the equivalent
+              explicit `match` accepts. *)
+           let init_smaller =
+             List.fold_left (fun acc p ->
+               match p with
+               | Ast.FPPat pat ->
+                 StringSet.union acc (pattern_subcomponent_vars pat)
+               | Ast.FPNamed _ | Ast.FPDefault _ -> acc
+             ) StringSet.empty clause.Ast.fc_params
+           in
            let display n =
              match Hashtbl.find_opt to_bare n with Some b -> b | None -> n in
-           check_tail_position ~display errors rec_set def.fn_name.txt fn_params
-             clause.Ast.fc_body
+           check_tail_position ~display ~init_smaller errors rec_set
+             def.fn_name.txt fn_params clause.Ast.fc_body
          end
        | _ -> ())
     | Ast.DMod (name, _, inner_decls, _) ->

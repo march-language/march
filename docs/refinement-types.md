@@ -828,14 +828,22 @@ once shipped with zero enforcement while every test stayed green.
 
 ```
 $ march --check --refine-report stdlib/list.march
-refinement obligations (user code): 0 proved, 0 violated, 0 trusted, 5 skipped
-  skipped (solver-undecided): 5
-  by kind: 5 precondition, 0 postcondition
-refinement obligations (user + stdlib): 8 proved, 0 violated, 0 trusted, 28 skipped
+refinement obligations (user code): 0 proved, 0 violated, 0 trusted, 6 skipped
+  skipped (unconstrained-subject): 5
   skipped (unreflectable-predicate): 1
-  skipped (solver-undecided): 27
-  by kind: 36 precondition, 0 postcondition
+  by kind: 6 precondition, 0 postcondition, 0 division
+refinement obligations (user + stdlib): 16 proved, 0 violated, 0 trusted, 34 skipped
+  skipped (unconstrained-subject): 32
+  skipped (unreflectable-predicate): 2
+  by kind: 50 precondition, 0 postcondition, 0 division
 ```
+
+`--refine-report` records a [promoted call-site failure](#promoting-a-skip-a-demonstrated-precondition-failure)
+under `violated`, the same bucket used for a contract the solver proved can
+never hold. A nonzero `violated` count on a module with no `cap verified`
+annotation is therefore not necessarily a bad annotation; it can be a
+demonstrated call-site failure the checker found on its own. The report does
+not currently distinguish the two shapes.
 
 One wrinkle to know before you run it: clear `.march/cas/artifacts-v2` first. A
 `--check` with sources already in the build cache exits straight away, before
@@ -858,12 +866,36 @@ obligations at all, and the floor is read from a small fixture with one obligati
 alias stops working. This is the failure mode the report exists to expose: a skip and a
 proof both exit 0, and only the count can tell them apart.
 
-Every skip states *why*: the predicate uses vocabulary the checker can't translate
-(`unreflectable-predicate`), the argument's own value didn't translate
-(`unreflectable-subject`), a symbol would have needed two different sorts
-(`sort-conflict`), the float wellsortedness gate rejected it (`float-sort-gate`), a
-measure alias the guard relied on had been withdrawn (`alias-withdrawn`; see below),
-or the solver simply didn't decide (`solver-undecided`).
+Every skip states *why*, one of nine reasons: the predicate uses vocabulary the
+checker can't translate (`unreflectable-predicate`), the argument's own value
+didn't translate (`unreflectable-subject`), a symbol would have needed two
+different sorts (`sort-conflict`), the float wellsortedness gate rejected it
+(`float-sort-gate`), a measure alias the guard relied on had been withdrawn
+(`alias-withdrawn`; see below), no fact the checker derived constrains the
+argument the predicate talks about (`unconstrained-subject`), the predicate is
+a top-level `&&` and only some of its conjuncts were proved
+(`partial-conjunct`; the message names which held and which did not), the goal
+names a function the checker has no meaning for (`opaque-application`), or the
+solver simply didn't decide either way (`solver-undecided`).
+
+`unconstrained-subject`, `partial-conjunct`, and `opaque-application` are all
+more specific answers to the same question `solver-undecided` asks: they fire
+only where the VC was built and the solver ran, and each names a narrower
+reason the proof didn't go through.
+
+These three diagnosed reasons print at *every* call site that has one, not
+once per module. Five of the residual reasons (`solver-undecided`,
+`unreflectable-predicate`, `unreflectable-subject`, `sort-conflict`, and
+`float-sort-gate`) keep the older behavior: one hint per module, because their
+message says the same thing regardless of which call triggered it. A diagnosed
+reason does not: "nothing constrains `n`" and "`_ >= 0` held here, `_ < len(xs)`
+did not" are different facts about different calls, so printing only the first
+one found would hide the rest.
+
+`alias-withdrawn` follows neither rule: outside `cap verified` it prints no
+hint at all, not even once per module. It is still counted in
+`--refine-report`, and under `cap verified` it becomes its own error; see
+[below](#when-the-guard-is-right-and-the-error-still-fires).
 
 The counts include both **preconditions checked at call sites** and
 **postconditions**: a function's own return value checked against its declared
@@ -871,6 +903,64 @@ return type. Each obligation is tagged with its kind, shown as a `by kind`
 breakdown line under each slice; a proved postcondition counts toward the same
 "proved" headline as a proved precondition, and [`cap verified`](#cap-verified--making-silence-an-error)
 (below) escalates an undischarged one of either kind.
+
+---
+
+## Promoting a Skip: a Demonstrated Precondition Failure
+
+Most skips stay silent because the checker genuinely can't decide either way.
+A narrow slice is different: the checker can *prove* the skip is a real bug.
+When an argument reaches a refined parameter and the obligation is skipped,
+the checker runs the *enclosing* function on the solver's own model, watches
+for a real `panic`, and then checks whether fixing just that one argument
+makes the function return instead of panicking. When both hold, the skip is
+promoted from silence to a warning (an error under `cap verified`).
+
+```march
+mod Stats do
+  fn percentile(xs : {List(Float) | len(_) > 0}, p : {Float | _ >= 0.0 && _ <= 100.0}) : Float do
+    match xs do
+    Nil -> panic("Stats.percentile: empty list")
+    _   -> percentile_sorted(sort_floats(xs), p)
+    end
+  end
+
+  fn median(xs : List(Float)) : Float do
+    percentile(xs, 50.0)
+  end
+end
+```
+
+```
+`median` propagates a requirement it doesn't declare.
+
+`percentile` requires  len(_) > 0
+but median([]) panics — "Stats.percentile: empty list"
+
+help: declare what `median` actually needs —
+        fn median(xs : {List(Float) | len(_) > 0}) : Float
+`forge fix` can apply this.
+```
+
+**Read the claim precisely.** It says `median` panics on some input (`[]`); it
+does not say `percentile` panicked wrongly. `percentile`'s own contract,
+`len(_) > 0`, is exactly what rules `[]` out. The bug is that `median` never
+forwards that requirement to its own caller.
+
+Outside `cap verified` this is a warning; inside it, the identical message is
+a compile error. The `help:` block names the precondition to add and
+`forge fix` can rewrite the signature for you, but not every promotion earns
+one: when the callee has more than one unforwarded precondition and no single
+parameter fix is unambiguously correct, the promotion still fires with no
+`help:` block. `Stats.quantile_default` in `stdlib/stats.march` is this
+shape (its callee needs both a non-empty list and a `q` in `[0.0, 1.0]`), and
+reports with no fix offered.
+
+Promotion is not attempted at spans inside the standard library when the
+stdlib is merely imported: those diagnostics never reach the printed stream,
+so promoting them would spend real work on a count nobody sees. Compiling a
+stdlib file directly as the entry file is different: its own spans are user
+spans there, and it reports its own promotions like any other module.
 
 ---
 
@@ -892,7 +982,7 @@ mod Checked do
   fn head_of(xs : {List(Int) | len(_) > 0}) : Int do
     match xs do
     Cons(h, _) -> h
-    Nil        -> panic("empty")
+    Nil        -> 0
     end
   end
 
@@ -902,8 +992,22 @@ mod Checked do
 end
 ```
 
-Take the guard away and the same call fails the build, telling you which precondition,
-on which function, and why it couldn't be discharged:
+Take the guard away entirely and the same call fails the build, telling you
+which precondition, on which function, and why it couldn't be discharged. With
+nothing left constraining `ys`, the reason is `unconstrained-subject`:
+
+```
+`cap verified` module: cannot verify precondition `len(_) > 0` on `head_of`
+(unconstrained-subject: no fact the checker derived constrains `ys`)
+note: guard the call or strengthen what is known here, rewrite the predicate
+into the fragment the checker supports, or remove `cap verified` from this
+module — it asks for every obligation to be discharged
+```
+
+Weaken the guard instead of dropping it (`if List.length(ys) >= 0 do
+head_of(ys) else 0 end` is always true, so it proves nothing) and a fact stays
+in scope, which falls back to the residual `solver-undecided` reason, with the
+same note:
 
 ```
 `cap verified` module: cannot verify precondition `len(_) > 0` on `head_of`
@@ -912,6 +1016,13 @@ note: guard the call or strengthen what is known here, rewrite the predicate
 into the fragment the checker supports, or remove `cap verified` from this
 module — it asks for every obligation to be discharged
 ```
+
+If `head_of`'s `Nil` arm panics instead of returning `0`, dropping the guard
+produces a different message altogether: the checker can execute `head_of` and
+observe the panic, so the skip is *promoted* instead of reported as
+`unconstrained-subject`. See
+[Promoting a Skip](#promoting-a-skip-a-demonstrated-precondition-failure)
+above.
 
 ### When the guard is right and the error still fires
 
@@ -941,10 +1052,13 @@ state the fact you need as a refinement instead of a runtime guard.
 You'll only see this reason when the withdrawal is plausibly what stopped the proof:
 the predicate has to use the affected measure, and this call's own argument has to be
 guarded by the withdrawn spelling, positively, on the matching kind of value. A guard
-on a *different* list, a `List.length` guard in front of a *string* contract, a guard
-on the `else` side (which disproves the predicate rather than failing to prove it), and
-an unguarded call all keep the plain `solver-undecided` message, because in each of
-those the binding you'd be sent to rename is not the reason anything failed.
+on a *different* list, a `List.length` guard in front of a *string* contract, and a
+guard on the `else` side (which disproves the predicate rather than failing to prove
+it) all keep the plain `solver-undecided` message, because in each of those the
+binding you'd be sent to rename is not the reason anything failed. An unguarded call
+is not blamed on the withdrawal either, but it does not fall back to
+`solver-undecided`: with no guard at all, nothing constrains the argument, and that's
+its own reason (`unconstrained-subject`, below).
 
 The price of that caution is coverage: a guard laundered through a local
 (`let n = List.length(ys)` and then `if n > 0`), applied to something other than a
