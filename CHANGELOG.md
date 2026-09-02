@@ -13,6 +13,15 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`Session`**: a session-transport capability. `Cap(Session.Live)` carries
+  the transport as a dictionary — `register`, `emit`, `suspend`, `close`,
+  protocol-agnostic, messages as `Bytes` — so the same endpoint code runs
+  against a real transport in production and a deterministic in-process one
+  under test, where a FIFO run queue fixes the interleaving and the trace is
+  reproducible run to run. `Session.attach(io, ops)` is the only way to obtain
+  one. There is deliberately no ambient transport: a session with nothing
+  attached panics rather than silently doing nothing.
+
 - Capability mocking now reaches **actor handlers**. A handler runs on the
   scheduler rather than under the caller that spawned it, so there was no
   parameter to thread a capability through and an actor's IO stayed real while
@@ -41,6 +50,15 @@ git log is authoritative for exact commits.
   work for interpreted runs too.
 
 ### Fixed
+
+- `march --emit-io-ops` printed every multi-argument operation in the wrong
+  spelling: `(A, B) -> C`, which in March is a function of one *tuple*
+  argument (`Tuple.apply` calls its `f : (a, b) -> c` as `f(t)`). Copying that
+  shape into a hand-written dictionary type then failed to typecheck against a
+  two-parameter lambda. Multi-argument functions are spelled curried,
+  `A -> B -> C`, and the output now says so. The compiler-built dictionaries
+  were never affected. `Tuple.apply`'s doc string, which described the same
+  type as "two separate args", is corrected too.
 
 - A type mismatch between two types that print with the same name no longer
   says "expected `Ops` but got `Ops`". A record type declared with type

@@ -1,0 +1,79 @@
+mod Session do
+  needs IO
+
+  -- Session transport capability.
+  --
+  -- A `Cap(Session.Live)` carries a DICTIONARY — the transport — and every
+  -- operation here dispatches through it. There is deliberately no ambient
+  -- transport: a session with nothing attached is a programming error, not a
+  -- fallback, because the whole point is that the transport is the thing you
+  -- swap (a deterministic in-process one under test, a real one in production).
+  --
+  -- The dictionary is transport-level and protocol-agnostic: no field is named
+  -- after a protocol, a role, or a message. Endpoints, roles and access points
+  -- are opaque `Int` handles the transport hands out; a message is `Bytes`,
+  -- because a transport must serialise anyway and the code that knows the real
+  -- message type sits on both sides of it.
+  --
+  -- Derived by hand-projecting the `Stream` protocol (see
+  -- `specs/todos/2026-08-31-cap-runtime-dictionaries.md`): `register`, `send`
+  -- (spelled `emit` here — `send` is reserved for actors), `suspend`, `close`.
+  -- No `recv`: an event-driven endpoint never blocks; delivery is the handler
+  -- passed to `suspend`.
+
+  -- The transport. `suspend(ep, handler)` installs `handler` for the next
+  -- delivery on `ep` and yields; the handler receives `(from, msg, ep)` and
+  -- returns the next suspension. It is tail-resumptive only: a handler
+  -- resumes exactly once, in tail position, as a plain call through this
+  -- record.  (A `doc` is only accepted before a function; on a `type` it is a
+  -- parse error, which the stdlib loader reports as "Unknown module".)
+  type Ops = {
+    register : Int -> Int -> Int,
+    emit     : Int -> Int -> Bytes -> Int,
+    suspend  : Int -> (Int -> Bytes -> Int -> Int) -> Int,
+    close    : Int -> ()
+  }
+
+  proof cap Live with Ops
+
+  doc "Attach a transport. The only way to obtain a `Cap(Session.Live)`."
+  fn attach(io : Cap(IO), ops : Ops) : Cap(Session.Live) do
+    cap_impl(mint_cap(io), ops)
+  end
+
+  pfn no_transport() do
+    panic("Session: no transport attached to this capability")
+  end
+
+  doc "Join a session at access point `ap` in role `role`; returns the endpoint."
+  fn register(c : Cap(Session.Live), ap : Int, role : Int) : Int do
+    match cap_dict(c) do
+      Some(d) -> d.register(ap, role)
+      None    -> no_transport()
+    end
+  end
+
+  doc "Send `msg` from `ep` to role `to`; returns the continuation endpoint."
+  fn emit(c : Cap(Session.Live), ep : Int, to : Int, msg : Bytes) : Int do
+    match cap_dict(c) do
+      Some(d) -> d.emit(ep, to, msg)
+      None    -> no_transport()
+    end
+  end
+
+  doc "Install `handler` for the next delivery on `ep` and yield."
+  fn suspend(c : Cap(Session.Live), ep : Int, handler : Int -> Bytes -> Int -> Int) : Int do
+    match cap_dict(c) do
+      Some(d) -> d.suspend(ep, handler)
+      None    -> no_transport()
+    end
+  end
+
+  doc "Close endpoint `ep`."
+  fn close(c : Cap(Session.Live), ep : Int) : () do
+    match cap_dict(c) do
+      Some(d) -> d.close(ep)
+      None    -> no_transport()
+    end
+  end
+end

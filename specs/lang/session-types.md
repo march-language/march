@@ -352,6 +352,58 @@ boundary described above, repeated in concrete terms.
 
 ---
 
+## Swapping the transport: `Session`
+
+`Chan` and `MPST` run over an in-process queue baked into the runtime. For code
+that must run over a *real* transport in production and *deterministically* in
+a test, the standard library's `Session` module puts the transport behind a
+capability instead.
+
+`Cap(Session.Live)` carries a **dictionary** — the transport — and every
+operation dispatches through it:
+
+```march
+type Ops = {
+  register : Int -> Int -> Int,                     -- access point, role -> endpoint
+  emit     : Int -> Int -> Bytes -> Int,            -- endpoint, to-role, msg -> endpoint
+  suspend  : Int -> (Int -> Bytes -> Int -> Int) -> Int,  -- install a handler, yield
+  close    : Int -> ()
+}
+```
+
+It is protocol-agnostic on purpose: no field is named after a protocol, a role
+or a message. Endpoints, roles and access points are opaque `Int` handles the
+transport hands out, and a message is `Bytes` — a transport must serialise
+anyway, and the code that knows the real message type sits on both sides of
+it. There is no `recv`: an event-driven endpoint never blocks; delivery is the
+handler you pass to `suspend`, which is entered exactly once, in tail position.
+
+`Session.attach(io, ops)` is the only way to obtain a `Cap(Session.Live)`, and
+a session with nothing attached **panics** rather than silently doing nothing.
+
+An endpoint for the `Stream` protocol above, written the way a projector would
+emit it — it names no transport:
+
+```march
+pfn prod_send(s : Cap(Session.Live), ep : Int, next : Int) : Int do
+  let ep1 = Session.emit(s, ep, cons(), enc_item(next))
+  Session.suspend(s, ep1, fn (_from, msg, ep2) ->
+    if tag(msg) == "M" do prod_send(s, ep2, next + 1)
+    else Session.close(s, ep2)  ep2 end)
+end
+```
+
+Under test, attach an in-process transport whose `emit` only *enqueues* and
+whose run queue is drained in FIFO order after every endpoint has had its turn;
+the interleaving is then fixed and the trace is the same on every run. The
+worked version, with both `Stream` roles and the deterministic trace they
+produce, is `test/session/stream_replay.march`. (A transport that delivers
+synchronously inside `emit` is wrong for this shape: an endpoint sends *before*
+it suspends, so a synchronous reply arrives before its handler exists.)
+
+Any module that takes a `Cap(Session.Live)` parameter declares
+`needs Session.Live`, as for any proof capability.
+
 ## See also
 
 - [Actors]({{ site.baseurl }}/docs/actors/): mailboxes, `spawn`/`send`, and the scheduler these channels run on.

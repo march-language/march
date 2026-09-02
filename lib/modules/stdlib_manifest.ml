@@ -158,6 +158,9 @@ let stdlib_file_list = [
      types. dist_supervisor depends on dist_link, so it must come after. *)
   "dist_link.march";
   "dist_supervisor.march";
+  (* Session transport capability (proof cap + dictionary). References
+     Bytes, so it must sit after bytes.march; it has no dependents. *)
+  "session.march"
 ]
 
 let js_only_stdlib_file_list = ["dom.march"; "canvas.march"; "audio.march"]

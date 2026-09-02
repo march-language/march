@@ -11,7 +11,7 @@ permalink: /docs/stdlib-guide/
 > signatures and docstrings generated from source, lives at **[/docs/stdlib/](/docs/stdlib/)**.
 > This page is a hand-written tour of the most commonly used modules.
 
-March ships with 116 stdlib modules covering collections, strings, I/O, HTTP, cryptography, and more. This page provides an overview and quick reference for the most commonly used modules.
+March ships with 117 stdlib modules covering collections, strings, I/O, HTTP, cryptography, and more. This page provides an overview and quick reference for the most commonly used modules.
 
 All stdlib modules are available without any import statement: use qualified access (`List.map`, `String.length`, etc.) or `import`/`use` to bring names into scope.
 

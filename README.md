@@ -497,7 +497,7 @@ lib/
   errors/errors.ml       diagnostic type (Error/Warning/Hint + span)
   search/search.ml       Hoogle-style type/name search engine
   refine/                refinement-types Z3 bridge
-stdlib/                  116 March stdlib modules (list, map, http, json, crypto,
+stdlib/                  117 March stdlib modules (list, map, http, json, crypto,
                          distributed-OTP actors, DataFrame, ...)
 runtime/                 C runtime (alloc, RC, scheduler, HTTP, TLS, WASM)
 forge/                   build tool (new, build, run, test, deps, publish, ...)

@@ -498,7 +498,7 @@ references inside interface method signatures and impl headers are not tracked
 
 ## 5. Stdlib Manifest
 
-116 stdlib modules are loaded by `bin/main.ml`. The most commonly used are listed
+117 stdlib modules are loaded by `bin/main.ml`. The most commonly used are listed
 below (use `forge search` to discover the rest):
 
 ### Auto-imported (Prelude)
@@ -619,6 +619,8 @@ Functions always in scope without `use`:
 **Task** — `async`, `await`, `await_ms`, `await_unwrap`, `await_many`, `await_many_ms`, `async_stream`, `async_stream_n`
 
 **Channel** — `new`, `join`, `leave`, `push`, `broadcast`, `broadcast_from`, `serialize`, `parse`
+
+**Session** (transport behind a capability; needs `Session.Live`) — `attach`, `register`, `emit`, `suspend`, `close`
 
 **PubSub** — `new`, `subscribe_state`, `unsubscribe_state`, `broadcast`, `broadcast_from`, `topic_shard`, `topic_matches`, `broadcast_to`
 
@@ -1174,7 +1176,7 @@ lib/tir/                    typed IR (lower/mono/defun/perceus/borrow/fusion/llv
 lib/jit/                    REPL JIT
 lib/errors/errors.ml        diagnostics
 lib/search/search.ml        Hoogle-style search
-stdlib/                     116 March stdlib modules
+stdlib/                     117 March stdlib modules
 runtime/                    C runtime (GC, scheduler, HTTP, TLS, WASM)
 forge/                      build tool
 lsp/                        LSP server

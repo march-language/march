@@ -1,9 +1,17 @@
 # Capabilities: optional runtime dictionaries on `Cap(X)` (tail-resumptive only)
 
-`[P3]` Design pinned 2026-08-31. **Typing, gating and the interpreter runtime
-have landed; compiled codegen has not.** Filed as a design record so the shape
-below is not re-derived, and the out-of-scope list at the bottom is not
-re-expanded.
+`[P3]` Design pinned 2026-08-31; reviewed end to end 2026-09-02.
+
+**Everything except the session transport has landed** (#388, #389, #392,
+#397). `SessionOps` — this design's payoff case — landed as `stdlib/session.march`
+on 2026-09-02, after a same-day detour through a "language limitation" that
+turned out to be a spelling error in this document's own tooling (recorded
+below, kept because the detour is the instructive part).
+
+This file is a design record AND a history. Sections marked **(history)** are
+kept because the errors in them were instructive; they are not current claims.
+The current truth is the Status table and the "What blocks `SessionOps`"
+section, and nothing else in the file should be read as overriding them.
 
 ## Status
 
@@ -12,17 +20,25 @@ re-expanded.
 | `proof cap X with T` declaration + validation | **landed** |
 | `cap_impl` / `cap_dict` typing | **landed** |
 | The gate (declaring-module; `--test` for IO caps) | **landed** |
-| Interpreter runtime + dictionary dispatch | **landed** |
-| Compiled (LLVM) runtime | **landed** — compiled/interpreted parity pinned |
-| IO-capability dictionary SHAPES (derived) | **landed** — `march --emit-io-ops` |
-| Mocking an IO capability | **blocked** on the elaboration pass (b) below; the gate stays CLOSED so there is no silent no-op |
-| Session transport dictionary (`SessionOps`) | **not started** — this design's payoff case |
+| Interpreter runtime + dictionary dispatch | **landed** (#388) |
+| Compiled (LLVM) runtime | **landed** (#388) — compiled/interpreted parity pinned |
+| IO-capability dictionary SHAPES (derived) | **landed** (#389) — `march --emit-io-ops` |
+| Compiler-inserted capability passing (`--test` builds) | **landed** (#389) — analysis + threading + dispatch wrappers, in TIR |
+| `with_cap` binding site; `cap_ops_empty` base | **landed** (#389) |
+| Mocking an IO capability, end to end | **landed** (#389); three CI fixtures under `test/cap_mock/` |
+| Actor handlers reached (capture at spawn) | **landed** (#397) — one capability per actor |
+| `--test` in the CAS cache key (pre-existing bug) | **fixed** (#389) |
+| Session transport dictionary (`stdlib/session.march`) | **landed** (v1) — `test/session/stream_replay.march` replays `Stream` deterministically on both backends |
 
-Tests: `test/test_cap_dict.ml` (19 cases, registered as `cap_dict` in
-`run_compiler`). The four runtime cases are the load-bearing ones: one
-dictionary proves dispatch reaches it, but only TWO dictionaries on one
-capability distinguish a swap from a hard-coded implementation, and the
-no-dictionary case pins the path every capability that exists today takes.
+Tests: `test/test_cap_dict.ml` (28 cases, `cap_dict` in `run_compiler`) and
+three compiled fixtures under `test/cap_mock/` (`cap_mock_io`,
+`cap_mock_clock`, `cap_mock_actor`), each proved non-vacuous by disabling the
+mechanism it exercises and watching it fail. The runtime cases are the
+load-bearing ones: one dictionary proves dispatch reaches it, but only TWO
+dictionaries on one capability distinguish a swap from a hard-coded
+implementation, and the no-dictionary case pins the path every capability that
+exists today takes. `cap_mock/` fixtures stay OUT of `test/native/`, whose
+IR-verify sweep compiles without `--test`.
 
 ### What landed, concretely
 
@@ -39,8 +55,12 @@ no-dictionary case pins the path every capability that exists today takes.
   `check_cap_impl_sites` sweeps.
 - `lib/eval/eval.ml` — a capability is either `VUnit` (the sentinel, i.e. null)
   or the dictionary record itself. No new value constructor.
-- `bin/main.ml` — refuses a compiled/JIT build that would lower a dictionary,
-  with a span and a way forward.
+- `lib/tir/cap_passing.ml` — the capability-passing pass (analysis, threading,
+  dispatch rewrite, `with_cap`, spawn-site capture).
+- `lib/typecheck/io_ops_gen.ml`, `cap_dict_resolve.ml` — derived IO dictionary
+  shapes and their resolution.
+- `runtime/march_runtime.c` — `march_cap_impl` / `march_cap_dict` /
+  `march_mint_cap`, and `march_actor_meta.spawn_cap` with its accessors.
 
 ### The compiled representation costs nothing, and the RC hazard dissolved
 
@@ -74,8 +94,14 @@ matters more than the conclusion:
    cannot carry a dictionary (`check_cap_impl_sites`). So the inc there would be
    an untestable guess baked into the runtime, and is deliberately absent.
 
-**When IO capabilities gain dictionaries, item 4 must be re-answered against a
-program that actually exercises it.** That is the one live piece of this.
+**Item 4 was re-answered on 2026-09-02**, once IO capabilities could carry
+dictionaries under `--test`. A dictionaried `Cap(IO.Console)` passed through
+`cap_narrow` and used on both sides — the exact shape item 4 worried about —
+runs compiled with no RC abort, the mock propagates through the narrow, and
+`live_allocs()` shows no growth attributable to it. **Verified by execution;
+the emitted RC ops for this specific shape were not audited**, so treat it as
+"not observed to fail" rather than "proved balanced". If a dictionaried
+capability ever aborts with an RC underflow, this is the first place to look.
 
 ### `mint_cap` needed its own symbol
 
@@ -94,16 +120,14 @@ argument.** Harmless while every capability was `VUnit`; it would have silently
 dropped the dictionary across every narrow. Now the identity — which is what
 `march_cap_narrow` has always been on the compiled side.
 
-**2. Mocking an IO capability is unreachable, and the `--test` gate is not what
-blocks it.** The gate works: under `--test` an IO cap gets past it. What stops
-the next step is that there is nowhere to declare the dictionary TYPE — an IO
-capability has no declaration site to carry a `with` clause — and, upstream of
-that, `println : String -> ()` never consumes its capability, so a dictionary
-attached to `Cap(IO.Console)` would never be consulted. This is the same finding
-as the effect-system section below, reached from the other direction. Closing it
-needs the cap-first migration of the 91 entries in `builtin_cap_table`, not more
-machinery here. Pinned by `impl_io_cap_test_build` so nobody infers from the
-gate's existence that IO mocking works.
+**2. (history) Mocking an IO capability was unreachable at this point**,
+because `println : String -> ()` never consumes its capability, so a dictionary
+attached to `Cap(IO.Console)` was never consulted. The sentence that followed
+here — "closing it needs the cap-first migration of the 91 builtins" — turned
+out to be the wrong conclusion: the compiler can insert the capability passing
+itself in `--test` builds, and does (#389). See "Making IO mocking reachable".
+`impl_io_cap_test_build` now pins the OPPOSITE of what it originally pinned:
+that `--test` admits `cap_impl` on an IO capability.
 
 ## The gap
 
@@ -298,14 +322,18 @@ representation. No field below is named after a protocol, a role, or a label.
 
 ```march
 type SessionOps = {
-  register : (AccessPoint, Role) -> Endpoint,
-  send     : (Endpoint, Role, Msg) -> Endpoint,
-  suspend  : (Endpoint, State, Handler) -> Suspended,
-  close    : (Endpoint) -> ()
+  register : AccessPoint -> Role -> Endpoint,
+  send     : Endpoint -> Role -> Msg -> Endpoint,
+  suspend  : Endpoint -> State -> Handler -> Suspended,
+  close    : Endpoint -> ()
 }
 
--- Handler = (Role, Msg, Endpoint, State) -> Suspended
+-- Handler = Role -> Msg -> Endpoint -> State -> Suspended
 ```
+
+(Spelling corrected 2026-09-02: an earlier version wrote these as
+`(A, B) -> C`, which in March is a function of one TUPLE argument — see
+"`SessionOps` is NOT blocked" below.)
 
 `AccessPoint`, `Role`, `Msg`, `Endpoint`, `State`, `Suspended` are **opaque at the
 dictionary boundary** — uniform representation, `ptr`-shaped. The generated
@@ -337,9 +365,12 @@ which is *every capability that exists today*. So the current representation is
 preserved exactly for all existing programs: `root_cap` still emits `ptr null`,
 and `march_cap_narrow` is still `return cap;`.
 
-**Interpreter:** `VUnit` becomes `VCap of value option`. Note that eval's
-`cap_narrow` today returns `VUnit` and *discards its argument* — it must become
-identity, or the dictionary is lost across every narrow.
+**Interpreter:** no new value constructor. A capability is either `VUnit` (the
+sentinel) or the dictionary record itself — which mirrors the compiled
+null-or-pointer representation exactly. (The plan here originally said "`VUnit`
+becomes `VCap of value option`"; that was not needed.) Eval's `cap_narrow` had
+been returning `VUnit` and *discarding its argument*, which would have dropped
+the dictionary across every narrow; it is now the identity.
 
 ### The RC cost is already being paid — measured, not assumed
 
@@ -363,24 +394,21 @@ So: **no new RC ops, and no `needs_rc` change.** The only *cost* is that existin
 no-op decs become real atomic decrements — and only on caps that actually carry a
 dictionary.
 
-### The real RC item is a correctness hazard, not a cost
+### (history) "The real RC item is a correctness hazard" — resolved
 
-**Still open — this is the gate on the compiled slice.**
+This section originally called the `cap_narrow` return-without-inc "the single
+highest-risk implementation detail" and said the shim "must `march_incrc`". It
+was measured instead, and the conclusion reversed: Perceus emits no dec on
+`cap_impl`'s or `cap_dict`'s result in any reachable arm, and a dictionaried
+capability could not reach `cap_narrow` at the time. The full account — including
+the two controls that proved nothing before `--dump-tir` settled it — is under
+"The compiled representation costs nothing, and the RC hazard dissolved" near the
+top, and item 4 there records the later re-check once IO caps could carry
+dictionaries. An inc was deliberately NOT added.
 
-`cap_narrow`/`mint_cap` return their argument pointer (`march_cap_narrow` is
-literally `return cap;`) while being typed as ordinary builtins whose result
-Perceus owns. With `null` that is invisible. With a real pointer it is an
-unbalanced alias: the result receives a `dec_rc` with no matching `inc_rc` —
-RC underflow, which `march_decrc` aborts on. **Fix: `march_cap_narrow` must
-`march_incrc` its argument before returning, or `cap_narrow`/`mint_cap` (and the
-new `cap_impl`) must be registered as aliasing/borrowed-return builtins.** This is
-the single highest-risk implementation detail in the item.
-
-Secondary: a cap held in a record field or actor state and then invoked is the
-closure-through-field shape. The dictionary's fields are `TFn` (needs_rc true,
-borrow_eligible false) — ordinary closure accounting, but see the known hazards in
-`specs/todos/2026-08-21-ecallptr-owned-arg-borrow-callee-leak.md` and the
-defunctionalisation capture-shadowing class before trusting it.
+The secondary note stands: a cap held in a record field or actor state and then
+invoked is the closure-through-field shape, with the known hazards in
+`specs/todos/2026-08-21-ecallptr-owned-arg-borrow-callee-leak.md`.
 
 ## Who may supply a dictionary, and when
 
@@ -414,10 +442,14 @@ This maps each surviving motivation onto a gate: **transport swapping** and
 own cap) and are covered by rule 2 in all builds; only **mocking IO** needs rule 3.
 
 **State the weakness plainly:** rule 3 is a *build-mode* gate, not a type-level
-one. It must be enforced where the checker knows the mode, and `forge publish`
-must refuse an artifact built with `--test`. The failure mode is a library that
-mocks IO for its own tests and ships the mock. It is not as strong as rule 2, and
-should not be described as if it were.
+one, and it is not as strong as rule 2. The originally stated failure mode —
+"`forge publish` must refuse an artifact built with `--test`, or a library ships
+its mock" — is narrower than it sounded: `forge publish` (`forge/lib/cmd_publish.ml`)
+packages and submits **source**, not binaries, so the consumer's own `--test`
+decides whether the elaboration runs and a published package cannot carry a
+mocked build. The residual concern is any path that ships a `--test`-built
+BINARY (hot-deploy is the candidate); none was audited, so that stays open as a
+question rather than a defect.
 
 ## Interaction with `lib/caps/cap_rows.ml` — nothing to fix; the behaviour is right
 
@@ -556,9 +588,11 @@ is the strongest, since `Session.*` would be new API with no migration to pay an
 deterministic in-process replay of a distributed protocol as the payoff.
 
 Not worth pitching as a general effect system. The honest sequencing to become one
-is: (1) route operations through caps — the API break above; (2) abortive
-handlers, which need the unwinding path first; (3) `cap_rows` precision, which
-this design makes worse before anyone makes it better.
+is: (1) route operations through caps — done for `--test` builds by the
+compiler-inserted passing below, still an API break for release builds; (2)
+abortive handlers, which need the unwinding path first. (An earlier version
+listed "(3) `cap_rows` precision, which this design makes worse" — measured,
+it does not; see the `cap_rows` section.)
 
 ## Alternative considered and rejected
 
@@ -640,11 +674,12 @@ importers, so every program would have demanded all fifteen capabilities.
 Building the record structurally from the builtins' own `ty` values sidesteps
 both. `--emit-io-ops` remains as documentation, not as a file the compiler reads.
 
-### (b) The elaboration pass — NOT STARTED
+### (b) The elaboration pass — the original plan (history; it LANDED in #389)
 
-The gate on `cap_impl` for IO capabilities stays CLOSED until this lands.
-Opening it first would let a mock typecheck, attach, and silently never be
-consulted — worse than the current refusal.
+Kept as written because the two notes after it record what the plan got wrong.
+At the time the gate on `cap_impl` for IO capabilities was held CLOSED until
+this landed, so a mock could not typecheck, attach, and silently never be
+consulted.
 
 1. New builtin `cap_ops_empty(c)`: the all-`None` dictionary for `c`'s
    capability, typed from `Io_ops_gen.dict_ty` the way the `cap_dict` arm
@@ -712,47 +747,45 @@ accounting for that.)
 correctness — an un-elaborated function keeps today's behaviour exactly:
 
 - Actor handlers are skipped: the scheduler invokes them, not an elaborated
-  caller, so there is nobody to thread from.
+  caller, so there is nobody to thread from. **(Lifted in #397 — see "Actor
+  handlers: capture at spawn" below.)**
 - A function whose name is referenced anywhere except as a call head is not
   elaborated; changing its arity would break the reference, and eta-expanding
   every such site is more than a first version needs.
 
-### (b) progress and the open bug
+### (b) progress, and the SIGBUS that was open here (history; fixed in #389)
 
-Landed, all behind `MARCH_CAP_PASSING=1` (and `MARCH_CAP_DISPATCH=1` for the
-dispatch half). **Not wired to `--test`** — see the bug below.
+Everything in this list landed and is wired to `--test`:
 
 - **Analysis** (`lib/tir/cap_passing.ml`): which functions must carry which
-  capability, from the TIR call graph. 162 of 2752 across a whole program
-  including stdlib.
+  capability, from the TIR call graph. ~160 of ~2750 across a whole program
+  including stdlib, matching the pre-build estimate of ~7%.
 - **Threading**: implicit parameters added and passed; a caller that cannot
-  supply one passes `root_cap`, the ambient sentinel, so un-elaborated callers
-  stay correct for free.
+  supply one passes `root_cap`, the ambient sentinel.
 - **Dispatch wrappers**: generated as March SOURCE and injected before
-  typechecking (`Io_ops_gen.dispatch_wrappers_source`, 652 lines), so they are
+  typechecking (`Io_ops_gen.dispatch_wrappers_source`, ~650 lines), so they are
   typechecked rather than hand-built as TIR. They typecheck clean, including
-  the stdlib-owned types (`FileError`, `Csv.CsvRow`, `FileStat`) that killed
-  the generated-stdlib-module approach — an entry-module injection sees them,
-  a standalone stdlib module cannot.
+  the stdlib-owned types (`FileError`, `Csv.CsvRow`, `FileStat`) that killed the
+  generated-stdlib-module approach.
 - **`cap_ops_empty`**: the all-`None` base a mock overrides one field of.
 
-A benefit of rewriting in TIR that was not anticipated: the wrappers are NOT
-reachable from `main` at typecheck time, so injecting 69 of them does not widen
-any program's capability closure and a narrow `main` grant still checks. An
-AST-level rewrite would have made them reachable and blown the ceiling.
+An unanticipated benefit of rewriting in TIR: the wrappers are NOT reachable
+from `main` at typecheck time, so injecting them does not widen any program's
+capability closure and a narrow `main` grant still checks.
 
-**OPEN BUG — threading `File.with_lines` gives SIGBUS (rc=138).** Reduced
-repro: read a file via `File.with_lines(path, fn(lines) -> ...)` and compile.
-Correct with the pass off, rc=138 with it on. `dispatch` plays no part — this
-is the threading alone. Caught by `try_call_capture_ownership_codegen`, whose
-name is already about the fd `Option` niche contract.
-
-The shape is a lazy `Seq` whose step is a closure, so the likely cause is a
-threaded function reaching a closure the pass did not classify as
-arity-frozen: the `unsafe` rule keys on an `ADefRef`'s `did_name` matching a
-top-level `fn_name`, and if lower spells those differently the function is
-never excluded — an indirect call then passes the OLD arity. Check that
-correspondence first.
+**The SIGBUS (rc=138) on `File.with_lines`, and the wrong first hypothesis.**
+This section originally said the likely cause was "a threaded function reaching
+a closure the pass did not classify as arity-frozen — the `unsafe` rule keys on
+an `ADefRef`'s `did_name`". That hypothesis was TESTED — a check was added
+reporting exactly that — and it reported nothing. Falsifying it is what found
+the real cause: `with_lines` has a nested local `fn do_lines(a, f)` calling
+`file_read_line`, and the scan charged that operation to the LOCAL's name. A
+local is not in `tm_fns`, so `elaborate` never added parameters to it while
+`thread` added an argument at its call sites. Defun lifts such locals to top
+level LATER, which is why `--dump-tir` showed `fn do_lines` and made it look
+top-level. Charging a local's IO to its enclosing function fixed it and closed a
+missed-threading hole at the same time. The `ADefRef` check was kept: it asserts
+an invariant threading depends on.
 
 ### The binding site: `with_cap` — LANDED
 
@@ -813,19 +846,34 @@ WITHOUT `--test` — and without `--test` there is no implementation of
 `cap_ops_empty` to link, so the sweep would fail on it. Anything needing
 `--test` to compile belongs elsewhere.
 
-### Still open
+### Actor handlers: capture at spawn — LANDED (#397)
 
-`with_cap(mock, fn _ -> body)` is designed but not built, so nothing can yet
-say "run this code with that mock". Until it exists, `cap_impl` on an IO
-capability typechecks under `--test` and has no runtime effect. Pinned by
-`impl_io_cap_test_build` so the gap stays visible.
+A handler is entered from the scheduler through `$actor.$d_dispatch`, so the
+dispatch function's arity is frozen and it supplied the ambient sentinel. The
+capability is now captured at the **spawn site** onto `march_actor_meta`
+(`spawn_cap`) — NOT as a field on the actor record, whose layout is pinned by
+the C runtime's hardcoded word indices (`a[2]=dispatch`, `a[3]=alive`) and is
+what `migrate_state`, hot reload and `@compat` all reason about. The meta is
+runtime-internal and none of them see it. `march_spawn`'s ABI is untouched: the
+setter is a separate call after it, since `march_spawn` creates the meta.
 
-At TIR the binding site needs the lambda's `fn_def`, which ANF has hoisted into
-a `let`-bound `ELetRec`. That wants a two-pass shape: find
-`EApp(with_cap, [mock; AVar v])` and record `v -> mock`, then rewrite the
-`ELetRec` bound to `v` with the extra binding. `thread`'s `avail : StrSet.t`
-should become a `(cap * atom) list` so a capability can be supplied by
-something other than the enclosing parameter.
+Because capture is per-actor at spawn, a mock reaches an actor spawned inside
+`with_cap` and not one spawned outside it, **regardless of when either runs** —
+`test/cap_mock/cap_mock_actor.march` sends to the outside actor after the block
+closes, so a global or dynamically-scoped slot would give the right answer for
+the wrong reason.
+
+**Limit: one capability per actor.** An actor whose handlers reach two would
+need a record of them captured; `dispatch_cap` returns `None` for that case, so
+such an actor keeps the previous behaviour rather than a partly-wrong one.
+
+The bug worth remembering from building it: the first version scanned the
+dispatch BODY for interceptable operations and found none, because handlers are
+not inlined into the dispatch at the point this pass runs — that is the
+optimizer, later. `--dump-tir` shows the POST-optimizer form, where the handler
+is inlined, which made the wrong shape look right. `MARCH_DUMP_TXT=lower` shows
+what the pass actually sees. Full account in
+`specs/progress/2026-09-01-actor-capability-capture-at-spawn.md`.
 
 ### Incidental fix: `--test` was not in the CAS cache key
 
@@ -838,12 +886,136 @@ compiling the same file both ways and getting the same artifact. Fixed.
 
 **Risks to price before starting.** The pass changes the arity of most
 functions in a test build, so it lands on defun, mono, Perceus, the CAS cache
-key, hot-reload dispatch tables and FFI boundaries. `cap_rows` gets worse in the
-usual way (`COpaque` head -> `sd_unknown` -> narrow grants refused), though here
-the dispatch site is compiler-generated and can be recognised specifically
-rather than needing the general fix. And `forge test` COMPILES by default
+key, hot-reload dispatch tables and FFI boundaries. (It said here that
+`cap_rows` "gets worse in the usual way"; measured, it does not — the
+`cap_rows` section has the numbers.) And `forge test` COMPILES by default
 (`march --compile --test`; the interpreter is the `MARCH_TEST_INTERPRETER=1`
 fallback) — which is why the compiled runtime had to land first.
+
+## `SessionOps` is NOT blocked — and the section that said so was wrong (2026-09-02)
+
+An earlier version of this section, written the same day, claimed a language
+defect: "a user-declared record field cannot hold a 2+-argument function
+type". That claim was **false**, and how it went wrong is the useful part.
+
+### What is actually true
+
+March's multi-argument function type is the **curried** spelling, documented
+in `specs/lang/surface-syntax.md:292` ("`a -> b -> c` — curried") and used in
+every interface method (`fn eq: a -> a -> Bool`). It works in a record field
+for two and three arguments:
+
+```march
+type Ops = { f : Int -> Int -> Int, g : Int -> String -> Bool -> Int }
+fn use_it(o : Ops) : Int do o.f(1, 2) + o.g(10, "x", true) end
+-- { f: fn (a, b) -> a + b, g: fn (n, _s, _b) -> n }   -- prints 13
+```
+
+`(A, B) -> C` means something else, and correctly so: a function of ONE
+argument that is a tuple. `ty: ty_nat_add ARROW ty` — the left of an arrow is
+a single type, and `(A, B)` is a tuple type. `Tuple.apply(t, f : (a, b) -> c)`
+calls `f(t)`, and `test_sort.march`'s `pair_fst_cmp` returns `fn b -> …` over a
+pair. Both rely on that meaning. It must not change.
+
+### Where the false claim came from
+
+`Io_ops_gen.march_ty` rendered a curried arrow as `(A, B) -> C` — the tuple
+spelling — so `--emit-io-ops` printed every multi-argument field in a form
+that means the wrong thing, the pinned `SessionOps` shape below was written in
+that form, and every probe copied it. The compiler-built dictionaries were
+never affected because they are built from `ty` values, not from that string;
+which is why a 2-argument `file_write` mock worked while the "same" shape typed
+by hand did not. The renderer is fixed to emit the curried spelling; a test
+pins that a rendered field type is valid surface syntax for a multi-parameter
+lambda.
+
+Two smaller things the same mistake exposed: `Tuple.apply`'s doc said "a
+function that takes two separate args" while its body calls `f(t)` on the pair;
+and the zero-argument spelling `(()) -> r` is the same AST as `() -> r`, which
+is what the renderer now emits.
+
+### The pinned shape, spelled correctly
+
+```march
+type SessionOps = {
+  register : AccessPoint -> Role -> Endpoint,
+  send     : Endpoint -> Role -> Msg -> Endpoint,
+  suspend  : Endpoint -> State -> Handler -> Suspended,
+  close    : Endpoint -> ()
+}
+-- Handler = Role -> Msg -> Endpoint -> State -> Suspended
+```
+
+Same four operations as derived above; only the arrows changed.
+
+### What remains before building it
+
+Only the representation of the two protocol-specific types, and neither is a
+language change:
+
+- **`Msg`**: erase to `Bytes` at the dictionary boundary. For a *transport*
+  that is natural rather than a hack — a network transport must serialise
+  anyway, and the projector that emits the endpoints knows the real type on
+  both sides. This keeps `SessionOps` monomorphic AND protocol-agnostic, so the
+  `with`-clause limitation (below) is not on the path.
+- **`State`**: whether it belongs in the dictionary at all, or is closed over
+  by the handler. A design question to settle in the first real endpoint, not
+  before.
+
+### Related, not blocking: the `with` clause is monomorphic
+
+`Cap_dict_resolve.dict_ty_of_cap` builds `TCon (rec_name, [])`, so
+`type SessionOps(m) = …` never unifies with the literal's `SessionOps('a)`.
+Filed with a reject/accept pair in
+`specs/todos/2026-09-02-cap-with-clause-is-monomorphic.md`; the diagnostic for
+it now renders the arity instead of blaming a namespace collision. It would
+only matter for a parameterised dictionary, which would be protocol-specific —
+the thing the design rejects — so it is not on the `SessionOps` path.
+
+### Landed: `stdlib/session.march` + `test/session/stream_replay.march`
+
+The `Stream` protocol's two endpoints, written as a projector would emit them,
+run against an in-process transport and produce the same eight-line trace
+interpreted and compiled:
+
+```
+Prod sends Item(1)   Cons got Item(1)   Prod got More
+Prod sends Item(2)   Cons got Item(2)   close 2   Prod got Done   close 1
+```
+
+What building the first real endpoint settled, each a change to the shape
+above:
+
+- **`State` is not in the dictionary.** The handler closes over it. So
+  `suspend` is `Endpoint -> Handler -> Suspended` and `Handler` is
+  `Role -> Msg -> Endpoint -> Suspended` — one argument fewer than the artifact
+  assumed. Maty's `Handler(S, C)` carries state so that suspension needs no
+  continuation capture; a March closure carries it for free.
+- **`send` is spelled `emit`**: `send` is reserved for actor messaging.
+- **A synchronous transport is wrong for send-then-suspend endpoints.** The
+  first transport delivered inside `emit`; `prod_send` emits FIRST and suspends
+  AFTER (that is the protocol), so Cons's reply arrived before Prod had
+  installed a handler and was dropped. A FIFO run queue drained after every
+  endpoint has had its turn — what an event loop gives you — is required, and
+  its fixed drain order is the determinism. A delivery with no handler is a
+  panic, never a silent drop: a silent drop is what hid this.
+- **The transport must close over its tables.** `Vault.new(name)` twice is a
+  fresh table interpreted and the same table compiled — a backend divergence
+  filed in `specs/todos/2026-08-12-vault-toward-ets-semantics.md`.
+- **Two parser facts the module hit**: `doc` is accepted only before a
+  function (before a `type` or `proof cap` it is a parse error), and the stdlib
+  loader reports a stdlib parse error as "Unknown module" — filed in
+  `specs/todos/2026-09-02-stdlib-parse-error-reported-as-unknown-module.md`.
+
+v1 scope: endpoints are functions, not actors (an actor host is additive and
+brings the one-capability-per-actor limit with it); one in-process transport,
+in the test; `Session.attach` is the only mint.
+
+### Order of remaining work
+
+1. An actor-hosted endpoint, once the one-capability-per-actor limit is lifted.
+2. The monomorphic-`with` limitation only if a parameterised dictionary ever
+   has a use.
 
 ## Explicitly OUT OF SCOPE — do not re-expand
 
@@ -891,6 +1063,14 @@ endpoints imitate.
 - `lib/tir/llvm_builtins.ml` (:843-848), `lib/tir/llvm_emit.ml` (:358),
   `lib/eval/eval.ml` (:2650), `runtime/march_runtime.c` (:6541) — current
   runtime representation of caps
+- `lib/tir/cap_passing.ml` — compiler-inserted capability passing
+- `lib/typecheck/io_ops_gen.ml`, `lib/typecheck/cap_dict_resolve.ml` — derived
+  IO dictionary shapes and resolution
+- `test/cap_mock/` — the three end-to-end mocking fixtures
+- `stdlib/session.march` — the session transport capability (`Session.attach` is the only mint)
+- `test/session/stream_replay.march` — the `Stream` protocol replayed deterministically, both backends
+- `specs/todos/2026-09-02-cap-with-clause-is-monomorphic.md` — blocker (2)
+- `specs/progress/2026-09-01-actor-capability-capture-at-spawn.md`
 - `lib/eval/eval_session.ml` — the existing in-process queue session runtime
 - `lib/tir/rc_types.ml` — `needs_rc` / `borrow_eligible` contract
 - `specs/lang/capabilities.md`, `specs/lang/linear-types.md`
