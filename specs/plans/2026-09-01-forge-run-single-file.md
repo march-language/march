@@ -726,7 +726,26 @@ end
 EOF
 ```
 
-Then, with `FORGE=/Users/80197052/code/march/.claude/worktrees/ast-llvm-open-source-a73a89/_build/default/forge/bin/main.exe` and the matching `march` on PATH:
+Outside a project `lib_path_env` is empty, so forge adds no PATH prefix and
+invokes whatever `march` is ambient. Point both at this worktree's build first —
+`MARCH_HOME=` (empty) stops forge preferring an installed toolchain over the
+PATH one:
+
+```bash
+W=/Users/80197052/code/march/.claude/worktrees/ast-llvm-open-source-a73a89
+FORGE=$W/_build/default/forge/bin/main.exe
+mkdir -p /tmp/march-shim-a73a89 && ln -sf $W/_build/default/bin/main.exe /tmp/march-shim-a73a89/march
+export PATH=/tmp/march-shim-a73a89:$PATH MARCH_HOME=
+```
+
+Confirm the shim resolves before trusting any result below — a stale or missing
+`march` produces failures that look like plan bugs:
+
+```bash
+command -v march && march --help | head -1
+```
+
+Then:
 
 ```bash
 "$FORGE" run scratch.march -- alpha beta
@@ -817,7 +836,7 @@ In `CHANGELOG.md`, under `## [Unreleased]` / `### Added`:
 git mv specs/todos/2026-09-01-forge-run-single-file.md specs/progress/
 ```
 
-Then edit the moved file's header line so it records the outcome rather than an open item: replace `Filed 2026-09-01. Design approved; not yet implemented.` with `Filed 2026-09-01, landed 2026-09-01.` and drop the `` `[P2]` `` tag from the title line.
+Then edit the moved file's header line so it records the outcome rather than an open item: replace `Filed 2026-09-01. Design approved; not yet implemented.` with `Filed 2026-09-01, landed <the date the commit lands>.` and drop the `` `[P2]` `` tag from the title line.
 
 - [ ] **Step 8: Commit**
 
