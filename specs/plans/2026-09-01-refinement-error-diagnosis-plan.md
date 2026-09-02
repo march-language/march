@@ -1395,6 +1395,20 @@ dune build --root . test/run_compiler.exe && ./_build/default/test/run_compiler.
 
 Expected: FAIL — the warning quotes the panic but suggests no signature.
 
+**Correction (Task 7 implementation).** The epilogue placement below is
+impossible: `precond_infer.ml:38` is `module RC = Refine_check`, so
+`Refine_check.check_module` cannot call `Precond_infer.suggest` without a
+module cycle. The shipped shape keeps the reentrancy discipline (nothing calls
+`suggest` inside the walk) but moves the drain one level out:
+`Precond_infer.attach_promoted_fixes` is a post-pass the CALLER runs right
+after `check_module` returns — both `bin/main.ml` pipelines and the test
+helper. `refine_check.mli` exposes `promoted_sites` and `stdlib_source_files`
+for it. Because the diagnostic is emitted during the walk and MUTATED by the
+post-pass (rather than deferred), a caller that does not run the post-pass
+still gets the Task 6 finding, just without the offer; `Errors.sorted` orders
+by span so emission order is moot. A trivial cold `--check` measured 0.24s
+after this task, matching the pre-task baseline.
+
 - [ ] **Step 3: Collect promoted sites during the walk, suggest AFTER it**
 
 **Do not call `Precond_infer.suggest` from inside `check_call`.** Its body is
