@@ -21,17 +21,33 @@ jobs:
           - os: macos-15
             platform: darwin-arm64
             ocaml-compiler: 5.3.0
+          # BOTH Linux legs build inside Alpine, and `static: true` now means
+          # it: the archives are fully statically linked musl binaries with no
+          # NEEDED entries at all (verified by the scratch-container step
+          # below). Until 2026-09 the label was decorative — nothing passed
+          # -static — and both legs shipped binaries NEEDing libLLVM,
+          # libblake3, libz, libzstd, libbrotli{enc,dec} and libc. libblake3 in
+          # particular is built from source by this workflow and is packaged by
+          # neither Alpine nor Ubuntu, so it existed on no user's machine.
+          #
+          # x86_64 moved from a host build to this container in the same
+          # change. On the Ubuntu host it linked against glibc, and a static
+          # glibc link is a trap rather than a fix: it succeeds, then
+          # getaddrinfo/NSS fail at runtime because the NSS modules it needs
+          # are dlopened. musl has no such split, so Alpine is what makes
+          # `-static` mean something. Both legs are native-arch — the x86_64
+          # runner runs an x86_64 container and the arm64 runner an arm64 one,
+          # no QEMU on either.
           - os: ubuntu-24.04
             platform: linux-x86_64
             ocaml-compiler: 5.3.0
             static: true
+            alpine: true
           # Native arm64 host (GitHub-hosted `ubuntu-24.04-arm`, free for
           # public repos). This leg used to run on an x86_64 runner with
           # docker/setup-qemu-action and `--platform linux/arm64`; building
           # ocaml-base-compiler.5.3.0 from source under that emulation took 52
-          # minutes on its own (nightly run 33358635235). The Alpine container
-          # stays — it is what provides musl for the `static: true` artifact —
-          # but on an arm64 host it runs natively, with no QEMU.
+          # minutes on its own (nightly run 33358635235).
           - os: ubuntu-24.04-arm
             platform: linux-aarch64
             ocaml-compiler: 5.3.0
@@ -48,21 +64,13 @@ jobs:
 
       # --- Linux static builds (musl) ---
 
-      # Only the x86_64 leg builds musl-static on the runner host. The
-      # aarch64 leg builds inside Alpine, which is musl-native already, so
-      # installing musl-tools on its host would be pure waste.
-      - name: Install musl toolchain (Linux)
-        if: matrix.static && !matrix.alpine
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools
-
-      # aarch64 builds inside Alpine because the artifact must be
-      # musl-static, not because of any cross-compilation: the runner is
-      # already arm64, so the container is a plain native `docker run` with no
-      # `--platform` and no QEMU. Do not reintroduce either without also moving
-      # this leg back to an x86_64 `os:` — they only made sense together.
-      - name: Build in Alpine container (Linux aarch64)
+      # Both Linux legs build inside Alpine because the artifact must be
+      # musl-static, not because of any cross-compilation: each runner already
+      # matches its container's arch, so this is a plain native `docker run`
+      # with no `--platform` and no QEMU. Do not reintroduce either without
+      # also changing the `os:` of the leg you are doing it for — they only
+      # ever made sense together.
+      - name: Build in Alpine container (Linux)
         if: matrix.alpine
         uses: addnab/docker-run-action@v3
         with:
@@ -77,7 +85,18 @@ jobs:
             # shipped with an EMPTY bin/ because the build (or the cp that
             # follows it) failed here and the job still reported success.
             set -euo pipefail
-            apk add --no-cache bash opam ocaml build-base git llvm19-dev llvm19 brotli-dev brotli-libs
+            # The *-static packages are what make `static: true` real: without
+            # them llvm-config --link-static names archives that do not exist
+            # and the link dies with `cannot find -lLLVMSupport`. g++/
+            # libstdc++-dev supply libstdc++.a, which libLLVM.so used to carry
+            # for us.
+            apk add --no-cache bash opam ocaml build-base git \
+              llvm19-dev llvm19 llvm19-static \
+              brotli-dev brotli-libs brotli-static \
+              zlib-dev zlib-static zstd-dev zstd-static \
+              libxml2-dev libxml2-static \
+              openssl-dev openssl-libs-static \
+              g++ libstdc++-dev
             # /work is the host checkout bind-mounted in; it is owned by the
             # runner user (uid 1001) while this container runs as root, so git
             # refuses it as "dubious ownership" and every plumbing command exits
@@ -87,20 +106,33 @@ jobs:
             # runner's own safe.directory entry does not carry over: different
             # user, different HOME, different path (/work, not the host path).
             git config --global --add safe.directory /work
-            # Build blake3 from source. The x86 SIMD units are correctly omitted
-            # here, but blake3_neon.c is NOT optional on aarch64: blake3_dispatch.c
-            # dispatches to blake3_hash_many_neon unconditionally on this target
-            # (NEON is baseline for aarch64, so upstream has no runtime check to
-            # skip), and leaving it out produces a libblake3.so that links fine and
-            # then fails every consumer with `undefined reference to
-            # blake3_hash_many_neon`. The macOS leg below already compiles it.
+            # Build blake3 from source: no distro packages it.
             git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
+            cd /tmp/blake3/c
+            # SIMD sources are per-arch and NOT optional. blake3_dispatch.c
+            # dispatches to blake3_hash_many_neon unconditionally on aarch64
+            # (NEON is baseline there, so upstream has no runtime check to skip
+            # it) and to the x86 units behind cpuid on x86_64; omit the ones
+            # for the arch you are on and the library links fine, then fails
+            # every consumer with `undefined reference to blake3_hash_many_*`.
+            case "$(uname -m)" in
+              aarch64) B3_SIMD="blake3_neon.c" ;;
+              x86_64)  B3_SIMD="blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S" ;;
+              *)       echo "unexpected arch $(uname -m)" >&2; exit 1 ;;
+            esac
+            # Both forms are needed. The .a is what the statically linked
+            # compiler binary links; the .so is what `march --compile` links
+            # into a USER's program on a machine that has this toolchain
+            # (a separate link, not covered by our -static).
             gcc -O2 -shared -fPIC -o /usr/lib/libblake3.so \
-              /tmp/blake3/c/blake3.c /tmp/blake3/c/blake3_dispatch.c \
-              /tmp/blake3/c/blake3_portable.c /tmp/blake3/c/blake3_neon.c
-            cp /tmp/blake3/c/blake3.h /usr/include/blake3.h
-            # NOT covered by .github/actions/opam-deps (which the host-built
-            # legs below use): this runs inside an ephemeral Alpine container
+              blake3.c blake3_dispatch.c blake3_portable.c $B3_SIMD
+            gcc -O2 -fPIC -c blake3.c blake3_dispatch.c blake3_portable.c $B3_SIMD
+            ar rcs /usr/lib/libblake3.a blake3.o blake3_dispatch.o blake3_portable.o \
+              $(for f in $B3_SIMD; do echo "${f%.*}.o"; done)
+            cp blake3.h /usr/include/blake3.h
+            cd /work
+            # NOT covered by .github/actions/opam-deps (which the macOS leg
+            # below uses): this runs inside an ephemeral Alpine container
             # and creates a GLOBAL switch in the container's own opam root, not
             # the `_opam` local switch that action caches. Caching across the
             # docker-run boundary would be a separate mechanism; left uncached
@@ -110,7 +142,15 @@ jobs:
             opam switch create 5.3.0 ocaml-base-compiler.5.3.0
             eval $(opam env)
             opam install --deps-only -y .
-            dune build --force bin/main.exe forge/bin/main.exe
+            # This pair is the whole of `static: true`. OCAMLPARAM passes
+            # -static through to the C linker that ocamlopt drives;
+            # MARCH_STATIC_LLVM makes lib/jit/detect_llvm.sh emit LLVM's static
+            # archives instead of -lLLVM-19 (see the comment there). --force is
+            # required, not cosmetic: the flag sexps are dune RULE outputs, and
+            # a cached one would otherwise be reused with the old dynamic
+            # flags even though the environment changed.
+            MARCH_STATIC_LLVM=1 OCAMLPARAM='_,ccopt=-static' \
+              dune build --force bin/main.exe forge/bin/main.exe
             mkdir -p _dist/bin _dist/stdlib _dist/runtime
             cp _build/default/bin/main.exe _dist/bin/march
             cp _build/default/forge/bin/main.exe _dist/bin/forge
@@ -119,12 +159,11 @@ jobs:
             cp runtime/*.c runtime/*.h _dist/runtime/
             cp LICENSE _dist/ 2>/dev/null || true
 
-      # --- macOS and Linux x86_64: built on the runner host ---
+      # --- macOS: built on the runner host ---
 
-      # Runs on the two legs that build directly on the runner host, i.e.
-      # everything except the Alpine-container leg above (every leg is now
-      # native-arch, so `!matrix.alpine` is a host-vs-container distinction,
-      # not a native-vs-emulated one).
+      # `!matrix.alpine` is now exactly "the macOS leg": both Linux legs build
+      # in the container above. The condition is left in this form rather than
+      # hard-coded to macOS so a future host-built leg picks it up.
       #
       # Sets up OCaml (pinning setup-ocaml@v3.7.0 — the first release with a
       # stable-opam entry for macos-15, our minimum macOS target; the older @v3
@@ -145,46 +184,23 @@ jobs:
         with:
           ocaml-compiler: ${{ matrix.ocaml-compiler }}
 
+      # macOS keeps a dynamic link against the OS's own stable libraries, which
+      # is the platform-correct choice (Apple discourages static linking and
+      # does not ship a static libSystem). Only the non-system libraries —
+      # blake3, zstd, brotli — are linked from archives here.
       - name: Install system dependencies (host)
         if: "!matrix.alpine"
         run: |
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            brew install blake3 zstd brotli llvm
-            # Homebrew ships only the blake3 dylib. Build a static libblake3.a so
-            # the release binary links blake3 (and zstd/brotli, whose .a come from
-            # brew) statically — no Homebrew dylib dependency on the user's machine.
-            git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
-            ( cd /tmp/blake3/c && \
-              clang -O2 -c blake3.c blake3_dispatch.c blake3_portable.c blake3_neon.c && \
-              ar rcs "$(brew --prefix)/lib/libblake3.a" \
-                blake3.o blake3_dispatch.o blake3_portable.o blake3_neon.o )
-          else
-            sudo apt-get update
-            sudo apt-get install -y llvm-dev libbrotli-dev
-            # libblake3-dev is not in Ubuntu 24.04; build from source
-            git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
-            cd /tmp/blake3/c
-            gcc -O2 -shared -fPIC -o libblake3.so \
-              blake3.c blake3_dispatch.c blake3_portable.c \
-              blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S \
-              blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S
-            sudo cp libblake3.so /usr/local/lib/libblake3.so
-            sudo cp blake3.h /usr/local/include/blake3.h
-            sudo ldconfig
-          fi
-
-      - name: Build (Linux x86_64)
-        if: matrix.static && !matrix.alpine
-        run: |
-          eval $(opam env)
-          dune build --force bin/main.exe forge/bin/main.exe
-          mkdir -p _dist/bin _dist/stdlib _dist/runtime
-          cp _build/default/bin/main.exe _dist/bin/march
-          cp _build/default/forge/bin/main.exe _dist/bin/forge
-          cp stdlib/*.march _dist/stdlib/
-          # Bundle the C runtime sources so `march --compile` works from the prebuilt.
-          cp runtime/*.c runtime/*.h _dist/runtime/
-          cp LICENSE _dist/ 2>/dev/null || true
+          set -euo pipefail
+          brew install blake3 zstd brotli llvm
+          # Homebrew ships only the blake3 dylib. Build a static libblake3.a so
+          # the release binary links blake3 (and zstd/brotli, whose .a come from
+          # brew) statically — no Homebrew dylib dependency on the user's machine.
+          git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
+          ( cd /tmp/blake3/c && \
+            clang -O2 -c blake3.c blake3_dispatch.c blake3_portable.c blake3_neon.c && \
+            ar rcs "$(brew --prefix)/lib/libblake3.a" \
+              blake3.o blake3_dispatch.o blake3_portable.o blake3_neon.o )
 
       - name: Build (macOS)
         if: "!matrix.static"
@@ -226,6 +242,49 @@ jobs:
               echo "  $p: $(wc -c < "$p") bytes"
             fi
           done
+          exit $fail
+
+      # THE test this whole change exists for. Both Linux legs shipped
+      # dynamically linked binaries to users for two releases while labelled
+      # `static: true`, and nothing noticed, because every check ran on the
+      # build machine — where libLLVM, libblake3, libzstd and libbrotli happen
+      # to be installed, since this job installed them. On a user's bare
+      # container the aarch64 binary aborted with ~20 `Error relocating ...
+      # symbol not found` lines before reaching main.
+      #
+      # A scratch container with no dev packages is the only environment that
+      # can tell the two apart, so run the actual artifact in one. Both images
+      # are load-bearing and neither subsumes the other: alpine catches a
+      # binary that still wants a shared library, debian additionally catches
+      # one that is merely musl-DYNAMIC (which alpine would happily run).
+      #
+      # Runs BEFORE `strip`, for the same reason the binaries-exist check does.
+      - name: Verify the archive runs on a bare system
+        if: matrix.static
+        run: |
+          set -euo pipefail
+          fail=0
+          for image in alpine:3.21 debian:stable-slim; do
+            for b in march forge; do
+              echo "--- $b in $image ---"
+              # --entrypoint, not `sh -c`: debian:stable-slim has a shell but a
+              # distroless-style image need not, and the point is to depend on
+              # nothing in the image but the kernel.
+              if out=$(docker run --rm --entrypoint "/dist/bin/$b" \
+                         -v "$PWD/_dist:/dist:ro" "$image" --version 2>&1); then
+                echo "  ok: $out"
+              else
+                echo "::error::${{ matrix.platform }}: _dist/bin/$b does not run in a bare ${image} — the archive is labelled static but is not. See the readelf output below." >&2
+                echo "$out" >&2
+                fail=1
+              fi
+            done
+          done
+          echo "--- readelf -d (should list no NEEDED entries) ---"
+          readelf -d _dist/bin/march | grep NEEDED && {
+            echo "::error::${{ matrix.platform }}: _dist/bin/march has NEEDED entries; it is not statically linked." >&2
+            fail=1
+          } || echo "  none — statically linked"
           exit $fail
 
       - name: Strip binary

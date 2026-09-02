@@ -33,6 +33,25 @@ else
     fi
     case "$WHAT" in
         c_flags)    printf '(-I%s -DLLVM_MAJOR_VERSION=%s)\n' "$INC" "$LLVM_VER" ;;
-        link_flags) printf '(-ldl -L%s -lLLVM-%s)\n' "$LIB" "$LLVM_VER" ;;
+        link_flags)
+            # MARCH_STATIC_LLVM=1 links LLVM's static archives instead of
+            # libLLVM.so, so the produced binary carries no libLLVM dependency.
+            # The release workflow's musl legs set it; a plain dev build does
+            # not, and gets the shared library exactly as before.
+            #
+            # `llvm-config --link-static` needs the distro's llvm*-static
+            # package (Alpine: llvm19-static); without it the archives are
+            # absent and the link fails with `cannot find -lLLVMSupport`.
+            # -lstdc++ is required because the archives are C++ objects that
+            # libLLVM.so would otherwise have carried for us. --system-libs
+            # supplies the rest (-lrt -ldl -lm -lz -lzstd -lxml2), which is why
+            # the -ldl of the dynamic branch is not repeated here.
+            if [ "${MARCH_STATIC_LLVM:-}" = "1" ] && [ -n "$LLVM_CFG" ] && [ -x "$LLVM_CFG" ]; then
+                printf '(-L%s %s %s -lstdc++)\n' "$LIB" \
+                    "$("$LLVM_CFG" --link-static --libs orcjit native)" \
+                    "$("$LLVM_CFG" --link-static --system-libs)"
+            else
+                printf '(-ldl -L%s -lLLVM-%s)\n' "$LIB" "$LLVM_VER"
+            fi ;;
     esac
 fi

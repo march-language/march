@@ -68,6 +68,32 @@ git log is authoritative for exact commits.
   parameterised record the note says so — "`Ops` is declared with 1 type
   parameter (`Ops(m)`), but here it is used with none" — instead of blaming a
   global-namespace collision that isn't there.
+- **The Linux release binaries are now actually statically linked.** Both Linux
+  archives were labelled `static: true` and promised "zero runtime
+  dependencies", but nothing ever passed `-static`: they shipped needing
+  libLLVM, libblake3, libz, libzstd, libbrotli{enc,dec} and libc, and the
+  aarch64 binary would not start on a bare `alpine:3.21` — ~20 `Error
+  relocating ... symbol not found` lines before `main`. libblake3 is built from
+  source by the release workflow and is packaged by no distro, so it was on no
+  user's machine. Both Linux legs now build inside Alpine and link statically
+  for real, and a new CI step runs the produced `march` and `forge` inside bare
+  `alpine:3.21` and `debian:stable-slim` before publishing, so a dynamically
+  linked archive can no longer ship. One consequence, on the Linux prebuilts
+  only: a static musl binary has no `dlopen`, so interpreted `extern` FFI does
+  not work there and the REPL's `--jit` falls back to the interpreter.
+  Interpreting, `--compile` and `forge` are unaffected, as are macOS builds and
+  builds from source.
+
+- **`march --compile` works on musl (Alpine).** Two separate breakages, so the
+  musl-targeted `linux-aarch64` prebuilt could interpret March but not compile
+  it. `runtime/march_runtime.c` included `<execinfo.h>` unconditionally — a
+  glibc extension musl lacks — so compiling the bundled runtime died at the
+  first header; it is now guarded, and the only thing lost on musl is the
+  symbolic C backtrace inside the opt-in `MARCH_DEBUG_OOM` forensics (March's
+  own stack trace is built from its own frame table and is unaffected).
+  Then the link failed on `getcontext`/`makecontext`/`swapcontext`, which musl
+  declares but does not define; on a musl host the compiler now links
+  `-lucontext`, where Alpine keeps them.
 
 - Multi-head function heads now count as structural recursion, so an ordinary
   recursive tree walk written with function heads compiles. Desugar merges
@@ -479,6 +505,27 @@ git log is authoritative for exact commits.
   later launches, a save that fails reports it on stderr instead of degrading
   silently, and both the REPL and the CLI sweep stale staging files left by
   processes that crashed mid-write.
+
+### Documentation
+
+- **`specs/docker_images.md` no longer claims `march --compile` emits a static
+  binary.** It said a compiled March program "can be copied into `scratch` or a
+  distroless image, producing a deploy image of a few megabytes with zero
+  runtime dependencies", and built its whole recommended deploy pattern on that.
+  In fact the link command passes no `-static` on any path: every compiled
+  program carries `DT_NEEDED` entries for libssl, libcrypto, libz, libblake3
+  and (host-dependent) libzstd/libbrotli, plus libucontext on musl — verified on
+  `alpine:3.21` aarch64 and, identically, on macOS arm64. `libblake3` is the
+  worst of them: March's own release workflow compiles it from source because
+  there is no package to install, so a user's program depended on a library they
+  had no packaged way to obtain. The spec now carries a table of what is
+  actually linked and where each entry comes from, a deploy pattern with a real
+  base image and package list, and an explicit note that `scratch` and
+  `distroless-static` do not work today. Static output is filed as its own item
+  (`specs/todos/2026-09-02-march-compile-output-is-not-static.md`), with
+  acceptance criteria that require running the artifact in a bare container.
+  This is separate from the release-archive static defect, which concerns the
+  distributed `march`/`forge` binaries rather than the output of `--compile`.
 
 ## [0.3.0] - 2026-08-23
 

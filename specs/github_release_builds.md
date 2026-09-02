@@ -18,21 +18,75 @@ This spec defines how March compiler binaries are built, packaged, and published
 > quotes `alpine:3.19`, a `matrix.cross` flag, `docker/setup-qemu-action` and
 > `--platform linux/arm64`, none of which exist any more. Read
 > `.github/workflows/build.yml`, not the snippet.
+>
+> **Update 2026-09-02:** the "static (musl)" column below was aspirational
+> until this date — see § Why Static Linking on Linux. Both Linux legs now
+> build inside Alpine (the x86_64 leg moved off its glibc host build) and link
+> statically for real, checked by running the artifact in a scratch container.
+> The snippet's `OCAMLPARAM='_,ccopt=-static' dune build --force` is once again
+> roughly what the workflow does, but it is still an old snapshot in every
+> other respect; the workflow remains the source of truth.
 
 
 All builds target OCaml 5.3.0 and produce native binaries for four platforms:
 
 | OS    | Architecture | Runner              | Platform string  | Linking    |
 |-------|-------------|---------------------|------------------|------------|
-| macOS | Apple Silicon | `macos-14`          | `darwin-arm64`   | dynamic    |
-| Linux | x86-64       | `ubuntu-22.04`      | `linux-x86_64`   | static (musl) |
-| Linux | AArch64      | `ubuntu-24.04-arm`  | `linux-aarch64`  | static (musl) |
+| macOS | Apple Silicon | `macos-15`          | `darwin-arm64`   | dynamic    |
+| Linux | x86-64       | `ubuntu-24.04`      | `linux-x86_64`   | static (musl, in Alpine) |
+| Linux | AArch64      | `ubuntu-24.04-arm`  | `linux-aarch64`  | static (musl, in Alpine) |
 
 Platform strings match the forge version manager's platform detection table exactly (see `forge_version_manager.md § Platform Detection`).
 
 ### Why Static Linking on Linux
 
 Linux distributions vary wildly in glibc version. A binary linked against glibc 2.35 won't run on a system with glibc 2.31. Static linking via musl eliminates this entirely — the resulting binary has zero runtime dependencies and runs on any Linux kernel 3.2+. macOS doesn't have this problem (dynamic linking against system libraries is stable across OS versions), and Apple discourages static linking anyway.
+
+#### What "static" costs, and how it is enforced
+
+For two releases (v0.2.0 and v0.3.0) the paragraph above was simply false.
+`static: true` gated only an apt install and the choice of build step; nothing
+passed `-static`, and both Linux archives shipped binaries `NEEDED`ing
+libLLVM, libblake3, libz, libzstd, libbrotli{enc,dec} and libc. The aarch64
+binary aborted on a bare `alpine:3.21` with ~20 `Error relocating ... symbol
+not found` lines before reaching `main`. libblake3 is the sharpest edge: it is
+built from source *by this workflow* and packaged by neither Alpine nor Ubuntu,
+so no dependency list could have told a user how to obtain it.
+
+Three things make the claim true now, and one CI step makes it stay true:
+
+- `lib/jit/detect_llvm.sh` emits LLVM's static archives (plus `-lstdc++`) when
+  `MARCH_STATIC_LLVM=1`, instead of `-lLLVM-<n>`.
+- `lib/eval/discover_compress.ml` lists `-lbrotlicommon` last. Against shared
+  objects the loader follows brotli's own `DT_NEEDED` and this is a no-op;
+  against `.a` archives, omitting it is ~30 undefined references.
+- Both Linux legs build in Alpine with `OCAMLPARAM='_,ccopt=-static'`. This is
+  why x86_64 could not stay on its glibc host: a *static glibc* link succeeds
+  and then fails at runtime, because `getaddrinfo`/NSS dlopen their modules.
+- **The `Verify the archive runs on a bare system` step** runs the produced
+  `march` and `forge` inside bare `alpine:3.21` *and* `debian:stable-slim`, and
+  asserts `readelf -d` reports no `NEEDED` entries. Both images earn their
+  place: alpine catches a binary that still wants a shared library, debian
+  additionally catches one that is merely musl-*dynamic*, which alpine would
+  run happily. Every check before this one ran on the build machine, where the
+  libraries are installed because this same job installed them — which is
+  exactly why the defect survived two releases.
+
+The cost is real and worth stating. A statically linked musl binary has no
+working `dlopen` (musl's static libc returns "Dynamic loading not supported"),
+so on the **Linux prebuilts only**:
+
+- interpreted `extern` FFI (`lib/eval`'s dlopen-based marshal layer) does not
+  work;
+- the REPL's `--jit` acceleration falls back to the interpreter — a graceful
+  degradation, not an error, because `repl_jit` already treats a failed
+  dlopen as "not compiled" (see the ROOT CAUSE FIX comment at the top of
+  `lib/jit/repl_jit.ml`).
+
+Everything else — interpreting, `--compile`, `forge` — is unaffected;
+`march --compile` shells out to `clang` and needs a C toolchain on the user's
+machine either way. Building from source, or the macOS prebuilt, retains both
+features.
 
 ## Artifact Structure
 
@@ -48,6 +102,10 @@ march-{version}-{os}-{arch}.tar.gz
     │   ├── core.march
     │   ├── io.march
     │   ├── collections.march
+    │   └── ...
+    ├── runtime/           # C runtime sources, so `march --compile` works
+    │   ├── march_runtime.c
+    │   ├── march_scheduler.c
     │   └── ...
     └── LICENSE
 ```

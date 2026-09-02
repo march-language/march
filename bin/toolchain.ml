@@ -598,6 +598,38 @@ let blake3_link_flags () =
   | [] -> ""
   | _ -> " " ^ String.concat " " flags
 
+(* musl removed the ucontext family from libc.  runtime/march_scheduler.c uses
+   getcontext/makecontext/swapcontext for its green threads, and musl's
+   <ucontext.h> declares them (so the COMPILE succeeds) while providing no
+   definitions — the failure is at LINK time, with "undefined reference to
+   getcontext".  Alpine and the other musl distros ship the implementations in
+   a separate libucontext, so on musl the link needs an explicit -lucontext.
+
+   glibc has these in libc and has no libucontext, so this must not be emitted
+   there.  musl is detected by its dynamic loader, /lib/ld-musl-<arch>.so.1,
+   which every musl distro installs under that exact name; there is no
+   __MUSL__-style predefined macro to test instead.
+
+   Emitted only when a libucontext is actually present: on a musl box without
+   it, adding the flag would replace the (accurate) "undefined reference to
+   getcontext" with a less informative "cannot find -lucontext". *)
+let is_musl_host () =
+  match Sys.readdir "/lib" with
+  | entries ->
+    Array.exists (fun f ->
+        String.length f > 8 && String.sub f 0 8 = "ld-musl-") entries
+  | exception Sys_error _ -> false
+
+let ucontext_link_flags () =
+  if not (Sys.unix && is_musl_host ()) then ""
+  else
+    let dirs = [ "/usr/lib"; "/lib"; "/usr/local/lib" ] in
+    let present =
+      List.exists (fun d ->
+          Sys.file_exists (Filename.concat d "libucontext.a")
+          || Sys.file_exists (Filename.concat d "libucontext.so")) dirs in
+    if present then " -lucontext" else ""
+
 (* ── Cross-compile target sysroot (OpenSSL/TLS + zlib/gzip) ─────────────────
    A cross Linux main binary CANNOT defer undefined symbols the way a .so can,
    so the cross-linker needs TARGET copies of libssl/libcrypto/libz (+ headers)
@@ -820,9 +852,10 @@ let ensure_runtime_so () =
        command plus every header in runtime/) and the full flag string.
        Identical inputs across worktrees share one artifact; any divergence
        gets its own filename instead of overwriting a shared one. *)
+    let ucontext_flags = ucontext_link_flags () in
     let flags_sig = Printf.sprintf
-      "clang -shared -O2 -fno-strict-aliasing -fwrapv -fPIC -msse4.2 -Wno-unused-command-line-argument%s%s%s -I%s %s%s%s%s%s"
-      evloop_flag so_dbg_flag so_san_flag runtime_dir runtime_c extra_files openssl_flags compress_flags blake3_flags in
+      "clang -shared -O2 -fno-strict-aliasing -fwrapv -fPIC -msse4.2 -Wno-unused-command-line-argument%s%s%s -I%s %s%s%s%s%s%s"
+      evloop_flag so_dbg_flag so_san_flag runtime_dir runtime_c extra_files openssl_flags compress_flags blake3_flags ucontext_flags in
     let key_buf = Buffer.create 256 in
     Buffer.add_string key_buf flags_sig;
     (* Not part of [flags_sig] itself: the -install_name argument is the .so
