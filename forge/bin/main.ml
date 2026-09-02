@@ -231,9 +231,29 @@ let run_cmd =
            ~doc:"Compilation target when using $(b,--compiled): native (default) or js. \
                  With $(b,js), builds an .mjs module then runs it with node.")
   in
-  let run d c tgt = handle (Cmd_run.run ~dump_phases:d ~compiled:c ?target:tgt ()) in
-  Cmd.v (Cmd.info "run" ~doc:"Build and run the current project")
-    Term.(const run $ dump_phases $ compiled $ target)
+  let files =
+    Arg.(value & pos_all string [] &
+         info [] ~docv:"FILE"
+           ~doc:"A single .march file to run, followed by any arguments for the \
+                 program itself (separate them with $(b,--)). Omit FILE to run \
+                 the project's entry point. A file named here still sees the \
+                 surrounding project's modules and FFI shims when there is one.")
+  in
+  let run d c tgt fs =
+    (* The first positional is always the FILE; everything after it belongs to
+       the program.  There is deliberately no spelling that passes arguments to
+       the PROJECT entry: cmdliner records the positionals but not where `--`
+       sat, so `forge run -- a b` cannot be told apart from a file `a` with one
+       argument, and guessing (e.g. "it's a file if it exists") is worse than
+       not offering it. *)
+    let (file, args) = match fs with
+      | []          -> (None, [])
+      | f :: rest   -> (Some f, rest)
+    in
+    handle (Cmd_run.run ~dump_phases:d ~compiled:c ?target:tgt ?file ~args ())
+  in
+  Cmd.v (Cmd.info "run" ~doc:"Build and run the current project, or a single file")
+    Term.(const run $ dump_phases $ compiled $ target $ files)
 
 (* ------------------------------------------------------------------ forge test *)
 

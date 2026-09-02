@@ -11,6 +11,14 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- `forge run FILE` runs a single `.march` file, interpreted or (with
+  `--compiled`) through the LLVM pipeline. A file inside a project still
+  resolves that project's modules and FFI shims. Arguments after `--` reach the
+  program as `System.argv()`; the compiler gained `march --args` to make that
+  work for interpreted runs too.
+
 ### Fixed
 
 - The non-tail-recursion warning no longer promises a loop that does not

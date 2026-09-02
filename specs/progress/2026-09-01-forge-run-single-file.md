@@ -1,6 +1,6 @@
-`[P2]` # `forge run FILE` — run a single `.march` file
+# `forge run FILE` — run a single `.march` file
 
-Filed 2026-09-01. Design approved; not yet implemented.
+Filed 2026-09-01, landed 2026-09-02.
 
 ## The gap
 
