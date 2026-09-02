@@ -1604,24 +1604,32 @@ let test_output_ext_by_target () =
   Alcotest.(check string) "an unknown target is native" ""
     (Cmd_build.output_ext (Some "aarch64-linux"))
 
-(** Full end-to-end pipeline: compile a single file through the real LLVM
-    backend and run the resulting binary, exactly the path
-    [forge run --compiled FILE] takes with no forge.toml in scope
-    ([resolve_entry] falls back to [empty_context], so `march` is resolved
-    off PATH by [Cmd_build.compile_entry] -- see [run]'s [Some _] branch in
-    cmd_run.ml).  [test_output_ext_by_target] above only unit-tests the
-    extension helper; this is the one test that actually exercises the
-    temp-file lifecycle (pre-compile removal, [Fun.protect] cleanup on
-    success and on failure) and [exec_output]'s dispatch -- a regression in
-    either would otherwise pass the whole suite untouched. Marked [`Slow]:
-    this pays a real clang compile, so it must not land in the quick
-    suite ([scripts/run-tests.sh -q] skips [`Slow]). *)
-let test_compiled_run_end_to_end () =
-  (* Exe-relative, for the same reason as test/test_cap_markers.ml: a
-     CWD-relative path returns 127 under dune's test runner. Two levels up
-     from _build/default/forge/test/ (vs. one for test/test_cap_markers.ml,
-     which sits directly under _build/default/test/) lands on
-     _build/default/bin/main.exe. *)
+(** Point PATH's `march` at the just-built dev compiler under test, instead of
+    whatever `march` (if any) happens to be on PATH or globally installed
+    under $HOME/.march -- a CI runner has neither, so a test that skips this
+    exits 127, and a machine that DOES have a global toolchain would
+    otherwise silently exercise a different, possibly months-old compiler
+    instead of this branch's. Every test that shells out to `march` should
+    run its body inside this.
+
+    Exe-relative, for the same reason as test/test_cap_markers.ml: a
+    CWD-relative path returns 127 under dune's test runner. Two levels up
+    from _build/default/forge/test/ (vs. one for test/test_cap_markers.ml,
+    which sits directly under _build/default/test/) lands on
+    _build/default/bin/main.exe. Fails loudly (never skips silently) if
+    bin/main.exe hasn't been built.
+
+    Shims a private bin dir with a `march` symlink onto the just-built
+    main.exe (it is literally named main.exe, not march) and prepends it to
+    PATH. Invoked as a bare `march` through a PATH symlink, the compiler's
+    own exe-relative runtime/stdlib resolution (bin/toolchain.ml) resolves
+    against the SYMLINK's directory, not the real bin/main.exe location --
+    the same failure mode forge/test/test_cap_sandbox.ml's
+    setup_hermetic_toolchain works around. Point it at the already-staged
+    _build/default/{runtime,stdlib} directly via the override env vars.
+    Restores PATH and the env var overrides, and removes the shim dir, in
+    [Fun.protect]'s cleanup regardless of how [f] exits. *)
+let with_dev_march_on_path (f : unit -> 'a) : 'a =
   let compiler_exe =
     let exe_dir = Filename.dirname Sys.executable_name in
     Filename.concat exe_dir "../../bin/main.exe"
@@ -1635,20 +1643,11 @@ let test_compiled_run_end_to_end () =
       Filename.concat (Sys.getcwd ()) compiler_exe
     else compiler_exe
   in
-  (* Cmd_build.compile_entry shells out to a bare `march`, resolved off
-     PATH. Shim a private bin dir with a `march` symlink onto the just-built
-     main.exe (it is literally named main.exe, not march) and prepend it. *)
-  let shim_dir = Filename.temp_dir "forge_run_march_shim_" "" in
+  let shim_dir = Filename.temp_dir "forge_march_shim_" "" in
   let march_link = Filename.concat shim_dir "march" in
   Unix.symlink compiler_exe_abs march_link;
   let old_path = try Sys.getenv "PATH" with Not_found -> "" in
   Unix.putenv "PATH" (shim_dir ^ ":" ^ old_path);
-  (* Invoked as a bare `march` through a PATH symlink, the compiler's own
-     exe-relative runtime/stdlib resolution (bin/toolchain.ml) resolves
-     against the SYMLINK's directory, not the real bin/main.exe location --
-     the same failure mode forge/test/test_cap_sandbox.ml's
-     setup_hermetic_toolchain works around. Point it at the already-staged
-     _build/default/{runtime,stdlib} directly via the override env vars. *)
   let staged_runtime_dir =
     Filename.concat (Filename.dirname compiler_exe_abs) "../runtime"
   in
@@ -1663,6 +1662,32 @@ let test_compiled_run_end_to_end () =
   let old_stdlib_dir = Sys.getenv_opt "MARCH_STDLIB" in
   Unix.putenv "MARCH_RUNTIME_DIR" staged_runtime_dir;
   Unix.putenv "MARCH_STDLIB" staged_stdlib_dir;
+  Fun.protect
+    ~finally:(fun () ->
+        Unix.putenv "PATH" old_path;
+        (* Unix.unsetenv is unavailable in this toolchain's Unix module;
+           putenv "" is equivalent here since both toolchain.ml checks treat
+           an empty value as absent (`when d <> ""`). *)
+        Unix.putenv "MARCH_RUNTIME_DIR" (Option.value old_runtime_dir ~default:"");
+        Unix.putenv "MARCH_STDLIB" (Option.value old_stdlib_dir ~default:"");
+        let _ = Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote shim_dir)) in
+        ())
+    f
+
+(** Full end-to-end pipeline: compile a single file through the real LLVM
+    backend and run the resulting binary, exactly the path
+    [forge run --compiled FILE] takes with no forge.toml in scope
+    ([resolve_entry] falls back to [empty_context], so `march` is resolved
+    off PATH by [Cmd_build.compile_entry] -- see [run]'s [Some _] branch in
+    cmd_run.ml).  [test_output_ext_by_target] above only unit-tests the
+    extension helper; this is the one test that actually exercises the
+    temp-file lifecycle (pre-compile removal, [Fun.protect] cleanup on
+    success and on failure) and [exec_output]'s dispatch -- a regression in
+    either would otherwise pass the whole suite untouched. Marked [`Slow]:
+    this pays a real clang compile, so it must not land in the quick
+    suite ([scripts/run-tests.sh -q] skips [`Slow]). *)
+let test_compiled_run_end_to_end () =
+ with_dev_march_on_path (fun () ->
   (* Run from a directory with no forge.toml in scope, so resolve_entry takes
      the no-project fallback (empty_context) -- a genuine no-project
      single-file compiled run, not one riding a project's lib path/FFI. *)
@@ -1691,17 +1716,7 @@ let test_compiled_run_end_to_end () =
   Fun.protect
     ~finally:(fun () ->
         Unix.chdir old_cwd;
-        Unix.putenv "PATH" old_path;
-        (* Unix.unsetenv is unavailable in this toolchain's Unix module;
-           putenv "" is equivalent here since both toolchain.ml checks treat
-           an empty value as absent (`when d <> ""`). *)
-        Unix.putenv "MARCH_RUNTIME_DIR" (Option.value old_runtime_dir ~default:"");
-        Unix.putenv "MARCH_STDLIB" (Option.value old_stdlib_dir ~default:"");
-        let _ =
-          Sys.command
-            (Printf.sprintf "rm -rf %s %s" (Filename.quote shim_dir)
-               (Filename.quote tmpdir))
-        in
+        let _ = Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote tmpdir)) in
         ())
     (fun () ->
        Unix.chdir tmpdir;
@@ -1740,7 +1755,7 @@ let test_compiled_run_end_to_end () =
        let after = forge_run_temp_files () in
        let leftover = List.filter (fun n -> not (List.mem n baseline)) after in
        Alcotest.(check (list string)) "no leftover forge-run-* temp file" []
-         leftover)
+         leftover))
 
 let test_resolve_entry_missing_file () =
   match Cmd_run.resolve_entry ~file:"/definitely/not/here.march" () with
@@ -1890,10 +1905,15 @@ let test_interpreted_file_run_argv_excludes_compiler () =
     first, which [Sys.file_exists]-checks the entry BEFORE any preprocessor
     has run and fails with "entry point not found"; after the fix that call
     is skipped entirely and [Cmd_build.build] itself runs the preprocessor
-    before checking anything, so the same project typechecks clean. Uses
-    `march check` (a real subprocess, resolved off PATH) but no linking, so
-    it stays fast enough for the quick suite. *)
+    before checking anything, so the same project typechecks clean. The
+    project is [type = "app"], so this exercises a real `march check` AND a
+    real compile+link of the generated entry -- both real subprocesses,
+    resolved via [with_dev_march_on_path] onto the just-built dev compiler
+    (never PATH or a globally-installed toolchain: neither exists in CI, and
+    either would silently test a different, possibly stale, compiler).
+    Marked [`Slow] because of the real link. *)
 let test_compiled_project_build_generated_entrypoint () =
+ with_dev_march_on_path (fun () ->
   let tmpdir = Filename.temp_dir "forge_run_genentry_" "" in
   let lib_dir = Filename.concat tmpdir "lib" in
   Project.mkdir_p lib_dir;
@@ -1941,7 +1961,7 @@ entrypoint = ".forge/generated/lib/genentry.march"
          Alcotest.failf
            "compiled project build with a generated entrypoint should succeed \
             once preprocessors run, got: %s" msg
-       | Ok () -> ())
+       | Ok () -> ()))
 
 let test_repl_command_includes_ffi_flags_after_entry () =
   let cmd =
