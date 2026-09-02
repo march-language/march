@@ -3196,7 +3196,28 @@ let analyse ~filename ~src : t =
          @ List.filter_map make_diag (Depot.fk_column_diagnostics depot_schemas ops))
     in
     let diags =
-      (Err.sorted errors |> List.filter_map (diag_to_lsp ~filename))
+      let compiler_diags =
+        Err.sorted errors |> List.filter_map (diag_to_lsp ~filename)
+      in
+      (* The typechecker's own tail-call checker already reports every
+         non-tail recursive call, at the same span, saying the same thing —
+         so emitting the `perf/non-tail-call` insight as well put two
+         near-identical messages in one hover. Keep the compiler's (it is the
+         authority on whether this is an error or a warning, and it honours
+         `@[no_warn_recursion]`) and drop the duplicate. Other perf insights
+         have no compiler counterpart and are unaffected. *)
+      let perf_diags =
+        let covered (d : Lsp.Types.Diagnostic.t) =
+          List.exists (fun (c : Lsp.Types.Diagnostic.t) -> c.range = d.range)
+            compiler_diags
+        in
+        List.filter (fun (d : Lsp.Types.Diagnostic.t) ->
+            match d.code with
+            | Some (`String "perf/non-tail-call") -> not (covered d)
+            | _ -> true)
+          perf_diags
+      in
+      compiler_diags
       @ !dead_code_diags
       @ unused_fn_diags
       @ perf_diags
@@ -4167,18 +4188,42 @@ let completions_at (a : t) ~line ~character =
                           `Assoc [("module", `String m); ("name", `String short)])])
           ())
   in
-  (* Rank by category via sortText: locals < keywords < top-level/stdlib values
-     < types < constructors < interfaces < sigils < auto-imports. *)
+  (* Rank by ORIGIN first, then category.
+     
+     This used to rank by category alone — locals, keywords, values, types,
+     constructors, ... — which put every stdlib function above the user's own
+     types and constructors, because values outrank both. Typing `B` in a
+     module declaring `BTree` and `Branch` therefore offered `Base64.decode`
+     and the whole of `BigInt` first, and the two names actually in scope were
+     below the fold. What you defined in the file you are editing is almost
+     always what you mean, so it goes first regardless of category.
+
+     Match the edited file exactly rather than reusing [span_in_user_file],
+     which also accepts empty / "<unknown>" spans — those belong to builtins,
+     and promoting the entire builtin surface is the bug over again. *)
+  let defined_here name =
+    a.filename <> "" && a.filename <> "<unknown>" &&
+    (match Hashtbl.find_opt a.def_map name with
+     | Some sp -> sp.Ast.file = a.filename
+     | None -> false)
+  in
   let rank s items =
     List.map (fun it -> { it with CompletionItem.sortText = Some s }) items
   in
-  rank "0" local_items
-  @ rank "1" kw_items
-  @ rank "2" var_items
-  @ rank "3" type_items
-  @ rank "4" ctor_items
-  @ rank "5" iface_items
-  @ rank "6" sigil_items
+  (* [cat] is the within-band category digit; the leading digit is the band:
+     0 = defined in this file, 1 = language-level, 2 = imported/stdlib. *)
+  let rank_by_origin cat items =
+    List.map (fun (it : CompletionItem.t) ->
+        let band = if defined_here it.CompletionItem.label then "0" else "2" in
+        { it with CompletionItem.sortText = Some (band ^ cat) }) items
+  in
+  rank "00" local_items
+  @ rank "10" kw_items
+  @ rank_by_origin "2" var_items
+  @ rank_by_origin "3" type_items
+  @ rank_by_origin "4" ctor_items
+  @ rank_by_origin "5" iface_items
+  @ rank "16" sigil_items
   @ auto_items
   ) (* end match island_items *)
   ) (* end match depot_table_items *)
