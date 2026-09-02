@@ -146,3 +146,5 @@ things vacuously, which is exactly how this survived.
 
 Every measurement this file relies on is inlined above; there is no external
 evidence document to chase.
+
+Design for closing the remaining arms: `specs/2026-09-02-postcond-let-self-rebinding-design.md` (2026-09-02).
