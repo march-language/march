@@ -1587,6 +1587,144 @@ let test_output_ext_by_target () =
   Alcotest.(check string) "an unknown target is native" ""
     (Cmd_build.output_ext (Some "aarch64-linux"))
 
+(** Full end-to-end pipeline: compile a single file through the real LLVM
+    backend and run the resulting binary, exactly the path
+    [forge run --compiled FILE] takes with no forge.toml in scope
+    ([resolve_entry] falls back to [empty_context], so `march` is resolved
+    off PATH by [Cmd_build.compile_entry] -- see [run]'s [Some _] branch in
+    cmd_run.ml).  [test_output_ext_by_target] above only unit-tests the
+    extension helper; this is the one test that actually exercises the
+    temp-file lifecycle (pre-compile removal, [Fun.protect] cleanup on
+    success and on failure) and [exec_output]'s dispatch -- a regression in
+    either would otherwise pass the whole suite untouched. Marked [`Slow]:
+    this pays a real clang compile, so it must not land in the quick
+    suite ([scripts/run-tests.sh -q] skips [`Slow]). *)
+let test_compiled_run_end_to_end () =
+  (* Exe-relative, for the same reason as test/test_cap_markers.ml: a
+     CWD-relative path returns 127 under dune's test runner. Two levels up
+     from _build/default/forge/test/ (vs. one for test/test_cap_markers.ml,
+     which sits directly under _build/default/test/) lands on
+     _build/default/bin/main.exe. *)
+  let compiler_exe =
+    let exe_dir = Filename.dirname Sys.executable_name in
+    Filename.concat exe_dir "../../bin/main.exe"
+  in
+  if not (Sys.file_exists compiler_exe) then
+    Alcotest.failf
+      "compiler not found at %s -- build bin/main.exe before running this test"
+      compiler_exe;
+  let compiler_exe_abs =
+    if Filename.is_relative compiler_exe then
+      Filename.concat (Sys.getcwd ()) compiler_exe
+    else compiler_exe
+  in
+  (* Cmd_build.compile_entry shells out to a bare `march`, resolved off
+     PATH. Shim a private bin dir with a `march` symlink onto the just-built
+     main.exe (it is literally named main.exe, not march) and prepend it. *)
+  let shim_dir = Filename.temp_dir "forge_run_march_shim_" "" in
+  let march_link = Filename.concat shim_dir "march" in
+  Unix.symlink compiler_exe_abs march_link;
+  let old_path = try Sys.getenv "PATH" with Not_found -> "" in
+  Unix.putenv "PATH" (shim_dir ^ ":" ^ old_path);
+  (* Invoked as a bare `march` through a PATH symlink, the compiler's own
+     exe-relative runtime/stdlib resolution (bin/toolchain.ml) resolves
+     against the SYMLINK's directory, not the real bin/main.exe location --
+     the same failure mode forge/test/test_cap_sandbox.ml's
+     setup_hermetic_toolchain works around. Point it at the already-staged
+     _build/default/{runtime,stdlib} directly via the override env vars. *)
+  let staged_runtime_dir =
+    Filename.concat (Filename.dirname compiler_exe_abs) "../runtime"
+  in
+  let staged_stdlib_dir =
+    Filename.concat (Filename.dirname compiler_exe_abs) "../stdlib"
+  in
+  if not (Sys.file_exists (Filename.concat staged_runtime_dir "march_runtime.c"))
+  then Alcotest.failf "staged runtime not found at %s" staged_runtime_dir;
+  if not (Sys.file_exists (Filename.concat staged_stdlib_dir "prelude.march"))
+  then Alcotest.failf "staged stdlib not found at %s" staged_stdlib_dir;
+  let old_runtime_dir = Sys.getenv_opt "MARCH_RUNTIME_DIR" in
+  let old_stdlib_dir = Sys.getenv_opt "MARCH_STDLIB" in
+  Unix.putenv "MARCH_RUNTIME_DIR" staged_runtime_dir;
+  Unix.putenv "MARCH_STDLIB" staged_stdlib_dir;
+  (* Run from a directory with no forge.toml in scope, so resolve_entry takes
+     the no-project fallback (empty_context) -- a genuine no-project
+     single-file compiled run, not one riding a project's lib path/FFI. *)
+  let tmpdir = Filename.temp_dir "forge_run_e2e_" "" in
+  let file = Filename.concat tmpdir "hello.march" in
+  let oc = open_out file in
+  output_string oc
+    (String.concat "\n"
+       [ "mod ForgeRunE2e do";
+         "  needs IO.Console";
+         "";
+         "  fn main(_cap : Cap(IO.Console)) : () do";
+         "    println(\"forge-run-e2e-ok\")";
+         "  end";
+         "end";
+         "" ]);
+  close_out oc;
+  let old_cwd = Sys.getcwd () in
+  let forge_run_temp_files () =
+    Sys.readdir (Filename.get_temp_dir_name ())
+    |> Array.to_list
+    |> List.filter (fun n ->
+        String.length n >= 10 && String.sub n 0 10 = "forge-run-")
+  in
+  let baseline = forge_run_temp_files () in
+  Fun.protect
+    ~finally:(fun () ->
+        Unix.chdir old_cwd;
+        Unix.putenv "PATH" old_path;
+        (* Unix.unsetenv is unavailable in this toolchain's Unix module;
+           putenv "" is equivalent here since both toolchain.ml checks treat
+           an empty value as absent (`when d <> ""`). *)
+        Unix.putenv "MARCH_RUNTIME_DIR" (Option.value old_runtime_dir ~default:"");
+        Unix.putenv "MARCH_STDLIB" (Option.value old_stdlib_dir ~default:"");
+        let _ =
+          Sys.command
+            (Printf.sprintf "rm -rf %s %s" (Filename.quote shim_dir)
+               (Filename.quote tmpdir))
+        in
+        ())
+    (fun () ->
+       Unix.chdir tmpdir;
+       (* exec_output shells out via Sys.command, which inherits this
+          process's real stdout fd -- redirect it to a file around the call
+          to capture the program's own printed output. *)
+       flush stdout;
+       let capture = Filename.temp_file "forge_run_e2e_stdout_" ".tmp" in
+       let saved_stdout = Unix.dup Unix.stdout in
+       let out_fd =
+         Unix.openfile capture [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC ] 0o600
+       in
+       Unix.dup2 out_fd Unix.stdout;
+       Unix.close out_fd;
+       let result =
+         try Cmd_run.run ~compiled:true ~file:"hello.march" ~args:[] ()
+         with e ->
+           flush stdout;
+           Unix.dup2 saved_stdout Unix.stdout;
+           Unix.close saved_stdout;
+           raise e
+       in
+       flush stdout;
+       Unix.dup2 saved_stdout Unix.stdout;
+       Unix.close saved_stdout;
+       let ic = open_in capture in
+       let n = in_channel_length ic in
+       let out = really_input_string ic n in
+       close_in ic;
+       (try Sys.remove capture with Sys_error _ -> ());
+       (match result with
+        | Error msg -> Alcotest.failf "compiled single-file run failed: %s" msg
+        | Ok () -> ());
+       Alcotest.(check bool) "program's own stdout was captured" true
+         (contains out "forge-run-e2e-ok");
+       let after = forge_run_temp_files () in
+       let leftover = List.filter (fun n -> not (List.mem n baseline)) after in
+       Alcotest.(check (list string)) "no leftover forge-run-* temp file" []
+         leftover)
+
 let test_resolve_entry_missing_file () =
   match Cmd_run.resolve_entry ~file:"/definitely/not/here.march" () with
   | Ok _ -> Alcotest.fail "a missing file must not resolve"
@@ -1829,6 +1967,8 @@ let () =
         test_repl_command_bare_includes_ffi_flags;
       Alcotest.test_case "output extension follows the target" `Quick
         test_output_ext_by_target;
+      Alcotest.test_case "compiled single-file run: real compile, real run" `Slow
+        test_compiled_run_end_to_end;
     ];
     "search_index_cache", [
       Alcotest.test_case "stale version cache is rebuilt" `Quick
