@@ -42,6 +42,15 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- A type mismatch between two types that print with the same name no longer
+  says "expected `Ops` but got `Ops`". A record type declared with type
+  parameters is reached with zero arguments in some positions (a `proof cap X
+  with T` clause, for one), and both sides then rendered as the bare declared
+  name. The record side is now spelt out structurally, and when the name is a
+  parameterised record the note says so — "`Ops` is declared with 1 type
+  parameter (`Ops(m)`), but here it is used with none" — instead of blaming a
+  global-namespace collision that isn't there.
+
 - Multi-head function heads now count as structural recursion, so an ordinary
   recursive tree walk written with function heads compiles. Desugar merges
   multiple parameters into a tuple scrutinee, which the tail-call checker did

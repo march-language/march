@@ -74,13 +74,43 @@ let report_mismatch env ~span ?(occurs_violation = false) ~reason expected found
      Convention: `expected` = inferred type of the expression (what was provided);
                  `found`    = required type from context (what was needed).
      Headline uses standard compiler phrasing: "expected <required> but got <provided>". *)
-  let exp_str = format_ty_for_error expected in
-  let fnd_str = format_ty_for_error found in
+  (* Two sides can print identically while being structurally distinct: a
+     [TCon] with no arguments prints bare, and a [TRecord] prints as the
+     declared name recovered from its field signature.  A parameterised record
+     type referenced with zero type arguments therefore renders exactly like a
+     literal of that same type, giving the useless "expected `Ops` but got
+     `Ops`".  When that happens, spell the record side out structurally so the
+     headline actually says something. *)
+  let structurally_distinct =
+    match repr expected, repr found with
+    | TCon (n1, a1), TCon (n2, a2) ->
+      n1 <> n2 || List.length a1 <> List.length a2
+    | TCon _, TRecord _ | TRecord _, TCon _ -> true
+    | _ -> false
+  in
+  let same_printed =
+    structurally_distinct && pp_ty (repr expected) = pp_ty (repr found)
+  in
+  let render t =
+    match repr t with
+    | TRecord ((_ :: _) as flds) when same_printed ->
+      "{ " ^ String.concat ", "
+               (List.map (fun (n, ft) -> n ^ " : " ^ pp_ty ft) flds) ^ " }"
+    | _ -> pp_ty t
+  in
+  let pretty t =
+    if same_printed then render t else pp_ty_pretty ~indent:4 ~width:60 t
+  in
+  let fmt t =
+    if same_printed then "`" ^ render t ^ "`" else format_ty_for_error t
+  in
+  let exp_str = fmt expected in
+  let fnd_str = fmt found in
   let headline =
-    if String.length (pp_ty expected) > 50 || String.length (pp_ty found) > 50 then
+    if String.length (render expected) > 50 || String.length (render found) > 50 then
       Printf.sprintf "expected:\n    %s\nbut got:\n    %s"
-        (String.concat "\n    " (String.split_on_char '\n' (pp_ty_pretty ~indent:4 ~width:60 found)))
-        (String.concat "\n    " (String.split_on_char '\n' (pp_ty_pretty ~indent:4 ~width:60 expected)))
+        (String.concat "\n    " (String.split_on_char '\n' (pretty found)))
+        (String.concat "\n    " (String.split_on_char '\n' (pretty expected)))
     else
       render_parts
         [ MPText "expected "; MPText fnd_str;
@@ -165,7 +195,9 @@ let report_mismatch env ~span ?(occurs_violation = false) ~reason expected found
          Did you mean to pass this as a callback?" ]
     | _ -> []
   in
-  (* Same-printed-name disambiguation.
+  (* Same-printed-name explanation.  Two shapes reach here: a genuine
+     global-namespace collision, and (commoner) a parameterised record type
+     referenced with zero type arguments.
      March has a single global type namespace, so a user-defined type can share
      its printed name with a stdlib type (e.g. local `Config` vs `Config` from the
      standard library).  When that happens unification fails but both sides render
@@ -175,15 +207,23 @@ let report_mismatch env ~span ?(occurs_violation = false) ~reason expected found
      constructor name, argument count) rather than exact identity so we only fire
      when the types genuinely differ despite printing alike. *)
   let same_name_note =
-    let pe = pp_ty (repr expected) and pf = pp_ty (repr found) in
-    let structurally_distinct =
-      match repr expected, repr found with
-      | TCon (n1, a1), TCon (n2, a2) ->
-        n1 <> n2 || List.length a1 <> List.length a2
-      | TCon _, TRecord _ | TRecord _, TCon _ -> true
-      | _ -> false
-    in
-    if pe = pf && structurally_distinct then
+    let pe = pp_ty (repr expected) in
+    if not same_printed then []
+    else
+      (* The commonest way to get here is not a collision at all: a record type
+         declared WITH type parameters, referenced somewhere that supplies
+         none.  Say that instead of blaming the namespace. *)
+      match StrMap.find_opt pe env.records with
+      | Some ((_ :: _) as params, _) ->
+        [ Printf.sprintf
+            "`%s` is declared with %d type parameter%s (`%s(%s)`), but here it \
+             is used with none. A bare `%s` never unifies with `%s(%s)`; \
+             supply the argument, or declare the type without parameters."
+            pe (List.length params)
+            (if List.length params = 1 then "" else "s")
+            pe (String.concat ", " params)
+            pe pe (String.concat ", " params) ]
+      | _ ->
       [ Printf.sprintf
           "Two distinct types are both named `%s` — they print the same but have \
            different definitions. March has a single global type namespace, so a \
@@ -192,7 +232,6 @@ let report_mismatch env ~span ?(occurs_violation = false) ~reason expected found
            Rename one of them (e.g. `App%s`), or qualify/avoid the import that \
            brings the other `%s` into scope."
           pe pe pe ]
-    else []
   in
   let labels =
     match reason with
