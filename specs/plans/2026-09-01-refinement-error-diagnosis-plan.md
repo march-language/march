@@ -1395,6 +1395,19 @@ dune build --root . test/run_compiler.exe && ./_build/default/test/run_compiler.
 
 Expected: FAIL — the warning quotes the panic but suggests no signature.
 
+**Second correction (Task 7 review).** The snippet below selects
+`suggest`'s result with `| r :: _ ->`. That is wrong: `suggest` matches its
+`~target` by qualified name OR ANY DOTTED SUFFIX (so `forge refine chunks`
+finds `Text.Split.chunks`), and an entry-file top-level function's qualified
+name is unqualified, so `~target:"go"` returns one result per `*.go` in the
+program and the head is whichever declared first. Reproduced: a nested
+`Inner.go(ys : Int)`'s `{Int | _ != 0}` was attached to the top-level
+`go(ys : List(Int))`, and `forge fix` rewrote the base type — a
+source-corrupting auto-fix. Select by identity: `List.find_opt (fun r ->
+r.rs_fn = qname)`, declining on no exact match. This is the third time a
+short-name collision has bitten this plan (Task 5 C1 was `call_fn` by bare
+name); any lookup of a function by name must be qualified and exact.
+
 **Correction (Task 7 implementation).** The epilogue placement below is
 impossible: `precond_infer.ml:38` is `module RC = Refine_check`, so
 `Refine_check.check_module` cannot call `Precond_infer.suggest` without a
