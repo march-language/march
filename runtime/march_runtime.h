@@ -522,6 +522,8 @@ void march_actor_broadcast_migrate(uint32_t dispatch_name_id,
 void    march_kill(void *actor);
 int64_t march_is_alive(void *actor);
 /* Register an actor with the scheduler; returns actor unchanged. */
+void    march_set_actor_caps(void *actor, void *caps);
+void   *march_actor_caps(void *actor);
 void   *march_spawn(void *actor);
 /* Internal compiler/runtime handshake for supervise-block children: assign a
  * Pid/meta now, but do not schedule the actor loop until register_child has
