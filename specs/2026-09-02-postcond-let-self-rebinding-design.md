@@ -1,7 +1,9 @@
 # Closing the postcondition-`let` self-rebinding hole
 
-Filed 2026-09-02. Status: design approved, not implemented.
-Open item: `specs/todos/2026-08-04-postcond-let-self-rebinding-holes.md`.
+Filed 2026-09-02. Status: landed 2026-09-02 (`ebdebca6`, `4c1b090e`).
+Landed notes, including the corpus measurements and the record arm's status as
+a forward guard rather than a live reproduction:
+`specs/progress/2026-08-04-postcond-let-self-rebinding-holes.md`.
 
 ## Problem
 
