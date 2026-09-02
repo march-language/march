@@ -13599,6 +13599,85 @@ let test_entry_qual_annotated_same_tvar_ok () =
    position".  Reported in the wild as: a module declaring an `extern` named
    `length` (prelude's `length` uses a local helper `fn go`) plus a top-level
    `fn go` calling it. *)
+(* Multi-head function heads must count as structural recursion, exactly as the
+   equivalent explicit `match` does. Desugar merges multi-head clauses into
+   `match ($a0, $a1) do (C(l,v,r), t) -> ...`, and the tuple scrutinee used to
+   defeat the "is the scrutinee a parameter?" test, so every arm binder lost
+   its structurally-smaller status and ordinary tree recursion became a hard
+   error in head form while compiling fine as a `match`. The two spellings are
+   asserted together: whatever the verdict, it must be the SAME one. *)
+let test_tce_multi_head_matches_explicit_match () =
+  let head_form = typecheck {|mod T do
+    type BTree = Tip | Branch(BTree, Int, BTree)
+    fn has_val(Tip, _t : Int) : Bool do false end
+    fn has_val(Branch(l, v, r), t : Int) : Bool do
+      v == t || has_val(l, t) || has_val(r, t)
+    end
+  end|} in
+  let match_form = typecheck {|mod T do
+    type BTree = Tip | Branch(BTree, Int, BTree)
+    fn has_val(x : BTree, t : Int) : Bool do
+      match x do
+        Tip -> false
+        Branch(l, v, r) -> v == t || has_val(l, t) || has_val(r, t)
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "explicit match form: accepted"
+    false (has_error_with match_form "not in tail position");
+  Alcotest.(check bool) "multi-head form: accepted the same way"
+    false (has_error_with head_form "not in tail position")
+
+(* Only ONE parameter used to work, because the desugared scrutinee is then a
+   bare `EVar` rather than a tuple. Pin the multi-parameter case directly. *)
+let test_tce_multi_head_with_extra_param () =
+  let ctx = typecheck {|mod T do
+    type BTree = Tip | Branch(BTree, Int, BTree)
+    fn g(Branch(l, v, r), t : Int) : Int do v + g(l, t) end
+  end|} in
+  Alcotest.(check bool) "destructuring param alongside a plain one: no error"
+    false (has_error_with ctx "not in tail position")
+
+(* A whole-value arm binder is NOT smaller, but it IS another name for the
+   matched value, so ARITHMETIC reduction on it still decreases. `fn fib(n)`
+   merges to `match $a0 do n -> fib(n - 1) + fib(n - 2)`: rejecting `fib(n)`
+   must not also reject `fib(n - 1)`. Tightening the smaller-set without
+   keeping these in the parameter set broke exactly this, and the conformance
+   corpus (`p15_multi_head_fn_merge.march`) caught it. *)
+let test_tce_arithmetic_on_whole_value_binder_still_ok () =
+  let ctx = typecheck {|mod T do
+    fn fib(0) do 0 end
+    fn fib(1) do 1 end
+    fn fib(n) do fib(n - 1) + fib(n - 2) end
+  end|} in
+  Alcotest.(check bool) "arithmetic reduction on a whole-value binder: accepted"
+    false (has_error_with ctx "not in tail position")
+
+(* Soundness, and the reason the fix uses sub-component binders rather than all
+   arm binders: a binder that names the WHOLE scrutinee is not smaller, and
+   recursing on it does not terminate. This was accepted before the fix. *)
+let test_tce_whole_value_arm_binder_is_not_smaller () =
+  let ctx = typecheck {|mod T do
+    fn loopy(x : Int) : Int do
+      match x do
+        y -> 1 + loopy(y)
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "recursing on a whole-value arm binder is rejected"
+    true (has_error_with ctx "not in tail position")
+
+(* The paired-position rule must not leak smallness across tuple positions:
+   `t` is bound to the whole of the second parameter, so recursing on it is
+   not decreasing even though the first position destructures. *)
+let test_tce_tuple_position_smallness_does_not_leak () =
+  let ctx = typecheck {|mod T do
+    type BTree = Tip | Branch(BTree, Int, BTree)
+    fn h(Branch(_l, v, _r), t : BTree) : Int do v + h(t, t) end
+  end|} in
+  Alcotest.(check bool) "smallness does not leak to a whole-value tuple position"
+    true (has_error_with ctx "not in tail position")
+
 let test_tce_local_helper_shadow_no_false_recursion () =
   (* `helper`'s local `fn go` is NOT the top-level `go`: no edge, no SCC, and
      so `helper(m)` inside `go` is not a recursive call at all. *)
@@ -15799,6 +15878,11 @@ let compiler_suites =
           Alcotest.test_case "nested mod, non-tail self-recursion: errors"          `Quick test_tce_nested_mod_non_tail_recursion_errors;
           Alcotest.test_case "nested mod, mutual recursion: errors"                 `Quick test_tce_nested_mod_mutual_recursion_errors;
           Alcotest.test_case "doubly-nested mod, non-tail recursion: errors"        `Quick test_tce_doubly_nested_mod_non_tail_recursion_errors;
+          Alcotest.test_case "multi-head == explicit match verdict"                `Quick test_tce_multi_head_matches_explicit_match;
+          Alcotest.test_case "multi-head with an extra plain param"                `Quick test_tce_multi_head_with_extra_param;
+          Alcotest.test_case "arithmetic on whole-value binder still ok"          `Quick test_tce_arithmetic_on_whole_value_binder_still_ok;
+          Alcotest.test_case "whole-value arm binder is not smaller"               `Quick test_tce_whole_value_arm_binder_is_not_smaller;
+          Alcotest.test_case "tuple-position smallness does not leak"              `Quick test_tce_tuple_position_smallness_does_not_leak;
           Alcotest.test_case "nested mod, structural recursion: no error"           `Quick test_tce_nested_mod_structural_recursion_no_error;
           Alcotest.test_case "nested mod, tail recursion: no error"                 `Quick test_tce_nested_mod_tail_recursion_no_error;
           Alcotest.test_case "nested mod, `no_warn_recursion`: no error"            `Quick test_tce_nested_mod_no_warn_recursion_opts_out;
