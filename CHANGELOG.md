@@ -13,6 +13,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- Completions now offer what you defined in the file you are editing before
+  anything from the standard library. Ranking was by category alone — locals,
+  keywords, values, types, constructors — so every stdlib function outranked
+  your own types and constructors, and typing `B` in a module declaring
+  `BTree`/`Branch` offered all of `Base64` and `BigInt` first. Ranking is now
+  by origin first, then category.
+
 - Typing in the editor no longer silently rewrites the same identifier
   elsewhere in the file. The LSP answered `textDocument/linkedEditingRange`
   with a symbol's definition *and every use*, but that request is not a
