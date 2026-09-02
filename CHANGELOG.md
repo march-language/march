@@ -453,6 +453,27 @@ git log is authoritative for exact commits.
   silently, and both the REPL and the CLI sweep stale staging files left by
   processes that crashed mid-write.
 
+### Documentation
+
+- **`specs/docker_images.md` no longer claims `march --compile` emits a static
+  binary.** It said a compiled March program "can be copied into `scratch` or a
+  distroless image, producing a deploy image of a few megabytes with zero
+  runtime dependencies", and built its whole recommended deploy pattern on that.
+  In fact the link command passes no `-static` on any path: every compiled
+  program carries `DT_NEEDED` entries for libssl, libcrypto, libz, libblake3
+  and (host-dependent) libzstd/libbrotli, plus libucontext on musl — verified on
+  `alpine:3.21` aarch64 and, identically, on macOS arm64. `libblake3` is the
+  worst of them: March's own release workflow compiles it from source because
+  there is no package to install, so a user's program depended on a library they
+  had no packaged way to obtain. The spec now carries a table of what is
+  actually linked and where each entry comes from, a deploy pattern with a real
+  base image and package list, and an explicit note that `scratch` and
+  `distroless-static` do not work today. Static output is filed as its own item
+  (`specs/todos/2026-09-02-march-compile-output-is-not-static.md`), with
+  acceptance criteria that require running the artifact in a bare container.
+  This is separate from the release-archive static defect, which concerns the
+  distributed `march`/`forge` binaries rather than the output of `--compile`.
+
 ## [0.3.0] - 2026-08-23
 
 ### Added
