@@ -561,6 +561,16 @@ let string_byte_length_is_builtin : bool ref = ref false
    `List.length` is in scope. *)
 let stdlib_source_files : string list ref = ref []
 
+(* The single predicate for "this span came from the standard library's own
+   sources".  Defined HERE rather than beside its first caller because it now
+   has two very different callers at two different depths: the measure-alias
+   gates in [Refine_check] (see the long comment there for why the identity
+   must not be inferred from the path's shape), and the call-site PROMOTION in
+   [Refine_call], which must decline a span the user can never see a
+   diagnostic for.  Two copies of this test would be two things to keep in
+   agreement; there is one. *)
+let is_stdlib_source_file (f : string) : bool = List.mem f !stdlib_source_files
+
 (* ── Why an alias was withdrawn ────────────────────────────────────────────
    The three gates above are unit-global, syntactic, and default to
    SUPPRESSING — all correct, and none of it changes here.  What a withdrawal

@@ -468,9 +468,19 @@ let print_refine_report ~filename ~user_files () =
     let f = span.March_ast.Ast.file in
     f = filename || f = "" || f = "<unknown>" || List.mem f user_files
   in
+  (* Keyed on [Obligation.reason_name] (a payload-free slug), NOT the whole
+     [reason] value: [Alias_withdrawn] and [Unconstrained_subject] both carry
+     a NAME in their payload (the withdrawn spelling; the unconstrained
+     symbol), so keying on the raw variant makes every distinct payload its
+     own bucket — one `skipped (unconstrained-subject)` line per distinct
+     variable name instead of one line for the cause.  [reason_name] exists
+     precisely to avoid this (see its own comment in obligation.ml); [Alias_
+     withdrawn]'s doc comment predicted the bug and judged it cosmetic for a
+     rare cause, which is wrong for the far more common
+     [Unconstrained_subject] — this fixes both at once. *)
   let summarize obligations =
     let proved = ref 0 and violated = ref 0 and trusted = ref 0 in
-    let skips = Hashtbl.create 8 in
+    let skips : (string, int) Hashtbl.t = Hashtbl.create 8 in
     List.iter
       (fun (o : March_refinecheck.Obligation.t) ->
         match o.verdict with
@@ -478,9 +488,10 @@ let print_refine_report ~filename ~user_files () =
         | March_refinecheck.Obligation.Violated -> incr violated
         | March_refinecheck.Obligation.Trusted -> incr trusted
         | March_refinecheck.Obligation.Skipped r ->
-          Hashtbl.replace skips r (1 + Option.value ~default:0 (Hashtbl.find_opt skips r)))
+          let name = March_refinecheck.Obligation.reason_name r in
+          Hashtbl.replace skips name (1 + Option.value ~default:0 (Hashtbl.find_opt skips name)))
       obligations;
-    (!proved, !violated, !trusted, Hashtbl.fold (fun r n acc -> (r, n) :: acc) skips [])
+    (!proved, !violated, !trusted, Hashtbl.fold (fun name n acc -> (name, n) :: acc) skips [])
   in
   (* A postcondition (a function's own return type) and a precondition (a
      callee's declared param type, checked at the call site) are the same
@@ -497,8 +508,7 @@ let print_refine_report ~filename ~user_files () =
     Printf.eprintf "refinement obligations (%s): %d proved, %d violated, %d trusted, %d skipped\n"
       label proved violated trusted skipped;
     List.iter
-      (fun (r, n) ->
-        Printf.eprintf "  skipped (%s): %d\n" (March_refinecheck.Obligation.reason_name r) n)
+      (fun (name, n) -> Printf.eprintf "  skipped (%s): %d\n" name n)
       (List.sort compare skips);
     Printf.eprintf "  by kind: %d precondition, %d postcondition, %d division\n"
       (count_kind March_refinecheck.Obligation.Precondition obligations)
@@ -1054,6 +1064,15 @@ let run_test_cmd args =
     March_refinecheck.No_alloc.check_module errors desugared;
     (* Cap-infer: emit hints at call sites missing a `needs` declaration. *)
     March_refinecheck.Cap_infer.check_module errors desugared;
+    (* A promoted call-site failure (a requirement the enclosing function
+       propagates without declaring) ends in the signature to write, not the
+       panic to fear: infer the precondition that discharges it and attach it as
+       a machine-applicable fix. Costs nothing when nothing was promoted, and
+       must run LAST among the refinement passes for the same reason the
+       suggestion printers do — every probe refills the per-call-site verdict
+       index from a hypothesis module. Before [shutdown]: the probes need the
+       solver. *)
+    March_refinecheck.Precond_infer.attach_promoted_fixes errors desugared;
     (* Solving scope ends here: reap the shared z3 child now rather than
        holding an idle solver process for the rest of the run. *)
     March_refine.Refine.shutdown ();
@@ -1759,6 +1778,15 @@ let compile filename =
   March_refinecheck.No_alloc.check_module errors desugared;
   (* Cap-infer: emit hints at call sites missing a `needs` declaration. *)
   March_refinecheck.Cap_infer.check_module errors desugared;
+  (* A promoted call-site failure (a requirement the enclosing function
+     propagates without declaring) ends in the signature to write, not the
+     panic to fear: infer the precondition that discharges it and attach it as
+     a machine-applicable fix. Costs nothing when nothing was promoted, and
+     must run LAST among the refinement passes for the same reason the
+     suggestion printers do — every probe refills the per-call-site verdict
+     index from a hypothesis module. Before [shutdown]: the probes need the
+     solver. *)
+  March_refinecheck.Precond_infer.attach_promoted_fixes errors desugared;
   (* Solving scope ends here: reap the shared z3 child now rather than holding
      an idle solver for the rest of the run (eval servers live indefinitely).
      --check-migration below lazily respawns; its child is reaped by at_exit. *)

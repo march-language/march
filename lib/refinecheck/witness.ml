@@ -449,7 +449,52 @@ let blocked_name : string -> bool =
 type exec_result =
   | Ret of V.value
   | Panicked of string
-  | Unconfirmable  (* blocked effect, fuel out, eval error, missing fn, … *)
+      (** A USER-level panic, carrying the user's own message with the
+          builtin's marker prefix stripped — see [user_panic_message]. *)
+  | Unconfirmable  (* blocked effect, fuel out, evaluator error, missing fn, … *)
+
+(* Is this [Eval_error] message a user panic, and if so what did the user
+   write?
+
+   [Eval_error] is NOT the panic exception.  It is the evaluator's general
+   failure channel: [Eval_prim.eval_error] raises it, and ~860 internal sites
+   across `lib/eval/` use it for unbound variables, arity mismatches, desugar
+   residue ("EResultRef reached evaluator") and every other internal
+   limitation.  Confirming one of those as "the program panics" would report a
+   failure in a program that has none — a false positive with nothing to do
+   with the model.
+
+   The four user-facing panic builtins are distinguished by a message prefix
+   they alone produce (`lib/eval/eval_builtins.ml`, the `panic` / `panic_` /
+   `todo_` / `unreachable_` entries); no other [eval_error] call site in
+   `lib/eval/` begins with one.  That is a soft contract — a reformat of those
+   entries would silently turn every user panic into a decline — so the unit
+   suite pins BOTH directions: a real `panic("…")` confirms with the user's
+   text, and a provoked internal error declines.
+
+   Deliberately NOT classified as panics: [Eval.Match_failure] and
+   [Eval.Assert_failure] (declared in `lib/eval/eval.ml`, not in `eval_prim.ml`
+   which declares only [Eval_error] and [Blocked_builtin]), which are separate
+   exceptions and genuinely ARE user-level failures.  They keep declining (via the catch-all below).  That
+   is a coverage gap, not a soundness one, and closing it means deciding
+   whether "let binding pattern failed: …" is a requirement a caller can be
+   asked to declare — a Task 6 question, not this one. *)
+let user_panic_message (msg : string) : string option =
+  let strip p =
+    let lp = String.length p in
+    if String.length msg >= lp && String.sub msg 0 lp = p then
+      Some (String.sub msg lp (String.length msg - lp))
+    else None
+  in
+  match strip "panic: " with
+  | Some m -> Some m
+  | None ->
+    (match strip "todo: " with
+     | Some m -> Some m
+     | None ->
+       (match strip "unreachable: " with
+        | Some m -> Some m
+        | None -> if msg = "panic" then Some "panic" else None))
 
 (* Run [f] with the guard installed and [per_call_fuel] reductions available,
    charging the module-wide [wall_budget].  Restores both hooks on every
@@ -477,7 +522,13 @@ let with_harness (f : unit -> 'a) : ('a, exec_result) result =
         with
         | March_eval.Eval.Yield -> Error Unconfirmable
         | March_eval.Eval_prim.Blocked_builtin _ -> Error Unconfirmable
-        | March_eval.Eval_prim.Eval_error msg -> Error (Panicked msg)
+        | March_eval.Eval_prim.Eval_error msg ->
+          (* Only a USER panic is a confirmable failure; every other
+             [Eval_error] is an evaluator limitation.  See
+             [user_panic_message]. *)
+          (match user_panic_message msg with
+           | Some m -> Error (Panicked m)
+           | None -> Error Unconfirmable)
         | _ -> Error Unconfirmable)
   end
 
@@ -531,6 +582,77 @@ let call_fn ~(name : string) ~(args : V.value list) : exec_result =
 (* =================================================================
    §6  Confirmation: admissibility + execute + check
    ================================================================= *)
+
+(* A parameter type is *witness-safe* when [admissible] genuinely decides it.
+
+   [admissible] pattern-matches a single [A.TyRefine] at the top of the
+   declared type; a refinement anywhere else is silently unchecked.  Three
+   such places exist and all three parse today: a type argument
+   (`List({Int | _ > 0})`), a record field (`type Box = { v : {Int | _ > 0} }`)
+   and a [TyLinear] wrapper around the outer refinement (which [strip_refine]
+   sees through and [admissible] does not).  A zero-filled decode may then
+   produce a value the DECLARED type excludes, and confirming a panic on it
+   would report a requirement the caller never had.
+
+   Stated precisely, because the obvious phrasing overclaims: the checker does
+   not enforce nested refinements TODAY — `g([0, -5])` against
+   `List({Int | _ > 0})` passes `--check` in silence — so such a value is not
+   currently unconstructible, and this walk is defence-in-depth rather than a
+   live bug fix.  It closes the hole the moment nested enforcement lands, at
+   the cost of declining a witness (return-contract or call-site promotion)
+   whose parameters carry one.  Shared by [confirm_enumerative],
+   [confirm_post] and [confirm_precond_reachable].
+
+   So the walk rejects any refinement below the outermost position, and treats
+   an unknown type name as unsafe — an unregistered name may expand to
+   anything.
+
+   A type VARIABLE carries no refinement and is allowed here; a parameter
+   actually typed by one is declined further down by [decode_model], which has
+   no zero value for it. *)
+let rec refinement_free ~(seen : string list) (ty : A.ty) : bool =
+  match ty with
+  | A.TyRefine _ -> false
+  | A.TyLinear (_, t) -> refinement_free ~seen t
+  | A.TyVar _ | A.TyArrow _ | A.TyNat _ | A.TyNatOp _ | A.TyChan _ -> true
+  | A.TyTuple ts -> List.for_all (refinement_free ~seen) ts
+  | A.TyRecord fs -> List.for_all (fun (_, t) -> refinement_free ~seen t) fs
+  | A.TyCon (n, args) ->
+    List.for_all (refinement_free ~seen) args
+    && named_refinement_free ~seen n.A.txt
+
+(* A REGISTERED definition always wins over the built-in allowlist below: a
+   user is free to declare `type Option = Weird({Int | _ > 0})`, and
+   [zero_value] would build `Weird(0)` from that definition, so answering from
+   the allowlist would declare safe a type whose own definition is refined. *)
+and named_refinement_free ~(seen : string list) (name : string) : bool =
+  (* A recursive type is being proved by the frame that pushed it. *)
+  if List.mem name seen then true
+  else
+    let seen' = name :: seen in
+    match Hashtbl.find_opt type_ctors name with
+    | Some ctors ->
+      List.for_all
+        (fun (_, ats) -> List.for_all (refinement_free ~seen:seen') ats)
+        ctors
+    | None ->
+      (match Hashtbl.find_opt record_fields name with
+       | Some fs -> List.for_all (fun (_, t) -> refinement_free ~seen:seen' t) fs
+       | None ->
+         (* Not declared in this program: the primitives and the containers
+            [zero_value] builds structurally, whose arguments the caller
+            already walked.  Anything else may expand to anything. *)
+         (match name with
+          | "Int" | "Float" | "Bool" | "String" | "Char" | "Bytes" | "Unit"
+          | "List" | "Option" -> true
+          | _ -> false))
+
+(* [admissible] decides this parameter, and nothing below it hides a
+   refinement it cannot see. *)
+let witness_safe_param ((_, ty) : string * A.ty) : bool =
+  match ty with
+  | A.TyRefine (base, _, _) -> refinement_free ~seen:[] base
+  | t -> refinement_free ~seen:[] t
 
 (* Every parameter whose declared type carries a refinement must satisfy it —
    a "witness" the contract already excludes would blame the caller for an
@@ -745,6 +867,7 @@ let confirm_enumerative ~(fn_name : string)
   | None -> None
   | Some params ->
     if params = [] then None
+    else if not (List.for_all witness_safe_param params) then None
     else
       let run cand =
         if admissible ~params cand then
@@ -873,6 +996,220 @@ let render_entries (entries : (string * V.value) list) : string option =
   else None
 
 (* =================================================================
+   §8b  Reachable call-site precondition confirmation
+
+   [confirm_precond] above validates a candidate against the RECORDED path
+   facts.  That is sound where the solver already settled the verdict — the
+   witness is illustrative decoration on a proof.  It is unsound as a
+   PROMOTION gate for the undecided bucket, and unsound exactly where that
+   bucket is most populated: undecidedness there is caused by a MISSING fact,
+   and a missing fact is by definition not in [path] to be checked against, so
+   a candidate violating it sails through.  `stdlib/list.march`'s `last` is the
+   worked case: `t = Nil` satisfies every recorded fact in the `Cons(_, t)`
+   arm, and the arm exclusion that rules it out is precisely the fact the
+   checker never derived.
+
+   The gate below never assumes reachability, it demonstrates it: run the
+   ENCLOSING function from its entry on arguments the model assigns to that
+   function's own parameters, and confirm only on an actual panic.  See
+   specs/2026-09-01-refinement-error-diagnosis-design.md §2.
+
+   Placed here rather than beside [violates_post] because it consumes
+   [annotated_params], [shrink], [battery] and [free_vars], all defined below
+   that point.  (Names, not line numbers: the numbers rot on every edit.)
+   ================================================================= *)
+
+(* One clause parameter as [annotated_params] wants it. *)
+let clause_param (fp : A.fn_param) : string * A.ty option =
+  match fp with
+  | A.FPNamed p | A.FPDefault (p, _) -> (p.A.param_name.A.txt, p.A.param_ty)
+  (* A pattern head binds no name we could hand an argument to; the [None]
+     type makes [annotated_params] decline. *)
+  | A.FPPat _ -> ("_", None)
+
+(* The name under which [fn] is BOUND in the interpreter environment.
+
+   [call_fn] resolves by name and [lookup_fn] prefers an EXACT bare-name
+   binding, so handing it `fn.fn_name.txt` runs the wrong definition whenever
+   the enclosing function lives in a nested `mod` and a top-level function
+   shares its short name:
+
+     mod P7 do
+       fn f(ys : List(Int)) : Int do panic("outer boom") end
+       mod Inner do fn f(ys : List(Int)) : Int do 0 end end
+     end
+
+   `Inner.f` returns 0 on every input, but the bare lookup finds the
+   top-level `f` and reports its panic against `Inner.f`.  That is exactly the
+   failure this gate exists to prevent — a confirmation for a function that
+   cannot reach the panic — and it is the NORMAL shape of the AST, not a
+   contrivance: [Refine_check] walks [A.DMod] (so a nested function really is
+   the enclosing one) and prepends the whole stdlib as [A.DMod]s.
+
+   So resolve by IDENTITY instead: find where this very [fn_def] sits in the
+   module tree and qualify it with that path, which is how [Eval]'s [DMod] arm
+   exports nested members.  Not found, or found twice, means we cannot say
+   which definition would run — decline. *)
+let qualified_fn_name (fn : A.fn_def) : string option =
+  match !current_module with
+  | None -> None
+  | Some m ->
+    let found = ref [] in
+    let rec walk prefix decls =
+      List.iter
+        (function
+          | A.DFn (fd, _) when fd == fn ->
+            found := (prefix ^ fd.A.fn_name.A.txt) :: !found
+          | A.DMod (name, _, inner, _) -> walk (prefix ^ name.A.txt ^ ".") inner
+          | _ -> ())
+        decls
+    in
+    walk "" m.A.mod_decls;
+    (match !found with [ q ] -> Some q | _ -> None)
+
+(* Confirm a call-site precondition failure by DEMONSTRATING reachability:
+   run the enclosing function on arguments the model assigns to its own
+   parameters and observe an actual panic.  Returns the shrunk argument
+   assignment paired with the user's panic message, or [None].
+
+   [pred]/[binder]/[arg] describe the obligation exactly as [confirm_precond]
+   takes them: the callee's precondition, its binder, and the argument
+   expression at the call site.
+
+   Five things must hold and none is assumed:
+
+     - the model assigns the enclosing function's own PARAMETERS (a match
+       binder or a let-bound temporary is not one, which is what makes the
+       `List.last` shape decline),
+     - those arguments are admissible under the function's OWN refinements
+       (else we would blame a caller for an input the function never promised
+       to accept),
+     - the argument expression, evaluated from those parameters alone, really
+       does VIOLATE the callee's precondition,
+     - executing the enclosing function actually panics, and
+     - repairing ONLY the subject makes the panic go away.
+
+   The last two are separate requirements because the interpreter cannot tell
+   us where a panic came from.  [Eval_prim.Eval_error] carries a string and
+   nothing else — no span, no function identity — so "the panic originated at
+   this call" is not a question that can be asked.  Without the repair check,
+   this confirms a panic from an unrelated branch:
+
+     fn go(ys : List(Int), n : Int) : Int do
+       if n == 0 do panic("unrelated") else head(ys) end
+     end
+
+   where the don't-care `n` zero-fills to 0, `head(ys)` is never evaluated,
+   and Task 6 would pair `head`'s requirement with a panic that declaring it
+   would not remove.  Re-running with the subject repaired to a value the
+   precondition ACCEPTS still panics there, so it declines; in the real shape
+   `go(ys) = head(ys)` the repaired run returns and it confirms.
+
+   RESIDUAL IMPRECISION, stated plainly: this demonstrates that the panic is
+   attributable to the subject's value, not that it was raised inside the
+   callee.  A function that panics for its own reasons on exactly the inputs
+   the precondition rejects would still confirm.  Both halves of the reported
+   sentence are nonetheless true — the input violates the requirement, and the
+   function panics on it, and not on the repaired one. *)
+let confirm_precond_reachable ~(fn : A.fn_def) ~(pred : A.expr)
+    ~(binder : string) ~(arg : A.expr) ~(model : (string * string) list)
+    : ((string * V.value) list * string) option =
+  match fn.A.fn_clauses, qualified_fn_name fn with
+  | [ clause ], Some fname when clause.A.fc_guard = None ->
+    (* A guard is a second acceptance condition that [admissible] does not
+       model: a candidate failing it crashes with a clause-match error rather
+       than with the requirement we would be reporting.  Decline. *)
+    (match annotated_params (List.map clause_param clause.A.fc_params) with
+     | None -> None
+     | Some params ->
+       (* Nullary: there is no argument for a caller to have got wrong, and no
+          parameter for the suggested precondition to land on. *)
+       if params = [] then None
+       else if not (List.for_all witness_safe_param params) then None
+       else
+         (* The parameters the call-site argument is actually built from.  If
+            it mentions none of them — a literal, a `let`-bound temporary, a
+            match binder — then the enclosing function's entry cannot control
+            it and there is nothing to demonstrate. *)
+         let subjects =
+           let fv = free_vars arg in
+           List.filter (fun (n, _) -> List.mem n fv) params
+         in
+         if subjects = [] then None
+         else
+           (* [Some true] / [Some false] / [None] for "the argument computed
+              from [cand] satisfies the callee's precondition". *)
+           let holds cand =
+             let lookup n = List.assoc_opt n cand in
+             match eval_operand ~lookup arg with
+             | None -> None
+             | Some av ->
+               let lk n = if n = binder || n = "_" then Some av else lookup n in
+               eval_pred ~lookup:lk pred
+           in
+           let panic_of cand =
+             match call_fn ~name:fname ~args:(List.map snd cand) with
+             | Panicked msg -> Some msg
+             | Ret _ | Unconfirmable -> None
+           in
+           (* One confirmation round: admissible, genuinely violating, and
+              observed to panic. *)
+           let run cand =
+             if admissible ~params cand && holds cand = Some false then
+               Option.map (fun _ -> V.VUnit) (panic_of cand)
+             else None
+           in
+           (match decode_model ~params ~model with
+            | None -> None
+            | Some args ->
+              (match run args with
+               | None -> None
+               | Some _ ->
+                 (* Shrink with the same oracle, then re-read the panic from
+                    the shrunk candidate: a smaller input may panic in a
+                    different place, and quoting the original message beside
+                    the shrunk arguments would be a lie. *)
+                 let shrunk, _ = shrink ~run args V.VUnit in
+                 (* Causality: some assignment differing from the witness ONLY
+                    in the subject, admissible and satisfying the callee's
+                    precondition, must run without panicking.  Bounded by
+                    [battery]'s own cap. *)
+                 let repaired_runs_clean sub =
+                   let cand =
+                     List.map
+                       (fun (n, v) ->
+                         match List.assoc_opt n sub with
+                         | Some v' -> (n, v')
+                         | None -> (n, v))
+                       shrunk
+                   in
+                   admissible ~params cand
+                   && holds cand = Some true
+                   (* An actual RETURN, not merely "no panic observed".
+                      [panic_of] collapses [Unconfirmable] into [None], and a
+                      repaired run can be unconfirmable for reasons that say
+                      nothing about the panic: fuel exhaustion, a blocked
+                      builtin, an internal [Eval_error], or — the nastiest —
+                      a spent [wall_budget], after which EVERY later call
+                      short-circuits to [Unconfirmable].  Scoring any of those
+                      as "the panic went away" makes the demonstration
+                      vacuous and restores the unrelated-branch false
+                      positive this check exists to stop. *)
+                   && (match
+                         call_fn ~name:fname ~args:(List.map snd cand)
+                       with
+                       | Ret _ -> true
+                       | Panicked _ | Unconfirmable -> false)
+                 in
+                 if not (List.exists repaired_runs_clean (battery ~params:subjects))
+                 then None
+                 else Option.map (fun msg -> (shrunk, msg)) (panic_of shrunk))))
+  (* A multi-head function is several clauses after desugar; executing it is
+     still well defined, but which clause the panic came from is not, and the
+     message would have to guess. *)
+  | _ -> None
+
+(* =================================================================
    §9  Division safety
 
    Confirm that an ADMISSIBLE assignment (params satisfy their own Int
@@ -932,6 +1269,13 @@ let confirm_post ~(fn_name : string) ~(fn_params : (string * A.ty option) list)
   match annotated_params fn_params with
   | None -> None
   | Some params ->
+    (* Same gate as [confirm_precond_reachable]: [admissible] cannot see a
+       refinement below the outermost position, so a zero-filled decode of
+       `Box = { v : {Int | _ > 0} }` yields `{ v: 0 }` and the reported
+       "but f({ v: 0 }) returns 0" blames an input the declared type
+       excludes.  Decline rather than duplicate the check. *)
+    if not (List.for_all witness_safe_param params) then None
+    else
     (match decode_model ~params ~model with
      | None -> None
      | Some args ->

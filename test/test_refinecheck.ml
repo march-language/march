@@ -44,17 +44,37 @@ let has_refine_error_d src =
    alias: the alias is allowed only when a `List.length` in scope came from a
    file the caller identified as stdlib, and no string-parsed fixture (whose
    span file is "") can ever reach that branch. *)
-let has_refine_error_from ?(stdlib_files = []) ~file src =
+let parse_as ~file src =
   let lexbuf = Lexing.from_string src in
   lexbuf.Lexing.lex_curr_p <- { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = file };
-  let m =
-    March_parser.Parser.module_
-      (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
-  in
+  March_parser.Parser.module_
+    (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+
+let has_refine_error_from ?(stdlib_files = []) ~file src =
   let ctx = March_errors.Errors.create () in
   March_refinecheck.Refine_check.check_module ~stdlib_files ctx
-    (March_desugar.Desugar.desugar_module m);
+    (March_desugar.Desugar.desugar_module (parse_as ~file src));
   March_errors.Errors.has_errors ctx
+
+(* [refine_warnings], but through the same parse-as-[file] / declare-[stdlib_files]
+   path as [has_refine_error_from] above — the only way to reach a code path
+   that keys on a span's SOURCE FILE, since a plain string-parsed fixture has
+   the empty file name and can never be anyone's stdlib.  Shares [parse_as]
+   with the error helper so there is one parsing path, not two that could
+   drift; a WARNING view is needed because the call-site promotion this pins
+   is a warning by default, and adding `cap verified` to make it an error
+   would defeat the test — a DECLINED promotion falls back to a skip, which
+   `cap verified` escalates to an error too, so the two outcomes would be
+   indistinguishable. *)
+let refine_warnings_from ?(stdlib_files = []) ~file src =
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module ~stdlib_files ctx
+    (March_desugar.Desugar.desugar_module (parse_as ~file src));
+  List.filter_map
+    (fun (d : March_errors.Errors.diagnostic) ->
+      if d.March_errors.Errors.severity = March_errors.Errors.Warning
+      then Some d.March_errors.Errors.message else None)
+    ctx.March_errors.Errors.diagnostics
 
 (* Number of ERRORS the refinement pass reports on [src].  A plain boolean
    cannot tell "both violations found" from "one found, one silently lost",
@@ -116,6 +136,71 @@ let refine_hints src =
       if d.March_errors.Errors.severity = March_errors.Errors.Hint
       then Some d.March_errors.Errors.message else None)
     ctx.March_errors.Errors.diagnostics
+
+(* Same as [refine_hints], but DESUGARED first — needed whenever the fixture
+   uses a qualified call like `List.length(ys)`: desugar flattens `EField`
+   into a single dotted `EVar`, which is what the `List.length` measure alias
+   actually keys on (see [has_refine_error_d]).  Skipping desugar here doesn't
+   just miss the alias — it changes the DIAGNOSIS: `List.length(ys) < 100`
+   goes from "a guard the checker cannot connect to `len(_)`" (solver-undecided)
+   to "no guard the checker even parses" (unconstrained-subject), a different
+   reason entirely. Use this whenever pairing with [skip_reasons], which
+   always desugars, on the same fixture. *)
+let refine_hints_d src =
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module ctx
+    (March_desugar.Desugar.desugar_module (parse src));
+  List.filter_map
+    (fun (d : March_errors.Errors.diagnostic) ->
+      if d.March_errors.Errors.severity = March_errors.Errors.Hint
+      then Some d.March_errors.Errors.message else None)
+    ctx.March_errors.Errors.diagnostics
+
+(* Warnings emitted by the refinement pass, as (message) list.  DESUGARED, for
+   the same reasons [refine_hints_d] is: the promotion path this feeds runs on
+   qualified calls, and a fixture checked through an undesugared pipeline can
+   disagree with the obligation ledger about the same source.
+
+   Distinct from [has_refine_warning] above, which answers only "any?" — the
+   promotion fixtures assert an exact COUNT, because "zero warnings" is the
+   whole assertion in three of the four and a bare existence check cannot
+   catch an over-firing gate that also emits something unrelated. *)
+let refine_warnings src =
+  let ctx = March_errors.Errors.create () in
+  let m = March_desugar.Desugar.desugar_module (parse src) in
+  March_refinecheck.Refine_check.check_module ctx m;
+  (* The same post-pass the driver runs (bin/main.ml, both pipelines): a
+     promoted warning is upgraded, after the walk, with the precondition its
+     enclosing function should declare.  Running it here and not there — or
+     there and not here — is how the promoted message and its test drift. *)
+  March_refinecheck.Precond_infer.attach_promoted_fixes ctx m;
+  List.filter_map
+    (fun (d : March_errors.Errors.diagnostic) ->
+      if d.March_errors.Errors.severity = March_errors.Errors.Warning
+      then Some d.March_errors.Errors.message else None)
+    ctx.March_errors.Errors.diagnostics
+
+(* Reason each surviving [Skipped] obligation was filed under, in traversal
+   order.  Moved up from beside [reason_suite] below (where it originated) so
+   the throttle tests just below can pin a fixture's classification before
+   asserting on the hints it produces — see the "diagnosed cause is reported
+   at every site" pair.  Gating notes: only the [Solver_undecided] case
+   reaches the solver; the other three are decided at reflection / sort-gate
+   time, BEFORE [Refine.discharge], so gating them would disable them on a
+   z3-less machine for no reason — and worse, [Solver_undecided] is the
+   fallthrough every obligation lands in when there is no solver, so an
+   ungated reason test would pass by accident there.  Verified empirically
+   with z3 off PATH. *)
+let skip_reasons src =
+  March_refinecheck.Obligation.reset ();
+  ignore (has_refine_error_d src);
+  List.filter_map
+    (fun (o : March_refinecheck.Obligation.t) ->
+      match o.March_refinecheck.Obligation.verdict with
+      | March_refinecheck.Obligation.Skipped r ->
+        Some (March_refinecheck.Obligation.reason_name r)
+      | _ -> None)
+    (March_refinecheck.Obligation.all ())
 
 (* Most of this suite needs a solver, so a z3-less machine cannot run it.  What
    it must NOT do is report those cases as PASSING.  [gated] used to print a
@@ -196,27 +281,78 @@ let suite =
           (contains text "e.g. k = "));
 
     (* An undecidable obligation stays non-fatal, but silence is
-       indistinguishable from "checked and fine". One hint per module says so
-       and names the escalation. *)
-    gated "an unverified contract is announced once" (fun () ->
+       indistinguishable from "checked and fine". A hint says so.
+       `take_n(k)` with `k : Int` unconstrained is [Unconstrained_subject], a
+       DIAGNOSED cause (Task 3's per-site rule), so its message is the
+       specific "no fact the checker derived constrains" text rather than the residual's
+       `cap verified` boilerplate paragraph — the latter is module-level
+       advice that Task 3 deliberately drops for diagnosed causes. *)
+    gated "an unverified contract is announced" (fun () ->
         let hints =
           refine_hints (decl "  fn f(k : Int) : Int do take_n(k) end") in
         Alcotest.(check bool) "a hint is emitted" true
           (List.exists (fun h -> contains h "was NOT verified here") hints);
-        Alcotest.(check bool) "it points at `cap verified`" true
-          (List.exists (fun h -> contains h "cap verified") hints));
+        Alcotest.(check bool) "it names what's unconstrained" true
+          (List.exists (fun h -> contains h "no fact the checker derived constrains") hints));
 
-    (* Advice repeated per call site would be worse than silence. *)
-    gated "the unverified hint is emitted at most once per module" (fun () ->
+    (* A DIAGNOSED cause is specific and actionable, so it reports at every
+       site.  The throttle exists to stop a vague message repeating; it must
+       not also suppress three different pieces of real advice. *)
+    gated "a diagnosed cause is reported at every site" (fun () ->
         let hints =
           refine_hints
             (decl
                "  fn f(k : Int) : Int do take_n(k) end\n\
                \  fn g(k : Int) : Int do take_n(k) end\n\
                \  fn h(k : Int) : Int do take_n(k) end") in
-        Alcotest.(check int) "exactly one unverified hint" 1
+        Alcotest.(check int) "one hint per site" 3
           (List.length
              (List.filter (fun h -> contains h "was NOT verified here") hints)));
+
+    (* …and the residual keeps the throttle, because repeating "the solver
+       proved neither" three times is exactly the noise it was added for.
+       This fixture must produce a BARE solver-undecided; if the taxonomy ever
+       learns to diagnose it, this test starts failing and the right fix is a
+       new fixture, not deleting the throttle.
+
+       The brief's original UD4 fixture (guard `a > b` before `pos(a - b) :
+       {Int | _ > 0}`) turned out to reflect as [unreflectable-predicate], not
+       [solver-undecided] — verified by running [skip_reasons] on it before
+       touching any source, per the task's own instruction to replace rather
+       than weaken the assertion. Swapped for the "insufficiently guarded
+       measure" shape already pinned genuinely solver-undecided a few hundred
+       lines below, in "an unrefined parameter passed straight into a measured
+       one is diagnosed as unconstrained" (the `guarded` half): the caller's
+       `List.length(ys) < 100` guard is real but does not entail `len(_) > 0`,
+       so the solver receives a goal it cannot decide either way, with no
+       structural axiom involved.
+
+       The `List.length` alias only resolves post-desugar (`EField` ->
+       dotted `EVar`, see [has_refine_error_d]), so the hint assertion below
+       uses [refine_hints_d], not the non-desugaring [refine_hints]: on the
+       first pass this fixture was checked with the un-desugared helper and
+       silently landed on [unconstrained-subject] instead — same slug family
+       of bug the desugar helpers exist to avoid, caught here only because
+       [skip_reasons] (which always desugars) and the hint assertion
+       disagreed on the SAME source. *)
+    gated "the residual solver-undecided hint stays once per module" (fun () ->
+        let src =
+          {|mod UD4 do
+  fn head_of(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn f(ys : List(Int)) : Int do
+    if List.length(ys) < 100 do head_of(ys) else 0 end
+  end
+  fn g(ys : List(Int)) : Int do
+    if List.length(ys) < 100 do head_of(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check (list string)) "the fixture is a bare residual"
+          [ "solver-undecided"; "solver-undecided" ] (skip_reasons src);
+        Alcotest.(check int) "exactly one hint" 1
+          (List.length
+             (List.filter (fun h -> contains h "was NOT verified here")
+                (refine_hints_d src))));
 
     (* The hint is about the checker giving up. Code it can discharge must stay
        completely silent, or every clean project grows advisory noise. *)
@@ -224,7 +360,52 @@ let suite =
         let hints = refine_hints (decl "  fn main() : Int do take_n(5) end") in
         Alcotest.(check int) "no unverified hints on proved code" 0
           (List.length
-             (List.filter (fun h -> contains h "was NOT verified here") hints))) ]
+             (List.filter (fun h -> contains h "was NOT verified here") hints)));
+
+    (* The enclosing function must be POPULATED while its body is walked, not
+       just left at its [None] default and restored to it afterward — a test
+       that only checks the post-walk value would still pass if
+       [enclosing_fn := Some fd] were deleted outright.  A probe installed via
+       [enclosing_fn_probe] samples the ref DURING the walk, once per
+       function, so we can pin both that it fires the right number of times
+       and that each firing sees that function's OWN [fd] rather than a
+       sibling's left behind.  The enclosing function must also be restored
+       on the way out, or a sibling decl inherits a stale identity and the
+       promotion in Task 6 executes the WRONG function.  Save/restore mirrors
+       [trusted_fn]. *)
+    gated "enclosing_fn is populated during each function's own walk" (fun () ->
+        let module RC = March_refinecheck.Refine_call in
+        let observed = ref [] in
+        let saved_probe = !RC.enclosing_fn_probe in
+        RC.enclosing_fn_probe :=
+          Some
+            (fun fd ->
+              observed :=
+                (fd.March_ast.Ast.fn_name.March_ast.Ast.txt, !RC.enclosing_fn)
+                :: !observed);
+        Fun.protect
+          ~finally:(fun () -> RC.enclosing_fn_probe := saved_probe)
+          (fun () ->
+            ignore (has_refine_error_d
+              {|mod EF1 do
+  fn take_n(n : {Int | _ > 0}) : Int do n end
+  fn go(k : Int) : Int do take_n(k) end
+end|}));
+        let observed = List.rev !observed in
+        Alcotest.(check int) "the probe fired exactly twice" 2
+          (List.length observed);
+        List.iter
+          (fun (name, seen) ->
+            Alcotest.(check bool)
+              (Printf.sprintf "%s saw its own fd, not a sibling's" name) true
+              (match seen with
+               | Some fd -> fd.March_ast.Ast.fn_name.March_ast.Ast.txt = name
+               | None -> false))
+          observed;
+        Alcotest.(check (list string)) "each function saw its own name"
+          [ "take_n"; "go" ] (List.map fst observed);
+        Alcotest.(check bool) "restored to None after the walk" true
+          (!RC.enclosing_fn = None)) ]
 
 (* A2: the `len` measure + cross-argument bounds.  `at` indexes a list with a
    bounds-refined index; we check calls against list literals (statically sized). *)
@@ -4171,18 +4352,8 @@ let obligation_suite =
    so gating them would disable them on a z3-less machine for no reason — and
    worse, [Solver_undecided] is the fallthrough every obligation lands in when
    there is no solver, so an ungated reason test would pass by accident there.
-   Verified empirically with z3 off PATH. *)
-let skip_reasons src =
-  March_refinecheck.Obligation.reset ();
-  ignore (has_refine_error_d src);
-  List.filter_map
-    (fun (o : March_refinecheck.Obligation.t) ->
-      match o.March_refinecheck.Obligation.verdict with
-      | March_refinecheck.Obligation.Skipped r ->
-        Some (March_refinecheck.Obligation.reason_name r)
-      | _ -> None)
-    (March_refinecheck.Obligation.all ())
-
+   Verified empirically with z3 off PATH.  [skip_reasons] itself now lives up
+   near [refine_hints], where the once-per-module-throttle tests need it. *)
 let reason_suite =
   [ (* A RECORD subject whose actual cannot be reflected: `mk()` is a call, so
        [record_self] finds no term for it and no goal is built at all.  The
@@ -4239,15 +4410,34 @@ end|}
         in
         Alcotest.(check (list string)) "float-sort-gate" [ "float-sort-gate" ] rs);
 
-    (* The genuine solver outcome, with a CONTROL.  Without the control this
-       test would pass on a z3-less machine for the wrong reason: with no
-       solver EVERY obligation falls through to [Solver_undecided].  The
-       control — the same call under a guard that discharges it — can only be
-       [Proved] when a solver actually ran and decided, so the pair together
-       says "z3 ran, and on the unguarded call it declined".
-       Mutation that fails this: replace the final `| _ -> note (Skipped
-       Solver_undecided)` arm with any other reason. *)
-    gated "a genuinely undecided obligation is filed as solver-undecided" (fun () ->
+    (* An unguarded MEASURE-typed call, with a CONTROL.  Without the control
+       this test would pass on a z3-less machine for the wrong reason: with
+       no solver EVERY obligation falls through to a skip.  The control — the
+       same call under a guard that discharges it — can only be [Proved] when
+       a solver actually ran and decided, so the pair together says "z3 ran,
+       and on the unguarded call it declined".
+
+       This is [Unconstrained_subject], not [Solver_undecided]: nothing the
+       USER wrote constrains `ys`.  [measure_of_var] DOES assert `len$ys >=
+       0` unconditionally as a side effect of reflecting `len(_)` on the
+       goal side, so a naive check over the full [vc.assumptions] would see
+       SOMETHING mentioning `len$ys` and wrongly stay silent (this was this
+       task's round-2 review finding: the fix landed correct but too
+       narrow, and this exact fixture is what proved it).  `len$ys >= 0` is
+       a well-formedness axiom about the ENCODER's own representation — true
+       of every list, unconditionally — not a fact the user's code
+       establishes, so [Undecided.diagnose] is handed [user_assumptions]
+       (assembled in [Refine_call.check_one], filtering out exactly the
+       axioms marked [push_structural] at their emission sites), not the raw
+       [vc.assumptions].  See lib/refinecheck/refine_call.ml's [user_assume]
+       comment for the full account, and "a constrained MEASURE subject is
+       not called unconstrained, even though the guard is insufficient"
+       below for the paired control that proves this doesn't just make the
+       check fire unconditionally again.
+       Mutation that fails THIS test: make [push_structural] behave like
+       [push_user] (i.e. add the well-formedness axiom to [user_assume] too)
+       — the slug reverts to "solver-undecided". *)
+    gated "a genuinely unguarded MEASURE-typed subject is diagnosed as unconstrained" (fun () ->
         let control =
           {|mod RS4b do
   fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
@@ -4265,7 +4455,7 @@ end|}
   fn go(ys : List(Int)) : Int do head(ys) end
 end|}
         in
-        Alcotest.(check (list string)) "solver-undecided" [ "solver-undecided" ] rs);
+        Alcotest.(check (list string)) "unconstrained-subject" [ "unconstrained-subject" ] rs);
 
     (* [Alias_withdrawn] is checked in [alias_attribution_suite] through the
        `cap verified` MESSAGE text, which is the user-facing surface.  It is
@@ -4291,7 +4481,302 @@ end|}
   end
 end|}
         in
-        Alcotest.(check (list string)) "alias-withdrawn" [ "alias-withdrawn" ] rs)
+        Alcotest.(check (list string)) "alias-withdrawn" [ "alias-withdrawn" ] rs);
+
+    (* Nothing in scope mentions `n` at all, so no assumption constrains it.
+       This is the single most common shape in the corpus and used to be
+       indistinguishable from a solver that merely ran out of road.
+       Mutation that fails this: return `None` from [Undecided.diagnose]'s
+       unconstrained branch — the slug reverts to "solver-undecided". *)
+    gated "an unconstrained subject is diagnosed, not filed solver-undecided"
+      (fun () ->
+        let rs =
+          skip_reasons
+            {|mod UD1 do
+  fn take_n(n : {Int | _ > 0}) : Int do n end
+  fn go(k : Int) : Int do take_n(k) end
+end|}
+        in
+        Alcotest.(check (list string)) "unconstrained-subject"
+          [ "unconstrained-subject" ] rs);
+
+    (* CONTROL for the above: the same call with a fact about `k` in scope is
+       NOT unconstrained.  Without this control the test above passes even if
+       [diagnose] returns Unconstrained_subject unconditionally, which would
+       mislabel every skip in the compiler. *)
+    gated "a constrained-but-undecided subject is not called unconstrained"
+      (fun () ->
+        let rs =
+          skip_reasons
+            {|mod UD1b do
+  fn take_n(n : {Int | _ > 0}) : Int do n end
+  fn go(k : Int) : Int do
+    if k > -5 do take_n(k) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "not unconstrained" false
+          (List.mem "unconstrained-subject" rs));
+
+    (* CRITICAL regression (found in review of this task): [UD1b] above only
+       exercises a plain SCALAR subject, where the source argument's own name
+       IS the SMT symbol the goal uses.  A MEASURE-typed subject is not:
+       `len(_) > 0` over a `List(Int)` reflects the binder to `Const
+       "len$ys"`, never `Const "ys"` (see [Refine_call.measure_of_var]).
+       Before [mark_self] existed, [subject_sym] was taken from the raw
+       source spelling ("ys"), which never appears in ANY assumption for a
+       measured subject — so this exact shape reported `unconstrained-subject`
+       UNCONDITIONALLY, guarded or not, which is a false claim: the guard
+       below genuinely constrains `len$ys`, the solver just cannot derive
+       `> 0` from `< 100`.
+       Mutation that fails this: change [mark_self]'s [Const c] arm back to
+       reading the source argument's spelling instead of the term [resolve_var]
+       / [resolve_measure] actually produced. *)
+    gated "a constrained MEASURE subject is not called unconstrained, even though the guard is insufficient"
+      (fun () ->
+        let rs =
+          skip_reasons
+            {|mod UD1c do
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) < 100 do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "not unconstrained" false
+          (List.mem "unconstrained-subject" rs));
+
+    (* CRITICAL regression, round 2 of review: the fix above (UD1c) landed
+       correct but too narrow.  [measure_of_var] asserts `len$x >= 0`
+       unconditionally as a side effect of reflecting `len(_)`, so a naive
+       "does any assumption mention the symbol" check saw that boilerplate
+       axiom and stayed silent EVEN WITH NO GUARD AT ALL — the exact shape
+       this whole project opened with (an unrefined parameter passed
+       straight into a refined one) kept reporting the useless
+       `solver-undecided`.  Pin BOTH halves in one fixture pair, per the
+       review: the unguarded call must be [unconstrained-subject], and the
+       insufficiently-guarded one (mirroring UD1c) must NOT be — proving the
+       fix filters out only the STRUCTURAL axiom, not every assumption.
+       Mutation that fails this: make [push_structural] add to [user_assume]
+       too (the unguarded case wrongly reverts to solver-undecided), or
+       delete the [is_self]/[mark_self] machinery so `subject_sym` goes back
+       to the raw source name (both halves break, differently). *)
+    gated "an unrefined parameter passed straight into a measured one is diagnosed as unconstrained"
+      (fun () ->
+        let unguarded =
+          skip_reasons
+            {|mod Motiv do
+  fn head_of(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn caller(ys : List(Int)) : Int do head_of(ys) end
+end|}
+        in
+        Alcotest.(check (list string)) "unconstrained-subject"
+          [ "unconstrained-subject" ] unguarded;
+        let guarded =
+          skip_reasons
+            {|mod MotivGuarded do
+  fn head_of(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn caller(ys : List(Int)) : Int do
+    if List.length(ys) < 100 do head_of(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check (list string)) "solver-undecided" [ "solver-undecided" ] guarded);
+
+    (* IMPORTANT regression, round 3 of review: every test above this one
+       asserts the SLUG ("unconstrained-subject"), never the MESSAGE TEXT —
+       which is exactly how the previous fix shipped through two review
+       rounds and a re-review with `reason_detail` printing the internal
+       SMT symbol `len$ys` instead of the source name `ys` the user actually
+       typed.  A slug-only assertion cannot catch a leaked internal string;
+       only the rendered text can.  Pin both halves on TEXT, using the same
+       Motiv/guarded pair as above.
+       Mutation that fails this: make [Undecided.diagnose] build
+       [Unconstrained_subject] from [subject_sym] instead of [subject_name]
+       — the slug-only tests above stay green, this one does not. *)
+    gated "the unconstrained message names the SOURCE variable, never the internal SMT symbol"
+      (fun () ->
+        let unguarded_msg =
+          refine_error_text_d
+            {|mod MotivCV do
+  cap verified
+  fn head_of(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn caller(ys : List(Int)) : Int do head_of(ys) end
+end|}
+        in
+        Alcotest.(check bool) "names the source variable" true
+          (contains unguarded_msg "no fact the checker derived constrains `ys`");
+        Alcotest.(check bool) "never prints the internal SMT symbol" false
+          (contains unguarded_msg "len$ys");
+        let guarded_msg =
+          refine_error_text_d
+            {|mod MotivGuardedCV do
+  cap verified
+  fn head_of(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn caller(ys : List(Int)) : Int do
+    if List.length(ys) < 100 do head_of(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "insufficiently-guarded stays solver-undecided" true
+          (contains guarded_msg "solver-undecided"));
+
+    (* IMPORTANT regression (found in review of this task): [known_head]'s
+       [Refine_encode.is_measure] arm looked unreachable from the `$strlen`
+       fixture alone — a `len` application never appears as an [App] head
+       (see [known_head]'s own comment).  But an AXIOMATISED user measure
+       (`@[measure]` over a declared ADT) reflects the OTHER way:
+       [Refine_call.resolve_measure]'s axiom branch builds `App(m, [t])`
+       literally, e.g. `App ("size", [...])`, because the solver needs the
+       recursion equations rather than an opaque flattened constant.  So an
+       unguarded call whose obligation mentions `size(t)` DOES put "size" in
+       [app_heads], and without [is_measure] it misfires `opaque-application`
+       — the same false-positive class `$strlen` did.
+       Mutation that fails this: remove [Refine_encode.is_measure] from
+       [known_head] — the slug becomes "opaque-application". *)
+    gated "an axiomatised measure's own name is not opaque" (fun () ->
+        let rs =
+          skip_reasons
+            {|mod UD3 do
+  type Tree(a) = Leaf | Node(Tree(a), a, Tree(a))
+  @[measure]
+  fn size(t : Tree(a)) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, x, r) -> 1 + size(l) + size(r)
+    end
+  end
+  fn get(t : Tree(a), i : {Int | _ >= 0 && _ < size(t)}) : a do get(t, i) end
+  fn ung(t : Tree(Int), i : Int) : Int do get(t, i) end
+end|}
+        in
+        Alcotest.(check bool) "not opaque" false
+          (List.mem "opaque-application" rs));
+
+    (* IMPORTANT regression, round 2 of review: [bin/main.ml]'s
+       [print_refine_report] and [Obligation.summary] both used to key their
+       skip-count [Hashtbl] on the raw [reason] value.  [Unconstrained_
+       subject] carries the unconstrained symbol's NAME in its payload, so
+       three obligations skipped for the SAME cause but three DIFFERENT
+       variable names produced three separate `skipped (unconstrained-
+       subject)` report lines instead of one summed line — defeating the
+       per-bucket distribution count a later task relies on to judge this
+       taxonomy.  [reason_name] exists precisely to be the payload-free key;
+       this pins that [summary] actually uses it, not just that
+       [reason_name] itself works (that half was never broken).
+       Mutation that fails this: change [summary]'s [Hashtbl.replace skips
+       name …] back to keying on the raw [Skipped r] payload — three buckets
+       reappear. *)
+    gated "several differently-named unconstrained subjects report ONE summed bucket"
+      (fun () ->
+        March_refinecheck.Obligation.reset ();
+        ignore
+          (has_refine_error_d
+             {|mod Bucket do
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn a(ys : List(Int)) : Int do head(ys) end
+  fn b(zs : List(Int)) : Int do head(zs) end
+  fn c(ws : List(Int)) : Int do head(ws) end
+end|});
+        let _, _, skips = March_refinecheck.Obligation.summary () in
+        Alcotest.(check (list (pair string int)))
+          "one bucket, summed" [ ("unconstrained-subject", 3) ] skips);
+
+    (* Half a bounds contract is established.  "the solver proved neither the
+       predicate nor its negation" is true and useless; naming the surviving
+       conjunct is the whole difference between advice and noise.
+       Mutation that fails this: drop the per-conjunct discharge and return
+       Unconstrained_subject — `i` IS constrained here, by the guard. *)
+    gated "a partially established conjunction names the missing half"
+      (fun () ->
+        let rs =
+          skip_reasons
+            {|mod UD3 do
+  fn at(xs : List(Int), i : {Int | _ >= 0 && _ < len(xs)}) : Int do 0 end
+  fn go(xs : List(Int), i : Int) : Int do
+    if i >= 0 do at(xs, i) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check (list string)) "partial-conjunct" [ "partial-conjunct" ] rs);
+
+    (* Slug-only assertions cannot catch a leaked internal string (see round 3
+       of Task 1's review, above) — pin the rendered TEXT too.  `i >= 0` must
+       read back as the user's own guard, `i < len(xs)` as the missing half,
+       and neither the SMT symbol (`len$xs`) nor any encoder-internal spelling
+       may appear.
+       Mutation that fails this: build [Partial_conjunct]'s payload from the
+       SMT term's rendering instead of [pred_str] on the paired source
+       fragment. *)
+    gated "the partial-conjunct message quotes the user's own syntax for both halves"
+      (fun () ->
+        let msg =
+          refine_error_text_d
+            {|mod UD3CV do
+  cap verified
+  fn at(xs : List(Int), i : {Int | _ >= 0 && _ < len(xs)}) : Int do 0 end
+  fn go(xs : List(Int), i : Int) : Int do
+    if i >= 0 do at(xs, i) else 0 end
+  end
+end|}
+        in
+        (* Rendered as WRITTEN in [at]'s own signature, `_`-binder and all —
+           [pred_str] quotes the predicate's own source text, not the
+           caller's argument name; the other obligation-reasons messages
+           above do the same (see the `cap verified` message at
+           [refine_call.ml:2009]). *)
+        Alcotest.(check bool) "names the held conjunct" true (contains msg "`_ >= 0`");
+        Alcotest.(check bool) "names the missing conjunct" true
+          (contains msg "`_ < len(xs)`");
+        Alcotest.(check bool) "says which side is established" true
+          (contains msg "established here");
+        Alcotest.(check bool) "never leaks the SMT symbol" false (contains msg "len$xs"));
+
+    (* DISCRIMINATING fixture (found in review round 1 of this task): every
+       other case above has a real risk of passing even if the per-conjunct
+       discharge is changed to run against [vc_for_diagnose] (Task 1's
+       diagnosis-narrowed assumption set, which drops the encoder's own
+       [push_structural] well-formedness axioms) instead of the FULL [vc] the
+       whole-goal proof attempt uses — none of them depend on a structural
+       axiom to prove a CONJUNCT.  This one does: there is no user guard on
+       `xs` or `i` anywhere, so `len(xs) >= 0` can only be established by
+       [measure_of_var]'s structural non-negativity axiom (emitted via
+       [push_structural], never in [user_assume]).  `i > 100` has no support
+       at all and is correctly the missing half.
+       If this test ever goes RED, look first at whether the per-conjunct
+       discharge in [Refine_call.check_call]'s fall-through still reads
+       `{ vc with Smt.goal = g }` — [vc] and [vc_for_diagnose] are bound a
+       few lines apart and a copy-paste substitution of one for the other is
+       an easy mistake.  Swapping to [vc_for_diagnose] would NOT flip the
+       slug (still "partial-conjunct") and would NOT fail any test above —
+       it silently reports `len(xs) >= 0` as unestablished when the checker
+       can in fact prove it, which is exactly the class of defect this whole
+       project exists to remove.  Only the MESSAGE TEXT below catches it. *)
+    gated "a structural axiom (not a user guard) can establish a conjunct"
+      (fun () ->
+        let msg =
+          refine_error_text_d
+            {|mod AxTest do
+  cap verified
+  fn f(xs : List(Int), i : {Int | len(xs) >= 0 && i > 100}) : Int do 0 end
+  fn g(xs : List(Int), i : Int) : Int do f(xs, i) end
+end|}
+        in
+        Alcotest.(check bool) "partial-conjunct fires" true
+          (contains msg "partial-conjunct");
+        Alcotest.(check bool) "the structurally-established conjunct is on the held side" true
+          (contains msg "`len(xs) >= 0` established here");
+        Alcotest.(check bool) "the genuinely unsupported conjunct is on the missing side" true
+          (contains msg "`i > 100` not"));
+
+    (* A third variant, [Nonlinear_goal], was drafted here and cut: the only
+       [smt_of] used to build a goal never produces [Smt.Mul] for two
+       non-literal operands, so a fixture like `pos(a * b)` never reaches
+       [Undecided.diagnose] at all -- it fails earlier as
+       [Unreflectable_predicate].  Making it reachable needs [smt_of] itself
+       to reflect general multiplication, which is a checker PRECISION change
+       out of scope here.  See lib/refinecheck/obligation.ml's [reason] type
+       comment for the full account. *)
   ]
 
 (* ── `cap verified`: an obligation the checker SKIPS becomes an error ─────
@@ -5372,6 +5857,94 @@ end|}
         Alcotest.(check bool)
           "names the withdrawn spelling" true
           (contains msg "List.length"));
+    (* Same withdrawal shape as the case above, but the predicate is now a
+       top-level CONJUNCTION.  Task 2's per-conjunct discharge runs before
+       [alias_withdrawal_cause] ever sees the skip, so without [Partial_
+       conjunct] in that function's guard this reports `partial-conjunct`
+       ("guard the call") instead of `alias-withdrawn` ("rename the
+       binding") — losing the attribution to the withdrawn alias even though
+       the withdrawal is exactly what stopped the MISSING conjunct here.
+       `len(_) >= 0` is discharged by the encoder's own non-negativity
+       axiom regardless of any guard, so the withdrawal stops exactly ONE
+       conjunct, `len(_) > 0` — not both, and [guard_discharges] must only
+       ever be asked about that one ([Partial_conjunct]'s own [missing]).
+       Per the doc comment's own rule, "where both could describe the same
+       skip, the withdrawal wins".
+       Mutation (b) that fails this: drop `Partial_conjunct _` from
+       [alias_withdrawal_cause]'s guard — this case goes RED (reports
+       `partial-conjunct`) while the single-conjunct case above stays GREEN. *)
+    gated "a withdrawn alias is attributed even when the predicate is a conjunction"
+      (fun () ->
+        let msg =
+          refine_error_text_d
+            {|mod Ver3Conj do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) >= 0 && len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) > 0 do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "attributes to the withdrawal, not the conjunct split" true
+          (contains msg "alias-withdrawn");
+        Alcotest.(check bool)
+          "does not fall back to partial-conjunct" false
+          (contains msg "partial-conjunct");
+        Alcotest.(check bool)
+          "names the withdrawn spelling" true
+          (contains msg "List.length"));
+    (* The OVER-attribution guard (round 4 review, probe `ProbeA`): a guard
+       that only reaches the HELD conjunct must NOT be credited with
+       discharging the MISSING one.  `len(_) >= 0` is held on the
+       non-negativity axiom alone — no guard needed — so `List.length(ys) >
+       0` entails only that held half; the missing `len(_) < 5` is
+       completely untouched by the withdrawal (`List.length` returning
+       anything `> 0` says nothing about whether it is `< 5`).  Reporting
+       `alias-withdrawn` here would send the reader to rename a binding
+       that silences nothing — exactly what the doc comment's fail-closed
+       stance ("undecided means do not blame the withdrawal") exists to
+       prevent.  The competing `mod List` binding stays PRESENT in this
+       fixture on purpose: deleting it and finding the obligation STILL
+       undischarged (see the plain [partial_conjunct_suite] / [Undecided]
+       coverage of the same predicate without a withdrawal in scope) is
+       the proof that the withdrawal was never the cause — this fixture
+       pins that the checker does not even need that control to get it
+       right the first time.
+       Mutation (c) that fails this: change [guard_discharges] back to
+       testing ALL conjuncts of [pred] (today's pre-fix behaviour, not
+       just [missing]) — this case goes RED (reports `alias-withdrawn`)
+       while the case above stays GREEN. *)
+    gated "a withdrawn alias is NOT blamed when the guard only reaches the held conjunct"
+      (fun () ->
+        let msg =
+          refine_error_text_d
+            {|mod ProbeA do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) >= 0 && len(_) < 5}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) > 0 do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "attributes to the undischarged conjunct, not the withdrawal" true
+          (contains msg "partial-conjunct");
+        Alcotest.(check bool)
+          "does not over-attribute to the withdrawal" false
+          (contains msg "alias-withdrawn"));
     gated "an unrelated Int local named string_byte_length names itself"
       (fun () ->
         let msg =
@@ -5400,7 +5973,7 @@ end|}
        DOES have a withdrawn alias but at a call the alias could not have
        helped, must both keep the general message.  Without these, "never says
        solver-undecided" would pass trivially. *)
-    gated "a genuinely undecided obligation still says solver-undecided"
+    gated "a genuinely unguarded obligation is diagnosed as unconstrained"
       (fun () ->
         let msg =
           refine_error_text_d
@@ -5412,8 +5985,8 @@ end|}
         in
         Alcotest.(check bool) "reported at all" true (msg <> "");
         Alcotest.(check bool)
-          "still says solver-undecided" true
-          (contains msg "solver-undecided"));
+          "still says unconstrained-subject" true
+          (contains msg "unconstrained-subject"));
     gated "a withdrawn alias is not blamed for an UNGUARDED call"
       (fun () ->
         (* Same competing `mod List` as the first case, so the alias IS
@@ -5434,8 +6007,8 @@ end|}
         in
         Alcotest.(check bool) "reported at all" true (msg <> "");
         Alcotest.(check bool)
-          "still says solver-undecided" true
-          (contains msg "solver-undecided");
+          "still says unconstrained-subject" true
+          (contains msg "unconstrained-subject");
         Alcotest.(check bool)
           "does not name the alias" false
           (contains msg "alias-withdrawn"));
@@ -5473,13 +6046,13 @@ end|}
            the call is undischarged all the same. *)
         Alcotest.(check bool)
           "control is undischarged too" true
-          (contains control "solver-undecided");
+          (contains control "unconstrained-subject");
         Alcotest.(check bool)
           "so the withdrawal is not blamed" false
           (contains witness "alias-withdrawn");
         Alcotest.(check bool)
           "and the honest message stands" true
-          (contains witness "solver-undecided"));
+          (contains witness "unconstrained-subject"));
     gated "a withdrawn LIST alias is not blamed for a STRING obligation"
       (fun () ->
         (* All three spellings route to the single measure name `len`, so
@@ -5505,7 +6078,7 @@ end|}
         Alcotest.(check bool)
           "does not name the list alias" false (contains msg "alias-withdrawn");
         Alcotest.(check bool)
-          "stays general" true (contains msg "solver-undecided"));
+          "stays general" true (contains msg "unconstrained-subject"));
     gated "a NEGATED guard is not read as a guard that proved nothing"
       (fun () ->
         (* `if List.length(ys) > 0 do 0 else head(ys) end` — the guard does not
@@ -5601,8 +6174,8 @@ end|}
         in
         Alcotest.(check bool) "reported at all" true (msg <> "");
         Alcotest.(check bool)
-          "stays general (solver-undecided)" true
-          (contains msg "solver-undecided"));
+          "stays general (unconstrained-subject)" true
+          (contains msg "unconstrained-subject"));
     gated "a FREE occurrence under a non-colliding binder still attributes"
       (fun () ->
         (* Companion control to LA7 (the colliding-binder case, just above):
@@ -5677,8 +6250,8 @@ end|}
           "no longer misattributed to the withdrawal" false
           (contains msg "alias-withdrawn");
         Alcotest.(check bool)
-          "stays general (solver-undecided)" true
-          (contains msg "solver-undecided"));
+          "stays general (unconstrained-subject)" true
+          (contains msg "unconstrained-subject"));
     gated "a laundered guard on a DIFFERENT collection is not this guard"
       (fun () ->
         (* The laundered analogue of the WA control: the walk must consult
@@ -5705,7 +6278,7 @@ end|}
         Alcotest.(check bool)
           "the withdrawal is not blamed" false (contains msg "alias-withdrawn");
         Alcotest.(check bool)
-          "stays general" true (contains msg "solver-undecided"));
+          "stays general" true (contains msg "unconstrained-subject"));
     gated "a REBOUND laundering name is not the launder"
       (fun () ->
         (* `let n = 5` between the laundering `let` and the guard: the guard's
@@ -5733,7 +6306,7 @@ end|}
         Alcotest.(check bool)
           "the withdrawal is not blamed" false (contains msg "alias-withdrawn");
         Alcotest.(check bool)
-          "stays general" true (contains msg "solver-undecided"));
+          "stays general" true (contains msg "unconstrained-subject"));
     gated "a REBOUND collection retires the laundered fact"
       (fun () ->
         (* The collection itself rebinds between the `let` and the call: `n`
@@ -5762,7 +6335,7 @@ end|}
         Alcotest.(check bool)
           "the withdrawal is not blamed" false (contains msg "alias-withdrawn");
         Alcotest.(check bool)
-          "stays general" true (contains msg "solver-undecided"));
+          "stays general" true (contains msg "unconstrained-subject"));
     gated "a NEGATED laundered guard is not read as a guard that proved nothing"
       (fun () ->
         (* The laundered analogue of WC: in the else-branch the guard
@@ -5845,8 +6418,8 @@ end|}
 end|}
         in
         Alcotest.(check bool)
-          "still falls back to solver-undecided" true
-          (contains msg "solver-undecided"));
+          "still falls back to unconstrained-subject" true
+          (contains msg "unconstrained-subject"));
     gated "a guard's lambda param colliding with the subject name is not evidence"
       (fun () ->
         (* Mirror-image of probe PE (2026-07-31), on the DIRECT path instead of
@@ -5870,8 +6443,8 @@ end|}
 end|}
         in
         Alcotest.(check bool)
-          "stays general (solver-undecided)" true
-          (contains msg "solver-undecided"));
+          "stays general (unconstrained-subject)" true
+          (contains msg "unconstrained-subject"));
     gated "a FREE occurrence of the subject under a non-colliding binder still attributes"
       (fun () ->
         (* Companion control: a genuine free use of the withdrawn spelling
@@ -5925,8 +6498,8 @@ end|}
 end|}
         in
         Alcotest.(check bool)
-          "stays general (solver-undecided)" true
-          (contains msg "solver-undecided"));
+          "stays general (unconstrained-subject)" true
+          (contains msg "unconstrained-subject"));
     gated "LA14: a guard that could never discharge is NOT blamed on the withdrawal"
       (fun () ->
         (* `List.length(ys) >= 0` is a tautology over a non-negative measure; it
@@ -5955,8 +6528,8 @@ end|}
           "does not claim the withdrawal caused this" false
           (contains msg "alias-withdrawn");
         Alcotest.(check bool)
-          "stays general (solver-undecided)" true
-          (contains msg "solver-undecided"));
+          "stays general (unconstrained-subject)" true
+          (contains msg "unconstrained-subject"));
     gated "LA15: CONTROL — a guard that WOULD have discharged is still blamed"
       (fun () ->
         (* The discrimination must be real: `List.length(ys) > 0` is exactly the
@@ -6016,8 +6589,8 @@ end|}
           "the shadowed launder is not read as evidence" false
           (contains msg "alias-withdrawn");
         Alcotest.(check bool)
-          "stays general (solver-undecided)" true
-          (contains msg "solver-undecided"));
+          "stays general (unconstrained-subject)" true
+          (contains msg "unconstrained-subject"));
     gated "LA16 CONTROL: a non-colliding param leaves the launder readable"
       (fun () ->
         (* Same shape as LA16, but the lambda binds `q` instead of `n`, so
@@ -9746,6 +10319,45 @@ let witness_e2e_suite =
             (decl "  fn fpos(x : {Int | _ > 0}) : {Int | _ >= 5} do x end") in
         Alcotest.(check bool) "never blames the excluded input" false
           (contains text "fpos(0)"))
+  ; gated "a refinement hidden in a record field declines the witness" (fun () ->
+        (* [admissible] sees only a refinement at the TOP of the parameter
+           type.  The one on `v` is invisible to it, so before the
+           witness-safety gate a zero-filled decode reported
+           "but f({ v: 0 }) returns 0." — blaming an input the declared type
+           excludes.  A declined witness leaves the obligation
+           solver-undecided, which is silent outside `cap verified`. *)
+        let text =
+          refine_error_text_d
+            {|mod P9 do
+  type Box = { v : {Int | _ > 0} }
+  fn f(b : Box) : {Int | _ >= 5} do b.v end
+end|} in
+        Alcotest.(check bool) "no witness naming the excluded input" false
+          (contains text "but f(");
+        Alcotest.(check bool) "no definite violation either" false
+          (contains text "does not satisfy its return type constraint"))
+  ; gated "a refinement hidden in a type argument declines the witness" (fun () ->
+        let text =
+          refine_error_text_d
+            {|mod P10 do
+  fn f(xs : List({Int | _ > 0})) : {Int | _ >= 5} do
+    match xs do
+    Nil -> 0
+    Cons(h, _) -> h
+    end
+  end
+end|} in
+        Alcotest.(check bool) "no witness naming the excluded input" false
+          (contains text "but f("))
+  ; gated "positive control: a top-level refined parameter still confirms" (fun () ->
+        (* The same shape with the refinement where [admissible] CAN see it.
+           Without this the two declines above would also pass if the gate
+           simply declined everything. *)
+        let text =
+          refine_error_text_d
+            (decl "  fn gpos(x : {Int | _ > 0}) : {Int | _ >= 5} do x end") in
+        Alcotest.(check bool) "witness confirmed" true
+          (contains text "but gpos(1) returns 1."))
   ; gated "cap verified: a confirmed violation reports the witness, not cannot-verify" (fun () ->
         (* One error, the strong one: the witness proves the contract is
            WRONG, which supersedes "the checker could not verify it".  The
@@ -9827,6 +10439,759 @@ end|} in
         Alcotest.(check bool) "no witness claim" false (contains text "but fdiv("))
   ]
 
+(* Call-site precondition PROMOTION (design doc §2).
+
+   Task 5 builds [Witness.confirm_precond_reachable]; Task 6 wires it into
+   `refine_call`.  Until then nothing here can promote, so the three SILENCE
+   cases are green by construction — that is deliberate.  They are the
+   regression guards for the wiring: an accept-only fixture cannot tell
+   "correctly declining" from "the promotion path is dead", so the negatives
+   have to be in place BEFORE the code that could break them.  If W1 ever goes
+   red, fix the gate; do not adjust the fixture. *)
+let promotion_suite =
+  [ (* THE false-positive guard.  `List.last`'s recursive call is safe because
+       the previous arm rules out the singleton — a fact the checker does not
+       derive, so the model happily assigns `t = Nil`.  Confirming that model
+       against RECORDED path facts "proves" a failure in correct code.
+       Executing `last` from its entry cannot: `t` is a match binder, not a
+       parameter, and `last`'s own contract excludes every `xs` that would
+       reach the call with `t = Nil`.
+
+       This fixture carries the REAL `List.last`'s `Nil -> panic(...)` arm
+       (not a silent `Nil -> 0` stand-in), so "0 warnings" actually tests the
+       gate's DECLINE — a harness that always returns "no panic" would look
+       identical against a panic-free fixture, but not against this one. *)
+    gated "a safe recursive call is not promoted (List.last shape)" (fun () ->
+        let src =
+          {|mod W1 do
+  fn last(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil          -> panic("List.last: empty list")
+    Cons(x, Nil) -> x
+    Cons(_, t)   -> last(t)
+    end
+  end
+end|}
+        in
+        Alcotest.(check int) "no warnings" 0
+          (List.length (refine_warnings src));
+        Alcotest.(check bool) "no errors" false (has_refine_error_d src))
+
+  ; (* The positive: an unrefined parameter passed straight into a refined one.
+       `go([])` is a real, reachable panic and the model assigns `ys` — a
+       PARAMETER of the enclosing function — so execution can demonstrate it.
+
+       EXPECTED RED until Task 6 wires the gate in; Task 5 only builds the
+       function. *)
+    gated "an unconstrained parameter reaching a panic is promoted" (fun () ->
+        let src =
+          {|mod W2 do
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil        -> panic("empty")
+    Cons(h, _) -> h
+    end
+  end
+  fn go(ys : List(Int)) : Int do head(ys) end
+end|}
+        in
+        Alcotest.(check int) "exactly one warning" 1
+          (List.length (refine_warnings src));
+        Alcotest.(check bool) "and it is not an error by default" false
+          (has_refine_error_d src))
+
+  ; (* The SENTENCE, pinned verbatim.  Counting warnings cannot tell a correct
+       promotion from one that attributes the panic to the wrong function, and
+       that distinction is the whole residual imprecision of Task 5's gate:
+       what was demonstrated is that `go` panics on an input violating `head`'s
+       requirement and returns once that input is repaired — NOT that `head`
+       raised the panic.  A rewording to "the call to `head` panics" would
+       claim something the gate does not prove, and only a text assertion
+       catches it.  The rendered argument comes from [Witness.render_call], so
+       it is in the user's own syntax (`[]`, not an internal value dump). *)
+    gated "the promoted warning states exactly what was demonstrated" (fun () ->
+        let src =
+          {|mod W2t do
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil        -> panic("empty")
+    Cons(h, _) -> h
+    end
+  end
+  fn go(ys : List(Int)) : Int do head(ys) end
+end|}
+        in
+        Alcotest.(check (list string)) "the warning, verbatim"
+          [ "`go` propagates a requirement it doesn't declare.\n\n"
+            ^ "`head` requires  len(_) > 0\n"
+            ^ "but go([]) panics \xe2\x80\x94 \"empty\"\n\n"
+            (* Task 7 ADDS the help block; the sentence above is unchanged,
+               which is the point — the finding is the same, it now ends in
+               the signature to write.  The parameter list printed here is
+               the SAME string the [FReplace] fix carries, so this pins that
+               the offer and the payload cannot diverge; the return type is
+               appended for display only, so what the user reads is a
+               signature they could type, while the fix stays scoped to the
+               one span there is to rewrite. *)
+            ^ "help: declare what `go` actually needs \xe2\x80\x94\n"
+            ^ "        fn go(ys : {List(Int) | len(_) > 0}) : Int\n"
+            ^ "`forge fix` can apply this." ]
+          (refine_warnings src))
+
+  ; (* The message should end in the signature to write, not the panic to
+       fear.  [Precond_infer] is assume-and-recheck against the real checker,
+       so a suggestion is correct by construction; it is affordable here
+       precisely because promotion is rare. *)
+    gated "a promoted failure suggests the precondition to declare" (fun () ->
+        let ws =
+          refine_warnings
+            {|mod W4 do
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil        -> panic("empty")
+    Cons(h, _) -> h
+    end
+  end
+  fn go(ys : List(Int)) : Int do head(ys) end
+end|}
+        in
+        Alcotest.(check bool) "names the refinement to add" true
+          (List.exists (fun w -> contains w "len(_) > 0" && contains w "ys") ws))
+
+  ; (* A message that advertises `forge fix` MUST carry something `forge fix`
+       can apply — its only input is `march --check-json`, which serialises
+       exactly this field.  Advertising without a payload is worse than not
+       advertising, and only inspecting the payload catches that; the text
+       assertion above passes either way. *)
+    gated "the promoted warning carries the fix it advertises" (fun () ->
+        let src =
+          {|mod W4f do
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil        -> panic("empty")
+    Cons(h, _) -> h
+    end
+  end
+  fn go(ys : List(Int)) : Int do head(ys) end
+end|}
+        in
+        let ctx = March_errors.Errors.create () in
+        let m = March_desugar.Desugar.desugar_module (parse src) in
+        March_refinecheck.Refine_check.check_module ctx m;
+        March_refinecheck.Precond_infer.attach_promoted_fixes ctx m;
+        match ctx.March_errors.Errors.diagnostics with
+        | [ { March_errors.Errors.fix =
+                Some (March_errors.Errors.FReplace { text; _ }); _ } ] ->
+          Alcotest.(check string) "rewrites the parameter list"
+            "(ys : {List(Int) | len(_) > 0})" text
+        | _ -> Alcotest.fail "the promoted warning carried no FReplace fix")
+
+  ; (* THE hijack guard.  [Precond_infer.matches_target] accepts any dotted
+       SUFFIX of a qualified name — that rule is why `forge refine chunks`
+       finds `Text.Split.chunks` — and an entry file's top-level function is
+       qualified by nothing, so `~target:"go"` also matches `Inner.go`.
+       [suggest] returns one result per hit, in decl order, so selecting the
+       HEAD lets an unrelated same-named helper decide this signature: its
+       refinement is applied to the recorded function's parameters BY NAME,
+       which rewrites the BASE TYPE too.  Here that turns `ys : List(Int)`
+       into `ys : Int` and `forge fix` writes a signature no caller
+       typechecks against — strictly worse than offering no fix at all.
+
+       Both functions promote, so this also pins the positive half: each
+       `go` must get its OWN refinement, not the other's. *)
+    gated "a same-named function in another module cannot hijack the fix" (fun () ->
+        let ws =
+          refine_warnings
+            {|mod Amb3 do
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil        -> panic("empty")
+    Cons(h, _) -> h
+    end
+  end
+  mod Inner do
+    fn hd(n : {Int | _ > 0}) : Int do
+      if n > 0 do n else panic("nonpos") end
+    end
+    fn go(ys : Int) : Int do hd(ys) end
+  end
+  fn go(ys : List(Int)) : Int do head(ys) end
+end|}
+        in
+        Alcotest.(check int) "both sites promoted" 2 (List.length ws);
+        Alcotest.(check bool) "the list `go` is offered the list refinement" true
+          (List.exists
+             (fun w ->
+               contains w "`head` requires"
+               && contains w "fn go(ys : {List(Int) | len(_) > 0})")
+             ws);
+        Alcotest.(check bool) "and never the Int one" false
+          (List.exists
+             (fun w -> contains w "`head` requires" && contains w "fn go(ys : {Int")
+             ws);
+        Alcotest.(check bool) "the Int `go` keeps its own" true
+          (List.exists
+             (fun w ->
+               contains w "`Inner.hd` requires"
+               && contains w "fn go(ys : {Int | _ > 0})")
+             ws))
+
+  ; (* The [Solved]-only rule, which nothing else pins: every other promotion
+       fixture has a single obligation, so [Partial] never arises and relaxing
+       the match to `Solved | Partial` leaves the whole group green.
+
+       `go` carries two INDEPENDENT obligations.  `len(_) > 0` on `ys`
+       discharges the first; nothing in the candidate grammar implies `_ == 7`,
+       so `k`'s survives and the status is `partial` (debt 2 -> 1, verified
+       through `--refine-suggest-json`).  A `Partial` proposal is a signature
+       that does NOT remove the failure being reported, so it must be offered
+       neither as help text nor as a fix. *)
+    gated "a partial suggestion is not offered" (fun () ->
+        let src =
+          {|mod P1 do
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil        -> panic("empty")
+    Cons(h, _) -> h
+    end
+  end
+  fn seven(n : {Int | _ == 7}) : Int do n end
+  fn go(ys : List(Int), k : Int) : Int do head(ys) + seven(k) end
+end|}
+        in
+        let ctx = March_errors.Errors.create () in
+        let m = March_desugar.Desugar.desugar_module (parse src) in
+        March_refinecheck.Refine_check.check_module ctx m;
+        March_refinecheck.Precond_infer.attach_promoted_fixes ctx m;
+        let ws =
+          List.filter
+            (fun (d : March_errors.Errors.diagnostic) ->
+              d.March_errors.Errors.severity = March_errors.Errors.Warning)
+            ctx.March_errors.Errors.diagnostics
+        in
+        Alcotest.(check int) "the promotion still fires" 1 (List.length ws);
+        let w = List.hd ws in
+        Alcotest.(check bool) "no help block" false
+          (contains w.March_errors.Errors.message "help: declare what");
+        Alcotest.(check bool) "and no fix payload" false
+          (w.March_errors.Errors.fix <> None))
+
+  ; (* `forge fix` applies an [FReplace] only when it stays on ONE line
+       (`forge/lib/cmd_fix.ml`'s `start_line = end_line` guard) and silently
+       DROPS it otherwise, without counting it.  A parameter list broken
+       across lines would therefore advertise `forge fix` for a fix that never
+       arrives — the anti-pattern this task exists to avoid — so it must be
+       declined.  The finding itself still stands. *)
+    gated "a multi-line parameter list is not offered a fix" (fun () ->
+        let src =
+          {|mod ML do
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil        -> panic("empty")
+    Cons(h, _) -> h
+    end
+  end
+  fn go(
+    ys : List(Int)
+  ) : Int do head(ys) end
+end|}
+        in
+        let ws = refine_warnings src in
+        Alcotest.(check int) "the promotion still fires" 1 (List.length ws);
+        Alcotest.(check bool) "but nothing is advertised" false
+          (List.exists (fun w -> contains w "forge fix") ws))
+
+  ; (* Warning by default because "propagates an undeclared requirement" is a
+       design choice a user may make; Error under `cap verified`, which is the
+       established opt-in for turning unverifiable obligations into errors.
+       Both halves are pinned: a promotion that is always an error would break
+       every unrefined wrapper around a panicking stdlib function. *)
+    gated "a promoted failure escalates to an error under cap verified" (fun () ->
+        let src =
+          {|mod W3 do
+  cap verified
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil        -> panic("empty")
+    Cons(h, _) -> h
+    end
+  end
+  fn go(ys : List(Int)) : Int do head(ys) end
+end|}
+        in
+        Alcotest.(check bool) "error under cap verified" true
+          (has_refine_error_d src);
+        (* The SAME sentence as the warning, not the generic `cap verified`
+           boilerplate: the escalation changes the severity, not the finding. *)
+        Alcotest.(check bool) "and it is the promotion's own text" true
+          (contains (refine_error_text_d src) "propagates a requirement it doesn't declare"))
+
+  ; (* A promotion notes [Violated], not [Skipped], so it must not ALSO flow
+       through the `cap verified` escalation in [note] and report twice.  A
+       boolean cannot tell "reported once" from "reported twice", which is why
+       this counts. *)
+    gated "a promoted failure under cap verified reports exactly once" (fun () ->
+        Alcotest.(check int) "one diagnostic, not a doubled report" 1
+          (refine_error_count
+             {|mod W3b do
+  cap verified
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil        -> panic("empty")
+    Cons(h, _) -> h
+    end
+  end
+  fn go(ys : List(Int)) : Int do head(ys) end
+end|}))
+
+  ; (* A promotion-shaped call in a file the CALLER declared to be the standard
+       library's own source does not promote.  Stdlib-span diagnostics are
+       filtered out of the printed stream, so a promotion there is invisible to
+       the reader while still growing `--refine-report`'s `violated` count and
+       still paying for the interpreter run that produced it — measured as four
+       true-but-mute promotions in `stdlib/stats.march` and +0.12s on a cold
+       `--check` of a three-line program.  Declining puts those obligations back
+       where they already were, at `Skipped unconstrained-subject`.
+
+       The second half is the non-vacuity control, and it is the whole reason
+       this test is written as a pair: with the SAME source and the SAME file
+       name, but the file no longer declared as stdlib, the promotion fires.
+       Without it, "zero warnings" is equally consistent with the fixture not
+       being promotion-shaped at all, with a typo in the module, or with the
+       promotion path being dead — and this suite's own history is that a
+       silence assertion which cannot fail is worse than no assertion. *)
+    gated "a stdlib-span call is not promoted" (fun () ->
+        let src =
+          {|mod W4 do
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil        -> panic("empty")
+    Cons(h, _) -> h
+    end
+  end
+  fn go(ys : List(Int)) : Int do head(ys) end
+end|}
+        in
+        Alcotest.(check int) "no warnings at a stdlib span" 0
+          (List.length
+             (refine_warnings_from ~stdlib_files:[ "stdlib/w4.march" ]
+                ~file:"stdlib/w4.march" src));
+        Alcotest.(check int) "but the same source DOES promote when it is not stdlib" 1
+          (List.length (refine_warnings_from ~file:"stdlib/w4.march" src)))
+
+  ; (* An effectful enclosing function cannot be executed under the veto, so
+       no panic can be observed and nothing is promoted.  Without this the
+       veto could be removed and every test above would still pass. *)
+    gated "an effectful enclosing function is not promoted" (fun () ->
+        let src =
+          {|mod W5 do
+  needs IO.Console
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil        -> panic("empty")
+    Cons(h, _) -> h
+    end
+  end
+  fn go(ys : List(Int)) : Int do
+    print("side effect")
+    head(ys)
+  end
+end|}
+        in
+        Alcotest.(check int) "no warnings" 0 (List.length (refine_warnings src)))
+
+  ; (* A subject that is a LET-BOUND temporary rather than a parameter: the
+       model assigns `n`, which `decode_model` cannot map onto `go`'s own
+       parameters, so there is nothing admissible to execute.  This is the
+       same mechanism that makes the List.last shape decline, exercised
+       without recursion so a failure here localises. *)
+    gated "a let-bound subject is not promoted" (fun () ->
+        let src =
+          {|mod W6 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn go(k : Int) : Int do
+    let n = k - k
+    pos(n)
+  end
+end|}
+        in
+        Alcotest.(check int) "no warnings" 0 (List.length (refine_warnings src)))
+  ]
+
+(* Direct unit coverage for [Witness.confirm_precond_reachable].
+
+   Task 5 ships the function with no caller (Task 6 wires it), so without
+   these the whole implementation would be untested-by-construction in this
+   commit and a broken gate would be invisible until the wiring landed.  No
+   solver is involved — the model is supplied by hand, which is also the only
+   way to pin the DECLINE paths against a model that a real solver may or may
+   not produce on any given day.  Hence [Alcotest.test_case], not [gated]. *)
+let reachable_unit_suite =
+  let module W = March_refinecheck.Witness in
+  let module A = March_ast.Ast in
+  let dsp = A.dummy_span in
+  let nm t = { A.txt = t; A.span = dsp } in
+  let evar t = A.EVar (nm t) in
+  let eint n = A.ELit (A.LitInt n, dsp) in
+  let eapp f args = A.EApp (evar f, args, dsp) in
+  (* The obligation every fixture below is about: `len(_) > 0`, the callee's
+     precondition, with the call-site argument named per case. *)
+  let len_pos = eapp ">" [ eapp "len" [ evar "_" ]; eint 0 ] in
+  let confirm ?(pred = len_pos) ?(binder = "_") ~arg fn model =
+    W.confirm_precond_reachable ~fn ~pred ~binder ~arg:(evar arg) ~model
+  in
+  (* Register [src] as the module under witness execution and hand back the
+     desugared definition of [name] — [path] is the enclosing `mod` chain, so
+     a nested definition can be reached. *)
+  let fn_at src path name =
+    let m = March_desugar.Desugar.desugar_module (parse src) in
+    W.set_module m;
+    let rec dig decls = function
+      | [] ->
+        List.find_map
+          (function
+            | A.DFn (fd, _) when fd.A.fn_name.A.txt = name -> Some fd
+            | _ -> None)
+          decls
+      | p :: rest ->
+        List.find_map
+          (function
+            | A.DMod (n, _, inner, _) when n.A.txt = p -> dig inner rest
+            | _ -> None)
+          decls
+    in
+    match dig m.A.mod_decls path with
+    | Some fd -> fd
+    | None -> Alcotest.fail ("no fn " ^ String.concat "." (path @ [ name ]))
+  in
+  let fn_named src name = fn_at src [] name in
+  (* A callee that panics on exactly the inputs its precondition rejects. *)
+  let head_decl =
+    {|  fn head(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil        -> panic("empty list")
+    Cons(h, _) -> h
+    end
+  end
+|}
+  in
+  let last_src =
+    {|mod U1 do
+  fn last(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil          -> panic("List.last: empty list")
+    Cons(x, Nil) -> x
+    Cons(_, t)   -> last(t)
+    end
+  end
+end|}
+  in
+  [ Alcotest.test_case "reachable: parameter model confirms" `Quick (fun () ->
+        let fn =
+          fn_named
+            ({|mod U2 do
+|} ^ head_decl ^ {|  fn go(ys : List(Int)) : Int do head(ys) end
+end|})
+            "go"
+        in
+        (* The model names `ys`, a parameter of the enclosing function; the
+           decoded empty list is admissible (`go` declares no refinement), it
+           really violates `len(_) > 0`, executing `go` panics, and repairing
+           only `ys` makes the panic go away. *)
+        match confirm ~arg:"ys" fn [ ("len$ys", "0") ] with
+        | None -> Alcotest.fail "expected a confirmed reachable witness"
+        | Some (args, msg) ->
+          Alcotest.(check (option string))
+            "the failing argument" (Some "ys = []") (W.render_entries args);
+          (* VERBATIM the user's own text: the `panic: ` marker the builtin
+             adds is stripped, so Task 6 can quote this directly. *)
+          Alcotest.(check string) "panic quoted" "empty list" msg)
+
+  ; Alcotest.test_case "reachable: the confirmed witness is shrunk" `Quick
+      (fun () ->
+        (* The don't-care `n` starts at 5 and is minimised by the same
+           admissible-violating-panicking oracle. *)
+        let fn =
+          fn_named
+            ({|mod U5 do
+|} ^ head_decl
+           ^ {|  fn go(ys : List(Int), n : Int) : Int do head(ys) + n end
+end|})
+            "go"
+        in
+        match confirm ~arg:"ys" fn [ ("len$ys", "0"); ("n", "5") ] with
+        | None -> Alcotest.fail "expected a confirmed reachable witness"
+        | Some (args, _) ->
+          Alcotest.(check (option string))
+            "shrunk" (Some "ys = [], n = 0") (W.render_entries args))
+
+  ; Alcotest.test_case "reachable: the List.last shape declines" `Quick
+      (fun () ->
+        (* THE case the gate exists for.  The obligation's argument is the
+           match binder `t`, which is not a parameter of `last`, so the entry
+           cannot control it; and `last`'s only parameter zero-fills to `[]`,
+           which its OWN refinement excludes.  Two independent gates, either
+           of which is enough.  Were this confirmed against recorded path
+           facts instead, `last([])` panics and correct code is reported. *)
+        let fn = fn_named last_src "last" in
+        Alcotest.(check bool) "declined" true
+          (confirm ~arg:"t" fn [ ("len$t", "0") ] = None))
+
+  ; Alcotest.test_case "reachable: an inadmissible model declines" `Quick
+      (fun () ->
+        (* Same function, and this time the obligation is about the parameter
+           itself — with a value the parameter's own contract forbids.
+           Executing it panics, so only the admissibility check stands between
+           this and a false positive. *)
+        let fn = fn_named last_src "last" in
+        Alcotest.(check bool) "declined" true
+          (confirm ~arg:"xs" fn [ ("len$xs", "0") ] = None))
+
+  ; Alcotest.test_case "reachable: a hidden nested refinement declines" `Quick
+      (fun () ->
+        (* [admissible] only inspects a refinement at the TOP of the declared
+           type, so the one on the element type here is invisible to it and a
+           zero-filled decode could hand the function a value the declared
+           type excludes.  Everything else about this fixture confirms, so it
+           returns [Some] the moment the witness-safety walk stops rejecting
+           the type. *)
+        let fn =
+          fn_named
+            ({|mod U3 do
+|} ^ head_decl
+           ^ {|  fn f(xs : List({Int | _ > 0})) : Int do head(xs) end
+end|})
+            "f"
+        in
+        Alcotest.(check bool) "declined" true
+          (confirm ~arg:"xs" fn [ ("len$xs", "0") ] = None))
+
+  ; Alcotest.test_case "reachable: a non-panicking function declines" `Quick
+      (fun () ->
+        (* The oracle is an OBSERVED panic, not a decoded model. *)
+        let fn =
+          fn_named {|mod U4 do
+  fn f(ys : List(Int)) : Int do 0 end
+end|} "f"
+        in
+        Alcotest.(check bool) "declined" true
+          (confirm ~arg:"ys" fn [ ("len$ys", "0") ] = None))
+
+  ; (* C1.  `lookup_fn` prefers an exact BARE-name binding, so resolving the
+       enclosing function by its short name runs the top-level `f` and
+       attributes its panic to `Inner.f`, which returns 0 on every input.
+       Both halves are asserted: the nested one must decline AND the
+       top-level one must still confirm, or "declines" proves only that the
+       lookup broke. *)
+    (let collision_src =
+      {|mod P7 do
+|} ^ head_decl
+      ^ {|  fn f(ys : List(Int)) : Int do head(ys) end
+  mod Inner do
+    fn f(ys : List(Int)) : Int do 0 end
+  end
+end|}
+    in
+    Alcotest.test_case "reachable: a nested namesake is not executed" `Quick
+      (fun () ->
+        let inner = fn_at collision_src [ "Inner" ] "f" in
+        Alcotest.(check bool) "nested namesake declines" true
+          (confirm ~arg:"ys" inner [ ("len$ys", "0") ] = None);
+        let outer = fn_at collision_src [] "f" in
+        match confirm ~arg:"ys" outer [ ("len$ys", "0") ] with
+        | Some (_, msg) ->
+          Alcotest.(check string) "the top-level one still confirms"
+            "empty list" msg
+        | None -> Alcotest.fail "expected the top-level `f` to confirm"))
+
+  ; (* C1, positive half.  Case 6 above shows the NESTED namesake declining,
+       which on its own is equally consistent with the identity lookup never
+       finding a nested definition at all — and every stdlib module is a
+       `DMod`, so that failure mode would silently kill the whole feature.
+       Here the working definition is the nested one and the top-level
+       namesake is inert, so only a lookup that really resolves `Inner.f` can
+       confirm. *)
+    (let nested_src =
+       {|mod P8 do
+|} ^ head_decl
+       ^ {|  fn f(ys : List(Int)) : Int do 0 end
+  mod Inner do
+    fn f(ys : List(Int)) : Int do head(ys) end
+  end
+end|}
+     in
+     Alcotest.test_case "reachable: a nested function is resolved" `Quick
+       (fun () ->
+         let inner = fn_at nested_src [ "Inner" ] "f" in
+         (match confirm ~arg:"ys" inner [ ("len$ys", "0") ] with
+          | Some (_, msg) ->
+            Alcotest.(check string) "the nested one confirms" "empty list" msg
+          | None -> Alcotest.fail "expected `Inner.f` to confirm");
+         let outer = fn_at nested_src [] "f" in
+         Alcotest.(check bool) "the inert top-level namesake declines" true
+           (confirm ~arg:"ys" outer [ ("len$ys", "0") ] = None)))
+
+  ; Alcotest.test_case "reachable: an unrelated panic declines" `Quick
+      (fun () ->
+        (* I2.  The don't-care `n` zero-fills to 0 and the panic comes from a
+           branch that never evaluates `head(ys)`.  The interpreter cannot
+           tell us where a panic came from, so the gate demonstrates
+           attribution instead: repairing only the subject leaves this one
+           panicking, so it declines. *)
+        let fn =
+          fn_named
+            ({|mod U6 do
+|} ^ head_decl
+           ^ {|  fn go(ys : List(Int), n : Int) : Int do
+    if n == 0 do panic("unrelated: n is zero") else head(ys) end
+  end
+end|})
+            "go"
+        in
+        Alcotest.(check bool) "declined" true
+          (confirm ~arg:"ys" fn [ ("len$ys", "0"); ("n", "0") ] = None))
+
+  ; Alcotest.test_case "reachable: a satisfied precondition declines" `Quick
+      (fun () ->
+        (* The panic is real and IS attributable to the subject — repairing
+           `n` to 2 removes it — but `n = 1` SATISFIES `pos`'s requirement, so
+           this call is not the failure and reporting it would name a
+           precondition the input already meets.  The only gate that rejects
+           it is the requirement that the decoded argument genuinely violate
+           the predicate. *)
+        let fn =
+          fn_named
+            {|mod U8 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn go(n : Int) : Int do
+    if n == 1 do panic("one") else pos(n) end
+  end
+end|}
+            "go"
+        in
+        Alcotest.(check bool) "declined" true
+          (confirm ~pred:(eapp ">" [ evar "_"; eint 0 ]) ~arg:"n" fn
+             [ ("n", "1") ]
+           = None))
+
+  ; Alcotest.test_case "reachable: an unconfirmable repair declines" `Quick
+      (fun () ->
+        (* The repair check must demand an actual RETURN, not merely "no panic
+           observed".  A repaired run can come back [Unconfirmable] for
+           reasons that say nothing about the panic — fuel exhaustion, a
+           blocked builtin, an internal [Eval_error], or a spent
+           [wall_budget], after which every later call short-circuits — and
+           scoring those as "the panic went away" makes the demonstration
+           vacuous and restores the unrelated-branch false positive.
+
+           Here the panic is guarded solely by `n`, so `head(ys)` is never
+           evaluated and repairing `ys` cannot remove it; the repaired run
+           takes the `Cons` branch into an unbound name and comes back
+           unconfirmable rather than returning.  An internal error is used
+           rather than a fuel-out loop so the case costs nothing to run. *)
+        let fn =
+          fn_named
+            ({|mod U9 do
+|} ^ head_decl
+           ^ {|  fn go(ys : List(Int), n : Int) : Int do
+    let z = match ys do
+    Nil        -> 0
+    Cons(_, _) -> nope
+    end
+    if n == 0 do panic("unrelated: n is zero") else head(ys) + z end
+  end
+end|})
+            "go"
+        in
+        Alcotest.(check bool) "declined" true
+          (confirm ~arg:"ys" fn [ ("len$ys", "0"); ("n", "0") ] = None))
+
+  ; Alcotest.test_case "reachable: an internal evaluator error declines" `Quick
+      (fun () ->
+        (* I3.  `Eval_error` is the evaluator's GENERAL failure channel, not
+           the panic exception: an unbound variable raises exactly what
+           `panic` does.  Only the message prefix separates them, so this
+           fixture is what keeps that convention honest — reverting the
+           classification in [with_harness] confirms
+           "unbound variable: nope" as a program panic. *)
+        let fn =
+          fn_named
+            {|mod U7 do
+  fn f(ys : List(Int)) : Int do
+    match ys do
+    Nil        -> nope
+    Cons(h, _) -> h
+    end
+  end
+end|}
+            "f"
+        in
+        Alcotest.(check bool) "declined" true
+          (confirm ~arg:"ys" fn [ ("len$ys", "0") ] = None))
+  ]
+
+(* Direct, solver-free coverage for the witness-safety gate on the RETURN
+   contract path.  [confirm_enumerative] needs no model, so a hand-built
+   parameter type exercises the gate exactly; the e2e cases above depend on
+   z3 producing a model and skip without one. *)
+let post_nested_unit_suite =
+  let module W = March_refinecheck.Witness in
+  let module A = March_ast.Ast in
+  let module V = March_eval.Eval_types in
+  let dsp = A.dummy_span in
+  let nm t = { A.txt = t; A.span = dsp } in
+  let evar t = A.EVar (nm t) in
+  let eint n = A.ELit (A.LitInt n, dsp) in
+  let eapp f args = A.EApp (evar f, args, dsp) in
+  let ge5 = eapp ">=" [ evar "_"; eint 5 ] in
+  let int_ty = A.TyCon (nm "Int", []) in
+  let pos_int = A.TyRefine (int_ty, None, eapp ">" [ evar "_"; eint 0 ]) in
+  let register src = W.set_module (March_desugar.Desugar.desugar_module (parse src)) in
+  let confirm fn_name fn_params =
+    W.confirm_enumerative ~fn_name ~fn_params ~binder:"_" ~ret_pred:ge5
+  in
+  [ Alcotest.test_case "enumerative: a refined record field declines" `Quick
+      (fun () ->
+        register
+          {|mod Q1 do
+  type Box = { v : {Int | _ > 0} }
+  fn f(b : Box) : {Int | _ >= 5} do b.v end
+end|};
+        Alcotest.(check bool) "declined" true
+          (confirm "f" [ ("b", Some (A.TyCon (nm "Box", []))) ] = None))
+  ; Alcotest.test_case "enumerative: a refined type argument declines" `Quick
+      (fun () ->
+        register
+          {|mod Q2 do
+  fn f(xs : List(Int)) : {Int | _ >= 5} do
+    match xs do
+    Nil -> 0
+    Cons(h, _) -> h
+    end
+  end
+end|};
+        Alcotest.(check bool) "declined" true
+          (confirm "f" [ ("xs", Some (A.TyCon (nm "List", [ pos_int ]))) ] = None))
+  ; Alcotest.test_case "enumerative: a refinement under a linear wrapper declines" `Quick
+      (fun () ->
+        register {|mod Q3 do
+  fn f(x : Int) : {Int | _ >= 5} do x end
+end|};
+        Alcotest.(check bool) "declined" true
+          (confirm "f" [ ("x", Some (A.TyLinear (A.Linear, pos_int))) ] = None))
+  ; Alcotest.test_case "enumerative: a top-level refined parameter still confirms" `Quick
+      (fun () ->
+        (* Discriminating control: the gate must pass what [admissible] can
+           decide, or the three declines above prove nothing. *)
+        register {|mod Q4 do
+  fn f(x : Int) : {Int | _ >= 5} do x end
+end|};
+        match confirm "f" [ ("x", Some pos_int) ] with
+        | Some ((_, V.VInt 1) :: [], V.VInt 1) -> ()
+        | Some _ -> Alcotest.fail "confirmed, but not the minimal witness f(1)"
+        | None -> Alcotest.fail "the top-level refined parameter was declined")
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -9897,4 +11262,7 @@ let () =
       ("no-panic-syntactic-fallback", syntactic_fallback_suite);
       ("witness-harness", witness_harness_suite);
       ("witness-core", witness_core_suite);
-      ("witness-e2e", witness_e2e_suite) ]
+      ("witness-e2e", witness_e2e_suite);
+      ("precond-promotion", promotion_suite);
+      ("precond-reachable-unit", reachable_unit_suite);
+      ("post-nested-unit", post_nested_unit_suite) ]

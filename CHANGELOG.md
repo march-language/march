@@ -149,6 +149,12 @@ git log is authoritative for exact commits.
   stack on deep input. The warning now says deep input can overflow, and
   describes TRMC as the opt-in it is (`--trmc`).
 
+- A return-contract counterexample no longer names an input the parameter's
+  own type excludes when the refinement sits below the top of the type (a
+  refined record field such as `{ v : {Int | _ > 0} }`, a refined type
+  argument, or a refinement under a linear wrapper). Such witnesses are now
+  declined, the same rule the call-site precondition path already applied;
+  a refinement at the top of the parameter type still confirms as before.
 - ARM Linux (`linux-aarch64`) has a working release artifact for the first
   time. Every v0.2.0 and v0.3.0 ARM archive shipped with an empty `bin/` and no
   compiler at all. Three defects were stacked behind one another: git refusing
@@ -158,6 +164,25 @@ git log is authoritative for exact commits.
   `blake3_hash_many_neon` undefined in every executable that uses it.
 
 ### Changed
+
+- Refinement obligations the checker cannot discharge now report *why*. The
+  single `solver-undecided` message has been split into three diagnosed causes —
+  an **unconstrained subject** (no fact the checker derived constrains the
+  value the predicate talks about), a **partially established conjunction** (naming which
+  half holds and which does not), and an **opaque application** (the goal
+  depends on a call the checker cannot see through) — with `solver-undecided`
+  kept as the honest residual for "the solver returned unknown". A diagnosed
+  cause reports at every call site that has one; the undiagnosable residual
+  keeps its previous once-per-module hint, so the common case gains detail
+  without the rare one gaining noise. `--refine-report` now groups its skipped
+  counts by *cause* rather than by message payload, so a bucket is one line
+  instead of one line per distinct variable name.
+
+- Promotion of a call-site precondition failure to a warning is not attempted
+  at `stdlib/` spans. Diagnostics at stdlib spans are filtered out of the
+  printed stream, so a promotion there paid the reachability cost to produce a
+  count nobody could explain. Compiling a stdlib module directly still reports
+  its own sites, because then they are user spans.
 
 - The `linux-aarch64` release leg builds on a native arm64 runner
   (`ubuntu-24.04-arm`) instead of QEMU emulation on an x86_64 host. It still
@@ -181,6 +206,34 @@ git log is authoritative for exact commits.
   encoding makes `cap_dict` the identity function. Mocking an *IO* capability is
   not yet reachable — IO builtins do not take their capability as an argument,
   so a dictionary attached to one would never be consulted.
+- A function that propagates a refinement requirement it does not declare is
+  now reported, and the report ends in the signature to write rather than the
+  panic to fear. When a call-site precondition failure can be *demonstrated* —
+  the enclosing function is executed, a real panic observed, and repairing the
+  argument shown to remove it — March infers the precondition that discharges
+  the obligation and prints it as a `help:` block, carrying a machine-applicable
+  fix so `forge fix` rewrites the parameter list for you:
+
+  ```
+  `go` propagates a requirement it doesn't declare.
+
+  `head` requires  len(_) > 0
+  but go([]) panics — "empty"
+
+  help: declare what `go` actually needs —
+          fn go(ys : {List(Int) | len(_) > 0}) : Int
+  `forge fix` can apply this.
+  ```
+
+  The suggestion is offered only when the checker itself proved it discharges
+  the whole debt, so applying it really does silence the warning. A warning by
+  default (propagating an undeclared requirement is a design choice); an error
+  under `cap verified`. Cost is confined to promotion, which is rare: a program
+  with no demonstrated failure runs no inference at all. Only evaluator
+  failures prefixed `panic:`, `todo:`, or `unreachable:` count as a panic for
+  this confirmation; any other `Eval_error` (unbound name, arity mismatch,
+  desugar residue, …) declines to confirm, so an internal evaluator error can
+  never be reported as a demonstrated failure.
 
 - Refinement failures now come with concrete, interpreter-validated
   counterexamples rendered in source terms. A return contract violated for

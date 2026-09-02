@@ -49,9 +49,13 @@
    The four module aliases (A, Smt, Refine, Err) moved with the band and
    arrive through the include, so they are no longer declared above.
    The SMT encoding and sort discipline moved VERBATIM into [Refine_encode].
-   [include], not aliases: that band owns 16 of this pass's 20 mutable cells
-   and they are written from the far end of this file, so the SAME ref cell
-   must be in scope here — see [Refine_encode]'s header. *)
+   [include], not aliases: the included chain owns all 16 of the cells
+   reached through this include (9 in [Refine_encode], 1 in
+   [Refine_resolve], 6 in [Refine_call]; [Refine_scope] and [Refine_post]
+   declare none at top level — [Obligation.log] and [Witness]'s three cells
+   are pass state too, but they live outside this include chain) and they
+   are written from the far end of this file, so the SAME ref cell must be
+   in scope here — see [Refine_encode]'s header. *)
 (* ── §1–§11 moved out ─────────────────────────────────────────────────────
    §1–§6 (the SMT encoding and sort discipline) live in [Refine_encode];
    §7–§11 (reflection, rendering, and the two fact channels) live in
@@ -61,9 +65,12 @@
    brings both back, in their original order.  The four module aliases
    (A, Smt, Refine, Err) arrive through it too.
 
-   [include], not aliases: those bands own 16 of this pass's 20 mutable cells
-   and they are written from the far end of this file, so the SAME ref cell
-   must be in scope here. *)
+   [include], not aliases: those bands own all 16 of the cells reached
+   through this include (9 in [Refine_encode], 1 in [Refine_resolve], 6 in
+   [Refine_call]; [Refine_scope] and [Refine_post] declare none at top
+   level — [Obligation.log] and [Witness]'s three cells are pass state too,
+   but they live outside this include chain) and they are written from the
+   far end of this file, so the SAME ref cell must be in scope here. *)
 include Refine_post
 
 (* =================================================================
@@ -901,8 +908,17 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
      in March, but a fresh call into [visit_fn] for a sibling clearly must not
      inherit this) never sees a stale `true` left behind by a caller. *)
   let saved_trusted = !trusted_fn in
+  let saved_enclosing = !enclosing_fn in
   trusted_fn := is_trusted;
-  Fun.protect ~finally:(fun () -> trusted_fn := saved_trusted) (fun () ->
+  enclosing_fn := Some fd;
+  (match !enclosing_fn_probe with
+   | Some probe -> probe fd
+   | None -> ());
+  Fun.protect
+    ~finally:(fun () ->
+      trusted_fn := saved_trusted;
+      enclosing_fn := saved_enclosing)
+    (fun () ->
     check_fn_post ~root errctx fd;
     let walked = if assume_params then fd else strip_param_refinements fd in
     List.iter
@@ -1116,7 +1132,11 @@ let rec collect_measure_fns (decls : A.decl list) : (string * A.fn_def) list =
 
    `alias Foo as List` and `use Some.List` can also make the spelling denote
    someone else's function, so either withdraws the alias too. *)
-let is_stdlib_source_file (f : string) : bool = List.mem f !stdlib_source_files
+(* [is_stdlib_source_file] itself lives in [Refine_encode], beside the
+   [stdlib_source_files] ref it reads — the promotion gate in [Refine_call]
+   needs the same predicate and sits upstream of this file.  The reasoning
+   above is about WHY the test is an identity rather than a path pattern, and
+   applies wherever it is called from. *)
 
 (* ── Glob imports: LOOK instead of assuming ────────────────────────────────
    `import X` / `use X.*` can only make a spelling denote something else if X
@@ -1781,6 +1801,13 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   (* Hygiene: [visit_decls] sets this per decl list, but a prior module must
      never be able to leave it on. *)
   strict_verified := false;
+  (* Same hygiene, same reason: [Precond_infer.attach_promoted_fixes] drains
+     this after the walk, and a site left over from a previous module would
+     send it looking for a diagnostic this context never had. *)
+  promoted_sites := [];
+  (* Same hygiene: a prior module's enclosing function must never leak into
+     this module's promotion checks. *)
+  enclosing_fn := None;
   stdlib_source_files := stdlib_files;
   let mod_name = m.A.mod_name.A.txt in
   (* Each gate answers "is the alias still safe?"; a `false` is a WITHDRAWAL,
