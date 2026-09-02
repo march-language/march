@@ -69,8 +69,16 @@ let resolve_entry ?file () =
 
     [args] goes last, behind --args: the compiler collects every remaining
     token there (Arg.Rest_all), so anything emitted after it would be swallowed
-    as a program argument.  An empty [args] emits nothing at all, keeping the
-    command byte-identical to what forge has always run.
+    as a program argument.  [args] distinguishes "don't pass --args at all"
+    ([None]) from "pass --args with an empty argument list" ([Some []]): the
+    project-entry path uses [None] when there are no arguments, keeping its
+    command byte-identical to what forge has always run (pinned by
+    [test_interp_command_no_ffi_is_unchanged]); the single-named-FILE path
+    always passes [Some _], even when empty, so the interpreted program's
+    argv is always exactly [ [entry] @ args ] instead of leaking the march
+    binary itself as argv[0] when no program arguments are given (`march
+    f.march --args` with nothing after --args yields argv = [f.march], per
+    test/test_prog_argv.ml's test_args_with_nothing_after_is_script_only).
 
     Takes a trailing unit: [?args] sits between two required *labeled*
     arguments ([ffi_flags] and [entry]), and OCaml can only erase an optional
@@ -78,12 +86,15 @@ let resolve_entry ?file () =
     application — a labeled one, no matter how many, never triggers erasure
     (this is "unerasable-optional-argument", warning 16). Without the trailing
     [()], every call that omits [~args] — including the pre-existing
-    no-[[ffi]] case — would type as [?args:string list -> string] instead of
-    [string]. *)
-let interp_command ~lib_path_env ~dump_flag ~ffi_flags ?(args = []) ~entry () =
+    no-[[ffi]] case — would type as [?args:string list option -> string]
+    instead of [string]. *)
+let interp_command ~lib_path_env ~dump_flag ~ffi_flags ?(args = None) ~entry () =
   let args_flag =
-    if args = [] then ""
-    else " --args " ^ String.concat " " (List.map Filename.quote args)
+    match args with
+    | None -> ""
+    | Some args ->
+      let quoted = List.map Filename.quote args in
+      " --args" ^ (if quoted = [] then "" else " " ^ String.concat " " quoted)
   in
   Printf.sprintf "%smarch%s%s %s%s"
     lib_path_env dump_flag ffi_flags (Filename.quote entry) args_flag
@@ -101,45 +112,70 @@ let exec_output ~target ~args output =
   if rc = 0 then Ok ()
   else Error (Printf.sprintf "program exited with code %d" rc)
 
+(** [run] branches on [compiled] and [file] together, in one match, so every
+    combination is handled in exactly one place and none is reachable-but-
+    unhandled:
+
+    - [(true, None)]: a plain compiled PROJECT build.  This is the one
+      combination that needs nothing from [resolve_entry] — it hands off
+      entirely to [Cmd_build.build], which resolves its own entry and
+      re-derives its own context.  Calling [resolve_entry] first would redo
+      that work for a result thrown away — re-running any [[ffi.rust]]
+      `cargo build` (and re-printing its output) a second time on every
+      invocation, including every poll of `forge watch run`, and
+      [Sys.file_exists]-checking the entry before [Cmd_build.build]'s own
+      preprocessors have had a chance to generate it.
+    - [(false, _)]: an interpreted run, project entry or named FILE alike.
+    - [(true, Some _)]: a compiled single-FILE run: compile straight to a
+      disposable temp output (the CAS caches the real work).
+
+    Splitting this three ways up front — rather than deciding on [compiled]
+    first and re-matching on [file] inside — means there is no leftover
+    "[compiled] and [file] is somehow [None] after all" arm to fill with a
+    placeholder; the impossible case simply isn't expressible. *)
 let run ?(dump_phases = false) ?(compiled = false) ?target ?file ?(args = []) () =
-  match resolve_entry ?file () with
-  | Error msg -> Error msg
-  | Ok (entry, ctx) ->
-    if not compiled then begin
-      let dump_flag = if dump_phases then " --dump-phases" else "" in
-      let cmd =
-        interp_command ~lib_path_env:ctx.lib_path_env ~dump_flag
-          ~ffi_flags:ctx.ffi_flags ~args ~entry ()
-      in
-      let rc = Sys.command cmd in
-      if rc = 0 then Ok ()
-      else Error (Printf.sprintf "program exited with code %d" rc)
-    end else
-      match file with
-      | None ->
-        (* Project build: go through Cmd_build.build so the target dir, the CAS
-           and workspace semantics stay exactly as they were. *)
-        (match Cmd_build.build ~release:false ~dump_phases ?target () with
-         | Error msg -> Error msg
-         | Ok output -> exec_output ~target ~args output)
-      | Some _ ->
-        (* Single file: compile straight to a temp output.  The CAS caches the
-           real work, so the artifact itself is disposable and is removed after
-           the run rather than littering the cwd. *)
-        let output =
-          Filename.temp_file "forge-run-" (Cmd_build.output_ext target) in
-        (* temp_file creates the file; the compiler wants to write it itself. *)
-        (try Sys.remove output with Sys_error _ -> ());
-        Fun.protect
-          ~finally:(fun () ->
-              try if Sys.file_exists output then Sys.remove output
-              with Sys_error _ -> ())
-          (fun () ->
-             let (rc, _errors, _warnings) =
-               Cmd_build.compile_entry ~lib_path_env:ctx.lib_path_env
-                 ~ffi_flags:ctx.ffi_flags ~output ~release:false ~dump_phases
-                 ?target entry
-             in
-             if rc <> 0 then
-               Error (Printf.sprintf "march compiler exited with code %d" rc)
-             else exec_output ~target ~args output)
+  match compiled, file with
+  | true, None ->
+    (match Cmd_build.build ~release:false ~dump_phases ?target () with
+     | Error msg -> Error msg
+     | Ok output -> exec_output ~target ~args output)
+  | false, _ ->
+    (match resolve_entry ?file () with
+     | Error msg -> Error msg
+     | Ok (entry, ctx) ->
+       let dump_flag = if dump_phases then " --dump-phases" else "" in
+       let cmd =
+         interp_command ~lib_path_env:ctx.lib_path_env ~dump_flag
+           ~ffi_flags:ctx.ffi_flags
+           ~args:(match file with
+                  | Some _ -> Some args
+                  | None   -> if args = [] then None else Some args)
+           ~entry ()
+       in
+       let rc = Sys.command cmd in
+       if rc = 0 then Ok ()
+       else Error (Printf.sprintf "program exited with code %d" rc))
+  | true, Some _ ->
+    (match resolve_entry ?file () with
+     | Error msg -> Error msg
+     | Ok (entry, ctx) ->
+       (* Single file: compile straight to a temp output.  The CAS caches the
+          real work, so the artifact itself is disposable and is removed after
+          the run rather than littering the cwd. *)
+       let output =
+         Filename.temp_file "forge-run-" (Cmd_build.output_ext target) in
+       (* temp_file creates the file; the compiler wants to write it itself. *)
+       (try Sys.remove output with Sys_error _ -> ());
+       Fun.protect
+         ~finally:(fun () ->
+             try if Sys.file_exists output then Sys.remove output
+             with Sys_error _ -> ())
+         (fun () ->
+            let (rc, _errors, _warnings) =
+              Cmd_build.compile_entry ~lib_path_env:ctx.lib_path_env
+                ~ffi_flags:ctx.ffi_flags ~output ~release:false ~dump_phases
+                ?target entry
+            in
+            if rc <> 0 then
+              Error (Printf.sprintf "march compiler exited with code %d" rc)
+            else exec_output ~target ~args output))
