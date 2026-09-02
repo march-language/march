@@ -60,7 +60,10 @@ Two executors:
   `"interp_command"`) keeps testing what it was written to test.
 - **Compiled.** With a FILE, call `Cmd_build.compile_entry` into a temp output,
   exec it with the program args, then remove it — the CAS makes the recompile
-  cheap, so the binary is disposable. With no FILE, keep calling
+  cheap, so the binary is disposable. The temp output's extension follows the
+  target the same way `Cmd_build.build` chooses one: a native binary with no
+  extension, `.mjs` under `--target js`, which is then run with `node` (the
+  existing `--compiled` branch already does this). With no FILE, keep calling
   `Cmd_build.build`, leaving the project's target-dir, CAS and workspace
   semantics untouched.
 
