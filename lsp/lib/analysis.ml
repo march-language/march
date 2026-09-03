@@ -3452,26 +3452,21 @@ let run_tir_pass (a : t) : t =
           d.March_tir.Alloc_contract.d_form <> None
           && not (List.mem d.March_tir.Alloc_contract.d_name_span failing)
       in
+      (* The SAME predicate `forge fix --contracts` uses (there is one copy,
+         in Alloc_contract), so the editor offers the action exactly where
+         forge would insert it.  The editor has no forge.toml globs to apply,
+         so only the default scope is offered here. *)
       let no_alloc_candidates =
-        List.filter_map (fun (d : March_tir.Alloc_contract.decl_info) ->
-            let open March_tir.Alloc_contract in
-            if d.d_form <> None then None
-            else if d.d_name_span.Ast.file <> a.filename then None
-            else if d.d_name = "" || d.d_name.[0] = '$' then None
-            else begin
-              let clones =
-                List.filter (fun (fn : Tir.fn_def) ->
-                    March_tir.Alloc_contract.base fn.Tir.fn_name = d.d_name)
-                  tir.Tir.tm_fns in
-              if clones = [] then None
-              else if List.exists (fun (fn : Tir.fn_def) ->
-                  Hashtbl.mem pipe.March_tir.Contract_pipeline.allocating
-                    fn.Tir.fn_name) clones then None
-              else if List.exists (fun (fn : Tir.fn_def) ->
-                  March_tir.Alloc_contract.has_reuse_or_stack fn.Tir.fn_body) clones
-              then Some (d.d_name, d.d_name_span, d.d_decl_span)
-              else None
-            end) contract_decls
+        List.map (fun (d : March_tir.Alloc_contract.decl_info) ->
+            (d.March_tir.Alloc_contract.d_name,
+             d.March_tir.Alloc_contract.d_name_span,
+             d.March_tir.Alloc_contract.d_decl_span))
+          (March_tir.Alloc_contract.generation_candidates
+             ~decls:contract_decls
+             ~allocating:pipe.March_tir.Contract_pipeline.allocating
+             ~globs:[]
+             ~is_user:(fun (sp : Ast.span) -> sp.Ast.file = a.filename)
+             tir)
       in
       (* Collect per-function optimization counts *)
       let tir_fn_insights =
