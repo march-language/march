@@ -26,7 +26,7 @@ section, and nothing else in the file should be read as overriding them.
 | Compiler-inserted capability passing (`--test` builds) | **landed** (#389) — analysis + threading + dispatch wrappers, in TIR |
 | `with_cap` binding site; `cap_ops_empty` base | **landed** (#389) |
 | Mocking an IO capability, end to end | **landed** (#389); three CI fixtures under `test/cap_mock/` |
-| Actor handlers reached (capture at spawn) | **landed** (#397) — one capability per actor |
+| Actor handlers reached (capture at spawn) | **landed** (#397); the one-capability-per-actor limit **lifted** (#404, `specs/progress/2026-09-02-lift-one-cap-per-actor.md`) — a record of every capability the actor reaches |
 | `--test` in the CAS cache key (pre-existing bug) | **fixed** (#389) |
 | Session transport dictionary (`stdlib/session.march`) | **landed** (v1) — `test/session/stream_replay.march` replays `Stream` deterministically on both backends |
 
@@ -863,9 +863,12 @@ Because capture is per-actor at spawn, a mock reaches an actor spawned inside
 closes, so a global or dynamically-scoped slot would give the right answer for
 the wrong reason.
 
-**Limit: one capability per actor.** An actor whose handlers reach two would
-need a record of them captured; `dispatch_cap` returns `None` for that case, so
-such an actor keeps the previous behaviour rather than a partly-wrong one.
+**The v1 limit, one capability per actor, is lifted** (#404; design and
+RC contract in `specs/progress/2026-09-02-lift-one-cap-per-actor.md`). The spawn
+site now builds a record of every capability the dispatch reaches, on the same
+meta pointer, and the dispatch projects them back out; a capability the spawn
+site cannot supply is the sentinel in its field, so a partial mock works.
+`test/cap_mock/cap_mock_actor_two.march` is the guard.
 
 The bug worth remembering from building it: the first version scanned the
 dispatch BODY for interceptable operations and found none, because handlers are
@@ -1013,8 +1016,19 @@ in the test; `Session.attach` is the only mint.
 
 ### Order of remaining work
 
-1. An actor-hosted endpoint, once the one-capability-per-actor limit is lifted.
-2. The monomorphic-`with` limitation only if a parameterised dictionary ever
+1. ~~Lift the one-capability-per-actor limit on capture at spawn~~ — **done**
+   (#404; `specs/progress/2026-09-02-lift-one-cap-per-actor.md`). An
+   actor that logs AND reads the clock can now be mocked, wholly or partially.
+   Supervised children are still never captured, on any capability count:
+   `2026-09-03-supervised-children-not-captured.md`.
+2. An actor-hosted endpoint. **Not blocked on item 1**, contrary to what this
+   list said before 2026-09-02: `Cap(Session.Live)` is a `proof cap`, passed
+   explicitly and never threaded, and a probe shows it reaching an actor
+   handler as a message payload on both backends (the probe is in item 1's
+   file). What the endpoint needs is a way to receive its capability, and a
+   message does that today. Item 1 matters to it only when its handlers also
+   perform two IO capabilities' builtins.
+3. The monomorphic-`with` limitation only if a parameterised dictionary ever
    has a use.
 
 ## Explicitly OUT OF SCOPE — do not re-expand
