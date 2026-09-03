@@ -84,3 +84,79 @@ let tests = [
   Alcotest.test_case "bad payload is a parse error"   `Quick test_bad_payload_is_parse_error;
   Alcotest.test_case "no_alloc on actor is rejected"  `Quick test_no_alloc_on_actor_is_parse_error;
 ]
+
+(* ── Task 5: classifier + transitive set on hand-built TIR ─────────────── *)
+module T = March_tir.Tir
+let v n ty = { T.v_name = n; v_ty = ty; v_lin = T.Unr }
+let fn name body = { T.fn_name = name; fn_params = []; fn_ret_ty = T.TInt;
+                     fn_body = body; fn_kind = T.FnNormal }
+let modl fns = { T.tm_name = "M"; tm_fns = fns;
+                 tm_types = [T.TDVariant ("Box", [("Box", [T.TInt])])];
+                 tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] }
+let call f = T.EApp (v f T.TInt, [])
+let lit n = T.ALit (March_ast.Ast.LitInt n)
+let decl ?form n = { AC.d_name = n; d_form = form;
+                     d_name_span = March_ast.Ast.dummy_span;
+                     d_decl_span = March_ast.Ast.dummy_span }
+
+let test_builtin_table_total_and_conservative () =
+  Alcotest.(check bool) "+ does not allocate" false (AC.builtin_allocates "+");
+  Alcotest.(check bool) "++ allocates" true (AC.builtin_allocates "++");
+  Alcotest.(check bool) "int_to_string allocates" true (AC.builtin_allocates "int_to_string");
+  Alcotest.(check bool) "specialized name is stripped" false (AC.builtin_allocates "+$Int");
+  Alcotest.(check bool) "unknown name allocates" true
+    (AC.builtin_allocates "totally_unknown_builtin");
+  List.iter (fun c -> ignore (AC.builtin_allocates (March_tir.Builtin_name.to_string c)))
+    March_tir.Builtin_name.all
+
+let test_fixpoint_transitive () =
+  let m = modl [ fn "g" (T.EAlloc (T.TCon ("Box", []), [lit 1]));
+                 fn "f" (call "g");
+                 fn "h" (T.EAtom (lit 0)) ] in
+  let set = AC.allocating_fns ~decls:[] m in
+  Alcotest.(check bool) "g direct" true (Hashtbl.mem set "g");
+  (match Hashtbl.find_opt set "f" with
+   | Some (AC.Callee ("g", AC.Ctor "Box")) -> ()
+   | _ -> Alcotest.fail "f should be Callee(g, Ctor Box)");
+  Alcotest.(check bool) "h clean" false (Hashtbl.mem set "h")
+
+let test_assume_removes_and_unseeds () =
+  let m = modl [ fn "wrap" (T.ECallPtr (T.AVar (v "cb" (T.TPtr T.TUnit)), []));
+                 fn "user" (call "wrap") ] in
+  let set = AC.allocating_fns ~decls:[decl ~form:AC.Assume "wrap"] m in
+  Alcotest.(check bool) "assume is clean" false (Hashtbl.mem set "wrap");
+  Alcotest.(check bool) "caller of assume is clean" false (Hashtbl.mem set "user");
+  let set2 = AC.allocating_fns ~decls:[] m in
+  (match Hashtbl.find_opt set2 "wrap" with
+   | Some (AC.UnknownClosure "cb") -> ()
+   | _ -> Alcotest.fail "ECallPtr without assume must fail")
+
+let test_reuse_and_stack_pass_float_box_fails () =
+  let x = v "x" T.TInt in
+  let reuse = T.EReuse (T.AVar (v "o" (T.TCon ("Box", []))), T.TCon ("Box", []), [T.AVar x]) in
+  let stack = T.EStackAlloc (T.TCon ("Box", []), [T.AVar x]) in
+  let m = modl [ fn "r" reuse; fn "s" stack ] in
+  let set = AC.allocating_fns ~decls:[] m in
+  Alcotest.(check bool) "reuse clean" false (Hashtbl.mem set "r");
+  Alcotest.(check bool) "stack clean" false (Hashtbl.mem set "s");
+  (* A Float stored into an erased (TVar) payload is boxed even under reuse. *)
+  let m2 = { (modl [ fn "fb" (T.EReuse (T.AVar (v "o" (T.TCon ("Some", []))),
+                                        T.TCon ("Some", []),
+                                        [T.AVar (v "f" T.TFloat)])) ])
+             with T.tm_types = [T.TDVariant ("Option", [("None", []); ("Some", [T.TVar "a"])])] } in
+  (match Hashtbl.find_opt (AC.allocating_fns ~decls:[] m2) "fb" with
+   | Some AC.FloatBox -> ()
+   | _ -> Alcotest.fail "Float into TVar payload must be FloatBox")
+
+let test_spec_clone_resolves_to_decl () =
+  let m = modl [ fn "wrap$Int" (T.ECallPtr (T.AVar (v "cb" (T.TPtr T.TUnit)), [])) ] in
+  let set = AC.allocating_fns ~decls:[decl ~form:AC.Assume "wrap"] m in
+  Alcotest.(check bool) "clone inherits assume" false (Hashtbl.mem set "wrap$Int")
+
+let tests = tests @ [
+  Alcotest.test_case "builtin table total and conservative" `Quick test_builtin_table_total_and_conservative;
+  Alcotest.test_case "fixpoint is transitive"                `Quick test_fixpoint_transitive;
+  Alcotest.test_case "assume removes and unseeds"            `Quick test_assume_removes_and_unseeds;
+  Alcotest.test_case "reuse/stack pass, float box fails"     `Quick test_reuse_and_stack_pass_float_box_fails;
+  Alcotest.test_case "spec clone resolves to decl"           `Quick test_spec_clone_resolves_to_decl;
+]

@@ -40,3 +40,225 @@ let rec collect_prefixed (prefix : string) (decls : March_ast.Ast.decl list)
 
 let collect (m : March_ast.Ast.module_) : decl_info list =
   collect_prefixed "" m.March_ast.Ast.mod_decls
+
+(* ── What counts as an allocation ─────────────────────────────────────── *)
+
+type reason =
+  | Ctor of string
+  | Tuple
+  | Record
+  | Update
+  | Closure
+  | Builtin of string
+  | FloatBox
+  | UnknownClosure of string   (** ECallPtr through this variable *)
+  | Extern of string
+  | Callee of string * reason  (** callee display name, its first reason *)
+
+let rec describe = function
+  | Ctor c -> Printf.sprintf "constructor `%s` is allocated here" c
+  | Tuple -> "a tuple is allocated here"
+  | Record -> "a record is allocated here"
+  | Update -> "a record update allocates a new record here"
+  | Closure -> "a closure is allocated here"
+  | Builtin ("++" | "string_concat" | "string_concat3") -> "string concatenation"
+  | Builtin b -> Printf.sprintf "`%s` allocates" b
+  | FloatBox -> "a Float is boxed here (it crosses an erased slot)"
+  | UnknownClosure x -> Printf.sprintf "call through an unknown closure `%s`" x
+  | Extern e -> Printf.sprintf "call to the extern `%s`" e
+  | Callee (g, r) ->
+    Printf.sprintf "calls `%s`, which allocates (in `%s`: %s)" g g (describe r)
+
+(* TOTAL over the closed codegen-dispatched set: adding a constructor to
+   [Builtin_name.t] without a row here is a build error (no wildcard arm).
+   Classification is by what the runtime does; unclear ⇒ allocating. *)
+let named_builtin_allocates : Builtin_name.t -> bool = function
+  | Builtin_name.Int_abs | Builtin_name.Int_div | Builtin_name.Int_div_euclid
+  | Builtin_name.Int_max_value | Builtin_name.Int_min_value | Builtin_name.Int_mod
+  | Builtin_name.Int_mod_euclid | Builtin_name.Int_not | Builtin_name.Int_popcount
+  | Builtin_name.Int_pow | Builtin_name.Negate | Builtin_name.Not
+  | Builtin_name.Pmap_threshold | Builtin_name.Task_is_cancelled
+  | Builtin_name.Task_reductions | Builtin_name.Signal_raise_self -> false
+  | Builtin_name.Bool_to_string | Builtin_name.Float_to_string
+  | Builtin_name.Int_to_string | Builtin_name.To_string
+  | Builtin_name.Html_auto_escape | Builtin_name.Html_escape_ctx
+  | Builtin_name.Actor_register | Builtin_name.Actor_reply
+  | Builtin_name.Chan_choose | Builtin_name.Chan_send | Builtin_name.Get_work_pool
+  | Builtin_name.Mpst_send | Builtin_name.Receive | Builtin_name.Record_from_list
+  | Builtin_name.Record_get | Builtin_name.Record_has_key | Builtin_name.Record_put
+  | Builtin_name.Remote_ref_hashes | Builtin_name.Send
+  | Builtin_name.Signal_unwatch | Builtin_name.Signal_watch
+  | Builtin_name.Task_await | Builtin_name.Task_await_unwrap
+  | Builtin_name.Task_cancel | Builtin_name.Task_cancel_by_id
+  | Builtin_name.Task_cancel_token_new | Builtin_name.Task_spawn
+  | Builtin_name.Task_spawn_steal | Builtin_name.Task_spawn_with_cancel
+  | Builtin_name.Task_yield
+  | Builtin_name.Vault_drop | Builtin_name.Vault_get | Builtin_name.Vault_incr
+  | Builtin_name.Vault_ns_drop | Builtin_name.Vault_ns_get | Builtin_name.Vault_ns_set
+  | Builtin_name.Vault_push_capped | Builtin_name.Vault_put_new | Builtin_name.Vault_set
+  | Builtin_name.Vault_set_ttl | Builtin_name.Vault_update -> true
+
+(* Non-allocating builtins that are NOT codegen-dispatched through
+   [Builtin_name] (they go through the generic runtime-call fallback or are
+   emitted inline): scalar arithmetic, comparisons, predicates, and reads of
+   existing cells.  Anything not listed here is allocating. *)
+let scalar_builtins = [
+  "+"; "-"; "*"; "/"; "%"; "+."; "-."; "*."; "/."; "<"; ">"; "<="; ">="; "&&"; "||";
+  "=="; "!="; "compare_int"; "compare_float"; "compare_string";
+  "int_and"; "int_or"; "int_xor"; "int_shl"; "int_shr"; "int_to_float";
+  "float_to_int"; "float_abs"; "float_ceil"; "float_floor"; "float_round";
+  "float_truncate"; "float_is_nan"; "float_is_infinite"; "float_infinity";
+  "float_neg_infinity"; "float_nan"; "float_epsilon";
+  "math_sqrt"; "math_cbrt"; "math_pow"; "math_exp"; "math_exp2"; "math_log";
+  "math_log2"; "math_log10"; "math_sin"; "math_cos"; "math_tan"; "math_asin";
+  "math_acos"; "math_atan"; "math_atan2"; "math_sinh"; "math_cosh"; "math_tanh";
+  "char_is_alpha"; "char_is_digit"; "char_is_alphanumeric"; "char_is_whitespace";
+  "char_is_uppercase"; "char_is_lowercase"; "char_to_int"; "char_from_int";
+  "byte_to_char"; "char_to_uppercase"; "char_to_lowercase";
+  "string_length"; "string_byte_length"; "string_byte_at"; "string_is_empty";
+  "is_nil"; "head"; "tail";
+  "native_int_arr_get"; "native_int_arr_length"; "native_int_arr_set"; "native_int_arr_sum";
+  "native_float_arr_get"; "native_float_arr_length"; "native_float_arr_set"; "native_float_arr_sum";
+  "native_f32_arr_get"; "native_f32_arr_length"; "native_f32_arr_set"; "native_f32_arr_sum";
+  "native_i32_arr_get"; "native_i32_arr_length"; "native_i32_arr_set"; "native_i32_arr_sum";
+  "native_u8_arr_get"; "native_u8_arr_length"; "native_u8_arr_set"; "native_u8_arr_sum";
+  "native_int_arr_max"; "native_int_arr_min"; "native_float_arr_max"; "native_float_arr_min";
+]
+
+let scalar_set : (string, unit) Hashtbl.t =
+  let h = Hashtbl.create 128 in
+  List.iter (fun n -> Hashtbl.replace h n ()) scalar_builtins;
+  h
+
+let base = Tir_names.strip_specialization_suffix
+
+let builtin_allocates (name : string) : bool =
+  let b = base name in
+  match Builtin_name.of_string b with
+  | Some c -> named_builtin_allocates c
+  | None -> not (Hashtbl.mem scalar_set b)
+
+(* ── Float boxing ──────────────────────────────────────────────────────── *)
+
+let ty_of_atom = function
+  | Tir.AVar v -> v.Tir.v_ty
+  | Tir.ALit (March_ast.Ast.LitFloat _) -> Tir.TFloat
+  | Tir.ALit (March_ast.Ast.LitInt _) -> Tir.TInt
+  | _ -> Tir.TUnit
+
+(* Declared field types of the constructor / record / tuple [ty] builds. *)
+let ctor_fields (m : Tir.tir_module) (ty : Tir.ty) : Tir.ty list option =
+  match ty with
+  | Tir.TTuple ts -> Some ts
+  | Tir.TRecord fs -> Some (List.map snd fs)
+  | Tir.TCon (name, _) ->
+    List.find_map (function
+        | Tir.TDVariant (_, ctors) -> List.assoc_opt name ctors
+        | Tir.TDRecord (n, fs) when n = name -> Some (List.map snd fs)
+        | Tir.TDClosure (n, tys) when n = name -> Some tys
+        | _ -> None) m.Tir.tm_types
+  | _ -> None
+
+(* A Float stored into a slot whose declared type is not TFloat is boxed by
+   [Llvm_ctx.coerce] ("double" -> "ptr"): a march_alloc_float cell.  [skip]
+   is the index of a TRMC hole, absent from [args]. *)
+let stores_boxed_float ?skip m ty args =
+  match ctor_fields m ty with
+  | None -> false
+  | Some fields ->
+    let fields = match skip with
+      | None -> fields
+      | Some h -> List.filteri (fun i _ -> i <> h) fields in
+    List.length fields = List.length args
+    && List.exists2 (fun a f -> ty_of_atom a = Tir.TFloat && f <> Tir.TFloat) args fields
+
+(* ── Per-function classification ───────────────────────────────────────── *)
+
+let has_reuse_or_stack (e : Tir.expr) : bool =
+  Policy_dce.fold_expr (fun acc e ->
+      acc || (match e with
+          | Tir.EReuse _ | Tir.EStackAlloc _ | Tir.EAllocHole (Some _, _, _, _) -> true
+          | _ -> false)) false e
+
+let decl_of decls name = List.find_opt (fun d -> d.d_name = base name) decls
+
+let is_assume ~decls name =
+  match decl_of decls name with
+  | Some { d_form = Some Assume; _ } -> true
+  | _ -> false
+
+let display_name name =
+  match Tir_names.apply_fn_base name with
+  | Some b -> base b
+  | None -> base name
+
+(* First direct reason in [body], in evaluation order ([Policy_dce.fold_expr]
+   visits a node, then its sub-expressions in order). *)
+let direct_reason ~(m : Tir.tir_module) ~fns ~externs (body : Tir.expr) : reason option =
+  let found = ref None in
+  let set r = if !found = None then found := Some r in
+  Policy_dce.fold_expr (fun () e ->
+      match e with
+      | Tir.EAlloc (Tir.TCon (c, _), _) when Tir_names.is_clo_struct c -> set Closure
+      | Tir.EAlloc (Tir.TCon (c, _), _) -> set (Ctor c)
+      | Tir.EAlloc (ty, _) -> set (Ctor (Tir.show_ty ty))
+      | Tir.EAllocHole (None, Tir.TCon (c, _), _, _) -> set (Ctor c)
+      | Tir.EAllocHole (None, ty, _, _) -> set (Ctor (Tir.show_ty ty))
+      | Tir.ETuple (_ :: _) -> set Tuple
+      | Tir.ERecord _ -> set Record
+      | Tir.EUpdate _ -> set Update
+      | Tir.EReuse (_, ty, args) when stores_boxed_float m ty args -> set FloatBox
+      | Tir.EStackAlloc (ty, args) when stores_boxed_float m ty args -> set FloatBox
+      | Tir.EAllocHole (Some _, ty, args, hole)
+        when stores_boxed_float ~skip:hole m ty args -> set FloatBox
+      | Tir.ECallPtr (Tir.AVar f, _) -> set (UnknownClosure f.Tir.v_name)
+      | Tir.ECallPtr (Tir.ADefRef d, _) -> set (UnknownClosure d.Tir.did_name)
+      | Tir.ECallPtr (Tir.ALit _, _) -> set (UnknownClosure "<closure>")
+      | Tir.EApp (f, args) ->
+        let n = f.Tir.v_name in
+        if Hashtbl.mem fns n then begin
+          (* Boundary B: a direct apply-fn call passes every arg through the
+             uniform ptr closure ABI, boxing Floats via march_alloc_float. *)
+          if Tir_names.is_apply_fn n
+             && List.exists (fun a -> ty_of_atom a = Tir.TFloat) args
+          then set FloatBox
+        end
+        else if Hashtbl.mem externs n then set (Extern n)
+        else if builtin_allocates n then set (Builtin (base n))
+      | _ -> ()) () body;
+  !found
+
+(* The transitive allocating set: seed with direct reasons, then a fixpoint
+   over the call graph (the [Policy_dce.panicky_fns_of_module] pattern).  A
+   function marked @[no_alloc(assume)] is never in the set, whatever its
+   body — that is the whole point of the form. *)
+let allocating_fns ~decls (m : Tir.tir_module) : (string, reason) Hashtbl.t =
+  let fns = Hashtbl.create 64 in
+  List.iter (fun fd -> Hashtbl.replace fns fd.Tir.fn_name ()) m.Tir.tm_fns;
+  let externs = Hashtbl.create 16 in
+  List.iter (fun e -> Hashtbl.replace externs e.Tir.ed_march_name ()) m.Tir.tm_externs;
+  let set : (string, reason) Hashtbl.t = Hashtbl.create 64 in
+  List.iter (fun fd ->
+      if not (is_assume ~decls fd.Tir.fn_name) then
+        match direct_reason ~m ~fns ~externs fd.Tir.fn_body with
+        | Some r -> Hashtbl.replace set fd.Tir.fn_name r
+        | None -> ()) m.Tir.tm_fns;
+  let callees fd =
+    List.rev (Policy_dce.fold_expr (fun acc e ->
+        match e with
+        | Tir.EApp (f, _) -> f.Tir.v_name :: acc
+        | _ -> acc) [] fd.Tir.fn_body) in
+  let rec fix () =
+    let changed = ref false in
+    List.iter (fun fd ->
+        let n = fd.Tir.fn_name in
+        if not (Hashtbl.mem set n) && not (is_assume ~decls n) then
+          match List.find_opt (fun c -> Hashtbl.mem set c) (callees fd) with
+          | Some c ->
+            Hashtbl.replace set n (Callee (display_name c, Hashtbl.find set c));
+            changed := true
+          | None -> ()) m.Tir.tm_fns;
+    if !changed then fix ()
+  in
+  fix ();
+  set
