@@ -3244,6 +3244,15 @@ static void *march_respawn_child(void *supervisor, march_actor_meta *sup_meta, i
     typedef void *(*spawn_clo_fn_t)(void *);
     void **clo_fields = (void **)((char *)child->spawn_clo + 16);
     spawn_clo_fn_t fn_ptr = (spawn_clo_fn_t)(*clo_fields);
+    /* Every apply function drops the closure it is handed (Perceus's
+     * callee-side $clo release), and this cell is called on EVERY respawn of
+     * the slot, so keep our reference: without the inc the first respawn
+     * frees the cell and the second is a use-after-free.  For the static
+     * <Actor>_spawn reference a non-capturing child passes, IS_HEAP_PTR
+     * makes this a no-op, exactly as the drop is.  (A --test build passes a
+     * heap closure here when the child is itself a supervisor whose spawn
+     * glue carries capabilities; see cap_passing.ml.) */
+    march_incrc(child->spawn_clo);
     void *raw = fn_ptr(child->spawn_clo);
     void *new_child = march_spawn_supervised(raw);
     march_actor_meta *new_meta = find_or_create_meta(new_child);

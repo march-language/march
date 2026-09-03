@@ -1432,6 +1432,36 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff cap_mock/cap_mock_supervised.expected cap_mock_supervised.out)))
 
+; ── Capability mocking reaching the child of a NESTED supervisor ───────────
+; Top supervises Mid supervises Leaf. Mid's spawn glue was passed to
+; register_supervisor_child as a value (for respawn), freezing its arity, so it
+; carried nothing to Leaf. The respawn value is now a closure calling the glue
+; with the capabilities in scope; the runtime incs it per respawn call. Four
+; lines: mocked, mocked after Mid's first restart, mocked after its second,
+; real for a Top spawned outside the block and sent to after it closes.
+(rule
+ (targets cap_mock_supervised_nested_bin cap_mock_supervised_nested.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (source_tree ../stdlib)
+       (file cap_mock/cap_mock_supervised_nested.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --test -o cap_mock_supervised_nested_bin
+        cap_mock/cap_mock_supervised_nested.march)
+   (with-stdout-to cap_mock_supervised_nested.out (system "./cap_mock_supervised_nested_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff cap_mock/cap_mock_supervised_nested.expected cap_mock_supervised_nested.out)))
+
 ; ── Capability mocking as a user writes it: inside a `test` block ─────────
 ; Companion to cap_mock_io above, which drives `main` and diffs stdout. This
 ; one uses the real API surface -- a `test` block, `root_cap` attenuated to the
