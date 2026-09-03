@@ -51,6 +51,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- Capability mocking now reaches a **supervised child**. A `supervise` block's
+  children are spawned by the supervisor itself, not by user code, so a mock
+  that reached a plain actor never reached one under a supervisor. The
+  capabilities in scope where the supervisor is spawned now reach each of its
+  children, and a child restarted after a crash keeps them. Compiled `--test`
+  builds only, as before.
+
 - An actor whose handlers reach **two or more capabilities** (it logs *and*
   reads the clock, the ordinary shape) can now be mocked; previously only
   one-capability actors were captured at spawn, and an actor over that limit

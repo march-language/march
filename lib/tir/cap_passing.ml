@@ -189,6 +189,41 @@ let rec scan (f : facts) (owner : string) (bound : StrSet.t) (e : T.expr) : unit
   | T.EAllocHole (tok, _, ats, _) -> Option.iter atom tok; atoms ats
   | T.ESetField (o, _, v) -> atom o; atom v
 
+(** [actor_of_spawn n] is the actor name when [n] is a spawn glue function. *)
+let actor_of_spawn (n : string) : string option =
+  let sfx = Tir_names.actor_spawn_suffix in
+  let ls = String.length sfx and ln = String.length n in
+  if ln > ls && String.sub n (ln - ls) ls = sfx
+  then Some (String.sub n 0 (ln - ls)) else None
+
+(** The actors [e] spawns as SUPERVISED CHILDREN.  A `supervise` block's
+    children are spawned inside the supervisor's own spawn glue
+    (`lower_actor.ml`'s [spawn_with_fields]), as
+      let $sup_child_raw_f = Child_spawn() in
+      let $sup_child_ptr_f = spawn_supervised($sup_child_raw_f) in …
+    which is a different shape from a plain `spawn(Child)` at a user site. *)
+let supervised_children (e : T.expr) : string list =
+  let acc = ref [] in
+  let rec go (e : T.expr) =
+    match e with
+    | T.ELet (raw, T.EApp (cs, []), (T.ELet (_, T.EApp (ss, [ T.AVar raw' ]), _) as rest))
+      when ss.T.v_name = "spawn_supervised" && raw'.T.v_name = raw.T.v_name ->
+      (match actor_of_spawn cs.T.v_name with
+       | Some child -> acc := child :: !acc
+       | None -> ());
+      go rest
+    | T.ELet (_, a, b) | T.ESeq (a, b) -> go a; go b
+    | T.ELetRec (fns, b) ->
+      List.iter (fun (fd : T.fn_def) -> go fd.T.fn_body) fns; go b
+    | T.ECase (_, brs, d) ->
+      List.iter (fun (br : T.branch) -> go br.T.br_body) brs; Option.iter go d
+    | T.EApp _ | T.ECallPtr _ | T.EAtom _ | T.ETuple _ | T.ERecord _
+    | T.EField _ | T.EUpdate _ | T.EAlloc _ | T.EStackAlloc _ | T.EFree _
+    | T.EIncRC _ | T.EDecRC _ | T.EAtomicIncRC _ | T.EAtomicDecRC _
+    | T.EReuse _ | T.EAllocHole _ | T.ESetField _ -> ()
+  in
+  go e; List.rev !acc
+
 (** [needed_caps m] maps each function to the capabilities it must carry: the
     ones its own body performs, plus everything its callees need, to a
     fixpoint.  Functions in [unsafe] are excluded — their arity cannot change. *)
@@ -196,6 +231,28 @@ let needed_caps (m : T.tir_module) : (string, string list) Hashtbl.t =
   let f = { calls = Hashtbl.create 64; ops = Hashtbl.create 64;
             unsafe = Hashtbl.create 64; toplevel = Hashtbl.create 512 } in
   List.iter (fun (fd : T.fn_def) -> Hashtbl.replace f.toplevel fd.T.fn_name ()) m.T.tm_fns;
+  (* A supervisor's spawn glue spawns its declared children ITSELF, so it is
+     the only place a supervised child's capabilities can be captured from —
+     and the user's `spawn(Sup)` site is where a `with_cap` mock is in scope.
+     Model the glue as calling each child's dispatch: the fixpoint below then
+     charges it with everything the child's handlers reach, the user site
+     threads those in (the glue is only ever a call head — a CHILD's spawn fn
+     is passed as a value to `register_supervisor_child` for respawn and stays
+     frozen, but a child needs no parameters, only a record set on it), and
+     the capture pattern in [thread] builds the child's record inside the glue
+     from the parameters it now carries. *)
+  List.iter
+    (fun (fd : T.fn_def) ->
+       match actor_of_spawn fd.T.fn_name with
+       | None -> ()
+       | Some _ ->
+         List.iter
+           (fun child ->
+              let callee = child ^ Tir_names.actor_dispatch_suffix in
+              Hashtbl.replace f.calls fd.T.fn_name
+                (callee :: Option.value ~default:[] (Hashtbl.find_opt f.calls fd.T.fn_name)))
+           (supervised_children fd.T.fn_body))
+    m.T.tm_fns;
   List.iter
     (fun (fd : T.fn_def) ->
        (* A dispatch wrapper CALLS the operation it wraps — that call is the
@@ -353,13 +410,6 @@ let caps_reached (need : (string, string list) Hashtbl.t) (e : T.expr) : string 
     f.calls;
   List.sort_uniq String.compare !acc
 
-(** [actor_of_spawn n] is the actor name when [n] is a spawn glue function. *)
-let actor_of_spawn (n : string) : string option =
-  let sfx = Tir_names.actor_spawn_suffix in
-  let ls = String.length sfx and ln = String.length n in
-  if ln > ls && String.sub n (ln - ls) ls = sfx
-  then Some (String.sub n 0 (ln - ls)) else None
-
 (** [actor_of_dispatch n] is the actor name when [n] is a dispatch function. *)
 let actor_of_dispatch (n : string) : string option =
   let sfx = Tir_names.actor_dispatch_suffix in
@@ -501,8 +551,12 @@ let rec thread ?(dispatch = false) ?(spawn_caps = Hashtbl.create 1)
     when sp.T.v_name = "spawn" && raw'.T.v_name = raw.T.v_name
       && (match actor_of_spawn sf.T.v_name with Some _ -> true | None -> false) ->
     let actor = Option.get (actor_of_spawn sf.T.v_name) in
+    (* [go spawn_call], not [spawn_call]: a SUPERVISOR's spawn glue carries its
+       children's capabilities as parameters (see [needed_caps]), so the call
+       to it gains arguments here like any other elaborated callee — whether
+       or not the supervisor's own dispatch needs anything. *)
     (match Hashtbl.find_opt spawn_caps actor with
-     | None | Some [] -> e
+     | None | Some [] -> T.ELet (raw, go spawn_call, T.EApp (sp, [ T.AVar raw ]))
      | Some caps ->
        let pid = { T.v_name = "$pid_cap"; T.v_ty = T.TPtr T.TUnit; T.v_lin = T.Unr } in
        let setter =
@@ -512,12 +566,43 @@ let rec thread ?(dispatch = false) ?(spawn_caps = Hashtbl.create 1)
        let caps_var =
          { T.v_name = "$spawn_caps"; T.v_ty = caps_record_ty caps; T.v_lin = T.Unr }
        in
-       T.ELet (raw, spawn_call,
+       T.ELet (raw, go spawn_call,
          T.ELet (pid, T.EApp (sp, [ T.AVar raw ]),
            T.ELet (caps_var,
              T.ERecord (List.map (fun (f, c) -> (f, supply c)) fields),
              T.ESeq (T.EApp (setter, [ T.AVar raw; T.AVar caps_var ]),
                      T.EAtom (T.AVar pid))))))
+  (* Supervised-child capture: the SECOND spawn shape, inside a supervisor's
+     spawn glue (see [supervised_children]).  `march_spawn_supervised` creates
+     the child's meta exactly as `march_spawn` does, so the record is attached
+     right after it; the caps come from the glue's own parameters, i.e. from
+     whatever the user's `spawn(Sup)` site supplied.  A child the runtime
+     RESPAWNS after a crash goes through `march_respawn_child`, not through
+     this glue; the runtime carries the record over to the replacement there.
+     Kept distinct from the plain pattern above on purpose: they share
+     [spawn_caps] (so they cannot disagree about which caps a child needs)
+     and nothing else. *)
+  | T.ELet (raw, (T.EApp (cs, []) as child_call),
+            T.ELet (ptr, (T.EApp (ss, [ T.AVar raw' ]) as sup_call), rest))
+    when ss.T.v_name = "spawn_supervised" && raw'.T.v_name = raw.T.v_name
+      && (match actor_of_spawn cs.T.v_name with Some _ -> true | None -> false) ->
+    let child = Option.get (actor_of_spawn cs.T.v_name) in
+    (match Hashtbl.find_opt spawn_caps child with
+     | None | Some [] -> T.ELet (raw, child_call, T.ELet (ptr, sup_call, go rest))
+     | Some caps ->
+       let setter =
+         { T.v_name = "set_actor_caps"; T.v_ty = T.TPtr T.TUnit; T.v_lin = T.Unr }
+       in
+       let fields = caps_record_fields caps in
+       let caps_var =
+         { T.v_name = raw.T.v_name ^ "_caps"; T.v_ty = caps_record_ty caps; T.v_lin = T.Unr }
+       in
+       T.ELet (raw, child_call,
+         T.ELet (ptr, sup_call,
+           T.ELet (caps_var,
+             T.ERecord (List.map (fun (f, c) -> (f, supply c)) fields),
+             T.ESeq (T.EApp (setter, [ T.AVar raw; T.AVar caps_var ]),
+                     go rest)))))
   | T.ELet (v, e1, e2) ->
     (* `with_cap(mock, fn _ -> body)`: inside that lambda, the capability is
        the MOCK rather than whatever the enclosing scope was supplying.  Lower

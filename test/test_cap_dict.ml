@@ -525,6 +525,55 @@ end|}
         [ "IO.Console" ]
         (March_tir.Cap_passing.dispatch_caps need (dispatch_of "One")))
 
+(* A supervisor's spawn glue spawns its `supervise`-block children itself, so
+   it must carry the children's capabilities for the capture pattern inside it
+   to have anything to attach. The child's own spawn fn is passed as a value
+   to register_supervisor_child (for respawn) and stays frozen; it needs no
+   parameters, only a record set on it. *)
+let supervisor_glue_carries_children_caps =
+  Alcotest.test_case "a supervisor's spawn glue needs its children's capabilities"
+    `Quick (fun () ->
+      let m =
+        parse_and_desugar {|mod S do
+  needs IO.Console
+  actor Logger do
+    state { n : Int }
+    init  { n: 0 }
+    on Say(s : String) do
+      print_line(s)
+      { state with n: state.n + 1 }
+    end
+  end
+  actor Sup do
+    state { w : Int }
+    init  { w: 0 }
+    supervise do
+      strategy one_for_one
+      max_restarts 5 within 60
+      Logger w
+    end
+  end
+end|}
+      in
+      let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+      let tir =
+        March_tir.Lower.lower_module ~type_map ~test_mode:false ~hot_reload:false m
+      in
+      let glue =
+        List.find
+          (fun (fd : March_tir.Tir.fn_def) ->
+             March_tir.Cap_passing.actor_of_spawn fd.March_tir.Tir.fn_name = Some "Sup")
+          tir.March_tir.Tir.tm_fns
+      in
+      Alcotest.(check (list string)) "the glue spawns Logger as a supervised child"
+        [ "Logger" ]
+        (March_tir.Cap_passing.supervised_children glue.March_tir.Tir.fn_body);
+      let need = March_tir.Cap_passing.needed_caps tir in
+      Alcotest.(check (option (list string))) "Sup_spawn carries the child's caps"
+        (Some [ "IO.Console" ]) (Hashtbl.find_opt need "Sup_spawn");
+      Alcotest.(check (option (list string))) "Logger_spawn stays frozen (passed as a value)"
+        None (Hashtbl.find_opt need "Logger_spawn"))
+
 (* ── the surface spelling of a multi-argument field ───────────────────── *)
 
 (* `Io_ops_gen.march_ty` once rendered a curried arrow as `(A, B) -> C`. In
@@ -574,5 +623,6 @@ let tests = [
   excluded_ops_are_documented; dict_fields_sorted;
   analysis_attributes_locals_to_their_owner;
   dispatch_caps_lists_every_capability;
+  supervisor_glue_carries_children_caps;
   rendered_multi_arg_is_curried;
 ]

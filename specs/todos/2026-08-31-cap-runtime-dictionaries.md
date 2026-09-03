@@ -1019,8 +1019,8 @@ in the test; `Session.attach` is the only mint.
 1. ~~Lift the one-capability-per-actor limit on capture at spawn~~ — **done**
    (#404; `specs/progress/2026-09-02-lift-one-cap-per-actor.md`). An
    actor that logs AND reads the clock can now be mocked, wholly or partially.
-   Supervised children are still never captured, on any capability count:
-   `2026-09-03-supervised-children-not-captured.md`.
+   Supervised children, including a `kill`ed child's restart, are captured
+   too (#405; `specs/progress/2026-09-03-supervised-children-not-captured.md`).
 2. An actor-hosted endpoint. **Not blocked on item 1**, contrary to what this
    list said before 2026-09-02: `Cap(Session.Live)` is a `proof cap`, passed
    explicitly and never threaded, and a probe shows it reaching an actor
