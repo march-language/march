@@ -202,6 +202,25 @@ let skip_reasons src =
       | _ -> None)
     (March_refinecheck.Obligation.all ())
 
+(* Same shape as [skip_reasons], but the DETAIL text ([reason_detail], the
+   payload-bearing sentence) rather than the slug. Needed for Tier 2's
+   constructor-literal postcondition shape ([check_post_induction]), which
+   records a ledger entry but emits NO diagnostic even under `cap verified`
+   (`refine_post.ml`'s `Shape 1` comment: "Tier 2 stays verdict-only... it
+   emits no diagnostic either way") -- so [refine_error_text_d] sees nothing
+   to assert on and only the ledger's own [reason_detail] can confirm what a
+   Tier 2 skip actually names. *)
+let skip_reason_details src =
+  March_refinecheck.Obligation.reset ();
+  ignore (has_refine_error_d src);
+  List.filter_map
+    (fun (o : March_refinecheck.Obligation.t) ->
+      match o.March_refinecheck.Obligation.verdict with
+      | March_refinecheck.Obligation.Skipped r ->
+        Some (March_refinecheck.Obligation.reason_detail r)
+      | _ -> None)
+    (March_refinecheck.Obligation.all ())
+
 (* (proved, skipped) obligation counts for [src] — a ledger, not a boolean,
    because a self-mentioning postcond-let manufactures a false PROOF, and
    "has_refine_error" would report that outcome identically to a legitimate
@@ -4882,15 +4901,28 @@ end|}
        synthetic, one per shape from [smt_of_r]'s [None]/[Error] enumeration:
        an opaque call, an unsupported operator (no `/` arm in [smt_of_r]),
        symbolic float arithmetic, and a string literal a postcondition-side
-       resolver does not cover.  Each asserts the slug AND that the message
-       names the specific failing leaf, not the whole predicate and not
-       nothing.  Mutation (see the brief): make [smt_of_r] return [Error] for
-       the WHOLE predicate at its top arm instead of propagating the child's
-       [Error] unchanged -- UP2 and UP3 redden, since their failing leaf (`_ /
-       2`, `_ *. x`) is a proper sub-expression of the top-level `>`, not the
-       top-level predicate itself. UP1 does NOT redden: `is_prime(_)` IS the
-       whole predicate (its "leaf" and "the top" are the same node), so naming
-       the top instead of the leaf still names the same text. *)
+       resolver does not cover.  Each asserts the slug AND the EXACT detail
+       phrase [reason_detail] renders (`` the predicate's `<leaf>` has no SMT
+       translation ``), not merely a substring of it -- a bare
+       [contains msg "\"a\""] on UP4 would also be satisfied by the WHOLE
+       predicate `_ > 0 && "a" == "a"`, which also contains `"a"`; asserting
+       the exact detail, plus a negative assertion that the whole-predicate
+       text is ABSENT, is what actually discriminates "named the leaf" from
+       "named the top" (see the fix-loop-1 mutation below).
+
+       Mutation (see the brief), applied at [smt_of_r]'s own recursive [b2]
+       combinator -- change `Error e, _ -> Error e | _, Error e -> Error e` to
+       wrap instead of propagate (e.g. `Error _, _ | _, Error _ -> Error e`,
+       using the ENCLOSING node's [e] rather than the child's), so every
+       recursive arm blames its own node instead of the failing child: UP2 and
+       UP3 redden, since their failing leaf (`_ / 2`, `_ *. x`) is a proper
+       sub-expression of the top-level `>`, not the top-level predicate
+       itself; UP4 also reddens under this mutation (it does not under a
+       mutation applied only at the [refine_call.ml] call site, since that
+       goal site is never exercised by a POSTcondition fixture -- see
+       fix-loop-1 in the task report). UP1 does NOT redden: `is_prime(_)` IS
+       the whole predicate (its "leaf" and "the top" are the same node), so
+       naming the top instead of the leaf still names the same text. *)
     gated "a genuine unreflectable predicate names the failing sub-expression: opaque call"
       (fun () ->
         let src = {|mod UP1 do
@@ -4899,7 +4931,9 @@ end|}
   fn go() : Int do f(7) end
 end|} in
         Alcotest.(check (list string)) "slug" [ "unreflectable-predicate" ] (skip_reasons src);
-        Alcotest.(check bool) "names is_prime(_)" true (contains (refine_error_text_d src) "`is_prime(_)`"));
+        Alcotest.(check bool) "exact detail" true
+          (contains (refine_error_text_d src)
+             "the predicate's `is_prime(_)` has no SMT translation"));
 
     gated "a genuine unreflectable predicate names the failing sub-expression: division"
       (fun () ->
@@ -4909,7 +4943,8 @@ end|} in
   fn go() : Int do f(7) end
 end|} in
         Alcotest.(check (list string)) "slug" [ "unreflectable-predicate" ] (skip_reasons src);
-        Alcotest.(check bool) "names _ / 2" true (contains (refine_error_text_d src) "`_ / 2`"));
+        Alcotest.(check bool) "exact detail" true
+          (contains (refine_error_text_d src) "the predicate's `_ / 2` has no SMT translation"));
 
     gated
       "a genuine unreflectable predicate names the failing sub-expression: symbolic float \
@@ -4921,7 +4956,8 @@ end|} in
   fn go() : Float do f(1.0, 2.0) end
 end|} in
         Alcotest.(check (list string)) "slug" [ "unreflectable-predicate" ] (skip_reasons src);
-        Alcotest.(check bool) "names _ *. x" true (contains (refine_error_text_d src) "`_ *. x`"));
+        Alcotest.(check bool) "exact detail" true
+          (contains (refine_error_text_d src) "the predicate's `_ *. x` has no SMT translation"));
 
     (* Fixture caveat (per the brief): the brief's own text for UP4 --
        `fn f() : {String | _ == "a"} do "a" end` -- never reaches a
@@ -4946,7 +4982,71 @@ end|} in
   fn f() : {Int | _ > 0 && "a" == "a"} do 1 end
 end|} in
         Alcotest.(check (list string)) "slug" [ "unreflectable-predicate" ] (skip_reasons src);
-        Alcotest.(check bool) "names the literal" true (contains (refine_error_text_d src) "\"a\""))
+        let text = refine_error_text_d src in
+        Alcotest.(check bool) "exact detail names the leaf, not the whole predicate" true
+          (contains text "the predicate's `\"a\"` has no SMT translation");
+        Alcotest.(check bool) "does not blame the whole conjunction" false
+          (contains text "the predicate's `_ > 0 && \"a\" == \"a\"` has no SMT translation"));
+
+    (* ── fix-loop 1, finding 1: the postcondition's SUBJECT, not its
+       predicate, is what failed at these two sites -- the tail expression
+       (the return value) never reflected, so [ret_pred]/[pred] itself was
+       never even reached.  Both now file [Unreflectable_subject], mirroring
+       [check_call]'s Task 2 rule (the SUBJECT, i.e. the actual/return value,
+       is blamed before the predicate is ever consulted), rather than the
+       [Unreflectable_predicate (pred_str <the whole predicate>)] the brief's
+       Step 4 literally specified for these two "no sub-expression in hand"
+       sites -- which was a false statement whenever the predicate itself is
+       perfectly reflectable (both fixtures below: `_ > 0` and `size(_) ==
+       1` both translate fine; `g()` and the constructor's `hidden()` field
+       do not). *)
+    gated "a postcondition whose TAIL expression fails to reflect blames the subject, not \
+           the (reflectable) predicate"
+      (fun () ->
+        let src = {|mod QPT do
+  cap verified
+  fn g() : Int do 5 end
+  fn f() : {Int | _ > 0} do g() end
+end|} in
+        Alcotest.(check (list string)) "slug" [ "unreflectable-subject" ] (skip_reasons src);
+        let text = refine_error_text_d src in
+        Alcotest.(check bool) "names the tail `g()`" true (contains text "`g()`");
+        Alcotest.(check bool) "does not blame the (reflectable) predicate" false
+          (contains text "has no SMT translation"));
+
+    (* Same shape, Tier 2's constructor-literal postcondition (`check_tail`'s
+       `A.ECon _` arm, `refine_post.ml`'s "Shape 1"). Tier 2 is verdict-only
+       -- it emits NO diagnostic even under `cap verified` -- so this asserts
+       against the LEDGER's own [reason_detail] via [skip_reason_details],
+       not [refine_error_text_d]. *)
+    gated "a Tier-2 constructor-literal postcondition whose tail fails to reflect blames the \
+           subject, not the (reflectable) measure predicate"
+      (fun () ->
+        let src = {|mod QPI do
+  cap verified
+  type Tree = Leaf | Node(Tree, Int, Tree)
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> 1 + size(l) + size(r)
+    end
+  end
+  fn hidden() : Int do 1 end
+  fn mk() : {Tree | size(_) == 1} do Node(Leaf, hidden(), Leaf) end
+end|} in
+        Alcotest.(check (list string)) "slug" [ "unreflectable-subject" ] (skip_reasons src);
+        let details = skip_reason_details src in
+        (* [body] at the filing site is the WHOLE constructor-literal tail
+           (`Node(Leaf, hidden(), Leaf)`), not just its opaque field -- same
+           granularity finding 1 asked for at the sibling site (there too the
+           record-literal reproducer named the whole tail, `v.name == "a"`,
+           not an isolated field). Still names `hidden()` as a substring of
+           that tail, which is enough to point a reader at the actual cause. *)
+        Alcotest.(check bool) "names the tail, including `hidden()`" true
+          (List.exists (fun d -> contains d "`Node(Leaf, hidden(), Leaf)`") details);
+        Alcotest.(check bool) "does not blame the (reflectable) measure predicate" false
+          (List.exists (fun d -> contains d "has no SMT translation") details))
   ]
 
 (* ── `cap verified`: an obligation the checker SKIPS becomes an error ─────
