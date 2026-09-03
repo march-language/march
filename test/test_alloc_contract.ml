@@ -480,3 +480,57 @@ let accept_tests = [
   Alcotest.test_case "reject: boxed Float in Option"      `Quick test_reject_float_box;
 ]
 let tests = tests @ accept_tests
+
+(* ── Task 7: Tagged(_, NoAlloc) / Realtime policies use the same check ─── *)
+
+(* `Tagged(X, T)` is a phantom TYPE with no value constructor, so a
+   policy-tagged function is never called; it must still be checked, which
+   means the pipeline has to keep it alive past DCE. *)
+let policy_reuse_src = {|mod Main do
+needs IO
+type DSP = DSP
+type NoAlloc = NoAlloc
+ptype Box = Box(Int, Int)
+fn bump(_tag : Tagged(DSP, NoAlloc), b : Box) : Box do
+  match b do
+    Box(x, y) -> Box(x + 1, y)
+  end
+end
+fn main(cap : Cap(IO)) : Unit do println("ok") end
+end|}
+
+let test_policy_accepts_reused_ctor () =
+  let (rc, out) = compile policy_reuse_src in
+  if rc <> 0 then
+    Alcotest.failf "NoAlloc policy should accept a reused constructor:\n%s" out
+
+let policy_alloc_src = {|mod Main do
+needs IO
+type DSP = DSP
+type NoAlloc = NoAlloc
+ptype Box = Box(Int, Int)
+fn first(b : Box) : Int do
+  match b do
+    Box(x, _) -> x
+  end
+end
+fn bump(_tag : Tagged(DSP, NoAlloc), b : Box) : Int do
+  match b do
+    Box(x, y) ->
+      let updated = Box(x + 1, y)
+      let old_x = first(b)
+      first(updated) + old_x
+  end
+end
+fn main(cap : Cap(IO)) : Unit do println("ok") end
+end|}
+
+let test_policy_still_rejects_plain_alloc () =
+  rejects "policy alloc" policy_alloc_src
+    "`bump` is specialized to a NoAlloc policy but allocates"
+
+let policy_tests = [
+  Alcotest.test_case "NoAlloc policy accepts a reused ctor"  `Quick test_policy_accepts_reused_ctor;
+  Alcotest.test_case "NoAlloc policy rejects a real alloc"   `Quick test_policy_still_rejects_plain_alloc;
+]
+let tests = tests @ policy_tests

@@ -371,6 +371,13 @@ let failure_message ~head ~name ~suffix (reason : reason) : string =
 let trmc_note = "This function is TRMC-eligible; compiling with --trmc turns the \
                  constructor into an in-place write."
 
+(** True if [fd] carries a [Tagged(_, P)] parameter whose policy forbids
+    allocation (NoAlloc, or Realtime which implies it).  [Policy_dce] used to
+    answer this pre-Perceus by banning every EAlloc/EStackAlloc; the verdict
+    now comes from the same final-TIR analysis the attribute uses. *)
+let has_noalloc_policy (fd : Tir.fn_def) : bool =
+  List.exists (fun c -> c = Policy_dce.NoAlloc) (Policy_dce.policies_of_fn fd)
+
 (** [check ~decls ~allocating ~opt ~trmc ~trmc_eligible m]: one diagnostic per
     failing contract, from its first failing monomorphised clone.  [opt =
     false] (--no-opt) downgrades the hard form to a warning that names the
@@ -380,6 +387,24 @@ let check ~decls ~(allocating : (string, reason) Hashtbl.t) ~opt ~trmc
     ~(trmc_eligible : string -> bool) (m : Tir.tir_module)
   : March_errors.Errors.diagnostic list =
   let seen = Hashtbl.create 16 in
+  let policy_diags =
+    List.filter_map (fun (fd : Tir.fn_def) ->
+        let n = fd.Tir.fn_name in
+        if not (has_noalloc_policy fd) then None
+        else match Hashtbl.find_opt allocating n with
+          | None -> None
+          | Some reason ->
+            let name = display_name n in
+            let span = match decl_of decls n with
+              | Some d -> d.d_name_span
+              | None -> March_ast.Ast.dummy_span in
+            let head =
+              Printf.sprintf "`%s` is specialized to a NoAlloc policy" name in
+            Some (diag ~severity:March_errors.Errors.Error ~span ~code:"no_alloc_policy"
+                    (failure_message ~head ~name ~suffix:"" reason)))
+      m.Tir.tm_fns
+  in
+  policy_diags @
   List.filter_map (fun (fd : Tir.fn_def) ->
       let n = fd.Tir.fn_name in
       match decl_of decls n, Hashtbl.find_opt allocating n with

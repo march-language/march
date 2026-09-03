@@ -156,6 +156,15 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
      specialization-stripped name matches, then pin them via tm_exports so
      the DCE inside [Opt.run] cannot prune them.  A rooted function's BODY is
      optimised exactly as it would be otherwise; only reachability differs. *)
+  (* A Tagged(_, NoAlloc) function is never CALLED — Tagged is a phantom type
+     with no value constructor — so DCE would drop it before the check could
+     judge it.  Root it like an annotated one. *)
+  let extra_roots =
+    extra_roots
+    @ List.filter_map (fun (fn : Tir.fn_def) ->
+        if Alloc_contract.has_noalloc_policy fn then Some fn.Tir.fn_name else None)
+      tir.Tir.tm_fns
+  in
   let tir =
     if extra_roots = [] then tir
     else begin
