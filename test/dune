@@ -128,6 +128,29 @@
  (deps    (file test_scheduler_runner))
  (action  (run ./test_scheduler_runner)))
 
+; ── C scheduler pinned-proc tests (march_sched_spawn_pinned / MARCH_PIN_MAIN) ──
+; Built with -DMARCH_NUM_SCHEDULERS=4 so the scheduler-0-only pin queue is
+; actually exercised (pinning is a documented no-op with one scheduler).
+; Asserts the pinned proc executes on the thread that called march_sched_run
+; across spawn, yield re-push and cross-thread wake, while unpinned siblings
+; still run on the worker threads.
+(rule
+ (targets test_scheduler_pin_runner)
+ (deps    test_scheduler_pin.c
+          ../runtime/march_scheduler.c
+          ../runtime/march_scheduler.h
+          ../runtime/march_deque.h)
+ (action  (run %{cc}
+               -std=gnu11 -Wall -Wextra -I../runtime
+               -DMARCH_NUM_SCHEDULERS=4
+               -o %{targets}
+               test_scheduler_pin.c ../runtime/march_scheduler.c
+               -lpthread)))
+(rule
+ (alias   runtest)
+ (deps    (file test_scheduler_pin_runner))
+ (action  (run ./test_scheduler_pin_runner)))
+
 ; ── C scheduler timer tests (min-heap timers + timed park) ──────────────
 ; Multi-scheduler (no -DMARCH_NUM_SCHEDULERS=1): timers must work across the
 ; work-stealing/global-runq machinery, not just the single-scheduler path.
