@@ -160,3 +160,170 @@ let tests = tests @ [
   Alcotest.test_case "reuse/stack pass, float box fails"     `Quick test_reuse_and_stack_pass_float_box_fails;
   Alcotest.test_case "spec clone resolves to decl"           `Quick test_spec_clone_resolves_to_decl;
 ]
+
+(* ── Task 6: end-to-end through `march --compile` ─────────────────────── *)
+let compile ?(flags = "") src = Test_cap_ceiling.compile_with ~flags src
+
+(* Keeps the binary, runs it, and also runs the interpreter: compiled parity. *)
+let compile_and_run ?(flags = "") src =
+  let exe = Test_cap_ceiling.compiler_exe in
+  let f = Filename.temp_file "noalloc" ".march" in
+  let oc = open_out f in
+  output_string oc src;
+  close_out oc;
+  let bin = Filename.temp_file "noalloc" ".bin" in
+  let log = Filename.temp_file "noalloc" ".log" in
+  let read p =
+    let ic = open_in p in
+    let s = really_input_string ic (in_channel_length ic) in
+    close_in ic; s
+  in
+  let rc = Sys.command (Printf.sprintf "%s %s --compile -o %s %s > %s 2>&1"
+                          (Filename.quote exe) flags (Filename.quote bin)
+                          (Filename.quote f) (Filename.quote log)) in
+  let compile_out = read log in
+  let run_out =
+    if rc = 0 then begin
+      ignore (Sys.command (Printf.sprintf "%s > %s 2>&1" (Filename.quote bin) (Filename.quote log)));
+      read log
+    end else "" in
+  ignore (Sys.command (Printf.sprintf "%s %s > %s 2>&1"
+                         (Filename.quote exe) (Filename.quote f) (Filename.quote log)));
+  let interp_out = read log in
+  List.iter (fun p -> try Sys.remove p with _ -> ()) [f; bin; log];
+  (rc, compile_out, run_out, interp_out)
+
+let accepts name ?(flags = "") src expected_stdout =
+  let (rc, out, run_out, interp_out) = compile_and_run ~flags src in
+  if rc <> 0 then Alcotest.failf "%s: expected accept, got rc=%d:\n%s" name rc out;
+  Alcotest.(check string) (name ^ ": compiled output") expected_stdout run_out;
+  Alcotest.(check string) (name ^ ": interpreter parity") expected_stdout interp_out;
+  Alcotest.(check bool) (name ^ ": no contract diagnostic") false (contains "no_alloc" out)
+
+let rejects name ?(flags = "") src needle =
+  let (rc, out) = compile ~flags src in
+  if rc = 0 then Alcotest.failf "%s: expected reject, compiled fine" name;
+  if not (contains needle out) then Alcotest.failf "%s: missing %S in:\n%s" name needle out
+
+let live_src = {|mod Main do
+needs IO
+ptype Box = Box(Int, Int)
+fn first(b : Box) : Int do
+  match b do
+    Box(x, _) -> x
+  end
+end
+@[no_alloc]
+fn bump_copied(b : Box) : Int do
+  match b do
+    Box(x, y) ->
+      let updated = Box(x + 1, y)
+      let old_x = first(b)
+      first(updated) + old_x
+  end
+end
+fn main(cap : Cap(IO)) : Unit do println(int_to_string(bump_copied(Box(1, 2)))) end
+end|}
+
+let test_reject_live_scrutinee () =
+  rejects "live scrutinee" live_src "`bump_copied` is marked @[no_alloc] but allocates";
+  rejects "names ctor" live_src "constructor `Box` is allocated here"
+
+(* The callee must survive inlining or the allocation is honestly DIRECT, not
+   transitive (the inliner folds a one-liner into its caller); a recursive
+   callee is not inlined.  The callee's FIRST allocation in evaluation order
+   is the one named. *)
+let trans_src = {|mod Main do
+needs IO
+fn format_row(xs : List(String)) : String do
+  match xs do
+    Nil -> ""
+    Cons(h, t) -> h ++ format_row(t)
+  end
+end
+@[no_alloc]
+fn render(xs : List(String)) : String do format_row(xs) end
+fn main(cap : Cap(IO)) : Unit do println(render(["a", "b"])) end
+end|}
+
+let test_reject_transitive_names_callee () =
+  rejects "transitive" trans_src
+    "`render` calls `format_row`, which allocates (in `format_row`: string concatenation)"
+
+let concat_src = {|mod Main do
+needs IO
+@[no_alloc]
+fn greet(s : String) : String do "hi " ++ s end
+fn main(cap : Cap(IO)) : Unit do println(greet("x")) end
+end|}
+
+let test_reject_string_concat () = rejects "concat" concat_src "string concatenation"
+
+let callptr_src = {|mod Main do
+needs IO
+@[no_alloc]
+fn process(f : Int -> Int, x : Int) : Int do f(x) end
+fn main(cap : Cap(IO)) : Unit do println(int_to_string(process(fn y -> y, 1))) end
+end|}
+
+let test_reject_callptr_without_assume () =
+  rejects "callptr" callptr_src
+    "`process` is marked @[no_alloc] but calls through an unknown closure";
+  rejects "callptr hint" callptr_src "mark `process` @[no_alloc(assume)]"
+
+let replace_first s ~sub ~by =
+  let n = String.length s and k = String.length sub in
+  let rec go i = if i + k > n then s
+    else if String.sub s i k = sub then String.sub s 0 i ^ by ^ String.sub s (i + k) (n - i - k)
+    else go (i + 1) in
+  go 0
+
+let warn_src = replace_first live_src ~sub:"@[no_alloc]" ~by:"@[no_alloc(warn)]"
+
+let test_warn_form_exit_zero () =
+  let (rc, out) = compile warn_src in
+  Alcotest.(check int) "rc 0" 0 rc;
+  Alcotest.(check bool) "warning printed" true
+    (contains "-- WARNING --" out && contains "is marked @[no_alloc] but allocates" out)
+
+let test_no_opt_downgrades () =
+  let (rc, out) = compile ~flags:"--no-opt" live_src in
+  Alcotest.(check int) "rc 0 under --no-opt" 0 rc;
+  Alcotest.(check bool) "names the flag" true
+    (contains "(TIR optimisation was skipped by --no-opt; the normal build may pass.)" out)
+
+let test_opt_level_does_not_change_verdict () =
+  let (rc0, _) = compile ~flags:"--opt 0" live_src in
+  let (rc2, _) = compile ~flags:"--opt 2" live_src in
+  Alcotest.(check bool) "both reject" true (rc0 <> 0 && rc2 <> 0)
+
+let test_interpreter_ignores_attribute () =
+  let (_, _, _, interp_out) = compile_and_run live_src in
+  Alcotest.(check string) "interpreted runs" "3\n" interp_out
+
+let test_check_ignores_attribute () =
+  let exe = Test_cap_ceiling.compiler_exe in
+  let f = Filename.temp_file "noalloc" ".march" in
+  let oc = open_out f in output_string oc live_src; close_out oc;
+  let log = Filename.temp_file "noalloc" ".log" in
+  let rc = Sys.command (Printf.sprintf "%s --check %s > %s 2>&1"
+                          (Filename.quote exe) (Filename.quote f) (Filename.quote log)) in
+  let ic = open_in log in
+  let out = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  List.iter (fun p -> try Sys.remove p with _ -> ()) [f; log];
+  Alcotest.(check int) "--check rc" 0 rc;
+  Alcotest.(check bool) "silent" false (contains "no_alloc" out)
+
+let e2e_tests = [
+  Alcotest.test_case "reject: live scrutinee ctor"          `Quick test_reject_live_scrutinee;
+  Alcotest.test_case "reject: transitive names callee"      `Quick test_reject_transitive_names_callee;
+  Alcotest.test_case "reject: string concatenation"         `Quick test_reject_string_concat;
+  Alcotest.test_case "reject: ECallPtr without assume"      `Quick test_reject_callptr_without_assume;
+  Alcotest.test_case "warn form exits 0"                    `Quick test_warn_form_exit_zero;
+  Alcotest.test_case "--no-opt downgrades to a warning"     `Quick test_no_opt_downgrades;
+  Alcotest.test_case "--opt N does not change the verdict"  `Quick test_opt_level_does_not_change_verdict;
+  Alcotest.test_case "interpreter ignores the attribute"    `Quick test_interpreter_ignores_attribute;
+  Alcotest.test_case "--check ignores the attribute"        `Quick test_check_ignores_attribute;
+]
+let tests = tests @ e2e_tests

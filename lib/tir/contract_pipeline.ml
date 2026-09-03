@@ -14,6 +14,11 @@ type result = {
   final : Tir.tir_module;
   (** After [Native_map_inline]; ready for [Llvm_emit]. *)
   vectorize_diags : March_errors.Errors.diagnostic list;
+  contract_diags : March_errors.Errors.diagnostic list;
+  (** @[no_alloc] verdicts over [final]. *)
+  allocating : (string, Alloc_contract.reason) Hashtbl.t;
+  (** The transitive allocating set over [final], by TIR fn name — for the
+      LSP lens / quick fix and --report-contracts. *)
 }
 
 let island_suffixes = ["render"; "update"; "init"]
@@ -22,11 +27,35 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
     ?(after_fusion = fun _ -> ()) ?(before_perceus = fun _ -> ())
     ?(before_opt = fun _ -> ()) ?(extra_roots = [])
     ?(wasm_island = false) ?(is_js = false) ?(hot_reload = None)
-    ?iface_methods ~opt ~trmc (tir : Tir.tir_module) : result =
+    ?iface_methods ?(decls = []) ~opt ~trmc (tir : Tir.tir_module) : result =
   (* TRMC eligibility analysis (gated on MARCH_TRMC_REPORT).  Must run here:
      by tir-perceus the stdlib's nested `go` helpers are closures invoked via
      ECallPtr, so self-recursion is no longer syntactically visible. *)
   Trmc.report tir;
+  (* The same analysis feeds the @[no_alloc] --trmc hint: which annotated
+     functions TRMC would transform.  Taken on the pre-transform TIR, by the
+     pre-Mono name the contract is keyed on. *)
+  let trmc_eligible =
+    let contracts = List.filter (fun d -> d.Alloc_contract.d_form <> None) decls in
+    if contracts = [] then (fun _ -> false)
+    else begin
+      let eligible = Hashtbl.create 16 in
+      List.iter (fun r ->
+          if Trmc.verdict_of r = Trmc.Eligible then
+            Hashtbl.replace eligible r.Trmc.r_fn ())
+        (Trmc.analyze_module tir);
+      fun n -> Hashtbl.mem eligible n
+    end
+  in
+  (* Annotated functions must survive DCE so their own (optimised) bodies
+     can be judged even when every caller inlined them. *)
+  let extra_roots =
+    extra_roots
+    @ List.filter_map (fun d ->
+        match d.Alloc_contract.d_form with
+        | Some (Alloc_contract.Hard | Alloc_contract.Warn) -> Some d.Alloc_contract.d_name
+        | _ -> None) decls
+  in
   let tir = Trmc.transform_module ~enabled:trmc tir in
   (* For WASM island targets, mark render/update/init as exported.
      Set exports BEFORE monomorphization so the functions get mono'd. *)
@@ -168,4 +197,9 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   (* When opt is disabled there are no per-pass snaps; still emit one overall. *)
   if not opt then snap "tir-opt" tir;
   stamp "opt";
-  { pre_opt; final = tir; vectorize_diags }
+  (* @[no_alloc]: the last pass before emission, on the exact TIR Llvm_emit
+     will consume. *)
+  let allocating = Alloc_contract.allocating_fns ~decls tir in
+  let contract_diags =
+    Alloc_contract.check ~decls ~allocating ~opt ~trmc ~trmc_eligible tir in
+  { pre_opt; final = tir; vectorize_diags; contract_diags; allocating }

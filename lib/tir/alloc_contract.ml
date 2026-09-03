@@ -146,17 +146,38 @@ let ty_of_atom = function
   | Tir.ALit (March_ast.Ast.LitInt _) -> Tir.TInt
   | _ -> Tir.TUnit
 
+(* An [EAlloc]/[EReuse] constructor key is "Type.Ctor" (lower_expr's
+   [ctor_key]); the variant definition keys its constructors by the bare
+   name.  Split at the last '.'. *)
+let split_ctor_key (key : string) : string option * string =
+  match String.rindex_opt key '.' with
+  | Some i -> (Some (String.sub key 0 i), String.sub key (i + 1) (String.length key - i - 1))
+  | None -> (None, key)
+
+let ctor_short (key : string) : string = snd (split_ctor_key key)
+
 (* Declared field types of the constructor / record / tuple [ty] builds. *)
 let ctor_fields (m : Tir.tir_module) (ty : Tir.ty) : Tir.ty list option =
   match ty with
   | Tir.TTuple ts -> Some ts
   | Tir.TRecord fs -> Some (List.map snd fs)
-  | Tir.TCon (name, _) ->
-    List.find_map (function
-        | Tir.TDVariant (_, ctors) -> List.assoc_opt name ctors
-        | Tir.TDRecord (n, fs) when n = name -> Some (List.map snd fs)
-        | Tir.TDClosure (n, tys) when n = name -> Some tys
-        | _ -> None) m.Tir.tm_types
+  | Tir.TCon (key, _) ->
+    let (tname, ctor) = split_ctor_key key in
+    let exact =
+      List.find_map (function
+          | Tir.TDVariant (n, ctors) when tname = None || tname = Some n ->
+            List.assoc_opt ctor ctors
+          | Tir.TDRecord (n, fs) when n = key -> Some (List.map snd fs)
+          | Tir.TDClosure (n, tys) when n = key -> Some tys
+          | _ -> None) m.Tir.tm_types
+    in
+    (match exact with
+     | Some _ -> exact
+     | None ->
+       (* Unqualified fallback: any variant declaring this constructor. *)
+       List.find_map (function
+           | Tir.TDVariant (_, ctors) -> List.assoc_opt ctor ctors
+           | _ -> None) m.Tir.tm_types)
   | _ -> None
 
 (* A Float stored into a slot whose declared type is not TFloat is boxed by
@@ -199,10 +220,14 @@ let direct_reason ~(m : Tir.tir_module) ~fns ~externs (body : Tir.expr) : reason
   let set r = if !found = None then found := Some r in
   Policy_dce.fold_expr (fun () e ->
       match e with
+      (* Nullary constructors are immediate tags per the design's allocation
+         table (specs/2026-09-03-allocation-contracts-design.md); see the
+         caveat in specs/lang/memory-model.md about today's codegen. *)
+      | Tir.EAlloc (_, []) -> ()
       | Tir.EAlloc (Tir.TCon (c, _), _) when Tir_names.is_clo_struct c -> set Closure
-      | Tir.EAlloc (Tir.TCon (c, _), _) -> set (Ctor c)
+      | Tir.EAlloc (Tir.TCon (c, _), _) -> set (Ctor (ctor_short c))
       | Tir.EAlloc (ty, _) -> set (Ctor (Tir.show_ty ty))
-      | Tir.EAllocHole (None, Tir.TCon (c, _), _, _) -> set (Ctor c)
+      | Tir.EAllocHole (None, Tir.TCon (c, _), _, _) -> set (Ctor (ctor_short c))
       | Tir.EAllocHole (None, ty, _, _) -> set (Ctor (Tir.show_ty ty))
       | Tir.ETuple (_ :: _) -> set Tuple
       | Tir.ERecord _ -> set Record
@@ -262,3 +287,68 @@ let allocating_fns ~decls (m : Tir.tir_module) : (string, reason) Hashtbl.t =
   in
   fix ();
   set
+
+(* ── The contract check ────────────────────────────────────────────────── *)
+
+let diag ~severity ~span ~code ?(notes = []) message : March_errors.Errors.diagnostic =
+  { March_errors.Errors.severity; span; message; labels = []; notes;
+    code = Some code; fix = None }
+
+(* Message body shared by the explicit-attribute and policy diagnostics:
+   [head] is "`f` is marked @[no_alloc]" or "`f` is specialized to a NoAlloc
+   policy". *)
+let failure_message ~head ~name ~suffix (reason : reason) : string =
+  match reason with
+  | UnknownClosure x ->
+    Printf.sprintf
+      "%s but calls through an unknown closure.%s\n  I can't see what `%s` does. \
+       If you know it doesn't allocate, mark `%s` @[no_alloc(assume)]."
+      head suffix x name
+  | Extern e ->
+    Printf.sprintf
+      "%s but calls the extern `%s`.%s\n  I can't see what `%s` does. \
+       If you know it doesn't allocate, mark `%s` @[no_alloc(assume)]."
+      head e suffix e name
+  | Callee (g, r) ->
+    Printf.sprintf "%s but allocates.%s\n  `%s` calls `%s`, which allocates (in `%s`: %s)."
+      head suffix name g g (describe r)
+  | r ->
+    Printf.sprintf "%s but allocates.%s\n  In `%s`: %s." head suffix name (describe r)
+
+let trmc_note = "This function is TRMC-eligible; compiling with --trmc turns the \
+                 constructor into an in-place write."
+
+(** [check ~decls ~allocating ~opt ~trmc ~trmc_eligible m]: one diagnostic per
+    failing contract, from its first failing monomorphised clone.  [opt =
+    false] (--no-opt) downgrades the hard form to a warning that names the
+    flag; a direct constructor allocation in a TRMC-eligible function gets
+    the --trmc note while TRMC is off. *)
+let check ~decls ~(allocating : (string, reason) Hashtbl.t) ~opt ~trmc
+    ~(trmc_eligible : string -> bool) (m : Tir.tir_module)
+  : March_errors.Errors.diagnostic list =
+  let seen = Hashtbl.create 16 in
+  List.filter_map (fun (fd : Tir.fn_def) ->
+      let n = fd.Tir.fn_name in
+      match decl_of decls n, Hashtbl.find_opt allocating n with
+      | Some ({ d_form = Some ((Hard | Warn) as form); _ } as d), Some reason
+        when not (Hashtbl.mem seen d.d_name) ->
+        Hashtbl.replace seen d.d_name ();
+        let name = d.d_name in
+        let severity, suffix =
+          match form, opt with
+          | Warn, _ -> (March_errors.Errors.Warning, "")
+          | Hard, true -> (March_errors.Errors.Error, "")
+          | Hard, false ->
+            (March_errors.Errors.Warning,
+             " (TIR optimisation was skipped by --no-opt; the normal build may pass.)")
+          | Assume, _ -> assert false (* excluded by the pattern above *)
+        in
+        let notes =
+          match reason with
+          | Ctor _ when (not trmc) && trmc_eligible name -> [ trmc_note ]
+          | _ -> []
+        in
+        let head = Printf.sprintf "`%s` is marked @[no_alloc]" name in
+        Some (diag ~severity ~span:d.d_name_span ~code:"no_alloc" ~notes
+                (failure_message ~head ~name ~suffix reason))
+      | _ -> None) m.Tir.tm_fns
