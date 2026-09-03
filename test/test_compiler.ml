@@ -14863,6 +14863,7 @@ let compiler_suites =
       ("cap_package", Test_cap_package.tests);
       ("cap_scope", Test_cap_scope.tests);
       ("cap_ceiling", Test_cap_ceiling.tests);
+      ("alloc_contract", Test_alloc_contract.tests);
       ("cap_unforgeable", Test_cap_unforgeable.tests);
       ("cap_dict", Test_cap_dict.tests);
       ("cap_attrib_agreement", Test_cap_attrib_agreement.tests);
