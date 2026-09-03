@@ -212,7 +212,7 @@ compiler and filed them for a follow-up fix wave, landed in this commit.
 
 **Finding 1: a self-referential RHS.** `path_shadow` retires the OLD facts
 about a rebound name `n`, but the equality pushed right after it, `n == rhs`,
-can itself mention `n` in `rhs` — both occurrences resolve to the same SMT
+can itself mention `n` in `rhs`: both occurrences resolve to the same SMT
 constant. `let k = k - 100` therefore became the unsatisfiable constraint
 `k == k - 100`, so every downstream obligation proved vacuously (`pos(k)` and
 a contradictory `neg(k)` both "proved"); `let k = k * 2` under `if k > 0`
@@ -229,7 +229,7 @@ admitted a bare `A.EVar` as an RHS on its own, not just as an operand of
 `+`/`-`/`*`. `smt_of`'s path translator reflects a variable at the integer
 sort, but an ADT-typed alias (`let u = o` with `o : Option(Int)`) has tester
 facts about `o` sitting at the datatype sort; pushing `u == o` mixed sorts in
-the same VC and tripped the sort-conflict gate, which drops the whole VC —
+the same VC and tripped the sort-conflict gate, which drops the whole VC:
 not just `u`'s own obligations, but an unrelated call in a different function
 that never mentions `u`. The alias also carried no exclusion fact through on
 its own. Fix: delete the bare `A.EVar _` arm from `let_equality_rhs`; a
@@ -241,17 +241,17 @@ and that `sort-conflict` does not appear among the skip reasons; confirmed by
 mutation (restoring the bare-`EVar` arm reddens it).
 
 **Also:** `LE3` (the rebinding guard) was switched from `ledger_counts` to
-`ledger_counts3`, asserting `(0, 0, 1)` — `ledger_counts` folds `violated`
+`ledger_counts3`, asserting `(0, 0, 1)` (vs. `ledger_counts`, which folds `violated`)
 into neither of its two buckets, so a stale-fact regression in this feature
 (finding 1 shows exactly this shape) could surface as a false `violated`
 and the old two-way assertion would not have caught it.
 
 **Lesson:** a path equality's right-hand side must not mention the name it
-binds — pushing `n == rhs` after `path_shadow` retires the old facts about
+binds: pushing `n == rhs` after `path_shadow` retires the old facts about
 `n` only prevents STALE facts from surviving; it does nothing to stop the
 NEW fact from being self-contradictory when `rhs` reintroduces the same
 name. And a fact channel that reflects a name at one SMT sort must never be
-fed a name that other live facts declare at a different sort — the
+fed a name that other live facts declare at a different sort: the
 sort-conflict gate's blast radius is the whole VC, not just the offending
 fact, so admitting the wrong shape into one channel can silently blank out
 unrelated, syntactically distant obligations.
