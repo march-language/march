@@ -151,6 +151,17 @@ In `refine_check.ml`'s block fold, the `path'` arm currently only shadows:
 
 Keep the existing shadowing for every other binding construct untouched. Confirm `==` is the comparison spelling `smt_of` maps to `Smt.Eq` (grep `"=="` in `refine_scope.ml`), and that path facts are translated with a `resolve_var` that maps a bare name to `Const name` (`path_resolve_var`, `refine_call.ml` ~1947-1954), so `k + 1` reflects with `k` resolvable. The fact is pushed positive (`false` = not negated).
 
+**Correction (plan-2 whole-plan review).** The push above is unsound as
+written for a SELF-REFERENTIAL right-hand side: `let k = k - 100` pushes
+`k == k - 100` with both `k`s resolving to one SMT constant, which is
+unsatisfiable and proves every downstream obligation; `let k = k * 2` forces
+`k = 0` and rejects a correct program. The shipped push is guarded with
+`not (expr_mentions names rhs)`, with fixtures for both shapes. The bare
+`A.EVar` right-hand side is also DROPPED from `let_equality_rhs`: an alias of
+an ADT-typed name reflects at the scalar sort while its tester facts are at
+the datatype sort, and the sort-conflict gate then drops the whole VC,
+including unrelated obligations; the alias carried no exclusion fact anyway.
+
 - [ ] **Step 5: Run, mutation, commit**
 
 All three `[OK]`. Mutation: change the push to `path` (drop the fact); LE1 and LE2 redden; LE3 stays green. Restore.
