@@ -228,6 +228,15 @@ end|}
 
 Check the guard syntax (`when`) against `specs/lang/surface-syntax.md` before relying on AE2.
 
+**Correction (Task 2 review).** As written above, AE2 and AE3 assert only
+`proved = 0`. That is an inert guard for AE3: removing the nullary
+requirement makes the mutant push `not is_Cons(t)`, which becomes
+`len(t) = 0`, false, and the compiler reports a spurious VIOLATED, which a
+`proved`-only assertion discards. The shipped tests assert the whole ledger,
+`(proved, skipped) = (0, 1)` and `violated = 0`, and AE3 was mutation-tested
+against exactly that mutant. A silence guard for a feature that can produce a
+false positive must assert every verdict that a false positive can take.
+
 - [ ] **Step 2: Run to verify AE1 fails**
 
 Expected: AE1 `(0, 1)` against `(1, 0)`; AE2 and AE3 pass already (silence guards).
