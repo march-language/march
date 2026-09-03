@@ -373,8 +373,10 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
        fall back to the function name instead when it does. *)
     let tail_display =
       let rendered = pred_str tail_e in
-      if rendered <> "<predicate>" then rendered
-      else Option.value ~default:"<anonymous>" fn_name
+      if rendered <> "<predicate>" then Printf.sprintf "the return expression `%s`" rendered
+      else
+        Printf.sprintf "the return expression of `%s`"
+          (Option.value ~default:"<anonymous>" fn_name)
     in
     if enum_witness_error () then note Obligation.Violated
     else note (Obligation.Skipped (Obligation.Unreflectable_subject tail_display));
@@ -879,7 +881,8 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
           | None ->
             let body_display =
               let rendered = pred_str body in
-              if rendered <> "<predicate>" then rendered else self
+              if rendered <> "<predicate>" then Printf.sprintf "the return expression `%s`" rendered
+              else Printf.sprintf "the return expression of `%s`" self
             in
             Obligation.Skipped (Obligation.Unreflectable_subject body_display)
         in

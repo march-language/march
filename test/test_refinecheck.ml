@@ -4869,7 +4869,15 @@ end|}
        `<predicate>` placeholder for an actual it cannot render as source
        syntax (an `if`, among others).  Naming the argument `<predicate>` in
        the message reads as if that were the user's own spelling; it must
-       fall back to the PARAMETER's name instead. *)
+       fall back to the PARAMETER's name instead.
+
+       Whole-plan review, finding 3: the fallback used to read "the argument
+       `i`", which still reads as if `i` were the call site's own text (it
+       is the CALLEE's parameter name, and the call site never mentions
+       `i`).  It now reads "the argument passed for `i`", said explicitly
+       rather than left to look like a spelling.  Mutation that fails the
+       exact-phrase assertion below: revert [self_display]'s placeholder
+       branch to the bare parameter name. *)
     gated "an actual pred_str cannot render never prints the <predicate> placeholder"
       (fun () ->
         let src =
@@ -4883,8 +4891,8 @@ end|}
         let text = refine_error_text_d src in
         Alcotest.(check bool) "never prints the placeholder" false
           (contains text "<predicate>");
-        Alcotest.(check bool) "names the parameter instead" true
-          (contains text "`i`"));
+        Alcotest.(check bool) "names the parameter, phrased as a fallback, not the call's own text" true
+          (contains text "the argument passed for `i`"));
 
     (* A third variant, [Nonlinear_goal], was drafted here and cut: the only
        [smt_of] used to build a goal never produces [Smt.Mul] for two
@@ -5010,7 +5018,12 @@ end|} in
 end|} in
         Alcotest.(check (list string)) "slug" [ "unreflectable-subject" ] (skip_reasons src);
         let text = refine_error_text_d src in
-        Alcotest.(check bool) "names the tail `g()`" true (contains text "`g()`");
+        (* Whole-plan review, finding 4: this used to read "the argument
+           `g()`" for a RETURN expression, which is the wrong noun -- a
+           postcondition has no argument. It now says "the return
+           expression `g()`" explicitly. *)
+        Alcotest.(check bool) "names the tail as a return expression, not an argument" true
+          (contains text "the return expression `g()`");
         Alcotest.(check bool) "does not blame the (reflectable) predicate" false
           (contains text "has no SMT translation"));
 
@@ -5043,8 +5056,8 @@ end|} in
            record-literal reproducer named the whole tail, `v.name == "a"`,
            not an isolated field). Still names `hidden()` as a substring of
            that tail, which is enough to point a reader at the actual cause. *)
-        Alcotest.(check bool) "names the tail, including `hidden()`" true
-          (List.exists (fun d -> contains d "`Node(Leaf, hidden(), Leaf)`") details);
+        Alcotest.(check bool) "names the tail as a return expression, including `hidden()`" true
+          (List.exists (fun d -> contains d "the return expression `Node(Leaf, hidden(), Leaf)`") details);
         Alcotest.(check bool) "does not blame the (reflectable) measure predicate" false
           (List.exists (fun d -> contains d "has no SMT translation") details))
   ]
@@ -11823,8 +11836,7 @@ end|}
   end
 end|}
         in
-        Alcotest.(check bool) "unreflectable-subject, not unreflectable-predicate" true
-          (List.mem "unreflectable-subject" rs);
+        Alcotest.(check (list string)) "slug" [ "unreflectable-subject" ] rs;
         Alcotest.(check bool) "no sort-conflict" false
           (List.mem "sort-conflict" rs);
         Alcotest.(check bool) "no float-sort-gate" false

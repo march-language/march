@@ -25,11 +25,17 @@ type reason =
   (* The SUBJECT did not reflect: a call's actual argument, or a
      postcondition's own return expression, whichever is being checked. Filed
      before the predicate is ever reached, so a subject failure never gets
-     misattributed to a predicate that would have translated fine. Payload
-     discipline follows [Alias_withdrawn]: the subject, rendered by
-     [pred_str], rides in [reason_detail] only; [reason_name] stays
-     payload-free so `--refine-report` groups every failed-subject skip into
-     one bucket instead of one per distinct subject. *)
+     misattributed to a predicate that would have translated fine. The
+     payload is the WHOLE noun phrase [reason_detail] prints (e.g.
+     "the argument `lane(1)`" at a call site, "the return expression `g()`"
+     at a postcondition site), not just the subject's own spelling, because
+     a call's actual and a postcondition's return expression need different
+     nouns and one payload site cannot know which noun the other needs.
+     Each filing site renders its own noun via [pred_str], following
+     [Alias_withdrawn]'s payload discipline: the rendered phrase rides in
+     [reason_detail] only; [reason_name] stays payload-free so
+     `--refine-report` groups every failed-subject skip into one bucket
+     instead of one per distinct subject. *)
   | Unreflectable_subject of string
   | Sort_conflict            (* a symbol would have been declared at two sorts *)
   | Float_sort_gate          (* the float/formula wellsortedness gate rejected it *)
@@ -267,9 +273,8 @@ let reason_name = function
 let reason_detail = function
   | Unreflectable_predicate sub ->
     Printf.sprintf "the predicate's `%s` has no SMT translation" sub
-  | Unreflectable_subject actual ->
-    Printf.sprintf
-      "the argument `%s` could not be translated to SMT, so no goal was built" actual
+  | Unreflectable_subject phrase ->
+    Printf.sprintf "%s could not be translated to SMT, so no goal was built" phrase
   | Sort_conflict -> "reflecting it would declare one symbol at two different sorts"
   | Float_sort_gate -> "the float wellsortedness gate rejected the formula"
   | Solver_undecided -> "the solver proved neither the predicate nor its negation"

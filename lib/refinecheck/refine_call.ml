@@ -2031,14 +2031,22 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
           [rp.binder] is the wrong fallback here: it is the refinement's own
           binder spelling, usually the anonymous `_` (as in `{Int | 0 <= _ &&
           _ < 4}`), which is not a name the user's call site ever mentions and
-          would leave the message pointing at nothing legible. *)
+          would leave the message pointing at nothing legible.
+
+          The fallback names a PARAMETER, not the call site's own text, so
+          the phrase has to say so explicitly: "the argument passed for
+          `s`" rather than "the argument `s`", which would misread `s` as
+          the caller's own expression. *)
        let self_display =
          let rendered = pred_str self_actual in
-         if rendered <> "<predicate>" then rendered
+         if rendered <> "<predicate>" then Printf.sprintf "the argument `%s`" rendered
          else
-           match List.nth_opt sg.param_names rp.idx with
-           | Some pname when pname <> "" -> pname
-           | _ -> rp.binder
+           let pname =
+             match List.nth_opt sg.param_names rp.idx with
+             | Some pname when pname <> "" -> pname
+             | _ -> rp.binder
+           in
+           Printf.sprintf "the argument passed for `%s`" pname
        in
        note
          (Obligation.Skipped
