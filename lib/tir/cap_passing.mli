@@ -25,6 +25,12 @@ val needed_caps : Tir.tir_module -> (string, string list) Hashtbl.t
 (** Each function that must carry capabilities, mapped to them (sorted).
     Functions whose arity cannot safely change are excluded. *)
 
+val actor_of_spawn : string -> string option
+(** The actor name when the argument is an actor's spawn glue function. *)
+
+val supervised_children : Tir.expr -> string list
+(** The actors a spawn glue's body spawns as `supervise`-block children. *)
+
 val actor_of_dispatch : string -> string option
 (** The actor name when the argument is an actor's dispatch function. *)
 

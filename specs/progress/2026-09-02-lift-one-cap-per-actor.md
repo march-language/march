@@ -313,8 +313,9 @@ builtin, or typechecker change, as designed.
   the table above, plus a **second message** to the `both` and `outside`
   actors, because a record freed after the first dispatch read (the UAF the
   RC contract guards against) is invisible on a one-message trace.
-- **Supervised children** are still never captured, on any capability count:
-  filed as `specs/todos/2026-09-03-supervised-children-not-captured.md`.
+- **Supervised children** were still never captured when this landed; done
+  right after, see `2026-09-03-supervised-children-not-captured.md` in this
+  directory.
 
 ### Red control
 
