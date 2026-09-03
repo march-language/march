@@ -242,6 +242,18 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- A `let` whose right-hand side is a literal or an arithmetic expression now
+  carries its value into refinement checking. `let n = 0` followed by a call
+  that requires a positive argument reports the same definite violation that
+  passing `0` directly already did, instead of going undecided because nothing
+  constrained `n`. Calls, `if` expressions and floats are not admitted.
+
+- A binder in a constructor pattern now inherits the constructor an earlier
+  unguarded arm's sub-pattern excluded. After `Cons(x, Nil)`, the `t` in a
+  later `Cons(_, t)` is known not to be `Nil`, which is what makes
+  `List.last`'s recursive call verify. That is the one site in the standard
+  library this reaches.
+
 - Refinement obligations the checker cannot discharge now report *why*. The
   single `solver-undecided` message has been split into three diagnosed causes —
   an **unconstrained subject** (no fact the checker derived constrains the

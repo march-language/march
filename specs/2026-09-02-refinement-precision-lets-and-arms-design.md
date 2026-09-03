@@ -1,7 +1,11 @@
 # Two precision gaps: `let` equalities and nested-pattern facts
 
-Filed 2026-09-02. Status: design approved, not implemented.
-Open item: `specs/todos/2026-09-02-refinement-precision-lets-and-arms.md`.
+Filed 2026-09-02. Status: **landed 2026-09-02** (`211b501c`, `40c51d1d`,
+`f1801a38`). Both parts shipped in the simplified forms described under
+"Corrections made while planning" below, not in the original Design A / Design
+B forms, which are kept for the record.
+Landed record, with the corpus sweep, the oracle classification and the
+measured deviations: `specs/progress/2026-09-02-refinement-precision-lets-and-arms.md`.
 
 ## Problem
 
