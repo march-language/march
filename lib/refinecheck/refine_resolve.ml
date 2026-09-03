@@ -440,7 +440,7 @@ let reflect_record_literal ?(opaque : (Smt.sort -> Smt.term) option)
    Defaulting both to [None] keeps every other caller byte-identical: only the
    call-site builder, which owns the caller namespace (sorts, string/record
    registries, the measure memo), passes them. *)
-let reflect_scalar
+let rec reflect_scalar
     ~(postcond : string -> A.expr list -> (string * A.expr * string option) option)
     ?(foreign_var : (string -> (Smt.term * (string * Smt.sort)) option) option)
     ?(foreign_measure : (string -> string -> Smt.term option) option)
@@ -512,6 +512,34 @@ let reflect_scalar
           guard about it can constrain it.  Without a guard it stays
           unconstrained and the definite-failure check keeps us silent. *)
        Some (xc, [ (x, sort) ], []))
+  (* An infix operator is spelled as an application of its name.  Dispatching
+     it as a named call sends it to [plain], whose variable resolver is
+     hard-coded to None, so `n - 1` never reflected and the PREDICATE was
+     blamed for a subject the caller never gave a chance to reflect.  Reflect
+     the operands through this same function — same [sc]/[sort]/resolvers —
+     so a guard on `n` reaches `n - 1`. Any operand that fails to reflect
+     falls the WHOLE actual back to [plain], never a partial term. *)
+  | A.EApp (A.EVar { A.txt = ("+" | "-") as op; _ }, [ a; b ], _) ->
+    (match
+       reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_field ~sort sc
+         a,
+       reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_field ~sort sc
+         b
+     with
+     | Some (ta, da, aa), Some (tb, db, ab) ->
+       let t = if op = "+" then Smt.Add (ta, tb) else Smt.Sub (ta, tb) in
+       Some (t, da @ db, aa @ ab)
+     | _ -> plain actual)
+  | A.EApp (A.EVar { A.txt = "*"; _ }, [ a; b ], _) ->
+    (match a, b with
+     | A.ELit (A.LitInt k, _), e | e, A.ELit (A.LitInt k, _) ->
+       (match
+          reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_field
+            ~sort sc e
+        with
+        | Some (te, de, ae) -> Some (Smt.MulLit (k, te), de, ae)
+        | None -> plain actual)
+     | _ -> plain actual)
   (* A direct named call: stand its result up as a fresh constant carrying the
      callee's declared postcondition.  `.` is a legal SMT-LIB simple-symbol
      character, so a qualified name needs no mangling. *)

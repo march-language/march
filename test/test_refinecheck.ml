@@ -11520,6 +11520,48 @@ end|}
         Alcotest.(check bool) "no sort-conflict skip" false
           (List.mem "sort-conflict" (skip_reasons src))) ]
 
+(* ── Task 1: arithmetic actuals reflect through the subject's own scope ──
+   `pos(i + 1)` is spelled `EApp (EVar "+", [i; 1])`.  [reflect_scalar]'s
+   named-call arm sent that straight to [plain], whose variable resolver is
+   hard-coded to [None], so `i` never reflected and the obligation was
+   blamed on the PREDICATE ("unreflectable-predicate") rather than on `i`
+   being unconstrained.  AA1 is the positive control: a guard on `i` reaches
+   `i + 1` and the call proves.  AA2 pins the negative shape: `i - 1` with
+   no lower-bound guard on `i` must still be a DIAGNOSED skip about `i`
+   (unconstrained-subject or solver-undecided), never
+   unreflectable-predicate. *)
+let arith_actual_suite =
+  [ gated "an arithmetic actual carries its operand's guard" (fun () ->
+        let proved, skipped =
+          ledger_counts
+            {|mod AA1 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn go(i : Int) : Int do
+    if i >= 0 do pos(i + 1) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check (pair int int)) "proved" (1, 0) (proved, skipped));
+
+    (* The operand reflects but the guard is insufficient: this must be a
+       DIAGNOSED skip about `i`, never unreflectable-predicate. *)
+    gated "an insufficiently guarded arithmetic actual is diagnosed, not unreflectable"
+      (fun () ->
+        let rs =
+          skip_reasons
+            {|mod AA2 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn go(i : Int) : Int do
+    if i >= 0 do pos(i - 1) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "not unreflectable-predicate" false
+          (List.mem "unreflectable-predicate" rs);
+        Alcotest.(check bool) "one skip, diagnosed" true
+          (List.length rs = 1
+           && (List.mem "unconstrained-subject" rs || List.mem "solver-undecided" rs))) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -11596,4 +11638,5 @@ let () =
       ("precond-reachable-unit", reachable_unit_suite);
       ("post-nested-unit", post_nested_unit_suite);
       ("let-equality", let_equality_suite);
-      ("let-equality-alias", let_equality_alias_suite) ]
+      ("let-equality-alias", let_equality_alias_suite);
+      ("arith-actual", arith_actual_suite) ]
