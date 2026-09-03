@@ -11417,10 +11417,14 @@ end|}
     (* Rebinding an operand retires the equality: the obligation must NOT be
        proved from a stale `n == k + 1`.  Silence-shaped, so it needs the
        positive case above as its control. *)
+    (* Uses [ledger_counts3], not [ledger_counts]: a stale-fact regression
+       in this feature can surface as a false VIOLATED verdict (see the
+       self-referential-RHS fixture just below), which the two-way ledger
+       cannot distinguish from a legitimate skip. *)
     gated "rebinding a mentioned name retires the let equality"
       (fun () ->
-        let proved, _ =
-          ledger_counts
+        let proved, violated, skipped =
+          ledger_counts3
             {|mod LE3 do
   fn pos(n : {Int | _ > 0}) : Int do n end
   fn dec(k : Int) : Int do k - 10 end
@@ -11433,7 +11437,88 @@ end|}
   end
 end|}
         in
-        Alcotest.(check int) "not proved from a stale equality" 0 proved) ]
+        Alcotest.(check (triple int int int)) "not proved from a stale equality"
+          (0, 0, 1) (proved, violated, skipped));
+
+    (* ── Whole-plan review finding 1: a self-referential RHS ──────────────
+       `let k = k - 100` resolves BOTH occurrences of `k` to the same SMT
+       constant once pushed, turning the equality into `k == k - 100` (an
+       unsatisfiable constraint on the OLD value) rather than a definition
+       of the new one.  An unsatisfiable path makes every downstream
+       obligation prove vacuously — here, both `pos(k)` (should be
+       undecided: post-subtraction `k` is unconstrained) and `neg(k)`
+       (contradictory: `pos` and `neg` can never both hold) must stay
+       skipped, never proved. *)
+    gated "a self-referential let RHS does not push a contradictory equality"
+      (fun () ->
+        let proved, violated, skipped =
+          ledger_counts3
+            {|mod LE4 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn neg(n : {Int | _ < 0}) : Int do n end
+  fn go(k : Int) : Int do
+    if k >= 0 do
+      let k = k - 100
+      pos(k) + neg(k)
+    else 0 end
+  end
+end|}
+        in
+        Alcotest.(check (triple int int int)) "neither call decided"
+          (0, 0, 2) (proved, violated, skipped));
+
+    (* `let k = k * 2` under `if k > 0` would push `k == 2 * k`, forcing
+       `k = 0` and making `pos(k)` a false VIOLATION for every genuine
+       `k > 0`.  Must stay skipped, and specifically must never violate. *)
+    gated "a self-referential multiplicative RHS does not falsely reject" (fun () ->
+        let proved, violated, skipped =
+          ledger_counts3
+            {|mod LE5 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn go(k : Int) : Int do
+    if k > 0 do
+      let k = k * 2
+      pos(k)
+    else 0 end
+  end
+end|}
+        in
+        Alcotest.(check (triple int int int)) "undecided, never a false violation"
+          (0, 0, 1) (proved, violated, skipped)) ]
+
+(* ── Whole-plan review finding 2: a bare-variable alias of an ADT-typed
+   name must not become a path equality ───────────────────────────────────
+   [smt_of]'s path translator reflects a variable at the INTEGER sort, but
+   `o : Option(Int)` carries its tester facts (`is_Some(o)`, from the match
+   arm) at the DATATYPE sort.  Admitting `let u = o` as a path equality
+   `u == o` mixed those sorts in the same VC and tripped the sort-conflict
+   gate, which drops the WHOLE VC — not just `u`'s own obligations, but
+   `unwrap(x)` in `g`, an entirely unrelated function that never mentions
+   `u`.  The alias is now excluded from [let_equality_rhs] outright (a
+   variable is admitted only as an OPERAND of `+`/`-`/`*`), so this ledger
+   must equal the baseline as if the `let u = x` line were not there at
+   all, and `sort-conflict` must not appear among the skip reasons. *)
+let let_equality_alias_suite =
+  [ gated "a bare-variable alias of an Option does not poison an unrelated call"
+      (fun () ->
+        let src =
+          {|mod OA1 do
+  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end
+  fn f(x : Option(Int)) : Int do
+    let u = x
+    match x do
+      Some(v) -> unwrap(x)
+      None -> 0
+    end
+  end
+  fn g(x : Option(Int)) : Int do unwrap(x) end
+end|}
+        in
+        let proved, violated, skipped = ledger_counts3 src in
+        Alcotest.(check (triple int int int)) "baseline ledger" (1, 0, 1)
+          (proved, violated, skipped);
+        Alcotest.(check bool) "no sort-conflict skip" false
+          (List.mem "sort-conflict" (skip_reasons src))) ]
 
 let () =
   Alcotest.run "march-refinecheck"
@@ -11510,4 +11595,5 @@ let () =
       ("precond-promotion", promotion_suite);
       ("precond-reachable-unit", reachable_unit_suite);
       ("post-nested-unit", post_nested_unit_suite);
-      ("let-equality", let_equality_suite) ]
+      ("let-equality", let_equality_suite);
+      ("let-equality-alias", let_equality_alias_suite) ]

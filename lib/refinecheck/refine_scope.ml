@@ -656,19 +656,35 @@ let path_shadow (path : (A.expr * bool) list) (names : string list) : (A.expr * 
    Calls are excluded (a refined return is handled by [scope_add_binding];
    an unrefined one carries no fact); `if` is excluded (its encoding is a
    separate decision); floats are excluded (symbolic float arithmetic does
-   not reflect — see the float-constant-folding note above). *)
-let rec let_equality_rhs (e : A.expr) : bool =
+   not reflect — see the float-constant-folding note above).
+
+   A BARE variable is excluded too, deliberately: [smt_of]'s path translator
+   reflects a variable at the INTEGER sort, but an ADT-typed alias
+   (`let u = o` with `o : Option(Int)`) has tester facts about `o` sitting
+   at the datatype sort. Pushing `u == o` then mixes sorts in the same VC,
+   and the sort-conflict gate drops the WHOLE VC — not just the alias's own
+   obligations, but unrelated ones too (e.g. `unwrap(o)`, which never
+   mentions `u`). An alias also carries no exclusion fact through on its
+   own (`let u = t; last(u)` stays undecided either way), so admitting it
+   only had a cost, never a benefit. A variable remains admitted as an
+   OPERAND of `+`/`-`/`*`, where it is always at the integer sort. *)
+let rec let_equality_operand (e : A.expr) : bool =
   match e with
   | A.ELit (A.LitInt _, _) -> true
   | A.EVar _ -> true
   | A.EApp (A.EVar { A.txt = ("+" | "-"); _ }, [ a; b ], _) ->
-    let_equality_rhs a && let_equality_rhs b
+    let_equality_operand a && let_equality_operand b
   | A.EApp (A.EVar { A.txt = "*"; _ }, [ a; b ], _) ->
     (match a, b with
-     | A.ELit (A.LitInt _, _), _ -> let_equality_rhs b
-     | _, A.ELit (A.LitInt _, _) -> let_equality_rhs a
+     | A.ELit (A.LitInt _, _), _ -> let_equality_operand b
+     | _, A.ELit (A.LitInt _, _) -> let_equality_operand a
      | _ -> false)
   | _ -> false
+
+let let_equality_rhs (e : A.expr) : bool =
+  match e with
+  | A.EVar _ -> false
+  | _ -> let_equality_operand e
 
 (* ── Laundered guards: name -> the application it was let-bound to ─────────
    [visit] records, per program point, which local names are ONE `let` away

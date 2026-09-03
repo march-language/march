@@ -204,3 +204,54 @@ each run: baseline compiler 1.59s wall / 1.28s user, this branch 1.40s wall /
 1.26s user. No measurable cost, which is the expected shape: (1) adds one path
 fact per admitted `let` and (2) one tester per qualifying binder, and neither
 adds a solver query.
+
+## Whole-plan review
+
+A reviewer of the finished plan measured two false verdicts against the built
+compiler and filed them for a follow-up fix wave, landed in this commit.
+
+**Finding 1: a self-referential RHS.** `path_shadow` retires the OLD facts
+about a rebound name `n`, but the equality pushed right after it, `n == rhs`,
+can itself mention `n` in `rhs` — both occurrences resolve to the same SMT
+constant. `let k = k - 100` therefore became the unsatisfiable constraint
+`k == k - 100`, so every downstream obligation proved vacuously (`pos(k)` and
+a contradictory `neg(k)` both "proved"); `let k = k * 2` under `if k > 0`
+became `k == 2 * k`, forcing `k = 0` and turning a correct call into a false
+`violated`. Fix: at the push site in `refine_check.ml`'s block fold, require
+`not (expr_mentions names rhs)` alongside the existing `let_equality_rhs rhs`
+guard, using the same `names` list `path_shadow` already computed. Probed
+with two new fixtures in the `let-equality` group (`LE4`, `LE5`), both
+asserting the full `(proved, violated, skipped)` triple, and confirmed by
+mutation: dropping the `expr_mentions` guard reddens both.
+
+**Finding 2: a bare-variable alias of an ADT-typed name.** `let_equality_rhs`
+admitted a bare `A.EVar` as an RHS on its own, not just as an operand of
+`+`/`-`/`*`. `smt_of`'s path translator reflects a variable at the integer
+sort, but an ADT-typed alias (`let u = o` with `o : Option(Int)`) has tester
+facts about `o` sitting at the datatype sort; pushing `u == o` mixed sorts in
+the same VC and tripped the sort-conflict gate, which drops the whole VC —
+not just `u`'s own obligations, but an unrelated call in a different function
+that never mentions `u`. The alias also carried no exclusion fact through on
+its own. Fix: delete the bare `A.EVar _` arm from `let_equality_rhs`; a
+variable is admitted only as an operand of `+`/`-`/`*`, via a new internal
+`let_equality_operand` that the top-level function no longer exposes for a
+bare variable. Probed with a new `let-equality-alias` group fixture (`OA1`)
+asserting the ledger equals the baseline as if the alias line were absent,
+and that `sort-conflict` does not appear among the skip reasons; confirmed by
+mutation (restoring the bare-`EVar` arm reddens it).
+
+**Also:** `LE3` (the rebinding guard) was switched from `ledger_counts` to
+`ledger_counts3`, asserting `(0, 0, 1)` — `ledger_counts` folds `violated`
+into neither of its two buckets, so a stale-fact regression in this feature
+(finding 1 shows exactly this shape) could surface as a false `violated`
+and the old two-way assertion would not have caught it.
+
+**Lesson:** a path equality's right-hand side must not mention the name it
+binds — pushing `n == rhs` after `path_shadow` retires the old facts about
+`n` only prevents STALE facts from surviving; it does nothing to stop the
+NEW fact from being self-contradictory when `rhs` reintroduces the same
+name. And a fact channel that reflects a name at one SMT sort must never be
+fed a name that other live facts declare at a different sort — the
+sort-conflict gate's blast radius is the whole VC, not just the offending
+fact, so admitting the wrong shape into one channel can silently blank out
+unrelated, syntactically distant obligations.

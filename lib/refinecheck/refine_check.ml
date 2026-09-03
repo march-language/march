@@ -242,7 +242,15 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                let names = pat_binders b.A.bind_pat in
                let path = path_shadow path names in
                (match b.A.bind_pat, b.A.bind_expr with
-                | A.PatVar n, rhs when let_equality_rhs rhs ->
+                (* A self-referential RHS (`let k = k - 100`) resolves both
+                   occurrences of `k` to the SAME SMT constant once pushed,
+                   turning the equality into a (usually unsatisfiable)
+                   constraint on the OLD value rather than a definition of
+                   the new one — see the whole-plan review's finding 1.
+                   [names] is exactly the set [path_shadow] just retired
+                   facts about, so require the RHS to mention none of them. *)
+                | A.PatVar n, rhs
+                  when let_equality_rhs rhs && not (expr_mentions names rhs) ->
                   let sp = n.A.span in
                   let eq =
                     A.EApp
