@@ -77,3 +77,33 @@ element type at every use. Residual erasure (handle minting from a name,
   for a handle that was bound rather than minted inline.
 - Concurrent writers to unrelated keys in one table do not serialise.
   **Open (item 2) — see the staleness note; want a measured workload first.**
+
+## Backend divergence found 2026-09-02: `Vault.new(name)` twice
+
+`Vault.new` with a name that is already registered returns a **fresh** table in
+the interpreter and the **same** table compiled. Probe (`main` must take
+`Cap(IO)` — a narrower grant is refused before the program runs, which hid this
+on the first attempt):
+
+```march
+let a = Vault.new("vn_probe")
+Vault.set(a, "k", 42)
+let b = Vault.new("vn_probe")
+match Vault.get(b, "k") do
+  Some(v) -> println("same table: " ++ int_to_string(v))
+  None    -> println("FRESH table")
+end
+```
+
+```
+interpreted:  FRESH table
+compiled:     same table: 42
+```
+
+Found because `test/session/stream_replay.march`'s first `drain` re-created its
+tables by name: the interpreter drained an empty queue and the trace stopped
+after one line, while the compiled binary ran the whole protocol. Whichever
+semantics ETS-style tables should have, the two backends must agree; the
+interpreter's fresh table is the one that silently loses data, so it is the
+more dangerous side. The fixture now closes over the handles instead.
+

@@ -472,6 +472,44 @@ end|}
          | Some caps -> List.mem "IO.FileRead" caps
          | None -> false))
 
+(* ── the surface spelling of a multi-argument field ───────────────────── *)
+
+(* `Io_ops_gen.march_ty` once rendered a curried arrow as `(A, B) -> C`. In
+   March that is a function of ONE argument that is a tuple (`Tuple.apply`
+   calls its `f : (a, b) -> c` as `f(t)`), so `--emit-io-ops` printed every
+   multi-argument field in a form that means the wrong thing. That leaked into a
+   design record and a day of probing that concluded a record field could not
+   hold a two-argument function at all. The compiler-built dictionaries were
+   never affected -- they are built from `ty` values, not this string -- which
+   is why a real 2-argument mock worked while the "same" shape typed by hand
+   did not.
+
+   Two assertions: the rendering is the documented curried spelling, and that
+   rendering ROUND-TRIPS -- pasted into a record field it typechecks against a
+   two-parameter lambda. The second is the one that catches the bug; the first
+   only says what the fix looks like. *)
+let rendered_multi_arg_is_curried =
+  Alcotest.test_case "a multi-argument field renders curried, and round-trips"
+    `Quick (fun () ->
+      let open March_typecheck.Typecheck_types in
+      let t_int = TCon ("Int", []) and t_str = TCon ("String", []) in
+      let two = TArrow (t_int, TArrow (t_str, t_int)) in
+      Alcotest.(check string) "curried spelling"
+        "Int -> String -> Int" (G.march_ty two);
+      (* an arrow in argument position must be parenthesised: `->` is
+         right-associative, so `(A -> B) -> C` is not `A -> B -> C` *)
+      let hof = TArrow (TArrow (t_int, t_int), t_int) in
+      Alcotest.(check string) "arrow argument parenthesised"
+        "(Int -> Int) -> Int" (G.march_ty hof);
+      let src = Printf.sprintf {|mod RT do
+  type Ops = { f : %s }
+  fn use_it(o : Ops) : Int do o.f(1, "x") end
+  fn mk() : Ops do { f: fn (a, _s) -> a + 1 } end
+end|} (G.march_ty two) in
+      let ctx = typecheck src in
+      Alcotest.(check bool) "rendered field type round-trips against a 2-param lambda"
+        false (has_errors ctx))
+
 let tests = [
   decl_ok; decl_unknown_type; decl_non_record;
   impl_ok; impl_pfn; impl_external; impl_wrong_dict; impl_no_dict_declared;
@@ -482,4 +520,5 @@ let tests = [
   io_console_shape; shadow_list_matches_stdlib; io_clock_zero_arg; io_mut_has_no_dictionary;
   excluded_ops_are_documented; dict_fields_sorted;
   analysis_attributes_locals_to_their_owner;
+  rendered_multi_arg_is_curried;
 ]

@@ -68,9 +68,20 @@ let rec flatten_arrow (t : ty) : ty list * ty =
   | other -> ([], other)
 
 (** Render [t] as March SURFACE syntax, for [render]'s documentation output.
-    Not [pp_ty]: that prints arrows curried and infix ([String -> ()]), which
-    is not what the parser accepts in a field annotation. *)
-let rec march_ty (t : ty) : string =
+
+    A multi-argument function type is spelled CURRIED — [A -> B -> C], the form
+    `specs/lang/surface-syntax.md` documents and every interface method uses.
+    This used to emit [(A, B) -> C], which in March is a function of ONE
+    argument that is a tuple ([Tuple.apply]'s [f : (a, b) -> c] is called as
+    [f(t)]). That spelling leaked into the documentation and, from there, into
+    a design record and a day of probing that concluded — wrongly — that a
+    record field could not hold a two-argument function. The compiler-built
+    dictionaries were never affected, because they are built from [ty] values
+    rather than from this string; only what a human copied out of the docs was.
+
+    An arrow in argument position is parenthesised, since [->] is
+    right-associative: [(A -> B) -> C] is not [A -> B -> C]. *)
+let rec march_ty ?(arg = false) (t : ty) : string =
   match repr t with
   | TCon (n, []) -> n
   | TCon (n, args) -> Printf.sprintf "%s(%s)" n (String.concat ", " (List.map march_ty args))
@@ -78,7 +89,10 @@ let rec march_ty (t : ty) : string =
   | TTuple ts -> Printf.sprintf "(%s)" (String.concat ", " (List.map march_ty ts))
   | TArrow _ as a ->
     let (args, ret) = flatten_arrow a in
-    Printf.sprintf "(%s) -> %s" (String.concat ", " (List.map march_ty args)) (march_ty ret)
+    let s =
+      String.concat " -> " (List.map (march_ty ~arg:true) args @ [ march_ty ret ])
+    in
+    if arg then "(" ^ s ^ ")" else s
   | TVar _ -> raise (Unsupported "type variable (needs rank-2 types)")
   | other -> raise (Unsupported (pp_ty other))
 
@@ -264,7 +278,7 @@ let render () : string =
   p "--\n";
   p "-- A zero-argument operation takes an explicit unit, because March auto-applies\n";
   p "-- a zero-arg function as soon as it is named and so cannot store one:\n";
-  p "-- `unix_time` is `(()) -> Float`, mocked as `fn _ -> 1234.0`.\n";
+  p "-- `unix_time` is `() -> Float`, mocked as `fn _ -> 1234.0`.\n";
   List.iter
     (fun cap ->
        p "\n-- %s\n" cap;

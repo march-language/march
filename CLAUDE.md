@@ -229,7 +229,7 @@ lsp/lib/                    LSP analysis: analysis (+.mli) + analysis_{types,uti
                              code_actions_{ast,diag} (the two code-action engines)
 lsp/test/                   test_lsp (Alcotest registration only) + the test bodies in
                              test_lsp_{harness,analysis,actions,perf,features,refactor,html,depot}
-stdlib/                     116 March stdlib modules (list, map, enum, sort, crypto, http, json, distributed-OTP, …)
+stdlib/                     117 March stdlib modules (list, map, enum, sort, crypto, http, json, distributed-OTP, …)
 runtime/                    C runtime (GC, scheduler, HTTP, TLS, WASM)
 forge/                      build tool (new, build, run, test, deps, search, publish subcommands)
 lsp/                        LSP server (diagnostics, hover, goto-def, completions, code actions)

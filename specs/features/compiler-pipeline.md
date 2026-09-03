@@ -1000,7 +1000,7 @@ clang-subprocess-plus-`dlopen` backend, and any unrecognized value also selects
 clang. Details in `specs/features/repl.md`.
 
 **Stdlib typecheck cache.** The "File compilation" step above no longer
-re-typechecks the 116 stdlib modules on every invocation: `get_stdlib_tc_env`
+re-typechecks the 117 stdlib modules on every invocation: `get_stdlib_tc_env`
 seeds the check from a cache under `~/.cache/march/`, keyed by the compiler
 binary's own content hash plus a hash of the stdlib sources. A file that shadows
 a stdlib module bypasses the cache entirely and takes the from-scratch combined

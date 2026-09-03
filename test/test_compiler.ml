@@ -12302,6 +12302,44 @@ let test_same_name_type_collision_note () =
       ) d.March_errors.Errors.notes
     ) errors)
 
+(* A `proof cap X with T` clause resolves T to a ZERO-argument `TCon`, so a
+   parameterised dictionary record never unifies with the record literal's own
+   inferred type.  Both sides used to print as the bare declared name, giving
+   "expected `SessionOps` but got `SessionOps`" plus a note blaming a
+   namespace collision that does not exist.  The record side must now be spelt
+   out structurally, and the note must name the type parameter.
+   See specs/todos/2026-09-02-cap-with-clause-is-monomorphic.md. *)
+let test_parameterised_type_arity_note () =
+  let ctx = typecheck {|mod P do
+  needs IO
+  type SessionOps(m) = { emit : (Int, m) -> Int }
+  proof cap Live with SessionOps
+  fn boot(c : Cap(IO)) : Cap(P.Live) do
+    cap_impl(mint_cap(c), { emit: fn (ep, msg) -> ep })
+  end
+end|} in
+  let errors = List.filter (fun d ->
+    d.March_errors.Errors.severity = March_errors.Errors.Error)
+    (March_errors.Errors.sorted ctx) in
+  Alcotest.(check bool)
+    "arity mismatch: the two sides no longer print identically" true
+    (errors <> [] &&
+     not (List.exists (fun d ->
+       _contains_substr d.March_errors.Errors.message
+         "expected `SessionOps` but got `SessionOps`") errors));
+  Alcotest.(check bool)
+    "arity mismatch: a note names the declared type parameter" true
+    (List.exists (fun d ->
+      List.exists (fun note ->
+        _contains_substr note "is declared with 1 type parameter" &&
+        _contains_substr note "`SessionOps(m)`"
+      ) d.March_errors.Errors.notes) errors);
+  Alcotest.(check bool)
+    "arity mismatch: not reported as a namespace collision" true
+    (not (List.exists (fun d ->
+      List.exists (fun note -> _contains_substr note "Two distinct types")
+        d.March_errors.Errors.notes) errors))
+
 (* ------------------------------------------------------------------ *)
 (* return_refine_infer guard tests                                     *)
 (* ------------------------------------------------------------------ *)
@@ -15758,6 +15796,7 @@ let compiler_suites =
           Alcotest.test_case "top-level mod + sibling fn: clear error"      `Quick test_toplevel_mod_plus_sibling_fn_error;
           Alcotest.test_case "nested inline match arm parses (no do/end)"   `Quick test_nested_inline_match_arm_parses;
           Alcotest.test_case "same-name type collision: explanatory note"   `Quick test_same_name_type_collision_note;
+          Alcotest.test_case "parameterised type used with no args: arity note" `Quick test_parameterised_type_arity_note;
         ] );
       ( "let_annotations", [
           Alcotest.test_case "finding 16: let : Int = String rejected"       `Quick test_let_annot_mismatch_rejects;

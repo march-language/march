@@ -1,0 +1,154 @@
+mod StreamReplay do
+  -- The design's payoff, demonstrated: a multiparty-style protocol run
+  -- DETERMINISTICALLY in-process by swapping the session transport.
+  --
+  -- Protocol `Stream` (specs/lang/types/accept/t105_loop_stop_two_iterations_close.march):
+  --   loop do
+  --     Prod -> Cons : Int
+  --     choose by Cons: more -> Cons -> Prod : Bool
+  --                     done -> Cons -> Prod : Bool  stop
+  --   end
+  --
+  -- The endpoints below are what a projector would emit (see the hand-written
+  -- artifact in specs/todos/2026-08-31-cap-runtime-dictionaries.md): register,
+  -- send by role, suspend with a handler, close. They name no transport. The
+  -- transport is a dictionary attached to `Cap(Session.Live)`: here an
+  -- in-process one that delivers synchronously to the peer's installed
+  -- handler, so the interleaving is fixed by program order and the trace is
+  -- reproducible run to run -- the property a real network transport cannot
+  -- give you and a test needs.
+  --
+  -- Messages are Bytes at the transport boundary (a transport must serialise
+  -- anyway); the endpoints encode/decode, as generated code would.
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs Session.Live
+
+  -- roles and access point are opaque Int handles the transport hands out
+  pfn prod() : Int do 1 end
+  pfn cons() : Int do 2 end
+
+  -- ── message encoding, the projector's job ──────────────────────────────
+  pfn enc_item(n : Int) : Bytes do Bytes.from_string("I:" ++ int_to_string(n)) end
+  pfn enc_more() : Bytes do Bytes.from_string("M") end
+  pfn enc_done() : Bytes do Bytes.from_string("D") end
+  pfn tag(m : Bytes) : String do String.slice_bytes(Bytes.to_string(m), 0, 1) end
+  pfn item_of(m : Bytes) : Int do
+    match string_to_int(String.slice_bytes(Bytes.to_string(m), 2, 8)) do
+      Some(n) -> n
+      None    -> 0
+    end
+  end
+
+  -- ── the in-process transport ──────────────────────────────────────────
+  -- Two Vaults: endpoint -> installed handler, and a FIFO of pending
+  -- deliveries (to, from, msg). `emit` only ENQUEUES; `drain` pops in order
+  -- and invokes the handler installed for the destination.
+  --
+  -- Queued, not synchronous, on purpose. The first version delivered inside
+  -- `emit`, and the trace stopped after two lines: `prod_send` emits FIRST and
+  -- suspends AFTER (that is the protocol -- send, then wait), so when Cons
+  -- replied `More` inside that synchronous delivery, Prod had not installed
+  -- its handler yet and the reply vanished. A run queue drained after every
+  -- endpoint has had its turn is what an event loop gives you; the order it
+  -- drains in is fixed, which is the whole point of an in-process transport.
+  --
+  -- A delivery with no handler installed is a PANIC, not a silent drop --
+  -- a silent drop is exactly what hid the bug above.
+  -- The transport hands back its ops AND its drain, both closing over the
+  -- same two tables, so nothing depends on re-acquiring a Vault by name.
+  -- That is load-bearing, not tidiness: an earlier `drain` called
+  -- `Vault.new` again with the same names, and `Vault.new(name)` twice is a
+  -- FRESH table interpreted but the SAME table compiled -- so the interpreter
+  -- drained an empty queue and stopped after one line while the compiled
+  -- binary ran the whole protocol. Filed in
+  -- specs/todos/2026-08-12-vault-toward-ets-semantics.md.
+  -- `drain` takes an explicit unit: March auto-applies a zero-arg function
+  -- the moment it is named, so a field cannot hold one (same convention as
+  -- the derived IO dictionaries' zero-arg operations).
+  type Transport = { ops : Session.Ops, drain : () -> () }
+
+  pfn drain_loop(handlers, pending) : () do
+    let q = match Vault.get(pending, "q") do
+      Some(d) -> d
+      None    -> Deque.empty()
+    end
+    match Deque.pop_front(q) do
+      (None, _) -> ()
+      (Some((to, from, msg)), rest) ->
+        Vault.set(pending, "q", rest)
+        match Vault.get(handlers, int_to_string(to)) do
+          Some(h) ->
+            let _ = h(from, msg, to)
+            drain_loop(handlers, pending)
+          None -> panic("stream_replay: delivery to " ++ int_to_string(to) ++ " with no handler installed")
+        end
+    end
+  end
+
+  fn in_process() : Transport do
+    let handlers = Vault.new("stream_replay_handlers")
+    let pending  = Vault.new("stream_replay_pending")
+    Vault.set(pending, "q", Deque.empty())
+    {
+      ops: {
+        register: fn (_ap, role) -> role,
+        emit: fn (ep, to, msg) -> do
+          let q = match Vault.get(pending, "q") do
+            Some(d) -> d
+            None    -> Deque.empty()
+          end
+          Vault.set(pending, "q", Deque.push_back(q, (to, ep, msg)))
+          ep
+        end,
+        suspend: fn (ep, handler) -> do
+          Vault.set(handlers, int_to_string(ep), handler)
+          ep
+        end,
+        close: fn ep -> print_line("close " ++ int_to_string(ep))
+      },
+      drain: fn _ -> drain_loop(handlers, pending)
+    }
+  end
+
+  -- ── role Prod:  Rec X. Send(Int, Offer{more: Recv(Bool,X), done: Recv(Bool,End)})
+  pfn prod_send(s : Cap(Session.Live), ep : Int, next : Int) : Int do
+    print_line("Prod sends Item(" ++ int_to_string(next) ++ ")")
+    let ep1 = Session.emit(s, ep, cons(), enc_item(next))
+    Session.suspend(s, ep1, fn (_from, msg, ep2) ->
+      if tag(msg) == "M" do
+        print_line("Prod got More")
+        prod_send(s, ep2, next + 1)
+      else
+        print_line("Prod got Done")
+        Session.close(s, ep2)
+        ep2
+      end)
+  end
+
+  -- ── role Cons:  Rec X. Recv(Int, Choose{more: Send(Bool,X), done: Send(Bool,End)})
+  pfn cons_wait(s : Cap(Session.Live), ep : Int, budget : Int) : Int do
+    Session.suspend(s, ep, fn (_from, msg, ep1) ->
+      let n = item_of(msg)
+      print_line("Cons got Item(" ++ int_to_string(n) ++ ")")
+      if budget > 1 do
+        let _ = cons_wait(s, ep1, budget - 1)
+        Session.emit(s, ep1, prod(), enc_more())
+      else
+        let ep2 = Session.emit(s, ep1, prod(), enc_done())
+        Session.close(s, ep2)
+        ep2
+      end)
+  end
+
+  fn main(c : Cap(IO)) do
+    let t = in_process()
+    let s = Session.attach(c, t.ops)
+    let cons_ep = Session.register(s, 0, cons())
+    let prod_ep = Session.register(s, 0, prod())
+    let _ = cons_wait(s, cons_ep, 2)
+    let _ = prod_send(s, prod_ep, 1)
+    t.drain(())
+  end
+end
