@@ -8979,9 +8979,13 @@ end|}
         in
         Alcotest.(check (pair int int)) "both proved" (2, 0) (proved, skipped))
 
-  ; (* Record arm of the same hole.  `bump`'s promise `r.port == c.port + 1`
-       under the rebound `c` is again a contradiction.
-       Mutation that fails this: drop the guard on the record arm. *)
+  ; (* The record arm carries the same guard as the scalar arm by symmetry:
+       no loader reaches a record-typed postcondition entry through a
+       self-spelling today, so this case is a forward guard for a structural
+       hole rather than a reproduction.  Its assertion fails only on the
+       false-proof ledger (2, 0); see
+       specs/progress/2026-08-04-postcond-let-self-rebinding-holes.md for the
+       measurement. *)
     gated "REJECT: a record postcond-let that rebinds a mentioned name is not a proof"
       (fun () ->
         let proved, skipped =
