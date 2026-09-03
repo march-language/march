@@ -1526,13 +1526,29 @@ reflected; the predicate `0 <= _ && _ < 4` is never reached.
 
 ```
 mod UpDoc do
+  needs IO.Console
+
   pfn is_prime(n : Int) : Bool do n == 2 || n == 3 || n == 5 || n == 7 end
+
   fn f(n : {Int | is_prime(_)}) : Int do n end
+
+  fn main(_cap_console : Cap(IO.Console)) : () do
+    println(f(7))
+  end
 end
 ```
 
 ```
 $ march --check up_doc.march
+
+-- WARNING -- up_doc.march
+
+`is_prime` is not a measure or known predicate, so this refinement is not checked. Annotate the function `@[measure]`, or use a supported predicate.
+
+6 |   fn f(n : {Int | is_prime(_)}) : Int do n end
+                      ^^^^^^^^^^^
+
+
 
 -- HINT -- up_doc.march
 

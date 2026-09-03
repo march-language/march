@@ -257,7 +257,10 @@ All three within 5%; no slowdown finding. (The three-run spread for
   still file `unreflectable-predicate`; only the self binder is consulted.
   Not exercised by this corpus's 11 sites (verified above, all 11 are
   accounted for without it), so it does not change this measurement, but it
-  is a real gap in the subject-blame rule.
+  is a real gap in the subject-blame rule. Filed as
+  `specs/todos/2026-09-03-sibling-parameter-opaque-actual.md`, with a
+  runnable reproducer, today's message, and the suggested fix (scan
+  `reflect_cache` for the sibling parameter's own name, not only `$self`).
 - **`{String | ...}` return refinements are checked by nothing**, a
   separate, more severe hole (zero obligations filed, not a skip), found
   while implementing Task 3 and confirmed by its reviewer. Filed as
