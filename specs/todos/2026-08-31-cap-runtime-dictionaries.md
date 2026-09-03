@@ -1013,8 +1013,17 @@ in the test; `Session.attach` is the only mint.
 
 ### Order of remaining work
 
-1. An actor-hosted endpoint, once the one-capability-per-actor limit is lifted.
-2. The monomorphic-`with` limitation only if a parameterised dictionary ever
+1. Lift the one-capability-per-actor limit on capture at spawn — specced in
+   `2026-09-02-lift-one-cap-per-actor.md`. An actor that logs AND reads the
+   clock is already over the limit, so no such actor can be mocked at all.
+2. An actor-hosted endpoint. **Not blocked on item 1**, contrary to what this
+   list said before 2026-09-02: `Cap(Session.Live)` is a `proof cap`, passed
+   explicitly and never threaded, and a probe shows it reaching an actor
+   handler as a message payload on both backends (the probe is in item 1's
+   file). What the endpoint needs is a way to receive its capability, and a
+   message does that today. Item 1 matters to it only when its handlers also
+   perform two IO capabilities' builtins.
+3. The monomorphic-`with` limitation only if a parameterised dictionary ever
    has a use.
 
 ## Explicitly OUT OF SCOPE — do not re-expand
