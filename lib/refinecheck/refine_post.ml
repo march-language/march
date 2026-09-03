@@ -359,8 +359,12 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
   in
   match tail_term_opt with
   | None ->
+    (* No sub-expression in hand here: this is the TAIL expression's own
+       reflection ([scalar tail_e]), not the predicate's, so there is no
+       [smt_of_r] call to name a leaf of [ret_pred] from. Name the whole
+       predicate instead, per the Task 3 brief. *)
     if enum_witness_error () then note Obligation.Violated
-    else note (Obligation.Skipped Obligation.Unreflectable_predicate);
+    else note (Obligation.Skipped (Obligation.Unreflectable_predicate (pred_str ret_pred)));
     false
   | Some tail_term ->
     let resolve_field = match record_sort with
@@ -403,12 +407,12 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
         | Some t -> assume := (if negated then Smt.Not t else t) :: !assume
         | None -> ())
       path;
-    (match smt_of ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app ret_pred with
-     | None ->
+    (match smt_of_r ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app ret_pred with
+     | Error e ->
        if enum_witness_error () then note Obligation.Violated
-       else note (Obligation.Skipped Obligation.Unreflectable_predicate);
+       else note (Obligation.Skipped (Obligation.Unreflectable_predicate (pred_str e)));
        false
-     | Some goal ->
+     | Ok goal ->
        let decls =
          List.fold_left (fun acc d -> if List.mem d acc then acc else d :: acc) [] !decls
        in
@@ -847,8 +851,11 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
              [Skipped Solver_undecided] are both "not proven". *)
           match check_tail ~mctx:None ~pat:None ~refute:record ([], body) with
           | Some v -> v
-          (* No VC could be built at all — reflection failed somewhere. *)
-          | None -> Obligation.Skipped Obligation.Unreflectable_predicate
+          (* No VC could be built at all — reflection failed somewhere. No
+             sub-expression in hand at this call site (Tier 2's own
+             [check_tail]/[smt_of] plumbing, not [smt_of_r]); name the whole
+             predicate instead, per the Task 3 brief. *)
+          | None -> Obligation.Skipped (Obligation.Unreflectable_predicate (pred_str pred))
         in
         if record then
           Obligation.record

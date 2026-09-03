@@ -790,31 +790,36 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                | Obligation.Unconstrained_subject _
                | Obligation.Opaque_application _
                | Obligation.Partial_conjunct _
-               | Obligation.Unreflectable_subject _ -> true
+               | Obligation.Unreflectable_subject _
+               (* Now that this reason carries a payload naming the specific
+                  failing sub-expression (Task 3), it is a specific, actionable
+                  fact about THIS call site, not a message that repeats
+                  verbatim everywhere — so it reports per-site like the other
+                  named reasons above, not throttled. *)
+               | Obligation.Unreflectable_predicate _ -> true
                | Obligation.Solver_undecided
-               | Obligation.Unreflectable_predicate
                | Obligation.Sort_conflict
                | Obligation.Float_sort_gate -> not !unverified_hinted) ->
       (match r with
        | Obligation.Solver_undecided
-       | Obligation.Unreflectable_predicate
        | Obligation.Sort_conflict
        | Obligation.Float_sort_gate -> unverified_hinted := true
        | Obligation.Unconstrained_subject _
        | Obligation.Opaque_application _
        | Obligation.Partial_conjunct _
        | Obligation.Unreflectable_subject _
+       | Obligation.Unreflectable_predicate _
        | Obligation.Alias_withdrawn _ -> ());
       let body =
         match r with
         | Obligation.Unconstrained_subject _
         | Obligation.Opaque_application _
         | Obligation.Partial_conjunct _
-        | Obligation.Unreflectable_subject _ ->
+        | Obligation.Unreflectable_subject _
+        | Obligation.Unreflectable_predicate _ ->
           Printf.sprintf "%s `%s` on `%s` was NOT verified here.\n%s"
             obligation_noun (pred_str rp.pred) callee (Obligation.reason_detail r)
         | Obligation.Solver_undecided
-        | Obligation.Unreflectable_predicate
         | Obligation.Sort_conflict
         | Obligation.Float_sort_gate
         | Obligation.Alias_withdrawn _ ->
@@ -1957,12 +1962,26 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
       path;
     (* [`Skip]: a record parameter whose actual could not be reflected — build
        no goal at all, so neither discharge runs and the call is passed over. *)
+    (* [pred_fail_expr] captures [smt_of_r]'s [Error] — the innermost
+       sub-expression of [rp.pred] that failed to reflect — for the
+       `Unreflectable_predicate` filing below, WITHOUT changing which branch
+       of the outer [match] runs: [`Skip] never calls [smt_of_r] at all (the
+       ref stays [None], and is never read on that path), and [Ok]/[Error]
+       collapse to [Some]/[None] exactly as [smt_of] did, so the wellsorted
+       and Sort_conflict arms below are untouched. *)
+    let pred_fail_expr = ref None in
     (match
        (match mode with
         | `Skip -> None
         | `Other | `Record _ ->
-          smt_of ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app
-            ~resolve_tester ~resolve_str_lit:str_lit_const rp.pred)
+          (match
+             smt_of_r ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app
+               ~resolve_tester ~resolve_str_lit:str_lit_const rp.pred
+           with
+           | Ok t -> Some t
+           | Error e ->
+             pred_fail_expr := Some e;
+             None))
      with
      | None ->
        (* Two different causes reach this arm and they must not be conflated:
@@ -2027,7 +2046,9 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
              | `Skip -> Obligation.Unreflectable_subject self_display
              | `Other when self_reflection_failed ->
                Obligation.Unreflectable_subject self_display
-             | `Other | `Record _ -> Obligation.Unreflectable_predicate))
+             | `Other | `Record _ ->
+               Obligation.Unreflectable_predicate
+                 (pred_str (Option.value !pred_fail_expr ~default:rp.pred))))
      | Some goal when not (wellsorted (Hashtbl.mem str_names) goal) ->
        note (Obligation.Skipped Obligation.Sort_conflict)
      | Some goal ->

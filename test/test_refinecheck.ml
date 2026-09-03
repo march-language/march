@@ -4875,6 +4875,78 @@ end|}
        to reflect general multiplication, which is a checker PRECISION change
        out of scope here.  See lib/refinecheck/obligation.ml's [reason] type
        comment for the full account. *)
+
+    (* ── Task 3: a genuine predicate failure names the failing sub-expression ──
+       The corpus has no genuine [unreflectable-predicate] case (Task 2 routed
+       every corpus skip to a subject or a diagnosed reason), so these four are
+       synthetic, one per shape from [smt_of_r]'s [None]/[Error] enumeration:
+       an opaque call, an unsupported operator (no `/` arm in [smt_of_r]),
+       symbolic float arithmetic, and a string literal a postcondition-side
+       resolver does not cover.  Each asserts the slug AND that the message
+       names the specific failing leaf, not the whole predicate and not
+       nothing.  Mutation (see the brief): make [smt_of_r] return [Error] for
+       the WHOLE predicate at its top arm instead of propagating the child's
+       [Error] unchanged -- UP2 and UP3 redden, since their failing leaf (`_ /
+       2`, `_ *. x`) is a proper sub-expression of the top-level `>`, not the
+       top-level predicate itself. UP1 does NOT redden: `is_prime(_)` IS the
+       whole predicate (its "leaf" and "the top" are the same node), so naming
+       the top instead of the leaf still names the same text. *)
+    gated "a genuine unreflectable predicate names the failing sub-expression: opaque call"
+      (fun () ->
+        let src = {|mod UP1 do
+  cap verified
+  fn f(n : {Int | is_prime(_)}) : Int do n end
+  fn go() : Int do f(7) end
+end|} in
+        Alcotest.(check (list string)) "slug" [ "unreflectable-predicate" ] (skip_reasons src);
+        Alcotest.(check bool) "names is_prime(_)" true (contains (refine_error_text_d src) "`is_prime(_)`"));
+
+    gated "a genuine unreflectable predicate names the failing sub-expression: division"
+      (fun () ->
+        let src = {|mod UP2 do
+  cap verified
+  fn f(n : {Int | _ / 2 > 0}) : Int do n end
+  fn go() : Int do f(7) end
+end|} in
+        Alcotest.(check (list string)) "slug" [ "unreflectable-predicate" ] (skip_reasons src);
+        Alcotest.(check bool) "names _ / 2" true (contains (refine_error_text_d src) "`_ / 2`"));
+
+    gated
+      "a genuine unreflectable predicate names the failing sub-expression: symbolic float \
+       arithmetic"
+      (fun () ->
+        let src = {|mod UP3 do
+  cap verified
+  fn f(x : Float, y : {Float | _ *. x > 0.0}) : Float do y end
+  fn go() : Float do f(1.0, 2.0) end
+end|} in
+        Alcotest.(check (list string)) "slug" [ "unreflectable-predicate" ] (skip_reasons src);
+        Alcotest.(check bool) "names _ *. x" true (contains (refine_error_text_d src) "`_ *. x`"));
+
+    (* Fixture caveat (per the brief): the brief's own text for UP4 --
+       `fn f() : {String | _ == "a"} do "a" end` -- never reaches a
+       [smt_of_r]/[smt_of] call at all. [return_refine_ext] (refine_post.ml)
+       only recognises Int/Bool/Float/record return bases; a `String` return
+       type falls through its wildcard to [None], so [check_fn_post_verdict]
+       routes to [check_post_induction] instead of [check_post], and no
+       obligation is filed for it -- `skip_reasons` on the literal fixture
+       returns `[]`, not `["unreflectable-predicate"]`. Replaced with an Int
+       postcondition whose second `&&` conjunct is a string-literal equality,
+       from the design's `smt_of` `None`-case enumeration ("string literals in
+       postconditions"): [refine_post.ml]'s goal-site [smt_of_r] call (the one
+       this task switched from [smt_of]) passes no [~resolve_str_lit], so a
+       string literal ALWAYS fails to reflect there, regardless of
+       [string_len_available]. *)
+    gated
+      "a genuine unreflectable predicate names the failing sub-expression: a string literal in \
+       a postcondition"
+      (fun () ->
+        let src = {|mod UP4 do
+  cap verified
+  fn f() : {Int | _ > 0 && "a" == "a"} do 1 end
+end|} in
+        Alcotest.(check (list string)) "slug" [ "unreflectable-predicate" ] (skip_reasons src);
+        Alcotest.(check bool) "names the literal" true (contains (refine_error_text_d src) "\"a\""))
   ]
 
 (* ── `cap verified`: an obligation the checker SKIPS becomes an error ─────

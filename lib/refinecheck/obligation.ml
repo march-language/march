@@ -8,7 +8,16 @@
    Every obligation now leaves a record, so the outcome is countable. *)
 
 type reason =
-  | Unreflectable_predicate  (* the goal did not translate into SMT at all *)
+  (* The PREDICATE (or a sub-expression of it) did not translate into SMT.
+     Payload discipline follows [Alias_withdrawn]/[Unreflectable_subject]: the
+     failing sub-expression, rendered by [pred_str], rides in [reason_detail]
+     only — [reason_name] stays payload-free so `--refine-report` groups every
+     unreflectable-predicate skip into one bucket instead of one per distinct
+     sub-expression. At the two goal sites that reflect through [smt_of_r]
+     (`refine_call.ml`, `refine_post.ml:406`) this names the innermost failing
+     leaf; the other two `refine_post.ml` sites (no sub-expression in hand)
+     name the whole predicate instead. *)
+  | Unreflectable_predicate of string
   (* The SUBJECT (the actual argument) did not reflect.  Payload discipline
      follows [Alias_withdrawn]: the actual, rendered by [pred_str], rides in
      [reason_detail] only — [reason_name] stays payload-free so
@@ -227,7 +236,7 @@ let verdict_name = function
   | Skipped _ -> "skipped"
 
 let reason_name = function
-  | Unreflectable_predicate -> "unreflectable-predicate"
+  | Unreflectable_predicate _ -> "unreflectable-predicate"
   | Unreflectable_subject _ -> "unreflectable-subject"
   | Sort_conflict -> "sort-conflict"
   | Float_sort_gate -> "float-sort-gate"
@@ -249,8 +258,8 @@ let reason_name = function
    predicate would have been told to rewrite it and sent chasing the wrong
    thing.  Nothing but a debug count depended on the conflation. *)
 let reason_detail = function
-  | Unreflectable_predicate ->
-    "the predicate uses vocabulary the checker cannot translate to SMT"
+  | Unreflectable_predicate sub ->
+    Printf.sprintf "the predicate's `%s` has no SMT translation" sub
   | Unreflectable_subject actual ->
     Printf.sprintf
       "the argument `%s` could not be translated to SMT, so no goal was built" actual
