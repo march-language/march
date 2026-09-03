@@ -477,6 +477,41 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
               | _ -> p)
             p earlier
         in
+        (* Nested-pattern exclusion over the CURRENT arm's binder.  An earlier
+           unguarded arm with the same head and a single nullary refutable
+           sub-pattern at index [i] ([arm_excludes_nested]) means that,
+           having failed to match there, the scrutinee's field [i] is not
+           that nullary constructor — so if THIS arm's own sub-pattern at
+           [i] is a bare variable binder, that binder itself carries the
+           exclusion.  This is what gives `Cons(_, t)` after `Cons(x, Nil)`
+           the fact `not is_Nil(t)`, pushed over the binder rather than the
+           scrutinee since [t] is new in this arm and has no path/scope
+           identity of its own until here — must therefore run AFTER the
+           binder-shadowing above, and is independent of the scrutinee-level
+           exclusion above (that one requires a bare-variable SCRUTINEE;
+           this one requires a bare-variable SUB-PATTERN). *)
+        let p =
+          match br.A.branch_pat with
+          | A.PatCon (cur, cur_subs) ->
+            List.fold_left
+              (fun p (prev : A.branch) ->
+                match arm_excludes_nested prev with
+                | Some (ctor, i, d) when cur.A.txt = ctor && sort_of_ctor d <> None ->
+                  (match List.nth_opt cur_subs i with
+                   | Some (A.PatVar t) ->
+                     let sp = t.A.span in
+                     let tester =
+                       A.EApp
+                         ( A.EVar { A.txt = "is_" ^ d; A.span = sp }
+                         , [ A.EVar { A.txt = t.A.txt; A.span = sp } ]
+                         , sp )
+                     in
+                     (tester, true) :: p
+                   | _ -> p)
+                | _ -> p)
+              p earlier
+          | _ -> p
+        in
         visit ~root errctx defs ctx p lets sc re cb br.A.branch_body;
         br :: earlier)
       [] branches

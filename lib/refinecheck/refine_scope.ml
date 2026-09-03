@@ -625,6 +625,24 @@ let arm_excludes_tag (br : A.branch) : string option =
     Some ctor.A.txt
   | _ -> None
 
+(* [Some (ctor, i, d)] when reaching a LATER arm with head [ctor] implies
+   that its binder at field [i] is not [d]: the earlier arm is unguarded, has
+   head [ctor], and is irrefutable everywhere except a nullary constructor
+   [d] at exactly one position.  One level only, nullary only: that is the
+   `Cons(x, Nil)` shape, and it is the only shape whose negation is a single
+   tester over a single binder. *)
+let arm_excludes_nested (br : A.branch) : (string * int * string) option =
+  match br.A.branch_pat, br.A.branch_guard with
+  | A.PatCon (ctor, subs), None ->
+    let refutable =
+      List.mapi (fun i p -> (i, p)) subs
+      |> List.filter (fun (_, p) -> not (irrefutable_pat p))
+    in
+    (match refutable with
+     | [ (i, A.PatCon (d, [])) ] -> Some (ctor.A.txt, i, d.A.txt)
+     | _ -> None)
+  | _ -> None
+
 let path_shadow (path : (A.expr * bool) list) (names : string list) : (A.expr * bool) list =
   if names = [] then path else List.filter (fun (c, _) -> not (expr_mentions names c)) path
 

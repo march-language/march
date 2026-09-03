@@ -8355,6 +8355,68 @@ end|}));
           (List.fold_left (fun a (_, n) -> a + n) 0 skips));
   ]
 
+(* ── Nested-pattern exclusion over the binder ────────────────────────────────
+   [arm_exclusion_suite] above pushes a fact against the SCRUTINEE when an
+   earlier arm's failure is decided purely by its tag. That leaves
+   `List.last`'s own shape unprovable: the third arm's `Cons(_, t) -> last(t)`
+   binds a FRESH name `t`, not the scrutinee, so no scrutinee-level fact ever
+   attaches to it, even though the second arm (`Cons(x, Nil) -> x`, unguarded,
+   irrefutable except for a nullary `Nil` at the tail position) means reaching
+   the third arm implies that tail position is not `Nil` — i.e. `t` is a
+   `Cons`. [arm_excludes_nested] recognizes that one-level, nullary-only shape
+   and the push here attaches the fact to the BINDER instead of the
+   scrutinee. *)
+let arm_exclusion_nested_suite =
+  [ (* The flagship: List.last's own shape.  Arm 2 excludes a Nil tail, so in
+       arm 3 the binder `t` is a Cons and `len(t) > 0`. *)
+    gated "a refutable sibling sub-pattern gives the later binder its tag"
+      (fun () ->
+        let proved, skipped =
+          ledger_counts
+            {|mod AE1 do
+  fn last(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil          -> panic("empty")
+    Cons(x, Nil) -> x
+    Cons(_, t)   -> last(t)
+    end
+  end
+end|}
+        in
+        Alcotest.(check (pair int int)) "recursive call proved" (1, 0) (proved, skipped));
+
+    (* A GUARDED sibling licenses nothing: it can fail with the tag matching. *)
+    gated "a guarded sibling arm yields no exclusion" (fun () ->
+        let proved, _ =
+          ledger_counts
+            {|mod AE2 do
+  fn last(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil                        -> panic("empty")
+    Cons(x, Nil) when x > 0    -> x
+    Cons(_, t)                 -> last(t)
+    end
+  end
+end|}
+        in
+        Alcotest.(check int) "not proved" 0 proved);
+
+    (* Two levels of nesting are out of scope and must stay silent. *)
+    gated "a two-level sub-pattern yields no exclusion" (fun () ->
+        let proved, _ =
+          ledger_counts
+            {|mod AE3 do
+  fn f(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil                  -> panic("empty")
+    Cons(x, Cons(y, Nil)) -> x + y
+    Cons(_, t)           -> f(t)
+    end
+  end
+end|}
+        in
+        Alcotest.(check int) "not proved" 0 proved) ]
+
 (* ── Pinning [measure_base_cases]/[build_measure_preamble]'s base-case-linking
    axiom directly ────────────────────────────────────────────────────────────
    The MA1/MA2 tests above exercise `len` over the built-in `List`, which
@@ -11401,6 +11463,7 @@ let () =
       ("resolve-precedence", resolve_precedence_suite);
       ("caller-promise", caller_promise_suite);
       ("arm-exclusion", arm_exclusion_suite);
+      ("arm-exclusion-nested", arm_exclusion_nested_suite);
       ("measure-base-case-axiom", measure_base_case_axiom_suite);
       ("measure-scalar-field-warn", measure_scalar_field_suite);
       ("post-compose-closed", post_compose_closed_suite);
