@@ -730,6 +730,26 @@ fn length(xs) do ... end
 fn old_api() do ... end
 ```
 
+### Allocation contracts
+
+```march
+@[no_alloc]           -- error if the compiled function, or anything it calls, allocates
+fn inc_leaves(t : Tree) : Tree do ... end
+
+@[no_alloc(warn)]     -- same check, reported as a warning
+@[no_alloc(assume)]   -- never checked; callers trust it (for closure/extern wrappers)
+```
+
+Checked on the final compiled form, after reference counting and escape
+analysis, so a constructor the compiler reuses in place (`♻`) and a value it
+promotes to the stack (`⚡`) both pass. The check is transitive over callees and
+needs no annotation on them; the one exception is a call through an unknown
+closure or an `extern`, which fails unless the enclosing function is
+`assume`. `fn` and `pfn` only — on an actor or with any other payload it is a
+parse error. The interpreter and `march --check` ignore the attribute. See
+[memory model](memory-model.md) for how to make a function pass, and
+[capabilities](capabilities.md) for how this differs from `cap no_alloc`.
+
 ---
 
 ## Interfaces (Typeclasses)

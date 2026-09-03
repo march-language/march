@@ -13,6 +13,20 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Allocation contracts (`@[no_alloc]`).** A per-function contract checked on
+  the compiled program, after reference counting and escape analysis, so a
+  constructor the compiler reuses in place or a value it promotes to the stack
+  passes. Transitive over callees with no annotation on them;
+  `@[no_alloc(warn)]` reports a warning instead of an error and
+  `@[no_alloc(assume)]` marks a closure or `extern` wrapper as trusted.
+  `--no-opt` downgrades a failure to a warning naming the flag, and a
+  TRMC-eligible failure points at `--trmc`. The language server reports the
+  failure at the function name, shows `✓ no_alloc` when the contract holds,
+  and offers an "Add `@[no_alloc]`" quick fix; `march --compile
+  --report-contracts` and `forge fix --contracts` insert the attribute on
+  functions the compiler has verified. `Tagged(_, NoAlloc)` and `Realtime`
+  policies now use the same check, which only widens what they accept.
+
 - **`Session`**: a session-transport capability. `Cap(Session.Live)` carries
   the transport as a dictionary — `register`, `emit`, `suspend`, `close`,
   protocol-agnostic, messages as `Bytes` — so the same endpoint code runs
@@ -50,6 +64,27 @@ git log is authoritative for exact commits.
   work for interpreted runs too.
 
 ### Fixed
+
+- A supervisor **nested under another supervisor** now passes its
+  capabilities on to its own children, including the fresh children it
+  creates each time it is restarted. Previously only a top-level supervisor's
+  direct children were captured, so a mock stopped one level down.
+
+- Capability mocking now reaches a **supervised child**. A `supervise` block's
+  children are spawned by the supervisor itself, not by user code, so a mock
+  that reached a plain actor never reached one under a supervisor. The
+  capabilities in scope where the supervisor is spawned now reach each of its
+  children, and a child restarted after a crash keeps them. Compiled `--test`
+  builds only, as before.
+
+- An actor whose handlers reach **two or more capabilities** (it logs *and*
+  reads the clock, the ordinary shape) can now be mocked; previously only
+  one-capability actors were captured at spawn, and an actor over that limit
+  kept its real IO with no warning. The spawn site now captures a record of
+  every capability the actor needs, and a partial mock works: an actor
+  reaching `IO.Console` and `IO.Clock`, spawned inside a Console-only
+  `with_cap`, gets the mocked Console and the real Clock. Compiled `--test`
+  builds only, as before.
 
 - `march --emit-io-ops` printed every multi-argument operation in the wrong
   spelling: `(A, B) -> C`, which in March is a function of one *tuple*
@@ -108,6 +143,10 @@ git log is authoritative for exact commits.
   where `y` is `x` — was treated as structurally smaller and accepted.
   Arithmetic reduction on such a binder (`f(y - 1)`, as in `fib`) is still
   accepted, since that genuinely decreases.
+- A `let` whose right-hand side is a call with a refined return type, and which
+  rebinds a name that return refinement mentions, no longer proves impossible
+  obligations. The scalar and record cases of a hole closed for ADTs on
+  2026-08-04 are now closed the same way.
 
 - The formatter no longer deletes compiler attributes. `format.ml` never read
   `fn_attrs`, so every `@[...]` was silently dropped — and that is not
@@ -237,6 +276,34 @@ git log is authoritative for exact commits.
   `blake3_hash_many_neon` undefined in every executable that uses it.
 
 ### Changed
+
+- `unreflectable-predicate` no longer misattributes a subject failure to the
+  predicate. An arithmetic actual (`n - 1`, `i + 1`) now reflects through the
+  same scope as the variable it uses, so a guard on `n` reaches `n - 1`
+  instead of being reported as an untranslatable predicate. A call actual
+  whose own value cannot be translated to SMT (an opaque call, a plain
+  arithmetic expression over a non-Int sort) is now filed as
+  `unreflectable-subject`, naming the actual, and the same rule applies to a
+  postcondition's own return expression. What remains under
+  `unreflectable-predicate` now names the specific sub-expression that failed
+  to reflect (for example `` the predicate's `_ / 2` has no SMT translation ``)
+  instead of a generic "uses vocabulary the checker cannot translate"
+  message; naming the sub-expression also lets that reason print at every
+  call site instead of once per module. A predicate containing `/`, `%`, or a
+  string literal now prints its real spelling in every message instead of
+  the `<predicate>` placeholder.
+
+- A `let` whose right-hand side is a literal or an arithmetic expression now
+  carries its value into refinement checking. `let n = 0` followed by a call
+  that requires a positive argument reports the same definite violation that
+  passing `0` directly already did, instead of going undecided because nothing
+  constrained `n`. Calls, `if` expressions and floats are not admitted.
+
+- A binder in a constructor pattern now inherits the constructor an earlier
+  unguarded arm's sub-pattern excluded. After `Cons(x, Nil)`, the `t` in a
+  later `Cons(_, t)` is known not to be `Nil`, which is what makes
+  `List.last`'s recursive call verify. That is the one site in the standard
+  library this reaches.
 
 - Refinement obligations the checker cannot discharge now report *why*. The
   single `solver-undecided` message has been split into three diagnosed causes —

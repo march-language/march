@@ -68,29 +68,44 @@ let rec float_const_of (e : A.expr) : float option =
 let float_lit_term (f : float) : Smt.term option =
   Option.map (fun (neg, d) -> Smt.FloatLit (neg, d)) (Smt.float_decimal f)
 
-let rec smt_of ~resolve_var ~resolve_measure ?(resolve_field = fun _ _ -> None)
+(* [smt_of_r] is [smt_of]'s body, made to name its failure: [Error e] carries
+   the innermost sub-expression that returned [None] in the [option] version —
+   the leaf itself where reflection bottoms out (an opaque call, an unhandled
+   operator, a resolver returning [None]), or, at a recursive arm, the CHILD's
+   [Error] propagated unchanged rather than wrapped, so a failure three levels
+   down still names the leaf, not each ancestor on the way up. [smt_of] is now
+   this function with [Result.to_option] on the outside; the 18 existing
+   callers, which want only the [option], are unchanged. *)
+let rec smt_of_r ~resolve_var ~resolve_measure ?(resolve_field = fun _ _ -> None)
     ?(resolve_measure_app = fun _ _ -> None) ?(resolve_tester = fun _ _ -> None)
     ?(resolve_str_lit = fun _ -> None)
-    (e : A.expr) : Smt.term option =
-  let r = smt_of ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app
+    (e : A.expr) : (Smt.term, A.expr) result =
+  let r = smt_of_r ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app
             ~resolve_tester ~resolve_str_lit in
-  let b2 f a b = match r a, r b with Some x, Some y -> Some (f x y) | _ -> None in
+  let b2 f a b =
+    match r a, r b with
+    | Ok x, Ok y -> Ok (f x y)
+    | Error e, _ -> Error e
+    | _, Error e -> Error e
+  in
   match e with
-  | A.ELit (A.LitInt n, _) -> Some (Smt.IntLit n)
-  | A.ELit (A.LitBool b, _) -> Some (Smt.BoolLit b)
+  | A.ELit (A.LitInt n, _) -> Ok (Smt.IntLit n)
+  | A.ELit (A.LitBool b, _) -> Ok (Smt.BoolLit b)
   (* A float literal, and float arithmetic over literals ONLY, folded to one.
      A `+.` with a non-literal operand falls through to [None] here, which makes
      the enclosing predicate untranslatable — the documented skip for symbolic
-     float arithmetic. *)
+     float arithmetic. [float_const_of] does not itself recurse through
+     [smt_of_r], so a failure here is blamed on the whole arithmetic
+     sub-expression [e], not some inner piece of it. *)
   | A.ELit (A.LitFloat _, _)
   | A.EApp (A.EVar { A.txt = "+." | "-." | "*." | "/."; _ }, [ _; _ ], _) ->
-    (match float_const_of e with Some f -> float_lit_term f | None -> None)
+    (match float_const_of e with Some f -> (match float_lit_term f with Some t -> Ok t | None -> Error e) | None -> Error e)
   | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], _) when float_const_of a <> None ->
-    (match float_const_of e with Some f -> float_lit_term f | None -> None)
+    (match float_const_of e with Some f -> (match float_lit_term f with Some t -> Ok t | None -> Error e) | None -> Error e)
   (* A string literal reflects to its per-VC constant, when the caller supplies
      a table.  Callers that cannot model strings leave [resolve_str_lit] at its
      default and the literal stays untranslatable — i.e. skipped. *)
-  | A.ELit (A.LitString s, _) -> resolve_str_lit s
+  | A.ELit (A.LitString s, _) -> (match resolve_str_lit s with Some t -> Ok t | None -> Error e)
   (* A measure application m(e): m(var) reflects to a consistent measure symbol;
      m(expr) is evaluated via resolve_measure_app (e.g. concrete_len for a list);
      len(list-literal) is computed concretely without needing resolve_measure_app. *)
@@ -100,37 +115,42 @@ let rec smt_of ~resolve_var ~resolve_measure ?(resolve_field = fun _ _ -> None)
        `List.length(ys) > 0` and `len(_) > 0` land on the same SMT symbol. *)
     let m = measure_name m0 in
     (match a with
-     | A.EVar { A.txt = x; _ } -> resolve_measure m x
+     | A.EVar { A.txt = x; _ } -> (match resolve_measure m x with Some t -> Ok t | None -> Error e)
      | _ ->
        (match if m = "len" then list_len a else None with
-        | Some n -> Some (Smt.IntLit n)
+        | Some n -> Ok (Smt.IntLit n)
         | None ->
           (match r a with
-           | Some arg_term -> resolve_measure_app m arg_term
-           | None -> None)))
+           | Ok arg_term ->
+             (match resolve_measure_app m arg_term with Some t -> Ok t | None -> Error e)
+           | Error e2 -> Error e2)))
   (* A constructor tester `is_Ctor(e)`: reflects to the Z3 datatype tester
      ((_ is Ctor) e).  [resolve_tester] owns reflecting [e] into a term of the
      right datatype sort (and declaring/registering it); a context that cannot
      do that returns None and the predicate is skipped. *)
   | A.EApp (A.EVar { A.txt = m; _ }, [ arg ], _) when ctor_of_tester m <> None ->
     (match ctor_of_tester m with
-     | Some ctor -> resolve_tester ctor arg
-     | None -> None)
-  | A.EVar { A.txt; _ } -> resolve_var txt
+     | Some ctor -> (match resolve_tester ctor arg with Some t -> Ok t | None -> Error e)
+     | None -> Error e)
+  | A.EVar { A.txt; _ } -> (match resolve_var txt with Some t -> Ok t | None -> Error e)
   (* Zero/multi-arity constructors: Nil → App("Nil",[]), Cons(h,t) → App("Cons",[h,t]).
-     Only constructors registered in ctor_field_sorts are handled (builtins + user ADTs). *)
+     Only constructors registered in ctor_field_sorts are handled (builtins + user ADTs).
+     [List.map] evaluates EVERY argument regardless of an earlier failure, matching
+     [smt_of]'s side-effecting resolvers ([reflect_cache] et al.); the first [Error]
+     found (left to right) is what's reported. *)
   | A.ECon ({ A.txt = ctor; _ }, args, _) when Hashtbl.mem ctor_field_sorts ctor ->
     let reflected = List.map r args in
-    if List.for_all Option.is_some reflected then
-      Some (Smt.App (ctor, List.filter_map Fun.id reflected))
-    else None
+    (match List.find_map (function Error e -> Some e | Ok _ -> None) reflected with
+     | Some e -> Error e
+     | None -> Ok (Smt.App (ctor, List.map (function Ok t -> t | Error _ -> assert false) reflected)))
   (* Field access on a bare variable: s.count → selector applied to s.
      Only EVar receivers are supported; complex receivers conservatively return
      None — safe under the definite-failure soundness stance. *)
-  | A.EField (A.EVar { A.txt = x; _ }, { A.txt = fname; _ }, _) -> resolve_field x fname
+  | A.EField (A.EVar { A.txt = x; _ }, { A.txt = fname; _ }, _) ->
+    (match resolve_field x fname with Some t -> Ok t | None -> Error e)
   | A.EApp (A.EVar { A.txt = "&&"; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.And (x, y)) a b
   | A.EApp (A.EVar { A.txt = "||"; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.Or (x, y)) a b
-  | A.EApp (A.EVar { A.txt = "not"; _ }, [ a ], _) -> Option.map (fun x -> Smt.Not x) (r a)
+  | A.EApp (A.EVar { A.txt = "not"; _ }, [ a ], _) -> Result.map (fun x -> Smt.Not x) (r a)
   | A.EApp (A.EVar { A.txt = ">="; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.Ge (x, y)) a b
   | A.EApp (A.EVar { A.txt = "<="; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.Le (x, y)) a b
   | A.EApp (A.EVar { A.txt = ">"; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.Gt (x, y)) a b
@@ -139,13 +159,21 @@ let rec smt_of ~resolve_var ~resolve_measure ?(resolve_field = fun _ _ -> None)
   | A.EApp (A.EVar { A.txt = "!="; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.Ne (x, y)) a b
   | A.EApp (A.EVar { A.txt = "+"; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.Add (x, y)) a b
   | A.EApp (A.EVar { A.txt = "-"; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.Sub (x, y)) a b
-  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], _) -> Option.map (fun x -> Smt.Neg x) (r a)
+  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], _) -> Result.map (fun x -> Smt.Neg x) (r a)
   | A.EApp (A.EVar { A.txt = "*"; _ }, [ a; b ], _) ->
     (match a, b with
-     | A.ELit (A.LitInt k, _), _ -> Option.map (fun y -> Smt.MulLit (k, y)) (r b)
-     | _, A.ELit (A.LitInt k, _) -> Option.map (fun x -> Smt.MulLit (k, x)) (r a)
-     | _ -> None)
-  | _ -> None
+     | A.ELit (A.LitInt k, _), _ -> Result.map (fun y -> Smt.MulLit (k, y)) (r b)
+     | _, A.ELit (A.LitInt k, _) -> Result.map (fun x -> Smt.MulLit (k, x)) (r a)
+     | _ -> Error e)
+  | _ -> Error e
+
+let smt_of ~resolve_var ~resolve_measure ?(resolve_field = fun _ _ -> None)
+    ?(resolve_measure_app = fun _ _ -> None) ?(resolve_tester = fun _ _ -> None)
+    ?(resolve_str_lit = fun _ -> None)
+    (e : A.expr) : Smt.term option =
+  Result.to_option
+    (smt_of_r ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app
+       ~resolve_tester ~resolve_str_lit e)
 
 (* =================================================================
    §8  Rendering: predicates, models, counterexamples
@@ -162,6 +190,13 @@ let rec pred_str (e : A.expr) : string =
   | A.ELit (A.LitFloat f, _) ->
     let s = Printf.sprintf "%.12g" f in
     if String.exists (fun c -> c = '.' || c = 'e' || c = 'E') s then s else s ^ ".0"
+  (* A string literal, quoted as March source spells it (best-effort: no
+     escaping of embedded quotes, matching every other arm's "best-effort"
+     stance). Needed so a genuine [Unreflectable_predicate] whose failing leaf
+     IS a string literal (no [resolve_str_lit] in scope, e.g. a postcondition)
+     names the literal instead of falling through to the [<predicate>]
+     placeholder below. *)
+  | A.ELit (A.LitString s, _) -> "\"" ^ s ^ "\""
   (* Rendering keeps the name AS WRITTEN — an aliased `List.length(_)` reads
      back as `List.length(_)`, not as the `len` it was normalized to. *)
   | A.EApp (A.EVar { A.txt = m; _ }, [ a ], _) when is_measure_app m || ctor_of_tester m <> None ->
@@ -172,7 +207,7 @@ let rec pred_str (e : A.expr) : string =
   | A.EVar { A.txt; _ } -> txt
   | A.EField (recv, { A.txt = fname; _ }, _) -> pred_str recv ^ "." ^ fname
   | A.EApp (A.EVar { A.txt = ("&&" | "||" | ">=" | "<=" | ">" | "<" | "==" | "!="
-                             | "+" | "-" | "*" | "+." | "-." | "*." | "/.") as op; _ },
+                             | "+" | "-" | "*" | "/" | "%" | "+." | "-." | "*." | "/.") as op; _ },
             [ a; b ], _) ->
     binop op a b
   | A.EApp (A.EVar { A.txt = "not"; _ }, [ a ], _) -> "!" ^ pred_str a
@@ -625,12 +660,66 @@ let arm_excludes_tag (br : A.branch) : string option =
     Some ctor.A.txt
   | _ -> None
 
+(* [Some (ctor, i, d)] when reaching a LATER arm with head [ctor] implies
+   that its binder at field [i] is not [d]: the earlier arm is unguarded, has
+   head [ctor], and is irrefutable everywhere except a nullary constructor
+   [d] at exactly one position.  One level only, nullary only: that is the
+   `Cons(x, Nil)` shape, and it is the only shape whose negation is a single
+   tester over a single binder. *)
+let arm_excludes_nested (br : A.branch) : (string * int * string) option =
+  match br.A.branch_pat, br.A.branch_guard with
+  | A.PatCon (ctor, subs), None ->
+    let refutable =
+      List.mapi (fun i p -> (i, p)) subs
+      |> List.filter (fun (_, p) -> not (irrefutable_pat p))
+    in
+    (match refutable with
+     | [ (i, A.PatCon (d, [])) ] -> Some (ctor.A.txt, i, d.A.txt)
+     | _ -> None)
+  | _ -> None
+
 let path_shadow (path : (A.expr * bool) list) (names : string list) : (A.expr * bool) list =
   if names = [] then path else List.filter (fun (c, _) -> not (expr_mentions names c)) path
 
 (* =================================================================
    §10 The other fact channels: path, launder, recenv, cbenv
    ================================================================= *)
+
+(* ── Right-hand sides a `let` may turn into the path fact `n == rhs` ───────
+   Pure, deterministic, and inside the linear fragment the path translator
+   ([smt_of] above / [check_call]'s [path_resolve_var]) already reflects.
+   Calls are excluded (a refined return is handled by [scope_add_binding];
+   an unrefined one carries no fact); `if` is excluded (its encoding is a
+   separate decision); floats are excluded (symbolic float arithmetic does
+   not reflect — see the float-constant-folding note above).
+
+   A BARE variable is excluded too, deliberately: [smt_of]'s path translator
+   reflects a variable at the INTEGER sort, but an ADT-typed alias
+   (`let u = o` with `o : Option(Int)`) has tester facts about `o` sitting
+   at the datatype sort. Pushing `u == o` then mixes sorts in the same VC,
+   and the sort-conflict gate drops the WHOLE VC — not just the alias's own
+   obligations, but unrelated ones too (e.g. `unwrap(o)`, which never
+   mentions `u`). An alias also carries no exclusion fact through on its
+   own (`let u = t; last(u)` stays undecided either way), so admitting it
+   only had a cost, never a benefit. A variable remains admitted as an
+   OPERAND of `+`/`-`/`*`, where it is always at the integer sort. *)
+let rec let_equality_operand (e : A.expr) : bool =
+  match e with
+  | A.ELit (A.LitInt _, _) -> true
+  | A.EVar _ -> true
+  | A.EApp (A.EVar { A.txt = ("+" | "-"); _ }, [ a; b ], _) ->
+    let_equality_operand a && let_equality_operand b
+  | A.EApp (A.EVar { A.txt = "*"; _ }, [ a; b ], _) ->
+    (match a, b with
+     | A.ELit (A.LitInt _, _), _ -> let_equality_operand b
+     | _, A.ELit (A.LitInt _, _) -> let_equality_operand a
+     | _ -> false)
+  | _ -> false
+
+let let_equality_rhs (e : A.expr) : bool =
+  match e with
+  | A.EVar _ -> false
+  | _ -> let_equality_operand e
 
 (* ── Laundered guards: name -> the application it was let-bound to ─────────
    [visit] records, per program point, which local names are ONE `let` away
@@ -766,6 +855,16 @@ let scope_add_fnparam (sc : scope) : A.fn_param -> scope = function
   | A.FPNamed p | A.FPDefault (p, _) -> scope_add_param sc p
   | A.FPPat pat -> scope_shadow sc (pat_binders pat)
 
+(* A postcondition-derived entry whose predicate mentions the `let`'s own
+   binder denotes the PRE-binding value under the post-binding name (the
+   actuals were substituted by [postcond_of] before the binding took effect).
+   Filing it would collapse two values onto one SMT symbol and, for a
+   relational promise like `_ == n + 1`, manufacture a contradiction that
+   proves every goal.  Declining is the only sound choice: the pre-binding
+   symbol has already been retired by [scope_shadow]. *)
+let self_mentioning (pat : A.pattern) (pred : A.expr) : bool =
+  expr_mentions (pat_binders pat) pred
+
 (* [postcond] resolves a callee name AND the call's actual arguments to the
    callee's return refinement, already instantiated in the CALLER's namespace.
    An explicit annotation always wins; only an UNANNOTATED `let` whose RHS is a
@@ -843,20 +942,24 @@ let scope_add_binding
           masked — before it, `size(u)` was untranslatable and [smt_of] dropped
           the predicate whole.
 
-          Deliberately on THIS arm only.  The scalar and record arms above have
-          the same shape and the same latent hole (reachable on the parent
-          commit through [reflect_scalar]'s `foreign_var` channel, which never
-          went through [load_scope_measure_facts] at all), but they are older,
-          broader, and out of scope here — recorded with repros in
-          `specs/todos/2026-08-04-postcond-let-self-rebinding-holes.md`. *)
+          The guard ([self_mentioning], defined above) applies to all THREE
+          arms below, not just this ADT one.  The scalar and record arms have
+          the identical shape and the identical latent hole (reachable on the
+          parent commit through [reflect_scalar]'s `foreign_var` channel,
+          which never went through [load_scope_measure_facts] at all); there
+          is nothing ADT-specific about the hazard, so there is nothing
+          ADT-specific about the fix. *)
        (match postcond fname args with
-        | Some (binder, pred, m) when scalar_sort_of_marker m <> None ->
+        | Some (binder, pred, m)
+          when scalar_sort_of_marker m <> None
+               && not (self_mentioning b.A.bind_pat pred) ->
           (n.A.txt, (binder, pred, m)) :: sc
-        | Some (binder, pred, Some srt) when is_record_sort srt ->
+        | Some (binder, pred, Some srt)
+          when is_record_sort srt && not (self_mentioning b.A.bind_pat pred) ->
           (n.A.txt, (binder, pred, Some srt)) :: sc
         | Some (binder, pred, Some srt)
           when Hashtbl.mem adt_ctors srt
-               && not (expr_mentions (pat_binders b.A.bind_pat) pred) ->
+               && not (self_mentioning b.A.bind_pat pred) ->
           (n.A.txt, (binder, pred, Some (meas_sort_prefix ^ srt))) :: sc
         | Some _ | None -> sc)
      | _ -> sc)

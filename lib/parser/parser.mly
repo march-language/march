@@ -313,11 +313,24 @@ decl:
       | DFn (def, span) -> DFn ({ def with fn_doc = Some s }, span)
       | d -> d }
   | attrs = nonempty_list(fn_attr); d = fn_decl
-    { match d with
+    { (* @[no_alloc] takes exactly two payloads; anything else is a typo, not
+         a silently-ignored attribute (see lib/tir/alloc_contract.ml). *)
+      List.iter (fun a ->
+          if String.length a > 9 && String.sub a 0 9 = "no_alloc:"
+             && a <> "no_alloc:warn" && a <> "no_alloc:assume" then
+            error_raise
+              (Printf.sprintf
+                 "I don't recognize `@[no_alloc(%s)]` \xe2\x80\x94 the forms are `@[no_alloc]`, `@[no_alloc(warn)]`, and `@[no_alloc(assume)]`."
+                 (String.sub a 9 (String.length a - 9)))
+              None $startpos(attrs)) attrs;
+      match d with
       | DFn (def, span) -> DFn ({ def with fn_attrs = attrs }, span)
       | d -> d }
   | attrs = nonempty_list(fn_attr); d = actor_decl
-    { let compat = List.fold_left (fun acc a ->
+    { if List.exists (fun a -> a = "no_alloc"
+                        || (String.length a > 9 && String.sub a 0 9 = "no_alloc:")) attrs then
+        error_raise "`@[no_alloc]` only applies to `fn` and `pfn` declarations, not to actors." None $startpos(attrs);
+      let compat = List.fold_left (fun acc a ->
           let n = String.length a in
           if n > 7 && String.sub a 0 7 = "compat:" then String.sub a 7 (n - 7) else acc
         ) "full" attrs in
@@ -330,7 +343,10 @@ decl:
         DActor (vis, name, { adef with actor_invariant = Some inv }, span)
       | d -> d }
   | AT; INVARIANT; LPAREN; inv = expr; RPAREN; attrs = nonempty_list(fn_attr); d = actor_decl
-    { let compat = List.fold_left (fun acc a ->
+    { if List.exists (fun a -> a = "no_alloc"
+                        || (String.length a > 9 && String.sub a 0 9 = "no_alloc:")) attrs then
+        error_raise "`@[no_alloc]` only applies to `fn` and `pfn` declarations, not to actors." None $startpos(attrs);
+      let compat = List.fold_left (fun acc a ->
           let n = String.length a in
           if n > 7 && String.sub a 0 7 = "compat:" then String.sub a 7 (n - 7) else acc
         ) "full" attrs in

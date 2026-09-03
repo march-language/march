@@ -1,0 +1,6 @@
+MOCK[both@1234]
+MOCK[both2@1234]
+clock@1234
+MOCK[console@real]
+out@real
+out2@real

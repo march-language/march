@@ -7200,11 +7200,28 @@ let tir_call name arg_tys ret_ty args =
             v_lin = March_tir.Tir.Unr } in
   March_tir.Tir.EApp (f, args)
 
+(* The NoAlloc verdict MOVED (2026-09-03): Policy_dce used to ban every
+   EAlloc/EStackAlloc here, pre-Perceus, which rejected constructors the
+   compiler goes on to reuse in place.  It now reports nothing and
+   [Alloc_contract] decides on the final TIR.  This test pins BOTH halves of
+   that split, so a regression in either direction is visible: the audit stays
+   silent, and the allocation is still detected — by the module that now owns
+   the question.  End-to-end coverage of the policy (accept a reused
+   constructor, reject a real allocation, through a real `march --compile`)
+   lives in test_alloc_contract.ml. *)
 let test_policy_noalloc_alloc_violation () =
-  let body = March_tir.Tir.EAlloc (March_tir.Tir.TCon ("List", [March_tir.Tir.TInt]), []) in
+  let body =
+    March_tir.Tir.EAlloc (March_tir.Tir.TCon ("Box.Box", []),
+                          [March_tir.Tir.ALit (March_ast.Ast.LitInt 1)]) in
   let m = mk_module [mk_tagged_fn "NoAlloc" body] in
-  let v = March_tir.Policy_dce.audit m in
-  Alcotest.(check bool) "NoAlloc fn with EAlloc: violation" true (v <> [])
+  Alcotest.(check bool) "Policy_dce no longer answers NoAlloc" true
+    (March_tir.Policy_dce.audit m = []);
+  let allocating = March_tir.Alloc_contract.allocating_fns ~decls:[] m in
+  Alcotest.(check bool) "Alloc_contract sees the allocation" true
+    (Hashtbl.mem allocating "process");
+  Alcotest.(check bool) "and reports it against the policy" true
+    (March_tir.Alloc_contract.check ~decls:[] ~allocating ~opt:true ~trmc:false
+       ~trmc_eligible:(fun _ -> false) m <> [])
 
 let test_policy_noalloc_clean () =
   let m = mk_module [mk_tagged_fn "NoAlloc" (tir_int_lit 42)] in
@@ -14863,6 +14880,7 @@ let compiler_suites =
       ("cap_package", Test_cap_package.tests);
       ("cap_scope", Test_cap_scope.tests);
       ("cap_ceiling", Test_cap_ceiling.tests);
+      ("alloc_contract", Test_alloc_contract.tests);
       ("cap_unforgeable", Test_cap_unforgeable.tests);
       ("cap_dict", Test_cap_dict.tests);
       ("cap_attrib_agreement", Test_cap_attrib_agreement.tests);
@@ -15433,7 +15451,7 @@ let compiler_suites =
           Alcotest.test_case "compiled Bool payload round-trips (F2)"    `Quick test_session_compile_bool_roundtrip;
         ] );
       ( "policy_dce", [
-          Alcotest.test_case "NoAlloc fn with EAlloc: violation"          `Quick test_policy_noalloc_alloc_violation;
+          Alcotest.test_case "NoAlloc verdict moved to Alloc_contract"    `Quick test_policy_noalloc_alloc_violation;
           Alcotest.test_case "NoAlloc fn clean: no violation"             `Quick test_policy_noalloc_clean;
           Alcotest.test_case "NoPanic fn calls int_div: violation"        `Quick test_policy_nopanic_int_div_violation;
           Alcotest.test_case "NoPanic fn safe body: no violation"         `Quick test_policy_nopanic_clean;

@@ -359,8 +359,27 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
   in
   match tail_term_opt with
   | None ->
+    (* This is the postcondition's SUBJECT failing, not the predicate: the
+       TAIL expression (the return value) is what [scalar tail_e] could not
+       reflect -- [ret_pred] itself is never even reached. Blaming the
+       predicate here (as an earlier revision of this task did, per the
+       brief's literal Step 4 text) is a false statement whenever the
+       predicate is perfectly reflectable, e.g. a `g()` opaque-call tail
+       under `{Int | _ > 0}`: `_ > 0` translates fine, `g()` does not. Mirrors
+       [check_call]'s `self_display` guard (Task 2): [pred_str] falls back to
+       the literal placeholder `<predicate>` for a tail it cannot render as
+       source syntax (an `if`, a lambda, …); naming the return expression
+       `<predicate>` would read as if that were the user's own spelling, so
+       fall back to the function name instead when it does. *)
+    let tail_display =
+      let rendered = pred_str tail_e in
+      if rendered <> "<predicate>" then Printf.sprintf "the return expression `%s`" rendered
+      else
+        Printf.sprintf "the return expression of `%s`"
+          (Option.value ~default:"<anonymous>" fn_name)
+    in
     if enum_witness_error () then note Obligation.Violated
-    else note (Obligation.Skipped Obligation.Unreflectable_predicate);
+    else note (Obligation.Skipped (Obligation.Unreflectable_subject tail_display));
     false
   | Some tail_term ->
     let resolve_field = match record_sort with
@@ -403,12 +422,12 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
         | Some t -> assume := (if negated then Smt.Not t else t) :: !assume
         | None -> ())
       path;
-    (match smt_of ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app ret_pred with
-     | None ->
+    (match smt_of_r ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app ret_pred with
+     | Error e ->
        if enum_witness_error () then note Obligation.Violated
-       else note (Obligation.Skipped Obligation.Unreflectable_predicate);
+       else note (Obligation.Skipped (Obligation.Unreflectable_predicate (pred_str e)));
        false
-     | Some goal ->
+     | Ok goal ->
        let decls =
          List.fold_left (fun acc d -> if List.mem d acc then acc else d :: acc) [] !decls
        in
@@ -847,8 +866,25 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
              [Skipped Solver_undecided] are both "not proven". *)
           match check_tail ~mctx:None ~pat:None ~refute:record ([], body) with
           | Some v -> v
-          (* No VC could be built at all — reflection failed somewhere. *)
-          | None -> Obligation.Skipped Obligation.Unreflectable_predicate
+          (* No VC could be built at all — reflection failed somewhere inside
+             [check_tail]'s own [reflect_dt tail_e] / [pred_term] plumbing
+             (not [smt_of_r], so no leaf sub-expression is ever in hand here).
+             [check_tail] cannot distinguish "the TAIL failed to reflect" from
+             "the predicate did", but the tail is this shape's subject in the
+             same sense a call's actual argument is (Task 2) -- and every
+             corpus/fixture case that reaches this arm is a tail failure, e.g.
+             a constructor argument that is itself an opaque call. Blaming the
+             predicate here would be the same false statement Finding 1 fixed
+             at the sibling site above. Same [<predicate>]-placeholder guard,
+             falling back to the callee name [self] (this arm's [pred_label]
+             equivalent -- [fd.A.fn_name.A.txt] IS [self] here). *)
+          | None ->
+            let body_display =
+              let rendered = pred_str body in
+              if rendered <> "<predicate>" then Printf.sprintf "the return expression `%s`" rendered
+              else Printf.sprintf "the return expression of `%s`" self
+            in
+            Obligation.Skipped (Obligation.Unreflectable_subject body_display)
         in
         if record then
           Obligation.record

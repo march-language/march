@@ -231,8 +231,35 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
            let path' =
              match e with
              | A.EAssert (p, _) -> (p, false) :: path
-             (* A `let` REBINDS its names: retire any fact about them. *)
-             | A.ELet (b, _) -> path_shadow path (pat_binders b.A.bind_pat)
+             (* A `let` REBINDS its names: retire any fact about them first
+                (the shadow discipline every other channel obeys), then, for
+                an admitted RHS shape, push `n == rhs` as an ordinary path
+                fact — reusing the same translator and the same retirement
+                rule that already protects [check_call]'s other path facts,
+                so a later rebinding of anything `rhs` mentions retires this
+                equality too. *)
+             | A.ELet (b, _) ->
+               let names = pat_binders b.A.bind_pat in
+               let path = path_shadow path names in
+               (match b.A.bind_pat, b.A.bind_expr with
+                (* A self-referential RHS (`let k = k - 100`) resolves both
+                   occurrences of `k` to the SAME SMT constant once pushed,
+                   turning the equality into a (usually unsatisfiable)
+                   constraint on the OLD value rather than a definition of
+                   the new one — see the whole-plan review's finding 1.
+                   [names] is exactly the set [path_shadow] just retired
+                   facts about, so require the RHS to mention none of them. *)
+                | A.PatVar n, rhs
+                  when let_equality_rhs rhs && not (expr_mentions names rhs) ->
+                  let sp = n.A.span in
+                  let eq =
+                    A.EApp
+                      ( A.EVar { A.txt = "=="; A.span = sp }
+                      , [ A.EVar { A.txt = n.A.txt; A.span = sp }; rhs ]
+                      , sp )
+                  in
+                  (eq, false) :: path
+                | _ -> path)
              | A.ELetFn (n, _, _, _, _) -> path_shadow path [ n.A.txt ]
              | _ -> path
            in
@@ -457,6 +484,41 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
               | A.PatLit (A.LitBool bv, _), None -> (subj, bv) :: p
               | _ -> p)
             p earlier
+        in
+        (* Nested-pattern exclusion over the CURRENT arm's binder.  An earlier
+           unguarded arm with the same head and a single nullary refutable
+           sub-pattern at index [i] ([arm_excludes_nested]) means that,
+           having failed to match there, the scrutinee's field [i] is not
+           that nullary constructor — so if THIS arm's own sub-pattern at
+           [i] is a bare variable binder, that binder itself carries the
+           exclusion.  This is what gives `Cons(_, t)` after `Cons(x, Nil)`
+           the fact `not is_Nil(t)`, pushed over the binder rather than the
+           scrutinee since [t] is new in this arm and has no path/scope
+           identity of its own until here — must therefore run AFTER the
+           binder-shadowing above, and is independent of the scrutinee-level
+           exclusion above (that one requires a bare-variable SCRUTINEE;
+           this one requires a bare-variable SUB-PATTERN). *)
+        let p =
+          match br.A.branch_pat with
+          | A.PatCon (cur, cur_subs) ->
+            List.fold_left
+              (fun p (prev : A.branch) ->
+                match arm_excludes_nested prev with
+                | Some (ctor, i, d) when cur.A.txt = ctor && sort_of_ctor d <> None ->
+                  (match List.nth_opt cur_subs i with
+                   | Some (A.PatVar t) ->
+                     let sp = t.A.span in
+                     let tester =
+                       A.EApp
+                         ( A.EVar { A.txt = "is_" ^ d; A.span = sp }
+                         , [ A.EVar { A.txt = t.A.txt; A.span = sp } ]
+                         , sp )
+                     in
+                     (tester, true) :: p
+                   | _ -> p)
+                | _ -> p)
+              p earlier
+          | _ -> p
         in
         visit ~root errctx defs ctx p lets sc re cb br.A.branch_body;
         br :: earlier)

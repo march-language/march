@@ -172,6 +172,10 @@ One capability per actor. An actor whose handlers reach two would need a record
 of them captured instead — additive. `dispatch_cap` returns `None` for that
 case, so such an actor keeps today's behaviour rather than getting a wrong one.
 
+*(Lifted 2026-09-03: `2026-09-02-lift-one-cap-per-actor.md` in this directory
+captures a record of every capability the dispatch reaches; `dispatch_cap` is
+now `dispatch_caps : … -> string list`.)*
+
 ### Test
 
 `test/cap_mock/cap_mock_actor.march`. Two actors: one spawned inside

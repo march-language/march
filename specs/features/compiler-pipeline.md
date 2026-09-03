@@ -90,7 +90,17 @@ Source Code
 
 > **Pass-order note.** The actual ordering enforced by `bin/main.ml` is
 >
-> **Lower → Vectorize_mark → Trmc → Mono → Fusion → *(Policy-DCE audit)* → Defun → Known_call → Beta_adt → Join_points.run_pre → Simplify(pre-Perceus) → Perceus → Drop → Escape → Opt → Llvm_emit.**
+> **Lower → Vectorize_mark → Trmc → Mono → Fusion → *(Policy-DCE audit)* → Defun → Known_call → Beta_adt → Join_points.run_pre → Simplify(pre-Perceus) → Perceus → Drop → Escape → Opt → Dce → Vectorize_check → Native_map_inline → *(Alloc_contract check)* → Llvm_emit.**
+>
+> **Update (2026-09-03).** Everything from `Trmc` through `Native_map_inline`
+> now lives in one function, `March_tir.Contract_pipeline.run`, extracted from
+> `bin/main.ml` and shared with the language server, so the editor sees the
+> TIR the build emits rather than a shorter hand-rolled sequence. The driver's
+> own concerns (the policy audit, capability attribution, `--cap-strict`,
+> phase snapshots) are hooks passed into it. The extraction was proven to move
+> no IR with `scripts/ir-oracle.sh` over 242 programs.
+> `Alloc_contract.check` runs last, immediately before emission, which is what
+> lets `@[no_alloc]` accept a constructor Perceus reused in place.
 >
 > In particular **Perceus runs *before* Escape** (see `bin/main.ml`, `Perceus.perceus` then `Escape.escape_analysis`). Earlier revisions of this document had the two reversed; that was wrong.
 >
@@ -1224,7 +1234,9 @@ Renders TIR expressions and types as readable text for debugging (`--dump-tir`).
 | Constant propagation | `lib/tir/cprop.ml` | ✓ Complete (Opt loop member) |
 | Deep-drop synthesis | `lib/tir/drop.ml` | ✓ Complete (runs between Perceus and Escape) |
 | Vectorize marking | `lib/tir/vectorize_mark.ml` | ✓ Complete (runs immediately after Lower) |
-| Policy-DCE audit | `lib/tir/policy_dce.ml` | ✓ Complete (audit only: reports and exits, does not transform) |
+| Allocation contracts | `lib/tir/alloc_contract.ml` | ✓ Complete (`@[no_alloc]`; runs last, immediately before Llvm_emit) |
+| Shared pipeline tail | `lib/tir/contract_pipeline.ml` | ✓ Complete (Trmc→Native_map_inline; used by both `bin/main.ml` and the LSP) |
+| Policy-DCE audit | `lib/tir/policy_dce.ml` | ✓ Complete (audit only: reports and exits, does not transform; its `NoAlloc` arm defers to `alloc_contract.ml`) |
 | TRMC | `lib/tir/trmc.ml` | ⚠ **Off by default**: opt-in via `--trmc` / `MARCH_TRMC`; report gated on `MARCH_TRMC_REPORT` |
 | LLVM Emission | `lib/tir/llvm_emit.ml` | ✓ Substantial (constructor collision & arity mismatch fixed) |
 | Code Generation | `lib/codegen/codegen.ml` | ⚠ Stub, **but see §17: code generation ships, it just does not live here** |

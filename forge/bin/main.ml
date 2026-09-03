@@ -205,14 +205,17 @@ let fix_cmd =
   let dry =
     Arg.(value & flag & info ["dry-run"; "n"]
            ~doc:"Show what would change without writing any files") in
-  let run d =
-    match Cmd_fix.run ~dry_run:d () with
+  let contracts =
+    Arg.(value & flag & info ["contracts"]
+           ~doc:"Insert @[no_alloc] on functions the compiler verified allocation-free.                  Default scope: functions whose compiled form reuses memory in place or                  stack-allocates; widen it with `[contracts] no_alloc = [...]` globs in forge.toml") in
+  let run d c =
+    match Cmd_fix.run ~dry_run:d ~contracts:c () with
     | Ok msg  -> Printf.printf "%s\n%!" msg
     | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
   in
   Cmd.v (Cmd.info "fix"
            ~doc:"Apply safe auto-fixes for compiler diagnostics (missing needs, unused params, redundant arms)")
-    Term.(const run $ dry)
+    Term.(const run $ dry $ contracts)
 
 (* ------------------------------------------------------------------- forge run *)
 

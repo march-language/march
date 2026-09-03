@@ -192,6 +192,7 @@ type t =
   demorgan_sites : demorgan_site list;
   perf_insights : perf_insight list;
   consume_modes : consume_modes list;
+  no_alloc_candidates : (string * Ast.span * Ast.span) list;
   tir_fn_insights : tir_fn_insight list;
   code_lens_items : code_lens_item list;
   decls : Ast.decl list;

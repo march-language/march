@@ -5,7 +5,7 @@
     policy, and reports any policy-violating operations.
 
     Policies:
-      NoAlloc  — prohibits EAlloc / EStackAlloc
+      NoAlloc  — delegated to [Alloc_contract] on the final TIR (see below)
       NoPanic  — prohibits transitive calls to panic-surface builtins
       NoIO     — prohibits calls to IO-needful functions (tracked via tm_io_fns)
 
@@ -139,22 +139,14 @@ let io_fns_of_module (m : Tir.tir_module) : StringSet.t =
 
 (* ── Per-policy body checks ──────────────────────────────────────────── *)
 
-(** Check NoAlloc: returns Some error message if fn body contains EAlloc / EStackAlloc. *)
-let check_noalloc (fd : Tir.fn_def) : string option =
-  let violations : string list = fold_expr (fun acc expr ->
-    match expr with
-    | Tir.EAlloc _      -> "EAlloc (heap allocation)" :: acc
-    | Tir.EStackAlloc _ -> "EStackAlloc (stack allocation)" :: acc
-    | _ -> acc
-  ) [] fd.Tir.fn_body in
-  match violations with
-  | [] -> None
-  | v :: _ ->
-    Some (Printf.sprintf
-      "function `%s` (specialized to a NoAlloc policy) contains %s.\n\
-       NoAlloc functions must not allocate. Move the allocation outside the\n\
-       NoAlloc boundary."
-      fd.Tir.fn_name v)
+(* The NoAlloc arm has no check here any more: it is decided by
+   [Alloc_contract] on the FINAL TIR, after Perceus, Drop, Escape and the Opt
+   loop, exactly like an @[no_alloc] contract.  This only widens what the
+   policy accepts — a constructor Perceus reused in place, or a value Escape
+   promoted to the stack, is no longer a violation — and it is the position
+   from which "does this allocate?" can be answered honestly.  [Policy_dce]
+   keeps its own position for NoPanic and NoIO, which are call-graph
+   questions that do not depend on RC insertion. *)
 
 (** Check NoPanic: returns Some error message if fn body calls a panicky function. *)
 let check_nopanic (panicky : StringSet.t) (fd : Tir.fn_def) : string option =
@@ -208,7 +200,7 @@ let audit (m : Tir.tir_module) : (string * string) list =
     else
       List.filter_map (fun c ->
         let msg_opt = match c with
-          | NoAlloc -> check_noalloc fd
+          | NoAlloc -> None   (* see the note above: Alloc_contract decides *)
           | NoPanic -> check_nopanic panicky fd
           | NoIO    -> check_noio io_fns io_mods fd
         in

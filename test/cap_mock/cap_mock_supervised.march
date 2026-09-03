@@ -1,0 +1,63 @@
+mod CapMockSupervised do
+  -- Capability mocking reaching a SUPERVISED child.
+  --
+  -- A `supervise` block's children are not spawned by user code: the
+  -- supervisor's own spawn glue spawns them, through `spawn_supervised`, a
+  -- different shape from the plain `spawn(Child)` that capture-at-spawn
+  -- matched. So a mock that reached a plain actor never reached a supervised
+  -- one. Now the supervisor's spawn glue carries its children's capabilities
+  -- as parameters, supplied at the user's `spawn(Sup)` site, and attaches
+  -- each child's record right after `spawn_supervised`.
+  --
+  -- Three lines, and which are mocked is the whole test:
+  --   in    : the child of a supervisor spawned inside with_cap -> mocked
+  --   again : the SAME child slot after `kill` forced a restart -> still
+  --           mocked, because the runtime carries the record over to the
+  --           replacement (a respawn does not go through the spawn glue)
+  --   out   : the child of a supervisor spawned outside, sent to AFTER the
+  --           block closes -> real
+  needs IO.Console
+
+  actor Logger do
+    state { n : Int }
+    init  { n: 0 }
+    on Say(s : String) do
+      print_line("L:" ++ s)
+      { state with n: state.n + 1 }
+    end
+  end
+
+  actor Sup do
+    state { w : Int }
+    init  { w: 0 }
+    supervise do
+      strategy one_for_one
+      max_restarts 5 within 60
+      Logger w
+    end
+  end
+
+  fn child_of(sup) do
+    match get_actor_field(sup, "w") do
+      None    -> pid_of_int(-1)
+      Some(n) -> pid_of_int(n)
+    end
+  end
+
+  fn main(c : Cap(IO.Console)) do
+    let outside = spawn(Sup)
+    let mock = cap_impl(c, { cap_ops_empty(c) with
+      print_line: Some(fn s -> print("MOCK[" ++ s ++ "]\n")) })
+    with_cap(mock, fn _ -> do
+      let inside = spawn(Sup)
+      send(child_of(inside), Say("in"))
+      run_until_idle()
+      kill(child_of(inside))
+      run_until_idle()
+      send(child_of(inside), Say("again"))
+      run_until_idle()
+    end)
+    send(child_of(outside), Say("out"))
+    run_until_idle()
+  end
+end

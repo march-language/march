@@ -246,6 +246,31 @@ pfn bump_reused(b : Box) : Box do
 end
 ```
 
+**Pinning the result with a contract.** Once a hot function shows only `♻` and
+`⚡`, you can make the compiler keep it that way:
+
+<!-- scroll:skip -->
+```march
+@[no_alloc]
+pfn bump_reused(b : Box) : Box do
+  match b do
+  Box(x, y) -> Box(x + 1, y)
+  end
+end
+```
+
+`@[no_alloc]` is checked on the compiled form, after reuse and stack promotion
+have been decided, so the reusing version above passes and the `⧉ copied`
+version does not. A later edit that reintroduces an allocation — here or in
+anything the function calls — fails the build instead of silently regressing.
+`@[no_alloc(warn)]` reports the same finding as a warning, and
+`@[no_alloc(assume)]` marks a wrapper around an unknown closure or an `extern`
+as trusted. `forge fix --contracts` adds the attribute to every function the
+compiler has already verified. Two caveats worth knowing: a nullary
+constructor of a variant that also has payload-carrying cases (`Nil` in
+`List`) is a real heap cell today, so returning a fresh one fails the
+contract, and a `Float` stored into a generic field is boxed, which counts.
+
 If `bump_copied` truly needs the old field, read it *before* you rebuild
 (bind `x` in the same `match`, then return it) rather than matching `b` a second
 time; that collapses the two uses into one and reuse fires again.
