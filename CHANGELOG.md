@@ -242,6 +242,22 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- `unreflectable-predicate` no longer misattributes a subject failure to the
+  predicate. An arithmetic actual (`n - 1`, `i + 1`) now reflects through the
+  same scope as the variable it uses, so a guard on `n` reaches `n - 1`
+  instead of being reported as an untranslatable predicate. A call actual
+  whose own value cannot be translated to SMT (an opaque call, a plain
+  arithmetic expression over a non-Int sort) is now filed as
+  `unreflectable-subject`, naming the actual, and the same rule applies to a
+  postcondition's own return expression. What remains under
+  `unreflectable-predicate` now names the specific sub-expression that failed
+  to reflect (for example `` the predicate's `_ / 2` has no SMT translation ``)
+  instead of a generic "uses vocabulary the checker cannot translate"
+  message; naming the sub-expression also lets that reason print at every
+  call site instead of once per module. A predicate containing `/`, `%`, or a
+  string literal now prints its real spelling in every message instead of
+  the `<predicate>` placeholder.
+
 - A `let` whose right-hand side is a literal or an arithmetic expression now
   carries its value into refinement checking. `let n = 0` followed by a call
   that requires a positive argument reports the same definite violation that

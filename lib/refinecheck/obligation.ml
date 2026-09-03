@@ -8,21 +8,28 @@
    Every obligation now leaves a record, so the outcome is countable. *)
 
 type reason =
-  (* The PREDICATE (or a sub-expression of it) did not translate into SMT.
-     Payload discipline follows [Alias_withdrawn]/[Unreflectable_subject]: the
-     failing sub-expression, rendered by [pred_str], rides in [reason_detail]
-     only — [reason_name] stays payload-free so `--refine-report` groups every
+  (* The rule between this reason and [Unreflectable_subject]: the SUBJECT is
+     tried first — a call's actual argument, or a postcondition's own return
+     expression — and only once the subject reflects fine does a further
+     failure blame the predicate. So [Unreflectable_predicate] fires when the
+     self binder (or the postcondition's return expression) reflected but some
+     other sub-expression of the predicate did not; it names that innermost
+     failing leaf, via [smt_of_r] at the two goal sites that reflect through it
+     (`refine_call.ml`, `refine_post.ml:406`). Payload discipline follows
+     [Alias_withdrawn]/[Unreflectable_subject]: the failing sub-expression,
+     rendered by [pred_str], rides in [reason_detail] only — [reason_name]
+     stays payload-free so `--refine-report` groups every
      unreflectable-predicate skip into one bucket instead of one per distinct
-     sub-expression. At the two goal sites that reflect through [smt_of_r]
-     (`refine_call.ml`, `refine_post.ml:406`) this names the innermost failing
-     leaf; the other two `refine_post.ml` sites (no sub-expression in hand)
-     name the whole predicate instead. *)
+     sub-expression. *)
   | Unreflectable_predicate of string
-  (* The SUBJECT (the actual argument) did not reflect.  Payload discipline
-     follows [Alias_withdrawn]: the actual, rendered by [pred_str], rides in
-     [reason_detail] only — [reason_name] stays payload-free so
-     `--refine-report` groups every failed-subject skip into one bucket
-     instead of one per distinct actual. *)
+  (* The SUBJECT did not reflect: a call's actual argument, or a
+     postcondition's own return expression, whichever is being checked. Filed
+     before the predicate is ever reached, so a subject failure never gets
+     misattributed to a predicate that would have translated fine. Payload
+     discipline follows [Alias_withdrawn]: the subject, rendered by
+     [pred_str], rides in [reason_detail] only — [reason_name] stays
+     payload-free so `--refine-report` groups every failed-subject skip into
+     one bucket instead of one per distinct subject. *)
   | Unreflectable_subject of string
   | Sort_conflict            (* a symbol would have been declared at two sorts *)
   | Float_sort_gate          (* the float/formula wellsortedness gate rejected it *)

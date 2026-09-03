@@ -1410,13 +1410,14 @@ passes look identical from outside.
 
 ```
 $ march --check --refine-report stdlib/list.march
-refinement obligations (user code): 0 proved, 0 violated, 0 trusted, 6 skipped
-  skipped (unconstrained-subject): 5
-  skipped (unreflectable-predicate): 1
+refinement obligations (user code): 1 proved, 0 violated, 0 trusted, 5 skipped
+  skipped (partial-conjunct): 1
+  skipped (unconstrained-subject): 4
   by kind: 6 precondition, 0 postcondition, 0 division
-refinement obligations (user + stdlib): 16 proved, 0 violated, 0 trusted, 34 skipped
-  skipped (unconstrained-subject): 32
-  skipped (unreflectable-predicate): 2
+refinement obligations (user + stdlib): 17 proved, 0 violated, 0 trusted, 33 skipped
+  skipped (partial-conjunct): 1
+  skipped (solver-undecided): 1
+  skipped (unconstrained-subject): 31
   by kind: 50 precondition, 0 postcondition, 0 division
 ```
 
@@ -1452,8 +1453,8 @@ Each skip is attributed to one of nine reasons:
 
 | Reason | What happened |
 |---|---|
-| `unreflectable-predicate` | the predicate uses vocabulary the checker cannot translate to SMT |
-| `unreflectable-subject` | the argument's own value did not translate, so no goal was built |
+| `unreflectable-predicate` | the predicate's own sub-expression named in the message has no SMT translation |
+| `unreflectable-subject` | the argument named in the message could not be translated to SMT, so no goal was built |
 | `sort-conflict` | reflecting it would declare one symbol at two different sorts |
 | `float-sort-gate` | the float wellsortedness gate rejected the formula |
 | `alias-withdrawn` | the guard used a measure alias (`List.length`, `String.byte_size`, `string_byte_length`), directly or through one `let` (`let n = List.length(ys)` then `if n > 0`), that this compilation unit had withdrawn, because something in the unit binds that name |
@@ -1474,15 +1475,77 @@ elsewhere in the unit. See [the alias-withdrawal note](#a-withdrawn-alias-names-
 below.
 
 **Where a skip is reported differs by reason.** `unconstrained-subject`,
-`partial-conjunct`, and `opaque-application` print at every call site that has
-one. Five residual reasons (`solver-undecided`, `unreflectable-predicate`,
-`unreflectable-subject`, `sort-conflict`, `float-sort-gate`) keep the older,
-once-per-module throttle: one hint per module, because their message says the
-same thing regardless of which call raised it, so repeating it at every site
-would be noise, not information. A diagnosed reason's message does not repeat:
-"no fact ... constrains `n`" and "`_ >= 0` established here; `_ < len(xs)` not"
-describe different calls, so suppressing the second because the first already
-printed would hide a real finding.
+`partial-conjunct`, `opaque-application`, `unreflectable-predicate`, and
+`unreflectable-subject` print at every call site that has one, because each
+of their messages now names the specific sub-expression or argument that
+failed, so repeating it is a distinct fact each time, not the same line
+twice. Three residual reasons (`solver-undecided`, `sort-conflict`,
+`float-sort-gate`) keep the older, once-per-module throttle: one hint per
+module, because their message says the same thing regardless of which call
+raised it, so repeating it at every site would be noise, not information. A
+diagnosed reason's message does not repeat: "no fact ... constrains `n`" and
+"`_ >= 0` established here; `_ < len(xs)` not" describe different calls, so
+suppressing the second because the first already printed would hide a real
+finding.
+
+**Which one gets blamed.** A call's argument (the "subject") is reflected
+first; if that reflection fails, the whole call is filed as
+`unreflectable-subject` naming the argument, and the predicate is never even
+reached. Only when the subject itself reflects fine does a further failure
+get filed as `unreflectable-predicate`, naming the innermost sub-expression
+of the predicate that had no translation. The same rule applies to a
+postcondition: the function's own return expression is the subject there, so
+a return expression that fails to reflect is `unreflectable-subject`, not
+`unreflectable-predicate`, even if the postcondition itself is unrelated. One
+gap: a predicate that never reaches the bare subject at all (it only applies
+a measure to it, or passes it to an opaque call) still blames the predicate
+when it is itself unreflectable, even though the subject may also be opaque;
+distinguishing that case would need reflecting the subject speculatively,
+which risks forcing work that would not otherwise happen (see the induction
+hazard note in `specs/progress/2026-09-02-unreflectable-predicate-attribution.md`).
+A sibling parameter's actual (not the refined parameter's own subject, but
+another argument the predicate mentions by name) is not covered by this rule
+yet and still blames the predicate; see the same progress note.
+
+Two generated examples, one per reason:
+
+```
+$ march --check test/native/simd_lane_panic.march
+
+-- HINT -- test/native/simd_lane_panic.march
+
+precondition `0 <= _ && _ < 4` on `Simd.extract_i32x4` was NOT verified here.
+the argument `lane(1)` could not be translated to SMT, so no goal was built
+
+25 |     println(Simd.extract_i32x4(v, lane(1)))
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+```
+
+`lane(1)` is a call to an unrefined function, so its own value could not be
+reflected; the predicate `0 <= _ && _ < 4` is never reached.
+
+```
+mod UpDoc do
+  pfn is_prime(n : Int) : Bool do n == 2 || n == 3 || n == 5 || n == 7 end
+  fn f(n : {Int | is_prime(_)}) : Int do n end
+end
+```
+
+```
+$ march --check up_doc.march
+
+-- HINT -- up_doc.march
+
+precondition `is_prime(_)` on `f` was NOT verified here.
+the predicate's `is_prime(_)` has no SMT translation
+
+9 |     println(f(7))
+                ^^^^
+```
+
+Here the subject (`7`) reflects fine; `is_prime` is an ordinary function, not
+a measure or a supported predicate operator, so the predicate itself has no
+SMT translation, and the message names it.
 
 `alias-withdrawn` follows neither rule: outside `cap verified` it prints no
 hint at all, not even once per module. It still counts toward
