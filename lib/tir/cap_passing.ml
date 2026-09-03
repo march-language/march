@@ -189,6 +189,41 @@ let rec scan (f : facts) (owner : string) (bound : StrSet.t) (e : T.expr) : unit
   | T.EAllocHole (tok, _, ats, _) -> Option.iter atom tok; atoms ats
   | T.ESetField (o, _, v) -> atom o; atom v
 
+(** [actor_of_spawn n] is the actor name when [n] is a spawn glue function. *)
+let actor_of_spawn (n : string) : string option =
+  let sfx = Tir_names.actor_spawn_suffix in
+  let ls = String.length sfx and ln = String.length n in
+  if ln > ls && String.sub n (ln - ls) ls = sfx
+  then Some (String.sub n 0 (ln - ls)) else None
+
+(** The actors [e] spawns as SUPERVISED CHILDREN.  A `supervise` block's
+    children are spawned inside the supervisor's own spawn glue
+    (`lower_actor.ml`'s [spawn_with_fields]), as
+      let $sup_child_raw_f = Child_spawn() in
+      let $sup_child_ptr_f = spawn_supervised($sup_child_raw_f) in …
+    which is a different shape from a plain `spawn(Child)` at a user site. *)
+let supervised_children (e : T.expr) : string list =
+  let acc = ref [] in
+  let rec go (e : T.expr) =
+    match e with
+    | T.ELet (raw, T.EApp (cs, []), (T.ELet (_, T.EApp (ss, [ T.AVar raw' ]), _) as rest))
+      when ss.T.v_name = "spawn_supervised" && raw'.T.v_name = raw.T.v_name ->
+      (match actor_of_spawn cs.T.v_name with
+       | Some child -> acc := child :: !acc
+       | None -> ());
+      go rest
+    | T.ELet (_, a, b) | T.ESeq (a, b) -> go a; go b
+    | T.ELetRec (fns, b) ->
+      List.iter (fun (fd : T.fn_def) -> go fd.T.fn_body) fns; go b
+    | T.ECase (_, brs, d) ->
+      List.iter (fun (br : T.branch) -> go br.T.br_body) brs; Option.iter go d
+    | T.EApp _ | T.ECallPtr _ | T.EAtom _ | T.ETuple _ | T.ERecord _
+    | T.EField _ | T.EUpdate _ | T.EAlloc _ | T.EStackAlloc _ | T.EFree _
+    | T.EIncRC _ | T.EDecRC _ | T.EAtomicIncRC _ | T.EAtomicDecRC _
+    | T.EReuse _ | T.EAllocHole _ | T.ESetField _ -> ()
+  in
+  go e; List.rev !acc
+
 (** [needed_caps m] maps each function to the capabilities it must carry: the
     ones its own body performs, plus everything its callees need, to a
     fixpoint.  Functions in [unsafe] are excluded — their arity cannot change. *)
@@ -196,6 +231,28 @@ let needed_caps (m : T.tir_module) : (string, string list) Hashtbl.t =
   let f = { calls = Hashtbl.create 64; ops = Hashtbl.create 64;
             unsafe = Hashtbl.create 64; toplevel = Hashtbl.create 512 } in
   List.iter (fun (fd : T.fn_def) -> Hashtbl.replace f.toplevel fd.T.fn_name ()) m.T.tm_fns;
+  (* A supervisor's spawn glue spawns its declared children ITSELF, so it is
+     the only place a supervised child's capabilities can be captured from —
+     and the user's `spawn(Sup)` site is where a `with_cap` mock is in scope.
+     Model the glue as calling each child's dispatch: the fixpoint below then
+     charges it with everything the child's handlers reach, the user site
+     threads those in (the glue is only ever a call head — a CHILD's spawn fn
+     is passed as a value to `register_supervisor_child` for respawn and stays
+     frozen, but a child needs no parameters, only a record set on it), and
+     the capture pattern in [thread] builds the child's record inside the glue
+     from the parameters it now carries. *)
+  List.iter
+    (fun (fd : T.fn_def) ->
+       match actor_of_spawn fd.T.fn_name with
+       | None -> ()
+       | Some _ ->
+         List.iter
+           (fun child ->
+              let callee = child ^ Tir_names.actor_dispatch_suffix in
+              Hashtbl.replace f.calls fd.T.fn_name
+                (callee :: Option.value ~default:[] (Hashtbl.find_opt f.calls fd.T.fn_name)))
+           (supervised_children fd.T.fn_body))
+    m.T.tm_fns;
   List.iter
     (fun (fd : T.fn_def) ->
        (* A dispatch wrapper CALLS the operation it wraps — that call is the
@@ -353,13 +410,6 @@ let caps_reached (need : (string, string list) Hashtbl.t) (e : T.expr) : string 
     f.calls;
   List.sort_uniq String.compare !acc
 
-(** [actor_of_spawn n] is the actor name when [n] is a spawn glue function. *)
-let actor_of_spawn (n : string) : string option =
-  let sfx = Tir_names.actor_spawn_suffix in
-  let ls = String.length sfx and ln = String.length n in
-  if ln > ls && String.sub n (ln - ls) ls = sfx
-  then Some (String.sub n 0 (ln - ls)) else None
-
 (** [actor_of_dispatch n] is the actor name when [n] is a dispatch function. *)
 let actor_of_dispatch (n : string) : string option =
   let sfx = Tir_names.actor_dispatch_suffix in
@@ -367,18 +417,36 @@ let actor_of_dispatch (n : string) : string option =
   if ln > ls && String.sub n (ln - ls) ls = sfx
   then Some (String.sub n 0 (ln - ls)) else None
 
-(** The single capability an actor's dispatch needs, if there is exactly one.
+(** The capabilities an actor's dispatch needs, sorted and de-duplicated;
+    empty when [fd] is not a dispatch or reaches no capability.
 
-    v1 deliberately handles ONE.  An actor performing two different
-    capabilities' operations would need a record of them captured at spawn, and
-    that is additive; one capability covers the ordinary actor (it logs, or it
-    reads the clock) and proves the whole path — spawn-site capture, runtime
-    metadata, dispatch read — end to end. *)
-let dispatch_cap (need : (string, string list) Hashtbl.t) (fd : T.fn_def)
-  : string option =
+    v1 handled exactly ONE capability and returned [None] for two or more, so
+    an actor that logged AND read the clock got nothing captured at all.  Now
+    every capability the dispatch reaches is captured, as one record of them
+    built at the spawn site (see [thread]) — one shape for one capability and
+    for many, so the two cannot disagree about WHICH capabilities an actor
+    needs. *)
+let dispatch_caps (need : (string, string list) Hashtbl.t) (fd : T.fn_def)
+  : string list =
   match actor_of_dispatch fd.T.fn_name with
-  | None -> None
-  | Some _ -> (match caps_reached need fd.T.fn_body with [ c ] -> Some c | _ -> None)
+  | None -> []
+  | Some _ -> caps_reached need fd.T.fn_body
+
+(** The record of an actor's captured capabilities, as [(field, capability)]:
+    one field per capability, named [cap_param_name c] (the `$cap_IO_Console`
+    spelling the parameters already use), SORTED BY FIELD NAME — the
+    [T.TRecord] invariant ([tir.ml]) that [Llvm_data.field_index_for] relies
+    on to compute each projection's index.  Sorted here explicitly rather than
+    inherited from [caps_reached]'s capability order: the field name swaps `.`
+    for `_`, and `_` sorts after every capital letter, so a capability-sorted
+    list is not field-sorted in general (`IO.A` < `IOB` but
+    `$cap_IO_A` > `$cap_IOB`). *)
+let caps_record_fields (caps : string list) : (string * string) list =
+  List.sort (fun (a, _) (b, _) -> String.compare a b)
+    (List.map (fun c -> (cap_param_name c, c)) caps)
+
+let caps_record_ty (caps : string list) : T.ty =
+  T.TRecord (List.map (fun (f, c) -> (f, cap_ty c)) (caps_record_fields caps))
 
 (* ── threading ────────────────────────────────────────────────────────── *)
 
@@ -462,26 +530,79 @@ let rec thread ?(dispatch = false) ?(spawn_caps = Hashtbl.create 1)
   (* Spawn-site capture.  Lower emits
        let $raw_actor = Name_spawn() in spawn($raw_actor)
      and `march_spawn` is what CREATES the actor's runtime metadata, so the
-     capability has to be attached after it, not before:
-       let $raw_actor = Name_spawn() in
-       let $pid = spawn($raw_actor) in
-       set_actor_caps($raw_actor, <cap>); $pid
-     The actor's dispatch reads it back — see [ops_in]/[dispatch_cap]. *)
+     capabilities have to be attached after it, not before:
+       let $raw_actor  = Name_spawn() in
+       let $pid        = spawn($raw_actor) in
+       let $spawn_caps = { $cap_c1: <supply c1>, …, $cap_cn: <supply cn> } in
+       set_actor_caps($raw_actor, $spawn_caps); $pid
+     One record on the meta's single pointer regardless of how many
+     capabilities the actor needs; a capability this site cannot supply is the
+     ambient sentinel in its field, so a PARTIAL mock (Console mocked, Clock
+     real) works.  The actor's dispatch reads it back — see [dispatch_caps]
+     and the projection in [elaborate].
+
+     RC: [needs_rc (TRecord _)] is false, so the record itself is never
+     inc'd/dec'd — it is retained forever on the meta, matching the meta's own
+     leak-don't-free discipline.  The +1 on each capability now comes from the
+     record build (Perceus dups an owned copy of every field into it), NOT
+     from the builtin's owned argument as it did for the bare pointer; that is
+     what lets a mock outlive the `with_cap` scope that supplied it. *)
   | T.ELet (raw, (T.EApp (sf, []) as spawn_call), T.EApp (sp, [ T.AVar raw' ]))
     when sp.T.v_name = "spawn" && raw'.T.v_name = raw.T.v_name
       && (match actor_of_spawn sf.T.v_name with Some _ -> true | None -> false) ->
     let actor = Option.get (actor_of_spawn sf.T.v_name) in
+    (* [go spawn_call], not [spawn_call]: a SUPERVISOR's spawn glue carries its
+       children's capabilities as parameters (see [needed_caps]), so the call
+       to it gains arguments here like any other elaborated callee — whether
+       or not the supervisor's own dispatch needs anything. *)
     (match Hashtbl.find_opt spawn_caps actor with
-     | None -> e
-     | Some cap ->
+     | None | Some [] -> T.ELet (raw, go spawn_call, T.EApp (sp, [ T.AVar raw ]))
+     | Some caps ->
        let pid = { T.v_name = "$pid_cap"; T.v_ty = T.TPtr T.TUnit; T.v_lin = T.Unr } in
        let setter =
          { T.v_name = "set_actor_caps"; T.v_ty = T.TPtr T.TUnit; T.v_lin = T.Unr }
        in
-       T.ELet (raw, spawn_call,
+       let fields = caps_record_fields caps in
+       let caps_var =
+         { T.v_name = "$spawn_caps"; T.v_ty = caps_record_ty caps; T.v_lin = T.Unr }
+       in
+       T.ELet (raw, go spawn_call,
          T.ELet (pid, T.EApp (sp, [ T.AVar raw ]),
-           T.ESeq (T.EApp (setter, [ T.AVar raw; supply cap ]),
-                   T.EAtom (T.AVar pid)))))
+           T.ELet (caps_var,
+             T.ERecord (List.map (fun (f, c) -> (f, supply c)) fields),
+             T.ESeq (T.EApp (setter, [ T.AVar raw; T.AVar caps_var ]),
+                     T.EAtom (T.AVar pid))))))
+  (* Supervised-child capture: the SECOND spawn shape, inside a supervisor's
+     spawn glue (see [supervised_children]).  `march_spawn_supervised` creates
+     the child's meta exactly as `march_spawn` does, so the record is attached
+     right after it; the caps come from the glue's own parameters, i.e. from
+     whatever the user's `spawn(Sup)` site supplied.  A child the runtime
+     RESPAWNS after a crash goes through `march_respawn_child`, not through
+     this glue; the runtime carries the record over to the replacement there.
+     Kept distinct from the plain pattern above on purpose: they share
+     [spawn_caps] (so they cannot disagree about which caps a child needs)
+     and nothing else. *)
+  | T.ELet (raw, (T.EApp (cs, []) as child_call),
+            T.ELet (ptr, (T.EApp (ss, [ T.AVar raw' ]) as sup_call), rest))
+    when ss.T.v_name = "spawn_supervised" && raw'.T.v_name = raw.T.v_name
+      && (match actor_of_spawn cs.T.v_name with Some _ -> true | None -> false) ->
+    let child = Option.get (actor_of_spawn cs.T.v_name) in
+    (match Hashtbl.find_opt spawn_caps child with
+     | None | Some [] -> T.ELet (raw, child_call, T.ELet (ptr, sup_call, go rest))
+     | Some caps ->
+       let setter =
+         { T.v_name = "set_actor_caps"; T.v_ty = T.TPtr T.TUnit; T.v_lin = T.Unr }
+       in
+       let fields = caps_record_fields caps in
+       let caps_var =
+         { T.v_name = raw.T.v_name ^ "_caps"; T.v_ty = caps_record_ty caps; T.v_lin = T.Unr }
+       in
+       T.ELet (raw, child_call,
+         T.ELet (ptr, sup_call,
+           T.ELet (caps_var,
+             T.ERecord (List.map (fun (f, c) -> (f, supply c)) fields),
+             T.ESeq (T.EApp (setter, [ T.AVar raw; T.AVar caps_var ]),
+                     go rest)))))
   | T.ELet (v, e1, e2) ->
     (* `with_cap(mock, fn _ -> body)`: inside that lambda, the capability is
        the MOCK rather than whatever the enclosing scope was supplying.  Lower
@@ -569,11 +690,11 @@ let elaborate ?(dispatch = false) (m : T.tir_module) : T.tir_module =
   else
     (* Which capability each actor's dispatch needs, so a spawn site knows what
        to capture and the dispatch knows what to read back. *)
-    let spawn_caps : (string, string) Hashtbl.t = Hashtbl.create 8 in
+    let spawn_caps : (string, string list) Hashtbl.t = Hashtbl.create 8 in
     List.iter
       (fun (fd : T.fn_def) ->
-         match actor_of_dispatch fd.T.fn_name, dispatch_cap need fd with
-         | Some actor, Some cap -> Hashtbl.replace spawn_caps actor cap
+         match actor_of_dispatch fd.T.fn_name, dispatch_caps need fd with
+         | Some actor, (_ :: _ as caps) -> Hashtbl.replace spawn_caps actor caps
          | _ -> ())
       m.T.tm_fns;
     let changed = ref 0 in
@@ -587,23 +708,72 @@ let elaborate ?(dispatch = false) (m : T.tir_module) : T.tir_module =
            else
              (* An actor's dispatch is entered from the scheduler, so its arity
                 is frozen and it has no capability parameter to supply.  Read
-                the one captured at the spawn site off the actor's runtime
-                metadata instead, and bind it for the body — the handler bodies
-                are already inlined here, so this reaches their operations. *)
+                the record captured at the spawn site off the actor's runtime
+                metadata instead, project one variable per capability out of
+                it, and bind those for the body — the calls it makes to the
+                threaded handlers then supply them instead of the sentinel:
+
+                  let $caps_opt : Option({…}) = actor_caps($actor) in
+                  let $caps : {…} = case $caps_opt of
+                                      Some($r) -> $r
+                                      None()   -> { $cap_c: root_cap, … } in
+                  let $spawn_cap_c = $caps.$cap_c in …
+
+                The read is NULL for any actor this pass did not capture for —
+                a supervised child, a respawned one, anything spawned through a
+                shape the rewrite does not match — and v1's bare pointer read
+                that as the sentinel for free.  A record projection cannot, so
+                the read is typed as the niche `Option` (`None` IS null) and
+                matched exactly as the generated `cap_dict` wrappers match
+                theirs; the `None` arm builds a record of sentinels, so the
+                uncaptured actor keeps release behaviour instead of a wild
+                field load.
+
+                RC: `$caps` MUST be typed [TRecord] — [needs_rc] false — so
+                Perceus never decs the retained record at scope end (a [TCon]
+                here would be a use-after-free on the second message).  The
+                `Some` payload moves into it without a dec of the scrutinee,
+                the same shape the `cap_dict` wrappers already exercise; each
+                projection is a borrowed-field var, dup'd when it escapes into
+                a handler call and never dec'd locally. *)
              let (extra_binds, wrap) =
-               match actor_of_dispatch fd.T.fn_name, dispatch_cap need fd with
-               | Some actor, Some cap when Hashtbl.mem spawn_caps actor ->
+               match actor_of_dispatch fd.T.fn_name, dispatch_caps need fd with
+               | Some actor, (_ :: _ as caps) when Hashtbl.mem spawn_caps actor ->
                  (match fd.T.fn_params with
                   | actor_param :: _ ->
-                    let cv =
-                      { T.v_name = "$spawn_cap"; T.v_ty = cap_ty cap; T.v_lin = T.Unr }
+                    let fields = caps_record_fields caps in
+                    let rec_ty = caps_record_ty caps in
+                    let opt_ty = T.TCon ("Option", [ rec_ty ]) in
+                    let mk name ty = { T.v_name = name; T.v_ty = ty; T.v_lin = T.Unr } in
+                    let caps_opt = mk "$caps_opt" opt_ty in
+                    (* [TVar "_"] for the branch binder, as lower's own case
+                       compilation does; the typed rebinding is the let. *)
+                    let caps_some = mk "$caps_some" (T.TVar "_") in
+                    let caps_var = mk "$caps" rec_ty in
+                    let reader = mk "actor_caps" opt_ty in
+                    let proj =
+                      List.map
+                        (fun (f, c) ->
+                           (* `$cap_IO_Console` -> `$spawn_cap_IO_Console` *)
+                           let pn = cap_param_name c in
+                           (c, f, mk ("$spawn_" ^ String.sub pn 1 (String.length pn - 1))
+                                    (cap_ty c)))
+                        fields
                     in
-                    let reader =
-                      { T.v_name = "actor_caps"; T.v_ty = cap_ty cap; T.v_lin = T.Unr }
-                    in
-                    ([ (cap, T.AVar cv) ],
+                    (List.map (fun (c, _, v) -> (c, T.AVar v)) proj,
                      fun body ->
-                       T.ELet (cv, T.EApp (reader, [ T.AVar actor_param ]), body))
+                       T.ELet (caps_opt, T.EApp (reader, [ T.AVar actor_param ]),
+                         T.ELet (caps_var,
+                           T.ECase (T.AVar caps_opt,
+                             [ { T.br_tag = "Some"; T.br_vars = [ caps_some ];
+                                 T.br_body = T.EAtom (T.AVar caps_some) };
+                               { T.br_tag = "None"; T.br_vars = [];
+                                 T.br_body =
+                                   T.ERecord (List.map (fun (f, c) -> (f, ambient_atom c)) fields) } ],
+                             Some (Lower_state.nonexhaustive_panic ())),
+                           List.fold_right
+                             (fun (_, f, v) acc -> T.ELet (v, T.EField (T.AVar caps_var, f), acc))
+                             proj body)))
                   | [] -> ([], fun b -> b))
                | _ -> ([], fun b -> b)
              in

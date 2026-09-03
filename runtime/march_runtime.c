@@ -3251,6 +3251,15 @@ static void *march_respawn_child(void *supervisor, march_actor_meta *sup_meta, i
     new_meta->supervisor = supervisor;
     new_meta->sup_child_index = child_idx;
     atomic_store_explicit(&new_meta->epoch, inherited_epoch, memory_order_release);
+    /* Capture-at-spawn (--test builds only ever set it): the replacement
+     * inherits the crashed incarnation's captured capability record, so a
+     * mock that reached the child reaches its restart.  The record is
+     * retained forever on the meta (never freed), so sharing the pointer
+     * needs no RC. */
+    if (old_meta)
+        atomic_store_explicit(&new_meta->spawn_cap,
+            atomic_load_explicit(&old_meta->spawn_cap, memory_order_acquire),
+            memory_order_release);
     pthread_mutex_unlock(&g_tbl_mu);
     ((int64_t *)supervisor)[4 + child->word_idx] =
         atomic_load_explicit(&new_meta->pid_index, memory_order_relaxed);

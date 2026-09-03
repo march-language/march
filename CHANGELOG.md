@@ -51,6 +51,22 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- Capability mocking now reaches a **supervised child**. A `supervise` block's
+  children are spawned by the supervisor itself, not by user code, so a mock
+  that reached a plain actor never reached one under a supervisor. The
+  capabilities in scope where the supervisor is spawned now reach each of its
+  children, and a child restarted after a crash keeps them. Compiled `--test`
+  builds only, as before.
+
+- An actor whose handlers reach **two or more capabilities** (it logs *and*
+  reads the clock, the ordinary shape) can now be mocked; previously only
+  one-capability actors were captured at spawn, and an actor over that limit
+  kept its real IO with no warning. The spawn site now captures a record of
+  every capability the actor needs, and a partial mock works: an actor
+  reaching `IO.Console` and `IO.Clock`, spawned inside a Console-only
+  `with_cap`, gets the mocked Console and the real Clock. Compiled `--test`
+  builds only, as before.
+
 - `march --emit-io-ops` printed every multi-argument operation in the wrong
   spelling: `(A, B) -> C`, which in March is a function of one *tuple*
   argument (`Tuple.apply` calls its `f : (a, b) -> c` as `f(t)`). Copying that
