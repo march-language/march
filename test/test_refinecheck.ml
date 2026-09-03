@@ -4806,6 +4806,25 @@ end|}
         Alcotest.(check bool) "the genuinely unsupported conjunct is on the missing side" true
           (contains msg "`i > 100` not"));
 
+    (* The predicate `0 <= _ && _ < 4` is fully reflectable; `lane(1)` is a
+       call with no refined return and cannot be.  Blame the subject, and
+       name it. *)
+    gated "an opaque call actual is filed as unreflectable-subject naming the call"
+      (fun () ->
+        let src =
+          {|mod US1 do
+  cap verified
+  fn at(i : {Int | 0 <= _ && _ < 4}) : Int do i end
+  fn lane(k : Int) : Int do k end
+  fn go() : Int do at(lane(1)) end
+end|}
+        in
+        Alcotest.(check (list string)) "slug" [ "unreflectable-subject" ] (skip_reasons src);
+        let text = refine_error_text_d src in
+        Alcotest.(check bool) "names the actual" true (contains text "`lane(1)`");
+        Alcotest.(check bool) "does not blame the predicate" false
+          (contains text "vocabulary the checker cannot translate"));
+
     (* A third variant, [Nonlinear_goal], was drafted here and cut: the only
        [smt_of] used to build a goal never produces [Smt.Mul] for two
        non-literal operands, so a fixture like `pos(a * b)` never reaches
@@ -11571,7 +11590,14 @@ end|}
        slug sweep for a case the design's Scope section explicitly excludes
        (symbolic float arithmetic). The `when sort = Smt.SInt` guard on both
        new arms keeps a Float actual on the SAME path it took before this
-       feature existed. *)
+       feature existed -- [reflect_scalar] still returns [None] for `x + 1.0`
+       exactly as it did pre-082d5bf5.
+
+       The SLUG this fixture asserts changed again in the task that added
+       [Unreflectable_subject]'s payload (Task 2 of the same plan): a failed
+       SCALAR subject is now filed as [unreflectable-subject], the same
+       attribution a failed RECORD subject already got, instead of blaming
+       `x > 0.0`, a predicate that reflects just fine. *)
     gated "an arithmetic actual over Float stays on its pre-existing (Int-only) path"
       (fun () ->
         let rs =
@@ -11583,8 +11609,8 @@ end|}
   end
 end|}
         in
-        Alcotest.(check bool) "unreflectable-predicate, same as pre-082d5bf5" true
-          (List.mem "unreflectable-predicate" rs);
+        Alcotest.(check bool) "unreflectable-subject, not unreflectable-predicate" true
+          (List.mem "unreflectable-subject" rs);
         Alcotest.(check bool) "no sort-conflict" false
           (List.mem "sort-conflict" rs);
         Alcotest.(check bool) "no float-sort-gate" false

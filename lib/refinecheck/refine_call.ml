@@ -789,32 +789,32 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                | Obligation.Alias_withdrawn _ -> false
                | Obligation.Unconstrained_subject _
                | Obligation.Opaque_application _
-               | Obligation.Partial_conjunct _ -> true
+               | Obligation.Partial_conjunct _
+               | Obligation.Unreflectable_subject _ -> true
                | Obligation.Solver_undecided
                | Obligation.Unreflectable_predicate
-               | Obligation.Unreflectable_subject
                | Obligation.Sort_conflict
                | Obligation.Float_sort_gate -> not !unverified_hinted) ->
       (match r with
        | Obligation.Solver_undecided
        | Obligation.Unreflectable_predicate
-       | Obligation.Unreflectable_subject
        | Obligation.Sort_conflict
        | Obligation.Float_sort_gate -> unverified_hinted := true
        | Obligation.Unconstrained_subject _
        | Obligation.Opaque_application _
        | Obligation.Partial_conjunct _
+       | Obligation.Unreflectable_subject _
        | Obligation.Alias_withdrawn _ -> ());
       let body =
         match r with
         | Obligation.Unconstrained_subject _
         | Obligation.Opaque_application _
-        | Obligation.Partial_conjunct _ ->
+        | Obligation.Partial_conjunct _
+        | Obligation.Unreflectable_subject _ ->
           Printf.sprintf "%s `%s` on `%s` was NOT verified here.\n%s"
             obligation_noun (pred_str rp.pred) callee (Obligation.reason_detail r)
         | Obligation.Solver_undecided
         | Obligation.Unreflectable_predicate
-        | Obligation.Unreflectable_subject
         | Obligation.Sort_conflict
         | Obligation.Float_sort_gate
         | Obligation.Alias_withdrawn _ ->
@@ -1966,16 +1966,41 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
      with
      | None ->
        (* Two different causes reach this arm and they must not be conflated:
-          `Skip` means the SUBJECT (a record actual) did not reflect, while the
-          other modes mean the PREDICATE itself did not.  The distinction was
-          cosmetic while it only fed a debug count; `cap verified` puts the
-          reason in front of a user, and telling someone their perfectly
-          reflectable predicate is unreflectable sends them after the wrong
-          thing. *)
+          the SUBJECT (the actual argument) not reflecting, versus the
+          PREDICATE itself not translating.  `Skip` is always the former.  For
+          `Other`, [reflect_cache] — the SAME memo [resolve_var]'s `is_self`
+          branch populates under the key `"$self"` — tells the two apart
+          AFTER THE FACT, without forcing a reflection the predicate would
+          never have attempted on its own: if the predicate never mentions the
+          binder as a bare scalar (e.g. it only ever appears inside a MEASURE
+          application, such as Tier 2 induction's `size(t) < 1`, which resolves
+          through [resolve_measure]/[resolve_measure_app] and never touches
+          this cache at all), the key is simply absent, and the failure must
+          be the predicate's.  Forcing the reflection unconditionally here —
+          the first attempt at this task — broke exactly that case: a Tree
+          actual whose own scalar reflection fails (Tree is not Int) but whose
+          MEASURE the induction machinery proves anyway, filed as a false
+          `unreflectable-subject` before the induction had a chance to run
+          (`test tier2-induction`, 4 fixtures reddened).  A present-but-`Some`
+          entry likewise means the subject reflected fine (to a compound term
+          [mark_self] does not track, e.g. an arithmetic actual) and some
+          OTHER conjunct is what failed — still the predicate's fault.
+          Deliberately excludes a String-typed subject, which reflects through
+          [reflect_str]/[str_reflected], a different cache this check does not
+          consult (out of the scope this task measured). *)
+       let self_reflection_failed =
+         (not self_is_str)
+         &&
+         match Hashtbl.find_opt reflect_cache "$self" with
+         | Some None -> true
+         | Some (Some _) | None -> false
+       in
        note
          (Obligation.Skipped
             (match mode with
-             | `Skip -> Obligation.Unreflectable_subject
+             | `Skip -> Obligation.Unreflectable_subject (pred_str self_actual)
+             | `Other when self_reflection_failed ->
+               Obligation.Unreflectable_subject (pred_str self_actual)
              | `Other | `Record _ -> Obligation.Unreflectable_predicate))
      | Some goal when not (wellsorted (Hashtbl.mem str_names) goal) ->
        note (Obligation.Skipped Obligation.Sort_conflict)

@@ -9,7 +9,12 @@
 
 type reason =
   | Unreflectable_predicate  (* the goal did not translate into SMT at all *)
-  | Unreflectable_subject    (* the SUBJECT (the actual argument) did not reflect *)
+  (* The SUBJECT (the actual argument) did not reflect.  Payload discipline
+     follows [Alias_withdrawn]: the actual, rendered by [pred_str], rides in
+     [reason_detail] only — [reason_name] stays payload-free so
+     `--refine-report` groups every failed-subject skip into one bucket
+     instead of one per distinct actual. *)
+  | Unreflectable_subject of string
   | Sort_conflict            (* a symbol would have been declared at two sorts *)
   | Float_sort_gate          (* the float/formula wellsortedness gate rejected it *)
   | Solver_undecided         (* neither goal nor its negation was Verified *)
@@ -223,7 +228,7 @@ let verdict_name = function
 
 let reason_name = function
   | Unreflectable_predicate -> "unreflectable-predicate"
-  | Unreflectable_subject -> "unreflectable-subject"
+  | Unreflectable_subject _ -> "unreflectable-subject"
   | Sort_conflict -> "sort-conflict"
   | Float_sort_gate -> "float-sort-gate"
   | Solver_undecided -> "solver-undecided"
@@ -246,8 +251,9 @@ let reason_name = function
 let reason_detail = function
   | Unreflectable_predicate ->
     "the predicate uses vocabulary the checker cannot translate to SMT"
-  | Unreflectable_subject ->
-    "the argument's own value could not be translated to SMT, so no goal was built"
+  | Unreflectable_subject actual ->
+    Printf.sprintf
+      "the argument `%s` could not be translated to SMT, so no goal was built" actual
   | Sort_conflict -> "reflecting it would declare one symbol at two different sorts"
   | Float_sort_gate -> "the float wellsortedness gate rejected the formula"
   | Solver_undecided -> "the solver proved neither the predicate nor its negation"
