@@ -2413,7 +2413,8 @@ let analyse ~filename ~src : t =
       transitions_index = [];
       always_linear_names = [];
       param_name_map    = build_param_name_map [];
-      proof_cap_defs    = Hashtbl.create 0 }
+      proof_cap_defs    = Hashtbl.create 0;
+      no_alloc_candidates = [] }
   in
   let make_parse_diag pos msg =
     let sp : Ast.span = {
@@ -3273,6 +3274,7 @@ let analyse ~filename ~src : t =
       demorgan_sites;
       perf_insights;
       consume_modes    = [];
+      no_alloc_candidates = [];
       tir_fn_insights  = [];
       code_lens_items  = build_action_lenses ~filename user_decls;
       decls            = user_decls;
@@ -3337,7 +3339,8 @@ let rec tir_count_nodes (e : Tir.expr) : int * int * int * int =
    own perf_insights on replay. *)
 let tir_pass_cache :
   (string, tir_fn_insight list * code_lens_item list * perf_insight list
-           * consume_modes list) Hashtbl.t
+           * consume_modes list * (string * Ast.span * Ast.span) list
+           * Lsp.Types.Diagnostic.t list) Hashtbl.t
   = Hashtbl.create 16
 
 let run_tir_pass (a : t) : t =
@@ -3366,10 +3369,13 @@ let run_tir_pass (a : t) : t =
       List.filter (fun cl -> cl.cl_command <> None) a.code_lens_items
     in
     match Hashtbl.find_opt tir_pass_cache cache_key with
-    | Some (tir_fn_insights, code_lens_items, tir_perf_insights, consume_modes) ->
+    | Some (tir_fn_insights, code_lens_items, tir_perf_insights, consume_modes,
+            no_alloc_candidates, contract_diags) ->
       { a with tir_fn_insights;
                consume_modes;
+               no_alloc_candidates;
                code_lens_items = action_lenses @ code_lens_items;
+               diagnostics = a.diagnostics @ contract_diags;
                perf_insights = a.perf_insights @ tir_perf_insights }
     | None ->
     try
@@ -3383,38 +3389,85 @@ let run_tir_pass (a : t) : t =
           (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
       in
       let desugared = March_desugar.Desugar.desugar_module raw in
-      (* Run: lower → mono → defun → known_call → perceus → escape *)
+      (* Run the SAME post-lower pipeline the build runs
+         (lib/tir/contract_pipeline.ml: TRMC → mono → defun → known_call →
+         … → perceus → drop → escape → opt → native_map_inline), so the
+         insights, the code lenses and the @[no_alloc] verdict below describe
+         the TIR the compiled program is actually built from.  `forge build`
+         never passes --no-opt, so opt is on; TRMC follows the global flag. *)
       let tir = March_tir.Lower.lower_module ~type_map:a.type_map desugared in
-      let tir = March_tir.Mono.monomorphize tir in
-      let tir = March_tir.Defun.defunctionalize tir in
-      let tir = March_tir.Known_call.run ~changed:(ref false) tir in
-      (* Borrow inference BEFORE Perceus: this is the same map Perceus itself
-         consults to decide which arguments need an EIncRC at a call site, so
-         the hint reports the compiler's actual decision rather than a
-         re-derivation of it. Run on the pre-Perceus module for the same reason
-         Perceus does — the RC operations it inserts are the CONSEQUENCE of
-         these modes, not an input to them. *)
-      let borrow_map = March_tir.Borrow.infer_module tir in
-      let consume_modes =
-        List.filter_map (fun (fn : Tir.fn_def) ->
-            if fn.Tir.fn_name = "" || fn.Tir.fn_name.[0] = '$' then None
-            else
-              let consumes =
-                List.mapi (fun i (p : Tir.var) ->
-                    (* Consuming = takes ownership AND there is ownership to
-                       take. Skipping non-RC parameters is what keeps this hint
-                       off every Int argument (see [consume_modes]). *)
-                    (not (March_tir.Borrow.is_borrowed borrow_map fn.Tir.fn_name i))
-                    && March_tir.Rc_types.needs_rc p.Tir.v_ty)
-                  fn.Tir.fn_params
-              in
-              if List.exists (fun c -> c) consumes
-              then Some { cm_fn_name = fn.Tir.fn_name; cm_consumes = consumes }
-              else None)
-          tir.Tir.tm_fns
+      (* Root every declaration this file makes so the DCE inside Opt.run
+         cannot prune a helper `main` never calls — its lens must still
+         describe it.  A rooted function's body is optimised exactly as the
+         build optimises it; only reachability differs.  Names are pre-Mono;
+         the pipeline expands them to their monomorphised clones. *)
+      let user_names = Hashtbl.fold (fun k _ acc -> k :: acc) a.def_map [] in
+      let borrow_snapshot = ref None in
+      let pipe =
+        March_tir.Contract_pipeline.run
+          (* Borrow inference BEFORE Perceus: this is the same map Perceus
+             itself consults to decide which arguments need an EIncRC at a
+             call site, so the hint reports the compiler's actual decision
+             rather than a re-derivation of it. *)
+          ~before_perceus:(fun pre ->
+              borrow_snapshot := Some (March_tir.Borrow.infer_module pre, pre))
+          ~extra_roots:user_names
+          ~decls:(March_tir.Alloc_contract.collect desugared)
+          ~opt:true ~trmc:!March_tir.Trmc.enabled tir
       in
-      let tir = March_tir.Perceus.perceus tir in
-      let tir = March_tir.Escape.escape_analysis tir in
+      let consume_modes =
+        match !borrow_snapshot with
+        | None -> []
+        | Some (borrow_map, tir) ->
+          List.filter_map (fun (fn : Tir.fn_def) ->
+                if fn.Tir.fn_name = "" || fn.Tir.fn_name.[0] = '$' then None
+                else
+                  let consumes =
+                    List.mapi (fun i (p : Tir.var) ->
+                        (* Consuming = takes ownership AND there is ownership to
+                           take. Skipping non-RC parameters is what keeps this hint
+                           off every Int argument (see [consume_modes]). *)
+                        (not (March_tir.Borrow.is_borrowed borrow_map fn.Tir.fn_name i))
+                        && March_tir.Rc_types.needs_rc p.Tir.v_ty)
+                      fn.Tir.fn_params
+                  in
+                  if List.exists (fun c -> c) consumes
+                  then Some { cm_fn_name = fn.Tir.fn_name; cm_consumes = consumes }
+                  else None)
+              tir.Tir.tm_fns
+      in
+      let tir = pipe.March_tir.Contract_pipeline.final in
+      (* @[no_alloc]: failing contracts, reported at the function's name span
+         with the same text the build prints, plus the verified-clean
+         functions in the quick fix's generation scope. *)
+      let contract_diags =
+        List.filter_map (diag_to_lsp ~filename:a.filename)
+          pipe.March_tir.Contract_pipeline.contract_diags in
+      let contract_decls = March_tir.Alloc_contract.collect desugared in
+      let no_alloc_holds =
+        let failing =
+          List.map (fun (d : Err.diagnostic) -> d.Err.span)
+            pipe.March_tir.Contract_pipeline.contract_diags in
+        fun (d : March_tir.Alloc_contract.decl_info) ->
+          d.March_tir.Alloc_contract.d_form <> None
+          && not (List.mem d.March_tir.Alloc_contract.d_name_span failing)
+      in
+      (* The SAME predicate `forge fix --contracts` uses (there is one copy,
+         in Alloc_contract), so the editor offers the action exactly where
+         forge would insert it.  The editor has no forge.toml globs to apply,
+         so only the default scope is offered here. *)
+      let no_alloc_candidates =
+        List.map (fun (d : March_tir.Alloc_contract.decl_info) ->
+            (d.March_tir.Alloc_contract.d_name,
+             d.March_tir.Alloc_contract.d_name_span,
+             d.March_tir.Alloc_contract.d_decl_span))
+          (March_tir.Alloc_contract.generation_candidates
+             ~decls:contract_decls
+             ~allocating:pipe.March_tir.Contract_pipeline.allocating
+             ~globs:[]
+             ~is_user:(fun (sp : Ast.span) -> sp.Ast.file = a.filename)
+             tir)
+      in
       (* Collect per-function optimization counts *)
       let tir_fn_insights =
         List.filter_map (fun (fn : Tir.fn_def) ->
@@ -3468,6 +3521,21 @@ let run_tir_pass (a : t) : t =
               }
           ) tir_fn_insights
       in
+      (* `✓ no_alloc` alongside the ⚡/♻ perf lenses, for a contract that
+         HOLDS.  A failing one shows nothing extra: its diagnostic covers it. *)
+      let code_lens_items =
+        code_lens_items
+        @ List.filter_map (fun (d : March_tir.Alloc_contract.decl_info) ->
+            if not (no_alloc_holds d) then None
+            else if d.March_tir.Alloc_contract.d_name_span.Ast.file <> a.filename
+            then None
+            else
+              Some { cl_range = Pos.span_to_lsp_range
+                         d.March_tir.Alloc_contract.d_name_span;
+                     cl_title = "\xe2\x9c\x93 no_alloc";
+                     cl_command = None;
+                     cl_args = [] }) contract_decls
+      in
       (* Produce perf insights at function-definition spans (Hint severity) so
          they appear in hover and the problems panel. *)
       let tir_perf_insights =
@@ -3510,11 +3578,14 @@ let run_tir_pass (a : t) : t =
           ) tir_fn_insights
       in
       Hashtbl.replace tir_pass_cache cache_key
-        (tir_fn_insights, code_lens_items, tir_perf_insights, consume_modes);
+        (tir_fn_insights, code_lens_items, tir_perf_insights, consume_modes,
+         no_alloc_candidates, contract_diags);
       { a with
         tir_fn_insights;
         consume_modes;
+        no_alloc_candidates;
         code_lens_items = action_lenses @ code_lens_items;
+        diagnostics = a.diagnostics @ contract_diags;
         perf_insights = a.perf_insights @ tir_perf_insights;
       }
     with _ ->

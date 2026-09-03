@@ -674,6 +674,20 @@ Nullary constructors (`None`, `True`, `False`, custom zero-arg tags) and unit `(
 
 The check recurses into sub-expressions inside `if`, `match`, `let`, blocks, etc.
 
+**`cap no_alloc` and `@[no_alloc]` are different checks.** `cap no_alloc` is
+syntactic and pre-optimisation: it walks the source of every function in the
+module and rejects the constructs in the table above, in every mode including
+the interpreter. The `@[no_alloc]` attribute (see
+[surface syntax](surface-syntax.md)) is a per-function *contract* checked on
+the compiled program, after Perceus reference counting and escape analysis, so
+a constructor the compiler reuses in place and a value it promotes to the stack
+both pass. It is also transitive: everything the function calls must be
+allocation-free too. Use the cap when the question is "does this source
+construct heap values"; use the contract when the question is "does the
+compiled binary allocate". The two are not unified yet — the contract has no
+answer under the interpreter, where no TIR exists (see
+`specs/todos/2026-09-03-unify-cap-no-alloc-with-contract.md`).
+
 ### `cap no_extern`: no foreign calls
 
 ```march

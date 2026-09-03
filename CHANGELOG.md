@@ -13,6 +13,20 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Allocation contracts (`@[no_alloc]`).** A per-function contract checked on
+  the compiled program, after reference counting and escape analysis, so a
+  constructor the compiler reuses in place or a value it promotes to the stack
+  passes. Transitive over callees with no annotation on them;
+  `@[no_alloc(warn)]` reports a warning instead of an error and
+  `@[no_alloc(assume)]` marks a closure or `extern` wrapper as trusted.
+  `--no-opt` downgrades a failure to a warning naming the flag, and a
+  TRMC-eligible failure points at `--trmc`. The language server reports the
+  failure at the function name, shows `✓ no_alloc` when the contract holds,
+  and offers an "Add `@[no_alloc]`" quick fix; `march --compile
+  --report-contracts` and `forge fix --contracts` insert the attribute on
+  functions the compiler has verified. `Tagged(_, NoAlloc)` and `Realtime`
+  policies now use the same check, which only widens what they accept.
+
 - **`Session`**: a session-transport capability. `Cap(Session.Live)` carries
   the transport as a dictionary — `register`, `emit`, `suspend`, `close`,
   protocol-agnostic, messages as `Bytes` — so the same endpoint code runs
