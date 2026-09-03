@@ -202,6 +202,43 @@ let skip_reasons src =
       | _ -> None)
     (March_refinecheck.Obligation.all ())
 
+(* (proved, skipped) obligation counts for [src] — a ledger, not a boolean,
+   because a self-mentioning postcond-let manufactures a false PROOF, and
+   "has_refine_error" would report that outcome identically to a legitimate
+   proof: both are "no error".  Mirrors [skip_reasons]'s reset/run/fold shape
+   and, like it, runs on the DESUGARED module via [has_refine_error_d] so a
+   qualified call in a fixture is checked the same way the compiler checks
+   it. *)
+let ledger_counts src =
+  March_refinecheck.Obligation.reset ();
+  ignore (has_refine_error_d src);
+  List.fold_left
+    (fun (proved, skipped) (o : March_refinecheck.Obligation.t) ->
+      match o.March_refinecheck.Obligation.verdict with
+      | March_refinecheck.Obligation.Proved -> (proved + 1, skipped)
+      | March_refinecheck.Obligation.Skipped _ -> (proved, skipped + 1)
+      | _ -> (proved, skipped))
+    (0, 0) (March_refinecheck.Obligation.all ())
+
+(* Full three-way ledger — [ledger_counts]'s (proved, skipped) pair alone
+   cannot tell a genuine skip apart from a false [Violated]: a false-positive
+   translation of a fact (e.g. `not is_Cons(t)` where the true fact should
+   have been silence) reports as VIOLATED, not skipped, so a test that checks
+   only `skipped` cannot catch that failure mode.  See the
+   [arm_exclusion_nested_suite] REJECT witnesses below, which is exactly the
+   shape this was written for. *)
+let ledger_counts3 src =
+  March_refinecheck.Obligation.reset ();
+  ignore (has_refine_error_d src);
+  List.fold_left
+    (fun (proved, violated, skipped) (o : March_refinecheck.Obligation.t) ->
+      match o.March_refinecheck.Obligation.verdict with
+      | March_refinecheck.Obligation.Proved -> (proved + 1, violated, skipped)
+      | March_refinecheck.Obligation.Violated -> (proved, violated + 1, skipped)
+      | March_refinecheck.Obligation.Skipped _ -> (proved, violated, skipped + 1)
+      | _ -> (proved, violated, skipped))
+    (0, 0, 0) (March_refinecheck.Obligation.all ())
+
 (* Most of this suite needs a solver, so a z3-less machine cannot run it.  What
    it must NOT do is report those cases as PASSING.  [gated] used to print a
    "[skip]" line and then return unit, which alcotest scores as `[OK]`: on a
@@ -7127,7 +7164,14 @@ end|});
            `{Int | n > 0}` over `let n`: that spelling measures 0 proved,
            0 violated, 1 skipped and ALREADY exits 1 today via the
            cap-verified skip escalation, so asserting an error on it would
-           pass before the fix existed and prove nothing. *)
+           pass before the fix existed and prove nothing.
+
+           2 violated, not 1: the let-equality path fact (`m == 0 - 5`, an
+           admitted arithmetic-over-literals shape) now lets `inner(m)`
+           itself be DECIDED instead of riding the unproven annotation, and
+           m is genuinely -5, so that call obligation is correctly violated
+           too — an obligation moving from skip to violated, not a false
+           positive. *)
         March_refinecheck.Obligation.reset ();
         ignore (has_refine_error_d {|
 mod LA4 do
@@ -7139,7 +7183,7 @@ mod LA4 do
   fn main() : Int do outer() end
 end|});
         let _, violated, _ = summary () in
-        Alcotest.(check int) "violated" 1 violated)
+        Alcotest.(check int) "violated" 2 violated)
 
   ; gated "a TRUE let annotation proves, and still composes" (fun () ->
         (* The false-positive control AND the interaction check with the
@@ -7201,8 +7245,12 @@ end|});
            value, so `0 - 5` is now seen and the annotation is REPORTED.
            That is a genuine violation, not a false positive: the annotation
            claims `n > 0` of the value -5.
-           The trailing skip is the downstream `inner(n)`, which no longer
-           rides the unproven annotation. *)
+
+           2 violated, not 1: the downstream `inner(n)` no longer rides the
+           unproven annotation — the let-equality path fact (`n == 0 - 5`)
+           now decides that call obligation independently, and n is
+           genuinely -5, so it too is correctly violated rather than
+           skipped. *)
         March_refinecheck.Obligation.reset ();
         ignore (has_refine_error_d {|
 mod LA6 do
@@ -7215,7 +7263,7 @@ mod LA6 do
 end|});
         let proved, violated, _ = summary () in
         Alcotest.(check int) "no false proof" 0 proved;
-        Alcotest.(check int) "the false annotation is now caught" 1 violated)
+        Alcotest.(check int) "the false annotation is now caught" 2 violated)
   ]
 
 let postcond_ledger_suite =
@@ -8326,6 +8374,80 @@ end|}));
           (List.fold_left (fun a (_, n) -> a + n) 0 skips));
   ]
 
+(* ── Nested-pattern exclusion over the binder ────────────────────────────────
+   [arm_exclusion_suite] above pushes a fact against the SCRUTINEE when an
+   earlier arm's failure is decided purely by its tag. That leaves
+   `List.last`'s own shape unprovable: the third arm's `Cons(_, t) -> last(t)`
+   binds a FRESH name `t`, not the scrutinee, so no scrutinee-level fact ever
+   attaches to it, even though the second arm (`Cons(x, Nil) -> x`, unguarded,
+   irrefutable except for a nullary `Nil` at the tail position) means reaching
+   the third arm implies that tail position is not `Nil` — i.e. `t` is a
+   `Cons`. [arm_excludes_nested] recognizes that one-level, nullary-only shape
+   and the push here attaches the fact to the BINDER instead of the
+   scrutinee. *)
+let arm_exclusion_nested_suite =
+  [ (* The flagship: List.last's own shape.  Arm 2 excludes a Nil tail, so in
+       arm 3 the binder `t` is a Cons and `len(t) > 0`. *)
+    gated "a refutable sibling sub-pattern gives the later binder its tag"
+      (fun () ->
+        let proved, skipped =
+          ledger_counts
+            {|mod AE1 do
+  fn last(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil          -> panic("empty")
+    Cons(x, Nil) -> x
+    Cons(_, t)   -> last(t)
+    end
+  end
+end|}
+        in
+        Alcotest.(check (pair int int)) "recursive call proved" (1, 0) (proved, skipped));
+
+    (* A GUARDED sibling licenses nothing: it can fail with the tag matching.
+       Asserting the FULL ledger, not just `proved = 0`, matters here: a
+       broken guard check could translate the (unsound) exclusion anyway and
+       report the call VIOLATED rather than skipped — `proved = 0` alone
+       cannot distinguish "correctly undecided" from "wrongly rejected". *)
+    gated "a guarded sibling arm yields no exclusion" (fun () ->
+        let proved, violated, skipped =
+          ledger_counts3
+            {|mod AE2 do
+  fn last(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil                        -> panic("empty")
+    Cons(x, Nil) when x > 0    -> x
+    Cons(_, t)                 -> last(t)
+    end
+  end
+end|}
+        in
+        Alcotest.(check (triple int int int)) "no exclusion: not proved, not violated, skipped"
+          (0, 0, 1) (proved, violated, skipped));
+
+    (* Two levels of nesting are out of scope and must stay silent.  Same
+       full-ledger discipline as AE2: on this fixture's own source, dropping
+       the nullary-only requirement of [arm_excludes_nested] pushes
+       `not is_Cons(t)`, which translates to `len(t) = 0` — false, since `t`
+       really is a `Cons(y, Nil)` here — and the checker reports a spurious
+       hard VIOLATION, not a skip.  `proved = 0` alone is silent to that
+       regression; only checking `violated = 0` too catches it. *)
+    gated "a two-level sub-pattern yields no exclusion" (fun () ->
+        let proved, violated, skipped =
+          ledger_counts3
+            {|mod AE3 do
+  fn f(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Nil                  -> panic("empty")
+    Cons(x, Cons(y, Nil)) -> x + y
+    Cons(_, t)           -> f(t)
+    end
+  end
+end|}
+        in
+        Alcotest.(check (triple int int int)) "no exclusion: not proved, not violated, skipped"
+          (0, 0, 1) (proved, violated, skipped)) ]
+
 (* ── Pinning [measure_base_cases]/[build_measure_preamble]'s base-case-linking
    axiom directly ────────────────────────────────────────────────────────────
    The MA1/MA2 tests above exercise `len` over the built-in `List`, which
@@ -8920,6 +9042,70 @@ end|}
         Alcotest.(check bool)
           "an IMPOSSIBLE goal is never proved from a self-rebinding promise"
           true (violated >= 1 || skipped >= 1))
+  ; (* THE hole.  `incr`'s promise, filed under `n` after the actual `n` was
+       substituted, reads `n == n + 1` once `n` is rebound: a contradiction,
+       and a contradiction proves every goal.  The ledger, not a boolean,
+       because the postcondition of `incr` legitimately proves and would mask
+       a boolean.  Mutation that fails this: drop the guard on the scalar arm. *)
+    gated "REJECT: a scalar postcond-let that rebinds a mentioned name is not a proof"
+      (fun () ->
+        let proved, skipped =
+          ledger_counts
+            {|mod PreScalar do
+  fn incr(n : Int) : {Int | _ == n + 1} do n + 1 end
+  fn needs_lt(u : Int, v : {Int | _ < u}) : Int do 0 end
+  fn go(n : Int, u : Int) : Int do
+    let n = incr(n)
+    needs_lt(u, n)
+  end
+end|}
+        in
+        Alcotest.(check (pair int int)) "1 proved (incr's own postcondition), 1 skipped"
+          (1, 1) (proved, skipped));
+
+    (* POSITIVE CONTROL: the same promise under a FRESH name keeps its fact.
+       Without this the guard could be widened to "always decline" and the
+       suite would stay green. *)
+    gated "ACCEPT CONTROL: a postcond-let under a fresh name keeps its fact"
+      (fun () ->
+        let proved, skipped =
+          ledger_counts
+            {|mod PreScalarOk do
+  fn incr(n : Int) : {Int | _ == n + 1} do n + 1 end
+  fn take_pos(v : {Int | _ > 0}) : Int do v end
+  fn go(n : Int) : Int do
+    if n >= 0 do
+      let m = incr(n)
+      take_pos(m)
+    else 0 end
+  end
+end|}
+        in
+        Alcotest.(check (pair int int)) "both proved" (2, 0) (proved, skipped))
+
+  ; (* The record arm carries the same guard as the scalar arm by symmetry:
+       no loader reaches a record-typed postcondition entry through a
+       self-spelling today, so this case is a forward guard for a structural
+       hole rather than a reproduction.  Its assertion fails only on the
+       false-proof ledger (2, 0); see
+       specs/progress/2026-08-04-postcond-let-self-rebinding-holes.md for the
+       measurement. *)
+    gated "REJECT: a record postcond-let that rebinds a mentioned name is not a proof"
+      (fun () ->
+        let proved, skipped =
+          ledger_counts
+            {|mod PreRecord do
+  type Config = { port : Int }
+  fn bump(c : Config) : {r : Config | r.port == c.port + 1} do { port: c.port + 1 } end
+  fn needs_port_lt(u : Int, c : {v : Config | v.port < u}) : Int do 0 end
+  fn go(c : Config, u : Int) : Int do
+    let c = bump(c)
+    needs_port_lt(u, c)
+  end
+end|}
+        in
+        Alcotest.(check bool) "the impossible call is not proved" true
+          (skipped >= 1 || proved < 2))
   ]
 
 (* ── `List.nth` carries a bounds contract ──────────────────────────────────
@@ -11192,6 +11378,148 @@ end|};
         | None -> Alcotest.fail "the top-level refined parameter was declined")
   ]
 
+(* ── Task 1: `let` equalities as path facts ─────────────────────────────
+   A `let n = <admitted rhs>` now pushes `n == rhs` as an ordinary path
+   fact, so a refined-parameter call downstream of it is DECIDED instead of
+   silently skipped.  LE3 is the guard: rebinding a name the equality
+   mentions must retire it, or a stale fact would prove something false. *)
+let let_equality_suite =
+  [ (* The literal case: identical verdict to passing the literal directly. *)
+    gated "a let-bound literal into a refined parameter is a definite violation"
+      (fun () ->
+        Alcotest.(check bool) "violated" true
+          (has_refine_error_d
+             {|mod LE1 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn go(xs : List(Int)) : Int do
+    let n = 0
+    pos(n)
+  end
+end|}));
+
+    (* Arithmetic over a guarded variable proves. *)
+    gated "a let-bound arithmetic expression carries the guard on its operands"
+      (fun () ->
+        let proved, skipped =
+          ledger_counts
+            {|mod LE2 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn go(k : Int) : Int do
+    if k >= 0 do
+      let n = k + 1
+      pos(n)
+    else 0 end
+  end
+end|}
+        in
+        Alcotest.(check (pair int int)) "proved" (1, 0) (proved, skipped));
+
+    (* Rebinding an operand retires the equality: the obligation must NOT be
+       proved from a stale `n == k + 1`.  Silence-shaped, so it needs the
+       positive case above as its control. *)
+    (* Uses [ledger_counts3], not [ledger_counts]: a stale-fact regression
+       in this feature can surface as a false VIOLATED verdict (see the
+       self-referential-RHS fixture just below), which the two-way ledger
+       cannot distinguish from a legitimate skip. *)
+    gated "rebinding a mentioned name retires the let equality"
+      (fun () ->
+        let proved, violated, skipped =
+          ledger_counts3
+            {|mod LE3 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn dec(k : Int) : Int do k - 10 end
+  fn go(k : Int) : Int do
+    if k >= 0 do
+      let n = k + 1
+      let k = dec(k)
+      pos(n)
+    else 0 end
+  end
+end|}
+        in
+        Alcotest.(check (triple int int int)) "not proved from a stale equality"
+          (0, 0, 1) (proved, violated, skipped));
+
+    (* ── Whole-plan review finding 1: a self-referential RHS ──────────────
+       `let k = k - 100` resolves BOTH occurrences of `k` to the same SMT
+       constant once pushed, turning the equality into `k == k - 100` (an
+       unsatisfiable constraint on the OLD value) rather than a definition
+       of the new one.  An unsatisfiable path makes every downstream
+       obligation prove vacuously — here, both `pos(k)` (should be
+       undecided: post-subtraction `k` is unconstrained) and `neg(k)`
+       (contradictory: `pos` and `neg` can never both hold) must stay
+       skipped, never proved. *)
+    gated "a self-referential let RHS does not push a contradictory equality"
+      (fun () ->
+        let proved, violated, skipped =
+          ledger_counts3
+            {|mod LE4 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn neg(n : {Int | _ < 0}) : Int do n end
+  fn go(k : Int) : Int do
+    if k >= 0 do
+      let k = k - 100
+      pos(k) + neg(k)
+    else 0 end
+  end
+end|}
+        in
+        Alcotest.(check (triple int int int)) "neither call decided"
+          (0, 0, 2) (proved, violated, skipped));
+
+    (* `let k = k * 2` under `if k > 0` would push `k == 2 * k`, forcing
+       `k = 0` and making `pos(k)` a false VIOLATION for every genuine
+       `k > 0`.  Must stay skipped, and specifically must never violate. *)
+    gated "a self-referential multiplicative RHS does not falsely reject" (fun () ->
+        let proved, violated, skipped =
+          ledger_counts3
+            {|mod LE5 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn go(k : Int) : Int do
+    if k > 0 do
+      let k = k * 2
+      pos(k)
+    else 0 end
+  end
+end|}
+        in
+        Alcotest.(check (triple int int int)) "undecided, never a false violation"
+          (0, 0, 1) (proved, violated, skipped)) ]
+
+(* ── Whole-plan review finding 2: a bare-variable alias of an ADT-typed
+   name must not become a path equality ───────────────────────────────────
+   [smt_of]'s path translator reflects a variable at the INTEGER sort, but
+   `o : Option(Int)` carries its tester facts (`is_Some(o)`, from the match
+   arm) at the DATATYPE sort.  Admitting `let u = o` as a path equality
+   `u == o` mixed those sorts in the same VC and tripped the sort-conflict
+   gate, which drops the WHOLE VC — not just `u`'s own obligations, but
+   `unwrap(x)` in `g`, an entirely unrelated function that never mentions
+   `u`.  The alias is now excluded from [let_equality_rhs] outright (a
+   variable is admitted only as an OPERAND of `+`/`-`/`*`), so this ledger
+   must equal the baseline as if the `let u = x` line were not there at
+   all, and `sort-conflict` must not appear among the skip reasons. *)
+let let_equality_alias_suite =
+  [ gated "a bare-variable alias of an Option does not poison an unrelated call"
+      (fun () ->
+        let src =
+          {|mod OA1 do
+  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end
+  fn f(x : Option(Int)) : Int do
+    let u = x
+    match x do
+      Some(v) -> unwrap(x)
+      None -> 0
+    end
+  end
+  fn g(x : Option(Int)) : Int do unwrap(x) end
+end|}
+        in
+        let proved, violated, skipped = ledger_counts3 src in
+        Alcotest.(check (triple int int int)) "baseline ledger" (1, 0, 1)
+          (proved, violated, skipped);
+        Alcotest.(check bool) "no sort-conflict skip" false
+          (List.mem "sort-conflict" (skip_reasons src))) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -11251,6 +11579,7 @@ let () =
       ("resolve-precedence", resolve_precedence_suite);
       ("caller-promise", caller_promise_suite);
       ("arm-exclusion", arm_exclusion_suite);
+      ("arm-exclusion-nested", arm_exclusion_nested_suite);
       ("measure-base-case-axiom", measure_base_case_axiom_suite);
       ("measure-scalar-field-warn", measure_scalar_field_suite);
       ("post-compose-closed", post_compose_closed_suite);
@@ -11265,4 +11594,6 @@ let () =
       ("witness-e2e", witness_e2e_suite);
       ("precond-promotion", promotion_suite);
       ("precond-reachable-unit", reachable_unit_suite);
-      ("post-nested-unit", post_nested_unit_suite) ]
+      ("post-nested-unit", post_nested_unit_suite);
+      ("let-equality", let_equality_suite);
+      ("let-equality-alias", let_equality_alias_suite) ]

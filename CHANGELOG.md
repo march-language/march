@@ -117,6 +117,10 @@ git log is authoritative for exact commits.
   where `y` is `x` — was treated as structurally smaller and accepted.
   Arithmetic reduction on such a binder (`f(y - 1)`, as in `fib`) is still
   accepted, since that genuinely decreases.
+- A `let` whose right-hand side is a call with a refined return type, and which
+  rebinds a name that return refinement mentions, no longer proves impossible
+  obligations. The scalar and record cases of a hole closed for ADTs on
+  2026-08-04 are now closed the same way.
 
 - The formatter no longer deletes compiler attributes. `format.ml` never read
   `fn_attrs`, so every `@[...]` was silently dropped — and that is not
@@ -246,6 +250,18 @@ git log is authoritative for exact commits.
   `blake3_hash_many_neon` undefined in every executable that uses it.
 
 ### Changed
+
+- A `let` whose right-hand side is a literal or an arithmetic expression now
+  carries its value into refinement checking. `let n = 0` followed by a call
+  that requires a positive argument reports the same definite violation that
+  passing `0` directly already did, instead of going undecided because nothing
+  constrained `n`. Calls, `if` expressions and floats are not admitted.
+
+- A binder in a constructor pattern now inherits the constructor an earlier
+  unguarded arm's sub-pattern excluded. After `Cons(x, Nil)`, the `t` in a
+  later `Cons(_, t)` is known not to be `Nil`, which is what makes
+  `List.last`'s recursive call verify. That is the one site in the standard
+  library this reaches.
 
 - Refinement obligations the checker cannot discharge now report *why*. The
   single `solver-undecided` message has been split into three diagnosed causes —

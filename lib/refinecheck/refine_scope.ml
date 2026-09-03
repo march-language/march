@@ -625,12 +625,66 @@ let arm_excludes_tag (br : A.branch) : string option =
     Some ctor.A.txt
   | _ -> None
 
+(* [Some (ctor, i, d)] when reaching a LATER arm with head [ctor] implies
+   that its binder at field [i] is not [d]: the earlier arm is unguarded, has
+   head [ctor], and is irrefutable everywhere except a nullary constructor
+   [d] at exactly one position.  One level only, nullary only: that is the
+   `Cons(x, Nil)` shape, and it is the only shape whose negation is a single
+   tester over a single binder. *)
+let arm_excludes_nested (br : A.branch) : (string * int * string) option =
+  match br.A.branch_pat, br.A.branch_guard with
+  | A.PatCon (ctor, subs), None ->
+    let refutable =
+      List.mapi (fun i p -> (i, p)) subs
+      |> List.filter (fun (_, p) -> not (irrefutable_pat p))
+    in
+    (match refutable with
+     | [ (i, A.PatCon (d, [])) ] -> Some (ctor.A.txt, i, d.A.txt)
+     | _ -> None)
+  | _ -> None
+
 let path_shadow (path : (A.expr * bool) list) (names : string list) : (A.expr * bool) list =
   if names = [] then path else List.filter (fun (c, _) -> not (expr_mentions names c)) path
 
 (* =================================================================
    §10 The other fact channels: path, launder, recenv, cbenv
    ================================================================= *)
+
+(* ── Right-hand sides a `let` may turn into the path fact `n == rhs` ───────
+   Pure, deterministic, and inside the linear fragment the path translator
+   ([smt_of] above / [check_call]'s [path_resolve_var]) already reflects.
+   Calls are excluded (a refined return is handled by [scope_add_binding];
+   an unrefined one carries no fact); `if` is excluded (its encoding is a
+   separate decision); floats are excluded (symbolic float arithmetic does
+   not reflect — see the float-constant-folding note above).
+
+   A BARE variable is excluded too, deliberately: [smt_of]'s path translator
+   reflects a variable at the INTEGER sort, but an ADT-typed alias
+   (`let u = o` with `o : Option(Int)`) has tester facts about `o` sitting
+   at the datatype sort. Pushing `u == o` then mixes sorts in the same VC,
+   and the sort-conflict gate drops the WHOLE VC — not just the alias's own
+   obligations, but unrelated ones too (e.g. `unwrap(o)`, which never
+   mentions `u`). An alias also carries no exclusion fact through on its
+   own (`let u = t; last(u)` stays undecided either way), so admitting it
+   only had a cost, never a benefit. A variable remains admitted as an
+   OPERAND of `+`/`-`/`*`, where it is always at the integer sort. *)
+let rec let_equality_operand (e : A.expr) : bool =
+  match e with
+  | A.ELit (A.LitInt _, _) -> true
+  | A.EVar _ -> true
+  | A.EApp (A.EVar { A.txt = ("+" | "-"); _ }, [ a; b ], _) ->
+    let_equality_operand a && let_equality_operand b
+  | A.EApp (A.EVar { A.txt = "*"; _ }, [ a; b ], _) ->
+    (match a, b with
+     | A.ELit (A.LitInt _, _), _ -> let_equality_operand b
+     | _, A.ELit (A.LitInt _, _) -> let_equality_operand a
+     | _ -> false)
+  | _ -> false
+
+let let_equality_rhs (e : A.expr) : bool =
+  match e with
+  | A.EVar _ -> false
+  | _ -> let_equality_operand e
 
 (* ── Laundered guards: name -> the application it was let-bound to ─────────
    [visit] records, per program point, which local names are ONE `let` away
@@ -766,6 +820,16 @@ let scope_add_fnparam (sc : scope) : A.fn_param -> scope = function
   | A.FPNamed p | A.FPDefault (p, _) -> scope_add_param sc p
   | A.FPPat pat -> scope_shadow sc (pat_binders pat)
 
+(* A postcondition-derived entry whose predicate mentions the `let`'s own
+   binder denotes the PRE-binding value under the post-binding name (the
+   actuals were substituted by [postcond_of] before the binding took effect).
+   Filing it would collapse two values onto one SMT symbol and, for a
+   relational promise like `_ == n + 1`, manufacture a contradiction that
+   proves every goal.  Declining is the only sound choice: the pre-binding
+   symbol has already been retired by [scope_shadow]. *)
+let self_mentioning (pat : A.pattern) (pred : A.expr) : bool =
+  expr_mentions (pat_binders pat) pred
+
 (* [postcond] resolves a callee name AND the call's actual arguments to the
    callee's return refinement, already instantiated in the CALLER's namespace.
    An explicit annotation always wins; only an UNANNOTATED `let` whose RHS is a
@@ -843,20 +907,24 @@ let scope_add_binding
           masked — before it, `size(u)` was untranslatable and [smt_of] dropped
           the predicate whole.
 
-          Deliberately on THIS arm only.  The scalar and record arms above have
-          the same shape and the same latent hole (reachable on the parent
-          commit through [reflect_scalar]'s `foreign_var` channel, which never
-          went through [load_scope_measure_facts] at all), but they are older,
-          broader, and out of scope here — recorded with repros in
-          `specs/todos/2026-08-04-postcond-let-self-rebinding-holes.md`. *)
+          The guard ([self_mentioning], defined above) applies to all THREE
+          arms below, not just this ADT one.  The scalar and record arms have
+          the identical shape and the identical latent hole (reachable on the
+          parent commit through [reflect_scalar]'s `foreign_var` channel,
+          which never went through [load_scope_measure_facts] at all); there
+          is nothing ADT-specific about the hazard, so there is nothing
+          ADT-specific about the fix. *)
        (match postcond fname args with
-        | Some (binder, pred, m) when scalar_sort_of_marker m <> None ->
+        | Some (binder, pred, m)
+          when scalar_sort_of_marker m <> None
+               && not (self_mentioning b.A.bind_pat pred) ->
           (n.A.txt, (binder, pred, m)) :: sc
-        | Some (binder, pred, Some srt) when is_record_sort srt ->
+        | Some (binder, pred, Some srt)
+          when is_record_sort srt && not (self_mentioning b.A.bind_pat pred) ->
           (n.A.txt, (binder, pred, Some srt)) :: sc
         | Some (binder, pred, Some srt)
           when Hashtbl.mem adt_ctors srt
-               && not (expr_mentions (pat_binders b.A.bind_pat) pred) ->
+               && not (self_mentioning b.A.bind_pat pred) ->
           (n.A.txt, (binder, pred, Some (meas_sort_prefix ^ srt))) :: sc
         | Some _ | None -> sc)
      | _ -> sc)
