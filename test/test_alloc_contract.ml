@@ -182,12 +182,15 @@ let compile_and_run ?(flags = "") src =
                           (Filename.quote exe) flags (Filename.quote bin)
                           (Filename.quote f) (Filename.quote log)) in
   let compile_out = read log in
+  (* stdout ONLY for the two runs: the interpreter also prints unrelated
+     diagnostics (e.g. the tail-recursion warning) on stderr, and folding
+     those into the comparison would make parity depend on warning text. *)
   let run_out =
     if rc = 0 then begin
-      ignore (Sys.command (Printf.sprintf "%s > %s 2>&1" (Filename.quote bin) (Filename.quote log)));
+      ignore (Sys.command (Printf.sprintf "%s > %s 2>/dev/null" (Filename.quote bin) (Filename.quote log)));
       read log
     end else "" in
-  ignore (Sys.command (Printf.sprintf "%s %s > %s 2>&1"
+  ignore (Sys.command (Printf.sprintf "%s %s > %s 2>/dev/null"
                          (Filename.quote exe) (Filename.quote f) (Filename.quote log)));
   let interp_out = read log in
   List.iter (fun p -> try Sys.remove p with _ -> ()) [f; bin; log];
@@ -327,3 +330,153 @@ let e2e_tests = [
   Alcotest.test_case "--check ignores the attribute"        `Quick test_check_ignores_attribute;
 ]
 let tests = tests @ e2e_tests
+
+(* Accept cases.  Each also runs the binary and compares with the
+   interpreter (compiled-parity convention).  The TIR shape each one relies
+   on was confirmed by hand with MARCH_DUMP_TXT=tir-native-map-inline:
+   `reuse` for the tree/accumulator/assume cases, `reuse_hole` for the TRMC
+   case under --trmc, and no bare `alloc` in the annotated function. *)
+let tree_src = {|mod Main do
+needs IO
+ptype Tree = Leaf(Int) | Node(Tree, Tree)
+@[no_alloc]
+fn inc_leaves(t : Tree) : Tree do
+  match t do
+    Leaf(n) -> Leaf(n + 1)
+    Node(l, r) -> Node(inc_leaves(l), inc_leaves(r))
+  end
+end
+fn sum(t : Tree) : Int do
+  match t do
+    Leaf(n) -> n
+    Node(l, r) -> sum(l) + sum(r)
+  end
+end
+fn main(cap : Cap(IO)) : Unit do
+  println(int_to_string(sum(inc_leaves(Node(Leaf(1), Leaf(2))))))
+end
+end|}
+
+let test_accept_fbip_tree () = accepts "fbip tree" tree_src "5\n"
+
+let acc_src = {|mod Main do
+needs IO
+@[no_alloc]
+fn rev_inc(xs : List(Int), acc : List(Int)) : List(Int) do
+  match xs do
+    Nil -> acc
+    Cons(h, t) -> rev_inc(t, Cons(h + 1, acc))
+  end
+end
+fn main(cap : Cap(IO)) : Unit do
+  println(int_to_string(List.sum_int(rev_inc([1, 2, 3], Nil))))
+end
+end|}
+
+let test_accept_accumulator_reuse () = accepts "accumulator" acc_src "9\n"
+
+(* The base case returns the matched `xs` rather than a fresh `Nil`: a nullary
+   constructor of a MIXED variant (unlike an all-nullary enum or a niche
+   Option) is a real 16-byte heap cell in today's codegen, so building one
+   would be a genuine allocation. *)
+let trmc_src = {|mod Main do
+needs IO
+@[no_alloc]
+fn inc_all(xs : List(Int)) : List(Int) do
+  match xs do
+    Nil -> xs
+    Cons(h, t) -> Cons(h + 1, inc_all(t))
+  end
+end
+fn main(cap : Cap(IO)) : Unit do
+  println(int_to_string(List.sum_int(inc_all([1, 2, 3]))))
+end
+end|}
+
+let test_accept_trmc_with_flag () = accepts "trmc" ~flags:"--trmc" trmc_src "9\n"
+
+let test_trmc_hint_absent_when_on () =
+  let (rc, out) = compile ~flags:"--trmc" trmc_src in
+  Alcotest.(check int) "rc" 0 rc;
+  Alcotest.(check bool) "no hint" false (contains "TRMC-eligible" out)
+
+let scalar_src = {|mod Main do
+needs IO
+type Mode = Fast | Slow
+ptype P = P(Int, Int)
+@[no_alloc]
+fn score(m : Mode, p : P) : Int do
+  match p do
+    P(x, y) -> match m do
+      Fast -> x * 2 + y
+      Slow -> x + y
+    end
+  end
+end
+fn main(cap : Cap(IO)) : Unit do println(int_to_string(score(Fast, P(3, 4)))) end
+end|}
+
+let test_accept_scalars_and_nullary_ctors () = accepts "scalars" scalar_src "10\n"
+
+let assume_src = {|mod Main do
+needs IO
+@[no_alloc(assume)]
+fn apply_twice(f : Int -> Int, x : Int) : Int do f(f(x)) end
+@[no_alloc]
+fn use_it(x : Int) : Int do apply_twice(fn y -> y + 1, x) end
+fn main(cap : Cap(IO)) : Unit do println(int_to_string(use_it(1))) end
+end|}
+
+let test_accept_assume_and_its_caller () = accepts "assume" assume_src "3\n"
+
+let intbox_src = {|mod Main do
+needs IO
+@[no_alloc]
+fn bump(o : Option(Int)) : Option(Int) do
+  match o do
+    Some(x) -> Some(x + 1)
+    None -> None
+  end
+end
+fn main(cap : Cap(IO)) : Unit do
+  match bump(Some(2)) do
+    Some(v) -> println(int_to_string(v))
+    None -> println("none")
+  end
+end
+end|}
+
+let test_accept_int_option () = accepts "int option" intbox_src "3\n"
+
+(* The Float sibling of [intbox_src]: identical shape, so the only thing that
+   can change the verdict is the Float crossing an erased (TVar) payload. *)
+let floatbox_src = {|mod Main do
+needs IO
+@[no_alloc]
+fn bump(o : Option(Float)) : Option(Float) do
+  match o do
+    Some(x) -> Some(x +. 1.0)
+    None -> None
+  end
+end
+fn main(cap : Cap(IO)) : Unit do
+  match bump(Some(1.5)) do
+    Some(v) -> println(float_to_string(v))
+    None -> println("none")
+  end
+end
+end|}
+
+let test_reject_float_box () = rejects "float box" floatbox_src "a Float is boxed here"
+
+let accept_tests = [
+  Alcotest.test_case "accept: FBIP tree transform"        `Quick test_accept_fbip_tree;
+  Alcotest.test_case "accept: accumulator reuses Cons"    `Quick test_accept_accumulator_reuse;
+  Alcotest.test_case "accept: TRMC producer with --trmc"  `Quick test_accept_trmc_with_flag;
+  Alcotest.test_case "TRMC hint absent when --trmc is on" `Quick test_trmc_hint_absent_when_on;
+  Alcotest.test_case "accept: scalars and nullary ctors"  `Quick test_accept_scalars_and_nullary_ctors;
+  Alcotest.test_case "accept: assume and its caller"      `Quick test_accept_assume_and_its_caller;
+  Alcotest.test_case "accept: Option(Int) reuse"          `Quick test_accept_int_option;
+  Alcotest.test_case "reject: boxed Float in Option"      `Quick test_reject_float_box;
+]
+let tests = tests @ accept_tests

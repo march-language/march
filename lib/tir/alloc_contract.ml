@@ -117,6 +117,15 @@ let scalar_builtins = [
   "byte_to_char"; "char_to_uppercase"; "char_to_lowercase";
   "string_length"; "string_byte_length"; "string_byte_at"; "string_is_empty";
   "is_nil"; "head"; "tail";
+  (* Divergence, not allocation: these never return, so no path through them
+     reaches a caller with a heap value.  The message is a literal (a global
+     constant), and the match fall-through lower_match inserts calls `panic_`
+     — without this entry every `match` would fail its contract. *)
+  "panic"; "panic_"; "todo_"; "unreachable_"; "process_exit";
+  (* Reference counting and freeing, not allocating: [Drop.run] synthesizes a
+     call to [march_decrc_freed] inside every generated __drop$T helper, so
+     without this entry any function that drops an owned value fails. *)
+  "march_decrc_freed"; "march_incrc"; "march_decrc"; "march_free";
   "native_int_arr_get"; "native_int_arr_length"; "native_int_arr_set"; "native_int_arr_sum";
   "native_float_arr_get"; "native_float_arr_length"; "native_float_arr_set"; "native_float_arr_sum";
   "native_f32_arr_get"; "native_f32_arr_length"; "native_f32_arr_set"; "native_f32_arr_sum";
@@ -193,6 +202,44 @@ let stores_boxed_float ?skip m ty args =
     List.length fields = List.length args
     && List.exists2 (fun a f -> ty_of_atom a = Tir.TFloat && f <> Tir.TFloat) args fields
 
+(* Whether an [EAlloc]/[EAllocHole] of constructor key [key] actually reaches
+   the heap.  Codegen elides two shapes entirely, and a checker that ignored
+   them would reject allocation-free code:
+
+   - [Repr.Newtype]: represented as the raw payload, no cell at all.
+   - Niche (Option-shaped) with a niche-safe or erased payload: None = 0,
+     Some(x) = x.  A niche-UNSAFE payload (Float, Option(Option(_)), ...)
+     falls through to a real boxed cell, so it still counts.
+
+   Mirrors [Llvm_emit_alloc]'s own arms; keep the two in step. *)
+let alloc_is_elided ~collision_set (m : Tir.tir_module) (key : string)
+    (args : Tir.atom list) : bool =
+  let (tname_opt, _ctor) = split_ctor_key key in
+  match tname_opt with
+  | None -> false
+  | Some tname ->
+    let type_defs = m.Tir.tm_types in
+    (match Repr.repr_of_ty ~collision_set type_defs (Tir.TCon (tname, [])) with
+     | Repr.Newtype _ -> true
+     | _ ->
+       Repr.is_niche_shaped ~collision_set type_defs tname
+       && (match args with
+           | [] -> true
+           | [ arg ] ->
+             let t = ty_of_atom arg in
+             Repr.niche_payload_ok ~collision_set type_defs t
+             || (match t with Tir.TVar _ -> true | _ -> false)
+           | _ -> false))
+
+(* A capture-free lambda becomes a static, immortal global closure rather than
+   a heap cell (Llvm_emit's [emit_static_closure] arm): a [$Clo_] alloc whose
+   only argument is the apply-fn pointer.  Hot-reload and the REPL disable
+   that path, so this mirrors only the ordinary compile. *)
+let closure_is_static (args : Tir.atom list) : bool =
+  match args with
+  | [ (Tir.AVar _ | Tir.ADefRef _) ] -> true
+  | _ -> false
+
 (* ── Per-function classification ───────────────────────────────────────── *)
 
 let has_reuse_or_stack (e : Tir.expr) : bool =
@@ -215,23 +262,28 @@ let display_name name =
 
 (* First direct reason in [body], in evaluation order ([Policy_dce.fold_expr]
    visits a node, then its sub-expressions in order). *)
-let direct_reason ~(m : Tir.tir_module) ~fns ~externs (body : Tir.expr) : reason option =
+let direct_reason ~(m : Tir.tir_module) ~collision_set ~fns ~externs
+    (body : Tir.expr) : reason option =
   let found = ref None in
   let set r = if !found = None then found := Some r in
+  let elided key args = alloc_is_elided ~collision_set m key args in
   Policy_dce.fold_expr (fun () e ->
       match e with
-      (* Nullary constructors are immediate tags per the design's allocation
-         table (specs/2026-09-03-allocation-contracts-design.md); see the
-         caveat in specs/lang/memory-model.md about today's codegen. *)
-      | Tir.EAlloc (_, []) -> ()
-      | Tir.EAlloc (Tir.TCon (c, _), _) when Tir_names.is_clo_struct c -> set Closure
-      | Tir.EAlloc (Tir.TCon (c, _), _) -> set (Ctor (ctor_short c))
+      | Tir.EAlloc (Tir.TCon (c, _), args) when Tir_names.is_clo_struct c ->
+        if not (closure_is_static args) then set Closure
+      | Tir.EAlloc (Tir.TCon (c, _), args) ->
+        if not (elided c args) then begin
+          if stores_boxed_float m (Tir.TCon (c, [])) args then set FloatBox
+          else set (Ctor (ctor_short c))
+        end
       | Tir.EAlloc (ty, _) -> set (Ctor (Tir.show_ty ty))
       | Tir.EAllocHole (None, Tir.TCon (c, _), _, _) -> set (Ctor (ctor_short c))
       | Tir.EAllocHole (None, ty, _, _) -> set (Ctor (Tir.show_ty ty))
       | Tir.ETuple (_ :: _) -> set Tuple
       | Tir.ERecord _ -> set Record
       | Tir.EUpdate _ -> set Update
+      (* A reused or stack-promoted cell still BOXES a Float it stores into an
+         erased slot: that box is a fresh march_alloc_float heap cell. *)
       | Tir.EReuse (_, ty, args) when stores_boxed_float m ty args -> set FloatBox
       | Tir.EStackAlloc (ty, args) when stores_boxed_float m ty args -> set FloatBox
       | Tir.EAllocHole (Some _, ty, args, hole)
@@ -262,10 +314,11 @@ let allocating_fns ~decls (m : Tir.tir_module) : (string, reason) Hashtbl.t =
   List.iter (fun fd -> Hashtbl.replace fns fd.Tir.fn_name ()) m.Tir.tm_fns;
   let externs = Hashtbl.create 16 in
   List.iter (fun e -> Hashtbl.replace externs e.Tir.ed_march_name ()) m.Tir.tm_externs;
+  let collision_set = Collision_set.compute m.Tir.tm_types in
   let set : (string, reason) Hashtbl.t = Hashtbl.create 64 in
   List.iter (fun fd ->
       if not (is_assume ~decls fd.Tir.fn_name) then
-        match direct_reason ~m ~fns ~externs fd.Tir.fn_body with
+        match direct_reason ~m ~collision_set ~fns ~externs fd.Tir.fn_body with
         | Some r -> Hashtbl.replace set fd.Tir.fn_name r
         | None -> ()) m.Tir.tm_fns;
   let callees fd =
