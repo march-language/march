@@ -518,8 +518,17 @@ let rec reflect_scalar
      blamed for a subject the caller never gave a chance to reflect.  Reflect
      the operands through this same function — same [sc]/[sort]/resolvers —
      so a guard on `n` reaches `n - 1`. Any operand that fails to reflect
-     falls the WHOLE actual back to [plain], never a partial term. *)
-  | A.EApp (A.EVar { A.txt = ("+" | "-") as op; _ }, [ a; b ], _) ->
+     falls the WHOLE actual back to [plain], never a partial term.
+
+     Scoped to [SInt]: `+`/`-`/`*` are numeric-polymorphic
+     ([poly1_num]), so at [SFloat] this same shape would build
+     [Smt.Add]/[Sub]/[MulLit] over Float64 — symbolic float arithmetic the
+     design deliberately does not reflect (see the plan's Scope section).
+     Falling through to [plain] here keeps a non-Int actual on EXACTLY the
+     pre-existing path (whatever slug it reported before this arm existed),
+     rather than moving it to a different wrong slug (`sort-conflict` /
+     `float-sort-gate`). *)
+  | A.EApp (A.EVar { A.txt = ("+" | "-") as op; _ }, [ a; b ], _) when sort = Smt.SInt ->
     (match
        reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_field ~sort sc
          a,
@@ -530,7 +539,7 @@ let rec reflect_scalar
        let t = if op = "+" then Smt.Add (ta, tb) else Smt.Sub (ta, tb) in
        Some (t, da @ db, aa @ ab)
      | _ -> plain actual)
-  | A.EApp (A.EVar { A.txt = "*"; _ }, [ a; b ], _) ->
+  | A.EApp (A.EVar { A.txt = "*"; _ }, [ a; b ], _) when sort = Smt.SInt ->
     (match a, b with
      | A.ELit (A.LitInt k, _), e | e, A.ELit (A.LitInt k, _) ->
        (match

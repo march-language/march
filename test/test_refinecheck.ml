@@ -11560,7 +11560,35 @@ end|}
           (List.mem "unreflectable-predicate" rs);
         Alcotest.(check bool) "one skip, diagnosed" true
           (List.length rs = 1
-           && (List.mem "unconstrained-subject" rs || List.mem "solver-undecided" rs))) ]
+           && (List.mem "unconstrained-subject" rs || List.mem "solver-undecided" rs)));
+
+    (* Guard follow-up (review finding 1): `+`/`-`/`*` are numeric-polymorphic
+       ([poly1_num]), so an unguarded arm would build [Smt.Add]/[MulLit] over
+       Float64 too, moving this fixture's skip slug from
+       [unreflectable-predicate] (the pre-082d5bf5 behaviour, confirmed by
+       checking out that commit's [reflect_resolve.ml] and running this exact
+       fixture) to [sort-conflict] or [float-sort-gate] -- muddying Task 4's
+       slug sweep for a case the design's Scope section explicitly excludes
+       (symbolic float arithmetic). The `when sort = Smt.SInt` guard on both
+       new arms keeps a Float actual on the SAME path it took before this
+       feature existed. *)
+    gated "an arithmetic actual over Float stays on its pre-existing (Int-only) path"
+      (fun () ->
+        let rs =
+          skip_reasons
+            {|mod AA3 do
+  fn fpos(x : {Float | _ > 0.0}) : Float do x end
+  fn go(x : Float) : Float do
+    if x > 0.0 do fpos(x + 1.0) else 0.0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "unreflectable-predicate, same as pre-082d5bf5" true
+          (List.mem "unreflectable-predicate" rs);
+        Alcotest.(check bool) "no sort-conflict" false
+          (List.mem "sort-conflict" rs);
+        Alcotest.(check bool) "no float-sort-gate" false
+          (List.mem "float-sort-gate" rs)) ]
 
 let () =
   Alcotest.run "march-refinecheck"
