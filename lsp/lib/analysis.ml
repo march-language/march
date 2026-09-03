@@ -3383,38 +3383,53 @@ let run_tir_pass (a : t) : t =
           (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
       in
       let desugared = March_desugar.Desugar.desugar_module raw in
-      (* Run: lower → mono → defun → known_call → perceus → escape *)
+      (* Run the SAME post-lower pipeline the build runs
+         (lib/tir/contract_pipeline.ml: TRMC → mono → defun → known_call →
+         … → perceus → drop → escape → opt → native_map_inline), so the
+         insights, the code lenses and the @[no_alloc] verdict below describe
+         the TIR the compiled program is actually built from.  `forge build`
+         never passes --no-opt, so opt is on; TRMC follows the global flag. *)
       let tir = March_tir.Lower.lower_module ~type_map:a.type_map desugared in
-      let tir = March_tir.Mono.monomorphize tir in
-      let tir = March_tir.Defun.defunctionalize tir in
-      let tir = March_tir.Known_call.run ~changed:(ref false) tir in
-      (* Borrow inference BEFORE Perceus: this is the same map Perceus itself
-         consults to decide which arguments need an EIncRC at a call site, so
-         the hint reports the compiler's actual decision rather than a
-         re-derivation of it. Run on the pre-Perceus module for the same reason
-         Perceus does — the RC operations it inserts are the CONSEQUENCE of
-         these modes, not an input to them. *)
-      let borrow_map = March_tir.Borrow.infer_module tir in
-      let consume_modes =
-        List.filter_map (fun (fn : Tir.fn_def) ->
-            if fn.Tir.fn_name = "" || fn.Tir.fn_name.[0] = '$' then None
-            else
-              let consumes =
-                List.mapi (fun i (p : Tir.var) ->
-                    (* Consuming = takes ownership AND there is ownership to
-                       take. Skipping non-RC parameters is what keeps this hint
-                       off every Int argument (see [consume_modes]). *)
-                    (not (March_tir.Borrow.is_borrowed borrow_map fn.Tir.fn_name i))
-                    && March_tir.Rc_types.needs_rc p.Tir.v_ty)
-                  fn.Tir.fn_params
-              in
-              if List.exists (fun c -> c) consumes
-              then Some { cm_fn_name = fn.Tir.fn_name; cm_consumes = consumes }
-              else None)
-          tir.Tir.tm_fns
+      (* Root every declaration this file makes so the DCE inside Opt.run
+         cannot prune a helper `main` never calls — its lens must still
+         describe it.  A rooted function's body is optimised exactly as the
+         build optimises it; only reachability differs.  Names are pre-Mono;
+         the pipeline expands them to their monomorphised clones. *)
+      let user_names = Hashtbl.fold (fun k _ acc -> k :: acc) a.def_map [] in
+      let borrow_snapshot = ref None in
+      let pipe =
+        March_tir.Contract_pipeline.run
+          (* Borrow inference BEFORE Perceus: this is the same map Perceus
+             itself consults to decide which arguments need an EIncRC at a
+             call site, so the hint reports the compiler's actual decision
+             rather than a re-derivation of it. *)
+          ~before_perceus:(fun pre ->
+              borrow_snapshot := Some (March_tir.Borrow.infer_module pre, pre))
+          ~extra_roots:user_names
+          ~opt:true ~trmc:!March_tir.Trmc.enabled tir
       in
-      let tir = March_tir.Perceus.perceus tir in
-      let tir = March_tir.Escape.escape_analysis tir in
+      let consume_modes =
+        match !borrow_snapshot with
+        | None -> []
+        | Some (borrow_map, tir) ->
+          List.filter_map (fun (fn : Tir.fn_def) ->
+                if fn.Tir.fn_name = "" || fn.Tir.fn_name.[0] = '$' then None
+                else
+                  let consumes =
+                    List.mapi (fun i (p : Tir.var) ->
+                        (* Consuming = takes ownership AND there is ownership to
+                           take. Skipping non-RC parameters is what keeps this hint
+                           off every Int argument (see [consume_modes]). *)
+                        (not (March_tir.Borrow.is_borrowed borrow_map fn.Tir.fn_name i))
+                        && March_tir.Rc_types.needs_rc p.Tir.v_ty)
+                      fn.Tir.fn_params
+                  in
+                  if List.exists (fun c -> c) consumes
+                  then Some { cm_fn_name = fn.Tir.fn_name; cm_consumes = consumes }
+                  else None)
+              tir.Tir.tm_fns
+      in
+      let tir = pipe.March_tir.Contract_pipeline.final in
       (* Collect per-function optimization counts *)
       let tir_fn_insights =
         List.filter_map (fun (fn : Tir.fn_def) ->
