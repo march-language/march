@@ -146,8 +146,12 @@ let contracts_module ~mod_name =
 let report_contracts_output file =
   let tmp = Filename.temp_file "report_contracts" ".out" in
   let rc =
-    Sys.command (Printf.sprintf "march --compile --report-contracts %s > %s 2>&1"
-                   (Filename.quote file) (Filename.quote tmp)) in
+    (* The SAME command shape Cmd_fix issues, --no-cap-strict included: a
+       module with no `main` is charged the prelude's IO.Console and fails the
+       ceiling otherwise (see the todo referenced in cmd_fix.ml). *)
+    Sys.command
+      (Printf.sprintf "march --compile --no-cap-strict --report-contracts %s > %s 2>&1"
+         (Filename.quote file) (Filename.quote tmp)) in
   let ic = open_in tmp in
   let out = really_input_string ic (in_channel_length ic) in
   close_in ic;

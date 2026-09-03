@@ -57,7 +57,15 @@ let collect_all_fixes ?(contracts = false) ?(scope_globs = []) ~lib_path_env fil
   List.iter (fun file ->
     let cmd =
       if contracts then
-        Printf.sprintf "%smarch --compile --report-contracts%s %s 2>/dev/null"
+        (* --no-cap-strict: this mode writes no binary — it stops before code
+           generation — and the capability ceiling exists to gate EMITTED code,
+           which the real build still checks.  Without it the command cannot
+           run on a library at all: compiling a module with no `main` charges
+           that module with the prelude's own `IO.Console` and fails the
+           ceiling, so `forge fix --contracts` would report nothing for every
+           lib project.  See
+           specs/todos/2026-09-03-cap-ceiling-charges-prelude-io-to-mainless-module.md *)
+        Printf.sprintf "%smarch --compile --no-cap-strict --report-contracts%s %s 2>/dev/null"
           lib_path_env
           (if scope_globs = [] then ""
            else " --contract-scope " ^ Filename.quote (String.concat "," scope_globs))

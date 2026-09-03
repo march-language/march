@@ -52,3 +52,12 @@ CAS artifact lookup silently swallowed the warning on every run after the
 first (measured: printed once, then never). `--report-contracts` and any
 source mentioning `no_alloc` now suppress that early exit, the same rule
 `--refine-report` already used.
+
+**Found while landing this (2026-09-03):** `forge fix --contracts` could not
+run on a library at all. `march --compile` of a module with no `main` charges
+that module with the prelude's own `IO.Console` and fails the default
+capability ceiling, so the report was empty for exactly the code the feature
+targets. CI's Linux leg caught it; it reproduces on macOS too. The command
+passes `--no-cap-strict` (it writes no binary, and the real build still checks
+the ceiling); the underlying false positive is filed as
+`specs/todos/2026-09-03-cap-ceiling-charges-prelude-io-to-mainless-module.md`.
