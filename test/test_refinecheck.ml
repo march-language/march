@@ -7145,7 +7145,14 @@ end|});
            `{Int | n > 0}` over `let n`: that spelling measures 0 proved,
            0 violated, 1 skipped and ALREADY exits 1 today via the
            cap-verified skip escalation, so asserting an error on it would
-           pass before the fix existed and prove nothing. *)
+           pass before the fix existed and prove nothing.
+
+           2 violated, not 1: the let-equality path fact (`m == 0 - 5`, an
+           admitted arithmetic-over-literals shape) now lets `inner(m)`
+           itself be DECIDED instead of riding the unproven annotation, and
+           m is genuinely -5, so that call obligation is correctly violated
+           too — an obligation moving from skip to violated, not a false
+           positive. *)
         March_refinecheck.Obligation.reset ();
         ignore (has_refine_error_d {|
 mod LA4 do
@@ -7157,7 +7164,7 @@ mod LA4 do
   fn main() : Int do outer() end
 end|});
         let _, violated, _ = summary () in
-        Alcotest.(check int) "violated" 1 violated)
+        Alcotest.(check int) "violated" 2 violated)
 
   ; gated "a TRUE let annotation proves, and still composes" (fun () ->
         (* The false-positive control AND the interaction check with the
@@ -7219,8 +7226,12 @@ end|});
            value, so `0 - 5` is now seen and the annotation is REPORTED.
            That is a genuine violation, not a false positive: the annotation
            claims `n > 0` of the value -5.
-           The trailing skip is the downstream `inner(n)`, which no longer
-           rides the unproven annotation. *)
+
+           2 violated, not 1: the downstream `inner(n)` no longer rides the
+           unproven annotation — the let-equality path fact (`n == 0 - 5`)
+           now decides that call obligation independently, and n is
+           genuinely -5, so it too is correctly violated rather than
+           skipped. *)
         March_refinecheck.Obligation.reset ();
         ignore (has_refine_error_d {|
 mod LA6 do
@@ -7233,7 +7244,7 @@ mod LA6 do
 end|});
         let proved, violated, _ = summary () in
         Alcotest.(check int) "no false proof" 0 proved;
-        Alcotest.(check int) "the false annotation is now caught" 1 violated)
+        Alcotest.(check int) "the false annotation is now caught" 2 violated)
   ]
 
 let postcond_ledger_suite =
@@ -11274,6 +11285,63 @@ end|};
         | None -> Alcotest.fail "the top-level refined parameter was declined")
   ]
 
+(* ── Task 1: `let` equalities as path facts ─────────────────────────────
+   A `let n = <admitted rhs>` now pushes `n == rhs` as an ordinary path
+   fact, so a refined-parameter call downstream of it is DECIDED instead of
+   silently skipped.  LE3 is the guard: rebinding a name the equality
+   mentions must retire it, or a stale fact would prove something false. *)
+let let_equality_suite =
+  [ (* The literal case: identical verdict to passing the literal directly. *)
+    gated "a let-bound literal into a refined parameter is a definite violation"
+      (fun () ->
+        Alcotest.(check bool) "violated" true
+          (has_refine_error_d
+             {|mod LE1 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn go(xs : List(Int)) : Int do
+    let n = 0
+    pos(n)
+  end
+end|}));
+
+    (* Arithmetic over a guarded variable proves. *)
+    gated "a let-bound arithmetic expression carries the guard on its operands"
+      (fun () ->
+        let proved, skipped =
+          ledger_counts
+            {|mod LE2 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn go(k : Int) : Int do
+    if k >= 0 do
+      let n = k + 1
+      pos(n)
+    else 0 end
+  end
+end|}
+        in
+        Alcotest.(check (pair int int)) "proved" (1, 0) (proved, skipped));
+
+    (* Rebinding an operand retires the equality: the obligation must NOT be
+       proved from a stale `n == k + 1`.  Silence-shaped, so it needs the
+       positive case above as its control. *)
+    gated "rebinding a mentioned name retires the let equality"
+      (fun () ->
+        let proved, _ =
+          ledger_counts
+            {|mod LE3 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn dec(k : Int) : Int do k - 10 end
+  fn go(k : Int) : Int do
+    if k >= 0 do
+      let n = k + 1
+      let k = dec(k)
+      pos(n)
+    else 0 end
+  end
+end|}
+        in
+        Alcotest.(check int) "not proved from a stale equality" 0 proved) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -11347,4 +11415,5 @@ let () =
       ("witness-e2e", witness_e2e_suite);
       ("precond-promotion", promotion_suite);
       ("precond-reachable-unit", reachable_unit_suite);
-      ("post-nested-unit", post_nested_unit_suite) ]
+      ("post-nested-unit", post_nested_unit_suite);
+      ("let-equality", let_equality_suite) ]

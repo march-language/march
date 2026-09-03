@@ -231,8 +231,27 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
            let path' =
              match e with
              | A.EAssert (p, _) -> (p, false) :: path
-             (* A `let` REBINDS its names: retire any fact about them. *)
-             | A.ELet (b, _) -> path_shadow path (pat_binders b.A.bind_pat)
+             (* A `let` REBINDS its names: retire any fact about them first
+                (the shadow discipline every other channel obeys), then, for
+                an admitted RHS shape, push `n == rhs` as an ordinary path
+                fact — reusing the same translator and the same retirement
+                rule that already protects [check_call]'s other path facts,
+                so a later rebinding of anything `rhs` mentions retires this
+                equality too. *)
+             | A.ELet (b, _) ->
+               let names = pat_binders b.A.bind_pat in
+               let path = path_shadow path names in
+               (match b.A.bind_pat, b.A.bind_expr with
+                | A.PatVar n, rhs when let_equality_rhs rhs ->
+                  let sp = n.A.span in
+                  let eq =
+                    A.EApp
+                      ( A.EVar { A.txt = "=="; A.span = sp }
+                      , [ A.EVar { A.txt = n.A.txt; A.span = sp }; rhs ]
+                      , sp )
+                  in
+                  (eq, false) :: path
+                | _ -> path)
              | A.ELetFn (n, _, _, _, _) -> path_shadow path [ n.A.txt ]
              | _ -> path
            in

@@ -632,6 +632,26 @@ let path_shadow (path : (A.expr * bool) list) (names : string list) : (A.expr * 
    §10 The other fact channels: path, launder, recenv, cbenv
    ================================================================= *)
 
+(* ── Right-hand sides a `let` may turn into the path fact `n == rhs` ───────
+   Pure, deterministic, and inside the linear fragment the path translator
+   ([smt_of] above / [check_call]'s [path_resolve_var]) already reflects.
+   Calls are excluded (a refined return is handled by [scope_add_binding];
+   an unrefined one carries no fact); `if` is excluded (its encoding is a
+   separate decision); floats are excluded (symbolic float arithmetic does
+   not reflect — see the float-constant-folding note above). *)
+let rec let_equality_rhs (e : A.expr) : bool =
+  match e with
+  | A.ELit (A.LitInt _, _) -> true
+  | A.EVar _ -> true
+  | A.EApp (A.EVar { A.txt = ("+" | "-"); _ }, [ a; b ], _) ->
+    let_equality_rhs a && let_equality_rhs b
+  | A.EApp (A.EVar { A.txt = "*"; _ }, [ a; b ], _) ->
+    (match a, b with
+     | A.ELit (A.LitInt _, _), _ -> let_equality_rhs b
+     | _, A.ELit (A.LitInt _, _) -> let_equality_rhs a
+     | _ -> false)
+  | _ -> false
+
 (* ── Laundered guards: name -> the application it was let-bound to ─────────
    [visit] records, per program point, which local names are ONE `let` away
    from a direct application: `let n = List.length(ys)` records
