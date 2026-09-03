@@ -128,9 +128,10 @@ get a dup at their non-last uses by the same rule.
 - A supervisor that is itself a supervised child of another supervisor: its
   spawn fn is then passed as a value (frozen), so it cannot carry its own
   children's capabilities. Its grandchildren are uncaptured (null-safe:
-  they run unmocked). Needs a different mechanism (e.g. the record itself
-  carried through the glue's closure), not filed as a todo until someone
-  hits it.
+  they run unmocked). Specced as
+  `specs/todos/2026-09-03-nested-supervisor-children-not-captured.md`: the
+  respawn value becomes a closure carrying the caps, so the glue stops being
+  frozen, plus one runtime `march_incrc` per respawn call.
 - Children a supervisor spawns dynamically at runtime go through whatever
   shape their spawn site lowers to (a plain `spawn` inside a handler is the
   plain pattern, supplied from the handler's threaded capabilities).
