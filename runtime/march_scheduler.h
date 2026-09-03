@@ -242,6 +242,17 @@ typedef struct march_proc {
                                               * procs remain and nothing is runnable, parked
                                               * daemons are woken without a message so their
                                               * loops exit and the process can terminate. */
+    int                        pinned;       /* Non-zero: this proc may only ever be dispatched
+                                              * by scheduler 0, which runs on the OS thread that
+                                              * called march_sched_run (the process main thread
+                                              * for a compiled binary).  Every enqueue of a
+                                              * pinned proc goes to the scheduler-0-only run
+                                              * queue instead of a Chase-Lev deque or the global
+                                              * runq, so no worker can pop or steal it.  Set once
+                                              * at spawn (march_sched_spawn_pinned), never
+                                              * changed; calloc zero-inits to unpinned.  Ignored
+                                              * when there is a single scheduler (everything
+                                              * already runs on scheduler 0's thread). */
     /* Set (via march_sched_request_stop) by the ONLY two callers entitled to
      * end a blocking receive without delivering a message: the shutdown
      * endgame (wake_idle_daemons) and actor death (do_actor_death, i.e.
@@ -355,6 +366,13 @@ void         march_sched_request_stop(march_proc *p);
 /* Spawn a new green thread.  Returns the new process, or NULL on failure.
  * Safe to call from within a running process (nested spawn). */
 march_proc  *march_sched_spawn(void (*fn)(void *), void *arg);
+
+/* Spawn a green thread pinned to scheduler 0 (see march_proc.pinned).  Used
+ * for `main` when MARCH_PIN_MAIN=1 is set, so code that must run on the OS
+ * main thread (Cocoa/GLFW window creation, some GUI toolkits) can be called
+ * from `main` while the other scheduler workers keep running Tasks/pmap.
+ * Procs spawned BY a pinned proc are not pinned. */
+march_proc  *march_sched_spawn_pinned(void (*fn)(void *), void *arg);
 
 /* Spawn a daemon green thread (see march_proc.is_daemon): daemons do not
  * keep the scheduler alive at shutdown.  Used for actor recv loops, which

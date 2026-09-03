@@ -2376,7 +2376,18 @@ void march_spawn_main(void (*fn)(void)) {
          * drift out of sync with the other again. */
         march_register_sched_callbacks();
     }
-    march_sched_spawn(main_fn_green_thread, (void *)(uintptr_t)fn);
+    /* MARCH_PIN_MAIN=1: run `main` only on scheduler 0, which lives on this
+     * OS thread (the process main thread).  Needed by libraries that demand
+     * the main thread (Cocoa/GLFW window creation) while the other scheduler
+     * workers keep running Tasks/pmap.  Opt-in: an unpinned main can be
+     * dispatched by any worker, which is the better default for servers and
+     * lets the yielded-main / steal-from-others fairness logic stay as is.
+     * Tasks spawned by main are not pinned (see march_sched_spawn_pinned). */
+    const char *pin = getenv("MARCH_PIN_MAIN");
+    if (pin && *pin && strcmp(pin, "0") != 0)
+        march_sched_spawn_pinned(main_fn_green_thread, (void *)(uintptr_t)fn);
+    else
+        march_sched_spawn(main_fn_green_thread, (void *)(uintptr_t)fn);
 }
 
 /* Forward declarations */

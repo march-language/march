@@ -16,6 +16,12 @@
  *      If WAITING, leave parked — a sender will re-enqueue via wake.
  *   5. If all deques empty and g_live_procs == 0, set g_all_done and exit.
  *
+ * Pinned procs (march_proc.pinned, set by march_sched_spawn_pinned): every
+ * enqueue goes to a scheduler-0-only FIFO (the "pin queue") that only
+ * scheduler 0 — the thread that called march_sched_run — ever pops, so the
+ * proc always executes on that OS thread.  Used for `main` under
+ * MARCH_PIN_MAIN=1 (Cocoa/GLFW main-thread requirement).  See pin_runq_push.
+ *
  * Context switching
  * ─────────────────
  * ucontext_t / makecontext / swapcontext provide stackful coroutines.
@@ -283,6 +289,63 @@ static march_proc *global_runq_pop(void) {
         atomic_fetch_sub_explicit(&g_runq_len, 1, memory_order_relaxed);
     }
     return p;
+}
+
+/* Scheduler-0-only run queue ("pin queue"): the home of every RUNNABLE
+ * proc whose march_proc.pinned flag is set.  Same shape as the global runq
+ * (mutex FIFO on march_proc::next — a pinned proc is never in both, since
+ * every enqueue site checks the flag first), but ONLY sched_loop running as
+ * scheduler 0 pops it.  Scheduler 0 runs on the thread that called
+ * march_sched_run, i.e. the OS main thread of a compiled binary, so a
+ * pinned proc is guaranteed to always execute there.  Pushes may come from
+ * any thread (wake), or from scheduler 0 itself (spawn, yield re-push).
+ *
+ * Why a separate queue and not a flag on the global runq: a worker that
+ * pops a pinned proc from the global runq would have to re-push it (churn,
+ * and a livelock when workers outnumber real work), and a worker can steal
+ * from scheduler 0's deque at any time, so neither existing structure can
+ * hold a proc that exactly one thread may run.
+ *
+ * Shutdown accounting needs nothing new: a proc parked here is still
+ * counted in g_live_procs (decremented only on PROC_DEAD reap), so no
+ * scheduler can observe "no live procs" while a pinned proc waits here. */
+static pthread_mutex_t       g_pinq_mu   = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic(march_proc *) g_pinq_head = NULL;
+static march_proc           *g_pinq_tail = NULL;
+
+static void pin_runq_push(march_proc *p) {
+    dbg_mark_enqueued(p, "pin_runq_push");
+    p->next = NULL;
+    pthread_mutex_lock(&g_pinq_mu);
+    if (g_pinq_tail) {
+        g_pinq_tail->next = p;
+    } else {
+        atomic_store_explicit(&g_pinq_head, p, memory_order_release);
+    }
+    g_pinq_tail = p;
+    pthread_mutex_unlock(&g_pinq_mu);
+}
+
+static march_proc *pin_runq_pop(void) {
+    if (atomic_load_explicit(&g_pinq_head, memory_order_acquire) == NULL)
+        return NULL;
+    pthread_mutex_lock(&g_pinq_mu);
+    march_proc *p = atomic_load_explicit(&g_pinq_head, memory_order_relaxed);
+    if (p) {
+        atomic_store_explicit(&g_pinq_head, p->next, memory_order_release);
+        if (p->next == NULL) g_pinq_tail = NULL;
+        p->next = NULL;
+    }
+    pthread_mutex_unlock(&g_pinq_mu);
+    if (p) dbg_mark_dequeued(p, "pin_runq_pop");
+    return p;
+}
+
+/* Does `p` have to go to the pin queue?  With a single scheduler every proc
+ * already runs on scheduler 0's thread, so pinning is a no-op there and the
+ * normal (fair, FIFO-steal) single-scheduler dispatch is kept unchanged. */
+static inline int proc_is_pinned(const march_proc *p) {
+    return p->pinned && g_num_scheds > 1;
 }
 
 /* Cross-file stat counters (indices 3-5 bumped from march_runtime.c /
@@ -1082,7 +1145,8 @@ void march_sched_init(void) {
     install_stack_growth_handler();
 }
 
-static march_proc *sched_spawn_common(void (*fn)(void *), void *arg, int is_daemon) {
+static march_proc *sched_spawn_common(void (*fn)(void *), void *arg,
+                                      int is_daemon, int pinned) {
     march_proc *p = (march_proc *)calloc(1, sizeof(march_proc));
     if (!p) {
         fputs("march_sched: out of memory (process alloc)\n", stderr);
@@ -1091,6 +1155,7 @@ static march_proc *sched_spawn_common(void (*fn)(void *), void *arg, int is_daem
 
     p->pid        = atomic_fetch_add_explicit(&g_next_pid, 1, memory_order_relaxed);
     p->is_daemon  = is_daemon;
+    p->pinned     = pinned;
     /* NEW→RUNNABLE: trivially single-winner (the proc is not yet published
      * to any other thread); the enqueue below is the one matching enqueue. */
     p->status     = PROC_RUNNABLE;
@@ -1167,8 +1232,14 @@ static march_proc *sched_spawn_common(void (*fn)(void *), void *arg, int is_daem
      * Chase-Lev-legal).  From non-scheduler threads (e.g. the main OS
      * thread), push to the global run queue instead — pushing to a Chase-Lev
      * deque from a thread that is not the deque's owner races with the
-     * owner's pop. */
-    if (tl_sched) {
+     * owner's pop.
+     *
+     * A pinned proc goes to the scheduler-0-only pin queue from either
+     * caller: a worker's deque could be stolen from, and the global runq is
+     * popped by every scheduler. */
+    if (proc_is_pinned(p)) {
+        pin_runq_push(p);
+    } else if (tl_sched) {
         /* march_deque_push returns -1 when the local deque is at
          * MARCH_DEQUE_CAPACITY (4096). Silently dropping the return value
          * here used to strand p: it's already RUNNABLE and counted in
@@ -1193,11 +1264,15 @@ static march_proc *sched_spawn_common(void (*fn)(void *), void *arg, int is_daem
 }
 
 march_proc *march_sched_spawn(void (*fn)(void *), void *arg) {
-    return sched_spawn_common(fn, arg, 0);
+    return sched_spawn_common(fn, arg, 0, 0);
+}
+
+march_proc *march_sched_spawn_pinned(void (*fn)(void *), void *arg) {
+    return sched_spawn_common(fn, arg, 0, 1);
 }
 
 march_proc *march_sched_spawn_daemon(void (*fn)(void *), void *arg) {
-    return sched_spawn_common(fn, arg, 1);
+    return sched_spawn_common(fn, arg, 1, 0);
 }
 
 /* ── Per-thread scheduler loop with work-stealing ────────────────────── */
@@ -1288,13 +1363,24 @@ static void sched_loop(march_scheduler *sched) {
          * one lock-free acquire load when the queue is empty (the common
          * case); FIFO pop order doubles as wake fairness. */
         march_proc *p = global_runq_pop();
+        /* Set for procs dequeued from a queue whose pop already did its own
+         * dbg_mark_dequeued (global runq, pin queue). */
         int from_global = (p != NULL);
-        (void)from_global;
 
         /* Single-scheduler: use steal (FIFO) for fairness and compatibility.
          * Multi-scheduler: use pop (LIFO) for cache locality; steal from others.
          * Exception: if the previous task yielded, try to steal first to avoid
-         * the LIFO livelock described above. */
+         * the LIFO livelock described above.
+         *
+         * Scheduler 0 additionally serves the pin queue (procs that may only
+         * run on this thread; see pin_runq_push).  It sits right after the
+         * global runq, ahead of the local deque, because like the global runq
+         * it is where cross-thread wakes of a pinned proc land and nobody
+         * else can drain it.  In the yielded case it comes AFTER the
+         * steal-from-others attempt, mirroring what a yielded unpinned proc
+         * gets: the yielder (which may be the pinned one) is re-run only if no
+         * other scheduler's work could be stolen first, so a pinned spinner
+         * cannot starve leaf tasks any more than an unpinned one could. */
         if (p) {
             /* run the globally-queued proc */
         } else if (g_num_scheds <= 1) {
@@ -1309,9 +1395,17 @@ static void sched_loop(march_scheduler *sched) {
                 p = (march_proc *)march_deque_steal(&g_scheds[victim].local_queue);
                 if (p) break;
             }
+            if (!p && sched->id == 0) {
+                p = pin_runq_pop();
+                from_global = (p != NULL);
+            }
             if (!p) p = (march_proc *)march_deque_pop(&sched->local_queue);
         } else {
-            p = (march_proc *)march_deque_pop(&sched->local_queue);
+            if (sched->id == 0) {
+                p = pin_runq_pop();
+                from_global = (p != NULL);
+            }
+            if (!p) p = (march_proc *)march_deque_pop(&sched->local_queue);
         }
         last_yielded = 0;
 
@@ -1420,8 +1514,12 @@ static void sched_loop(march_scheduler *sched) {
              * to itself in a burst must not silently drop the excess --
              * that strands a RUNNABLE proc forever (livelock). Overflow to
              * the global run queue; mark enqueued via whichever path
-             * actually succeeds so exactly one dbg_mark_enqueued fires. */
-            if (march_deque_push(&sched->local_queue, p) == 0) {
+             * actually succeeds so exactly one dbg_mark_enqueued fires.
+             * A pinned proc never touches the deque (stealable) or the
+             * global runq (popped by any scheduler): pin queue only. */
+            if (proc_is_pinned(p)) {
+                pin_runq_push(p);
+            } else if (march_deque_push(&sched->local_queue, p) == 0) {
                 dbg_mark_enqueued(p, "yield_repush");
             } else {
                 global_runq_push(p);
@@ -2489,8 +2587,15 @@ void march_sched_wake(march_proc *target) {
      * pop and a steal — the confirmed double-dispatch stack corruption.
      * Even when the waker IS a scheduler thread we route through the global
      * runq ("wake always global"): it keeps the rule single-cased, and every
-     * scheduler checks the global queue each dispatch iteration. */
-    global_runq_push(target);
+     * scheduler checks the global queue each dispatch iteration.
+     *
+     * The one exception is a pinned proc, which must not be picked up by a
+     * worker: it goes to the scheduler-0-only pin queue, which scheduler 0
+     * checks right after the global runq on every iteration. */
+    if (proc_is_pinned(target))
+        pin_runq_push(target);
+    else
+        global_runq_push(target);
 }
 
 /* Park the calling green thread until woken.  See the header doc comment

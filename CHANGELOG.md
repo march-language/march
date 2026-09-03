@@ -11,6 +11,16 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- **`MARCH_PIN_MAIN=1` runs `main` on the OS main thread.** The `main` green
+  thread is pinned to scheduler 0, which lives on the thread that started the
+  runtime, while the other scheduler workers keep running Tasks and `pmap`.
+  For libraries that require the process main thread (Cocoa, GLFW window
+  creation on macOS), which previously forced `MARCH_NUM_SCHEDULERS=1` and
+  lost all parallelism. Opt-in; the default is unchanged. Procs spawned by
+  `main` are not pinned; with a single scheduler the variable is a no-op.
+
 ### Fixed
 
 - `forge interactive` (and `march repl` / a bare `march` REPL) now build and load
