@@ -8,8 +8,35 @@
    Every obligation now leaves a record, so the outcome is countable. *)
 
 type reason =
-  | Unreflectable_predicate  (* the goal did not translate into SMT at all *)
-  | Unreflectable_subject    (* the SUBJECT (the actual argument) did not reflect *)
+  (* The rule between this reason and [Unreflectable_subject]: the SUBJECT is
+     tried first: a call's actual argument, or a postcondition's own return
+     expression. Only once the subject reflects fine does a further
+     failure blame the predicate. So [Unreflectable_predicate] fires when the
+     self binder (or the postcondition's return expression) reflected but some
+     other sub-expression of the predicate did not; it names that innermost
+     failing leaf, via [smt_of_r] at the two goal sites that reflect through it
+     (`refine_call.ml`, `refine_post.ml:406`). Payload discipline follows
+     [Alias_withdrawn]/[Unreflectable_subject]: the failing sub-expression,
+     rendered by [pred_str], rides in [reason_detail] only; [reason_name]
+     stays payload-free so `--refine-report` groups every
+     unreflectable-predicate skip into one bucket instead of one per distinct
+     sub-expression. *)
+  | Unreflectable_predicate of string
+  (* The SUBJECT did not reflect: a call's actual argument, or a
+     postcondition's own return expression, whichever is being checked. Filed
+     before the predicate is ever reached, so a subject failure never gets
+     misattributed to a predicate that would have translated fine. The
+     payload is the WHOLE noun phrase [reason_detail] prints (e.g.
+     "the argument `lane(1)`" at a call site, "the return expression `g()`"
+     at a postcondition site), not just the subject's own spelling, because
+     a call's actual and a postcondition's return expression need different
+     nouns and one payload site cannot know which noun the other needs.
+     Each filing site renders its own noun via [pred_str], following
+     [Alias_withdrawn]'s payload discipline: the rendered phrase rides in
+     [reason_detail] only; [reason_name] stays payload-free so
+     `--refine-report` groups every failed-subject skip into one bucket
+     instead of one per distinct subject. *)
+  | Unreflectable_subject of string
   | Sort_conflict            (* a symbol would have been declared at two sorts *)
   | Float_sort_gate          (* the float/formula wellsortedness gate rejected it *)
   | Solver_undecided         (* neither goal nor its negation was Verified *)
@@ -222,8 +249,8 @@ let verdict_name = function
   | Skipped _ -> "skipped"
 
 let reason_name = function
-  | Unreflectable_predicate -> "unreflectable-predicate"
-  | Unreflectable_subject -> "unreflectable-subject"
+  | Unreflectable_predicate _ -> "unreflectable-predicate"
+  | Unreflectable_subject _ -> "unreflectable-subject"
   | Sort_conflict -> "sort-conflict"
   | Float_sort_gate -> "float-sort-gate"
   | Solver_undecided -> "solver-undecided"
@@ -244,10 +271,10 @@ let reason_name = function
    predicate would have been told to rewrite it and sent chasing the wrong
    thing.  Nothing but a debug count depended on the conflation. *)
 let reason_detail = function
-  | Unreflectable_predicate ->
-    "the predicate uses vocabulary the checker cannot translate to SMT"
-  | Unreflectable_subject ->
-    "the argument's own value could not be translated to SMT, so no goal was built"
+  | Unreflectable_predicate sub ->
+    Printf.sprintf "the predicate's `%s` has no SMT translation" sub
+  | Unreflectable_subject phrase ->
+    Printf.sprintf "%s could not be translated to SMT, so no goal was built" phrase
   | Sort_conflict -> "reflecting it would declare one symbol at two different sorts"
   | Float_sort_gate -> "the float wellsortedness gate rejected the formula"
   | Solver_undecided -> "the solver proved neither the predicate nor its negation"
