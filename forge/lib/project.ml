@@ -85,6 +85,10 @@ type project = {
   ffi_rust      : ffi_rust_crate option;  (** [ffi.rust]: Rust staticlib crate auto-built by forge build *)
   js_deps       : (string * string) list;  (** [js_deps] name = "version": npm packages for JS target builds *)
   hot_reload    : hot_reload_config option;  (** [hot-reload] section (Phase 4) *)
+  contracts_no_alloc : string list;
+  (** [contracts] no_alloc = ["Dsp.*", "Audio.mix"]: module/function globs that
+      `forge fix --contracts` treats as in scope even without in-place reuse.
+      See lib/tir/alloc_contract.ml's generation scope. *)
 }
 
 let project_type_of_string = function
@@ -322,10 +326,13 @@ let load_from root =
              hr_health_check_url; hr_strategy }
     end
   in
+  let contracts_no_alloc =
+    Toml.get_string_list (Toml.get_section doc "contracts") "no_alloc" in
   { name; version; project_type = project_type_of_string type_str;
     description; author; root; entrypoint; march_req; license; repository; homepage;
     deps; dev_deps; dev_only_deps; test_deps; patches; archive_tasks; archive_deps;
-    preprocessors; ffi_sources; ffi_link; ffi_rust; js_deps; hot_reload }
+    preprocessors; ffi_sources; ffi_link; ffi_rust; js_deps; hot_reload;
+    contracts_no_alloc }
 
 let load_from_dir dir =
   try Ok (load_from dir)
