@@ -220,6 +220,25 @@ let ledger_counts src =
       | _ -> (proved, skipped))
     (0, 0) (March_refinecheck.Obligation.all ())
 
+(* Full three-way ledger — [ledger_counts]'s (proved, skipped) pair alone
+   cannot tell a genuine skip apart from a false [Violated]: a false-positive
+   translation of a fact (e.g. `not is_Cons(t)` where the true fact should
+   have been silence) reports as VIOLATED, not skipped, so a test that checks
+   only `skipped` cannot catch that failure mode.  See the
+   [arm_exclusion_nested_suite] REJECT witnesses below, which is exactly the
+   shape this was written for. *)
+let ledger_counts3 src =
+  March_refinecheck.Obligation.reset ();
+  ignore (has_refine_error_d src);
+  List.fold_left
+    (fun (proved, violated, skipped) (o : March_refinecheck.Obligation.t) ->
+      match o.March_refinecheck.Obligation.verdict with
+      | March_refinecheck.Obligation.Proved -> (proved + 1, violated, skipped)
+      | March_refinecheck.Obligation.Violated -> (proved, violated + 1, skipped)
+      | March_refinecheck.Obligation.Skipped _ -> (proved, violated, skipped + 1)
+      | _ -> (proved, violated, skipped))
+    (0, 0, 0) (March_refinecheck.Obligation.all ())
+
 (* Most of this suite needs a solver, so a z3-less machine cannot run it.  What
    it must NOT do is report those cases as PASSING.  [gated] used to print a
    "[skip]" line and then return unit, which alcotest scores as `[OK]`: on a
@@ -8385,10 +8404,14 @@ end|}
         in
         Alcotest.(check (pair int int)) "recursive call proved" (1, 0) (proved, skipped));
 
-    (* A GUARDED sibling licenses nothing: it can fail with the tag matching. *)
+    (* A GUARDED sibling licenses nothing: it can fail with the tag matching.
+       Asserting the FULL ledger, not just `proved = 0`, matters here: a
+       broken guard check could translate the (unsound) exclusion anyway and
+       report the call VIOLATED rather than skipped — `proved = 0` alone
+       cannot distinguish "correctly undecided" from "wrongly rejected". *)
     gated "a guarded sibling arm yields no exclusion" (fun () ->
-        let proved, _ =
-          ledger_counts
+        let proved, violated, skipped =
+          ledger_counts3
             {|mod AE2 do
   fn last(xs : {List(Int) | len(_) > 0}) : Int do
     match xs do
@@ -8399,12 +8422,19 @@ end|}
   end
 end|}
         in
-        Alcotest.(check int) "not proved" 0 proved);
+        Alcotest.(check (triple int int int)) "no exclusion: not proved, not violated, skipped"
+          (0, 0, 1) (proved, violated, skipped));
 
-    (* Two levels of nesting are out of scope and must stay silent. *)
+    (* Two levels of nesting are out of scope and must stay silent.  Same
+       full-ledger discipline as AE2: on this fixture's own source, dropping
+       the nullary-only requirement of [arm_excludes_nested] pushes
+       `not is_Cons(t)`, which translates to `len(t) = 0` — false, since `t`
+       really is a `Cons(y, Nil)` here — and the checker reports a spurious
+       hard VIOLATION, not a skip.  `proved = 0` alone is silent to that
+       regression; only checking `violated = 0` too catches it. *)
     gated "a two-level sub-pattern yields no exclusion" (fun () ->
-        let proved, _ =
-          ledger_counts
+        let proved, violated, skipped =
+          ledger_counts3
             {|mod AE3 do
   fn f(xs : {List(Int) | len(_) > 0}) : Int do
     match xs do
@@ -8415,7 +8445,8 @@ end|}
   end
 end|}
         in
-        Alcotest.(check int) "not proved" 0 proved) ]
+        Alcotest.(check (triple int int int)) "no exclusion: not proved, not violated, skipped"
+          (0, 0, 1) (proved, violated, skipped)) ]
 
 (* ── Pinning [measure_base_cases]/[build_measure_preamble]'s base-case-linking
    axiom directly ────────────────────────────────────────────────────────────
