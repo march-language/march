@@ -2413,7 +2413,8 @@ let analyse ~filename ~src : t =
       transitions_index = [];
       always_linear_names = [];
       param_name_map    = build_param_name_map [];
-      proof_cap_defs    = Hashtbl.create 0 }
+      proof_cap_defs    = Hashtbl.create 0;
+      no_alloc_candidates = [] }
   in
   let make_parse_diag pos msg =
     let sp : Ast.span = {
@@ -3273,6 +3274,7 @@ let analyse ~filename ~src : t =
       demorgan_sites;
       perf_insights;
       consume_modes    = [];
+      no_alloc_candidates = [];
       tir_fn_insights  = [];
       code_lens_items  = build_action_lenses ~filename user_decls;
       decls            = user_decls;
@@ -3337,7 +3339,8 @@ let rec tir_count_nodes (e : Tir.expr) : int * int * int * int =
    own perf_insights on replay. *)
 let tir_pass_cache :
   (string, tir_fn_insight list * code_lens_item list * perf_insight list
-           * consume_modes list) Hashtbl.t
+           * consume_modes list * (string * Ast.span * Ast.span) list
+           * Lsp.Types.Diagnostic.t list) Hashtbl.t
   = Hashtbl.create 16
 
 let run_tir_pass (a : t) : t =
@@ -3366,10 +3369,13 @@ let run_tir_pass (a : t) : t =
       List.filter (fun cl -> cl.cl_command <> None) a.code_lens_items
     in
     match Hashtbl.find_opt tir_pass_cache cache_key with
-    | Some (tir_fn_insights, code_lens_items, tir_perf_insights, consume_modes) ->
+    | Some (tir_fn_insights, code_lens_items, tir_perf_insights, consume_modes,
+            no_alloc_candidates, contract_diags) ->
       { a with tir_fn_insights;
                consume_modes;
+               no_alloc_candidates;
                code_lens_items = action_lenses @ code_lens_items;
+               diagnostics = a.diagnostics @ contract_diags;
                perf_insights = a.perf_insights @ tir_perf_insights }
     | None ->
     try
@@ -3406,6 +3412,7 @@ let run_tir_pass (a : t) : t =
           ~before_perceus:(fun pre ->
               borrow_snapshot := Some (March_tir.Borrow.infer_module pre, pre))
           ~extra_roots:user_names
+          ~decls:(March_tir.Alloc_contract.collect desugared)
           ~opt:true ~trmc:!March_tir.Trmc.enabled tir
       in
       let consume_modes =
@@ -3430,6 +3437,42 @@ let run_tir_pass (a : t) : t =
               tir.Tir.tm_fns
       in
       let tir = pipe.March_tir.Contract_pipeline.final in
+      (* @[no_alloc]: failing contracts, reported at the function's name span
+         with the same text the build prints, plus the verified-clean
+         functions in the quick fix's generation scope. *)
+      let contract_diags =
+        List.filter_map (diag_to_lsp ~filename:a.filename)
+          pipe.March_tir.Contract_pipeline.contract_diags in
+      let contract_decls = March_tir.Alloc_contract.collect desugared in
+      let no_alloc_holds =
+        let failing =
+          List.map (fun (d : Err.diagnostic) -> d.Err.span)
+            pipe.March_tir.Contract_pipeline.contract_diags in
+        fun (d : March_tir.Alloc_contract.decl_info) ->
+          d.March_tir.Alloc_contract.d_form <> None
+          && not (List.mem d.March_tir.Alloc_contract.d_name_span failing)
+      in
+      let no_alloc_candidates =
+        List.filter_map (fun (d : March_tir.Alloc_contract.decl_info) ->
+            let open March_tir.Alloc_contract in
+            if d.d_form <> None then None
+            else if d.d_name_span.Ast.file <> a.filename then None
+            else if d.d_name = "" || d.d_name.[0] = '$' then None
+            else begin
+              let clones =
+                List.filter (fun (fn : Tir.fn_def) ->
+                    March_tir.Alloc_contract.base fn.Tir.fn_name = d.d_name)
+                  tir.Tir.tm_fns in
+              if clones = [] then None
+              else if List.exists (fun (fn : Tir.fn_def) ->
+                  Hashtbl.mem pipe.March_tir.Contract_pipeline.allocating
+                    fn.Tir.fn_name) clones then None
+              else if List.exists (fun (fn : Tir.fn_def) ->
+                  March_tir.Alloc_contract.has_reuse_or_stack fn.Tir.fn_body) clones
+              then Some (d.d_name, d.d_name_span, d.d_decl_span)
+              else None
+            end) contract_decls
+      in
       (* Collect per-function optimization counts *)
       let tir_fn_insights =
         List.filter_map (fun (fn : Tir.fn_def) ->
@@ -3483,6 +3526,21 @@ let run_tir_pass (a : t) : t =
               }
           ) tir_fn_insights
       in
+      (* `✓ no_alloc` alongside the ⚡/♻ perf lenses, for a contract that
+         HOLDS.  A failing one shows nothing extra: its diagnostic covers it. *)
+      let code_lens_items =
+        code_lens_items
+        @ List.filter_map (fun (d : March_tir.Alloc_contract.decl_info) ->
+            if not (no_alloc_holds d) then None
+            else if d.March_tir.Alloc_contract.d_name_span.Ast.file <> a.filename
+            then None
+            else
+              Some { cl_range = Pos.span_to_lsp_range
+                         d.March_tir.Alloc_contract.d_name_span;
+                     cl_title = "\xe2\x9c\x93 no_alloc";
+                     cl_command = None;
+                     cl_args = [] }) contract_decls
+      in
       (* Produce perf insights at function-definition spans (Hint severity) so
          they appear in hover and the problems panel. *)
       let tir_perf_insights =
@@ -3525,11 +3583,14 @@ let run_tir_pass (a : t) : t =
           ) tir_fn_insights
       in
       Hashtbl.replace tir_pass_cache cache_key
-        (tir_fn_insights, code_lens_items, tir_perf_insights, consume_modes);
+        (tir_fn_insights, code_lens_items, tir_perf_insights, consume_modes,
+         no_alloc_candidates, contract_diags);
       { a with
         tir_fn_insights;
         consume_modes;
+        no_alloc_candidates;
         code_lens_items = action_lenses @ code_lens_items;
+        diagnostics = a.diagnostics @ contract_diags;
         perf_insights = a.perf_insights @ tir_perf_insights;
       }
     with _ ->
