@@ -4825,6 +4825,48 @@ end|}
         Alcotest.(check bool) "does not blame the predicate" false
           (contains text "vocabulary the checker cannot translate"));
 
+    (* Fix loop 1, finding 1: the String path was excluded from the original
+       cut, so a String-refined parameter with an opaque call actual stayed
+       misfiled as `unreflectable-predicate`.  `len(_) > 0` is fully
+       reflectable (a bare-variable actual proves this elsewhere in the
+       suite); the failure is `mk()`, an opaque call with no postcondition.
+       Mutation that fails this: restore the `(not self_is_str) && ...`
+       exclusion in the `self_reflection_failed` computation. *)
+    gated "an opaque call actual for a String subject is filed as unreflectable-subject"
+      (fun () ->
+        let src =
+          {|mod US2 do
+  cap verified
+  fn nonempty(s : {String | len(_) > 0}) : Int do 0 end
+  fn mk() : String do "" end
+  fn go() : Int do nonempty(mk()) end
+end|}
+        in
+        Alcotest.(check (list string)) "slug" [ "unreflectable-subject" ] (skip_reasons src);
+        let text = refine_error_text_d src in
+        Alcotest.(check bool) "names the call" true (contains text "`mk()`"));
+
+    (* Fix loop 1, finding 3: [pred_str] falls back to the literal
+       `<predicate>` placeholder for an actual it cannot render as source
+       syntax (an `if`, among others).  Naming the argument `<predicate>` in
+       the message reads as if that were the user's own spelling; it must
+       fall back to the PARAMETER's name instead. *)
+    gated "an actual pred_str cannot render never prints the <predicate> placeholder"
+      (fun () ->
+        let src =
+          {|mod US3 do
+  cap verified
+  fn at(i : {Int | 0 <= _ && _ < 4}) : Int do i end
+  fn go(b : Bool) : Int do at(if b do 1 else 2 end) end
+end|}
+        in
+        Alcotest.(check (list string)) "slug" [ "unreflectable-subject" ] (skip_reasons src);
+        let text = refine_error_text_d src in
+        Alcotest.(check bool) "never prints the placeholder" false
+          (contains text "<predicate>");
+        Alcotest.(check bool) "names the parameter instead" true
+          (contains text "`i`"));
+
     (* A third variant, [Nonlinear_goal], was drafted here and cut: the only
        [smt_of] used to build a goal never produces [Smt.Mul] for two
        non-literal operands, so a fixture like `pos(a * b)` never reaches
