@@ -185,7 +185,10 @@ This is the only part with a way to be subtly wrong, so it is spelled out.
    rule). No dec is emitted for the projection itself. This is the same
    shape as closure `$fv` fields and record-param field reads that the rest
    of the pipeline already exercises.
-5. **The sanitize-gate CI leg** (ASAN over the native corpus) must run the
+5. *(Wrong as written — see the correction in
+   `2026-09-03-nested-supervisor-children-not-captured.md`: sanitize-gate
+   sweeps `specs/lang/golden/`, not `test/cap_mock/`.)*
+   **The sanitize-gate CI leg** (ASAN over the native corpus) must run the
    new fixture; locally ASAN needs Docker (`ci/Dockerfile.ubuntu`; build only
    `bin/main.exe` there), so the local proof is the Perceus dump plus the
    fixture's output, and the ASAN proof is CI's.

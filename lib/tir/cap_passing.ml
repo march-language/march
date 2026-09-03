@@ -86,6 +86,14 @@ let ambient_atom (cap : string) : T.atom =
 
 (* ── analysis ─────────────────────────────────────────────────────────── *)
 
+(** [actor_of_spawn n] is the actor name when [n] is a spawn glue function. *)
+let actor_of_spawn (n : string) : string option =
+  let sfx = Tir_names.actor_spawn_suffix in
+  let ls = String.length sfx and ln = String.length n in
+  if ln > ls && String.sub n (ln - ls) ls = sfx
+  then Some (String.sub n 0 (ln - ls)) else None
+
+
 module StrSet = Set.Make (String)
 
 type facts = {
@@ -129,6 +137,23 @@ let rec scan (f : facts) (owner : string) (bound : StrSet.t) (e : T.expr) : unit
   let atoms = List.iter atom in
   let go = scan f owner bound in
   match e with
+  | T.EApp (v, args) when v.T.v_name = "register_supervisor_child" ->
+    (* The spawn glue named as this call's third argument is passed as a
+       VALUE (the runtime re-runs it on respawn), but it is not a value use
+       that freezes the glue's arity: [thread] replaces it with a closure
+       that CALLS the glue with the capabilities the enclosing glue carries.
+       So record it as a call edge, exactly like the head-position call the
+       supervised-child shape already makes to it, and never as [unsafe] —
+       otherwise a supervisor nested under another supervisor could never
+       carry its own children's capabilities. *)
+    add f.calls owner v.T.v_name;
+    List.iteri
+      (fun i a ->
+         match i, a with
+         | 2, T.AVar sf when actor_of_spawn sf.T.v_name <> None ->
+           add f.calls owner sf.T.v_name
+         | _ -> atom a)
+      args
   | T.EApp (v, args) ->
     add f.calls owner v.T.v_name;
     (match cap_of_interceptable_op v.T.v_name with
@@ -188,13 +213,6 @@ let rec scan (f : facts) (owner : string) (bound : StrSet.t) (e : T.expr) : unit
   | T.ESeq (e1, e2) -> go e1; go e2
   | T.EAllocHole (tok, _, ats, _) -> Option.iter atom tok; atoms ats
   | T.ESetField (o, _, v) -> atom o; atom v
-
-(** [actor_of_spawn n] is the actor name when [n] is a spawn glue function. *)
-let actor_of_spawn (n : string) : string option =
-  let sfx = Tir_names.actor_spawn_suffix in
-  let ls = String.length sfx and ln = String.length n in
-  if ln > ls && String.sub n (ln - ls) ls = sfx
-  then Some (String.sub n 0 (ln - ls)) else None
 
 (** The actors [e] spawns as SUPERVISED CHILDREN.  A `supervise` block's
     children are spawned inside the supervisor's own spawn glue
@@ -513,6 +531,41 @@ let rec thread ?(dispatch = false) ?(spawn_caps = Hashtbl.create 1)
       | _ -> { v with T.v_name = name }
     in
     T.EApp (v, supply cap :: args)
+  | T.EApp (v, [ sup; ptr; T.AVar sf; idx; restart ])
+    when v.T.v_name = "register_supervisor_child"
+      && actor_of_spawn sf.T.v_name <> None && Hashtbl.mem need sf.T.v_name ->
+    (* The respawn value for a child whose spawn glue now CARRIES capabilities
+       (a supervisor nested under this one).  The runtime re-runs whatever it
+       is handed with no arguments on every respawn — `march_respawn_child`
+       reads the `$clo_wrap` pointer out of the closure cell and calls it with
+       the cell as its only argument — so hand it a zero-argument closure that
+       calls the glue with the capabilities in scope here, the same threaded
+       call the supervised-child shape makes for the original spawn:
+
+         let $respawn = letrec [ fn $respawn() = Mid_spawn($cap_c1, …) ] in $respawn
+         in register_supervisor_child(sup, ptr, $respawn, idx, restart)
+
+       Built the way lower's [ELam] case builds a lambda thunk, so Defun lifts
+       it like any other; its free variables are exactly this glue's `$cap`
+       parameters, which Defun captures and Perceus dups at the capture.  A
+       glue that carries nothing keeps the static function reference — the
+       cheapest thing to pass, and the shape every existing supervisor test
+       compiles to.
+
+       RC: every apply function drops the closure it is handed, and the
+       runtime calls the SAME cell on every respawn, so `march_respawn_child`
+       incs it before each call; without that the second respawn would be a
+       use-after-free (`cap_mock_supervised_nested`'s third row). *)
+    let name = Lower_state.fresh_name "respawn" in
+    let fn_var =
+      { T.v_name = name; T.v_ty = T.TFn ([], T.TPtr T.TUnit); T.v_lin = T.Unr }
+    in
+    let fd : T.fn_def =
+      { T.fn_name = name; T.fn_params = []; T.fn_ret_ty = T.TPtr T.TUnit;
+        T.fn_body = go (T.EApp (sf, [])); T.fn_kind = T.FnLambda }
+    in
+    T.ELet (fn_var, T.ELetRec ([ fd ], T.EAtom (T.AVar fn_var)),
+            T.EApp (v, [ sup; ptr; T.AVar fn_var; idx; restart ]))
   | T.EApp (v, args) ->
     (match Hashtbl.find_opt need v.T.v_name with
      | None -> e
@@ -587,6 +640,12 @@ let rec thread ?(dispatch = false) ?(spawn_caps = Hashtbl.create 1)
     when ss.T.v_name = "spawn_supervised" && raw'.T.v_name = raw.T.v_name
       && (match actor_of_spawn cs.T.v_name with Some _ -> true | None -> false) ->
     let child = Option.get (actor_of_spawn cs.T.v_name) in
+    (* [go child_call]: a child that is itself a supervisor carries ITS
+       children's capabilities as parameters (see [scan]'s
+       `register_supervisor_child` case), so its spawn call gains arguments
+       here like the plain pattern's does.  Re-emitting it bare would be an
+       arity mismatch that dies at runtime, not a compile error. *)
+    let child_call = go child_call in
     (match Hashtbl.find_opt spawn_caps child with
      | None | Some [] -> T.ELet (raw, child_call, T.ELet (ptr, sup_call, go rest))
      | Some caps ->

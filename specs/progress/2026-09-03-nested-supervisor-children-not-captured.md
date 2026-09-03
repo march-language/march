@@ -1,6 +1,6 @@
 # Capture capabilities for the children of a NESTED supervisor
 
-**Status:** specced 2026-09-03, not started. Parent: `specs/progress/2026-09-03-supervised-children-not-captured.md` (#405), whose "Still not covered" note this is; grandparent: `specs/progress/2026-09-02-lift-one-cap-per-actor.md` (#404), whose RC contract and null-safe dispatch this relies on.
+**Status:** specced 2026-09-03, **shipped 2026-09-03** (see "What shipped" at the end). Parent: `specs/progress/2026-09-03-supervised-children-not-captured.md` (#405), whose "Still not covered" note this is; grandparent: `specs/progress/2026-09-02-lift-one-cap-per-actor.md` (#404), whose RC contract and null-safe dispatch this relies on.
 
 ## What the gap is, precisely
 
@@ -89,3 +89,69 @@ Lower the three-level module; assert `need["Top_spawn"] = need["Mid_spawn"] = ["
 4. Parent progress file's "Still not covered" bullet → done; this file to `specs/progress/`; CHANGELOG `### Fixed` ("a supervisor nested under another supervisor now passes its capabilities on to its own children, including after a restart").
 
 Estimated size: ~50 lines in `cap_passing.ml`, 1 line + comment in the runtime, one fixture, one unit test.
+
+---
+
+## What shipped (2026-09-03)
+
+Exactly the design above; the four steps landed as written.
+
+- **`scan`** treats the third argument of `register_supervisor_child` as a
+  call edge to the named glue rather than a value use, so a nested
+  supervisor's glue is no longer `unsafe`; `needed_caps` then gives it its
+  children's caps and the top glue picks them up through the existing
+  fixpoint (unit test: `need[Mid_spawn] = need[Top_spawn] = ["IO.Console"]`,
+  `Leaf_spawn` absent).
+- **Supervised-child pattern** threads the child's spawn call (`go child_call`)
+  in both arms.
+- **Closure rewrite** in `thread`: `register_supervisor_child` with a glue in
+  `need` as its respawn value gets
+  `let $respawnN = letrec [fn $respawnN() = Mid_spawn($cap_…)] in $respawnN`,
+  built as lower's `ELam` case builds a thunk (`FnLambda`, `TFn ([], Ptr)`),
+  the body being the same `go (EApp (sf, []))` the spawn shape threads. A glue
+  that carries nothing keeps the static reference: `cap_mock_supervised`'s
+  lower dump still reads `register_supervisor_child(…, Logger_spawn, …)`.
+- **Runtime:** `march_incrc(child->spawn_clo)` before the respawn call in
+  `march_respawn_child`, with the reason in a comment.
+
+### Red controls
+
+- **A** (analysis special case disabled, so the nested glue is frozen again):
+  `MOCK[leaf:in]`/`MOCK[leaf:again]`/`MOCK[leaf:third]` → `leaf:in`/`leaf:again`/`leaf:third`;
+  `leaf:out` unchanged.
+- **B** (runtime inc removed): the spec worried this might "happen to still
+  print MOCK". It did not: the second respawn dies with SIGBUS (exit 138)
+  right after `MOCK[leaf:again]`, three runs out of three, and the golden
+  rule fails on the missing third and fourth lines.
+
+  **Correction to this spec and its two parents:** the sanitize-gate CI leg
+  does NOT run `test/cap_mock/` — `scripts/sanitize.sh` sweeps
+  `specs/lang/golden/*.march` plus a curated SIMD/NativeArray list
+  (`.github/workflows/ci.yml` ~L351). So there is no ASAN witness for any
+  `cap_mock_*` fixture in CI; the deterministic SIGBUS above is this
+  control's red, and #404/#405's "the sanitize leg is the ASAN proof" lines
+  were wrong (corrected in the same commit). Running the fixtures under
+  ASAN needs the Docker recipe (`ci/Dockerfile.ubuntu`, build only
+  `bin/main.exe`), not yet done for any of the three.
+
+Both restored byte-for-byte: green.
+
+### RC proof (`MARCH_DUMP_TXT=perceus`, items 6–7)
+
+```
+fn Top_spawn($cap_IO_Console : Cap(IO.Console)) : Ptr(Unit) =
+  …
+let $sup_child_raw_m : Ptr(Unit) = inc_rc $cap_IO_Console;
+Mid_spawn($cap_IO_Console) in
+let $sup_child_ptr_m : Ptr(Unit) = spawn_supervised($sup_child_raw_m) in
+…
+let $reg_child_m : Unit = let $respawn30586 : () -> Ptr(Unit) = alloc $Clo_$respawn30586$3620($respawn30586$apply$3620, $cap_IO_Console) in
+inc_rc $spawned;
+call_ptr register_supervisor_child($spawned, $sup_child_ptr_m, $respawn30586, 0, 0) in
+```
+
+The parameter is dup'd at its non-last use (the threaded spawn call) and
+moved into the closure at its last use (the `alloc $Clo_…` capture, no inc):
+one +1 per reference, as item 7 requires. `Mid` itself has no handlers, so
+no record is set on it, and `Mid_spawn`'s body sets `Leaf`'s record from the
+parameter the closure re-supplies on every respawn.

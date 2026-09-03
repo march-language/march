@@ -51,6 +51,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- A supervisor **nested under another supervisor** now passes its
+  capabilities on to its own children, including the fresh children it
+  creates each time it is restarted. Previously only a top-level supervisor's
+  direct children were captured, so a mock stopped one level down.
+
 - Capability mocking now reaches a **supervised child**. A `supervise` block's
   children are spawned by the supervisor itself, not by user code, so a mock
   that reached a plain actor never reached one under a supervisor. The
