@@ -1,0 +1,76 @@
+mod CapMockActorTwo do
+  -- Capability mocking reaching an actor whose handler performs TWO
+  -- capabilities' operations: it logs (IO.Console) and reads the clock
+  -- (IO.Clock).
+  --
+  -- v1 of capture-at-spawn stored one `Cap` pointer per actor and captured
+  -- nothing for an actor over that limit, so an actor like this one could not
+  -- be mocked at all. Now the spawn site builds a RECORD of every capability
+  -- the actor's handlers reach and the dispatch projects them back out, so a
+  -- mock reaches each operation independently.
+  --
+  -- Four spawns, and which operations are mocked in each is the whole test:
+  --   both     : inside with_cap(clock) inside with_cap(console) -> both mocked
+  --   clock    : inside with_cap(clock) only  -> Clock mocked, real Console
+  --   console  : inside with_cap(console) only -> Console mocked, real Clock
+  --   out      : outside any with_cap, and sent to AFTER every block has
+  --              closed -> neither mocked
+  -- The two partial rows pin that a capability the spawn site cannot supply
+  -- falls back to the real one (the record field is the ambient sentinel),
+  -- rather than the whole actor losing its mocks. `out` pins, as
+  -- cap_mock_actor does, that capture is per-actor at spawn and not a global
+  -- or dynamically-scoped slot.
+  --
+  -- The clock is mocked to a fixed value; the real clock's reading varies, so
+  -- the handler prints it by SHAPE only ("real" for anything but the mock's
+  -- value) and the trace stays byte-comparable.
+  needs IO
+  needs IO.Console
+  needs IO.Clock
+
+  actor Stamper do
+    state { n : Int }
+    init  { n: 0 }
+    on Say(s : String) do
+      let t = unix_time_ms()
+      let shown = if t == 1234 do "1234" else "real" end
+      print_line(s ++ "@" ++ shown)
+      { state with n: state.n + 1 }
+    end
+  end
+
+  fn main(io : Cap(IO)) do
+    let console : Cap(IO.Console) = cap_narrow(io)
+    let clock : Cap(IO.Clock) = cap_narrow(io)
+    let outside = spawn(Stamper)
+    let mock_console = cap_impl(console, { cap_ops_empty(console) with
+      print_line: Some(fn s -> print("MOCK[" ++ s ++ "]\n")) })
+    let mock_clock = cap_impl(clock, { cap_ops_empty(clock) with
+      unix_time_ms: Some(fn _ -> 1234) })
+    with_cap(mock_clock, fn _ -> do
+      with_cap(mock_console, fn _ -> do
+        let both = spawn(Stamper)
+        send(both, Say("both"))
+        run_until_idle()
+        -- a SECOND message to the same actor: the captured record is read
+        -- again on every dispatch, so a record freed after the first read
+        -- (an RC bug in the dispatch's projection) shows up here and not on
+        -- a single-message trace
+        send(both, Say("both2"))
+        run_until_idle()
+      end)
+      let clock_only = spawn(Stamper)
+      send(clock_only, Say("clock"))
+      run_until_idle()
+    end)
+    with_cap(mock_console, fn _ -> do
+      let console_only = spawn(Stamper)
+      send(console_only, Say("console"))
+      run_until_idle()
+    end)
+    send(outside, Say("out"))
+    run_until_idle()
+    send(outside, Say("out2"))
+    run_until_idle()
+  end
+end

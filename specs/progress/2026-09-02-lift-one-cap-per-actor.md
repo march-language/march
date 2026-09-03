@@ -1,6 +1,7 @@
 # Lift the one-capability-per-actor limit on capture at spawn
 
-**Status:** specced 2026-09-02, not started. Parent design:
+**Status:** specced 2026-09-02, **shipped 2026-09-03** (see "What shipped" at
+the end). Parent design:
 `2026-08-31-cap-runtime-dictionaries.md` (§"Actor handlers: capture at spawn",
 landed in #397). Full account of the landed v1 in
 `specs/progress/2026-09-01-actor-capability-capture-at-spawn.md`.
@@ -262,3 +263,101 @@ gate.
 
 Estimated size: ~60 lines in `cap_passing.ml`, one fixture, one unit test. No
 runtime, ABI, builtin, or typechecker change.
+
+---
+
+## What shipped (2026-09-03)
+
+All in `lib/tir/cap_passing.ml`, plus tests and docs. No runtime, ABI,
+builtin, or typechecker change, as designed.
+
+- **Analysis.** `dispatch_cap : … -> string option` became
+  `dispatch_caps : … -> string list` (sorted, from `caps_reached`);
+  `spawn_caps` maps actor → list. Exported with `actor_of_dispatch` in the
+  `.mli` so `test/test_cap_dict.ml` can pin the analysis directly: a
+  two-capability actor yields `["IO.Clock"; "IO.Console"]`, a one-capability
+  actor a one-element list. Landing this step alone left every existing golden
+  byte-identical, as the plan required.
+- **Spawn site.** `let $spawn_caps : { $cap_c1 : Cap(c1), … } = { … } in
+  set_actor_caps($raw_actor, $spawn_caps)`. Fields are `cap_param_name c`,
+  sorted **by field name** explicitly (`caps_record_fields`) rather than by
+  inheriting the capability order: `.` → `_` is not monotone under `String.compare`
+  (`IO.A` < `IOB` but `$cap_IO_A` > `$cap_IOB`), so the spec's "sorting the
+  caps sorts the fields" would have held for today's names and broken for a
+  future one. A capability the site cannot supply is `root_cap` in its field,
+  which is what makes the partial-mock rows of the golden work.
+- **Dispatch, with one addition the spec did not have: the read is
+  null-safe.** `march_actor_caps` returns NULL for any actor this pass did not
+  capture for — a `supervise` child, a **respawned** child (`march_respawn_child`
+  goes through `find_or_create_meta`, whose `spawn_cap` is zeroed), anything
+  spawned through a shape the rewrite does not match. v1's bare `Cap` read
+  that as the sentinel for free; a record projection from NULL is a wild
+  load. So the dispatch reads
+
+  ```
+  let $caps_opt : Option({…}) = actor_caps($actor) in
+  let $caps : {…} = case $caps_opt of Some($r) -> $r
+                                      None()   -> { $cap_c: root_cap, … } in
+  let $spawn_cap_c = $caps.$cap_c in …
+  ```
+
+  typed as the niche `Option` (`None` IS null, `Some(x)` IS `x`) and matched
+  exactly the way the generated `cap_dict` wrappers match theirs; the `None`
+  arm builds a record of sentinels so an uncaptured actor keeps release
+  behaviour. The red control below happens to prove this arm too: with the
+  spawn-site build disabled every actor ran through it and printed `real`
+  rather than crashing. `$caps` stays `TRecord` (contract item 2).
+- **Single-capability actors** go through the same record path;
+  `cap_mock_actor` stayed green throughout.
+- **Golden** `test/cap_mock/cap_mock_actor_two.march`: the four spawns from
+  the table above, plus a **second message** to the `both` and `outside`
+  actors, because a record freed after the first dispatch read (the UAF the
+  RC contract guards against) is invisible on a one-message trace.
+- **Supervised children** are still never captured, on any capability count:
+  filed as `specs/todos/2026-09-03-supervised-children-not-captured.md`.
+
+### Red control
+
+Spawn-site record build disabled (`| Some _ when true -> e`), compiler
+rebuilt, CAS cleared, golden diffed:
+
+```
+< MOCK[both@1234]        > both@real
+< MOCK[both2@1234]       > both2@real
+< clock@1234             > clock@real
+< MOCK[console@real]     > console@real
+```
+
+Restored byte-for-byte, rebuilt: both actor goldens green again.
+
+### RC proof (`MARCH_DUMP_TXT=perceus` on the fixture)
+
+Contract item 3, the +1 moving from the builtin argument to the record build:
+
+```
+let $spawn_caps : { $cap_IO_Clock : Cap(IO.Clock), $cap_IO_Console : Cap(IO.Console) } = inc_rc mock_clock;
+inc_rc mock_console;
+{ $cap_IO_Clock = mock_clock, $cap_IO_Console = mock_console } in
+set_actor_caps($raw_actor, $spawn_caps);
+```
+
+(the Console-only site shows `inc_rc mock_console` alone with `root_cap` in
+the Clock field; the `inc_rc root_cap` at the uncaptured site is a no-op on
+the null sentinel). Contract items 2 and 4, the dispatch:
+
+```
+let $caps : { … } = case $caps_opt of
+  Some($caps_some) -> $caps_some
+  None() -> inc_rc root_cap; { $cap_IO_Clock = root_cap, $cap_IO_Console = root_cap }
+  _ -> dec_rc $caps_opt; panic("non-exhaustive pattern match") in
+let $spawn_cap_IO_Clock : Cap(IO.Clock) = $caps.$cap_IO_Clock in
+let $spawn_cap_IO_Console : Cap(IO.Console) = $caps.$cap_IO_Console in
+case $msg of
+  Say($Say_s) -> inc_rc $spawn_cap_IO_Clock;
+inc_rc $spawn_cap_IO_Console;
+Stamper_Say($spawn_cap_IO_Clock, $spawn_cap_IO_Console, $actor, $Say_s)
+```
+
+No dec of `$caps` or `$caps_opt` on the live path; each projection is dup'd
+where it escapes into the handler call. The two-message rows of the golden
+are the runtime witness.
