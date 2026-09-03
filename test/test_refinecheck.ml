@@ -12321,25 +12321,35 @@ let audit_arrow_signature_suite =
    fixture accidentally produces more (or fewer) than one site -- a wrong
    fixture must not silently pass by picking the "first" site. *)
 
-(* [is_adt_base] / [is_record_base] (Refine_post's Return rule, via
-   [check_post_induction_guard_matches]) read the GLOBAL [adt_ctors] /
-   [ctor_field_names] tables that [check_module] populates as a side effect
-   of [register_adt_names] / [register_field_sorts] before it ever reaches
-   [warn_predicate_decls]. A fixture that never runs through [check_module]
-   (as these do -- [classify] must run without a solver, and these tests
-   only need the SIGNATURE tables, not a full check) must prime those tables
-   itself or [Tree]-shaped fixtures below misclassify as [Unenforced] purely
-   because the ADT registry is empty, not because the checker actually
-   rejects them. Mirrors [check_module]'s own order (refine_check.ml:1928-29,
-   both exposed for exactly this in [Refine_check]'s .mli). *)
-let classify_only_site (src : string) : RAudit.site * RAudit.disposition =
-  let m = parse src in
-  March_refinecheck.Refine_check.register_adt_names m.March_ast.Ast.mod_decls;
-  March_refinecheck.Refine_check.register_field_sorts m.March_ast.Ast.mod_decls;
+(* [classify] is NOT a pure function of a [site] (see the .mli, Task 2's
+   review finding 3): [Refine_post.refined_param_ty] /
+   [refined_scope_ty] / [return_refine_ext] / [post_induction_shape] all read
+   GLOBAL tables ([adt_ctors], [ctor_field_names], [measure_preamble_sorts],
+   ...) that ONLY [check_module] populates -- and it populates more than the
+   two entry points ([register_adt_names] / [register_field_sorts]) a
+   fixture-only test can call directly: [measure_preamble_sorts] specifically
+   is built by [build_measure_preamble], reached only from inside
+   [check_module] itself (Task 2's review, finding 1's second gate). Rather
+   than hand-call each priming step individually and risk missing the next
+   one a future extractor gate adds, this runs the REAL [check_module] first
+   (diagnostics discarded -- only its global-table side effects matter) and
+   only THEN calls [RAudit.sites] on the SAME desugared decls, so every test
+   below exercises exactly the checker's own registration order and exactly
+   the AST SHAPE the checker sees (post-desugar: a multi-clause `fn` collapses
+   to one clause with no guard before refine_check ever runs it -- Task 2's
+   review, section 6 -- so a fixture parsed but not desugared would test an
+   AST production never actually reaches). *)
+let classify_only_site_gen ~(measure_axioms : bool) (src : string) : RAudit.site * RAudit.disposition =
+  let m = March_desugar.Desugar.desugar_module (parse src) in
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module ~measure_axioms ctx m;
   match RAudit.sites m.March_ast.Ast.mod_decls with
   | [ s ] -> (s, RAudit.classify s)
   | sites ->
     Alcotest.failf "expected exactly one refinement site, got %d" (List.length sites)
+
+let classify_only_site (src : string) : RAudit.site * RAudit.disposition =
+  classify_only_site_gen ~measure_axioms:true src
 
 let disposition_tag = function
   | RAudit.Enforced -> "Enforced"
@@ -12512,6 +12522,271 @@ let audit_classify_reason_suite =
         | _ -> Alcotest.fail "expected Unenforced")
   ]
 
+(* ── Fix loop 1: three false-Enforced positions, the Inert_warned coupling,
+   and a rejecting-side fixture for rule 3 ──────────────────────────────────
+   Task 2's review (task-2-review.md) found three positions the classifier
+   called Enforced where the checker enforces nothing at all (findings 4, 5,
+   6), an untested Inert_warned/warning coupling (finding 2), and that no
+   Param fixture sat on the REJECTING side of rule 3 (section 6, mutation
+   M4). Each test below pairs the classify verdict with an independent LEDGER
+   fact -- [has_refine_error_d] on a fixture that calls the site's function
+   with an argument that WOULD violate its predicate if the refinement were
+   enforced -- so the disposition and the compiler's actual behaviour can
+   never silently drift apart. *)
+
+(* True iff the compiler's own diagnostics for [src] contain [needle] --
+   independent of [classify], so a test using both can never pass by
+   coincidence the way Task 2's review showed the un-derived Inert_warned
+   arms could (Mutation B: deleting a warning's OWN emission left
+   [audit-classify] indifferent). *)
+let compiler_warns (src : string) (needle : string) : bool =
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module ctx
+    (March_desugar.Desugar.desugar_module (parse src));
+  List.exists
+    (fun (d : March_errors.Errors.diagnostic) -> contains d.March_errors.Errors.message needle)
+    ctx.March_errors.Errors.diagnostics
+
+let audit_classify_fixloop1_suite =
+  [ (* Finding 4: a lambda's own parameter. Ledger fact: calling the lambda
+       with an argument that violates its predicate raises no error at all --
+       [scope_add_param] / [sig_of_clause] never see an [A.ELam]'s params. *)
+    Alcotest.test_case "a lambda's own parameter refinement is Unenforced, not Enforced"
+      `Quick (fun () ->
+        let src =
+          {|mod LAM1 do
+              fn main() : Int do
+                let f = fn (n : {Int | _ > 0}) -> n
+                f(0)
+              end
+            end|}
+        in
+        let _, d = classify_only_site src in
+        Alcotest.(check string) "disposition" "Unenforced" (disposition_tag d);
+        (match d with
+         | RAudit.Unenforced reason ->
+           Alcotest.(check bool) "names the lambda / ELam fact" true (contains reason "ELam")
+         | _ -> Alcotest.fail "expected Unenforced");
+        Alcotest.(check bool) "the violating call raises no error (the ledger fact)" false
+          (has_refine_error_d src))
+
+  ; (* Finding 5: a block-level `fn`'s PARAMETER, the other half of the
+       ELetFn hole (the report already covers the Return half). Ledger fact:
+       calling `helper(0)` raises no error. *)
+    Alcotest.test_case "a block-level fn's parameter refinement is Unenforced, not Enforced"
+      `Quick (fun () ->
+        let src =
+          {|mod LETFNP1 do
+              fn main() : Int do
+                fn helper(x : {Int | _ > 0}) : Int do x end
+                helper(0)
+              end
+            end|}
+        in
+        let _, d = classify_only_site src in
+        Alcotest.(check string) "disposition" "Unenforced" (disposition_tag d);
+        (match d with
+         | RAudit.Unenforced reason ->
+           Alcotest.(check bool) "names the block-level fact" true (contains reason "block-level")
+         | _ -> Alcotest.fail "expected Unenforced");
+        Alcotest.(check bool) "the violating call raises no error (the ledger fact)" false
+          (has_refine_error_d src))
+
+  ; (* Finding 6: an `impl` method parameter whose method name is AMBIGUOUS
+       (two impls define `run`) -- [contract_is_enforced] strips the
+       parameter refinement from the body and no caller is obliged. The
+       audit cannot determine adoptability from a single site, so it reports
+       [Unenforced] rather than guess. Ledger fact: calling `run(Box(1), 0)`
+       raises no error, even though `k > 0` is violated. *)
+    Alcotest.test_case "an impl method parameter is Unenforced when the method name is ambiguous"
+      `Quick (fun () ->
+        let src =
+          {|mod IMPLAMB1 do
+              type Box = Box(Int)
+              type Cup = Cup(Int)
+              interface Runner(a) do fn run : a -> Int -> Int end
+              impl Runner(Box) do
+                fn run(b, k : {Int | k > 0}) : Int do k end
+              end
+              impl Runner(Cup) do
+                fn run(c, k : Int) : Int do k end
+              end
+              fn main() : Int do run(Box(1), 0) end
+            end|}
+        in
+        let _, d = classify_only_site src in
+        Alcotest.(check string) "disposition" "Unenforced" (disposition_tag d);
+        (match d with
+         | RAudit.Unenforced reason ->
+           Alcotest.(check bool) "names adoptability" true (contains reason "adoptab")
+         | _ -> Alcotest.fail "expected Unenforced");
+        Alcotest.(check bool) "the violating call raises no error (the ledger fact)" false
+          (has_refine_error_d src))
+
+  ; (* The other side of finding 6, recorded rather than silently accepted:
+       when the method name IS unambiguous (one impl), the SAME position is
+       genuinely enforced by the checker -- but the audit still reports
+       [Unenforced], deliberately, because a single [site] cannot tell the
+       two cases apart and a false [Enforced] is the error the design calls
+       worse than none. This is real lost precision, not a bug; the ledger
+       fact proves the checker really does enforce it here. *)
+    Alcotest.test_case "an impl method parameter is STILL reported Unenforced even when unambiguous \
+                         (deliberately conservative)"
+      `Quick (fun () ->
+        let src =
+          {|mod IMPLSOLO1 do
+              type Box = Box(Int)
+              interface Runner(a) do fn run : a -> Int -> Int end
+              impl Runner(Box) do
+                fn run(b, k : {Int | k > 0}) : Int do k end
+              end
+              fn main() : Int do run(Box(1), 0) end
+            end|}
+        in
+        let _, d = classify_only_site src in
+        Alcotest.(check string) "disposition" "Unenforced" (disposition_tag d);
+        Alcotest.(check bool) "the checker DOES enforce it here (the ledger fact)" true
+          (has_refine_error_d src))
+
+  ; (* Finding 2: the Inert_warned/warning coupling, for all three positions.
+       Asserts BOTH that [classify] answers [Inert_warned] AND that the
+       compiler's OWN diagnostics (an independent [check_module] run, not
+       derived from [classify]) actually carry the warning text -- so
+       deleting the warning's emission (Task 2 review's Mutation B, which
+       left the un-derived version's [audit-classify] indifferent) reddens
+       this test even though it would not have reddened before this fix. *)
+    Alcotest.test_case "sig: Inert_warned AND the compiler actually warns"
+      `Quick (fun () ->
+        let src =
+          {|mod SIGCOUPLE1 do
+              sig Store do
+                fn put : Int -> {Int | _ > 0}
+              end
+              fn main() : Int do 0 end
+            end|}
+        in
+        let _, d = classify_only_site src in
+        Alcotest.(check string) "disposition" "Inert_warned" (disposition_tag d);
+        Alcotest.(check bool) "compiler warns" true
+          (compiler_warns src "carries a refinement, which enforces nothing"))
+
+  ; Alcotest.test_case "extern: Inert_warned AND the compiler actually warns"
+      `Quick (fun () ->
+        let src =
+          {|mod EXTCOUPLE1 do
+              needs IO.Foreign
+              extern "c" : Cap(IO.Foreign) do
+                fn take(n : {Int | _ > 0}) : Int = "take"
+              end
+              fn main() : Int do 0 end
+            end|}
+        in
+        let _, d = classify_only_site src in
+        Alcotest.(check string) "disposition" "Inert_warned" (disposition_tag d);
+        Alcotest.(check bool) "compiler warns" true
+          (compiler_warns src "carries a refinement, which enforces nothing"))
+
+  ; Alcotest.test_case "interface: Inert_warned AND the compiler actually warns"
+      `Quick (fun () ->
+        let src =
+          {|mod IFACECOUPLE1 do
+              interface Runner(a) do
+                fn run : a -> Int -> {Int | _ > 1}
+              end
+              fn main() : Int do 0 end
+            end|}
+        in
+        let _, d = classify_only_site src in
+        Alcotest.(check string) "disposition" "Inert_warned" (disposition_tag d);
+        Alcotest.(check bool) "compiler warns" true
+          (compiler_warns src "carries a refinement, which enforces nothing"))
+
+  ; (* Section 6 / Mutation M4: a rejecting-side fixture for rule 3.
+       [refined_param_ty] has no [TyTuple] arm, so a parameter refined at a
+       TUPLE base is [Unenforced] -- without this fixture, a classifier that
+       hardcodes every top-level-fn [Param] as [Enforced], never calling
+       [refined_param_ty] at all, still passes the whole group (the review's
+       own M4). *)
+    check_unenforced "a parameter refined at a tuple base is Unenforced (refined_param_ty has no TyTuple arm)"
+      {|mod TUPP1 do
+          fn f(p : { t : (Int, Int) | true }) : Int do 0 end
+        end|}
+
+  ; (* The same shape on the Let_annot side (rule 5), the review's suggested
+       substitute if no parameter shape worked -- included alongside the
+       parameter one since both extractors share this exact gap. *)
+    check_unenforced "a let-binding refined at a tuple base is Unenforced (refined_scope_ty has no TyTuple arm)"
+      {|mod TUPL1 do
+          fn f() : Int do
+            let x : { t : (Int, Int) | true } = (1, 2)
+            0
+          end
+        end|}
+
+  ; (* Finding 2, the review's own suggested addition: the NON-SPINE shape --
+       the refinement sits inside a `List(...)` type argument, not directly
+       on either side of the arrow -- which no PRE-EXISTING warning test
+       covers (`sig-extern-refinement` only exercises the arrow spine). Still
+       [Inert_warned]: [ty_has_refinement] recurses into a [TyCon] argument
+       exactly as [warn_predicate_ty] does, so the warning fires here too. *)
+    check_inert_warned "a sig entry with a non-spine nested refinement (List(...) in the domain)                          is still Inert_warned"
+      {|mod SIGNONSPINE1 do
+          sig Store do
+            fn put : List({Int | _ > 0}) -> Int
+          end
+        end|}
+
+  ; (* Finding 1's second gate, isolated with `~measure_axioms` rather than
+       the presence/absence of `@[measure]` (which would ALSO flip
+       classify_pred's Unusable gate, conflating the two): the identical
+       fixture, `@[measure]` present in BOTH runs, classified once with the
+       measure-axiom preamble enabled and once disabled. Only
+       `measure_preamble_sorts` differs between the two runs, so this pins
+       exactly the gate `post_induction_shape` adds beyond the outer shape
+       match. *)
+    Alcotest.test_case "an ADT return contract's Enforced verdict is sensitive to --no-measure-axioms"
+      `Quick (fun () ->
+        let src =
+          {|mod MEASGATE1 do
+              type Tree = Leaf | Node(Tree, Int, Tree)
+              @[measure]
+              fn size(t : Tree) : Int do
+                match t do
+                  Leaf -> 0
+                  Node(l, _, r) -> 1 + size(l) + size(r)
+                end
+              end
+              fn mk() : {Tree | size(_) == 0} do Leaf end
+            end|}
+        in
+        let _, d_on = classify_only_site_gen ~measure_axioms:true src in
+        let _, d_off = classify_only_site_gen ~measure_axioms:false src in
+        Alcotest.(check string) "with measure axioms: Enforced" "Enforced" (disposition_tag d_on);
+        Alcotest.(check string) "without measure axioms: Unenforced" "Unenforced" (disposition_tag d_off))
+
+  ; (* The same fixture without `@[measure]` at all: `classify_pred` still
+       classifies `size(_) == 0` as `Closed` (an application's HEAD is a
+       function name, not a "used" variable, regardless of whether it is a
+       registered axiom measure -- see `classify_pred`'s `A.EApp (A.EVar _,
+       args, _)` arm), so the ENTIRE difference from the fixture above is
+       `measure_preamble_sorts`: without `@[measure]`, `size` never enters
+       `collect_measure_fns`, so `M_Tree` is never registered. A direct
+       second confirmation of the same gate as the `~measure_axioms` pair
+       above, and the closer analogue of the review's own leafA/leafB (which
+       differed by the `@[measure]` tag, not by a flag). *)
+    check_unenforced "the identical ADT return contract with NO @[measure] declared at all is Unenforced"
+      {|mod LEAFA1 do
+          type Tree = Leaf | Node(Tree, Int, Tree)
+          fn size(t : Tree) : Int do
+            match t do
+              Leaf -> 0
+              Node(l, _, r) -> 1 + size(l) + size(r)
+            end
+          end
+          fn mk() : {Tree | size(_) == 0} do Leaf end
+        end|}
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -12591,4 +12866,5 @@ let () =
       ("let-equality-alias", let_equality_alias_suite);
       ("arith-actual", arith_actual_suite);
       ("audit-sites", audit_sites_suite @ audit_stacked_refinement_suite @ audit_arrow_signature_suite);
-      ("audit-classify", audit_classify_suite @ audit_classify_reason_suite) ]
+      ("audit-classify",
+        audit_classify_suite @ audit_classify_reason_suite @ audit_classify_fixloop1_suite) ]

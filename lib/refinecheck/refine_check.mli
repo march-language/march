@@ -189,6 +189,20 @@ val gate_unverified_posts :
 val register_adt_names : A.decl list -> unit
 val register_field_sorts : A.decl list -> unit
 
+(** {1 The inert-signature warning's own condition}
+
+    True iff [t] carries a refinement ANYWHERE the warning machinery looks --
+    a [TyCon] argument, either side of a [TyArrow], a [TyTuple] element, a
+    [TyRecord] field, or a [TyLinear] wrapper. This is exactly the condition
+    [warn_sig_fn_refinement] / [warn_extern_fn_refinement] /
+    [warn_iface_method_refinement] gate on before firing (see
+    [warn_predicate_decls]'s `sig_fns` / `extern_fn` / `md_ty` arms).  Exposed
+    so [Refine_audit.classify] can DERIVE its [Inert_warned] verdict from the
+    warning's own condition rather than assert the correspondence -- see Task
+    2's review, finding 2: narrowing this function's recursion silently
+    breaks the correspondence while leaving every other test green. *)
+val ty_has_refinement : A.ty -> bool
+
 (** {1 Not API — declared only because they are dead}
 
     These three have no caller anywhere: not in this module, not outside it.

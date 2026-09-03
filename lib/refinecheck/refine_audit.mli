@@ -77,6 +77,20 @@ type position =
     after the fact. *)
 type nesting = Outermost | Nested
 
+(** Which of the checker's call-site machineries, if any, a [Param] or
+    [Return] site's enclosing function definition is actually visible to.
+    [scope_add_param] / [sig_of_clause] (parameter obligations) and
+    [check_fn_post_verdict] (return postconditions) are reached ONLY through
+    [visit_fn], called exactly twice by [visit_decl]: once for [A.DFn], once
+    per [A.DImpl] method. A block-level [A.ELetFn] is never handed to either.
+    An [A.DImpl] method's PARAMETER refinements additionally need a
+    MODULE-LEVEL judgement ([contract_is_enforced], keyed on whether the
+    method's bare name is adoptable -- exactly one `impl` defines it and no
+    top-level `fn` shares the name) before they are ever assumed; a single
+    [site] cannot answer that question, so [classify] never claims [Enforced]
+    for an [Impl_method_fn] parameter, regardless of adoptability. *)
+type fn_origin = Top_level_fn | Impl_method_fn | Local_fn
+
 (** [span] is always the predicate expression's OWN span: the third
     component of the [A.TyRefine (base, binder, pred)] this site came from.
     [A.TyRefine] itself carries no span (see the design's "Shared facts"),
@@ -141,6 +155,12 @@ type site = {
           all, so there is no extractor for [classify] to consult, and
           fabricating a synthetic [A.fn_def] to feed one would misrepresent
           that fact rather than report it. *)
+  fn_origin : fn_origin option;
+      (** [Some _] only for a [Param] or [Return] site whose declared type
+          came from an actual function definition's parameter list or return
+          annotation. [None] for every other position (including
+          [Lambda_param], which is never backed by an [A.fn_clause] at all --
+          see [classify]'s [Lambda_param] rule). *)
 }
 
 (** Enumerate every declared [A.TyRefine] occurrence reachable from [decls],
@@ -164,31 +184,70 @@ type disposition =
           reason specific to THIS site's position, never a shared sentence
           reused across positions (see [classify]'s implementation notes). *)
 
-(** Classify one [site]. A pure function of the site (plus whatever the
-    checker's own extractors -- called, never restated -- say about
-    [origin_ty] / [origin_fn]): emits no diagnostic, touches no obligation
-    ledger, and never invokes the solver. Rule order (see
-    [refine_audit.ml] for the full rationale and the exact reason string per
-    position):
+(** Classify one [site]: calls the checker's own extractors -- never
+    restates their acceptance rules -- and reports what they say. Emits no
+    diagnostic, touches no obligation ledger, and never invokes the solver.
 
-    1. [origin] is [Sig_fn] / [Extern_fn] / [Iface_method]: [Inert_warned],
-       tried BEFORE nesting, because such a signature's refinement is always
-       [Nested] (any signature that takes an argument is a [TyArrow]) and
-       nesting would otherwise hide a position the compiler already warns
-       about by name.
+    NOT a pure function of [site] alone: the [Return] rule (via [origin_fn])
+    and, for an ADT/record base, the [Param] / [Let_annot] rules read the
+    GLOBAL [adt_ctors] / [ctor_field_names] tables that
+    [Refine_check.register_adt_names] / [Refine_check.register_field_sorts]
+    populate as a side effect. REQUIRES those to have already run over the
+    [A.decl list] this [site] came from (and every OTHER declaration its
+    extractors might need to resolve an ADT/record name against, i.e. the
+    whole module, not just the one declaration containing this site) -- the
+    same order [Refine_check.check_module] itself uses, near the top of the
+    pipeline, well before it would ever reach a Task 3 call site for this
+    function. Without that priming, every ADT and record base reads as
+    unregistered and reads as [Unenforced] regardless of what the checker
+    would actually do once registered -- Task 2's review, finding 3. A
+    caller that runs [classify] over a corpus WITHOUT calling
+    [check_module] first (directly, or via those two registration
+    functions) will silently under-report and must not commit the result as
+    a baseline.
+
+    CAN RAISE [Failure] if [site.origin] is [Type_arg], [Arrow_domain] or
+    [Arrow_codomain] -- an invariant [sites] itself guarantees never happens
+    ([origin] is set only by [start], which is never called with a
+    structural position; see [walk_ty]) and [site.fn_origin] is [None] for a
+    [Param] site (guaranteed never to happen the same way, by [walk_fn] and
+    the [ELetFn] arm of [walk_expr]). A [site] built by hand rather than
+    produced by [sites] must preserve both invariants or [classify] may
+    raise.
+
+    Rule order (see [refine_audit.ml] for the full rationale and the exact
+    reason string per position):
+
+    1. [origin] is [Sig_fn] / [Extern_fn] / [Iface_method]: [Inert_warned]
+       iff [Refine_check.ty_has_refinement origin_ty] -- the WARNING's own
+       condition, called rather than assumed, so a change that silently
+       stops the warning from firing is caught here too -- tried BEFORE
+       nesting, because such a signature's refinement is always [Nested]
+       (any signature that takes an argument is a [TyArrow]) and nesting
+       would otherwise hide a position the compiler already warns about by
+       name. [Unenforced] if [ty_has_refinement] disagrees with what [sites]
+       found (a finding in its own right, not a guess).
     2. [nesting = Nested]: [Unenforced], for everything rule 1 did not
        already dispose of.
-    3. [Param] / [Lambda_param]: [Enforced] iff [Refine_scope.refined_param_ty]
-       accepts [origin_ty].
-    4. [Return]: [Enforced] iff [Refine_post.return_refine_ext] (via
-       [origin_fn]) accepts, or [check_post_induction]'s own outer guard
-       (reproduced, not called -- see [refine_audit.ml] -- because the real
-       function invokes the solver on an accepted shape) would match.
-       [origin_fn = None] (a block-level [A.ELetFn]) is always [Unenforced]:
-       the checker never verifies a local function's return at all.
-    5. [Let_annot]: [Enforced] iff [Refine_scope.refined_scope_ty] accepts
+    3. [Lambda_param]: ALWAYS [Unenforced] -- an [A.ELam]'s own parameter is
+       never routed through [scope_add_param] / [sig_of_clause] at all, so
+       [refined_param_ty] accepting its declared type is irrelevant; no call
+       site is ever obliged by it.
+    4. [Param]: dispatches on [fn_origin] first. [Some Local_fn] (a
+       block-level [A.ELetFn]'s own parameter) and [Some Impl_method_fn] (an
+       `impl` method's parameter, whose enforcement additionally needs a
+       module-level adoptability judgement no single [site] can make) are
+       ALWAYS [Unenforced]. [Some Top_level_fn]: [Enforced] iff
+       [Refine_post.refined_param_ty] accepts [origin_ty].
+    5. [Return]: [Enforced] iff [Refine_post.return_refine_ext] (via
+       [origin_fn]) accepts, or [Refine_post.post_induction_shape] (the
+       solver-free half of [check_post_induction], called directly -- no
+       longer a duplicate) accepts. [origin_fn = None] (a block-level
+       [A.ELetFn]) is always [Unenforced]: the checker never verifies a
+       local function's return at all.
+    6. [Let_annot]: [Enforced] iff [Refine_post.refined_scope_ty] accepts
        [origin_ty].
-    6. Every other position ([Field], [Variant_arg], [Impl_ty], [Expr_annot],
+    7. Every other position ([Field], [Variant_arg], [Impl_ty], [Expr_annot],
        [Actor_handler_param]): always [Unenforced], each with its own reason
        string -- there is no extractor for any of them, nested or not. *)
 val classify : site -> disposition
