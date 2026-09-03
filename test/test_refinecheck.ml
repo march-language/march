@@ -11842,6 +11842,234 @@ end|}
         Alcotest.(check bool) "no float-sort-gate" false
           (List.mem "float-sort-gate" rs)) ]
 
+(* ── Refinement coverage audit — Task 1: site enumeration ─────────────────
+   [Refine_audit.sites] is a fork of [warn_predicate_ty]/[warn_predicate_decls]
+   that enumerates every declared [TyRefine] occurrence rather than warning
+   about a few of them. These tests construct the [A.decl list] directly
+   (per the plan's Task 1: "Do not wire anything into check_module or
+   bin/main.ml in this task") rather than parsing March source, because one
+   of the covered positions ([Expr_annot], an [EAnnot] node) has no surface
+   syntax at all — [EAnnot] is produced only by desugar (see
+   [lib/desugar/desugar.ml]'s [DApp] handling), never by the parser. Building
+   every fixture the same way keeps the "one fixture, sixteen positions"
+   design honest instead of half-parsed-half-hand-built. *)
+module RAudit = March_refinecheck.Refine_audit
+
+module Audit_fixture = struct
+  module A = March_ast.Ast
+
+  (* Every predicate expression gets its OWN span, tagged by an integer id
+     1..16 — one per covered position. A site's span must be a REAL span
+     from a neighbour ([Refine_audit]'s contract is "the predicate
+     expression's own span"), so asserting the exact id round-trips through
+     [Refine_audit.sites] is what proves the span was actually threaded from
+     the right node, not fabricated or borrowed from an unrelated one. *)
+  let sp (id : int) : A.span =
+    { A.file = "audit-fixture"; start_line = id; start_col = 0; end_line = id; end_col = 1 }
+
+  let dummy = sp 0
+  let nm txt = { A.txt; A.span = dummy }
+  let int_ty = A.TyCon (nm "Int", [])
+
+  (* [refine_or_plain id base] is [{ base | true }] tagged with span [sp id],
+     UNLESS [omit = Some id], in which case it degrades to the plain [base]
+     with no refinement at all — the "delete this one declared refinement"
+     fixture the plan's per-position negative tests need, built by omission
+     rather than by duplicating the whole 16-position fixture 16 times. *)
+  let build_decls ?(omit : int option = None) () : A.decl list =
+    let refine_or_plain id base : A.ty =
+      if omit = Some id then base else A.TyRefine (base, None, A.ELit (A.LitBool true, sp id))
+    in
+    (* fn f(p0 : {Int|1}, p1 : {Int|2} -> Int, p2 : Int -> {Int|3},
+            p3 : List({Int|4})) : {Int|5} do
+         let _lam = fn (x : {Int|6}) -> x
+         let y : {Int|7} = 0
+         (y : {Int|8})
+       end
+       -- p0 is Param("f",0), Outermost.
+       -- p1's domain is refined: TyArrow's domain is NOT the outermost
+          position of p1's declared type (p1's type IS the arrow), so this
+          is Arrow_domain, Nested.
+       -- p2's codomain is refined, symmetrically: Arrow_codomain, Nested.
+       -- p3's List(...) argument is refined: Type_arg, Nested.
+       -- the return type is refined at the top: Return("f"), Outermost.
+       -- the lambda's parameter: Lambda_param(0), Outermost.
+       -- the let binding's annotation: Let_annot("y"), Outermost.
+       -- the annotated expression: Expr_annot, Outermost. *)
+    let p0 : A.param = { A.param_name = nm "p0"; param_ty = Some (refine_or_plain 1 int_ty); param_lin = A.Unrestricted } in
+    let p1 : A.param =
+      { A.param_name = nm "p1";
+        param_ty = Some (A.TyArrow (refine_or_plain 2 int_ty, int_ty));
+        param_lin = A.Unrestricted }
+    in
+    let p2 : A.param =
+      { A.param_name = nm "p2";
+        param_ty = Some (A.TyArrow (int_ty, refine_or_plain 3 int_ty));
+        param_lin = A.Unrestricted }
+    in
+    let p3 : A.param =
+      { A.param_name = nm "p3";
+        param_ty = Some (A.TyCon (nm "List", [ refine_or_plain 4 int_ty ]));
+        param_lin = A.Unrestricted }
+    in
+    let lam_param : A.param =
+      { A.param_name = nm "x"; param_ty = Some (refine_or_plain 6 int_ty); param_lin = A.Unrestricted }
+    in
+    let lam_binding : A.binding =
+      { A.bind_pat = A.PatVar (nm "_lam");
+        bind_ty = None;
+        bind_lin = A.Unrestricted;
+        bind_expr = A.ELam ([ lam_param ], A.EVar (nm "x"), dummy) }
+    in
+    let y_binding : A.binding =
+      { A.bind_pat = A.PatVar (nm "y");
+        bind_ty = Some (refine_or_plain 7 int_ty);
+        bind_lin = A.Unrestricted;
+        bind_expr = A.ELit (A.LitInt 0, dummy) }
+    in
+    let f_body : A.expr =
+      A.EBlock
+        ( [ A.ELet (lam_binding, dummy);
+            A.ELet (y_binding, dummy);
+            A.EAnnot (A.EVar (nm "y"), refine_or_plain 8 int_ty, dummy)
+          ],
+          dummy )
+    in
+    let f_clause : A.fn_clause =
+      { A.fc_params = [ A.FPNamed p0; A.FPNamed p1; A.FPNamed p2; A.FPNamed p3 ];
+        fc_guard = None;
+        fc_body = f_body;
+        fc_span = dummy;
+        fc_params_span = dummy }
+    in
+    let f_def : A.fn_def =
+      { A.fn_name = nm "f";
+        fn_vis = A.Public;
+        fn_doc = None;
+        fn_attrs = [];
+        fn_ret_ty = Some (refine_or_plain 5 int_ty);
+        fn_clauses = [ f_clause ];
+        fn_bounds = [] }
+    in
+    let top_let : A.binding =
+      { A.bind_pat = A.PatVar (nm "top_let");
+        bind_ty = Some (refine_or_plain 9 int_ty);
+        bind_lin = A.Unrestricted;
+        bind_expr = A.ELit (A.LitInt 0, dummy) }
+    in
+    let box_field : A.field = { A.fld_name = nm "v"; fld_ty = refine_or_plain 10 int_ty; fld_lin = A.Unrestricted } in
+    let tag_variant : A.variant =
+      { A.var_name = nm "A"; var_args = [ int_ty; refine_or_plain 11 int_ty ]; var_vis = A.Public }
+    in
+    let store_sig : A.sig_def = { A.sig_types = []; sig_fns = [ (nm "put", refine_or_plain 12 int_ty) ] } in
+    let extern_fn : A.extern_fn =
+      { A.ef_name = nm "take";
+        ef_params = [ (nm "n", refine_or_plain 13 int_ty) ];
+        ef_param_consumed = [ false ];
+        ef_blocking = false;
+        ef_raises = false;
+        ef_ret_ty = refine_or_plain 14 int_ty;
+        ef_symbol = None }
+    in
+    let extern_def : A.extern_def =
+      { A.ext_lib_name = "c"; ext_cap_ty = A.TyCon (nm "Cap", []); ext_fns = [ extern_fn ] }
+    in
+    let iface_def : A.interface_def =
+      { A.iface_name = nm "Runner";
+        iface_param = nm "a";
+        iface_superclasses = [];
+        iface_assoc_types = [];
+        iface_methods = [ { A.md_name = nm "run"; md_ty = refine_or_plain 15 int_ty; md_default = None } ] }
+    in
+    let actor_param : A.param =
+      { A.param_name = nm "d"; param_ty = Some (refine_or_plain 16 int_ty); param_lin = A.Unrestricted }
+    in
+    let actor_def : A.actor_def =
+      { A.actor_state = [];
+        actor_init = A.ELit (A.LitInt 0, dummy);
+        actor_handlers = [ { A.ah_msg = nm "Bump"; ah_params = [ actor_param ]; ah_body = A.ELit (A.LitInt 0, dummy) } ];
+        actor_supervise = None;
+        actor_compat = "full";
+        actor_invariant = None }
+    in
+    [ A.DFn (f_def, dummy);
+      A.DLet (A.Public, top_let, dummy);
+      A.DType (A.Public, nm "Box", [], A.TDRecord [ box_field ], dummy);
+      A.DType (A.Public, nm "Tag", [], A.TDVariant [ tag_variant ], dummy);
+      A.DSig (nm "Store", store_sig, dummy);
+      A.DExtern (extern_def, dummy);
+      A.DInterface (iface_def, dummy);
+      A.DActor (A.Public, nm "Counter", actor_def, dummy)
+    ]
+
+  let string_of_position (p : RAudit.position) : string =
+    match p with
+    | RAudit.Param (n, i) -> Printf.sprintf "Param(%s,%d)" n i
+    | RAudit.Return n -> Printf.sprintf "Return(%s)" n
+    | RAudit.Let_annot n -> Printf.sprintf "Let_annot(%s)" n
+    | RAudit.Field (t, f) -> Printf.sprintf "Field(%s,%s)" t f
+    | RAudit.Variant_arg (t, v, i) -> Printf.sprintf "Variant_arg(%s,%s,%d)" t v i
+    | RAudit.Type_arg -> "Type_arg"
+    | RAudit.Arrow_domain -> "Arrow_domain"
+    | RAudit.Arrow_codomain -> "Arrow_codomain"
+    | RAudit.Lambda_param i -> Printf.sprintf "Lambda_param(%d)" i
+    | RAudit.Expr_annot -> "Expr_annot"
+    | RAudit.Sig_fn n -> Printf.sprintf "Sig_fn(%s)" n
+    | RAudit.Extern_fn n -> Printf.sprintf "Extern_fn(%s)" n
+    | RAudit.Iface_method n -> Printf.sprintf "Iface_method(%s)" n
+    | RAudit.Actor_handler_param (n, i) -> Printf.sprintf "Actor_handler_param(%s,%d)" n i
+
+  let string_of_nesting = function RAudit.Outermost -> "Outermost" | RAudit.Nested -> "Nested"
+
+  (* One string per site: "<position>/<nesting>/<span id>". Folding the span
+     id into the same string ties the position/nesting label to the SPECIFIC
+     source node it was threaded from, in one assertion, rather than checking
+     the multiset and the spans separately and hoping they line up. *)
+  let label (s : RAudit.site) : string =
+    Printf.sprintf "%s/%s/%d" (string_of_position s.RAudit.position) (string_of_nesting s.RAudit.nesting)
+      s.RAudit.span.A.start_line
+
+  let labels decls = List.sort compare (List.map label (RAudit.sites decls))
+end
+
+let expected_audit_labels =
+  List.sort compare
+    [ "Param(f,0)/Outermost/1";
+      "Arrow_domain/Nested/2";
+      "Arrow_codomain/Nested/3";
+      "Type_arg/Nested/4";
+      "Return(f)/Outermost/5";
+      "Lambda_param(0)/Outermost/6";
+      "Let_annot(y)/Outermost/7";
+      "Expr_annot/Outermost/8";
+      "Let_annot(top_let)/Outermost/9";
+      "Field(Box,v)/Outermost/10";
+      "Variant_arg(Tag,A,1)/Outermost/11";
+      "Sig_fn(put)/Outermost/12";
+      "Extern_fn(take)/Outermost/13";
+      "Extern_fn(take)/Outermost/14";
+      "Iface_method(run)/Outermost/15";
+      "Actor_handler_param(Bump,0)/Outermost/16"
+    ]
+
+let audit_sites_suite =
+  [ Alcotest.test_case "the exact multiset of (position, nesting) pairs, one per covered position"
+      `Quick (fun () ->
+        Alcotest.(check (list string)) "labels" expected_audit_labels
+          (Audit_fixture.labels (Audit_fixture.build_decls ())))
+  ]
+  @ List.map
+      (fun id ->
+        Alcotest.test_case
+          (Printf.sprintf "deleting the refinement at span id %d drops the count by exactly one" id)
+          `Quick
+          (fun () ->
+            let full = Audit_fixture.labels (Audit_fixture.build_decls ()) in
+            let minus_one = Audit_fixture.labels (Audit_fixture.build_decls ~omit:(Some id) ()) in
+            Alcotest.(check int) "count drops by exactly one" (List.length full - 1)
+              (List.length minus_one)))
+      [ 1; 2; 3; 4; 5; 6; 7; 8; 9; 10; 11; 12; 13; 14; 15; 16 ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -11919,4 +12147,5 @@ let () =
       ("post-nested-unit", post_nested_unit_suite);
       ("let-equality", let_equality_suite);
       ("let-equality-alias", let_equality_alias_suite);
-      ("arith-actual", arith_actual_suite) ]
+      ("arith-actual", arith_actual_suite);
+      ("audit-sites", audit_sites_suite) ]
