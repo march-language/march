@@ -139,12 +139,35 @@ let contracts_module ~mod_name =
      end\n"
     mod_name
 
+(* What `forge fix --contracts` shells out to, run directly and with BOTH
+   streams captured.  Without this the suite can only say "nothing was
+   inserted", which is true of a clean compile that found no candidate AND of
+   a compile that died before printing anything — two very different bugs. *)
+let report_contracts_output file =
+  let tmp = Filename.temp_file "report_contracts" ".out" in
+  let rc =
+    Sys.command (Printf.sprintf "march --compile --report-contracts %s > %s 2>&1"
+                   (Filename.quote file) (Filename.quote tmp)) in
+  let ic = open_in tmp in
+  let out = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  (try Sys.remove tmp with Sys_error _ -> ());
+  (rc, out)
+
 let test_fix_contracts_inserts_and_is_idempotent () =
   setup_hermetic_march ();
   with_project ~project_type:Project.Lib (fun name root ->
       ignore name;
       let f = Filename.concat (Filename.concat root "lib") "boxes.march" in
       write_file f (contracts_module ~mod_name:"Boxes");
+      (* Non-vacuity: prove the compiler emits a candidate for `bump` before
+         asserting that forge applied one.  A failure here names the actual
+         compiler output instead of leaving an empty diff to guess at. *)
+      let (rc, out) = report_contracts_output f in
+      if rc <> 0 || not (contains out "`bump`") then
+        Alcotest.failf
+          "march --compile --report-contracts did not report `bump` (rc=%d):\n%s"
+          rc out;
       (match Cmd_fix.run ~contracts:true () with
        | Ok _ -> ()
        | Error e -> Alcotest.failf "forge fix --contracts failed: %s" e);
