@@ -71,8 +71,19 @@ type position =
 
 type nesting = Outermost | Nested   (* Nested = below the top of the declared type *)
 
-type site = { span : A.span; predicate : string; position : position; nesting : nesting }
+type site =
+  { span : A.span
+  ; predicate : string
+  ; origin : position    (* declaration-level, never relabelled *)
+  ; position : position  (* immediate structural container *)
+  ; nesting : nesting
+  }
 ```
+
+`origin` was added by Task 1's review. A sig or interface signature with any
+argument is a `TyArrow`, so its refinement is always `Nested` and its `position`
+is an arrow side. Without `origin`, Task 2 cannot tell a position the compiler
+already warns about from a genuine hole.
 
 `nesting` is the distinction the whole design turns on and it must come from the
 traversal's own depth, not from re-inspecting the type afterwards.
@@ -103,12 +114,14 @@ type disposition =
 
 Rules, in this order:
 
-1. `nesting = Nested` is `Unenforced "below the outermost position of the
-   declared type"`. Every extractor matches only an outermost `TyRefine`.
-2. `Sig_fn`, `Extern_fn`, `Iface_method` are `Inert_warned`, naming the existing
-   warning (`warn_sig_fn_refinement` and its siblings, `refine_check.ml:700-798`).
-   Assert the warning really fires for that position rather than assuming it; if
-   it does not, the site is `Unenforced`, which is a finding.
+1. `origin` is `Sig_fn`, `Extern_fn` or `Iface_method`: `Inert_warned`, naming the
+   existing warning (`warn_sig_fn_refinement` and its siblings,
+   `refine_check.ml:700-798`). This rule runs FIRST, before the nesting rule,
+   because such a signature is always nested. Assert the warning really fires for
+   that position rather than assuming it; if it does not, the site is
+   `Unenforced`, which is a finding.
+2. `nesting = Nested`: `Unenforced "below the outermost position of the declared
+   type"`. Every extractor matches only an outermost `TyRefine`.
 3. `Param` and `Lambda_param`: `Enforced` if `refined_param_ty` accepts the
    declared type, else `Unenforced` with the reason.
 4. `Return`: `Enforced` if `return_refine_ext` accepts, or the
@@ -132,10 +145,14 @@ saying the audit could not consult the checker, never a guess.
 - an ADT return contract that `check_post_induction` proves today: `Enforced`.
 - `type Box = { v : {Int | _ > 0} }`: `Unenforced`, nested.
 - `List({Int | _ > 0})` as a parameter type: `Unenforced`, nested.
-- a `sig` refinement: `Inert_warned`.
+- a `sig` refinement with an argument (`fn put : Int -> {Int | _ > 0}`):
+  `Inert_warned`. A nullary one is not enough; the arrow case is the one that
+  breaks if the rules are ordered wrongly.
+- an actor state field refinement: `Unenforced`.
 
 **Mutation:** make rule 4 consult only `return_refine_ext`; the ADT fixture must
-redden. Make rule 1 unconditional; the uncalled-parameter fixture must redden.
+redden. Make rule 2 unconditional; the uncalled-parameter fixture must redden.
+Swap rules 1 and 2; the `sig` arrow fixture must redden.
 
 Commit: `refine: classify each declared refinement as enforced, inert or unenforced`.
 
