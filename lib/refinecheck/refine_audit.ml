@@ -40,7 +40,14 @@ type site = {
   position : position;
   origin : position;
   nesting : nesting;
+  origin_ty : A.ty;
+  origin_fn : A.fn_def option;
 }
+
+type disposition =
+  | Enforced
+  | Inert_warned of string
+  | Unenforced of string
 
 (* -- Span and name helpers ------------------------------------------------ *)
 
@@ -126,8 +133,8 @@ let pat_name (p : A.pattern) : string =
    structural tag, so a refinement below one of those keeps whatever [pos]
    was already in force; only its [nesting] moves to [Nested] once
    [depth > 0]. [origin] is never affected by any of this. *)
-let rec walk_ty (sites : site list ref) ~(origin : position) (pos : position) (depth : int)
-    (t : A.ty) : unit =
+let rec walk_ty (sites : site list ref) ~(origin : position) ~(origin_ty : A.ty)
+    ~(origin_fn : A.fn_def option) (pos : position) (depth : int) (t : A.ty) : unit =
   match t with
   | A.TyRefine (base, _binder, pred) ->
     let nesting = if depth = 0 then Outermost else Nested in
@@ -136,24 +143,40 @@ let rec walk_ty (sites : site list ref) ~(origin : position) (pos : position) (d
         predicate = Refine_scope.pred_str pred;
         position = pos;
         origin;
-        nesting
+        nesting;
+        origin_ty;
+        origin_fn
       }
       :: !sites;
-    walk_ty sites ~origin pos (depth + 1) base
-  | A.TyCon (_, args) -> List.iter (walk_ty sites ~origin Type_arg (depth + 1)) args
+    walk_ty sites ~origin ~origin_ty ~origin_fn pos (depth + 1) base
+  | A.TyCon (_, args) ->
+    List.iter (walk_ty sites ~origin ~origin_ty ~origin_fn Type_arg (depth + 1)) args
   | A.TyArrow (a, b) ->
-    walk_ty sites ~origin Arrow_domain (depth + 1) a;
-    walk_ty sites ~origin Arrow_codomain (depth + 1) b
-  | A.TyTuple ts -> List.iter (walk_ty sites ~origin pos (depth + 1)) ts
-  | A.TyRecord fs -> List.iter (fun (_, t) -> walk_ty sites ~origin pos (depth + 1) t) fs
-  | A.TyLinear (_, t) -> walk_ty sites ~origin pos (depth + 1) t
+    walk_ty sites ~origin ~origin_ty ~origin_fn Arrow_domain (depth + 1) a;
+    walk_ty sites ~origin ~origin_ty ~origin_fn Arrow_codomain (depth + 1) b
+  | A.TyTuple ts -> List.iter (walk_ty sites ~origin ~origin_ty ~origin_fn pos (depth + 1)) ts
+  | A.TyRecord fs ->
+    List.iter (fun (_, t) -> walk_ty sites ~origin ~origin_ty ~origin_fn pos (depth + 1) t) fs
+  | A.TyLinear (_, t) -> walk_ty sites ~origin ~origin_ty ~origin_fn pos (depth + 1) t
   | A.TyChan _ | A.TyVar _ | A.TyNat _ | A.TyNatOp _ -> ()
 
 (* Entry point for a declared type: [pos] IS the origin here, by
    definition -- this is the top of the declared type at this declaration
-   position, before any structural relabelling has had a chance to happen. *)
-let start (sites : site list ref) (pos : position) (t : A.ty) : unit =
-  walk_ty sites ~origin:pos pos 0 t
+   position, before any structural relabelling has had a chance to happen.
+   [origin_ty] is [t] itself, captured once here and threaded unchanged
+   through the whole recursive walk of this declared type -- Task 2's
+   [classify] needs the UNMODIFIED declared type to hand to [refined_param_ty]
+   / [refined_scope_ty], which each expect exactly the shape a parameter's or
+   a let-binding's OWN annotation has, not a sub-form reached by descending
+   into it. [origin_fn] is [None] unless the caller is walking a real
+   [A.fn_def] whose return type this is (see [walk_fn]'s [Return] call); it
+   answers whether an extractor can even be consulted, not just what it says,
+   for the block-level [A.ELetFn] case where none of the checker's
+   postcondition machinery is ever invoked (see [walk_expr]'s [ELetFn] arm and
+   [classify]'s [Return] rule). *)
+let start ?(origin_fn : A.fn_def option = None) (sites : site list ref) (pos : position)
+    (t : A.ty) : unit =
+  walk_ty sites ~origin:pos ~origin_ty:t ~origin_fn pos 0 t
 
 (* -- The expression walk ---------------------------------------------------- *)
 
@@ -195,7 +218,18 @@ let rec walk_expr (sites : site list ref) (e : A.expr) : unit =
        this in the design's [position] type, so it reuses [Param]/[Return]
        under the local function's own name, exactly as a top-level [DFn]
        would: qualitatively the same position, just reached through an
-       expression rather than a decl. *)
+       expression rather than a decl.
+
+       No [~origin_fn] on the [Return] site below (it stays [None]): there
+       is no [A.fn_def] here at all, only bare params/return-type/body, and
+       even if one were synthesised it would misrepresent reality --
+       [check_fn_post_verdict] is invoked only through [visit_fn], reached
+       only from [A.DFn] / [A.DImpl] (see [refine_check.ml]'s [visit_decl]),
+       never from an [A.ELetFn]. A block-level function's return refinement
+       is not merely unreachable BY this module's extractors; the checker
+       itself never looks at it. [classify]'s [Return] rule reports this
+       directly rather than guessing at what an extractor would say about a
+       function definition that is never handed to one. *)
     List.iteri (fun idx (p : A.param) -> Option.iter (start sites (Param (n.A.txt, idx))) p.A.param_ty) ps;
     Option.iter (start sites (Return n.A.txt)) ret_ty;
     ge body
@@ -243,7 +277,14 @@ let walk_type_def (sites : site list ref) (type_name : string) (td : A.type_def)
 
 let walk_fn (sites : site list ref) (fd : A.fn_def) : unit =
   let fn_name = fd.A.fn_name.A.txt in
-  Option.iter (start sites (Return fn_name)) fd.A.fn_ret_ty;
+  (* [~origin_fn:(Some fd)] here (and only here): this is the one call to
+     [start] whose [fd] is a REAL top-level or `impl` method definition, the
+     exact shape [check_fn_post_verdict] consumes (called from [visit_fn],
+     reached only through [A.DFn] / [A.DImpl] -- see [walk_decls]). The
+     [ELetFn] arm of [walk_expr] below deliberately does NOT pass
+     [~origin_fn], because a block-level function's return type is never
+     handed to [check_fn_post_verdict] at all. *)
+  Option.iter (start sites ~origin_fn:(Some fd) (Return fn_name)) fd.A.fn_ret_ty;
   List.iter
     (fun (c : A.fn_clause) ->
       List.iteri
@@ -350,3 +391,169 @@ let sites (decls : A.decl list) : site list =
   let acc = ref [] in
   walk_decls acc decls;
   List.rev !acc
+
+(* -- Task 2: classification -------------------------------------------------
+
+   [classify] never emits a diagnostic, touches no obligation ledger, and
+   never invokes the solver: it calls the checker's own EXTRACTORS (which
+   return an [option], no solving involved) and reports what they say, rather
+   than restating their acceptance rules. Every module referenced below
+   ([Refine_post], reached through [Refine_check]'s own include chain
+   documented at the top of this file / the plan's Shared facts) is already a
+   dependency of this library. *)
+
+(* [check_post_induction]'s own OUTER guard (refine_post.ml:624-625), verified
+   against source and reproduced here -- NOT called -- because the function
+   itself is not callable as a pure predicate: on an accepted shape it
+   proceeds straight into building and discharging SMT queries (through
+   [Refine.discharge]), which [classify] must never do (see the .mli's "runs
+   without a solver"). Extracting a solver-free guard function out of
+   [refine_post.ml] is out of this task's file scope (Task 2 touches only
+   [refine_audit.ml] and [test/test_refinecheck.ml]), so this reproduces the
+   four conjuncts of the outer pattern match literally: a refined return type
+   whose base is an ADT that is NOT a record, exactly one function clause, and
+   that clause carries no `when` guard. This is a DUPLICATION, not a call --
+   a disclosed limitation, not an extraction. If [check_post_induction]'s
+   outer guard ever changes shape, this must be updated to match or the audit
+   will misclassify a Return site; it does not reproduce anything past the
+   outer match (the ECon/EMatch body-shape acceptance below it), since that
+   leads directly into [check_tail]'s own solver calls and duplicating it
+   would mean duplicating most of the function. *)
+let check_post_induction_guard_matches (fd : A.fn_def) : bool =
+  match fd.A.fn_ret_ty, fd.A.fn_clauses with
+  | Some (A.TyRefine (rbase, _binder, _pred)), [ c ] ->
+    Refine_post.is_adt_base rbase
+    && (not (Refine_post.is_record_base rbase))
+    && c.A.fc_guard = None
+  | _ -> false
+
+(* The reason a [Nested] site is unenforced, specialised by [position] when
+   the structural container names something specific ([Type_arg],
+   [Arrow_domain], [Arrow_codomain]), and falling back to rule 1's own literal
+   wording otherwise (reached when [position] still equals [origin] despite
+   being [Nested] -- below a [TyTuple] element, a nested [TyRecord] field, a
+   [TyLinear] wrapper, or a further layer of a stacked refinement; see the
+   .mli's [nesting] doc). *)
+let nested_reason (pos : position) : string =
+  match pos with
+  | Type_arg ->
+    "the refinement sits inside a type constructor's argument (for example \
+     `List({Int | _ > 0})`); refined_param_ty, refined_scope_ty and \
+     return_refine_ext all match only an outermost TyRefine, so a refinement \
+     this deep is invisible to every one of them"
+  | Arrow_domain ->
+    "the refinement sits in the domain of a function-typed value (for \
+     example `({Int | _ > 0}) -> Int`); no extractor descends into an arrow \
+     type looking for a nested refinement"
+  | Arrow_codomain ->
+    "the refinement sits in the codomain of a function-typed value (for \
+     example `Int -> {Int | _ > 0}`); no extractor descends into an arrow \
+     type looking for a nested refinement"
+  | Param _ | Return _ | Let_annot _ | Field _ | Variant_arg _ | Impl_ty _
+  | Lambda_param _ | Expr_annot | Sig_fn _ | Extern_fn _ | Iface_method _
+  | Actor_handler_param _ ->
+    "below the outermost position of the declared type"
+
+let classify (site : site) : disposition =
+  match site.origin with
+  (* Rule 2, tried FIRST: a `sig` / `extern` / `interface` entry's WHOLE
+     declared type is one inert unit as far as the existing warning is
+     concerned, regardless of nesting -- see the .mli's [origin] doc and
+     Task 1's review, finding 1. Fires unconditionally here because a real
+     fixture for each of the three positions was compiled and the warning was
+     observed to fire (see task-2-report.md); if a future change removed one
+     of those warnings this hardcoded verdict would go stale, exactly the
+     risk the report calls out. *)
+  | Sig_fn name ->
+    Inert_warned
+      (Printf.sprintf
+         "warn_sig_fn_refinement: the `sig` signature of `%s` carries a \
+          refinement, which enforces nothing -- a `sig` signature is never \
+          read by the refinement checker" name)
+  | Extern_fn name ->
+    Inert_warned
+      (Printf.sprintf
+         "warn_extern_fn_refinement: the `extern` signature of `%s` carries \
+          a refinement, which enforces nothing -- the callee is not March \
+          code" name)
+  | Iface_method name ->
+    Inert_warned
+      (Printf.sprintf
+         "warn_iface_method_refinement: the interface signature of `%s` \
+          carries a refinement, which enforces nothing -- an interface \
+          method signature is never read by the refinement checker" name)
+  (* Rule 1: nesting, tested for everything rule 2 did not already dispose
+     of. *)
+  | (Param _ | Lambda_param _ | Return _ | Let_annot _ | Field _
+    | Variant_arg _ | Impl_ty _ | Type_arg | Arrow_domain | Arrow_codomain
+    | Expr_annot | Actor_handler_param _)
+    when site.nesting = Nested -> Unenforced (nested_reason site.position)
+  (* Rules 3-6: [nesting = Outermost] here, so [origin = position] (see the
+     .mli), and every remaining case dispatches on the declaration-level
+     kind. *)
+  | Param _ | Lambda_param _ -> (
+    match Refine_post.refined_param_ty (Some site.origin_ty) with
+    | Some _ -> Enforced
+    | None ->
+      Unenforced
+        "refined_param_ty does not accept this declared base type: only an \
+         Int, a String, a Bool, a Float, or a registered record/ADT base is \
+         scope-checked at a parameter")
+  | Return _ -> (
+    match site.origin_fn with
+    | None ->
+      Unenforced
+        "this is a block-level function's return type: check_fn_post_verdict \
+         is reached only through visit_fn, which is called for A.DFn and \
+         A.DImpl, never for a local A.ELetFn, so no extractor is ever \
+         consulted for this position"
+    | Some fd -> (
+      match Refine_post.return_refine_ext fd with
+      | Some _ -> Enforced
+      | None ->
+        if check_post_induction_guard_matches fd then Enforced
+        else
+          Unenforced
+            "the return refinement matches neither return_refine_ext's \
+             accepted bases (Int, Bool, Float, or a registered record) nor \
+             check_post_induction's Tier 2 induction shape (a single clause \
+             with no guard, returning a non-record ADT)"))
+  | Let_annot _ -> (
+    match Refine_post.refined_scope_ty (Some site.origin_ty) with
+    | Some _ -> Enforced
+    | None -> Unenforced "refined_scope_ty does not accept this declared type at a local binding")
+  | Field _ ->
+    Unenforced
+      "a record (or actor-state) field's declared type is never re-examined \
+       once a value is constructed; the checker has no extractor for a \
+       stored field, only for a parameter, a return, or a let-binding"
+  | Variant_arg _ ->
+    Unenforced
+      "a variant constructor's argument type is never re-examined once a \
+       value is constructed; the checker has no extractor for a stored \
+       constructor argument"
+  | Impl_ty _ ->
+    Unenforced
+      "the type an `impl Iface(T)` block names is a type ascription, not a \
+       value position the checker ever inspects for a refinement"
+  | Expr_annot ->
+    Unenforced
+      "an EAnnot expression annotation is not read by any refinement \
+       extractor: EAnnot is produced only by desugar's DApp handling and is \
+       never scope-checked"
+  | Actor_handler_param _ ->
+    Unenforced
+      "an actor handler parameter's declared type is never scope-checked: \
+       refined_param_ty is called only from a `fn`'s own parameter walk, \
+       never from an actor handler's"
+  (* [origin] is set only by [start], which is called exclusively with a
+     declaration-level position -- never with [Type_arg], [Arrow_domain] or
+     [Arrow_codomain] (see [walk_ty]: those three are only ever passed as the
+     STRUCTURAL [pos] argument of a recursive call, never as [origin]). A
+     [site] reaching this arm would violate that invariant; surfacing it as a
+     hard failure is more useful than silently inventing a disposition for
+     data this module never produces. *)
+  | Type_arg | Arrow_domain | Arrow_codomain ->
+    failwith
+      "Refine_audit.classify: unreachable -- origin is never Type_arg / \
+       Arrow_domain / Arrow_codomain"

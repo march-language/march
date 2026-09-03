@@ -12315,6 +12315,203 @@ let audit_arrow_signature_suite =
           (List.map (fun (o, p, n, i) -> (o, p, (n, i))) labels))
   ]
 
+(* ── Task 2: classification ──────────────────────────────────────────────
+   Each fixture declares exactly one refinement, so [classify_only_site]
+   parses, enumerates, and classifies it in one step and fails loudly if the
+   fixture accidentally produces more (or fewer) than one site -- a wrong
+   fixture must not silently pass by picking the "first" site. *)
+
+(* [is_adt_base] / [is_record_base] (Refine_post's Return rule, via
+   [check_post_induction_guard_matches]) read the GLOBAL [adt_ctors] /
+   [ctor_field_names] tables that [check_module] populates as a side effect
+   of [register_adt_names] / [register_field_sorts] before it ever reaches
+   [warn_predicate_decls]. A fixture that never runs through [check_module]
+   (as these do -- [classify] must run without a solver, and these tests
+   only need the SIGNATURE tables, not a full check) must prime those tables
+   itself or [Tree]-shaped fixtures below misclassify as [Unenforced] purely
+   because the ADT registry is empty, not because the checker actually
+   rejects them. Mirrors [check_module]'s own order (refine_check.ml:1928-29,
+   both exposed for exactly this in [Refine_check]'s .mli). *)
+let classify_only_site (src : string) : RAudit.site * RAudit.disposition =
+  let m = parse src in
+  March_refinecheck.Refine_check.register_adt_names m.March_ast.Ast.mod_decls;
+  March_refinecheck.Refine_check.register_field_sorts m.March_ast.Ast.mod_decls;
+  match RAudit.sites m.March_ast.Ast.mod_decls with
+  | [ s ] -> (s, RAudit.classify s)
+  | sites ->
+    Alcotest.failf "expected exactly one refinement site, got %d" (List.length sites)
+
+let disposition_tag = function
+  | RAudit.Enforced -> "Enforced"
+  | RAudit.Inert_warned _ -> "Inert_warned"
+  | RAudit.Unenforced _ -> "Unenforced"
+
+let check_enforced name src =
+  Alcotest.test_case name `Quick (fun () ->
+      let _, d = classify_only_site src in
+      Alcotest.(check string) "disposition" "Enforced" (disposition_tag d))
+
+let check_unenforced name src =
+  Alcotest.test_case name `Quick (fun () ->
+      let _, d = classify_only_site src in
+      Alcotest.(check string) "disposition" "Unenforced" (disposition_tag d))
+
+let check_inert_warned name src =
+  Alcotest.test_case name `Quick (fun () ->
+      let _, d = classify_only_site src in
+      Alcotest.(check string) "disposition" "Inert_warned" (disposition_tag d))
+
+let audit_classify_suite =
+  [ (* The false-positive case the design exists to avoid: a refined
+       parameter that is never called still obliges nothing at a call site
+       TODAY, but [refined_param_ty] accepts its declared type, so it is
+       [Enforced] -- the checker's own machinery is in place for it, an
+       uncalled function is simply not exercising it. Pinned exactly because
+       an audit that reported this as a hole would be actively misleading. *)
+    check_enforced "an uncalled refined parameter is Enforced"
+      {|mod M do
+          fn f(n : {Int | _ > 0}) : Int do n end
+        end|};
+    check_unenforced "a refined String return is Unenforced (return_refine_ext has no String arm)"
+      {|mod M do
+          fn f() : {String | _ == "a"} do "a" end
+        end|};
+    check_enforced "a refined Int return is Enforced"
+      {|mod M do
+          fn f() : {Int | _ > 0} do 1 end
+        end|};
+    (* Reuses the exact Tier 2 fixture the `tier2-induction` group already
+       proves is discharged today (`tier2_src`'s `insert`, asserted via
+       `has_refine_error tier2_src = true` at line ~2608): `size(Tree)` is an
+       ADT (not record) return refined with a relational postcondition,
+       proven by [check_post_induction]'s structural-induction path since
+       [return_refine_ext] has no ADT-variant arm at all. *)
+    check_enforced "an ADT return contract check_post_induction proves today is Enforced"
+      {|mod M do
+          type Tree = Leaf | Node(Tree, Int, Tree)
+          @[measure]
+          fn size(t : Tree) : Int do
+            match t do
+              Leaf -> 0
+              Node(l, _, r) -> 1 + size(l) + size(r)
+            end
+          end
+          fn insert(t : Tree, x : Int) : {Tree | size(_) == size(t) + 1} do
+            match t do
+              Leaf -> Node(Leaf, x, Leaf)
+              Node(l, v, r) -> Node(insert(l, x), v, r)
+            end
+          end
+        end|};
+    check_unenforced "a refined record field is Unenforced"
+      {|mod M do
+          type Box = { v : {Int | _ > 0} }
+        end|};
+    check_unenforced "a refined List(...) element as a parameter type is Unenforced, nested"
+      {|mod M do
+          fn f(xs : List({Int | _ > 0})) : Int do 0 end
+        end|};
+    (* The arrow-shaped case, not a nullary signature: this is the one that
+       breaks if rule 2 (Inert_warned) is not tried before rule 1 (nesting),
+       since `put`'s one site is `Nested` (Arrow_codomain) -- see task-2-brief
+       .md's "The correction the plan does not have". *)
+    check_inert_warned "a sig entry with an argument (fn put : Int -> {Int | _ > 0}) is Inert_warned"
+      {|mod M do
+          sig Store do
+            fn put : Int -> {Int | _ > 0}
+          end
+        end|};
+    check_unenforced "an actor state field refinement is Unenforced"
+      {|mod M do
+          actor Counter do
+            state { value : {Int | _ >= 50} }
+            init { value: 0 }
+            on Bump(d : Int) do
+              { state with value: state.value + d }
+            end
+          end
+        end|}
+  ]
+
+(* Reason-string discrimination: a classify that returns the right
+   CONSTRUCTOR for the wrong reason (e.g. every Unenforced site sharing one
+   sentence) would still pass every test above. These pin that the reason
+   text actually names the position-specific fact rather than a shared
+   placeholder -- the precedent named in the brief
+   (specs/progress/2026-07-31-refine-sig-and-extern-signature-refinements-inert.md)
+   is that a shared remedy gives wrong advice somewhere. *)
+let audit_classify_reason_suite =
+  [ Alcotest.test_case "the nested List(...) reason names Type_arg, not a generic sentence"
+      `Quick (fun () ->
+        let _, d = classify_only_site
+            {|mod M do
+                fn f(xs : List({Int | _ > 0})) : Int do 0 end
+              end|}
+        in
+        match d with
+        | RAudit.Unenforced reason ->
+          Alcotest.(check bool) "names the type-constructor argument" true
+            (contains reason "type constructor's argument")
+        | _ -> Alcotest.fail "expected Unenforced")
+  ; Alcotest.test_case "the record-field reason names the field, not the nested-position sentence"
+      `Quick (fun () ->
+        let _, d = classify_only_site
+            {|mod M do
+                type Box = { v : {Int | _ > 0} }
+              end|}
+        in
+        match d with
+        | RAudit.Unenforced reason ->
+          Alcotest.(check bool) "names the field" true (contains reason "field")
+        | _ -> Alcotest.fail "expected Unenforced")
+  ; Alcotest.test_case "the actor-state reason names it distinctly from the record-field reason"
+      `Quick (fun () ->
+        let _, d = classify_only_site
+            {|mod M do
+                actor Counter do
+                  state { value : {Int | _ >= 50} }
+                  init { value: 0 }
+                  on Bump(d : Int) do
+                    { state with value: state.value + d }
+                  end
+                end
+              end|}
+        in
+        match d with
+        | RAudit.Unenforced reason ->
+          Alcotest.(check bool) "names a stored field" true (contains reason "field")
+        | _ -> Alcotest.fail "expected Unenforced")
+  ; Alcotest.test_case "the sig Inert_warned names warn_sig_fn_refinement"
+      `Quick (fun () ->
+        let _, d = classify_only_site
+            {|mod M do
+                sig Store do
+                  fn put : Int -> {Int | _ > 0}
+                end
+              end|}
+        in
+        match d with
+        | RAudit.Inert_warned reason ->
+          Alcotest.(check bool) "names the sig warning" true
+            (contains reason "warn_sig_fn_refinement")
+        | _ -> Alcotest.fail "expected Inert_warned")
+  ; Alcotest.test_case "a block-level function's return refinement is Unenforced with its own reason"
+      `Quick (fun () ->
+        let _, d = classify_only_site
+            {|mod M do
+                fn outer() : Int do
+                  fn helper() : {Int | _ > 0} do 1 end
+                  helper()
+                end
+              end|}
+        in
+        match d with
+        | RAudit.Unenforced reason ->
+          Alcotest.(check bool) "names ELetFn / block-level" true
+            (contains reason "block-level")
+        | _ -> Alcotest.fail "expected Unenforced")
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -12393,4 +12590,5 @@ let () =
       ("let-equality", let_equality_suite);
       ("let-equality-alias", let_equality_alias_suite);
       ("arith-actual", arith_actual_suite);
-      ("audit-sites", audit_sites_suite @ audit_stacked_refinement_suite @ audit_arrow_signature_suite) ]
+      ("audit-sites", audit_sites_suite @ audit_stacked_refinement_suite @ audit_arrow_signature_suite);
+      ("audit-classify", audit_classify_suite @ audit_classify_reason_suite) ]

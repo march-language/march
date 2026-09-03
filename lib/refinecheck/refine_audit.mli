@@ -123,6 +123,24 @@ type site = {
   position : position;
   origin : position;
   nesting : nesting;
+  origin_ty : March_ast.Ast.ty;
+      (** The declared type exactly as found at [origin], UNMODIFIED by any
+          structural relabelling -- the same value [start] was called with.
+          [classify] hands this straight to [Refine_scope.refined_param_ty] /
+          [Refine_scope.refined_scope_ty] / inspects it directly for a
+          [Return] site, since those extractors each expect exactly the shape
+          a parameter's, a let-binding's, or a function's own return
+          annotation has. *)
+  origin_fn : March_ast.Ast.fn_def option;
+      (** [Some fd] only when [origin] is a [Return] site backed by a REAL
+          top-level [fn] or `impl` method definition -- the exact shape
+          [check_fn_post_verdict] consumes (reached only through [A.DFn] /
+          [A.DImpl]). [None] everywhere else, including a block-level
+          function's ([A.ELetFn]) own [Return] site: the checker's
+          postcondition machinery is never invoked on a local function at
+          all, so there is no extractor for [classify] to consult, and
+          fabricating a synthetic [A.fn_def] to feed one would misrepresent
+          that fact rather than report it. *)
 }
 
 (** Enumerate every declared [A.TyRefine] occurrence reachable from [decls],
@@ -132,3 +150,45 @@ type site = {
     traversal's own left-to-right, top-to-bottom order; callers that need a
     set should build one from the result. *)
 val sites : March_ast.Ast.decl list -> site list
+
+(** Task 2: what, if anything, the checker actually does with a declared
+    refinement occurrence. *)
+type disposition =
+  | Enforced  (** the checker's own extractor accepts this declared type. *)
+  | Inert_warned of string
+      (** the position is one of the three the compiler already names in a
+          diagnostic ([warn_sig_fn_refinement], [warn_extern_fn_refinement],
+          [warn_iface_method_refinement]) -- the string names which one. *)
+  | Unenforced of string
+      (** declared, silent, and nothing tells the user: the string is a
+          reason specific to THIS site's position, never a shared sentence
+          reused across positions (see [classify]'s implementation notes). *)
+
+(** Classify one [site]. A pure function of the site (plus whatever the
+    checker's own extractors -- called, never restated -- say about
+    [origin_ty] / [origin_fn]): emits no diagnostic, touches no obligation
+    ledger, and never invokes the solver. Rule order (see
+    [refine_audit.ml] for the full rationale and the exact reason string per
+    position):
+
+    1. [origin] is [Sig_fn] / [Extern_fn] / [Iface_method]: [Inert_warned],
+       tried BEFORE nesting, because such a signature's refinement is always
+       [Nested] (any signature that takes an argument is a [TyArrow]) and
+       nesting would otherwise hide a position the compiler already warns
+       about by name.
+    2. [nesting = Nested]: [Unenforced], for everything rule 1 did not
+       already dispose of.
+    3. [Param] / [Lambda_param]: [Enforced] iff [Refine_scope.refined_param_ty]
+       accepts [origin_ty].
+    4. [Return]: [Enforced] iff [Refine_post.return_refine_ext] (via
+       [origin_fn]) accepts, or [check_post_induction]'s own outer guard
+       (reproduced, not called -- see [refine_audit.ml] -- because the real
+       function invokes the solver on an accepted shape) would match.
+       [origin_fn = None] (a block-level [A.ELetFn]) is always [Unenforced]:
+       the checker never verifies a local function's return at all.
+    5. [Let_annot]: [Enforced] iff [Refine_scope.refined_scope_ty] accepts
+       [origin_ty].
+    6. Every other position ([Field], [Variant_arg], [Impl_ty], [Expr_annot],
+       [Actor_handler_param]): always [Unenforced], each with its own reason
+       string -- there is no extractor for any of them, nested or not. *)
+val classify : site -> disposition
