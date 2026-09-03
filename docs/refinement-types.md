@@ -828,13 +828,14 @@ once shipped with zero enforcement while every test stayed green.
 
 ```
 $ march --check --refine-report stdlib/list.march
-refinement obligations (user code): 0 proved, 0 violated, 0 trusted, 6 skipped
-  skipped (unconstrained-subject): 5
-  skipped (unreflectable-predicate): 1
+refinement obligations (user code): 1 proved, 0 violated, 0 trusted, 5 skipped
+  skipped (partial-conjunct): 1
+  skipped (unconstrained-subject): 4
   by kind: 6 precondition, 0 postcondition, 0 division
-refinement obligations (user + stdlib): 16 proved, 0 violated, 0 trusted, 34 skipped
-  skipped (unconstrained-subject): 32
-  skipped (unreflectable-predicate): 2
+refinement obligations (user + stdlib): 17 proved, 0 violated, 0 trusted, 33 skipped
+  skipped (partial-conjunct): 1
+  skipped (solver-undecided): 1
+  skipped (unconstrained-subject): 31
   by kind: 50 precondition, 0 postcondition, 0 division
 ```
 
@@ -866,9 +867,10 @@ obligations at all, and the floor is read from a small fixture with one obligati
 alias stops working. This is the failure mode the report exists to expose: a skip and a
 proof both exit 0, and only the count can tell them apart.
 
-Every skip states *why*, one of nine reasons: the predicate uses vocabulary the
-checker can't translate (`unreflectable-predicate`), the argument's own value
-didn't translate (`unreflectable-subject`), a symbol would have needed two
+Every skip states *why*, one of nine reasons: the predicate's own
+sub-expression named in the message has no SMT translation
+(`unreflectable-predicate`), the argument named in the message could not be
+translated (`unreflectable-subject`), a symbol would have needed two
 different sorts (`sort-conflict`), the float wellsortedness gate rejected it
 (`float-sort-gate`), a measure alias the guard relied on had been withdrawn
 (`alias-withdrawn`; see below), no fact the checker derived constrains the
@@ -883,19 +885,91 @@ more specific answers to the same question `solver-undecided` asks: they fire
 only where the VC was built and the solver ran, and each names a narrower
 reason the proof didn't go through.
 
-These three diagnosed reasons print at *every* call site that has one, not
-once per module. Five of the residual reasons (`solver-undecided`,
-`unreflectable-predicate`, `unreflectable-subject`, `sort-conflict`, and
-`float-sort-gate`) keep the older behavior: one hint per module, because their
-message says the same thing regardless of which call triggered it. A diagnosed
-reason does not: "nothing constrains `n`" and "`_ >= 0` held here, `_ < len(xs)`
-did not" are different facts about different calls, so printing only the first
-one found would hide the rest.
+These three diagnosed reasons, plus `unreflectable-predicate` and
+`unreflectable-subject`, print at *every* call site that has one, not once
+per module: both of those two now name the specific sub-expression or
+argument that failed, so repeating the message at every site is a distinct
+fact each time. Three of the residual reasons (`solver-undecided`,
+`sort-conflict`, and `float-sort-gate`) keep the older behavior: one hint per
+module, because their message says the same thing regardless of which call
+triggered it. A diagnosed reason does not: "nothing constrains `n`" and
+"`_ >= 0` held here, `_ < len(xs)` did not" are different facts about
+different calls, so printing only the first one found would hide the rest.
 
 `alias-withdrawn` follows neither rule: outside `cap verified` it prints no
 hint at all, not even once per module. It is still counted in
 `--refine-report`, and under `cap verified` it becomes its own error; see
 [below](#when-the-guard-is-right-and-the-error-still-fires).
+
+**Which one gets blamed.** A call's argument (the "subject") is reflected
+first; if that reflection fails, the whole call is filed as
+`unreflectable-subject` naming the argument, and the predicate is never even
+reached. Only when the subject reflects fine does a further failure get
+filed as `unreflectable-predicate`, naming the innermost sub-expression of
+the predicate that had no translation. The same rule applies to a
+postcondition: the function's own return expression is the subject there,
+so a return expression that fails to reflect is `unreflectable-subject`, not
+`unreflectable-predicate`, even when the postcondition itself is fine. One
+gap: a predicate that never reaches the bare subject at all (only a measure
+over it, or an opaque call over it) still blames the predicate when the
+predicate is itself unreflectable, even though the subject may also be
+opaque. A sibling parameter's actual (an argument the predicate mentions by
+name, not the refined parameter's own subject) is not covered by this rule
+yet and still blames the predicate.
+
+Two generated examples, one per reason. `unreflectable-subject`, from the
+compiler's own test corpus (`test/native/simd_lane_panic.march`, a
+`Simd.extract_i32x4` call whose lane index comes from an unrefined helper):
+
+```
+$ march --check test/native/simd_lane_panic.march
+
+-- HINT -- test/native/simd_lane_panic.march
+
+precondition `0 <= _ && _ < 4` on `Simd.extract_i32x4` was NOT verified here.
+the argument `lane(1)` could not be translated to SMT, so no goal was built
+
+25 |     println(Simd.extract_i32x4(v, lane(1)))
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+```
+
+`unreflectable-predicate`, for a predicate built on an ordinary function
+rather than a measure:
+
+```
+mod UpDoc do
+  needs IO.Console
+
+  pfn is_prime(n : Int) : Bool do n == 2 || n == 3 || n == 5 || n == 7 end
+
+  fn f(n : {Int | is_prime(_)}) : Int do n end
+
+  fn main(_cap_console : Cap(IO.Console)) : () do
+    println(f(7))
+  end
+end
+```
+
+```
+$ march --check up_doc.march
+
+-- WARNING -- up_doc.march
+
+`is_prime` is not a measure or known predicate, so this refinement is not checked. Annotate the function `@[measure]`, or use a supported predicate.
+
+6 |   fn f(n : {Int | is_prime(_)}) : Int do n end
+                      ^^^^^^^^^^^
+
+
+
+-- HINT -- up_doc.march
+
+precondition `is_prime(_)` on `f` was NOT verified here.
+the predicate's `is_prime(_)` has no SMT translation
+
+9 |     println(f(7))
+                ^^^^
+```
 
 The counts include both **preconditions checked at call sites** and
 **postconditions**: a function's own return value checked against its declared

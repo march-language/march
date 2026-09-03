@@ -789,32 +789,37 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                | Obligation.Alias_withdrawn _ -> false
                | Obligation.Unconstrained_subject _
                | Obligation.Opaque_application _
-               | Obligation.Partial_conjunct _ -> true
+               | Obligation.Partial_conjunct _
+               | Obligation.Unreflectable_subject _
+               (* Now that this reason carries a payload naming the specific
+                  failing sub-expression (Task 3), it is a specific, actionable
+                  fact about THIS call site, not a message that repeats
+                  verbatim everywhere — so it reports per-site like the other
+                  named reasons above, not throttled. *)
+               | Obligation.Unreflectable_predicate _ -> true
                | Obligation.Solver_undecided
-               | Obligation.Unreflectable_predicate
-               | Obligation.Unreflectable_subject
                | Obligation.Sort_conflict
                | Obligation.Float_sort_gate -> not !unverified_hinted) ->
       (match r with
        | Obligation.Solver_undecided
-       | Obligation.Unreflectable_predicate
-       | Obligation.Unreflectable_subject
        | Obligation.Sort_conflict
        | Obligation.Float_sort_gate -> unverified_hinted := true
        | Obligation.Unconstrained_subject _
        | Obligation.Opaque_application _
        | Obligation.Partial_conjunct _
+       | Obligation.Unreflectable_subject _
+       | Obligation.Unreflectable_predicate _
        | Obligation.Alias_withdrawn _ -> ());
       let body =
         match r with
         | Obligation.Unconstrained_subject _
         | Obligation.Opaque_application _
-        | Obligation.Partial_conjunct _ ->
+        | Obligation.Partial_conjunct _
+        | Obligation.Unreflectable_subject _
+        | Obligation.Unreflectable_predicate _ ->
           Printf.sprintf "%s `%s` on `%s` was NOT verified here.\n%s"
             obligation_noun (pred_str rp.pred) callee (Obligation.reason_detail r)
         | Obligation.Solver_undecided
-        | Obligation.Unreflectable_predicate
-        | Obligation.Unreflectable_subject
         | Obligation.Sort_conflict
         | Obligation.Float_sort_gate
         | Obligation.Alias_withdrawn _ ->
@@ -1957,26 +1962,101 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
       path;
     (* [`Skip]: a record parameter whose actual could not be reflected — build
        no goal at all, so neither discharge runs and the call is passed over. *)
+    (* [pred_fail_expr] captures [smt_of_r]'s [Error] — the innermost
+       sub-expression of [rp.pred] that failed to reflect — for the
+       `Unreflectable_predicate` filing below, WITHOUT changing which branch
+       of the outer [match] runs: [`Skip] never calls [smt_of_r] at all (the
+       ref stays [None], and is never read on that path), and [Ok]/[Error]
+       collapse to [Some]/[None] exactly as [smt_of] did, so the wellsorted
+       and Sort_conflict arms below are untouched. *)
+    let pred_fail_expr = ref None in
     (match
        (match mode with
         | `Skip -> None
         | `Other | `Record _ ->
-          smt_of ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app
-            ~resolve_tester ~resolve_str_lit:str_lit_const rp.pred)
+          (match
+             smt_of_r ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app
+               ~resolve_tester ~resolve_str_lit:str_lit_const rp.pred
+           with
+           | Ok t -> Some t
+           | Error e ->
+             pred_fail_expr := Some e;
+             None))
      with
      | None ->
        (* Two different causes reach this arm and they must not be conflated:
-          `Skip` means the SUBJECT (a record actual) did not reflect, while the
-          other modes mean the PREDICATE itself did not.  The distinction was
-          cosmetic while it only fed a debug count; `cap verified` puts the
-          reason in front of a user, and telling someone their perfectly
-          reflectable predicate is unreflectable sends them after the wrong
-          thing. *)
+          the SUBJECT (the actual argument) not reflecting, versus the
+          PREDICATE itself not translating.  `Skip` is always the former.  For
+          `Other`, a memo table tells the two apart AFTER THE FACT, without
+          forcing a reflection the predicate would never have attempted on
+          its own: if the predicate never mentions the binder as a bare
+          scalar (e.g. it only ever appears inside a MEASURE application,
+          such as Tier 2 induction's `size(t) < 1`, which resolves through
+          [resolve_measure]/[resolve_measure_app] and never touches either
+          memo), the failure must be the predicate's.  Forcing the reflection
+          unconditionally here — the first attempt at this task — broke
+          exactly that case: a Tree actual whose own scalar reflection fails
+          (Tree is not Int) but whose MEASURE the induction machinery proves
+          anyway, filed as a false `unreflectable-subject` before the
+          induction had a chance to run (`test tier2-induction`, 4 fixtures
+          reddened).
+
+          The memo consulted depends on the subject's own sort: a String self
+          is pre-reflected EAGERLY, unconditionally, before path translation
+          (`if self_is_str then ignore (resolve_var rp.binder)`, above), so
+          [str_reflected]'s `"$self"` entry is always populated by the time
+          this arm runs and needs no special-casing beyond reading the right
+          table. Every other scalar sort goes through [reflect_cache] instead,
+          the SAME memo [resolve_var]'s `is_self` branch populates under the
+          key `"$self"` lazily, only if the predicate actually reached a bare
+          occurrence of the binder. In both tables a present-but-`Some` entry
+          means the subject reflected fine (to a compound term [mark_self]
+          does not track, e.g. an arithmetic actual) and some OTHER conjunct
+          is what failed — still the predicate's fault. *)
+       let self_reflection_failed =
+         if self_is_str then Hashtbl.find_opt str_reflected "$self" = Some None
+         else
+           match Hashtbl.find_opt reflect_cache "$self" with
+           | Some None -> true
+           | Some (Some _) | None -> false
+       in
+       (* [pred_str] falls back to the literal placeholder `<predicate>` for
+          an actual it cannot render as source syntax (an `if`, a lambda
+          passed to another call, …) — see [refine_scope.ml]'s printer.
+          Naming the argument `<predicate>` in the message is worse than
+          naming nothing: it reads as if that were the user's own spelling.
+          When the actual renders to the placeholder, name the PARAMETER
+          instead, from [sg.param_names] — the SAME lookup the VIOLATION
+          message below this arm uses to print ``argument `n` of `pos` ``.
+          [rp.binder] is the wrong fallback here: it is the refinement's own
+          binder spelling, usually the anonymous `_` (as in `{Int | 0 <= _ &&
+          _ < 4}`), which is not a name the user's call site ever mentions and
+          would leave the message pointing at nothing legible.
+
+          The fallback names a PARAMETER, not the call site's own text, so
+          the phrase has to say so explicitly: "the argument passed for
+          `s`" rather than "the argument `s`", which would misread `s` as
+          the caller's own expression. *)
+       let self_display =
+         let rendered = pred_str self_actual in
+         if rendered <> "<predicate>" then Printf.sprintf "the argument `%s`" rendered
+         else
+           let pname =
+             match List.nth_opt sg.param_names rp.idx with
+             | Some pname when pname <> "" -> pname
+             | _ -> rp.binder
+           in
+           Printf.sprintf "the argument passed for `%s`" pname
+       in
        note
          (Obligation.Skipped
             (match mode with
-             | `Skip -> Obligation.Unreflectable_subject
-             | `Other | `Record _ -> Obligation.Unreflectable_predicate))
+             | `Skip -> Obligation.Unreflectable_subject self_display
+             | `Other when self_reflection_failed ->
+               Obligation.Unreflectable_subject self_display
+             | `Other | `Record _ ->
+               Obligation.Unreflectable_predicate
+                 (pred_str (Option.value !pred_fail_expr ~default:rp.pred))))
      | Some goal when not (wellsorted (Hashtbl.mem str_names) goal) ->
        note (Obligation.Skipped Obligation.Sort_conflict)
      | Some goal ->

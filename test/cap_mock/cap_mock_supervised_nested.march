@@ -1,0 +1,80 @@
+mod CapMockSupervisedNested do
+  -- Capability mocking reaching the child of a NESTED supervisor.
+  --
+  -- Top supervises Mid supervises Leaf. Mid's spawn glue used to be passed
+  -- to register_supervisor_child as a VALUE (for respawn), which froze its
+  -- arity, so it could carry nothing to Leaf and Leaf ran unmocked. The
+  -- respawn value is now a closure that calls Mid's glue with the
+  -- capabilities in scope, so Mid's glue carries them like Top's does.
+  --
+  -- Four lines, and which are mocked is the whole test:
+  --   in    : the grandchild of a Top spawned inside with_cap -> mocked
+  --   again : after `kill`ing Mid, the NEW Leaf its respawn created -> still
+  --           mocked (the closure re-supplies the caps)
+  --   third : after killing Mid a SECOND time -> still mocked; this row is
+  --           the one only the runtime's per-respawn inc of the closure
+  --           makes possible (the apply fn drops what it is handed)
+  --   out   : the grandchild of a Top spawned outside, sent to AFTER the
+  --           block closes -> real
+  needs IO.Console
+
+  actor Leaf do
+    state { n : Int }
+    init  { n: 0 }
+    on Say(s : String) do
+      print_line("leaf:" ++ s)
+      { state with n: state.n + 1 }
+    end
+  end
+
+  actor Mid do
+    state { l : Int }
+    init  { l: 0 }
+    supervise do
+      strategy one_for_one
+      max_restarts 5 within 60
+      Leaf l
+    end
+  end
+
+  actor Top do
+    state { m : Int }
+    init  { m: 0 }
+    supervise do
+      strategy one_for_one
+      max_restarts 5 within 60
+      Mid m
+    end
+  end
+
+  fn field_pid(p, name) do
+    match get_actor_field(p, name) do
+      None    -> pid_of_int(-1)
+      Some(n) -> pid_of_int(n)
+    end
+  end
+
+  fn mid_of(top) do field_pid(top, "m") end
+  fn leaf_of(top) do field_pid(mid_of(top), "l") end
+
+  fn main(c : Cap(IO.Console)) do
+    let outside = spawn(Top)
+    let mock = cap_impl(c, { cap_ops_empty(c) with
+      print_line: Some(fn s -> print("MOCK[" ++ s ++ "]\n")) })
+    with_cap(mock, fn _ -> do
+      let inside = spawn(Top)
+      send(leaf_of(inside), Say("in"))
+      run_until_idle()
+      kill(mid_of(inside))
+      run_until_idle()
+      send(leaf_of(inside), Say("again"))
+      run_until_idle()
+      kill(mid_of(inside))
+      run_until_idle()
+      send(leaf_of(inside), Say("third"))
+      run_until_idle()
+    end)
+    send(leaf_of(outside), Say("out"))
+    run_until_idle()
+  end
+end

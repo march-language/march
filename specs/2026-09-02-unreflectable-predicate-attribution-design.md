@@ -1,7 +1,8 @@
 # `unreflectable-predicate`: fix the misattribution, then name the cause
 
-Filed 2026-09-02. Status: design approved, not implemented.
-Open item: `specs/todos/2026-09-02-unreflectable-predicate-attribution.md`.
+Filed 2026-09-02. Status: landed 2026-09-03, commits `082d5bf5..17aaf225`
+plus the docs/record commit. Record:
+`specs/progress/2026-09-02-unreflectable-predicate-attribution.md`.
 
 ## Problem
 
