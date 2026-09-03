@@ -534,3 +534,63 @@ let policy_tests = [
   Alcotest.test_case "NoAlloc policy rejects a real alloc"   `Quick test_policy_still_rejects_plain_alloc;
 ]
 let tests = tests @ policy_tests
+
+(* ── Task 9: --report-contracts (the forge fix --contracts input) ─────── *)
+
+(* `bump` reuses its Box in place (default scope); `add` is verified clean but
+   has nothing to protect, so it is out of scope unless a glob names it. *)
+let report_src = {|mod Main do
+needs IO
+ptype Box = Box(Int, Int)
+fn bump(b : Box) : Box do
+  match b do
+    Box(x, y) -> Box(x + 1, y)
+  end
+end
+fn add(a : Int, b : Int) : Int do a + b end
+fn main(cap : Cap(IO)) : Unit do
+  match bump(Box(1, 2)) do
+    Box(x, _) -> println(int_to_string(x + add(1, 2)))
+  end
+end
+end|}
+
+let insert_lines out =
+  List.filter (fun l -> contains "\"kind\":\"insert\"" l)
+    (String.split_on_char '\n' out)
+
+(* --report-contracts writes its NDJSON to stdout; compile_with captures both
+   streams, which is what we want here. *)
+let test_report_contracts_emits_one_insert () =
+  let (rc, out) = compile ~flags:"--report-contracts" report_src in
+  Alcotest.(check int) "rc 0" 0 rc;
+  let lines = insert_lines out in
+  Alcotest.(check int) "exactly one in-scope function" 1 (List.length lines);
+  let l = List.hd lines in
+  Alcotest.(check bool) "names bump" true (contains "`bump`" l);
+  Alcotest.(check bool) "inserts the hard form" true (contains "@[no_alloc]" l);
+  Alcotest.(check bool) "on the line before the declaration" true
+    (contains "\"after_line\":3" l)
+
+let test_report_contracts_glob_widens_scope () =
+  let (_, out) = compile ~flags:"--report-contracts --contract-scope add" report_src in
+  Alcotest.(check bool) "add is now in scope" true
+    (List.exists (fun l -> contains "`add`" l) (insert_lines out))
+
+let test_report_contracts_skips_annotated () =
+  let annotated = replace_first report_src ~sub:"fn bump" ~by:"@[no_alloc]\nfn bump" in
+  let (_, out) = compile ~flags:"--report-contracts" annotated in
+  Alcotest.(check int) "nothing to insert" 0 (List.length (insert_lines out))
+
+let test_report_contracts_skips_allocating () =
+  let (_, out) = compile ~flags:"--report-contracts" live_src in
+  Alcotest.(check bool) "bump_copied allocates, so no fix" false
+    (List.exists (fun l -> contains "`bump_copied`" l) (insert_lines out))
+
+let report_tests = [
+  Alcotest.test_case "--report-contracts emits one insert" `Quick test_report_contracts_emits_one_insert;
+  Alcotest.test_case "--contract-scope glob widens scope"  `Quick test_report_contracts_glob_widens_scope;
+  Alcotest.test_case "already-annotated functions skipped" `Quick test_report_contracts_skips_annotated;
+  Alcotest.test_case "allocating functions skipped"        `Quick test_report_contracts_skips_allocating;
+]
+let tests = tests @ report_tests

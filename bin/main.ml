@@ -1430,7 +1430,7 @@ let compile filename =
        silently prints nothing on a warm cache — which is exactly how
        --refine-report came to look broken.  Correctness of a diagnostic flag
        beats a cache hit on the run that asked for the diagnostic. *)
-    if refine_suggest_active () || !refine_report then None
+    if refine_suggest_active () || !refine_report || !report_contracts then None
     else if not !do_compile && not !do_check then None
     else try
       let buf = Buffer.create (256 * 1024) in
@@ -2326,6 +2326,7 @@ let compile filename =
     end;
     cap_state := Some (cap_attrib, cap_decls)
     in
+    let contract_decls = March_tir.Alloc_contract.collect desugared in
     let pipe =
       March_tir.Contract_pipeline.run
         ~snap:snap_tir ~stamp
@@ -2335,7 +2336,15 @@ let compile filename =
         ~after_fusion:policy_audit ~before_opt
         ~wasm_island:(parse_target !target_str = March_tir.Llvm_emit.Wasm32Unknown)
         ~is_js:is_js_target ~hot_reload:(hr_config ()) ~iface_methods
-        ~decls:(March_tir.Alloc_contract.collect desugared)
+        ~decls:contract_decls
+        (* --report-contracts judges functions nothing calls, so they must
+           survive DCE and inlining to be judged at all.  Their BODIES are
+           optimised exactly as always; only reachability changes, and the
+           flag already skips code generation. *)
+        ~extra_roots:(if !report_contracts
+                      then List.map (fun (d : March_tir.Alloc_contract.decl_info) ->
+                          d.March_tir.Alloc_contract.d_name) contract_decls
+                      else [])
         ~opt:!opt_enabled ~trmc:!March_tir.Trmc.enabled tir
     in
     let pre_opt_tir = pipe.March_tir.Contract_pipeline.pre_opt in
@@ -2360,6 +2369,43 @@ let compile filename =
     if List.exists (fun (d : March_errors.Errors.diagnostic) ->
         d.severity = March_errors.Errors.Error) vectorize_diags
     then exit 1;
+    (* --report-contracts: the generation half of the contract feature.  Emits
+       the same NDJSON shape --check-json does, with an FInsert fix placing
+       @[no_alloc] on the line above each verified-clean in-scope declaration,
+       and stops before code generation (no binary, no CAS artifact). *)
+    if !report_contracts then begin
+      let globs =
+        List.filter (fun g -> g <> "")
+          (String.split_on_char ',' !contract_scope) in
+      let is_user (sp : March_ast.Ast.span) =
+        let f = sp.March_ast.Ast.file in
+        f = filename || f = "" || f = "<unknown>" || List.mem f user_files
+      in
+      let cands =
+        March_tir.Alloc_contract.generation_candidates
+          ~decls:contract_decls
+          ~allocating:pipe.March_tir.Contract_pipeline.allocating
+          ~globs ~is_user tir
+      in
+      List.iter (fun (d : March_tir.Alloc_contract.decl_info) ->
+          let indent =
+            String.make d.March_tir.Alloc_contract.d_decl_span.March_ast.Ast.start_col ' ' in
+          let diag : March_errors.Errors.diagnostic =
+            { severity = March_errors.Errors.Hint;
+              span = d.March_tir.Alloc_contract.d_name_span;
+              message = Printf.sprintf
+                  "`%s` is verified allocation-free; add @[no_alloc] to keep it that way."
+                  d.March_tir.Alloc_contract.d_name;
+              labels = []; notes = []; code = Some "no_alloc_candidate";
+              fix = Some (March_errors.Errors.FInsert {
+                  after_line =
+                    d.March_tir.Alloc_contract.d_decl_span.March_ast.Ast.start_line - 1;
+                  text = indent ^ "@[no_alloc]" }) }
+          in
+          print_string (March_errors.Errors.render_diagnostic_json diag ^ "\n"))
+        cands;
+      exit 0
+    end;
     (* RPC admission hashes (remote_ref_hashes constant-folding + the @main
        march_remote_register calls) must be IDENTICAL across SEPARATE client and
        server compilations of the same source.  Derive them uniformly from the
@@ -4094,6 +4140,10 @@ let () =
     ("--cap-sandbox", Arg.Set cap_sandbox, " Embed a self-imposed capability sandbox applied at startup (opt-in; macOS Seatbelt / Linux seccomp-bpf)");
     ("--check-json", Arg.Set check_json,  " Emit diagnostics as NDJSON to stdout (for tooling such as forge fix)");
     ("--no-measure-axioms", Arg.Clear measure_axioms, " Reflect @[measure] functions symbolically instead of axiomatising them (skips datatype/quantifier reasoning and the soundness gate)");
+    ("--report-contracts", Arg.Set report_contracts,
+     " With --compile: emit one --check-json-shaped line per function verified allocation-free that should carry @[no_alloc] (consumed by `forge fix --contracts`). Stops before code generation, so no binary is written");
+    ("--contract-scope", Arg.Set_string contract_scope,
+     "<globs>  Comma-separated module/function globs (e.g. 'Dsp.*,Audio.mix') that --report-contracts considers in scope even without in-place reuse");
     ("--refine-report", Arg.Set refine_report,
      " Print a summary of refinement obligations: proved, violated, and skipped by reason (user code and user+stdlib)");
     ("--refine-suggest", Arg.String (fun s -> refine_suggest_target := Some s),

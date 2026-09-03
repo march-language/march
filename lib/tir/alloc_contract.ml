@@ -371,6 +371,50 @@ let failure_message ~head ~name ~suffix (reason : reason) : string =
 let trmc_note = "This function is TRMC-eligible; compiling with --trmc turns the \
                  constructor into an in-place write."
 
+(* ── Generation scope (LSP quick fix and forge fix --contracts) ───────── *)
+
+(* A glob is a module/function pattern with `*` standing for any run of
+   characters: "Dsp.*", "Audio.mix", "ad*". *)
+let glob_matches (pat : string) (name : string) : bool =
+  let np = String.length pat and nn = String.length name in
+  let rec go i j =
+    if i = np then j = nn
+    else if pat.[i] = '*' then
+      (* Skip consecutive stars, then try every split. *)
+      let rec star k = k <= nn && (go (i + 1) k || star (k + 1)) in
+      star j
+    else j < nn && pat.[i] = name.[j] && go (i + 1) (j + 1)
+  in
+  go 0 0
+
+(** Verified-clean functions that should carry the attribute but don't.
+
+    Default scope: functions whose final TIR contains an [EReuse], a tokened
+    [EAllocHole] or an [EStackAlloc] — the ones where a later change would
+    silently reintroduce an allocation.  [globs] widens it to any
+    verified-clean function whose name matches (forge.toml's
+    `[contracts] no_alloc`).  Never in scope: functions already carrying any
+    no_alloc form, `$`-prefixed synthetics, and anything outside the user's
+    own sources ([is_user]). *)
+let generation_candidates ~decls ~(allocating : (string, reason) Hashtbl.t)
+    ~(globs : string list) ~(is_user : March_ast.Ast.span -> bool)
+    (m : Tir.tir_module) : decl_info list =
+  List.filter (fun d ->
+      d.d_form = None
+      && d.d_name <> "" && d.d_name.[0] <> '$'
+      && is_user d.d_name_span
+      && begin
+        let clones =
+          List.filter (fun (fn : Tir.fn_def) -> base fn.Tir.fn_name = d.d_name)
+            m.Tir.tm_fns in
+        clones <> []
+        && not (List.exists (fun (fn : Tir.fn_def) ->
+            Hashtbl.mem allocating fn.Tir.fn_name) clones)
+        && (List.exists (fun p -> glob_matches p d.d_name) globs
+            || List.exists (fun (fn : Tir.fn_def) ->
+                has_reuse_or_stack fn.Tir.fn_body) clones)
+      end) decls
+
 (** True if [fd] carries a [Tagged(_, P)] parameter whose policy forbids
     allocation (NoAlloc, or Realtime which implies it).  [Policy_dce] used to
     answer this pre-Perceus by banning every EAlloc/EStackAlloc; the verdict

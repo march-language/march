@@ -45,6 +45,13 @@ let emit_core_ast_file : string option ref = ref None  (* --emit-core-ast <file>
 let measure_axioms = ref true    (* --no-measure-axioms: reflect @[measure]s symbolically *)
 let refine_report  = ref false   (* --refine-report: print obligation-ledger proved/violated/skipped counts *)
 
+(* --report-contracts / --contract-scope <globs>: emit one --check-json-shaped
+   line, with an `insert` fix, per function the @[no_alloc] checker verified
+   allocation-free and that is in the generation scope.  Consumed by
+   `forge fix --contracts`.  See lib/tir/alloc_contract.ml. *)
+let report_contracts = ref false
+let contract_scope   = ref ""    (* comma-separated globs, e.g. "Dsp.*,Audio.mix" *)
+
 (* --refine-suggest <FN> / --refine-suggest-all: propose the parameter
    refinement that discharges what a function's body leaves unproven.
    See lib/refinecheck/precond_infer.ml for the inference itself; this is
