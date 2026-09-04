@@ -13173,20 +13173,35 @@ end
 
 let audit_update_mode = Sys.getenv_opt "UPDATE_SNAPSHOTS" = Some "1"
 
-(* All of this group's paths are repo-root-relative, matching every gate
-   command in the brief (`./_build/default/test/test_refinecheck.exe -e`,
-   always invoked from the repo root, never from _build/default/test) --
-   the same assumption test/test_snapshots.ml and every doc-lint script in
-   this repo already make. A cwd off the repo root is a setup error, not a
-   case to silently paper over with a candidate-path search: it would only
-   hide someone running the binary from the wrong place. *)
-let require_repo_root () =
-  if not (Sys.file_exists "test/native") then
+(* This group reads the corpus and READS/WRITES the committed baselines, so
+   every path must resolve against the SOURCE tree, not against whatever cwd
+   the runner happened to pick. Two runners disagree about that cwd: a direct
+   `./_build/default/test/test_refinecheck.exe -e` from the repo root leaves
+   cwd AT the root, while `dune runtest` (what CI runs) sets cwd to
+   _build/default/test. An earlier version of this group asserted the first
+   and hard-failed under the second, which made the whole audit-baseline
+   group fail in CI while passing locally.
+
+   [Test_helpers.march_project_root] derives the root from the test exe's own
+   path (the parent of its _build ancestor, checked for a dune-project), which
+   is the source root under BOTH runners. That matters beyond just reading:
+   UPDATE_SNAPSHOTS=1 must rewrite the committed file, not a sandbox copy that
+   is discarded. [test_snapshots.ml] resolves its own snapshot paths exactly
+   this way, for the same reason. *)
+let audit_root () =
+  if Sys.file_exists "test/native" then Sys.getcwd ()
+  else Test_helpers.march_project_root ()
+
+let audit_path (rel : string) : string = Filename.concat (audit_root ()) rel
+
+let require_corpus_present () =
+  let native = audit_path "test/native" in
+  if not (Sys.file_exists native) then
     Alcotest.failf
-      "test/native not found under the current directory (%s) -- the \
-       audit-baseline group must be run from the repo root, e.g. \
-       ./_build/default/test/test_refinecheck.exe -e"
-      (Sys.getcwd ())
+      "test/native not found (looked in %s, cwd is %s) -- the audit-baseline \
+       group resolves paths against the source root derived from the test \
+       executable's location"
+      native (Sys.getcwd ())
 
 let march_files_sorted_in (dir : string) : string list =
   Sys.readdir dir |> Array.to_list
@@ -13217,9 +13232,34 @@ let audit_coverage_lines_for ~home (path : string) : string list =
   |> List.filter (fun l -> String.length l >= 14 && String.sub l 0 14 = "coverage audit")
   |> List.map (fun l -> tag ^ ": " ^ l)
 
+(* The baselines are committed, so every path they contain must be
+   repo-root-relative and identical on every machine. [audit_path] hands the
+   sweep an ABSOLUTE directory (it has to: the source root is derived from the
+   test exe, not from cwd), and the compiler echoes that absolute path back in
+   each diagnostic. Strip the root prefix before the line reaches a baseline,
+   or the committed file records one developer's home directory and every
+   other machine reports a spurious diff. The corpus baseline happens not to
+   contain paths, so only the holes baseline ever exercised this. *)
+let strip_root_prefix (root : string) (line : string) : string =
+  let prefix = if Filename.check_suffix root "/" then root else root ^ "/" in
+  let plen = String.length prefix in
+  let buf = Buffer.create (String.length line) in
+  let i = ref 0 in
+  let n = String.length line in
+  while !i < n do
+    if !i + plen <= n && String.sub line !i plen = prefix then i := !i + plen
+    else begin Buffer.add_char buf line.[!i]; incr i end
+  done;
+  Buffer.contents buf
+
 let audit_sweep ~home (dirs : string list) : int * string list =
+  let root = audit_root () in
   let files = List.concat_map march_files_sorted_in dirs in
-  let lines = List.concat_map (audit_coverage_lines_for ~home) files |> List.sort compare in
+  let lines =
+    List.concat_map (audit_coverage_lines_for ~home) files
+    |> List.map (strip_root_prefix root)
+    |> List.sort compare
+  in
   (List.length files, lines)
 
 let read_baseline_lines (path : string) : string list =
@@ -13263,8 +13303,8 @@ let assert_baseline_matches ~msg ~regen_cmd (baseline_path : string) (actual : s
       regen_cmd
   end
 
-let corpus_baseline_path = "test/refine_audit/corpus.baseline"
-let holes_baseline_path = "test/refine_audit/holes.baseline"
+let corpus_baseline_path () = audit_path "test/refine_audit/corpus.baseline"
+let holes_baseline_path () = audit_path "test/refine_audit/holes.baseline"
 
 (* Sums the `unenforced` count out of every `coverage audit (user code): N
    enforced, M inert (warned), K unenforced` summary line in a sweep's
@@ -13303,14 +13343,14 @@ let audit_baseline_suite =
   [ Alcotest.test_case
       "corpus baseline (test/native + stdlib): matches, or is regenerated" `Quick (fun () ->
         require_refine_audit_compiler ();
-        require_repo_root ();
+        require_corpus_present ();
         let home = Filename.temp_file "refine_audit_home" "" in
         Sys.remove home;
         Unix.mkdir home 0o700;
         Fun.protect
           ~finally:(fun () -> Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote home)) |> ignore)
           (fun () ->
-            let n, lines = audit_sweep ~home [ "test/native"; "stdlib" ] in
+            let n, lines = audit_sweep ~home [ audit_path "test/native"; audit_path "stdlib" ] in
             let total_report_lines = List.length lines in
             (* Same vacuity floor as scripts/refine-oracle.sh: this sweep is
                known to walk ~300 fixtures and print ~600 lines (two summary
@@ -13343,8 +13383,8 @@ let audit_baseline_suite =
                  the rise is intentional and explained in the commit message."
                 corpus_unenforced_ceiling unenforced_total;
             if audit_update_mode then begin
-              write_baseline_lines corpus_baseline_path lines;
-              Printf.printf "regenerated %s (%d fixtures, %d lines)\n%!" corpus_baseline_path n
+              write_baseline_lines (corpus_baseline_path ()) lines;
+              Printf.printf "regenerated %s (%d fixtures, %d lines)\n%!" (corpus_baseline_path ()) n
                 total_report_lines
             end
             else
@@ -13352,13 +13392,13 @@ let audit_baseline_suite =
                 ~msg:"the refinement coverage audit's corpus sweep changed"
                 ~regen_cmd:
                   "UPDATE_SNAPSHOTS=1 ./_build/default/test/test_refinecheck.exe -e 'audit-baseline'"
-                corpus_baseline_path lines))
+                (corpus_baseline_path ()) lines))
 
   ; Alcotest.test_case
       "holes baseline (test/refine_audit/holes): matches, and is never vacuous" `Quick (fun () ->
         require_refine_audit_compiler ();
-        require_repo_root ();
-        if not (Sys.file_exists "test/refine_audit/holes") then
+        require_corpus_present ();
+        if not (Sys.file_exists (audit_path "test/refine_audit/holes")) then
           Alcotest.fail "test/refine_audit/holes not found -- the non-vacuity fixture set is missing";
         let home = Filename.temp_file "refine_audit_holes_home" "" in
         Sys.remove home;
@@ -13366,7 +13406,7 @@ let audit_baseline_suite =
         Fun.protect
           ~finally:(fun () -> Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote home)) |> ignore)
           (fun () ->
-            let n, lines = audit_sweep ~home [ "test/refine_audit/holes" ] in
+            let n, lines = audit_sweep ~home [ audit_path "test/refine_audit/holes" ] in
             (* THE vacuity guard the brief asks for by name: this fixture
                set exists ONLY to contain known holes. If it ever reports
                zero Unenforced sites, the audit itself is broken (a rule
@@ -13398,8 +13438,8 @@ let audit_baseline_suite =
                  fixtures to match; find why classification changed."
                 n;
             if audit_update_mode then begin
-              write_baseline_lines holes_baseline_path lines;
-              Printf.printf "regenerated %s (%d fixtures, %d unenforced sites)\n%!" holes_baseline_path n
+              write_baseline_lines (holes_baseline_path ()) lines;
+              Printf.printf "regenerated %s (%d fixtures, %d unenforced sites)\n%!" (holes_baseline_path ()) n
                 unenforced_total
             end
             else
@@ -13407,7 +13447,7 @@ let audit_baseline_suite =
                 ~msg:"the refinement coverage audit's holes sweep changed"
                 ~regen_cmd:
                   "UPDATE_SNAPSHOTS=1 ./_build/default/test/test_refinecheck.exe -e 'audit-baseline'"
-                holes_baseline_path lines))
+                (holes_baseline_path ()) lines))
   ]
 
 let () =

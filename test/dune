@@ -899,7 +899,7 @@
  ; (typecheck -> refine_check -> division_safety -> panic_surface_by_proof),
  ; because the question it asks — "does a guarded call still error?" — spans
  ; the syntactic ban in the typechecker AND the proof-based pass here.
- (libraries march_lexer march_parser march_ast march_desugar march_errors march_refine march_refinecheck march_typecheck march_eval march_scheduler alcotest unix)
+ (libraries march_lexer march_parser march_ast march_desugar march_errors march_refine march_refinecheck march_typecheck march_eval march_scheduler march_test_helpers alcotest unix)
  ; The `audit-flag` group shells out to the REAL compiled driver: the
  ; --refine-audit flag, its printer, and the early-CAS bypass it needs all
  ; live in bin/main.ml, which this test binary does not (and should not)
