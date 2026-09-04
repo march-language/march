@@ -113,6 +113,61 @@ the JS backend (GC'd runtime, no struct ABI), and under `MARCH_NO_UNBOX=1`.
 - `bench/vector_math.march`: 20.8 ms unboxed vs 828.3 ms boxed (min of 5,
   `--opt 2`, M-series Mac), same output.
 
+## Measured on the engine that motivated it
+
+`~/code/cube_forge` at 9cd1ffb, built with this branch pinned as a toolchain
+(`.march-version`), against the same tree built with `1eb43d39`.
+
+**The representation applies.** The engine's own emitted IR declares ten
+unboxed struct types, including three of the four the brief named:
+
+    %ub.CubeForge_Math_Vec3_Vec3   = type { double, double, double }
+    %ub.CubeForge_Math_Quat_Quat   = type { double, double, double, double }
+    %ub.CubeForge_Math_Mat4_Vec4   = type { double, double, double, double }
+    %ub.CubeForge_Player_Sweep     = type { double, double, double, i64 }
+
+plus six stdlib types (`DateTime.Date`/`Time`, `Decimal`, `JsonStream.JsCfg`/
+`JsonLimits`, `Process.LiveProcess`), with 48 `insertvalue` and 18
+`extractvalue` on them. `Hit(Bool, Int, Int, Int, Int, Int, Int)` — the fourth
+type the brief named — has SEVEN fields and stays boxed: it is over
+`max_unboxed_arity`.
+
+**Contracts.** With `[contracts] no_alloc = ["*"]` (every verified-clean
+function in scope), from the same pristine tree:
+
+| | 1eb43d39 | this branch |
+|---|---|---|
+| functions carrying `@[no_alloc]` | 379 | **384** |
+| functions carrying `@[no_alloc(transient)]` | — | **12** |
+| total | 379 | **396** |
+
+Under the DEFAULT generation scope both compilers insert the same 2
+attributes; the difference above is entirely in the widened scope. (The base
+compiler's output does not then compile — see
+`specs/todos/2026-09-03-forge-fix-contracts-inserts-into-unparseable-positions.md`.)
+
+**Allocation churn: unchanged, and here is why.** Over an identical
+`MARCH_PIN_MAIN=1 CF_FRAMES=240 CF_SEED=12345` release run, deterministic
+across repeats:
+
+| | 1eb43d39 | this branch |
+|---|---|---|
+| total object allocations | 4 157 337 | 4 159 019 (+0.04%) |
+| `CF_ALLOC_PROBE` bisect | 13 lines | identical, line for line |
+| live-object delta, frames 100..200 | 150 (1/frame) | 150 (1/frame) |
+| 240 frames | 2003 ms, 119.8 fps | 2010 ms, 119.4 fps (both vsync-capped) |
+
+This engine keeps its vectors INSIDE heap values — a `Vec3` in `Player`, in
+`Scene`, in a `Ray` — so at those slots the representation trades a
+construction for a boxing, and the two very nearly cancel (the +1 682 is the
+boxing side coming out slightly ahead). The win is real where a vector stays
+in locals, parameters and returns, which is what `bench/vector_math.march`
+measures (20.8 ms against 828.3 ms), and it is real for CONTRACTS — `forward`
+can be pinned now and could not be before. It is NOT a win for a program that
+stores its aggregates, and this table is the evidence for saying so.
+
+The engine's 82 tests pass and the 240-frame release run exits 0.
+
 ## Docs
 
 `docs/value-representation.md` §7.5 (the full treatment),

@@ -290,9 +290,8 @@ let rec collect_alloc_candidates
     copy then goes is a question about the FIELD's lifetime, not about the
     cell's address. *)
 let may_retain_table (m : Tir.tir_module) : (string, bool array) Hashtbl.t =
-  let local = Hashtbl.create (List.length m.Tir.tm_fns) in
-  List.iter (fun (fd : Tir.fn_def) -> Hashtbl.replace local fd.Tir.fn_name ())
-    m.Tir.tm_fns;
+  (* [tbl]'s key set IS "defined in this module": [retains_param] answers true
+     for anything absent from it, which is the extern/builtin case. *)
   let tbl = Hashtbl.create (List.length m.Tir.tm_fns) in
   List.iter (fun (fd : Tir.fn_def) ->
       Hashtbl.replace tbl fd.Tir.fn_name
@@ -374,7 +373,6 @@ let may_retain_table (m : Tir.tir_module) : (string, bool array) Hashtbl.t =
       m.Tir.tm_fns;
     if !changed then fix ()
   in
-  ignore local;
   fix ();
   tbl
 

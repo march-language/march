@@ -53,7 +53,10 @@ git log is authoritative for exact commits.
   closure capture, a message) it is boxed into the same cell it always was —
   reported by `@[no_alloc]` as the allocation it is. A vector-math benchmark
   (`bench/vector_math.march`, 3M iterations building five vectors each) runs in
-  20.8 ms against 828.3 ms for the boxed representation. A type named in an
+  20.8 ms against 828.3 ms for the boxed representation. That win is for
+  vectors that stay in locals, parameters and returns; a program that stores
+  its aggregates inside other heap values pays a boxing there instead and sees
+  no change in allocation count. A type named in an
   `extern` signature keeps the boxed representation program-wide (see
   `docs/ffi.md`), and `MARCH_NO_UNBOX=1` restores it everywhere.
 
