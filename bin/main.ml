@@ -520,6 +520,96 @@ let print_refine_report ~filename ~user_files () =
   print_block "user code" user_obligations;
   print_block "user + stdlib" all_obligations
 
+(* --refine-audit: every declared refinement occurrence
+   ([March_refinecheck.Refine_audit.sites]), classified
+   ([March_refinecheck.Refine_audit.classify]) against what the checker
+   itself actually does with it. [Refine_check.check_module] cannot call
+   [Refine_audit] directly (a dependency cycle -- see
+   [Refine_check.audit_hook]'s own comment), so this hook is how the result
+   gets from inside [check_module] back out to this printer: set once, below,
+   and read here after [check_module ~audit:true] has returned. *)
+let refine_audit_sites : (March_refinecheck.Refine_audit.site * March_refinecheck.Refine_audit.disposition) list ref =
+  ref []
+
+let () =
+  March_refinecheck.Refine_check.audit_hook :=
+    fun decls ->
+      refine_audit_sites :=
+        List.map
+          (fun (s : March_refinecheck.Refine_audit.site) -> (s, March_refinecheck.Refine_audit.classify s))
+          (March_refinecheck.Refine_audit.sites decls)
+
+let print_refine_audit ~filename ~user_files () =
+  let module RA = March_refinecheck.Refine_audit in
+  let is_user_span (span : March_ast.Ast.span) =
+    let f = span.March_ast.Ast.file in
+    f = filename || f = "" || f = "<unknown>" || List.mem f user_files
+  in
+  (* [origin], not [position]: [origin] is the declaration-level label
+     (always carries the name of the enclosing function, field, sig entry,
+     ...) the traversal started this type's walk from, held fixed
+     regardless of nesting; [position] is overwritten to a bare structural
+     tag ([Type_arg], [Arrow_domain], [Arrow_codomain]) once the traversal
+     descends past the outermost type form -- which is the common shape for
+     an [Unenforced] verdict (rule 2 in [Refine_audit.classify] fires on
+     [nesting = Nested]). Printing [position] there would read
+     "an arrow codomain: ..." with no way to tell which function; [origin]
+     is what makes the line actionable. The structural detail is not lost:
+     [classify]'s own [Unenforced] reason string already names [Type_arg] /
+     [Arrow_domain] / [Arrow_codomain] specifically when [position] was
+     relabelled (see [nested_reason] in refine_audit.ml). *)
+  let string_of_origin = function
+    | RA.Param (n, i) -> Printf.sprintf "param `%s` #%d" n i
+    | RA.Return n -> Printf.sprintf "return of `%s`" n
+    | RA.Let_annot n -> Printf.sprintf "let `%s`" n
+    | RA.Field (t, f) -> Printf.sprintf "field `%s.%s`" t f
+    | RA.Variant_arg (t, v, i) -> Printf.sprintf "variant `%s.%s` arg #%d" t v i
+    | RA.Impl_ty n -> Printf.sprintf "impl of `%s`" n
+    | RA.Type_arg -> "a type-constructor argument"
+    | RA.Arrow_domain -> "an arrow domain"
+    | RA.Arrow_codomain -> "an arrow codomain"
+    | RA.Lambda_param i -> Printf.sprintf "lambda param #%d" i
+    | RA.Expr_annot -> "an expression annotation"
+    | RA.Sig_fn n -> Printf.sprintf "sig `%s`" n
+    | RA.Extern_fn n -> Printf.sprintf "extern `%s`" n
+    | RA.Iface_method n -> Printf.sprintf "interface method `%s`" n
+    | RA.Actor_handler_param (n, i) -> Printf.sprintf "actor handler `%s` param #%d" n i
+  in
+  let bucket_counts sites =
+    List.fold_left
+      (fun (e, w, u) (_, (d : RA.disposition)) ->
+        match d with
+        | RA.Enforced -> (e + 1, w, u)
+        | RA.Inert_warned _ -> (e, w + 1, u)
+        | RA.Unenforced _ -> (e, w, u + 1))
+      (0, 0, 0) sites
+  in
+  let print_summary label sites =
+    let enforced, inert, unenforced = bucket_counts sites in
+    Printf.eprintf "coverage audit (%s): %d enforced, %d inert (warned), %d unenforced\n"
+      label enforced inert unenforced
+  in
+  let all_sites = !refine_audit_sites in
+  let user_sites = List.filter (fun ((s : RA.site), _) -> is_user_span s.RA.span) all_sites in
+  (* One line per [Unenforced] site, user code only: the stdlib side has far
+     more declared refinements than a user's own module (most declared
+     refinements live in the stdlib -- the same reason the summary below is
+     split), and dumping its Unenforced sites too would bury the ones a
+     user can actually act on. The two summary lines below still cover
+     user+stdlib, so nothing about the stdlib's coverage is hidden, only
+     its per-site detail. *)
+  List.iter
+    (fun ((s : RA.site), (d : RA.disposition)) ->
+      match d with
+      | RA.Unenforced reason ->
+        Printf.eprintf "coverage audit: %s:%d:%d: %s: %s: %s\n"
+          s.RA.span.March_ast.Ast.file s.RA.span.March_ast.Ast.start_line
+          s.RA.span.March_ast.Ast.start_col (string_of_origin s.RA.origin)
+          s.RA.predicate reason
+      | RA.Enforced | RA.Inert_warned _ -> ())
+    user_sites;
+  print_summary "user code" user_sites;
+  print_summary "user + stdlib" all_sites
 
 let refine_suggest_active () =
   !refine_suggest_target <> None || !refine_suggest_all
@@ -1048,8 +1138,9 @@ let run_test_cmd args =
     let (errors, _type_map) = March_typecheck.Typecheck.check_module desugared in
     (* Phase A1b: discharge refinement-precondition VCs at call sites. *)
     March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
-      ~stdlib_files:(stdlib_span_files stdlib_decls) errors desugared;
+      ~stdlib_files:(stdlib_span_files stdlib_decls) ~audit:!refine_audit errors desugared;
     if !refine_report then print_refine_report ~filename ~user_files ();
+    if !refine_audit then print_refine_audit ~filename ~user_files ();
     (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
     March_refinecheck.Division_safety.check_module errors desugared;
     (* Panic-surface-by-proof: the `cap no_panic` names that carry a real
@@ -1430,7 +1521,7 @@ let compile filename =
        silently prints nothing on a warm cache — which is exactly how
        --refine-report came to look broken.  Correctness of a diagnostic flag
        beats a cache hit on the run that asked for the diagnostic. *)
-    if refine_suggest_active () || !refine_report then None
+    if refine_suggest_active () || !refine_report || !refine_audit then None
     else if not !do_compile && not !do_check then None
     else begin
       let buf = Buffer.create (256 * 1024) in
@@ -1743,8 +1834,9 @@ let compile filename =
   in
   (* Phase A1b: discharge refinement-precondition VCs at call sites. *)
   March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
-    ~stdlib_files:(stdlib_span_files stdlib_decls) errors desugared;
+    ~stdlib_files:(stdlib_span_files stdlib_decls) ~audit:!refine_audit errors desugared;
   if !refine_report then print_refine_report ~filename ~user_files ();
+  if !refine_audit then print_refine_audit ~filename ~user_files ();
   (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
   March_refinecheck.Division_safety.check_module errors desugared;
   (* Panic-surface-by-proof: the `cap no_panic` names that carry a real
@@ -4249,6 +4341,8 @@ let () =
     ("--no-measure-axioms", Arg.Clear measure_axioms, " Reflect @[measure] functions symbolically instead of axiomatising them (skips datatype/quantifier reasoning and the soundness gate)");
     ("--refine-report", Arg.Set refine_report,
      " Print a summary of refinement obligations: proved, violated, and skipped by reason (user code and user+stdlib)");
+    ("--refine-audit", Arg.Set refine_audit,
+     " Print every declared refinement the checker never enforces or only warns about, plus bucket counts (user code and user+stdlib); changes no verdict");
     ("--refine-suggest", Arg.String (fun s -> refine_suggest_target := Some s),
      "<fn>  Propose the parameter refinement that discharges what <fn>'s body leaves unproven");
     ("--refine-suggest-all", Arg.Set refine_suggest_all,

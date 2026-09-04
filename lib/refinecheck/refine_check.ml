@@ -1817,6 +1817,17 @@ let bare_builtin_undefined ?(mod_name = "") (name : string) (decls : A.decl list
   go decls;
   (not !taken, !cause)
 
+(* The coverage audit ([Refine_audit.sites] / [Refine_audit.classify]) cannot be
+   called from this module directly: [Refine_audit] depends on
+   [Refine_check.ty_has_refinement] (see its own comment there), so a direct call
+   here would be a dependency cycle within [march_refinecheck]'s single-directory
+   module list. A caller that wants the audit to run at the same join point
+   [check_module] uses for its own registration and vocabulary warning sets this
+   hook once; [check_module] invokes it, with the module's full decl list, only
+   when called with [~audit:true]. Defaults to a no-op so a caller that never
+   sets it (every existing caller) pays nothing and sees nothing. *)
+let audit_hook : (A.decl list -> unit) ref = ref (fun _ -> ())
+
 (* =================================================================
    §23 Entry point: check_module
    ================================================================= *)
@@ -1842,7 +1853,7 @@ let bare_builtin_undefined ?(mod_name = "") (name : string) (decls : A.decl list
    that no non-stdlib definition can ever be mistaken for the stdlib's, not in
    the sense that it turns the feature off. *)
 let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
-    ?(stdlib_files : string list = []) (errctx : Err.ctx)
+    ?(stdlib_files : string list = []) ?(audit = false) (errctx : Err.ctx)
     (m : A.module_) : unit =
   (* A module owns one solver declaration scope.  Z3 4.8.x does not reliably
      retract datatype declarations on [pop], even with [:global-decls false]:
@@ -1971,4 +1982,17 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   (* Vocabulary warning: runs last so [registered_measures] (set at the top of
      this function) is already populated — otherwise a user `@[measure]`
      would look unrecognized and warn spuriously. *)
-  warn_predicate_decls errctx ~strict:(decls_declare_verified m.A.mod_decls) m.A.mod_decls
+  warn_predicate_decls errctx ~strict:(decls_declare_verified m.A.mod_decls) m.A.mod_decls;
+  (* Coverage audit: runs last, only when asked, and touches neither [errctx]
+     nor the obligation ledger; it is a read-only classification of every
+     declared refinement occurrence against the registration state this
+     function has just finished building (ADT/record sorts, and, if
+     [measure_axioms] is set, [measure_preamble_sorts]). Placed after
+     [warn_predicate_decls] rather than before it so the audit can never
+     observe a partially-registered module, and before any caller-side
+     inference probe (`--refine-suggest*`, [Precond_infer.attach_promoted_fixes])
+     gets a chance to re-run [check_module] against a hypothesis and disturb
+     global state a naive audit implementation might have relied on; this
+     one does not touch the obligation ledger at all, but the placement is
+     chosen to make that true by construction, not by accident. *)
+  if audit then !audit_hook m.A.mod_decls

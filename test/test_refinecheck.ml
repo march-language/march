@@ -12787,6 +12787,250 @@ let audit_classify_fixloop1_suite =
         end|}
   ]
 
+(* ── Task 3: --refine-audit (audit-flag) ─────────────────────────────────
+   Everything the flag drives (its registration, [print_refine_audit], and
+   the early-CAS bypass a diagnostic flag needs -- see
+   project_refine_report_cas_shortcircuit in memory) lives in bin/main.ml,
+   which this test binary does not link. These tests shell out to the REAL
+   compiled driver instead of the library-level [Refine_check.check_module]
+   every other group in this file uses, so what they pin is what a user
+   actually sees, not a second, hand-written reimplementation of
+   [print_refine_audit]'s format that could drift from it silently -- the
+   exact failure mode the brief warns a substring grep would miss. Mirrors
+   the resolve-relative-to-this-binary pattern [test_cap_strip.ml] /
+   [test_cap_markers.ml] already use; test/dune declares `bin/main.exe` (and
+   the staged runtime/stdlib trees it resolves exe-relatively) as deps of
+   this test for the identical reason those runners' own dep comments give:
+   without them a missing/stale build makes this group silently vacuous
+   rather than loudly broken. *)
+
+let refine_audit_compiler_exe =
+  let exe_dir = Filename.dirname Sys.executable_name in
+  Filename.concat exe_dir "../bin/main.exe"
+
+let require_refine_audit_compiler () =
+  if not (Sys.file_exists refine_audit_compiler_exe) then
+    Alcotest.failf
+      "compiler not found at %s -- test/dune must declare bin/main.exe as a \
+       dep of test_refinecheck" refine_audit_compiler_exe
+
+let read_whole_file path =
+  let ic = open_in path in
+  let n = in_channel_length ic in
+  let s = really_input_string ic n in
+  close_in ic;
+  s
+
+(* Writes [src_text] to a fresh temp `.march` file and returns its path. The
+   caller is responsible for [Sys.remove]-ing it once done. *)
+let write_march_fixture (src_text : string) : string =
+  let src = Filename.temp_file "refine_audit" ".march" in
+  let oc = open_out src in
+  output_string oc src_text;
+  close_out oc;
+  src
+
+(* Runs the real compiler on the file at [path] with [args]. Never through a
+   pipe (see feedback_march_compile_pipe_hang.md in memory): stdout and
+   stderr are each redirected to their own temp file and read back
+   separately, exactly like [check_no_prelude_collision]'s sibling helpers in
+   [test_cap_strip.ml]. Returns (exit code, stdout, stderr). *)
+let run_march_on (args : string list) (path : string) : int * string * string =
+  require_refine_audit_compiler ();
+  let out = Filename.temp_file "refine_audit" ".out" in
+  let err = Filename.temp_file "refine_audit" ".err" in
+  let rc =
+    Sys.command
+      (Printf.sprintf "%s %s %s > %s 2> %s" refine_audit_compiler_exe
+         (String.concat " " args) (Filename.quote path) (Filename.quote out) (Filename.quote err))
+  in
+  let stdout_s = read_whole_file out and stderr_s = read_whole_file err in
+  Sys.remove out;
+  Sys.remove err;
+  (rc, stdout_s, stderr_s)
+
+(* Convenience for a single-run test: writes [src_text] to a fresh temp file,
+   runs the compiler on it once, and hands back the file's own path too -- a
+   caller building an EXACT expected line (one naming the source file) needs
+   it, since [Filename.temp_file] picks a fresh name every run. The caller is
+   responsible for [Sys.remove]-ing the path once done. *)
+let run_march_capturing (args : string list) (src_text : string) : int * string * string * string =
+  let path = write_march_fixture src_text in
+  let rc, stdout_s, stderr_s = run_march_on args path in
+  (rc, stdout_s, stderr_s, path)
+
+let nonempty_lines s = String.split_on_char '\n' s |> List.filter (fun l -> l <> "")
+
+(* Filters out every "coverage audit" line -- what --refine-audit alone
+   contributes -- so the REST of a run's output can be compared byte for
+   byte against the same run with the flag off. Verdict invariance means
+   this filtered remainder, plus the exit code, must be identical either
+   way; it does NOT mean the flag prints nothing (it prints exactly the
+   coverage-audit block, tested separately below). *)
+let strip_audit_lines s =
+  nonempty_lines s
+  |> List.filter (fun l -> not (String.length l >= 14 && String.sub l 0 14 = "coverage audit"))
+  |> String.concat "\n"
+
+let audit_flag_pinned_fixture =
+  {|mod PINAUDIT1 do
+  type Box = { v : {Int | v > 0} }
+
+  fn f(n : {Int | n > 0}) : {Int | _ > 0} do
+    n
+  end
+
+  fn main() : Int do
+    f(1)
+  end
+end
+|}
+
+(* Verdict invariance: a fixture that PROVES, one that VIOLATES, and one that
+   SKIPS, each run with the flag off and on. The exit code and every line of
+   output OTHER than the coverage-audit block itself must be identical
+   either way -- a verdict that moves under --refine-audit is a blocking
+   defect per the brief. *)
+let audit_flag_verdict_invariance name src =
+  Alcotest.test_case
+    (Printf.sprintf "verdict invariance (%s): flag off and on agree" name) `Quick (fun () ->
+      (* The SAME fixture path for both runs: a diagnostic embeds the source
+         file's own path in its text, so two different temp files (even with
+         byte-identical contents) would make the two runs' stderr differ by
+         path alone, a false positive this invariance check must not raise. *)
+      let path = write_march_fixture src in
+      Fun.protect
+        ~finally:(fun () -> try Sys.remove path with Sys_error _ -> ())
+        (fun () ->
+          let rc_off, out_off, err_off = run_march_on [ "--check" ] path in
+          let rc_on, out_on, err_on = run_march_on [ "--check"; "--refine-audit" ] path in
+          Alcotest.(check int) "exit code" rc_off rc_on;
+          Alcotest.(check string) "stdout" out_off out_on;
+          Alcotest.(check string) "stderr, minus the coverage-audit block"
+            (strip_audit_lines err_off) (strip_audit_lines err_on)))
+
+let audit_flag_suite =
+  [ (* The exact printed output for a small fixture, pinned line by line.
+       The `user code` slice is fully determined by this fixture alone (one
+       Unenforced site: the record field's declared refinement, never
+       re-examined once a value is constructed) and is pinned exactly. The
+       `user + stdlib` slice additionally reflects however many declared
+       refinements the shipped stdlib itself carries today, which is not
+       this task's fact to freeze (it drifts as the stdlib gains or loses
+       refinements, for reasons unrelated to this flag) -- only its FORMAT
+       is pinned, via Scanf, so a format regression there still fails this
+       test exactly as the brief asks. *)
+    Alcotest.test_case "the --refine-audit output for a small fixture is pinned exactly" `Quick
+      (fun () ->
+        let rc, stdout_s, stderr_s, path =
+          run_march_capturing [ "--check"; "--refine-audit" ] audit_flag_pinned_fixture
+        in
+        Fun.protect ~finally:(fun () -> try Sys.remove path with Sys_error _ -> ()) (fun () ->
+          Alcotest.(check int) "exit 0" 0 rc;
+          Alcotest.(check string) "stdout empty" "" stdout_s;
+          match nonempty_lines stderr_s with
+          | [ unenforced_line; user_summary; stdlib_summary ] ->
+            Alcotest.(check string) "the one Unenforced site's line"
+              (Printf.sprintf
+                 "coverage audit: %s:2:26: field `Box.v`: v > 0: a record (or \
+                  actor-state) field's declared type is never re-examined once a \
+                  value is constructed; the checker has no extractor for a stored \
+                  field, only for a parameter, a return, or a let-binding"
+                 path)
+              unenforced_line;
+            Alcotest.(check string) "user code bucket summary"
+              "coverage audit (user code): 2 enforced, 0 inert (warned), 1 unenforced"
+              user_summary;
+            (try
+               Scanf.sscanf stdlib_summary
+                 "coverage audit (user + stdlib): %d enforced, %d inert (warned), %d unenforced%!"
+                 (fun _ _ _ -> ())
+             with Scanf.Scan_failure _ | End_of_file ->
+               Alcotest.failf "user + stdlib bucket summary has the wrong format: %S" stdlib_summary)
+          | lines ->
+            Alcotest.failf "expected exactly 3 non-empty stderr lines, got %d:\n%s"
+              (List.length lines) stderr_s))
+
+  ; (* The flag off produces no output at all -- not just no coverage-audit
+       lines, the WHOLE run, on a fixture whose only site would otherwise
+       print (proving the silence is the flag's own absence, not that this
+       fixture has nothing to say). *)
+    Alcotest.test_case "the flag off produces no output at all" `Quick (fun () ->
+        let rc, stdout_s, stderr_s, path = run_march_capturing [ "--check" ] audit_flag_pinned_fixture in
+        Fun.protect ~finally:(fun () -> try Sys.remove path with Sys_error _ -> ()) (fun () ->
+          Alcotest.(check int) "exit 0" 0 rc;
+          Alcotest.(check string) "stdout empty" "" stdout_s;
+          Alcotest.(check string) "stderr empty" "" stderr_s))
+
+  ; audit_flag_verdict_invariance "proves"
+      {|mod AUDITFLAGPROVES1 do
+  fn f(n : {Int | n > 0}) : {Int | _ > 0} do
+    n
+  end
+
+  fn main() : Int do
+    f(1)
+  end
+end
+|}
+
+  ; audit_flag_verdict_invariance "violates"
+      {|mod AUDITFLAGVIOLATES1 do
+  fn f(n : {Int | n > 0}) : Int do
+    n
+  end
+
+  fn main() : Int do
+    f(-1)
+  end
+end
+|}
+
+  ; audit_flag_verdict_invariance "skips"
+      {|mod AUDITFLAGSKIPS1 do
+  fn f(n : {Int | n > 0}) : Int do
+    n
+  end
+
+  fn g(x : Int) : Int do
+    f(x)
+  end
+
+  fn main() : Int do
+    g(1)
+  end
+end
+|}
+
+  ; (* The audit does not escalate under `cap verified`: a module that
+       declares it and carries an Unenforced site (the record field again)
+       must still exit 0 with the flag off, and must still exit 0 with it
+       on. *)
+    Alcotest.test_case "cap verified with an Unenforced site still exits 0, flag off and on" `Quick
+      (fun () ->
+        let src =
+          {|mod AUDITFLAGVERIFIED1 do
+  cap verified
+
+  type Box = { v : {Int | v > 0} }
+
+  fn main() : Int do
+    0
+  end
+end
+|}
+        in
+        let rc_off, _, _, path_off = run_march_capturing [ "--check" ] src in
+        let rc_on, _, _, path_on = run_march_capturing [ "--check"; "--refine-audit" ] src in
+        Fun.protect
+          ~finally:(fun () ->
+            (try Sys.remove path_off with Sys_error _ -> ());
+            (try Sys.remove path_on with Sys_error _ -> ()))
+          (fun () ->
+            Alcotest.(check int) "exit 0, flag off" 0 rc_off;
+            Alcotest.(check int) "exit 0, flag on" 0 rc_on))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -12867,4 +13111,5 @@ let () =
       ("arith-actual", arith_actual_suite);
       ("audit-sites", audit_sites_suite @ audit_stacked_refinement_suite @ audit_arrow_signature_suite);
       ("audit-classify",
-        audit_classify_suite @ audit_classify_reason_suite @ audit_classify_fixloop1_suite) ]
+        audit_classify_suite @ audit_classify_reason_suite @ audit_classify_fixloop1_suite);
+      ("audit-flag", audit_flag_suite) ]

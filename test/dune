@@ -876,7 +876,15 @@
  ; (typecheck -> refine_check -> division_safety -> panic_surface_by_proof),
  ; because the question it asks — "does a guarded call still error?" — spans
  ; the syntactic ban in the typechecker AND the proof-based pass here.
- (libraries march_lexer march_parser march_ast march_desugar march_errors march_refine march_refinecheck march_typecheck march_eval march_scheduler alcotest unix))
+ (libraries march_lexer march_parser march_ast march_desugar march_errors march_refine march_refinecheck march_typecheck march_eval march_scheduler alcotest unix)
+ ; The `audit-flag` group shells out to the REAL compiled driver: the
+ ; --refine-audit flag, its printer, and the early-CAS bypass it needs all
+ ; live in bin/main.ml, which this test binary does not (and should not)
+ ; link as a library. Without these deps a missing/stale bin/main.exe, or a
+ ; stale staged stdlib/runtime tree it resolves exe-relatively, would make
+ ; that group silently vacuous instead of loudly broken -- the same
+ ; reasoning run_compiler/run_stdlib's identical dep comment gives.
+ (deps %{exe:../bin/main.exe} (source_tree ../runtime) (source_tree ../stdlib)))
 
 ; An (executable), NOT a (test): deliberately OUT of the `runtest` alias.
 ;

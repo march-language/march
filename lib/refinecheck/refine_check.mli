@@ -81,14 +81,32 @@ val rctx0 : rctx
     (default [true]). [?stdlib_files] names the files that ARE the standard
     library, which decides whether a competing [List.length] is the stdlib's
     own; omitting it is safe (the answer becomes "no file is") but disables
-    nothing. *)
+    nothing. [?audit] (default [false]) calls {!audit_hook} with the module's
+    full decl list, once, after every registration step and after the
+    vocabulary warning; when [false] (the default) the hook is never called
+    and nothing it would have driven (the coverage-audit enumeration and
+    classification) ever runs. *)
 val check_module :
   ?root:string ->
   ?measure_axioms:bool ->
   ?stdlib_files:string list ->
+  ?audit:bool ->
   Err.ctx ->
   A.module_ ->
   unit
+
+(** {1 Coverage-audit join point}
+
+    [Refine_audit] cannot be called from this module directly: it depends on
+    {!ty_has_refinement}, so a direct call here would be a dependency cycle.
+    A caller that wants the coverage audit ([Refine_audit.sites] /
+    [Refine_audit.classify]) to run at the exact point [check_module] itself
+    finishes registering a module (ADT/record sorts, and, when
+    [~measure_axioms] is set, the measure preamble) sets this hook once, then
+    passes [~audit:true] to {!check_module}. Called with the module's full
+    decl list; defaults to a no-op, so a caller that never sets it (every
+    caller before this hook existed) pays nothing and sees nothing. *)
+val audit_hook : (A.decl list -> unit) ref
 
 (** {1 Signature extraction and resolution}
 
