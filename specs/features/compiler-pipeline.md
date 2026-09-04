@@ -103,7 +103,10 @@ Source Code
 > phase snapshots) are hooks passed into it. The extraction was proven to move
 > no IR with `scripts/ir-oracle.sh` over 242 programs.
 > `Alloc_contract.check` runs last, immediately before emission, which is what
-> lets `@[no_alloc]` accept a constructor Perceus reused in place.>
+> lets `@[no_alloc]` accept a constructor Perceus reused in place.
+> `Alloc_contract.retaining_fns` runs beside it, on the same TIR, for the
+> `@[no_alloc(transient)]` verdict.
+>
 > **`Repr.set_unboxed_types` runs right after Defun** (Milestone 3, unboxed
 > small scalar aggregates): after Mono has instantiated generic variants and
 > Defun has added the closure structs, so the decision is made on the type list

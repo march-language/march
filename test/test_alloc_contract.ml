@@ -555,6 +555,125 @@ let accept_tests = [
 ]
 let tests = tests @ accept_tests
 
+(* ── @[no_alloc(transient)] ───────────────────────────────────────────────
+
+   "Allocates nothing that SURVIVES the call."  The property a frame loop
+   actually has and the base contract cannot state: a dozen cells allocated
+   and freed within the same frame is a net live-object delta of zero, but
+   every one of them is an allocation. *)
+
+let transient_accept_src = {|mod Main do
+needs IO
+ptype Box = Box(Int, String)
+@[no_alloc(transient)]
+fn label_len(i : Int) : Int do
+  let b = Box(i, "n=" ++ int_to_string(i))
+  match b do
+    Box(_, s) -> String.byte_size(s)
+  end
+end
+fn main(cap : Cap(IO)) : Unit do println(int_to_string(label_len(42))) end
+end|}
+
+let test_transient_accept_dead_allocation () =
+  accepts "transient" transient_accept_src "4\n"
+
+(* Whatever a function RETURNS outlives the call by definition. *)
+let transient_returns_src = {|mod Main do
+needs IO
+ptype Box = Box(Int, String)
+@[no_alloc(transient)]
+fn make(i : Int) : Box do Box(i, "x") end
+fn main(cap : Cap(IO)) : Unit do
+  match make(1) do Box(n, _) -> println(int_to_string(n)) end
+end
+end|}
+
+let test_transient_reject_returned () =
+  rejects "transient returns" transient_returns_src
+    "`make` is marked @[no_alloc(transient)] but retains an allocation";
+  rejects "transient names what" transient_returns_src
+    "it returns a freshly allocated `Box`"
+
+(* A callee that allocates freely and hands the value back, whose result the
+   annotated function DROPS, is exactly what the form exists to allow — and is
+   what the base contract rejects. *)
+let transient_callee_src = {|mod Main do
+needs IO
+fn describe(i : Int) : String do "n=" ++ int_to_string(i) end
+@[no_alloc(transient)]
+fn width(i : Int) : Int do String.byte_size(describe(i)) end
+@[no_alloc]
+fn width_hard(i : Int) : Int do String.byte_size(describe(i)) end
+fn main(cap : Cap(IO)) : Unit do println(int_to_string(width(42))) end
+end|}
+
+let test_transient_accepts_what_no_alloc_rejects () =
+  (* The SAME body under the two forms: the base contract rejects it (a string
+     really is allocated), the transient one accepts it (the string is gone by
+     the time `width` returns).  Asserting both against one source is what
+     makes this a contrast rather than two unrelated facts. *)
+  let (rc, out) = compile transient_callee_src in
+  if rc = 0 then
+    Alcotest.failf "expected the @[no_alloc] half to fail:\n%s" out;
+  if not (contains "`width_hard` is marked @[no_alloc] but allocates" out) then
+    Alcotest.failf "missing the base-contract failure in:\n%s" out;
+  if contains "`width` is marked @[no_alloc(transient)]" out then
+    Alcotest.failf "the transient contract should hold for `width`:\n%s" out
+
+(* An extern may keep what it is handed; this pass cannot read it. *)
+let transient_extern_src = {|mod Main do
+needs IO
+needs Ffi
+extern "m" : Cap(Ffi) do
+  fn stash(s: String): Int = "cf_stash"
+end
+@[no_alloc(transient)]
+fn keep(i : Int) : Int do stash("n=" ++ int_to_string(i)) end
+fn main(cap : Cap(IO)) : Unit do println(int_to_string(keep(1))) end
+end|}
+
+let test_transient_reject_extern () =
+  rejects "transient extern" transient_extern_src
+    "it calls the extern `stash`"
+
+(* Transitivity: a callee that LEAKS propagates; the diagnostic names it. *)
+let transient_transitive_src = {|mod Main do
+needs IO
+needs Ffi
+extern "m" : Cap(Ffi) do
+  fn stash(s: String): Int = "cf_stash"
+end
+fn inner(i : Int) : Int do stash("n=" ++ int_to_string(i)) end
+@[no_alloc(transient)]
+fn outer(i : Int) : Int do inner(i) + 1 end
+fn main(cap : Cap(IO)) : Unit do println(int_to_string(outer(1))) end
+end|}
+
+let test_transient_reject_transitive () =
+  rejects "transient transitive" transient_transitive_src
+    "it calls `inner`, which retains"
+
+(* The typo guard covers the new payload too. *)
+let test_transient_bad_payload_is_parse_error () =
+  rejects "bad payload" {|mod Main do
+needs IO
+@[no_alloc(transiant)]
+fn f(i : Int) : Int do i end
+fn main(cap : Cap(IO)) : Unit do println(int_to_string(f(1))) end
+end|}
+    "`@[no_alloc(transient)]`"
+
+let transient_tests = [
+  Alcotest.test_case "accept: allocation dead before return" `Quick test_transient_accept_dead_allocation;
+  Alcotest.test_case "accept: callee's result is dropped"    `Quick test_transient_accepts_what_no_alloc_rejects;
+  Alcotest.test_case "reject: returns what it allocates"     `Quick test_transient_reject_returned;
+  Alcotest.test_case "reject: hands a value to an extern"    `Quick test_transient_reject_extern;
+  Alcotest.test_case "reject: transitive, names the callee"  `Quick test_transient_reject_transitive;
+  Alcotest.test_case "typo payload is a parse error"         `Quick test_transient_bad_payload_is_parse_error;
+]
+let tests = tests @ transient_tests
+
 (* ── Task 7: Tagged(_, NoAlloc) / Realtime policies use the same check ─── *)
 
 (* `Tagged(X, T)` is a phantom TYPE with no value constructor, so a
@@ -661,8 +780,39 @@ let test_report_contracts_skips_allocating () =
   Alcotest.(check bool) "bump_copied allocates, so no fix" false
     (List.exists (fun l -> contains "`bump_copied`" l) (insert_lines out))
 
+(* The generation half prefers the STRONGEST form that holds: `@[no_alloc]`
+   for a function that allocates nothing, `@[no_alloc(transient)]` for one
+   that allocates but retains nothing.  Both functions below are in scope via
+   the glob; only the verdict differs. *)
+let report_transient_src = {|mod Main do
+needs IO
+fn describe(i : Int) : String do "n=" ++ int_to_string(i) end
+fn width(i : Int) : Int do String.byte_size(describe(i)) end
+fn twice(i : Int) : Int do i + i end
+fn main(cap : Cap(IO)) : Unit do println(int_to_string(width(1) + twice(2))) end
+end|}
+
+let test_report_contracts_prefers_strongest_form () =
+  let (rc, out) = compile ~flags:"--report-contracts --contract-scope width,twice"
+      report_transient_src in
+  Alcotest.(check int) "rc 0" 0 rc;
+  let lines = insert_lines out in
+  let line_for name = List.find_opt (fun l -> contains (Printf.sprintf "`%s`" name) l) lines in
+  (match line_for "twice" with
+   | None -> Alcotest.fail "`twice` allocates nothing; expected a hard-form insert"
+   | Some l ->
+     Alcotest.(check bool) "twice gets the hard form" true (contains "@[no_alloc]" l);
+     Alcotest.(check bool) "and not the transient one" false
+       (contains "no_alloc(transient)" l));
+  (match line_for "width" with
+   | None -> Alcotest.fail "`width` retains nothing; expected a transient insert"
+   | Some l ->
+     Alcotest.(check bool) "width gets the transient form" true
+       (contains "@[no_alloc(transient)]" l))
+
 let report_tests = [
   Alcotest.test_case "--report-contracts emits one insert" `Quick test_report_contracts_emits_one_insert;
+  Alcotest.test_case "prefers the strongest form that holds" `Quick test_report_contracts_prefers_strongest_form;
   Alcotest.test_case "--contract-scope glob widens scope"  `Quick test_report_contracts_glob_widens_scope;
   Alcotest.test_case "already-annotated functions skipped" `Quick test_report_contracts_skips_annotated;
   Alcotest.test_case "allocating functions skipped"        `Quick test_report_contracts_skips_allocating;

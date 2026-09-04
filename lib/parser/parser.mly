@@ -306,21 +306,48 @@ fn_attr:
   | AT; name = LOWER_IDENT; LPAREN; value = LOWER_IDENT; RPAREN { name ^ ":" ^ value }
   | AT; LBRACKET; name = LOWER_IDENT; LPAREN; value = LOWER_IDENT; RPAREN; RBRACKET
       { name ^ ":" ^ value }
+  (* `transient` is a KEYWORD (a supervisor restart type), so it never reaches
+     the LOWER_IDENT rules above.  @[no_alloc(transient)] is the one attribute
+     payload that collides with one; spell it out rather than un-reserving the
+     keyword, which would change supervisor child specs. *)
+  | AT; name = LOWER_IDENT; LPAREN; TRANSIENT; RPAREN { name ^ ":transient" }
+  | AT; LBRACKET; name = LOWER_IDENT; LPAREN; TRANSIENT; RPAREN; RBRACKET
+      { name ^ ":transient" }
 
 decl:
   | DOC; s = STRING; d = fn_decl
     { match d with
       | DFn (def, span) -> DFn ({ def with fn_doc = Some s }, span)
       | d -> d }
+  (* A documented function may ALSO carry attributes.  Without this rule the
+     two are mutually exclusive in either order, which `forge fix --contracts`
+     walks straight into: it inserts `@[no_alloc]` on the line above the
+     declaration, and on a documented function that line sits between the
+     `doc` and the `fn` — unparseable.  Attribute validation is the same as
+     the attributes-only rule below; see it for the payload check. *)
+  | DOC; s = STRING; attrs = nonempty_list(fn_attr); d = fn_decl
+    { List.iter (fun a ->
+          if String.length a > 9 && String.sub a 0 9 = "no_alloc:"
+             && a <> "no_alloc:warn" && a <> "no_alloc:assume"
+             && a <> "no_alloc:transient" then
+            error_raise
+              (Printf.sprintf
+                 "I don't recognize `@[no_alloc(%s)]` \xe2\x80\x94 the forms are `@[no_alloc]`, `@[no_alloc(warn)]`, `@[no_alloc(transient)]`, and `@[no_alloc(assume)]`."
+                 (String.sub a 9 (String.length a - 9)))
+              None $startpos(attrs)) attrs;
+      match d with
+      | DFn (def, span) -> DFn ({ def with fn_doc = Some s; fn_attrs = attrs }, span)
+      | d -> d }
   | attrs = nonempty_list(fn_attr); d = fn_decl
-    { (* @[no_alloc] takes exactly two payloads; anything else is a typo, not
+    { (* @[no_alloc] takes exactly three payloads; anything else is a typo, not
          a silently-ignored attribute (see lib/tir/alloc_contract.ml). *)
       List.iter (fun a ->
           if String.length a > 9 && String.sub a 0 9 = "no_alloc:"
-             && a <> "no_alloc:warn" && a <> "no_alloc:assume" then
+             && a <> "no_alloc:warn" && a <> "no_alloc:assume"
+             && a <> "no_alloc:transient" then
             error_raise
               (Printf.sprintf
-                 "I don't recognize `@[no_alloc(%s)]` \xe2\x80\x94 the forms are `@[no_alloc]`, `@[no_alloc(warn)]`, and `@[no_alloc(assume)]`."
+                 "I don't recognize `@[no_alloc(%s)]` \xe2\x80\x94 the forms are `@[no_alloc]`, `@[no_alloc(warn)]`, `@[no_alloc(transient)]`, and `@[no_alloc(assume)]`."
                  (String.sub a 9 (String.length a - 9)))
               None $startpos(attrs)) attrs;
       match d with

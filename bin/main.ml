@@ -2385,22 +2385,28 @@ let compile filename =
         March_tir.Alloc_contract.generation_candidates
           ~decls:contract_decls
           ~allocating:pipe.March_tir.Contract_pipeline.allocating
+          ~retaining:pipe.March_tir.Contract_pipeline.retaining
           ~globs ~is_user tir
       in
-      List.iter (fun (d : March_tir.Alloc_contract.decl_info) ->
+      List.iter (fun ((d : March_tir.Alloc_contract.decl_info), form) ->
           let indent =
             String.make d.March_tir.Alloc_contract.d_decl_span.March_ast.Ast.start_col ' ' in
+          let attr = March_tir.Alloc_contract.attr_of_form form in
+          let verdict = match form with
+            | March_tir.Alloc_contract.Transient ->
+              "verified to retain nothing it allocates"
+            | _ -> "verified allocation-free" in
           let diag : March_errors.Errors.diagnostic =
             { severity = March_errors.Errors.Hint;
               span = d.March_tir.Alloc_contract.d_name_span;
               message = Printf.sprintf
-                  "`%s` is verified allocation-free; add @[no_alloc] to keep it that way."
-                  d.March_tir.Alloc_contract.d_name;
+                  "`%s` is %s; add %s to keep it that way."
+                  d.March_tir.Alloc_contract.d_name verdict attr;
               labels = []; notes = []; code = Some "no_alloc_candidate";
               fix = Some (March_errors.Errors.FInsert {
                   after_line =
                     d.March_tir.Alloc_contract.d_decl_span.March_ast.Ast.start_line - 1;
-                  text = indent ^ "@[no_alloc]" }) }
+                  text = indent ^ attr }) }
           in
           print_string (March_errors.Errors.render_diagnostic_json diag ^ "\n"))
         cands;

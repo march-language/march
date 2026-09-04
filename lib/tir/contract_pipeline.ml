@@ -19,6 +19,9 @@ type result = {
   allocating : (string, Alloc_contract.reason) Hashtbl.t;
   (** The transitive allocating set over [final], by TIR fn name — for the
       LSP lens / quick fix and --report-contracts. *)
+  retaining : (string, Alloc_contract.retain) Hashtbl.t;
+  (** The @[no_alloc(transient)] counterpart: functions that hand an
+      allocation to something outliving the call. *)
 }
 
 let island_suffixes = ["render"; "update"; "init"]
@@ -53,7 +56,8 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
     extra_roots
     @ List.filter_map (fun d ->
         match d.Alloc_contract.d_form with
-        | Some (Alloc_contract.Hard | Alloc_contract.Warn) -> Some d.Alloc_contract.d_name
+        | Some (Alloc_contract.Hard | Alloc_contract.Warn
+               | Alloc_contract.Transient) -> Some d.Alloc_contract.d_name
         | _ -> None) decls
   in
   let tir = Trmc.transform_module ~enabled:trmc tir in
@@ -228,6 +232,7 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   (* Hand the emitter exactly this decision (see [Repr.rebind_registration]). *)
   Repr.rebind_registration tir.Tir.tm_types;
   let allocating = Alloc_contract.allocating_fns ~decls tir in
+  let retaining = Alloc_contract.retaining_fns ~decls tir in
   let contract_diags =
-    Alloc_contract.check ~decls ~allocating ~opt ~trmc ~trmc_eligible tir in
-  { pre_opt; final = tir; vectorize_diags; contract_diags; allocating }
+    Alloc_contract.check ~decls ~allocating ~retaining ~opt ~trmc ~trmc_eligible tir in
+  { pre_opt; final = tir; vectorize_diags; contract_diags; allocating; retaining }

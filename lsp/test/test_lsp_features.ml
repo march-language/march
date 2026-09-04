@@ -1366,10 +1366,60 @@ let test_no_alloc_quickfix_not_offered_without_reuse () =
     (List.exists (fun (ca : Lsp.Types.CodeAction.t) -> ca.title = "Add `@[no_alloc]`")
        (An.code_actions_at a ~line ~character:col ()))
 
+(* @[no_alloc(transient)]: the same three surfaces, for the weaker form.  The
+   lens names the form so the two contracts can be told apart at a glance, and
+   the quick fix offers whichever form actually holds. *)
+
+let transient_ok_src = {|mod Test do
+  ptype Box = Box(Int, String)
+  @[no_alloc(transient)]
+  fn width(i : Int) : Int do
+    let b = Box(i, "n")
+    match b do
+      Box(_, s) -> String.byte_size(s)
+    end
+  end
+  fn main() : Int do width(1) end
+end|}
+
+let test_transient_lens_names_the_form () =
+  let a = An.run_tir_pass (analyse transient_ok_src) in
+  let msgs = List.filter_map (fun (d : Lsp.Types.Diagnostic.t) ->
+      match d.message with `String s -> Some s | _ -> None) a.An.diagnostics in
+  if List.exists (fun m -> contains_sub m "no_alloc") msgs then
+    Alcotest.failf "the transient contract should hold here, but the LSP reported: %s"
+      (String.concat " | " msgs);
+  Alcotest.(check bool) "lens says which form holds" true
+    (List.exists (fun (cl : An.code_lens_item) ->
+         contains_sub cl.An.cl_title "no_alloc(transient)") a.An.code_lens_items)
+
+let transient_fail_src = {|mod Test do
+  ptype Box = Box(Int, String)
+  @[no_alloc(transient)]
+  fn make(i : Int) : Box do Box(i, "n") end
+  fn main() : Int do
+    match make(1) do
+      Box(x, _) -> x
+    end
+  end
+end|}
+
+let test_transient_diagnostic_at_name_span () =
+  let a = An.run_tir_pass (analyse transient_fail_src) in
+  let (line, col) = pos_of transient_fail_src "make(i : Int) : Box" in
+  match List.find_opt (fun (d : Lsp.Types.Diagnostic.t) ->
+      match d.message with
+      | `String s -> contains_sub s "is marked @[no_alloc(transient)] but retains"
+      | _ -> false) a.An.diagnostics with
+  | None -> Alcotest.fail "expected the @[no_alloc(transient)] diagnostic"
+  | Some d ->
+    Alcotest.(check int) "line" line d.range.start.line;
+    Alcotest.(check int) "column" col d.range.start.character
+
 let test_no_alloc_candidates_are_this_file_only () =
   let a = An.run_tir_pass (analyse quickfix_src) in
   Alcotest.(check bool) "candidates exist (guards vacuity)" true
     (a.An.no_alloc_candidates <> []);
   Alcotest.(check bool) "no stdlib or dependency function is a candidate" true
-    (List.for_all (fun (_, (sp : Ast.span), _) -> sp.Ast.file = a.An.filename)
+    (List.for_all (fun (_, (sp : Ast.span), _, _) -> sp.Ast.file = a.An.filename)
        a.An.no_alloc_candidates)

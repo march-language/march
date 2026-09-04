@@ -271,6 +271,38 @@ constructor of a variant that also has payload-carrying cases (`Nil` in
 `List`) is a real heap cell today, so returning a fresh one fails the
 contract, and a `Float` stored into a generic field is boxed, which counts.
 
+**When "nothing survives" is the real property.** A frame loop, a request
+handler, a tick — code that allocates freely and frees it all again before it
+returns — has a property `@[no_alloc]` cannot express. `@[no_alloc(transient)]`
+does:
+
+<!-- scroll:skip -->
+```march
+@[no_alloc(transient)]
+pfn width(i : Int) : Int do
+  String.byte_size(describe(i))     -- `describe` allocates a String
+end
+```
+
+`describe` really does allocate, so the bare form rejects `width`. The
+transient form accepts it: the String is gone by the time `width` returns. The
+question it asks is where a value *ends up*, not whether one was made. It fails
+when the function returns something it allocated, writes one into an object it
+did not allocate, or hands one to an actor, a `Vault`, a spawned task, an
+`extern`, or a call through an unknown closure — and when anything it calls
+does.
+
+One thing it deliberately does **not** cover: an amortized growth path. A
+buffer that reallocates its storage and keeps the new storage has *retained*
+that storage — it reaches a value the function returns — so `transient` rejects
+it just as the bare form does. If you want a growable buffer inside a hot loop,
+the answer is to hoist it out of the loop, not to relabel the contract.
+
+`forge fix --contracts` inserts whichever form actually holds: `@[no_alloc]`
+where a function allocates nothing at all, `@[no_alloc(transient)]` where it
+allocates but retains nothing. The editor's quick fix and the `✓` lens name the
+form too.
+
 **Promotion sees through a call.** `⚡ stack-allocated` used to stop at every
 call boundary: passing a value to any function meant it might escape. It now
 also fires when the only thing done with a value is to hand it to a function in
@@ -283,6 +315,7 @@ apply function is never promoted.
 If `bump_copied` truly needs the old field, read it *before* you rebuild
 (bind `x` in the same `match`, then return it) rather than matching `b` a second
 time; that collapses the two uses into one and reuse fires again.
+
 
 ### Small scalar aggregates never reach the heap at all
 

@@ -13,6 +13,20 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`@[no_alloc(transient)]`** — a weaker allocation contract that states
+  "nothing this function allocates SURVIVES the call". A frame loop that
+  allocates a dozen cells and frees all of them before returning has that
+  property and cannot state it with the bare form; `transient` accepts it,
+  including when the allocation happens in a callee whose result the annotated
+  function drops. It fails when a function returns something it allocated,
+  writes one into an object it did not allocate, or hands one to an actor, a
+  `Vault`, a spawned task, an `extern` or an unknown closure — and when
+  anything it calls does. An amortized growth path (a buffer that reallocates
+  its storage and keeps it) is retained and so still rejected. The language
+  server reports it at the function name and shows `✓ no_alloc(transient)` when
+  it holds; `forge fix --contracts` now inserts whichever form actually holds,
+  preferring the stronger one.
+
 - **Stack promotion through a call.** Escape analysis used to treat every call
   argument as escaping. It now promotes a value whose only use is an argument
   to a function in the same program that provably does not retain the pointer
