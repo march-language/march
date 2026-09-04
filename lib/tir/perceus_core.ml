@@ -463,6 +463,12 @@ let rec used_only_as_field_source (name : string) (e : Tir.expr) : bool =
   | Tir.ETuple atoms | Tir.EAlloc (_, atoms) | Tir.EStackAlloc (_, atoms) ->
     atoms_ok atoms
   | Tir.ERecord fields -> atoms_ok (List.map snd fields)
+  (* An EUpdate BASE is a read, like an EField source: emit_update copies the
+     base's fields into a fresh cell and leaves the base intact, so ownership
+     does not transfer and the base still needs its own drop.  The update
+     VALUES are stored into the new cell and are consuming. *)
+  | Tir.EUpdate (Tir.AVar w, fields) when String.equal w.Tir.v_name name ->
+    atoms_ok (List.map snd fields)
   | Tir.EUpdate (a, fields) -> atoms_ok (a :: List.map snd fields)
   | Tir.EReuse (a, _, args) -> atoms_ok (a :: args)
   | Tir.EAllocHole (tok, _, filled, _) ->
@@ -1408,7 +1414,23 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
     (e', lb)
 
   | Tir.EUpdate (a, fields) ->
-    let atoms = a :: List.map snd fields in
+    (* The BASE is borrowed, not consumed: [Llvm_emit_data.emit_update] reads
+       its fields into a fresh cell and leaves it intact.  Running it through
+       [find_inc_vars] emitted an inc with no matching dec (visible in
+       test/snapshots/perceus/record_update.expected as `inc_rc p` inside
+       move_right against a single `dec_rc p` in the caller), which pinned the
+       base's refcount above zero forever.
+
+       That stray inc was also masking a double-free: emit_update copies the
+       base's field POINTERS raw, so base and result both reference the same
+       children, and with aggregates now deep-dropped both would release them.
+       The inc kept the base's RC from reaching zero, so its drop skipped the
+       children and only the result released them.  The copied fields are inc'd
+       properly in emit_update now, so the mask is neither needed nor wanted.
+
+       The UPDATE VALUES are genuinely consumed -- they are stored into the new
+       cell -- so they keep their [find_inc_vars] treatment. *)
+    let atoms = List.map snd fields in
     let inc_vars = find_inc_vars env atoms live_after in
     let e' = wrap_incrcs env inc_vars e in
     let lb =

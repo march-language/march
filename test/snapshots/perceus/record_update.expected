@@ -4,9 +4,13 @@ record Point { x : Int, y : Int }
 ## main
 fn main(_cap_console : Cap(IO.Console)) : () =
   let p : { x : Int, y : Int } = { x = 1, y = 2 } in
-let moved : { x : Int, y : Int } = move_right(p) in
-let $t3 : Int = moved.x in
-println($t3)
+let moved : { x : Int, y : Int } = let $rc_2 : { x : Int, y : Int } = move_right(p) in
+dec_rc p;
+$rc_2 in
+let $rc_1 : () = let $t3 : Int = moved.x in
+println($t3) in
+dec_rc moved;
+$rc_1
 
 ## move_right
 fn move_right(p : { x : Int, y : Int }) : { x : Int, y : Int } =

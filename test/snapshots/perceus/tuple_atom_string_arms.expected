@@ -67,7 +67,9 @@ $f1 in
 ## main
 fn main(_cap_console : Cap(IO.Console)) : () =
   let $t16 : String = let $t15 : (Int, Int) = (0, 0) in
-describe($t15) in
+let $rc_3 : String = describe($t15) in
+dec_rc $t15;
+$rc_3 in
 let $rc_2 : () = println($t16) in
 dec_rc $t16;
 $rc_2;

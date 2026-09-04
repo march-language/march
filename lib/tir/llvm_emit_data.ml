@@ -267,10 +267,22 @@ let emit_update ~emit_atom ctx (base_atom : Tir.atom)
     let n = List.length all_fields in
     (* Allocate new record of same size *)
     let ptr = emit_heap_alloc ctx 0 n in
-    (* Copy all fields from base *)
+    (* Copy all fields from base.  Each copied HEAP field is inc'd: the base
+       keeps its own reference (an update borrows the base, it does not consume
+       it) and the new cell takes a second one, so both can be released
+       independently.  Without the inc the two cells share children with a
+       single refcount between them, and once aggregates became deep-dropped
+       that was a double-free -- masked, until this landed, by a stray inc on
+       the base itself that kept its refcount from ever reaching zero.
+
+       Fields whose slot is not a pointer (Int/Float/Bool/Unit) carry no
+       reference, so they are copied as before. *)
     List.iteri (fun i (_, fty) ->
-      let fv = emit_load_field ctx base_val i (llvm_ty fty) in
-      emit_store_field ctx ptr i (llvm_ty fty) fv
+      let lty = llvm_ty fty in
+      let fv = emit_load_field ctx base_val i lty in
+      if Rc_types.needs_rc fty && String.equal lty "ptr" then
+        emit ctx (Printf.sprintf "call void @march_incrc(ptr %s)" fv);
+      emit_store_field ctx ptr i lty fv
     ) all_fields;
     (* Overwrite updated fields *)
     List.iter (fun (fname, atom) ->

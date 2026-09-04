@@ -4,7 +4,9 @@ record Box { inner : String }
 ## main
 fn main(_cap_console : Cap(IO.Console)) : () =
   let b : { inner : String } = { inner = "wrapped" } in
-let $t1 : String = peek(b) in
+let $t1 : String = let $rc_3 : String = peek(b) in
+dec_rc b;
+$rc_3 in
 let $rc_2 : () = println($t1) in
 dec_rc $t1;
 $rc_2
