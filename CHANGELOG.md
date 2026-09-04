@@ -51,6 +51,26 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Records and tuples are now reference-counted and freed.** Previously
+  `needs_rc` was false for both, so Perceus never decided an aggregate was
+  dead: every record and tuple cell leaked, and so did every heap value it
+  owned. A 200,000-iteration loop rebuilding a `{ n : Int, s : String }`
+  leaked ~200k strings and ~200k cells (15.2 MB peak) where the equivalent
+  two-field variant leaked nothing (2.4 MB). Aggregates now get a synthesized
+  deep drop (`__drop$R` / `__drop$T`) that releases their fields behind the
+  same shared-cell guard variants use. A variant holding a record or tuple
+  field is fixed by the same change.
+
+  Not yet covered: an aggregate parameter of a self-tail-recursive function,
+  rebuilt each iteration, still leaks — the trailing dec is discarded when TCO
+  emits the back-edge. Tracked in
+  `specs/todos/2026-09-03-aggregate-rc-tail-recursive-param-leak.md`.
+
+- Compiled binaries built with `MARCH_STRING_STATS=1` now report `live_objs`,
+  the runtime's exact live-heap-object count. Unlike peak RSS it does not vary
+  with machine load, so it can be asserted directly in leak regression tests.
+
+
 - Capability mocking now reaches a **supervised child**. A `supervise` block's
   children are spawned by the supervisor itself, not by user code, so a mock
   that reached a plain actor never reached one under a supervisor. The

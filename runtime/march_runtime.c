@@ -180,6 +180,14 @@ static void str_stats_dump(void) {
             (long long)atomic_load_explicit(&obj_alloc_count, memory_order_relaxed));
     fprintf(stderr, "march_string_stats obj_alloc_bytes %lld\n",
             (long long)atomic_load_explicit(&obj_alloc_bytes, memory_order_relaxed));
+    /* Exact live-object gauge: MARCH_ALLOC_BUMP/MARCH_FREE_BUMP keep this in
+     * step with every heap alloc and free, so it is a deterministic leak
+     * signal -- unlike peak RSS, it does not move with machine load or
+     * allocator behaviour.  A leak makes it scale with the program's iteration
+     * count; nothing else does.  Used by the aggregate-RC leak fixtures, which
+     * run the same program at two sizes and require this number to match. */
+    fprintf(stderr, "march_string_stats live_objs %lld\n",
+            (long long)march_live_allocs());
     for (int i = 0; i < MARCH_STR_NBUCKETS; i++)
         fprintf(stderr, "march_string_stats %s %lld\n", str_hist_names[i],
                 (long long)atomic_load_explicit(&str_hist[i], memory_order_relaxed));

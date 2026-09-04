@@ -130,7 +130,20 @@ let rec mangle (ty : Tir.ty) : string =
   | Tir.TString -> "String" | Tir.TUnit -> "Unit"
   | Tir.TTuple ts -> "T" ^ string_of_int (List.length ts)
                      ^ "_" ^ String.concat "_" (List.map mangle ts)
-  | Tir.TRecord fs -> "R" ^ string_of_int (List.length fs)
+  | Tir.TRecord fs ->
+    (* Field names AND types, sorted, not merely the arity.  This key is the
+       memo key in [env.names] and the suffix of the synthesized function's
+       name, so a bare "R<n>" made every n-field record collide: the first
+       2-field record to be asked about decided the answer for all of them, and
+       a memoized negative (no heap children) then suppressed the drop for a
+       later { n : Int, s : String }, silently leaking its string.  Harmless
+       while aggregates never got drop functions; a correctness bug now.
+       Names are part of the identity because the drop projects fields by name
+       and TRecord's layout is name-sorted. *)
+    let sorted = List.sort (fun (a, _) (b, _) -> String.compare a b) fs in
+    "R" ^ string_of_int (List.length fs)
+    ^ "_" ^ String.concat "_"
+              (List.map (fun (n, t) -> n ^ "$" ^ mangle t) sorted)
   | Tir.TCon (n, []) -> String.map (fun c -> if c = '.' then '_' else c) n
   | Tir.TCon (n, args) ->
     String.map (fun c -> if c = '.' then '_' else c) n
@@ -186,6 +199,19 @@ let rec has_tvar = function
   | Tir.TPtr t -> has_tvar t
   | _ -> false
 
+(** The (accessor, type) pairs of a record or tuple, in layout order, or
+    [None] for any other type.  Records are keyed by field name and sorted, as
+    [TRecord] itself is and as [Llvm_emit_data.emit_record] lays them out;
+    tuples are keyed by the [$fvN] accessor that tuple destructuring lowers to.
+    These are the aggregates that own their fields and are read exclusively
+    through [EField] — see [build_aggregate_drop_fn]. *)
+let aggregate_fields (ty : Tir.ty) : (string * Tir.ty) list option =
+  match ty with
+  | Tir.TRecord fs ->
+    Some (List.sort (fun (a, _) (b, _) -> String.compare a b) fs)
+  | Tir.TTuple ts -> Some (List.mapi (fun i t -> (Tir_names.fv_field i, t)) ts)
+  | _ -> None
+
 (** The synthesized drop function for [ty], or [None] if a bare [EDecRC] on
     [ty] is already correct (no heap children to release). *)
 let rec drop_fn_for (env : env) (ty : Tir.ty) : string option =
@@ -194,6 +220,29 @@ let rec drop_fn_for (env : env) (ty : Tir.ty) : string option =
   | Some "" -> None            (* memoized negative *)
   | Some fname -> Some fname
   | None ->
+    match aggregate_fields ty with
+    | Some fields ->
+      (* Records and tuples: one implicit "constructor" over the fields, and no
+         ECase to destructure it -- see [build_aggregate_drop_fn].  Without
+         this branch a bare [EDecRC] on an aggregate stayed SHALLOW
+         (march_decrc_local frees the cell and decrements nothing), so every
+         heap value the aggregate owned was orphaned: a
+         { n : Int, s : String } rebuilt 200k times leaked ~200k strings on
+         top of ~200k cells. *)
+      let owns_heap_child =
+        List.exists (fun (_, fty) ->
+            (not (has_tvar fty)) && Rc_types.needs_rc fty) fields
+      in
+      if not owns_heap_child then begin
+        Hashtbl.replace env.names key ""; None
+      end else begin
+        let fname = Tir_names.drop_fn_prefix ^ key in
+        Hashtbl.replace env.names key fname;
+        let fn = build_aggregate_drop_fn env fname ty fields in
+        env.fns <- fn :: env.fns;
+        Some fname
+      end
+    | None ->
     match droppable_ctors env ty with
     | None -> Hashtbl.replace env.names key ""; None
     | Some ctors ->
@@ -222,6 +271,69 @@ let rec drop_fn_for (env : env) (ty : Tir.ty) : string option =
         env.fns <- fn :: env.fns;
         Some fname
       end
+
+and build_aggregate_drop_fn env fname ty (fields : (string * Tir.ty) list)
+  : Tir.fn_def =
+  (* Mirrors [build_drop_fn]'s body exactly, with EField projections standing in
+     for the ECase destructuring a variant gets:
+
+       fn __drop$R(x) = let f1 = x.a in let f2 = x.b in
+                        let freed = march_decrc_freed(x) in
+                        case freed of True -> drop f1; drop f2 | _ -> ()
+
+     Field loads are emitted BEFORE march_decrc_freed, so they read the cell
+     while it is still alive; the free is shallow and does not disturb the
+     children, so the loaded references stay valid for the drops below.  The
+     freed-guard is what keeps a SHARED aggregate from having its children
+     released out from under the surviving reference. *)
+  let x = { Tir.v_name = fresh env "dx"; v_ty = ty; v_lin = Tir.Unr } in
+  let unit_expr = Tir.ETuple [] in
+  let droppable =
+    List.filter (fun (_, fty) ->
+        (not (has_tvar fty)) && Rc_types.needs_rc fty) fields
+  in
+  let binders =
+    List.map (fun (accessor, fty) ->
+        (accessor, { Tir.v_name = fresh env "df"; v_ty = fty; v_lin = Tir.Unr }))
+      droppable
+  in
+  let ops =
+    List.map (fun (_, v) ->
+        match drop_fn_for env v.Tir.v_ty with
+        | Some callee ->
+          let f = { Tir.v_name = callee;
+                    v_ty = Tir.TFn ([v.Tir.v_ty], Tir.TUnit);
+                    v_lin = Tir.Unr } in
+          Tir.EApp (f, [Tir.AVar v])
+        | None -> Tir.EDecRC (Tir.AVar v))
+      binders
+  in
+  let rec chain = function
+    | [] -> unit_expr
+    | [last] -> last
+    | op :: rest -> Tir.ESeq (op, chain rest)
+  in
+  let freed = { Tir.v_name = fresh env "dfree"; v_ty = Tir.TBool;
+                v_lin = Tir.Unr } in
+  let decrc_freed =
+    { Tir.v_name = "march_decrc_freed";
+      v_ty = Tir.TFn ([ty], Tir.TBool); v_lin = Tir.Unr } in
+  let guarded =
+    Tir.ELet (freed, Tir.EApp (decrc_freed, [Tir.AVar x]),
+      Tir.ECase (Tir.AVar freed,
+        [ { Tir.br_tag = "True"; br_vars = []; br_body = chain ops } ],
+        Some unit_expr))
+  in
+  let body =
+    List.fold_right (fun (accessor, v) acc ->
+        Tir.ELet (v, Tir.EField (Tir.AVar x, accessor), acc))
+      binders guarded
+  in
+  { Tir.fn_name = fname;
+    fn_params = [x];
+    fn_ret_ty = Tir.TUnit;
+    fn_body = body;
+    fn_kind = Tir.FnNormal }
 
 and build_drop_fn env fname ty ctors : Tir.fn_def =
   let x = { Tir.v_name = fresh env "dx"; v_ty = ty; v_lin = Tir.Unr } in

@@ -4423,14 +4423,48 @@ let test_perceus_local_record_field_no_spurious_decrc () =
   end|} in
   (* render extracts meta.title into t, then byte_size borrows t at last use.
      Before the fix: post_dec fires → EDecRC(t) in render.
-     After the fix:  t is in _borrowed_field_vars → no EDecRC for t in render. *)
+     After the fix:  t is in _borrowed_field_vars → no EDecRC for t in render.
+
+     Asserted by NAME rather than as "no EDecRC anywhere in render".  Since
+     aggregates became RC'd, render legitimately contains `dec_rc meta` — the
+     scope-end drop of the record itself, which is the whole point of that
+     change and which the blanket form would have flagged as a regression.
+     The bug this test guards is specifically a dec of the extracted FIELD, so
+     name t; and pin the record's own drop as well, so that dropping it again
+     by accident is caught here too. *)
+  let decrc_names fn =
+    let acc = ref [] in
+    let atom_name = function
+      | March_tir.Tir.AVar v -> Some v.March_tir.Tir.v_name
+      | _ -> None
+    in
+    let rec go = function
+      | March_tir.Tir.EDecRC a | March_tir.Tir.EAtomicDecRC a
+      | March_tir.Tir.EFree a ->
+        (match atom_name a with Some n -> acc := n :: !acc | None -> ())
+      | March_tir.Tir.ELet (_, e1, e2) | March_tir.Tir.ESeq (e1, e2) ->
+        go e1; go e2
+      | March_tir.Tir.ECase (_, brs, def) ->
+        List.iter (fun b -> go b.March_tir.Tir.br_body) brs;
+        (match def with Some e -> go e | None -> ())
+      | March_tir.Tir.ELetRec (fns, body) ->
+        List.iter (fun f -> go f.March_tir.Tir.fn_body) fns; go body
+      | _ -> ()
+    in
+    go fn.March_tir.Tir.fn_body; !acc
+  in
   let render_fns = List.filter (fun fn ->
     String.equal fn.March_tir.Tir.fn_name "render"
   ) m.March_tir.Tir.tm_fns in
+  let names = List.concat_map decrc_names render_fns in
   Alcotest.(check bool)
-    "render has no spurious EDecRC for locally-owned record field"
+    "render has no spurious EDecRC for the extracted record field t"
     false
-    (List.exists (fun fn -> has_any_decrc fn.March_tir.Tir.fn_body) render_fns)
+    (List.mem "t" names);
+  Alcotest.(check bool)
+    "render drops the record itself exactly once"
+    true
+    (List.length (List.filter (String.equal "meta") names) = 1)
 
 (* Regression: same bug at the LLVM IR level — ensure the emitted IR for a
    function using && contains no call to @__ (the undefined symbol produced

@@ -389,6 +389,143 @@ let wrap_incrcs (env : env) (incs : Tir.var list) (inner : Tir.expr) : Tir.expr 
     Tir.ESeq (incrc_for env v (Tir.AVar v), acc)
   ) incs inner
 
+(** True for the heap aggregates that own their fields: records and tuples.
+    Both are read only through [EField] (tuple destructuring lowers to
+    [EField] with [$fv]N names, not to an ECase), so both need the scope-end
+    drop in [insert_rc_expr]'s ELet case. *)
+let is_aggregate_ty : Tir.ty -> bool = function
+  | Tir.TTuple _ | Tir.TRecord _ -> true
+  | _ -> false
+
+(** Best-effort type of a TIR expression's value.  [None] means "could not
+    determine", and every caller must treat that as a refusal to transform
+    rather than a guess: the only consumer is the aggregate scope-end drop,
+    which needs a correctly-typed temporary to rebind the scope's value, and a
+    wrong type there is a miscompile (an i64 result stored through a ptr
+    slot).  Refusing merely leaves that aggregate undropped. *)
+let rec tir_expr_ty (e : Tir.expr) : Tir.ty option =
+  match e with
+  | Tir.EAtom (Tir.AVar w) -> Some w.Tir.v_ty
+  | Tir.EAtom (Tir.ALit (March_ast.Ast.LitInt _)) -> Some Tir.TInt
+  | Tir.EAtom (Tir.ALit (March_ast.Ast.LitBool _)) -> Some Tir.TBool
+  | Tir.EAtom (Tir.ALit (March_ast.Ast.LitFloat _)) -> Some Tir.TFloat
+  | Tir.EAtom (Tir.ALit (March_ast.Ast.LitString _)) -> Some Tir.TString
+  | Tir.ELet (_, _, body) | Tir.ESeq (_, body) -> tir_expr_ty body
+  | Tir.EApp (f, _) ->
+    (match f.Tir.v_ty with Tir.TFn (_, r) -> Some r | _ -> None)
+  | Tir.EField (Tir.AVar src, f) ->
+    (match src.Tir.v_ty with
+     | Tir.TRecord fs -> List.assoc_opt f fs
+     | Tir.TTuple ts when Tir_names.is_fv_field f ->
+       List.nth_opt ts (Tir_names.fv_field_index f)
+     | _ -> None)
+  | Tir.EAlloc (ty, _) | Tir.EStackAlloc (ty, _) -> Some ty
+  | Tir.ERecord fs ->
+    (* TRecord is sorted by field name; preserve that invariant. *)
+    let named = List.filter_map (fun (n, a) ->
+      match a with
+      | Tir.AVar w -> Some (n, w.Tir.v_ty)
+      | _ -> None) fs in
+    if List.length named = List.length fs
+    then Some (Tir.TRecord (List.sort (fun (a, _) (b, _) -> String.compare a b) named))
+    else None
+  | Tir.EUpdate (Tir.AVar src, _) -> Some src.Tir.v_ty
+  | _ -> None
+
+(** True when every occurrence of [name] in [e] is as the SOURCE of an
+    [EField] projection — i.e. the aggregate is only ever read, never handed
+    off.  This is the precondition for the scope-end drop: at any CONSUMING
+    position (call argument, constructor / tuple / record capture, an atom in
+    tail position) ownership transfers to the consumer, which becomes
+    responsible for the release, and dropping here as well frees a cell the
+    consumer still holds.
+
+    [env.moved_vars] does not cover this: it did not stop the scope-end drop
+    from firing on a record captured by an [EAlloc]
+    (`alloc Box.Box(n, r); dec_rc r`), which freed the constructor's own field
+    and crashed with SIGBUS. Rather than widen that set and change what it
+    means for the rest of the pass, this predicate states the requirement
+    directly and conservatively: anything that is not an EField source
+    disqualifies the drop. *)
+let rec used_only_as_field_source (name : string) (e : Tir.expr) : bool =
+  let atom_hits = function
+    | Tir.AVar w -> String.equal w.Tir.v_name name
+    | _ -> false
+  in
+  let atoms_ok atoms = not (List.exists atom_hits atoms) in
+  match e with
+  (* The one permitted occurrence. *)
+  | Tir.EField (Tir.AVar w, _) when String.equal w.Tir.v_name name -> true
+  | Tir.EField (a, _) -> not (atom_hits a)
+  | Tir.EAtom a -> not (atom_hits a)
+  | Tir.EApp (f, args) -> not (String.equal f.Tir.v_name name) && atoms_ok args
+  | Tir.ECallPtr (a, args) -> atoms_ok (a :: args)
+  | Tir.ETuple atoms | Tir.EAlloc (_, atoms) | Tir.EStackAlloc (_, atoms) ->
+    atoms_ok atoms
+  | Tir.ERecord fields -> atoms_ok (List.map snd fields)
+  | Tir.EUpdate (a, fields) -> atoms_ok (a :: List.map snd fields)
+  | Tir.EReuse (a, _, args) -> atoms_ok (a :: args)
+  | Tir.EAllocHole (tok, _, filled, _) ->
+    atoms_ok (match tok with Some a -> a :: filled | None -> filled)
+  | Tir.ESetField (a, _, b) -> atoms_ok [a; b]
+  | Tir.EIncRC a | Tir.EDecRC a | Tir.EAtomicIncRC a | Tir.EAtomicDecRC a
+  | Tir.EFree a -> not (atom_hits a)
+  | Tir.ELet (_, e1, e2) ->
+    used_only_as_field_source name e1 && used_only_as_field_source name e2
+  | Tir.ESeq (e1, e2) ->
+    used_only_as_field_source name e1 && used_only_as_field_source name e2
+  | Tir.ECase (a, branches, default) ->
+    (* A case SCRUTINEE is consumed (add_scrutinee_free_for may free it). *)
+    not (atom_hits a)
+    && List.for_all (fun br -> used_only_as_field_source name br.Tir.br_body)
+         branches
+    && (match default with
+        | Some d -> used_only_as_field_source name d
+        | None -> true)
+  | Tir.ELetRec (fns, body) ->
+    List.for_all (fun fn -> used_only_as_field_source name fn.Tir.fn_body) fns
+    && used_only_as_field_source name body
+
+(** True when [e] already contains a release of [name] on some path.  The
+    aggregate scope-end drop must stand down in that case: [post_dec_vars]
+    already emits a post-call dec for an aggregate passed to a borrowed
+    parameter position, and adding a second one underflows the refcount (the
+    runtime aborts on it).  Conservative in the safe direction — a dec on ONE
+    branch suppresses the scope-end drop on all of them, which can leave the
+    aggregate undropped on the others, never double-freed. *)
+let rec releases_var (name : string) (e : Tir.expr) : bool =
+  let atom_is = function
+    | Tir.AVar w -> String.equal w.Tir.v_name name
+    | _ -> false
+  in
+  match e with
+  | Tir.EDecRC a | Tir.EAtomicDecRC a | Tir.EFree a -> atom_is a
+  | Tir.ELet (_, e1, e2) -> releases_var name e1 || releases_var name e2
+  | Tir.ESeq (e1, e2) -> releases_var name e1 || releases_var name e2
+  | Tir.ECase (_, branches, default) ->
+    List.exists (fun br -> releases_var name br.Tir.br_body) branches
+    || (match default with Some d -> releases_var name d | None -> false)
+  | Tir.ELetRec (fns, body) ->
+    List.exists (fun fn -> releases_var name fn.Tir.fn_body) fns
+    || releases_var name body
+  | _ -> false
+
+(** True when [name] is the value the expression evaluates to, i.e. it sits in
+    tail position as a bare atom.  Used to suppress the aggregate scope-end
+    drop for [let b = {..} in b], where ownership has already been transferred
+    out by the tail EAtom and a dec here would double-free. *)
+let rec tail_value_is_var (name : string) (e : Tir.expr) : bool =
+  match e with
+  | Tir.EAtom (Tir.AVar w) -> String.equal w.Tir.v_name name
+  | Tir.ELet (_, _, body) -> tail_value_is_var name body
+  | Tir.ESeq (_, body) -> tail_value_is_var name body
+  | Tir.ECase (_, branches, default) ->
+    List.exists (fun br -> tail_value_is_var name br.Tir.br_body) branches
+    || (match default with
+        | Some d -> tail_value_is_var name d
+        | None -> false)
+  | _ -> false
+
 (** Determine which AVar atoms in a list need EIncRC because they are
     Unr, needs_rc, and still live after this use.
     Closure FVs are handled via the [borrowed] set in [insert_rc]: they are
@@ -882,6 +1019,46 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
             e2'
         else
           e2'
+      else if is_aggregate_ty v.Tir.v_ty
+              && v.Tir.v_lin = Tir.Unr
+              && StringSet.mem v.Tir.v_name live_into_e2
+              && not (StringSet.mem v.Tir.v_name live_after)
+              && not (StringSet.mem v.Tir.v_name env.closure_fvs)
+              && not (StringSet.mem v.Tir.v_name env.moved_vars)
+              && not is_borrowed_field
+              && not (tail_value_is_var v.Tir.v_name e2')
+              && not (releases_var v.Tir.v_name e2')
+              && used_only_as_field_source v.Tir.v_name e2'
+              && tir_expr_ty e2' <> None then
+        (* Scope-end drop for an owned aggregate (Wave: aggregate RC).
+           Records and tuples are read exclusively through [EField]; unlike a
+           variant, which is destructured by an ECase and freed there by
+           [add_scrutinee_free_for], an aggregate has NO drop site on its read
+           path.  So an aggregate that is USED in [e2] (and therefore skips the
+           dead-binding branch above) but does not outlive this scope was never
+           dropped at all: every record and tuple cell leaked, together with
+           every heap value it owned.
+
+           The drop goes at the END of the scope rather than at the last field
+           read.  That is the conservative direction and it is what makes it
+           safe: a field that ESCAPES [e2] has already been dup'd by the
+           borrowed-field logic above ([inc_rc] before the field leaves), so by
+           the time the aggregate is released every reference taken out of it is
+           independently owned.  Dropping at last use instead would require
+           proving that no borrowed field outlives the projection.
+
+           [tail_value_is_var] excludes the aggregate being the scope's own
+           result ([let b = {..} in b]), where the EAtom arm has already handed
+           ownership to the caller and this dec would be a double-free.
+           [moved_vars] excludes the aggregate being stored into another
+           structure on any path. *)
+        let body_ty = match tir_expr_ty e2' with
+          | Some t -> t
+          | None -> assert false (* guarded above *) in
+        let tmp = fresh_rc_var body_ty in
+        Tir.ELet (tmp, e2',
+                  Tir.ESeq (decrc_for env v (Tir.AVar v),
+                            Tir.EAtom (Tir.AVar tmp)))
       else
         e2'
     in
@@ -1208,8 +1385,24 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
 
   | Tir.EField (a, f) ->
     (* Field projection BORROWS the record: no ownership changes hands, so a
-       borrowed-field record var must not be dup'd here (it would leak). *)
-    let inc_vars = find_inc_vars ~include_borrowed_fields:false env [a] live_after in
+       borrowed-field record var must not be dup'd here (it would leak).
+
+       Aggregate sources are excluded outright.  [find_inc_vars] documents its
+       atoms as being at CONSUMING positions; an EField projection is not one,
+       and ~include_borrowed_fields:false only suppresses sources already in
+       [borrowed_field_vars] — an owned record/tuple parameter is not, so it
+       would be dup'd once per field read with no matching dec.  This was inert
+       while [needs_rc] was false for TTuple/TRecord; once aggregates became
+       RC'd it leaked one reference per projection (`inc_rc b; b.n`). *)
+    let a_is_aggregate = match a with
+      | Tir.AVar v -> (match v.Tir.v_ty with
+                       | Tir.TTuple _ | Tir.TRecord _ -> true
+                       | _ -> false)
+      | _ -> false
+    in
+    let inc_vars =
+      if a_is_aggregate then []
+      else find_inc_vars ~include_borrowed_fields:false env [a] live_after in
     let e' = wrap_incrcs env inc_vars (Tir.EField (a, f)) in
     let lb = StringSet.union live_after (vars_of_atom a) in
     (e', lb)

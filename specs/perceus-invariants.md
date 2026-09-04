@@ -45,8 +45,8 @@ The divergent set, exactly as `rc_types.ml` states it:
 |---|---|---|
 | `TFn _` | **true** | **false** |
 | bare `TVar _` | **true** | **false** |
-| `TTuple _` | **false** | **true** |
-| `TRecord _` | **false** | **true** |
+| `TTuple _` | true | true |
+| `TRecord _` | true | true |
 
 Everything else agrees (atoms and scalars: both false; `TCon`/`TString`/
 `TPtr`/`TVar "_"`: both true). The divergence is load-bearing, not an
@@ -62,18 +62,28 @@ oversight:
   for the dec while Perceus's capture-site accounting still assumes
   ownership transfer — this is exactly the boundary the closure-FV fix
   lineage (§3) landed on.
-- **`TTuple`/`TRecord` — Perceus false, Borrow true.** Perceus never emits
-  aggregate-level RC ops for a tuple/record cell — ownership is reconciled
-  at the *field* level via the `borrowed_field_vars` mechanism (§4). But
-  record/tuple params must be borrow-*eligible* so the fixpoint can infer
-  `cfg:borrowed` for functions that only read fields via `EField` — this is
-  the toml-cluster fix (§5).
+- **`TTuple`/`TRecord` — both true; these no longer diverge.** Aggregates
+  own their fields and are DEEP-dropped at death, exactly like variants.
+  `borrowed_field_vars` (§4) still governs the *read* path — a field
+  extracted from a live aggregate is borrowed, and is dup'd if it escapes —
+  and record/tuple params stay borrow-*eligible* so the fixpoint can infer
+  `cfg:borrowed` for functions that only read fields via `EField` (the
+  toml-cluster fix, §5). What changed is the *death* path, which previously
+  did not exist: with `needs_rc` false, Perceus never decided an aggregate
+  was dead, so every record and tuple cell leaked together with every heap
+  value it owned (measured: a 200k-iteration loop rebuilding a
+  `{ n : Int, s : String }` leaked ~200k strings and ~200k cells, where the
+  equivalent two-field variant leaked nothing).
+
+  The read and death paths are orthogonal, which is why the `390dff00`
+  double-free warning below does not forbid this: that bug was about fields
+  extracted from a *live* aggregate being independently freed.
 
 `rc_types.ml`'s module doc carries the full fix-history citations for each
 arm (Map.fold `TFn` crash, Gate.cast `TVar` UAF, the Toml `get_str`
-corruption for the `TTuple`/`TRecord` side) — this document does not repeat
-them; changing any arm without reading that doc first reopens one of those
-crash classes.
+corruption for the `TTuple`/`TRecord` read path) — this document does not
+repeat them; changing any arm without reading that doc first reopens one of
+those crash classes.
 
 ---
 
