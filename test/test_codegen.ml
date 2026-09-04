@@ -1167,7 +1167,17 @@ let test_mutual_tco_borrowed_arg_decref_on_live_path () =
     IncRCs.  Before the fix it dups the tail field once and never releases it
     (1 IncRC / 0 DecRC).  (eafbd71a's own case stays covered by
     test/native/tco_fresh_arg_decrc.march — there the forwarded argument has
-    no IncRC to balance, so it must keep emitting neither op.) *)
+    no IncRC to balance, so it must keep emitting neither op.)
+
+    UPDATED for the G73 elision (specs/perceus-invariants.md §6.1): [xs] is
+    inferred [borrow], so [t] is now a borrowed field of a scrutinee that is
+    live across the whole case and gets NEITHER half of the pair — the
+    balanced 1/1 this test used to observe is now a strictly better 0/0.  The
+    balance assertion is unchanged and still load-bearing; the old
+    non-vacuousness guard ([incs > 0], which only made sense while a dup was
+    unavoidable) is replaced by pinning the exact new count.  Both directions
+    of eafbd71a's bug remain caught: a returning unbalanced dup fails the
+    count AND the balance, and a returning balanced dup fails the count. *)
 let test_tco_self_dup_arg_decref_on_live_path () =
   let ir = emit_tco_opt_ir {|mod Test do
   needs IO.Console
@@ -1203,7 +1213,9 @@ let test_tco_self_dup_arg_decref_on_live_path () =
      — a call to the generated deep drop, which performs that same decrc on
      the box.  Either discharges the dup; neither being present does not. *)
   let decs = count "@march_decrc" + count "@__drop$" in
-  Alcotest.(check bool) "self-tco dup-arg: the tail field is dup'd" true (incs > 0);
+  Alcotest.(check int)
+    "self-tco dup-arg: a borrowed tail forwarded to a borrowed position is not refcounted at all"
+    0 incs;
   Alcotest.(check int)
     "self-tco dup-arg: every IncRC of the forwarded tail has a matching release (else every cons cell leaks)"
     incs decs

@@ -408,6 +408,71 @@ neither of which is sort_by:
    elsewhere" set (see below) — without this second, *independent* fix,
    the conservatism above actively causes a double-free, not just a leak.
 
+### 6.1 Branch variables of a live-across-case scrutinee are borrowed
+### field vars (the G73 elision)
+
+**Governing module: `lib/tir/perceus_core.ml`**'s `ECase` case, the
+`scrutinee_live_across_case` computation feeding `env_for_br`'s
+`borrowed_field_vars`.
+
+The `la` re-add described above makes a borrowed scrutinee's branch
+variables *live*, which is enough to stop them being freed and enough to
+make a consuming use dup them. It is **not** enough to stop them being
+dup'd at a use that consumes nothing. A projection bound out of a live
+scrutinee and then handed to a borrowed parameter got the full owned-
+binding treatment:
+
+```
+Box($f) -> let s : String = inc_rc $f; $f in
+             let $rc : Int = string_byte_length(s) in
+             dec_rc s; $rc
+```
+
+`inc_rc` at the projection (because `$f` is live, so the alias binding
+`let s = $f` must mint its own reference) and `dec_rc` after the call (§2's
+borrowed-position rule: the callee will not release what the caller lent
+it). Neither is needed — `b` outlives the whole arm and `s` never escapes
+it. Under the scheduler `march_incrc_local` defers to the atomic
+`march_incrc` on any scheduler thread, so this pair is an atomic
+read-modify-write on a header that other workers are reading concurrently:
+a cache line bouncing between cores for a *read*. Measured on a one-field
+`Cell(NativeU8Arr)` wrapper against the same array read directly, the
+wrapped form was 5.8x slower single-threaded and got **slower** as threads
+were added, while the direct form sped up 5.8x.
+
+**The fix** is not a new mechanism: such a br_var *is* a borrowed field
+var in the sense §7 and the `ELet` `is_borrowed_field` cases already
+define, so the `ECase` branch env now says so. Everything else follows from
+the existing discipline — the alias-binding arm of `ELet` skips RC
+processing of `let a = <br_var>`, the `post_dec_vars` filters in
+`EApp`/`ECallPtr` exclude `borrowed_field_vars`, and a consuming use still
+dups because the br_vars are in the branch's live-at-exit set. The dup for
+an escaping projection is not removed, only **moved** from the projection
+site to the escaping use.
+
+**The safety gate is `live_after` membership ALONE, not `scrutinee_borrowed`.**
+The premise being discharged is "the parent outlives the arm", and only the
+first of `scrutinee_borrowed`'s three disjuncts establishes it:
+
+- `name_free_in v br_body` — the path-insensitive conservatism above — says
+  only that the scrutinee is *mentioned* somewhere in the arm. Ownership
+  then transfers into the body, which may consume and free the scrutinee
+  part-way through while a projected field is still being read. Today that
+  field holds its own `+1` and survives. Eliding it there would convert
+  this section's deliberate leak-not-crash into a use-after-free, which is
+  the one direction that is not allowed to be wrong.
+- `TTuple`/`TRecord` scrutinees are `needs_rc = false` (§1): Perceus never
+  sees the aggregate's lifetime, so it cannot discharge the premise at all.
+
+Excluding those two leaves elidable pairs on the table. That is the
+acceptable direction; §6's asymmetry argument runs the same way here.
+
+**Standing regression artifact:** the golden pair
+`test/snapshots/{lower,perceus}/borrowed_scrutinee_field_read.expected`.
+Its `read_only` function is two projections and two borrowed reads with
+**zero** RC ops; its `escapes` control is the same projection returned from
+the arm, carrying exactly one `inc_rc` at the return.
+
 ### The double-dec fix (`20d1d144`)
 
 `add_cross_decrcs` (the cross-branch dead-variable `EDecRC` pass, §7)
