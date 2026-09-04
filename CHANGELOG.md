@@ -34,6 +34,19 @@ git log is authoritative for exact commits.
   default-argument function's parameter) are documented in
   `docs/refinement-types.md` and filed as `specs/todos/` entries with
   reproducers.
+- **Allocation contracts (`@[no_alloc]`).** A per-function contract checked on
+  the compiled program, after reference counting and escape analysis, so a
+  constructor the compiler reuses in place or a value it promotes to the stack
+  passes. Transitive over callees with no annotation on them;
+  `@[no_alloc(warn)]` reports a warning instead of an error and
+  `@[no_alloc(assume)]` marks a closure or `extern` wrapper as trusted.
+  `--no-opt` downgrades a failure to a warning naming the flag, and a
+  TRMC-eligible failure points at `--trmc`. The language server reports the
+  failure at the function name, shows `✓ no_alloc` when the contract holds,
+  and offers an "Add `@[no_alloc]`" quick fix; `march --compile
+  --report-contracts` and `forge fix --contracts` insert the attribute on
+  functions the compiler has verified. `Tagged(_, NoAlloc)` and `Realtime`
+  policies now use the same check, which only widens what they accept.
 
 - **`Session`**: a session-transport capability. `Cap(Session.Live)` carries
   the transport as a dictionary — `register`, `emit`, `suspend`, `close`,
@@ -70,6 +83,14 @@ git log is authoritative for exact commits.
   resolves that project's modules and FFI shims. Arguments after `--` reach the
   program as `System.argv()`; the compiler gained `march --args` to make that
   work for interpreted runs too.
+
+- **`MARCH_PIN_MAIN=1` runs `main` on the OS main thread.** The `main` green
+  thread is pinned to scheduler 0, which lives on the thread that started the
+  runtime, while the other scheduler workers keep running Tasks and `pmap`.
+  For libraries that require the process main thread (Cocoa, GLFW window
+  creation on macOS), which previously forced `MARCH_NUM_SCHEDULERS=1` and
+  lost all parallelism. Opt-in; the default is unchanged. Procs spawned by
+  `main` are not pinned; with a single scheduler the variable is a no-op.
 
 ### Fixed
 

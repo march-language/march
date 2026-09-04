@@ -467,8 +467,8 @@ let transform_fn ?(on_decline = fun (_ : string) -> ())
 let enabled : bool ref = ref false
 
 (** Apply TRMC across a module.  Gated on [enabled] (see [--trmc]). *)
-let transform_module (m : Tir.tir_module) : Tir.tir_module =
-  if not !enabled then m
+let transform_module ?(enabled = !enabled) (m : Tir.tir_module) : Tir.tir_module =
+  if not enabled then m
   else begin
     let report = Sys.getenv_opt "MARCH_TRMC_REPORT" <> None in
     let out = List.concat_map (fun fn ->

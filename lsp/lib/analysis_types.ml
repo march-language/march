@@ -269,6 +269,11 @@ type t = {
   consume_modes    : consume_modes list;
   (** Per-callee argument ownership from borrow inference — drives the
       "consumed" inlay hint. Populated by the TIR pass; empty until it runs. *)
+  no_alloc_candidates : (string * Ast.span * Ast.span) list;
+  (** Functions the @[no_alloc] checker verified allocation-free that are in
+      the generation scope for the "Add `@[no_alloc]`" quick fix: (name, name
+      span, declaration span).  Same predicate `forge fix --contracts` uses,
+      so the editor offers the action exactly where forge would insert it. *)
   tir_fn_insights  : tir_fn_insight list;
   (** TIR-pipeline function-level insights: stack promotions, FBIP reuse, indirect calls. *)
   code_lens_items  : code_lens_item list;
