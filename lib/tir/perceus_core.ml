@@ -1393,22 +1393,19 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
     (* Field projection BORROWS the record: no ownership changes hands, so a
        borrowed-field record var must not be dup'd here (it would leak).
 
-       Aggregate sources are excluded outright.  [find_inc_vars] documents its
-       atoms as being at CONSUMING positions; an EField projection is not one,
-       and ~include_borrowed_fields:false only suppresses sources already in
-       [borrowed_field_vars] — an owned record/tuple parameter is not, so it
-       would be dup'd once per field read with no matching dec.  This was inert
-       while [needs_rc] was false for TTuple/TRecord; once aggregates became
-       RC'd it leaked one reference per projection (`inc_rc b; b.n`). *)
-    let a_is_aggregate = match a with
-      | Tir.AVar v -> (match v.Tir.v_ty with
-                       | Tir.TTuple _ | Tir.TRecord _ -> true
-                       | _ -> false)
-      | _ -> false
-    in
-    let inc_vars =
-      if a_is_aggregate then []
-      else find_inc_vars ~include_borrowed_fields:false env [a] live_after in
+       NOTE: an aggregate source is deliberately NOT excluded here, even though
+       [find_inc_vars] documents its atoms as consuming positions and a
+       projection is not one.  Excluding it (tried, reverted) removed incs that
+       are load-bearing for niche-represented payloads, where the scrutinee and
+       its payload share one cell: test/native/record_pattern.march
+       (`Wrap = W({rate : Float, code : Int}) | Z`, matched twice) then died
+       with a nondeterministic SIGBUS/RC-underflow on the second call.  The inc
+       is largely inert anyway -- [find_inc_vars] only emits one when the source
+       is live after the projection, in which case a later dec balances it -- so
+       excluding it bought nothing measurable: the leak fixtures and
+       simple-record leak counts were identical either way.  See
+       specs/todos/2026-09-03-aggregate-field-read-inc-masks-imbalance.md. *)
+    let inc_vars = find_inc_vars ~include_borrowed_fields:false env [a] live_after in
     let e' = wrap_incrcs env inc_vars (Tir.EField (a, f)) in
     let lb = StringSet.union live_after (vars_of_atom a) in
     (e', lb)

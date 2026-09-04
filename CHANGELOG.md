@@ -61,10 +61,12 @@ git log is authoritative for exact commits.
   same shared-cell guard variants use. A variant holding a record or tuple
   field is fixed by the same change.
 
-  Not yet covered: an aggregate parameter of a self-tail-recursive function,
-  rebuilt each iteration, still leaks — the trailing dec is discarded when TCO
-  emits the back-edge. Tracked in
-  `specs/todos/2026-09-03-aggregate-rc-tail-recursive-param-leak.md`.
+  Two shapes are not yet covered, both tracked in `specs/todos/`: an aggregate
+  parameter of a self-tail-recursive function rebuilt each iteration (the
+  trailing dec is discarded when TCO emits the back-edge), and a record passed
+  to a function that reads its fields (the projection dups the record, and
+  removing that dup breaks niche-represented payloads). A record built and read
+  within one scope, and a variant holding a record or tuple field, are fixed.
 
 - Compiled binaries built with `MARCH_STRING_STATS=1` now report `live_objs`,
   the runtime's exact live-heap-object count. Unlike peak RSS it does not vary

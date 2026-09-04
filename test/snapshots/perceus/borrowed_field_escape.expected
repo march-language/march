@@ -13,7 +13,8 @@ $rc_2
 
 ## peek
 fn peek(b : { inner : String }) : String =
-  let $rc_1 : String = b.inner in
+  let $rc_1 : String = inc_rc b;
+b.inner in
 inc_rc $rc_1;
 $rc_1
 
