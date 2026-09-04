@@ -11842,6 +11842,1614 @@ end|}
         Alcotest.(check bool) "no float-sort-gate" false
           (List.mem "float-sort-gate" rs)) ]
 
+(* -- Refinement coverage audit -- Task 1: site enumeration --------------
+   [Refine_audit.sites] is a fork of [warn_predicate_ty]/[warn_predicate_decls]
+   that enumerates every declared [TyRefine] occurrence rather than warning
+   about a few of them. These tests construct the [A.decl list] directly
+   (per the plan's Task 1: "Do not wire anything into check_module or
+   bin/main.ml in this task") rather than parsing March source, because one
+   of the covered positions ([Expr_annot], an [EAnnot] node) has no surface
+   syntax at all: [EAnnot] is produced only by desugar (see
+   [lib/desugar/desugar.ml]'s [DApp] handling), never by the parser. Building
+   every fixture the same way keeps the "one fixture, many positions" design
+   honest instead of half-parsed-half-hand-built. *)
+module RAudit = March_refinecheck.Refine_audit
+
+module Audit_fixture = struct
+  module A = March_ast.Ast
+
+  (* Every predicate expression gets its OWN span, tagged by an integer id
+     that identifies which predicate it is. A site's span must be a REAL
+     span from a neighbour ([Refine_audit]'s contract is "the predicate
+     expression's own span"), so asserting the exact id round-trips through
+     [Refine_audit.sites] is what proves the span was actually threaded from
+     the right node, not fabricated or borrowed from an unrelated one. *)
+  let sp (id : int) : A.span =
+    { A.file = "audit-fixture"; start_line = id; start_col = 0; end_line = id; end_col = 1 }
+
+  let dummy = sp 0
+  let nm txt = { A.txt; A.span = dummy }
+  let int_ty = A.TyCon (nm "Int", [])
+
+  (* [refine_or_plain omit id base] is [{ base | true }] tagged with span
+     [sp id], UNLESS [id] is a member of [omit], in which case it degrades to
+     the plain [base] with no refinement at all -- the "delete this one
+     declared refinement" fixture the plan's per-position negative tests
+     need, built by omission rather than by duplicating the whole fixture
+     once per position. *)
+  let build_decls ?(omit : int list = []) () : A.decl list =
+    let refine_or_plain id base : A.ty =
+      if List.mem id omit then base
+      else A.TyRefine (base, None, A.ELit (A.LitBool true, sp id))
+    in
+    (* fn f(p0 : {Int|1}, p1 : {Int|2} -> Int, p2 : Int -> {Int|3},
+            p3 : List({Int|4}), p4 : (Int, {Int|17}),
+            p5 : { b : {Int|18} }, p6 : linear {Int|19},
+            p7 : List({ b : {Int|20} }),
+            p9 : Int \\ (default expr annotated {Int|24}))
+            : {Int|5}
+        when (guard annotated {Int|23}) do
+         fn helper(hp0 : {Int|30}) : {Int|31} do hp0 end
+         let _lam = fn (x : {Int|6}) -> x
+         let y : {Int|7} = 0
+         (y : {Int|8})
+       end
+
+       -- p0 is Param("f",0), Outermost.
+       -- p1's domain is refined: the type itself IS the arrow (p1's
+          declared type is not the outermost TyRefine), so this is
+          Arrow_domain, Nested.
+       -- p2's codomain is refined, symmetrically: Arrow_codomain, Nested.
+       -- p3's List(...) argument is refined: Type_arg, Nested.
+       -- p4's tuple element is refined: no dedicated tag for TyTuple, so it
+          keeps Param("f",4), Nested.
+       -- p5's inline record TYPE EXPRESSION field is refined: no dedicated
+          tag for a TyRecord type expression either, so Param("f",5), Nested.
+          This is distinct from [Field], which only ever names a TDRecord
+          declaration's own field, never a record type expression used
+          inline as a parameter's type.
+       -- p6's linear wrapper is refined: Param("f",6), Nested.
+       -- p7 nests a refined record field inside a TyCon argument: the
+          immediate container when the refinement is found is still the
+          TyCon argument (Type_arg), Nested, since neither TyRecord nor
+          TyCon changes an already-set Type_arg label once assigned within
+          the same walk_ty call chain... concretely this is Type_arg,
+          Nested, reached two structural layers below Param("f",7).
+       -- the return type is refined at the top: Return("f"), Outermost.
+       -- the guard expression's annotation: Expr_annot, Outermost.
+       -- p9's default expression's annotation: Expr_annot, Outermost.
+       -- the lambda's parameter: Lambda_param(0), Outermost.
+       -- the let binding's annotation: Let_annot("y"), Outermost.
+       -- the annotated expression: Expr_annot, Outermost.
+       -- the block-level function's parameter and return: Param("helper",0)
+          and Return("helper"), both Outermost. *)
+    let p0 : A.param = { A.param_name = nm "p0"; param_ty = Some (refine_or_plain 1 int_ty); param_lin = A.Unrestricted } in
+    let p1 : A.param =
+      { A.param_name = nm "p1";
+        param_ty = Some (A.TyArrow (refine_or_plain 2 int_ty, int_ty));
+        param_lin = A.Unrestricted }
+    in
+    let p2 : A.param =
+      { A.param_name = nm "p2";
+        param_ty = Some (A.TyArrow (int_ty, refine_or_plain 3 int_ty));
+        param_lin = A.Unrestricted }
+    in
+    let p3 : A.param =
+      { A.param_name = nm "p3";
+        param_ty = Some (A.TyCon (nm "List", [ refine_or_plain 4 int_ty ]));
+        param_lin = A.Unrestricted }
+    in
+    let p4 : A.param =
+      { A.param_name = nm "p4";
+        param_ty = Some (A.TyTuple [ int_ty; refine_or_plain 17 int_ty ]);
+        param_lin = A.Unrestricted }
+    in
+    let p5 : A.param =
+      { A.param_name = nm "p5";
+        param_ty = Some (A.TyRecord [ (nm "b", refine_or_plain 18 int_ty) ]);
+        param_lin = A.Unrestricted }
+    in
+    let p6 : A.param =
+      { A.param_name = nm "p6";
+        param_ty = Some (A.TyLinear (A.Linear, refine_or_plain 19 int_ty));
+        param_lin = A.Unrestricted }
+    in
+    let p7 : A.param =
+      { A.param_name = nm "p7";
+        param_ty = Some (A.TyCon (nm "List", [ A.TyRecord [ (nm "b", refine_or_plain 20 int_ty) ] ]));
+        param_lin = A.Unrestricted }
+    in
+    let p9 : A.param = { A.param_name = nm "p9"; param_ty = Some int_ty; param_lin = A.Unrestricted } in
+    let p9_default : A.expr = A.EAnnot (A.ELit (A.LitInt 21, dummy), refine_or_plain 24 int_ty, dummy) in
+    let lam_param : A.param =
+      { A.param_name = nm "x"; param_ty = Some (refine_or_plain 6 int_ty); param_lin = A.Unrestricted }
+    in
+    let lam_binding : A.binding =
+      { A.bind_pat = A.PatVar (nm "_lam");
+        bind_ty = None;
+        bind_lin = A.Unrestricted;
+        bind_expr = A.ELam ([ lam_param ], A.EVar (nm "x"), dummy) }
+    in
+    let y_binding : A.binding =
+      { A.bind_pat = A.PatVar (nm "y");
+        bind_ty = Some (refine_or_plain 7 int_ty);
+        bind_lin = A.Unrestricted;
+        bind_expr = A.ELit (A.LitInt 0, dummy) }
+    in
+    let helper_param : A.param =
+      { A.param_name = nm "hp0"; param_ty = Some (refine_or_plain 30 int_ty); param_lin = A.Unrestricted }
+    in
+    let helper_letfn : A.expr =
+      A.ELetFn ( nm "helper", [ helper_param ], Some (refine_or_plain 31 int_ty), A.EVar (nm "hp0"), dummy)
+    in
+    let f_body : A.expr =
+      A.EBlock
+        ( [ helper_letfn;
+            A.ELet (lam_binding, dummy);
+            A.ELet (y_binding, dummy);
+            A.EAnnot (A.EVar (nm "y"), refine_or_plain 8 int_ty, dummy)
+          ],
+          dummy )
+    in
+    let f_clause : A.fn_clause =
+      { A.fc_params =
+          [ A.FPNamed p0; A.FPNamed p1; A.FPNamed p2; A.FPNamed p3;
+            A.FPNamed p4; A.FPNamed p5; A.FPNamed p6; A.FPNamed p7;
+            A.FPDefault (p9, p9_default)
+          ];
+        fc_guard = Some (A.EAnnot (A.ELit (A.LitBool true, dummy), refine_or_plain 23 int_ty, dummy));
+        fc_body = f_body;
+        fc_span = dummy;
+        fc_params_span = dummy }
+    in
+    let f_def : A.fn_def =
+      { A.fn_name = nm "f";
+        fn_vis = A.Public;
+        fn_doc = None;
+        fn_attrs = [];
+        fn_ret_ty = Some (refine_or_plain 5 int_ty);
+        fn_clauses = [ f_clause ];
+        fn_bounds = [] }
+    in
+    let top_let : A.binding =
+      { A.bind_pat = A.PatVar (nm "top_let");
+        bind_ty = Some (refine_or_plain 9 int_ty);
+        bind_lin = A.Unrestricted;
+        bind_expr = A.ELit (A.LitInt 0, dummy) }
+    in
+    let box_field : A.field = { A.fld_name = nm "v"; fld_ty = refine_or_plain 10 int_ty; fld_lin = A.Unrestricted } in
+    let tag_variant : A.variant =
+      { A.var_name = nm "A"; var_args = [ int_ty; refine_or_plain 11 int_ty ]; var_vis = A.Public }
+    in
+    let store_sig : A.sig_def = { A.sig_types = []; sig_fns = [ (nm "put", refine_or_plain 12 int_ty) ] } in
+    let extern_fn : A.extern_fn =
+      { A.ef_name = nm "take";
+        ef_params = [ (nm "n", refine_or_plain 13 int_ty) ];
+        ef_param_consumed = [ false ];
+        ef_blocking = false;
+        ef_raises = false;
+        ef_ret_ty = refine_or_plain 14 int_ty;
+        ef_symbol = None }
+    in
+    let extern_def : A.extern_def =
+      { A.ext_lib_name = "c"; ext_cap_ty = A.TyCon (nm "Cap", []); ext_fns = [ extern_fn ] }
+    in
+    let iface_def : A.interface_def =
+      { A.iface_name = nm "Runner";
+        iface_param = nm "a";
+        iface_superclasses = [];
+        iface_assoc_types = [];
+        iface_methods = [ { A.md_name = nm "run"; md_ty = refine_or_plain 15 int_ty; md_default = None } ] }
+    in
+    (* [DImpl]: an [impl] block for a DIFFERENT interface than [Runner]
+       above, so its [Impl_ty] site and its method's [Param]/[Return] sites
+       (under the method name "bump", never reused by [DFn]/[DInterface]
+       above) are reachable ONLY through the [DImpl] arm. *)
+    let impl_method_def : A.fn_def =
+      { A.fn_name = nm "bump";
+        fn_vis = A.Public;
+        fn_doc = None;
+        fn_attrs = [];
+        fn_ret_ty = Some (refine_or_plain 27 int_ty);
+        fn_clauses =
+          [ { A.fc_params = [ A.FPNamed { A.param_name = nm "q0"; param_ty = Some (refine_or_plain 26 int_ty); param_lin = A.Unrestricted } ];
+              fc_guard = None;
+              fc_body = A.ELit (A.LitInt 0, dummy);
+              fc_span = dummy;
+              fc_params_span = dummy }
+          ];
+        fn_bounds = [] }
+    in
+    let impl_def : A.impl_def =
+      { A.impl_iface = nm "Bumper";
+        impl_ty = refine_or_plain 25 int_ty;
+        impl_constraints = [];
+        impl_assoc_types = [];
+        impl_methods = [ (nm "bump", impl_method_def) ] }
+    in
+    (* [DMod]: a nested module whose only content is a [DLet], reachable
+       ONLY through [walk_decls]'s [DMod] recursion. *)
+    let mod_let : A.binding =
+      { A.bind_pat = A.PatVar (nm "modlet");
+        bind_ty = Some (refine_or_plain 28 int_ty);
+        bind_lin = A.Unrestricted;
+        bind_expr = A.ELit (A.LitInt 0, dummy) }
+    in
+    let mod_decl : A.decl = A.DMod (nm "Sub", A.Public, [ A.DLet (A.Public, mod_let, dummy) ], dummy) in
+    (* [DDescribe] wrapping a [DTest]: the test body's annotation is
+       reachable only when BOTH the [DDescribe] recursion and the [DTest]
+       arm are intact. *)
+    let test_def : A.test_def =
+      { A.test_name = "t1";
+        test_body = A.EAnnot (A.ELit (A.LitBool true, dummy), refine_or_plain 29 int_ty, dummy) }
+    in
+    let describe_decl : A.decl = A.DDescribe ("suite", [ A.DTest (test_def, dummy) ], dummy) in
+    let actor_param : A.param =
+      { A.param_name = nm "d"; param_ty = Some (refine_or_plain 16 int_ty); param_lin = A.Unrestricted }
+    in
+    let init_binding : A.binding =
+      { A.bind_pat = A.PatVar (nm "initlet");
+        bind_ty = Some (refine_or_plain 32 int_ty);
+        bind_lin = A.Unrestricted;
+        bind_expr = A.ELit (A.LitInt 0, dummy) }
+    in
+    let supervise_cfg : A.supervise_config =
+      { A.sc_fields = [ { A.sf_name = nm "child"; sf_ty = refine_or_plain 35 int_ty; sf_restart = A.Permanent } ];
+        sc_strategy = A.OneForOne;
+        sc_max_restarts = 0;
+        sc_window_secs = 0;
+        sc_order = [] }
+    in
+    let actor_def : A.actor_def =
+      { A.actor_state = [ { A.fld_name = nm "value"; fld_ty = refine_or_plain 34 int_ty; fld_lin = A.Unrestricted } ];
+        actor_init = A.ELet (init_binding, dummy);
+        actor_handlers = [ { A.ah_msg = nm "Bump"; ah_params = [ actor_param ]; ah_body = A.ELit (A.LitInt 0, dummy) } ];
+        actor_supervise = Some supervise_cfg;
+        actor_compat = "full";
+        actor_invariant = Some (A.EAnnot (A.ELit (A.LitBool true, dummy), refine_or_plain 33 int_ty, dummy)) }
+    in
+    [ A.DFn (f_def, dummy);
+      A.DLet (A.Public, top_let, dummy);
+      A.DType (A.Public, nm "Box", [], A.TDRecord [ box_field ], dummy);
+      A.DType (A.Public, nm "Tag", [], A.TDVariant [ tag_variant ], dummy);
+      A.DSig (nm "Store", store_sig, dummy);
+      A.DExtern (extern_def, dummy);
+      A.DInterface (iface_def, dummy);
+      A.DImpl (impl_def, dummy);
+      mod_decl;
+      describe_decl;
+      A.DActor (A.Public, nm "Counter", actor_def, dummy)
+    ]
+
+  let string_of_position (p : RAudit.position) : string =
+    match p with
+    | RAudit.Param (n, i) -> Printf.sprintf "Param(%s,%d)" n i
+    | RAudit.Return n -> Printf.sprintf "Return(%s)" n
+    | RAudit.Let_annot n -> Printf.sprintf "Let_annot(%s)" n
+    | RAudit.Field (t, f) -> Printf.sprintf "Field(%s,%s)" t f
+    | RAudit.Variant_arg (t, v, i) -> Printf.sprintf "Variant_arg(%s,%s,%d)" t v i
+    | RAudit.Impl_ty n -> Printf.sprintf "Impl_ty(%s)" n
+    | RAudit.Type_arg -> "Type_arg"
+    | RAudit.Arrow_domain -> "Arrow_domain"
+    | RAudit.Arrow_codomain -> "Arrow_codomain"
+    | RAudit.Lambda_param i -> Printf.sprintf "Lambda_param(%d)" i
+    | RAudit.Expr_annot -> "Expr_annot"
+    | RAudit.Sig_fn n -> Printf.sprintf "Sig_fn(%s)" n
+    | RAudit.Extern_fn n -> Printf.sprintf "Extern_fn(%s)" n
+    | RAudit.Iface_method n -> Printf.sprintf "Iface_method(%s)" n
+    | RAudit.Actor_handler_param (n, i) -> Printf.sprintf "Actor_handler_param(%s,%d)" n i
+
+  let string_of_nesting = function RAudit.Outermost -> "Outermost" | RAudit.Nested -> "Nested"
+
+  (* One tuple per site: (origin, position, nesting, span id). Folding the
+     span id in ties the labels to the SPECIFIC source node they were
+     threaded from, in one comparable value, rather than checking the
+     multiset and the spans separately and hoping they line up. *)
+  let label (s : RAudit.site) : string * string * string * int =
+    ( string_of_position s.RAudit.origin,
+      string_of_position s.RAudit.position,
+      string_of_nesting s.RAudit.nesting,
+      s.RAudit.span.A.start_line )
+
+  let labels decls = List.sort compare (List.map label (RAudit.sites decls))
+end
+
+let expected_audit_labels =
+  List.sort compare
+    [ ("Param(f,0)", "Param(f,0)", "Outermost", 1);
+      ("Param(f,1)", "Arrow_domain", "Nested", 2);
+      ("Param(f,2)", "Arrow_codomain", "Nested", 3);
+      ("Param(f,3)", "Type_arg", "Nested", 4);
+      ("Return(f)", "Return(f)", "Outermost", 5);
+      ("Lambda_param(0)", "Lambda_param(0)", "Outermost", 6);
+      ("Let_annot(y)", "Let_annot(y)", "Outermost", 7);
+      ("Expr_annot", "Expr_annot", "Outermost", 8);
+      ("Let_annot(top_let)", "Let_annot(top_let)", "Outermost", 9);
+      ("Field(Box,v)", "Field(Box,v)", "Outermost", 10);
+      ("Variant_arg(Tag,A,1)", "Variant_arg(Tag,A,1)", "Outermost", 11);
+      ("Sig_fn(put)", "Sig_fn(put)", "Outermost", 12);
+      ("Extern_fn(take)", "Extern_fn(take)", "Outermost", 13);
+      ("Extern_fn(take)", "Extern_fn(take)", "Outermost", 14);
+      ("Iface_method(run)", "Iface_method(run)", "Outermost", 15);
+      ("Actor_handler_param(Bump,0)", "Actor_handler_param(Bump,0)", "Outermost", 16);
+      ("Param(f,4)", "Param(f,4)", "Nested", 17);
+      ("Param(f,5)", "Param(f,5)", "Nested", 18);
+      ("Param(f,6)", "Param(f,6)", "Nested", 19);
+      ("Param(f,7)", "Type_arg", "Nested", 20);
+      ("Expr_annot", "Expr_annot", "Outermost", 23);
+      ("Expr_annot", "Expr_annot", "Outermost", 24);
+      ("Param(helper,0)", "Param(helper,0)", "Outermost", 30);
+      ("Return(helper)", "Return(helper)", "Outermost", 31);
+      ("Impl_ty(Bumper)", "Impl_ty(Bumper)", "Outermost", 25);
+      ("Param(bump,0)", "Param(bump,0)", "Outermost", 26);
+      ("Return(bump)", "Return(bump)", "Outermost", 27);
+      ("Let_annot(modlet)", "Let_annot(modlet)", "Outermost", 28);
+      ("Expr_annot", "Expr_annot", "Outermost", 29);
+      ("Let_annot(initlet)", "Let_annot(initlet)", "Outermost", 32);
+      ("Expr_annot", "Expr_annot", "Outermost", 33);
+      ("Field(Counter,value)", "Field(Counter,value)", "Outermost", 34);
+      ("Field(Counter,child)", "Field(Counter,child)", "Outermost", 35)
+    ]
+
+let audit_sites_suite =
+  [ Alcotest.test_case
+      "the exact multiset of (origin, position, nesting) tuples, one per covered position"
+      `Quick (fun () ->
+        Alcotest.(check (list (triple string string (pair string int))))
+          "labels"
+          (List.map (fun (o, p, n, i) -> (o, p, (n, i))) expected_audit_labels)
+          (List.map (fun (o, p, n, i) -> (o, p, (n, i))) (Audit_fixture.labels (Audit_fixture.build_decls ()))))
+  ]
+  @ List.map
+      (fun id ->
+        Alcotest.test_case
+          (Printf.sprintf "deleting the refinement at span id %d drops exactly its own label" id)
+          `Quick
+          (fun () ->
+            let expected_reduced =
+              List.filter (fun (_, _, _, i) -> i <> id) expected_audit_labels |> List.sort compare
+            in
+            let actual_reduced = Audit_fixture.labels (Audit_fixture.build_decls ~omit:[ id ] ()) in
+            Alcotest.(check (list (triple string string (pair string int))))
+              "reduced labels"
+              (List.map (fun (o, p, n, i) -> (o, p, (n, i))) expected_reduced)
+              (List.map (fun (o, p, n, i) -> (o, p, (n, i))) actual_reduced)))
+      [ 1; 2; 3; 4; 5; 6; 7; 8; 9; 10; 11; 12; 13; 14; 15; 16;
+        17; 18; 19; 20; 23; 24; 25; 26; 27; 28; 29; 30; 31; 32; 33; 34; 35
+      ]
+
+(* A stacked refinement's inner layer is NESTED, not "still outermost
+   because only a TyRefine was peeled" -- see the .mli's [nesting] doc,
+   which pins this exact example: [refined_param_ty] (refine_scope.ml:344)
+   requires a [TyCon] base, so a stacked refinement's inner predicate is
+   never what an extractor looks at, and [Nested] here is the reading that
+   matches the checker rather than an approximation of it. Kept as its own
+   small fixture rather than folded into the shared one above, since
+   omitting either layer changes the OTHER layer's nesting too (peeling the
+   outer [TyRefine] makes the inner one the new top, i.e. [Outermost]),
+   which the generic "omit one id, drop one label" test above assumes does
+   not happen. *)
+let audit_stacked_refinement_suite =
+  [ Alcotest.test_case "a stacked refinement's inner layer is Nested, its outer layer Outermost"
+      `Quick (fun () ->
+        let module A = March_ast.Ast in
+        let sp id : A.span = { A.file = "stacked"; start_line = id; start_col = 0; end_line = id; end_col = 1 } in
+        let dummy = sp 0 in
+        let nm txt = { A.txt; A.span = dummy } in
+        let int_ty = A.TyCon (nm "Int", []) in
+        let inner = A.TyRefine (int_ty, None, A.ELit (A.LitBool true, sp 2)) in
+        let stacked = A.TyRefine (inner, None, A.ELit (A.LitBool true, sp 1)) in
+        let p : A.param = { A.param_name = nm "p"; param_ty = Some stacked; param_lin = A.Unrestricted } in
+        let clause : A.fn_clause =
+          { A.fc_params = [ A.FPNamed p ];
+            fc_guard = None;
+            fc_body = A.ELit (A.LitInt 0, dummy);
+            fc_span = dummy;
+            fc_params_span = dummy }
+        in
+        let fd : A.fn_def =
+          { A.fn_name = nm "refref";
+            fn_vis = A.Public;
+            fn_doc = None;
+            fn_attrs = [];
+            fn_ret_ty = None;
+            fn_clauses = [ clause ];
+            fn_bounds = [] }
+        in
+        let labels = Audit_fixture.labels [ A.DFn (fd, dummy) ] in
+        Alcotest.(check (list (triple string string (pair string int))))
+          "outer Outermost, inner Nested"
+          (List.map (fun (o, p, n, i) -> (o, p, (n, i)))
+             (List.sort compare
+                [ ("Param(refref,0)", "Param(refref,0)", "Outermost", 1);
+                  ("Param(refref,0)", "Param(refref,0)", "Nested", 2)
+                ]))
+          (List.map (fun (o, p, n, i) -> (o, p, (n, i))) labels))
+  ]
+
+(* Finding 1's fix, pinned directly: a `sig`/`interface` entry whose type is
+   an ARROW (the shape every signature with an argument actually has) must
+   keep [origin = Sig_fn _ / Iface_method _] even though [position] is
+   relabelled to [Arrow_codomain] and [nesting] is [Nested]. Before this fix
+   both labels were entirely lost: `fn put : Int -> {Int | _ > 0}` in a
+   `sig` block enumerated as a bare [Arrow_codomain], with no way to tell it
+   apart from an ordinary nested arrow codomain, which is exactly the false
+   "unenforced" finding the design says the audit must not produce for a
+   position an existing warning already covers. *)
+let audit_arrow_signature_suite =
+  [ Alcotest.test_case "a sig entry `fn put : Int -> {Int | _ > 0}` keeps origin = Sig_fn(put)"
+      `Quick (fun () ->
+        let module A = March_ast.Ast in
+        let sp id : A.span = { A.file = "arrow-sig"; start_line = id; start_col = 0; end_line = id; end_col = 1 } in
+        let dummy = sp 0 in
+        let nm txt = { A.txt; A.span = dummy } in
+        let int_ty = A.TyCon (nm "Int", []) in
+        let refined = A.TyRefine (int_ty, None, A.ELit (A.LitBool true, sp 1)) in
+        let sig_ty = A.TyArrow (int_ty, refined) in
+        let sd : A.sig_def = { A.sig_types = []; sig_fns = [ (nm "put", sig_ty) ] } in
+        let labels = Audit_fixture.labels [ A.DSig (nm "Store", sd, dummy) ] in
+        Alcotest.(check (list (triple string string (pair string int))))
+          "origin Sig_fn(put), position Arrow_codomain, Nested"
+          (List.map (fun (o, p, n, i) -> (o, p, (n, i))) [ ("Sig_fn(put)", "Arrow_codomain", "Nested", 1) ])
+          (List.map (fun (o, p, n, i) -> (o, p, (n, i))) labels))
+  ; Alcotest.test_case "an interface method `fn run : a -> Int -> {Int | _ > 1}` keeps origin = Iface_method(run)"
+      `Quick (fun () ->
+        let module A = March_ast.Ast in
+        let sp id : A.span = { A.file = "arrow-iface"; start_line = id; start_col = 0; end_line = id; end_col = 1 } in
+        let dummy = sp 0 in
+        let nm txt = { A.txt; A.span = dummy } in
+        let int_ty = A.TyCon (nm "Int", []) in
+        let refined = A.TyRefine (int_ty, None, A.ELit (A.LitBool true, sp 1)) in
+        let method_ty = A.TyArrow (A.TyVar (nm "a"), A.TyArrow (int_ty, refined)) in
+        let idf : A.interface_def =
+          { A.iface_name = nm "Runner";
+            iface_param = nm "a";
+            iface_superclasses = [];
+            iface_assoc_types = [];
+            iface_methods = [ { A.md_name = nm "run"; md_ty = method_ty; md_default = None } ] }
+        in
+        let labels = Audit_fixture.labels [ A.DInterface (idf, dummy) ] in
+        Alcotest.(check (list (triple string string (pair string int))))
+          "origin Iface_method(run), position Arrow_codomain, Nested"
+          (List.map (fun (o, p, n, i) -> (o, p, (n, i))) [ ("Iface_method(run)", "Arrow_codomain", "Nested", 1) ])
+          (List.map (fun (o, p, n, i) -> (o, p, (n, i))) labels))
+  ]
+
+(* ── Task 2: classification ──────────────────────────────────────────────
+   Each fixture declares exactly one refinement, so [classify_only_site]
+   parses, enumerates, and classifies it in one step and fails loudly if the
+   fixture accidentally produces more (or fewer) than one site -- a wrong
+   fixture must not silently pass by picking the "first" site. *)
+
+(* [classify] is NOT a pure function of a [site] (see the .mli, Task 2's
+   review finding 3): [Refine_post.refined_param_ty] /
+   [refined_scope_ty] / [return_refine_ext] / [post_induction_shape] all read
+   GLOBAL tables ([adt_ctors], [ctor_field_names], [measure_preamble_sorts],
+   ...) that ONLY [check_module] populates -- and it populates more than the
+   two entry points ([register_adt_names] / [register_field_sorts]) a
+   fixture-only test can call directly: [measure_preamble_sorts] specifically
+   is built by [build_measure_preamble], reached only from inside
+   [check_module] itself (Task 2's review, finding 1's second gate). Rather
+   than hand-call each priming step individually and risk missing the next
+   one a future extractor gate adds, this runs the REAL [check_module] first
+   (diagnostics discarded -- only its global-table side effects matter) and
+   only THEN calls [RAudit.sites] on the SAME desugared decls, so every test
+   below exercises exactly the checker's own registration order and exactly
+   the AST SHAPE the checker sees (post-desugar: a multi-clause `fn` collapses
+   to one clause with no guard before refine_check ever runs it -- Task 2's
+   review, section 6 -- so a fixture parsed but not desugared would test an
+   AST production never actually reaches). *)
+let classify_only_site_gen ~(measure_axioms : bool) (src : string) : RAudit.site * RAudit.disposition =
+  let m = March_desugar.Desugar.desugar_module (parse src) in
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module ~measure_axioms ctx m;
+  match RAudit.sites m.March_ast.Ast.mod_decls with
+  | [ s ] -> (s, RAudit.classify s)
+  | sites ->
+    Alcotest.failf "expected exactly one refinement site, got %d" (List.length sites)
+
+let classify_only_site (src : string) : RAudit.site * RAudit.disposition =
+  classify_only_site_gen ~measure_axioms:true src
+
+let disposition_tag = function
+  | RAudit.Enforced -> "Enforced"
+  | RAudit.Inert_warned _ -> "Inert_warned"
+  | RAudit.Unenforced _ -> "Unenforced"
+
+let check_enforced name src =
+  Alcotest.test_case name `Quick (fun () ->
+      let _, d = classify_only_site src in
+      Alcotest.(check string) "disposition" "Enforced" (disposition_tag d))
+
+let check_unenforced name src =
+  Alcotest.test_case name `Quick (fun () ->
+      let _, d = classify_only_site src in
+      Alcotest.(check string) "disposition" "Unenforced" (disposition_tag d))
+
+let check_inert_warned name src =
+  Alcotest.test_case name `Quick (fun () ->
+      let _, d = classify_only_site src in
+      Alcotest.(check string) "disposition" "Inert_warned" (disposition_tag d))
+
+let audit_classify_suite =
+  [ (* The false-positive case the design exists to avoid: a refined
+       parameter that is never called still obliges nothing at a call site
+       TODAY, but [refined_param_ty] accepts its declared type, so it is
+       [Enforced] -- the checker's own machinery is in place for it, an
+       uncalled function is simply not exercising it. Pinned exactly because
+       an audit that reported this as a hole would be actively misleading. *)
+    check_enforced "an uncalled refined parameter is Enforced"
+      {|mod M do
+          fn f(n : {Int | _ > 0}) : Int do n end
+        end|};
+    check_unenforced "a refined String return is Unenforced (return_refine_ext has no String arm)"
+      {|mod M do
+          fn f() : {String | _ == "a"} do "a" end
+        end|};
+    check_enforced "a refined Int return is Enforced"
+      {|mod M do
+          fn f() : {Int | _ > 0} do 1 end
+        end|};
+    (* Reuses the exact Tier 2 fixture the `tier2-induction` group already
+       proves is discharged today (`tier2_src`'s `insert`, asserted via
+       `has_refine_error tier2_src = true` at line ~2608): `size(Tree)` is an
+       ADT (not record) return refined with a relational postcondition,
+       proven by [check_post_induction]'s structural-induction path since
+       [return_refine_ext] has no ADT-variant arm at all. *)
+    check_enforced "an ADT return contract check_post_induction proves today is Enforced"
+      {|mod M do
+          type Tree = Leaf | Node(Tree, Int, Tree)
+          @[measure]
+          fn size(t : Tree) : Int do
+            match t do
+              Leaf -> 0
+              Node(l, _, r) -> 1 + size(l) + size(r)
+            end
+          end
+          fn insert(t : Tree, x : Int) : {Tree | size(_) == size(t) + 1} do
+            match t do
+              Leaf -> Node(Leaf, x, Leaf)
+              Node(l, v, r) -> Node(insert(l, x), v, r)
+            end
+          end
+        end|};
+    check_unenforced "a refined record field is Unenforced"
+      {|mod M do
+          type Box = { v : {Int | _ > 0} }
+        end|};
+    check_unenforced "a refined List(...) element as a parameter type is Unenforced, nested"
+      {|mod M do
+          fn f(xs : List({Int | _ > 0})) : Int do 0 end
+        end|};
+    (* The arrow-shaped case, not a nullary signature: this is the one that
+       breaks if rule 2 (Inert_warned) is not tried before rule 1 (nesting),
+       since `put`'s one site is `Nested` (Arrow_codomain) -- see task-2-brief
+       .md's "The correction the plan does not have". *)
+    check_inert_warned "a sig entry with an argument (fn put : Int -> {Int | _ > 0}) is Inert_warned"
+      {|mod M do
+          sig Store do
+            fn put : Int -> {Int | _ > 0}
+          end
+        end|};
+    check_unenforced "an actor state field refinement is Unenforced"
+      {|mod M do
+          actor Counter do
+            state { value : {Int | _ >= 50} }
+            init { value: 0 }
+            on Bump(d : Int) do
+              { state with value: state.value + d }
+            end
+          end
+        end|}
+  ]
+
+(* Reason-string discrimination: a classify that returns the right
+   CONSTRUCTOR for the wrong reason (e.g. every Unenforced site sharing one
+   sentence) would still pass every test above. These pin that the reason
+   text actually names the position-specific fact rather than a shared
+   placeholder -- the precedent named in the brief
+   (specs/progress/2026-07-31-refine-sig-and-extern-signature-refinements-inert.md)
+   is that a shared remedy gives wrong advice somewhere. *)
+let audit_classify_reason_suite =
+  [ Alcotest.test_case "the nested List(...) reason names Type_arg, not a generic sentence"
+      `Quick (fun () ->
+        let _, d = classify_only_site
+            {|mod M do
+                fn f(xs : List({Int | _ > 0})) : Int do 0 end
+              end|}
+        in
+        match d with
+        | RAudit.Unenforced reason ->
+          Alcotest.(check bool) "names the type-constructor argument" true
+            (contains reason "type constructor's argument")
+        | _ -> Alcotest.fail "expected Unenforced")
+  ; Alcotest.test_case "the record-field reason names the field, not the nested-position sentence"
+      `Quick (fun () ->
+        let _, d = classify_only_site
+            {|mod M do
+                type Box = { v : {Int | _ > 0} }
+              end|}
+        in
+        match d with
+        | RAudit.Unenforced reason ->
+          Alcotest.(check bool) "names the field" true (contains reason "field")
+        | _ -> Alcotest.fail "expected Unenforced")
+  ; Alcotest.test_case "the actor-state reason names it distinctly from the record-field reason"
+      `Quick (fun () ->
+        let _, d = classify_only_site
+            {|mod M do
+                actor Counter do
+                  state { value : {Int | _ >= 50} }
+                  init { value: 0 }
+                  on Bump(d : Int) do
+                    { state with value: state.value + d }
+                  end
+                end
+              end|}
+        in
+        match d with
+        | RAudit.Unenforced reason ->
+          Alcotest.(check bool) "names a stored field" true (contains reason "field")
+        | _ -> Alcotest.fail "expected Unenforced")
+  ; Alcotest.test_case "the sig Inert_warned names warn_sig_fn_refinement"
+      `Quick (fun () ->
+        let _, d = classify_only_site
+            {|mod M do
+                sig Store do
+                  fn put : Int -> {Int | _ > 0}
+                end
+              end|}
+        in
+        match d with
+        | RAudit.Inert_warned reason ->
+          Alcotest.(check bool) "names the sig warning" true
+            (contains reason "warn_sig_fn_refinement")
+        | _ -> Alcotest.fail "expected Inert_warned")
+  ; Alcotest.test_case "a block-level function's return refinement is Unenforced with its own reason"
+      `Quick (fun () ->
+        let _, d = classify_only_site
+            {|mod M do
+                fn outer() : Int do
+                  fn helper() : {Int | _ > 0} do 1 end
+                  helper()
+                end
+              end|}
+        in
+        match d with
+        | RAudit.Unenforced reason ->
+          Alcotest.(check bool) "names ELetFn / block-level" true
+            (contains reason "block-level")
+        | _ -> Alcotest.fail "expected Unenforced")
+  ]
+
+(* ── Fix loop 1: three false-Enforced positions, the Inert_warned coupling,
+   and a rejecting-side fixture for rule 3 ──────────────────────────────────
+   Task 2's review (task-2-review.md) found three positions the classifier
+   called Enforced where the checker enforces nothing at all (findings 4, 5,
+   6), an untested Inert_warned/warning coupling (finding 2), and that no
+   Param fixture sat on the REJECTING side of rule 3 (section 6, mutation
+   M4). Each test below pairs the classify verdict with an independent LEDGER
+   fact -- [has_refine_error_d] on a fixture that calls the site's function
+   with an argument that WOULD violate its predicate if the refinement were
+   enforced -- so the disposition and the compiler's actual behaviour can
+   never silently drift apart. *)
+
+(* True iff the compiler's own diagnostics for [src] contain [needle] --
+   independent of [classify], so a test using both can never pass by
+   coincidence the way Task 2's review showed the un-derived Inert_warned
+   arms could (Mutation B: deleting a warning's OWN emission left
+   [audit-classify] indifferent). *)
+let compiler_warns (src : string) (needle : string) : bool =
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module ctx
+    (March_desugar.Desugar.desugar_module (parse src));
+  List.exists
+    (fun (d : March_errors.Errors.diagnostic) -> contains d.March_errors.Errors.message needle)
+    ctx.March_errors.Errors.diagnostics
+
+let audit_classify_fixloop1_suite =
+  [ (* Finding 4: a lambda's own parameter. Ledger fact: calling the lambda
+       with an argument that violates its predicate raises no error at all --
+       [scope_add_param] / [sig_of_clause] never see an [A.ELam]'s params. *)
+    Alcotest.test_case "a lambda's own parameter refinement is Unenforced, not Enforced"
+      `Quick (fun () ->
+        let src =
+          {|mod LAM1 do
+              fn main() : Int do
+                let f = fn (n : {Int | _ > 0}) -> n
+                f(0)
+              end
+            end|}
+        in
+        let _, d = classify_only_site src in
+        Alcotest.(check string) "disposition" "Unenforced" (disposition_tag d);
+        (match d with
+         | RAudit.Unenforced reason ->
+           Alcotest.(check bool) "names the lambda / ELam fact" true (contains reason "ELam")
+         | _ -> Alcotest.fail "expected Unenforced");
+        Alcotest.(check bool) "the violating call raises no error (the ledger fact)" false
+          (has_refine_error_d src))
+
+  ; (* Finding 5: a block-level `fn`'s PARAMETER, the other half of the
+       ELetFn hole (the report already covers the Return half). Ledger fact:
+       calling `helper(0)` raises no error. *)
+    Alcotest.test_case "a block-level fn's parameter refinement is Unenforced, not Enforced"
+      `Quick (fun () ->
+        let src =
+          {|mod LETFNP1 do
+              fn main() : Int do
+                fn helper(x : {Int | _ > 0}) : Int do x end
+                helper(0)
+              end
+            end|}
+        in
+        let _, d = classify_only_site src in
+        Alcotest.(check string) "disposition" "Unenforced" (disposition_tag d);
+        (match d with
+         | RAudit.Unenforced reason ->
+           Alcotest.(check bool) "names the block-level fact" true (contains reason "block-level")
+         | _ -> Alcotest.fail "expected Unenforced");
+        Alcotest.(check bool) "the violating call raises no error (the ledger fact)" false
+          (has_refine_error_d src))
+
+  ; (* Finding 6: an `impl` method parameter whose method name is AMBIGUOUS
+       (two impls define `run`) -- [contract_is_enforced] strips the
+       parameter refinement from the body and no caller is obliged. The
+       audit cannot determine adoptability from a single site, so it reports
+       [Unenforced] rather than guess. Ledger fact: calling `run(Box(1), 0)`
+       raises no error, even though `k > 0` is violated. *)
+    Alcotest.test_case "an impl method parameter is Unenforced when the method name is ambiguous"
+      `Quick (fun () ->
+        let src =
+          {|mod IMPLAMB1 do
+              type Box = Box(Int)
+              type Cup = Cup(Int)
+              interface Runner(a) do fn run : a -> Int -> Int end
+              impl Runner(Box) do
+                fn run(b, k : {Int | k > 0}) : Int do k end
+              end
+              impl Runner(Cup) do
+                fn run(c, k : Int) : Int do k end
+              end
+              fn main() : Int do run(Box(1), 0) end
+            end|}
+        in
+        let _, d = classify_only_site src in
+        Alcotest.(check string) "disposition" "Unenforced" (disposition_tag d);
+        (match d with
+         | RAudit.Unenforced reason ->
+           Alcotest.(check bool) "names adoptability" true (contains reason "adoptab")
+         | _ -> Alcotest.fail "expected Unenforced");
+        Alcotest.(check bool) "the violating call raises no error (the ledger fact)" false
+          (has_refine_error_d src))
+
+  ; (* The other side of finding 6, recorded rather than silently accepted:
+       when the method name IS unambiguous (one impl), the SAME position is
+       genuinely enforced by the checker -- but the audit still reports
+       [Unenforced], deliberately, because a single [site] cannot tell the
+       two cases apart and a false [Enforced] is the error the design calls
+       worse than none. This is real lost precision, not a bug; the ledger
+       fact proves the checker really does enforce it here. *)
+    Alcotest.test_case "an impl method parameter is STILL reported Unenforced even when unambiguous \
+                         (deliberately conservative)"
+      `Quick (fun () ->
+        let src =
+          {|mod IMPLSOLO1 do
+              type Box = Box(Int)
+              interface Runner(a) do fn run : a -> Int -> Int end
+              impl Runner(Box) do
+                fn run(b, k : {Int | k > 0}) : Int do k end
+              end
+              fn main() : Int do run(Box(1), 0) end
+            end|}
+        in
+        let _, d = classify_only_site src in
+        Alcotest.(check string) "disposition" "Unenforced" (disposition_tag d);
+        Alcotest.(check bool) "the checker DOES enforce it here (the ledger fact)" true
+          (has_refine_error_d src))
+
+  ; (* Finding 2: the Inert_warned/warning coupling, for all three positions.
+       Asserts BOTH that [classify] answers [Inert_warned] AND that the
+       compiler's OWN diagnostics (an independent [check_module] run, not
+       derived from [classify]) actually carry the warning text -- so
+       deleting the warning's emission (Task 2 review's Mutation B, which
+       left the un-derived version's [audit-classify] indifferent) reddens
+       this test even though it would not have reddened before this fix. *)
+    Alcotest.test_case "sig: Inert_warned AND the compiler actually warns"
+      `Quick (fun () ->
+        let src =
+          {|mod SIGCOUPLE1 do
+              sig Store do
+                fn put : Int -> {Int | _ > 0}
+              end
+              fn main() : Int do 0 end
+            end|}
+        in
+        let _, d = classify_only_site src in
+        Alcotest.(check string) "disposition" "Inert_warned" (disposition_tag d);
+        Alcotest.(check bool) "compiler warns" true
+          (compiler_warns src "carries a refinement, which enforces nothing"))
+
+  ; Alcotest.test_case "extern: Inert_warned AND the compiler actually warns"
+      `Quick (fun () ->
+        let src =
+          {|mod EXTCOUPLE1 do
+              needs IO.Foreign
+              extern "c" : Cap(IO.Foreign) do
+                fn take(n : {Int | _ > 0}) : Int = "take"
+              end
+              fn main() : Int do 0 end
+            end|}
+        in
+        let _, d = classify_only_site src in
+        Alcotest.(check string) "disposition" "Inert_warned" (disposition_tag d);
+        Alcotest.(check bool) "compiler warns" true
+          (compiler_warns src "carries a refinement, which enforces nothing"))
+
+  ; Alcotest.test_case "interface: Inert_warned AND the compiler actually warns"
+      `Quick (fun () ->
+        let src =
+          {|mod IFACECOUPLE1 do
+              interface Runner(a) do
+                fn run : a -> Int -> {Int | _ > 1}
+              end
+              fn main() : Int do 0 end
+            end|}
+        in
+        let _, d = classify_only_site src in
+        Alcotest.(check string) "disposition" "Inert_warned" (disposition_tag d);
+        Alcotest.(check bool) "compiler warns" true
+          (compiler_warns src "carries a refinement, which enforces nothing"))
+
+  ; (* Section 6 / Mutation M4: a rejecting-side fixture for rule 3.
+       [refined_param_ty] has no [TyTuple] arm, so a parameter refined at a
+       TUPLE base is [Unenforced] -- without this fixture, a classifier that
+       hardcodes every top-level-fn [Param] as [Enforced], never calling
+       [refined_param_ty] at all, still passes the whole group (the review's
+       own M4). *)
+    check_unenforced "a parameter refined at a tuple base is Unenforced (refined_param_ty has no TyTuple arm)"
+      {|mod TUPP1 do
+          fn f(p : { t : (Int, Int) | true }) : Int do 0 end
+        end|}
+
+  ; (* The same shape on the Let_annot side (rule 5), the review's suggested
+       substitute if no parameter shape worked -- included alongside the
+       parameter one since both extractors share this exact gap. *)
+    check_unenforced "a let-binding refined at a tuple base is Unenforced (refined_scope_ty has no TyTuple arm)"
+      {|mod TUPL1 do
+          fn f() : Int do
+            let x : { t : (Int, Int) | true } = (1, 2)
+            0
+          end
+        end|}
+
+  ; (* Finding 2, the review's own suggested addition: the NON-SPINE shape --
+       the refinement sits inside a `List(...)` type argument, not directly
+       on either side of the arrow -- which no PRE-EXISTING warning test
+       covers (`sig-extern-refinement` only exercises the arrow spine). Still
+       [Inert_warned]: [ty_has_refinement] recurses into a [TyCon] argument
+       exactly as [warn_predicate_ty] does, so the warning fires here too. *)
+    check_inert_warned "a sig entry with a non-spine nested refinement (List(...) in the domain)                          is still Inert_warned"
+      {|mod SIGNONSPINE1 do
+          sig Store do
+            fn put : List({Int | _ > 0}) -> Int
+          end
+        end|}
+
+  ; (* Finding 1's second gate, isolated with `~measure_axioms` rather than
+       the presence/absence of `@[measure]` (which would ALSO flip
+       classify_pred's Unusable gate, conflating the two): the identical
+       fixture, `@[measure]` present in BOTH runs, classified once with the
+       measure-axiom preamble enabled and once disabled. Only
+       `measure_preamble_sorts` differs between the two runs, so this pins
+       exactly the gate `post_induction_shape` adds beyond the outer shape
+       match. *)
+    Alcotest.test_case "an ADT return contract's Enforced verdict is sensitive to --no-measure-axioms"
+      `Quick (fun () ->
+        let src =
+          {|mod MEASGATE1 do
+              type Tree = Leaf | Node(Tree, Int, Tree)
+              @[measure]
+              fn size(t : Tree) : Int do
+                match t do
+                  Leaf -> 0
+                  Node(l, _, r) -> 1 + size(l) + size(r)
+                end
+              end
+              fn mk() : {Tree | size(_) == 0} do Leaf end
+            end|}
+        in
+        let _, d_on = classify_only_site_gen ~measure_axioms:true src in
+        let _, d_off = classify_only_site_gen ~measure_axioms:false src in
+        Alcotest.(check string) "with measure axioms: Enforced" "Enforced" (disposition_tag d_on);
+        Alcotest.(check string) "without measure axioms: Unenforced" "Unenforced" (disposition_tag d_off))
+
+  ; (* The same fixture without `@[measure]` at all: `classify_pred` still
+       classifies `size(_) == 0` as `Closed` (an application's HEAD is a
+       function name, not a "used" variable, regardless of whether it is a
+       registered axiom measure -- see `classify_pred`'s `A.EApp (A.EVar _,
+       args, _)` arm), so the ENTIRE difference from the fixture above is
+       `measure_preamble_sorts`: without `@[measure]`, `size` never enters
+       `collect_measure_fns`, so `M_Tree` is never registered. A direct
+       second confirmation of the same gate as the `~measure_axioms` pair
+       above, and the closer analogue of the review's own leafA/leafB (which
+       differed by the `@[measure]` tag, not by a flag). *)
+    check_unenforced "the identical ADT return contract with NO @[measure] declared at all is Unenforced"
+      {|mod LEAFA1 do
+          type Tree = Leaf | Node(Tree, Int, Tree)
+          fn size(t : Tree) : Int do
+            match t do
+              Leaf -> 0
+              Node(l, _, r) -> 1 + size(l) + size(r)
+            end
+          end
+          fn mk() : {Tree | size(_) == 0} do Leaf end
+        end|}
+  ]
+
+(* ── Task 3: --refine-audit (audit-flag) ─────────────────────────────────
+   Everything the flag drives (its registration, [print_refine_audit], and
+   the early-CAS bypass a diagnostic flag needs -- see
+   project_refine_report_cas_shortcircuit in memory) lives in bin/main.ml,
+   which this test binary does not link. These tests shell out to the REAL
+   compiled driver instead of the library-level [Refine_check.check_module]
+   every other group in this file uses, so what they pin is what a user
+   actually sees, not a second, hand-written reimplementation of
+   [print_refine_audit]'s format that could drift from it silently -- the
+   exact failure mode the brief warns a substring grep would miss. Mirrors
+   the resolve-relative-to-this-binary pattern [test_cap_strip.ml] /
+   [test_cap_markers.ml] already use; test/dune declares `bin/main.exe` (and
+   the staged runtime/stdlib trees it resolves exe-relatively) as deps of
+   this test for the identical reason those runners' own dep comments give:
+   without them a missing/stale build makes this group silently vacuous
+   rather than loudly broken. *)
+
+let refine_audit_compiler_exe =
+  let exe_dir = Filename.dirname Sys.executable_name in
+  Filename.concat exe_dir "../bin/main.exe"
+
+let require_refine_audit_compiler () =
+  if not (Sys.file_exists refine_audit_compiler_exe) then
+    Alcotest.failf
+      "compiler not found at %s -- test/dune must declare bin/main.exe as a \
+       dep of test_refinecheck" refine_audit_compiler_exe
+
+let read_whole_file path =
+  let ic = open_in path in
+  let n = in_channel_length ic in
+  let s = really_input_string ic n in
+  close_in ic;
+  s
+
+(* Writes [src_text] to a fresh temp `.march` file and returns its path. The
+   caller is responsible for [Sys.remove]-ing it once done. *)
+let write_march_fixture (src_text : string) : string =
+  let src = Filename.temp_file "refine_audit" ".march" in
+  let oc = open_out src in
+  output_string oc src_text;
+  close_out oc;
+  src
+
+(* Runs the real compiler on the file at [path] with [args] and an optional
+   extra environment ([env], as VAR=value pairs prepended to the command --
+   used only to point [MARCH_STDLIB] at a throwaway directory for the
+   stdlib-slice test below, never to change what a normal invocation sees).
+   Never through a pipe (see feedback_march_compile_pipe_hang.md in memory):
+   stdout and stderr are each redirected to their own temp file and read
+   back separately, exactly like [check_no_prelude_collision]'s sibling
+   helpers in [test_cap_strip.ml]. Returns (exit code, stdout, stderr). *)
+let run_march_on_env (env : (string * string) list) (args : string list) (path : string)
+    : int * string * string =
+  require_refine_audit_compiler ();
+  let out = Filename.temp_file "refine_audit" ".out" in
+  let err = Filename.temp_file "refine_audit" ".err" in
+  let env_prefix =
+    String.concat ""
+      (List.map (fun (k, v) -> Printf.sprintf "%s=%s " k (Filename.quote v)) env)
+  in
+  let rc =
+    Sys.command
+      (Printf.sprintf "%s%s %s %s > %s 2> %s" env_prefix refine_audit_compiler_exe
+         (String.concat " " args) (Filename.quote path) (Filename.quote out) (Filename.quote err))
+  in
+  let stdout_s = read_whole_file out and stderr_s = read_whole_file err in
+  Sys.remove out;
+  Sys.remove err;
+  (rc, stdout_s, stderr_s)
+
+let run_march_on (args : string list) (path : string) : int * string * string =
+  run_march_on_env [] args path
+
+(* Convenience for a single-run test: writes [src_text] to a fresh temp file,
+   runs the compiler on it once, and hands back the file's own path too -- a
+   caller building an EXACT expected line (one naming the source file) needs
+   it, since [Filename.temp_file] picks a fresh name every run. The caller is
+   responsible for [Sys.remove]-ing the path once done. *)
+let run_march_capturing (args : string list) (src_text : string) : int * string * string * string =
+  let path = write_march_fixture src_text in
+  let rc, stdout_s, stderr_s = run_march_on args path in
+  (rc, stdout_s, stderr_s, path)
+
+let nonempty_lines s = String.split_on_char '\n' s |> List.filter (fun l -> l <> "")
+
+(* Filters out every "coverage audit" line -- what --refine-audit alone
+   contributes -- so the REST of a run's output can be compared byte for
+   byte against the same run with the flag off. Verdict invariance means
+   this filtered remainder, plus the exit code, must be identical either
+   way; it does NOT mean the flag prints nothing (it prints exactly the
+   coverage-audit block, tested separately below). *)
+let strip_audit_lines s =
+  nonempty_lines s
+  |> List.filter (fun l -> not (String.length l >= 14 && String.sub l 0 14 = "coverage audit"))
+  |> String.concat "\n"
+
+let audit_flag_pinned_fixture =
+  {|mod PINAUDIT1 do
+  type Box = { v : {Int | v > 0} }
+
+  fn f(n : {Int | n > 0}) : {Int | _ > 0} do
+    n
+  end
+
+  fn main() : Int do
+    f(1)
+  end
+end
+|}
+
+(* Verdict invariance: a fixture that PROVES, one that VIOLATES, and one that
+   SKIPS, each run with the flag off and on. The exit code and every line of
+   output OTHER than the coverage-audit block itself must be identical
+   either way -- a verdict that moves under --refine-audit is a blocking
+   defect per the brief. *)
+let audit_flag_verdict_invariance name src =
+  Alcotest.test_case
+    (Printf.sprintf "verdict invariance (%s): flag off and on agree" name) `Quick (fun () ->
+      (* The SAME fixture path for both runs: a diagnostic embeds the source
+         file's own path in its text, so two different temp files (even with
+         byte-identical contents) would make the two runs' stderr differ by
+         path alone, a false positive this invariance check must not raise. *)
+      let path = write_march_fixture src in
+      Fun.protect
+        ~finally:(fun () -> try Sys.remove path with Sys_error _ -> ())
+        (fun () ->
+          let rc_off, out_off, err_off = run_march_on [ "--check" ] path in
+          let rc_on, out_on, err_on = run_march_on [ "--check"; "--refine-audit" ] path in
+          Alcotest.(check int) "exit code" rc_off rc_on;
+          Alcotest.(check string) "stdout" out_off out_on;
+          Alcotest.(check string) "stderr, minus the coverage-audit block"
+            (strip_audit_lines err_off) (strip_audit_lines err_on)))
+
+let audit_flag_suite =
+  [ (* The exact printed output for a small fixture, pinned line by line.
+       The `user code` slice is fully determined by this fixture alone (one
+       Unenforced site: the record field's declared refinement, never
+       re-examined once a value is constructed) and is pinned exactly. The
+       `user + stdlib` slice additionally reflects however many declared
+       refinements the shipped stdlib itself carries today, which is not
+       this task's fact to freeze (it drifts as the stdlib gains or loses
+       refinements, for reasons unrelated to this flag) -- only its FORMAT
+       is pinned, via Scanf, so a format regression there still fails this
+       test exactly as the brief asks. *)
+    Alcotest.test_case "the --refine-audit output for a small fixture is pinned exactly" `Quick
+      (fun () ->
+        let rc, stdout_s, stderr_s, path =
+          run_march_capturing [ "--check"; "--refine-audit" ] audit_flag_pinned_fixture
+        in
+        Fun.protect ~finally:(fun () -> try Sys.remove path with Sys_error _ -> ()) (fun () ->
+          Alcotest.(check int) "exit 0" 0 rc;
+          Alcotest.(check string) "stdout empty" "" stdout_s;
+          match nonempty_lines stderr_s with
+          | [ unenforced_line; user_summary; stdlib_summary ] ->
+            Alcotest.(check string) "the one Unenforced site's line"
+              (Printf.sprintf
+                 "coverage audit: %s:2:26: field `Box.v`: v > 0: a record (or \
+                  actor-state) field's declared type is never re-examined once a \
+                  value is constructed; the checker has no extractor for a stored \
+                  field, only for a parameter, a return, or a let-binding"
+                 path)
+              unenforced_line;
+            Alcotest.(check string) "user code bucket summary"
+              "coverage audit (user code): 2 enforced, 0 inert (warned), 1 unenforced"
+              user_summary;
+            (try
+               Scanf.sscanf stdlib_summary
+                 "coverage audit (user + stdlib): %d enforced, %d inert (warned), %d unenforced%!"
+                 (fun _ _ _ -> ())
+             with Scanf.Scan_failure _ | End_of_file ->
+               Alcotest.failf "user + stdlib bucket summary has the wrong format: %S" stdlib_summary)
+          | lines ->
+            Alcotest.failf "expected exactly 3 non-empty stderr lines, got %d:\n%s"
+              (List.length lines) stderr_s))
+
+  ; (* The flag off produces no output at all -- not just no coverage-audit
+       lines, the WHOLE run, on a fixture whose only site would otherwise
+       print (proving the silence is the flag's own absence, not that this
+       fixture has nothing to say). *)
+    Alcotest.test_case "the flag off produces no output at all" `Quick (fun () ->
+        let rc, stdout_s, stderr_s, path = run_march_capturing [ "--check" ] audit_flag_pinned_fixture in
+        Fun.protect ~finally:(fun () -> try Sys.remove path with Sys_error _ -> ()) (fun () ->
+          Alcotest.(check int) "exit 0" 0 rc;
+          Alcotest.(check string) "stdout empty" "" stdout_s;
+          Alcotest.(check string) "stderr empty" "" stderr_s))
+
+  ; audit_flag_verdict_invariance "proves"
+      {|mod AUDITFLAGPROVES1 do
+  fn f(n : {Int | n > 0}) : {Int | _ > 0} do
+    n
+  end
+
+  fn main() : Int do
+    f(1)
+  end
+end
+|}
+
+  ; audit_flag_verdict_invariance "violates"
+      {|mod AUDITFLAGVIOLATES1 do
+  fn f(n : {Int | n > 0}) : Int do
+    n
+  end
+
+  fn main() : Int do
+    f(-1)
+  end
+end
+|}
+
+  ; audit_flag_verdict_invariance "skips"
+      {|mod AUDITFLAGSKIPS1 do
+  fn f(n : {Int | n > 0}) : Int do
+    n
+  end
+
+  fn g(x : Int) : Int do
+    f(x)
+  end
+
+  fn main() : Int do
+    g(1)
+  end
+end
+|}
+
+  ; (* The audit does not escalate under `cap verified`: a module that
+       declares it and carries an Unenforced site (the record field again)
+       must still exit 0 with the flag off, and must still exit 0 with it
+       on. *)
+    Alcotest.test_case "cap verified with an Unenforced site still exits 0, flag off and on" `Quick
+      (fun () ->
+        let src =
+          {|mod AUDITFLAGVERIFIED1 do
+  cap verified
+
+  type Box = { v : {Int | v > 0} }
+
+  fn main() : Int do
+    0
+  end
+end
+|}
+        in
+        let rc_off, _, _, path_off = run_march_capturing [ "--check" ] src in
+        let rc_on, _, _, path_on = run_march_capturing [ "--check"; "--refine-audit" ] src in
+        Fun.protect
+          ~finally:(fun () ->
+            (try Sys.remove path_off with Sys_error _ -> ());
+            (try Sys.remove path_on with Sys_error _ -> ()))
+          (fun () ->
+            Alcotest.(check int) "exit 0, flag off" 0 rc_off;
+            Alcotest.(check int) "exit 0, flag on" 0 rc_on))
+
+  ; (* The CAS bypass at bin/main.ml's early_cas guard, regression-tested
+       directly: run the SAME path twice, flag OFF first (which warms
+       .march/cas/artifacts-v2, since a plain --check with no diagnostic
+       flag is exactly the case the early-CAS short-circuit is FOR), then
+       flag ON second. If `!refine_audit` is ever dropped from that guard's
+       disjunction again, the second run hits the warm artifact and prints
+       nothing despite the flag -- the exact bug class documented in memory
+       as project_refine_report_cas_shortcircuit, and the one the Task 3
+       review found untested (finding 1): all six OTHER audit-flag cases
+       above stay green under that mutation, because none of them runs the
+       compiler twice against one path with the flag off first. This one
+       does not clear the CAS between the two runs on purpose -- that is
+       the whole point. *)
+    Alcotest.test_case "--refine-audit still prints on a warm CAS" `Quick (fun () ->
+        let path = write_march_fixture audit_flag_pinned_fixture in
+        Fun.protect
+          ~finally:(fun () -> try Sys.remove path with Sys_error _ -> ())
+          (fun () ->
+            let (_ : int * string * string) = run_march_on [ "--check" ] path in
+            let rc, _, err = run_march_on [ "--check"; "--refine-audit" ] path in
+            Alcotest.(check int) "exit 0" 0 rc;
+            Alcotest.(check int) "the audit block is still printed on a warm cache" 3
+              (List.length (nonempty_lines err))))
+
+  ; (* Fix loop 1 (task-3-review.md finding 4): an Unenforced STDLIB site
+       must print its own line too, not just move a count in the "user +
+       stdlib" summary. The shipped stdlib has zero Unenforced sites today
+       (all 63 classify Enforced), so this cannot be exercised against the
+       real stdlib -- it is exercised against a throwaway one instead:
+       [MARCH_STDLIB] points the compiler at a temp directory containing a
+       minimal `prelude.march` (empty; the entry fixture below calls
+       nothing from it) and a `list.march` (a name the real manifest also
+       uses, though nothing here depends on that) declaring the same
+       record-field-refinement shape the pinned test already knows is
+       Unenforced. Every OTHER manifest-listed stdlib file is simply
+       absent, which [load_stdlib_file] tolerates (an unreadable path
+       silently contributes no declarations), so this is not a fragile
+       reproduction of the real stdlib, only a controlled single-file one. *)
+    Alcotest.test_case "an Unenforced stdlib site prints its own (stdlib)-prefixed line" `Quick
+      (fun () ->
+        with_temp_root "refine_audit_stdlib" (fun stdlib_dir ->
+          let write name text =
+            let oc = open_out (Filename.concat stdlib_dir name) in
+            output_string oc text;
+            close_out oc
+          in
+          write "prelude.march" "mod Prelude do
+end
+";
+          write "list.march"
+            "mod List do
+  type Box = { v : {Int | v > 0} }
+end
+";
+          let entry_path = write_march_fixture "mod E do
+  fn main() : Int do
+    0
+  end
+end
+" in
+          Fun.protect
+            ~finally:(fun () -> try Sys.remove entry_path with Sys_error _ -> ())
+            (fun () ->
+              let rc, _, err =
+                run_march_on_env [ ("MARCH_STDLIB", stdlib_dir) ] [ "--check"; "--refine-audit" ]
+                  entry_path
+              in
+              Alcotest.(check int) "exit 0" 0 rc;
+              match nonempty_lines err with
+              | [ user_summary; stdlib_line; combined_summary ] ->
+                Alcotest.(check bool) "the stdlib line is prefixed and names the field"
+                  true
+                  (let prefix = "coverage audit (stdlib): " in
+                   String.length stdlib_line >= String.length prefix
+                   && String.sub stdlib_line 0 (String.length prefix) = prefix
+                   && (let needle = "field `Box.v`: v > 0:" in
+                       let hay = stdlib_line in
+                       let nlen = String.length needle and hlen = String.length hay in
+                       let rec search i =
+                         i + nlen <= hlen && (String.sub hay i nlen = needle || search (i + 1))
+                       in
+                       search 0));
+                Alcotest.(check string) "user code summary: nothing from the entry file"
+                  "coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced"
+                  user_summary;
+                Alcotest.(check string) "user + stdlib summary: the one stdlib site counted"
+                  "coverage audit (user + stdlib): 0 enforced, 0 inert (warned), 1 unenforced"
+                  combined_summary
+              | lines ->
+                Alcotest.failf "expected exactly 3 non-empty stderr lines, got %d:
+%s"
+                  (List.length lines) err)))
+  ]
+
+(* ------------------------------------------------------------------ *)
+(* Task 4: two committed baselines over --refine-audit's own output.
+
+   1. [corpus.baseline]: the audit swept over the corpus the refinement
+      oracle walks (`test/native/*.march`, `stdlib/*.march`, ~300 files).
+      This is EMPTY of any Unenforced line today -- Task 2's re-review
+      independently found 63 declared refinements over that corpus, every
+      one Enforced, and the sweep below reproduces that count. An empty
+      baseline is still worth committing: a future nested refinement or
+      String return added anywhere in the corpus flips a line from silence
+      to a diff, and this test catches it.
+
+   2. [holes.baseline]: a SEPARATE, small, hand-built fixture set under
+      test/refine_audit/holes/ that deliberately contains one program per
+      known unenforced position (a block-level fn's own param/return, a
+      lambda's own param, a non-adoptable impl method's param, an actor's
+      state field and handler param, a nested field refinement, and a
+      String return). Its baseline MUST be non-empty. This is the guard on
+      the guard: if the corpus baseline were empty because the audit
+      silently stopped walking anything, this second baseline would be
+      empty too, and the vacuity check below fails loudly rather than
+      quietly matching two empty files.
+
+   Regeneration mirrors the TIR golden-snapshot workflow
+   (test/test_snapshots.ml): run once with UPDATE_SNAPSHOTS=1 to overwrite
+   the committed file with the current sweep, review the diff, then run
+   again without the env var to confirm it is green. Both sweeps run the
+   REAL compiled driver (like audit-flag above), not a re-implementation of
+   [print_refine_audit], so a format change in the printer shows up here
+   too. Every invocation clears .march/cas/artifacts-v2 first: a warm
+   --check CAS entry short-circuits before --refine-audit ever prints
+   anything, which would masquerade as "even fewer sites" rather than
+   failing loudly (see bin/main.ml's do_check cache lookup, and the
+   refinement obligation ratchet's identical comment in
+   .github/workflows/ci.yml). *)
+
+let audit_update_mode = Sys.getenv_opt "UPDATE_SNAPSHOTS" = Some "1"
+
+(* This group reads the corpus and READS/WRITES the committed baselines, so
+   every path must resolve against the SOURCE tree, not against whatever cwd
+   the runner happened to pick. Two runners disagree about that cwd: a direct
+   `./_build/default/test/test_refinecheck.exe -e` from the repo root leaves
+   cwd AT the root, while `dune runtest` (what CI runs) sets cwd to
+   _build/default/test. An earlier version of this group asserted the first
+   and hard-failed under the second, which made the whole audit-baseline
+   group fail in CI while passing locally.
+
+   [Test_helpers.march_project_root] derives the root from the test exe's own
+   path (the parent of its _build ancestor, checked for a dune-project), which
+   is the source root under BOTH runners. That matters beyond just reading:
+   UPDATE_SNAPSHOTS=1 must rewrite the committed file, not a sandbox copy that
+   is discarded. [test_snapshots.ml] resolves its own snapshot paths exactly
+   this way, for the same reason. *)
+let audit_root () =
+  if Sys.file_exists "test/native" then Sys.getcwd ()
+  else Test_helpers.march_project_root ()
+
+let audit_path (rel : string) : string = Filename.concat (audit_root ()) rel
+
+let require_corpus_present () =
+  let native = audit_path "test/native" in
+  if not (Sys.file_exists native) then
+    Alcotest.failf
+      "test/native not found (looked in %s, cwd is %s) -- the audit-baseline \
+       group resolves paths against the source root derived from the test \
+       executable's location"
+      native (Sys.getcwd ())
+
+let march_files_sorted_in (dir : string) : string list =
+  Sys.readdir dir |> Array.to_list
+  |> List.filter (fun f -> Filename.check_suffix f ".march")
+  |> List.sort compare
+  |> List.map (Filename.concat dir)
+
+(* Namespaces a fixture's tag by its parent directory, exactly like
+   scripts/refine-oracle.sh: `test/native/foo.march` and
+   `stdlib/foo.march` must not collide under one basename. *)
+let audit_tag_of (path : string) : string =
+  Filename.basename (Filename.dirname path) ^ "_" ^ Filename.remove_extension (Filename.basename path)
+
+(* Runs --refine-audit on one file under a private HOME (the stdlib
+   AST/typecheck-env cache under ~/.cache/march embeds the populating
+   worktree's absolute paths -- see
+   project_home_cache_path_contamination_oracles.md) and returns every
+   "coverage audit" line from stderr, tagged and ready to sort. Clears the
+   check-artifact CAS immediately before the run, every time: seeing this
+   inside the per-file loop (not once before the whole sweep) matters
+   because [require_refine_audit_compiler]'s own compiler build can populate
+   it via an earlier group in this same process. *)
+let audit_coverage_lines_for ~home (path : string) : string list =
+  Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote ".march/cas/artifacts-v2")) |> ignore;
+  let _, _, err = run_march_on_env [ ("HOME", home) ] [ "--check"; "--refine-audit" ] path in
+  let tag = audit_tag_of path in
+  nonempty_lines err
+  |> List.filter (fun l -> String.length l >= 14 && String.sub l 0 14 = "coverage audit")
+  |> List.map (fun l -> tag ^ ": " ^ l)
+
+(* The baselines are committed, so every path they contain must be
+   repo-root-relative and identical on every machine. [audit_path] hands the
+   sweep an ABSOLUTE directory (it has to: the source root is derived from the
+   test exe, not from cwd), and the compiler echoes that absolute path back in
+   each diagnostic. Strip the root prefix before the line reaches a baseline,
+   or the committed file records one developer's home directory and every
+   other machine reports a spurious diff. The corpus baseline happens not to
+   contain paths, so only the holes baseline ever exercised this. *)
+let strip_root_prefix (root : string) (line : string) : string =
+  let prefix = if Filename.check_suffix root "/" then root else root ^ "/" in
+  let plen = String.length prefix in
+  let buf = Buffer.create (String.length line) in
+  let i = ref 0 in
+  let n = String.length line in
+  while !i < n do
+    if !i + plen <= n && String.sub line !i plen = prefix then i := !i + plen
+    else begin Buffer.add_char buf line.[!i]; incr i end
+  done;
+  Buffer.contents buf
+
+let audit_sweep ~home (dirs : string list) : int * string list =
+  let root = audit_root () in
+  let files = List.concat_map march_files_sorted_in dirs in
+  let lines =
+    List.concat_map (audit_coverage_lines_for ~home) files
+    |> List.map (strip_root_prefix root)
+    |> List.sort compare
+  in
+  (List.length files, lines)
+
+let read_baseline_lines (path : string) : string list =
+  if not (Sys.file_exists path) then []
+  else
+    let ic = open_in path in
+    let rec go acc =
+      match input_line ic with
+      | line -> go (line :: acc)
+      | exception End_of_file -> List.rev acc
+    in
+    let lines = go [] in
+    close_in ic;
+    lines
+
+let write_baseline_lines (path : string) (lines : string list) : unit =
+  let oc = open_out path in
+  List.iter (fun l -> output_string oc l; output_char oc '\n') lines;
+  close_out oc
+
+(* Diffs two already-sorted line lists, reporting only the first handful of
+   differing lines -- a full corpus diff can be thousands of lines and a
+   test failure message that dumps all of them is not more actionable than
+   one that dumps the first 20. *)
+let assert_baseline_matches ~msg ~regen_cmd (baseline_path : string) (actual : string list) =
+  let expected = read_baseline_lines baseline_path in
+  if expected <> actual then begin
+    let expected_set = List.sort_uniq compare expected in
+    let actual_set = List.sort_uniq compare actual in
+    let missing = List.filter (fun l -> not (List.mem l actual_set)) expected_set in
+    let added = List.filter (fun l -> not (List.mem l expected_set)) actual_set in
+    let take n l = List.filteri (fun i _ -> i < n) l in
+    Alcotest.failf
+      "%s\nbaseline: %s (%d lines) vs current sweep (%d lines)\n\
+       missing (in baseline, not in current), first 20:\n%s\n\
+       added (in current, not in baseline), first 20:\n%s\n\
+       If this is an intentional change, regenerate with:\n  %s"
+      msg baseline_path (List.length expected) (List.length actual)
+      (String.concat "\n" (take 20 missing))
+      (String.concat "\n" (take 20 added))
+      regen_cmd
+  end
+
+let corpus_baseline_path () = audit_path "test/refine_audit/corpus.baseline"
+let holes_baseline_path () = audit_path "test/refine_audit/holes.baseline"
+
+(* Sums the `unenforced` count out of every `coverage audit (user code): N
+   enforced, M inert (warned), K unenforced` summary line in a sweep's
+   output (ignoring the per-site detail lines and the `user + stdlib`
+   summary, which double-counts the whole prepended stdlib on every
+   fixture and is not a meaningful sum across files). *)
+let sum_user_code_unenforced (lines : string list) : int =
+  List.fold_left
+    (fun acc l ->
+      match
+        Scanf.sscanf_opt l
+          "%_[^:]: coverage audit (user code): %_d enforced, %_d inert (warned), %d unenforced"
+          (fun u -> u)
+      with
+      | Some u -> acc + u
+      | None -> acc)
+    0 lines
+
+(* Whole-plan review, finding 3 (MEDIUM): the CI ratchet step reads only
+   `stdlib/list.march`'s whole-program slice, which catches a regression
+   ANYWHERE in the prepended stdlib but not a new Unenforced site in a
+   `test/native/*.march` fixture's OWN user-code slice (test/native carries
+   no stdlib). The only artifact that watches that slice is this
+   corpus-baseline test, and its documented remedy is
+   `UPDATE_SNAPSHOTS=1`, which would silently accept a newly added
+   Unenforced line as the new normal. This ceiling closes that gap: it is
+   checked UNCONDITIONALLY, even under `UPDATE_SNAPSHOTS=1` regeneration,
+   so regenerating the baseline can never be used to launder a real rise
+   in the corpus's own Unenforced count. Lower this only by hand, with a
+   commit message explaining why a corpus fixture legitimately grew a new
+   Unenforced site, the same discipline the CI ratchet step already
+   documents for its own ceiling. *)
+let corpus_unenforced_ceiling = 0
+
+let audit_baseline_suite =
+  [ Alcotest.test_case
+      "corpus baseline (test/native + stdlib): matches, or is regenerated" `Quick (fun () ->
+        require_refine_audit_compiler ();
+        require_corpus_present ();
+        let home = Filename.temp_file "refine_audit_home" "" in
+        Sys.remove home;
+        Unix.mkdir home 0o700;
+        Fun.protect
+          ~finally:(fun () -> Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote home)) |> ignore)
+          (fun () ->
+            let n, lines = audit_sweep ~home [ audit_path "test/native"; audit_path "stdlib" ] in
+            let total_report_lines = List.length lines in
+            (* Same vacuity floor as scripts/refine-oracle.sh: this sweep is
+               known to walk ~300 fixtures and print ~600 lines (two summary
+               lines per file; today zero Unenforced detail lines). Fewer
+               than 100 fixtures or 50 report lines means the sweep itself
+               broke (wrong cwd, stale build, warm cache) well before the
+               question "is the baseline empty" is even reachable. *)
+            if n < 100 || total_report_lines < 50 then
+              Alcotest.failf
+                "REFUSING to compare a vacuous corpus sweep: %d fixtures, %d \
+                 coverage-audit lines. The audit is not being exercised \
+                 (wrong cwd, stale build, or a warm --check cache). This is \
+                 not the same failure as the baseline being empty of \
+                 Unenforced lines, which is a real, currently-true finding."
+                n total_report_lines;
+            (* Checked BEFORE the update-mode branch, and never skipped by
+               it: see the comment on [corpus_unenforced_ceiling]. *)
+            let unenforced_total = sum_user_code_unenforced lines in
+            if unenforced_total > corpus_unenforced_ceiling then
+              Alcotest.failf
+                "FAIL: the corpus's own (user code) Unenforced count rose from \
+                 %d to %d. This ceiling is checked even under \
+                 UPDATE_SNAPSHOTS=1, so a corpus sweep cannot silently accept \
+                 a new unenforced site as the new baseline. A real, declared \
+                 refinement in test/native/*.march or stdlib/*.march is now \
+                 sitting somewhere the checker never enforces it -- read the \
+                 per-site lines above (or re-run the sweep without this test \
+                 filtering them out) to find which fixture and position. Raise \
+                 corpus_unenforced_ceiling in test/test_refinecheck.ml only if \
+                 the rise is intentional and explained in the commit message."
+                corpus_unenforced_ceiling unenforced_total;
+            if audit_update_mode then begin
+              write_baseline_lines (corpus_baseline_path ()) lines;
+              Printf.printf "regenerated %s (%d fixtures, %d lines)\n%!" (corpus_baseline_path ()) n
+                total_report_lines
+            end
+            else
+              assert_baseline_matches
+                ~msg:"the refinement coverage audit's corpus sweep changed"
+                ~regen_cmd:
+                  "UPDATE_SNAPSHOTS=1 ./_build/default/test/test_refinecheck.exe -e 'audit-baseline'"
+                (corpus_baseline_path ()) lines))
+
+  ; Alcotest.test_case
+      "holes baseline (test/refine_audit/holes): matches, and is never vacuous" `Quick (fun () ->
+        require_refine_audit_compiler ();
+        require_corpus_present ();
+        if not (Sys.file_exists (audit_path "test/refine_audit/holes")) then
+          Alcotest.fail "test/refine_audit/holes not found -- the non-vacuity fixture set is missing";
+        let home = Filename.temp_file "refine_audit_holes_home" "" in
+        Sys.remove home;
+        Unix.mkdir home 0o700;
+        Fun.protect
+          ~finally:(fun () -> Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote home)) |> ignore)
+          (fun () ->
+            let n, lines = audit_sweep ~home [ audit_path "test/refine_audit/holes" ] in
+            (* THE vacuity guard the brief asks for by name: this fixture
+               set exists ONLY to contain known holes. If it ever reports
+               zero Unenforced sites, the audit itself is broken (a rule
+               got over-widened, a position stopped being walked, ...) --
+               that is categorically different from the corpus baseline
+               being empty, which is a true fact about a corpus that
+               happens to declare no unenforced refinement anywhere. *)
+            let unenforced_total =
+              List.fold_left
+                (fun acc l ->
+                  match
+                    Scanf.sscanf_opt l
+                      "%_[^:]: coverage audit (user code): %_d enforced, %_d inert (warned), %d unenforced"
+                      (fun u -> u)
+                  with
+                  | Some u -> acc + u
+                  | None -> acc)
+                0 lines
+            in
+            if n < 1 then Alcotest.fail "no .march fixtures found under test/refine_audit/holes";
+            if unenforced_total <= 0 then
+              Alcotest.failf
+                "THE AUDIT IS BROKEN: test/refine_audit/holes's %d fixtures, which \
+                 exist ONLY to contain known-unenforced refinements, reported ZERO \
+                 unenforced sites (user code slice) between them. This is the \
+                 non-vacuity guard failing: either --refine-audit stopped \
+                 classifying a position as Unenforced, or the sweep itself did \
+                 not run. Do not let this test go green by trimming the holes \
+                 fixtures to match; find why classification changed."
+                n;
+            if audit_update_mode then begin
+              write_baseline_lines (holes_baseline_path ()) lines;
+              Printf.printf "regenerated %s (%d fixtures, %d unenforced sites)\n%!" (holes_baseline_path ()) n
+                unenforced_total
+            end
+            else
+              assert_baseline_matches
+                ~msg:"the refinement coverage audit's holes sweep changed"
+                ~regen_cmd:
+                  "UPDATE_SNAPSHOTS=1 ./_build/default/test/test_refinecheck.exe -e 'audit-baseline'"
+                (holes_baseline_path ()) lines))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -11919,4 +13527,9 @@ let () =
       ("post-nested-unit", post_nested_unit_suite);
       ("let-equality", let_equality_suite);
       ("let-equality-alias", let_equality_alias_suite);
-      ("arith-actual", arith_actual_suite) ]
+      ("arith-actual", arith_actual_suite);
+      ("audit-sites", audit_sites_suite @ audit_stacked_refinement_suite @ audit_arrow_signature_suite);
+      ("audit-classify",
+        audit_classify_suite @ audit_classify_reason_suite @ audit_classify_fixloop1_suite);
+      ("audit-flag", audit_flag_suite);
+      ("audit-baseline", audit_baseline_suite) ]

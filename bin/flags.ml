@@ -44,6 +44,12 @@ let check_json     = ref false   (* --check-json: emit diagnostics as NDJSON to 
 let emit_core_ast_file : string option ref = ref None  (* --emit-core-ast <file>: dump desugared core AST + verdict + diagnostics as JSON to stdout *)
 let measure_axioms = ref true    (* --no-measure-axioms: reflect @[measure]s symbolically *)
 let refine_report  = ref false   (* --refine-report: print obligation-ledger proved/violated/skipped counts *)
+(* --refine-audit: print every declared refinement occurrence the checker
+   never enforces (Unenforced) or only warns about (Inert_warned), plus a
+   three-bucket summary. Read-only: changes no verdict, emits no diagnostic.
+   See lib/refinecheck/refine_audit.ml for the classification itself; this
+   flag only decides whether it runs and whether its result gets printed. *)
+let refine_audit   = ref false
 
 (* --report-contracts / --contract-scope <globs>: emit one --check-json-shaped
    line, with an `insert` fix, per function the @[no_alloc] checker verified

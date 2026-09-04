@@ -10,5 +10,5 @@
  ; validate them before they are reported.  No cycle: march_eval depends on
  ; ast/ctxesc/modules/scheduler/coverage/doctest only.
  (libraries march_ast march_errors march_refine march_caps march_typecheck march_eval march_scheduler)
- (modules refine_check refine_encode refine_scope refine_resolve refine_call refine_post division_safety no_alloc return_infer precond_infer postcond_infer cap_infer
+ (modules refine_check refine_encode refine_scope refine_resolve refine_call refine_post refine_audit division_safety no_alloc return_infer precond_infer postcond_infer cap_infer
           obligation panic_surface_by_proof witness undecided))

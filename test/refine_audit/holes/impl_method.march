@@ -1,0 +1,36 @@
+-- Task 4 fixture: an `impl` method's parameter refinement is genuinely
+-- unenforced when the method's bare name is NOT adoptable
+-- (`Refine_scope.adoptable_impl_methods` requires exactly one `impl` to
+-- define the name; here TWO do, for `Box` and `Crate`). `visit_decl`
+-- strips the parameter refinement from the body in that case, so
+-- `at(Crate(0), 0 - 1)` below is accepted in silence: no caller is
+-- obliged by it. Contrast with the adoptable case, which the checker
+-- does enforce (a single `impl` defining the name) -- `classify` reports
+-- Unenforced either way, since adoptability is a module-level fact no
+-- single site can determine; that over-approximation is a documented
+-- conservatism, not a hole, and gets no todo of its own.
+-- See specs/todos/2026-09-03-impl-method-param-refinement-unchecked.md.
+mod HolesImplMethod do
+  interface Indexable(a) do
+    fn at : a -> Int -> Int
+  end
+
+  type Box = Box(Int)
+  type Crate = Crate(Int)
+
+  impl Indexable(Box) do
+    fn at(b, i : {Int | i >= 0}) do
+      match b do Box(v) -> v end
+    end
+  end
+
+  impl Indexable(Crate) do
+    fn at(c, i : {Int | i >= 0}) do
+      match c do Crate(v) -> v end
+    end
+  end
+
+  fn main() : Int do
+    at(Crate(0), 0 - 1)
+  end
+end

@@ -1653,6 +1653,191 @@ for the full command surface, including `--apply` and the editor code action.
 
 ---
 
+## Coverage audit: does the checker even look at this refinement?
+
+`--refine-report` counts obligations that were actually filed. It has
+nothing to say about a declared refinement that never reaches a
+goal-building call site at all, because no code path in the checker ever
+looks at that position. `--refine-audit` (`lib/refinecheck/refine_audit.ml`)
+answers that prior question directly: for every `{Base | pred}` written
+anywhere in the module, does any extractor in the checker ever consult it?
+
+```
+$ march --check --refine-audit stdlib/list.march
+coverage audit (user code): 7 enforced, 0 inert (warned), 0 unenforced
+coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+```
+
+Every declared refinement lands in exactly one of three buckets:
+
+- **Enforced**: the checker's own extractor for this position accepts the
+  declared type, so an obligation gets filed against it (at a call site for
+  a parameter, or against the function's own body for a postcondition). A
+  parameter with no caller yet still counts Enforced: what matters is that
+  the position is wired into the checker's scope machinery, not whether a
+  call site exists today. See below for why this reading is correct rather
+  than a loophole.
+- **Inert (warned)**: a `sig` entry, an `extern` signature, or an
+  `interface` method whose refinement the compiler already names in its own
+  warning. Nothing new here; the audit confirms that warning still fires.
+- **Unenforced**: declared, silent, and nothing tells you. No extractor
+  ever reads this position, so a value violating the written predicate is
+  accepted without complaint.
+
+Every `Unenforced` site prints one line, naming the file position, the
+enclosing declaration, the predicate, and the specific reason no extractor
+reaches it. For:
+
+```march
+mod PINAUDIT1 do
+  type Box = { v : {Int | v > 0} }
+
+  fn f(n : {Int | n > 0}) : {Int | _ > 0} do
+    n
+  end
+
+  fn main() : Int do
+    f(1)
+  end
+end
+```
+
+```
+$ march --check --refine-audit t.march
+coverage audit: t.march:2:26: field `Box.v`: v > 0: a record (or actor-state) field's declared type is never re-examined once a value is constructed; the checker has no extractor for a stored field, only for a parameter, a return, or a let-binding
+coverage audit (user code): 2 enforced, 0 inert (warned), 1 unenforced
+coverage audit (user + stdlib): 65 enforced, 0 inert (warned), 1 unenforced
+```
+
+`f`'s parameter and return are both Enforced. Only `Box.v`'s field
+refinement is Unenforced. There is no extractor for a stored field at all,
+only for a parameter, a return, or a let-binding. The `user + stdlib` total
+(65) is this file's own 2 sites plus the 63 the shipped stdlib always
+contributes.
+
+### Why an uncalled parameter still counts as Enforced
+
+This is the design's central subtlety. Enforcement is not a property of
+having a caller; it is a property of the checker's scope machinery accepting
+the declared type at all. `refined_param_ty` running over
+`fn f(n : {Int | n > 0}) : Int do ... end` registers `n > 0` as a fact
+inside `f`'s body and would raise an obligation at *any* call site, present
+or future. Adding one tomorrow gets checked automatically, because the
+position is already wired in. This is the same distinction
+`--refine-report` already draws between an obligation that is unproven and
+one that was never filed; the audit stays consistent with it instead of
+inventing an incompatible second notion of "checked."
+
+Contrast a lambda's own parameter (`fn (n : {Int | n > 0}) -> n`): no scope
+machinery ever runs over an `ELam`'s parameters, so *no* call through that
+lambda, ever, is obliged by it, so it is genuinely Unenforced rather than merely uncalled.
+
+### Where the current baseline stands
+
+A sweep of the corpus `scripts/refine-oracle.sh` already walks
+(`test/native/*.march` and `stdlib/*.march`, ~300 files) finds 63 declared
+refinements, every one Enforced: zero Unenforced, zero Inert. That result is
+committed at `test/refine_audit/corpus.baseline` and ratcheted in CI
+(`.github/workflows/ci.yml`'s "Refinement coverage audit ratchet" step,
+beside the existing obligation ratchet). It is regenerated the same way the
+TIR golden snapshots are:
+`UPDATE_SNAPSHOTS=1 ./_build/default/test/test_refinecheck.exe -e`.
+
+An empty baseline over real code is a true finding, not evidence the audit
+does nothing, but an audit that silently broke would also report an empty
+baseline, which is why a second, deliberately non-empty fixture set exists:
+`test/refine_audit/holes/`, one small program per known unenforced position
+(a lambda's own parameter, a block-level `fn`'s parameter and return, a
+non-adoptable `impl` method's parameter, an actor's state field and handler
+parameter, a nested field refinement, and a `{String | ...}` return),
+pinned at `test/refine_audit/holes.baseline`. If that baseline ever reports
+zero Unenforced sites, the audit itself is broken; the test that diffs it
+fails loudly rather than passing.
+
+The positions currently known to be Unenforced, none of which the corpus
+above happens to exercise:
+
+- A lambda's own parameter.
+- A block-level `fn`'s own parameter and return type: `check_fn_post_verdict`
+  and `scope_add_param` are reached only through `A.DFn` / `A.DImpl`, never
+  through a local `A.ELetFn`.
+- An `impl` method's parameter, when the method's bare name is not
+  adoptable (more than one `impl` defines it, or a top-level `fn` shares the
+  name): `visit_decl` strips the refinement from the body in that case, and
+  no caller is ever obliged. The audit reports every `impl` method
+  parameter Unenforced regardless of actual adoptability, since a single
+  site cannot make that module-level judgement. When the method *is*
+  adoptable the checker does enforce it, so this is a documented
+  conservatism in the audit, not a hole in the checker.
+- An actor's state field, and a handler's own parameter: no extractor
+  exists for either.
+- A record field or a variant constructor argument, once a value is
+  constructed.
+- A refinement nested below the outermost position of a declared type.
+- A `{String | ...}` return type: `return_refine_ext` only recognizes Int,
+  Bool, Float, and record bases.
+- A parameter refinement that desugar drops or relocates before the audit
+  ever sees it: a multi-head function's clause merge, or a default-argument
+  function's mangled arity variant. See below.
+
+See `specs/todos/2026-09-03-lambda-param-refinement-unchecked.md`,
+`specs/todos/2026-09-03-block-fn-refinement-unchecked.md`,
+`specs/todos/2026-09-03-impl-method-param-refinement-unchecked.md`,
+`specs/todos/2026-09-03-actor-state-and-handler-refinement-unchecked.md`,
+`specs/todos/2026-09-01-nested-refinement-enforcement.md`,
+`specs/todos/2026-09-03-string-return-refinement-unchecked.md`, and
+`specs/todos/2026-09-03-desugar-dropped-refinement-unchecked.md`.
+
+### Why the audit needs the pre-desugar AST too
+
+A whole-plan review of this design found two shapes where the POST-desugar
+declaration list alone is not enough:
+
+- A multi-head function's clause merge rebuilds every parameter with no
+  declared type at all, so a refined parameter on one of the original
+  clauses is not `Unenforced`; it is simply absent, with no site and no
+  disposition, which is worse than a false negative.
+- A default-argument function survives desugar only under mangled
+  arity-variant names (`f$2`, `f$1`, ...). A refined parameter on the
+  survivor used to report `Enforced`, correctly describing what the
+  checker's extractor accepts at that decl, but incorrectly implying a
+  plain call `f(...)` is covered by it: no decl named `f` remains, so no
+  such call resolves to anything refined.
+
+Both are fixed by diffing the pre-desugar site list against the
+post-desugar one: a pre-desugar site with no matching post-desugar
+occurrence (same enclosing declaration name and predicate text) is reported
+`Unenforced`, overriding whatever a post-desugar site at a similar position
+would otherwise say. `Return` is the one exception: it matches by predicate
+text alone, not by name, because a postcondition is checked against a
+function's own body with no notion of a caller, so a default-argument
+function's renamed full-arity variant is still correctly `Enforced` for its
+return type even while its parameter is not. Confirmed directly: `fn f(a :
+Int, b : Int \\ 1) : {Int | _ > 0} do a - b end` called as `f(0, 5)` still
+errors under `cap verified` (`f$2` does not satisfy its return type
+constraint), unaffected by this fix.
+
+```
+$ march --check --refine-audit --refine-report t6e.march
+coverage audit: t6e.march:3:27: param `f` #1: b > 0: this refinement was declared here, but no occurrence with the same enclosing name and predicate text survives desugaring: either the declared type was discarded entirely (a multi-head function's clause merge drops every parameter type before the checker ever sees it) or it now lives only under a mangled name a plain call cannot resolve to (a default-argument function's arity variant, e.g. `f$2`). See specs/todos/2026-09-03-desugar-dropped-refinement-unchecked.md.
+coverage audit (user code): 1 enforced, 0 inert (warned), 1 unenforced
+```
+
+(`t6e.march` is `fn f(a : Int, b : {Int | b > 0} \\ 1) : Int do a + b end`,
+called as `f(1, 0)`.) Pinned at `test/refine_audit/holes/default_param.march`
+and `multi_head.march`; `type_arg.march`, `arrow_domain.march`, and
+`linear_wrapper.march` add fixtures for the three nested positions this
+list already named but the holes set had not yet covered (a whole-plan
+review finding). This comparison covers only the entry file and its
+resolved imports, not the shipped stdlib, which a sweep already established
+contains neither shape today.
+
+`Refine_check.check_module` takes this pre-desugar list as an optional
+`?pre_desugar_decls` argument alongside `?audit`; omitting it (every caller
+before this fix) keeps behavior identical to before.
+
+---
+
 ## Promoting a skip: a demonstrated precondition failure
 
 Most skips stay silent because the checker cannot *prove* anything either way.
