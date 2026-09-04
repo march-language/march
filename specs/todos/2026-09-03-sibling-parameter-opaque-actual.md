@@ -77,3 +77,14 @@ having to dig through the progress record's "Deferred items" section.
 and the `None` arm that files `Unreflectable_predicate` /
 `Unreflectable_subject` (see `specs/progress/2026-09-02-unreflectable-predicate-attribution.md`
 for the mechanism as built for the self-binder case).
+
+## Cross-reference
+
+The refinement coverage audit
+(`specs/plans/2026-09-03-refinement-coverage-audit-plan.md`) is a different
+question -- it asks whether a declared refinement is ever consulted at all,
+not why a filed obligation was misattributed -- and does not classify this
+case as its own `Unenforced` position; it is filed as
+`unreflectable-predicate` under `--refine-report`, not as an audit site.
+Listed here only so a reader scanning `specs/todos/` for known refinement
+gaps finds it alongside the audit's own todos.

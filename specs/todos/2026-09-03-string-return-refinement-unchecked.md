@@ -83,3 +83,14 @@ zero enforcement. A `--refine-report` reader has no way to distinguish "this
 function's return type has no refinement" from "this function's return
 refinement is silently unchecked"; both print nothing. Worth fixing before
 any `{String | ...}` return type is relied on for correctness.
+
+## Cross-reference
+
+The refinement coverage audit (`specs/plans/2026-09-03-refinement-coverage-audit-plan.md`)
+reproduces this exact repro at `test/refine_audit/holes/string_return.march`,
+one of the fixtures in the audit's non-vacuity guard
+(`test/refine_audit/holes.baseline`). `--refine-audit` classifies this site
+as `Unenforced`, naming both `return_refine_ext` and `post_induction_shape`
+as the extractors that decline it; see
+`docs/refinement-types.md`/`specs/lang/refinement-types.md`'s "Coverage
+audit" section.

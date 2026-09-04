@@ -13,6 +13,27 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`--refine-audit`**: a refinement coverage audit, answering "does the
+  checker even look at this declared refinement?" as a separate question
+  from `--refine-report`'s "was this obligation proved?". Every declared
+  refinement in a module is classified Enforced, Inert (warned), or
+  Unenforced, with a per-position reason for every Unenforced site,
+  including a refinement a multi-head function's clause merge drops
+  entirely or a default-argument function relocates to a mangled name no
+  plain call can reach (compared against the pre-desugar declaration list,
+  not just the post-desugar one). A swept baseline over the corpus
+  `test/native/*.march` and `stdlib/*.march` finds 63 declared refinements
+  today, all Enforced (`test/refine_audit/corpus.baseline`, ratcheted in CI
+  beside the existing refinement obligation ratchet, plus a ceiling on the
+  corpus's own Unenforced count that a baseline regeneration cannot
+  bypass); a second, deliberately non-empty fixture set at
+  `test/refine_audit/holes/` guards against the audit itself silently going
+  vacuous. Known unenforced positions (a lambda's own parameter, a
+  block-level `fn`'s parameter and return, a non-adoptable `impl` method's
+  parameter, an actor's state field and handler parameter, a multi-head or
+  default-argument function's parameter) are documented in
+  `docs/refinement-types.md` and filed as `specs/todos/` entries with
+  reproducers.
 - **`@[no_alloc(transient)]`** — a weaker allocation contract that states
   "nothing this function allocates SURVIVES the call". A frame loop that
   allocates a dozen cells and frees all of them before returning has that
@@ -119,6 +140,17 @@ git log is authoritative for exact commits.
   `main` are not pinned; with a single scheduler the variable is a no-op.
 
 ### Fixed
+
+- **A small scalar aggregate built inside a branch no longer leaks.** A
+  single-constructor variant whose fields are all `Int`/`Float`/`Bool` and
+  whose arity is 2-4 is held in registers rather than on the heap. Building one
+  inside an `if` or a `match` arm leaked one object per construction, because
+  the value has to be boxed to cross the branch join and nothing freed the box
+  afterwards; a 5 000-iteration loop ended with 5 001 live objects instead of
+  1. The join now releases it. Building the same value straight-line or in a
+  called function was never affected, and still reaches the allocator zero
+  times. One related case remains open: an aggregate stored into an `Option`
+  (or another niche-encoded type) still leaks, with or without a branch.
 
 - A supervisor **nested under another supervisor** now passes its
   capabilities on to its own children, including the fresh children it

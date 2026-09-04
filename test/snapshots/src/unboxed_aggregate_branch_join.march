@@ -1,0 +1,37 @@
+-- Unboxed small scalar aggregate built INSIDE a branch.  In TIR this is
+-- indistinguishable from the straight-line case pinned by
+-- unboxed_aggregate.march: two EAlloc arms under an ECase, no inc/dec around
+-- either (Rc_types.needs_rc is false for the aggregate), and that is what this
+-- snapshot exists to hold still.
+--
+-- The representation forces a heap cell here that the straight-line shape
+-- never needs: both arms of the join store through a `ptr` result slot, so
+-- codegen boxes the struct to cross it (Llvm_ctx.coerce's inline-aggregate
+-- arm) and releases the box again at the merge (Llvm_case.finish_ptr_merge).
+-- All of that is BELOW TIR — none of it appears here, and a drop showing up in
+-- this snapshot would mean someone moved the fix into the RC pass instead,
+-- which would change ownership for every unboxed aggregate rather than for the
+-- one box the merge itself allocated.  See
+-- specs/progress/2026-09-04-unboxed-aggregate-branch-join-leak.md.
+mod UnboxedAggregateBranchJoin do
+  needs IO.Console
+  type P2 = P2(Float, Float)
+
+  fn psum(p : P2) : Float do
+    match p do
+      P2(a, b) -> a +. b
+    end
+  end
+
+  pfn spin(i : Int, acc : Float) : Float do
+    if i == 0 do acc
+    else
+      let p = if i % 2 == 0 do P2(1.0, 2.0) else P2(3.0, 4.0) end
+      spin(i - 1, acc +. psum(p))
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    println(float_to_string(spin(10, 0.0)))
+  end
+end

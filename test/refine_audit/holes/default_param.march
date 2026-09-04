@@ -1,0 +1,14 @@
+-- Task 4 fix (whole-plan review finding 1): a default parameter's own
+-- refinement survives desugar only on a mangled arity variant (`f$2`) no
+-- plain call resolves to, so the checker files no obligation for it and
+-- `cap verified` passes vacuously. See
+-- specs/todos/2026-09-03-desugar-dropped-refinement-unchecked.md.
+mod HolesDefaultParam do
+  cap verified
+
+  fn f(a : Int, b : {Int | b > 0} \\ 1) : Int do a + b end
+
+  fn main() : Int do
+    f(1, 0 - 1)
+  end
+end
