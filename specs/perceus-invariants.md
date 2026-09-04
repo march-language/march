@@ -735,6 +735,64 @@ bug).
 
 ---
 
+## 10. Boxes that codegen allocates and Perceus cannot see (case merges)
+
+**Governing module: `lib/tir/llvm_case.ml`** (`finish_ptr_merge`), with
+`lib/tir/llvm_ctx.ml`'s `coerce` as the site that creates the boxes.
+
+Every `ECase`/`if` merge stores its arms through a `ptr`-typed result slot, so
+an arm whose value is NOT ptr-shaped is boxed on the way in and read back on
+the way out. Two types are in that position, and both have `needs_rc = false`
+(§1) — which is precisely why the box has no owner:
+
+| arm type | box | why Perceus never drops it |
+|---|---|---|
+| `TFloat` (`double`) | `march_alloc_float` cell | `needs_rc TFloat = false` |
+| an unboxed small scalar aggregate (`Repr.Unboxed`, `%ub.T`) | `march_alloc(16 + 8n)` cell | `needs_rc` is false for the aggregate |
+
+**Invariant.** A box created by a merge's own coerce-to-`ptr` calls is owned by
+that merge and must be released there. The proof that it is safe to release is
+the arm-type uniformity check: when every arm that reaches the merge shared one
+pre-coercion LLVM type that is not itself `ptr`, the pointer loaded at the
+merge can only be a box this `emit_case` allocated — never escaped, never
+aliased, never read by anyone else. Any other mix (including plain `ptr` arms,
+whose value came from elsewhere and is owned by someone else) hands the pointer
+back untouched.
+
+Order matters: unbox **before** the release. `march_decrc_local` is a shallow
+free, so the read must happen while the cell is still live — and the shallowness
+is also what makes releasing an aggregate box safe at all, since its fields are
+raw scalars (`Repr.is_scalar_field` admits only Int/Float/Bool) and a
+field-walking free would sniff a raw `double`'s bits with `IS_HEAP_PTR`.
+
+**Fix lineage.** Three instances of the same defect, one per boundary, each
+found as a live-object leak scaling exactly with the loop count rather than as
+a failing assertion:
+
+- Boxed-path merge, `TFloat` — one leaked `march_float_box` per evaluation
+  (`specs/progress/2026-08-12-float-boxing-case-merge-leak-fix.md`).
+- Niche-path merge, `TFloat` — 20 000 leaked boxes on a 20 000-iteration
+  `Option(Option(Float))` loop
+  (`specs/progress/2026-08-22-erased-slot-ownership-leaks.md`).
+- Both merges, unboxed aggregate — a `Pair(Float, Float)` built inside an `if`
+  leaked one 32-byte cell per construction, 5 001 live objects over 5 000
+  iterations, while the same program with the aggregate built straight-line or
+  in a callee did not
+  (`specs/progress/2026-09-04-unboxed-aggregate-branch-join-leak.md`).
+
+The third is why the check is stated as "uniform non-`ptr` arm type" rather
+than as a special case for `double`: a new boxable arm type is otherwise a
+silent leak by default. **A type whose `needs_rc` is false but whose `llvm_ty`
+is not `ptr` must be added to `finish_ptr_merge` in the same change that makes
+it boxable**, or every branch join over it leaks.
+
+Not covered by this invariant, and still open: the box an unboxed aggregate
+gets when it is stored into a *niche-encoded ADT payload* (`Some(P2(...))`) has
+the same no-owner problem at a different boundary — see
+`specs/todos/2026-09-04-unboxed-aggregate-niche-payload-leak.md`.
+
+---
+
 ## Historical note: commit provenance across branch lineages
 
 The fix commits cited above (`a5dad194`, `20d1d144`, `a705cc95`, `d2cf09e`,
