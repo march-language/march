@@ -279,12 +279,32 @@ let emit_update ~emit_atom ctx (base_atom : Tir.atom)
     let n = List.length all_fields in
     (* Allocate new record of same size *)
     let ptr = emit_heap_alloc ctx 0 n in
-    (* Copy all fields from base *)
+    (* Copy all fields from base.  Each copied HEAP field is inc'd: the base
+       keeps its own reference (an update borrows the base, it does not consume
+       it) and the new cell takes a second one, so both can be released
+       independently.  Without the inc the two cells share children with a
+       single refcount between them, and once aggregates became deep-dropped
+       that was a double-free -- masked, until this landed, by a stray inc on
+       the base itself that kept its refcount from ever reaching zero.
+
+       Fields whose slot is not a pointer (Int/Float/Bool/Unit) carry no
+       reference, so they are copied as before. *)
     List.iteri (fun i (_, fty) ->
       (* Slot-to-slot copy: read and write at the SLOT type, never the value
          type, so an unboxed aggregate's box is copied as the pointer it is. *)
       let sty = Llvm_ctx.llvm_field_ty fty in
       let fv = emit_load_field ctx base_val i sty in
+      (* ...and inc each copied HEAP reference, since the base keeps its own
+         (an update borrows the base, it does not consume it) and the new cell
+         takes a second one.  An UNBOXED type occupies a ptr slot without being
+         a heap pointer, so it is excluded explicitly rather than left to
+         march_incrc's IS_HEAP_PTR guard. *)
+      let is_unboxed = match fty with
+        | Tir.TCon (n, _) -> Repr.unboxed_of_type_name n <> None
+        | _ -> false
+      in
+      if Rc_types.needs_rc fty && String.equal sty "ptr" && not is_unboxed then
+        emit ctx (Printf.sprintf "call void @march_incrc(ptr %s)" fv);
       emit_store_field ctx ptr i sty fv
     ) all_fields;
     (* Overwrite updated fields *)

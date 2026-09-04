@@ -1,0 +1,53 @@
+-- Regression: a NON-GENERIC Option-shaped type with a heap payload was
+-- released twice, once as the box and once as the payload.
+--
+-- `Wrap = W(String) | Z` is one nullary plus one single-field constructor, so
+-- codegen encodes it as a NICHE (null / non-null, no tag) via
+-- Repr.niche_repr_of_concrete, which exists for exactly this "TCon with no type
+-- params" case.  Under that encoding `W(x)` IS `x` -- one cell, not two.
+--
+-- Drop.droppable_ctors classified it through Repr.repr_of_ty instead, which
+-- reads an Option-shaped type's payload out of the TCon's type PARAMS.  A
+-- non-generic type has none, so repr_of_ty fell back to Boxed and a deep drop
+-- was synthesized:
+--
+--   case x of W(f) -> let freed = march_decrc_freed(x) in
+--                     case freed of True -> drop f
+--
+-- With f and x the same pointer, that releases the cell and then releases it
+-- again.  Measured before the fix: 6/6 crashes, split across libsystem_malloc's
+-- freelist-corruption detector (SIGTRAP), the runtime's RC-underflow guard
+-- reporting a garbage refcount, and SIGBUS.
+--
+-- Generic Option-shaped types were never affected: Option(String) carries its
+-- payload in ty_args, so repr_of_ty sees it and says Niche correctly.  The bug
+-- needed a user-declared non-generic one, which is why it survived so long.
+--
+-- The loop matters: a single call frees the cell and exits before the corrupted
+-- freelist is touched again.
+mod NicheConcretePayloadDrop do
+  needs IO.Console
+
+  type Wrap = W(String) | Z
+
+  fn size(w : Wrap) : Int do
+    match w do
+      W(s) -> String.byte_size(s)
+      Z    -> 0
+    end
+  end
+
+  fn spin(i : Int, acc : Int) : Int do
+    if i <= 0 do
+      acc
+    else
+      spin(i - 1, acc + size(W(string_concat("v", int_to_string(i)))))
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    -- 9 x 2 + 90 x 3 + 900 x 4 + 1 x 5 = 3893
+    println(int_to_string(spin(1000, 0)))
+    println(int_to_string(size(Z)))
+  end
+end

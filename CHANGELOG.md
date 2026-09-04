@@ -199,6 +199,43 @@ git log is authoritative for exact commits.
   creates each time it is restarted. Previously only a top-level supervisor's
   direct children were captured, so a mock stopped one level down.
 
+- **Records and tuples are now reference-counted and freed.** Previously
+  `needs_rc` was false for both, so Perceus never decided an aggregate was
+  dead: every record and tuple cell leaked, and so did every heap value it
+  owned. A 200,000-iteration loop rebuilding a `{ n : Int, s : String }`
+  leaked ~200k strings and ~200k cells (15.2 MB peak) where the equivalent
+  two-field variant leaked nothing (2.4 MB). Aggregates now get a synthesized
+  deep drop (`__drop$R` / `__drop$T`) that releases their fields behind the
+  same shared-cell guard variants use. A variant holding a record or tuple
+  field is fixed by the same change.
+
+  A record passed to a function that reads its fields is fixed too: the
+  projection no longer dups the record (2001 live objects over a 1000-iteration
+  loop, now 1).
+
+- **An aggregate rebuilt each iteration of a self-tail-recursive function no
+  longer leaks.** Records and tuples are now *owned* parameters. A borrowed one
+  left the caller holding the release, and in a tail-recursive loop that release
+  sits after the tail call — where TCO folds the call into a back-edge and the
+  release is discarded, leaking one cell per iteration. Owned parameters let
+  each iteration release the aggregate it was handed before jumping with a new
+  one, so such a loop now runs in constant space. All six aggregate leak
+  fixtures — record, record-with-heap-field, record update, and tuple — are flat
+  across a 100x change in iteration count.
+
+- **A non-generic Option-shaped type with a heap payload was freed twice.**
+  `type Wrap = W(String) | Z` is encoded as a niche, where `W(x)` *is* `x` — one
+  cell — but the deep-drop pass classified it as boxed and synthesized a drop
+  that released the cell and then released its "payload", the same pointer.
+  Crashed 6/6 in a loop, variously as heap-allocator freelist corruption, an
+  RC-underflow abort, or SIGBUS. Generic `Option(String)` was never affected, so
+  this needed a user-declared non-generic type. The two representation
+  predicates now have to agree before a drop is synthesized.
+
+- Compiled binaries built with `MARCH_STRING_STATS=1` now report `live_objs`,
+  the runtime's exact live-heap-object count. Unlike peak RSS it does not vary
+  with machine load, so it can be asserted directly in leak regression tests.
+
 - Capability mocking now reaches a **supervised child**. A `supervise` block's
   children are spawned by the supervisor itself, not by user code, so a mock
   that reached a plain actor never reached one under a supervisor. The

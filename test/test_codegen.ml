@@ -285,7 +285,23 @@ let test_tir_names_bool_tags () =
    precisely {TFn _, bare TVar _, TTuple _, TRecord _} and nothing else.
    If either predicate changes, this test fails and points at Rc_types's
    module doc (each divergent constructor's fix history: a705cc95/d2cf09e/
-   fd520110 for TFn/TVar, 0b52510d/390dff00 for TTuple/TRecord). *)
+   fd520110 for TFn/TVar).
+
+   TTuple/TRecord diverge, but in the OPPOSITE direction from their history:
+   they used to be (needs_rc false, borrow_eligible true), and are now
+   (true, false).
+
+   needs_rc true: aggregates own their fields and are deep-dropped at death like
+   variants.  While it was false Perceus never decided an aggregate was dead, so
+   every record and tuple cell leaked along with every heap value it owned.
+
+   borrow_eligible false: an aggregate parameter is OWNED.  A borrowed one
+   leaves the caller holding the release, and in a self-tail-recursive loop that
+   release is unreachable -- it sits after the tail call, llvm_tco folds the call
+   into a back-edge, and the dec is discarded -- so every iteration leaked its
+   aggregate.  Ownership lets each iteration release the aggregate it was handed
+   before jumping with a new one, which is also what makes
+   Perceus.insert_owned_aggregate_param_drops reachable at all. *)
 
 (* (label, ty, expected needs_rc, expected borrow_eligible) *)
 let rc_types_truth_table : (string * March_tir.Tir.ty * bool * bool) list =
@@ -296,11 +312,11 @@ let rc_types_truth_table : (string * March_tir.Tir.ty * bool * bool) list =
     "TBool",               TBool,                       false, false;
     "TString",             TString,                     true,  true;
     "TUnit",               TUnit,                       false, false;
-    "TTuple []",           TTuple [],                   false, true;   (* diverges *)
-    "TTuple [Int]",        TTuple [TInt],               false, true;   (* diverges *)
-    "TTuple [String]",     TTuple [TString],            false, true;   (* diverges *)
-    "TRecord []",          TRecord [],                  false, true;   (* diverges *)
-    "TRecord [(f,Int)]",   TRecord [("f", TInt)],       false, true;   (* diverges *)
+    "TTuple []",           TTuple [],                   true,  false; (* diverges *)
+    "TTuple [Int]",        TTuple [TInt],               true,  false; (* diverges *)
+    "TTuple [String]",     TTuple [TString],            true,  false; (* diverges *)
+    "TRecord []",          TRecord [],                  true,  false; (* diverges *)
+    "TRecord [(f,Int)]",   TRecord [("f", TInt)],       true,  false; (* diverges *)
     "TCon (Atom,[])",      TCon ("Atom", []),           false, false;
     "TCon (Foo,[])",       TCon ("Foo", []),            true,  true;
     "TCon (List,[Int])",   TCon ("List", [TInt]),       true,  true;

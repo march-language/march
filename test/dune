@@ -2143,6 +2143,40 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; record type there, so EField fell back to march_record_field_dyn and
 ; march_unbox_float dereferenced a raw inline double — SIGSEGV, compiled
 ; only (the interpreter and every Int/String field were unaffected).
+; Regression: a NON-GENERIC Option-shaped type (`W(String) | Z`) with a heap
+; payload was released twice -- once as the box, once as the payload.  Codegen
+; encodes such a type as a NICHE (Repr.niche_repr_of_concrete, written for the
+; "TCon with no type params" case) where `W(x)` IS `x`, but
+; Drop.droppable_ctors classified it through Repr.repr_of_ty, which reads an
+; Option-shaped type's payload from the TCon's type PARAMS -- a non-generic
+; type has none, so it fell back to Boxed and synthesized a deep drop that
+; freed the single cell twice.  6/6 crashes before the fix.  Generic
+; Option(String) was never affected, which is why this survived; it needs a
+; user-declared non-generic type.  See the fixture's own header.
+(rule
+ (targets native_niche_concrete_payload_drop native_niche_concrete_payload_drop.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (source_tree ../stdlib)
+       (file native/niche_concrete_payload_drop.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_niche_concrete_payload_drop
+        native/niche_concrete_payload_drop.march)
+   (with-stdout-to native_niche_concrete_payload_drop.out
+        (system "./native_niche_concrete_payload_drop")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/niche_concrete_payload_drop.expected native_niche_concrete_payload_drop.out)))
+
 (rule
  (targets native_record_pattern native_record_pattern.out)
  (deps (file %{exe:../bin/main.exe})

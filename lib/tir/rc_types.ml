@@ -31,8 +31,8 @@
       TVar "_"             true       true             (lower.ml placeholder)
       TVar _             ★ true       false
       TFn _              ★ true       false
-      TTuple _           ★ false      true
-      TRecord _          ★ false      true
+      TTuple _             true       true
+      TRecord _            true       true
       TInt TFloat
       TBool TUnit          false      false
     v}
@@ -72,20 +72,44 @@
     If you flip needs_rc (TFn _ | TVar _) to false, expect the Map.fold
     crash and the Gate.cast UAF class to return.
 
-    ── Why TTuple / TRecord diverge (needs_rc FALSE, borrow_eligible TRUE) ──
+    ── TTuple / TRecord: both TRUE (they no longer diverge) ──
 
-    Perceus side (false): tuples and records are heap-allocated (via
-    march_alloc) but Perceus never emits inc/dec on the aggregate itself —
-    the aggregate is never RC-freed and its fields belong to it. Perceus
-    instead reconciles at the FIELD level: the [_borrowed_field_vars]
-    mechanism (perceus.ml) tracks variables extracted from a borrowed/live
-    record via EField and suppresses RC ops on them, and TTuple/TRecord
-    ECase scrutinees are treated as borrowed so escaping fields are inc'd
-    and dead fields are not dec'd (390dff00 bug #4, the Toml get_str
-    pair-list corruption: fields of a borrowed-derived aggregate were freed
-    while the aggregate lived). If you flip needs_rc (TTuple/TRecord) to
-    true, Perceus starts emitting aggregate-level RC ops on top of the
-    field-level accounting — double-frees on tuple/record fields.
+    Aggregates own their fields and are DEEP-dropped at death, exactly like
+    variants: Drop.aggregate_fields gives them a synthesized __drop$R/__drop$T
+    that projects each field with EField and releases it behind the
+    march_decrc_freed guard.
+
+    needs_rc was FALSE here until the aggregate-RC change, on the reasoning
+    that "the aggregate is never RC-freed and its fields belong to it".  The
+    second half is true; the first half was the bug.  Nothing ever decided an
+    aggregate was dead, so every record and tuple cell leaked, and so did every
+    heap value it owned — measured at ~200k leaked strings plus ~200k leaked
+    cells for a 200k-iteration loop rebuilding a { n : Int, s : String }, where
+    the equivalent two-field variant leaked nothing.
+
+    The READ path is unchanged and still does the work its bug history
+    describes: [borrowed_field_vars] (perceus_core.ml) tracks variables
+    extracted from a live aggregate via EField and suppresses RC ops on them,
+    dup'ing instead at any consuming position so an escaping field outlives the
+    aggregate (390dff00 bug #4, the Toml get_str pair-list corruption: fields
+    of a borrowed-derived aggregate were freed while the aggregate lived).
+
+    That 390dff00 warning used to be stated as "flipping needs_rc to true gives
+    double-frees on tuple/record fields".  It constrains the READ path, not the
+    death path, and the two are orthogonal — an aggregate's drop releases only
+    the references the aggregate itself still holds.  What the warning does
+    still forbid is releasing a field that [borrowed_field_vars] has already
+    handed to someone else; keep that mechanism intact.
+
+    Two adjacent invariants the death path depends on, both easy to break:
+      - EField must NOT run its source through [find_inc_vars]: projection is a
+        BORROW, not a consuming position, and dup'ing the aggregate there leaks
+        one reference per field read.
+      - the scope-end drop in insert_rc_expr's ELet case must fire only when the
+        aggregate's every use is an EField source ([used_only_as_field_source]).
+        At a consuming position ownership has already transferred; dropping as
+        well frees the consumer's cell (seen as a SIGBUS on
+        `alloc Box.Box(n, r); dec_rc r`).
 
     Borrow side (true): record/tuple params must be ELIGIBLE for borrow
     inference so the fixpoint can mark functions that only read fields via
@@ -158,10 +182,12 @@ let needs_rc : Tir.ty -> bool = function
                              (Gate.cast RC-underflow UAF — module doc) *)
   | Tir.TFn _ -> true     (* defunctionalized closure struct (Map.fold crash —
                              module doc) *)
-  | Tir.TInt | Tir.TFloat | Tir.TBool | Tir.TUnit
-  | Tir.TTuple _ | Tir.TRecord _ -> false
-    (* Tuples/records: aggregate is never RC-freed; fields are reconciled by
-       Perceus's _borrowed_field_vars machinery (390dff00 #4 — module doc). *)
+  | Tir.TTuple _ | Tir.TRecord _ -> true
+    (* Aggregates own their fields and are DEEP-dropped at death, exactly like
+       variants (see the module doc's TTuple/TRecord section).  Was false, which
+       meant Perceus never decided an aggregate was dead: every record and tuple
+       cell leaked, and so did every heap value it owned. *)
+  | Tir.TInt | Tir.TFloat | Tir.TBool | Tir.TUnit -> false
 
 (** Borrow's predicate: true iff a parameter of this type may enter borrow
     inference (the borrowed-calling-convention fixpoint). Diverges from
@@ -174,7 +200,28 @@ let borrow_eligible : Tir.ty -> bool = function
     (* copied at every boundary; no reference, so no ownership — module doc *)
   | Tir.TCon _ | Tir.TString | Tir.TPtr _ -> true
   | Tir.TVar "_" -> true  (* lower.ml placeholder: conservatively heap-carrying *)
-  | Tir.TRecord _ | Tir.TTuple _ -> true
+  | Tir.TRecord _ | Tir.TTuple _ -> false
+    (* Aggregates are OWNED parameters, not borrowed ones.  A borrowed
+       aggregate parameter leaves the caller responsible for the release, and
+       in a SELF-TAIL-RECURSIVE loop that release is unreachable: it sits after
+       the tail call, llvm_tco folds the call into a back-edge, and the dec is
+       discarded (llvm_tco.ml's has_self_tail_call says so outright -- "the
+       EDecRC lands in dead code after TCO emits the back-edge").  Every
+       iteration then leaks its aggregate.  It cannot simply be emitted before
+       the back-edge either: that would free the cell the next iteration reads.
+
+       Ownership fixes it uniformly -- each iteration releases the aggregate it
+       was handed before jumping with a new one, so the loop runs in constant
+       space -- and it is what makes the parameter drop site in
+       [Perceus.insert_owned_aggregate_param_drops] reachable at all.
+
+       The historical reason this was true (0b52510d, the record-liveness
+       multi-call bug) was about a field EXTRACTED from the record being dec'd
+       at its last use inside the callee.  That is the [borrowed_field_vars]
+       mechanism's job and it still does it; what changes here is only who
+       releases the AGGREGATE.  The two tests that pinned the old behaviour
+       asserted "no EDecRC anywhere in the callee" as a proxy for "no dec of
+       the extracted field" -- see their updated forms in test_eval.ml. *)
     (* Records and tuples are heap-allocated (via march_alloc) and hold
        heap-carrying fields (Strings, ADT values, etc.). Making them
        borrow-eligible lets the fixpoint infer "cfg:borrowed" for functions

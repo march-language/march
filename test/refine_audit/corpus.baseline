@@ -212,6 +212,8 @@ native_nested_mod_qualcall: coverage audit (user + stdlib): 63 enforced, 0 inert
 native_nested_mod_qualcall: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_newtype_counter: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_newtype_counter: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_niche_concrete_payload_drop: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_niche_concrete_payload_drop: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_niche_ctor_ambiguity: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_niche_ctor_ambiguity: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_niche_reuse_closure: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced

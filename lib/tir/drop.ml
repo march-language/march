@@ -130,7 +130,20 @@ let rec mangle (ty : Tir.ty) : string =
   | Tir.TString -> "String" | Tir.TUnit -> "Unit"
   | Tir.TTuple ts -> "T" ^ string_of_int (List.length ts)
                      ^ "_" ^ String.concat "_" (List.map mangle ts)
-  | Tir.TRecord fs -> "R" ^ string_of_int (List.length fs)
+  | Tir.TRecord fs ->
+    (* Field names AND types, sorted, not merely the arity.  This key is the
+       memo key in [env.names] and the suffix of the synthesized function's
+       name, so a bare "R<n>" made every n-field record collide: the first
+       2-field record to be asked about decided the answer for all of them, and
+       a memoized negative (no heap children) then suppressed the drop for a
+       later { n : Int, s : String }, silently leaking its string.  Harmless
+       while aggregates never got drop functions; a correctness bug now.
+       Names are part of the identity because the drop projects fields by name
+       and TRecord's layout is name-sorted. *)
+    let sorted = List.sort (fun (a, _) (b, _) -> String.compare a b) fs in
+    "R" ^ string_of_int (List.length fs)
+    ^ "_" ^ String.concat "_"
+              (List.map (fun (n, t) -> n ^ "$" ^ mangle t) sorted)
   | Tir.TCon (n, []) -> String.map (fun c -> if c = '.' then '_' else c) n
   | Tir.TCon (n, args) ->
     String.map (fun c -> if c = '.' then '_' else c) n
@@ -160,6 +173,47 @@ let droppable_ctors (env : env) (ty : Tir.ty)
   match ty with
   | Tir.TCon (name, ty_args)
     when not (Tir_names.is_actor_msg_name name) ->
+    (* [repr_of_ty] alone is NOT enough here.  For an Option-shaped type it
+       classifies from the TCon's type PARAMS, and a NON-GENERIC one
+       (`type Wrap = W(String) | Z`) has none — so it falls back to Boxed:
+
+         | Some [ (_nullary, []); (_single, [_]) ] ->
+           (match params with
+            | [p] when niche_payload_ok .. -> Niche ..
+            | _ -> Boxed)                        <- params = [] lands here
+
+       Codegen does not agree: it classifies such a type through
+       [niche_repr_of_concrete], which exists precisely for "a NON-GENERIC
+       Option-shaped ADT", and emits the niche encoding (null / non-null, no
+       tag).  Under that encoding `W(x)` IS `x` — one cell, not two — so the
+       drop this function would synthesize,
+
+         case x of W(f) -> let freed = march_decrc_freed(x) in
+                           case freed of True -> drop f
+
+       releases the SAME pointer twice: once as the box, then again as the
+       payload.  Measured on `type Wrap = W(String) | Z` in a 1000-iteration
+       loop: 6/6 crashes, split across libsystem_malloc's freelist-corruption
+       detector (SIGTRAP), this runtime's own RC-underflow guard reporting a
+       garbage refcount, and SIGBUS.
+
+       Generic Option-shaped types were never affected — `Option(String)`
+       carries its payload in ty_args, so repr_of_ty sees `[p]` and correctly
+       says Niche — which is why this survived: it needs a user-declared
+       non-generic one.
+
+       Consult BOTH predicates and decline if EITHER says the payload shares
+       the box's storage. *)
+    let concrete_niche =
+      match ty with
+      | Tir.TCon (n, []) ->
+        (match Repr.niche_repr_of_concrete ~collision_set:env.collision_set
+                 env.type_defs n with
+         | Some (Repr.Niche _) -> true
+         | _ -> false)
+      | _ -> false
+    in
+    if concrete_niche then None else
     (match Repr.repr_of_ty ~collision_set:env.collision_set env.type_defs ty with
      | Repr.Boxed ->
        (match Repr.find_variant env.type_defs name with
@@ -189,6 +243,53 @@ let rec has_tvar = function
   | Tir.TPtr t -> has_tvar t
   | _ -> false
 
+(** The (accessor, type) pairs of a record or tuple, in layout order, or
+    [None] for any other type.  Records are keyed by field name and sorted, as
+    [TRecord] itself is and as [Llvm_emit_data.emit_record] lays them out;
+    tuples are keyed by the [$fvN] accessor that tuple destructuring lowers to.
+    These are the aggregates that own their fields and are read exclusively
+    through [EField] — see [build_aggregate_drop_fn]. *)
+let aggregate_fields (ty : Tir.ty) : (string * Tir.ty) list option =
+  match ty with
+  | Tir.TRecord fs ->
+    Some (List.sort (fun (a, _) (b, _) -> String.compare a b) fs)
+  | Tir.TTuple ts -> Some (List.mapi (fun i t -> (Tir_names.fv_field i, t)) ts)
+  | _ -> None
+
+(** True when a value of [ty] may NOT be a heap pointer at runtime: a niche
+    [None] is the raw word 0, and a newtype over a scalar is a tagged integer.
+
+    Such a value must never be handed to a synthesized deep drop.  Those
+    functions gate their children on [march_decrc_freed], which returns
+    "freed" (1) for anything that is not a heap pointer — so the children
+    branch fires and dereferences the word.  Observed as an EXC_BAD_ACCESS at
+    address 0x8 (the tag slot) inside __drop$R3_... for
+    test/native/ffi_codec2.march, whose `flag : Option(Unit)` field is a niche
+    None built on the C side.
+
+    Falling back to a bare [EDecRC] for these is safe — [march_decrc] is
+    IS_HEAP_PTR-guarded, so it is a no-op on a non-heap word and an ordinary
+    release otherwise.  It is also shallow, so a niche-typed field's own heap
+    children are not reclaimed by this path; that is the conservative
+    direction (leak, never crash) and it is the same treatment such a field
+    got before aggregates were dropped at all. *)
+let may_be_non_heap (env : env) (ty : Tir.ty) : bool =
+  match ty with
+  | Tir.TCon (name, _) ->
+    (match Repr.repr_of_ty ~collision_set:env.collision_set env.type_defs ty with
+     (* Unboxed: a scalar-only variant packed into a word -- never a heap
+        pointer, so it belongs here too. *)
+     | Repr.Niche _ | Repr.Newtype _ | Repr.Unboxed _ -> true
+     | Repr.Boxed ->
+       (* repr_of_ty answers Boxed for an Option-shaped type reached without
+          type params; niche_repr_of_concrete is the predicate codegen uses
+          there.  Same split that caused the double release fixed above. *)
+       (match Repr.niche_repr_of_concrete ~collision_set:env.collision_set
+                env.type_defs name with
+        | Some (Repr.Niche _) -> true
+        | _ -> false))
+  | _ -> false
+
 (** The synthesized drop function for [ty], or [None] if a bare [EDecRC] on
     [ty] is already correct (no heap children to release). *)
 let rec drop_fn_for (env : env) (ty : Tir.ty) : string option =
@@ -197,6 +298,29 @@ let rec drop_fn_for (env : env) (ty : Tir.ty) : string option =
   | Some "" -> None            (* memoized negative *)
   | Some fname -> Some fname
   | None ->
+    match aggregate_fields ty with
+    | Some fields ->
+      (* Records and tuples: one implicit "constructor" over the fields, and no
+         ECase to destructure it -- see [build_aggregate_drop_fn].  Without
+         this branch a bare [EDecRC] on an aggregate stayed SHALLOW
+         (march_decrc_local frees the cell and decrements nothing), so every
+         heap value the aggregate owned was orphaned: a
+         { n : Int, s : String } rebuilt 200k times leaked ~200k strings on
+         top of ~200k cells. *)
+      let owns_heap_child =
+        List.exists (fun (_, fty) ->
+            (not (has_tvar fty)) && Rc_types.needs_rc fty) fields
+      in
+      if not owns_heap_child then begin
+        Hashtbl.replace env.names key ""; None
+      end else begin
+        let fname = Tir_names.drop_fn_prefix ^ key in
+        Hashtbl.replace env.names key fname;
+        let fn = build_aggregate_drop_fn env fname ty fields in
+        env.fns <- fn :: env.fns;
+        Some fname
+      end
+    | None ->
     match droppable_ctors env ty with
     | None -> Hashtbl.replace env.names key ""; None
     | Some ctors ->
@@ -226,6 +350,70 @@ let rec drop_fn_for (env : env) (ty : Tir.ty) : string option =
         Some fname
       end
 
+and build_aggregate_drop_fn env fname ty (fields : (string * Tir.ty) list)
+  : Tir.fn_def =
+  (* Mirrors [build_drop_fn]'s body exactly, with EField projections standing in
+     for the ECase destructuring a variant gets:
+
+       fn __drop$R(x) = let f1 = x.a in let f2 = x.b in
+                        let freed = march_decrc_freed(x) in
+                        case freed of True -> drop f1; drop f2 | _ -> ()
+
+     Field loads are emitted BEFORE march_decrc_freed, so they read the cell
+     while it is still alive; the free is shallow and does not disturb the
+     children, so the loaded references stay valid for the drops below.  The
+     freed-guard is what keeps a SHARED aggregate from having its children
+     released out from under the surviving reference. *)
+  let x = { Tir.v_name = fresh env "dx"; v_ty = ty; v_lin = Tir.Unr } in
+  let unit_expr = Tir.ETuple [] in
+  let droppable =
+    List.filter (fun (_, fty) ->
+        (not (has_tvar fty)) && Rc_types.needs_rc fty) fields
+  in
+  let binders =
+    List.map (fun (accessor, fty) ->
+        (accessor, { Tir.v_name = fresh env "df"; v_ty = fty; v_lin = Tir.Unr }))
+      droppable
+  in
+  let ops =
+    List.map (fun (_, v) ->
+        if may_be_non_heap env v.Tir.v_ty then Tir.EDecRC (Tir.AVar v) else
+        match drop_fn_for env v.Tir.v_ty with
+        | Some callee ->
+          let f = { Tir.v_name = callee;
+                    v_ty = Tir.TFn ([v.Tir.v_ty], Tir.TUnit);
+                    v_lin = Tir.Unr } in
+          Tir.EApp (f, [Tir.AVar v])
+        | None -> Tir.EDecRC (Tir.AVar v))
+      binders
+  in
+  let rec chain = function
+    | [] -> unit_expr
+    | [last] -> last
+    | op :: rest -> Tir.ESeq (op, chain rest)
+  in
+  let freed = { Tir.v_name = fresh env "dfree"; v_ty = Tir.TBool;
+                v_lin = Tir.Unr } in
+  let decrc_freed =
+    { Tir.v_name = "march_decrc_freed";
+      v_ty = Tir.TFn ([ty], Tir.TBool); v_lin = Tir.Unr } in
+  let guarded =
+    Tir.ELet (freed, Tir.EApp (decrc_freed, [Tir.AVar x]),
+      Tir.ECase (Tir.AVar freed,
+        [ { Tir.br_tag = "True"; br_vars = []; br_body = chain ops } ],
+        Some unit_expr))
+  in
+  let body =
+    List.fold_right (fun (accessor, v) acc ->
+        Tir.ELet (v, Tir.EField (Tir.AVar x, accessor), acc))
+      binders guarded
+  in
+  { Tir.fn_name = fname;
+    fn_params = [x];
+    fn_ret_ty = Tir.TUnit;
+    fn_body = body;
+    fn_kind = Tir.FnNormal }
+
 and build_drop_fn env fname ty ctors : Tir.fn_def =
   let x = { Tir.v_name = fresh env "dx"; v_ty = ty; v_lin = Tir.Unr } in
   let unit_expr = Tir.ETuple [] in
@@ -239,6 +427,8 @@ and build_drop_fn env fname ty ctors : Tir.fn_def =
         let ops =
           List.filter_map (fun v ->
               if has_tvar v.Tir.v_ty || not (Rc_types.needs_rc v.Tir.v_ty) then None
+              else if may_be_non_heap env v.Tir.v_ty then
+                Some (Tir.EDecRC (Tir.AVar v))
               else match drop_fn_for env v.Tir.v_ty with
                 | Some callee ->
                   let f = { Tir.v_name = callee;
