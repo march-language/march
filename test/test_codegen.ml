@@ -493,6 +493,93 @@ let test_unboxed_aggregate_ffi_type_stays_boxed () =
     (March_tir.Repr.unboxed_of_type_name "Vec3" <> None);
   March_tir.Repr.clear_unboxed_types ()
 
+(* ── The branch-join box is owned by the merge that made it ───────────────
+
+   An unboxed aggregate built inside an `if`/`match` arm cannot stay in
+   registers across the join: both arms store through a `ptr` result slot, so
+   [Llvm_ctx.coerce]'s inline-aggregate boxing arm materialises a
+   [march_alloc] cell per arm.  Nobody downstream owns that cell —
+   [Rc_types.needs_rc] is false for the aggregate, so Perceus emits no drop for
+   it, and the value the caller sees is the struct, not the box.  The merge in
+   [Llvm_case.finish_ptr_merge] is therefore the only place that can release
+   it, and before it did, a `Pair(Float, Float)` built in a branch leaked one
+   32-byte cell per construction (5 001 live objects over 5 000 iterations;
+   specs/progress/2026-09-04-unboxed-aggregate-branch-join-leak.md).
+
+   Asserted structurally rather than by a raw call count, so the check says
+   what it means: for each case-merge load that is UNBOXED as an inline
+   aggregate (a field read at +16 off the loaded pointer, which only the
+   ptr→struct coerce arm emits), the same SSA value must also be released.
+   Pre-fix this program emitted two boxes and one release, and the pair whose
+   `released` is false was exactly the aggregate merge. *)
+
+let unboxed_branch_join_src = {|mod UBJoin do
+  needs IO.Console
+  type P2 = P2(Float, Float)
+  fn psum(p : P2) : Float do
+    match p do
+      P2(a, c) -> a +. c
+    end
+  end
+  pfn spin(i : Int, acc : Float) : Float do
+    if i == 0 do acc
+    else
+      let p = if i % 2 == 0 do P2(1.0, 2.0) else P2(3.0, 4.0) end
+      spin(i - 1, acc +. psum(p))
+    end
+  end
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    println(float_to_string(spin(10, 0.0)))
+  end
+end|}
+
+(* The body of `define ... @name(`, up to the closing brace in column 0. *)
+let ir_define ir name =
+  let re = Str.regexp (Printf.sprintf "define [^\n]*@%s(" (Str.quote name)) in
+  match Str.search_forward re ir 0 with
+  | exception Not_found -> ""
+  | start ->
+    (match Str.search_forward (Str.regexp "^}") ir start with
+     | exception Not_found -> String.sub ir start (String.length ir - start)
+     | stop -> String.sub ir start (stop - start))
+
+(* Every case-merge load in [fn_ir] that is unboxed back into an inline
+   aggregate, paired with whether that same value is also released. *)
+let unboxed_merge_loads fn_ir =
+  let re = Str.regexp "\\(%[A-Za-z0-9_.]+\\) = load ptr, ptr %res_slot" in
+  let rec go i acc =
+    match Str.search_forward re fn_ir i with
+    | exception Not_found -> List.rev acc
+    | j ->
+      let v = Str.matched_group 1 fn_ir in
+      let acc =
+        if ir_contains fn_ir (Printf.sprintf "getelementptr i8, ptr %s, i64 16" v)
+        then (v, ir_contains fn_ir
+                (Printf.sprintf "call void @march_decrc_local(ptr %s)" v)) :: acc
+        else acc
+      in
+      go (j + 1) acc
+  in
+  go 0 []
+
+let test_unboxed_aggregate_branch_join_box_released () =
+  let ir = emit_tco_opt_ir unboxed_branch_join_src in
+  let fn_ir = ir_define ir "spin" in
+  Alcotest.(check bool) "the loop function is present in the IR" true (fn_ir <> "");
+  (* The join really does box — otherwise the release assertion below is
+     vacuous.  Two arms, two boxes, each the 16-byte header + 2 fields. *)
+  Alcotest.(check int) "both arms box the aggregate to cross the join" 2
+    (ir_count fn_ir "call ptr @march_alloc(i64 32)");
+  let merges = unboxed_merge_loads fn_ir in
+  Alcotest.(check bool) "an aggregate-unboxing merge exists" true (merges <> []);
+  List.iter (fun (v, released) ->
+      Alcotest.(check bool)
+        (Printf.sprintf
+           "the box loaded at %s is unboxed into a struct and then released — \
+            nobody downstream owns it" v)
+        true released)
+    merges
+
 (* ── FnFused coverage: flag-vs-reality cross-check (Wave 3 Chunk 2 Task 1) ──
    fusion.ml's three synthesis sites (gen_map_fold / gen_filter_fold /
    gen_map_filter_fold — see fusion.ml) tag every generated fn_def
@@ -10319,6 +10406,64 @@ let test_unboxed_aggregate_zero_live_allocs_compiled () =
        count must not move at all"
       "ZERO" run_out
 
+(* The runtime-gauge half of the branch-join story (the IR assertion lives in
+   test_unboxed_aggregate_branch_join_box_released, "unboxed_aggregates"
+   group).  Unlike the straight-line Vec3 loop above, this one CANNOT reach
+   zero: an aggregate built inside an `if` is boxed to cross the join, so one
+   cell per construction is allocated and must be freed again.  The assertion
+   is therefore that the gauge does not GROW — which is exactly what the boxed
+   representation did before Milestone 3, and exactly what the leak broke.
+
+   Non-vacuity: with the merge release removed, this same program prints
+   "GREW 20000" — one leaked 32-byte cell per iteration, scaling exactly with
+   the loop count (measured 5 000 -> 5 001, 20 000 -> 20 001 live objects). *)
+let test_unboxed_aggregate_branch_join_no_leak_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_ubjoingauge"
+    "mod UbJoinGauge do\n\
+    \  needs IO.Console\n\
+    \  needs Ffi\n\
+    \  needs IO.Foreign\n\
+    \  extern \"m\" : Cap(Ffi) do\n\
+    \    fn live_allocs(): Int = \"march_live_allocs\"\n\
+    \  end\n\
+    \  type P2 = P2(Float, Float)\n\
+    \  pfn psum(p : P2) : Float do\n\
+    \    match p do\n\
+    \      P2(a, c) -> a +. c\n\
+    \    end\n\
+    \  end\n\
+    \  pfn spin(i : Int, acc : Float) : Float do\n\
+    \    if i == 0 do acc\n\
+    \    else\n\
+    \      let p = if i % 2 == 0 do P2(1.0, 2.0) else P2(3.0, 4.0) end\n\
+    \      spin(i - 1, acc +. psum(p))\n\
+    \    end\n\
+    \  end\n\
+    \  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do\n\
+    \    let warm = spin(100, 0.0)\n\
+    \    let base = live_allocs()\n\
+    \    let bulk = spin(20000, 0.0)\n\
+    \    let grew = live_allocs() - base\n\
+    \    if warm +. bulk > 0.0 && grew == 0 do\n\
+    \      println(\"ZERO\")\n\
+    \    else\n\
+    \      println(\"GREW \" ++ int_to_string(grew))\n\
+    \    end\n\
+    \  end\n\
+     end\n"
+  in
+  let bin = Filename.concat tmp "ubjoingaugebin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Printf.sprintf "%s 2>&1" (Filename.quote bin)) in
+    Alcotest.(check string)
+      "an aggregate built inside a branch is boxed to cross the join and freed \
+       again at the merge: the runtime's live-object count must not grow with \
+       the iteration count"
+      "ZERO" run_out
+
 (* Static capture-free closures (Task 1, lib/tir/llvm_emit.ml): a top-level
    named fn used as a first-class value now references ONE immortal
    `internal global` closure object per fn (@<fn>$static_clo, refcount
@@ -14598,6 +14743,10 @@ let codegen_suites =
           Alcotest.test_case "needs_rc/borrow_eligible are false"     `Quick test_unboxed_aggregate_rc_predicates;
           Alcotest.test_case "compiled Vec3 loop moves march_live_allocs by zero" `Slow
             test_unboxed_aggregate_zero_live_allocs_compiled;
+          Alcotest.test_case "branch-join box is released at the merge" `Quick
+            test_unboxed_aggregate_branch_join_box_released;
+          Alcotest.test_case "compiled branch-built aggregate loop does not leak" `Slow
+            test_unboxed_aggregate_branch_join_no_leak_compiled;
           Alcotest.test_case "a type in an extern signature stays boxed" `Quick test_unboxed_aggregate_ffi_type_stays_boxed;
         ] );
       ( "rc_types", [
