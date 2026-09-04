@@ -356,6 +356,10 @@ native_typed_array_map_closure_abi: coverage audit (user + stdlib): 63 enforced,
 native_typed_array_map_closure_abi: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_typed_array_scalar_repr: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_typed_array_scalar_repr: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_unboxed_aggregate: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_unboxed_aggregate: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_unboxed_aggregate_boundaries: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_unboxed_aggregate_boundaries: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_unit_callback_zero_arg: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_unit_callback_zero_arg: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_vault_niche_unsafe_element: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
