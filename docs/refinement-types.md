@@ -997,18 +997,18 @@ coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 
 Every declared refinement is sorted into exactly one of three buckets:
 
-- **Enforced** — the checker's own extractor for this position accepts the
+- **Enforced**: the checker's own extractor for this position accepts the
   declared type, so a call site (or the function's own body, for a
   postcondition) gets an obligation filed against it. A parameter that is
   never called from anywhere still counts as Enforced: enforcement is a
   property of the checker's own scope-registration for that parameter's
   position, not of whether a caller exists yet. See below for why this is the
   right reading, not a loophole.
-- **Inert (warned)** — a `sig` entry, an `extern` signature, or an
+- **Inert (warned)**: a `sig` entry, an `extern` signature, or an
   `interface` method whose refinement the compiler already flags with its
   own warning (`warn_sig_fn_refinement` and friends). The compiler tells you
   about these today; the audit just confirms the warning still fires.
-- **Unenforced** — declared, silent, and nothing tells you. No extractor in
+- **Unenforced**: declared, silent, and nothing tells you. No extractor in
   the checker ever looks at this position, so a value that violates the
   written predicate is accepted without complaint.
 
@@ -1045,7 +1045,7 @@ this file's 2 sites plus the 63 the shipped stdlib always contributes.
 
 This is the design's central subtlety, and it is easy to get backwards. A
 parameter refinement is not enforced by there being callers; it is enforced
-by the checker's scope machinery accepting the declared type at all —
+by the checker's scope machinery accepting the declared type at all,
 `refined_param_ty` running over `fn f(n : {Int | n > 0}) : Int do ... end`
 registers `n > 0` as a fact inside `f`'s own body and would raise an
 obligation at *any* call site, present or future. Whether such a call site
@@ -1083,7 +1083,7 @@ The positions currently known to be Unenforced, none of which the corpus
 above happens to exercise:
 
 - A lambda's own parameter (`fn (n : {Int | n > 0}) -> ...`).
-- A block-level `fn`'s own parameter and return type — `check_fn_post_verdict`
+- A block-level `fn`'s own parameter and return type. `check_fn_post_verdict`
   and `scope_add_param` are only reached through `A.DFn` / `A.DImpl`, never
   through a local `A.ELetFn`.
 - An `impl` method's parameter, when the method's bare name is not adoptable
@@ -1094,7 +1094,7 @@ above happens to exercise:
   module-level judgement; when the method *is* actually adoptable the checker
   does enforce it, and this over-approximation is a documented conservatism,
   not a bug of its own.
-- An actor's state field, and a handler's own parameter — no extractor exists
+- An actor's state field, and a handler's own parameter. No extractor exists
   for either.
 - A record field or a variant constructor argument, once a value is
   constructed.

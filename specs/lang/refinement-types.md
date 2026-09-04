@@ -1670,17 +1670,17 @@ coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 
 Every declared refinement lands in exactly one of three buckets:
 
-- **Enforced** — the checker's own extractor for this position accepts the
+- **Enforced**: the checker's own extractor for this position accepts the
   declared type, so an obligation gets filed against it (at a call site for
   a parameter, or against the function's own body for a postcondition). A
   parameter with no caller yet still counts Enforced: what matters is that
   the position is wired into the checker's scope machinery, not whether a
   call site exists today. See below for why this reading is correct rather
   than a loophole.
-- **Inert (warned)** — a `sig` entry, an `extern` signature, or an
+- **Inert (warned)**: a `sig` entry, an `extern` signature, or an
   `interface` method whose refinement the compiler already names in its own
   warning. Nothing new here; the audit confirms that warning still fires.
-- **Unenforced** — declared, silent, and nothing tells you. No extractor
+- **Unenforced**: declared, silent, and nothing tells you. No extractor
   ever reads this position, so a value violating the written predicate is
   accepted without complaint.
 
@@ -1710,7 +1710,7 @@ coverage audit (user + stdlib): 65 enforced, 0 inert (warned), 1 unenforced
 ```
 
 `f`'s parameter and return are both Enforced. Only `Box.v`'s field
-refinement is Unenforced — there is no extractor for a stored field at all,
+refinement is Unenforced. There is no extractor for a stored field at all,
 only for a parameter, a return, or a let-binding. The `user + stdlib` total
 (65) is this file's own 2 sites plus the 63 the shipped stdlib always
 contributes.
@@ -1722,7 +1722,7 @@ having a caller; it is a property of the checker's scope machinery accepting
 the declared type at all. `refined_param_ty` running over
 `fn f(n : {Int | n > 0}) : Int do ... end` registers `n > 0` as a fact
 inside `f`'s body and would raise an obligation at *any* call site, present
-or future — adding one tomorrow gets checked automatically, because the
+or future. Adding one tomorrow gets checked automatically, because the
 position is already wired in. This is the same distinction
 `--refine-report` already draws between an obligation that is unproven and
 one that was never filed; the audit stays consistent with it instead of
@@ -1730,7 +1730,7 @@ inventing an incompatible second notion of "checked."
 
 Contrast a lambda's own parameter (`fn (n : {Int | n > 0}) -> n`): no scope
 machinery ever runs over an `ELam`'s parameters, so *no* call through that
-lambda, ever, is obliged by it — genuinely Unenforced, not merely uncalled.
+lambda, ever, is obliged by it, so it is genuinely Unenforced rather than merely uncalled.
 
 ### Where the current baseline stands
 
@@ -1744,7 +1744,7 @@ TIR golden snapshots are:
 `UPDATE_SNAPSHOTS=1 ./_build/default/test/test_refinecheck.exe -e`.
 
 An empty baseline over real code is a true finding, not evidence the audit
-does nothing — but an audit that silently broke would also report an empty
+does nothing, but an audit that silently broke would also report an empty
 baseline, which is why a second, deliberately non-empty fixture set exists:
 `test/refine_audit/holes/`, one small program per known unenforced position
 (a lambda's own parameter, a block-level `fn`'s parameter and return, a
@@ -1766,7 +1766,7 @@ above happens to exercise:
   name): `visit_decl` strips the refinement from the body in that case, and
   no caller is ever obliged. The audit reports every `impl` method
   parameter Unenforced regardless of actual adoptability, since a single
-  site cannot make that module-level judgement — when the method *is*
+  site cannot make that module-level judgement. When the method *is*
   adoptable the checker does enforce it, so this is a documented
   conservatism in the audit, not a hole in the checker.
 - An actor's state field, and a handler's own parameter: no extractor
