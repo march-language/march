@@ -298,7 +298,7 @@ jobs:
       # being proved" but "does the checker ever look at this declared
       # refinement at all". Task 2/3's sweep over the ~300-file corpus
       # (test/native/*.march, stdlib/*.march) found 63 declared refinements,
-      # every one Enforced, zero Unenforced — see test/refine_audit/
+      # every one Enforced, zero Unenforced. See test/refine_audit/
       # corpus.baseline (the alcotest `audit-baseline` group under
       # `dune runtest`, which the `test` job above already runs, diffs the
       # full sweep against that file exactly). This step is a second,
@@ -340,7 +340,7 @@ jobs:
             echo "FAIL: the refinement coverage audit's Unenforced count rose from"
             echo "$unenforced_baseline to $unenforced."
             echo "A declared refinement now sits somewhere the checker never enforces"
-            echo "it — see test/refine_audit/corpus.baseline and"
+            echo "it. See test/refine_audit/corpus.baseline and"
             echo "docs/refinement-types.md's 'Coverage audit' section for the full"
             echo "list of unenforced positions (a lambda's own param, a block-level"
             echo "fn's param/return, a non-adoptable impl method's param, an actor's"

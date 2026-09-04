@@ -43,7 +43,7 @@ Swept `test/native/*.march` (183 files) and `stdlib/*.march` (117 files),
 
 By file, every nonzero contribution to the 63 comes from a stdlib file
 declaring its own top-level parameter/return refinements (test/native
-contributes 0 everywhere — none of its 183 hand-picked regression fixtures
+contributes 0 everywhere, since none of its 183 hand-picked regression fixtures
 declares a refinement at all):
 
 | File | Enforced sites |
@@ -111,7 +111,7 @@ the change before committing.
 name to demonstrate a REAL hole: a lone `impl` defining an unambiguous
 method name IS actually enforced by the checker (adoptable), even though
 `classify` reports it `Unenforced` either way (a documented
-over-approximation, see below) — the fixture had to break adoptability with
+over-approximation, see below). The fixture had to break adoptability with
 a second `impl Indexable(Crate)` to show the checker actually skip the
 check, confirmed by `march --check` exiting 0 on a call that violates the
 declared precondition.
@@ -124,9 +124,9 @@ regardless of whether the method's bare name is actually adoptable
 module-level judgement no single `site` can make in isolation. This means
 the audit can report `Unenforced` on a parameter the checker in fact
 enforces (the adoptable case). This conservatism contributes zero entries
-to either baseline above — the corpus's `impl` methods, where they exist,
+to either baseline above. The corpus's `impl` methods, where they exist,
 were not swept as a source of any of the 63 sites (none of the 63 are
-`impl` methods at all) — and per the Task 4 brief, gets no todo of its own:
+`impl` methods at all), and per the Task 4 brief it gets no todo of its own:
 it is the audit being conservative, not the checker having a gap. The real
 gap (a non-adoptable method's parameter genuinely unchecked) is filed
 separately; see the todo list below.
@@ -148,8 +148,8 @@ note pointing at its `test/refine_audit/holes/` fixture:
 - `specs/todos/2026-09-01-nested-refinement-enforcement.md`
 - `specs/todos/2026-09-03-string-return-refinement-unchecked.md`
 - `specs/todos/2026-09-03-sibling-parameter-opaque-actual.md` (a different
-  mechanism — `unreflectable-predicate` misattribution, not an audit
-  `Unenforced` site — listed only so a reader scanning `specs/todos/` finds
+  mechanism, `unreflectable-predicate` misattribution rather than an audit
+  `Unenforced` site, listed only so a reader scanning `specs/todos/` finds
   it alongside the others)
 
 No todo filed for a plain record field or `Variant_arg`/`Impl_ty` as their
@@ -157,7 +157,7 @@ own top-level items: `Field` and `Variant_arg` are demonstrated by the
 `holes/nested.march` and `holes/variant_arg.march` fixtures and covered by
 the existing nested-refinement todo's broader scope (any position below the
 outermost type, or any stored value position, shares the same root
-cause — no extractor for a constructed value). `Impl_ty` was investigated
+cause, no extractor for a constructed value). `Impl_ty` was investigated
 (an `impl Iface(T)` block's `T` argument) and found to have no realistic
 refined-in-practice shape worth a fixture on its own. `Expr_annot` was
 investigated and found unreachable from source entirely: `EAnnot` is
