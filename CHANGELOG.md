@@ -163,6 +163,17 @@ git log is authoritative for exact commits.
   average ~170; the ratios are inflated by contention for the machine, so the
   shape rather than the magnitude is the result.)
 
+- **A small scalar aggregate built inside a branch no longer leaks.** A
+  single-constructor variant whose fields are all `Int`/`Float`/`Bool` and
+  whose arity is 2-4 is held in registers rather than on the heap. Building one
+  inside an `if` or a `match` arm leaked one object per construction, because
+  the value has to be boxed to cross the branch join and nothing freed the box
+  afterwards; a 5 000-iteration loop ended with 5 001 live objects instead of
+  1. The join now releases it. Building the same value straight-line or in a
+  called function was never affected, and still reaches the allocator zero
+  times. One related case remains open: an aggregate stored into an `Option`
+  (or another niche-encoded type) still leaks, with or without a branch.
+
 - A supervisor **nested under another supervisor** now passes its
   capabilities on to its own children, including the fresh children it
   creates each time it is restarted. Previously only a top-level supervisor's
