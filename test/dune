@@ -6079,7 +6079,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; (PR #269 removed this probe's prior Darwin-only gate), at max RSS
 ; 128,761,856 B -- not a leak, just Linux's ~122 MB process baseline that the
 ; macOS-derived band never accounted for. live_allocs() reads the runtime's
-; always-on march_live_alloc_count -- incremented in march_alloc, decremented
+; always-on live-object gauge -- incremented in march_alloc, decremented
 ; on every free-on-rc-zero path -- so it counts the defect directly: no
 ; allocator free-list behaviour, no page-granularity rounding, no OS/platform
 ; baseline. Same conversion, same rationale, as

@@ -13,7 +13,7 @@
 -- guards only memory.)
 --
 -- SIGNAL: live_allocs(), NOT RSS. live_allocs() reads the runtime's
--- always-on march_live_alloc_count -- incremented in march_alloc,
+-- always-on live-object gauge -- incremented in march_alloc,
 -- decremented on every free-on-rc-zero path. A leak is exactly "objects
 -- allocated and never freed", so this counts the defect directly: no
 -- allocator free-list behaviour, no page-granularity rounding, no
