@@ -194,4 +194,5 @@ val preprocess_fn : Tir.fn_def -> Tir.fn_def
 val perceus :
   ?repl:bool ->
   ?repl_vars:string list ->
+  ?borrow_map:Borrow.borrow_map ->
   Tir.tir_module -> Tir.tir_module

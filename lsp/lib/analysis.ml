@@ -3339,7 +3339,7 @@ let rec tir_count_nodes (e : Tir.expr) : int * int * int * int =
    own perf_insights on replay. *)
 let tir_pass_cache :
   (string, tir_fn_insight list * code_lens_item list * perf_insight list
-           * consume_modes list * (string * Ast.span * Ast.span) list
+           * consume_modes list * (string * Ast.span * Ast.span * string) list
            * Lsp.Types.Diagnostic.t list) Hashtbl.t
   = Hashtbl.create 16
 
@@ -3457,13 +3457,15 @@ let run_tir_pass (a : t) : t =
          forge would insert it.  The editor has no forge.toml globs to apply,
          so only the default scope is offered here. *)
       let no_alloc_candidates =
-        List.map (fun (d : March_tir.Alloc_contract.decl_info) ->
+        List.map (fun ((d : March_tir.Alloc_contract.decl_info), form) ->
             (d.March_tir.Alloc_contract.d_name,
              d.March_tir.Alloc_contract.d_name_span,
-             d.March_tir.Alloc_contract.d_decl_span))
+             d.March_tir.Alloc_contract.d_decl_span,
+             March_tir.Alloc_contract.attr_of_form form))
           (March_tir.Alloc_contract.generation_candidates
              ~decls:contract_decls
              ~allocating:pipe.March_tir.Contract_pipeline.allocating
+             ~retaining:pipe.March_tir.Contract_pipeline.retaining
              ~globs:[]
              ~is_user:(fun (sp : Ast.span) -> sp.Ast.file = a.filename)
              tir)
@@ -3530,9 +3532,16 @@ let run_tir_pass (a : t) : t =
             else if d.March_tir.Alloc_contract.d_name_span.Ast.file <> a.filename
             then None
             else
+              (* The lens names the FORM that holds, so a reader can tell the
+                 two contracts apart at a glance:
+                 `\xe2\x9c\x93 no_alloc` vs `\xe2\x9c\x93 no_alloc(transient)`. *)
+              let title = match d.March_tir.Alloc_contract.d_form with
+                | Some March_tir.Alloc_contract.Transient ->
+                  "\xe2\x9c\x93 no_alloc(transient)"
+                | _ -> "\xe2\x9c\x93 no_alloc" in
               Some { cl_range = Pos.span_to_lsp_range
                          d.March_tir.Alloc_contract.d_name_span;
-                     cl_title = "\xe2\x9c\x93 no_alloc";
+                     cl_title = title;
                      cl_command = None;
                      cl_args = [] }) contract_decls
       in

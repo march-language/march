@@ -27,13 +27,28 @@ let emit_store_tag ctx obj_val tag_int =
   Llvm_ctx.emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 8" tp obj_val);
   Llvm_ctx.emit ctx (Printf.sprintf "store i32 %d, ptr %s, align 4" tag_int tp)
 
+(* A heap-cell slot is 8 bytes wide ([Llvm_ctx.alloc_size]).  An unboxed
+   aggregate's struct type is wider, so storing or loading one at a slot would
+   run over the neighbouring fields.  Fail loudly rather than corrupt: the
+   caller wanted [Llvm_ctx.llvm_field_ty], which boxes. *)
+let check_slot_ty (where : string) (ty_str : string) =
+  match Repr.unboxed_of_llvm_ty ty_str with
+  | None -> ()
+  | Some (tname, _, _) ->
+    failwith (Printf.sprintf
+      "LLVM emit: %s with slot type %s (unboxed aggregate `%s`) — a heap slot \
+       is 8 bytes; use Llvm_ctx.llvm_field_ty so the value is boxed"
+      where ty_str tname)
+
 let emit_store_field ctx obj_val i ty_str val_str =
+  check_slot_ty "emit_store_field" ty_str;
   let offset = 16 + i * 8 in
   let fp = Llvm_ctx.fresh ctx "fp" in
   Llvm_ctx.emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %d" fp obj_val offset);
   Llvm_ctx.emit ctx (Printf.sprintf "store %s %s, ptr %s, align 8" ty_str val_str fp)
 
 let emit_load_field ctx obj_val i ty_str =
+  check_slot_ty "emit_load_field" ty_str;
   let offset = 16 + i * 8 in
   let fp = Llvm_ctx.fresh ctx "fp" in
   let fv = Llvm_ctx.fresh ctx "fv" in

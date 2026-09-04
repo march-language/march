@@ -3,7 +3,98 @@
     Stack-promotes heap allocations whose lifetimes are provably bounded
     to the current function's stack frame.  An EAlloc that does not escape
     is replaced with EStackAlloc, and dead RC ops on stack-allocated
-    variables are removed. *)
+    variables are removed.
+
+    ── Promotion through a borrowed callee (2026-09-03) ──────────────────
+
+    The verdict used to stop at every call boundary: passing a value as ANY
+    argument of ANY call marked it escaping.  That is right for a callee that
+    might keep the value, and wrong for one that only reads it — which is
+    precisely the question [Borrow.infer_module] already answers.
+
+    [Borrow]'s fixpoint calls a use OWNING when the value is returned, stored
+    into a constructor / tuple / record, captured by an escaping closure,
+    passed through an unknown callee ([ECallPtr]) or handed to an owned
+    parameter of a known one; everything else (an [ECase] scrutinee, an
+    [EField] source, an argument at another function's borrowed position) is
+    BORROWING.  So [Borrow.is_borrowed bm f i] = "f neither consumes nor
+    retains argument i" — exactly the property a stack cell needs from a
+    callee, and the reason this pass can now see through such a call.
+
+    ── Why the borrow verdict alone is not enough ────────────────────────
+
+    [Borrow] answers an OWNERSHIP question ("who releases the reference"),
+    which is strictly stronger than the one stack promotion needs ("can the
+    pointer outlive the call").  Its [field_escape_owns] rule marks a
+    parameter owned as soon as any field extracted from it is used in an
+    owning position — including a scalar field handed to an ordinary builtin,
+    because [is_borrowed] has no entry for `+`:
+
+    {v
+      pfn sum5(b : Big) : Int do
+        match b do Big(a, c, d, e, f) -> a + c + d + e + f end
+      end                                        -- inferred b:own
+    v}
+
+    That rule is load-bearing for ownership (an extracted HEAP field that
+    escapes without an inc is an RC underflow), but it says nothing about
+    where [b]'s POINTER went — it went nowhere.  Worse, being inferred owned
+    is what makes Perceus emit a [dec_rc] on the parameter inside the callee,
+    and a stack cell has [rc = 0] — so an owned callee does not merely fail to
+    clear the value, it would free a stack address if promoted anyway.
+
+    Measured over the 43 programs in [bench/]: taking the borrow verdict alone
+    promotes NOTHING (0 stack cells, the same as before this extension); the
+    retention answer below promotes 36 (in `array_numeric`, `dataframe_bench`,
+    `rrb_bench`, `simd_map`, `simd_sum` and `string_parallel_scan`).
+
+    So the verdict here is the disjunction of two answers:
+
+    - [Borrow.is_borrowed] — the ownership fixpoint, as the design called for;
+    - [may_retain] below — a purpose-built, narrower question: does the callee
+      put the POINTER it received anywhere that outlives the call?  Storing it
+      in a cell, returning it, capturing it in a closure, sending it through an
+      unknown callee or an extern, or reference-counting/freeing it all count.
+      Destructuring it, reading a field, and passing it on to a non-retaining
+      local callee do not.  A field extracted from a stack cell is a copy: the
+      cell's address never leaves, which is the whole property being proved.
+
+    The first implies the second (an owning use in [Borrow]'s sense is always
+    one of the retaining shapes), so the disjunction is really just the second
+    — it is written as a disjunction so the design's stated criterion is
+    visibly still honoured rather than quietly replaced.
+
+    Three deliberate restrictions on the extension.  The first is about the
+    VALUE; the other two are about who can be held to the contract:
+
+    - **Never a closure struct** ([clo_candidates]).  A [$Clo_] cell handed to
+      its own apply function is governed by a separate protocol:
+      [Borrow.infer_module] PINS an apply function's [$clo] parameter owned,
+      and [Perceus.insert_apply_fn_clo_drop] emits a [dec_rc $clo] inside the
+      callee on the strength of that pin.  A stack cell's header says [rc = 0]
+      ([Llvm_data.emit_stack_alloc] zeroes it), so that decrement underflows —
+      and a capture-free closure is additionally something [Llvm_emit] already
+      turns into ONE immortal global ([static_closure_ok]), which a stack cell
+      would be a pessimisation of, not an improvement on.  Closure structs
+      keep the pre-existing promotion rules (a dead binding may still be
+      promoted); only clearing them THROUGH A CALL is excluded.
+
+    - **March-defined callees only**.  [Borrow.is_borrowed]
+      falls back to a hardcoded ABI table for C externs and runtime builtins,
+      where "borrowed" is a DECLARATION about C code this pass cannot read.  A
+      stack cell handed to C is a pointer whose header says [rc = 0]
+      ([emit_stack_alloc] zeroes it), so a single stray [march_incrc] /
+      [march_decrc] pair inside the C function would free a stack address.
+      The fixpoint's verdict about a March function is derived from its body
+      and carries no such risk.
+    - **A borrow map must be supplied.**  It defaults to [Borrow.empty], under
+      which [is_borrowed] answers false for every March function and the pass
+      behaves exactly as it did before.  A caller that assembles its own pass
+      list and does not pass one (the REPL) simply keeps the old, narrower
+      verdict.  The map MUST be the one [Perceus] consumed — computed on the
+      pre-Perceus module — because Perceus placed its RC ops against that
+      answer; deriving a fresh one here, from a module that now carries those
+      ops, could disagree with it. *)
 
 module StringSet = Set.Make (String)
 
@@ -103,8 +194,34 @@ let alloc_emits_heap_cell
     in
     (match Repr.repr_of_ty ~collision_set type_defs (Tir.TCon (type_name, [])) with
      | Repr.Newtype _ | Repr.Niche _ -> false
+     (* Milestone 3: an unboxed aggregate's "alloc" is an [insertvalue] chain,
+        no cell at all — the same reason Newtype/Niche return false here.
+        Promoting one would force a boxed stack cell whose consumers all decode
+        it as a struct value. *)
+     | Repr.Unboxed _ -> false
      | Repr.Boxed -> not (Repr.is_niche_shaped ~collision_set type_defs type_name))
   | _ -> true
+
+(** Names of variables bound to an [EAlloc] of a CLOSURE struct.  These are
+    excluded from the through-a-call clearance — see the module doc's first
+    restriction.  Same walk as [collect_alloc_candidates]. *)
+let rec collect_clo_candidates (e : Tir.expr) : StringSet.t =
+  match e with
+  | Tir.ELet (v, Tir.EAlloc (Tir.TCon (c, _), _), body)
+    when Tir_names.is_clo_struct c ->
+    StringSet.add v.Tir.v_name (collect_clo_candidates body)
+  | Tir.ELet (_, e1, e2) | Tir.ESeq (e1, e2) ->
+    StringSet.union (collect_clo_candidates e1) (collect_clo_candidates e2)
+  | Tir.ELetRec (_, body) -> collect_clo_candidates body
+  | Tir.ECase (_, branches, default) ->
+    let from_branches =
+      List.fold_left (fun acc br ->
+          StringSet.union acc (collect_clo_candidates br.Tir.br_body))
+        StringSet.empty branches in
+    (match default with
+     | Some d -> StringSet.union from_branches (collect_clo_candidates d)
+     | None -> from_branches)
+  | _ -> StringSet.empty
 
 (** Walk [e] and collect names of variables bound directly to an EAlloc that
     really allocates (see [alloc_emits_heap_cell]).
@@ -139,11 +256,149 @@ let rec collect_alloc_candidates
       (collect_alloc_candidates ~collision_set type_defs e2)
   | _ -> StringSet.empty
 
+(* ── Callee retention analysis ───────────────────────────────────────────── *)
+
+(** Does parameter [i] of local function [f] put the POINTER it receives
+    somewhere that outlives the call?  See the module doc for why this exists
+    alongside [Borrow.is_borrowed] and how the two differ.
+
+    A least fixpoint over the call graph: start with nothing retained and
+    propagate retention until stable.  The retaining shapes, and the argument
+    for each:
+
+    - [EAtom (AVar p)] — returned to the caller;
+    - [EAlloc] / [EStackAlloc] / [ETuple] / [ERecord] / [EUpdate] /
+      [EAllocHole] / [ESetField] — stored into something with its own
+      lifetime.  A closure capture is an [EAlloc] of a [$Clo_] struct and is
+      caught by the same arm;
+    - [ECallPtr] in either position — an unknown callee;
+    - [EApp] to anything NOT defined in this module (an extern, a runtime
+      builtin such as [send], [task_spawn] or a [Vault] operation) — this pass
+      cannot read that code;
+    - [EApp] to a local function at a parameter this analysis already marks
+      retaining;
+    - [EIncRC] / [EAtomicIncRC] — someone is taking a longer-lived reference;
+    - [EDecRC] / [EAtomicDecRC] / [EFree] — worse than retention: a stack cell
+      has [rc = 0] ([Llvm_data.emit_stack_alloc] zeroes the header), so a
+      decrement would underflow and hand a stack address to [free].
+
+    - an [EReuse] token — [Llvm_emit_alloc]'s arm reads the cell's refcount and
+      decrements it on the shared path, which is the rc = 0 hazard again.
+
+    Non-retaining, and each is the point of the analysis: an [ECase] scrutinee
+    and an [EField] source.  A field read out of the cell is a COPY; where that
+    copy then goes is a question about the FIELD's lifetime, not about the
+    cell's address. *)
+let may_retain_table (m : Tir.tir_module) : (string, bool array) Hashtbl.t =
+  (* [tbl]'s key set IS "defined in this module": [retains_param] answers true
+     for anything absent from it, which is the extern/builtin case. *)
+  let tbl = Hashtbl.create (List.length m.Tir.tm_fns) in
+  List.iter (fun (fd : Tir.fn_def) ->
+      Hashtbl.replace tbl fd.Tir.fn_name
+        (Array.make (List.length fd.Tir.fn_params) false))
+    m.Tir.tm_fns;
+  let retains_param f i =
+    match Hashtbl.find_opt tbl f with
+    | Some a -> i < Array.length a && a.(i)
+    (* Not defined here: an extern or a runtime builtin.  Conservatively
+       retaining — see the module doc's first restriction. *)
+    | None -> true
+  in
+  (* [names]: the tracked variable and every pure alias of it in scope. *)
+  let rec retained (names : StringSet.t) (e : Tir.expr) : bool =
+    let hits a = match a with
+      | Tir.AVar v -> StringSet.mem v.Tir.v_name names
+      | _ -> false in
+    let any = List.exists hits in
+    match e with
+    | Tir.EAtom a -> hits a
+    | Tir.EAlloc (_, args) | Tir.EStackAlloc (_, args) | Tir.ETuple args -> any args
+    | Tir.ERecord fields -> any (List.map snd fields)
+    | Tir.EUpdate (base, fields) -> hits base || any (List.map snd fields)
+    | Tir.EAllocHole (tok, _, args, _) ->
+      (match tok with Some a -> hits a | None -> false) || any args
+    | Tir.ESetField (o, _, v) -> hits o || hits v
+    | Tir.ECallPtr (a, args) -> hits a || any args
+    | Tir.EApp (f, args) ->
+      let fname = f.Tir.v_name in
+      StringSet.mem fname names
+      || list_any_idx (fun i a -> hits a && retains_param fname i) args
+    | Tir.EIncRC a | Tir.EAtomicIncRC a
+    | Tir.EDecRC a | Tir.EAtomicDecRC a | Tir.EFree a -> hits a
+    | Tir.EField (a, _) -> ignore a; false
+    (* The REUSE TOKEN is not a read: [Llvm_emit_alloc]'s EReuse arm checks the
+       cell's refcount and, on the shared path, decrements it and allocates a
+       fresh one.  A stack cell's header says rc = 0, so that decrement would
+       underflow and free a stack address — the same reason the RC ops below
+       count. *)
+    | Tir.EReuse (tok, _, args) -> hits tok || any args
+    (* A pure alias carries the same pointer forward; track it too. *)
+    | Tir.ELet (v, Tir.EAtom (Tir.AVar src), body)
+      when StringSet.mem src.Tir.v_name names ->
+      retained (StringSet.add v.Tir.v_name names) body
+    | Tir.ELet (v, e1, e2) ->
+      retained names e1
+      || retained (StringSet.remove v.Tir.v_name names) e2
+    | Tir.ELetRec (fns, body) ->
+      retained names body
+      || List.exists (fun fn ->
+          let shadowed =
+            List.exists (fun p -> StringSet.mem p.Tir.v_name names) fn.Tir.fn_params in
+          not shadowed && retained names fn.Tir.fn_body) fns
+    | Tir.ECase (_, branches, default) ->
+      List.exists (fun br ->
+          let bound =
+            List.fold_left (fun acc (bv : Tir.var) -> StringSet.remove bv.Tir.v_name acc)
+              names br.Tir.br_vars in
+          retained bound br.Tir.br_body) branches
+      || (match default with Some d -> retained names d | None -> false)
+    | Tir.ESeq (e1, e2) -> retained names e1 || retained names e2
+  and list_any_idx f xs =
+    let rec go i = function
+      | [] -> false
+      | x :: t -> if f i x then true else go (i + 1) t
+    in go 0 xs
+  in
+  let rec fix () =
+    let changed = ref false in
+    List.iter (fun (fd : Tir.fn_def) ->
+        match Hashtbl.find_opt tbl fd.Tir.fn_name with
+        | None -> ()
+        | Some modes ->
+          List.iteri (fun i (p : Tir.var) ->
+              if not modes.(i)
+              && retained (StringSet.singleton p.Tir.v_name) fd.Tir.fn_body
+              then begin modes.(i) <- true; changed := true end)
+            fd.Tir.fn_params)
+      m.Tir.tm_fns;
+    if !changed then fix ()
+  in
+  fix ();
+  tbl
+
+(** True iff [f] is defined in this module and provably does not retain the
+    pointer passed at parameter [i]. *)
+let callee_cannot_retain (tbl : (string, bool array) Hashtbl.t)
+    (f : string) (i : int) : bool =
+  match Hashtbl.find_opt tbl f with
+  | Some a -> i < Array.length a && not a.(i)
+  | None -> false
+
 (* ── Phase 2: Escape check ────────────────────────────────────────────────── *)
 
 (** Returns the subset of [candidates] that appear in escaping atom positions
-    within [e]. *)
-let rec escaping_vars (e : Tir.expr) (candidates : StringSet.t) : StringSet.t =
+    within [e].
+
+    [borrow_map] / [retain_tbl]: see the module doc.  An [EApp] argument on a
+    callee defined in this module is NOT an escaping position when either
+    answer clears it. *)
+let rec escaping_vars ?(borrow_map = Borrow.empty)
+    ?(retain_tbl : (string, bool array) Hashtbl.t = Hashtbl.create 0)
+    ?(clo_candidates = StringSet.empty)
+    (e : Tir.expr) (candidates : StringSet.t) : StringSet.t =
+  let escaping_vars ?(borrow_map = borrow_map) ?(retain_tbl = retain_tbl)
+      ?(clo_candidates = clo_candidates) e c =
+    escaping_vars ~borrow_map ~retain_tbl ~clo_candidates e c in
   let candidate_atom a =
     match a with
     | Tir.AVar v when StringSet.mem v.Tir.v_name candidates ->
@@ -158,7 +413,9 @@ let rec escaping_vars (e : Tir.expr) (candidates : StringSet.t) : StringSet.t =
   (* Tail atom return — escapes *)
   | Tir.EAtom a -> candidate_atom a
 
-  (* Passed as function call arguments — escapes *)
+  (* Passed as a function call argument — escapes UNLESS the callee is a
+     March function this module defines and the borrow fixpoint proved that
+     parameter borrowed (see the module doc). *)
   | Tir.EApp (f, args) ->
     (* f is a var, not an atom; check if it's a candidate (used as closure) *)
     let fn_esc =
@@ -166,7 +423,25 @@ let rec escaping_vars (e : Tir.expr) (candidates : StringSet.t) : StringSet.t =
       then StringSet.singleton f.Tir.v_name
       else StringSet.empty
     in
-    StringSet.union fn_esc (candidate_atoms args)
+    let callee = f.Tir.v_name in
+    let callee_is_local = Hashtbl.mem retain_tbl callee in
+    let arg_esc =
+      List.fold_left (fun (i, acc) a ->
+          let is_clo = match a with
+            | Tir.AVar v -> StringSet.mem v.Tir.v_name clo_candidates
+            | _ -> false in
+          let cleared =
+            callee_is_local && not is_clo
+            && (Borrow.is_borrowed borrow_map callee i
+                || callee_cannot_retain retain_tbl callee i)
+          in
+          let acc =
+            if cleared then acc else StringSet.union acc (candidate_atom a) in
+          (i + 1, acc))
+        (0, StringSet.empty) args
+      |> snd
+    in
+    StringSet.union fn_esc arg_esc
 
   | Tir.ECallPtr (a, args) ->
     (* a may be a closure — check both the fn ptr and all args *)
@@ -327,6 +602,8 @@ let rec promote_expr (e : Tir.expr) (promotable : StringSet.t) : Tir.expr =
 
 let escape_fn
     ?(collision_set : (string, string list) Hashtbl.t = Hashtbl.create 0)
+    ?(borrow_map = Borrow.empty)
+    ?(retain_tbl : (string, bool array) Hashtbl.t = Hashtbl.create 0)
     (type_defs : Tir.type_def list) (fn : Tir.fn_def) : Tir.fn_def =
   let body = fn.Tir.fn_body in
   (* Phase 1: collect EAlloc-bound variables (Boxed-repr allocs only) *)
@@ -334,7 +611,9 @@ let escape_fn
   if StringSet.is_empty candidates then fn
   else begin
     (* Phase 2: compute promotable set *)
-    let escaping = escaping_vars body candidates in
+    let clo_candidates = collect_clo_candidates body in
+    let escaping =
+      escaping_vars ~borrow_map ~retain_tbl ~clo_candidates body candidates in
     let with_incrc = has_incrc_for body candidates in
     let non_promotable = StringSet.union escaping with_incrc in
     let promotable = StringSet.diff candidates non_promotable in
@@ -347,7 +626,16 @@ let escape_fn
 
 (* ── Module entry point ───────────────────────────────────────────────────── *)
 
-let escape_analysis (m : Tir.tir_module) : Tir.tir_module =
+let escape_analysis ?(borrow_map = Borrow.empty) (m : Tir.tir_module)
+  : Tir.tir_module =
+  (* Milestone 3: this pass must not offer an unboxed aggregate for stack
+     promotion — it has no cell to promote and [Llvm_emit_alloc] rejects an
+     [EStackAlloc] of one outright.  [Contract_pipeline] has normally already
+     registered; [ensure_unboxed_types] makes a caller that assembles its own
+     pass list (the LSP's older path, tests, [Repl_jit] with unboxing forced
+     off) agree with the emitter rather than run against an empty table. *)
+  Repr.ensure_unboxed_types
+    ~collision_set:(Collision_set.compute m.Tir.tm_types) m.Tir.tm_types;
   (* Computed once per module from its own [tm_types] — mirrors
      [Llvm_ctx.make_ctx]'s [collision_set] derivation (Task 1), so escape
      analysis's Boxed/Niche/Newtype classification of a same-short-name
@@ -355,5 +643,11 @@ let escape_analysis (m : Tir.tir_module) : Tir.tir_module =
      it, even though this pass runs standalone (no [ctx] in scope; see
      [alloc_emits_heap_cell]'s doc comment for why that agreement matters). *)
   let collision_set = Collision_set.compute m.Tir.tm_types in
+  (* Callees whose borrow verdict is derived from a body this module contains
+     — never a C extern or a runtime builtin, whose entry in
+     [Borrow.extern_borrow_table] is a declaration rather than an inference.
+     See the module doc. *)
+  let retain_tbl = may_retain_table m in
   { m with Tir.tm_fns =
-      List.map (escape_fn ~collision_set m.Tir.tm_types) m.Tir.tm_fns }
+      List.map (escape_fn ~collision_set ~borrow_map ~retain_tbl m.Tir.tm_types)
+        m.Tir.tm_fns }

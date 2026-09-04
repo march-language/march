@@ -205,6 +205,11 @@ let empty_env : env = {
 let scrutinee_shares_payload_storage (env : env) (ty : Tir.ty) : bool =
   match Repr.repr_of_ty ~collision_set:env.collision_set env.type_defs ty with
   | Repr.Newtype _ | Repr.Niche _ -> true
+  (* Unboxed (Milestone 3): there is no container cell, so there is nothing to
+     free separately and nothing for FBIP to reuse.  Answering true is what
+     keeps [add_scrutinee_free_for] and the reuse-token search away from a
+     value that never reached the heap. *)
+  | Repr.Unboxed _ -> true
   | Repr.Boxed ->
     (* Erased-niche recovery — must mirror [llvm_case.ml]'s [effective_repr]
        abstract-arg path.  [repr_of_ty] conservatively returns [Boxed] for a

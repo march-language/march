@@ -13,6 +13,53 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`@[no_alloc(transient)]`** — a weaker allocation contract that states
+  "nothing this function allocates SURVIVES the call". A frame loop that
+  allocates a dozen cells and frees all of them before returning has that
+  property and cannot state it with the bare form; `transient` accepts it,
+  including when the allocation happens in a callee whose result the annotated
+  function drops. It fails when a function returns something it allocated,
+  writes one into an object it did not allocate, or hands one to an actor, a
+  `Vault`, a spawned task, an `extern` or an unknown closure — and when
+  anything it calls does. An amortized growth path (a buffer that reallocates
+  its storage and keeps it) is retained and so still rejected. The language
+  server reports it at the function name and shows `✓ no_alloc(transient)` when
+  it holds; `forge fix --contracts` now inserts whichever form actually holds,
+  preferring the stronger one.
+
+- **Stack promotion through a call.** Escape analysis used to treat every call
+  argument as escaping. It now promotes a value whose only use is an argument
+  to a function in the same program that provably does not retain the pointer
+  it receives — one that destructures it, reads its fields and returns
+  something else. Storing it, returning it, capturing it in a closure, sending
+  it to an actor and handing it to an `extern` all still count as escaping, and
+  a closure passed to its own apply function is never promoted. Borrow
+  inference also stopped marking a parameter *owned* just because a SCALAR
+  field extracted from it met a builtin: for a variant with no heap-carrying
+  field anywhere there is no aliasing hazard for that rule to guard against,
+  and being owned is what made the callee free a cell the caller could have
+  kept in its frame.
+
+- **Unboxed small scalar aggregates.** A variant with exactly one constructor
+  whose fields are all `Int`, `Float` or `Bool` — two to four of them — is now
+  represented inline: `Vec3(Float, Float, Float)` is three doubles in
+  registers, with no heap cell, no object header and no reference counting.
+  Constructing one is not an allocation, so a function like `fn forward(yaw,
+  pitch) : Vec3` can carry `@[no_alloc]`, which was impossible before (nothing
+  was dying for reuse to take over, and the value escapes through its return).
+  Semantics are unchanged: pattern matching, equality, `Show`, and passing such
+  a value to a closure, an actor or a generic all behave exactly as before, and
+  wherever the value is *stored* (a constructor or record field, a tuple, a
+  closure capture, a message) it is boxed into the same cell it always was —
+  reported by `@[no_alloc]` as the allocation it is. A vector-math benchmark
+  (`bench/vector_math.march`, 3M iterations building five vectors each) runs in
+  20.8 ms against 828.3 ms for the boxed representation. That win is for
+  vectors that stay in locals, parameters and returns; a program that stores
+  its aggregates inside other heap values pays a boxing there instead and sees
+  no change in allocation count. A type named in an
+  `extern` signature keeps the boxed representation program-wide (see
+  `docs/ffi.md`), and `MARCH_NO_UNBOX=1` restores it everywhere.
+
 - **Allocation contracts (`@[no_alloc]`).** A per-function contract checked on
   the compiled program, after reference counting and escape analysis, so a
   constructor the compiler reuses in place or a value it promotes to the stack

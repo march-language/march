@@ -1,0 +1,15 @@
+-- A `doc` string and function attributes on the SAME declaration: the doc
+-- comes first, then the attributes, then the `fn`.  Until 2026-09-03 the two
+-- were mutually exclusive in either order, which made `forge fix --contracts`
+-- emit unparseable source whenever it targeted a documented function.
+mod DocWithAttribute do
+  doc "Adds two integers."
+  @[no_alloc]
+  fn add(a : Int, b : Int) : Int do a + b end
+
+  doc "Adds three."
+  @[no_alloc(transient)]
+  fn add3(a : Int, b : Int, c : Int) : Int do add(add(a, b), c) end
+
+  fn main() : Int do add3(1, 2, 3) end
+end

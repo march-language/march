@@ -219,11 +219,54 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
        ~family:(match effective_repr with
          | Repr.Newtype _ -> "Newtype"
          | Repr.Niche _   -> "Niche"
+         | Repr.Unboxed _ -> "Unboxed"
          | Repr.Boxed     -> "Boxed")
        ~site:("case in " ^ ctx.Llvm_ctx.cur_emit_fn)
    | _ -> ());
-  (* Fast path: newtype scrutinee — the value IS the payload; no tag/alloc. *)
+  (* Fast path: unboxed aggregate — the value is an LLVM struct in registers.
+     One constructor, so there is no tag to read and no branch to select: bind
+     each field with [extractvalue] and emit the single arm.  Perceus emits no
+     RC ops for these ([Rc_types.needs_rc] is false), so unlike the Newtype and
+     Niche paths below there is no scrutinee DecRC to strip. *)
   match effective_repr with
+  | Repr.Unboxed { ctor = _; fields } ->
+    let sty = match scrut_tir_ty_init with
+      | Tir.TCon (name, _) -> Repr.unboxed_llvm_name name
+      | _ ->
+        (* Unreachable: [Repr.repr_of_ty] only answers [Unboxed] for a TCon. *)
+        failwith "emit_case: unboxed repr for a non-TCon scrutinee"
+    in
+    let sv = Llvm_ctx.coerce ctx scrut_ty scrut_val sty in
+    let bind_fields (br : Tir.branch) =
+      List.iteri (fun i (v : Tir.var) ->
+          match List.nth_opt fields i with
+          | None ->
+            failwith (Printf.sprintf
+                        "emit_case: unboxed branch binds field %d of a %d-field \
+                         aggregate (arity mismatch — malformed TIR)"
+                        i (List.length fields))
+          | Some fty_tir ->
+            let fty = Llvm_ctx.llvm_ty fty_tir in
+            let fv = Llvm_ctx.fresh ctx "ubget" in
+            Llvm_ctx.emit ctx
+              (Printf.sprintf "%s = extractvalue %s %s, %d" fv sty sv i);
+            let slot = Llvm_ctx.alloca_name ctx (Llvm_ctx.llvm_name v.Tir.v_name) in
+            Llvm_ctx.emit ctx (Printf.sprintf "%%%s.addr = alloca %s" slot fty);
+            Llvm_ctx.emit ctx
+              (Printf.sprintf "store %s %s, ptr %%%s.addr" fty fv slot);
+            Hashtbl.replace ctx.Llvm_ctx.var_llvm_ty slot fty)
+        br.Tir.br_vars
+    in
+    (match branches with
+     | [] ->
+       (* Wildcard/default-only match *)
+       (match default_opt with
+        | Some d -> emit_expr ctx d
+        | None -> ("ptr", "poison"))
+     | [ br ] -> bind_fields br; emit_expr ctx br.Tir.br_body
+     | _ ->
+       failwith "emit_case: unboxed type has multiple branches (impossible: \
+                 the representation is only chosen for single-ctor types)")
   | Repr.Newtype payload ->
     (* Strip a leading DecRC(scrut) from a branch body.
        Perceus inserts DecRC(box) inside the branch assuming box is a heap cell.
@@ -849,7 +892,7 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
          below to decide which fields are genuine heap pointers (for IncRC). *)
       List.iteri (fun i (v : Tir.var) ->
         let field_ty = match List.nth_opt entry.Llvm_ctx.ce_fields i with
-          | Some t -> Llvm_ctx.llvm_ty t | None -> Llvm_ctx.llvm_ty v.Tir.v_ty in
+          | Some t -> Llvm_ctx.llvm_field_ty t | None -> Llvm_ctx.llvm_ty v.Tir.v_ty in
         let fv = Llvm_data.emit_load_field ctx scrut_val i field_ty in
         (* Concrete field type, with the scrutinee's type arguments resolved.
            Use it (not [field_ty]) to decide which fields are genuine heap
@@ -884,14 +927,34 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
           concrete_field_ty = "double" && field_ty = "ptr"
           && not body_reuses_scrut_here
         in
-        let bind_ty = if is_boxed_float then "double" else field_ty in
+        (* AN UNBOXED AGGREGATE IN AN ERASED SLOT — the Milestone-3 analogue of
+           the Float case just above, and it needs the same treatment for the
+           same reason.  The slot physically holds the BOX [Llvm_ctx.coerce]
+           built at construction (a heap slot is 8 bytes, so an inline
+           aggregate can never be stored inline in one — see
+           [Llvm_ctx.llvm_field_ty]).  Bind a COPY of the struct rather than
+           the box: the box's reference belongs to the cell, and the binder's
+           type is an aggregate for which [Rc_types.needs_rc] is false, so
+           Perceus would emit no drop and a transferred reference would die on
+           the floor.  Copying means the binder aliases nothing, which is what
+           lets the release below be a release of a genuinely unowned box. *)
+        let is_boxed_agg =
+          (not is_boxed_float) && field_ty = "ptr"
+          && Repr.unboxed_of_llvm_ty concrete_field_ty <> None
+          && not body_reuses_scrut_here
+        in
+        let bind_ty =
+          if is_boxed_float then "double"
+          else if is_boxed_agg then concrete_field_ty
+          else field_ty in
         let bind_val =
           if is_boxed_float then begin
             let d = Llvm_ctx.fresh ctx "fbxf" in
             Llvm_ctx.emit ctx
               (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" d fv);
             d
-          end else fv
+          end else if is_boxed_agg then Llvm_ctx.coerce ctx "ptr" fv concrete_field_ty
+          else fv
         in
         let slot = Llvm_ctx.alloca_name ctx (Llvm_ctx.llvm_name v.Tir.v_name) in
         Llvm_ctx.emit ctx (Printf.sprintf "%%%s.addr = alloca %s" slot bind_ty);
@@ -899,7 +962,9 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
         Hashtbl.replace ctx.Llvm_ctx.var_llvm_ty slot bind_ty;
         if concrete_field_ty = "ptr" && field_ty = "ptr" then
           heap_field_vals := fv :: !heap_field_vals
-        else if is_boxed_float then
+        else if is_boxed_float || is_boxed_agg then
+          (* Both bind a copy, so both leave an unowned box behind — the list
+             is "boxes the cell owns and the binder does not". *)
           boxed_float_field_vals := fv :: !boxed_float_field_vals
       ) br.Tir.br_vars
     end;

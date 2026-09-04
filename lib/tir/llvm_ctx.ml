@@ -286,11 +286,44 @@ type ctx = {
   atom_names : (int64, string) Hashtbl.t;
 }
 
+(** LLVM scalar type for an unboxed aggregate's field.  A deliberate
+    three-case duplicate of [llvm_ty] (defined below, after this function)
+    rather than a forward reference: [Repr.set_unboxed_types] admits only
+    Int/Float/Bool fields, so these three cases are the whole domain, and
+    keeping [make_ctx] able to emit the struct declarations itself means the
+    declaration and the registration happen in one place — no entry point
+    (compiler, REPL, JIT) can register the types and forget to declare them. *)
+let unboxed_field_llvm_ty : Tir.ty -> string = function
+  | Tir.TFloat -> "double"
+  | Tir.TInt | Tir.TBool -> "i64"
+  | other ->
+    failwith (Printf.sprintf
+                "LLVM emit: unboxed aggregate has non-scalar field type %s \
+                 (Repr.set_unboxed_types should have rejected the type)"
+                (Tir.show_ty other))
+
 let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
     ?(hot_reload=None) ?(hr_names=Hot_reload.Name_table.build [])
-    ?(type_defs=[]) () = {
+    ?(type_defs=[]) () =
+  let collision_set = Collision_set.compute type_defs in
+  (* Milestone 3: decide the unboxed-aggregate set for THIS module before any
+     emission reads [llvm_ty].  Doing it here rather than only in
+     [Contract_pipeline.run] is what covers the REPL and the JIT, which build a
+     ctx directly; the derivation is a pure function of [type_defs] so the two
+     registrations agree by construction. *)
+  if repl then begin
+    Repr.force_disable ();
+    Repr.set_unboxed_types ~collision_set ~enabled:false type_defs
+  end else Repr.ensure_unboxed_types ~collision_set type_defs;
+  let preamble = Buffer.create 1024 in
+  List.iter (fun (_tname, lname, fields) ->
+      Buffer.add_string preamble
+        (Printf.sprintf "%s = type { %s }\n" lname
+           (String.concat ", " (List.map unboxed_field_llvm_ty fields))))
+    (Repr.unboxed_types ());
+  {
   buf      = Buffer.create 4096;
-  preamble = Buffer.create 1024;
+  preamble;
   ctr      = 0; blk = 0; str_ctr = 0;
   ctor_info = Hashtbl.create 64;
   top_fns   = Hashtbl.create 64;
@@ -304,7 +337,7 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   fast_math;
   pmap_threshold;
   type_defs;
-  collision_set = Collision_set.compute type_defs;
+  collision_set;
   var_slot    = Hashtbl.create 32;
   local_names = Hashtbl.create 32;
   poly_ctors  = Hashtbl.create 64;
@@ -438,12 +471,41 @@ let llvm_ty : Tir.ty -> string = function
   | Tir.TUnit   -> "i64"   (* unit = i64 0 *)
   | Tir.TString -> "ptr"
   | Tir.TCon ("Atom", []) -> "i64"  (* atoms are interned i64 hashes, not heap ptrs *)
+  (* Milestone 3: a small scalar-only single-ctor variant is an LLVM struct
+     VALUE — [{ double, double, double }] for [Vec3(Float, Float, Float)] —
+     passed and returned in registers, never a cell.  The identified struct
+     type is declared once per module by [Llvm_toplevel.emit_module]; the
+     registry it is read from is [Repr]'s, the same one [Llvm_emit_alloc],
+     [Llvm_case] and [Rc_types] read, so this mapping can never disagree with
+     the construction, destructuring or RC treatment of the same type. *)
+  | Tir.TCon (name, _) when Repr.unboxed_of_type_name name <> None ->
+    Repr.unboxed_llvm_name name
   | Tir.TCon _  -> "ptr"
   | Tir.TTuple _ -> "ptr"
   | Tir.TRecord _ -> "ptr"
   | Tir.TFn _   -> "ptr"
   | Tir.TPtr _  -> "ptr"
   | Tir.TVar _  -> "ptr"   (* pre-mono fallback *)
+
+(** LLVM type for a HEAP-CELL SLOT holding a value of type [ty].
+
+    Every March heap cell — variant, record, tuple, closure struct — lays its
+    fields out as 8-byte slots at [16 + i*8] ([alloc_size]).  An unboxed
+    aggregate's value type is WIDER than a slot ([{double,double,double}] is
+    24 bytes), so storing one at a slot type would write over the following
+    fields: use ["ptr"] and let [coerce] box it, exactly as a [Float] crossing
+    into an erased slot is boxed.
+
+    Use this — never [llvm_ty] — for any type that names a field of a heap
+    cell ([ce_fields], record fields, tuple elements).  [llvm_ty] is for a
+    value in a register, a parameter, a return type or a local alloca.
+    [Llvm_data.emit_store_field]/[emit_load_field] fail loudly on a struct
+    slot type, so a site that forgets is a build error, not silent
+    corruption. *)
+let llvm_field_ty (ty : Tir.ty) : string =
+  match ty with
+  | Tir.TCon (name, _) when Repr.unboxed_of_type_name name <> None -> "ptr"
+  | _ -> llvm_ty ty
 
 (* llvm_ret_ty moved here (Wave 3 Task 6, chunk 2): a pure ctx-independent
    wrapper around [llvm_ty] (Unit -> "void", else llvm_ty) with no home
@@ -471,6 +533,9 @@ let llvm_param_ty ?(type_defs : Tir.type_def list = [])
     (ty : Tir.ty) : string =
   match ty with
   | Tir.TCon ("Atom", []) -> "i64"
+  (* Unboxed aggregate: a struct value, so none of the pointer alias
+     attributes below apply.  Delegate to [llvm_ty]. *)
+  | Tir.TCon (name, _) when Repr.unboxed_of_type_name name <> None -> llvm_ty ty
   | Tir.TCon (name, _) when Repr.is_niche_shaped ~collision_set type_defs name -> "ptr"
   | Tir.TString | Tir.TCon _ | Tir.TTuple _ | Tir.TRecord _ | Tir.TFn _
   | Tir.TPtr _ | Tir.TVar _ ->
@@ -649,6 +714,63 @@ let coerce ctx from_ty v to_ty =
     let r = fresh ctx "vunbox" in
     emit ctx (Printf.sprintf "%s = load %s, ptr %s, align 16" r vt pp);
     r
+  (* ── Unboxed aggregates ↔ erased slots (Milestone 3) ─────────────────
+     An inline aggregate crossing into a ptr slot (a tuple/record/closure
+     field, a generic ADT payload, a task trampoline, an apply wrapper) is
+     BOXED into exactly the heap cell it would have been under the Boxed
+     representation: [march_alloc(16 + n*8)], the type's own constructor tag,
+     one field per slot stored at its own LLVM type.  That is what makes the
+     boundary invisible to everything downstream — generic equality, `show`,
+     the interpreter-parity oracle and the runtime's own field readers all see
+     the layout they saw before Milestone 3.  Pairs with the unbox arm below;
+     the two must stay in lockstep, exactly like the Float box/unbox pair.
+
+     Ownership: the box is a fresh rc=1 cell that Perceus does not track
+     ([Rc_types.needs_rc] is false for the aggregate — see its module doc),
+     the same position a boxed Float is in.  [Alloc_contract] therefore
+     reports crossing this boundary as an allocation, so a [@[no_alloc]]
+     function cannot silently pay for one. *)
+  | (sty, "ptr") when Repr.unboxed_of_llvm_ty sty <> None ->
+    (match Repr.unboxed_of_llvm_ty sty with
+     | None -> assert false (* guard checked <> None *)
+     | Some (tname, ctor, fields) ->
+       let entry = Hashtbl.find_opt ctx.ctor_info (tname ^ "." ^ ctor) in
+       let tag = match entry with Some e -> e.ce_tag | None -> 0 in
+       let n = List.length fields in
+       let box = fresh ctx "ubbox" in
+       emit ctx (Printf.sprintf "%s = call ptr @march_alloc(i64 %d)" box (alloc_size n));
+       let tp = fresh ctx "ubtag" in
+       emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 8" tp box);
+       emit ctx (Printf.sprintf "store i32 %d, ptr %s, align 4" tag tp);
+       List.iteri (fun i fty ->
+           let l = llvm_ty fty in
+           let fv = fresh ctx "ubf" in
+           emit ctx (Printf.sprintf "%s = extractvalue %s %s, %d" fv sty v i);
+           let fp = fresh ctx "ubfp" in
+           emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %d" fp box (16 + i * 8));
+           emit ctx (Printf.sprintf "store %s %s, ptr %s, align 8" l fv fp))
+         fields;
+       box)
+  | ("ptr", sty) when Repr.unboxed_of_llvm_ty sty <> None ->
+    (* Erased slot → inline aggregate: read the cell's fields back into a
+       struct value.  The box itself is left alone; whoever owns it releases
+       it, exactly as for [march_unbox_float]. *)
+    (match Repr.unboxed_of_llvm_ty sty with
+     | None -> assert false (* guard checked <> None *)
+     | Some (_tname, _ctor, fields) ->
+       let acc = ref "poison" in
+       List.iteri (fun i fty ->
+           let l = llvm_ty fty in
+           let fp = fresh ctx "ubfp" in
+           emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %d" fp v (16 + i * 8));
+           let fv = fresh ctx "ubf" in
+           emit ctx (Printf.sprintf "%s = load %s, ptr %s, align 8" fv l fp);
+           let nx = fresh ctx "ubi" in
+           emit ctx (Printf.sprintf "%s = insertvalue %s %s, %s %s, %d"
+                       nx sty !acc l fv i);
+           acc := nx)
+         fields;
+       !acc)
   | ("ptr", "double") ->
     (* Erased slot → Float: UNBOX the heap float cell (float-boxing, Stage 2).
        A Float crossing an erasure boundary is stored as a `march_float_box`

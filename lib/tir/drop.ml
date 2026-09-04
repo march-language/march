@@ -172,7 +172,10 @@ let droppable_ctors (env : env) (ty : Tir.ty)
           Some (List.map (fun (cn, ftys) ->
               (cn, List.map (apply_subst subst) ftys)) ctors)
         | None -> None)
-     | Repr.Newtype _ | Repr.Niche _ -> None)
+     (* Unboxed: an inline struct of scalars.  No cell to free and no heap
+        field to recurse into, so there is nothing for a [__drop$T] helper to
+        do — the same answer as the erased reprs, for a different reason. *)
+     | Repr.Newtype _ | Repr.Niche _ | Repr.Unboxed _ -> None)
   | _ -> None
 
 (* A field still carrying an unsubstituted TVar means the type-parameter

@@ -210,7 +210,7 @@ let rejects name ?(flags = "") src needle =
 
 let live_src = {|mod Main do
 needs IO
-ptype Box = Box(Int, Int)
+ptype Box = Box(Int, String)
 fn first(b : Box) : Int do
   match b do
     Box(x, _) -> x
@@ -225,7 +225,7 @@ fn bump_copied(b : Box) : Int do
       first(updated) + old_x
   end
 end
-fn main(cap : Cap(IO)) : Unit do println(int_to_string(bump_copied(Box(1, 2)))) end
+fn main(cap : Cap(IO)) : Unit do println(int_to_string(bump_copied(Box(1, "two")))) end
 end|}
 
 let test_reject_live_scrutinee () =
@@ -469,7 +469,81 @@ end|}
 
 let test_reject_float_box () = rejects "float box" floatbox_src "a Float is boxed here"
 
+(* ── Unboxed small scalar aggregates (Repr.Unboxed) ───────────────────────
+
+   The motivating case for the representation: `forward` builds a Vec3 from
+   three scalars, so there is no dying cell for FBIP to reuse and no caller
+   whose frame it could be promoted into — under the boxed representation it
+   is an unconditional march_alloc(40) and the contract cannot hold.  As an
+   inline aggregate it is three doubles in registers and the contract does
+   hold, transitively through a caller that only reads it back. *)
+let unboxed_agg_src = {|mod Main do
+needs IO
+type Vec3 = Vec3(Float, Float, Float)
+@[no_alloc]
+fn forward(yaw : Float, pitch : Float) : Vec3 do
+  let cp = Math.cos(pitch)
+  Vec3(0.0 -. Math.sin(yaw) *. cp, Math.sin(pitch), 0.0 -. Math.cos(yaw) *. cp)
+end
+@[no_alloc]
+fn dot(a : Vec3, b : Vec3) : Float do
+  match a do
+    Vec3(ax, ay, az) ->
+      match b do
+        Vec3(bx, b2, bz) -> ax *. bx +. ay *. b2 +. az *. bz
+      end
+  end
+end
+@[no_alloc]
+fn energy(yaw : Float) : Float do
+  let v = forward(yaw, 0.25)
+  dot(v, v)
+end
+fn main(cap : Cap(IO)) : Unit do println(int_to_string(float_round(energy(0.0) *. 1000.0))) end
+end|}
+
+let test_accept_unboxed_aggregate () =
+  accepts "unboxed aggregate" unboxed_agg_src "1000\n"
+
+(* The RED control, and the exact diagnostic the representation removes.
+   MARCH_NO_UNBOX=1 restores the pre-Milestone-3 representation, so the same
+   program must fail with the boxed verdict — without this the accept above
+   could pass for any reason at all.
+
+   The source carries a distinguishing comment: the content-addressed artifact
+   cache keys on source + compiler, and the accept run just compiled the same
+   text, so an identical string would be answered from the cache and the
+   control would be vacuous. *)
+let unboxed_agg_boxed_src =
+  "-- RED control: compiled with MARCH_NO_UNBOX=1\n" ^ unboxed_agg_src
+
+let compile_env ~env src =
+  let exe = Test_cap_ceiling.compiler_exe in
+  let f = Filename.temp_file "noalloc_env" ".march" in
+  let oc = open_out f in output_string oc src; close_out oc;
+  let bin = Filename.temp_file "noalloc_env" ".bin" in
+  let log = Filename.temp_file "noalloc_env" ".log" in
+  let rc = Sys.command (Printf.sprintf "%s %s --compile -o %s %s > %s 2>&1"
+                          env (Filename.quote exe) (Filename.quote bin)
+                          (Filename.quote f) (Filename.quote log)) in
+  let ic = open_in log in
+  let out = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  List.iter (fun p -> try Sys.remove p with _ -> ()) [f; bin; log];
+  (rc, out)
+
+let test_reject_unboxed_aggregate_when_boxed () =
+  let (rc, out) = compile_env ~env:"MARCH_NO_UNBOX=1" unboxed_agg_boxed_src in
+  if rc = 0 then
+    Alcotest.failf
+      "RED control: with the boxed representation `forward` must fail its \
+       contract, but the compile succeeded:\n%s" out;
+  if not (contains "constructor `Vec3` is allocated here" out) then
+    Alcotest.failf "RED control: missing the boxed verdict in:\n%s" out
+
 let accept_tests = [
+  Alcotest.test_case "accept: unboxed scalar aggregate"   `Quick test_accept_unboxed_aggregate;
+  Alcotest.test_case "RED control: boxed Vec3 is rejected" `Quick test_reject_unboxed_aggregate_when_boxed;
   Alcotest.test_case "accept: FBIP tree transform"        `Quick test_accept_fbip_tree;
   Alcotest.test_case "accept: accumulator reuses Cons"    `Quick test_accept_accumulator_reuse;
   Alcotest.test_case "accept: TRMC producer with --trmc"  `Quick test_accept_trmc_with_flag;
@@ -481,6 +555,125 @@ let accept_tests = [
 ]
 let tests = tests @ accept_tests
 
+(* ── @[no_alloc(transient)] ───────────────────────────────────────────────
+
+   "Allocates nothing that SURVIVES the call."  The property a frame loop
+   actually has and the base contract cannot state: a dozen cells allocated
+   and freed within the same frame is a net live-object delta of zero, but
+   every one of them is an allocation. *)
+
+let transient_accept_src = {|mod Main do
+needs IO
+ptype Box = Box(Int, String)
+@[no_alloc(transient)]
+fn label_len(i : Int) : Int do
+  let b = Box(i, "n=" ++ int_to_string(i))
+  match b do
+    Box(_, s) -> String.byte_size(s)
+  end
+end
+fn main(cap : Cap(IO)) : Unit do println(int_to_string(label_len(42))) end
+end|}
+
+let test_transient_accept_dead_allocation () =
+  accepts "transient" transient_accept_src "4\n"
+
+(* Whatever a function RETURNS outlives the call by definition. *)
+let transient_returns_src = {|mod Main do
+needs IO
+ptype Box = Box(Int, String)
+@[no_alloc(transient)]
+fn make(i : Int) : Box do Box(i, "x") end
+fn main(cap : Cap(IO)) : Unit do
+  match make(1) do Box(n, _) -> println(int_to_string(n)) end
+end
+end|}
+
+let test_transient_reject_returned () =
+  rejects "transient returns" transient_returns_src
+    "`make` is marked @[no_alloc(transient)] but retains an allocation";
+  rejects "transient names what" transient_returns_src
+    "it returns a freshly allocated `Box`"
+
+(* A callee that allocates freely and hands the value back, whose result the
+   annotated function DROPS, is exactly what the form exists to allow — and is
+   what the base contract rejects. *)
+let transient_callee_src = {|mod Main do
+needs IO
+fn describe(i : Int) : String do "n=" ++ int_to_string(i) end
+@[no_alloc(transient)]
+fn width(i : Int) : Int do String.byte_size(describe(i)) end
+@[no_alloc]
+fn width_hard(i : Int) : Int do String.byte_size(describe(i)) end
+fn main(cap : Cap(IO)) : Unit do println(int_to_string(width(42))) end
+end|}
+
+let test_transient_accepts_what_no_alloc_rejects () =
+  (* The SAME body under the two forms: the base contract rejects it (a string
+     really is allocated), the transient one accepts it (the string is gone by
+     the time `width` returns).  Asserting both against one source is what
+     makes this a contrast rather than two unrelated facts. *)
+  let (rc, out) = compile transient_callee_src in
+  if rc = 0 then
+    Alcotest.failf "expected the @[no_alloc] half to fail:\n%s" out;
+  if not (contains "`width_hard` is marked @[no_alloc] but allocates" out) then
+    Alcotest.failf "missing the base-contract failure in:\n%s" out;
+  if contains "`width` is marked @[no_alloc(transient)]" out then
+    Alcotest.failf "the transient contract should hold for `width`:\n%s" out
+
+(* An extern may keep what it is handed; this pass cannot read it. *)
+let transient_extern_src = {|mod Main do
+needs IO
+needs Ffi
+extern "m" : Cap(Ffi) do
+  fn stash(s: String): Int = "cf_stash"
+end
+@[no_alloc(transient)]
+fn keep(i : Int) : Int do stash("n=" ++ int_to_string(i)) end
+fn main(cap : Cap(IO)) : Unit do println(int_to_string(keep(1))) end
+end|}
+
+let test_transient_reject_extern () =
+  rejects "transient extern" transient_extern_src
+    "it calls the extern `stash`"
+
+(* Transitivity: a callee that LEAKS propagates; the diagnostic names it. *)
+let transient_transitive_src = {|mod Main do
+needs IO
+needs Ffi
+extern "m" : Cap(Ffi) do
+  fn stash(s: String): Int = "cf_stash"
+end
+fn inner(i : Int) : Int do stash("n=" ++ int_to_string(i)) end
+@[no_alloc(transient)]
+fn outer(i : Int) : Int do inner(i) + 1 end
+fn main(cap : Cap(IO)) : Unit do println(int_to_string(outer(1))) end
+end|}
+
+let test_transient_reject_transitive () =
+  rejects "transient transitive" transient_transitive_src
+    "it calls `inner`, which retains"
+
+(* The typo guard covers the new payload too. *)
+let test_transient_bad_payload_is_parse_error () =
+  rejects "bad payload" {|mod Main do
+needs IO
+@[no_alloc(transiant)]
+fn f(i : Int) : Int do i end
+fn main(cap : Cap(IO)) : Unit do println(int_to_string(f(1))) end
+end|}
+    "`@[no_alloc(transient)]`"
+
+let transient_tests = [
+  Alcotest.test_case "accept: allocation dead before return" `Quick test_transient_accept_dead_allocation;
+  Alcotest.test_case "accept: callee's result is dropped"    `Quick test_transient_accepts_what_no_alloc_rejects;
+  Alcotest.test_case "reject: returns what it allocates"     `Quick test_transient_reject_returned;
+  Alcotest.test_case "reject: hands a value to an extern"    `Quick test_transient_reject_extern;
+  Alcotest.test_case "reject: transitive, names the callee"  `Quick test_transient_reject_transitive;
+  Alcotest.test_case "typo payload is a parse error"         `Quick test_transient_bad_payload_is_parse_error;
+]
+let tests = tests @ transient_tests
+
 (* ── Task 7: Tagged(_, NoAlloc) / Realtime policies use the same check ─── *)
 
 (* `Tagged(X, T)` is a phantom TYPE with no value constructor, so a
@@ -490,7 +683,7 @@ let policy_reuse_src = {|mod Main do
 needs IO
 type DSP = DSP
 type NoAlloc = NoAlloc
-ptype Box = Box(Int, Int)
+ptype Box = Box(Int, String)
 fn bump(_tag : Tagged(DSP, NoAlloc), b : Box) : Box do
   match b do
     Box(x, y) -> Box(x + 1, y)
@@ -508,7 +701,7 @@ let policy_alloc_src = {|mod Main do
 needs IO
 type DSP = DSP
 type NoAlloc = NoAlloc
-ptype Box = Box(Int, Int)
+ptype Box = Box(Int, String)
 fn first(b : Box) : Int do
   match b do
     Box(x, _) -> x
@@ -541,7 +734,7 @@ let tests = tests @ policy_tests
    has nothing to protect, so it is out of scope unless a glob names it. *)
 let report_src = {|mod Main do
 needs IO
-ptype Box = Box(Int, Int)
+ptype Box = Box(Int, String)
 fn bump(b : Box) : Box do
   match b do
     Box(x, y) -> Box(x + 1, y)
@@ -549,7 +742,7 @@ fn bump(b : Box) : Box do
 end
 fn add(a : Int, b : Int) : Int do a + b end
 fn main(cap : Cap(IO)) : Unit do
-  match bump(Box(1, 2)) do
+  match bump(Box(1, "two")) do
     Box(x, _) -> println(int_to_string(x + add(1, 2)))
   end
 end
@@ -587,8 +780,39 @@ let test_report_contracts_skips_allocating () =
   Alcotest.(check bool) "bump_copied allocates, so no fix" false
     (List.exists (fun l -> contains "`bump_copied`" l) (insert_lines out))
 
+(* The generation half prefers the STRONGEST form that holds: `@[no_alloc]`
+   for a function that allocates nothing, `@[no_alloc(transient)]` for one
+   that allocates but retains nothing.  Both functions below are in scope via
+   the glob; only the verdict differs. *)
+let report_transient_src = {|mod Main do
+needs IO
+fn describe(i : Int) : String do "n=" ++ int_to_string(i) end
+fn width(i : Int) : Int do String.byte_size(describe(i)) end
+fn twice(i : Int) : Int do i + i end
+fn main(cap : Cap(IO)) : Unit do println(int_to_string(width(1) + twice(2))) end
+end|}
+
+let test_report_contracts_prefers_strongest_form () =
+  let (rc, out) = compile ~flags:"--report-contracts --contract-scope width,twice"
+      report_transient_src in
+  Alcotest.(check int) "rc 0" 0 rc;
+  let lines = insert_lines out in
+  let line_for name = List.find_opt (fun l -> contains (Printf.sprintf "`%s`" name) l) lines in
+  (match line_for "twice" with
+   | None -> Alcotest.fail "`twice` allocates nothing; expected a hard-form insert"
+   | Some l ->
+     Alcotest.(check bool) "twice gets the hard form" true (contains "@[no_alloc]" l);
+     Alcotest.(check bool) "and not the transient one" false
+       (contains "no_alloc(transient)" l));
+  (match line_for "width" with
+   | None -> Alcotest.fail "`width` retains nothing; expected a transient insert"
+   | Some l ->
+     Alcotest.(check bool) "width gets the transient form" true
+       (contains "@[no_alloc(transient)]" l))
+
 let report_tests = [
   Alcotest.test_case "--report-contracts emits one insert" `Quick test_report_contracts_emits_one_insert;
+  Alcotest.test_case "prefers the strongest form that holds" `Quick test_report_contracts_prefers_strongest_form;
   Alcotest.test_case "--contract-scope glob widens scope"  `Quick test_report_contracts_glob_widens_scope;
   Alcotest.test_case "already-annotated functions skipped" `Quick test_report_contracts_skips_annotated;
   Alcotest.test_case "allocating functions skipped"        `Quick test_report_contracts_skips_allocating;

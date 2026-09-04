@@ -737,6 +737,10 @@ fn old_api() do ... end
 fn inc_leaves(t : Tree) : Tree do ... end
 
 @[no_alloc(warn)]     -- same check, reported as a warning
+
+@[no_alloc(transient)] -- weaker: allocations are allowed, but none may SURVIVE the call
+fn frame(w : World) : Int do ... end
+
 @[no_alloc(assume)]   -- never checked; callers trust it (for closure/extern wrappers)
 ```
 
@@ -746,9 +750,21 @@ promotes to the stack (`⚡`) both pass. The check is transitive over callees an
 needs no annotation on them; the one exception is a call through an unknown
 closure or an `extern`, which fails unless the enclosing function is
 `assume`. `fn` and `pfn` only — on an actor or with any other payload it is a
-parse error. The interpreter and `march --check` ignore the attribute. See
+parse error. A `doc` string comes FIRST, then the attributes, then the
+declaration (`doc "..."` / `@[no_alloc]` / `fn f() ...`); the reverse order is
+a parse error. The interpreter and `march --check` ignore the attribute. See
 [memory model](memory-model.md) for how to make a function pass, and
 [capabilities](capabilities.md) for how this differs from `cap no_alloc`.
+
+`transient` asks a different question: not "did it allocate" but "does anything
+it allocated outlive the call". A function fails it when it returns something
+it allocated, writes one into an object it did not allocate, or hands one to an
+actor, a `Vault`, a spawned task, an `extern` or an unknown closure — and when
+anything it calls does. It passes when a callee allocates freely and the
+annotated function drops the result before returning, which is exactly the case
+the bare form rejects. An amortized growth path (a buffer that reallocates its
+storage and keeps the new storage) is *retained*, so `transient` rejects it too
+— it is not a way to bless growable buffers.
 
 ---
 

@@ -24,6 +24,7 @@
     {v
       constructor          needs_rc   borrow_eligible
       TCon ("Atom", [])    false      false            (atoms are i64 scalars)
+      TCon <unboxed>       false      false            (inline struct, no cell)
       TCon _               true       true
       TString              true       true
       TPtr _               true       true
@@ -103,7 +104,44 @@
     with [if ty = "ptr" then …], so emitting EIncRC/EDecRC for a scalar
     TVar "_" is safe — the guard prevents the actual C call from firing.
     Scalars (TInt/TFloat/TBool/TUnit) are unboxed; TString/TPtr/other TCon
-    are plain heap values: RC'd and borrowable. *)
+    are plain heap values: RC'd and borrowable.
+
+    ── The [Repr.Unboxed] row (both FALSE, added with Milestone 3) ──
+
+    A small scalar-only single-constructor variant ([Vec3(Float, Float,
+    Float)]) is represented as an LLVM struct VALUE, not a heap cell: there is
+    no header to hold a refcount and [Llvm_ctx.llvm_ty] gives it a struct type
+    rather than ["ptr"].  Both predicates must say false, for two different
+    reasons.
+
+    needs_rc false: there is nothing to count.  Leaving it true would be
+    *nearly* harmless — [llvm_emit] guards every RC call with
+    [if ty = "ptr"], and a struct-typed value fails that guard — but only
+    nearly: Perceus's liveness would still treat such a value as an owned
+    resource, and [Drop.run] would synthesize a [__drop$T] helper for a type
+    with no cell to free.  Answering the question honestly is cheaper than
+    relying on a downstream guard, and it is what makes the [@[no_alloc]]
+    verdict for a [Vec3]-returning function come out as "no allocation".
+
+    borrow_eligible false: borrowing is a statement about who releases a
+    reference.  An inline aggregate is COPIED at every call boundary (the
+    struct is passed in registers), so there is no reference and no releasing
+    party; admitting it to the fixpoint would let [Borrow.is_borrowed] answer
+    "borrowed" for a parameter whose ownership question is meaningless, and
+    Milestone-3's stack-promotion extension (which reads exactly that answer
+    to decide a value does not escape through a call) would then be reasoning
+    about a value that was never on the heap.
+
+    Both arms read [Repr.unboxed_of_type_name], the SAME registry
+    [Llvm_ctx.llvm_ty], [Llvm_emit_alloc] and [Llvm_case] read — see the
+    registry's own comment in [repr.ml] for why one shared table rather than
+    two derivations. *)
+
+(** True iff [ty] is a [Repr.Unboxed] aggregate: an inline struct value with
+    no heap cell, no header and therefore no refcount. *)
+let is_unboxed_aggregate : Tir.ty -> bool = function
+  | Tir.TCon (name, _) -> Repr.unboxed_of_type_name name <> None
+  | _ -> false
 
 (** Perceus's predicate: true iff this type needs reference counting —
     Perceus must emit EIncRC/EDecRC ops for values of this type. Diverges
@@ -112,6 +150,8 @@
     ANY arm. *)
 let needs_rc : Tir.ty -> bool = function
   | Tir.TCon ("Atom", []) -> false  (* atoms are i64 scalars, not heap-allocated *)
+  | Tir.TCon (n, _) when Repr.unboxed_of_type_name n <> None -> false
+    (* inline struct value: no cell, no header, nothing to count — module doc *)
   | Tir.TCon _ | Tir.TString | Tir.TPtr _ -> true
   | Tir.TVar "_" -> true  (* lower.ml placeholder: conservatively heap-carrying *)
   | Tir.TVar _ -> true    (* unresolved cross-module type-var: heap ptr at runtime
@@ -130,6 +170,8 @@ let needs_rc : Tir.ty -> bool = function
     see the module doc before changing ANY arm. *)
 let borrow_eligible : Tir.ty -> bool = function
   | Tir.TCon ("Atom", []) -> false  (* atoms are i64 scalars, not heap-allocated *)
+  | Tir.TCon (n, _) when Repr.unboxed_of_type_name n <> None -> false
+    (* copied at every boundary; no reference, so no ownership — module doc *)
   | Tir.TCon _ | Tir.TString | Tir.TPtr _ -> true
   | Tir.TVar "_" -> true  (* lower.ml placeholder: conservatively heap-carrying *)
   | Tir.TRecord _ | Tir.TTuple _ -> true
