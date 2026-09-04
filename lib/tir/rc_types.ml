@@ -200,7 +200,28 @@ let borrow_eligible : Tir.ty -> bool = function
     (* copied at every boundary; no reference, so no ownership — module doc *)
   | Tir.TCon _ | Tir.TString | Tir.TPtr _ -> true
   | Tir.TVar "_" -> true  (* lower.ml placeholder: conservatively heap-carrying *)
-  | Tir.TRecord _ | Tir.TTuple _ -> true
+  | Tir.TRecord _ | Tir.TTuple _ -> false
+    (* Aggregates are OWNED parameters, not borrowed ones.  A borrowed
+       aggregate parameter leaves the caller responsible for the release, and
+       in a SELF-TAIL-RECURSIVE loop that release is unreachable: it sits after
+       the tail call, llvm_tco folds the call into a back-edge, and the dec is
+       discarded (llvm_tco.ml's has_self_tail_call says so outright -- "the
+       EDecRC lands in dead code after TCO emits the back-edge").  Every
+       iteration then leaks its aggregate.  It cannot simply be emitted before
+       the back-edge either: that would free the cell the next iteration reads.
+
+       Ownership fixes it uniformly -- each iteration releases the aggregate it
+       was handed before jumping with a new one, so the loop runs in constant
+       space -- and it is what makes the parameter drop site in
+       [Perceus.insert_owned_aggregate_param_drops] reachable at all.
+
+       The historical reason this was true (0b52510d, the record-liveness
+       multi-call bug) was about a field EXTRACTED from the record being dec'd
+       at its last use inside the callee.  That is the [borrowed_field_vars]
+       mechanism's job and it still does it; what changes here is only who
+       releases the AGGREGATE.  The two tests that pinned the old behaviour
+       asserted "no EDecRC anywhere in the callee" as a proxy for "no dec of
+       the extracted field" -- see their updated forms in test_eval.ml. *)
     (* Records and tuples are heap-allocated (via march_alloc) and hold
        heap-carrying fields (Strings, ADT values, etc.). Making them
        borrow-eligible lets the fixpoint infer "cfg:borrowed" for functions

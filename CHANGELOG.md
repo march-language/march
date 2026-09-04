@@ -169,9 +169,17 @@ git log is authoritative for exact commits.
 
   A record passed to a function that reads its fields is fixed too: the
   projection no longer dups the record (2001 live objects over a 1000-iteration
-  loop, now 1). One shape is not yet covered, tracked in `specs/todos/`: an
-  aggregate parameter of a self-tail-recursive function rebuilt each iteration,
-  where the trailing dec is discarded when TCO emits the back-edge.
+  loop, now 1).
+
+- **An aggregate rebuilt each iteration of a self-tail-recursive function no
+  longer leaks.** Records and tuples are now *owned* parameters. A borrowed one
+  left the caller holding the release, and in a tail-recursive loop that release
+  sits after the tail call — where TCO folds the call into a back-edge and the
+  release is discarded, leaking one cell per iteration. Owned parameters let
+  each iteration release the aggregate it was handed before jumping with a new
+  one, so such a loop now runs in constant space. All six aggregate leak
+  fixtures — record, record-with-heap-field, record update, and tuple — are flat
+  across a 100x change in iteration count.
 
 - **A non-generic Option-shaped type with a heap payload was freed twice.**
   `type Wrap = W(String) | Z` is encoded as a niche, where `W(x)` *is* `x` — one
