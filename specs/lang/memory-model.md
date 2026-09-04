@@ -235,9 +235,118 @@ pfn bump_reused(b : Box) : Box do
 end
 ```
 
+**Pinning the result with a contract.** Once a hot function shows only `♻` and
+`⚡`, you can make the compiler keep it that way:
+
+<!-- scroll:skip -->
+```march
+@[no_alloc]
+pfn bump_reused(b : Box) : Box do
+  match b do
+  Box(x, y) -> Box(x + 1, y)
+  end
+end
+```
+
+`@[no_alloc]` is checked on the compiled form, after reuse and stack promotion
+have been decided, so the reusing version above passes and the `⧉ copied`
+version does not. A later edit that reintroduces an allocation — here or in
+anything the function calls — fails the build instead of silently regressing.
+`@[no_alloc(warn)]` reports the same finding as a warning, and
+`@[no_alloc(assume)]` marks a wrapper around an unknown closure or an `extern`
+as trusted. `forge fix --contracts` adds the attribute to every function the
+compiler has already verified. Two caveats worth knowing: a nullary
+constructor of a variant that also has payload-carrying cases (`Nil` in
+`List`) is a real heap cell today, so returning a fresh one fails the
+contract, and a `Float` stored into a generic field is boxed, which counts.
+
+**When "nothing survives" is the real property.** A frame loop, a request
+handler, a tick — code that allocates freely and frees it all again before it
+returns — has a property `@[no_alloc]` cannot express. `@[no_alloc(transient)]`
+does:
+
+<!-- scroll:skip -->
+```march
+@[no_alloc(transient)]
+pfn width(i : Int) : Int do
+  String.byte_size(describe(i))     -- `describe` allocates a String
+end
+```
+
+`describe` really does allocate, so the bare form rejects `width`. The
+transient form accepts it: the String is gone by the time `width` returns. The
+question it asks is where a value *ends up*, not whether one was made. It fails
+when the function returns something it allocated, writes one into an object it
+did not allocate, or hands one to an actor, a `Vault`, a spawned task, an
+`extern`, or a call through an unknown closure — and when anything it calls
+does.
+
+One thing it deliberately does **not** cover: an amortized growth path. A
+buffer that reallocates its storage and keeps the new storage has *retained*
+that storage — it reaches a value the function returns — so `transient` rejects
+it just as the bare form does. If you want a growable buffer inside a hot loop,
+the answer is to hoist it out of the loop, not to relabel the contract.
+
+`forge fix --contracts` inserts whichever form actually holds: `@[no_alloc]`
+where a function allocates nothing at all, `@[no_alloc(transient)]` where it
+allocates but retains nothing. The editor's quick fix and the `✓` lens name the
+form too.
+
+**Promotion sees through a call.** `⚡ stack-allocated` used to stop at every
+call boundary: passing a value to any function meant it might escape. It now
+also fires when the only thing done with a value is to hand it to a function in
+the same program that provably does not keep the pointer — one that
+destructures it, reads its fields and returns something else. Storing it,
+returning it, capturing it in a closure, sending it to an actor, or handing it
+to an `extern` all still count as escaping, and a closure passed to its own
+apply function is never promoted.
+
 If `bump_copied` truly needs the old field, read it *before* you rebuild
 (bind `x` in the same `match`, then return it) rather than matching `b` a second
 time; that collapses the two uses into one and reuse fires again.
+
+
+### Small scalar aggregates never reach the heap at all
+
+Reuse and stack promotion both work on a cell that *exists*. A third case
+skips the cell entirely: a variant with **one constructor whose fields are all
+`Int`, `Float` or `Bool`**, with two to four of them, is represented inline —
+in registers, not on the heap.
+
+<!-- scroll:skip -->
+```march
+type Vec3 = Vec3(Float, Float, Float)
+
+@[no_alloc]
+fn forward(yaw : Float, pitch : Float) : Vec3 do
+  let cp = Math.cos(pitch)
+  Vec3(0.0 -. Math.sin(yaw) *. cp, Math.sin(pitch), 0.0 -. Math.cos(yaw) *. cp)
+end
+```
+
+`forward` builds its result from three scalars, so there is no dying `Vec3`
+for reuse to take over and nothing for stack promotion to keep in the frame —
+it used to be an unconditional allocation, and could not carry `@[no_alloc]`.
+As three doubles in registers it allocates nothing, and the contract holds
+through any caller that only reads it back.
+
+Two things to know about the boundary:
+
+- **A heap slot is eight bytes wide**, so wherever such a value is *stored* —
+  a constructor or record field, a tuple element, something a closure
+  captures, a message to an actor, an argument to an `extern` — it is boxed
+  into the ordinary cell on the way in and unboxed on the way out. Behaviour
+  is unchanged, but that box is a real allocation and `@[no_alloc]` reports it
+  ("a `Vec3` is boxed here (it crosses an erased slot)"). Keeping a hot
+  function's aggregates in locals, parameters and returns keeps them off the
+  heap.
+- **The class is exact**: add a `String` field, a fifth field, or a second
+  constructor and the type goes back to being an ordinary heap value. That is
+  a representation change with a visible performance consequence, so it is
+  worth knowing which side of the line a hot type sits on.
+
+Compiler internals, including why the class stops where it does:
+`docs/value-representation.md` §7.5.
 
 ---
 

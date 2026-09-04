@@ -574,6 +574,57 @@ end|}
       Alcotest.(check (option (list string))) "Logger_spawn stays frozen (passed as a value)"
         None (Hashtbl.find_opt need "Logger_spawn"))
 
+(* A supervisor nested under another supervisor: its spawn glue is passed as
+   a value to register_supervisor_child (for respawn), which used to freeze it.
+   That argument is now a call reference the threading pass replaces with a
+   closure, so the nested glue carries its children's capabilities and the
+   top glue picks them up transitively. A leaf's glue still needs nothing. *)
+let nested_supervisor_glue_carries_caps =
+  Alcotest.test_case "a nested supervisor's spawn glue carries its children's capabilities"
+    `Quick (fun () ->
+      let m =
+        parse_and_desugar {|mod N do
+  needs IO.Console
+  actor Leaf do
+    state { n : Int }
+    init  { n: 0 }
+    on Say(s : String) do
+      print_line(s)
+      { state with n: state.n + 1 }
+    end
+  end
+  actor Mid do
+    state { l : Int }
+    init  { l: 0 }
+    supervise do
+      strategy one_for_one
+      max_restarts 5 within 60
+      Leaf l
+    end
+  end
+  actor Top do
+    state { m : Int }
+    init  { m: 0 }
+    supervise do
+      strategy one_for_one
+      max_restarts 5 within 60
+      Mid m
+    end
+  end
+end|}
+      in
+      let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+      let tir =
+        March_tir.Lower.lower_module ~type_map ~test_mode:false ~hot_reload:false m
+      in
+      let need = March_tir.Cap_passing.needed_caps tir in
+      Alcotest.(check (option (list string))) "Mid_spawn carries Leaf's caps"
+        (Some [ "IO.Console" ]) (Hashtbl.find_opt need "Mid_spawn");
+      Alcotest.(check (option (list string))) "Top_spawn carries them transitively"
+        (Some [ "IO.Console" ]) (Hashtbl.find_opt need "Top_spawn");
+      Alcotest.(check (option (list string))) "Leaf_spawn still needs nothing"
+        None (Hashtbl.find_opt need "Leaf_spawn"))
+
 (* ── the surface spelling of a multi-argument field ───────────────────── *)
 
 (* `Io_ops_gen.march_ty` once rendered a curried arrow as `(A, B) -> C`. In
@@ -624,5 +675,6 @@ let tests = [
   analysis_attributes_locals_to_their_owner;
   dispatch_caps_lists_every_capability;
   supervisor_glue_carries_children_caps;
+  nested_supervisor_glue_carries_caps;
   rendered_multi_arg_is_curried;
 ]

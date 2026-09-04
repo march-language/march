@@ -1430,9 +1430,9 @@ let compile filename =
        silently prints nothing on a warm cache — which is exactly how
        --refine-report came to look broken.  Correctness of a diagnostic flag
        beats a cache hit on the run that asked for the diagnostic. *)
-    if refine_suggest_active () || !refine_report then None
+    if refine_suggest_active () || !refine_report || !report_contracts then None
     else if not !do_compile && not !do_check then None
-    else begin
+    else try
       let buf = Buffer.create (256 * 1024) in
       Buffer.add_string buf src;
       (match stdlib_source_hash ~for_js:is_js_target () with
@@ -1470,8 +1470,17 @@ let compile filename =
           end
         ) files
       ) (Filename.dirname filename :: lib_dirs);
-      let src_hash = "src:" ^ Digest.to_hex (Digest.string (Buffer.contents buf)) in
+      let cache_input = Buffer.contents buf in
+      let src_hash = "src:" ^ Digest.to_hex (Digest.string cache_input) in
       let store = March_cas.Cas.create ~project_root:(Sys.getcwd ()) in
+      (* Same rule as --refine-report above, for a diagnostic that lives even
+         further down the pipeline: an @[no_alloc(warn)] contract (or a hard
+         one downgraded by --no-opt) produces a WARNING and a successful
+         binary, so a warm artifact would satisfy the next build and the
+         warning would silently disappear.  A textual mention anywhere in the
+         hashed sources is enough to suppress the early exit — the check
+         itself decides whether anything is reported. *)
+      if contains_substring cache_input "no_alloc" then raise Exit;
       if !do_check then begin
         let ch = March_cas.Cas.compilation_hash src_hash ~target:"check" ~flags:[] in
         (match March_cas.Cas.lookup_artifact store ch with
@@ -1503,7 +1512,7 @@ let compile filename =
          | Some _ | None -> ());
         Some (store, ch)
       end
-    end
+    with Exit -> None
   in
   (* Per-stage timing: stamp records wall time since just before parsing.
      Enabled by --timings; output goes to stderr so it doesn't mix with
@@ -2010,16 +2019,6 @@ let compile filename =
     let tir = { tir with March_tir.Tir.tm_io_fns = io_modules } in
     snap_tir "tir-lower" tir;
     stamp "lower";
-    (* TRMC eligibility analysis (Phase 1 — analysis only, gated on
-       MARCH_TRMC_REPORT).  Must run here: by tir-perceus the stdlib's nested
-       `go` helpers are closures invoked via ECallPtr, so self-recursion is no
-       longer syntactically visible.  See
-       specs/todos/2026-08-07-trmc-tail-recursion-modulo-cons.md. *)
-    March_tir.Trmc.report tir;
-    (* Phase 3 (WIP, gated on --trmc / legacy MARCH_TRMC): destination-passing rewrite of
-       TRMC-eligible functions.  Off by default — this is a measurement
-       vehicle until the RC integration (phase 4) is done. *)
-    let tir = March_tir.Trmc.transform_module tir in
     (* Phase 5: collect actor state schemas for .schemas.json emission.
        Picks up TDRecord entries named *_State — the state record emitted
        by lower_actor for every actor definition. Only collected when both
@@ -2084,141 +2083,21 @@ let compile filename =
        Passed to monomorphize so it can resolve interface calls in functions
        that were polymorphic during lowering but now have concrete types. *)
     let iface_methods = March_tir.Lower.get_iface_methods () in
-    (* For WASM island targets, mark render/update/init as exported.
-       Set exports BEFORE monomorphization so the functions get mono'd. *)
-    let tir = match parse_target !target_str with
-      | March_tir.Llvm_emit.Wasm32Unknown ->
-        let island_suffixes = ["render"; "update"; "init"] in
-        let exports = List.filter_map (fun (fn : March_tir.Tir.fn_def) ->
-          let n = fn.March_tir.Tir.fn_name in
-          if List.exists (fun suffix ->
-            n = suffix ||
-            (String.length n > String.length suffix + 1 &&
-             String.sub n (String.length n - String.length suffix - 1)
-               (String.length suffix + 1) = ("." ^ suffix))
-          ) island_suffixes
-          then Some n else None
-        ) tir.March_tir.Tir.tm_fns in
-        { tir with March_tir.Tir.tm_exports = exports }
-      | _ -> tir
+    (* Everything from TRMC through Native_map_inline now lives in
+       [March_tir.Contract_pipeline.run], shared with the LSP so both see the
+       same TIR.  The driver-only concerns that used to be interleaved with the
+       passes are hooks: the policy audit after Fusion, and capability
+       attribution / --cap-strict just before Opt.run (both may [exit 1]). *)
+    let policy_audit tir =
+      (* Phase 3b: policy-tag audit — report violations in Tagged(_, P) functions. *)
+      let policy_violations = March_tir.Policy_dce.audit tir in
+      List.iter (fun (_fn_name, msg) ->
+        Printf.eprintf "Error: %s\n\n" msg
+      ) policy_violations;
+      if policy_violations <> [] then exit 1
     in
-    let tir = March_tir.Mono.monomorphize ~iface_methods tir in
-    snap_tir "tir-mono" tir;
-    stamp "mono";
-    (* After mono, update tm_exports to use monomorphized names *)
-    let tir =
-      if tir.March_tir.Tir.tm_exports <> [] then begin
-        let island_suffixes = ["render"; "update"; "init"] in
-        let matches_suffix name suffix =
-          let base = match String.index_opt name '$' with
-            | Some i -> String.sub name 0 i
-            | None -> name
-          in
-          base = suffix ||
-          (String.length base > String.length suffix + 1 &&
-           String.sub base (String.length base - String.length suffix - 1)
-             (String.length suffix + 1) = ("." ^ suffix))
-        in
-        let exports = List.filter_map (fun (fn : March_tir.Tir.fn_def) ->
-          let n = fn.March_tir.Tir.fn_name in
-          if List.exists (matches_suffix n) island_suffixes
-          then Some n else None
-        ) tir.March_tir.Tir.tm_fns in
-        { tir with March_tir.Tir.tm_exports = exports }
-      end else tir
-    in
-    (* Pin __rpc_stub functions so the DCE pass keeps them (and their callees)
-       alive.  Without this, private stubs never called from March code are
-       dropped before the CAS hash and LLVM emit steps can see them. *)
-    let tir =
-      let stub_suffix = "__rpc_stub" in
-      let slen = String.length stub_suffix in
-      let stubs = List.filter_map (fun (fn : March_tir.Tir.fn_def) ->
-        let n = fn.March_tir.Tir.fn_name in
-        let nl = String.length n in
-        if nl > slen && String.sub n (nl - slen) slen = stub_suffix
-        then Some n else None
-      ) tir.March_tir.Tir.tm_fns in
-      if stubs = [] then tir
-      else { tir with March_tir.Tir.tm_exports =
-               tir.March_tir.Tir.tm_exports @ stubs }
-    in
-    let tir = if !opt_enabled then March_tir.Fusion.run ~changed:(ref false) tir else tir in
-    snap_tir "tir-fusion" tir;
-    stamp "fusion";
-    (* Phase 3b: policy-tag audit — report violations in Tagged(_, P) functions. *)
-    let policy_violations = March_tir.Policy_dce.audit tir in
-    List.iter (fun (_fn_name, msg) ->
-      Printf.eprintf "Error: %s\n\n" msg
-    ) policy_violations;
-    if policy_violations <> [] then exit 1;
-    let tir = March_tir.Defun.defunctionalize tir in
-    snap_tir "tir-defun" tir;
-    stamp "defun";
-    (* Known-call pass: run before Perceus so apply functions are still pure
-       and eligible for inlining in the subsequent Opt fixed-point loop.
-       Also included in the Opt coordinator for cases revealed after Perceus.
-       This rewrites ECallPtr(clo, args) -> EApp(clo_apply, clo :: args).  The
-       closure-apply ABI consumes the closure argument, so Perceus must NOT
-       emit a caller-side post-call EDecRC for the $clo slot of an apply
-       function even when borrow inference classifies it as borrowed — see the
-       [is_apply_fn] guard in [Perceus]'s EApp post_dec_vars.  Without that
-       guard the rewrite double-freed the closure (List.sort_by SIGBUS at
-       n >= ~90 with a heap-capturing comparator). *)
-    let tir = if !opt_enabled
-              then March_tir.Known_call.run ~changed:(ref false) tir
-              else tir in
-    snap_tir "tir-known-call" tir;
-    (* Beta-ADT: reduce case-of-known-constructor before Perceus so that the
-       EAlloc is DCE'd before RC insertion, avoiding a spurious allocation and
-       its associated reference-count operations entirely. *)
-    let tir = if !opt_enabled
-              then March_tir.Beta_adt.run ~changed:(ref false) tir
-              else tir in
-    snap_tir "tir-beta-adt-pre" tir;
-    (* P1 Layer 1: alpha-merge let-floating on RC-free TIR.  Hoists common
-       leading lets above ECase even when arms bind the shared RHS under
-       different fresh ANF names, substituting onto one floated binder.  Must
-       run BEFORE Perceus so RC is inserted once for the hoisted binding.  The
-       conservative (name-equality) variant still runs in the post-Perceus opt
-       loop. *)
-    let tir = if !opt_enabled
-              then March_tir.Join_points.run_pre ~changed:(ref false) tir
-              else tir in
-    snap_tir "tir-join-points-pre" tir;
-    (* Pre-Perceus simplify: folds that are only sound before RC insertion,
-       currently the empty-string concat identities (x ++ "" → x, "" ++ x → x).
-       Folding here aliases the result to `x` while it is still un-RC-tracked, so
-       Perceus inserts a single correct dec_rc afterwards.  The post-Perceus Opt
-       loop runs Simplify with pre_perceus=false and never applies these. *)
-    let tir = if !opt_enabled
-              then March_tir.Simplify.run ~pre_perceus:true ~changed:(ref false) tir
-              else tir in
-    snap_tir "tir-simplify-pre" tir;
-    let tir = March_tir.Perceus.perceus tir in
-    snap_tir "tir-perceus" tir;
-    stamp "perceus";
-    (* Deep-drop synthesis: route Perceus's bare EDecRC on a heap-owning
-       aggregate through a generated destructuring drop, so releasing a
-       container that was never pattern-matched also releases its children
-       (see lib/tir/drop.ml).  Skipped for the JS target, whose runtime is
-       GC'd and ignores RC ops entirely — there the generated drop would be a
-       pure-overhead walk of every dropped structure. *)
-    let tir =
-      if parse_target !target_str = March_tir.Llvm_emit.Js then tir
-      else March_tir.Drop.run tir in
-    snap_tir "tir-drop" tir;
-    stamp "drop";
-    let tir = March_tir.Escape.escape_analysis tir in
-    snap_tir "tir-escape" tir;
-    stamp "escape";
-    (* Run optimizer with per-pass snapshots (Phase 3 instrumentation).
-       When dump_phases is on, each individual opt pass is captured separately
-       (tir-opt-1-inline, tir-opt-1-cprop, …) so the viewer shows every step.
-       When opt is disabled, fall through to a single tir-opt snapshot. *)
-    (* Save pre-opt TIR so we can hash __rpc_stub base functions that the
-       inliner may eliminate before the CAS hash step below. *)
-    let pre_opt_tir = tir in
+    let cap_state = ref None in
+    let before_opt (pre_opt_tir : March_tir.Tir.tir_module) =
     (* Per-module capability attribution MUST be taken here, before the
        inliner runs: it folds a dependency's small function into its caller
        and the module boundary is gone by emission time, so attributing then
@@ -2445,41 +2324,39 @@ let compile filename =
         exit 1
       end
     end;
-    let tir =
-      if !opt_enabled then
-        March_tir.Opt.run
-          ~snap:(fun label m ->
+    cap_state := Some (cap_attrib, cap_decls)
+    in
+    let contract_decls = March_tir.Alloc_contract.collect desugared in
+    let pipe =
+      March_tir.Contract_pipeline.run
+        ~snap:snap_tir ~stamp
+        ~opt_snap:(fun label m ->
             if !dump_phases then
               phases := March_dump.Dump.tir_phase m label :: !phases)
-          ~hot_reload:(hr_config ())
-          tir
-      else tir
+        ~after_fusion:policy_audit ~before_opt
+        ~wasm_island:(parse_target !target_str = March_tir.Llvm_emit.Wasm32Unknown)
+        ~is_js:is_js_target ~hot_reload:(hr_config ()) ~iface_methods
+        ~decls:contract_decls
+        (* --report-contracts judges functions nothing calls, so they must
+           survive DCE and inlining to be judged at all.  Their BODIES are
+           optimised exactly as always; only reachability changes, and the
+           flag already skips code generation. *)
+        ~extra_roots:(if !report_contracts
+                      then List.map (fun (d : March_tir.Alloc_contract.decl_info) ->
+                          d.March_tir.Alloc_contract.d_name) contract_decls
+                      else [])
+        ~opt:!opt_enabled ~trmc:!March_tir.Trmc.enabled tir
     in
-    (* Prune functions unreachable from the entry points BEFORE LLVM emit, even
-       when the optimizer is disabled.  Reachability pruning is a linkability
-       requirement (not an optimization): the injected prelude/http stack
-       references not-always-linked externs like [_http_fetch], so an
-       unreachable prelude function reaching the linker produces "undefined
-       symbols".  When opt IS enabled the DCE pass already pruned inside
-       Opt.run, so this is an idempotent no-op there. *)
-    let tir = March_tir.Dce.prune_unreachable tir in
-    (* @[vectorize]/@[vectorize(warn)]: verify NativeArray.map/map2
-       eligibility against the SAME pre-rewrite TIR shape
-       Native_map_inline.run (right below) is about to consume — a
-       DIFFERENT ctx than the shared typecheck [errors], printed and
-       gated on its own, so already-printed earlier diagnostics in
-       [errors] are never re-emitted here. [check]'s return value MUST be
-       used going forward (not the original [tir]) — it has every
-       Vectorize_mark sentinel stripped back out, and nothing past this
-       point may see one (there is no @__vectorize_marker_* symbol to
-       link against). *)
-    let (tir, vectorize_diags) =
-      if is_js_target then (tir, [])
-      else
-        let ctx = March_errors.Errors.create () in
-        let tir' = March_tir.Vectorize_check.check ctx tir in
-        (tir', March_errors.Errors.sorted ctx)
-    in
+    let pre_opt_tir = pipe.March_tir.Contract_pipeline.pre_opt in
+    let tir = pipe.March_tir.Contract_pipeline.final in
+    let (cap_attrib, cap_decls) =
+      match !cap_state with Some s -> s | None -> assert false in
+    (* @[vectorize] and @[no_alloc] diagnostics render through a fresh ctx
+       (not the shared typecheck [errors], already drained and printed); a
+       hard failure of either exits before any object file is written. *)
+    let vectorize_diags =
+      pipe.March_tir.Contract_pipeline.vectorize_diags
+      @ pipe.March_tir.Contract_pipeline.contract_diags in
     List.iter (fun (d : March_errors.Errors.diagnostic) ->
         let f = d.span.March_ast.Ast.file in
         let (d_src, d_file) =
@@ -2492,27 +2369,49 @@ let compile filename =
     if List.exists (fun (d : March_errors.Errors.diagnostic) ->
         d.severity = March_errors.Errors.Error) vectorize_diags
     then exit 1;
-    (* P10 Phase 2: inline non-capturing NativeArray.map closures so
-       llvm_emit.ml can emit a direct-call loop instead of going through the
-       C runtime's opaque closure-pointer indirection (never inlinable across
-       that translation-unit boundary, so never vectorizable). Runs after Opt
-       (not right after Defun) because the pattern it looks for only appears
-       once Inline has flattened the NativeArray.map_int/map_float stdlib
-       wrapper into its call site — at Defun time the closure allocation and
-       the native_int_arr_map/native_float_arr_map call are still in two
-       different function bodies. Native/wasm compile only (guarded on
-       is_js_target) — Js_emit.ml has no codegen arm for the synthetic call
-       this pass introduces, since this shared pipeline reaches the JS
-       backend too (target dispatch happens later, at the emit stage below).
-       Its single-use-of-the-closure-var check is also what makes running
-       this late safe: if Perceus (which ran before Opt) left any RC op
-       referencing the closure var, that counts as an extra use and the
-       pass silently declines, falling back to the existing correct path. *)
-    let tir = if is_js_target then tir else March_tir.Native_map_inline.run tir in
-    snap_tir "tir-native-map-inline" tir;
-    (* When opt is disabled there are no per-pass snaps; still emit one overall. *)
-    if not !opt_enabled then snap_tir "tir-opt" tir;
-    stamp "opt";
+    (* --report-contracts: the generation half of the contract feature.  Emits
+       the same NDJSON shape --check-json does, with an FInsert fix placing
+       @[no_alloc] on the line above each verified-clean in-scope declaration,
+       and stops before code generation (no binary, no CAS artifact). *)
+    if !report_contracts then begin
+      let globs =
+        List.filter (fun g -> g <> "")
+          (String.split_on_char ',' !contract_scope) in
+      let is_user (sp : March_ast.Ast.span) =
+        let f = sp.March_ast.Ast.file in
+        f = filename || f = "" || f = "<unknown>" || List.mem f user_files
+      in
+      let cands =
+        March_tir.Alloc_contract.generation_candidates
+          ~decls:contract_decls
+          ~allocating:pipe.March_tir.Contract_pipeline.allocating
+          ~retaining:pipe.March_tir.Contract_pipeline.retaining
+          ~globs ~is_user tir
+      in
+      List.iter (fun ((d : March_tir.Alloc_contract.decl_info), form) ->
+          let indent =
+            String.make d.March_tir.Alloc_contract.d_decl_span.March_ast.Ast.start_col ' ' in
+          let attr = March_tir.Alloc_contract.attr_of_form form in
+          let verdict = match form with
+            | March_tir.Alloc_contract.Transient ->
+              "verified to retain nothing it allocates"
+            | _ -> "verified allocation-free" in
+          let diag : March_errors.Errors.diagnostic =
+            { severity = March_errors.Errors.Hint;
+              span = d.March_tir.Alloc_contract.d_name_span;
+              message = Printf.sprintf
+                  "`%s` is %s; add %s to keep it that way."
+                  d.March_tir.Alloc_contract.d_name verdict attr;
+              labels = []; notes = []; code = Some "no_alloc_candidate";
+              fix = Some (March_errors.Errors.FInsert {
+                  after_line =
+                    d.March_tir.Alloc_contract.d_decl_span.March_ast.Ast.start_line - 1;
+                  text = indent ^ attr }) }
+          in
+          print_string (March_errors.Errors.render_diagnostic_json diag ^ "\n"))
+        cands;
+      exit 0
+    end;
     (* RPC admission hashes (remote_ref_hashes constant-folding + the @main
        march_remote_register calls) must be IDENTICAL across SEPARATE client and
        server compilations of the same source.  Derive them uniformly from the
@@ -4247,6 +4146,10 @@ let () =
     ("--cap-sandbox", Arg.Set cap_sandbox, " Embed a self-imposed capability sandbox applied at startup (opt-in; macOS Seatbelt / Linux seccomp-bpf)");
     ("--check-json", Arg.Set check_json,  " Emit diagnostics as NDJSON to stdout (for tooling such as forge fix)");
     ("--no-measure-axioms", Arg.Clear measure_axioms, " Reflect @[measure] functions symbolically instead of axiomatising them (skips datatype/quantifier reasoning and the soundness gate)");
+    ("--report-contracts", Arg.Set report_contracts,
+     " With --compile: emit one --check-json-shaped line per function verified allocation-free that should carry @[no_alloc] (consumed by `forge fix --contracts`). Stops before code generation, so no binary is written");
+    ("--contract-scope", Arg.Set_string contract_scope,
+     "<globs>  Comma-separated module/function globs (e.g. 'Dsp.*,Audio.mix') that --report-contracts considers in scope even without in-place reuse");
     ("--refine-report", Arg.Set refine_report,
      " Print a summary of refinement obligations: proved, violated, and skipped by reason (user code and user+stdlib)");
     ("--refine-suggest", Arg.String (fun s -> refine_suggest_target := Some s),

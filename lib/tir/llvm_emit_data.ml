@@ -129,6 +129,14 @@ let emit_tuple ~emit_atom ctx (atoms : Tir.atom list) : string * string =
     ) atoms;
     ("ptr", ptr)
 
+(* A record slot, like every heap-cell slot, is 8 bytes wide.  An unboxed
+   aggregate's struct value is wider, so it goes in BOXED — the same rule
+   [Llvm_ctx.llvm_field_ty] states for a declared field type, restated here
+   because a record stores each field at the type its VALUE was emitted as
+   rather than at a declared one. *)
+let slot_ty_of_value_ty (ty : string) : string =
+  if Repr.unboxed_of_llvm_ty ty <> None then "ptr" else ty
+
 (** Body of the [ERecord] arm. *)
 let emit_record ~emit_atom ctx (fields : (string * Tir.atom) list)
   : string * string =
@@ -138,7 +146,8 @@ let emit_record ~emit_atom ctx (fields : (string * Tir.atom) list)
     let ptr = emit_heap_alloc ctx 0 n in
     List.iteri (fun i (_, atom) ->
       let (ty, v) = emit_atom ctx atom in
-      emit_store_field ctx ptr i ty v
+      let sty = slot_ty_of_value_ty ty in
+      emit_store_field ctx ptr i sty (coerce ctx ty v sty)
     ) sorted;
     (* Stamp the shape id so record introspection builtins can recover the
        field names at runtime. *)
@@ -203,8 +212,11 @@ let emit_field ~emit_atom ctx (obj_atom : Tir.atom) (field_name : string)
            ("ptr", res)
          | _ ->
            let (_, obj_val) = emit_atom ctx obj_atom in
-           let fv = emit_load_field ctx obj_val idx (llvm_ty field_ty) in
-           (llvm_ty field_ty, fv))
+           let sty = Llvm_ctx.llvm_field_ty field_ty in
+           let fv = emit_load_field ctx obj_val idx sty in
+           (* Boxed in the slot, struct in a register: hand the caller the
+              value type its [Tir.ty] promises. *)
+           (llvm_ty field_ty, coerce ctx sty fv (llvm_ty field_ty)))
     end
 
 (** Body of the [EUpdate] arm (record update). *)
@@ -278,17 +290,29 @@ let emit_update ~emit_atom ctx (base_atom : Tir.atom)
        Fields whose slot is not a pointer (Int/Float/Bool/Unit) carry no
        reference, so they are copied as before. *)
     List.iteri (fun i (_, fty) ->
-      let lty = llvm_ty fty in
-      let fv = emit_load_field ctx base_val i lty in
-      if Rc_types.needs_rc fty && String.equal lty "ptr" then
+      (* Slot-to-slot copy: read and write at the SLOT type, never the value
+         type, so an unboxed aggregate's box is copied as the pointer it is. *)
+      let sty = Llvm_ctx.llvm_field_ty fty in
+      let fv = emit_load_field ctx base_val i sty in
+      (* ...and inc each copied HEAP reference, since the base keeps its own
+         (an update borrows the base, it does not consume it) and the new cell
+         takes a second one.  An UNBOXED type occupies a ptr slot without being
+         a heap pointer, so it is excluded explicitly rather than left to
+         march_incrc's IS_HEAP_PTR guard. *)
+      let is_unboxed = match fty with
+        | Tir.TCon (n, _) -> Repr.unboxed_of_type_name n <> None
+        | _ -> false
+      in
+      if Rc_types.needs_rc fty && String.equal sty "ptr" && not is_unboxed then
         emit ctx (Printf.sprintf "call void @march_incrc(ptr %s)" fv);
-      emit_store_field ctx ptr i lty fv
+      emit_store_field ctx ptr i sty fv
     ) all_fields;
     (* Overwrite updated fields *)
     List.iter (fun (fname, atom) ->
       let (idx, _) = field_index_for ctx base_ty fname in
       let (aty, av) = emit_atom ctx atom in
-      emit_store_field ctx ptr idx aty av
+      let sty = slot_ty_of_value_ty aty in
+      emit_store_field ctx ptr idx sty (coerce ctx aty av sty)
     ) updates;
     (* Stamp the shape id on the copy.  When the static shape is known, use
        it; otherwise copy the base record's shape id (header pad word). *)

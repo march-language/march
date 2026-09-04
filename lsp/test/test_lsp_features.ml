@@ -1252,3 +1252,174 @@ end|} in
   let hls = An.document_highlights_at a ~line:l ~character:(c + 1) in
   Alcotest.(check int) "open + close div highlighted" 2 (List.length hls)
 
+
+(* ------------------------------------------------------------------ *)
+(* @[no_alloc] allocation contracts (specs/2026-09-03-...-design.md)   *)
+(* ------------------------------------------------------------------ *)
+
+let no_alloc_fail_src = {|mod Test do
+  ptype Box = Box(Int, String)
+  fn first(b : Box) : Int do
+    match b do
+      Box(x, _) -> x
+    end
+  end
+  @[no_alloc]
+  fn bump(b : Box) : Int do
+    match b do
+      Box(x, y) ->
+        let updated = Box(x + 1, y)
+        let old_x = first(b)
+        first(updated) + old_x
+    end
+  end
+  fn main() : Int do bump(Box(1, "two")) end
+end|}
+
+(** A failing contract is reported at the function's NAME span, with the same
+    text the build prints. *)
+let test_no_alloc_diagnostic_at_name_span () =
+  let a = An.run_tir_pass (analyse no_alloc_fail_src) in
+  let (line, col) = pos_of no_alloc_fail_src "bump(b : Box) : Int" in
+  match List.find_opt (fun (d : Lsp.Types.Diagnostic.t) ->
+      match d.message with
+      | `String s -> contains_sub s "is marked @[no_alloc] but allocates"
+      | _ -> false) a.An.diagnostics with
+  | None -> Alcotest.fail "expected the @[no_alloc] diagnostic"
+  | Some d ->
+    Alcotest.(check int) "line" line d.range.start.line;
+    Alcotest.(check int) "column" col d.range.start.character;
+    Alcotest.(check bool) "severity is Error" true
+      (d.severity = Some Lsp.Types.DiagnosticSeverity.Error)
+
+let no_alloc_ok_src = {|mod Test do
+  ptype Box = Box(Int, String)
+  @[no_alloc]
+  fn bump(b : Box) : Box do
+    match b do
+      Box(x, y) -> Box(x + 1, y)
+    end
+  end
+  fn main() : Int do
+    match bump(Box(1, "two")) do
+      Box(x, _) -> x
+    end
+  end
+end|}
+
+(** A holding contract shows a `✓ no_alloc` lens; a failing one shows none
+    (its diagnostic already covers it). *)
+let test_no_alloc_lens_when_contract_holds () =
+  let a = An.run_tir_pass (analyse no_alloc_ok_src) in
+  (* Non-vacuity: if the contract does NOT hold in the LSP's pipeline the lens
+     is correctly absent, and the assertion below would be testing the wrong
+     thing — so name the diagnostics that fired. *)
+  let msgs = List.filter_map (fun (d : Lsp.Types.Diagnostic.t) ->
+      match d.message with `String s -> Some s | _ -> None) a.An.diagnostics in
+  if List.exists (fun m -> contains_sub m "no_alloc") msgs then
+    Alcotest.failf "contract should hold here, but the LSP reported: %s"
+      (String.concat " | " msgs);
+  Alcotest.(check bool) "lens present" true
+    (List.exists (fun (cl : An.code_lens_item) ->
+         contains_sub cl.An.cl_title "\xe2\x9c\x93 no_alloc") a.An.code_lens_items);
+  let b = An.run_tir_pass (analyse no_alloc_fail_src) in
+  Alcotest.(check bool) "no lens on a failing contract" false
+    (List.exists (fun (cl : An.code_lens_item) ->
+         contains_sub cl.An.cl_title "\xe2\x9c\x93 no_alloc") b.An.code_lens_items)
+
+let quickfix_src = {|mod Test do
+  ptype Box = Box(Int, String)
+  fn bump(b : Box) : Box do
+    match b do
+      Box(x, y) -> Box(x + 1, y)
+    end
+  end
+  fn add(a : Int, b : Int) : Int do a + b end
+  fn main() : Int do
+    match bump(Box(1, "two")) do
+      Box(x, _) -> x + add(1, 2)
+    end
+  end
+end|}
+
+(** Offered on a verified-clean function that reuses in place (the default
+    generation scope), not on one with nothing to protect. *)
+let test_no_alloc_quickfix_offered_on_reuse () =
+  let a = An.run_tir_pass (analyse quickfix_src) in
+  let (line, col) = pos_of quickfix_src "bump(b : Box)" in
+  let acts = An.code_actions_at a ~line ~character:col () in
+  match List.find_opt (fun (ca : Lsp.Types.CodeAction.t) ->
+      ca.title = "Add `@[no_alloc]`") acts with
+  | None -> Alcotest.fail "expected the 'Add `@[no_alloc]`' code action"
+  | Some ca ->
+    (match ca.edit with
+     | Some { changes = Some [ (_, [ e ]) ]; _ } ->
+       Alcotest.(check string) "inserts the hard form" "@[no_alloc]\n  " e.newText;
+       Alcotest.(check int) "on the declaration's line" line e.range.start.line;
+       Alcotest.(check int) "at the declaration's column" 2 e.range.start.character
+     | _ -> Alcotest.fail "expected exactly one insert edit")
+
+let test_no_alloc_quickfix_not_offered_without_reuse () =
+  let a = An.run_tir_pass (analyse quickfix_src) in
+  let (line, col) = pos_of quickfix_src "add(a : Int" in
+  Alcotest.(check bool) "not offered on a plain scalar fn" false
+    (List.exists (fun (ca : Lsp.Types.CodeAction.t) -> ca.title = "Add `@[no_alloc]`")
+       (An.code_actions_at a ~line ~character:col ()))
+
+(* @[no_alloc(transient)]: the same three surfaces, for the weaker form.  The
+   lens names the form so the two contracts can be told apart at a glance, and
+   the quick fix offers whichever form actually holds. *)
+
+let transient_ok_src = {|mod Test do
+  ptype Box = Box(Int, String)
+  @[no_alloc(transient)]
+  fn width(i : Int) : Int do
+    let b = Box(i, "n")
+    match b do
+      Box(_, s) -> String.byte_size(s)
+    end
+  end
+  fn main() : Int do width(1) end
+end|}
+
+let test_transient_lens_names_the_form () =
+  let a = An.run_tir_pass (analyse transient_ok_src) in
+  let msgs = List.filter_map (fun (d : Lsp.Types.Diagnostic.t) ->
+      match d.message with `String s -> Some s | _ -> None) a.An.diagnostics in
+  if List.exists (fun m -> contains_sub m "no_alloc") msgs then
+    Alcotest.failf "the transient contract should hold here, but the LSP reported: %s"
+      (String.concat " | " msgs);
+  Alcotest.(check bool) "lens says which form holds" true
+    (List.exists (fun (cl : An.code_lens_item) ->
+         contains_sub cl.An.cl_title "no_alloc(transient)") a.An.code_lens_items)
+
+let transient_fail_src = {|mod Test do
+  ptype Box = Box(Int, String)
+  @[no_alloc(transient)]
+  fn make(i : Int) : Box do Box(i, "n") end
+  fn main() : Int do
+    match make(1) do
+      Box(x, _) -> x
+    end
+  end
+end|}
+
+let test_transient_diagnostic_at_name_span () =
+  let a = An.run_tir_pass (analyse transient_fail_src) in
+  let (line, col) = pos_of transient_fail_src "make(i : Int) : Box" in
+  match List.find_opt (fun (d : Lsp.Types.Diagnostic.t) ->
+      match d.message with
+      | `String s -> contains_sub s "is marked @[no_alloc(transient)] but retains"
+      | _ -> false) a.An.diagnostics with
+  | None -> Alcotest.fail "expected the @[no_alloc(transient)] diagnostic"
+  | Some d ->
+    Alcotest.(check int) "line" line d.range.start.line;
+    Alcotest.(check int) "column" col d.range.start.character
+
+let test_no_alloc_candidates_are_this_file_only () =
+  let a = An.run_tir_pass (analyse quickfix_src) in
+  Alcotest.(check bool) "candidates exist (guards vacuity)" true
+    (a.An.no_alloc_candidates <> []);
+  Alcotest.(check bool) "no stdlib or dependency function is a candidate" true
+    (List.for_all (fun (_, (sp : Ast.span), _, _) -> sp.Ast.file = a.An.filename)
+       a.An.no_alloc_candidates)

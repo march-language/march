@@ -183,6 +183,7 @@ let emit_term = Llvm_ctx.emit_term
 let llvm_name = Llvm_ctx.llvm_name
 let atom_hash = Llvm_ctx.atom_hash
 let llvm_ty = Llvm_ctx.llvm_ty
+let llvm_field_ty = Llvm_ctx.llvm_field_ty
 let coerce = Llvm_ctx.coerce
 let is_vec_ty = Llvm_ctx.is_vec_ty
 
@@ -748,6 +749,11 @@ let emit_vault_opt_reencode ctx (v : string) (ret_ty : Tir.ty) : string =
     | Tir.TCon ("Option", ([_] as args)) ->
       (match Repr.repr_of_ty ~collision_set:ctx.collision_set ctx.type_defs ret_ty with
        | Repr.Niche _ | Repr.Newtype _ -> false
+       (* Unboxed is unreachable here: the arm is guarded on
+          [TCon ("Option", [_])], and Option is niche-shaped, never a
+          single-ctor scalar aggregate.  Answering as for Boxed keeps the
+          re-encode conservative if that ever changes. *)
+       | Repr.Unboxed _
        | Repr.Boxed ->
          not (List.exists (function Tir.TVar _ -> true | _ -> false) args
               && Repr.is_niche_shaped ~collision_set:ctx.collision_set
@@ -781,7 +787,7 @@ let emit_vault_opt_reencode ctx (v : string) (ret_ty : Tir.ty) : string =
     let some_entry = ctor_entry ctx "Option.Some" 1 in
     let some_ptr = emit_heap_alloc ctx some_entry.Llvm_ctx.ce_tag 1 in
     let field_ty = match List.nth_opt some_entry.Llvm_ctx.ce_fields 0 with
-      | Some t -> llvm_ty t | None -> "ptr" in
+      | Some t -> llvm_field_ty t | None -> "ptr" in
     emit_store_field ctx some_ptr 0 field_ty (coerce ctx "ptr" v field_ty);
     emit ctx (Printf.sprintf "store ptr %s, ptr %s" some_ptr slot);
     emit_term ctx (Printf.sprintf "br label %%%s" l_join);

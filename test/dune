@@ -11,7 +11,7 @@
 (library
  (name march_test_compiler)
  (wrapped false)
- (modules test_compiler test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_ceiling test_cap_unforgeable test_cap_dict test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_ctxesc test_prog_argv)
+ (modules test_compiler test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_ceiling test_cap_unforgeable test_cap_dict test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_ctxesc test_prog_argv test_alloc_contract)
  (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_refinecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_ctxesc march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
 
 (library
@@ -127,6 +127,29 @@
  (alias   runtest)
  (deps    (file test_scheduler_runner))
  (action  (run ./test_scheduler_runner)))
+
+; ── C scheduler pinned-proc tests (march_sched_spawn_pinned / MARCH_PIN_MAIN) ──
+; Built with -DMARCH_NUM_SCHEDULERS=4 so the scheduler-0-only pin queue is
+; actually exercised (pinning is a documented no-op with one scheduler).
+; Asserts the pinned proc executes on the thread that called march_sched_run
+; across spawn, yield re-push and cross-thread wake, while unpinned siblings
+; still run on the worker threads.
+(rule
+ (targets test_scheduler_pin_runner)
+ (deps    test_scheduler_pin.c
+          ../runtime/march_scheduler.c
+          ../runtime/march_scheduler.h
+          ../runtime/march_deque.h)
+ (action  (run %{cc}
+               -std=gnu11 -Wall -Wextra -I../runtime
+               -DMARCH_NUM_SCHEDULERS=4
+               -o %{targets}
+               test_scheduler_pin.c ../runtime/march_scheduler.c
+               -lpthread)))
+(rule
+ (alias   runtest)
+ (deps    (file test_scheduler_pin_runner))
+ (action  (run ./test_scheduler_pin_runner)))
 
 ; ── C scheduler timer tests (min-heap timers + timed park) ──────────────
 ; Multi-scheduler (no -DMARCH_NUM_SCHEDULERS=1): timers must work across the
@@ -1431,6 +1454,36 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff cap_mock/cap_mock_supervised.expected cap_mock_supervised.out)))
+
+; ── Capability mocking reaching the child of a NESTED supervisor ───────────
+; Top supervises Mid supervises Leaf. Mid's spawn glue was passed to
+; register_supervisor_child as a value (for respawn), freezing its arity, so it
+; carried nothing to Leaf. The respawn value is now a closure calling the glue
+; with the capabilities in scope; the runtime incs it per respawn call. Four
+; lines: mocked, mocked after Mid's first restart, mocked after its second,
+; real for a Top spawned outside the block and sent to after it closes.
+(rule
+ (targets cap_mock_supervised_nested_bin cap_mock_supervised_nested.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (source_tree ../stdlib)
+       (file cap_mock/cap_mock_supervised_nested.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --test -o cap_mock_supervised_nested_bin
+        cap_mock/cap_mock_supervised_nested.march)
+   (with-stdout-to cap_mock_supervised_nested.out (system "./cap_mock_supervised_nested_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff cap_mock/cap_mock_supervised_nested.expected cap_mock_supervised_nested.out)))
 
 ; ── Capability mocking as a user writes it: inside a `test` block ─────────
 ; Companion to cap_mock_io above, which drives `main` and diffs stdout. This

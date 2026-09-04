@@ -26,7 +26,11 @@ USAGE='usage: ir-oracle.sh baseline|check <dir>'
 MODE="${1:?$USAGE}"
 DIR="${2:?$USAGE}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-EXE="$ROOT/_build/default/bin/main.exe"
+# MARCH_ORACLE_EXE points the oracle at a FROZEN copy of the compiler so a
+# baseline can keep running while the worktree is rebuilt underneath it (a
+# relink mid-run silently mixes two compilers into one manifest).  A copy
+# cannot find stdlib exe-relatively, so pair it with MARCH_STDLIB.
+EXE="${MARCH_ORACLE_EXE:-$ROOT/_build/default/bin/main.exe}"
 WORK="$DIR/work"
 MANIFEST="$DIR/ir.sha256"
 

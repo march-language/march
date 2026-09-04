@@ -115,6 +115,103 @@ let warning_module_source ~mod_name =
     "mod %s do\n\n  fn f(x : Int, unused_param : Int) : Int do\n    x\n  end\n\nend\n"
     mod_name
 
+(* --------------------------------------------------- forge fix --contracts *)
+
+let read_file_text path =
+  let ic = open_in path in
+  let s = really_input_string ic (in_channel_length ic) in
+  close_in ic; s
+
+(* `bump` reuses its Box in place, so it is in the default generation scope;
+   `add` is verified clean but has nothing to protect. *)
+let contracts_module ~mod_name =
+  Printf.sprintf
+    "mod %s do\n\n\
+    \  ptype Box = Box(Int, String)\n\n\
+    \  fn bump(b : Box) : Box do\n\
+    \    match b do\n\
+    \      Box(x, y) -> Box(x + 1, y)\n\
+    \    end\n\
+    \  end\n\n\
+    \  fn add(a : Int, b : Int) : Int do\n\
+    \    a + b\n\
+    \  end\n\n\
+     end\n"
+    mod_name
+
+(* What `forge fix --contracts` shells out to, run directly and with BOTH
+   streams captured.  Without this the suite can only say "nothing was
+   inserted", which is true of a clean compile that found no candidate AND of
+   a compile that died before printing anything — two very different bugs. *)
+let report_contracts_output file =
+  let tmp = Filename.temp_file "report_contracts" ".out" in
+  let rc =
+    (* The SAME command shape Cmd_fix issues, --no-cap-strict included: a
+       module with no `main` is charged the prelude's IO.Console and fails the
+       ceiling otherwise (see the todo referenced in cmd_fix.ml). *)
+    Sys.command
+      (Printf.sprintf "march --compile --no-cap-strict --report-contracts %s > %s 2>&1"
+         (Filename.quote file) (Filename.quote tmp)) in
+  let ic = open_in tmp in
+  let out = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  (try Sys.remove tmp with Sys_error _ -> ());
+  (rc, out)
+
+let test_fix_contracts_inserts_and_is_idempotent () =
+  setup_hermetic_march ();
+  with_project ~project_type:Project.Lib (fun name root ->
+      ignore name;
+      let f = Filename.concat (Filename.concat root "lib") "boxes.march" in
+      write_file f (contracts_module ~mod_name:"Boxes");
+      (* Non-vacuity: prove the compiler emits a candidate for `bump` before
+         asserting that forge applied one.  A failure here names the actual
+         compiler output instead of leaving an empty diff to guess at. *)
+      let (rc, out) = report_contracts_output f in
+      if rc <> 0 || not (contains out "`bump`") then
+        Alcotest.failf
+          "march --compile --report-contracts did not report `bump` (rc=%d):\n%s"
+          rc out;
+      (match Cmd_fix.run ~contracts:true () with
+       | Ok _ -> ()
+       | Error e -> Alcotest.failf "forge fix --contracts failed: %s" e);
+      let after = read_file_text f in
+      Alcotest.(check bool) "bump got the attribute" true
+        (contains after "@[no_alloc]\n  fn bump");
+      Alcotest.(check bool) "add did not (no reuse to protect)" false
+        (contains after "@[no_alloc]\n  fn add");
+      (* A second run must be a no-op: bump now carries the attribute, so it
+         is out of scope. *)
+      (match Cmd_fix.run ~contracts:true () with
+       | Ok _ -> () | Error e -> Alcotest.failf "second run failed: %s" e);
+      Alcotest.(check string) "file unchanged by the second run" after
+        (read_file_text f))
+
+let test_fix_without_contracts_inserts_nothing () =
+  setup_hermetic_march ();
+  with_project ~project_type:Project.Lib (fun name root ->
+      ignore name;
+      let f = Filename.concat (Filename.concat root "lib") "boxes.march" in
+      write_file f (contracts_module ~mod_name:"Boxes");
+      (match Cmd_fix.run () with
+       | Ok _ -> () | Error e -> Alcotest.failf "forge fix failed: %s" e);
+      Alcotest.(check bool) "no contract inserted without --contracts" false
+        (contains (read_file_text f) "@[no_alloc]"))
+
+let test_fix_contracts_honors_forge_toml_globs () =
+  setup_hermetic_march ();
+  with_project ~project_type:Project.Lib (fun name root ->
+      ignore name;
+      let f = Filename.concat (Filename.concat root "lib") "boxes.march" in
+      write_file f (contracts_module ~mod_name:"Boxes");
+      let toml = Filename.concat root "forge.toml" in
+      let cur = read_file_text toml in
+      write_file toml (cur ^ "\n[contracts]\nno_alloc = [\"*add\"]\n");
+      (match Cmd_fix.run ~contracts:true () with
+       | Ok _ -> () | Error e -> Alcotest.failf "forge fix --contracts failed: %s" e);
+      Alcotest.(check bool) "add is in scope via the glob" true
+        (contains (read_file_text f) "@[no_alloc]\n  fn add"))
+
 (* -------------------------------------------------------------- forge check *)
 
 let test_check_clean_lib () =
@@ -663,5 +760,13 @@ let () =
     "forge run", [
       Alcotest.test_case "interpreted run passes [ffi] sources to the compiler" `Quick
         test_run_interpreted_passes_ffi_sources;
+    ];
+    "forge fix --contracts", [
+      Alcotest.test_case "inserts @[no_alloc] and is idempotent" `Quick
+        test_fix_contracts_inserts_and_is_idempotent;
+      Alcotest.test_case "plain forge fix inserts no contract" `Quick
+        test_fix_without_contracts_inserts_nothing;
+      Alcotest.test_case "forge.toml globs widen the scope" `Quick
+        test_fix_contracts_honors_forge_toml_globs;
     ];
   ]

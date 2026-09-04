@@ -46,11 +46,33 @@ let parse_fix_line line : fix_item option =
     end
   with _ -> None
 
-let collect_all_fixes ~lib_path_env files : fix_item list =
+(* [contracts] switches the input from the ordinary diagnostic stream
+   (`march --check-json`) to the contract-generation one
+   (`march --compile --report-contracts`), which emits the same NDJSON shape
+   with an `insert` fix per function verified allocation-free.  [scope_globs]
+   comes from forge.toml's `[contracts] no_alloc`. *)
+let collect_all_fixes ?(contracts = false) ?(scope_globs = []) ~lib_path_env files
+  : fix_item list =
   let all_items = ref [] in
   List.iter (fun file ->
-    let cmd = Printf.sprintf "%smarch --check-json %s 2>/dev/null"
-      lib_path_env (Filename.quote file) in
+    let cmd =
+      if contracts then
+        (* --no-cap-strict: this mode writes no binary — it stops before code
+           generation — and the capability ceiling exists to gate EMITTED code,
+           which the real build still checks.  Without it the command cannot
+           run on a library at all: compiling a module with no `main` charges
+           that module with the prelude's own `IO.Console` and fails the
+           ceiling, so `forge fix --contracts` would report nothing for every
+           lib project.  See
+           specs/todos/2026-09-03-cap-ceiling-charges-prelude-io-to-mainless-module.md *)
+        Printf.sprintf "%smarch --compile --no-cap-strict --report-contracts%s %s 2>/dev/null"
+          lib_path_env
+          (if scope_globs = [] then ""
+           else " --contract-scope " ^ Filename.quote (String.concat "," scope_globs))
+          (Filename.quote file)
+      else
+        Printf.sprintf "%smarch --check-json %s 2>/dev/null"
+          lib_path_env (Filename.quote file) in
     let ic = Unix.open_process_in cmd in
     (try
       while true do
@@ -168,7 +190,7 @@ let apply_fixes_to_file path items dry_run =
     !count
   end
 
-let run ?(dry_run = false) () =
+let run ?(dry_run = false) ?(contracts = false) () =
   match Project.load () with
   | Error msg -> Error msg
   | Ok proj ->
@@ -190,7 +212,10 @@ let run ?(dry_run = false) () =
     if all_files = [] then Error (Printf.sprintf "no .march files found in %s" lib_dir)
     else begin
       let lib_path_env = Cmd_build.lib_path_env proj in
-      let items = collect_all_fixes ~lib_path_env all_files in
+      let items =
+        collect_all_fixes ~contracts
+          ~scope_globs:(if contracts then proj.Project.contracts_no_alloc else [])
+          ~lib_path_env all_files in
       let root = proj.Project.root in
         let owned = List.filter (fun fi ->
           let abs      = try Unix.realpath fi.fi_file with _ -> fi.fi_file in
@@ -216,7 +241,8 @@ let run ?(dry_run = false) () =
           end
         ) by_file;
         if !total_fixes = 0 then
-          Ok "no auto-fixable diagnostics found"
+          Ok (if contracts then "no allocation contracts to add"
+              else "no auto-fixable diagnostics found")
         else
           Ok (Printf.sprintf "%d file%s changed, %d fix%s applied%s"
             !total_files (if !total_files = 1 then "" else "s")

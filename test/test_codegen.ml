@@ -319,7 +319,12 @@ let rc_types_truth_table : (string * March_tir.Tir.ty * bool * bool) list =
     "TVar \"'_1234\"",     TVar "'_1234",               true,  false;  (* diverges *)
   ]
 
+(* Both predicates now consult [Repr]'s unboxed registry for [TCon] (the
+   [Repr.Unboxed] row), and that registry is process-global: clear it so the
+   table's "Foo"/"List" rows are judged as ordinary boxed types no matter what
+   an earlier test in this runner registered. *)
 let test_rc_types_truth_table () =
+  March_tir.Repr.clear_unboxed_types ();
   List.iter (fun (label, ty, exp_rc, exp_be) ->
     Alcotest.(check bool) (label ^ ": needs_rc") exp_rc
       (March_tir.Rc_types.needs_rc ty);
@@ -328,6 +333,7 @@ let test_rc_types_truth_table () =
   ) rc_types_truth_table
 
 let test_rc_types_divergence_set_exact () =
+  March_tir.Repr.clear_unboxed_types ();
   (* Exactly the {TFn, bare TVar, TTuple, TRecord} rows diverge — computed
      from the live predicates, compared against the constructor-classified
      expectation, so a new divergence (or a silently unified arm) fails
@@ -346,6 +352,152 @@ let test_rc_types_divergence_set_exact () =
     Alcotest.(check bool) (label ^ ": diverges iff TFn/bare-TVar")
       (expected_divergent ty) actual
   ) rc_types_truth_table
+
+(* ── Unboxed small scalar aggregates (Repr.Unboxed, Milestone 3) ──────────
+
+   A single-constructor variant whose fields are all Int/Float/Bool and whose
+   arity is 2..Repr.max_unboxed_arity is represented as an LLVM struct VALUE:
+   `Vec3(Float, Float, Float)` is `{ double, double, double }` in registers,
+   with no heap cell, no header and no refcount.  These pin the three things
+   that make that representation worth having, plus the classification itself.
+
+   The differential half (interpreted == compiled for construction, matching,
+   equality, Show and every heap-slot boundary) lives in the oracle sweep, over
+   test/native/unboxed_aggregate{,_boundaries}.march. *)
+
+let unboxed_vec3_src = {|mod UB do
+  needs IO.Console
+  type Vec3 = Vec3(Float, Float, Float)
+  fn forward(yaw : Float, pitch : Float) : Vec3 do
+    Vec3(0.0 -. yaw, pitch, yaw *. pitch)
+  end
+  fn vx(v : Vec3) : Float do
+    match v do
+      Vec3(x, _, _) -> x
+    end
+  end
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    println(float_to_string(vx(forward(1.0, 2.0))))
+  end
+end|}
+
+let test_unboxed_aggregate_declared_as_struct () =
+  let ir = emit_tco_opt_ir unboxed_vec3_src in
+  Alcotest.(check bool)
+    "the identified struct type is declared once in the preamble" true
+    (ir_contains ir "%ub.Vec3 = type { double, double, double }")
+
+let test_unboxed_aggregate_built_without_alloc () =
+  let ir = emit_tco_opt_ir unboxed_vec3_src in
+  (* Construction is an insertvalue chain ... *)
+  Alcotest.(check bool) "constructed with insertvalue" true
+    (ir_contains ir "insertvalue %ub.Vec3");
+  (* ... and destructuring is extractvalue, not a field load. *)
+  Alcotest.(check bool) "destructured with extractvalue" true
+    (ir_contains ir "extractvalue %ub.Vec3");
+  (* ... and nothing in this program reaches march_alloc.  The module builds
+     only Vec3 values and a println of a formatted Float, so a single
+     march_alloc CALL here would mean the cell came back. *)
+  Alcotest.(check int) "no march_alloc call anywhere in the module" 0
+    (ir_count ir "call ptr @march_alloc(")
+
+(* The RED control for the two above: with MARCH_NO_UNBOX the same source must
+   go back to allocating a cell, which is what proves the assertions are
+   measuring the representation and not some incidental property of the
+   program.  The env var is read through a [Lazy.t] in [Repr], so it cannot be
+   flipped inside this process — assert the pre-Milestone-3 shape by clearing
+   the registry directly instead, which is the same code path the flag takes. *)
+let test_unboxed_aggregate_boxed_control () =
+  let m = parse_and_desugar unboxed_vec3_src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let tir = March_tir.Mono.monomorphize tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  (* Register the EMPTY table and pin it to this module's types, so the
+     [ensure_unboxed_types] calls inside Perceus/Escape and [make_ctx] all
+     inherit "nothing is unboxed". *)
+  March_tir.Repr.set_unboxed_types ~enabled:false tir.March_tir.Tir.tm_types;
+  let tir = March_tir.Perceus.perceus tir in
+  let tir = March_tir.Drop.run tir in
+  let tir = March_tir.Escape.escape_analysis tir in
+  let ir  = March_tir.Llvm_emit.emit_module tir in
+  March_tir.Repr.clear_unboxed_types ();
+  Alcotest.(check bool) "control: no struct type declared" false
+    (ir_contains ir "%ub.Vec3 = type");
+  Alcotest.(check bool)
+    "control: the same program DOES allocate a cell when Vec3 stays boxed" true
+    (ir_count ir "call ptr @march_alloc(" > 0)
+
+(* The eligible class, stated as a table over [Repr.set_unboxed_types].  Each
+   rejected row is rejected for its own reason, so a widening of the predicate
+   shows up here as a specific row flipping rather than as a mysterious IR
+   diff somewhere else. *)
+let test_unboxed_aggregate_eligible_class () =
+  let open March_tir.Tir in
+  let cases = [
+    "3 Floats",            TDVariant ("Vec3", [("Vec3", [TFloat; TFloat; TFloat])]),      true;
+    "2 Ints",              TDVariant ("P", [("P", [TInt; TInt])]),                        true;
+    "Bool + 2 Ints",       TDVariant ("Hit", [("Hit", [TBool; TInt; TInt])]),             true;
+    "4 fields (max)",      TDVariant ("Sw", [("Sw", [TFloat; TFloat; TFloat; TBool])]),   true;
+    "5 fields (over max)", TDVariant ("Big", [("Big", [TInt; TInt; TInt; TInt; TInt])]),  false;
+    "1 field (Newtype)",   TDVariant ("N", [("N", [TInt; ])]),                            false;
+    "0 fields",            TDVariant ("Z", [("Z", [])]),                                  false;
+    "a String field",      TDVariant ("S", [("S", [TInt; TString])]),                     false;
+    "an ADT field",        TDVariant ("A", [("A", [TInt; TCon ("Foo", [])])]),            false;
+    "a Unit field",        TDVariant ("U", [("U", [TInt; TUnit])]),                       false;
+    "two constructors",    TDVariant ("Two", [("L", [TInt; TInt]); ("R", [TInt; TInt])]), false;
+    "a record",            TDRecord ("R", [("a", TInt); ("b", TInt)]),                    false;
+  ] in
+  List.iter (fun (label, td, expected) ->
+      March_tir.Repr.set_unboxed_types [td];
+      let name = match td with
+        | TDVariant (n, _) | TDRecord (n, _) | TDClosure (n, _) -> n in
+      Alcotest.(check bool) (label ^ ": unboxed?") expected
+        (March_tir.Repr.unboxed_of_type_name name <> None))
+    cases;
+  (* An actor message type is excluded whatever its shape: it needs a runtime
+     tag so a foreign message can be told apart at dispatch. *)
+  March_tir.Repr.set_unboxed_types
+    [ TDVariant ("Counter" ^ March_tir.Tir_names.actor_msg_suffix,
+                 [("Inc", [TInt; TInt])]) ];
+  Alcotest.(check int) "an actor message type is never unboxed" 0
+    (List.length (March_tir.Repr.unboxed_types ()));
+  March_tir.Repr.clear_unboxed_types ()
+
+let test_unboxed_aggregate_rc_predicates () =
+  let open March_tir.Tir in
+  March_tir.Repr.set_unboxed_types
+    [ TDVariant ("Vec3", [("Vec3", [TFloat; TFloat; TFloat])]) ];
+  let v = TCon ("Vec3", []) in
+  Alcotest.(check bool) "needs_rc: an inline aggregate has no refcount" false
+    (March_tir.Rc_types.needs_rc v);
+  Alcotest.(check bool) "borrow_eligible: it is copied, never referenced" false
+    (March_tir.Rc_types.borrow_eligible v);
+  (* An ordinary TCon in the same table is unaffected. *)
+  Alcotest.(check bool) "an ordinary ADT still needs RC" true
+    (March_tir.Rc_types.needs_rc (TCon ("Other", [])));
+  March_tir.Repr.clear_unboxed_types ()
+
+(* A type named in an extern signature stays Boxed: the C side is handed the
+   boxed cell (that is the layout every extern was written against), but that
+   box would be a fresh rc=1 cell no one owns — [needs_rc] is false for the
+   aggregate, so Perceus emits no caller-side drop.  Keeping the type boxed end
+   to end removes the question. *)
+let test_unboxed_aggregate_ffi_type_stays_boxed () =
+  let open March_tir.Tir in
+  let td = TDVariant ("Vec3", [("Vec3", [TFloat; TFloat; TFloat])]) in
+  March_tir.Repr.set_unboxed_types [td];
+  Alcotest.(check bool) "unboxed without an extern" true
+    (March_tir.Repr.unboxed_of_type_name "Vec3" <> None);
+  March_tir.Repr.set_unboxed_types
+    ~externs:[ { ed_march_name = "f"; ed_c_name = "f"; ed_lib_name = "m";
+                 ed_js_sym = "f"; ed_params = [TCon ("Vec3", [])];
+                 ed_consumed = [false]; ed_blocking = false; ed_raises = false;
+                 ed_ret = TInt } ]
+    [td];
+  Alcotest.(check bool) "boxed once it crosses an extern signature" false
+    (March_tir.Repr.unboxed_of_type_name "Vec3" <> None);
+  March_tir.Repr.clear_unboxed_types ()
 
 (* ── FnFused coverage: flag-vs-reality cross-check (Wave 3 Chunk 2 Task 1) ──
    fusion.ml's three synthesis sites (gen_map_fold / gen_filter_fold /
@@ -10107,6 +10259,72 @@ let test_string_literal_operand_no_leak_compiled () =
        grow with the iteration count)"
       "BOUNDED" run_out
 
+(* The runtime-gauge half of the unboxed-aggregate story (the IR assertions
+   live in the "unboxed_aggregates" group above): a vector-math loop over an
+   inline aggregate must move march_live_allocs by ZERO.  Same shape as the
+   two leak probes above — warm the code once so any one-off permanent cell is
+   already live at the baseline, then run the same loop 200x longer and assert
+   the gauge has not moved.  Unlike those, the assertion is exact rather than
+   bounded: the whole point of the representation is that a Vec3 never reaches
+   the allocator at all, so any growth is a regression.
+
+   Non-vacuity: the same program compiled with MARCH_NO_UNBOX=1 (the
+   representation escape hatch) allocates one 40-byte cell per iteration and
+   prints "GREW 20000". *)
+let test_unboxed_aggregate_zero_live_allocs_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_ubgauge"
+    "mod UbGauge do\n\
+    \  needs IO.Console\n\
+    \  needs Ffi\n\
+    \  needs IO.Foreign\n\
+    \  extern \"m\" : Cap(Ffi) do\n\
+    \    fn live_allocs(): Int = \"march_live_allocs\"\n\
+    \  end\n\
+    \  type Vec3 = Vec3(Float, Float, Float)\n\
+    \  fn forward(yaw : Float, pitch : Float) : Vec3 do\n\
+    \    let cp = Math.cos(pitch)\n\
+    \    Vec3(0.0 -. Math.sin(yaw) *. cp, Math.sin(pitch), 0.0 -. Math.cos(yaw) *. cp)\n\
+    \  end\n\
+    \  fn dot(a : Vec3, b : Vec3) : Float do\n\
+    \    match a do\n\
+    \      Vec3(ax, ay, az) ->\n\
+    \        match b do\n\
+    \          Vec3(bx, b2, bz) -> ax *. bx +. ay *. b2 +. az *. bz\n\
+    \        end\n\
+    \    end\n\
+    \  end\n\
+    \  pfn spin(i : Int, n : Int, acc : Float) : Float do\n\
+    \    if i >= n do acc\n\
+    \    else\n\
+    \      let v = forward(int_to_float(i) *. 0.001, 0.25)\n\
+    \      spin(i + 1, n, acc +. dot(v, v))\n\
+    \    end\n\
+    \  end\n\
+    \  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do\n\
+    \    let warm = spin(0, 100, 0.0)\n\
+    \    let base = live_allocs()\n\
+    \    let bulk = spin(0, 20000, 0.0)\n\
+    \    let grew = live_allocs() - base\n\
+    \    if warm +. bulk > 0.0 && grew == 0 do\n\
+    \      println(\"ZERO\")\n\
+    \    else\n\
+    \      println(\"GREW \" ++ int_to_string(grew))\n\
+    \    end\n\
+    \  end\n\
+     end\n"
+  in
+  let bin = Filename.concat tmp "ubgaugebin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Printf.sprintf "%s 2>&1" (Filename.quote bin)) in
+    Alcotest.(check string)
+      "a Vec3-heavy loop never reaches the allocator: an unboxed aggregate is \
+       built with insertvalue, not march_alloc, so the runtime's live-object \
+       count must not move at all"
+      "ZERO" run_out
+
 (* Static capture-free closures (Task 1, lib/tir/llvm_emit.ml): a top-level
    named fn used as a first-class value now references ONE immortal
    `internal global` closure object per fn (@<fn>$static_clo, refcount
@@ -14377,6 +14595,16 @@ let codegen_suites =
           Alcotest.test_case "filter+fold fused fn is FnFused"     `Quick test_fnfused_filter_fold_tagged;
           Alcotest.test_case "map+filter+fold fused fn is FnFused" `Quick test_fnfused_map_filter_fold_tagged;
           Alcotest.test_case "no FnFused when nothing fuses"       `Quick test_fnfused_absent_when_not_fused;
+        ] );
+      ( "unboxed_aggregates", [
+          Alcotest.test_case "identified struct type declared"        `Quick test_unboxed_aggregate_declared_as_struct;
+          Alcotest.test_case "built/destructured without march_alloc" `Quick test_unboxed_aggregate_built_without_alloc;
+          Alcotest.test_case "RED control: boxed repr does allocate"  `Quick test_unboxed_aggregate_boxed_control;
+          Alcotest.test_case "eligible class"                         `Quick test_unboxed_aggregate_eligible_class;
+          Alcotest.test_case "needs_rc/borrow_eligible are false"     `Quick test_unboxed_aggregate_rc_predicates;
+          Alcotest.test_case "compiled Vec3 loop moves march_live_allocs by zero" `Slow
+            test_unboxed_aggregate_zero_live_allocs_compiled;
+          Alcotest.test_case "a type in an extern signature stays boxed" `Quick test_unboxed_aggregate_ffi_type_stays_boxed;
         ] );
       ( "rc_types", [
           Alcotest.test_case "needs_rc/borrow_eligible truth table" `Quick test_rc_types_truth_table;
