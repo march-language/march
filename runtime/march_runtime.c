@@ -279,14 +279,104 @@ static void gc_trace_atexit(void) {
 /* ── Allocation ──────────────────────────────────────────────────────── */
 
 /* Net count of live march objects (alloc +, free-on-rc=0 -).  An FFI/test
- * leak gauge exposed via march_live_allocs(); relaxed atomics keep the hot
- * RC paths cheap.  See specs/2026-06-19-c-ffi-abi-design.md §14.4. */
-static _Atomic int64_t march_live_alloc_count = 0;
-int64_t march_live_allocs(void) {
-    return atomic_load_explicit(&march_live_alloc_count, memory_order_relaxed);
+ * leak gauge exposed via march_live_allocs(); see
+ * specs/2026-06-19-c-ffi-abi-design.md §14.4.
+ *
+ * PER-THREAD slots, summed on read.  This gauge is always on -- not behind a
+ * debug flag -- so it sits on the two hottest paths in the runtime
+ * (march_alloc, and every RC free-on-zero branch).  A single process-wide
+ * atomic made every scheduler thread read-modify-write ONE cache line there,
+ * which is enough on its own to make allocation-heavy parallel code scale
+ * negatively: on an M3 Max, a List.pmap_n over 64 cons-allocating tasks ran
+ * ~3x SLOWER on 14 scheduler threads than on 1, where the same code without
+ * the counter sped up ~3.4x.
+ *
+ * Each thread writes only its own slot, with a relaxed load/store pair rather
+ * than an atomic RMW -- a plain ldr/str, no bus lock, no sharing.  The slot is
+ * _Atomic solely so the reader's concurrent load is defined behaviour instead
+ * of a data race.
+ *
+ * Allocation and freeing are NOT thread-affine: an object allocated on one
+ * scheduler thread is routinely freed on another, so an individual slot can go
+ * arbitrarily negative or positive and only the SUM is meaningful.  For the
+ * sum to stay correct across thread lifetimes, an exiting thread folds its
+ * residual into march_live_residual (via a pthread_key_t destructor) and
+ * releases its slot for reuse; the reader walks the slot list and adds the
+ * residual.  Slots are never freed, so the walk is lock-free.
+ *
+ * Exactness under concurrency is neither required nor previously provided --
+ * the gauge is read between frames by FFI/leak tests, and memory_order_relaxed
+ * already gave no ordering guarantee. */
+typedef struct march_live_slot {
+    _Atomic int64_t count;                   /* owner-written, anyone-read */
+    _Atomic int in_use;                      /* 0 = free for a new thread   */
+    struct march_live_slot *_Atomic next;
+} march_live_slot;
+
+static march_live_slot *_Atomic march_live_slot_head = NULL;
+static _Atomic int64_t march_live_residual = 0;   /* folded from exited threads */
+static _Thread_local march_live_slot *march_live_self = NULL;
+static pthread_key_t march_live_key;
+static pthread_once_t march_live_once = PTHREAD_ONCE_INIT;
+
+/* Thread-exit: move this thread's net count into the process-wide residual and
+ * hand the slot back.  The exchange makes the move atomic with respect to a
+ * concurrent reader, so the count is never seen twice nor lost. */
+static void march_live_slot_release(void *arg) {
+    march_live_slot *s = (march_live_slot *)arg;
+    int64_t n = atomic_exchange_explicit(&s->count, 0, memory_order_relaxed);
+    if (n) atomic_fetch_add_explicit(&march_live_residual, n, memory_order_relaxed);
+    march_live_self = NULL;
+    atomic_store_explicit(&s->in_use, 0, memory_order_release);
 }
-#define MARCH_ALLOC_BUMP() atomic_fetch_add_explicit(&march_live_alloc_count, 1, memory_order_relaxed)
-#define MARCH_FREE_BUMP()  atomic_fetch_sub_explicit(&march_live_alloc_count, 1, memory_order_relaxed)
+
+static void march_live_key_init(void) {
+    pthread_key_create(&march_live_key, march_live_slot_release);
+}
+
+/* Claim a free slot (a thread that has since exited), else push a new one. */
+static march_live_slot *march_live_slot_acquire(void) {
+    pthread_once(&march_live_once, march_live_key_init);
+    for (march_live_slot *s = atomic_load_explicit(&march_live_slot_head, memory_order_acquire);
+         s; s = atomic_load_explicit(&s->next, memory_order_acquire)) {
+        int expected = 0;
+        if (atomic_compare_exchange_strong_explicit(&s->in_use, &expected, 1,
+                memory_order_acq_rel, memory_order_relaxed)) {
+            march_live_self = s;
+            pthread_setspecific(march_live_key, s);
+            return s;
+        }
+    }
+    march_live_slot *s = (march_live_slot *)calloc(1, sizeof *s);
+    if (!s) { fputs("march: out of memory\n", stderr); exit(1); }
+    atomic_store_explicit(&s->in_use, 1, memory_order_relaxed);
+    march_live_slot *head = atomic_load_explicit(&march_live_slot_head, memory_order_relaxed);
+    do {
+        atomic_store_explicit(&s->next, head, memory_order_relaxed);
+    } while (!atomic_compare_exchange_weak_explicit(&march_live_slot_head, &head, s,
+                 memory_order_release, memory_order_relaxed));
+    march_live_self = s;
+    pthread_setspecific(march_live_key, s);
+    return s;
+}
+
+static inline void march_live_bump(int64_t d) {
+    march_live_slot *s = march_live_self;
+    if (__builtin_expect(s == NULL, 0)) s = march_live_slot_acquire();
+    atomic_store_explicit(&s->count,
+        atomic_load_explicit(&s->count, memory_order_relaxed) + d,
+        memory_order_relaxed);
+}
+
+int64_t march_live_allocs(void) {
+    int64_t total = atomic_load_explicit(&march_live_residual, memory_order_relaxed);
+    for (march_live_slot *s = atomic_load_explicit(&march_live_slot_head, memory_order_acquire);
+         s; s = atomic_load_explicit(&s->next, memory_order_acquire))
+        total += atomic_load_explicit(&s->count, memory_order_relaxed);
+    return total;
+}
+#define MARCH_ALLOC_BUMP() march_live_bump(1)
+#define MARCH_FREE_BUMP()  march_live_bump(-1)
 
 /* If [p] is an FFI resource cell (MARCH_RESOURCE_TAG), run its destructor on
  * the wrapped native pointer before the cell itself is freed.  Called from
