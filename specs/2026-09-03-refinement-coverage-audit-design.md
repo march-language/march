@@ -1,9 +1,7 @@
 # Refinement coverage audit
 
-Status: landed 2026-09-03. Commit range `5dbaf235..07db9bf2` (Tasks 1-4),
-plus this doc/todo/CHANGELOG commit (`docs: record the refinement coverage
-audit and its baseline`), which lands immediately after `07db9bf2` on the
-same branch.
+Status: landed 2026-09-03. Commit range `5dbaf235..c08af2db` (Tasks 1-4;
+Task 4 is `07db9bf2` (baseline/CI) and `c08af2db` (docs/todos/record)).
 
 ## The problem
 
