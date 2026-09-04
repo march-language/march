@@ -141,6 +141,28 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`MARCH_NUM_SCHEDULERS` was a silent ceiling, not a setting.** The
+  environment variable could only ever *lower* the OS scheduler-thread count:
+  a request above the compile-time default (4) was dropped without a word, so
+  `MARCH_NUM_SCHEDULERS=14` ran four threads and reported nothing. Every
+  parallel-scaling measurement taken on a machine with more than four cores
+  was therefore comparing four threads against four threads, and CPU-bound
+  `pmap`/`pmap_n` work looked like it plateaued at ~4x when it had simply
+  stopped being given threads. The variable is now a real request, honoured up
+  to `MARCH_MAX_SCHEDULERS` (a compile-time bound, default 64, that sizes the
+  runtime's scheduler table); `MARCH_NUM_SCHEDULERS=auto` asks for one
+  scheduler per online CPU. A request the build cannot satisfy is still
+  clamped but now warns on stderr naming both the request and the maximum, and
+  a malformed or non-positive value is reported instead of being silently
+  reinterpreted. The compile-time default is unchanged at 4, so no program's
+  behaviour changes unless it sets the variable. Measured on a 14-core M3 Max
+  (64 CPU-bound `pmap_n` tasks, medians of 3): 1984 ms at 1 thread, 342 ms at
+  4, 118 ms at 10, 105 ms at 14, 109 ms at 20. The old code resolved every
+  request of 4 or more to 4, i.e. it produced the 342 ms row and never left
+  it — a ~5.8x ceiling where the real span is ~18.9x. (Measured under load
+  average ~170; the ratios are inflated by contention for the machine, so the
+  shape rather than the magnitude is the result.)
+
 - A supervisor **nested under another supervisor** now passes its
   capabilities on to its own children, including the fresh children it
   creates each time it is restarted. Previously only a top-level supervisor's

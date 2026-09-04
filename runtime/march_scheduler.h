@@ -64,10 +64,39 @@
  * this many march_sched_tick() calls within a single scheduler turn. */
 #define MARCH_REDUCTION_BUDGET  4000
 
-/* Number of OS-thread schedulers.  Override at compile time with
- * -DMARCH_NUM_SCHEDULERS=N.  Default is 4. */
+/* DEFAULT number of OS-thread schedulers, used when the MARCH_NUM_SCHEDULERS
+ * environment variable is unset or unusable.  Override at compile time with
+ * -DMARCH_NUM_SCHEDULERS=N.  Default is 4.
+ *
+ * This is a DEFAULT, not a ceiling: the environment variable of the same name
+ * may raise the count as well as lower it, up to MARCH_MAX_SCHEDULERS below.
+ * (It was a silent ceiling until 2026-09; MARCH_NUM_SCHEDULERS=14 ran four
+ * threads and said nothing, which made every parallel-scaling measurement on
+ * a >4-core machine wrong.  Written up in
+ * specs/progress/2026-09-04-scheduler-count-env-was-a-silent-ceiling.md) */
 #ifndef MARCH_NUM_SCHEDULERS
 #  define MARCH_NUM_SCHEDULERS 4
+#endif
+
+/* Hard upper bound on the scheduler count, i.e. the size of the statically
+ * allocated scheduler table.  A larger request from the environment is
+ * clamped to this and reported on stderr.
+ *
+ * Why static rather than sized-to-order at init: g_scheds is indexed on the
+ * work-stealing hot path in march_sched_run, and a static array keeps that a
+ * fixed-address index instead of a load-then-index through a global pointer.
+ * The table is not free -- sizeof(march_scheduler) is dominated by the 4096-
+ * slot Chase-Lev deque, ~32 KiB per entry, so 64 entries is ~2 MiB -- but it
+ * lives in BSS and march_sched_init only ever touches the entries actually in
+ * use, so unused slots are never faulted in and cost no resident memory.
+ * Raise it at compile time with -DMARCH_MAX_SCHEDULERS=N on a machine with
+ * more than 64 cores. */
+#ifndef MARCH_MAX_SCHEDULERS
+#  define MARCH_MAX_SCHEDULERS 64
+#endif
+#if MARCH_NUM_SCHEDULERS > MARCH_MAX_SCHEDULERS
+#  undef  MARCH_MAX_SCHEDULERS
+#  define MARCH_MAX_SCHEDULERS MARCH_NUM_SCHEDULERS
 #endif
 
 /* Preemption quantum in microseconds.  The preemption daemon sends SIGUSR1
@@ -343,6 +372,12 @@ typedef struct march_scheduler {
 
 /* Initialize the global scheduler.  Call once before any other sched fn. */
 void         march_sched_init(void);
+
+/* Number of OS scheduler threads this process resolved at march_sched_init:
+ * the MARCH_NUM_SCHEDULERS environment request when it is usable, otherwise
+ * the compile-time default, always within [1, MARCH_MAX_SCHEDULERS].  Zero
+ * before the first march_sched_init. */
+int          march_sched_num_schedulers(void);
 
 /* Run the scheduler loop until all spawned processes are DEAD.
  * Returns to the caller once all work drains.  Spawns N-1 worker threads

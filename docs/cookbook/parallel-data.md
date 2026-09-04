@@ -239,9 +239,15 @@ end
 
 ### When parallelism pays
 
-The March runtime runs 4 OS scheduler threads (`MARCH_NUM_SCHEDULERS = 4`).  Theoretical
-maximum speedup is 4×.  In practice, how close you get depends almost entirely on **how much
-work each element does**:
+The March runtime runs **4** OS scheduler threads by default, whatever the machine's core
+count, so the default theoretical maximum speedup is 4×.  Raise it at run time with the
+`MARCH_NUM_SCHEDULERS` environment variable — `MARCH_NUM_SCHEDULERS=auto` gives one scheduler
+per online CPU — and the ceiling moves with it.  The numbers below are at the default of 4;
+if you are benchmarking parallel scaling, set the variable explicitly and say what you set it
+to, or you will be comparing 4 threads against 4 threads.
+
+In practice, how close you get to the ceiling depends almost entirely on **how much work each
+element does**:
 
 | Per-element work | Example | Observed speedup (4 workers) |
 |-----------------|---------|------------------------------|
