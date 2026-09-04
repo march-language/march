@@ -210,7 +210,7 @@ let rejects name ?(flags = "") src needle =
 
 let live_src = {|mod Main do
 needs IO
-ptype Box = Box(Int, Int)
+ptype Box = Box(Int, String)
 fn first(b : Box) : Int do
   match b do
     Box(x, _) -> x
@@ -225,7 +225,7 @@ fn bump_copied(b : Box) : Int do
       first(updated) + old_x
   end
 end
-fn main(cap : Cap(IO)) : Unit do println(int_to_string(bump_copied(Box(1, 2)))) end
+fn main(cap : Cap(IO)) : Unit do println(int_to_string(bump_copied(Box(1, "two")))) end
 end|}
 
 let test_reject_live_scrutinee () =
@@ -469,7 +469,81 @@ end|}
 
 let test_reject_float_box () = rejects "float box" floatbox_src "a Float is boxed here"
 
+(* ── Unboxed small scalar aggregates (Repr.Unboxed) ───────────────────────
+
+   The motivating case for the representation: `forward` builds a Vec3 from
+   three scalars, so there is no dying cell for FBIP to reuse and no caller
+   whose frame it could be promoted into — under the boxed representation it
+   is an unconditional march_alloc(40) and the contract cannot hold.  As an
+   inline aggregate it is three doubles in registers and the contract does
+   hold, transitively through a caller that only reads it back. *)
+let unboxed_agg_src = {|mod Main do
+needs IO
+type Vec3 = Vec3(Float, Float, Float)
+@[no_alloc]
+fn forward(yaw : Float, pitch : Float) : Vec3 do
+  let cp = Math.cos(pitch)
+  Vec3(0.0 -. Math.sin(yaw) *. cp, Math.sin(pitch), 0.0 -. Math.cos(yaw) *. cp)
+end
+@[no_alloc]
+fn dot(a : Vec3, b : Vec3) : Float do
+  match a do
+    Vec3(ax, ay, az) ->
+      match b do
+        Vec3(bx, b2, bz) -> ax *. bx +. ay *. b2 +. az *. bz
+      end
+  end
+end
+@[no_alloc]
+fn energy(yaw : Float) : Float do
+  let v = forward(yaw, 0.25)
+  dot(v, v)
+end
+fn main(cap : Cap(IO)) : Unit do println(int_to_string(float_round(energy(0.0) *. 1000.0))) end
+end|}
+
+let test_accept_unboxed_aggregate () =
+  accepts "unboxed aggregate" unboxed_agg_src "1000\n"
+
+(* The RED control, and the exact diagnostic the representation removes.
+   MARCH_NO_UNBOX=1 restores the pre-Milestone-3 representation, so the same
+   program must fail with the boxed verdict — without this the accept above
+   could pass for any reason at all.
+
+   The source carries a distinguishing comment: the content-addressed artifact
+   cache keys on source + compiler, and the accept run just compiled the same
+   text, so an identical string would be answered from the cache and the
+   control would be vacuous. *)
+let unboxed_agg_boxed_src =
+  "-- RED control: compiled with MARCH_NO_UNBOX=1\n" ^ unboxed_agg_src
+
+let compile_env ~env src =
+  let exe = Test_cap_ceiling.compiler_exe in
+  let f = Filename.temp_file "noalloc_env" ".march" in
+  let oc = open_out f in output_string oc src; close_out oc;
+  let bin = Filename.temp_file "noalloc_env" ".bin" in
+  let log = Filename.temp_file "noalloc_env" ".log" in
+  let rc = Sys.command (Printf.sprintf "%s %s --compile -o %s %s > %s 2>&1"
+                          env (Filename.quote exe) (Filename.quote bin)
+                          (Filename.quote f) (Filename.quote log)) in
+  let ic = open_in log in
+  let out = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  List.iter (fun p -> try Sys.remove p with _ -> ()) [f; bin; log];
+  (rc, out)
+
+let test_reject_unboxed_aggregate_when_boxed () =
+  let (rc, out) = compile_env ~env:"MARCH_NO_UNBOX=1" unboxed_agg_boxed_src in
+  if rc = 0 then
+    Alcotest.failf
+      "RED control: with the boxed representation `forward` must fail its \
+       contract, but the compile succeeded:\n%s" out;
+  if not (contains "constructor `Vec3` is allocated here" out) then
+    Alcotest.failf "RED control: missing the boxed verdict in:\n%s" out
+
 let accept_tests = [
+  Alcotest.test_case "accept: unboxed scalar aggregate"   `Quick test_accept_unboxed_aggregate;
+  Alcotest.test_case "RED control: boxed Vec3 is rejected" `Quick test_reject_unboxed_aggregate_when_boxed;
   Alcotest.test_case "accept: FBIP tree transform"        `Quick test_accept_fbip_tree;
   Alcotest.test_case "accept: accumulator reuses Cons"    `Quick test_accept_accumulator_reuse;
   Alcotest.test_case "accept: TRMC producer with --trmc"  `Quick test_accept_trmc_with_flag;
@@ -490,7 +564,7 @@ let policy_reuse_src = {|mod Main do
 needs IO
 type DSP = DSP
 type NoAlloc = NoAlloc
-ptype Box = Box(Int, Int)
+ptype Box = Box(Int, String)
 fn bump(_tag : Tagged(DSP, NoAlloc), b : Box) : Box do
   match b do
     Box(x, y) -> Box(x + 1, y)
@@ -508,7 +582,7 @@ let policy_alloc_src = {|mod Main do
 needs IO
 type DSP = DSP
 type NoAlloc = NoAlloc
-ptype Box = Box(Int, Int)
+ptype Box = Box(Int, String)
 fn first(b : Box) : Int do
   match b do
     Box(x, _) -> x
@@ -541,7 +615,7 @@ let tests = tests @ policy_tests
    has nothing to protect, so it is out of scope unless a glob names it. *)
 let report_src = {|mod Main do
 needs IO
-ptype Box = Box(Int, Int)
+ptype Box = Box(Int, String)
 fn bump(b : Box) : Box do
   match b do
     Box(x, y) -> Box(x + 1, y)
@@ -549,7 +623,7 @@ fn bump(b : Box) : Box do
 end
 fn add(a : Int, b : Int) : Int do a + b end
 fn main(cap : Cap(IO)) : Unit do
-  match bump(Box(1, 2)) do
+  match bump(Box(1, "two")) do
     Box(x, _) -> println(int_to_string(x + add(1, 2)))
   end
 end

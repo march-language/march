@@ -46,10 +46,18 @@ let emit_fv_load ~emit_atom ~emit_expr ctx (v : Tir.var) (rhs : Tir.expr)
        and conditionally untag to the field's concrete type via `coerce`.
        Closure free-vars (the other `$fv` producer) keep the direct native load,
        so this is inert for defun-generated apply fns. *)
+    (* A heap slot is 8 bytes, so an unboxed aggregate lives there BOXED
+       ([Llvm_ctx.llvm_field_ty]).  Load the slot as ptr and let [coerce]
+       rebuild the struct value the binder's type calls for — the same
+       slot-vs-value split the tuple arm above makes for a tagged scalar. *)
+    let slot_ty = Llvm_ctx.llvm_field_ty v.Tir.v_ty in
     let fv = match atom_tir_ty obj_atom with
       | Tir.TTuple _ ->
         let raw = emit_load_field ctx obj_val field_idx "ptr" in
         coerce ctx "ptr" raw field_ty
+      | _ when slot_ty <> field_ty ->
+        let raw = emit_load_field ctx obj_val field_idx slot_ty in
+        coerce ctx slot_ty raw field_ty
       | _ -> emit_load_field ctx obj_val field_idx field_ty
     in
     let slot = alloca_name ctx (llvm_name v.Tir.v_name) in

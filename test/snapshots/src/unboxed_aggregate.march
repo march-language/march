@@ -1,0 +1,30 @@
+-- Unboxed small scalar aggregate (Repr.Unboxed): pins the TIR SHAPE around a
+-- type that codegen represents as an LLVM struct value rather than a heap
+-- cell.  The representation decision itself is invisible in TIR — `Vec3(...)`
+-- is still an EAlloc and the match is still an ECase — and that is the point
+-- of pinning it here: what must NOT appear is a Perceus inc/dec around a
+-- value with no refcount (Rc_types.needs_rc is false for it), or an
+-- EStackAlloc from escape analysis promoting a cell that was never allocated.
+mod UnboxedAggregate do
+  needs IO.Console
+  type Vec3 = Vec3(Float, Float, Float)
+
+  fn forward(yaw : Float, pitch : Float) : Vec3 do
+    let cp = pitch *. 2.0
+    Vec3(0.0 -. yaw *. cp, pitch, 0.0 -. cp)
+  end
+
+  fn dot(a : Vec3, b : Vec3) : Float do
+    match a do
+      Vec3(ax, ay, az) ->
+        match b do
+          Vec3(bx, b2, bz) -> ax *. bx +. ay *. b2 +. az *. bz
+        end
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    let v = forward(0.5, 0.25)
+    println(float_to_string(dot(v, v)))
+  end
+end

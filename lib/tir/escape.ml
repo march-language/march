@@ -103,6 +103,11 @@ let alloc_emits_heap_cell
     in
     (match Repr.repr_of_ty ~collision_set type_defs (Tir.TCon (type_name, [])) with
      | Repr.Newtype _ | Repr.Niche _ -> false
+     (* Milestone 3: an unboxed aggregate's "alloc" is an [insertvalue] chain,
+        no cell at all — the same reason Newtype/Niche return false here.
+        Promoting one would force a boxed stack cell whose consumers all decode
+        it as a struct value. *)
+     | Repr.Unboxed _ -> false
      | Repr.Boxed -> not (Repr.is_niche_shaped ~collision_set type_defs type_name))
   | _ -> true
 
@@ -348,6 +353,14 @@ let escape_fn
 (* ── Module entry point ───────────────────────────────────────────────────── *)
 
 let escape_analysis (m : Tir.tir_module) : Tir.tir_module =
+  (* Milestone 3: this pass must not offer an unboxed aggregate for stack
+     promotion — it has no cell to promote and [Llvm_emit_alloc] rejects an
+     [EStackAlloc] of one outright.  [Contract_pipeline] has normally already
+     registered; [ensure_unboxed_types] makes a caller that assembles its own
+     pass list (the LSP's older path, tests, [Repl_jit] with unboxing forced
+     off) agree with the emitter rather than run against an empty table. *)
+  Repr.ensure_unboxed_types
+    ~collision_set:(Collision_set.compute m.Tir.tm_types) m.Tir.tm_types;
   (* Computed once per module from its own [tm_types] — mirrors
      [Llvm_ctx.make_ctx]'s [collision_set] derivation (Task 1), so escape
      analysis's Boxed/Niche/Newtype classification of a same-short-name

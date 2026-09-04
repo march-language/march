@@ -84,6 +84,7 @@ let corpus = [
   "nested_generic_adt",              "nested_generic_adt.march";
   "nested_cons_ctor_heap",           "nested_cons_ctor_heap.march";
   "interp_string_operand_rc",        "interp_string_operand_rc.march";
+  "unboxed_aggregate",               "unboxed_aggregate.march";
 ]
 
 (* ── Path resolution ────────────────────────────────────────────────────

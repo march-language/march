@@ -1258,7 +1258,7 @@ end|} in
 (* ------------------------------------------------------------------ *)
 
 let no_alloc_fail_src = {|mod Test do
-  ptype Box = Box(Int, Int)
+  ptype Box = Box(Int, String)
   fn first(b : Box) : Int do
     match b do
       Box(x, _) -> x
@@ -1273,7 +1273,7 @@ let no_alloc_fail_src = {|mod Test do
         first(updated) + old_x
     end
   end
-  fn main() : Int do bump(Box(1, 2)) end
+  fn main() : Int do bump(Box(1, "two")) end
 end|}
 
 (** A failing contract is reported at the function's NAME span, with the same
@@ -1293,7 +1293,7 @@ let test_no_alloc_diagnostic_at_name_span () =
       (d.severity = Some Lsp.Types.DiagnosticSeverity.Error)
 
 let no_alloc_ok_src = {|mod Test do
-  ptype Box = Box(Int, Int)
+  ptype Box = Box(Int, String)
   @[no_alloc]
   fn bump(b : Box) : Box do
     match b do
@@ -1301,7 +1301,7 @@ let no_alloc_ok_src = {|mod Test do
     end
   end
   fn main() : Int do
-    match bump(Box(1, 2)) do
+    match bump(Box(1, "two")) do
       Box(x, _) -> x
     end
   end
@@ -1328,7 +1328,7 @@ let test_no_alloc_lens_when_contract_holds () =
          contains_sub cl.An.cl_title "\xe2\x9c\x93 no_alloc") b.An.code_lens_items)
 
 let quickfix_src = {|mod Test do
-  ptype Box = Box(Int, Int)
+  ptype Box = Box(Int, String)
   fn bump(b : Box) : Box do
     match b do
       Box(x, y) -> Box(x + 1, y)
@@ -1336,7 +1336,7 @@ let quickfix_src = {|mod Test do
   end
   fn add(a : Int, b : Int) : Int do a + b end
   fn main() : Int do
-    match bump(Box(1, 2)) do
+    match bump(Box(1, "two")) do
       Box(x, _) -> x + add(1, 2)
     end
   end

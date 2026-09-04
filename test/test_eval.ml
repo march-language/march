@@ -3116,12 +3116,17 @@ let test_escape_local_discarded_promoted () =
      consumers decoded under the erased convention (garbage at runtime —
      invisible here because these tests inspect TIR only, never emitted IR).
      Escape analysis now only promotes genuinely Boxed allocs, so the vehicle
-     is a 2-field ctor; the Newtype exclusion is pinned by
-     test_escape_newtype_not_promoted below. *)
+     is a multi-field ctor; the Newtype exclusion is pinned by
+     test_escape_newtype_not_promoted below.
+     HISTORY (unboxed aggregates, 2026-09-03): the vehicle was `Box(Int, Int)`
+     until small scalar-only single-ctor variants stopped being heap cells at
+     all (Repr.Unboxed) — which made this test's subject unallocated rather
+     than stack-promoted. A String field keeps it Boxed, so the test still
+     measures promotion. *)
   let m = escape_module {|mod Test do
-    type Box = Box(Int, Int)
+    type Box = Box(Int, String)
     fn make_and_ignore() : Int do
-      let b = Box(42, 43)
+      let b = Box(42, "x")
       0
     end
   end|} in

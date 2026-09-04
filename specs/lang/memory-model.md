@@ -264,6 +264,48 @@ If `bump_copied` truly needs the old field, read it *before* you rebuild
 (bind `x` in the same `match`, then return it) rather than matching `b` a second
 time; that collapses the two uses into one and reuse fires again.
 
+### Small scalar aggregates never reach the heap at all
+
+Reuse and stack promotion both work on a cell that *exists*. A third case
+skips the cell entirely: a variant with **one constructor whose fields are all
+`Int`, `Float` or `Bool`**, with two to four of them, is represented inline —
+in registers, not on the heap.
+
+<!-- scroll:skip -->
+```march
+type Vec3 = Vec3(Float, Float, Float)
+
+@[no_alloc]
+fn forward(yaw : Float, pitch : Float) : Vec3 do
+  let cp = Math.cos(pitch)
+  Vec3(0.0 -. Math.sin(yaw) *. cp, Math.sin(pitch), 0.0 -. Math.cos(yaw) *. cp)
+end
+```
+
+`forward` builds its result from three scalars, so there is no dying `Vec3`
+for reuse to take over and nothing for stack promotion to keep in the frame —
+it used to be an unconditional allocation, and could not carry `@[no_alloc]`.
+As three doubles in registers it allocates nothing, and the contract holds
+through any caller that only reads it back.
+
+Two things to know about the boundary:
+
+- **A heap slot is eight bytes wide**, so wherever such a value is *stored* —
+  a constructor or record field, a tuple element, something a closure
+  captures, a message to an actor, an argument to an `extern` — it is boxed
+  into the ordinary cell on the way in and unboxed on the way out. Behaviour
+  is unchanged, but that box is a real allocation and `@[no_alloc]` reports it
+  ("a `Vec3` is boxed here (it crosses an erased slot)"). Keeping a hot
+  function's aggregates in locals, parameters and returns keeps them off the
+  heap.
+- **The class is exact**: add a `String` field, a fifth field, or a second
+  constructor and the type goes back to being an ordinary heap value. That is
+  a representation change with a visible performance consequence, so it is
+  worth knowing which side of the line a hot type sits on.
+
+Compiler internals, including why the class stops where it does:
+`docs/value-representation.md` §7.5.
+
 ---
 
 ## Parallel FBIP needs no locks

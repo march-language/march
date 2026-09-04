@@ -503,6 +503,12 @@ let lower_module ~type_map ?(stdlib_context : March_ast.Ast.decl list = []) ?(re
      capture-free closure is a real per-materialization [march_alloc] here
      rather than the immortal static global [static_closure_ok] gives the
      native build, and therefore needs a callee-side release. *)
+  (* The REPL never unboxes aggregates: a fragment's result thunk is called as
+     [void -> ptr] and its value printed by walking a heap cell, so a struct
+     returned in registers would be read as a pointer.  Forced off process-wide
+     (see [Repr.force_disable]) so no later registration can re-enable it for a
+     subsequent fragment. *)
+  March_tir.Repr.force_disable ();
   let tir = March_tir.Perceus.perceus ~repl:true ~repl_vars tir in
   let tir = March_tir.Escape.escape_analysis tir in
   tir
@@ -716,7 +722,13 @@ let rec pp_heap_value ?(depth=0) ~type_defs ~ctor_tags (ty : March_tir.Tir.ty) (
   | TCon (name, args) when (match Hashtbl.find_opt type_defs name with
                             | Some (TDVariant _) -> true | _ -> false)
                         && (match variant_repr ~type_defs name args with
-                            | March_tir.Repr.Boxed -> false | _ -> true) ->
+                            (* [Repr.Unboxed] never reaches the REPL: the REPL
+                               registers the empty unboxed table (see
+                               [Repr.set_unboxed_types]), so its aggregates
+                               stay Boxed heap cells.  Grouped with Boxed so
+                               the printer stays correct if that changes. *)
+                            | March_tir.Repr.Boxed
+                            | March_tir.Repr.Unboxed _ -> false | _ -> true) ->
     let ctors = match Hashtbl.find type_defs name with
       | TDVariant (_, cs) -> cs | _ -> [] in
     let bindings =
@@ -737,9 +749,11 @@ let rec pp_heap_value ?(depth=0) ~type_defs ~ctor_tags (ty : March_tir.Tir.ty) (
             (pp_word ~depth ~type_defs ~ctor_tags ~tagged:(field_is_tagged declared)
                (subst_ty bindings payload) ptr)
         | _ -> Printf.sprintf "#<newtype:%nd>" ptr)
-     (* Unreachable: the guard above already excluded Boxed.  Rendered rather
-        than asserted — a printer must never take the REPL down. *)
-     | March_tir.Repr.Boxed -> Printf.sprintf "#<%s:%nd>" name ptr)
+     (* Unreachable: the guard above already excluded Boxed and Unboxed.
+        Rendered rather than asserted — a printer must never take the REPL
+        down. *)
+     | March_tir.Repr.Boxed | March_tir.Repr.Unboxed _ ->
+       Printf.sprintf "#<%s:%nd>" name ptr)
   | _ ->
   if ptr = Nativeint.zero then "#<null>"
   else

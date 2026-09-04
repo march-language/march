@@ -685,6 +685,14 @@ let perceus ?(repl : bool = false) ?(repl_vars : string list = [])
      remains a ref rather than becoming an [env] field (Wave 3 Task 4 — see
      the plan's guidance on accumulator- vs scope-shaped refs). *)
   _rc_fresh_ctr := 0;
+  (* Milestone 3: [Rc_types.needs_rc]/[borrow_eligible] answer from [Repr]'s
+     unboxed registry, so it must be populated before borrow inference reads
+     them.  [Contract_pipeline] normally registered already; this makes a
+     caller with its own pass list (the LSP, tests, [Repl_jit] with unboxing
+     forced off) agree with the emitter instead of running against an empty
+     table.  See [Repr.ensure_unboxed_types]. *)
+  Repr.ensure_unboxed_types
+    ~collision_set:(Collision_set.compute m.Tir.tm_types) m.Tir.tm_types;
   (* Phase 0: borrow inference *)
   let borrow_map = Borrow.infer_module m in
   (* Phase 0b: publish, for every function, whether its FIRST USER ARGUMENT is

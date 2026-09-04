@@ -51,6 +51,7 @@ type reason =
   | Closure
   | Builtin of string
   | FloatBox
+  | AggBox of string           (** unboxed aggregate boxed at an erased slot *)
   | UnknownClosure of string   (** ECallPtr through this variable *)
   | Extern of string
   | Callee of string * reason  (** callee display name, its first reason *)
@@ -64,6 +65,8 @@ let rec describe = function
   | Builtin ("++" | "string_concat" | "string_concat3") -> "string concatenation"
   | Builtin b -> Printf.sprintf "`%s` allocates" b
   | FloatBox -> "a Float is boxed here (it crosses an erased slot)"
+  | AggBox t ->
+    Printf.sprintf "a `%s` is boxed here (it crosses an erased slot)" t
   | UnknownClosure x -> Printf.sprintf "call through an unknown closure `%s`" x
   | Extern e -> Printf.sprintf "call to the extern `%s`" e
   | Callee (g, r) ->
@@ -202,11 +205,34 @@ let stores_boxed_float ?skip m ty args =
     List.length fields = List.length args
     && List.exists2 (fun a f -> ty_of_atom a = Tir.TFloat && f <> Tir.TFloat) args fields
 
+(* The unboxed-aggregate analogue of [stores_boxed_float].  An inline
+   aggregate stored into a slot whose declared type is not that aggregate is
+   BOXED by [Llvm_ctx.coerce] into the very heap cell the representation
+   exists to avoid — a real [march_alloc], reported as one.  Returns the
+   aggregate's type name for the diagnostic. *)
+let stores_boxed_agg ?skip m ty args : string option =
+  match ctor_fields m ty with
+  | None -> None
+  | Some fields ->
+    let fields = match skip with
+      | None -> fields
+      | Some h -> List.filteri (fun i _ -> i <> h) fields in
+    if List.length fields <> List.length args then None
+    else
+      List.find_map (fun (a, f) ->
+          match ty_of_atom a with
+          | Tir.TCon (n, _) as at
+            when Repr.unboxed_of_type_name n <> None && f <> at -> Some n
+          | _ -> None)
+        (List.combine args fields)
+
 (* Whether an [EAlloc]/[EAllocHole] of constructor key [key] actually reaches
    the heap.  Codegen elides two shapes entirely, and a checker that ignored
    them would reject allocation-free code:
 
    - [Repr.Newtype]: represented as the raw payload, no cell at all.
+   - [Repr.Unboxed]: a small scalar-only single-ctor variant, built with
+     [insertvalue] in registers.
    - Niche (Option-shaped) with a niche-safe or erased payload: None = 0,
      Some(x) = x.  A niche-UNSAFE payload (Float, Option(Option(_)), ...)
      falls through to a real boxed cell, so it still counts.
@@ -221,6 +247,11 @@ let alloc_is_elided ~collision_set (m : Tir.tir_module) (key : string)
     let type_defs = m.Tir.tm_types in
     (match Repr.repr_of_ty ~collision_set type_defs (Tir.TCon (tname, [])) with
      | Repr.Newtype _ -> true
+     (* Milestone 3: an unboxed aggregate's construction is an [insertvalue]
+        chain in registers — [Llvm_emit_alloc]'s [Repr.Unboxed] arm.  No cell,
+        so no allocation, so a function that only builds them satisfies the
+        contract. *)
+     | Repr.Unboxed _ -> true
      | _ ->
        Repr.is_niche_shaped ~collision_set type_defs tname
        && (match args with
@@ -275,7 +306,12 @@ let direct_reason ~(m : Tir.tir_module) ~collision_set ~fns ~externs
         if not (elided c args) then begin
           if stores_boxed_float m (Tir.TCon (c, [])) args then set FloatBox
           else set (Ctor (ctor_short c))
-        end
+        end else
+          (* Elided cell, but an inline aggregate stored into one of its
+             erased slots is still boxed into a real one. *)
+          (match stores_boxed_agg m (Tir.TCon (c, [])) args with
+           | Some t -> set (AggBox t)
+           | None -> ())
       | Tir.EAlloc (ty, _) -> set (Ctor (Tir.show_ty ty))
       | Tir.EAllocHole (None, Tir.TCon (c, _), _, _) -> set (Ctor (ctor_short c))
       | Tir.EAllocHole (None, ty, _, _) -> set (Ctor (Tir.show_ty ty))
@@ -286,6 +322,10 @@ let direct_reason ~(m : Tir.tir_module) ~collision_set ~fns ~externs
          erased slot: that box is a fresh march_alloc_float heap cell. *)
       | Tir.EReuse (_, ty, args) when stores_boxed_float m ty args -> set FloatBox
       | Tir.EStackAlloc (ty, args) when stores_boxed_float m ty args -> set FloatBox
+      | Tir.EReuse (_, ty, args) | Tir.EStackAlloc (ty, args)
+        when stores_boxed_agg m ty args <> None ->
+        (match stores_boxed_agg m ty args with
+         | Some t -> set (AggBox t) | None -> ())
       | Tir.EAllocHole (Some _, ty, args, hole)
         when stores_boxed_float ~skip:hole m ty args -> set FloatBox
       | Tir.ECallPtr (Tir.AVar f, _) -> set (UnknownClosure f.Tir.v_name)
@@ -299,6 +339,14 @@ let direct_reason ~(m : Tir.tir_module) ~collision_set ~fns ~externs
           if Tir_names.is_apply_fn n
              && List.exists (fun a -> ty_of_atom a = Tir.TFloat) args
           then set FloatBox
+          else if Tir_names.is_apply_fn n then
+            (* Same boundary for an inline aggregate: the uniform ptr closure
+               ABI boxes it. *)
+            (match List.find_map (fun a -> match ty_of_atom a with
+                 | Tir.TCon (t, _) when Repr.unboxed_of_type_name t <> None -> Some t
+                 | _ -> None) args with
+            | Some t -> set (AggBox t)
+            | None -> ())
         end
         else if Hashtbl.mem externs n then set (Extern n)
         else if builtin_allocates n then set (Builtin (base n))

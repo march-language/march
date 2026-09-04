@@ -1,0 +1,88 @@
+-- types (7) --
+type Vec3 = Vec3(Float, Float, Float)
+closure $Clo_$jp22$0(Ptr(Unit))
+closure $Clo_$jp26$1(Ptr(Unit), () -> '_)
+closure $Clo_$jp24$2(Ptr(Unit), () -> '_)
+closure $Clo_$jp11$3(Ptr(Unit))
+closure $Clo_$jp15$4(Ptr(Unit), () -> '_)
+closure $Clo_$jp13$5(Ptr(Unit), () -> '_)
+-- fns (9) --
+## $jp11$apply$3
+fn $jp11$apply$3($clo : Ptr(Unit)) : '_ =
+  panic("non-exhaustive pattern match")
+
+## $jp13$apply$5
+fn $jp13$apply$5($clo : Ptr(Unit)) : '_ =
+  let $jp_clo12 : () -> '_ = $clo.$fv1 in
+dec_rc $clo;
+inc_rc $jp_clo12;
+call_ptr $jp_clo12()
+
+## $jp15$apply$4
+fn $jp15$apply$4($clo : Ptr(Unit)) : '_ =
+  let $jp_clo12 : () -> '_ = $clo.$fv1 in
+dec_rc $clo;
+let $jp_clo14 : () -> '_ = inc_rc $jp_clo12;
+alloc $Clo_$jp13$5($jp13$apply$5, $jp_clo12) in
+call_ptr $jp_clo14()
+
+## $jp22$apply$0
+fn $jp22$apply$0($clo : Ptr(Unit)) : '_ =
+  panic("non-exhaustive pattern match")
+
+## $jp24$apply$2
+fn $jp24$apply$2($clo : Ptr(Unit)) : '_ =
+  let $jp_clo23 : () -> '_ = $clo.$fv1 in
+dec_rc $clo;
+inc_rc $jp_clo23;
+call_ptr $jp_clo23()
+
+## $jp26$apply$1
+fn $jp26$apply$1($clo : Ptr(Unit)) : '_ =
+  let $jp_clo23 : () -> '_ = $clo.$fv1 in
+dec_rc $clo;
+let $jp_clo25 : () -> '_ = inc_rc $jp_clo23;
+alloc $Clo_$jp24$2($jp24$apply$2, $jp_clo23) in
+call_ptr $jp_clo25()
+
+## dot
+fn dot(a : Vec3, b : Vec3) : Float =
+  case a of
+  Vec3($f19, $f20, $f21) -> let $jp_clo23 : () -> '_ = alloc $Clo_$jp22$0($jp22$apply$0) in
+let $jp_clo27 : () -> '_ = alloc $Clo_$jp26$1($jp26$apply$1, $jp_clo23) in
+dec_rc $jp_clo27;
+let az : Float = $f21 in
+let ay : Float = $f20 in
+let ax : Float = $f19 in
+case b of
+  Vec3($f8, $f9, $f10) -> let $jp_clo12 : () -> '_ = alloc $Clo_$jp11$3($jp11$apply$3) in
+let $jp_clo16 : () -> '_ = alloc $Clo_$jp15$4($jp15$apply$4, $jp_clo12) in
+dec_rc $jp_clo16;
+let bz : Float = $f10 in
+let b2 : Float = $f9 in
+let bx : Float = $f8 in
+let $t6 : Float = let $t4 : Float = *.(ax, bx) in
+let $t5 : Float = *.(ay, b2) in
++.($t4, $t5) in
+let $t7 : Float = *.(az, bz) in
++.($t6, $t7)
+  _ -> panic("non-exhaustive pattern match")
+  _ -> panic("non-exhaustive pattern match")
+
+## forward
+fn forward(yaw : Float, pitch : Float) : Vec3 =
+  let cp : Float = *.(pitch, 2.) in
+let $t2 : Float = let $t1 : Float = *.(yaw, cp) in
+-.(0., $t1) in
+let $t3 : Float = -.(0., cp) in
+alloc Vec3.Vec3($t2, pitch, $t3)
+
+## main
+fn main(_cap_console : Cap(IO.Console)) : () =
+  let v : Vec3 = forward(0.5, 0.25) in
+let $t31 : String = let $t30 : Float = dot(v, v) in
+float_to_string($t30) in
+let $rc_1 : () = println($t31) in
+dec_rc $t31;
+$rc_1
+

@@ -121,6 +121,18 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   let tir = Defun.defunctionalize tir in
   snap "tir-defun" tir;
   stamp "defun";
+  (* Milestone 3: decide the unboxed-aggregate set here — after Mono (which
+     instantiates generic variants) and Defun (which adds the closure structs),
+     so the decision is made on the type list the remaining passes see, and
+     BEFORE the first pass that consults it.  [Rc_types.needs_rc], [Borrow],
+     [Drop], [Escape] and [Alloc_contract] all read [Repr]'s registry, so it
+     must be populated before Perceus runs, not merely before emission —
+     otherwise the passes reason about a Boxed cell that codegen never
+     allocates.  [Repr.rebind_registration] at the end of this function hands
+     the SAME answer to [Llvm_ctx.make_ctx]; the JS backend registers empty
+     (see [Repr.set_unboxed_types]). *)
+  Repr.set_unboxed_types ~collision_set:(Collision_set.compute tir.Tir.tm_types)
+    ~externs:tir.Tir.tm_externs ~enabled:(not is_js) tir.Tir.tm_types;
   (* Known-call pass: run before Perceus so apply functions are still pure
      and eligible for inlining in the subsequent Opt fixed-point loop.  See
      the [is_apply_fn] guard in [Perceus]'s EApp post_dec_vars for why the
@@ -208,6 +220,8 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   stamp "opt";
   (* @[no_alloc]: the last pass before emission, on the exact TIR Llvm_emit
      will consume. *)
+  (* Hand the emitter exactly this decision (see [Repr.rebind_registration]). *)
+  Repr.rebind_registration tir.Tir.tm_types;
   let allocating = Alloc_contract.allocating_fns ~decls tir in
   let contract_diags =
     Alloc_contract.check ~decls ~allocating ~opt ~trmc ~trmc_eligible tir in
