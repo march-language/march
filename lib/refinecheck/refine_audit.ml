@@ -478,7 +478,7 @@ let nested_reason (pos : position) : string =
     "below the outermost position of the declared type"
 
 (* Rule 2's disposition for a `sig` / `extern` / `interface` entry: derived
-   from [Refine_check.ty_has_refinement], the WARNING's own condition, rather
+   from [Refine_post.ty_has_refinement], the WARNING's own condition, rather
    than asserted -- Task 2's review, finding 2. Narrowing [ty_has_refinement]
    (e.g. no longer descending into a [TyCon] argument) silently stops the
    warning from firing for a nested refinement in one of these three
@@ -487,9 +487,21 @@ let nested_reason (pos : position) : string =
    goes silent underneath it. Falls back to [Unenforced] -- not a guess -- if
    the audit found a refinement here that the warning's own condition somehow
    does not see, which would itself be worth investigating rather than
-   papering over as [Inert_warned]. *)
+   papering over as [Inert_warned].
+
+   Called as [Refine_post.ty_has_refinement], not [Refine_check.ty_has_refinement]:
+   this module cannot depend on [Refine_check] at all -- [Refine_check] is the
+   LAST link in [refine_check.ml]'s own [include] chain (it includes
+   [Refine_post], which includes [Refine_call], ... down to [Refine_encode],
+   where this function actually lives), so depending on [Refine_check] here
+   would be a module dependency cycle within [march_refinecheck] (Task 2's
+   re-review, finding 9, proved this with a real build). [Refine_post] is a
+   link EARLIER in that same chain and exposes the identical function, since
+   [include] re-exports it upward; [refine_check.mli]'s own
+   [val ty_has_refinement] is unaffected and keeps re-exporting it too, so a
+   caller going through either name sees the same function. *)
 let inert_signature_verdict (warning_name : string) (subject : string) (site : site) : disposition =
-  if Refine_check.ty_has_refinement site.origin_ty then
+  if Refine_post.ty_has_refinement site.origin_ty then
     Inert_warned
       (Printf.sprintf "%s: %s carries a refinement, and ty_has_refinement confirms the warning fires"
          warning_name subject)

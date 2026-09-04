@@ -523,23 +523,17 @@ let print_refine_report ~filename ~user_files () =
 (* --refine-audit: every declared refinement occurrence
    ([March_refinecheck.Refine_audit.sites]), classified
    ([March_refinecheck.Refine_audit.classify]) against what the checker
-   itself actually does with it. [Refine_check.check_module] cannot call
-   [Refine_audit] directly (a dependency cycle -- see
-   [Refine_check.audit_hook]'s own comment), so this hook is how the result
-   gets from inside [check_module] back out to this printer: set once, below,
-   and read here after [check_module ~audit:true] has returned. *)
-let refine_audit_sites : (March_refinecheck.Refine_audit.site * March_refinecheck.Refine_audit.disposition) list ref =
-  ref []
-
-let () =
-  March_refinecheck.Refine_check.audit_hook :=
-    fun decls ->
-      refine_audit_sites :=
-        List.map
-          (fun (s : March_refinecheck.Refine_audit.site) -> (s, March_refinecheck.Refine_audit.classify s))
-          (March_refinecheck.Refine_audit.sites decls)
-
-let print_refine_audit ~filename ~user_files () =
+   itself actually does with it. [Refine_check.check_module]'s [?audit]
+   computes this list itself (calling [Refine_audit] directly; no cycle,
+   since [Refine_audit] does not depend on [Refine_check] -- see
+   [Refine_post.ty_has_refinement]'s own comment) and hands it to whatever
+   sink function the caller passed, exactly once, synchronously. No global
+   ref: each call site below declares its OWN local ref, passes a closure
+   that fills it as [~audit], and reads it back immediately after
+   [check_module] returns -- an ordinary out-parameter, not persistent
+   state. *)
+let print_refine_audit ~filename ~user_files
+    (classified_sites : (March_refinecheck.Refine_audit.site * March_refinecheck.Refine_audit.disposition) list) =
   let module RA = March_refinecheck.Refine_audit in
   let is_user_span (span : March_ast.Ast.span) =
     let f = span.March_ast.Ast.file in
@@ -589,26 +583,39 @@ let print_refine_audit ~filename ~user_files () =
     Printf.eprintf "coverage audit (%s): %d enforced, %d inert (warned), %d unenforced\n"
       label enforced inert unenforced
   in
-  let all_sites = !refine_audit_sites in
-  let user_sites = List.filter (fun ((s : RA.site), _) -> is_user_span s.RA.span) all_sites in
-  (* One line per [Unenforced] site, user code only: the stdlib side has far
-     more declared refinements than a user's own module (most declared
-     refinements live in the stdlib -- the same reason the summary below is
-     split), and dumping its Unenforced sites too would bury the ones a
-     user can actually act on. The two summary lines below still cover
-     user+stdlib, so nothing about the stdlib's coverage is hidden, only
-     its per-site detail. *)
-  List.iter
-    (fun ((s : RA.site), (d : RA.disposition)) ->
-      match d with
-      | RA.Unenforced reason ->
-        Printf.eprintf "coverage audit: %s:%d:%d: %s: %s: %s\n"
-          s.RA.span.March_ast.Ast.file s.RA.span.March_ast.Ast.start_line
-          s.RA.span.March_ast.Ast.start_col (string_of_origin s.RA.origin)
-          s.RA.predicate reason
-      | RA.Enforced | RA.Inert_warned _ -> ())
-    user_sites;
+  let all_sites = classified_sites in
+  let user_sites, stdlib_sites =
+    List.partition (fun ((s : RA.site), _) -> is_user_span s.RA.span) all_sites
+  in
+  (* One line per [Unenforced] site, in BOTH slices, kept visually separate
+     by prefix so a reader can tell which slice a line came from without
+     cross-referencing the summaries: `coverage audit:` for user code,
+     `coverage audit (stdlib):` for the stdlib. Originally (Task 3) this
+     printed user code only, on the theory that the stdlib side, having far
+     more declared refinements than a user's own module, would bury the
+     lines a user can act on. Fix loop 1 (task-3-review.md finding 4)
+     corrected that: today every stdlib site happens to classify Enforced
+     (0 of 63), so the theory was never tested, but a FUTURE stdlib site
+     that regresses to Unenforced must produce a line naming it, not just a
+     count that silently moves in the "user + stdlib" summary below -- the
+     exact blind spot Task 4's committed baseline and CI ratchet would
+     otherwise inherit. *)
+  let print_unenforced_lines prefix sites =
+    List.iter
+      (fun ((s : RA.site), (d : RA.disposition)) ->
+        match d with
+        | RA.Unenforced reason ->
+          Printf.eprintf "coverage audit%s: %s:%d:%d: %s: %s: %s
+"
+            prefix s.RA.span.March_ast.Ast.file s.RA.span.March_ast.Ast.start_line
+            s.RA.span.March_ast.Ast.start_col (string_of_origin s.RA.origin)
+            s.RA.predicate reason
+        | RA.Enforced | RA.Inert_warned _ -> ())
+      sites
+  in
+  print_unenforced_lines "" user_sites;
   print_summary "user code" user_sites;
+  print_unenforced_lines " (stdlib)" stdlib_sites;
   print_summary "user + stdlib" all_sites
 
 let refine_suggest_active () =
@@ -1137,10 +1144,21 @@ let run_test_cmd args =
     March_typecheck.Typecheck.proof_based_panic_surface := true;
     let (errors, _type_map) = March_typecheck.Typecheck.check_module desugared in
     (* Phase A1b: discharge refinement-precondition VCs at call sites. *)
+    (* NOTE: --refine-audit cannot actually reach this pipeline from the CLI
+       today. `march test` is dispatched to [run_test_cmd], whose own
+       hand-rolled [parse_args] (just above) treats any token it does not
+       recognise as a target FILENAME -- exactly the same pre-existing gap
+       `--refine-report` has here. The call below is kept for parity with
+       [compile]'s pipeline (so the two never drift if `parse_args` is ever
+       taught the flag) but is dead code from the CLI's point of view; see
+       task-3-review.md finding 3. *)
+    let audit_result = ref [] in
     March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
-      ~stdlib_files:(stdlib_span_files stdlib_decls) ~audit:!refine_audit errors desugared;
+      ~stdlib_files:(stdlib_span_files stdlib_decls)
+      ?audit:(if !refine_audit then Some (fun r -> audit_result := r) else None)
+      errors desugared;
     if !refine_report then print_refine_report ~filename ~user_files ();
-    if !refine_audit then print_refine_audit ~filename ~user_files ();
+    if !refine_audit then print_refine_audit ~filename ~user_files !audit_result;
     (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
     March_refinecheck.Division_safety.check_module errors desugared;
     (* Panic-surface-by-proof: the `cap no_panic` names that carry a real
@@ -1833,10 +1851,13 @@ let compile filename =
       March_typecheck.Typecheck.check_module_full desugared
   in
   (* Phase A1b: discharge refinement-precondition VCs at call sites. *)
+  let audit_result = ref [] in
   March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
-    ~stdlib_files:(stdlib_span_files stdlib_decls) ~audit:!refine_audit errors desugared;
+    ~stdlib_files:(stdlib_span_files stdlib_decls)
+    ?audit:(if !refine_audit then Some (fun r -> audit_result := r) else None)
+    errors desugared;
   if !refine_report then print_refine_report ~filename ~user_files ();
-  if !refine_audit then print_refine_audit ~filename ~user_files ();
+  if !refine_audit then print_refine_audit ~filename ~user_files !audit_result;
   (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
   March_refinecheck.Division_safety.check_module errors desugared;
   (* Panic-surface-by-proof: the `cap no_panic` names that carry a real

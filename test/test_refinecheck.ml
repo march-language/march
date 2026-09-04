@@ -12830,24 +12830,35 @@ let write_march_fixture (src_text : string) : string =
   close_out oc;
   src
 
-(* Runs the real compiler on the file at [path] with [args]. Never through a
-   pipe (see feedback_march_compile_pipe_hang.md in memory): stdout and
-   stderr are each redirected to their own temp file and read back
-   separately, exactly like [check_no_prelude_collision]'s sibling helpers in
-   [test_cap_strip.ml]. Returns (exit code, stdout, stderr). *)
-let run_march_on (args : string list) (path : string) : int * string * string =
+(* Runs the real compiler on the file at [path] with [args] and an optional
+   extra environment ([env], as VAR=value pairs prepended to the command --
+   used only to point [MARCH_STDLIB] at a throwaway directory for the
+   stdlib-slice test below, never to change what a normal invocation sees).
+   Never through a pipe (see feedback_march_compile_pipe_hang.md in memory):
+   stdout and stderr are each redirected to their own temp file and read
+   back separately, exactly like [check_no_prelude_collision]'s sibling
+   helpers in [test_cap_strip.ml]. Returns (exit code, stdout, stderr). *)
+let run_march_on_env (env : (string * string) list) (args : string list) (path : string)
+    : int * string * string =
   require_refine_audit_compiler ();
   let out = Filename.temp_file "refine_audit" ".out" in
   let err = Filename.temp_file "refine_audit" ".err" in
+  let env_prefix =
+    String.concat ""
+      (List.map (fun (k, v) -> Printf.sprintf "%s=%s " k (Filename.quote v)) env)
+  in
   let rc =
     Sys.command
-      (Printf.sprintf "%s %s %s > %s 2> %s" refine_audit_compiler_exe
+      (Printf.sprintf "%s%s %s %s > %s 2> %s" env_prefix refine_audit_compiler_exe
          (String.concat " " args) (Filename.quote path) (Filename.quote out) (Filename.quote err))
   in
   let stdout_s = read_whole_file out and stderr_s = read_whole_file err in
   Sys.remove out;
   Sys.remove err;
   (rc, stdout_s, stderr_s)
+
+let run_march_on (args : string list) (path : string) : int * string * string =
+  run_march_on_env [] args path
 
 (* Convenience for a single-run test: writes [src_text] to a fresh temp file,
    runs the compiler on it once, and hands back the file's own path too -- a
@@ -13029,6 +13040,99 @@ end
           (fun () ->
             Alcotest.(check int) "exit 0, flag off" 0 rc_off;
             Alcotest.(check int) "exit 0, flag on" 0 rc_on))
+
+  ; (* The CAS bypass at bin/main.ml's early_cas guard, regression-tested
+       directly: run the SAME path twice, flag OFF first (which warms
+       .march/cas/artifacts-v2, since a plain --check with no diagnostic
+       flag is exactly the case the early-CAS short-circuit is FOR), then
+       flag ON second. If `!refine_audit` is ever dropped from that guard's
+       disjunction again, the second run hits the warm artifact and prints
+       nothing despite the flag -- the exact bug class documented in memory
+       as project_refine_report_cas_shortcircuit, and the one the Task 3
+       review found untested (finding 1): all six OTHER audit-flag cases
+       above stay green under that mutation, because none of them runs the
+       compiler twice against one path with the flag off first. This one
+       does not clear the CAS between the two runs on purpose -- that is
+       the whole point. *)
+    Alcotest.test_case "--refine-audit still prints on a warm CAS" `Quick (fun () ->
+        let path = write_march_fixture audit_flag_pinned_fixture in
+        Fun.protect
+          ~finally:(fun () -> try Sys.remove path with Sys_error _ -> ())
+          (fun () ->
+            let (_ : int * string * string) = run_march_on [ "--check" ] path in
+            let rc, _, err = run_march_on [ "--check"; "--refine-audit" ] path in
+            Alcotest.(check int) "exit 0" 0 rc;
+            Alcotest.(check int) "the audit block is still printed on a warm cache" 3
+              (List.length (nonempty_lines err))))
+
+  ; (* Fix loop 1 (task-3-review.md finding 4): an Unenforced STDLIB site
+       must print its own line too, not just move a count in the "user +
+       stdlib" summary. The shipped stdlib has zero Unenforced sites today
+       (all 63 classify Enforced), so this cannot be exercised against the
+       real stdlib -- it is exercised against a throwaway one instead:
+       [MARCH_STDLIB] points the compiler at a temp directory containing a
+       minimal `prelude.march` (empty; the entry fixture below calls
+       nothing from it) and a `list.march` (a name the real manifest also
+       uses, though nothing here depends on that) declaring the same
+       record-field-refinement shape the pinned test already knows is
+       Unenforced. Every OTHER manifest-listed stdlib file is simply
+       absent, which [load_stdlib_file] tolerates (an unreadable path
+       silently contributes no declarations), so this is not a fragile
+       reproduction of the real stdlib, only a controlled single-file one. *)
+    Alcotest.test_case "an Unenforced stdlib site prints its own (stdlib)-prefixed line" `Quick
+      (fun () ->
+        with_temp_root "refine_audit_stdlib" (fun stdlib_dir ->
+          let write name text =
+            let oc = open_out (Filename.concat stdlib_dir name) in
+            output_string oc text;
+            close_out oc
+          in
+          write "prelude.march" "mod Prelude do
+end
+";
+          write "list.march"
+            "mod List do
+  type Box = { v : {Int | v > 0} }
+end
+";
+          let entry_path = write_march_fixture "mod E do
+  fn main() : Int do
+    0
+  end
+end
+" in
+          Fun.protect
+            ~finally:(fun () -> try Sys.remove entry_path with Sys_error _ -> ())
+            (fun () ->
+              let rc, _, err =
+                run_march_on_env [ ("MARCH_STDLIB", stdlib_dir) ] [ "--check"; "--refine-audit" ]
+                  entry_path
+              in
+              Alcotest.(check int) "exit 0" 0 rc;
+              match nonempty_lines err with
+              | [ user_summary; stdlib_line; combined_summary ] ->
+                Alcotest.(check bool) "the stdlib line is prefixed and names the field"
+                  true
+                  (let prefix = "coverage audit (stdlib): " in
+                   String.length stdlib_line >= String.length prefix
+                   && String.sub stdlib_line 0 (String.length prefix) = prefix
+                   && (let needle = "field `Box.v`: v > 0:" in
+                       let hay = stdlib_line in
+                       let nlen = String.length needle and hlen = String.length hay in
+                       let rec search i =
+                         i + nlen <= hlen && (String.sub hay i nlen = needle || search (i + 1))
+                       in
+                       search 0));
+                Alcotest.(check string) "user code summary: nothing from the entry file"
+                  "coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced"
+                  user_summary;
+                Alcotest.(check string) "user + stdlib summary: the one stdlib site counted"
+                  "coverage audit (user + stdlib): 0 enforced, 0 inert (warned), 1 unenforced"
+                  combined_summary
+              | lines ->
+                Alcotest.failf "expected exactly 3 non-empty stderr lines, got %d:
+%s"
+                  (List.length lines) err)))
   ]
 
 let () =

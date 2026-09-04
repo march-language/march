@@ -677,21 +677,6 @@ let rec warn_predicate_ty (errctx : Err.ctx) (t : A.ty) : unit =
   | A.TyLinear (_, t) -> warn_predicate_ty errctx t
   | A.TyChan _ | A.TyVar _ | A.TyNat _ | A.TyNatOp _ -> ()
 
-(* Does [t] carry a refinement ANYWHERE — either position of an arrow spine
-   (so both a parameter and the return), or nested inside a type argument,
-   tuple, record field or linearity wrapper?  Every one of those positions is
-   equally inert in an interface method signature, so the detector must not be
-   narrowed to the spine.  Mirrors [warn_predicate_ty]'s traversal exactly. *)
-let rec ty_has_refinement (t : A.ty) : bool =
-  match t with
-  | A.TyRefine _ -> true
-  | A.TyCon (_, args) -> List.exists ty_has_refinement args
-  | A.TyArrow (a, b) -> ty_has_refinement a || ty_has_refinement b
-  | A.TyTuple ts -> List.exists ty_has_refinement ts
-  | A.TyRecord fs -> List.exists (fun (_, t) -> ty_has_refinement t) fs
-  | A.TyLinear (_, t) -> ty_has_refinement t
-  | A.TyChan _ | A.TyVar _ | A.TyNat _ | A.TyNatOp _ -> false
-
 (* ── Interface-signature refinement warning ────────────────────────────────
    A refinement written in an `interface` method signature (`A.method_decl`'s
    [md_ty]) is inert.  NOTHING in this pass reads [md_ty]: [visit_decl]'s
@@ -1817,17 +1802,6 @@ let bare_builtin_undefined ?(mod_name = "") (name : string) (decls : A.decl list
   go decls;
   (not !taken, !cause)
 
-(* The coverage audit ([Refine_audit.sites] / [Refine_audit.classify]) cannot be
-   called from this module directly: [Refine_audit] depends on
-   [Refine_check.ty_has_refinement] (see its own comment there), so a direct call
-   here would be a dependency cycle within [march_refinecheck]'s single-directory
-   module list. A caller that wants the audit to run at the same join point
-   [check_module] uses for its own registration and vocabulary warning sets this
-   hook once; [check_module] invokes it, with the module's full decl list, only
-   when called with [~audit:true]. Defaults to a no-op so a caller that never
-   sets it (every existing caller) pays nothing and sees nothing. *)
-let audit_hook : (A.decl list -> unit) ref = ref (fun _ -> ())
-
 (* =================================================================
    §23 Entry point: check_module
    ================================================================= *)
@@ -1853,8 +1827,9 @@ let audit_hook : (A.decl list -> unit) ref = ref (fun _ -> ())
    that no non-stdlib definition can ever be mistaken for the stdlib's, not in
    the sense that it turns the feature off. *)
 let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
-    ?(stdlib_files : string list = []) ?(audit = false) (errctx : Err.ctx)
-    (m : A.module_) : unit =
+    ?(stdlib_files : string list = [])
+    ?(audit : ((Refine_audit.site * Refine_audit.disposition) list -> unit) option)
+    (errctx : Err.ctx) (m : A.module_) : unit =
   (* A module owns one solver declaration scope.  Z3 4.8.x does not reliably
      retract datatype declarations on [pop], even with [:global-decls false]:
      checking a later module that reuses a qualified type name with a different
@@ -1994,5 +1969,18 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
      gets a chance to re-run [check_module] against a hypothesis and disturb
      global state a naive audit implementation might have relied on; this
      one does not touch the obligation ledger at all, but the placement is
-     chosen to make that true by construction, not by accident. *)
-  if audit then !audit_hook m.A.mod_decls
+     chosen to make that true by construction, not by accident.
+
+     Calls [Refine_audit] directly: no cycle, because [Refine_audit] depends
+     only on [Refine_post] and earlier links in this file's own [include]
+     chain, never on [Refine_check] itself (see [Refine_post.ty_has_refinement]'s
+     own comment for why it moved there). [?audit] carries the caller's sink
+     as an ordinary optional function argument, not a global mutable ref: a
+     caller that wants the result passes [~audit:(fun result -> ...)] and
+     receives the classified list exactly once, synchronously, from this
+     call; a caller that omits it (every caller before this flag existed)
+     pays nothing and nothing is ever computed. *)
+  match audit with
+  | None -> ()
+  | Some sink ->
+    sink (List.map (fun s -> (s, Refine_audit.classify s)) (Refine_audit.sites m.A.mod_decls))
