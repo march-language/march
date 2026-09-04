@@ -1653,6 +1653,139 @@ for the full command surface, including `--apply` and the editor code action.
 
 ---
 
+## Coverage audit: does the checker even look at this refinement?
+
+`--refine-report` counts obligations that were actually filed. It has
+nothing to say about a declared refinement that never reaches a
+goal-building call site at all, because no code path in the checker ever
+looks at that position. `--refine-audit` (`lib/refinecheck/refine_audit.ml`)
+answers that prior question directly: for every `{Base | pred}` written
+anywhere in the module, does any extractor in the checker ever consult it?
+
+```
+$ march --check --refine-audit stdlib/list.march
+coverage audit (user code): 7 enforced, 0 inert (warned), 0 unenforced
+coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+```
+
+Every declared refinement lands in exactly one of three buckets:
+
+- **Enforced** — the checker's own extractor for this position accepts the
+  declared type, so an obligation gets filed against it (at a call site for
+  a parameter, or against the function's own body for a postcondition). A
+  parameter with no caller yet still counts Enforced: what matters is that
+  the position is wired into the checker's scope machinery, not whether a
+  call site exists today. See below for why this reading is correct rather
+  than a loophole.
+- **Inert (warned)** — a `sig` entry, an `extern` signature, or an
+  `interface` method whose refinement the compiler already names in its own
+  warning. Nothing new here; the audit confirms that warning still fires.
+- **Unenforced** — declared, silent, and nothing tells you. No extractor
+  ever reads this position, so a value violating the written predicate is
+  accepted without complaint.
+
+Every `Unenforced` site prints one line, naming the file position, the
+enclosing declaration, the predicate, and the specific reason no extractor
+reaches it. For:
+
+```march
+mod PINAUDIT1 do
+  type Box = { v : {Int | v > 0} }
+
+  fn f(n : {Int | n > 0}) : {Int | _ > 0} do
+    n
+  end
+
+  fn main() : Int do
+    f(1)
+  end
+end
+```
+
+```
+$ march --check --refine-audit t.march
+coverage audit: t.march:2:26: field `Box.v`: v > 0: a record (or actor-state) field's declared type is never re-examined once a value is constructed; the checker has no extractor for a stored field, only for a parameter, a return, or a let-binding
+coverage audit (user code): 2 enforced, 0 inert (warned), 1 unenforced
+coverage audit (user + stdlib): 65 enforced, 0 inert (warned), 1 unenforced
+```
+
+`f`'s parameter and return are both Enforced. Only `Box.v`'s field
+refinement is Unenforced — there is no extractor for a stored field at all,
+only for a parameter, a return, or a let-binding. The `user + stdlib` total
+(65) is this file's own 2 sites plus the 63 the shipped stdlib always
+contributes.
+
+### Why an uncalled parameter still counts as Enforced
+
+This is the design's central subtlety. Enforcement is not a property of
+having a caller; it is a property of the checker's scope machinery accepting
+the declared type at all. `refined_param_ty` running over
+`fn f(n : {Int | n > 0}) : Int do ... end` registers `n > 0` as a fact
+inside `f`'s body and would raise an obligation at *any* call site, present
+or future — adding one tomorrow gets checked automatically, because the
+position is already wired in. This is the same distinction
+`--refine-report` already draws between an obligation that is unproven and
+one that was never filed; the audit stays consistent with it instead of
+inventing an incompatible second notion of "checked."
+
+Contrast a lambda's own parameter (`fn (n : {Int | n > 0}) -> n`): no scope
+machinery ever runs over an `ELam`'s parameters, so *no* call through that
+lambda, ever, is obliged by it — genuinely Unenforced, not merely uncalled.
+
+### Where the current baseline stands
+
+A sweep of the corpus `scripts/refine-oracle.sh` already walks
+(`test/native/*.march` and `stdlib/*.march`, ~300 files) finds 63 declared
+refinements, every one Enforced: zero Unenforced, zero Inert. That result is
+committed at `test/refine_audit/corpus.baseline` and ratcheted in CI
+(`.github/workflows/ci.yml`'s "Refinement coverage audit ratchet" step,
+beside the existing obligation ratchet). It is regenerated the same way the
+TIR golden snapshots are:
+`UPDATE_SNAPSHOTS=1 ./_build/default/test/test_refinecheck.exe -e`.
+
+An empty baseline over real code is a true finding, not evidence the audit
+does nothing — but an audit that silently broke would also report an empty
+baseline, which is why a second, deliberately non-empty fixture set exists:
+`test/refine_audit/holes/`, one small program per known unenforced position
+(a lambda's own parameter, a block-level `fn`'s parameter and return, a
+non-adoptable `impl` method's parameter, an actor's state field and handler
+parameter, a nested field refinement, and a `{String | ...}` return),
+pinned at `test/refine_audit/holes.baseline`. If that baseline ever reports
+zero Unenforced sites, the audit itself is broken; the test that diffs it
+fails loudly rather than passing.
+
+The positions currently known to be Unenforced, none of which the corpus
+above happens to exercise:
+
+- A lambda's own parameter.
+- A block-level `fn`'s own parameter and return type: `check_fn_post_verdict`
+  and `scope_add_param` are reached only through `A.DFn` / `A.DImpl`, never
+  through a local `A.ELetFn`.
+- An `impl` method's parameter, when the method's bare name is not
+  adoptable (more than one `impl` defines it, or a top-level `fn` shares the
+  name): `visit_decl` strips the refinement from the body in that case, and
+  no caller is ever obliged. The audit reports every `impl` method
+  parameter Unenforced regardless of actual adoptability, since a single
+  site cannot make that module-level judgement — when the method *is*
+  adoptable the checker does enforce it, so this is a documented
+  conservatism in the audit, not a hole in the checker.
+- An actor's state field, and a handler's own parameter: no extractor
+  exists for either.
+- A record field or a variant constructor argument, once a value is
+  constructed.
+- A refinement nested below the outermost position of a declared type.
+- A `{String | ...}` return type: `return_refine_ext` only recognizes Int,
+  Bool, Float, and record bases.
+
+See `specs/todos/2026-09-03-lambda-param-refinement-unchecked.md`,
+`specs/todos/2026-09-03-block-fn-refinement-unchecked.md`,
+`specs/todos/2026-09-03-impl-method-param-refinement-unchecked.md`,
+`specs/todos/2026-09-03-actor-state-and-handler-refinement-unchecked.md`,
+`specs/todos/2026-09-01-nested-refinement-enforcement.md`, and
+`specs/todos/2026-09-03-string-return-refinement-unchecked.md`.
+
+---
+
 ## Promoting a skip: a demonstrated precondition failure
 
 Most skips stay silent because the checker cannot *prove* anything either way.

@@ -1,6 +1,9 @@
 # Refinement coverage audit
 
-Status: designed 2026-09-03. Not landed.
+Status: landed 2026-09-03. Commit range `5dbaf235..07db9bf2` (Tasks 1-4),
+plus this doc/todo/CHANGELOG commit (`docs: record the refinement coverage
+audit and its baseline`), which lands immediately after `07db9bf2` on the
+same branch.
 
 ## The problem
 
@@ -81,6 +84,20 @@ learns a new base type, sites move from `unenforced` to `enforced` with no audit
 change.
 
 ## What it will find on day one
+
+**Correction (Task 4, 2026-09-03): this prediction was wrong.** The audit
+does NOT go red over the actual corpus. Task 2's re-review, and Task 4's
+independent re-verification, swept the ~300 files `test/native/*.march` and
+`stdlib/*.march` and found 63 declared refinements, every one `Enforced`.
+Zero `Unenforced`, zero `Inert`. Every position kind listed below is real
+(each has a targeted fixture proving it genuinely unenforced, under
+`test/refine_audit/holes/`), but none of them occurs anywhere in the corpus
+the oracle already walks. See
+`specs/progress/2026-09-03-refinement-coverage-audit-baseline-and-ratchet.md`
+for the corrected record, the two committed baselines, and why an empty
+corpus baseline is still the right artifact to commit. The paragraph below
+is left as originally written, as the prediction that turned out wrong, not
+edited to match the outcome.
 
 The audit goes red immediately, and that is the point. Expected populations:
 
