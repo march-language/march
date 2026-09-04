@@ -2802,19 +2802,34 @@ let test_perceus_to_string_borrowed_field_no_decrc () =
     fn acc(s : R) : String do "${s.content_dir}" end
   end|} in
   let f = List.find (fun fn -> fn.March_tir.Tir.fn_name = "acc") m.March_tir.Tir.tm_fns in
-  let rec has_decrc = function
-    | March_tir.Tir.EDecRC _ -> true
-    | March_tir.Tir.ELet (_, e1, e2) -> has_decrc e1 || has_decrc e2
-    | March_tir.Tir.ESeq (e1, e2) -> has_decrc e1 || has_decrc e2
-    | March_tir.Tir.ELetRec (fns, body) ->
-      List.exists (fun f -> has_decrc f.March_tir.Tir.fn_body) fns || has_decrc body
-    | March_tir.Tir.ECase (_, brs, def) ->
-      List.exists (fun b -> has_decrc b.March_tir.Tir.br_body) brs ||
-      (match def with Some e -> has_decrc e | None -> false)
-    | _ -> false
+  (* Asserted by the TYPE of what is released, not as "no EDecRC anywhere".
+     Since aggregates became owned parameters, `acc` legitimately contains
+     `dec_rc s` -- the record's own release, which is the whole point of that
+     change.  The bug this test guards is a dec of the extracted STRING field,
+     which the record owner is responsible for; that must still be absent, and
+     the escaping field must be dup'd instead. *)
+  let decrc_tys fn =
+    let acc = ref [] in
+    let rec go = function
+      | March_tir.Tir.EDecRC (March_tir.Tir.AVar v)
+      | March_tir.Tir.EAtomicDecRC (March_tir.Tir.AVar v)
+      | March_tir.Tir.EFree (March_tir.Tir.AVar v) -> acc := v :: !acc
+      | March_tir.Tir.ELet (_, e1, e2) | March_tir.Tir.ESeq (e1, e2) -> go e1; go e2
+      | March_tir.Tir.ELetRec (fns, body) ->
+        List.iter (fun f -> go f.March_tir.Tir.fn_body) fns; go body
+      | March_tir.Tir.ECase (_, brs, def) ->
+        List.iter (fun b -> go b.March_tir.Tir.br_body) brs;
+        (match def with Some e -> go e | None -> ())
+      | _ -> ()
+    in
+    go fn.March_tir.Tir.fn_body; !acc
   in
-  Alcotest.(check bool) "to_string(borrowed field) emits no EDecRC" false
-    (has_decrc f.March_tir.Tir.fn_body)
+  let dropped = decrc_tys f in
+  Alcotest.(check bool) "no EDecRC of a String (the extracted field)" false
+    (List.exists (fun v -> v.March_tir.Tir.v_ty = March_tir.Tir.TString) dropped);
+  Alcotest.(check int) "the owned record parameter is released exactly once" 1
+    (List.length
+       (List.filter (fun v -> String.equal v.March_tir.Tir.v_name "s") dropped))
 
 let test_perceus_pipeline_no_crash () =
   (* The full pipeline including perceus runs without exception *)
@@ -4378,10 +4393,35 @@ let test_perceus_record_param_multi_call_no_rc_underflow () =
       ) m.March_tir.Tir.tm_fns
     else use_cfg_fns
   in
+  (* By TYPE, matching this test's own stated property ("must not contain a
+     dec_rc for the extracted string field from cfg").  The blanket
+     "no EDecRC at all" form no longer expresses that: aggregates are owned
+     parameters now, so the record's own `dec_rc cfg` is expected and correct.
+     A dec of the extracted STRING is still the bug. *)
+  let decrc_vars fn =
+    let acc = ref [] in
+    let rec go = function
+      | March_tir.Tir.EDecRC (March_tir.Tir.AVar v)
+      | March_tir.Tir.EAtomicDecRC (March_tir.Tir.AVar v)
+      | March_tir.Tir.EFree (March_tir.Tir.AVar v) -> acc := v :: !acc
+      | March_tir.Tir.ELet (_, e1, e2) | March_tir.Tir.ESeq (e1, e2) -> go e1; go e2
+      | March_tir.Tir.ELetRec (fns, body) ->
+        List.iter (fun f -> go f.March_tir.Tir.fn_body) fns; go body
+      | March_tir.Tir.ECase (_, brs, def) ->
+        List.iter (fun b -> go b.March_tir.Tir.br_body) brs;
+        (match def with Some e -> go e | None -> ())
+      | _ -> ()
+    in
+    go fn.March_tir.Tir.fn_body; !acc
+  in
   Alcotest.(check bool)
     "use_cfg (or process after inlining) has no spurious field-string EDecRC"
     false
-    (List.exists (fun fn -> has_any_decrc fn.March_tir.Tir.fn_body) fns_to_check)
+    (List.exists
+       (fun fn ->
+          List.exists (fun v -> v.March_tir.Tir.v_ty = March_tir.Tir.TString)
+            (decrc_vars fn))
+       fns_to_check)
 
 (* Regression: List.length(result) followed by List.nth(result, 0) — the
    List.length call (via its internal go closure) CONSUMES the list (owned

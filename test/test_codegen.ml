@@ -282,16 +282,26 @@ let test_tir_names_bool_tags () =
 (* ── Rc_types: needs_rc / borrow_eligible divergence contract (Wave 3 Task 2) ──
    Table-driven pin of the FULL truth table for both predicates over
    representative types, plus an exactness check that the divergence set is
-   precisely {TFn _, bare TVar _} and nothing else.
+   precisely {TFn _, bare TVar _, TTuple _, TRecord _} and nothing else.
    If either predicate changes, this test fails and points at Rc_types's
    module doc (each divergent constructor's fix history: a705cc95/d2cf09e/
    fd520110 for TFn/TVar).
 
-   TTuple/TRecord used to diverge (needs_rc false, borrow_eligible true).  They
-   no longer do: aggregates own their fields and are deep-dropped at death like
-   variants, so they are RC'd AND borrow-eligible.  While needs_rc was false
-   Perceus never decided an aggregate was dead, and every record and tuple cell
-   leaked along with every heap value it owned. *)
+   TTuple/TRecord diverge, but in the OPPOSITE direction from their history:
+   they used to be (needs_rc false, borrow_eligible true), and are now
+   (true, false).
+
+   needs_rc true: aggregates own their fields and are deep-dropped at death like
+   variants.  While it was false Perceus never decided an aggregate was dead, so
+   every record and tuple cell leaked along with every heap value it owned.
+
+   borrow_eligible false: an aggregate parameter is OWNED.  A borrowed one
+   leaves the caller holding the release, and in a self-tail-recursive loop that
+   release is unreachable -- it sits after the tail call, llvm_tco folds the call
+   into a back-edge, and the dec is discarded -- so every iteration leaked its
+   aggregate.  Ownership lets each iteration release the aggregate it was handed
+   before jumping with a new one, which is also what makes
+   Perceus.insert_owned_aggregate_param_drops reachable at all. *)
 
 (* (label, ty, expected needs_rc, expected borrow_eligible) *)
 let rc_types_truth_table : (string * March_tir.Tir.ty * bool * bool) list =
@@ -302,11 +312,11 @@ let rc_types_truth_table : (string * March_tir.Tir.ty * bool * bool) list =
     "TBool",               TBool,                       false, false;
     "TString",             TString,                     true,  true;
     "TUnit",               TUnit,                       false, false;
-    "TTuple []",           TTuple [],                   true,  true;
-    "TTuple [Int]",        TTuple [TInt],               true,  true;
-    "TTuple [String]",     TTuple [TString],            true,  true;
-    "TRecord []",          TRecord [],                  true,  true;
-    "TRecord [(f,Int)]",   TRecord [("f", TInt)],       true,  true;
+    "TTuple []",           TTuple [],                   true,  false; (* diverges *)
+    "TTuple [Int]",        TTuple [TInt],               true,  false; (* diverges *)
+    "TTuple [String]",     TTuple [TString],            true,  false; (* diverges *)
+    "TRecord []",          TRecord [],                  true,  false; (* diverges *)
+    "TRecord [(f,Int)]",   TRecord [("f", TInt)],       true,  false; (* diverges *)
     "TCon (Atom,[])",      TCon ("Atom", []),           false, false;
     "TCon (Foo,[])",       TCon ("Foo", []),            true,  true;
     "TCon (List,[Int])",   TCon ("List", [TInt]),       true,  true;
@@ -340,7 +350,7 @@ let test_rc_types_divergence_set_exact () =
      loudly here even if the truth-table rows above were edited in sync. *)
   let expected_divergent (ty : March_tir.Tir.ty) : bool =
     match ty with
-    | March_tir.Tir.TFn _ -> true
+    | March_tir.Tir.TFn _ | March_tir.Tir.TTuple _ | March_tir.Tir.TRecord _ -> true
     | March_tir.Tir.TVar "_" -> false
     | March_tir.Tir.TVar _ -> true
     | _ -> false
@@ -349,7 +359,7 @@ let test_rc_types_divergence_set_exact () =
     let actual =
       March_tir.Rc_types.needs_rc ty <> March_tir.Rc_types.borrow_eligible ty
     in
-    Alcotest.(check bool) (label ^ ": diverges iff TFn/bare-TVar")
+    Alcotest.(check bool) (label ^ ": diverges iff TFn/bare-TVar/TTuple/TRecord")
       (expected_divergent ty) actual
   ) rc_types_truth_table
 
@@ -14757,7 +14767,7 @@ let codegen_suites =
         ] );
       ( "rc_types", [
           Alcotest.test_case "needs_rc/borrow_eligible truth table" `Quick test_rc_types_truth_table;
-          Alcotest.test_case "divergence set is exactly {TFn, bare TVar}" `Quick test_rc_types_divergence_set_exact;
+          Alcotest.test_case "divergence set is exactly {TFn, bare TVar, TTuple, TRecord}" `Quick test_rc_types_divergence_set_exact;
         ] );
       ( "nested_lit_pattern_codegen", [
           Alcotest.test_case "nested bool lit: no tag switch"   `Quick test_nested_bool_lit_pattern_no_tag_switch;

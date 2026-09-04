@@ -46,7 +46,8 @@ call_ptr $jp_clo8()
 ## describe
 fn describe(pair : (Int, Int)) : String =
   case pair of
-  $Tuple2($f1, $f2) -> case $f1 of
+  $Tuple2($f1, $f2) -> dec_rc pair;
+case $f1 of
   0() -> let $jp_clo8 : () -> '_ = inc_rc $f1;
 inc_rc $f2;
 alloc $Clo_$jp7$0($jp7$apply$0, $f1, $f2) in
@@ -62,14 +63,13 @@ $f2 in
 let x : Int = inc_rc $f1;
 $f1 in
 "point"
-  _ -> panic("non-exhaustive pattern match")
+  _ -> dec_rc pair;
+panic("non-exhaustive pattern match")
 
 ## main
 fn main(_cap_console : Cap(IO.Console)) : () =
   let $t16 : String = let $t15 : (Int, Int) = (0, 0) in
-let $rc_3 : String = describe($t15) in
-dec_rc $t15;
-$rc_3 in
+describe($t15) in
 let $rc_2 : () = println($t16) in
 dec_rc $t16;
 $rc_2;

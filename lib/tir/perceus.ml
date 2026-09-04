@@ -500,6 +500,76 @@ let insert_apply_fn_clo_drop ~(repl : bool) (body : Tir.expr) : Tir.expr =
       Tir.ESeq (Tir.EDecRC (Tir.AVar clo_var), body)
     else body
 
+(** Drop owned aggregate PARAMETERS that the body never releases.
+
+    A variant reaching its last use inside a match is freed by
+    [add_scrutinee_free_for]; a let-bound aggregate is freed by the scope-end
+    drop in [insert_rc_expr]'s ELet case.  A PARAMETER has neither — there is no
+    binding site to hang a drop on — so an owned aggregate parameter was never
+    released at all.
+
+    The drops are pushed down to every TAIL position rather than wrapped around
+    the body.  Wrapping ([let tmp = body in dec_rc p; tmp]) puts an operation
+    after the body, so a self tail call inside it stops being a tail call,
+    llvm_tco stops firing, and a loop that ran in constant space recurses
+    instead: measured correct and leak-free to ~5,000 iterations, then SIGBUS
+    from stack exhaustion by 20,000.  Dropping just BEFORE each tail expression
+    keeps the tail call in tail position AND gives the loop constant space — at
+    the back-edge the parameter holds THIS iteration's aggregate, exactly the
+    cell that should be released, while the next iteration runs on the newly
+    built one already passed as the argument.
+
+    A tail expression that still READS the parameter (a base case like [b.n]) is
+    rebound first so the read happens before the release.  Its type is the
+    function's return type by definition of tail position, so no inference is
+    needed.
+
+    Guards mirror the ELet scope-end drop.  [used_only_as_field_source] is what
+    keeps this from double-freeing: at any consuming position ownership has
+    already transferred, and [releases_var] stands the drop down when the body
+    already decs the parameter on some path. *)
+let insert_owned_aggregate_param_drops (env : env) (borrowed : StringSet.t)
+    (fn : Tir.fn_def) (body : Tir.expr) : Tir.expr =
+  let candidates =
+    List.filter (fun p ->
+        is_aggregate_ty p.Tir.v_ty
+        && p.Tir.v_lin = Tir.Unr
+        && not (StringSet.mem p.Tir.v_name borrowed)
+        && not (StringSet.mem p.Tir.v_name env.closure_fvs)
+        && not (StringSet.mem p.Tir.v_name env.moved_vars)
+        && not (releases_var p.Tir.v_name body)
+        && used_only_as_field_source p.Tir.v_name body)
+      fn.Tir.fn_params
+  in
+  match candidates with
+  | [] -> body
+  | _ ->
+    let drop_ops tail_expr =
+      List.fold_left
+        (fun acc p -> Tir.ESeq (decrc_for env p (Tir.AVar p), acc))
+        tail_expr candidates
+    in
+    let uses_candidate e =
+      List.exists
+        (fun p -> Perceus_liveness.name_free_in p.Tir.v_name e) candidates
+    in
+    let rec push (e : Tir.expr) : Tir.expr =
+      match e with
+      | Tir.ELet (v, e1, e2) -> Tir.ELet (v, e1, push e2)
+      | Tir.ESeq (e1, e2) -> Tir.ESeq (e1, push e2)
+      | Tir.ECase (a, branches, default) ->
+        Tir.ECase (a,
+          List.map (fun br -> { br with Tir.br_body = push br.Tir.br_body })
+            branches,
+          Option.map push default)
+      | Tir.ELetRec (fns, inner) -> Tir.ELetRec (fns, push inner)
+      | tail when uses_candidate tail ->
+        let tmp = fresh_rc_var fn.Tir.fn_ret_ty in
+        Tir.ELet (tmp, tail, drop_ops (Tir.EAtom (Tir.AVar tmp)))
+      | tail -> drop_ops tail
+    in
+    push body
+
 (** [insert_rc ~module_env ~borrowed fn] runs Phase 2 (RC insertion) over one
     function.  [module_env] carries the module-scoped fields (borrow_map,
     type_defs, extern_names) set once per [perceus] run; this
@@ -556,13 +626,15 @@ let insert_rc ~(module_env : env) ?(repl = false) ?(borrowed = StringSet.empty)
      class) automatically withdraws the matching drop instead of silently
      leaving caller and callee disagreeing — the exact split that caused the
      double-free wave. *)
-  let body'' =
+  let body_clo =
     if Tir_names.is_apply_fn fn.Tir.fn_name
        && not (Borrow.is_borrowed module_env.borrow_map fn.Tir.fn_name 0)
     then insert_apply_fn_clo_drop ~repl body'
     else body'
   in
-  { fn' with Tir.fn_body = body'' }
+  let body_final =
+    insert_owned_aggregate_param_drops fn_env borrowed' fn' body_clo in
+  { fn' with Tir.fn_body = body_final }
 
 (* ── Phase 3: RC Elision (cancel pairs) ──────────────────────────────────── *)
 

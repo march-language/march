@@ -481,6 +481,16 @@ let rec used_only_as_field_source (name : string) (e : Tir.expr) : bool =
   | Tir.ESetField (a, _, b) -> atoms_ok [a; b]
   | Tir.EIncRC a | Tir.EDecRC a | Tir.EAtomicIncRC a | Tir.EAtomicDecRC a
   | Tir.EFree a -> not (atom_hits a)
+  (* A pure ALIAS binding [let v = p] moves ownership to [v] rather than
+     consuming the aggregate at some other owner's behest.  Tuple destructuring
+     lowers to exactly this ([let linear $p = t in let n = $p.$fv0 in ..]), so
+     refusing it outright left a tuple parameter with no drop site at all.
+     Follow the alias: the aggregate is still "only read" as long as the ALIAS
+     is only read.  Releasing the original then releases the one shared cell
+     once, which is what the alias made it. *)
+  | Tir.ELet (v, Tir.EAtom (Tir.AVar w), e2)
+    when String.equal w.Tir.v_name name ->
+    used_only_as_field_source v.Tir.v_name e2
   | Tir.ELet (_, e1, e2) ->
     used_only_as_field_source name e1 && used_only_as_field_source name e2
   | Tir.ESeq (e1, e2) ->
