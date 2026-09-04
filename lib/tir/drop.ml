@@ -256,6 +256,40 @@ let aggregate_fields (ty : Tir.ty) : (string * Tir.ty) list option =
   | Tir.TTuple ts -> Some (List.mapi (fun i t -> (Tir_names.fv_field i, t)) ts)
   | _ -> None
 
+(** True when a value of [ty] may NOT be a heap pointer at runtime: a niche
+    [None] is the raw word 0, and a newtype over a scalar is a tagged integer.
+
+    Such a value must never be handed to a synthesized deep drop.  Those
+    functions gate their children on [march_decrc_freed], which returns
+    "freed" (1) for anything that is not a heap pointer — so the children
+    branch fires and dereferences the word.  Observed as an EXC_BAD_ACCESS at
+    address 0x8 (the tag slot) inside __drop$R3_... for
+    test/native/ffi_codec2.march, whose `flag : Option(Unit)` field is a niche
+    None built on the C side.
+
+    Falling back to a bare [EDecRC] for these is safe — [march_decrc] is
+    IS_HEAP_PTR-guarded, so it is a no-op on a non-heap word and an ordinary
+    release otherwise.  It is also shallow, so a niche-typed field's own heap
+    children are not reclaimed by this path; that is the conservative
+    direction (leak, never crash) and it is the same treatment such a field
+    got before aggregates were dropped at all. *)
+let may_be_non_heap (env : env) (ty : Tir.ty) : bool =
+  match ty with
+  | Tir.TCon (name, _) ->
+    (match Repr.repr_of_ty ~collision_set:env.collision_set env.type_defs ty with
+     (* Unboxed: a scalar-only variant packed into a word -- never a heap
+        pointer, so it belongs here too. *)
+     | Repr.Niche _ | Repr.Newtype _ | Repr.Unboxed _ -> true
+     | Repr.Boxed ->
+       (* repr_of_ty answers Boxed for an Option-shaped type reached without
+          type params; niche_repr_of_concrete is the predicate codegen uses
+          there.  Same split that caused the double release fixed above. *)
+       (match Repr.niche_repr_of_concrete ~collision_set:env.collision_set
+                env.type_defs name with
+        | Some (Repr.Niche _) -> true
+        | _ -> false))
+  | _ -> false
+
 (** The synthesized drop function for [ty], or [None] if a bare [EDecRC] on
     [ty] is already correct (no heap children to release). *)
 let rec drop_fn_for (env : env) (ty : Tir.ty) : string option =
@@ -343,6 +377,7 @@ and build_aggregate_drop_fn env fname ty (fields : (string * Tir.ty) list)
   in
   let ops =
     List.map (fun (_, v) ->
+        if may_be_non_heap env v.Tir.v_ty then Tir.EDecRC (Tir.AVar v) else
         match drop_fn_for env v.Tir.v_ty with
         | Some callee ->
           let f = { Tir.v_name = callee;
@@ -392,6 +427,8 @@ and build_drop_fn env fname ty ctors : Tir.fn_def =
         let ops =
           List.filter_map (fun v ->
               if has_tvar v.Tir.v_ty || not (Rc_types.needs_rc v.Tir.v_ty) then None
+              else if may_be_non_heap env v.Tir.v_ty then
+                Some (Tir.EDecRC (Tir.AVar v))
               else match drop_fn_for env v.Tir.v_ty with
                 | Some callee ->
                   let f = { Tir.v_name = callee;
