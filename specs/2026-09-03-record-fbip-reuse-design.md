@@ -44,6 +44,60 @@ is the one that makes ordering mandatory rather than merely convenient.
    ```
    That is a wrong-answer miscompile, not a missed optimisation.
 
+## Status update 2026-09-04 (after the aggregate-RC work landed)
+
+Of the three blockers above, one is gone and two changed shape. Re-read this
+before starting; the original blocker list is now partly stale.
+
+**Blocker 3 (vacuous guard) — RESOLVED.** Aggregates now carry real refcounts
+(`Rc_types.needs_rc` is true for `TTuple`/`TRecord`), so
+`emit_reuse_uniform`'s `RC == 1` check means something. The shared-record
+miscompile described above is no longer the hazard it was.
+
+**Blocker 2 (no marker) — still true, still fine.** Unchanged: records need no
+arity check, so `same_arity`/`$fbip$` stay out of it.
+
+**Blocker 1 (no reuse source) — still true, and now for TWO reasons.**
+
+1. *The guard would read an inflated refcount.* Every `EField` projection puts
+   an `inc_rc` on its aggregate source, so on the canonical shape the base is at
+   RC 2 exactly when the update runs:
+
+   ```
+   let c = let $t30230 = (inc_rc a; a.n) + 1 in
+           { a with n = $t30230 }        -- a's RC is 2 here
+   ```
+
+   A reuse guard reads 2, takes the fresh-allocation branch, and reuse silently
+   never fires. So this is not only a leak (2001 live objects over 1000
+   iterations) — it would make record reuse a NO-OP even once implemented.
+   Removing that inc is blocked on
+   `specs/repros/2026-09-04-niche-record-payload-double-release.md`, which is
+   therefore on the critical path for reuse being effective, not merely for the
+   leak.
+
+2. *The aggregate's drop is in the wrong POSITION.* `Perceus_fbip` matches
+   `dec` THEN `alloc` (`fbip_expr`'s `ELet(_, EDecRC, ELet(result, EAlloc ..))`
+   and `try_fbip_sink`'s `ESeq(EDecRC, body)`). The scope-end drop added by the
+   aggregate-RC work emits the opposite order — the dec lands after the whole
+   scope:
+
+   ```
+   let a = { n = 1, s = "x" } in
+   let c = { a with n = 5 } in
+   ... dec_rc a          -- far below the update; nothing to sink
+   ```
+
+   This was a deliberate, conservative choice (see the comment on the scope-end
+   drop in `perceus_core.ml`): dropping at LAST USE instead would require
+   proving no borrowed field outlives the projection. Reuse needs exactly that
+   last-use placement, so this project must either do that proof or give the
+   update site its own reuse-source rule rather than relying on `try_fbip_sink`.
+
+Net: the aggregate-RC work made reuse SAFE to attempt but not yet POSSIBLE. Both
+remaining items are about the base's refcount — its value at the update site,
+and where its release is emitted.
+
 ## What already exists
 
 Codegen is largely done. `Llvm_emit_alloc.emit_reuse_uniform` already handles
