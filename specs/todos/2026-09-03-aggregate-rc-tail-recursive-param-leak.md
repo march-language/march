@@ -51,14 +51,78 @@ the very cell the next iteration is about to read.
   record-liveness class. Do not re-try this without addressing the param drop
   site first.
 
+## Attempted 2026-09-03: owned-parameter drop site — DOES NOT WORK ALONE
+
+The two directions below were tried and are the SAME fix, not alternatives. A
+drop site for owned aggregate parameters only pays off if some aggregate
+parameter is actually owned, and while `borrow_eligible` is true for
+`TTuple`/`TRecord` none is.
+
+What was built (then reverted, deliberately not committed):
+
+- `Perceus.insert_owned_aggregate_param_drops`, a post-pass mirroring
+  `insert_apply_fn_clo_drop`. It drops owned aggregate params the body never
+  releases, with the same guards as the `ELet` scope-end drop
+  (`used_only_as_field_source`, `releases_var`, `moved_vars`).
+- Crucially it must push the drops down to every TAIL position, not wrap the
+  body. Wrapping (`let tmp = body in dec_rc p; tmp`) moves a self tail call out
+  of tail position, TCO stops firing, and the loop recurses: measured correct
+  and leak-free to ~5,000 iterations, then SIGBUS from stack exhaustion by
+  20,000. Dropping just before each tail expression keeps the tail call intact
+  and gives constant space — at the back-edge the parameter holds THIS
+  iteration's cell, which is exactly the one to release.
+
+Measured with that in place AND `borrow_eligible` false for aggregates:
+`rec_scalar` and `rec_heap` went FLAT (0 and 2 live objects at both N=1,000 and
+N=100,000). So the mechanism is right.
+
+Why it was reverted: `borrow_eligible` false for `TTuple`/`TRecord` reopens the
+documented `0b52510d` class, as `rc_types.ml` warns. Full suite went from 0
+failures to 2 real ones (beyond the truth-table pins):
+`perceus 3 "to_string borrowed field"` and
+`perceus 13 "record param multi-call"` — the latter being that exact bug.
+A hand-written multi-call program still produced the right answer, but one
+passing program is not grounds for overriding a bug-history-backed invariant.
+
+And with `borrow_eligible` left true the drop site is PROVABLY DEAD: its guard
+(the parameter is used only as an `EField` source) is precisely the condition
+under which borrow inference marks the parameter `cfg:borrowed`, which the
+`not (StringSet.mem p borrowed)` filter then excludes. Instrumented and
+confirmed: zero firings across `stdlib/toml.march`, `stdlib/json.march`,
+`stdlib/http.march`, `stdlib/cluster.march` and every fixture.
+
+So any real fix must FIRST make some aggregate parameters owned without
+reopening `0b52510d`, or attack the TCO side directly.
+
 ## Candidate directions
 
-- Give owned aggregate PARAMETERS a drop site, the analogue of the `ELet`
-  scope-end drop (and of `add_scrutinee_free_for` for `ECase` scrutinees).
-- Or make a self tail call pass its aggregate argument as OWNED, so no
-  post-call dec is needed and the back-edge stays a true tail call. Note
+- Make a self tail call pass its aggregate argument as OWNED, so no post-call
+  dec is needed and the back-edge stays a true tail call.
   `perceus_core.ml` already special-cases `is_self_call` when computing
-  `inc_vars`/`post_dec_vars`.
+  `inc_vars`/`post_dec_vars`, which is the natural hook. This is now the most
+  promising direction: it is narrower than flipping `borrow_eligible`
+  wholesale, so it need not disturb the multi-call borrowed-parameter shape
+  that `0b52510d` protects.
+- Understand why `perceus 3` / `perceus 13` fail under owned aggregate params
+  and whether they are genuine miscompiles or over-broad TIR-shape assertions.
+  Precedent: `test_perceus_local_record_field_no_spurious_decrc` asserted "no
+  EDecRC anywhere in render" and had to be narrowed to "no EDecRC of the
+  extracted field t", because the record's own drop is now legitimate. These
+  two may be the same kind of over-broad assertion — but that must be
+  established by reading them, not assumed.
+
+Two remaining fixtures are blocked on separate questions, not on this one:
+
+- `rec_update` (`{ b with n: ... }`): `b` sits at an `EUpdate` BASE position.
+  Whether that is a consuming position or a borrow is the open ownership
+  question in `specs/2026-09-03-record-fbip-reuse-design.md`; `emit_update`
+  copies from the base and does not consume it, which suggests borrow, but the
+  Perceus `EUpdate` arm runs the base through `find_inc_vars` as if it were
+  consumed. Settle that before touching either.
+- `tuple`: tuple destructuring binds `let linear $p = t`, moving ownership to a
+  LINEAR alias. The scope-end drop requires `v_lin = Tir.Unr`, so neither `t`
+  (aliased away) nor `$p` (linear) is dropped. Linear/affine aggregates need
+  their own release path (`EFree` rather than `EDecRC`).
 
 Either way, add a fixture asserting `live_objs` is flat across N=1,000 and
 N=100,000 for the `spin` shape above, in records, tuples, and record-update
