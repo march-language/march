@@ -55,6 +55,43 @@ scrutinee are one cell, which the function does not own.
 (`scrutinee_shares_payload_storage`); the incs were the remaining thing keeping
 that shared cell alive across the callee.
 
+## What the masked bug actually is (narrowed 2026-09-04)
+
+It is a genuine HEAP CORRUPTION, pre-existing, that the incs merely hide. With
+the aggregate inc suppressed:
+
+- `lldb` stops in `libsystem_malloc`'s `_xzm_xzone_malloc_freelist_outlined`
+  with `EXC_BREAKPOINT` — malloc's own freelist-corruption detector.
+- Roughly half of runs instead hit the runtime's guard with a GARBAGE refcount:
+  `march: RC underflow (rc was -6048672674068485440) at 0xba8c00900`. A wild rc
+  value means the dec landed on something that is not a live heap header.
+
+Trigger, minimised (`Wrap = W({rate : Int, code : Int}) | Z`, two calls):
+
+| calls                      | result |
+|----------------------------|--------|
+| literal arm only           | ok     |
+| fall-through arm only      | ok     |
+| literal, then fall-through | **ok** |
+| fall-through twice         | CRASH  |
+| literal twice              | CRASH  |
+
+So it needs the SAME match arm to execute twice — a per-arm object is released
+twice — and it does not matter which arm. Two hypotheses are already excluded:
+
+- **Not Float-specific.** The original fixture used `rate : Float`; an all-`Int`
+  record reproduces identically.
+- **Not the static-closure path.** Capture-free join-point closures are interned
+  as immortal globals with rc = 2^40 (`Llvm_ctx.intern_static_closure`), so
+  decrementing one is harmless by design — and the minimised repro emits no
+  `$static_clo` at all; its join-point closure is a real `march_alloc(32)`.
+
+The remaining suspect is the join-point closure chain that a literal-pattern arm
+builds (`$jp_clo_b = alloc $Clo(..., $jp_clo_a)` followed immediately by
+`dec_rc $jp_clo_b`, whose deep drop releases `$jp_clo_a` while the enclosing
+scope may still hold it). That is a hypothesis, NOT established — verify before
+acting on it.
+
 ## Why a targeted guard is not obvious
 
 The `EField` arm cannot see the niche-ness: its source is the payload binder,
