@@ -1,3 +1,72 @@
+# FIXED 2026-09-04 — double release of a non-generic niche payload, and the
+# aggregate field-read inc it was masking
+
+**Root cause.** `Drop.droppable_ctors` classified types through
+`Repr.repr_of_ty`, which reads an Option-shaped type's payload out of the
+TCon's type PARAMS:
+
+```
+| Some [ (_nullary, []); (_single, [_]) ] ->
+  (match params with
+   | [p] when niche_payload_ok .. -> Niche ..
+   | _ -> Boxed)          <- a NON-GENERIC type has params = [], lands here
+```
+
+A user-declared `type Wrap = W(String) | Z` is non-generic, so it fell back to
+`Boxed` — but codegen classifies it with `Repr.niche_repr_of_concrete`, which
+exists precisely for "a NON-GENERIC Option-shaped ADT", and emits the NICHE
+encoding. Under a niche `W(x)` IS `x`: one cell, not two. The deep drop
+synthesized off the Boxed answer,
+
+```
+case x of W(f) -> let freed = march_decrc_freed(x) in
+                  case freed of True -> drop f
+```
+
+therefore released the same pointer twice. Generic `Option(String)` was never
+affected — its payload rides in `ty_args`, so `repr_of_ty` sees `[p]` and says
+Niche correctly. That is why this survived: it needs a user-declared
+non-generic type.
+
+**Pre-existing on main**, independent of the aggregate-RC work: verified 6/6
+crashes with a compiler built from the commit BEFORE any of it.
+
+**Fix.** `droppable_ctors` now consults `niche_repr_of_concrete` for a
+`TCon (n, [])` and declines to synthesize a drop when it reports Niche —
+i.e. it asks both predicates and refuses if either says the payload shares the
+box's storage.
+
+**Second fix, unblocked by the first.** `insert_rc_expr`'s `EField` arm no
+longer runs an aggregate source through `find_inc_vars`. That inc had no
+matching dec for a borrowed parameter, so a record passed to a field-reading
+helper never reached refcount zero. This exclusion had been tried and reverted
+once, because the double release above surfaced the moment the inc stopped
+masking it.
+
+**Measured.**
+
+| shape | before | after |
+|---|---|---|
+| `W(String) \| Z` in a 1000-iteration loop | 6/6 crash | 6/6 clean, correct output |
+| record passed to a field-reading helper, 1000 iterations | 2001 live objects | **1** |
+| record built and read in one scope | 1 | 1 |
+
+**Verification.** Full suite green — 975 / 273 / 593 / 878 / 61 / 24 / 354 / 5 /
+36 / 10 / 7 / 609 across 12 suites, zero failures, including Slow and the
+z3-backed refinement cases. Corpus sweep 186 ok, 0 RC underflows. Reuse-neutral:
+whole-program `EReuse` counts unchanged at 1134 / 1133. TIR snapshot diff is
+exactly the two unbalanced incs disappearing.
+
+**Regression test.** `test/native/niche_concrete_payload_drop.march` plus its
+`.expected`, wired as a native golden in `test/dune`. Note these goldens run
+under `dune runtest`, NOT under `scripts/run-tests.sh` — which is why the
+crashing `record_pattern.march` sat green through several full suite runs, and
+why the compile-and-run corpus sweep was what caught it.
+
+---
+
+## Original investigation notes
+
 `[P1]` Aggregate RC: the `EField` inc on an aggregate source blocks the drop for
 borrowed record parameters, but removing it breaks niche-represented payloads
 

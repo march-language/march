@@ -61,12 +61,20 @@ git log is authoritative for exact commits.
   same shared-cell guard variants use. A variant holding a record or tuple
   field is fixed by the same change.
 
-  Two shapes are not yet covered, both tracked in `specs/todos/`: an aggregate
-  parameter of a self-tail-recursive function rebuilt each iteration (the
-  trailing dec is discarded when TCO emits the back-edge), and a record passed
-  to a function that reads its fields (the projection dups the record, and
-  removing that dup breaks niche-represented payloads). A record built and read
-  within one scope, and a variant holding a record or tuple field, are fixed.
+  A record passed to a function that reads its fields is fixed too: the
+  projection no longer dups the record (2001 live objects over a 1000-iteration
+  loop, now 1). One shape is not yet covered, tracked in `specs/todos/`: an
+  aggregate parameter of a self-tail-recursive function rebuilt each iteration,
+  where the trailing dec is discarded when TCO emits the back-edge.
+
+- **A non-generic Option-shaped type with a heap payload was freed twice.**
+  `type Wrap = W(String) | Z` is encoded as a niche, where `W(x)` *is* `x` — one
+  cell — but the deep-drop pass classified it as boxed and synthesized a drop
+  that released the cell and then released its "payload", the same pointer.
+  Crashed 6/6 in a loop, variously as heap-allocator freelist corruption, an
+  RC-underflow abort, or SIGBUS. Generic `Option(String)` was never affected, so
+  this needed a user-declared non-generic type. The two representation
+  predicates now have to agree before a drop is synthesized.
 
 - Compiled binaries built with `MARCH_STRING_STATS=1` now report `live_objs`,
   the runtime's exact live-heap-object count. Unlike peak RSS it does not vary

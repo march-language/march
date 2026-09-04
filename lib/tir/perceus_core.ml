@@ -1393,19 +1393,32 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
     (* Field projection BORROWS the record: no ownership changes hands, so a
        borrowed-field record var must not be dup'd here (it would leak).
 
-       NOTE: an aggregate source is deliberately NOT excluded here, even though
-       [find_inc_vars] documents its atoms as consuming positions and a
-       projection is not one.  Excluding it (tried, reverted) removed incs that
-       are load-bearing for niche-represented payloads, where the scrutinee and
-       its payload share one cell: test/native/record_pattern.march
-       (`Wrap = W({rate : Float, code : Int}) | Z`, matched twice) then died
-       with a nondeterministic SIGBUS/RC-underflow on the second call.  The inc
-       is largely inert anyway -- [find_inc_vars] only emits one when the source
-       is live after the projection, in which case a later dec balances it -- so
-       excluding it bought nothing measurable: the leak fixtures and
-       simple-record leak counts were identical either way.  See
-       specs/todos/2026-09-03-aggregate-field-read-inc-masks-imbalance.md. *)
-    let inc_vars = find_inc_vars ~include_borrowed_fields:false env [a] live_after in
+       An AGGREGATE source is excluded from [find_inc_vars] outright.  That
+       function documents its atoms as sitting at CONSUMING positions, and a
+       projection is not one: it emitted an inc whenever the source was live
+       after the read, which is ALWAYS true of a borrowed parameter, and
+       nothing ever undid it.  A record passed to a field-reading helper
+       therefore never reached refcount zero -- 2001 live objects over a
+       1000-iteration loop, against 1 when the same field is read inline.
+
+       This exclusion was tried once before and reverted, because it made
+       test/native/record_pattern.march die with a nondeterministic
+       SIGBUS/RC-underflow.  That was NOT this rule's bug: those incs were
+       masking a genuine double release in [Drop.droppable_ctors], which
+       synthesized a deep drop for a NON-GENERIC Option-shaped type that
+       codegen encodes as a niche -- releasing the one cell twice, once as the
+       box and once as the payload.  With that fixed (see the concrete-niche
+       check there) the exclusion is sound, and record_pattern.march passes
+       repeatedly. *)
+    let a_is_aggregate = match a with
+      | Tir.AVar v -> (match v.Tir.v_ty with
+                       | Tir.TTuple _ | Tir.TRecord _ -> true
+                       | _ -> false)
+      | _ -> false
+    in
+    let inc_vars =
+      if a_is_aggregate then []
+      else find_inc_vars ~include_borrowed_fields:false env [a] live_after in
     let e' = wrap_incrcs env inc_vars (Tir.EField (a, f)) in
     let lb = StringSet.union live_after (vars_of_atom a) in
     (e', lb)

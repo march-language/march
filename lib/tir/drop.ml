@@ -173,6 +173,47 @@ let droppable_ctors (env : env) (ty : Tir.ty)
   match ty with
   | Tir.TCon (name, ty_args)
     when not (Tir_names.is_actor_msg_name name) ->
+    (* [repr_of_ty] alone is NOT enough here.  For an Option-shaped type it
+       classifies from the TCon's type PARAMS, and a NON-GENERIC one
+       (`type Wrap = W(String) | Z`) has none — so it falls back to Boxed:
+
+         | Some [ (_nullary, []); (_single, [_]) ] ->
+           (match params with
+            | [p] when niche_payload_ok .. -> Niche ..
+            | _ -> Boxed)                        <- params = [] lands here
+
+       Codegen does not agree: it classifies such a type through
+       [niche_repr_of_concrete], which exists precisely for "a NON-GENERIC
+       Option-shaped ADT", and emits the niche encoding (null / non-null, no
+       tag).  Under that encoding `W(x)` IS `x` — one cell, not two — so the
+       drop this function would synthesize,
+
+         case x of W(f) -> let freed = march_decrc_freed(x) in
+                           case freed of True -> drop f
+
+       releases the SAME pointer twice: once as the box, then again as the
+       payload.  Measured on `type Wrap = W(String) | Z` in a 1000-iteration
+       loop: 6/6 crashes, split across libsystem_malloc's freelist-corruption
+       detector (SIGTRAP), this runtime's own RC-underflow guard reporting a
+       garbage refcount, and SIGBUS.
+
+       Generic Option-shaped types were never affected — `Option(String)`
+       carries its payload in ty_args, so repr_of_ty sees `[p]` and correctly
+       says Niche — which is why this survived: it needs a user-declared
+       non-generic one.
+
+       Consult BOTH predicates and decline if EITHER says the payload shares
+       the box's storage. *)
+    let concrete_niche =
+      match ty with
+      | Tir.TCon (n, []) ->
+        (match Repr.niche_repr_of_concrete ~collision_set:env.collision_set
+                 env.type_defs n with
+         | Some (Repr.Niche _) -> true
+         | _ -> false)
+      | _ -> false
+    in
+    if concrete_niche then None else
     (match Repr.repr_of_ty ~collision_set:env.collision_set env.type_defs ty with
      | Repr.Boxed ->
        (match Repr.find_variant env.type_defs name with

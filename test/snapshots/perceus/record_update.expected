@@ -14,8 +14,7 @@ $rc_1
 
 ## move_right
 fn move_right(p : { x : Int, y : Int }) : { x : Int, y : Int } =
-  let $t2 : Int = let $t1 : Int = inc_rc p;
-p.x in
+  let $t2 : Int = let $t1 : Int = p.x in
 +($t1, 1) in
 { p with x = $t2 }
 
