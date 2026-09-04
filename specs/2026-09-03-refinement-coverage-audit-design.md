@@ -1,7 +1,13 @@
 # Refinement coverage audit
 
-Status: landed 2026-09-03. Commit range `5dbaf235..c08af2db` (Tasks 1-4;
-Task 4 is `07db9bf2` (baseline/CI) and `c08af2db` (docs/todos/record)).
+Status: landed 2026-09-03, with a fix wave following a whole-plan review
+(also 2026-09-03: findings 1 and 2 blocking, 3 and 4 medium, 5 and 6 low).
+Commit range `5dbaf235..` through the branch tip -- an open-ended form on
+purpose, not a fixed end hash: a fixed hash in this exact line was itself
+wrong twice (`b92ca446` fixed one self-reference, and two more commits,
+`b92ca446` and `7acf5423`, landed after the range it named was written).
+`git log 5dbaf235..HEAD` on `claude/refinement-coverage-audit` is
+authoritative.
 
 ## The problem
 
@@ -37,6 +43,22 @@ Not "every declared refinement produces an obligation". That is false by design.
 A precondition is filed once per call site, so a refined parameter on an uncalled
 function legitimately has zero obligations, and an audit built on that assertion
 would drown in true zeros.
+
+**Correction (whole-plan review, 2026-09-03): this assertion depends on
+seeing the pre-desugar AST, and did not until the review's findings 1 and
+2.** The audit enumerated only the POST-desugar decl list, which two
+desugar transforms falsify the assertion against: a multi-head function's
+clause merge discards every declared parameter type before the audit ever
+sees it (a declared refinement with no site at all, not even
+`unenforced`), and a default-argument function survives only under mangled
+arity-variant names, so a refinement that lands on the survivor gets a
+false `enforced` verdict (a plain call to the original name can never
+resolve to it). Both are now fixed by comparing the PRE-desugar site list
+against the POST-desugar one (`Refine_audit.desugar_dropped`); see
+`specs/progress/2026-09-03-refinement-coverage-audit-baseline-and-ratchet.md`
+for the matching rule and its justification. The assertion below is left as
+originally written, as the version that turned out incomplete, not edited
+to match the fix.
 
 The assertion is instead:
 
@@ -90,7 +112,12 @@ independent re-verification, swept the ~300 files `test/native/*.march` and
 Zero `Unenforced`, zero `Inert`. Every position kind listed below is real
 (each has a targeted fixture proving it genuinely unenforced, under
 `test/refine_audit/holes/`), but none of them occurs anywhere in the corpus
-the oracle already walks. See
+the oracle already walks. (Finding 4 of the whole-plan review found this
+sentence inaccurate as first written: the type-argument, arrow-domain and
+linear-wrapper positions had no fixture, only `audit-classify` unit test
+cases. `test/refine_audit/holes/type_arg.march`, `arrow_domain.march` and
+`linear_wrapper.march` were added to close that gap, so the sentence is
+accurate as it now stands.) See
 `specs/progress/2026-09-03-refinement-coverage-audit-baseline-and-ratchet.md`
 for the corrected record, the two committed baselines, and why an empty
 corpus baseline is still the right artifact to commit. The paragraph below
@@ -124,6 +151,21 @@ than the refinement oracle, whose baseline lives in a temporary directory and is
 not committed, so it cannot catch a regression that arrives between refactors.
 
 ## Where it hooks in
+
+**Correction (whole-plan review, 2026-09-03): the audit also needs the
+PRE-desugar decl list, not only the module `check_module` already sees.**
+`Refine_check.check_module` takes an optional `?pre_desugar_decls`
+alongside `?audit`; when a caller supplies it, `check_module` enumerates
+sites over BOTH the pre-desugar list and `m.mod_decls` (post-desugar) and
+reports any pre-desugar site with no surviving occurrence as `unenforced`,
+overriding what a post-desugar site at a similar position might otherwise
+say. `bin/main.ml` passes the entry file's own decls, captured right after
+parsing and before `Desugar.desugar_module` runs; the shipped stdlib is not
+included (the corpus sweep already established it contains neither
+problem shape today). Omitting `?pre_desugar_decls` keeps every existing
+caller's behaviour identical to before this fix. The paragraph below
+predates that fix and describes only the post-desugar hook point, which is
+still where the POST-desugar half of the comparison happens.
 
 `Refine_check.check_module` ends by running the whole-type traversal that emits
 the declared-but-inert warnings. At that point the module's declarations and the

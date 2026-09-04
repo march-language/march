@@ -1776,13 +1776,65 @@ above happens to exercise:
 - A refinement nested below the outermost position of a declared type.
 - A `{String | ...}` return type: `return_refine_ext` only recognizes Int,
   Bool, Float, and record bases.
+- A parameter refinement that desugar drops or relocates before the audit
+  ever sees it: a multi-head function's clause merge, or a default-argument
+  function's mangled arity variant. See below.
 
 See `specs/todos/2026-09-03-lambda-param-refinement-unchecked.md`,
 `specs/todos/2026-09-03-block-fn-refinement-unchecked.md`,
 `specs/todos/2026-09-03-impl-method-param-refinement-unchecked.md`,
 `specs/todos/2026-09-03-actor-state-and-handler-refinement-unchecked.md`,
-`specs/todos/2026-09-01-nested-refinement-enforcement.md`, and
-`specs/todos/2026-09-03-string-return-refinement-unchecked.md`.
+`specs/todos/2026-09-01-nested-refinement-enforcement.md`,
+`specs/todos/2026-09-03-string-return-refinement-unchecked.md`, and
+`specs/todos/2026-09-03-desugar-dropped-refinement-unchecked.md`.
+
+### Why the audit needs the pre-desugar AST too
+
+A whole-plan review of this design found two shapes where the POST-desugar
+declaration list alone is not enough:
+
+- A multi-head function's clause merge rebuilds every parameter with no
+  declared type at all, so a refined parameter on one of the original
+  clauses is not `Unenforced`; it is simply absent, with no site and no
+  disposition, which is worse than a false negative.
+- A default-argument function survives desugar only under mangled
+  arity-variant names (`f$2`, `f$1`, ...). A refined parameter on the
+  survivor used to report `Enforced`, correctly describing what the
+  checker's extractor accepts at that decl, but incorrectly implying a
+  plain call `f(...)` is covered by it: no decl named `f` remains, so no
+  such call resolves to anything refined.
+
+Both are fixed by diffing the pre-desugar site list against the
+post-desugar one: a pre-desugar site with no matching post-desugar
+occurrence (same enclosing declaration name and predicate text) is reported
+`Unenforced`, overriding whatever a post-desugar site at a similar position
+would otherwise say. `Return` is the one exception: it matches by predicate
+text alone, not by name, because a postcondition is checked against a
+function's own body with no notion of a caller, so a default-argument
+function's renamed full-arity variant is still correctly `Enforced` for its
+return type even while its parameter is not. Confirmed directly: `fn f(a :
+Int, b : Int \\ 1) : {Int | _ > 0} do a - b end` called as `f(0, 5)` still
+errors under `cap verified` (`f$2` does not satisfy its return type
+constraint), unaffected by this fix.
+
+```
+$ march --check --refine-audit --refine-report t6e.march
+coverage audit: t6e.march:3:27: param `f` #1: b > 0: this refinement was declared here, but no occurrence with the same enclosing name and predicate text survives desugaring: either the declared type was discarded entirely (a multi-head function's clause merge drops every parameter type before the checker ever sees it) or it now lives only under a mangled name a plain call cannot resolve to (a default-argument function's arity variant, e.g. `f$2`). See specs/todos/2026-09-03-desugar-dropped-refinement-unchecked.md.
+coverage audit (user code): 1 enforced, 0 inert (warned), 1 unenforced
+```
+
+(`t6e.march` is `fn f(a : Int, b : {Int | b > 0} \\ 1) : Int do a + b end`,
+called as `f(1, 0)`.) Pinned at `test/refine_audit/holes/default_param.march`
+and `multi_head.march`; `type_arg.march`, `arrow_domain.march`, and
+`linear_wrapper.march` add fixtures for the three nested positions this
+list already named but the holes set had not yet covered (a whole-plan
+review finding). This comparison covers only the entry file and its
+resolved imports, not the shipped stdlib, which a sweep already established
+contains neither shape today.
+
+`Refine_check.check_module` takes this pre-desugar list as an optional
+`?pre_desugar_decls` argument alongside `?audit`; omitting it (every caller
+before this fix) keeps behavior identical to before.
 
 ---
 

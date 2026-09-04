@@ -1103,14 +1103,63 @@ above happens to exercise:
   stacked refinement).
 - A `{String | ...}` return type: `return_refine_ext` only recognizes Int,
   Bool, Float, and record bases.
+- A parameter refinement that desugar drops or relocates before the audit
+  ever sees it: a multi-head function's clause merge, or a default-argument
+  function's mangled arity variant. See the next section.
 
 See `specs/todos/2026-09-03-lambda-param-refinement-unchecked.md`,
 `specs/todos/2026-09-03-block-fn-refinement-unchecked.md`,
 `specs/todos/2026-09-03-impl-method-param-refinement-unchecked.md`,
 `specs/todos/2026-09-03-actor-state-and-handler-refinement-unchecked.md`,
-`specs/todos/2026-09-01-nested-refinement-enforcement.md`, and
-`specs/todos/2026-09-03-string-return-refinement-unchecked.md` for reproducers
-and root causes.
+`specs/todos/2026-09-01-nested-refinement-enforcement.md`,
+`specs/todos/2026-09-03-string-return-refinement-unchecked.md`, and
+`specs/todos/2026-09-03-desugar-dropped-refinement-unchecked.md` for
+reproducers and root causes.
+
+### Why the audit needs the pre-desugar AST too
+
+A whole-plan review found two shapes where reading only the POST-desugar
+declaration list is not enough, and both are corrected as of this section:
+
+- A multi-head function (two or more `fn` clauses for the same name) is
+  merged by desugar into a single clause whose parameters are rebuilt with
+  no declared type at all. A refined parameter on one of the original
+  clauses vanishes before the audit ever runs: not `Unenforced`, simply
+  absent, which is worse than a false negative because nothing at all
+  reports it.
+- A default-argument function survives desugar only under mangled
+  arity-variant names (`f$2`, `f$1`, ...); no declaration named `f` remains.
+  A refined parameter that lands on the survivor used to report `Enforced`,
+  because the checker's own extractor genuinely does accept it there, but
+  a plain call written `f(...)` can never resolve to that mangled name, so
+  nothing a user writes ever reaches the check.
+
+Both are now caught by comparing the declaration list from BEFORE desugar
+ran against the one from after: a declared refinement present before and
+absent after (matched by its enclosing declaration's name and its
+predicate's exact text) is reported `Unenforced`, regardless of what a
+post-desugar site at a similar-looking position might say. A `Return` site
+is matched by predicate text alone, not by name: a postcondition is
+checked against a function's own body regardless of what the declaration
+is named, so `expand_defaults_decl`'s renamed full-arity variant is still
+correctly `Enforced` for its return type even though its parameter is not.
+
+```
+$ march --check --refine-audit --refine-report t6e.march
+coverage audit: t6e.march:3:27: param `f` #1: b > 0: this refinement was declared here, but no occurrence with the same enclosing name and predicate text survives desugaring: either the declared type was discarded entirely (a multi-head function's clause merge drops every parameter type before the checker ever sees it) or it now lives only under a mangled name a plain call cannot resolve to (a default-argument function's arity variant, e.g. `f$2`). See specs/todos/2026-09-03-desugar-dropped-refinement-unchecked.md.
+coverage audit (user code): 1 enforced, 0 inert (warned), 1 unenforced
+```
+
+(`t6e.march` is `fn f(a : Int, b : {Int | b > 0} \\ 1) : Int do a + b end`,
+called as `f(1, 0)`.) `test/refine_audit/holes/default_param.march` and
+`multi_head.march` pin both shapes; `test/refine_audit/holes/type_arg.march`,
+`arrow_domain.march`, and `linear_wrapper.march` pin the three remaining
+nested positions this section's list already named but the holes set had
+not yet covered.
+
+This comparison covers only the entry file and its resolved imports, not
+the shipped stdlib: a sweep already established the stdlib contains
+neither shape today.
 
 ---
 
