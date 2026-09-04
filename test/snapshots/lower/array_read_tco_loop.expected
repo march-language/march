@@ -1,0 +1,255 @@
+-- types (0) --
+-- fns (61) --
+## NativeArray.f32_to_float_arr
+fn NativeArray.f32_to_float_arr(arr : '_) : '_ =
+  native_f32_to_float_arr(arr)
+
+## NativeArray.float_to_f32_arr
+fn NativeArray.float_to_f32_arr(arr : '_) : '_ =
+  native_float_to_f32_arr(arr)
+
+## NativeArray.fold_f32
+fn NativeArray.fold_f32(arr : '_, acc : '_, f : '_) : '_ =
+  native_f32_arr_fold(acc, arr, f)
+
+## NativeArray.fold_float
+fn NativeArray.fold_float(arr : '_, acc : '_, f : '_) : '_ =
+  native_float_arr_fold(acc, arr, f)
+
+## NativeArray.fold_i32
+fn NativeArray.fold_i32(arr : '_, acc : '_, f : '_) : '_ =
+  native_i32_arr_fold(acc, arr, f)
+
+## NativeArray.fold_int
+fn NativeArray.fold_int(arr : '_, acc : '_, f : '_) : '_ =
+  native_int_arr_fold(acc, arr, f)
+
+## NativeArray.fold_u8
+fn NativeArray.fold_u8(arr : '_, acc : '_, f : '_) : '_ =
+  native_u8_arr_fold(acc, arr, f)
+
+## NativeArray.from_list_f32
+fn NativeArray.from_list_f32(lst : '_) : '_ =
+  native_f32_arr_from_list(lst)
+
+## NativeArray.from_list_float
+fn NativeArray.from_list_float(lst : '_) : '_ =
+  native_float_arr_from_list(lst)
+
+## NativeArray.from_list_i32
+fn NativeArray.from_list_i32(lst : '_) : '_ =
+  native_i32_arr_from_list(lst)
+
+## NativeArray.from_list_int
+fn NativeArray.from_list_int(lst : '_) : '_ =
+  native_int_arr_from_list(lst)
+
+## NativeArray.from_list_u8
+fn NativeArray.from_list_u8(lst : '_) : '_ =
+  native_u8_arr_from_list(lst)
+
+## NativeArray.get_f32
+fn NativeArray.get_f32(arr : '_, i : Int) : '_ =
+  native_f32_arr_get(arr, i)
+
+## NativeArray.get_float
+fn NativeArray.get_float(arr : '_, i : Int) : '_ =
+  native_float_arr_get(arr, i)
+
+## NativeArray.get_i32
+fn NativeArray.get_i32(arr : '_, i : Int) : '_ =
+  native_i32_arr_get(arr, i)
+
+## NativeArray.get_int
+fn NativeArray.get_int(arr : '_, i : Int) : '_ =
+  native_int_arr_get(arr, i)
+
+## NativeArray.get_u8
+fn NativeArray.get_u8(arr : '_, i : Int) : '_ =
+  native_u8_arr_get(arr, i)
+
+## NativeArray.i32_to_f32_arr
+fn NativeArray.i32_to_f32_arr(arr : '_) : '_ =
+  native_i32_to_f32_arr(arr)
+
+## NativeArray.i32_to_int_arr
+fn NativeArray.i32_to_int_arr(arr : '_) : '_ =
+  native_i32_to_int_arr(arr)
+
+## NativeArray.int_to_i32_arr
+fn NativeArray.int_to_i32_arr(arr : '_) : '_ =
+  native_int_to_i32_arr(arr)
+
+## NativeArray.int_to_u8_arr
+fn NativeArray.int_to_u8_arr(arr : '_) : '_ =
+  native_int_to_u8_arr(arr)
+
+## NativeArray.length_f32
+fn NativeArray.length_f32(arr : '_) : '_ =
+  native_f32_arr_length(arr)
+
+## NativeArray.length_float
+fn NativeArray.length_float(arr : '_) : '_ =
+  native_float_arr_length(arr)
+
+## NativeArray.length_i32
+fn NativeArray.length_i32(arr : '_) : '_ =
+  native_i32_arr_length(arr)
+
+## NativeArray.length_int
+fn NativeArray.length_int(arr : '_) : '_ =
+  native_int_arr_length(arr)
+
+## NativeArray.length_u8
+fn NativeArray.length_u8(arr : '_) : '_ =
+  native_u8_arr_length(arr)
+
+## NativeArray.make_f32
+fn NativeArray.make_f32(n : Int, fill : Float) : '_ =
+  native_f32_arr_make(n, fill)
+
+## NativeArray.make_float
+fn NativeArray.make_float(n : Int, fill : Float) : '_ =
+  native_float_arr_make(n, fill)
+
+## NativeArray.make_i32
+fn NativeArray.make_i32(n : Int, fill : Int) : '_ =
+  native_i32_arr_make(n, fill)
+
+## NativeArray.make_int
+fn NativeArray.make_int(n : Int, fill : Int) : '_ =
+  native_int_arr_make(n, fill)
+
+## NativeArray.make_u8
+fn NativeArray.make_u8(n : Int, fill : Int) : '_ =
+  native_u8_arr_make(n, fill)
+
+## NativeArray.map2_f32
+fn NativeArray.map2_f32(arr1 : '_, arr2 : '_, f : '_) : '_ =
+  native_f32_arr_map2(arr1, arr2, f)
+
+## NativeArray.map2_float
+fn NativeArray.map2_float(arr1 : '_, arr2 : '_, f : '_) : '_ =
+  native_float_arr_map2(arr1, arr2, f)
+
+## NativeArray.map2_i32
+fn NativeArray.map2_i32(arr1 : '_, arr2 : '_, f : '_) : '_ =
+  native_i32_arr_map2(arr1, arr2, f)
+
+## NativeArray.map2_int
+fn NativeArray.map2_int(arr1 : '_, arr2 : '_, f : '_) : '_ =
+  native_int_arr_map2(arr1, arr2, f)
+
+## NativeArray.map2_u8
+fn NativeArray.map2_u8(arr1 : '_, arr2 : '_, f : '_) : '_ =
+  native_u8_arr_map2(arr1, arr2, f)
+
+## NativeArray.map_f32
+fn NativeArray.map_f32(arr : '_, f : '_) : '_ =
+  native_f32_arr_map(arr, f)
+
+## NativeArray.map_float
+fn NativeArray.map_float(arr : '_, f : '_) : '_ =
+  native_float_arr_map(arr, f)
+
+## NativeArray.map_i32
+fn NativeArray.map_i32(arr : '_, f : '_) : '_ =
+  native_i32_arr_map(arr, f)
+
+## NativeArray.map_int
+fn NativeArray.map_int(arr : '_, f : '_) : '_ =
+  native_int_arr_map(arr, f)
+
+## NativeArray.map_u8
+fn NativeArray.map_u8(arr : '_, f : '_) : '_ =
+  native_u8_arr_map(arr, f)
+
+## NativeArray.set_f32
+fn NativeArray.set_f32(arr : '_, i : Int, v : Float) : '_ =
+  native_f32_arr_set(arr, i, v)
+
+## NativeArray.set_float
+fn NativeArray.set_float(arr : '_, i : Int, v : Float) : '_ =
+  native_float_arr_set(arr, i, v)
+
+## NativeArray.set_i32
+fn NativeArray.set_i32(arr : '_, i : Int, v : Int) : '_ =
+  native_i32_arr_set(arr, i, v)
+
+## NativeArray.set_int
+fn NativeArray.set_int(arr : '_, i : Int, v : Int) : '_ =
+  native_int_arr_set(arr, i, v)
+
+## NativeArray.set_u8
+fn NativeArray.set_u8(arr : '_, i : Int, v : Int) : '_ =
+  native_u8_arr_set(arr, i, v)
+
+## NativeArray.sum_f32
+fn NativeArray.sum_f32(arr : '_) : Float =
+  native_f32_arr_sum(arr)
+
+## NativeArray.sum_float
+fn NativeArray.sum_float(arr : '_) : Float =
+  native_float_arr_sum(arr)
+
+## NativeArray.sum_i32
+fn NativeArray.sum_i32(arr : '_) : Int =
+  native_i32_arr_sum(arr)
+
+## NativeArray.sum_int
+fn NativeArray.sum_int(arr : '_) : Int =
+  native_int_arr_sum(arr)
+
+## NativeArray.sum_u8
+fn NativeArray.sum_u8(arr : '_) : Int =
+  native_u8_arr_sum(arr)
+
+## NativeArray.to_float_arr
+fn NativeArray.to_float_arr(arr : '_) : '_ =
+  native_int_arr_to_float_arr(arr)
+
+## NativeArray.to_list_f32
+fn NativeArray.to_list_f32(arr : '_) : '_ =
+  native_f32_arr_to_list(arr)
+
+## NativeArray.to_list_float
+fn NativeArray.to_list_float(arr : '_) : '_ =
+  native_float_arr_to_list(arr)
+
+## NativeArray.to_list_i32
+fn NativeArray.to_list_i32(arr : '_) : '_ =
+  native_i32_arr_to_list(arr)
+
+## NativeArray.to_list_int
+fn NativeArray.to_list_int(arr : '_) : '_ =
+  native_int_arr_to_list(arr)
+
+## NativeArray.to_list_u8
+fn NativeArray.to_list_u8(arr : '_) : '_ =
+  native_u8_arr_to_list(arr)
+
+## NativeArray.u8_to_f32_arr
+fn NativeArray.u8_to_f32_arr(arr : '_) : '_ =
+  native_u8_to_f32_arr(arr)
+
+## NativeArray.u8_to_int_arr
+fn NativeArray.u8_to_int_arr(arr : '_) : '_ =
+  native_u8_to_int_arr(arr)
+
+## main
+fn main(_cap_console : Cap(IO.Console)) : () =
+  let a : NativeU8Arr = NativeArray.make_u8(4, 7) in
+let $t6 : Int = let $t5 : Int = NativeArray.length_u8(a) in
+sum_bytes(a, 0, $t5, 0) in
+println($t6)
+
+## sum_bytes
+fn sum_bytes(a : NativeU8Arr, i : Int, n : Int, acc : Int) : Int =
+  let $t1 : Bool = >=(i, n) in
+case $t1 of
+  True() -> acc
+  _ -> let $t2 : Int = +(i, 1) in
+let $t4 : Int = let $t3 : Int = NativeArray.get_u8(a, i) in
++(acc, $t3) in
+sum_bytes(a, $t2, n, $t4)
+
