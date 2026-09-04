@@ -56,6 +56,7 @@
 #include <sys/mman.h>
 #include <time.h>     /* nanosleep */
 #include <unistd.h>   /* sysconf */
+#include <errno.h>    /* errno, ERANGE (MARCH_NUM_SCHEDULERS parsing) */
 
 /* macOS spells it MAP_ANON; Linux spells it MAP_ANONYMOUS.  Both platforms
  * define MAP_ANON as well, so we only need the reverse fallback. */
@@ -109,7 +110,11 @@
 
 /* ── Global state ─────────────────────────────────────────────────────── */
 
-static march_scheduler  g_scheds[MARCH_NUM_SCHEDULERS + 1];
+/* Sized by MARCH_MAX_SCHEDULERS (the hard bound), not by
+ * MARCH_NUM_SCHEDULERS (merely the default), so that the environment can ask
+ * for more schedulers than the build defaults to.  The trailing +1 slot is
+ * historical slack. */
+static march_scheduler  g_scheds[MARCH_MAX_SCHEDULERS + 1];
 static int              g_num_scheds = 0;
 static _Atomic int64_t  g_next_pid   = 0;
 static _Atomic int      g_all_done       = 0;
@@ -1121,17 +1126,64 @@ void march_sched_init(void) {
      * Clearing the list here would only turn already-reusable mappings back
      * into leaks with no safety benefit. */
 
+    /* Resolve the OS scheduler-thread count.
+     *
+     * MARCH_NUM_SCHEDULERS (the macro) is the DEFAULT; MARCH_NUM_SCHEDULERS
+     * (the environment variable) is a REQUEST that may raise it as well as
+     * lower it, bounded only by MARCH_MAX_SCHEDULERS -- the size of g_scheds.
+     * Until 2026-09 the request was clamped to the compile-time default and
+     * anything larger was dropped without a word, so MARCH_NUM_SCHEDULERS=14
+     * ran four threads and every parallel-scaling table taken on a >4-core
+     * machine was really measuring four threads against four threads.
+     *
+     * A request this build cannot satisfy is still clamped -- g_scheds is a
+     * fixed-size table -- but it is now reported on stderr, naming both the
+     * request and the bound.  Anything unusable (non-numeric, <= 0) is also
+     * reported and falls back to the default rather than being silently read
+     * as some other number.
+     *
+     * Setting it to 1 serializes all green-thread execution onto a single OS
+     * thread (no concurrent March code), which is the only configuration
+     * under which the current non-atomic local refcounting is race-free. */
     g_num_scheds = MARCH_NUM_SCHEDULERS > 0 ? MARCH_NUM_SCHEDULERS : 1;
-    /* Runtime override: MARCH_NUM_SCHEDULERS=N caps the number of OS scheduler
-     * threads, clamped to [1, compile-time max].  Setting it to 1 serializes
-     * all green-thread execution onto a single OS thread (no concurrent March
-     * code), which is the only configuration under which the current
-     * non-atomic local refcounting is race-free. */
+    if (g_num_scheds > MARCH_MAX_SCHEDULERS) g_num_scheds = MARCH_MAX_SCHEDULERS;
     {
         const char *env = getenv("MARCH_NUM_SCHEDULERS");
         if (env && *env) {
-            int n = atoi(env);
-            if (n >= 1 && n <= MARCH_NUM_SCHEDULERS) g_num_scheds = n;
+            long n;
+            if (strcmp(env, "auto") == 0) {
+                /* One scheduler per online CPU. Always satisfiable: clamped
+                 * silently, since the user asked for "whatever fits". */
+                long cpus = sysconf(_SC_NPROCESSORS_ONLN);
+                n = (cpus >= 1) ? cpus : g_num_scheds;
+                if (n > MARCH_MAX_SCHEDULERS) n = MARCH_MAX_SCHEDULERS;
+                g_num_scheds = (int)n;
+            } else {
+                char *end = NULL;
+                errno = 0;
+                n = strtol(env, &end, 10);
+                if (end == env || (end && *end != '\0') || errno == ERANGE) {
+                    fprintf(stderr,
+                            "march: MARCH_NUM_SCHEDULERS=\"%s\" is not a number "
+                            "or \"auto\"; using %d scheduler threads\n",
+                            env, g_num_scheds);
+                } else if (n < 1) {
+                    fprintf(stderr,
+                            "march: MARCH_NUM_SCHEDULERS=%ld is not a valid "
+                            "scheduler count (minimum 1); using %d\n",
+                            n, g_num_scheds);
+                } else if (n > MARCH_MAX_SCHEDULERS) {
+                    fprintf(stderr,
+                            "march: MARCH_NUM_SCHEDULERS=%ld exceeds this "
+                            "build's maximum of %d; using %d scheduler threads "
+                            "(rebuild the runtime with "
+                            "-DMARCH_MAX_SCHEDULERS=%ld to raise it)\n",
+                            n, MARCH_MAX_SCHEDULERS, MARCH_MAX_SCHEDULERS, n);
+                    g_num_scheds = MARCH_MAX_SCHEDULERS;
+                } else {
+                    g_num_scheds = (int)n;
+                }
+            }
         }
     }
     for (int i = 0; i < g_num_scheds; i++) {
@@ -1144,6 +1196,8 @@ void march_sched_init(void) {
      * Idempotent: a CAS inside ensures it runs at most once per process. */
     install_stack_growth_handler();
 }
+
+int march_sched_num_schedulers(void) { return g_num_scheds; }
 
 static march_proc *sched_spawn_common(void (*fn)(void *), void *arg,
                                       int is_daemon, int pinned) {

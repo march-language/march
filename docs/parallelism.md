@@ -83,6 +83,27 @@ Because the number of tasks tracks the chunk count (not the element count), the 
 
 In **compiled** code, tasks run on March's M:N green-thread scheduler: several OS threads (4 by default), each running many lightweight green threads, with work-stealing to keep cores busy. This is the same runtime described in [Actors]({{ site.baseurl }}/docs/actors/). Reference counting is atomic and each actor/task owns a private arena heap, so there is **no stop-the-world GC pause**; parallel work scales cleanly.
 
+#### How many OS threads
+
+The count is **4 by default**, regardless of how many cores the machine has, and you raise it with the `MARCH_NUM_SCHEDULERS` environment variable at run time:
+
+```bash
+MARCH_NUM_SCHEDULERS=14 ./my_program    # 14 scheduler threads
+MARCH_NUM_SCHEDULERS=auto ./my_program  # one per online CPU
+MARCH_NUM_SCHEDULERS=1 ./my_program     # fully serialize green threads
+```
+
+Because the default does not track core count, **4 is the effective parallelism ceiling of a March program until you say otherwise** — on a 14-core machine a `pmap_n` over CPU-bound work will plateau at roughly 4x and stay there no matter how many tasks you create. If you are measuring parallel scaling, set this variable explicitly and record what you set it to; a scaling table taken at the default is a table of one data point repeated.
+
+The upper bound is `MARCH_MAX_SCHEDULERS`, a compile-time constant (64) that sizes the runtime's scheduler table. A larger request is clamped, and the runtime says so on stderr rather than silently running fewer threads:
+
+```
+march: MARCH_NUM_SCHEDULERS=200 exceeds this build's maximum of 64; using 64
+scheduler threads (rebuild the runtime with -DMARCH_MAX_SCHEDULERS=200 to raise it)
+```
+
+A value that is not a positive integer or `auto` is likewise reported and the default used.
+
 ### Why parallel FBIP needs no locks
 
 The reason `preduce` over a tree (or any divide-and-conquer over a uniquely-owned structure) scales without a single mutex comes down to **ownership**. March's [memory model]({{ site.baseurl }}/docs/memory-model/) tracks each value's reference count; a structure with `RC == 1` at the root is *uniquely owned*. When you split a uniquely-owned tree at its root, the left and right subtrees are themselves uniquely owned and **disjoint**: no node is reachable from both parts.

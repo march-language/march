@@ -126,7 +126,12 @@
 (rule
  (alias   runtest)
  (deps    (file test_scheduler_runner))
- (action  (run ./test_scheduler_runner)))
+ ; MARCH_NUM_SCHEDULERS="" so this harness's scheduler count comes from the
+ ; build above, not from a developer's exported environment.  While the
+ ; variable was a ceiling rather than a request, a compile-time
+ ; -DMARCH_NUM_SCHEDULERS bounded it on its own; it no longer does.
+ (action  (setenv MARCH_NUM_SCHEDULERS ""
+           (run ./test_scheduler_runner))))
 
 ; ── C scheduler pinned-proc tests (march_sched_spawn_pinned / MARCH_PIN_MAIN) ──
 ; Built with -DMARCH_NUM_SCHEDULERS=4 so the scheduler-0-only pin queue is
@@ -149,7 +154,35 @@
 (rule
  (alias   runtest)
  (deps    (file test_scheduler_pin_runner))
- (action  (run ./test_scheduler_pin_runner)))
+ ; MARCH_NUM_SCHEDULERS="" — see test_scheduler_runner above.
+ (action  (setenv MARCH_NUM_SCHEDULERS ""
+           (run ./test_scheduler_pin_runner))))
+
+; ── C scheduler thread-count tests (MARCH_NUM_SCHEDULERS request, G71) ──
+; Built with the default -DMARCH_NUM_SCHEDULERS=4 and -DMARCH_MAX_SCHEDULERS=8
+; so that "above the default" (7) and "above the maximum" (9) are both
+; reachable without spawning a hundred OS threads.  Asserts the env request is
+; honoured above the compile-time default, that the honoured number is the
+; number of OS threads that actually dispatch green threads, and that an
+; unsatisfiable or malformed request warns on stderr instead of being dropped
+; in silence.
+(rule
+ (targets test_scheduler_count_runner)
+ (deps    test_scheduler_count.c
+          ../runtime/march_scheduler.c
+          ../runtime/march_scheduler.h
+          ../runtime/march_deque.h)
+ (action  (run %{cc} -std=gnu11 -Wall -Wextra -I../runtime
+               -DMARCH_MAX_SCHEDULERS=8
+               -o %{targets}
+               test_scheduler_count.c ../runtime/march_scheduler.c
+               -lpthread)))
+(rule
+ (alias   runtest)
+ (deps    (file test_scheduler_count_runner))
+ ; The test sets/unsets MARCH_NUM_SCHEDULERS itself around each
+ ; march_sched_init(), so an inherited value cannot influence it.
+ (action  (run ./test_scheduler_count_runner)))
 
 ; ── C scheduler timer tests (min-heap timers + timed park) ──────────────
 ; Multi-scheduler (no -DMARCH_NUM_SCHEDULERS=1): timers must work across the
@@ -167,7 +200,9 @@
 (rule
  (alias   runtest)
  (deps    (file test_scheduler_timer_runner))
- (action  (run ./test_scheduler_timer_runner)))
+ ; MARCH_NUM_SCHEDULERS="" — see test_scheduler_runner above.
+ (action  (setenv MARCH_NUM_SCHEDULERS ""
+           (run ./test_scheduler_timer_runner))))
 
 ; ── C scheduler mailbox capacity + drop-policy tests (Task 7) ───────────
 ; Multi-scheduler (no -DMARCH_NUM_SCHEDULERS=1), matching the timer rule
@@ -186,7 +221,9 @@
 (rule
  (alias   runtest)
  (deps    (file test_scheduler_mbox_runner))
- (action  (run ./test_scheduler_mbox_runner)))
+ ; MARCH_NUM_SCHEDULERS="" — see test_scheduler_runner above.
+ (action  (setenv MARCH_NUM_SCHEDULERS ""
+           (run ./test_scheduler_mbox_runner))))
 
 ; ── C scheduler stack-recycling / churn test (Task 12) ───────────────────
 ; Multi-scheduler (no -DMARCH_NUM_SCHEDULERS=1), matching the timer/mbox
@@ -206,7 +243,9 @@
 (rule
  (alias   runtest)
  (deps    (file test_scheduler_churn_runner))
- (action  (run ./test_scheduler_churn_runner)))
+ ; MARCH_NUM_SCHEDULERS="" — see test_scheduler_runner above.
+ (action  (setenv MARCH_NUM_SCHEDULERS ""
+           (run ./test_scheduler_churn_runner))))
 
 ; ── march_actor_broadcast_migrate dead-target message leak regression ────
 ; Same minimal, decoupled dependency set as test_scheduler_mbox above (only
@@ -738,7 +777,9 @@
 (rule
  (alias   runtest)
  (deps    (file test_scheduler_mt_runner))
- (action  (run ./test_scheduler_mt_runner)))
+ ; MARCH_NUM_SCHEDULERS="" — see test_scheduler_runner above.
+ (action  (setenv MARCH_NUM_SCHEDULERS ""
+           (run ./test_scheduler_mt_runner))))
 
 ; ── SIMD HTTP parser tests ───────────────────────────────────────────────
 ; -msse4.2 is only passed on x86-64; the source guards SSE4.2 paths with
