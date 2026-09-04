@@ -676,7 +676,7 @@ let print_perceus_stats ~(label : string) ~(before : rc_counts) ~(after : rc_cou
       live after the call; a post-call EDecRC is emitted instead when the arg
       is the caller's last use. *)
 let perceus ?(repl : bool = false) ?(repl_vars : string list = [])
-    (m : Tir.tir_module) : Tir.tir_module =
+    ?(borrow_map : Borrow.borrow_map option) (m : Tir.tir_module) : Tir.tir_module =
   (* Reset the fresh-name counter per module so that compiling the same module
      twice produces identical IR.  A monotonic counter that survives across
      modules makes IR diffs unstable and causes spurious churn in test
@@ -685,8 +685,21 @@ let perceus ?(repl : bool = false) ?(repl_vars : string list = [])
      remains a ref rather than becoming an [env] field (Wave 3 Task 4 — see
      the plan's guidance on accumulator- vs scope-shaped refs). *)
   _rc_fresh_ctr := 0;
-  (* Phase 0: borrow inference *)
-  let borrow_map = Borrow.infer_module m in
+  (* Milestone 3: [Rc_types.needs_rc]/[borrow_eligible] answer from [Repr]'s
+     unboxed registry, so it must be populated before borrow inference reads
+     them.  [Contract_pipeline] normally registered already; this makes a
+     caller with its own pass list (the LSP, tests, [Repl_jit] with unboxing
+     forced off) agree with the emitter instead of running against an empty
+     table.  See [Repr.ensure_unboxed_types]. *)
+  Repr.ensure_unboxed_types
+    ~collision_set:(Collision_set.compute m.Tir.tm_types) m.Tir.tm_types;
+  (* Phase 0: borrow inference.  [?borrow_map] lets the driver compute this
+     ONCE and hand the same answer to [Escape], whose stack-promotion verdict
+     must be taken against the map this pass placed its RC ops against — see
+     [Escape]'s module doc.  Omitted, it is computed here exactly as before. *)
+  let borrow_map = match borrow_map with
+    | Some bm -> bm
+    | None -> Borrow.infer_module m in
   (* Phase 0b: publish, for every function, whether its FIRST USER ARGUMENT is
      free of owning uses.  [Llvm_emit] stamps that bit into the header of each
      closure object it materialises so the C runtime's fold helpers can tell

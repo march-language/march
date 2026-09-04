@@ -69,6 +69,21 @@ tag, so each side accesses a value by the type the signature declares.
 Strings and bytes are **borrowed** for the duration of the call; copy them with
 `march_str_new` if you need to keep them.
 
+**Small scalar aggregates keep their heap representation across the FFI.** A
+one-constructor variant of two to four `Int`/`Float`/`Bool` fields (`Vec3(Float,
+Float, Float)`) is normally represented inline, in registers, with no heap cell
+at all — see [Memory Model]({{ site.baseurl }}/docs/memory-model/), "Small
+scalar aggregates never reach the heap at all". Naming such a type anywhere in
+an `extern` signature turns that off **for the whole program**: the type goes
+back to being an ordinary heap value, so the C side sees exactly the cell the
+generated `march_decode_T`/`march_encode_T` codecs were written against and
+your bindings need no change. Nothing is rejected and nothing is marshalled
+differently; the only consequence is that the type loses the inline
+representation everywhere it is used, which matters if it is also on a hot path
+elsewhere. If that trade is wrong for your program, pass the fields
+individually (`fn f(x: Float, y: Float, z: Float)`) and keep the aggregate on
+the March side of the boundary.
+
 ---
 
 ## Ownership: `borrow` vs `consume`

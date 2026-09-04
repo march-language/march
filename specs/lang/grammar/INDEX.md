@@ -1,4 +1,4 @@
-# Grammar corpus index (p01–p35 parse, 13 reject: r02/r07/r08 retired 2026-07-24; Task 1 seeded p01–p02/r01–r02, Task 2 added p03–p08/r03–r04, Task 3 added p09–p11/r05–r06, Task 4 added p12–p14/r07–r08, Task 5 added p15–p17/r09–r10, DSL-resolution pass added p18–p22/r11–r13, §7.3 curried-call resolution added p23–p24/r14, slice-8 companion added p25; item-110 ECond `>=`/`<=` regression added p26; item-700 dedicated `let?`-annotation error added r15; leading-`|` arm-separator and single-line cond-form parser fixes added p27–p28; as-patterns became reachable and retired r08 (2026-07-24), added p29; record patterns became reachable and retired r02/r07 (2026-07-24), added p30–p31; or-patterns added p32; the `(`-led-statement fix added p33; its literal-operand follow-up added p34; `let*` generalized bind added p35/r16)
+# Grammar corpus index (p01–p36 parse, 13 reject: r02/r07/r08 retired 2026-07-24; Task 1 seeded p01–p02/r01–r02, Task 2 added p03–p08/r03–r04, Task 3 added p09–p11/r05–r06, Task 4 added p12–p14/r07–r08, Task 5 added p15–p17/r09–r10, DSL-resolution pass added p18–p22/r11–r13, §7.3 curried-call resolution added p23–p24/r14, slice-8 companion added p25; item-110 ECond `>=`/`<=` regression added p26; item-700 dedicated `let?`-annotation error added r15; leading-`|` arm-separator and single-line cond-form parser fixes added p27–p28; as-patterns became reachable and retired r08 (2026-07-24), added p29; record patterns became reachable and retired r02/r07 (2026-07-24), added p30–p31; or-patterns added p32; the `(`-led-statement fix added p33; its literal-operand follow-up added p34; `let*` generalized bind added p35/r16; a `doc` string alongside function attributes added p36)
 
 Navigable map of the resolved-grammar conformance corpus: each program in
 this directory (`specs/lang/grammar/parse/*.march`,
@@ -33,7 +33,7 @@ Run the whole corpus:
 MARCH_BIN=$PWD/_build/default/bin/main.exe bash specs/lang/grammar/check_grammar.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 48/48, 35 parse, 13
+Exit 0 iff every program behaves as declared (currently 49/49, 36 parse, 13
 reject).
 
 **Naming note:** this corpus uses `parse/` + `reject/` (not `accept/` +
@@ -92,6 +92,7 @@ shape is otherwise identical to `types/check_types.sh`.
 | [`parse/p33_paren_stmt_after_bare_ident.march`](parse/p33_paren_stmt_after_bare_ident.march) | §7.3, the two-statement reading of a `(`-led line applies after ANY value-ending token, not just a call's `)` | `let _ = a`⏎`()` and `let _ = a`⏎`(1, 2)`. Companion to p24, which only pinned the `)`⏎`(` case: after a bare identifier the `(` was still classified as that identifier's argument list, so the binding parsed as `let _ = a()`, silently INVOKING the parameter (interpreted: "applied non-function value"; compiled: a closure-ABI indirect call through offset 16 of a String, EXC_BAD_ACCESS/exit 138). The token filter now retags such a `(` as `LPAREN_STMT`, which only the group/tuple/unit and pattern rules accept, never the call rule. Prints `ok`. |
 | [`parse/p34_paren_stmt_after_literal.march`](parse/p34_paren_stmt_after_literal.march) | §7.3, the `(`-led-statement reading applies after a LITERAL too | p33 keyed the retag on a *value-ending* token (identifier, `)`, `]`), but the call rule takes an `expr_field`, which a bare literal also reduces to, so `let _ = 1` ⏎ `()` was still glued into `1()`. Unlike p33 this never reaches the closure-ABI path (a literal has no receiver to load a fn_ptr from): codegen emitted invalid LLVM, `declare ptr @<lit>()`, which clang rejected with "expected function name", failing the build with a diagnostic pointing at generated IR rather than the source. Covers Int, String and Bool operands. `--check` exit 0. |
 | [`parse/p35_letstar_mixed_letq_block_fold.march`](parse/p35_letstar_mixed_letq_block_fold.march) | §5.4 `let*` position (`specs/lang/let-star-generalized-bind.md`); a block MIXING `let?` and `let*` bindings parses, and `fold_letq` (extended to recognize BOTH constructors) nests each one's continuation correctly regardless of which comes first | Complements p25 (`let?`-only). This is the fold function's own new risk surface from adding `let*`, a single shared fold now dispatches on two constructors, not one. Value-witnessed: prints `70`, same shape as p25, only obtainable if both binders' fold arms nested correctly. `--check` exit 0. |
+| [`parse/p36_doc_with_attribute.march`](parse/p36_doc_with_attribute.march) | §2 declarations: a `doc` string and function attributes on the SAME declaration, doc first | Until 2026-09-03 `decl` had `DOC STRING fn_decl` and `attrs fn_decl` as separate productions with nothing combining them, so a documented function could carry no attribute in EITHER order — and `forge fix --contracts`, which inserts on the line above the declaration, emitted unparseable source for every documented function it targeted. Covers both `@[no_alloc]` and `@[no_alloc(transient)]`. `--check` exit 0. |
 
 Task 2 (§4 Expressions, the precedence ladder) added p03–p08/r03–r04 above.
 Task 3 (§5 Blocks & statements) added p09–p11/r05–r06: block-sequencing,
@@ -127,7 +128,7 @@ p29 and retired r08; the same pass, closing the record-pattern
 reachability gap, added p30/p31 and retired r02/r07; the same pass, adding
 or-patterns, added p32 (the binding-rejection witness is a type error, not a
 parse error, so it lives in `specs/lang/types/reject/t82` instead):
-48 programs total (35 `parse/`, 13 `reject/`). See
+49 programs total (36 `parse/`, 13 `reject/`). See
 `specs/plans/archive/2026-07-06-resolved-grammar-plan.md` for the task-by-task
 breakdown that built the first 27; the DSL-resolution pass and the
 `f(1)(2)` fix are tracked in their own commits rather than numbered plan

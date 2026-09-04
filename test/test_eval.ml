@@ -3116,12 +3116,17 @@ let test_escape_local_discarded_promoted () =
      consumers decoded under the erased convention (garbage at runtime —
      invisible here because these tests inspect TIR only, never emitted IR).
      Escape analysis now only promotes genuinely Boxed allocs, so the vehicle
-     is a 2-field ctor; the Newtype exclusion is pinned by
-     test_escape_newtype_not_promoted below. *)
+     is a multi-field ctor; the Newtype exclusion is pinned by
+     test_escape_newtype_not_promoted below.
+     HISTORY (unboxed aggregates, 2026-09-03): the vehicle was `Box(Int, Int)`
+     until small scalar-only single-ctor variants stopped being heap cells at
+     all (Repr.Unboxed) — which made this test's subject unallocated rather
+     than stack-promoted. A String field keeps it Boxed, so the test still
+     measures promotion. *)
   let m = escape_module {|mod Test do
-    type Box = Box(Int, Int)
+    type Box = Box(Int, String)
     fn make_and_ignore() : Int do
-      let b = Box(42, 43)
+      let b = Box(42, "x")
       0
     end
   end|} in
@@ -3180,6 +3185,91 @@ let test_escape_stored_in_alloc_not_promoted () =
   (* Both Box(x) and Pair(b, 0) are heap allocations; the Box must stay heap. *)
   Alcotest.(check bool) "inner alloc stored in outer alloc stays heap-allocated"
     true (has_heap_alloc f.March_tir.Tir.fn_body)
+
+(* ── Promotion through a borrowed / non-retaining callee (2026-09-03) ─────
+
+   The escape verdict used to stop at every call boundary.  It now sees
+   through a call to a March function in the same module that provably does
+   not put the POINTER anywhere outliving the call — see [Escape]'s module doc
+   for why the ownership verdict alone was not enough, and for the three
+   restrictions on the extension.  Each negative below names its restriction. *)
+
+let escape_call_src ~callee = Printf.sprintf {|mod Test do
+    type Big = Big(Int, Int, Int, Int, Int)
+    type Wrap = Wrap(Big)
+    pfn keep(b : Big) : Wrap do Wrap(b) end
+    pfn sum5(b : Big) : Int do
+      match b do
+        Big(a, c, d, e, f) -> a + c + d + e + f
+      end
+    end
+    fn use_it(i : Int) : Int do
+      let p = i + 1
+      let q = i + 2
+      let r = i + 3
+      let s = i + 4
+      let v = Big(i, p, q, r, s)
+      %s
+    end
+  end|} callee
+
+let escape_use_it src =
+  let m = escape_module src in
+  let f = List.find (fun fn -> fn.March_tir.Tir.fn_name = "use_it")
+            m.March_tir.Tir.tm_fns in
+  f.March_tir.Tir.fn_body
+
+let test_escape_through_reading_callee_promoted () =
+  let body = escape_use_it (escape_call_src ~callee:"sum5(v)") in
+  Alcotest.(check bool)
+    "a cell whose only use is a callee that just reads it is stack-promoted"
+    true (has_stack_alloc body);
+  Alcotest.(check bool) "and no longer heap-allocated"
+    false (has_heap_alloc body)
+
+let test_escape_through_retaining_callee_not_promoted () =
+  (* `keep` stores the pointer into a Wrap cell that outlives the call. *)
+  let body = escape_use_it (escape_call_src ~callee:"match keep(v) do Wrap(_) -> 0 end") in
+  Alcotest.(check bool)
+    "a callee that stores the pointer blocks promotion"
+    false (has_stack_alloc body)
+
+let test_escape_through_extern_not_promoted () =
+  (* Restriction 2: a C extern's borrow entry is a DECLARATION about code this
+     pass cannot read, and a stack cell's header says rc = 0. *)
+  let body = escape_use_it {|mod Test do
+    needs Ffi
+    type Big = Big(Int, Int, Int, Int, Int)
+    extern "m" : Cap(Ffi) do
+      fn peek(b : Big): Int = "cf_peek"
+    end
+    fn use_it(i : Int) : Int do
+      let p = i + 1
+      let q = i + 2
+      let r = i + 3
+      let s = i + 4
+      let v = Big(i, p, q, r, s)
+      peek(v)
+    end
+  end|} in
+  Alcotest.(check bool) "a cell handed to an extern is not promoted"
+    false (has_stack_alloc body)
+
+let test_escape_closure_through_call_not_promoted () =
+  (* Restriction 1: a $Clo_ cell passed to its own apply function is governed
+     by the $clo ownership pin — [Perceus.insert_apply_fn_clo_drop] emits a
+     dec_rc on it inside the callee, and a stack cell has rc = 0. *)
+  let m = escape_module {|mod Test do
+    fn twice(n : Int) : Int do
+      let go = fn (i : Int, acc : Int) -> if i <= 0 do acc else go(i - 1, acc + 2) end
+      go(n, 0)
+    end
+  end|} in
+  let f = List.find (fun fn -> fn.March_tir.Tir.fn_name = "twice")
+            m.March_tir.Tir.tm_fns in
+  Alcotest.(check bool)
+    "a closure struct passed to its own apply fn is not promoted through the call"
+    false (has_stack_alloc f.March_tir.Tir.fn_body)
 
 let test_escape_match_field_promoted () =
   (* A value that is created and immediately pattern-matched — with only the
@@ -4026,14 +4116,22 @@ let test_perceus_scrut_escape_rewrite () =
     (RC > 1, e.g. inside Check.run_loop), loading the FV from the closure
     struct read a dangling pointer → SIGSEGV. *)
 let test_perceus_closure_fv_single_use_incrc () =
+  (* The captured value must be HEAP-carrying for the bug this pins to exist at
+     all: the crash was a captured object freed by the callee's pattern match.
+     It used to be spelled `Box(Int)`, which stopped exercising the shape once
+     borrow inference stopped force-owning a parameter whose only escaping
+     field is a SCALAR (2026-09-03, `Borrow._scalar_only`) — with an Int field
+     `consume` is inferred borrowing, so there is no ownership transfer for the
+     apply function to balance and no EIncRC to assert. A String field keeps
+     the callee consuming, which is the case the regression is about. *)
   let m = perceus_module {|mod Test do
-    type Box = Box(Int)
-    pfn consume(b : Box) : Int do
+    type Box = Box(String)
+    pfn consume(b : Box) : String do
       match b do
       Box(n) -> n
       end
     end
-    fn make_thunk(b : Box) : (Unit -> Int) do
+    fn make_thunk(b : Box) : (Unit -> String) do
       fn () -> consume(b)
     end
   end|} in
@@ -5393,6 +5491,10 @@ let eval_suites =
           Alcotest.test_case "returned not promoted"         `Quick test_escape_returned_not_promoted;
           Alcotest.test_case "stored in alloc not promoted"  `Quick test_escape_stored_in_alloc_not_promoted;
           Alcotest.test_case "match field read promoted"     `Quick test_escape_match_field_promoted;
+          Alcotest.test_case "promoted through a reading callee" `Quick test_escape_through_reading_callee_promoted;
+          Alcotest.test_case "retaining callee blocks promotion" `Quick test_escape_through_retaining_callee_not_promoted;
+          Alcotest.test_case "extern callee blocks promotion"    `Quick test_escape_through_extern_not_promoted;
+          Alcotest.test_case "closure through its apply fn blocked" `Quick test_escape_closure_through_call_not_promoted;
           Alcotest.test_case "decrc eliminated on promote"   `Quick test_escape_decrc_eliminated_after_promotion;
           Alcotest.test_case "pipeline no crash"             `Quick test_escape_pipeline_no_crash;
         ] );

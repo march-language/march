@@ -19,6 +19,9 @@ type result = {
   allocating : (string, Alloc_contract.reason) Hashtbl.t;
   (** The transitive allocating set over [final], by TIR fn name — for the
       LSP lens / quick fix and --report-contracts. *)
+  retaining : (string, Alloc_contract.retain) Hashtbl.t;
+  (** The @[no_alloc(transient)] counterpart: functions that hand an
+      allocation to something outliving the call. *)
 }
 
 let island_suffixes = ["render"; "update"; "init"]
@@ -53,7 +56,8 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
     extra_roots
     @ List.filter_map (fun d ->
         match d.Alloc_contract.d_form with
-        | Some (Alloc_contract.Hard | Alloc_contract.Warn) -> Some d.Alloc_contract.d_name
+        | Some (Alloc_contract.Hard | Alloc_contract.Warn
+               | Alloc_contract.Transient) -> Some d.Alloc_contract.d_name
         | _ -> None) decls
   in
   let tir = Trmc.transform_module ~enabled:trmc tir in
@@ -121,6 +125,18 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   let tir = Defun.defunctionalize tir in
   snap "tir-defun" tir;
   stamp "defun";
+  (* Milestone 3: decide the unboxed-aggregate set here — after Mono (which
+     instantiates generic variants) and Defun (which adds the closure structs),
+     so the decision is made on the type list the remaining passes see, and
+     BEFORE the first pass that consults it.  [Rc_types.needs_rc], [Borrow],
+     [Drop], [Escape] and [Alloc_contract] all read [Repr]'s registry, so it
+     must be populated before Perceus runs, not merely before emission —
+     otherwise the passes reason about a Boxed cell that codegen never
+     allocates.  [Repr.rebind_registration] at the end of this function hands
+     the SAME answer to [Llvm_ctx.make_ctx]; the JS backend registers empty
+     (see [Repr.set_unboxed_types]). *)
+  Repr.set_unboxed_types ~collision_set:(Collision_set.compute tir.Tir.tm_types)
+    ~externs:tir.Tir.tm_externs ~enabled:(not is_js) tir.Tir.tm_types;
   (* Known-call pass: run before Perceus so apply functions are still pure
      and eligible for inlining in the subsequent Opt fixed-point loop.  See
      the [is_apply_fn] guard in [Perceus]'s EApp post_dec_vars for why the
@@ -139,7 +155,12 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   let tir = if opt then Simplify.run ~pre_perceus:true ~changed:(ref false) tir else tir in
   snap "tir-simplify-pre" tir;
   before_perceus tir;
-  let tir = Perceus.perceus tir in
+  (* Computed ONCE here and shared: [Perceus] places its RC ops against this
+     answer, and [Escape]'s promotion-through-a-borrowed-callee verdict has to
+     be taken against the SAME one — re-deriving it after RC insertion could
+     disagree.  See [Escape]'s module doc. *)
+  let borrow_map = Borrow.infer_module tir in
+  let tir = Perceus.perceus ~borrow_map tir in
   snap "tir-perceus" tir;
   stamp "perceus";
   (* Deep-drop synthesis (lib/tir/drop.ml).  Skipped for the JS target, whose
@@ -147,7 +168,7 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   let tir = if is_js then tir else Drop.run tir in
   snap "tir-drop" tir;
   stamp "drop";
-  let tir = Escape.escape_analysis tir in
+  let tir = Escape.escape_analysis ~borrow_map tir in
   snap "tir-escape" tir;
   stamp "escape";
   let pre_opt = tir in
@@ -208,7 +229,10 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   stamp "opt";
   (* @[no_alloc]: the last pass before emission, on the exact TIR Llvm_emit
      will consume. *)
+  (* Hand the emitter exactly this decision (see [Repr.rebind_registration]). *)
+  Repr.rebind_registration tir.Tir.tm_types;
   let allocating = Alloc_contract.allocating_fns ~decls tir in
+  let retaining = Alloc_contract.retaining_fns ~decls tir in
   let contract_diags =
-    Alloc_contract.check ~decls ~allocating ~opt ~trmc ~trmc_eligible tir in
-  { pre_opt; final = tir; vectorize_diags; contract_diags; allocating }
+    Alloc_contract.check ~decls ~allocating ~retaining ~opt ~trmc ~trmc_eligible tir in
+  { pre_opt; final = tir; vectorize_diags; contract_diags; allocating; retaining }

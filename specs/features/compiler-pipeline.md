@@ -64,6 +64,9 @@ Source Code
 [Perceus RC Analysis] (lib/tir/perceus.ml — Perceus.perceus)
     ↓
 [Escape Analysis] (lib/tir/escape.ml — Escape.escape_analysis)   ← AFTER Perceus
+                  ← takes the SAME Borrow.borrow_map Perceus consumed, so its
+                    promotion-through-a-call verdict is judged against the map
+                    the RC ops were placed against
     ↓
 [Optimization Loop] (lib/tir/opt.ml)  ← fixed-point over NINE passes, in this order
   ├─ [Join points]        (lib/tir/join_points.ml)
@@ -101,6 +104,14 @@ Source Code
 > no IR with `scripts/ir-oracle.sh` over 242 programs.
 > `Alloc_contract.check` runs last, immediately before emission, which is what
 > lets `@[no_alloc]` accept a constructor Perceus reused in place.
+> `Alloc_contract.retaining_fns` runs beside it, on the same TIR, for the
+> `@[no_alloc(transient)]` verdict.
+>
+> **`Repr.set_unboxed_types` runs right after Defun** (Milestone 3, unboxed
+> small scalar aggregates): after Mono has instantiated generic variants and
+> Defun has added the closure structs, so the decision is made on the type list
+> the remaining passes see — and before Perceus, because `Rc_types.needs_rc`,
+> `Borrow`, `Drop`, `Escape` and `Alloc_contract` all read that registry.
 >
 > In particular **Perceus runs *before* Escape** (see `bin/main.ml`, `Perceus.perceus` then `Escape.escape_analysis`). Earlier revisions of this document had the two reversed; that was wrong.
 >
