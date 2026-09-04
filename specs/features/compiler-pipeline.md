@@ -64,6 +64,9 @@ Source Code
 [Perceus RC Analysis] (lib/tir/perceus.ml — Perceus.perceus)
     ↓
 [Escape Analysis] (lib/tir/escape.ml — Escape.escape_analysis)   ← AFTER Perceus
+                  ← takes the SAME Borrow.borrow_map Perceus consumed, so its
+                    promotion-through-a-call verdict is judged against the map
+                    the RC ops were placed against
     ↓
 [Optimization Loop] (lib/tir/opt.ml)  ← fixed-point over NINE passes, in this order
   ├─ [Join points]        (lib/tir/join_points.ml)

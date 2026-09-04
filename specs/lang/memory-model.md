@@ -260,6 +260,15 @@ constructor of a variant that also has payload-carrying cases (`Nil` in
 `List`) is a real heap cell today, so returning a fresh one fails the
 contract, and a `Float` stored into a generic field is boxed, which counts.
 
+**Promotion sees through a call.** `⚡ stack-allocated` used to stop at every
+call boundary: passing a value to any function meant it might escape. It now
+also fires when the only thing done with a value is to hand it to a function in
+the same program that provably does not keep the pointer — one that
+destructures it, reads its fields and returns something else. Storing it,
+returning it, capturing it in a closure, sending it to an actor, or handing it
+to an `extern` all still count as escaping, and a closure passed to its own
+apply function is never promoted.
+
 If `bump_copied` truly needs the old field, read it *before* you rebuild
 (bind `x` in the same `match`, then return it) rather than matching `b` a second
 time; that collapses the two uses into one and reuse fires again.

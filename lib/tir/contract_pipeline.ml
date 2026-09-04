@@ -151,7 +151,12 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   let tir = if opt then Simplify.run ~pre_perceus:true ~changed:(ref false) tir else tir in
   snap "tir-simplify-pre" tir;
   before_perceus tir;
-  let tir = Perceus.perceus tir in
+  (* Computed ONCE here and shared: [Perceus] places its RC ops against this
+     answer, and [Escape]'s promotion-through-a-borrowed-callee verdict has to
+     be taken against the SAME one — re-deriving it after RC insertion could
+     disagree.  See [Escape]'s module doc. *)
+  let borrow_map = Borrow.infer_module tir in
+  let tir = Perceus.perceus ~borrow_map tir in
   snap "tir-perceus" tir;
   stamp "perceus";
   (* Deep-drop synthesis (lib/tir/drop.ml).  Skipped for the JS target, whose
@@ -159,7 +164,7 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   let tir = if is_js then tir else Drop.run tir in
   snap "tir-drop" tir;
   stamp "drop";
-  let tir = Escape.escape_analysis tir in
+  let tir = Escape.escape_analysis ~borrow_map tir in
   snap "tir-escape" tir;
   stamp "escape";
   let pre_opt = tir in

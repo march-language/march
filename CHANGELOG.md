@@ -13,6 +13,19 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Stack promotion through a call.** Escape analysis used to treat every call
+  argument as escaping. It now promotes a value whose only use is an argument
+  to a function in the same program that provably does not retain the pointer
+  it receives — one that destructures it, reads its fields and returns
+  something else. Storing it, returning it, capturing it in a closure, sending
+  it to an actor and handing it to an `extern` all still count as escaping, and
+  a closure passed to its own apply function is never promoted. Borrow
+  inference also stopped marking a parameter *owned* just because a SCALAR
+  field extracted from it met a builtin: for a variant with no heap-carrying
+  field anywhere there is no aliasing hazard for that rule to guard against,
+  and being owned is what made the callee free a cell the caller could have
+  kept in its frame.
+
 - **Unboxed small scalar aggregates.** A variant with exactly one constructor
   whose fields are all `Int`, `Float` or `Bool` — two to four of them — is now
   represented inline: `Vec3(Float, Float, Float)` is three doubles in
