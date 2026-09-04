@@ -316,8 +316,34 @@ let run_http_e2e ~variant ~slug ~evloop () =
      runtime selector regressed, both variants would quietly run the same
      server and every assertion below would still pass.  The server announces
      itself on stderr, so check it.  ("(event-loop)" appears only in the
-     event-loop banner; the pool prints "HTTP thread pool started".) *)
-  let banner = read_log () in
+     event-loop banner; the pool prints "HTTP thread pool started".)
+
+     WAIT for the banner rather than sampling the log once.  A successful
+     connect does not imply the banner has been written: the thread-pool path
+     binds and listen()s first, and only then calls march_http_pool_start,
+     which is what prints "HTTP thread pool started"
+     (runtime/march_http.c:2188, reached from the serve path at :2314).  A
+     client can therefore complete a TCP handshake out of the listen backlog
+     strictly before the banner exists, so the poll above can return with an
+     EMPTY log.  That is not load-dependent -- the window is unconditional --
+     and it reddened main's Linux leg on 2026-09-04 (run 33916841033) with
+     "asked for the THREAD POOL but the server did not announce it" over a
+     log containing nothing at all.
+
+     Reading it as a missing banner rather than an unwritten one is the trap
+     this comment exists to stop: the diagnostic accuses the runtime selector,
+     and the selector was fine. An EMPTY log means "not yet"; a log carrying
+     the OTHER variant's banner is the real regression, and still fails
+     below. *)
+  let banner_deadline = Unix.gettimeofday () +. 30.0 in
+  let want = if evloop then "(event-loop)" else "thread pool" in
+  let rec await_banner () =
+    let b = read_log () in
+    if find_from b want 0 <> None then b
+    else if Unix.gettimeofday () >= banner_deadline then b
+    else (Unix.sleepf 0.05; await_banner ())
+  in
+  let banner = await_banner () in
   let saw_evloop = find_from banner "(event-loop)" 0 <> None in
   let saw_pool   = find_from banner "thread pool"  0 <> None in
   if evloop && not saw_evloop then
