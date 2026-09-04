@@ -1,0 +1,12 @@
+-- Task 4 fixture: a refinement below the outermost position of a declared
+-- type parses and typechecks but is never enforced. Reproducer lifted from
+-- specs/todos/2026-09-01-nested-refinement-enforcement.md.
+mod HolesNested do
+  type Box = { v : {Int | _ > 0} }
+
+  fn f(b : Box) : Int do b.v end
+
+  fn main() : Int do
+    f({ v: 0 })
+  end
+end

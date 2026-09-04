@@ -1,0 +1,600 @@
+native_actor_call_canonical: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_actor_call_canonical: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_call_late_reply: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_actor_call_late_reply: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_call_timeout: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_actor_call_timeout: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_counter: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_actor_counter: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_crash_rc_restore: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_actor_crash_rc_restore: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_dispatch_rc_window: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_actor_dispatch_rc_window: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_monitor_down_reason: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_actor_monitor_down_reason: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_registry_basic: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_actor_registry_basic: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_registry_restart: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_actor_registry_restart: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_registry_restart_batch: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_actor_registry_restart_batch: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_registry_retire: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_actor_registry_retire: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_registry_retire_vault: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_actor_registry_retire_vault: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_as_pattern: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_as_pattern: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_atom_ctor_field: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_atom_ctor_field: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_bare_none_print: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_bare_none_print: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_boxed_adt_atom_field_not_boxed: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_boxed_adt_atom_field_not_boxed: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_boxed_adt_float_field: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_boxed_adt_float_field: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_builtin_link_backing: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_builtin_link_backing: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_bytes_u8_bridge: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_bytes_u8_bridge: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_cap_dictionary: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_cap_dictionary: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_cap_epoch_plane: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_cap_epoch_plane: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_closure_bool_field: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_closure_bool_field: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_closure_param_shadows_import: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_closure_param_shadows_import: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_closure_scalar_abi: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_closure_scalar_abi: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_csv_niche_row: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_csv_niche_row: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_ctor_pattern_multi_param: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_ctor_pattern_multi_param: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_dataframe_groupby_count: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_dataframe_groupby_count: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_deep_drop_shared_child: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_deep_drop_shared_child: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_default_args_nested: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_default_args_nested: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_default_method_args: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_default_method_args: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_erased_float_slot_leak_probe: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_erased_float_slot_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_ffi_blocking: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_ffi_blocking: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_ffi_codec2: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_ffi_codec2: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_ffi_codec: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_ffi_codec: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_ffi_float: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_ffi_float: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_ffi_interp2: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_ffi_interp2: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_ffi_interp: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_ffi_interp: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_ffi_interp_shim: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_ffi_interp_shim: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_ffi_interp_upcall: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_ffi_interp_upcall: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_ffi_leak: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_ffi_leak: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_ffi_option: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_ffi_option: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_ffi_optres: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_ffi_optres: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_ffi_raise: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_ffi_raise: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_ffi_resource: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_ffi_resource: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_ffi_result: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_ffi_result: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_ffi_upcall: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_ffi_upcall: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_ffi_variant: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_ffi_variant: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_float_arr_list_boxing: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_float_arr_list_boxing: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_float_boxing: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_float_boxing: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_float_generic_field_abi: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_float_generic_field_abi: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_fn_arities_shadow_poisoning: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_fn_arities_shadow_poisoning: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_foreign_actor_http: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_foreign_actor_http: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_generic_fn_to_string_specialize: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_generic_fn_to_string_specialize: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_get_actor_field_direct: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_get_actor_field_direct: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_h_css_url_context: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_h_css_url_context: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_h_escape_ctx_builtin: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_h_escape_ctx_builtin: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_h_sigil_adt_interp: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_h_sigil_adt_interp: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_h_sigil_safe_collision: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_h_sigil_safe_collision: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_h_tag_hardening: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_h_tag_hardening: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_h_trusted_context: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_h_trusted_context: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_hash_cross_backend: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_hash_cross_backend: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_html_safe_raw: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_html_safe_raw: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_iface_collision_ambiguous_call: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_iface_collision_ambiguous_call: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_iface_method_collision: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_iface_method_collision: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_js_canvas_available: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_js_canvas_available: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_js_closure_reuse_apply_slot: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_js_closure_reuse_apply_slot: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_js_dom_available: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_js_dom_available: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_js_dom_timeout_callback: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_js_dom_timeout_callback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_js_extern_import: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_js_extern_import: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_js_ffi_async: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_js_ffi_async: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_js_ffi_blocking_raises: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_js_ffi_blocking_raises: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_js_ffi_cbacked: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_js_ffi_cbacked: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_js_ffi_raises: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_js_ffi_raises: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_js_let_shadowing: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_js_let_shadowing: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_js_match_stmt_fallthrough: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_js_match_stmt_fallthrough: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_js_random_determinism: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_js_random_determinism: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_js_self_tail_call_rc_drop: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_js_self_tail_call_rc_drop: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_js_unmapped_builtin: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_js_unmapped_builtin: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_lazy_niche: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_lazy_niche: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_let_shadow_rebind: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_let_shadow_rebind: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_let_tuple_destructure: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_let_tuple_destructure: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_let_tuple_nested: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_let_tuple_nested: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_mailbox_bounded: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_mailbox_bounded: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_mailbox_depth: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_mailbox_depth: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_main_cap_io: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_main_cap_io: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_march_prefixed_local: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_march_prefixed_local: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_multihead_literal_arg: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_multihead_literal_arg: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_bounds_panic: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_bounds_panic: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_fold: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_fold: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_fold_acc_leak_probe: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_fold_acc_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_fold_leak_probe: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_fold_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_map2: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_map2: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_map2_inline: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_map2_inline: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_map2_inline_length_panic: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_map2_inline_length_panic: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_map_closure_abi: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_map_closure_abi: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_map_inline_capture: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_map_inline_capture: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_map_inline_float_box_reuse: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_map_inline_float_box_reuse: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_map_inline_reuse: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_map_inline_reuse: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_map_inline_unboxed: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_map_inline_unboxed: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_map_inline_vectorize: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_map_inline_vectorize: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_narrow: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_narrow: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_narrow_inline: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_narrow_inline: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_native_float_box_abi_leak_probe: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_native_float_box_abi_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_nested_cons_ctor_heap: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_nested_cons_ctor_heap: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_nested_derive_json: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_nested_derive_json: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_nested_mod_qualcall: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_nested_mod_qualcall: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_newtype_counter: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_newtype_counter: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_niche_ctor_ambiguity: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_niche_ctor_ambiguity: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_niche_reuse_closure: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_niche_reuse_closure: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_node_call_loopback: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_node_call_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_node_discovery: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_node_discovery: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_option_adt_eq: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_option_adt_eq: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_option_niche: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_option_niche: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_or_pattern: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_or_pattern: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_peak_rss: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_peak_rss: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_pid_of_int_roundtrip: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_pid_of_int_roundtrip: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_preempt_starvation: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_preempt_starvation: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_println_line_atomic: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_println_line_atomic: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_qualified_ctor_pattern: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_qualified_ctor_pattern: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_record_erased_field_repr: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_record_erased_field_repr: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_record_field_erased_int: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_record_field_erased_int: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_record_get_let_bound_eq: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_record_get_let_bound_eq: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_record_pattern: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_record_pattern: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_record_pattern_partial: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_record_pattern_partial: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_remote_ref_hashes: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_remote_ref_hashes: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_result_int_match: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_result_int_match: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_ring_buf_ops: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_ring_buf_ops: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_rpc_auto_enroll: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_rpc_auto_enroll: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_rpc_hash_elim: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_rpc_hash_elim: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_rpc_hash_live: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_rpc_hash_live: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_rrb_push_float: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_rrb_push_float: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_sched_stats: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_sched_stats: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_sched_stress: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_sched_stress: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_shadow_selfref_let: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_shadow_selfref_let: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_shadowed_builtin_name: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_shadowed_builtin_name: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_signal_term_suppress: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_signal_term_suppress: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_signal_watch: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_signal_watch: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_simd_actor_msg: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_simd_actor_msg: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_simd_bounds_panic: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_simd_bounds_panic: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_simd_fma_fuzz: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_simd_fma_fuzz: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_simd_lane_panic: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_simd_lane_panic: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_simd_leak_probe: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_simd_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_simd_mutual_tco: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_simd_mutual_tco: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_simd_nested_closure_acc: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_simd_nested_closure_acc: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_simd_poly_eq: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_simd_poly_eq: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_simd_residency: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_simd_residency: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_simd_to_string: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_simd_to_string: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_simd_vector_core: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_simd_vector_core: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_simd_vector_escape_arg: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_simd_vector_escape_arg: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_simd_vector_mem: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_simd_vector_mem: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_single_use_inline_rc: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_single_use_inline_rc: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_static_closure_no_leak: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_static_closure_no_leak: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_static_closure_semantics: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_static_closure_semantics: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_static_lambda_no_leak: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_static_lambda_no_leak: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_string_search_edge_cases: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_string_search_edge_cases: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_string_to_float_option: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_string_to_float_option: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_supervisor_one_for_all_restart: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_supervisor_one_for_all_restart: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_supervisor_one_for_one_restart: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_supervisor_one_for_one_restart: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_supervisor_rest_for_one_restart: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_supervisor_rest_for_one_restart: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_supervisor_spawn_children: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_supervisor_spawn_children: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_tagged_int_rc: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_tagged_int_rc: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_task_await_float: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_task_await_float: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_task_await_int: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_task_await_int: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_task_await_ptr: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_task_await_ptr: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_task_burst_await: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_task_burst_await: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_task_lifetime_leak_probe: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_task_lifetime_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_task_race_cancel: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_task_race_cancel: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_task_spawn_float_thunk: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_task_spawn_float_thunk: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_tco_fresh_arg_decrc: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_tco_fresh_arg_decrc: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_timer_leak_probe: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_timer_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_timer_send_after: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_timer_send_after: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_to_string_show: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_to_string_show: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_toml_get_int: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_toml_get_int: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_tuple_destructure_dce: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_tuple_destructure_dce: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_tuple_destructure_rc: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_tuple_destructure_rc: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_tuple_scalar_fields: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_tuple_scalar_fields: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_tuple_show: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_tuple_show: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_typed_array_map_closure_abi: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_typed_array_map_closure_abi: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_typed_array_scalar_repr: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_typed_array_scalar_repr: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_unit_callback_zero_arg: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_unit_callback_zero_arg: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_vault_niche_unsafe_element: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_vault_niche_unsafe_element: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_vault_non_string_key: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_vault_non_string_key: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_zero_arg_closure_default: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_zero_arg_closure_default: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_actor: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_actor: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_aho_corasick: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_aho_corasick: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_array: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_array: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_audio: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_audio: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_base64: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_base64: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_bigint: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_bigint: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_bytes: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_bytes: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_canvas: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_canvas: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_channel: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_channel: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_channel_server: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_channel_server: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_channel_socket: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_channel_socket: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_char: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_char: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_check: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_check: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_cli: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_cli: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_cluster: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_cluster: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_cluster_auth: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_cluster_auth: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_cluster_conn: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_cluster_conn: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_cluster_load: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_cluster_load: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_compress: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_compress: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_config: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_config: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_consistent_hash: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_consistent_hash: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_crdt: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_crdt: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_crypto: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_crypto: coverage audit (user code): 2 enforced, 0 inert (warned), 0 unenforced
+stdlib_csv: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_csv: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_dataframe: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_dataframe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_datetime: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_datetime: coverage audit (user code): 2 enforced, 0 inert (warned), 0 unenforced
+stdlib_decimal: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_decimal: coverage audit (user code): 1 enforced, 0 inert (warned), 0 unenforced
+stdlib_deque: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_deque: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_dir: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_dir: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_dist_link: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_dist_link: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_dist_supervisor: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_dist_supervisor: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_dns: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_dns: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_dom: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_dom: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_duration: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_duration: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_enum: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_enum: coverage audit (user code): 1 enforced, 0 inert (warned), 0 unenforced
+stdlib_env: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_env: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_file: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_file: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_flow: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_flow: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_forge_nb: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_forge_nb: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_gen: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_gen: coverage audit (user code): 2 enforced, 0 inert (warned), 0 unenforced
+stdlib_global_pid: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_global_pid: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_global_registry: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_global_registry: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_hamt: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_hamt: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_handle: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_handle: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_handshake: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_handshake: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_hash_map: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_hash_map: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_html: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_html: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_http: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_http: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_http_client: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_http_client: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_http_server: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_http_server: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_http_transport: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_http_transport: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_io: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_io: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_iolist: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_iolist: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_iterable: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_iterable: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_json: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_json: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_json_stream: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_json_stream: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_lazy_niche_probe: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_lazy_niche_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_list: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_list: coverage audit (user code): 7 enforced, 0 inert (warned), 0 unenforced
+stdlib_logger: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_logger: coverage audit (user code): 1 enforced, 0 inert (warned), 0 unenforced
+stdlib_map: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_map: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_math: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_math: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_membership: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_membership: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_merkle: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_merkle: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_msgpack: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_msgpack: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_native_array: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_native_array: coverage audit (user code): 5 enforced, 0 inert (warned), 0 unenforced
+stdlib_net_frame: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_net_frame: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_net_kernel: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_net_kernel: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_node_call: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_node_call: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_node_identity: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_node_identity: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_node_rpc: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_node_rpc: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_option: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_option: coverage audit (user code): 2 enforced, 0 inert (warned), 0 unenforced
+stdlib_ordered_map: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_ordered_map: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_parallel: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_parallel: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_parser: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_parser: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_path: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_path: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_peer_registry: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_peer_registry: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_plot: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_plot: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_prelude: coverage audit (user + stdlib): 66 enforced, 0 inert (warned), 0 unenforced
+stdlib_prelude: coverage audit (user code): 3 enforced, 0 inert (warned), 0 unenforced
+stdlib_presence: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_presence: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_process: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_process: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_pubsub: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_pubsub: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_queue: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_queue: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_random: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_random: coverage audit (user code): 5 enforced, 0 inert (warned), 0 unenforced
+stdlib_range: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_range: coverage audit (user code): 1 enforced, 0 inert (warned), 0 unenforced
+stdlib_regex: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_regex: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_remote_call: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_remote_call: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_result: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_result: coverage audit (user code): 3 enforced, 0 inert (warned), 0 unenforced
+stdlib_ring_buf: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_ring_buf: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_rrb_vec: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_rrb_vec: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_scheduler: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_scheduler: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_seq: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_seq: coverage audit (user code): 1 enforced, 0 inert (warned), 0 unenforced
+stdlib_session: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_session: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_set: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_set: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_sigil: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_sigil: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_signal: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_signal: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_simd: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_simd: coverage audit (user code): 10 enforced, 0 inert (warned), 0 unenforced
+stdlib_socket: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_socket: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_sort: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_sort: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_sorted_set: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_sorted_set: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_stats: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_stats: coverage audit (user code): 17 enforced, 0 inert (warned), 0 unenforced
+stdlib_string: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_string: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_swim: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_swim: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_swim_driver: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_swim_driver: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_system: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_system: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_task: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_task: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_test: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_test: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_tls: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_tls: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_toml: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_toml: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_tuple: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_tuple: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_uri: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_uri: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_uuid: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_uuid: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_vault: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_vault: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_vector_clock: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_vector_clock: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_websocket: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_websocket: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_work_dispatch: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_work_dispatch: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_xml: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_xml: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_yaml: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+stdlib_yaml: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced

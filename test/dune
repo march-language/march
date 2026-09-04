@@ -884,7 +884,13 @@
  ; stale staged stdlib/runtime tree it resolves exe-relatively, would make
  ; that group silently vacuous instead of loudly broken -- the same
  ; reasoning run_compiler/run_stdlib's identical dep comment gives.
- (deps %{exe:../bin/main.exe} (source_tree ../runtime) (source_tree ../stdlib)))
+ ; `audit-baseline` sweeps test/native, stdlib, and test/refine_audit/holes
+ ; the same way, and additionally READS/WRITES the committed baseline files
+ ; under test/refine_audit -- both must be dune deps for the identical
+ ; reason (and this test group always runs relative to the repo root, not
+ ; the sandbox, per its own require_repo_root check).
+ (deps %{exe:../bin/main.exe} (source_tree ../runtime) (source_tree ../stdlib)
+   (source_tree ../test/native) (source_tree refine_audit)))
 
 ; An (executable), NOT a (test): deliberately OUT of the `runtest` alias.
 ;

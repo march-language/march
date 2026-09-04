@@ -13135,6 +13135,232 @@ end
                   (List.length lines) err)))
   ]
 
+(* ------------------------------------------------------------------ *)
+(* Task 4: two committed baselines over --refine-audit's own output.
+
+   1. [corpus.baseline]: the audit swept over the corpus the refinement
+      oracle walks (`test/native/*.march`, `stdlib/*.march`, ~300 files).
+      This is EMPTY of any Unenforced line today -- Task 2's re-review
+      independently found 63 declared refinements over that corpus, every
+      one Enforced, and the sweep below reproduces that count. An empty
+      baseline is still worth committing: a future nested refinement or
+      String return added anywhere in the corpus flips a line from silence
+      to a diff, and this test catches it.
+
+   2. [holes.baseline]: a SEPARATE, small, hand-built fixture set under
+      test/refine_audit/holes/ that deliberately contains one program per
+      known unenforced position (a block-level fn's own param/return, a
+      lambda's own param, a non-adoptable impl method's param, an actor's
+      state field and handler param, a nested field refinement, and a
+      String return). Its baseline MUST be non-empty. This is the guard on
+      the guard: if the corpus baseline were empty because the audit
+      silently stopped walking anything, this second baseline would be
+      empty too, and the vacuity check below fails loudly rather than
+      quietly matching two empty files.
+
+   Regeneration mirrors the TIR golden-snapshot workflow
+   (test/test_snapshots.ml): run once with UPDATE_SNAPSHOTS=1 to overwrite
+   the committed file with the current sweep, review the diff, then run
+   again without the env var to confirm it is green. Both sweeps run the
+   REAL compiled driver (like audit-flag above), not a re-implementation of
+   [print_refine_audit], so a format change in the printer shows up here
+   too. Every invocation clears .march/cas/artifacts-v2 first: a warm
+   --check CAS entry short-circuits before --refine-audit ever prints
+   anything, which would masquerade as "even fewer sites" rather than
+   failing loudly (see bin/main.ml's do_check cache lookup, and the
+   refinement obligation ratchet's identical comment in
+   .github/workflows/ci.yml). *)
+
+let audit_update_mode = Sys.getenv_opt "UPDATE_SNAPSHOTS" = Some "1"
+
+(* All of this group's paths are repo-root-relative, matching every gate
+   command in the brief (`./_build/default/test/test_refinecheck.exe -e`,
+   always invoked from the repo root, never from _build/default/test) --
+   the same assumption test/test_snapshots.ml and every doc-lint script in
+   this repo already make. A cwd off the repo root is a setup error, not a
+   case to silently paper over with a candidate-path search: it would only
+   hide someone running the binary from the wrong place. *)
+let require_repo_root () =
+  if not (Sys.file_exists "test/native") then
+    Alcotest.failf
+      "test/native not found under the current directory (%s) -- the \
+       audit-baseline group must be run from the repo root, e.g. \
+       ./_build/default/test/test_refinecheck.exe -e"
+      (Sys.getcwd ())
+
+let march_files_sorted_in (dir : string) : string list =
+  Sys.readdir dir |> Array.to_list
+  |> List.filter (fun f -> Filename.check_suffix f ".march")
+  |> List.sort compare
+  |> List.map (Filename.concat dir)
+
+(* Namespaces a fixture's tag by its parent directory, exactly like
+   scripts/refine-oracle.sh: `test/native/foo.march` and
+   `stdlib/foo.march` must not collide under one basename. *)
+let audit_tag_of (path : string) : string =
+  Filename.basename (Filename.dirname path) ^ "_" ^ Filename.remove_extension (Filename.basename path)
+
+(* Runs --refine-audit on one file under a private HOME (the stdlib
+   AST/typecheck-env cache under ~/.cache/march embeds the populating
+   worktree's absolute paths -- see
+   project_home_cache_path_contamination_oracles.md) and returns every
+   "coverage audit" line from stderr, tagged and ready to sort. Clears the
+   check-artifact CAS immediately before the run, every time: seeing this
+   inside the per-file loop (not once before the whole sweep) matters
+   because [require_refine_audit_compiler]'s own compiler build can populate
+   it via an earlier group in this same process. *)
+let audit_coverage_lines_for ~home (path : string) : string list =
+  Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote ".march/cas/artifacts-v2")) |> ignore;
+  let _, _, err = run_march_on_env [ ("HOME", home) ] [ "--check"; "--refine-audit" ] path in
+  let tag = audit_tag_of path in
+  nonempty_lines err
+  |> List.filter (fun l -> String.length l >= 14 && String.sub l 0 14 = "coverage audit")
+  |> List.map (fun l -> tag ^ ": " ^ l)
+
+let audit_sweep ~home (dirs : string list) : int * string list =
+  let files = List.concat_map march_files_sorted_in dirs in
+  let lines = List.concat_map (audit_coverage_lines_for ~home) files |> List.sort compare in
+  (List.length files, lines)
+
+let read_baseline_lines (path : string) : string list =
+  if not (Sys.file_exists path) then []
+  else
+    let ic = open_in path in
+    let rec go acc =
+      match input_line ic with
+      | line -> go (line :: acc)
+      | exception End_of_file -> List.rev acc
+    in
+    let lines = go [] in
+    close_in ic;
+    lines
+
+let write_baseline_lines (path : string) (lines : string list) : unit =
+  let oc = open_out path in
+  List.iter (fun l -> output_string oc l; output_char oc '\n') lines;
+  close_out oc
+
+(* Diffs two already-sorted line lists, reporting only the first handful of
+   differing lines -- a full corpus diff can be thousands of lines and a
+   test failure message that dumps all of them is not more actionable than
+   one that dumps the first 20. *)
+let assert_baseline_matches ~msg ~regen_cmd (baseline_path : string) (actual : string list) =
+  let expected = read_baseline_lines baseline_path in
+  if expected <> actual then begin
+    let expected_set = List.sort_uniq compare expected in
+    let actual_set = List.sort_uniq compare actual in
+    let missing = List.filter (fun l -> not (List.mem l actual_set)) expected_set in
+    let added = List.filter (fun l -> not (List.mem l expected_set)) actual_set in
+    let take n l = List.filteri (fun i _ -> i < n) l in
+    Alcotest.failf
+      "%s\nbaseline: %s (%d lines) vs current sweep (%d lines)\n\
+       missing (in baseline, not in current), first 20:\n%s\n\
+       added (in current, not in baseline), first 20:\n%s\n\
+       If this is an intentional change, regenerate with:\n  %s"
+      msg baseline_path (List.length expected) (List.length actual)
+      (String.concat "\n" (take 20 missing))
+      (String.concat "\n" (take 20 added))
+      regen_cmd
+  end
+
+let corpus_baseline_path = "test/refine_audit/corpus.baseline"
+let holes_baseline_path = "test/refine_audit/holes.baseline"
+
+let audit_baseline_suite =
+  [ Alcotest.test_case
+      "corpus baseline (test/native + stdlib): matches, or is regenerated" `Quick (fun () ->
+        require_refine_audit_compiler ();
+        require_repo_root ();
+        let home = Filename.temp_file "refine_audit_home" "" in
+        Sys.remove home;
+        Unix.mkdir home 0o700;
+        Fun.protect
+          ~finally:(fun () -> Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote home)) |> ignore)
+          (fun () ->
+            let n, lines = audit_sweep ~home [ "test/native"; "stdlib" ] in
+            let total_report_lines = List.length lines in
+            (* Same vacuity floor as scripts/refine-oracle.sh: this sweep is
+               known to walk ~300 fixtures and print ~600 lines (two summary
+               lines per file; today zero Unenforced detail lines). Fewer
+               than 100 fixtures or 50 report lines means the sweep itself
+               broke (wrong cwd, stale build, warm cache) well before the
+               question "is the baseline empty" is even reachable. *)
+            if n < 100 || total_report_lines < 50 then
+              Alcotest.failf
+                "REFUSING to compare a vacuous corpus sweep: %d fixtures, %d \
+                 coverage-audit lines. The audit is not being exercised \
+                 (wrong cwd, stale build, or a warm --check cache). This is \
+                 not the same failure as the baseline being empty of \
+                 Unenforced lines, which is a real, currently-true finding."
+                n total_report_lines;
+            if audit_update_mode then begin
+              write_baseline_lines corpus_baseline_path lines;
+              Printf.printf "regenerated %s (%d fixtures, %d lines)\n%!" corpus_baseline_path n
+                total_report_lines
+            end
+            else
+              assert_baseline_matches
+                ~msg:"the refinement coverage audit's corpus sweep changed"
+                ~regen_cmd:
+                  "UPDATE_SNAPSHOTS=1 ./_build/default/test/test_refinecheck.exe -e 'audit-baseline'"
+                corpus_baseline_path lines))
+
+  ; Alcotest.test_case
+      "holes baseline (test/refine_audit/holes): matches, and is never vacuous" `Quick (fun () ->
+        require_refine_audit_compiler ();
+        require_repo_root ();
+        if not (Sys.file_exists "test/refine_audit/holes") then
+          Alcotest.fail "test/refine_audit/holes not found -- the non-vacuity fixture set is missing";
+        let home = Filename.temp_file "refine_audit_holes_home" "" in
+        Sys.remove home;
+        Unix.mkdir home 0o700;
+        Fun.protect
+          ~finally:(fun () -> Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote home)) |> ignore)
+          (fun () ->
+            let n, lines = audit_sweep ~home [ "test/refine_audit/holes" ] in
+            (* THE vacuity guard the brief asks for by name: this fixture
+               set exists ONLY to contain known holes. If it ever reports
+               zero Unenforced sites, the audit itself is broken (a rule
+               got over-widened, a position stopped being walked, ...) --
+               that is categorically different from the corpus baseline
+               being empty, which is a true fact about a corpus that
+               happens to declare no unenforced refinement anywhere. *)
+            let unenforced_total =
+              List.fold_left
+                (fun acc l ->
+                  match
+                    Scanf.sscanf_opt l
+                      "%_[^:]: coverage audit (user code): %_d enforced, %_d inert (warned), %d unenforced"
+                      (fun u -> u)
+                  with
+                  | Some u -> acc + u
+                  | None -> acc)
+                0 lines
+            in
+            if n < 1 then Alcotest.fail "no .march fixtures found under test/refine_audit/holes";
+            if unenforced_total <= 0 then
+              Alcotest.failf
+                "THE AUDIT IS BROKEN: test/refine_audit/holes's %d fixtures, which \
+                 exist ONLY to contain known-unenforced refinements, reported ZERO \
+                 unenforced sites (user code slice) between them. This is the \
+                 non-vacuity guard failing: either --refine-audit stopped \
+                 classifying a position as Unenforced, or the sweep itself did \
+                 not run. Do not let this test go green by trimming the holes \
+                 fixtures to match; find why classification changed."
+                n;
+            if audit_update_mode then begin
+              write_baseline_lines holes_baseline_path lines;
+              Printf.printf "regenerated %s (%d fixtures, %d unenforced sites)\n%!" holes_baseline_path n
+                unenforced_total
+            end
+            else
+              assert_baseline_matches
+                ~msg:"the refinement coverage audit's holes sweep changed"
+                ~regen_cmd:
+                  "UPDATE_SNAPSHOTS=1 ./_build/default/test/test_refinecheck.exe -e 'audit-baseline'"
+                holes_baseline_path lines))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -13216,4 +13442,5 @@ let () =
       ("audit-sites", audit_sites_suite @ audit_stacked_refinement_suite @ audit_arrow_signature_suite);
       ("audit-classify",
         audit_classify_suite @ audit_classify_reason_suite @ audit_classify_fixloop1_suite);
-      ("audit-flag", audit_flag_suite) ]
+      ("audit-flag", audit_flag_suite);
+      ("audit-baseline", audit_baseline_suite) ]

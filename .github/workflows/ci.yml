@@ -293,6 +293,76 @@ jobs:
             exit 1
           fi
 
+      # --refine-audit (lib/refinecheck/refine_audit.ml) answers a different
+      # question than the ratchet above: not "did a filed obligation stop
+      # being proved" but "does the checker ever look at this declared
+      # refinement at all". Task 2/3's sweep over the ~300-file corpus
+      # (test/native/*.march, stdlib/*.march) found 63 declared refinements,
+      # every one Enforced, zero Unenforced — see test/refine_audit/
+      # corpus.baseline (the alcotest `audit-baseline` group under
+      # `dune runtest`, which the `test` job above already runs, diffs the
+      # full sweep against that file exactly). This step is a second,
+      # narrower ratchet in this job specifically: it reads the SAME
+      # `user + stdlib` slice the ceiling step above uses (stdlib/list.march
+      # sees the whole prepended stdlib regardless of which stdlib file is
+      # named, per that comment), and fails if its Unenforced count rises
+      # above what the corpus baseline currently records. A rise here means
+      # a newly declared refinement landed in a position the checker never
+      # enforces (a lambda param, a block-level fn, a non-adoptable impl
+      # method, an actor field/handler param, ...) with nothing else in CI
+      # catching it, because an Unenforced site files no obligation and so
+      # never touches the ratchet above at all.
+      - name: Refinement coverage audit ratchet
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          eval $(opam env)
+          unenforced_baseline=0
+          rm -rf .march/cas/artifacts-v2
+          ./_build/default/bin/main.exe --check --refine-audit stdlib/list.march \
+            > /tmp/refine_audit_ceiling.txt 2>&1 || true
+          cat /tmp/refine_audit_ceiling.txt
+          unenforced=$(sed -n \
+            's/^coverage audit (user + stdlib): [0-9][0-9]* enforced, [0-9][0-9]* inert (warned), \([0-9][0-9]*\) unenforced$/\1/p' \
+            /tmp/refine_audit_ceiling.txt)
+          if [ -z "$unenforced" ]; then
+            echo "FAIL: could not find the 'coverage audit (user + stdlib)' line in"
+            echo "--refine-audit output for stdlib/list.march."
+            echo "Likely causes: a warm --check CAS short-circuited before the audit"
+            echo "printed (the rm above should prevent this), the compiler errored"
+            echo "before printing, or the audit's summary line format changed (update"
+            echo "the sed above to match). This step must never pass vacuously."
+            exit 1
+          fi
+          echo "unenforced=$unenforced (ceiling: $unenforced_baseline), read from stdlib/list.march's user + stdlib slice"
+          if [ "$unenforced" -gt "$unenforced_baseline" ]; then
+            echo ""
+            echo "FAIL: the refinement coverage audit's Unenforced count rose from"
+            echo "$unenforced_baseline to $unenforced."
+            echo "A declared refinement now sits somewhere the checker never enforces"
+            echo "it — see test/refine_audit/corpus.baseline and"
+            echo "docs/refinement-types.md's 'Coverage audit' section for the full"
+            echo "list of unenforced positions (a lambda's own param, a block-level"
+            echo "fn's param/return, a non-adoptable impl method's param, an actor's"
+            echo "state field or handler param, a nested refinement, a String"
+            echo "return, ...)."
+            echo ""
+            echo "What to do:"
+            echo "  1. Reproduce locally:"
+            echo "       rm -rf .march/cas/artifacts-v2"
+            echo "       ./_build/default/bin/main.exe --check --refine-audit stdlib/list.march"
+            echo "  2. Read the per-site lines this prints (file:line:col, the"
+            echo "     predicate, and why it is Unenforced) to find what changed."
+            echo "  3. Fix the regression, or move the new refinement to a position"
+            echo "     the checker enforces (a top-level fn's own parameter, its"
+            echo "     return when the base is Int/Bool/Float/a registered record, or"
+            echo "     a let-binding)."
+            echo "  4. Only raise this ceiling if the rise is intentional and filed as"
+            echo "     a specs/todos/ entry with a reproducer, exactly like the four"
+            echo "     Task 4 todos this ratchet was introduced alongside."
+            exit 1
+          fi
+
       - name: Resolved-grammar conformance corpus (slow lane, not part of runtest)
         timeout-minutes: 5
         run: |
