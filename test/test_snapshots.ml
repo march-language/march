@@ -81,6 +81,7 @@ let corpus = [
   "fbip_dead_binding_reuse",         "fbip_dead_binding_reuse.march";
   "record_update",                   "record_update.march";
   "self_tco_loop",                   "self_tco_loop.march";
+  "array_read_tco_loop",             "array_read_tco_loop.march";
   "nested_generic_adt",              "nested_generic_adt.march";
   "nested_cons_ctor_heap",           "nested_cons_ctor_heap.march";
   "interp_string_operand_rc",        "interp_string_operand_rc.march";
