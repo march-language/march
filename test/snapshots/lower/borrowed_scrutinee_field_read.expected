@@ -1,0 +1,33 @@
+-- types (1) --
+type Box = Box(String, String)
+-- fns (3) --
+## escapes
+fn escapes(b : Box) : String =
+  let head : String = case b of
+  Box($f9, $f10) -> let $jp_clo12 : () -> '_ = letrec [$jp11] in
+$jp11 in
+let s : String = $f9 in
+s
+  _ -> panic("non-exhaustive pattern match") in
+let $t16 : String = let $t15 : Int = read_only(b) in
+int_to_string($t15) in
+string_concat(head, $t16)
+
+## main
+fn main(_cap_console : Cap(IO.Console)) : () =
+  let b : Box = alloc Box.Box("ab", "cde") in
+let $t17 : String = escapes(b) in
+println($t17)
+
+## read_only
+fn read_only(b : Box) : Int =
+  case b of
+  Box($f3, $f4) -> let $jp_clo6 : () -> '_ = letrec [$jp5] in
+$jp5 in
+let t : String = $f4 in
+let s : String = $f3 in
+let $t1 : Int = string_byte_length(s) in
+let $t2 : Int = string_byte_length(t) in
++($t1, $t2)
+  _ -> panic("non-exhaustive pattern match")
+

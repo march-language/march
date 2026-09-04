@@ -1067,12 +1067,65 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
          Descending with an updated [env] copy handles shadowing correctly
          (the caller's [env] for sibling branches is untouched, matching the
          old code's save/restore). *)
+      (* A field projected out of a scrutinee that is PROVABLY live across the
+         whole case is a borrowed reference, exactly like [let f = rec.field]
+         on a borrowed record parameter (the ELet [is_borrowed_field] case
+         above, condition 1).  Mark such br_vars as borrowed field vars so the
+         normal borrowed-field discipline applies to them:
+
+           - a use at a BORROWED argument position emits neither a dup nor a
+             post-call EDecRC (the [borrowed_field_vars] exclusions in the
+             EApp/ECallPtr [post_dec_vars] filters, and the alias-binding arm
+             of ELet which skips RC processing of [let a = <br_var>]);
+           - a CONSUMING use (owned argument position, constructor capture,
+             tail return) still gets its EIncRC dup, because the br_vars were
+             re-added to [la] above and are therefore live at every such use.
+
+         Without this, the accessor shape
+
+           fn get(c : Chunk, i : Int) : Int do
+             match c do Chunk(a) -> NativeArray.get_u8(a, i) end
+           end
+
+         emitted [inc_rc]/[dec_rc] around a read that never escapes the arm.
+         Under the scheduler every RC op is atomic, so a read-only projection
+         out of shared data became a contended cache line — measurably
+         negative scaling (see specs/progress for the G73 measurements).
+
+         SAFETY: the premise is "the parent outlives the arm", so this is
+         gated on [live_after] membership ALONE, not on the full
+         [scrutinee_borrowed] disjunction.  [scrutinee_borrowed]'s other two
+         disjuncts are deliberately excluded:
+
+           - [name_free_in v br_body] (the path-insensitive conservatism, §6
+             of specs/perceus-invariants.md) only says the scrutinee is
+             mentioned SOMEWHERE in the arm.  Ownership then transfers into
+             the body, which may consume the scrutinee part-way through and
+             free it while a projected field is still being read.  Today that
+             field holds its own +1 and survives; eliding the dup there would
+             turn a bounded leak into a use-after-free — the wrong direction.
+           - TTuple/TRecord scrutinees are [needs_rc = false]: Perceus never
+             sees the aggregate's lifetime at all, so "the parent outlives the
+             arm" is not a premise it can discharge.
+
+         Missing those cases only leaves an elidable pair on the table, which
+         is the acceptable direction to be wrong in. *)
+      let scrutinee_live_across_case = match a with
+        | Tir.AVar v -> StringSet.mem v.Tir.v_name live_after
+        | _ -> false
+      in
       let env_for_br =
         { env with
           var_ctx =
             List.fold_left (fun ctx (v : Tir.var) ->
               StringMap.add v.Tir.v_name v ctx
-            ) env.var_ctx br.Tir.br_vars }
+            ) env.var_ctx br.Tir.br_vars;
+          borrowed_field_vars =
+            if scrutinee_live_across_case then
+              List.fold_left (fun s (v : Tir.var) ->
+                if needs_rc v.Tir.v_ty then StringSet.add v.Tir.v_name s else s
+              ) env.borrowed_field_vars br.Tir.br_vars
+            else env.borrowed_field_vars }
       in
       let (body', live_before_br) = insert_rc_expr env_for_br br.Tir.br_body la in
       (* Emit EDecRC for br_vars that are heap-typed but dead in this branch body.

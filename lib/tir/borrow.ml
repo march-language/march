@@ -148,6 +148,27 @@ let extern_borrow_table : (string * bool list) list = [
   ("ring_buf_cap",         [true]);
   ("ring_buf_clear",       [true]);
   ("ring_buf_to_list",     [true]);
+  (* ── NativeArray: reads borrow their array, `set` consumes it (in-place) ── *)
+  ("native_u8_arr_get",    [true; false]);
+  ("native_u8_arr_length", [true]);
+  ("native_u8_arr_sum",    [true]);
+  ("native_u8_arr_to_list",[true]);
+  ("native_i32_arr_get",    [true; false]);
+  ("native_i32_arr_length", [true]);
+  ("native_i32_arr_sum",    [true]);
+  ("native_i32_arr_to_list",[true]);
+  ("native_f32_arr_get",    [true; false]);
+  ("native_f32_arr_length", [true]);
+  ("native_f32_arr_sum",    [true]);
+  ("native_f32_arr_to_list",[true]);
+  ("native_int_arr_get",    [true; false]);
+  ("native_int_arr_length", [true]);
+  ("native_int_arr_sum",    [true]);
+  ("native_int_arr_to_list",[true]);
+  ("native_float_arr_get",    [true; false]);
+  ("native_float_arr_length", [true]);
+  ("native_float_arr_sum",    [true]);
+  ("native_float_arr_to_list",[true]);
   (* ── Synthetic C names used directly in lower.ml wrappers ──────────────── *)
   ("march_compare_string", [true; true]);
   ("march_hash_string",    [true]);
