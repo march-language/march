@@ -163,6 +163,26 @@ git log is authoritative for exact commits.
   average ~170; the ratios are inflated by contention for the machine, so the
   shape rather than the magnitude is the result.)
 
+- **Reading a field of a borrowed value no longer refcounts it.** A field
+  projected out of a scrutinee that is alive for the whole `match` — a
+  borrowed parameter, or any value still needed after the match — and then
+  used only at borrowed positions was bracketed by an `inc_rc`/`dec_rc` pair
+  that nothing needed: the parent already holds the reference, and the
+  projection never escapes the arm. Under the scheduler every refcount
+  operation is atomic, so a one-field wrapper such as `Chunk(NativeU8Arr)`
+  turned a read-only access to data shared between workers into a contended
+  cache line, and the same reads scaled *negatively* with thread count where
+  the unwrapped array scaled 5.8x. A projection that does escape — returned,
+  stored in a constructor, captured by a closure, or passed at an owned
+  argument position — still takes its dup, now emitted at the escaping use
+  rather than at the projection.
+
+- **`NativeArray` reads borrow their array.** `NativeArray.get_*`, `.length`,
+  `.sum` and `.to_list` were absent from the extern borrow table, so every
+  array read looked like an ownership transfer. That flipped the enclosing
+  parameter to owned, which forced a dup at a self-call that the tail-call
+  back-edge never balanced: a loop reading a heap parameter grew its refcount
+  by roughly one per element read and never freed the array.
 - **A small scalar aggregate built inside a branch no longer leaks.** A
   single-constructor variant whose fields are all `Int`/`Float`/`Bool` and
   whose arity is 2-4 is held in registers rather than on the heap. Building one
