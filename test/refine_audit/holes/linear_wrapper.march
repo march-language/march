@@ -1,0 +1,12 @@
+-- Task 4 fix (whole-plan review finding 4): a refinement under a `linear`
+-- wrapper is never re-examined; no extractor descends into a TyLinear
+-- looking for a nested refinement.
+mod HolesLinearWrapper do
+  fn f(x : linear {Int | _ > 0}) : Int do
+    x
+  end
+
+  fn main() : Int do
+    f(0 - 1)
+  end
+end

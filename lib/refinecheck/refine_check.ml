@@ -677,21 +677,6 @@ let rec warn_predicate_ty (errctx : Err.ctx) (t : A.ty) : unit =
   | A.TyLinear (_, t) -> warn_predicate_ty errctx t
   | A.TyChan _ | A.TyVar _ | A.TyNat _ | A.TyNatOp _ -> ()
 
-(* Does [t] carry a refinement ANYWHERE — either position of an arrow spine
-   (so both a parameter and the return), or nested inside a type argument,
-   tuple, record field or linearity wrapper?  Every one of those positions is
-   equally inert in an interface method signature, so the detector must not be
-   narrowed to the spine.  Mirrors [warn_predicate_ty]'s traversal exactly. *)
-let rec ty_has_refinement (t : A.ty) : bool =
-  match t with
-  | A.TyRefine _ -> true
-  | A.TyCon (_, args) -> List.exists ty_has_refinement args
-  | A.TyArrow (a, b) -> ty_has_refinement a || ty_has_refinement b
-  | A.TyTuple ts -> List.exists ty_has_refinement ts
-  | A.TyRecord fs -> List.exists (fun (_, t) -> ty_has_refinement t) fs
-  | A.TyLinear (_, t) -> ty_has_refinement t
-  | A.TyChan _ | A.TyVar _ | A.TyNat _ | A.TyNatOp _ -> false
-
 (* ── Interface-signature refinement warning ────────────────────────────────
    A refinement written in an `interface` method signature (`A.method_decl`'s
    [md_ty]) is inert.  NOTHING in this pass reads [md_ty]: [visit_decl]'s
@@ -1842,8 +1827,10 @@ let bare_builtin_undefined ?(mod_name = "") (name : string) (decls : A.decl list
    that no non-stdlib definition can ever be mistaken for the stdlib's, not in
    the sense that it turns the feature off. *)
 let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
-    ?(stdlib_files : string list = []) (errctx : Err.ctx)
-    (m : A.module_) : unit =
+    ?(stdlib_files : string list = [])
+    ?(audit : ((Refine_audit.site * Refine_audit.disposition) list -> unit) option)
+    ?(pre_desugar_decls : A.decl list option)
+    (errctx : Err.ctx) (m : A.module_) : unit =
   (* A module owns one solver declaration scope.  Z3 4.8.x does not reliably
      retract datatype declarations on [pop], even with [:global-decls false]:
      checking a later module that reuses a qualified type name with a different
@@ -1971,4 +1958,61 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   (* Vocabulary warning: runs last so [registered_measures] (set at the top of
      this function) is already populated — otherwise a user `@[measure]`
      would look unrecognized and warn spuriously. *)
-  warn_predicate_decls errctx ~strict:(decls_declare_verified m.A.mod_decls) m.A.mod_decls
+  warn_predicate_decls errctx ~strict:(decls_declare_verified m.A.mod_decls) m.A.mod_decls;
+  (* Coverage audit: runs last, only when asked, and touches neither [errctx]
+     nor the obligation ledger; it is a read-only classification of every
+     declared refinement occurrence against the registration state this
+     function has just finished building (ADT/record sorts, and, if
+     [measure_axioms] is set, [measure_preamble_sorts]). Placed after
+     [warn_predicate_decls] rather than before it so the audit can never
+     observe a partially-registered module, and before any caller-side
+     inference probe (`--refine-suggest*`, [Precond_infer.attach_promoted_fixes])
+     gets a chance to re-run [check_module] against a hypothesis and disturb
+     global state a naive audit implementation might have relied on; this
+     one does not touch the obligation ledger at all, but the placement is
+     chosen to make that true by construction, not by accident.
+
+     Calls [Refine_audit] directly: no cycle, because [Refine_audit] depends
+     only on [Refine_post] and earlier links in this file's own [include]
+     chain, never on [Refine_check] itself (see [Refine_encode.ty_has_refinement]'s
+     own comment for why it moved there). [?audit] carries the caller's sink
+     as an ordinary optional function argument, not a global mutable ref: a
+     caller that wants the result passes [~audit:(fun result -> ...)] and
+     receives the classified list exactly once, synchronously, from this
+     call; a caller that omits it (every caller before this flag existed)
+     pays nothing and nothing is ever computed.
+
+     [?pre_desugar_decls], when given, is the SAME module's decl list before
+     [Desugar.desugar_module] ran. [m.A.mod_decls] is always POST-desugar
+     (every caller of [check_module] passes the desugared module), which
+     hides two real gaps from [Refine_audit.sites]/[classify] entirely: a
+     multi-head function's clause merge drops every declared parameter type
+     before this function ever runs, and a default-argument function
+     survives only under mangled arity-variant names no plain call can
+     resolve to, so a refinement that lands on the survivor gets a false
+     [Enforced] verdict (whole-plan review, findings 1 and 2). Without
+     [?pre_desugar_decls] this function cannot see either: the omission is
+     silent, not a warning, matching every other optional argument here.
+     Every existing caller that does not supply it keeps today's exact
+     behaviour ([desugar_dropped] simply has nothing to compare against). *)
+  match audit with
+  | None -> ()
+  | Some sink ->
+    let post_sites = Refine_audit.sites m.A.mod_decls in
+    let dropped =
+      match pre_desugar_decls with
+      | None -> []
+      | Some pre_decls -> Refine_audit.desugar_dropped ~pre:(Refine_audit.sites pre_decls) ~post:post_sites
+    in
+    let dropped_reason =
+      "this refinement was declared here, but no occurrence with the same \
+       enclosing name and predicate text survives desugaring: either the \
+       declared type was discarded entirely (a multi-head function's \
+       clause merge drops every parameter type before the checker ever \
+       sees it) or it now lives only under a mangled name a plain call \
+       cannot resolve to (a default-argument function's arity variant, \
+       e.g. `f$2`). See specs/todos/2026-09-03-desugar-dropped-refinement-unchecked.md."
+    in
+    sink
+      (List.map (fun s -> (s, Refine_audit.Unenforced dropped_reason)) dropped
+      @ List.map (fun s -> (s, Refine_audit.classify s)) post_sites)

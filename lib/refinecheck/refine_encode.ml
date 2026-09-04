@@ -1277,6 +1277,34 @@ let record_vc_preamble () : string =
    §6  AST traversal helpers and measure gating
    ================================================================= *)
 
+(* Does [t] carry a refinement ANYWHERE -- either position of an arrow spine
+   (so both a parameter and the return), or nested inside a type argument,
+   tuple, record field or linearity wrapper?  Every one of those positions is
+   equally inert in an interface method signature, so the detector must not be
+   narrowed to the spine.  Mirrors [warn_predicate_ty]'s traversal exactly
+   (see [refine_check.ml]).
+
+   Lives here, not in [refine_check.ml] where it originated, because
+   [Refine_audit] (a separate, non-included module -- see its own top
+   comment) needs to call it and cannot depend on [Refine_check] without
+   creating a cycle: [Refine_check] is the last link in this file's own
+   [include] chain ([refine_check.ml] includes [refine_post.ml] includes
+   ... includes this file), so anything [Refine_check] can see, everything
+   downstream of it in the chain can see too, but not the reverse. Moved
+   here per Task 2's re-review (finding 9), which proved the cycle with a
+   real build and verified this exact move compiles clean and needs no
+   [.mli] change: [refine_check.mli]'s [val ty_has_refinement] keeps
+   re-exporting it through the [include] chain unchanged. *)
+let rec ty_has_refinement (t : A.ty) : bool =
+  match t with
+  | A.TyRefine _ -> true
+  | A.TyCon (_, args) -> List.exists ty_has_refinement args
+  | A.TyArrow (a, b) -> ty_has_refinement a || ty_has_refinement b
+  | A.TyTuple ts -> List.exists ty_has_refinement ts
+  | A.TyRecord fs -> List.exists (fun (_, t) -> ty_has_refinement t) fs
+  | A.TyLinear (_, t) -> ty_has_refinement t
+  | A.TyChan _ | A.TyVar _ | A.TyNat _ | A.TyNatOp _ -> false
+
 (* ── M-b: the @[measure] soundness gate ─────────────────────────────────────
    `@[measure]` is a promise that the function is a TOTAL, TERMINATING, PURE
    mathematical function.  The axiom encoding trusts that promise: axiomatising a

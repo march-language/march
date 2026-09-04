@@ -1,0 +1,16 @@
+-- Task 4 fix (whole-plan review finding 4): a refinement nested inside a
+-- type constructor's argument is never re-examined. Distinct from
+-- nested.march (a record field): here the outer type is List itself, not
+-- a user-defined record.
+mod HolesTypeArg do
+  fn f(xs : List({Int | _ > 0})) : Int do
+    match xs do
+      Cons(h, _) -> h
+      Nil -> 0
+    end
+  end
+
+  fn main() : Int do
+    f([0, 0 - 1])
+  end
+end

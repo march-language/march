@@ -13,6 +13,27 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`--refine-audit`**: a refinement coverage audit, answering "does the
+  checker even look at this declared refinement?" as a separate question
+  from `--refine-report`'s "was this obligation proved?". Every declared
+  refinement in a module is classified Enforced, Inert (warned), or
+  Unenforced, with a per-position reason for every Unenforced site,
+  including a refinement a multi-head function's clause merge drops
+  entirely or a default-argument function relocates to a mangled name no
+  plain call can reach (compared against the pre-desugar declaration list,
+  not just the post-desugar one). A swept baseline over the corpus
+  `test/native/*.march` and `stdlib/*.march` finds 63 declared refinements
+  today, all Enforced (`test/refine_audit/corpus.baseline`, ratcheted in CI
+  beside the existing refinement obligation ratchet, plus a ceiling on the
+  corpus's own Unenforced count that a baseline regeneration cannot
+  bypass); a second, deliberately non-empty fixture set at
+  `test/refine_audit/holes/` guards against the audit itself silently going
+  vacuous. Known unenforced positions (a lambda's own parameter, a
+  block-level `fn`'s parameter and return, a non-adoptable `impl` method's
+  parameter, an actor's state field and handler parameter, a multi-head or
+  default-argument function's parameter) are documented in
+  `docs/refinement-types.md` and filed as `specs/todos/` entries with
+  reproducers.
 - **`@[no_alloc(transient)]`** — a weaker allocation contract that states
   "nothing this function allocates SURVIVES the call". A frame loop that
   allocates a dozen cells and frees all of them before returning has that
