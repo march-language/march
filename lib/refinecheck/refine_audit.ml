@@ -640,3 +640,105 @@ let classify (site : site) : disposition =
     failwith
       "Refine_audit.classify: unreachable -- origin is never Type_arg / \
        Arrow_domain / Arrow_codomain"
+
+(* -- Task 4 fix (whole-plan review, findings 1/2): desugar-dropped sites -- *)
+
+(* Matching identity, justified:
+
+   [origin] alone (the declaration-level position: for [Param]/[Return], the
+   enclosing function's NAME plus, for [Param], its index) is necessary but
+   not sufficient by itself, and neither is span alone. Concretely:
+
+   - Span alone is not sufficient: [expand_defaults_decl] strips a
+     [FPDefault] down to [FPNamed p] and keeps [p] -- the exact same record,
+     same [param_ty], same span -- on the surviving mangled decl ([f$2]).
+     Matching by span only would call that site "found" (same span exists
+     post-desugar) and classify it exactly as it does today: [Enforced].
+     That reproduces finding 1 verbatim. The part of [origin] that actually
+     changes under this transform is the NAME ([f] becomes [f$2]), so the
+     identity must be sensitive to it.
+   - Name (via [origin]) alone is not sufficient in general -- a multi-clause
+     function's [walk_fn] emits one [Param(name, idx)] per CLAUSE, so two
+     distinct refinements (different predicate text) at the same [(name,
+     idx)] are possible (a multi-head function whose several clauses refine
+     the same parameter position differently). Predicate text disambiguates
+     them without needing full span comparison, and also disambiguates a
+     stacked refinement's two layers, which deliberately share one [origin]
+     (see the [nesting] doc) but never share predicate text.
+
+   So the key is [(origin, predicate)]: both must match exactly for a
+   PRE-desugar site to count as still present POST-desugar.
+
+   False-negative risk (a real hole reported [Enforced] because this rule
+   wrongly calls it "found"): would require a desugar transform that
+   preserves BOTH the exact enclosing name and the exact predicate text
+   while still breaking enforcement. No such transform exists in this
+   compiler: the fast path in [Desugar.desugar_fn_def] (a single trivial
+   clause, no defaults) preserves the decl's name, every parameter's
+   [param_ty], and every span verbatim, so a site matched under this rule
+   through the fast path really is the same occurrence, still reachable
+   under the name a caller would write.
+
+   False-positive risk (a real, still-enforced occurrence reported
+   Unenforced because this rule wrongly calls it "dropped"): would require a
+   desugar transform that renames a user-callable declaration, or changes
+   its parameter's declared type identity, WITHOUT any loss of enforcement
+   -- e.g. a rewrite that also threads the new name through every call site
+   so [origin]'s embedded name is the only thing that changed. No such
+   transform exists in this repository for a declaration carrying a
+   [Param]/[Return]/[Let_annot] refinement today: [expand_defaults_decl] is
+   the only name-mangling transform touching a refinable function
+   declaration, and it does NOT rewrite call sites at all (that absence is
+   finding 1 itself, not a counterexample to it). The ordinary case --
+   single trivial clause, no defaults, which is every real corpus site
+   today -- goes through the fast path and is left completely unchanged, so
+   it is always "found" here exactly as before. If a future desugar
+   transform legitimately renames-and-keeps-enforced, this rule needs a
+   matching exception the same way [classify] special-cases `impl` method
+   adoptability; until one exists, treating "same origin, same predicate,
+   different or absent post-desugar occurrence" as dropped is the correct
+   default, not a false positive. *)
+(* [Return] is a documented EXCEPTION to the "exact origin" rule above, for
+   a reason grounded in how the checker actually enforces a postcondition:
+   [check_fn_post_verdict] checks a function's return type against its OWN
+   body, once, with no notion of a caller or a name a call site resolved
+   through. A parameter's precondition is checked at every CALL SITE, which
+   is why renaming the declaration (with no matching rename at call sites)
+   breaks it -- [expand_defaults_decl] is exactly that. But
+   [expand_defaults_decl]'s full-arity decl ([f$2]) keeps the ORIGINAL
+   [fn_def]'s [fn_ret_ty] untouched apart from the enclosing rename, and its
+   body still gets checked by [check_fn_post_verdict] regardless of what the
+   decl is named -- [t9.march] in the whole-plan review confirms this
+   directly (`f$2` does not satisfy its return type constraint`, exit 1: the
+   postcondition IS enforced). Matching a [Return] site by NAME would
+   therefore misreport this real, still-enforced case as dropped, which is
+   exactly the "legitimate desugar rewrite that is genuinely still enforced"
+   the review asks this rule to get right. So a [Return] site matches by
+   PREDICATE TEXT ALONE, ignoring which function's name it is attached to
+   post-desugar.
+
+   Risk of dropping the name from a [Return] match: two unrelated
+   functions' return refinements could coincide on predicate text (e.g.
+   `_ > 0` on two different functions), which would let a genuinely dropped
+   return refinement hide behind an unrelated survivor with the same text.
+   No desugar transform in this compiler drops a [Return] site's predicate
+   today (neither transform this fix targets touches [fn_ret_ty]: the
+   multi-head merge rewrites only [fn_clauses], and [expand_defaults_decl]
+   copies [fn_ret_ty] into every arity variant unchanged), so this is a
+   theoretical false negative, not an observed one -- flagged here so a
+   future desugar transform that DOES drop a return type is not assumed
+   safe by this comment. -- [Param] (and every other position kind) keeps
+   the exact-origin rule: its enforcement genuinely depends on call-site
+   name resolution, which is precisely what a rename breaks. *)
+type desugar_match_key =
+  | By_predicate_only of string
+  | By_origin of position * string
+
+let desugar_match_key (s : site) : desugar_match_key =
+  match s.origin with
+  | Return _ -> By_predicate_only s.predicate
+  | _ -> By_origin (s.origin, s.predicate)
+
+let desugar_dropped ~(pre : site list) ~(post : site list) : site list =
+  let post_keys = List.map desugar_match_key post in
+  List.filter (fun s -> not (List.mem (desugar_match_key s) post_keys)) pre

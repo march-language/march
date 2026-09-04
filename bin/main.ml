@@ -526,12 +526,19 @@ let print_refine_report ~filename ~user_files () =
    itself actually does with it. [Refine_check.check_module]'s [?audit]
    computes this list itself (calling [Refine_audit] directly; no cycle,
    since [Refine_audit] does not depend on [Refine_check] -- see
-   [Refine_post.ty_has_refinement]'s own comment) and hands it to whatever
+   [Refine_encode.ty_has_refinement]'s own comment) and hands it to whatever
    sink function the caller passed, exactly once, synchronously. No global
    ref: each call site below declares its OWN local ref, passes a closure
    that fills it as [~audit], and reads it back immediately after
    [check_module] returns -- an ordinary out-parameter, not persistent
-   state. *)
+   state. Each call site also passes [~pre_desugar_decls:module_ast.mod_decls]
+   (the entry file's own decls before [Desugar.desugar_module] ran), so a
+   multi-head function's dropped parameter refinement or a default-argument
+   function's relocated one is reported [Unenforced] instead of being
+   invisible or falsely [Enforced] -- see [Refine_check.check_module]'s own
+   comment and [Refine_audit.desugar_dropped]. This covers only the entry
+   file and its resolved imports, not the shipped stdlib: the corpus sweep
+   already established the stdlib contains neither shape today. *)
 let print_refine_audit ~filename ~user_files
     (classified_sites : (March_refinecheck.Refine_audit.site * March_refinecheck.Refine_audit.disposition) list) =
   let module RA = March_refinecheck.Refine_audit in
@@ -1156,6 +1163,7 @@ let run_test_cmd args =
     March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
       ~stdlib_files:(stdlib_span_files stdlib_decls)
       ?audit:(if !refine_audit then Some (fun r -> audit_result := r) else None)
+      ~pre_desugar_decls:module_ast.March_ast.Ast.mod_decls
       errors desugared;
     if !refine_report then print_refine_report ~filename ~user_files ();
     if !refine_audit then print_refine_audit ~filename ~user_files !audit_result;
@@ -1855,6 +1863,7 @@ let compile filename =
   March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
     ~stdlib_files:(stdlib_span_files stdlib_decls)
     ?audit:(if !refine_audit then Some (fun r -> audit_result := r) else None)
+    ~pre_desugar_decls:module_ast.March_ast.Ast.mod_decls
     errors desugared;
   if !refine_report then print_refine_report ~filename ~user_files ();
   if !refine_audit then print_refine_audit ~filename ~user_files !audit_result;

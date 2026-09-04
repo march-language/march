@@ -1829,6 +1829,7 @@ let bare_builtin_undefined ?(mod_name = "") (name : string) (decls : A.decl list
 let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
     ?(stdlib_files : string list = [])
     ?(audit : ((Refine_audit.site * Refine_audit.disposition) list -> unit) option)
+    ?(pre_desugar_decls : A.decl list option)
     (errctx : Err.ctx) (m : A.module_) : unit =
   (* A module owns one solver declaration scope.  Z3 4.8.x does not reliably
      retract datatype declarations on [pop], even with [:global-decls false]:
@@ -1973,14 +1974,45 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
 
      Calls [Refine_audit] directly: no cycle, because [Refine_audit] depends
      only on [Refine_post] and earlier links in this file's own [include]
-     chain, never on [Refine_check] itself (see [Refine_post.ty_has_refinement]'s
+     chain, never on [Refine_check] itself (see [Refine_encode.ty_has_refinement]'s
      own comment for why it moved there). [?audit] carries the caller's sink
      as an ordinary optional function argument, not a global mutable ref: a
      caller that wants the result passes [~audit:(fun result -> ...)] and
      receives the classified list exactly once, synchronously, from this
      call; a caller that omits it (every caller before this flag existed)
-     pays nothing and nothing is ever computed. *)
+     pays nothing and nothing is ever computed.
+
+     [?pre_desugar_decls], when given, is the SAME module's decl list before
+     [Desugar.desugar_module] ran. [m.A.mod_decls] is always POST-desugar
+     (every caller of [check_module] passes the desugared module), which
+     hides two real gaps from [Refine_audit.sites]/[classify] entirely: a
+     multi-head function's clause merge drops every declared parameter type
+     before this function ever runs, and a default-argument function
+     survives only under mangled arity-variant names no plain call can
+     resolve to, so a refinement that lands on the survivor gets a false
+     [Enforced] verdict (whole-plan review, findings 1 and 2). Without
+     [?pre_desugar_decls] this function cannot see either: the omission is
+     silent, not a warning, matching every other optional argument here.
+     Every existing caller that does not supply it keeps today's exact
+     behaviour ([desugar_dropped] simply has nothing to compare against). *)
   match audit with
   | None -> ()
   | Some sink ->
-    sink (List.map (fun s -> (s, Refine_audit.classify s)) (Refine_audit.sites m.A.mod_decls))
+    let post_sites = Refine_audit.sites m.A.mod_decls in
+    let dropped =
+      match pre_desugar_decls with
+      | None -> []
+      | Some pre_decls -> Refine_audit.desugar_dropped ~pre:(Refine_audit.sites pre_decls) ~post:post_sites
+    in
+    let dropped_reason =
+      "this refinement was declared here, but no occurrence with the same \
+       enclosing name and predicate text survives desugaring: either the \
+       declared type was discarded entirely (a multi-head function's \
+       clause merge drops every parameter type before the checker ever \
+       sees it) or it now lives only under a mangled name a plain call \
+       cannot resolve to (a default-argument function's arity variant, \
+       e.g. `f$2`). See specs/todos/2026-09-03-desugar-dropped-refinement-unchecked.md."
+    in
+    sink
+      (List.map (fun s -> (s, Refine_audit.Unenforced dropped_reason)) dropped
+      @ List.map (fun s -> (s, Refine_audit.classify s)) post_sites)

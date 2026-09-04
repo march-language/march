@@ -251,3 +251,52 @@ type disposition =
        [Actor_handler_param]): always [Unenforced], each with its own reason
        string -- there is no extractor for any of them, nested or not. *)
 val classify : site -> disposition
+
+(** {1 Task 4 fix: desugar-dropped and desugar-relocated occurrences}
+
+    [sites] walks whatever decl list it is given. Every caller in this
+    codebase gives it the POST-desugar list, because that is what
+    [Refine_check.check_module] itself checks. But [classify] answers "does
+    the checker's own extractor accept this occurrence", which silently
+    assumes the occurrence [classify] is looking at is the same one the
+    USER wrote and the same one a normal call resolves to. Two desugar
+    transforms break that assumption for a function declaration:
+
+    - A multi-head function's clause merge ([lib/desugar/desugar.ml]'s
+      general path, [mk_named_param]) rebuilds every parameter with
+      [param_ty = None], discarding a declared parameter refinement before
+      [sites] can ever see it. The occurrence is not [Unenforced]; it does
+      not exist post-desugar at all, so [classify] never runs on it, and
+      the whole-plan review's finding 2 calls this the more serious of the
+      two: a declared refinement with no disposition whatsoever.
+    - A default-argument function ([expand_defaults_decl]) survives desugar
+      only under mangled arity-variant names ([f$1], [f$2], ...); no decl
+      named [f] remains. A refined parameter that survives on [f$2] still
+      gets an [Enforced] verdict from [classify], because [classify] has no
+      way to know a plain call written [f(...)] can never resolve to
+      [f$2]'s signature at all. This is finding 1: a false [Enforced].
+
+    [desugar_dropped] answers both by comparing the PRE-desugar site list
+    against the POST-desugar one, with no knowledge of which specific
+    desugar transform is responsible -- so the same check also catches the
+    next transform that drops or relocates a refinement, not just these
+    two. See [refine_audit.ml] for the exact matching rule and its
+    justification (why it is neither pure name matching nor pure span
+    matching, and what a legitimate desugar rename would need to avoid
+    being flagged). *)
+
+(** [desugar_dropped ~pre ~post] returns every site in [pre] that has no
+    matching occurrence in [post]: same [origin] (the declaration-level
+    position, including the enclosing name(s)) and the same [predicate]
+    text -- EXCEPT for a [Return] site, matched by predicate text alone
+    (see [refine_audit.ml] for why: a postcondition is checked against a
+    function's own body regardless of what the declaration is named, so
+    matching it by name would misreport [expand_defaults_decl]'s renamed
+    full-arity variant as dropped when its return is genuinely still
+    enforced). These are declared refinements that desugar either
+    discarded entirely or moved under a name/position the checker no
+    longer associates with a caller's plain use of the original name --
+    report them [Unenforced], never [Enforced] or [Inert_warned],
+    regardless of what a POST-desugar site at a similar-looking position
+    might say. *)
+val desugar_dropped : pre:site list -> post:site list -> site list

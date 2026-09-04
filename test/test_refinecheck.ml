@@ -13266,6 +13266,39 @@ let assert_baseline_matches ~msg ~regen_cmd (baseline_path : string) (actual : s
 let corpus_baseline_path = "test/refine_audit/corpus.baseline"
 let holes_baseline_path = "test/refine_audit/holes.baseline"
 
+(* Sums the `unenforced` count out of every `coverage audit (user code): N
+   enforced, M inert (warned), K unenforced` summary line in a sweep's
+   output (ignoring the per-site detail lines and the `user + stdlib`
+   summary, which double-counts the whole prepended stdlib on every
+   fixture and is not a meaningful sum across files). *)
+let sum_user_code_unenforced (lines : string list) : int =
+  List.fold_left
+    (fun acc l ->
+      match
+        Scanf.sscanf_opt l
+          "%_[^:]: coverage audit (user code): %_d enforced, %_d inert (warned), %d unenforced"
+          (fun u -> u)
+      with
+      | Some u -> acc + u
+      | None -> acc)
+    0 lines
+
+(* Whole-plan review, finding 3 (MEDIUM): the CI ratchet step reads only
+   `stdlib/list.march`'s whole-program slice, which catches a regression
+   ANYWHERE in the prepended stdlib but not a new Unenforced site in a
+   `test/native/*.march` fixture's OWN user-code slice (test/native carries
+   no stdlib). The only artifact that watches that slice is this
+   corpus-baseline test, and its documented remedy is
+   `UPDATE_SNAPSHOTS=1`, which would silently accept a newly added
+   Unenforced line as the new normal. This ceiling closes that gap: it is
+   checked UNCONDITIONALLY, even under `UPDATE_SNAPSHOTS=1` regeneration,
+   so regenerating the baseline can never be used to launder a real rise
+   in the corpus's own Unenforced count. Lower this only by hand, with a
+   commit message explaining why a corpus fixture legitimately grew a new
+   Unenforced site, the same discipline the CI ratchet step already
+   documents for its own ceiling. *)
+let corpus_unenforced_ceiling = 0
+
 let audit_baseline_suite =
   [ Alcotest.test_case
       "corpus baseline (test/native + stdlib): matches, or is regenerated" `Quick (fun () ->
@@ -13293,6 +13326,22 @@ let audit_baseline_suite =
                  not the same failure as the baseline being empty of \
                  Unenforced lines, which is a real, currently-true finding."
                 n total_report_lines;
+            (* Checked BEFORE the update-mode branch, and never skipped by
+               it: see the comment on [corpus_unenforced_ceiling]. *)
+            let unenforced_total = sum_user_code_unenforced lines in
+            if unenforced_total > corpus_unenforced_ceiling then
+              Alcotest.failf
+                "FAIL: the corpus's own (user code) Unenforced count rose from \
+                 %d to %d. This ceiling is checked even under \
+                 UPDATE_SNAPSHOTS=1, so a corpus sweep cannot silently accept \
+                 a new unenforced site as the new baseline. A real, declared \
+                 refinement in test/native/*.march or stdlib/*.march is now \
+                 sitting somewhere the checker never enforces it -- read the \
+                 per-site lines above (or re-run the sweep without this test \
+                 filtering them out) to find which fixture and position. Raise \
+                 corpus_unenforced_ceiling in test/test_refinecheck.ml only if \
+                 the rise is intentional and explained in the commit message."
+                corpus_unenforced_ceiling unenforced_total;
             if audit_update_mode then begin
               write_baseline_lines corpus_baseline_path lines;
               Printf.printf "regenerated %s (%d fixtures, %d lines)\n%!" corpus_baseline_path n

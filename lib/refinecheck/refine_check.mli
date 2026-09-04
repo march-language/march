@@ -89,12 +89,27 @@ val rctx0 : rctx
     [Refine_audit.classify]). Omitting it (the default) computes nothing:
     neither [Refine_audit.sites] nor [Refine_audit.classify] runs at all. No
     global state is involved; the sink is an ordinary optional argument,
-    called once per [check_module] invocation, and never stored. *)
+    called once per [check_module] invocation, and never stored.
+
+    [?pre_desugar_decls], when given, is [m]'s OWN decl list as it was
+    before [Desugar.desugar_module] ran over it -- not the stdlib-prepended,
+    post-desugar [m.A.mod_decls] this function otherwise only ever sees.
+    Used only together with [?audit]: every site in the pre-desugar list
+    with no occurrence of the same declaration name and predicate text in
+    the post-desugar list ([Refine_audit.desugar_dropped]) is reported
+    [Unenforced], overriding whatever [Refine_audit.classify] would say
+    about the nearest post-desugar decl (which may not exist at all, or may
+    be a desugar-synthesized name a plain call cannot resolve to). Omitting
+    it keeps every existing caller's behaviour identical: a multi-head
+    function's dropped parameter refinement stays invisible to the audit,
+    and a default-argument function's parameter still reports a possibly
+    false [Enforced], exactly as before this parameter existed. *)
 val check_module :
   ?root:string ->
   ?measure_axioms:bool ->
   ?stdlib_files:string list ->
   ?audit:((Refine_audit.site * Refine_audit.disposition) list -> unit) ->
+  ?pre_desugar_decls:A.decl list ->
   Err.ctx ->
   A.module_ ->
   unit
