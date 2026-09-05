@@ -17,9 +17,20 @@
  *      warning; it is never silently treated as "1".
  *   5. `auto` means "one scheduler per online CPU", clamped to the maximum.
  *
- * Built with -DMARCH_MAX_SCHEDULERS=8 (see test/dune) and the default
- * -DMARCH_NUM_SCHEDULERS=4, so "above the default" (7) and "above the
- * maximum" (9) are both reachable without spawning a hundred threads. */
+ * Built TWICE (see test/dune), both at -DMARCH_MAX_SCHEDULERS=8 so that
+ * "above the default" (7) and "above the maximum" (9) are reachable without
+ * spawning a hundred threads:
+ *
+ *   - UNPINNED, i.e. the shipped configuration.  MARCH_NUM_SCHEDULERS is 0
+ *     there ("auto"), so an unset environment must resolve to the machine's
+ *     online CPU count, clamped.
+ *   - PINNED at -DMARCH_NUM_SCHEDULERS=3.  A build that names a count must
+ *     still get exactly that count with the environment unset -- the C test
+ *     harnesses that pin themselves to 1 or 4 depend on it, and on a
+ *     single-core box an auto default would silently turn their
+ *     multi-scheduler premise into a no-op.
+ *
+ * [expected_default] below is the single place that encodes which is which. */
 
 #ifndef _XOPEN_SOURCE
 #  define _XOPEN_SOURCE 700
@@ -82,6 +93,25 @@ static int init_with(const char *value, char *err, size_t err_cap) {
     march_sched_init();
     capture_stderr_end(err, err_cap);
     return march_sched_num_schedulers();
+}
+
+/* What march_sched_init must resolve to when MARCH_NUM_SCHEDULERS is unset.
+ *
+ * A build that pins the macro to a positive value gets exactly that; the
+ * shipped build leaves it 0 ("auto") and gets one scheduler per online CPU,
+ * clamped to the table size. */
+static int expected_default(void) {
+    if (MARCH_NUM_SCHEDULERS > 0) return MARCH_NUM_SCHEDULERS;
+    /* march_sched_usable_cpus(), not sysconf: inside a container the two
+     * disagree, and the runtime is required to follow the container.  Asking
+     * the runtime for the CPU count pins the RELATIONSHIP (default = usable
+     * CPUs, clamped) without this test reimplementing cgroup and affinity
+     * parsing, which would only test the copy.  That the probe itself is
+     * right is verified end-to-end under docker --cpuset-cpus and --cpus; see
+     * specs/progress/2026-09-04-scheduler-default-tracks-cpu-count.md. */
+    int n = march_sched_usable_cpus();
+    if (n < 1) n = 1;
+    return (n > MARCH_MAX_SCHEDULERS) ? MARCH_MAX_SCHEDULERS : n;
 }
 
 /* ── 1. a request above the compile-time default is honoured ───────────── */
@@ -171,7 +201,9 @@ static void test_request_above_max_warns_naming_both_numbers(void) {
 static void test_default_when_unset(void) {
     char err[512];
     int n = init_with(NULL, err, sizeof err);
-    TEST_ASSERT(n == MARCH_NUM_SCHEDULERS, "an unset variable uses the compile-time default");
+    TEST_ASSERT(n == expected_default(),
+                "an unset variable uses the build's default: the pinned count, "
+                "or one per online CPU when the build did not pin one");
     TEST_ASSERT(err[0] == '\0', "the default path must not warn");
     TEST_PASS();
 }
@@ -179,7 +211,7 @@ static void test_default_when_unset(void) {
 static void test_malformed_warns_and_uses_default(void) {
     char err[512];
     int n = init_with("banana", err, sizeof err);
-    TEST_ASSERT(n == MARCH_NUM_SCHEDULERS, "a malformed value falls back to the default");
+    TEST_ASSERT(n == expected_default(), "a malformed value falls back to the default");
     TEST_ASSERT(err[0] != '\0', "a malformed value must be reported, not silently ignored");
     TEST_PASS();
 }
@@ -187,7 +219,7 @@ static void test_malformed_warns_and_uses_default(void) {
 static void test_zero_warns_and_uses_default(void) {
     char err[512];
     int n = init_with("0", err, sizeof err);
-    TEST_ASSERT(n == MARCH_NUM_SCHEDULERS, "0 is not a legal scheduler count; use the default");
+    TEST_ASSERT(n == expected_default(), "0 is not a legal scheduler count; use the default");
     TEST_ASSERT(err[0] != '\0', "0 must be reported");
     TEST_PASS();
 }
@@ -197,19 +229,41 @@ static void test_zero_warns_and_uses_default(void) {
 static void test_auto_tracks_cpu_count(void) {
     char err[512];
     int n = init_with("auto", err, sizeof err);
-    long cpus = sysconf(_SC_NPROCESSORS_ONLN);
-    int expect = (cpus < 1) ? MARCH_NUM_SCHEDULERS : (int)cpus;
+    int expect = march_sched_usable_cpus();
+    if (expect < 1) expect = 1;
     if (expect > MARCH_MAX_SCHEDULERS) expect = MARCH_MAX_SCHEDULERS;
-    TEST_ASSERT(n == expect, "auto = online CPUs, clamped to the maximum");
+    TEST_ASSERT(n == expect, "auto = usable CPUs, clamped to the maximum");
+    /* A container narrows what this process may use; the machine's raw online
+     * count is only ever an upper bound. Asserting that separately keeps the
+     * probe honest if it ever starts reporting MORE than the machine has. */
+    long online = sysconf(_SC_NPROCESSORS_ONLN);
+    if (online >= 1)
+        TEST_ASSERT(march_sched_usable_cpus() <= (int)online,
+                    "usable CPUs never exceed the machine's online CPUs");
     TEST_ASSERT(err[0] == '\0', "auto is always satisfiable and must not warn");
+    /* On the shipped (unpinned) build, "auto" and "unset" must be the SAME
+     * thing -- if they ever diverge, the default stopped tracking the
+     * machine and this suite would otherwise not notice. */
+    if (MARCH_NUM_SCHEDULERS == 0)
+        TEST_ASSERT(n == expected_default(),
+                    "on an unpinned build, auto and an unset variable agree");
     TEST_PASS();
 }
 
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
+    /* Report what march_sched_init ACTUALLY resolves, not what this file
+     * predicts -- a banner printing the prediction would have agreed with
+     * itself while the runtime disagreed, which is exactly how the container
+     * case first looked fine. */
+    unsetenv("MARCH_NUM_SCHEDULERS");
+    march_sched_init();
     printf("=== March scheduler — thread-count request "
-           "(default %d, max %d) ===\n",
-           MARCH_NUM_SCHEDULERS, MARCH_MAX_SCHEDULERS);
+           "(build default %s; usable CPUs %d, online %ld; "
+           "unset resolves to %d; max %d) ===\n",
+           MARCH_NUM_SCHEDULERS > 0 ? "pinned" : "auto",
+           march_sched_usable_cpus(), sysconf(_SC_NPROCESSORS_ONLN),
+           march_sched_num_schedulers(), MARCH_MAX_SCHEDULERS);
     test_request_above_default_is_honoured();
     test_live_scheduler_threads_match_request();
     test_request_above_max_warns_naming_both_numbers();
