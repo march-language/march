@@ -621,6 +621,44 @@ inner(Node(Leaf, 5, Leaf))   -- fine: size is 1
 Both directions are checked: the checker reasons about the actual argument, so
 `inner(Leaf)` is rejected and `inner(Node(Leaf, 5, Leaf))` passes.
 
+### Constant functions as bounds
+
+A bound does not have to be a literal. A **zero-argument function whose body is
+a compile-time constant** may be called inside a predicate, and it is checked
+exactly as if its value had been written in place:
+
+```march
+fn size_x() : Int do 128 end
+fn size_y() : Int do 2 * size_x() end
+
+fn index(x : {Int | 0 <= _ && _ < size_x()},
+         y : {Int | 0 <= _ && _ < size_y()}) : Int do x + size_x() * y end
+
+index(5, 255)     -- proved
+index(128, 0)     -- rejected: 128 < size_x() is false
+```
+
+This is what lets a program name a dimension once (`World.size()`) and keep
+static bounds checking on everything indexed by it, instead of freezing the
+literal into every refinement and every guard. A qualified spelling
+(`_ < 16 * World.size()`) works the same way.
+
+"Constant" means the body folds without running anything: `Int`/`Bool`
+literals, `+ - *` and `negate`, `&& || not`, and calls to other constant
+functions. `/` and `%` are deliberately excluded (a fold that disagreed with
+the runtime's truncation would assert a false fact). A zero-argument function
+whose body does not fold, say one that calls a function with parameters,
+draws a warning at the predicate naming the reason, and the refinement is not
+checked. No annotation is involved; in particular `@[measure]` is **not** the
+remedy: a measure is a function of the value it measures, and annotating a
+constant with it is a compile error (see the gate below).
+
+Folding applies wherever the checker reflects an expression, so a call
+`takepos(neg_one())` with `fn neg_one() : Int do 0 - 1 end` is a definite
+violation rather than an unverified one. If a function binds a local of the
+same name (`let size_x = fn -> 7`), folding is suspended inside that function
+and the call is treated as opaque.
+
 ### The measure soundness gate
 
 The solver trusts a `@[measure]` completely: it treats the function's body as a fact
@@ -636,6 +674,12 @@ be used at all: a **hard compile error** if it isn't. A `@[measure]` is rejected
 - is **not recursive over the structure** (a recursive call with an argument that isn't a
   component of the matched parameter); each call must work on a strictly smaller piece
   of the input, so it's guaranteed to terminate.
+- does **not take exactly one parameter**, the value it measures. A predicate can
+  only apply a measure to one argument, so a zero-argument or multi-parameter
+  `@[measure]` could never be translated; the annotation would only silence the
+  vocabulary warning while every call site went unverified. A zero-argument
+  constant needs no annotation at all (see [Constant functions as
+  bounds](#constant-functions-as-bounds)).
 
 A measure that is sound but outside what the encoding can model (see
 limitations, below) isn't an error: it simply falls back to weaker, symbolic

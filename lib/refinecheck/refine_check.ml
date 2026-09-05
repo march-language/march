@@ -639,11 +639,24 @@ let warn_predicate_expr (errctx : Err.ctx) (e : A.expr) : unit =
              generic "not a measure" message below. *)
           warn_qualified_call errctx ~span f
         else
-          Err.warning errctx ~span
-            (Printf.sprintf
-               "`%s` is not a measure or known predicate, so this refinement is not checked. \
-                Annotate the function `@[measure]`, or use a supported predicate."
-               f)
+          match Hashtbl.find_opt const_fn_rejected f with
+          | Some why when args = [] ->
+            (* A zero-argument function that did not qualify as a constant.
+               `@[measure]` is the WRONG remedy here — the shape gate rejects
+               it — so say what would actually make the call reflect. *)
+            Err.warning errctx ~span
+              (Printf.sprintf
+                 "`%s()` is a zero-argument function, but it cannot be used as a constant in \
+                  this refinement predicate, so the refinement is not checked: its body %s. \
+                  A predicate can call a zero-argument function only when its body folds to \
+                  an Int or Bool literal."
+                 f why)
+          | _ ->
+            Err.warning errctx ~span
+              (Printf.sprintf
+                 "`%s` is not a measure or known predicate, so this refinement is not checked. \
+                  Annotate the function `@[measure]`, or use a supported predicate."
+                 f)
       end;
       List.iter go args
     (* A qualified call in call position that ISN'T already flattened to a
@@ -958,11 +971,19 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
   let saved_enclosing = !enclosing_fn in
   trusted_fn := is_trusted;
   enclosing_fn := Some fd;
+  (* Constant-function folding is suspended for any name this function
+     binds locally — see [const_shadowed].  Saved and restored like the two
+     cells above rather than reset, for the same reason. *)
+  let saved_shadowed = Hashtbl.copy const_shadowed in
+  Hashtbl.reset const_shadowed;
+  List.iter (fun n -> Hashtbl.replace const_shadowed n ()) (fn_binders fd);
   (match !enclosing_fn_probe with
    | Some probe -> probe fd
    | None -> ());
   Fun.protect
     ~finally:(fun () ->
+      Hashtbl.reset const_shadowed;
+      Hashtbl.iter (fun n () -> Hashtbl.replace const_shadowed n ()) saved_shadowed;
       trusted_fn := saved_trusted;
       enclosing_fn := saved_enclosing)
     (fun () ->
@@ -1124,6 +1145,8 @@ let register_types_for_check (decls : A.decl list) : unit =
   Hashtbl.clear measure_preamble_sorts;
   registered_measures := [];
   measure_nonneg := [];
+  Hashtbl.clear const_fns;
+  Hashtbl.clear const_fn_rejected;
   measure_preamble := "";
   type_preamble := "";
   register_builtin_adts ();
@@ -1879,17 +1902,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   string_byte_length_is_builtin :=
     gate "string_byte_length" "len" ~str:true
       (bare_builtin_undefined ~mod_name "string_byte_length" m.A.mod_decls);
-  let mfns = collect_measure_fns m.A.mod_decls in
-  registered_measures := List.map fst mfns;
-  (* Determine which measures are non-negative (single pass; a measure depending
-     only on already-classified ones, itself, and `len` is classified). *)
-  measure_nonneg :=
-    List.fold_left
-      (fun known (name, fd) ->
-        match fd.A.fn_clauses with
-        | c :: _ when measure_body_nonneg name known c.A.fc_body -> name :: known
-        | _ -> known)
-      [] mfns;
+  let all_mfns = collect_measure_fns m.A.mod_decls in
   Hashtbl.reset adt_ctors;
   Hashtbl.reset ctor_field_sorts;
   Hashtbl.reset ctor_field_names;
@@ -1914,6 +1927,38 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   register_builtin_adts ();
   register_adt_names m.A.mod_decls;
   register_field_sorts m.A.mod_decls;
+  (* Zero-argument constant functions a predicate may name (`_ < size_x()`).
+     Independent of [measure_axioms]: a constant folds to a literal, no axiom
+     is involved. *)
+  register_const_fns ~mod_name m.A.mod_decls;
+  (* Shape gate FIRST, and its survivors are the ONLY measures registered: a
+     `@[measure]` the preamble could never axiomatise nor reflect must not
+     enter the predicate vocabulary, or the vocabulary warning goes quiet
+     while every call site quietly files an unreflectable-predicate hint.
+     Runs regardless of [measure_axioms] — it is about what a measure IS, not
+     whether its recursion equations are asserted — and needs [adt_ctors]
+     populated, hence its position after [register_adt_names]. *)
+  let mfns =
+    List.filter
+      (fun (name, fd) ->
+        match measure_shape_error fd with
+        | None -> true
+        | Some msg ->
+          Err.error errctx ~span:fd.A.fn_name.A.span
+            (Printf.sprintf "@[measure] `%s` %s" name msg);
+          false)
+      all_mfns
+  in
+  registered_measures := List.map fst mfns;
+  (* Determine which measures are non-negative (single pass; a measure depending
+     only on already-classified ones, itself, and `len` is classified). *)
+  measure_nonneg :=
+    List.fold_left
+      (fun known (name, fd) ->
+        match fd.A.fn_clauses with
+        | c :: _ when measure_body_nonneg name known c.A.fc_body -> name :: known
+        | _ -> known)
+      [] mfns;
   if measure_axioms then begin
     build_measure_preamble mfns;
     build_type_preamble ();

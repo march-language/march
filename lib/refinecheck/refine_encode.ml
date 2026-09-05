@@ -475,6 +475,37 @@ let rec list_len (e : A.expr) : int option =
 let registered_measures : string list ref = ref []
 let is_measure (m : string) : bool = m = "len" || List.mem m !registered_measures
 
+(* ── Zero-argument constant functions ──────────────────────────────────────
+   `fn size_x() : Int do 128 end` is, after inlining, the literal 128, so a
+   predicate `{Int | _ < size_x()}` can be checked exactly like `{Int | _ < 128}`
+   — which is what lets a program name its array dimensions once instead of
+   freezing them as literals at every refinement.  [const_fns] maps every
+   spelling a predicate may use for such a function (bare name, and each
+   module-qualified suffix `World.size` / `M.World.size`) to the literal its
+   body folds to; [register_const_fns] populates it once per [check_module].
+
+   [const_fn_rejected] records, for a zero-argument function that did NOT
+   qualify, why — its body does not fold, or the spelling is ambiguous — so the
+   vocabulary warning can say what would make it usable rather than sending
+   the user to `@[measure]`, which cannot help here (see
+   [measure_shape_error]). *)
+let const_fns : (string, Smt.term) Hashtbl.t = Hashtbl.create 16
+let const_fn_rejected : (string, string) Hashtbl.t = Hashtbl.create 16
+
+(* Names bound ANYWHERE inside the function currently being visited
+   ([Refine_check.visit_fn] sets and restores it; see [fn_binders]).  A
+   constant function is folded wherever [smt_of_r] runs — a predicate, a
+   guard, an actual, a tail — and in a BODY a local `let size_x = fn -> 7`
+   can shadow the top-level `size_x`; folding `size_x()` to 128 there would
+   assert a false fact.  So a name bound anywhere in the enclosing function
+   is not folded in that function at all.  Over-retiring is the safe
+   direction: it costs a proof, never soundness.  (A parameter refinement
+   cannot see locals, so the vocabulary warning, which runs outside any
+   [visit_fn], sees the table empty and judges the unshadowed name.) *)
+let const_shadowed : (string, unit) Hashtbl.t = Hashtbl.create 16
+let is_const_fn (m : string) : bool =
+  Hashtbl.mem const_fns m && not (Hashtbl.mem const_shadowed m)
+
 (* ── Measure aliases ───────────────────────────────────────────────────────
    Runtime functions that ARE a measure under a different name.  Reflecting
    `List.length(xs)` to the same SMT term as `len(xs)` is what lets an ordinary
@@ -712,6 +743,7 @@ let ctor_of_tester (m : string) : string option =
 (* True iff the checker attaches meaning to [m] applied inside a predicate. *)
 let known_predicate_fn (m : string) : bool =
   is_predicate_operator m || is_measure_app m || ctor_of_tester m <> None
+  || is_const_fn m
 
 (* measures we soundly axiomatize: name -> its argument ADT name. *)
 let axiom_measures : (string, string) Hashtbl.t = Hashtbl.create 16
@@ -868,6 +900,201 @@ let measure_param_adt (fd : A.fn_def) : (string * string) option =
 let rec unblock = function
   | A.EBlock (es, sp) -> (match List.rev es with last :: _ -> unblock last | [] -> A.EBlock (es, sp))
   | e -> e
+
+(* ── Constant-function folding ─────────────────────────────────────────────
+   The value of a zero-argument function body built only from Int/Bool
+   literals, `+ - * negate`, `&& || not`, and calls to OTHER zero-argument
+   constant functions ([lookup]).  Deliberately no `/` or `%`: March's
+   truncating division would have to be re-implemented here bit-for-bit, and a
+   fold that disagrees with the runtime asserts a false fact — the one thing
+   this subsystem must never do.  [Error] carries the reason in the words the
+   vocabulary warning shows. *)
+type const_val = CInt of int | CBool of bool
+
+let term_of_const_val = function
+  | CInt n -> Smt.IntLit n
+  | CBool b -> Smt.BoolLit b
+
+let rec fold_const_body (lookup : string -> (const_val, string) result) (e : A.expr)
+    : (const_val, string) result =
+  let go = fold_const_body lookup in
+  let generic =
+    Error
+      "is not built only from literals, `+ - * negate`, `&& || not`, and other \
+       zero-argument constant functions"
+  in
+  let int2 f a b =
+    match go a, go b with
+    | Ok (CInt x), Ok (CInt y) -> Ok (CInt (f x y))
+    | (Error _ as err), _ | _, (Error _ as err) -> err
+    | _ -> generic
+  in
+  let bool2 f a b =
+    match go a, go b with
+    | Ok (CBool x), Ok (CBool y) -> Ok (CBool (f x y))
+    | (Error _ as err), _ | _, (Error _ as err) -> err
+    | _ -> generic
+  in
+  match unblock e with
+  | A.ELit (A.LitInt n, _) -> Ok (CInt n)
+  | A.ELit (A.LitBool b, _) -> Ok (CBool b)
+  | A.EAnnot (inner, _, _) -> go inner
+  | A.EApp (A.EVar { A.txt = "+"; _ }, [ a; b ], _) -> int2 ( + ) a b
+  | A.EApp (A.EVar { A.txt = "-"; _ }, [ a; b ], _) -> int2 ( - ) a b
+  | A.EApp (A.EVar { A.txt = "*"; _ }, [ a; b ], _) -> int2 ( * ) a b
+  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], _) ->
+    (match go a with Ok (CInt x) -> Ok (CInt (-x)) | Error _ as err -> err | _ -> generic)
+  | A.EApp (A.EVar { A.txt = "&&"; _ }, [ a; b ], _) -> bool2 ( && ) a b
+  | A.EApp (A.EVar { A.txt = "||"; _ }, [ a; b ], _) -> bool2 ( || ) a b
+  | A.EApp (A.EVar { A.txt = "not"; _ }, [ a ], _) ->
+    (match go a with Ok (CBool x) -> Ok (CBool (not x)) | Error _ as err -> err | _ -> generic)
+  | A.EApp (A.EVar { A.txt = f; _ }, [], _) -> lookup f
+  | A.EApp (A.EVar { A.txt = f; _ }, _ :: _, _)
+    when f <> "" && (match f.[0] with 'a' .. 'z' | '_' -> true | _ -> false) ->
+    Error (Printf.sprintf "calls `%s`, which is not a zero-argument constant function" f)
+  | _ -> generic
+
+(* Populate [const_fns] / [const_fn_rejected] from [decls].
+
+   A candidate is a single-clause, unguarded `fn f()` whose body folds
+   ([fold_const_body]); a call to another candidate folds through it, with a
+   visiting set so a (nonsensical, but writable) `fn a() do b() end`,
+   `fn b() do a() end` pair is rejected rather than looped on.  Each
+   candidate is registered under every spelling a predicate could use for it:
+   its bare name and each suffix of its module path (`size`, `World.size`,
+   `M.World.size`).  The stdlib's declarations are merged into the checked
+   module, so a spelling can collide — two definitions under one spelling that
+   do not fold to the same value make that spelling AMBIGUOUS and it is
+   withdrawn with a reason, never resolved by guessing which one was meant. *)
+let register_const_fns ~(mod_name : string) (decls : A.decl list) : unit =
+  Hashtbl.reset const_fns;
+  Hashtbl.reset const_fn_rejected;
+  (* (module path, fn) for every zero-argument single-clause function.  The
+     path starts at the checked module's own name so `Probe.size_x()` is a
+     spelling too, not only the nested `World.size()`. *)
+  let rec collect path decls =
+    List.concat_map
+      (function
+        | A.DFn (fd, _) -> (
+          match fd.A.fn_clauses with
+          | [ { A.fc_params = []; fc_guard = None; _ } ] -> [ (path, fd) ]
+          | _ -> [])
+        | A.DMod (n, _, ds, _) -> collect (path @ [ n.A.txt ]) ds
+        | _ -> [])
+      decls
+  in
+  let cands = collect [ mod_name ] decls in
+  (* Fold by BARE name (that is how a constant body spells a call to another
+     constant); a bare name with several definitions folds only if they all
+     agree, exactly as the spelling rule below. *)
+  let memo : (string, (const_val, string) result) Hashtbl.t = Hashtbl.create 16 in
+  let visiting = Hashtbl.create 16 in
+  let recursive = Hashtbl.create 4 in
+  let rec value_of_bare (f : string) : (const_val, string) result =
+    match Hashtbl.find_opt memo f with
+    | Some r -> r
+    | None ->
+      if Hashtbl.mem visiting f then begin
+        Hashtbl.replace recursive f ();
+        Error "is recursive"
+      end
+      else begin
+        Hashtbl.replace visiting f ();
+        let defs = List.filter (fun (_, fd) -> fd.A.fn_name.A.txt = f) cands in
+        let r =
+          match defs with
+          | [] -> Error (Printf.sprintf "calls `%s`, which is not itself a zero-argument constant function" f)
+          | _ ->
+            let rs = List.map (fun (_, fd) -> fold_const_body lookup (List.hd fd.A.fn_clauses).A.fc_body) defs in
+            combine f rs
+        in
+        Hashtbl.remove visiting f;
+        Hashtbl.replace memo f r;
+        r
+      end
+  (* A callee's own failure reason is about ITS body; the caller's reason
+     names the callee instead. *)
+  and lookup (f : string) : (const_val, string) result =
+    match value_of_bare f with
+    | Ok v -> Ok v
+    | Error _ when Hashtbl.mem recursive f ->
+      Error (Printf.sprintf "calls `%s`, which is recursive" f)
+    | Error _ -> Error (Printf.sprintf "calls `%s`, which is not itself a zero-argument constant function" f)
+  (* Several definitions under one spelling: all must fold to one value. *)
+  and combine (spelling : string) (rs : (const_val, string) result list) =
+    match rs with
+    | [] -> assert false
+    | [ r ] -> r
+    | first :: rest ->
+      if List.for_all (fun r -> r = first) rest then first
+      else
+        Error
+          (Printf.sprintf
+             "is defined more than once as `%s` and the definitions do not fold to the same value, so the spelling is ambiguous"
+             spelling)
+  in
+  (* Every spelling of every candidate, then combine per spelling. *)
+  let by_spelling : (string, (const_val, string) result list) Hashtbl.t = Hashtbl.create 16 in
+  List.iter
+    (fun (path, fd) ->
+      let name = fd.A.fn_name.A.txt in
+      let r = fold_const_body lookup (List.hd fd.A.fn_clauses).A.fc_body in
+      let rec suffixes = function
+        | [] -> [ name ]
+        | _ :: tl as p -> String.concat "." (p @ [ name ]) :: suffixes tl
+      in
+      List.iter
+        (fun sp ->
+          let prev = try Hashtbl.find by_spelling sp with Not_found -> [] in
+          Hashtbl.replace by_spelling sp (prev @ [ r ]))
+        (suffixes path))
+    cands;
+  Hashtbl.iter
+    (fun sp rs ->
+      match combine sp rs with
+      | Ok v -> Hashtbl.replace const_fns sp (term_of_const_val v)
+      | Error why -> Hashtbl.replace const_fn_rejected sp why)
+    by_spelling
+
+(* ── `@[measure]` shape gate ───────────────────────────────────────────────
+   [is_measure] (which decides the predicate vocabulary) and
+   [build_measure_preamble] / [resolve_measure] (which decide what a measure
+   application reflects to) must agree on what a measure IS, or an annotated
+   name is accepted by the first and dropped by the second: the warning goes
+   quiet and every call site files an unreflectable-predicate hint instead.
+   That was exactly the path `@[measure] fn size_x() : Int do 128 end` took.
+   The shape both sides need is "a function of exactly the one value it
+   measures": [smt_of_r] reflects a measure application only as `m(arg)`, to
+   the symbolic `m$x` / `(m v)` (when the parameter's type is undeclared, as
+   in the P1b fixtures) or to the axiomatised `(m (Ctor …))` (when it is a
+   declared ADT).  A nullary or multi-parameter measure has no reflection at
+   all — the only signal would be an unreflectable-predicate hint at every
+   call site — so it is rejected HERE, at the annotation, with the remedy.
+   Whether the parameter's type is a DECLARED ADT is deliberately not gated:
+   symbolic fallback over an undeclared type is a translation, just a weaker
+   one. *)
+let measure_shape_error (fd : A.fn_def) : string option =
+  let name = fd.A.fn_name.A.txt in
+  match fd.A.fn_clauses with
+  | [] -> None
+  | c :: _ -> (
+    match c.A.fc_params with
+    | [] ->
+      Some
+        (Printf.sprintf
+           "takes no parameters. A measure folds over the value it measures, so it must take \
+            that value (an ADT such as `Tree` or `List(a)`) as its first parameter. A \
+            zero-argument constant needs no annotation: a refinement predicate can call \
+            `%s()` directly, and it is checked as the literal its body folds to."
+           name)
+    | [ _ ] -> None
+    | ps ->
+      Some
+        (Printf.sprintf
+           "takes %d parameters. A measure is a function of the single value it measures, \
+            and a predicate can only apply it to one argument, so no predicate mentioning \
+            `%s` could be translated."
+           (List.length ps) name))
 
 (* Is [e] EXACTLY one of [vars] — an arm body that is a bare field read?
 
@@ -1376,6 +1603,43 @@ let structural_subvars (param : string) (body : A.expr) : (string, unit) Hashtbl
       | _ -> ())
     body;
   set
+
+(* Every name a function binds: its parameters, and every `let` / `let fn` /
+   `let?` / `let*` / lambda / match binder anywhere in its bodies (a union
+   over all clauses; over-approximation is the safe direction for
+   [const_shadowed]). *)
+let fn_binders (fd : A.fn_def) : string list =
+  let acc = ref [] in
+  let add n = acc := n :: !acc in
+  let rec pat_vars = function
+    | A.PatVar n -> add n.A.txt
+    | A.PatAs (p, n, _) -> add n.A.txt; pat_vars p
+    | A.PatCon (_, ps) | A.PatAtom (_, ps, _) | A.PatTuple (ps, _) | A.PatOr (ps, _) ->
+      List.iter pat_vars ps
+    | A.PatRecord (fs, _) -> List.iter (fun (_, p) -> pat_vars p) fs
+    | A.PatWild _ | A.PatLit _ -> ()
+  in
+  let params ps = List.iter (fun (p : A.param) -> add p.A.param_name.A.txt) ps in
+  List.iter
+    (fun (c : A.fn_clause) ->
+      List.iter
+        (function
+          | A.FPNamed p | A.FPDefault (p, _) -> add p.A.param_name.A.txt
+          | A.FPPat p -> pat_vars p)
+        c.A.fc_params;
+      iter_all
+        (fun e ->
+          match e with
+          | A.ELet (b, _) -> pat_vars b.A.bind_pat
+          | A.ELetQ (p, _, _, _) | A.ELetStar (p, _, _, _) -> pat_vars p
+          | A.ELetFn (n, ps, _, _, _) -> add n.A.txt; params ps
+          | A.ELam (ps, _, _) -> params ps
+          | A.EMatch (_, brs, _) ->
+            List.iter (fun (br : A.branch) -> pat_vars br.A.branch_pat) brs
+          | _ -> ())
+        c.A.fc_body)
+    fd.A.fn_clauses;
+  !acc
 
 (* Builtins that diverge or abort: a body calling one is not a total function. *)
 let measure_partial_calls =
