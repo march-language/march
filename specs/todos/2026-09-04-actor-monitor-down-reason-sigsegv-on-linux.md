@@ -49,16 +49,85 @@ here.
   exactly 4 scheduler threads. main's own `test (ubuntu-24.04)` leg passed on
   `2ac12751`, which contains that change.
 
-## Reproduction status
+## Reproduction status — 8,500 runs, NOT reproduced (updated 2026-09-04)
 
-- **macOS, 300 runs at `MARCH_NUM_SCHEDULERS=4`, load ~16: 0 crashes.** The
-  fixture was built from the same tree.
-- Not yet attempted on Linux. `specs/progress/`'s note on running the aarch64
-  CI leg locally in Docker
-  (`specs/progress/…aarch64-ci-leg-local-docker-repro`, and the memo on
-  `alpine:3.21` running natively on an arm64 Mac) is the cheapest next step,
-  though the failing leg is ubuntu-24.04 on amd64 and the platform difference
-  may matter — a segfault that only shows on one libc/arch usually does.
+| environment | runs | SIGSEGV (139) |
+|---|---|---|
+| macOS arm64, `MARCH_NUM_SCHEDULERS=4` | 300 | 0 |
+| macOS arm64, `MARCH_NUM_SCHEDULERS=4`, second sweep | 4,000 | 0 |
+| Linux aarch64 (Docker, `ci/Dockerfile.ubuntu` base), 14 CPUs | 1,500 | 0 |
+| Linux aarch64 (Docker), `--cpus 4` to force CPU-time contention | 3,000 | 0 |
+
+**Beware the neighbouring signal.** The 4,000-run macOS sweep produced 3
+non-zero exits, and all three were **137 (SIGKILL)**, not 139 — the machine's
+jetsam killing processes under load, the same contamination that reddened an
+unrelated `string_codepoint` codegen case the same afternoon. Filter on the
+exact code; "non-zero exit" is not the signal here.
+
+**What the negative result argues.** The suspected mechanism was a memory
+-ordering / use-after-free race in the death path. aarch64 has a *weaker*
+memory model than amd64, so a plain ordering race should surface sooner there,
+not later — 4,500 clean Linux-arm runs is therefore evidence against that
+class, not merely an absence of evidence. Note the `--cpus 4` container still
+reports `nproc` = 14 (a cgroup quota does not change the CPU count the process
+sees), so that leg throttled CPU *time* without narrowing the thread count.
+
+## Still untried
+
+- **amd64.** The failing leg is ubuntu-24.04 on amd64; everything above is
+  arm64. `docker build --platform linux/amd64` reproduces it under emulation,
+  which is slow (a full OCaml switch under QEMU) but is the one axis not yet
+  covered, and the only one where "it only happens there" remains plausible.
+- A build with `-DMARCH_DEBUG` (arms the scheduler's invariant tripwires) or
+  under ASAN, which would convert a latent use-after-free into a loud failure
+  well before it becomes a segfault. `specs/progress/`'s note on ASAN needing
+  Docker locally applies — Falcon hangs ASAN binaries on this Mac.
+## The obvious suspect has been tried and does NOT reproduce
+
+Because the crash follows the LAST line of output, the natural suspect was the
+terminal-watcher block: `spawn` a watcher and a target, `monitor`, `kill` the
+watcher, `kill` the target (whose death then tries to deliver a Down into the
+already-terminal watcher), then read `mailbox_size` on the killed watcher.
+
+That block was narrowed into a standalone fixture and looped 4,000 times per
+process:
+
+```march
+fn round(n : Int, bad : Int) : Int do
+  if n <= 0 do bad
+  else
+    let w = spawn(Watcher)
+    let t = spawn(Target)
+    monitor(w, t)
+    kill(w)
+    kill(t)
+    let depth = mailbox_size(w)
+    round(n - 1, if depth == 0 do bad else bad + 1 end)
+  end
+end
+```
+
+| scheduler count | runs | terminal claims | SIGSEGV |
+|---|---|---|---|
+| 1 | 60 | 240,000 | 0 |
+| 4 | 60 | 240,000 | 0 |
+| 14 | 60 | 240,000 | 0 |
+
+**720,000 exercises of the suspected edge, zero crashes**, and `mailbox_size`
+returned 0 every single time (the property the original fixture asserts). On
+macOS arm64. So either the crash is not in this block, or it needs something
+this narrowing removed — the supervised children, the earlier monitors still
+registered, or the specific teardown state the full program reaches.
+
+Whoever picks this up: do not start by re-deriving the terminal-watcher
+theory. It has been measured.
+
+## Still untried
+
+- Narrowing the OTHER direction: keep the full fixture but delete the terminal
+  block, and see whether it still crashes on Linux amd64. That distinguishes
+  "the crash is in teardown after everything" from "the crash is in the
+  terminal block" far more cheaply than reading code.
 
 ## What to build
 

@@ -139,6 +139,31 @@ git log is authoritative for exact commits.
   lost all parallelism. Opt-in; the default is unchanged. Procs spawned by
   `main` are not pinned; with a single scheduler the variable is a no-op.
 
+### Changed
+
+- **The default scheduler-thread count now tracks the machine.** March ran
+  **4** OS scheduler threads by default on every machine — four on a four-core
+  laptop and four on a 96-core server — so 4 was the de-facto parallelism
+  limit of any program that had not set `MARCH_NUM_SCHEDULERS`, and nothing
+  said so. The default is now **one scheduler per online CPU**, clamped to
+  `MARCH_MAX_SCHEDULERS` (64). `MARCH_NUM_SCHEDULERS=N` still pins a count and
+  `=auto` still asks for one-per-CPU explicitly; both behave exactly as
+  before. A build may still pin the default with
+  `-DMARCH_NUM_SCHEDULERS=N`, and a pin wins over auto — the C scheduler test
+  harnesses depend on that, since their premise is a specific thread count and
+  an auto default would make them vacuous on a single-core box. Measured on a
+  14-core M3 Max: the same CPU-bound `pmap_n` program goes from 5 OS threads
+  and 4499 ms to 15 threads and 2487 ms with no source or flag change.
+
+  **The count follows the container, not the host.** `sysconf` reports the
+  machine's CPUs and ignores both ways a container narrows them, so the
+  default is derived from the smallest of the online count, the CPU affinity
+  mask (`docker --cpuset-cpus`, k8s CPU pinning) and the cgroup CPU quota
+  (`docker --cpus`, k8s CPU limits, cgroup v2 and v1). Without that, a program
+  pinned to one CPU would have started one thread per HOST core — worse than
+  the flat 4 it replaced. Verified in Docker: `--cpuset-cpus=0` and `--cpus=1`
+  each resolve to 1 scheduler while `sysconf` still reports 14.
+
 ### Fixed
 
 - **`MARCH_NUM_SCHEDULERS` was a silent ceiling, not a setting.** The

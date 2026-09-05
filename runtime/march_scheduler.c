@@ -1085,6 +1085,98 @@ static void proc_trampoline(int arg_hi, int arg_lo) {
 
 /* ── Public API ───────────────────────────────────────────────────────── */
 
+/* Read a cgroup CPU quota as a whole number of CPUs, or 0 if there is no
+ * quota (or it cannot be read).  Rounds UP, so a 1.5-CPU limit gets 2
+ * schedulers rather than 1 -- the scheduler count is a parallelism budget,
+ * not a hard cap, and rounding down would leave a fractional allowance
+ * permanently unusable. */
+#if defined(__linux__)
+static int cgroup_quota_cpus(void) {
+    /* cgroup v2: "$MAX $PERIOD", where MAX is "max" when unlimited. */
+    FILE *f = fopen("/sys/fs/cgroup/cpu.max", "r");
+    if (f) {
+        char maxbuf[64];
+        long long period = 0;
+        int got = fscanf(f, "%63s %lld", maxbuf, &period);
+        fclose(f);
+        if (got == 2 && period > 0 && strcmp(maxbuf, "max") != 0) {
+            long long quota = strtoll(maxbuf, NULL, 10);
+            if (quota > 0) return (int)((quota + period - 1) / period);
+        }
+        return 0;   /* present and unlimited -- do not fall through to v1 */
+    }
+    /* cgroup v1: quota and period in separate files; quota -1 is unlimited. */
+    long long quota = -1, period = 0;
+    f = fopen("/sys/fs/cgroup/cpu/cpu.cfs_quota_us", "r");
+    if (f) { if (fscanf(f, "%lld", &quota) != 1) quota = -1; fclose(f); }
+    f = fopen("/sys/fs/cgroup/cpu/cpu.cfs_period_us", "r");
+    if (f) { if (fscanf(f, "%lld", &period) != 1) period = 0; fclose(f); }
+    if (quota > 0 && period > 0) return (int)((quota + period - 1) / period);
+    return 0;
+}
+#endif
+
+/* How many CPUs this PROCESS may actually use.
+ *
+ * Not simply sysconf(_SC_NPROCESSORS_ONLN): that reports the machine's online
+ * CPUs and ignores both ways a container narrows them, which is precisely the
+ * environment where oversubscribing hurts most.  Measured in a Docker
+ * container pinned to one CPU: `nproc` says 1 and
+ * `getconf _NPROCESSORS_ONLN` says 14.  Taking sysconf at face value there
+ * would start 14 scheduler threads on one CPU -- worse than the flat default
+ * of 4 this replaced, which is exactly the regression this function exists to
+ * avoid.
+ *
+ *   - sched_getaffinity covers CPU *pinning* (docker --cpuset-cpus, k8s CPU
+ *     manager static policy), which sysconf does not see.
+ *   - the cgroup quota covers CPU *bandwidth* (docker --cpus, k8s CPU limits),
+ *     which neither sysconf nor affinity sees.
+ *
+ * Take the smallest of whatever is available, floored at 1: a failing or
+ * nonsensical probe must yield a slow scheduler, never a zero-thread one,
+ * which would hang rather than run slowly. */
+int march_sched_usable_cpus(void) {
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    if (n < 1) n = 1;
+#if defined(__linux__)
+    {
+        cpu_set_t set;
+        CPU_ZERO(&set);
+        if (sched_getaffinity(0, sizeof set, &set) == 0) {
+            int aff = CPU_COUNT(&set);
+            if (aff >= 1 && aff < n) n = aff;
+        }
+        int quota = cgroup_quota_cpus();
+        if (quota >= 1 && quota < n) n = quota;
+    }
+#endif
+    return (int)n;
+}
+
+/* One scheduler per usable CPU, clamped to the table.  At least 1. */
+static int auto_sched_count(void) {
+    long n = march_sched_usable_cpus();
+    if (n < 1) n = 1;
+    if (n > MARCH_MAX_SCHEDULERS) n = MARCH_MAX_SCHEDULERS;
+    return (int)n;
+}
+
+/* The scheduler count to use when the environment says nothing.
+ *
+ * A build that pinned MARCH_NUM_SCHEDULERS to a positive value gets exactly
+ * that -- a pin WINS over auto, because the C harnesses that pin themselves
+ * to 1 or 4 are asserting properties of that specific thread count, and on a
+ * single-core machine an auto default would turn them into silent no-ops.
+ * Otherwise (the shipped build, where the macro is 0) track the machine. */
+static int default_sched_count(void) {
+#if MARCH_NUM_SCHEDULERS > 0
+    int n = MARCH_NUM_SCHEDULERS;
+    return (n > MARCH_MAX_SCHEDULERS) ? MARCH_MAX_SCHEDULERS : n;
+#else
+    return auto_sched_count();
+#endif
+}
+
 void march_sched_init(void) {
     /* Cache the OS page size for use in the async-signal-safe SIGSEGV handler. */
     if (g_page_size == 0)
@@ -1145,19 +1237,18 @@ void march_sched_init(void) {
      * Setting it to 1 serializes all green-thread execution onto a single OS
      * thread (no concurrent March code), which is the only configuration
      * under which the current non-atomic local refcounting is race-free. */
-    g_num_scheds = MARCH_NUM_SCHEDULERS > 0 ? MARCH_NUM_SCHEDULERS : 1;
-    if (g_num_scheds > MARCH_MAX_SCHEDULERS) g_num_scheds = MARCH_MAX_SCHEDULERS;
+    g_num_scheds = default_sched_count();
     {
         const char *env = getenv("MARCH_NUM_SCHEDULERS");
         if (env && *env) {
             long n;
             if (strcmp(env, "auto") == 0) {
-                /* One scheduler per online CPU. Always satisfiable: clamped
-                 * silently, since the user asked for "whatever fits". */
-                long cpus = sysconf(_SC_NPROCESSORS_ONLN);
-                n = (cpus >= 1) ? cpus : g_num_scheds;
-                if (n > MARCH_MAX_SCHEDULERS) n = MARCH_MAX_SCHEDULERS;
-                g_num_scheds = (int)n;
+                /* One scheduler per online CPU -- the same thing the default
+                 * already does on an unpinned build, and an explicit way to
+                 * ask for it on a build that pinned a count.  Always
+                 * satisfiable: clamped silently, since the user asked for
+                 * "whatever fits". */
+                g_num_scheds = auto_sched_count();
             } else {
                 char *end = NULL;
                 errno = 0;

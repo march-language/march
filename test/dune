@@ -159,13 +159,24 @@
            (run ./test_scheduler_pin_runner))))
 
 ; ── C scheduler thread-count tests (MARCH_NUM_SCHEDULERS request, G71) ──
-; Built with the default -DMARCH_NUM_SCHEDULERS=4 and -DMARCH_MAX_SCHEDULERS=8
-; so that "above the default" (7) and "above the maximum" (9) are both
-; reachable without spawning a hundred OS threads.  Asserts the env request is
-; honoured above the compile-time default, that the honoured number is the
-; number of OS threads that actually dispatch green threads, and that an
-; unsatisfiable or malformed request warns on stderr instead of being dropped
-; in silence.
+; Built TWICE from one source, both at -DMARCH_MAX_SCHEDULERS=8 so that "above
+; the default" (7) and "above the maximum" (9) are reachable without spawning a
+; hundred OS threads:
+;
+;   _runner        UNPINNED — the shipped configuration, where the header
+;                  leaves MARCH_NUM_SCHEDULERS at 0 ("auto") and an unset
+;                  environment must resolve to one scheduler per online CPU.
+;   _pinned_runner -DMARCH_NUM_SCHEDULERS=3 — a build that names a count must
+;                  still get exactly 3 with the environment unset. This is the
+;                  property the sibling C harnesses below depend on: they pin
+;                  themselves to 1 or 4 because their premise IS that thread
+;                  count, and on a single-core machine an auto default would
+;                  turn them into silent no-ops rather than failures.
+;
+; Between them: the env request is honoured above the build's default, the
+; honoured number is the number of OS threads that actually dispatch green
+; threads, and an unsatisfiable or malformed request warns on stderr instead of
+; being dropped in silence.
 (rule
  (targets test_scheduler_count_runner)
  (deps    test_scheduler_count.c
@@ -184,9 +195,33 @@
  ; march_sched_init(), so an inherited value cannot influence it.
  (action  (run ./test_scheduler_count_runner)))
 
+(rule
+ (targets test_scheduler_count_pinned_runner)
+ (deps    test_scheduler_count.c
+          ../runtime/march_scheduler.c
+          ../runtime/march_scheduler.h
+          ../runtime/march_deque.h)
+ (action  (run %{cc} -std=gnu11 -Wall -Wextra -I../runtime
+               -DMARCH_MAX_SCHEDULERS=8
+               -DMARCH_NUM_SCHEDULERS=3
+               -o %{targets}
+               test_scheduler_count.c ../runtime/march_scheduler.c
+               -lpthread)))
+(rule
+ (alias   runtest)
+ (deps    (file test_scheduler_count_pinned_runner))
+ (action  (run ./test_scheduler_count_pinned_runner)))
+
 ; ── C scheduler timer tests (min-heap timers + timed park) ──────────────
-; Multi-scheduler (no -DMARCH_NUM_SCHEDULERS=1): timers must work across the
+; Multi-scheduler (pinned at 4, see below): timers must work across the
 ; work-stealing/global-runq machinery, not just the single-scheduler path.
+; NOW PINNED AT 4 EXPLICITLY.  This rule used to say "no -DMARCH_NUM_SCHEDULERS"
+; and inherit a flat compile-time default of 4.  That default now tracks the
+; machine (one scheduler per usable CPU), so on a 1- or 2-CPU box these cases
+; would silently run with fewer threads than their premise needs -- and
+; test_scheduler_mt's third case is literally named "via stealing", which
+; requires more than one scheduler to mean anything.  The multi-scheduler
+; guarantee is stated here rather than inherited.
 (rule
  (targets test_scheduler_timer_runner)
  (deps    test_scheduler_timer.c
@@ -194,6 +229,7 @@
           ../runtime/march_scheduler.h
           ../runtime/march_deque.h)
  (action  (run %{cc} -std=gnu11 -Wall -Wextra -I../runtime
+               -DMARCH_NUM_SCHEDULERS=4
                -o %{targets}
                test_scheduler_timer.c ../runtime/march_scheduler.c
                -lpthread)))
@@ -205,9 +241,16 @@
            (run ./test_scheduler_timer_runner))))
 
 ; ── C scheduler mailbox capacity + drop-policy tests (Task 7) ───────────
-; Multi-scheduler (no -DMARCH_NUM_SCHEDULERS=1), matching the timer rule
+; Multi-scheduler (pinned at 4, see below), matching the timer rule
 ; above: deterministic by construction (scheduler is never run), so the
 ; multi-thread machinery is present but never actually contended here.
+; NOW PINNED AT 4 EXPLICITLY.  This rule used to say "no -DMARCH_NUM_SCHEDULERS"
+; and inherit a flat compile-time default of 4.  That default now tracks the
+; machine (one scheduler per usable CPU), so on a 1- or 2-CPU box these cases
+; would silently run with fewer threads than their premise needs -- and
+; test_scheduler_mt's third case is literally named "via stealing", which
+; requires more than one scheduler to mean anything.  The multi-scheduler
+; guarantee is stated here rather than inherited.
 (rule
  (targets test_scheduler_mbox_runner)
  (deps    test_scheduler_mbox.c
@@ -215,6 +258,7 @@
           ../runtime/march_scheduler.h
           ../runtime/march_deque.h)
  (action  (run %{cc} -std=gnu11 -Wall -Wextra -I../runtime
+               -DMARCH_NUM_SCHEDULERS=4
                -o %{targets}
                test_scheduler_mbox.c ../runtime/march_scheduler.c
                -lpthread)))
@@ -226,10 +270,17 @@
            (run ./test_scheduler_mbox_runner))))
 
 ; ── C scheduler stack-recycling / churn test (Task 12) ───────────────────
-; Multi-scheduler (no -DMARCH_NUM_SCHEDULERS=1), matching the timer/mbox
+; Multi-scheduler (pinned at 4, see below), matching the timer/mbox
 ; rules above: churns 3000+100 procs through spawn->run->death and asserts
 ; via march_stat_counters[MARCH_STAT_STACKS_RECYCLED] that dead stacks are
 ; recycled instead of leaked.
+; NOW PINNED AT 4 EXPLICITLY.  This rule used to say "no -DMARCH_NUM_SCHEDULERS"
+; and inherit a flat compile-time default of 4.  That default now tracks the
+; machine (one scheduler per usable CPU), so on a 1- or 2-CPU box these cases
+; would silently run with fewer threads than their premise needs -- and
+; test_scheduler_mt's third case is literally named "via stealing", which
+; requires more than one scheduler to mean anything.  The multi-scheduler
+; guarantee is stated here rather than inherited.
 (rule
  (targets test_scheduler_churn_runner)
  (deps    test_scheduler_churn.c
@@ -237,6 +288,7 @@
           ../runtime/march_scheduler.h
           ../runtime/march_deque.h)
  (action  (run %{cc} -std=gnu11 -Wall -Wextra -I../runtime
+               -DMARCH_NUM_SCHEDULERS=4
                -o %{targets}
                test_scheduler_churn.c ../runtime/march_scheduler.c
                -lpthread)))
@@ -760,6 +812,13 @@
  (action  (run ./test_heap_runner)))
 
 ; Phase 3: multi-threaded scheduler tests (4 schedulers)
+; NOW PINNED AT 4 EXPLICITLY.  This rule used to say "no -DMARCH_NUM_SCHEDULERS"
+; and inherit a flat compile-time default of 4.  That default now tracks the
+; machine (one scheduler per usable CPU), so on a 1- or 2-CPU box these cases
+; would silently run with fewer threads than their premise needs -- and
+; test_scheduler_mt's third case is literally named "via stealing", which
+; requires more than one scheduler to mean anything.  The multi-scheduler
+; guarantee is stated here rather than inherited.
 (rule
  (targets test_scheduler_mt_runner)
  (deps    test_scheduler_mt.c
@@ -767,6 +826,7 @@
           ../runtime/march_scheduler.h
           ../runtime/march_deque.h)
  (action  (run %{cc} -std=gnu11 -Wall -Wextra -I../runtime
+               -DMARCH_NUM_SCHEDULERS=4
                -o %{targets}
                test_scheduler_mt.c ../runtime/march_scheduler.c
                -lpthread)))
