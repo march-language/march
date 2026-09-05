@@ -13,6 +13,16 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Refinement predicates can name a zero-argument constant function.**
+  `fn size_x() : Int do 128 end` may be called inside a predicate
+  (`{Int | 0 <= _ && _ < size_x()}`) and is checked exactly as the literal
+  `128` would be, including derived constants (`2 * size_x()`), `Bool`
+  constants, and qualified spellings (`16 * World.size()`). A program can now
+  name an array dimension once and keep static bounds checking on everything
+  indexed by it instead of freezing the literal into every refinement. A
+  zero-argument function whose body does not fold to a literal draws a warning
+  at the predicate that says why.
+
 - **`--refine-audit`**: a refinement coverage audit, answering "does the
   checker even look at this declared refinement?" as a separate question
   from `--refine-report`'s "was this obligation proved?". Every declared
@@ -166,6 +176,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`@[measure]` on a function no predicate could ever translate is now an
+  error at the annotation.** A zero-argument or multi-parameter `@[measure]`
+  used to be accepted by the predicate-vocabulary check and dropped by the
+  measure preamble, so following the "annotate the function `@[measure]`"
+  warning on a constant silenced the warning and changed nothing else: every
+  call site kept filing a "has no SMT translation" hint. The two gates now
+  agree; the error names the remedy (a constant needs no annotation).
 - **`MARCH_NUM_SCHEDULERS` was a silent ceiling, not a setting.** The
   environment variable could only ever *lower* the OS scheduler-thread count:
   a request above the compile-time default (4) was dropped without a word, so

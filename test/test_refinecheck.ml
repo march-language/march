@@ -1614,7 +1614,10 @@ let tier0_suite =
     gated "inline call to a non-refined function is skipped" (fun () ->
         Alcotest.(check bool) "no error" false
           (has_refine_error
-             (t0 "  fn plain() : Int do 0 - 9 end\n  fn f() : Int do takepos(plain()) end")));
+             (* [plain] takes a parameter: a zero-argument `fn plain() : Int do
+                0 - 9 end` now FOLDS to -9 (a constant function is its
+                literal), and `takepos(-9)` is a definite violation. *)
+             (t0 "  fn plain(k : Int) : Int do 0 - k end\n  fn f() : Int do takepos(plain(9)) end")));
 
     gated "inline call arg binder used twice must reflect to one constant" (fun () ->
         (* `four`'s predicate `n > 3 && n < 5` forces n == 4, contradicting
@@ -5011,10 +5014,13 @@ end|} in
     gated "a postcondition whose TAIL expression fails to reflect blames the subject, not \
            the (reflectable) predicate"
       (fun () ->
+        (* `g` takes a parameter on purpose: a zero-argument `fn g() : Int do
+           5 end` is a constant function and now reflects as its literal, so
+           the tail would verify instead of failing to reflect. *)
         let src = {|mod QPT do
   cap verified
-  fn g() : Int do 5 end
-  fn f() : {Int | _ > 0} do g() end
+  fn g(k : Int) : Int do k end
+  fn f() : {Int | _ > 0} do g(5) end
 end|} in
         Alcotest.(check (list string)) "slug" [ "unreflectable-subject" ] (skip_reasons src);
         let text = refine_error_text_d src in
@@ -5023,7 +5029,7 @@ end|} in
            postcondition has no argument. It now says "the return
            expression `g()`" explicitly. *)
         Alcotest.(check bool) "names the tail as a return expression, not an argument" true
-          (contains text "the return expression `g()`");
+          (contains text "the return expression `g(5)`");
         Alcotest.(check bool) "does not blame the (reflectable) predicate" false
           (contains text "has no SMT translation"));
 
@@ -5045,8 +5051,8 @@ end|} in
       Node(l, _, r) -> 1 + size(l) + size(r)
     end
   end
-  fn hidden() : Int do 1 end
-  fn mk() : {Tree | size(_) == 1} do Node(Leaf, hidden(), Leaf) end
+  fn hidden(k : Int) : Int do k end
+  fn mk() : {Tree | size(_) == 1} do Node(Leaf, hidden(1), Leaf) end
 end|} in
         Alcotest.(check (list string)) "slug" [ "unreflectable-subject" ] (skip_reasons src);
         let details = skip_reason_details src in
@@ -5057,7 +5063,7 @@ end|} in
            not an isolated field). Still names `hidden()` as a substring of
            that tail, which is enough to point a reader at the actual cause. *)
         Alcotest.(check bool) "names the tail as a return expression, including `hidden()`" true
-          (List.exists (fun d -> contains d "the return expression `Node(Leaf, hidden(), Leaf)`") details);
+          (List.exists (fun d -> contains d "the return expression `Node(Leaf, hidden(1), Leaf)`") details);
         Alcotest.(check bool) "does not blame the (reflectable) measure predicate" false
           (List.exists (fun d -> contains d "has no SMT translation") details))
   ]
@@ -13450,6 +13456,188 @@ let audit_baseline_suite =
                 (holes_baseline_path ()) lines))
   ]
 
+(* ── Zero-argument constant functions in predicate position ───────────────
+   `fn size_x() : Int do 128 end` is, after inlining, the literal 128; a
+   predicate `{Int | _ < size_x()}` should verify exactly like `{Int | _ < 128}`.
+   Before this existed the plain spelling drew the "not a measure" warning and
+   every call site an unreflectable-predicate hint, and following the
+   warning's own advice (`@[measure]`) silenced the warning while changing
+   nothing else — [is_measure] accepted the name, [build_measure_preamble]
+   never axiomatised it, and the loss of verification went silent.  Both
+   halves are pinned here: the constant reflects, and `@[measure]` on a
+   shape the preamble cannot use is a hard error at the annotation. *)
+let const_prog ?(consts = "  fn size_x() : Int do 128 end\n") body =
+  Printf.sprintf
+    "mod M do\n\
+     %s\
+    \  fn index(x : {Int | 0 <= _ && _ < size_x()}) : Int do x end\n\
+     %s\n\
+     end\n"
+    consts body
+
+let const_fn_suite =
+  [ gated "in-bounds call against a constant-function bound verifies silently" (fun () ->
+        let src = const_prog "  fn f() : Int do index(5) end" in
+        Alcotest.(check bool) "no error" false (has_refine_error src);
+        Alcotest.(check bool) "no warning" false (has_refine_warning src);
+        Alcotest.(check (list string)) "no skipped obligation" [] (skip_reasons src));
+
+    gated "out-of-bounds call against a constant-function bound is rejected" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error (const_prog "  fn f() : Int do index(200) end")));
+
+    gated "the bound is exclusive: index(size_x()) is rejected" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error (const_prog "  fn f() : Int do index(128) end")));
+
+    gated "a constant derived from other constants folds (2 * size_x())" (fun () ->
+        let consts =
+          "  fn size_x() : Int do 128 end\n\
+          \  fn size_y() : Int do 2 * size_x() end\n\
+          \  fn index_y(y : {Int | 0 <= _ && _ < size_y()}) : Int do y end\n"
+        in
+        Alcotest.(check bool) "255 in bounds" false
+          (has_refine_error (const_prog ~consts "  fn f() : Int do index_y(255) end"));
+        Alcotest.(check bool) "256 out of bounds" true
+          (has_refine_error (const_prog ~consts "  fn f() : Int do index_y(256) end")));
+
+    gated "a Bool constant function reflects" (fun () ->
+        let src =
+          "mod M do\n\
+          \  fn strict() : Bool do true end\n\
+          \  fn g(x : {Int | strict() && _ > 0}) : Int do x end\n\
+          \  fn f() : Int do g(0) end\n\
+           end\n"
+        in
+        Alcotest.(check bool) "error" true (has_refine_error src);
+        Alcotest.(check bool) "no warning" false (has_refine_warning src));
+
+    gated "a qualified constant (`World.size()`) reflects through desugar" (fun () ->
+        let prog call =
+          Printf.sprintf
+            "mod M do\n\
+            \  mod World do\n\
+            \    fn size() : Int do 8 end\n\
+            \  end\n\
+            \  fn index(x : {Int | 0 <= _ && _ < 16 * World.size()}) : Int do x end\n\
+            \  fn f() : Int do index(%s) end\n\
+             end\n"
+            call
+        in
+        Alcotest.(check bool) "127 in bounds" false (has_refine_error_d (prog "127"));
+        Alcotest.(check bool) "128 out of bounds" true (has_refine_error_d (prog "128"));
+        Alcotest.(check (list string)) "no warning" [] (refine_warnings (prog "127")));
+
+    (* Ungated: the vocabulary warning and the annotation gate are decided
+       syntactically, before any solver is consulted. *)
+    Alcotest.test_case "a constant function in a predicate draws no vocabulary warning" `Quick
+      (fun () ->
+        Alcotest.(check bool) "no warning" false
+          (has_refine_warning (const_prog "  fn f() : Int do index(5) end")));
+
+    Alcotest.test_case "a zero-argument function that is not constant still warns, with the reason" `Quick
+      (fun () ->
+        let src =
+          "mod M do\n\
+          \  fn limit(n : Int) : Int do n end\n\
+          \  fn size_x() : Int do limit(128) end\n\
+          \  fn index(x : {Int | 0 <= _ && _ < size_x()}) : Int do x end\n\
+           end\n"
+        in
+        match refine_warnings src with
+        | [ w ] ->
+          Alcotest.(check bool) "names the function" true (contains w "`size_x()`");
+          Alcotest.(check bool) "explains the fold failure" true (contains w "calls `limit`")
+        | ws -> Alcotest.failf "expected exactly one warning, got %d" (List.length ws));
+
+    Alcotest.test_case "@[measure] on a zero-argument function is an error at the annotation" `Quick
+      (fun () ->
+        let src =
+          "mod M do\n\
+          \  @[measure]\n\
+          \  fn size_x() : Int do 128 end\n\
+          \  fn index(x : {Int | 0 <= _ && _ < size_x()}) : Int do x end\n\
+           end\n"
+        in
+        let text = refine_error_text_d src in
+        Alcotest.(check bool) "is an error" true (contains text "@[measure] `size_x`");
+        Alcotest.(check bool) "says the annotation is unnecessary" true
+          (contains text "needs no annotation"));
+
+    Alcotest.test_case "@[measure] on a two-parameter function is an error" `Quick
+      (fun () ->
+        let src =
+          "mod M do\n\
+          \  type Tree = Leaf | Node(Tree, Tree)\n\
+          \  @[measure]\n\
+          \  fn depth_at(t : Tree, k : Int) : Int do k end\n\
+           end\n"
+        in
+        let text = refine_error_text_d src in
+        Alcotest.(check bool) "is an error" true (contains text "@[measure] `depth_at`");
+        Alcotest.(check bool) "names the requirement" true (contains text "takes 2 parameters"));
+
+    (* The P1b fixtures measure over an UNDECLARED `Tree(a)`: symbolic
+       fallback is a translation, and the gate must leave it alone. *)
+    Alcotest.test_case "@[measure] over an undeclared type passes the shape gate" `Quick
+      (fun () ->
+        Alcotest.(check int) "no error" 0
+          (refine_error_count
+             "mod M do\n\
+             \  @[measure]\n\
+             \  fn size(t : Tree(a)) : Int do 0 end\n\
+              end\n"));
+
+    gated "a local binding shadowing the constant's name suspends folding in that function" (fun () ->
+        (* Inside [f], `size_x` is a local lambda returning 7, so `size_x()`
+           there is 7, not 128.  Folding the top-level constant would assert
+           `takepos(128)`'s argument is fine when it is really `7 - 10 < 0`;
+           the checker must instead treat the call as opaque (skipped, no
+           error) rather than prove or refute it from the wrong value. *)
+        let src =
+          "mod M do\n\
+          \  fn size_x() : Int do 128 end\n\
+          \  fn takepos(n : {Int | _ >= 10}) : Int do n end\n\
+          \  fn f() : Int do\n\
+          \    let size_x = fn -> 7\n\
+          \    takepos(size_x())\n\
+          \  end\n\
+          \  fn g() : Int do takepos(size_x()) end\n\
+           end\n"
+        in
+        Alcotest.(check bool) "no error: shadowed call is opaque, unshadowed call proves" false
+          (has_refine_error src);
+        let src_bad =
+          "mod M do\n\
+          \  fn size_x() : Int do 7 end\n\
+          \  fn takepos(n : {Int | _ >= 10}) : Int do n end\n\
+          \  fn f() : Int do\n\
+          \    let size_x = fn -> 128\n\
+          \    takepos(size_x())\n\
+          \  end\n\
+           end\n"
+        in
+        Alcotest.(check bool) "no error: the top-level 7 must not be asserted for the local" false
+          (has_refine_error src_bad));
+
+    gated "@[measure] on a constant does not stop the constant itself from verifying" (fun () ->
+        (* The annotation is rejected, but the plain-function path still
+           reflects the constant: the rejected-annotation error is the ONLY
+           error, and the out-of-bounds call is what adds the second. *)
+        let prog call =
+          Printf.sprintf
+            "mod M do\n\
+            \  @[measure]\n\
+            \  fn size_x() : Int do 128 end\n\
+            \  fn index(x : {Int | 0 <= _ && _ < size_x()}) : Int do x end\n\
+            \  fn f() : Int do index(%s) end\n\
+             end\n"
+            call
+        in
+        Alcotest.(check int) "annotation error only" 1 (refine_error_count (prog "5"));
+        Alcotest.(check int) "annotation error + bounds error" 2 (refine_error_count (prog "200"))) ]
+
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -13532,4 +13720,5 @@ let () =
       ("audit-classify",
         audit_classify_suite @ audit_classify_reason_suite @ audit_classify_fixloop1_suite);
       ("audit-flag", audit_flag_suite);
-      ("audit-baseline", audit_baseline_suite) ]
+      ("audit-baseline", audit_baseline_suite);
+      ("const-fn-predicate", const_fn_suite) ]

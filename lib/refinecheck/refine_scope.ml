@@ -91,6 +91,10 @@ let rec smt_of_r ~resolve_var ~resolve_measure ?(resolve_field = fun _ _ -> None
   match e with
   | A.ELit (A.LitInt n, _) -> Ok (Smt.IntLit n)
   | A.ELit (A.LitBool b, _) -> Ok (Smt.BoolLit b)
+  (* A zero-argument constant function IS its literal (see [const_fns]);
+     `_ < size_x()` reflects exactly as `_ < 128` does. *)
+  | A.EApp (A.EVar { A.txt = f; _ }, [], _) when is_const_fn f ->
+    Ok (Hashtbl.find const_fns f)
   (* A float literal, and float arithmetic over literals ONLY, folded to one.
      A `+.` with a non-literal operand falls through to [None] here, which makes
      the enclosing predicate untranslatable — the documented skip for symbolic
