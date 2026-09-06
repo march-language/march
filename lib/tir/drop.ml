@@ -89,7 +89,48 @@
       [TRecord] by design — Perceus never emits inc/dec on those aggregates at
       all, reconciling at the field level instead — so there is no bare
       [EDecRC] on them for this pass to rewrite.  Their drop story is a
-      separate question, untouched here. *)
+      separate question, untouched here.
+
+    {1 Closure environments}
+
+    A defunctionalized closure is an [EAlloc] of a [TDClosure] struct —
+    [alloc $Clo_f$7(f$apply$7, capture1, capture2)] — and releasing that cell
+    had the same shallow-free problem, with a much wider blast radius: EVERY
+    value a lambda captured leaked.  A thousand closures each capturing a 1 MB
+    array, called once and dropped, held 1.07 GB resident.
+
+    The release site cannot be typed its way out of: inside the lifted
+    [f$apply$7] the environment is the parameter [$clo : Ptr(Unit)], and at an
+    outer site a closure value carries a function type.  But an apply function
+    corresponds to exactly ONE [$Clo_...] definition, and it has already loaded
+    every capture it uses into a local — so it needs no layout knowledge at
+    all, only an answer to "did MY release of the environment free it?".
+    [rewrite_apply_clo_drop] asks exactly that: it rewrites the [dec_rc $clo]
+    Perceus splices in ([Perceus.insert_apply_fn_clo_drop]) to
+    [let $freed = march_decrc_freed($clo)] — same reference, same instant, only
+    now remembered — and prefixes every TAIL with
+    [case $freed of True -> drop c1 ; drop c2 | _ -> ()] over those locals.
+
+    {b Nothing moves, and that is the design.}  The captures are BORROWED from
+    the environment ([Perceus.collect_closure_fvs] puts each [let a = $clo.$fvN]
+    binding in the borrowed set, so nothing in the body releases one) and the
+    body reads them well after the splice point, so a release deepened IN PLACE
+    frees a value the body is about to read.  Moving the release to the tails
+    instead — the way [Perceus.insert_owned_aggregate_param_drops] moves an
+    owned aggregate parameter's drop — balances on paper and does not work:
+    see [rewrite_apply_clo_drop] for the measurement that rules it out.
+    Deferring only the CHILD releases keeps the environment's own lifetime
+    bit-for-bit what it was, releases each capture exactly once on exactly the
+    path where the environment died owning it, and puts a branch (not post-call
+    work) before a tail call, so llvm_tco still folds a self-recursive apply
+    function into a loop.
+
+    {b Still shallow:} a bare [EDecRC] on a closure value at an outer site (a
+    closure dropped without ever being applied, or extracted from a data
+    structure).  Its type there is a function type, which names no layout, and
+    the environment is not in hand to read captures out of; resolving it would
+    need a runtime table keyed by the code pointer in field 0.  That is the
+    conservative direction — leak, never crash. *)
 
 (* Type parameters of a variant, in order of first appearance in its
    constructor field types.  Mirrors llvm_toplevel.ml's build_ctor_info, which
@@ -168,6 +209,43 @@ let fresh env pfx = env.ctr <- env.ctr + 1; Printf.sprintf "$%s%d" pfx env.ctr
 (* The variant's constructors, with type arguments substituted in, when [ty] is
    a type this pass may synthesize a drop for.  See the "What is deliberately
    NOT dropped" section of the module doc for each exclusion. *)
+(* A type declared in a library module is registered under its qualified name
+   (Yaml.YamlValue, CubeForge.Biome.Field), while a use site inside that module,
+   or one that reached the type through an alias, carries the short name.
+   [Repr.find_variant] is exact, so this pass found no constructors for
+   essentially every library-defined type, freed each dying cell shallowly, and
+   leaked the cell's children -- in cube_forge a persistent vector's trie
+   nodes, a world's light fields and two field records, 2 MB a frame.
+
+   Resolve a short name to the ONE qualified definition that ends in it, and
+   only when that definition is Boxed and not a concrete niche: an unresolved
+   name classifies Boxed by fallback, and a destructuring drop synthesized
+   against a layout the codegen does not use is worse than the leak. Two or
+   more candidates are a genuine collision and stay unresolved. *)
+let find_variant_by_suffix (env : env) (name : string)
+  : (string * Tir.ty list) list option =
+  if String.contains name '.' then None
+  else
+    let suffix = "." ^ name in
+    let ends_with n =
+      let ln = String.length n and ls = String.length suffix in
+      ln > ls && String.sub n (ln - ls) ls = suffix in
+    match List.filter_map (function
+        | Tir.TDVariant (n, variants) when ends_with n -> Some (n, variants)
+        | _ -> None) env.type_defs with
+    | [ (qualified, variants) ] ->
+      let niche =
+        match Repr.niche_repr_of_concrete ~collision_set:env.collision_set
+                env.type_defs qualified with
+        | Some (Repr.Niche _) -> true
+        | _ -> false in
+      if niche then None
+      else (match Repr.repr_of_ty ~collision_set:env.collision_set env.type_defs
+                    (Tir.TCon (qualified, [])) with
+            | Repr.Boxed -> Some variants
+            | _ -> None)
+    | _ -> None
+
 let droppable_ctors (env : env) (ty : Tir.ty)
   : (string * Tir.ty list) list option =
   match ty with
@@ -216,7 +294,9 @@ let droppable_ctors (env : env) (ty : Tir.ty)
     if concrete_niche then None else
     (match Repr.repr_of_ty ~collision_set:env.collision_set env.type_defs ty with
      | Repr.Boxed ->
-       (match Repr.find_variant env.type_defs name with
+       (match (match Repr.find_variant env.type_defs name with
+               | Some _ as found -> found
+               | None -> find_variant_by_suffix env name) with
         | Some ctors ->
           let params = type_params_of ctors in
           let subst =
@@ -483,6 +563,245 @@ and build_drop_fn env fname ty ctors : Tir.fn_def =
     fn_body = Tir.ECase (Tir.AVar x, branches, None);
     fn_kind = Tir.FnNormal }
 
+(* ── Closure environments ──────────────────────────────────────────────── *)
+
+(** True for the RHS of one of the prefix bindings [Defun.lift_lambda] and
+    Perceus leave at the head of an apply function: a capture read
+    [$clo.$fvN], or the self-binding alias [$clo], either possibly wrapped in a
+    protective [EIncRC].  Mirrors [Perceus.insert_apply_fn_clo_drop]'s
+    [is_clo_source] — this pass has to recognise the same prefix in order to
+    find the release spliced after it. *)
+let rec is_clo_source (clo : string) (e : Tir.expr) : bool =
+  match e with
+  | Tir.EAtom (Tir.AVar src) | Tir.EField (Tir.AVar src, _) ->
+    String.equal src.Tir.v_name clo
+  | Tir.ESeq ((Tir.EIncRC (Tir.AVar src) | Tir.EAtomicIncRC (Tir.AVar src)), inner)
+    when String.equal src.Tir.v_name clo -> is_clo_source clo inner
+  | _ -> false
+
+(** [Some field] when [e] reads capture [field] out of [clo] — the [EField]
+    half of [is_clo_source], with the self-binding alias excluded. *)
+let rec capture_read (clo : string) (e : Tir.expr) : string option =
+  match e with
+  | Tir.EField (Tir.AVar src, f) when String.equal src.Tir.v_name clo -> Some f
+  | Tir.ESeq ((Tir.EIncRC (Tir.AVar src) | Tir.EAtomicIncRC (Tir.AVar src)), inner)
+    when String.equal src.Tir.v_name clo -> capture_read clo inner
+  | _ -> None
+
+(** The apply-wrapper name for a closure struct: ["$Clo_go$7"] -> ["go$apply$7"].
+    Inverse of [Tir_names.clo_struct_name] / [apply_fn_name] applied to the same
+    (fn_name, lam_uid) pair — the uid is everything after the LAST ['$'], which
+    is what keeps a lambda whose defun-minted name itself contains ['$']
+    (["$lam30269"], ["$jp7650"]) resolving correctly. *)
+let apply_name_of_clo (clo_name : string) : string option =
+  if not (Tir_names.is_clo_struct clo_name) then None
+  else
+    let base = String.sub clo_name 5 (String.length clo_name - 5) in
+    match String.rindex_opt base '$' with
+    | None -> None
+    | Some i ->
+      (match int_of_string_opt
+               (String.sub base (i + 1) (String.length base - i - 1)) with
+       | Some uid ->
+         Some (Tir_names.apply_fn_name ~fn_name:(String.sub base 0 i) ~lam_uid:uid)
+       | None -> None)
+
+(** Closure types whose environment OWNS its captures, keyed by apply-fn name.
+
+    This is the gate the first version of this pass was missing, and without it
+    the whole idea is unsound.  [Borrow.closure_escapes] states the rule:
+
+    {v A non-escaping closure does not transfer ownership of its captured free
+       variables to any longer-lived value — so those captures are borrowing
+       dups, not ownership transfers of the caller's reference. v}
+
+    A closure that is only ever the CALLEE of an [ECallPtr] — a join point, an
+    immediately-applied lambda — borrows what it captures; the enclosing scope
+    still owns those values and still releases them.  Releasing them again when
+    the environment dies is a double release.  Measured: without this gate,
+    [test/native/node_discovery.march] (whose Msgpack parser is a long chain of
+    exactly such join points) died with a guard-page hit in the prologue of a
+    recursive list append — a cyclic list built through a dangling pointer, so
+    unbounded recursion, which a 16x larger [MARCH_STACK_MAX] did not prevent —
+    in 17 of 60 runs against 0 of 60 on main.
+
+    So a closure type qualifies only if EVERY allocation site in the module is
+    an [ELet]-bound [EAlloc] whose closure escapes that binding.  The default is
+    to leak: an [EStackAlloc], an allocation in a shape this does not recognise,
+    or a closure type with no allocation site at all, all disqualify it.
+    [Borrow.closure_escapes] is reused verbatim rather than re-derived, so this
+    pass and the borrow fixpoint cannot drift apart on the one question that
+    decides whether the release is a reclaim or a double free. *)
+let owning_apply_fns (m : Tir.tir_module) : (string, unit) Hashtbl.t =
+  (* clo type name -> false as soon as one site fails to transfer ownership. *)
+  let verdict : (string, bool) Hashtbl.t = Hashtbl.create 64 in
+  let note name ok =
+    match Hashtbl.find_opt verdict name with
+    | Some false -> ()
+    | _ -> Hashtbl.replace verdict name ok
+  in
+  let rec scan (e : Tir.expr) : unit =
+    match e with
+    | Tir.ELet (v, Tir.EAlloc (Tir.TCon (n, _), _), e2)
+      when Tir_names.is_clo_struct n ->
+      (* Do NOT descend into the allocation itself: its arguments are atoms, so
+         there is nothing there to find, and the bare-[EAlloc] arm below would
+         re-note this very site as an unrecognised shape and latch it to false.
+         That bug made the gate answer false for EVERY closure type in the
+         module, which silently turned the whole pass off. *)
+      note n (Borrow.closure_escapes v.Tir.v_name e2);
+      scan e2
+    | Tir.ELet (_, Tir.EStackAlloc (Tir.TCon (n, _), _), e2)
+      when Tir_names.is_clo_struct n ->
+      (* A stack-promoted environment is not a heap cell at all: it must never
+         be handed to a release whose IS_HEAP_PTR guard would accept the stack
+         address. *)
+      note n false; scan e2
+    | Tir.EAlloc (Tir.TCon (n, _), _) | Tir.EStackAlloc (Tir.TCon (n, _), _)
+      when Tir_names.is_clo_struct n ->
+      (* An allocation in any other position — an argument, a tail, a field —
+         is a shape this does not analyse.  Fail closed. *)
+      note n false
+    | Tir.ELet (_, e1, e2) | Tir.ESeq (e1, e2) -> scan e1; scan e2
+    | Tir.ELetRec (fns, body) ->
+      List.iter (fun f -> scan f.Tir.fn_body) fns; scan body
+    | Tir.ECase (_, brs, def) ->
+      List.iter (fun br -> scan br.Tir.br_body) brs;
+      Option.iter scan def
+    | _ -> ()
+  in
+  List.iter (fun f -> scan f.Tir.fn_body) m.Tir.tm_fns;
+  let owning = Hashtbl.create 64 in
+  Hashtbl.iter (fun clo_name ok ->
+      if ok then
+        match apply_name_of_clo clo_name with
+        | Some apply_name -> Hashtbl.replace owning apply_name ()
+        | None -> ()) verdict;
+  owning
+
+(** Release a capturing apply function's captures when its own release of the
+    environment is the one that frees it.
+
+    Perceus splices [dec_rc $clo] just after the prefix of capture reads
+    ([Perceus.insert_apply_fn_clo_drop]).  That release stays exactly where it
+    is; only the CHILD releases the shallow free never performed are added, and
+    they are added at the function's tails.
+
+    Nothing moves, which is the point.  Two earlier shapes were built and
+    measured, and both are wrong:
+
+    - {b Deepening the release in place.}  The captures are BORROWED from the
+      environment — [Perceus.collect_closure_fvs] puts each [let a = $clo.$fvN]
+      binding in the borrowed set, so nothing in the body releases one — and
+      the body reads them well after the splice point.  The shallow free is
+      survivable precisely because it orphans the captures rather than freeing
+      them; releasing them there frees a value the body is about to read
+      ([$lam$apply] reads [native_u8_arr_length(a)] two instructions later).
+    - {b Moving the release to the tails} (the way
+      [Perceus.insert_owned_aggregate_param_drops] moves an owned aggregate
+      parameter's drop), so that a deep drop there is safe.  The release count
+      per path is unchanged by that move and the RC arithmetic works out on
+      paper, but it is not sound in practice: with the child releases removed
+      entirely, so that the moved drop does nothing but
+      [march_decrc_freed], [test/native/node_discovery.march] still died with
+      EXC_BAD_ACCESS in the prologue of a recursive list append — a guard-page
+      hit that a 16x larger green-thread stack did not prevent, i.e. unbounded
+      recursion — in 8 of 20 runs against 0 of 20 at the same commit without
+      the move.  The splice point is load-bearing for something this pass
+      should not be relitigating.
+
+    So: rewrite [dec_rc $clo] to [let $freed = march_decrc_freed($clo)], which
+    releases the same reference at the same instant and merely remembers what
+    that release did, and prefix every tail with
+
+    {v  case $freed of True -> drop c1 ; drop c2 | _ -> () v}
+
+    over the capture locals the prefix already loaded.  Those locals are in
+    scope at every tail (their bindings dominate the whole body), they are
+    still valid there (the free was shallow), and each is released exactly once
+    on exactly the path where the environment died owning it.  A [case] before
+    a tail expression is not work AFTER a call, so a tail call stays one and
+    llvm_tco still folds a self-recursive apply function into a loop.
+
+    Leaves the body untouched unless the expected shape is found — a prefix of
+    [$clo]-source bindings followed by [ESeq (EDecRC $clo, rest)].  Anything
+    else means Perceus spliced no release here (a capture-free apply function,
+    the REPL-only arm) and there is nothing to pair child releases with. *)
+let rewrite_apply_clo_drop (env : env) (body : Tir.expr) : Tir.expr =
+  let clo = Tir_names.clo_param_name in
+  let clo_var =
+    { Tir.v_name = clo; v_ty = Tir.TPtr Tir.TUnit; v_lin = Tir.Unr } in
+  let unit_expr = Tir.ETuple [] in
+  (* Capture locals, in prefix order, that are worth releasing.  A capture read
+     twice binds twice; only the first binding is kept, so the environment's
+     single reference is released once. *)
+  let seen_fields = Hashtbl.create 4 in
+  let captures = ref [] in
+  let note_capture field (v : Tir.var) =
+    if Rc_types.needs_rc v.Tir.v_ty && not (Hashtbl.mem seen_fields field)
+    then begin
+      Hashtbl.add seen_fields field ();
+      captures := v :: !captures
+    end
+  in
+  let drop_ops () =
+    List.rev_map (fun (v : Tir.var) ->
+        if may_be_non_heap env v.Tir.v_ty then Tir.EDecRC (Tir.AVar v)
+        else match drop_fn_for env v.Tir.v_ty with
+          | Some callee ->
+            let f = { Tir.v_name = callee;
+                      v_ty = Tir.TFn ([v.Tir.v_ty], Tir.TUnit);
+                      v_lin = Tir.Unr } in
+            Tir.EApp (f, [Tir.AVar v])
+          | None -> Tir.EDecRC (Tir.AVar v))
+      !captures
+  in
+  let rec chain = function
+    | [] -> unit_expr
+    | [last] -> last
+    | op :: rest -> Tir.ESeq (op, chain rest)
+  in
+  let rec push (freed : Tir.var) (e : Tir.expr) : Tir.expr =
+    match e with
+    | Tir.ELet (v, e1, e2) -> Tir.ELet (v, e1, push freed e2)
+    | Tir.ESeq (e1, e2) -> Tir.ESeq (e1, push freed e2)
+    | Tir.ELetRec (fns, inner) -> Tir.ELetRec (fns, push freed inner)
+    | Tir.ECase (a, branches, default) ->
+      Tir.ECase (a,
+        List.map (fun br -> { br with Tir.br_body = push freed br.Tir.br_body })
+          branches,
+        Option.map (push freed) default)
+    | tail ->
+      let guarded =
+        Tir.ECase (Tir.AVar freed,
+          [ { Tir.br_tag = "True"; br_vars = []; br_body = chain (drop_ops ()) } ],
+          Some unit_expr)
+      in
+      Tir.ESeq (guarded, tail)
+  in
+  let rec walk (e : Tir.expr) : Tir.expr option =
+    match e with
+    | Tir.ELet (v, e1, rest) when is_clo_source clo e1 ->
+      (match capture_read clo e1 with
+       | Some field -> note_capture field v
+       | None -> ());
+      Option.map (fun rest' -> Tir.ELet (v, e1, rest')) (walk rest)
+    | Tir.ESeq (Tir.EDecRC (Tir.AVar v), rest) when String.equal v.Tir.v_name clo ->
+      if !captures = [] then None
+      else begin
+        let freed = { Tir.v_name = fresh env "cfree"; v_ty = Tir.TBool;
+                      v_lin = Tir.Unr } in
+        let decrc_freed =
+          { Tir.v_name = "march_decrc_freed";
+            v_ty = Tir.TFn ([Tir.TPtr Tir.TUnit], Tir.TBool); v_lin = Tir.Unr } in
+        Some (Tir.ELet (freed, Tir.EApp (decrc_freed, [Tir.AVar clo_var]),
+                        push freed rest))
+      end
+    | _ -> None
+  in
+  match walk body with Some body' -> body' | None -> body
+
+
 (* ── Rewriting bare drops at their use sites ───────────────────────────── *)
 
 let rewrite_dec env (atom : Tir.atom) (orig : Tir.expr) : Tir.expr =
@@ -545,8 +864,21 @@ let run (m : Tir.tir_module) : Tir.tir_module =
   let collision_set = Collision_set.compute m.Tir.tm_types in
   let env = { type_defs = m.Tir.tm_types; collision_set;
               names = Hashtbl.create 32; fns = []; ctr = 0 } in
+  (* Apply functions whose environment owns what it captured — see
+     [owning_apply_fns] for why this gate is load-bearing rather than an
+     optimisation. *)
+  let owning = owning_apply_fns m in
   let fns = List.map (fun f ->
-      { f with Tir.fn_body = rewrite env f.Tir.fn_body }) m.Tir.tm_fns in
+      let body = rewrite env f.Tir.fn_body in
+      (* Only an apply function carries a [$clo] parameter to pair child
+         releases with; [fn_kind] is defun's own tag for one, so no name
+         parsing is involved. *)
+      let body =
+        if f.Tir.fn_kind = Tir.FnApply && Hashtbl.mem owning f.Tir.fn_name
+        then rewrite_apply_clo_drop env body
+        else body
+      in
+      { f with Tir.fn_body = body }) m.Tir.tm_fns in
   (* Synthesized bodies are built already-rewritten (drop_fn_for is called
      directly when emitting each field op), so they are appended as-is. *)
   { m with Tir.tm_fns = fns @ List.rev env.fns }

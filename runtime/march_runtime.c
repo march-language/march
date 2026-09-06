@@ -571,6 +571,47 @@ void march_decrc_local(void *p) {
     }
 }
 
+/* Sibling of march_decrc_local that reports whether the release freed the
+ * object, for a caller that has work to do only on the path where it did
+ * (Drop.run's closure-capture releases).
+ *
+ * It exists rather than reusing march_decrc_freed because the two differ in
+ * ATOMICITY POLICY, not just in the return value: march_decrc_freed is
+ * unconditionally atomic, while the "local" ops take a non-atomic fast path
+ * off the scheduler.  Substituting one for the other at a site the compiler
+ * previously emitted as march_decrc_local leaves that object decremented
+ * atomically at one site and non-atomically at another, and a read-modify-write
+ * pair split that way loses updates in both directions — a premature free.
+ * Measured: swapping in march_decrc_freed at the closure-environment release,
+ * with no other change and no child releases at all, took
+ * test/native/node_discovery.march from 0 crashes in 60 runs to 21 in 40.
+ * Mirror march_decrc_local's branch structure exactly; only the report is new.
+ *
+ * Returns 0 for a non-heap pointer — the opposite of march_decrc_freed, and
+ * deliberately: "nothing was freed" is the answer that makes a caller skip its
+ * child releases, which is the safe direction for a stack-promoted or
+ * tagged-scalar value. */
+int64_t march_decrc_local_freed(void *p) {
+    if (!IS_HEAP_PTR(p)) return 0;
+    if (march_sched_in_scheduler() || march_tls_concurrent_rc)
+        return march_decrc_freed(p);
+    march_hdr *h = (march_hdr *)p;
+    h->rc--;
+    if (gc_trace_on())
+        gc_emit(h->rc <= 0 ? "free" : "dec_ref", p, 0, h->rc, h->tag);
+    if (h->rc <= 0) {
+        if (h->rc < 0) {
+            fprintf(stderr, "march: local RC underflow at %p — aborting\n", p);
+            abort();
+        }
+        march_run_resource_dtor(p);
+        MARCH_FREE_BUMP();
+        free(p);
+        return 1;
+    }
+    return 0;
+}
+
 /* ── IOList hash ─────────────────────────────────────────────────────── */
 
 /* IOList variant tags (must match iolist.march stdlib):

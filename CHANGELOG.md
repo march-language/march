@@ -176,6 +176,18 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A closure environment was freed shallowly, so every captured value
+  leaked.** Releasing a lambda's environment freed the cell and left what the
+  lambda had captured allocated forever. A thousand closures each capturing a
+  1 MB array, called once and dropped, held 1,073 MB resident; they now hold
+  9.5 MB. A capturing closure's own release now records whether it was the one
+  that freed the environment, and releases the captures at the function's tails
+  on that path — so the captures stay valid for the body that borrows them, and
+  the environment's own lifetime is unchanged. The release is emitted only for
+  closures whose environment provably owns what it captured: a closure that is
+  only ever invoked locally (a join point, an immediately-applied lambda)
+  borrows its captures, and releasing those would be a double free. A closure
+  released without ever being applied is still freed shallowly.
 - **`@[measure]` on a function no predicate could ever translate is now an
   error at the annotation.** A zero-argument or multi-parameter `@[measure]`
   used to be accepted by the predicate-vocabulary check and dropped by the

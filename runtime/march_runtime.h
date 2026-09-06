@@ -24,6 +24,9 @@ void  march_decrc(void *p);
 /* Decrement RC and return 1 if the object was freed (RC hit 0), 0 if still alive.
    Used when pattern-matching to conditionally IncRC extracted child pointers. */
 int64_t march_decrc_freed(void *p);
+/* Decrement RC with march_decrc_local's atomicity policy and return 1 if the
+   object was freed, 0 otherwise (0 also for a non-heap pointer). */
+int64_t march_decrc_local_freed(void *p);
 
 /* Non-atomic reference counting — only safe for values provably owned by a
    single thread (no actor send in their lifetime).  Faster than atomic ops
