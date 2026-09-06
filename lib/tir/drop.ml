@@ -89,7 +89,48 @@
       [TRecord] by design — Perceus never emits inc/dec on those aggregates at
       all, reconciling at the field level instead — so there is no bare
       [EDecRC] on them for this pass to rewrite.  Their drop story is a
-      separate question, untouched here. *)
+      separate question, untouched here.
+
+    {1 Closure environments}
+
+    A defunctionalized closure is an [EAlloc] of a [TDClosure] struct —
+    [alloc $Clo_f$7(f$apply$7, capture1, capture2)] — and releasing that cell
+    had the same shallow-free problem, with a much wider blast radius: EVERY
+    value a lambda captured leaked.  A thousand closures each capturing a 1 MB
+    array, called once and dropped, held 1.07 GB resident.
+
+    The release site cannot be typed its way out of: inside the lifted
+    [f$apply$7] the environment is the parameter [$clo : Ptr(Unit)], and at an
+    outer site a closure value carries a function type.  But an apply function
+    corresponds to exactly ONE [$Clo_...] definition, and it has already loaded
+    every capture it uses into a local — so it needs no layout knowledge at
+    all, only an answer to "did MY release of the environment free it?".
+    [rewrite_apply_clo_drop] asks exactly that: it rewrites the [dec_rc $clo]
+    Perceus splices in ([Perceus.insert_apply_fn_clo_drop]) to
+    [let $freed = march_decrc_freed($clo)] — same reference, same instant, only
+    now remembered — and prefixes every TAIL with
+    [case $freed of True -> drop c1 ; drop c2 | _ -> ()] over those locals.
+
+    {b Nothing moves, and that is the design.}  The captures are BORROWED from
+    the environment ([Perceus.collect_closure_fvs] puts each [let a = $clo.$fvN]
+    binding in the borrowed set, so nothing in the body releases one) and the
+    body reads them well after the splice point, so a release deepened IN PLACE
+    frees a value the body is about to read.  Moving the release to the tails
+    instead — the way [Perceus.insert_owned_aggregate_param_drops] moves an
+    owned aggregate parameter's drop — balances on paper and does not work:
+    see [rewrite_apply_clo_drop] for the measurement that rules it out.
+    Deferring only the CHILD releases keeps the environment's own lifetime
+    bit-for-bit what it was, releases each capture exactly once on exactly the
+    path where the environment died owning it, and puts a branch (not post-call
+    work) before a tail call, so llvm_tco still folds a self-recursive apply
+    function into a loop.
+
+    {b Still shallow:} a bare [EDecRC] on a closure value at an outer site (a
+    closure dropped without ever being applied, or extracted from a data
+    structure).  Its type there is a function type, which names no layout, and
+    the environment is not in hand to read captures out of; resolving it would
+    need a runtime table keyed by the code pointer in field 0.  That is the
+    conservative direction — leak, never crash. *)
 
 (* Type parameters of a variant, in order of first appearance in its
    constructor field types.  Mirrors llvm_toplevel.ml's build_ctor_info, which
@@ -522,6 +563,154 @@ and build_drop_fn env fname ty ctors : Tir.fn_def =
     fn_body = Tir.ECase (Tir.AVar x, branches, None);
     fn_kind = Tir.FnNormal }
 
+(* ── Closure environments ──────────────────────────────────────────────── *)
+
+(** True for the RHS of one of the prefix bindings [Defun.lift_lambda] and
+    Perceus leave at the head of an apply function: a capture read
+    [$clo.$fvN], or the self-binding alias [$clo], either possibly wrapped in a
+    protective [EIncRC].  Mirrors [Perceus.insert_apply_fn_clo_drop]'s
+    [is_clo_source] — this pass has to recognise the same prefix in order to
+    find the release spliced after it. *)
+let rec is_clo_source (clo : string) (e : Tir.expr) : bool =
+  match e with
+  | Tir.EAtom (Tir.AVar src) | Tir.EField (Tir.AVar src, _) ->
+    String.equal src.Tir.v_name clo
+  | Tir.ESeq ((Tir.EIncRC (Tir.AVar src) | Tir.EAtomicIncRC (Tir.AVar src)), inner)
+    when String.equal src.Tir.v_name clo -> is_clo_source clo inner
+  | _ -> false
+
+(** [Some field] when [e] reads capture [field] out of [clo] — the [EField]
+    half of [is_clo_source], with the self-binding alias excluded. *)
+let rec capture_read (clo : string) (e : Tir.expr) : string option =
+  match e with
+  | Tir.EField (Tir.AVar src, f) when String.equal src.Tir.v_name clo -> Some f
+  | Tir.ESeq ((Tir.EIncRC (Tir.AVar src) | Tir.EAtomicIncRC (Tir.AVar src)), inner)
+    when String.equal src.Tir.v_name clo -> capture_read clo inner
+  | _ -> None
+
+(** Release a capturing apply function's captures when its own release of the
+    environment is the one that frees it.
+
+    Perceus splices [dec_rc $clo] just after the prefix of capture reads
+    ([Perceus.insert_apply_fn_clo_drop]).  That release stays exactly where it
+    is; only the CHILD releases the shallow free never performed are added, and
+    they are added at the function's tails.
+
+    Nothing moves, which is the point.  Two earlier shapes were built and
+    measured, and both are wrong:
+
+    - {b Deepening the release in place.}  The captures are BORROWED from the
+      environment — [Perceus.collect_closure_fvs] puts each [let a = $clo.$fvN]
+      binding in the borrowed set, so nothing in the body releases one — and
+      the body reads them well after the splice point.  The shallow free is
+      survivable precisely because it orphans the captures rather than freeing
+      them; releasing them there frees a value the body is about to read
+      ([$lam$apply] reads [native_u8_arr_length(a)] two instructions later).
+    - {b Moving the release to the tails} (the way
+      [Perceus.insert_owned_aggregate_param_drops] moves an owned aggregate
+      parameter's drop), so that a deep drop there is safe.  The release count
+      per path is unchanged by that move and the RC arithmetic works out on
+      paper, but it is not sound in practice: with the child releases removed
+      entirely, so that the moved drop does nothing but
+      [march_decrc_freed], [test/native/node_discovery.march] still died with
+      EXC_BAD_ACCESS in the prologue of a recursive list append — a guard-page
+      hit that a 16x larger green-thread stack did not prevent, i.e. unbounded
+      recursion — in 8 of 20 runs against 0 of 20 at the same commit without
+      the move.  The splice point is load-bearing for something this pass
+      should not be relitigating.
+
+    So: rewrite [dec_rc $clo] to [let $freed = march_decrc_freed($clo)], which
+    releases the same reference at the same instant and merely remembers what
+    that release did, and prefix every tail with
+
+    {v  case $freed of True -> drop c1 ; drop c2 | _ -> () v}
+
+    over the capture locals the prefix already loaded.  Those locals are in
+    scope at every tail (their bindings dominate the whole body), they are
+    still valid there (the free was shallow), and each is released exactly once
+    on exactly the path where the environment died owning it.  A [case] before
+    a tail expression is not work AFTER a call, so a tail call stays one and
+    llvm_tco still folds a self-recursive apply function into a loop.
+
+    Leaves the body untouched unless the expected shape is found — a prefix of
+    [$clo]-source bindings followed by [ESeq (EDecRC $clo, rest)].  Anything
+    else means Perceus spliced no release here (a capture-free apply function,
+    the REPL-only arm) and there is nothing to pair child releases with. *)
+let rewrite_apply_clo_drop (env : env) (body : Tir.expr) : Tir.expr =
+  let clo = Tir_names.clo_param_name in
+  let clo_var =
+    { Tir.v_name = clo; v_ty = Tir.TPtr Tir.TUnit; v_lin = Tir.Unr } in
+  let unit_expr = Tir.ETuple [] in
+  (* Capture locals, in prefix order, that are worth releasing.  A capture read
+     twice binds twice; only the first binding is kept, so the environment's
+     single reference is released once. *)
+  let seen_fields = Hashtbl.create 4 in
+  let captures = ref [] in
+  let note_capture field (v : Tir.var) =
+    if Rc_types.needs_rc v.Tir.v_ty && not (Hashtbl.mem seen_fields field)
+    then begin
+      Hashtbl.add seen_fields field ();
+      captures := v :: !captures
+    end
+  in
+  let drop_ops () =
+    List.rev_map (fun (v : Tir.var) ->
+        if may_be_non_heap env v.Tir.v_ty then Tir.EDecRC (Tir.AVar v)
+        else match drop_fn_for env v.Tir.v_ty with
+          | Some callee ->
+            let f = { Tir.v_name = callee;
+                      v_ty = Tir.TFn ([v.Tir.v_ty], Tir.TUnit);
+                      v_lin = Tir.Unr } in
+            Tir.EApp (f, [Tir.AVar v])
+          | None -> Tir.EDecRC (Tir.AVar v))
+      !captures
+  in
+  let rec chain = function
+    | [] -> unit_expr
+    | [last] -> last
+    | op :: rest -> Tir.ESeq (op, chain rest)
+  in
+  let rec push (freed : Tir.var) (e : Tir.expr) : Tir.expr =
+    match e with
+    | Tir.ELet (v, e1, e2) -> Tir.ELet (v, e1, push freed e2)
+    | Tir.ESeq (e1, e2) -> Tir.ESeq (e1, push freed e2)
+    | Tir.ELetRec (fns, inner) -> Tir.ELetRec (fns, push freed inner)
+    | Tir.ECase (a, branches, default) ->
+      Tir.ECase (a,
+        List.map (fun br -> { br with Tir.br_body = push freed br.Tir.br_body })
+          branches,
+        Option.map (push freed) default)
+    | tail ->
+      let guarded =
+        Tir.ECase (Tir.AVar freed,
+          [ { Tir.br_tag = "True"; br_vars = []; br_body = chain (drop_ops ()) } ],
+          Some unit_expr)
+      in
+      Tir.ESeq (guarded, tail)
+  in
+  let rec walk (e : Tir.expr) : Tir.expr option =
+    match e with
+    | Tir.ELet (v, e1, rest) when is_clo_source clo e1 ->
+      (match capture_read clo e1 with
+       | Some field -> note_capture field v
+       | None -> ());
+      Option.map (fun rest' -> Tir.ELet (v, e1, rest')) (walk rest)
+    | Tir.ESeq (Tir.EDecRC (Tir.AVar v), rest) when String.equal v.Tir.v_name clo ->
+      if !captures = [] then None
+      else begin
+        let freed = { Tir.v_name = fresh env "cfree"; v_ty = Tir.TBool;
+                      v_lin = Tir.Unr } in
+        let decrc_freed =
+          { Tir.v_name = "march_decrc_freed";
+            v_ty = Tir.TFn ([Tir.TPtr Tir.TUnit], Tir.TBool); v_lin = Tir.Unr } in
+        Some (Tir.ELet (freed, Tir.EApp (decrc_freed, [Tir.AVar clo_var]),
+                        push freed rest))
+      end
+    | _ -> None
+  in
+  match walk body with Some body' -> body' | None -> body
+
+
 (* ── Rewriting bare drops at their use sites ───────────────────────────── *)
 
 let rewrite_dec env (atom : Tir.atom) (orig : Tir.expr) : Tir.expr =
@@ -585,7 +774,15 @@ let run (m : Tir.tir_module) : Tir.tir_module =
   let env = { type_defs = m.Tir.tm_types; collision_set;
               names = Hashtbl.create 32; fns = []; ctr = 0 } in
   let fns = List.map (fun f ->
-      { f with Tir.fn_body = rewrite env f.Tir.fn_body }) m.Tir.tm_fns in
+      let body = rewrite env f.Tir.fn_body in
+      (* Only an apply function carries a [$clo] parameter to pair child
+         releases with; [fn_kind] is defun's own tag for one, so no name
+         parsing is involved. *)
+      let body =
+        if f.Tir.fn_kind = Tir.FnApply then rewrite_apply_clo_drop env body
+        else body
+      in
+      { f with Tir.fn_body = body }) m.Tir.tm_fns in
   (* Synthesized bodies are built already-rewritten (drop_fn_for is called
      directly when emitting each field op), so they are appended as-is. *)
   { m with Tir.tm_fns = fns @ List.rev env.fns }
