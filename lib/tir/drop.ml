@@ -588,6 +588,97 @@ let rec capture_read (clo : string) (e : Tir.expr) : string option =
     when String.equal src.Tir.v_name clo -> capture_read clo inner
   | _ -> None
 
+(** The apply-wrapper name for a closure struct: ["$Clo_go$7"] -> ["go$apply$7"].
+    Inverse of [Tir_names.clo_struct_name] / [apply_fn_name] applied to the same
+    (fn_name, lam_uid) pair — the uid is everything after the LAST ['$'], which
+    is what keeps a lambda whose defun-minted name itself contains ['$']
+    (["$lam30269"], ["$jp7650"]) resolving correctly. *)
+let apply_name_of_clo (clo_name : string) : string option =
+  if not (Tir_names.is_clo_struct clo_name) then None
+  else
+    let base = String.sub clo_name 5 (String.length clo_name - 5) in
+    match String.rindex_opt base '$' with
+    | None -> None
+    | Some i ->
+      (match int_of_string_opt
+               (String.sub base (i + 1) (String.length base - i - 1)) with
+       | Some uid ->
+         Some (Tir_names.apply_fn_name ~fn_name:(String.sub base 0 i) ~lam_uid:uid)
+       | None -> None)
+
+(** Closure types whose environment OWNS its captures, keyed by apply-fn name.
+
+    This is the gate the first version of this pass was missing, and without it
+    the whole idea is unsound.  [Borrow.closure_escapes] states the rule:
+
+    {v A non-escaping closure does not transfer ownership of its captured free
+       variables to any longer-lived value — so those captures are borrowing
+       dups, not ownership transfers of the caller's reference. v}
+
+    A closure that is only ever the CALLEE of an [ECallPtr] — a join point, an
+    immediately-applied lambda — borrows what it captures; the enclosing scope
+    still owns those values and still releases them.  Releasing them again when
+    the environment dies is a double release.  Measured: without this gate,
+    [test/native/node_discovery.march] (whose Msgpack parser is a long chain of
+    exactly such join points) died with a guard-page hit in the prologue of a
+    recursive list append — a cyclic list built through a dangling pointer, so
+    unbounded recursion, which a 16x larger [MARCH_STACK_MAX] did not prevent —
+    in 17 of 60 runs against 0 of 60 on main.
+
+    So a closure type qualifies only if EVERY allocation site in the module is
+    an [ELet]-bound [EAlloc] whose closure escapes that binding.  The default is
+    to leak: an [EStackAlloc], an allocation in a shape this does not recognise,
+    or a closure type with no allocation site at all, all disqualify it.
+    [Borrow.closure_escapes] is reused verbatim rather than re-derived, so this
+    pass and the borrow fixpoint cannot drift apart on the one question that
+    decides whether the release is a reclaim or a double free. *)
+let owning_apply_fns (m : Tir.tir_module) : (string, unit) Hashtbl.t =
+  (* clo type name -> false as soon as one site fails to transfer ownership. *)
+  let verdict : (string, bool) Hashtbl.t = Hashtbl.create 64 in
+  let note name ok =
+    match Hashtbl.find_opt verdict name with
+    | Some false -> ()
+    | _ -> Hashtbl.replace verdict name ok
+  in
+  let rec scan (e : Tir.expr) : unit =
+    match e with
+    | Tir.ELet (v, Tir.EAlloc (Tir.TCon (n, _), _), e2)
+      when Tir_names.is_clo_struct n ->
+      (* Do NOT descend into the allocation itself: its arguments are atoms, so
+         there is nothing there to find, and the bare-[EAlloc] arm below would
+         re-note this very site as an unrecognised shape and latch it to false.
+         That bug made the gate answer false for EVERY closure type in the
+         module, which silently turned the whole pass off. *)
+      note n (Borrow.closure_escapes v.Tir.v_name e2);
+      scan e2
+    | Tir.ELet (_, Tir.EStackAlloc (Tir.TCon (n, _), _), e2)
+      when Tir_names.is_clo_struct n ->
+      (* A stack-promoted environment is not a heap cell at all: it must never
+         be handed to a release whose IS_HEAP_PTR guard would accept the stack
+         address. *)
+      note n false; scan e2
+    | Tir.EAlloc (Tir.TCon (n, _), _) | Tir.EStackAlloc (Tir.TCon (n, _), _)
+      when Tir_names.is_clo_struct n ->
+      (* An allocation in any other position — an argument, a tail, a field —
+         is a shape this does not analyse.  Fail closed. *)
+      note n false
+    | Tir.ELet (_, e1, e2) | Tir.ESeq (e1, e2) -> scan e1; scan e2
+    | Tir.ELetRec (fns, body) ->
+      List.iter (fun f -> scan f.Tir.fn_body) fns; scan body
+    | Tir.ECase (_, brs, def) ->
+      List.iter (fun br -> scan br.Tir.br_body) brs;
+      Option.iter scan def
+    | _ -> ()
+  in
+  List.iter (fun f -> scan f.Tir.fn_body) m.Tir.tm_fns;
+  let owning = Hashtbl.create 64 in
+  Hashtbl.iter (fun clo_name ok ->
+      if ok then
+        match apply_name_of_clo clo_name with
+        | Some apply_name -> Hashtbl.replace owning apply_name ()
+        | None -> ()) verdict;
+  owning
+
 (** Release a capturing apply function's captures when its own release of the
     environment is the one that frees it.
 
@@ -773,13 +864,18 @@ let run (m : Tir.tir_module) : Tir.tir_module =
   let collision_set = Collision_set.compute m.Tir.tm_types in
   let env = { type_defs = m.Tir.tm_types; collision_set;
               names = Hashtbl.create 32; fns = []; ctr = 0 } in
+  (* Apply functions whose environment owns what it captured — see
+     [owning_apply_fns] for why this gate is load-bearing rather than an
+     optimisation. *)
+  let owning = owning_apply_fns m in
   let fns = List.map (fun f ->
       let body = rewrite env f.Tir.fn_body in
       (* Only an apply function carries a [$clo] parameter to pair child
          releases with; [fn_kind] is defun's own tag for one, so no name
          parsing is involved. *)
       let body =
-        if f.Tir.fn_kind = Tir.FnApply then rewrite_apply_clo_drop env body
+        if f.Tir.fn_kind = Tir.FnApply && Hashtbl.mem owning f.Tir.fn_name
+        then rewrite_apply_clo_drop env body
         else body
       in
       { f with Tir.fn_body = body }) m.Tir.tm_fns in
