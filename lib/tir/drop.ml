@@ -168,6 +168,43 @@ let fresh env pfx = env.ctr <- env.ctr + 1; Printf.sprintf "$%s%d" pfx env.ctr
 (* The variant's constructors, with type arguments substituted in, when [ty] is
    a type this pass may synthesize a drop for.  See the "What is deliberately
    NOT dropped" section of the module doc for each exclusion. *)
+(* A type declared in a library module is registered under its qualified name
+   (Yaml.YamlValue, CubeForge.Biome.Field), while a use site inside that module,
+   or one that reached the type through an alias, carries the short name.
+   [Repr.find_variant] is exact, so this pass found no constructors for
+   essentially every library-defined type, freed each dying cell shallowly, and
+   leaked the cell's children -- in cube_forge a persistent vector's trie
+   nodes, a world's light fields and two field records, 2 MB a frame.
+
+   Resolve a short name to the ONE qualified definition that ends in it, and
+   only when that definition is Boxed and not a concrete niche: an unresolved
+   name classifies Boxed by fallback, and a destructuring drop synthesized
+   against a layout the codegen does not use is worse than the leak. Two or
+   more candidates are a genuine collision and stay unresolved. *)
+let find_variant_by_suffix (env : env) (name : string)
+  : (string * Tir.ty list) list option =
+  if String.contains name '.' then None
+  else
+    let suffix = "." ^ name in
+    let ends_with n =
+      let ln = String.length n and ls = String.length suffix in
+      ln > ls && String.sub n (ln - ls) ls = suffix in
+    match List.filter_map (function
+        | Tir.TDVariant (n, variants) when ends_with n -> Some (n, variants)
+        | _ -> None) env.type_defs with
+    | [ (qualified, variants) ] ->
+      let niche =
+        match Repr.niche_repr_of_concrete ~collision_set:env.collision_set
+                env.type_defs qualified with
+        | Some (Repr.Niche _) -> true
+        | _ -> false in
+      if niche then None
+      else (match Repr.repr_of_ty ~collision_set:env.collision_set env.type_defs
+                    (Tir.TCon (qualified, [])) with
+            | Repr.Boxed -> Some variants
+            | _ -> None)
+    | _ -> None
+
 let droppable_ctors (env : env) (ty : Tir.ty)
   : (string * Tir.ty list) list option =
   match ty with
@@ -216,7 +253,9 @@ let droppable_ctors (env : env) (ty : Tir.ty)
     if concrete_niche then None else
     (match Repr.repr_of_ty ~collision_set:env.collision_set env.type_defs ty with
      | Repr.Boxed ->
-       (match Repr.find_variant env.type_defs name with
+       (match (match Repr.find_variant env.type_defs name with
+               | Some _ as found -> found
+               | None -> find_variant_by_suffix env name) with
         | Some ctors ->
           let params = type_params_of ctors in
           let subst =
