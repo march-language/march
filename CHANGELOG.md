@@ -11,6 +11,16 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Native arrays carry a header tag.** `native_arr_alloc` left the tag at `0`,
+  an ordinary ADT constructor index, so every generic walker treated a
+  `NativeU8Arr` as a cell of pointer fields and read its payload as pointers.
+  Arrays now carry `MARCH_NATIVE_ARR_TAG`, and the cross-heap message copier
+  (`copy_value`) copies them by byte length instead of by field count. Latent
+  today, because native arrays are barred from actor messages; a prerequisite
+  for lifting that bar.
+
 ### Added
 
 - **Refinement predicates can name a zero-argument constant function.**

@@ -7777,6 +7777,7 @@ static void *native_arr_alloc(int64_t len, int64_t elem_size, uint8_t kind) {
     if ((((uintptr_t)arr + NATIVE_ARR_HDR) & 15) != 0) {
         fputs("march: native array: misaligned allocation\n", stderr); exit(1);
     }
+    ((march_hdr *)arr)->tag = MARCH_NATIVE_ARR_TAG;
     *(int64_t *)((char *)arr + 16) = len;
     *(uint8_t *)((char *)arr + 24) = kind;
     return arr;

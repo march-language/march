@@ -182,6 +182,13 @@ typedef struct { int64_t rc; int32_t tag; int32_t pad; int64_t len; char data[];
  * binding returned to the caller — ordinary RC, no leak, no cancel-after-
  * fire UAF (the object only dies once BOTH release it). */
 #define MARCH_TIMER_TOKEN_TAG ((int32_t)-5)
+/* Native arrays (NativeU8Arr and friends) carry their own sentinel so a
+ * generic walker can tell a flat byte/word buffer from an ADT cell. Without
+ * it every walker fell through to the ADT case, read n_fields out of
+ * alloc_meta and scanned the PAYLOAD for pointers -- which is why native
+ * arrays were barred from actor messages (GAPS.md G44) rather than copied.
+ * See native_arr_alloc, which sets it, and march_message.c's copy_value. */
+#define MARCH_NATIVE_ARR_TAG ((int32_t)-6)
 
 /* send_after(pid, msg, delay_ms) : TimerRef — schedule msg for delivery to
  * the actor `actor` after delay_ms milliseconds. RC contract matches
