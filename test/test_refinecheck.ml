@@ -12105,7 +12105,8 @@ module Audit_fixture = struct
         sc_strategy = A.OneForOne;
         sc_max_restarts = 0;
         sc_window_secs = 0;
-        sc_order = [] }
+        sc_order = [];
+        sc_backoff = A.default_backoff }
     in
     let actor_def : A.actor_def =
       { A.actor_state = [ { A.fld_name = nm "value"; fld_ty = refine_or_plain 34 int_ty; fld_lin = A.Unrestricted } ];
