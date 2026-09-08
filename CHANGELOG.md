@@ -13,6 +13,22 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A stdlib file that fails to parse is now a hard error instead of a missing
+  module.** Loading a stdlib source that did not parse printed one unbannered
+  line to stderr and then continued *without that module*, so what the user
+  actually saw was an unrelated ``Unknown module `Session` `` from the
+  typechecker, pointing nowhere near the cause — and the stderr line was easy
+  to miss, since it has no `-- ERROR --` banner and is printed before the
+  program's own diagnostics. The parse error is now rendered through the same
+  banner formatter user files get, naming the file and position, and the
+  compiler exits.
+
+- **`doc` before a `type` or `proof cap` says what is wrong.** It was a bare
+  parse error whose caret landed on the following declaration under the generic
+  "I got stuck here". It now reports ``` `doc` goes before a function; use a
+  `--` comment here. ``` with a hint. `doc` attaches to `fn`/`pfn` only; type
+  and `proof cap` declarations have no doc slot.
+
 - **Native arrays carry a header tag.** `native_arr_alloc` left the tag at `0`,
   an ordinary ADT constructor index, so every generic walker treated a
   `NativeU8Arr` as a cell of pointer fields and read its payload as pointers.
