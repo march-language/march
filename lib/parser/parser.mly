@@ -26,6 +26,14 @@
   (** Collect a parse error into the buffer and then raise [ParseError].
       Use this in sub-production error rules where Menhir requires the action
       to abort (assert false is generated after the action otherwise). *)
+  (* Shared by the `doc`-on-a-non-function rules in [decl]. *)
+  let doc_not_on_decl_msg =
+    "`doc` goes before a function; use a `--` comment here."
+  let doc_not_on_decl_hint what =
+    Some (Printf.sprintf
+      "`doc \"...\"` attaches a doc string to a `fn` or `pfn`. %s don't carry one \xe2\x80\x94 write `-- ...` on the line above instead."
+      what)
+
   let error_raise msg hint pos =
     Parse_errors.collect_parse_error msg hint pos;
     raise (March_errors.Errors.ParseError (msg, hint, pos))
@@ -402,6 +410,37 @@ fn_attr:
       { name ^ ":transient" }
 
 decl:
+  (* `doc` attaches to FUNCTIONS only: [fn_doc] is a field of the function
+     definition record, and neither [DType] nor [DProofCap] has a doc slot to
+     put a string in.  Without these rules a `doc` before a `type` or a
+     `proof cap` is a bare parse error whose caret lands on the NEXT token (the
+     `type` keyword) under the generic "I got stuck here", pointing at a
+     declaration that is perfectly well-formed and saying nothing about the
+     `doc` that actually caused it.  In a stdlib file that used to be worse
+     still -- the module was dropped and the user saw `Unknown module` (see
+     bin/toolchain.ml).  Say where `doc` goes instead.
+
+     Rejecting rather than accepting is deliberate: accepting would mean adding
+     a doc field to [DType]/[DProofCap] and threading it through desugar,
+     typecheck, doc generation and LSP hover -- a cross-cutting AST change with
+     its own design questions, not a diagnostic fix.
+
+     These match the declaration's KEYWORD only, never the whole nonterminal.
+     Spelling them `DOC STRING type_decl` instead costs 11 shift/reduce
+     conflicts in a grammar that currently has zero; erroring on the keyword
+     needs no lookahead past it, since we raise rather than reduce. *)
+  | DOC; STRING; TYPE
+    { error_raise doc_not_on_decl_msg (doc_not_on_decl_hint "Type declarations")
+        $startpos($1) }
+  | DOC; STRING; PTYPE
+    { error_raise doc_not_on_decl_msg (doc_not_on_decl_hint "Type declarations")
+        $startpos($1) }
+  | DOC; STRING; OPAQUE
+    { error_raise doc_not_on_decl_msg (doc_not_on_decl_hint "Type declarations")
+        $startpos($1) }
+  | DOC; STRING; PROOFCAP
+    { error_raise doc_not_on_decl_msg (doc_not_on_decl_hint "`proof cap` declarations")
+        $startpos($1) }
   | DOC; s = STRING; d = fn_decl
     { match d with
       | DFn (def, span) -> DFn ({ def with fn_doc = Some s }, span)

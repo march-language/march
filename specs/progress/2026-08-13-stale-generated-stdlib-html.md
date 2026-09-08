@@ -55,3 +55,27 @@ While there, consider whether a CI check should assert that the generated
 stdlib pages are in sync with `stdlib/*.march` — the failure mode here is
 silent by construction, and `scripts/check-docs.sh`'s stdlib-module-count lint
 did not catch it because the module count did not change.
+
+---
+
+## Resolution (2026-09-08)
+
+Closed by commit `6622c090` ("docs(stdlib): regenerate API docs from stdlib
+source"), which regenerated `docs/docs/stdlib/` from the stdlib source. All the
+acceptance criteria above were re-verified on the current tree:
+
+| Check | Required | Actual |
+| --- | --- | --- |
+| `grep -c 'no compiled implementation yet' docs/docs/stdlib/NativeArray.html` | 0 | 0 |
+| `grep -c fold_f32 docs/docs/stdlib/NativeArray.html` | > 0 | 3 |
+| `grep -c fold_i32 docs/docs/stdlib/NativeArray.html` | > 0 | 3 |
+| `grep -c fold_u8 docs/docs/stdlib/NativeArray.html` | > 0 | 3 |
+| `grep -c mem_peak_bytes docs/docs/stdlib/System.html` | > 0 | 5 |
+
+The false "no compiled implementation yet" claim about `fold_int`/`fold_float`
+is gone from the published page.
+
+The closing paragraph's suggestion — a CI check asserting the generated stdlib
+pages stay in sync with `stdlib/*.march` — was **not** implemented here; it is a
+separate piece of work and is filed as
+`specs/todos/2026-09-08-ci-check-generated-stdlib-html-in-sync.md`.

@@ -63,6 +63,33 @@ git log is authoritative for exact commits.
   run, so it is where most users meet `Actor.call`. (The interpreter still
   cannot abort a handler mid-run: a call whose deadline passes waits for the
   handler to finish before returning `Err`.)
+- **`scripts/run-tests.sh` names the suite that failed.** Every runner failure
+  collapsed into one `FAILED` bit and the lone line
+  `One or more suites FAILED.` — no runner name, no exit status, no signal.
+  That permits a misleading result, because a runner can print
+  `Test Successful` and still exit non-zero (a launcher failure after the
+  summary, a timeout kill, a signal), leaving output with no `[FAIL]` line
+  anywhere. Failures are now attributed at the point of failure and listed in
+  the summary with the original status decoded (`killed by signal 9
+  (SIGKILL)`, `TIMED OUT after 2400s`), and a suite whose executable is missing
+  is reported as `NOT RUN` instead of counting as a pass. The exit code and the
+  `One or more suites FAILED.` line are unchanged.
+
+- **A stdlib file that fails to parse is now a hard error instead of a missing
+  module.** Loading a stdlib source that did not parse printed one unbannered
+  line to stderr and then continued *without that module*, so what the user
+  actually saw was an unrelated ``Unknown module `Session` `` from the
+  typechecker, pointing nowhere near the cause — and the stderr line was easy
+  to miss, since it has no `-- ERROR --` banner and is printed before the
+  program's own diagnostics. The parse error is now rendered through the same
+  banner formatter user files get, naming the file and position, and the
+  compiler exits.
+
+- **`doc` before a `type` or `proof cap` says what is wrong.** It was a bare
+  parse error whose caret landed on the following declaration under the generic
+  "I got stuck here". It now reports ``` `doc` goes before a function; use a
+  `--` comment here. ``` with a hint. `doc` attaches to `fn`/`pfn` only; type
+  and `proof cap` declarations have no doc slot.
 
 - **Native arrays carry a header tag.** `native_arr_alloc` left the tag at `0`,
   an ordinary ADT constructor index, so every generic walker treated a

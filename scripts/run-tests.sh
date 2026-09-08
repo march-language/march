@@ -47,6 +47,12 @@
 # Environment:
 #   MARCH_TEST_TIMEOUT  seconds per suite process  (default: 2400)
 #   MARCH_DUNE_SHUTDOWN if non-empty, run `dune shutdown` first
+#
+# Two hooks exist solely so scripts/test-run-tests.sh can drive this script
+# against FAKE runners; they are not for normal use:
+#   MARCH_TEST_RUNNER_ROOT  directory holding test/<r>.exe and lsp/test/<r>.exe
+#                           (default: ./_build/default)
+#   MARCH_TEST_SKIP_BUILD   if non-empty, skip the dune build phase
 
 set -euo pipefail
 
@@ -66,6 +72,11 @@ DUNE=${DUNE:-dune}
 # timeout. 2400s sits safely above the ~1825s worst observed run; raise it
 # further if a slower CI tier is added rather than lowering it back toward 300.
 SUITE_TIMEOUT=${MARCH_TEST_TIMEOUT:-2400}
+
+# Where the runner executables live.  Overridable ONLY so the regression test
+# (scripts/test-run-tests.sh) can point this script at a tree of fake runners
+# and assert on how it reports their exit statuses.
+RUNNER_ROOT=${MARCH_TEST_RUNNER_ROOT:-./_build/default}
 
 # Pin the dune root to the invocation directory.  Claude worktrees live at
 # .claude/worktrees/<name> inside the main repo, so dune's upward root search
@@ -195,10 +206,74 @@ for r in "${RUNNERS[@]}"; do
   # rather than a missing build target.
   [[ "$r" == "test_jsonrpc" ]] && BUILD_TARGETS+=("lsp/bin/main.exe")
 done
-$DUNE build "${DUNE_ROOT[@]}" "${BUILD_TARGETS[@]}"
+if [[ -n "${MARCH_TEST_SKIP_BUILD:-}" ]]; then
+  echo "(skipped: MARCH_TEST_SKIP_BUILD set)"
+else
+  $DUNE build "${DUNE_ROOT[@]}" "${BUILD_TARGETS[@]}"
+fi
 
 # Execution phase: run binaries directly — no dune RPC, no output buffering
+#
+# Every non-zero invocation is ATTRIBUTED: the runner name and its original
+# exit status are printed at the point of failure and repeated in the final
+# summary.  This used to collapse to a single `FAILED=1` bit and the lone line
+# "One or more suites FAILED.", which permits a genuinely misleading result:
+# every alcotest runner can print "Test Successful" while an invocation still
+# returns non-zero (a wrapper/launcher failure after the test process has
+# emitted its summary, a timeout kill, a signal), and the output then contains
+# no [FAIL] line anywhere and nothing naming the suite.  Note that
+# `if ! cmd; then` — the old shape — DISCARDS the status: `$?` inside the
+# branch is the status of the `!` pipeline (always 0), so the number has to be
+# captured with `|| status=$?` on the command itself.
 FAILED=0
+# Parallel arrays rather than an associative one: this script targets bash 3.2,
+# which is what /bin/bash on macOS still is.
+FAILED_NAMES=()
+FAILED_WHY=()
+
+# Render an exit status the way a reader needs it: a bare "exit 137" hides that
+# the process was killed, and a bare "FAILED" hides everything.
+describe_status() {
+  local st="$1"
+  if [[ "$st" -eq 124 ]]; then
+    # GNU timeout's own exit code for "I fired".
+    echo "TIMED OUT after ${SUITE_TIMEOUT}s (exit 124; timeout signals the whole"\
+" process group, so in-flight march/clang children were killed too)"
+  elif [[ "$st" -gt 128 && "$st" -lt 192 ]]; then
+    local sig=$(( st - 128 ))
+    local name
+    name=$(kill -l "$sig" 2>/dev/null) || name="?"
+    echo "killed by signal ${sig} (SIG${name}) [exit ${st}]"
+  else
+    echo "exit status ${st}"
+  fi
+}
+
+record_failure() {
+  local runner="$1" why="$2"
+  FAILED=1
+  FAILED_NAMES+=("$runner")
+  FAILED_WHY+=("$why")
+  echo "!! SUITE FAILED: ${runner} -- ${why}" >&2
+}
+
+# Run one runner exe, attributing whatever it does.  Any leading VAR=VAL
+# assignments are passed through via `env`.
+run_suite() {
+  local runner="$1" exe="$2"; shift 2
+  if [[ ! -x "$exe" ]]; then
+    # Distinct from a test failure: the suite never started, so a green run of
+    # everything else says nothing about it.
+    record_failure "$runner" "NOT RUN -- no executable at ${exe}"
+    return
+  fi
+  local status=0
+  env "$@" $TIMEOUT_CMD "$exe" -e $QUICK_FLAG || status=$?
+  if [[ "$status" -ne 0 ]]; then
+    record_failure "$runner" "$(describe_status "$status")"
+  fi
+}
+
 for runner in "${RUNNERS[@]}"; do
   echo ""
   echo "==> ${runner}"
@@ -222,11 +297,9 @@ for runner in "${RUNNERS[@]}"; do
       echo "!! NOTHING about lib/refinecheck/.  Install z3 (see"                  >&2
       echo "!! .github/actions/march-setup/action.yml) and re-run."               >&2
       echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" >&2
-      FAILED=1
+      record_failure "$runner" "z3 not found on PATH -- every z3-gated case would [SKIP] and still exit 0"
     fi
-    if ! $TIMEOUT_CMD ./_build/default/test/${runner}.exe -e $QUICK_FLAG; then
-      FAILED=1
-    fi
+    run_suite "$runner" "$RUNNER_ROOT/test/${runner}.exe"
   elif [[ "$runner" == "test_jit" ]]; then
     # test_jit spawns bin/main.exe as a subprocess for REPL/--jit sessions
     # (see test/dune's `(test (name test_jit) ...)` stanza) and silently
@@ -234,10 +307,8 @@ for runner in "${RUNNERS[@]}"; do
     # to a real binary. Mirror dune's env here so the jit cases actually run
     # instead of vacuously skipping.
     mkdir -p "$PWD/_build/jit_home"
-    if ! HOME="$PWD/_build/jit_home" MARCH_BIN="$PWD/_build/default/bin/main.exe" \
-        $TIMEOUT_CMD ./_build/default/test/${runner}.exe -e $QUICK_FLAG; then
-      FAILED=1
-    fi
+    run_suite "$runner" "$RUNNER_ROOT/test/${runner}.exe" \
+      "HOME=$PWD/_build/jit_home" "MARCH_BIN=$PWD/_build/default/bin/main.exe"
   else
     # The LSP suites are cwd-sensitive: test_lsp resolves the stdlib through
     # Analysis.find_stdlib_dir (a relative "stdlib" unless $MARCH_STDLIB is
@@ -246,12 +317,21 @@ for runner in "${RUNNERS[@]}"; do
     # "introduce pipe offered" fails.  This script already runs everything
     # from $PWD, which is where DUNE_ROOT points, so nothing extra is needed
     # here -- but do not "fix" a red LSP run by cd-ing somewhere else.
-    if ! $TIMEOUT_CMD ./_build/default/"$(runner_target "$runner")" -e $QUICK_FLAG; then
-      FAILED=1
-    fi
+    run_suite "$runner" "$RUNNER_ROOT/$(runner_target "$runner")"
   fi
 done
 
 echo ""
-[[ $FAILED -eq 0 ]] && echo "All suites passed." || echo "One or more suites FAILED."
+if [[ $FAILED -eq 0 ]]; then
+  echo "All suites passed."
+else
+  echo "${#FAILED_NAMES[@]} of ${#RUNNERS[@]} suite invocations FAILED:"
+  i=0
+  while [[ $i -lt ${#FAILED_NAMES[@]} ]]; do
+    echo "  - ${FAILED_NAMES[$i]}: ${FAILED_WHY[$i]}"
+    i=$(( i + 1 ))
+  done
+  echo ""
+  echo "One or more suites FAILED."
+fi
 exit $FAILED

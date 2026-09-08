@@ -4,6 +4,12 @@ Filed: 2026-08-25
 Updated: 2026-08-25 — four `--jit` defects root-caused and FIXED; the headline
 repro still exits 138 for a fifth, **non-JIT-specific** reason. Kept open for
 that residual. See "Residual" at the bottom for the remaining decision.
+Updated: 2026-09-08 — the fifth listed defect (the prelude `.so` recording a
+dead install name) is also confirmed fixed; see that section. **This file stays
+open for the residual only**, which is a policy call on the benchmark's own
+`count_list`, not a compiler bug. Re-confirmed on 2026-09-08:
+`--jit bench/interp/json_stream.march` still exits 138, and the compiler still
+emits its `count_list` non-tail-recursion warning on the way.
 
 ## Repro
 
@@ -124,7 +130,7 @@ Fixed in `lib/jit/repl_jit.ml` by folding the compiler executable's size+mtime
 into the cache key (not `Digest.file` — the binary is ~15 MB and this is on
 every `--jit`/REPL startup).
 
-## Still open, NOT fixed: the prelude `.so` records a dead install name
+## CLOSED 2026-09-08: the prelude `.so` recorded a dead install name
 
 `bin/main.ml` builds the cached runtime at `<name>.<pid>.tmp` and renames it
 into place, so on macOS its `LC_ID_DYLIB` still names the temp file:
@@ -143,6 +149,40 @@ the prelude cache currently never hits on macOS.
 Fix is a one-liner — pass `-install_name <so_path>` (the final path, not the
 temp) when linking the runtime `.so` around `bin/main.ml:1016`. Not done here
 only because `bin/main.ml` was owned by another agent at the time.
+
+**Update 2026-09-08: this defect is fixed; no change was needed.** It landed at
+some point after this section was written, and the code carries the same
+diagnosis this section does. `bin/toolchain.ml:722` defines
+
+```ocaml
+let install_name_flag (final_path : string) : string =
+  if Sys.file_exists "/System/Library/CoreServices"
+  then Printf.sprintf " -Xlinker -install_name -Xlinker %s"
+         (Filename.quote final_path)
+  else ""
+```
+
+applied at the runtime `.so` link (`bin/toolchain.ml:914`, the
+`libmarch_runtime_<key>.so` build) and at the FFI shim link
+(`bin/main.ml:303`). It uses `-Xlinker` rather than `-Wl,` on purpose: clang
+splits a `-Wl,` argument on commas, so a cache path containing one (a home
+directory named `Doe, J`) would be torn into two bogus linker arguments.
+
+Verified on a clean private `HOME`, which is the only way to see this — a warm
+cache hides it:
+
+```
+$ otool -D ~/.cache/march/libmarch_runtime_f1eae302edc71b6d.so
+.../.cache/march/libmarch_runtime_f1eae302edc71b6d.so
+```
+
+— the final path, not `<name>.<pid>.tmp`. The prelude built against it records
+that same real path as its dependency (`otool -L` on
+`stdlib_prelude_O1_tln2_ty1_*.so`), and the second and third `--jit` runs in
+that `HOME` complete in **0.31s / 0.31s**, i.e. the prelude cache is hitting
+rather than recompiling the whole stdlib per run.
+
+Nothing else in this file changes: see the Residual below, which is still open.
 
 ## Residual: the filed repro still exits 138, for a non-JIT reason
 
