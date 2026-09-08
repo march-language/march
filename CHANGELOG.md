@@ -13,6 +13,18 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`scripts/run-tests.sh` names the suite that failed.** Every runner failure
+  collapsed into one `FAILED` bit and the lone line
+  `One or more suites FAILED.` — no runner name, no exit status, no signal.
+  That permits a misleading result, because a runner can print
+  `Test Successful` and still exit non-zero (a launcher failure after the
+  summary, a timeout kill, a signal), leaving output with no `[FAIL]` line
+  anywhere. Failures are now attributed at the point of failure and listed in
+  the summary with the original status decoded (`killed by signal 9
+  (SIGKILL)`, `TIMED OUT after 2400s`), and a suite whose executable is missing
+  is reported as `NOT RUN` instead of counting as a pass. The exit code and the
+  `One or more suites FAILED.` line are unchanged.
+
 - **A stdlib file that fails to parse is now a hard error instead of a missing
   module.** Loading a stdlib source that did not parse printed one unbannered
   line to stderr and then continued *without that module*, so what the user
