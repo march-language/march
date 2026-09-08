@@ -62,6 +62,32 @@ type clo_env = (string * string) list
     an ordinary user value to a function). *)
 type self_clo = (string * string) option
 
+(** Drop the self pair when a binder REBINDS the [$clo] parameter's name.
+
+    The self-binding rule below treats [let v = $clo] as binding [v] to the
+    apply function currently being traversed, and the traversal carries that
+    pair down into [ELetRec] function bodies and [ECase] branch bodies.  That
+    is only sound while no inner binder shadows the name: under a shadow,
+    [let v = $clo] names a DIFFERENT closure, and the rewrite would dispatch
+    the call to the wrong apply function — a compiled-only miscompile of a
+    shape this codebase has been bitten by before (see
+    specs/progress/2026-08-19-actor-handler-binder-shadowing.md).
+
+    No such shadow exists today — defun's apply fns are top-level, and the
+    [ELetRec] groups that survive to codegen (join points, mutual-recursion
+    groups) take ordinary value parameters — so this guards an invariant that
+    is currently an observation about the pipeline.  It is safe by
+    construction: clearing the pair can only ever REMOVE a resolution, which
+    returns that call to its pre-self-binding behaviour, so it cannot
+    introduce a miscompile.  The only risk is removing a resolution we want,
+    which is what the verification in
+    specs/progress/2026-08-22-known-call-self-binding-shadowing-guard.md
+    measures. *)
+let shadowing (self : self_clo) (names : string list) : self_clo =
+  match self with
+  | Some (clo_param, _) when List.exists (String.equal clo_param) names -> None
+  | s -> s
+
 let rec go ~changed ~(self : self_clo) (env : clo_env) : Tir.expr -> Tir.expr = function
 
   (* ── Track closure allocations ──────────────────────────────────────── *)
@@ -71,7 +97,7 @@ let rec go ~changed ~(self : self_clo) (env : clo_env) : Tir.expr -> Tir.expr = 
       body)
     when is_clo_name clo_name ->
     let env' = (v.Tir.v_name, fn_ptr.Tir.v_name) :: env in
-    Tir.ELet (v, rhs, go ~changed ~self env' body)
+    Tir.ELet (v, rhs, go ~changed ~self:(shadowing self [v.Tir.v_name]) env' body)
 
   (* Same but for stack-promoted closures (after Escape analysis). *)
   | Tir.ELet (v,
@@ -79,7 +105,7 @@ let rec go ~changed ~(self : self_clo) (env : clo_env) : Tir.expr -> Tir.expr = 
       body)
     when is_clo_name clo_name ->
     let env' = (v.Tir.v_name, fn_ptr.Tir.v_name) :: env in
-    Tir.ELet (v, rhs, go ~changed ~self env' body)
+    Tir.ELet (v, rhs, go ~changed ~self:(shadowing self [v.Tir.v_name]) env' body)
 
   (* ── Track the SELF-binding of a local recursive fn ─────────────────── *)
   (* Defun lifts `fn go(...) ... go(...) ... end` to an apply function whose
@@ -106,7 +132,7 @@ let rec go ~changed ~(self : self_clo) (env : clo_env) : Tir.expr -> Tir.expr = 
           | None -> false) ->
     let apply_name = match self with Some (_, n) -> n | None -> assert false in
     let env' = (v.Tir.v_name, apply_name) :: env in
-    Tir.ELet (v, rhs, go ~changed ~self env' body)
+    Tir.ELet (v, rhs, go ~changed ~self:(shadowing self [v.Tir.v_name]) env' body)
 
   (* ── Convert known ECallPtr to direct EApp ──────────────────────────── *)
   | Tir.ECallPtr (Tir.AVar v, args) ->
@@ -123,14 +149,22 @@ let rec go ~changed ~(self : self_clo) (env : clo_env) : Tir.expr -> Tir.expr = 
 
   (* ── Recursive traversal ────────────────────────────────────────────── *)
   | Tir.ELet (v, rhs, body) ->
-    Tir.ELet (v, go ~changed ~self env rhs, go ~changed ~self env body)
+    (* The binder scopes over the BODY only, so [rhs] keeps the outer pair. *)
+    Tir.ELet (v, go ~changed ~self env rhs,
+              go ~changed ~self:(shadowing self [v.Tir.v_name]) env body)
   | Tir.ELetRec (fns, body) ->
     Tir.ELetRec (
-      List.map (fun fd -> { fd with Tir.fn_body = go ~changed ~self env fd.Tir.fn_body }) fns,
+      List.map (fun fd ->
+        let self = shadowing self
+          (List.map (fun p -> p.Tir.v_name) fd.Tir.fn_params) in
+        { fd with Tir.fn_body = go ~changed ~self env fd.Tir.fn_body }) fns,
       go ~changed ~self env body)
   | Tir.ECase (a, branches, default) ->
     Tir.ECase (a,
-      List.map (fun b -> { b with Tir.br_body = go ~changed ~self env b.Tir.br_body }) branches,
+      List.map (fun b ->
+        let self = shadowing self
+          (List.map (fun v -> v.Tir.v_name) b.Tir.br_vars) in
+        { b with Tir.br_body = go ~changed ~self env b.Tir.br_body }) branches,
       Option.map (go ~changed ~self env) default)
   | Tir.ESeq (e1, e2) ->
     Tir.ESeq (go ~changed ~self env e1, go ~changed ~self env e2)

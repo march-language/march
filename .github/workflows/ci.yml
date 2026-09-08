@@ -46,6 +46,15 @@ jobs:
       - name: Lint docs for stale source pointers and stdlib counts
         run: scripts/check-docs.sh
 
+      # scripts/run-tests.sh is what CLAUDE.md tells everyone to run, so a bug in
+      # how IT reports failures is invisible by construction -- the aggregate says
+      # "FAILED" and nothing says which suite or why. This drives it against fake
+      # runners (no dune, no real suites, well under a second) and asserts the
+      # attribution, including the case that motivated it: a runner that prints
+      # "Test Successful" and still exits non-zero.
+      - name: Test the test runner's failure attribution
+        run: scripts/test-run-tests.sh
+
       # docs/pagefind/ is a COMMITTED build artifact — march-lang.org is served by
       # GitHub's own Jekyll over docs/, which has no post-build hook, so the search index
       # can only reach production by being in git. A docs edit without a regenerated
