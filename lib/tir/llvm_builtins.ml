@@ -463,6 +463,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare i64  @march_actor_stop(ptr %actor, i64 %timeout_ms)" };
   { march_name = "actor_is_draining"; c_name = Some "march_actor_is_draining"; ret_ty = Some Tir.TBool;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_actor_is_draining(ptr %actor)" };
+  { march_name = "actor_pid_indices"; c_name = Some "march_actor_pid_indices"; ret_ty = Some (Tir.TCon ("List", [Tir.TInt]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_actor_pid_indices()" };
   { march_name = "is_alive"; c_name = Some "march_is_alive"; ret_ty = Some Tir.TBool;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_is_alive(ptr %actor)" };
   { march_name = "send"; c_name = Some "march_send"; ret_ty = Some (Tir.TCon ("Option", [Tir.TUnit]));
@@ -1370,6 +1372,7 @@ let native_actor_items : preamble_item list = [   (* native-only: actors + sched
   PDeclare "march_kill";
   PDeclare "march_actor_stop";
   PDeclare "march_actor_is_draining";
+  PDeclare "march_actor_pid_indices";
   PDeclare "march_is_alive";
   PDeclare "march_send";
   PDeclare "march_send_linear";

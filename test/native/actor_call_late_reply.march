@@ -1,4 +1,7 @@
--- Correlation-checked Actor.call replies (actor-system hardening, task 4):
+-- Correlation-checked Actor.call replies, and Actor.call's timeout as a real
+-- wall-clock deadline on BOTH backends (the interpreter ignored timeout_ms
+-- entirely until 2026-09-08, which is why this fixture used to run compiled
+-- only -- interpreted it reported `first: unexpected ok`):
 -- a first call times out (the handler replies late); the caller then issues
 -- a second call. Without correlation checking, the stale first reply is
 -- returned as the second call's answer. With it, the second call gets the
@@ -12,8 +15,16 @@ mod Main do
     init  { n: 0 }
 
     on Get(reply_to) do
-      -- burn time so call #1's 1ms timeout expires before this reply lands
-      let _ = List.fold_left(Range.to_list(Range.new(0, 20000000)), 0, fn (a, b) -> a + b)
+      -- Burn time so call #1's 1ms deadline expires before this reply lands.
+      --
+      -- The size is bounded from BOTH sides, because this fixture now runs on
+      -- both backends. Compiled, the burn must comfortably exceed 1ms: 50k
+      -- takes ~4ms, a 4x margin, and CI load only pushes it further past the
+      -- deadline. Interpreted, the same burn costs ~1.2s -- roughly 300x --
+      -- so it must stay small enough to be an affordable test: the original
+      -- 20,000,000 would have taken hours and allocated a list of 20M cons
+      -- cells (it overflowed the interpreter's stack at 3M).
+      let _ = List.fold_left(Range.to_list(Range.new(0, 50000)), 0, fn (a, b) -> a + b)
       Actor.reply(reply_to, state.n)
       { n: state.n + 1 }
     end

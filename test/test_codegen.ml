@@ -13319,6 +13319,7 @@ let golden_preamble_native_actor : string = {|; Actor builtins
 declare void @march_kill(ptr %actor)
 declare i64  @march_actor_stop(ptr %actor, i64 %timeout_ms)
 declare i64  @march_actor_is_draining(ptr %actor)
+declare ptr  @march_actor_pid_indices()
 declare i64  @march_is_alive(ptr %actor)
 declare ptr  @march_send(ptr %actor, ptr %msg)
 declare ptr  @march_send_linear(ptr %actor, ptr %msg)

@@ -2369,6 +2369,7 @@ let reset_scheduler_state () : unit =
   shutdown_requested := false;
   Hashtbl.clear revocation_table;
   Hashtbl.clear pending_replies;
+  Hashtbl.clear pending_reply_times;
   next_call_ref := 0;
   logger_level := 1;
   logger_fields := [];

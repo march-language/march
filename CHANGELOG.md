@@ -24,6 +24,14 @@ git log is authoritative for exact commits.
   Note that March's `permanent` is deliberately not OTP's: no restart type
   restarts a child that returned normally.
 
+- **`Actor.list()`: enumerate every live actor.** Monitoring code can now find
+  the actor that is behind, instead of only the ones it can name in advance:
+  `mailbox_size(pid)` needed a `Pid` with no way to obtain one, so the
+  load-shedding loop documented in the overload-resilience guide could not
+  actually be closed. The result is a snapshot in spawn order, and the guide
+  now shows it in the shedding loop. Still missing, and still open: a
+  growing-mailbox alarm, per-actor state inspection, and tracing.
+
 - **`Actor.stop(pid, timeout_ms)`: graceful shutdown.** A stopped actor accepts
   no new messages (`send` returns `None`), works off whatever is already
   queued, and then dies a normal death — which no restart type restarts. It
@@ -45,6 +53,16 @@ git log is authoritative for exact commits.
   delays exactly reproducible for tests.
 
 ### Fixed
+
+- **`Actor.call`'s timeout is enforced in the interpreter.** It was bound and
+  never read, so a handler that took ten seconds "answered in time" against a
+  1ms timeout, while one that did not reply within a single scheduler pass was
+  reported as a timeout however large the timeout was. Replies are now
+  timestamped and compared against a real wall-clock deadline, and a late reply
+  is discarded. This is the path `forge test` and `march file.march` actually
+  run, so it is where most users meet `Actor.call`. (The interpreter still
+  cannot abort a handler mid-run: a call whose deadline passes waits for the
+  handler to finish before returning `Err`.)
 
 - **Native arrays carry a header tag.** `native_arr_alloc` left the tag at `0`,
   an ordinary ADT constructor index, so every generic walker treated a

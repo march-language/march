@@ -493,6 +493,15 @@ let capture_ewriteln (s : string) : unit =
 (* Pending synchronous call replies: call_ref -> reply value. *)
 let pending_replies : (int, value) Hashtbl.t = Hashtbl.create 4
 
+(** When each pending reply was stored, in Unix ms. [actor_call] compares this
+    against the deadline it computed from its `timeout_ms` argument: the
+    interpreter's scheduler runs a handler to completion inside one pass, so
+    "did a reply land?" alone cannot tell a fast handler from one that took ten
+    seconds — the reply is there either way. Timestamping the reply at the
+    moment it is produced is what makes the deadline real.
+    See specs/todos/2026-08-11-interpreter-actor-call-timeout-not-enforced.md. *)
+let pending_reply_times : (int, float) Hashtbl.t = Hashtbl.create 4
+
 let next_call_ref : int ref = ref 0
 
 (** Pid of the actor whose handler is currently executing.

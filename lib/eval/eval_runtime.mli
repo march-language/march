@@ -135,6 +135,7 @@ val process_registry : (string, int) Hashtbl.t
 val pid_to_registry_name : (int, string) Hashtbl.t
 val revocation_table : (int * int, unit) Hashtbl.t
 val pending_replies : (int, value) Hashtbl.t
+val pending_reply_times : (int, float) Hashtbl.t
 val next_call_ref : int ref
 val process_start_time : float
 val uname_info : (string * string) option Lazy.t

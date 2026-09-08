@@ -2008,8 +2008,13 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; This fixture burns time in the handler so the first call's 1ms deadline
 ; expires before the reply lands, then makes a second call and checks it
 ; gets the SECOND reply (n=1), not the stale first one (n=0). Needs the real
-; stdlib (List.fold_left, Range), hence (source_tree ../stdlib). Compile
-; natively, run, diff.
+; stdlib (List.fold_left, Range), hence (source_tree ../stdlib).
+;
+; Runs on BOTH backends since 2026-09-08. It could not before: the
+; interpreter bound Actor.call's timeout_ms and never looked at it, so the
+; slow handler below "answered in time" by construction and the interpreted
+; output was `first: unexpected ok`. See
+; specs/progress/2026-09-08-interpreter-actor-call-timeout.md.
 (rule
  (targets native_actor_call_late_reply native_actor_call_late_reply.out)
  (deps (file %{exe:../bin/main.exe})
@@ -2029,6 +2034,19 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
         native/actor_call_late_reply.march)
    (with-stdout-to native_actor_call_late_reply.out
         (system "./native_actor_call_late_reply")))))
+
+(rule
+ (targets interp_actor_call_late_reply.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/actor_call_late_reply.march))
+ (action
+  (with-stdout-to interp_actor_call_late_reply.out
+    (run %{exe:../bin/main.exe} native/actor_call_late_reply.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_call_late_reply.expected interp_actor_call_late_reply.out)))
 
 (rule
  (alias runtest)
@@ -4025,6 +4043,48 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/actor_stop_tree.order.expected interp_actor_stop_tree.order.out)))
+
+; ── Process enumeration ─────────────────────────────────────────────────
+; specs/todos/2026-08-12-per-actor-introspection-and-alarms.md. Compiled and
+; interpreted against one .expected: the shed-load guidance in
+; docs/overload-resilience.md is written for both backends, and the snapshot's
+; contents and ORDER (spawn order, deduplicated) are what make it followable.
+(rule
+ (targets native_actor_enumeration native_actor_enumeration.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/actor_enumeration.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_enumeration
+        native/actor_enumeration.march)
+   (with-stdout-to native_actor_enumeration.out
+        (system "./native_actor_enumeration")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_enumeration.expected native_actor_enumeration.out)))
+
+(rule
+ (targets interp_actor_enumeration.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/actor_enumeration.march))
+ (action
+  (with-stdout-to interp_actor_enumeration.out
+    (run %{exe:../bin/main.exe} native/actor_enumeration.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_enumeration.expected interp_actor_enumeration.out)))
 
 ; ── Per-child restart types (`restart transient` / `restart temporary`) ──
 ; specs/2026-09-08-supervise-child-spec-design.md. Each fixture runs BOTH

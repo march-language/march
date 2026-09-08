@@ -1,6 +1,26 @@
-`[P2]` # Observability is aggregate-only: no process enumeration, no slow-mailbox alarm
+`[P2]` # Observability: no slow-mailbox alarm, no state inspection, no tracing
 
-## The gap
+> **Process enumeration landed 2026-09-08** — `Actor.list()` (builtin
+> `actor_pid_indices`) walks every live actor lock-free, and
+> `docs/overload-resilience.md` now shows it closing the shedding loop. See
+> `specs/progress/2026-09-08-process-enumeration.md`. This file is trimmed to
+> the three pieces that did NOT land.
+
+## What remains
+
+- **A growing-mailbox alarm.** BEAM's `erlang:system_monitor` has a
+  `long_message_queue` trigger that tells you *when* a process crosses a
+  threshold. Ours must still be polled. Enumeration makes polling possible, so
+  the loop is no longer broken — but a threshold callback is strictly better
+  than a timer, and it is the shape `Scheduler.top_by_mailbox(n)` (see the
+  sketch below) was suggested for: doing the walk inside the runtime and
+  returning only the worst N, rather than materialising every actor.
+- **Per-actor state inspection.** No equivalent of `sys:get_state/1`.
+  `get_actor_field` exists but needs a Pid and a field index.
+- **Tracing.** No `erlang:trace` equivalent — no way to watch one actor's
+  message flow without editing the program.
+
+## The original gap, for context
 
 The 2026-08-12 hardening added the counters (`Scheduler.live_procs`,
 `total_spawned`, `runq_depth`, `dropped_messages`) and fixed compiled

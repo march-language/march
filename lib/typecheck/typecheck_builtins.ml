@@ -615,6 +615,10 @@ let builtin_bindings : (string * scheme) list =
        it" from "it was already gone". *)
     ("actor_stop", poly1 (fun a -> TArrow (TCon ("Pid", [a]), TArrow (t_int, t_bool))));
     ("actor_is_draining", poly1 (fun a -> TArrow (TCon ("Pid", [a]), t_bool)));
+    (* Process enumeration: every live actor's pid index, ascending. Returns
+       Ints rather than Pids so the result carries no actor references —
+       Actor.list() maps pid_of_int over it. *)
+    ("actor_pid_indices", Mono (TArrow (t_unit, TCon ("List", [t_int]))));
     ("is_alive", poly1 (fun a -> TArrow (TCon ("Pid", [a]), t_bool)));
     ("actor_get_int", poly1 (fun a -> TArrow (TCon ("Pid", [a]), TArrow (t_int, t_int))));
     (* Int primitives *)

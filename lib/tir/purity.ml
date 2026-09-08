@@ -27,7 +27,7 @@ let impure_builtins = [
   (* Time *)
   "unix_time"; "unix_time_ms"; "sys_uptime_ms";
   (* Actors / tasks / processes *)
-  "send"; "kill"; "actor_stop"; "spawn"; "receive";
+  "send"; "kill"; "actor_stop"; "actor_pid_indices"; "spawn"; "receive";
   "task_spawn"; "task_spawn_steal"; "task_spawn_link";
   (* Signal watchers — register/remove a deferred OS-signal handler; self-raise *)
   "signal_watch"; "signal_unwatch"; "signal_raise_self";

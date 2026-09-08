@@ -7491,6 +7491,95 @@ static struct { march_hdr hdr; int64_t dispatch; int64_t alive; }
     march_dead_actor_sentinel = { .hdr = { .rc = 1000000000, .tag = 0, .pad = 0 },
                                    .dispatch = 0, .alive = 0 };
 
+/* march_actor_pid_indices() -> List(Int): the pid index of every actor alive
+ * right now, ascending.
+ *
+ * The enumeration primitive the overload-shedding guidance needs. Before it,
+ * mailbox_size(pid) could only be asked about a Pid you already held, so
+ * monitoring code could watch actors it could name in advance and had no way
+ * at all to discover an unknown hot one — the documented polling loop could
+ * not be closed. March code turns these back into Pids with pid_of_int, the
+ * same round trip a supervisor's Int-typed child fields already make.
+ *
+ * LOCK-FREE on purpose, walking the bucket heads exactly as find_meta does
+ * (acquire load of the head, plain reads down the chain — the chain is
+ * append-at-head and nodes are never freed, see replace_stale_meta_locked).
+ * Task 10 deliberately took find_meta off g_tbl_mu to keep sends lock-free; an
+ * enumeration that grabbed that mutex on a monitoring timer would re-serialise
+ * the very path that work freed.
+ *
+ * A snapshot is inherently racy — an actor can die between this call and
+ * anything done with the result — which is fine and already the norm: every
+ * consumer of a Pid handles a dead one.
+ *
+ * Sorted ascending, and deduplicated, so the result is deterministic (bucket
+ * order is an artifact of heap addresses) and identical to the interpreter's. */
+static int pid_index_cmp(const void *a, const void *b) {
+    int64_t x = *(const int64_t *)a, y = *(const int64_t *)b;
+    return x < y ? -1 : x > y ? 1 : 0;
+}
+
+void *march_actor_pid_indices(void) {
+    int64_t cap = 64, n = 0;
+    int64_t *idx = (int64_t *)malloc(sizeof(int64_t) * (size_t)cap);
+    if (!idx) return make_nil();
+    for (unsigned int b = 0; b < MARCH_SCHED_BUCKETS; b++) {
+        for (march_actor_meta *m = atomic_load_explicit(&g_actor_tbl[b],
+                                                        memory_order_acquire);
+             m; m = m->tbl_next) {
+            /* "Has not died", not "is alive right now". The two differ for a
+             * just-spawned actor: march_spawn returns before the new actor's
+             * green thread has run, and its $alive word is still 0 until it
+             * does, so an actor_alive_load gate drops actors the caller has
+             * only just created — measured, a three-spawn program listed two,
+             * a different one missing run to run. The interpreter, whose
+             * ai_alive is true from the moment of spawn, would have listed all
+             * three; gating on terminal_set makes the two backends agree AND
+             * removes a startup race from the result. A meta that has died has
+             * terminal_set claimed by do_actor_death, so dead actors are still
+             * excluded.
+             *
+             * terminal_set is written under g_tbl_mu and read here without it
+             * — a benign race for a snapshot: the worst case is listing an
+             * actor that died microseconds ago, which is inherent to any
+             * enumeration and which every Pid consumer already handles. */
+            if (!m->actor || m->terminal_set) continue;
+            int64_t pidx = atomic_load_explicit(&m->pid_index,
+                                                memory_order_relaxed);
+            /* NOT cross-checked against g_pididx_tbl. The obvious guard here —
+             * "skip this meta unless find_meta_by_pid_index(pidx) resolves
+             * back to it", to drop a stale meta whose actor address was
+             * recycled — is itself a lock-free walk of a table being inserted
+             * into concurrently, and it MISSES live actors: measured, a
+             * three-actor program listed only two, with a different one
+             * dropped run to run, because a freshly spawned actor's index was
+             * transiently unreachable on that chain. A snapshot that silently
+             * omits live actors is worse than one that may occasionally carry
+             * a stale index, since the whole point is finding an actor you did
+             * not already know about. Duplicates are removed below instead;
+             * a stale index left in resolves through pid_of_int to a live
+             * actor, which every Pid consumer already handles. */
+            if (n == cap) {
+                cap *= 2;
+                int64_t *grown = (int64_t *)realloc(idx, sizeof(int64_t) * (size_t)cap);
+                if (!grown) break;
+                idx = grown;
+            }
+            idx[n++] = pidx;
+        }
+    }
+    qsort(idx, (size_t)n, sizeof(int64_t), pid_index_cmp);
+    void *list = make_nil();
+    /* Descending build (Cons is back-to-front), skipping repeats of the index
+     * just emitted — sorted, so equal indices are adjacent. */
+    for (int64_t i = n - 1; i >= 0; i--) {
+        if (i + 1 < n && idx[i] == idx[i + 1]) continue;
+        list = make_cons(make_some_i64(idx[i]), list);
+    }
+    free(idx);
+    return list;
+}
+
 void *march_pid_of_int(int64_t n) {
     march_actor_meta *m = find_meta_by_pid_index(n);
     if (m) return m->actor;

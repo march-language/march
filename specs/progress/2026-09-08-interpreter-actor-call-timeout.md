@@ -1,4 +1,4 @@
-# Interpreter's `Actor.call` ignores its `timeout_ms` argument (no parity with the compiled backend)
+# Interpreter's `Actor.call` now enforces `timeout_ms` (fixed 2026-09-08)
 
 Filed while implementing correlation-checked replies for the compiled runtime
 (`.superpowers/sdd/2026-08-11-actor-system-hardening/`, Task 4;
@@ -61,3 +61,44 @@ path only (dune golden `run`+`diff`, no interpreted counterpart). The
 interpreted output for this fixture is `first: unexpected ok` / `second: 1`
 and is expected to keep differing from `test/native/actor_call_late_reply.expected`
 until this timeout gap is closed.
+
+
+---
+
+## Fixed 2026-09-08
+
+`actor_reply` timestamps each reply into `pending_reply_times`; `actor_call`
+computes a deadline from `timeout_ms` at entry and compares. A reply produced
+after the deadline is discarded and the call returns `Err`.
+
+**Why timestamping rather than the sketch's "loop until the deadline".** The
+sketch above asks for a scheduler-hook variant that returns after a bounded
+slice so a deadline check can interleave with a still-running handler. That is
+a real change to the interpreter's execution model and it is not needed for the
+actual defect: the interpreter's scheduler runs each handler to completion
+inside one pass, so by the time control returns, either a reply exists or it
+never will. What was missing was not the ability to interrupt — it was any
+record of WHEN the reply happened. A handler that burned ten seconds and a
+handler that returned instantly were indistinguishable, so `timeout_ms` had
+nothing to compare against. With the timestamp, both directions are honest: a
+slow handler misses a short deadline, and a slow handler comfortably makes a
+long one.
+
+The remaining gap is narrower and now documented rather than silent: the
+interpreter still cannot ABORT a handler mid-run, so a call whose deadline
+passes still waits for the handler to finish before returning `Err`. Wall-clock
+enforcement of the RESULT is exact; pre-emption is not.
+
+## The workaround is gone
+
+`test/native/actor_call_late_reply.march` now runs on BOTH backends against one
+`.expected` (`first: timeout` / `second: 1`), which was the todo's own
+acceptance criterion.
+
+Its burn loop shrank from 20,000,000 to 50,000 iterations, because the fixture
+is now bounded from both sides: compiled, the handler must comfortably outlast
+the 1ms deadline (50k takes ~4ms, a 4x margin, and CI load only pushes it
+further past); interpreted, the same loop costs ~1.2s — about 300x — so the
+original size would have taken hours, and at 3,000,000 it overflowed the
+interpreter's stack outright. Checked stable over five consecutive compiled
+runs.
