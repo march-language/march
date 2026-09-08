@@ -219,6 +219,15 @@ let base_env : env =
   ; ("kill", VBuiltin ("kill", function
         | [VPid pid] -> crash_actor_with_reason pid "killed" Killed; VUnit
         | _ -> eval_error "kill: expected Pid"))
+  ; ("actor_stop", VBuiltin ("actor_stop", function
+        | [VPid pid; VInt timeout_ms] -> VBool (stop_actor pid timeout_ms)
+        | _ -> eval_error "actor_stop: expected (Pid, timeout_ms)"))
+  ; ("actor_is_draining", VBuiltin ("actor_is_draining", function
+        | [VPid pid] ->
+          (match Hashtbl.find_opt actor_registry pid with
+           | Some inst -> VBool inst.ai_draining
+           | None      -> VBool false)
+        | _ -> eval_error "actor_is_draining: expected Pid"))
   ; ("is_alive", VBuiltin ("is_alive", function
         | [VPid pid] ->
           (match Hashtbl.find_opt actor_registry pid with
@@ -3976,7 +3985,7 @@ let base_env : env =
         | [VPid pid; msg] ->
           (match Hashtbl.find_opt actor_registry pid with
            | None -> VUnit
-           | Some inst when not inst.ai_alive -> VUnit
+           | Some inst when not (mailbox_accepts inst) -> VUnit
            | Some inst ->
              (match msg with
               | VCon _ | VAtom _ -> mailbox_enqueue inst msg; VUnit

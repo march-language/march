@@ -216,6 +216,10 @@ type actor_inst = {
   mutable ai_monitors : (int * int) list;   (** (monitor_ref, watcher_pid) pairs *)
   mutable ai_mailbox  : value Queue.t;      (** pending Down/Crashed messages *)
   (* Phase 2: supervisor support *)
+  mutable ai_draining : bool;
+  (** Graceful shutdown (actor_stop): the actor is finishing its queued
+      messages and accepting no new ones. Parity with the compiled runtime's
+      march_actor_meta.draining. *)
   mutable ai_supervisor : int option;        (** pid of supervising actor, if any *)
   mutable ai_restart_count : (float * int) list; (** (timestamp, count) restart history *)
   (* Phase 3: epoch-based capability tracking *)
@@ -722,6 +726,7 @@ let spawn_child_actor ?(crashed_pid : int option = None) (child_actor_name : str
       ai_state = child_init_state; ai_alive = true;
       ai_terminal_reason = Normal;
       ai_monitors = []; ai_mailbox = Queue.create ();
+      ai_draining = false;
       ai_supervisor = Some supervisor_pid;
       ai_restart_count = []; ai_epoch = inherited_epoch;
       ai_resources = [];
@@ -1132,11 +1137,104 @@ and crash_actor_with_reason (pid : int) (_reason : string)
 and crash_actor (pid : int) (reason : string) : unit =
   crash_actor_with_reason pid reason (Crash reason)
 
+(** Graceful stop: drain [pid]'s mailbox, then end it with a NORMAL death.
+
+    Mirrors the compiled runtime's march_actor_stop
+    (specs/todos/2026-08-12-graceful-shutdown-and-drain.md):
+
+    - the actor is marked draining first, so [mailbox_accepts] refuses new
+      work while the queue is being worked off;
+    - its queued messages are then run to completion, or until [deadline]
+      (absolute Unix ms; [None] waits indefinitely) passes;
+    - it dies NORMAL, which no restart type restarts, so stopping a child does
+      not fight its supervisor.
+
+    A supervisor stops its children FIRST and in REVERSE declaration order —
+    the mirror of start order, the same order rest_for_one relies on — each
+    with its own `shutdown` budget from the child spec. Each child is detached
+    from the supervisor before it is stopped: an orderly teardown must not run
+    a restart strategy against a parent that is itself on the way out.
+
+    The drain runs on the interpreter's own eager scheduler, so unlike the
+    compiled runtime there is no other thread to wait for: [drain_hook] is
+    [run_scheduler], installed by eval.ml (this module is below it). *)
+and drain_hook : (unit -> unit) ref = ref (fun () -> ())
+
+and stop_actor (pid : int) (timeout_ms : int) : bool =
+  match Hashtbl.find_opt actor_registry pid with
+  | None -> false
+  | Some inst when not inst.ai_alive || inst.ai_draining -> false
+  | Some inst ->
+    inst.ai_draining <- true;
+    (* Children first, deepest-declared first. *)
+    (match inst.ai_def.actor_supervise with
+     | None -> ()
+     | Some sup_cfg ->
+       let names = List.map (fun n -> n.txt) sup_cfg.sc_order in
+       let order = List.rev (List.mapi (fun i n -> (i, n)) names) in
+       List.iter (fun (child_idx, fname) ->
+           let child_pid = match inst.ai_state with
+             | VRecord fields ->
+               (match List.assoc_opt fname fields with Some (VInt p) -> p | _ -> -1)
+             | _ -> -1
+           in
+           if child_pid >= 0 then
+             match Hashtbl.find_opt actor_registry child_pid with
+             | Some ci when ci.ai_alive ->
+               ci.ai_supervisor <- None;
+               let budget =
+                 match List.find_opt (fun sf -> sf.sf_name.txt = fname)
+                         sup_cfg.sc_fields with
+                 | Some sf -> March_ast.Ast.shutdown_ms sf.sf_shutdown
+                 | None    -> March_ast.Ast.shutdown_ms March_ast.Ast.default_shutdown
+               in
+               (* Same line, same order, as the compiled runtime's trace in
+                  march_actor_stop: teardown order has no other observable
+                  channel until actors get a terminate callback. *)
+               if Sys.getenv_opt "MARCH_SUP_TRACE" <> None then
+                 Printf.eprintf
+                   "march: stopping supervised child %d (shutdown_ms=%d)\n%!"
+                   child_idx budget;
+               if budget = 0 then
+                 crash_actor_with_reason child_pid "shutdown" Killed
+               else
+                 ignore (stop_actor child_pid budget)
+             | _ -> ()
+         ) order);
+    (* Then this actor's own queue. Each pass of the scheduler drains every
+       live actor's mailbox, so one pass is normally enough; the loop exists
+       for handlers that enqueue further work onto this actor. *)
+    let deadline =
+      if timeout_ms < 0 then None
+      else Some (Unix.gettimeofday () *. 1000. +. float_of_int timeout_ms)
+    in
+    let past_deadline () =
+      match deadline with
+      | None -> false
+      | Some d -> Unix.gettimeofday () *. 1000. >= d
+    in
+    let rec drain () =
+      if not (Queue.is_empty inst.ai_mailbox) && not (past_deadline ()) then begin
+        let before = Queue.length inst.ai_mailbox in
+        !drain_hook ();
+        if Queue.length inst.ai_mailbox < before then drain ()
+      end
+    in
+    if timeout_ms <> 0 then drain ();
+    crash_actor_with_reason pid "stopped" Normal;
+    true
+
 (** Task 9: interpreter-side counter for messages dropped by bounded-mailbox
     overflow policies. Mirrors the compiled runtime's
     MARCH_STAT_MSGS_DROPPED / march_stat_counters[4], surfaced to March via
     sched_stat(4) / Scheduler.dropped_messages(). *)
 let dropped_messages_count = ref 0
+
+(** Will [inst] accept a new message? False once it is draining — that is what
+    makes actor_stop a shutdown rather than a pause, and it mirrors
+    march_send's MARCH_SEND_DRAINING rejection in the compiled runtime. *)
+let mailbox_accepts (inst : actor_inst) : bool =
+  inst.ai_alive && not inst.ai_draining
 
 (** Task 9: enqueue [msg] onto [inst]'s mailbox, honoring its bounded-mailbox
     policy (set via actor_set_mailbox_limit / Actor.set_queue_limit).
@@ -1147,7 +1245,9 @@ let dropped_messages_count = ref 0
     - policy 1 (drop_new): reject the incoming message when at capacity.
     - policy 2 (drop_old): evict the oldest queued message to make room.
     - unrecognized policy: falls back to unbounded (defensive default). *)
+
 let mailbox_enqueue (inst : actor_inst) (msg : value) : unit =
+  if inst.ai_draining then () else
   let limit = inst.ai_mbox_limit in
   if limit <= 0 then
     Queue.push msg inst.ai_mailbox

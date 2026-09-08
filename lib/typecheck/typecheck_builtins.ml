@@ -610,6 +610,11 @@ let builtin_bindings : (string * scheme) list =
     ("respond", poly1 (fun a -> TArrow (a, t_unit)));
     (* Actor builtins *)
     ("kill",     poly1 (fun a -> TArrow (TCon ("Pid", [a]), t_unit)));
+    (* Graceful stop: drains the mailbox, then dies normally. Returns whether
+       the actor was live and is now stopping, so a caller can tell "I stopped
+       it" from "it was already gone". *)
+    ("actor_stop", poly1 (fun a -> TArrow (TCon ("Pid", [a]), TArrow (t_int, t_bool))));
+    ("actor_is_draining", poly1 (fun a -> TArrow (TCon ("Pid", [a]), t_bool)));
     ("is_alive", poly1 (fun a -> TArrow (TCon ("Pid", [a]), t_bool)));
     ("actor_get_int", poly1 (fun a -> TArrow (TCon ("Pid", [a]), TArrow (t_int, t_int))));
     (* Int primitives *)

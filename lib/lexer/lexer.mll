@@ -79,6 +79,7 @@ let () =
       ("within", WITHIN);
       ("restart",   RESTART);
       ("backoff",   BACKOFF);
+      ("shutdown",  SHUTDOWN);
       ("permanent", PERMANENT);
       ("transient", TRANSIENT);
       ("temporary", TEMPORARY);

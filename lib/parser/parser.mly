@@ -42,6 +42,42 @@
      out-of-range values and a `%` on the wrong label are all diagnosed here,
      naming the offender, because the alternative is a "stuck here" pointing at
      the next declaration. *)
+  (* Per-child trailing modifiers. A `list(child_modifier)` rather than a
+     fixed sequence, so `restart transient shutdown 5000` and
+     `shutdown 5000 restart transient` both parse, and a repeated label is a
+     diagnostic naming the child instead of a silent last-wins. Each new field
+     the child spec grows is one more constructor here and one more `option`
+     to fill in below -- the property the trailing-modifier shape was chosen
+     for. See specs/2026-09-08-supervise-child-spec-design.md §1. *)
+  type child_modifier = CmRestart of restart_type | CmShutdown of shutdown_spec
+
+  let mk_shutdown_word (w : string) (sp : span) : shutdown_spec =
+    match w with
+    | "infinity" -> ShutdownInfinity
+    | "brutal"   -> ShutdownBrutal
+    | other ->
+      error_raise
+        (Printf.sprintf "I don't recognize `shutdown %s`" other)
+        (Some "`shutdown` takes a millisecond budget (`shutdown 5000`), \
+               `infinity`, or `brutal`.")
+        { Lexing.pos_fname = ""; pos_lnum = sp.start_line;
+          pos_bol = 0; pos_cnum = sp.start_col }
+
+  let mk_child_spec (child : string) (mods : child_modifier list)
+      (pos : Lexing.position) : restart_type * shutdown_spec =
+    let restart = ref None and shutdown = ref None in
+    let dup label =
+      error_raise
+        (Printf.sprintf "`%s` is given twice for child `%s`" label child)
+        (Some "Each modifier may appear at most once per child.") pos
+    in
+    List.iter (function
+        | CmRestart r  -> if !restart <> None then dup "restart" else restart := Some r
+        | CmShutdown s -> if !shutdown <> None then dup "shutdown" else shutdown := Some s)
+      mods;
+    ((match !restart with Some r -> r | None -> Permanent),
+     (match !shutdown with Some s -> s | None -> default_shutdown))
+
   let mk_backoff (entries : (string * int * bool) list) (pos : Lexing.position)
       : backoff_config =
     let seen = Hashtbl.create 3 in
@@ -263,7 +299,7 @@
 %token SUPERVISE STRATEGY MAX_RESTARTS WITHIN
 %token ONE_FOR_ONE ONE_FOR_ALL REST_FOR_ONE
 %token RESTART PERMANENT TRANSIENT TEMPORARY
-%token BACKOFF
+%token BACKOFF SHUTDOWN
 %token <string> INTERP_START
 %token <string> INTERP_MID
 %token <string> INTERP_END
@@ -722,8 +758,8 @@ supervise_block:
     children = list(supervise_child);
     END
     { let names = List.map (fun (n, _, _) -> n) children in
-      let tyfields = List.map (fun (n, t, r) ->
-        { sf_name = n; sf_ty = t; sf_restart = r }) children in
+      let tyfields = List.map (fun (n, t, (r, sd)) ->
+        { sf_name = n; sf_ty = t; sf_restart = r; sf_shutdown = sd }) children in
       { sc_fields = tyfields;
         sc_strategy = strat;
         sc_max_restarts = max_r;
@@ -743,16 +779,21 @@ backoff_kv:
 
 supervise_child:
   | actor_type = upper_name; field_name = lower_name;
-    r = option(child_restart)
+    mods = list(child_modifier)
     { (field_name, TyCon (actor_type, []),
-       (match r with Some t -> t | None -> Permanent)) }
+       mk_child_spec field_name.txt mods $startpos) }
 
 (* Optional per-child restart policy. Placed as a labelled trailing modifier so
    a later `shutdown <ms>` field can be added in the same position without a
    grammar rework. Omitted means Permanent, which is what every supervise block
    written before this feature means. *)
-child_restart:
-  | RESTART; t = restart_type_tok  { t }
+child_modifier:
+  | RESTART; t = restart_type_tok   { CmRestart t }
+  | SHUTDOWN; sd = shutdown_spec_tok { CmShutdown sd }
+
+shutdown_spec_tok:
+  | n = INT           { ShutdownMs n }
+  | w = lower_name    { mk_shutdown_word w.txt w.span }
 
 restart_type_tok:
   | PERMANENT  { Permanent }

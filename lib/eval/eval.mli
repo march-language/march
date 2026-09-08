@@ -126,6 +126,7 @@ type actor_inst =
   mutable ai_terminal_reason : monitor_down_reason;
   mutable ai_monitors : (int * int) list;
   mutable ai_mailbox : Eval_types.value Queue.t;
+  mutable ai_draining : bool;
   mutable ai_supervisor : int option;
   mutable ai_restart_count : (float * int) list;
   mutable ai_epoch : int;

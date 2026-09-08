@@ -907,6 +907,11 @@ and supervise_field_to_json (sf : supervise_field) : string =
   Dump.json_obj [
     ("name", name_to_json sf.sf_name);
     ("ty", ty_to_json sf.sf_ty);
+    ("restart", Dump.json_string
+       (match sf.sf_restart with
+        | Permanent -> "permanent" | Transient -> "transient"
+        | Temporary -> "temporary"));
+    ("shutdown_ms", json_int (shutdown_ms sf.sf_shutdown));
   ]
 
 and supervise_config_to_json (sc : supervise_config) : string =

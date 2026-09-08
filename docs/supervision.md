@@ -107,6 +107,62 @@ rewrites it.
 
 ---
 
+## Stopping gracefully
+
+`kill(pid)` is immediate: whatever was queued in the actor's mailbox is
+discarded. That is the wrong tool for a deploy, which needs the opposite —
+stop accepting new work, let the in-flight work finish, *then* exit.
+
+`Actor.stop(pid, timeout_ms)` does that:
+
+```march
+let stopped = Actor.stop(worker, 5000)
+```
+
+1. The actor is marked **draining**: `send` to it returns `None`, so no new
+   work is accepted.
+2. It works off the messages already in its mailbox.
+3. It dies a **normal** death — which no restart type restarts, so a stopped
+   child does not fight its supervisor.
+
+`stop` returns only once the actor has actually stopped, so a shutdown
+sequence can be written as straight-line code. It returns `false` if the actor
+was already dead or already stopping. `timeout_ms` bounds the drain: a negative
+value waits indefinitely, and `0` discards the queue as soon as the in-flight
+message returns. `Actor.is_draining(pid)` distinguishes "shutting down" from
+"dead", which `is_alive` alone cannot.
+
+### Stopping a tree
+
+Stopping a supervisor stops its children first, in **reverse declaration
+order** — the mirror of the order they were started in — each with its own
+`shutdown` budget:
+
+```march
+supervise do
+  strategy one_for_one
+  max_restarts 5 within 60
+  Db      db                      -- stopped last  (5s default)
+  Cache   cache shutdown 1000     -- stopped second (1s)
+  Api     api   shutdown infinity -- stopped first  (waits as long as it takes)
+end
+```
+
+`shutdown` takes a millisecond budget, `infinity`, or `brutal` (die at once,
+mailbox discarded — what `kill` does). A child that has not finished when its
+budget runs out is killed. The default is 5 seconds; `kill` never consults this
+field, so it changes nothing for code that does not call `stop`.
+
+Children are detached from the supervisor before being stopped, so an orderly
+teardown does not trigger a restart — otherwise the children would come back
+and the tree would never go down.
+
+**Not yet supported:** a `terminate`-style callback. An actor cannot run
+cleanup code of its own at shutdown; it can only finish the messages it has.
+Draining is also not yet integrated with hot code reload.
+
+---
+
 ## Restart backoff
 
 When the same child crashes repeatedly, the supervisor waits a little longer

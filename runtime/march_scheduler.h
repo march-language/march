@@ -189,6 +189,7 @@ typedef enum {
 #define MARCH_SEND_OK       0
 #define MARCH_SEND_DEAD    (-1)
 #define MARCH_SEND_DROPPED  1    /* message NOT enqueued (DROP_NEW) */
+#define MARCH_SEND_DRAINING 2    /* target is stopping: NOT enqueued, not disposed */
 
 /* Forward-declare scheduler so march_proc can hold a pointer to it. */
 struct march_scheduler;

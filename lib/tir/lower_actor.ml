@@ -441,7 +441,7 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
             let reg_child_var : Tir.var = {
               v_name = "register_supervisor_child";
               v_ty   = Tir.TFn ([Tir.TPtr Tir.TUnit; Tir.TPtr Tir.TUnit; Tir.TPtr Tir.TUnit;
-                                 Tir.TInt; Tir.TInt], Tir.TUnit);
+                                 Tir.TInt; Tir.TInt; Tir.TInt], Tir.TUnit);
               v_lin  = Tir.Unr;
             } in
             Tir.ELet ({ v_name = "$reg_child_" ^ fname; v_ty = Tir.TUnit; v_lin = Tir.Unr },
@@ -449,6 +449,9 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
                 sup_atom; Tir.AVar child_ptr_var; Tir.AVar child_spawn_fn_var;
                 Tir.ALit (Ast.LitInt (field_word_idx fname));
                 Tir.ALit (Ast.LitInt (restart_type_int sf.Ast.sf_restart));
+                (* -1 infinity, 0 brutal, else the millisecond budget; read by
+                   march_actor_stop when it tears the tree down. *)
+                Tir.ALit (Ast.LitInt (Ast.shutdown_ms sf.Ast.sf_shutdown));
               ]),
               acc)
           ) sc.Ast.sc_fields rest

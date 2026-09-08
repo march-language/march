@@ -26,6 +26,7 @@ let builtin_names : StringSet.t =
       "panic";
       "head"; "tail"; "is_nil";
       "to_string"; "respond"; "kill"; "is_alive";
+      "actor_stop"; "actor_is_draining";
       "send"; "spawn"; "actor_get_int";
       "task_spawn"; "task_await"; "task_await_unwrap";
       "task_yield"; "task_spawn_steal"; "task_reductions";

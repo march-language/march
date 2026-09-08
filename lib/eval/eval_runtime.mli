@@ -66,6 +66,7 @@ type actor_inst = {
   mutable ai_terminal_reason : monitor_down_reason;
   mutable ai_monitors : (int * int) list;
   mutable ai_mailbox : value Queue.t;
+  mutable ai_draining : bool;
   mutable ai_supervisor : int option;
   mutable ai_restart_count : (float * int) list;
   mutable ai_epoch : int;
@@ -109,6 +110,16 @@ val spawn_child_actor : ?crashed_pid:int option -> string -> int -> int
 val crash_actor : int -> string -> unit
 
 val crash_actor_with_reason : int -> string -> monitor_down_reason -> unit
+
+(** Graceful stop: drain the mailbox (up to [timeout_ms]; negative waits
+    indefinitely, 0 discards what is queued), then die NORMAL. Stops a
+    supervisor's children first, in reverse declaration order. *)
+val stop_actor : int -> int -> bool
+
+(** Set by eval.ml to [run_scheduler]; [stop_actor] pumps it to work the queue
+    off. This module is compiled below the scheduler, hence the hook. *)
+val drain_hook : (unit -> unit) ref
+val mailbox_accepts : actor_inst -> bool
 val mailbox_enqueue : actor_inst -> value -> unit
 val dropped_messages_count : int ref
 val monitor_actor : watcher_pid:int -> target_pid:int -> int

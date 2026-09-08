@@ -2214,18 +2214,23 @@ supervise_block ::= "supervise" "do"
 restart_strategy ::= "one_for_one" | "one_for_all" | "rest_for_one"
 supervise_child  ::= upper_name lower_name child_modifier*
 child_modifier   ::= "restart" restart_type
+                  | "shutdown" shutdown_spec
 restart_type     ::= "permanent" | "transient" | "temporary"
+shutdown_spec    ::= INT | "infinity" | "brutal"
 backoff_clause   ::= "backoff" backoff_kv+
 backoff_kv       ::= lower_name INT "%"?
 ```
 
-Both `backoff_clause` and `child_modifier` are optional, and their absence is
-the pre-existing meaning: `permanent`, and a `25 / 5000 / 25` backoff curve
-(`Ast.default_backoff`). `backoff_kv`'s label is deliberately an ordinary
+Both `backoff_clause` and `child_modifier` are optional. `child_modifier` is a
+`list`, not a fixed sequence, so the modifiers may be written in either order,
+and a repeated one is a diagnostic naming the child (`mk_child_spec`). Absent,
+they mean `permanent` and a 5-second `shutdown` budget (`Ast.default_shutdown`,
+consulted only by `stop`, never by `kill`); an absent `backoff` clause means
+the `25 / 5000 / 25` curve (`Ast.default_backoff`). `backoff_kv`'s label is deliberately an ordinary
 `lower_name` rather than three keywords — `base`, `cap` and `jitter` are
 validated in the semantic action (`mk_backoff`), which rejects an unknown
 label, a repeated one, `cap` below `base`, a `%` on a millisecond field, and a
-jitter outside 0–100. `restart` and `backoff` themselves are **soft** keywords,
+jitter outside 0–100. `restart`, `shutdown` and `backoff` themselves are **soft** keywords,
 demoted back to identifiers by `token_filter.ml` unless the following token
 confirms the keyword reading; reserving `restart` outright once broke
 `stdlib/dist_supervisor.march`, which uses it as a field and a parameter name.

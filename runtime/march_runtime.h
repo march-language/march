@@ -478,6 +478,16 @@ typedef enum {
     MARCH_DEATH_CRASH  = 2,
 } march_death_reason;
 
+/* Graceful shutdown. march_actor_stop marks the actor draining (new sends are
+   refused), lets its green thread finish the queued messages until the mailbox
+   empties or timeout_ms elapses, then ends it with MARCH_DEATH_NORMAL. A
+   negative timeout waits indefinitely; 0 discards whatever is queued once the
+   current handler returns. A supervisor stops its children first, in reverse
+   declaration order, each with its own `shutdown` budget from the child spec.
+   Contrast march_kill, which is immediate and drops the mailbox. */
+int64_t march_actor_stop(void *actor, int64_t timeout_ms);
+int64_t march_actor_is_draining(void *actor);
+
 /* register_supervisor: record an actor as a supervisor with a given restart
    strategy (0=one_for_one, 1=one_for_all, 2=rest_for_one), max_restarts, and
    time window in seconds.  Children are registered separately via

@@ -24,6 +24,20 @@ git log is authoritative for exact commits.
   Note that March's `permanent` is deliberately not OTP's: no restart type
   restarts a child that returned normally.
 
+- **`Actor.stop(pid, timeout_ms)`: graceful shutdown.** A stopped actor accepts
+  no new messages (`send` returns `None`), works off whatever is already
+  queued, and then dies a normal death — which no restart type restarts. It
+  returns only once the actor has actually stopped, so a shutdown sequence
+  reads as straight-line code, and `Actor.is_draining(pid)` tells "shutting
+  down" apart from "dead". Previously the only way to stop an actor was
+  `kill`, which discards the mailbox, so rolling a node lost exactly the
+  requests that were waiting. Stopping a supervisor stops its children first,
+  in reverse declaration order, each with its own `shutdown` budget from the
+  child spec (`Worker w shutdown 5000`, or `infinity` / `brutal`; the default
+  is 5 seconds and `kill` never consults it). No `terminate`-style callback
+  yet: an actor can finish its queued messages, but cannot run cleanup of its
+  own.
+
 - **`backoff base <ms> cap <ms> jitter <n>%`** on a `supervise` block tunes the
   delay between repeated restarts of the same child. All three are optional and
   default to `25 / 5000 / 25`, the constants the runtime previously hardcoded,

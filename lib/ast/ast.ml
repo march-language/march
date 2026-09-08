@@ -309,10 +309,23 @@ and restart_strategy =
     specs/2026-08-17-supervisor-restart-types-design.md. *)
 and restart_type = Permanent | Transient | Temporary
 
+(** How long a supervisor waits for a child to drain when the tree is stopped
+    with [stop], from the child spec's optional `shutdown` modifier.
+
+    This governs [stop] only. [kill] is unchanged and always immediate, so no
+    program written before graceful shutdown existed can observe this field —
+    which is why the default is OTP's 5 seconds rather than [ShutdownBrutal].
+    See specs/2026-09-08-supervise-child-spec-design.md §2. *)
+and shutdown_spec =
+  | ShutdownBrutal        (** `shutdown brutal`: die at once, mailbox discarded *)
+  | ShutdownMs of int     (** `shutdown 5000`: drain, hard-kill at the deadline *)
+  | ShutdownInfinity      (** `shutdown infinity`: drain to empty, no deadline *)
+
 and supervise_field = {
-  sf_name    : name;
-  sf_ty      : ty;
-  sf_restart : restart_type;   (** [Permanent] when the modifier is omitted *)
+  sf_name     : name;
+  sf_ty       : ty;
+  sf_restart  : restart_type;   (** [Permanent] when the modifier is omitted *)
+  sf_shutdown : shutdown_spec;  (** [default_shutdown] when the modifier is omitted *)
 }
 
 (** Restart-backoff curve for a supervise block, tunable with the optional
@@ -508,3 +521,16 @@ let show_expr = function
     before the clause existed. Parser, interpreter and lowering all read this
     one value, so "the default" cannot drift between them. *)
 let default_backoff = { bo_base_ms = 25; bo_cap_ms = 5000; bo_jitter_pct = 25 }
+
+(** How long [stop] waits for a child with no `shutdown` modifier: OTP's five
+    seconds. Safe as a default precisely because it is unobservable to older
+    programs — `stop` did not exist when they were written, and `kill` does not
+    consult it. *)
+let default_shutdown = ShutdownMs 5000
+
+(** Runtime encoding of a [shutdown_spec], shared by lowering and the
+    interpreter: -1 infinity, 0 brutal, otherwise the millisecond budget. *)
+let shutdown_ms = function
+  | ShutdownInfinity -> -1
+  | ShutdownBrutal   -> 0
+  | ShutdownMs n     -> n

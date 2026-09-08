@@ -101,6 +101,35 @@ mod Actor do
     actor_register(pid, name)
   end
 
+  doc """
+  Stop `pid` gracefully: it accepts no further messages, works off whatever is
+  already queued, and then dies a NORMAL death (which no restart type
+  restarts). Returns false if it was already dead or already stopping.
+
+  This is the deploy story `kill` cannot tell. `kill(pid)` is immediate and
+  drops the mailbox, so stopping a busy actor loses exactly the requests that
+  were waiting; `stop` finishes them first.
+
+  Waits up to `timeout_ms` for the queue to empty, then gives up and dies with
+  whatever is left undelivered. A negative timeout waits indefinitely; 0
+  discards the queue as soon as the in-flight message returns.
+
+  Stopping a supervisor stops its children first, in REVERSE declaration
+  order, each with its own `shutdown` budget from the `supervise` block's
+  child spec (`Worker w shutdown 5000`), defaulting to 5 seconds.
+  """
+  fn stop(pid, timeout_ms) do
+    actor_stop(pid, timeout_ms)
+  end
+
+  doc """
+  Is `pid` stopping — accepting no new messages, but not dead yet? `is_alive`
+  alone cannot express this: a draining actor is still alive.
+  """
+  fn is_draining(pid) do
+    actor_is_draining(pid)
+  end
+
   doc "Remove a name. Returns false if it was not registered."
   fn unregister(name) do
     actor_unregister(name)
