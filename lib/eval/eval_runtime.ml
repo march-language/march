@@ -765,6 +765,48 @@ let spawn_child_actor ?(crashed_pid : int option = None) (child_actor_name : str
               Hashtbl.replace named_registry name child_pid) names));
     child_pid
 
+(** Should a child with restart policy [rt] be brought back after dying for
+    [reason]?  Mirrors [march_child_should_restart] in runtime/march_runtime.c
+    exactly — both backends must agree on identical source.
+
+      policy      Crash   Killed   Normal
+      permanent   yes     yes      no
+      transient   yes     no       no
+      temporary   no      no       no
+
+    March's [Permanent] is deliberately not OTP's: it does not restart on a
+    normal exit. See specs/2026-09-08-supervise-child-spec-design.md §4. *)
+let child_should_restart (rt : restart_type) (reason : monitor_down_reason) : bool =
+  match reason with
+  | Normal -> false
+  | _ ->
+    (match rt with
+     | Permanent -> true
+     | Transient -> (match reason with Crash _ -> true | _ -> false)
+     | Temporary -> false)
+
+(** The declared restart policy of whichever supervise-block child currently
+    holds [crashed_pid] in [sup_inst]'s state, or [Permanent] if the child
+    cannot be identified — the conservative direction, matching the runtime's
+    unset-terminal_reason fallback: an unknown child restarts as it did before
+    restart types existed, rather than being silently retired. *)
+let child_restart_policy (sup_inst : actor_inst) (crashed_pid : int) : restart_type =
+  match sup_inst.ai_def.actor_supervise with
+  | None -> Permanent
+  | Some sup_cfg ->
+    let fname = match sup_inst.ai_state with
+      | VRecord fields ->
+        (match List.find_opt (fun (_, v) -> v = VInt crashed_pid) fields with
+         | Some (k, _) -> Some k | None -> None)
+      | _ -> None
+    in
+    (match fname with
+     | None -> Permanent
+     | Some fname ->
+       (match List.find_opt (fun sf -> sf.sf_name.txt = fname) sup_cfg.sc_fields with
+        | Some sf -> sf.sf_restart
+        | None -> Permanent))
+
 (** Restart a supervisor's crashed child under one_for_one strategy.
     Finds which field in the supervisor state held the crashed pid,
     spawns a new child, and updates the supervisor's state. *)
@@ -859,6 +901,15 @@ and one_for_all_restart (sup_pid : int) (_crashed_pid : int) : unit =
              let new_fields = List.map (fun (fname, old_val) ->
                match List.find_opt (fun sf -> sf.sf_name.txt = fname) sup_cfg.sc_fields with
                | None -> (fname, VInt 0)
+               | Some sf when sf.sf_restart = Temporary ->
+                 (* Swept up by the batch and killed like any other sibling,
+                    but NOT brought back: the kill is internal machinery, this
+                    respawn is the restart decision. The slot keeps the dead
+                    child's pid, exactly as the runtime leaves the supervisor's
+                    stored pid_index untouched when it skips a temporary child.
+                    No single-child test sees this — a temporary child only
+                    resurrects when a SIBLING crashes. *)
+                 (fname, old_val)
                | Some sf ->
                  let child_actor_name = match sf.sf_ty with
                    | TyCon (n, []) -> n.txt | _ -> "" in
@@ -933,6 +984,10 @@ and rest_for_one_restart (sup_pid : int) (crashed_pid : int) : unit =
                let updated = List.fold_left (fun acc fname ->
                  match List.find_opt (fun sf -> sf.sf_name.txt = fname) sup_cfg.sc_fields with
                  | None -> acc
+                 | Some sf when sf.sf_restart = Temporary ->
+                   (* See one_for_all_restart's identical skip: killed by the
+                      sweep, never respawned. *)
+                   acc
                  | Some sf ->
                    let child_actor_name = match sf.sf_ty with
                      | TyCon (n, []) -> n.txt | _ -> "" in
@@ -952,7 +1007,8 @@ and rest_for_one_restart (sup_pid : int) (crashed_pid : int) : unit =
        end)
 
 (** Notify a dynamic supervisor that one of its children crashed. *)
-and notify_dyn_supervisor (sup_name : string) (crashed_pid : int) : unit =
+and notify_dyn_supervisor (sup_name : string) (crashed_pid : int)
+    (reason : monitor_down_reason) : unit =
   match Hashtbl.find_opt dyn_sup_registry sup_name with
   | None -> ()
   | Some ds ->
@@ -961,7 +1017,12 @@ and notify_dyn_supervisor (sup_name : string) (crashed_pid : int) : unit =
      | Some entry ->
        (* Remove from the list regardless of restart policy *)
        ds.ds_children <- List.filter (fun e -> e.dce_pid <> crashed_pid) ds.ds_children;
-       if entry.dce_restart = "temporary" then ()
+       let policy = match entry.dce_restart with
+         | "transient" -> Transient
+         | "temporary" -> Temporary
+         | _           -> Permanent
+       in
+       if not (child_should_restart policy reason) then ()
        else begin
          (* Permanent or transient: attempt restart within budget *)
          let now = Unix.gettimeofday () in
@@ -979,17 +1040,26 @@ and notify_dyn_supervisor (sup_name : string) (crashed_pid : int) : unit =
 
 (** Notify a supervisor that a child has crashed, triggering the appropriate
     restart strategy. *)
-and notify_supervisor (sup_pid : int) (crashed_pid : int) : unit =
+and notify_supervisor (sup_pid : int) (crashed_pid : int)
+    (reason : monitor_down_reason) : unit =
   match Hashtbl.find_opt actor_registry sup_pid with
   | None ->
     (* Check if this is a dynamic supervisor virtual pid *)
     (match Hashtbl.find_opt dyn_sup_vpid_map sup_pid with
-     | Some sup_name -> notify_dyn_supervisor sup_name crashed_pid
+     | Some sup_name -> notify_dyn_supervisor sup_name crashed_pid reason
      | None -> ())
   | Some sup_inst ->
     (match sup_inst.ai_def.actor_supervise with
      | None -> ()
      | Some sup_cfg ->
+       (* Per-child restart policy, filtered BEFORE the strategy runs so a
+          death that will not restart also charges nothing against
+          ai_restart_count (each strategy debits the budget on entry). Same
+          placement, and the same reason, as the runtime's filter sitting
+          ahead of its crash_streak update. *)
+       if not (child_should_restart (child_restart_policy sup_inst crashed_pid) reason)
+       then ()
+       else
        (match sup_cfg.sc_strategy with
         | OneForOne  -> one_for_one_restart sup_pid crashed_pid
         | OneForAll  -> one_for_all_restart sup_pid crashed_pid
@@ -1056,7 +1126,7 @@ and crash_actor_with_reason (pid : int) (_reason : string)
     ) inst.ai_monitors;
     (* Phase 2: notify supervisor for restart *)
     (match supervisor with
-     | Some sup_pid -> notify_supervisor sup_pid pid
+     | Some sup_pid -> notify_supervisor sup_pid pid down_reason
      | None -> ())
 
 and crash_actor (pid : int) (reason : string) : unit =

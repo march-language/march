@@ -483,7 +483,10 @@ typedef enum {
    time window in seconds.  Children are registered separately via
    march_actor_register_child. */
 void    march_register_supervisor(void *supervisor, int64_t strategy,
-                                   int64_t max_restarts, int64_t window_secs);
+                                   int64_t max_restarts, int64_t window_secs,
+                                   int64_t backoff_base_ms,
+                                   int64_t backoff_cap_ms,
+                                   int64_t backoff_jitter_pct);
 
 /* ── Phase 5: Actor state migration ─────────────────────────────────── */
 

@@ -2207,12 +2207,29 @@ parses and evaluates as an application root.
 supervise_block ::= "supervise" "do"
                        "strategy" restart_strategy
                        "max_restarts" INT "within" INT
+                       backoff_clause?
                        supervise_child*
                      "end"
 
 restart_strategy ::= "one_for_one" | "one_for_all" | "rest_for_one"
-supervise_child  ::= upper_name lower_name
+supervise_child  ::= upper_name lower_name child_modifier*
+child_modifier   ::= "restart" restart_type
+restart_type     ::= "permanent" | "transient" | "temporary"
+backoff_clause   ::= "backoff" backoff_kv+
+backoff_kv       ::= lower_name INT "%"?
 ```
+
+Both `backoff_clause` and `child_modifier` are optional, and their absence is
+the pre-existing meaning: `permanent`, and a `25 / 5000 / 25` backoff curve
+(`Ast.default_backoff`). `backoff_kv`'s label is deliberately an ordinary
+`lower_name` rather than three keywords — `base`, `cap` and `jitter` are
+validated in the semantic action (`mk_backoff`), which rejects an unknown
+label, a repeated one, `cap` below `base`, a `%` on a millisecond field, and a
+jitter outside 0–100. `restart` and `backoff` themselves are **soft** keywords,
+demoted back to identifiers by `token_filter.ml` unless the following token
+confirms the keyword reading; reserving `restart` outright once broke
+`stdlib/dist_supervisor.march`, which uses it as a field and a parameter name.
+See [`specs/2026-09-08-supervise-child-spec-design.md`](../2026-09-08-supervise-child-spec-design.md).
 
 (`supervise_block` at `parser.mly:579–592`; `restart_strategy_tok` at
 `parser.mly:598–601`; `supervise_child` at `parser.mly:594–596`.) Reachable

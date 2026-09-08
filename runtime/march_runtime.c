@@ -2043,6 +2043,14 @@ typedef struct march_actor_meta {
     int                         supervisor_strategy;    /* 0=one_for_one, 1=one_for_all, 2=rest_for_one */
     int64_t                     supervisor_max_restarts;
     int64_t                     supervisor_window_secs;
+    /* Restart-backoff curve, from the supervise block's optional
+     * `backoff base N cap N jitter N%` clause. Defaulted by the parser to
+     * 25 / 5000 / 25 — the constants march_supervisor_notify used to spell
+     * inline — so an absent clause reproduces the previous delays exactly.
+     * Written once at registration, read only by march_supervisor_notify. */
+    int64_t                     backoff_base_ms;
+    int64_t                     backoff_cap_ms;
+    int64_t                     backoff_jitter_pct;
     /* Capability revocation (used by march_is_cap_valid). _Atomic: written
      * once per respawn by march_respawn_child (on the supervisor's thread,
      * under g_tbl_mu, but g_tbl_mu is a writer-side critical section only —
@@ -3374,6 +3382,45 @@ static int march_restart_budget_ok(march_actor_meta *sup_meta) {
  * is only for a child's initial spawn), inherit the crashed child's
  * epoch+1 (matching eval.ml spawn_child_actor's stale-capability-detection
  * inheritance), and write the new pid_index into the supervisor's state. */
+/* Restart policy encoding, shared with lower_actor.ml's restart_type_int and
+ * Ast.restart_type: 0 permanent, 1 transient, 2 temporary. */
+#define MARCH_RESTART_PERMANENT 0
+#define MARCH_RESTART_TRANSIENT 1
+#define MARCH_RESTART_TEMPORARY 2
+
+/* Should a child with policy [restart_type] be brought back after dying for
+ * [reason]?  The whole table, in one place, because it is consulted from two
+ * unrelated sites (march_supervisor_notify's filter and the batch strategies'
+ * respawn loops) and they must not drift:
+ *
+ *   policy      CRASH   KILLED   NORMAL
+ *   permanent   yes     yes      no
+ *   transient   yes     no       no
+ *   temporary   no      no       no
+ *
+ * NOTE March's `permanent` is deliberately NOT OTP's: OTP restarts a permanent
+ * child even on a normal exit, while do_actor_death has always guarded the
+ * notify with `reason != MARCH_DEATH_NORMAL`. Matching OTP here would silently
+ * change every supervise block ever written. See
+ * specs/2026-09-08-supervise-child-spec-design.md §4. */
+static int march_child_should_restart(int32_t restart_type,
+                                      march_death_reason reason) {
+    if (reason == MARCH_DEATH_NORMAL) return 0;
+    switch (restart_type) {
+        case MARCH_RESTART_TRANSIENT: return reason == MARCH_DEATH_CRASH;
+        case MARCH_RESTART_TEMPORARY: return 0;
+        default:                      return 1;   /* permanent */
+    }
+}
+
+/* The reason [meta] died, as the restart filter should see it. An unset
+ * terminal_reason reads as CRASH on purpose: an unknown reason must restart a
+ * permanent child (today's behaviour) rather than silently retire it. */
+static march_death_reason march_meta_death_reason(march_actor_meta *meta) {
+    if (!meta || !meta->terminal_set) return MARCH_DEATH_CRASH;
+    return meta->terminal_reason;
+}
+
 static void *march_respawn_child(void *supervisor, march_actor_meta *sup_meta, int child_idx) {
     march_sup_child *child = &sup_meta->sup_children[child_idx];
     int64_t old_pid_index = ((int64_t *)supervisor)[4 + child->word_idx];
@@ -3516,6 +3563,13 @@ static void march_one_for_all_restart(void *supervisor, march_actor_meta *sup_me
             do_actor_death(live_children[i], MARCH_DEATH_KILLED, NULL, 0);
     }
     for (int i = 0; i < n; i++) {
+        /* A `temporary` sibling swept up by this batch is killed like any
+         * other, but must NOT come back — the kill above is internal
+         * machinery, the respawn here is the actual restart decision. Missing
+         * this is invisible to every single-child test: the child resurrects
+         * only when a SIBLING crashes. */
+        if (sup_meta->sup_children[i].restart_type == MARCH_RESTART_TEMPORARY)
+            continue;
         march_respawn_child(supervisor, sup_meta, i);
     }
 }
@@ -3553,6 +3607,9 @@ static void march_rest_for_one_restart(void *supervisor, march_actor_meta *sup_m
             do_actor_death(live_children[i], MARCH_DEATH_KILLED, NULL, 0);
     }
     for (int i = child_idx; i < n; i++) {
+        /* See march_one_for_all_restart's identical skip. */
+        if (sup_meta->sup_children[i].restart_type == MARCH_RESTART_TEMPORARY)
+            continue;
         march_respawn_child(supervisor, sup_meta, i);
     }
 }
@@ -3771,6 +3828,23 @@ static void march_supervisor_notify(void *supervisor, march_actor_meta *crashed_
     int child_idx = crashed_meta->sup_child_index;
     if (child_idx < 0 || child_idx >= sup_meta->sup_num_children) return;
     march_sup_child *child = &sup_meta->sup_children[child_idx];
+
+    /* Per-child restart policy (specs/2026-09-08-supervise-child-spec-design.md).
+     * Placed HERE, before the g_supervise_mu section below, on purpose: that
+     * section does the crash_streak read-modify-write that feeds the restart
+     * budget, and a death that will not restart must charge nothing. Filtering
+     * after it would let a program that retires N `temporary` children walk a
+     * perfectly healthy supervisor toward its max_restarts ceiling. */
+    if (!march_child_should_restart(child->restart_type,
+                                    march_meta_death_reason(crashed_meta))) {
+        if (getenv("MARCH_SUP_TRACE"))
+            fprintf(stderr, "march: supervisor child=%d retired"
+                    " (restart_type=%d, reason=%d) -- not restarting\n",
+                    child_idx, (int)child->restart_type,
+                    (int)march_meta_death_reason(crashed_meta));
+        return;
+    }
+
     int strategy = sup_meta->supervisor_strategy;
     int is_batch = (strategy == 1 || strategy == 2);
 
@@ -3834,17 +3908,30 @@ static void march_supervisor_notify(void *supervisor, march_actor_meta *crashed_
 
     int64_t delay = 0;
     if (streak > 1) {
+        /* Same curve as ever, with the three constants now read from the
+         * supervise block (Ast.default_backoff keeps them at 25 / 5000 / 25
+         * when no `backoff` clause is written, so every existing program and
+         * every supervision golden sees identical delays). Defensive
+         * fallbacks: a meta registered before this field existed, or by a C
+         * caller that passed nothing, reads 0 here. */
+        int64_t base = sup_meta->backoff_base_ms > 0 ? sup_meta->backoff_base_ms : 25;
+        int64_t cap  = sup_meta->backoff_cap_ms >= base ? sup_meta->backoff_cap_ms : 5000;
+        int64_t jitter_pct = sup_meta->backoff_jitter_pct;
+        if (jitter_pct < 0 || jitter_pct > 100) jitter_pct = 25;
         int shift = streak > 8 ? 7 : streak - 1;
-        delay = 25LL << shift;             /* 50,100,...,3200 */
-        if (delay > 5000) delay = 5000;
-        /* ±25% jitter, seeded off a process-wide counter — Math.random is
-         * not available here and rand() is process-global anyway; a weak
-         * LCG is plenty for de-synchronizing a crash-storm's retries. */
+        delay = base << shift;             /* 50,100,...,3200 at base 25 */
+        if (delay > cap || delay < 0) delay = cap;
+        /* +/-jitter_pct of the delay, seeded off a process-wide counter —
+         * Math.random is not available here and rand() is process-global
+         * anyway; a weak LCG is plenty for de-synchronizing a crash-storm's
+         * retries. jitter_pct 0 disables it (the span below collapses to 0,
+         * and `s % 1` is 0, so delay is left exactly on the curve). */
         static _Atomic uint32_t jitter_seed = 0x9E3779B9u;
+        int64_t half_span = delay * jitter_pct / 100;   /* the +/- radius */
         uint32_t s = atomic_fetch_add_explicit(&jitter_seed, 0x9E3779B9u,
                                                memory_order_relaxed);
         s ^= s >> 16; s *= 0x45d9f3bu; s ^= s >> 16;
-        delay += (int64_t)(s % (uint32_t)(delay / 2 + 1)) - delay / 4;
+        delay += (int64_t)(s % (uint32_t)(2 * half_span + 1)) - half_span;
     }
     if (getenv("MARCH_SUP_TRACE"))
         fprintf(stderr, "march: supervisor backoff child=%d streak=%d delay_ms=%lld%s\n",
@@ -6851,12 +6938,26 @@ void march_demonitor(int64_t ref) {
    The actor must already be registered via march_spawn.
    This is a metadata call; actual restart logic is driven by Down events. */
 void march_register_supervisor(void *supervisor, int64_t strategy,
-                                int64_t max_restarts, int64_t window_secs) {
+                                int64_t max_restarts, int64_t window_secs,
+                                int64_t backoff_base_ms,
+                                int64_t backoff_cap_ms,
+                                int64_t backoff_jitter_pct) {
     if (!IS_HEAP_PTR(supervisor)) return;
     march_actor_meta *meta = find_or_create_meta(supervisor);
     meta->supervisor_strategy  = (int)strategy;
     meta->supervisor_max_restarts = max_restarts;
     meta->supervisor_window_secs  = window_secs;
+    /* The backoff curve. Codegen always emits these three (defaulted by the
+     * parser to 25/5000/25, the constants this function's caller used to have
+     * hardcoded), but clamp anyway: this is a public C symbol, and a 0 base
+     * would make every delay 0 while a negative cap would make the ceiling
+     * unreachable. */
+    meta->backoff_base_ms = backoff_base_ms > 0 ? backoff_base_ms : 25;
+    meta->backoff_cap_ms  = backoff_cap_ms >= meta->backoff_base_ms
+                              ? backoff_cap_ms : meta->backoff_base_ms;
+    meta->backoff_jitter_pct =
+        backoff_jitter_pct < 0 ? 0
+      : backoff_jitter_pct > 100 ? 100 : backoff_jitter_pct;
 }
 
 /* Called once per declared supervise-block child, from the generated

@@ -318,6 +318,12 @@ native_supervisor_one_for_one_restart: coverage audit (user + stdlib): 63 enforc
 native_supervisor_one_for_one_restart: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_supervisor_rest_for_one_restart: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_supervisor_rest_for_one_restart: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_supervisor_restart_batch_temporary: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_supervisor_restart_batch_temporary: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_supervisor_restart_temporary: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_supervisor_restart_temporary: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_supervisor_restart_transient: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_supervisor_restart_transient: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_supervisor_spawn_children: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_supervisor_spawn_children: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_tagged_int_rc: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced

@@ -3913,6 +3913,124 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/supervisor_rest_for_one_restart.expected native_supervisor_rest_for_one_restart.out)))
 
+; ── Per-child restart types (`restart transient` / `restart temporary`) ──
+; specs/2026-09-08-supervise-child-spec-design.md. Each fixture runs BOTH
+; compiled and interpreted against ONE .expected: the policy is single-
+; threaded decision-making implemented twice (march_child_should_restart in
+; the C runtime, child_should_restart in eval_runtime.ml), and the two
+; drifting apart is the failure mode these goldens exist to catch.
+;
+; Each is non-vacuous by construction -- deleting the `restart <type>`
+; modifier from the source flips at least one printed line on BOTH backends.
+
+(rule
+ (targets native_supervisor_restart_transient native_supervisor_restart_transient.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/supervisor_restart_transient.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_supervisor_restart_transient
+        native/supervisor_restart_transient.march)
+   (with-stdout-to native_supervisor_restart_transient.out
+        (system "./native_supervisor_restart_transient")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_restart_transient.expected native_supervisor_restart_transient.out)))
+
+(rule
+ (targets interp_supervisor_restart_transient.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/supervisor_restart_transient.march))
+ (action
+  (with-stdout-to interp_supervisor_restart_transient.out
+    (run %{exe:../bin/main.exe} native/supervisor_restart_transient.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_restart_transient.expected interp_supervisor_restart_transient.out)))
+
+(rule
+ (targets native_supervisor_restart_temporary native_supervisor_restart_temporary.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/supervisor_restart_temporary.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_supervisor_restart_temporary
+        native/supervisor_restart_temporary.march)
+   (with-stdout-to native_supervisor_restart_temporary.out
+        (system "./native_supervisor_restart_temporary")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_restart_temporary.expected native_supervisor_restart_temporary.out)))
+
+(rule
+ (targets interp_supervisor_restart_temporary.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/supervisor_restart_temporary.march))
+ (action
+  (with-stdout-to interp_supervisor_restart_temporary.out
+    (run %{exe:../bin/main.exe} native/supervisor_restart_temporary.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_restart_temporary.expected interp_supervisor_restart_temporary.out)))
+
+(rule
+ (targets native_supervisor_restart_batch_temporary native_supervisor_restart_batch_temporary.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/supervisor_restart_batch_temporary.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_supervisor_restart_batch_temporary
+        native/supervisor_restart_batch_temporary.march)
+   (with-stdout-to native_supervisor_restart_batch_temporary.out
+        (system "./native_supervisor_restart_batch_temporary")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_restart_batch_temporary.expected native_supervisor_restart_batch_temporary.out)))
+
+(rule
+ (targets interp_supervisor_restart_batch_temporary.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/supervisor_restart_batch_temporary.march))
+ (action
+  (with-stdout-to interp_supervisor_restart_batch_temporary.out
+    (run %{exe:../bin/main.exe} native/supervisor_restart_batch_temporary.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_restart_batch_temporary.expected interp_supervisor_restart_batch_temporary.out)))
+
 ; ── Regression: Task.await / await_many / async_stream must untag i64 Ok
 ; ── payloads.  The thunk trampoline double-tags scalar results (task[3] =
 ; ── 4*n+3); march_task_await wraps that straight into Ok, and the Ok(n)

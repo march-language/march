@@ -315,12 +315,28 @@ and supervise_field = {
   sf_restart : restart_type;   (** [Permanent] when the modifier is omitted *)
 }
 
+(** Restart-backoff curve for a supervise block, tunable with the optional
+    `backoff base N cap N jitter N%` clause.
+
+    The defaults reproduce the curve that was hardcoded in
+    march_supervisor_notify before the clause existed —
+    [delay = min(5000, 25 << min(streak-1, 7))] ms with +/-25% jitter — so an
+    absent clause is byte-for-byte today's behaviour, which is what keeps
+    examples/supervision_strategies.march and the native supervision goldens
+    unmoved. See specs/2026-09-08-supervise-child-spec-design.md §5. *)
+and backoff_config = {
+  bo_base_ms    : int;   (** delay for the second consecutive crash *)
+  bo_cap_ms     : int;   (** ceiling the doubling saturates at *)
+  bo_jitter_pct : int;   (** +/- this percent of the computed delay; 0 = none *)
+}
+
 and supervise_config = {
   sc_fields       : supervise_field list;
   sc_strategy     : restart_strategy;
   sc_max_restarts : int;
   sc_window_secs  : int;
   sc_order        : name list;   (** declared field order for rest_for_one *)
+  sc_backoff      : backoff_config;  (** [default_backoff] when the clause is absent *)
 }
 
 and actor_def = {
@@ -486,3 +502,9 @@ let show_expr = function
   | ELetStar _ -> "ELetStar(...)"
   | EAssert _ -> "EAssert(...)"
   | ESigil _ -> "ESigil(...)"
+
+(** The restart-backoff curve a `supervise` block gets when it declares no
+    `backoff` clause: exactly the constants that were hardcoded in the runtime
+    before the clause existed. Parser, interpreter and lowering all read this
+    one value, so "the default" cannot drift between them. *)
+let default_backoff = { bo_base_ms = 25; bo_cap_ms = 5000; bo_jitter_pct = 25 }

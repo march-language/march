@@ -916,6 +916,9 @@ and supervise_config_to_json (sc : supervise_config) : string =
     ("max_restarts", json_int sc.sc_max_restarts);
     ("window_secs", json_int sc.sc_window_secs);
     ("order", Dump.json_list (List.map name_to_json sc.sc_order));
+    ("backoff_base_ms", json_int sc.sc_backoff.bo_base_ms);
+    ("backoff_cap_ms", json_int sc.sc_backoff.bo_cap_ms);
+    ("backoff_jitter_pct", json_int sc.sc_backoff.bo_jitter_pct);
   ]
 
 and actor_def_to_json (ad : actor_def) : string =

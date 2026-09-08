@@ -1,0 +1,64 @@
+-- Per-child restart types: `temporary`, and the restart BUDGET it must not
+-- charge (specs/2026-09-08-supervise-child-spec-design.md §4).
+--
+-- max_restarts is 1 on purpose. The temporary child's crash happens first; if
+-- the filter sat AFTER the budget accounting instead of before it, that crash
+-- would spend the supervisor's only restart and the permanent child's kill
+-- below would take the whole supervisor down with "restart intensity
+-- exceeded" -- so the last two lines are the budget assertion, not decoration.
+mod Main do
+  needs IO.Console
+
+  actor Worker do
+    state { n : Int }
+    init  { n: 0 }
+
+    on Ping() do
+      { n: state.n + 1 }
+    end
+
+    on Poison() do
+      panic("boom")
+    end
+  end
+
+  actor Sup do
+    state { perm : Int, tmp : Int }
+    init  { perm: 0, tmp: 0 }
+
+    supervise do
+      strategy one_for_one
+      max_restarts 1 within 60
+      Worker perm
+      Worker tmp restart temporary
+    end
+  end
+
+  fn child_int(sup, field) do
+    match get_actor_field(sup, field) do
+      None    -> -1
+      Some(n) -> n
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let sup = spawn(Sup)
+    let perm1 = child_int(sup, "perm")
+    let tmp1 = child_int(sup, "tmp")
+
+    -- A crash does not bring a temporary child back.
+    send(pid_of_int(tmp1), Poison())
+    run_until_idle()
+    let tmp2 = child_int(sup, "tmp")
+    println("temporary crashed, slot unchanged: " ++ bool_to_string(tmp2 == tmp1))
+    println("temporary crashed, child dead: " ++ bool_to_string(is_alive(pid_of_int(tmp1)) == false))
+
+    -- And it spent none of the restart budget: the permanent child still gets
+    -- the supervisor's one allowed restart.
+    kill(pid_of_int(perm1))
+    run_until_idle()
+    let perm2 = child_int(sup, "perm")
+    println("permanent respawned after: " ++ bool_to_string(perm2 != perm1))
+    println("supervisor alive: " ++ bool_to_string(is_alive(sup)))
+  end
+end

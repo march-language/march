@@ -78,6 +78,7 @@ let () =
       ("max_restarts", MAX_RESTARTS);
       ("within", WITHIN);
       ("restart",   RESTART);
+      ("backoff",   BACKOFF);
       ("permanent", PERMANENT);
       ("transient", TRANSIENT);
       ("temporary", TEMPORARY);

@@ -11,6 +11,25 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- **Per-child restart types on `supervise` blocks.** A child may be declared
+  `restart transient` (a crash restarts it, `kill()` retires it for good) or
+  `restart temporary` (never restarted); the default stays `permanent`, so
+  existing blocks are unchanged. Retiring a child spends none of the
+  supervisor's `max_restarts` budget, and a `temporary` child swept up by a
+  `one_for_all` / `rest_for_one` batch restart is stopped without being brought
+  back. Previously every supervised child was permanent and `kill()` on one
+  simply restarted it, with no way to stop a worker that had finished its job.
+  Note that March's `permanent` is deliberately not OTP's: no restart type
+  restarts a child that returned normally.
+
+- **`backoff base <ms> cap <ms> jitter <n>%`** on a `supervise` block tunes the
+  delay between repeated restarts of the same child. All three are optional and
+  default to `25 / 5000 / 25`, the constants the runtime previously hardcoded,
+  so an existing supervision tree's timing is unchanged. `jitter 0%` makes the
+  delays exactly reproducible for tests.
+
 ### Fixed
 
 - **Native arrays carry a header tag.** `native_arr_alloc` left the tag at `0`,

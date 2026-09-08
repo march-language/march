@@ -45,3 +45,33 @@ parsed into `sup_meta` fields (`backoff_base_ms`, `backoff_cap_ms`,
 (25/5000/25) when the clause is absent so existing programs (and the
 goldens) are unaffected. `march_supervisor_notify`'s delay computation
 would read from `sup_meta` instead of the literals.
+
+---
+
+## Landed 2026-09-08
+
+`backoff base N cap N jitter N%` is now an optional clause on the `supervise`
+block, parsed into `Ast.backoff_config`, lowered as three extra `i64`
+arguments to `march_register_supervisor`, stored on the supervisor's meta, and
+read by `march_supervisor_notify`'s delay computation in place of the literals.
+
+Defaults are `Ast.default_backoff` = 25 / 5000 / 25, i.e. exactly the constants
+that were hardcoded, so every existing program keeps its previous delays and
+the supervision goldens (which crash once, hence `streak == 1`, hence the
+`delay == 0` synchronous path) are untouched.
+
+The three labels are NOT reserved words. `cap` is the capability vocabulary and
+`base` an everyday noun; they are parsed as ordinary lowercase identifiers and
+validated in `mk_backoff`, which rejects unknown labels, duplicates, `cap` below
+`base`, a `%` on a millisecond field, and jitter outside 0–100. `backoff`
+itself is a soft keyword on `token_filter.ml`'s existing demote mechanism, like
+`restart`.
+
+End-to-end proof (not just a parse test): with `backoff base 400 cap 4000
+jitter 0%`, `MARCH_SUP_TRACE=1` reports `streak=2 delay_ms=800` — exactly
+`400 << 1`, no jitter — against `delay_ms=57` for the same program with the
+clause removed. Note this needed a build that RESTAGES `_build/default/runtime`:
+`dune build @install` does not, and the first measurement silently ran the old
+runtime and showed no difference.
+
+Design: [`specs/2026-09-08-supervise-child-spec-design.md`](../2026-09-08-supervise-child-spec-design.md) §5.
