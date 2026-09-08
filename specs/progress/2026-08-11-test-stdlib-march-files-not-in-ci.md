@@ -75,3 +75,31 @@ is enforced on-demand pending a runtime benchmark. One
 (`test_island_bridges`) stays manual-only pending a real compiler fix to a
 newly-discovered, tracked bug — running it now demonstrates the bug rather
 than silently hiding it.
+
+---
+
+## Closing note (2026-09-08)
+
+The "Net result" section above records the state as of 2026-08-11 (37 files in
+scope, 35 enforced). The gap has since closed completely, and the `specs/todos/`
+entry for this item — which had been left behind when the work landed — is
+removed as of this commit.
+
+Current state, verified on the tree:
+
+```
+grep -o 'test_[a-z_0-9]*\.march' test/test_stdlib_march.ml | sort -u | wc -l   # 97
+ls test/stdlib/*.march | wc -l                                                  # 97
+```
+
+The two sets are not merely equal in size — they are identical, so there is no
+file that is wired-but-missing or present-but-unwired. The todo's own
+reproduction command for the unwired list,
+
+```bash
+for f in test/stdlib/*.march; do b=$(basename $f); \
+  grep -q "\"$b\"" test/test_stdlib_march.ml || echo "$b"; done
+```
+
+now prints nothing. All 97 of 97 `test/stdlib/*.march` files run in the
+`stdlib_march` suite.
