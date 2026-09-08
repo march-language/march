@@ -89,7 +89,7 @@ of the three. Probed each:
 | `string_from_codepoint` | works | link error | FIXED here |
 | `worker` | implemented | link error | filed, see below |
 | `dynamic_supervisor` | implemented | link error | filed, see below |
-| `from_json_events` | `unbound variable` | link error | filed, see below |
+| `from_json_events` | `unbound variable` **when probed bare** | link error | **false positive, struck 2026-09-08** |
 
 `string_to_codepoints` / `string_from_codepoint` are the identical defect and
 were fixed the same way (`march_string_to_codepoints` /
@@ -101,10 +101,24 @@ replacement character — because the two backends have to agree and the
 interpreter is the older one.
 
 `worker` / `dynamic_supervisor` build `ChildSpec` values for the supervision
-DSL and giving them codegen backing is a different piece of work;
-`from_json_events` is a table entry with no implementation on either backend.
-All three are out of scope here and are filed as
+DSL and giving them codegen backing is a different piece of work. They are out
+of scope here and are filed as
 `specs/todos/2026-08-22-builtins-that-typecheck-but-do-not-link.md`.
+
+**Correction (2026-09-08): the `from_json_events` row above is wrong.** This
+audit concluded it was "a table entry with no implementation on either
+backend". It is not — it is implemented, by `derive Json for T`
+(`lib/desugar/desugar_derive.ml`, Task 7 / Phase B), exactly as `to_json` and
+`from_json` are. Step 3 of the sweep probes each name with a bare one-line
+program, and bare `to_json` / `from_json` are equally unbound with no `derive
+Json` in scope; the sweep simply did not probe those two. Deleting the entry
+was attempted and reverted: it breaks `derive Json` for record types outright,
+and it reopens the capability-forging hole that
+`specs/lang/types/reject/t147_cap_from_json_events.march` exists to catch. The
+full write-up and the reproduction are in the todo's "Struck:
+`from_json_events`" section. The sweep recipe needs a fourth resolution
+route — names bound by derive/desugar expansion — before it is turned into a
+CI check.
 
 Nothing cross-checks the two tables, so this audit will rot. That todo carries
 the reproduction recipe.
