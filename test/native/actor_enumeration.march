@@ -1,0 +1,48 @@
+-- Process enumeration: Actor.list() / actor_pid_indices().
+-- specs/todos/2026-08-12-per-actor-introspection-and-alarms.md
+--
+-- docs/overload-resilience.md tells readers to poll mailbox_size(pid) to
+-- decide when to shed load -- but mailbox_size needs a Pid, and until this
+-- landed there was no way to obtain one for an actor you could not name in
+-- advance. The documented loop could not be closed at all. This is the walk
+-- that closes it.
+--
+-- The result is a SNAPSHOT and inherently racy; what is deterministic, and
+-- what this golden pins, is that every live actor appears, in spawn order,
+-- and a dead one does not. run_until_idle() first so the freshly spawned
+-- actors have started: an actor appears in the list from the moment it is
+-- spawned, but its own green thread has not necessarily run yet, so is_alive
+-- can still be false for a few microseconds after spawn.
+mod Main do
+  needs IO.Console
+
+  actor W do
+    state { n : Int }
+    init  { n: 0 }
+
+    on Work() do
+      { n: state.n + 1 }
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let a = spawn(W)
+    let b = spawn(W)
+    let c = spawn(W)
+    run_until_idle()
+
+    println("indices: " ++ to_string(actor_pid_indices()))
+    println("count: " ++ int_to_string(List.length(Actor.list())))
+    println("depths: " ++ to_string(List.map(Actor.list(), fn p -> mailbox_size(p))))
+
+    -- A dead actor leaves the snapshot.
+    kill(b)
+    run_until_idle()
+    println("after kill: " ++ to_string(actor_pid_indices()))
+    println("count: " ++ int_to_string(List.length(Actor.list())))
+
+    -- And a stopped one does too, so a shutdown is visible to monitoring.
+    println("stopped c: " ++ bool_to_string(Actor.stop(c, 5000)))
+    println("after stop: " ++ to_string(actor_pid_indices()))
+  end
+end

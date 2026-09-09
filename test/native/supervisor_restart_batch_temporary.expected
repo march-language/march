@@ -1,0 +1,4 @@
+permanent sibling respawned: true
+permanent sibling alive: true
+temporary sibling not respawned: true
+temporary sibling dead: true

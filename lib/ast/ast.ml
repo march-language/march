@@ -309,10 +309,38 @@ and restart_strategy =
     specs/2026-08-17-supervisor-restart-types-design.md. *)
 and restart_type = Permanent | Transient | Temporary
 
+(** How long a supervisor waits for a child to drain when the tree is stopped
+    with [stop], from the child spec's optional `shutdown` modifier.
+
+    This governs [stop] only. [kill] is unchanged and always immediate, so no
+    program written before graceful shutdown existed can observe this field —
+    which is why the default is OTP's 5 seconds rather than [ShutdownBrutal].
+    See specs/2026-09-08-supervise-child-spec-design.md §2. *)
+and shutdown_spec =
+  | ShutdownBrutal        (** `shutdown brutal`: die at once, mailbox discarded *)
+  | ShutdownMs of int     (** `shutdown 5000`: drain, hard-kill at the deadline *)
+  | ShutdownInfinity      (** `shutdown infinity`: drain to empty, no deadline *)
+
 and supervise_field = {
-  sf_name    : name;
-  sf_ty      : ty;
-  sf_restart : restart_type;   (** [Permanent] when the modifier is omitted *)
+  sf_name     : name;
+  sf_ty       : ty;
+  sf_restart  : restart_type;   (** [Permanent] when the modifier is omitted *)
+  sf_shutdown : shutdown_spec;  (** [default_shutdown] when the modifier is omitted *)
+}
+
+(** Restart-backoff curve for a supervise block, tunable with the optional
+    `backoff base N cap N jitter N%` clause.
+
+    The defaults reproduce the curve that was hardcoded in
+    march_supervisor_notify before the clause existed —
+    [delay = min(5000, 25 << min(streak-1, 7))] ms with +/-25% jitter — so an
+    absent clause is byte-for-byte today's behaviour, which is what keeps
+    examples/supervision_strategies.march and the native supervision goldens
+    unmoved. See specs/2026-09-08-supervise-child-spec-design.md §5. *)
+and backoff_config = {
+  bo_base_ms    : int;   (** delay for the second consecutive crash *)
+  bo_cap_ms     : int;   (** ceiling the doubling saturates at *)
+  bo_jitter_pct : int;   (** +/- this percent of the computed delay; 0 = none *)
 }
 
 and supervise_config = {
@@ -321,6 +349,7 @@ and supervise_config = {
   sc_max_restarts : int;
   sc_window_secs  : int;
   sc_order        : name list;   (** declared field order for rest_for_one *)
+  sc_backoff      : backoff_config;  (** [default_backoff] when the clause is absent *)
 }
 
 and actor_def = {
@@ -486,3 +515,22 @@ let show_expr = function
   | ELetStar _ -> "ELetStar(...)"
   | EAssert _ -> "EAssert(...)"
   | ESigil _ -> "ESigil(...)"
+
+(** The restart-backoff curve a `supervise` block gets when it declares no
+    `backoff` clause: exactly the constants that were hardcoded in the runtime
+    before the clause existed. Parser, interpreter and lowering all read this
+    one value, so "the default" cannot drift between them. *)
+let default_backoff = { bo_base_ms = 25; bo_cap_ms = 5000; bo_jitter_pct = 25 }
+
+(** How long [stop] waits for a child with no `shutdown` modifier: OTP's five
+    seconds. Safe as a default precisely because it is unobservable to older
+    programs — `stop` did not exist when they were written, and `kill` does not
+    consult it. *)
+let default_shutdown = ShutdownMs 5000
+
+(** Runtime encoding of a [shutdown_spec], shared by lowering and the
+    interpreter: -1 infinity, 0 brutal, otherwise the millisecond budget. *)
+let shutdown_ms = function
+  | ShutdownInfinity -> -1
+  | ShutdownBrutal   -> 0
+  | ShutdownMs n     -> n

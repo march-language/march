@@ -78,9 +78,24 @@ end
 ```
 
 Resolve once and cache the `Pid` on a hot path, re-resolving on `None`; repeated lookups
-of the same name contend on the stored value's reference count. There is still no way to
-*enumerate* live actors, so this works for actors you can name in advance, not for
-discovering an unknown hot one; see
+of the same name contend on the stored value's reference count.
+
+For an actor you *cannot* name in advance — the point of monitoring being to find the one
+you did not expect — `Actor.list()` enumerates every actor alive right now, so the loop
+closes without holding any `Pid` up front — this answers "which actor is behind?", the
+question the aggregate counters cannot:
+
+```march
+fn overloaded(threshold) do
+  List.filter(Actor.list(), fn p -> mailbox_size(p) > threshold)
+end
+```
+
+The list is a snapshot in spawn order, and inherently racy: an actor can die between the
+enumeration and anything you do with the result. That is already true of every `Pid`, and
+every consumer handles a dead one. What is *not* yet available is a growing-mailbox alarm
+(BEAM's `long_message_queue`) that would tell you *when* a queue crosses a threshold
+instead of requiring you to poll for it, per-actor state inspection, and tracing; see
 [`specs/todos/2026-08-12-per-actor-introspection-and-alarms.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-08-12-per-actor-introspection-and-alarms.md).
 
 A practical shedding pattern is checking a worker's depth at the *dispatch point*:
@@ -154,8 +169,9 @@ A resilient shape for a service that must survive a thundering herd:
 3. **Callers**: short `Actor.call` deadlines with fallbacks; accepted work stays fast.
 4. **Supervision over every worker**: crashes heal with backoff; poisoned input costs a
    bounded restart rate, not the node.
-5. **A metrics loop** sampling `Scheduler` counters, so "we are shedding" is a
-   dashboard fact, not a post-mortem discovery.
+5. **A metrics loop** sampling `Scheduler` counters and walking `Actor.list()` for the
+   deepest mailboxes, so "we are shedding" — and *which actor is behind* — is a dashboard
+   fact, not a post-mortem discovery.
 
 For *streaming* workloads (a fast producer feeding a slow consumer through
 transformation stages), reach for [Flow]({{ site.baseurl }}/docs/flow/) instead of

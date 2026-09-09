@@ -10,6 +10,8 @@ native_actor_crash_rc_restore: coverage audit (user + stdlib): 63 enforced, 0 in
 native_actor_crash_rc_restore: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_dispatch_rc_window: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_actor_dispatch_rc_window: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_enumeration: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_actor_enumeration: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_monitor_down_reason: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_actor_monitor_down_reason: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_registry_basic: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
@@ -22,6 +24,10 @@ native_actor_registry_retire: coverage audit (user + stdlib): 63 enforced, 0 ine
 native_actor_registry_retire: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_registry_retire_vault: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_actor_registry_retire_vault: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_stop_drains_mailbox: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_actor_stop_drains_mailbox: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_stop_tree: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_actor_stop_tree: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_as_pattern: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_as_pattern: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_atom_ctor_field: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
@@ -318,6 +324,12 @@ native_supervisor_one_for_one_restart: coverage audit (user + stdlib): 63 enforc
 native_supervisor_one_for_one_restart: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_supervisor_rest_for_one_restart: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_supervisor_rest_for_one_restart: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_supervisor_restart_batch_temporary: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_supervisor_restart_batch_temporary: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_supervisor_restart_temporary: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_supervisor_restart_temporary: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_supervisor_restart_transient: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_supervisor_restart_transient: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_supervisor_spawn_children: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_supervisor_spawn_children: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_tagged_int_rc: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced

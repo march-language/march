@@ -12100,11 +12100,13 @@ module Audit_fixture = struct
         bind_expr = A.ELit (A.LitInt 0, dummy) }
     in
     let supervise_cfg : A.supervise_config =
-      { A.sc_fields = [ { A.sf_name = nm "child"; sf_ty = refine_or_plain 35 int_ty; sf_restart = A.Permanent } ];
+      { A.sc_fields = [ { A.sf_name = nm "child"; sf_ty = refine_or_plain 35 int_ty; sf_restart = A.Permanent;
+                                  sf_shutdown = A.default_shutdown } ];
         sc_strategy = A.OneForOne;
         sc_max_restarts = 0;
         sc_window_secs = 0;
-        sc_order = [] }
+        sc_order = [];
+        sc_backoff = A.default_backoff }
     in
     let actor_def : A.actor_def =
       { A.actor_state = [ { A.fld_name = nm "value"; fld_ty = refine_or_plain 34 int_ty; fld_lin = A.Unrestricted } ];

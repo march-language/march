@@ -531,7 +531,13 @@ let rec thread ?(dispatch = false) ?(spawn_caps = Hashtbl.create 1)
       | _ -> { v with T.v_name = name }
     in
     T.EApp (v, supply cap :: args)
-  | T.EApp (v, [ sup; ptr; T.AVar sf; idx; restart ])
+  (* Matched by SHAPE, not by arity: the trailing per-child spec arguments
+     (restart_type, shutdown_ms, and whatever the child spec grows next) are
+     passed through untouched. Spelling the argument list out in full here
+     once cost exactly this: adding shutdown_ms silently stopped this arm from
+     matching, nested supervisors quietly lost their children's capabilities,
+     and cap_mock_supervised_nested was the only thing that noticed. *)
+  | T.EApp (v, sup :: ptr :: T.AVar sf :: child_spec_args)
     when v.T.v_name = "register_supervisor_child"
       && actor_of_spawn sf.T.v_name <> None && Hashtbl.mem need sf.T.v_name ->
     (* The respawn value for a child whose spawn glue now CARRIES capabilities
@@ -543,7 +549,7 @@ let rec thread ?(dispatch = false) ?(spawn_caps = Hashtbl.create 1)
        call the supervised-child shape makes for the original spawn:
 
          let $respawn = letrec [ fn $respawn() = Mid_spawn($cap_c1, …) ] in $respawn
-         in register_supervisor_child(sup, ptr, $respawn, idx, restart)
+         in register_supervisor_child(sup, ptr, $respawn, idx, restart, shutdown)
 
        Built the way lower's [ELam] case builds a lambda thunk, so Defun lifts
        it like any other; its free variables are exactly this glue's `$cap`
@@ -565,7 +571,7 @@ let rec thread ?(dispatch = false) ?(spawn_caps = Hashtbl.create 1)
         T.fn_body = go (T.EApp (sf, [])); T.fn_kind = T.FnLambda }
     in
     T.ELet (fn_var, T.ELetRec ([ fd ], T.EAtom (T.AVar fn_var)),
-            T.EApp (v, [ sup; ptr; T.AVar fn_var; idx; restart ]))
+            T.EApp (v, sup :: ptr :: T.AVar fn_var :: child_spec_args))
   | T.EApp (v, args) ->
     (match Hashtbl.find_opt need v.T.v_name with
      | None -> e

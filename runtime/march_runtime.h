@@ -478,12 +478,30 @@ typedef enum {
     MARCH_DEATH_CRASH  = 2,
 } march_death_reason;
 
+/* Graceful shutdown. march_actor_stop marks the actor draining (new sends are
+   refused), lets its green thread finish the queued messages until the mailbox
+   empties or timeout_ms elapses, then ends it with MARCH_DEATH_NORMAL. A
+   negative timeout waits indefinitely; 0 discards whatever is queued once the
+   current handler returns. A supervisor stops its children first, in reverse
+   declaration order, each with its own `shutdown` budget from the child spec.
+   Contrast march_kill, which is immediate and drops the mailbox. */
+int64_t march_actor_stop(void *actor, int64_t timeout_ms);
+
+/* Process enumeration: List(Int) of every live actor's pid index, ascending.
+   Lock-free (same bucket walk as find_meta); a snapshot, so inherently racy.
+   March turns these back into Pids with pid_of_int. */
+void *march_actor_pid_indices(void);
+int64_t march_actor_is_draining(void *actor);
+
 /* register_supervisor: record an actor as a supervisor with a given restart
    strategy (0=one_for_one, 1=one_for_all, 2=rest_for_one), max_restarts, and
    time window in seconds.  Children are registered separately via
    march_actor_register_child. */
 void    march_register_supervisor(void *supervisor, int64_t strategy,
-                                   int64_t max_restarts, int64_t window_secs);
+                                   int64_t max_restarts, int64_t window_secs,
+                                   int64_t backoff_base_ms,
+                                   int64_t backoff_cap_ms,
+                                   int64_t backoff_jitter_pct);
 
 /* ── Phase 5: Actor state migration ─────────────────────────────────── */
 

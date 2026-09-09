@@ -32,6 +32,7 @@ let mk_actor_inst name alive st = March_eval.Eval.{
   ai_terminal_reason = March_eval.Eval.Normal;
   ai_monitors      = [];
   ai_mailbox       = Queue.create ();
+  ai_draining    = false;
   ai_supervisor    = None;
   ai_restart_count = [];
   ai_epoch         = 0;
@@ -597,6 +598,139 @@ let test_one_for_all_cleans_resources () =
   Alcotest.(check bool) "A's resource cleaned on crash" true !a_cleaned
 
 (* ------------------------------------------------------------------ *)
+(* Child-spec grammar: restart modifiers + the backoff clause           *)
+(* specs/2026-09-08-supervise-child-spec-design.md                      *)
+(* ------------------------------------------------------------------ *)
+
+let parse_supervise src =
+  let lexbuf = Lexing.from_string src in
+  let m = March_parser.Parser.module_
+            (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let rec find = function
+    | [] -> Alcotest.fail "no actor with a supervise block in source"
+    | March_ast.Ast.DActor (_, _, ad, _) :: rest ->
+      (match ad.March_ast.Ast.actor_supervise with
+       | Some sc -> sc
+       | None -> find rest)
+    | _ :: rest -> find rest
+  in
+  find m.March_ast.Ast.mod_decls
+
+let sup_src ?(backoff = "") children =
+  Printf.sprintf
+    "mod M do\n\
+     \  actor W do\n\
+     \    state { n : Int }\n\
+     \    init { n: 0 }\n\
+     \    on Ping() do { n: state.n + 1 } end\n\
+     \  end\n\
+     \  actor S do\n\
+     \    state { a : Int, b : Int }\n\
+     \    init { a: 0, b: 0 }\n\
+     \    supervise do\n\
+     \      strategy one_for_one\n\
+     \      max_restarts 3 within 60\n\
+     \      %s\n\
+     \      %s\n\
+     \    end\n\
+     \  end\n\
+     end\n" backoff children
+
+let test_restart_modifier_parses () =
+  let sc = parse_supervise (sup_src "W a restart transient\n      W b restart temporary") in
+  let policies =
+    List.map (fun sf -> (sf.March_ast.Ast.sf_name.March_ast.Ast.txt,
+                         sf.March_ast.Ast.sf_restart))
+      sc.March_ast.Ast.sc_fields
+  in
+  Alcotest.(check bool) "a is transient" true
+    (List.assoc "a" policies = March_ast.Ast.Transient);
+  Alcotest.(check bool) "b is temporary" true
+    (List.assoc "b" policies = March_ast.Ast.Temporary)
+
+let test_restart_modifier_omitted_is_permanent () =
+  let sc = parse_supervise (sup_src "W a\n      W b") in
+  Alcotest.(check bool) "both permanent" true
+    (List.for_all (fun sf -> sf.March_ast.Ast.sf_restart = March_ast.Ast.Permanent)
+       sc.March_ast.Ast.sc_fields)
+
+(* The whole point of the defaults: a block with no `backoff` clause must
+   carry exactly the constants the runtime used to hardcode, or every
+   supervision golden's timing moves. *)
+let test_backoff_absent_is_the_old_curve () =
+  let sc = parse_supervise (sup_src "W a\n      W b") in
+  Alcotest.(check bool) "defaults are 25/5000/25" true
+    (sc.March_ast.Ast.sc_backoff = March_ast.Ast.default_backoff);
+  Alcotest.(check int) "base"   25   sc.March_ast.Ast.sc_backoff.March_ast.Ast.bo_base_ms;
+  Alcotest.(check int) "cap"    5000 sc.March_ast.Ast.sc_backoff.March_ast.Ast.bo_cap_ms;
+  Alcotest.(check int) "jitter" 25   sc.March_ast.Ast.sc_backoff.March_ast.Ast.bo_jitter_pct
+
+let test_backoff_clause_parses () =
+  let sc = parse_supervise
+      (sup_src ~backoff:"backoff base 50 cap 400 jitter 0%" "W a\n      W b") in
+  Alcotest.(check int) "base"   50  sc.March_ast.Ast.sc_backoff.March_ast.Ast.bo_base_ms;
+  Alcotest.(check int) "cap"    400 sc.March_ast.Ast.sc_backoff.March_ast.Ast.bo_cap_ms;
+  Alcotest.(check int) "jitter" 0   sc.March_ast.Ast.sc_backoff.March_ast.Ast.bo_jitter_pct
+
+let test_backoff_labels_in_any_order () =
+  let sc = parse_supervise
+      (sup_src ~backoff:"backoff jitter 10% cap 900 base 30" "W a\n      W b") in
+  Alcotest.(check int) "base"   30  sc.March_ast.Ast.sc_backoff.March_ast.Ast.bo_base_ms;
+  Alcotest.(check int) "cap"    900 sc.March_ast.Ast.sc_backoff.March_ast.Ast.bo_cap_ms;
+  Alcotest.(check int) "jitter" 10  sc.March_ast.Ast.sc_backoff.March_ast.Ast.bo_jitter_pct
+
+let test_backoff_partial_clause_keeps_defaults () =
+  let sc = parse_supervise (sup_src ~backoff:"backoff base 100" "W a\n      W b") in
+  Alcotest.(check int) "base overridden" 100  sc.March_ast.Ast.sc_backoff.March_ast.Ast.bo_base_ms;
+  Alcotest.(check int) "cap default"     5000 sc.March_ast.Ast.sc_backoff.March_ast.Ast.bo_cap_ms;
+  Alcotest.(check int) "jitter default"  25   sc.March_ast.Ast.sc_backoff.March_ast.Ast.bo_jitter_pct
+
+let rejects src =
+  match parse_supervise src with
+  | _ -> false
+  | exception _ -> true
+
+let test_backoff_rejects_unknown_label () =
+  Alcotest.(check bool) "unknown label rejected" true
+    (rejects (sup_src ~backoff:"backoff bass 25" "W a\n      W b"))
+
+let test_backoff_rejects_duplicate_label () =
+  Alcotest.(check bool) "duplicate label rejected" true
+    (rejects (sup_src ~backoff:"backoff base 25 base 50" "W a\n      W b"))
+
+let test_backoff_rejects_cap_below_base () =
+  Alcotest.(check bool) "cap < base rejected" true
+    (rejects (sup_src ~backoff:"backoff base 500 cap 100" "W a\n      W b"))
+
+let test_backoff_rejects_jitter_over_100 () =
+  Alcotest.(check bool) "jitter > 100 rejected" true
+    (rejects (sup_src ~backoff:"backoff jitter 500%" "W a\n      W b"))
+
+(* `restart` and `backoff` are SOFT keywords. Reserving either outright breaks
+   real code: stdlib/dist_supervisor.march already uses `restart` as a record
+   field and a parameter name, and `cap`/`base` are everyday identifiers. *)
+let test_soft_keywords_remain_identifiers () =
+  let src =
+    "mod M do\n\
+     \  type Policy = Policy(Int)\n\
+     \  fn backoff(base) do base * 2 end\n\
+     \  fn use_them() do\n\
+     \    let restart = 1\n\
+     \    let cap = 2\n\
+     \    let jitter = 3\n\
+     \    restart + cap + jitter + backoff(4)\n\
+     \  end\n\
+     end\n"
+  in
+  let lexbuf = Lexing.from_string src in
+  (match March_parser.Parser.module_
+           (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf with
+   | _ -> ()
+   | exception e ->
+     Alcotest.failf "soft keywords must stay usable as identifiers: %s"
+       (Printexc.to_string e))
+
+(* ------------------------------------------------------------------ *)
 (* Test runner                                                          *)
 (* ------------------------------------------------------------------ *)
 
@@ -627,6 +761,19 @@ let () =
     ("restart builtin", [
       Alcotest.test_case "restart() returns new pid"     `Quick (with_reset test_restart_builtin_returns_new_pid);
       Alcotest.test_case "restart() increments epoch"    `Quick (with_reset test_restart_builtin_increments_epoch);
+    ]);
+    ("child spec grammar", [
+      Alcotest.test_case "restart modifier parses"        `Quick test_restart_modifier_parses;
+      Alcotest.test_case "omitted modifier is permanent"  `Quick test_restart_modifier_omitted_is_permanent;
+      Alcotest.test_case "no backoff clause = old curve"  `Quick test_backoff_absent_is_the_old_curve;
+      Alcotest.test_case "backoff clause parses"          `Quick test_backoff_clause_parses;
+      Alcotest.test_case "backoff labels in any order"    `Quick test_backoff_labels_in_any_order;
+      Alcotest.test_case "partial backoff keeps defaults" `Quick test_backoff_partial_clause_keeps_defaults;
+      Alcotest.test_case "backoff rejects unknown label"  `Quick test_backoff_rejects_unknown_label;
+      Alcotest.test_case "backoff rejects duplicate"      `Quick test_backoff_rejects_duplicate_label;
+      Alcotest.test_case "backoff rejects cap < base"     `Quick test_backoff_rejects_cap_below_base;
+      Alcotest.test_case "backoff rejects jitter > 100"   `Quick test_backoff_rejects_jitter_over_100;
+      Alcotest.test_case "soft keywords stay identifiers" `Quick test_soft_keywords_remain_identifiers;
     ]);
     ("phase6a resource cleanup", [
       Alcotest.test_case "one_for_all cleans resources"  `Quick (with_reset test_one_for_all_cleans_resources);

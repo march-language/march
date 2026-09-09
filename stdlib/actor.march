@@ -59,7 +59,9 @@ mod Actor do
   for a reply. The runtime injects the caller as the target handler's first
   argument; that handler must call Actor.reply(reply_to, result) to unblock
   the caller. Returns Ok(result) or Err(reason).
-  timeout_ms is accepted for API compatibility but not enforced in the interpreter.
+  timeout_ms is a real wall-clock deadline on both backends: a reply produced
+  after it has passed is discarded and the call returns Err, so the timeout you
+  write is a bound you can build retry and fallback logic on.
   """
   fn call(pid, msg, timeout_ms) do
     actor_call(pid, msg, timeout_ms)
@@ -101,6 +103,35 @@ mod Actor do
     actor_register(pid, name)
   end
 
+  doc """
+  Stop `pid` gracefully: it accepts no further messages, works off whatever is
+  already queued, and then dies a NORMAL death (which no restart type
+  restarts). Returns false if it was already dead or already stopping.
+
+  This is the deploy story `kill` cannot tell. `kill(pid)` is immediate and
+  drops the mailbox, so stopping a busy actor loses exactly the requests that
+  were waiting; `stop` finishes them first.
+
+  Waits up to `timeout_ms` for the queue to empty, then gives up and dies with
+  whatever is left undelivered. A negative timeout waits indefinitely; 0
+  discards the queue as soon as the in-flight message returns.
+
+  Stopping a supervisor stops its children first, in REVERSE declaration
+  order, each with its own `shutdown` budget from the `supervise` block's
+  child spec (`Worker w shutdown 5000`), defaulting to 5 seconds.
+  """
+  fn stop(pid, timeout_ms) do
+    actor_stop(pid, timeout_ms)
+  end
+
+  doc """
+  Is `pid` stopping — accepting no new messages, but not dead yet? `is_alive`
+  alone cannot express this: a draining actor is still alive.
+  """
+  fn is_draining(pid) do
+    actor_is_draining(pid)
+  end
+
   doc "Remove a name. Returns false if it was not registered."
   fn unregister(name) do
     actor_unregister(name)
@@ -114,6 +145,25 @@ mod Actor do
   """
   fn whereis(name) do
     actor_whereis(name)
+  end
+
+  doc """
+  Every actor alive right now. The enumeration primitive monitoring code needs:
+  `mailbox_size(pid)` can only be asked about a Pid you already hold, so
+  without this there is no way to discover an unknown hot actor — only ones you
+  can name in advance with `whereis`.
+
+  A snapshot, and inherently racy: an actor can die between this call and
+  anything you do with the result. That is already the norm for a Pid, and
+  every consumer handles a dead one.
+
+      let hot = List.filter(Actor.list(), fn p -> mailbox_size(p) > 500)
+
+  Ordered by spawn sequence, so the list is deterministic rather than ordered
+  by heap address.
+  """
+  fn list() do
+    List.map(actor_pid_indices(), fn n -> pid_of_int(n))
   end
 
   doc "Every currently-registered name."

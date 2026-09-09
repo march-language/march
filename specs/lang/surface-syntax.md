@@ -902,10 +902,22 @@ actor App do
   supervise do
     strategy one_for_one
     max_restarts 3 within 60
-    Worker w
+    backoff base 25 cap 5000 jitter 25%   -- optional; these are the defaults
+    Worker w                              -- restart permanent (the default)
+    Worker j restart transient            -- crash restarts it, kill() retires it
+    Reaper r restart temporary            -- never restarted
+    Db     d shutdown 1000                -- Actor.stop waits 1s for it to drain
   end
 end
 ```
+
+Per-child `restart` policy and `shutdown` budget, and the block-level
+`backoff` curve, are all optional; omitting them gives `permanent` and `25 / 5000 / 25`, which is what
+every `supervise` block written before these clauses existed already means.
+`restart`, `shutdown`, `backoff`, `base`, `cap` and `jitter` are **not**
+reserved words —
+they stay usable as ordinary identifiers everywhere, including inside a
+`supervise` block's own children.
 
 ---
 

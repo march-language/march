@@ -1988,11 +1988,22 @@ typedef struct {
      * it MUST be assigned explicitly at registration — sup_children grows via
      * realloc, which does not zero the new memory. */
     int32_t restart_type;
+    /* How long march_actor_stop waits for this child to drain when the tree
+     * is stopped: -1 infinity, 0 brutal (kill at once), otherwise a
+     * millisecond budget after which the child is killed outright. Set once at
+     * registration, alongside restart_type and for the same realloc reason. */
+    int64_t shutdown_ms;
     int32_t crash_streak;     /* consecutive crashes without surviving a full
                                   supervisor_window_secs window */
     int64_t last_crash_ms;    /* march_now_ms() at the most recent crash; 0
                                   means "never crashed yet" */
 } march_sup_child;
+
+/* march_actor_meta.drain_deadline_ms while a stop is claimed but not yet
+ * armed. Distinct from every real deadline (which is a march_now_ms() value,
+ * or -1 for `shutdown infinity`) so the receiving loop can tell "a stop is in
+ * progress, keep working" from "your deadline has passed, stop now". */
+#define MARCH_DRAIN_NOT_ARMED INT64_MIN
 
 /* Per-actor scheduler metadata.  Stored in a side table keyed by actor
  * pointer so the actor object layout (and codegen) are unaffected. */
@@ -2033,6 +2044,19 @@ typedef struct march_actor_meta {
      * allocates a fresh meta instead of re-linking the stale one — see the
      * Task 15 fix-up commit message for the full argument. */
     int                          pididx_linked;
+    /* Graceful shutdown (march_actor_stop). [draining] is set by whichever
+     * thread called stop; the actor's own green thread reads it at the top of
+     * every receive iteration and exits once the mailbox is empty or the
+     * deadline has passed. Both are _Atomic because writer and reader are
+     * always different threads; the deadline is published BEFORE draining so
+     * an acquire-load of draining implies a visible deadline. A negative
+     * deadline means `shutdown infinity`: drain to empty however long it
+     * takes. See specs/todos/2026-08-12-graceful-shutdown-and-drain.md. */
+    _Atomic int                  draining;
+    /* MARCH_DRAIN_NOT_ARMED until march_actor_stop has finished tearing down
+     * this actor's children and computed its own deadline. The receive loop
+     * must NOT exit while it reads that value — see the gate there. */
+    _Atomic int64_t              drain_deadline_ms;
     march_cleanup_node         *cleanup_head; /* Cleanup callbacks (most recent first) */
     march_monitor_node         *monitor_head; /* Monitors watching this actor   */
     int                          terminal_set; /* Claimed once under g_tbl_mu. */
@@ -2043,6 +2067,14 @@ typedef struct march_actor_meta {
     int                         supervisor_strategy;    /* 0=one_for_one, 1=one_for_all, 2=rest_for_one */
     int64_t                     supervisor_max_restarts;
     int64_t                     supervisor_window_secs;
+    /* Restart-backoff curve, from the supervise block's optional
+     * `backoff base N cap N jitter N%` clause. Defaulted by the parser to
+     * 25 / 5000 / 25 — the constants march_supervisor_notify used to spell
+     * inline — so an absent clause reproduces the previous delays exactly.
+     * Written once at registration, read only by march_supervisor_notify. */
+    int64_t                     backoff_base_ms;
+    int64_t                     backoff_cap_ms;
+    int64_t                     backoff_jitter_pct;
     /* Capability revocation (used by march_is_cap_valid). _Atomic: written
      * once per respawn by march_respawn_child (on the supervisor's thread,
      * under g_tbl_mu, but g_tbl_mu is a writer-side critical section only —
@@ -3107,6 +3139,38 @@ static void actor_green_thread(void *arg) {
     }
 
     while (actor_alive_load(actor)) {  /* while alive */
+        /* Graceful shutdown (march_actor_stop): keep serving the queue, but
+         * stop taking new work and leave once the queue is empty or the
+         * deadline passes. Checked HERE, at the top of the iteration, rather
+         * than in the recv path, so an actor that was mid-handler when stop
+         * arrived finishes that handler and then drains the rest.
+         *
+         * An actor parked in recv with an empty mailbox never reaches this
+         * check at all -- march_actor_stop's request_stop wakes it, recv
+         * returns MARCH_RECV_NO_MSG, and the loop breaks below into the same
+         * normal death. Same outcome, one iteration earlier. */
+        if (self && atomic_load_explicit(&meta->draining, memory_order_acquire)) {
+            int64_t deadline = atomic_load_explicit(&meta->drain_deadline_ms,
+                                                    memory_order_relaxed);
+            /* A claimed-but-not-yet-armed stop means march_actor_stop is still
+             * stopping this actor's CHILDREN, and it yields while doing so, so
+             * this loop really does get to run in that window. Exiting here
+             * would be wrong twice over: the queue this stop exists to drain
+             * would be discarded on an empty-mailbox check that has not been
+             * asked for yet, and do_actor_death could free the actor struct
+             * that the teardown loop is still reading child pids out of.
+             * Keep serving until the deadline is armed. */
+            if (deadline == MARCH_DRAIN_NOT_ARMED) {
+                /* fall through to the normal receive below */
+            } else if (march_sched_mbox_count(self) == 0) {
+                break;
+            } else if (deadline >= 0 && march_now_ms() >= deadline) {
+                if (getenv("MARCH_SUP_TRACE"))
+                    fprintf(stderr, "march: drain deadline reached, %lld message(s)"
+                            " discarded\n", (long long)march_sched_mbox_count(self));
+                break;
+            }
+        }
         void *msg = march_sched_recv_user();
         if (msg == MARCH_RECV_NO_MSG) break;  /* woken without message (killed) */
 
@@ -3374,6 +3438,45 @@ static int march_restart_budget_ok(march_actor_meta *sup_meta) {
  * is only for a child's initial spawn), inherit the crashed child's
  * epoch+1 (matching eval.ml spawn_child_actor's stale-capability-detection
  * inheritance), and write the new pid_index into the supervisor's state. */
+/* Restart policy encoding, shared with lower_actor.ml's restart_type_int and
+ * Ast.restart_type: 0 permanent, 1 transient, 2 temporary. */
+#define MARCH_RESTART_PERMANENT 0
+#define MARCH_RESTART_TRANSIENT 1
+#define MARCH_RESTART_TEMPORARY 2
+
+/* Should a child with policy [restart_type] be brought back after dying for
+ * [reason]?  The whole table, in one place, because it is consulted from two
+ * unrelated sites (march_supervisor_notify's filter and the batch strategies'
+ * respawn loops) and they must not drift:
+ *
+ *   policy      CRASH   KILLED   NORMAL
+ *   permanent   yes     yes      no
+ *   transient   yes     no       no
+ *   temporary   no      no       no
+ *
+ * NOTE March's `permanent` is deliberately NOT OTP's: OTP restarts a permanent
+ * child even on a normal exit, while do_actor_death has always guarded the
+ * notify with `reason != MARCH_DEATH_NORMAL`. Matching OTP here would silently
+ * change every supervise block ever written. See
+ * specs/2026-09-08-supervise-child-spec-design.md §4. */
+static int march_child_should_restart(int32_t restart_type,
+                                      march_death_reason reason) {
+    if (reason == MARCH_DEATH_NORMAL) return 0;
+    switch (restart_type) {
+        case MARCH_RESTART_TRANSIENT: return reason == MARCH_DEATH_CRASH;
+        case MARCH_RESTART_TEMPORARY: return 0;
+        default:                      return 1;   /* permanent */
+    }
+}
+
+/* The reason [meta] died, as the restart filter should see it. An unset
+ * terminal_reason reads as CRASH on purpose: an unknown reason must restart a
+ * permanent child (today's behaviour) rather than silently retire it. */
+static march_death_reason march_meta_death_reason(march_actor_meta *meta) {
+    if (!meta || !meta->terminal_set) return MARCH_DEATH_CRASH;
+    return meta->terminal_reason;
+}
+
 static void *march_respawn_child(void *supervisor, march_actor_meta *sup_meta, int child_idx) {
     march_sup_child *child = &sup_meta->sup_children[child_idx];
     int64_t old_pid_index = ((int64_t *)supervisor)[4 + child->word_idx];
@@ -3516,6 +3619,13 @@ static void march_one_for_all_restart(void *supervisor, march_actor_meta *sup_me
             do_actor_death(live_children[i], MARCH_DEATH_KILLED, NULL, 0);
     }
     for (int i = 0; i < n; i++) {
+        /* A `temporary` sibling swept up by this batch is killed like any
+         * other, but must NOT come back — the kill above is internal
+         * machinery, the respawn here is the actual restart decision. Missing
+         * this is invisible to every single-child test: the child resurrects
+         * only when a SIBLING crashes. */
+        if (sup_meta->sup_children[i].restart_type == MARCH_RESTART_TEMPORARY)
+            continue;
         march_respawn_child(supervisor, sup_meta, i);
     }
 }
@@ -3553,6 +3663,9 @@ static void march_rest_for_one_restart(void *supervisor, march_actor_meta *sup_m
             do_actor_death(live_children[i], MARCH_DEATH_KILLED, NULL, 0);
     }
     for (int i = child_idx; i < n; i++) {
+        /* See march_one_for_all_restart's identical skip. */
+        if (sup_meta->sup_children[i].restart_type == MARCH_RESTART_TEMPORARY)
+            continue;
         march_respawn_child(supervisor, sup_meta, i);
     }
 }
@@ -3771,6 +3884,23 @@ static void march_supervisor_notify(void *supervisor, march_actor_meta *crashed_
     int child_idx = crashed_meta->sup_child_index;
     if (child_idx < 0 || child_idx >= sup_meta->sup_num_children) return;
     march_sup_child *child = &sup_meta->sup_children[child_idx];
+
+    /* Per-child restart policy (specs/2026-09-08-supervise-child-spec-design.md).
+     * Placed HERE, before the g_supervise_mu section below, on purpose: that
+     * section does the crash_streak read-modify-write that feeds the restart
+     * budget, and a death that will not restart must charge nothing. Filtering
+     * after it would let a program that retires N `temporary` children walk a
+     * perfectly healthy supervisor toward its max_restarts ceiling. */
+    if (!march_child_should_restart(child->restart_type,
+                                    march_meta_death_reason(crashed_meta))) {
+        if (getenv("MARCH_SUP_TRACE"))
+            fprintf(stderr, "march: supervisor child=%d retired"
+                    " (restart_type=%d, reason=%d) -- not restarting\n",
+                    child_idx, (int)child->restart_type,
+                    (int)march_meta_death_reason(crashed_meta));
+        return;
+    }
+
     int strategy = sup_meta->supervisor_strategy;
     int is_batch = (strategy == 1 || strategy == 2);
 
@@ -3834,17 +3964,30 @@ static void march_supervisor_notify(void *supervisor, march_actor_meta *crashed_
 
     int64_t delay = 0;
     if (streak > 1) {
+        /* Same curve as ever, with the three constants now read from the
+         * supervise block (Ast.default_backoff keeps them at 25 / 5000 / 25
+         * when no `backoff` clause is written, so every existing program and
+         * every supervision golden sees identical delays). Defensive
+         * fallbacks: a meta registered before this field existed, or by a C
+         * caller that passed nothing, reads 0 here. */
+        int64_t base = sup_meta->backoff_base_ms > 0 ? sup_meta->backoff_base_ms : 25;
+        int64_t cap  = sup_meta->backoff_cap_ms >= base ? sup_meta->backoff_cap_ms : 5000;
+        int64_t jitter_pct = sup_meta->backoff_jitter_pct;
+        if (jitter_pct < 0 || jitter_pct > 100) jitter_pct = 25;
         int shift = streak > 8 ? 7 : streak - 1;
-        delay = 25LL << shift;             /* 50,100,...,3200 */
-        if (delay > 5000) delay = 5000;
-        /* ±25% jitter, seeded off a process-wide counter — Math.random is
-         * not available here and rand() is process-global anyway; a weak
-         * LCG is plenty for de-synchronizing a crash-storm's retries. */
+        delay = base << shift;             /* 50,100,...,3200 at base 25 */
+        if (delay > cap || delay < 0) delay = cap;
+        /* +/-jitter_pct of the delay, seeded off a process-wide counter —
+         * Math.random is not available here and rand() is process-global
+         * anyway; a weak LCG is plenty for de-synchronizing a crash-storm's
+         * retries. jitter_pct 0 disables it (the span below collapses to 0,
+         * and `s % 1` is 0, so delay is left exactly on the curve). */
         static _Atomic uint32_t jitter_seed = 0x9E3779B9u;
+        int64_t half_span = delay * jitter_pct / 100;   /* the +/- radius */
         uint32_t s = atomic_fetch_add_explicit(&jitter_seed, 0x9E3779B9u,
                                                memory_order_relaxed);
         s ^= s >> 16; s *= 0x45d9f3bu; s ^= s >> 16;
-        delay += (int64_t)(s % (uint32_t)(delay / 2 + 1)) - delay / 4;
+        delay += (int64_t)(s % (uint32_t)(2 * half_span + 1)) - half_span;
     }
     if (getenv("MARCH_SUP_TRACE"))
         fprintf(stderr, "march: supervisor backoff child=%d streak=%d delay_ms=%lld%s\n",
@@ -4227,6 +4370,145 @@ static void do_actor_death(void *actor, march_death_reason reason,
 
 void march_kill(void *actor) {
     do_actor_death(actor, MARCH_DEATH_KILLED, NULL, 0);
+}
+
+/* ── Graceful shutdown: stop, drain, then die ──────────────────────────
+ * specs/todos/2026-08-12-graceful-shutdown-and-drain.md.
+ *
+ * `stop` is the deploy story `kill` cannot tell: kill drops whatever was
+ * queued, so rolling a node loses exactly the requests that were waiting.
+ * stop instead (1) marks the actor draining, after which march_send refuses
+ * new work, (2) lets its own green thread run the receive loop until the
+ * mailbox empties or the deadline passes, and (3) ends in an ordinary
+ * MARCH_DEATH_NORMAL, which no restart type restarts.
+ *
+ * The actor drains on ITS OWN thread. Nothing here runs a handler, which is
+ * what keeps this safe to call from any thread, including from inside another
+ * actor's handler. */
+
+/* Wait for [child] to finish draining, up to [deadline_ms] (absolute; < 0
+ * means wait indefinitely). Past the deadline the child is killed outright —
+ * OTP's semantics, and the reason `shutdown` is a budget rather than a
+ * promise. Returns 1 if the child died on its own, 0 if it had to be killed. */
+static int stop_await_death(void *child, int64_t deadline_ms) {
+    while (march_is_alive(child)) {
+        if (deadline_ms >= 0 && march_now_ms() >= deadline_ms) {
+            do_actor_death(child, MARCH_DEATH_KILLED, NULL, 0);
+            return 0;
+        }
+        /* Yield first so a child sharing this scheduler thread can actually
+         * run; the sleep bounds the burn when the yield is a no-op (this can
+         * be called from a non-green thread) or when the child is parked on
+         * another scheduler thread. */
+        march_sched_yield();
+        struct timespec ts = { 0, 200 * 1000 };   /* 200us */
+        nanosleep(&ts, NULL);
+    }
+    return 1;
+}
+
+/* Stop [actor] gracefully. timeout_ms: < 0 wait forever, 0 stop as soon as the
+ * current handler returns (queued messages are discarded), > 0 drain for at
+ * most that long. Returns 1 if the actor was live and is now stopping.
+ *
+ * If [actor] supervises children, they are stopped FIRST and in REVERSE
+ * declaration order — the mirror of the order they were started in, and the
+ * same order rest_for_one already relies on — each with its own `shutdown`
+ * budget from the child spec. A supervisor whose children are still finishing
+ * work must outlive them, or their in-flight replies go to a dead parent. */
+int64_t march_actor_stop(void *actor, int64_t timeout_ms) {
+    if (!IS_HEAP_PTR(actor) || !actor_alive_load(actor)) return 0;
+    march_actor_meta *meta = find_meta(actor);
+    if (!meta) return 0;
+
+    /* Park the deadline in its not-yet-armed state BEFORE publishing
+     * `draining`, so the actor's own loop can never observe a stale 0 (which
+     * reads as "your deadline passed") in the window between the claim below
+     * and the real deadline being computed after the child teardown. */
+    atomic_store_explicit(&meta->drain_deadline_ms, MARCH_DRAIN_NOT_ARMED,
+                          memory_order_relaxed);
+
+    /* Claim the transition. A second stop on an actor already draining is a
+     * no-op rather than a deadline extension: two callers racing must not be
+     * able to push the deadline out indefinitely. */
+    int expected = 0;
+    if (!atomic_compare_exchange_strong_explicit(&meta->draining, &expected, 1,
+                                                 memory_order_acq_rel,
+                                                 memory_order_acquire))
+        return 0;
+
+    /* Tear the subtree down first, deepest-declared child first. Each child's
+     * own stop recurses, so a nested supervisor's grandchildren drain before
+     * it does. sup_children is in declaration order (Task 3's field injection
+     * walks sc_fields in order), so a reverse index walk IS reverse start
+     * order. */
+    if (meta->sup_num_children > 0) {
+        for (int i = meta->sup_num_children - 1; i >= 0; i--) {
+            int64_t stored_pid_index =
+                ((int64_t *)actor)[4 + meta->sup_children[i].word_idx];
+            march_actor_meta *cm = find_meta_by_pid_index(stored_pid_index);
+            if (!cm || !march_is_alive(cm->actor)) continue;
+            int64_t budget = meta->sup_children[i].shutdown_ms;
+            if (getenv("MARCH_SUP_TRACE"))
+                fprintf(stderr, "march: stopping supervised child %d"
+                        " (shutdown_ms=%lld)\n", i, (long long)budget);
+            /* Detach before stopping: this is an orderly teardown, not a
+             * crash, so the child's death must not run a restart strategy
+             * against a supervisor that is itself on the way out. Same
+             * technique the batch strategies use for their sweep kills. */
+            pthread_mutex_lock(&g_tbl_mu);
+            cm->supervisor = NULL;
+            pthread_mutex_unlock(&g_tbl_mu);
+            if (budget == 0) {
+                do_actor_death(cm->actor, MARCH_DEATH_KILLED, NULL, 0);
+                continue;
+            }
+            march_actor_stop(cm->actor, budget);
+            stop_await_death(cm->actor,
+                             budget < 0 ? -1 : march_now_ms() + budget);
+        }
+    }
+
+    int64_t deadline = timeout_ms < 0 ? -1 : march_now_ms() + timeout_ms;
+    atomic_store_explicit(&meta->drain_deadline_ms, deadline,
+                          memory_order_relaxed);
+    /* Published AFTER the deadline, and re-stored with release ordering so a
+     * green thread that acquire-loads `draining` sees the deadline too. The
+     * CAS above already set it; this store is the release fence. */
+    atomic_store_explicit(&meta->draining, 1, memory_order_release);
+
+    /* Wake it. request_stop, not a bare wake: an actor parked on an empty
+     * mailbox must be able to LEAVE the untimed recv (which otherwise re-parks
+     * on a wake it cannot attribute to a message), and an empty mailbox is
+     * precisely the case where draining is already finished. */
+    march_proc *gt = atomic_load_explicit(&meta->green_thread,
+                                          memory_order_acquire);
+    if (gt) march_sched_request_stop(gt);
+
+    /* Then WAIT for it, up to the same deadline. `stop` is a synchronous
+     * operation on purpose: a deploy sequence's whole point is to know when
+     * the in-flight work is finished, and a caller that has to poll is_alive
+     * afterwards has been handed the hard half of the problem back. It is
+     * also what makes stop behave identically on both backends — the
+     * interpreter's eager scheduler drains inline, so an asynchronous
+     * compiled stop would give the same program two different observable
+     * orderings.
+     *
+     * Except when the caller IS the actor being stopped: an actor stopping
+     * itself cannot wait for its own green thread to finish the queue it is
+     * currently standing in. That call marks it draining and returns, and the
+     * receive loop does the rest as soon as the handler returns. */
+    if (gt != march_sched_current())
+        stop_await_death(actor, deadline);
+    return 1;
+}
+
+/* Is [actor] draining (stopped but not yet dead)? Lets March tell "shutting
+ * down" apart from "dead", which `is_alive` alone cannot express. */
+int64_t march_actor_is_draining(void *actor) {
+    if (!IS_HEAP_PTR(actor)) return 0;
+    march_actor_meta *meta = find_meta(actor);
+    return meta && atomic_load_explicit(&meta->draining, memory_order_acquire);
 }
 
 int64_t march_is_alive(void *actor) {
@@ -4847,6 +5129,18 @@ void *march_send(void *actor, void *msg) {
      * entirely (find_meta is lock-free; the green_thread field is
      * _Atomic). */
     march_actor_meta *meta = find_meta(actor);
+    /* A draining actor takes no new work: that is what makes `stop` a
+     * shutdown rather than a pause. Rejected here rather than inside
+     * march_sched_send so the message is never enqueued and never handed to
+     * the mailbox disposer -- MARCH_SEND_DRAINING, distinct at the C level
+     * from MARCH_SEND_DEAD and MARCH_SEND_DROPPED. March's `send` returns
+     * Option(Unit), so it reports this the way it reports a dead target:
+     * None, i.e. "not accepted". */
+    if (meta && atomic_load_explicit(&meta->draining, memory_order_acquire)) {
+        march_decrc(msg);
+        void *none = march_alloc(16);
+        return none;
+    }
     march_proc *gt = meta ? atomic_load_explicit(&meta->green_thread,
                                                   memory_order_acquire)
                           : NULL;
@@ -6851,12 +7145,26 @@ void march_demonitor(int64_t ref) {
    The actor must already be registered via march_spawn.
    This is a metadata call; actual restart logic is driven by Down events. */
 void march_register_supervisor(void *supervisor, int64_t strategy,
-                                int64_t max_restarts, int64_t window_secs) {
+                                int64_t max_restarts, int64_t window_secs,
+                                int64_t backoff_base_ms,
+                                int64_t backoff_cap_ms,
+                                int64_t backoff_jitter_pct) {
     if (!IS_HEAP_PTR(supervisor)) return;
     march_actor_meta *meta = find_or_create_meta(supervisor);
     meta->supervisor_strategy  = (int)strategy;
     meta->supervisor_max_restarts = max_restarts;
     meta->supervisor_window_secs  = window_secs;
+    /* The backoff curve. Codegen always emits these three (defaulted by the
+     * parser to 25/5000/25, the constants this function's caller used to have
+     * hardcoded), but clamp anyway: this is a public C symbol, and a 0 base
+     * would make every delay 0 while a negative cap would make the ceiling
+     * unreachable. */
+    meta->backoff_base_ms = backoff_base_ms > 0 ? backoff_base_ms : 25;
+    meta->backoff_cap_ms  = backoff_cap_ms >= meta->backoff_base_ms
+                              ? backoff_cap_ms : meta->backoff_base_ms;
+    meta->backoff_jitter_pct =
+        backoff_jitter_pct < 0 ? 0
+      : backoff_jitter_pct > 100 ? 100 : backoff_jitter_pct;
 }
 
 /* Called once per declared supervise-block child, from the generated
@@ -6874,7 +7182,7 @@ void march_register_supervisor(void *supervisor, int64_t strategy,
  * closure stored on meta->cleanup_head. */
 void march_actor_register_child(void *supervisor, void *child,
                                  void *spawn_clo, int64_t word_idx,
-                                 int64_t restart_type) {
+                                 int64_t restart_type, int64_t shutdown_ms) {
     march_actor_meta *sup_meta = find_or_create_meta(supervisor);
     march_actor_meta *child_meta = find_or_create_meta(child);
     /* The child was prepared by march_spawn_supervised, so no actor loop can
@@ -6889,6 +7197,7 @@ void march_actor_register_child(void *supervisor, void *child,
     sup_meta->sup_children[idx].spawn_clo = spawn_clo;
     sup_meta->sup_children[idx].word_idx = word_idx;
     sup_meta->sup_children[idx].restart_type = (int32_t)restart_type;
+    sup_meta->sup_children[idx].shutdown_ms = shutdown_ms;
     sup_meta->sup_children[idx].crash_streak = 0;
     sup_meta->sup_children[idx].last_crash_ms = 0;
     sup_meta->sup_num_children = idx + 1;
@@ -7208,6 +7517,95 @@ int64_t march_send_checked(void *cap, void *msg) {
 static struct { march_hdr hdr; int64_t dispatch; int64_t alive; }
     march_dead_actor_sentinel = { .hdr = { .rc = 1000000000, .tag = 0, .pad = 0 },
                                    .dispatch = 0, .alive = 0 };
+
+/* march_actor_pid_indices() -> List(Int): the pid index of every actor alive
+ * right now, ascending.
+ *
+ * The enumeration primitive the overload-shedding guidance needs. Before it,
+ * mailbox_size(pid) could only be asked about a Pid you already held, so
+ * monitoring code could watch actors it could name in advance and had no way
+ * at all to discover an unknown hot one — the documented polling loop could
+ * not be closed. March code turns these back into Pids with pid_of_int, the
+ * same round trip a supervisor's Int-typed child fields already make.
+ *
+ * LOCK-FREE on purpose, walking the bucket heads exactly as find_meta does
+ * (acquire load of the head, plain reads down the chain — the chain is
+ * append-at-head and nodes are never freed, see replace_stale_meta_locked).
+ * Task 10 deliberately took find_meta off g_tbl_mu to keep sends lock-free; an
+ * enumeration that grabbed that mutex on a monitoring timer would re-serialise
+ * the very path that work freed.
+ *
+ * A snapshot is inherently racy — an actor can die between this call and
+ * anything done with the result — which is fine and already the norm: every
+ * consumer of a Pid handles a dead one.
+ *
+ * Sorted ascending, and deduplicated, so the result is deterministic (bucket
+ * order is an artifact of heap addresses) and identical to the interpreter's. */
+static int pid_index_cmp(const void *a, const void *b) {
+    int64_t x = *(const int64_t *)a, y = *(const int64_t *)b;
+    return x < y ? -1 : x > y ? 1 : 0;
+}
+
+void *march_actor_pid_indices(void) {
+    int64_t cap = 64, n = 0;
+    int64_t *idx = (int64_t *)malloc(sizeof(int64_t) * (size_t)cap);
+    if (!idx) return make_nil();
+    for (unsigned int b = 0; b < MARCH_SCHED_BUCKETS; b++) {
+        for (march_actor_meta *m = atomic_load_explicit(&g_actor_tbl[b],
+                                                        memory_order_acquire);
+             m; m = m->tbl_next) {
+            /* "Has not died", not "is alive right now". The two differ for a
+             * just-spawned actor: march_spawn returns before the new actor's
+             * green thread has run, and its $alive word is still 0 until it
+             * does, so an actor_alive_load gate drops actors the caller has
+             * only just created — measured, a three-spawn program listed two,
+             * a different one missing run to run. The interpreter, whose
+             * ai_alive is true from the moment of spawn, would have listed all
+             * three; gating on terminal_set makes the two backends agree AND
+             * removes a startup race from the result. A meta that has died has
+             * terminal_set claimed by do_actor_death, so dead actors are still
+             * excluded.
+             *
+             * terminal_set is written under g_tbl_mu and read here without it
+             * — a benign race for a snapshot: the worst case is listing an
+             * actor that died microseconds ago, which is inherent to any
+             * enumeration and which every Pid consumer already handles. */
+            if (!m->actor || m->terminal_set) continue;
+            int64_t pidx = atomic_load_explicit(&m->pid_index,
+                                                memory_order_relaxed);
+            /* NOT cross-checked against g_pididx_tbl. The obvious guard here —
+             * "skip this meta unless find_meta_by_pid_index(pidx) resolves
+             * back to it", to drop a stale meta whose actor address was
+             * recycled — is itself a lock-free walk of a table being inserted
+             * into concurrently, and it MISSES live actors: measured, a
+             * three-actor program listed only two, with a different one
+             * dropped run to run, because a freshly spawned actor's index was
+             * transiently unreachable on that chain. A snapshot that silently
+             * omits live actors is worse than one that may occasionally carry
+             * a stale index, since the whole point is finding an actor you did
+             * not already know about. Duplicates are removed below instead;
+             * a stale index left in resolves through pid_of_int to a live
+             * actor, which every Pid consumer already handles. */
+            if (n == cap) {
+                cap *= 2;
+                int64_t *grown = (int64_t *)realloc(idx, sizeof(int64_t) * (size_t)cap);
+                if (!grown) break;
+                idx = grown;
+            }
+            idx[n++] = pidx;
+        }
+    }
+    qsort(idx, (size_t)n, sizeof(int64_t), pid_index_cmp);
+    void *list = make_nil();
+    /* Descending build (Cons is back-to-front), skipping repeats of the index
+     * just emitted — sorted, so equal indices are adjacent. */
+    for (int64_t i = n - 1; i >= 0; i--) {
+        if (i + 1 < n && idx[i] == idx[i + 1]) continue;
+        list = make_cons(make_some_i64(idx[i]), list);
+    }
+    free(idx);
+    return list;
+}
 
 void *march_pid_of_int(int64_t n) {
     march_actor_meta *m = find_meta_by_pid_index(n);

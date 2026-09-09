@@ -11,8 +11,58 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- **Per-child restart types on `supervise` blocks.** A child may be declared
+  `restart transient` (a crash restarts it, `kill()` retires it for good) or
+  `restart temporary` (never restarted); the default stays `permanent`, so
+  existing blocks are unchanged. Retiring a child spends none of the
+  supervisor's `max_restarts` budget, and a `temporary` child swept up by a
+  `one_for_all` / `rest_for_one` batch restart is stopped without being brought
+  back. Previously every supervised child was permanent and `kill()` on one
+  simply restarted it, with no way to stop a worker that had finished its job.
+  Note that March's `permanent` is deliberately not OTP's: no restart type
+  restarts a child that returned normally.
+
+- **`Actor.list()`: enumerate every live actor.** Monitoring code can now find
+  the actor that is behind, instead of only the ones it can name in advance:
+  `mailbox_size(pid)` needed a `Pid` with no way to obtain one, so the
+  load-shedding loop documented in the overload-resilience guide could not
+  actually be closed. The result is a snapshot in spawn order, and the guide
+  now shows it in the shedding loop. Still missing, and still open: a
+  growing-mailbox alarm, per-actor state inspection, and tracing.
+
+- **`Actor.stop(pid, timeout_ms)`: graceful shutdown.** A stopped actor accepts
+  no new messages (`send` returns `None`), works off whatever is already
+  queued, and then dies a normal death — which no restart type restarts. It
+  returns only once the actor has actually stopped, so a shutdown sequence
+  reads as straight-line code, and `Actor.is_draining(pid)` tells "shutting
+  down" apart from "dead". Previously the only way to stop an actor was
+  `kill`, which discards the mailbox, so rolling a node lost exactly the
+  requests that were waiting. Stopping a supervisor stops its children first,
+  in reverse declaration order, each with its own `shutdown` budget from the
+  child spec (`Worker w shutdown 5000`, or `infinity` / `brutal`; the default
+  is 5 seconds and `kill` never consults it). No `terminate`-style callback
+  yet: an actor can finish its queued messages, but cannot run cleanup of its
+  own.
+
+- **`backoff base <ms> cap <ms> jitter <n>%`** on a `supervise` block tunes the
+  delay between repeated restarts of the same child. All three are optional and
+  default to `25 / 5000 / 25`, the constants the runtime previously hardcoded,
+  so an existing supervision tree's timing is unchanged. `jitter 0%` makes the
+  delays exactly reproducible for tests.
+
 ### Fixed
 
+- **`Actor.call`'s timeout is enforced in the interpreter.** It was bound and
+  never read, so a handler that took ten seconds "answered in time" against a
+  1ms timeout, while one that did not reply within a single scheduler pass was
+  reported as a timeout however large the timeout was. Replies are now
+  timestamped and compared against a real wall-clock deadline, and a late reply
+  is discarded. This is the path `forge test` and `march file.march` actually
+  run, so it is where most users meet `Actor.call`. (The interpreter still
+  cannot abort a handler mid-run: a call whose deadline passes waits for the
+  handler to finish before returning `Err`.)
 - **`scripts/run-tests.sh` names the suite that failed.** Every runner failure
   collapsed into one `FAILED` bit and the lone line
   `One or more suites FAILED.` — no runner name, no exit status, no signal.

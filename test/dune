@@ -2008,8 +2008,13 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; This fixture burns time in the handler so the first call's 1ms deadline
 ; expires before the reply lands, then makes a second call and checks it
 ; gets the SECOND reply (n=1), not the stale first one (n=0). Needs the real
-; stdlib (List.fold_left, Range), hence (source_tree ../stdlib). Compile
-; natively, run, diff.
+; stdlib (List.fold_left, Range), hence (source_tree ../stdlib).
+;
+; Runs on BOTH backends since 2026-09-08. It could not before: the
+; interpreter bound Actor.call's timeout_ms and never looked at it, so the
+; slow handler below "answered in time" by construction and the interpreted
+; output was `first: unexpected ok`. See
+; specs/progress/2026-09-08-interpreter-actor-call-timeout.md.
 (rule
  (targets native_actor_call_late_reply native_actor_call_late_reply.out)
  (deps (file %{exe:../bin/main.exe})
@@ -2029,6 +2034,19 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
         native/actor_call_late_reply.march)
    (with-stdout-to native_actor_call_late_reply.out
         (system "./native_actor_call_late_reply")))))
+
+(rule
+ (targets interp_actor_call_late_reply.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/actor_call_late_reply.march))
+ (action
+  (with-stdout-to interp_actor_call_late_reply.out
+    (run %{exe:../bin/main.exe} native/actor_call_late_reply.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_call_late_reply.expected interp_actor_call_late_reply.out)))
 
 (rule
  (alias runtest)
@@ -3912,6 +3930,279 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/supervisor_rest_for_one_restart.expected native_supervisor_rest_for_one_restart.out)))
+
+; ── Graceful shutdown: Actor.stop drains, kill does not ─────────────────
+; specs/todos/2026-08-12-graceful-shutdown-and-drain.md. Both fixtures run
+; compiled AND interpreted against one .expected. `stop` is synchronous --
+; it returns only once the actor has drained and died -- which is what makes
+; a single expectation possible: an asynchronous stop would let the compiled
+; backend's handler output interleave with main's, and the same program would
+; have two legal orderings.
+
+(rule
+ (targets native_actor_stop_drains_mailbox native_actor_stop_drains_mailbox.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/actor_stop_drains_mailbox.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_stop_drains_mailbox
+        native/actor_stop_drains_mailbox.march)
+   (with-stdout-to native_actor_stop_drains_mailbox.out
+        (system "./native_actor_stop_drains_mailbox")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_stop_drains_mailbox.expected native_actor_stop_drains_mailbox.out)))
+
+(rule
+ (targets interp_actor_stop_drains_mailbox.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/actor_stop_drains_mailbox.march))
+ (action
+  (with-stdout-to interp_actor_stop_drains_mailbox.out
+    (run %{exe:../bin/main.exe} native/actor_stop_drains_mailbox.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_stop_drains_mailbox.expected interp_actor_stop_drains_mailbox.out)))
+
+(rule
+ (targets native_actor_stop_tree native_actor_stop_tree.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/actor_stop_tree.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_stop_tree
+        native/actor_stop_tree.march)
+   (with-stdout-to native_actor_stop_tree.out
+        (system "./native_actor_stop_tree")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_stop_tree.expected native_actor_stop_tree.out)))
+
+(rule
+ (targets interp_actor_stop_tree.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/actor_stop_tree.march))
+ (action
+  (with-stdout-to interp_actor_stop_tree.out
+    (run %{exe:../bin/main.exe} native/actor_stop_tree.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_stop_tree.expected interp_actor_stop_tree.out)))
+
+; Teardown ORDER, which stdout cannot show: a child that printed at shutdown
+; would race main on the compiled backend, and until actors get a terminate
+; callback there is no in-language event at teardown time at all. Both
+; backends emit the identical MARCH_SUP_TRACE line, so the order is asserted
+; off stderr instead -- reverse declaration order (2, 1, 0), each with the
+; shutdown budget its child spec declared.
+(rule
+ (targets native_actor_stop_tree.order.out)
+ (deps (file native_actor_stop_tree))
+ (action
+  (with-stdout-to native_actor_stop_tree.order.out
+   (system "MARCH_SUP_TRACE=1 ./native_actor_stop_tree 2>&1 >/dev/null | grep 'stopping supervised'"))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_stop_tree.order.expected native_actor_stop_tree.order.out)))
+
+(rule
+ (targets interp_actor_stop_tree.order.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/actor_stop_tree.march))
+ (action
+  (with-stdout-to interp_actor_stop_tree.order.out
+   (setenv MARCH_SUP_TRACE 1
+    (system "%{exe:../bin/main.exe} native/actor_stop_tree.march 2>&1 >/dev/null | grep 'stopping supervised'")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_stop_tree.order.expected interp_actor_stop_tree.order.out)))
+
+; ── Process enumeration ─────────────────────────────────────────────────
+; specs/todos/2026-08-12-per-actor-introspection-and-alarms.md. Compiled and
+; interpreted against one .expected: the shed-load guidance in
+; docs/overload-resilience.md is written for both backends, and the snapshot's
+; contents and ORDER (spawn order, deduplicated) are what make it followable.
+(rule
+ (targets native_actor_enumeration native_actor_enumeration.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/actor_enumeration.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_enumeration
+        native/actor_enumeration.march)
+   (with-stdout-to native_actor_enumeration.out
+        (system "./native_actor_enumeration")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_enumeration.expected native_actor_enumeration.out)))
+
+(rule
+ (targets interp_actor_enumeration.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/actor_enumeration.march))
+ (action
+  (with-stdout-to interp_actor_enumeration.out
+    (run %{exe:../bin/main.exe} native/actor_enumeration.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_enumeration.expected interp_actor_enumeration.out)))
+
+; ── Per-child restart types (`restart transient` / `restart temporary`) ──
+; specs/2026-09-08-supervise-child-spec-design.md. Each fixture runs BOTH
+; compiled and interpreted against ONE .expected: the policy is single-
+; threaded decision-making implemented twice (march_child_should_restart in
+; the C runtime, child_should_restart in eval_runtime.ml), and the two
+; drifting apart is the failure mode these goldens exist to catch.
+;
+; Each is non-vacuous by construction -- deleting the `restart <type>`
+; modifier from the source flips at least one printed line on BOTH backends.
+
+(rule
+ (targets native_supervisor_restart_transient native_supervisor_restart_transient.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/supervisor_restart_transient.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_supervisor_restart_transient
+        native/supervisor_restart_transient.march)
+   (with-stdout-to native_supervisor_restart_transient.out
+        (system "./native_supervisor_restart_transient")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_restart_transient.expected native_supervisor_restart_transient.out)))
+
+(rule
+ (targets interp_supervisor_restart_transient.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/supervisor_restart_transient.march))
+ (action
+  (with-stdout-to interp_supervisor_restart_transient.out
+    (run %{exe:../bin/main.exe} native/supervisor_restart_transient.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_restart_transient.expected interp_supervisor_restart_transient.out)))
+
+(rule
+ (targets native_supervisor_restart_temporary native_supervisor_restart_temporary.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/supervisor_restart_temporary.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_supervisor_restart_temporary
+        native/supervisor_restart_temporary.march)
+   (with-stdout-to native_supervisor_restart_temporary.out
+        (system "./native_supervisor_restart_temporary")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_restart_temporary.expected native_supervisor_restart_temporary.out)))
+
+(rule
+ (targets interp_supervisor_restart_temporary.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/supervisor_restart_temporary.march))
+ (action
+  (with-stdout-to interp_supervisor_restart_temporary.out
+    (run %{exe:../bin/main.exe} native/supervisor_restart_temporary.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_restart_temporary.expected interp_supervisor_restart_temporary.out)))
+
+(rule
+ (targets native_supervisor_restart_batch_temporary native_supervisor_restart_batch_temporary.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/supervisor_restart_batch_temporary.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_supervisor_restart_batch_temporary
+        native/supervisor_restart_batch_temporary.march)
+   (with-stdout-to native_supervisor_restart_batch_temporary.out
+        (system "./native_supervisor_restart_batch_temporary")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_restart_batch_temporary.expected native_supervisor_restart_batch_temporary.out)))
+
+(rule
+ (targets interp_supervisor_restart_batch_temporary.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/supervisor_restart_batch_temporary.march))
+ (action
+  (with-stdout-to interp_supervisor_restart_batch_temporary.out
+    (run %{exe:../bin/main.exe} native/supervisor_restart_batch_temporary.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_restart_batch_temporary.expected interp_supervisor_restart_batch_temporary.out)))
 
 ; ── Regression: Task.await / await_many / async_stream must untag i64 Ok
 ; ── payloads.  The thunk trampoline double-tags scalar results (task[3] =

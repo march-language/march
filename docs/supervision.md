@@ -57,9 +57,141 @@ end
 The `supervise` block:
 - `strategy`: restart policy (see below)
 - `max_restarts N within S`: if more than N restarts occur in S seconds, the supervisor itself crashes (escalates to its own supervisor)
-- Each line `ActorName field_name`: a child to supervise, with `field_name` being the state field that stores its current `Pid`
+- `backoff base <ms> cap <ms> jitter <n>%` (optional): tunes the delay between repeated restarts of the same child — see [Restart backoff](#restart-backoff)
+- Each line `ActorName field_name`: a child to supervise, with `field_name` being the state field that stores its current `Pid`, optionally followed by `restart <type>` — see [Restart types](#restart-types)
 
 When the supervisor starts (via `spawn(AppSupervisor)`), it automatically spawns all listed children.
+
+---
+
+## Restart types
+
+By default every child is `permanent`: it comes back whether it crashed or was
+deliberately stopped with `kill()`. A trailing `restart` modifier changes that
+per child:
+
+```march
+supervise do
+  strategy one_for_one
+  max_restarts 5 within 60
+  Counter counter                      -- permanent (the default)
+  Job     job     restart transient    -- crash restarts it; kill() retires it
+  Reaper  reaper  restart temporary    -- never restarted
+end
+```
+
+| Restart type | Child crashed | `kill(child)` | Child returned normally |
+|---|---|---|---|
+| `permanent` (default) | restarted | restarted | not restarted |
+| `transient` | restarted | **not restarted** | not restarted |
+| `temporary` | not restarted | not restarted | not restarted |
+
+`transient` is the job-worker case: a worker that finishes its assignment and
+is stopped on purpose stays stopped, while one that dies badly is brought back.
+
+A death that does not restart also spends **none** of the supervisor's
+`max_restarts` budget, so retiring children can never escalate a healthy
+supervisor. Under `one_for_all` and `rest_for_one`, a `temporary` child caught
+in a batch restart is stopped with its siblings and simply not brought back;
+its state field keeps the dead child's `Pid`, since only an actual respawn
+rewrites it.
+
+> **Coming from Erlang/OTP?** March's `permanent` is *not* OTP's. OTP restarts a
+> permanent child even when it exits normally; March never restarts a child that
+> returned normally, under any restart type. March's `permanent` is therefore
+> closest to OTP's `transient`, with `kill()` counting as an abnormal exit, and
+> March's `transient` differs from `permanent` exactly in that `kill()` retires
+> it. This was a deliberate choice: the normal-exit behaviour predates restart
+> types, and changing it would silently alter every `supervise` block already
+> written.
+
+---
+
+## Stopping gracefully
+
+`kill(pid)` is immediate: whatever was queued in the actor's mailbox is
+discarded. That is the wrong tool for a deploy, which needs the opposite —
+stop accepting new work, let the in-flight work finish, *then* exit.
+
+`Actor.stop(pid, timeout_ms)` does that:
+
+```march
+let stopped = Actor.stop(worker, 5000)
+```
+
+1. The actor is marked **draining**: `send` to it returns `None`, so no new
+   work is accepted.
+2. It works off the messages already in its mailbox.
+3. It dies a **normal** death — which no restart type restarts, so a stopped
+   child does not fight its supervisor.
+
+`stop` returns only once the actor has actually stopped, so a shutdown
+sequence can be written as straight-line code. It returns `false` if the actor
+was already dead or already stopping. `timeout_ms` bounds the drain: a negative
+value waits indefinitely, and `0` discards the queue as soon as the in-flight
+message returns. `Actor.is_draining(pid)` distinguishes "shutting down" from
+"dead", which `is_alive` alone cannot.
+
+### Stopping a tree
+
+Stopping a supervisor stops its children first, in **reverse declaration
+order** — the mirror of the order they were started in — each with its own
+`shutdown` budget:
+
+```march
+supervise do
+  strategy one_for_one
+  max_restarts 5 within 60
+  Db      db                      -- stopped last  (5s default)
+  Cache   cache shutdown 1000     -- stopped second (1s)
+  Api     api   shutdown infinity -- stopped first  (waits as long as it takes)
+end
+```
+
+`shutdown` takes a millisecond budget, `infinity`, or `brutal` (die at once,
+mailbox discarded — what `kill` does). A child that has not finished when its
+budget runs out is killed. The default is 5 seconds; `kill` never consults this
+field, so it changes nothing for code that does not call `stop`.
+
+Children are detached from the supervisor before being stopped, so an orderly
+teardown does not trigger a restart — otherwise the children would come back
+and the tree would never go down.
+
+**Not yet supported:** a `terminate`-style callback. An actor cannot run
+cleanup code of its own at shutdown; it can only finish the messages it has.
+Draining is also not yet integrated with hot code reload.
+
+---
+
+## Restart backoff
+
+When the same child crashes repeatedly, the supervisor waits a little longer
+before each restart so a crash loop cannot burn a core. The delay doubles per
+consecutive crash up to a ceiling, with jitter so that siblings crashing
+together do not retry in lockstep, and the streak resets once a child survives
+a full `max_restarts` window. The first crash is always restarted immediately.
+
+The curve is tunable per supervisor:
+
+```march
+supervise do
+  strategy one_for_one
+  max_restarts 5 within 60
+  backoff base 25 cap 5000 jitter 25%   -- these are the defaults
+  Worker w
+end
+```
+
+- `base <ms>`: the delay before the *second* consecutive restart; each further
+  consecutive crash doubles it (8 doublings maximum).
+- `cap <ms>`: the ceiling the doubling saturates at. Must be at least `base`.
+- `jitter <n>%`: each delay is spread by ±n% of itself. `jitter 0%` disables it
+  and makes the delays exactly reproducible, which is what you want in a test.
+
+All three are optional individually — `backoff base 100` keeps the default cap
+and jitter — and omitting the clause entirely gives the values shown above.
+Set `MARCH_SUP_TRACE=1` in the environment to have each restart decision print
+its child index, crash streak and chosen delay.
 
 ---
 

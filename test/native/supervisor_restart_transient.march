@@ -1,0 +1,66 @@
+-- Per-child restart types: `transient` (specs/2026-09-08-supervise-child-spec-design.md).
+--
+-- A transient child is retired by kill() and restarted by a crash. Before the
+-- restart filter landed, the child's declared policy was parsed, lowered, sent
+-- across the register_child ABI and stored in march_sup_child.restart_type --
+-- and then read by nothing, so kill() restarted every child regardless.
+--
+-- The retired slot keeps the DEAD child's pid on purpose: the supervisor's
+-- state field is only rewritten by an actual respawn, so "same pid, not alive"
+-- is what retirement looks like from March. Both backends must agree.
+mod Main do
+  needs IO.Console
+
+  actor Worker do
+    state { n : Int }
+    init  { n: 0 }
+
+    on Ping() do
+      { n: state.n + 1 }
+    end
+
+    on Poison() do
+      panic("boom")
+    end
+  end
+
+  actor Sup do
+    state { ta : Int, tb : Int }
+    init  { ta: 0, tb: 0 }
+
+    supervise do
+      strategy one_for_one
+      max_restarts 5 within 60
+      Worker ta restart transient
+      Worker tb restart transient
+    end
+  end
+
+  fn child_int(sup, field) do
+    match get_actor_field(sup, field) do
+      None    -> -1
+      Some(n) -> n
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let sup = spawn(Sup)
+    let ta1 = child_int(sup, "ta")
+    let tb1 = child_int(sup, "tb")
+
+    -- kill() retires a transient child: no respawn, slot untouched.
+    kill(pid_of_int(ta1))
+    run_until_idle()
+    let ta2 = child_int(sup, "ta")
+    println("transient killed, slot unchanged: " ++ bool_to_string(ta2 == ta1))
+    println("transient killed, child dead: " ++ bool_to_string(is_alive(pid_of_int(ta1)) == false))
+
+    -- ...but a crash still restarts it.
+    send(pid_of_int(tb1), Poison())
+    run_until_idle()
+    let tb2 = child_int(sup, "tb")
+    println("transient crashed, respawned: " ++ bool_to_string(tb2 != tb1))
+    println("transient crashed, child alive: " ++ bool_to_string(is_alive(pid_of_int(tb2))))
+    println("supervisor alive: " ++ bool_to_string(is_alive(sup)))
+  end
+end

@@ -459,6 +459,12 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_logger_write(ptr %level, ptr %msg, ptr %ctx, ptr %extra)" };
   { march_name = "kill"; c_name = Some "march_kill"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_kill(ptr %actor)" };
+  { march_name = "actor_stop"; c_name = Some "march_actor_stop"; ret_ty = Some Tir.TBool;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_actor_stop(ptr %actor, i64 %timeout_ms)" };
+  { march_name = "actor_is_draining"; c_name = Some "march_actor_is_draining"; ret_ty = Some Tir.TBool;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_actor_is_draining(ptr %actor)" };
+  { march_name = "actor_pid_indices"; c_name = Some "march_actor_pid_indices"; ret_ty = Some (Tir.TCon ("List", [Tir.TInt]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_actor_pid_indices()" };
   { march_name = "is_alive"; c_name = Some "march_is_alive"; ret_ty = Some Tir.TBool;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_is_alive(ptr %actor)" };
   { march_name = "send"; c_name = Some "march_send"; ret_ty = Some (Tir.TCon ("Option", [Tir.TUnit]));
@@ -913,9 +919,9 @@ let builtins : builtin list = [
   { march_name = "get_actor_field"; c_name = Some "march_get_actor_field"; ret_ty = Some (Tir.TCon ("Option", [Tir.TVar "a"]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_get_actor_field(ptr %pid, ptr %name)" };
   { march_name = "register_supervisor"; c_name = Some "march_register_supervisor"; ret_ty = Some Tir.TUnit;
-    in_is_builtin = true; declare_sig = Some "declare void @march_register_supervisor(ptr %supervisor, i64 %strategy, i64 %max_restarts, i64 %window_secs)" };
+    in_is_builtin = true; declare_sig = Some "declare void @march_register_supervisor(ptr %supervisor, i64 %strategy, i64 %max_restarts, i64 %window_secs, i64 %backoff_base_ms, i64 %backoff_cap_ms, i64 %backoff_jitter_pct)" };
   { march_name = "register_supervisor_child"; c_name = Some "march_actor_register_child"; ret_ty = Some Tir.TUnit;
-    in_is_builtin = true; declare_sig = Some "declare void @march_actor_register_child(ptr %sup, ptr %child, ptr %spawn_fn, i64 %word_idx, i64 %restart_type)" };
+    in_is_builtin = true; declare_sig = Some "declare void @march_actor_register_child(ptr %sup, ptr %child, ptr %spawn_fn, i64 %word_idx, i64 %restart_type, i64 %shutdown_ms)" };
   { march_name = "pid_index_of"; c_name = Some "march_pid_index_of"; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_pid_index_of(ptr %actor)" };
   { march_name = "to_string"; c_name = Some "march_value_to_string"; ret_ty = Some Tir.TString;
@@ -1364,6 +1370,9 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
 let native_actor_items : preamble_item list = [   (* native-only: actors + scheduler *)
   PComment "; Actor builtins";
   PDeclare "march_kill";
+  PDeclare "march_actor_stop";
+  PDeclare "march_actor_is_draining";
+  PDeclare "march_actor_pid_indices";
   PDeclare "march_is_alive";
   PDeclare "march_send";
   PDeclare "march_send_linear";

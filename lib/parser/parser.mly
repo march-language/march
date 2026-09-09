@@ -38,6 +38,92 @@
     Parse_errors.collect_parse_error msg hint pos;
     raise (March_errors.Errors.ParseError (msg, hint, pos))
 
+  (* `backoff base 25 cap 5000 jitter 25%` — the labels are parsed as ordinary
+     lowercase identifiers and validated here rather than lexed as keywords.
+     Reserving `cap`, `base` or `jitter` outright is not an option: `cap` is
+     the capability vocabulary, and the last time a supervise-block word was
+     reserved outright (`restart`) it broke stdlib/dist_supervisor.march, which
+     uses it as a record field and a parameter name. See
+     specs/2026-09-08-supervise-child-spec-design.md §3.
+
+     Each entry is (label, value, had_percent). Unknown labels, duplicates,
+     out-of-range values and a `%` on the wrong label are all diagnosed here,
+     naming the offender, because the alternative is a "stuck here" pointing at
+     the next declaration. *)
+  (* Per-child trailing modifiers. A `list(child_modifier)` rather than a
+     fixed sequence, so `restart transient shutdown 5000` and
+     `shutdown 5000 restart transient` both parse, and a repeated label is a
+     diagnostic naming the child instead of a silent last-wins. Each new field
+     the child spec grows is one more constructor here and one more `option`
+     to fill in below -- the property the trailing-modifier shape was chosen
+     for. See specs/2026-09-08-supervise-child-spec-design.md §1. *)
+  type child_modifier = CmRestart of restart_type | CmShutdown of shutdown_spec
+
+  let mk_shutdown_word (w : string) (sp : span) : shutdown_spec =
+    match w with
+    | "infinity" -> ShutdownInfinity
+    | "brutal"   -> ShutdownBrutal
+    | other ->
+      error_raise
+        (Printf.sprintf "I don't recognize `shutdown %s`" other)
+        (Some "`shutdown` takes a millisecond budget (`shutdown 5000`), \
+               `infinity`, or `brutal`.")
+        { Lexing.pos_fname = ""; pos_lnum = sp.start_line;
+          pos_bol = 0; pos_cnum = sp.start_col }
+
+  let mk_child_spec (child : string) (mods : child_modifier list)
+      (pos : Lexing.position) : restart_type * shutdown_spec =
+    let restart = ref None and shutdown = ref None in
+    let dup label =
+      error_raise
+        (Printf.sprintf "`%s` is given twice for child `%s`" label child)
+        (Some "Each modifier may appear at most once per child.") pos
+    in
+    List.iter (function
+        | CmRestart r  -> if !restart <> None then dup "restart" else restart := Some r
+        | CmShutdown s -> if !shutdown <> None then dup "shutdown" else shutdown := Some s)
+      mods;
+    ((match !restart with Some r -> r | None -> Permanent),
+     (match !shutdown with Some s -> s | None -> default_shutdown))
+
+  let mk_backoff (entries : (string * int * bool) list) (pos : Lexing.position)
+      : backoff_config =
+    let seen = Hashtbl.create 3 in
+    let bo = ref default_backoff in
+    List.iter (fun (label, v, pct) ->
+        if Hashtbl.mem seen label then
+          error_raise
+            (Printf.sprintf "`%s` is given twice in this `backoff` clause" label)
+            (Some "Each of `base`, `cap` and `jitter` may appear at most once.")
+            pos;
+        Hashtbl.add seen label ();
+        (match label with
+         | "base" | "cap" ->
+           if pct then
+             error_raise
+               (Printf.sprintf "`backoff %s` is a duration in milliseconds, not a percentage" label)
+               (Some "Drop the `%` — write `base 25` or `cap 5000`.") pos;
+           if v <= 0 then
+             error_raise
+               (Printf.sprintf "`backoff %s` must be greater than 0" label)
+               (Some "A zero or negative delay would disable backoff entirely;                       omit the clause to keep the default curve.") pos;
+           if label = "base" then bo := { !bo with bo_base_ms = v }
+           else bo := { !bo with bo_cap_ms = v }
+         | "jitter" ->
+           if v < 0 || v > 100 then
+             error_raise "`backoff jitter` must be between 0 and 100 percent"
+               (Some "`jitter 25%` spreads each delay by +/-25%; `jitter 0%`                       disables jitter.") pos;
+           bo := { !bo with bo_jitter_pct = v }
+         | other ->
+           error_raise
+             (Printf.sprintf "I don't recognize `%s` as a `backoff` option" other)
+             (Some "`backoff` takes `base <ms>`, `cap <ms>` and `jitter <n>%`,                     in any order, e.g. `backoff base 25 cap 5000 jitter 25%`.")
+             pos)) entries;
+    if !bo.bo_cap_ms < !bo.bo_base_ms then
+      error_raise "`backoff cap` is smaller than `backoff base`"
+        (Some "The cap is the ceiling the doubling saturates at, so it cannot                be below the first delay.") pos;
+    !bo
+
   (* Desugar a string interpolation into a `++` chain + to_string calls:
        prefix ++ to_string(e1) ++ s1 ++ to_string(e2) ++ s2 ++ ...
      where to_string is the polymorphic builtin.
@@ -221,6 +307,7 @@
 %token SUPERVISE STRATEGY MAX_RESTARTS WITHIN
 %token ONE_FOR_ONE ONE_FOR_ALL REST_FOR_ONE
 %token RESTART PERMANENT TRANSIENT TEMPORARY
+%token BACKOFF SHUTDOWN
 %token <string> INTERP_START
 %token <string> INTERP_MID
 %token <string> INTERP_END
@@ -706,29 +793,46 @@ supervise_block:
   | SUPERVISE; DO;
     STRATEGY; strat = restart_strategy_tok;
     MAX_RESTARTS; max_r = INT; WITHIN; win = INT;
+    bo = option(backoff_clause);
     children = list(supervise_child);
     END
     { let names = List.map (fun (n, _, _) -> n) children in
-      let tyfields = List.map (fun (n, t, r) ->
-        { sf_name = n; sf_ty = t; sf_restart = r }) children in
+      let tyfields = List.map (fun (n, t, (r, sd)) ->
+        { sf_name = n; sf_ty = t; sf_restart = r; sf_shutdown = sd }) children in
       { sc_fields = tyfields;
         sc_strategy = strat;
         sc_max_restarts = max_r;
         sc_window_secs = win;
-        sc_order = names } }
+        sc_order = names;
+        sc_backoff = (match bo with Some b -> b | None -> default_backoff) } }
+
+(* Optional, and block-level rather than per-child: the curve it tunes is
+   computed from the supervisor's own state, not from any one child. *)
+backoff_clause:
+  | BACKOFF; kvs = nonempty_list(backoff_kv)
+    { mk_backoff kvs $startpos }
+
+backoff_kv:
+  | k = lower_name; n = INT; pct = option(PERCENT)
+    { (k.txt, n, pct <> None) }
 
 supervise_child:
   | actor_type = upper_name; field_name = lower_name;
-    r = option(child_restart)
+    mods = list(child_modifier)
     { (field_name, TyCon (actor_type, []),
-       (match r with Some t -> t | None -> Permanent)) }
+       mk_child_spec field_name.txt mods $startpos) }
 
 (* Optional per-child restart policy. Placed as a labelled trailing modifier so
    a later `shutdown <ms>` field can be added in the same position without a
    grammar rework. Omitted means Permanent, which is what every supervise block
    written before this feature means. *)
-child_restart:
-  | RESTART; t = restart_type_tok  { t }
+child_modifier:
+  | RESTART; t = restart_type_tok   { CmRestart t }
+  | SHUTDOWN; sd = shutdown_spec_tok { CmShutdown sd }
+
+shutdown_spec_tok:
+  | n = INT           { ShutdownMs n }
+  | w = lower_name    { mk_shutdown_word w.txt w.span }
 
 restart_type_tok:
   | PERMANENT  { Permanent }

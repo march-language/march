@@ -1,0 +1,66 @@
+-- Ordered teardown of a supervision tree.
+-- specs/todos/2026-08-12-graceful-shutdown-and-drain.md
+--
+-- Stopping a supervisor stops its children FIRST, in reverse declaration order
+-- (the mirror of start order, and the same order rest_for_one relies on), each
+-- with its own `shutdown` budget from the child spec. Children are detached
+-- before they are stopped, so an orderly teardown does not run a restart
+-- strategy against a parent that is itself on the way out -- if it did, the
+-- stopped children would come straight back and the tree would never go down.
+--
+-- Only main prints. A child that printed from its handler would race main on
+-- the compiled backend, where children run concurrently. The ORDER of the
+-- teardown is asserted separately, off MARCH_SUP_TRACE, because until actors
+-- get a terminate callback there is no in-language event at teardown time to
+-- observe it with.
+mod Main do
+  needs IO.Console
+
+  actor W do
+    state { n : Int }
+    init  { n: 0 }
+
+    on Work(tag) do
+      { n: state.n + 1 }
+    end
+  end
+
+  actor Sup do
+    state { a : Int, b : Int, c : Int }
+    init  { a: 0, b: 0, c: 0 }
+
+    supervise do
+      strategy one_for_one
+      max_restarts 5 within 60
+      W a
+      W b
+      W c shutdown 1000
+    end
+  end
+
+  fn child_int(sup, field) do
+    match get_actor_field(sup, field) do
+      None    -> -1
+      Some(n) -> n
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let sup = spawn(Sup)
+    let a1 = child_int(sup, "a")
+    let b1 = child_int(sup, "b")
+    let c1 = child_int(sup, "c")
+    send(pid_of_int(a1), Work("a"))
+    send(pid_of_int(b1), Work("b"))
+    send(pid_of_int(c1), Work("c"))
+
+    println("stop: " ++ bool_to_string(Actor.stop(sup, 5000)))
+    println("supervisor dead: " ++ bool_to_string(is_alive(sup) == false))
+    println("child a dead: " ++ bool_to_string(is_alive(pid_of_int(a1)) == false))
+    println("child b dead: " ++ bool_to_string(is_alive(pid_of_int(b1)) == false))
+    println("child c dead: " ++ bool_to_string(is_alive(pid_of_int(c1)) == false))
+    -- Not respawned: only an actual restart rewrites a supervisor's state
+    -- field, so the slot still names the child that was stopped.
+    println("child a not restarted: " ++ bool_to_string(child_int(sup, "a") == a1))
+  end
+end
