@@ -54,11 +54,16 @@ attributes-only rule. Menhir's conflict count is unchanged at 11.
 
 ## Still to do
 
+Trimmed 2026-09-09: the "reverse order... undocumented" bullet that used to
+sit here is done — `specs/lang/surface-syntax.md:753-754` now states the
+order explicitly ("A `doc` string comes FIRST, then the attributes, then the
+declaration... the reverse order is a parse error"). The two remaining
+bullets are still open; re-verified `forge/test/test_build_check.ml`'s
+`contracts_module` fixture (used by `test_fix_contracts_inserts_and_is_idempotent`)
+still has neither a doc string nor a leading comment on any function.
+
 - Make the insertion point skip a leading `--` comment block, so shape 1 reads
   the way a human would write it.
-- The reverse order (`@[attr]` then `doc "..."`) is still a parse error. Either
-  accept both orders or say so in `specs/lang/surface-syntax.md`; today the
-  restriction is undocumented.
 - A `forge/test` case that runs `forge fix --contracts` over a module whose
   functions carry docs and comments and then COMPILES the result. The existing
   case (`test_fix_contracts_inserts_and_is_idempotent`) uses a fixture with

@@ -1,5 +1,18 @@
 # `examples/csv_example.march` renders `#<tag:1>` compiled, real values interpreted
 
+## Closed 2026-09-09
+
+Fixed and already recorded in detail at
+`specs/progress/2026-08-12-csv-example-tag-render-compiled-generic-to-string.md`
+(root-caused to `lib/tir/mono.ml`'s `find_iface_impls` not retrying
+`to_string`→`show` resolution after monomorphization concretizes a generic
+function's parameter; fixed by commit `b44ede62`, with regression test
+`test/native/generic_fn_to_string_specialize.march`). Re-ran
+`examples/csv_example.march` both interpreted and `--compile --opt 2`: all 4
+demos now produce byte-identical output, no `#<tag:N>` anywhere. This todo
+file is redundant with the progress entry above and is closed without
+restating the detail.
+
 Found 2026-08-10 while verifying the R1 stage D migration. **Not caused by
 stage D** — proven with a pre-fix control (see below). Filed separately
 because it is a live compiled-only divergence in a shipped example.
@@ -49,18 +62,22 @@ shipped example could diverge unnoticed.
 
 ---
 
-## Resolved 2026-09-08
+## Closed 2026-09-09 — the file was STALE, not newly fixed
 
-Root cause was the missing constructor metadata, not a mis-resolved `Show`
-instance: `Csv.each_row` yields a declared ADT whose cells carried a tag and
-nothing else, so the type-erased formatter printed the tag. The constructor
-name table closes it — see
-`specs/progress/2026-09-08-compiled-to-string-adt-ctor-names.md`.
+This item was already fixed on **2026-08-12**, by the mono-time
+`to_string` -> `show` retry recorded in
+`specs/progress/2026-08-12-csv-example-tag-render-compiled-generic-to-string.md`.
+That fix landed with its own progress note and its own regression test
+(`test/native/generic_fn_to_string_specialize.march`) but did not remove THIS
+file, so the todo sat open for a bug that no longer existed. Removing it is all
+that happened here.
 
-Verified: `examples/csv_example.march` interpreted and compiled now produce
-byte-identical output, with zero `#<tag:` occurrences.
-
-The note's closing suggestion — that `examples/` is not covered by the
-compiled-parity suites — still stands and is NOT addressed here. The new
-coverage is `test/native/to_string_ctor_names.march`, a purpose-built parity
-golden; the examples directory remains uncovered.
+Recording the correction rather than quietly deleting the file, because the
+first version of this note claimed the constructor-name table
+(`specs/progress/2026-09-08-compiled-to-string-adt-ctor-names.md`) closed it.
+That was wrong, and wrong in an avoidable way: the example was observed working
+and the working state credited to the change in hand, with no pre-fix control
+run to establish it had ever been broken at that base. It had not been — the
+mono retry was already in the base commit. The two are not even related: the
+example's `to_string(row)` resolves to `Show$List.show`, which never reaches
+the constructor table.
