@@ -10672,6 +10672,121 @@ let test_compiled_file_open_err_is_real_fileerror () =
       true
       (compiled_out = interp_out || compiled_out = "#<tag:0>")
 
+(* Regression (todo 2026-08-08-file-dir-builtins-bare-string-errno-fileerror):
+   the sibling follow-up to test_compiled_file_open_err_is_real_fileerror
+   above.  Twelve more file_*/dir_* runtime builtins are typed
+   Result(_, FileError) by the typechecker but each returned Err(<bare
+   march_string>) from the C runtime's mk_err_errno(), so a compiled program
+   destructuring the Err payload read a march_string header as if it were a
+   FileError cell.
+
+   Beyond the representation, the *tag* has to be right per call site: the
+   interpreter does not use one errno mapping for every builtin (see the
+   per-builtin `with` arms in lib/eval/eval_builtins.ml and
+   lib/eval/eval_net.ml's file_error_of_unix / file_error_of_sys), so a
+   sweep that routed every site through a single helper would look correct
+   and still report the wrong error kind.  Each case below therefore pins
+   the exact FileError constructor, and the table deliberately includes the
+   non-NotFound mappings that a copy-paste sweep would get wrong:
+   EISDIR -> IsDirectory (file_write onto a directory), ENOTEMPTY ->
+   NotEmpty (dir_rmdir on a non-empty directory), and the always-IoError
+   builtins (file_copy, file_rename, dir_mkdir, dir_mkdir_p).
+
+   All thirteen cases live in one March program so the whole table costs a
+   single compile.  Interpreted output is the oracle: it prints the friendly
+   ctor form (NotFound("...")).  Compiled Show cannot resolve the *name* of
+   the bare, unqualified "FileError" type these builtins are declared with
+   -- a separate, still-open gap noted in the same todo -- so it prints
+   "#<tag:N>"; that N is exactly the assertion we want, since it is the
+   cell's real tag under stdlib/file.march's declaration order (NotFound=0,
+   Permission=1, IsDirectory=2, NotEmpty=3, IoError=4).  Pre-fix, the
+   compiled line was the raw errno string leaking through a misread
+   march_string, which matches neither. *)
+let test_compiled_file_dir_err_are_real_fileerrors () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_filedirerr" "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
+  let write_file p = let oc = open_out p in output_string oc "x"; close_out oc in
+  (* A non-empty directory (dir_rmdir -> ENOTEMPTY) that doubles as the
+     EISDIR target for file_write. *)
+  let full = Filename.concat tmp "full" in
+  Unix.mkdir full 0o755;
+  write_file (Filename.concat full "child");
+  (* A regular file, so dir_mkdir_p walks into it and gets ENOTDIR. *)
+  let plain = Filename.concat tmp "plain" in
+  write_file plain;
+  let missing       = Filename.concat tmp "no_such_entry" in
+  let under_missing = Filename.concat tmp "no_such_dir/deep" in
+  let under_plain   = Filename.concat plain "sub" in
+  let q s = "\"" ^ s ^ "\"" in
+  (* (label, March expression, expected ctor, expected FileError tag) *)
+  let cases = [
+    ("file_read on a missing path",        Printf.sprintf "file_read(%s)" (q missing),                "NotFound",    0);
+    ("file_write under a missing dir",     Printf.sprintf "file_write(%s, \"x\")" (q under_missing),  "NotFound",    0);
+    ("file_write onto a directory",        Printf.sprintf "file_write(%s, \"x\")" (q full),           "IsDirectory", 2);
+    ("file_append under a missing dir",    Printf.sprintf "file_append(%s, \"x\")" (q under_missing), "NotFound",    0);
+    ("file_delete on a missing path",      Printf.sprintf "file_delete(%s)" (q missing),              "NotFound",    0);
+    ("file_copy from a missing source",
+       Printf.sprintf "file_copy(%s, %s)" (q missing) (q (Filename.concat tmp "cpdst")),              "IoError",     4);
+    ("file_rename from a missing source",
+       Printf.sprintf "file_rename(%s, %s)" (q missing) (q (Filename.concat tmp "rndst")),            "IoError",     4);
+    ("file_stat on a missing path",        Printf.sprintf "file_stat(%s)" (q missing),                "NotFound",    0);
+    ("dir_list on a missing path",         Printf.sprintf "dir_list(%s)" (q missing),                 "NotFound",    0);
+    ("dir_mkdir under a missing parent",   Printf.sprintf "dir_mkdir(%s)" (q under_missing),          "IoError",     4);
+    ("dir_mkdir_p under a regular file",   Printf.sprintf "dir_mkdir_p(%s)" (q under_plain),          "IoError",     4);
+    ("dir_rmdir on a missing path",        Printf.sprintf "dir_rmdir(%s)" (q missing),                "NotFound",    0);
+    ("dir_rmdir on a non-empty directory", Printf.sprintf "dir_rmdir(%s)" (q full),                   "NotEmpty",    3);
+  ] in
+  let src = Filename.concat tmp "filedirerr.march" in
+  let oc = open_out src in
+  output_string oc "mod FileDirErrRegress do\n";
+  output_string oc "  needs IO.FileSystem\n";
+  output_string oc "  needs IO.Console\n";
+  output_string oc "  fn main(_cap_console : Cap(IO.Console), _cap_fs : Cap(IO.FileSystem)) do\n";
+  List.iter (fun (_, expr, _, _) ->
+    Printf.fprintf oc
+      "    match %s do\n    Ok(_) -> println(\"unexpected-ok\")\n    Err(e) -> println(to_string(e))\n    end\n"
+      expr) cases;
+  output_string oc "  end\nend\n";
+  close_out oc;
+  let split out = String.split_on_char '\n' out |> List.map String.trim in
+  let (interp_rc, interp_out) =
+    run_capture_rc (Printf.sprintf "%s %s" (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check int) "interpreter runs the file_*/dir_* failure program cleanly" 0 interp_rc;
+  let interp_lines = split interp_out in
+  Alcotest.(check int) "interpreter printed one line per case"
+    (List.length cases) (List.length interp_lines);
+  (* The interpreter is the oracle for the expected constructor: if it does
+     not agree with the table, the table (not the runtime) is wrong, and the
+     compiled check below would be measuring nothing. *)
+  List.iter2 (fun (label, _, ctor, _) line ->
+    Alcotest.(check string)
+      (Printf.sprintf "interpreted %s yields %s" label ctor)
+      ctor
+      (match String.index_opt line '(' with
+       | Some i -> String.sub line 0 i
+       | None -> line)) cases interp_lines;
+  let bin = Filename.concat tmp "filedirerrbin" in
+  match compile_march_or_skip ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let (run_rc, compiled_out) = run_capture_rc (Filename.quote bin) in
+    Alcotest.(check int)
+      "compiled file_*/dir_* failure program exits 0 (no misread FileError cell)"
+      0 run_rc;
+    let compiled_lines = split compiled_out in
+    Alcotest.(check int) "compiled printed one line per case"
+      (List.length cases) (List.length compiled_lines);
+    List.iter2 (fun ((label, _, ctor, tag), interp_line) compiled_line ->
+      Alcotest.(check bool)
+        (Printf.sprintf
+           "compiled %s builds a real FileError cell tagged %d (%s), not a misread march_string (got %S)"
+           label tag ctor compiled_line)
+        true
+        (compiled_line = interp_line
+         || compiled_line = Printf.sprintf "#<tag:%d>" tag))
+      (List.combine cases interp_lines) compiled_lines
+
 (* Regression (P0, perceus.ml same_arity): the FBIP arity check compared a
    TCon's TYPE-PARAMETER count against the new constructor's FIELD count.  A
    dead binding's dec carries its raw declared type, so a dead 1-field
@@ -14441,6 +14556,8 @@ let stdlib_suites =
           test_compiled_dual_position_owned_borrowed;
         Alcotest.test_case "file_open on missing path: Err carries a real FileError NotFound ctor cell (compiled)" `Slow
           test_compiled_file_open_err_is_real_fileerror;
+        Alcotest.test_case "file_*/dir_* Err payloads are real FileError cells with the right tag, parity (compiled)" `Slow
+          test_compiled_file_dir_err_are_real_fileerrors;
         Alcotest.test_case "FBIP same_arity: dead 1-field cell NOT reused for 5-field ctor, parity (compiled)" `Slow
           test_compiled_fbip_arity_no_overflow;
         Alcotest.test_case "actor niche msg + run_until_idle + kill: no SIGSEGV, parity (compiled)" `Slow
