@@ -71,7 +71,8 @@ let rec describe = function
   | Record -> "a record is allocated here"
   | Update -> "a record update allocates a new record here"
   | Closure -> "a closure is allocated here"
-  | Builtin ("++" | "string_concat" | "string_concat3") -> "string concatenation"
+  | Builtin ("++" | "string_concat" | "string_concat3" | "string_concat_n") ->
+    "string concatenation"
   | Builtin b -> Printf.sprintf "`%s` allocates" b
   | FloatBox -> "a Float is boxed here (it crosses an erased slot)"
   | AggBox t ->
@@ -108,7 +109,9 @@ let named_builtin_allocates : Builtin_name.t -> bool = function
   | Builtin_name.Vault_drop | Builtin_name.Vault_get | Builtin_name.Vault_incr
   | Builtin_name.Vault_ns_drop | Builtin_name.Vault_ns_get | Builtin_name.Vault_ns_set
   | Builtin_name.Vault_push_capped | Builtin_name.Vault_put_new | Builtin_name.Vault_set
-  | Builtin_name.Vault_set_ttl | Builtin_name.Vault_update -> true
+  | Builtin_name.Vault_set_ttl | Builtin_name.Vault_update
+  (* Allocates exactly one result string, whatever its arity. *)
+  | Builtin_name.String_concat_n -> true
 
 (* Non-allocating builtins that are NOT codegen-dispatched through
    [Builtin_name] (they go through the generic runtime-call fallback or are
@@ -493,7 +496,9 @@ let named_builtin_retains : Builtin_name.t -> bool = function
   | Builtin_name.Task_await | Builtin_name.Task_await_unwrap
   | Builtin_name.Task_cancel | Builtin_name.Task_cancel_by_id
   | Builtin_name.Task_yield
-  | Builtin_name.Vault_drop | Builtin_name.Vault_ns_drop -> false
+  | Builtin_name.Vault_drop | Builtin_name.Vault_ns_drop
+  (* Borrows every part and copies the bytes out; keeps no reference. *)
+  | Builtin_name.String_concat_n -> false
 
 let builtin_retains (name : string) : bool =
   match Builtin_name.of_string (base name) with

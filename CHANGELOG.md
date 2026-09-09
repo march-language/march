@@ -54,6 +54,16 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **String interpolation is linear at every operand size.** A four-or-more
+  operand interpolation now compiles to a single `string_concat_n` that sums
+  every part's length once, allocates once, and copies each byte once, instead
+  of a fold of three-way concats that re-copied the accumulated prefix at every
+  step. That fold was quadratic with large operands: with 4 KB operands, 32 of
+  them went from 0.54s to 0.06s. Short operands, the case the fold was chosen
+  for, got faster too rather than regressing, from 0.23s to 0.07s at the same
+  count. Nothing changes below four operands, where a single concat is already
+  one allocation and one copy.
+
 - **Tail-recursion-modulo-cons is now on by default.** A recursive call that is
   the direct argument of a constructor in tail position — the natural way to
   write `map`, `filter` or a tree rebuild — compiles to a loop that reuses list
