@@ -1999,6 +1999,12 @@ typedef struct {
                                   means "never crashed yet" */
 } march_sup_child;
 
+/* march_actor_meta.drain_deadline_ms while a stop is claimed but not yet
+ * armed. Distinct from every real deadline (which is a march_now_ms() value,
+ * or -1 for `shutdown infinity`) so the receiving loop can tell "a stop is in
+ * progress, keep working" from "your deadline has passed, stop now". */
+#define MARCH_DRAIN_NOT_ARMED INT64_MIN
+
 /* Per-actor scheduler metadata.  Stored in a side table keyed by actor
  * pointer so the actor object layout (and codegen) are unaffected. */
 typedef struct march_actor_meta {
@@ -2047,6 +2053,9 @@ typedef struct march_actor_meta {
      * deadline means `shutdown infinity`: drain to empty however long it
      * takes. See specs/todos/2026-08-12-graceful-shutdown-and-drain.md. */
     _Atomic int                  draining;
+    /* MARCH_DRAIN_NOT_ARMED until march_actor_stop has finished tearing down
+     * this actor's children and computed its own deadline. The receive loop
+     * must NOT exit while it reads that value — see the gate there. */
     _Atomic int64_t              drain_deadline_ms;
     march_cleanup_node         *cleanup_head; /* Cleanup callbacks (most recent first) */
     march_monitor_node         *monitor_head; /* Monitors watching this actor   */
@@ -3141,10 +3150,21 @@ static void actor_green_thread(void *arg) {
          * returns MARCH_RECV_NO_MSG, and the loop breaks below into the same
          * normal death. Same outcome, one iteration earlier. */
         if (self && atomic_load_explicit(&meta->draining, memory_order_acquire)) {
-            if (march_sched_mbox_count(self) == 0) break;
             int64_t deadline = atomic_load_explicit(&meta->drain_deadline_ms,
                                                     memory_order_relaxed);
-            if (deadline >= 0 && march_now_ms() >= deadline) {
+            /* A claimed-but-not-yet-armed stop means march_actor_stop is still
+             * stopping this actor's CHILDREN, and it yields while doing so, so
+             * this loop really does get to run in that window. Exiting here
+             * would be wrong twice over: the queue this stop exists to drain
+             * would be discarded on an empty-mailbox check that has not been
+             * asked for yet, and do_actor_death could free the actor struct
+             * that the teardown loop is still reading child pids out of.
+             * Keep serving until the deadline is armed. */
+            if (deadline == MARCH_DRAIN_NOT_ARMED) {
+                /* fall through to the normal receive below */
+            } else if (march_sched_mbox_count(self) == 0) {
+                break;
+            } else if (deadline >= 0 && march_now_ms() >= deadline) {
                 if (getenv("MARCH_SUP_TRACE"))
                     fprintf(stderr, "march: drain deadline reached, %lld message(s)"
                             " discarded\n", (long long)march_sched_mbox_count(self));
@@ -4400,6 +4420,13 @@ int64_t march_actor_stop(void *actor, int64_t timeout_ms) {
     if (!IS_HEAP_PTR(actor) || !actor_alive_load(actor)) return 0;
     march_actor_meta *meta = find_meta(actor);
     if (!meta) return 0;
+
+    /* Park the deadline in its not-yet-armed state BEFORE publishing
+     * `draining`, so the actor's own loop can never observe a stale 0 (which
+     * reads as "your deadline passed") in the window between the claim below
+     * and the real deadline being computed after the child teardown. */
+    atomic_store_explicit(&meta->drain_deadline_ms, MARCH_DRAIN_NOT_ARMED,
+                          memory_order_relaxed);
 
     /* Claim the transition. A second stop on an actor already draining is a
      * no-op rather than a deadline extension: two callers racing must not be
