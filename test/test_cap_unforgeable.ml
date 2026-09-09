@@ -151,6 +151,109 @@ end|} in
     "Cap(IO.Console) -> Cap(IO.FileWrite) is rejected: a sibling is not a parent"
     true (has_errors ctx)
 
+(* ── R3 under return-type dispatch (2026-09-09) ───────────────────────────
+
+   `from_json` return-type-directed dispatch landed, and the design note that
+   tracked it says plainly what that changes: what limited the blast radius of
+   `from_json`'s unconstrained type was that it could not actually PRODUCE a
+   value at run time. Now it can. The guard
+   ([Typecheck_caps.check_json_cap_sites]) is what stands between a
+   compile-clean program and a working capability forge, and the dispatch
+   resolution is written INSIDE that guard's clean branch, on the same solved
+   type, so a target can never be derived from a type the check did not see.
+
+   The corpus witnesses (reject/t143, t147, t155) pin the guard. These pin it
+   in the configuration that only exists now — several `derive Json` types in
+   scope, so dispatch is live rather than inert — and assert the DIAGNOSTIC,
+   not merely that something failed. That distinction is not pedantry here:
+   [typecheck] checks a module with no stdlib in scope, so a test written with
+   `Json.parse` in it passes on the unknown-name error alone and would keep
+   passing with the capability check deleted. *)
+
+(* The type and FIELD names below are deliberately distinctive (`FjdAlpha`,
+   `fjd_alpha`) rather than the obvious `A` / `a`. These tests share a process
+   with the rest of run_compiler, and some state outlives one [typecheck] call:
+   an earlier module declaring the structural record `{ a : Int }` changes the
+   diagnostic a LATER, unrelated test gets for its own same-name type collision
+   (test_compiler.ml's "same-name type collision" case, which then loses its
+   explanatory note and fails). Measured: with `type A = { a : Int }` here the
+   suite fails at that case and passes when run alone; renaming clears it. That
+   leak predates this work -- it reproduces with the dispatch recording
+   compiled out -- and is filed as
+   specs/todos/2026-09-09-typecheck-record-state-leaks-across-checks.md. Until
+   it is fixed, a new test that declares a plainly-named record is a landmine
+   for whatever runs after it. *)
+
+let errors_mentioning ctx needle =
+  List.filter (fun d ->
+      d.March_errors.Errors.severity = March_errors.Errors.Error
+      && (try
+            ignore (Str.search_forward (Str.regexp_string needle)
+                      d.March_errors.Errors.message 0);
+            true
+          with Not_found -> false))
+    (March_errors.Errors.sorted ctx)
+
+(* Two Json derives in scope, so the dispatch machinery is live, and a result
+   annotated straight to a capability. *)
+let test_forge_direct_cap_result_with_dispatch_live () =
+  let ctx = typecheck {|mod ForgeDirect do
+  needs IO
+  type FjdAlpha = { fjd_alpha : Int }
+  type FjdBeta = { fjd_beta : Int }
+  derive Json for FjdAlpha
+  derive Json for FjdBeta
+  fn main(cap : Cap(IO)) do
+    let forged : Cap(IO) = from_json("{}")
+    println("forged")
+  end
+end|} in
+  Alcotest.(check bool)
+    "from_json to a bare Cap is refused, and refused AS a forge, with \
+     dispatch resolvable"
+    true (errors_mentioning ctx "cannot be deserialized" <> [])
+
+(* The capability is not the result type — it is a FIELD of it, and the type
+   carries no `derive Json`, so the desugar-time refusal never fires and this
+   rests entirely on the type-level sweep. A named record solves structurally
+   to a TRecord and [cap_in_solved_ty] walks field types, which is why this is
+   caught; a sweep that only looked at the head constructor would let it
+   through — and the head is exactly what the new dispatch resolution reads. *)
+let test_forge_cap_hidden_in_a_record_field () =
+  let ctx = typecheck {|mod ForgeHidden do
+  needs IO
+  type FjdAlpha = { fjd_alpha : Int }
+  type FjdHolder = { fjd_cap : Cap(IO), fjd_n : Int }
+  derive Json for FjdAlpha
+  fn main(cap : Cap(IO)) do
+    let h : FjdHolder = from_json("{}")
+    println("forged")
+  end
+end|} in
+  Alcotest.(check bool)
+    "a capability reached through a record field is refused as a forge"
+    true (errors_mentioning ctx "cannot be deserialized" <> [])
+
+(* The feature itself, asserted as SILENCE: two derives in scope and two
+   decodes at two different types must typecheck clean. Without this, the two
+   refusals above are equally satisfied by a check that refuses everything. *)
+let test_resolvable_dispatch_is_accepted () =
+  let ctx = typecheck {|mod DispatchClean do
+  needs IO
+  type FjdAlpha = { fjd_alpha : Int }
+  type FjdBeta = { fjd_beta : Int }
+  derive Json for FjdAlpha
+  derive Json for FjdBeta
+  fn main(cap : Cap(IO)) do
+    let x : FjdAlpha = from_json("{}")
+    let y : FjdBeta = from_json("{}")
+    println("both")
+  end
+end|} in
+  Alcotest.(check bool)
+    "two cap-free decodes at two different types raise no forge diagnostic"
+    true (errors_mentioning ctx "cannot be deserialized" = [])
+
 let tests =
   [ Alcotest.test_case "type-decl capability counts as a use" `Quick
       test_type_decl_position_counts_as_a_use;
@@ -162,4 +265,10 @@ let tests =
       test_attenuation_narrowing_is_accepted;
     Alcotest.test_case "attenuation: widening rejected" `Quick
       test_attenuation_widening_is_rejected;
+    Alcotest.test_case "forge: bare Cap result, dispatch live" `Quick
+      test_forge_direct_cap_result_with_dispatch_live;
+    Alcotest.test_case "forge: Cap hidden in a record field" `Quick
+      test_forge_cap_hidden_in_a_record_field;
+    Alcotest.test_case "resolvable from_json dispatch is accepted" `Quick
+      test_resolvable_dispatch_is_accepted;
   ]

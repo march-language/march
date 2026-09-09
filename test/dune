@@ -7086,6 +7086,39 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; raw and unescaped (XSS), tag-2 ADTs walked field 0 as a cons list (SIGSEGV).
 ; The interpreter was always correct, so .expected is the interpreter's output
 ; and this rule is an interpreter/compiled parity check.
+; ── `from_json` return-type-directed dispatch with 2+ derive Json ────────
+; `from_json` dispatches on its RESULT type, so nothing at the call site's
+; values distinguishes the impls. Interpreted, `derive Json` bound the bare
+; name and the LAST type to derive Json owned it, so earlier types decoded
+; with the wrong decoder and returned a DecodeError indistinguishable from bad
+; input; compiled, the same program failed to build with "ambiguous
+; interface-method call". The typechecker now resolves the target per call
+; site and both backends read that one answer. .expected is the interpreter's
+; output, so this rule is an interpreter/compiled parity check.
+(rule
+ (targets native_from_json_dispatch native_from_json_dispatch.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (source_tree ../stdlib)
+       (file native/from_json_dispatch.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_from_json_dispatch
+        native/from_json_dispatch.march)
+   (with-stdout-to native_from_json_dispatch.out
+        (system "./native_from_json_dispatch")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/from_json_dispatch.expected native_from_json_dispatch.out)))
+
 ; ── Compiled `to_string`/`println` on a user ADT renders the constructor ──
 ; A boxed ADT cell carries a per-type tag and nothing else, so the type-erased
 ; `march_value_to_string` printed `#<tag:N>` for every user ADT.  The
@@ -7723,12 +7756,10 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; `dune runtest` instead of waiting for someone to remember to run the file
 ; by hand.
 ;
-; Two of the 37 are deliberately NOT included:
-;   - test_island_bridges.march: 7 of its tests fail due to a genuine,
-;     tracked compiler bug (derive Json's `from_json` dispatch is broken
-;     for the auto-generated island-bridge feature in BOTH the interpreted
-;     and compiled paths -- not test-file drift). See
-;     specs/todos/2026-08-12-island-bridge-from-json-broken.md.
+; One of the 37 is deliberately NOT included (it was two until 2026-09-09,
+; when `from_json` return-type dispatch landed and test_island_bridges.march
+; -- held out because 7 of its tests exercised a feature that could not work
+; in either execution path -- went green at 161/161 and was wired in below):
 ;   - test_properties.march: passes, but its 76 Check.all property runs are
 ;     extremely slow under the tree-walking interpreter; wired separately
 ;     below under its own alias so it does not block the default `runtest`.
@@ -7737,6 +7768,11 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_actor.march))
  (action (run %{exe:../bin/main.exe} test stdlib/test_actor.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_island_bridges.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_island_bridges.march)))
 
 (rule
  (alias runtest)

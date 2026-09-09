@@ -1,7 +1,21 @@
-# `from_json` return-type dispatch — design (future work, not scheduled)
+# `from_json` return-type dispatch — design (implemented 2026-09-09)
 
-**Status:** draft, **not part of any active plan**. Recorded so the bug is
-tracked and scoped, not lost. Do not start without a fresh scoping pass.
+**Status: IMPLEMENTED 2026-09-09.** Kept as the problem statement and the
+record of the options weighed; it is no longer a description of current
+behaviour. What shipped, and how the capability guard was preserved, is in
+`specs/progress/2026-09-09-from-json-return-type-dispatch.md`.
+
+The question this note said a real design pass must answer first — "does the
+typechecker already know the concrete `T` at each `from_json` call site in a
+form the desugar/mono pipeline can act on before codegen" — turned out to have
+the answer yes, and through machinery that already existed: the DEFERRED
+end-of-module capability sweep holds each call's instantiated arrow, solved.
+Resolution rides that sweep, which is also what keeps the two decisions
+inseparable.
+
+The "Interim guidance" section below is obsolete: bare `from_json` now resolves
+per call site, and the top-level-`let`-after-each-derive convention it
+describes is no longer needed.
 
 **Date:** 2026-07-31
 

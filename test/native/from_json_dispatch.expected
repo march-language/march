@@ -1,0 +1,7 @@
+wire p={"x":3,"y":4}
+wire l={"name":"hi"}
+wire c={"tag":"Gamma","0":"g"}
+Point(3, 4)
+Label(hi)
+Choice=Gamma("g")
+again Point(3, 4)

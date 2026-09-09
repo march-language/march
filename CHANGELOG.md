@@ -65,6 +65,21 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`from_json` decodes to the type the caller asked for.** It dispatches on
+  its RESULT type, which no value at the call site reveals, so with two or
+  more `derive Json` types in one module the interpreter ran whichever
+  decoder was derived LAST - every earlier type's decode failed with an error
+  indistinguishable from bad input - and the compiled backend refused to
+  build the program at all. The typechecker now resolves the target per call
+  site and both backends follow it. A call whose result type nothing pins is
+  still reported rather than guessed.
+
+- **`derive Json`'s island bridges work.** The auto-generated `update_json`
+  and `render_json` are generated only for a module with both a `State` and a
+  `Msg` deriving Json, which is exactly the case the bug above broke, so
+  `update_json` silently returned its input unchanged. Its 161-test suite is
+  now part of the test run.
+
 - **A missing `Show` impl is no longer reported as an ambiguity.**
   `println(x)` on a type with no `Show` failed to compile with "ambiguous
   interface-method call to `show`: 20 implementations are in scope", listing

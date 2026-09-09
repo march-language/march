@@ -82,3 +82,29 @@ file of the original 37 not included in the new `test/dune` runtest rule, to
 avoid landing a red (or falsely-green) CI check for a feature that does not
 work. Its other 154 tests (everything except the 7 `update_json`/`render_json`
 behavior tests) pass and were left as-is.
+
+---
+
+## Resolved 2026-09-09
+
+Fixed by `from_json` return-type-directed dispatch — see
+`specs/progress/2026-09-09-from-json-return-type-dispatch.md`. The note above
+scoped a bridge-local workaround and observed that it would fix only the
+interpreted path; the shared dispatch mechanism fixes both, so no
+bridge-specific decoding change was needed.
+
+One bridge-specific change WAS needed, and it is the note's own observation
+turned into a requirement. `gen_island_bridges` stamped a single span on every
+node it generated, so `update_json`'s two `from_json` calls were
+indistinguishable to the span-keyed dispatch table: the second overwrote the
+first and both decoded as the same type — the original bug, reproduced through
+the new mechanism. The generated declarations now pass through
+`Desugar_derive.respan_derived_decl`.
+
+Verified: `update_json("{\"count\":5}", "{\"tag\":\"Increment\"}")` returns
+`{"count":6}`, byte-identical interpreted and compiled.
+
+`test/stdlib/test_island_bridges.march` — the one file of the original 37 left
+unwired pending this fix — now passes 161/161 and is wired into `test/dune`.
+Its hold-out note there has been replaced with a line recording why it was
+held and when it went green.
