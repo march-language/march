@@ -612,15 +612,35 @@ constructor recursion over a 500k-element list:
 ### The existing benchmarks cannot see this change, and that is the point
 
 `bench/list_producers.march`, `bench/list_ops.march`, `bench/tree_transform.march`
-and `bench/binary_trees.march` emit **byte-identical LLVM IR** with TRMC on and
-off (`--emit-llvm` diff: zero lines on all four). TRMC does transform 13-14
-functions in each link closure, but they are stdlib helpers those benchmarks
-never call, and DCE drops them.
+and `bench/binary_trees.march` emit **structurally identical LLVM IR** with TRMC
+on and off. TRMC does transform 13-14 functions in each link closure, but they
+are stdlib helpers those benchmarks never call, and DCE drops them.
 
-So the flip is a no-op for existing code — no regression is possible on it —
-and a timing A/B on these four benchmarks would have been vacuous. This is the
-file's own "the compiler feature alone buys nothing for the stdlib" prediction,
-confirmed by construction rather than by a stopwatch.
+So the flip is a no-op for existing code and no regression is possible on it.
+This is the file's own "the compiler feature alone buys nothing for the stdlib"
+prediction, confirmed structurally rather than by a stopwatch — which also makes
+it immune to machine load, unlike a timing comparison.
+
+**Read "structurally identical" precisely.** The raw IR is NOT byte-identical:
+84, 98 and 14 lines differ on `list_producers`, `list_ops` and `tree_transform`
+respectively (`binary_trees` is byte-identical). Every one of those lines is a
+fresh-name suffix — `%$t389_i14489` against `%$t389_i14452`, `$lam30064$3624`
+against `$lam30064$3620` — because running the transform consumes values from
+the shared downstream naming counters and shifts every later number, even in
+functions it does not touch. Normalising `_i<N>` and `$<N>` suffixes brings all
+four to zero differing lines.
+
+The normaliser is not hiding the change: applied to a program TRMC actually
+transforms, the same normalisation still leaves 933 differing lines out of 945.
+
+**A correction, and the mistake worth not repeating.** An earlier revision of
+this section claimed all four were byte-identical, from a `--emit-llvm` diff
+that compared two EMPTY files: `--emit-llvm` writes to `<source>.ll`, it does
+not write IR to stdout, so redirecting stdout captures nothing and `diff` of two
+empty files reports no difference. The exit status was 0 and the output looked
+exactly like a successful clean comparison. **Check that a diff's inputs are
+non-empty before reporting that they match** — a vacuous comparison and a
+genuine match are indistinguishable from the diff alone.
 
 Collecting the stdlib win is the separate follow-up item
 `specs/todos/2026-09-09-rewrite-stdlib-list-producers-into-natural-style.md`.

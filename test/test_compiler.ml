@@ -4185,15 +4185,21 @@ let test_nested_actor_bare_spawn_from_entry_is_charged () =
     true (has_error_with ctx "granted `Cap(IO.Console)`")
 
 (* TRMC: constructor-wrapped structural recursion — `Succ(bump(k))` — is the
-   shape TRMC transforms, but `Trmc.enabled` is false by default, so on the
-   default pipeline this function DOES keep O(depth) stack and DOES overflow on
-   deep input (verified: 400k-element repro exits 138 without `--trmc`, 0 with
-   it).  An earlier revision of this test asserted the opposite — it pinned the
-   promise "the compiler turns it into a loop", which was written ahead of a
-   default flip that never landed.  The warning must therefore describe the
-   transformation as OPT-IN and must not promise it happens automatically.
-   The detection itself is unchanged: the warning still fires (the typechecker
-   has no TIR-level eligibility information), only the wording moved. *)
+   shape TRMC transforms, and since 2026-09-09 the transform is ON by default,
+   so this function compiles to a loop.
+
+   This test has now pinned a wrong message twice, in opposite directions: first
+   the unconditional promise "the compiler turns it into a loop" (false while
+   TRMC was opt-in), then "off by default; enable it with `--trmc`" (false once
+   the default flipped, and worse, because it tells the user to work around a
+   solved problem). The lesson is that a verdict is the wrong thing to assert
+   here at all — the typechecker has no TIR-level eligibility information and
+   genuinely cannot tell which case a given function is.
+
+   So this pins the CONDITION: the message must name the constructor-argument
+   shape, must say TRMC is on by default, must still warn about O(depth) stack
+   for the other case, and must NOT tell the user to pass `--trmc`. The
+   detection itself is unchanged; the warning still fires either way. *)
 let test_structural_recursion_warning_states_trmc_is_opt_in () =
   let ctx = typecheck {|mod W do
   type Nat = Zero | Succ(Nat)
@@ -4213,17 +4219,23 @@ end|} in
     ) diags
   in
   Alcotest.(check bool)
-    "the warning does not promise an automatic loop"
+    "the warning does not promise an unconditional automatic loop"
     false (mentions "the compiler turns it into a loop");
   Alcotest.(check bool)
-    "the warning says deep input can overflow the stack"
+    "the warning still warns about O(depth) stack for the ineligible case"
     true (mentions "overflow the stack");
   Alcotest.(check bool)
-    "the warning names the opt-in flag that does perform the transformation"
-    true (mentions "`--trmc`");
+    "the warning states the condition under which the loop happens"
+    true (mentions "direct argument of a constructor in tail position");
   Alcotest.(check bool)
-    "the warning says that transformation is off by default"
-    true (mentions "off by default")
+    "the warning says the transformation is on by default"
+    true (mentions "on by default");
+  Alcotest.(check bool)
+    "the warning does NOT tell the user to enable an opt-in flag"
+    false (mentions "enable it with");
+  Alcotest.(check bool)
+    "the warning no longer claims the transformation is off by default"
+    false (mentions "off by default")
 
 (* ── Cap(IO.NetListen) body-scan enforcement (item 1380) ─────────────────
    tcp_listen / tcp_accept / http_server_listen are classified IO.NetListen in
