@@ -48,8 +48,14 @@ count (`MARCH_NUM_SCHEDULERS=1` changes nothing).
   further recovery means checking less often (e.g. unrolling the TRE loop or
   a check-every-N scheme), which re-opens the counter-cost question; not
   obviously worth it.
-- [ ] **Re-baseline `bench/RESULTS.md` against a post-preemption reference**
-  so the table stops implying a regression that is actually a feature cost.
+
+Trimmed 2026-09-09: the "re-baseline `bench/RESULTS.md`" bullet that used to
+sit here is done — `bench/RESULTS.md` (dated 2026-07-24) now explicitly
+documents the preemption-check cost against the old table throughout the
+fib/tree_transform/list_ops sections. The fib-gap bullet above is still open,
+confirmed still true as of 2026-09-09: `bench/RESULTS.md:495` itself says "A
+residual ~25% gap to the 2026-03-24 `fib` figure is still unexplained and
+tracked in `specs/todos.md`."
 
 > ⚠️ **Benchmark A/B methodology — the CAS artifact cache will lie to you.**
 > The first run of this experiment concluded "the reduction check costs

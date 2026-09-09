@@ -15,11 +15,19 @@ are what is left, all narrow.
   `DENY_NR`/`MARCH_CAP_DENY_*` pattern in `runtime/march_runtime.c`
   (`march_sandbox_install`) — NOT a new mechanism, contrary to how this was
   filed. The investigation doc has a near-complete code sketch. What's
-  actually blocking it: no Linux machine was available to verify, and more
-  importantly `specs/todos/2026-08-10-cap-sandbox-no-runtime-enforcement-ci.md`
-  — NOTHING in CI verifies any of this sandbox's runtime behavior today, on
-  either platform, so landing this without that job first would be another
-  plausible-looking-but-unverified diff. Land the CI job first.
+  actually blocking it: no Linux machine was available to verify.
+
+  **Unblocked 2026-09-08:** the other blocker, "land the CI job first," is
+  done — `specs/todos/2026-08-10-cap-sandbox-no-runtime-enforcement-ci.md`
+  landed as `test/test_cap_sandbox_runtime.ml`
+  (`specs/progress/2026-08-12-cap-sandbox-runtime-enforcement-ci.md`), which
+  verifies real syscall-level enforcement for the `IO.Network`/`IO.Process`/
+  `IO.FileWrite` deny classes on both Linux (seccomp-bpf) and macOS
+  (Seatbelt) as part of `scripts/run-tests.sh`. That file's own "Still open"
+  note names `IO.NetListen` and Landlock as the next classes to extend it
+  with when they land — i.e. this item's own remaining work, not a
+  prerequisite for it. `IO.NetListen` itself is NOT implemented here; a Linux
+  machine to verify against is still needed.
 
 - [ ] **`IO.FileRead` under the Linux self-sandbox needs Landlock — re-scoped
   2026-08-10, see `specs/2026-08-10-cap-tier5-investigation.md`.** Confirmed

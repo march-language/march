@@ -6398,6 +6398,35 @@ static void *mk_err_file(int tag, void *payload_str) {
     return mk_err(mk_file_error(tag, payload_str));
 }
 
+/* ── errno → FileError mappings ──────────────────────────────────────
+   The interpreter does NOT use one mapping for every file_ / dir_
+   builtin: each builtin in lib/eval/eval_builtins.ml classifies only the
+   errnos its own syscall can actually produce and falls back to IoError.
+   The helpers below mirror that split one-for-one.  Routing every site
+   through a single mapping would fix the representation bug while still
+   reporting the wrong error *kind*, which is harder to spot than the
+   original defect.  Reference: lib/eval/eval_net.ml's
+   file_error_of_unix / file_error_of_sys, plus the per-builtin `with`
+   arms in lib/eval/eval_builtins.ml. */
+
+/* IoError(<msg>) from a C string literal — for failures with no errno. */
+static void *mk_err_file_cstr(int tag, const char *msg) {
+    return mk_err_file(tag, march_string_lit(msg, (int64_t)strlen(msg)));
+}
+
+/* IoError(strerror(errno)) — mirrors `IoError(Unix.error_message err)`. */
+static void *mk_err_errno_io(void) {
+    return mk_err_file_cstr(FILEERR_IO_ERROR, strerror(errno));
+}
+
+/* IoError("<path>: <strerror>") — mirrors the interpreter's Sys_error
+   fallback, whose OCaml-formatted message carries the path. */
+static void *mk_err_errno_io_path(const char *path) {
+    char buf[1024];
+    snprintf(buf, sizeof(buf), "%s: %s", path, strerror(errno));
+    return mk_err_file_cstr(FILEERR_IO_ERROR, buf);
+}
+
 /* Map the current errno to a FileError, mirroring the interpreter's
    unix_error_to_file_error (lib/eval/eval.ml) for file_open: ENOENT ->
    NotFound(path), EACCES -> Permission(path), everything else ->
@@ -6412,6 +6441,52 @@ static void *mk_err_errno_file(const char *path) {
         const char *msg = strerror(errno);
         return mk_err_file(FILEERR_IO_ERROR, march_string_lit(msg, (int64_t)strlen(msg)));
     }
+    }
+}
+
+/* Full file_error_of_unix / file_error_of_sys mapping, used by the
+   read/write/append/delete family: ENOENT -> NotFound, EACCES|EPERM ->
+   Permission, EISDIR -> IsDirectory, ENOTEMPTY -> NotEmpty, else
+   IoError("<path>: <strerror>"). */
+static void *mk_err_errno_file_rw(const char *path) {
+    void *p = march_string_lit(path, (int64_t)strlen(path));
+    switch (errno) {
+    case ENOENT:    return mk_err_file(FILEERR_NOT_FOUND,    p);
+    case EACCES:
+    case EPERM:     return mk_err_file(FILEERR_PERMISSION,   p);
+    case EISDIR:    return mk_err_file(FILEERR_IS_DIRECTORY, p);
+    case ENOTEMPTY: return mk_err_file(FILEERR_NOT_EMPTY,    p);
+    default:        return mk_err_errno_io_path(path);
+    }
+}
+
+/* file_stat: ENOENT -> NotFound(path), else IoError(strerror). */
+static void *mk_err_errno_stat(const char *path) {
+    if (errno == ENOENT)
+        return mk_err_file(FILEERR_NOT_FOUND, march_string_lit(path, (int64_t)strlen(path)));
+    return mk_err_errno_io();
+}
+
+/* dir_list: ENOENT -> NotFound, EACCES -> Permission, ENOTDIR ->
+   IsDirectory, else IoError(strerror).  Note ENOTDIR (not EISDIR) maps to
+   IsDirectory here, matching the interpreter's dir_list arms. */
+static void *mk_err_errno_dir_list(const char *path) {
+    void *p = march_string_lit(path, (int64_t)strlen(path));
+    switch (errno) {
+    case ENOENT:  return mk_err_file(FILEERR_NOT_FOUND,    p);
+    case EACCES:  return mk_err_file(FILEERR_PERMISSION,   p);
+    case ENOTDIR: return mk_err_file(FILEERR_IS_DIRECTORY, p);
+    default:      return mk_err_errno_io();
+    }
+}
+
+/* dir_rmdir: ENOTEMPTY -> NotEmpty, ENOENT -> NotFound, else IoError. */
+static void *mk_err_errno_rmdir(const char *path) {
+    void *p = march_string_lit(path, (int64_t)strlen(path));
+    switch (errno) {
+    case ENOTEMPTY: return mk_err_file(FILEERR_NOT_EMPTY, p);
+    case ENOENT:    return mk_err_file(FILEERR_NOT_FOUND, p);
+    default:        return mk_err_errno_io();
     }
 }
 
@@ -6435,13 +6510,13 @@ static void *build_string_list(char **strs, int n) {
 void *march_file_read(void *path_ptr) {
     march_string *ps = (march_string *)path_ptr;
     FILE *f = fopen(ps->data, "rb");
-    if (!f) return mk_err_errno();
+    if (!f) return mk_err_errno_file_rw(ps->data);
     fseek(f, 0, SEEK_END);
     long len = ftell(f);
     fseek(f, 0, SEEK_SET);
-    if (len < 0) { fclose(f); return mk_err_cstr("ftell failed"); }
+    if (len < 0) { fclose(f); return mk_err_file_cstr(FILEERR_IO_ERROR, "ftell failed"); }
     char *buf = (char *)malloc((size_t)len + 1);
-    if (!buf) { fclose(f); return mk_err_cstr("out of memory"); }
+    if (!buf) { fclose(f); return mk_err_file_cstr(FILEERR_IO_ERROR, "out of memory"); }
     size_t n = fread(buf, 1, (size_t)len, f);
     fclose(f);
     buf[n] = '\0';
@@ -6454,10 +6529,10 @@ void *march_file_write(void *path_ptr, void *data_ptr) {
     march_string *ps = (march_string *)path_ptr;
     march_string *ds = (march_string *)data_ptr;
     FILE *f = fopen(ps->data, "wb");
-    if (!f) return mk_err_errno();
+    if (!f) return mk_err_errno_file_rw(ps->data);
     size_t w = fwrite(ds->data, 1, (size_t)ds->len, f);
     fclose(f);
-    if ((int64_t)w != ds->len) return mk_err_cstr("write failed");
+    if ((int64_t)w != ds->len) return mk_err_file_cstr(FILEERR_IO_ERROR, "write failed");
     return mk_ok_unit();
 }
 
@@ -6465,16 +6540,16 @@ void *march_file_append(void *path_ptr, void *data_ptr) {
     march_string *ps = (march_string *)path_ptr;
     march_string *ds = (march_string *)data_ptr;
     FILE *f = fopen(ps->data, "ab");
-    if (!f) return mk_err_errno();
+    if (!f) return mk_err_errno_file_rw(ps->data);
     size_t w = fwrite(ds->data, 1, (size_t)ds->len, f);
     fclose(f);
-    if ((int64_t)w != ds->len) return mk_err_cstr("write failed");
+    if ((int64_t)w != ds->len) return mk_err_file_cstr(FILEERR_IO_ERROR, "write failed");
     return mk_ok_unit();
 }
 
 void *march_file_delete(void *path_ptr) {
     march_string *ps = (march_string *)path_ptr;
-    if (remove(ps->data) != 0) return mk_err_errno();
+    if (remove(ps->data) != 0) return mk_err_errno_file_rw(ps->data);
     return mk_ok_unit();
 }
 
@@ -6482,9 +6557,10 @@ void *march_file_copy(void *src_ptr, void *dst_ptr) {
     march_string *src = (march_string *)src_ptr;
     march_string *dst = (march_string *)dst_ptr;
     FILE *in = fopen(src->data, "rb");
-    if (!in) return mk_err_errno();
+    if (!in) return mk_err_errno_io_path(src->data);
     FILE *out = fopen(dst->data, "wb");
-    if (!out) { fclose(in); return mk_err_errno(); }
+    /* fclose() may clobber errno, so classify before closing the source. */
+    if (!out) { void *e = mk_err_errno_io_path(dst->data); fclose(in); return e; }
     char buf[8192];
     size_t n;
     while ((n = fread(buf, 1, sizeof(buf), in)) > 0)
@@ -6497,7 +6573,7 @@ void *march_file_copy(void *src_ptr, void *dst_ptr) {
 void *march_file_rename(void *src_ptr, void *dst_ptr) {
     march_string *src = (march_string *)src_ptr;
     march_string *dst = (march_string *)dst_ptr;
-    if (rename(src->data, dst->data) != 0) return mk_err_errno();
+    if (rename(src->data, dst->data) != 0) return mk_err_errno_io_path(src->data);
     return mk_ok_unit();
 }
 
@@ -6505,7 +6581,7 @@ void *march_file_rename(void *src_ptr, void *dst_ptr) {
 void *march_file_stat(void *path_ptr) {
     march_string *ps = (march_string *)path_ptr;
     struct stat st;
-    if (stat(ps->data, &st) != 0) return mk_err_errno();
+    if (stat(ps->data, &st) != 0) return mk_err_errno_stat(ps->data);
     int kind_tag = S_ISREG(st.st_mode) ? 0 :
                    S_ISDIR(st.st_mode) ? 1 :
                    S_ISLNK(st.st_mode) ? 2 : 3;
@@ -6580,7 +6656,7 @@ void *march_file_read_chunk(void *handle_ptr, int64_t size) {
 void *march_dir_list(void *path_ptr) {
     march_string *ps = (march_string *)path_ptr;
     DIR *dir = opendir(ps->data);
-    if (!dir) return mk_err_errno();
+    if (!dir) return mk_err_errno_dir_list(ps->data);
     /* Collect entries into a dynamic array */
     char **names = NULL;
     int n = 0, cap = 0;
@@ -6616,19 +6692,19 @@ static int mkdir_p(const char *path) {
 
 void *march_dir_mkdir(void *path_ptr) {
     march_string *ps = (march_string *)path_ptr;
-    if (mkdir(ps->data, 0755) != 0 && errno != EEXIST) return mk_err_errno();
+    if (mkdir(ps->data, 0755) != 0 && errno != EEXIST) return mk_err_errno_io();
     return mk_ok_unit();
 }
 
 void *march_dir_mkdir_p(void *path_ptr) {
     march_string *ps = (march_string *)path_ptr;
-    if (mkdir_p(ps->data) != 0 && errno != EEXIST) return mk_err_errno();
+    if (mkdir_p(ps->data) != 0 && errno != EEXIST) return mk_err_errno_io();
     return mk_ok_unit();
 }
 
 void *march_dir_rmdir(void *path_ptr) {
     march_string *ps = (march_string *)path_ptr;
-    if (rmdir(ps->data) != 0) return mk_err_errno();
+    if (rmdir(ps->data) != 0) return mk_err_errno_rmdir(ps->data);
     return mk_ok_unit();
 }
 
@@ -6651,7 +6727,7 @@ static int rm_rf(const char *path) {
 
 void *march_dir_rm_rf(void *path_ptr) {
     march_string *ps = (march_string *)path_ptr;
-    if (rm_rf(ps->data) != 0) return mk_err_errno();
+    if (rm_rf(ps->data) != 0) return mk_err_errno_io();
     return mk_ok_unit();
 }
 
