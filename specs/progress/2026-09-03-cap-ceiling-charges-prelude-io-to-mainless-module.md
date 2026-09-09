@@ -1,4 +1,12 @@
-`[P2]` - [x] **The capability ceiling charges the prelude's `IO.Console` to a module with no `main`.**
+`[P2]` - [ ] **The capability ceiling charges the prelude's `IO.Console` to a module with no `main`.**
+
+> **REOPENED 2026-09-09.** The closure below is wrong: it verified
+> `ptype Box = Box(Int, Int)`, which does compile cleanly, while the shape
+> `forge/test/test_build_check.ml` exercises, `Box(Int, String)`, still fails
+> the ceiling on both macOS and Linux. Removing the `forge` workaround on the
+> strength of that check turned `test (ubuntu-24.04)` red on `main`. Tracking
+> continues in
+> `specs/todos/2026-09-09-cap-ceiling-charges-prelude-io-to-mainless-module.md`.
 
 Filed 2026-09-03, found while landing `@[no_alloc]`
 (`specs/progress/2026-09-03-allocation-contracts.md`); caught by CI on the
@@ -43,7 +51,7 @@ carried by prelude declarations for a main-less module, and check whether the
 `extra_root` branch in `Dce.root_names` (which only fires when no other root
 exists) is reached at all here.
 
-## Closed 2026-09-08
+## Closed 2026-09-08 — RETRACTED, see the banner above
 
 Re-ran the exact repro above against `origin/main` at `a9706580` (a freshly
 built `bin/main.exe`, not a cached one — see the worktree-stale-binary trap in
