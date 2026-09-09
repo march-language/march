@@ -1,5 +1,13 @@
 # Compiler bug — JS backend `Option`-of-ADT `==` uses reference equality, not structural equality (filed, not fixed, 2026-07-13)
 
+## Closed 2026-09-09
+
+Fixed in the same commit as the multi-head-fn JS fix, `46b919c7` ("Release
+hardening: JS structural =="), which added `test/native/option_adt_eq.march`
+and made `js_emit.ml` dispatch through `__eq_TypeName` for structural
+equality. Ran the fixture compiled `--target js` under `node`: output
+`eq/ne/eq/ne` matches `test/native/option_adt_eq.expected` exactly.
+
 
 - ❌ **Comparing an `Option(ADT)` with `==` on the JS target always evaluates
   `false`, even when both sides hold structurally identical values**, when

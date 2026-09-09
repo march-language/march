@@ -69,3 +69,17 @@ should assert on the "capability ceiling" text for the same reason.
 Fixtures restructured to the nested-module shape as part of the stage-D CI
 fix. This todo records the semantic finding and the assert-on-text
 recommendation, which is not yet done.
+
+## Closed 2026-09-09
+
+The assert-on-text recommendation landed too: `test/test_cap_ceiling.ml`'s
+`rejects` (line ~132) now does
+`Str.search_forward (Str.regexp_string "capability ceiling violation(s)") out 0`
+before passing, not just a non-zero-exit check, and `rejects_at_typecheck` /
+`rejects_naming` already pin exact expected text. `git log -S'capability
+ceiling violation(s)' -- test/test_cap_ceiling.ml` shows this landed in
+`4beef6de` (2026-08-14), three days after this todo was filed, described in
+that commit's message as reworking ceiling diagnostics. The semantic finding
+itself (entry-module ceiling violations are unexpressible after stage D) was
+never a bug — it's recorded above as a deliberate consequence — so with the
+recommendation done, nothing here remains actionable.
