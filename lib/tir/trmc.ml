@@ -1,9 +1,9 @@
-(** TRMC (tail-recursion-modulo-cons) eligibility analysis — Phase 1.
+(** TRMC (tail-recursion-modulo-cons): eligibility analysis AND the
+    destination-passing rewrite.
 
-    ANALYSIS ONLY: this module never rewrites the TIR.  It classifies every
-    self-recursive call in the module so we can measure how much TRMC would
-    actually buy before paying for the transformation (two new [Tir.expr]
-    nodes and the RC integration).  See
+    Both halves live here.  [analyze_module] classifies every self-recursive
+    call; [transform_module] rewrites the eligible ones into destination-passing
+    style using the [EAllocHole]/[ESetField] TIR nodes.  See
     [specs/todos/2026-08-07-trmc-tail-recursion-modulo-cons.md] for the staged
     plan and [Lorenzen & Leijen, ICFP'22] §2.4.1 for the technique.
 
@@ -320,6 +320,23 @@ let report (m : Tir.tir_module) : unit =
 
 let trmc_ctr = ref 0
 
+(** Reset the fresh-name counter.  Called at the top of every
+    [transform_module], so emitted TIR depends only on the module being
+    transformed and not on how many modules the process transformed before it.
+
+    Without this the counter is monotonic across calls, which makes a
+    function's [$trmcN] names a function of run order.  That is not cosmetic:
+    the CAS cache key is a digest of emitted code, so order-dependent names
+    make two builds of the same source hash differently, and it makes any
+    golden or snapshot over TRMC'd TIR fail depending on what ran first.
+    [Perceus.perceus] resets [_rc_fresh_ctr] at entry for exactly this reason.
+
+    Per-module (rather than cross-call like [Defun.lambda_counter]) is the
+    right granularity because [fresh_var] only mints FUNCTION-LOCAL variable
+    names: two modules both using [$trmc1] never collide, since the names
+    never escape the function body they are bound in. *)
+let reset_counter () = trmc_ctr := 0
+
 let fresh_var (ty : Tir.ty) : Tir.var =
   incr trmc_ctr;
   { Tir.v_name = Printf.sprintf "$trmc%d" !trmc_ctr; v_ty = ty; v_lin = Tir.Unr }
@@ -462,14 +479,15 @@ let transform_fn ?(on_decline = fun (_ : string) -> ())
 
 (** Whether the destination-passing transform runs.  A [ref] rather than an
     env-var read so the driver owns the decision and a CLI flag can set it;
-    [bin/main.ml] is the only writer.  Default OFF until the default flips
-    (see specs/plans/2026-08-10-trmc-on-by-default.md Task 10). *)
-let enabled : bool ref = ref false
+    [bin/main.ml] is the only writer.  Default ON since 2026-09-09;
+    [--no-trmc] disables it. *)
+let enabled : bool ref = ref true
 
 (** Apply TRMC across a module.  Gated on [enabled] (see [--trmc]). *)
 let transform_module ?(enabled = !enabled) (m : Tir.tir_module) : Tir.tir_module =
   if not enabled then m
   else begin
+    reset_counter ();
     let report = Sys.getenv_opt "MARCH_TRMC_REPORT" <> None in
     let out = List.concat_map (fun fn ->
       (* No silent caps: a function the ANALYSIS considers transformable but

@@ -52,6 +52,21 @@ git log is authoritative for exact commits.
   so an existing supervision tree's timing is unchanged. `jitter 0%` makes the
   delays exactly reproducible for tests.
 
+### Changed
+
+- **Tail-recursion-modulo-cons is now on by default.** A recursive call that is
+  the direct argument of a constructor in tail position — the natural way to
+  write `map`, `filter` or a tree rebuild — compiles to a loop that reuses list
+  cells in place, instead of one stack frame and one retained cell per element.
+  This is a correctness change as much as a speed one: such a function
+  previously overflowed the stack on a long list when compiled (a 500k-element
+  natural-style `map` exited 138), and now runs. On a 20k-element list mapped
+  2000 times it is 4.8x faster than the same source compiled without the
+  transform. `--no-trmc`, or `MARCH_NO_TRMC=1`, restores the old behaviour.
+  Existing code is unaffected: the stdlib's list producers are hand-written in
+  accumulator form, which the transform does not touch, so every benchmark in
+  `bench/` emits byte-identical code either way.
+
 ### Fixed
 
 - **`Actor.call`'s timeout is enforced in the interpreter.** It was bound and

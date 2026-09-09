@@ -426,7 +426,7 @@ jobs:
           eval $(opam env)
           dune fmt 2>&1 || true
 
-  # AddressSanitizer sweep, run TWICE on this runner (plain, then MARCH_TRMC=1).
+  # AddressSanitizer sweep over two corpora on this runner.
   # sanitize.sh covers two corpora: every specs/lang/golden/*.march, plus a
   # curated by-name list of test/native/*.march SIMD / NativeArray-narrow-width /
   # array-backed-Bytes programs — that second corpus was added 2026-08-20 because
@@ -455,17 +455,17 @@ jobs:
           MARCH_BIN="$PWD/_build/default/bin/main.exe" \
             ./specs/lang/golden/sanitize.sh
 
-      - name: AddressSanitizer gate — TRMC enabled
-        timeout-minutes: 15
-        run: |
-          eval $(opam env)
-          MARCH_BIN="$PWD/_build/default/bin/main.exe" \
-            MARCH_TRMC=1 ./specs/lang/golden/sanitize.sh
-
-  # Runs the full test suite with MARCH_TRMC=1 on its own fresh runner. It used to be
-  # a third phase inside sanitize-gate, but that confounded resource exhaustion (two
-  # ASAN sweeps already run on that runner) with the TRMC variable itself — failures
-  # were flaky/non-reproducible. A clean runner isolates whether TRMC is the cause.
+  # Runs the full test suite with TRMC DISABLED on its own fresh runner.
+  #
+  # This job used to run MARCH_TRMC=1. Since TRMC became the default (2026-09-09)
+  # that is what the ordinary `test` job already does, so the direction that
+  # needs its own coverage is the other one: --no-trmc is now the only escape
+  # hatch and nothing else exercises it over a whole suite run. MARCH_NO_TRMC=1
+  # is the env spelling of that flag (bin/main.ml).
+  #
+  # It stays a separate runner rather than a phase inside sanitize-gate, where
+  # it began: two ASAN sweeps already run there, which confounded resource
+  # exhaustion with the TRMC variable itself and made failures non-reproducible.
   trmc-suite:
     runs-on: ubuntu-24.04
     timeout-minutes: 50
@@ -486,12 +486,12 @@ jobs:
           dune shutdown 2>/dev/null || true
           dune build bin/main.exe
 
-      - name: Test suite with TRMC enabled
+      - name: Test suite with TRMC disabled
         timeout-minutes: 35
-        # Cold build + full test suite (~20 min of tests) with TRMC enabled.
+        # Cold build + full test suite (~20 min of tests) with TRMC turned off.
         run: |
           eval $(opam env)
-          MARCH_TRMC=1 ./scripts/run-tests.sh
+          MARCH_NO_TRMC=1 ./scripts/run-tests.sh
 
   # Build once, fan out via same-run artifacts (not a persistent actions/cache):
   # cross-linux-oracle and all 8 property-oracle shards below each used to
