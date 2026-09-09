@@ -1,6 +1,10 @@
 # Capabilities: optional runtime dictionaries on `Cap(X)` (tail-resumptive only)
 
-`[P3]` Design pinned 2026-08-31; reviewed end to end 2026-09-02.
+`[P3]` Design pinned 2026-08-31; reviewed end to end 2026-09-02. **Closed
+2026-09-08: every row of the Status table below reads "landed," including
+session transport — confirmed present at `stdlib/session.march` and
+`test/session/stream_replay.march`.** Moved to `specs/progress/` intact, as a
+design record; the sections marked (history) are kept on purpose.
 
 **Everything except the session transport has landed** (#388, #389, #392,
 #397). `SessionOps` — this design's payoff case — landed as `stdlib/session.march`

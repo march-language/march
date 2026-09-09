@@ -113,3 +113,17 @@ Options to weigh, not yet decided:
 
 Needs a design decision before implementation; filed as investigation output
 after being reported from an unrelated SIMD Task 2 branch.
+
+## Closed 2026-09-09
+
+Fix shape option 1 landed: re-ran the exact repro (adjusted only for the
+`_cap_console : Cap(IO.Console)` grant param now required by stage D, unrelated
+to this bug), compiled it, and ran the binary three times — prints `5`, exits
+0 every time, no SIGSEGV. `--dump-tir` confirms `n`'s type is still a
+genuinely unresolved TVar all the way through (the underlying inference gap
+this file diagnoses is unchanged), but `println$String` no longer statically
+mangles to a heap-string ABI call: it now compiles to
+`march_value_to_string(x)`, a runtime tag-dispatching function
+(`runtime/march_runtime.c:7681`) that checks the tagged-immediate low bit
+first and formats correctly regardless of the erased static type. The crash
+class described here no longer reproduces.

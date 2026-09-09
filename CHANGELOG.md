@@ -54,6 +54,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`forge fix --contracts` enforces the capability ceiling again.** It was
+  passing `--no-cap-strict` to `march --compile --report-contracts` to work
+  around a compiler bug that charged a main-less library module with the
+  prelude's own `IO.Console` use and failed the ceiling on every library
+  project. That bug is gone, so the workaround (which silently skipped
+  ceiling enforcement for every project run through `forge fix --contracts`)
+  is removed.
 - **`Actor.call`'s timeout is enforced in the interpreter.** It was bound and
   never read, so a handler that took ten seconds "answered in time" against a
   1ms timeout, while one that did not reply within a single scheduler pass was

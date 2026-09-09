@@ -1,5 +1,13 @@
 # Compiler bug — multi-head fn recurses infinitely under --target js (filed, not fixed, 2026-07-10)
 
+## Closed 2026-09-09
+
+Fixed by commit `46b919c7` ("fix(js): multi-head fn with a literal-Int arg no
+longer infinite-loops under --target js"), same root cause described here
+(switch-vs-if scrutinee typing in `js_emit.ml`'s `emit_case_impl`). Re-ran
+the exact repro (`rotate_n(cells,0)`/`rotate_n(cells,n)`) compiled
+`--target js` and run under `node`: prints `3`, no `RangeError`.
+
 
 - ❌ **A multi-head function mixing a literal-Int pattern in one argument
   position with a plain-variable pattern in another loses its base case

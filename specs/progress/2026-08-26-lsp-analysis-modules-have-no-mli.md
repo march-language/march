@@ -1,5 +1,16 @@
 `[P3]` The five `lsp/lib/analysis*` / `code_actions_*` modules have no `.mli`
 
+## Closed 2026-09-09
+
+Landed 2026-08-27, recorded in
+`specs/progress/2026-08-27-mli-interfaces-remaining-modules.md`. Confirmed
+`lsp/lib/{analysis,analysis_util,code_actions_ast,code_actions_diag}.mli` all
+exist. The fifth module, `analysis_types.ml`, was deliberately skipped — its
+progress-file section "Skipped, on purpose: `lsp/lib/analysis_types.ml`"
+gives the rationale (a pure-declarations file where an interface adds no
+abstraction). That's a legitimate resolution of this item's scope, not an
+oversight.
+
 **Filed:** 2026-08-26 — out of scope of Phase 4 of
 `specs/plans/2026-08-19-compiler-file-decomposition.md`, which was code motion
 only (see `specs/progress/2026-08-26-lsp-analysis-decomposition-phase4.md`).
