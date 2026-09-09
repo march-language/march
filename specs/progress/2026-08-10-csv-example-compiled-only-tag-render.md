@@ -1,5 +1,18 @@
 # `examples/csv_example.march` renders `#<tag:1>` compiled, real values interpreted
 
+## Closed 2026-09-09
+
+Fixed and already recorded in detail at
+`specs/progress/2026-08-12-csv-example-tag-render-compiled-generic-to-string.md`
+(root-caused to `lib/tir/mono.ml`'s `find_iface_impls` not retrying
+`to_string`→`show` resolution after monomorphization concretizes a generic
+function's parameter; fixed by commit `b44ede62`, with regression test
+`test/native/generic_fn_to_string_specialize.march`). Re-ran
+`examples/csv_example.march` both interpreted and `--compile --opt 2`: all 4
+demos now produce byte-identical output, no `#<tag:N>` anywhere. This todo
+file is redundant with the progress entry above and is closed without
+restating the detail.
+
 Found 2026-08-10 while verifying the R1 stage D migration. **Not caused by
 stage D** — proven with a pre-fix control (see below). Filed separately
 because it is a live compiled-only divergence in a shipped example.
