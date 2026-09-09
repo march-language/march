@@ -665,3 +665,54 @@ Collecting the stdlib win is the separate follow-up item
   on this Mac for any program at all (CrowdStrike Falcon), so it proves nothing
   locally either way.
 - Multi-constructor-layer TRMC and mutual TRMC remain open questions, unchanged.
+
+## Final measurement on a quiet box (2026-09-09)
+
+Re-taken after a peer session warned that this machine had been running three
+concurrent builds, with load averages reported above 200 at one point. Gated on
+`busy=0 && load1 < 2.5`; load was **2.44 before and 2.27 after**. Five
+interleaved rounds after a discarded warm-up, all variants built against a
+cleared `.march/cas/artifacts-v2`.
+
+Workload: `List.range(1, 20000)`, mapped 2000 times, list threaded so each pass
+sees a unique value.
+
+| variant | source | time |
+|---|---|---:|
+| natural style, TRMC on (default) | `Cons(h+1, nmap(t))` | **0.05-0.06s** |
+| natural style, `--no-trmc` | same source | 0.26s |
+| stdlib `List.map` accumulator form | `List.map(xs, fn x -> x + 1)` | 0.44s |
+
+Round-to-round spread was 0.01s or less on every variant.
+
+**The number that isolates the transform is the first pair: 0.05-0.06s against
+0.26s, roughly 4.5x, same source compiled two ways.**
+
+Do NOT read the 0.44s row as an 8x stdlib win. That variant calls `List.map`
+with a closure (`fn x -> x + 1`) while the natural one inlines `h + 1`, so the
+gap mixes TRMC with closure-call overhead. This file's own 2026-08-07 figure for
+a hand-written accumulator on the same workload was ~0.16-0.17s, which suggests
+most of the 0.44 - 0.17 difference is closure dispatch and not the traversal
+count. Establishing what TRMC is worth against the stdlib requires the Phase 6
+rewrite, and that measurement belongs to that item.
+
+### On the "TRMC measured slower" results in this file
+
+Two earlier sections record TRMC being dramatically slower, and both are about
+INTERMEDIATE PROTOTYPE STATES from 2026-08-07, not the transform in the tree:
+
+- Phase 3 prototype, destination-passing alone: ~1.00s, **3.5x worse**. Cause:
+  it destroyed FBIP reuse, because `Perceus_fbip.same_arity` paired a scrutinee
+  drop only with `EAlloc` and never with `EAllocHole`, so every iteration
+  allocated.
+- Phase 4B alone, post-call drop fixed but reuse still broken: ~0.98s, 5.8x
+  worse.
+
+Phase 4A (reuse-with-hole: `EAllocHole` gains a reuse token so FBIP emits
+`reuse_hole xs as Cons(h+1, _)`) is what closed the gap, 0.98s to 0.06s. The
+measurement above confirms that on a quiet box a month later.
+
+A third statement in this file is easy to misread as a claim about the
+transform and is not one: **"natural style is 1.8x SLOWER today"** compares
+natural style *without* TRMC against the accumulator form. It is the reason the
+stdlib is written in accumulator style, not a result about TRMC.
