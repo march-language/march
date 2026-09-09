@@ -169,6 +169,8 @@ type ctx = Llvm_ctx.ctx = {
   repl : bool;
   mutable shape_meta : bool;
   rec_shape_globals : (string, string * string) Hashtbl.t;
+  mutable ctor_desc_globals : (string * string) option;
+  ctor_desc_ids : (string, int) Hashtbl.t;
   remote_impl_hashes : (string, string) Hashtbl.t;
   remote_sig_hashes  : (string, string) Hashtbl.t;
   compile_so : bool;
@@ -1524,6 +1526,17 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
        let r = fresh ctx "cr" in
        emit ctx (Printf.sprintf "%s = call ptr @march_bool_to_string(i64 %s)" r v);
        ("ptr", r)
+     (* A named variant/record type the constructor-name table describes:
+        render through it so a user ADT prints `Circle(7)` rather than
+        `#<tag:0>`.  This is the ONE place the static TIR type is still known;
+        [Llvm_ctor_desc.id_for] returns [None] for every shape the table
+        cannot walk (unboxed/newtype/niche repr, an erased TVar), which falls
+        through to the generic renderer below — never worse than before. *)
+     | _ when Llvm_ctor_desc.id_for ctx tir_ty <> None ->
+       let v = coerce ctx arg_ty arg_val "ptr" in
+       let local_id =
+         match Llvm_ctor_desc.id_for ctx tir_ty with Some i -> i | None -> 0 in
+       Llvm_ctor_desc.emit_to_string ctx v local_id
      | _ ->
        let v = coerce ctx arg_ty arg_val "ptr" in
        let r = fresh ctx "cr" in

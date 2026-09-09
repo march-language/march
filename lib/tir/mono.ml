@@ -675,6 +675,13 @@ let rec rewrite_calls
           This handles calls like "Conduit.Storage.checkpoint_get" where the
           impl was registered under "Storage.checkpoint_get" (because the user
           wrote `impl Storage(VaultStorage)` after `import Conduit`). *)
+       (* Bare method name behind any module qualification, mirroring
+          [find_iface_impls]'s own prefix-stripping walk. *)
+       let method_suffix name =
+         match String.rindex_opt name '.' with
+         | Some i -> String.sub name (i + 1) (String.length name - i - 1)
+         | None -> name
+       in
        let rec find_iface_impls name =
          match Hashtbl.find_opt iface_methods name with
          | Some impls -> Some impls
@@ -758,6 +765,24 @@ let rec rewrite_calls
                 (match (match resolve_impl_by_type impls tname with
                         | Some m -> Some m
                         | None -> return_position_single_impl impls arg_ty) with
+                 (* No impl for this concrete type.  For `show` specifically
+                    that is a MISSING impl, not an ambiguity: the argument type
+                    is concrete here (tname came from the first argument, not
+                    from the single-impl sentinel), so no amount of extra type
+                    information would pick a different answer — there is simply
+                    no `Show` for it.  Route to the `to_string` builtin, which
+                    renders a user ADT through the constructor-name table
+                    ([Llvm_ctor_desc]) exactly as the interpreter's Show-less
+                    fallback does.  Without this the bare `show` survives to
+                    codegen and [Llvm_calls.fail_if_unresolved_iface_method]
+                    reports a MISSING impl as an ambiguity between twenty impls
+                    of other types — a real program that runs fine interpreted
+                    then fails to compile.  Only `show`: every other method has
+                    no universal fallback to route to. *)
+                 | None
+                   when method_suffix orig_name = "show"
+                     && tname <> "$single_impl$" ->
+                   Tir.EApp ({ f_var with Tir.v_name = "to_string" }, args)
                  | None -> expr   (* No impl for this concrete type *)
                  | Some mangled_name ->
                    (* Resolved!  Enqueue the impl (specialized under this

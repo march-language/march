@@ -59,3 +59,25 @@ general. Start by diffing the TIR for the row-printing call
 Worth a compiled-parity regression test in `test_codegen` once fixed;
 `examples/` is not covered by the compiled-parity suites today, which is why a
 shipped example could diverge unnoticed.
+
+---
+
+## Closed 2026-09-09 — the file was STALE, not newly fixed
+
+This item was already fixed on **2026-08-12**, by the mono-time
+`to_string` -> `show` retry recorded in
+`specs/progress/2026-08-12-csv-example-tag-render-compiled-generic-to-string.md`.
+That fix landed with its own progress note and its own regression test
+(`test/native/generic_fn_to_string_specialize.march`) but did not remove THIS
+file, so the todo sat open for a bug that no longer existed. Removing it is all
+that happened here.
+
+Recording the correction rather than quietly deleting the file, because the
+first version of this note claimed the constructor-name table
+(`specs/progress/2026-09-08-compiled-to-string-adt-ctor-names.md`) closed it.
+That was wrong, and wrong in an avoidable way: the example was observed working
+and the working state credited to the change in hand, with no pre-fix control
+run to establish it had ever been broken at that base. It had not been — the
+mono retry was already in the base commit. The two are not even related: the
+example's `to_string(row)` resolves to `Show$List.show`, which never reaches
+the constructor table.

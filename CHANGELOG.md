@@ -13,6 +13,17 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Compiled `to_string`/`println` render a user ADT's constructor, not
+  `#<tag:N>`.** A boxed constructor cell carries a per-type tag and nothing
+  else, so the compiled backend's type-erased formatter had no name, arity or
+  field types to work from and printed the raw tag; `~H` interpolation of an
+  ADT had the same gap. The compiler now emits a constructor descriptor for
+  every declared variant and record type it lowers, and the runtime walks it,
+  so `to_string(Circle(7))` is `Circle(7)` compiled as well as interpreted —
+  nested fields, lists and records included. Values in a genuinely erased slot,
+  and `Option`-shaped or single-field-wrapper types (which have no cell of
+  their own), still render `#<tag:N>`.
+
 - **Per-child restart types on `supervise` blocks.** A child may be declared
   `restart transient` (a crash restarts it, `kill()` retires it for good) or
   `restart temporary` (never restarted); the default stays `permanent`, so
@@ -78,6 +89,30 @@ git log is authoritative for exact commits.
   `bench/` emits byte-identical code either way.
 
 ### Fixed
+
+- **`from_json` decodes to the type the caller asked for.** It dispatches on
+  its RESULT type, which no value at the call site reveals, so with two or
+  more `derive Json` types in one module the interpreter ran whichever
+  decoder was derived LAST - every earlier type's decode failed with an error
+  indistinguishable from bad input - and the compiled backend refused to
+  build the program at all. The typechecker now resolves the target per call
+  site and both backends follow it. A call whose result type nothing pins is
+  still reported rather than guessed.
+
+- **`derive Json`'s island bridges work.** The auto-generated `update_json`
+  and `render_json` are generated only for a module with both a `State` and a
+  `Msg` deriving Json, which is exactly the case the bug above broke, so
+  `update_json` silently returned its input unchanged. Its 161-test suite is
+  now part of the test run.
+
+- **A missing `Show` impl is no longer reported as an ambiguity.**
+  `println(x)` on a type with no `Show` failed to compile with "ambiguous
+  interface-method call to `show`: 20 implementations are in scope", listing
+  twenty types none of which was the argument's, and never mentioning the
+  `derive` that fixes it. Such a call now renders through the constructor names
+  above, matching the interpreter, so it compiles. Where an interface method
+  genuinely has no fallback, the diagnostic names the type and how to supply
+  the implementation instead of listing every impl in scope.
 
 - **Compiled `File` / `Dir` errors are real `FileError` values again.** Twelve
   builtins — `file_read`, `file_write`, `file_append`, `file_delete`,

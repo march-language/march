@@ -1590,7 +1590,16 @@ let maybe_inject_island_bridges
         | DFn (_, sp) :: _ -> sp
         | _ -> dummy_span
       in
-      expanded @ gen_island_bridges sp
+      (* Uniquify the generated spans, exactly as [Desugar_derive] does for
+         derive-generated decls and for the same reason, which became a
+         correctness requirement rather than a nicety once `from_json`
+         dispatch became span-keyed (March_ast.Json_dispatch).
+         [gen_island_bridges] stamps ONE span on every node it builds, so
+         `update_json`'s two `from_json` calls — one decoding State, one
+         decoding Msg — were indistinguishable to any span-keyed table: the
+         second recording overwrote the first and both decoded as the same
+         type, which is the shape of the original bug. *)
+      expanded @ List.map Desugar_derive.respan_derived_decl (gen_island_bridges sp)
   end
   else expanded
 

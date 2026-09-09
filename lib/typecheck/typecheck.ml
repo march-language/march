@@ -5958,6 +5958,14 @@ let check_stdlib_mediated_ceiling (env : env) (errors : Err.ctx)
 
 let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
     : Err.ctx * (Ast.span, ty) Hashtbl.t * env =
+  (* `from_json` return-type dispatch is recorded per call-site span by
+     [check_json_cap_sites] at the end of this pass.  The table is
+     process-global, so clear it here: a REPL fragment, an LSP re-check and a
+     multi-file build are each their own check, and answers from a previous
+     one describe call sites that are no longer in scope.  Cleared even when
+     seeding from an existing env — a seeded check re-walks the bodies it
+     cares about and re-records what it finds. *)
+  March_ast.Json_dispatch.reset ();
   let type_map = match seed_env with
     | Some (se : env) -> se.type_map
     | None -> Hashtbl.create 256

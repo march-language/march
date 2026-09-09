@@ -58,5 +58,45 @@ correct rather than merely safe, `march_value_to_string` can flatten IOLists,
 and the `tag > 2` abort guard in `march_html_auto_escape` can become an exact
 check instead of the partial one documented at that site.
 
-Related: `specs/todos/2026-08-05-compiled-to-string-adt-ctor-names.md` (a
-constructor-name table would likely share this type-id mechanism).
+Related: `specs/progress/2026-09-08-compiled-to-string-adt-ctor-names.md`
+(landed; the constructor-name table took the static route instead of sharing
+this type-id mechanism — see the narrowing note at the end of this file).
+
+---
+
+## Narrowed 2026-09-08 — the STATIC half landed; this is the residual
+
+`specs/progress/2026-09-08-compiled-to-string-adt-ctor-names.md` closed the
+sibling todo (`to_string` printing `#<tag:N>`) with a COMPILE-TIME constructor
+descriptor: the emitter knows the static TIR type at a `to_string`/`~H` site,
+so it passes a type id and the runtime walks a table. That charges nothing at
+allocation, which is why it was preferred over the header stamp proposed above.
+
+This item stays open for exactly what the static route cannot reach. Each of
+these is pinned as a `#<tag:N>` / placeholder line in
+`test/native/h_sigil_adt_interp.expected`, with the reason named in that file's
+header comment:
+
+1. **An erased (`TVar`) slot** — the original motivation. Still `#<tag:N>`, and
+   `march_value_to_string` still cannot recognise an `IOList` handed to it
+   generically, so a genuine `IOList` partial reaching a polymorphic `~H` hole
+   is stringified rather than flattened.
+2. **Niche-encoded types** (`Option`): `Some(x)` IS `x` and `None` is null, so
+   there is no wrapper cell and no tag. Note for an implementer: asking
+   `Repr.repr_of_ty` about a bare `TCon (name, [])` answers `Boxed` for these,
+   because the niche decision needs the type arguments that key does not carry.
+   `Llvm_ctor_desc.describable` calls `Repr.is_niche_shaped` directly for that
+   reason; getting this wrong prints a confidently WRONG constructor rather
+   than a placeholder, which is worse than the bug being fixed.
+3. **Newtype-repr types** (one constructor, one field): the value IS the
+   payload, so a table lookup would read the payload's header and print the
+   payload's constructor under the wrapper's name.
+4. **Anonymous record literals and tuples**: no declared type name for the
+   table to key on. (Tuples reach `to_string` through `Show$TupleN.show` and
+   are fine there; only the `~H` path shows the placeholder.)
+5. **Generic fields instantiated at a concrete type**: a `Cons(a, ...)` field
+   is described as the generic token `p`, so a `List(Shape)` nested inside
+   another value renders its elements through the untyped renderer. The
+   element's own top-level `to_string` is unaffected.
+
+A header type id would close 1, 2, 3 and 5 together. It would not close 4.

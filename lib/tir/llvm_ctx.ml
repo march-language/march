@@ -262,6 +262,14 @@ type ctx = {
   mutable shape_meta : bool;
   (* Record shape descriptor → (descriptor string global, i32 id-cache global). *)
   rec_shape_globals : (string, string * string) Hashtbl.t;
+  (* Constructor-name descriptor for this compilation unit (see
+     [Llvm_ctor_desc]): the (desc_global, base_cache_global) pair, emitted at
+     most once and only when some call site actually needs it, plus the
+     type-name -> LOCAL id map the call sites index with.  Both are filled by
+     [Llvm_ctor_desc.ensure]; [None] means no site has asked yet, so nothing
+     is emitted into the module at all. *)
+  mutable ctor_desc_globals : (string * string) option;
+  ctor_desc_ids : (string, int) Hashtbl.t;
   (* Distributed OTP L4: CAS-derived hash maps for remote_ref_hashes constant folding.
      Maps qualified fn name ("Math.add") → hex hash string. *)
   remote_impl_hashes : (string, string) Hashtbl.t;
@@ -374,6 +382,8 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   repl;
   shape_meta = true;
   rec_shape_globals = Hashtbl.create 16;
+  ctor_desc_globals = None;
+  ctor_desc_ids = Hashtbl.create 64;
   remote_impl_hashes = Hashtbl.create 0;
   remote_sig_hashes  = Hashtbl.create 0;
   compile_so = false;

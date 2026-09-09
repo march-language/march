@@ -1,0 +1,79 @@
+-- `from_json` return-type-directed dispatch, with MORE THAN ONE `derive Json`
+-- in the module.
+--
+-- `from_json` dispatches on its RESULT type: every impl takes the same
+-- JsonValue argument, so nothing in the values at a call site says which
+-- decoder to run. Before this landed:
+--   interpreted -- `derive Json` bound the bare name in the environment and
+--     the LAST type to derive Json owned it, so every earlier type's decode
+--     silently ran the wrong decoder and returned a DecodeError that looked
+--     like bad input;
+--   compiled    -- Mono's single-impl fallback could only resolve the case
+--     where exactly ONE impl existed module-wide, so this failed to COMPILE
+--     with "ambiguous interface-method call to `from_json`".
+-- The typechecker resolves the target per call site and both backends read
+-- that one answer (March_ast.Json_dispatch).
+--
+-- Three constructors on Choice, not two, on purpose: one nullary plus one
+-- single-field constructor is Option-shaped NICHE repr, whose `to_string`
+-- renders the payload rather than the constructor. That is a separate, still
+-- open residual (specs/todos/2026-08-05-boxed-adt-type-id.md) and would show
+-- up here as a spurious interpreter/compiled difference that has nothing to
+-- do with from_json.
+--
+-- .expected is the interpreter's output, so this rule is an
+-- interpreter/compiled parity check.
+mod FromJsonDispatch do
+  needs IO.Console
+
+  type Point  = { x : Int, y : Int }
+  type Label  = { name : String }
+  type Choice = Alpha | Beta(Int) | Gamma(String)
+
+  derive Json for Point
+  derive Json for Label
+  derive Json for Choice
+
+  fn show_point(r : Result(Point, Json.DecodeError)) : String do
+    match r do
+      Ok(p)  -> "Point(" ++ to_string(p.x) ++ ", " ++ to_string(p.y) ++ ")"
+      Err(_) -> "point-decode-failed"
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    let pt : Point = { x: 3, y: 4 }
+    let lb : Label = { name: "hi" }
+    let ch = Gamma("g")
+
+    let ps = Json.to_string(to_json(pt))
+    let ls = Json.to_string(to_json(lb))
+    let cs = Json.to_string(to_json(ch))
+    println("wire p=" ++ ps)
+    println("wire l=" ++ ls)
+    println("wire c=" ++ cs)
+
+    match (Json.parse(ps), Json.parse(ls), Json.parse(cs)) do
+      (Ok(pv), Ok(lv), Ok(cv)) ->
+        -- Each of these three resolves to a DIFFERENT decoder. Under the old
+        -- last-derive-wins binding all three ran Choice's.
+        let p : Result(Point, Json.DecodeError)  = from_json(pv)
+        let l : Result(Label, Json.DecodeError)  = from_json(lv)
+        let c : Result(Choice, Json.DecodeError) = from_json(cv)
+        println(show_point(p))
+        match l do
+          Ok(ll) -> println("Label(" ++ ll.name ++ ")")
+          Err(_) -> println("label-decode-failed")
+        end
+        match c do
+          Ok(cc) -> println("Choice=" ++ to_string(cc))
+          Err(_) -> println("choice-decode-failed")
+        end
+        -- The first type to derive Json, decoded LAST: ordering must not
+        -- matter, which is the whole point.
+        let p2 : Result(Point, Json.DecodeError) = from_json(pv)
+        println("again " ++ show_point(p2))
+      _ -> println("parse failed")
+    end
+  end
+end
