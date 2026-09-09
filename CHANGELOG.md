@@ -227,7 +227,7 @@ git log is authoritative for exact commits.
   `@[no_alloc(warn)]` reports a warning instead of an error and
   `@[no_alloc(assume)]` marks a closure or `extern` wrapper as trusted.
   `--no-opt` downgrades a failure to a warning naming the flag, and a
-  TRMC-eligible failure points at `--trmc`. The language server reports the
+  TRMC-eligible failure under `--no-trmc` says so. The language server reports the
   failure at the function name, shows `✓ no_alloc` when the contract holds,
   and offers an "Add `@[no_alloc]`" quick fix; `march --compile
   --report-contracts` and `forge fix --contracts` insert the attribute on
@@ -603,12 +603,17 @@ git log is authoritative for exact commits.
   syntax (`{ left = l, right = r }`), which the parser rejects — every
   reformat of such a pattern broke the file. Record-literal shorthand fields
   (`{ x, y }`, where the binder matches the field name) were unaffected.
-- The non-tail-recursion warning no longer promises a loop that does not
-  happen. It used to end "when the recursive call is the direct argument of a
-  constructor, the compiler turns it into a loop" — but tail-recursion-modulo-cons
-  is off by default, so code written in exactly that shape still overflowed the
-  stack on deep input. The warning now says deep input can overflow, and
-  describes TRMC as the opt-in it is (`--trmc`).
+- The non-tail-recursion warning states the condition instead of a verdict.
+  It has been wrong in both directions: it used to end "when the recursive call
+  is the direct argument of a constructor, the compiler turns it into a loop",
+  which was false while tail-recursion-modulo-cons was opt-in, and was then
+  reworded to say the transform is off by default, which became false when the
+  default flipped in this same release. The typechecker runs before the IR and
+  cannot tell which case a function is, so the warning now names the shape that
+  becomes a loop, says the transform is on by default, and still warns that
+  anything else uses O(depth) stack. It no longer recommends a flag. The
+  language server's copy of the message and the allocation-contract note were
+  corrected the same way.
 
 - A return-contract counterexample no longer names an input the parameter's
   own type excludes when the refinement sits below the top of the type (a
