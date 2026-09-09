@@ -54,13 +54,22 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
-- **`forge fix --contracts` enforces the capability ceiling again.** It was
-  passing `--no-cap-strict` to `march --compile --report-contracts` to work
-  around a compiler bug that charged a main-less library module with the
-  prelude's own `IO.Console` use and failed the ceiling on every library
-  project. That bug is gone, so the workaround (which silently skipped
-  ceiling enforcement for every project run through `forge fix --contracts`)
-  is removed.
+- **Compiled `File` / `Dir` errors are real `FileError` values again.** Twelve
+  builtins — `file_read`, `file_write`, `file_append`, `file_delete`,
+  `file_copy`, `file_rename`, `file_stat`, `dir_list`, `dir_mkdir`,
+  `dir_mkdir_p`, `dir_rmdir` and `dir_rm_rf` — are typed
+  `Result(_, FileError)`, but the compiled runtime put a bare string in the
+  `Err` payload instead of a `FileError`, so a natively compiled program that
+  inspected the payload read a string's header as if it were a `FileError`.
+  Interpreted runs were always correct, so the misread only appeared once a
+  program was compiled. Each builtin now reports the same error kind its
+  interpreted counterpart does, including the kinds a single shared mapping
+  would have flattened: writing to a directory reports `IsDirectory`, and
+  removing a non-empty directory reports `NotEmpty`. This continues the fix
+  that landed for `file_open` alone. (Printing such a payload with
+  `to_string` still shows `#<tag:N>` rather than the constructor name when
+  compiled, and these payloads still cannot be matched by constructor name in
+  March source; both remain open.)
 - **`Actor.call`'s timeout is enforced in the interpreter.** It was bound and
   never read, so a handler that took ten seconds "answered in time" against a
   1ms timeout, while one that did not reply within a single scheduler pass was
