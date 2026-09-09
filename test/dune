@@ -1404,6 +1404,39 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/default_args_nested.expected native_default_args_nested.out)))
 
+; ── n-ary string concat, compiled ─────────────────────────────────────────
+; Desugar folds a 4+ operand interpolation into `string_concat_n`, whose ABI
+; the generic builtin call path cannot emit: codegen spreads the operands into
+; a stack array and calls march_string_concat_n(count, array).  Every operand
+; is borrowed.  This golden checks the ANSWER: the .expected was generated from
+; the interpreter, so the diff is a compiled-vs-interpreted parity check as
+; well as a golden.  It deliberately does NOT claim to catch a wrong borrow
+; mode -- that leaks without changing any printed byte, and is pinned instead
+; by the `string_concat_n` case in test_codegen.ml.
+(rule
+ (targets native_string_concat_n native_string_concat_n.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (source_tree ../stdlib)
+       (file native/string_concat_n.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_string_concat_n
+        native/string_concat_n.march)
+   (with-stdout-to native_string_concat_n.out
+        (system "./native_string_concat_n")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/string_concat_n.expected native_string_concat_n.out)))
+
 ; ── Capability mocking, end to end, compiled ──────────────────────────────
 ; The one test that exercises what compiler-inserted capability passing exists
 ; for: an operation performed by code that names no capability is intercepted

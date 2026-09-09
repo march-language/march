@@ -321,7 +321,8 @@ let rec try_collect_list acc = function
     user code can also write by hand.
 
     The formatter runs on the PARSED module, before desugar, so it never sees
-    the [string_concat3] folding that desugar applies afterwards.
+    the concat folding that desugar applies afterwards ([string_concat3] at
+    three operands, [string_concat_n] at four or more).
 
     Returns Some (prefix_str, [(expr, suffix_str); ...]) if the pattern matches,
     where the original source was "prefix${e1}s1${e2}s2". *)

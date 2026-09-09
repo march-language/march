@@ -52,6 +52,31 @@ git log is authoritative for exact commits.
   so an existing supervision tree's timing is unchanged. `jitter 0%` makes the
   delays exactly reproducible for tests.
 
+### Changed
+
+- **String interpolation is linear at every operand size.** A four-or-more
+  operand interpolation now compiles to a single `string_concat_n` that sums
+  every part's length once, allocates once, and copies each byte once, instead
+  of a fold of three-way concats that re-copied the accumulated prefix at every
+  step. That fold was quadratic with large operands: with 4 KB operands, 32 of
+  them went from 0.54s to 0.06s. Short operands, the case the fold was chosen
+  for, got faster too rather than regressing, from 0.23s to 0.07s at the same
+  count. Nothing changes below four operands, where a single concat is already
+  one allocation and one copy.
+
+- **Tail-recursion-modulo-cons is now on by default.** A recursive call that is
+  the direct argument of a constructor in tail position — the natural way to
+  write `map`, `filter` or a tree rebuild — compiles to a loop that reuses list
+  cells in place, instead of one stack frame and one retained cell per element.
+  This is a correctness change as much as a speed one: such a function
+  previously overflowed the stack on a long list when compiled (a 500k-element
+  natural-style `map` exited 138), and now runs. On a 20k-element list mapped
+  2000 times it is 4.8x faster than the same source compiled without the
+  transform. `--no-trmc`, or `MARCH_NO_TRMC=1`, restores the old behaviour.
+  Existing code is unaffected: the stdlib's list producers are hand-written in
+  accumulator form, which the transform does not touch, so every benchmark in
+  `bench/` emits byte-identical code either way.
+
 ### Fixed
 
 - **Compiled `File` / `Dir` errors are real `FileError` values again.** Twelve
@@ -202,7 +227,7 @@ git log is authoritative for exact commits.
   `@[no_alloc(warn)]` reports a warning instead of an error and
   `@[no_alloc(assume)]` marks a closure or `extern` wrapper as trusted.
   `--no-opt` downgrades a failure to a warning naming the flag, and a
-  TRMC-eligible failure points at `--trmc`. The language server reports the
+  TRMC-eligible failure under `--no-trmc` says so. The language server reports the
   failure at the function name, shows `✓ no_alloc` when the contract holds,
   and offers an "Add `@[no_alloc]`" quick fix; `march --compile
   --report-contracts` and `forge fix --contracts` insert the attribute on
@@ -578,12 +603,17 @@ git log is authoritative for exact commits.
   syntax (`{ left = l, right = r }`), which the parser rejects — every
   reformat of such a pattern broke the file. Record-literal shorthand fields
   (`{ x, y }`, where the binder matches the field name) were unaffected.
-- The non-tail-recursion warning no longer promises a loop that does not
-  happen. It used to end "when the recursive call is the direct argument of a
-  constructor, the compiler turns it into a loop" — but tail-recursion-modulo-cons
-  is off by default, so code written in exactly that shape still overflowed the
-  stack on deep input. The warning now says deep input can overflow, and
-  describes TRMC as the opt-in it is (`--trmc`).
+- The non-tail-recursion warning states the condition instead of a verdict.
+  It has been wrong in both directions: it used to end "when the recursive call
+  is the direct argument of a constructor, the compiler turns it into a loop",
+  which was false while tail-recursion-modulo-cons was opt-in, and was then
+  reworded to say the transform is off by default, which became false when the
+  default flipped in this same release. The typechecker runs before the IR and
+  cannot tell which case a function is, so the warning now names the shape that
+  becomes a loop, says the transform is on by default, and still warns that
+  anything else uses O(depth) stack. It no longer recommends a flag. The
+  language server's copy of the message and the allocation-contract note were
+  corrected the same way.
 
 - A return-contract counterexample no longer names an input the parameter's
   own type excludes when the refinement sits below the top of the type (a

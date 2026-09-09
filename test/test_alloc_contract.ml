@@ -395,10 +395,34 @@ end|}
 
 let test_accept_trmc_with_flag () = accepts "trmc" ~flags:"--trmc" trmc_src "9\n"
 
+(* KNOWN VACUOUS since TRMC became the default (2026-09-09), and deliberately
+   left that way rather than papered over.
+
+   [Alloc_contract.trmc_note] is guarded on `(not trmc) && trmc_eligible name`.
+   With TRMC on by default the guard is false on every ordinary build, so this
+   assertion now holds for a reason that has nothing to do with the flag it
+   passes -- it would pass if `--trmc` did nothing at all.
+
+   The obvious repair, asserting the note DOES fire under `--no-trmc`, was
+   tried and does not work: on this fixture `--no-trmc` produces no `no_alloc`
+   diagnostic at all, because FBIP already reuses the scrutinee cell without
+   the transform, so there is no allocation to complain about. A second
+   fixture with no cell to reuse (`upto(n) = Cons(n, upto(n-1))`) does produce
+   a `no_alloc` diagnostic in both modes but still carries no note.
+
+   So the note may be unreachable in practice, which is a question about the
+   note rather than about TRMC's default. Filed as
+   specs/todos/2026-09-09-trmc-note-in-alloc-contract-may-be-unreachable.md;
+   this case stays as a regression guard on the absence, with its vacuity
+   documented so nobody reads it as coverage. *)
 let test_trmc_hint_absent_when_on () =
   let (rc, out) = compile ~flags:"--trmc" trmc_src in
   Alcotest.(check int) "rc" 0 rc;
-  Alcotest.(check bool) "no hint" false (contains "TRMC-eligible" out)
+  Alcotest.(check bool) "no hint with --trmc" false (contains "TRMC-eligible" out);
+  let (rc_d, out_d) = compile ~flags:"" trmc_src in
+  Alcotest.(check int) "rc (default)" 0 rc_d;
+  Alcotest.(check bool) "no hint on the default build" false
+    (contains "TRMC-eligible" out_d)
 
 let scalar_src = {|mod Main do
 needs IO

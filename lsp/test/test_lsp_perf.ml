@@ -177,18 +177,23 @@ end
 |} in
   Alcotest.(check bool) "constructor case does not prescribe an accumulator"
     false (has "accumulator" ctor);
-  (* This used to assert the message said the compiler "compiles to a loop"
-     and no rewrite was needed. That claim is false: TRMC is implemented but
-     OFF BY DEFAULT (`lib/tir/trmc.ml`), so this exact shape still overflows
-     on deep input — see
-     specs/progress/2026-09-01-trmc-warning-promises-a-loop-that-does-not-happen.md,
-     which corrected the compiler's copy of the same sentence. The editor's
-     copy said it too, and this test was pinning it. It must now state the
-     opt-in rather than promise the loop. *)
+  (* The editor's copy of the compiler's structural-recursion warning. It has
+     tracked that message through two wrong versions -- first "No rewrite
+     needed" (false while TRMC was opt-in), then "OFF BY DEFAULT; enable it
+     with --trmc" (false since the default flipped on 2026-09-09). Both were
+     verdicts; the analysis has no eligibility information and cannot give one.
+     Pin the CONDITION instead, matching test_compiler.ml's case on the
+     compiler-side copy. *)
   Alcotest.(check bool) "constructor case does not promise an automatic loop"
     false (has "No rewrite needed" ctor);
-  Alcotest.(check bool) "constructor case names TRMC as opt-in"
-    true (has "--trmc" ctor);
+  Alcotest.(check bool) "constructor case states the shape TRMC handles"
+    true (has "direct argument of a constructor in tail position" ctor);
+  Alcotest.(check bool) "constructor case says TRMC is on by default"
+    true (has "on by default" ctor);
+  Alcotest.(check bool) "constructor case does not tell the user to pass --trmc"
+    false (has "enable it with `--trmc`" ctor);
+  Alcotest.(check bool) "constructor case no longer says TRMC is off by default"
+    false (has "off by default" ctor);
   (* Non-vacuousness: the arithmetic case still gives the old advice, so the
      assertion above is testing the branch and not an empty message. *)
   let arith = msg_of {|

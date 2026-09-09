@@ -816,6 +816,7 @@ type builtin_group =
   | Bg_arith   (* integer/float/bool scalar ops and the to_string family *)
   | Bg_task    (* tasks, actors, signals, channels, MPST, work pools *)
   | Bg_record  (* records, vaults, HTML escaping *)
+  | Bg_string  (* string builtins whose ABI the generic call path cannot emit *)
 
 let builtin_group : Builtin_name.t -> builtin_group = function
   | Builtin_name.Bool_to_string | Builtin_name.Float_to_string
@@ -850,6 +851,8 @@ let builtin_group : Builtin_name.t -> builtin_group = function
   | Builtin_name.Vault_set | Builtin_name.Vault_set_ttl
   | Builtin_name.Vault_update ->
     Bg_record
+  | Builtin_name.String_concat_n ->
+    Bg_string
 
 let rec emit_expr ctx (e : Tir.expr) : string * string =
   match e with
@@ -1253,6 +1256,34 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      skipping an escaper. *)
   | Tir.EApp (f, [idx; a]) when Builtin_name.is Builtin_name.Html_escape_ctx f.Tir.v_name ->
     Llvm_emit_html.emit_html_escape_ctx_dynamic ~emit_atom ctx idx a
+
+  (* ── string_concat_n: the one variadic builtin ─────────────────────────
+     March-level it takes n String arguments (Typecheck_builtins.variadic_
+     builtins); at the ABI level march_string_concat_n takes (count, array), so
+     the operands are spread into a stack array here.  A C variadic would have
+     worked too, but arm64 passes variadic arguments differently from fixed
+     ones, and an explicit array keeps one ABI on every target.
+
+     The alloca is in place rather than hoisted to the entry block, matching
+     [Llvm_calls.emit_blocking_call], the existing precedent for this shape.
+
+     Every operand is BORROWED (see Borrow.all_args_borrowed_builtins), so
+     nothing here retains or releases them. *)
+  | Tir.EApp (f, (_ :: _ :: _ as args))
+    when Builtin_name.is Builtin_name.String_concat_n f.Tir.v_name ->
+    let n = List.length args in
+    let arr = fresh ctx "catn" in
+    emit ctx (Printf.sprintf "%s = alloca [%d x ptr]" arr n);
+    List.iteri (fun i a ->
+      let v = emit_atom_as ctx "ptr" a in
+      let slot = fresh ctx "catnslot" in
+      emit ctx (Printf.sprintf
+        "%s = getelementptr [%d x ptr], ptr %s, i64 0, i64 %d" slot n arr i);
+      emit ctx (Printf.sprintf "store ptr %s, ptr %s" v slot)) args;
+    let r = fresh ctx "catnr" in
+    emit ctx (Printf.sprintf
+      "%s = call ptr @march_string_concat_n(i64 %d, ptr %s)" r n arr);
+    ("ptr", r)
 
   (* ── Bitwise integer builtins ─────────────────────────────────────── *)
   | Tir.EApp (f, [a; b]) when is_int_bitwise f.Tir.v_name ->

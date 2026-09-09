@@ -13168,6 +13168,7 @@ declare i64  @march_string_byte_at(ptr %s, i64 %i)
 declare i64  @march_string_is_empty(ptr %s)
 declare ptr  @march_string_to_int(ptr %s)
 declare ptr  @march_string_concat3(ptr %a, ptr %b, ptr %c)
+declare ptr  @march_string_concat_n(i64 %n, ptr %parts)
 declare ptr  @march_string_join(ptr %list, ptr %sep)
 ; Float builtins
 declare double @march_float_abs(double %f)
@@ -13688,7 +13689,7 @@ let test_builtin_name_roundtrip () =
         Alcotest.failf "builtin %S round-tripped to a different constructor" s
       | None -> Alcotest.failf "builtin %S has no of_string entry" s)
     March_tir.Builtin_name.all;
-  Alcotest.(check int) "constructor count" 57
+  Alcotest.(check int) "constructor count" 58
     (List.length March_tir.Builtin_name.all);
   (* Distinct names: two constructors mapping to one string would make the
      Hashtbl silently drop one direction of the round trip. *)
@@ -14702,6 +14703,32 @@ let test_derive_json_ambiguous_from_json_diagnostic () =
   Alcotest.(check bool) "diagnostic is a clean user error, not an ICE" true
     (not (ir_contains output "internal compiler error"))
 
+(* string_concat_n borrows EVERY argument, at any arity.
+
+   [extern_borrow_table] is a fixed-length list per builtin and [List.nth_opt]
+   answers [None] -- i.e. NOT borrowed -- past its end, so a variadic builtin
+   cannot be described there; [Borrow.all_args_borrowed_builtins] is the
+   separate rule that covers it.
+
+   Pinned as its own case because the failure is INVISIBLE in output. Measured
+   with the rule removed: a program making 3,000,000 five-operand concat_n
+   calls printed the identical answer while peak RSS went from 3 MB to 196 MB,
+   because Perceus treated the call as consuming its arguments and emitted no
+   drop for them. No golden that checks stdout can catch that. *)
+let test_string_concat_n_borrows_all_args () =
+  for i = 0 to 15 do
+    Alcotest.(check bool)
+      (Printf.sprintf "string_concat_n arg %d is borrowed" i)
+      true (March_tir.Borrow.is_extern_borrowed "string_concat_n" i)
+  done;
+  (* Non-vacuousness: a builtin with a real fixed-arity row must still answer
+     from that row, and go false past its end -- otherwise this would pass
+     against an is_extern_borrowed that returned true for everything. *)
+  Alcotest.(check bool) "string_concat3 arg 2 is borrowed" true
+    (March_tir.Borrow.is_extern_borrowed "string_concat3" 2);
+  Alcotest.(check bool) "string_concat3 has no arg 3" false
+    (March_tir.Borrow.is_extern_borrowed "string_concat3" 3)
+
 let codegen_suites =
   [
       ( "vectorize_check", [
@@ -15594,6 +15621,10 @@ let codegen_suites =
       ( "unix_time_ms", [
           Alcotest.test_case "unix_time_ms builtin links and matches interp" `Quick
             test_compiled_unix_time_ms_parity;
+        ] );
+      ( "string_concat_n", [
+          Alcotest.test_case "every argument is borrowed, at any arity" `Quick
+            test_string_concat_n_borrows_all_args;
         ] );
       ( "llvm_builtins_preamble_golden", [
           Alcotest.test_case "every builtin c_name is declared in some preamble" `Quick

@@ -314,6 +314,8 @@ native_static_closure_semantics: coverage audit (user + stdlib): 63 enforced, 0 
 native_static_closure_semantics: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_static_lambda_no_leak: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_static_lambda_no_leak: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_string_concat_n: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_string_concat_n: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_string_search_edge_cases: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_string_search_edge_cases: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_string_to_float_option: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced

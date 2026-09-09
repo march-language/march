@@ -4316,11 +4316,18 @@ let () =
     ("--emit-core-ast", Arg.String (fun f -> emit_core_ast_file := Some f),
      " <file.march>  Emit desugared core AST + verdict + diagnostics as JSON to stdout");
   ] in
-  (* Legacy escape hatch: MARCH_TRMC=1 predates --trmc and is still used by the
-     CI sanitize gate.  Seeded BEFORE Arg.parse so it acts as a DEFAULT — an
-     explicit --trmc or --no-trmc on the command line overrides it either way.
-     (Applying it after parsing would silently clobber --no-trmc.) *)
+  (* Env-var forms of --trmc / --no-trmc.  Seeded BEFORE Arg.parse so they act
+     as DEFAULTS — an explicit --trmc or --no-trmc on the command line
+     overrides either.  (Applying them after parsing would silently clobber the
+     flag.)
+
+     MARCH_TRMC=1 predates --trmc and is now a no-op against the default;
+     it is kept because external scripts set it.  MARCH_NO_TRMC=1 is the one
+     that earns its keep: since TRMC became the default, --no-trmc is the only
+     way back, and it is what gives CI a way to exercise that path over a whole
+     suite run rather than one compile at a time. *)
   if Sys.getenv_opt "MARCH_TRMC" <> None then March_tir.Trmc.enabled := true;
+  if Sys.getenv_opt "MARCH_NO_TRMC" <> None then March_tir.Trmc.enabled := false;
   Arg.parse specs (fun f -> files := f :: !files) "Usage: march [options] [file.march]";
   (* --target js implies --compile (skip JIT, emit .mjs) *)
   if !target_str = "js" || !target_str = "javascript" then do_compile := true;

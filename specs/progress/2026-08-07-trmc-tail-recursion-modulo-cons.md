@@ -1,8 +1,16 @@
-# TRMC: tail-recursion-modulo-cons
+# TRMC: tail-recursion-modulo-cons — LANDED, ON BY DEFAULT
 
 **Filed:** 2026-08-07
-**Priority:** P2 — a real constant-factor win on every list producer, and it
-removes a warning that currently exports work to users. Not urgent; not blocked.
+**Closed:** 2026-09-09 — default flipped to ON. See the closing section at the
+bottom for the final evidence.
+
+**Status of the text below.** Everything from "Phase 1 results" onward is a
+running log of work that HAS landed, written as it happened. The two paragraphs
+under "Design" that describe TRMC as hypothetical, and the sentence in the
+original framing claiming `grep -ri trmc lib/` is empty, were true only on
+2026-08-07 and are corrected inline below. They are kept rather than deleted
+because the measurements that follow only make sense against the reasoning that
+produced them.
 
 Taken from Lorenzen & Leijen, *Reference Counting with Frame Limited Reuse*
 (ICFP'22) §2.4.1. See `specs/todos/2026-08-07-drop-guided-reuse-coverage.md` for
@@ -14,9 +22,18 @@ the sibling item from the same paper (measured, and declined).
 > recursive call with a *hole* in the tail field, which is later assigned by the
 > recursive call."
 
-March has plain TCO (`lib/tir/llvm_tco.ml`) and no TRMC — `grep -ri trmc lib/`
-is empty. Instead, `lib/typecheck/typecheck.ml:12055` **warns** and tells the
-user to hand-write an accumulator.
+**[CORRECTED 2026-09-09 — this paragraph described the tree on 2026-08-07 and
+has not been true since Phase 1 landed that same day.]** As originally written:
+"March has plain TCO (`lib/tir/llvm_tco.ml`) and no TRMC — `grep -ri trmc lib/`
+is empty. Instead, `lib/typecheck/typecheck.ml` **warns** and tells the user to
+hand-write an accumulator."
+
+What is actually true now: `lib/tir/trmc.ml` holds both the eligibility
+analysis and the destination-passing rewrite; `EAllocHole` and `ESetField` are
+real `Tir.expr` nodes; `--trmc` / `--no-trmc` exist and are in the CAS cache
+key; the REPL JIT runs the same transform; and the transform is ON BY DEFAULT.
+The warning was reworded in Task 9. Read the rest of this file as a build log,
+not as a description of missing work.
 
 ## What this is actually worth (measured 2026-08-07)
 
@@ -518,3 +535,184 @@ Recommend proceeding to Phase 2, with Phase 6 explicitly gated behind it.
 - Mutual TRMC? `Llvm_tco` has a mutual-TCO group emitter; out of scope for v1.
 - Does the hole-write need to be atomic for actor-shared values? v1 should refuse
   TRMC on any type that can cross an actor boundary rather than answer this.
+
+
+## Closed 2026-09-09 — default flipped to ON
+
+Plan `specs/plans/2026-08-10-trmc-on-by-default.md` Task 10. `Trmc.enabled`
+now defaults to `true`; `--no-trmc` (or `MARCH_NO_TRMC=1`) is the escape hatch.
+
+### Blocker resolved first: the fresh-name counter had no reset
+
+`trmc_ctr` was a module-level counter with no reset anywhere in `lib/`, `bin/`
+or `test/`. That was latent only because the transform almost never ran. On by
+default it runs on every compile, and a monotonic counter makes a function's
+`$trmcN` names a function of how many modules the process transformed first —
+which is not cosmetic: the CAS cache key is a digest of emitted code, so the
+same source would hash differently depending on run order, and any golden over
+TRMC'd TIR would be order-dependent.
+
+Fixed with all three parts, mirroring `Perceus._rc_fresh_ctr`:
+
+1. `Trmc.reset_counter ()`, called at the top of `transform_module` — so every
+   caller (driver, REPL JIT, tests) gets it without a separate opt-in.
+2. The harness slot is `transform_module` itself, plus the TIR snapshot harness,
+   which now runs the pass (see below).
+3. A differential fixture, `trmc/fresh names ignore run order`: transform a
+   module from a clean counter, then transform an unrelated module, then
+   transform the first one again and require byte-identical pretty-printed TIR.
+   **Proven RED** by removing the reset and rebuilding — the case fails with
+   "TRMC output does not depend on how many modules ran before it". A naive
+   double-transform check would NOT have caught this: `transform_module` is
+   idempotent, so the second call on the same module mints no names at all.
+
+### The snapshots were blind to TRMC, and now are not
+
+Flipping the default moved **zero** snapshot lines. That was not evidence of
+safety: `test_snapshots.ml`'s `dump_post_perceus` ran `Lower -> Mono -> Defun ->
+Perceus` and never called `Trmc.transform_module`, so the goldens had no view of
+the transform at all. The harness now runs TRMC post-lower / pre-mono exactly as
+`Contract_pipeline` does, and a TRMC-shaped corpus program
+(`test/snapshots/src/trmc_modulo_cons.march`) pins the output.
+
+With the pass wired in, the regenerated corpus shows **only the two new
+`trmc_modulo_cons` files** — no pre-existing snapshot moved, because none of the
+other 20 corpus programs is TRMC-eligible.
+
+The new post-Perceus golden is the review artifact, and it shows both Phase 4
+fixes holding on the default path:
+
+- `reuse_hole xs as List.Cons($t1, _)` — FBIP reuse still fires (cause A);
+- in `bump$dps`, `$dst.1 <- $trmc3` is followed by `bump$dps(t, $trmc3)` as the
+  **last** expression, with no post-call `dec_rc`, so the call stays in tail
+  position and `Llvm_tco` can form a loop (cause B).
+
+### Measured
+
+Same box, interleaved, first (warmup) round discarded. 20k-element list, 2000
+successive increments, compiled `--opt 2`, CAS cleared between builds. All three
+print `239988000`.
+
+| variant | time |
+|---|---:|
+| natural style, TRMC on (new default) | 0.06s |
+| natural style, `--no-trmc` | 0.29s |
+| `List.map` accumulator + `reverse` (today's stdlib, via `bench/list_producers.march`) | 0.49s |
+
+Four rounds varied by at most 0.01s per variant.
+
+**The correctness result matters more than the timing one.** Natural-style
+constructor recursion over a 500k-element list:
+
+| build | result |
+|---|---|
+| `--no-trmc` | exit 138 — stack overflow |
+| default (TRMC on) | prints the correct sum |
+
+### The existing benchmarks cannot see this change, and that is the point
+
+`bench/list_producers.march`, `bench/list_ops.march`, `bench/tree_transform.march`
+and `bench/binary_trees.march` emit **structurally identical LLVM IR** with TRMC
+on and off. TRMC does transform 13-14 functions in each link closure, but they
+are stdlib helpers those benchmarks never call, and DCE drops them.
+
+So the flip is a no-op for existing code and no regression is possible on it.
+This is the file's own "the compiler feature alone buys nothing for the stdlib"
+prediction, confirmed structurally rather than by a stopwatch — which also makes
+it immune to machine load, unlike a timing comparison.
+
+**Read "structurally identical" precisely.** The raw IR is NOT byte-identical:
+84, 98 and 14 lines differ on `list_producers`, `list_ops` and `tree_transform`
+respectively (`binary_trees` is byte-identical). Every one of those lines is a
+fresh-name suffix — `%$t389_i14489` against `%$t389_i14452`, `$lam30064$3624`
+against `$lam30064$3620` — because running the transform consumes values from
+the shared downstream naming counters and shifts every later number, even in
+functions it does not touch. Normalising `_i<N>` and `$<N>` suffixes brings all
+four to zero differing lines.
+
+The normaliser is not hiding the change: applied to a program TRMC actually
+transforms, the same normalisation still leaves 933 differing lines out of 945.
+
+**A correction, and the mistake worth not repeating.** An earlier revision of
+this section claimed all four were byte-identical, from a `--emit-llvm` diff
+that compared two EMPTY files: `--emit-llvm` writes to `<source>.ll`, it does
+not write IR to stdout, so redirecting stdout captures nothing and `diff` of two
+empty files reports no difference. The exit status was 0 and the output looked
+exactly like a successful clean comparison. **Check that a diff's inputs are
+non-empty before reporting that they match** — a vacuous comparison and a
+genuine match are indistinguishable from the diff alone.
+
+Collecting the stdlib win is the separate follow-up item
+`specs/todos/2026-09-09-rewrite-stdlib-list-producers-into-natural-style.md`.
+
+### Evidence
+
+- Full-suite baseline before any change (TRMC off): 3985 tests across 12
+  suites, one failure (`socket_timeout` case 0), which re-ran green in 8.5s in
+  isolation — a 30s wall-clock deadline blown by a machine at load average 229
+  from unrelated concurrent work, not a code failure.
+- Quick suite with TRMC on by default: exit 0, all 11 suites green
+  (964 / 277 / 600 / 816 / 61 / 4 / 361 / 5 / 36 / 10 / 7).
+- `dune build --root .` green, which compiles and runs the native golden
+  fixtures with the transform active.
+- TIR snapshots: 43 cases green, including the determinism canary.
+
+### Deliberately out of scope
+
+- The stdlib rewrite (former Phase 6) — filed separately, and it MUST NOT land
+  before this flip, per the ordering correction recorded in the plan.
+- Sanitizer evidence still comes only from Linux CI; `MARCH_SANITIZE=1` hangs
+  on this Mac for any program at all (CrowdStrike Falcon), so it proves nothing
+  locally either way.
+- Multi-constructor-layer TRMC and mutual TRMC remain open questions, unchanged.
+
+## Final measurement on a quiet box (2026-09-09)
+
+Re-taken after a peer session warned that this machine had been running three
+concurrent builds, with load averages reported above 200 at one point. Gated on
+`busy=0 && load1 < 2.5`; load was **2.44 before and 2.27 after**. Five
+interleaved rounds after a discarded warm-up, all variants built against a
+cleared `.march/cas/artifacts-v2`.
+
+Workload: `List.range(1, 20000)`, mapped 2000 times, list threaded so each pass
+sees a unique value.
+
+| variant | source | time |
+|---|---|---:|
+| natural style, TRMC on (default) | `Cons(h+1, nmap(t))` | **0.05-0.06s** |
+| natural style, `--no-trmc` | same source | 0.26s |
+| stdlib `List.map` accumulator form | `List.map(xs, fn x -> x + 1)` | 0.44s |
+
+Round-to-round spread was 0.01s or less on every variant.
+
+**The number that isolates the transform is the first pair: 0.05-0.06s against
+0.26s, roughly 4.5x, same source compiled two ways.**
+
+Do NOT read the 0.44s row as an 8x stdlib win. That variant calls `List.map`
+with a closure (`fn x -> x + 1`) while the natural one inlines `h + 1`, so the
+gap mixes TRMC with closure-call overhead. This file's own 2026-08-07 figure for
+a hand-written accumulator on the same workload was ~0.16-0.17s, which suggests
+most of the 0.44 - 0.17 difference is closure dispatch and not the traversal
+count. Establishing what TRMC is worth against the stdlib requires the Phase 6
+rewrite, and that measurement belongs to that item.
+
+### On the "TRMC measured slower" results in this file
+
+Two earlier sections record TRMC being dramatically slower, and both are about
+INTERMEDIATE PROTOTYPE STATES from 2026-08-07, not the transform in the tree:
+
+- Phase 3 prototype, destination-passing alone: ~1.00s, **3.5x worse**. Cause:
+  it destroyed FBIP reuse, because `Perceus_fbip.same_arity` paired a scrutinee
+  drop only with `EAlloc` and never with `EAllocHole`, so every iteration
+  allocated.
+- Phase 4B alone, post-call drop fixed but reuse still broken: ~0.98s, 5.8x
+  worse.
+
+Phase 4A (reuse-with-hole: `EAllocHole` gains a reuse token so FBIP emits
+`reuse_hole xs as Cons(h+1, _)`) is what closed the gap, 0.98s to 0.06s. The
+measurement above confirms that on a quiet box a month later.
+
+A third statement in this file is easy to misread as a claim about the
+transform and is not one: **"natural style is 1.8x SLOWER today"** compares
+natural style *without* TRMC against the accumulator form. It is the reason the
+stdlib is written in accumulator style, not a result about TRMC.

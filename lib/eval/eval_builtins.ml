@@ -1159,6 +1159,14 @@ let base_env : env =
   ; ("string_concat3", VBuiltin ("string_concat3", function
         | [VString a; VString b; VString c] -> VString (a ^ b ^ c)
         | _ -> eval_error "string_concat3: expected three strings"))
+  ; (* Variadic: desugar emits this for a 4+ operand interpolation, so the
+       argument list is whatever that chain had.  See
+       [Typecheck_builtins.variadic_builtins]. *)
+    ("string_concat_n", VBuiltin ("string_concat_n", fun args ->
+        let parts = List.map (function
+          | VString s -> s
+          | _ -> eval_error "string_concat_n: expected strings") args in
+        VString (String.concat "" parts)))
   ; ("string_join", VBuiltin ("string_join", function
         | [lst; VString sep] ->
           let rec to_strings = function

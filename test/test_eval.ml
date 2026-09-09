@@ -4815,6 +4815,60 @@ let test_h_sigil_escapes_many_part_interp () =
     "<p>&lt;script&gt;</p><i>&lt;script&gt;</i><b>&lt;script&gt;</b>"
     (vstr result)
 
+(* Same, at an operand count that folds to `string_concat_n` rather than
+   `string_concat3` (Desugar.fold_concat3 switches at 4+ parts).  That fold is
+   a THIRD shape `decompose_concat` has to see through, and the failure mode is
+   the same one that has already bitten twice: an unrecognized shape collapses
+   the template into one opaque part and escaping is silently skipped while the
+   page still renders. Nine segments here, well past the threshold. *)
+let test_h_sigil_escapes_concat_n_interp () =
+  let env = eval_h_escape_page {|
+  fn page(evil) : String do
+    IOList.to_string(~H"<p>${evil}</p><i>${evil}</i><b>${evil}</b><u>${evil}</u>")
+  end|} in
+  let result = call_fn env "page" [March_eval.Eval.VString "<script>"] in
+  Alcotest.(check string) "concat_n-folded ~H interpolation is HTML-escaped"
+    "<p>&lt;script&gt;</p><i>&lt;script&gt;</i><b>&lt;script&gt;</b><u>&lt;script&gt;</u>"
+    (vstr result)
+
+(* The fold itself: 3 operands stay `string_concat3` (already one allocation
+   and one copy, so an n-ary call would only add a stack array), 4+ become
+   `string_concat_n`.  Pinned because the boundary is a correctness-relevant
+   claim about both shapes, not a tuning constant -- see fold_concat3. *)
+let desugared_head src =
+  match March_desugar.Desugar.desugar_expr (parse_expr_str src) with
+  | March_ast.Ast.EApp (March_ast.Ast.EVar f, args, _) ->
+    (f.March_ast.Ast.txt, List.length args)
+  | _ -> ("<not an application>", 0)
+
+let test_concat_fold_boundary () =
+  Alcotest.(check (pair string int)) "2 operands stay ++"
+    ("++", 2) (desugared_head {|"a${x}"|});
+  Alcotest.(check (pair string int)) "3 operands are concat3"
+    ("string_concat3", 3) (desugared_head {|"a${x}b"|});
+  Alcotest.(check (pair string int)) "4 operands become concat_n"
+    ("string_concat_n", 4) (desugared_head {|"a${x}b${y}"|});
+  Alcotest.(check (pair string int)) "9 operands are ONE concat_n, not a fold"
+    ("string_concat_n", 9) (desugared_head {|"a${w}b${x}c${y}d${z}e"|})
+
+let test_eval_concat_n_matches_chain () =
+  (* The n-ary form must agree with the pairwise one it replaces, including
+     when an operand is empty. *)
+  let env = eval_module {|mod Test do
+  fn nary(a : String, b : String, c : String, d : String, e : String) : String do
+    "${a}${b}${c}${d}${e}"
+  end
+  fn pairwise(a : String, b : String, c : String, d : String, e : String) : String do
+    a ++ (b ++ (c ++ (d ++ e)))
+  end
+end|} in
+  let args = List.map (fun s -> March_eval.Eval.VString s)
+    ["A"; ""; "CCC"; "DD"; ""] in
+  Alcotest.(check string) "n-ary concat agrees with the pairwise chain"
+    (vstr (call_fn env "pairwise" args)) (vstr (call_fn env "nary" args));
+  Alcotest.(check string) "and is the expected string"
+    "ACCCDD" (vstr (call_fn env "nary" args))
+
 (* Signal.watch (7.2, Stage A): deferred green-thread dispatch of an OS-signal
    watcher.  Drive the drain directly — register an OCaml handler on the Usr1
    slot (code 3), raise SIGUSR1 to ourselves, pump [run_scheduler], and assert
@@ -5611,5 +5665,8 @@ let eval_suites =
           Alcotest.test_case "GET form with conn: no injection"        `Quick test_h_sigil_get_form_not_injected_with_conn;
           Alcotest.test_case "short interp: escaped"                   `Quick test_h_sigil_escapes_short_interp;
           Alcotest.test_case "many-part interp: escaped"               `Quick test_h_sigil_escapes_many_part_interp;
+          Alcotest.test_case "concat_n interp: escaped"                `Quick test_h_sigil_escapes_concat_n_interp;
+          Alcotest.test_case "concat fold boundary"                    `Quick test_concat_fold_boundary;
+          Alcotest.test_case "concat_n matches pairwise chain"         `Quick test_eval_concat_n_matches_chain;
         ] );
   ]
