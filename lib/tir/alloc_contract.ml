@@ -810,8 +810,16 @@ let failure_message ~head ~name ~suffix (reason : reason) : string =
   | r ->
     Printf.sprintf "%s but allocates.%s\n  In `%s`: %s." head suffix name (describe r)
 
-let trmc_note = "This function is TRMC-eligible; compiling with --trmc turns the \
-                 constructor into an in-place write."
+(* Fires only when TRMC is OFF, which since 2026-09-09 means the user passed
+   --no-trmc (or MARCH_NO_TRMC=1). The note used to read "compiling with --trmc
+   turns the constructor into an in-place write", which was correct while the
+   transform was opt-in and is now backwards: the allocation this diagnostic is
+   complaining about exists BECAUSE the default was turned off. Say that, so
+   the reader knows the fix is to drop their flag, not to add one. *)
+let trmc_note = "This function is TRMC-eligible: with tail-recursion-modulo-cons \
+                 the constructor would be an in-place write and this function \
+                 would not allocate. It is on by default and something turned it \
+                 off here — check for `--no-trmc` or `MARCH_NO_TRMC`."
 
 (* ── Generation scope (LSP quick fix and forge fix --contracts) ───────── *)
 
@@ -885,7 +893,7 @@ let has_noalloc_policy (fd : Tir.fn_def) : bool =
     clone.  [retaining] carries the @[no_alloc(transient)] verdicts.  [opt =
     false] (--no-opt) downgrades the hard form to a warning that names the
     flag; a direct constructor allocation in a TRMC-eligible function gets
-    the --trmc note while TRMC is off. *)
+    [trmc_note] while TRMC is off, which now means the user disabled it. *)
 let check ~decls ~(allocating : (string, reason) Hashtbl.t)
     ?(retaining : (string, retain) Hashtbl.t = Hashtbl.create 0) ~opt ~trmc
     ~(trmc_eligible : string -> bool) (m : Tir.tir_module)
