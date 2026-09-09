@@ -8,29 +8,45 @@
 -- second reply.
 mod Main do
   needs IO.Console
+  needs IO.Clock
+
   type GetReq = GetReq
+
+  -- Make the handler late by the CLOCK, not by a fixed amount of work.
+  --
+  -- This fixture used to burn a fixed 20,000,000-element fold, which is only
+  -- ever "slow" relative to whatever machine runs it: the interpreter needed
+  -- that cut to something affordable (~300x slower per element than compiled),
+  -- and at 50,000 the compiled handler finished INSIDE the 1ms deadline on the
+  -- macos-15 CI runner while taking 4ms locally, so the golden said
+  -- `first: unexpected ok` in CI and `first: timeout` here. Raw speed is not
+  -- even the whole story -- on a many-core runner the handler's green thread
+  -- gets a head start on the caller.
+  --
+  -- Spinning until a wall-clock deadline costs the same 50ms on both backends
+  -- and on any machine, which is a 50x margin over the 1ms deadline below
+  -- instead of a 4x one. Both backends tail-call-optimize this, so it does not
+  -- grow the stack.
+  fn spin_until(deadline_ms) do
+    if unix_time_ms() >= deadline_ms do
+      0
+    else
+      spin_until(deadline_ms)
+    end
+  end
 
   actor Echo do
     state { n : Int }
     init  { n: 0 }
 
     on Get(reply_to) do
-      -- Burn time so call #1's 1ms deadline expires before this reply lands.
-      --
-      -- The size is bounded from BOTH sides, because this fixture now runs on
-      -- both backends. Compiled, the burn must comfortably exceed 1ms: 50k
-      -- takes ~4ms, a 4x margin, and CI load only pushes it further past the
-      -- deadline. Interpreted, the same burn costs ~1.2s -- roughly 300x --
-      -- so it must stay small enough to be an affordable test: the original
-      -- 20,000,000 would have taken hours and allocated a list of 20M cons
-      -- cells (it overflowed the interpreter's stack at 3M).
-      let _ = List.fold_left(Range.to_list(Range.new(0, 50000)), 0, fn (a, b) -> a + b)
+      let _ = spin_until(unix_time_ms() + 50)
       Actor.reply(reply_to, state.n)
       { n: state.n + 1 }
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main(_cap_console : Cap(IO.Console), _cap_clock : Cap(IO.Clock)) do
     let pid = spawn(Echo)
     let first = Actor.call(pid, GetReq, 1)      -- times out; reply n=0 arrives late
     match first do
