@@ -694,6 +694,17 @@ int64_t march_send_checked(void *cap, void *msg);
 /* Value pretty-printing. */
 void *march_value_to_string(void *v);
 
+/* Constructor-name metadata for compiled `to_string` on a user ADT.
+ * [march_ctor_table_ensure] registers one compilation unit's descriptor
+ * string (grammar and field-token alphabet documented at the implementation
+ * in runtime/march_extras.c, written by lib/tir/llvm_ctor_desc.ml) and
+ * returns the base index its types were appended at; [cache] memoizes
+ * base+1.  [march_value_to_string_typed] renders [v] as the type with that
+ * (already rebased) id, falling back to [march_value_to_string] for any
+ * shape the table cannot describe. */
+int32_t march_ctor_table_ensure(const char *desc, int32_t *cache);
+void *march_value_to_string_typed(void *v, int32_t type_id);
+
 /* Process builtins */
 void  march_process_argv_init(int argc, char **argv);
 void *march_process_argv(void);

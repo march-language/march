@@ -13,6 +13,17 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Compiled `to_string`/`println` render a user ADT's constructor, not
+  `#<tag:N>`.** A boxed constructor cell carries a per-type tag and nothing
+  else, so the compiled backend's type-erased formatter had no name, arity or
+  field types to work from and printed the raw tag; `~H` interpolation of an
+  ADT had the same gap. The compiler now emits a constructor descriptor for
+  every declared variant and record type it lowers, and the runtime walks it,
+  so `to_string(Circle(7))` is `Circle(7)` compiled as well as interpreted —
+  nested fields, lists and records included. Values in a genuinely erased slot,
+  and `Option`-shaped or single-field-wrapper types (which have no cell of
+  their own), still render `#<tag:N>`.
+
 - **Per-child restart types on `supervise` blocks.** A child may be declared
   `restart transient` (a crash restarts it, `kill()` retires it for good) or
   `restart temporary` (never restarted); the default stays `permanent`, so
@@ -53,6 +64,18 @@ git log is authoritative for exact commits.
   delays exactly reproducible for tests.
 
 ### Fixed
+
+- **A missing `Show` impl is no longer reported as an ambiguity.**
+  `println(x)` on a type with no `Show` failed to compile with "ambiguous
+  interface-method call to `show`: 20 implementations are in scope", listing
+  twenty types none of which was the argument's, and never mentioning the
+  `derive` that fixes it. Such a call now renders through the constructor names
+  above, matching the interpreter, so it compiles. Where an interface method
+  genuinely has no fallback, the diagnostic names the type and how to supply
+  the implementation instead of listing every impl in scope.
+
+- **`examples/csv_example.march` prints its rows compiled.** It rendered
+  `#<tag:1>` per row in a compiled binary and the real values interpreted.
 
 - **`Actor.call`'s timeout is enforced in the interpreter.** It was bound and
   never read, so a handler that took ten seconds "answered in time" against a

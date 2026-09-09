@@ -354,6 +354,8 @@ native_timer_leak_probe: coverage audit (user + stdlib): 63 enforced, 0 inert (w
 native_timer_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_timer_send_after: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_timer_send_after: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_to_string_ctor_names: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_to_string_ctor_names: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_to_string_show: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_to_string_show: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_toml_get_int: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced

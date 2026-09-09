@@ -33,3 +33,38 @@ can RESOLVE instead of erroring — remains open.
   from_json(s)` from generalizing past the sweep. If return-type dispatch
   needs `from_json` to stay polymorphic at a binding, that trade has to be
   made deliberately and the capability check re-secured another way.
+## Scoping pass, 2026-09-08 — split into two items with very different risk
+
+A scoping pass for this item found that the two open symptoms it covers do NOT
+need the same mechanism, and should not be attempted together.
+
+**(A) The island bridges do not need return-type dispatch at all.**
+`Desugar.gen_island_bridges` (`lib/desugar/desugar.ml`) emits two BARE
+`from_json` calls and relies on inference to pin each one's type. But the
+generator knows STATICALLY that the first decodes to `State` and the second to
+`Msg` — it only generates the bridges when both types exist and both derive
+Json. Emitting a call that is unambiguous by construction fixes both backends
+(the interpreter's last-derive-wins rebinding and the compiled ≥2-impl
+ambiguity error) and introduces NO new dispatch mechanism, so it does not go
+near `check_json_cap_sites`. Blocking question a real attempt must answer
+first: `derive Json` generates `DImpl` blocks under the pseudo-interfaces
+`JsonFrom`/`JsonTo`, and the interpreter name-binds only the BARE method
+(last-wins) while putting the impl in `impl_tbl`; so whether a per-type
+reference is expressible in the generated AST such that BOTH backends resolve
+it is the thing to determine before writing any code.
+
+**(B) True return-type-directed dispatch for user-written bare `from_json`**
+is the risky half, and the capability guard is the reason. `from_json` has an
+unconstrained type (`poly2 (fun a b -> TArrow (a, b))`), so
+`let forged : Cap(IO) = from_json("{}")` typechecks, `--cap-strict` included.
+What stops it is not the type system — it is that no dispatch can produce the
+value. Implementing (B) without preserving the guard turns a compile-clean
+program into a working capability forge. The guard is `check_json_cap_sites`
+(`lib/typecheck/typecheck.ml`), a DEFERRED end-of-module sweep, plus
+`demote_to_monomorphic` on the recorded arrow; the witness that the sweep is
+still deferred is
+`specs/lang/types/reject/t143_cap_from_json_deferred_zonk.march`.
+
+(A) is worth doing on its own — it closes
+`specs/todos/2026-08-12-island-bridge-from-json-broken.md`, whose feature is
+100% non-functional today, without touching (B). Neither was started.

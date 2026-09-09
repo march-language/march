@@ -21,6 +21,22 @@ open Llvm_ctx
 
 let atom_tir_ty = Llvm_data.atom_tir_ty
 
+(** Normalise [a] (already emitted as [v]) to a real March String for
+    escaping.  Uses the constructor-name table when the atom's STATIC type
+    names a variant/record the table describes, so an interpolated user ADT
+    escapes `Point(1, 2)` rather than `#<tag:0>`; every other shape keeps the
+    generic [march_value_to_string] it had.  Purely a legibility change — the
+    value is escaped identically either way, so the security property this
+    file's dispatch exists to protect is untouched. *)
+let stringify_for_escape ctx (a : Tir.atom) (v : string) : string =
+  match Llvm_ctor_desc.id_for ctx (atom_tir_ty a) with
+  | Some local_id -> snd (Llvm_ctor_desc.emit_to_string ctx v local_id)
+  | None ->
+    let s = Llvm_ctx.fresh ctx "vts_str" in
+    Llvm_ctx.emit ctx
+      (Printf.sprintf "%s = call ptr @march_value_to_string(ptr %s)" s v);
+    s
+
 (** Body of the `html_auto_escape` arm for an [Html.Safe] argument: the
     payload passes through unescaped, which is exactly Safe's contract. *)
 let emit_html_auto_escape_safe ~emit_atom ctx (a : Tir.atom)
@@ -73,10 +89,7 @@ let emit_html_auto_escape ~emit_atom ctx (a : Tir.atom) : string * string =
     let v =
       if runtime_safe then v
       else begin
-        let s = fresh ctx "hae_str" in
-        emit ctx
-          (Printf.sprintf "%s = call ptr @march_value_to_string(ptr %s)" s v);
-        s
+        stringify_for_escape ctx a v
       end
     in
     let r = fresh ctx "hae" in
@@ -163,10 +176,7 @@ let emit_html_escape_ctx_static ~emit_atom ctx (id : int) (a : Tir.atom)
           (Printf.sprintf "%s = call ptr @march_html_auto_escape(ptr %s)" fv v);
         fv
       | _ ->
-        let sv = fresh ctx "hec_str" in
-        emit ctx
-          (Printf.sprintf "%s = call ptr @march_value_to_string(ptr %s)" sv v);
-        sv
+        stringify_for_escape ctx a v
     in
     let trust_covers_this_context =
       match trusted_ids with
@@ -196,10 +206,7 @@ let emit_html_escape_ctx_dynamic ~emit_atom ctx (idx : Tir.atom)
       match atom_tir_ty a with
       | Tir.TString -> v
       | _ ->
-        let sv = fresh ctx "hecd_str" in
-        emit ctx
-          (Printf.sprintf "%s = call ptr @march_value_to_string(ptr %s)" sv v);
-        sv
+        stringify_for_escape ctx a v
     in
     let r = fresh ctx "hecd" in
     emit ctx

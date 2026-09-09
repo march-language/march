@@ -46,3 +46,21 @@ general. Start by diffing the TIR for the row-printing call
 Worth a compiled-parity regression test in `test_codegen` once fixed;
 `examples/` is not covered by the compiled-parity suites today, which is why a
 shipped example could diverge unnoticed.
+
+---
+
+## Resolved 2026-09-08
+
+Root cause was the missing constructor metadata, not a mis-resolved `Show`
+instance: `Csv.each_row` yields a declared ADT whose cells carried a tag and
+nothing else, so the type-erased formatter printed the tag. The constructor
+name table closes it — see
+`specs/progress/2026-09-08-compiled-to-string-adt-ctor-names.md`.
+
+Verified: `examples/csv_example.march` interpreted and compiled now produce
+byte-identical output, with zero `#<tag:` occurrences.
+
+The note's closing suggestion — that `examples/` is not covered by the
+compiled-parity suites — still stands and is NOT addressed here. The new
+coverage is `test/native/to_string_ctor_names.march`, a purpose-built parity
+golden; the examples directory remains uncovered.

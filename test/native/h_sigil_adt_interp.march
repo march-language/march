@@ -19,15 +19,24 @@
 -- everything else is stringified with march_value_to_string first, then
 -- escaped as a String.
 --
--- KNOWN SEPARATE DEFECT — the `#<tag:N>` below is NOT intended output.
--- Compiled `march_value_to_string` has no constructor-name metadata, so it
--- renders any user ADT as `#<tag:N>` where the interpreter renders
--- `Point(1, 2)`.  That gap predates this fix and is independent of `~H`:
--- `to_string(Point(1, 2))` alone already differs the same way on main.  It is
--- filed separately; see specs/todos/2026-08-05-compiled-to-string-adt-ctor-names.md.
--- What this test pins is the SECURITY property — the ADT payload is never
--- emitted raw, and the `<`/`>` that do appear are escaped.  Once ctor names
--- land, update .expected to the interpreter's rendering.
+-- What this test pins first is the SECURITY property — the ADT payload is
+-- never emitted raw, and the `<`/`>` that do appear are escaped.
+--
+-- The `#<tag:N>` placeholders it used to pin everywhere are gone as of
+-- 2026-09-08: the constructor-name table (lib/tir/llvm_ctor_desc.ml +
+-- march_ctor_table_ensure in runtime/march_extras.c) renders any DECLARED
+-- variant or record type whose repr is Boxed or Unboxed, so `.expected` is now
+-- the interpreter's own rendering for those lines.
+--
+-- FOUR PLACEHOLDERS REMAIN, and each is a specific, still-open residual — not
+-- a line to "fix up" by editing .expected:
+--   some/none      Option is NICHE-encoded: `Some(x)` IS `x` and `None` is
+--                  null, so there is no wrapper cell to name.
+--   record/tuple   an anonymous record literal and a tuple literal have no
+--                  declared type name for the table to key on.
+--   poly_*         the genuinely undecidable TVar case this file was written
+--                  for; it needs a runtime type id, which is exactly
+--                  specs/todos/2026-08-05-boxed-adt-type-id.md.
 
 mod HSigilAdtInterp do
   needs IO.Console

@@ -341,7 +341,7 @@ let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
        [fail_if_unresolved_iface_method]; the ECallPtr no-var-slot catch-all
        applies the identical guard. *)
     if not is_known_fn then
-      fail_if_unresolved_iface_method ctx f.Tir.v_name;
+      fail_if_unresolved_iface_method ~args ctx f.Tir.v_name;
     if not is_known_fn && not (Hashtbl.mem ctx.unknown_decls fname) then begin
       Hashtbl.replace ctx.unknown_decls fname ();
       let param_strs = List.mapi (fun i (ty, _) ->
@@ -579,7 +579,7 @@ let emit_callptr_global ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
        [fail_if_unresolved_iface_method]; the EApp general-call path applies
        the identical guard. *)
     if not is_known_fn then
-      fail_if_unresolved_iface_method ctx f.Tir.v_name;
+      fail_if_unresolved_iface_method ~args ctx f.Tir.v_name;
     if not is_known_fn && not (Hashtbl.mem ctx.unknown_decls fname) then begin
       Hashtbl.replace ctx.unknown_decls fname ();
       let param_strs = List.mapi (fun i (ty, _) ->
