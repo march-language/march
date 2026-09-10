@@ -11,6 +11,8 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-10
+
 ### Added
 
 - **Compiled `to_string`/`println` render a user ADT's constructor, not
