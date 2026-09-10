@@ -126,36 +126,45 @@ let rec decompose_concat (e : expr) : expr list =
     decompose_concat left @ decompose_concat right
   | EApp (EVar { txt = "string_concat3"; _ }, [a; b; c], _sp) ->
     decompose_concat a @ decompose_concat b @ decompose_concat c
+  | EApp (EVar { txt = "string_concat_n"; _ }, parts, _sp) ->
+    List.concat_map decompose_concat parts
   | _ -> [e]
 
 (** Number of operands in a [++] chain, without building the list. *)
 let concat_chain_len (e : expr) : int = List.length (decompose_concat e)
 
-(** Rebuild a flattened [++] chain using three-way concats, consuming three
-    operands per allocation instead of two.
+(** Rebuild a flattened [++] chain as a single concat.
 
-    [a;b;c;d;e] becomes [string_concat3(string_concat3(a,b,c), d, e)] — two
-    allocations where the left-deep [++] chain needed four.  A trailing pair
-    falls back to [++], and a trailing single operand is appended with [++],
-    since [string_concat3] is fixed-arity.
+    Three shapes, by operand count, and the boundary is not a tuning knob:
 
-    Left-associative, matching [++]'s own associativity, so evaluation order and
-    therefore the result string are unchanged. *)
+    - 1 operand is itself; 2 is [++]; 3 is [string_concat3].  Each of those is
+      already ONE allocation and ONE copy of each byte, which is the best any
+      concat can do — there is nothing for an n-ary form to improve.
+    - 4 or more becomes [string_concat_n], which sums every part's length once,
+      allocates once, and copies each byte once.
+
+    Why not keep folding [string_concat3]?  Because that fold re-copies the
+    accumulated prefix at every link, so k parts cost O(k^2) bytes copied.  With
+    short operands that is invisible and the fold was measured faster than the
+    cons-list [string_join] it replaced; with 4KB operands it is the difference
+    between 0.03s and 0.5s at k=32 (see
+    specs/progress/2026-07-27-large-operand-interpolation-is-quadratic-again-needs-string.md).
+    A count-based choice BETWEEN those two strategies could not work, because
+    the parser knows operand count but not operand size.  This is not that
+    choice: [string_concat_n] is linear at every size, so the only thing the
+    count decides is whether an n-ary call would beat a shape that is already
+    optimal, and below 4 it does not.
+
+    Evaluation order is left-to-right in all three shapes, matching [++]'s own
+    associativity, so the result string is unchanged. *)
 let fold_concat3 (parts : expr list) (sp : span) : expr =
   let cat2 a b = EApp (EVar { txt = "++"; span = sp }, [a; b], sp) in
-  let cat3 a b c =
-    EApp (EVar { txt = "string_concat3"; span = sp }, [a; b; c], sp) in
-  let rec go acc rest =
-    match rest with
-    | []            -> acc
-    | [x]           -> cat2 acc x
-    | x :: y :: tl  -> go (cat3 acc x y) tl
-  in
   match parts with
   | []            -> ELit (LitString "", sp)
   | [x]           -> x
   | [x; y]        -> cat2 x y
-  | x :: y :: z :: tl -> go (cat3 x y z) tl
+  | [x; y; z]     -> EApp (EVar { txt = "string_concat3"; span = sp }, [x; y; z], sp)
+  | _             -> EApp (EVar { txt = "string_concat_n"; span = sp }, parts, sp)
 
 (* ── Island tag parsing in ~H ──────────────────────────────────────────── *)
 
@@ -1581,7 +1590,16 @@ let maybe_inject_island_bridges
         | DFn (_, sp) :: _ -> sp
         | _ -> dummy_span
       in
-      expanded @ gen_island_bridges sp
+      (* Uniquify the generated spans, exactly as [Desugar_derive] does for
+         derive-generated decls and for the same reason, which became a
+         correctness requirement rather than a nicety once `from_json`
+         dispatch became span-keyed (March_ast.Json_dispatch).
+         [gen_island_bridges] stamps ONE span on every node it builds, so
+         `update_json`'s two `from_json` calls — one decoding State, one
+         decoding Msg — were indistinguishable to any span-keyed table: the
+         second recording overwrote the first and both decoded as the same
+         type, which is the shape of the original bug. *)
+      expanded @ List.map Desugar_derive.respan_derived_decl (gen_island_bridges sp)
   end
   else expanded
 

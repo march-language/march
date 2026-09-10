@@ -203,6 +203,13 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_string_to_int(ptr %s)" };
   { march_name = "string_concat3"; c_name = Some "march_string_concat3"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_string_concat3(ptr %a, ptr %b, ptr %c)" };
+  (* Variadic at the March level, but NOT at the ABI level: codegen spreads the
+     operands into a stack array and calls this with (count, array).  The
+     generic call path in [Llvm_emit] cannot emit that, so [String_concat_n]
+     has its own arm there; the entry here exists for the declaration and the
+     return type. *)
+  { march_name = "string_concat_n"; c_name = Some "march_string_concat_n"; ret_ty = Some Tir.TString;
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_string_concat_n(i64 %n, ptr %parts)" };
   { march_name = "string_join"; c_name = Some "march_string_join"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_string_join(ptr %list, ptr %sep)" };
   { march_name = "float_abs"; c_name = Some "march_float_abs"; ret_ty = Some Tir.TFloat;
@@ -1058,6 +1065,8 @@ let runtime_only_declares : (string * string) list = [
   ("march_test_report", "declare i32  @march_test_report()");
   ("march_string_lit", "declare ptr  @march_string_lit(ptr %s, i64 %len)");
   ("march_string_lit_static", "declare ptr  @march_string_lit_static(ptr %s, i64 %len, ptr %cell)");
+  ("march_ctor_table_ensure", "declare i32  @march_ctor_table_ensure(ptr %desc, ptr %cache)");
+  ("march_value_to_string_typed", "declare ptr  @march_value_to_string_typed(ptr %v, i32 %type_id)");
   ("march_record_shape_intern", "declare i32  @march_record_shape_intern(ptr %desc)");
   ("march_record_set_shape", "declare void @march_record_set_shape(ptr %rec, ptr %desc, ptr %cache)");
   ("march_record_put", "declare ptr  @march_record_put(ptr %rec, ptr %key, ptr %val, i64 %kind)");
@@ -1178,6 +1187,8 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_string_lit_static";
   PDeclare "march_html_auto_escape";
   PDeclare "march_html_escape_ctx";
+  PDeclare "march_ctor_table_ensure";
+  PDeclare "march_value_to_string_typed";
   PDeclare "march_record_shape_intern";
   PDeclare "march_record_set_shape";
   PDeclare "march_record_keys";
@@ -1220,6 +1231,7 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_string_is_empty";
   PDeclare "march_string_to_int";
   PDeclare "march_string_concat3";
+  PDeclare "march_string_concat_n";
   PDeclare "march_string_join";
   PComment "; Float builtins";
   PDeclare "march_float_abs";

@@ -63,7 +63,7 @@ val mangle_extern : string -> string
     non-exhaustive-match error. It doubles as documentation of which topic
     section of [llvm_emit.ml] emits a given builtin. *)
 
-type builtin_group = Bg_arith | Bg_task | Bg_record
+type builtin_group = Bg_arith | Bg_task | Bg_record | Bg_string
 
 val builtin_group : Builtin_name.t -> builtin_group
 

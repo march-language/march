@@ -51,6 +51,7 @@ type t =
   | Signal_raise_self
   | Signal_unwatch
   | Signal_watch
+  | String_concat_n
   | Task_await
   | Task_await_unwrap
   | Task_cancel
@@ -113,6 +114,7 @@ let to_string = function
   | Signal_raise_self -> "signal_raise_self"
   | Signal_unwatch -> "signal_unwatch"
   | Signal_watch -> "signal_watch"
+  | String_concat_n -> "string_concat_n"
   | Task_await -> "task_await"
   | Task_await_unwrap -> "task_await_unwrap"
   | Task_cancel -> "task_cancel"
@@ -140,6 +142,7 @@ let to_string = function
 let all =
   [ Actor_register; Actor_reply; Bool_to_string; Chan_choose; Chan_send;
     Float_to_string; Get_work_pool; Html_auto_escape; Html_escape_ctx;
+    String_concat_n;
     Int_abs; Int_div; Int_div_euclid; Int_max_value; Int_min_value;
     Int_mod; Int_mod_euclid; Int_not; Int_popcount; Int_pow;
     Int_to_string; Mpst_send; Negate; Not; Pmap_threshold; Receive;

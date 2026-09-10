@@ -78,6 +78,7 @@ let corpus = [
   "borrowed_field_escape",           "borrowed_field_escape.march";
   "scrutinee_borrowed_conservatism", "scrutinee_borrowed_conservatism.march";
   "mutual_tco",                      "mutual_tco.march";
+  "trmc_modulo_cons",                "trmc_modulo_cons.march";
   "fbip_dead_binding_reuse",         "fbip_dead_binding_reuse.march";
   "record_update",                   "record_update.march";
   "self_tco_loop",                   "self_tco_loop.march";
@@ -180,9 +181,17 @@ let dump_post_lower src =
   March_tir.Defun.set_lambda_counter 0;
   render_module (Test_helpers.lower_module_typed src)
 
+(* TRMC runs post-lower / pre-mono, exactly as [Contract_pipeline] runs it,
+   and reads [Trmc.enabled] — so these snapshots pin the DEFAULT behaviour and
+   a change to that default shows up here as a diff.  Before this was wired in,
+   the harness skipped the pass entirely and TRMC's emitted shape had no golden
+   coverage at all: flipping the default moved zero snapshot lines, which reads
+   as "nothing changed" when it actually meant "nothing was looking". *)
 let dump_post_perceus src =
   March_tir.Defun.set_lambda_counter 0;
-  let tir = Test_helpers.mono_module src in
+  let tir = Test_helpers.lower_module_typed src in
+  let tir = March_tir.Trmc.transform_module tir in
+  let tir = March_tir.Mono.monomorphize tir in
   let tir = March_tir.Defun.defunctionalize tir in
   let tir = March_tir.Perceus.perceus tir in
   render_module tir

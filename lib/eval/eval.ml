@@ -1786,7 +1786,40 @@ and eval_expr_inner (env : env) (e : expr) : value =
     in
     (if !March_coverage.Coverage.coverage_enabled then
       March_coverage.Coverage.record_fn_call fn_name);
-    let fn_val = eval_expr env f in
+    (* `from_json` dispatches on its RESULT type, which no value in hand can
+       reveal, so `derive Json` binds the bare name in the environment and the
+       LAST type to derive Json in a module owned it — every earlier type's
+       decode silently ran the wrong decoder and returned a DecodeError that
+       looked like bad input.  The typechecker resolves the target per call
+       site (March_ast.Json_dispatch, written by the capability sweep in
+       Typecheck_caps); when it did, take the impl straight out of [impl_tbl]
+       instead of the shadowed name.
+
+       Falls through to the ordinary lookup when the site is unresolved (the
+       result type was never pinned) or when no impl is registered for the
+       resolved type — the previous behaviour, not an error, because a
+       resolved-but-absent impl is a program the typechecker already rejected
+       or a shape this does not model. *)
+    let json_iface_of = function
+      | "from_json" -> Some "JsonFrom"
+      | "from_json_events" -> Some "JsonFromEvents"
+      | _ -> None
+    in
+    let dispatched =
+      match f with
+      | EVar n ->
+        (match json_iface_of n.txt with
+         | None -> None
+         | Some iface ->
+           (match March_ast.Json_dispatch.find sp with
+            | None -> None
+            | Some tname -> Hashtbl.find_opt impl_tbl (iface, tname)))
+      | _ -> None
+    in
+    let fn_val = match dispatched with
+      | Some v -> v
+      | None -> eval_expr env f
+    in
     let arg_vals = List.map (eval_expr env) args in
     march_stack_push fn_name sp;
     (* Leave March-panic frames live for the backtrace handler.

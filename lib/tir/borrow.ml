@@ -179,10 +179,22 @@ let extern_borrow_table : (string * bool list) list = [
   ("march_value_to_string", [true]);
 ]
 
+(** Builtins that borrow EVERY argument, at any arity.
+
+    [extern_borrow_table] is a fixed-length list per name, which cannot say
+    "all of them" for a variadic builtin: [List.nth_opt] past the end answers
+    [None], i.e. NOT borrowed, so Perceus would treat the call as consuming
+    those arguments and emit no drop for them.  For [string_concat_n], whose C
+    implementation borrows all its parts, that leaks every operand past the
+    third. *)
+let all_args_borrowed_builtins = [ "string_concat_n" ]
+
 (** True iff parameter [idx] of C extern / TIR builtin [fn_name] is borrowed
     according to the hardcoded ABI table.  Used as a fallback in [is_borrowed]
     when the function is not a March-defined function. *)
 let is_extern_borrowed (fn_name : string) (param_idx : int) : bool =
+  if List.mem fn_name all_args_borrowed_builtins then true
+  else
   match List.assoc_opt fn_name extern_borrow_table with
   | Some borrows ->
     (match List.nth_opt borrows param_idx with Some b -> b | None -> false)

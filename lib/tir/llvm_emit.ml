@@ -169,6 +169,8 @@ type ctx = Llvm_ctx.ctx = {
   repl : bool;
   mutable shape_meta : bool;
   rec_shape_globals : (string, string * string) Hashtbl.t;
+  mutable ctor_desc_globals : (string * string) option;
+  ctor_desc_ids : (string, int) Hashtbl.t;
   remote_impl_hashes : (string, string) Hashtbl.t;
   remote_sig_hashes  : (string, string) Hashtbl.t;
   compile_so : bool;
@@ -816,6 +818,7 @@ type builtin_group =
   | Bg_arith   (* integer/float/bool scalar ops and the to_string family *)
   | Bg_task    (* tasks, actors, signals, channels, MPST, work pools *)
   | Bg_record  (* records, vaults, HTML escaping *)
+  | Bg_string  (* string builtins whose ABI the generic call path cannot emit *)
 
 let builtin_group : Builtin_name.t -> builtin_group = function
   | Builtin_name.Bool_to_string | Builtin_name.Float_to_string
@@ -850,6 +853,8 @@ let builtin_group : Builtin_name.t -> builtin_group = function
   | Builtin_name.Vault_set | Builtin_name.Vault_set_ttl
   | Builtin_name.Vault_update ->
     Bg_record
+  | Builtin_name.String_concat_n ->
+    Bg_string
 
 let rec emit_expr ctx (e : Tir.expr) : string * string =
   match e with
@@ -1254,6 +1259,34 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   | Tir.EApp (f, [idx; a]) when Builtin_name.is Builtin_name.Html_escape_ctx f.Tir.v_name ->
     Llvm_emit_html.emit_html_escape_ctx_dynamic ~emit_atom ctx idx a
 
+  (* ── string_concat_n: the one variadic builtin ─────────────────────────
+     March-level it takes n String arguments (Typecheck_builtins.variadic_
+     builtins); at the ABI level march_string_concat_n takes (count, array), so
+     the operands are spread into a stack array here.  A C variadic would have
+     worked too, but arm64 passes variadic arguments differently from fixed
+     ones, and an explicit array keeps one ABI on every target.
+
+     The alloca is in place rather than hoisted to the entry block, matching
+     [Llvm_calls.emit_blocking_call], the existing precedent for this shape.
+
+     Every operand is BORROWED (see Borrow.all_args_borrowed_builtins), so
+     nothing here retains or releases them. *)
+  | Tir.EApp (f, (_ :: _ :: _ as args))
+    when Builtin_name.is Builtin_name.String_concat_n f.Tir.v_name ->
+    let n = List.length args in
+    let arr = fresh ctx "catn" in
+    emit ctx (Printf.sprintf "%s = alloca [%d x ptr]" arr n);
+    List.iteri (fun i a ->
+      let v = emit_atom_as ctx "ptr" a in
+      let slot = fresh ctx "catnslot" in
+      emit ctx (Printf.sprintf
+        "%s = getelementptr [%d x ptr], ptr %s, i64 0, i64 %d" slot n arr i);
+      emit ctx (Printf.sprintf "store ptr %s, ptr %s" v slot)) args;
+    let r = fresh ctx "catnr" in
+    emit ctx (Printf.sprintf
+      "%s = call ptr @march_string_concat_n(i64 %d, ptr %s)" r n arr);
+    ("ptr", r)
+
   (* ── Bitwise integer builtins ─────────────────────────────────────── *)
   | Tir.EApp (f, [a; b]) when is_int_bitwise f.Tir.v_name ->
     let va = emit_atom_as ctx "i64" a in
@@ -1493,6 +1526,17 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
        let r = fresh ctx "cr" in
        emit ctx (Printf.sprintf "%s = call ptr @march_bool_to_string(i64 %s)" r v);
        ("ptr", r)
+     (* A named variant/record type the constructor-name table describes:
+        render through it so a user ADT prints `Circle(7)` rather than
+        `#<tag:0>`.  This is the ONE place the static TIR type is still known;
+        [Llvm_ctor_desc.id_for] returns [None] for every shape the table
+        cannot walk (unboxed/newtype/niche repr, an erased TVar), which falls
+        through to the generic renderer below — never worse than before. *)
+     | _ when Llvm_ctor_desc.id_for ctx tir_ty <> None ->
+       let v = coerce ctx arg_ty arg_val "ptr" in
+       let local_id =
+         match Llvm_ctor_desc.id_for ctx tir_ty with Some i -> i | None -> 0 in
+       Llvm_ctor_desc.emit_to_string ctx v local_id
      | _ ->
        let v = coerce ctx arg_ty arg_val "ptr" in
        let r = fresh ctx "cr" in

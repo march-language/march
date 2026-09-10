@@ -36,6 +36,7 @@ type t =
   | Signal_raise_self
   | Signal_unwatch
   | Signal_watch
+  | String_concat_n
   | Task_await
   | Task_await_unwrap
   | Task_cancel

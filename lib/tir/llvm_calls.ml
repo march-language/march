@@ -166,7 +166,19 @@ let emit_raises_wrapper ctx ~fname ~ret_tir ~arg_pairs : string * string =
    internal-compiler-error report (exit 3). *)
 exception Ambiguous_iface_call of string
 
-let fail_if_unresolved_iface_method ctx (bare_name : string) : unit =
+(** Concrete type name of an unresolved call's dispatch argument, or [None]
+    if it is erased.  The distinction decides which of the two very different
+    failures below the user is actually looking at. *)
+let dispatch_arg_type_name (args : Tir.atom list) : string option =
+  match args with
+  | Tir.AVar v :: _ ->
+    (match v.Tir.v_ty with
+     | Tir.TCon (n, _) -> Some n
+     | _ -> None)
+  | _ -> None
+
+let fail_if_unresolved_iface_method ?(args : Tir.atom list = [])
+    ctx (bare_name : string) : unit =
   let candidates =
     Hashtbl.fold (fun name _ acc ->
         if Tir_names.is_iface_mangled name then
@@ -199,17 +211,71 @@ let fail_if_unresolved_iface_method ctx (bare_name : string) : unit =
       in
       find bare_name
   in
-  if candidates <> [] then
-    raise (Ambiguous_iface_call (Printf.sprintf
-      "ambiguous interface-method call to `%s`: %d implementations are in \
-       scope (%s) and the call site's types do not determine which one \
-       applies.\n\
-       This method dispatches on a position that is not concrete at this \
-       call site (for `from_json`-style methods, the RESULT type). \
-       Restructure so only one implementation is in scope for the call — \
-       e.g. keep one `derive`/`impl` per module — or route the call through \
-       a helper defined next to the intended type's `derive`/`impl`."
-      bare_name (List.length candidates) (String.concat ", " candidates)))
+  if candidates <> [] then begin
+    (* Two failures wear the same shape here and must not wear the same
+       message.  If the dispatch ARGUMENT's type is concrete, nothing is
+       ambiguous: there is no impl for that type, and listing twenty impls of
+       other types describes a problem the user does not have.  Only an erased
+       dispatch position — the `from_json` return-type shape — is a genuine
+       ambiguity. *)
+    let iface_of m =
+      match String.index_opt m '$' with
+      | Some i -> Some (String.sub m 0 i)
+      | None -> None
+    in
+    (* `from_json`'s family dispatches on the RESULT type, so its first
+       argument is NOT the dispatch position and "no impl for the argument's
+       type" would be a confidently wrong claim about it.  Those keep the
+       ambiguity wording, which is what it was written for. *)
+    let return_position =
+      List.exists (fun c ->
+          let n = String.length "JsonFrom" in
+          String.length c >= n && String.sub c 0 n = "JsonFrom") candidates
+    in
+    match (if return_position then None else dispatch_arg_type_name args) with
+    | Some tname when not (List.exists (fun c ->
+        (* An impl for this very type IS in the candidate list: then the
+           argument type is not the reason the call failed, and the ambiguity
+           wording is the honest one after all. *)
+        match String.index_opt c '$', String.rindex_opt c '.' with
+        | Some i, Some j -> String.sub c (i + 1) (j - i - 1) = tname
+        | _ -> false) candidates) ->
+      let iface = match List.filter_map iface_of candidates with
+        | i :: _ -> i
+        | [] -> "?"
+      in
+      (* `derive` only exists for the built-in derivable interfaces
+         (Desugar_derive's supported set); suggesting it for a user-declared
+         interface would send the reader to a diagnostic that says the derive
+         target is unknown. *)
+      let derivable =
+        List.mem iface ["Eq"; "Show"; "Hash"; "Ord"; "Json"] in
+      raise (Ambiguous_iface_call (Printf.sprintf
+        "no `%s` implementation for type `%s`, which the call to `%s` needs \
+         here.\n\
+         %d implementation%s of `%s` %s in scope (%s), none of them for `%s`.\n\
+         Add one next to the type's declaration:\n\
+        \  %s"
+        iface tname bare_name
+        (List.length candidates) (if List.length candidates = 1 then "" else "s")
+        bare_name (if List.length candidates = 1 then "is" else "are")
+        (String.concat ", " candidates) tname
+        (if derivable then
+           Printf.sprintf "derive %s for %s\n     (or `impl %s(%s) do ... end` \
+                           for a hand-written one)" iface tname iface tname
+         else Printf.sprintf "impl %s(%s) do ... end" iface tname)))
+    | _ ->
+      raise (Ambiguous_iface_call (Printf.sprintf
+        "ambiguous interface-method call to `%s`: %d implementations are in \
+         scope (%s) and the call site's types do not determine which one \
+         applies.\n\
+         This method dispatches on a position that is not concrete at this \
+         call site (for `from_json`-style methods, the RESULT type). \
+         Restructure so only one implementation is in scope for the call — \
+         e.g. keep one `derive`/`impl` per module — or route the call through \
+         a helper defined next to the intended type's `derive`/`impl`."
+        bare_name (List.length candidates) (String.concat ", " candidates)))
+  end
 
 (** Emit a `$clo_wrap` trampoline that forwards to [fn_name] and returns the
     result in the generic ptr ABI shared by all closure dispatch (see

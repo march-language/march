@@ -1633,6 +1633,75 @@ let check_cap_narrow_sites (env : env) : unit =
       | _ -> ()
     ) !(env.cap_narrow_sites)
 
+(** The nominal type a `from_json` family call decodes TO, read out of the
+    SOLVED result type, or [None] if nothing pinned it.
+
+    [from_json] returns [Result(T, Json.DecodeError)]; [from_json_events]
+    returns [Result((T, List(Event)), Json.DecodeError)], so the target is the
+    first tuple component there. Anything else — an unsolved variable, a
+    structural record, a shape this does not recognise — yields [None], which
+    leaves the call exactly where it is today: resolved by Mono's single-impl
+    fallback if only one impl is in scope, and reported as ambiguous if not.
+
+    Returns the type's own name only. A [derive Json] on a parameterised type
+    still registers one impl under the bare head name, which is the key both
+    backends look up, so the arguments are deliberately not part of it. *)
+let json_dispatch_target (env : env) (jname : string) (result_ty : ty)
+  : string option =
+  (* A NAMED record type reaches here structurally, as [TRecord], not as the
+     [TCon] its declaration produced — the same thing Mono works around with
+     its [record_to_typename] table.  Recover the declared name by matching the
+     solved field names against [env.records].
+     Requires a UNIQUE match: two record types with identical field names are
+     genuinely indistinguishable in this position, and guessing one would pick
+     a decoder by coin flip.  [None] there falls back to the previous
+     behaviour, which reports the call as unresolved rather than decoding as
+     the wrong type. *)
+  let record_type_name flds =
+    let key = List.sort String.compare (List.map fst flds) in
+    let matches =
+      StrMap.fold (fun name (_params, decl_flds) acc ->
+          if List.sort String.compare (List.map fst decl_flds) = key
+          then name :: acc else acc)
+        env.records []
+    in
+    (* One declaration is registered under BOTH its bare name and its
+       module-qualified alias ("Point" and "FJ.Point"), so the raw candidate
+       list is never a singleton for a record declared inside a module.
+       Collapse to short names first: what survives is the set of distinct
+       DECLARATIONS, and both backends key their implementation lookup on the
+       short name anyway (`JsonFrom$Point.from_json`, `impl_tbl ("JsonFrom",
+       "Point")`).
+       Two genuinely different record types with the same field names still
+       collapse to two short names and stay unresolved. Two same-SHORT-name
+       types in different modules with identical fields would collapse to one;
+       that is the pre-existing same-short-name collision case, which impl
+       dispatch already keys on the short name, so this does not make it
+       worse. *)
+    let short n =
+      match String.rindex_opt n '.' with
+      | Some i -> String.sub n (i + 1) (String.length n - i - 1)
+      | None -> n
+    in
+    let distinct =
+      List.sort_uniq String.compare (List.map short matches) in
+    match distinct with [ n ] -> Some n | _ -> None
+  in
+  let head t =
+    match repr t with
+    | TCon (n, _) -> Some n
+    | TRecord flds -> record_type_name flds
+    | _ -> None
+  in
+  match repr result_ty with
+  | TCon ("Result", payload :: _) ->
+    if jname = "from_json_events" then
+      (match repr payload with
+       | TTuple (t :: _) -> head t
+       | _ -> None)
+    else head payload
+  | _ -> None
+
 (** Capability unforgeability (R3), the call-site half.  [to_json] is checked
     on its argument, the [from_json] family on its result; see
     [env.json_cap_sites] for why this runs deferred and why it inspects the
@@ -1657,7 +1726,27 @@ let check_json_cap_sites (env : env) : unit =
         | other -> other
       in
       match cap_in_solved_ty inspected with
-      | None -> ()
+      | None ->
+        (* Clean: no capability anywhere in the position this builtin would
+           construct.  Only now record where the call dispatches to.
+
+           The two decisions are made HERE, together, on ONE value, on
+           purpose.  [inspected] is the same solved type the guard just
+           cleared, so a dispatch target can never be derived from a type the
+           capability check did not see — the ordering is structural, not a
+           convention a later edit can drift away from.  If this ever needs to
+           move, the guard has to move with it.
+
+           A second, independent barrier stands behind this one: [derive Json]
+           refuses outright to generate a codec for a type with a capability
+           anywhere in it (Desugar_derive's "Json" arm), so no
+           `JsonFrom$T.from_json` implementation exists for such a T and there
+           is nothing for a resolved dispatch to reach even if it were
+           recorded. *)
+        if jname <> "to_json" then
+          (match json_dispatch_target env jname inspected with
+           | Some tname -> March_ast.Json_dispatch.record sp tname
+           | None -> ())
       | Some cap_rendered ->
         let verb = if encoding then "serialized" else "deserialized" in
         Err.error env.errors ~span:sp

@@ -1,0 +1,38 @@
+-- Compiled coverage for the n-ary string concat (Desugar.fold_concat3 emits
+-- `string_concat_n` for 4+ interpolation operands).  The compiled path is the
+-- one with real risk: the operands are spread into a stack array and handed to
+-- march_string_concat_n as (count, array), and every one of them is BORROWED,
+-- so a wrong borrow mode would leak or double-free them.
+--
+-- Exercises: the 3-vs-4 operand fold boundary; a long chain (so the array has
+-- many slots); empty operands; operands that are freshly built temporaries
+-- rather than live locals (the RC case), and a call inside a loop so the
+-- alloca is reached repeatedly.
+mod StringConcatN do
+  needs IO.Console
+
+  fn label(i : Int) : String do
+    "n${int_to_string(i)}"
+  end
+
+  fn row(i : Int) : String do
+    -- 4 operands after the literals are folded in: crosses the boundary, and
+    -- three of them are fresh temporaries whose only reference is this call.
+    "[${label(i)}|${int_to_string(i * 2)}|${int_to_string(i * 3)}]"
+  end
+
+  fn rows(i : Int, acc : String) : String do
+    if i <= 0 do acc else rows(i - 1, acc ++ row(i)) end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let a = "A"
+    let b = ""
+    let c = "CCC"
+    println("3:${a}${c}")
+    println("4:${a}${b}${c}${a}")
+    println("9:${a}${b}${c}${a}${b}${c}${a}${b}${c}")
+    println(rows(4, ""))
+    println(String.byte_size(rows(200, "")))
+  end
+end

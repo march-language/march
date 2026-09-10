@@ -704,6 +704,13 @@ let builtin_bindings : (string * scheme) list =
     ("string_replace_all",  Mono (TArrow (t_string, TArrow (t_string, TArrow (t_string, t_string)))));
     ("string_split",        Mono (TArrow (t_string, TArrow (t_string, t_list t_string))));
     ("string_concat3",      Mono (TArrow (t_string, TArrow (t_string, TArrow (t_string, t_string)))));
+    (* string_concat_n is VARIADIC -- see [variadic_builtins].  The scheme
+       registered here is the 4-argument instance, which is only what a
+       non-application reference (say, passing the name as a value) would see;
+       every real call site is typed from the table instead.  It is registered
+       at all so that name resolution, arity diagnostics and the "unknown
+       identifier" path behave like they do for any other builtin. *)
+    ("string_concat_n",     Mono (TArrow (t_string, TArrow (t_string, TArrow (t_string, TArrow (t_string, t_string))))));
     ("string_join",         Mono (TArrow (t_list t_string, TArrow (t_string, t_string))));
     ("string_trim",         Mono (TArrow (t_string, t_string)));
     ("string_trim_start",   Mono (TArrow (t_string, t_string)));
@@ -1597,6 +1604,35 @@ let prelude_collision_iface_arities : (string * int) list =
   [ ("eq", 2); ("compare", 2); ("show", 1); ("hash", 1) ]
 
 let noncallable_builtin_values = StringSet.of_list [ "root_cap" ]
+
+(** Builtins that accept a VARIABLE number of arguments.
+
+    March builtin signatures are `Mono (TArrow ...)`, which is fixed-arity by
+    construction: the callee's type is inferred from its name alone, before the
+    argument list is in view.  This table is the exception, and it is
+    consulted from [Typecheck]'s application rule -- the one place that knows
+    the arity -- where an entry `(name, arg_ty, ret_ty, min_arity)` means
+    "check every argument against [arg_ty] and yield [ret_ty], provided there
+    are at least [min_arity] of them".
+
+    A table rather than a hardcoded name in the inference core so that adding
+    the next variadic builtin is a data change. The mechanism is deliberately
+    narrow: no fixed prefix parameters, no polymorphism. Both would be
+    straightforward to add here, and neither has a caller yet.
+
+    Note what this does NOT need. Downstream of typechecking nothing is
+    variadic: the application is typed at its actual arity, so [Lower], [Mono]
+    and [Defun] see an ordinary n-argument builtin call. Only the LLVM emitter
+    has to know, because the C side takes (count, array) rather than n
+    arguments. *)
+let variadic_builtins : (string * ty * ty * int) list = [
+  ("string_concat_n", t_string, t_string, 2);
+]
+
+let variadic_builtin (name : string) : (ty * ty * int) option =
+  match List.find_opt (fun (n, _, _, _) -> String.equal n name) variadic_builtins with
+  | Some (_, a, r, k) -> Some (a, r, k)
+  | None -> None
 
 let builtin_types : (string * int) list =
   [ ("Int",    0); ("Float",  0); ("Bool",  0); ("String", 0);

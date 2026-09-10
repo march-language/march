@@ -1,0 +1,53 @@
+-- Compiled `to_string`/`println` on a user ADT must render the CONSTRUCTOR,
+-- not `#<tag:N>`.
+--
+-- Before the constructor-name table (lib/tir/llvm_ctor_desc.ml +
+-- march_ctor_table_ensure in runtime/march_extras.c) a boxed ADT cell carried
+-- a tag and nothing else, so the type-erased `march_value_to_string` printed
+-- the raw tag.  A program could pass its whole test suite interpreted — which
+-- is what `forge test`, `forge run` and `march file.march` all run — and then
+-- print garbage once compiled.
+--
+-- This file is the anti-drift check for the FIELD-TOKEN ALPHABET.  The
+-- descriptor is generated at compile time into the LLVM module, so unlike the
+-- capability lattice there is no checked-in generated file to diff; what CAN
+-- silently drift is the meaning of a token between the OCaml writer and the C
+-- parser, and a wrong token is a MISREAD field (wrong number, wrong string,
+-- crash), not a missing name.  So every token has a case here: i, b, u, f, s,
+-- A (nested ADT), the record shape, and the List bracket form.
+--
+-- .expected is the INTERPRETER's output; the rule diffs compiled output
+-- against it, so this is an interpreter/compiled parity check.
+mod ToStringCtorNames do
+  needs IO.Console
+
+  type Shape = Circle(Int) | Square(Int)
+  type Multi = A | B(String) | C(String, Int)
+  type Flags = Flags(Bool, Bool)
+  type Meas  = Meas(Float)
+  type Nest  = Nest(Shape, Multi)
+  -- Shaped to be BOXED, on purpose, since that is the only repr the
+  -- descriptor describes.  One constructor with one field would be Newtype
+  -- (the value IS the payload); one nullary plus one single-field would be
+  -- Option-shaped Niche.  Two single-field constructors is neither.  The
+  -- residual for the other reprs is recorded in
+  -- specs/todos/2026-08-05-boxed-adt-type-id.md.
+  type Holder = Holder(List(Int)) | Tally(Int)
+  type Pt = { x : Int, y : Int }
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    println("ts=" ++ to_string(Circle(7)))
+    println(Circle(7))
+    println(Square(0 - 3))
+    println(A)
+    println(B("hi"))
+    println(C("a\"b", 12))
+    println(Flags(true, false))
+    println(Meas(1.5))
+    println(Nest(Circle(1), B("x")))
+    println(Holder(Cons(1, Cons(2, Nil))))
+    println(Tally(0))
+    let p : Pt = { x: 1, y: 2 }
+    println(p)
+  end
+end

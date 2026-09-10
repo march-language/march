@@ -1199,7 +1199,18 @@ let rec tco_check (fn_name : string) (blocking : string option) (e : Ast.expr) a
         let msg =
           if is_ctor_blocked b then
             Printf.sprintf
-              "This recursive call is not in tail position — %s, so the stack grows by one frame per call and deep input can overflow it. TRMC can turn a call wrapped in a constructor into a loop, but it is OFF BY DEFAULT; enable it with `--trmc`. (This message used to say no rewrite was needed — it was wrong: the loop is not automatic.)"
+              (* This branch already knows the call is constructor-wrapped
+                 ([is_ctor_blocked]), so unlike the compiler's broader
+                 non-arithmetic warning it does not need to hedge about the
+                 other shapes, and must not: prescribing an accumulator here is
+                 the wrong advice for exactly the case TRMC handles, which is
+                 what the `does not prescribe an accumulator` test pins.
+                 Constructor-wrapped is necessary but not sufficient for
+                 eligibility (branching recursion such as `Node(f(l), f(r))` is
+                 only partly transformable), so state the shape TRMC does
+                 handle rather than promising this particular call becomes a
+                 loop. *)
+              "This recursive call is not in tail position — %s, so the stack grows by one frame per call. Tail-recursion-modulo-cons compiles a call that is the direct argument of a constructor in tail position into a loop with no extra stack, and is on by default (`--no-trmc` disables it)."
               b
           else if is_boolop_blocked b then
             (* `&&`/`||` are STRICT in March (specs/lang/core-march.md 4.4.1):

@@ -77,6 +77,12 @@ let rec decompose (e : March_ast.Ast.expr) =
   | EApp (EVar { txt = "++"; _ }, [ l; r ], _) -> decompose l @ decompose r
   | EApp (EVar { txt = "string_concat3"; _ }, [ a; b; c ], _) ->
     decompose a @ decompose b @ decompose c
+  (* 4+ operands fold to the n-ary form instead (Desugar.fold_concat3).  A
+     shape this cannot see through collapses the whole template into ONE opaque
+     part, which silently disables context-sensitive escaping rather than
+     failing — so this arm must track that fold. *)
+  | EApp (EVar { txt = "string_concat_n"; _ }, parts, _) ->
+    List.concat_map decompose parts
   | _ -> [ e ]
 
 let scan_sigil tbl file line content =

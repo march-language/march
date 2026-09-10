@@ -51,6 +51,12 @@ val same_package_namespace : string -> string -> bool
 val locally_declared_names_of : Ast.decl list -> (string, unit) Hashtbl.t
 val builtin_interface_bindings : (string * scheme) list
 val builtin_bindings : (string * scheme) list
+
+(** Variadic builtins: [(name, arg_ty, ret_ty, min_arity)].  Consulted by
+    [Typecheck]'s application rule, the only place that knows a call's arity.
+    See the definition for why fixed-arity [scheme] cannot express these. *)
+val variadic_builtins : (string * ty * ty * int) list
+val variadic_builtin : string -> (ty * ty * int) option
 val prelude_collision_builtin_names : string list
 val prelude_collision_iface_arities : (string * int) list
 val noncallable_builtin_values : StringSet.t

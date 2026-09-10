@@ -71,7 +71,8 @@ let rec describe = function
   | Record -> "a record is allocated here"
   | Update -> "a record update allocates a new record here"
   | Closure -> "a closure is allocated here"
-  | Builtin ("++" | "string_concat" | "string_concat3") -> "string concatenation"
+  | Builtin ("++" | "string_concat" | "string_concat3" | "string_concat_n") ->
+    "string concatenation"
   | Builtin b -> Printf.sprintf "`%s` allocates" b
   | FloatBox -> "a Float is boxed here (it crosses an erased slot)"
   | AggBox t ->
@@ -108,7 +109,9 @@ let named_builtin_allocates : Builtin_name.t -> bool = function
   | Builtin_name.Vault_drop | Builtin_name.Vault_get | Builtin_name.Vault_incr
   | Builtin_name.Vault_ns_drop | Builtin_name.Vault_ns_get | Builtin_name.Vault_ns_set
   | Builtin_name.Vault_push_capped | Builtin_name.Vault_put_new | Builtin_name.Vault_set
-  | Builtin_name.Vault_set_ttl | Builtin_name.Vault_update -> true
+  | Builtin_name.Vault_set_ttl | Builtin_name.Vault_update
+  (* Allocates exactly one result string, whatever its arity. *)
+  | Builtin_name.String_concat_n -> true
 
 (* Non-allocating builtins that are NOT codegen-dispatched through
    [Builtin_name] (they go through the generic runtime-call fallback or are
@@ -493,7 +496,9 @@ let named_builtin_retains : Builtin_name.t -> bool = function
   | Builtin_name.Task_await | Builtin_name.Task_await_unwrap
   | Builtin_name.Task_cancel | Builtin_name.Task_cancel_by_id
   | Builtin_name.Task_yield
-  | Builtin_name.Vault_drop | Builtin_name.Vault_ns_drop -> false
+  | Builtin_name.Vault_drop | Builtin_name.Vault_ns_drop
+  (* Borrows every part and copies the bytes out; keeps no reference. *)
+  | Builtin_name.String_concat_n -> false
 
 let builtin_retains (name : string) : bool =
   match Builtin_name.of_string (base name) with
@@ -805,8 +810,16 @@ let failure_message ~head ~name ~suffix (reason : reason) : string =
   | r ->
     Printf.sprintf "%s but allocates.%s\n  In `%s`: %s." head suffix name (describe r)
 
-let trmc_note = "This function is TRMC-eligible; compiling with --trmc turns the \
-                 constructor into an in-place write."
+(* Fires only when TRMC is OFF, which since 2026-09-09 means the user passed
+   --no-trmc (or MARCH_NO_TRMC=1). The note used to read "compiling with --trmc
+   turns the constructor into an in-place write", which was correct while the
+   transform was opt-in and is now backwards: the allocation this diagnostic is
+   complaining about exists BECAUSE the default was turned off. Say that, so
+   the reader knows the fix is to drop their flag, not to add one. *)
+let trmc_note = "This function is TRMC-eligible: with tail-recursion-modulo-cons \
+                 the constructor would be an in-place write and this function \
+                 would not allocate. It is on by default and something turned it \
+                 off here — check for `--no-trmc` or `MARCH_NO_TRMC`."
 
 (* ── Generation scope (LSP quick fix and forge fix --contracts) ───────── *)
 
@@ -880,7 +893,7 @@ let has_noalloc_policy (fd : Tir.fn_def) : bool =
     clone.  [retaining] carries the @[no_alloc(transient)] verdicts.  [opt =
     false] (--no-opt) downgrades the hard form to a warning that names the
     flag; a direct constructor allocation in a TRMC-eligible function gets
-    the --trmc note while TRMC is off. *)
+    [trmc_note] while TRMC is off, which now means the user disabled it. *)
 let check ~decls ~(allocating : (string, reason) Hashtbl.t)
     ?(retaining : (string, retain) Hashtbl.t = Hashtbl.create 0) ~opt ~trmc
     ~(trmc_eligible : string -> bool) (m : Tir.tir_module)
