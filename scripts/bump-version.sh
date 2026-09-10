@@ -39,16 +39,21 @@ step "1/7  preconditions"
 
 [ -z "$(git status --porcelain)" ] || die "working tree is dirty; commit or discard first"
 
-branch="$(git rev-parse --abbrev-ref HEAD)"
-[ "$branch" = "main" ] || die "on branch '$branch'; releases are cut from main"
-
-# Fetch first: a bare `main`/`origin/main` comparison against a stale ref has
-# silently merged old state in this repo before.
+# The property that matters is "you are releasing exactly what is on
+# origin/main", NOT "your local branch is spelled main".  This repo keeps many
+# worktrees and `main` is frequently checked out in one of them, so requiring
+# the literal branch name would make the ritual unrunnable from anywhere else
+# while testing something weaker than the real invariant.
+#
+# Fetch first: comparing against a stale origin/main ref has silently merged old
+# state in this repo before.
 git fetch origin --quiet
 behind="$(git rev-list --count HEAD..origin/main)"
-[ "$behind" -eq 0 ] || die "main is $behind commit(s) behind origin/main; pull first"
+[ "$behind" -eq 0 ] || die "HEAD is $behind commit(s) behind origin/main; pull first"
 ahead="$(git rev-list --count origin/main..HEAD)"
-[ "$ahead" -eq 0 ] || die "main is $ahead commit(s) ahead of origin/main; push first"
+[ "$ahead" -eq 0 ] || die "HEAD is $ahead commit(s) ahead of origin/main; push first"
+[ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] \
+  || die "HEAD does not equal origin/main; releases are cut from origin/main exactly"
 
 current="$(march_version)"
 [ "$current" != "$version" ] || die "dune-project already says $version"
