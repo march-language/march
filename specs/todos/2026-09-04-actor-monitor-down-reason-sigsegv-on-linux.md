@@ -1,10 +1,50 @@
 # `native_actor_monitor_down_reason` exited 139 (SIGSEGV) on the Linux CI leg
 
-**Filed 2026-09-04.** One observation, not yet reproduced. Recorded rather than
-re-run away, because the symptom is a segfault in the actor monitor/death path,
-which is not a class of failure to lose track of.
+**Filed 2026-09-04** on one observation. **Second sighting 2026-09-10** — this
+file's own closing instruction was "a single SIGSEGV in the death path is worth
+a second sighting before it is dismissed." That sighting has now happened, on
+`main`, and it is confirmed intermittent rather than commit-specific.
 
-## The observation
+## Second sighting (2026-09-10) — same crash, different iteration
+
+`test (ubuntu-24.04)`, run
+[34427139188](https://github.com/march-language/march/actions/runs/34427139188),
+on `main` at `de5444ec` (the #431 merge):
+
+```
+native_actor_monitor_down_reason: MARCH_NUM_SCHEDULERS=4 iteration 55: binary exited 139
+offending output:
+down ref=1 target=crashed reason=Crash(bang)
+bounded mailbox=1 down=Killed ref=3
+late down ref=5 target=killed reason=Killed
+down target=nulled reason=Crash(embedded-nul-ok)
+terminal watcher mailbox=0
+```
+
+Byte-identical offending output to the 2026-09-04 sighting; only the iteration
+number differs (55 vs 34). Same signature: all five expected lines printed in a
+legal interleaving, then SIGSEGV.
+
+**Confirmed intermittent, not a regression.** The very next commit on `main`,
+`29ae20b7`, is `de5444ec` plus a **documentation-only** change (one file under
+`specs/todos/`), so the compiled code is identical — and its
+`test (ubuntu-24.04)` leg passed. Red then green on the same code is the
+definition of a flake, so do not bisect for a commit that introduced this.
+
+**Observed frequency.** Two sightings total (PR #419, and `main` at
+`de5444ec`). Across the last 15 `main` CI runs, this is the only failure
+attributable to it; the last 10 Nightly runs are all green. So it is rare —
+somewhere around one CI run in ten or worse — which is consistent with the
+8,500-run local sweeps below finding nothing, and means any local reproduction
+attempt needs to think in tens of thousands of iterations, not hundreds.
+
+**A note on finding it in the logs.** Both sightings are dune-rule failures.
+They print `File "test/dune", lines 7601-7621` and never `[FAIL]`, and every
+alcotest suite in the same job still reports `0 failed`. A job that exits 1
+while every suite reports success is this, not a silent failure — grep the log
+for `File "test/dune"`.
+
+## The original observation (2026-09-04)
 
 `test (ubuntu-24.04)`, run
 [33912489505](https://github.com/march-language/march/actions/runs/33912489505/job/101151887101),
@@ -134,6 +174,17 @@ theory. It has been measured.
 1. Try to reproduce on Linux: the fixture in a loop under `MARCH_NUM_SCHEDULERS=4`,
    then under ASAN (`ci/Dockerfile.ubuntu`; note its own `dune build` fails for
    want of `node`, so build only `bin/main.exe`).
+
+   **Build obstacle, hit 2026-09-10.** Building just the fixture in a fresh
+   container — `dune build test/native_actor_monitor_down_reason` — fails with
+   a bare `march: clang failed (exit 1)` and no underlying clang diagnostic.
+   That is the known "runtime not staged yet on a fresh `_build`" trap, not a
+   broken fixture: dune has not yet materialised `_build/default/runtime`, so
+   the compile has no runtime C to link. Run a rule that stages the runtime
+   first (`@test/runtest`, which costs a full suite run in the container) or
+   build a target carrying a `runtime` dep, then loop the fixture binary
+   directly. Budget for that staging cost when planning the sweep — and given
+   the frequency estimate above, plan on tens of thousands of iterations.
 2. If it reproduces, get a backtrace. The suspects are the paths the fixture
    exercises last: `do_actor_death` → `deliver_monitor_down` →
    `march_sched_send_control`, and the terminal-watcher teardown after the
