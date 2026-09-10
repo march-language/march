@@ -2278,6 +2278,37 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/record_pattern.expected native_record_pattern.out)))
 
+; A String read through a NESTED record projection (`h.identity.name`) and
+; captured by a constructor must be dup'd: Perceus's borrowed-field lookahead
+; had no arm for a let-chain ENDING in a projection, so the read was moved
+; into the constructor without an inc_rc and that cell's drop released the
+; record owner's string. This is node_discovery's exit-138: the inlined
+; Handshake.encode_hello freed my_id.node_id. Deterministic here because the
+; fields are heap strings (a literal is immortal and would hide the dec) and
+; the allocator is churned before they are re-read: pre-fix, exit 138 3/3.
+(rule
+ (targets native_nested_record_field_capture native_nested_record_field_capture.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/nested_record_field_capture.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_nested_record_field_capture
+        native/nested_record_field_capture.march)
+   (with-stdout-to native_nested_record_field_capture.out
+        (system "./native_nested_record_field_capture")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/nested_record_field_capture.expected native_nested_record_field_capture.out)))
+
 ; A compiled `println` must be ONE write, not two.  Two assertions, because the
 ; runtime half and the structural half fail differently: `intact` counts how
 ; many of the 1200 concurrently-printed lines survived unsplit (the observable

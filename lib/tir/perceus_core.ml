@@ -926,11 +926,24 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
            a borrowed field string as owned and drop it — an RC underflow. *)
         StringSet.mem a.Tir.v_name bfv
       | Tir.ELet (iv, Tir.EField (Tir.AVar src, _), ibody)
-        when needs_rc iv.Tir.v_ty && field_src_is_borrowed src ->
+        when needs_rc iv.Tir.v_ty
+             && (StringSet.mem src.Tir.v_name bfv || field_src_is_borrowed src) ->
         (* [iv] is a borrowed field var inside this sub-scope; check the body
            with that knowledge. *)
         result_is_borrowed_field (StringSet.add iv.Tir.v_name bfv) ibody
       | Tir.ELet (_, _, ibody) -> result_is_borrowed_field bfv ibody
+      | Tir.EField (Tir.AVar src, _)
+        when (match src.Tir.v_ty with Tir.TPtr _ -> false | _ -> true)
+             && (StringSet.mem src.Tir.v_name bfv || field_src_is_borrowed src) ->
+        (* The chain ends in a projection out of a borrowed record — the
+           nested-record read [h.identity.name] lowers to exactly this,
+           [let r = h.identity in r.name].  The result aliases a field the
+           record owner still holds, the same as the one-level [h.nonce] case
+           the EField arm below handles.  Without this arm the binding was
+           classified as owned, so a constructor capture took it without a
+           dup and that constructor's drop released the owner's string
+           (node_discovery: Handshake.encode_hello freed my_id.node_id). *)
+        true
       | _ -> false
     in
     let is_borrowed_field =

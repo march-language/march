@@ -1,0 +1,58 @@
+-- Regression: a String read through a NESTED record projection and captured
+-- by a constructor must be dup'd, not moved.
+--
+-- `h.identity.name` lowers to `let r = h.identity in r.name`. Perceus's
+-- borrowed-field lookahead (result_is_borrowed_field, lib/tir/perceus_core.ml)
+-- walked that let-chain but had no arm for the chain ENDING in a projection,
+-- so the binding was classified as owned and `S(...)` took it without an
+-- inc_rc; the S cell's drop then released the record owner's string. The
+-- one-level `h.nonce` read right next to it was correct. Observed as
+-- test/native/node_discovery.march's intermittent exit-138 / SIGTRAP: the
+-- inlined Handshake.encode_hello freed my_id.node_id, which run_node_b then
+-- msgpack-encoded from freed, reused memory.
+--
+-- Deterministic oracle: after the round-trip, churn the allocator so a freed
+-- string's cell is reused, then print the original fields. Pre-fix this
+-- printed garbage / crashed; the post-Perceus TIR of `enc` must carry an
+-- inc_rc on BOTH nested reads (see the run_codegen assertion).
+mod Main do
+  needs IO.Console
+
+  type Ident = { name : String, node_id : String }
+  type Hello = { identity : Ident, nonce : String }
+  type V = S(String) | A(List(V))
+
+  pfn enc(h : Hello) : V do
+    A(Cons(S(h.identity.name),
+      Cons(S(h.identity.node_id),
+      Cons(S(h.nonce), Nil))))
+  end
+
+  pfn count(v : V) : Int do
+    match v do
+      S(_) -> 1
+      A(xs) -> List.length(xs)
+    end
+  end
+
+  pfn round(my_id : Ident, nonce : String) : Int do
+    let h = { identity: my_id, nonce: nonce }
+    count(enc(h))
+  end
+
+  pfn churn(i : Int, acc : List(String)) : List(String) do
+    if i == 0 do acc else churn(i - 1, Cons("junk-" ++ String.from_int(i), acc)) end
+  end
+
+  fn main(_c : Cap(IO.Console)) : () do
+    -- Heap strings, not literals: a static literal is immortal, so a stray
+    -- dec_rc on it is invisible.
+    let my_id = { name: "node-" ++ String.from_int(2), node_id: "pk-node-" ++ String.from_int(20001) }
+    let n = round(my_id, "nonce-1") + round(my_id, "nonce-2")
+    let junk = churn(3000, Nil)
+    println(String.from_int(n))
+    println(my_id.name)
+    println(my_id.node_id)
+    println(String.from_int(List.length(junk)))
+  end
+end

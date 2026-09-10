@@ -68,11 +68,29 @@ Measured shape of what still leaks on `Array.set`'s trie path, per update:
 cell. `trie_update`'s `ascend` also never releases its `stk` spine or the frame
 tuples it walks.
 
-## 5. `node_discovery` has two pre-existing memory bugs on main
+## 5. `node_discovery` has pre-existing memory bugs on main
 
-Not caused by any of the above, and they make that test a poor oracle:
+Not caused by any of the above, and they make that test a poor oracle. One run
+hung for over an hour. Worth fixing on its own account; until then, compare
+per-signal counts across interleaved runs.
+
+**Superseded 2026-09-09:** the "`Msgpack.encode_val`/`list_append`" framing
+below turned out to be a debugging artifact (an `lldb` backtrace always shows
+a `list_append` recursion because lldb intercepts the FIRST, benign,
+self-recovering stack-growth fault of a run, before the runtime's own
+`march_sigsegv_handler` gets to service it — that fault has nothing to do with
+the crash). Runtime-level fault-address instrumentation found the actual fatal
+fault is a corrupted `march_string`'s `len` field read inside
+`march_string_split`, reached from `NetKernel.handshake` →
+`Msgpack.encode_val`'s `Str` arm, not from the later SwimPing exchange. Also
+confirmed NOT caused by TRMC (byte-identical codegen with `--no-trmc`). Full
+detail and next steps:
+`specs/progress/2026-09-09-nested-record-field-capture-uaf.md` — FIXED the same day (a Perceus borrowed-field lookahead gap on nested record projections).
+The original (now-superseded) notes, kept for the measured crash-rate data
+points:
+
 `Msgpack.encode_val` corrupts the malloc freelist (SIGTRAP in `mfm_free` under
 `march_decrc`, ~8% of runs) and `Msgpack.list_append` overflows the stack
-(~19%, unaffected by a 16x larger `MARCH_STACK_MAX`, so a cyclic list — very
-likely the same corruption). One run hung for over an hour. Worth fixing on its
-own account; until then, compare per-signal counts across interleaved runs.
+(~19%, unaffected by a 16x larger `MARCH_STACK_MAX` — that env var is actually
+a compile-time `#define`, `runtime/march_scheduler.h`, never read via `getenv`,
+so that experiment never tested anything).

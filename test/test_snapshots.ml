@@ -88,6 +88,7 @@ let corpus = [
   "unboxed_aggregate",               "unboxed_aggregate.march";
   "unboxed_aggregate_branch_join",   "unboxed_aggregate_branch_join.march";
   "borrowed_scrutinee_field_read",   "borrowed_scrutinee_field_read.march";
+  "nested_record_field_capture",     "nested_record_field_capture.march";
 ]
 
 (* ── Path resolution ────────────────────────────────────────────────────
