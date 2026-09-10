@@ -218,6 +218,8 @@ native_nested_derive_json: coverage audit (user + stdlib): 63 enforced, 0 inert 
 native_nested_derive_json: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_nested_mod_qualcall: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_nested_mod_qualcall: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_nested_record_field_capture: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_nested_record_field_capture: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_newtype_counter: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_newtype_counter: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_niche_concrete_payload_drop: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced

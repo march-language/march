@@ -1,0 +1,25 @@
+-- Nested-record field capture: a String read through TWO projections
+-- (`h.identity.name` lowers to `let r = h.identity in r.name`) and captured
+-- by a constructor is a borrowed field of `h`'s owner, exactly like the
+-- one-level `h.nonce` read, so the capture must dup it (inc_rc) rather than
+-- move it. The post-perceus snapshot pins an inc_rc on ALL THREE captures.
+-- Pre-fix, result_is_borrowed_field had no arm for a let-chain ending in a
+-- projection, the two nested reads were moved, and the S cells' drop freed
+-- the owner's strings (node_discovery's exit 138, via Handshake.encode_hello).
+mod NestedRecordFieldCapture do
+  needs IO.Console
+  type Ident = { name : String, node_id : String }
+  type Hello = { identity : Ident, nonce : String }
+  type V = S(String) | A(List(V))
+
+  fn enc(h : Hello) : V do
+    A(Cons(S(h.identity.name), Cons(S(h.identity.node_id), Cons(S(h.nonce), Nil))))
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    let my_id = { name: "node-" ++ "b", node_id: "pk-" ++ "b" }
+    let h = { identity: my_id, nonce: "n" ++ "1" }
+    let _ = enc(h)
+    println(my_id.node_id)
+  end
+end

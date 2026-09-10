@@ -90,6 +90,21 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A String read through a nested record projection and captured by a
+  constructor was moved instead of dup'd (compiled only).** `h.identity.name`
+  lowers to `let r = h.identity in r.name`; Perceus's borrowed-field lookahead
+  walked that chain but had no arm for it *ending* in a projection, so the
+  binding was classified as owned and, say, `Str(h.identity.name)` took the
+  string without an `inc_rc` — the constructor's later drop then released the
+  record owner's string. The one-level `h.nonce` read beside it was always
+  correct. This is what made `test/native/node_discovery.march` die
+  intermittently with exit 138 / SIGTRAP: the inlined `Handshake.encode_hello`
+  freed `my_id.node_id`, which each node later msgpack-encoded from freed,
+  reused memory. Pinned by `test/native/nested_record_field_capture` (exit 138
+  3/3 pre-fix, deterministic — heap strings plus allocator churn) and a
+  post-Perceus TIR snapshot; `node_discovery` went from 8/40 to 0/100 crashes
+  in an interleaved same-runtime A/B.
+
 - **`from_json` decodes to the type the caller asked for.** It dispatches on
   its RESULT type, which no value at the call site reveals, so with two or
   more `derive Json` types in one module the interpreter ran whichever
