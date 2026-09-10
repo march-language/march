@@ -1,196 +1,146 @@
-# Release mechanism: what exists, what is missing, what to build
+# Release mechanism: what exists, and the scripts that now drive it
 
-**Filed 2026-09-10**, while planning the 0.4.0 release. This is not a new
-design — [`specs/march_versioning.md`](march_versioning.md) already decided the
-shape, and [`specs/march_versioning_plan.md`](march_versioning_plan.md) laid out
-nine tasks. Tasks 1–4 landed (in a simpler form than written). **Tasks 5–8
-never did**, so 0.2.0 and 0.3.0 were both cut by hand, and one consequence is
-live in every nightly published since 2026-08-23.
+**Filed 2026-09-10**, while planning the 0.4.0 release; implemented the same
+day. This is not a new design — [`specs/march_versioning.md`](march_versioning.md)
+decided the shape and [`specs/march_versioning_plan.md`](march_versioning_plan.md)
+laid out nine tasks. Tasks 1–4 landed; **tasks 5–8 did not**, so 0.2.0 and 0.3.0
+were both cut by hand.
 
-This file records the measured current state and specifies exactly what to
-build, so the next release is a script rather than a remembered ritual.
+This file records the measured state, the one decision that was revisited, and
+what the scripts do.
 
-## Current state, measured on `e45abff0`
-
-### What works
+## What already worked
 
 `dune-project`'s `(version …)` is a genuine single source of truth:
 
 ```
 dune-project (version 0.3.0)
-  └─ generate_opam_files true  →  march.opam / forge.opam / march-lsp.opam  version: "0.3.0"
-       └─ %{version:march}     →  bin/version.ml, forge/bin/version.ml  (dune rule)
-            └─ march --version →  "march 0.3.0"     [verified against the built binary]
+  └─ generate_opam_files true  →  march.opam / forge.opam / march-lsp.opam
+       └─ %{version:march}     →  bin/version.ml, forge/bin/version.ml
+            └─ march --version →  "march 0.3.0"     [verified against the binary]
 ```
 
 `release.yml` triggers on `v*` tags, calls `build.yml`, publishes
 `march-<tag>-<platform>.tar.gz` plus `march-<tag>-checksums.txt`, and
-force-moves a `latest` tag. `install.sh` and `forge toolchain` both consume
-that shape. None of this needs changing.
+force-moves a `latest` tag. `install.sh` and `forge toolchain` consume that
+shape. Unchanged.
 
-### What is missing
+## The defect this fixes
 
-| Plan task | Artifact | Status |
-|---|---|---|
-| 5 | `scripts/changelog-section.sh` | **absent** |
-| 6 | `scripts/check-version-tag.sh` + CI wiring | **absent** |
-| 7 | `scripts/nightly-version.sh` | **absent** — `nightly.yml` inlines a `grep`/`sed` |
-| 8 | `scripts/bump-version.sh` | **absent** |
+The in-tree version stayed at `0.3.0` after release, and `nightly.yml` derived
+its version from that field, so **every nightly published between 2026-08-23 and
+2026-09-10 was labelled `0.3.0-nightly.YYYYMMDD`** — a version that sorts *below*
+the release it postdates, while containing 200+ commits of later work.
 
-`scripts/` contains no version, release, changelog, bump or tag script of any
-kind. There is no CI guard that a pushed `vX.Y.Z` tag matches the in-tree
-version. `release.yml`'s GitHub Release body is a fixed install blurb; it never
-quotes the version's CHANGELOG section.
+**Severity, measured rather than assumed.** This is an ordering and honesty
+problem, not a resolution failure:
 
-### The live defect
+- `install.sh` and `forge toolchain install latest` resolve through the GitHub
+  Releases API's stable/pre-release classification, not by sorting versions.
+- `forge.toml`'s `march = "~> X.Y"` never selects a nightly under any labelling.
+  `resolver_constraint.ml` states it outright: *"a non-pre-release constraint
+  does NOT select pre-release versions. `~> 1.0` does not select `1.1.0-beta`."*
+  Every nightly is a pre-release by construction.
+- `Toolchain.check_constraint` receives the resolved *tag* (`nightly-YYYYMMDD`),
+  which is not semver, and returns `Ok ()` unevaluated.
 
-`specs/march_versioning.md` § Decisions chose: *in-tree version means the
-**next, in-development** version*. That decision never landed. After the 0.3.0
-release, `dune-project` stayed at `0.3.0` rather than moving to `0.4.0-dev`.
+So nothing was resolving wrongly. What was wrong is that the published version
+string lied about where the build sits in history.
 
-`nightly.yml` derives its version from that field, so **every nightly published
-since 2026-08-23 is labelled `0.3.0-nightly.YYYYMMDD`** — a version that
-semver-sorts *below* the released `0.3.0`, while containing 200+ commits of
-work that postdates it.
+## The decision that was revisited: no `-dev` suffix
 
-**Severity, measured rather than assumed.** Neither `install.sh` nor
-`forge toolchain install latest` is broken by this: both resolve through the
-GitHub Releases API's stable/pre-release classification, not by sorting version
-strings. The real bite is `forge.toml`'s `march = "~> X.Y"` constraint, which
-*is* evaluated as semver (`Toolchain.check_constraint`). `Toolchain` lets a
-non-semver tag through unevaluated — but `0.3.0-nightly.20260910` **is**
-parseable semver, so it is evaluated, and it fails `~> 0.4`. Once 0.4.0 ships,
-a project pinning `~> 0.4` will reject every nightly until this is fixed.
-
-## Decision to confirm before building
-
-The `-dev` convention is the one open question, because it is the thing that
-was decided and then not done. Two coherent options:
-
-**A. In-tree version is the next in-development version (`0.4.1-dev`).**
-What `march_versioning.md` chose; matches Rust and Go. `main` always says what
-it is becoming, nightlies derive correctly, and the tag guard is meaningful
-because `-dev` can never match a release tag.
-*Cost:* `march --version` on a dev build reads `0.4.1-dev`, and the nightly
-derivation must strip the suffix (below).
-
-**B. In-tree version is the last released version (status quo).**
-`march --version` on `main` matches the last release.
-*Cost:* nightlies are mislabelled by construction, and the tag guard degenerates
-— every commit matches the last tag, so it cannot catch a forgotten bump.
-
-**Recommend A**, because B has no mechanism that catches the exact mistake made
-after 0.3.0. If A is adopted, say so in `march_versioning.md` § Decisions rather
-than leaving the row unchanged for a third release.
-
-### Nightly derivation under A
-
-`0.4.1-dev` must not be pasted into a nightly string directly:
-`0.4.1-dev-nightly.20260910` parses as semver but sorts by the identifier
-`dev-nightly`, which is not what anyone means. Strip the suffix first:
+`march_versioning.md` § Decisions chose *"in-tree version = the next, in-development
+version"*, i.e. `0.4.1-dev` on `main`. **That is superseded.** The in-tree version
+is the **last released version**, and the nightly script patch-increments it:
 
 ```
-BASE=$(sed -n 's/^(version \(.*\))$/\1/p' dune-project)   # 0.4.1-dev
-BASE=${BASE%-dev}                                          # 0.4.1
-echo "${BASE}-nightly.$(date -u +%Y%m%d)"                  # 0.4.1-nightly.20260910
+dune-project 0.3.0  →  scripts/nightly-version.sh  →  0.3.1-nightly.20260910
 ```
 
-That sorts above `0.4.0` and below `0.4.1`, which is the correct claim for a
-build heading toward 0.4.1.
+That sorts above `0.3.0` and below any plausible next release, which is the only
+claim a nightly needs to make. Verified against forge's own comparator, which is
+semver-correct (`resolver_version.ml`: *"absent pre > present pre"*, and
+`test_resolver.ml` asserts `1.0.0-alpha < 1.0.0`). Note `sort -V` disagrees — it
+is not semver-aware and orders the pre-release *after* the release; do not use it
+to check this.
 
-## What to build
+Two arguments originally made for `-dev` did not survive checking, and are
+recorded so they are not re-made:
 
-### 1. `scripts/version.sh` (shared helper)
+- *"Without `-dev`, a `~> 0.4` pin will reject every nightly once 0.4.0 ships."*
+  False — `~>` rejects every nightly regardless, by design (above).
+- *"Without `-dev`, the tag guard degenerates, because every commit matches the
+  last tag."* False — the guard compares the **tag** to the in-tree version.
+  Tagging `v0.4.0` on a tree still reading `0.3.0` mismatches and fails, which is
+  exactly the forgotten-bump case.
 
-One reader for the in-tree version, sourced by everything below, so the
-`grep`/`sed` currently inlined in `nightly.yml` exists once. Exposes the raw
-value and the `-dev`-stripped base.
+What `-dev` would genuinely have bought is *declaring intent* — a tree at
+`0.4.0-dev` says "heading to 0.4.0", where patch-incrementing from `0.3.0` says
+"heading to 0.3.1" even when the next release is 0.4.0. Since nightlies are
+excluded from constraint resolution either way, that is a cosmetic difference in
+a string, not worth carrying a suffix on every dev build and a strip step in the
+nightly path.
 
-### 2. `scripts/check-version-tag.sh` — the guard that matters most
+## What was built
 
-Given a tag `vX.Y.Z`, assert the in-tree version is exactly `X.Y.Z` (no `-dev`).
-Wire into `release.yml` as the **first** step of the `publish` job, before any
-artifact is uploaded, so a mismatched tag fails loudly instead of shipping a
-binary whose `--version` disagrees with its own release page.
+| script | does |
+|---|---|
+| `scripts/version.sh` | Reads `(version …)` from `dune-project`. Sourced by the rest, so the extraction exists once instead of inline in a workflow. |
+| `scripts/nightly-version.sh` | Prints `X.Y.(Z+1)-nightly.YYYYMMDD`. Rejects an in-tree version carrying a pre-release suffix. |
+| `scripts/check-version-tag.sh` | `vX.Y.Z` must equal the in-tree version. Wired as the **first** step of `release.yml`'s publish job. |
+| `scripts/changelog-section.sh` | Prints one version's CHANGELOG section; `--max-bytes N` truncates at a line boundary with a pointer to the full log. |
+| `scripts/bump-version.sh` | The ritual: preconditions → build → tests → finalize CHANGELOG → set version → verify the built binary agrees → commit → tag. Prints push commands; does not push. |
 
-This is the producer↔consumer contract `march_versioning.md` § 5.1 calls out:
-forge resolves `march = "~> X.Y"` and `.march-version` against release *tags*,
-so a tag that disagrees with the in-tree version makes forge's resolver silently
-lie.
+### Workflow wiring
 
-### 3. `scripts/changelog-section.sh X.Y.Z`
+- `release.yml`: tag guard runs **before any artifact is downloaded**, so a
+  mismatched tag fails before anything is published. The release body is now the
+  version's CHANGELOG section plus the install blurb, via `body_path`.
+- `nightly.yml`: the inline `grep`/`sed` is replaced by `scripts/nightly-version.sh`.
 
-Print the `## [X.Y.Z]` section of `CHANGELOG.md` up to the next `## [`. Used by
-`release.yml` to build the release body: the current fixed install blurb should
-become the changelog section *plus* that blurb. Must exit non-zero on a missing
-section, so a release cannot publish empty notes.
+### The release-body size cap, found while building this
 
-### 4. `scripts/bump-version.sh X.Y.Z` — the ritual
+A GitHub release body is capped at **125,000 characters**. The 0.3.0 CHANGELOG
+section is **321,778 bytes** — 2.5× over. An untruncated body would be rejected
+by the API *at publish time, after the artifacts had been built and uploaded*.
+Hence `--max-bytes 100000`, which leaves room for the install blurb; the measured
+total for a 0.3.0-shaped release is 100,289 bytes.
 
-Per `march_versioning.md` § 4, in order, aborting on any failure:
+The current `[Unreleased]` section is already 65KB and grows every merge, so this
+cap is load-bearing for 0.4.0, not a future concern.
 
-1. Require a clean tree, and require being on `main` up to date with
-   `origin/main` (fetch first — a stale `main` ref is a known trap in this repo).
-2. Build, and run the full suite. **Include the suites `scripts/run-tests.sh`
-   does not cover** — it is alcotest-only, and misses `forge/test/`,
-   `@types-check` and `@grammar-check`. A green `run-tests.sh` has already been
-   demonstrated to coexist with a red `main` (`db44fbb3`). At minimum:
-   `dune build @forge/test/runtest`, and `@types-check`/`@grammar-check` **with
-   `--force`** (without it they exit 0 having done nothing).
-3. Finalize `CHANGELOG.md`: `[Unreleased]` → `[X.Y.Z] - <today>`, and open a
-   fresh empty `[Unreleased]` above it.
-4. Set `dune-project` to `X.Y.Z`.
-5. Commit, then create annotated tag `vX.Y.Z`.
-6. Set `dune-project` to the next in-development version and commit, so `main`
-   carries `-dev` again.
-7. Print the push commands rather than pushing. Pushing a tag starts a
-   publish; that stays a human decision.
+## What stays manual
 
-### 5. `nightly.yml`
+`bump-version.sh` prints these rather than editing them, because no script
+should own them:
 
-Replace the inline extraction with `scripts/nightly-version.sh` (or
-`version.sh --nightly`), including the `-dev` strip.
+- `docs/upgrading-to-0-N-0.md` — the migration guide, the part adopters need.
+- `docs/_layouts/landing.html:466` — the hero badge. Missed at 0.2.0, caught
+  late at 0.3.0.
+- `docs/tooling.md` — four examples pin a concrete version.
 
-## What stays manual, and should be written down as such
+Also: `docs/upgrading-to-0-3-0.md` is linked from nowhere on the site. The 0.4.0
+guide should be linked from the docs nav, and the 0.3.0 one retroactively.
 
-The 0.3.0 release commit (`3206b316`) also touched things no script should own:
+## Traps hit while building this, kept because they recur
 
-- `docs/upgrading-to-0-N-0.md` — the migration guide. This is the part that
-  actually matters to adopters and cannot be generated.
-- `docs/_layouts/landing.html` — the hero badge (`Early Access · vX.Y.Z`). Was
-  missed at 0.2.0 and caught late at 0.3.0.
-- `docs/tooling.md` — four example invocations pin a concrete version.
-
-`bump-version.sh` should **print a reminder listing these**, with the badge line
-number, rather than editing them. Also note that `docs/upgrading-to-0-3-0.md` is
-linked from nowhere on the site; whatever guide 0.4.0 ships should be linked
-from the docs nav, and the 0.3.0 one linked retroactively.
-
-## Acceptance
-
-- `scripts/check-version-tag.sh v0.4.0` fails on a tree at `0.4.1-dev` and
-  passes on a tree at `0.4.0` — proven both ways, not just the passing one.
-- `scripts/changelog-section.sh 0.4.0` prints exactly that section, and exits
-  non-zero for a version with no section.
-- A nightly built from a `0.4.1-dev` tree is labelled `0.4.1-nightly.YYYYMMDD`,
-  and `Toolchain.check_constraint` accepts it for `march = "~> 0.4"`. This is
-  the regression that motivated the work; assert it directly rather than
-  inferring it from the string.
-- `bump-version.sh` refuses on a dirty tree, on a non-`main` branch, on a `main`
-  behind `origin/main`, and on any failing suite — each proven with a
-  deliberately broken input.
-
-## Traps specific to this work
-
+- **`set -o pipefail` plus a pipe into an early-exiting `awk` aborts the script
+  silently.** The truncation path piped a section into an `awk` that `exit`s once
+  its budget is spent; `awk` closing the pipe SIGPIPEs the upstream `printf`, and
+  under `pipefail` + `set -e` the script died *before emitting the trailer*. The
+  output was still under budget, so a size-only check passed while the truncation
+  notice was missing. Fixed with a here-string. **Assert the content, not just
+  the size.**
 - **Prove each guard goes RED.** Three release-oracle scripts in this repo
-  shipped broken because a `${1:?usage … {a|b} …}` bash expansion ends at the
-  *first* `}`, mangling the mode argument; one was reviewed and certified while
-  in that state. A guard that has only ever been seen to pass is not a guard.
-- **`scripts/run-tests.sh` is not the release gate.** See step 2 above.
-- **`gh pr merge --auto` merges immediately** when the repo has auto-merge off.
-  Read the run's conclusion and assert the green sha equals the PR head before
-  merging, and merge without `--auto`.
-- **Verify the CHANGELOG bullet union after any merge** during release prep — a
-  merge has previously dropped four entries with no conflict.
-- Changing the version invalidates the CAS compiler identity, so the first build
-  after a bump is cold. Expected, not a fault.
+  shipped broken because a `${1:?usage … {a|b} …}` expansion ends at the *first*
+  `}`, mangling the mode argument — and one was reviewed and certified in that
+  state. `check-version-tag.sh` deliberately avoids that form. Every guard here
+  was proven red and green before landing.
+- **`scripts/run-tests.sh` is not the release gate.** It is alcotest-only: no
+  `forge/test/`, no `@types-check`/`@grammar-check`. A fully green `run-tests.sh`
+  has already coexisted with a red `main` (`db44fbb3`). `bump-version.sh` runs
+  all four, and `--force` on the two aliases is load-bearing — without it they
+  exit 0 having done nothing.
+- **`sort -V` is not semver.** See above.
+- This repo's shell is **zsh**; `${PIPESTATUS[0]}` is bash. Checking an exit code
+  through a pipe silently reports nothing.
