@@ -68,6 +68,7 @@ type env = {
           scrutinee's constructor shares its heap object with the bound
           payload (newtype/niche representations).  Was [_type_defs]. *)
   collision_set : (string, string list) Hashtbl.t;
+  k_table : Kind.table;   (* the per-type table; see specs/2026-09-10-type-kinds-design.md *)
       (** Same-short-name type collision set (Task 2, [Collision_set.compute]),
           derived from [type_defs] once per [perceus] run (mirrors
           [Llvm_ctx.make_ctx]'s derivation).  Threaded into
@@ -186,6 +187,7 @@ let empty_env : env = {
   borrow_map = Borrow.empty;
   type_defs = [];
   collision_set = Hashtbl.create 0;
+  k_table = Kind.empty;
   extern_names = StringSet.empty;
   current_fn_name = "";
   closure_fvs = StringSet.empty;
@@ -203,14 +205,14 @@ let empty_env : env = {
     double-free the object the branch variable now owns — the cause of the
     Toml get_str / nested-Option RC underflow. *)
 let scrutinee_shares_payload_storage (env : env) (ty : Tir.ty) : bool =
-  match Repr.repr_of_ty ~collision_set:env.collision_set env.type_defs ty with
-  | Repr.Newtype _ | Repr.Niche _ -> true
+  match Kind.repr_of env.k_table ty with
+  | Kind.Newtype _ | Kind.Niche _ -> true
   (* Unboxed (Milestone 3): there is no container cell, so there is nothing to
      free separately and nothing for FBIP to reuse.  Answering true is what
      keeps [add_scrutinee_free_for] and the reuse-token search away from a
      value that never reached the heap. *)
-  | Repr.Unboxed _ -> true
-  | Repr.Boxed ->
+  | Kind.Unboxed _ -> true
+  | Kind.Boxed ->
     (* Erased-niche recovery — must mirror [llvm_case.ml]'s [effective_repr]
        abstract-arg path.  [repr_of_ty] conservatively returns [Boxed] for a
        niche-shaped type applied to abstract (TVar) arguments — e.g.
@@ -229,7 +231,7 @@ let scrutinee_shares_payload_storage (env : env) (ty : Tir.ty) : bool =
      | Tir.TCon (name, args)
        when args <> []
             && List.exists (function Tir.TVar _ -> true | _ -> false) args
-            && Repr.is_niche_shaped ~collision_set:env.collision_set env.type_defs name -> true
+            && Kind.is_niche_shaped env.k_table name -> true
      | _ -> false)
 
 (** Collect the names of variables loaded directly from the closure parameter

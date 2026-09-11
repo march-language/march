@@ -789,11 +789,13 @@ let perceus ?(repl : bool = false) ?(repl_vars : string list = [])
       StringSet.add ed.Tir.ed_march_name s) StringSet.empty m.Tir.tm_externs
   in
   (* Module-scoped env fields: constant for every function processed below. *)
+  let module_cs = Collision_set.compute m.Tir.tm_types in
   let module_env =
     { empty_env with
       borrow_map;
       type_defs = m.Tir.tm_types;
-      collision_set = Collision_set.compute m.Tir.tm_types;
+      collision_set = module_cs;
+      k_table = Repr.table_for ~collision_set:module_cs m.Tir.tm_types;
       extern_names }
   in
   let repl_set =

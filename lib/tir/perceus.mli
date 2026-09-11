@@ -146,6 +146,7 @@ type env = {
   borrow_map : Borrow.borrow_map;
   type_defs : Tir.type_def list;
   collision_set : (string, string list) Hashtbl.t;
+  k_table : Kind.table;   (* the per-type table; see specs/2026-09-10-type-kinds-design.md *)
   extern_names : StringSet.t;
   current_fn_name : string;
   closure_fvs : StringSet.t;
