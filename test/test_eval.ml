@@ -2843,9 +2843,9 @@ let test_perceus_pipeline_no_crash () =
 let test_perceus_needs_rc_tcon () =
   (* needs_rc returns true for TCon, false for TInt *)
   Alcotest.(check bool) "TCon needs RC" true
-    (March_tir.Perceus.needs_rc (March_tir.Tir.TCon ("List", [])));
+    (March_tir.Kind.needs_rc_of March_tir.Kind.empty (March_tir.Tir.TCon ("List", [])));
   Alcotest.(check bool) "TInt no RC" false
-    (March_tir.Perceus.needs_rc March_tir.Tir.TInt)
+    (March_tir.Kind.needs_rc_of March_tir.Kind.empty March_tir.Tir.TInt)
 
 (* Audit P4 regression: elide_expr must NOT collapse a cancel pair whose
    halves have different atomicity (one atomic, one local).  In correct

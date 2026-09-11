@@ -473,10 +473,9 @@ let niche_repr_of_concrete (t : table) (name : string) : repr option =
     to decide a value does not escape through a call) would then be reasoning
     about a value that was never on the heap.
 
-    Both arms read [Repr.unboxed_of_type_name], the SAME registry
-    [Llvm_ctx.llvm_ty], [Llvm_emit_alloc] and [Llvm_case] read — see the
-    registry's own comment in [repr.ml] for why one shared table rather than
-    two derivations. *)
+    Both arms read the table's unboxed set — the SAME entry [llvm_ty],
+    [Llvm_emit_alloc] and [Llvm_case] read, so one shared table rather
+    than two derivations. *)
 
 (** True iff [ty] is a [Repr.Unboxed] aggregate: an inline struct value with
     no heap cell, no header and therefore no refcount. *)

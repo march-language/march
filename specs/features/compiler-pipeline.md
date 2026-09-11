@@ -107,11 +107,18 @@ Source Code
 > `Alloc_contract.retaining_fns` runs beside it, on the same TIR, for the
 > `@[no_alloc(transient)]` verdict.
 >
-> **`Repr.set_unboxed_types` runs right after Defun** (Milestone 3, unboxed
-> small scalar aggregates): after Mono has instantiated generic variants and
-> Defun has added the closure structs, so the decision is made on the type list
-> the remaining passes see — and before Perceus, because `Rc_types.needs_rc`,
-> `Borrow`, `Drop`, `Escape` and `Alloc_contract` all read that registry.
+> **The `Kind` table is built right after Defun** (`Kind.build` in
+> `Contract_pipeline.run`; see `specs/2026-09-10-type-kinds-design.md`): after
+> Mono has instantiated generic variants and Defun has added the closure
+> structs, so every per-type decision — representation (Boxed / Newtype /
+> Niche / Unboxed), `needs_rc`, `borrowable`, niche safety, LLVM spelling — is
+> made once on the type list the remaining passes see, and before Perceus,
+> because `Borrow`, `Perceus`, `Drop`, `Escape` and `Alloc_contract` all take
+> that table as a value.  `Kind.rebind` re-keys it to the final type list for
+> the emitter (`Llvm_ctx.ctx.k_table`).  There is no process-global
+> representation state any more: the registry `Repr` used to hold (and its
+> never-cleared `force_disable` latch) was removed by the type-kinds refactor;
+> `repr.ml` is now only a type re-export and `rc_types.ml` no longer exists.
 >
 > In particular **Perceus runs *before* Escape** (see `bin/main.ml`, `Perceus.perceus` then `Escape.escape_analysis`). Earlier revisions of this document had the two reversed; that was wrong.
 >
@@ -1225,6 +1232,7 @@ Renders TIR expressions and types as readable text for debugging (`--dump-tir`).
 | TIR Types | `lib/tir/tir.ml` | ✓ Complete |
 | Monomorphization | `lib/tir/mono.ml` | ✓ Complete |
 | Defunctionalization | `lib/tir/defun.ml` | ✓ Complete |
+| Kind (per-type table) | `lib/tir/kind.ml` | ✓ Complete — built once after Defun, threaded to every pass and the emitter; replaces `rc_types.ml` (removed) and `repr.ml`'s registry |
 | Perceus RC | `lib/tir/perceus.ml` | ✓ Complete (runs before Escape) |
 | Escape Analysis | `lib/tir/escape.ml` | ✓ Complete (runs after Perceus) |
 | Fusion | `lib/tir/fusion.ml` | ✓ Complete |

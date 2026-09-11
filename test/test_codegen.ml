@@ -279,89 +279,8 @@ let test_tir_names_bool_tags () =
   Alcotest.(check string) "bool_lit_tag true" "true" (March_tir.Tir_names.bool_lit_tag true);
   Alcotest.(check string) "bool_lit_tag false" "false" (March_tir.Tir_names.bool_lit_tag false)
 
-(* ── Rc_types: needs_rc / borrow_eligible divergence contract (Wave 3 Task 2) ──
-   Table-driven pin of the FULL truth table for both predicates over
-   representative types, plus an exactness check that the divergence set is
-   precisely {TFn _, bare TVar _, TTuple _, TRecord _} and nothing else.
-   If either predicate changes, this test fails and points at Rc_types's
-   module doc (each divergent constructor's fix history: a705cc95/d2cf09e/
-   fd520110 for TFn/TVar).
-
-   TTuple/TRecord diverge, but in the OPPOSITE direction from their history:
-   they used to be (needs_rc false, borrow_eligible true), and are now
-   (true, false).
-
-   needs_rc true: aggregates own their fields and are deep-dropped at death like
-   variants.  While it was false Perceus never decided an aggregate was dead, so
-   every record and tuple cell leaked along with every heap value it owned.
-
-   borrow_eligible false: an aggregate parameter is OWNED.  A borrowed one
-   leaves the caller holding the release, and in a self-tail-recursive loop that
-   release is unreachable -- it sits after the tail call, llvm_tco folds the call
-   into a back-edge, and the dec is discarded -- so every iteration leaked its
-   aggregate.  Ownership lets each iteration release the aggregate it was handed
-   before jumping with a new one, which is also what makes
-   Perceus.insert_owned_aggregate_param_drops reachable at all. *)
-
-(* (label, ty, expected needs_rc, expected borrow_eligible) *)
-let rc_types_truth_table : (string * March_tir.Tir.ty * bool * bool) list =
-  let open March_tir.Tir in
-  [
-    "TInt",                TInt,                        false, false;
-    "TFloat",              TFloat,                      false, false;
-    "TBool",               TBool,                       false, false;
-    "TString",             TString,                     true,  true;
-    "TUnit",               TUnit,                       false, false;
-    "TTuple []",           TTuple [],                   true,  false; (* diverges *)
-    "TTuple [Int]",        TTuple [TInt],               true,  false; (* diverges *)
-    "TTuple [String]",     TTuple [TString],            true,  false; (* diverges *)
-    "TRecord []",          TRecord [],                  true,  false; (* diverges *)
-    "TRecord [(f,Int)]",   TRecord [("f", TInt)],       true,  false; (* diverges *)
-    "TCon (Atom,[])",      TCon ("Atom", []),           false, false;
-    "TCon (Foo,[])",       TCon ("Foo", []),            true,  true;
-    "TCon (List,[Int])",   TCon ("List", [TInt]),       true,  true;
-    "TCon (Atom,[Int])",   TCon ("Atom", [TInt]),       true,  true;   (* only nullary Atom is scalar *)
-    "TFn ([],Int)",        TFn ([], TInt),              true,  false;  (* diverges *)
-    "TFn ([Int],Int)",     TFn ([TInt], TInt),          true,  false;  (* diverges *)
-    "TPtr Int",            TPtr TInt,                   true,  true;
-    "TVar \"_\"",          TVar "_",                    true,  true;   (* placeholder: both conservative *)
-    "TVar \"a\"",          TVar "a",                    true,  false;  (* diverges *)
-    "TVar \"'_1234\"",     TVar "'_1234",               true,  false;  (* diverges *)
-  ]
-
-(* Both predicates now consult [Repr]'s unboxed registry for [TCon] (the
-   [Repr.Unboxed] row), and that registry is process-global: clear it so the
-   table's "Foo"/"List" rows are judged as ordinary boxed types no matter what
-   an earlier test in this runner registered. *)
-let test_rc_types_truth_table () =
-  March_tir.Repr.clear_unboxed_types ();
-  List.iter (fun (label, ty, exp_rc, exp_be) ->
-    Alcotest.(check bool) (label ^ ": needs_rc") exp_rc
-      (March_tir.Rc_types.needs_rc ty);
-    Alcotest.(check bool) (label ^ ": borrow_eligible") exp_be
-      (March_tir.Rc_types.borrow_eligible ty)
-  ) rc_types_truth_table
-
-let test_rc_types_divergence_set_exact () =
-  March_tir.Repr.clear_unboxed_types ();
-  (* Exactly the {TFn, bare TVar, TTuple, TRecord} rows diverge — computed
-     from the live predicates, compared against the constructor-classified
-     expectation, so a new divergence (or a silently unified arm) fails
-     loudly here even if the truth-table rows above were edited in sync. *)
-  let expected_divergent (ty : March_tir.Tir.ty) : bool =
-    match ty with
-    | March_tir.Tir.TFn _ | March_tir.Tir.TTuple _ | March_tir.Tir.TRecord _ -> true
-    | March_tir.Tir.TVar "_" -> false
-    | March_tir.Tir.TVar _ -> true
-    | _ -> false
-  in
-  List.iter (fun (label, ty, _, _) ->
-    let actual =
-      March_tir.Rc_types.needs_rc ty <> March_tir.Rc_types.borrow_eligible ty
-    in
-    Alcotest.(check bool) (label ^ ": diverges iff TFn/bare-TVar/TTuple/TRecord")
-      (expected_divergent ty) actual
-  ) rc_types_truth_table
+(* The needs_rc / borrow_eligible truth table and divergence-set test live in
+   test_kind.ml ("kind" group) since the type-kinds refactor. *)
 
 (* ── Unboxed small scalar aggregates (Repr.Unboxed, Milestone 3) ──────────
 
@@ -414,24 +333,22 @@ let test_unboxed_aggregate_built_without_alloc () =
 (* The RED control for the two above: with MARCH_NO_UNBOX the same source must
    go back to allocating a cell, which is what proves the assertions are
    measuring the representation and not some incidental property of the
-   program.  The env var is read through a [Lazy.t] in [Repr], so it cannot be
-   flipped inside this process — assert the pre-Milestone-3 shape by clearing
-   the registry directly instead, which is the same code path the flag takes. *)
+   program.  The env var is read through a [Lazy.t], so it cannot be flipped
+   inside this process — build the table with unboxing off instead, which is
+   the same argument the flag sets. *)
 let test_unboxed_aggregate_boxed_control () =
   let m = parse_and_desugar unboxed_vec3_src in
   let (_, type_map) = March_typecheck.Typecheck.check_module m in
   let tir = March_tir.Lower.lower_module ~type_map m in
   let tir = March_tir.Mono.monomorphize tir in
   let tir = March_tir.Defun.defunctionalize tir in
-  (* Register the EMPTY table and pin it to this module's types, so the
-     [ensure_unboxed_types] calls inside Perceus/Escape and [make_ctx] all
-     inherit "nothing is unboxed". *)
-  March_tir.Repr.set_unboxed_types ~enabled:false tir.March_tir.Tir.tm_types;
-  let tir = March_tir.Perceus.perceus tir in
-  let tir = March_tir.Drop.run tir in
-  let tir = March_tir.Escape.escape_analysis tir in
-  let ir  = March_tir.Llvm_emit.emit_module tir in
-  March_tir.Repr.clear_unboxed_types ();
+  (* One table with unboxing OFF, handed to every pass and to the emitter:
+     the same shape MARCH_NO_UNBOX produces through the pipeline. *)
+  let k_table = March_tir.Kind.of_module ~unboxing:false tir in
+  let tir = March_tir.Perceus.perceus ~k_table tir in
+  let tir = March_tir.Drop.run ~k_table tir in
+  let tir = March_tir.Escape.escape_analysis ~k_table tir in
+  let ir  = March_tir.Llvm_emit.emit_module ~k_table tir in
   Alcotest.(check bool) "control: no struct type declared" false
     (ir_contains ir "%ub.Vec3 = type");
   Alcotest.(check bool)
@@ -442,6 +359,25 @@ let test_unboxed_aggregate_boxed_control () =
    rejected row is rejected for its own reason, so a widening of the predicate
    shows up here as a specific row flipping rather than as a mysterious IR
    diff somewhere else. *)
+(* The readable proof that the old process-wide [force_disable] latch is
+   gone: build a REPL context (which used to disable unboxing for the rest
+   of the process), then compile a Vec3 module normally — it still unboxes.
+   Before Phase 3 of the type-kinds refactor this test failed. *)
+let test_unboxed_after_repl_ctx_in_same_process () =
+  ignore (March_tir.Llvm_ctx.make_ctx ~repl:true ());
+  let m = parse_and_desugar unboxed_vec3_src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let tir = March_tir.Mono.monomorphize tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  let k_table = March_tir.Kind.of_module tir in
+  let tir = March_tir.Perceus.perceus ~k_table tir in
+  let tir = March_tir.Drop.run ~k_table tir in
+  let tir = March_tir.Escape.escape_analysis ~k_table tir in
+  let ir  = March_tir.Llvm_emit.emit_module ~k_table tir in
+  Alcotest.(check bool) "a REPL ctx earlier in the process does not latch unboxing off" true
+    (ir_contains ir "%ub.Vec3 = type")
+
 let test_unboxed_aggregate_eligible_class () =
   let open March_tir.Tir in
   let cases = [
@@ -459,34 +395,32 @@ let test_unboxed_aggregate_eligible_class () =
     "a record",            TDRecord ("R", [("a", TInt); ("b", TInt)]),                    false;
   ] in
   List.iter (fun (label, td, expected) ->
-      March_tir.Repr.set_unboxed_types [td];
+      let t = (March_tir.Kind.build ~collision_set:(Hashtbl.create 0) [td]) in
       let name = match td with
         | TDVariant (n, _) | TDRecord (n, _) | TDClosure (n, _) -> n in
       Alcotest.(check bool) (label ^ ": unboxed?") expected
-        (March_tir.Repr.unboxed_of_type_name name <> None))
+        (March_tir.Kind.unboxed_of_type_name t name <> None))
     cases;
   (* An actor message type is excluded whatever its shape: it needs a runtime
      tag so a foreign message can be told apart at dispatch. *)
-  March_tir.Repr.set_unboxed_types
+  let t = (March_tir.Kind.build ~collision_set:(Hashtbl.create 0) 
     [ TDVariant ("Counter" ^ March_tir.Tir_names.actor_msg_suffix,
-                 [("Inc", [TInt; TInt])]) ];
+                 [("Inc", [TInt; TInt])]) ]) in
   Alcotest.(check int) "an actor message type is never unboxed" 0
-    (List.length (March_tir.Repr.unboxed_types ()));
-  March_tir.Repr.clear_unboxed_types ()
+    (List.length (March_tir.Kind.unboxed_types t))
 
 let test_unboxed_aggregate_rc_predicates () =
   let open March_tir.Tir in
-  March_tir.Repr.set_unboxed_types
-    [ TDVariant ("Vec3", [("Vec3", [TFloat; TFloat; TFloat])]) ];
+  let t = (March_tir.Kind.build ~collision_set:(Hashtbl.create 0) 
+    [ TDVariant ("Vec3", [("Vec3", [TFloat; TFloat; TFloat])]) ]) in
   let v = TCon ("Vec3", []) in
   Alcotest.(check bool) "needs_rc: an inline aggregate has no refcount" false
-    (March_tir.Rc_types.needs_rc v);
+    (March_tir.Kind.of_ty t v).March_tir.Kind.needs_rc;
   Alcotest.(check bool) "borrow_eligible: it is copied, never referenced" false
-    (March_tir.Rc_types.borrow_eligible v);
+    (March_tir.Kind.of_ty t v).March_tir.Kind.borrowable;
   (* An ordinary TCon in the same table is unaffected. *)
   Alcotest.(check bool) "an ordinary ADT still needs RC" true
-    (March_tir.Rc_types.needs_rc (TCon ("Other", [])));
-  March_tir.Repr.clear_unboxed_types ()
+    (March_tir.Kind.of_ty t (TCon ("Other", []))).March_tir.Kind.needs_rc
 
 (* A type named in an extern signature stays Boxed: the C side is handed the
    boxed cell (that is the layout every extern was written against), but that
@@ -496,18 +430,17 @@ let test_unboxed_aggregate_rc_predicates () =
 let test_unboxed_aggregate_ffi_type_stays_boxed () =
   let open March_tir.Tir in
   let td = TDVariant ("Vec3", [("Vec3", [TFloat; TFloat; TFloat])]) in
-  March_tir.Repr.set_unboxed_types [td];
+  let t0 = (March_tir.Kind.build ~collision_set:(Hashtbl.create 0) [td]) in
   Alcotest.(check bool) "unboxed without an extern" true
-    (March_tir.Repr.unboxed_of_type_name "Vec3" <> None);
-  March_tir.Repr.set_unboxed_types
+    (March_tir.Kind.unboxed_of_type_name t0 "Vec3" <> None);
+  let t1 = March_tir.Kind.build ~collision_set:(Hashtbl.create 0)
     ~externs:[ { ed_march_name = "f"; ed_c_name = "f"; ed_lib_name = "m";
                  ed_js_sym = "f"; ed_params = [TCon ("Vec3", [])];
                  ed_consumed = [false]; ed_blocking = false; ed_raises = false;
                  ed_ret = TInt } ]
-    [td];
+    [td] in
   Alcotest.(check bool) "boxed once it crosses an extern signature" false
-    (March_tir.Repr.unboxed_of_type_name "Vec3" <> None);
-  March_tir.Repr.clear_unboxed_types ()
+    (March_tir.Kind.unboxed_of_type_name t1 "Vec3" <> None)
 
 (* ── The branch-join box is owned by the merge that made it ───────────────
 
@@ -6658,81 +6591,84 @@ let test_join_points_pre_no_float_different_rhs () =
 
 let test_repr_newtype_int () =
   let tds = [March_tir.Tir.TDVariant ("UserId", [("UserId", [March_tir.Tir.TInt])])] in
-  match March_tir.Repr.repr_of_ty tds (March_tir.Tir.TCon ("UserId", [])) with
-  | March_tir.Repr.Newtype March_tir.Tir.TInt -> ()
+  match March_tir.Kind.repr_of (March_tir.Kind.build ~collision_set:(Hashtbl.create 0) tds) (March_tir.Tir.TCon ("UserId", [])) with
+  | March_tir.Kind.Newtype March_tir.Tir.TInt -> ()
   | other -> Alcotest.failf "expected Newtype TInt, got %s"
-      (match other with March_tir.Repr.Boxed -> "Boxed" | _ -> "other")
+      (match other with March_tir.Kind.Boxed -> "Boxed" | _ -> "other")
 
 let test_repr_newtype_ptr () =
   let tds = [March_tir.Tir.TDVariant ("Wrap", [("Wrap", [March_tir.Tir.TString])])] in
-  match March_tir.Repr.repr_of_ty tds (March_tir.Tir.TCon ("Wrap", [])) with
-  | March_tir.Repr.Newtype March_tir.Tir.TString -> ()
+  match March_tir.Kind.repr_of (March_tir.Kind.build ~collision_set:(Hashtbl.create 0) tds) (March_tir.Tir.TCon ("Wrap", [])) with
+  | March_tir.Kind.Newtype March_tir.Tir.TString -> ()
   | _ -> Alcotest.fail "expected Newtype TString"
 
 let test_repr_multivariant_is_boxed () =
   (* No type params → can't determine payload → Boxed. *)
   let tds = [March_tir.Tir.TDVariant
     ("Option", [("None", []); ("Some", [March_tir.Tir.TInt])])] in
-  match March_tir.Repr.repr_of_ty tds (March_tir.Tir.TCon ("Option", [])) with
-  | March_tir.Repr.Boxed -> ()
+  match March_tir.Kind.repr_of (March_tir.Kind.build ~collision_set:(Hashtbl.create 0) tds) (March_tir.Tir.TCon ("Option", [])) with
+  | March_tir.Kind.Boxed -> ()
   | _ -> Alcotest.fail "expected Boxed for Option with no params"
 
 let test_repr_niche_int () =
   let tds = [March_tir.Tir.TDVariant
     ("Option", [("None", []); ("Some", [March_tir.Tir.TInt])])] in
-  match March_tir.Repr.repr_of_ty tds (March_tir.Tir.TCon ("Option", [March_tir.Tir.TInt])) with
-  | March_tir.Repr.Niche { payload = March_tir.Tir.TInt; tagged = true } -> ()
+  match March_tir.Kind.repr_of (March_tir.Kind.build ~collision_set:(Hashtbl.create 0) tds) (March_tir.Tir.TCon ("Option", [March_tir.Tir.TInt])) with
+  | March_tir.Kind.Niche { payload = March_tir.Tir.TInt; tagged = true } -> ()
   | _ -> Alcotest.fail "expected Niche{TInt, tagged=true}"
 
 let test_repr_niche_string () =
   let tds = [March_tir.Tir.TDVariant
     ("Option", [("None", []); ("Some", [March_tir.Tir.TString])])] in
-  match March_tir.Repr.repr_of_ty tds (March_tir.Tir.TCon ("Option", [March_tir.Tir.TString])) with
-  | March_tir.Repr.Niche { payload = March_tir.Tir.TString; tagged = false } -> ()
+  match March_tir.Kind.repr_of (March_tir.Kind.build ~collision_set:(Hashtbl.create 0) tds) (March_tir.Tir.TCon ("Option", [March_tir.Tir.TString])) with
+  | March_tir.Kind.Niche { payload = March_tir.Tir.TString; tagged = false } -> ()
   | _ -> Alcotest.fail "expected Niche{TString, tagged=false}"
 
 let test_repr_niche_bool () =
   let tds = [March_tir.Tir.TDVariant
     ("Option", [("None", []); ("Some", [March_tir.Tir.TBool])])] in
-  match March_tir.Repr.repr_of_ty tds (March_tir.Tir.TCon ("Option", [March_tir.Tir.TBool])) with
-  | March_tir.Repr.Niche { payload = March_tir.Tir.TBool; tagged = true } -> ()
+  match March_tir.Kind.repr_of (March_tir.Kind.build ~collision_set:(Hashtbl.create 0) tds) (March_tir.Tir.TCon ("Option", [March_tir.Tir.TBool])) with
+  | March_tir.Kind.Niche { payload = March_tir.Tir.TBool; tagged = true } -> ()
   | _ -> Alcotest.fail "expected Niche{TBool, tagged=true}"
 
 let test_repr_niche_float_is_boxed () =
   (* Float 0.0 bitcasts to 0 → cannot use niche. *)
   let tds = [March_tir.Tir.TDVariant
     ("Option", [("None", []); ("Some", [March_tir.Tir.TFloat])])] in
-  match March_tir.Repr.repr_of_ty tds (March_tir.Tir.TCon ("Option", [March_tir.Tir.TFloat])) with
-  | March_tir.Repr.Boxed -> ()
+  match March_tir.Kind.repr_of (March_tir.Kind.build ~collision_set:(Hashtbl.create 0) tds) (March_tir.Tir.TCon ("Option", [March_tir.Tir.TFloat])) with
+  | March_tir.Kind.Boxed -> ()
   | _ -> Alcotest.fail "expected Boxed for Option(Float)"
 
 let test_repr_niche_unit_is_boxed () =
   (* Unit = i64 0 → null → unsafe for niche. *)
   let tds = [March_tir.Tir.TDVariant
     ("Option", [("None", []); ("Some", [March_tir.Tir.TUnit])])] in
-  match March_tir.Repr.repr_of_ty tds (March_tir.Tir.TCon ("Option", [March_tir.Tir.TUnit])) with
-  | March_tir.Repr.Boxed -> ()
+  match March_tir.Kind.repr_of (March_tir.Kind.build ~collision_set:(Hashtbl.create 0) tds) (March_tir.Tir.TCon ("Option", [March_tir.Tir.TUnit])) with
+  | March_tir.Kind.Boxed -> ()
   | _ -> Alcotest.fail "expected Boxed for Option(Unit)"
 
 let test_repr_nested_niche_is_boxed () =
   (* Some(None)=0=None: nested niche is ambiguous → must stay Boxed. *)
   let tds = [March_tir.Tir.TDVariant
     ("Option", [("None", []); ("Some", [March_tir.Tir.TCon ("Option", [March_tir.Tir.TInt])])])] in
-  match March_tir.Repr.repr_of_ty tds (March_tir.Tir.TCon ("Option", [March_tir.Tir.TCon ("Option", [March_tir.Tir.TInt])])) with
-  | March_tir.Repr.Boxed -> ()
+  match March_tir.Kind.repr_of (March_tir.Kind.build ~collision_set:(Hashtbl.create 0) tds) (March_tir.Tir.TCon ("Option", [March_tir.Tir.TCon ("Option", [March_tir.Tir.TInt])])) with
+  | March_tir.Kind.Boxed -> ()
   | _ -> Alcotest.fail "expected Boxed for Option(Option(Int))"
 
+(* With unboxing ON a scalar-only 2-field single ctor is a legitimate
+   [Unboxed] aggregate (see the unboxed_aggregates group); this case pins the
+   pre-Milestone-3 shape, so it asks a table with unboxing off. *)
 let test_repr_multifield_is_boxed () =
   let tds = [March_tir.Tir.TDVariant
     ("Point", [("Point", [March_tir.Tir.TInt; March_tir.Tir.TInt])])] in
-  match March_tir.Repr.repr_of_ty tds (March_tir.Tir.TCon ("Point", [])) with
-  | March_tir.Repr.Boxed -> ()
+  match March_tir.Kind.repr_of (March_tir.Kind.build ~unboxing:false ~collision_set:(Hashtbl.create 0) tds) (March_tir.Tir.TCon ("Point", [])) with
+  | March_tir.Kind.Boxed -> ()
   | _ -> Alcotest.fail "expected Boxed for 2-field ctor"
 
 let test_repr_scalar_is_boxed () =
   (* Bare scalars are not TCon ctors — classify as Boxed (irrelevant). *)
-  match March_tir.Repr.repr_of_ty [] March_tir.Tir.TInt with
-  | March_tir.Repr.Boxed -> ()
+  match March_tir.Kind.repr_of March_tir.Kind.empty March_tir.Tir.TInt with
+  | March_tir.Kind.Boxed -> ()
   | _ -> Alcotest.fail "expected Boxed for TInt"
 
 (** Same-short-name colliding types must never classify Niche even when they
@@ -6747,10 +6683,10 @@ let test_repr_colliding_niche_shaped_type_forced_boxed () =
   ] in
   let cs = March_tir.Collision_set.compute defs in
   Alcotest.(check bool) "colliding niche-shaped type is NOT niche"
-    false (March_tir.Repr.is_niche_shaped ~collision_set:cs defs "NA.Option2");
-  (match March_tir.Repr.repr_of_ty ~collision_set:cs defs
+    false (March_tir.Kind.is_niche_shaped (March_tir.Kind.build ~collision_set:cs defs) "NA.Option2");
+  (match March_tir.Kind.repr_of (March_tir.Kind.build ~collision_set:cs defs)
            (March_tir.Tir.TCon ("NA.Option2", [March_tir.Tir.TInt])) with
-   | March_tir.Repr.Boxed -> ()
+   | March_tir.Kind.Boxed -> ()
    | _ -> Alcotest.fail "expected forced Boxed repr for colliding niche-shaped type")
 
 (** Non-colliding types (the common case: a single declaring module) must be
@@ -6762,7 +6698,7 @@ let test_repr_noncolliding_niche_shaped_type_unaffected () =
   ] in
   let cs = March_tir.Collision_set.compute defs in  (* empty — single declaration *)
   Alcotest.(check bool) "Option stays niche"
-    true (March_tir.Repr.is_niche_shaped ~collision_set:cs defs "Option")
+    true (March_tir.Kind.is_niche_shaped (March_tir.Kind.build ~collision_set:cs defs) "Option")
 
 (* ── lower.ml: collision-conditional module-qualified impl symbols
    (Task 3, specs/plans/2026-07-20-fqn-impl-dispatch-identity.md) ────────── *)
@@ -14801,6 +14737,7 @@ let codegen_suites =
           Alcotest.test_case "built/destructured without march_alloc" `Quick test_unboxed_aggregate_built_without_alloc;
           Alcotest.test_case "RED control: boxed repr does allocate"  `Quick test_unboxed_aggregate_boxed_control;
           Alcotest.test_case "eligible class"                         `Quick test_unboxed_aggregate_eligible_class;
+          Alcotest.test_case "a REPL ctx does not latch unboxing off" `Quick test_unboxed_after_repl_ctx_in_same_process;
           Alcotest.test_case "needs_rc/borrow_eligible are false"     `Quick test_unboxed_aggregate_rc_predicates;
           Alcotest.test_case "compiled Vec3 loop moves march_live_allocs by zero" `Slow
             test_unboxed_aggregate_zero_live_allocs_compiled;
@@ -14809,10 +14746,6 @@ let codegen_suites =
           Alcotest.test_case "compiled branch-built aggregate loop does not leak" `Slow
             test_unboxed_aggregate_branch_join_no_leak_compiled;
           Alcotest.test_case "a type in an extern signature stays boxed" `Quick test_unboxed_aggregate_ffi_type_stays_boxed;
-        ] );
-      ( "rc_types", [
-          Alcotest.test_case "needs_rc/borrow_eligible truth table" `Quick test_rc_types_truth_table;
-          Alcotest.test_case "divergence set is exactly {TFn, bare TVar, TTuple, TRecord}" `Quick test_rc_types_divergence_set_exact;
         ] );
       ( "nested_lit_pattern_codegen", [
           Alcotest.test_case "nested bool lit: no tag switch"   `Quick test_nested_bool_lit_pattern_no_tag_switch;
