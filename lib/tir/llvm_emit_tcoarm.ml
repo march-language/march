@@ -39,7 +39,7 @@ let emit_fv_load ~emit_atom ~emit_expr ctx (v : Tir.var) (rhs : Tir.expr)
     let field_idx =
       int_of_string (String.sub field_name 3 (String.length field_name - 3)) in
     let (_, obj_val) = emit_atom ctx obj_atom in
-    let field_ty = llvm_ty v.Tir.v_ty in
+    let field_ty = llvm_ty ctx v.Tir.v_ty in
     (* Tuple fields are stored low-bit tagged (the unified slot convention): a
        direct native-typed load (e.g. `load i64`) reads the tagged value
        verbatim — Int 5 -> 11.  When the object is a tuple, load the slot as ptr
@@ -50,7 +50,7 @@ let emit_fv_load ~emit_atom ~emit_expr ctx (v : Tir.var) (rhs : Tir.expr)
        ([Llvm_ctx.llvm_field_ty]).  Load the slot as ptr and let [coerce]
        rebuild the struct value the binder's type calls for — the same
        slot-vs-value split the tuple arm above makes for a tagged scalar. *)
-    let slot_ty = Llvm_ctx.llvm_field_ty v.Tir.v_ty in
+    let slot_ty = Llvm_ctx.llvm_field_ty ctx v.Tir.v_ty in
     let fv = match atom_tir_ty obj_atom with
       | Tir.TTuple _ ->
         let raw = emit_load_field ctx obj_val field_idx "ptr" in
@@ -125,7 +125,7 @@ let emit_self_tco_let ~emit_atom ~emit_expr ctx (args : Tir.atom list)
     (* 5. Back-edge to the TCO loop header. *)
     emit_term ctx (Printf.sprintf "br label %%%s" ctx.tco_loop_label);
     emit_label ctx (fresh_block ctx "tco_perceus_cont");
-    let dummy_ty = llvm_ret_ty ctx.ret_ty in
+    let dummy_ty = llvm_ret_ty ctx ctx.ret_ty in
     (match dummy_ty with
      | "double" -> ("double", "0x0000000000000000")
      | "void"   -> ("i64",    "0")
@@ -187,7 +187,7 @@ let emit_self_tco_seq ~emit_atom ~emit_expr ctx (args : Tir.atom list)
     (* 5. Back-edge to the TCO loop header. *)
     emit_term ctx (Printf.sprintf "br label %%%s" ctx.tco_loop_label);
     emit_label ctx (fresh_block ctx "tco_seq_cont");
-    let dummy_ty = llvm_ret_ty ctx.ret_ty in
+    let dummy_ty = llvm_ret_ty ctx ctx.ret_ty in
     (match dummy_ty with
      | "double" -> ("double", "0x0000000000000000")
      | "void"   -> ("i64",    "0")
@@ -232,7 +232,7 @@ let emit_mutual_tco_let ~emit_atom ~emit_expr ctx (f : Tir.var)
     (* 6. Back-edge to the shared mutual-TCO loop header. *)
     emit_term ctx (Printf.sprintf "br label %%%s" ctx.mutual_tco_loop_label);
     emit_label ctx (fresh_block ctx "mutco_perceus_cont");
-    let dummy_ty = llvm_ret_ty ctx.ret_ty in
+    let dummy_ty = llvm_ret_ty ctx ctx.ret_ty in
     (match dummy_ty with
      | "double" -> ("double", "0x0000000000000000")
      | "void"   -> ("i64",    "0")
@@ -278,7 +278,7 @@ let emit_mutual_tco_seq ~emit_atom ~emit_expr ctx (f : Tir.var)
     (* 6. Back-edge to the shared mutual-TCO loop header. *)
     emit_term ctx (Printf.sprintf "br label %%%s" ctx.mutual_tco_loop_label);
     emit_label ctx (fresh_block ctx "mutco_seq_cont");
-    let dummy_ty = llvm_ret_ty ctx.ret_ty in
+    let dummy_ty = llvm_ret_ty ctx ctx.ret_ty in
     (match dummy_ty with
      | "double" -> ("double", "0x0000000000000000")
      | "void"   -> ("i64",    "0")

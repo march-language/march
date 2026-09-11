@@ -185,7 +185,7 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
      coerced to ptr below (tagging scalars), matching what every call site
      reads.  void wrappers keep void — there is no value to carry. *)
   let ret_ty =
-    let base = Llvm_ctx.llvm_ret_ty fn.Tir.fn_ret_ty in
+    let base = Llvm_ctx.llvm_ret_ty ctx fn.Tir.fn_ret_ty in
     if Tir_names.is_apply_fn fn.Tir.fn_name && base <> "void" then "ptr" else base
   in
 
@@ -211,7 +211,7 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
   let is_apply_wrapper = Tir_names.is_apply_fn fn.Tir.fn_name in
   let params_str = String.concat ", " (List.map (fun (v : Tir.var) ->
       let vn = Llvm_ctx.llvm_name v.Tir.v_name in
-      let base = Llvm_ctx.llvm_param_ty ~type_defs:ctx.Llvm_ctx.type_defs ~collision_set:ctx.Llvm_ctx.collision_set v.Tir.v_ty in
+      let base = Llvm_ctx.llvm_param_ty ~k_table:ctx.Llvm_ctx.k_table v.Tir.v_ty in
       let pty = if is_apply_wrapper && (base = "double" || base = "i64") then "ptr" else base in
       pty ^ " %" ^ vn ^ ".arg"
     ) fn.Tir.fn_params) in
@@ -261,7 +261,7 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
   (* Alloca + store for each parameter; collect slot info for TCO. *)
   let native_vec_idxs = native_vec_param_idxs fn in
   let param_slots = List.mapi (fun param_idx (v : Tir.var) ->
-    let ty = Llvm_ctx.llvm_ty v.Tir.v_ty in
+    let ty = Llvm_ctx.llvm_ty ctx v.Tir.v_ty in
     let slot = Llvm_ctx.alloca_name ctx (Llvm_ctx.llvm_name v.Tir.v_name) in
     let vn = Llvm_ctx.llvm_name v.Tir.v_name in
     (* Task 4b: a SIMD-vector parameter of a SELF-TAIL-RECURSIVE function gets
@@ -420,7 +420,10 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
     declaration in subsequent JIT fragments that reference it without redefining it. *)
 let fn_declare_str (fn : Tir.fn_def) : string =
   let fn_llvm_name = Llvm_builtins.mangle_extern fn.Tir.fn_name in
-  let ret_ty = Llvm_ctx.llvm_ret_ty fn.Tir.fn_ret_ty in
+  (* No ctx here (JIT forward-declare helper); the REPL never unboxes, so the
+     empty table's spelling is exactly the REPL ctx's. *)
+  let ret_ty = match fn.Tir.fn_ret_ty with
+    | Tir.TUnit -> "void" | t -> Kind.llvm_ty_of Kind.empty t in
   let param_tys = String.concat ", " (List.map (fun (v : Tir.var) ->
       (* Called without ~collision_set (this JIT-fragment forward-`declare`
          helper has no ctx in scope).  Known, low-risk omission: the only thing
@@ -789,6 +792,7 @@ let emit_module ~emit_expr
     ?(emit_main=true)
     ?(cap_attrib=([] : (string * string) list))
     ?(cap_decls=([] : (string * string) list))
+    ?(k_table : Kind.table option)
     (m : Tir.tir_module) : string =
   (* type defs are threaded via ctx.type_defs (set below); reset the
      repr-consistency audit per module emission. *)
@@ -831,8 +835,9 @@ let emit_module ~emit_expr
            then Some n else None)
       |> Hot_reload.Name_table.build
   in
+  let k_table = match k_table with Some t -> t | None -> Kind.of_module m in
   let ctx = Llvm_ctx.make_ctx ~fast_math ~pmap_threshold ~hot_reload ~hr_names
-      ~type_defs:m.Tir.tm_types () in
+      ~type_defs:m.Tir.tm_types ~k_table () in
   (* Patch .so: hide all non-exported symbols so intra-.so PLT calls prefer the
      .so's own definitions over same-named symbols in the server binary.  This
      is the compile-time complement to RTLD_DEEPBIND (which is Linux-only). *)
@@ -980,7 +985,7 @@ let emit_module ~emit_expr
   (* Identify mutual-TCO groups.  Functions in these groups are emitted as
      combined dispatch functions + thin wrappers — they must NOT also be
      emitted individually via emit_fn. *)
-  let mutual_groups = Llvm_tco.find_mutual_tco_groups m.Tir.tm_fns in
+  let mutual_groups = Llvm_tco.find_mutual_tco_groups ctx m.Tir.tm_fns in
   let mutual_fn_names =
     List.concat_map (fun g -> List.map (fun fn -> fn.Tir.fn_name) g)
       mutual_groups
@@ -1099,8 +1104,8 @@ let emit_module ~emit_expr
       (* A `raises` binding takes a hidden march_env* first param and returns the
          bare Ok payload (T of Result(T,E)); the call site wraps it into Ok/Err. *)
       let ret_llty =
-        if ed.ed_raises then Llvm_ctx.llvm_ret_ty (Llvm_calls.ok_payload_ty ed.ed_ret)
-        else Llvm_ctx.llvm_ret_ty ed.ed_ret in
+        if ed.ed_raises then Llvm_ctx.llvm_ret_ty ctx (Llvm_calls.ok_payload_ty ed.ed_ret)
+        else Llvm_ctx.llvm_ret_ty ctx ed.ed_ret in
       let param_lltys = List.map (fun _t -> "ptr") ed.ed_params in
       let param_lltys = if ed.ed_raises then "ptr" :: param_lltys else param_lltys in
       let params_str = String.concat ", " (List.mapi (fun i ty ->

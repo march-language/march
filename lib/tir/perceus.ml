@@ -209,27 +209,27 @@ let rename_borrowed_shadows (borrowed : StringSet.t) (body : Tir.expr) : Tir.exp
    the caller's consume frees the field the record still owns (use-after-free
    observed in sitemap/feed entry rendering and tags-list reuse).
    Only projections whose field type [needs_rc] are rewritten. *)
-let rec dup_field_results (e : Tir.expr) : Tir.expr =
+let rec dup_field_results (k_table : Kind.table) (e : Tir.expr) : Tir.expr =
   match e with
   | Tir.EField (Tir.AVar src, f) ->
     (match src.Tir.v_ty with
      | Tir.TRecord fields ->
        (match List.assoc_opt f fields with
-        | Some fty when needs_rc fty ->
+        | Some fty when Kind.needs_rc_of k_table fty ->
           let tmp = fresh_rc_var fty in
           Tir.ELet (tmp, e, Tir.EAtom (Tir.AVar tmp))
         | _ -> e)
      | _ -> e)
-  | Tir.ELet (v, e1, e2) -> Tir.ELet (v, e1, dup_field_results e2)
-  | Tir.ESeq (e1, e2) -> Tir.ESeq (e1, dup_field_results e2)
+  | Tir.ELet (v, e1, e2) -> Tir.ELet (v, e1, dup_field_results k_table e2)
+  | Tir.ESeq (e1, e2) -> Tir.ESeq (e1, dup_field_results k_table e2)
   | Tir.ECase (a, brs, dflt) ->
     Tir.ECase (a,
-      List.map (fun b -> { b with Tir.br_body = dup_field_results b.Tir.br_body }) brs,
-      Option.map dup_field_results dflt)
+      List.map (fun b -> { b with Tir.br_body = dup_field_results k_table b.Tir.br_body }) brs,
+      Option.map (dup_field_results k_table) dflt)
   | Tir.ELetRec (fns, body) ->
     Tir.ELetRec (
-      List.map (fun fd -> { fd with Tir.fn_body = dup_field_results fd.Tir.fn_body }) fns,
-      dup_field_results body)
+      List.map (fun fd -> { fd with Tir.fn_body = dup_field_results k_table fd.Tir.fn_body }) fns,
+      dup_field_results k_table body)
   | other -> other
 
 (** Emit the callee-side ownership drop of [$clo] for an apply function whose
@@ -586,7 +586,7 @@ let insert_rc ~(module_env : env) ?(repl = false) ?(borrowed = StringSet.empty)
   (* Rename ELet/ECase-bound variables that shadow borrowed parameters before
      RC insertion.  See [rename_borrowed_shadows] for the full rationale. *)
   let body_renamed = rename_borrowed_shadows borrowed fn.Tir.fn_body in
-  let body_normed = dup_field_results body_renamed in
+  let body_normed = dup_field_results module_env.k_table body_renamed in
   let fn' = { fn with Tir.fn_body = body_normed } in
   let closure_fvs = collect_closure_fvs fn' in
   (* Closure FVs are owned by the closure struct, not by the apply function.
@@ -748,7 +748,9 @@ let print_perceus_stats ~(label : string) ~(before : rc_counts) ~(after : rc_cou
       live after the call; a post-call EDecRC is emitted instead when the arg
       is the caller's last use. *)
 let perceus ?(repl : bool = false) ?(repl_vars : string list = [])
-    ?(borrow_map : Borrow.borrow_map option) (m : Tir.tir_module) : Tir.tir_module =
+    ?(borrow_map : Borrow.borrow_map option) ?(k_table : Kind.table option)
+    (m : Tir.tir_module) : Tir.tir_module =
+  let k_table = match k_table with Some t -> t | None -> Kind.of_module m in
   (* Reset the fresh-name counter per module so that compiling the same module
      twice produces identical IR.  A monotonic counter that survives across
      modules makes IR diffs unstable and causes spurious churn in test
@@ -757,14 +759,6 @@ let perceus ?(repl : bool = false) ?(repl_vars : string list = [])
      remains a ref rather than becoming an [env] field (Wave 3 Task 4 — see
      the plan's guidance on accumulator- vs scope-shaped refs). *)
   _rc_fresh_ctr := 0;
-  (* Milestone 3: [Rc_types.needs_rc]/[borrow_eligible] answer from [Repr]'s
-     unboxed registry, so it must be populated before borrow inference reads
-     them.  [Contract_pipeline] normally registered already; this makes a
-     caller with its own pass list (the LSP, tests, [Repl_jit] with unboxing
-     forced off) agree with the emitter instead of running against an empty
-     table.  See [Repr.ensure_unboxed_types]. *)
-  Repr.ensure_unboxed_types
-    ~collision_set:(Collision_set.compute m.Tir.tm_types) m.Tir.tm_types;
   (* Phase 0: borrow inference.  [?borrow_map] lets the driver compute this
      ONCE and hand the same answer to [Escape], whose stack-promotion verdict
      must be taken against the map this pass placed its RC ops against — see
@@ -789,11 +783,13 @@ let perceus ?(repl : bool = false) ?(repl_vars : string list = [])
       StringSet.add ed.Tir.ed_march_name s) StringSet.empty m.Tir.tm_externs
   in
   (* Module-scoped env fields: constant for every function processed below. *)
+  let module_cs = Collision_set.compute m.Tir.tm_types in
   let module_env =
     { empty_env with
       borrow_map;
       type_defs = m.Tir.tm_types;
-      collision_set = Collision_set.compute m.Tir.tm_types;
+      collision_set = module_cs;
+      k_table;
       extern_names }
   in
   let repl_set =
@@ -801,7 +797,7 @@ let perceus ?(repl : bool = false) ?(repl_vars : string list = [])
   in
   let fns_after_insert =
     m.Tir.tm_fns
-    |> List.map preprocess_fn
+    |> List.map (preprocess_fn ~k_table)
     |> List.map (fun fn ->
          let base =
            if fn.Tir.fn_name = "main" then repl_set else StringSet.empty

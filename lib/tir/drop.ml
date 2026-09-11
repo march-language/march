@@ -196,6 +196,7 @@ let rec mangle (ty : Tir.ty) : string =
 type env = {
   type_defs     : Tir.type_def list;
   collision_set : (string, string list) Hashtbl.t;
+  k_table       : Kind.table;   (* the per-type table; see specs/2026-09-10-type-kinds-design.md *)
   (* mangled type -> synthesized fn name.  Populated BEFORE the body is built
      so a recursive type's own drop call resolves instead of recursing
      forever during synthesis. *)
@@ -235,14 +236,13 @@ let find_variant_by_suffix (env : env) (name : string)
         | _ -> None) env.type_defs with
     | [ (qualified, variants) ] ->
       let niche =
-        match Repr.niche_repr_of_concrete ~collision_set:env.collision_set
-                env.type_defs qualified with
-        | Some (Repr.Niche _) -> true
+        match Kind.niche_repr_of_concrete env.k_table qualified with
+        | Some (Kind.Niche _) -> true
         | _ -> false in
       if niche then None
-      else (match Repr.repr_of_ty ~collision_set:env.collision_set env.type_defs
+      else (match Kind.repr_of env.k_table
                     (Tir.TCon (qualified, [])) with
-            | Repr.Boxed -> Some variants
+            | Kind.Boxed -> Some variants
             | _ -> None)
     | _ -> None
 
@@ -285,16 +285,15 @@ let droppable_ctors (env : env) (ty : Tir.ty)
     let concrete_niche =
       match ty with
       | Tir.TCon (n, []) ->
-        (match Repr.niche_repr_of_concrete ~collision_set:env.collision_set
-                 env.type_defs n with
-         | Some (Repr.Niche _) -> true
+        (match Kind.niche_repr_of_concrete env.k_table n with
+         | Some (Kind.Niche _) -> true
          | _ -> false)
       | _ -> false
     in
     if concrete_niche then None else
-    (match Repr.repr_of_ty ~collision_set:env.collision_set env.type_defs ty with
-     | Repr.Boxed ->
-       (match (match Repr.find_variant env.type_defs name with
+    (match Kind.repr_of env.k_table ty with
+     | Kind.Boxed ->
+       (match (match Kind.find_variant env.k_table name with
                | Some _ as found -> found
                | None -> find_variant_by_suffix env name) with
         | Some ctors ->
@@ -309,7 +308,7 @@ let droppable_ctors (env : env) (ty : Tir.ty)
      (* Unboxed: an inline struct of scalars.  No cell to free and no heap
         field to recurse into, so there is nothing for a [__drop$T] helper to
         do — the same answer as the erased reprs, for a different reason. *)
-     | Repr.Newtype _ | Repr.Niche _ | Repr.Unboxed _ -> None)
+     | Kind.Newtype _ | Kind.Niche _ | Kind.Unboxed _ -> None)
   | _ -> None
 
 (* A field still carrying an unsubstituted TVar means the type-parameter
@@ -356,17 +355,16 @@ let aggregate_fields (ty : Tir.ty) : (string * Tir.ty) list option =
 let may_be_non_heap (env : env) (ty : Tir.ty) : bool =
   match ty with
   | Tir.TCon (name, _) ->
-    (match Repr.repr_of_ty ~collision_set:env.collision_set env.type_defs ty with
+    (match Kind.repr_of env.k_table ty with
      (* Unboxed: a scalar-only variant packed into a word -- never a heap
         pointer, so it belongs here too. *)
-     | Repr.Niche _ | Repr.Newtype _ | Repr.Unboxed _ -> true
-     | Repr.Boxed ->
+     | Kind.Niche _ | Kind.Newtype _ | Kind.Unboxed _ -> true
+     | Kind.Boxed ->
        (* repr_of_ty answers Boxed for an Option-shaped type reached without
           type params; niche_repr_of_concrete is the predicate codegen uses
           there.  Same split that caused the double release fixed above. *)
-       (match Repr.niche_repr_of_concrete ~collision_set:env.collision_set
-                env.type_defs name with
-        | Some (Repr.Niche _) -> true
+       (match Kind.niche_repr_of_concrete env.k_table name with
+        | Some (Kind.Niche _) -> true
         | _ -> false))
   | _ -> false
 
@@ -389,7 +387,7 @@ let rec drop_fn_for (env : env) (ty : Tir.ty) : string option =
          top of ~200k cells. *)
       let owns_heap_child =
         List.exists (fun (_, fty) ->
-            (not (has_tvar fty)) && Rc_types.needs_rc fty) fields
+            (not (has_tvar fty)) && Kind.needs_rc_of env.k_table fty) fields
       in
       if not owns_heap_child then begin
         Hashtbl.replace env.names key ""; None
@@ -406,7 +404,7 @@ let rec drop_fn_for (env : env) (ty : Tir.ty) : string option =
     | Some ctors ->
       let owns_heap_child =
         List.exists (fun (_, ftys) ->
-            List.exists (fun fty -> (not (has_tvar fty)) && Rc_types.needs_rc fty)
+            List.exists (fun fty -> (not (has_tvar fty)) && Kind.needs_rc_of env.k_table fty)
               ftys)
           ctors
       in
@@ -448,7 +446,7 @@ and build_aggregate_drop_fn env fname ty (fields : (string * Tir.ty) list)
   let unit_expr = Tir.ETuple [] in
   let droppable =
     List.filter (fun (_, fty) ->
-        (not (has_tvar fty)) && Rc_types.needs_rc fty) fields
+        (not (has_tvar fty)) && Kind.needs_rc_of env.k_table fty) fields
   in
   let binders =
     List.map (fun (accessor, fty) ->
@@ -506,7 +504,7 @@ and build_drop_fn env fname ty ctors : Tir.fn_def =
         (* One drop op per field that actually needs releasing. *)
         let ops =
           List.filter_map (fun v ->
-              if has_tvar v.Tir.v_ty || not (Rc_types.needs_rc v.Tir.v_ty) then None
+              if has_tvar v.Tir.v_ty || not (Kind.needs_rc_of env.k_table v.Tir.v_ty) then None
               else if may_be_non_heap env v.Tir.v_ty then
                 Some (Tir.EDecRC (Tir.AVar v))
               else match drop_fn_for env v.Tir.v_ty with
@@ -738,7 +736,7 @@ let rewrite_apply_clo_drop (env : env) (body : Tir.expr) : Tir.expr =
   let seen_fields = Hashtbl.create 4 in
   let captures = ref [] in
   let note_capture field (v : Tir.var) =
-    if Rc_types.needs_rc v.Tir.v_ty && not (Hashtbl.mem seen_fields field)
+    if Kind.needs_rc_of env.k_table v.Tir.v_ty && not (Hashtbl.mem seen_fields field)
     then begin
       Hashtbl.add seen_fields field ();
       captures := v :: !captures
@@ -860,9 +858,10 @@ let rec rewrite env (e : Tir.expr) : Tir.expr =
     Runs AFTER Perceus (it rewrites the [EDecRC]s Perceus inserts) and BEFORE
     Escape (so a value flowing into a drop call is seen as escaping and is not
     stack-allocated behind the drop's back). *)
-let run (m : Tir.tir_module) : Tir.tir_module =
+let run ?(k_table : Kind.table option) (m : Tir.tir_module) : Tir.tir_module =
+  let k_table = match k_table with Some t -> t | None -> Kind.of_module m in
   let collision_set = Collision_set.compute m.Tir.tm_types in
-  let env = { type_defs = m.Tir.tm_types; collision_set;
+  let env = { type_defs = m.Tir.tm_types; collision_set; k_table;
               names = Hashtbl.create 32; fns = []; ctr = 0 } in
   (* Apply functions whose environment owns what it captured — see
      [owning_apply_fns] for why this gate is load-bearing rather than an

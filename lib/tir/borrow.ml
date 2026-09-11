@@ -315,7 +315,7 @@ let rec has_matching_alloc (base_type : string) (e : Tir.expr) : bool =
     here would mean re-deriving and parsing the uid back out of the type
     name, which is exactly the kind of fragile re-derivation this task
     exists to eliminate, not add. Left unconverted; see the task report. *)
-let is_closure_ty : Tir.ty -> bool = function
+let is_clo_struct_ty : Tir.ty -> bool = function
   | Tir.TCon (n, _) -> Tir_names.is_clo_struct n
   | _ -> false
 
@@ -449,7 +449,7 @@ let rec owned_in (name : string) (bm : borrow_map) (e : Tir.expr) : bool =
      a use-after-free (Depot Transaction.run/tx_begin → Migration.run →
      Db.close(conn)). *)
   | Tir.ELet (v, Tir.EAlloc (ty, args), e2)
-    when is_closure_ty ty
+    when is_clo_struct_ty ty
          && List.exists (atom_is name) args
          && not (String.equal v.Tir.v_name name)
          && not (closure_escapes v.Tir.v_name e2) ->
@@ -636,7 +636,8 @@ let print_borrow_map (m : Tir.tir_module) (bm : borrow_map) =
   ) m.Tir.tm_fns;
   Printf.eprintf "%!"
 
-let infer_module (m : Tir.tir_module) : borrow_map =
+let infer_module ?(k_table : Kind.table option) (m : Tir.tir_module) : borrow_map =
+  let k_table = match k_table with Some t -> t | None -> Kind.of_module m in
   (* Per-module: which variant types carry no heap field anywhere.  Consulted
      by [field_escape_owns] — see [_scalar_only]. *)
   set_scalar_only_types m.Tir.tm_types;
@@ -669,7 +670,7 @@ let infer_module (m : Tir.tir_module) : borrow_map =
            late seed would leave callers-of-callers classified against the
            stale answer. *)
         if i = 0 && Tir_names.is_apply_fn fn.Tir.fn_name then false
-        else Rc_types.borrow_eligible (List.nth fn.Tir.fn_params i).Tir.v_ty
+        else Kind.borrowable_of k_table (List.nth fn.Tir.fn_params i).Tir.v_ty
       ) in
       StringMap.add fn.Tir.fn_name modes acc
     ) StringMap.empty m.Tir.tm_fns
@@ -713,7 +714,7 @@ let infer_module (m : Tir.tir_module) : borrow_map =
       let modes = Array.of_list (List.mapi (fun i pty ->
         let consumed = match List.nth_opt ed.Tir.ed_consumed i with
           | Some c -> c | None -> false in
-        Rc_types.borrow_eligible pty && not consumed
+        Kind.borrowable_of k_table pty && not consumed
       ) ed.Tir.ed_params) in
       StringMap.add ed.Tir.ed_march_name modes acc
     ) result m.Tir.tm_externs

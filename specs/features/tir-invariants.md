@@ -86,7 +86,7 @@ like a `let`-RHS.
 
 ## 2. `TVar "_"` semantics
 
-**Governing module: `lib/tir/rc_types.ml`** (module doc, `TVar "_"` row of
+**Governing module: `lib/tir/kind.ml`** (module doc, `TVar "_"` row of
 the truth table) and **`lib/tir/lower_types.ml`** (`unknown_ty`).
 
 `Tir.ty`'s `TVar of string` constructor serves two, sharply different roles
@@ -94,8 +94,8 @@ depending on the string it contains:
 
 - **A truly named type variable** (`TVar "_NNNN"` or similar): an
   unresolved user type-var that leaked into monomorphic TIR because a
-  concrete type was not propagated across a module boundary (`rc_types.ml`'s
-  example: an opaque `Gate.cast` result staying `'_NNNN`). This is a
+  concrete type was not propagated across a module boundary (`kind.ml`'s
+  example, in the module doc moved there from `rc_types.ml`: an opaque `Gate.cast` result staying `'_NNNN`). This is a
   **real** (if regrettable) polymorphism failure to be tracked as a heap
   pointer at runtime.
 - **`TVar "_"` exactly**: not a type variable at all, but **lowering's own
@@ -109,8 +109,8 @@ depending on the string it contains:
   (`lower.ml:234`, `:783`).
 
 Despite the shared representation, `TVar "_"` and a truly named `TVar _`
-are treated **identically** by every RC-relevant predicate; `rc_types.ml`'s
-truth table has `TVar "_"` as its own explicit row (`needs_rc = true`,
+are treated **identically** by every RC-relevant predicate; `kind.ml`'s
+truth table (moved from `rc_types.ml`) has `TVar "_"` as its own explicit row (`needs_rc = true`,
 `borrow_eligible = true`) exactly because a placeholder is "conservatively
 heap-carrying": since lowering could not determine the real type, Perceus and
 Borrow must assume the worst (a heap pointer) rather than the best (a

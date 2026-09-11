@@ -2823,7 +2823,7 @@ something a snapshot by itself cannot prove. Full governing detail lives in
 already have both forms of pinning, in the same hypothesis/conclusion style as
 the rest of §4.
 
-**RC applicability (`lib/tir/rc_types.ml`).** Two predicates over `Tir.ty`,
+**RC applicability (`lib/tir/kind.ml`).** Two predicates over `Tir.ty`,
 `needs_rc` (must Perceus emit `EIncRC`/`EDecRC` for this type?) and
 `borrow_eligible` (may a parameter of this type be borrow-inferred?),
 intentionally **disagree** on two constructor families:

@@ -223,7 +223,7 @@ let stores_boxed_float ?skip m ty args =
    BOXED by [Llvm_ctx.coerce] into the very heap cell the representation
    exists to avoid — a real [march_alloc], reported as one.  Returns the
    aggregate's type name for the diagnostic. *)
-let stores_boxed_agg ?skip m ty args : string option =
+let stores_boxed_agg ?skip ~k_table m ty args : string option =
   match ctor_fields m ty with
   | None -> None
   | Some fields ->
@@ -235,7 +235,7 @@ let stores_boxed_agg ?skip m ty args : string option =
       List.find_map (fun (a, f) ->
           match ty_of_atom a with
           | Tir.TCon (n, _) as at
-            when Repr.unboxed_of_type_name n <> None && f <> at -> Some n
+            when Kind.unboxed_of_type_name k_table n <> None && f <> at -> Some n
           | _ -> None)
         (List.combine args fields)
 
@@ -251,27 +251,26 @@ let stores_boxed_agg ?skip m ty args : string option =
      falls through to a real boxed cell, so it still counts.
 
    Mirrors [Llvm_emit_alloc]'s own arms; keep the two in step. *)
-let alloc_is_elided ~collision_set (m : Tir.tir_module) (key : string)
+let alloc_is_elided ~k_table (_m : Tir.tir_module) (key : string)
     (args : Tir.atom list) : bool =
   let (tname_opt, _ctor) = split_ctor_key key in
   match tname_opt with
   | None -> false
   | Some tname ->
-    let type_defs = m.Tir.tm_types in
-    (match Repr.repr_of_ty ~collision_set type_defs (Tir.TCon (tname, [])) with
-     | Repr.Newtype _ -> true
+    (match Kind.repr_of k_table (Tir.TCon (tname, [])) with
+     | Kind.Newtype _ -> true
      (* Milestone 3: an unboxed aggregate's construction is an [insertvalue]
         chain in registers — [Llvm_emit_alloc]'s [Repr.Unboxed] arm.  No cell,
         so no allocation, so a function that only builds them satisfies the
         contract. *)
-     | Repr.Unboxed _ -> true
+     | Kind.Unboxed _ -> true
      | _ ->
-       Repr.is_niche_shaped ~collision_set type_defs tname
+       Kind.is_niche_shaped k_table tname
        && (match args with
            | [] -> true
            | [ arg ] ->
              let t = ty_of_atom arg in
-             Repr.niche_payload_ok ~collision_set type_defs t
+             Kind.niche_payload_ok k_table t
              || (match t with Tir.TVar _ -> true | _ -> false)
            | _ -> false))
 
@@ -306,11 +305,11 @@ let display_name name =
 
 (* First direct reason in [body], in evaluation order ([Policy_dce.fold_expr]
    visits a node, then its sub-expressions in order). *)
-let direct_reason ~(m : Tir.tir_module) ~collision_set ~fns ~externs
+let direct_reason ~(m : Tir.tir_module) ~k_table ~fns ~externs
     (body : Tir.expr) : reason option =
   let found = ref None in
   let set r = if !found = None then found := Some r in
-  let elided key args = alloc_is_elided ~collision_set m key args in
+  let elided key args = alloc_is_elided ~k_table m key args in
   Policy_dce.fold_expr (fun () e ->
       match e with
       | Tir.EAlloc (Tir.TCon (c, _), args) when Tir_names.is_clo_struct c ->
@@ -322,7 +321,7 @@ let direct_reason ~(m : Tir.tir_module) ~collision_set ~fns ~externs
         end else
           (* Elided cell, but an inline aggregate stored into one of its
              erased slots is still boxed into a real one. *)
-          (match stores_boxed_agg m (Tir.TCon (c, [])) args with
+          (match stores_boxed_agg ~k_table m (Tir.TCon (c, [])) args with
            | Some t -> set (AggBox t)
            | None -> ())
       | Tir.EAlloc (ty, _) -> set (Ctor (Tir.show_ty ty))
@@ -336,8 +335,8 @@ let direct_reason ~(m : Tir.tir_module) ~collision_set ~fns ~externs
       | Tir.EReuse (_, ty, args) when stores_boxed_float m ty args -> set FloatBox
       | Tir.EStackAlloc (ty, args) when stores_boxed_float m ty args -> set FloatBox
       | Tir.EReuse (_, ty, args) | Tir.EStackAlloc (ty, args)
-        when stores_boxed_agg m ty args <> None ->
-        (match stores_boxed_agg m ty args with
+        when stores_boxed_agg ~k_table m ty args <> None ->
+        (match stores_boxed_agg ~k_table m ty args with
          | Some t -> set (AggBox t) | None -> ())
       | Tir.EAllocHole (Some _, ty, args, hole)
         when stores_boxed_float ~skip:hole m ty args -> set FloatBox
@@ -356,7 +355,7 @@ let direct_reason ~(m : Tir.tir_module) ~collision_set ~fns ~externs
             (* Same boundary for an inline aggregate: the uniform ptr closure
                ABI boxes it. *)
             (match List.find_map (fun a -> match ty_of_atom a with
-                 | Tir.TCon (t, _) when Repr.unboxed_of_type_name t <> None -> Some t
+                 | Tir.TCon (t, _) when Kind.unboxed_of_type_name k_table t <> None -> Some t
                  | _ -> None) args with
             | Some t -> set (AggBox t)
             | None -> ())
@@ -370,16 +369,16 @@ let direct_reason ~(m : Tir.tir_module) ~collision_set ~fns ~externs
    over the call graph (the [Policy_dce.panicky_fns_of_module] pattern).  A
    function marked @[no_alloc(assume)] is never in the set, whatever its
    body — that is the whole point of the form. *)
-let allocating_fns ~decls (m : Tir.tir_module) : (string, reason) Hashtbl.t =
+let allocating_fns ?(k_table : Kind.table option) ~decls (m : Tir.tir_module) : (string, reason) Hashtbl.t =
   let fns = Hashtbl.create 64 in
   List.iter (fun fd -> Hashtbl.replace fns fd.Tir.fn_name ()) m.Tir.tm_fns;
   let externs = Hashtbl.create 16 in
   List.iter (fun e -> Hashtbl.replace externs e.Tir.ed_march_name ()) m.Tir.tm_externs;
-  let collision_set = Collision_set.compute m.Tir.tm_types in
+  let k_table = match k_table with Some t -> t | None -> Kind.of_module m in
   let set : (string, reason) Hashtbl.t = Hashtbl.create 64 in
   List.iter (fun fd ->
       if not (is_assume ~decls fd.Tir.fn_name) then
-        match direct_reason ~m ~collision_set ~fns ~externs fd.Tir.fn_body with
+        match direct_reason ~m ~k_table ~fns ~externs fd.Tir.fn_body with
         | Some r -> Hashtbl.replace set fd.Tir.fn_name r
         | None -> ()) m.Tir.tm_fns;
   let callees fd =
@@ -553,10 +552,10 @@ let scalar_result : Tir.ty -> bool = function
   | Tir.TCon ("Atom", []) -> true
   | _ -> false
 
-let rec returns_fresh_expr ~m ~collision_set ~fns ~returns_fresh ~carries_arg
+let rec returns_fresh_expr ~m ~k_table ~fns ~returns_fresh ~carries_arg
     ~(params : (string, unit) Hashtbl.t)
     (fresh : (string, unit) Hashtbl.t) (e : Tir.expr) : string option =
-  let recur = returns_fresh_expr ~m ~collision_set ~fns ~returns_fresh
+  let recur = returns_fresh_expr ~m ~k_table ~fns ~returns_fresh
       ~carries_arg ~params in
   let arg_is_fresh = function
     | Tir.AVar v -> Hashtbl.mem fresh v.Tir.v_name
@@ -586,7 +585,7 @@ let rec returns_fresh_expr ~m ~collision_set ~fns ~returns_fresh ~carries_arg
   | Tir.EAlloc (Tir.TCon (c, _), args) when Tir_names.is_clo_struct c ->
     if closure_is_static args then None else Some "closure"
   | Tir.EAlloc (Tir.TCon (c, _), args) ->
-    if alloc_is_elided ~collision_set m c args then None
+    if alloc_is_elided ~k_table m c args then None
     else Some (Printf.sprintf "`%s`" (ctor_short c))
   | Tir.EAlloc (ty, _) -> Some (Printf.sprintf "`%s`" (Tir.show_ty ty))
   | Tir.EAllocHole (None, Tir.TCon (c, _), _, _) ->
@@ -686,7 +685,7 @@ let direct_leak ~fns ~externs ~assume (fd : Tir.fn_def) : retain option =
 (** The two fixpoints, and the per-function transient verdict computed from
     them.  Returns the reason a function FAILS the transient contract, or
     [None] when it holds. *)
-let retaining_fns ~decls (m : Tir.tir_module) : (string, retain) Hashtbl.t =
+let retaining_fns ?(k_table : Kind.table option) ~decls (m : Tir.tir_module) : (string, retain) Hashtbl.t =
   let fns = Hashtbl.create 64 in
   List.iter (fun (fd : Tir.fn_def) -> Hashtbl.replace fns fd.Tir.fn_name ()) m.Tir.tm_fns;
   (* Keyed by every spelling an extern's call site can carry: its March name,
@@ -706,7 +705,7 @@ let retaining_fns ~decls (m : Tir.tir_module) : (string, retain) Hashtbl.t =
   in
   List.iter (fun (e : Tir.extern_decl) ->
       add_extern e.Tir.ed_march_name; add_extern e.Tir.ed_c_name) m.Tir.tm_externs;
-  let collision_set = Collision_set.compute m.Tir.tm_types in
+  let k_table = match k_table with Some t -> t | None -> Kind.of_module m in
   let params_of (fd : Tir.fn_def) =
     let h = Hashtbl.create 8 in
     List.iter (fun (p : Tir.var) -> Hashtbl.replace h p.Tir.v_name ()) fd.Tir.fn_params;
@@ -733,7 +732,7 @@ let retaining_fns ~decls (m : Tir.tir_module) : (string, retain) Hashtbl.t =
     List.iter (fun (fd : Tir.fn_def) ->
         if not (Hashtbl.mem returns_fresh fd.Tir.fn_name)
         && not (scalar_result fd.Tir.fn_ret_ty) then
-          match returns_fresh_expr ~m ~collision_set ~fns ~returns_fresh:rf_names
+          match returns_fresh_expr ~m ~k_table ~fns ~returns_fresh:rf_names
                   ~carries_arg ~params:(params_of fd)
                   (Hashtbl.create 16) fd.Tir.fn_body with
           | Some what ->

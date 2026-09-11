@@ -67,13 +67,11 @@ let describable ctx (name : string) : bool =
      answer: without this a niche type is described, and since [Some x] IS [x]
      the renderer reads the PAYLOAD's header as the wrapper's tag and prints a
      confidently wrong constructor. *)
-  if Repr.is_niche_shaped ~collision_set:ctx.Llvm_ctx.collision_set
-       ctx.Llvm_ctx.type_defs name then false
+  if Kind.is_niche_shaped ctx.Llvm_ctx.k_table name then false
   else
-    match Repr.repr_of_ty ~collision_set:ctx.Llvm_ctx.collision_set
-            ctx.Llvm_ctx.type_defs (Tir.TCon (name, [])) with
-    | Repr.Boxed | Repr.Unboxed _ -> true
-    | Repr.Newtype _ | Repr.Niche _ -> false
+    match Kind.repr_of ctx.Llvm_ctx.k_table (Tir.TCon (name, [])) with
+    | Kind.Boxed | Kind.Unboxed _ -> true
+    | Kind.Newtype _ | Kind.Niche _ -> false
 
 (** Assign local ids to every describable variant/record type, first-wins on
     the short name — the same rule [Llvm_toplevel.build_ctor_info] uses to
