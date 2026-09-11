@@ -1,5 +1,12 @@
 # Type Kinds Implementation Plan
 
+> **Status: landed 2026-09-11** (commits 4577c5f3 … ead273a3 on
+> `claude/oxcaml-learning-applications-821c17`). Deviations from the plan as
+> written, and what the migration found, are in
+> `specs/progress/2026-09-10-type-kinds.md`. Task 2.x batches were oracle-gated
+> per batch (2a / 2b / 2c) with per-file commits, not oracle-per-file; the
+> `llvm_ty` family migrated with Phase 3b rather than in Phase 2.
+
 **Design:** `specs/2026-09-10-type-kinds-design.md` (read it first; this plan
 does not restate the rationale).
 
