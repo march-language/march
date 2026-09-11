@@ -22,12 +22,22 @@ type result = {
   retaining : (string, Alloc_contract.retain) Hashtbl.t;
   (** The @[no_alloc(transient)] counterpart: functions that hand an
       allocation to something outliving the call. *)
+  k_table : Kind.table;
+  (** The per-type table the passes reasoned against, rebound to [final]'s
+      type list — hand it to the emitter (specs/2026-09-10-type-kinds-design.md). *)
 }
 
 let island_suffixes = ["render"; "update"; "init"]
 
+(** Escape hatch: [MARCH_NO_UNBOX=1] classifies every type Boxed, restoring the
+    pre-Milestone-3 representation for bisection.  Read once per process. *)
+let unboxing_env_disabled : bool Lazy.t =
+  lazy (match Sys.getenv_opt "MARCH_NO_UNBOX" with
+      | Some ("1" | "true" | "yes") -> true
+      | _ -> false)
+
 let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
-    ?(after_fusion = fun _ -> ()) ?(before_perceus = fun _ -> ())
+    ?(after_fusion = fun _ -> ()) ?(before_perceus = fun ~k_table:_ _ -> ())
     ?(before_opt = fun _ -> ()) ?(extra_roots = [])
     ?(wasm_island = false) ?(is_js = false) ?(hot_reload = None)
     ?iface_methods ?(decls = []) ~opt ~trmc (tir : Tir.tir_module) : result =
@@ -135,8 +145,17 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
      allocates.  [Repr.rebind_registration] at the end of this function hands
      the SAME answer to [Llvm_ctx.make_ctx]; the JS backend registers empty
      (see [Repr.set_unboxed_types]). *)
-  Repr.set_unboxed_types ~collision_set:(Collision_set.compute tir.Tir.tm_types)
-    ~externs:tir.Tir.tm_externs ~enabled:(not is_js) tir.Tir.tm_types;
+  let k0 =
+    let collision_set = Collision_set.compute tir.Tir.tm_types in
+    (* Phase 3a of the type-kinds plan: the passes read THIS table.  The
+       emitter still reads the registry until 3b; both are built from the
+       same inputs, so they cannot disagree in the meantime. *)
+    Repr.set_unboxed_types ~collision_set ~externs:tir.Tir.tm_externs
+      ~enabled:(not is_js) tir.Tir.tm_types;
+    Kind.build ~externs:tir.Tir.tm_externs
+      ~unboxing:(not is_js && not (Lazy.force unboxing_env_disabled))
+      ~collision_set tir.Tir.tm_types
+  in
   (* Known-call pass: run before Perceus so apply functions are still pure
      and eligible for inlining in the subsequent Opt fixed-point loop.  See
      the [is_apply_fn] guard in [Perceus]'s EApp post_dec_vars for why the
@@ -154,21 +173,21 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   (* Pre-Perceus simplify: folds that are only sound before RC insertion. *)
   let tir = if opt then Simplify.run ~pre_perceus:true ~changed:(ref false) tir else tir in
   snap "tir-simplify-pre" tir;
-  before_perceus tir;
+  before_perceus ~k_table:k0 tir;
   (* Computed ONCE here and shared: [Perceus] places its RC ops against this
      answer, and [Escape]'s promotion-through-a-borrowed-callee verdict has to
      be taken against the SAME one — re-deriving it after RC insertion could
      disagree.  See [Escape]'s module doc. *)
-  let borrow_map = Borrow.infer_module tir in
-  let tir = Perceus.perceus ~borrow_map tir in
+  let borrow_map = Borrow.infer_module ~k_table:k0 tir in
+  let tir = Perceus.perceus ~k_table:k0 ~borrow_map tir in
   snap "tir-perceus" tir;
   stamp "perceus";
   (* Deep-drop synthesis (lib/tir/drop.ml).  Skipped for the JS target, whose
      runtime is GC'd and ignores RC ops entirely. *)
-  let tir = if is_js then tir else Drop.run tir in
+  let tir = if is_js then tir else Drop.run ~k_table:k0 tir in
   snap "tir-drop" tir;
   stamp "drop";
-  let tir = Escape.escape_analysis ~borrow_map tir in
+  let tir = Escape.escape_analysis ~k_table:k0 ~borrow_map tir in
   snap "tir-escape" tir;
   stamp "escape";
   let pre_opt = tir in
@@ -231,8 +250,9 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
      will consume. *)
   (* Hand the emitter exactly this decision (see [Repr.rebind_registration]). *)
   Repr.rebind_registration tir.Tir.tm_types;
-  let allocating = Alloc_contract.allocating_fns ~decls tir in
-  let retaining = Alloc_contract.retaining_fns ~decls tir in
+  let k_table = Kind.rebind k0 tir.Tir.tm_types in
+  let allocating = Alloc_contract.allocating_fns ~k_table ~decls tir in
+  let retaining = Alloc_contract.retaining_fns ~k_table ~decls tir in
   let contract_diags =
     Alloc_contract.check ~decls ~allocating ~retaining ~opt ~trmc ~trmc_eligible tir in
-  { pre_opt; final = tir; vectorize_diags; contract_diags; allocating; retaining }
+  { pre_opt; final = tir; vectorize_diags; contract_diags; allocating; retaining; k_table }

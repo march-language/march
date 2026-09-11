@@ -387,7 +387,7 @@ let rec drop_fn_for (env : env) (ty : Tir.ty) : string option =
          top of ~200k cells. *)
       let owns_heap_child =
         List.exists (fun (_, fty) ->
-            (not (has_tvar fty)) && Rc_types.needs_rc fty) fields
+            (not (has_tvar fty)) && Kind.needs_rc_of env.k_table fty) fields
       in
       if not owns_heap_child then begin
         Hashtbl.replace env.names key ""; None
@@ -404,7 +404,7 @@ let rec drop_fn_for (env : env) (ty : Tir.ty) : string option =
     | Some ctors ->
       let owns_heap_child =
         List.exists (fun (_, ftys) ->
-            List.exists (fun fty -> (not (has_tvar fty)) && Rc_types.needs_rc fty)
+            List.exists (fun fty -> (not (has_tvar fty)) && Kind.needs_rc_of env.k_table fty)
               ftys)
           ctors
       in
@@ -446,7 +446,7 @@ and build_aggregate_drop_fn env fname ty (fields : (string * Tir.ty) list)
   let unit_expr = Tir.ETuple [] in
   let droppable =
     List.filter (fun (_, fty) ->
-        (not (has_tvar fty)) && Rc_types.needs_rc fty) fields
+        (not (has_tvar fty)) && Kind.needs_rc_of env.k_table fty) fields
   in
   let binders =
     List.map (fun (accessor, fty) ->
@@ -504,7 +504,7 @@ and build_drop_fn env fname ty ctors : Tir.fn_def =
         (* One drop op per field that actually needs releasing. *)
         let ops =
           List.filter_map (fun v ->
-              if has_tvar v.Tir.v_ty || not (Rc_types.needs_rc v.Tir.v_ty) then None
+              if has_tvar v.Tir.v_ty || not (Kind.needs_rc_of env.k_table v.Tir.v_ty) then None
               else if may_be_non_heap env v.Tir.v_ty then
                 Some (Tir.EDecRC (Tir.AVar v))
               else match drop_fn_for env v.Tir.v_ty with
@@ -736,7 +736,7 @@ let rewrite_apply_clo_drop (env : env) (body : Tir.expr) : Tir.expr =
   let seen_fields = Hashtbl.create 4 in
   let captures = ref [] in
   let note_capture field (v : Tir.var) =
-    if Rc_types.needs_rc v.Tir.v_ty && not (Hashtbl.mem seen_fields field)
+    if Kind.needs_rc_of env.k_table v.Tir.v_ty && not (Hashtbl.mem seen_fields field)
     then begin
       Hashtbl.add seen_fields field ();
       captures := v :: !captures
@@ -858,10 +858,10 @@ let rec rewrite env (e : Tir.expr) : Tir.expr =
     Runs AFTER Perceus (it rewrites the [EDecRC]s Perceus inserts) and BEFORE
     Escape (so a value flowing into a drop call is seen as escaping and is not
     stack-allocated behind the drop's back). *)
-let run (m : Tir.tir_module) : Tir.tir_module =
+let run ?(k_table : Kind.table option) (m : Tir.tir_module) : Tir.tir_module =
+  let k_table = match k_table with Some t -> t | None -> Kind.of_module m in
   let collision_set = Collision_set.compute m.Tir.tm_types in
-  let env = { type_defs = m.Tir.tm_types; collision_set;
-              k_table = Repr.table_for ~collision_set m.Tir.tm_types;
+  let env = { type_defs = m.Tir.tm_types; collision_set; k_table;
               names = Hashtbl.create 32; fns = []; ctr = 0 } in
   (* Apply functions whose environment owns what it captured — see
      [owning_apply_fns] for why this gate is load-bearing rather than an

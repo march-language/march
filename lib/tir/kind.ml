@@ -99,6 +99,10 @@ let rebind ?collision_set (t : table) (type_defs : Tir.type_def list) : table =
 
 let empty : table = build ~unboxing:false ~collision_set:(Hashtbl.create 0) []
 
+let of_module ?(unboxing = true) (m : Tir.tir_module) : table =
+  build ~externs:m.Tir.tm_externs ~unboxing
+    ~collision_set:(Collision_set.compute m.Tir.tm_types) m.Tir.tm_types
+
 let unboxed_of_type_name (t : table) (name : string) =
   Hashtbl.find_opt t.k_unboxed name
 

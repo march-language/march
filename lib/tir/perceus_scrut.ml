@@ -109,15 +109,15 @@ let rec rewrite_scrut_tail (scrut_name : string) (alloc_ty : Tir.ty)
 (** Walk the function body, applying the scrut-escape rewrite inside every
     ECase arm whose scrutinee is a heap-valued AVar and whose branch binds
     at least one field. *)
-let rec preprocess_scrut_escape (e : Tir.expr) : Tir.expr =
+let rec preprocess_scrut_escape (k_table : Kind.table) (e : Tir.expr) : Tir.expr =
   match e with
   | Tir.ECase (a, branches, default) ->
     let branches' = List.map (fun br ->
-      let body' = preprocess_scrut_escape br.Tir.br_body in
+      let body' = preprocess_scrut_escape k_table br.Tir.br_body in
       let body'' =
         match a with
         | Tir.AVar sv
-          when Rc_types.needs_rc sv.Tir.v_ty
+          when Kind.needs_rc_of k_table sv.Tir.v_ty
                && br.Tir.br_vars <> []
                && not (List.exists
                          (fun bv -> String.equal bv.Tir.v_name sv.Tir.v_name)
@@ -134,18 +134,18 @@ let rec preprocess_scrut_escape (e : Tir.expr) : Tir.expr =
       in
       { br with Tir.br_body = body'' }
     ) branches in
-    let default' = Option.map preprocess_scrut_escape default in
+    let default' = Option.map (preprocess_scrut_escape k_table) default in
     Tir.ECase (a, branches', default')
   | Tir.ELet (v, e1, e2) ->
-    Tir.ELet (v, preprocess_scrut_escape e1, preprocess_scrut_escape e2)
+    Tir.ELet (v, preprocess_scrut_escape k_table e1, preprocess_scrut_escape k_table e2)
   | Tir.ELetRec (fns, body) ->
     let fns' = List.map (fun fn ->
-      { fn with Tir.fn_body = preprocess_scrut_escape fn.Tir.fn_body }
+      { fn with Tir.fn_body = preprocess_scrut_escape k_table fn.Tir.fn_body }
     ) fns in
-    Tir.ELetRec (fns', preprocess_scrut_escape body)
+    Tir.ELetRec (fns', preprocess_scrut_escape k_table body)
   | Tir.ESeq (e1, e2) ->
-    Tir.ESeq (preprocess_scrut_escape e1, preprocess_scrut_escape e2)
+    Tir.ESeq (preprocess_scrut_escape k_table e1, preprocess_scrut_escape k_table e2)
   | _ -> e
 
-let preprocess_fn (fn : Tir.fn_def) : Tir.fn_def =
-  { fn with Tir.fn_body = preprocess_scrut_escape fn.Tir.fn_body }
+let preprocess_fn ~(k_table : Kind.table) (fn : Tir.fn_def) : Tir.fn_def =
+  { fn with Tir.fn_body = preprocess_scrut_escape k_table fn.Tir.fn_body }

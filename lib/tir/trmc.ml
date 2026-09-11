@@ -432,9 +432,12 @@ let rec seed_entry ~(self : string) ~(dps : Tir.var) (e : Tir.expr) : Tir.expr =
       costs an optimization and never correctness.  Do not copy this suffix test
       to a site where a false positive would SKIP a safety check. *)
 let crosses_actor_boundary (type_defs : Tir.type_def list) (ty : Tir.ty) : bool =
+  (* Shape-only question, so a table with nothing unboxed answers it; this
+     pass runs before Mono, before the pipeline's real table exists. *)
+  let kt = Kind.build ~unboxing:false ~collision_set:(Hashtbl.create 0) type_defs in
   match ty with
   | Tir.TCon (name, _) ->
-    Tir_names.is_actor_msg_name name || Repr.is_actor_struct_type type_defs name
+    Tir_names.is_actor_msg_name name || Kind.is_actor_struct_type kt name
   | _ -> false
 
 (** [Some (f', f_dps)] when [fn] is transformable.

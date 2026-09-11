@@ -69,6 +69,12 @@ val rebind :
 (** No type definitions, nothing unboxed. *)
 val empty : table
 
+(** The table for a module compiled on its own: built from its own
+    [tm_types] and [tm_externs].  [Contract_pipeline] builds the real one
+    once and threads it; this is what a standalone caller (a test, the
+    REPL with [~unboxing:false]) uses so every pass it runs agrees. *)
+val of_module : ?unboxing:bool -> Tir.tir_module -> table
+
 val type_defs : table -> Tir.type_def list
 val collision_set : table -> (string, string list) Hashtbl.t
 
