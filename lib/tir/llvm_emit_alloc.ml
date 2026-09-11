@@ -69,8 +69,8 @@ let emit_alloc_ctor ~emit_atom ctx (ctor : string)
         ~family:fam ~site:(site ^ ":" ^ ctor ^ " in " ^ ctx.cur_emit_fn)
     in
     let alloc_result =
-     (match Repr.repr_of_ty ~collision_set:ctx.collision_set ctx.type_defs (Tir.TCon (alloc_type_name, [])) with
-     | Repr.Unboxed { ctor = _; fields } ->
+     (match Kind.repr_of ctx.k_table (Tir.TCon (alloc_type_name, [])) with
+     | Kind.Unboxed { ctor = _; fields } ->
        audit "Unboxed" "alloc";
        (* Milestone 3: no cell.  Build the LLVM struct value directly with an
           [insertvalue] chain; the fields are scalars by construction (see
@@ -94,7 +94,7 @@ let emit_alloc_ctor ~emit_atom ctx (ctor : string)
            acc := nx)
          args;
        (sty, !acc)
-     | Repr.Newtype payload ->
+     | Kind.Newtype payload ->
        audit "Newtype" "alloc";
        (* Newtype: no allocation. Emit the single payload atom directly. *)
        if List.length args <> 1 then
@@ -103,7 +103,7 @@ let emit_alloc_ctor ~emit_atom ctx (ctor : string)
             (arity mismatch — malformed TIR)"
            ctor (List.length args));
        let (v_ty, v_val) = emit_atom ctx (List.hd args) in
-       if Repr.payload_needs_tag ~collision_set:ctx.collision_set ctx.type_defs payload then begin
+       if Kind.payload_needs_tag ctx.k_table payload then begin
          (* Scalar payload: tag (v<<1)|1 so it's odd → IS_HEAP_PTR = false *)
          let i64v = coerce ctx v_ty v_val "i64" in
          let as_ptr = emit_tag_scalar ctx ~sh:"nt_sh" ~tag:"nt_tag" ~ptr:"nt_ptr" i64v in
@@ -111,7 +111,7 @@ let emit_alloc_ctor ~emit_atom ctx (ctor : string)
        end else
          (* Pointer payload: pass through raw *)
          ("ptr", coerce ctx v_ty v_val "ptr")
-     | _ when Repr.is_niche_shaped ~collision_set:ctx.collision_set ctx.type_defs alloc_type_name ->
+     | _ when Kind.is_niche_shaped ctx.k_table alloc_type_name ->
        (* Niche (Option-shaped): None=0, Some(x)=x.
           repr_of_ty returns Boxed here because EAlloc's ctor key carries no type
           params; we use the actual arg TIR type to determine tagging. *)
@@ -125,7 +125,7 @@ let emit_alloc_ctor ~emit_atom ctx (ctor : string)
            | _ -> Tir.TUnit
          in
          let arg_niche_ok =
-           Repr.niche_payload_ok ~collision_set:ctx.collision_set ctx.type_defs arg_tir_ty
+           Kind.niche_payload_ok ctx.k_table arg_tir_ty
            (* Erased (TVar) payload: the rest of the erased convention —
               emit_case's abstract-arg niche path, ensure_adt_eq_fn, and the
               nullary-None alloc — treats Option(TVar) as NICHE, and a TVar
@@ -139,7 +139,7 @@ let emit_alloc_ctor ~emit_atom ctx (ctor : string)
          if not arg_niche_ok then None
          else begin
            let (v_ty, v_val) = emit_atom ctx arg in
-           if Repr.payload_needs_tag ~collision_set:ctx.collision_set ctx.type_defs arg_tir_ty then begin
+           if Kind.payload_needs_tag ctx.k_table arg_tir_ty then begin
              let i64v = coerce ctx v_ty v_val "i64" in
              let as_ptr = emit_tag_scalar ctx ~sh:"niche_sh" ~tag:"niche_tag" ~ptr:"niche_ptr" i64v in
              Some ("ptr", as_ptr)
@@ -160,7 +160,7 @@ let emit_alloc_ctor ~emit_atom ctx (ctor : string)
              EAlloc ctor key has no payload, so use the TCon type params. *)
           let payload_niche_safe = match alloc_params with
             | [p] ->
-              Repr.niche_payload_ok ~collision_set:ctx.collision_set ctx.type_defs p
+              Kind.niche_payload_ok ctx.k_table p
               (* Abstract (erased) payload: emit_case's abstract-arg niche path
                  and ensure_adt_eq_fn both treat Option(TVar) as NICHE, so the
                  alloc must too — boxing None here would make a niche match read
@@ -172,7 +172,7 @@ let emit_alloc_ctor ~emit_atom ctx (ctor : string)
                  carries the concrete payload type — key the encode on the same
                  classification the decode (emit_case) uses, so None and Some
                  stay consistently encoded (both niche, or both boxed). *)
-              (match Repr.niche_repr_of_concrete ~collision_set:ctx.collision_set ctx.type_defs alloc_type_name with
+              (match Kind.niche_repr_of_concrete ctx.k_table alloc_type_name with
                | Some _ -> true
                | None   -> false)
           in
@@ -366,14 +366,14 @@ let emit_alloc_hole ~emit_atom ctx (tok : Tir.atom option)
       | Some i -> String.sub ctor 0 i
       | None -> ctor
     in
-    (match Repr.repr_of_ty ~collision_set:ctx.collision_set ctx.type_defs (Tir.TCon (ah_type_name, [])) with
-     | Repr.Newtype _ | Repr.Niche _ | Repr.Unboxed _ ->
+    (match Kind.repr_of ctx.k_table (Tir.TCon (ah_type_name, [])) with
+     | Kind.Newtype _ | Kind.Niche _ | Kind.Unboxed _ ->
        failwith (Printf.sprintf
          "LLVM emit: EAllocHole of erased-repr type %s (ctor %s) — a hole needs \
           a real heap cell; TRMC must not select an erased-repr constructor"
          ah_type_name ctor)
-     | Repr.Boxed ->
-       if Repr.is_niche_shaped ~collision_set:ctx.collision_set ctx.type_defs ah_type_name then
+     | Kind.Boxed ->
+       if Kind.is_niche_shaped ctx.k_table ah_type_name then
          failwith (Printf.sprintf
            "LLVM emit: EAllocHole of niche-shaped type %s (ctor %s) — same \
             erased-vs-boxed split as Newtype"
@@ -464,15 +464,15 @@ let emit_stack_alloc_ctor ~emit_atom ctx (ctor : string)
       | Some i -> String.sub ctor 0 i
       | None -> ctor
     in
-    (match Repr.repr_of_ty ~collision_set:ctx.collision_set ctx.type_defs (Tir.TCon (sa_type_name, [])) with
-     | Repr.Newtype _ | Repr.Niche _ | Repr.Unboxed _ ->
+    (match Kind.repr_of ctx.k_table (Tir.TCon (sa_type_name, [])) with
+     | Kind.Newtype _ | Kind.Niche _ | Kind.Unboxed _ ->
        failwith (Printf.sprintf
          "LLVM emit: EStackAlloc of erased-repr type %s (ctor %s) — \
           construction would be boxed but consumers decode erased; \
           escape analysis must not promote this alloc (finding L7)"
          sa_type_name ctor)
-     | Repr.Boxed ->
-       if Repr.is_niche_shaped ~collision_set:ctx.collision_set ctx.type_defs sa_type_name then
+     | Kind.Boxed ->
+       if Kind.is_niche_shaped ctx.k_table sa_type_name then
          failwith (Printf.sprintf
            "LLVM emit: EStackAlloc of niche-shaped type %s (ctor %s) — \
             same erased-vs-boxed split as Newtype (finding L7)"
@@ -519,18 +519,18 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
       | Some i -> String.sub ctor 0 i
       | None -> ctor
     in
-    (match Repr.repr_of_ty ~collision_set:ctx.collision_set ctx.type_defs (Tir.TCon (reuse_type_name, [])) with
-     | Repr.Newtype payload ->
+    (match Kind.repr_of ctx.k_table (Tir.TCon (reuse_type_name, [])) with
+     | Kind.Newtype payload ->
        let (_, rv) = emit_atom ctx reuse_atom in
        emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" rv);
        let (v_ty, v_val) = emit_atom ctx (List.hd args) in
-       if Repr.payload_needs_tag ~collision_set:ctx.collision_set ctx.type_defs payload then begin
+       if Kind.payload_needs_tag ctx.k_table payload then begin
          let i64v = coerce ctx v_ty v_val "i64" in
          let as_ptr = emit_tag_scalar ctx ~sh:"nt_sh" ~tag:"nt_tag" ~ptr:"nt_ptr" i64v in
          ("ptr", as_ptr)
        end else
          ("ptr", coerce ctx v_ty v_val "ptr")
-     | _ when Repr.is_niche_shaped ~collision_set:ctx.collision_set ctx.type_defs reuse_type_name ->
+     | _ when Kind.is_niche_shaped ctx.k_table reuse_type_name ->
        (* Niche reuse: old value is itself a niche value (0, tagged-int, or ptr).
           march_decrc's IS_HEAP_PTR guard makes it a no-op on 0 and tagged ints. *)
        let (_, old_v) = emit_atom ctx reuse_atom in
@@ -545,7 +545,7 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
            | _ -> Tir.TUnit
          in
          let arg_niche_ok =
-           Repr.niche_payload_ok ~collision_set:ctx.collision_set ctx.type_defs arg_tir_ty
+           Kind.niche_payload_ok ctx.k_table arg_tir_ty
            (* Erased (TVar) payload: the rest of the erased convention —
               emit_case's abstract-arg niche path, ensure_adt_eq_fn, and the
               nullary-None alloc — treats Option(TVar) as NICHE, and a TVar
@@ -559,7 +559,7 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
          if not arg_niche_ok then None
          else begin
            let (v_ty, v_val) = emit_atom ctx arg in
-           if Repr.payload_needs_tag ~collision_set:ctx.collision_set ctx.type_defs arg_tir_ty then begin
+           if Kind.payload_needs_tag ctx.k_table arg_tir_ty then begin
              let i64v = coerce ctx v_ty v_val "i64" in
              let as_ptr = emit_tag_scalar ctx ~sh:"niche_sh" ~tag:"niche_tag" ~ptr:"niche_ptr" i64v in
              Some ("ptr", as_ptr)
@@ -568,7 +568,7 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
          end
        in
        (match args with
-        | [] when (match Repr.niche_repr_of_concrete ~collision_set:ctx.collision_set ctx.type_defs reuse_type_name with
+        | [] when (match Kind.niche_repr_of_concrete ctx.k_table reuse_type_name with
                    | Some _ -> true
                    (* Payload not niche-safe (e.g. Float): the Some side is
                       encoded BOXED (emit_niche_payload returns None), so None
@@ -626,7 +626,7 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
       | _ -> ""
     in
     if reuse_atom_parent_type <> ""
-       && Repr.is_niche_shaped ~collision_set:ctx.collision_set ctx.type_defs reuse_atom_parent_type
+       && Kind.is_niche_shaped ctx.k_table reuse_atom_parent_type
     then begin
       let entry = ctor_entry ctx ctor (List.length args) in
       let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
@@ -643,7 +643,7 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
       ) args;
       ("ptr", ptr)
     end
-    else if Repr.is_actor_struct_type ctx.type_defs reuse_type_name then begin
+    else if Kind.is_actor_struct_type ctx.k_table reuse_type_name then begin
       (* Actor-state update (finding 20): an actor's message handler writes its
          new state back into the actor struct via EReuse (see
          lib/tir/lower_actor.ml).  The actor object is a stable, long-lived
@@ -797,7 +797,7 @@ let emit_reuse_uniform ~emit_atom ctx (reuse_atom : Tir.atom)
       | _ -> ""
     in
     if reuse_atom_parent_type <> ""
-       && Repr.is_niche_shaped ~collision_set:ctx.collision_set ctx.type_defs reuse_atom_parent_type
+       && Kind.is_niche_shaped ctx.k_table reuse_atom_parent_type
     then begin
       let arg_vals = arg_vals_of () in
       let hp = emit_heap_alloc ctx 0 (List.length args) in
