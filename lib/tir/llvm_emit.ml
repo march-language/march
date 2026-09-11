@@ -750,17 +750,16 @@ let emit_vault_opt_reencode ctx (v : string) (ret_ty : Tir.ty) : string =
      declares its own `Option` stays consistent on both sides. *)
   let boxed_at_call_site = match ret_ty with
     | Tir.TCon ("Option", ([_] as args)) ->
-      (match Repr.repr_of_ty ~collision_set:ctx.collision_set ctx.type_defs ret_ty with
-       | Repr.Niche _ | Repr.Newtype _ -> false
+      (match Kind.repr_of ctx.k_table ret_ty with
+       | Kind.Niche _ | Kind.Newtype _ -> false
        (* Unboxed is unreachable here: the arm is guarded on
           [TCon ("Option", [_])], and Option is niche-shaped, never a
           single-ctor scalar aggregate.  Answering as for Boxed keeps the
           re-encode conservative if that ever changes. *)
-       | Repr.Unboxed _
-       | Repr.Boxed ->
+       | Kind.Unboxed _
+       | Kind.Boxed ->
          not (List.exists (function Tir.TVar _ -> true | _ -> false) args
-              && Repr.is_niche_shaped ~collision_set:ctx.collision_set
-                   ctx.type_defs "Option"))
+              && Kind.is_niche_shaped ctx.k_table "Option"))
     | _ -> false
   in
   if not boxed_at_call_site then v
