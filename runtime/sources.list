@@ -1,0 +1,40 @@
+# Runtime C sources and the role each plays. Policed by scripts/check-runtime-sources.sh
+# (run in CI's doc-lint job): every runtime/*.c must appear here exactly once, and the
+# hand-maintained link lists in bin/main.ml, bin/toolchain.ml and test/test_helpers.ml
+# must agree with the roles below. Design: specs/2026-09-11-ci-tooling-fixes-design.md §4.
+#
+#   file                       role            jit
+#
+# role:
+#   core            linked by the compiler driver whenever the file exists
+#   http            linked only when march_http.c is present (the HTTP/TLS stack)
+#   hcr             linked by the driver, skipped under --compile-so (hot-reload plane)
+#   unit-test-only  the not-yet-default per-process arena; linked only by C unit-test
+#                   harnesses in test/dune and demo/dune, never by the driver
+#   wasm            a separate wasm32 runtime; never linked into a native build
+# jit: `jit` if test/test_helpers.ml's REPL/JIT .so link list must include it, else `-`.
+march_runtime.c              core            jit
+march_scheduler.c            core            jit
+march_extras.c               core            jit
+march_compress.c             core            -
+march_ctx_escape.c           core            jit
+march_ffi.c                  core            jit
+march_remote_registry.c      core            jit
+march_monitor_registry.c     core            jit
+base64.c                     core            jit
+sha1.c                       core            jit
+march_http.c                 http            -
+march_http_parse_simd.c      http            -
+march_http_response.c        http            -
+march_http_io.c              http            -
+march_http_evloop.c          http            -
+march_tls.c                  http            -
+march_dispatch.c             hcr             jit
+march_reload.c               hcr             jit
+march_blake3.c               hcr             -
+march_cap_lattice.c          hcr             -
+tweetnacl.c                  hcr             -
+march_gc.c                   unit-test-only  jit
+march_heap.c                 unit-test-only  jit
+march_message.c              unit-test-only  jit
+march_runtime_wasm.c         wasm            -

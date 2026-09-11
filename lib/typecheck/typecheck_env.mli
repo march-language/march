@@ -134,6 +134,7 @@ type env = {
     (Typecheck_types.Ast.span,
      Typecheck_types.ty)
     Hashtbl.t;
+  record_names_snapshot : (string * string option) list;
   refs : ref_record list ref;
   current_decl : string ref;
   scheme_witnesses :
@@ -259,8 +260,6 @@ val lookup_ctor_in_type_unique :
 val add_ctor :
   string -> ctor_info -> ctor_info list StrMap.t -> ctor_info list StrMap.t
 val split_qualified : string -> (string * string) option
-val inject_iface_exports_ref :
-  (string -> March_modules.Module_registry.module_exports -> env -> env) ref
 val load_module_into_env :
   string -> March_modules.Module_registry.module_exports -> env -> env
 val resolve_qualified_var :

@@ -1,3 +1,17 @@
+> **Landed 2026-09-11.** The display-only record-name index
+> (`Typecheck_types._record_names`) is now per-check: `env` carries a
+> `record_names_snapshot`, `check_module_core` (and the REPL/LSP path
+> `check_module_with_env`) reload the table from the seed env's snapshot at
+> entry and snapshot it into the returned env at exit. Stdlib's entries
+> survive (they are in the seed, including through the `~/.cache/march`
+> tcenv cache, which marshals the env wholesale); a previous check's user
+> entries do not. Test: `test_compiler.ml` "record-name index does not leak
+> across checks" poisons `{ a : Int }` then runs the same-name collision case
+> (RED pre-fix: the note vanished). `test_cap_unforgeable.ml`'s landmine
+> comment is gone and its `FjdAlpha`/`fjd_alpha` names are plain `A`/`a`
+> again; the suite staying green is the third witness.
+> Design: `specs/2026-09-11-correctness-fixes-design.md` §1. Original filing follows.
+
 # A record type declared in one `check_module` changes a later, unrelated check's diagnostics
 
 **Filed:** 2026-09-09
@@ -61,3 +75,5 @@ is exactly what the audit should establish.
 A new test declaring a plainly-named record (`A`, `Thing`, `{ a : Int }`) can
 silently change an unrelated test's result. `test/test_cap_unforgeable.ml`
 carries a comment saying so at the tests that tripped it.
+
+> **Design spec (2026-09-11):** `specs/2026-09-11-correctness-fixes-design.md` — root cause re-verified against the tree, chosen fix, test plan with a RED control, effort and risk.

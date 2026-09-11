@@ -34,27 +34,37 @@ jobs:
           eval $(opam env)
           dune shutdown 2>/dev/null || true
           failed=""
-          # Full alias paths, not bare names: build_check lives in
-          # forge/test/dune, the rest in test/dune. Keep this list in sync
-          # with the quarantine inventory in specs/todos/.
-          for a in test/task_burst_await_quarantined \
-                   test/signal_term_suppress_quarantined \
-                   test/node_call_loopback_quarantined \
-                   test/node_discovery_quarantined \
-                   test/rpc_auto_enroll_quarantined \
-                   forge/test/build_check_quarantined; do
+          passed=""
+          # Derived, not hand-listed: the loop once named three aliases that
+          # had been deleted two weeks earlier, so `dune build @<undefined>`
+          # failed every night and the "all passed" notice below was
+          # unreachable. A quarantined test is exactly one whose rule sits on
+          # a `<name>_quarantined` alias; scripts/check-docs.sh Check E keeps
+          # that set equal to the inventory in
+          # specs/todos/2026-07-24-quarantined-tests-coverage-that-is-currently-dark-inventory-2026.md.
+          aliases=$(for f in test/dune forge/test/dune; do
+                      [ -f "$f" ] && grep -oE '\(alias +[A-Za-z0-9_]+_quarantined\)' "$f" \
+                        | sed -E "s|\(alias +([A-Za-z0-9_]+)\)|$(dirname "$f")/\1|"
+                    done | sort -u)
+          echo "quarantine aliases: $(echo $aliases)"
+          for a in $aliases; do
             echo "::group::$a"
             if dune build "@$a"; then
-              echo "$a: PASSED"
+              echo "$a: PASSED"; passed="$passed $a"
             else
-              echo "$a: still failing"
-              failed="$failed $a"
+              echo "$a: still failing"; failed="$failed $a"
             fi
             echo "::endgroup::"
           done
+          {
+            echo "## Quarantined tests"
+            for a in $passed; do echo "- :white_check_mark: \`$a\` passed"; done
+            for a in $failed; do echo "- :x: \`$a\` still failing"; done
+            [ -z "$aliases" ] && echo "- (none quarantined)"
+          } >> "$GITHUB_STEP_SUMMARY"
           echo "still-failing:${failed:- none}"
-          if [ -z "$failed" ]; then
-            echo "::notice::All quarantined tests passed — consider un-quarantining them in test/dune."
+          if [ -n "$aliases" ] && [ -z "$failed" ]; then
+            echo "::notice::All quarantined tests passed — consider un-quarantining them (restore (alias runtest) in test/dune and strike the inventory row)."
           fi
 
   # Smoke-test the stdlib doc generator against the current compiler. The
@@ -87,6 +97,12 @@ jobs:
           # stale. Re-run that workflow (workflow_dispatch) to fix.
           git diff --exit-code --stat docs/docs/stdlib \
             || { echo "::error::committed docs/docs/stdlib is stale — dispatch the 'Regenerate Stdlib Docs' workflow"; exit 1; }
+
+      - name: Check every public stdlib symbol is on its generated page
+        # Check D compares each page to its SOURCE, which the diff above cannot:
+        # a generator that runs and emits less than the module declares is
+        # byte-stable and so invisible to a generator-vs-generator diff.
+        run: CHECK_STDLIB_HTML=1 scripts/check-docs.sh
 
   version:
     runs-on: ubuntu-24.04

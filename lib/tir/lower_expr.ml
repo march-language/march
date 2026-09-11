@@ -43,6 +43,18 @@ let _fn_param_types = Lower_state._fn_param_types
 let _use_aliases = Lower_state._use_aliases
 let _protocol_roles = Lower_state._protocol_roles
 let _current_module_fns = Lower_state._current_module_fns
+
+(** The value-level supervisor DSL (`app … Supervisor.spec(:one_for_one,
+    [worker(W)])`) is interpreter-only: these names typecheck, [eval.ml]
+    implements them, and the compiled backend has neither a lowering nor a C
+    symbol, so a compiled program used to die at LINK time with
+    `Undefined symbols: _worker` -- a C symbol with no March span. Rejecting
+    the call here turns that into a positioned compile-time error. A user
+    function of the same name shadows the builtin (the typechecker already
+    resolved it that way), so [_current_module_fns] is consulted first.
+    specs/2026-09-11-correctness-fixes-design.md §3. *)
+let interpreter_only_builtins =
+  ["worker"; "dynamic_supervisor"; "Supervisor.spec"; "Supervisor.start_child"]
 let resolve_use_alias = Lower_state.resolve_use_alias
 let _ensure_module_lowered = Lower_state._ensure_module_lowered
 let _default_dispatch = Lower_state._default_dispatch
@@ -420,6 +432,16 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
     lower_to_atom_k env e (fun a -> Tir.EField (a, name))
 
   (* --- Session-typed channel builtins (binary) --- *)
+  | Ast.EApp (Ast.EVar { txt = name; span }, _, _)
+    when List.mem name interpreter_only_builtins
+         && not (Hashtbl.mem !_current_module_fns name) ->
+    failwith (Printf.sprintf
+      "%s:%d:%d: error: `%s` builds a value-level supervisor spec, which only \
+       the interpreter runs; a compiled program declares its children in a \
+       `supervise do ... end` block inside the supervising actor (see \
+       docs/supervision.md). The `app` / `Supervisor.spec` DSL is \
+       interpreter-only."
+      span.Ast.file span.Ast.start_line span.Ast.start_col name)
   | Ast.EApp (Ast.EVar { txt = "Chan.new"; _ }, [proto_arg], _) ->
     lower_to_atom_k env proto_arg (fun proto' ->
       let fn_var : Tir.var = {

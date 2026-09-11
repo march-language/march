@@ -82,16 +82,30 @@ let span_of_expr (e : expr) : span =
 let is_real_span (sp : span) =
   sp.file <> "" && sp.file <> "<none>" && sp.file <> "<unknown>"
 
-(** Walk an expression tree counting nodes whose span matches [file].
-    When [file] is [""], all nodes are counted. *)
-let rec walk_expr ~file acc_e acc_b (e : expr) : unit =
+(** Walk an expression tree collecting the coverage KEYS of nodes whose span
+    matches [file] ([""] = every file): [acc_e] gets [span_key sp] for every
+    expression, [acc_b] the [:T]/[:F] keys of every [if] and the [:armN] keys
+    of every [match]/[cond] arm -- the exact keys the evaluator records. The
+    denominator is the size of these sets and the numerator is the recorded
+    hits INTERSECTED with them, so hit <= total holds by construction whatever
+    [walk_decl] chooses to skip (it skips test bodies, which the evaluator
+    still records; that is how `--coverage` reported 487%).
+    specs/2026-09-11-correctness-fixes-design.md §6. *)
+let rec walk_expr ~file (acc_e : (string, unit) Hashtbl.t)
+    (acc_b : (string, unit) Hashtbl.t) (e : expr) : unit =
   let sp = span_of_expr e in
   let in_file = (file = "" || sp.file = file) && is_real_span sp in
   if in_file then begin
-    incr acc_e;
+    let k = span_key sp in
+    Hashtbl.replace acc_e k ();
     match e with
-    | EIf _ -> acc_b := !acc_b + 2
-    | EMatch (_, branches, _) -> acc_b := !acc_b + List.length branches
+    | EIf _ ->
+      Hashtbl.replace acc_b (k ^ ":T") ();
+      Hashtbl.replace acc_b (k ^ ":F") ()
+    | EMatch (_, branches, _) ->
+      List.iteri (fun i _ -> Hashtbl.replace acc_b (Printf.sprintf "%s:arm%d" k i) ()) branches
+    | ECond (arms, _) ->
+      List.iteri (fun i _ -> Hashtbl.replace acc_b (Printf.sprintf "%s:arm%d" k i) ()) arms
     | _ -> ()
   end;
   (* Always recurse into children regardless of current node's file. *)
@@ -101,7 +115,6 @@ let rec walk_expr ~file acc_e acc_b (e : expr) : unit =
     walk_expr ~file acc_e acc_b then_;
     walk_expr ~file acc_e acc_b else_
   | ECond (arms, _) ->
-    acc_b := !acc_b + List.length arms;
     List.iter (fun (ce, be) ->
       walk_expr ~file acc_e acc_b ce;
       walk_expr ~file acc_e acc_b be
@@ -181,13 +194,24 @@ let rec walk_decl ~file acc_e acc_b (d : decl) : unit =
   | DType _ | DAlwaysLinearType _ | DTransitions _ | DActor _ | DInterface _ | DExtern _ | DNeeds _ | DProofCap _
   | DProtocol _ | DSig _ | DUse _ | DAlias _ | DApp _ | DDeriving _ | DSatisfy _ | DOpts _ -> ()
 
+(** The coverage-key sets of every countable expression and branch in [m],
+    restricted to [file] when it is non-empty. *)
+let collect_totals ~file (m : module_) : (string, unit) Hashtbl.t * (string, unit) Hashtbl.t =
+  let acc_e = Hashtbl.create 1024 in
+  let acc_b = Hashtbl.create 256 in
+  List.iter (walk_decl ~file acc_e acc_b) m.mod_decls;
+  (acc_e, acc_b)
+
 (** Count the total expressions and branches in [m], restricted to
     [file] when it is non-empty. *)
 let count_totals ~file (m : module_) : int * int =
-  let acc_e = ref 0 in
-  let acc_b = ref 0 in
-  List.iter (walk_decl ~file acc_e acc_b) m.mod_decls;
-  (!acc_e, !acc_b)
+  let (e, b) = collect_totals ~file m in
+  (Hashtbl.length e, Hashtbl.length b)
+
+(** Hit sites in [tbl] that are also in the walked key set [totals]: the
+    numerator that can never exceed the denominator. *)
+let count_hits_in (tbl : (string, int) Hashtbl.t) (totals : (string, unit) Hashtbl.t) : int =
+  Hashtbl.fold (fun key _n acc -> if Hashtbl.mem totals key then acc + 1 else acc) tbl 0
 
 (* ------------------------------------------------------------------ *)
 (* Reporting                                                          *)
@@ -210,9 +234,11 @@ let count_unique_hits (tbl : (string, int) Hashtbl.t) ~file =
 
 (** Print a human-readable coverage summary table. *)
 let report_summary ?(target_file="") (m : module_) () =
-  let (total_exprs, total_branches) = count_totals ~file:target_file m in
-  let hit_exprs    = count_unique_hits expr_hits   ~file:target_file in
-  let hit_branches = count_unique_hits branch_hits ~file:target_file in
+  let (walked_exprs, walked_branches) = collect_totals ~file:target_file m in
+  let total_exprs    = Hashtbl.length walked_exprs in
+  let total_branches = Hashtbl.length walked_branches in
+  let hit_exprs    = count_hits_in expr_hits   walked_exprs in
+  let hit_branches = count_hits_in branch_hits walked_branches in
   Printf.printf "\n=== Coverage Summary";
   (if target_file <> "" then
     Printf.printf " [%s]" (Filename.basename target_file));

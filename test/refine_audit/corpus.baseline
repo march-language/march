@@ -102,6 +102,8 @@ native_ffi_upcall: coverage audit (user + stdlib): 63 enforced, 0 inert (warned)
 native_ffi_upcall: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_ffi_variant: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_ffi_variant: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_file_error_ctor_match: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_file_error_ctor_match: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_float_arr_list_boxing: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_float_arr_list_boxing: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_float_boxing: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced

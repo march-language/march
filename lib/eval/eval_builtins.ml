@@ -1533,7 +1533,25 @@ let base_env : env =
   ; ("file_rename", VBuiltin ("file_rename", function
       | [VString src; VString dst] ->
         (try Sys.rename src dst; VCon ("Ok", [VAtom "ok"])
-         with Sys_error msg -> VCon ("Err", [VCon ("IoError", [VString msg])]))
+         with Sys_error msg ->
+           (* [Sys.rename] raises a BARE strerror message ("No such file or
+              directory"), unlike [open_in_bin] (file_copy's failure path),
+              whose OCaml-formatted message already carries the path. The
+              compiled runtime formats "<path>: <strerror>" for both
+              (mk_err_errno_io_path), so prefix the source path here when the
+              message lacks it, or the two backends disagree on the payload
+              text. Found 2026-09-11 once compiled `to_string` began printing
+              the constructor instead of "#<tag:4>", which is what had been
+              hiding the difference. *)
+           let msg =
+             let pfx = src ^ ": " in
+             let has_prefix =
+               String.length msg >= String.length pfx
+               && String.sub msg 0 (String.length pfx) = pfx
+             in
+             if has_prefix then msg else pfx ^ msg
+           in
+           VCon ("Err", [VCon ("IoError", [VString msg])]))
       | _ -> eval_error "file_rename(src, dst)"))
 
   ; ("file_stat", VBuiltin ("file_stat", function

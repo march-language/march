@@ -10694,13 +10694,17 @@ let test_compiled_file_open_err_is_real_fileerror () =
 
    All thirteen cases live in one March program so the whole table costs a
    single compile.  Interpreted output is the oracle: it prints the friendly
-   ctor form (NotFound("...")).  Compiled Show cannot resolve the *name* of
-   the bare, unqualified "FileError" type these builtins are declared with
-   -- a separate, still-open gap noted in the same todo -- so it prints
-   "#<tag:N>"; that N is exactly the assertion we want, since it is the
-   cell's real tag under stdlib/file.march's declaration order (NotFound=0,
-   Permission=1, IsDirectory=2, NotEmpty=3, IoError=4).  Pre-fix, the
-   compiled line was the raw errno string leaking through a misread
+   ctor form (NotFound("...")).  Compiled Show cannot resolve the NAME of a
+   module-declared type: the ctor-descriptor table is keyed by the LOWERED
+   name (File.FileError) while a call site looks it up by the bare static one
+   these builtins are declared with -- a separate, still-open gap, now
+   specs/todos/2026-09-11-compiled-to-string-of-module-declared-type.md (a
+   first attempt to close it by aliasing the bare suffix caused a
+   deterministic SIGSEGV; see that todo).  So it prints "#<tag:N>"; that N is
+   exactly the assertion we want, since it is the cell's real tag under
+   stdlib/file.march's declaration order (NotFound=0, Permission=1,
+   IsDirectory=2, NotEmpty=3, IoError=4).  Pre-fix of the representation bug,
+   the compiled line was the raw errno string leaking through a misread
    march_string, which matches neither. *)
 let test_compiled_file_dir_err_are_real_fileerrors () =
   let main_exe = find_main_exe () in

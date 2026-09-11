@@ -1,3 +1,14 @@
+> **Closed 2026-09-11 by deletion.** `inject_iface_exports_ref` (declaration,
+> `.mli` export, the `let () =` installation in `typecheck_unify.ml`, and the
+> breadcrumb comments) is gone; ~40 lines removed, nothing migrated. The data
+> flow showed no reachable consumer: registry-loaded modules are stdlib (zero
+> interfaces) and REPL fragments, whose interface methods
+> `prebind_interface_decl` already binds under both `Iface.m` and
+> `Mod.Iface.m`. `lib/typecheck/` now has one top-level side effect
+> (`expand_record_ref`) instead of two. Compiler, eval, codegen, LSP suites
+> unchanged. Design: `specs/2026-09-11-correctness-fixes-design.md` §4.
+> Original filing follows.
+
 # `inject_iface_exports_ref` is installed but never read — cross-module interface exports are silently dropped
 
 **Filed:** 2026-08-27, at `f3c37fb6`. Found while planning
@@ -83,3 +94,5 @@ lib/typecheck/typecheck.ml:841:let () = expand_record_ref := ...
 
 — and this one is a no-op. That is what makes Target B's task B3 (extract §1/§2
 to `typecheck_unify.ml`) safe: see the plan for the argument.
+
+> **Design spec (2026-09-11):** `specs/2026-09-11-correctness-fixes-design.md` — root cause re-verified against the tree, chosen fix, test plan with a RED control, effort and risk.

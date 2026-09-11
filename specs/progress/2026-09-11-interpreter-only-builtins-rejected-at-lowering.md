@@ -1,3 +1,17 @@
+> **Landed 2026-09-11.** `worker`, `dynamic_supervisor`, `Supervisor.spec` and
+> `Supervisor.start_child` (the value-level `app` supervisor DSL) are
+> interpreter-only; a compiled call now fails at LOWERING with a positioned
+> diagnostic (`file:line:col: error: \`worker\` builds a value-level supervisor
+> spec, which only the interpreter runs; …`) instead of at link time with
+> `Undefined symbols: _worker`. `bin/main.ml` prints a lowering `Failure`
+> as one clean line and exits 1 (a positioned message verbatim; anything else
+> as an internal-error line) rather than an OCaml backtrace. A user function
+> named `worker` still compiles (lowering consults the current module's fn
+> table first; `test_codegen.ml` "a user fn named worker still compiles").
+> The interpreter behaviour and its tests are untouched; docs say the DSL is
+> interpreter-only. Design: `specs/2026-09-11-correctness-fixes-design.md` §3
+> (option C). Original filing follows.
+
 # Two builtins still typecheck but do not link
 
 Filed 2026-08-22, out of the audit in
@@ -128,3 +142,5 @@ is in the right neighbourhood for it.
 - `specs/progress/2026-08-21-unix-time-ms-has-no-codegen-backing.md` — the
   three that were fixed (`unix_time_ms`, `string_to_codepoints`,
   `string_from_codepoint`) and the seven sites each one needed.
+
+> **Design spec (2026-09-11):** `specs/2026-09-11-correctness-fixes-design.md` — root cause re-verified against the tree, chosen fix, test plan with a RED control, effort and risk.

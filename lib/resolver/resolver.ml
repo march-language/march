@@ -174,9 +174,11 @@ let read_file path =
   close_in ic;
   Bytes.to_string b
 
-(** Parse a .march source file.  Returns [Ok module_ast] or [Error msg].
-    Applies a span-remap sidecar when one exists (template-lowered files). *)
-let parse_march_file path src =
+(** Parse [src] (read from [path]).  Applies a span-remap sidecar when one
+    exists (template-lowered files).  On failure returns the parser's message
+    and the 1-based line and column it stopped at, so callers can build a
+    positioned diagnostic instead of a flat string. *)
+let parse_march_file_pos path src =
   let lexbuf = Lexing.from_string src in
   lexbuf.Lexing.lex_curr_p <-
     { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
@@ -190,11 +192,19 @@ let parse_march_file path src =
   with
   | March_errors.Errors.ParseError (msg, _hint, pos) ->
     let open Lexing in
-    Error (Printf.sprintf "%s:%d: parse error: %s" path pos.pos_lnum msg)
+    Error (Printf.sprintf "parse error: %s" msg, pos.pos_lnum,
+           pos.pos_cnum - pos.pos_bol + 1)
   | March_parser.Parser.Error ->
     let pos = Lexing.lexeme_start_p lexbuf in
     let open Lexing in
-    Error (Printf.sprintf "%s:%d: parse error" path pos.pos_lnum)
+    Error ("parse error", pos.pos_lnum, pos.pos_cnum - pos.pos_bol + 1)
+
+(** Parse a .march source file.  Returns [Ok module_ast] or [Error msg]
+    with the path and line folded into [msg]. *)
+let parse_march_file path src =
+  match parse_march_file_pos path src with
+  | Ok m -> Ok m
+  | Error (msg, line, _col) -> Error (Printf.sprintf "%s:%d: %s" path line msg)
 
 (** Recursively collect all .march files under [dir].
     Entries are sorted so discovery order is deterministic — raw
@@ -245,10 +255,21 @@ let collect_lib_files dir =
     [extra_lib_paths] lets callers (e.g. the LSP) inject paths derived from
     forge.toml without requiring the env var to be set.
 
+    [strict_parse] makes a phase-1 discovery file that fails to PARSE a
+    positioned error instead of a stderr note plus silent drop. The tolerant
+    default is deliberate for the LSP, the REPL and ordinary builds (an
+    unparsable scratch file on MARCH_LIB_PATH must not fail an unrelated
+    entry); a `--test` build sets it, because a sibling test file that is
+    dropped shrinks the suite with "0 failures" — the exact failure
+    specs/todos/2026-08-17-forge-test-silent-skip-on-compile-failure.md
+    describes. Type errors in a kept module were already fatal; this closes
+    the parse-error half.
+
     Returns (errors, extra_dmods_to_prepend, user_files) where [user_files]
     is every file loaded as user code (entry + imports + discovered libs) —
     callers use it to decide which typecheck diagnostics are fatal. *)
 let resolve_imports ?(extra_lib_paths = []) ?(auto_discover = true)
+    ?(strict_parse = false)
     ~source_file (m : March_ast.Ast.module_) =
   let source_dir = Filename.dirname source_file in
   let env_lib_paths =
@@ -481,9 +502,19 @@ let resolve_imports ?(extra_lib_paths = []) ?(auto_discover = true)
                   let src = try read_file file_path with Sys_error _ -> "" in
                   if src = "" then None
                   else
-                    match parse_march_file file_path src with
-                    | Error msg ->
-                      Printf.eprintf "[lib] %s\n%!" msg; None
+                    match parse_march_file_pos file_path src with
+                    | Error (msg, line, col) when strict_parse ->
+                      let span = { March_ast.Ast.file = file_path;
+                                   start_line = line; start_col = col;
+                                   end_line = line; end_col = col } in
+                      errors := ("<discovered>", span,
+                                 msg ^ " (in a file discovered on MARCH_LIB_PATH; "
+                                 ^ "a --test build refuses to drop an unparsable "
+                                 ^ "test module and silently run fewer tests)")
+                                :: !errors;
+                      None
+                    | Error (msg, line, _col) ->
+                      Printf.eprintf "[lib] %s:%d: %s\n%!" file_path line msg; None
                     | Ok ast ->
                       Some (dir_idx, canon_fp, file_path,
                             March_desugar.Desugar.desugar_module ~is_entry:false ast,

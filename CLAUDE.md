@@ -16,7 +16,13 @@ structure exists specifically so two PRs filing or closing different items never
 
 **Doc freshness lint.** `scripts/check-docs.sh` (run in CI) guards the current-truth docs
 (root guides, `docs/`, `specs/features/`, the agent SKILL) against two kinds of rot: dead
-compiler-source pointers (e.g. a path that moved) and stale stdlib module counts. It does
+compiler-source pointers (e.g. a path that moved) and stale stdlib module counts. It also
+checks the conformance-corpus INDEX counts, the quarantine aliases against their inventory
+todo (Check E), and, with `CHECK_STDLIB_HTML=1` where the generated pages are expected
+fresh, that every public stdlib symbol is anchored on its generated page (Check D). A
+sibling, `scripts/check-runtime-sources.sh`, polices every hand-maintained runtime C link
+list (drivers, JIT, dune rules) against `runtime/sources.list`; adding a runtime `.c`
+means adding one manifest line with a role. It does
 **not** lint the historical corpus (`specs/plans/`, dated design specs, `specs/todos/`,
 `specs/progress/`). If a current doc must reference a since-removed file or a frozen
 count, say so in words ("no longer exists", "removed") or add a `doc-lint:ignore-count` /

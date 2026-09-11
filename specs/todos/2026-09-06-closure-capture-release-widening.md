@@ -94,3 +94,5 @@ points:
 (~19%, unaffected by a 16x larger `MARCH_STACK_MAX` — that env var is actually
 a compile-time `#define`, `runtime/march_scheduler.h`, never read via `getenv`,
 so that experiment never tested anything).
+
+> **Design spec (2026-09-11):** `specs/2026-09-11-codegen-leaks-design.md` — root cause re-verified against the tree, chosen fix, test plan with a RED control, effort and risk.

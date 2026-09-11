@@ -1,0 +1,5 @@
+mod TestB do
+  test "b" do
+    assert 1 == 1
+  end
+end
