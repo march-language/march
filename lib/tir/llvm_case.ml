@@ -21,7 +21,7 @@
 (** Does this case arm DIVERGE — i.e. can control never actually arrive at the
     arm's merge block through it?
 
-    Both merge paths below ([Repr.Niche]'s and the general boxed one) may
+    Both merge paths below ([Kind.Niche]'s and the general boxed one) may
     unbox-and-free the ptr they merged, but only when EVERY arm reaching the
     merge produced a "double" pre-coercion — the proof that the ptr is a
     march_float_box this emit_case's own coerce allocated.  A
@@ -91,7 +91,7 @@ let finish_ptr_merge ctx ~arm_tys ~loaded =
         (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" d loaded);
       Llvm_ctx.emit ctx (Printf.sprintf "call void @march_decrc_local(ptr %s)" loaded);
       ("double", d)
-    end else if Repr.unboxed_of_llvm_ty t0 <> None then begin
+    end else if Kind.unboxed_of_llvm_ty ctx.Llvm_ctx.k_table t0 <> None then begin
       let v = Llvm_ctx.coerce ctx "ptr" loaded t0 in
       Llvm_ctx.emit ctx (Printf.sprintf "call void @march_decrc_local(ptr %s)" loaded);
       (t0, v)
@@ -143,7 +143,7 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
        | _ -> None) ctx.Llvm_ctx.type_defs in
      owners <> [] &&
      List.for_all (fun tname ->
-       Repr.is_niche_shaped ~collision_set:ctx.Llvm_ctx.collision_set ctx.Llvm_ctx.type_defs tname) owners)
+       Kind.is_niche_shaped ctx.Llvm_ctx.k_table tname) owners)
   in
   (* Newtype analogue of the niche recovery: [lower_match] mints destructured
      sub-pattern variables with [unknown_ty], so a nested match on one (e.g.
@@ -185,29 +185,29 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
       let owner_reprs = List.filter_map (function
         | Tir.TDVariant (tname, variants)
           when List.exists (fun (c, _) -> c = tag) variants ->
-          Some (Repr.repr_of_ty ~collision_set:ctx.Llvm_ctx.collision_set ctx.Llvm_ctx.type_defs
+          Some (Kind.repr_of ctx.Llvm_ctx.k_table
                   (Tir.TCon (last_seg tname, [])))
         | _ -> None) ctx.Llvm_ctx.type_defs in
       (match owner_reprs with
-       | Repr.Newtype p0 :: rest
+       | Kind.Newtype p0 :: rest
          when List.for_all (function
-             | Repr.Newtype p ->
-               Repr.payload_needs_tag ~collision_set:ctx.Llvm_ctx.collision_set ctx.Llvm_ctx.type_defs p
-               = Repr.payload_needs_tag ~collision_set:ctx.Llvm_ctx.collision_set ctx.Llvm_ctx.type_defs p0
+             | Kind.Newtype p ->
+               Kind.payload_needs_tag ctx.Llvm_ctx.k_table p
+               = Kind.payload_needs_tag ctx.Llvm_ctx.k_table p0
              | _ -> false) rest ->
          Some p0
        | _ -> None)
     | _ -> None
   in
   let effective_repr =
-    match Repr.repr_of_ty ~collision_set:ctx.Llvm_ctx.collision_set ctx.Llvm_ctx.type_defs scrut_tir_ty_init with
-    | Repr.Boxed
+    match Kind.repr_of ctx.Llvm_ctx.k_table scrut_tir_ty_init with
+    | Kind.Boxed
       when (match scrut_tir_ty_init with Tir.TVar _ -> true | _ -> false)
            && newtype_recovery_payload () <> None ->
       (match newtype_recovery_payload () with
-       | Some p -> Repr.Newtype p
-       | None -> Repr.Boxed (* unreachable: guard checked <> None *))
-    | Repr.Boxed
+       | Some p -> Kind.Newtype p
+       | None -> Kind.Boxed (* unreachable: guard checked <> None *))
+    | Kind.Boxed
       when (
         (* TVar path: scrutinee type unknown (unresolved module body), recover
            niche from the branch constructor names. *)
@@ -224,11 +224,11 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
         (match scrut_tir_ty_init with
          | Tir.TCon (name, args) when args <> [] ->
            (List.exists (function Tir.TVar _ -> true | _ -> false) args)
-           && Repr.is_niche_shaped ~collision_set:ctx.Llvm_ctx.collision_set ctx.Llvm_ctx.type_defs name
+           && Kind.is_niche_shaped ctx.Llvm_ctx.k_table name
          | _ -> false)
       ) ->
-      Repr.Niche { payload = Tir.TVar "_"; tagged = false }
-    | Repr.Boxed
+      Kind.Niche { payload = Tir.TVar "_"; tagged = false }
+    | Kind.Boxed
       when (match scrut_tir_ty_init with
             | Tir.TCon (_, []) -> true
             | _ -> false) ->
@@ -247,10 +247,10 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
          Non-niche-shaped TCons return None and stay Boxed. *)
       (match scrut_tir_ty_init with
        | Tir.TCon (name, []) ->
-         (match Repr.niche_repr_of_concrete ~collision_set:ctx.Llvm_ctx.collision_set ctx.Llvm_ctx.type_defs name with
+         (match Kind.niche_repr_of_concrete ctx.Llvm_ctx.k_table name with
           | Some r -> r
-          | None -> Repr.Boxed)
-       | _ -> Repr.Boxed)
+          | None -> Kind.Boxed)
+       | _ -> Kind.Boxed)
     | r -> r
   in
   (* Repr audit hook — record the DECODING this match commits to, so mixed
@@ -264,10 +264,10 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
          | [] -> "?"
          | _ -> String.concat "," (List.map Llvm_eq.mangle_ty_for_eq ps))
        ~family:(match effective_repr with
-         | Repr.Newtype _ -> "Newtype"
-         | Repr.Niche _   -> "Niche"
-         | Repr.Unboxed _ -> "Unboxed"
-         | Repr.Boxed     -> "Boxed")
+         | Kind.Newtype _ -> "Newtype"
+         | Kind.Niche _   -> "Niche"
+         | Kind.Unboxed _ -> "Unboxed"
+         | Kind.Boxed     -> "Boxed")
        ~site:("case in " ^ ctx.Llvm_ctx.cur_emit_fn)
    | _ -> ());
   (* Fast path: unboxed aggregate — the value is an LLVM struct in registers.
@@ -276,9 +276,9 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
      RC ops for these ([Rc_types.needs_rc] is false), so unlike the Newtype and
      Niche paths below there is no scrutinee DecRC to strip. *)
   match effective_repr with
-  | Repr.Unboxed { ctor = _; fields } ->
+  | Kind.Unboxed { ctor = _; fields } ->
     let sty = match scrut_tir_ty_init with
-      | Tir.TCon (name, _) -> Repr.unboxed_llvm_name name
+      | Tir.TCon (name, _) -> Kind.unboxed_llvm_name name
       | _ ->
         (* Unreachable: [Repr.repr_of_ty] only answers [Unboxed] for a TCon. *)
         failwith "emit_case: unboxed repr for a non-TCon scrutinee"
@@ -314,7 +314,7 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
      | _ ->
        failwith "emit_case: unboxed type has multiple branches (impossible: \
                  the representation is only chosen for single-ctor types)")
-  | Repr.Newtype payload ->
+  | Kind.Newtype payload ->
     (* Strip a leading DecRC(scrut) from a branch body.
        Perceus inserts DecRC(box) inside the branch assuming box is a heap cell.
        For a newtype, box IS the payload — DecRC would decrement the payload RC,
@@ -338,7 +338,7 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
      | [br] ->
        (match br.Tir.br_vars with
         | [field_var] ->
-          let needs_tag = Repr.payload_needs_tag ~collision_set:ctx.Llvm_ctx.collision_set ctx.Llvm_ctx.type_defs payload in
+          let needs_tag = Kind.payload_needs_tag ctx.Llvm_ctx.k_table payload in
           let (fty, fval) =
             if needs_tag then
               ("i64", Llvm_ctx.emit_untag_known_scalar ctx ~raw:"nt_raw" ~unt:"nt_unt" scrut_val)
@@ -353,7 +353,7 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
         | _ -> failwith "emit_case: newtype branch has multiple field vars (impossible)");
        emit_expr ctx (strip_decrc br.Tir.br_body)
      | _ -> failwith "emit_case: newtype type has multiple branches (impossible)")
-  | Repr.Niche { payload = _; tagged = niche_tagged } ->
+  | Kind.Niche { payload = _; tagged = niche_tagged } ->
     (* Niche fast path: None = 0, Some(x) = x.
        Emit an icmp eq null + conditional br.  Branch bodies handle their own
        RC via Perceus, but for the Some(ptr) case the DecRC Perceus inserts on
@@ -980,7 +980,7 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
            lets the release below be a release of a genuinely unowned box. *)
         let is_boxed_agg =
           (not is_boxed_float) && field_ty = "ptr"
-          && Repr.unboxed_of_llvm_ty concrete_field_ty <> None
+          && Kind.unboxed_of_llvm_ty ctx.Llvm_ctx.k_table concrete_field_ty <> None
           && not body_reuses_scrut_here
         in
         let bind_ty =
