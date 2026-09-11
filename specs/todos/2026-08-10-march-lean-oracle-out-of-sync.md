@@ -57,3 +57,5 @@ Keeping it in sync is protecting a working bug-finder, not bookkeeping.
   Worth either a note in the capability-check contributor docs or, better, a
   scheduled cross-repo harness run whose failure is visible to whoever landed
   the check.
+
+> **Design spec (2026-09-11):** `specs/2026-09-11-ci-tooling-fixes-design.md` — root cause re-verified against the tree, chosen fix, test plan with a RED control, effort and risk.

@@ -60,3 +60,5 @@ are currently accepted and ignored.
 Do not fix this by special-casing `++` chains. The same collapse will apply to any long
 list, record or call-argument list; the missing piece is the width budget, not a rule about
 string concatenation.
+
+> **Design spec (2026-09-11):** `specs/2026-09-11-correctness-fixes-design.md` — root cause re-verified against the tree, chosen fix, test plan with a RED control, effort and risk.

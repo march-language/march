@@ -24,3 +24,5 @@ failure of files reachable from the chosen entry's import graph. Needs a
 repro case first (a `test/` dir with two `*.march` test files, one of which
 has a deliberate compile error) to confirm the current silent-skip behavior
 before changing `cmd_test.ml`.
+
+> **Design spec (2026-09-11):** `specs/2026-09-11-ci-tooling-fixes-design.md` — root cause re-verified against the tree, chosen fix, test plan with a RED control, effort and risk.

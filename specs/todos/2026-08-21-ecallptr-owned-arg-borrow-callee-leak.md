@@ -136,3 +136,5 @@ The fresh-String probe above RED→GREEN; the #313 acc probe and
 and emitted-caller conventions respectively); full ASAN corpus — an
 ownership-convention change is exactly the kind that passes unit tests and
 double-frees in the corpus.
+
+> **Design spec (2026-09-11):** `specs/2026-09-11-codegen-leaks-design.md` — root cause re-verified against the tree, chosen fix, test plan with a RED control, effort and risk.

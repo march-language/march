@@ -31,3 +31,5 @@ Note that `test_compiled_file_dir_err_are_real_fileerrors` in
 `test/test_stdlib_suite.ml` currently accepts `#<tag:N>` as a valid compiled
 output precisely because of this gap. Closing this todo should tighten that
 test to require the constructor form.
+
+> **Design spec (2026-09-11):** `specs/2026-09-11-correctness-fixes-design.md` — root cause re-verified against the tree, chosen fix, test plan with a RED control, effort and risk.

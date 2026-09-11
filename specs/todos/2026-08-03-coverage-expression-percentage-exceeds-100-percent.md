@@ -50,3 +50,5 @@ Coverage instrumentation is not implicated in FFI crashes. The
 previously-suspected "coverage breaks on FFI file operations" was an unrelated
 reference-counting bug in the interpreter's FFI argument cleanup; `--coverage`
 merely selected the interpreter path that exposed it.
+
+> **Design spec (2026-09-11):** `specs/2026-09-11-correctness-fixes-design.md` — root cause re-verified against the tree, chosen fix, test plan with a RED control, effort and risk.

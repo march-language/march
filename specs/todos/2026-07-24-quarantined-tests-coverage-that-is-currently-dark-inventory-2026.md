@@ -21,3 +21,5 @@ a fix.
 | ~~`test/rpc_auto_enroll_quarantined`~~ | ~~RPC auto-enrollment handshake~~ | **RESOLVED 2026-08-08** — same ephemeral-port fix. The macOS `result:15` vs `fail:call_error` mismatch was the fixed-port collision (a concurrent listener answering the connect), gone with ephemeral ports. Back on `runtest`. |
 | `test/signal_term_suppress_quarantined` | a watched `SIGTERM` must NOT kill the process | `Signal.watch` deferred-dispatch race (entry below) |
 | ~~`forge/test/build_check_quarantined`~~ | ~~`forge build` end-to-end check~~ | **RESOLVED 2026-08-08** — made hermetic (tests the just-built compiler via `MARCH_TEST_BIN`) and the constructor-resolution bug fixed; back on `runtest`. See `specs/progress/2026-08-08-forge-check-build-suite-un-quarantined.md`. |
+
+> **Design spec (2026-09-11):** `specs/2026-09-11-ci-tooling-fixes-design.md` — root cause re-verified against the tree, chosen fix, test plan with a RED control, effort and risk.

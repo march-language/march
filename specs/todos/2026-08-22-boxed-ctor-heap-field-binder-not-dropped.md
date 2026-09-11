@@ -105,3 +105,5 @@ The `One(String)` reduction RED (1/destructure) → GREEN (small constant); the
 `int_to_string(n)` and stay green, which is the cross-check that the two fixes
 compose. Full ASAN corpus — a missing drop and an over-eager drop look
 identical in a unit test and opposite in a corpus sweep.
+
+> **Design spec (2026-09-11):** `specs/2026-09-11-codegen-leaks-design.md` — root cause re-verified against the tree, chosen fix, test plan with a RED control, effort and risk.

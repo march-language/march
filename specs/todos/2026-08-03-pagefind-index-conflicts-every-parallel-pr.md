@@ -132,3 +132,5 @@ collide at merge time. Given the above, the plausible resolutions are now:
 
 **Left open deliberately.** Every remaining path is a policy or
 site-architecture decision, not a mechanical edit.
+
+> **Design spec (2026-09-11):** `specs/2026-09-11-ci-tooling-fixes-design.md` — root cause re-verified against the tree, chosen fix, test plan with a RED control, effort and risk.

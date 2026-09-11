@@ -47,3 +47,5 @@ Add a CI check that fails when `docs/docs/stdlib/` is stale relative to
 - The check is proven to go RED on a deliberate perturbation (delete a function
   from a generated page, or add a stdlib function without regenerating) before
   it is trusted GREEN.
+
+> **Design spec (2026-09-11):** `specs/2026-09-11-ci-tooling-fixes-design.md` — root cause re-verified against the tree, chosen fix, test plan with a RED control, effort and risk.

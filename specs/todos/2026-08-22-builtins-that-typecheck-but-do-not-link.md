@@ -128,3 +128,5 @@ is in the right neighbourhood for it.
 - `specs/progress/2026-08-21-unix-time-ms-has-no-codegen-backing.md` — the
   three that were fixed (`unix_time_ms`, `string_to_codepoints`,
   `string_from_codepoint`) and the seven sites each one needed.
+
+> **Design spec (2026-09-11):** `specs/2026-09-11-correctness-fixes-design.md` — root cause re-verified against the tree, chosen fix, test plan with a RED control, effort and risk.

@@ -83,3 +83,5 @@ lib/typecheck/typecheck.ml:841:let () = expand_record_ref := ...
 
 — and this one is a no-op. That is what makes Target B's task B3 (extract §1/§2
 to `typecheck_unify.ml`) safe: see the plan for the argument.
+
+> **Design spec (2026-09-11):** `specs/2026-09-11-correctness-fixes-design.md` — root cause re-verified against the tree, chosen fix, test plan with a RED control, effort and risk.

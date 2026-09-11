@@ -61,3 +61,5 @@ is exactly what the audit should establish.
 A new test declaring a plainly-named record (`A`, `Thing`, `{ a : Int }`) can
 silently change an unrelated test's result. `test/test_cap_unforgeable.ml`
 carries a comment saying so at the tests that tripped it.
+
+> **Design spec (2026-09-11):** `specs/2026-09-11-correctness-fixes-design.md` — root cause re-verified against the tree, chosen fix, test plan with a RED control, effort and risk.

@@ -49,3 +49,5 @@ roughly in increasing order of effort:
 
 Option 3 is cheap and would have caught this immediately; options 1–2 remove the
 duplication rather than policing it.
+
+> **Design spec (2026-09-11):** `specs/2026-09-11-ci-tooling-fixes-design.md` — root cause re-verified against the tree, chosen fix, test plan with a RED control, effort and risk.
