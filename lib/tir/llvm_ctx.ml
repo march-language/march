@@ -117,6 +117,11 @@ type ctx = {
      fragment's representation decisions ran against a stale or empty table,
      causing niche-vs-boxed ABI mismatches across JIT fragments (B12). *)
   type_defs : Tir.type_def list;
+  (* The per-type table for THIS module (specs/2026-09-10-type-kinds-design.md).
+     Every representation / RC / LLVM-spelling question the emitter asks is
+     answered from here; until Phase 3 of the type-kinds plan it is derived
+     from the same registration [make_ctx] performs just above the record. *)
+  k_table : Kind.table;
   (* Same-short-name type collision set, derived from [type_defs] (see
      [Collision_set.compute]'s doc comment): short type name -> full
      declaring names, present ONLY for short names declared by >=2 modules.
@@ -346,6 +351,7 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   pmap_threshold;
   type_defs;
   collision_set;
+  k_table = Repr.table_for ~collision_set type_defs;
   var_slot    = Hashtbl.create 32;
   local_names = Hashtbl.create 32;
   poly_ctors  = Hashtbl.create 64;
@@ -525,6 +531,12 @@ let llvm_field_ty (ty : Tir.ty) : string =
    moves ("pure primitive, real non-[llvm_emit.ml] consumer exists").
    Re-exported bare in [llvm_emit.ml], which still calls it unqualified at
    ~20 sites in [emit_expr]/[emit_fn]. *)
+(** Table-taking form of [llvm_ty]: the one spelling, read from the kind
+    table.  New code and migrated call sites use this; [llvm_ty] above is
+    the transitional free function that reads the process-global registry
+    and goes away with Phase 3 of the type-kinds plan. *)
+let lty (ctx : ctx) (ty : Tir.ty) : string = Kind.llvm_ty_of ctx.k_table ty
+
 let llvm_ret_ty : Tir.ty -> string = function
   | Tir.TUnit -> "void"
   | t -> llvm_ty t
@@ -538,15 +550,20 @@ let llvm_ret_ty : Tir.ty -> string = function
       safely dereferenced for 16 bytes.
     EXCEPTION: niche-encoded Option-shaped types can carry None=0 (null), so
     [nonnull] and [dereferenceable] must be suppressed for them. *)
-let llvm_param_ty ?(type_defs : Tir.type_def list = [])
-    ?(collision_set : (string, string list) Hashtbl.t = Hashtbl.create 0)
-    (ty : Tir.ty) : string =
+let llvm_param_ty ?(k_table : Kind.table option) (ty : Tir.ty) : string =
+  (* [None] reproduces the historical call with no type list: the
+     registered unboxed set, but NO shape information, so no niche
+     exemption.  One caller ([Llvm_toplevel], the apply-fn prototype)
+     still relies on it; see the type-kinds plan's Phase-2 audit. *)
+  let t = match k_table with
+    | Some t -> t
+    | None -> Repr.table_for ~collision_set:Repr.no_collisions [] in
   match ty with
   | Tir.TCon ("Atom", []) -> "i64"
   (* Unboxed aggregate: a struct value, so none of the pointer alias
-     attributes below apply.  Delegate to [llvm_ty]. *)
-  | Tir.TCon (name, _) when Repr.unboxed_of_type_name name <> None -> llvm_ty ty
-  | Tir.TCon (name, _) when Repr.is_niche_shaped ~collision_set type_defs name -> "ptr"
+     attributes below apply.  Delegate to the table's spelling. *)
+  | Tir.TCon (name, _) when Kind.unboxed_of_type_name t name <> None -> Kind.llvm_ty_of t ty
+  | Tir.TCon (name, _) when Kind.is_niche_shaped t name -> "ptr"
   | Tir.TString | Tir.TCon _ | Tir.TTuple _ | Tir.TRecord _ | Tir.TFn _
   | Tir.TPtr _ | Tir.TVar _ ->
     "ptr nonnull dereferenceable(16)"
@@ -740,8 +757,8 @@ let coerce ctx from_ty v to_ty =
      the same position a boxed Float is in.  [Alloc_contract] therefore
      reports crossing this boundary as an allocation, so a [@[no_alloc]]
      function cannot silently pay for one. *)
-  | (sty, "ptr") when Repr.unboxed_of_llvm_ty sty <> None ->
-    (match Repr.unboxed_of_llvm_ty sty with
+  | (sty, "ptr") when Kind.unboxed_of_llvm_ty ctx.k_table sty <> None ->
+    (match Kind.unboxed_of_llvm_ty ctx.k_table sty with
      | None -> assert false (* guard checked <> None *)
      | Some (tname, ctor, fields) ->
        let entry = Hashtbl.find_opt ctx.ctor_info (tname ^ "." ^ ctor) in
@@ -761,11 +778,11 @@ let coerce ctx from_ty v to_ty =
            emit ctx (Printf.sprintf "store %s %s, ptr %s, align 8" l fv fp))
          fields;
        box)
-  | ("ptr", sty) when Repr.unboxed_of_llvm_ty sty <> None ->
+  | ("ptr", sty) when Kind.unboxed_of_llvm_ty ctx.k_table sty <> None ->
     (* Erased slot → inline aggregate: read the cell's fields back into a
        struct value.  The box itself is left alone; whoever owns it releases
        it, exactly as for [march_unbox_float]. *)
-    (match Repr.unboxed_of_llvm_ty sty with
+    (match Kind.unboxed_of_llvm_ty ctx.k_table sty with
      | None -> assert false (* guard checked <> None *)
      | Some (_tname, _ctor, fields) ->
        let acc = ref "poison" in
