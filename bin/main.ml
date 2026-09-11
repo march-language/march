@@ -2725,7 +2725,8 @@ let compile filename =
         else
           (* Cache miss (or stale artifact / failed copy): emit LLVM IR,
              call clang, then cache the binary *)
-          let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes ~emit_main:(not !compile_so) ~cap_attrib ~cap_decls tir in
+          let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes ~emit_main:(not !compile_so) ~cap_attrib ~cap_decls
+            ~k_table:pipe.March_tir.Contract_pipeline.k_table tir in
           stamp "llvm-emit";
           let oc = open_out ll_file in
           output_string oc ir;
@@ -3510,7 +3511,8 @@ let compile filename =
             end
           ) pre_fns
         in
-        let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes2 ~emit_main:(not !compile_so) ~cap_attrib ~cap_decls tir in
+        let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes2 ~emit_main:(not !compile_so) ~cap_attrib ~cap_decls
+            ~k_table:pipe.March_tir.Contract_pipeline.k_table tir in
         let oc = open_out ll_file in
         output_string oc ir;
         close_out oc;

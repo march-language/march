@@ -37,7 +37,7 @@ let check_slot_ty (ctx : Llvm_ctx.ctx) (where : string) (ty_str : string) =
   | Some (tname, _, _) ->
     failwith (Printf.sprintf
       "LLVM emit: %s with slot type %s (unboxed aggregate `%s`) — a heap slot \
-       is 8 bytes; use Llvm_ctx.llvm_field_ty so the value is boxed"
+       is 8 bytes; use Llvm_ctx.llvm_field_ty ctx so the value is boxed"
       where ty_str tname)
 
 let emit_store_field ctx obj_val i ty_str val_str =

@@ -58,7 +58,7 @@ type repl_slot_info = { rs_bare : string; rs_slot : int; rs_ty : Tir.ty }
     values live in a single persistent C array that survives .so reloads. *)
 let emit_prev_slot_bridges ctx (prev_slots : repl_slot_info list) =
   List.iter (fun si ->
-    let llty = Llvm_ctx.llvm_ty si.rs_ty in
+    let llty = Llvm_ctx.llvm_ty ctx si.rs_ty in
     let raw  = Llvm_ctx.fresh ctx "slot" in
     Printf.bprintf ctx.Llvm_ctx.buf "  %%%s.addr = alloca %s\n" si.rs_bare llty;
     Printf.bprintf ctx.Llvm_ctx.buf "  %s = call i64 @march_repl_get(i64 %d)\n" raw si.rs_slot;
@@ -149,7 +149,7 @@ let emit_slot_loader_fns ctx (prev_slots : repl_slot_info list) =
     | Tir.TUnit -> ()  (* unit slots carry no meaningful value; skip *)
     | ty ->
       let fname  = Llvm_ctx.llvm_name si.rs_bare in
-      let ret_ty = Llvm_ctx.llvm_ret_ty ty in
+      let ret_ty = Llvm_ctx.llvm_ret_ty ctx ty in
       Hashtbl.replace ctx.Llvm_ctx.top_fn_ret_ty si.rs_bare ty;
       (* Let the EApp/ECallPtr paths route calls to this binding through the
          loader (closure dispatch) instead of direct-calling an extern @<name>
@@ -245,7 +245,7 @@ let emit_repl_expr ~emit_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
       Hashtbl.replace ctx.Llvm_ctx.top_fn_nparams fn.Tir.fn_name (List.length fn.Tir.fn_params);
       if fn.Tir.fn_params = [] then Hashtbl.replace ctx.Llvm_ctx.zero_arg_fns fn.Tir.fn_name true) extern_fns;
   List.iter (Llvm_toplevel.emit_fn ~emit_expr ctx) fns;
-  let ret_llty = Llvm_ctx.llvm_ty ret_ty in
+  let ret_llty = Llvm_ctx.llvm_ty ctx ret_ty in
   let fname = Printf.sprintf "repl_%d" n in
   Printf.bprintf ctx.Llvm_ctx.buf "\ndefine %s @%s() {\nentry:\n" ret_llty fname;
   emit_prev_slot_bridges ctx prev_slots;
@@ -298,7 +298,7 @@ let emit_repl_decl ~emit_expr ?(fast_math=false) ~(n : int) ~(name : string)
       Hashtbl.replace ctx.Llvm_ctx.top_fn_nparams fn.Tir.fn_name (List.length fn.Tir.fn_params);
       if fn.Tir.fn_params = [] then Hashtbl.replace ctx.Llvm_ctx.zero_arg_fns fn.Tir.fn_name true) extern_fns;
   List.iter (Llvm_toplevel.emit_fn ~emit_expr ctx) fns;
-  let llty = Llvm_ctx.llvm_ty val_ty in
+  let llty = Llvm_ctx.llvm_ty ctx val_ty in
   let init_name = Printf.sprintf "repl_%d_init" n in
   Printf.bprintf ctx.Llvm_ctx.buf "\ndefine void @%s() {\nentry:\n" init_name;
   emit_prev_slot_bridges ctx prev_slots;
@@ -397,8 +397,8 @@ let emit_repl_fn_with_closure_slot ~emit_expr ?(fast_math=false) ~(n : int)
      results (B11). *)
   let fn_llvm_name = Llvm_ctx.llvm_name (Llvm_builtins.mangle_extern fn.Tir.fn_name) in
   let wrap_name = fn_llvm_name ^ "$clo_wrap" in
-  let target_ret = Llvm_ctx.llvm_ret_ty fn.Tir.fn_ret_ty in
-  let param_tys = List.map (fun v -> Llvm_ctx.llvm_ty v.Tir.v_ty) fn.Tir.fn_params in
+  let target_ret = Llvm_ctx.llvm_ret_ty ctx fn.Tir.fn_ret_ty in
+  let param_tys = List.map (fun v -> Llvm_ctx.llvm_ty ctx v.Tir.v_ty) fn.Tir.fn_params in
   (* Same check-then-add emitted_wraps guard as the other two clo_wrap_define
      call sites: the fn is registered in ctx.top_fns BEFORE emit_fn above, so
      a body that references ITSELF as a first-class value (e.g.
@@ -489,7 +489,7 @@ let emit_fns_fragment
      [emit_module] emitted the group.  Feeding the identical total input in
      4 KiB chunks also survived — the tell that the depth tracked frames per
      `feed` call rather than anything about the data. *)
-  let mutual_groups = Llvm_tco.find_mutual_tco_groups fns in
+  let mutual_groups = Llvm_tco.find_mutual_tco_groups ctx fns in
   let mutual_fn_names =
     List.concat_map (fun g -> List.map (fun fn -> fn.Tir.fn_name) g)
       mutual_groups in

@@ -77,7 +77,7 @@ let emit_alloc_ctor ~emit_atom ctx (ctor : string)
           [Repr.set_unboxed_types]) so each one is already in its own register.
           A consumer that needs the boxed form gets it from [Llvm_ctx.coerce],
           which reconstructs exactly the cell this arm used to allocate. *)
-       let sty = Llvm_ctx.llvm_ty (Tir.TCon (alloc_type_name, [])) in
+       let sty = Llvm_ctx.llvm_ty ctx (Tir.TCon (alloc_type_name, [])) in
        if List.length args <> List.length fields then
          failwith (Printf.sprintf
            "LLVM emit: unboxed constructor %s expects %d arg(s), got %d \
@@ -85,7 +85,7 @@ let emit_alloc_ctor ~emit_atom ctx (ctor : string)
            ctor (List.length fields) (List.length args));
        let acc = ref "poison" in
        List.iteri (fun i atom ->
-           let fty = Llvm_ctx.llvm_ty (List.nth fields i) in
+           let fty = Llvm_ctx.llvm_ty ctx (List.nth fields i) in
            let (v_ty, v_val) = emit_atom ctx atom in
            let fv = coerce ctx v_ty v_val fty in
            let nx = fresh ctx "ubmk" in
@@ -218,7 +218,7 @@ let emit_alloc_ctor ~emit_atom ctx (ctor : string)
              let entry = ctor_entry ctx ctor (List.length args) in
              let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
              let field_ty = match List.nth_opt entry.ce_fields 0 with
-               | Some t -> llvm_field_ty t | None -> "ptr" in
+               | Some t -> llvm_field_ty ctx t | None -> "ptr" in
              let (v_ty, v_val) = emit_atom ctx arg in
              emit_store_field ctx ptr 0 field_ty (coerce ctx v_ty v_val field_ty);
              ("ptr", ptr))
@@ -229,7 +229,7 @@ let emit_alloc_ctor ~emit_atom ctx (ctor : string)
           let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
           List.iteri (fun i atom ->
             let field_ty = match List.nth_opt entry.ce_fields i with
-              | Some t -> llvm_field_ty t | None -> "ptr" in
+              | Some t -> llvm_field_ty ctx t | None -> "ptr" in
             let (v_ty, v_val) = emit_atom ctx atom in
             emit_store_field ctx ptr i field_ty (coerce ctx v_ty v_val field_ty)
           ) args;
@@ -240,7 +240,7 @@ let emit_alloc_ctor ~emit_atom ctx (ctor : string)
        let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
        List.iteri (fun i atom ->
          let field_ty = match List.nth_opt entry.ce_fields i with
-           | Some t -> llvm_field_ty t
+           | Some t -> llvm_field_ty ctx t
            | None ->
              failwith (Printf.sprintf
                "LLVM emit: constructor %s has %d field(s) but field index %d \
@@ -398,7 +398,7 @@ let emit_alloc_hole ~emit_atom ctx (tok : Tir.atom option)
           | atom :: tl ->
             rest := tl;
             let field_ty = match List.nth_opt entry.ce_fields i with
-              | Some t -> llvm_field_ty t | None -> "ptr" in
+              | Some t -> llvm_field_ty ctx t | None -> "ptr" in
             let (v_ty, v_val) = emit_atom ctx atom in
             Some (i, field_ty, coerce ctx v_ty v_val field_ty)
           | [] ->
@@ -482,7 +482,7 @@ let emit_stack_alloc_ctor ~emit_atom ctx (ctor : string)
     emit_store_tag ctx ptr entry.ce_tag;
     List.iteri (fun i atom ->
       let field_ty = match List.nth_opt entry.ce_fields i with
-        | Some t -> llvm_field_ty t
+        | Some t -> llvm_field_ty ctx t
         | None ->
           failwith (Printf.sprintf
             "LLVM emit: constructor %s has %d field(s) but field index %d \
@@ -591,7 +591,7 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
              let entry = ctor_entry ctx ctor (List.length args) in
              let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
              let field_ty = match List.nth_opt entry.ce_fields 0 with
-               | Some t -> llvm_field_ty t | None -> "ptr" in
+               | Some t -> llvm_field_ty ctx t | None -> "ptr" in
              let (v_ty, v_val) = emit_atom ctx arg in
              emit_store_field ctx ptr 0 field_ty (coerce ctx v_ty v_val field_ty);
              ("ptr", ptr))
@@ -600,7 +600,7 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
           let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
           List.iteri (fun i atom ->
             let field_ty = match List.nth_opt entry.ce_fields i with
-              | Some t -> llvm_field_ty t | None -> "ptr" in
+              | Some t -> llvm_field_ty ctx t | None -> "ptr" in
             let (v_ty, v_val) = emit_atom ctx atom in
             emit_store_field ctx ptr i field_ty (coerce ctx v_ty v_val field_ty)
           ) args;
@@ -632,7 +632,7 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
       let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
       List.iteri (fun i atom ->
         let field_ty = match List.nth_opt entry.ce_fields i with
-          | Some t -> llvm_field_ty t
+          | Some t -> llvm_field_ty ctx t
           | None -> failwith (Printf.sprintf
               "LLVM emit: constructor %s has %d field(s) but field index %d \
                was requested (arity mismatch)"
@@ -674,7 +674,7 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
       emit_store_tag ctx rv entry.ce_tag;
       List.iteri (fun i atom ->
         let field_ty = match List.nth_opt entry.ce_fields i with
-          | Some t -> llvm_field_ty t
+          | Some t -> llvm_field_ty ctx t
           | None -> failwith (Printf.sprintf
               "LLVM emit: actor-struct reuse %s has %d field(s) but field index \
                %d was requested (arity mismatch)"
@@ -712,7 +712,7 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
     (* Pre-compute all arg values before branching *)
     let arg_vals = List.mapi (fun i atom ->
       let field_ty = match List.nth_opt entry.ce_fields i with
-        | Some t -> llvm_field_ty t
+        | Some t -> llvm_field_ty ctx t
         | None ->
           failwith (Printf.sprintf
             "LLVM emit: constructor %s has %d field(s) but field index %d \

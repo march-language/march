@@ -194,7 +194,7 @@ let is_vec_ty = Llvm_ctx.is_vec_ty
    [Llvm_emit_call] with the general EApp arm body, its only caller. *)
 
 
-(* llvm_ret_ty moved to [Llvm_ctx] (Wave 3 Task 6, chunk 2): [Llvm_calls] and
+(* llvm_ret_ty ctx moved to [Llvm_ctx] (Wave 3 Task 6, chunk 2): [Llvm_calls] and
    [Llvm_tco] both need it too; re-exported bare since ~20 call sites in this
    file still use it unqualified. *)
 let llvm_ret_ty = Llvm_ctx.llvm_ret_ty
@@ -404,11 +404,11 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
           (List.init n (fun _ -> Tir.TVar "_"), n)
       in
       let ret_tir = fn_ret_tir v.Tir.v_ty in
-      let target_ret = llvm_ret_ty ret_tir in
+      let target_ret = llvm_ret_ty ctx ret_tir in
       let _ = nparams in
       (* clo_wrap_define builds the wrapper's uniform-ptr ABI signature and the
          concrete forwarding call (boxing/unboxing Float params + return). *)
-      let param_tys = List.map llvm_ty ps_tirs in
+      let param_tys = List.map (llvm_ty ctx) ps_tirs in
       Buffer.add_string ctx.extra_fns
         (match wrap_kind with
          | `Declare -> Llvm_calls.clo_wrap_declare wrap_name param_tys
@@ -455,7 +455,7 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
       | Some t -> t
       | None   -> v.Tir.v_ty
     in
-    let ret_ty = llvm_ret_ty ret_tir in
+    let ret_ty = llvm_ret_ty ctx ret_tir in
     let r = fresh ctx "slotld" in
     emit ctx (Printf.sprintf "%s = call %s @%s()" r ret_ty (llvm_name v.Tir.v_name));
     (ret_ty, r)
@@ -532,13 +532,13 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
         | Some ps -> ps
         | None ->
           (match v.Tir.v_ty with
-           | Tir.TFn (ps, _) -> List.map llvm_ty ps
+           | Tir.TFn (ps, _) -> List.map (llvm_ty ctx) ps
            | _ -> [])
       in
       let target_ret =
         match builtin_ret_ty v.Tir.v_name with
-        | Some t -> llvm_ret_ty t
-        | None -> llvm_ret_ty (fn_ret_tir v.Tir.v_ty)
+        | Some t -> llvm_ret_ty ctx t
+        | None -> llvm_ret_ty ctx (fn_ret_tir v.Tir.v_ty)
       in
       Buffer.add_string ctx.extra_fns
         (match wrap_kind with
@@ -594,8 +594,8 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
         | `Skip -> ()
         | (`Define | `Declare) as wrap_kind ->
           let ret_tir     = fn_ret_tir v.Tir.v_ty in
-          let target_ret  = llvm_ret_ty ret_tir in
-          let param_tys   = List.map llvm_ty ps in
+          let target_ret  = llvm_ret_ty ctx ret_tir in
+          let param_tys   = List.map (llvm_ty ctx) ps in
           Buffer.add_string ctx.extra_fns
             (match wrap_kind with
              | `Declare -> Llvm_calls.clo_wrap_declare wrap_name param_tys
@@ -622,7 +622,7 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
          | Some (Tir.TVar _) | None -> Tir.TVar "_"
          | Some t -> t
        in
-       let ret_ty = llvm_ret_ty ret_tir in
+       let ret_ty = llvm_ret_ty ctx ret_tir in
        let r = fresh ctx "gl" in
        emit ctx (Printf.sprintf "%s = call %s @%s()" r ret_ty (llvm_name fname));
        (ret_ty, r))
@@ -637,7 +637,7 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
        variables with unresolved TVar types load with the correct type. *)
     let ty = match Hashtbl.find_opt ctx.var_llvm_ty slot with
       | Some t -> t
-      | None   -> llvm_ty v.Tir.v_ty
+      | None   -> llvm_ty ctx v.Tir.v_ty
     in
     let tmp = fresh ctx "ld" in
     emit ctx (Printf.sprintf "%s = load %s, ptr %%%s.addr" tmp ty slot);
@@ -789,7 +789,7 @@ let emit_vault_opt_reencode ctx (v : string) (ret_ty : Tir.ty) : string =
     let some_entry = ctor_entry ctx "Option.Some" 1 in
     let some_ptr = emit_heap_alloc ctx some_entry.Llvm_ctx.ce_tag 1 in
     let field_ty = match List.nth_opt some_entry.Llvm_ctx.ce_fields 0 with
-      | Some t -> llvm_field_ty t | None -> "ptr" in
+      | Some t -> llvm_field_ty ctx t | None -> "ptr" in
     emit_store_field ctx some_ptr 0 field_ty (coerce ctx "ptr" v field_ty);
     emit ctx (Printf.sprintf "store ptr %s, ptr %s" some_ptr slot);
     emit_term ctx (Printf.sprintf "br label %%%s" l_join);
@@ -975,7 +975,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          where e.g. an Int field loaded as i64 gets coerced to ptr. *)
       let slot_ty  = match v.Tir.v_ty with
         | Tir.TVar _ -> rhs_ty
-        | _ -> llvm_ty v.Tir.v_ty
+        | _ -> llvm_ty ctx v.Tir.v_ty
       in
       let final_val = coerce ctx rhs_ty rhs_val slot_ty in
       let slot = alloca_name ctx (llvm_name v.Tir.v_name) in
@@ -1047,7 +1047,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     emit_term ctx (Printf.sprintf "br label %%%s" ctx.mutual_tco_loop_label);
     (* 6. Open a dead continuation block for syntactic validity. *)
     emit_label ctx (fresh_block ctx "mutco_cont");
-    let dummy_ty = llvm_ret_ty ctx.ret_ty in
+    let dummy_ty = llvm_ret_ty ctx ctx.ret_ty in
     (match dummy_ty with
      | "double" -> ("double", "0x0000000000000000")
      | "void"   -> ("i64",    "0")
@@ -1087,7 +1087,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     emit_label ctx (fresh_block ctx "tco_cont");
     (* 5. Return a dummy value.  The caller may coerce / store it, but since
           we are in a dead block the value is never observed. *)
-    let dummy_ty = llvm_ret_ty ctx.ret_ty in
+    let dummy_ty = llvm_ret_ty ctx ctx.ret_ty in
     let dummy = match dummy_ty with
       | "double" -> ("double", "0x0000000000000000")
       | "void"   -> ("i64",    "0")
@@ -1861,7 +1861,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
         (match Hashtbl.find_opt ctx.top_fn_ret_ty sym with
          | Some t -> t | None -> fn_ret_tir f.Tir.v_ty)
       | [] -> fn_ret_tir f.Tir.v_ty in
-    let ret_ty = llvm_ret_ty ret_tir in
+    let ret_ty = llvm_ret_ty ctx ret_tir in
     (match Llvm_dispatch.ensure_dispatch_fn ctx ~fn_name:f.Tir.v_name
              ~param_tys ~ret_ty ~rows with
      | None ->
@@ -2322,10 +2322,11 @@ let emit_preamble = Llvm_toplevel.emit_preamble
 
 let emit_module ?fast_math ?pmap_threshold ?target ?hot_reload ?impl_hashes
     ?remote_impl_hashes ?remote_sig_hashes ?emit_main ?cap_attrib ?cap_decls
-    (m : Tir.tir_module) : string =
+    ?k_table (m : Tir.tir_module) : string =
   Llvm_toplevel.emit_module ~emit_expr
     ?fast_math ?pmap_threshold ?target ?hot_reload ?impl_hashes
-    ?remote_impl_hashes ?remote_sig_hashes ?emit_main ?cap_attrib ?cap_decls m
+    ?remote_impl_hashes ?remote_sig_hashes ?emit_main ?cap_attrib ?cap_decls
+    ?k_table m
 
 
 type repl_slot_info = Llvm_repl.repl_slot_info = {

@@ -505,12 +505,13 @@ let lower_module ~type_map ?(stdlib_context : March_ast.Ast.decl list = []) ?(re
      native build, and therefore needs a callee-side release. *)
   (* The REPL never unboxes aggregates: a fragment's result thunk is called as
      [void -> ptr] and its value printed by walking a heap cell, so a struct
-     returned in registers would be read as a pointer.  Forced off process-wide
-     (see [Repr.force_disable]) so no later registration can re-enable it for a
-     subsequent fragment. *)
-  March_tir.Repr.force_disable ();
-  let tir = March_tir.Perceus.perceus ~repl:true ~repl_vars tir in
-  let tir = March_tir.Escape.escape_analysis tir in
+     returned in registers would be read as a pointer.  One table with
+     unboxing off, handed to every pass this fragment runs (and matching the
+     [~repl:true] ctx the emitter builds), replaces the old process-wide
+     [force_disable] latch. *)
+  let k_table = March_tir.Kind.of_module ~unboxing:false tir in
+  let tir = March_tir.Perceus.perceus ~repl:true ~repl_vars ~k_table tir in
+  let tir = March_tir.Escape.escape_analysis ~k_table tir in
   tir
 
 (* ── Heap pretty-printer ───────────────────────────────────────────── *)
@@ -643,23 +644,26 @@ let rec qualify_ty ~type_defs (t : March_tir.Tir.ty) : March_tir.Tir.ty =
     a NON-generic Option-shaped type (no args) comes back [Boxed]; that is what
     [niche_repr_of_concrete] recovers, exactly as codegen's own decode sites do. *)
 let variant_repr ~type_defs (name : string) (args : March_tir.Tir.ty list)
-    : March_tir.Repr.repr =
+    : March_tir.Kind.repr =
   let defs = Hashtbl.fold (fun _ td acc -> td :: acc) type_defs [] in
-  match March_tir.Repr.repr_of_ty defs (March_tir.Tir.TCon (name, args)) with
-  | March_tir.Repr.Boxed when args = [] ->
-    (match March_tir.Repr.niche_repr_of_concrete defs name with
+  (* REPL: nothing is ever unboxed, so a shape-only table answers this. *)
+  let kt = March_tir.Kind.build ~unboxing:false
+      ~collision_set:(March_tir.Collision_set.compute defs) defs in
+  match March_tir.Kind.repr_of kt (March_tir.Tir.TCon (name, args)) with
+  | March_tir.Kind.Boxed when args = [] ->
+    (match March_tir.Kind.niche_repr_of_concrete kt name with
      | Some r -> r
-     | None -> March_tir.Repr.Boxed)
+     | None -> March_tir.Kind.Boxed)
   (* Abstract-arg niche path, mirroring [Llvm_case]'s [effective_repr]: a
      niche-shaped type applied to a still-abstract argument (e.g. a bare
      `Nothing2` whose element type never got resolved) is Boxed by
      [repr_of_ty] — [niche_payload_ok] is false for a TVar — but codegen
      emits Niche anyway, under the erased convention. *)
-  | March_tir.Repr.Boxed
+  | March_tir.Kind.Boxed
     when args <> []
       && List.exists (function March_tir.Tir.TVar _ -> true | _ -> false) args
-      && March_tir.Repr.is_niche_shaped defs name ->
-    March_tir.Repr.Niche { payload = March_tir.Tir.TVar "_"; tagged = false }
+      && March_tir.Kind.is_niche_shaped kt name ->
+    March_tir.Kind.Niche { payload = March_tir.Tir.TVar "_"; tagged = false }
   | r -> r
 
 (** Split an Option-shaped variant's ctors into (nullary name, single name). *)
@@ -722,27 +726,26 @@ let rec pp_heap_value ?(depth=0) ~type_defs ~ctor_tags (ty : March_tir.Tir.ty) (
   | TCon (name, args) when (match Hashtbl.find_opt type_defs name with
                             | Some (TDVariant _) -> true | _ -> false)
                         && (match variant_repr ~type_defs name args with
-                            (* [Repr.Unboxed] never reaches the REPL: the REPL
-                               registers the empty unboxed table (see
-                               [Repr.set_unboxed_types]), so its aggregates
+                            (* [Kind.Unboxed] never reaches the REPL: its table is
+                               built with [~unboxing:false], so its aggregates
                                stay Boxed heap cells.  Grouped with Boxed so
                                the printer stays correct if that changes. *)
-                            | March_tir.Repr.Boxed
-                            | March_tir.Repr.Unboxed _ -> false | _ -> true) ->
+                            | March_tir.Kind.Boxed
+                            | March_tir.Kind.Unboxed _ -> false | _ -> true) ->
     let ctors = match Hashtbl.find type_defs name with
       | TDVariant (_, cs) -> cs | _ -> [] in
     let bindings =
       try List.combine (collect_tvars (Hashtbl.find type_defs name)) args
       with Invalid_argument _ -> [] in
     (match variant_repr ~type_defs name args with
-     | March_tir.Repr.Niche { payload; tagged } ->
+     | March_tir.Kind.Niche { payload; tagged } ->
        (match niche_ctor_names ctors with
         | None -> Printf.sprintf "#<niche:%nd>" ptr
         | Some (nullary, single) ->
           if ptr = Nativeint.zero then nullary
           else Printf.sprintf "%s(%s)" single
                  (pp_word ~depth ~type_defs ~ctor_tags ~tagged (subst_ty bindings payload) ptr))
-     | March_tir.Repr.Newtype payload ->
+     | March_tir.Kind.Newtype payload ->
        (match ctors with
         | [ (ctor, [ declared ]) ] ->
           Printf.sprintf "%s(%s)" ctor
@@ -752,7 +755,7 @@ let rec pp_heap_value ?(depth=0) ~type_defs ~ctor_tags (ty : March_tir.Tir.ty) (
      (* Unreachable: the guard above already excluded Boxed and Unboxed.
         Rendered rather than asserted — a printer must never take the REPL
         down. *)
-     | March_tir.Repr.Boxed | March_tir.Repr.Unboxed _ ->
+     | March_tir.Kind.Boxed | March_tir.Kind.Unboxed _ ->
        Printf.sprintf "#<%s:%nd>" name ptr)
   | _ ->
   if ptr = Nativeint.zero then "#<null>"
@@ -892,7 +895,7 @@ let is_raw_word_ty ~type_defs (ty : March_tir.Tir.ty) =
     (match Hashtbl.find_opt type_defs name with
      | Some (March_tir.Tir.TDVariant _) ->
        (match variant_repr ~type_defs name args with
-        | March_tir.Repr.Boxed -> false
+        | March_tir.Kind.Boxed -> false
         | _ -> true)
      | _ -> false)
   | _ -> false
@@ -1133,11 +1136,14 @@ let run_program ctx ~tc_env (m : March_ast.Ast.module_) : unit =
   let ir = March_tir.Llvm_emit.emit_fns_fragment
       ~types:all_types ~fns:new_fns ~extern_fns ~session_wraps:sw ~repl:true () in
   let mangled = March_tir.Llvm_emit.mangle_extern jit_main in
-  let ret_ty = March_tir.Llvm_ctx.llvm_ret_ty main_fn.March_tir.Tir.fn_ret_ty in
+  (* No ctx here; the REPL never unboxes, so the empty table's spelling is
+     exactly the REPL ctx's. *)
+  let ret_ty = match main_fn.March_tir.Tir.fn_ret_ty with
+    | March_tir.Tir.TUnit -> "void" | t -> March_tir.Kind.llvm_ty_of March_tir.Kind.empty t in
   let erased_args =
     String.concat ", "
       (List.map (fun (v : March_tir.Tir.var) ->
-           let ty = March_tir.Llvm_ctx.llvm_ty v.March_tir.Tir.v_ty in
+           let ty = March_tir.Kind.llvm_ty_of March_tir.Kind.empty v.March_tir.Tir.v_ty in
            (* Capability parameters are pointer-shaped; keep the fallback
               honest for any non-ptr parameter rather than emitting `null`
               against an integer type (an LLVM verifier error). *)

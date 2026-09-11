@@ -193,7 +193,7 @@ let emit_int_cmp ~emit_atom ctx (f : Tir.var) (a : Tir.atom) (b : Tir.atom)
       let av = coerce ctx ty_a va sty and bv = coerce ctx ty_b vb sty in
       let acc = ref "true" in
       List.iteri (fun i fty_tir ->
-          let fty = Llvm_ctx.llvm_ty fty_tir in
+          let fty = Llvm_ctx.llvm_ty ctx fty_tir in
           let fa = fresh ctx "ubea" and fb = fresh ctx "ubeb" in
           emit ctx (Printf.sprintf "%s = extractvalue %s %s, %d" fa sty av i);
           emit ctx (Printf.sprintf "%s = extractvalue %s %s, %d" fb sty bv i);

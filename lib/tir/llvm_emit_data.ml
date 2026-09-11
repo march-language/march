@@ -168,8 +168,8 @@ let emit_field ~emit_atom ctx (obj_atom : Tir.atom) (field_name : string)
     if Tir_names.is_fv_field field_name then begin
       let i = Tir_names.fv_field_index field_name in
       let (_, obj_val) = emit_atom ctx obj_atom in
-      let fv = emit_load_field ctx obj_val i (llvm_ty (Tir.TPtr Tir.TUnit)) in
-      (llvm_ty (Tir.TPtr Tir.TUnit), fv)
+      let fv = emit_load_field ctx obj_val i (llvm_ty ctx (Tir.TPtr Tir.TUnit)) in
+      (llvm_ty ctx (Tir.TPtr Tir.TUnit), fv)
     end else begin
       match get_record_fields ctx obj_ty with
       | [] when ctx.shape_meta ->
@@ -212,11 +212,11 @@ let emit_field ~emit_atom ctx (obj_atom : Tir.atom) (field_name : string)
            ("ptr", res)
          | _ ->
            let (_, obj_val) = emit_atom ctx obj_atom in
-           let sty = Llvm_ctx.llvm_field_ty field_ty in
+           let sty = Llvm_ctx.llvm_field_ty ctx field_ty in
            let fv = emit_load_field ctx obj_val idx sty in
            (* Boxed in the slot, struct in a register: hand the caller the
               value type its [Tir.ty] promises. *)
-           (llvm_ty field_ty, coerce ctx sty fv (llvm_ty field_ty)))
+           (llvm_ty ctx field_ty, coerce ctx sty fv (llvm_ty ctx field_ty)))
     end
 
 (** Body of the [EUpdate] arm (record update). *)
@@ -292,7 +292,7 @@ let emit_update ~emit_atom ctx (base_atom : Tir.atom)
     List.iteri (fun i (_, fty) ->
       (* Slot-to-slot copy: read and write at the SLOT type, never the value
          type, so an unboxed aggregate's box is copied as the pointer it is. *)
-      let sty = Llvm_ctx.llvm_field_ty fty in
+      let sty = Llvm_ctx.llvm_field_ty ctx fty in
       let fv = emit_load_field ctx base_val i sty in
       (* ...and inc each copied HEAP reference, since the base keeps its own
          (an update borrows the base, it does not consume it) and the new cell

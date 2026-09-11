@@ -261,7 +261,7 @@ let tarjan_sccs (fns : Tir.fn_def list) : string list list =
     2. No function in the group makes a non-tail call to any other group member.
     3. All functions in the group have the same LLVM return type (required for
        the shared loop to produce one result type). *)
-let find_mutual_tco_groups (fns : Tir.fn_def list) : Tir.fn_def list list =
+let find_mutual_tco_groups (ctx : Llvm_ctx.ctx) (fns : Tir.fn_def list) : Tir.fn_def list list =
   let fn_map = List.map (fun fn -> (fn.Tir.fn_name, fn)) fns in
   let sccs = tarjan_sccs fns in
   List.filter_map (fun scc ->
@@ -277,7 +277,7 @@ let find_mutual_tco_groups (fns : Tir.fn_def list) : Tir.fn_def list list =
         ) group_fns
       in
       (* All functions must have the same LLVM return type *)
-      let ret_tys = List.map (fun fn -> Llvm_ctx.llvm_ret_ty fn.Tir.fn_ret_ty) group_fns in
+      let ret_tys = List.map (fun fn -> Llvm_ctx.llvm_ret_ty ctx fn.Tir.fn_ret_ty) group_fns in
       let all_same_ret = match ret_tys with
         | [] | [_] -> true
         | h :: t   -> List.for_all (String.equal h) t
@@ -370,7 +370,7 @@ let emit_mutual_tco_group ~emit_expr ctx (group : Tir.fn_def list) =
   Hashtbl.clear ctx.Llvm_ctx.var_llvm_ty;
   let group_names = List.map (fun fn -> fn.Tir.fn_name) group in
   let combined    = mutual_tco_combined_name group in
-  let ret_ty      = Llvm_ctx.llvm_ret_ty (List.hd group).Tir.fn_ret_ty in
+  let ret_ty      = Llvm_ctx.llvm_ret_ty ctx (List.hd group).Tir.fn_ret_ty in
 
   (* Assign integer dispatch tags in list order. *)
   let fn_tags = List.mapi (fun i fn -> (fn.Tir.fn_name, i)) group in
@@ -409,7 +409,7 @@ let emit_mutual_tco_group ~emit_expr ctx (group : Tir.fn_def list) =
   (* Alloca each parameter slot and store the incoming arg.
 
      SIMD note: a vector-typed parameter threaded through a MUTUAL-recursion
-     group keeps its uniform boxed `ptr` slot here (llvm_ty of the vector
+     group keeps its uniform boxed `ptr` slot here (llvm_ty ctx of the vector
      type), unlike emit_fn's self-TCO path which promotes it to a raw
      <N x T> register slot. That is correct, just unaccelerated: the group
      boxes/unboxes the vector on every call, exactly as it did before the
@@ -433,7 +433,7 @@ let emit_mutual_tco_group ~emit_expr ctx (group : Tir.fn_def list) =
     List.map (fun fn ->
       let slots = List.map (fun (v : Tir.var) ->
         let base = Llvm_ctx.llvm_name fn.Tir.fn_name ^ "__" ^ Llvm_ctx.llvm_name v.Tir.v_name in
-        let ty   = Llvm_ctx.llvm_ty v.Tir.v_ty in
+        let ty   = Llvm_ctx.llvm_ty ctx v.Tir.v_ty in
         Llvm_ctx.emit ctx (Printf.sprintf "%%%s.addr = alloca %s" base ty);
         Llvm_ctx.emit ctx (Printf.sprintf "store %s %%%s.arg, ptr %%%s.addr" ty base base);
         Hashtbl.replace ctx.Llvm_ctx.var_llvm_ty base ty;
@@ -563,7 +563,7 @@ let emit_mutual_tco_group ~emit_expr ctx (group : Tir.fn_def list) =
       (if all_params = [] then ""
        else ", " ^ String.concat ", "
          (List.map (fun (owner_fn, (v : Tir.var), base) ->
-           let ty = Llvm_ctx.llvm_ty v.Tir.v_ty in
+           let ty = Llvm_ctx.llvm_ty ctx v.Tir.v_ty in
            if String.equal owner_fn fn.Tir.fn_name then
              Printf.sprintf "%s %%%s.arg" ty (Llvm_ctx.llvm_name v.Tir.v_name)
            else

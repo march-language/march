@@ -293,7 +293,7 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
                          aggregate (arity mismatch — malformed TIR)"
                         i (List.length fields))
           | Some fty_tir ->
-            let fty = Llvm_ctx.llvm_ty fty_tir in
+            let fty = Llvm_ctx.llvm_ty ctx fty_tir in
             let fv = Llvm_ctx.fresh ctx "ubget" in
             Llvm_ctx.emit ctx
               (Printf.sprintf "%s = extractvalue %s %s, %d" fv sty sv i);
@@ -932,7 +932,7 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
          below to decide which fields are genuine heap pointers (for IncRC). *)
       List.iteri (fun i (v : Tir.var) ->
         let field_ty = match List.nth_opt entry.Llvm_ctx.ce_fields i with
-          | Some t -> Llvm_ctx.llvm_field_ty t | None -> Llvm_ctx.llvm_ty v.Tir.v_ty in
+          | Some t -> Llvm_ctx.llvm_field_ty ctx t | None -> Llvm_ctx.llvm_ty ctx v.Tir.v_ty in
         let fv = Llvm_data.emit_load_field ctx scrut_val i field_ty in
         (* Concrete field type, with the scrutinee's type arguments resolved.
            Use it (not [field_ty]) to decide which fields are genuine heap
@@ -945,7 +945,7 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
            concrete ctor_info key) so using both as a conjunction prevents
            false positives. *)
         let concrete_field_ty = match List.nth_opt concrete_fields i with
-          | Some t -> Llvm_ctx.llvm_ty t | None -> field_ty in
+          | Some t -> Llvm_ctx.llvm_ty ctx t | None -> field_ty in
         (* A FLOAT IN AN ERASED SLOT.  The ctor's declared field is generic
            (ce_fields says "ptr") but the scrutinee instantiates it at Float,
            so what the slot physically holds is a march_alloc_float BOX, not

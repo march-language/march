@@ -106,9 +106,9 @@ type ctx = {
   fast_math : bool;
   pmap_threshold : int;  (* --pmap-threshold: List.pmap sequential-fallback cutoff *)
   (* The full type_def table for the module/fragment currently being emitted.
-     Consulted by EAlloc, EReuse, emit_case, and ensure_adt_eq_fn (via
-     Repr.is_niche_shaped / niche_payload_ok / repr_of_ty / payload_needs_tag)
-     to decide niche/newtype/boxed representation. Populated at ctx
+     Consulted by EAlloc, EReuse, emit_case, and ensure_adt_eq_fn (through
+     [k_table]: Kind.is_niche_shaped / niche_payload_ok / repr_of / payload_needs_tag)
+     to decide niche/newtype/boxed/unboxed representation. Populated at ctx
      construction (make_ctx) from the `types` parameter every entry point
      (emit_module, emit_repl_expr, emit_repl_decl, emit_repl_fn,
      emit_repl_fn_with_closure_slot, emit_fns_fragment) already receives.
@@ -312,28 +312,30 @@ let unboxed_field_llvm_ty : Tir.ty -> string = function
   | other ->
     failwith (Printf.sprintf
                 "LLVM emit: unboxed aggregate has non-scalar field type %s \
-                 (Repr.set_unboxed_types should have rejected the type)"
+                 (Kind.build should have rejected the type)"
                 (Tir.show_ty other))
 
 let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
     ?(hot_reload=None) ?(hr_names=Hot_reload.Name_table.build [])
-    ?(type_defs=[]) () =
+    ?(type_defs=[]) ?(k_table : Kind.table option) () =
   let collision_set = Collision_set.compute type_defs in
-  (* Milestone 3: decide the unboxed-aggregate set for THIS module before any
-     emission reads [llvm_ty].  Doing it here rather than only in
-     [Contract_pipeline.run] is what covers the REPL and the JIT, which build a
-     ctx directly; the derivation is a pure function of [type_defs] so the two
-     registrations agree by construction. *)
-  if repl then begin
-    Repr.force_disable ();
-    Repr.set_unboxed_types ~collision_set ~enabled:false type_defs
-  end else Repr.ensure_unboxed_types ~collision_set type_defs;
+  (* The per-type table (specs/2026-09-10-type-kinds-design.md).  The
+     compiler driver passes the one the pipeline's passes reasoned against;
+     a caller that builds a ctx directly (the REPL, the JIT, tests) gets a
+     derivation from its own [type_defs].  The REPL never unboxes: a
+     fragment's result thunk is called as [void -> ptr] and its value printed
+     by walking a heap cell, so a struct returned in registers would be read
+     as a pointer — that is [~unboxing:(not repl)], a per-table argument
+     rather than the process-wide latch it replaces. *)
+  let k_table = match k_table with
+    | Some t -> t
+    | None -> Kind.build ~unboxing:(not repl) ~collision_set type_defs in
   let preamble = Buffer.create 1024 in
   List.iter (fun (_tname, lname, fields) ->
       Buffer.add_string preamble
         (Printf.sprintf "%s = type { %s }\n" lname
            (String.concat ", " (List.map unboxed_field_llvm_ty fields))))
-    (Repr.unboxed_types ());
+    (Kind.unboxed_types k_table);
   {
   buf      = Buffer.create 4096;
   preamble;
@@ -351,7 +353,7 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   pmap_threshold;
   type_defs;
   collision_set;
-  k_table = Repr.table_for ~collision_set type_defs;
+  k_table;
   var_slot    = Hashtbl.create 32;
   local_names = Hashtbl.create 32;
   poly_ctors  = Hashtbl.create 64;
@@ -480,50 +482,20 @@ let atom_hash (name : string) : int64 =
 
 (* ── Type mapping ─────────────────────────────────────────────────────── *)
 
-let llvm_ty : Tir.ty -> string = function
-  | Tir.TInt    -> "i64"
-  | Tir.TFloat  -> "double"
-  | Tir.TBool   -> "i64"   (* booleans as i64 for uniform field layout *)
-  | Tir.TUnit   -> "i64"   (* unit = i64 0 *)
-  | Tir.TString -> "ptr"
-  | Tir.TCon ("Atom", []) -> "i64"  (* atoms are interned i64 hashes, not heap ptrs *)
-  (* Milestone 3: a small scalar-only single-ctor variant is an LLVM struct
-     VALUE — [{ double, double, double }] for [Vec3(Float, Float, Float)] —
-     passed and returned in registers, never a cell.  The identified struct
-     type is declared once per module by [Llvm_toplevel.emit_module]; the
-     registry it is read from is [Repr]'s, the same one [Llvm_emit_alloc],
-     [Llvm_case] and [Rc_types] read, so this mapping can never disagree with
-     the construction, destructuring or RC treatment of the same type. *)
-  | Tir.TCon (name, _) when Repr.unboxed_of_type_name name <> None ->
-    Repr.unboxed_llvm_name name
-  | Tir.TCon _  -> "ptr"
-  | Tir.TTuple _ -> "ptr"
-  | Tir.TRecord _ -> "ptr"
-  | Tir.TFn _   -> "ptr"
-  | Tir.TPtr _  -> "ptr"
-  | Tir.TVar _  -> "ptr"   (* pre-mono fallback *)
+(** LLVM type spelling for a TIR type — the kind table's answer.  Takes the
+    ctx (for its [k_table]); there is no table-free spelling any more,
+    which is the point of the type-kinds refactor. *)
+let llvm_ty (ctx : ctx) (ty : Tir.ty) : string = Kind.llvm_ty_of ctx.k_table ty
 
-(** LLVM type for a HEAP-CELL SLOT holding a value of type [ty].
-
-    Every March heap cell — variant, record, tuple, closure struct — lays its
-    fields out as 8-byte slots at [16 + i*8] ([alloc_size]).  An unboxed
-    aggregate's value type is WIDER than a slot ([{double,double,double}] is
-    24 bytes), so storing one at a slot type would write over the following
-    fields: use ["ptr"] and let [coerce] box it, exactly as a [Float] crossing
-    into an erased slot is boxed.
-
-    Use this — never [llvm_ty] — for any type that names a field of a heap
-    cell ([ce_fields], record fields, tuple elements).  [llvm_ty] is for a
-    value in a register, a parameter, a return type or a local alloca.
-    [Llvm_data.emit_store_field]/[emit_load_field] fail loudly on a struct
-    slot type, so a site that forgets is a build error, not silent
-    corruption. *)
-let llvm_field_ty (ty : Tir.ty) : string =
+(** LLVM type of a value stored in a heap-cell FIELD (8-byte slot).  An
+    unboxed aggregate is a struct value wider than a slot, so it is boxed
+    into the slot — ["ptr"] here, not its struct type. *)
+let llvm_field_ty (ctx : ctx) (ty : Tir.ty) : string =
   match ty with
-  | Tir.TCon (name, _) when Repr.unboxed_of_type_name name <> None -> "ptr"
-  | _ -> llvm_ty ty
+  | Tir.TCon (name, _) when Kind.unboxed_of_type_name ctx.k_table name <> None -> "ptr"
+  | _ -> llvm_ty ctx ty
 
-(* llvm_ret_ty moved here (Wave 3 Task 6, chunk 2): a pure ctx-independent
+(* llvm_ret_ty ctx moved here (Wave 3 Task 6, chunk 2): a pure ctx-independent
    wrapper around [llvm_ty] (Unit -> "void", else llvm_ty) with no home
    outside this file's already-depended-on base once [Llvm_calls] and
    [Llvm_tco] (both split out of [llvm_emit.ml] in that task) needed it too —
@@ -531,15 +503,9 @@ let llvm_field_ty (ty : Tir.ty) : string =
    moves ("pure primitive, real non-[llvm_emit.ml] consumer exists").
    Re-exported bare in [llvm_emit.ml], which still calls it unqualified at
    ~20 sites in [emit_expr]/[emit_fn]. *)
-(** Table-taking form of [llvm_ty]: the one spelling, read from the kind
-    table.  New code and migrated call sites use this; [llvm_ty] above is
-    the transitional free function that reads the process-global registry
-    and goes away with Phase 3 of the type-kinds plan. *)
-let lty (ctx : ctx) (ty : Tir.ty) : string = Kind.llvm_ty_of ctx.k_table ty
-
-let llvm_ret_ty : Tir.ty -> string = function
+let llvm_ret_ty (ctx : ctx) : Tir.ty -> string = function
   | Tir.TUnit -> "void"
-  | t -> llvm_ty t
+  | t -> llvm_ty ctx t
 
 (** LLVM type string for a function *parameter*, augmented with alias-analysis
     attributes for pointer types.
@@ -551,13 +517,11 @@ let llvm_ret_ty : Tir.ty -> string = function
     EXCEPTION: niche-encoded Option-shaped types can carry None=0 (null), so
     [nonnull] and [dereferenceable] must be suppressed for them. *)
 let llvm_param_ty ?(k_table : Kind.table option) (ty : Tir.ty) : string =
-  (* [None] reproduces the historical call with no type list: the
-     registered unboxed set, but NO shape information, so no niche
-     exemption.  One caller ([Llvm_toplevel], the apply-fn prototype)
-     still relies on it; see the type-kinds plan's Phase-2 audit. *)
-  let t = match k_table with
-    | Some t -> t
-    | None -> Repr.table_for ~collision_set:Repr.no_collisions [] in
+  (* [None]: no shapes and nothing unboxed.  The one caller without a
+     table is [Llvm_toplevel.fn_declare_str], the JIT-fragment forward
+     `declare` helper, and the JIT never unboxes; see its comment for why
+     the missing niche exemption there is a safe attribute omission. *)
+  let t = match k_table with Some t -> t | None -> Kind.empty in
   match ty with
   | Tir.TCon ("Atom", []) -> "i64"
   (* Unboxed aggregate: a struct value, so none of the pointer alias
@@ -567,7 +531,7 @@ let llvm_param_ty ?(k_table : Kind.table option) (ty : Tir.ty) : string =
   | Tir.TString | Tir.TCon _ | Tir.TTuple _ | Tir.TRecord _ | Tir.TFn _
   | Tir.TPtr _ | Tir.TVar _ ->
     "ptr nonnull dereferenceable(16)"
-  | other -> llvm_ty other
+  | other -> Kind.llvm_ty_of t other
 
 (* ── Object layout constants ──────────────────────────────────────────── *)
 
@@ -770,7 +734,7 @@ let coerce ctx from_ty v to_ty =
        emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 8" tp box);
        emit ctx (Printf.sprintf "store i32 %d, ptr %s, align 4" tag tp);
        List.iteri (fun i fty ->
-           let l = llvm_ty fty in
+           let l = llvm_ty ctx fty in
            let fv = fresh ctx "ubf" in
            emit ctx (Printf.sprintf "%s = extractvalue %s %s, %d" fv sty v i);
            let fp = fresh ctx "ubfp" in
@@ -787,7 +751,7 @@ let coerce ctx from_ty v to_ty =
      | Some (_tname, _ctor, fields) ->
        let acc = ref "poison" in
        List.iteri (fun i fty ->
-           let l = llvm_ty fty in
+           let l = llvm_ty ctx fty in
            let fp = fresh ctx "ubfp" in
            emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %d" fp v (16 + i * 8));
            let fv = fresh ctx "ubf" in
