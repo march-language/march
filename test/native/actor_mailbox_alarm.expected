@@ -1,0 +1,9 @@
+top(2) length: 2
+top(2) deepest first: true
+top(10) covers all: 3
+over(-1) is everyone: 3
+over(1000000) is empty: true
+over(10) at most one: true
+over(10) depths all > 10: true
+drained top(1): 1
+drained over(0): 0

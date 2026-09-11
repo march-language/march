@@ -1,0 +1,7 @@
+march: supervisor backoff child=1 streak=1 delay_ms=0
+march: supervisor backoff child=0 streak=1 delay_ms=0 (batch restart already pending, skipped)
+lo restarted: true
+hi restarted: true
+lo alive: true
+hi alive: true
+old lo dead: true

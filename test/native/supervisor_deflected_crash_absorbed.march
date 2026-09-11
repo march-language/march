@@ -1,0 +1,87 @@
+-- The supervisor restart-race class, forced by construction.
+-- specs/todos/2026-08-17-supervision-race-test-seam.md (option 2).
+--
+-- Two children of a rest_for_one supervisor crash on two different OS
+-- threads at "the same time". The first crash (main kills `hi`, index 1)
+-- claims the synchronous batch-restart marker and then -- under
+-- MARCH_SUP_TEST_STALL_MS, which the dune rule sets -- stalls before running
+-- the strategy. The second crash (a Killer actor, on a scheduler worker,
+-- kills `lo`, index 0) lands inside that window and is DEFLECTED: it must
+-- not start a competing restart, so it only widens the pending window and
+-- counts a drop. rest_for_one's first pass restarts [1, n), which does NOT
+-- cover `lo`; the absorb loop sees the drop count moved and runs a second
+-- pass from index 0. Without the absorb loop (commit a31ca9fb's fix), `lo`
+-- stays dead forever and nothing will ever crash that slot again to trigger
+-- a restart -- that is the bug, and the RED shape of this test.
+--
+-- The MARCH_SUP_TRACE line "(batch restart already pending, skipped)" is
+-- captured into the golden on purpose: it is the proof the deflection
+-- actually happened. On a one-worker scheduler it would not, and this test
+-- would then be asserting nothing -- so it fails there rather than passing
+-- vacuously.
+mod SupervisorDeflectedCrashAbsorbed do
+  needs IO.Console
+
+  actor Worker do
+    state { count : Int }
+    init  { count: 0 }
+
+    on Work() do
+      { count: state.count + 1 }
+    end
+  end
+
+  actor Sup do
+    state { lo : Int, hi : Int }
+    init  { lo: 0, hi: 0 }
+
+    supervise do
+      strategy rest_for_one
+      max_restarts 10 within 60
+      Worker lo
+      Worker hi
+    end
+  end
+
+  -- Runs on a scheduler worker, so its kill() -- and the supervisor
+  -- notification that kill performs synchronously -- happen on a different
+  -- OS thread from main's.
+  actor Killer do
+    state { done : Int }
+    init  { done: 0 }
+
+    on Go(target) do
+      kill(pid_of_int(target))
+      { done: 1 }
+    end
+  end
+
+  fn child_int(sup, field) do
+    match get_actor_field(sup, field) do
+    None    -> -1
+    Some(n) -> n
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    let sup = spawn(Sup)
+    let killer = spawn(Killer)
+    let lo1 = child_int(sup, "lo")
+    let hi1 = child_int(sup, "hi")
+
+    -- Order matters: the Killer's crash of `lo` must arrive while main is
+    -- stalled inside `hi`'s restart, so queue it first and crash `hi` next.
+    send(killer, Go(lo1))
+    kill(pid_of_int(hi1))
+
+    -- kill() returns only once the synchronous restart -- both passes --
+    -- has completed, so everything below reads settled state.
+    let lo2 = child_int(sup, "lo")
+    let hi2 = child_int(sup, "hi")
+    println("lo restarted: " ++ bool_to_string(lo2 != lo1))
+    println("hi restarted: " ++ bool_to_string(hi2 != hi1))
+    println("lo alive: " ++ bool_to_string(is_alive(pid_of_int(lo2))))
+    println("hi alive: " ++ bool_to_string(is_alive(pid_of_int(hi2))))
+    println("old lo dead: " ++ bool_to_string(!is_alive(pid_of_int(lo1))))
+  end
+end
