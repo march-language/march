@@ -315,7 +315,7 @@ let rec has_matching_alloc (base_type : string) (e : Tir.expr) : bool =
     here would mean re-deriving and parsing the uid back out of the type
     name, which is exactly the kind of fragile re-derivation this task
     exists to eliminate, not add. Left unconverted; see the task report. *)
-let is_closure_ty : Tir.ty -> bool = function
+let is_clo_struct_ty : Tir.ty -> bool = function
   | Tir.TCon (n, _) -> Tir_names.is_clo_struct n
   | _ -> false
 
@@ -449,7 +449,7 @@ let rec owned_in (name : string) (bm : borrow_map) (e : Tir.expr) : bool =
      a use-after-free (Depot Transaction.run/tx_begin → Migration.run →
      Db.close(conn)). *)
   | Tir.ELet (v, Tir.EAlloc (ty, args), e2)
-    when is_closure_ty ty
+    when is_clo_struct_ty ty
          && List.exists (atom_is name) args
          && not (String.equal v.Tir.v_name name)
          && not (closure_escapes v.Tir.v_name e2) ->
