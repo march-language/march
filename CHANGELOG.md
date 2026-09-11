@@ -11,8 +11,26 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- **`Actor.top_by_mailbox(n)` and `Actor.over_mailbox(threshold)`**: the
+  "which actor is behind?" question, as `(pid, depth)` pairs — the `n` deepest
+  mailboxes deepest-first, and every actor over a threshold (the growing-mailbox
+  alarm, polled). Both are snapshots built on `Actor.list()`.
+- **Stash / become** is now a documented idiom (`docs/actors.md`, "Stash and
+  Become") with a worked multi-step protocol: a `mode` field plus a stash list
+  in actor state cover what selective receive is used for, no runtime support
+  needed.
+- **`MARCH_SUP_TEST_STALL_MS`**, a test seam that lets the runtime's own suite
+  force the supervisor restart race by construction. Unset in production; does
+  nothing when unset.
+
 ### Fixed
 
+- **`Vault.new(name)` on an already-registered name returned a fresh, empty
+  table in the interpreter** but the existing table compiled, silently
+  orphaning the first table's data when run interpreted. Both backends now
+  return the same table (ETS semantics).
 - Compiled `to_string` and `~H` interpolation of a value whose type is
   erased at the render site (a value reaching a closure stored in a
   container, a generic `List(a)` field holding user ADTs, a polymorphic

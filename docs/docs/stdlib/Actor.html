@@ -158,12 +158,14 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Actor.html#fn-cast"><span class="sb-kind" style="color:var(--fn)">F</span>cast</a>
 <a class="sl" href="Actor.html#fn-is_draining"><span class="sb-kind" style="color:var(--fn)">F</span>is_draining</a>
 <a class="sl" href="Actor.html#fn-list"><span class="sb-kind" style="color:var(--fn)">F</span>list</a>
+<a class="sl" href="Actor.html#fn-over_mailbox"><span class="sb-kind" style="color:var(--fn)">F</span>over_mailbox</a>
 <a class="sl" href="Actor.html#fn-register"><span class="sb-kind" style="color:var(--fn)">F</span>register</a>
 <a class="sl" href="Actor.html#fn-registered"><span class="sb-kind" style="color:var(--fn)">F</span>registered</a>
 <a class="sl" href="Actor.html#fn-reply"><span class="sb-kind" style="color:var(--fn)">F</span>reply</a>
 <a class="sl" href="Actor.html#fn-send_after"><span class="sb-kind" style="color:var(--fn)">F</span>send_after</a>
 <a class="sl" href="Actor.html#fn-set_queue_limit"><span class="sb-kind" style="color:var(--fn)">F</span>set_queue_limit</a>
 <a class="sl" href="Actor.html#fn-stop"><span class="sb-kind" style="color:var(--fn)">F</span>stop</a>
+<a class="sl" href="Actor.html#fn-top_by_mailbox"><span class="sb-kind" style="color:var(--fn)">F</span>top_by_mailbox</a>
 <a class="sl" href="Actor.html#fn-unregister"><span class="sb-kind" style="color:var(--fn)">F</span>unregister</a>
 <a class="sl" href="Actor.html#fn-whereis"><span class="sb-kind" style="color:var(--fn)">F</span>whereis</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="AhoCorasick.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="AhoCorasick.html">AhoCorasick</a></div><div class="sb-sub"><a class="sl" href="AhoCorasick.html#type-AcNode"><span class="sb-kind" style="color:var(--ty)">T</span>AcNode</a>
@@ -2402,6 +2404,11 @@ every consumer handles a dead one.
 
 Ordered by spawn sequence, so the list is deterministic rather than ordered
 by heap address.</code></pre></div></div>
+<div class="item" id="fn-over_mailbox"><div class="ih"><span class="badge bfn">fn</span><span class="name">over_mailbox</span><span class="sig">over_mailbox(threshold : Int) : List((<a href="GlobalPid.html#type-Pid">Pid</a>, Int))</span><a class="anchor-link" href="#fn-over_mailbox" title="Link">#</a></div><div class="ib"><p>Every actor whose mailbox is deeper than <code>threshold</code>, as <code>(pid, depth)</code> pairs in spawn order — the growing-mailbox alarm, polled. An empty result is the healthy case, so a monitor can be <code>if Actor.over_mailbox(500) != Nil</code>.</p><pre><code>    List.each(Actor.over_mailbox(500), fn hot -&gt;
+      match hot do (p, d) -&gt; log_slow_actor(p, d) end)
+
+Same snapshot caveats as `top_by_mailbox`. A threshold below zero returns
+every live actor.</code></pre></div></div>
 <div class="item" id="fn-register"><div class="ih"><span class="badge bfn">fn</span><span class="name">register</span><span class="sig">register(pid, name)</span><a class="anchor-link" href="#fn-register" title="Link">#</a></div><div class="ib"><p>Register <code>pid</code> under <code>name</code>, so holders can re-resolve it after a restart. Returns false if the name is already held by a LIVE actor, or if <code>pid</code> is dead. A registered actor's name is carried forward across supervisor restarts, so callers should hold the name, not the Pid.</p></div></div>
 <div class="item" id="fn-registered"><div class="ih"><span class="badge bfn">fn</span><span class="name">registered</span><span class="sig">registered()</span><a class="anchor-link" href="#fn-registered" title="Link">#</a></div><div class="ib"><p>Every currently-registered name.</p></div></div>
 <div class="item" id="fn-reply"><div class="ih"><span class="badge bfn">fn</span><span class="name">reply</span><span class="sig">reply(ref_id, result)</span><a class="anchor-link" href="#fn-reply" title="Link">#</a></div><div class="ib"><p>Reply to a synchronous call from within an actor handler. ref_id is the reply channel — the handler's first argument, injected by Actor.call. result is the value to return to the caller.</p></div></div>
@@ -2433,6 +2440,15 @@ discards the queue as soon as the in-flight message returns.
 Stopping a supervisor stops its children first, in REVERSE declaration
 order, each with its own `shutdown` budget from the `supervise` block's
 child spec (`Worker w shutdown 5000`), defaulting to 5 seconds.</code></pre></div></div>
+<div class="item" id="fn-top_by_mailbox"><div class="ih"><span class="badge bfn">fn</span><span class="name">top_by_mailbox</span><span class="sig">top_by_mailbox(n : Int) : List((<a href="GlobalPid.html#type-Pid">Pid</a>, Int))</span><a class="anchor-link" href="#fn-top_by_mailbox" title="Link">#</a></div><div class="ib"><p>The <code>n</code> deepest mailboxes right now, deepest first, as <code>(pid, depth)</code> pairs. This is the &quot;which actor is behind?&quot; question a monitoring loop actually asks; <code>Scheduler</code> counters only answer &quot;is the system behind?&quot;.</p><pre><code>    match Actor.top_by_mailbox(1) do
+      Cons((hot, depth), _) -&gt; shed_from(hot, depth)
+      Nil                   -&gt; ()
+    end
+
+A snapshot: it walks `Actor.list()` and asks `mailbox_size` of each, so an
+actor can die or drain between the walk and your reaction. Ties keep spawn
+order. Cost is one pass over every live actor plus a sort, so call it from a
+timer, not from a hot path.</code></pre></div></div>
 <div class="item" id="fn-unregister"><div class="ih"><span class="badge bfn">fn</span><span class="name">unregister</span><span class="sig">unregister(name)</span><a class="anchor-link" href="#fn-unregister" title="Link">#</a></div><div class="ib"><p>Remove a name. Returns false if it was not registered.</p></div></div>
 <div class="item" id="fn-whereis"><div class="ih"><span class="badge bfn">fn</span><span class="name">whereis</span><span class="sig">whereis(name)</span><a class="anchor-link" href="#fn-whereis" title="Link">#</a></div><div class="ib"><p>Resolve a name to the actor currently holding it. Returns None if the name is unregistered, or if its actor has died — including the window while a supervised actor is waiting out its restart backoff, which is the honest signal that the service is mid-restart.</p></div></div></main></div><script>
 /* Theme toggle */

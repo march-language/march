@@ -8,13 +8,15 @@
 
 ## What remains
 
-- **A growing-mailbox alarm.** BEAM's `erlang:system_monitor` has a
+> **Polled alarm landed 2026-09-10** — `Actor.top_by_mailbox(n)` and
+> `Actor.over_mailbox(threshold)` (stdlib, on top of `Actor.list()`); see
+> `specs/progress/2026-09-10-mailbox-alarm-polled.md`.
+
+- **A push-style growing-mailbox alarm.** BEAM's `erlang:system_monitor` has a
   `long_message_queue` trigger that tells you *when* a process crosses a
-  threshold. Ours must still be polled. Enumeration makes polling possible, so
-  the loop is no longer broken — but a threshold callback is strictly better
-  than a timer, and it is the shape `Scheduler.top_by_mailbox(n)` (see the
-  sketch below) was suggested for: doing the walk inside the runtime and
-  returning only the worst N, rather than materialising every actor.
+  threshold. Ours is polled (`Actor.over_mailbox`); a threshold callback fired
+  from the send path when a mailbox crosses a limit would remove the timer.
+  Watch the lock discipline: it must not re-serialise the lock-free send path.
 - **Per-actor state inspection.** No equivalent of `sys:get_state/1`.
   `get_actor_field` exists but needs a Pid and a field index.
 - **Tracing.** No `erlang:trace` equivalent — no way to watch one actor's

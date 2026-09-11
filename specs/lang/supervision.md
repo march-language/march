@@ -233,6 +233,13 @@ Set `MARCH_SUP_TRACE=1` to print each restart decision to stderr:
 ` (batch restart already pending, skipped)` suffix when a crash was absorbed
 into an already-pending batch restart instead of scheduling its own.
 
+`MARCH_SUP_TEST_STALL_MS=<ms>` is a test seam for this exact race: it makes a
+synchronous batch restart pause (yielding, so other actors keep running)
+between claiming its in-flight marker and running the strategy, so a test can
+land a sibling's crash inside that window by construction instead of by luck.
+It is read once, does nothing when unset, and exists for the runtime's own
+regression suite; leave it unset in production.
+
 ---
 
 ## Supervision Strategies Compared

@@ -580,6 +580,23 @@ void march_actor_set_call_base(void *actor, int64_t base);
 void march_actor_broadcast_migrate(uint32_t dispatch_name_id,
                                    void *(*migrate_fn)(void *));
 
+/* Phase 2 of march_actor_broadcast_migrate for ONE target: malloc a migrate
+ * message, march_sched_send it to [green_thread] (a march_proc*), and free
+ * it again if the send reports MARCH_SEND_DEAD (the only status on which the
+ * caller keeps ownership). Returns the send status, or -1 on malloc failure.
+ * Exposed so the leak regression test can drive the real code path. */
+int march_actor_inject_migrate_msg(void *green_thread,
+                                   void *(*migrate_fn)(void *));
+
+/* Number of migrate messages allocated and not yet disposed on any of their
+ * disposal paths (DEAD-send free, receive-loop free, reap-time dispose).
+ * Zero at rest; a leak leaves it positive. */
+int64_t march_migrate_msgs_live(void);
+
+/* Test-only seam: bind [actor]'s meta green_thread to [proc] (a march_proc*)
+ * without spawning an actor green thread. Not used by generated code. */
+void march_test_actor_bind_green_thread(void *actor, void *proc);
+
 /* Actor builtins.
  * Actor object layout (on top of the standard 16-byte header):
  *   offset 16: ptr     dispatch fn  (field 0, stored as closure struct)

@@ -10,6 +10,14 @@
 
 ## What remains
 
+> Reviewed 2026-09-10, unchanged: both pieces below are still open. The
+> `terminate` callback is a full pipeline feature (parser, desugar,
+> typecheck, eval, lower, codegen, runtime) and the reload drain-first story
+> needs a *pause* state distinct from `draining` (a reloading actor must keep
+> accepting sends, not refuse them), so neither fit the batch that closed the
+> neighbouring actor todos.
+
+
 ### 1. No `terminate`-style callback
 
 An actor can finish the messages it has queued, but it cannot run code of its
