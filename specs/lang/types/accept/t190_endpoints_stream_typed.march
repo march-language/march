@@ -1,0 +1,35 @@
+mod Main do
+  needs IO
+  needs Session.Live
+  @[endpoints]
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+  -- Both roles of Stream against the API `@[endpoints]` generates
+  -- (lib/desugar/desugar_endpoints.ml).  The runnable twin, with an
+  -- in-process transport and a pinned trace, is test/session/stream_endpoints.march;
+  -- this is the typing witness: order, linearity and branch totality are all
+  -- ordinary type checking of generated code.  Rejects: t186-t189.
+  pfn prod(s : Cap(Session.Live), st : Stream_Prod.S_send_Msg_Prod_Cons_1, next : Int) : Stream_Prod.Yield do
+    let st1 = Stream_Prod.send_Msg_Prod_Cons_1(s, st, next)
+    Stream_Prod.offer_more_done(s, st1,
+      fn (_b, st2) -> prod(s, st2, next + 1),
+      fn (_b, st2) -> Stream_Prod.close(s, st2))
+  end
+  pfn cons(s : Cap(Session.Live), st : Stream_Cons.S_recv_Msg_Prod_Cons_1, budget : Int) : Stream_Cons.Yield do
+    Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (_n, st1) ->
+      if budget > 1 do
+        cons(s, Stream_Cons.choose_more(s, st1, true), budget - 1)
+      else
+        Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true))
+      end)
+  end
+  fn main(c : Cap(IO)) do () end
+end

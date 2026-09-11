@@ -2128,6 +2128,33 @@ let desugar_module ?errors ?(is_entry = true) (m : module_) : module_ =
   Fun.protect ~finally:(fun () -> expr_err_ctx := saved_ctx) @@ fun () ->
   check_app_main_exclusivity errors m.mod_decls;
   check_main_signature errors m.mod_decls;
+  (* `@[endpoints]` protocols expand into generated nested modules here, ahead
+     of everything else, so the generated declarations are desugared and later
+     typechecked exactly like hand-written ones.  See
+     [Desugar_endpoints.expand]; a module with no such protocol gets [].
+
+     They are inserted BEFORE the user's first ordinary declaration (after any
+     leading `needs`/`use`/`alias` directives), not appended: the typechecker
+     registers `always_linear` types in declaration order, so a user function
+     checked before the generated module is declared would see its state
+     types as ordinary -- reuse and abandon silently accepted.  Measured, not
+     guessed: the same hand-written nested module placed after `main` loses
+     the reuse check. *)
+  let m =
+    match Desugar_endpoints.expand errors m.mod_decls with
+    | [] -> m
+    | generated ->
+      let is_directive = function
+        | DNeeds _ | DUse _ | DAlias _ | DOpts _ -> true
+        | _ -> false
+      in
+      let rec split acc = function
+        | d :: rest when is_directive d -> split (d :: acc) rest
+        | rest -> (List.rev acc, rest)
+      in
+      let (lead, rest) = split [] m.mod_decls in
+      { m with mod_decls = lead @ generated @ rest }
+  in
   (* Collect type definitions so derive expansion can reference them. *)
   let type_defs = collect_type_defs m.mod_decls in
   (* Collect interfaces and fns for satisfy expansion. *)

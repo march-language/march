@@ -946,6 +946,7 @@ and actor_handler_to_json (ah : actor_handler) : string =
 and protocol_def_to_json (pd : protocol_def) : string =
   Dump.json_obj [
     ("steps", Dump.json_list (List.map protocol_step_to_json pd.proto_steps));
+    ("attrs", Dump.json_list (List.map Dump.json_string pd.proto_attrs));
   ]
 
 and protocol_step_to_json (ps : protocol_step) : string =

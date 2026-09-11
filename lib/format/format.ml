@@ -1086,6 +1086,7 @@ and emit_decl ctx = function
     List.iter (fun opt -> line ctx (Printf.sprintf "cap %s" opt)) opts
 
   | DProtocol (name, proto, _) ->
+    List.iter (fun a -> line ctx (Printf.sprintf "@[%s]" a)) proto.proto_attrs;
     line ctx (Printf.sprintf "protocol %s do" name.txt);
     indented ctx (fun () ->
       List.iter (emit_proto_step ctx) proto.proto_steps);
@@ -1274,7 +1275,12 @@ and emit_proto_step ctx = function
         line ctx (Printf.sprintf "%s ->" label.txt);
         indented ctx (fun () -> List.iter (emit_proto_step ctx) steps)
       ) choices
-    )
+    );
+    (* The block's own `end`.  Without it the enclosing loop's `end` closed
+       the choice and the protocol's `end` closed the loop, so formatting any
+       protocol with a choice produced a program that no longer parsed
+       (witness: `--fmt` on specs/lang/types/accept/t105, 2026-09-11). *)
+    line ctx "end"
 
 (* ------------------------------------------------------------------ *)
 (* Public entry points                                                 *)

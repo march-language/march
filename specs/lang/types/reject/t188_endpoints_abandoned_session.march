@@ -1,0 +1,23 @@
+-- EXPECT-ERROR: was never used
+mod Main do
+  needs IO
+  needs Session.Live
+  @[endpoints]
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+  -- Registering an endpoint and never driving it abandons a live session.
+  -- The registered state is always_linear, so dropping it is an error.
+  fn main(c : Cap(IO)) do
+    let s = Session.attach(c, { register: fn (_a, r) -> r, emit: fn (e, _t, _m) -> e, suspend: fn (e, _h) -> e, close: fn _e -> () })
+    let st = Stream_Prod.register(s, 0)
+    ()
+  end
+end
