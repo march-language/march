@@ -9,6 +9,20 @@ send-path locking, supervision timing/backoff) and is validated by
 explicitly scoped the distributed plane (cross-node messaging, monitors, and
 migration) out of phase 1; this file is that deferred scope, so it isn't lost.
 
+## Status 2026-09-10
+
+Reviewed in the actor-plane batch that closed the broadcast-migrate guard,
+the supervision race seam, and the stash/become item; nothing here landed.
+Items 1–3 and 5 are design projects (a per-peer credit scheme, a second
+connection per peer, a delivery contract for `MONITOR_FIRE`, epoch
+reclamation of procs) and need their own plans. Item 4 is a
+parser/desugar/typecheck slice that lowers to the existing
+`actor_set_mailbox_limit` after every spawn site. Item 6: the interpreter's
+eager single-threaded scheduler still cannot park a sender; the only parity
+option identified is to run the *target* until it has room, from inside
+`send`, which re-enters handler evaluation from a send and was judged too
+risky to do without a design note. All six stay open.
+
 ## Items
 
 1. **Per-peer flow control.** Cross-node sends currently have no

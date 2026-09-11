@@ -1,3 +1,23 @@
+# Stash / become: the idiom is documented, with a worked multi-step protocol
+
+Landed 2026-09-10, taking the todo's "establish first whether it needs runtime
+support" branch: it does not. A `mode` field (become) and a list in state
+(stash) cover the two jobs selective receive is used for, with no compiler or
+runtime change.
+
+- `test/native/actor_stash_become.march`: a `Session` that stashes `Query`s
+  until `Connected()`, then drains the stash *inline* through the same serving
+  function, run on both backends (`served: a;b;c;`).
+- `specs/lang/actors.md` and `docs/actors.md`, new section "Stash and Become",
+  including the ordering caveat: re-sending stashed messages to `self()` lands
+  them behind whatever is already queued (`c;a;b;` here), so drain inline when
+  arrival order matters.
+
+Selective receive itself stays unbuilt, for the cost reasons the todo gives
+(mailbox scan, order-preserving skip, quadratic blow-up on a long queue).
+
+## Original todo
+
 `[P3]` # No selective receive, stash, or `become`
 
 ## The gap

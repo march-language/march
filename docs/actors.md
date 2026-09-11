@@ -127,6 +127,58 @@ Messages are always delivered in FIFO order, so `receive()` pops the oldest queu
 
 ---
 
+## Stash and Become: multi-step protocols without selective receive
+
+`receive()` always pops the *oldest* message, and only the first `receive()` in a
+handler may block, so there is no way to say "wait for *this particular* message next"
+(Erlang's selective receive). What an actor does have is its own state, and that is
+enough for the two jobs selective receive is used for, the same way Akka's
+`stash`/`become` cover them:
+
+- **become**: a `mode` field that the handlers dispatch on;
+- **stash**: a list in state holding the work that cannot be served yet, replayed
+  through the same serving code when the mode changes.
+
+A session that must be told it is connected before it may serve queries:
+
+```march
+type Mode = Connecting | Ready
+
+actor Session do
+  state { mode : Mode, stash : List(String), served : String }
+  init  { mode: Connecting, stash: Nil, served: "" }
+
+  on Query(q : String) do
+    match state.mode do
+      Ready      -> serve(state, q)
+      Connecting -> { state with stash: Cons(q, state.stash) }   -- stash it
+    end
+  end
+
+  on Connected() do
+    -- become Ready, then unstash: the stash is newest-first, so reverse it
+    -- and push each stashed query through the same serving code.
+    let ready = { state with mode: Ready, stash: Nil }
+    List.fold_left(List.reverse(state.stash), ready, fn (st, q) -> serve(st, q))
+  end
+end
+
+fn serve(st, q) do
+  { mode: st.mode, stash: st.stash, served: st.served ++ q ++ ";" }
+end
+```
+
+Sending `Query("a")`, `Query("b")`, `Connected()`, `Query("c")` serves `a;b;c;`: the
+stash drains in arrival order *before* anything queued behind the transition is looked
+at. Draining inline is what gives that order. The other unstash shape, re-sending each
+stashed message to `self()`, is simpler when the stashed thing really is a whole message,
+but a re-sent message lands behind whatever is already queued, so here it would serve
+`c;a;b;`. Pick by whether arrival order matters to the protocol.
+
+The full example is `test/native/actor_stash_become.march`, run on both backends.
+
+---
+
 ## Checking if an Actor is Alive
 
 ```march
@@ -680,9 +732,19 @@ end
 | `Scheduler.runq_depth()` | `Int` | Cross-thread global run-queue depth (instantaneous) |
 | `Scheduler.dropped_messages()` | `Int` | Messages dropped by bounded-mailbox overflow policies |
 | `Scheduler.stat(i)` | `Int` | Raw stat by index (`0`=live procs, `1`=total spawned, `2`=runq depth, `3`=stack-alloc failures, `4`=dropped messages, `5`=stacks recycled, `6`=pending timers; unknown index reads `0`) |
+| `Actor.top_by_mailbox(n)` | `List((Pid, Int))` | The `n` deepest mailboxes right now, deepest first, as `(pid, depth)` pairs |
+| `Actor.over_mailbox(t)` | `List((Pid, Int))` | Every actor whose mailbox is deeper than `t`, in spawn order: the growing-mailbox alarm, polled |
 
 The interpreted backend reports the subset that's meaningful without the C scheduler
 (live actor count); everything else reads `0` on both backends rather than erroring.
+
+`Scheduler` answers "is the system behind?". "*Which* actor is behind?" is
+`Actor.top_by_mailbox(n)` and `Actor.over_mailbox(threshold)`, built on `Actor.list()`
+and `mailbox_size`: both are snapshots (an actor can die or drain between the walk and
+your reaction) and cost one pass over every live actor, so poll them from a timer, not a
+hot path. There is no push-style alarm that fires when a queue crosses a threshold, and no
+per-actor state inspection or tracing; see
+`specs/todos/2026-08-12-per-actor-introspection-and-alarms.md`.
 
 ---
 

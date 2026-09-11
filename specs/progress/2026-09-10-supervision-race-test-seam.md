@@ -1,3 +1,55 @@
+# The supervisor restart-race class now has a deterministic test venue
+
+Landed 2026-09-10, option 2 of the todo below (the injected stall). Option 1
+(an exported C hook around `march_supervisor_notify`) was not built: the
+strategy functions respawn children through generated `_spawn` code, so a
+C-level call with synthetic records could only ever reach the marker
+bookkeeping, not the interleaving the races live in.
+
+## The seam
+
+`MARCH_SUP_TEST_STALL_MS=<ms>`, read once and cached, makes a synchronous
+batch restart loiter between the leaf-lock release (where the in-flight marker
+was just claimed) and the strategy call. The stall **yields**
+(`march_sched_yield` in a loop until the deadline; `usleep` only outside a
+green thread) rather than sleeping: a blocking `usleep` pins the OS worker, and
+a sibling whose crash is queued on that worker's run queue then runs only
+*after* the stall — the first version did exactly that and deflected the
+sibling in roughly half of runs, which is the flaky shape the todo forbids.
+Yielding gave 40 of 40 deflections under both one and the default number of
+schedulers. Only the `claimed_sync_batch` path stalls; the delayed path already
+has its backoff window and non-batch strategies have no marker to race.
+Unset, it costs one cached `getenv`.
+
+Documented next to `MARCH_SUP_TRACE` in `docs/supervision.md` and
+`specs/lang/supervision.md`.
+
+## The test
+
+`test/native/supervisor_deflected_crash_absorbed.march`, compiled-only, run
+under the stall and `MARCH_SUP_TRACE=1` with stderr captured into the golden.
+A `rest_for_one` supervisor with children `lo` (index 0) and `hi` (index 1);
+main kills `hi` and a `Killer` actor — on a scheduler worker, so a different
+OS thread — kills `lo` inside the window. `lo`'s crash is deflected (the
+` (batch restart already pending, skipped)` trace line is in the golden: a
+run where the deflection did not happen fails instead of passing vacuously).
+The first pass covers only `[1, n)`, so `lo` is restarted only by the absorb
+loop's second pass.
+
+Red control: with the absorb loop disabled (`if (!claimed_sync_batch) return;`
+made unconditional), 5 of 5 runs print `lo restarted: false` / `lo alive:
+false` — the permanently-dead-child bug commit `a31ca9fb` fixed, reproduced
+by construction.
+
+## A trap hit on the way
+
+The first stall runs "did nothing": the compiled fixture links the runtime
+copy staged under `_build/default/runtime`, which a targeted
+`dune build bin/main.exe` does not refresh. Build any rule that depends on
+`runtime/*.c` first (CLAUDE.md, "Build & test").
+
+## Original todo
+
 `[P2]` # No deterministic test venue for the supervisor restart-race class
 
 ## The gap

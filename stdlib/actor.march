@@ -166,6 +166,46 @@ mod Actor do
     List.map(actor_pid_indices(), fn n -> pid_of_int(n))
   end
 
+  doc """
+  The `n` deepest mailboxes right now, deepest first, as `(pid, depth)` pairs.
+  This is the "which actor is behind?" question a monitoring loop actually
+  asks; `Scheduler` counters only answer "is the system behind?".
+
+      match Actor.top_by_mailbox(1) do
+        Cons((hot, depth), _) -> shed_from(hot, depth)
+        Nil                   -> ()
+      end
+
+  A snapshot: it walks `Actor.list()` and asks `mailbox_size` of each, so an
+  actor can die or drain between the walk and your reaction. Ties keep spawn
+  order. Cost is one pass over every live actor plus a sort, so call it from a
+  timer, not from a hot path.
+  """
+  fn top_by_mailbox(n : Int) : List((Pid, Int)) do
+    let depths = List.map(list(), fn p -> (p, mailbox_size(p)))
+    let deeper = fn (a, b) ->
+      match a do
+        (_, da) -> match b do (_, db) -> da > db end
+      end
+    List.take(List.sort_by(depths, deeper), n)
+  end
+
+  doc """
+  Every actor whose mailbox is deeper than `threshold`, as `(pid, depth)`
+  pairs in spawn order — the growing-mailbox alarm, polled. An empty result is
+  the healthy case, so a monitor can be `if Actor.over_mailbox(500) != Nil`.
+
+      List.each(Actor.over_mailbox(500), fn hot ->
+        match hot do (p, d) -> log_slow_actor(p, d) end)
+
+  Same snapshot caveats as `top_by_mailbox`. A threshold below zero returns
+  every live actor.
+  """
+  fn over_mailbox(threshold : Int) : List((Pid, Int)) do
+    let depths = List.map(list(), fn p -> (p, mailbox_size(p)))
+    List.filter(depths, fn pd -> match pd do (_, d) -> d > threshold end)
+  end
+
   doc "Every currently-registered name."
   fn registered() do
     actor_registered()

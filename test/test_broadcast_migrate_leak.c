@@ -1,52 +1,32 @@
-/* test_broadcast_migrate_leak.c — regression test for the
+/* test_broadcast_migrate_leak.c — end-to-end regression test for the
  * march_actor_broadcast_migrate dead-target message leak
- * (specs/progress/2026-08-12-broadcast-migrate-dead-target-message-leak.md).
+ * (specs/progress/2026-08-12-broadcast-migrate-dead-target-message-leak.md,
+ * closed out per specs/todos/2026-08-18-broadcast-migrate-no-end-to-end-guard.md
+ * option 2).
  *
- * The bug: march_actor_broadcast_migrate (runtime/march_runtime.c) snapshots
- * matching actors under g_tbl_mu, releases the lock, then for each
- * snapshotted actor malloc's a march_migrate_msg_t and calls
- * march_sched_send(snaps[i]->green_thread, mm) WITHOUT checking the return
- * value. If the target's green thread has already fully died by the time
- * that send runs (a real race: g_tbl_mu is released before Phase 2, and an
- * actor's green_thread field is cleared to NULL / its march_proc transitions
- * to PROC_DEAD asynchronously, on its own green thread, after
- * do_actor_death has already made it "not there" for Phase 1's purposes),
- * march_sched_send returns MARCH_SEND_DEAD without ever taking ownership of
- * mm (see its contract in runtime/march_scheduler.h and its DEAD branches in
- * runtime/march_scheduler.c) -- so nobody ever frees it. The fix wraps the
- * send in `if (march_sched_send(...) == MARCH_SEND_DEAD) free(mm);`.
+ * The bug: Phase 2 of march_actor_broadcast_migrate (runtime/march_runtime.c)
+ * malloc's a march_migrate_msg_t per snapshotted actor and march_sched_send's
+ * it to that actor's green thread. If the target has already reached
+ * PROC_DEAD in the snapshot-to-send window, march_sched_send returns
+ * MARCH_SEND_DEAD without taking ownership, so the message must be freed by
+ * the caller. The fix does exactly that, in march_actor_inject_migrate_msg.
  *
- * Why this test does NOT drive march_actor_broadcast_migrate itself end to
- * end: reaching MARCH_SEND_DEAD via the real g_actor_tbl snapshot path
- * requires a live actor's green thread to actually finish running its exit
- * sequence (clearing meta->green_thread / reaching PROC_DEAD) in the narrow
- * window between Phase 1's unlock and Phase 2's send -- which only happens
- * on a background scheduler thread that march_spawn starts automatically,
- * racing the calling thread's own progress through the loop. There is no
- * public hook to pause Phase 2 to force that interleaving deterministically,
- * and adding one would mean instrumenting production code for the sake of
- * a test, which is out of scope for this fix. A loop-many-times-and-hope
- * stress test would only be *probabilistically* likely to hit the window,
- * which is exactly the kind of flaky timing-based repro this test is meant
- * to avoid.
- *
- * What IS fully deterministic, single-threaded, and requires no timing
- * assumptions at all: driving a plain (non-actor) proc to PROC_DEAD via the
- * raw scheduler API with no background thread involved (march_sched_run()
- * runs the whole thing to completion on the calling thread, exactly like
- * test_scheduler_mbox.c's test_dead_reap_drain), and then calling
- * march_sched_send on it afterwards. march_proc structs are deliberately
- * never freed on death (see march_scheduler.c's "Deliberately NOT munmap
- * ... / free(p)" comment next to the PROC_DEAD reap branch), so the proc
- * pointer is still valid to pass to march_sched_send here -- this is
- * exactly the shape Phase 2 sees when the race fires: a still-valid
- * march_proc pointer whose status is PROC_DEAD. This test exercises that
- * scenario against march_sched_send directly, using the *exact* malloc +
- * send + conditional-free pattern now in march_actor_broadcast_migrate's
- * Phase 2, and (as a red/green control) shows the pre-fix pattern -- malloc
- * + send, return value ignored -- really does leak under the identical
- * scenario.
+ * What this test drives: the REAL code, twice over.
+ *   1. march_actor_inject_migrate_msg (Phase 2's per-target body, split out
+ *      of the loop) against a proc driven to PROC_DEAD deterministically on
+ *      this thread via the raw scheduler API — no background scheduler
+ *      thread, no timing window.
+ *   2. march_actor_broadcast_migrate itself: a fake actor record is given a
+ *      dispatch id (so Phase 1's filter matches it) and, through the
+ *      march_test_actor_bind_green_thread seam, a green_thread that IS the
+ *      dead proc. Phase 1 snapshots it; Phase 2 sends to a dead target.
+ * The leak oracle is march_migrate_msgs_live(): every allocation is counted
+ * and every disposal path uncounts, so a leaked message is a non-zero
+ * reading afterwards. Deleting the free-on-DEAD line from
+ * march_actor_inject_migrate_msg turns every check below red (verified at
+ * filing time; see the progress entry).
  */
+#include "march_runtime.h"
 #include "march_scheduler.h"
 #include <assert.h>
 #include <stdatomic.h>
@@ -62,82 +42,22 @@ static int g_fail = 0;
         else      { printf("  FAIL  %s  (line %d)\n", name, __LINE__); g_fail++; } \
     } while (0)
 
-/* Mirrors runtime/march_runtime.h's march_migrate_msg_t / MARCH_MIGRATE_TAG.
- * Duplicated here (rather than #include "march_runtime.h") so this test
- * links only against march_scheduler.c -- the same minimal, decoupled
- * dependency set test_scheduler_mbox.c and friends use -- with zero
- * dependency on march_runtime.c, which this test never calls into. */
-#define TEST_MIGRATE_TAG ((int64_t)0x4D494752L)   /* "MIGR" */
-typedef struct {
-    int64_t  _rc;
-    int64_t  _tag;
-    void    *(*migrate_fn)(void *);
-} test_migrate_msg_t;
-
 /* A proc whose entry function returns immediately: the scheduler marks it
  * PROC_DEAD as soon as march_sched_run() dispatches and retires it. */
 static void die_immediately(void *arg) { (void)arg; }
 
-/* Every "Phase 2"-shaped allocation in this test goes through these two
- * wrappers, so the leak check is a plain counter -- no malloc/free
- * interposition needed. */
-static int g_outstanding = 0;
-
-static test_migrate_msg_t *alloc_migrate_msg(void) {
-    test_migrate_msg_t *mm = (test_migrate_msg_t *)malloc(sizeof(*mm));
-    assert(mm);
-    mm->_rc        = 1;
-    mm->_tag       = TEST_MIGRATE_TAG;
-    mm->migrate_fn = NULL;
-    g_outstanding++;
-    return mm;
-}
-
-static void free_migrate_msg(test_migrate_msg_t *mm) {
-    free(mm);
-    g_outstanding--;
-}
-
-/* A RE-IMPLEMENTATION of march_actor_broadcast_migrate's Phase 2 body,
- * FIXED version -- not the production function itself.
- *
- * READ THIS BEFORE TRUSTING A GREEN RUN: this file links march_scheduler.c
- * only (see test/dune), so it cannot call march_actor_broadcast_migrate,
- * which lives in march_runtime.c. Deleting the `== MARCH_SEND_DEAD` check
- * from the real Phase 2 therefore leaves this test PASSING. What it does
- * establish is the property the fix rests on -- that march_sched_send
- * returns MARCH_SEND_DEAD for an already-dead target and takes no ownership
- * of the message on that path, so the caller must free it -- plus a red
- * control showing the ignore-the-return-value shape really does leak.
- * The residual gap (no end-to-end guard on the production call site) is
- * tracked in specs/todos/2026-08-18-broadcast-migrate-no-end-to-end-guard.md. */
-static void phase2_fixed(march_proc *target) {
-    test_migrate_msg_t *mm = alloc_migrate_msg();
-    if (march_sched_send(target, mm) == MARCH_SEND_DEAD) {
-        free_migrate_msg(mm);
-    }
-}
-
-/* march_actor_broadcast_migrate's Phase 2 body, PRE-FIX version: the send's
- * return value is ignored, exactly as the bug report describes. Used only
- * as a red control to prove this scenario really did leak before the fix. */
-static void phase2_prefix_buggy(march_proc *target) {
-    test_migrate_msg_t *mm = alloc_migrate_msg();
-    march_sched_send(target, mm);   /* BUG: return value ignored */
+static void *fake_actor(void) {
+    void *a = march_alloc(48);
+    ((int64_t *)a)[3] = 1;          /* $alive */
+    return a;
 }
 
 int main(void) {
-    printf("=== march_sched_send dead-target ownership contract "
-           "(underpins the march_actor_broadcast_migrate leak fix) ===\n");
-    printf("    note: exercises a re-implementation of Phase 2, not "
-           "march_actor_broadcast_migrate itself -- see phase2_fixed's comment\n\n");
+    printf("=== march_actor_broadcast_migrate dead-target leak (end to end) ===\n\n");
 
     /* Deterministically, single-threadedly, drive `victim` to PROC_DEAD.
-     * No background scheduler thread is ever started here (that is a
-     * march_spawn/march_ensure_sched_started thing, from march_runtime.c,
-     * which this test never calls) -- march_sched_run() runs to completion
-     * on THIS thread and returns only once every proc (victim included) is
-     * fully retired, so there is no window to race here at all. */
+     * march_sched_run() runs to completion on THIS thread and returns only
+     * once every proc is retired, so there is no window to race here. */
     march_sched_init();
     march_proc *victim = march_sched_spawn_daemon(die_immediately, NULL);
     march_sched_request_shutdown();
@@ -145,35 +65,45 @@ int main(void) {
     CHECK(atomic_load(&victim->status) == PROC_DEAD,
           "victim proc reached PROC_DEAD deterministically");
 
-    /* Precondition the whole bug (and fix) rests on: sending to a target
-     * whose green thread has already fully died returns MARCH_SEND_DEAD,
-     * not MARCH_SEND_OK -- and does so safely (march_proc is never freed on
-     * death, so `victim` is still a valid pointer to dereference). */
-    void *probe = (void *)0x1;
-    CHECK(march_sched_send(victim, probe) == MARCH_SEND_DEAD,
-          "send to an already-PROC_DEAD target returns MARCH_SEND_DEAD");
+    CHECK(march_migrate_msgs_live() == 0, "no migrate messages live at start");
 
-    /* Red: the pre-fix pattern (malloc + send, ignore the result) leaks
-     * exactly one allocation per call against a dead target. */
-    g_outstanding = 0;
-    phase2_prefix_buggy(victim);
-    CHECK(g_outstanding == 1,
-          "pre-fix pattern leaks the migrate message (red control)");
+    /* 1. The real per-target body, on the DEAD path. */
+    int st = march_actor_inject_migrate_msg(victim, NULL);
+    CHECK(st == MARCH_SEND_DEAD,
+          "inject to an already-PROC_DEAD target reports MARCH_SEND_DEAD");
+    CHECK(march_migrate_msgs_live() == 0,
+          "inject frees the migrate message on the DEAD path");
 
-    /* Green: the fixed pattern (malloc + send + free-on-DEAD) leaks
-     * nothing under the identical scenario. */
-    g_outstanding = 0;
-    phase2_fixed(victim);
-    CHECK(g_outstanding == 0,
-          "fixed pattern frees the migrate message on the DEAD path");
+    for (int i = 0; i < 256; i++) march_actor_inject_migrate_msg(victim, NULL);
+    CHECK(march_migrate_msgs_live() == 0,
+          "256 injects against a dead target: no leak");
 
-    /* Repeat at a scale closer to a real broadcast (MARCH_MIGRATE_SNAPSHOT
-     * = 2048 matched actors max in march_runtime.c) against the same dead
-     * target -- still fully deterministic, no timing dependency. */
-    g_outstanding = 0;
-    for (int i = 0; i < 256; i++) phase2_fixed(victim);
-    CHECK(g_outstanding == 0,
-          "256 repeats of the fixed pattern against a dead target: no leak");
+    /* 2. The real broadcast: Phase 1 must snapshot our fake actor (dispatch
+     * id matches, actor and green_thread non-NULL), Phase 2 must hit DEAD
+     * and free. Two actors under the same dispatch id, to exercise the loop
+     * rather than a single iteration. */
+    const uint32_t DISPATCH_ID = 7;
+    void *a1 = fake_actor();
+    void *a2 = fake_actor();
+    march_actor_set_dispatch_id(a1, DISPATCH_ID);
+    march_actor_set_dispatch_id(a2, DISPATCH_ID);
+    march_test_actor_bind_green_thread(a1, victim);
+    march_test_actor_bind_green_thread(a2, victim);
+
+    march_actor_broadcast_migrate(DISPATCH_ID, NULL);
+    CHECK(march_migrate_msgs_live() == 0,
+          "broadcast_migrate over two dead-target actors leaks nothing");
+
+    for (int i = 0; i < 64; i++) march_actor_broadcast_migrate(DISPATCH_ID, NULL);
+    CHECK(march_migrate_msgs_live() == 0,
+          "64 broadcasts over dead targets: no leak");
+
+    /* A non-matching dispatch id must send nothing at all (and so allocate
+     * nothing) — guards the counter against a Phase 1 filter regression
+     * showing up as a false green. */
+    march_actor_broadcast_migrate(DISPATCH_ID + 1, NULL);
+    CHECK(march_migrate_msgs_live() == 0,
+          "broadcast under an unmatched dispatch id allocates nothing");
 
     printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

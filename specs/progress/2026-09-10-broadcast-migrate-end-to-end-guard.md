@@ -1,3 +1,40 @@
+# `march_actor_broadcast_migrate`'s dead-target leak fix now has an end-to-end guard
+
+Landed 2026-09-10, option 2 of the todo below (kept verbatim under "Original
+todo" for the reasoning).
+
+## What changed
+
+- Phase 2's per-target body is now `march_actor_inject_migrate_msg(green_thread,
+  migrate_fn)` (non-static, declared in `runtime/march_runtime.h`): malloc,
+  `march_sched_send`, free on `MARCH_SEND_DEAD`, return the status.
+  `march_actor_broadcast_migrate` calls it per snapshot entry; no behaviour
+  change on the production path.
+- Every migrate message is counted in a runtime-private atomic on allocation
+  and uncounted at each of its three disposal sites (the DEAD-send free, the
+  receive loop's free after applying it, `march_actor_msg_dispose` at reap
+  time), all through one `migrate_msg_free`. `march_migrate_msgs_live()` reads
+  it; zero at rest, positive after a leak on any path.
+- `march_test_actor_bind_green_thread(actor, proc)` is a test-only seam that
+  points an actor meta's `green_thread` at an arbitrary proc without spawning
+  an actor green thread. This is what lets a C test put a `PROC_DEAD` proc
+  where Phase 1's `m->actor && m->green_thread` filter will snapshot it.
+- `test/test_broadcast_migrate_leak.c` now links the full runtime (the
+  `test_actor_registry_runner` dependency set) and drives BOTH the helper and
+  `march_actor_broadcast_migrate` itself against a proc driven to `PROC_DEAD`
+  on the calling thread via the raw scheduler API — still single-threaded,
+  still no timing window. The re-implemented `phase2_fixed` /
+  `phase2_prefix_buggy` copies are gone.
+
+## Red control
+
+With `if (st == MARCH_SEND_DEAD) migrate_msg_free(mm);` deleted from the
+helper, the runner reports 5 of 8 checks failed (every leak check goes red;
+the three preconditions stay green). Restored: 8 of 8. So the todo's
+"delete the line and the suite stays green" is closed.
+
+## Original todo
+
 # `march_actor_broadcast_migrate`'s dead-target leak fix has no end-to-end regression guard
 
 Filed 2026-08-18, from the review of the PR that landed the fix

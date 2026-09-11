@@ -1,0 +1,66 @@
+-- The growing-mailbox alarm, polled: Actor.top_by_mailbox / Actor.over_mailbox.
+-- specs/todos/2026-08-12-per-actor-introspection-and-alarms.md
+--
+-- Exact depths are backend-dependent (the compiled backend's actors drain
+-- concurrently with main; the interpreter's do not run until run_until_idle),
+-- so the golden pins the SHAPE: deepest-first ordering, the n cut, the
+-- threshold filter, and that an unreachable threshold is empty. The
+-- interpreter case happens to see the exact depths 0 / 5 / 50, which the
+-- ordering check exercises fully.
+mod ActorMailboxAlarm do
+  needs IO.Console
+
+  actor W do
+    state { n : Int }
+    init  { n: 0 }
+
+    on Work() do
+      { n: state.n + 1 }
+    end
+  end
+
+  fn send_n(p, k) do
+    if k <= 0 do () else
+      send(p, Work())
+      send_n(p, k - 1)
+    end
+  end
+
+  fn depths_of(pairs) do
+    List.map(pairs, fn pd -> match pd do (_, d) -> d end)
+  end
+
+  fn non_increasing(ds) do
+    match ds do
+      Cons(a, Cons(b, rest)) ->
+        if a >= b do non_increasing(Cons(b, rest)) else false end
+      _ -> true
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let a = spawn(W)
+    let b = spawn(W)
+    let c = spawn(W)
+    send_n(b, 5)
+    send_n(c, 50)
+
+    let top = Actor.top_by_mailbox(2)
+    println("top(2) length: " ++ int_to_string(List.length(top)))
+    println("top(2) deepest first: " ++ bool_to_string(non_increasing(depths_of(top))))
+    println("top(10) covers all: " ++ int_to_string(List.length(Actor.top_by_mailbox(10))))
+
+    println("over(-1) is everyone: " ++ int_to_string(List.length(Actor.over_mailbox(-1))))
+    println("over(1000000) is empty: " ++ bool_to_string(Actor.over_mailbox(1000000) == Nil))
+    let hot = Actor.over_mailbox(10)
+    println("over(10) at most one: " ++ bool_to_string(List.length(hot) <= 1))
+    println("over(10) depths all > 10: " ++ bool_to_string(
+      List.all(depths_of(hot), fn d -> d > 10)))
+
+    run_until_idle()
+    println("drained top(1): " ++ int_to_string(List.length(Actor.top_by_mailbox(1))))
+    println("drained over(0): " ++ int_to_string(List.length(Actor.over_mailbox(0))))
+    let _ = a
+    ()
+  end
+end
