@@ -186,7 +186,7 @@ let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
       then
         match Hashtbl.find_opt ctx.top_fn_param_tys resolved_name with
         | Some param_tirs ->
-          List.mapi (fun i t -> (i, llvm_ty t = "double")) param_tirs
+          List.mapi (fun i t -> (i, llvm_ty ctx t = "double")) param_tirs
           |> List.filter (fun (_, is_dbl) -> is_dbl)
           |> List.map fst
         | None -> []
@@ -226,7 +226,7 @@ let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
         match Hashtbl.find_opt ctx.top_fn_param_tys resolved_name with
         | Some param_tirs when List.length param_tirs = List.length arg_pairs ->
           List.mapi (fun i (param_tir, (ty, v)) ->
-            let param_ty = llvm_ty param_tir in
+            let param_ty = llvm_ty ctx param_tir in
             let v' = coerce ctx ty v param_ty in
             record_temp_box i ~from_ty:ty ~to_ty:param_ty v';
             param_ty ^ " " ^ v'
@@ -317,7 +317,7 @@ let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
        rewrites ECallPtr→EApp(apply_fn, ...) for non-escaping closures, so this
        direct path must read the result as ptr too. *)
     let ret_ty =
-      if is_apply_fn resolved_name then "ptr" else llvm_ret_ty ret_tir in
+      if is_apply_fn resolved_name then "ptr" else llvm_ret_ty ctx ret_tir in
     (* If the function is not known (not in top_fns, not a builtin, not an extern),
        emit a forward declaration into the preamble so LLVM does not reject the IR
        with "use of undefined value".  This covers interface dispatch calls that were
@@ -463,7 +463,7 @@ let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
          dispatch branch above deliberately skips this (and the temp-box
          releases): dispatched apply-fn calls keep the old leak rather than
          risk releasing across a version boundary — the safe direction. *)
-      if is_apply_fn resolved_name && llvm_ret_ty ret_tir = "double"
+      if is_apply_fn resolved_name && llvm_ret_ty ctx ret_tir = "double"
          && resolved_name <> ctx.cur_emit_fn (* self-tail-call exemption *)
       then begin
         let d = fresh ctx "crf" in
@@ -500,7 +500,7 @@ let emit_callptr_blocking ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
       | Some c_name -> c_name | None -> mangle_extern rn in
     let ret_tir = match Hashtbl.find_opt ctx.top_fn_ret_ty rn with
       | Some t -> t | None -> fn_ret_tir f.Tir.v_ty in
-    let ret_ty = llvm_ret_ty ret_tir in
+    let ret_ty = llvm_ret_ty ctx ret_tir in
     Llvm_calls.emit_blocking_call ctx ~fname ~ret_ty ~arg_pairs
       ~resolved_name:rn
 
@@ -521,7 +521,7 @@ let emit_callptr_unqualified ~emit_atom ctx (f : Tir.var)
       | None -> fn_ret_tir f.Tir.v_ty
       | Some t -> t
     in
-    let ret_ty = llvm_ret_ty ret_tir in
+    let ret_ty = llvm_ret_ty ctx ret_tir in
     if ret_ty = "void" then begin
       emit ctx (Printf.sprintf "call void @%s(%s)" fname args_str);
       ("i64", "0")
@@ -555,7 +555,7 @@ let emit_callptr_global ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
          | None -> fn_ret_tir f.Tir.v_ty
          | Some t -> t)
     in
-    let ret_ty = llvm_ret_ty ret_tir in
+    let ret_ty = llvm_ret_ty ctx ret_tir in
     (* Emit a forward declare if the function is not known (not in top_fns,
        not a builtin, not an extern).  This covers interface-dispatch calls
        where the storage value has a type-erased type (TVar "_") and march
@@ -672,13 +672,13 @@ let emit_callptr_closure ~emit_atom ctx (fn_atom : Tir.atom)
        annotation (which may say a concrete scalar like Bool) and let the
        consumer untag via coerce.  void wrappers keep void. *)
     let ret_ty =
-      let base = llvm_ret_ty ret_tir in
+      let base = llvm_ret_ty ctx ret_tir in
       if base = "void" then "void" else "ptr"
     in
     let orig_param_llvm_tys = match fn_atom with
       | Tir.AVar v ->
         (match v.Tir.v_ty with
-         | Tir.TFn (ps, _) when List.length ps = nargs -> List.map llvm_ty ps
+         | Tir.TFn (ps, _) when List.length ps = nargs -> List.map (llvm_ty ctx) ps
          | Tir.TFn _ as ty ->
            (* Uncurry the param type chain for curried calls, collecting
               all parameter types across nested TFn wrappers. *)
@@ -688,7 +688,7 @@ let emit_callptr_closure ~emit_atom ctx (fn_atom : Tir.atom)
                | Tir.TFn (ps, ret) ->
                  let take = min n (List.length ps) in
                  let taken = List.filteri (fun i _ -> i < take) ps in
-                 collect_params (n - take) ret (List.rev_append (List.map llvm_ty taken) acc)
+                 collect_params (n - take) ret (List.rev_append (List.map (llvm_ty ctx) taken) acc)
                | _ -> List.rev acc @ List.init n (fun _ -> "ptr")
            in
            collect_params nargs ty []
@@ -798,7 +798,7 @@ let emit_callptr_closure ~emit_atom ctx (fn_atom : Tir.atom)
          re-boxes fresh (Float is immutable, the copy is unobservable).
          Before: one leaked box per Float-returning indirect call, unbounded
          (the fret_leg of the probe above). *)
-      if llvm_ret_ty ret_tir = "double" && not is_potential_self_call then begin
+      if llvm_ret_ty ctx ret_tir = "double" && not is_potential_self_call then begin
         let d = fresh ctx "crf" in
         emit ctx (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" d r);
         emit ctx (Printf.sprintf "call void @march_decrc_local(ptr %s)" r);

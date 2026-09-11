@@ -68,6 +68,7 @@ type env = {
           scrutinee's constructor shares its heap object with the bound
           payload (newtype/niche representations).  Was [_type_defs]. *)
   collision_set : (string, string list) Hashtbl.t;
+  k_table : Kind.table;   (* the per-type table; see specs/2026-09-10-type-kinds-design.md *)
       (** Same-short-name type collision set (Task 2, [Collision_set.compute]),
           derived from [type_defs] once per [perceus] run (mirrors
           [Llvm_ctx.make_ctx]'s derivation).  Threaded into
@@ -186,6 +187,7 @@ let empty_env : env = {
   borrow_map = Borrow.empty;
   type_defs = [];
   collision_set = Hashtbl.create 0;
+  k_table = Kind.empty;
   extern_names = StringSet.empty;
   current_fn_name = "";
   closure_fvs = StringSet.empty;
@@ -203,14 +205,14 @@ let empty_env : env = {
     double-free the object the branch variable now owns — the cause of the
     Toml get_str / nested-Option RC underflow. *)
 let scrutinee_shares_payload_storage (env : env) (ty : Tir.ty) : bool =
-  match Repr.repr_of_ty ~collision_set:env.collision_set env.type_defs ty with
-  | Repr.Newtype _ | Repr.Niche _ -> true
+  match Kind.repr_of env.k_table ty with
+  | Kind.Newtype _ | Kind.Niche _ -> true
   (* Unboxed (Milestone 3): there is no container cell, so there is nothing to
      free separately and nothing for FBIP to reuse.  Answering true is what
      keeps [add_scrutinee_free_for] and the reuse-token search away from a
      value that never reached the heap. *)
-  | Repr.Unboxed _ -> true
-  | Repr.Boxed ->
+  | Kind.Unboxed _ -> true
+  | Kind.Boxed ->
     (* Erased-niche recovery — must mirror [llvm_case.ml]'s [effective_repr]
        abstract-arg path.  [repr_of_ty] conservatively returns [Boxed] for a
        niche-shaped type applied to abstract (TVar) arguments — e.g.
@@ -229,7 +231,7 @@ let scrutinee_shares_payload_storage (env : env) (ty : Tir.ty) : bool =
      | Tir.TCon (name, args)
        when args <> []
             && List.exists (function Tir.TVar _ -> true | _ -> false) args
-            && Repr.is_niche_shaped ~collision_set:env.collision_set env.type_defs name -> true
+            && Kind.is_niche_shaped env.k_table name -> true
      | _ -> false)
 
 (** Collect the names of variables loaded directly from the closure parameter
@@ -330,7 +332,7 @@ let decrc_for (env : env) (v : Tir.var) (a : Tir.atom) : Tir.expr =
     TFn / bare TVar (true here) and TTuple / TRecord (false here) — see
     Rc_types's module doc for the full contract and fix history before
     changing any arm. *)
-let needs_rc = Rc_types.needs_rc
+let needs_rc (env : env) (ty : Tir.ty) : bool = Kind.needs_rc_of env.k_table ty
 
 (** True for a defunctionalized closure apply wrapper ("<fn>$apply$<uid>").
     An apply function's first parameter is the closure struct ([$clo]); the
@@ -576,7 +578,7 @@ let find_inc_vars ?(include_borrowed_fields = true)
      the caller passes ~include_borrowed_fields:false to keep that suppression. *)
   let eligible (v : Tir.var) : bool =
     v.Tir.v_lin = Tir.Unr
-    && needs_rc v.Tir.v_ty
+    && needs_rc env v.Tir.v_ty
     && (include_borrowed_fields
         || not (StringSet.mem v.Tir.v_name env.borrowed_field_vars))
   in
@@ -608,7 +610,7 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
   match e with
   | Tir.EAtom (Tir.AVar v) ->
     let lb = StringSet.add v.Tir.v_name live_after in
-    if v.Tir.v_lin = Tir.Unr && needs_rc v.Tir.v_ty
+    if v.Tir.v_lin = Tir.Unr && needs_rc env v.Tir.v_ty
        && StringSet.mem v.Tir.v_name live_after then
       (* Non-last use of Unr heap value: inc before use.
          Borrowed field vars are NOT exempt here: a borrowed field is kept in
@@ -665,7 +667,7 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
         match a with
         | Tir.AVar v
           when v.Tir.v_lin = Tir.Unr
-               && needs_rc v.Tir.v_ty
+               && needs_rc env v.Tir.v_ty
                && not (StringSet.mem v.Tir.v_name live_after)
                && Borrow.is_borrowed env.borrow_map f.Tir.v_name i
                (* The closure slot (arg 0) of an apply function follows the
@@ -800,7 +802,7 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
         match a with
         | Tir.AVar v
           when v.Tir.v_lin = Tir.Unr
-               && needs_rc v.Tir.v_ty
+               && needs_rc env v.Tir.v_ty
                && not (StringSet.mem v.Tir.v_name live_after)
                && Borrow.is_borrowed env.borrow_map fname i
                && not (StringSet.mem v.Tir.v_name env.closure_fvs)
@@ -926,7 +928,7 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
            a borrowed field string as owned and drop it — an RC underflow. *)
         StringSet.mem a.Tir.v_name bfv
       | Tir.ELet (iv, Tir.EField (Tir.AVar src, _), ibody)
-        when needs_rc iv.Tir.v_ty
+        when needs_rc env iv.Tir.v_ty
              && (StringSet.mem src.Tir.v_name bfv || field_src_is_borrowed src) ->
         (* [iv] is a borrowed field var inside this sub-scope; check the body
            with that knowledge. *)
@@ -948,7 +950,7 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
     in
     let is_borrowed_field =
       match e1 with
-      | _ when needs_rc v.Tir.v_ty
+      | _ when needs_rc env v.Tir.v_ty
                && (match e1 with
                    | Tir.EField _ | Tir.EAtom _ -> false  (* handled below *)
                    | _ -> result_is_borrowed_field env.borrowed_field_vars e1) ->
@@ -959,7 +961,7 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
            the result is compared to a literal with [==]. *)
         true
       | Tir.EField (Tir.AVar src, _)
-        when needs_rc v.Tir.v_ty
+        when needs_rc env v.Tir.v_ty
              (* TPtr sources are closure structs ($clo).  Their fields are
                 closure FVs managed by the borrowed' set (d2cf09e): Perceus
                 emits EIncRC before any consuming call so the closure's own
@@ -994,7 +996,7 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
               consuming calls, which borrowed_field_vars would suppress. *)
         true
       | Tir.EAtom (Tir.AVar src)
-        when needs_rc v.Tir.v_ty
+        when needs_rc env v.Tir.v_ty
              && StringSet.mem src.Tir.v_name env.borrowed_field_vars ->
         (* Alias of a borrowed field var — propagate the borrowed status. *)
         true
@@ -1044,10 +1046,10 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
            Closure FVs are exempt: the closure holds the reference; the apply
            function must not decrement values it does not own.
            Borrowed field vars are exempt: the record owner manages their RC. *)
-        if v.Tir.v_lin = Tir.Unr && needs_rc v.Tir.v_ty then
+        if v.Tir.v_lin = Tir.Unr && needs_rc env v.Tir.v_ty then
           Tir.ESeq (decrc_for env v (Tir.AVar v), e2')
         else if v.Tir.v_lin = Tir.Lin || v.Tir.v_lin = Tir.Aff then
-          if needs_rc v.Tir.v_ty then
+          if needs_rc env v.Tir.v_ty then
             Tir.ESeq (Tir.EFree (Tir.AVar v), e2')
           else
             e2'
@@ -1159,7 +1161,7 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
        against the new EAlloc's arg count without needing type definitions. *)
     let add_scrutinee_free_for ctor_tag arity body =
       match a with
-      | Tir.AVar v when needs_rc v.Tir.v_ty
+      | Tir.AVar v when needs_rc env v.Tir.v_ty
                      && not (StringSet.mem v.Tir.v_name live_after)
                      && not (name_free_in v.Tir.v_name body)
                      (* Newtype/niche scrutinees share storage with their payload
@@ -1245,7 +1247,7 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
       let scrutinee_borrowed = match a with
         | Tir.AVar v ->
           StringSet.mem v.Tir.v_name live_after
-          || (needs_rc v.Tir.v_ty
+          || (needs_rc env v.Tir.v_ty
               && name_free_in v.Tir.v_name br.Tir.br_body)
           (* Tuples/records are [needs_rc = false]: Perceus never emits a
              DecRC/free for the aggregate itself, so its extracted fields are
@@ -1329,7 +1331,7 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
           borrowed_field_vars =
             if scrutinee_live_across_case then
               List.fold_left (fun s (v : Tir.var) ->
-                if needs_rc v.Tir.v_ty then StringSet.add v.Tir.v_name s else s
+                if needs_rc env v.Tir.v_ty then StringSet.add v.Tir.v_name s else s
               ) env.borrowed_field_vars br.Tir.br_vars
             else env.borrowed_field_vars }
       in
@@ -1345,7 +1347,7 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
          above, so they appear in [live_before_br] and the check below
          correctly suppresses EDecRC for borrowed fields. *)
       let body'' = List.fold_right (fun (v : Tir.var) body_acc ->
-        if needs_rc v.Tir.v_ty
+        if needs_rc env v.Tir.v_ty
            && not (StringSet.mem v.Tir.v_name live_before_br)
            && not (StringSet.mem v.Tir.v_name env.closure_fvs)
            && not (StringSet.mem v.Tir.v_name env.moved_vars)
@@ -1422,7 +1424,7 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
       in
       StringSet.fold (fun name body_acc ->
         match StringMap.find_opt name env.var_ctx with
-        | Some v when v.Tir.v_lin = Tir.Unr && needs_rc v.Tir.v_ty ->
+        | Some v when v.Tir.v_lin = Tir.Unr && needs_rc env v.Tir.v_ty ->
           Tir.ESeq (decrc_for env v (Tir.AVar v), body_acc)
         | _ -> body_acc
       ) dead_here body
@@ -1439,7 +1441,7 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
          Only free the scrutinee if the branch body does NOT use it directly —
          if the body uses it, ownership transfers into the body. *)
       let d_rc' = (match a with
-       | Tir.AVar v when needs_rc v.Tir.v_ty
+       | Tir.AVar v when needs_rc env v.Tir.v_ty
                       && not (StringSet.mem v.Tir.v_name live_after)
                       && not (name_free_in v.Tir.v_name d) ->
          Tir.ESeq (decrc_for env v (Tir.AVar v), d_rc)

@@ -82,7 +82,7 @@ let emit_raises_wrapper ctx ~fname ~ret_tir ~arg_pairs : string * string =
     "%s = getelementptr { i64, i64 }, ptr %s, i64 0, i32 0" rslot env);
   Llvm_ctx.emit ctx (Printf.sprintf "store i64 0, ptr %s" rslot);
   let t_ok = ok_payload_ty ret_tir in
-  let payload_llty = Llvm_ctx.llvm_ret_ty t_ok in
+  let payload_llty = Llvm_ctx.llvm_ret_ty ctx t_ok in
   let call_args =
     String.concat ", "
       (Printf.sprintf "ptr %s" env

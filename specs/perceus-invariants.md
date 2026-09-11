@@ -25,7 +25,7 @@ debugging a "works in the interpreter, aborts/leaks when compiled" report.
 
 ## 1. The two RC-relevance predicates: `needs_rc` vs `borrow_eligible`
 
-**Governing module: `lib/tir/rc_types.ml`.** This section summarizes; the
+**Governing module: `lib/tir/kind.ml`.** This section summarizes; the
 module doc's truth table is the single source — do not fork it into a second
 copy here.
 
@@ -39,7 +39,7 @@ constructor patterns:
   considered for the borrowed (non-owning) calling convention by the
   fixpoint in `lib/tir/borrow.ml`?
 
-The divergent set, exactly as `rc_types.ml` states it:
+The divergent set, exactly as `kind.ml` (formerly `rc_types.ml`) states it:
 
 | constructor | `needs_rc` | `borrow_eligible` |
 |---|---|---|
@@ -79,7 +79,7 @@ oversight:
   double-free warning below does not forbid this: that bug was about fields
   extracted from a *live* aggregate being independently freed.
 
-`rc_types.ml`'s module doc carries the full fix-history citations for each
+the module doc of `kind.ml` (formerly `rc_types.ml`) carries the full fix-history citations for each
 arm (Map.fold `TFn` crash, Gate.cast `TVar` UAF, the Toml `get_str`
 corruption for the `TTuple`/`TRecord` read path) — this document does not
 repeat them; changing any arm without reading that doc first reopens one of
@@ -664,8 +664,9 @@ Probe sources under the session scratchpad
    - `test_scrutinee_borrowed_cross_branch_no_double_dec`
      (`test/test_codegen.ml`) — present at HEAD, part of the same green
      codegen run.
-   - `rc_types` group (`test/test_codegen.ml`):
-     `test_rc_types_truth_table`, `test_rc_types_divergence_set_exact` —
+   - `kind` group (`test/test_kind.ml`, moved there from `test_codegen.ml`'s
+     `rc_types` group by the type-kinds refactor):
+     `test_truth_table`, `test_divergence_set_exact` —
      present at HEAD, pin §1's table directly; not independently
      re-probed here (they are the pin).
 

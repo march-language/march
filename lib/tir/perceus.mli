@@ -146,6 +146,7 @@ type env = {
   borrow_map : Borrow.borrow_map;
   type_defs : Tir.type_def list;
   collision_set : (string, string list) Hashtbl.t;
+  k_table : Kind.table;   (* the per-type table; see specs/2026-09-10-type-kinds-design.md *)
   extern_names : StringSet.t;
   current_fn_name : string;
   closure_fvs : StringSet.t;
@@ -161,7 +162,7 @@ val incrc_for :
   env -> Tir.var -> Tir.atom -> Tir.expr
 val decrc_for :
   env -> Tir.var -> Tir.atom -> Tir.expr
-val needs_rc : Tir.ty -> bool
+val needs_rc : env -> Tir.ty -> bool
 val is_apply_fn : string -> bool
 val vars_of_atom :
   Tir.atom -> Perceus_liveness.StringSet.t
@@ -179,7 +180,7 @@ val find_inc_vars :
   env -> Tir.atom list -> live_set -> Tir.var list
 val insert_rc_expr :
   env -> Tir.expr -> live_set -> Tir.expr * StringSet.t
-val dup_field_results : Tir.expr -> Tir.expr
+val dup_field_results : Kind.table -> Tir.expr -> Tir.expr
 val insert_apply_fn_clo_drop :
   repl:bool -> Tir.expr -> Tir.expr
 val insert_rc :
@@ -190,9 +191,10 @@ val elide_expr : Tir.expr -> Tir.expr
 val elide_cancel_pairs : Tir.fn_def -> Tir.fn_def
 val fbip_expr : Tir.expr -> Tir.expr
 val insert_fbip : Tir.fn_def -> Tir.fn_def
-val preprocess_fn : Tir.fn_def -> Tir.fn_def
+val preprocess_fn : k_table:Kind.table -> Tir.fn_def -> Tir.fn_def
 val perceus :
   ?repl:bool ->
   ?repl_vars:string list ->
   ?borrow_map:Borrow.borrow_map ->
+  ?k_table:Kind.table ->
   Tir.tir_module -> Tir.tir_module

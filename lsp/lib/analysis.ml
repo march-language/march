@@ -3420,8 +3420,8 @@ let run_tir_pass (a : t) : t =
              itself consults to decide which arguments need an EIncRC at a
              call site, so the hint reports the compiler's actual decision
              rather than a re-derivation of it. *)
-          ~before_perceus:(fun pre ->
-              borrow_snapshot := Some (March_tir.Borrow.infer_module pre, pre))
+          ~before_perceus:(fun ~k_table pre ->
+              borrow_snapshot := Some (March_tir.Borrow.infer_module ~k_table pre, pre, k_table))
           ~extra_roots:user_names
           ~decls:(March_tir.Alloc_contract.collect desugared)
           ~opt:true ~trmc:!March_tir.Trmc.enabled tir
@@ -3429,7 +3429,7 @@ let run_tir_pass (a : t) : t =
       let consume_modes =
         match !borrow_snapshot with
         | None -> []
-        | Some (borrow_map, tir) ->
+        | Some (borrow_map, tir, k_table) ->
           List.filter_map (fun (fn : Tir.fn_def) ->
                 if fn.Tir.fn_name = "" || fn.Tir.fn_name.[0] = '$' then None
                 else
@@ -3439,7 +3439,7 @@ let run_tir_pass (a : t) : t =
                            take. Skipping non-RC parameters is what keeps this hint
                            off every Int argument (see [consume_modes]). *)
                         (not (March_tir.Borrow.is_borrowed borrow_map fn.Tir.fn_name i))
-                        && March_tir.Rc_types.needs_rc p.Tir.v_ty)
+                        && March_tir.Kind.needs_rc_of k_table p.Tir.v_ty)
                       fn.Tir.fn_params
                   in
                   if List.exists (fun c -> c) consumes

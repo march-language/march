@@ -78,4 +78,5 @@ val emit_module :
   ?remote_sig_hashes:(string, string) Hashtbl.t ->
   ?emit_main:bool ->
   ?cap_attrib:(String.t * string) list ->
-  ?cap_decls:(string * string) list -> Tir.tir_module -> string
+  ?cap_decls:(string * string) list ->
+  ?k_table:Kind.table -> Tir.tir_module -> string

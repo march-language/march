@@ -28,7 +28,7 @@ let emit_task_await_unwrap ~emit_atom ctx (a : Tir.atom) : string * string =
     let inner_ty = match a with
       | Tir.AVar v ->
         (match v.Tir.v_ty with
-         | Tir.TCon ("Task", [inner]) -> llvm_ty inner
+         | Tir.TCon ("Task", [inner]) -> llvm_ty ctx inner
          | _ -> "ptr")
       | _ -> "ptr"
     in
@@ -101,7 +101,7 @@ let emit_task_await_unwrap ~emit_atom ctx (a : Tir.atom) : string * string =
      In ALL cases the correct field value is apply_ret == task[3] >> 1, and
      task[3] is always odd (trampoline sets the low bit), so a single
      unconditional ashr-1 of the freshly-allocated Ok payload (field 0, offset
-     16) is the exact inverse — for every llvm_ty (i64 / ptr / double are the
+     16) is the exact inverse — for every llvm_ty ctx (i64 / ptr / double are the
      only three it produces).  The i64 half mirrors task_await_unwrap
      (291f6b5f) and the await i64 fix (f89b8711); the ptr half fixes the
      heap-payload crash f89b8711's comment wrongly assumed was already correct.
@@ -153,7 +153,7 @@ let emit_task_await ~emit_atom ctx (a : Tir.atom) : string * string =
        that: it is balanced by the destructure's release. *)
     (match a with
      | Tir.AVar av when (match av.Tir.v_ty with
-                         | Tir.TCon ("Task", [inner]) -> llvm_ty inner = "double"
+                         | Tir.TCon ("Task", [inner]) -> llvm_ty ctx inner = "double"
                          | _ -> false) ->
        let bp = fresh ctx "tawbox" in
        emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" bp v2);

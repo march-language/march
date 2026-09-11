@@ -72,7 +72,7 @@ type avar_env = (string * Tir.var) list
     After defunctionalization, closures have type [TFn] or [TVar].
     Aliases of closure-typed variables must NOT be propagated: ECallPtr
     dispatch in llvm_emit is name-sensitive (top_fns / var_slot lookups). *)
-let is_closure_ty = function
+let is_indirect_callable_ty = function
   | Tir.TFn _ | Tir.TVar _ -> true
   | _ -> false
 
@@ -180,7 +180,7 @@ let rec cprop_expr ~changed (env : env) (avar : avar_env) (fenv : field_env)
     in
     (* P12: extend avar_env when RHS is a non-closure variable alias. *)
     let avar' = match rhs' with
-      | Tir.EAtom (Tir.AVar y) when not (is_closure_ty y.Tir.v_ty) ->
+      | Tir.EAtom (Tir.AVar y) when not (is_indirect_callable_ty y.Tir.v_ty) ->
         avar_add name y avar0
       | _ -> avar0
     in
