@@ -1,3 +1,10 @@
+> **Partially landed 2026-09-11.** The march-side half shipped: a
+> `repository_dispatch` workflow and the written two-repo rule; see
+> `specs/progress/2026-09-11-march-lean-dispatch.md`. What remains is (a) a repo
+> admin creating the `MARCH_LEAN_DISPATCH_TOKEN` secret and (b) the Lean-side
+> re-baseline against today's 303-fixture corpus (the `t170` name below no
+> longer matches the tree: it is now `t170_native_u8_arr_not_sendable`).
+
 # march-lean's differential oracle is out of sync with this repo's corpus
 
 Filed 2026-08-10, while recording R1 stage C in the sandbox ladder

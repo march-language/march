@@ -1,3 +1,8 @@
+> **Wiring fixed 2026-09-11** (`specs/progress/2026-09-11-quarantine-wiring-derived.md`):
+> the nightly derives its alias list from the dune files and `check-docs.sh`
+> Check E keeps this table's live rows equal to the defined `*_quarantined`
+> aliases. This file stays open because the two tests below are still dark.
+
 # Quarantined tests — coverage that is currently DARK (inventory, 2026-07-24)
 
 

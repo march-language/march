@@ -1,3 +1,18 @@
+> **Landed 2026-09-11.** `Resolver.resolve_imports` gained `?strict_parse`;
+> `bin/main.ml` passes `~strict_parse:!do_test`, so a `--compile --test` build
+> turns a discovered file that fails to PARSE into a positioned error
+> (`file:line:col: error: parse error (in a file discovered on MARCH_LIB_PATH;
+> …)`) and exits 1 with no binary, instead of dropping it with a `[lib]` stderr
+> note and running fewer tests with 0 failures. LSP, REPL and ordinary builds
+> keep the tolerant behaviour (an unparsable scratch file on the path must not
+> fail an unrelated entry). `forge test` needed no change: it already fails on
+> a non-zero compiler exit. Fixtures: `test/imports/test_sibling_parse_error/`
+> (must exit 1) and the `test_sibling_ok/` control (runs both tests), plus a
+> hermetic `forge test` case in `forge/test/test_build_check.ml`. Type errors
+> in a kept sibling were already fatal; this closes the parse half.
+> Design: `specs/2026-09-11-ci-tooling-fixes-design.md` §5. The original
+> filing follows.
+
 # forge test silently drops test modules that fail to compile
 
 `forge/lib/cmd_test.ml` (compiled path, ~163-192) picks `List.hd test_files`

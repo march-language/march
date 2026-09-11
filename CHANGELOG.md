@@ -11,6 +11,29 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A `--test` build no longer silently drops a sibling test file that fails
+  to parse.** `forge test` compiles one entry and discovers the rest via
+  `MARCH_LIB_PATH`; an unparsable sibling used to be dropped with a stderr
+  note, so the suite ran fewer tests and reported 0 failures. Under `--test`
+  it is now a positioned error and the build fails. Ordinary builds, the REPL
+  and the LSP keep tolerating unparsable files on the lib path.
+- **Cross-compilation now links `tweetnacl.c`.** The cross-compile driver's
+  runtime list omitted it (ed25519 for hot-reload ACTIVATE verification);
+  found by the new `scripts/check-runtime-sources.sh`.
+
+### Changed
+
+- **Pull requests must not carry `docs/pagefind/`.** The search index is
+  bot-owned; CI rejects a PR that touches it (fix: `git checkout origin/main --
+  docs/pagefind`). This ends the merge conflicts between any two docs PRs.
+- **`runtime/sources.list`** classifies every runtime C file by role, and CI
+  checks the compiler drivers, the JIT link list and every dune rule against it.
+- The nightly quarantine job derives its alias list from the dune files instead
+  of a hand list that had named three deleted aliases for a month.
+
+
 ## [0.4.0] - 2026-09-10
 
 ### Added

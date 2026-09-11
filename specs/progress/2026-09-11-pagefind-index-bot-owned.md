@@ -1,3 +1,16 @@
+> **Landed 2026-09-11.** The conflicts were self-inflicted: `ci.yml`'s
+> doc-lint ran `gen-docs-search-index.sh --check` as a PR gate, so every docs
+> PR had to regenerate the bot-owned index to go green (23 human vs 18 bot
+> commits touching it since 08-16). Now: on `pull_request` the job runs the
+> INVERSE gate (a PR touching `docs/pagefind/` fails with the one-line fix
+> `git checkout origin/main -- docs/pagefind`); off-PR `--check` is a warning,
+> since `sync-docs-search-index.yml` lands the regeneration minutes after a
+> merge and its own 3-attempt failure is the real red. Two PRs can no longer
+> both carry an index, so the conflict class is gone by construction. Header
+> of `gen-docs-search-index.sh` rewritten to say who writes the file.
+> Design: `specs/2026-09-11-ci-tooling-fixes-design.md` §2. The original
+> filing follows.
+
 # The committed Pagefind index conflicts between any two PRs that regenerate it
 
 Filed 2026-08-03, hit while merging #164.

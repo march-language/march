@@ -1174,6 +1174,45 @@
            (run %{exe:../bin/main.exe} test
                 imports/lib_path_ill_typed/lp_entry.march)))))
 
+; ── Regression: a --test build must NOT drop a sibling test file that fails to parse ──
+; `forge test` compiles ONE entry and relies on MARCH_LIB_PATH discovery for the
+; other test files. A discovered file that failed to PARSE used to be dropped
+; with a stderr note (the resolver's deliberate tolerance for unparsable
+; scratch files on a lib path), so the suite compiled, ran fewer tests, and
+; reported 0 failures. Under --test the resolver is now strict about it
+; (Resolver.resolve_imports ~strict_parse). Non-test builds keep the tolerance.
+; specs/2026-09-11-ci-tooling-fixes-design.md §5.
+(rule
+ (alias runtest)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (glob_files imports/test_sibling_parse_error/*.march))
+ (action (setenv MARCH_LIB_PATH imports/test_sibling_parse_error
+          (with-accepted-exit-codes 1
+           (run %{exe:../bin/main.exe} --compile --test -o test_sibling_parse_error_bin
+                imports/test_sibling_parse_error/test_a.march)))))
+
+; Control: the identical suite with a well-formed sibling compiles and runs BOTH
+; tests, so the rule above is red for the parse error and nothing else.
+(rule
+ (targets test_sibling_ok_bin test_sibling_ok.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (glob_files imports/test_sibling_ok/*.march))
+ (action
+  (progn
+   (setenv MARCH_LIB_PATH imports/test_sibling_ok
+    (run %{exe:../bin/main.exe} --compile --test -o test_sibling_ok_bin
+         imports/test_sibling_ok/test_a.march))
+   (with-stdout-to test_sibling_ok.out
+    (system "./test_sibling_ok_bin | tail -1")))))
+
+(rule
+ (alias runtest)
+ (action (diff imports/test_sibling_ok.expected test_sibling_ok.out)))
+
 ; ── Regression: an UNREFERENCED ill-typed lib module must NOT fail the build ──
 ; MARCH_LIB_PATH auto-discovery used to parse+typecheck EVERY .march file on
 ; the path regardless of reachability, so a single broken UNRELATED module
@@ -1384,14 +1423,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_default_args_nested native_default_args_nested.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/default_args_nested.march))
  (action
   (progn
@@ -1416,14 +1448,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_string_concat_n native_string_concat_n.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (source_tree ../stdlib)
        (file native/string_concat_n.march))
  (action
@@ -1455,14 +1480,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets cap_mock_io_bin cap_mock_io.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (source_tree ../stdlib)
        (file cap_mock/cap_mock_io.march))
  (action
@@ -1488,14 +1506,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets stream_replay_bin stream_replay.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (source_tree ../stdlib)
        (file session/stream_replay.march))
  (action
@@ -1523,14 +1534,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets cap_mock_actor_bin cap_mock_actor.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (source_tree ../stdlib)
        (file cap_mock/cap_mock_actor.march))
  (action
@@ -1553,14 +1557,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets cap_mock_actor_two_bin cap_mock_actor_two.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (source_tree ../stdlib)
        (file cap_mock/cap_mock_actor_two.march))
  (action
@@ -1583,14 +1580,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets cap_mock_supervised_bin cap_mock_supervised.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (source_tree ../stdlib)
        (file cap_mock/cap_mock_supervised.march))
  (action
@@ -1613,14 +1603,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets cap_mock_supervised_nested_bin cap_mock_supervised_nested.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (source_tree ../stdlib)
        (file cap_mock/cap_mock_supervised_nested.march))
  (action
@@ -1647,14 +1630,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets cap_mock_clock_bin cap_mock_clock.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (source_tree ../stdlib)
        (file cap_mock/cap_mock_clock.march))
  (action
@@ -1677,14 +1653,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_cap_dictionary native_cap_dictionary.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/cap_dictionary.march))
  (action
   (progn
@@ -1710,14 +1679,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_shadowed_builtin_name native_shadowed_builtin_name.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/shadowed_builtin_name.march))
  (action
   (progn
@@ -1739,14 +1701,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_lazy_niche native_lazy_niche.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/lazy_niche.march)
        (file ../stdlib/lazy_niche_probe.march))
  (action
@@ -1771,14 +1726,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_boxed_adt_float_field native_boxed_adt_float_field.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/boxed_adt_float_field.march))
  (action
   (progn
@@ -1794,14 +1742,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_boxed_adt_float_field_opt0 native_boxed_adt_float_field_opt0.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/boxed_adt_float_field.march))
  (action
   (progn
@@ -1827,14 +1768,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_boxed_adt_atom_field_not_boxed native_boxed_adt_atom_field_not_boxed.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/boxed_adt_atom_field_not_boxed.march)
        (source_tree ../stdlib))
  (action
@@ -1851,14 +1785,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_boxed_adt_atom_field_not_boxed_opt0 native_boxed_adt_atom_field_not_boxed_opt0.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/boxed_adt_atom_field_not_boxed.march)
        (source_tree ../stdlib))
  (action
@@ -1889,14 +1816,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_qctor_collision native_qctor_collision.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (glob_files_rec native/qctor_collision/*.march)
        (source_tree ../stdlib))
  (action
@@ -1914,14 +1834,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_qctor_collision_opt0 native_qctor_collision_opt0.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (glob_files_rec native/qctor_collision/*.march)
        (source_tree ../stdlib))
  (action
@@ -1946,14 +1859,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_ring_buf_ops native_ring_buf_ops.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/ring_buf_ops.march)
        (source_tree ../stdlib))
  (action
@@ -1980,14 +1886,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_string_search_edge_cases native_string_search_edge_cases.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/string_search_edge_cases.march)
        (source_tree ../stdlib))
  (action
@@ -2013,14 +1912,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_nested_derive_json native_nested_derive_json.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/nested_derive_json.march)
        (source_tree ../stdlib))
  (action
@@ -2051,14 +1943,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_actor_call_late_reply native_actor_call_late_reply.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/actor_call_late_reply.march)
        (source_tree ../stdlib))
  (action
@@ -2100,14 +1985,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_task_burst_await native_task_burst_await.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/task_burst_await.march))
  (action
   (progn
@@ -2127,11 +2005,13 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; values: waiter parks forever, completer wakes nobody. Fixed with seq_cst
 ; on both pairs (24-in-500 hangs -> 1-in-1000), plus a wake permit in
 ; march_sched_wake/march_sched_park_self closing the residual
-; wake-while-still-RUNNING drop (-> 0-in-3000). Full detail: specs/todos.md
-; "Scheduler fork-join". The quarantine alias is kept as a convenience for
-; soak-testing (`dune build @test/task_burst_await_quarantined`).
+; wake-while-still-RUNNING drop (-> 0-in-3000). Full detail: specs/todos/2026-07-24-quarantined-tests-coverage-that-is-currently-dark-inventory-2026.md
+; "Scheduler fork-join". A soak alias is kept as a convenience
+; (`dune build @test/task_burst_await_soak`); it is NOT a quarantine alias --
+; the test is on `runtest` below -- so the nightly's derived quarantine loop
+; (which greps for `*_quarantined`) does not count it as dark.
 (rule
- (alias task_burst_await_quarantined)
+ (alias task_burst_await_soak)
  (action (diff native/task_burst_await.expected native_task_burst_await.out)))
 
 (rule
@@ -2161,14 +2041,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_signal_watch native_signal_watch.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/signal_watch.march)
        (source_tree ../stdlib))
  (action
@@ -2222,14 +2095,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_as_pattern native_as_pattern.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/as_pattern.march))
  (action
   (progn
@@ -2267,14 +2133,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_niche_concrete_payload_drop native_niche_concrete_payload_drop.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (source_tree ../stdlib)
        (file native/niche_concrete_payload_drop.march))
  (action
@@ -2291,14 +2150,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_record_pattern native_record_pattern.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/record_pattern.march))
  (action
   (progn
@@ -2322,14 +2174,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_nested_record_field_capture native_nested_record_field_capture.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/nested_record_field_capture.march))
  (action
   (progn
@@ -2616,12 +2461,13 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; march_scheduler.c's march_signal_drain call sites) and the raising
 ; thread's own subsequent code, touching overlapping memory (allocator/GC)
 ; rather than just interleaving output. Same general class as the open
-; scheduler-deadlock P0 in specs/todos.md (heisenbug: not yet isolated to
+; scheduler-deadlock P0 in the inventory todo below (heisenbug: not yet isolated to
 ; an exact missing sync edge) but a distinct symptom — tracked as a
 ; separate entry there. Un-quarantine (restore `(alias runtest)` below)
 ; once the dispatch race is fixed. Runnable manually via
 ; `dune build @test/signal_term_suppress_quarantined`.  Full quarantine
-; inventory (what coverage this leaves dark): specs/todos.md.
+; inventory (what coverage this leaves dark):
+; specs/todos/2026-07-24-quarantined-tests-coverage-that-is-currently-dark-inventory-2026.md.
 (rule
  (alias signal_term_suppress_quarantined)
  (action (diff native/signal_term_suppress.expected native_signal_term_suppress.out)))
@@ -4710,15 +4556,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_ffi_blocking native_ffi_blocking.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_ffi.c) (file ../runtime/march_ffi.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/ffi_blocking.march))
  (action
   (progn
@@ -4734,15 +4572,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_ffi_variant native_ffi_variant.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_ffi.c) (file ../runtime/march_ffi.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/ffi_variant.march))
  (action
   (progn
@@ -4759,15 +4589,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_ffi_codec native_ffi_codec.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_ffi.c) (file ../runtime/march_ffi.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/ffi_codec.march) (file native/ffi_codec.c))
  (action
   (progn
@@ -4785,15 +4607,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_ffi_raise native_ffi_raise.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_ffi.c) (file ../runtime/march_ffi.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/ffi_raise.march))
  (action
   (progn
@@ -4810,15 +4624,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_ffi_upcall native_ffi_upcall.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_ffi.c) (file ../runtime/march_ffi.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/ffi_upcall.march))
  (action
   (progn
@@ -5286,15 +5092,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_ffi_float native_ffi_float.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_ffi.c) (file ../runtime/march_ffi.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/ffi_float.march))
  (action
   (progn
@@ -5311,15 +5109,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_ffi_optres native_ffi_optres.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_ffi.c) (file ../runtime/march_ffi.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/ffi_optres.march) (file native/ffi_optres.c))
  (action
   (progn
@@ -5336,15 +5126,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_ffi_codec2 native_ffi_codec2.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_ffi.c) (file ../runtime/march_ffi.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/ffi_codec2.march) (file native/ffi_codec2.c))
  (action
   (progn
@@ -5360,15 +5142,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_remote_ref_hashes native_remote_ref_hashes.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
-       (file ../runtime/march_remote_registry.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/remote_ref_hashes.march))
  (action
   (progn
@@ -5385,16 +5159,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_node_call_loopback native_node_call_loopback.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
-       (file ../runtime/march_http.c) (file ../runtime/march_http.h)
-       (file ../runtime/march_remote_registry.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/node_call_loopback.march)
        (file ../stdlib/node_call.march)
        (file ../stdlib/node_rpc.march)
@@ -5427,15 +5192,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_node_discovery native_node_discovery.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
-       (file ../runtime/march_http.c) (file ../runtime/march_http.h)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/node_discovery.march)
        (file ../stdlib/node_identity.march)
        (file ../stdlib/cluster_auth.march)
@@ -5494,16 +5251,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_rpc_auto_enroll native_rpc_auto_enroll.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
-       (file ../runtime/march_http.c) (file ../runtime/march_http.h)
-       (file ../runtime/march_remote_registry.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/rpc_auto_enroll.march)
        (file ../stdlib/node_call.march)
        (file ../stdlib/node_rpc.march)
@@ -5535,14 +5283,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_march_prefixed_local native_march_prefixed_local.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/march_prefixed_local.march))
  (action
   (progn
@@ -5566,14 +5307,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_shadow_selfref_let native_shadow_selfref_let.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/shadow_selfref_let.march))
  (action
   (progn
@@ -5594,14 +5328,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_tagged_int_rc native_tagged_int_rc.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/tagged_int_rc.march)
        (source_tree ../stdlib))
  (action
@@ -5618,14 +5345,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_closure_scalar_abi native_closure_scalar_abi.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/closure_scalar_abi.march)
        (source_tree ../stdlib))
  (action

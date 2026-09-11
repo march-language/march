@@ -1,3 +1,20 @@
+> **Landed 2026-09-11.** `runtime/sources.list` classifies all 25 runtime
+> `.c` files by role (`core` / `http` / `hcr` / `unit-test-only` / `wasm`, plus
+> a `jit` tag), and `scripts/check-runtime-sources.sh` (in CI's doc-lint job,
+> macOS-bash-3 compatible) polices the hand lists against it: every file
+> listed once; `bin/main.ml` and `bin/toolchain.ml` name every core/http/hcr
+> file and no arena file; `test/test_helpers.ml`'s JIT list covers every
+> `jit` file; every `%{cc}` dune rule names the same set in `(deps)` and its
+> action; every `march --compile` rule globs `../runtime/*.c` or names every
+> driver-linked file. Landing it found one real gap, `bin/toolchain.ml`
+> (cross-compile) never linked `tweetnacl.c`, now fixed, and 52 `--compile`
+> rules (44 in `test/dune`, 8 in `demo/dune`) that under-declared their runtime
+> deps, all converted to the two globs. Red controls: an unlisted `.c`, a
+> dropped `(deps)` entry in a `%{cc}` rule, each fails naming the file or rule.
+> Generation from the manifest is deferred until the roles have been stable.
+> Design: `specs/2026-09-11-ci-tooling-fixes-design.md` §4. The original
+> filing follows.
+
 # Adding a runtime `.c` file requires editing 6+ hand-maintained lists
 
 **Filed:** 2026-08-05

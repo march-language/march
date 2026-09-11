@@ -975,7 +975,9 @@ let collect_lib_files = March_resolver.Resolver.collect_lib_files
     lib/resolver (also used by the REPL and the LSP), so editor
     diagnostics, REPL loads, and forge builds resolve modules identically. *)
 let resolve_imports ~source_file m =
-  March_resolver.Resolver.resolve_imports ~source_file m
+  (* A `--test` build is strict about discovered files that fail to parse:
+     see Resolver.resolve_imports's [strict_parse] doc. *)
+  March_resolver.Resolver.resolve_imports ~strict_parse:!do_test ~source_file m
 
 (** Format [filename] in-place.  Returns true if the file was changed. *)
 let fmt_file filename =

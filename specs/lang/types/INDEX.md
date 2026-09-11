@@ -1,5 +1,14 @@
 # Typing corpus index (t01–t141 accept, t01–t142 reject) <!-- doc-lint:ignore-count: accept/reject share one numbering pool with no reuse across sides, so the highest id on each side is NOT that side's file count (123 accept, 121 reject; see the Result line below) -->
 
+**Two-repo rule.** This corpus is also checked by
+[march-language/march-lean](https://github.com/march-language/march-lean), an
+independent Lean implementation of the ERROR-level checks. Adding a check at
+ERROR level, or a new `reject/` fixture, is therefore a change to two
+repositories: after the merge lands, `.github/workflows/march-lean-dispatch.yml`
+fires a `repository_dispatch` at march-lean; confirm that run is green, or file
+a ledgered skip there for the fixture it cannot yet decide. A march change that
+is never mirrored leaves the oracle silently disagreeing with the corpus.
+
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
 `specs/lang/types/reject/*.march`) to the typing rule(s) it anchors in

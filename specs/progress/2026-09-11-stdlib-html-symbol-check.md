@@ -1,3 +1,15 @@
+> **Landed 2026-09-11.** `scripts/check-docs.sh` Check D (gated by
+> `CHECK_STDLIB_HTML=1`) reads every generated `docs/docs/stdlib/<Mod>.html`
+> back against its `stdlib/*.march` source: each top-level public `fn`/`type`
+> must have its `id="fn-…"`/`id="type-…"` anchor on the page named after the
+> `mod` declaration. It runs in `gen-stdlib-docs.yml` BEFORE the bot pushes (so
+> the bot cannot publish a page set that omits a symbol) and in the nightly
+> `stdlib-docs-smoke`; not on PRs, where the pages are stale by design until the
+> bot runs. 2140 symbols checked green on landing; red control: renaming one
+> anchor fails naming module and symbol. The bot workflow also gained an
+> `if: failure()` step summary. Design: `specs/2026-09-11-ci-tooling-fixes-design.md` §1.
+> The original filing follows.
+
 # CI should assert the generated stdlib HTML is in sync with `stdlib/*.march`
 
 Filed 2026-09-08, split out of

@@ -74,6 +74,13 @@ jobs:
       - name: Regenerate docs search index
         run: scripts/gen-docs-search-index.sh
 
+      # The bot must not publish a page set that omits a public symbol: compare
+      # each regenerated page to its stdlib source before anything is pushed
+      # (scripts/check-docs.sh Check D; see
+      # specs/2026-09-11-ci-tooling-fixes-design.md §1).
+      - name: Check every public stdlib symbol is on its generated page
+        run: CHECK_STDLIB_HTML=1 scripts/check-docs.sh
+
       - name: Commit regenerated docs
         run: |
           # The generator clones march_doc into ./march_doc; never commit that.
@@ -90,3 +97,13 @@ jobs:
           else
             echo "docs/docs/stdlib and docs/pagefind already up to date — nothing to commit."
           fi
+
+      - name: Explain a red run on the commit that caused it
+        if: failure()
+        run: |
+          {
+            echo "## Stdlib docs regeneration FAILED"
+            echo "Triggered by \`${GITHUB_SHA}\`. The published stdlib pages were NOT updated;"
+            echo "the site is stale until this is fixed. Usual causes: march_doc needs updating"
+            echo "for a compiler change, or a generated page omits a public symbol (Check D)."
+          } >> "$GITHUB_STEP_SUMMARY"
