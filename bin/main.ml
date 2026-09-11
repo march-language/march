@@ -2090,7 +2090,22 @@ let compile filename =
     (* Phase 1: AST after parse+desugar — user file only (no stdlib). *)
     (if !dump_phases then
        phases := March_dump.Dump.ast_phase user_ast "parse" :: !phases);
-    let tir = March_tir.Lower.lower_module ~type_map ~test_mode:!do_test ~hot_reload:(Option.is_some !hot_reload_prefix) desugared in
+    let tir =
+      try March_tir.Lower.lower_module ~type_map ~test_mode:!do_test ~hot_reload:(Option.is_some !hot_reload_prefix) desugared
+      with Failure msg ->
+        (* A lowering failure is either a positioned rejection of something
+           the compiled backend does not support (message already of the form
+           `file:line:col: error: ...`, e.g. the interpreter-only supervisor
+           DSL) or an internal invariant violation. Either way the user should
+           see one clean line and rc=1, not `Fatal error: exception Failure`
+           plus a backtrace and rc=2. *)
+        let is_positioned =
+          try ignore (Str.search_forward (Str.regexp_string ": error: ") msg 0); true
+          with Not_found -> false in
+        if is_positioned then Printf.eprintf "%s\n%!" msg
+        else Printf.eprintf "march: internal error while lowering to TIR: %s\n%!" msg;
+        exit 1
+    in
     (* Capability-passing analysis dump.  Immediately after lowering is the one
        point where a TIR fn's name is still exactly its source name, which is
        what the analysis keys on. *)

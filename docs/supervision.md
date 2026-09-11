@@ -476,6 +476,12 @@ children), and the strategy is passed as the atom `:one_for_one` rather than the
 [Actors → App Entry Point]({{ site.baseurl }}/docs/actors/) for the same note from the
 actor side.
 
+**Interpreter-only.** The `app` / `Supervisor.spec` / `worker` /
+`dynamic_supervisor` DSL runs under `march run` and `march test`; the compiled
+backend rejects a call to any of them with a positioned error (it used to fail
+at link time with `Undefined symbols: _worker`). A compiled program declares its
+children in a `supervise do … end` block.
+
 ---
 
 ## Strategies for Supervision Design

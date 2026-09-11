@@ -312,6 +312,12 @@ mod MyService do
 end
 ```
 
+**Interpreter-only.** This value-level DSL (`app`, `Supervisor.spec`, `worker`,
+`dynamic_supervisor`) runs under `march run` and `march test`; the compiled
+backend rejects a call to any of them with a positioned error rather than the
+former link-time `Undefined symbols: _worker`. Compiled programs declare children
+in a `supervise do … end` block.
+
 ---
 
 ## Strategies for Supervision Design

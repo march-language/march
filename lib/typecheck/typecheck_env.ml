@@ -181,6 +181,11 @@ type env = {
   errors  : Err.ctx;
   pending_constraints : constraint_ list ref; (** Accumulated use-site constraints *)
   type_map : (Ast.span, ty) Hashtbl.t;
+  record_names_snapshot : (string * string option) list;
+  (** The display-only record-name index ([Typecheck_types._record_names]) as
+      it stood when this env was produced by a check. A check seeded from this
+      env reloads the table from it, so the index is per-check, not
+      per-process; see [record_names_dump]. *)
   refs : ref_record list ref;
   (** Resolved call/ctor/type references accumulated during checking, for
       `forge search --callers`. Shared (mutable) across all env copies
@@ -589,7 +594,7 @@ type env = {
 let make_env errors type_map = {
   vars = StrMap.empty; types = StrMap.empty; ctors = StrMap.empty; records = StrMap.empty;
   level = 0; lin = [];
-  errors; pending_constraints = ref []; type_map;
+  errors; pending_constraints = ref []; type_map; record_names_snapshot = [];
   refs = ref []; current_decl = ref "";
   scheme_witnesses = Hashtbl.create 64;
   inst_witnesses = Hashtbl.create 256;
@@ -1135,15 +1140,14 @@ let suggest_module_name (name : string) : string option =
      with _ -> ());
     !best
 
-(** Forward ref filled after [surface_ty] and [generalize] are defined.
-    Injects interface method bindings for cross-module [ExInterface] exports. *)
-let inject_iface_exports_ref
-  : (string -> March_modules.Module_registry.module_exports -> env -> env) ref =
-  ref (fun _mod_name _exports env -> env)
-
 (** Load a module's exports into an env, returning the updated env.
     Injects "Mod.name" bindings for functions/values, types, and constructors.
-    Interface method bindings are handled separately via inject_iface_exports_ref. *)
+    Cross-module interface exports are NOT injected here: registry-loaded
+    modules are stdlib (which declares no interfaces) and REPL fragments, whose
+    interface methods [prebind_interface_decl] already binds under both
+    [Iface.m] and [Mod.Iface.m]. A forward hook meant to do it here never had a
+    reader and was removed 2026-09-11
+    (specs/2026-09-11-correctness-fixes-design.md §4). *)
 let load_module_into_env (mod_name : string) (exports : March_modules.Module_registry.module_exports) (env : env) : env =
   List.fold_left (fun env entry ->
     let open March_modules.Module_registry in
@@ -1212,7 +1216,17 @@ let load_module_into_env (mod_name : string) (exports : March_modules.Module_reg
         let arg_tys = List.init _ctor_arity (fun i ->
           Ast.TyVar { txt = Printf.sprintf "$a%d" i; span = Ast.dummy_span }) in
         let ci = {
-          ci_type = mod_name ^ "." ^ parent_type;
+          (* BARE, not [mod_name ^ "." ^ parent_type]: March has one global
+             type namespace and a module-declared type's canonical identity
+             is its bare name — every in-file constructor site uses
+             [ci_type = name.txt], and a qualified annotation `File.FileError`
+             canonicalizes to bare `FileError` in [surface_ty]. This arm was
+             the one place minting a QUALIFIED type, so `Err(File.NotFound(p))`
+             produced `File.FileError` and could never unify with the bare
+             `FileError` every annotation and builtin denotes ("expected
+             `FileError` but got `File.FileError`"). Found via
+             specs/2026-09-11-correctness-fixes-design.md §2. *)
+          ci_type = parent_type;
           ci_params = param_names;
           ci_arg_tys = arg_tys;
           ci_module = mod_name;
@@ -1230,7 +1244,7 @@ let load_module_into_env (mod_name : string) (exports : March_modules.Module_reg
         } in
         { env with ctors = add_ctor qname ci env.ctors }
       end
-    | ExInterface _ -> env  (* handled by inject_iface_exports_ref after surface_ty is available *)
+    | ExInterface _ -> env  (* not injected; see the doc comment above *)
   ) env exports.me_entries
 
 (** Try to resolve a qualified variable by loading its module.

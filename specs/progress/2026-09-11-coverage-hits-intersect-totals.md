@@ -1,3 +1,16 @@
+> **Landed 2026-09-11.** The todo's likely cause was wrong: the numerator WAS
+> file-filtered. The evaluator records every evaluated expression, test bodies
+> included, while `walk_decl` skips `DTest` bodies on purpose, so a test
+> file's hits outnumbered its walked nodes (487%). `Coverage.collect_totals`
+> now returns the walked KEY sets (expressions; `:T`/`:F`/`:armN` branches,
+> the evaluator's own keys) and the numerator is the recorded hits
+> intersected with them (`count_hits_in`), so `hit <= total` holds by
+> construction whatever the walk skips. The reproducer now reads 100%.
+> Test: `test_eval.ml` "coverage hits never exceed totals" (RED pre-fix; also
+> asserts the raw per-file count still exceeds the walked total, i.e. the old
+> bug's mechanism, and that the intersection is non-vacuous). Design:
+> `specs/2026-09-11-correctness-fixes-design.md` §6. Original filing follows.
+
 # `--coverage` reports an expression percentage above 100%
 
 Filed 2026-08-03. Found while fixing the interpreter FFI drop bug

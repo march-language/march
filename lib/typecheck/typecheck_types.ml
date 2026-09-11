@@ -241,6 +241,22 @@ let reset_tvar_display_names () =
    lowering, or codegen — so it cannot change type-checking semantics. *)
 let _record_names : (string, string option) Hashtbl.t = Hashtbl.create 64
 
+(** The index is process-global but must be per-check: a record declared in
+    one [check_module] call must not decide how a later, unrelated check
+    renders its types (it changed whether the "Two distinct types are both
+    named" note fired, depending on which test ran first). [check_module_core]
+    reloads the table from its seed env's [record_names_snapshot] at entry and
+    snapshots it into the returned env at exit, so every check starts from
+    exactly the state its seed was produced in: stdlib entries survive (they
+    are in the seed), a previous check's user entries do not.
+    specs/2026-09-11-correctness-fixes-design.md §1. *)
+let record_names_dump () : (string * string option) list =
+  Hashtbl.fold (fun k v acc -> (k, v) :: acc) _record_names []
+
+let record_names_load (snapshot : (string * string option) list) : unit =
+  Hashtbl.reset _record_names;
+  List.iter (fun (k, v) -> Hashtbl.replace _record_names k v) snapshot
+
 (** Build the field-name signature for a record's field list. *)
 let record_field_sig (flds : (string * 'a) list) =
   flds

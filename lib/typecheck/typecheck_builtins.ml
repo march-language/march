@@ -877,6 +877,16 @@ let builtin_bindings : (string * scheme) list =
                 TCon ("Task", [a])))));
     ("task_cancel_by_id",      poly1 (fun a -> TArrow (TCon ("Task", [a]), t_unit)));
     (* File I/O builtins.
+       The error/stat types are spelled BARE (`FileError`, `FileStat`) on
+       purpose: March has one global type namespace and a type declared inside
+       a module (`ptype FileError` in `mod File`) has its bare name as its
+       canonical identity — a qualified annotation `File.FileError`
+       canonicalizes to it (see the TyCon arm of Typecheck_unify.surface_ty).
+       What used to break `Err(File.NotFound(p))` against these results was
+       the qualified-constructor path minting a QUALIFIED `ci_type`
+       (`File.FileError`), fixed in Typecheck_env.load_module_into_env.
+       specs/2026-09-11-correctness-fixes-design.md §2 (whose "qualify the
+       tables" choice was wrong for this reason).
        All of these fail with a concrete `File.FileError` value at runtime
        (see eval.ml's file_error_of_unix/file_error_of_sys) — never an
        arbitrary caller-chosen type — so the error type is Mono, not a

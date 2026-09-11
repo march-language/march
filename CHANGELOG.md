@@ -13,6 +13,36 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`Err(File.NotFound(p))` can be matched on a file error.** The `file_*` /
+  `dir_*` builtins return `File.FileError`, but a cross-module constructor was
+  registered under a qualified parent type (`File.FileError`) while every
+  annotation and builtin signature denotes the canonical bare name, so the two
+  never unified ("expected `FileError` but got `File.FileError`") and a bare
+  `NotFound(p)` resolved to the DNS constructor of the same name. Compiled
+  `to_string` of a file error also printed `#<tag:N>` instead of the
+  constructor, because the descriptor table was keyed only by the lowered
+  qualified name.
+- **The interpreter's `file_rename` error now names the path**, as the
+  compiled runtime and every other file builtin already did.
+- **A record type declared in one typecheck no longer changes a later,
+  unrelated one's diagnostics.** The display-only record-name index was
+  process-global; it is now carried per-check on the typing environment. This
+  affected the test suite, the LSP and the REPL, where several checks share one
+  process.
+- **`march test --coverage` no longer reports above 100%.** The evaluator
+  records every evaluated expression, test bodies included, while the
+  denominator deliberately skips them; the numerator is now intersected with
+  the walked node set, so hits can never exceed the total.
+- **The formatter breaks a too-wide list or record literal across lines.** It
+  had a column budget but no multi-line renderer for literals, so a long list
+  of records was emitted as one enormous line. A literal that fits is
+  unchanged. A single element wider than the budget still overflows.
+- **A compiled call to `worker` / `dynamic_supervisor` / `Supervisor.spec` /
+  `Supervisor.start_child` is rejected with a positioned error** naming the
+  `supervise do … end` alternative, instead of failing at link time with
+  `Undefined symbols: _worker`. That value-level supervisor DSL is
+  interpreter-only. A user function named `worker` is unaffected.
+
 - **A `--test` build no longer silently drops a sibling test file that fails
   to parse.** `forge test` compiles one entry and discovers the rest via
   `MARCH_LIB_PATH`; an unparsable sibling used to be dropped with a stderr

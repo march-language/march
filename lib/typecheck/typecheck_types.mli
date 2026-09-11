@@ -140,6 +140,11 @@ val _tvar_ctr : int ref
 val reset_tvar_display_names : unit -> unit
 val _record_names : (string, string option) Hashtbl.t
 val register_record_name : name:string -> string list -> unit
+
+(** Snapshot / reload of [_record_names], making the display-only index
+    per-check rather than per-process; see the .ml doc comment. *)
+val record_names_dump : unit -> (string * string option) list
+val record_names_load : (string * string option) list -> unit
 val pp_ty : ?parens:bool -> ty -> string
 val pp_ty_pretty : ?indent:int -> ?width:int -> ty -> string
 val find_arg_mismatch :

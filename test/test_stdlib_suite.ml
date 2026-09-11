@@ -10694,14 +10694,12 @@ let test_compiled_file_open_err_is_real_fileerror () =
 
    All thirteen cases live in one March program so the whole table costs a
    single compile.  Interpreted output is the oracle: it prints the friendly
-   ctor form (NotFound("...")).  Compiled Show cannot resolve the *name* of
-   the bare, unqualified "FileError" type these builtins are declared with
-   -- a separate, still-open gap noted in the same todo -- so it prints
-   "#<tag:N>"; that N is exactly the assertion we want, since it is the
-   cell's real tag under stdlib/file.march's declaration order (NotFound=0,
-   Permission=1, IsDirectory=2, NotEmpty=3, IoError=4).  Pre-fix, the
-   compiled line was the raw errno string leaking through a misread
-   march_string, which matches neither. *)
+   ctor form (NotFound("...")), and since 2026-09-11 the compiled line must
+   match it byte for byte (the builtins declare the qualified
+   `File.FileError`, so compiled Show resolves the ctor name; before that it
+   printed "#<tag:N>" and this test accepted it).  Pre-fix of the
+   representation bug, the compiled line was the raw errno string leaking
+   through a misread march_string, which matches neither. *)
 let test_compiled_file_dir_err_are_real_fileerrors () =
   let main_exe = find_main_exe () in
   let tmp = Filename.temp_file "march_filedirerr" "" in
@@ -10783,8 +10781,10 @@ let test_compiled_file_dir_err_are_real_fileerrors () =
            "compiled %s builds a real FileError cell tagged %d (%s), not a misread march_string (got %S)"
            label tag ctor compiled_line)
         true
-        (compiled_line = interp_line
-         || compiled_line = Printf.sprintf "#<tag:%d>" tag))
+        (* Byte-identical to the interpreter now: the builtins declare the
+           qualified `File.FileError`, so compiled Show resolves the ctor
+           descriptor and prints `NotFound("...")`, not `#<tag:N>`. *)
+        (compiled_line = interp_line))
       (List.combine cases interp_lines) compiled_lines
 
 (* Regression (P0, perceus.ml same_arity): the FBIP arity check compared a

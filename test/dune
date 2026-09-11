@@ -18,7 +18,7 @@
  (name march_test_eval)
  (wrapped false)
  (modules test_eval)
- (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
+ (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_coverage march_tir march_repl march_debug march_scheduler march_cas march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
 
 (library
  (name march_test_codegen)
@@ -3922,6 +3922,38 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/actor_stop_tree.expected interp_actor_stop_tree.out)))
+
+; ── file_*/dir_* declare the qualified File.FileError: ctor match on both backends ──
+; specs/2026-09-11-correctness-fixes-design.md §2.
+(rule
+ (targets native_file_error_ctor_match native_file_error_ctor_match.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/file_error_ctor_match.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_file_error_ctor_match
+        native/file_error_ctor_match.march)
+   (with-stdout-to native_file_error_ctor_match.out
+        (system "./native_file_error_ctor_match")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/file_error_ctor_match.expected native_file_error_ctor_match.out)))
+
+(rule
+ (targets interp_file_error_ctor_match.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/file_error_ctor_match.march))
+ (action
+  (with-stdout-to interp_file_error_ctor_match.out
+    (run %{exe:../bin/main.exe} native/file_error_ctor_match.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/file_error_ctor_match.expected interp_file_error_ctor_match.out)))
 
 ; Teardown ORDER, which stdout cannot show: a child that printed at shutdown
 ; would race main on the compiled backend, and until actors get a terminate

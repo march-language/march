@@ -1,0 +1,27 @@
+-- Application code can branch on a file error's constructor, on both
+-- backends. The file_*/dir_* builtins declare the QUALIFIED `File.FileError`
+-- (stdlib/file.march's ptype), so the annotation resolves, `File.NotFound(p)`
+-- matches, and compiled to_string prints the constructor, not `#<tag:N>`.
+-- Before 2026-09-11 the tables said bare `FileError`, which no declaration
+-- owned: the annotation was "cannot find", and a bare `NotFound(p)` pattern
+-- resolved to Dns.DnsError's constructor of the same name.
+-- specs/2026-09-11-correctness-fixes-design.md §2.
+mod FileErrorCtorMatch do
+  needs IO
+
+  fn classify(r : Result(String, File.FileError)) : String do
+    match r do
+      Ok(_) -> "ok"
+      Err(File.NotFound(p)) -> "notfound:" ++ p
+      Err(_) -> "other"
+    end
+  end
+
+  fn main(_cap : Cap(IO)) do
+    println(classify(file_read("/nonexistent/zzz")))
+    match dir_list("/nonexistent/zzz") do
+      Ok(_) -> println("ok")
+      Err(e) -> println("dir: " ++ to_string(e))
+    end
+  end
+end

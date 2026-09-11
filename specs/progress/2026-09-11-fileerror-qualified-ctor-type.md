@@ -1,3 +1,31 @@
+> **Landed 2026-09-11.** Root cause was not the bare `FileError` in the
+> builtin tables (that spelling is correct: March has one global type
+> namespace, a module-declared type's canonical identity is its bare name, and
+> a qualified annotation `File.FileError` canonicalizes to it in `surface_ty`).
+> It was `load_module_into_env`'s cross-module constructor arm minting a
+> QUALIFIED parent type (`ci_type = "File.FileError"`), so a value produced by
+> `Err(File.NotFound(p))` could never unify with the bare `FileError` every
+> annotation and builtin denotes — "expected `FileError` but got
+> `File.FileError`". That arm now uses the bare parent type, matching every
+> in-file constructor site. A first attempt that qualified both builtin tables
+> instead is recorded in the design spec as the wrong turn.
+>
+> Compiled `to_string` of a file error also printed `#<tag:N>`: the ctor
+> descriptor table was keyed only by the lowered qualified name
+> (`File.FileError`) while call sites look it up under the static bare name.
+> `Llvm_ctor_desc.assign_ids` now aliases the bare suffix to the same id.
+>
+> Tightened `test_stdlib_suite.ml`'s thirteen-case table to require the
+> compiled line to equal the interpreted one byte for byte (it used to accept
+> `#<tag:N>`) — RED pre-fix on all thirteen. That tightening then exposed a
+> SEPARATE backend divergence, now also fixed: the interpreter's `file_rename`
+> reported a bare strerror message where the compiled runtime and every other
+> file builtin carry `"<path>: <strerror>"` (OCaml's `Sys.rename` does not
+> include the path, unlike `open_in_bin`). New fixture
+> `test/native/file_error_ctor_match.march` runs on both backends.
+> Design: `specs/2026-09-11-correctness-fixes-design.md` §2. Original filing
+> follows.
+
 # file_*/dir_* builtins declare a bare `FileError` that no ptype declares
 
 Split out of `specs/progress/2026-09-08-file-dir-builtins-fileerror-representation-fix.md`

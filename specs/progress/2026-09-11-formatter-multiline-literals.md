@@ -1,3 +1,17 @@
+> **Landed 2026-09-11.** The todo's diagnosis was half right: `format.ml` had
+> an 80-column budget (`should_break`) but list and record literals had no
+> multi-line renderer, so the budget was never consulted for them. New
+> `emit_stmt` arms break a too-wide list one element per line and a too-wide
+> record one field per line, recursing so a too-wide record inside a broken
+> list breaks one level deeper; a literal that fits stays inline byte for
+> byte. Honest residual: a single over-wide atom (one long string, one `++`
+> chain) still yields an over-width line — nothing splits atoms. Tests in
+> `test_fmt.ml` ("wide literals"): the todo's list-of-records case (RED
+> pre-fix: one line), the stays-inline REJECT witness, a nested record, a
+> `let`-bound record, each asserting the output is a formatting fixpoint.
+> The 34 existing round-trips stay green. Design:
+> `specs/2026-09-11-correctness-fixes-design.md` §5. Original filing follows.
+
 # The formatter collapses a multi-line literal onto one enormous line
 
 `[P2]` - [ ] **`march fmt` turns a readable 654-line file into 10 lines, one of them 19,509

@@ -14667,6 +14667,61 @@ let test_string_concat_n_borrows_all_args () =
   Alcotest.(check bool) "string_concat3 has no arg 3" false
     (March_tir.Borrow.is_extern_borrowed "string_concat3" 3)
 
+(** Compiling a call to the interpreter-only supervisor DSL used to fail at
+    LINK time (`Undefined symbols: _worker`, a C symbol, no March span). It is
+    now rejected at lowering with a positioned diagnostic. The interpreter
+    witnesses for the DSL (test_helpers.ml's app/Supervisor.spec cases) are
+    untouched, and test_compiled_worker_local_fn_still_compiles below is the
+    witness that a USER function named `worker` still compiles.
+    specs/2026-09-11-correctness-fixes-design.md §3. *)
+let test_compiled_interpreter_only_supervisor_dsl_rejected () =
+  let main_exe = find_main_exe () in
+  let project_root = march_project_root () in
+  let tmp = Filename.temp_file "march_worker_dsl" "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "worker_dsl.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod WorkerDsl do\n\
+    \  needs IO.Console\n\
+    \  actor Counter do\n\
+    \    state { n : Int }\n\
+    \    init  { n: 0 }\n\
+    \    on Inc() do { n: state.n + 1 } end\n\
+    \  end\n\
+    \  fn main(_c : Cap(IO.Console)) do\n\
+    \    let _spec = worker(Counter)\n\
+    \    println(\"unreachable compiled\")\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let bin = Filename.concat tmp "worker_dsl_bin" in
+  match compile_march_raw ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | `Ok _ -> Alcotest.fail "a compiled call to worker() must be rejected, not linked"
+  | `Skipped -> ()
+  | `Failed (rc, output, _) ->
+    Alcotest.(check bool) "non-zero exit" true (rc <> 0);
+    Alcotest.(check bool) "diagnostic names the interpreter-only DSL" true
+      (ir_contains output "only the interpreter runs");
+    Alcotest.(check bool) "diagnostic carries the March span, not a C symbol" true
+      (ir_contains output "worker_dsl.march:");
+    Alcotest.(check bool) "no link-time symbol error" false
+      (ir_contains output "Undefined symbols")
+
+(** A user-defined `worker` shadows the builtin at typecheck time, so lowering
+    must not reject it (it consults the current module's fn table first). *)
+let test_compiled_worker_local_fn_still_compiles () =
+  assert_compiled_interp_parity
+    ~name:"march_worker_local_fn"
+    ~src:"mod W do\n\
+    \  needs IO.Console\n\
+         \  fn worker(n) do n * 2 end\n\
+         \  fn main(_c : Cap(IO.Console)) do println(int_to_string(worker(21))) end\n\
+          end\n"
+    ~expected:"42"
+    ()
+
 let codegen_suites =
   [
       ( "vectorize_check", [
@@ -15608,6 +15663,12 @@ let codegen_suites =
             test_entry_bulk_import_resolves_partial_qualified;
           Alcotest.test_case "registry record's bare-named sibling field type resolves" `Quick
             test_registry_record_field_bare_sibling_type_resolves;
+        ] );
+      ( "interpreter_only_dsl", [
+          Alcotest.test_case "compiled worker() call is rejected with a span" `Quick
+            test_compiled_interpreter_only_supervisor_dsl_rejected;
+          Alcotest.test_case "a user fn named worker still compiles" `Quick
+            test_compiled_worker_local_fn_still_compiles;
         ] );
       ( "js_pipeline", [
           Alcotest.test_case "simple program compiles"      `Quick test_js_pipeline_simple_program_compiles;
