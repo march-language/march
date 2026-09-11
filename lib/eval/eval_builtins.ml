@@ -219,6 +219,29 @@ let base_env : env =
   ; ("kill", VBuiltin ("kill", function
         | [VPid pid] -> crash_actor_with_reason pid "killed" Killed; VUnit
         | _ -> eval_error "kill: expected Pid"))
+  ; ("actor_stop", VBuiltin ("actor_stop", function
+        | [VPid pid; VInt timeout_ms] -> VBool (stop_actor pid timeout_ms)
+        | _ -> eval_error "actor_stop: expected (Pid, timeout_ms)"))
+  ; ("actor_pid_indices", VBuiltin ("actor_pid_indices", function
+        | [] | [VUnit] ->
+          (* Every live actor's pid, ascending — the same order and the same
+             shape the compiled runtime's march_actor_pid_indices returns, so
+             a monitoring loop reads identically on both backends. *)
+          let pids =
+            Hashtbl.fold (fun pid inst acc ->
+                if inst.ai_alive then pid :: acc else acc)
+              actor_registry []
+          in
+          List.fold_left (fun acc p -> VCon ("Cons", [VInt p; acc]))
+            (VCon ("Nil", []))
+            (List.sort (fun a b -> compare b a) pids)
+        | _ -> eval_error "actor_pid_indices: expected no arguments"))
+  ; ("actor_is_draining", VBuiltin ("actor_is_draining", function
+        | [VPid pid] ->
+          (match Hashtbl.find_opt actor_registry pid with
+           | Some inst -> VBool inst.ai_draining
+           | None      -> VBool false)
+        | _ -> eval_error "actor_is_draining: expected Pid"))
   ; ("is_alive", VBuiltin ("is_alive", function
         | [VPid pid] ->
           (match Hashtbl.find_opt actor_registry pid with
@@ -1136,6 +1159,14 @@ let base_env : env =
   ; ("string_concat3", VBuiltin ("string_concat3", function
         | [VString a; VString b; VString c] -> VString (a ^ b ^ c)
         | _ -> eval_error "string_concat3: expected three strings"))
+  ; (* Variadic: desugar emits this for a 4+ operand interpolation, so the
+       argument list is whatever that chain had.  See
+       [Typecheck_builtins.variadic_builtins]. *)
+    ("string_concat_n", VBuiltin ("string_concat_n", fun args ->
+        let parts = List.map (function
+          | VString s -> s
+          | _ -> eval_error "string_concat_n: expected strings") args in
+        VString (String.concat "" parts)))
   ; ("string_join", VBuiltin ("string_join", function
         | [lst; VString sep] ->
           let rec to_strings = function
@@ -3976,7 +4007,7 @@ let base_env : env =
         | [VPid pid; msg] ->
           (match Hashtbl.find_opt actor_registry pid with
            | None -> VUnit
-           | Some inst when not inst.ai_alive -> VUnit
+           | Some inst when not (mailbox_accepts inst) -> VUnit
            | Some inst ->
              (match msg with
               | VCon _ | VAtom _ -> mailbox_enqueue inst msg; VUnit
@@ -4000,7 +4031,9 @@ let base_env : env =
           sentinel this is index 0 = the actor's FIRST handler.
      Returns Ok(result) or Err(reason). *)
   ; ("actor_call", VBuiltin ("actor_call", function
-        | [VPid pid; msg; VInt _timeout_ms] ->
+        | [VPid pid; msg; VInt timeout_ms] ->
+          let call_started_ms = Unix.gettimeofday () *. 1000. in
+          let deadline_ms = call_started_ms +. float_of_int timeout_ms in
           let ref_id = !next_call_ref in
           next_call_ref := ref_id + 1;
           let sentinel_tag = match msg with
@@ -4046,17 +4079,40 @@ let base_env : env =
               | Some hname ->
                 mailbox_enqueue inst (VCon (hname, [VInt ref_id]));
                 !run_scheduler_hook ();
+                (* timeout_ms is a REAL wall-clock deadline, not decoration.
+                   The interpreter's scheduler runs a handler to completion
+                   inside the pass above, so "a reply is present" says nothing
+                   about when it arrived: a handler that burned ten seconds
+                   before replying used to be reported as answering in time
+                   even against a 1ms timeout, and that is precisely the case
+                   test/native/actor_call_late_reply.march is built on.
+                   actor_reply timestamps each reply; compare it here.
+
+                   A late reply is DISCARDED, not left behind: the interpreter
+                   correlates by a private ref_id so it could never be
+                   misdelivered to a later call, but leaving it in the table
+                   would leak one entry per timed-out call. *)
+                let answered_at = Hashtbl.find_opt pending_reply_times ref_id in
                 (match Hashtbl.find_opt pending_replies ref_id with
                  | Some result ->
                    Hashtbl.remove pending_replies ref_id;
-                   VCon ("Ok", [result])
+                   Hashtbl.remove pending_reply_times ref_id;
+                   let in_time = match answered_at with
+                     | Some t -> t <= deadline_ms
+                     | None   -> true   (* no timestamp: treat as in time *)
+                   in
+                   if in_time then VCon ("Ok", [result])
+                   else VCon ("Err", [VString "call timed out"])
                  | None ->
+                   Hashtbl.remove pending_reply_times ref_id;
                    VCon ("Err", [VString "no reply (timeout or unhandled Call)"]))))
         | _ -> eval_error "actor_call: expected (Pid, message, Int)"))
   (* actor_reply: store a reply for a pending call.  Called from actor handlers. *)
   ; ("actor_reply", VBuiltin ("actor_reply", function
         | [VInt ref_id; result] ->
-          Hashtbl.replace pending_replies ref_id result; VUnit
+          Hashtbl.replace pending_replies ref_id result;
+          Hashtbl.replace pending_reply_times ref_id (Unix.gettimeofday () *. 1000.);
+          VUnit
         | _ -> eval_error "actor_reply: expected (Int, value)"))
   (* actor_send_after/actor_cancel_timer (specs/progress/2026-08-12-language-
      level-timers.md). Real wall-clock scheduling: the entry sits in

@@ -328,6 +328,33 @@ A large regression vs OCaml points to closure dispatch or intermediate-list GC o
 
 ---
 
+## bench/vector_math.march — Vec3 integrator loop (unboxed aggregates)
+
+**Command:** `step(0, 3_000_000, ...)` — a toy integrator building five `Vec3`
+temporaries per iteration (`vadd`, `vscale`, `vdot`, `vcross`).
+**Expected output:** `6853874.21103`
+
+| Feature exercised | Notes |
+|-------------------|-------|
+| `Repr.Unboxed` | `Vec3(Float, Float, Float)` is an LLVM struct value, not a cell |
+| Struct-value ABI | vectors are passed and returned in registers across `vadd`/`vcross` |
+| `Llvm_case` unboxed arm | every operation destructures with `extractvalue` |
+| Allocator throughput | under the boxed representation this is 15M `march_alloc(40)` |
+
+**Comparison baseline:** its own boxed representation, via the escape hatch:
+`MARCH_NO_UNBOX=1 march --compile --opt 2 bench/vector_math.march -o /tmp/vmb`.
+**What to watch:** the two builds must print the same number. The unboxed build
+should be roughly an order of magnitude faster — the loop is deliberately free
+of any allocation except the vectors, so the whole gap is allocator cost. If
+the gap closes, a heap slot has crept back in: check for `march_alloc` in the
+emitted IR for `step` (`--emit-llvm`), and for a `coerce` boxing at a slot
+boundary (`Llvm_ctx.llvm_field_ty`).
+
+Measured on an M-series Mac, `--opt 2`, min of 5 runs:
+`unboxed 20.8 ms` vs `boxed 828.3 ms`.
+
+---
+
 ## bench/list_producers.march — list-producer traversal count (TRMC)
 
 **Command:** `List.range(1, 20000)` threaded through `repeat_n(step, 2000)`, `step = List.map(xs, fn x -> x + 1)`
@@ -1194,6 +1221,7 @@ to the features it exercises. Quick reference:
 | `HashMap.*` / `Enum.uniq` / `Enum.frequencies` | `hash_map_bench` |
 | `RRB.*` / `Parallel.*` / `task_await_unwrap` i64 | `rrb_bench` |
 | `lib/tir/trmc.ml` / TRMC / `lib/tir/perceus_fbip.ml` | `list_producers` |
+| `lib/tir/repr.ml` / value representation / `llvm_field_ty` | `vector_math` |
 | JsonStream / streaming JSON | `json_stream` (tiny-token), `json_stream_strings` (string-heavy) |
 | actor / mailbox / scheduler / supervision changes | `scripts/actor-load.sh` (all four scenarios: `fanin`, `churn`, `callstorm`, `crashloop`) |
 | interpreter (`lib/eval/eval.ml`) / REPL-JIT (`lib/jit/`) changes | `bench/run_interp_bench.sh` (interp vs. compiled vs. repl-clang vs. repl-orc A-B over `bench/interp/`) |

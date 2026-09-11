@@ -11,7 +11,266 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-10
+
 ### Added
+
+- **Compiled `to_string`/`println` render a user ADT's constructor, not
+  `#<tag:N>`.** A boxed constructor cell carries a per-type tag and nothing
+  else, so the compiled backend's type-erased formatter had no name, arity or
+  field types to work from and printed the raw tag; `~H` interpolation of an
+  ADT had the same gap. The compiler now emits a constructor descriptor for
+  every declared variant and record type it lowers, and the runtime walks it,
+  so `to_string(Circle(7))` is `Circle(7)` compiled as well as interpreted —
+  nested fields, lists and records included. Values in a genuinely erased slot,
+  and `Option`-shaped or single-field-wrapper types (which have no cell of
+  their own), still render `#<tag:N>`.
+
+- **Per-child restart types on `supervise` blocks.** A child may be declared
+  `restart transient` (a crash restarts it, `kill()` retires it for good) or
+  `restart temporary` (never restarted); the default stays `permanent`, so
+  existing blocks are unchanged. Retiring a child spends none of the
+  supervisor's `max_restarts` budget, and a `temporary` child swept up by a
+  `one_for_all` / `rest_for_one` batch restart is stopped without being brought
+  back. Previously every supervised child was permanent and `kill()` on one
+  simply restarted it, with no way to stop a worker that had finished its job.
+  Note that March's `permanent` is deliberately not OTP's: no restart type
+  restarts a child that returned normally.
+
+- **`Actor.list()`: enumerate every live actor.** Monitoring code can now find
+  the actor that is behind, instead of only the ones it can name in advance:
+  `mailbox_size(pid)` needed a `Pid` with no way to obtain one, so the
+  load-shedding loop documented in the overload-resilience guide could not
+  actually be closed. The result is a snapshot in spawn order, and the guide
+  now shows it in the shedding loop. Still missing, and still open: a
+  growing-mailbox alarm, per-actor state inspection, and tracing.
+
+- **`Actor.stop(pid, timeout_ms)`: graceful shutdown.** A stopped actor accepts
+  no new messages (`send` returns `None`), works off whatever is already
+  queued, and then dies a normal death — which no restart type restarts. It
+  returns only once the actor has actually stopped, so a shutdown sequence
+  reads as straight-line code, and `Actor.is_draining(pid)` tells "shutting
+  down" apart from "dead". Previously the only way to stop an actor was
+  `kill`, which discards the mailbox, so rolling a node lost exactly the
+  requests that were waiting. Stopping a supervisor stops its children first,
+  in reverse declaration order, each with its own `shutdown` budget from the
+  child spec (`Worker w shutdown 5000`, or `infinity` / `brutal`; the default
+  is 5 seconds and `kill` never consults it). No `terminate`-style callback
+  yet: an actor can finish its queued messages, but cannot run cleanup of its
+  own.
+
+- **`backoff base <ms> cap <ms> jitter <n>%`** on a `supervise` block tunes the
+  delay between repeated restarts of the same child. All three are optional and
+  default to `25 / 5000 / 25`, the constants the runtime previously hardcoded,
+  so an existing supervision tree's timing is unchanged. `jitter 0%` makes the
+  delays exactly reproducible for tests.
+
+### Changed
+
+- **String interpolation is linear at every operand size.** A four-or-more
+  operand interpolation now compiles to a single `string_concat_n` that sums
+  every part's length once, allocates once, and copies each byte once, instead
+  of a fold of three-way concats that re-copied the accumulated prefix at every
+  step. That fold was quadratic with large operands: with 4 KB operands, 32 of
+  them went from 0.54s to 0.06s. Short operands, the case the fold was chosen
+  for, got faster too rather than regressing, from 0.23s to 0.07s at the same
+  count. Nothing changes below four operands, where a single concat is already
+  one allocation and one copy.
+
+- **Tail-recursion-modulo-cons is now on by default.** A recursive call that is
+  the direct argument of a constructor in tail position — the natural way to
+  write `map`, `filter` or a tree rebuild — compiles to a loop that reuses list
+  cells in place, instead of one stack frame and one retained cell per element.
+  This is a correctness change as much as a speed one: such a function
+  previously overflowed the stack on a long list when compiled (a 500k-element
+  natural-style `map` exited 138), and now runs. On a 20k-element list mapped
+  2000 times it is 4.8x faster than the same source compiled without the
+  transform. `--no-trmc`, or `MARCH_NO_TRMC=1`, restores the old behaviour.
+  Existing code is unaffected: the stdlib's list producers are hand-written in
+  accumulator form, which the transform does not touch, so every benchmark in
+  `bench/` emits byte-identical code either way.
+
+### Fixed
+
+- **A String read through a nested record projection and captured by a
+  constructor was moved instead of dup'd (compiled only).** `h.identity.name`
+  lowers to `let r = h.identity in r.name`; Perceus's borrowed-field lookahead
+  walked that chain but had no arm for it *ending* in a projection, so the
+  binding was classified as owned and, say, `Str(h.identity.name)` took the
+  string without an `inc_rc` — the constructor's later drop then released the
+  record owner's string. The one-level `h.nonce` read beside it was always
+  correct. This is what made `test/native/node_discovery.march` die
+  intermittently with exit 138 / SIGTRAP: the inlined `Handshake.encode_hello`
+  freed `my_id.node_id`, which each node later msgpack-encoded from freed,
+  reused memory. Pinned by `test/native/nested_record_field_capture` (exit 138
+  3/3 pre-fix, deterministic — heap strings plus allocator churn) and a
+  post-Perceus TIR snapshot; `node_discovery` went from 8/40 to 0/100 crashes
+  in an interleaved same-runtime A/B.
+
+- **`from_json` decodes to the type the caller asked for.** It dispatches on
+  its RESULT type, which no value at the call site reveals, so with two or
+  more `derive Json` types in one module the interpreter ran whichever
+  decoder was derived LAST - every earlier type's decode failed with an error
+  indistinguishable from bad input - and the compiled backend refused to
+  build the program at all. The typechecker now resolves the target per call
+  site and both backends follow it. A call whose result type nothing pins is
+  still reported rather than guessed.
+
+- **`derive Json`'s island bridges work.** The auto-generated `update_json`
+  and `render_json` are generated only for a module with both a `State` and a
+  `Msg` deriving Json, which is exactly the case the bug above broke, so
+  `update_json` silently returned its input unchanged. Its 161-test suite is
+  now part of the test run.
+
+- **A missing `Show` impl is no longer reported as an ambiguity.**
+  `println(x)` on a type with no `Show` failed to compile with "ambiguous
+  interface-method call to `show`: 20 implementations are in scope", listing
+  twenty types none of which was the argument's, and never mentioning the
+  `derive` that fixes it. Such a call now renders through the constructor names
+  above, matching the interpreter, so it compiles. Where an interface method
+  genuinely has no fallback, the diagnostic names the type and how to supply
+  the implementation instead of listing every impl in scope.
+
+- **Compiled `File` / `Dir` errors are real `FileError` values again.** Twelve
+  builtins — `file_read`, `file_write`, `file_append`, `file_delete`,
+  `file_copy`, `file_rename`, `file_stat`, `dir_list`, `dir_mkdir`,
+  `dir_mkdir_p`, `dir_rmdir` and `dir_rm_rf` — are typed
+  `Result(_, FileError)`, but the compiled runtime put a bare string in the
+  `Err` payload instead of a `FileError`, so a natively compiled program that
+  inspected the payload read a string's header as if it were a `FileError`.
+  Interpreted runs were always correct, so the misread only appeared once a
+  program was compiled. Each builtin now reports the same error kind its
+  interpreted counterpart does, including the kinds a single shared mapping
+  would have flattened: writing to a directory reports `IsDirectory`, and
+  removing a non-empty directory reports `NotEmpty`. This continues the fix
+  that landed for `file_open` alone. (Printing such a payload with
+  `to_string` still shows `#<tag:N>` rather than the constructor name when
+  compiled, and these payloads still cannot be matched by constructor name in
+  March source; both remain open.)
+- **`Actor.call`'s timeout is enforced in the interpreter.** It was bound and
+  never read, so a handler that took ten seconds "answered in time" against a
+  1ms timeout, while one that did not reply within a single scheduler pass was
+  reported as a timeout however large the timeout was. Replies are now
+  timestamped and compared against a real wall-clock deadline, and a late reply
+  is discarded. This is the path `forge test` and `march file.march` actually
+  run, so it is where most users meet `Actor.call`. (The interpreter still
+  cannot abort a handler mid-run: a call whose deadline passes waits for the
+  handler to finish before returning `Err`.)
+- **`scripts/run-tests.sh` names the suite that failed.** Every runner failure
+  collapsed into one `FAILED` bit and the lone line
+  `One or more suites FAILED.` — no runner name, no exit status, no signal.
+  That permits a misleading result, because a runner can print
+  `Test Successful` and still exit non-zero (a launcher failure after the
+  summary, a timeout kill, a signal), leaving output with no `[FAIL]` line
+  anywhere. Failures are now attributed at the point of failure and listed in
+  the summary with the original status decoded (`killed by signal 9
+  (SIGKILL)`, `TIMED OUT after 2400s`), and a suite whose executable is missing
+  is reported as `NOT RUN` instead of counting as a pass. The exit code and the
+  `One or more suites FAILED.` line are unchanged.
+
+- **A stdlib file that fails to parse is now a hard error instead of a missing
+  module.** Loading a stdlib source that did not parse printed one unbannered
+  line to stderr and then continued *without that module*, so what the user
+  actually saw was an unrelated ``Unknown module `Session` `` from the
+  typechecker, pointing nowhere near the cause — and the stderr line was easy
+  to miss, since it has no `-- ERROR --` banner and is printed before the
+  program's own diagnostics. The parse error is now rendered through the same
+  banner formatter user files get, naming the file and position, and the
+  compiler exits.
+
+- **`doc` before a `type` or `proof cap` says what is wrong.** It was a bare
+  parse error whose caret landed on the following declaration under the generic
+  "I got stuck here". It now reports ``` `doc` goes before a function; use a
+  `--` comment here. ``` with a hint. `doc` attaches to `fn`/`pfn` only; type
+  and `proof cap` declarations have no doc slot.
+
+- **Native arrays carry a header tag.** `native_arr_alloc` left the tag at `0`,
+  an ordinary ADT constructor index, so every generic walker treated a
+  `NativeU8Arr` as a cell of pointer fields and read its payload as pointers.
+  Arrays now carry `MARCH_NATIVE_ARR_TAG`, and the cross-heap message copier
+  (`copy_value`) copies them by byte length instead of by field count. Latent
+  today, because native arrays are barred from actor messages; a prerequisite
+  for lifting that bar.
+
+### Added
+
+- **Refinement predicates can name a zero-argument constant function.**
+  `fn size_x() : Int do 128 end` may be called inside a predicate
+  (`{Int | 0 <= _ && _ < size_x()}`) and is checked exactly as the literal
+  `128` would be, including derived constants (`2 * size_x()`), `Bool`
+  constants, and qualified spellings (`16 * World.size()`). A program can now
+  name an array dimension once and keep static bounds checking on everything
+  indexed by it instead of freezing the literal into every refinement. A
+  zero-argument function whose body does not fold to a literal draws a warning
+  at the predicate that says why.
+
+- **`--refine-audit`**: a refinement coverage audit, answering "does the
+  checker even look at this declared refinement?" as a separate question
+  from `--refine-report`'s "was this obligation proved?". Every declared
+  refinement in a module is classified Enforced, Inert (warned), or
+  Unenforced, with a per-position reason for every Unenforced site,
+  including a refinement a multi-head function's clause merge drops
+  entirely or a default-argument function relocates to a mangled name no
+  plain call can reach (compared against the pre-desugar declaration list,
+  not just the post-desugar one). A swept baseline over the corpus
+  `test/native/*.march` and `stdlib/*.march` finds 63 declared refinements
+  today, all Enforced (`test/refine_audit/corpus.baseline`, ratcheted in CI
+  beside the existing refinement obligation ratchet, plus a ceiling on the
+  corpus's own Unenforced count that a baseline regeneration cannot
+  bypass); a second, deliberately non-empty fixture set at
+  `test/refine_audit/holes/` guards against the audit itself silently going
+  vacuous. Known unenforced positions (a lambda's own parameter, a
+  block-level `fn`'s parameter and return, a non-adoptable `impl` method's
+  parameter, an actor's state field and handler parameter, a multi-head or
+  default-argument function's parameter) are documented in
+  `docs/refinement-types.md` and filed as `specs/todos/` entries with
+  reproducers.
+- **`@[no_alloc(transient)]`** — a weaker allocation contract that states
+  "nothing this function allocates SURVIVES the call". A frame loop that
+  allocates a dozen cells and frees all of them before returning has that
+  property and cannot state it with the bare form; `transient` accepts it,
+  including when the allocation happens in a callee whose result the annotated
+  function drops. It fails when a function returns something it allocated,
+  writes one into an object it did not allocate, or hands one to an actor, a
+  `Vault`, a spawned task, an `extern` or an unknown closure — and when
+  anything it calls does. An amortized growth path (a buffer that reallocates
+  its storage and keeps it) is retained and so still rejected. The language
+  server reports it at the function name and shows `✓ no_alloc(transient)` when
+  it holds; `forge fix --contracts` now inserts whichever form actually holds,
+  preferring the stronger one.
+
+- **Stack promotion through a call.** Escape analysis used to treat every call
+  argument as escaping. It now promotes a value whose only use is an argument
+  to a function in the same program that provably does not retain the pointer
+  it receives — one that destructures it, reads its fields and returns
+  something else. Storing it, returning it, capturing it in a closure, sending
+  it to an actor and handing it to an `extern` all still count as escaping, and
+  a closure passed to its own apply function is never promoted. Borrow
+  inference also stopped marking a parameter *owned* just because a SCALAR
+  field extracted from it met a builtin: for a variant with no heap-carrying
+  field anywhere there is no aliasing hazard for that rule to guard against,
+  and being owned is what made the callee free a cell the caller could have
+  kept in its frame.
+
+- **Unboxed small scalar aggregates.** A variant with exactly one constructor
+  whose fields are all `Int`, `Float` or `Bool` — two to four of them — is now
+  represented inline: `Vec3(Float, Float, Float)` is three doubles in
+  registers, with no heap cell, no object header and no reference counting.
+  Constructing one is not an allocation, so a function like `fn forward(yaw,
+  pitch) : Vec3` can carry `@[no_alloc]`, which was impossible before (nothing
+  was dying for reuse to take over, and the value escapes through its return).
+  Semantics are unchanged: pattern matching, equality, `Show`, and passing such
+  a value to a closure, an actor or a generic all behave exactly as before, and
+  wherever the value is *stored* (a constructor or record field, a tuple, a
+  closure capture, a message) it is boxed into the same cell it always was —
+  reported by `@[no_alloc]` as the allocation it is. A vector-math benchmark
+  (`bench/vector_math.march`, 3M iterations building five vectors each) runs in
+  20.8 ms against 828.3 ms for the boxed representation. That win is for
+  vectors that stay in locals, parameters and returns; a program that stores
+  its aggregates inside other heap values pays a boxing there instead and sees
+  no change in allocation count. A type named in an
+  `extern` signature keeps the boxed representation program-wide (see
+  `docs/ffi.md`), and `MARCH_NO_UNBOX=1` restores it everywhere.
 
 - **Allocation contracts (`@[no_alloc]`).** A per-function contract checked on
   the compiled program, after reference counting and escape analysis, so a
@@ -20,7 +279,7 @@ git log is authoritative for exact commits.
   `@[no_alloc(warn)]` reports a warning instead of an error and
   `@[no_alloc(assume)]` marks a closure or `extern` wrapper as trusted.
   `--no-opt` downgrades a failure to a warning naming the flag, and a
-  TRMC-eligible failure points at `--trmc`. The language server reports the
+  TRMC-eligible failure under `--no-trmc` says so. The language server reports the
   failure at the function name, shows `✓ no_alloc` when the contract holds,
   and offers an "Add `@[no_alloc]`" quick fix; `march --compile
   --report-contracts` and `forge fix --contracts` insert the attribute on
@@ -71,12 +330,146 @@ git log is authoritative for exact commits.
   lost all parallelism. Opt-in; the default is unchanged. Procs spawned by
   `main` are not pinned; with a single scheduler the variable is a no-op.
 
+### Changed
+
+- **The default scheduler-thread count now tracks the machine.** March ran
+  **4** OS scheduler threads by default on every machine — four on a four-core
+  laptop and four on a 96-core server — so 4 was the de-facto parallelism
+  limit of any program that had not set `MARCH_NUM_SCHEDULERS`, and nothing
+  said so. The default is now **one scheduler per online CPU**, clamped to
+  `MARCH_MAX_SCHEDULERS` (64). `MARCH_NUM_SCHEDULERS=N` still pins a count and
+  `=auto` still asks for one-per-CPU explicitly; both behave exactly as
+  before. A build may still pin the default with
+  `-DMARCH_NUM_SCHEDULERS=N`, and a pin wins over auto — the C scheduler test
+  harnesses depend on that, since their premise is a specific thread count and
+  an auto default would make them vacuous on a single-core box. Measured on a
+  14-core M3 Max: the same CPU-bound `pmap_n` program goes from 5 OS threads
+  and 4499 ms to 15 threads and 2487 ms with no source or flag change.
+
+  **The count follows the container, not the host.** `sysconf` reports the
+  machine's CPUs and ignores both ways a container narrows them, so the
+  default is derived from the smallest of the online count, the CPU affinity
+  mask (`docker --cpuset-cpus`, k8s CPU pinning) and the cgroup CPU quota
+  (`docker --cpus`, k8s CPU limits, cgroup v2 and v1). Without that, a program
+  pinned to one CPU would have started one thread per HOST core — worse than
+  the flat 4 it replaced. Verified in Docker: `--cpuset-cpus=0` and `--cpus=1`
+  each resolve to 1 scheduler while `sysconf` still reports 14.
+
 ### Fixed
+
+- **A closure environment was freed shallowly, so every captured value
+  leaked.** Releasing a lambda's environment freed the cell and left what the
+  lambda had captured allocated forever. A thousand closures each capturing a
+  1 MB array, called once and dropped, held 1,073 MB resident; they now hold
+  9.5 MB. A capturing closure's own release now records whether it was the one
+  that freed the environment, and releases the captures at the function's tails
+  on that path — so the captures stay valid for the body that borrows them, and
+  the environment's own lifetime is unchanged. The release is emitted only for
+  closures whose environment provably owns what it captured: a closure that is
+  only ever invoked locally (a join point, an immediately-applied lambda)
+  borrows its captures, and releasing those would be a double free. A closure
+  released without ever being applied is still freed shallowly.
+- **`@[measure]` on a function no predicate could ever translate is now an
+  error at the annotation.** A zero-argument or multi-parameter `@[measure]`
+  used to be accepted by the predicate-vocabulary check and dropped by the
+  measure preamble, so following the "annotate the function `@[measure]`"
+  warning on a constant silenced the warning and changed nothing else: every
+  call site kept filing a "has no SMT translation" hint. The two gates now
+  agree; the error names the remedy (a constant needs no annotation).
+- **`MARCH_NUM_SCHEDULERS` was a silent ceiling, not a setting.** The
+  environment variable could only ever *lower* the OS scheduler-thread count:
+  a request above the compile-time default (4) was dropped without a word, so
+  `MARCH_NUM_SCHEDULERS=14` ran four threads and reported nothing. Every
+  parallel-scaling measurement taken on a machine with more than four cores
+  was therefore comparing four threads against four threads, and CPU-bound
+  `pmap`/`pmap_n` work looked like it plateaued at ~4x when it had simply
+  stopped being given threads. The variable is now a real request, honoured up
+  to `MARCH_MAX_SCHEDULERS` (a compile-time bound, default 64, that sizes the
+  runtime's scheduler table); `MARCH_NUM_SCHEDULERS=auto` asks for one
+  scheduler per online CPU. A request the build cannot satisfy is still
+  clamped but now warns on stderr naming both the request and the maximum, and
+  a malformed or non-positive value is reported instead of being silently
+  reinterpreted. The compile-time default is unchanged at 4, so no program's
+  behaviour changes unless it sets the variable. Measured on a 14-core M3 Max
+  (64 CPU-bound `pmap_n` tasks, medians of 3): 1984 ms at 1 thread, 342 ms at
+  4, 118 ms at 10, 105 ms at 14, 109 ms at 20. The old code resolved every
+  request of 4 or more to 4, i.e. it produced the 342 ms row and never left
+  it — a ~5.8x ceiling where the real span is ~18.9x. (Measured under load
+  average ~170; the ratios are inflated by contention for the machine, so the
+  shape rather than the magnitude is the result.)
+
+- **Reading a field of a borrowed value no longer refcounts it.** A field
+  projected out of a scrutinee that is alive for the whole `match` — a
+  borrowed parameter, or any value still needed after the match — and then
+  used only at borrowed positions was bracketed by an `inc_rc`/`dec_rc` pair
+  that nothing needed: the parent already holds the reference, and the
+  projection never escapes the arm. Under the scheduler every refcount
+  operation is atomic, so a one-field wrapper such as `Chunk(NativeU8Arr)`
+  turned a read-only access to data shared between workers into a contended
+  cache line, and the same reads scaled *negatively* with thread count where
+  the unwrapped array scaled 5.8x. A projection that does escape — returned,
+  stored in a constructor, captured by a closure, or passed at an owned
+  argument position — still takes its dup, now emitted at the escaping use
+  rather than at the projection.
+
+- **`NativeArray` reads borrow their array.** `NativeArray.get_*`, `.length`,
+  `.sum` and `.to_list` were absent from the extern borrow table, so every
+  array read looked like an ownership transfer. That flipped the enclosing
+  parameter to owned, which forced a dup at a self-call that the tail-call
+  back-edge never balanced: a loop reading a heap parameter grew its refcount
+  by roughly one per element read and never freed the array.
+- **A small scalar aggregate built inside a branch no longer leaks.** A
+  single-constructor variant whose fields are all `Int`/`Float`/`Bool` and
+  whose arity is 2-4 is held in registers rather than on the heap. Building one
+  inside an `if` or a `match` arm leaked one object per construction, because
+  the value has to be boxed to cross the branch join and nothing freed the box
+  afterwards; a 5 000-iteration loop ended with 5 001 live objects instead of
+  1. The join now releases it. Building the same value straight-line or in a
+  called function was never affected, and still reaches the allocator zero
+  times. One related case remains open: an aggregate stored into an `Option`
+  (or another niche-encoded type) still leaks, with or without a branch.
 
 - A supervisor **nested under another supervisor** now passes its
   capabilities on to its own children, including the fresh children it
   creates each time it is restarted. Previously only a top-level supervisor's
   direct children were captured, so a mock stopped one level down.
+
+- **Records and tuples are now reference-counted and freed.** Previously
+  `needs_rc` was false for both, so Perceus never decided an aggregate was
+  dead: every record and tuple cell leaked, and so did every heap value it
+  owned. A 200,000-iteration loop rebuilding a `{ n : Int, s : String }`
+  leaked ~200k strings and ~200k cells (15.2 MB peak) where the equivalent
+  two-field variant leaked nothing (2.4 MB). Aggregates now get a synthesized
+  deep drop (`__drop$R` / `__drop$T`) that releases their fields behind the
+  same shared-cell guard variants use. A variant holding a record or tuple
+  field is fixed by the same change.
+
+  A record passed to a function that reads its fields is fixed too: the
+  projection no longer dups the record (2001 live objects over a 1000-iteration
+  loop, now 1).
+
+- **An aggregate rebuilt each iteration of a self-tail-recursive function no
+  longer leaks.** Records and tuples are now *owned* parameters. A borrowed one
+  left the caller holding the release, and in a tail-recursive loop that release
+  sits after the tail call — where TCO folds the call into a back-edge and the
+  release is discarded, leaking one cell per iteration. Owned parameters let
+  each iteration release the aggregate it was handed before jumping with a new
+  one, so such a loop now runs in constant space. All six aggregate leak
+  fixtures — record, record-with-heap-field, record update, and tuple — are flat
+  across a 100x change in iteration count.
+
+- **A non-generic Option-shaped type with a heap payload was freed twice.**
+  `type Wrap = W(String) | Z` is encoded as a niche, where `W(x)` *is* `x` — one
+  cell — but the deep-drop pass classified it as boxed and synthesized a drop
+  that released the cell and then released its "payload", the same pointer.
+  Crashed 6/6 in a loop, variously as heap-allocator freelist corruption, an
+  RC-underflow abort, or SIGBUS. Generic `Option(String)` was never affected, so
+  this needed a user-declared non-generic type. The two representation
+  predicates now have to agree before a drop is synthesized.
+
+- Compiled binaries built with `MARCH_STRING_STATS=1` now report `live_objs`,
+  the runtime's exact live-heap-object count. Unlike peak RSS it does not vary
+  with machine load, so it can be asserted directly in leak regression tests.
 
 - Capability mocking now reaches a **supervised child**. A `supervise` block's
   children are spawned by the supervisor itself, not by user code, so a mock
@@ -262,12 +655,17 @@ git log is authoritative for exact commits.
   syntax (`{ left = l, right = r }`), which the parser rejects — every
   reformat of such a pattern broke the file. Record-literal shorthand fields
   (`{ x, y }`, where the binder matches the field name) were unaffected.
-- The non-tail-recursion warning no longer promises a loop that does not
-  happen. It used to end "when the recursive call is the direct argument of a
-  constructor, the compiler turns it into a loop" — but tail-recursion-modulo-cons
-  is off by default, so code written in exactly that shape still overflowed the
-  stack on deep input. The warning now says deep input can overflow, and
-  describes TRMC as the opt-in it is (`--trmc`).
+- The non-tail-recursion warning states the condition instead of a verdict.
+  It has been wrong in both directions: it used to end "when the recursive call
+  is the direct argument of a constructor, the compiler turns it into a loop",
+  which was false while tail-recursion-modulo-cons was opt-in, and was then
+  reworded to say the transform is off by default, which became false when the
+  default flipped in this same release. The typechecker runs before the IR and
+  cannot tell which case a function is, so the warning now names the shape that
+  becomes a loop, says the transform is on by default, and still warns that
+  anything else uses O(depth) stack. It no longer recommends a flag. The
+  language server's copy of the message and the allocation-contract note were
+  corrected the same way.
 
 - A return-contract counterexample no longer names an input the parameter's
   own type excludes when the refinement sits below the top of the type (a
@@ -284,6 +682,25 @@ git log is authoritative for exact commits.
   `blake3_hash_many_neon` undefined in every executable that uses it.
 
 ### Changed
+
+- **The live-object gauge (`march_live_allocs`) no longer serialises parallel
+  allocation.** The gauge is always on, so its single process-wide atomic sat
+  on the two hottest paths in the runtime — `march_alloc`, and every RC
+  free-on-zero branch — making every thread in the program read-modify-write
+  one cache line there. That was enough on its own to make allocation-heavy
+  parallel code scale *negatively*: measured on an M3 Max (14 cores) with a
+  `List.pmap_n` over 64 cons-allocating tasks, the same program took 3022 ms
+  on 14 scheduler threads against 1875 ms on 1. It is now a per-thread
+  counter summed on read — an exiting thread folds its residual into a
+  process-wide total via a `pthread_key_t` destructor and releases its slot
+  for reuse, so the sum stays correct across thread lifetimes even though
+  allocation and freeing are not thread-affine. The same program now runs in
+  471 ms on 14 threads (6.4x faster than before, and 4.8x faster than its own
+  1-thread time), matching a build with the counter compiled out entirely.
+  `march_live_allocs()` keeps its existing semantics and single-threaded
+  results; `test/test_ffi.c` gains a multi-threaded case that allocates on
+  eight threads, lets them exit, and frees each thread's objects from a
+  different thread.
 
 - `unreflectable-predicate` no longer misattributes a subject failure to the
   predicate. An arithmetic actual (`n - 1`, `i + 1`) now reflects through the

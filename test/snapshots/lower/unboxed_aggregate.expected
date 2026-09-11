@@ -1,0 +1,44 @@
+-- types (1) --
+type Vec3 = Vec3(Float, Float, Float)
+-- fns (3) --
+## dot
+fn dot(a : Vec3, b : Vec3) : Float =
+  case a of
+  Vec3($f19, $f20, $f21) -> let $jp_clo23 : () -> '_ = letrec [$jp22] in
+$jp22 in
+let $jp_clo27 : () -> '_ = letrec [$jp26] in
+$jp26 in
+let az : Float = $f21 in
+let ay : Float = $f20 in
+let ax : Float = $f19 in
+case b of
+  Vec3($f8, $f9, $f10) -> let $jp_clo12 : () -> '_ = letrec [$jp11] in
+$jp11 in
+let $jp_clo16 : () -> '_ = letrec [$jp15] in
+$jp15 in
+let bz : Float = $f10 in
+let b2 : Float = $f9 in
+let bx : Float = $f8 in
+let $t6 : Float = let $t4 : Float = *.(ax, bx) in
+let $t5 : Float = *.(ay, b2) in
++.($t4, $t5) in
+let $t7 : Float = *.(az, bz) in
++.($t6, $t7)
+  _ -> panic("non-exhaustive pattern match")
+  _ -> panic("non-exhaustive pattern match")
+
+## forward
+fn forward(yaw : Float, pitch : Float) : Vec3 =
+  let cp : Float = *.(pitch, 2.) in
+let $t2 : Float = let $t1 : Float = *.(yaw, cp) in
+-.(0., $t1) in
+let $t3 : Float = -.(0., cp) in
+alloc Vec3.Vec3($t2, pitch, $t3)
+
+## main
+fn main(_cap_console : Cap(IO.Console)) : () =
+  let v : Vec3 = forward(0.5, 0.25) in
+let $t31 : String = let $t30 : Float = dot(v, v) in
+float_to_string($t30) in
+println($t31)
+

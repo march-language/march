@@ -171,6 +171,48 @@ let emit_int_cmp ~emit_atom ctx (f : Tir.var) (a : Tir.atom) (b : Tir.atom)
       emit ctx (Printf.sprintf "%s = icmp %s i64 %s, 0" cmp (int_cmp_pred f.Tir.v_name) c);
       emit ctx (Printf.sprintf "%s = zext i1 %s to i64" r cmp);
       ("i64", r)
+    end else if
+      (f.Tir.v_name = "==" || f.Tir.v_name = "!=")
+      && (Repr.unboxed_of_llvm_ty ty_a <> None || Repr.unboxed_of_llvm_ty ty_b <> None)
+    then begin
+      (* Unboxed aggregate equality (Milestone 3): compare field by field in
+         registers.  Boxing both sides and reusing [Llvm_eq.ensure_adt_eq_fn]
+         would give the same answer, but it would allocate two cells per
+         comparison — which is precisely what the representation exists to
+         avoid, and would make `v == v` fail a [@[no_alloc]] contract.
+
+         The per-field predicates are the SAME ones the boxed structural
+         comparison uses ([Llvm_eq]: `fcmp oeq double` for a Float field,
+         `icmp eq i64` for Int/Bool), so the two paths agree on every input
+         including NaN (a NaN field compares unequal under `oeq` in both). *)
+      let sty = match Repr.unboxed_of_llvm_ty ty_a with
+        | Some _ -> ty_a | None -> ty_b in
+      let fields = match Repr.unboxed_of_llvm_ty sty with
+        | Some (_, _, fs) -> fs
+        | None -> assert false (* guard checked one side is unboxed *) in
+      let av = coerce ctx ty_a va sty and bv = coerce ctx ty_b vb sty in
+      let acc = ref "true" in
+      List.iteri (fun i fty_tir ->
+          let fty = Llvm_ctx.llvm_ty fty_tir in
+          let fa = fresh ctx "ubea" and fb = fresh ctx "ubeb" in
+          emit ctx (Printf.sprintf "%s = extractvalue %s %s, %d" fa sty av i);
+          emit ctx (Printf.sprintf "%s = extractvalue %s %s, %d" fb sty bv i);
+          let c = fresh ctx "ubec" in
+          if fty = "double" then
+            emit ctx (Printf.sprintf "%s = fcmp oeq double %s, %s" c fa fb)
+          else
+            emit ctx (Printf.sprintf "%s = icmp eq %s %s, %s" c fty fa fb);
+          let nx = fresh ctx "ubea" in
+          emit ctx (Printf.sprintf "%s = and i1 %s, %s" nx !acc c);
+          acc := nx)
+        fields;
+      let bit =
+        if f.Tir.v_name = "!=" then begin
+          let n = fresh ctx "ubea" in
+          emit ctx (Printf.sprintf "%s = xor i1 %s, true" n !acc); n
+        end else !acc
+      in
+      ("i64", coerce ctx "i1" bit "i64")
     end else begin
       (* Fallback comparison: float or i64 (pointer coercion). *)
       let fallback_cmp () =

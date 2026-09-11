@@ -1,0 +1,12 @@
+-- Task 4 fix (whole-plan review finding 4): a refinement in the domain of
+-- a function-typed parameter is never re-examined; no extractor descends
+-- into an arrow type looking for a nested refinement.
+mod HolesArrowDomain do
+  fn apply(f : ({Int | _ > 0}) -> Int, x : Int) : Int do
+    f(x)
+  end
+
+  fn main() : Int do
+    apply(fn n -> n, 0 - 1)
+  end
+end

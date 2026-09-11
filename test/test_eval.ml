@@ -2802,19 +2802,34 @@ let test_perceus_to_string_borrowed_field_no_decrc () =
     fn acc(s : R) : String do "${s.content_dir}" end
   end|} in
   let f = List.find (fun fn -> fn.March_tir.Tir.fn_name = "acc") m.March_tir.Tir.tm_fns in
-  let rec has_decrc = function
-    | March_tir.Tir.EDecRC _ -> true
-    | March_tir.Tir.ELet (_, e1, e2) -> has_decrc e1 || has_decrc e2
-    | March_tir.Tir.ESeq (e1, e2) -> has_decrc e1 || has_decrc e2
-    | March_tir.Tir.ELetRec (fns, body) ->
-      List.exists (fun f -> has_decrc f.March_tir.Tir.fn_body) fns || has_decrc body
-    | March_tir.Tir.ECase (_, brs, def) ->
-      List.exists (fun b -> has_decrc b.March_tir.Tir.br_body) brs ||
-      (match def with Some e -> has_decrc e | None -> false)
-    | _ -> false
+  (* Asserted by the TYPE of what is released, not as "no EDecRC anywhere".
+     Since aggregates became owned parameters, `acc` legitimately contains
+     `dec_rc s` -- the record's own release, which is the whole point of that
+     change.  The bug this test guards is a dec of the extracted STRING field,
+     which the record owner is responsible for; that must still be absent, and
+     the escaping field must be dup'd instead. *)
+  let decrc_tys fn =
+    let acc = ref [] in
+    let rec go = function
+      | March_tir.Tir.EDecRC (March_tir.Tir.AVar v)
+      | March_tir.Tir.EAtomicDecRC (March_tir.Tir.AVar v)
+      | March_tir.Tir.EFree (March_tir.Tir.AVar v) -> acc := v :: !acc
+      | March_tir.Tir.ELet (_, e1, e2) | March_tir.Tir.ESeq (e1, e2) -> go e1; go e2
+      | March_tir.Tir.ELetRec (fns, body) ->
+        List.iter (fun f -> go f.March_tir.Tir.fn_body) fns; go body
+      | March_tir.Tir.ECase (_, brs, def) ->
+        List.iter (fun b -> go b.March_tir.Tir.br_body) brs;
+        (match def with Some e -> go e | None -> ())
+      | _ -> ()
+    in
+    go fn.March_tir.Tir.fn_body; !acc
   in
-  Alcotest.(check bool) "to_string(borrowed field) emits no EDecRC" false
-    (has_decrc f.March_tir.Tir.fn_body)
+  let dropped = decrc_tys f in
+  Alcotest.(check bool) "no EDecRC of a String (the extracted field)" false
+    (List.exists (fun v -> v.March_tir.Tir.v_ty = March_tir.Tir.TString) dropped);
+  Alcotest.(check int) "the owned record parameter is released exactly once" 1
+    (List.length
+       (List.filter (fun v -> String.equal v.March_tir.Tir.v_name "s") dropped))
 
 let test_perceus_pipeline_no_crash () =
   (* The full pipeline including perceus runs without exception *)
@@ -3116,12 +3131,17 @@ let test_escape_local_discarded_promoted () =
      consumers decoded under the erased convention (garbage at runtime —
      invisible here because these tests inspect TIR only, never emitted IR).
      Escape analysis now only promotes genuinely Boxed allocs, so the vehicle
-     is a 2-field ctor; the Newtype exclusion is pinned by
-     test_escape_newtype_not_promoted below. *)
+     is a multi-field ctor; the Newtype exclusion is pinned by
+     test_escape_newtype_not_promoted below.
+     HISTORY (unboxed aggregates, 2026-09-03): the vehicle was `Box(Int, Int)`
+     until small scalar-only single-ctor variants stopped being heap cells at
+     all (Repr.Unboxed) — which made this test's subject unallocated rather
+     than stack-promoted. A String field keeps it Boxed, so the test still
+     measures promotion. *)
   let m = escape_module {|mod Test do
-    type Box = Box(Int, Int)
+    type Box = Box(Int, String)
     fn make_and_ignore() : Int do
-      let b = Box(42, 43)
+      let b = Box(42, "x")
       0
     end
   end|} in
@@ -3180,6 +3200,91 @@ let test_escape_stored_in_alloc_not_promoted () =
   (* Both Box(x) and Pair(b, 0) are heap allocations; the Box must stay heap. *)
   Alcotest.(check bool) "inner alloc stored in outer alloc stays heap-allocated"
     true (has_heap_alloc f.March_tir.Tir.fn_body)
+
+(* ── Promotion through a borrowed / non-retaining callee (2026-09-03) ─────
+
+   The escape verdict used to stop at every call boundary.  It now sees
+   through a call to a March function in the same module that provably does
+   not put the POINTER anywhere outliving the call — see [Escape]'s module doc
+   for why the ownership verdict alone was not enough, and for the three
+   restrictions on the extension.  Each negative below names its restriction. *)
+
+let escape_call_src ~callee = Printf.sprintf {|mod Test do
+    type Big = Big(Int, Int, Int, Int, Int)
+    type Wrap = Wrap(Big)
+    pfn keep(b : Big) : Wrap do Wrap(b) end
+    pfn sum5(b : Big) : Int do
+      match b do
+        Big(a, c, d, e, f) -> a + c + d + e + f
+      end
+    end
+    fn use_it(i : Int) : Int do
+      let p = i + 1
+      let q = i + 2
+      let r = i + 3
+      let s = i + 4
+      let v = Big(i, p, q, r, s)
+      %s
+    end
+  end|} callee
+
+let escape_use_it src =
+  let m = escape_module src in
+  let f = List.find (fun fn -> fn.March_tir.Tir.fn_name = "use_it")
+            m.March_tir.Tir.tm_fns in
+  f.March_tir.Tir.fn_body
+
+let test_escape_through_reading_callee_promoted () =
+  let body = escape_use_it (escape_call_src ~callee:"sum5(v)") in
+  Alcotest.(check bool)
+    "a cell whose only use is a callee that just reads it is stack-promoted"
+    true (has_stack_alloc body);
+  Alcotest.(check bool) "and no longer heap-allocated"
+    false (has_heap_alloc body)
+
+let test_escape_through_retaining_callee_not_promoted () =
+  (* `keep` stores the pointer into a Wrap cell that outlives the call. *)
+  let body = escape_use_it (escape_call_src ~callee:"match keep(v) do Wrap(_) -> 0 end") in
+  Alcotest.(check bool)
+    "a callee that stores the pointer blocks promotion"
+    false (has_stack_alloc body)
+
+let test_escape_through_extern_not_promoted () =
+  (* Restriction 2: a C extern's borrow entry is a DECLARATION about code this
+     pass cannot read, and a stack cell's header says rc = 0. *)
+  let body = escape_use_it {|mod Test do
+    needs Ffi
+    type Big = Big(Int, Int, Int, Int, Int)
+    extern "m" : Cap(Ffi) do
+      fn peek(b : Big): Int = "cf_peek"
+    end
+    fn use_it(i : Int) : Int do
+      let p = i + 1
+      let q = i + 2
+      let r = i + 3
+      let s = i + 4
+      let v = Big(i, p, q, r, s)
+      peek(v)
+    end
+  end|} in
+  Alcotest.(check bool) "a cell handed to an extern is not promoted"
+    false (has_stack_alloc body)
+
+let test_escape_closure_through_call_not_promoted () =
+  (* Restriction 1: a $Clo_ cell passed to its own apply function is governed
+     by the $clo ownership pin — [Perceus.insert_apply_fn_clo_drop] emits a
+     dec_rc on it inside the callee, and a stack cell has rc = 0. *)
+  let m = escape_module {|mod Test do
+    fn twice(n : Int) : Int do
+      let go = fn (i : Int, acc : Int) -> if i <= 0 do acc else go(i - 1, acc + 2) end
+      go(n, 0)
+    end
+  end|} in
+  let f = List.find (fun fn -> fn.March_tir.Tir.fn_name = "twice")
+            m.March_tir.Tir.tm_fns in
+  Alcotest.(check bool)
+    "a closure struct passed to its own apply fn is not promoted through the call"
+    false (has_stack_alloc f.March_tir.Tir.fn_body)
 
 let test_escape_match_field_promoted () =
   (* A value that is created and immediately pattern-matched — with only the
@@ -4026,14 +4131,22 @@ let test_perceus_scrut_escape_rewrite () =
     (RC > 1, e.g. inside Check.run_loop), loading the FV from the closure
     struct read a dangling pointer → SIGSEGV. *)
 let test_perceus_closure_fv_single_use_incrc () =
+  (* The captured value must be HEAP-carrying for the bug this pins to exist at
+     all: the crash was a captured object freed by the callee's pattern match.
+     It used to be spelled `Box(Int)`, which stopped exercising the shape once
+     borrow inference stopped force-owning a parameter whose only escaping
+     field is a SCALAR (2026-09-03, `Borrow._scalar_only`) — with an Int field
+     `consume` is inferred borrowing, so there is no ownership transfer for the
+     apply function to balance and no EIncRC to assert. A String field keeps
+     the callee consuming, which is the case the regression is about. *)
   let m = perceus_module {|mod Test do
-    type Box = Box(Int)
-    pfn consume(b : Box) : Int do
+    type Box = Box(String)
+    pfn consume(b : Box) : String do
       match b do
       Box(n) -> n
       end
     end
-    fn make_thunk(b : Box) : (Unit -> Int) do
+    fn make_thunk(b : Box) : (Unit -> String) do
       fn () -> consume(b)
     end
   end|} in
@@ -4280,10 +4393,35 @@ let test_perceus_record_param_multi_call_no_rc_underflow () =
       ) m.March_tir.Tir.tm_fns
     else use_cfg_fns
   in
+  (* By TYPE, matching this test's own stated property ("must not contain a
+     dec_rc for the extracted string field from cfg").  The blanket
+     "no EDecRC at all" form no longer expresses that: aggregates are owned
+     parameters now, so the record's own `dec_rc cfg` is expected and correct.
+     A dec of the extracted STRING is still the bug. *)
+  let decrc_vars fn =
+    let acc = ref [] in
+    let rec go = function
+      | March_tir.Tir.EDecRC (March_tir.Tir.AVar v)
+      | March_tir.Tir.EAtomicDecRC (March_tir.Tir.AVar v)
+      | March_tir.Tir.EFree (March_tir.Tir.AVar v) -> acc := v :: !acc
+      | March_tir.Tir.ELet (_, e1, e2) | March_tir.Tir.ESeq (e1, e2) -> go e1; go e2
+      | March_tir.Tir.ELetRec (fns, body) ->
+        List.iter (fun f -> go f.March_tir.Tir.fn_body) fns; go body
+      | March_tir.Tir.ECase (_, brs, def) ->
+        List.iter (fun b -> go b.March_tir.Tir.br_body) brs;
+        (match def with Some e -> go e | None -> ())
+      | _ -> ()
+    in
+    go fn.March_tir.Tir.fn_body; !acc
+  in
   Alcotest.(check bool)
     "use_cfg (or process after inlining) has no spurious field-string EDecRC"
     false
-    (List.exists (fun fn -> has_any_decrc fn.March_tir.Tir.fn_body) fns_to_check)
+    (List.exists
+       (fun fn ->
+          List.exists (fun v -> v.March_tir.Tir.v_ty = March_tir.Tir.TString)
+            (decrc_vars fn))
+       fns_to_check)
 
 (* Regression: List.length(result) followed by List.nth(result, 0) — the
    List.length call (via its internal go closure) CONSUMES the list (owned
@@ -4423,14 +4561,48 @@ let test_perceus_local_record_field_no_spurious_decrc () =
   end|} in
   (* render extracts meta.title into t, then byte_size borrows t at last use.
      Before the fix: post_dec fires → EDecRC(t) in render.
-     After the fix:  t is in _borrowed_field_vars → no EDecRC for t in render. *)
+     After the fix:  t is in _borrowed_field_vars → no EDecRC for t in render.
+
+     Asserted by NAME rather than as "no EDecRC anywhere in render".  Since
+     aggregates became RC'd, render legitimately contains `dec_rc meta` — the
+     scope-end drop of the record itself, which is the whole point of that
+     change and which the blanket form would have flagged as a regression.
+     The bug this test guards is specifically a dec of the extracted FIELD, so
+     name t; and pin the record's own drop as well, so that dropping it again
+     by accident is caught here too. *)
+  let decrc_names fn =
+    let acc = ref [] in
+    let atom_name = function
+      | March_tir.Tir.AVar v -> Some v.March_tir.Tir.v_name
+      | _ -> None
+    in
+    let rec go = function
+      | March_tir.Tir.EDecRC a | March_tir.Tir.EAtomicDecRC a
+      | March_tir.Tir.EFree a ->
+        (match atom_name a with Some n -> acc := n :: !acc | None -> ())
+      | March_tir.Tir.ELet (_, e1, e2) | March_tir.Tir.ESeq (e1, e2) ->
+        go e1; go e2
+      | March_tir.Tir.ECase (_, brs, def) ->
+        List.iter (fun b -> go b.March_tir.Tir.br_body) brs;
+        (match def with Some e -> go e | None -> ())
+      | March_tir.Tir.ELetRec (fns, body) ->
+        List.iter (fun f -> go f.March_tir.Tir.fn_body) fns; go body
+      | _ -> ()
+    in
+    go fn.March_tir.Tir.fn_body; !acc
+  in
   let render_fns = List.filter (fun fn ->
     String.equal fn.March_tir.Tir.fn_name "render"
   ) m.March_tir.Tir.tm_fns in
+  let names = List.concat_map decrc_names render_fns in
   Alcotest.(check bool)
-    "render has no spurious EDecRC for locally-owned record field"
+    "render has no spurious EDecRC for the extracted record field t"
     false
-    (List.exists (fun fn -> has_any_decrc fn.March_tir.Tir.fn_body) render_fns)
+    (List.mem "t" names);
+  Alcotest.(check bool)
+    "render drops the record itself exactly once"
+    true
+    (List.length (List.filter (String.equal "meta") names) = 1)
 
 (* Regression: same bug at the LLVM IR level — ensure the emitted IR for a
    function using && contains no call to @__ (the undefined symbol produced
@@ -4642,6 +4814,60 @@ let test_h_sigil_escapes_many_part_interp () =
   Alcotest.(check string) "many-part ~H interpolation is HTML-escaped"
     "<p>&lt;script&gt;</p><i>&lt;script&gt;</i><b>&lt;script&gt;</b>"
     (vstr result)
+
+(* Same, at an operand count that folds to `string_concat_n` rather than
+   `string_concat3` (Desugar.fold_concat3 switches at 4+ parts).  That fold is
+   a THIRD shape `decompose_concat` has to see through, and the failure mode is
+   the same one that has already bitten twice: an unrecognized shape collapses
+   the template into one opaque part and escaping is silently skipped while the
+   page still renders. Nine segments here, well past the threshold. *)
+let test_h_sigil_escapes_concat_n_interp () =
+  let env = eval_h_escape_page {|
+  fn page(evil) : String do
+    IOList.to_string(~H"<p>${evil}</p><i>${evil}</i><b>${evil}</b><u>${evil}</u>")
+  end|} in
+  let result = call_fn env "page" [March_eval.Eval.VString "<script>"] in
+  Alcotest.(check string) "concat_n-folded ~H interpolation is HTML-escaped"
+    "<p>&lt;script&gt;</p><i>&lt;script&gt;</i><b>&lt;script&gt;</b><u>&lt;script&gt;</u>"
+    (vstr result)
+
+(* The fold itself: 3 operands stay `string_concat3` (already one allocation
+   and one copy, so an n-ary call would only add a stack array), 4+ become
+   `string_concat_n`.  Pinned because the boundary is a correctness-relevant
+   claim about both shapes, not a tuning constant -- see fold_concat3. *)
+let desugared_head src =
+  match March_desugar.Desugar.desugar_expr (parse_expr_str src) with
+  | March_ast.Ast.EApp (March_ast.Ast.EVar f, args, _) ->
+    (f.March_ast.Ast.txt, List.length args)
+  | _ -> ("<not an application>", 0)
+
+let test_concat_fold_boundary () =
+  Alcotest.(check (pair string int)) "2 operands stay ++"
+    ("++", 2) (desugared_head {|"a${x}"|});
+  Alcotest.(check (pair string int)) "3 operands are concat3"
+    ("string_concat3", 3) (desugared_head {|"a${x}b"|});
+  Alcotest.(check (pair string int)) "4 operands become concat_n"
+    ("string_concat_n", 4) (desugared_head {|"a${x}b${y}"|});
+  Alcotest.(check (pair string int)) "9 operands are ONE concat_n, not a fold"
+    ("string_concat_n", 9) (desugared_head {|"a${w}b${x}c${y}d${z}e"|})
+
+let test_eval_concat_n_matches_chain () =
+  (* The n-ary form must agree with the pairwise one it replaces, including
+     when an operand is empty. *)
+  let env = eval_module {|mod Test do
+  fn nary(a : String, b : String, c : String, d : String, e : String) : String do
+    "${a}${b}${c}${d}${e}"
+  end
+  fn pairwise(a : String, b : String, c : String, d : String, e : String) : String do
+    a ++ (b ++ (c ++ (d ++ e)))
+  end
+end|} in
+  let args = List.map (fun s -> March_eval.Eval.VString s)
+    ["A"; ""; "CCC"; "DD"; ""] in
+  Alcotest.(check string) "n-ary concat agrees with the pairwise chain"
+    (vstr (call_fn env "pairwise" args)) (vstr (call_fn env "nary" args));
+  Alcotest.(check string) "and is the expected string"
+    "ACCCDD" (vstr (call_fn env "nary" args))
 
 (* Signal.watch (7.2, Stage A): deferred green-thread dispatch of an OS-signal
    watcher.  Drive the drain directly — register an OCaml handler on the Usr1
@@ -5393,6 +5619,10 @@ let eval_suites =
           Alcotest.test_case "returned not promoted"         `Quick test_escape_returned_not_promoted;
           Alcotest.test_case "stored in alloc not promoted"  `Quick test_escape_stored_in_alloc_not_promoted;
           Alcotest.test_case "match field read promoted"     `Quick test_escape_match_field_promoted;
+          Alcotest.test_case "promoted through a reading callee" `Quick test_escape_through_reading_callee_promoted;
+          Alcotest.test_case "retaining callee blocks promotion" `Quick test_escape_through_retaining_callee_not_promoted;
+          Alcotest.test_case "extern callee blocks promotion"    `Quick test_escape_through_extern_not_promoted;
+          Alcotest.test_case "closure through its apply fn blocked" `Quick test_escape_closure_through_call_not_promoted;
           Alcotest.test_case "decrc eliminated on promote"   `Quick test_escape_decrc_eliminated_after_promotion;
           Alcotest.test_case "pipeline no crash"             `Quick test_escape_pipeline_no_crash;
         ] );
@@ -5435,5 +5665,8 @@ let eval_suites =
           Alcotest.test_case "GET form with conn: no injection"        `Quick test_h_sigil_get_form_not_injected_with_conn;
           Alcotest.test_case "short interp: escaped"                   `Quick test_h_sigil_escapes_short_interp;
           Alcotest.test_case "many-part interp: escaped"               `Quick test_h_sigil_escapes_many_part_interp;
+          Alcotest.test_case "concat_n interp: escaped"                `Quick test_h_sigil_escapes_concat_n_interp;
+          Alcotest.test_case "concat fold boundary"                    `Quick test_concat_fold_boundary;
+          Alcotest.test_case "concat_n matches pairwise chain"         `Quick test_eval_concat_n_matches_chain;
         ] );
   ]

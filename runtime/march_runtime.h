@@ -24,6 +24,9 @@ void  march_decrc(void *p);
 /* Decrement RC and return 1 if the object was freed (RC hit 0), 0 if still alive.
    Used when pattern-matching to conditionally IncRC extracted child pointers. */
 int64_t march_decrc_freed(void *p);
+/* Decrement RC with march_decrc_local's atomicity policy and return 1 if the
+   object was freed, 0 otherwise (0 also for a non-heap pointer). */
+int64_t march_decrc_local_freed(void *p);
 
 /* Non-atomic reference counting — only safe for values provably owned by a
    single thread (no actor send in their lifetime).  Faster than atomic ops
@@ -182,6 +185,13 @@ typedef struct { int64_t rc; int32_t tag; int32_t pad; int64_t len; char data[];
  * binding returned to the caller — ordinary RC, no leak, no cancel-after-
  * fire UAF (the object only dies once BOTH release it). */
 #define MARCH_TIMER_TOKEN_TAG ((int32_t)-5)
+/* Native arrays (NativeU8Arr and friends) carry their own sentinel so a
+ * generic walker can tell a flat byte/word buffer from an ADT cell. Without
+ * it every walker fell through to the ADT case, read n_fields out of
+ * alloc_meta and scanned the PAYLOAD for pointers -- which is why native
+ * arrays were barred from actor messages (GAPS.md G44) rather than copied.
+ * See native_arr_alloc, which sets it, and march_message.c's copy_value. */
+#define MARCH_NATIVE_ARR_TAG ((int32_t)-6)
 
 /* send_after(pid, msg, delay_ms) : TimerRef — schedule msg for delivery to
  * the actor `actor` after delay_ms milliseconds. RC contract matches
@@ -468,12 +478,30 @@ typedef enum {
     MARCH_DEATH_CRASH  = 2,
 } march_death_reason;
 
+/* Graceful shutdown. march_actor_stop marks the actor draining (new sends are
+   refused), lets its green thread finish the queued messages until the mailbox
+   empties or timeout_ms elapses, then ends it with MARCH_DEATH_NORMAL. A
+   negative timeout waits indefinitely; 0 discards whatever is queued once the
+   current handler returns. A supervisor stops its children first, in reverse
+   declaration order, each with its own `shutdown` budget from the child spec.
+   Contrast march_kill, which is immediate and drops the mailbox. */
+int64_t march_actor_stop(void *actor, int64_t timeout_ms);
+
+/* Process enumeration: List(Int) of every live actor's pid index, ascending.
+   Lock-free (same bucket walk as find_meta); a snapshot, so inherently racy.
+   March turns these back into Pids with pid_of_int. */
+void *march_actor_pid_indices(void);
+int64_t march_actor_is_draining(void *actor);
+
 /* register_supervisor: record an actor as a supervisor with a given restart
    strategy (0=one_for_one, 1=one_for_all, 2=rest_for_one), max_restarts, and
    time window in seconds.  Children are registered separately via
    march_actor_register_child. */
 void    march_register_supervisor(void *supervisor, int64_t strategy,
-                                   int64_t max_restarts, int64_t window_secs);
+                                   int64_t max_restarts, int64_t window_secs,
+                                   int64_t backoff_base_ms,
+                                   int64_t backoff_cap_ms,
+                                   int64_t backoff_jitter_pct);
 
 /* ── Phase 5: Actor state migration ─────────────────────────────────── */
 
@@ -665,6 +693,17 @@ int64_t march_send_checked(void *cap, void *msg);
 
 /* Value pretty-printing. */
 void *march_value_to_string(void *v);
+
+/* Constructor-name metadata for compiled `to_string` on a user ADT.
+ * [march_ctor_table_ensure] registers one compilation unit's descriptor
+ * string (grammar and field-token alphabet documented at the implementation
+ * in runtime/march_extras.c, written by lib/tir/llvm_ctor_desc.ml) and
+ * returns the base index its types were appended at; [cache] memoizes
+ * base+1.  [march_value_to_string_typed] renders [v] as the type with that
+ * (already rebased) id, falling back to [march_value_to_string] for any
+ * shape the table cannot describe. */
+int32_t march_ctor_table_ensure(const char *desc, int32_t *cache);
+void *march_value_to_string_typed(void *v, int32_t type_id);
 
 /* Process builtins */
 void  march_process_argv_init(int argc, char **argv);

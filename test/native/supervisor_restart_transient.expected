@@ -1,0 +1,5 @@
+transient killed, slot unchanged: true
+transient killed, child dead: true
+transient crashed, respawned: true
+transient crashed, child alive: true
+supervisor alive: true

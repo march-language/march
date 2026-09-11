@@ -70,6 +70,30 @@ let emit_alloc_ctor ~emit_atom ctx (ctor : string)
     in
     let alloc_result =
      (match Repr.repr_of_ty ~collision_set:ctx.collision_set ctx.type_defs (Tir.TCon (alloc_type_name, [])) with
+     | Repr.Unboxed { ctor = _; fields } ->
+       audit "Unboxed" "alloc";
+       (* Milestone 3: no cell.  Build the LLVM struct value directly with an
+          [insertvalue] chain; the fields are scalars by construction (see
+          [Repr.set_unboxed_types]) so each one is already in its own register.
+          A consumer that needs the boxed form gets it from [Llvm_ctx.coerce],
+          which reconstructs exactly the cell this arm used to allocate. *)
+       let sty = Llvm_ctx.llvm_ty (Tir.TCon (alloc_type_name, [])) in
+       if List.length args <> List.length fields then
+         failwith (Printf.sprintf
+           "LLVM emit: unboxed constructor %s expects %d arg(s), got %d \
+            (arity mismatch — malformed TIR)"
+           ctor (List.length fields) (List.length args));
+       let acc = ref "poison" in
+       List.iteri (fun i atom ->
+           let fty = Llvm_ctx.llvm_ty (List.nth fields i) in
+           let (v_ty, v_val) = emit_atom ctx atom in
+           let fv = coerce ctx v_ty v_val fty in
+           let nx = fresh ctx "ubmk" in
+           emit ctx (Printf.sprintf "%s = insertvalue %s %s, %s %s, %d"
+                       nx sty !acc fty fv i);
+           acc := nx)
+         args;
+       (sty, !acc)
      | Repr.Newtype payload ->
        audit "Newtype" "alloc";
        (* Newtype: no allocation. Emit the single payload atom directly. *)
@@ -194,7 +218,7 @@ let emit_alloc_ctor ~emit_atom ctx (ctor : string)
              let entry = ctor_entry ctx ctor (List.length args) in
              let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
              let field_ty = match List.nth_opt entry.ce_fields 0 with
-               | Some t -> llvm_ty t | None -> "ptr" in
+               | Some t -> llvm_field_ty t | None -> "ptr" in
              let (v_ty, v_val) = emit_atom ctx arg in
              emit_store_field ctx ptr 0 field_ty (coerce ctx v_ty v_val field_ty);
              ("ptr", ptr))
@@ -205,7 +229,7 @@ let emit_alloc_ctor ~emit_atom ctx (ctor : string)
           let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
           List.iteri (fun i atom ->
             let field_ty = match List.nth_opt entry.ce_fields i with
-              | Some t -> llvm_ty t | None -> "ptr" in
+              | Some t -> llvm_field_ty t | None -> "ptr" in
             let (v_ty, v_val) = emit_atom ctx atom in
             emit_store_field ctx ptr i field_ty (coerce ctx v_ty v_val field_ty)
           ) args;
@@ -216,7 +240,7 @@ let emit_alloc_ctor ~emit_atom ctx (ctor : string)
        let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
        List.iteri (fun i atom ->
          let field_ty = match List.nth_opt entry.ce_fields i with
-           | Some t -> llvm_ty t
+           | Some t -> llvm_field_ty t
            | None ->
              failwith (Printf.sprintf
                "LLVM emit: constructor %s has %d field(s) but field index %d \
@@ -343,7 +367,7 @@ let emit_alloc_hole ~emit_atom ctx (tok : Tir.atom option)
       | None -> ctor
     in
     (match Repr.repr_of_ty ~collision_set:ctx.collision_set ctx.type_defs (Tir.TCon (ah_type_name, [])) with
-     | Repr.Newtype _ | Repr.Niche _ ->
+     | Repr.Newtype _ | Repr.Niche _ | Repr.Unboxed _ ->
        failwith (Printf.sprintf
          "LLVM emit: EAllocHole of erased-repr type %s (ctor %s) — a hole needs \
           a real heap cell; TRMC must not select an erased-repr constructor"
@@ -374,7 +398,7 @@ let emit_alloc_hole ~emit_atom ctx (tok : Tir.atom option)
           | atom :: tl ->
             rest := tl;
             let field_ty = match List.nth_opt entry.ce_fields i with
-              | Some t -> llvm_ty t | None -> "ptr" in
+              | Some t -> llvm_field_ty t | None -> "ptr" in
             let (v_ty, v_val) = emit_atom ctx atom in
             Some (i, field_ty, coerce ctx v_ty v_val field_ty)
           | [] ->
@@ -441,7 +465,7 @@ let emit_stack_alloc_ctor ~emit_atom ctx (ctor : string)
       | None -> ctor
     in
     (match Repr.repr_of_ty ~collision_set:ctx.collision_set ctx.type_defs (Tir.TCon (sa_type_name, [])) with
-     | Repr.Newtype _ | Repr.Niche _ ->
+     | Repr.Newtype _ | Repr.Niche _ | Repr.Unboxed _ ->
        failwith (Printf.sprintf
          "LLVM emit: EStackAlloc of erased-repr type %s (ctor %s) — \
           construction would be boxed but consumers decode erased; \
@@ -458,7 +482,7 @@ let emit_stack_alloc_ctor ~emit_atom ctx (ctor : string)
     emit_store_tag ctx ptr entry.ce_tag;
     List.iteri (fun i atom ->
       let field_ty = match List.nth_opt entry.ce_fields i with
-        | Some t -> llvm_ty t
+        | Some t -> llvm_field_ty t
         | None ->
           failwith (Printf.sprintf
             "LLVM emit: constructor %s has %d field(s) but field index %d \
@@ -567,7 +591,7 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
              let entry = ctor_entry ctx ctor (List.length args) in
              let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
              let field_ty = match List.nth_opt entry.ce_fields 0 with
-               | Some t -> llvm_ty t | None -> "ptr" in
+               | Some t -> llvm_field_ty t | None -> "ptr" in
              let (v_ty, v_val) = emit_atom ctx arg in
              emit_store_field ctx ptr 0 field_ty (coerce ctx v_ty v_val field_ty);
              ("ptr", ptr))
@@ -576,7 +600,7 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
           let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
           List.iteri (fun i atom ->
             let field_ty = match List.nth_opt entry.ce_fields i with
-              | Some t -> llvm_ty t | None -> "ptr" in
+              | Some t -> llvm_field_ty t | None -> "ptr" in
             let (v_ty, v_val) = emit_atom ctx atom in
             emit_store_field ctx ptr i field_ty (coerce ctx v_ty v_val field_ty)
           ) args;
@@ -608,7 +632,7 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
       let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
       List.iteri (fun i atom ->
         let field_ty = match List.nth_opt entry.ce_fields i with
-          | Some t -> llvm_ty t
+          | Some t -> llvm_field_ty t
           | None -> failwith (Printf.sprintf
               "LLVM emit: constructor %s has %d field(s) but field index %d \
                was requested (arity mismatch)"
@@ -650,7 +674,7 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
       emit_store_tag ctx rv entry.ce_tag;
       List.iteri (fun i atom ->
         let field_ty = match List.nth_opt entry.ce_fields i with
-          | Some t -> llvm_ty t
+          | Some t -> llvm_field_ty t
           | None -> failwith (Printf.sprintf
               "LLVM emit: actor-struct reuse %s has %d field(s) but field index \
                %d was requested (arity mismatch)"
@@ -688,7 +712,7 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
     (* Pre-compute all arg values before branching *)
     let arg_vals = List.mapi (fun i atom ->
       let field_ty = match List.nth_opt entry.ce_fields i with
-        | Some t -> llvm_ty t
+        | Some t -> llvm_field_ty t
         | None ->
           failwith (Printf.sprintf
             "LLVM emit: constructor %s has %d field(s) but field index %d \

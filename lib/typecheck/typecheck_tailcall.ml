@@ -440,23 +440,29 @@ let rec check_tail_position
                   for O(n) performance."
                  fn_name)
           else
-            (* The loop is NOT automatic.  TRMC (lib/tir/trmc.ml) does perform
-               exactly this transformation and is correct on eligible shapes,
-               but `Trmc.enabled` defaults to false, so on the default pipeline
-               a constructor-wrapped recursive call really does keep O(depth)
-               stack and really does overflow on deep input.  This message once
-               promised the loop unconditionally — it was reworded ahead of a
-               default flip (specs/plans/2026-08-10-trmc-on-by-default.md) that
-               never landed.  State the opt-in, not the promise. *)
+            (* This message has now been wrong in BOTH directions, so state the
+               condition rather than a verdict.
+
+               It first promised the loop unconditionally, which was false while
+               `Trmc.enabled` defaulted to false. It was then reworded to say
+               the transform is opt-in and to pass `--trmc` — which became false
+               on 2026-09-09 when the default flipped, and which is the worse
+               error of the two: it tells the user to work around a problem the
+               compiler has already solved.
+
+               The typechecker runs before TIR and has no eligibility
+               information, so it cannot say WHICH of the two cases this
+               function is. Both are therefore spelled out, with the condition
+               attached, and no flag is recommended. *)
             Err.warning errors ~span:sp
               (Printf.sprintf
                  "Warning: function `%s` is structurally recursive but not \
-                  tail-recursive. This is safe for bounded input but uses \
-                  O(depth) stack space, so deep input can overflow the stack. \
-                  Consider an accumulator parameter. Tail-recursion-modulo-cons \
-                  can compile a recursive call that is the direct argument of a \
-                  constructor into a loop instead, but it is off by default; \
-                  enable it with `--trmc`."
+                  tail-recursive. If the recursive call is the direct argument \
+                  of a constructor in tail position, tail-recursion-modulo-cons \
+                  compiles it to a loop with no extra stack (on by default; \
+                  `--no-trmc` disables it). Otherwise it uses O(depth) stack \
+                  space and deep input can overflow the stack — consider an \
+                  accumulator parameter."
                  fn_name)
         end
       end;

@@ -658,6 +658,7 @@ let restore_actors (snap : actor_state_snapshot) : unit =
                      ai_terminal_reason = s.ais_terminal_reason;
                      ai_monitors = [];
                      ai_mailbox  = Queue.create ();
+                     ai_draining = false;
                      ai_supervisor = None;
                      ai_restart_count = [];
                      ai_epoch = 0;
@@ -1785,7 +1786,40 @@ and eval_expr_inner (env : env) (e : expr) : value =
     in
     (if !March_coverage.Coverage.coverage_enabled then
       March_coverage.Coverage.record_fn_call fn_name);
-    let fn_val = eval_expr env f in
+    (* `from_json` dispatches on its RESULT type, which no value in hand can
+       reveal, so `derive Json` binds the bare name in the environment and the
+       LAST type to derive Json in a module owned it — every earlier type's
+       decode silently ran the wrong decoder and returned a DecodeError that
+       looked like bad input.  The typechecker resolves the target per call
+       site (March_ast.Json_dispatch, written by the capability sweep in
+       Typecheck_caps); when it did, take the impl straight out of [impl_tbl]
+       instead of the shadowed name.
+
+       Falls through to the ordinary lookup when the site is unresolved (the
+       result type was never pinned) or when no impl is registered for the
+       resolved type — the previous behaviour, not an error, because a
+       resolved-but-absent impl is a program the typechecker already rejected
+       or a shape this does not model. *)
+    let json_iface_of = function
+      | "from_json" -> Some "JsonFrom"
+      | "from_json_events" -> Some "JsonFromEvents"
+      | _ -> None
+    in
+    let dispatched =
+      match f with
+      | EVar n ->
+        (match json_iface_of n.txt with
+         | None -> None
+         | Some iface ->
+           (match March_ast.Json_dispatch.find sp with
+            | None -> None
+            | Some tname -> Hashtbl.find_opt impl_tbl (iface, tname)))
+      | _ -> None
+    in
+    let fn_val = match dispatched with
+      | Some v -> v
+      | None -> eval_expr env f
+    in
     let arg_vals = List.map (eval_expr env) args in
     march_stack_push fn_name sp;
     (* Leave March-panic frames live for the backtrace handler.
@@ -2049,6 +2083,7 @@ and eval_expr_inner (env : env) (e : expr) : value =
                  ai_state = child_init_state; ai_alive = true;
                  ai_terminal_reason = Normal;
                  ai_monitors = []; ai_mailbox = Queue.create ();
+                 ai_draining = false;
                  ai_supervisor = Some pid;
                  ai_restart_count = []; ai_epoch = 0;
                  ai_resources = [];
@@ -2082,6 +2117,7 @@ and eval_expr_inner (env : env) (e : expr) : value =
                     ai_state    = init_state; ai_alive = true;
                     ai_terminal_reason = Normal;
                     ai_monitors = []; ai_mailbox = Queue.create ();
+                    ai_draining = false;
                     ai_supervisor = None; ai_restart_count = [];
                     ai_epoch = 0; ai_resources = [];
                     ai_linear_values = [];
@@ -2097,7 +2133,7 @@ and eval_expr_inner (env : env) (e : expr) : value =
      | VPid pid ->
        (match Hashtbl.find_opt actor_registry pid with
         | None -> VCon ("None", [])  (* dead/unknown actor: fire-and-forget, silently drop *)
-        | Some inst when not inst.ai_alive -> VCon ("None", [])  (* actor was killed: drop *)
+        | Some inst when not (Eval_runtime.mailbox_accepts inst) -> VCon ("None", [])  (* actor was killed: drop *)
         | Some inst ->
           (* Phase 4: async — push message to mailbox, do not dispatch inline.
              Only constructor values (VCon/VAtom) are valid messages. *)
@@ -2112,7 +2148,7 @@ and eval_expr_inner (env : env) (e : expr) : value =
        (* Capability-based send: validate epoch and revocation before enqueuing. *)
        (match Hashtbl.find_opt actor_registry pid with
         | None -> VCon ("None", [])
-        | Some inst when not inst.ai_alive -> VCon ("None", [])
+        | Some inst when not (Eval_runtime.mailbox_accepts inst) -> VCon ("None", [])
         | Some inst when inst.ai_epoch <> cap_epoch ->
           eval_error "send: capability epoch mismatch — cap has epoch %d, actor is at epoch %d"
             cap_epoch inst.ai_epoch
@@ -2366,6 +2402,7 @@ let reset_scheduler_state () : unit =
   shutdown_requested := false;
   Hashtbl.clear revocation_table;
   Hashtbl.clear pending_replies;
+  Hashtbl.clear pending_reply_times;
   next_call_ref := 0;
   logger_level := 1;
   logger_fields := [];
@@ -2516,6 +2553,9 @@ let run_scheduler () =
   done
 
 let () = run_scheduler_hook := run_scheduler
+(* stop_actor (Eval_runtime) drains a stopping actor's mailbox by pumping the
+   scheduler, which is defined here, above it. *)
+let () = Eval_runtime.drain_hook := run_scheduler
 
 (* =================================================================
    §11  App / Supervisor machinery
@@ -3064,6 +3104,7 @@ let spawn_from_spec (spec : value) : unit =
                 ai_state = init_state; ai_alive = true;
                 ai_terminal_reason = Normal;
                 ai_monitors = []; ai_mailbox = Queue.create ();
+                ai_draining = false;
                 ai_supervisor = None; ai_restart_count = []; ai_epoch = 0;
                 ai_resources = []; ai_linear_values = [];
                 ai_mbox_limit = 0; ai_mbox_policy = 0 } in

@@ -1,0 +1,41 @@
+-- types (2) --
+type P2 = P2(Float, Float)
+closure $Clo_$jp3$0(Ptr(Unit))
+-- fns (4) --
+## $jp3$apply$0
+fn $jp3$apply$0($clo : Ptr(Unit)) : '_ =
+  panic("non-exhaustive pattern match")
+
+## main
+fn main(_cap_console : Cap(IO.Console)) : () =
+  let $t14 : String = let $t13 : Float = spin(10, 0.) in
+float_to_string($t13) in
+let $rc_1 : () = println($t14) in
+dec_rc $t14;
+$rc_1
+
+## psum
+fn psum(p : P2) : Float =
+  case p of
+  P2($f1, $f2) -> let $jp_clo4 : () -> '_ = alloc $Clo_$jp3$0($jp3$apply$0) in
+dec_rc $jp_clo4;
+let b : Float = $f2 in
+let a : Float = $f1 in
++.(a, b)
+  _ -> panic("non-exhaustive pattern match")
+
+## spin
+fn spin(i : Int, acc : Float) : Float =
+  let $t7 : Bool = ==(i, 0) in
+case $t7 of
+  True() -> acc
+  _ -> let p : P2 = let $t9 : Bool = let $t8 : Int = %(i, 2) in
+==($t8, 0) in
+case $t9 of
+  True() -> alloc P2.P2(1., 2.)
+  _ -> alloc P2.P2(3., 4.) in
+let $t10 : Int = -(i, 1) in
+let $t12 : Float = let $t11 : Float = psum(p) in
++.(acc, $t11) in
+spin($t10, $t12)
+

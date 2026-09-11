@@ -14,7 +14,7 @@
 --
 -- SIGNAL: live_allocs(), NOT RSS -- same rationale, and same conversion, as
 -- native_arr_fold_leak_probe.march. march_simd_alloc cells are March heap
--- objects, so live_allocs() (the runtime's always-on march_live_alloc_count,
+-- objects, so live_allocs() (the runtime's always-on live-object gauge,
 -- incremented in march_alloc/decremented on every free-on-rc-zero path)
 -- counts a leaked box directly, with no allocator free-list behaviour, no
 -- page-granularity rounding, and no OS/platform baseline to calibrate away.

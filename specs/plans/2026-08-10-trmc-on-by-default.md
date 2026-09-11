@@ -4,6 +4,11 @@
 
 **Goal:** Turn tail-recursion-modulo-cons from an env-gated experiment (`MARCH_TRMC=1`) into the compiler's default behaviour, with the coverage needed to trust it.
 
+**DONE 2026-09-09.** Tasks 1-7, 9 and 10 landed; the default is ON. Task 8 was
+split into its own todo (see the note on that task). Closing evidence and the
+final measurements are in
+`specs/progress/2026-08-07-trmc-tail-recursion-modulo-cons.md`.
+
 **Architecture:** TRMC already exists and works (PR #241): `lib/tir/trmc.ml` analyses eligibility post-lower and rewrites eligible functions into destination-passing style, `EAllocHole`/`ESetField` carry the hole, and `Perceus_fbip` pairs a scrutinee drop with a hole allocation so the loop reuses cells in place. This plan does not change that design. It closes the coverage gaps (sanitizer, backends, benchmarks), replaces the env var with a real flag, rewrites the stdlib producers so the optimisation has something to bite on, and only then flips the default.
 
 **Tech Stack:** OCaml 5.3.0 / dune (opam switch `march`), LLVM textual IR, C runtime, alcotest, GitHub Actions (ubuntu-24.04 + macOS runners).
@@ -662,6 +667,12 @@ git commit -m "test(trmc): cover the JS backend's hole allocation and fill"
 
 ### Task 8: Rewrite the stdlib producers into natural style
 
+> **SPLIT OUT 2026-09-09.** This task is no longer part of this plan. It now
+> lives as its own item,
+> `specs/todos/2026-09-09-rewrite-stdlib-list-producers-into-natural-style.md`,
+> which carries the ordering correction below and the escape-hatch decision it
+> forces. Task 10 landed without it.
+
 **This is the task that makes the default worth flipping.** Today `List.map`/`filter`/`filter_map`/`append`/`flat_map` are accumulator+`reverse` and classify `already-tail`, so TRMC never sees them.
 
 > **ORDERING CORRECTION (2026-08-12): run this task AFTER Task 10, not before.**
@@ -916,7 +927,7 @@ Only after Tasks 1-9 are merged and CI is green on all of them.
 - Consumes: everything above.
 - Produces: `Trmc.enabled` defaults to `true`; `--no-trmc` is the escape hatch.
 
-- [ ] **Step 1: Flip the ref**
+- [x] **Step 1: Flip the ref**
 
 In `lib/tir/trmc.ml`, change:
 
@@ -932,7 +943,7 @@ let enabled : bool ref = ref true
 
 and update the doc comment's final sentence to read: `Default ON since 2026-08-10; --no-trmc disables it.`
 
-- [ ] **Step 2: Full suite, both directions**
+- [x] **Step 2: Full suite, both directions**
 
 ```bash
 scripts/run-tests.sh
@@ -948,7 +959,7 @@ rm -rf .march/cas/artifacts-v2
 ```
 Expected: prints `239988000`.
 
-- [ ] **Step 3: Regenerate TIR snapshots**
+- [x] **Step 3: Regenerate TIR snapshots**
 
 The default-on transform changes emitted TIR for eligible functions, so the goldens legitimately move:
 
@@ -959,7 +970,7 @@ git diff test/snapshots/ | head -60
 
 **Review the diff — it is the code-review artifact.** Expect `alloc_hole` / `reuse_hole` / `$dst.N <-` lines to appear in producer-shaped fixtures and nowhere else. If an unrelated fixture moved, stop and find out why.
 
-- [ ] **Step 4: Benchmark sweep**
+- [x] **Step 4: Benchmark sweep**
 
 ```bash
 rm -rf .march/cas/artifacts-v2
@@ -970,14 +981,14 @@ done
 ```
 Expected: `list_producers` markedly faster than the Task 2 baseline; the others within noise.
 
-- [ ] **Step 5: Drop the now-redundant CI leg**
+- [x] **Step 5: Drop the now-redundant CI leg**
 
 In `.github/workflows/ci.yml`, remove the "Test suite with TRMC enabled" step
 added in Task 1 Step 4 — with the default on, the ordinary `test` job covers it.
 Keep both `sanitize.sh` legs: the explicit `MARCH_TRMC=1` leg is now redundant
 with the default, so delete that one too and leave the original.
 
-- [ ] **Step 6: Changelog and specs**
+- [x] **Step 6: Changelog and specs**
 
 In `CHANGELOG.md` under `## [Unreleased]` → `### Changed`:
 
@@ -995,7 +1006,7 @@ git mv specs/todos/2026-08-07-trmc-tail-recursion-modulo-cons.md specs/progress/
 
 and append a closing section to that file recording the final benchmark numbers from Step 4.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add lib/tir/trmc.ml CHANGELOG.md test/snapshots .github/workflows/ci.yml
@@ -1003,7 +1014,7 @@ git add specs/progress/2026-08-07-trmc-tail-recursion-modulo-cons.md
 git commit -m "tir(trmc): enable tail-recursion-modulo-cons by default"
 ```
 
-- [ ] **Step 8: Watch CI**
+- [ ] **Step 8: Watch CI** — not done locally; this is a post-push step.
 
 Both `sanitize-gate` legs, `test`, `conformance`, `property-tests` and `cross-linux-oracle` must be green. The sanitize gate is the one that matters most: it is the only memory-safety evidence this feature has.
 

@@ -1,0 +1,6 @@
+stop: true
+supervisor dead: true
+child a dead: true
+child b dead: true
+child c dead: true
+child a not restarted: true

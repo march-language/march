@@ -1498,6 +1498,46 @@ let rec infer_expr env (e : Ast.expr) : ty =
       demote_to_monomorphic rty;
       rty
 
+    (* Variadic builtins.  The generic path below cannot type these: a builtin's
+       type comes from its name via [instantiate], with no view of the argument
+       list, so the arity is fixed before the call is in scope.  Here it is in
+       scope.  See [Builtins.variadic_builtins] for the table and why the
+       mechanism stops at the typechecker -- the application is typed at its
+       ACTUAL arity, so every pass downstream sees an ordinary n-argument
+       builtin call and needs no variadic notion of its own.
+
+       Guarded on the name being unshadowed: a user function called
+       `string_concat_n` must keep its own type. *)
+    | Ast.EApp (Ast.EVar ({ txt = bname; _ } as bn), args, sp)
+      when (match variadic_builtin bname with
+            | None -> false
+            | Some _ ->
+              (* Unshadowed check.  The builtin lives in [env.vars] like any
+                 other binding, so presence proves nothing; a user function of
+                 the same name would simply have replaced it.  Compare the
+                 scheme in scope against the one this table registered — both
+                 are ground [Mono] types, so structural equality is exact. *)
+              (match lookup_var bname env, List.assoc_opt bname builtin_bindings with
+               | Some in_scope, Some registered -> in_scope = registered
+               | _ -> false)) ->
+      let (arg_ty, ret_ty, min_arity) =
+        match variadic_builtin bname with
+        | Some t -> t
+        | None -> assert false (* guarded above *)
+      in
+      Hashtbl.replace env.type_map bn.Ast.span ret_ty;
+      if List.length args < min_arity then begin
+        Err.error env.errors ~span:sp
+          (Printf.sprintf
+             "`%s` needs at least %d arguments, but I see %d here."
+             bname min_arity (List.length args));
+        TError
+      end else begin
+        List.iteri (fun i a ->
+          ignore (check_expr env a arg_ty ~reason:(Some (RFnArg (sp, i))))) args;
+        ret_ty
+      end
+
     | Ast.EApp (f, args, sp) ->
       (* Default-arg call resolution.  [expand_defaults_decl] emits a default-arg
          fn as mangled `foo$R`..`foo$N` decls (one per supplied arity) with NO
@@ -5918,6 +5958,14 @@ let check_stdlib_mediated_ceiling (env : env) (errors : Err.ctx)
 
 let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
     : Err.ctx * (Ast.span, ty) Hashtbl.t * env =
+  (* `from_json` return-type dispatch is recorded per call-site span by
+     [check_json_cap_sites] at the end of this pass.  The table is
+     process-global, so clear it here: a REPL fragment, an LSP re-check and a
+     multi-file build are each their own check, and answers from a previous
+     one describe call sites that are no longer in scope.  Cleared even when
+     seeding from an existing env — a seeded check re-walks the bodies it
+     cares about and re-records what it finds. *)
+  March_ast.Json_dispatch.reset ();
   let type_map = match seed_env with
     | Some (se : env) -> se.type_map
     | None -> Hashtbl.create 256

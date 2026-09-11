@@ -1,0 +1,12 @@
+ts=Circle(7)
+Circle(7)
+Square(-3)
+A
+B("hi")
+C("a\"b", 12)
+Flags(true, false)
+Meas(1.5)
+Nest(Circle(1), B("x"))
+Holder([1, 2])
+Tally(0)
+{ x: 1, y: 2 }

@@ -2835,3 +2835,379 @@ void *march_html_auto_escape(void *v) {
     free(buf);
     return r;
 }
+
+/* ── Constructor-name metadata (compiled `to_string` on a user ADT) ─────
+ *
+ * A boxed ADT cell carries a constructor TAG but no name, arity or field
+ * types, so the type-erased [march_value_to_string] could only print
+ * "#<tag:N>" for anything the runtime does not structurally recognise (see
+ * specs/progress/2026-09-08-compiled-to-string-adt-ctor-names.md).  The
+ * compiler now emits, per compilation unit, a descriptor string naming every
+ * variant/record type it lowered, and calls [march_value_to_string_typed]
+ * wherever the STATIC TIR type of a `to_string` argument names one of them.
+ *
+ * Descriptor grammar (tab-separated, newline-terminated lines):
+ *
+ *   T \t <local id> \t <V|R> \t <TypeName>       start a type
+ *   C \t <tag> \t <CtorName> \t <f1,f2,...>      a variant constructor
+ *   F \t <FieldName> \t <f>                      a record field, slot order
+ *
+ * A field token is one character, optionally followed by a decimal id:
+ *   i  raw i64 Int          b  raw i64 Bool        u  Unit
+ *   f  raw double bits      s  march_string ptr    p  generic ptr slot
+ *   A<id>  pointer to a cell of the type with that LOCAL id
+ *
+ * These MUST agree with [Llvm_ctx.llvm_field_ty] — the slot representation a
+ * boxed constructor actually stores — and with lib/tir/llvm_ctor_desc.ml,
+ * which writes the string.  A mismatch there is a misread field, not a
+ * missing name, so the two are deliberately documented together.
+ *
+ * Ids are LOCAL to one descriptor.  Several descriptors can be registered in
+ * one process (the REPL/JIT registers one per fragment), so
+ * [march_ctor_table_ensure] appends a table's types to one global array and
+ * returns the BASE index it was placed at; parsing rebases every nested `A`
+ * reference by the same amount, and the call site adds the base to its own
+ * local id.  That is why the base is cached per descriptor global rather than
+ * a bare "already registered" flag.
+ *
+ * Rendering deliberately mirrors [March_eval.Eval_runtime.value_to_string] —
+ * the interpreter's Show-less fallback — not `derive Show`'s output: nested
+ * strings are QUOTED, `List` renders in bracket form, records render as
+ * `{ k: v, ... }`.  Anything else would swap one parity gap for another. */
+
+typedef struct { char kind; int32_t type_id; } march_ctor_field;
+typedef struct {
+    int32_t tag;
+    char *name;
+    int32_t nfields;
+    march_ctor_field *fields;
+} march_ctor_row;
+typedef struct {
+    char kind;                /* 'V' variant, 'R' record */
+    char *name;
+    int32_t nrows;
+    march_ctor_row *rows;
+} march_ctor_type;
+
+static march_ctor_type *ctor_types = NULL;
+static int32_t ctor_type_count = 0;
+static int32_t ctor_type_cap   = 0;
+static pthread_mutex_t ctor_tbl_mu = PTHREAD_MUTEX_INITIALIZER;
+
+/* Copy [n] bytes of [p] into a fresh NUL-terminated buffer. */
+static char *ctor_strndup(const char *p, size_t n) {
+    char *s = malloc(n + 1);
+    memcpy(s, p, n);
+    s[n] = '\0';
+    return s;
+}
+
+/* Parse a comma-separated field-token list into [row]. */
+static void ctor_parse_fields(march_ctor_row *row, const char *p, const char *end,
+                              int32_t base) {
+    int32_t n = 0;
+    if (end > p) { n = 1; for (const char *q = p; q < end; q++) if (*q == ',') n++; }
+    row->nfields = n;
+    row->fields = n > 0 ? calloc((size_t)n, sizeof(march_ctor_field)) : NULL;
+    for (int32_t i = 0; i < n; i++) {
+        const char *comma = p;
+        while (comma < end && *comma != ',') comma++;
+        row->fields[i].kind = *p;
+        row->fields[i].type_id = 0;
+        if (*p == 'A') {
+            int32_t local = (int32_t)strtol(p + 1, NULL, 10);
+            row->fields[i].type_id = local > 0 ? base + local : 0;
+        }
+        p = comma + 1;
+    }
+}
+
+/* Register one descriptor.  Returns the base index its first type landed at;
+ * [cache] memoizes base+1 so a hot call site pays one load and one branch.
+ * Idempotent per cache cell, not per descriptor CONTENT: two identical
+ * descriptors from two compilation units get two (equivalent) tables, which
+ * costs a little memory and no correctness. */
+int32_t march_ctor_table_ensure(const char *desc, int32_t *cache) {
+    int32_t cached = *cache;
+    if (cached != 0) return cached - 1;
+    pthread_mutex_lock(&ctor_tbl_mu);
+    if (*cache != 0) { pthread_mutex_unlock(&ctor_tbl_mu); return *cache - 1; }
+    int32_t base = ctor_type_count;
+    /* Pass 1: count types so the array can be grown once. */
+    int32_t ntypes = 0;
+    for (const char *p = desc; *p; p++)
+        if (*p == 'T' && (p == desc || p[-1] == '\n')) ntypes++;
+    if (ctor_type_count + ntypes > ctor_type_cap) {
+        int32_t want = ctor_type_cap ? ctor_type_cap : 32;
+        while (want < ctor_type_count + ntypes) want *= 2;
+        ctor_types = realloc(ctor_types, (size_t)want * sizeof(*ctor_types));
+        ctor_type_cap = want;
+    }
+    memset(ctor_types + base, 0, (size_t)ntypes * sizeof(*ctor_types));
+    ctor_type_count += ntypes;
+    /* Pass 2: fill.  Rows are counted per type by a lookahead over its own
+     * C/F lines, so one allocation per type rather than a realloc per row. */
+    march_ctor_type *cur = NULL;
+    int32_t row_i = 0;
+    const char *p = desc;
+    while (*p) {
+        const char *eol = strchr(p, '\n');
+        if (!eol) break;
+        if (*p == 'T') {
+            const char *f1 = strchr(p, '\t') + 1;         /* local id */
+            int32_t local = (int32_t)strtol(f1, NULL, 10);
+            const char *f2 = strchr(f1, '\t') + 1;        /* kind */
+            const char *f3 = strchr(f2, '\t') + 1;        /* name */
+            /* The producer numbers types 1..ntypes and the ntypes above is
+             * counted from this same string, so this can only fail if the
+             * emitter and this parser disagree — a compiler bug.  Bound it
+             * anyway: it is the one place a bad number would index the array,
+             * and a skipped line degrades to "#<tag:N>" while a wild write
+             * corrupts the heap. */
+            if (local < 1 || local > ntypes) { cur = NULL; p = eol + 1; continue; }
+            cur = &ctor_types[base + local - 1];
+            cur->kind = *f2;
+            cur->name = ctor_strndup(f3, (size_t)(eol - f3));
+            int32_t nrows = 0;
+            for (const char *q = eol + 1; *q && *q != 'T'; ) {
+                const char *e2 = strchr(q, '\n');
+                if (!e2) break;
+                nrows++;
+                q = e2 + 1;
+            }
+            cur->nrows = nrows;
+            cur->rows = nrows > 0 ? calloc((size_t)nrows, sizeof(march_ctor_row)) : NULL;
+            row_i = 0;
+        } else if (cur && row_i < cur->nrows && (*p == 'C' || *p == 'F')) {
+            march_ctor_row *row = &cur->rows[row_i++];
+            const char *f1 = strchr(p, '\t') + 1;
+            if (*p == 'C') {
+                row->tag = (int32_t)strtol(f1, NULL, 10);
+                const char *f2 = strchr(f1, '\t') + 1;     /* ctor name */
+                const char *f3 = strchr(f2, '\t');         /* field list */
+                row->name = ctor_strndup(f2, (size_t)(f3 - f2));
+                ctor_parse_fields(row, f3 + 1, eol, base);
+            } else {
+                row->tag = row_i - 1;
+                const char *f2 = strchr(f1, '\t');         /* field kind */
+                row->name = ctor_strndup(f1, (size_t)(f2 - f1));
+                ctor_parse_fields(row, f2 + 1, eol, base);
+            }
+        }
+        p = eol + 1;
+    }
+    *cache = base + 1;
+    pthread_mutex_unlock(&ctor_tbl_mu);
+    return base;
+}
+
+/* ── Rendering ──────────────────────────────────────────────────────── */
+
+/* A plain growable byte buffer.  Rendering builds ONE march_string at the
+ * end instead of folding march_string_concat over every piece: the concat
+ * route allocates and refcounts a cell per separator (march_simd_to_string
+ * does that, but it renders at most 16 lanes and never recurses), and a
+ * deeply nested ADT would pay it quadratically. */
+typedef struct { char *p; size_t len, cap; } ctor_buf;
+
+static void cb_need(ctor_buf *b, size_t extra) {
+    if (b->len + extra + 1 <= b->cap) return;
+    size_t want = b->cap ? b->cap : 64;
+    while (want < b->len + extra + 1) want *= 2;
+    b->p = realloc(b->p, want);
+    b->cap = want;
+}
+static void cb_puts(ctor_buf *b, const char *s, size_t n) {
+    cb_need(b, n); memcpy(b->p + b->len, s, n); b->len += n; b->p[b->len] = '\0';
+}
+static void cb_putz(ctor_buf *b, const char *s) { cb_puts(b, s, strlen(s)); }
+static void cb_putc(ctor_buf *b, char c) { cb_puts(b, &c, 1); }
+
+/* Append a March string VALUE (heap cell or inline SSO) to [b], then release
+ * it if [owned].  Used for every piece produced by an existing runtime
+ * formatter (march_int_to_string, march_float_to_string,
+ * march_value_to_string), which all return +1. */
+static void cb_put_march_string(ctor_buf *b, void *s, int owned) {
+    if (!s) return;
+    char scratch[24];
+    const char *d = march_str_data(s, scratch);
+    int64_t n = march_str_len(s);
+    if (d && n > 0) cb_puts(b, d, (size_t)n);
+    if (owned) march_decrc(s);
+}
+
+/* OCaml [String.escaped], which is what the interpreter's repr-form
+ * value_to_string applies to a nested string.  Non-printables become a
+ * THREE-digit DECIMAL escape (\ddd), not hex — matching that exactly is the
+ * whole point of quoting nested strings here at all. */
+static void cb_put_escaped(ctor_buf *b, const char *d, int64_t n) {
+    cb_putc(b, '"');
+    for (int64_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)d[i];
+        switch (c) {
+            case '"':  cb_putz(b, "\\\""); break;
+            case '\\': cb_putz(b, "\\\\"); break;
+            case '\n': cb_putz(b, "\\n");  break;
+            case '\t': cb_putz(b, "\\t");  break;
+            case '\r': cb_putz(b, "\\r");  break;
+            case '\b': cb_putz(b, "\\b");  break;
+            default:
+                if (c < 32 || c == 127) {
+                    char e[5];
+                    snprintf(e, sizeof(e), "\\%03u", (unsigned)c);
+                    cb_putz(b, e);
+                } else cb_putc(b, (char)c);
+        }
+    }
+    cb_putc(b, '"');
+}
+
+/* Depth cap: the table cannot describe a cyclic type, but a corrupted or
+ * mis-typed slot could still walk one, and printing is never worth a stack
+ * overflow. */
+#define CTOR_MAX_DEPTH 24
+
+static void ctor_render(ctor_buf *b, void *v, int32_t type_id, int depth);
+
+/* Render one field slot.  [raw] is the 8 bytes at the slot; which of its
+ * interpretations is correct is decided ENTIRELY by [f.kind], because that is
+ * the only thing that knows what the compiler stored there. */
+static void ctor_render_field(ctor_buf *b, int64_t raw, march_ctor_field f, int depth) {
+    switch (f.kind) {
+        case 'i': {
+            char tmp[24];
+            int n = snprintf(tmp, sizeof(tmp), "%lld", (long long)raw);
+            cb_puts(b, tmp, (size_t)n);
+            break;
+        }
+        case 'b': cb_putz(b, raw ? "true" : "false"); break;
+        case 'u': cb_putz(b, "()"); break;
+        case 'f': {
+            double d;
+            memcpy(&d, &raw, 8);
+            cb_put_march_string(b, march_float_to_string(d), 1);
+            break;
+        }
+        case 's': {
+            void *s = (void *)(uintptr_t)raw;
+            if (!s) { cb_putz(b, "\"\""); break; }
+            char scratch[24];
+            const char *d = march_str_data(s, scratch);
+            if (!d) { cb_putz(b, "\"\""); break; }
+            cb_put_escaped(b, d, march_str_len(s));
+            break;
+        }
+        case 'A': ctor_render(b, (void *)(uintptr_t)raw, f.type_id, depth + 1); break;
+        default: {
+            /* Generic slot: the field's declared type was a type VARIABLE
+             * (`Ok(a)`, `Cons(a, List(a))`), so the descriptor cannot say what
+             * is in it and the value must classify itself.  A String must
+             * still be QUOTED here — the interpreter's repr-form
+             * value_to_string quotes a nested string wherever it appears, and
+             * march_value_to_string returns one verbatim (it is the identity
+             * on a real String), so delegating blindly would print
+             * `Ok(<script>)` where the interpreter prints `Ok("<script>")`. */
+            void *fv = (void *)(uintptr_t)raw;
+            int is_str = fv
+                && (march_str_is_inline(fv)
+                    || (IS_HEAP_PTR(fv) && ((march_hdr *)fv)->tag == MARCH_STRING_TAG));
+            if (is_str) {
+                char scratch[24];
+                const char *d = march_str_data(fv, scratch);
+                if (d) { cb_put_escaped(b, d, march_str_len(fv)); break; }
+            }
+            cb_put_march_string(b, march_value_to_string(fv), 1);
+            break;
+        }
+    }
+}
+
+static int64_t ctor_slot(void *v, int32_t i) {
+    return *(int64_t *)((char *)v + 16 + (size_t)i * 8);
+}
+
+static march_ctor_row *ctor_row_for_tag(march_ctor_type *t, int32_t tag) {
+    for (int32_t i = 0; i < t->nrows; i++)
+        if (t->rows[i].tag == tag) return &t->rows[i];
+    return NULL;
+}
+
+/* `List` renders in bracket form ("[1, 2, 3]"), like the interpreter's
+ * is_list_value branch, rather than as the Cons spine it actually is.  Keyed
+ * on the DECLARED type name plus Nil/Cons ctor names, so a user type that
+ * merely happens to have a two-field constructor is unaffected. */
+static int ctor_type_is_list(march_ctor_type *t) {
+    return t->kind == 'V' && strcmp(t->name, "List") == 0;
+}
+
+static void ctor_render(ctor_buf *b, void *v, int32_t type_id, int depth) {
+    if (depth >= CTOR_MAX_DEPTH) { cb_putz(b, "..."); return; }
+    if (type_id <= 0 || type_id > ctor_type_count || !IS_HEAP_PTR(v)) {
+        cb_put_march_string(b, march_value_to_string(v), 1);
+        return;
+    }
+    march_ctor_type *t = &ctor_types[type_id - 1];
+    if (!t->name) { cb_put_march_string(b, march_value_to_string(v), 1); return; }
+    int32_t tag = ((march_hdr *)v)->tag;
+    /* A reserved sentinel tag means the slot does not actually hold a value of
+     * the static type (an erased flow, a string in a TVar slot).  The generic
+     * renderer classifies those correctly; the table would misread them. */
+    if (tag < 0) { cb_put_march_string(b, march_value_to_string(v), 1); return; }
+    if (t->kind == 'R') {
+        cb_putz(b, "{ ");
+        for (int32_t i = 0; i < t->nrows; i++) {
+            if (i) cb_putz(b, ", ");
+            cb_putz(b, t->rows[i].name);
+            cb_putz(b, ": ");
+            ctor_render_field(b, ctor_slot(v, i),
+                              t->rows[i].nfields > 0 ? t->rows[i].fields[0]
+                                                     : (march_ctor_field){ 'p', 0 },
+                              depth);
+        }
+        cb_putz(b, " }");
+        return;
+    }
+    march_ctor_row *row = ctor_row_for_tag(t, tag);
+    if (!row) { cb_put_march_string(b, march_value_to_string(v), 1); return; }
+    if (ctor_type_is_list(t)) {
+        if (strcmp(row->name, "Nil") == 0) { cb_putz(b, "[]"); return; }
+        if (strcmp(row->name, "Cons") == 0 && row->nfields == 2) {
+            cb_putc(b, '[');
+            void *cur = v;
+            march_ctor_row *r = row;
+            int first = 1, guard = 0;
+            while (r && strcmp(r->name, "Cons") == 0 && r->nfields == 2
+                   && guard++ < 1000000) {
+                if (!first) cb_putz(b, ", ");
+                first = 0;
+                ctor_render_field(b, ctor_slot(cur, 0), r->fields[0], depth + 1);
+                void *next = (void *)(uintptr_t)ctor_slot(cur, 1);
+                if (!IS_HEAP_PTR(next)) { cur = NULL; break; }
+                cur = next;
+                r = ctor_row_for_tag(t, ((march_hdr *)cur)->tag);
+            }
+            cb_putc(b, ']');
+            return;
+        }
+    }
+    cb_putz(b, row->name);
+    if (row->nfields == 0) return;
+    cb_putc(b, '(');
+    for (int32_t i = 0; i < row->nfields; i++) {
+        if (i) cb_putz(b, ", ");
+        ctor_render_field(b, ctor_slot(v, i), row->fields[i], depth + 1);
+    }
+    cb_putc(b, ')');
+}
+
+/* to_string on a value whose STATIC type named a registered variant/record.
+ * Falls back to [march_value_to_string] for every shape the table cannot
+ * describe, so this is never worse than the untyped path. */
+void *march_value_to_string_typed(void *v, int32_t type_id) {
+    if (!v || !IS_HEAP_PTR(v)) return march_value_to_string(v);
+    ctor_buf b = { NULL, 0, 0 };
+    ctor_render(&b, v, type_id, 0);
+    void *s = march_string_lit(b.p ? b.p : "", (int64_t)b.len);
+    free(b.p);
+    return s;
+}

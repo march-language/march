@@ -126,7 +126,12 @@
 (rule
  (alias   runtest)
  (deps    (file test_scheduler_runner))
- (action  (run ./test_scheduler_runner)))
+ ; MARCH_NUM_SCHEDULERS="" so this harness's scheduler count comes from the
+ ; build above, not from a developer's exported environment.  While the
+ ; variable was a ceiling rather than a request, a compile-time
+ ; -DMARCH_NUM_SCHEDULERS bounded it on its own; it no longer does.
+ (action  (setenv MARCH_NUM_SCHEDULERS ""
+           (run ./test_scheduler_runner))))
 
 ; ── C scheduler pinned-proc tests (march_sched_spawn_pinned / MARCH_PIN_MAIN) ──
 ; Built with -DMARCH_NUM_SCHEDULERS=4 so the scheduler-0-only pin queue is
@@ -149,11 +154,74 @@
 (rule
  (alias   runtest)
  (deps    (file test_scheduler_pin_runner))
- (action  (run ./test_scheduler_pin_runner)))
+ ; MARCH_NUM_SCHEDULERS="" — see test_scheduler_runner above.
+ (action  (setenv MARCH_NUM_SCHEDULERS ""
+           (run ./test_scheduler_pin_runner))))
+
+; ── C scheduler thread-count tests (MARCH_NUM_SCHEDULERS request, G71) ──
+; Built TWICE from one source, both at -DMARCH_MAX_SCHEDULERS=8 so that "above
+; the default" (7) and "above the maximum" (9) are reachable without spawning a
+; hundred OS threads:
+;
+;   _runner        UNPINNED — the shipped configuration, where the header
+;                  leaves MARCH_NUM_SCHEDULERS at 0 ("auto") and an unset
+;                  environment must resolve to one scheduler per online CPU.
+;   _pinned_runner -DMARCH_NUM_SCHEDULERS=3 — a build that names a count must
+;                  still get exactly 3 with the environment unset. This is the
+;                  property the sibling C harnesses below depend on: they pin
+;                  themselves to 1 or 4 because their premise IS that thread
+;                  count, and on a single-core machine an auto default would
+;                  turn them into silent no-ops rather than failures.
+;
+; Between them: the env request is honoured above the build's default, the
+; honoured number is the number of OS threads that actually dispatch green
+; threads, and an unsatisfiable or malformed request warns on stderr instead of
+; being dropped in silence.
+(rule
+ (targets test_scheduler_count_runner)
+ (deps    test_scheduler_count.c
+          ../runtime/march_scheduler.c
+          ../runtime/march_scheduler.h
+          ../runtime/march_deque.h)
+ (action  (run %{cc} -std=gnu11 -Wall -Wextra -I../runtime
+               -DMARCH_MAX_SCHEDULERS=8
+               -o %{targets}
+               test_scheduler_count.c ../runtime/march_scheduler.c
+               -lpthread)))
+(rule
+ (alias   runtest)
+ (deps    (file test_scheduler_count_runner))
+ ; The test sets/unsets MARCH_NUM_SCHEDULERS itself around each
+ ; march_sched_init(), so an inherited value cannot influence it.
+ (action  (run ./test_scheduler_count_runner)))
+
+(rule
+ (targets test_scheduler_count_pinned_runner)
+ (deps    test_scheduler_count.c
+          ../runtime/march_scheduler.c
+          ../runtime/march_scheduler.h
+          ../runtime/march_deque.h)
+ (action  (run %{cc} -std=gnu11 -Wall -Wextra -I../runtime
+               -DMARCH_MAX_SCHEDULERS=8
+               -DMARCH_NUM_SCHEDULERS=3
+               -o %{targets}
+               test_scheduler_count.c ../runtime/march_scheduler.c
+               -lpthread)))
+(rule
+ (alias   runtest)
+ (deps    (file test_scheduler_count_pinned_runner))
+ (action  (run ./test_scheduler_count_pinned_runner)))
 
 ; ── C scheduler timer tests (min-heap timers + timed park) ──────────────
-; Multi-scheduler (no -DMARCH_NUM_SCHEDULERS=1): timers must work across the
+; Multi-scheduler (pinned at 4, see below): timers must work across the
 ; work-stealing/global-runq machinery, not just the single-scheduler path.
+; NOW PINNED AT 4 EXPLICITLY.  This rule used to say "no -DMARCH_NUM_SCHEDULERS"
+; and inherit a flat compile-time default of 4.  That default now tracks the
+; machine (one scheduler per usable CPU), so on a 1- or 2-CPU box these cases
+; would silently run with fewer threads than their premise needs -- and
+; test_scheduler_mt's third case is literally named "via stealing", which
+; requires more than one scheduler to mean anything.  The multi-scheduler
+; guarantee is stated here rather than inherited.
 (rule
  (targets test_scheduler_timer_runner)
  (deps    test_scheduler_timer.c
@@ -161,18 +229,28 @@
           ../runtime/march_scheduler.h
           ../runtime/march_deque.h)
  (action  (run %{cc} -std=gnu11 -Wall -Wextra -I../runtime
+               -DMARCH_NUM_SCHEDULERS=4
                -o %{targets}
                test_scheduler_timer.c ../runtime/march_scheduler.c
                -lpthread)))
 (rule
  (alias   runtest)
  (deps    (file test_scheduler_timer_runner))
- (action  (run ./test_scheduler_timer_runner)))
+ ; MARCH_NUM_SCHEDULERS="" — see test_scheduler_runner above.
+ (action  (setenv MARCH_NUM_SCHEDULERS ""
+           (run ./test_scheduler_timer_runner))))
 
 ; ── C scheduler mailbox capacity + drop-policy tests (Task 7) ───────────
-; Multi-scheduler (no -DMARCH_NUM_SCHEDULERS=1), matching the timer rule
+; Multi-scheduler (pinned at 4, see below), matching the timer rule
 ; above: deterministic by construction (scheduler is never run), so the
 ; multi-thread machinery is present but never actually contended here.
+; NOW PINNED AT 4 EXPLICITLY.  This rule used to say "no -DMARCH_NUM_SCHEDULERS"
+; and inherit a flat compile-time default of 4.  That default now tracks the
+; machine (one scheduler per usable CPU), so on a 1- or 2-CPU box these cases
+; would silently run with fewer threads than their premise needs -- and
+; test_scheduler_mt's third case is literally named "via stealing", which
+; requires more than one scheduler to mean anything.  The multi-scheduler
+; guarantee is stated here rather than inherited.
 (rule
  (targets test_scheduler_mbox_runner)
  (deps    test_scheduler_mbox.c
@@ -180,19 +258,29 @@
           ../runtime/march_scheduler.h
           ../runtime/march_deque.h)
  (action  (run %{cc} -std=gnu11 -Wall -Wextra -I../runtime
+               -DMARCH_NUM_SCHEDULERS=4
                -o %{targets}
                test_scheduler_mbox.c ../runtime/march_scheduler.c
                -lpthread)))
 (rule
  (alias   runtest)
  (deps    (file test_scheduler_mbox_runner))
- (action  (run ./test_scheduler_mbox_runner)))
+ ; MARCH_NUM_SCHEDULERS="" — see test_scheduler_runner above.
+ (action  (setenv MARCH_NUM_SCHEDULERS ""
+           (run ./test_scheduler_mbox_runner))))
 
 ; ── C scheduler stack-recycling / churn test (Task 12) ───────────────────
-; Multi-scheduler (no -DMARCH_NUM_SCHEDULERS=1), matching the timer/mbox
+; Multi-scheduler (pinned at 4, see below), matching the timer/mbox
 ; rules above: churns 3000+100 procs through spawn->run->death and asserts
 ; via march_stat_counters[MARCH_STAT_STACKS_RECYCLED] that dead stacks are
 ; recycled instead of leaked.
+; NOW PINNED AT 4 EXPLICITLY.  This rule used to say "no -DMARCH_NUM_SCHEDULERS"
+; and inherit a flat compile-time default of 4.  That default now tracks the
+; machine (one scheduler per usable CPU), so on a 1- or 2-CPU box these cases
+; would silently run with fewer threads than their premise needs -- and
+; test_scheduler_mt's third case is literally named "via stealing", which
+; requires more than one scheduler to mean anything.  The multi-scheduler
+; guarantee is stated here rather than inherited.
 (rule
  (targets test_scheduler_churn_runner)
  (deps    test_scheduler_churn.c
@@ -200,13 +288,16 @@
           ../runtime/march_scheduler.h
           ../runtime/march_deque.h)
  (action  (run %{cc} -std=gnu11 -Wall -Wextra -I../runtime
+               -DMARCH_NUM_SCHEDULERS=4
                -o %{targets}
                test_scheduler_churn.c ../runtime/march_scheduler.c
                -lpthread)))
 (rule
  (alias   runtest)
  (deps    (file test_scheduler_churn_runner))
- (action  (run ./test_scheduler_churn_runner)))
+ ; MARCH_NUM_SCHEDULERS="" — see test_scheduler_runner above.
+ (action  (setenv MARCH_NUM_SCHEDULERS ""
+           (run ./test_scheduler_churn_runner))))
 
 ; ── march_actor_broadcast_migrate dead-target message leak regression ────
 ; Same minimal, decoupled dependency set as test_scheduler_mbox above (only
@@ -721,6 +812,13 @@
  (action  (run ./test_heap_runner)))
 
 ; Phase 3: multi-threaded scheduler tests (4 schedulers)
+; NOW PINNED AT 4 EXPLICITLY.  This rule used to say "no -DMARCH_NUM_SCHEDULERS"
+; and inherit a flat compile-time default of 4.  That default now tracks the
+; machine (one scheduler per usable CPU), so on a 1- or 2-CPU box these cases
+; would silently run with fewer threads than their premise needs -- and
+; test_scheduler_mt's third case is literally named "via stealing", which
+; requires more than one scheduler to mean anything.  The multi-scheduler
+; guarantee is stated here rather than inherited.
 (rule
  (targets test_scheduler_mt_runner)
  (deps    test_scheduler_mt.c
@@ -728,6 +826,7 @@
           ../runtime/march_scheduler.h
           ../runtime/march_deque.h)
  (action  (run %{cc} -std=gnu11 -Wall -Wextra -I../runtime
+               -DMARCH_NUM_SCHEDULERS=4
                -o %{targets}
                test_scheduler_mt.c ../runtime/march_scheduler.c
                -lpthread)))
@@ -738,7 +837,9 @@
 (rule
  (alias   runtest)
  (deps    (file test_scheduler_mt_runner))
- (action  (run ./test_scheduler_mt_runner)))
+ ; MARCH_NUM_SCHEDULERS="" — see test_scheduler_runner above.
+ (action  (setenv MARCH_NUM_SCHEDULERS ""
+           (run ./test_scheduler_mt_runner))))
 
 ; ── SIMD HTTP parser tests ───────────────────────────────────────────────
 ; -msse4.2 is only passed on x86-64; the source guards SSE4.2 paths with
@@ -899,7 +1000,21 @@
  ; (typecheck -> refine_check -> division_safety -> panic_surface_by_proof),
  ; because the question it asks — "does a guarded call still error?" — spans
  ; the syntactic ban in the typechecker AND the proof-based pass here.
- (libraries march_lexer march_parser march_ast march_desugar march_errors march_refine march_refinecheck march_typecheck march_eval march_scheduler alcotest unix))
+ (libraries march_lexer march_parser march_ast march_desugar march_errors march_refine march_refinecheck march_typecheck march_eval march_scheduler march_test_helpers alcotest unix)
+ ; The `audit-flag` group shells out to the REAL compiled driver: the
+ ; --refine-audit flag, its printer, and the early-CAS bypass it needs all
+ ; live in bin/main.ml, which this test binary does not (and should not)
+ ; link as a library. Without these deps a missing/stale bin/main.exe, or a
+ ; stale staged stdlib/runtime tree it resolves exe-relatively, would make
+ ; that group silently vacuous instead of loudly broken -- the same
+ ; reasoning run_compiler/run_stdlib's identical dep comment gives.
+ ; `audit-baseline` sweeps test/native, stdlib, and test/refine_audit/holes
+ ; the same way, and additionally READS/WRITES the committed baseline files
+ ; under test/refine_audit -- both must be dune deps for the identical
+ ; reason (and this test group always runs relative to the repo root, not
+ ; the sandbox, per its own require_repo_root check).
+ (deps %{exe:../bin/main.exe} (source_tree ../runtime) (source_tree ../stdlib)
+   (source_tree ../test/native) (source_tree refine_audit)))
 
 ; An (executable), NOT a (test): deliberately OUT of the `runtest` alias.
 ;
@@ -1288,6 +1403,39 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/default_args_nested.expected native_default_args_nested.out)))
+
+; ── n-ary string concat, compiled ─────────────────────────────────────────
+; Desugar folds a 4+ operand interpolation into `string_concat_n`, whose ABI
+; the generic builtin call path cannot emit: codegen spreads the operands into
+; a stack array and calls march_string_concat_n(count, array).  Every operand
+; is borrowed.  This golden checks the ANSWER: the .expected was generated from
+; the interpreter, so the diff is a compiled-vs-interpreted parity check as
+; well as a golden.  It deliberately does NOT claim to catch a wrong borrow
+; mode -- that leaks without changing any printed byte, and is pinned instead
+; by the `string_concat_n` case in test_codegen.ml.
+(rule
+ (targets native_string_concat_n native_string_concat_n.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (source_tree ../stdlib)
+       (file native/string_concat_n.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_string_concat_n
+        native/string_concat_n.march)
+   (with-stdout-to native_string_concat_n.out
+        (system "./native_string_concat_n")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/string_concat_n.expected native_string_concat_n.out)))
 
 ; ── Capability mocking, end to end, compiled ──────────────────────────────
 ; The one test that exercises what compiler-inserted capability passing exists
@@ -1893,8 +2041,13 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; This fixture burns time in the handler so the first call's 1ms deadline
 ; expires before the reply lands, then makes a second call and checks it
 ; gets the SECOND reply (n=1), not the stale first one (n=0). Needs the real
-; stdlib (List.fold_left, Range), hence (source_tree ../stdlib). Compile
-; natively, run, diff.
+; stdlib (List.fold_left, Range), hence (source_tree ../stdlib).
+;
+; Runs on BOTH backends since 2026-09-08. It could not before: the
+; interpreter bound Actor.call's timeout_ms and never looked at it, so the
+; slow handler below "answered in time" by construction and the interpreted
+; output was `first: unexpected ok`. See
+; specs/progress/2026-09-08-interpreter-actor-call-timeout.md.
 (rule
  (targets native_actor_call_late_reply native_actor_call_late_reply.out)
  (deps (file %{exe:../bin/main.exe})
@@ -1914,6 +2067,19 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
         native/actor_call_late_reply.march)
    (with-stdout-to native_actor_call_late_reply.out
         (system "./native_actor_call_late_reply")))))
+
+(rule
+ (targets interp_actor_call_late_reply.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/actor_call_late_reply.march))
+ (action
+  (with-stdout-to interp_actor_call_late_reply.out
+    (run %{exe:../bin/main.exe} native/actor_call_late_reply.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_call_late_reply.expected interp_actor_call_late_reply.out)))
 
 (rule
  (alias runtest)
@@ -2088,6 +2254,40 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; record type there, so EField fell back to march_record_field_dyn and
 ; march_unbox_float dereferenced a raw inline double — SIGSEGV, compiled
 ; only (the interpreter and every Int/String field were unaffected).
+; Regression: a NON-GENERIC Option-shaped type (`W(String) | Z`) with a heap
+; payload was released twice -- once as the box, once as the payload.  Codegen
+; encodes such a type as a NICHE (Repr.niche_repr_of_concrete, written for the
+; "TCon with no type params" case) where `W(x)` IS `x`, but
+; Drop.droppable_ctors classified it through Repr.repr_of_ty, which reads an
+; Option-shaped type's payload from the TCon's type PARAMS -- a non-generic
+; type has none, so it fell back to Boxed and synthesized a deep drop that
+; freed the single cell twice.  6/6 crashes before the fix.  Generic
+; Option(String) was never affected, which is why this survived; it needs a
+; user-declared non-generic type.  See the fixture's own header.
+(rule
+ (targets native_niche_concrete_payload_drop native_niche_concrete_payload_drop.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (source_tree ../stdlib)
+       (file native/niche_concrete_payload_drop.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_niche_concrete_payload_drop
+        native/niche_concrete_payload_drop.march)
+   (with-stdout-to native_niche_concrete_payload_drop.out
+        (system "./native_niche_concrete_payload_drop")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/niche_concrete_payload_drop.expected native_niche_concrete_payload_drop.out)))
+
 (rule
  (targets native_record_pattern native_record_pattern.out)
  (deps (file %{exe:../bin/main.exe})
@@ -2110,6 +2310,37 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/record_pattern.expected native_record_pattern.out)))
+
+; A String read through a NESTED record projection (`h.identity.name`) and
+; captured by a constructor must be dup'd: Perceus's borrowed-field lookahead
+; had no arm for a let-chain ENDING in a projection, so the read was moved
+; into the constructor without an inc_rc and that cell's drop released the
+; record owner's string. This is node_discovery's exit-138: the inlined
+; Handshake.encode_hello freed my_id.node_id. Deterministic here because the
+; fields are heap strings (a literal is immortal and would hide the dec) and
+; the allocator is churned before they are re-read: pre-fix, exit 138 3/3.
+(rule
+ (targets native_nested_record_field_capture native_nested_record_field_capture.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/nested_record_field_capture.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_nested_record_field_capture
+        native/nested_record_field_capture.march)
+   (with-stdout-to native_nested_record_field_capture.out
+        (system "./native_nested_record_field_capture")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/nested_record_field_capture.expected native_nested_record_field_capture.out)))
 
 ; A compiled `println` must be ONE write, not two.  Two assertions, because the
 ; runtime half and the structural half fail differently: `intact` counts how
@@ -3763,6 +3994,279 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/supervisor_rest_for_one_restart.expected native_supervisor_rest_for_one_restart.out)))
+
+; ── Graceful shutdown: Actor.stop drains, kill does not ─────────────────
+; specs/todos/2026-08-12-graceful-shutdown-and-drain.md. Both fixtures run
+; compiled AND interpreted against one .expected. `stop` is synchronous --
+; it returns only once the actor has drained and died -- which is what makes
+; a single expectation possible: an asynchronous stop would let the compiled
+; backend's handler output interleave with main's, and the same program would
+; have two legal orderings.
+
+(rule
+ (targets native_actor_stop_drains_mailbox native_actor_stop_drains_mailbox.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/actor_stop_drains_mailbox.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_stop_drains_mailbox
+        native/actor_stop_drains_mailbox.march)
+   (with-stdout-to native_actor_stop_drains_mailbox.out
+        (system "./native_actor_stop_drains_mailbox")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_stop_drains_mailbox.expected native_actor_stop_drains_mailbox.out)))
+
+(rule
+ (targets interp_actor_stop_drains_mailbox.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/actor_stop_drains_mailbox.march))
+ (action
+  (with-stdout-to interp_actor_stop_drains_mailbox.out
+    (run %{exe:../bin/main.exe} native/actor_stop_drains_mailbox.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_stop_drains_mailbox.expected interp_actor_stop_drains_mailbox.out)))
+
+(rule
+ (targets native_actor_stop_tree native_actor_stop_tree.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/actor_stop_tree.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_stop_tree
+        native/actor_stop_tree.march)
+   (with-stdout-to native_actor_stop_tree.out
+        (system "./native_actor_stop_tree")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_stop_tree.expected native_actor_stop_tree.out)))
+
+(rule
+ (targets interp_actor_stop_tree.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/actor_stop_tree.march))
+ (action
+  (with-stdout-to interp_actor_stop_tree.out
+    (run %{exe:../bin/main.exe} native/actor_stop_tree.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_stop_tree.expected interp_actor_stop_tree.out)))
+
+; Teardown ORDER, which stdout cannot show: a child that printed at shutdown
+; would race main on the compiled backend, and until actors get a terminate
+; callback there is no in-language event at teardown time at all. Both
+; backends emit the identical MARCH_SUP_TRACE line, so the order is asserted
+; off stderr instead -- reverse declaration order (2, 1, 0), each with the
+; shutdown budget its child spec declared.
+(rule
+ (targets native_actor_stop_tree.order.out)
+ (deps (file native_actor_stop_tree))
+ (action
+  (with-stdout-to native_actor_stop_tree.order.out
+   (system "MARCH_SUP_TRACE=1 ./native_actor_stop_tree 2>&1 >/dev/null | grep 'stopping supervised'"))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_stop_tree.order.expected native_actor_stop_tree.order.out)))
+
+(rule
+ (targets interp_actor_stop_tree.order.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/actor_stop_tree.march))
+ (action
+  (with-stdout-to interp_actor_stop_tree.order.out
+   (setenv MARCH_SUP_TRACE 1
+    (system "%{exe:../bin/main.exe} native/actor_stop_tree.march 2>&1 >/dev/null | grep 'stopping supervised'")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_stop_tree.order.expected interp_actor_stop_tree.order.out)))
+
+; ── Process enumeration ─────────────────────────────────────────────────
+; specs/todos/2026-08-12-per-actor-introspection-and-alarms.md. Compiled and
+; interpreted against one .expected: the shed-load guidance in
+; docs/overload-resilience.md is written for both backends, and the snapshot's
+; contents and ORDER (spawn order, deduplicated) are what make it followable.
+(rule
+ (targets native_actor_enumeration native_actor_enumeration.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/actor_enumeration.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_enumeration
+        native/actor_enumeration.march)
+   (with-stdout-to native_actor_enumeration.out
+        (system "./native_actor_enumeration")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_enumeration.expected native_actor_enumeration.out)))
+
+(rule
+ (targets interp_actor_enumeration.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/actor_enumeration.march))
+ (action
+  (with-stdout-to interp_actor_enumeration.out
+    (run %{exe:../bin/main.exe} native/actor_enumeration.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_enumeration.expected interp_actor_enumeration.out)))
+
+; ── Per-child restart types (`restart transient` / `restart temporary`) ──
+; specs/2026-09-08-supervise-child-spec-design.md. Each fixture runs BOTH
+; compiled and interpreted against ONE .expected: the policy is single-
+; threaded decision-making implemented twice (march_child_should_restart in
+; the C runtime, child_should_restart in eval_runtime.ml), and the two
+; drifting apart is the failure mode these goldens exist to catch.
+;
+; Each is non-vacuous by construction -- deleting the `restart <type>`
+; modifier from the source flips at least one printed line on BOTH backends.
+
+(rule
+ (targets native_supervisor_restart_transient native_supervisor_restart_transient.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/supervisor_restart_transient.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_supervisor_restart_transient
+        native/supervisor_restart_transient.march)
+   (with-stdout-to native_supervisor_restart_transient.out
+        (system "./native_supervisor_restart_transient")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_restart_transient.expected native_supervisor_restart_transient.out)))
+
+(rule
+ (targets interp_supervisor_restart_transient.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/supervisor_restart_transient.march))
+ (action
+  (with-stdout-to interp_supervisor_restart_transient.out
+    (run %{exe:../bin/main.exe} native/supervisor_restart_transient.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_restart_transient.expected interp_supervisor_restart_transient.out)))
+
+(rule
+ (targets native_supervisor_restart_temporary native_supervisor_restart_temporary.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/supervisor_restart_temporary.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_supervisor_restart_temporary
+        native/supervisor_restart_temporary.march)
+   (with-stdout-to native_supervisor_restart_temporary.out
+        (system "./native_supervisor_restart_temporary")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_restart_temporary.expected native_supervisor_restart_temporary.out)))
+
+(rule
+ (targets interp_supervisor_restart_temporary.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/supervisor_restart_temporary.march))
+ (action
+  (with-stdout-to interp_supervisor_restart_temporary.out
+    (run %{exe:../bin/main.exe} native/supervisor_restart_temporary.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_restart_temporary.expected interp_supervisor_restart_temporary.out)))
+
+(rule
+ (targets native_supervisor_restart_batch_temporary native_supervisor_restart_batch_temporary.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/supervisor_restart_batch_temporary.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_supervisor_restart_batch_temporary
+        native/supervisor_restart_batch_temporary.march)
+   (with-stdout-to native_supervisor_restart_batch_temporary.out
+        (system "./native_supervisor_restart_batch_temporary")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_restart_batch_temporary.expected native_supervisor_restart_batch_temporary.out)))
+
+(rule
+ (targets interp_supervisor_restart_batch_temporary.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/supervisor_restart_batch_temporary.march))
+ (action
+  (with-stdout-to interp_supervisor_restart_batch_temporary.out
+    (run %{exe:../bin/main.exe} native/supervisor_restart_batch_temporary.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_restart_batch_temporary.expected interp_supervisor_restart_batch_temporary.out)))
 
 ; ── Regression: Task.await / await_many / async_stream must untag i64 Ok
 ; ── payloads.  The thunk trampoline double-tags scalar results (task[3] =
@@ -6065,7 +6569,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; (PR #269 removed this probe's prior Darwin-only gate), at max RSS
 ; 128,761,856 B -- not a leak, just Linux's ~122 MB process baseline that the
 ; macOS-derived band never accounted for. live_allocs() reads the runtime's
-; always-on march_live_alloc_count -- incremented in march_alloc, decremented
+; always-on live-object gauge -- incremented in march_alloc, decremented
 ; on every free-on-rc-zero path -- so it counts the defect directly: no
 ; allocator free-list behaviour, no page-granularity rounding, no OS/platform
 ; baseline. Same conversion, same rationale, as
@@ -6646,6 +7150,73 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; raw and unescaped (XSS), tag-2 ADTs walked field 0 as a cons list (SIGSEGV).
 ; The interpreter was always correct, so .expected is the interpreter's output
 ; and this rule is an interpreter/compiled parity check.
+; ── `from_json` return-type-directed dispatch with 2+ derive Json ────────
+; `from_json` dispatches on its RESULT type, so nothing at the call site's
+; values distinguishes the impls. Interpreted, `derive Json` bound the bare
+; name and the LAST type to derive Json owned it, so earlier types decoded
+; with the wrong decoder and returned a DecodeError indistinguishable from bad
+; input; compiled, the same program failed to build with "ambiguous
+; interface-method call". The typechecker now resolves the target per call
+; site and both backends read that one answer. .expected is the interpreter's
+; output, so this rule is an interpreter/compiled parity check.
+(rule
+ (targets native_from_json_dispatch native_from_json_dispatch.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (source_tree ../stdlib)
+       (file native/from_json_dispatch.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_from_json_dispatch
+        native/from_json_dispatch.march)
+   (with-stdout-to native_from_json_dispatch.out
+        (system "./native_from_json_dispatch")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/from_json_dispatch.expected native_from_json_dispatch.out)))
+
+; ── Compiled `to_string`/`println` on a user ADT renders the constructor ──
+; A boxed ADT cell carries a per-type tag and nothing else, so the type-erased
+; `march_value_to_string` printed `#<tag:N>` for every user ADT.  The
+; constructor-name table (lib/tir/llvm_ctor_desc.ml writes the descriptor,
+; march_ctor_table_ensure in runtime/march_extras.c parses and walks it) closes
+; that.  This rule is ALSO the anti-drift check for the field-token alphabet
+; the two sides share: the descriptor is generated into the LLVM module rather
+; than checked in, so there is no generated file to diff, but a token whose
+; meaning drifts between the OCaml writer and the C parser MISREADS a field.
+; Every token has a case in the .march file.  .expected is the interpreter's
+; output, so this is an interpreter/compiled parity check.
+(rule
+ (targets native_to_string_ctor_names native_to_string_ctor_names.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/to_string_ctor_names.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_to_string_ctor_names
+        native/to_string_ctor_names.march)
+   (with-stdout-to native_to_string_ctor_names.out
+        (system "./native_to_string_ctor_names")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/to_string_ctor_names.expected native_to_string_ctor_names.out)))
+
 (rule
  (targets native_h_sigil_adt_interp native_h_sigil_adt_interp.out)
  (deps (file %{exe:../bin/main.exe})
@@ -7249,12 +7820,10 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; `dune runtest` instead of waiting for someone to remember to run the file
 ; by hand.
 ;
-; Two of the 37 are deliberately NOT included:
-;   - test_island_bridges.march: 7 of its tests fail due to a genuine,
-;     tracked compiler bug (derive Json's `from_json` dispatch is broken
-;     for the auto-generated island-bridge feature in BOTH the interpreted
-;     and compiled paths -- not test-file drift). See
-;     specs/todos/2026-08-12-island-bridge-from-json-broken.md.
+; One of the 37 is deliberately NOT included (it was two until 2026-09-09,
+; when `from_json` return-type dispatch landed and test_island_bridges.march
+; -- held out because 7 of its tests exercised a feature that could not work
+; in either execution path -- went green at 161/161 and was wired in below):
 ;   - test_properties.march: passes, but its 76 Check.all property runs are
 ;     extremely slow under the tree-walking interpreter; wired separately
 ;     below under its own alias so it does not block the default `runtest`.
@@ -7263,6 +7832,11 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_actor.march))
  (action (run %{exe:../bin/main.exe} test stdlib/test_actor.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_island_bridges.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_island_bridges.march)))
 
 (rule
  (alias runtest)

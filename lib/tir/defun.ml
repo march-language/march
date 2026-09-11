@@ -21,11 +21,12 @@ let builtin_names : StringSet.t =
       "int_to_string"; "float_to_string"; "bool_to_string"; "atom_to_string";
       "string_to_int"; "string_length"; "string_concat";
       "string_byte_length"; "string_byte_at"; "string_is_empty";
-      "string_join"; "string_concat3";
+      "string_join"; "string_concat3"; "string_concat_n";
       "read_line"; "io_read_line"; "read_byte"; "io_read_byte"; "not";
       "panic";
       "head"; "tail"; "is_nil";
       "to_string"; "respond"; "kill"; "is_alive";
+      "actor_stop"; "actor_is_draining"; "actor_pid_indices";
       "send"; "spawn"; "actor_get_int";
       "task_spawn"; "task_await"; "task_await_unwrap";
       "task_yield"; "task_spawn_steal"; "task_reductions";

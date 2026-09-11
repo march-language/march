@@ -282,7 +282,8 @@ let test_native_allowlist =
     "native_arr_map_closure_abi";
     "niche_reuse_closure"; "option_niche"; "qualified_ctor_pattern";
     "shadow_selfref_let"; "to_string_show"; "tuple_scalar_fields";
-    "tuple_show"; "typed_array_map_closure_abi"; "zero_arg_closure_default" ]
+    "tuple_show"; "typed_array_map_closure_abi"; "unboxed_aggregate"; "unboxed_aggregate_boundaries";
+    "zero_arg_closure_default" ]
 
 let curated_test_files root =
   let dir = Filename.concat root "test/native" in

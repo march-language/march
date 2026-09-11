@@ -1,0 +1,15 @@
+-- Task 4 fixture: a variant constructor argument's declared refinement is
+-- never checked. There is no extractor for a variant argument, nested or
+-- not; a value can be constructed with any Int and the checker never looks
+-- at it again.
+mod HolesVariantArg do
+  type Wrapped = Wrapped({Int | _ > 0})
+
+  fn unwrap(w : Wrapped) : Int do
+    match w do Wrapped(v) -> v end
+  end
+
+  fn main() : Int do
+    unwrap(Wrapped(0 - 1))
+  end
+end

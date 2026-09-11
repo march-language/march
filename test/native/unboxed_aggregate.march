@@ -1,0 +1,104 @@
+-- Unboxed small scalar aggregates (Repr.Unboxed, Milestone 3).
+--
+-- `Vec3`, `Hit` and `Pair` are single-constructor variants whose fields are
+-- all scalars and whose arity is <= Repr.max_unboxed_arity, so each is
+-- represented as an LLVM struct VALUE with no heap cell.  Everything below
+-- crosses one of the boundaries where that representation must agree with the
+-- boxed one: pattern matching, field-wise equality, derived Show, a generic
+-- (type-erased) slot, a tuple field, a closure capture, and a field of an
+-- ordinary boxed constructor.  Interpreted output is the ground truth; the
+-- oracle sweep (test/test_oracle.ml) compares it against the compiled run.
+mod UnboxedAggregate do
+  needs IO
+
+  type Vec3 = Vec3(Float, Float, Float)
+  type Hit  = Hit(Bool, Int, Int)
+  type Pair = Pair(Int, Int)
+
+  -- A BOXED constructor with an unboxed aggregate in one field: the field is
+  -- an erased slot, so the aggregate is boxed on the way in and unboxed on
+  -- the way out.
+  type Ray = Ray(Vec3, Int)
+
+  derive Show for Vec3
+  derive Eq for Vec3
+  derive Show for Hit
+  derive Eq for Pair
+
+  fn mk(x : Float, y : Float, z : Float) : Vec3 do Vec3(x, y, z) end
+
+  fn vx(v : Vec3) : Float do
+    match v do
+      Vec3(x, _, _) -> x
+    end
+  end
+
+  fn add(a : Vec3, b : Vec3) : Vec3 do
+    match a do
+      Vec3(ax, ay, az) ->
+        match b do
+          Vec3(bx, b2, bz) -> Vec3(ax +. bx, ay +. b2, az +. bz)
+        end
+    end
+  end
+
+  fn scale(v : Vec3, k : Float) : Vec3 do
+    match v do
+      Vec3(x, y, z) -> Vec3(x *. k, y *. k, z *. k)
+    end
+  end
+
+  fn hit_depth(h : Hit) : Int do
+    match h do
+      Hit(true, d, _)  -> d
+      Hit(false, _, _) -> 0 - 1
+    end
+  end
+
+  fn ray_origin(r : Ray) : Vec3 do
+    match r do
+      Ray(o, _) -> o
+    end
+  end
+
+  fn main(cap : Cap(IO)) : Unit do
+    let a = mk(1.0, 2.0, 3.0)
+    let b = mk(0.5, 0.5, 0.5)
+
+    -- construction + destructuring
+    println(float_to_string(vx(add(a, b))))
+    println(to_string(scale(a, 2.0)))
+
+    -- field-wise equality, both ways
+    println(bool_to_string(a == a))
+    println(bool_to_string(a == b))
+    println(bool_to_string(a != b))
+    println(bool_to_string(Pair(1, 2) == Pair(1, 2)))
+    println(bool_to_string(Pair(1, 2) == Pair(1, 3)))
+
+    -- a Bool-and-Int aggregate, matched on a literal field
+    println(int_to_string(hit_depth(Hit(true, 7, 9))))
+    println(int_to_string(hit_depth(Hit(false, 7, 9))))
+    println(to_string(Hit(true, 7, 9)))
+
+    -- generic slot: Option(Vec3) is erased, so the aggregate is boxed there
+    let o = Some(a)
+    match o do
+      Some(v) -> println(to_string(v))
+      None    -> println("none")
+    end
+
+    -- tuple field (uniform slot) and a boxed constructor's field
+    let t = (a, 5)
+    let (tv, tn) = t
+    println(float_to_string(vx(tv)) ++ "/" ++ int_to_string(tn))
+    println(to_string(ray_origin(Ray(b, 3))))
+
+    -- closure capture, and a list of aggregates through a generic HOF
+    let k = 3.0
+    let f = fn v -> scale(v, k)
+    println(to_string(f(a)))
+    let vs = [a, b, mk(0.0, 0.0, 1.0)]
+    println(float_to_string(List.fold_left(List.map(vs, fn v -> vx(v)), 0.0, fn (acc, x) -> acc +. x)))
+  end
+end

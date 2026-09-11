@@ -1,0 +1,15 @@
+-- Task 4 fixture: an `ELam`'s own parameter refinement is declared but
+-- never checked. A lambda's parameter never goes through
+-- `scope_add_param` / `sig_of_clause`, so `refined_param_ty` accepting the
+-- declared type is irrelevant: no call site is ever obliged by it.
+-- See specs/todos/2026-09-03-lambda-param-refinement-unchecked.md.
+mod HolesLambdaParam do
+  fn apply(f : Int -> Int, x : Int) : Int do
+    f(x)
+  end
+
+  fn main() : Int do
+    let g = fn (n : {Int | n > 0}) -> n
+    apply(g, 0)
+  end
+end

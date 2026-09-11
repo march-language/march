@@ -51,6 +51,53 @@ let rec arm_diverges (e : Tir.expr) : bool =
   | Tir.ESeq (_, e2) | Tir.ELet (_, _, e2) -> arm_diverges e2
   | _ -> false
 
+(** Finish a case/match join whose result slot is a `ptr`.
+
+    Every arm stores through [Llvm_ctx.coerce ... "ptr"], so when all arms that
+    reach the merge shared ONE pre-coercion LLVM type that is not itself "ptr",
+    the pointer just loaded is a box allocated by this [emit_case]'s own
+    coerce-to-ptr calls: never escaped, never aliased, never read by anyone
+    else.  Nobody downstream owns it — the arm types are what the caller sees,
+    and for both boxable types below [Rc_types.needs_rc] is false for that
+    type, so Perceus emits no drop.  This merge is therefore the only place
+    that can release it, and must:
+
+    - "double" → a [march_alloc_float] cell (float-boxing Stage 2).  Leaking it
+      cost one cell per evaluation
+      (specs/progress/2026-08-22-erased-slot-ownership-leaks.md).
+    - an unboxed small aggregate's struct type → a [march_alloc] cell built by
+      [Llvm_ctx.coerce]'s inline-aggregate boxing arm (Milestone 3).  Same
+      leak, same shape: a `Pair(Float, Float)` built inside an `if` leaked one
+      cell per construction, 5 001 live objects over 5 000 iterations
+      (specs/progress/2026-09-04-unboxed-aggregate-branch-join-leak.md).
+
+    Both frees are [march_decrc_local], which is a SHALLOW free — it does not
+    walk the cell's fields.  That matters for the aggregate box: its fields are
+    raw scalars ([Repr.is_scalar_field] admits only Int/Float/Bool), so a
+    field-walking free would sniff a raw double's bits with IS_HEAP_PTR and
+    recurse into garbage.  Unbox BEFORE the release, so the loads read a live
+    cell.
+
+    Any other mix of arm types — including plain "ptr" arms, whose value came
+    from somewhere else and is owned by someone else — hands the loaded pointer
+    back untouched, exactly as before. *)
+let finish_ptr_merge ctx ~arm_tys ~loaded =
+  match arm_tys with
+  | [] -> ("ptr", loaded)
+  | t0 :: rest when List.for_all (fun t -> t = t0) rest ->
+    if t0 = "double" then begin
+      let d = Llvm_ctx.fresh ctx "case_rd" in
+      Llvm_ctx.emit ctx
+        (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" d loaded);
+      Llvm_ctx.emit ctx (Printf.sprintf "call void @march_decrc_local(ptr %s)" loaded);
+      ("double", d)
+    end else if Repr.unboxed_of_llvm_ty t0 <> None then begin
+      let v = Llvm_ctx.coerce ctx "ptr" loaded t0 in
+      Llvm_ctx.emit ctx (Printf.sprintf "call void @march_decrc_local(ptr %s)" loaded);
+      (t0, v)
+    end else ("ptr", loaded)
+  | _ -> ("ptr", loaded)
+
 let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
   let (scrut_ty, scrut_val) = emit_atom ctx scrut_atom in
   let scrut_tir_ty_init =
@@ -219,11 +266,54 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
        ~family:(match effective_repr with
          | Repr.Newtype _ -> "Newtype"
          | Repr.Niche _   -> "Niche"
+         | Repr.Unboxed _ -> "Unboxed"
          | Repr.Boxed     -> "Boxed")
        ~site:("case in " ^ ctx.Llvm_ctx.cur_emit_fn)
    | _ -> ());
-  (* Fast path: newtype scrutinee — the value IS the payload; no tag/alloc. *)
+  (* Fast path: unboxed aggregate — the value is an LLVM struct in registers.
+     One constructor, so there is no tag to read and no branch to select: bind
+     each field with [extractvalue] and emit the single arm.  Perceus emits no
+     RC ops for these ([Rc_types.needs_rc] is false), so unlike the Newtype and
+     Niche paths below there is no scrutinee DecRC to strip. *)
   match effective_repr with
+  | Repr.Unboxed { ctor = _; fields } ->
+    let sty = match scrut_tir_ty_init with
+      | Tir.TCon (name, _) -> Repr.unboxed_llvm_name name
+      | _ ->
+        (* Unreachable: [Repr.repr_of_ty] only answers [Unboxed] for a TCon. *)
+        failwith "emit_case: unboxed repr for a non-TCon scrutinee"
+    in
+    let sv = Llvm_ctx.coerce ctx scrut_ty scrut_val sty in
+    let bind_fields (br : Tir.branch) =
+      List.iteri (fun i (v : Tir.var) ->
+          match List.nth_opt fields i with
+          | None ->
+            failwith (Printf.sprintf
+                        "emit_case: unboxed branch binds field %d of a %d-field \
+                         aggregate (arity mismatch — malformed TIR)"
+                        i (List.length fields))
+          | Some fty_tir ->
+            let fty = Llvm_ctx.llvm_ty fty_tir in
+            let fv = Llvm_ctx.fresh ctx "ubget" in
+            Llvm_ctx.emit ctx
+              (Printf.sprintf "%s = extractvalue %s %s, %d" fv sty sv i);
+            let slot = Llvm_ctx.alloca_name ctx (Llvm_ctx.llvm_name v.Tir.v_name) in
+            Llvm_ctx.emit ctx (Printf.sprintf "%%%s.addr = alloca %s" slot fty);
+            Llvm_ctx.emit ctx
+              (Printf.sprintf "store %s %s, ptr %%%s.addr" fty fv slot);
+            Hashtbl.replace ctx.Llvm_ctx.var_llvm_ty slot fty)
+        br.Tir.br_vars
+    in
+    (match branches with
+     | [] ->
+       (* Wildcard/default-only match *)
+       (match default_opt with
+        | Some d -> emit_expr ctx d
+        | None -> ("ptr", "poison"))
+     | [ br ] -> bind_fields br; emit_expr ctx br.Tir.br_body
+     | _ ->
+       failwith "emit_case: unboxed type has multiple branches (impossible: \
+                 the representation is only chosen for single-ctor types)")
   | Repr.Newtype payload ->
     (* Strip a leading DecRC(scrut) from a branch body.
        Perceus inserts DecRC(box) inside the branch assuming box is a heap cell.
@@ -380,19 +470,10 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
     Llvm_ctx.emit_label ctx merge_lbl_n;
     let r_n = Llvm_ctx.fresh ctx "niche_r" in
     Llvm_ctx.emit ctx (Printf.sprintf "%s = load ptr, ptr %s" r_n result_slot_n);
-    (* All arms that reach this merge were "double", so the ptr just loaded is
-       a march_float_box allocated by this emit_case's own coerce-to-ptr calls
-       above — never escaped, never aliased.  Unbox and free it instead of
-       handing the caller a live box it has no way to own.  Identical to the
-       boxed path's merge below; see [niche_arm_tys] for the measurement. *)
-    if !niche_arm_tys <> [] && List.for_all (fun t -> t = "double") !niche_arm_tys
-    then begin
-      let d = Llvm_ctx.fresh ctx "niche_rd" in
-      Llvm_ctx.emit ctx (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" d r_n);
-      Llvm_ctx.emit ctx (Printf.sprintf "call void @march_decrc_local(ptr %s)" r_n);
-      ("double", d)
-    end else
-      ("ptr", r_n)
+    (* Release the box this merge's own coerce-to-ptr calls allocated, if any —
+       see [finish_ptr_merge].  Identical to the boxed path's merge below; see
+       [niche_arm_tys] for the float measurement. *)
+    finish_ptr_merge ctx ~arm_tys:!niche_arm_tys ~loaded:r_n
   | _ ->
 
   (* Tags produced by PatLit patterns: lowercase "true"/"false" (Bool),
@@ -489,10 +570,12 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
      evaluation (specs/todos/2026-08-11-float-boxing-erasure-boundary-per-call-leak.md).
      Arms that don't reach merge — the `unreachable` default, and any arm
      [arm_diverges] recognises — contribute nothing, so they can't spoil the
-     all-double proof.  Before [arm_diverges] existed only the first of those
+     uniform-type proof.  Before [arm_diverges] existed only the first of those
      was excluded, and the non-exhaustive-panic default's "ptr" cost 20,000
      leaked boxes on a 20,000-iteration `Option(Float)` loop
-     (specs/progress/2026-08-22-erased-slot-ownership-leaks.md). *)
+     (specs/progress/2026-08-22-erased-slot-ownership-leaks.md).  The same
+     argument covers an unboxed small aggregate's struct type; see
+     [finish_ptr_merge], which is what acts on this list. *)
   let arm_result_tys = ref [] in
 
   (* Record an arm's pre-coercion type unless the arm diverges. *)
@@ -849,7 +932,7 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
          below to decide which fields are genuine heap pointers (for IncRC). *)
       List.iteri (fun i (v : Tir.var) ->
         let field_ty = match List.nth_opt entry.Llvm_ctx.ce_fields i with
-          | Some t -> Llvm_ctx.llvm_ty t | None -> Llvm_ctx.llvm_ty v.Tir.v_ty in
+          | Some t -> Llvm_ctx.llvm_field_ty t | None -> Llvm_ctx.llvm_ty v.Tir.v_ty in
         let fv = Llvm_data.emit_load_field ctx scrut_val i field_ty in
         (* Concrete field type, with the scrutinee's type arguments resolved.
            Use it (not [field_ty]) to decide which fields are genuine heap
@@ -884,14 +967,34 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
           concrete_field_ty = "double" && field_ty = "ptr"
           && not body_reuses_scrut_here
         in
-        let bind_ty = if is_boxed_float then "double" else field_ty in
+        (* AN UNBOXED AGGREGATE IN AN ERASED SLOT — the Milestone-3 analogue of
+           the Float case just above, and it needs the same treatment for the
+           same reason.  The slot physically holds the BOX [Llvm_ctx.coerce]
+           built at construction (a heap slot is 8 bytes, so an inline
+           aggregate can never be stored inline in one — see
+           [Llvm_ctx.llvm_field_ty]).  Bind a COPY of the struct rather than
+           the box: the box's reference belongs to the cell, and the binder's
+           type is an aggregate for which [Rc_types.needs_rc] is false, so
+           Perceus would emit no drop and a transferred reference would die on
+           the floor.  Copying means the binder aliases nothing, which is what
+           lets the release below be a release of a genuinely unowned box. *)
+        let is_boxed_agg =
+          (not is_boxed_float) && field_ty = "ptr"
+          && Repr.unboxed_of_llvm_ty concrete_field_ty <> None
+          && not body_reuses_scrut_here
+        in
+        let bind_ty =
+          if is_boxed_float then "double"
+          else if is_boxed_agg then concrete_field_ty
+          else field_ty in
         let bind_val =
           if is_boxed_float then begin
             let d = Llvm_ctx.fresh ctx "fbxf" in
             Llvm_ctx.emit ctx
               (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" d fv);
             d
-          end else fv
+          end else if is_boxed_agg then Llvm_ctx.coerce ctx "ptr" fv concrete_field_ty
+          else fv
         in
         let slot = Llvm_ctx.alloca_name ctx (Llvm_ctx.llvm_name v.Tir.v_name) in
         Llvm_ctx.emit ctx (Printf.sprintf "%%%s.addr = alloca %s" slot bind_ty);
@@ -899,7 +1002,9 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
         Hashtbl.replace ctx.Llvm_ctx.var_llvm_ty slot bind_ty;
         if concrete_field_ty = "ptr" && field_ty = "ptr" then
           heap_field_vals := fv :: !heap_field_vals
-        else if is_boxed_float then
+        else if is_boxed_float || is_boxed_agg then
+          (* Both bind a copy, so both leave an unowned box behind — the list
+             is "boxes the cell owns and the binder does not". *)
           boxed_float_field_vals := fv :: !boxed_float_field_vals
       ) br.Tir.br_vars
     end;
@@ -1080,13 +1185,7 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
   Llvm_ctx.emit_label ctx merge_lbl;
   let r = Llvm_ctx.fresh ctx "case_r" in
   Llvm_ctx.emit ctx (Printf.sprintf "%s = load ptr, ptr %s" r result_slot);
-  (* All arms that reached merge were "double" → the box is ours alone
-     (see [arm_result_tys]'s doc comment above); unbox and free it here
-     instead of leaking it into the caller as an opaque live ptr. *)
-  if !arm_result_tys <> [] && List.for_all (fun t -> t = "double") !arm_result_tys then begin
-    let d = Llvm_ctx.fresh ctx "case_rd" in
-    Llvm_ctx.emit ctx (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" d r);
-    Llvm_ctx.emit ctx (Printf.sprintf "call void @march_decrc_local(ptr %s)" r);
-    ("double", d)
-  end else
-    ("ptr", r)
+  (* Uniform arm type → the box is ours alone (see [arm_result_tys]'s doc
+     comment above); unbox and free it here instead of leaking it into the
+     caller as an opaque live ptr.  See [finish_ptr_merge]. *)
+  finish_ptr_merge ctx ~arm_tys:!arm_result_tys ~loaded:r

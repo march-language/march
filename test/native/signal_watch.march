@@ -7,8 +7,9 @@
 --
 -- ORDERING HAZARD — this rule must run at MARCH_NUM_SCHEDULERS=1.
 -- march_signal_drain() is called at the TOP OF EVERY sched_loop iteration on
--- EVERY scheduler thread (runtime/march_scheduler.c).  At the default of 4
--- schedulers the other three threads are idle-spinning in that loop, so the
+-- EVERY scheduler thread (runtime/march_scheduler.c).  At the default (one
+-- scheduler per CPU; it was a flat 4 when this was measured) the other
+-- threads are idle-spinning in that loop, so the
 -- self-raise's pending flag is claimed by whichever thread gets there first —
 -- typically a worker, microseconds later, running the handler CONCURRENTLY
 -- with main's own println.  That made this golden fail ~4% of the time under

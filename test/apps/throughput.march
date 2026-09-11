@@ -12,9 +12,9 @@
 --
 -- In the interpreter, all tasks run single-threaded (cooperative scheduler),
 -- so parallel sections show no speedup — that is expected.
--- The compiled binary uses the M:N green-thread scheduler (4 OS worker
--- threads by default, MARCH_NUM_SCHEDULERS), giving near-linear speedup
--- for embarrassingly parallel CPU work.
+-- The compiled binary uses the M:N green-thread scheduler (one OS worker
+-- thread per online CPU by default; MARCH_NUM_SCHEDULERS pins a count),
+-- giving near-linear speedup for embarrassingly parallel CPU work.
 --
 -- March if-else syntax note: each `else if` is a nested `if` expression,
 -- so an n-level chain needs n closing `end` tokens stacked at the bottom.
@@ -146,7 +146,7 @@ mod Throughput do
 
     println("march throughput benchmark")
     println("CPUs available : " ++ int_to_string(ncpu))
-    println("Worker threads : 4 (MARCH_NUM_SCHEDULERS default)")
+    println("Worker threads : one per CPU (MARCH_NUM_SCHEDULERS default is auto)")
     println("Work            : count primes <= " ++ int_to_string(limit))
     println("  (interpreter is single-threaded; use the compiled binary for speedup)")
     println("")

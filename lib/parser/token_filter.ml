@@ -89,12 +89,34 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
         | Parser.PERMANENT | Parser.TRANSIENT | Parser.TEMPORARY -> true
         | _ -> false
       in
+      (* `backoff` is a SOFT keyword on the same mechanism, and needs to be:
+         the supervise block's clause is `backoff base 25 cap 5000 ...`, whose
+         three labels are deliberately NOT reserved words (`cap` is the
+         capability vocabulary this whole language is built on, and `base` is
+         an ordinary noun). The clause is the ONLY place a lowercase word
+         directly follows `backoff`, since a call writes `backoff(...)` and a
+         binding writes `backoff =` — both of which demote here. *)
+      let after_lower_ident = function
+        | Parser.LOWER_IDENT _ -> true
+        | _ -> false
+      in
+      (* `shutdown` likewise: `shutdown 5000` / `shutdown infinity` /
+         `shutdown brutal` in a child spec, but `shutdown(pid)` — or any other
+         use of the word as an identifier — demotes. Graceful shutdown ships a
+         `stop` builtin whose users will reach for `shutdown` as a function
+         name; reserving it would take that away for no gain. *)
+      let after_shutdown_arg = function
+        | Parser.INT _ | Parser.LOWER_IDENT _ -> true
+        | _ -> false
+      in
       match tok with
       | Parser.TEST      -> demote "test"      ~keep_when:after_string
       | Parser.DESCRIBE  -> demote "describe"  ~keep_when:after_string
       | Parser.SETUP     -> demote "setup"     ~keep_when:after_do
       | Parser.SETUP_ALL -> demote "setup_all" ~keep_when:after_do
       | Parser.RESTART   -> demote "restart"   ~keep_when:after_restart_type
+      | Parser.BACKOFF   -> demote "backoff"   ~keep_when:after_lower_ident
+      | Parser.SHUTDOWN  -> demote "shutdown"  ~keep_when:after_shutdown_arg
       | _ -> restore (); tok
   in
   let stack : context Stack.t = Stack.create () in

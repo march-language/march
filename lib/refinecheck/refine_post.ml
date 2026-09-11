@@ -616,30 +616,46 @@ let rec smt_sort_of_ty (t : A.ty) : Smt.sort option =
 let ctor_belongs (ctor : string) (adt : string) : bool =
   match Hashtbl.find_opt adt_ctors adt with Some cs -> List.mem ctor cs | None -> false
 
-let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
-  let self = fd.A.fn_name.A.txt in
-  let dummy_span = fd.A.fn_name.A.span in
-  let evar x = A.EVar { A.txt = x; A.span = dummy_span } in
+(* The FULL solver-free acceptance test [check_post_induction] applies before
+   it ever builds a VC: the outer shape match (a refined ADT-non-record
+   return, one guardless clause), [classify_pred]'s usability filter, and the
+   measure-preamble gate ("every sort this VC family mentions must already be
+   declared by the measure preamble; otherwise the VC would reference an
+   undeclared sort and z3 would answer with an `(error ...)` line -- the
+   failure mode that desynchronises the shared solver channel."
+   `--no-measure-axioms` empties the preamble, so this also disables Tier 2
+   under that flag). Extracted so [Refine_audit.classify] can consult exactly
+   what the checker consults, with no risk of drift, rather than duplicating
+   the rule (see [refine_audit.ml]'s Return rule and Task 2's review, finding
+   1). Everything here is a pattern match, a syntactic classifier, or a
+   hashtable lookup; the first and only solver contact is [Refine.discharge],
+   deep inside [check_tail] below, well past everything this function
+   decides. Returns the destructured pieces the caller needs so nothing is
+   computed twice. *)
+let post_induction_shape (fd : A.fn_def)
+  : (string * string * string list * A.expr * A.fn_clause * string list) option =
   match fd.A.fn_ret_ty, fd.A.fn_clauses with
   | Some (A.TyRefine ((A.TyCon (rn, _) as rbase), bnd, pred)), [ c ]
     when is_adt_base rbase && (not (is_record_base rbase)) && c.A.fc_guard = None -> (
     let ret_adt = adt_sort_name rn.A.txt in
     let binder = binder_name bnd in
     let params = List.map param_name_of c.A.fc_params in
-    let ps = match classify_pred binder params pred with
-      | Unusable -> None
-      | Closed -> Some []
-      | Relational ps -> Some ps
-    in
-    (* Every sort this VC family mentions must already be declared by the
-       measure preamble; otherwise the VC would reference an undeclared sort and
-       z3 would answer with an `(error …)` line — the failure mode that
-       desynchronises the shared solver channel.  (`--no-measure-axioms` empties
-       the preamble, so this also disables Tier 2 under that flag.) *)
-    match ps with
-    | None -> false
-    | Some _ when not (Hashtbl.mem measure_preamble_sorts ret_adt) -> false
-    | Some ps ->
+    match classify_pred binder params pred with
+    | Unusable -> None
+    | Closed when Hashtbl.mem measure_preamble_sorts ret_adt ->
+      Some (ret_adt, binder, params, pred, c, [])
+    | Relational ps when Hashtbl.mem measure_preamble_sorts ret_adt ->
+      Some (ret_adt, binder, params, pred, c, ps)
+    | Closed | Relational _ -> None)
+  | _ -> None
+
+let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
+  let self = fd.A.fn_name.A.txt in
+  let dummy_span = fd.A.fn_name.A.span in
+  let evar x = A.EVar { A.txt = x; A.span = dummy_span } in
+  match post_induction_shape fd with
+  | None -> false
+  | Some (ret_adt, binder, params, pred, c, ps) ->
       (* ── The single VC builder, shared by every accepted body shape ────────
          [mctx] is the INDUCTION context — the matched parameter, its ADT sort,
          its index in the parameter list, and the structurally-smaller variables
@@ -962,8 +978,7 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
             && List.fold_left (fun acc br -> check_branch br && acc) true branches
           end
         | _ -> false)
-      | _ -> false))
-  | _ -> false
+      | _ -> false)
 
 (* =================================================================
    §18 Function-level postcondition entry points and gating

@@ -203,6 +203,13 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_string_to_int(ptr %s)" };
   { march_name = "string_concat3"; c_name = Some "march_string_concat3"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_string_concat3(ptr %a, ptr %b, ptr %c)" };
+  (* Variadic at the March level, but NOT at the ABI level: codegen spreads the
+     operands into a stack array and calls this with (count, array).  The
+     generic call path in [Llvm_emit] cannot emit that, so [String_concat_n]
+     has its own arm there; the entry here exists for the declaration and the
+     return type. *)
+  { march_name = "string_concat_n"; c_name = Some "march_string_concat_n"; ret_ty = Some Tir.TString;
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_string_concat_n(i64 %n, ptr %parts)" };
   { march_name = "string_join"; c_name = Some "march_string_join"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_string_join(ptr %list, ptr %sep)" };
   { march_name = "float_abs"; c_name = Some "march_float_abs"; ret_ty = Some Tir.TFloat;
@@ -459,6 +466,12 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_logger_write(ptr %level, ptr %msg, ptr %ctx, ptr %extra)" };
   { march_name = "kill"; c_name = Some "march_kill"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_kill(ptr %actor)" };
+  { march_name = "actor_stop"; c_name = Some "march_actor_stop"; ret_ty = Some Tir.TBool;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_actor_stop(ptr %actor, i64 %timeout_ms)" };
+  { march_name = "actor_is_draining"; c_name = Some "march_actor_is_draining"; ret_ty = Some Tir.TBool;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_actor_is_draining(ptr %actor)" };
+  { march_name = "actor_pid_indices"; c_name = Some "march_actor_pid_indices"; ret_ty = Some (Tir.TCon ("List", [Tir.TInt]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_actor_pid_indices()" };
   { march_name = "is_alive"; c_name = Some "march_is_alive"; ret_ty = Some Tir.TBool;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_is_alive(ptr %actor)" };
   { march_name = "send"; c_name = Some "march_send"; ret_ty = Some (Tir.TCon ("Option", [Tir.TUnit]));
@@ -531,33 +544,33 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_open(ptr %path)" };
   { march_name = "file_close"; c_name = Some "march_file_close"; ret_ty = Some (Tir.TPtr Tir.TUnit);
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_close(ptr %handle)" };
-  { march_name = "file_read"; c_name = Some "march_file_read"; ret_ty = Some (Tir.TCon ("Result", [Tir.TString; Tir.TString]));
+  { march_name = "file_read"; c_name = Some "march_file_read"; ret_ty = Some (Tir.TCon ("Result", [Tir.TString; Tir.TCon ("FileError", [])]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_read(ptr %path)" };
   { march_name = "file_read_line"; c_name = Some "march_file_read_line"; ret_ty = Some (Tir.TCon ("Option", [Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_read_line(ptr %handle)" };
   { march_name = "file_read_chunk"; c_name = Some "march_file_read_chunk"; ret_ty = Some (Tir.TCon ("Option", [Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_read_chunk(ptr %handle, i64 %size)" };
-  { march_name = "file_write"; c_name = Some "march_file_write"; ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TString]));
+  { march_name = "file_write"; c_name = Some "march_file_write"; ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TCon ("FileError", [])]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_write(ptr %path, ptr %data)" };
-  { march_name = "file_append"; c_name = Some "march_file_append"; ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TString]));
+  { march_name = "file_append"; c_name = Some "march_file_append"; ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TCon ("FileError", [])]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_append(ptr %path, ptr %data)" };
-  { march_name = "file_delete"; c_name = Some "march_file_delete"; ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TString]));
+  { march_name = "file_delete"; c_name = Some "march_file_delete"; ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TCon ("FileError", [])]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_delete(ptr %path)" };
-  { march_name = "file_copy"; c_name = Some "march_file_copy"; ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TString]));
+  { march_name = "file_copy"; c_name = Some "march_file_copy"; ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TCon ("FileError", [])]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_copy(ptr %src, ptr %dst)" };
-  { march_name = "file_rename"; c_name = Some "march_file_rename"; ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TString]));
+  { march_name = "file_rename"; c_name = Some "march_file_rename"; ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TCon ("FileError", [])]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_rename(ptr %src, ptr %dst)" };
-  { march_name = "file_stat"; c_name = Some "march_file_stat"; ret_ty = Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TString]));
+  { march_name = "file_stat"; c_name = Some "march_file_stat"; ret_ty = Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TCon ("FileError", [])]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_stat(ptr %path)" };
-  { march_name = "dir_mkdir"; c_name = Some "march_dir_mkdir"; ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TString]));
+  { march_name = "dir_mkdir"; c_name = Some "march_dir_mkdir"; ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TCon ("FileError", [])]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_dir_mkdir(ptr %path)" };
-  { march_name = "dir_mkdir_p"; c_name = Some "march_dir_mkdir_p"; ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TString]));
+  { march_name = "dir_mkdir_p"; c_name = Some "march_dir_mkdir_p"; ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TCon ("FileError", [])]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_dir_mkdir_p(ptr %path)" };
-  { march_name = "dir_rmdir"; c_name = Some "march_dir_rmdir"; ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TString]));
+  { march_name = "dir_rmdir"; c_name = Some "march_dir_rmdir"; ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TCon ("FileError", [])]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_dir_rmdir(ptr %path)" };
-  { march_name = "dir_rm_rf"; c_name = Some "march_dir_rm_rf"; ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TString]));
+  { march_name = "dir_rm_rf"; c_name = Some "march_dir_rm_rf"; ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TCon ("FileError", [])]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_dir_rm_rf(ptr %path)" };
-  { march_name = "dir_list"; c_name = Some "march_dir_list"; ret_ty = Some (Tir.TCon ("Result", [Tir.TCon ("List", [Tir.TString]); Tir.TString]));
+  { march_name = "dir_list"; c_name = Some "march_dir_list"; ret_ty = Some (Tir.TCon ("Result", [Tir.TCon ("List", [Tir.TString]); Tir.TCon ("FileError", [])]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_dir_list(ptr %path)" };
   { march_name = "dir_list_full"; c_name = Some "march_dir_list_full"; ret_ty = Some (Tir.TCon ("Result", [Tir.TCon ("List", [Tir.TString]); Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_dir_list_full(ptr %path)" };
@@ -913,9 +926,9 @@ let builtins : builtin list = [
   { march_name = "get_actor_field"; c_name = Some "march_get_actor_field"; ret_ty = Some (Tir.TCon ("Option", [Tir.TVar "a"]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_get_actor_field(ptr %pid, ptr %name)" };
   { march_name = "register_supervisor"; c_name = Some "march_register_supervisor"; ret_ty = Some Tir.TUnit;
-    in_is_builtin = true; declare_sig = Some "declare void @march_register_supervisor(ptr %supervisor, i64 %strategy, i64 %max_restarts, i64 %window_secs)" };
+    in_is_builtin = true; declare_sig = Some "declare void @march_register_supervisor(ptr %supervisor, i64 %strategy, i64 %max_restarts, i64 %window_secs, i64 %backoff_base_ms, i64 %backoff_cap_ms, i64 %backoff_jitter_pct)" };
   { march_name = "register_supervisor_child"; c_name = Some "march_actor_register_child"; ret_ty = Some Tir.TUnit;
-    in_is_builtin = true; declare_sig = Some "declare void @march_actor_register_child(ptr %sup, ptr %child, ptr %spawn_fn, i64 %word_idx, i64 %restart_type)" };
+    in_is_builtin = true; declare_sig = Some "declare void @march_actor_register_child(ptr %sup, ptr %child, ptr %spawn_fn, i64 %word_idx, i64 %restart_type, i64 %shutdown_ms)" };
   { march_name = "pid_index_of"; c_name = Some "march_pid_index_of"; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_pid_index_of(ptr %actor)" };
   { march_name = "to_string"; c_name = Some "march_value_to_string"; ret_ty = Some Tir.TString;
@@ -1044,6 +1057,7 @@ let runtime_only_declares : (string * string) list = [
   ("march_decrc_freed", "declare i64  @march_decrc_freed(ptr %p)");
   ("march_incrc_local", "declare void @march_incrc_local(ptr %p)");
   ("march_decrc_local", "declare void @march_decrc_local(ptr %p)");
+  ("march_decrc_local_freed", "declare i64  @march_decrc_local_freed(ptr %p)");
   ("march_free", "declare void @march_free(ptr %p)");
   ("march_test_init", "declare void @march_test_init(i32 %argc, ptr %argv)");
   ("march_test_run", "declare void @march_test_run(ptr %fn, ptr %name, ptr %setup_or_null)");
@@ -1051,6 +1065,8 @@ let runtime_only_declares : (string * string) list = [
   ("march_test_report", "declare i32  @march_test_report()");
   ("march_string_lit", "declare ptr  @march_string_lit(ptr %s, i64 %len)");
   ("march_string_lit_static", "declare ptr  @march_string_lit_static(ptr %s, i64 %len, ptr %cell)");
+  ("march_ctor_table_ensure", "declare i32  @march_ctor_table_ensure(ptr %desc, ptr %cache)");
+  ("march_value_to_string_typed", "declare ptr  @march_value_to_string_typed(ptr %v, i32 %type_id)");
   ("march_record_shape_intern", "declare i32  @march_record_shape_intern(ptr %desc)");
   ("march_record_set_shape", "declare void @march_record_set_shape(ptr %rec, ptr %desc, ptr %cache)");
   ("march_record_put", "declare ptr  @march_record_put(ptr %rec, ptr %key, ptr %val, i64 %kind)");
@@ -1152,6 +1168,7 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_decrc_freed";
   PDeclare "march_incrc_local";
   PDeclare "march_decrc_local";
+  PDeclare "march_decrc_local_freed";
   PDeclare "march_free";
   PDeclare "march_print";
   PDeclare "march_panic";
@@ -1170,6 +1187,8 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_string_lit_static";
   PDeclare "march_html_auto_escape";
   PDeclare "march_html_escape_ctx";
+  PDeclare "march_ctor_table_ensure";
+  PDeclare "march_value_to_string_typed";
   PDeclare "march_record_shape_intern";
   PDeclare "march_record_set_shape";
   PDeclare "march_record_keys";
@@ -1212,6 +1231,7 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_string_is_empty";
   PDeclare "march_string_to_int";
   PDeclare "march_string_concat3";
+  PDeclare "march_string_concat_n";
   PDeclare "march_string_join";
   PComment "; Float builtins";
   PDeclare "march_float_abs";
@@ -1362,6 +1382,9 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
 let native_actor_items : preamble_item list = [   (* native-only: actors + scheduler *)
   PComment "; Actor builtins";
   PDeclare "march_kill";
+  PDeclare "march_actor_stop";
+  PDeclare "march_actor_is_draining";
+  PDeclare "march_actor_pid_indices";
   PDeclare "march_is_alive";
   PDeclare "march_send";
   PDeclare "march_send_linear";

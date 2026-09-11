@@ -64,10 +64,57 @@
  * this many march_sched_tick() calls within a single scheduler turn. */
 #define MARCH_REDUCTION_BUDGET  4000
 
-/* Number of OS-thread schedulers.  Override at compile time with
- * -DMARCH_NUM_SCHEDULERS=N.  Default is 4. */
+/* DEFAULT number of OS-thread schedulers, used when the MARCH_NUM_SCHEDULERS
+ * environment variable is unset or unusable.
+ *
+ * **0 means AUTO**: one scheduler per online CPU, clamped to
+ * MARCH_MAX_SCHEDULERS.  That is the shipped default, and it is what a March
+ * program gets unless someone says otherwise.
+ *
+ * A build may pin a specific count with -DMARCH_NUM_SCHEDULERS=N, and a pin
+ * WINS over auto.  This is load-bearing, not a convenience: the C scheduler
+ * harnesses in test/ pin themselves to 1 or 4 because their premise is a
+ * specific number of threads (with one scheduler, pinning a proc is a
+ * documented no-op), and on a single-core box an auto default would quietly
+ * turn those tests into vacuous no-ops rather than failures.
+ *
+ * The default was a flat 4 on every machine until 2026-09-04 — four threads on
+ * a 4-core laptop and four on a 96-core server — so 4 was the de-facto
+ * parallelism limit of every March program that had not been told otherwise,
+ * and nothing said so.  Written up in
+ * specs/progress/2026-09-04-scheduler-default-tracks-cpu-count.md
+ *
+ * This is a DEFAULT, not a ceiling: the environment variable of the same name
+ * may raise the count as well as lower it, up to MARCH_MAX_SCHEDULERS below.
+ * (It was a silent ceiling until 2026-09; MARCH_NUM_SCHEDULERS=14 ran four
+ * threads and said nothing, which made every parallel-scaling measurement on
+ * a >4-core machine wrong.  Written up in
+ * specs/progress/2026-09-04-scheduler-count-env-was-a-silent-ceiling.md) */
 #ifndef MARCH_NUM_SCHEDULERS
-#  define MARCH_NUM_SCHEDULERS 4
+#  define MARCH_NUM_SCHEDULERS 0   /* 0 = auto (one per online CPU) */
+#endif
+
+/* Hard upper bound on the scheduler count, i.e. the size of the statically
+ * allocated scheduler table.  A larger request from the environment is
+ * clamped to this and reported on stderr.
+ *
+ * Why static rather than sized-to-order at init: g_scheds is indexed on the
+ * work-stealing hot path in march_sched_run, and a static array keeps that a
+ * fixed-address index instead of a load-then-index through a global pointer.
+ * The table is not free -- sizeof(march_scheduler) is dominated by the 4096-
+ * slot Chase-Lev deque, ~32 KiB per entry, so 64 entries is ~2 MiB -- but it
+ * lives in BSS and march_sched_init only ever touches the entries actually in
+ * use, so unused slots are never faulted in and cost no resident memory.
+ * Raise it at compile time with -DMARCH_MAX_SCHEDULERS=N on a machine with
+ * more than 64 cores. */
+#ifndef MARCH_MAX_SCHEDULERS
+#  define MARCH_MAX_SCHEDULERS 64
+#endif
+/* A build that pins a default larger than the bound raises the bound with it.
+ * (Vacuous for the auto default, which is 0.) */
+#if MARCH_NUM_SCHEDULERS > MARCH_MAX_SCHEDULERS
+#  undef  MARCH_MAX_SCHEDULERS
+#  define MARCH_MAX_SCHEDULERS MARCH_NUM_SCHEDULERS
 #endif
 
 /* Preemption quantum in microseconds.  The preemption daemon sends SIGUSR1
@@ -142,6 +189,7 @@ typedef enum {
 #define MARCH_SEND_OK       0
 #define MARCH_SEND_DEAD    (-1)
 #define MARCH_SEND_DROPPED  1    /* message NOT enqueued (DROP_NEW) */
+#define MARCH_SEND_DRAINING 2    /* target is stopping: NOT enqueued, not disposed */
 
 /* Forward-declare scheduler so march_proc can hold a pointer to it. */
 struct march_scheduler;
@@ -343,6 +391,20 @@ typedef struct march_scheduler {
 
 /* Initialize the global scheduler.  Call once before any other sched fn. */
 void         march_sched_init(void);
+
+/* Number of OS scheduler threads this process resolved at march_sched_init:
+ * the MARCH_NUM_SCHEDULERS environment request when it is usable, otherwise
+ * the build's default (a compile-time pin, or one per online CPU), always
+ * within [1, MARCH_MAX_SCHEDULERS].  Zero before the first march_sched_init. */
+int          march_sched_num_schedulers(void);
+
+/* How many CPUs this PROCESS may actually use: the machine's online CPUs,
+ * narrowed by CPU affinity (docker --cpuset-cpus, k8s CPU pinning) and by the
+ * cgroup CPU quota (docker --cpus, k8s CPU limits) where those apply.  At
+ * least 1.  This is what the auto scheduler default is derived from, and it
+ * is deliberately NOT sysconf(_SC_NPROCESSORS_ONLN), which reports the
+ * machine and ignores both container mechanisms. */
+int          march_sched_usable_cpus(void);
 
 /* Run the scheduler loop until all spawned processes are DEAD.
  * Returns to the caller once all work drains.  Spawns N-1 worker threads

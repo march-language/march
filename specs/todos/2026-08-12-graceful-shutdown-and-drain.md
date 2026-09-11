@@ -1,6 +1,37 @@
-`[P2]` # No graceful shutdown: death discards the mailbox instead of draining it
+`[P2]` # Graceful shutdown: the `terminate` callback and reload drain-first
 
-## The gap
+> **Partially landed 2026-09-08.** `Actor.stop(pid, timeout_ms)` now marks an
+> actor draining (new sends refused), works off the queued messages until the
+> mailbox empties or the deadline passes, and ends in a NORMAL death; a
+> supervisor stops its children first in reverse declaration order, each with
+> its own `shutdown` budget from the child spec. See
+> `specs/progress/2026-09-08-graceful-shutdown-and-drain.md`. This file is
+> trimmed to the two pieces that did NOT land.
+
+## What remains
+
+### 1. No `terminate`-style callback
+
+An actor can finish the messages it has queued, but it cannot run code of its
+own at shutdown — it cannot flush a buffer, checkpoint state, or hand
+unfinished work back to a queue. That needs a new actor-level declaration (an
+`on_stop`-shaped handler) and a decision about what it may do: whether it can
+send, whether its own failure aborts the shutdown, and whether it runs on the
+brutal path as well as the drained one.
+
+It is also the missing observability channel for teardown ORDER. Reverse
+declaration order is implemented and asserted today only via a
+`MARCH_SUP_TRACE` stderr line (`test/native/actor_stop_tree.order.expected`),
+because there is no in-language event at teardown time to observe it with: a
+child that printed from a handler races main on the compiled backend.
+
+### 2. Hot code reload has no drain-first story
+
+`runtime/march_reload.c` migration carries state across a code swap but does
+not drain the queue first. The draining flag now exists; wiring migration to
+stop-then-swap-then-resume is untouched.
+
+## The original gap, for context
 
 Actor death is immediate and lossy. The 2026-08-12 hardening (Task 14) added a
 reap-time mailbox drain, but that drain **disposes** queued messages — it frees

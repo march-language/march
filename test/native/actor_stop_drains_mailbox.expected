@@ -1,0 +1,12 @@
+-- stop drains what is queued
+handled a
+handled b
+handled c
+stop returned: true
+alive after stop: false
+-- a draining actor takes no new work
+handled first
+stop returned: true
+send after stop refused
+-- stopping an already-dead actor is a no-op
+second stop: false

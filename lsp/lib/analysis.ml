@@ -1199,7 +1199,18 @@ let rec tco_check (fn_name : string) (blocking : string option) (e : Ast.expr) a
         let msg =
           if is_ctor_blocked b then
             Printf.sprintf
-              "This recursive call is not in tail position — %s, so the stack grows by one frame per call and deep input can overflow it. TRMC can turn a call wrapped in a constructor into a loop, but it is OFF BY DEFAULT; enable it with `--trmc`. (This message used to say no rewrite was needed — it was wrong: the loop is not automatic.)"
+              (* This branch already knows the call is constructor-wrapped
+                 ([is_ctor_blocked]), so unlike the compiler's broader
+                 non-arithmetic warning it does not need to hedge about the
+                 other shapes, and must not: prescribing an accumulator here is
+                 the wrong advice for exactly the case TRMC handles, which is
+                 what the `does not prescribe an accumulator` test pins.
+                 Constructor-wrapped is necessary but not sufficient for
+                 eligibility (branching recursion such as `Node(f(l), f(r))` is
+                 only partly transformable), so state the shape TRMC does
+                 handle rather than promising this particular call becomes a
+                 loop. *)
+              "This recursive call is not in tail position — %s, so the stack grows by one frame per call. Tail-recursion-modulo-cons compiles a call that is the direct argument of a constructor in tail position into a loop with no extra stack, and is on by default (`--no-trmc` disables it)."
               b
           else if is_boolop_blocked b then
             (* `&&`/`||` are STRICT in March (specs/lang/core-march.md 4.4.1):
@@ -3339,7 +3350,7 @@ let rec tir_count_nodes (e : Tir.expr) : int * int * int * int =
    own perf_insights on replay. *)
 let tir_pass_cache :
   (string, tir_fn_insight list * code_lens_item list * perf_insight list
-           * consume_modes list * (string * Ast.span * Ast.span) list
+           * consume_modes list * (string * Ast.span * Ast.span * string) list
            * Lsp.Types.Diagnostic.t list) Hashtbl.t
   = Hashtbl.create 16
 
@@ -3457,13 +3468,15 @@ let run_tir_pass (a : t) : t =
          forge would insert it.  The editor has no forge.toml globs to apply,
          so only the default scope is offered here. *)
       let no_alloc_candidates =
-        List.map (fun (d : March_tir.Alloc_contract.decl_info) ->
+        List.map (fun ((d : March_tir.Alloc_contract.decl_info), form) ->
             (d.March_tir.Alloc_contract.d_name,
              d.March_tir.Alloc_contract.d_name_span,
-             d.March_tir.Alloc_contract.d_decl_span))
+             d.March_tir.Alloc_contract.d_decl_span,
+             March_tir.Alloc_contract.attr_of_form form))
           (March_tir.Alloc_contract.generation_candidates
              ~decls:contract_decls
              ~allocating:pipe.March_tir.Contract_pipeline.allocating
+             ~retaining:pipe.March_tir.Contract_pipeline.retaining
              ~globs:[]
              ~is_user:(fun (sp : Ast.span) -> sp.Ast.file = a.filename)
              tir)
@@ -3530,9 +3543,16 @@ let run_tir_pass (a : t) : t =
             else if d.March_tir.Alloc_contract.d_name_span.Ast.file <> a.filename
             then None
             else
+              (* The lens names the FORM that holds, so a reader can tell the
+                 two contracts apart at a glance:
+                 `\xe2\x9c\x93 no_alloc` vs `\xe2\x9c\x93 no_alloc(transient)`. *)
+              let title = match d.March_tir.Alloc_contract.d_form with
+                | Some March_tir.Alloc_contract.Transient ->
+                  "\xe2\x9c\x93 no_alloc(transient)"
+                | _ -> "\xe2\x9c\x93 no_alloc" in
               Some { cl_range = Pos.span_to_lsp_range
                          d.March_tir.Alloc_contract.d_name_span;
-                     cl_title = "\xe2\x9c\x93 no_alloc";
+                     cl_title = title;
                      cl_command = None;
                      cl_args = [] }) contract_decls
       in

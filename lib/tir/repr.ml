@@ -7,12 +7,221 @@
 
     Milestone 1: [Boxed] and [Newtype].
     Milestone 2: [Niche] for Option-shaped types (one nullary + one single-field
-    ctor).  None = raw 0, Some(x) = x (tagged when payload is a scalar). *)
+    ctor).  None = raw 0, Some(x) = x (tagged when payload is a scalar).
+
+    Milestone 3: [Unboxed] for small scalar-only single-constructor variants
+    ([Vec3(Float, Float, Float)]).  See the [Unboxed] section below. *)
 
 type repr =
   | Boxed                                           (* heap cell with RC header + tag *)
   | Newtype of Tir.ty                               (* represented as raw payload *)
   | Niche   of { payload : Tir.ty; tagged : bool } (* None=0, Some(x)=x *)
+  | Unboxed of { ctor : string; fields : Tir.ty list }
+    (* inline LLVM struct value; no cell, no RC.  See [set_unboxed_types]. *)
+
+(* ── Unboxed small scalar aggregates (Milestone 3) ─────────────────────
+
+   A single-constructor variant whose fields are ALL scalars (Int / Float /
+   Bool) and whose arity is 2..[max_unboxed_arity] is represented INLINE as an
+   LLVM first-class struct value: [Vec3(Float, Float, Float)] is
+   [{ double, double, double }] in registers.  No heap cell, no header, no
+   reference counting.
+
+   ── Why this table is a mutable registry rather than a pure function ──
+
+   Every other classifier here is a pure function of [type_defs], because
+   every consultation site has [type_defs] in scope.  The unboxed decision has
+   two consultation sites that do NOT and cannot cheaply get one:
+
+     - [Llvm_ctx.llvm_ty : Tir.ty -> string], the LLVM type mapping, called
+       unqualified at ~100 sites across the emitter;
+     - [Rc_types.needs_rc] / [Rc_types.borrow_eligible], the RC predicates,
+       called from Perceus, Borrow and Drop on a bare [Tir.ty].
+
+   Threading [type_defs] through both would touch every one of those sites.
+   Instead the classification is computed ONCE per compilation unit from the
+   module's own [tm_types] by [set_unboxed_types], and every site — including
+   [repr_of_ty] below — reads the result.  Making [repr_of_ty] read the same
+   table rather than re-deriving the predicate is deliberate and is the same
+   discipline the actor-msg and collision-set exclusions above exist to
+   enforce: encode ([Llvm_emit_alloc]), decode ([Llvm_case]), RC ([Perceus],
+   [Borrow], [Drop]), escape analysis and the [@[no_alloc]] checker must never
+   disagree about a type's representation.  One table read by all of them
+   cannot split; two independent derivations can.
+
+   Callers that must register:
+     - [Contract_pipeline.run]  — before the first pass that consults it;
+     - [Llvm_ctx.make_ctx]      — covers every other emitter entry point.
+
+   Two consumers register the EMPTY table ([~enabled:false]), because neither
+   can honour a struct-value ABI:
+     - the JS backend: its runtime is GC'd and [Js_emit] has no arm for an
+       inline aggregate;
+     - the REPL / JIT: a fragment's result thunk is invoked as [void -> ptr]
+       ([Repl_jit]'s [call_void_to_ptr]) and its value printed by walking a
+       heap cell, so a fragment returning a struct in registers would be read
+       as a pointer.  Fragments within one session all register the same empty
+       table, so they stay consistent with each other.
+   Both derive it from their module's [tm_types], and the derivation is a pure
+   function of those, so repeated registration is idempotent.
+
+   The JS backend registers the EMPTY table ([clear_unboxed_types]): its
+   runtime is GC'd, has no struct-value ABI, and [Js_emit] has no arm for an
+   inline aggregate. *)
+
+(** Largest field count still represented inline.  Four 8-byte fields is 32
+    bytes — two SysV/AAPCS64 register pairs — past which the struct is
+    memory-passed by the C ABI and the copy costs more than the cell it
+    replaces. *)
+let max_unboxed_arity = 4
+
+(* type name → (constructor short name, field types) *)
+let _unboxed : (string, string * Tir.ty list) Hashtbl.t = Hashtbl.create 16
+
+(* The [type_defs] the current registration was derived from, so a later
+   caller that knows LESS than the pipeline did (no extern list) can inherit
+   the pipeline's answer instead of recomputing a different one.  See
+   [ensure_unboxed_types]. *)
+let _registered_from : Tir.type_def list option ref = ref None
+
+(* LLVM struct type name ("%ub.Vec3") → March type name.  The reverse
+   direction, needed by [Llvm_ctx.coerce], which sees only LLVM type STRINGS
+   and must recover the constructor tag and field types to box/unbox. *)
+let _unboxed_by_llvm : (string, string) Hashtbl.t = Hashtbl.create 16
+
+(** Process-wide hard off switch.  The REPL/JIT sets it once ([Repl_jit],
+    [Llvm_ctx.make_ctx ~repl:true]) so that no registration anywhere in the
+    process — including the [ensure_unboxed_types] calls inside [Perceus] and
+    [Escape], which cannot see who their caller is — can turn unboxing back on
+    for a fragment.  Never cleared: a process either drives the REPL or it
+    does not. *)
+let _forced_off = ref false
+
+let force_disable () = _forced_off := true
+
+(** Escape hatch: [MARCH_NO_UNBOX=1] classifies every type Boxed, restoring the
+    pre-Milestone-3 representation for bisection. *)
+let unboxing_disabled : bool Lazy.t =
+  lazy (match Sys.getenv_opt "MARCH_NO_UNBOX" with
+      | Some ("1" | "true" | "yes") -> true
+      | _ -> false)
+
+let is_scalar_field : Tir.ty -> bool = function
+  | Tir.TInt | Tir.TFloat | Tir.TBool -> true
+  | _ -> false
+
+(** The LLVM identified-struct name for an unboxed type.  Dots (module
+    qualification) become underscores; the ["%ub."] prefix cannot collide with
+    a mangled March symbol, which [Llvm_ctx.llvm_name] never prefixes. *)
+let unboxed_llvm_name (type_name : string) : string =
+  "%ub." ^ String.map (fun c -> if c = '.' then '_' else c) type_name
+
+(** Is [name] (a bare March TYPE name, never a "Type.Ctor" key) represented
+    inline?  Answers from the registry — see the section comment. *)
+let unboxed_of_type_name (name : string) : (string * Tir.ty list) option =
+  Hashtbl.find_opt _unboxed name
+
+(** March type name behind an LLVM struct type string, or [None] if the string
+    is not an unboxed aggregate's type. *)
+let unboxed_of_llvm_ty (lty : string) : (string * string * Tir.ty list) option =
+  match Hashtbl.find_opt _unboxed_by_llvm lty with
+  | None -> None
+  | Some tname ->
+    (match Hashtbl.find_opt _unboxed tname with
+     | Some (ctor, fields) -> Some (tname, ctor, fields)
+     | None -> None)
+
+(** Every registered unboxed type, as (March type name, LLVM struct name,
+    field types).  Used by [Llvm_toplevel.emit_module] to emit the
+    [%ub.X = type { ... }] declarations, and by tests. *)
+let unboxed_types () : (string * string * Tir.ty list) list =
+  Hashtbl.fold (fun tname (_ctor, fields) acc ->
+      (tname, unboxed_llvm_name tname, fields) :: acc) _unboxed []
+  |> List.sort compare
+
+let clear_unboxed_types () =
+  Hashtbl.reset _unboxed; Hashtbl.reset _unboxed_by_llvm;
+  _registered_from := None
+
+(** Recompute the unboxed-type registry from [type_defs].  Idempotent and a
+    pure function of its arguments; see the section comment for who calls it
+    and why it is a registry at all.
+
+    Exclusions, each mirroring an existing one above:
+    - types crossing an [extern] signature ([externs]): the C side sees the
+      BOXED cell (that is what [Llvm_ctx.coerce] hands it, and it is the
+      layout every existing extern was written against), but the box is a
+      fresh rc=1 cell that no one owns — [Rc_types.needs_rc] is false for the
+      aggregate, so Perceus emits no caller-side drop and the box would leak
+      once per call.  Keeping such a type Boxed end to end costs one
+      representation and removes the whole question;
+    - actor message types: need a runtime tag for foreign-message dispatch;
+    - same-short-name colliding types: their globally-unique ctor tag must stay
+      readable at a dispatch site that only knows the short name;
+    - closure structs and actor state records: not [TDVariant] at all, so they
+      cannot reach the shape test, but named here so the intent is on record. *)
+let set_unboxed_types
+    ?(collision_set : (string, string list) Hashtbl.t = Hashtbl.create 0)
+    ?(externs : Tir.extern_decl list = [])
+    ?(enabled = true)
+    (type_defs : Tir.type_def list) : unit =
+  clear_unboxed_types ();
+  _registered_from := Some type_defs;
+  if (not enabled) || !_forced_off || Lazy.force unboxing_disabled then ()
+  else begin
+    let ffi = Hashtbl.create 8 in
+    List.iter (fun (ed : Tir.extern_decl) ->
+        List.iter (function
+            | Tir.TCon (n, _) -> Hashtbl.replace ffi n ()
+            | _ -> ())
+          (ed.Tir.ed_ret :: ed.Tir.ed_params))
+      externs;
+    List.iter (function
+        | Tir.TDVariant (name, [ (ctor, fields) ])
+          when List.length fields >= 2
+            && List.length fields <= max_unboxed_arity
+            && List.for_all is_scalar_field fields
+            && not (Hashtbl.mem ffi name)
+            && not (Tir_names.is_actor_msg_name name)
+            && not (Tir_names.is_clo_struct name)
+            && not (Collision_set.is_colliding collision_set name) ->
+          Hashtbl.replace _unboxed name (ctor, fields);
+          Hashtbl.replace _unboxed_by_llvm (unboxed_llvm_name name) name
+        | _ -> ()) type_defs
+  end
+
+(** Re-key the current registration to [type_defs] WITHOUT recomputing it.
+
+    The pipeline decides the unboxed set once, on the TIR shape its passes
+    will reason about, and later passes may still ADD type definitions
+    ([Defun]'s closure structs, an inliner's specialisations).  Recomputing
+    from the final list could then admit a type the passes treated as Boxed —
+    a representation split.  Re-keying instead means the emitter's
+    [ensure_unboxed_types] recognises the final module as "already
+    registered" and inherits the passes' answer verbatim; a type that appeared
+    after the decision simply stays Boxed everywhere, which is conservative
+    and consistent. *)
+let rebind_registration (type_defs : Tir.type_def list) : unit =
+  if !_registered_from <> None then _registered_from := Some type_defs
+
+(** Register only if nothing has registered from these same [type_defs].
+
+    [Contract_pipeline.run] registers with the module's extern list; an
+    emitter entry point that reaches [Llvm_ctx.make_ctx] afterwards has the
+    same [type_defs] but no extern list, and recomputing there would produce a
+    LARGER set (no FFI exclusion) — an encode/decode representation split, the
+    one failure mode this file's exclusions all exist to prevent.  Inheriting
+    the earlier answer is what keeps the two in step; a caller that arrives
+    first (a direct [Llvm_emit] call in a test, say) still gets a correct, if
+    slightly conservative, registration of its own. *)
+let ensure_unboxed_types
+    ?(collision_set : (string, string list) Hashtbl.t = Hashtbl.create 0)
+    (type_defs : Tir.type_def list) : unit =
+  if !_forced_off then clear_unboxed_types ()
+  else
+    match !_registered_from with
+    | Some tds when tds == type_defs || tds = type_defs -> ()
+    | _ -> set_unboxed_types ~collision_set type_defs
 
 (* Look up a variant type definition by name. *)
 let find_variant (type_defs : Tir.type_def list) (name : string)
@@ -89,6 +298,8 @@ let rec niche_payload_ok
     (match repr_of_ty ~collision_set type_defs ty with
      | Niche _  -> false  (* nested niche: Some(None)=0=None *)
      | Newtype inner -> niche_payload_ok ~collision_set type_defs inner
+     | Unboxed _ -> true  (* boxed by [Llvm_ctx.coerce] on entry to a ptr slot,
+                             so what the niche slot holds is a heap ptr *)
      | Boxed -> true)     (* boxed heap ptr, march_alloc never returns 0 *)
   | _ -> true  (* TInt, TBool, TString, TPtr, TFn — never raw 0 in ptr slot *)
 
@@ -129,6 +340,14 @@ and repr_of_ty
   (* Task 2: same-short-name colliding type — force Boxed (see doc comment
      above) BEFORE the ctor-shape match, mirroring the actor-msg exclusion. *)
   | Tir.TCon (name, _) when Collision_set.is_colliding collision_set name -> Boxed
+  (* Milestone 3: registered small scalar-only single-ctor variant.  The
+     registry ALREADY applied the actor-msg and collision exclusions (see
+     [set_unboxed_types]); the two arms above are kept ahead of this one so the
+     ordering reads the same as the reasoning. *)
+  | Tir.TCon (name, _) when unboxed_of_type_name name <> None ->
+    (match unboxed_of_type_name name with
+     | Some (ctor, fields) -> Unboxed { ctor; fields }
+     | None -> Boxed (* unreachable: guard checked <> None *))
   | Tir.TCon (name, params) ->
     (match find_variant type_defs name with
      (* Float-payload newtype: stay boxed (can't tag float bits safely). *)
@@ -158,6 +377,8 @@ and payload_needs_tag
   | Tir.TCon _ ->
     (match repr_of_ty ~collision_set type_defs ty with
      | Newtype inner -> payload_needs_tag ~collision_set type_defs inner
+     (* Unboxed: what reaches a ptr slot is the BOX [Llvm_ctx.coerce] built,
+        a real heap pointer — never a tagged immediate. *)
      | _ -> false)
   | _ -> false
 

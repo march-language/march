@@ -148,6 +148,27 @@ let extern_borrow_table : (string * bool list) list = [
   ("ring_buf_cap",         [true]);
   ("ring_buf_clear",       [true]);
   ("ring_buf_to_list",     [true]);
+  (* ── NativeArray: reads borrow their array, `set` consumes it (in-place) ── *)
+  ("native_u8_arr_get",    [true; false]);
+  ("native_u8_arr_length", [true]);
+  ("native_u8_arr_sum",    [true]);
+  ("native_u8_arr_to_list",[true]);
+  ("native_i32_arr_get",    [true; false]);
+  ("native_i32_arr_length", [true]);
+  ("native_i32_arr_sum",    [true]);
+  ("native_i32_arr_to_list",[true]);
+  ("native_f32_arr_get",    [true; false]);
+  ("native_f32_arr_length", [true]);
+  ("native_f32_arr_sum",    [true]);
+  ("native_f32_arr_to_list",[true]);
+  ("native_int_arr_get",    [true; false]);
+  ("native_int_arr_length", [true]);
+  ("native_int_arr_sum",    [true]);
+  ("native_int_arr_to_list",[true]);
+  ("native_float_arr_get",    [true; false]);
+  ("native_float_arr_length", [true]);
+  ("native_float_arr_sum",    [true]);
+  ("native_float_arr_to_list",[true]);
   (* ── Synthetic C names used directly in lower.ml wrappers ──────────────── *)
   ("march_compare_string", [true; true]);
   ("march_hash_string",    [true]);
@@ -158,10 +179,22 @@ let extern_borrow_table : (string * bool list) list = [
   ("march_value_to_string", [true]);
 ]
 
+(** Builtins that borrow EVERY argument, at any arity.
+
+    [extern_borrow_table] is a fixed-length list per name, which cannot say
+    "all of them" for a variadic builtin: [List.nth_opt] past the end answers
+    [None], i.e. NOT borrowed, so Perceus would treat the call as consuming
+    those arguments and emit no drop for them.  For [string_concat_n], whose C
+    implementation borrows all its parts, that leaks every operand past the
+    third. *)
+let all_args_borrowed_builtins = [ "string_concat_n" ]
+
 (** True iff parameter [idx] of C extern / TIR builtin [fn_name] is borrowed
     according to the hardcoded ABI table.  Used as a fallback in [is_borrowed]
     when the function is not a March-defined function. *)
 let is_extern_borrowed (fn_name : string) (param_idx : int) : bool =
+  if List.mem fn_name all_args_borrowed_builtins then true
+  else
   match List.assoc_opt fn_name extern_borrow_table with
   | Some borrows ->
     (match List.nth_opt borrows param_idx with Some b -> b | None -> false)
@@ -179,6 +212,53 @@ let is_borrowed (m : borrow_map) (fn_name : string) (idx : int) : bool =
    predicate as [Rc_types.needs_rc] (Perceus's RC-op emission question):
    they deliberately diverge on TFn / bare TVar / TTuple / TRecord. See
    Rc_types's module doc for the contract and fix history. *)
+
+(* ── Scalar-only variant types ───────────────────────────────────────────
+
+   [field_escape_owns] below marks a parameter OWNED as soon as any field
+   extracted from it is used in an owning position.  Its rationale is entirely
+   about HEAP fields: pattern-match extraction hands out a field's value
+   without incrementing its refcount, so if that field then escapes, the
+   caller holds an aliased pointer it does not own, and the next read of the
+   parent double-frees or use-after-frees the child.
+
+   For a variant type whose EVERY constructor's EVERY declared field is a
+   scalar — Int, Float, Bool, Unit, or the interned-i64 Atom — no extracted
+   field can be a pointer, and the hazard cannot arise: `a + b` on two Int
+   fields is not an aliasing question at all.  Before this table such a type
+   (`Big(Int, Int, Int, Int, Int)`, `Hit(Bool, Int, Int)`, an enum with
+   payloads) was inferred `own` the moment its fields met any builtin, since
+   [is_borrowed] has no entry for `+`.  That is not merely a missed
+   optimisation: being owned is what makes [Perceus] emit a `dec_rc` on the
+   parameter inside the callee, which is what stops [Escape] from ever
+   stack-promoting such a value at a call site (a stack cell has rc = 0).
+
+   Kept as a module-level table set once per [infer_module] rather than
+   threaded through [owned_in]'s fifteen recursive call sites — the same
+   shape, and the same trade, as [Repr]'s unboxed registry.  Empty by
+   default, so a caller that never runs [infer_module] gets the previous
+   behaviour. *)
+let _scalar_only : (string, unit) Hashtbl.t = Hashtbl.create 16
+
+let is_scalar_field_ty : Tir.ty -> bool = function
+  | Tir.TInt | Tir.TFloat | Tir.TBool | Tir.TUnit -> true
+  | Tir.TCon ("Atom", []) -> true
+  | _ -> false
+
+let set_scalar_only_types (type_defs : Tir.type_def list) : unit =
+  Hashtbl.reset _scalar_only;
+  List.iter (function
+      | Tir.TDVariant (name, ctors)
+        when List.for_all (fun (_, fields) ->
+            List.for_all is_scalar_field_ty fields) ctors ->
+        Hashtbl.replace _scalar_only name ()
+      | _ -> ()) type_defs
+
+(** True iff [ty] is a variant every one of whose constructor fields is a
+    scalar — see the section comment. *)
+let is_scalar_only_ty : Tir.ty -> bool = function
+  | Tir.TCon (name, _) -> Hashtbl.mem _scalar_only name
+  | _ -> false
 
 (** True iff atom [a] is a reference to the variable named [name]. *)
 let atom_is (name : string) : Tir.atom -> bool = function
@@ -476,6 +556,10 @@ let rec owned_in (name : string) (bm : borrow_map) (e : Tir.expr) : bool =
             because FBIP reuse and ADT-specific ownership patterns need it. *)
          (match v.Tir.v_ty with
           | Tir.TTuple _ | Tir.TRecord _ -> false
+          (* A variant with no heap-carrying field anywhere: an extracted
+             field is a scalar, so the aliasing hazard this rule guards
+             against cannot arise.  See [_scalar_only]. *)
+          | t when is_scalar_only_ty t -> false
           | _ -> true)
        | _ -> false) &&
       List.exists (fun br ->
@@ -553,6 +637,9 @@ let print_borrow_map (m : Tir.tir_module) (bm : borrow_map) =
   Printf.eprintf "%!"
 
 let infer_module (m : Tir.tir_module) : borrow_map =
+  (* Per-module: which variant types carry no heap field anywhere.  Consulted
+     by [field_escape_owns] — see [_scalar_only]. *)
+  set_scalar_only_types m.Tir.tm_types;
   (* Initialise: borrow-eligible params start as borrowed; others are false. *)
   let init =
     List.fold_left (fun acc fn ->

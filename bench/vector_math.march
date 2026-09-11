@@ -1,0 +1,81 @@
+-- Vector-math benchmark: the workload the unboxed-aggregate representation
+-- exists for (Repr.Unboxed, specs/progress/2026-09-03-unboxed-small-scalar-aggregates.md).
+--
+-- `Vec3(Float, Float, Float)` is a single-constructor variant whose fields are
+-- all scalars, so it is represented as an LLVM struct value in registers with
+-- no heap cell.  Under the previous (boxed) representation every intermediate
+-- vector was a march_alloc(40) that died the same iteration: allocator churn
+-- proportional to the loop count, with nothing for FBIP to reuse (the inputs
+-- are scalars, so there is no dying cell of the same shape) and nothing for
+-- escape analysis to promote (the value is returned across a call boundary).
+--
+-- The loop is deliberately allocation-free apart from the vectors themselves,
+-- so the wall-clock difference is the allocator cost of the representation.
+-- Compare with and without the escape hatch:
+--
+--   march --compile --opt 2 bench/vector_math.march -o /tmp/vm && /tmp/vm
+--   MARCH_NO_UNBOX=1 march --compile --opt 2 bench/vector_math.march -o /tmp/vmb && /tmp/vmb
+--
+-- Usage: march --compile --opt 2 bench/vector_math.march -o bench/vector_math
+--        bench/vector_math
+
+mod VectorMath do
+  needs IO.Console
+
+  type Vec3 = Vec3(Float, Float, Float)
+
+  pfn vadd(a : Vec3, b : Vec3) : Vec3 do
+    match a do
+      Vec3(ax, ay, az) ->
+        match b do
+          Vec3(bx, b2, bz) -> Vec3(ax +. bx, ay +. b2, az +. bz)
+        end
+    end
+  end
+
+  pfn vscale(v : Vec3, k : Float) : Vec3 do
+    match v do
+      Vec3(x, y, z) -> Vec3(x *. k, y *. k, z *. k)
+    end
+  end
+
+  pfn vdot(a : Vec3, b : Vec3) : Float do
+    match a do
+      Vec3(ax, ay, az) ->
+        match b do
+          Vec3(bx, b2, bz) -> ax *. bx +. ay *. b2 +. az *. bz
+        end
+    end
+  end
+
+  pfn vcross(a : Vec3, b : Vec3) : Vec3 do
+    match a do
+      Vec3(ax, ay, az) ->
+        match b do
+          Vec3(bx, b2, bz) ->
+            Vec3(ay *. bz -. az *. b2, az *. bx -. ax *. bz, ax *. b2 -. ay *. bx)
+        end
+    end
+  end
+
+  -- One step of a toy integrator: five vector temporaries per iteration, each
+  -- of which was a separate heap cell before the representation change.
+  pfn step(i : Int, n : Int, pos : Vec3, vel : Vec3, acc : Float) : Float do
+    if i >= n do acc
+    else
+      let t     = int_to_float(i) *. 0.000001
+      let force = Vec3(t, 0.0 -. t, t *. 0.5)
+      let vel2  = vadd(vel, vscale(force, 0.5))
+      let pos2  = vadd(pos, vscale(vel2, 0.001))
+      let spin  = vcross(pos2, vel2)
+      step(i + 1, n, pos2, vel2, acc +. vdot(spin, vel2))
+    end
+  end
+
+  pfn main(_cap_console : Cap(IO.Console)) : Unit do
+    let n     = 3000000
+    let total = step(0, n, Vec3(1.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0), 0.0)
+    println(float_to_string(total))
+  end
+
+end

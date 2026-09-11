@@ -1,0 +1,76 @@
+-- Unboxed small scalar aggregates: the BOUNDARY cases (Repr.Unboxed).
+--
+-- Companion to native/unboxed_aggregate.march, which covers the ordinary
+-- construct/match/compare path.  This one puts an unboxed aggregate in every
+-- place where a heap SLOT is involved, because a heap slot is 8 bytes wide
+-- (Llvm_ctx.alloc_size) and an inline aggregate is wider: a record field, a
+-- record update's slot-to-slot copy, a recursive constructor's field, a
+-- closure free variable, a green thread's erased result slot, and a Result
+-- payload.  Each of those must box on the way in and unbox on the way out
+-- (Llvm_ctx.llvm_field_ty / Llvm_ctx.coerce); getting one wrong writes 24
+-- bytes into an 8-byte slot and silently corrupts the NEXT field, which is
+-- what this fixture exists to catch.  Interpreted output is ground truth; the
+-- oracle sweep compares it against the compiled run.
+mod UnboxedAggregateBoundaries do
+  needs IO
+
+  type V3 = V3(Float, Float, Float)
+  type P  = P(Int, Int)
+  type Sweep = Sweep(Float, Float, Float, Bool)
+
+  derive Show for V3
+  derive Show for P
+  derive Eq for P
+  derive Show for Sweep
+
+  type Body = { pos : V3, id : Int }
+
+  type Node = Leaf | Branch(V3, Node, Node)
+
+  fn mkv(a : Float) : V3 do V3(a, a +. 1.0, a +. 2.0) end
+
+  fn sumv(v : V3) : Float do
+    match v do
+      V3(x, y, z) -> x +. y +. z
+    end
+  end
+
+  fn depth(n : Node) : Int do
+    match n do
+      Leaf -> 0
+      Branch(v, l, r) ->
+        let d = if depth(l) > depth(r) do depth(l) else depth(r) end
+        d + 1 + float_to_int(sumv(v)) * 0
+    end
+  end
+
+  fn main(cap : Cap(IO)) : Unit do
+    -- record field of aggregate type
+    let b = { pos: mkv(1.0), id: 4 }
+    println(to_string(b.pos))
+    let b2 = { b with id: 9 }
+    println(to_string(b2.pos) ++ "/" ++ int_to_string(b2.id))
+
+    -- recursive ADT with an aggregate field
+    let t = Branch(mkv(0.0), Branch(mkv(1.0), Leaf, Leaf), Leaf)
+    println(int_to_string(depth(t)))
+
+    -- 4-field mixed aggregate at the arity boundary
+    println(to_string(Sweep(1.0, 2.0, 3.0, true)))
+
+    -- lists, sorting, higher-order functions
+    let ps = [P(3, 1), P(1, 2), P(2, 3)]
+    println(to_string(List.map(ps, fn p -> match p do P(x, _) -> x end)))
+
+    -- a task boundary (aggregate through a green thread's erased slot)
+    let h = task_spawn(fn _ -> sumv(mkv(10.0)))
+    println(float_to_string(task_await_unwrap(h)))
+
+    -- result / option wrapping
+    let r : Result(V3, String) = Ok(mkv(5.0))
+    match r do
+      Ok(v)  -> println(to_string(v))
+      Err(e) -> println(e)
+    end
+  end
+end

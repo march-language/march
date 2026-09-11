@@ -216,6 +216,10 @@ type actor_inst = {
   mutable ai_monitors : (int * int) list;   (** (monitor_ref, watcher_pid) pairs *)
   mutable ai_mailbox  : value Queue.t;      (** pending Down/Crashed messages *)
   (* Phase 2: supervisor support *)
+  mutable ai_draining : bool;
+  (** Graceful shutdown (actor_stop): the actor is finishing its queued
+      messages and accepting no new ones. Parity with the compiled runtime's
+      march_actor_meta.draining. *)
   mutable ai_supervisor : int option;        (** pid of supervising actor, if any *)
   mutable ai_restart_count : (float * int) list; (** (timestamp, count) restart history *)
   (* Phase 3: epoch-based capability tracking *)
@@ -489,6 +493,15 @@ let capture_ewriteln (s : string) : unit =
 (* Pending synchronous call replies: call_ref -> reply value. *)
 let pending_replies : (int, value) Hashtbl.t = Hashtbl.create 4
 
+(** When each pending reply was stored, in Unix ms. [actor_call] compares this
+    against the deadline it computed from its `timeout_ms` argument: the
+    interpreter's scheduler runs a handler to completion inside one pass, so
+    "did a reply land?" alone cannot tell a fast handler from one that took ten
+    seconds — the reply is there either way. Timestamping the reply at the
+    moment it is produced is what makes the deadline real.
+    See specs/todos/2026-08-11-interpreter-actor-call-timeout-not-enforced.md. *)
+let pending_reply_times : (int, float) Hashtbl.t = Hashtbl.create 4
+
 let next_call_ref : int ref = ref 0
 
 (** Pid of the actor whose handler is currently executing.
@@ -722,6 +735,7 @@ let spawn_child_actor ?(crashed_pid : int option = None) (child_actor_name : str
       ai_state = child_init_state; ai_alive = true;
       ai_terminal_reason = Normal;
       ai_monitors = []; ai_mailbox = Queue.create ();
+      ai_draining = false;
       ai_supervisor = Some supervisor_pid;
       ai_restart_count = []; ai_epoch = inherited_epoch;
       ai_resources = [];
@@ -764,6 +778,48 @@ let spawn_child_actor ?(crashed_pid : int option = None) (child_actor_name : str
             if not held_by_live_other then
               Hashtbl.replace named_registry name child_pid) names));
     child_pid
+
+(** Should a child with restart policy [rt] be brought back after dying for
+    [reason]?  Mirrors [march_child_should_restart] in runtime/march_runtime.c
+    exactly — both backends must agree on identical source.
+
+      policy      Crash   Killed   Normal
+      permanent   yes     yes      no
+      transient   yes     no       no
+      temporary   no      no       no
+
+    March's [Permanent] is deliberately not OTP's: it does not restart on a
+    normal exit. See specs/2026-09-08-supervise-child-spec-design.md §4. *)
+let child_should_restart (rt : restart_type) (reason : monitor_down_reason) : bool =
+  match reason with
+  | Normal -> false
+  | _ ->
+    (match rt with
+     | Permanent -> true
+     | Transient -> (match reason with Crash _ -> true | _ -> false)
+     | Temporary -> false)
+
+(** The declared restart policy of whichever supervise-block child currently
+    holds [crashed_pid] in [sup_inst]'s state, or [Permanent] if the child
+    cannot be identified — the conservative direction, matching the runtime's
+    unset-terminal_reason fallback: an unknown child restarts as it did before
+    restart types existed, rather than being silently retired. *)
+let child_restart_policy (sup_inst : actor_inst) (crashed_pid : int) : restart_type =
+  match sup_inst.ai_def.actor_supervise with
+  | None -> Permanent
+  | Some sup_cfg ->
+    let fname = match sup_inst.ai_state with
+      | VRecord fields ->
+        (match List.find_opt (fun (_, v) -> v = VInt crashed_pid) fields with
+         | Some (k, _) -> Some k | None -> None)
+      | _ -> None
+    in
+    (match fname with
+     | None -> Permanent
+     | Some fname ->
+       (match List.find_opt (fun sf -> sf.sf_name.txt = fname) sup_cfg.sc_fields with
+        | Some sf -> sf.sf_restart
+        | None -> Permanent))
 
 (** Restart a supervisor's crashed child under one_for_one strategy.
     Finds which field in the supervisor state held the crashed pid,
@@ -859,6 +915,15 @@ and one_for_all_restart (sup_pid : int) (_crashed_pid : int) : unit =
              let new_fields = List.map (fun (fname, old_val) ->
                match List.find_opt (fun sf -> sf.sf_name.txt = fname) sup_cfg.sc_fields with
                | None -> (fname, VInt 0)
+               | Some sf when sf.sf_restart = Temporary ->
+                 (* Swept up by the batch and killed like any other sibling,
+                    but NOT brought back: the kill is internal machinery, this
+                    respawn is the restart decision. The slot keeps the dead
+                    child's pid, exactly as the runtime leaves the supervisor's
+                    stored pid_index untouched when it skips a temporary child.
+                    No single-child test sees this — a temporary child only
+                    resurrects when a SIBLING crashes. *)
+                 (fname, old_val)
                | Some sf ->
                  let child_actor_name = match sf.sf_ty with
                    | TyCon (n, []) -> n.txt | _ -> "" in
@@ -933,6 +998,10 @@ and rest_for_one_restart (sup_pid : int) (crashed_pid : int) : unit =
                let updated = List.fold_left (fun acc fname ->
                  match List.find_opt (fun sf -> sf.sf_name.txt = fname) sup_cfg.sc_fields with
                  | None -> acc
+                 | Some sf when sf.sf_restart = Temporary ->
+                   (* See one_for_all_restart's identical skip: killed by the
+                      sweep, never respawned. *)
+                   acc
                  | Some sf ->
                    let child_actor_name = match sf.sf_ty with
                      | TyCon (n, []) -> n.txt | _ -> "" in
@@ -952,7 +1021,8 @@ and rest_for_one_restart (sup_pid : int) (crashed_pid : int) : unit =
        end)
 
 (** Notify a dynamic supervisor that one of its children crashed. *)
-and notify_dyn_supervisor (sup_name : string) (crashed_pid : int) : unit =
+and notify_dyn_supervisor (sup_name : string) (crashed_pid : int)
+    (reason : monitor_down_reason) : unit =
   match Hashtbl.find_opt dyn_sup_registry sup_name with
   | None -> ()
   | Some ds ->
@@ -961,7 +1031,12 @@ and notify_dyn_supervisor (sup_name : string) (crashed_pid : int) : unit =
      | Some entry ->
        (* Remove from the list regardless of restart policy *)
        ds.ds_children <- List.filter (fun e -> e.dce_pid <> crashed_pid) ds.ds_children;
-       if entry.dce_restart = "temporary" then ()
+       let policy = match entry.dce_restart with
+         | "transient" -> Transient
+         | "temporary" -> Temporary
+         | _           -> Permanent
+       in
+       if not (child_should_restart policy reason) then ()
        else begin
          (* Permanent or transient: attempt restart within budget *)
          let now = Unix.gettimeofday () in
@@ -979,17 +1054,26 @@ and notify_dyn_supervisor (sup_name : string) (crashed_pid : int) : unit =
 
 (** Notify a supervisor that a child has crashed, triggering the appropriate
     restart strategy. *)
-and notify_supervisor (sup_pid : int) (crashed_pid : int) : unit =
+and notify_supervisor (sup_pid : int) (crashed_pid : int)
+    (reason : monitor_down_reason) : unit =
   match Hashtbl.find_opt actor_registry sup_pid with
   | None ->
     (* Check if this is a dynamic supervisor virtual pid *)
     (match Hashtbl.find_opt dyn_sup_vpid_map sup_pid with
-     | Some sup_name -> notify_dyn_supervisor sup_name crashed_pid
+     | Some sup_name -> notify_dyn_supervisor sup_name crashed_pid reason
      | None -> ())
   | Some sup_inst ->
     (match sup_inst.ai_def.actor_supervise with
      | None -> ()
      | Some sup_cfg ->
+       (* Per-child restart policy, filtered BEFORE the strategy runs so a
+          death that will not restart also charges nothing against
+          ai_restart_count (each strategy debits the budget on entry). Same
+          placement, and the same reason, as the runtime's filter sitting
+          ahead of its crash_streak update. *)
+       if not (child_should_restart (child_restart_policy sup_inst crashed_pid) reason)
+       then ()
+       else
        (match sup_cfg.sc_strategy with
         | OneForOne  -> one_for_one_restart sup_pid crashed_pid
         | OneForAll  -> one_for_all_restart sup_pid crashed_pid
@@ -1056,17 +1140,110 @@ and crash_actor_with_reason (pid : int) (_reason : string)
     ) inst.ai_monitors;
     (* Phase 2: notify supervisor for restart *)
     (match supervisor with
-     | Some sup_pid -> notify_supervisor sup_pid pid
+     | Some sup_pid -> notify_supervisor sup_pid pid down_reason
      | None -> ())
 
 and crash_actor (pid : int) (reason : string) : unit =
   crash_actor_with_reason pid reason (Crash reason)
+
+(** Graceful stop: drain [pid]'s mailbox, then end it with a NORMAL death.
+
+    Mirrors the compiled runtime's march_actor_stop
+    (specs/todos/2026-08-12-graceful-shutdown-and-drain.md):
+
+    - the actor is marked draining first, so [mailbox_accepts] refuses new
+      work while the queue is being worked off;
+    - its queued messages are then run to completion, or until [deadline]
+      (absolute Unix ms; [None] waits indefinitely) passes;
+    - it dies NORMAL, which no restart type restarts, so stopping a child does
+      not fight its supervisor.
+
+    A supervisor stops its children FIRST and in REVERSE declaration order —
+    the mirror of start order, the same order rest_for_one relies on — each
+    with its own `shutdown` budget from the child spec. Each child is detached
+    from the supervisor before it is stopped: an orderly teardown must not run
+    a restart strategy against a parent that is itself on the way out.
+
+    The drain runs on the interpreter's own eager scheduler, so unlike the
+    compiled runtime there is no other thread to wait for: [drain_hook] is
+    [run_scheduler], installed by eval.ml (this module is below it). *)
+and drain_hook : (unit -> unit) ref = ref (fun () -> ())
+
+and stop_actor (pid : int) (timeout_ms : int) : bool =
+  match Hashtbl.find_opt actor_registry pid with
+  | None -> false
+  | Some inst when not inst.ai_alive || inst.ai_draining -> false
+  | Some inst ->
+    inst.ai_draining <- true;
+    (* Children first, deepest-declared first. *)
+    (match inst.ai_def.actor_supervise with
+     | None -> ()
+     | Some sup_cfg ->
+       let names = List.map (fun n -> n.txt) sup_cfg.sc_order in
+       let order = List.rev (List.mapi (fun i n -> (i, n)) names) in
+       List.iter (fun (child_idx, fname) ->
+           let child_pid = match inst.ai_state with
+             | VRecord fields ->
+               (match List.assoc_opt fname fields with Some (VInt p) -> p | _ -> -1)
+             | _ -> -1
+           in
+           if child_pid >= 0 then
+             match Hashtbl.find_opt actor_registry child_pid with
+             | Some ci when ci.ai_alive ->
+               ci.ai_supervisor <- None;
+               let budget =
+                 match List.find_opt (fun sf -> sf.sf_name.txt = fname)
+                         sup_cfg.sc_fields with
+                 | Some sf -> March_ast.Ast.shutdown_ms sf.sf_shutdown
+                 | None    -> March_ast.Ast.shutdown_ms March_ast.Ast.default_shutdown
+               in
+               (* Same line, same order, as the compiled runtime's trace in
+                  march_actor_stop: teardown order has no other observable
+                  channel until actors get a terminate callback. *)
+               if Sys.getenv_opt "MARCH_SUP_TRACE" <> None then
+                 Printf.eprintf
+                   "march: stopping supervised child %d (shutdown_ms=%d)\n%!"
+                   child_idx budget;
+               if budget = 0 then
+                 crash_actor_with_reason child_pid "shutdown" Killed
+               else
+                 ignore (stop_actor child_pid budget)
+             | _ -> ()
+         ) order);
+    (* Then this actor's own queue. Each pass of the scheduler drains every
+       live actor's mailbox, so one pass is normally enough; the loop exists
+       for handlers that enqueue further work onto this actor. *)
+    let deadline =
+      if timeout_ms < 0 then None
+      else Some (Unix.gettimeofday () *. 1000. +. float_of_int timeout_ms)
+    in
+    let past_deadline () =
+      match deadline with
+      | None -> false
+      | Some d -> Unix.gettimeofday () *. 1000. >= d
+    in
+    let rec drain () =
+      if not (Queue.is_empty inst.ai_mailbox) && not (past_deadline ()) then begin
+        let before = Queue.length inst.ai_mailbox in
+        !drain_hook ();
+        if Queue.length inst.ai_mailbox < before then drain ()
+      end
+    in
+    if timeout_ms <> 0 then drain ();
+    crash_actor_with_reason pid "stopped" Normal;
+    true
 
 (** Task 9: interpreter-side counter for messages dropped by bounded-mailbox
     overflow policies. Mirrors the compiled runtime's
     MARCH_STAT_MSGS_DROPPED / march_stat_counters[4], surfaced to March via
     sched_stat(4) / Scheduler.dropped_messages(). *)
 let dropped_messages_count = ref 0
+
+(** Will [inst] accept a new message? False once it is draining — that is what
+    makes actor_stop a shutdown rather than a pause, and it mirrors
+    march_send's MARCH_SEND_DRAINING rejection in the compiled runtime. *)
+let mailbox_accepts (inst : actor_inst) : bool =
+  inst.ai_alive && not inst.ai_draining
 
 (** Task 9: enqueue [msg] onto [inst]'s mailbox, honoring its bounded-mailbox
     policy (set via actor_set_mailbox_limit / Actor.set_queue_limit).
@@ -1077,7 +1254,9 @@ let dropped_messages_count = ref 0
     - policy 1 (drop_new): reject the incoming message when at capacity.
     - policy 2 (drop_old): evict the oldest queued message to make room.
     - unrecognized policy: falls back to unbounded (defensive default). *)
+
 let mailbox_enqueue (inst : actor_inst) (msg : value) : unit =
+  if inst.ai_draining then () else
   let limit = inst.ai_mbox_limit in
   if limit <= 0 then
     Queue.push msg inst.ai_mailbox

@@ -1,0 +1,51 @@
+-- Graceful shutdown: `stop` finishes the queued work instead of throwing it
+-- away. specs/todos/2026-08-12-graceful-shutdown-and-drain.md
+--
+-- This is the deploy story. Rolling a node means "stop accepting new work, let
+-- in-flight work finish, then exit" -- and before Actor.stop existed the only
+-- way to stop an actor was kill(), which drops whatever was queued, losing
+-- exactly the requests that were waiting.
+--
+-- Every line here is ordered by a synchronous `stop`: it returns only once the
+-- actor has actually drained and died, so the handler's output cannot
+-- interleave with main's. A `kill` contrast is deliberately NOT in this
+-- golden -- on the compiled backend the actor's green thread races main, so
+-- whether a killed actor's queued messages were already handled is genuinely
+-- nondeterministic. `kill` semantics are pinned by the supervision goldens,
+-- which do not depend on that race.
+mod Main do
+  needs IO.Console
+
+  actor Sink do
+    state { n : Int }
+    init  { n: 0 }
+
+    on Work(tag) do
+      println("handled " ++ tag)
+      { n: state.n + 1 }
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    println("-- stop drains what is queued")
+    let s = spawn(Sink)
+    send(s, Work("a"))
+    send(s, Work("b"))
+    send(s, Work("c"))
+    println("stop returned: " ++ bool_to_string(Actor.stop(s, 5000)))
+    println("alive after stop: " ++ bool_to_string(is_alive(s)))
+
+    println("-- a draining actor takes no new work")
+    let d = spawn(Sink)
+    send(d, Work("first"))
+    println("stop returned: " ++ bool_to_string(Actor.stop(d, 5000)))
+    match send(d, Work("after-stop")) do
+      None    -> println("send after stop refused")
+      Some(_) -> println("send after stop ACCEPTED")
+    end
+
+    println("-- stopping an already-dead actor is a no-op")
+    println("second stop: " ++ bool_to_string(Actor.stop(s, 5000)))
+    run_until_idle()
+  end
+end

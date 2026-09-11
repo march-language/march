@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 
 /* Resource destructor for the resources test: frees the native allocation and
  * records that it ran (so the test can assert dtor-on-drop). */
@@ -20,6 +21,44 @@ static void test_res_dtor(void *p) { res_dtor_calls++; free(p); }
  * march_extras.c too) — no local stub needed any more; the real
  * implementation runs, and its id is only stored in the header pad word,
  * still not exercised by this test. */
+
+
+/* ── multi-threaded live-gauge harness ────────────────────────────────────
+ * The gauge is a process-wide net count, but allocation and freeing are not
+ * thread-affine: an object allocated on one scheduler thread is routinely
+ * freed on another, and the threads that did the allocating may have exited
+ * by the time the gauge is read.  A per-thread counter implementation is only
+ * correct if (a) it sums across all live threads and (b) an exiting thread
+ * folds its residual into a process-wide total instead of dropping it.
+ *
+ * MT_THREADS allocator threads each allocate MT_PER_THREAD objects into their
+ * own slot of mt_cells and then EXIT.  A second, disjoint set of threads then
+ * frees them, each freeing a slot it did not allocate (rotate by one), so
+ * every participating thread ends with a non-zero net count of its own — one
+ * positive, one negative — and only the sum is meaningful. */
+#define MT_THREADS    8
+#define MT_PER_THREAD 512
+static void *mt_cells[MT_THREADS][MT_PER_THREAD];
+
+static void *mt_alloc_thread(void *arg) {
+    long id = (long)arg;
+    for (int i = 0; i < MT_PER_THREAD; i++) mt_cells[id][i] = march_alloc(16);
+    return NULL;
+}
+
+static void *mt_free_thread(void *arg) {
+    long id = (long)arg;                       /* frees the PREVIOUS slot */
+    long src = (id + MT_THREADS - 1) % MT_THREADS;
+    for (int i = 0; i < MT_PER_THREAD; i++)
+        march_drop(march_from_ptr(mt_cells[src][i]));
+    return NULL;
+}
+
+static void mt_run(void *(*fn)(void *)) {
+    pthread_t th[MT_THREADS];
+    for (long i = 0; i < MT_THREADS; i++) pthread_create(&th[i], NULL, fn, (void *)i);
+    for (int i = 0; i < MT_THREADS; i++) pthread_join(th[i], NULL);
+}
 
 int main(void) {
     /* ── version handshake ─────────────────────────────────────────────── */
@@ -175,6 +214,15 @@ int main(void) {
             march_drop(o);
         }
         assert(march_live_allocs() == base);   /* no leak */
+    }
+
+    /* ── leak gauge sums across threads, including exited ones ────────── */
+    {
+        int64_t base = march_live_allocs();
+        mt_run(mt_alloc_thread);   /* allocating threads exit before the read */
+        assert(march_live_allocs() == base + (int64_t)MT_THREADS * MT_PER_THREAD);
+        mt_run(mt_free_thread);    /* each frees another thread's objects */
+        assert(march_live_allocs() == base);
     }
 
     printf("test_ffi: OK\n");

@@ -46,6 +46,15 @@ jobs:
       - name: Lint docs for stale source pointers and stdlib counts
         run: scripts/check-docs.sh
 
+      # scripts/run-tests.sh is what CLAUDE.md tells everyone to run, so a bug in
+      # how IT reports failures is invisible by construction -- the aggregate says
+      # "FAILED" and nothing says which suite or why. This drives it against fake
+      # runners (no dune, no real suites, well under a second) and asserts the
+      # attribution, including the case that motivated it: a runner that prints
+      # "Test Successful" and still exits non-zero.
+      - name: Test the test runner's failure attribution
+        run: scripts/test-run-tests.sh
+
       # docs/pagefind/ is a COMMITTED build artifact — march-lang.org is served by
       # GitHub's own Jekyll over docs/, which has no post-build hook, so the search index
       # can only reach production by being in git. A docs edit without a regenerated
@@ -293,6 +302,76 @@ jobs:
             exit 1
           fi
 
+      # --refine-audit (lib/refinecheck/refine_audit.ml) answers a different
+      # question than the ratchet above: not "did a filed obligation stop
+      # being proved" but "does the checker ever look at this declared
+      # refinement at all". Task 2/3's sweep over the ~300-file corpus
+      # (test/native/*.march, stdlib/*.march) found 63 declared refinements,
+      # every one Enforced, zero Unenforced. See test/refine_audit/
+      # corpus.baseline (the alcotest `audit-baseline` group under
+      # `dune runtest`, which the `test` job above already runs, diffs the
+      # full sweep against that file exactly). This step is a second,
+      # narrower ratchet in this job specifically: it reads the SAME
+      # `user + stdlib` slice the ceiling step above uses (stdlib/list.march
+      # sees the whole prepended stdlib regardless of which stdlib file is
+      # named, per that comment), and fails if its Unenforced count rises
+      # above what the corpus baseline currently records. A rise here means
+      # a newly declared refinement landed in a position the checker never
+      # enforces (a lambda param, a block-level fn, a non-adoptable impl
+      # method, an actor field/handler param, ...) with nothing else in CI
+      # catching it, because an Unenforced site files no obligation and so
+      # never touches the ratchet above at all.
+      - name: Refinement coverage audit ratchet
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          eval $(opam env)
+          unenforced_baseline=0
+          rm -rf .march/cas/artifacts-v2
+          ./_build/default/bin/main.exe --check --refine-audit stdlib/list.march \
+            > /tmp/refine_audit_ceiling.txt 2>&1 || true
+          cat /tmp/refine_audit_ceiling.txt
+          unenforced=$(sed -n \
+            's/^coverage audit (user + stdlib): [0-9][0-9]* enforced, [0-9][0-9]* inert (warned), \([0-9][0-9]*\) unenforced$/\1/p' \
+            /tmp/refine_audit_ceiling.txt)
+          if [ -z "$unenforced" ]; then
+            echo "FAIL: could not find the 'coverage audit (user + stdlib)' line in"
+            echo "--refine-audit output for stdlib/list.march."
+            echo "Likely causes: a warm --check CAS short-circuited before the audit"
+            echo "printed (the rm above should prevent this), the compiler errored"
+            echo "before printing, or the audit's summary line format changed (update"
+            echo "the sed above to match). This step must never pass vacuously."
+            exit 1
+          fi
+          echo "unenforced=$unenforced (ceiling: $unenforced_baseline), read from stdlib/list.march's user + stdlib slice"
+          if [ "$unenforced" -gt "$unenforced_baseline" ]; then
+            echo ""
+            echo "FAIL: the refinement coverage audit's Unenforced count rose from"
+            echo "$unenforced_baseline to $unenforced."
+            echo "A declared refinement now sits somewhere the checker never enforces"
+            echo "it. See test/refine_audit/corpus.baseline and"
+            echo "docs/refinement-types.md's 'Coverage audit' section for the full"
+            echo "list of unenforced positions (a lambda's own param, a block-level"
+            echo "fn's param/return, a non-adoptable impl method's param, an actor's"
+            echo "state field or handler param, a nested refinement, a String"
+            echo "return, ...)."
+            echo ""
+            echo "What to do:"
+            echo "  1. Reproduce locally:"
+            echo "       rm -rf .march/cas/artifacts-v2"
+            echo "       ./_build/default/bin/main.exe --check --refine-audit stdlib/list.march"
+            echo "  2. Read the per-site lines this prints (file:line:col, the"
+            echo "     predicate, and why it is Unenforced) to find what changed."
+            echo "  3. Fix the regression, or move the new refinement to a position"
+            echo "     the checker enforces (a top-level fn's own parameter, its"
+            echo "     return when the base is Int/Bool/Float/a registered record, or"
+            echo "     a let-binding)."
+            echo "  4. Only raise this ceiling if the rise is intentional and filed as"
+            echo "     a specs/todos/ entry with a reproducer, exactly like the four"
+            echo "     Task 4 todos this ratchet was introduced alongside."
+            exit 1
+          fi
+
       - name: Resolved-grammar conformance corpus (slow lane, not part of runtest)
         timeout-minutes: 5
         run: |
@@ -347,7 +426,7 @@ jobs:
           eval $(opam env)
           dune fmt 2>&1 || true
 
-  # AddressSanitizer sweep, run TWICE on this runner (plain, then MARCH_TRMC=1).
+  # AddressSanitizer sweep over two corpora on this runner.
   # sanitize.sh covers two corpora: every specs/lang/golden/*.march, plus a
   # curated by-name list of test/native/*.march SIMD / NativeArray-narrow-width /
   # array-backed-Bytes programs — that second corpus was added 2026-08-20 because
@@ -376,17 +455,17 @@ jobs:
           MARCH_BIN="$PWD/_build/default/bin/main.exe" \
             ./specs/lang/golden/sanitize.sh
 
-      - name: AddressSanitizer gate — TRMC enabled
-        timeout-minutes: 15
-        run: |
-          eval $(opam env)
-          MARCH_BIN="$PWD/_build/default/bin/main.exe" \
-            MARCH_TRMC=1 ./specs/lang/golden/sanitize.sh
-
-  # Runs the full test suite with MARCH_TRMC=1 on its own fresh runner. It used to be
-  # a third phase inside sanitize-gate, but that confounded resource exhaustion (two
-  # ASAN sweeps already run on that runner) with the TRMC variable itself — failures
-  # were flaky/non-reproducible. A clean runner isolates whether TRMC is the cause.
+  # Runs the full test suite with TRMC DISABLED on its own fresh runner.
+  #
+  # This job used to run MARCH_TRMC=1. Since TRMC became the default (2026-09-09)
+  # that is what the ordinary `test` job already does, so the direction that
+  # needs its own coverage is the other one: --no-trmc is now the only escape
+  # hatch and nothing else exercises it over a whole suite run. MARCH_NO_TRMC=1
+  # is the env spelling of that flag (bin/main.ml).
+  #
+  # It stays a separate runner rather than a phase inside sanitize-gate, where
+  # it began: two ASAN sweeps already run there, which confounded resource
+  # exhaustion with the TRMC variable itself and made failures non-reproducible.
   trmc-suite:
     runs-on: ubuntu-24.04
     timeout-minutes: 50
@@ -407,12 +486,12 @@ jobs:
           dune shutdown 2>/dev/null || true
           dune build bin/main.exe
 
-      - name: Test suite with TRMC enabled
+      - name: Test suite with TRMC disabled
         timeout-minutes: 35
-        # Cold build + full test suite (~20 min of tests) with TRMC enabled.
+        # Cold build + full test suite (~20 min of tests) with TRMC turned off.
         run: |
           eval $(opam env)
-          MARCH_TRMC=1 ./scripts/run-tests.sh
+          MARCH_NO_TRMC=1 ./scripts/run-tests.sh
 
   # Build once, fan out via same-run artifacts (not a persistent actions/cache):
   # cross-linux-oracle and all 8 property-oracle shards below each used to

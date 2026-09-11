@@ -1,0 +1,27 @@
+-- A field projected out of a BORROWED scrutinee and used only at borrowed
+-- argument positions must get neither a dup nor a drop: the parent is alive
+-- for the whole call, and the projection never escapes the arm.  Under the
+-- scheduler every RC op is atomic, so this pair turned a read-only projection
+-- out of shared data into a contended cache line (G73).
+--
+-- [read_only] is the elidable shape.  [escapes] is its control: the same
+-- projection, but returned from the arm, so exactly ONE dup must survive --
+-- moved from the projection site to the escaping use.
+mod BorrowedScrutineeFieldRead do
+  needs IO.Console
+  type Box = Box(String, String)
+
+  fn read_only(b : Box) : Int do
+    match b do Box(s, t) -> string_byte_length(s) + string_byte_length(t) end
+  end
+
+  fn escapes(b : Box) : String do
+    let head = match b do Box(s, _) -> s end
+    string_concat(head, int_to_string(read_only(b)))
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    let b = Box("ab", "cde")
+    println(escapes(b))
+  end
+end

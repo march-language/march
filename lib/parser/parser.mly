@@ -26,9 +26,103 @@
   (** Collect a parse error into the buffer and then raise [ParseError].
       Use this in sub-production error rules where Menhir requires the action
       to abort (assert false is generated after the action otherwise). *)
+  (* Shared by the `doc`-on-a-non-function rules in [decl]. *)
+  let doc_not_on_decl_msg =
+    "`doc` goes before a function; use a `--` comment here."
+  let doc_not_on_decl_hint what =
+    Some (Printf.sprintf
+      "`doc \"...\"` attaches a doc string to a `fn` or `pfn`. %s don't carry one \xe2\x80\x94 write `-- ...` on the line above instead."
+      what)
+
   let error_raise msg hint pos =
     Parse_errors.collect_parse_error msg hint pos;
     raise (March_errors.Errors.ParseError (msg, hint, pos))
+
+  (* `backoff base 25 cap 5000 jitter 25%` — the labels are parsed as ordinary
+     lowercase identifiers and validated here rather than lexed as keywords.
+     Reserving `cap`, `base` or `jitter` outright is not an option: `cap` is
+     the capability vocabulary, and the last time a supervise-block word was
+     reserved outright (`restart`) it broke stdlib/dist_supervisor.march, which
+     uses it as a record field and a parameter name. See
+     specs/2026-09-08-supervise-child-spec-design.md §3.
+
+     Each entry is (label, value, had_percent). Unknown labels, duplicates,
+     out-of-range values and a `%` on the wrong label are all diagnosed here,
+     naming the offender, because the alternative is a "stuck here" pointing at
+     the next declaration. *)
+  (* Per-child trailing modifiers. A `list(child_modifier)` rather than a
+     fixed sequence, so `restart transient shutdown 5000` and
+     `shutdown 5000 restart transient` both parse, and a repeated label is a
+     diagnostic naming the child instead of a silent last-wins. Each new field
+     the child spec grows is one more constructor here and one more `option`
+     to fill in below -- the property the trailing-modifier shape was chosen
+     for. See specs/2026-09-08-supervise-child-spec-design.md §1. *)
+  type child_modifier = CmRestart of restart_type | CmShutdown of shutdown_spec
+
+  let mk_shutdown_word (w : string) (sp : span) : shutdown_spec =
+    match w with
+    | "infinity" -> ShutdownInfinity
+    | "brutal"   -> ShutdownBrutal
+    | other ->
+      error_raise
+        (Printf.sprintf "I don't recognize `shutdown %s`" other)
+        (Some "`shutdown` takes a millisecond budget (`shutdown 5000`), \
+               `infinity`, or `brutal`.")
+        { Lexing.pos_fname = ""; pos_lnum = sp.start_line;
+          pos_bol = 0; pos_cnum = sp.start_col }
+
+  let mk_child_spec (child : string) (mods : child_modifier list)
+      (pos : Lexing.position) : restart_type * shutdown_spec =
+    let restart = ref None and shutdown = ref None in
+    let dup label =
+      error_raise
+        (Printf.sprintf "`%s` is given twice for child `%s`" label child)
+        (Some "Each modifier may appear at most once per child.") pos
+    in
+    List.iter (function
+        | CmRestart r  -> if !restart <> None then dup "restart" else restart := Some r
+        | CmShutdown s -> if !shutdown <> None then dup "shutdown" else shutdown := Some s)
+      mods;
+    ((match !restart with Some r -> r | None -> Permanent),
+     (match !shutdown with Some s -> s | None -> default_shutdown))
+
+  let mk_backoff (entries : (string * int * bool) list) (pos : Lexing.position)
+      : backoff_config =
+    let seen = Hashtbl.create 3 in
+    let bo = ref default_backoff in
+    List.iter (fun (label, v, pct) ->
+        if Hashtbl.mem seen label then
+          error_raise
+            (Printf.sprintf "`%s` is given twice in this `backoff` clause" label)
+            (Some "Each of `base`, `cap` and `jitter` may appear at most once.")
+            pos;
+        Hashtbl.add seen label ();
+        (match label with
+         | "base" | "cap" ->
+           if pct then
+             error_raise
+               (Printf.sprintf "`backoff %s` is a duration in milliseconds, not a percentage" label)
+               (Some "Drop the `%` — write `base 25` or `cap 5000`.") pos;
+           if v <= 0 then
+             error_raise
+               (Printf.sprintf "`backoff %s` must be greater than 0" label)
+               (Some "A zero or negative delay would disable backoff entirely;                       omit the clause to keep the default curve.") pos;
+           if label = "base" then bo := { !bo with bo_base_ms = v }
+           else bo := { !bo with bo_cap_ms = v }
+         | "jitter" ->
+           if v < 0 || v > 100 then
+             error_raise "`backoff jitter` must be between 0 and 100 percent"
+               (Some "`jitter 25%` spreads each delay by +/-25%; `jitter 0%`                       disables jitter.") pos;
+           bo := { !bo with bo_jitter_pct = v }
+         | other ->
+           error_raise
+             (Printf.sprintf "I don't recognize `%s` as a `backoff` option" other)
+             (Some "`backoff` takes `base <ms>`, `cap <ms>` and `jitter <n>%`,                     in any order, e.g. `backoff base 25 cap 5000 jitter 25%`.")
+             pos)) entries;
+    if !bo.bo_cap_ms < !bo.bo_base_ms then
+      error_raise "`backoff cap` is smaller than `backoff base`"
+        (Some "The cap is the ceiling the doubling saturates at, so it cannot                be below the first delay.") pos;
+    !bo
 
   (* Desugar a string interpolation into a `++` chain + to_string calls:
        prefix ++ to_string(e1) ++ s1 ++ to_string(e2) ++ s2 ++ ...
@@ -213,6 +307,7 @@
 %token SUPERVISE STRATEGY MAX_RESTARTS WITHIN
 %token ONE_FOR_ONE ONE_FOR_ALL REST_FOR_ONE
 %token RESTART PERMANENT TRANSIENT TEMPORARY
+%token BACKOFF SHUTDOWN
 %token <string> INTERP_START
 %token <string> INTERP_MID
 %token <string> INTERP_END
@@ -306,21 +401,79 @@ fn_attr:
   | AT; name = LOWER_IDENT; LPAREN; value = LOWER_IDENT; RPAREN { name ^ ":" ^ value }
   | AT; LBRACKET; name = LOWER_IDENT; LPAREN; value = LOWER_IDENT; RPAREN; RBRACKET
       { name ^ ":" ^ value }
+  (* `transient` is a KEYWORD (a supervisor restart type), so it never reaches
+     the LOWER_IDENT rules above.  @[no_alloc(transient)] is the one attribute
+     payload that collides with one; spell it out rather than un-reserving the
+     keyword, which would change supervisor child specs. *)
+  | AT; name = LOWER_IDENT; LPAREN; TRANSIENT; RPAREN { name ^ ":transient" }
+  | AT; LBRACKET; name = LOWER_IDENT; LPAREN; TRANSIENT; RPAREN; RBRACKET
+      { name ^ ":transient" }
 
 decl:
+  (* `doc` attaches to FUNCTIONS only: [fn_doc] is a field of the function
+     definition record, and neither [DType] nor [DProofCap] has a doc slot to
+     put a string in.  Without these rules a `doc` before a `type` or a
+     `proof cap` is a bare parse error whose caret lands on the NEXT token (the
+     `type` keyword) under the generic "I got stuck here", pointing at a
+     declaration that is perfectly well-formed and saying nothing about the
+     `doc` that actually caused it.  In a stdlib file that used to be worse
+     still -- the module was dropped and the user saw `Unknown module` (see
+     bin/toolchain.ml).  Say where `doc` goes instead.
+
+     Rejecting rather than accepting is deliberate: accepting would mean adding
+     a doc field to [DType]/[DProofCap] and threading it through desugar,
+     typecheck, doc generation and LSP hover -- a cross-cutting AST change with
+     its own design questions, not a diagnostic fix.
+
+     These match the declaration's KEYWORD only, never the whole nonterminal.
+     Spelling them `DOC STRING type_decl` instead costs 11 shift/reduce
+     conflicts in a grammar that currently has zero; erroring on the keyword
+     needs no lookahead past it, since we raise rather than reduce. *)
+  | DOC; STRING; TYPE
+    { error_raise doc_not_on_decl_msg (doc_not_on_decl_hint "Type declarations")
+        $startpos($1) }
+  | DOC; STRING; PTYPE
+    { error_raise doc_not_on_decl_msg (doc_not_on_decl_hint "Type declarations")
+        $startpos($1) }
+  | DOC; STRING; OPAQUE
+    { error_raise doc_not_on_decl_msg (doc_not_on_decl_hint "Type declarations")
+        $startpos($1) }
+  | DOC; STRING; PROOFCAP
+    { error_raise doc_not_on_decl_msg (doc_not_on_decl_hint "`proof cap` declarations")
+        $startpos($1) }
   | DOC; s = STRING; d = fn_decl
     { match d with
       | DFn (def, span) -> DFn ({ def with fn_doc = Some s }, span)
       | d -> d }
+  (* A documented function may ALSO carry attributes.  Without this rule the
+     two are mutually exclusive in either order, which `forge fix --contracts`
+     walks straight into: it inserts `@[no_alloc]` on the line above the
+     declaration, and on a documented function that line sits between the
+     `doc` and the `fn` — unparseable.  Attribute validation is the same as
+     the attributes-only rule below; see it for the payload check. *)
+  | DOC; s = STRING; attrs = nonempty_list(fn_attr); d = fn_decl
+    { List.iter (fun a ->
+          if String.length a > 9 && String.sub a 0 9 = "no_alloc:"
+             && a <> "no_alloc:warn" && a <> "no_alloc:assume"
+             && a <> "no_alloc:transient" then
+            error_raise
+              (Printf.sprintf
+                 "I don't recognize `@[no_alloc(%s)]` \xe2\x80\x94 the forms are `@[no_alloc]`, `@[no_alloc(warn)]`, `@[no_alloc(transient)]`, and `@[no_alloc(assume)]`."
+                 (String.sub a 9 (String.length a - 9)))
+              None $startpos(attrs)) attrs;
+      match d with
+      | DFn (def, span) -> DFn ({ def with fn_doc = Some s; fn_attrs = attrs }, span)
+      | d -> d }
   | attrs = nonempty_list(fn_attr); d = fn_decl
-    { (* @[no_alloc] takes exactly two payloads; anything else is a typo, not
+    { (* @[no_alloc] takes exactly three payloads; anything else is a typo, not
          a silently-ignored attribute (see lib/tir/alloc_contract.ml). *)
       List.iter (fun a ->
           if String.length a > 9 && String.sub a 0 9 = "no_alloc:"
-             && a <> "no_alloc:warn" && a <> "no_alloc:assume" then
+             && a <> "no_alloc:warn" && a <> "no_alloc:assume"
+             && a <> "no_alloc:transient" then
             error_raise
               (Printf.sprintf
-                 "I don't recognize `@[no_alloc(%s)]` \xe2\x80\x94 the forms are `@[no_alloc]`, `@[no_alloc(warn)]`, and `@[no_alloc(assume)]`."
+                 "I don't recognize `@[no_alloc(%s)]` \xe2\x80\x94 the forms are `@[no_alloc]`, `@[no_alloc(warn)]`, `@[no_alloc(transient)]`, and `@[no_alloc(assume)]`."
                  (String.sub a 9 (String.length a - 9)))
               None $startpos(attrs)) attrs;
       match d with
@@ -640,29 +793,46 @@ supervise_block:
   | SUPERVISE; DO;
     STRATEGY; strat = restart_strategy_tok;
     MAX_RESTARTS; max_r = INT; WITHIN; win = INT;
+    bo = option(backoff_clause);
     children = list(supervise_child);
     END
     { let names = List.map (fun (n, _, _) -> n) children in
-      let tyfields = List.map (fun (n, t, r) ->
-        { sf_name = n; sf_ty = t; sf_restart = r }) children in
+      let tyfields = List.map (fun (n, t, (r, sd)) ->
+        { sf_name = n; sf_ty = t; sf_restart = r; sf_shutdown = sd }) children in
       { sc_fields = tyfields;
         sc_strategy = strat;
         sc_max_restarts = max_r;
         sc_window_secs = win;
-        sc_order = names } }
+        sc_order = names;
+        sc_backoff = (match bo with Some b -> b | None -> default_backoff) } }
+
+(* Optional, and block-level rather than per-child: the curve it tunes is
+   computed from the supervisor's own state, not from any one child. *)
+backoff_clause:
+  | BACKOFF; kvs = nonempty_list(backoff_kv)
+    { mk_backoff kvs $startpos }
+
+backoff_kv:
+  | k = lower_name; n = INT; pct = option(PERCENT)
+    { (k.txt, n, pct <> None) }
 
 supervise_child:
   | actor_type = upper_name; field_name = lower_name;
-    r = option(child_restart)
+    mods = list(child_modifier)
     { (field_name, TyCon (actor_type, []),
-       (match r with Some t -> t | None -> Permanent)) }
+       mk_child_spec field_name.txt mods $startpos) }
 
 (* Optional per-child restart policy. Placed as a labelled trailing modifier so
    a later `shutdown <ms>` field can be added in the same position without a
    grammar rework. Omitted means Permanent, which is what every supervise block
    written before this feature means. *)
-child_restart:
-  | RESTART; t = restart_type_tok  { t }
+child_modifier:
+  | RESTART; t = restart_type_tok   { CmRestart t }
+  | SHUTDOWN; sd = shutdown_spec_tok { CmShutdown sd }
+
+shutdown_spec_tok:
+  | n = INT           { ShutdownMs n }
+  | w = lower_name    { mk_shutdown_word w.txt w.span }
 
 restart_type_tok:
   | PERMANENT  { Permanent }

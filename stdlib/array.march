@@ -61,13 +61,22 @@ mod Array do
       Cons(a, rest) -> rev_onto(rest, Cons(a, ys))
       end
     end
+    -- The element being replaced must not be bound by name in the branch
+    -- that discards it: a named binding left unused in one arm of a lifted
+    -- closure is never released by Perceus (the old element leaked on every
+    -- Array.set), where a wildcard is. So the arm that replaces matches the
+    -- cell again with `_` for the head.
     fn go(xs, i, acc) do
-      match xs do
-      Nil -> lst_rev(acc)
-      Cons(h, t) -> do
-        if i == 0 do rev_onto(acc, Cons(v, t))
-        else go(t, i - 1, Cons(h, acc)) end
-      end
+      if i == 0 do
+        match xs do
+        Nil -> lst_rev(acc)
+        Cons(_, t) -> rev_onto(acc, Cons(v, t))
+        end
+      else
+        match xs do
+        Nil -> lst_rev(acc)
+        Cons(h, t) -> go(t, i - 1, Cons(h, acc))
+        end
       end
     end
     go(lst, n, Nil)

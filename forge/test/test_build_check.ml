@@ -127,7 +127,7 @@ let read_file_text path =
 let contracts_module ~mod_name =
   Printf.sprintf
     "mod %s do\n\n\
-    \  ptype Box = Box(Int, Int)\n\n\
+    \  ptype Box = Box(Int, String)\n\n\
     \  fn bump(b : Box) : Box do\n\
     \    match b do\n\
     \      Box(x, y) -> Box(x + 1, y)\n\

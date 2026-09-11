@@ -528,11 +528,39 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
       Tir.EApp (fn_var, [ch']))
 
   (* --- Function application (CPS: all args must be atoms) --- *)
-  | Ast.EApp (f_expr, args, _) ->
+  | Ast.EApp (f_expr, args, call_sp) ->
     (* Check for default-arg dispatch: if f is a plain EVar that names a
        default-arg function (tracked via [_default_dispatch]), rewrite the
        call to the appropriate arity-mangled version (e.g. greet$1, greet$2). *)
-    let resolved_f = match f_expr with
+    (* `from_json` dispatches on its RESULT type, so no pass downstream of here
+       can pick an implementation: the argument is a JsonValue in every impl,
+       and Mono's [return_position_single_impl] can only resolve the case where
+       exactly ONE impl exists module-wide.  The typechecker is the one pass
+       that knows the target, and it records it per call site
+       (March_ast.Json_dispatch, written by the capability sweep in
+       Typecheck_caps).  Rewrite to that impl's mangled symbol so everything
+       downstream sees an ordinary direct call.
+
+       Keyed on the CALL's span, not the callee's: two `from_json` calls in one
+       expression share nothing else, and the generated island bridges put both
+       of theirs on the same line (which is why those are span-uniquified). *)
+    let json_dispatch_rewrite =
+      match f_expr with
+      | Ast.EVar { txt = ("from_json" | "from_json_events") as jname;
+                   span = fn_span } ->
+        (match March_ast.Json_dispatch.find call_sp with
+         | None -> None
+         | Some tname ->
+           let iface =
+             if jname = "from_json" then "JsonFrom" else "JsonFromEvents" in
+           Some (Ast.EVar { txt = iface ^ "$" ^ tname ^ "." ^ jname;
+                            span = fn_span }))
+      | _ -> None
+    in
+    let resolved_f = match json_dispatch_rewrite with
+      | Some rewritten -> rewritten
+      | None ->
+      match f_expr with
       | Ast.EVar { txt = name; span = fn_span } ->
         let n_args = List.length args in
         (match Hashtbl.find_opt !_default_dispatch name with

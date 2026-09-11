@@ -489,11 +489,35 @@ let load_stdlib_file path =
                               m.March_ast.Ast.mod_decls,
                               March_ast.Ast.dummy_span)]
      with
+     (* A stdlib file that does not parse is FATAL, not a skipped module.
+        This used to print one unbannered line to stderr and return [], so
+        loading continued with the module silently absent — and the failure the
+        user actually saw was `Unknown module \`Session\`` from the typechecker,
+        pointing nowhere near the real cause. The stderr line was easy to miss:
+        it is emitted before the program's own diagnostics and carries no
+        `-- ERROR --` banner, so it reads as noise rather than as the error.
+
+        There is no situation in which continuing without a stdlib module is
+        what the user wants — the manifest test already treats an UNLISTED
+        module as a correctness bug (silent miscompilation at a niche-eligible
+        type), and a listed-but-unparseable one is strictly worse. So render the
+        real parse error, at the real position in the real file, through the
+        same banner renderer user files get, and exit. *)
+     | March_errors.Errors.ParseError (msg, hint, _) ->
+       Printf.eprintf "%s\n%!"
+         (March_errors.Errors.render_parse_error ~src ~filename:path ?hint ~msg lexbuf);
+       Printf.eprintf
+         "This is a stdlib source file, so this is a compiler-installation \
+          problem rather than something wrong with your program.\n%!";
+       exit 1
      | March_parser.Parser.Error ->
-       let pos = Lexing.lexeme_start_p lexbuf in
-       Printf.eprintf "[stdlib] parse error in %s at line %d col %d\n%!"
-         path pos.Lexing.pos_lnum (pos.Lexing.pos_cnum - pos.Lexing.pos_bol);
-       []
+       Printf.eprintf "%s\n%!"
+         (March_errors.Errors.render_parse_error ~src ~filename:path
+            ~msg:"I got stuck here:" lexbuf);
+       Printf.eprintf
+         "This is a stdlib source file, so this is a compiler-installation \
+          problem rather than something wrong with your program.\n%!";
+       exit 1
      | exn ->
        Printf.eprintf "[stdlib] error in %s: %s\n%!" path (Printexc.to_string exn); [])
 

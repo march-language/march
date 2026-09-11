@@ -552,11 +552,15 @@ Comparison: `==`, `!=`, `<`, `>`, `<=`, `>=`
 Logic: `&&`, `||`, `!` (prefix not), unary `-` (negate)
 
 Each `++` allocates and copies both operands into a new string/list. A chain
-of them (`a ++ b ++ c`) is collapsed into three-way concats by the compiler, so
-k parts cost `ceil((k-1)/2)` allocations rather than k-1. But using `++` as a
-loop accumulator (`acc = acc ++ x`) still copies `acc` again on every iteration,
-which is O(n²) overall. String interpolation (`"${a}${b}"`) desugars to exactly
-the same `++` chain and gets the same treatment. For accumulating many segments
+of them (`a ++ b ++ c`) is collapsed by the compiler into a single concat: two
+or three parts become one allocation and one copy directly, and four or more
+become an n-ary concat that sums every part's length once, allocates once, and
+copies each byte once. So a k-part chain costs one allocation, not k-1, and is
+linear in the total byte count at every k. But using `++` as a loop accumulator
+(`acc = acc ++ x`) still copies `acc` again on every iteration, which is O(n²)
+overall — the collapse applies within one chain, not across iterations. String
+interpolation (`"${a}${b}"`) desugars to exactly the same `++` chain and gets
+the same treatment. For accumulating many segments
 across loop iterations, use `IOList` (`stdlib/iolist.march`), which builds a
 tree and defers concatenation to a single O(n) pass at the end.
 
@@ -737,6 +741,10 @@ fn old_api() do ... end
 fn inc_leaves(t : Tree) : Tree do ... end
 
 @[no_alloc(warn)]     -- same check, reported as a warning
+
+@[no_alloc(transient)] -- weaker: allocations are allowed, but none may SURVIVE the call
+fn frame(w : World) : Int do ... end
+
 @[no_alloc(assume)]   -- never checked; callers trust it (for closure/extern wrappers)
 ```
 
@@ -746,9 +754,21 @@ promotes to the stack (`⚡`) both pass. The check is transitive over callees an
 needs no annotation on them; the one exception is a call through an unknown
 closure or an `extern`, which fails unless the enclosing function is
 `assume`. `fn` and `pfn` only — on an actor or with any other payload it is a
-parse error. The interpreter and `march --check` ignore the attribute. See
+parse error. A `doc` string comes FIRST, then the attributes, then the
+declaration (`doc "..."` / `@[no_alloc]` / `fn f() ...`); the reverse order is
+a parse error. The interpreter and `march --check` ignore the attribute. See
 [memory model](memory-model.md) for how to make a function pass, and
 [capabilities](capabilities.md) for how this differs from `cap no_alloc`.
+
+`transient` asks a different question: not "did it allocate" but "does anything
+it allocated outlive the call". A function fails it when it returns something
+it allocated, writes one into an object it did not allocate, or hands one to an
+actor, a `Vault`, a spawned task, an `extern` or an unknown closure — and when
+anything it calls does. It passes when a callee allocates freely and the
+annotated function drops the result before returning, which is exactly the case
+the bare form rejects. An amortized growth path (a buffer that reallocates its
+storage and keeps the new storage) is *retained*, so `transient` rejects it too
+— it is not a way to bless growable buffers.
 
 ---
 
@@ -886,10 +906,22 @@ actor App do
   supervise do
     strategy one_for_one
     max_restarts 3 within 60
-    Worker w
+    backoff base 25 cap 5000 jitter 25%   -- optional; these are the defaults
+    Worker w                              -- restart permanent (the default)
+    Worker j restart transient            -- crash restarts it, kill() retires it
+    Reaper r restart temporary            -- never restarted
+    Db     d shutdown 1000                -- Actor.stop waits 1s for it to drain
   end
 end
 ```
+
+Per-child `restart` policy and `shutdown` budget, and the block-level
+`backoff` curve, are all optional; omitting them gives `permanent` and `25 / 5000 / 25`, which is what
+every `supervise` block written before these clauses existed already means.
+`restart`, `shutdown`, `backoff`, `base`, `cap` and `jitter` are **not**
+reserved words —
+they stay usable as ordinary identifiers everywhere, including inside a
+`supervise` block's own children.
 
 ---
 

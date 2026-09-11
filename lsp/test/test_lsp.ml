@@ -493,6 +493,8 @@ let () =
       "quick fix offered on a reusing fn",     `Quick, test_no_alloc_quickfix_offered_on_reuse;
       "quick fix not offered without reuse",   `Quick, test_no_alloc_quickfix_not_offered_without_reuse;
       "candidates are this file only",         `Quick, test_no_alloc_candidates_are_this_file_only;
+      "transient lens names the form",         `Quick, test_transient_lens_names_the_form;
+      "transient diagnostic at name span",     `Quick, test_transient_diagnostic_at_name_span;
     ];
     "tier4: ~H interpolation intelligence", [
       "type/def/completion inside ${...}",                   `Quick, test_hover_in_h_interp;

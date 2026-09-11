@@ -39,6 +39,17 @@ The opam switch is `march`. `opam` and `dune` are available directly in PATH; no
 
 **NEVER use `eval $(opam env ...)` or any opam env setup prefix.** Run `dune`, `opam`, etc. directly without any preamble.
 
+**Worktree note:** a bare `dune build`/`dune runtest` run from inside a `.claude/worktrees/*`
+checkout can silently target the WRONG tree. Dune resolves its workspace root by walking up
+to the *outermost* ancestor directory containing a `dune-project` — since a worktree lives
+nested inside the main checkout's directory tree, that's the main repo's root, not the
+worktree's own `dune-project`. The main repo's root `dune` file excludes `.claude`
+(`(dirs (:standard \ .claude))`), so the build resolves to `Error: No rule found for alias
+.claude/worktrees/<name>/default` — an error easy to misread as "nothing to build" rather
+than "wrong tree entirely." **Always pass `--root .` explicitly** when building/testing from
+inside a worktree (`dune build --root .`, `dune runtest --root .`); `scripts/run-tests.sh`
+already handles this correctly and is the preferred entry point regardless.
+
 ```
 dune build          # build everything
 dune runtest        # run all tests

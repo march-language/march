@@ -100,10 +100,14 @@ jobs:
       - name: Compute nightly version
         id: version
         run: |
-          # Extract base version from dune-project
-          BASE=$(grep '(version' dune-project | head -1 | sed 's/.*version \(.*\))/\1/')
+          # scripts/nightly-version.sh patch-increments the in-tree version, so
+          # a nightly sorts ABOVE the release it postdates.  Reading
+          # dune-project directly (as this step used to) labelled every nightly
+          # between 2026-08-23 and 2026-09-10 as 0.3.0-nightly.*, i.e. below the
+          # 0.3.0 it came after.
+          VERSION=$(./scripts/nightly-version.sh)
           DATE=$(date -u +%Y%m%d)
-          echo "version=${BASE}-nightly.${DATE}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "date=${DATE}" >> "$GITHUB_OUTPUT"
 
   build:

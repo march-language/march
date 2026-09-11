@@ -29,3 +29,14 @@ teach `admissible` to check nested refinements against the decoded value (and
 the decline, or keep the decline and document that such functions never get
 a witness. Do not lift the decline first; without it the enforcement change
 turns a silent decline into a false-positive witness.
+
+## Cross-reference
+
+The refinement coverage audit (`specs/plans/2026-09-03-refinement-coverage-audit-plan.md`)
+reproduces this exact repro at `test/refine_audit/holes/nested.march`, one of
+the fixtures in the audit's non-vacuity guard
+(`test/refine_audit/holes.baseline`). `--refine-audit` classifies the `Box.v`
+field as `Unenforced` for a related but distinct reason (no extractor exists
+for a stored field at all, nested or not); see
+`docs/refinement-types.md`/`specs/lang/refinement-types.md`'s "Coverage
+audit" section.

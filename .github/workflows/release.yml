@@ -25,38 +25,61 @@ jobs:
         with:
           ref: ${{ github.ref }}
 
+      # First, before any artifact is downloaded or published: the pushed tag
+      # must match the version compiled into the binaries.  forge resolves
+      # `march = "~> X.Y"` and `.march-version` pins against release TAGS, so a
+      # tag that disagrees with the artifacts makes forge's resolver lie.
+      - name: Check tag matches in-tree version
+        run: ./scripts/check-version-tag.sh "${{ github.ref_name }}"
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
 
+      # The release body is this version's CHANGELOG section plus the install
+      # blurb.  --max-bytes keeps it under GitHub's 125,000-character body cap
+      # (the 0.3.0 section alone is 321KB); the script appends a pointer to the
+      # full changelog when it truncates.
+      - name: Build release notes
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          {
+            ./scripts/changelog-section.sh --max-bytes 100000 "$VERSION"
+            cat <<'BLURB'
+
+          ## Installation
+
+          ```
+          curl -fsSL https://github.com/march-language/march/releases/latest/download/install.sh | sh
+          ```
+
+          Or if you already have forge:
+
+          ```
+          forge toolchain install TAGNAME
+          forge toolchain use TAGNAME
+          ```
+
+          ## Checksums
+
+          Verify your download:
+
+          ```
+          sha256sum -c march-TAGNAME-checksums.txt
+          ```
+          BLURB
+          } | sed "s/TAGNAME/${GITHUB_REF_NAME}/g" > release-notes.md
+          echo "release notes: $(wc -c < release-notes.md) bytes"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: March ${{ github.ref_name }}
-          body: |
-            ## Installation
-
-            ```
-            curl -fsSL https://github.com/march-language/march/releases/latest/download/install.sh | sh
-            ```
-
-            Or if you already have forge:
-
-            ```
-            forge toolchain install ${{ github.ref_name }}
-            forge toolchain use ${{ github.ref_name }}
-            ```
-
-            ## Checksums
-
-            Verify your download:
-
-            ```
-            sha256sum -c march-${{ github.ref_name }}-checksums.txt
-            ```
+          body_path: release-notes.md
           files: |
             artifacts/*
             install.sh

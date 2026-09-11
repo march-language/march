@@ -1,0 +1,61 @@
+-- The batch-strategy half of per-child restart types, which the single-child
+-- fixtures cannot see: a `temporary` sibling swept up by a one_for_all restart
+-- is killed like everyone else, but must NOT be brought back.
+--
+-- The kill and the respawn are two separate decisions in both backends. The
+-- sweep's kill is internal machinery (the strategy nulls the sibling's
+-- supervisor link first, precisely so it does not re-enter the notify filter),
+-- so filtering only at notify leaves the respawn loop resurrecting the
+-- temporary child every time an unrelated sibling crashes.
+mod Main do
+  needs IO.Console
+
+  actor Worker do
+    state { n : Int }
+    init  { n: 0 }
+
+    on Ping() do
+      { n: state.n + 1 }
+    end
+
+    on Poison() do
+      panic("boom")
+    end
+  end
+
+  actor Boss do
+    state { a : Int, t : Int }
+    init  { a: 0, t: 0 }
+
+    supervise do
+      strategy one_for_all
+      max_restarts 10 within 60
+      Worker a
+      Worker t restart temporary
+    end
+  end
+
+  fn child_int(sup, field) do
+    match get_actor_field(sup, field) do
+      None    -> -1
+      Some(n) -> n
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let boss = spawn(Boss)
+    let a1 = child_int(boss, "a")
+    let t1 = child_int(boss, "t")
+
+    -- Crash the permanent child; one_for_all sweeps both.
+    send(pid_of_int(a1), Poison())
+    run_until_idle()
+
+    let a2 = child_int(boss, "a")
+    let t2 = child_int(boss, "t")
+    println("permanent sibling respawned: " ++ bool_to_string(a2 != a1))
+    println("permanent sibling alive: " ++ bool_to_string(is_alive(pid_of_int(a2))))
+    println("temporary sibling not respawned: " ++ bool_to_string(t2 == t1))
+    println("temporary sibling dead: " ++ bool_to_string(is_alive(pid_of_int(t1)) == false))
+  end
+end

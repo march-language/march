@@ -1,0 +1,25 @@
+-- A self-tail-recursive loop that READS a heap parameter each iteration.
+-- Pins the borrow classification of NativeArray reads: `a` must stay borrowed,
+-- so the loop body carries no inc_rc/dec_rc at all.
+--
+-- Without the NativeArray rows in borrow.ml's extern_borrow_table, the read
+-- looks like an ownership transfer, `a` is inferred owned, and the self-call
+-- dups it once per iteration — a dup the TCO back-edge never balances, so the
+-- refcount grows without bound and the array can never be uniquely owned again.
+-- self_tco_loop.march does not catch this: its loop touches only Ints.
+mod ArrayReadTcoLoop do
+  needs IO.Console
+
+  fn sum_bytes(a : NativeU8Arr, i : Int, n : Int, acc : Int) : Int do
+    if i >= n do
+      acc
+    else
+      sum_bytes(a, i + 1, n, acc + NativeArray.get_u8(a, i))
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    let a = NativeArray.make_u8(4, 7)
+    println(sum_bytes(a, 0, NativeArray.length_u8(a), 0))
+  end
+end

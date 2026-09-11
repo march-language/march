@@ -1,0 +1,22 @@
+-- Task 4 fixture: an actor's state field refinement and a handler
+-- parameter refinement are both declared but never checked. State fields
+-- use the same `Field` position a record type's field uses (no extractor
+-- exists for a stored field at all), and a handler parameter has no
+-- dedicated extractor either.
+-- See specs/todos/2026-09-03-actor-state-and-handler-refinement-unchecked.md.
+mod HolesActor do
+  actor Counter do
+    state { value : {Int | value >= 0} }
+    init { value: 0 }
+
+    on Increment(n : {Int | n > 0}) do
+      { state with value: state.value + n }
+    end
+  end
+
+  fn main() : Unit do
+    let c = spawn(Counter)
+    let _ = send(c, Increment(0 - 1))
+    kill(c)
+  end
+end

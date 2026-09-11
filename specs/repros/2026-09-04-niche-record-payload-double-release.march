@@ -1,0 +1,30 @@
+-- Minimal repro: heap corruption when a NICHE-represented variant carries a
+-- RECORD payload and a fresh one is allocated per iteration.
+--
+-- Latent on the committed compiler: an unbalanced `inc_rc` that every EField
+-- projection puts on its aggregate source keeps the cell's refcount off zero
+-- and hides the second release.  Unmask it with the one-line patch in
+-- 2026-09-04-niche-record-payload-double-release.md, then this program dies
+-- 6/6 with SIGBUS (133/138) or the runtime's own guard reporting a GARBAGE
+-- refcount ("RC underflow (rc was -3798685876956648731)").
+--
+-- Expected output, always: 15000
+mod P1 do
+  needs IO.Console
+  type Wrap = W({ rate : Int }) | Z
+
+  fn f(w : Wrap) : Int do
+    match w do
+      W({ rate: r }) -> r
+      Z              -> 0
+    end
+  end
+
+  fn spin(i : Int, acc : Int) : Int do
+    if i <= 0 do acc else spin(i - 1, acc + f(W({ rate: 15 }))) end
+  end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    println(int_to_string(spin(1000, 0)))
+  end
+end

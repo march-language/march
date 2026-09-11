@@ -44,21 +44,15 @@ items closed below. See `specs/progress/2026-08-04-cap-ceiling-strict.md`.
 
 ## Open
 
-- [ ] **`--cap-strict` is compile-only, not available to `--check`.** The
-  check needs TIR and `--check` stops after typecheck, so editors and
-  `forge check` cannot preview ceiling violations. With the `println` fix
-  above, the *source-level warnings* are now a much better proxy than they
-  were — they cover the direct-builtin route faithfully — but they still miss
-  the stdlib-mediated and value-passing routes, which only the TIR channel
-  sees. Either lower far enough under a flag, or document strict as a build
-  gate and lean on the warnings for editor feedback.
-
-- [ ] **No migration autofix.** `--cap-strict` rejects most existing code,
-  including this repo's own `examples/`, because `needs IO.Console` is almost
-  never declared. Check 1b already emits the right `FInsert` autofix, and
-  with the stdlib-span fix it now fires for every direct-builtin case, so a
-  `forge fix`-style bulk apply is mostly wiring. The stdlib-mediated route
-  still has no source-level diagnostic to hang a fix on.
+Trimmed 2026-09-09: two bullets that used to sit here are done. "`--cap-strict`
+is compile-only, not available to `--check`" was resolved by PR #299 ("run the
+capability ceiling under march --check", `2fb3a0a5`) — confirmed live,
+`bin/main.ml:1843-1844` now sets `cap_strict_ceiling := !cap_strict &&
+(!do_check || !check_json)`. "No migration autofix" was resolved — `forge fix`
+now exists as a real top-level command (`forge/bin/main.ml:216`,
+`forge/lib/cmd_fix.ml`) that generically applies `FInsert`/`FDelete`/`FReplace`
+fixes from `--check-json`, including the `needs` autofix this bullet asked
+for. The two remaining bullets below are still open.
 
 - [ ] **Per-dependency capability budgets in `forge.toml`** — the original
   motivation, now unblocked on both sides: attribution names the module and

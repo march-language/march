@@ -627,7 +627,7 @@ forge add depot --git https://github.com/march-language/depot --rev a3f1c9b
 forge add my_lib --path ../my_lib
 
 # Dev dependency (available in dev + test builds)
-forge add check --git https://github.com/march-language/check --tag v0.3.0 --dev
+forge add check --git https://github.com/march-language/check --tag v0.4.0 --dev
 
 # Test-only dependency
 forge add fixtures --path ../fixtures --test
@@ -890,15 +890,15 @@ forge toolchain list
 forge toolchain list --remote
 
 # Install a specific version
-forge toolchain install v0.3.0
+forge toolchain install v0.4.0
 forge toolchain install nightly          # latest nightly
 forge toolchain install nightly-20251201
 
 # Switch the active toolchain
-forge toolchain use v0.3.0
+forge toolchain use v0.4.0
 
 # Pin this project to a specific version (writes .march-version)
-forge toolchain pin v0.3.0
+forge toolchain pin v0.4.0
 
 # Show which toolchain resolves for the current directory
 forge toolchain which

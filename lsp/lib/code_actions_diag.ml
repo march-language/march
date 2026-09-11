@@ -1010,7 +1010,7 @@ let code_actions_at (a : t) ~line ~character
   (* Same generation scope `forge fix --contracts` uses, so the editor offers
      the action exactly where forge would insert it. *)
   let no_alloc_actions =
-    List.filter_map (fun (_name, (name_span : Ast.span), (decl_span : Ast.span)) ->
+    List.filter_map (fun (_name, (name_span : Ast.span), (decl_span : Ast.span), attr) ->
         if not (Pos.span_contains decl_span ~line ~character
                 || Pos.span_contains name_span ~line ~character) then None
         else begin
@@ -1018,9 +1018,9 @@ let code_actions_at (a : t) ~line ~character
               ~line:(decl_span.Ast.start_line - 1) ~character:decl_span.Ast.start_col in
           let indent = String.make decl_span.Ast.start_col ' ' in
           let edit = TextEdit.create ~range:(Range.create ~start:pos ~end_:pos)
-              ~newText:("@[no_alloc]\n" ^ indent) in
+              ~newText:(attr ^ "\n" ^ indent) in
           let uri = DocumentUri.of_path a.filename in
-          Some (CodeAction.create ~title:"Add `@[no_alloc]`"
+          Some (CodeAction.create ~title:(Printf.sprintf "Add `%s`" attr)
                   ~kind:CodeActionKind.QuickFix
                   ~edit:(WorkspaceEdit.create ~changes:[(uri, [edit])] ()) ())
         end) a.no_alloc_candidates

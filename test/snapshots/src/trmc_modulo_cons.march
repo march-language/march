@@ -1,0 +1,18 @@
+-- Tail-recursion-modulo-cons: the recursive call is the direct tail-field
+-- argument of a `Cons` in tail position, which is the one shape Trmc rewrites
+-- into destination-passing style.  Pins the emitted TIR for the default-ON
+-- transform: the `$dps` helper, `alloc_hole`/`reuse_hole`, and the `<-` fill.
+mod TrmcModuloCons do
+  needs IO.Console
+
+  fn bump(xs : List(Int)) : List(Int) do
+    match xs do
+      Nil        -> Nil
+      Cons(h, t) -> Cons(h + 1, bump(t))
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    println(List.sum_int(bump(List.range(1, 5))))
+  end
+end

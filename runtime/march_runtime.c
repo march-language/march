@@ -180,6 +180,14 @@ static void str_stats_dump(void) {
             (long long)atomic_load_explicit(&obj_alloc_count, memory_order_relaxed));
     fprintf(stderr, "march_string_stats obj_alloc_bytes %lld\n",
             (long long)atomic_load_explicit(&obj_alloc_bytes, memory_order_relaxed));
+    /* Exact live-object gauge: MARCH_ALLOC_BUMP/MARCH_FREE_BUMP keep this in
+     * step with every heap alloc and free, so it is a deterministic leak
+     * signal -- unlike peak RSS, it does not move with machine load or
+     * allocator behaviour.  A leak makes it scale with the program's iteration
+     * count; nothing else does.  Used by the aggregate-RC leak fixtures, which
+     * run the same program at two sizes and require this number to match. */
+    fprintf(stderr, "march_string_stats live_objs %lld\n",
+            (long long)march_live_allocs());
     for (int i = 0; i < MARCH_STR_NBUCKETS; i++)
         fprintf(stderr, "march_string_stats %s %lld\n", str_hist_names[i],
                 (long long)atomic_load_explicit(&str_hist[i], memory_order_relaxed));
@@ -279,14 +287,104 @@ static void gc_trace_atexit(void) {
 /* ── Allocation ──────────────────────────────────────────────────────── */
 
 /* Net count of live march objects (alloc +, free-on-rc=0 -).  An FFI/test
- * leak gauge exposed via march_live_allocs(); relaxed atomics keep the hot
- * RC paths cheap.  See specs/2026-06-19-c-ffi-abi-design.md §14.4. */
-static _Atomic int64_t march_live_alloc_count = 0;
-int64_t march_live_allocs(void) {
-    return atomic_load_explicit(&march_live_alloc_count, memory_order_relaxed);
+ * leak gauge exposed via march_live_allocs(); see
+ * specs/2026-06-19-c-ffi-abi-design.md §14.4.
+ *
+ * PER-THREAD slots, summed on read.  This gauge is always on -- not behind a
+ * debug flag -- so it sits on the two hottest paths in the runtime
+ * (march_alloc, and every RC free-on-zero branch).  A single process-wide
+ * atomic made every scheduler thread read-modify-write ONE cache line there,
+ * which is enough on its own to make allocation-heavy parallel code scale
+ * negatively: on an M3 Max, a List.pmap_n over 64 cons-allocating tasks ran
+ * ~3x SLOWER on 14 scheduler threads than on 1, where the same code without
+ * the counter sped up ~3.4x.
+ *
+ * Each thread writes only its own slot, with a relaxed load/store pair rather
+ * than an atomic RMW -- a plain ldr/str, no bus lock, no sharing.  The slot is
+ * _Atomic solely so the reader's concurrent load is defined behaviour instead
+ * of a data race.
+ *
+ * Allocation and freeing are NOT thread-affine: an object allocated on one
+ * scheduler thread is routinely freed on another, so an individual slot can go
+ * arbitrarily negative or positive and only the SUM is meaningful.  For the
+ * sum to stay correct across thread lifetimes, an exiting thread folds its
+ * residual into march_live_residual (via a pthread_key_t destructor) and
+ * releases its slot for reuse; the reader walks the slot list and adds the
+ * residual.  Slots are never freed, so the walk is lock-free.
+ *
+ * Exactness under concurrency is neither required nor previously provided --
+ * the gauge is read between frames by FFI/leak tests, and memory_order_relaxed
+ * already gave no ordering guarantee. */
+typedef struct march_live_slot {
+    _Atomic int64_t count;                   /* owner-written, anyone-read */
+    _Atomic int in_use;                      /* 0 = free for a new thread   */
+    struct march_live_slot *_Atomic next;
+} march_live_slot;
+
+static march_live_slot *_Atomic march_live_slot_head = NULL;
+static _Atomic int64_t march_live_residual = 0;   /* folded from exited threads */
+static _Thread_local march_live_slot *march_live_self = NULL;
+static pthread_key_t march_live_key;
+static pthread_once_t march_live_once = PTHREAD_ONCE_INIT;
+
+/* Thread-exit: move this thread's net count into the process-wide residual and
+ * hand the slot back.  The exchange makes the move atomic with respect to a
+ * concurrent reader, so the count is never seen twice nor lost. */
+static void march_live_slot_release(void *arg) {
+    march_live_slot *s = (march_live_slot *)arg;
+    int64_t n = atomic_exchange_explicit(&s->count, 0, memory_order_relaxed);
+    if (n) atomic_fetch_add_explicit(&march_live_residual, n, memory_order_relaxed);
+    march_live_self = NULL;
+    atomic_store_explicit(&s->in_use, 0, memory_order_release);
 }
-#define MARCH_ALLOC_BUMP() atomic_fetch_add_explicit(&march_live_alloc_count, 1, memory_order_relaxed)
-#define MARCH_FREE_BUMP()  atomic_fetch_sub_explicit(&march_live_alloc_count, 1, memory_order_relaxed)
+
+static void march_live_key_init(void) {
+    pthread_key_create(&march_live_key, march_live_slot_release);
+}
+
+/* Claim a free slot (a thread that has since exited), else push a new one. */
+static march_live_slot *march_live_slot_acquire(void) {
+    pthread_once(&march_live_once, march_live_key_init);
+    for (march_live_slot *s = atomic_load_explicit(&march_live_slot_head, memory_order_acquire);
+         s; s = atomic_load_explicit(&s->next, memory_order_acquire)) {
+        int expected = 0;
+        if (atomic_compare_exchange_strong_explicit(&s->in_use, &expected, 1,
+                memory_order_acq_rel, memory_order_relaxed)) {
+            march_live_self = s;
+            pthread_setspecific(march_live_key, s);
+            return s;
+        }
+    }
+    march_live_slot *s = (march_live_slot *)calloc(1, sizeof *s);
+    if (!s) { fputs("march: out of memory\n", stderr); exit(1); }
+    atomic_store_explicit(&s->in_use, 1, memory_order_relaxed);
+    march_live_slot *head = atomic_load_explicit(&march_live_slot_head, memory_order_relaxed);
+    do {
+        atomic_store_explicit(&s->next, head, memory_order_relaxed);
+    } while (!atomic_compare_exchange_weak_explicit(&march_live_slot_head, &head, s,
+                 memory_order_release, memory_order_relaxed));
+    march_live_self = s;
+    pthread_setspecific(march_live_key, s);
+    return s;
+}
+
+static inline void march_live_bump(int64_t d) {
+    march_live_slot *s = march_live_self;
+    if (__builtin_expect(s == NULL, 0)) s = march_live_slot_acquire();
+    atomic_store_explicit(&s->count,
+        atomic_load_explicit(&s->count, memory_order_relaxed) + d,
+        memory_order_relaxed);
+}
+
+int64_t march_live_allocs(void) {
+    int64_t total = atomic_load_explicit(&march_live_residual, memory_order_relaxed);
+    for (march_live_slot *s = atomic_load_explicit(&march_live_slot_head, memory_order_acquire);
+         s; s = atomic_load_explicit(&s->next, memory_order_acquire))
+        total += atomic_load_explicit(&s->count, memory_order_relaxed);
+    return total;
+}
+#define MARCH_ALLOC_BUMP() march_live_bump(1)
+#define MARCH_FREE_BUMP()  march_live_bump(-1)
 
 /* If [p] is an FFI resource cell (MARCH_RESOURCE_TAG), run its destructor on
  * the wrapped native pointer before the cell itself is freed.  Called from
@@ -471,6 +569,47 @@ void march_decrc_local(void *p) {
          * allocator, plumb the owning march_heap_t* through to here and
          * call march_heap_record_death(heap, sz). */
     }
+}
+
+/* Sibling of march_decrc_local that reports whether the release freed the
+ * object, for a caller that has work to do only on the path where it did
+ * (Drop.run's closure-capture releases).
+ *
+ * It exists rather than reusing march_decrc_freed because the two differ in
+ * ATOMICITY POLICY, not just in the return value: march_decrc_freed is
+ * unconditionally atomic, while the "local" ops take a non-atomic fast path
+ * off the scheduler.  Substituting one for the other at a site the compiler
+ * previously emitted as march_decrc_local leaves that object decremented
+ * atomically at one site and non-atomically at another, and a read-modify-write
+ * pair split that way loses updates in both directions — a premature free.
+ * Measured: swapping in march_decrc_freed at the closure-environment release,
+ * with no other change and no child releases at all, took
+ * test/native/node_discovery.march from 0 crashes in 60 runs to 21 in 40.
+ * Mirror march_decrc_local's branch structure exactly; only the report is new.
+ *
+ * Returns 0 for a non-heap pointer — the opposite of march_decrc_freed, and
+ * deliberately: "nothing was freed" is the answer that makes a caller skip its
+ * child releases, which is the safe direction for a stack-promoted or
+ * tagged-scalar value. */
+int64_t march_decrc_local_freed(void *p) {
+    if (!IS_HEAP_PTR(p)) return 0;
+    if (march_sched_in_scheduler() || march_tls_concurrent_rc)
+        return march_decrc_freed(p);
+    march_hdr *h = (march_hdr *)p;
+    h->rc--;
+    if (gc_trace_on())
+        gc_emit(h->rc <= 0 ? "free" : "dec_ref", p, 0, h->rc, h->tag);
+    if (h->rc <= 0) {
+        if (h->rc < 0) {
+            fprintf(stderr, "march: local RC underflow at %p — aborting\n", p);
+            abort();
+        }
+        march_run_resource_dtor(p);
+        MARCH_FREE_BUMP();
+        free(p);
+        return 1;
+    }
+    return 0;
 }
 
 /* ── IOList hash ─────────────────────────────────────────────────────── */
@@ -998,6 +1137,38 @@ void *march_string_concat3(void *a, void *b, void *c) {
     march_str_copy(r->data, sa->data, (size_t)sa->len);
     march_str_copy(r->data + sa->len, sb->data, (size_t)sb->len);
     march_str_copy(r->data + sa->len + sb->len, sc->data, (size_t)sc->len);
+    r->data[total] = '\0';
+    return r;
+}
+
+/* N-ary concat: sum the lengths of `n` parts, allocate once, copy once.
+ *
+ * `parts` is a caller-owned array of n march_string* -- codegen builds it with
+ * an alloca in the calling frame, so there is no heap allocation for the
+ * spread and nothing here to free.  A C variadic (`..., ...`) would have done
+ * the same job, but an explicit array keeps the ABI identical on every target
+ * (arm64 passes variadic arguments differently from fixed ones) and makes the
+ * function callable from tests.
+ *
+ * This is what makes interpolation linear.  The march_string_concat3 fold is
+ * fine for a handful of short operands, but it re-copies the accumulated
+ * prefix at every link, so k parts cost O(k^2) bytes copied -- with 4KB
+ * operands that is the difference between 0.5s and 0.03s at k=32.  Desugar
+ * therefore emits concat3 for k<=3 (where a single concat3 IS a single
+ * allocate-and-copy, so there is nothing to improve) and this for k>=4.
+ *
+ * All parts are borrowed: this neither retains nor releases them. */
+void *march_string_concat_n(int64_t n, void **parts) {
+    int64_t total = 0;
+    for (int64_t i = 0; i < n; i++)
+        total += ((march_string *)parts[i])->len;
+    march_string *r = march_string_alloc(total);
+    char *w = r->data;
+    for (int64_t i = 0; i < n; i++) {
+        march_string *p = (march_string *)parts[i];
+        march_str_copy(w, p->data, (size_t)p->len);
+        w += p->len;
+    }
     r->data[total] = '\0';
     return r;
 }
@@ -1849,11 +2020,22 @@ typedef struct {
      * it MUST be assigned explicitly at registration — sup_children grows via
      * realloc, which does not zero the new memory. */
     int32_t restart_type;
+    /* How long march_actor_stop waits for this child to drain when the tree
+     * is stopped: -1 infinity, 0 brutal (kill at once), otherwise a
+     * millisecond budget after which the child is killed outright. Set once at
+     * registration, alongside restart_type and for the same realloc reason. */
+    int64_t shutdown_ms;
     int32_t crash_streak;     /* consecutive crashes without surviving a full
                                   supervisor_window_secs window */
     int64_t last_crash_ms;    /* march_now_ms() at the most recent crash; 0
                                   means "never crashed yet" */
 } march_sup_child;
+
+/* march_actor_meta.drain_deadline_ms while a stop is claimed but not yet
+ * armed. Distinct from every real deadline (which is a march_now_ms() value,
+ * or -1 for `shutdown infinity`) so the receiving loop can tell "a stop is in
+ * progress, keep working" from "your deadline has passed, stop now". */
+#define MARCH_DRAIN_NOT_ARMED INT64_MIN
 
 /* Per-actor scheduler metadata.  Stored in a side table keyed by actor
  * pointer so the actor object layout (and codegen) are unaffected. */
@@ -1894,6 +2076,19 @@ typedef struct march_actor_meta {
      * allocates a fresh meta instead of re-linking the stale one — see the
      * Task 15 fix-up commit message for the full argument. */
     int                          pididx_linked;
+    /* Graceful shutdown (march_actor_stop). [draining] is set by whichever
+     * thread called stop; the actor's own green thread reads it at the top of
+     * every receive iteration and exits once the mailbox is empty or the
+     * deadline has passed. Both are _Atomic because writer and reader are
+     * always different threads; the deadline is published BEFORE draining so
+     * an acquire-load of draining implies a visible deadline. A negative
+     * deadline means `shutdown infinity`: drain to empty however long it
+     * takes. See specs/todos/2026-08-12-graceful-shutdown-and-drain.md. */
+    _Atomic int                  draining;
+    /* MARCH_DRAIN_NOT_ARMED until march_actor_stop has finished tearing down
+     * this actor's children and computed its own deadline. The receive loop
+     * must NOT exit while it reads that value — see the gate there. */
+    _Atomic int64_t              drain_deadline_ms;
     march_cleanup_node         *cleanup_head; /* Cleanup callbacks (most recent first) */
     march_monitor_node         *monitor_head; /* Monitors watching this actor   */
     int                          terminal_set; /* Claimed once under g_tbl_mu. */
@@ -1904,6 +2099,14 @@ typedef struct march_actor_meta {
     int                         supervisor_strategy;    /* 0=one_for_one, 1=one_for_all, 2=rest_for_one */
     int64_t                     supervisor_max_restarts;
     int64_t                     supervisor_window_secs;
+    /* Restart-backoff curve, from the supervise block's optional
+     * `backoff base N cap N jitter N%` clause. Defaulted by the parser to
+     * 25 / 5000 / 25 — the constants march_supervisor_notify used to spell
+     * inline — so an absent clause reproduces the previous delays exactly.
+     * Written once at registration, read only by march_supervisor_notify. */
+    int64_t                     backoff_base_ms;
+    int64_t                     backoff_cap_ms;
+    int64_t                     backoff_jitter_pct;
     /* Capability revocation (used by march_is_cap_valid). _Atomic: written
      * once per respawn by march_respawn_child (on the supervisor's thread,
      * under g_tbl_mu, but g_tbl_mu is a writer-side critical section only —
@@ -2968,6 +3171,38 @@ static void actor_green_thread(void *arg) {
     }
 
     while (actor_alive_load(actor)) {  /* while alive */
+        /* Graceful shutdown (march_actor_stop): keep serving the queue, but
+         * stop taking new work and leave once the queue is empty or the
+         * deadline passes. Checked HERE, at the top of the iteration, rather
+         * than in the recv path, so an actor that was mid-handler when stop
+         * arrived finishes that handler and then drains the rest.
+         *
+         * An actor parked in recv with an empty mailbox never reaches this
+         * check at all -- march_actor_stop's request_stop wakes it, recv
+         * returns MARCH_RECV_NO_MSG, and the loop breaks below into the same
+         * normal death. Same outcome, one iteration earlier. */
+        if (self && atomic_load_explicit(&meta->draining, memory_order_acquire)) {
+            int64_t deadline = atomic_load_explicit(&meta->drain_deadline_ms,
+                                                    memory_order_relaxed);
+            /* A claimed-but-not-yet-armed stop means march_actor_stop is still
+             * stopping this actor's CHILDREN, and it yields while doing so, so
+             * this loop really does get to run in that window. Exiting here
+             * would be wrong twice over: the queue this stop exists to drain
+             * would be discarded on an empty-mailbox check that has not been
+             * asked for yet, and do_actor_death could free the actor struct
+             * that the teardown loop is still reading child pids out of.
+             * Keep serving until the deadline is armed. */
+            if (deadline == MARCH_DRAIN_NOT_ARMED) {
+                /* fall through to the normal receive below */
+            } else if (march_sched_mbox_count(self) == 0) {
+                break;
+            } else if (deadline >= 0 && march_now_ms() >= deadline) {
+                if (getenv("MARCH_SUP_TRACE"))
+                    fprintf(stderr, "march: drain deadline reached, %lld message(s)"
+                            " discarded\n", (long long)march_sched_mbox_count(self));
+                break;
+            }
+        }
         void *msg = march_sched_recv_user();
         if (msg == MARCH_RECV_NO_MSG) break;  /* woken without message (killed) */
 
@@ -3235,6 +3470,45 @@ static int march_restart_budget_ok(march_actor_meta *sup_meta) {
  * is only for a child's initial spawn), inherit the crashed child's
  * epoch+1 (matching eval.ml spawn_child_actor's stale-capability-detection
  * inheritance), and write the new pid_index into the supervisor's state. */
+/* Restart policy encoding, shared with lower_actor.ml's restart_type_int and
+ * Ast.restart_type: 0 permanent, 1 transient, 2 temporary. */
+#define MARCH_RESTART_PERMANENT 0
+#define MARCH_RESTART_TRANSIENT 1
+#define MARCH_RESTART_TEMPORARY 2
+
+/* Should a child with policy [restart_type] be brought back after dying for
+ * [reason]?  The whole table, in one place, because it is consulted from two
+ * unrelated sites (march_supervisor_notify's filter and the batch strategies'
+ * respawn loops) and they must not drift:
+ *
+ *   policy      CRASH   KILLED   NORMAL
+ *   permanent   yes     yes      no
+ *   transient   yes     no       no
+ *   temporary   no      no       no
+ *
+ * NOTE March's `permanent` is deliberately NOT OTP's: OTP restarts a permanent
+ * child even on a normal exit, while do_actor_death has always guarded the
+ * notify with `reason != MARCH_DEATH_NORMAL`. Matching OTP here would silently
+ * change every supervise block ever written. See
+ * specs/2026-09-08-supervise-child-spec-design.md §4. */
+static int march_child_should_restart(int32_t restart_type,
+                                      march_death_reason reason) {
+    if (reason == MARCH_DEATH_NORMAL) return 0;
+    switch (restart_type) {
+        case MARCH_RESTART_TRANSIENT: return reason == MARCH_DEATH_CRASH;
+        case MARCH_RESTART_TEMPORARY: return 0;
+        default:                      return 1;   /* permanent */
+    }
+}
+
+/* The reason [meta] died, as the restart filter should see it. An unset
+ * terminal_reason reads as CRASH on purpose: an unknown reason must restart a
+ * permanent child (today's behaviour) rather than silently retire it. */
+static march_death_reason march_meta_death_reason(march_actor_meta *meta) {
+    if (!meta || !meta->terminal_set) return MARCH_DEATH_CRASH;
+    return meta->terminal_reason;
+}
+
 static void *march_respawn_child(void *supervisor, march_actor_meta *sup_meta, int child_idx) {
     march_sup_child *child = &sup_meta->sup_children[child_idx];
     int64_t old_pid_index = ((int64_t *)supervisor)[4 + child->word_idx];
@@ -3377,6 +3651,13 @@ static void march_one_for_all_restart(void *supervisor, march_actor_meta *sup_me
             do_actor_death(live_children[i], MARCH_DEATH_KILLED, NULL, 0);
     }
     for (int i = 0; i < n; i++) {
+        /* A `temporary` sibling swept up by this batch is killed like any
+         * other, but must NOT come back — the kill above is internal
+         * machinery, the respawn here is the actual restart decision. Missing
+         * this is invisible to every single-child test: the child resurrects
+         * only when a SIBLING crashes. */
+        if (sup_meta->sup_children[i].restart_type == MARCH_RESTART_TEMPORARY)
+            continue;
         march_respawn_child(supervisor, sup_meta, i);
     }
 }
@@ -3414,6 +3695,9 @@ static void march_rest_for_one_restart(void *supervisor, march_actor_meta *sup_m
             do_actor_death(live_children[i], MARCH_DEATH_KILLED, NULL, 0);
     }
     for (int i = child_idx; i < n; i++) {
+        /* See march_one_for_all_restart's identical skip. */
+        if (sup_meta->sup_children[i].restart_type == MARCH_RESTART_TEMPORARY)
+            continue;
         march_respawn_child(supervisor, sup_meta, i);
     }
 }
@@ -3632,6 +3916,23 @@ static void march_supervisor_notify(void *supervisor, march_actor_meta *crashed_
     int child_idx = crashed_meta->sup_child_index;
     if (child_idx < 0 || child_idx >= sup_meta->sup_num_children) return;
     march_sup_child *child = &sup_meta->sup_children[child_idx];
+
+    /* Per-child restart policy (specs/2026-09-08-supervise-child-spec-design.md).
+     * Placed HERE, before the g_supervise_mu section below, on purpose: that
+     * section does the crash_streak read-modify-write that feeds the restart
+     * budget, and a death that will not restart must charge nothing. Filtering
+     * after it would let a program that retires N `temporary` children walk a
+     * perfectly healthy supervisor toward its max_restarts ceiling. */
+    if (!march_child_should_restart(child->restart_type,
+                                    march_meta_death_reason(crashed_meta))) {
+        if (getenv("MARCH_SUP_TRACE"))
+            fprintf(stderr, "march: supervisor child=%d retired"
+                    " (restart_type=%d, reason=%d) -- not restarting\n",
+                    child_idx, (int)child->restart_type,
+                    (int)march_meta_death_reason(crashed_meta));
+        return;
+    }
+
     int strategy = sup_meta->supervisor_strategy;
     int is_batch = (strategy == 1 || strategy == 2);
 
@@ -3695,17 +3996,30 @@ static void march_supervisor_notify(void *supervisor, march_actor_meta *crashed_
 
     int64_t delay = 0;
     if (streak > 1) {
+        /* Same curve as ever, with the three constants now read from the
+         * supervise block (Ast.default_backoff keeps them at 25 / 5000 / 25
+         * when no `backoff` clause is written, so every existing program and
+         * every supervision golden sees identical delays). Defensive
+         * fallbacks: a meta registered before this field existed, or by a C
+         * caller that passed nothing, reads 0 here. */
+        int64_t base = sup_meta->backoff_base_ms > 0 ? sup_meta->backoff_base_ms : 25;
+        int64_t cap  = sup_meta->backoff_cap_ms >= base ? sup_meta->backoff_cap_ms : 5000;
+        int64_t jitter_pct = sup_meta->backoff_jitter_pct;
+        if (jitter_pct < 0 || jitter_pct > 100) jitter_pct = 25;
         int shift = streak > 8 ? 7 : streak - 1;
-        delay = 25LL << shift;             /* 50,100,...,3200 */
-        if (delay > 5000) delay = 5000;
-        /* ±25% jitter, seeded off a process-wide counter — Math.random is
-         * not available here and rand() is process-global anyway; a weak
-         * LCG is plenty for de-synchronizing a crash-storm's retries. */
+        delay = base << shift;             /* 50,100,...,3200 at base 25 */
+        if (delay > cap || delay < 0) delay = cap;
+        /* +/-jitter_pct of the delay, seeded off a process-wide counter —
+         * Math.random is not available here and rand() is process-global
+         * anyway; a weak LCG is plenty for de-synchronizing a crash-storm's
+         * retries. jitter_pct 0 disables it (the span below collapses to 0,
+         * and `s % 1` is 0, so delay is left exactly on the curve). */
         static _Atomic uint32_t jitter_seed = 0x9E3779B9u;
+        int64_t half_span = delay * jitter_pct / 100;   /* the +/- radius */
         uint32_t s = atomic_fetch_add_explicit(&jitter_seed, 0x9E3779B9u,
                                                memory_order_relaxed);
         s ^= s >> 16; s *= 0x45d9f3bu; s ^= s >> 16;
-        delay += (int64_t)(s % (uint32_t)(delay / 2 + 1)) - delay / 4;
+        delay += (int64_t)(s % (uint32_t)(2 * half_span + 1)) - half_span;
     }
     if (getenv("MARCH_SUP_TRACE"))
         fprintf(stderr, "march: supervisor backoff child=%d streak=%d delay_ms=%lld%s\n",
@@ -4088,6 +4402,145 @@ static void do_actor_death(void *actor, march_death_reason reason,
 
 void march_kill(void *actor) {
     do_actor_death(actor, MARCH_DEATH_KILLED, NULL, 0);
+}
+
+/* ── Graceful shutdown: stop, drain, then die ──────────────────────────
+ * specs/todos/2026-08-12-graceful-shutdown-and-drain.md.
+ *
+ * `stop` is the deploy story `kill` cannot tell: kill drops whatever was
+ * queued, so rolling a node loses exactly the requests that were waiting.
+ * stop instead (1) marks the actor draining, after which march_send refuses
+ * new work, (2) lets its own green thread run the receive loop until the
+ * mailbox empties or the deadline passes, and (3) ends in an ordinary
+ * MARCH_DEATH_NORMAL, which no restart type restarts.
+ *
+ * The actor drains on ITS OWN thread. Nothing here runs a handler, which is
+ * what keeps this safe to call from any thread, including from inside another
+ * actor's handler. */
+
+/* Wait for [child] to finish draining, up to [deadline_ms] (absolute; < 0
+ * means wait indefinitely). Past the deadline the child is killed outright —
+ * OTP's semantics, and the reason `shutdown` is a budget rather than a
+ * promise. Returns 1 if the child died on its own, 0 if it had to be killed. */
+static int stop_await_death(void *child, int64_t deadline_ms) {
+    while (march_is_alive(child)) {
+        if (deadline_ms >= 0 && march_now_ms() >= deadline_ms) {
+            do_actor_death(child, MARCH_DEATH_KILLED, NULL, 0);
+            return 0;
+        }
+        /* Yield first so a child sharing this scheduler thread can actually
+         * run; the sleep bounds the burn when the yield is a no-op (this can
+         * be called from a non-green thread) or when the child is parked on
+         * another scheduler thread. */
+        march_sched_yield();
+        struct timespec ts = { 0, 200 * 1000 };   /* 200us */
+        nanosleep(&ts, NULL);
+    }
+    return 1;
+}
+
+/* Stop [actor] gracefully. timeout_ms: < 0 wait forever, 0 stop as soon as the
+ * current handler returns (queued messages are discarded), > 0 drain for at
+ * most that long. Returns 1 if the actor was live and is now stopping.
+ *
+ * If [actor] supervises children, they are stopped FIRST and in REVERSE
+ * declaration order — the mirror of the order they were started in, and the
+ * same order rest_for_one already relies on — each with its own `shutdown`
+ * budget from the child spec. A supervisor whose children are still finishing
+ * work must outlive them, or their in-flight replies go to a dead parent. */
+int64_t march_actor_stop(void *actor, int64_t timeout_ms) {
+    if (!IS_HEAP_PTR(actor) || !actor_alive_load(actor)) return 0;
+    march_actor_meta *meta = find_meta(actor);
+    if (!meta) return 0;
+
+    /* Park the deadline in its not-yet-armed state BEFORE publishing
+     * `draining`, so the actor's own loop can never observe a stale 0 (which
+     * reads as "your deadline passed") in the window between the claim below
+     * and the real deadline being computed after the child teardown. */
+    atomic_store_explicit(&meta->drain_deadline_ms, MARCH_DRAIN_NOT_ARMED,
+                          memory_order_relaxed);
+
+    /* Claim the transition. A second stop on an actor already draining is a
+     * no-op rather than a deadline extension: two callers racing must not be
+     * able to push the deadline out indefinitely. */
+    int expected = 0;
+    if (!atomic_compare_exchange_strong_explicit(&meta->draining, &expected, 1,
+                                                 memory_order_acq_rel,
+                                                 memory_order_acquire))
+        return 0;
+
+    /* Tear the subtree down first, deepest-declared child first. Each child's
+     * own stop recurses, so a nested supervisor's grandchildren drain before
+     * it does. sup_children is in declaration order (Task 3's field injection
+     * walks sc_fields in order), so a reverse index walk IS reverse start
+     * order. */
+    if (meta->sup_num_children > 0) {
+        for (int i = meta->sup_num_children - 1; i >= 0; i--) {
+            int64_t stored_pid_index =
+                ((int64_t *)actor)[4 + meta->sup_children[i].word_idx];
+            march_actor_meta *cm = find_meta_by_pid_index(stored_pid_index);
+            if (!cm || !march_is_alive(cm->actor)) continue;
+            int64_t budget = meta->sup_children[i].shutdown_ms;
+            if (getenv("MARCH_SUP_TRACE"))
+                fprintf(stderr, "march: stopping supervised child %d"
+                        " (shutdown_ms=%lld)\n", i, (long long)budget);
+            /* Detach before stopping: this is an orderly teardown, not a
+             * crash, so the child's death must not run a restart strategy
+             * against a supervisor that is itself on the way out. Same
+             * technique the batch strategies use for their sweep kills. */
+            pthread_mutex_lock(&g_tbl_mu);
+            cm->supervisor = NULL;
+            pthread_mutex_unlock(&g_tbl_mu);
+            if (budget == 0) {
+                do_actor_death(cm->actor, MARCH_DEATH_KILLED, NULL, 0);
+                continue;
+            }
+            march_actor_stop(cm->actor, budget);
+            stop_await_death(cm->actor,
+                             budget < 0 ? -1 : march_now_ms() + budget);
+        }
+    }
+
+    int64_t deadline = timeout_ms < 0 ? -1 : march_now_ms() + timeout_ms;
+    atomic_store_explicit(&meta->drain_deadline_ms, deadline,
+                          memory_order_relaxed);
+    /* Published AFTER the deadline, and re-stored with release ordering so a
+     * green thread that acquire-loads `draining` sees the deadline too. The
+     * CAS above already set it; this store is the release fence. */
+    atomic_store_explicit(&meta->draining, 1, memory_order_release);
+
+    /* Wake it. request_stop, not a bare wake: an actor parked on an empty
+     * mailbox must be able to LEAVE the untimed recv (which otherwise re-parks
+     * on a wake it cannot attribute to a message), and an empty mailbox is
+     * precisely the case where draining is already finished. */
+    march_proc *gt = atomic_load_explicit(&meta->green_thread,
+                                          memory_order_acquire);
+    if (gt) march_sched_request_stop(gt);
+
+    /* Then WAIT for it, up to the same deadline. `stop` is a synchronous
+     * operation on purpose: a deploy sequence's whole point is to know when
+     * the in-flight work is finished, and a caller that has to poll is_alive
+     * afterwards has been handed the hard half of the problem back. It is
+     * also what makes stop behave identically on both backends — the
+     * interpreter's eager scheduler drains inline, so an asynchronous
+     * compiled stop would give the same program two different observable
+     * orderings.
+     *
+     * Except when the caller IS the actor being stopped: an actor stopping
+     * itself cannot wait for its own green thread to finish the queue it is
+     * currently standing in. That call marks it draining and returns, and the
+     * receive loop does the rest as soon as the handler returns. */
+    if (gt != march_sched_current())
+        stop_await_death(actor, deadline);
+    return 1;
+}
+
+/* Is [actor] draining (stopped but not yet dead)? Lets March tell "shutting
+ * down" apart from "dead", which `is_alive` alone cannot express. */
+int64_t march_actor_is_draining(void *actor) {
+    if (!IS_HEAP_PTR(actor)) return 0;
+    march_actor_meta *meta = find_meta(actor);
+    return meta && atomic_load_explicit(&meta->draining, memory_order_acquire);
 }
 
 int64_t march_is_alive(void *actor) {
@@ -4708,6 +5161,18 @@ void *march_send(void *actor, void *msg) {
      * entirely (find_meta is lock-free; the green_thread field is
      * _Atomic). */
     march_actor_meta *meta = find_meta(actor);
+    /* A draining actor takes no new work: that is what makes `stop` a
+     * shutdown rather than a pause. Rejected here rather than inside
+     * march_sched_send so the message is never enqueued and never handed to
+     * the mailbox disposer -- MARCH_SEND_DRAINING, distinct at the C level
+     * from MARCH_SEND_DEAD and MARCH_SEND_DROPPED. March's `send` returns
+     * Option(Unit), so it reports this the way it reports a dead target:
+     * None, i.e. "not accepted". */
+    if (meta && atomic_load_explicit(&meta->draining, memory_order_acquire)) {
+        march_decrc(msg);
+        void *none = march_alloc(16);
+        return none;
+    }
     march_proc *gt = meta ? atomic_load_explicit(&meta->green_thread,
                                                   memory_order_acquire)
                           : NULL;
@@ -5933,6 +6398,35 @@ static void *mk_err_file(int tag, void *payload_str) {
     return mk_err(mk_file_error(tag, payload_str));
 }
 
+/* ── errno → FileError mappings ──────────────────────────────────────
+   The interpreter does NOT use one mapping for every file_ / dir_
+   builtin: each builtin in lib/eval/eval_builtins.ml classifies only the
+   errnos its own syscall can actually produce and falls back to IoError.
+   The helpers below mirror that split one-for-one.  Routing every site
+   through a single mapping would fix the representation bug while still
+   reporting the wrong error *kind*, which is harder to spot than the
+   original defect.  Reference: lib/eval/eval_net.ml's
+   file_error_of_unix / file_error_of_sys, plus the per-builtin `with`
+   arms in lib/eval/eval_builtins.ml. */
+
+/* IoError(<msg>) from a C string literal — for failures with no errno. */
+static void *mk_err_file_cstr(int tag, const char *msg) {
+    return mk_err_file(tag, march_string_lit(msg, (int64_t)strlen(msg)));
+}
+
+/* IoError(strerror(errno)) — mirrors `IoError(Unix.error_message err)`. */
+static void *mk_err_errno_io(void) {
+    return mk_err_file_cstr(FILEERR_IO_ERROR, strerror(errno));
+}
+
+/* IoError("<path>: <strerror>") — mirrors the interpreter's Sys_error
+   fallback, whose OCaml-formatted message carries the path. */
+static void *mk_err_errno_io_path(const char *path) {
+    char buf[1024];
+    snprintf(buf, sizeof(buf), "%s: %s", path, strerror(errno));
+    return mk_err_file_cstr(FILEERR_IO_ERROR, buf);
+}
+
 /* Map the current errno to a FileError, mirroring the interpreter's
    unix_error_to_file_error (lib/eval/eval.ml) for file_open: ENOENT ->
    NotFound(path), EACCES -> Permission(path), everything else ->
@@ -5947,6 +6441,52 @@ static void *mk_err_errno_file(const char *path) {
         const char *msg = strerror(errno);
         return mk_err_file(FILEERR_IO_ERROR, march_string_lit(msg, (int64_t)strlen(msg)));
     }
+    }
+}
+
+/* Full file_error_of_unix / file_error_of_sys mapping, used by the
+   read/write/append/delete family: ENOENT -> NotFound, EACCES|EPERM ->
+   Permission, EISDIR -> IsDirectory, ENOTEMPTY -> NotEmpty, else
+   IoError("<path>: <strerror>"). */
+static void *mk_err_errno_file_rw(const char *path) {
+    void *p = march_string_lit(path, (int64_t)strlen(path));
+    switch (errno) {
+    case ENOENT:    return mk_err_file(FILEERR_NOT_FOUND,    p);
+    case EACCES:
+    case EPERM:     return mk_err_file(FILEERR_PERMISSION,   p);
+    case EISDIR:    return mk_err_file(FILEERR_IS_DIRECTORY, p);
+    case ENOTEMPTY: return mk_err_file(FILEERR_NOT_EMPTY,    p);
+    default:        return mk_err_errno_io_path(path);
+    }
+}
+
+/* file_stat: ENOENT -> NotFound(path), else IoError(strerror). */
+static void *mk_err_errno_stat(const char *path) {
+    if (errno == ENOENT)
+        return mk_err_file(FILEERR_NOT_FOUND, march_string_lit(path, (int64_t)strlen(path)));
+    return mk_err_errno_io();
+}
+
+/* dir_list: ENOENT -> NotFound, EACCES -> Permission, ENOTDIR ->
+   IsDirectory, else IoError(strerror).  Note ENOTDIR (not EISDIR) maps to
+   IsDirectory here, matching the interpreter's dir_list arms. */
+static void *mk_err_errno_dir_list(const char *path) {
+    void *p = march_string_lit(path, (int64_t)strlen(path));
+    switch (errno) {
+    case ENOENT:  return mk_err_file(FILEERR_NOT_FOUND,    p);
+    case EACCES:  return mk_err_file(FILEERR_PERMISSION,   p);
+    case ENOTDIR: return mk_err_file(FILEERR_IS_DIRECTORY, p);
+    default:      return mk_err_errno_io();
+    }
+}
+
+/* dir_rmdir: ENOTEMPTY -> NotEmpty, ENOENT -> NotFound, else IoError. */
+static void *mk_err_errno_rmdir(const char *path) {
+    void *p = march_string_lit(path, (int64_t)strlen(path));
+    switch (errno) {
+    case ENOTEMPTY: return mk_err_file(FILEERR_NOT_EMPTY, p);
+    case ENOENT:    return mk_err_file(FILEERR_NOT_FOUND, p);
+    default:        return mk_err_errno_io();
     }
 }
 
@@ -5970,13 +6510,13 @@ static void *build_string_list(char **strs, int n) {
 void *march_file_read(void *path_ptr) {
     march_string *ps = (march_string *)path_ptr;
     FILE *f = fopen(ps->data, "rb");
-    if (!f) return mk_err_errno();
+    if (!f) return mk_err_errno_file_rw(ps->data);
     fseek(f, 0, SEEK_END);
     long len = ftell(f);
     fseek(f, 0, SEEK_SET);
-    if (len < 0) { fclose(f); return mk_err_cstr("ftell failed"); }
+    if (len < 0) { fclose(f); return mk_err_file_cstr(FILEERR_IO_ERROR, "ftell failed"); }
     char *buf = (char *)malloc((size_t)len + 1);
-    if (!buf) { fclose(f); return mk_err_cstr("out of memory"); }
+    if (!buf) { fclose(f); return mk_err_file_cstr(FILEERR_IO_ERROR, "out of memory"); }
     size_t n = fread(buf, 1, (size_t)len, f);
     fclose(f);
     buf[n] = '\0';
@@ -5989,10 +6529,10 @@ void *march_file_write(void *path_ptr, void *data_ptr) {
     march_string *ps = (march_string *)path_ptr;
     march_string *ds = (march_string *)data_ptr;
     FILE *f = fopen(ps->data, "wb");
-    if (!f) return mk_err_errno();
+    if (!f) return mk_err_errno_file_rw(ps->data);
     size_t w = fwrite(ds->data, 1, (size_t)ds->len, f);
     fclose(f);
-    if ((int64_t)w != ds->len) return mk_err_cstr("write failed");
+    if ((int64_t)w != ds->len) return mk_err_file_cstr(FILEERR_IO_ERROR, "write failed");
     return mk_ok_unit();
 }
 
@@ -6000,16 +6540,16 @@ void *march_file_append(void *path_ptr, void *data_ptr) {
     march_string *ps = (march_string *)path_ptr;
     march_string *ds = (march_string *)data_ptr;
     FILE *f = fopen(ps->data, "ab");
-    if (!f) return mk_err_errno();
+    if (!f) return mk_err_errno_file_rw(ps->data);
     size_t w = fwrite(ds->data, 1, (size_t)ds->len, f);
     fclose(f);
-    if ((int64_t)w != ds->len) return mk_err_cstr("write failed");
+    if ((int64_t)w != ds->len) return mk_err_file_cstr(FILEERR_IO_ERROR, "write failed");
     return mk_ok_unit();
 }
 
 void *march_file_delete(void *path_ptr) {
     march_string *ps = (march_string *)path_ptr;
-    if (remove(ps->data) != 0) return mk_err_errno();
+    if (remove(ps->data) != 0) return mk_err_errno_file_rw(ps->data);
     return mk_ok_unit();
 }
 
@@ -6017,9 +6557,10 @@ void *march_file_copy(void *src_ptr, void *dst_ptr) {
     march_string *src = (march_string *)src_ptr;
     march_string *dst = (march_string *)dst_ptr;
     FILE *in = fopen(src->data, "rb");
-    if (!in) return mk_err_errno();
+    if (!in) return mk_err_errno_io_path(src->data);
     FILE *out = fopen(dst->data, "wb");
-    if (!out) { fclose(in); return mk_err_errno(); }
+    /* fclose() may clobber errno, so classify before closing the source. */
+    if (!out) { void *e = mk_err_errno_io_path(dst->data); fclose(in); return e; }
     char buf[8192];
     size_t n;
     while ((n = fread(buf, 1, sizeof(buf), in)) > 0)
@@ -6032,7 +6573,7 @@ void *march_file_copy(void *src_ptr, void *dst_ptr) {
 void *march_file_rename(void *src_ptr, void *dst_ptr) {
     march_string *src = (march_string *)src_ptr;
     march_string *dst = (march_string *)dst_ptr;
-    if (rename(src->data, dst->data) != 0) return mk_err_errno();
+    if (rename(src->data, dst->data) != 0) return mk_err_errno_io_path(src->data);
     return mk_ok_unit();
 }
 
@@ -6040,7 +6581,7 @@ void *march_file_rename(void *src_ptr, void *dst_ptr) {
 void *march_file_stat(void *path_ptr) {
     march_string *ps = (march_string *)path_ptr;
     struct stat st;
-    if (stat(ps->data, &st) != 0) return mk_err_errno();
+    if (stat(ps->data, &st) != 0) return mk_err_errno_stat(ps->data);
     int kind_tag = S_ISREG(st.st_mode) ? 0 :
                    S_ISDIR(st.st_mode) ? 1 :
                    S_ISLNK(st.st_mode) ? 2 : 3;
@@ -6115,7 +6656,7 @@ void *march_file_read_chunk(void *handle_ptr, int64_t size) {
 void *march_dir_list(void *path_ptr) {
     march_string *ps = (march_string *)path_ptr;
     DIR *dir = opendir(ps->data);
-    if (!dir) return mk_err_errno();
+    if (!dir) return mk_err_errno_dir_list(ps->data);
     /* Collect entries into a dynamic array */
     char **names = NULL;
     int n = 0, cap = 0;
@@ -6151,19 +6692,19 @@ static int mkdir_p(const char *path) {
 
 void *march_dir_mkdir(void *path_ptr) {
     march_string *ps = (march_string *)path_ptr;
-    if (mkdir(ps->data, 0755) != 0 && errno != EEXIST) return mk_err_errno();
+    if (mkdir(ps->data, 0755) != 0 && errno != EEXIST) return mk_err_errno_io();
     return mk_ok_unit();
 }
 
 void *march_dir_mkdir_p(void *path_ptr) {
     march_string *ps = (march_string *)path_ptr;
-    if (mkdir_p(ps->data) != 0 && errno != EEXIST) return mk_err_errno();
+    if (mkdir_p(ps->data) != 0 && errno != EEXIST) return mk_err_errno_io();
     return mk_ok_unit();
 }
 
 void *march_dir_rmdir(void *path_ptr) {
     march_string *ps = (march_string *)path_ptr;
-    if (rmdir(ps->data) != 0) return mk_err_errno();
+    if (rmdir(ps->data) != 0) return mk_err_errno_rmdir(ps->data);
     return mk_ok_unit();
 }
 
@@ -6186,7 +6727,7 @@ static int rm_rf(const char *path) {
 
 void *march_dir_rm_rf(void *path_ptr) {
     march_string *ps = (march_string *)path_ptr;
-    if (rm_rf(ps->data) != 0) return mk_err_errno();
+    if (rm_rf(ps->data) != 0) return mk_err_errno_io();
     return mk_ok_unit();
 }
 
@@ -6712,12 +7253,26 @@ void march_demonitor(int64_t ref) {
    The actor must already be registered via march_spawn.
    This is a metadata call; actual restart logic is driven by Down events. */
 void march_register_supervisor(void *supervisor, int64_t strategy,
-                                int64_t max_restarts, int64_t window_secs) {
+                                int64_t max_restarts, int64_t window_secs,
+                                int64_t backoff_base_ms,
+                                int64_t backoff_cap_ms,
+                                int64_t backoff_jitter_pct) {
     if (!IS_HEAP_PTR(supervisor)) return;
     march_actor_meta *meta = find_or_create_meta(supervisor);
     meta->supervisor_strategy  = (int)strategy;
     meta->supervisor_max_restarts = max_restarts;
     meta->supervisor_window_secs  = window_secs;
+    /* The backoff curve. Codegen always emits these three (defaulted by the
+     * parser to 25/5000/25, the constants this function's caller used to have
+     * hardcoded), but clamp anyway: this is a public C symbol, and a 0 base
+     * would make every delay 0 while a negative cap would make the ceiling
+     * unreachable. */
+    meta->backoff_base_ms = backoff_base_ms > 0 ? backoff_base_ms : 25;
+    meta->backoff_cap_ms  = backoff_cap_ms >= meta->backoff_base_ms
+                              ? backoff_cap_ms : meta->backoff_base_ms;
+    meta->backoff_jitter_pct =
+        backoff_jitter_pct < 0 ? 0
+      : backoff_jitter_pct > 100 ? 100 : backoff_jitter_pct;
 }
 
 /* Called once per declared supervise-block child, from the generated
@@ -6735,7 +7290,7 @@ void march_register_supervisor(void *supervisor, int64_t strategy,
  * closure stored on meta->cleanup_head. */
 void march_actor_register_child(void *supervisor, void *child,
                                  void *spawn_clo, int64_t word_idx,
-                                 int64_t restart_type) {
+                                 int64_t restart_type, int64_t shutdown_ms) {
     march_actor_meta *sup_meta = find_or_create_meta(supervisor);
     march_actor_meta *child_meta = find_or_create_meta(child);
     /* The child was prepared by march_spawn_supervised, so no actor loop can
@@ -6750,6 +7305,7 @@ void march_actor_register_child(void *supervisor, void *child,
     sup_meta->sup_children[idx].spawn_clo = spawn_clo;
     sup_meta->sup_children[idx].word_idx = word_idx;
     sup_meta->sup_children[idx].restart_type = (int32_t)restart_type;
+    sup_meta->sup_children[idx].shutdown_ms = shutdown_ms;
     sup_meta->sup_children[idx].crash_streak = 0;
     sup_meta->sup_children[idx].last_crash_ms = 0;
     sup_meta->sup_num_children = idx + 1;
@@ -7069,6 +7625,95 @@ int64_t march_send_checked(void *cap, void *msg) {
 static struct { march_hdr hdr; int64_t dispatch; int64_t alive; }
     march_dead_actor_sentinel = { .hdr = { .rc = 1000000000, .tag = 0, .pad = 0 },
                                    .dispatch = 0, .alive = 0 };
+
+/* march_actor_pid_indices() -> List(Int): the pid index of every actor alive
+ * right now, ascending.
+ *
+ * The enumeration primitive the overload-shedding guidance needs. Before it,
+ * mailbox_size(pid) could only be asked about a Pid you already held, so
+ * monitoring code could watch actors it could name in advance and had no way
+ * at all to discover an unknown hot one — the documented polling loop could
+ * not be closed. March code turns these back into Pids with pid_of_int, the
+ * same round trip a supervisor's Int-typed child fields already make.
+ *
+ * LOCK-FREE on purpose, walking the bucket heads exactly as find_meta does
+ * (acquire load of the head, plain reads down the chain — the chain is
+ * append-at-head and nodes are never freed, see replace_stale_meta_locked).
+ * Task 10 deliberately took find_meta off g_tbl_mu to keep sends lock-free; an
+ * enumeration that grabbed that mutex on a monitoring timer would re-serialise
+ * the very path that work freed.
+ *
+ * A snapshot is inherently racy — an actor can die between this call and
+ * anything done with the result — which is fine and already the norm: every
+ * consumer of a Pid handles a dead one.
+ *
+ * Sorted ascending, and deduplicated, so the result is deterministic (bucket
+ * order is an artifact of heap addresses) and identical to the interpreter's. */
+static int pid_index_cmp(const void *a, const void *b) {
+    int64_t x = *(const int64_t *)a, y = *(const int64_t *)b;
+    return x < y ? -1 : x > y ? 1 : 0;
+}
+
+void *march_actor_pid_indices(void) {
+    int64_t cap = 64, n = 0;
+    int64_t *idx = (int64_t *)malloc(sizeof(int64_t) * (size_t)cap);
+    if (!idx) return make_nil();
+    for (unsigned int b = 0; b < MARCH_SCHED_BUCKETS; b++) {
+        for (march_actor_meta *m = atomic_load_explicit(&g_actor_tbl[b],
+                                                        memory_order_acquire);
+             m; m = m->tbl_next) {
+            /* "Has not died", not "is alive right now". The two differ for a
+             * just-spawned actor: march_spawn returns before the new actor's
+             * green thread has run, and its $alive word is still 0 until it
+             * does, so an actor_alive_load gate drops actors the caller has
+             * only just created — measured, a three-spawn program listed two,
+             * a different one missing run to run. The interpreter, whose
+             * ai_alive is true from the moment of spawn, would have listed all
+             * three; gating on terminal_set makes the two backends agree AND
+             * removes a startup race from the result. A meta that has died has
+             * terminal_set claimed by do_actor_death, so dead actors are still
+             * excluded.
+             *
+             * terminal_set is written under g_tbl_mu and read here without it
+             * — a benign race for a snapshot: the worst case is listing an
+             * actor that died microseconds ago, which is inherent to any
+             * enumeration and which every Pid consumer already handles. */
+            if (!m->actor || m->terminal_set) continue;
+            int64_t pidx = atomic_load_explicit(&m->pid_index,
+                                                memory_order_relaxed);
+            /* NOT cross-checked against g_pididx_tbl. The obvious guard here —
+             * "skip this meta unless find_meta_by_pid_index(pidx) resolves
+             * back to it", to drop a stale meta whose actor address was
+             * recycled — is itself a lock-free walk of a table being inserted
+             * into concurrently, and it MISSES live actors: measured, a
+             * three-actor program listed only two, with a different one
+             * dropped run to run, because a freshly spawned actor's index was
+             * transiently unreachable on that chain. A snapshot that silently
+             * omits live actors is worse than one that may occasionally carry
+             * a stale index, since the whole point is finding an actor you did
+             * not already know about. Duplicates are removed below instead;
+             * a stale index left in resolves through pid_of_int to a live
+             * actor, which every Pid consumer already handles. */
+            if (n == cap) {
+                cap *= 2;
+                int64_t *grown = (int64_t *)realloc(idx, sizeof(int64_t) * (size_t)cap);
+                if (!grown) break;
+                idx = grown;
+            }
+            idx[n++] = pidx;
+        }
+    }
+    qsort(idx, (size_t)n, sizeof(int64_t), pid_index_cmp);
+    void *list = make_nil();
+    /* Descending build (Cons is back-to-front), skipping repeats of the index
+     * just emitted — sorted, so equal indices are adjacent. */
+    for (int64_t i = n - 1; i >= 0; i--) {
+        if (i + 1 < n && idx[i] == idx[i + 1]) continue;
+        list = make_cons(make_some_i64(idx[i]), list);
+    }
+    free(idx);
+    return list;
+}
 
 void *march_pid_of_int(int64_t n) {
     march_actor_meta *m = find_meta_by_pid_index(n);
@@ -7679,6 +8324,7 @@ static void *native_arr_alloc(int64_t len, int64_t elem_size, uint8_t kind) {
     if ((((uintptr_t)arr + NATIVE_ARR_HDR) & 15) != 0) {
         fputs("march: native array: misaligned allocation\n", stderr); exit(1);
     }
+    ((march_hdr *)arr)->tag = MARCH_NATIVE_ARR_TAG;
     *(int64_t *)((char *)arr + 16) = len;
     *(uint8_t *)((char *)arr + 24) = kind;
     return arr;

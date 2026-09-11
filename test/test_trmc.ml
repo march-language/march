@@ -427,15 +427,72 @@ let test_transform_is_idempotent_on_a_transformed_module () =
                           [Tir.AVar h; Tir.AVar t]))
   in
   let m = module_of [fn "f" [v "xs" list_int] body] in
+  (* Save and restore rather than forcing false: the default is a compiler-wide
+     setting that may flip, and a test must not silently redefine it for every
+     case that runs after this one. *)
+  let saved = !Trmc.enabled in
   Trmc.enabled := true;
   let once = Trmc.transform_module m in
   let twice = Trmc.transform_module once in
-  Trmc.enabled := false;
+  Trmc.enabled := saved;
   (* Non-vacuousness: the first pass must actually have added the helper. *)
   Alcotest.(check int) "first transform adds the $dps helper"
     2 (List.length once.Tir.tm_fns);
   Alcotest.(check int) "transforming twice adds nothing further"
     (List.length once.Tir.tm_fns) (List.length twice.Tir.tm_fns)
+
+(* ── Fresh-name determinism ──────────────────────────────────────────────────
+   [Trmc.fresh_var] mints "$trmcN" from a module-level counter.  If that
+   counter is not reset per module, a function's emitted TIR depends on how
+   many OTHER modules the same process transformed first — which corrupts the
+   CAS cache key (a digest of emitted code) and makes any TRMC golden
+   order-dependent.  [Perceus] resets its own counter for the same reason.
+
+   The fixture is a DIFFERENTIAL one: transform the same module from a fresh
+   process state, then again after transforming an unrelated module.  Without
+   [reset_counter] the second result carries higher $trmc numbers and the two
+   strings differ.  An "obvious" single-module double-transform check would
+   NOT catch this — transform_module is idempotent, so the second call mints
+   no names at all. *)
+let trmc_fixture_module name =
+  let self = v name (Tir.TFn ([list_int], list_int)) in
+  let t = v "t" list_int and h = v "h" Tir.TInt in
+  let body =
+    Tir.ELet (t, Tir.EApp (self, [Tir.AVar (v "xs" list_int)]),
+              Tir.EAlloc (Tir.TCon ("List.Cons", []),
+                          [Tir.AVar h; Tir.AVar t]))
+  in
+  module_of [fn name [v "xs" list_int] body]
+
+let render (m : Tir.tir_module) =
+  String.concat "\n" (List.map Pp.string_of_fn_def m.Tir.tm_fns)
+
+let test_fresh_names_are_independent_of_run_order () =
+  let saved = !Trmc.enabled in
+  Trmc.enabled := true;
+  let target = trmc_fixture_module "f" in
+  (* Reset explicitly first so this case does not inherit whatever earlier
+     cases in this process left in the counter — the point under test is
+     transform_module's OWN reset, measured between the two runs below. *)
+  Trmc.reset_counter ();
+  let alone = render (Trmc.transform_module target) in
+  (* Burn counter values on an unrelated module. *)
+  ignore (Trmc.transform_module (trmc_fixture_module "g"));
+  let after_other = render (Trmc.transform_module target) in
+  Trmc.enabled := saved;
+  (* Non-vacuousness: the fixture must actually mint at least one $trmc name,
+     otherwise both sides are equal no matter what the counter does. *)
+  let mentions_trmc s =
+    let needle = "$trmc" in
+    let n = String.length needle and len = String.length s in
+    let rec go i = i + n <= len && (String.sub s i n = needle || go (i + 1)) in
+    go 0
+  in
+  Alcotest.(check bool) "fixture actually mints a $trmc name" true
+    (mentions_trmc alone);
+  Alcotest.(check string)
+    "TRMC output does not depend on how many modules ran before it"
+    alone after_other
 
 (* ── Phase 2: the JS backend ─────────────────────────────────────────────────
    [Js_emit.emit_tagged_alloc_hole] and the [ESetField] arm had no coverage at
@@ -536,6 +593,7 @@ let suites = [
     Alcotest.test_case "user type named _Actor gets TRMC" `Quick test_user_type_named_actor_is_transformed;
     Alcotest.test_case "real actor struct refused"        `Quick test_real_actor_struct_is_not_transformed;
     Alcotest.test_case "transform is idempotent"         `Quick test_transform_is_idempotent_on_a_transformed_module;
+    Alcotest.test_case "fresh names ignore run order"     `Quick test_fresh_names_are_independent_of_run_order;
   ];
   "trmc-ir", [
     Alcotest.test_case "alloc-hole emits verifiable IR"  `Quick test_alloc_hole_emits_verifiable_ir;

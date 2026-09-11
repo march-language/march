@@ -1,0 +1,3 @@
+march: stopping supervised child 2 (shutdown_ms=1000)
+march: stopping supervised child 1 (shutdown_ms=5000)
+march: stopping supervised child 0 (shutdown_ms=5000)

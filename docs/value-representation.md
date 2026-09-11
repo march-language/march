@@ -380,7 +380,7 @@ transcript item 10; roundtrip computed alongside it.)
 `ensure_adt_eq_fn` (the "repr-audit" infrastructure, `MARCH_REPR_AUDIT=1`, added in
 `f0fe40cc`).
 
-Three representations a monomorphic variant type can take, decided purely
+Four representations a monomorphic variant type can take, decided purely
 from its shape (`Repr.repr`):
 
 - **`Boxed`**, the general case: a heap cell with the normal RC header +
@@ -397,6 +397,14 @@ from its shape (`Repr.repr`):
   slot (Int/Bool: always tagged-odd; String/heap pointers: `march_alloc`
   never returns null; nested niche/Float/Unit/`TVar`: rejected as unsafe,
   conservatively boxed).
+
+- **`Unboxed of { ctor; fields }`**, added 2026-09-03: exactly one
+  constructor, all of whose fields are `Int`/`Float`/`Bool`, with an arity of
+  2..`Repr.max_unboxed_arity` (4). The value is an LLVM **struct value** —
+  `Vec3(Float, Float, Float)` is `{ double, double, double }` — passed and
+  returned in registers, never allocated and never reference-counted. §7.5
+  below is the full treatment; the rest of this section is about the first
+  three.
 
 This is what makes `Option(Int)`/`Option(String)`/etc. essentially free:
 `None` has no cost (no allocation, a null check) and `Some` has no cost
@@ -422,6 +430,132 @@ tagged scalar, so the general conditional dance in §2 is unnecessary here).
 **Claim 12: verified (behavior).** The same probe, compiled and run,
 prints the correct payload for the `Some` arm actually taken. (Transcript
 item 12–13.)
+
+---
+
+## 7.5 Unboxed small scalar aggregates
+
+**Governing text:** `lib/tir/repr.ml`'s "Unboxed small scalar aggregates"
+section comment (the registry and `set_unboxed_types`), plus
+`Llvm_ctx.llvm_ty` / `Llvm_ctx.llvm_field_ty` / `Llvm_ctx.coerce`'s
+aggregate arms, `Llvm_emit_alloc`'s `Repr.Unboxed` arm, and `Llvm_case`'s.
+
+`Vec3(Float, Float, Float)` used to be `march_alloc(40)`: a 16-byte header
+plus three doubles. Nothing could remove it — the inputs are scalars, so FBIP
+has no dying cell of the same shape to reuse, and the value is returned across
+a call boundary, so escape analysis cannot promote it. A vector-math loop paid
+a heap round trip per vector.
+
+Such a type is now represented **inline**:
+
+| | boxed | unboxed |
+|---|---|---|
+| a value in a register / parameter / return | `ptr` to a cell | `{ double, double, double }` |
+| construction | `march_alloc` + 3 stores | 3 `insertvalue` |
+| destructuring | tag load + 3 field loads | 3 `extractvalue` |
+| reference counting | header `rc` | none (`Rc_types.needs_rc` is false) |
+
+### The eligible class, and why it stops there
+
+`Repr.set_unboxed_types` admits a `TDVariant` with exactly one constructor,
+all of whose fields are `TInt`/`TFloat`/`TBool`, and whose arity is 2..4.
+Everything else is Boxed, each exclusion for its own reason:
+
+- **arity 1** is already `Newtype` (the value *is* the payload);
+- **arity > 4** — four 8-byte fields is 32 bytes, two register pairs under
+  SysV/AAPCS64; past that the C ABI passes the struct in memory and the copy
+  costs more than the cell it replaces;
+- **a non-scalar field** would make the struct carry a heap pointer, and with
+  no header there is nowhere to reference-count it from;
+- **two or more constructors** need a tag, and a struct value has no tag slot;
+- **an actor message type** needs a runtime tag so a foreign message can be
+  told apart at dispatch (§ finding-19 in `repr.ml`);
+- **a same-short-name colliding type** needs its globally-unique constructor
+  tag readable at a dispatch site that only knows the short name;
+- **a type named in an `extern` signature** — see "The FFI" below.
+
+### The boundary: what happens at an erased slot
+
+**Every heap slot is 8 bytes** (`Llvm_ctx.alloc_size` is `16 + n*8`), so an
+inline aggregate can never be stored inline in one. Wherever such a value
+reaches a slot — a constructor field, a record field, a tuple element, a
+closure free variable, a generic ADT payload, an actor mailbox, a task
+trampoline, an `extern` argument — `Llvm_ctx.coerce` **boxes** it into
+exactly the cell the Boxed representation would have built: `march_alloc(16 +
+n*8)`, the type's own constructor tag, one field per slot. Reading it back
+unboxes. This is the same two-form convention a `Float` already has
+(`march_alloc_float` / `march_unbox_float`), and it is what makes the change
+invisible to everything downstream — generic equality, `show`, the runtime's
+own field readers, and the interpreter-vs-compiled oracle all see the layout
+they saw before.
+
+Two rules follow, and both are enforced rather than documented:
+
+1. **Use `Llvm_ctx.llvm_field_ty`, never `llvm_ty`, for a slot type.**
+   `Llvm_data.emit_store_field`/`emit_load_field` `failwith` on a struct slot
+   type, so a site that forgets is a build error rather than a 24-byte store
+   into an 8-byte slot silently corrupting the next field.
+2. **A destructured aggregate field is bound as a COPY, not as the box.**
+   `Llvm_case` treats it exactly like the erased-slot `Float` case
+   (`is_boxed_agg` alongside `is_boxed_float`): the box's reference belongs to
+   the cell, and the binder's type has no refcount, so binding the box would
+   leave a transferred reference with no owner. Copying means the binder
+   aliases nothing, which is what lets the unique-path release below it be a
+   release of a genuinely unowned box.
+
+### Reference counting
+
+`Rc_types.needs_rc` and `Rc_types.borrow_eligible` are both **false** for an
+unboxed aggregate; that module's doc comment carries the row and the argument.
+The short version: there is no cell to count, and a value that is copied at
+every boundary has no reference for a borrow to be about.
+
+The box built at a slot boundary is a fresh `rc=1` cell that Perceus does not
+track — the same position a boxed `Float` is in. `Alloc_contract` therefore
+reports crossing that boundary as an allocation (`AggBox`, "a `Vec3` is boxed
+here (it crosses an erased slot)"), so a `@[no_alloc]` function cannot
+silently pay for one.
+
+### The FFI
+
+A type named in an `extern` signature is excluded from the representation and
+stays Boxed end to end. The C side would otherwise be handed the boxed cell —
+which is the right layout, and is what every existing `extern` was written
+against — but that box would be a fresh unowned cell, and since the aggregate
+has no refcount Perceus emits no caller-side drop for it, so it would leak
+once per call. Keeping the type boxed removes the question rather than
+answering it. `docs/ffi.md` states this from the user's side.
+
+### Where it is off
+
+- **The REPL and the JIT.** A fragment's result thunk is invoked as
+  `void -> ptr` and its value printed by walking a heap cell, so a fragment
+  returning a struct in registers would be read as a pointer.
+  `Repr.force_disable` turns the representation off process-wide for those.
+- **The JS backend.** Its runtime is GC'd and `Js_emit` has no arm for an
+  inline aggregate.
+- **`MARCH_NO_UNBOX=1`**, the bisection escape hatch: every type classifies
+  Boxed, restoring the pre-2026-09-03 representation exactly.
+
+### One registry, read by everyone
+
+The classification is computed once per compilation unit, by
+`Contract_pipeline.run` right after Mono and Defun, and every consultation
+site reads that one table: `repr_of_ty`, `llvm_ty`, `needs_rc`,
+`borrow_eligible`, `Escape`, `Drop`, `Alloc_contract`. This is deliberate and
+is the same discipline the actor-message and collision-set exclusions exist to
+enforce: encode, decode and RC must never disagree about a type's
+representation. One table read by all of them cannot split; two independent
+derivations can. `Repr.rebind_registration` hands the pipeline's answer to the
+emitter unchanged, so a type definition that appears after the decision (a
+later pass's specialisation) simply stays Boxed everywhere.
+
+**Claim 15: verified (IR + gauge).** `test/test_codegen.ml`'s
+`unboxed_aggregates` group asserts the `%ub.Vec3 = type { double, double,
+double }` declaration, an `insertvalue`/`extractvalue` pair, and zero
+`call ptr @march_alloc(` in a `Vec3`-only module — with a RED control that
+registers the empty table and shows the same program allocating. A compiled
+20,000-iteration `Vec3` loop moves `march_live_allocs` by exactly 0.
 
 ---
 

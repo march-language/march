@@ -1,0 +1,38 @@
+-- types (3) --
+record Ident { name : String, node_id : String }
+record Hello { identity : Ident, nonce : String }
+type V = S(String) | A(List(V))
+-- fns (2) --
+## enc
+fn enc(h : { identity : { name : String, node_id : String }, nonce : String }) : V =
+  let $t12 : List(V) = let $t3 : V = let $t2 : String = let $t1 : { name : String, node_id : String } = h.identity in
+$t1.name in
+inc_rc $t2;
+alloc V.S($t2) in
+let $t11 : List(V) = let $t6 : V = let $t5 : String = let $t4 : { name : String, node_id : String } = h.identity in
+$t4.node_id in
+inc_rc $t5;
+alloc V.S($t5) in
+let $t10 : List(V) = let $t8 : V = let $t7 : String = h.nonce in
+inc_rc $t7;
+alloc V.S($t7) in
+let $t9 : List(V) = alloc List.Nil(V)() in
+alloc List.Cons($t8, $t9) in
+alloc List.Cons($t6, $t10) in
+alloc List.Cons($t3, $t11) in
+dec_rc h;
+alloc V.A($t12)
+
+## main
+fn main(_cap_console : Cap(IO.Console)) : () =
+  let my_id : { name : String, node_id : String } = let $t13 : String = ++("node-", "b") in
+let $t14 : String = ++("pk-", "b") in
+{ name = $t13, node_id = $t14 } in
+let h : { identity : { name : String, node_id : String }, nonce : String } = let $t15 : String = ++("n", "1") in
+inc_rc my_id;
+{ identity = my_id, nonce = $t15 } in
+let $p17 : V = enc(h) in
+dec_rc $p17;
+let $t16 : String = my_id.node_id in
+println($t16)
+

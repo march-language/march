@@ -83,7 +83,28 @@ Because the number of tasks tracks the chunk count (not the element count), the 
 
 ### The scheduler
 
-In **compiled** code, tasks run on March's M:N green-thread scheduler: several OS threads (4 by default), each running many lightweight green threads, with work-stealing to keep cores busy. This is the same runtime described in [Actors]({{ site.baseurl }}/docs/actors/). Reference counting is atomic and each actor/task owns a private arena heap, so there is **no stop-the-world GC pause**; parallel work scales cleanly.
+In **compiled** code, tasks run on March's M:N green-thread scheduler: several OS threads (one per CPU by default), each running many lightweight green threads, with work-stealing to keep cores busy. This is the same runtime described in [Actors]({{ site.baseurl }}/docs/actors/). Reference counting is atomic and each actor/task owns a private arena heap, so there is **no stop-the-world GC pause**; parallel work scales cleanly.
+
+#### How many OS threads
+
+**One per online CPU**, by default. You override it with the `MARCH_NUM_SCHEDULERS` environment variable at run time:
+
+```bash
+MARCH_NUM_SCHEDULERS=4 ./my_program     # exactly 4 scheduler threads
+MARCH_NUM_SCHEDULERS=auto ./my_program  # one per online CPU (the default)
+MARCH_NUM_SCHEDULERS=1 ./my_program     # fully serialize green threads
+```
+
+The default was a flat **4 on every machine** until 2026-09-04 — four threads on a four-core laptop and four on a 96-core server — so 4 was the effective parallelism ceiling of any March program that had not been told otherwise, and nothing said so. A `pmap_n` over CPU-bound work would plateau at roughly 4x and stay there no matter how many tasks you created. If you have a scaling table taken before that change, it is a table of one data point repeated.
+
+The upper bound is `MARCH_MAX_SCHEDULERS`, a compile-time constant (64) that sizes the runtime's scheduler table. A larger request is clamped, and the runtime says so on stderr rather than silently running fewer threads:
+
+```
+march: MARCH_NUM_SCHEDULERS=200 exceeds this build's maximum of 64; using 64
+scheduler threads (rebuild the runtime with -DMARCH_MAX_SCHEDULERS=200 to raise it)
+```
+
+A value that is not a positive integer or `auto` is likewise reported and the default used.
 
 ### Why parallel FBIP needs no locks
 

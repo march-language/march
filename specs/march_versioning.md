@@ -31,7 +31,7 @@ trivially passes; `latest` is meaningless; drift never fires. This plan is the
 | Version model | **Lockstep** — one number covers `march`, `forge`, `march-lsp` | They ship as one toolchain from one `dune-project` |
 | Ambition | **Real & visible** — no formal compatibility policy yet | Appropriate pre-1.0; policy deferred |
 | Mechanism | Generated `Version` module via a dune `(rule)` | One source of truth, embeds git hash, no new dependency |
-| In-tree version meaning | The **next, in-development** version | Lets nightlies derive `X.Y.Z-nightly.YYYYMMDD`; matches Rust/Go |
+| In-tree version meaning | ~~The **next, in-development** version~~ → **the last RELEASED version** (superseded 2026-09-10) | The `-dev` suffix was never implemented across two releases. Nightlies patch-increment instead (`scripts/nightly-version.sh`), which orders correctly without a suffix; see [2026-09-10-release-mechanism-design.md](2026-09-10-release-mechanism-design.md) |
 
 ## Design
 

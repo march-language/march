@@ -45,8 +45,8 @@ The divergent set, exactly as `rc_types.ml` states it:
 |---|---|---|
 | `TFn _` | **true** | **false** |
 | bare `TVar _` | **true** | **false** |
-| `TTuple _` | **false** | **true** |
-| `TRecord _` | **false** | **true** |
+| `TTuple _` | true | true |
+| `TRecord _` | true | true |
 
 Everything else agrees (atoms and scalars: both false; `TCon`/`TString`/
 `TPtr`/`TVar "_"`: both true). The divergence is load-bearing, not an
@@ -62,18 +62,28 @@ oversight:
   for the dec while Perceus's capture-site accounting still assumes
   ownership transfer — this is exactly the boundary the closure-FV fix
   lineage (§3) landed on.
-- **`TTuple`/`TRecord` — Perceus false, Borrow true.** Perceus never emits
-  aggregate-level RC ops for a tuple/record cell — ownership is reconciled
-  at the *field* level via the `borrowed_field_vars` mechanism (§4). But
-  record/tuple params must be borrow-*eligible* so the fixpoint can infer
-  `cfg:borrowed` for functions that only read fields via `EField` — this is
-  the toml-cluster fix (§5).
+- **`TTuple`/`TRecord` — both true; these no longer diverge.** Aggregates
+  own their fields and are DEEP-dropped at death, exactly like variants.
+  `borrowed_field_vars` (§4) still governs the *read* path — a field
+  extracted from a live aggregate is borrowed, and is dup'd if it escapes —
+  and record/tuple params stay borrow-*eligible* so the fixpoint can infer
+  `cfg:borrowed` for functions that only read fields via `EField` (the
+  toml-cluster fix, §5). What changed is the *death* path, which previously
+  did not exist: with `needs_rc` false, Perceus never decided an aggregate
+  was dead, so every record and tuple cell leaked together with every heap
+  value it owned (measured: a 200k-iteration loop rebuilding a
+  `{ n : Int, s : String }` leaked ~200k strings and ~200k cells, where the
+  equivalent two-field variant leaked nothing).
+
+  The read and death paths are orthogonal, which is why the `390dff00`
+  double-free warning below does not forbid this: that bug was about fields
+  extracted from a *live* aggregate being independently freed.
 
 `rc_types.ml`'s module doc carries the full fix-history citations for each
 arm (Map.fold `TFn` crash, Gate.cast `TVar` UAF, the Toml `get_str`
-corruption for the `TTuple`/`TRecord` side) — this document does not repeat
-them; changing any arm without reading that doc first reopens one of those
-crash classes.
+corruption for the `TTuple`/`TRecord` read path) — this document does not
+repeat them; changing any arm without reading that doc first reopens one of
+those crash classes.
 
 ---
 
@@ -408,6 +418,71 @@ neither of which is sort_by:
    elsewhere" set (see below) — without this second, *independent* fix,
    the conservatism above actively causes a double-free, not just a leak.
 
+### 6.1 Branch variables of a live-across-case scrutinee are borrowed
+### field vars (the G73 elision)
+
+**Governing module: `lib/tir/perceus_core.ml`**'s `ECase` case, the
+`scrutinee_live_across_case` computation feeding `env_for_br`'s
+`borrowed_field_vars`.
+
+The `la` re-add described above makes a borrowed scrutinee's branch
+variables *live*, which is enough to stop them being freed and enough to
+make a consuming use dup them. It is **not** enough to stop them being
+dup'd at a use that consumes nothing. A projection bound out of a live
+scrutinee and then handed to a borrowed parameter got the full owned-
+binding treatment:
+
+```
+Box($f) -> let s : String = inc_rc $f; $f in
+             let $rc : Int = string_byte_length(s) in
+             dec_rc s; $rc
+```
+
+`inc_rc` at the projection (because `$f` is live, so the alias binding
+`let s = $f` must mint its own reference) and `dec_rc` after the call (§2's
+borrowed-position rule: the callee will not release what the caller lent
+it). Neither is needed — `b` outlives the whole arm and `s` never escapes
+it. Under the scheduler `march_incrc_local` defers to the atomic
+`march_incrc` on any scheduler thread, so this pair is an atomic
+read-modify-write on a header that other workers are reading concurrently:
+a cache line bouncing between cores for a *read*. Measured on a one-field
+`Cell(NativeU8Arr)` wrapper against the same array read directly, the
+wrapped form was 5.8x slower single-threaded and got **slower** as threads
+were added, while the direct form sped up 5.8x.
+
+**The fix** is not a new mechanism: such a br_var *is* a borrowed field
+var in the sense §7 and the `ELet` `is_borrowed_field` cases already
+define, so the `ECase` branch env now says so. Everything else follows from
+the existing discipline — the alias-binding arm of `ELet` skips RC
+processing of `let a = <br_var>`, the `post_dec_vars` filters in
+`EApp`/`ECallPtr` exclude `borrowed_field_vars`, and a consuming use still
+dups because the br_vars are in the branch's live-at-exit set. The dup for
+an escaping projection is not removed, only **moved** from the projection
+site to the escaping use.
+
+**The safety gate is `live_after` membership ALONE, not `scrutinee_borrowed`.**
+The premise being discharged is "the parent outlives the arm", and only the
+first of `scrutinee_borrowed`'s three disjuncts establishes it:
+
+- `name_free_in v br_body` — the path-insensitive conservatism above — says
+  only that the scrutinee is *mentioned* somewhere in the arm. Ownership
+  then transfers into the body, which may consume and free the scrutinee
+  part-way through while a projected field is still being read. Today that
+  field holds its own `+1` and survives. Eliding it there would convert
+  this section's deliberate leak-not-crash into a use-after-free, which is
+  the one direction that is not allowed to be wrong.
+- `TTuple`/`TRecord` scrutinees are `needs_rc = false` (§1): Perceus never
+  sees the aggregate's lifetime, so it cannot discharge the premise at all.
+
+Excluding those two leaves elidable pairs on the table. That is the
+acceptable direction; §6's asymmetry argument runs the same way here.
+
+**Standing regression artifact:** the golden pair
+`test/snapshots/{lower,perceus}/borrowed_scrutinee_field_read.expected`.
+Its `read_only` function is two projections and two borrowed reads with
+**zero** RC ops; its `escapes` control is the same projection returned from
+the arm, carrying exactly one `inc_rc` at the return.
+
 ### The double-dec fix (`20d1d144`)
 
 `add_cross_decrcs` (the cross-branch dead-variable `EDecRC` pass, §7)
@@ -667,6 +742,64 @@ pin) and the `tree_transform`/`binary_trees` benchmarks are unaffected. Golden
 `g44_crdt_convergence` now includes the disjoint-key `VectorClock.compare`/
 `.concurrent` case unconditionally (previously excluded, scoped around this
 bug).
+
+---
+
+## 10. Boxes that codegen allocates and Perceus cannot see (case merges)
+
+**Governing module: `lib/tir/llvm_case.ml`** (`finish_ptr_merge`), with
+`lib/tir/llvm_ctx.ml`'s `coerce` as the site that creates the boxes.
+
+Every `ECase`/`if` merge stores its arms through a `ptr`-typed result slot, so
+an arm whose value is NOT ptr-shaped is boxed on the way in and read back on
+the way out. Two types are in that position, and both have `needs_rc = false`
+(§1) — which is precisely why the box has no owner:
+
+| arm type | box | why Perceus never drops it |
+|---|---|---|
+| `TFloat` (`double`) | `march_alloc_float` cell | `needs_rc TFloat = false` |
+| an unboxed small scalar aggregate (`Repr.Unboxed`, `%ub.T`) | `march_alloc(16 + 8n)` cell | `needs_rc` is false for the aggregate |
+
+**Invariant.** A box created by a merge's own coerce-to-`ptr` calls is owned by
+that merge and must be released there. The proof that it is safe to release is
+the arm-type uniformity check: when every arm that reaches the merge shared one
+pre-coercion LLVM type that is not itself `ptr`, the pointer loaded at the
+merge can only be a box this `emit_case` allocated — never escaped, never
+aliased, never read by anyone else. Any other mix (including plain `ptr` arms,
+whose value came from elsewhere and is owned by someone else) hands the pointer
+back untouched.
+
+Order matters: unbox **before** the release. `march_decrc_local` is a shallow
+free, so the read must happen while the cell is still live — and the shallowness
+is also what makes releasing an aggregate box safe at all, since its fields are
+raw scalars (`Repr.is_scalar_field` admits only Int/Float/Bool) and a
+field-walking free would sniff a raw `double`'s bits with `IS_HEAP_PTR`.
+
+**Fix lineage.** Three instances of the same defect, one per boundary, each
+found as a live-object leak scaling exactly with the loop count rather than as
+a failing assertion:
+
+- Boxed-path merge, `TFloat` — one leaked `march_float_box` per evaluation
+  (`specs/progress/2026-08-12-float-boxing-case-merge-leak-fix.md`).
+- Niche-path merge, `TFloat` — 20 000 leaked boxes on a 20 000-iteration
+  `Option(Option(Float))` loop
+  (`specs/progress/2026-08-22-erased-slot-ownership-leaks.md`).
+- Both merges, unboxed aggregate — a `Pair(Float, Float)` built inside an `if`
+  leaked one 32-byte cell per construction, 5 001 live objects over 5 000
+  iterations, while the same program with the aggregate built straight-line or
+  in a callee did not
+  (`specs/progress/2026-09-04-unboxed-aggregate-branch-join-leak.md`).
+
+The third is why the check is stated as "uniform non-`ptr` arm type" rather
+than as a special case for `double`: a new boxable arm type is otherwise a
+silent leak by default. **A type whose `needs_rc` is false but whose `llvm_ty`
+is not `ptr` must be added to `finish_ptr_merge` in the same change that makes
+it boxable**, or every branch join over it leaks.
+
+Not covered by this invariant, and still open: the box an unboxed aggregate
+gets when it is stored into a *niche-encoded ADT payload* (`Some(P2(...))`) has
+the same no-owner problem at a different boundary — see
+`specs/todos/2026-09-04-unboxed-aggregate-niche-payload-leak.md`.
 
 ---
 

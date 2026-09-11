@@ -1,0 +1,18 @@
+-- Task 4 fixture: a block-level `fn`'s own parameter and return refinements
+-- are declared but never checked. `check_fn_post_verdict` is only invoked
+-- from the `A.DFn` and `A.DImpl` arms of `visit_decl`; an `A.ELetFn` inside
+-- a block is never visited that way, so neither its parameter refinement
+-- nor its return refinement ever reaches an obligation.
+-- See specs/todos/2026-09-03-block-fn-refinement-unchecked.md.
+mod HolesLocalFn do
+  fn outer() : Int do
+    fn inner(n : {Int | n > 0}) : {Int | _ > 0} do
+      n
+    end
+    inner(0)
+  end
+
+  fn main() : Int do
+    outer()
+  end
+end

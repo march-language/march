@@ -41,6 +41,22 @@ typedef struct { int64_t rc; int32_t tag; int32_t pad; int64_t len; char data[];
  * sync manually (same circular-include avoidance). */
 #define MARCH_SIMD_TAG    (-4)
 #define MARCH_SIMD_BOX_SIZE   32u
+/* Native-array sentinel (must match march_runtime.h MARCH_NATIVE_ARR_TAG). A
+ * native array is [rc][tag][pad][len@16][kind@24][data@32]: a FLAT buffer, not
+ * a cell of pointer fields, so it has to be copied by its byte length. Without
+ * this case it fell to the ADT arm below, which reads n_fields from alloc_meta
+ * and scans the payload for pointers. Kept in sync manually (same
+ * circular-include avoidance as the tags above). */
+#define MARCH_NATIVE_ARR_TAG (-6)
+#define NATIVE_ARR_HDR_SZ    32u
+/* elem_kind at byte 24: 0=i64, 1=f64, 2=f32, 3=i32, 4=u8. */
+static size_t native_elem_size(unsigned kind) {
+    switch (kind) {
+        case 0: case 1: return 8u;
+        case 2: case 3: return 4u;
+        default:        return 1u;
+    }
+}
 
 /* Values below one OS page are unboxed scalars (inttoptr-encoded integers). */
 #define IS_HEAP_PTR(p)  ((uintptr_t)(p) >= 4096u)
@@ -193,6 +209,17 @@ static void *copy_value(march_heap_t *dst_heap, void *value, fwd_table *fwd) {
     if (h->tag == MARCH_SIMD_TAG) {
         void *nv = march_process_alloc(dst_heap, MARCH_SIMD_BOX_SIZE);
         memcpy(nv, value, MARCH_SIMD_BOX_SIZE);
+        ((msg_hdr *)nv)->rc = 1;
+        fwd_insert(fwd, value, nv);
+        return nv;
+    }
+
+    if (h->tag == MARCH_NATIVE_ARR_TAG) {
+        int64_t  len  = *(int64_t *)((char *)value + 16);
+        unsigned kind = *(uint8_t *)((char *)value + 24);
+        size_t   sz   = NATIVE_ARR_HDR_SZ + (size_t)len * native_elem_size(kind);
+        void *nv = march_process_alloc(dst_heap, sz);
+        memcpy(nv, value, sz);
         ((msg_hdr *)nv)->rc = 1;
         fwd_insert(fwd, value, nv);
         return nv;

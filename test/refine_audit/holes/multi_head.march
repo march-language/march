@@ -1,0 +1,15 @@
+-- Task 4 fix (whole-plan review finding 2): a multi-head function's clause
+-- merge (Desugar.desugar_fn_def's general path, mk_named_param) discards
+-- every declared parameter type before the checker ever sees it, so the
+-- refinement is not merely unenforced -- it has no site at all pre-fix.
+-- See specs/todos/2026-09-03-desugar-dropped-refinement-unchecked.md.
+mod HolesMultiHead do
+  cap verified
+
+  fn f(n : {Int | n > 0}) do n end
+  fn f(0) do 0 end
+
+  fn main() : Int do
+    f(0 - 1)
+  end
+end

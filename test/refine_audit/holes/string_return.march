@@ -1,0 +1,10 @@
+-- Task 4 fixture: a `{String | ...}` return refinement files no obligation
+-- at all. Reproducer lifted from
+-- specs/todos/2026-09-03-string-return-refinement-unchecked.md.
+mod HolesStringReturn do
+  fn f() : {String | _ == "a"} do "a" end
+
+  fn main() : String do
+    f()
+  end
+end

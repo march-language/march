@@ -13,5 +13,6 @@ $rc_2
 fn peek(b : { inner : String }) : String =
   let $rc_1 : String = b.inner in
 inc_rc $rc_1;
+dec_rc b;
 $rc_1
 
