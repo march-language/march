@@ -300,24 +300,36 @@
            (run ./test_scheduler_churn_runner))))
 
 ; ── march_actor_broadcast_migrate dead-target message leak regression ────
-; Same minimal, decoupled dependency set as test_scheduler_mbox above (only
-; march_scheduler.c, no march_runtime.c): this test mirrors the fixed
-; malloc + march_sched_send + conditional-free pattern from
-; march_actor_broadcast_migrate's Phase 2 directly against march_sched_send,
-; rather than driving march_actor_broadcast_migrate itself end to end -- see
-; test_broadcast_migrate_leak.c's header comment for why a fully
-; deterministic single-threaded repro of the real function's snapshot-to-
-; send race isn't achievable without test-only hooks in production code.
+; Links the full runtime (same set as test_actor_registry_runner below) so
+; the test drives march_actor_inject_migrate_msg and
+; march_actor_broadcast_migrate THEMSELVES against a proc driven to
+; PROC_DEAD on the calling thread, with march_migrate_msgs_live() as the
+; leak oracle. Deleting the free-on-DEAD line in the runtime turns it red.
 (rule
  (targets test_broadcast_migrate_leak_runner)
  (deps    test_broadcast_migrate_leak.c
-          ../runtime/march_scheduler.c
-          ../runtime/march_scheduler.h
-          ../runtime/march_deque.h)
- (action  (run %{cc} -std=gnu11 -Wall -Wextra -I../runtime
+          ../runtime/march_runtime.c ../runtime/march_runtime.h
+          ../runtime/march_scheduler.c ../runtime/march_scheduler.h
+          ../runtime/march_heap.c ../runtime/march_heap.h
+          ../runtime/march_gc.c ../runtime/march_gc.h
+          ../runtime/march_message.c ../runtime/march_message.h
+          ../runtime/march_deque.h
+          ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+          ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
+          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+          ../runtime/march_remote_registry.c
+          (glob_files ../runtime/*.h))
+ (action  (run %{cc}
+               -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
                -o %{targets}
-               test_broadcast_migrate_leak.c ../runtime/march_scheduler.c
-               -lpthread)))
+               test_broadcast_migrate_leak.c ../runtime/march_runtime.c
+               ../runtime/march_scheduler.c ../runtime/march_heap.c
+               ../runtime/march_gc.c ../runtime/march_message.c
+               ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+               ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
+               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+               ../runtime/march_remote_registry.c
+               -lpthread -lz -lm)))
 (rule
  (alias   runtest)
  (deps    (file test_broadcast_migrate_leak_runner))
@@ -3923,8 +3935,10 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/actor_stop_tree.expected interp_actor_stop_tree.out)))
 
-; ── file_*/dir_* declare the qualified File.FileError: ctor match on both backends ──
-; specs/2026-09-11-correctness-fixes-design.md §2.
+; ── A file error's constructor can be matched, on both backends ──────────
+; The file_*/dir_* builtins denote the canonical BARE `FileError`; a
+; cross-module ctor used to register a QUALIFIED parent type, which could
+; never unify with it. specs/2026-09-11-correctness-fixes-design.md §2.
 (rule
  (targets native_file_error_ctor_match native_file_error_ctor_match.out)
  (deps (file %{exe:../bin/main.exe})
@@ -3954,6 +3968,163 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/file_error_ctor_match.expected interp_file_error_ctor_match.out)))
+
+; ── The supervisor restart-race class, forced by construction ────────────
+; specs/todos/2026-08-17-supervision-race-test-seam.md, option 2. Two
+; children crash on two OS threads; MARCH_SUP_TEST_STALL_MS widens the gap
+; between the in-flight marker claim and the strategy call so the second
+; crash reliably lands inside it and is deflected, and the absorb loop must
+; then cover it. Disabling the absorb loop in march_supervisor_notify turns
+; this red (the deflected child stays dead). Compiled-only: the interpreter
+; has one eager thread and no marker to race. stderr is captured on purpose:
+; the "(batch restart already pending, skipped)" trace line is the proof the
+; deflection happened, so a run where it did not fails instead of passing
+; vacuously.
+(rule
+ (targets native_supervisor_deflected_crash_absorbed native_supervisor_deflected_crash_absorbed.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/supervisor_deflected_crash_absorbed.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_supervisor_deflected_crash_absorbed
+        native/supervisor_deflected_crash_absorbed.march)
+   (setenv MARCH_SUP_TEST_STALL_MS 300
+    (setenv MARCH_SUP_TRACE 1
+     (with-stdout-to native_supervisor_deflected_crash_absorbed.out
+          (system "./native_supervisor_deflected_crash_absorbed 2>&1")))))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_deflected_crash_absorbed.expected native_supervisor_deflected_crash_absorbed.out)))
+
+; ── Vault.new on an already-registered name: same table on both backends ──
+; The interpreter used to mint a fresh table (silently orphaning the first
+; one's data) where the compiled runtime reused it; see
+; specs/progress/2026-09-10-vault-new-same-name-backend-parity.md.
+(rule
+ (targets native_vault_new_same_name native_vault_new_same_name.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/vault_new_same_name.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_vault_new_same_name
+        native/vault_new_same_name.march)
+   (with-stdout-to native_vault_new_same_name.out
+        (system "./native_vault_new_same_name")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/vault_new_same_name.expected native_vault_new_same_name.out)))
+
+(rule
+ (targets interp_vault_new_same_name.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/vault_new_same_name.march))
+ (action
+  (with-stdout-to interp_vault_new_same_name.out
+    (run %{exe:../bin/main.exe} native/vault_new_same_name.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/vault_new_same_name.expected interp_vault_new_same_name.out)))
+
+; ── The stash / become idiom, as a worked multi-step protocol ─────────────
+; specs/todos/2026-08-12-selective-receive-or-stash.md: March has no
+; selective receive; a mode field plus a stash list in actor state covers
+; the same ground, and this golden is the documented recipe, run on both
+; backends.
+(rule
+ (targets native_actor_stash_become native_actor_stash_become.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/actor_stash_become.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_stash_become
+        native/actor_stash_become.march)
+   (with-stdout-to native_actor_stash_become.out
+        (system "./native_actor_stash_become")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_stash_become.expected native_actor_stash_become.out)))
+
+(rule
+ (targets interp_actor_stash_become.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/actor_stash_become.march))
+ (action
+  (with-stdout-to interp_actor_stash_become.out
+    (run %{exe:../bin/main.exe} native/actor_stash_become.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_stash_become.expected interp_actor_stash_become.out)))
+
+; ── Growing-mailbox alarm, polled: Actor.top_by_mailbox / over_mailbox ──
+; specs/todos/2026-08-12-per-actor-introspection-and-alarms.md. Pins the
+; shape (ordering, cut, filter), not exact depths, which race on the
+; compiled backend.
+(rule
+ (targets native_actor_mailbox_alarm native_actor_mailbox_alarm.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/actor_mailbox_alarm.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_mailbox_alarm
+        native/actor_mailbox_alarm.march)
+   (with-stdout-to native_actor_mailbox_alarm.out
+        (system "./native_actor_mailbox_alarm")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_mailbox_alarm.expected native_actor_mailbox_alarm.out)))
+
+(rule
+ (targets interp_actor_mailbox_alarm.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/actor_mailbox_alarm.march))
+ (action
+  (with-stdout-to interp_actor_mailbox_alarm.out
+    (run %{exe:../bin/main.exe} native/actor_mailbox_alarm.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_mailbox_alarm.expected interp_actor_mailbox_alarm.out)))
 
 ; Teardown ORDER, which stdout cannot show: a child that printed at shutdown
 ; would race main on the compiled backend, and until actors get a terminate

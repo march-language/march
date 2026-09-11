@@ -1,0 +1,67 @@
+-- The stash / become idiom, as a worked multi-step protocol.
+-- specs/todos/2026-08-12-selective-receive-or-stash.md.
+--
+-- March has no selective receive: `receive()` pops the oldest message, and
+-- only the first `receive()` in a handler may block. What it has instead is
+-- the actor's own state, which is enough for the two things selective receive
+-- is used for:
+--   become  -- a `mode` field the handlers dispatch on;
+--   stash   -- a list in state holding the work that cannot be served yet,
+--              replayed through the same serving code when the mode changes.
+--
+-- Here a Session cannot serve queries until it has been told it is
+-- Connected. Queries that arrive first are stashed; the transition drains the
+-- stash IN ARRIVAL ORDER before anything queued behind it is looked at, which
+-- is the ordering re-sending the stash to `self()` would NOT give you (a
+-- re-sent message lands behind whatever is already queued).
+--
+-- Every observable line is read by main through Actor.call after
+-- run_until_idle(), so the golden is identical on both backends.
+mod ActorStashBecome do
+  needs IO.Console
+
+  type Mode = Connecting | Ready
+  type ReportReq = ReportReq
+
+  actor Session do
+    state { mode : Mode, stash : List(String), served : String }
+    init  { mode: Connecting, stash: Nil, served: "" }
+
+    -- First handler = the Actor.call handler; reply_to is the caller.
+    on Report(reply_to) do
+      Actor.reply(reply_to, state.served)
+      state
+    end
+
+    on Query(q : String) do
+      match state.mode do
+        Ready      -> serve(state, q)
+        Connecting -> { state with stash: Cons(q, state.stash) }
+      end
+    end
+
+    on Connected() do
+      -- become Ready, then unstash: the stash is newest-first, so reverse it
+      -- and push each stashed query through the same serving code.
+      let ready = { state with mode: Ready, stash: Nil }
+      List.fold_left(List.reverse(state.stash), ready, fn (st, q) -> serve(st, q))
+    end
+  end
+
+  fn serve(st, q) do
+    { mode: st.mode, stash: st.stash, served: st.served ++ q ++ ";" }
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let s = spawn(Session)
+    send(s, Query("a"))
+    send(s, Query("b"))
+    send(s, Connected())
+    send(s, Query("c"))
+    run_until_idle()
+    match Actor.call(s, ReportReq, 5000) do
+      Ok(log) -> println("served: " ++ log)
+      Err(e)  -> println("error: " ++ e)
+    end
+  end
+end

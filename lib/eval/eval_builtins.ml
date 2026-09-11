@@ -3739,6 +3739,16 @@ let base_env : env =
      multi-threaded compiled runtime. *)
 
   ; ("vault_new", VBuiltin ("vault_new", function
+      | [VString name] when
+          (match Hashtbl.find_opt vault_name_registry name with
+           | Some id -> Hashtbl.mem vault_registry id
+           | None -> false) ->
+        (* ETS-style semantics, matching the compiled runtime's
+           march_vault_new: a name that is already registered names the SAME
+           table, not a fresh one. Before 2026-09-10 the interpreter minted a
+           fresh table here and silently orphaned the old one's data — see
+           specs/progress/2026-09-10-vault-new-same-name-backend-parity.md. *)
+        VVaultHandle (Hashtbl.find vault_name_registry name)
       | [VString name] ->
         let id = !vault_next_id in
         incr vault_next_id;
