@@ -90,21 +90,7 @@ let assign_ids ctx : unit =
       | Some n when not (Hashtbl.mem ctx.Llvm_ctx.ctor_desc_ids n)
                  && describable ctx n ->
         incr next;
-        Hashtbl.replace ctx.Llvm_ctx.ctor_desc_ids n !next;
-        (* A module-declared type is lowered under its QUALIFIED name
-           (`File.FileError`) but reaches call sites under its canonical BARE
-           name whenever the static type came from a builtin signature or a
-           bare annotation (`Result(String, FileError)` for `file_read`), so a
-           lookup by the static name missed and compiled `to_string` printed
-           `#<tag:N>` for every File/Dir error. Alias the bare suffix to the
-           same id, first-wins, the rule this table already follows for the
-           short name. specs/2026-09-11-correctness-fixes-design.md §2. *)
-        (match String.rindex_opt n '.' with
-         | Some i ->
-           let bare = String.sub n (i + 1) (String.length n - i - 1) in
-           if not (Hashtbl.mem ctx.Llvm_ctx.ctor_desc_ids bare) then
-             Hashtbl.replace ctx.Llvm_ctx.ctor_desc_ids bare !next
-         | None -> ())
+        Hashtbl.replace ctx.Llvm_ctx.ctor_desc_ids n !next
       | _ -> ())
     ctx.Llvm_ctx.type_defs
   end

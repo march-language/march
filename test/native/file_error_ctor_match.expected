@@ -1,2 +1,2 @@
 notfound:/nonexistent/zzz
-dir: NotFound("/nonexistent/zzz")
+dir:notfound

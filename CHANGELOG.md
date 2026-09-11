@@ -37,9 +37,8 @@ git log is authoritative for exact commits.
   annotation and builtin signature denotes the canonical bare name, so the two
   never unified ("expected `FileError` but got `File.FileError`") and a bare
   `NotFound(p)` resolved to the DNS constructor of the same name. Compiled
-  `to_string` of a file error also printed `#<tag:N>` instead of the
-  constructor, because the descriptor table was keyed only by the lowered
-  qualified name.
+  (Compiled `to_string` of such an error still renders `#<tag:N>`; that
+  rendering gap is tracked separately.)
 - **The interpreter's `file_rename` error now names the path**, as the
   compiled runtime and every other file builtin already did.
 - **A record type declared in one typecheck no longer changes a later,

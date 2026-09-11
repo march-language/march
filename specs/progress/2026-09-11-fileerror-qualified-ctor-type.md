@@ -10,19 +10,23 @@
 > in-file constructor site. A first attempt that qualified both builtin tables
 > instead is recorded in the design spec as the wrong turn.
 >
-> Compiled `to_string` of a file error also printed `#<tag:N>`: the ctor
-> descriptor table was keyed only by the lowered qualified name
-> (`File.FileError`) while call sites look it up under the static bare name.
-> `Llvm_ctor_desc.assign_ids` now aliases the bare suffix to the same id.
+> **Deliberately NOT closed here:** compiled `to_string` of such an error still
+> prints `#<tag:N>`, because the ctor-descriptor table is keyed by the lowered
+> qualified name while call sites look it up by the bare static one. Aliasing
+> the bare suffix was tried and **deterministically SIGSEGVs** (40/40 runs of
+> `native_actor_monitor_down_reason`, against 0/30 on main); two narrowings of
+> that alias did not help. The full measurement trail, the two ruled-out
+> mechanisms and three alternative designs are in
+> `specs/todos/2026-09-11-compiled-to-string-of-module-declared-type.md`.
+> `test_stdlib_suite.ml`'s table therefore keeps accepting `#<tag:N>`, and
+> `test/native/file_error_ctor_match.march` prints a classification string
+> rather than the error value.
 >
-> Tightened `test_stdlib_suite.ml`'s thirteen-case table to require the
-> compiled line to equal the interpreted one byte for byte (it used to accept
-> `#<tag:N>`) — RED pre-fix on all thirteen. That tightening then exposed a
-> SEPARATE backend divergence, now also fixed: the interpreter's `file_rename`
+> While that alias was briefly in place it did expose a SEPARATE backend
+> divergence, which is fixed and kept: the interpreter's `file_rename`
 > reported a bare strerror message where the compiled runtime and every other
 > file builtin carry `"<path>: <strerror>"` (OCaml's `Sys.rename` does not
-> include the path, unlike `open_in_bin`). New fixture
-> `test/native/file_error_ctor_match.march` runs on both backends.
+> include the path, unlike `open_in_bin`).
 > Design: `specs/2026-09-11-correctness-fixes-design.md` §2. Original filing
 > follows.
 
