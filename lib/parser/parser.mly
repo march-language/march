@@ -479,6 +479,23 @@ decl:
       match d with
       | DFn (def, span) -> DFn ({ def with fn_attrs = attrs }, span)
       | d -> d }
+  | attrs = nonempty_list(fn_attr); d = protocol_decl
+    { (* The one protocol attribute is `@[endpoints]`: generate typed session
+         endpoints over the `Session` capability for every role
+         (lib/desugar/desugar_endpoints.ml).  Anything else is rejected here
+         rather than ignored, for the same reason `@[no_alloc]` is checked on
+         actors below: a silently-dropped attribute looks like it worked. *)
+      List.iter (fun a ->
+          if a <> "endpoints" then
+            error_raise
+              (Printf.sprintf
+                 "`@[%s]` is not a protocol attribute. The only one is `@[endpoints]`, \
+                  which generates typed endpoints for every role of the protocol." a)
+              None $startpos(attrs)) attrs;
+      match d with
+      | DProtocol (name, pdef, span) ->
+        DProtocol (name, { pdef with proto_attrs = attrs }, span)
+      | d -> d }
   | attrs = nonempty_list(fn_attr); d = actor_decl
     { if List.exists (fun a -> a = "no_alloc"
                         || (String.length a > 9 && String.sub a 0 9 = "no_alloc:")) attrs then
@@ -874,7 +891,7 @@ actor_handler:
     end *)
 protocol_decl:
   | PROTOCOL; name = upper_name; DO; steps = list(protocol_step); END
-    { DProtocol (name, { proto_steps = steps }, mk_span ($loc)) }
+    { DProtocol (name, { proto_steps = steps; proto_attrs = [] }, mk_span ($loc)) }
 
 protocol_step:
   | sender = upper_name; ARROW; receiver = upper_name; COLON; t = ty

@@ -11,6 +11,31 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- **`@[endpoints]` on a `protocol` generates a typed endpoint API for every
+  role**, over the `Session` transport capability. Each session state becomes
+  an `always_linear` type and each protocol step a function between them, so
+  the ordinary typechecker enforces the protocol: sending out of order is a
+  type mismatch, sending twice on one state or abandoning a session is a
+  linearity error, an offer takes one callback per label, and a callback
+  cannot drop its state because it must return a token only the generated
+  wrappers produce. Messages get a `Json` codec over `Bytes`; the LSP sees the
+  generated modules because generation happens at desugar time. Protocol
+  conformance was previously checked only over the same-thread `Chan`/`MPST`
+  runtime; the `Session` capability ran for real but was untyped. This joins
+  the two: `test/session/stream_endpoints.march` replays the `Stream`
+  protocol through the generated API with the same eight-line trace as the
+  hand-written endpoints, on both backends.
+
+### Fixed
+
+- `march --fmt` dropped the `end` that closes a `choose by … :` block inside a
+  `protocol`, so formatting a file with a choice produced a program that no
+  longer parsed (the loop's `end` closed the choice and the protocol's `end`
+  closed the loop). The formatter now emits it; a round-trip regression pins
+  the shape.
+
 ## [0.4.0] - 2026-09-10
 
 ### Added

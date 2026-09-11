@@ -326,6 +326,77 @@ it suspends, so a synchronous reply arrives before its handler exists.)
 Any module that takes a `Cap(Session.Live)` parameter declares
 `needs Session.Live`, as for any proof capability.
 
+## Generated endpoints: `@[endpoints]`
+
+Annotate a protocol with `@[endpoints]` and the compiler generates a typed
+endpoint API for every role, over the `Session` capability above:
+
+```march
+@[endpoints]
+protocol Stream do
+  loop do
+    Prod -> Cons : Int
+    choose by Cons:
+      more -> Cons -> Prod : Bool
+      done -> Cons -> Prod : Bool
+              stop
+    end
+  end
+end
+```
+
+This produces three nested modules next to your own declarations:
+
+- `Stream_Msg` — the message type (one constructor per message or label:
+  `Msg_Prod_Cons_1(Int)`, `More(Bool)`, `Done(Bool)`), a `Json` codec over
+  `Bytes`, and the role indices (`role_Prod() = 1`, `role_Cons() = 2`, in
+  order of first appearance).
+- `Stream_Prod` and `Stream_Cons` — one **`always_linear` type per session
+  state** and one function per transition.
+
+Session states are ordinary nominal types, so the ordinary typechecker
+enforces the protocol. `Stream_Prod` has `S_send_Msg_Prod_Cons_1` (at the loop
+head, Prod must send), `S_offer_more_done` (after sending, Prod waits for the
+choice) and `S_end`; its transitions are `register`, `send_Msg_Prod_Cons_1`,
+`offer_more_done` and `close`. The endpoints read as they did by hand, minus
+the raw transport calls and minus any way to get the protocol wrong:
+
+```march
+pfn prod(s : Cap(Session.Live), st : Stream_Prod.S_send_Msg_Prod_Cons_1, next : Int) : Stream_Prod.Yield do
+  let st1 = Stream_Prod.send_Msg_Prod_Cons_1(s, st, next)
+  Stream_Prod.offer_more_done(s, st1,
+    fn (_b, st2) -> prod(s, st2, next + 1),
+    fn (_b, st2) -> Stream_Prod.close(s, st2))
+end
+
+pfn cons(s : Cap(Session.Live), st : Stream_Cons.S_recv_Msg_Prod_Cons_1, budget : Int) : Stream_Cons.Yield do
+  Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (_n, st1) ->
+    if budget > 1 do
+      cons(s, Stream_Cons.choose_more(s, st1, true), budget - 1)
+    else
+      Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true))
+    end)
+end
+```
+
+What is checked, each a compile error rather than a runtime surprise:
+
+| mistake | why it is rejected |
+|---|---|
+| closing at the loop head | `close` takes `S_end`; you hold `S_send_…` — a type mismatch |
+| sending twice on one state | the state is `always_linear`: "used more than once" |
+| registering and never driving the session | the state is `always_linear`: "was never used" |
+| a callback that ignores its state | it must return a `Yield`, and only the generated wrappers that consume a state produce one; the token's constructor argument is a private type |
+| handling only some branches of an offer | `offer_…` takes one callback **per label** |
+
+A label and its payload are one message, so every branch of a `choose` must
+begin with a message from the chooser; `@[endpoints]` reports a branch that
+does not. Payload types are carried verbatim: scalars work as they are, and a
+user type needs `derive Json`. Generation happens at desugar time, so the LSP
+sees the generated modules like any other code. The runnable twin of the
+example above, with an in-process transport and a pinned trace, is
+`test/session/stream_endpoints.march`.
+
 ## See also
 
 - [Actors]({{ site.baseurl }}/docs/actors/): mailboxes, `spawn`/`send`, and the scheduler these channels run on.

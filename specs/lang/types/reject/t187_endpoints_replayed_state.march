@@ -1,0 +1,25 @@
+-- EXPECT-ERROR: is used more than once
+mod Main do
+  needs IO
+  needs Session.Live
+  @[endpoints]
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+  -- A session state is always_linear: sending twice on one state would fork
+  -- the session, and is a linearity error, not a runtime surprise.
+  pfn prod(s : Cap(Session.Live), st : Stream_Prod.S_send_Msg_Prod_Cons_1) : Stream_Prod.Yield do
+    let a = Stream_Prod.send_Msg_Prod_Cons_1(s, st, 1)
+    let b = Stream_Prod.send_Msg_Prod_Cons_1(s, st, 2)
+    let _ = Stream_Prod.offer_more_done(s, a, fn (_x, st2) -> Stream_Prod.close(s, st2), fn (_x, st2) -> Stream_Prod.close(s, st2))
+    Stream_Prod.offer_more_done(s, b, fn (_x, st2) -> Stream_Prod.close(s, st2), fn (_x, st2) -> Stream_Prod.close(s, st2))
+  end
+  fn main(c : Cap(IO)) do () end
+end

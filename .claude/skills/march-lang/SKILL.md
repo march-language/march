@@ -620,7 +620,7 @@ Functions always in scope without `use`:
 
 **Channel** — `new`, `join`, `leave`, `push`, `broadcast`, `broadcast_from`, `serialize`, `parse`
 
-**Session** (transport behind a capability; needs `Session.Live`) — `attach`, `register`, `emit`, `suspend`, `close`
+**Session** (transport behind a capability; needs `Session.Live`) — `attach`, `register`, `emit`, `suspend`, `close`; `@[endpoints]` on a `protocol` generates `<P>_Msg` and `<P>_<Role>` modules with one `always_linear` type per session state (see session-types.md)
 
 **PubSub** — `new`, `subscribe_state`, `unsubscribe_state`, `broadcast`, `broadcast_from`, `topic_shard`, `topic_matches`, `broadcast_to`
 

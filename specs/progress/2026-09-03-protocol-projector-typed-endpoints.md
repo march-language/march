@@ -1,6 +1,6 @@
 # `[P2]` Choreography: a projector that emits typed endpoints over `Session`
 
-**Status:** specced 2026-09-03, reviewed and amended 2026-09-10, not started.
+**Status:** specced 2026-09-03, reviewed and amended 2026-09-10, **shipped 2026-09-11** (see "What shipped" at the end). Steps 0–5 of the order of work landed; step 6, the actor-hosted endpoint, stays open on the two prerequisites named in item 3.
 Follows `specs/progress/2026-08-31-cap-runtime-dictionaries.md`, whose
 `Session` transport capability is the substrate this builds on, and which
 explicitly deferred "whether to build the projector on top of this" as a later
@@ -446,3 +446,85 @@ probing the exact shape the API uses.
 - `stdlib/session.march` — the transport capability
 - `test/session/stream_replay.march` — the artifact this must reproduce
 - `specs/lang/linear-types.md` — `always_linear`, findings L3 and L8
+
+---
+
+## What shipped (2026-09-11)
+
+`@[endpoints]` on a `protocol` generates `<P>_Msg` and one `<P>_<Role>` module
+per role: `lib/desugar/desugar_endpoints.ml`, hooked into `desugar_module`.
+Unit tests in `test/test_endpoints.ml` (12 cases: shape for `Stream` and
+`Relay`, the two desugar-time rejections, both roles typechecking, the four
+misuses rejected with their exact messages, a payload declared after the
+protocol). Corpus: `accept/t190`, `reject/t186`–`t189`. Golden:
+`test/session/stream_endpoints.march`, the raw fixture rewritten against the
+generated API, diffed against **the raw fixture's own expected trace** and
+identical on both backends. Docs in both trees, CHANGELOG, SKILL.
+
+What building it changed, each measured rather than assumed:
+
+- **AST, not source text.** The spec said generate March source and inject it
+  as the capability wrappers do. `desugar_module` turns out to have some
+  twenty callers -- the driver, the LSP, the REPL, forge, search, lint -- and
+  the injection precedent lives in the driver alone, so the editor would never
+  have seen a generated module. Generating AST inside desugar, as `derive`
+  does, is the only placement every consumer shares; it also carries payload
+  types verbatim instead of printing and re-parsing them, and it is still
+  checked by the typechecker like any other code. `Desugar_derive`'s span
+  uniquification is reused for the same reason it exists there.
+- **Generated modules go BEFORE the user's first ordinary declaration**, after
+  any leading `needs`/`use`/`alias`. The `always_linear` registry is filled in
+  declaration order, so a user function checked before the generated module
+  is declared sees the state types as ordinary: three of the four reject
+  programs were silently accepted until the insertion point moved. The same
+  hand-written nested module placed after `main` loses the reuse check; that
+  ordering sensitivity is the typechecker's, not this generator's, and is
+  worth its own todo.
+- **Each role module declares `needs Session.Live` itself.** The capability
+  checker asks every module for its own manifest; the enclosing module's does
+  not cover a nested one.
+- **The codec's `derive Json` is expanded by the generator inside `<P>_Msg`**,
+  by calling `Desugar_derive.expand_derive` directly, because the top-level
+  derive pass does not descend into nested modules and a derive at the user's
+  top level would rebind their bare `to_json`. A user record deriving `Json`
+  in the same module coexists with it (the fixture carries one).
+- **Roles are numbered from 1 in order of first appearance**, not sorted from
+  0 as the typechecker orders them: the number is what a transport hands back
+  as an endpoint, so it is user-visible, and the raw fixture's trace (`close 2`,
+  `close 1`) pins the producer as 1.
+- **`choose` transitions carry a per-branch destination.** The first version
+  sent every branch to the chooser itself; a multiparty choice may inform a
+  different role on each label.
+- **Message constructors** are the capitalised label for a branch head and
+  `Msg_<Sender>_<Receiver>_<k>` for an unlabelled step, `k` counting among
+  messages between the same pair so an unrelated edit does not rename it.
+  Ugly in user code (`send_Msg_Prod_Cons_1`); a label syntax for plain steps
+  is the fix, and a grammar change, so not here.
+
+Found on the way, not part of the design:
+
+- **The formatter drops the `end` of a `choose` block inside a protocol**
+  (`Format.emit_proto_step`'s `ProtoChoice` arm emits the label branches and
+  no closing line), so `--fmt` on an untouched corpus file (`accept/t105`)
+  produces a program that no longer parses. Pre-existing; fixed in the same
+  change with a round-trip regression in `test/test_fmt.ml`.
+- **A module whose only use of `Cap(Session.Live)` is inside generated nested
+  modules gets the "declares `needs Session.Live` but no function requires
+  it" warning**: the unused-needs scan looks at top-level functions only. Any
+  real endpoint module has a user function taking the capability, so it does
+  not fire in practice; noted, not fixed.
+- **The unit-test harness prepends stdlib modules as nested modules**, which
+  the capability checker and the record-derive's bare Json event constructors
+  do not tolerate; the CLI typechecks the stdlib separately and filters its
+  spans. `test_endpoints.ml` mirrors the filter and uses a variant payload.
+
+Not done, deliberately:
+
+- **Step 6, the actor-hosted endpoint**, on item 3's two prerequisites:
+  linearity for actor-state fields
+  (`2026-09-10-linear-actor-state-field-retained-after-consume.md`) and a
+  transport whose `suspend` delivers into a mailbox.
+- Decision 3 (a named access point; `register` still takes an `Int`) and
+  decision 4 (a typed sender for multiparty receives; the `from` is ignored).
+- An `--emit-endpoints` debugging flag. The LSP shows the generated modules,
+  and `MARCH_DUMP_TXT=lower` lists their functions.

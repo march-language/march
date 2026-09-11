@@ -1,0 +1,130 @@
+mod StreamEndpoints do
+  -- stream_replay.march, written against the GENERATED endpoint API instead
+  -- of the raw `Session` transport calls.  Same protocol, same in-process
+  -- transport, same eight-line trace -- byte for byte, diffed against
+  -- stream_replay.expected on the compiled path.  That identity is the proof
+  -- that `@[endpoints]` emits what the hand-written endpoint did.
+  --
+  -- What the typed version buys, and what the raw one could not check:
+  -- `prod` cannot emit `Done` at the loop head (no function takes the state it
+  -- holds), cannot send twice on one state (always_linear), cannot forget to
+  -- close (the state is linear), and cannot ignore a branch of the offer (one
+  -- callback per label, by construction).  A callback cannot abandon its
+  -- state either: it has to return a `Yield`, and only the generated wrappers
+  -- that consume a state produce one.
+  --
+  -- One thing this ordering depends on, recorded because the trace is the
+  -- proof: the raw Cons suspends THEN emits on the same endpoint; the typed
+  -- API forces emit (`choose_more`) THEN suspend (`recv_…`), because the
+  -- suspend needs the state the emit returns.  The trace is unchanged only
+  -- because this transport ENQUEUES on emit and drains after the handler
+  -- returns.  A transport that delivered inside `emit` would not give the
+  -- same trace from the two orderings.
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs Session.Live
+
+  @[endpoints]
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+
+  -- A user type deriving `Json` in the SAME module as the generated codec:
+  -- the generated `Stream_Msg` derives its own, inside its own module, and
+  -- must neither rebind this one's bare `to_json` nor collide with it
+  -- (return-type-directed `from_json`, 414baa5a).
+  type Marker = { n : Int }
+  derive Json for Marker
+
+  -- ── the in-process transport, verbatim from stream_replay.march ───────
+  type Transport = { ops : Session.Ops, drain : () -> () }
+
+  pfn drain_loop(handlers, pending) : () do
+    let q = match Vault.get(pending, "q") do
+      Some(d) -> d
+      None    -> Deque.empty()
+    end
+    match Deque.pop_front(q) do
+      (None, _) -> ()
+      (Some((to, from, msg)), rest) ->
+        Vault.set(pending, "q", rest)
+        match Vault.get(handlers, int_to_string(to)) do
+          Some(h) ->
+            let _ = h(from, msg, to)
+            drain_loop(handlers, pending)
+          None -> panic("stream_endpoints: delivery to " ++ int_to_string(to) ++ " with no handler installed")
+        end
+    end
+  end
+
+  fn in_process() : Transport do
+    let handlers = Vault.new("stream_endpoints_handlers")
+    let pending  = Vault.new("stream_endpoints_pending")
+    Vault.set(pending, "q", Deque.empty())
+    {
+      ops: {
+        register: fn (_ap, role) -> role,
+        emit: fn (ep, to, msg) -> do
+          let q = match Vault.get(pending, "q") do
+            Some(d) -> d
+            None    -> Deque.empty()
+          end
+          Vault.set(pending, "q", Deque.push_back(q, (to, ep, msg)))
+          ep
+        end,
+        suspend: fn (ep, handler) -> do
+          Vault.set(handlers, int_to_string(ep), handler)
+          ep
+        end,
+        close: fn ep -> print_line("close " ++ int_to_string(ep))
+      },
+      drain: fn _ -> drain_loop(handlers, pending)
+    }
+  end
+
+  -- ── role Prod, against Stream_Prod ──────────────────────────────────────
+  -- At the loop head Prod must send; after sending it must offer more/done.
+  pfn prod(s : Cap(Session.Live), st : Stream_Prod.S_send_Msg_Prod_Cons_1, next : Int) : Stream_Prod.Yield do
+    print_line("Prod sends Item(" ++ int_to_string(next) ++ ")")
+    let st1 = Stream_Prod.send_Msg_Prod_Cons_1(s, st, next)
+    Stream_Prod.offer_more_done(s, st1,
+      fn (_b, st2) ->
+        print_line("Prod got More")
+        prod(s, st2, next + 1),
+      fn (_b, st2) ->
+        print_line("Prod got Done")
+        Stream_Prod.close(s, st2))
+  end
+
+  -- ── role Cons, against Stream_Cons ──────────────────────────────────────
+  -- At the loop head Cons must receive; then it chooses more or done.
+  pfn cons(s : Cap(Session.Live), st : Stream_Cons.S_recv_Msg_Prod_Cons_1, budget : Int) : Stream_Cons.Yield do
+    Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
+      print_line("Cons got Item(" ++ int_to_string(n) ++ ")")
+      if budget > 1 do
+        let st2 = Stream_Cons.choose_more(s, st1, true)
+        cons(s, st2, budget - 1)
+      else
+        let st2 = Stream_Cons.choose_done(s, st1, true)
+        Stream_Cons.close(s, st2)
+      end)
+  end
+
+  fn main(c : Cap(IO)) do
+    let t = in_process()
+    let s = Session.attach(c, t.ops)
+    let cons_st = Stream_Cons.register(s, 0)
+    let prod_st = Stream_Prod.register(s, 0)
+    let _ = cons(s, cons_st, 2)
+    let _ = prod(s, prod_st, 1)
+    t.drain(())
+  end
+end

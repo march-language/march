@@ -1,0 +1,23 @@
+-- EXPECT-ERROR: expected `S_end` but got `S_send_Msg_Prod_Cons_1`
+mod Main do
+  needs IO
+  needs Session.Live
+  @[endpoints]
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+  -- `@[endpoints]` (lib/desugar/desugar_endpoints.ml) gives every session
+  -- state its own always_linear type.  Protocol ORDER is then ordinary typing:
+  -- at the loop head Prod holds S_send_…, and `close` takes S_end.
+  pfn prod(s : Cap(Session.Live), st : Stream_Prod.S_send_Msg_Prod_Cons_1) : Stream_Prod.Yield do
+    Stream_Prod.close(s, st)
+  end
+  fn main(c : Cap(IO)) do () end
+end

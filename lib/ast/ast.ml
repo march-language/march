@@ -369,6 +369,10 @@ and actor_handler = {
 
 and protocol_def = {
   proto_steps : protocol_step list;
+  proto_attrs : string list;
+  (** Compiler attributes on the declaration.  [@[endpoints]] asks the
+      desugarer to generate typed session endpoints for every role
+      (lib/desugar/desugar_endpoints.ml); nothing else is accepted. *)
 }
 
 and protocol_step =

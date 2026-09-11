@@ -486,6 +486,32 @@ let test_stdlib_prelude () = stdlib_roundtrip "prelude.march"
 (* Test suite registration                                             *)
 (* ------------------------------------------------------------------ *)
 
+
+(* A `choose` block inside a `protocol` must round-trip: the formatter once
+   emitted its label branches and no closing `end`, so the loop's `end` closed
+   the choice and the protocol's `end` closed the loop -- a formatted file that
+   no longer parsed.  Checked on the shape that bit (a choice inside a loop,
+   with `stop`), for parse and for idempotence. *)
+let test_protocol_choice_end () =
+  let src = {|mod M do
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+end
+|} in
+  check_parses "protocol choice" src;
+  check_idempotent "protocol choice" src;
+  let out = fmt src in
+  Alcotest.(check int) "one `end` per block: loop, choose, protocol"
+    3 (List.length (List.filter (fun l -> String.trim l = "end") (String.split_on_char '\n' out)) - 1)
+
 let () =
   let open Alcotest in
   run "formatter" [
@@ -514,6 +540,7 @@ let () =
       test_case "type alias"      `Quick test_type_alias;
       test_case "small float literal" `Quick test_small_float_literal;
       test_case "format fixpoint" `Quick test_format_fixpoint;
+      test_case "protocol choice end" `Quick test_protocol_choice_end;
       test_case "trailing blank insensitive" `Quick test_trailing_blank_insensitive;
       test_case "import run is tight" `Quick test_import_run_is_tight;
       test_case "cap run is tight"    `Quick test_cap_run_is_tight;

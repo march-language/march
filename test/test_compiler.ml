@@ -14895,6 +14895,7 @@ let compiler_suites =
       ("alloc_contract", Test_alloc_contract.tests);
       ("cap_unforgeable", Test_cap_unforgeable.tests);
       ("cap_dict", Test_cap_dict.tests);
+      ("endpoints", Test_endpoints.tests);
       ("cap_attrib_agreement", Test_cap_attrib_agreement.tests);
       ("cap_sandbox_profile", Test_cap_sandbox_profile.tests);
       ("cap_sandbox_runtime", Test_cap_sandbox_runtime.tests);

@@ -1025,8 +1025,8 @@ in the test; `Session.attach` is the only mint.
    actor that logs AND reads the clock can now be mocked, wholly or partially.
    Supervised children, including a `kill`ed child's restart, are captured
    too (#405; `specs/progress/2026-09-03-supervised-children-not-captured.md`).
-2. The projector, and with it an actor-hosted endpoint — specced in
-   `specs/todos/2026-09-03-protocol-projector-typed-endpoints.md`. That file
+2. The projector — **shipped 2026-09-11**, `specs/progress/2026-09-03-protocol-projector-typed-endpoints.md`
+   (`@[endpoints]`). The actor-hosted endpoint stays open, as that file's item 3 says. That file
    answers the question deferred under Background ("whether to build the
    projector on top of this is a **later** decision"): yes, as a source
    generator emitting one `always_linear` type per session state, which needs
