@@ -15688,3 +15688,4 @@ let codegen_suites =
   @ Test_collision_set.suites (* Task 0: same-short-name type collision-set computation *)
   @ Test_ctor_tags.suites (* Task 1: globally-unique ctor tags for colliding types *)
   @ Test_trmc.suites (* TRMC Phase 1: tail-recursion-modulo-cons eligibility *)
+  @ Test_kind.suites (* type kinds: the per-type table (specs/2026-09-10-type-kinds-design.md) *)
