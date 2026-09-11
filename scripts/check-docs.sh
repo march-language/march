@@ -285,6 +285,88 @@ else
 fi
 [ "$c_problems" -eq 0 ] && echo "  ok — corpus INDEX counts match on-disk file counts"
 
+# ─── Check D: generated stdlib pages carry every public symbol ───────────────
+#
+# gen-stdlib-docs.yml regenerates docs/docs/stdlib/ on main and the nightly diffs
+# generator output against the committed pages — both compare the GENERATOR to
+# itself. Neither sees a generator that runs and emits LESS than the source
+# declares (the fold_f32 / mem_peak_bytes omission in
+# specs/todos/2026-09-08-ci-check-generated-stdlib-html-in-sync.md). This reads
+# each page back against its module: every top-level public `fn` and `type`
+# must have its anchor (`id="fn-<name>"`, `id="type-<Name>"`) on the page named
+# after the `mod` declaration (Js.Audio.html, not audio.html).
+#
+# Gated by CHECK_STDLIB_HTML=1: on a stdlib PR the pages are red BY DESIGN until
+# the bot regenerates them after merge, so this runs where the pages are
+# supposed to be fresh — gen-stdlib-docs.yml before its push, and the nightly.
+
+if [ "${CHECK_STDLIB_HTML:-0}" = "1" ]; then
+echo "== Check D: generated stdlib pages vs stdlib/*.march public symbols =="
+d_problems=0
+d_checked=0
+for src in stdlib/*.march; do
+  modname=$(grep -m1 -E '^mod +[A-Za-z0-9_.]+' "$src" | awk '{print $2}')
+  [ -z "$modname" ] && continue
+  page="docs/docs/stdlib/$modname.html"
+  if [ ! -f "$page" ]; then
+    echo "  MISSING PAGE: $src declares mod $modname but $page does not exist"
+    d_problems=$((d_problems + 1)); fail=1; continue
+  fi
+  while IFS= read -r name; do
+    [ -z "$name" ] && continue
+    d_checked=$((d_checked + 1))
+    grep -q "id=\"fn-$name\"" "$page" \
+      || { echo "  MISSING SYMBOL: $page has no anchor for fn $name (declared in $src)"; d_problems=$((d_problems + 1)); fail=1; }
+  done < <(grep -oE '^  fn +[a-z_][A-Za-z0-9_?!]*' "$src" | awk '{print $2}' | sort -u)
+  while IFS= read -r name; do
+    [ -z "$name" ] && continue
+    d_checked=$((d_checked + 1))
+    grep -q "id=\"type-$name\"" "$page" \
+      || { echo "  MISSING SYMBOL: $page has no anchor for type $name (declared in $src)"; d_problems=$((d_problems + 1)); fail=1; }
+  done < <(grep -oE '^  type +[A-Z][A-Za-z0-9_]*' "$src" | awk '{print $2}' | sort -u)
+done
+[ "$d_problems" -eq 0 ] && echo "  ok — $d_checked public symbols all anchored on their module page"
+else
+echo "== Check D: generated stdlib pages (skipped; set CHECK_STDLIB_HTML=1 where the pages are expected fresh) =="
+fi
+
+# ─── Check E: quarantine aliases match the quarantine inventory ──────────────
+#
+# A quarantined test is one whose dune rule is on a `<name>_quarantined` alias
+# instead of `runtest`, so it is dark until the nightly runs it. The inventory
+# of what that leaves unverified is the todo below; the nightly loop derives its
+# alias list from the dune files. Both rot silently (the loop once named three
+# aliases deleted two weeks earlier), so: the set of `*_quarantined` aliases in
+# test/dune + forge/test/dune must equal the inventory's live (non-struck)
+# rows, and no quarantine comment may point at a file that does not exist.
+
+inventory="specs/todos/2026-07-24-quarantined-tests-coverage-that-is-currently-dark-inventory-2026.md"
+echo "== Check E: quarantine aliases vs $inventory =="
+e_problems=0
+if [ -f "$inventory" ]; then
+  defined=$(grep -hoE '\(alias +[A-Za-z0-9_]+_quarantined\)' test/dune forge/test/dune 2>/dev/null \
+              | sed -E 's/\(alias +//; s/\)//' | sort -u)
+  # Live rows: `| `test/<alias>` | ...` with no ~~strike~~ on the alias cell.
+  listed=$(grep -E '^\| *`(test|forge/test)/[A-Za-z0-9_]+_quarantined`' "$inventory" \
+             | sed -E 's/^\| *`[a-z/]*\/([A-Za-z0-9_]+_quarantined)`.*/\1/' | sort -u)
+  for a in $defined; do
+    grep -qx "$a" <<<"$listed" \
+      || { echo "  UNLISTED ALIAS: $a is defined in a dune file but has no live row in the inventory"; e_problems=$((e_problems + 1)); fail=1; }
+  done
+  for a in $listed; do
+    grep -qx "$a" <<<"$defined" \
+      || { echo "  STALE ROW: inventory lists $a as live but no dune file defines that alias (strike the row or restore the alias)"; e_problems=$((e_problems + 1)); fail=1; }
+  done
+  while IFS= read -r hit; do
+    [ -z "$hit" ] && continue
+    echo "  DEAD POINTER: $hit (specs/todos.md no longer exists; point at $inventory)"
+    e_problems=$((e_problems + 1)); fail=1
+  done < <(grep -n 'specs/todos\.md' test/dune forge/test/dune 2>/dev/null || true)
+  [ "$e_problems" -eq 0 ] && echo "  ok — $(echo "$defined" | grep -c . ) quarantine alias(es), inventory in sync"
+else
+  echo "  note: $inventory not found — skipping"
+fi
+
 echo
 if [ "$fail" -ne 0 ]; then
   echo "doc-lint FAILED — fix the references above, or add a doc-lint:ignore-* marker"

@@ -129,6 +129,8 @@ val fresh_var : int -> ty
 val repr : ty -> ty
 val reset_tvar_display_names : unit -> unit
 val _record_names : (string, string option) Hashtbl.t
+val record_names_dump : unit -> (string * string option) list
+val record_names_load : (string * string option) list -> unit
 val pp_ty : ?parens:bool -> ty -> string
 val pp_ty_pretty : ?indent:int -> ?width:int -> ty -> string
 val pp_session_ty : session_ty -> string
@@ -236,6 +238,7 @@ type env = {
   errors : Err.ctx;
   pending_constraints : constraint_ list ref;
   type_map : (Ast.span, ty) Hashtbl.t;
+  record_names_snapshot : (string * string option) list;
   refs : ref_record list ref;
   current_decl : string ref;
   scheme_witnesses : (int list, constraint_ list * ty) Hashtbl.t;

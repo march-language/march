@@ -1,0 +1,9 @@
+-- Entry of a two-file --test build; test_b.march (its sibling, discovered via
+-- MARCH_LIB_PATH) does not parse. Before 2026-09-11 the sibling was dropped
+-- with a stderr note and this suite compiled and ran as ONE test with 0
+-- failures. specs/todos/2026-08-17-forge-test-silent-skip-on-compile-failure.md
+mod TestA do
+  test "a" do
+    assert 1 == 1
+  end
+end

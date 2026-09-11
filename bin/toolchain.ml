@@ -800,6 +800,7 @@ let ensure_runtime_so () =
       ^ (opt_file (Filename.concat runtime_dir "march_reload.c"))    (* HCR reload server *)
       ^ (opt_file (Filename.concat runtime_dir "march_blake3.c"))    (* BLAKE3 for server-side cap_root recompute *)
       ^ (opt_file (Filename.concat runtime_dir "march_cap_lattice.c")) (* cap subsumption/normalize for ACTIVATE4 admission *)
+      ^ (opt_file (Filename.concat runtime_dir "tweetnacl.c"))        (* ed25519 for ACTIVATE verification; was missing from the cross-compile list (check-runtime-sources.sh caught it) *)
       ^ (opt_file (Filename.concat runtime_dir "march_ctx_escape.c"))  (* ~H contextual escapers; referenced by march_extras.c *)
       ^ (opt_file (Filename.concat runtime_dir "march_remote_registry.c"))  (* L4 remote registry *)
       ^ (opt_file (Filename.concat runtime_dir "march_monitor_registry.c")) (* dist monitor registry *)

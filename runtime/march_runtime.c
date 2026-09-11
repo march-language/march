@@ -9,6 +9,10 @@
 #include <math.h>
 #include <ctype.h>
 #include <stdatomic.h>
+
+/* Defined next to march_actor_broadcast_migrate; used by the actor receive
+ * loop and march_actor_msg_dispose, both of which precede it in this file. */
+static void migrate_msg_free(void *mm);
 #include <pthread.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -3231,7 +3235,7 @@ static void actor_green_thread(void *arg) {
                 void *new_state = mm->migrate_fn((void *)(uintptr_t)a[4]);
                 a[4] = (int64_t)(uintptr_t)new_state;
             }
-            free(mm);
+            migrate_msg_free(mm);
             march_sched_tick();
             continue;
         }
@@ -4029,6 +4033,40 @@ static void march_supervisor_notify(void *supervisor, march_actor_meta *crashed_
 
     if (skip_due_to_pending) return;
 
+    /* Test seam (specs/todos/2026-08-17-supervision-race-test-seam.md, option
+     * 2): MARCH_SUP_TEST_STALL_MS, read once, widens the gap between the
+     * leaf-lock release above and the strategy call below from "a few
+     * instructions" to a window a second OS thread can reliably land a
+     * sibling crash inside. That is the interleaving the in-flight marker +
+     * absorb loop exist for, and the only way to force it by construction
+     * rather than by luck; test/native/supervisor_deflected_crash_absorbed
+     * runs under it. Unset (the default) costs one cached getenv and nothing
+     * else. Only the synchronous batch path stalls: a delayed restart already
+     * has its backoff window, and a non-batch strategy has no marker to race. */
+    if (claimed_sync_batch) {
+        static _Atomic int stall_ms = -1;
+        int ms = atomic_load_explicit(&stall_ms, memory_order_relaxed);
+        if (ms < 0) {
+            const char *e = getenv("MARCH_SUP_TEST_STALL_MS");
+            ms = e ? atoi(e) : 0;
+            if (ms < 0) ms = 0;
+            atomic_store_explicit(&stall_ms, ms, memory_order_relaxed);
+        }
+        if (ms > 0) {
+            /* Yield, don't sleep: a blocking usleep would pin this OS worker,
+             * and a sibling whose crash is queued on THIS worker's run queue
+             * would then only run after the stall — the exact opposite of
+             * the interleaving the seam exists to force. Yielding keeps the
+             * worker serving other green threads (the sibling included)
+             * while this one loiters between the unlock and the strategy. */
+            int64_t deadline = march_now_ms() + ms;
+            while (march_now_ms() < deadline) {
+                if (march_sched_current()) march_sched_yield();
+                else usleep(1000);
+            }
+        }
+    }
+
     if (delay == 0) {
         /* The first pass is unconditional and at child_idx, exactly as the
          * pre-fix code was — that is what keeps the single-crash supervision
@@ -4579,7 +4617,7 @@ int64_t march_is_alive(void *actor) {
  * rejected. */
 static void march_actor_msg_dispose(void *msg) {
     if (IS_HEAP_PTR(msg) && ((int64_t *)msg)[1] == MARCH_MIGRATE_TAG) {
-        free(msg);
+        migrate_msg_free(msg);
         return;
     }
     if (IS_HEAP_PTR(msg) && ((march_hdr *)msg)->tag == MARCH_DOWN_TAG) {
@@ -4701,6 +4739,14 @@ void march_actor_set_call_base(void *actor, int64_t base) {
 
 #define MARCH_MIGRATE_SNAPSHOT 2048
 
+/* Live (allocated, not yet disposed) migrate messages. See
+ * march_actor_inject_migrate_msg below. */
+static _Atomic int64_t g_migrate_msgs_live = 0;
+static void migrate_msg_free(void *mm) {
+    atomic_fetch_sub_explicit(&g_migrate_msgs_live, 1, memory_order_relaxed);
+    free(mm);
+}
+
 void march_actor_broadcast_migrate(uint32_t dispatch_name_id,
                                    void *(*migrate_fn)(void *)) {
     if (!dispatch_name_id) return;
@@ -4742,17 +4788,44 @@ void march_actor_broadcast_migrate(uint32_t dispatch_name_id,
      * never march_decrc, matching march_actor_msg_dispose's mirror-image
      * disposal of this same malloc'd (not march-heap-allocated) shape. */
     for (int i = 0; i < n; i++) {
-        march_migrate_msg_t *mm = (march_migrate_msg_t *)malloc(sizeof(*mm));
-        if (mm) {
-            mm->_rc        = 1;
-            mm->_tag       = MARCH_MIGRATE_TAG;
-            mm->migrate_fn = migrate_fn;
-            if (march_sched_send(snaps[i]->green_thread, mm) == MARCH_SEND_DEAD) {
-                free(mm);
-            }
-        }
+        march_actor_inject_migrate_msg(snaps[i]->green_thread, migrate_fn);
         march_decrc(snaps[i]->actor);
     }
+}
+
+/* Phase 2's per-target body, split out so test/test_broadcast_migrate_leak.c
+ * can drive the REAL send + conditional-free against an already-dead proc
+ * (specs/todos/2026-08-18-broadcast-migrate-no-end-to-end-guard.md, option
+ * 2). Returns march_sched_send's status, or -1 if the malloc failed. Every
+ * migrate message ever allocated is counted in g_migrate_msgs_live and
+ * uncounted at each of its three disposal sites (the DEAD path here, the
+ * receive loop, march_actor_msg_dispose), so a leak on any path is a
+ * non-zero march_migrate_msgs_live() after the fact. */
+int march_actor_inject_migrate_msg(void *green_thread,
+                                   void *(*migrate_fn)(void *)) {
+    march_migrate_msg_t *mm = (march_migrate_msg_t *)malloc(sizeof(*mm));
+    if (!mm) return -1;
+    mm->_rc        = 1;
+    mm->_tag       = MARCH_MIGRATE_TAG;
+    mm->migrate_fn = migrate_fn;
+    atomic_fetch_add_explicit(&g_migrate_msgs_live, 1, memory_order_relaxed);
+    int st = march_sched_send((march_proc *)green_thread, mm);
+    if (st == MARCH_SEND_DEAD) migrate_msg_free(mm);
+    return st;
+}
+
+int64_t march_migrate_msgs_live(void) {
+    return atomic_load_explicit(&g_migrate_msgs_live, memory_order_acquire);
+}
+
+/* Test seam: point an actor's meta at a scheduler proc without spawning a
+ * real actor green thread, so a C test can put a PROC_DEAD proc where
+ * march_actor_broadcast_migrate's Phase 1 filter will snapshot it. Never
+ * called by generated code or the runtime itself. */
+void march_test_actor_bind_green_thread(void *actor, void *proc) {
+    march_actor_meta *meta = find_or_create_meta(actor);
+    atomic_store_explicit(&meta->green_thread, (march_proc *)proc,
+                          memory_order_release);
 }
 
 /* ── Lightweight task spawn ──────────────────────────────────────────────── */

@@ -12,6 +12,8 @@ native_actor_dispatch_rc_window: coverage audit (user + stdlib): 63 enforced, 0 
 native_actor_dispatch_rc_window: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_enumeration: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_actor_enumeration: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_mailbox_alarm: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_actor_mailbox_alarm: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_monitor_down_reason: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_actor_monitor_down_reason: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_registry_basic: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
@@ -24,6 +26,8 @@ native_actor_registry_retire: coverage audit (user + stdlib): 63 enforced, 0 ine
 native_actor_registry_retire: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_registry_retire_vault: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_actor_registry_retire_vault: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_stash_become: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_actor_stash_become: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_stop_drains_mailbox: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_actor_stop_drains_mailbox: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_stop_tree: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
@@ -98,6 +102,8 @@ native_ffi_upcall: coverage audit (user + stdlib): 63 enforced, 0 inert (warned)
 native_ffi_upcall: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_ffi_variant: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_ffi_variant: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_file_error_ctor_match: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_file_error_ctor_match: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_float_arr_list_boxing: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_float_arr_list_boxing: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_float_boxing: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
@@ -324,6 +330,8 @@ native_string_search_edge_cases: coverage audit (user + stdlib): 63 enforced, 0 
 native_string_search_edge_cases: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_string_to_float_option: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_string_to_float_option: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_supervisor_deflected_crash_absorbed: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_supervisor_deflected_crash_absorbed: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_supervisor_one_for_all_restart: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_supervisor_one_for_all_restart: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_supervisor_one_for_one_restart: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
@@ -384,6 +392,8 @@ native_unboxed_aggregate_boundaries: coverage audit (user + stdlib): 63 enforced
 native_unboxed_aggregate_boundaries: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_unit_callback_zero_arg: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_unit_callback_zero_arg: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_vault_new_same_name: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_vault_new_same_name: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_vault_niche_unsafe_element: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_vault_niche_unsafe_element: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_vault_non_string_key: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced

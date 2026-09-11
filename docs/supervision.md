@@ -385,6 +385,13 @@ Set `MARCH_SUP_TRACE=1` to print each restart decision to stderr:
 ` (batch restart already pending, skipped)` suffix when a crash was absorbed
 into an already-pending batch restart instead of scheduling its own.
 
+`MARCH_SUP_TEST_STALL_MS=<ms>` is a test seam for this exact race: it makes a
+synchronous batch restart pause (yielding, so other actors keep running)
+between claiming its in-flight marker and running the strategy, so a test can
+land a sibling's crash inside that window by construction instead of by luck.
+It is read once, does nothing when unset, and exists for the runtime's own
+regression suite; leave it unset in production.
+
 ---
 
 ## Supervision Strategies Compared
@@ -475,6 +482,12 @@ children), and the strategy is passed as the atom `:one_for_one` rather than the
 `app` for the application's root supervisor. See
 [Actors → App Entry Point]({{ site.baseurl }}/docs/actors/) for the same note from the
 actor side.
+
+**Interpreter-only.** The `app` / `Supervisor.spec` / `worker` /
+`dynamic_supervisor` DSL runs under `march run` and `march test`; the compiled
+backend rejects a call to any of them with a positioned error (it used to fail
+at link time with `Undefined symbols: _worker`). A compiled program declares its
+children in a `supervise do … end` block.
 
 ---
 

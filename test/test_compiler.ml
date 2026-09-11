@@ -12331,6 +12331,21 @@ let test_same_name_type_collision_note () =
       ) d.March_errors.Errors.notes
     ) errors)
 
+(** The display-only record-name index used to be process-global and never
+    cleared, so a record `{ a : Int }` declared by ANY earlier check in this
+    process poisoned the signature "a" and the same-name collision note above
+    silently disappeared -- the test passed alone and failed after
+    test_cap_unforgeable declared `type A = { a : Int }`. Now every check
+    reloads the index from its seed env's snapshot, so this poisoning check
+    leaves nothing behind. RED on the pre-fix tree (the note is missing);
+    specs/2026-09-11-correctness-fixes-design.md §1. *)
+let test_record_name_index_does_not_leak_across_checks () =
+  let _ = typecheck {|mod Poison do
+    type A = { a : Int }
+    fn mk() : A do { a: 1 } end
+  end|} in
+  test_same_name_type_collision_note ()
+
 (* A `proof cap X with T` clause resolves T to a ZERO-argument `TCon`, so a
    parameterised dictionary record never unifies with the record literal's own
    inferred type.  Both sides used to print as the bare declared name, giving
@@ -15827,6 +15842,7 @@ let compiler_suites =
           Alcotest.test_case "top-level mod + sibling fn: clear error"      `Quick test_toplevel_mod_plus_sibling_fn_error;
           Alcotest.test_case "nested inline match arm parses (no do/end)"   `Quick test_nested_inline_match_arm_parses;
           Alcotest.test_case "same-name type collision: explanatory note"   `Quick test_same_name_type_collision_note;
+          Alcotest.test_case "record-name index does not leak across checks" `Quick test_record_name_index_does_not_leak_across_checks;
           Alcotest.test_case "parameterised type used with no args: arity note" `Quick test_parameterised_type_arity_note;
         ] );
       ( "let_annotations", [

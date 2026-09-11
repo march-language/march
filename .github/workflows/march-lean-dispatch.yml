@@ -1,0 +1,40 @@
+name: Dispatch march-lean oracle
+
+# march-language/march-lean re-checks this repo's specs/lang/types corpus with an
+# independent Lean implementation of the ERROR-level checks. Nothing here used to
+# tell it when the corpus or the checker changed, so the oracle drifted silently
+# (specs/2026-09-11-ci-tooling-fixes-design.md §6). This fires a repository_dispatch
+# at it with the merged SHA; the Lean build runs where its cache lives.
+#
+# Needs a token with `repo` scope on march-lean, stored as MARCH_LEAN_DISPATCH_TOKEN.
+# A missing secret FAILS this job loudly (curl --fail) rather than skipping: a dispatch
+# nobody notices is exactly the darkness this exists to end.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'specs/lang/types/**'
+      - 'lib/typecheck/**'
+      - 'lib/caps/**'
+  workflow_dispatch:
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Send repository_dispatch to march-language/march-lean
+        env:
+          TOKEN: ${{ secrets.MARCH_LEAN_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::MARCH_LEAN_DISPATCH_TOKEN is not set; the march-lean oracle was NOT notified of ${GITHUB_SHA}"
+            exit 1
+          fi
+          curl --fail --silent --show-error -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $TOKEN" \
+            https://api.github.com/repos/march-language/march-lean/dispatches \
+            -d "{\"event_type\":\"march-corpus-changed\",\"client_payload\":{\"march_sha\":\"${GITHUB_SHA}\",\"ref\":\"${GITHUB_REF}\"}}"
+          echo "dispatched march-corpus-changed for ${GITHUB_SHA}"

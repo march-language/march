@@ -93,9 +93,19 @@ end
 
 The list is a snapshot in spawn order, and inherently racy: an actor can die between the
 enumeration and anything you do with the result. That is already true of every `Pid`, and
-every consumer handles a dead one. What is *not* yet available is a growing-mailbox alarm
-(BEAM's `long_message_queue`) that would tell you *when* a queue crosses a threshold
-instead of requiring you to poll for it, per-actor state inspection, and tracing; see
+every consumer handles a dead one. The two questions a monitor actually asks are packaged
+on top of it: `Actor.top_by_mailbox(n)` returns the `n` deepest mailboxes deepest-first as
+`(pid, depth)` pairs, and `Actor.over_mailbox(threshold)` is the growing-mailbox alarm,
+polled: every actor over the threshold, empty when healthy.
+
+```march
+List.each(Actor.over_mailbox(500), fn hot ->
+  match hot do (p, depth) -> shed_from(p, depth) end)
+```
+
+What is *not* available is the push form of that alarm (BEAM's `long_message_queue`,
+which fires when a queue crosses the threshold instead of being polled), per-actor state
+inspection, and tracing; see
 [`specs/todos/2026-08-12-per-actor-introspection-and-alarms.md`](https://github.com/march-language/march/blob/main/specs/todos/2026-08-12-per-actor-introspection-and-alarms.md).
 
 A practical shedding pattern is checking a worker's depth at the *dispatch point*:

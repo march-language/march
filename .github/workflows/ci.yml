@@ -57,12 +57,36 @@ jobs:
 
       # docs/pagefind/ is a COMMITTED build artifact — march-lang.org is served by
       # GitHub's own Jekyll over docs/, which has no post-build hook, so the search index
-      # can only reach production by being in git. A docs edit without a regenerated
-      # index means the live search silently serves stale results, which nothing else
-      # would catch. Compares a digest of the docs sources, not the index bytes:
-      # Pagefind's output is intentionally not reproducible run-to-run.
+      # can only reach production by being in git. It is BOT-OWNED: sync-docs-search-index.yml
+      # and gen-stdlib-docs.yml regenerate and push it after a merge. A pull request must
+      # not carry it — two PRs that each regenerated the index conflict on every
+      # hash-named file plus pagefind-entry.json, and the index is not reproducible, so
+      # the conflict has no textual resolution. Running `--check` as a PR gate is what
+      # used to recruit humans into writing that file; on PRs we now gate the inverse.
+      # (specs/2026-09-11-ci-tooling-fixes-design.md §2.)
+      - name: Reject pull requests that carry the bot-owned search index
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+          if git diff --name-only "origin/${{ github.base_ref }}...HEAD" -- docs/pagefind | grep -q .; then
+            echo "::error::docs/pagefind/ is bot-owned; drop it from this PR:  git checkout origin/${{ github.base_ref }} -- docs/pagefind && git commit"
+            git diff --name-only "origin/${{ github.base_ref }}...HEAD" -- docs/pagefind | head -20
+            exit 1
+          fi
+          echo "ok — this PR does not touch docs/pagefind/"
+
+      # Off-PR (push to main, dispatch): report staleness, but do not fail the run —
+      # the bot lands its regeneration a minute or three after the merge, and its own
+      # 3-attempt failure is the real red for a stale index.
       - name: Check the committed search index is not stale
-        run: scripts/gen-docs-search-index.sh --check
+        if: github.event_name != 'pull_request'
+        continue-on-error: true
+        run: scripts/gen-docs-search-index.sh --check || echo "::warning::search index stale; sync-docs-search-index.yml should land shortly"
+
+      # Every runtime .c must be classified in runtime/sources.list and every
+      # hand-maintained link list (drivers, JIT .so, dune rules) must agree with it.
+      - name: Check runtime C source lists against runtime/sources.list
+        run: scripts/check-runtime-sources.sh
 
   # The long pole. Kept as its own job so nothing else waits behind it.
   test:

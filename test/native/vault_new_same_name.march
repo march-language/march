@@ -1,0 +1,24 @@
+-- Backend parity: Vault.new on an already-registered name returns the SAME
+-- table on both backends (ETS semantics). Before 2026-09-10 the interpreter
+-- minted a fresh table and silently orphaned the first one's data while
+-- the compiled runtime reused it; found via test/session/stream_replay.
+-- specs/todos/2026-08-12-vault-toward-ets-semantics.md, "Backend divergence".
+mod VaultNewSameName do
+  needs IO
+
+  fn main(_cap : Cap(IO)) do
+    let a = Vault.new("vn_probe")
+    Vault.set(a, "k", 42)
+    let b = Vault.new("vn_probe")
+    match Vault.get(b, "k") do
+      Some(v) -> println("same table: " ++ int_to_string(v))
+      None    -> println("FRESH table")
+    end
+    -- and a different name is still a different table
+    let c = Vault.new("vn_other")
+    match Vault.get(c, "k") do
+      Some(_) -> println("other name SHARED")
+      None    -> println("other name is its own table")
+    end
+  end
+end

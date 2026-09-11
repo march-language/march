@@ -511,6 +511,84 @@ end
   let out = fmt src in
   Alcotest.(check int) "one `end` per block: loop, choose, protocol"
     3 (List.length (List.filter (fun l -> String.trim l = "end") (String.split_on_char '\n' out)) - 1)
+(* ------------------------------------------------------------------ *)
+(* Wide literals break one element per line                            *)
+(* ------------------------------------------------------------------ *)
+
+let max_line_width src =
+  List.fold_left (fun m l -> max m (String.length l)) 0 (String.split_on_char '\n' src)
+
+(** A long list of records used to come out as ONE line (the formatter had no
+    multi-line renderer for literals, so the 80-column budget was never
+    consulted for them). It now breaks one element per line, and every line
+    fits unless a single element is itself wider than the budget.
+    RED on the pre-fix tree: one 200+ column line. *)
+let test_wide_list_of_records_breaks () =
+  let src = {|mod T do
+fn all() do
+  [{ name: "create_users_table_and_indexes", sql: "CREATE TABLE users (id INTEGER PRIMARY KEY)" }, { name: "create_posts_table", sql: "CREATE TABLE posts (id INTEGER PRIMARY KEY, user_id INTEGER)" }, { name: "third", sql: "SELECT 1" }]
+end
+end|} in
+  let out = fmt src in
+  let lines = String.split_on_char '\n' out in
+  Alcotest.(check bool) "list broke across lines (more than 5 lines total)" true
+    (List.length lines > 5);
+  Alcotest.(check bool) "an opening bracket sits alone on its line" true
+    (List.exists (fun l -> String.trim l = "[") lines);
+  Alcotest.(check bool) "every line fits in 80 columns" true (max_line_width out <= 80);
+  check_parses "wide list" src;
+  check_idempotent "wide list" src;
+  (* idempotence of the OUTPUT specifically: formatting the broken form again
+     must reproduce it byte for byte *)
+  Alcotest.(check string) "output is a fixpoint" out (fmt out)
+
+(** REJECT witness: a literal that fits stays inline, byte for byte. *)
+let test_small_literals_stay_inline () =
+  let src = {|mod T do
+fn xs() do
+  [1, 2, 3]
+end
+fn r() do
+  { a: 1, b: 2 }
+end
+end|} in
+  let out = fmt src in
+  let trimmed = List.map String.trim (String.split_on_char '\n' out) in
+  Alcotest.(check bool) "small list stays inline" true (List.mem "[1, 2, 3]" trimmed);
+  Alcotest.(check bool) "small record stays inline" true (List.mem "{ a: 1, b: 2 }" trimmed)
+
+(** A too-wide record ELEMENT inside a broken list breaks in turn, at the
+    next indent level, and the whole thing still round-trips. *)
+let test_wide_record_inside_list_breaks () =
+  let src = {|mod T do
+fn all() do
+  [{ name: "a", sql: "x" }, { name: "create_users_table_and_indexes_and_more_and_more", sql: "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT NOT NULL UNIQUE)" }]
+end
+end|} in
+  let out = fmt src in
+  let lines = String.split_on_char '\n' out in
+  (* fn bodies sit at indent 2 inside the module, the list's elements at 3,
+     so the inner record's opener is alone on a 6-space line. *)
+  Alcotest.(check bool) "inner record opened on its own line one level deeper than the list" true
+    (List.exists (fun l -> l = "      {") lines);
+  check_parses "wide record in list" src;
+  Alcotest.(check string) "output is a fixpoint" out (fmt out)
+
+(** A wide record literal bound by `let` breaks one field per line. *)
+let test_wide_record_let_breaks () =
+  let src = {|mod T do
+fn cfg() do
+  let c = { host: "database.internal.example.com", port: 5432, user: "service_account_name", password: "not-really-a-secret-value" }
+  c
+end
+end|} in
+  let out = fmt src in
+  let lines = String.split_on_char '\n' out in
+  Alcotest.(check bool) "let rhs opened as `let c =` then `{` one level deeper" true
+    (List.mem "    let c =" lines && List.mem "      {" lines);
+  Alcotest.(check bool) "every line fits in 80 columns" true (max_line_width out <= 80);
+  check_parses "wide record let" src;
+  Alcotest.(check string) "output is a fixpoint" out (fmt out)
 
 let () =
   let open Alcotest in
@@ -546,6 +624,12 @@ let () =
       test_case "cap run is tight"    `Quick test_cap_run_is_tight;
       test_case "unrelated decls keep blank line" `Quick
         test_unrelated_decls_keep_blank_line;
+    ];
+    "wide literals", [
+      test_case "list of records breaks"        `Quick test_wide_list_of_records_breaks;
+      test_case "small literals stay inline"    `Quick test_small_literals_stay_inline;
+      test_case "record inside list breaks"     `Quick test_wide_record_inside_list_breaks;
+      test_case "record let breaks"             `Quick test_wide_record_let_breaks;
     ];
     "stdlib", [
       test_case "list"    `Quick test_stdlib_list;

@@ -92,3 +92,5 @@ destructure's release; the reference it does NOT account for is still
 `task[3]`'s own, which is precisely this item. Whoever implements the free-path
 release must check the `Ok` route as well as `task_await_unwrap`'s unbox route
 — `test/native/task_lifetime_leak_probe.march`'s double-await leg covers both.
+
+> **Design spec (2026-09-11):** `specs/2026-09-11-codegen-leaks-design.md` — root cause re-verified against the tree, chosen fix, test plan with a RED control, effort and risk.

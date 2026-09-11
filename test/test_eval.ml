@@ -5282,6 +5282,54 @@ end|} in
       Alcotest.(check int) "depth restored after exception" depth_before
         ctx.March_eval.Eval.dc_depth)
 
+(** `--coverage` reported 487%: the evaluator records every evaluated
+    expression, test bodies included, while the denominator walk skips
+    [DTest] bodies on purpose. The numerator is now the recorded hits
+    INTERSECTED with the walked key set, so hit <= total by construction.
+    RED on the pre-fix tree for any module whose test body outnumbers its
+    non-test nodes (this one: a two-line fn, one test calling it many times).
+    specs/2026-09-11-correctness-fixes-design.md §6. *)
+let test_coverage_hits_never_exceed_totals () =
+  let file = "cov_probe.march" in
+  let src = {|mod CovProbe do
+  fn double(x) do
+    x + x
+  end
+  describe "double" do
+    test "many calls" do
+      assert double(1) == 2
+      assert double(2) == 4
+      assert double(3) == 6
+      assert double(4) == 8
+      assert double(5) == 10
+      assert double(6) == 12
+      assert double(7) == 14
+      assert double(8) == 16
+    end
+  end
+end|} in
+  let lexbuf = Lexing.from_string src in
+  lexbuf.Lexing.lex_curr_p <- { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = file };
+  let m = March_desugar.Desugar.desugar_module
+      (March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf) in
+  let open March_coverage.Coverage in
+  reset ();
+  coverage_enabled := true;
+  let (n_tests, n_failed, _) = March_eval.Eval.run_tests ~quiet:true m in
+  coverage_enabled := false;
+  Alcotest.(check int) "the probe's one test ran and passed" 0 n_failed;
+  Alcotest.(check int) "one test" 1 n_tests;
+  let (walked_e, walked_b) = collect_totals ~file m in
+  let total_e = Hashtbl.length walked_e and total_b = Hashtbl.length walked_b in
+  let hit_e = count_hits_in expr_hits walked_e and hit_b = count_hits_in branch_hits walked_b in
+  Alcotest.(check bool) "expression hits <= expression total" true (hit_e <= total_e);
+  Alcotest.(check bool) "branch hits <= branch total" true (hit_b <= total_b);
+  Alcotest.(check bool) "the intersection is not vacuous: double's body was hit" true (hit_e >= 1);
+  (* The recorded-but-unwalked sites (the test body) are exactly what made the
+     old ratio exceed 100%: the raw per-file count is strictly larger here. *)
+  Alcotest.(check bool) "raw per-file hit count exceeds the walked total (the old bug)" true
+    (count_unique_hits expr_hits ~file > total_e)
+
 let eval_suites =
   [
       ( "env_lookup", [
@@ -5668,5 +5716,6 @@ let eval_suites =
           Alcotest.test_case "concat_n interp: escaped"                `Quick test_h_sigil_escapes_concat_n_interp;
           Alcotest.test_case "concat fold boundary"                    `Quick test_concat_fold_boundary;
           Alcotest.test_case "concat_n matches pairwise chain"         `Quick test_eval_concat_n_matches_chain;
+          Alcotest.test_case "coverage hits never exceed totals"        `Quick test_coverage_hits_never_exceed_totals;
         ] );
   ]
