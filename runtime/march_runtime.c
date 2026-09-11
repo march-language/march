@@ -7786,6 +7786,8 @@ static void *march_simd_to_string(void *v) {
 
 /* Format a March value as a human-readable string.
    Handles tagged immediates (low bit == 1), actor Pids, and heap objects. */
+void *(*march_render_dyn_hook)(void *v) = NULL;
+
 void *march_value_to_string(void *v) {
     if (!v) return march_string_lit("nil", 3);
     /* Tagged immediate: low bit == 1 → extract integer value via arithmetic
@@ -7841,6 +7843,14 @@ void *march_value_to_string(void *v) {
                           (long long)atomic_load_explicit(&meta->pid_index,
                                                             memory_order_relaxed));
         return march_string_lit(buf, n);
+    }
+    /* A boxed ADT whose header carries a type id (see march_hdr_type_id):
+     * the constructor-name table can render it by name even though no static
+     * type reached this call.  Only consulted for an ordinary ctor tag, and
+     * only once some compilation unit has registered its descriptor. */
+    if (tag >= 0 && march_render_dyn_hook) {
+        void *r = march_render_dyn_hook(v);
+        if (r) return r;
     }
     char buf[128];
     int n = snprintf(buf, sizeof(buf), "#<tag:%d>", tag);

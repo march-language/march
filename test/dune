@@ -7240,6 +7240,35 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/h_sigil_adt_interp.expected native_h_sigil_adt_interp.out)))
 
+; ── Boxed ADT header type id: erased (TVar) renders ──────────────────────
+; A boxed constructor reaching to_string / a ~H hole through an erased slot
+; used to print "#<tag:N>" (specs/todos/2026-08-05-boxed-adt-type-id.md).
+; The header pad word now carries a type id (march_type_id_of_name), so the
+; runtime renders it by name and flattens a genuine IOList.  .expected is the
+; interpreter's own output; see the fixture header for what each line pins.
+(rule
+ (targets native_erased_type_id native_erased_type_id.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/erased_type_id.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_erased_type_id
+        native/erased_type_id.march)
+   (with-stdout-to native_erased_type_id.out
+        (system "./native_erased_type_id")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/erased_type_id.expected native_erased_type_id.out)))
+
 ; ── Regression: Html.raw dropped under a `Safe` short-name collision ──────
 ; llvm_emit's verbatim-insertion arm declines to fire when another module also
 ; declares a type named `Safe`; that fell through to the IOList misread and

@@ -638,7 +638,8 @@ let build_ctor_info ctx (m : Tir.tir_module) =
         | _ -> failwith "invalid canonical monitor constructor"
       in
       Hashtbl.replace ctx.Llvm_ctx.ctor_info (type_name ^ "." ^ ctor_name)
-        { Llvm_ctx.ce_tag = tag; ce_fields = field_tys };
+        { Llvm_ctx.ce_tag = tag; ce_fields = field_tys;
+          ce_type_id = Llvm_ctx.type_id_of_name type_name };
       Hashtbl.replace ctx.Llvm_ctx.poly_ctors (type_name, ctor_name) field_tys
     ) ctors
   in
@@ -702,7 +703,9 @@ let build_ctor_info ctx (m : Tir.tir_module) =
         let g = tag_of _name i in
         let key = _name ^ "." ^ ctor_name in
         if not (Hashtbl.mem ctx.Llvm_ctx.ctor_info key) then
-          Hashtbl.replace ctx.Llvm_ctx.ctor_info key { Llvm_ctx.ce_tag = g; ce_fields = field_tys };
+          Hashtbl.replace ctx.Llvm_ctx.ctor_info key
+            { Llvm_ctx.ce_tag = g; ce_fields = field_tys;
+              ce_type_id = Llvm_ctx.type_id_of_name _name };
         if not (Hashtbl.mem ctx.Llvm_ctx.poly_ctors (_name, ctor_name)) then
           Hashtbl.replace ctx.Llvm_ctx.poly_ctors (_name, ctor_name) field_tys
       ) ctors
@@ -736,7 +739,9 @@ let build_ctor_info ctx (m : Tir.tir_module) =
         let g = tag_of _name i in
         let key = _name ^ "." ^ ctor_name in
         if not (Hashtbl.mem ctx.Llvm_ctx.ctor_info key) then
-          Hashtbl.replace ctx.Llvm_ctx.ctor_info key { Llvm_ctx.ce_tag = g; ce_fields = field_tys };
+          Hashtbl.replace ctx.Llvm_ctx.ctor_info key
+            { Llvm_ctx.ce_tag = g; ce_fields = field_tys;
+              ce_type_id = Llvm_ctx.type_id_of_name _name };
         if not (Hashtbl.mem ctx.Llvm_ctx.poly_ctors (_name, ctor_name)) then
           Hashtbl.replace ctx.Llvm_ctx.poly_ctors (_name, ctor_name) field_tys
       ) ctors
@@ -771,17 +776,19 @@ let build_ctor_info ctx (m : Tir.tir_module) =
            and Ast.Query both lower to TDVariant("Query", ...)). *)
         let key = _name ^ "." ^ ctor_name in
         if not (Hashtbl.mem ctx.Llvm_ctx.ctor_info key) then
-          Hashtbl.replace ctx.Llvm_ctx.ctor_info key { Llvm_ctx.ce_tag = tag_idx; ce_fields = field_tys };
+          Hashtbl.replace ctx.Llvm_ctx.ctor_info key
+            { Llvm_ctx.ce_tag = tag_idx; ce_fields = field_tys;
+              ce_type_id = Llvm_ctx.type_id_of_name _name };
         if not (Hashtbl.mem ctx.Llvm_ctx.poly_ctors (_name, ctor_name)) then
           Hashtbl.replace ctx.Llvm_ctx.poly_ctors (_name, ctor_name) field_tys
       ) ctors
     | Tir.TDRecord (_name, fields) ->
       Hashtbl.replace ctx.Llvm_ctx.ctor_info _name
-        { Llvm_ctx.ce_tag = 0; ce_fields = List.map snd fields };
+        { Llvm_ctx.ce_tag = 0; ce_fields = List.map snd fields; ce_type_id = 0 };
       Hashtbl.replace ctx.Llvm_ctx.field_map _name fields
     | Tir.TDClosure (_name, field_tys) ->
       Hashtbl.replace ctx.Llvm_ctx.ctor_info _name
-        { Llvm_ctx.ce_tag = 0; ce_fields = field_tys }
+        { Llvm_ctx.ce_tag = 0; ce_fields = field_tys; ce_type_id = 0 }
   ) m.Tir.tm_types
 
 let emit_module ~emit_expr

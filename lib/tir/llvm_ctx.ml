@@ -27,7 +27,8 @@
 (* ── Context ─────────────────────────────────────────────────────────── *)
 
 (** Constructor info: ctor_name → (tag_index, field_tir_types) *)
-type ctor_entry = { ce_tag : int; ce_fields : Tir.ty list }
+type ctor_entry = { ce_tag : int; ce_fields : Tir.ty list;
+                    ce_type_id : int  (* header type id, see [type_id_of_name]; 0 = none *) }
 
 (** REPL/JIT cross-FRAGMENT bookkeeping for `$clo_wrap` trampolines.
 
@@ -552,6 +553,42 @@ let llvm_param_ty ?(k_table : Kind.table option) (ty : Tir.ty) : string =
     moves, since it has no such back-references. *)
 let alloc_size n = 16 + n * 8
 
+(* ── Boxed-ADT header type id ──────────────────────────────────────────
+   Every boxed constructor header store also stamps a TYPE id into the pad
+   word (offset 12), so the runtime can tell `IOList.Str(s)` from a user
+   `B(s)` when a value reaches a renderer through an erased slot -- see the
+   march_hdr comment in runtime/march_runtime.h for the full convention and
+   specs/progress/2026-09-11-boxed-adt-type-id.md for why.
+
+   The id is a pure function of the type NAME (FNV-1a 32, masked to 30 bits,
+   negated) rather than a per-unit table index so that it is (1) a
+   compile-time constant -- the stamp costs no load, and folds into the
+   adjacent tag store -- and (2) identical across compilation units: a REPL
+   fragment, a hot-reload patch and the host binary all agree on what an
+   `IOList` cell looks like.  [march_type_id_of_name] in runtime/march_extras.c
+   is the same function; test_codegen pins a vector of each.  Negative so it
+   can never collide with the pad word's positive users (record shape ids,
+   closure flags, SIMD kinds).
+
+   The name hashed is the type_defs name -- module-qualified for a stdlib or
+   dependency type ("IOList.IOList", "Http.Method"), bare for the entry
+   module's own -- exactly the string the constructor-name descriptor's `T`
+   line carries, so the runtime recomputes the same id from the table it
+   already parses.  [Llvm_toplevel.build_ctor_info] computes it once per
+   constructor into [ce_type_id]; allocation sites never derive it from the
+   constructor string they were handed, because [Llvm_data.ctor_entry]
+   resolves that string by suffix (`IOList.Segments` -> the
+   `IOList.IOList.Segments` entry) and the prefix would name the wrong
+   thing. *)
+let type_id_of_name (name : string) : int =
+  let h = ref 0x811c9dc5 in
+  String.iter (fun c ->
+      h := (!h lxor Char.code c) land 0xFFFFFFFF;
+      h := (!h * 0x01000193) land 0xFFFFFFFF)
+    name;
+  - (1 + (!h land 0x3FFFFFFF))
+
+
 (* ── Type coercion ───────────────────────────────────────────────────── *)
 
 (** Emit an unconditional integer tag: [(v << 1) | 1], the ADDRESS of which
@@ -733,6 +770,14 @@ let coerce ctx from_ty v to_ty =
        let tp = fresh ctx "ubtag" in
        emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 8" tp box);
        emit ctx (Printf.sprintf "store i32 %d, ptr %s, align 4" tag tp);
+       (* Same header the boxed allocator would have stamped: the type id
+          lives at offset 12 (see [type_id_of_name]). *)
+       let tid = match entry with Some e -> e.ce_type_id | None -> 0 in
+       if tid <> 0 then begin
+         let ip = fresh ctx "ubtid" in
+         emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 12" ip box);
+         emit ctx (Printf.sprintf "store i32 %d, ptr %s, align 4" tid ip)
+       end;
        List.iteri (fun i fty ->
            let l = llvm_ty ctx fty in
            let fv = fresh ctx "ubf" in

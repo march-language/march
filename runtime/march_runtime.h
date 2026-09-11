@@ -11,6 +11,48 @@
  * TInt fields stored as int64_t, TFloat as double, all others as pointer. */
 typedef struct { int64_t rc; int32_t tag; int32_t pad; } march_hdr;
 
+/* ── What the header pad word means ───────────────────────────────────
+ *
+ * `pad` is multiplexed, decided by SIGN and by tag:
+ *   > 0   record shape id (march_record_shape_intern, tag 0 cells), the
+ *         closure flag bits (MARCH_CLO_ARG0_BORROWED, "$Clo_" cells), or the
+ *         SIMD lane kind (under MARCH_SIMD_TAG).
+ *   == 0  nothing known.  march_alloc zeroes it, and every cell the C runtime
+ *         builds itself (make_cons & friends, the message copier's strings,
+ *         C-built results) reads as this.
+ *   < 0   a boxed ADT TYPE ID: -(1 + (fnv1a32(type_name) & 0x3FFFFFFF)),
+ *         stamped by the compiler at every constructor header store
+ *         (lib/tir/llvm_data.ml emit_store_tag, incl. FBIP reuse and stack
+ *         cells) so a value reaching a renderer through an ERASED slot can
+ *         still be told apart from another type with the same tag.  The
+ *         runtime resolves it through the constructor-name table
+ *         (march_ctor_table_ensure) and treats a hash collision as
+ *         "unknown", never as a guess.  Negative so it can never be mistaken
+ *         for one of the positive users above; march_record_shape's reader
+ *         already rejects id <= 0.  Kept in lockstep with
+ *         Llvm_ctx.type_id_of_name; specs/progress/2026-09-11-boxed-adt-type-id.md.
+ *
+ * Two runtime sites compare the whole 64-bit tag+pad word against
+ * MARCH_MIGRATE_TAG (a C-built struct, pad 0); a stamped cell cannot collide
+ * with it because ordinary constructor tags are bounded by
+ * MARCH_ORDINARY_CTOR_TAG_LIMIT, far below that value's low word. */
+static inline int32_t march_hdr_type_id(const void *p) {
+    int32_t pad = ((const march_hdr *)p)->pad;
+    return pad < 0 ? pad : 0;
+}
+/* The id the compiler stamps for a type named [name] (march_extras.c). */
+int32_t march_type_id_of_name(const char *name);
+/* `~H` hole on an ERASED value: flattens iff the header id says IOList,
+ * otherwise renders by name and escapes (march_extras.c). */
+void   *march_html_auto_escape_dyn(void *v);
+/* Same decision under a context escaper id (march_extras.c). */
+void   *march_html_escape_ctx_dyn(int64_t escaper_id, void *v);
+/* Installed by march_ctor_table_ensure: renders a heap cell by its header
+ * type id, or returns NULL when the id is unknown/ambiguous.  NULL until a
+ * descriptor is registered, so the WASM runtime and binaries with no erased
+ * render site never pay for it. */
+extern void *(*march_render_dyn_hook)(void *v);
+
 /* Heap allocation: allocates sz bytes zeroed, returns a pointer. */
 void *march_alloc(int64_t sz);
 

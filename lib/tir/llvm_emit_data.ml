@@ -121,7 +121,7 @@ let emit_tuple ~emit_atom ctx (atoms : Tir.atom list) : string * string =
        storing naturals here silently halved odd ints / flipped true→false
        the moment a tuple passed through any pattern match. *)
     let n = List.length atoms in
-    let ptr = emit_heap_alloc ctx 0 n in
+    let ptr = emit_heap_alloc ctx 0 n 0 in
     List.iteri (fun i atom ->
       let (ty, v) = emit_atom ctx atom in
       let vp = coerce ctx ty v "ptr" in
@@ -143,7 +143,7 @@ let emit_record ~emit_atom ctx (fields : (string * Tir.atom) list)
     (* Sort by field name so layout matches TRecord (sorted by name) *)
     let sorted = List.sort (fun (a, _) (b, _) -> String.compare a b) fields in
     let n = List.length sorted in
-    let ptr = emit_heap_alloc ctx 0 n in
+    let ptr = emit_heap_alloc ctx 0 n 0 in
     List.iteri (fun i (_, atom) ->
       let (ty, v) = emit_atom ctx atom in
       let sty = slot_ty_of_value_ty ctx ty in
@@ -278,7 +278,7 @@ let emit_update ~emit_atom ctx (base_atom : Tir.atom)
     end else begin
     let n = List.length all_fields in
     (* Allocate new record of same size *)
-    let ptr = emit_heap_alloc ctx 0 n in
+    let ptr = emit_heap_alloc ctx 0 n 0 in
     (* Copy all fields from base.  Each copied HEAP field is inc'd: the base
        keeps its own reference (an update borrows the base, it does not consume
        it) and the new cell takes a second one, so both can be released

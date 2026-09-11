@@ -11,6 +11,18 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- Compiled `to_string` and `~H` interpolation of a value whose type is
+  erased at the render site (a value reaching a closure stored in a
+  container, a generic `List(a)` field holding user ADTs, a polymorphic
+  `${x}` hole) now render the constructor by name instead of `#<tag:N>`,
+  and a genuine `IOList` reaching a polymorphic `~H` hole is flattened as
+  markup rather than stringified. Every boxed constructor header now
+  carries a type id in its previously unused pad word, so the runtime can
+  tell types apart without a static type; the stamp folds into the existing
+  tag store and costs no extra instruction at `--opt 2`.
+
 ## [0.4.0] - 2026-09-10
 
 ### Added
