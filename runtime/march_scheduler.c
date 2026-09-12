@@ -2093,10 +2093,27 @@ int march_sched_in_scheduler(void) {
     return tl_sched != NULL;
 }
 
-/* self() builtin — returns the current green thread's proc pointer (the PID
- * value used as first arg to send/receive in the compiled binary). */
+/* self() builtin — the ACTOR whose handler is running.
+ *
+ * This used to return the proc pointer, on the theory that it was "the PID
+ * value used as first arg to send".  It is not: a Pid at the ABI is the
+ * ACTOR pointer (march_send takes one, march_spawn returns one,
+ * march_pid_of_int hands back meta->actor).  The mistake was invisible
+ * because nothing reached this function — `self` was missing from
+ * llvm_builtins, so every compiled program naming it died in clang on an
+ * undefined symbol instead, and no caller inside the runtime uses it.
+ * Returns NULL outside an actor handler (compiled `main` is itself a green
+ * thread, and its proc's actor field is NULL because procs are calloc'd).
+ * See specs/todos/2026-09-11-self-in-an-actor-handler-does-not-compile.md. */
 void *march_self(void) {
-    return (void *)march_sched_current();
+    march_proc *cur = march_sched_current();
+    /* NULL outside an actor handler.  Not a panic: this file is linked on its
+     * own by the C unit-test harnesses in test/dune, which have no
+     * march_panic, and the out-of-handler case never reaches here anyway --
+     * the typechecker binds the global `self` as Int, so a top-level use
+     * lowers to the closure's address rather than a call.  Making THAT an
+     * error is a typechecker change, filed with this item. */
+    return cur ? cur->actor : NULL;
 }
 
 int64_t march_sched_total_spawned(void) {

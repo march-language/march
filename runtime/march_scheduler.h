@@ -285,6 +285,14 @@ typedef struct march_proc {
     struct march_proc         *next;         /* Intrusive link for the global run queue (mutex FIFO);
                                               * only valid while the proc is IN that queue. */
     struct march_scheduler    *owner_sched;  /* Scheduler that last ran this process */
+    void                      *actor;        /* The actor this proc is running, or NULL when it is
+                                              * not an actor green thread (ordinary procs, and
+                                              * compiled `main`, which is itself a green thread).
+                                              * Set once by actor_green_thread; read by march_self,
+                                              * which must hand back the ACTOR pointer because that
+                                              * is what a Pid is at the ABI (march_send and
+                                              * march_spawn both take/return one). Procs are
+                                              * calloc'd, so NULL is the default. */
     int                        is_daemon;    /* Daemon procs (actor recv loops) do not keep the
                                               * scheduler alive: at shutdown, once no non-daemon
                                               * procs remain and nothing is runnable, parked
