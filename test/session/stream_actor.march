@@ -1,0 +1,191 @@
+mod StreamActor do
+  -- The actor-hosted session endpoint: the demonstration the whole capability
+  -- line was aimed at.  Same `Stream` protocol and the same generated
+  -- `@[endpoints]` API as stream_endpoints.march, but BOTH roles now live in
+  -- actors and every message travels through a mailbox.
+  --
+  -- Design: specs/todos/2026-09-11-actor-hosted-session-endpoint.md.
+  --
+  -- What is different from the in-process transport, and all that is
+  -- different: `emit` still enqueues, but the drain step does not call the
+  -- installed continuation itself.  It looks up which ACTOR owns the
+  -- destination endpoint and sends it a `Deliver` message; that actor's
+  -- handler invokes the continuation inside its own turn.  The endpoint's
+  -- session state is not in actor state at all -- it is already captured in
+  -- the continuation closure, which is what makes this need no compiler
+  -- change and no linearity fix.
+  --
+  -- Three things this fixture pins, each learned by probing:
+  --   * ONE Vault per element type.  Owners (Pid) and continuations
+  --     (closures) cannot share a table -- typed vault handles reject it.
+  --   * `self` is never used.  It does not compile inside a handler
+  --     (specs/todos/2026-09-11-self-in-an-actor-handler-does-not-compile.md),
+  --     so the SPAWNER registers ownership: it knows the pid.
+  --   * A delivery with no owner, or none with no continuation, PANICS.  The
+  --     in-process transport learned that the hard way: its first version
+  --     dropped such deliveries silently and a truncated trace looked like a
+  --     protocol bug rather than a transport one.
+  --
+  -- The trace is byte-identical to stream_endpoints.expected: routing through
+  -- a mailbox does not change the protocol's interleaving, only who runs it.
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs Session.Live
+
+  @[endpoints]
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+
+  -- ── the mailbox transport ─────────────────────────────────────────────
+  -- `handlers`: endpoint -> installed continuation (closures).
+  -- `owners`:   endpoint -> the actor that drives it (Pids).
+  -- `pending`:  FIFO of (to, from, msg), drained one delivery per turn.
+  type Transport = { ops : Session.Ops }
+
+  pfn ekey(ep : Int) : String do "e" ++ int_to_string(ep) end
+
+  fn own(owners, ep : Int, p) : () do
+    Vault.set(owners, ekey(ep), p)
+  end
+
+  fn fire(handlers, ep : Int, from : Int, msg : Bytes) : Int do
+    match Vault.get(handlers, ekey(ep)) do
+      Some(k) -> k(from, msg, ep)
+      None    -> panic("stream_actor: delivery to " ++ int_to_string(ep) ++ " with no continuation installed")
+    end
+  end
+
+  fn mailbox(handlers, pending) : Transport do
+    Vault.set(pending, "q", Deque.empty())
+    {
+      ops: {
+        register: fn (_ap, role) -> role,
+        emit: fn (ep, to, msg) -> do
+          let q = match Vault.get(pending, "q") do
+            Some(d) -> d
+            None    -> Deque.empty()
+          end
+          Vault.set(pending, "q", Deque.push_back(q, (to, ep, msg)))
+          ep
+        end,
+        suspend: fn (ep, handler) -> do
+          Vault.set(handlers, ekey(ep), handler)
+          ep
+        end,
+        close: fn ep -> print_line("close " ++ int_to_string(ep))
+      }
+    }
+  end
+
+  -- One delivery per turn: hand it to the owning actor's mailbox, let the
+  -- scheduler run that turn to completion, then take the next.  The fixed
+  -- order is what makes the trace reproducible.
+  pfn route(owners, handlers, pending) : () do
+    let q = match Vault.get(pending, "q") do
+      Some(d) -> d
+      None    -> Deque.empty()
+    end
+    match Deque.pop_front(q) do
+      (None, _) -> ()
+      (Some((to, from, msg)), rest) ->
+        Vault.set(pending, "q", rest)
+        -- Both checks happen HERE, in the driver, not in the handler. A
+        -- `panic` inside a handler is absorbed by actor crash isolation: the
+        -- actor dies, the program exits 0, and the trace simply stops --
+        -- indistinguishable from a protocol that ended early, which is the
+        -- very failure mode the in-process transport's panic was added to
+        -- prevent. `fire` keeps its own panic as a backstop for a delivery
+        -- that reaches an actor another way.
+        match Vault.get(handlers, ekey(to)) do
+          None -> panic("stream_actor: delivery to " ++ int_to_string(to) ++ " with no continuation installed")
+          Some(_) ->
+            match Vault.get(owners, ekey(to)) do
+              Some(p) ->
+                send(p, Deliver(handlers, to, from, msg))
+                run_until_idle()
+                route(owners, handlers, pending)
+              None -> panic("stream_actor: delivery to " ++ int_to_string(to) ++ " with no owner registered")
+            end
+        end
+    end
+  end
+
+  -- ── the endpoints, identical to the function-hosted fixture ────────────
+  pfn prod(s : Cap(Session.Live), st : Stream_Prod.S_send_Msg_Prod_Cons_1, next : Int) : Stream_Prod.Yield do
+    print_line("Prod sends Item(" ++ int_to_string(next) ++ ")")
+    let st1 = Stream_Prod.send_Msg_Prod_Cons_1(s, st, next)
+    Stream_Prod.offer_more_done(s, st1,
+      fn (_b, st2) ->
+        print_line("Prod got More")
+        prod(s, st2, next + 1),
+      fn (_b, st2) ->
+        print_line("Prod got Done")
+        Stream_Prod.close(s, st2))
+  end
+
+  pfn cons(s : Cap(Session.Live), st : Stream_Cons.S_recv_Msg_Prod_Cons_1, budget : Int) : Stream_Cons.Yield do
+    Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
+      print_line("Cons got Item(" ++ int_to_string(n) ++ ")")
+      if budget > 1 do
+        let st2 = Stream_Cons.choose_more(s, st1, true)
+        cons(s, st2, budget - 1)
+      else
+        let st2 = Stream_Cons.choose_done(s, st1, true)
+        Stream_Cons.close(s, st2)
+      end)
+  end
+
+  -- ── the endpoint actor ───────────────────────────────────────────────
+  -- ONE actor type, two instances -- one per endpoint.  Two actor types would
+  -- each mint their own `Deliver` constructor, and the router has to send a
+  -- single one to whichever actor owns the destination ("Constructor
+  -- `Deliver` is defined by multiple types"), so the role cannot live in the
+  -- actor's type.  It does not need to: the role-specific session state is in
+  -- the continuation, and the actor only resumes it.
+  --
+  -- The actor has no `Start`. Each role is driven to its FIRST suspension by
+  -- `main`, which is where the session is established anyway; everything
+  -- after that -- every resumption, for both roles -- runs inside an actor
+  -- turn, driven by a mailbox delivery.
+  actor Ep do
+    state { n : Int }
+    init  { n: 0 }
+    on Deliver(handlers, ep : Int, from : Int, msg : Bytes) do
+      let _ = fire(handlers, ep, from, msg)
+      { state with n: state.n + 1 }
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let handlers = Vault.new("stream_actor_handlers")
+    let owners   = Vault.new("stream_actor_owners")
+    let pending  = Vault.new("stream_actor_pending")
+    let t = mailbox(handlers, pending)
+    let s = Session.attach(c, t.ops)
+
+    -- The spawner knows each pid, so it registers ownership; `self` is not
+    -- usable inside a handler (see the header).
+    let pc = spawn(Ep)
+    own(owners, 2, pc)
+    let pp = spawn(Ep)
+    own(owners, 1, pp)
+
+    -- Drive each role to its first suspension, then hand the protocol over to
+    -- the mailboxes.
+    let cons_st = Stream_Cons.register(s, 0)
+    let _ = cons(s, cons_st, 2)
+    let prod_st = Stream_Prod.register(s, 0)
+    let _ = prod(s, prod_st, 1)
+
+    route(owners, handlers, pending)
+  end
+end

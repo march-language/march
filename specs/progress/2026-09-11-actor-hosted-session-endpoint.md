@@ -1,6 +1,6 @@
 # `[P2]` The actor-hosted session endpoint, and the mailbox transport
 
-**Status:** specced 2026-09-11, not started. Step 6 — the last one — of
+**Status:** specced 2026-09-11, **shipped 2026-09-12** (see "What shipped" at the end). Step 6 — the last one — of
 `specs/progress/2026-09-03-protocol-projector-typed-endpoints.md`, whose item
 3 deferred it. This is the demonstration the whole capability line was aimed
 at: a session endpoint driven by an actor's mailbox, restartable by its
@@ -167,3 +167,71 @@ reach actor state, that is the follow-on below, not a patch.
   should assume in-process.
 - Fixing the three linearity holes or `self`. Each is filed, and this item is
   deliberately built so that none of them is on its path.
+
+---
+
+## What shipped (2026-09-12)
+
+`test/session/stream_actor.march` — the `Stream` protocol over the generated
+`@[endpoints]` API with **both** roles hosted in actors and every resumption
+driven by a mailbox delivery. Its trace is byte-identical to
+`stream_endpoints.expected`, the function-hosted fixture's: routing through a
+mailbox changes who runs the protocol, not its interleaving. Both backends.
+Proved non-vacuous by disabling the routing send — the trace collapses from
+eight lines to one — then restoring.
+
+`test/session/stream_actor_restart.march` answers step 4, and the answer is
+the **opposite of what this file predicted**.
+
+### What building it changed
+
+- **One actor type, two instances, not one type per role.** Two actor types
+  each mint their own `Deliver` constructor, and the router has to send a
+  single one to whichever actor owns the destination: "Constructor `Deliver`
+  is defined by multiple types". The role cannot live in the actor's type —
+  and does not need to, since the role-specific state is in the continuation.
+- **No `Start` handler.** Each role is driven to its first suspension by
+  `main`, which is where the session is established anyway. Everything after
+  that runs in an actor turn. A `Start` carrying the initial state would need
+  a per-role constructor and reintroduce the ambiguity above.
+- **Both delivery guards live in the DRIVER, not the handler.** A `panic`
+  inside a handler is absorbed by actor crash isolation: the actor dies, the
+  program exits 0, and the trace simply stops — indistinguishable from a
+  protocol that ended early, which is precisely the failure mode the
+  in-process transport's panic was added to prevent. Measured: with the
+  continuation missing, the handler-side panic produced exit 0 and a
+  one-line trace. Checking in `route` gives "delivery to 2 with no
+  continuation installed" and exit 1. `fire` keeps its own panic as a
+  backstop.
+
+### Step 4, measured: the host is replaceable
+
+The spec said "**The first is almost certainly right** — a session has linear
+state and half of it lives in the peer" — meaning a restart should abandon the
+session. Wrong. Swapping the Cons actor for a freshly spawned one mid-session
+and re-registering ownership continues the protocol from exactly where it was,
+with the remaining trace unchanged.
+
+That follows from the design choice rather than luck: the session state lives
+in the transport's continuation, keyed by endpoint, and the actor holds none
+of it. Losing the actor loses nothing the session needs. It is the same
+property that made this item need no compiler fix.
+
+**The honest limit**, recorded in the fixture: this holds for an actor lost
+BETWEEN turns. One that dies part way through a handler may have consumed its
+continuation without installing the next, leaving the session with none for
+that endpoint — which the driver now reports rather than hides. Nothing here
+makes a half-finished turn atomic, and a real supervisor tree would need to
+decide that case deliberately.
+
+### Not done
+
+- A supervisor *tree* over the endpoint actors. The restart question it exists
+  to answer is answered above by direct replacement, which is the same
+  observation with less machinery; wiring `supervise` adds the child-pid
+  plumbing (a supervisor owns its children, so the spawn-site ownership
+  registration has to move) without changing the answer.
+- The `@[endpoints(actor)]` parked/handler-shaped generator variant, still the
+  answer to "a callback cannot read the actor's state record", still out of
+  scope and still unneeded by anything.
+- A network transport.

@@ -1552,6 +1552,48 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff session/stream_endpoints.expected stream_endpoints.out)))
 
+; The actor-hosted endpoint: the same protocol and the same generated API as
+; stream_endpoints, but both roles live in actors and every resumption is
+; driven by a mailbox delivery.  Its expected output is stream_endpoints' own
+; trace, byte for byte -- routing through a mailbox changes who runs the
+; protocol, not its interleaving.  Design:
+; specs/todos/2026-09-11-actor-hosted-session-endpoint.md.
+(rule
+ (targets stream_actor_bin stream_actor.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file session/stream_actor.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o stream_actor_bin
+        session/stream_actor.march)
+   (with-stdout-to stream_actor.out (system "./stream_actor_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff session/stream_actor.expected stream_actor.out)))
+
+; What a restart means: the endpoint's HOST is replaceable. Swaps the Cons
+; actor mid-session and re-registers ownership; the protocol continues,
+; because the session state is in the transport's continuation and not in the
+; actor. The design record predicted the opposite; this is the measurement.
+(rule
+ (targets stream_actor_restart_bin stream_actor_restart.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file session/stream_actor_restart.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o stream_actor_restart_bin
+        session/stream_actor_restart.march)
+   (with-stdout-to stream_actor_restart.out (system "./stream_actor_restart_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff session/stream_actor_restart.expected stream_actor_restart.out)))
+
 ; ── Capability mocking reaching an actor handler ──────────────────────────
 ; The handler is entered from the scheduler, so the capability cannot be
 ; threaded in as a parameter -- the dispatch function's arity is frozen because
