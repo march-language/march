@@ -1,0 +1,4 @@
+file_err=NotFound("/definitely/missing/path.txt")
+dir_err=NotFound("/definitely/missing/dir")
+dup_a_not_wrong=true
+dup_b_not_wrong=true

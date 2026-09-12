@@ -6460,9 +6460,34 @@ static void *mk_err_errno(void) {
 #define FILEERR_NOT_EMPTY    3
 #define FILEERR_IO_ERROR     4
 
+/* File.FileError's header type id (see the march_hdr comment in
+ * march_runtime.h).  Cells the C runtime builds carry no type id by default,
+ * which is why compiled `to_string` of a file error printed "#<tag:0>" while
+ * the interpreter printed NotFound("..."): the value's STATIC type is the
+ * bare `FileError` (that is the canonical spelling every builtin signature
+ * uses) but the descriptor is keyed on the name the ptype LOWERS to,
+ * `File.FileError`, so the static lookup missed and the renderer had only a
+ * tag to go on.
+ *
+ * Stamping the cell answers it from the value instead of from the name.
+ * Resolving the bare name to the qualified descriptor at compile time was
+ * tried and is NOT sound: `Pid` is a builtin runtime handle and also the
+ * short name of stdlib's `GlobalPid.Pid`, so a bare-name alias handed an
+ * actor handle a constructor descriptor and the renderer read it as a cell
+ * (deterministic SIGSEGV in native_actor_monitor_down_reason, 40/40; see
+ * specs/progress/2026-09-12-compiled-to-string-module-declared-type.md).
+ * A header id cannot make that mistake: it is written by whoever built the
+ * cell. */
+static int32_t file_error_type_id(void) {
+    static int32_t id = 0;
+    if (id == 0) id = march_type_id_of_name("File.FileError");
+    return id;
+}
+
 static void *mk_file_error(int tag, void *payload_str) {
     void *cell = march_alloc(24); /* header(16) + 1 field(8) */
     MARCH_SET_TAG(cell, tag);
+    ((march_hdr *)cell)->pad = file_error_type_id();
     MARCH_FIELD(cell, 0) = (int64_t)payload_str;
     return cell;
 }
