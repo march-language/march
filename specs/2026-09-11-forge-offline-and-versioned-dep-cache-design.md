@@ -1,7 +1,10 @@
 # `forge --offline` and a version-aware dependency cache
 
 **Date:** 2026-09-11
-**Status:** proposed; nothing here has landed
+**Status:** §2 (version-aware cache) and the §0.3 hash alignment **LANDED
+2026-09-12** — see `specs/progress/2026-09-12-version-aware-dep-cache.md` and
+`specs/progress/2026-09-12-lockfile-hash-domains-aligned.md`. §3 (`--offline`),
+§4's verification and §2.4's tarball cache remain proposed.
 **Closes part of:** `specs/todos/2026-07-31-p1-tooling-forge-build-tool.md`, first
 bullet ("Vendoring / explicit offline mode … partly mitigated by the CAS cache;
 no explicit story"). Vendoring proper (`forge vendor`, an in-tree committed
@@ -101,6 +104,16 @@ This one breaks the obvious integrity design, so it is called out separately:
 |---|---|---|
 | registry | **sha256 of the original `.tar.gz` bytes** — the registry's own published checksum | `"sha256:" ^ expected_cs` (`cmd_deps.ml:463`), after verifying the download against it (`:442-446`) |
 | git | **sha256 of the canonical archive of the extracted tree** | `content_hash` → `Resolver_cas_package.store_directory` (`cmd_deps.ml:139-144`) |
+
+> **FIXED 2026-09-12.** `hash` is now uniformly the canonical-archive hash of
+> the extracted tree for every dep kind, and a new `checksum` field carries the
+> registry's published tarball digest as provenance. A `[lockfile] version = 2`
+> marker distinguishes the new format, because a format-1 file's registry
+> `hash` is in the old domain and must not be verified against a tree
+> (`Resolver_lockfile.read_format_version`). This is option B below, taken
+> rather than deferred. §4's per-domain plan is therefore obsolete: one
+> uniform check now covers every dep kind, and what remains unimplemented is
+> the check itself, not the ability to write one.
 
 One field, two domains. Re-hashing an extracted tree can never reproduce a
 tarball checksum: different bytes, different framing. So "re-hash the tree and

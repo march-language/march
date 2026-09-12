@@ -393,19 +393,24 @@ let test_lockfile_write_and_read_back () =
   Fun.protect ~finally:(fun () ->
       let _ = Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote tmpdir)) in ())
     (fun () ->
+       (* Hashes are spelled sha256: because that is what the writer actually
+          produces (Digestif.SHA256); the format comment used to say blake3
+          and was wrong. A registry entry also carries [checksum] — the
+          upstream tarball digest — which is a DIFFERENT value from [hash],
+          the tree hash, and the round-trip must keep them distinct. *)
        let entries = [
          Resolver_lockfile.{ name = "json"; version = Some "1.4.7";
            source = "registry:forge"; commit = None;
-           hash = "blake3:aabbccdd" };
+           hash = "sha256:aabbccdd"; checksum = Some "sha256:deadbeef" };
          Resolver_lockfile.{ name = "depot"; version = Some "0.2.1";
            source = "git:https://github.com/user/depot.git";
-           commit = Some "f7a3b1c9"; hash = "blake3:11223344" };
+           commit = Some "f7a3b1c9"; hash = "sha256:11223344"; checksum = None };
          Resolver_lockfile.{ name = "live"; version = None;
            source = "git:https://github.com/user/live.git";
-           commit = Some "a0b1c2d3"; hash = "blake3:55667788" };
+           commit = Some "a0b1c2d3"; hash = "sha256:55667788"; checksum = None };
          Resolver_lockfile.{ name = "vault"; version = None;
            source = "path:../vault"; commit = None;
-           hash = "blake3:99aabbcc" };
+           hash = "sha256:99aabbcc"; checksum = None };
        ] in
        Resolver_lockfile.write lock_path entries ~manifest_hash:"sha256:testmhash";
        (* verify file exists *)
@@ -417,6 +422,19 @@ let test_lockfile_write_and_read_back () =
          Alcotest.(check (option string)) "manifest hash"
            (Some "sha256:testmhash") mhash;
          Alcotest.(check int) "4 entries" 4 (List.length read_entries);
+         Alcotest.(check int) "format version 2 is recorded" 2
+           (Resolver_lockfile.read_format_version lock_path);
+         let by_name = List.map (fun e -> (e.Resolver_lockfile.name, e)) read_entries in
+         (* The two hash domains stay separate through a round trip. *)
+         Alcotest.(check (option string)) "registry checksum survives"
+           (Some "sha256:deadbeef")
+           (List.assoc "json" by_name).Resolver_lockfile.checksum;
+         Alcotest.(check string) "registry tree hash is not the checksum"
+           "sha256:aabbccdd" (List.assoc "json" by_name).Resolver_lockfile.hash;
+         Alcotest.(check (option string)) "a git dep publishes no checksum"
+           None (List.assoc "depot" by_name).Resolver_lockfile.checksum;
+         Alcotest.(check (option string)) "a path dep publishes no checksum"
+           None (List.assoc "vault" by_name).Resolver_lockfile.checksum;
          (* json *)
          let json_e = List.assoc "json" (List.map (fun e -> (e.Resolver_lockfile.name, e)) read_entries) in
          Alcotest.(check (option string)) "json version" (Some "1.4.7") json_e.Resolver_lockfile.version;

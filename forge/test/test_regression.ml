@@ -291,61 +291,62 @@ let test_archive_lib_paths_include_git_dep () =
       true (List.exists (fun p -> canon p = wanted) paths))
 
 (* ------------------------------------------------------------------ *)
-(*  CAS install reuse must check the source                            *)
+(*  A coordinate-keyed install cannot alias a different source          *)
 (* ------------------------------------------------------------------ *)
 
-(** ~/.march/cas/deps/<name> is keyed by dep NAME only, so it can hold content
-    from a different source than the manifest now asks for (switch a dep
-    between `registry = ...` and `git = ...`, or two projects wanting different
-    URLs). [install_dep] used to treat "directory exists" as "correctly
-    installed": it printed `already installed (branch main)` over a registry
-    tarball and then failed with `fatal: not a git repository`, with the
-    lockfile claiming the git source while the directory held registry content.
+(** Until 2026-09-12 the CAS keyed an install by dep NAME alone, so
+    [~/.march/cas/deps/<name>] could hold content from a different source than
+    the manifest now asked for — switch a dep between `registry = ...` and
+    `git = ...`, or have two projects want different URLs, and [install_dep]
+    read "directory exists" as "correctly installed": it printed
+    `already installed (branch main)` over a registry tarball and then failed
+    with `fatal: not a git repository`, while the lockfile claimed the git
+    source.
 
-    [Cmd_deps.git_checkout_matches] is the guard. These cover its three
-    outcomes without any network access. *)
-let with_tmp_dir f =
-  let tmp = Filename.temp_file "forge_cas_reuse" "" in
-  Sys.remove tmp;
-  Unix.mkdir tmp 0o755;
+    [Cmd_deps.git_checkout_matches] used to be the guard, and three cases here
+    covered its outcomes. Both the guard and those cases are gone, because the
+    hazard is now structural rather than checked: an install lives at
+    [deps/<name>/<coord>], and a git commit and a registry version are never
+    the same coordinate, so two sources cannot land in one directory for any
+    check to have to notice. These cases assert THAT property instead, which is
+    what makes the removed guard unnecessary. Still no network access. *)
+let test_git_and_registry_coords_never_collide () =
+  let name = "dep" in
+  let git_dir = Cmd_deps.dep_coord_dir ~name ~coord:"9c78649872d34ebaa1ea6330198681d0a58f041d" in
+  let reg_dir = Cmd_deps.dep_coord_dir ~name ~coord:"1.4.7" in
+  Alcotest.(check bool) "a git commit and a registry version are different dirs"
+    true (git_dir <> reg_dir);
+  Alcotest.(check string) "both sit under the same per-name container"
+    (Filename.dirname git_dir) (Filename.dirname reg_dir)
+
+(** The install directory is never the per-name container itself: that is what
+    made the old layout shared, and a build resolving to the container would
+    see a directory of coordinate names rather than a package. *)
+let test_coord_dir_is_never_the_container () =
+  let name = "dep" in
+  let coord_dir = Cmd_deps.dep_coord_dir ~name ~coord:"1.0.0" in
+  Alcotest.(check bool) "coordinate dir is strictly below the container"
+    true (Filename.dirname coord_dir <> coord_dir
+          && Filename.basename coord_dir = "1.0.0")
+
+(** A pre-2026-09-12 flat install is recognised as one, so `forge deps` can
+    migrate it instead of treating it as a container of coordinates. *)
+let test_flat_install_is_detected () =
+  let tmp = Filename.temp_file "forge_flat_detect" "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
   Fun.protect
     ~finally:(fun () -> ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote tmp))))
-    (fun () -> f tmp)
-
-let test_cas_reuse_rejects_non_git_dir () =
-  with_tmp_dir (fun tmp ->
-    let dest = Filename.concat tmp "dep" in
-    ignore (Sys.command (Printf.sprintf "mkdir -p %s" (Filename.quote dest)));
-    (* A registry tarball extract: real files, but no .git. *)
-    let oc = open_out (Filename.concat dest "forge.toml") in
-    output_string oc "[package]\nname = \"dep\"\n"; close_out oc;
-    Alcotest.(check bool)
-      "a non-git directory is never reused as a git checkout"
-      false
-      (Cmd_deps.git_checkout_matches ~url:"https://example.invalid/dep.git" dest))
-
-let test_cas_reuse_rejects_wrong_remote () =
-  with_tmp_dir (fun tmp ->
-    let dest = Filename.concat tmp "dep" in
-    ignore (Sys.command (Printf.sprintf
-      "git init -q %s && git -C %s remote add origin https://example.invalid/OTHER.git"
-      (Filename.quote dest) (Filename.quote dest)));
-    Alcotest.(check bool)
-      "a git checkout of a DIFFERENT url is not reused"
-      false
-      (Cmd_deps.git_checkout_matches ~url:"https://example.invalid/dep.git" dest))
-
-let test_cas_reuse_accepts_matching_remote () =
-  with_tmp_dir (fun tmp ->
-    let dest = Filename.concat tmp "dep" in
-    let url = "https://example.invalid/dep.git" in
-    ignore (Sys.command (Printf.sprintf
-      "git init -q %s && git -C %s remote add origin %s"
-      (Filename.quote dest) (Filename.quote dest) (Filename.quote url)));
-    Alcotest.(check bool)
-      "a git checkout of the SAME url is reused (no needless re-clone)"
-      true
-      (Cmd_deps.git_checkout_matches ~url dest))
+    (fun () ->
+       let flat = Filename.concat tmp "widget" in
+       ignore (Sys.command (Printf.sprintf "mkdir -p %s"
+                              (Filename.quote (Filename.concat flat "lib"))));
+       Alcotest.(check bool) "a dir with lib/ is a flat install"
+         true (Cmd_deps.looks_like_flat_install flat);
+       let container = Filename.concat tmp "gadget" in
+       ignore (Sys.command (Printf.sprintf "mkdir -p %s"
+                              (Filename.quote (Filename.concat container "1.0.0"))));
+       Alcotest.(check bool) "a container of coordinates is not a flat install"
+         false (Cmd_deps.looks_like_flat_install container))
 
 (* ------------------------------------------------------------------ *)
 (*  Suite                                                              *)
@@ -369,12 +370,12 @@ let () =
       Alcotest.test_case "archive task still sees a git dep's lib dir" `Quick
         test_archive_lib_paths_include_git_dep;
     ];
-    "cas-install-reuse", [
-      Alcotest.test_case "non-git dir (registry tarball) not reused as git" `Quick
-        test_cas_reuse_rejects_non_git_dir;
-      Alcotest.test_case "git checkout of a different url not reused" `Quick
-        test_cas_reuse_rejects_wrong_remote;
-      Alcotest.test_case "git checkout of the same url is reused" `Quick
-        test_cas_reuse_accepts_matching_remote;
+    "coordinate-keyed install", [
+      Alcotest.test_case "git and registry coordinates never collide" `Quick
+        test_git_and_registry_coords_never_collide;
+      Alcotest.test_case "coordinate dir is never the container" `Quick
+        test_coord_dir_is_never_the_container;
+      Alcotest.test_case "a legacy flat install is detected" `Quick
+        test_flat_install_is_detected;
     ];
   ]

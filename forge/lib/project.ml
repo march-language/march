@@ -351,39 +351,122 @@ let load () =
      | Failure msg   -> Error msg
      | Toml.Parse_error msg -> Error ("forge.toml parse error: " ^ msg))
 
-(** Return the lib directory for a git dependency installed in the CAS, or
-    [None] if [forge deps] has not been run yet for this dep. *)
-let git_dep_lib_path dep_name =
+(** Read a project's forge.lock into a [name -> coordinate] table: the commit
+    for a git dep, the exact resolved version for a registry dep. This is the
+    only way a consumer can find a version-keyed cache directory without
+    re-resolving, and it is why the lockfile is read at build time at all —
+    before 2026-09-12 nothing read it except [read_toolchain].
+
+    A path dep contributes no coordinate (it is never cached). A malformed or
+    absent lockfile yields an empty table, and the locators below then fall
+    back as described there. *)
+let dep_coords ~project_root : (string, string) Hashtbl.t =
+  let tbl = Hashtbl.create 16 in
+  let lock = Filename.concat project_root "forge.lock" in
+  (match Resolver_lockfile.read lock with
+   | Error _ -> ()
+   | Ok (entries, _) ->
+     List.iter (fun (e : Resolver_lockfile.entry) ->
+         let coord = match e.Resolver_lockfile.commit with
+           | Some c -> Some c                     (* git: commit *)
+           | None ->
+             (* registry: the exact version. A path dep has neither, and a
+                `pending:` hash means the dep was never actually installed. *)
+             if e.Resolver_lockfile.source = "registry:forge"
+             then e.Resolver_lockfile.version else None
+         in
+         match coord with
+         | Some c when c <> "" -> Hashtbl.replace tbl e.Resolver_lockfile.name c
+         | _ -> ())
+       entries);
+  tbl
+
+(** The cache directory holding dep [dep_name], under the version-aware layout
+    [~/.march/cas/deps/<name>/<coord>].
+
+    Resolution order, and why each step exists:
+    1. [coords] names the coordinate (from forge.lock) and that directory
+       exists — the normal path.
+    2. [deps/<name>] is itself a package (it has lib/ or forge.toml) — a
+       pre-2026-09-12 flat install that `forge deps` has not migrated yet.
+       Keeps a build working across the upgrade.
+    3. [deps/<name>] is a container with exactly ONE coordinate inside — no
+       lockfile entry, but no ambiguity either, so use it.
+    4. Otherwise [None]. In particular a container with SEVERAL coordinates and
+       no lockfile entry is ambiguous, and guessing which version a project
+       wanted is exactly the mistake this layout exists to prevent. *)
+let dep_cache_dir ?coords dep_name =
   match Sys.getenv_opt "HOME" with
   | None -> None
   | Some home ->
-    let dep_dir =
+    let base =
       Filename.concat home
         (Filename.concat ".march"
            (Filename.concat "cas" (Filename.concat "deps" dep_name)))
     in
+    let coord_dir =
+      match coords with
+      | Some tbl ->
+        (match Hashtbl.find_opt tbl dep_name with
+         | Some c ->
+           let d = Filename.concat base c in
+           if Sys.file_exists d then Some d else None
+         | None -> None)
+      | None -> None
+    in
+    (match coord_dir with
+     | Some d -> Some d
+     | None ->
+       if not (Sys.file_exists base) then None
+       else if Sys.file_exists (Filename.concat base "lib")
+            || Sys.file_exists (Filename.concat base "forge.toml") then
+         Some base                                   (* legacy flat install *)
+       else
+         match (try Array.to_list (Sys.readdir base) with Sys_error _ -> []) with
+         | [ only ] ->
+           let d = Filename.concat base only in
+           if Sys.is_directory d then Some d else None
+         | _ -> None)
+
+(** The lib directory of a dep installed in the CAS (or the dep root when it
+    has no lib/), or [None] if [forge deps] has not installed it yet. *)
+let git_dep_lib_path ?coords dep_name =
+  match dep_cache_dir ?coords dep_name with
+  | None -> None
+  | Some dep_dir ->
     let lib_dir = Filename.concat dep_dir "lib" in
     if Sys.file_exists lib_dir then Some lib_dir
-    else if Sys.file_exists dep_dir then Some dep_dir
-    else None
+    else Some dep_dir
 
 (** Resolve the root directory of an already-installed dependency (a path
     dep, or a git dep's clone under the CAS), so its own forge.toml can be
     read to walk transitive dependencies.  [project_root] is the root of the
     project that DECLARED [dep] (needed to resolve a relative PathDep).
     Registry and git deps both live under [~/.march/cas/deps/<name>]. *)
-let dep_root_dir ~project_root (dep_name, dep) =
+let dep_root_dir ?coords ~project_root (dep_name, dep) =
   match dep with
   | PathDep rel_path ->
     Some (if Filename.is_relative rel_path
           then Filename.concat project_root rel_path
           else rel_path)
   | GitTagDep _ | GitBranchDep _ | GitRevDep _ | RegistryDep _ ->
-    (match Sys.getenv_opt "HOME" with
-     | None -> None
-     | Some home ->
-       Some (Filename.concat home
-               (Filename.concat ".march" (Filename.concat "cas" (Filename.concat "deps" dep_name)))))
+    (* Version-aware WHERE-IS, falling back to WHERE-WOULD-IT-BE.
+       [dep_cache_dir] answers only the former (it existence-checks), but this
+       function's callers — `forge audit`/`licenses`/`tree` — use the result to
+       report whether a dep is installed, so it must still name a location when
+       nothing is installed yet. Returning [None] there would send them back to
+       a project-relative path, which is the exact bug test_dep_dir.ml exists to
+       prevent. So: the coordinate directory when one is resolvable, else the
+       container under $HOME. *)
+    (match dep_cache_dir ?coords dep_name with
+     | Some d -> Some d
+     | None ->
+       (match Sys.getenv_opt "HOME" with
+        | None -> None
+        | Some home ->
+          Some (Filename.concat home
+                  (Filename.concat ".march"
+                     (Filename.concat "cas" (Filename.concat "deps" dep_name))))))
 
 (** Create a directory and all its parents. *)
 let mkdir_p dir =
