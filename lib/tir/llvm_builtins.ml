@@ -921,6 +921,13 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare i64  @march_revoke_cap(ptr %cap)" };
   { march_name = "is_cap_valid"; c_name = Some "march_is_cap_valid"; ret_ty = Some Tir.TBool;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_is_cap_valid(ptr %cap)" };
+  (* `self` inside an actor handler.  The typechecker shadows the global
+     binding with this actor's own Pid (typecheck.ml's DActor arm); the
+     interpreter has had a real builtin since actors landed, but this table
+     did not, so the emitter produced `call ptr @self()` naming a symbol
+     nothing defined and the module died in clang. *)
+  { march_name = "self"; c_name = Some "march_self"; ret_ty = Some (Tir.TCon ("Pid", [Tir.TVar "a"]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_self()" };
   { march_name = "pid_of_int"; c_name = Some "march_pid_of_int"; ret_ty = Some (Tir.TCon ("Pid", [Tir.TVar "a"]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_pid_of_int(i64 %n)" };
   { march_name = "get_actor_field"; c_name = Some "march_get_actor_field"; ret_ty = Some (Tir.TCon ("Option", [Tir.TVar "a"]));
@@ -1633,6 +1640,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_send_checked";
   PDeclare "march_revoke_cap";
   PDeclare "march_is_cap_valid";
+  PDeclare "march_self";
   PDeclare "march_pid_of_int";
   PDeclare "march_get_actor_field";
   PDeclare "march_register_supervisor";

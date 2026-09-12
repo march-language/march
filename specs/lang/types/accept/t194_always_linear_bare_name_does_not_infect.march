@@ -1,0 +1,20 @@
+mod Main do
+  needs IO.Console
+  -- The registry holds BARE names, so seeding it in pass 1 (t191-t193) would
+  -- have made an unrelated same-named ordinary type linear. The let-binding
+  -- promotion goes through `resolves_always_linear`, which prefers the
+  -- current module's own declaration, so `Main.S` below stays ordinary and
+  -- reusing it is fine. This case FAILED (rejected) before 2026-09-11 and is
+  -- the guard on that half of the fix.
+  mod G do
+    always_linear type S = S(Int)
+  end
+  type S = S(Int)
+  fn get(x : S) : Int do match x do S(v) -> v end end
+  fn main(c : Cap(IO.Console)) do
+    let a = S(1)
+    let x = get(a)
+    let y = get(a)
+    print_line(int_to_string(x + y))
+  end
+end

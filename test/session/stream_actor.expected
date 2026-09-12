@@ -1,0 +1,8 @@
+Prod sends Item(1)
+Cons got Item(1)
+Prod got More
+Prod sends Item(2)
+Cons got Item(2)
+close 2
+Prod got Done
+close 1

@@ -1,0 +1,28 @@
+mod Main do
+  needs IO.Console
+  -- The two legal shapes for a linear value arriving at a handler, pinned so
+  -- the t195/t196 fix cannot over-fire. `Take` consumes it exactly once;
+  -- `Keep` stores it into the returned state, which counts as a use because
+  -- the record update references it.
+  always_linear type S = S(Int)
+  fn sink(x : S) : Int do match x do S(v) -> v end end
+  actor A do
+    state { n : Int }
+    init  { n: 0 }
+    on Take(s : S) do
+      { state with n: state.n + sink(s) }
+    end
+  end
+  actor B do
+    state { held : S, n : Int }
+    init  { held: S(0), n: 0 }
+    on Keep(s : S) do
+      { held: s, n: state.n + 1 }
+    end
+  end
+  fn main(c : Cap(IO.Console)) do
+    let p = spawn(A)
+    send(p, Take(S(1)))
+    run_until_idle()
+  end
+end

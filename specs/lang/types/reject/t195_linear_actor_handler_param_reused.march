@@ -1,0 +1,26 @@
+-- EXPECT-ERROR: is used more than once
+mod Main do
+  needs IO.Console
+  -- An actor handler's parameters were bound with a plain `bind_var`, so they
+  -- got none of the `always_linear` promotion a named function's parameters
+  -- get: tracked for NEITHER must-use nor at-most-once. Sending a linear
+  -- value as a message is a documented idiom (finding L6, a zero-copy move)
+  -- whose sender half was enforced and receiver half was not. Sibling: t196
+  -- (drop), accept/t197 (the two legal shapes).
+  always_linear type S = S(Int)
+  fn sink(x : S) : Int do match x do S(v) -> v end end
+  actor A do
+    state { n : Int }
+    init  { n: 0 }
+    on Take(s : S) do
+      let a = sink(s)
+      let b = sink(s)
+      { state with n: state.n + a + b }
+    end
+  end
+  fn main(c : Cap(IO.Console)) do
+    let p = spawn(A)
+    send(p, Take(S(1)))
+    run_until_idle()
+  end
+end

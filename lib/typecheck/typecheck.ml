@@ -234,7 +234,11 @@ let bind_pattern_bindings scrut_expr (bindings : (string * scheme) list) env =
      ordinary variable and its uses are never checked for double-consumption. *)
   let always_linear_of t =
     match repr t with
-    | TCon (name, _) when List.mem name env.always_linear_types -> Some Ast.Linear
+    (* [resolves_always_linear], not the raw registry: the registry holds BARE
+       names, so a nested or imported `always_linear` type would otherwise
+       infect an unrelated type of the same name declared here — a false
+       positive on ordinary code, which the ordering hole above used to mask. *)
+    | TCon (name, _) when resolves_always_linear name env -> Some Ast.Linear
     | _ -> None
   in
   List.fold_left (fun acc_env (name, sch) ->
@@ -4304,18 +4308,28 @@ let rec check_decl env (d : Ast.decl) : env =
            valid inside a handler body, exactly like `state` above. *)
         let handler_env =
           bind_var "self" (Mono (TCon ("Pid", [state_ty]))) handler_env in
+        (* [bind_lam_param], not a bare [bind_var]: it is what applies the
+           `always_linear` / [TLin] promotion that a named function's
+           parameters get.  Binding these plainly meant a handler's parameters
+           were tracked for NEITHER must-use nor at-most-once — wider than the
+           lambda hole, which at least catches duplication — so the one idiom
+           the language documents for handing a resource between actors
+           (finding L6: a linear value sent as a message is a zero-copy move)
+           enforced the sender's half and dropped the receiver's.  See
+           specs/todos/2026-09-11-linear-actor-handler-parameter-untracked.md. *)
         let handler_env =
-          List.fold_left (fun e p ->
-              bind_var p.Ast.param_name.txt
-                (Mono (match p.param_ty with
-                   | Some ann -> let tvars = ref [] in surface_ty env ~tvars ann
-                   | None     -> fresh_var env.level))
-                e
-            ) handler_env h.ah_params
+          List.fold_left
+            (fun e (p : Ast.param) -> bind_lam_param e p.Ast.param_name.Ast.span p None)
+            handler_env h.ah_params
         in
         (* Handler body must return the state record type — emit rich
            diagnostic. No enclosing function — see [with_no_caller]. *)
         let inferred = with_no_caller handler_env (fun () -> infer_expr handler_env h.ah_body) in
+        (* A linear parameter must be consumed by the time the handler returns.
+           Storing it into the returned state counts: `{ state with st: s }`
+           references `s`, which marks it used. *)
+        check_linear_all_consumed handler_env ~scope_span:h.ah_msg.Ast.span
+          (List.map (fun (p : Ast.param) -> p.Ast.param_name.Ast.txt) h.ah_params);
         let shadow_env = { handler_env with errors = Err.create () } in
         (* Note: pending_constraints and type_map are shared (shallow copy) —
            intentional; only error reporting is isolated. *)
@@ -5956,6 +5970,32 @@ let check_stdlib_mediated_ceiling (env : env) (errors : Err.ctx)
          (March_caps.Cap_lattice.normalize attributed))
     user_fns
 
+(** Every `always_linear type` declared anywhere in [decls], as the bare name
+    plus the module-qualified name, spelled exactly as [check_decl]'s
+    [DAlwaysLinearType] arm spells them — a nested module qualifies with its
+    OWN bare name, because that is what [check_decl] sets [current_module] to.
+
+    Pass 1 seeds these so linearity does not depend on declaration order.
+    [env.always_linear_types] was written only by [check_decl], mid-fold, so a
+    function checked BEFORE the declaration saw an ordinary type and lost both
+    halves of the guarantee — reuse and must-use — with the program silently
+    accepted, top-level as much as nested. The pass-1 type prebind could not
+    cover it: its arm matches [DType] and [DAlwaysLinearType] together and
+    registers arity, names and constructors, never the linearity. See
+    specs/todos/2026-09-11-always-linear-registry-is-declaration-ordered.md. *)
+let rec always_linear_names ~(modname : string) (decls : Ast.decl list) : string list =
+  List.concat_map
+    (fun (d : Ast.decl) ->
+       match d with
+       | Ast.DAlwaysLinearType (_, name, _, _, _) ->
+         let bare = name.Ast.txt in
+         let qual = if modname = "" then bare else modname ^ "." ^ bare in
+         if bare = qual then [ bare ] else [ bare; qual ]
+       | Ast.DMod (mname, _, inner, _) ->
+         always_linear_names ~modname:mname.Ast.txt inner
+       | _ -> [])
+    decls
+
 let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
     : Err.ctx * (Ast.span, ty) Hashtbl.t * env =
   (* `from_json` return-type dispatch is recorded per call-site span by
@@ -6244,6 +6284,9 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
   let pre_env =
     { pre_env with
       current_module = m.Ast.mod_name.txt;
+      always_linear_types =
+        always_linear_names ~modname:m.Ast.mod_name.txt m.Ast.mod_decls
+        @ pre_env.always_linear_types;
       enclosing_package =
         (if pre_env.enclosing_package = "" then m.Ast.mod_name.txt
          else pre_env.enclosing_package) } in
@@ -6571,6 +6614,13 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
     ) env m.Ast.mod_decls
   in
   (* Pass 2: full checking of new declarations *)
+  (* Same order-independence seeding as [check_module_core]'s pass 1; the two
+     prebind paths must not diverge on this (see [always_linear_names]). *)
+  let pre_env =
+    { pre_env with
+      always_linear_types =
+        always_linear_names ~modname:m.Ast.mod_name.txt m.Ast.mod_decls
+        @ pre_env.always_linear_types } in
   let final_env = List.fold_left check_decl pre_env (reorder_decls m.Ast.mod_decls) in
   last_with_env_final := { final_env with record_names_snapshot = record_names_dump () };
   (* Pass 3: tail-call enforcement *)

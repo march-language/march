@@ -26,6 +26,8 @@ native_actor_registry_retire: coverage audit (user + stdlib): 63 enforced, 0 ine
 native_actor_registry_retire: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_registry_retire_vault: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_actor_registry_retire_vault: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_self: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_actor_self: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_stash_become: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_actor_stash_become: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_stop_drains_mailbox: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced

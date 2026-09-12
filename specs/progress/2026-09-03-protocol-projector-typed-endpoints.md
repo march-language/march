@@ -333,6 +333,24 @@ Two prerequisites, neither designed yet:
 This is still the demonstration the whole line was for. It is now its own
 follow-on, sequenced after the binary and multiparty generators land.
 
+**(correction, 2026-09-11)** Both prerequisites above were premised on putting
+the session state in the actor, and the design specced in
+`specs/todos/2026-09-11-actor-hosted-session-endpoint.md` does not. The
+generated API is callback-shaped, so the session state is already captured in
+the continuation closure; keeping it there puts neither the actor-state gap
+nor the handler-parameter gap on the path, and the whole mechanic — a
+continuation stored in a vault and invoked inside a handler turn, a delivery
+routed to an owner pid — was probed working on both backends with no compiler
+fix. Two further corrections to the text above: the recommended shape ("it
+rides in each message and is `let`-bound inside the handler, where tracking is
+real") does **not** give the guarantee it claims, because an actor handler's
+parameters are tracked for neither must-use nor at-most-once
+(`specs/todos/2026-09-11-linear-actor-handler-parameter-untracked.md`); and
+`self` cannot be used to register ownership, because `self` inside a handler
+does not compile at all
+(`specs/todos/2026-09-11-self-in-an-actor-handler-does-not-compile.md`) —
+ownership is registered at the spawn site instead.
+
 ## Verified live (2026-09-03, re-run and extended 2026-09-10)
 
 Every load-bearing claim above, with the probe that established it. Exit codes

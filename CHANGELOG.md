@@ -13,6 +13,14 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **A session endpoint can be hosted in an actor.** `test/session/stream_actor.march`
+  runs both roles of a protocol inside actors, with every resumption driven by
+  a mailbox delivery, over the same generated `@[endpoints]` API and with the
+  same trace as the function-hosted version. The session state lives in the
+  transport's continuation rather than in actor state, so the endpoint's host
+  turns out to be replaceable: swapping an endpoint's actor for a fresh one
+  mid-session continues the protocol from where it was.
+
 - **`@[endpoints]` on a `protocol` generates a typed endpoint API for every
   role**, over the `Session` transport capability. Each session state becomes
   an `always_linear` type and each protocol step a function between them, so
@@ -41,6 +49,36 @@ git log is authoritative for exact commits.
   nothing when unset.
 
 ### Fixed
+
+- **`self` inside an actor handler compiles.** It was a real builtin in the
+  interpreter but missing from the compiled backend's builtin table, so the
+  emitter produced a call to an undefined symbol and *any* compiled program
+  naming `self` failed to link. The runtime accessor it should have pointed
+  at existed but returned the wrong thing — a scheduler process pointer
+  rather than the actor pointer a pid actually is — which nothing could
+  notice while no compiled program could reach it. Both are fixed, and
+  `self` outside a handler now fails loudly instead of yielding a stray
+  address. Sending *to* `self` still does not deliver, on either backend;
+  that is tracked separately.
+
+- **`always_linear` tracking no longer depends on declaration order.** The
+  registry of always-linear type names was filled only as declarations were
+  checked, in order, so a function checked *before* the type's declaration saw
+  an ordinary type and lost both halves of the guarantee: reusing a linear
+  value and abandoning one were each silently accepted. Top-level types were
+  affected as much as nested ones. Pass 1 now seeds the registry before any
+  body is checked. The same change routes the let-binding promotion through
+  the shadow-aware lookup, so a nested `always_linear` type no longer infects
+  an unrelated type of the same name declared in the current module — a false
+  positive on ordinary code that the ordering hole had been masking.
+
+- **An actor handler's parameters are tracked for linearity.** They were bound
+  without the promotion a named function's parameters get, so a linear value
+  arriving in a message could be duplicated or dropped by the handler with no
+  diagnostic at all — the sender's half of the documented zero-copy-move idiom
+  was enforced and the receiver's was not. Storing the parameter into the
+  returned state counts as consuming it, so an actor that holds a resource
+  needs no special case.
 
 - `march --fmt` dropped the `end` that closes a `choose by … :` block inside a
   `protocol`, so formatting a file with a choice produced a program that no
