@@ -22,6 +22,36 @@ let cas_deps_dir () =
     (Filename.concat ".march" (Filename.concat "cas" "deps"))
 
 (* ------------------------------------------------------------------ *)
+(*  Version-aware cache layout                                         *)
+(* ------------------------------------------------------------------ *)
+
+(** A dep's install directory is [deps/<name>/<coord>], never [deps/<name>].
+
+    The flat layout was keyed by NAME ALONE, so two projects wanting different
+    versions of one dep shared one directory. For git deps that merely caused
+    thrash (the URL matched, so the checkout was reused at whatever ref it
+    happened to be on); for REGISTRY deps it was destructive — install did an
+    unconditional `rm -rf` of the destination with no check at all, so
+    installing `bastion 0.3.1` silently deleted the `bastion 0.2.0` another
+    project was building against.
+
+    [coord] is the dep's resolved identity: the commit SHA for any git dep
+    (a tag or branch can move, a commit cannot), and the exact resolved semver
+    for a registry dep. Both are already recorded in forge.lock, which is what
+    lets a consumer find the directory again without re-resolving. See
+    `specs/2026-09-11-forge-offline-and-versioned-dep-cache-design.md` §2. *)
+let dep_coord_dir ~name ~coord =
+  Filename.concat (Filename.concat (cas_deps_dir ()) name) coord
+
+(** True if [dir] looks like an INSTALLED PACKAGE rather than a container of
+    coordinate directories — i.e. the pre-2026-09-12 flat layout. Keyed on
+    markers a package root has and a container never does. *)
+let looks_like_flat_install dir =
+  Sys.file_exists (Filename.concat dir "forge.toml")
+  || Sys.file_exists (Filename.concat dir "lib")
+  || Sys.file_exists (Filename.concat dir ".git")
+
+(* ------------------------------------------------------------------ *)
 (*  Timeout-guarded subprocess runner                                  *)
 (* ------------------------------------------------------------------ *)
 
@@ -91,49 +121,64 @@ let resolve_commit path =
   | (0, sha) when String.length sha >= 7 -> Some sha
   | _ -> None
 
-(** Is [dest] an existing git checkout of [url]?
+(** Move a legacy flat install at [deps/<name>] down to
+    [deps/<name>/<coord>], preserving a warm cache across the upgrade — the
+    alternative is every user re-downloading every dep. A flat install whose
+    coordinate cannot be determined is moved aside rather than deleted: it may
+    be something a user placed by hand.
 
-    The CAS keys an install by dep NAME only ([Project.dep_root_dir] maps every
-    non-path dep to ~/.march/cas/deps/<name>), so that directory can hold
-    content from a DIFFERENT source than the manifest now asks for — most
-    easily by switching a dep between `registry = ...` and `git = ...`, but
-    equally by two projects on one machine wanting different URLs.
+    [coord] must identify what the flat directory ACTUALLY holds, not what is
+    about to be installed. A git checkout can say ([resolve_commit] reads its
+    HEAD), so callers pass [None] and let it. A registry extract cannot — it
+    carries no version marker — and labelling it with the version now being
+    installed would serve the old tree under the new version's name. So that
+    case is moved aside instead, at the cost of one re-download.
 
-    A bare [Sys.file_exists dest] then reports "already installed" over, say, a
-    registry tarball, and the next git command fails with `fatal: not a git
-    repository` — with the lockfile recording the git source while the
-    directory holds registry content. Checking the remote before reuse turns
-    that silent mismatch into a re-install.
-
-    Conservative by design: anything we cannot positively confirm as a matching
-    checkout (no .git, git not on PATH, a rewritten remote) reports false, and
-    the caller re-installs. Re-cloning is cheap; serving wrong content is not.
-
-    NOTE this does not fix the underlying sharing problem — two projects
-    needing the same package at different revs still collide on one directory,
-    and the later one re-clones over the earlier. The real fix is to key the
-    CAS path by source, which is an on-disk layout change; see
-    specs/plans/2026-07-30-forge-registry-dep-gaps.md (B3, option 2). *)
-let git_checkout_matches ~url dest =
-  Sys.file_exists (Filename.concat dest ".git")
-  && (let cmd = Printf.sprintf "git -C %s remote get-url origin"
-                  (Filename.quote dest) in
-      match run_cmd cmd with
-      | (0, got) -> String.trim got = String.trim url
-      | _ -> false)
-
-(** Reuse [dest] if it is a matching checkout of [url]; otherwise clear it so
-    the caller's clone starts from a clean directory. Returns true when the
-    existing install can be reused as-is. *)
-let reuse_or_clear_git_dest ~name ~url dest =
-  if not (Sys.file_exists dest) then false
-  else if git_checkout_matches ~url dest then true
+    Returns [true] if a migration happened (so the caller can then treat
+    [deps/<name>] as a container). *)
+let migrate_flat_install ~name ~coord =
+  let flat = Filename.concat (cas_deps_dir ()) name in
+  if not (Sys.file_exists flat) then false
+  else if not (looks_like_flat_install flat) then false
   else begin
-    Printf.printf
-      "  %s: installed copy does not match %s — reinstalling\n%!" name url;
-    ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote dest)));
-    false
+    let staging = Printf.sprintf "%s.migrating.%d" flat (Unix.getpid ()) in
+    ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote staging)));
+    (* Determine the coordinate BEFORE moving anything: for a git checkout it
+       is read out of the checkout itself. *)
+    let coord = match coord with
+      | Some c -> Some c
+      | None -> resolve_commit flat
+    in
+    match (try Sys.rename flat staging; true with Sys_error _ -> false) with
+    | false ->
+      Printf.eprintf "warning: %s: could not move legacy cache dir aside\n%!" name;
+      false
+    | true ->
+      Project.mkdir_p flat;
+      (match coord with
+       | Some c ->
+         let target = Filename.concat flat c in
+         ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote target)));
+         (try Sys.rename staging target with Sys_error _ -> ());
+         Printf.printf "  %s: migrated cached copy to %s/%s\n%!" name name c
+       | None ->
+         let aside = Printf.sprintf "%s.legacy-%.0f" flat (Unix.time ()) in
+         (try Sys.rename staging aside with Sys_error _ -> ());
+         Printf.printf
+           "  %s: cached copy could not be identified; moved aside to %s\n%!"
+           name aside);
+      true
   end
+
+(* [git_checkout_matches] / [reuse_or_clear_git_dest] lived here until
+   2026-09-12. They existed because the CAS keyed an install by dep NAME alone,
+   so one directory could hold content from a different source than the
+   manifest now asked for; their answer was to compare the remote URL and
+   `rm -rf` on a mismatch. Both the problem and that answer are gone: an
+   install is keyed by its resolved coordinate ([dep_coord_dir]), so a
+   different tag, rev or source is simply a different directory and nothing
+   needs clearing. Removed rather than left dead, so nothing reaches for the
+   URL-keyed reuse test again. *)
 
 (** Compute the content hash for a resolved dep directory.
     Uses the CAS canonical archive hash; falls back to a placeholder if
@@ -431,7 +476,11 @@ let resolve_registry_deps ~reg_deps ~override_deps =
                            (Printf.sprintf "%s %s: no checksum in registry metadata"
                               name vstr)
                      | Some expected_cs ->
-                       let dest = Filename.concat deps_dir name in
+                       (* Version-keyed: deps/<name>/<version>. Before this,
+                          the destination was deps/<name> and the rm -rf below
+                          destroyed whatever OTHER version was cached there. *)
+                       ignore (migrate_flat_install ~name ~coord:None);
+                       let dest = dep_coord_dir ~name ~coord:vstr in
                        let tarball =
                          Filename.temp_file ("forge_" ^ name ^ "_") ".tar.gz" in
                        Printf.printf "  %s %s: downloading...\n%!" name vstr;
@@ -445,7 +494,10 @@ let resolve_registry_deps ~reg_deps ~override_deps =
                                 "%s %s: checksum mismatch\n  expected: %s\n  got:      %s"
                                 name vstr expected_cs actual_cs)
                           else begin
-                            (* Fresh extract: remove any stale install first. *)
+                            (* Fresh extract. Removing [dest] is safe now that
+                               it is version-keyed: it can only ever hold a
+                               previous extract of THIS same version, never a
+                               sibling version another project depends on. *)
                             if Sys.file_exists dest then
                               ignore (Sys.command
                                         (Printf.sprintf "rm -rf %s" (Filename.quote dest)));
@@ -455,12 +507,18 @@ let resolve_registry_deps ~reg_deps ~override_deps =
                                   "%s %s: tar extraction failed (exit %d)" name vstr rc)
                             else begin
                               Printf.printf "  %s %s: installed to %s\n%!" name vstr dest;
+                              (* Format 2: [hash] is the tree hash, in the
+                                 same domain as every other dep kind, so one
+                                 integrity check covers all of them;
+                                 [checksum] keeps the registry's published
+                                 tarball digest as provenance. *)
                               let e = Resolver_lockfile.{
                                   name;
                                   version = Some vstr;
                                   source  = "registry:forge";
                                   commit  = None;
-                                  hash    = "sha256:" ^ expected_cs } in
+                                  hash    = content_hash ~name ~source:"registry:forge" dest;
+                                  checksum = Some ("sha256:" ^ expected_cs) } in
                               entries := e :: !entries
                             end
                           end);
@@ -477,11 +535,78 @@ let resolve_registry_deps ~reg_deps ~override_deps =
 (*  Install / update per dep type                                      *)
 (* ------------------------------------------------------------------ *)
 
+(** Clone a git dep into its COMMIT-keyed directory.
+
+    The commit is only knowable after the clone, so the clone goes to a staging
+    directory first, then moves to [deps/<name>/<commit>]. If that directory
+    already exists the staging copy is discarded and the cached one reused —
+    which is both the cache hit and the reason two projects on different refs
+    of one repo no longer fight over one directory.
+
+    Replaces the old [reuse_or_clear_git_dest] flow, whose reuse test was the
+    remote URL: the same URL at a different tag was reused as-is, and a
+    different URL triggered `rm -rf` of a directory another project might be
+    building against.
+
+    [version] is called only on a fresh clone, to decide what goes in the
+    lockfile's `version` field (a tag parses as semver; a branch or rev has
+    none). *)
+let clone_git_dep ~name ~url ~ref_name ~depth1 ~version =
+  let source = "git:" ^ url in
+  ignore (migrate_flat_install ~name ~coord:None);
+  let staging =
+    Filename.concat (cas_deps_dir ())
+      (Printf.sprintf ".staging-%s-%d" name (Unix.getpid ())) in
+  ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote staging)));
+  Printf.printf "  %s: cloning %s @ %s...\n%!" name url ref_name;
+  let cmd =
+    if depth1 then
+      Printf.sprintf "git clone --depth 1 --branch %s %s %s"
+        (Filename.quote ref_name) (Filename.quote url) (Filename.quote staging)
+    else
+      Printf.sprintf "git clone %s %s && git -C %s checkout %s"
+        (Filename.quote url) (Filename.quote staging)
+        (Filename.quote staging) (Filename.quote ref_name)
+  in
+  let rc = Sys.command cmd in
+  if rc <> 0 then begin
+    ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote staging)));
+    Error (Printf.sprintf "failed to clone %s @ %s (exit %d)" url ref_name rc)
+  end else begin
+    match resolve_commit staging with
+    | None ->
+      ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote staging)));
+      Error (Printf.sprintf "%s: cloned %s but could not resolve its commit" name url)
+    | Some commit ->
+      let dest = dep_coord_dir ~name ~coord:commit in
+      if Sys.file_exists dest then begin
+        (* Already cached at this exact commit — keep the cached tree and throw
+           the fresh clone away, so a concurrent reader is never disturbed. *)
+        ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote staging)));
+        Printf.printf "  %s: already cached at %s\n%!" name commit
+      end else begin
+        Project.mkdir_p (Filename.dirname dest);
+        (try Sys.rename staging dest
+         with Sys_error _ ->
+           (* Cross-device or a racing writer: fall back to a copy, then make
+              sure staging does not leak. *)
+           ignore (Sys.command (Printf.sprintf "cp -R %s %s"
+                                  (Filename.quote staging) (Filename.quote dest)));
+           ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote staging))));
+        Printf.printf "  %s: installed to %s\n%!" name dest
+      end;
+      Ok Resolver_lockfile.{
+          name;
+          version = version ();
+          source;
+          commit = Some commit;
+          hash = content_hash ~name ~source dest;
+          checksum = None }
+  end
+
 (** Install a dep for the first time.  Returns a (lock_entry, error option). *)
 let install_dep name (dep : Project.dep) =
-  let deps_dir = cas_deps_dir () in
-  Project.mkdir_p deps_dir;
-  let dest = Filename.concat deps_dir name in
+  Project.mkdir_p (cas_deps_dir ());
   match dep with
 
   | Project.RegistryDep { version } ->
@@ -491,88 +616,27 @@ let install_dep name (dep : Project.dep) =
     let e = Resolver_lockfile.{ name; version = None;
                                  source = "registry:forge";
                                  commit = None;
-                                 hash = Printf.sprintf "pending:%s" name } in
+                                 hash = Printf.sprintf "pending:%s" name;
+                                 checksum = None } in
     Ok e
 
   | Project.GitTagDep { url; tag } ->
-    if reuse_or_clear_git_dest ~name ~url dest then begin
-      Printf.printf "  %s: already installed (tag %s)\n%!" name tag;
-      let commit = resolve_commit dest in
-      let e = Resolver_lockfile.{ name; version = Some tag;
-                                   source = "git:" ^ url;
-                                   commit; hash = content_hash ~name ~source:("git:" ^ url) dest } in
-      Ok e
-    end else begin
-      Printf.printf "  %s: cloning %s @ %s...\n%!" name url tag;
-      let cmd = Printf.sprintf "git clone --depth 1 --branch %s %s %s"
-          (Filename.quote tag) (Filename.quote url) (Filename.quote dest) in
-      let rc = Sys.command cmd in
-      if rc = 0 then begin
-        let commit = resolve_commit dest in
-        (* Parse tag as semver version for the lockfile *)
-        let ver_str = match Resolver_version.parse tag with
+    clone_git_dep ~name ~url ~ref_name:tag ~depth1:true
+      ~version:(fun () ->
+          match Resolver_version.parse tag with
           | Ok v  -> Some (Resolver_version.to_string v)
           | Error _ ->
             Printf.eprintf
               "warning: tag '%s' for %s is not semver — stored as-is\n%!" tag name;
-            Some tag
-        in
-        let e = Resolver_lockfile.{ name; version = ver_str;
-                                     source = "git:" ^ url;
-                                     commit; hash = content_hash ~name ~source:("git:" ^ url) dest } in
-        Ok e
-      end else
-        Error (Printf.sprintf "failed to clone %s @ %s (exit %d)" url tag rc)
-    end
+            Some tag)
 
   | Project.GitBranchDep { url; branch } ->
-    if reuse_or_clear_git_dest ~name ~url dest then begin
-      Printf.printf "  %s: already installed (branch %s)\n%!" name branch;
-      let commit = resolve_commit dest in
-      let e = Resolver_lockfile.{ name; version = None;
-                                   source = "git:" ^ url;
-                                   commit; hash = content_hash ~name ~source:("git:" ^ url) dest } in
-      Ok e
-    end else begin
-      Printf.printf "  %s: cloning %s @ branch %s...\n%!" name url branch;
-      let cmd = Printf.sprintf "git clone --depth 1 --branch %s %s %s"
-          (Filename.quote branch) (Filename.quote url) (Filename.quote dest) in
-      let rc = Sys.command cmd in
-      if rc = 0 then begin
-        let commit = resolve_commit dest in
-        let e = Resolver_lockfile.{ name; version = None;
-                                     source = "git:" ^ url;
-                                     commit; hash = content_hash ~name ~source:("git:" ^ url) dest } in
-        Ok e
-      end else
-        Error (Printf.sprintf "failed to clone %s (branch %s, exit %d)" url branch rc)
-    end
+    clone_git_dep ~name ~url ~ref_name:branch ~depth1:true ~version:(fun () -> None)
 
   | Project.GitRevDep { url; rev } ->
-    if reuse_or_clear_git_dest ~name ~url dest then begin
-      Printf.printf "  %s: already installed (rev %s)\n%!" name rev;
-      let e = Resolver_lockfile.{ name; version = None;
-                                   source = "git:" ^ url;
-                                   commit = Some rev;
-                                   hash = content_hash ~name ~source:("git:" ^ url) dest } in
-      Ok e
-    end else begin
-      Printf.printf "  %s: cloning %s @ %s...\n%!" name url rev;
-      (* Can't use --depth 1 with arbitrary rev unless the server supports it.
-         Use a full clone then checkout. *)
-      let cmd = Printf.sprintf "git clone %s %s && git -C %s checkout %s"
-          (Filename.quote url) (Filename.quote dest)
-          (Filename.quote dest) (Filename.quote rev) in
-      let rc = Sys.command cmd in
-      if rc = 0 then begin
-        let e = Resolver_lockfile.{ name; version = None;
-                                     source = "git:" ^ url;
-                                     commit = Some rev;
-                                     hash = content_hash ~name ~source:("git:" ^ url) dest } in
-        Ok e
-      end else
-        Error (Printf.sprintf "failed to clone %s @ %s (exit %d)" url rev rc)
-    end
+    (* A full clone then checkout: --depth 1 cannot take an arbitrary rev
+       unless the server advertises it. *)
+    clone_git_dep ~name ~url ~ref_name:rev ~depth1:false ~version:(fun () -> None)
 
   | Project.PathDep path ->
     if Sys.file_exists path then begin
@@ -581,7 +645,8 @@ let install_dep name (dep : Project.dep) =
       let e = Resolver_lockfile.{ name; version = None;
                                    source = "path:" ^ path;
                                    commit = None;
-                                   hash } in
+                                   hash;
+                                   checksum = None } in
       Ok e
     end else
       Error (Printf.sprintf "path dep '%s' not found: %s" name path)
@@ -589,20 +654,19 @@ let install_dep name (dep : Project.dep) =
 (** Update a dep in place (moves branch deps to new HEAD; no-ops for others). *)
 let update_dep name (dep : Project.dep) =
   match dep with
-  | Project.GitBranchDep { url; branch } ->
-    let dest = Filename.concat (cas_deps_dir ()) name in
-    if Sys.file_exists dest then begin
-      Printf.printf "  %s: pulling %s @ %s...\n%!" name url branch;
-      let cmd = Printf.sprintf
-          "git -C %s fetch --depth 1 origin %s && git -C %s checkout FETCH_HEAD"
-          (Filename.quote dest) (Filename.quote branch) (Filename.quote dest) in
-      let rc = Sys.command cmd in
-      if rc = 0 then Ok ()
-      else Error (Printf.sprintf "failed to update %s" name)
-    end else begin
-      ignore (install_dep name dep);
-      Ok ()
-    end
+  | Project.GitBranchDep _ ->
+    (* Moving a branch dep to its new HEAD means landing on a DIFFERENT commit,
+       which under the version-aware layout is a different directory. So an
+       update is a fresh install: it clones, resolves the new commit, and lands
+       at deps/<name>/<new commit>, leaving the old coordinate in place for any
+       project still locked to it.
+       This used to `git -C deps/<name> fetch && checkout FETCH_HEAD`, mutating
+       the one shared checkout in place — the aliasing the coordinate layout
+       removes, and which would now not even find a git repository there, since
+       deps/<name> is a container of coordinates. *)
+    (match install_dep name dep with
+     | Ok _ -> Ok ()
+     | Error e -> Error e)
   | Project.GitRevDep _ ->
     Printf.printf "  %s: pinned to exact rev — nothing to update\n%!" name;
     Printf.printf "     (change the rev in forge.toml to update)\n%!";

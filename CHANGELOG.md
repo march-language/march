@@ -58,8 +58,8 @@ git log is authoritative for exact commits.
   annotation and builtin signature denotes the canonical bare name, so the two
   never unified ("expected `FileError` but got `File.FileError`") and a bare
   `NotFound(p)` resolved to the DNS constructor of the same name. Compiled
-  (Compiled `to_string` of such an error still renders `#<tag:N>`; that
-  rendering gap is tracked separately.)
+  `to_string` of such an error still renders `#<tag:N>`; that rendering gap is
+  tracked separately.
 - **The interpreter's `file_rename` error now names the path**, as the
   compiled runtime and every other file builtin already did.
 - **A record type declared in one typecheck no longer changes a later,
@@ -80,7 +80,6 @@ git log is authoritative for exact commits.
   `supervise do … end` alternative, instead of failing at link time with
   `Undefined symbols: _worker`. That value-level supervisor DSL is
   interpreter-only. A user function named `worker` is unaffected.
-
 - **A `--test` build no longer silently drops a sibling test file that fails
   to parse.** `forge test` compiles one entry and discovers the rest via
   `MARCH_LIB_PATH`; an unparsable sibling used to be dropped with a stderr
@@ -101,6 +100,26 @@ git log is authoritative for exact commits.
   the existing tag store and costs no extra instruction at `--opt 2`. Niche
   `Option`, single-field wrapper types, tuples and anonymous records still
   render `#<tag:N>` — they have no cell of their own to stamp.
+- **Installing one version of a dependency no longer destroys another.** The
+  cache was keyed by dependency NAME alone, so every project on a machine
+  shared one directory per name. A registry install did an unconditional
+  `rm -rf` of it with no check at all, so `forge deps` in a project wanting
+  `bastion 0.3.1` silently deleted the `bastion 0.2.0` tree another project was
+  building against, which then failed with `Unknown module` for everything that
+  dependency provided. Installs now live at
+  `~/.march/cas/deps/<name>/<coordinate>` — the resolved commit for a git
+  dependency, the exact version for a registry one — so versions coexist, and
+  `forge.lock` is read at build time to select the right one. An existing flat
+  install is migrated on the next `forge deps` rather than re-downloaded.
+- **`forge.lock`'s `hash` field had two incompatible meanings.** For a registry
+  dependency it was the published checksum of the `.tar.gz`; for a git
+  dependency it was a hash of the extracted source tree. No single integrity
+  check could cover both, including the one the code has claimed to perform in
+  a comment since it was written. `hash` is now uniformly the tree hash for
+  every dependency kind, a new optional `checksum` field carries the registry's
+  published digest as provenance, and a `[lockfile] version = 2` marker lets a
+  reader tell an old file's registry `hash` from a new one's. Older lockfiles
+  are still read.
 
 ### Changed
 

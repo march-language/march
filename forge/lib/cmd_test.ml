@@ -114,8 +114,13 @@ let project_env proj =
   let visited = Hashtbl.create 16 in
   let transitive_deps =
     Cmd_build.collect_transitive_deps visited (proj.Project.root, test_scope_deps) in
+  (* Same version-aware coordinates as the build path: without them a
+     version-keyed dep directory is only found by Project.dep_cache_dir's
+     fallbacks, so a project with two cached versions of one dep would drop it
+     from the test MARCH_LIB_PATH entirely. *)
+  let coords = Project.dep_coords ~project_root:proj.Project.root in
   let dep_lib_paths = List.concat_map
-    (fun (root, dep_name, dep) -> Cmd_build.dep_to_lib_paths ~root (dep_name, dep))
+    (fun (root, dep_name, dep) -> Cmd_build.dep_to_lib_paths ~coords ~root (dep_name, dep))
     transitive_deps in
   let gen_dir = Filename.concat proj.Project.root ".forge/generated" in
   let all_lib_paths =

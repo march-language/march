@@ -158,7 +158,7 @@ let build_islands ~lib_path_env ~islands_dir ~release lib_dir =
 
 (** Expand a single dep entry into the lib paths it contributes to MARCH_LIB_PATH.
     PathDeps are resolved relative to [root]; git deps use the CAS install path. *)
-let dep_to_lib_paths ~root (dep_name, dep) =
+let dep_to_lib_paths ?coords ~root (dep_name, dep) =
   match dep with
   | Project.PathDep rel_path ->
     let abs_path = if Filename.is_relative rel_path
@@ -171,9 +171,11 @@ let dep_to_lib_paths ~root (dep_name, dep) =
     else []
   | Project.GitTagDep _ | Project.GitBranchDep _ | Project.GitRevDep _
   | Project.RegistryDep _ ->
-    (* Git and registry deps both install under ~/.march/cas/deps/<name>; use
-       that dep's lib/ (or its root as a fallback). *)
-    (match Project.git_dep_lib_path dep_name with
+    (* Git and registry deps install under ~/.march/cas/deps/<name>/<coord>;
+       [coords] carries the coordinate from forge.lock. Without it the locator
+       falls back (legacy flat install, or a single unambiguous version) —
+       see Project.dep_cache_dir. *)
+    (match Project.git_dep_lib_path ?coords dep_name with
      | Some p -> collect_lib_dirs p
      | None  -> [])
 
@@ -257,8 +259,11 @@ let lib_path_env ?(release=false) proj =
      of its descendant directories — mirroring [collect_lib_dirs lib_dir] for
      the primary package below.  Without this, a reorganised dependency's
      internal cross-module imports fail with "Module not found" in consumers. *)
+  (* The dep coordinates this project locked. Read once per lib_path_env call,
+     not once per dep. *)
+  let coords = Project.dep_coords ~project_root:proj.Project.root in
   let dep_lib_paths = List.concat_map
-    (fun (root, dep_name, dep) -> dep_to_lib_paths ~root (dep_name, dep))
+    (fun (root, dep_name, dep) -> dep_to_lib_paths ~coords ~root (dep_name, dep))
     transitive_deps in
   let gen_dir = Filename.concat proj.Project.root ".forge/generated" in
   let all_lib_paths =
