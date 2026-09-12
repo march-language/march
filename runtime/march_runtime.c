@@ -3087,6 +3087,9 @@ static void actor_green_thread(void *arg) {
      * not a _Thread_local — this scheduler steals procs across OS
      * threads, so a raw thread-local would go stale after a migration). */
     march_proc *self = march_sched_current();
+    /* Publish the actor this proc is running, so `self` in a handler body can
+     * find it (march_self, in march_scheduler.c). */
+    if (self) self->actor = actor;
     jmp_buf crash_jmp;
     jmp_buf *saved_jmp = self ? self->crash_jmp : NULL;
     /* Supervise-block children reach this function only after deferred spawn

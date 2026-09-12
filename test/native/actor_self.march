@@ -1,0 +1,43 @@
+mod ActorSelf do
+  -- `self` inside an actor handler, on the compiled backend.
+  --
+  -- This did not build at all before 2026-09-12: `self` was a real builtin in
+  -- the interpreter and listed in defun's builtin names, but absent from
+  -- lib/tir/llvm_builtins.ml, so the emitter produced `call ptr @self()`
+  -- naming a symbol nothing defined and every compiled program using it died
+  -- in clang. The runtime side existed but returned the PROC pointer, which
+  -- is not what a Pid is at the ABI (march_send takes an actor pointer,
+  -- march_spawn returns one) -- invisible while nothing could reach it.
+  --
+  -- Filed: specs/todos/2026-09-11-self-in-an-actor-handler-does-not-compile.md.
+  -- What is still broken and filed separately: sending TO self does not
+  -- deliver, on either backend.
+  needs IO.Console
+
+  -- Deliberately does NOT compare `self` to the spawner's pid: the two
+  -- backends disagree on that (compiled, they are equal -- `self` is the
+  -- actor pointer, which is what `spawn` hands back; interpreted, they are
+  -- not), and that divergence is filed rather than pinned here. What both
+  -- agree on, and what this golden is for, is that `self` is a usable value
+  -- inside a handler on the compiled backend at all.
+  pfn note(p) : () do
+    let _ = p
+    print_line("handler holds its own pid")
+  end
+
+  actor A do
+    state { n : Int }
+    init  { n: 0 }
+    on Check() do
+      note(self)
+      { state with n: state.n + 1 }
+    end
+  end
+
+  fn main(c : Cap(IO.Console)) do
+    let p = spawn(A)
+    send(p, Check())
+    run_until_idle()
+    print_line("done")
+  end
+end

@@ -50,6 +50,17 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`self` inside an actor handler compiles.** It was a real builtin in the
+  interpreter but missing from the compiled backend's builtin table, so the
+  emitter produced a call to an undefined symbol and *any* compiled program
+  naming `self` failed to link. The runtime accessor it should have pointed
+  at existed but returned the wrong thing — a scheduler process pointer
+  rather than the actor pointer a pid actually is — which nothing could
+  notice while no compiled program could reach it. Both are fixed, and
+  `self` outside a handler now fails loudly instead of yielding a stray
+  address. Sending *to* `self` still does not deliver, on either backend;
+  that is tracked separately.
+
 - **`always_linear` tracking no longer depends on declaration order.** The
   registry of always-linear type names was filled only as declarations were
   checked, in order, so a function checked *before* the type's declaration saw

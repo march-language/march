@@ -1,5 +1,7 @@
 # `[P1]` `self` inside an actor handler emits invalid IR
 
+**Shipped 2026-09-12.** See "What shipped" at the end.
+
 Found 2026-09-11 while designing the mailbox transport for
 `2026-09-11-actor-hosted-session-endpoint.md`. Interpreter-only feature: every
 compiled program that names `self` in a handler fails to build.
@@ -94,3 +96,65 @@ actor's own identity can be told it: register at the spawn site, or send the
 pid in the actor's first message. `2026-09-11-actor-hosted-session-endpoint.md`
 uses exactly this and needs no `self`, which is why that item is not blocked
 on this one.
+
+---
+
+## What shipped (2026-09-12)
+
+`self` inside a handler compiles and works as a value on both backends.
+`test/native/actor_self.march` is the golden; it did not build at all before.
+
+**The diagnosis in this file was half right, and the wrong half mattered.**
+It said the runtime had no accessor to point the builtin at. It already had
+one — `march_self` in `march_scheduler.c`, present and dead, because nothing
+could reach it:
+
+```c
+/* self() builtin — returns the current green thread's proc pointer (the PID
+ * value used as first arg to send/receive in the compiled binary). */
+void *march_self(void) { return (void *)march_sched_current(); }
+```
+
+That comment is wrong, and had been invisible for exactly the reason this
+item exists: with `self` missing from `llvm_builtins.ml`, no compiled program
+ever called it, so nothing could notice that a **proc** pointer is not a Pid.
+A Pid at the ABI is the **actor** pointer — `march_send` takes one,
+`march_spawn` returns one, `march_pid_of_int` hands back `meta->actor`.
+
+So the change is three lines of runtime plus the table entry, not a new
+accessor:
+
+- `march_proc` gains an `actor` field, published once by `actor_green_thread`
+  (procs are `calloc`'d, so NULL is the default and non-actor procs keep it).
+- `march_self` returns that actor pointer, and panics outside a handler
+  instead of handing back something the caller will misread.
+- `llvm_builtins.ml` gains the `self` entry and its `PDeclare`.
+
+I briefly added a *second* `march_self` in `march_runtime.c` before noticing
+the existing one — a duplicate symbol that only failed to break the build
+because the staged runtime was stale. Reverted; the lesson is to grep the
+runtime for the symbol before adding an accessor a spec says is missing.
+
+### Step 4, the out-of-handler decision: not decidable here
+
+The spec asked what compiled `self` should do outside a handler. It turns out
+`march_self` is never called there: the typechecker binds the global `self`
+as `Int`, so `let x = self` at top level lowers to the **closure address** of
+`march_self$static_clo` cast to an integer, and prints a raw pointer. The
+panic added above is unreachable on that path and is kept only as a backstop.
+
+Making that case an error is a typechecker change — the global `self : Int`
+binding is the actual defect — and belongs to its own item, not to a codegen
+fix. Recorded here rather than silently left.
+
+### Found while fixing it, filed separately
+
+- **`send(self, …)` does not deliver**, on *either* backend and differently
+  on each: `specs/todos/2026-09-12-send-to-self-does-not-deliver.md`. A
+  handler sending to a *different* actor works on both, so this is specific
+  to self-directed delivery, not to sends from handlers. Filed P1: it is the
+  ordinary way an actor drives itself forward and it fails silently.
+- **`self == spawn(...)`** is true compiled, false interpreted. The compiled
+  answer is the defensible one. The golden deliberately avoids comparing them
+  so it pins only what both backends agree on; the divergence is recorded in
+  the file above.
