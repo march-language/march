@@ -19,6 +19,7 @@ open Llvm_ctx
 
 let emit_store_field = Llvm_data.emit_store_field
 let emit_store_tag = Llvm_data.emit_store_tag
+let emit_store_tag_keep_pad = Llvm_data.emit_store_tag_keep_pad
 let emit_heap_alloc = Llvm_data.emit_heap_alloc
 let emit_stack_alloc = Llvm_data.emit_stack_alloc
 let ctor_entry = Llvm_data.ctor_entry
@@ -192,7 +193,7 @@ let emit_alloc_ctor ~emit_atom ctx (ctor : string)
             (* Boxed None: a tag-0 heap cell with no fields, matching the boxed
                Some encoding for this niche-unsafe Option. *)
             let entry = ctor_entry ctx ctor 0 in
-            let ptr = emit_heap_alloc ctx entry.ce_tag 0 in
+            let ptr = emit_heap_alloc ctx entry.ce_tag 0 entry.ce_type_id in
             ("ptr", ptr)
           end
         | [arg] ->
@@ -216,7 +217,7 @@ let emit_alloc_ctor ~emit_atom ctx (ctor : string)
              audit_arg "Boxed" "alloc-some-boxed";
              (* Payload not niche-safe (Float/Unit/Bool) — fall through to boxed *)
              let entry = ctor_entry ctx ctor (List.length args) in
-             let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
+             let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) entry.ce_type_id in
              let field_ty = match List.nth_opt entry.ce_fields 0 with
                | Some t -> llvm_field_ty ctx t | None -> "ptr" in
              let (v_ty, v_val) = emit_atom ctx arg in
@@ -226,7 +227,7 @@ let emit_alloc_ctor ~emit_atom ctx (ctor : string)
           audit "Boxed" "alloc-multi";
           (* Multi-arg ctor that happens to share the type name — boxed *)
           let entry = ctor_entry ctx ctor (List.length args) in
-          let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
+          let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) entry.ce_type_id in
           List.iteri (fun i atom ->
             let field_ty = match List.nth_opt entry.ce_fields i with
               | Some t -> llvm_field_ty ctx t | None -> "ptr" in
@@ -237,7 +238,7 @@ let emit_alloc_ctor ~emit_atom ctx (ctor : string)
      | _ ->
        audit "Boxed" "alloc";
        let entry = ctor_entry ctx ctor (List.length args) in
-       let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
+       let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) entry.ce_type_id in
        List.iteri (fun i atom ->
          let field_ty = match List.nth_opt entry.ce_fields i with
            | Some t -> llvm_field_ty ctx t
@@ -348,7 +349,7 @@ let emit_alloc_uniform ~emit_atom ctx (args : Tir.atom list) : string * string =
     (* Non-TCon allocation (tuples / erased cells): UNIFORM slots — readers
        go through ctor_entry fallbacks that load ptr and untag conditionally. *)
     let n = List.length args in
-    let ptr = emit_heap_alloc ctx 0 n in
+    let ptr = emit_heap_alloc ctx 0 n 0 in
     List.iteri (fun i atom ->
       let (ty, v) = emit_atom ctx atom in
       let vp = coerce ctx ty v "ptr" in
@@ -413,7 +414,7 @@ let emit_alloc_hole ~emit_atom ctx (tok : Tir.atom option)
     in
     (match tok with
      | None ->
-       let ptr = emit_heap_alloc ctx entry.ce_tag arity in
+       let ptr = emit_heap_alloc ctx entry.ce_tag arity entry.ce_type_id in
        store_slots ptr;
        ("ptr", ptr)
      | Some reuse_atom ->
@@ -431,7 +432,7 @@ let emit_alloc_hole ~emit_atom ctx (tok : Tir.atom option)
        emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
                         uniq reuse_lbl fresh_lbl);
        emit_label ctx reuse_lbl;
-       emit_store_tag ctx rv entry.ce_tag;
+       emit_store_tag ctx rv entry.ce_tag entry.ce_type_id;
        store_slots rv;
        (* A fresh cell comes from calloc and is already zero.  A REUSED cell is
           not: its hole slot still holds the old child pointer, whose ownership
@@ -442,7 +443,7 @@ let emit_alloc_hole ~emit_atom ctx (tok : Tir.atom option)
        emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl);
        emit_label ctx fresh_lbl;
        emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" rv);
-       let hp = emit_heap_alloc ctx entry.ce_tag arity in
+       let hp = emit_heap_alloc ctx entry.ce_tag arity entry.ce_type_id in
        store_slots hp;
        emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl);
        emit_label ctx merge_lbl;
@@ -479,7 +480,7 @@ let emit_stack_alloc_ctor ~emit_atom ctx (ctor : string)
            sa_type_name ctor));
     let entry = ctor_entry ctx ctor (List.length args) in
     let ptr = emit_stack_alloc ctx (List.length args) in
-    emit_store_tag ctx ptr entry.ce_tag;
+    emit_store_tag ctx ptr entry.ce_tag entry.ce_type_id;
     List.iteri (fun i atom ->
       let field_ty = match List.nth_opt entry.ce_fields i with
         | Some t -> llvm_field_ty ctx t
@@ -589,7 +590,7 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
            | Some result -> result
            | None ->
              let entry = ctor_entry ctx ctor (List.length args) in
-             let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
+             let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) entry.ce_type_id in
              let field_ty = match List.nth_opt entry.ce_fields 0 with
                | Some t -> llvm_field_ty ctx t | None -> "ptr" in
              let (v_ty, v_val) = emit_atom ctx arg in
@@ -597,7 +598,7 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
              ("ptr", ptr))
         | _ ->
           let entry = ctor_entry ctx ctor (List.length args) in
-          let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
+          let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) entry.ce_type_id in
           List.iteri (fun i atom ->
             let field_ty = match List.nth_opt entry.ce_fields i with
               | Some t -> llvm_field_ty ctx t | None -> "ptr" in
@@ -629,7 +630,7 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
        && Kind.is_niche_shaped ctx.k_table reuse_atom_parent_type
     then begin
       let entry = ctor_entry ctx ctor (List.length args) in
-      let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
+      let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) entry.ce_type_id in
       List.iteri (fun i atom ->
         let field_ty = match List.nth_opt entry.ce_fields i with
           | Some t -> llvm_field_ty ctx t
@@ -671,7 +672,19 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
          never start with `$`), so this cannot false-positive on user code. *)
       let (_, rv) = emit_atom ctx reuse_atom in
       let entry = ctor_entry ctx ctor (List.length args) in
-      emit_store_tag ctx rv entry.ce_tag;
+      (* Tag only -- the pad word must SURVIVE.  An actor struct keeps its
+         record shape id there (stamped once by the allocation arm above via
+         [emit_set_shape]), and this arm mutates the one long-lived actor
+         object in place on EVERY state update.  Rewriting pad here erases
+         the shape, and `get_actor_field`/`set_actor_field` -- which resolve a
+         field BY NAME through that id -- then answer None forever after;
+         native/timer_send_after and native/actor_dispatch_rc_window both read
+         state that way and both caught it.  Re-stamping the shape instead
+         would also work but puts a `march_record_set_shape` call in every
+         handler's hot path; the id is already right, so keep it.  Safe
+         because an actor struct is only ever reused AS ITSELF (the reuse
+         atom is the actor object, per lower_actor.ml). *)
+      emit_store_tag_keep_pad ctx rv entry.ce_tag;
       List.iteri (fun i atom ->
         let field_ty = match List.nth_opt entry.ce_fields i with
           | Some t -> llvm_field_ty ctx t
@@ -742,7 +755,7 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
        — safe to use as phi source labels.  Audit L6: phi instead of
        alloca/store/load slot. *)
     emit_label ctx reuse_lbl;
-    emit_store_tag ctx rv entry.ce_tag;
+    emit_store_tag ctx rv entry.ce_tag entry.ce_type_id;
     List.iteri (fun i (field_ty, v_coerced) ->
       emit_store_field ctx rv i field_ty v_coerced
     ) arg_vals;
@@ -750,7 +763,7 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
     (* Fresh branch: DecRC original, alloc fresh, write tag/fields *)
     emit_label ctx fresh_lbl;
     emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" rv);
-    let hp = emit_heap_alloc ctx entry.ce_tag (List.length args) in
+    let hp = emit_heap_alloc ctx entry.ce_tag (List.length args) entry.ce_type_id in
     List.iteri (fun i (field_ty, v_coerced) ->
       emit_store_field ctx hp i field_ty v_coerced
     ) arg_vals;
@@ -800,7 +813,7 @@ let emit_reuse_uniform ~emit_atom ctx (reuse_atom : Tir.atom)
        && Kind.is_niche_shaped ctx.k_table reuse_atom_parent_type
     then begin
       let arg_vals = arg_vals_of () in
-      let hp = emit_heap_alloc ctx 0 (List.length args) in
+      let hp = emit_heap_alloc ctx 0 (List.length args) 0 in
       List.iteri (fun i (ty, v) -> emit_store_field ctx hp i ty v) arg_vals;
       (match reuse_ty with
        | Tir.TRecord fields -> emit_set_shape ctx hp fields
@@ -823,14 +836,14 @@ let emit_reuse_uniform ~emit_atom ctx (reuse_atom : Tir.atom)
        passes tag_int=0).  Without this, the reused cell would carry whatever
        tag was previously stored — semantically inconsistent with the
        same-shape value the fresh branch produces. *)
-    emit_store_tag ctx rv 0;
+    emit_store_tag ctx rv 0 0;
     List.iteri (fun i (ty, v) ->
       emit_store_field ctx rv i ty v
     ) arg_vals;
     emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl);
     emit_label ctx fresh_lbl;
     emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" rv);
-    let hp = emit_heap_alloc ctx 0 (List.length args) in
+    let hp = emit_heap_alloc ctx 0 (List.length args) 0 in
     List.iteri (fun i (ty, v) ->
       emit_store_field ctx hp i ty v
     ) arg_vals;

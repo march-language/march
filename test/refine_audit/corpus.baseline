@@ -70,6 +70,8 @@ native_default_method_args: coverage audit (user + stdlib): 63 enforced, 0 inert
 native_default_method_args: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_erased_float_slot_leak_probe: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_erased_float_slot_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_erased_type_id: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_erased_type_id: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_ffi_blocking: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_ffi_blocking: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_ffi_codec2: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced

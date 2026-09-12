@@ -868,7 +868,7 @@ All heap values are opaque pointers to:
 ```
 offset  0: i64 rc        (reference count, init 1)
 offset  8: i32 tag       (constructor index)
-offset 12: i32 pad       (alignment)
+offset 12: i32 pad       (< 0: boxed-ADT type id; > 0: record shape id / closure flags / SIMD kind; 0: unknown)
 offset 16+8i: field[i]   (i64 for Int/Bool/Unit, double for Float, ptr for others)
 ```
 

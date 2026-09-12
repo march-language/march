@@ -109,7 +109,7 @@ let _repr_audit = Llvm_ctx._repr_audit
    [emit_untag_scalar] / [emit_untag_known_scalar]) are also re-exported
    here; the ~9-site consolidation below calls them by their bare names. *)
 
-type ctor_entry = Llvm_ctx.ctor_entry = { ce_tag : int; ce_fields : Tir.ty list }
+type ctor_entry = Llvm_ctx.ctor_entry = { ce_tag : int; ce_fields : Tir.ty list; ce_type_id : int }
 type session_wraps = Llvm_ctx.session_wraps = {
   sw_defined : (string, unit) Hashtbl.t;
   sw_pending : (string, unit) Hashtbl.t;
@@ -777,7 +777,7 @@ let emit_vault_opt_reencode ctx (v : string) (ret_ty : Tir.ty) : string =
        alloc-none-boxed fallthrough emits for a niche-unsafe Option. *)
     emit_label ctx l_none;
     let none_entry = ctor_entry ctx "Option.None" 0 in
-    let none_ptr = emit_heap_alloc ctx none_entry.Llvm_ctx.ce_tag 0 in
+    let none_ptr = emit_heap_alloc ctx none_entry.Llvm_ctx.ce_tag 0 none_entry.Llvm_ctx.ce_type_id in
     emit ctx (Printf.sprintf "store ptr %s, ptr %s" none_ptr slot);
     emit_term ctx (Printf.sprintf "br label %%%s" l_join);
     (* Boxed Some: tag-1 cell, payload in field 0 at the ctor's DECLARED field
@@ -787,7 +787,7 @@ let emit_vault_opt_reencode ctx (v : string) (ret_ty : Tir.ty) : string =
        march_alloc_float), so it is stored through unchanged. *)
     emit_label ctx l_some;
     let some_entry = ctor_entry ctx "Option.Some" 1 in
-    let some_ptr = emit_heap_alloc ctx some_entry.Llvm_ctx.ce_tag 1 in
+    let some_ptr = emit_heap_alloc ctx some_entry.Llvm_ctx.ce_tag 1 some_entry.Llvm_ctx.ce_type_id in
     let field_ty = match List.nth_opt some_entry.Llvm_ctx.ce_fields 0 with
       | Some t -> llvm_field_ty ctx t | None -> "ptr" in
     emit_store_field ctx some_ptr 0 field_ty (coerce ctx "ptr" v field_ty);
@@ -1539,6 +1539,10 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
        Llvm_ctor_desc.emit_to_string ctx v local_id
      | _ ->
        let v = coerce ctx arg_ty arg_val "ptr" in
+       (* An erased type: the generic renderer can still name a boxed ADT
+          through its header type id, provided this unit's descriptor is
+          registered first (a cached load once it is). *)
+       Llvm_ctor_desc.emit_ensure_if_erased ctx tir_ty;
        let r = fresh ctx "cr" in
        emit ctx (Printf.sprintf "%s = call ptr @march_value_to_string(ptr %s)" r v);
        ("ptr", r))

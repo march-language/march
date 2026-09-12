@@ -32,6 +32,7 @@ let stringify_for_escape ctx (a : Tir.atom) (v : string) : string =
   match Llvm_ctor_desc.id_for ctx (atom_tir_ty a) with
   | Some local_id -> snd (Llvm_ctor_desc.emit_to_string ctx v local_id)
   | None ->
+    Llvm_ctor_desc.emit_ensure_if_erased ctx (atom_tir_ty a);
     let s = Llvm_ctx.fresh ctx "vts_str" in
     Llvm_ctx.emit ctx
       (Printf.sprintf "%s = call ptr @march_value_to_string(ptr %s)" s v);
@@ -62,39 +63,34 @@ let emit_html_auto_escape ~emit_atom ctx (a : Tir.atom) : string * string =
       match atom_tir_ty a with
       | Tir.TString | Tir.TInt | Tir.TFloat | Tir.TBool -> true
       | Tir.TCon ("IOList", _) -> true
-      (* An unresolved type variable is the genuinely undecidable case, and it
-         is NOT hypothetical: a value reaching this hole through a closure
-         stored in a container (defunctionalized dispatch, e.g.
+      (* An unresolved type variable is undecidable STATICALLY, and it is NOT
+         hypothetical: a value reaching this hole through a closure stored in
+         a container (defunctionalized dispatch, e.g.
          `Bx(Cons(fn x -> ~H"<p>${x}</p>", Nil))`) is not specialised by mono
-         and arrives as TVar.  Neither answer is right for it — an IOList
-         wants flattening, an ADT must not be flattened, and nothing at
-         runtime can tell them apart, which is the whole defect.
+         and arrives as TVar.  An IOList wants flattening, an ADT must not be
+         flattened, and by TAG alone the runtime cannot tell them apart.
 
-         So choose the failure that is not a vulnerability: stringify.  A
-         genuine IOList partial reaching a polymorphic hole renders as
-         `#<tag:2>` instead of its markup — visibly wrong, and a real
-         regression for that (rare) pattern.  Routing it to the runtime
-         instead would leave a tag-1 ADT emitting its String field raw and
-         unescaped, and a tag-2 ADT segfaulting.  A wrong-looking page beats
-         an XSS and a crash.
-
-         Fixing this properly means giving the runtime a way to identify the
-         type — march_hdr.pad is free for non-record ADTs and could carry a
-         type id — which is out of scope here; see
-         specs/todos/2026-08-05-boxed-adt-type-id.md. *)
+         It can by header type id (runtime/march_runtime.h, march_hdr): the
+         dyn arm below flattens iff the cell says it is an IOList and
+         stringifies-then-escapes everything else, including an unstamped
+         cell.  Before the id existed this arm stringified unconditionally,
+         which was safe but rendered a genuine IOList partial as `#<tag:2>`
+         (pinned as poly_iolist in test/native/h_sigil_adt_interp). *)
       | Tir.TVar _ -> false
       | _ -> false
     in
     let v = emit_atom_as ctx "ptr" a in
-    let v =
-      if runtime_safe then v
-      else begin
-        stringify_for_escape ctx a v
-      end
-    in
-    let r = fresh ctx "hae" in
-    emit ctx (Printf.sprintf "%s = call ptr @march_html_auto_escape(ptr %s)" r v);
-    ("ptr", r)
+    match atom_tir_ty a with
+    | Tir.TVar _ when ctx.shape_meta ->
+      Llvm_ctor_desc.emit_ensure ctx;
+      let r = fresh ctx "haed" in
+      emit ctx (Printf.sprintf "%s = call ptr @march_html_auto_escape_dyn(ptr %s)" r v);
+      ("ptr", r)
+    | _ ->
+      let v = if runtime_safe then v else stringify_for_escape ctx a v in
+      let r = fresh ctx "hae" in
+      emit ctx (Printf.sprintf "%s = call ptr @march_html_auto_escape(ptr %s)" r v);
+      ("ptr", r)
 
 (** Body of the `html_escape_ctx` arm for a COMPILE-TIME escaper id. *)
 let emit_html_escape_ctx_static ~emit_atom ctx (id : int) (a : Tir.atom)
@@ -154,12 +150,26 @@ let emit_html_escape_ctx_static ~emit_atom ctx (id : int) (a : Tir.atom)
     let is_iolist =
       match atom_tir_ty a with Tir.TCon ("IOList", _) -> true | _ -> false in
     let v = emit_atom_as ctx "ptr" a in
+    match atom_tir_ty a with
+    | Tir.TVar _ when ctx.shape_meta ->
+      (* Erased: undecidable here, decidable at runtime from the cell's header
+         type id (runtime/march_runtime.h, march_hdr).  The runtime applies
+         exactly this function's static rules -- flatten an IOList and insert
+         it verbatim in HTML context, escape everything else -- so the
+         security property is enforced by identity rather than by refusing. *)
+      Llvm_ctor_desc.emit_ensure ctx;
+      let r = fresh ctx "hecdyn" in
+      emit ctx
+        (Printf.sprintf "%s = call ptr @march_html_escape_ctx_dyn(i64 %d, ptr %s)"
+           r id v);
+      ("ptr", r)
+    | _ ->
     (* Normalise to a real String first, by whichever route actually works for
        this type. `march_value_to_string` CANNOT flatten an IOList — it renders
        the constructor spine as `#<tag:2>` — so a known IOList/Safe must go
        through `march_html_auto_escape`, whose IOList path flattens verbatim.
-       Everything else, including TVar (the undecidable case), takes
-       to_string. *)
+       Everything else takes to_string (an erased TVar took the dyn arm
+       above). *)
     let v =
       match atom_tir_ty a with
       | Tir.TString -> v
@@ -202,6 +212,16 @@ let emit_html_escape_ctx_dynamic ~emit_atom ctx (idx : Tir.atom)
   in
     let id_v = emit_atom_as ctx "i64" idx in
     let v = emit_atom_as ctx "ptr" a in
+    match atom_tir_ty a with
+    | Tir.TVar _ when ctx.shape_meta ->
+      (* Same dyn arm as the static-id path: decided by header type id. *)
+      Llvm_ctor_desc.emit_ensure ctx;
+      let r = fresh ctx "hecdyn" in
+      emit ctx
+        (Printf.sprintf "%s = call ptr @march_html_escape_ctx_dyn(i64 %s, ptr %s)"
+           r id_v v);
+      ("ptr", r)
+    | _ ->
     let v =
       match atom_tir_ty a with
       | Tir.TString -> v

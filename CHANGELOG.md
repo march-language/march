@@ -90,6 +90,17 @@ git log is authoritative for exact commits.
 - **Cross-compilation now links `tweetnacl.c`.** The cross-compile driver's
   runtime list omitted it (ed25519 for hot-reload ACTIVATE verification);
   found by the new `scripts/check-runtime-sources.sh`.
+- **A value whose type is erased at the render site now prints its
+  constructor name.** Compiled `to_string` and `~H` interpolation of a value
+  that reaches the renderer through a closure stored in a container, a generic
+  `List(a)` field, or a polymorphic `${x}` hole printed `#<tag:N>`, and a
+  genuine `IOList` in such a hole was stringified instead of flattened as
+  markup. Every boxed constructor header now carries a type id in its
+  previously unused pad word, so the runtime can tell apart two types that
+  share a constructor tag without needing a static type; the stamp folds into
+  the existing tag store and costs no extra instruction at `--opt 2`. Niche
+  `Option`, single-field wrapper types, tuples and anonymous records still
+  render `#<tag:N>` — they have no cell of their own to stamp.
 
 ### Changed
 

@@ -39,7 +39,7 @@ typedef struct { int64_t rc; int32_t tag; int32_t pad; } march_hdr;
 |---|---|---|---|
 | 0  | 8 | `rc`  | reference count (`int64_t`, atomic RC ops cast to `_Atomic int64_t*`) |
 | 8  | 4 | `tag` | constructor tag (which variant; `0` for single-shape types) |
-| 12 | 4 | `pad` | alignment filler; **repurposed** as a record-shape id for records (see `march_record_shape_intern`) |
+| 12 | 4 | `pad` | multiplexed by sign: **> 0** a record-shape id for records (see `march_record_shape_intern`), closure flag bits, or a SIMD lane kind; **< 0** the boxed ADT's **type id** (`-(1 + (fnv1a32(type_name) & 0x3FFFFFFF))`, stamped at every constructor header store so the runtime can render or flatten a value that reached it through an erased slot); **0** nothing known (C-built cells) |
 | 16+ | 8/field | fields | one 8-byte slot per field, `n` fields → `16 + n*8` bytes total |
 
 `lib/tir/llvm_ctx.ml`'s `alloc_size n = 16 + n * 8` is this same arithmetic

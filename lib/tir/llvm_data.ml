@@ -22,7 +22,32 @@ let emit_load_tag ctx obj_val =
   Llvm_ctx.emit ctx (Printf.sprintf "%s = load i32, ptr %s, align 4" tv tp);
   tv
 
-let emit_store_tag ctx obj_val tag_int =
+(* Header stores.  [type_id] is the boxed-ADT type id for the pad word
+   ([Llvm_ctx.ctor_entry.ce_type_id], built by [Llvm_toplevel.build_ctor_info]
+   from [Llvm_ctx.type_id_of_name]; 0 = none, for a record / tuple / closure
+   cell, which keeps the pad word's positive meanings).  [emit_store_tag] is the RESTAMP used
+   by every FBIP reuse / alloc-hole / stack-cell path, so it always writes the
+   pad word too: a reused cell may have belonged to a different type (reuse
+   is matched by arity, not by name), and leaving its old id behind would
+   have the runtime render the new value as the old type.  Two adjacent i32
+   stores rather than one packed i64 so the emitter stays endian-agnostic;
+   LLVM merges them. *)
+let emit_store_tag ctx obj_val tag_int type_id =
+  let tp = Llvm_ctx.fresh ctx "tgp" in
+  Llvm_ctx.emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 8" tp obj_val);
+  Llvm_ctx.emit ctx (Printf.sprintf "store i32 %d, ptr %s, align 4" tag_int tp);
+  let ip = Llvm_ctx.fresh ctx "tidp" in
+  Llvm_ctx.emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 12" ip obj_val);
+  Llvm_ctx.emit ctx (Printf.sprintf "store i32 %d, ptr %s, align 4" type_id ip)
+
+(** Write ONLY the tag, leaving the pad word untouched.  For a cell that is
+    reused as its OWN type and carries something else in pad that is still
+    valid -- today exactly one caller: the actor-struct state write-back,
+    whose cell keeps the record shape id [emit_set_shape] stamped at
+    allocation and which `get_actor_field`/`set_actor_field` look a field up
+    by name through.  Do NOT reach for this on a cross-type reuse: there the
+    pad word describes the OLD type and must be rewritten. *)
+let emit_store_tag_keep_pad ctx obj_val tag_int =
   let tp = Llvm_ctx.fresh ctx "tgp" in
   Llvm_ctx.emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 8" tp obj_val);
   Llvm_ctx.emit ctx (Printf.sprintf "store i32 %d, ptr %s, align 4" tag_int tp)
@@ -58,10 +83,19 @@ let emit_load_field ctx obj_val i ty_str =
 
 (* ── Alloc helpers ───────────────────────────────────────────────────── *)
 
-let emit_heap_alloc ctx tag_int n_fields =
+(* A fresh cell comes from march_alloc (calloc), so the pad word is already
+   0 and only a nonzero type id needs a store. *)
+let emit_heap_alloc ctx tag_int n_fields type_id =
   let ptr = Llvm_ctx.fresh ctx "hp" in
   Llvm_ctx.emit ctx (Printf.sprintf "%s = call ptr @march_alloc(i64 %d)" ptr (Llvm_ctx.alloc_size n_fields));
-  emit_store_tag ctx ptr tag_int;
+  let tp = Llvm_ctx.fresh ctx "tgp" in
+  Llvm_ctx.emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 8" tp ptr);
+  Llvm_ctx.emit ctx (Printf.sprintf "store i32 %d, ptr %s, align 4" tag_int tp);
+  if type_id <> 0 then begin
+    let ip = Llvm_ctx.fresh ctx "tidp" in
+    Llvm_ctx.emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 12" ip ptr);
+    Llvm_ctx.emit ctx (Printf.sprintf "store i32 %d, ptr %s, align 4" type_id ip)
+  end;
   ptr
 
 let emit_stack_alloc ctx n_fields =
@@ -111,7 +145,8 @@ let ctor_entry ctx name n_args_fallback =
     (match found with
      | Some e -> e
      | None ->
-       { Llvm_ctx.ce_tag = 0; ce_fields = List.init n_args_fallback (fun _ -> Tir.TVar "_") })
+       { Llvm_ctx.ce_tag = 0; ce_fields = List.init n_args_fallback (fun _ -> Tir.TVar "_");
+         ce_type_id = 0 })
 
 (** Return concrete field types for [ctor_name] given the scrutinee's TIR type.
     When the scrutinee is a concrete [TCon(name, ty_args)] (e.g. List(Int)),

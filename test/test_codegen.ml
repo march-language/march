@@ -6658,6 +6658,48 @@ let test_repr_nested_niche_is_boxed () =
 (* With unboxing ON a scalar-only 2-field single ctor is a legitimate
    [Unboxed] aggregate (see the unboxed_aggregates group); this case pins the
    pre-Milestone-3 shape, so it asks a table with unboxing off. *)
+(* ── Boxed-ADT header type id (specs/progress/2026-09-11-boxed-adt-type-id.md) ──
+   [Llvm_ctx.type_id_of_name] and [march_type_id_of_name] (runtime/march_extras.c)
+   must be the same function: the emitter stamps the OCaml value into every
+   constructor header, the runtime recomputes the C value from the descriptor's
+   type name and looks the cell up by it.  This pins two vectors so a change to
+   either side is deliberate; test/native/erased_type_id proves end to end that
+   the two sides still agree (a divergence there prints "#<tag:N>"). *)
+let test_type_id_vector () =
+  Alcotest.(check int) "IOList.IOList" (-498863098)
+    (March_tir.Llvm_ctx.type_id_of_name "IOList.IOList");
+  Alcotest.(check int) "Shape" (-58777031)
+    (March_tir.Llvm_ctx.type_id_of_name "Shape");
+  (* Negative by construction: the pad word's positive values are record
+     shape ids, closure flags and SIMD kinds. *)
+  List.iter (fun n ->
+      Alcotest.(check bool) ("negative: " ^ n) true
+        (March_tir.Llvm_ctx.type_id_of_name n < 0))
+    [""; "a"; "List"; "Option"; "Http.Method"; "IOList.IOList"]
+
+(* A boxed constructor allocation stores the type's id at header offset 12,
+   right after the tag at offset 8; a record (tag 0, shape id via
+   march_record_set_shape) does not. *)
+let test_ctor_alloc_stamps_type_id () =
+  let x = { March_tir.Tir.v_name = "x"; v_ty = March_tir.Tir.TInt; v_lin = March_tir.Tir.Unr } in
+  let td = March_tir.Tir.TDVariant
+      ("Shape", [("Circle", [March_tir.Tir.TInt]); ("Rect", [March_tir.Tir.TInt; March_tir.Tir.TInt])]) in
+  let fn = { March_tir.Tir.fn_name = "mk";
+             fn_params = [x];
+             fn_ret_ty = March_tir.Tir.TCon ("Shape", []);
+             fn_body   = March_tir.Tir.EAlloc
+                           (March_tir.Tir.TCon ("Shape.Rect", []),
+                            [March_tir.Tir.AVar x; March_tir.Tir.AVar x]);
+             fn_kind   = March_tir.Tir.FnNormal } in
+  let m = { March_tir.Tir.tm_name = "test"; tm_fns = [fn];
+            tm_types = [td]; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
+  let ir = March_tir.Llvm_emit.emit_module m in
+  let has s = try ignore (Str.search_forward (Str.regexp_string s) ir 0); true
+              with Not_found -> false in
+  Alcotest.(check bool) "tag store for Rect" true (has "store i32 1, ptr %tgp");
+  Alcotest.(check bool) "type id store (Shape = -58777031)" true
+    (has "store i32 -58777031, ptr %tidp")
+
 let test_repr_multifield_is_boxed () =
   let tds = [March_tir.Tir.TDVariant
     ("Point", [("Point", [March_tir.Tir.TInt; March_tir.Tir.TInt])])] in
@@ -13064,6 +13106,8 @@ declare ptr  @march_html_auto_escape(ptr %v)
 declare ptr  @march_html_escape_ctx(i64 %id, ptr %v)
 declare i32  @march_ctor_table_ensure(ptr %desc, ptr %cache)
 declare ptr  @march_value_to_string_typed(ptr %v, i32 %type_id)
+declare ptr  @march_html_auto_escape_dyn(ptr %v)
+declare ptr  @march_html_escape_ctx_dyn(i64 %id, ptr %v)
 declare i32  @march_record_shape_intern(ptr %desc)
 declare void @march_record_set_shape(ptr %rec, ptr %desc, ptr %cache)
 declare ptr  @march_record_keys(ptr %rec)
@@ -15153,6 +15197,10 @@ let codegen_suites =
         Alcotest.test_case "float_two_common_lets"  `Quick test_join_points_float_two_common_lets;
         Alcotest.test_case "pre_float_alpha"         `Quick test_join_points_pre_float_alpha;
         Alcotest.test_case "pre_no_float_diff_rhs"   `Quick test_join_points_pre_no_float_different_rhs;
+      ]);
+      ("type_id", [
+        Alcotest.test_case "hash_vector"          `Quick test_type_id_vector;
+        Alcotest.test_case "ctor_alloc_stamps"    `Quick test_ctor_alloc_stamps_type_id;
       ]);
       ("repr", [
         Alcotest.test_case "newtype_int"          `Quick test_repr_newtype_int;
