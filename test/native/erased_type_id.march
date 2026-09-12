@@ -1,0 +1,55 @@
+-- Regression: a boxed ADT reaching a renderer through an ERASED (TVar) slot
+-- printed "#<tag:N>", because the cell carried a constructor tag but no type
+-- identity and the static constructor-name table (llvm_ctor_desc.ml) has no
+-- static type to key on at such a site.
+--
+-- Fix: every boxed constructor header now carries a type id in march_hdr.pad
+-- (negative, hashed from the type name; see march_type_id_of_name in
+-- runtime/march_extras.c), so the runtime can render a value it is handed
+-- generically.  Three sites exercised here:
+--   nested       residual 5 of specs/todos/2026-08-05-boxed-adt-type-id.md:
+--                a generic `Cons(a, ...)` field instantiated at a concrete
+--                ADT inside a DESCRIBED type; the elements used to render
+--                through the untyped renderer.
+--   erased       `to_string` on a TVar through a closure stored in a
+--                container (mono cannot specialise it).
+--   erased_list  the same, for a List of ADTs.
+--   erased_html  a `~H` hole on a TVar: a real IOList must FLATTEN and an
+--                ADT must be stringified and escaped -- both decided at
+--                runtime from the header id, not guessed from the tag.
+-- `.expected` is the interpreter's own rendering of every line.
+
+mod ErasedTypeId do
+  needs IO.Console
+  type Shape = Circle(Int) | Rect(Int, Int)
+  type Holder = H(Int, List(Shape))
+  type Box = Bx(List(b))
+
+  pfn apply_first(box, v) do
+    match box do
+    Bx(fs) ->
+      match fs do
+      Cons(f, _) -> f(v)
+      Nil        -> panic("empty box")
+      end
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    let h = H(0, Cons(Circle(1), Cons(Rect(2, 3), Nil)))
+    println("nested=" ++ to_string(h))
+
+    let cb = Bx(Cons(fn x -> to_string(x), Nil))
+    println("erased=" ++ apply_first(cb, Rect(4, 5)))
+
+    let cb2 = Bx(Cons(fn x -> to_string(x), Nil))
+    println("erased_list=" ++ apply_first(cb2, Cons(Circle(9), Cons(Circle(10), Nil))))
+
+    let cb3 = Bx(Cons(fn x -> IOList.to_string(~H"<p>${x}</p>"), Nil))
+    println("erased_html_adt=" ++ apply_first(cb3, Rect(6, 7)))
+    let cb4 = Bx(Cons(fn x -> IOList.to_string(~H"<p>${x}</p>"), Nil))
+    println("erased_html_iolist=" ++ apply_first(cb4, ~H"<i>ok</i>"))
+    let cb5 = Bx(Cons(fn x -> IOList.to_string(~H"<p>${x}</p>"), Nil))
+    println("erased_html_str=" ++ apply_first(cb5, "<script>"))
+  end
+end

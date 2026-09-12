@@ -193,7 +193,7 @@ let emit_remote_ref_hashes ctx (mod_atom : Tir.atom) (fn_atom : Tir.atom)
     in
     let sg_ptr  = emit_str_lit sig_h in
     let im_ptr  = emit_str_lit impl_h in
-    let tup = emit_heap_alloc ctx 0 2 in
+    let tup = emit_heap_alloc ctx 0 2 0 in
     emit_store_field ctx tup 0 "ptr" sg_ptr;
     emit_store_field ctx tup 1 "ptr" im_ptr;
     ("ptr", tup)

@@ -1,0 +1,6 @@
+nested=H(0, [Circle(1), Rect(2, 3)])
+erased=Rect(4, 5)
+erased_list=[Circle(9), Circle(10)]
+erased_html_adt=<p>Rect(6, 7)</p>
+erased_html_iolist=<p><i>ok</i></p>
+erased_html_str=<p>&lt;script&gt;</p>

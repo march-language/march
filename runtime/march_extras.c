@@ -2774,6 +2774,27 @@ void *march_html_escape_ctx(int64_t escaper_id, void *v) {
     return r;
 }
 
+static int32_t iolist_type_id(void);   /* defined with the ctor table below */
+static int is_iolist_type_id(int32_t tid);
+
+/* HTML-escape [n] bytes of [d] into a fresh March string. */
+static void *html_escape_bytes(const char *d, int64_t n) {
+    char *out = (char *)malloc((size_t)(n * 6 + 1));
+    int64_t o = 0;
+    for (int64_t i = 0; i < n; i++) {
+        char c = d[i];
+        if (c == '&') { memcpy(out + o, "&amp;", 5); o += 5; }
+        else if (c == '<') { memcpy(out + o, "&lt;", 4); o += 4; }
+        else if (c == '>') { memcpy(out + o, "&gt;", 4); o += 4; }
+        else if (c == '"') { memcpy(out + o, "&quot;", 6); o += 6; }
+        else if (c == '\'') { memcpy(out + o, "&#39;", 5); o += 5; }
+        else { out[o++] = c; }
+    }
+    void *r = march_string_lit(out, o);
+    free(out);
+    return r;
+}
+
 void *march_html_auto_escape(void *v) {
     /* Immediate (tagged int / nullary constructor): low bit set. */
     if (((uintptr_t)v & 1u) != 0) {
@@ -2827,6 +2848,29 @@ void *march_html_auto_escape(void *v) {
                 "dispatch in lib/tir/llvm_emit.ml.\n",
                 ((march_hdr *)v)->tag);
         abort();
+    }
+    /* Tags 0..2 are ambiguous by TAG alone -- which is the whole reason the
+       guard above can only reject 3 and up -- but not by header type id.  A
+       stamped cell naming some other type is the same misread, and here it is
+       provable rather than merely suspected.
+       Recover instead of aborting: render it by name and escape it.  That is
+       the outcome the erased path (march_html_auto_escape_dyn) would have
+       produced for the same cell, it emits no raw bytes, and unlike the
+       abort above it cannot turn a mis-dispatch into a crash in a running
+       program.  The abort above is left exactly as it was: widening a
+       hard-failure is not this change's business.
+       Id 0 -- a cell the C runtime built, or any pre-stamp cell -- keeps the
+       partial tag guard above, unchanged. */
+    {
+        int32_t tid = march_hdr_type_id(v);
+        if (tid != 0 && !is_iolist_type_id(tid)) {
+            void *s = march_value_to_string(v);
+            char scratch[24];
+            const char *d = march_str_data(s, scratch);
+            void *r = html_escape_bytes(d ? d : "", d ? march_str_len(s) : 0);
+            march_decrc(s);
+            return r;
+        }
     }
     int64_t sz = mh_iolist_size(v);
     char *buf = (char *)malloc((size_t)(sz + 1));
@@ -2893,6 +2937,105 @@ static march_ctor_type *ctor_types = NULL;
 static int32_t ctor_type_count = 0;
 static int32_t ctor_type_cap   = 0;
 static pthread_mutex_t ctor_tbl_mu = PTHREAD_MUTEX_INITIALIZER;
+
+/* ── Header type ids ─────────────────────────────────────────────────────
+ *
+ * The compiler stamps -(1 + (fnv1a32(type_name) & 0x3FFFFFFF)) into the pad
+ * word of every boxed constructor cell (see the march_hdr comment in
+ * march_runtime.h).  This is the C half of that contract: the SAME function
+ * (Llvm_ctx.type_id_of_name is the OCaml half; test_codegen pins one vector
+ * of each and the erased_type_id native golden proves they agree end to
+ * end), plus a map from id to the row-table index the descriptor gave that
+ * type, filled as descriptors register.
+ *
+ * A collision -- two DIFFERENT names hashing to one id in the same process
+ * -- marks the id AMBIGUOUS (index -1), and every reader then treats it as
+ * unknown.  A wrong constructor name is the one outcome this mechanism must
+ * never produce; falling back to "#<tag:N>" for one unlucky type is the
+ * price.  Two IDENTICAL names (the same descriptor registered twice, which
+ * the REPL does per fragment) keep the first index: the tables are
+ * equivalent.
+ *
+ * The map is copy-on-grow behind one atomic pointer so the render path reads
+ * it without the table mutex; writers hold ctor_tbl_mu.  Old copies are
+ * leaked on purpose (a handful of growths per process, and a reader may
+ * still be walking one). */
+
+int32_t march_type_id_of_name(const char *name) {
+    uint32_t h = 2166136261u;
+    for (const unsigned char *p = (const unsigned char *)name; *p; p++) {
+        h ^= *p;
+        h *= 16777619u;
+    }
+    return -(int32_t)(1u + (h & 0x3FFFFFFFu));
+}
+
+typedef struct { int32_t id; int32_t index; } ctor_id_slot;   /* id 0 = empty */
+typedef struct { uint32_t cap; uint32_t count; ctor_id_slot slots[]; } ctor_id_map;
+static _Atomic(ctor_id_map *) ctor_ids = NULL;
+
+static ctor_id_slot *ctor_id_find(ctor_id_map *m, int32_t id) {
+    if (!m) return NULL;
+    uint32_t h = (uint32_t)id * 2654435761u;
+    for (uint32_t i = 0; i < m->cap; i++) {
+        ctor_id_slot *s = &m->slots[(h + i) & (m->cap - 1)];
+        if (s->id == 0 || s->id == id) return s;
+    }
+    return NULL;
+}
+
+/* Writer side; caller holds ctor_tbl_mu. */
+static void ctor_id_put(int32_t id, int32_t index, const char *name) {
+    ctor_id_map *m = atomic_load_explicit(&ctor_ids, memory_order_acquire);
+    if (!m || (m->count + 1) * 2 > m->cap) {
+        uint32_t cap = m ? m->cap * 2 : 64;
+        ctor_id_map *nm = calloc(1, sizeof(ctor_id_map) + (size_t)cap * sizeof(ctor_id_slot));
+        nm->cap = cap;
+        if (m) for (uint32_t i = 0; i < m->cap; i++)
+            if (m->slots[i].id) { *ctor_id_find(nm, m->slots[i].id) = m->slots[i]; nm->count++; }
+        atomic_store_explicit(&ctor_ids, nm, memory_order_release);
+        m = nm;
+    }
+    ctor_id_slot *s = ctor_id_find(m, id);
+    if (s->id == 0) { s->id = id; s->index = index; m->count++; return; }
+    if (s->index == -1) return;                                   /* already ambiguous */
+    if (s->index == index) return;
+    if (strcmp(ctor_types[s->index - 1].name, name) == 0) return; /* same name, equivalent table */
+    s->index = -1;                                                 /* genuine collision */
+}
+
+/* The 1-based row-table index for a heap cell's header id, or 0 when the
+ * cell is unstamped, the id is unregistered, or it is ambiguous. */
+static int32_t ctor_type_index_for_hdr(void *v) {
+    if (!v || !IS_HEAP_PTR(v)) return 0;
+    int32_t id = march_hdr_type_id(v);
+    if (id == 0) return 0;
+    ctor_id_slot *s = ctor_id_find(atomic_load_explicit(&ctor_ids, memory_order_acquire), id);
+    return (s && s->id == id && s->index > 0) ? s->index : 0;
+}
+
+/* IOList's type_defs name is module-qualified ("IOList.IOList") in every
+ * program that imports it, and bare ("IOList") only when stdlib/iolist.march
+ * is itself the entry module; the emitter hashes whichever it has. */
+static int32_t iolist_type_id(void) {
+    static int32_t id = 0;
+    if (id == 0) id = march_type_id_of_name("IOList.IOList");
+    return id;
+}
+static int32_t iolist_type_id_bare(void) {
+    static int32_t id = 0;
+    if (id == 0) id = march_type_id_of_name("IOList");
+    return id;
+}
+static int is_iolist_type_id(int32_t tid) {
+    return tid == iolist_type_id() || tid == iolist_type_id_bare();
+}
+
+/* Set while ctor_render falls back to the generic renderer for a cell whose
+ * header id resolved but whose tag/kind did not match its rows: without it
+ * the generic renderer's hook would hand the same cell straight back. */
+static __thread int ctor_dyn_suppress = 0;
+static void *ctor_render_dyn(void *v);
 
 /* Copy [n] bytes of [p] into a fresh NUL-terminated buffer. */
 static char *ctor_strndup(const char *p, size_t n) {
@@ -2968,6 +3111,7 @@ int32_t march_ctor_table_ensure(const char *desc, int32_t *cache) {
             cur = &ctor_types[base + local - 1];
             cur->kind = *f2;
             cur->name = ctor_strndup(f3, (size_t)(eol - f3));
+            ctor_id_put(march_type_id_of_name(cur->name), base + local, cur->name);
             int32_t nrows = 0;
             for (const char *q = eol + 1; *q && *q != 'T'; ) {
                 const char *e2 = strchr(q, '\n');
@@ -2997,6 +3141,8 @@ int32_t march_ctor_table_ensure(const char *desc, int32_t *cache) {
         p = eol + 1;
     }
     *cache = base + 1;
+    /* From here on the generic renderer can resolve header ids. */
+    march_render_dyn_hook = ctor_render_dyn;
     pthread_mutex_unlock(&ctor_tbl_mu);
     return base;
 }
@@ -3108,6 +3254,11 @@ static void ctor_render_field(ctor_buf *b, int64_t raw, march_ctor_field f, int 
              * on a real String), so delegating blindly would print
              * `Ok(<script>)` where the interpreter prints `Ok("<script>")`. */
             void *fv = (void *)(uintptr_t)raw;
+            /* A boxed ADT in a generic slot names itself through its header
+               id (a `List(Shape)` element, an `Ok(a)` payload): render it by
+               name rather than as "#<tag:N>". */
+            int32_t dyn = ctor_type_index_for_hdr(fv);
+            if (dyn > 0) { ctor_render(b, fv, dyn, depth + 1); break; }
             int is_str = fv
                 && (march_str_is_inline(fv)
                     || (IS_HEAP_PTR(fv) && ((march_hdr *)fv)->tag == MARCH_STRING_TAG));
@@ -3140,19 +3291,36 @@ static int ctor_type_is_list(march_ctor_type *t) {
     return t->kind == 'V' && strcmp(t->name, "List") == 0;
 }
 
+/* Generic-renderer fallback for a cell the table could not walk.  [nohook]
+ * is set when the cell's own header id resolved to [type_id] and still did
+ * not match: the generic renderer would consult the hook, which would hand
+ * the same cell back here. */
+static void ctor_put_generic(ctor_buf *b, void *v, int nohook) {
+    if (nohook) ctor_dyn_suppress++;
+    cb_put_march_string(b, march_value_to_string(v), 1);
+    if (nohook) ctor_dyn_suppress--;
+}
+
 static void ctor_render(ctor_buf *b, void *v, int32_t type_id, int depth) {
     if (depth >= CTOR_MAX_DEPTH) { cb_putz(b, "..."); return; }
     if (type_id <= 0 || type_id > ctor_type_count || !IS_HEAP_PTR(v)) {
-        cb_put_march_string(b, march_value_to_string(v), 1);
+        ctor_put_generic(b, v, 0);
         return;
     }
+    /* The header id is ground truth for what was ALLOCATED; the static id is
+     * what the emitter believed.  Where both exist and disagree (an erased
+     * flow the static type did not see) trust the cell. */
+    {
+        int32_t hdr = ctor_type_index_for_hdr(v);
+        if (hdr > 0 && hdr != type_id) type_id = hdr;
+    }
     march_ctor_type *t = &ctor_types[type_id - 1];
-    if (!t->name) { cb_put_march_string(b, march_value_to_string(v), 1); return; }
+    if (!t->name) { ctor_put_generic(b, v, 1); return; }
     int32_t tag = ((march_hdr *)v)->tag;
     /* A reserved sentinel tag means the slot does not actually hold a value of
      * the static type (an erased flow, a string in a TVar slot).  The generic
      * renderer classifies those correctly; the table would misread them. */
-    if (tag < 0) { cb_put_march_string(b, march_value_to_string(v), 1); return; }
+    if (tag < 0) { ctor_put_generic(b, v, 0); return; }
     if (t->kind == 'R') {
         cb_putz(b, "{ ");
         for (int32_t i = 0; i < t->nrows; i++) {
@@ -3168,7 +3336,7 @@ static void ctor_render(ctor_buf *b, void *v, int32_t type_id, int depth) {
         return;
     }
     march_ctor_row *row = ctor_row_for_tag(t, tag);
-    if (!row) { cb_put_march_string(b, march_value_to_string(v), 1); return; }
+    if (!row) { ctor_put_generic(b, v, 1); return; }
     if (ctor_type_is_list(t)) {
         if (strcmp(row->name, "Nil") == 0) { cb_putz(b, "[]"); return; }
         if (strcmp(row->name, "Cons") == 0 && row->nfields == 2) {
@@ -3210,4 +3378,72 @@ void *march_value_to_string_typed(void *v, int32_t type_id) {
     void *s = march_string_lit(b.p ? b.p : "", (int64_t)b.len);
     free(b.p);
     return s;
+}
+
+/* march_render_dyn_hook: to_string on a value with NO static type.  Renders
+ * by the header id when it resolves, else NULL so the generic renderer
+ * prints what it always did. */
+static void *ctor_render_dyn(void *v) {
+    if (ctor_dyn_suppress) return NULL;
+    int32_t idx = ctor_type_index_for_hdr(v);
+    if (idx <= 0) return NULL;
+    ctor_buf b = { NULL, 0, 0 };
+    ctor_render(&b, v, idx, 0);
+    void *s = march_string_lit(b.p ? b.p : "", (int64_t)b.len);
+    free(b.p);
+    return s;
+}
+
+/* `~H"...${x}..."` where x's type erased to a TVar.  The static dispatch in
+ * lib/tir/llvm_emit_html.ml cannot decide this one; the header id can: a
+ * genuine IOList is flattened verbatim (it IS markup), anything else is
+ * rendered by name and escaped.  An unstamped cell (id 0) is escaped too --
+ * flattening on a tag guess is precisely the XSS this replaced. */
+/* `~H` hole under a CONTEXT escaper (attribute, url, js, ...) whose value's
+ * type erased to a TVar.  Mirrors the static dispatch in
+ * Llvm_emit_html.emit_html_escape_ctx_static, decided by header id instead
+ * of static type: a genuine IOList is flattened, and inserted verbatim only
+ * in the HTML context (escaper 0), escaped for this context anywhere else;
+ * every other value is rendered by name and escaped.  A Trusted or Safe
+ * wrapper reaching an erased hole is NOT unwrapped here -- it renders as
+ * `Safe("...")` and is escaped, the safe direction; the static path is where
+ * trust is decided. */
+void *march_html_escape_ctx_dyn(int64_t escaper_id, void *v) {
+    if (v && ((uintptr_t)v & 1u) == 0 && IS_HEAP_PTR(v)) {
+        int32_t tag = ((march_hdr *)v)->tag;
+        if (tag >= 0 && is_iolist_type_id(march_hdr_type_id(v))) {
+            void *flat = march_html_auto_escape(v);      /* flattens verbatim */
+            if (escaper_id == 0) return flat;
+            void *r = march_html_escape_ctx(escaper_id, flat);
+            march_decrc(flat);
+            return r;
+        }
+        if (tag == MARCH_STRING_TAG) return march_html_escape_ctx(escaper_id, v);
+    }
+    void *s = march_value_to_string(v);
+    if (march_str_is_inline(s)) {
+        /* march_html_escape_ctx reads a heap march_string; materialise. */
+        char scratch[24];
+        const char *d = march_str_data(s, scratch);
+        s = march_string_lit(d, march_str_len(s));
+    }
+    void *r = march_html_escape_ctx(escaper_id, s);
+    march_decrc(s);
+    return r;
+}
+
+void *march_html_auto_escape_dyn(void *v) {
+    if (!v || ((uintptr_t)v & 1u) != 0) return march_html_auto_escape(v);
+    if (IS_HEAP_PTR(v)) {
+        int32_t tag = ((march_hdr *)v)->tag;
+        if (tag == MARCH_STRING_TAG) return march_html_auto_escape(v);
+        if (tag >= 0 && is_iolist_type_id(march_hdr_type_id(v)))
+            return march_html_auto_escape(v);
+    }
+    void *s = march_value_to_string(v);
+    char scratch[24];
+    const char *d = march_str_data(s, scratch);
+    void *r = html_escape_bytes(d ? d : "", d ? march_str_len(s) : 0);
+    march_decrc(s);
+    return r;
 }

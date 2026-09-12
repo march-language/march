@@ -196,6 +196,32 @@ let id_for ctx (ty : Tir.ty) : int option =
       ctx.Llvm_ctx.ctor_desc_ids None
   | _ -> None
 
+(** Register this unit's descriptor (a cached load after the first call)
+    without rendering anything.  The runtime's ERASED renders -- the generic
+    `march_value_to_string` hook and `march_html_auto_escape_dyn` -- resolve
+    a cell's header type id (runtime/march_runtime.h, march_hdr) through the
+    table, so a site that hands the runtime an erased value must make sure
+    the table exists first; nothing on the runtime side can find the
+    descriptor by itself. *)
+let emit_ensure ctx : unit =
+  let (dg, cg) = ensure_globals ctx in
+  let base = Llvm_ctx.fresh ctx "ctbase" in
+  Llvm_ctx.emit ctx (Printf.sprintf
+    "%s = call i32 @march_ctor_table_ensure(ptr %s, ptr %s)" base dg cg)
+
+(** [emit_ensure] iff [ty] has an erased component a boxed ADT could hide in.
+    Gated like [id_for]: the runtime half lives in march_extras.c, which the
+    WASM runtime does not build. *)
+let emit_ensure_if_erased ctx (ty : Tir.ty) : unit =
+  let rec erased = function
+    | Tir.TVar _ -> true
+    | Tir.TCon (_, args) -> List.exists erased args
+    | Tir.TTuple ts -> List.exists erased ts
+    | Tir.TRecord fs -> List.exists (fun (_, t) -> erased t) fs
+    | _ -> false
+  in
+  if ctx.Llvm_ctx.shape_meta && erased ty then emit_ensure ctx
+
 (** Emit `march_value_to_string_typed(v, base + local_id)`, registering the
     table on first use.  Returns the ("ptr", ssa) pair of the result string. *)
 let emit_to_string ctx (v : string) (local_id : int) : string * string =
