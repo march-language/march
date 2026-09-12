@@ -1025,7 +1025,14 @@ in the test; `Session.attach` is the only mint.
    actor that logs AND reads the clock can now be mocked, wholly or partially.
    Supervised children, including a `kill`ed child's restart, are captured
    too (#405; `specs/progress/2026-09-03-supervised-children-not-captured.md`).
-2. An actor-hosted endpoint. **Not blocked on item 1**, contrary to what this
+2. The projector — **shipped 2026-09-11**, `specs/progress/2026-09-03-protocol-projector-typed-endpoints.md`
+   (`@[endpoints]`). The actor-hosted endpoint stays open, as that file's item 3 says. That file
+   answers the question deferred under Background ("whether to build the
+   projector on top of this is a **later** decision"): yes, as a source
+   generator emitting one `always_linear` type per session state, which needs
+   no new type-system machinery. Its 2026-09-10 review found two linearity
+   holes (lambda parameters, actor state) and re-scoped the actor-hosted
+   endpoint as blocked on them. The actor-hosted endpoint is **not blocked on item 1**, contrary to what this
    list said before 2026-09-02: `Cap(Session.Live)` is a `proof cap`, passed
    explicitly and never threaded, and a probe shows it reaching an actor
    handler as a message payload on both backends (the probe is in item 1's

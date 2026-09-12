@@ -1,0 +1,38 @@
+-- Application code can branch on a file error's CONSTRUCTOR, on both backends.
+-- The file_*/dir_* builtins denote the canonical bare `FileError`
+-- (stdlib/file.march's `ptype` inside `mod File`); a cross-module constructor
+-- used to register a QUALIFIED parent type (`File.FileError`), which could
+-- never unify with it, so `Err(File.NotFound(p))` was unmatchable and a bare
+-- `NotFound(p)` resolved to Dns.DnsError's same-named constructor instead.
+--
+-- Deliberately does NOT print the error value itself: compiled `to_string` of
+-- a module-declared type still renders `#<tag:N>` because the ctor-descriptor
+-- table is keyed by the lowered qualified name while call sites look it up by
+-- the bare static name. That residual is tracked separately in
+-- specs/todos/2026-09-11-compiled-to-string-of-module-declared-type.md; a
+-- first attempt to close it here caused a deterministic SIGSEGV.
+-- specs/2026-09-11-correctness-fixes-design.md §2.
+mod FileErrorCtorMatch do
+  needs IO
+
+  fn classify(r : Result(String, File.FileError)) : String do
+    match r do
+      Ok(_) -> "ok"
+      Err(File.NotFound(p)) -> "notfound:" ++ p
+      Err(_) -> "other"
+    end
+  end
+
+  fn dir_kind(r : Result(List(String), File.FileError)) : String do
+    match r do
+      Ok(_) -> "ok"
+      Err(File.NotFound(_)) -> "dir:notfound"
+      Err(_) -> "dir:other"
+    end
+  end
+
+  fn main(_cap : Cap(IO)) do
+    println(classify(file_read("/nonexistent/zzz")))
+    println(dir_kind(dir_list("/nonexistent/zzz")))
+  end
+end

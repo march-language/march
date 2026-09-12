@@ -13,6 +13,21 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`@[endpoints]` on a `protocol` generates a typed endpoint API for every
+  role**, over the `Session` transport capability. Each session state becomes
+  an `always_linear` type and each protocol step a function between them, so
+  the ordinary typechecker enforces the protocol: sending out of order is a
+  type mismatch, sending twice on one state or abandoning a session is a
+  linearity error, an offer takes one callback per label, and a callback
+  cannot drop its state because it must return a token only the generated
+  wrappers produce. Messages get a `Json` codec over `Bytes`; the LSP sees the
+  generated modules because generation happens at desugar time. Protocol
+  conformance was previously checked only over the same-thread `Chan`/`MPST`
+  runtime; the `Session` capability ran for real but was untyped. This joins
+  the two: `test/session/stream_endpoints.march` replays the `Stream`
+  protocol through the generated API with the same eight-line trace as the
+  hand-written endpoints, on both backends.
+
 - **`Actor.top_by_mailbox(n)` and `Actor.over_mailbox(threshold)`**: the
   "which actor is behind?" question, as `(pid, depth)` pairs — the `n` deepest
   mailboxes deepest-first, and every actor over a threshold (the growing-mailbox
@@ -27,19 +42,76 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- `march --fmt` dropped the `end` that closes a `choose by … :` block inside a
+  `protocol`, so formatting a file with a choice produced a program that no
+  longer parsed (the loop's `end` closed the choice and the protocol's `end`
+  closed the loop). The formatter now emits it; a round-trip regression pins
+  the shape.
+
 - **`Vault.new(name)` on an already-registered name returned a fresh, empty
   table in the interpreter** but the existing table compiled, silently
   orphaning the first table's data when run interpreted. Both backends now
   return the same table (ETS semantics).
-- Compiled `to_string` and `~H` interpolation of a value whose type is
-  erased at the render site (a value reaching a closure stored in a
-  container, a generic `List(a)` field holding user ADTs, a polymorphic
-  `${x}` hole) now render the constructor by name instead of `#<tag:N>`,
-  and a genuine `IOList` reaching a polymorphic `~H` hole is flattened as
-  markup rather than stringified. Every boxed constructor header now
-  carries a type id in its previously unused pad word, so the runtime can
-  tell types apart without a static type; the stamp folds into the existing
-  tag store and costs no extra instruction at `--opt 2`.
+- **`Err(File.NotFound(p))` can be matched on a file error.** The `file_*` /
+  `dir_*` builtins return `File.FileError`, but a cross-module constructor was
+  registered under a qualified parent type (`File.FileError`) while every
+  annotation and builtin signature denotes the canonical bare name, so the two
+  never unified ("expected `FileError` but got `File.FileError`") and a bare
+  `NotFound(p)` resolved to the DNS constructor of the same name. Compiled
+  (Compiled `to_string` of such an error still renders `#<tag:N>`; that
+  rendering gap is tracked separately.)
+- **The interpreter's `file_rename` error now names the path**, as the
+  compiled runtime and every other file builtin already did.
+- **A record type declared in one typecheck no longer changes a later,
+  unrelated one's diagnostics.** The display-only record-name index was
+  process-global; it is now carried per-check on the typing environment. This
+  affected the test suite, the LSP and the REPL, where several checks share one
+  process.
+- **`march test --coverage` no longer reports above 100%.** The evaluator
+  records every evaluated expression, test bodies included, while the
+  denominator deliberately skips them; the numerator is now intersected with
+  the walked node set, so hits can never exceed the total.
+- **The formatter breaks a too-wide list or record literal across lines.** It
+  had a column budget but no multi-line renderer for literals, so a long list
+  of records was emitted as one enormous line. A literal that fits is
+  unchanged. A single element wider than the budget still overflows.
+- **A compiled call to `worker` / `dynamic_supervisor` / `Supervisor.spec` /
+  `Supervisor.start_child` is rejected with a positioned error** naming the
+  `supervise do … end` alternative, instead of failing at link time with
+  `Undefined symbols: _worker`. That value-level supervisor DSL is
+  interpreter-only. A user function named `worker` is unaffected.
+
+- **A `--test` build no longer silently drops a sibling test file that fails
+  to parse.** `forge test` compiles one entry and discovers the rest via
+  `MARCH_LIB_PATH`; an unparsable sibling used to be dropped with a stderr
+  note, so the suite ran fewer tests and reported 0 failures. Under `--test`
+  it is now a positioned error and the build fails. Ordinary builds, the REPL
+  and the LSP keep tolerating unparsable files on the lib path.
+- **Cross-compilation now links `tweetnacl.c`.** The cross-compile driver's
+  runtime list omitted it (ed25519 for hot-reload ACTIVATE verification);
+  found by the new `scripts/check-runtime-sources.sh`.
+- **A value whose type is erased at the render site now prints its
+  constructor name.** Compiled `to_string` and `~H` interpolation of a value
+  that reaches the renderer through a closure stored in a container, a generic
+  `List(a)` field, or a polymorphic `${x}` hole printed `#<tag:N>`, and a
+  genuine `IOList` in such a hole was stringified instead of flattened as
+  markup. Every boxed constructor header now carries a type id in its
+  previously unused pad word, so the runtime can tell apart two types that
+  share a constructor tag without needing a static type; the stamp folds into
+  the existing tag store and costs no extra instruction at `--opt 2`. Niche
+  `Option`, single-field wrapper types, tuples and anonymous records still
+  render `#<tag:N>` — they have no cell of their own to stamp.
+
+### Changed
+
+- **Pull requests must not carry `docs/pagefind/`.** The search index is
+  bot-owned; CI rejects a PR that touches it (fix: `git checkout origin/main --
+  docs/pagefind`). This ends the merge conflicts between any two docs PRs.
+- **`runtime/sources.list`** classifies every runtime C file by role, and CI
+  checks the compiler drivers, the JIT link list and every dune rule against it.
+- The nightly quarantine job derives its alias list from the dune files instead
+  of a hand list that had named three deleted aliases for a month.
+
 
 ## [0.4.0] - 2026-09-10
 

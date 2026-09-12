@@ -646,6 +646,26 @@ let test_project_env_walks_transitive_path_deps () =
                   "transitive dep leafc's lib/ is on the test MARCH_LIB_PATH"
                   true (List.mem c_lib all_lib_paths))))
 
+(** Regression test: a `forge test` suite whose sibling test file fails to
+    PARSE must fail, not compile the remaining files and report fewer tests
+    with 0 failures. The compiled path builds one entry and discovers the rest
+    via MARCH_LIB_PATH; the resolver used to drop an unparsable discovered file
+    with a stderr note. Under --test it is now a positioned error
+    (specs/2026-09-11-ci-tooling-fixes-design.md §5). *)
+let test_forge_test_fails_on_unparsable_sibling () =
+  with_project ~project_type:Project.Lib (fun _name root ->
+      let test_dir = Filename.concat root "test" in
+      Project.mkdir_p test_dir;
+      write_file (Filename.concat test_dir "test_a.march")
+        "mod TestA do\n  test \"a\" do\n    assert 1 == 1\n  end\nend\n";
+      write_file (Filename.concat test_dir "test_b.march")
+        "mod TestB do\n  test \"b\" do\n    assert (1 == 1\n  end\nend\n";
+      match Cmd_test.run () with
+      | Ok () -> Alcotest.fail "forge test succeeded with an unparsable sibling test file"
+      | Error msg ->
+        Alcotest.(check bool) "failure is the test compilation, not a project error"
+          true (contains msg "test compilation failed"))
+
 (* --------------------------------------------------------------- forge run *)
 
 (** [forge run] (INTERPRETED) must pass forge.toml's [[ffi]] sources through to
@@ -756,6 +776,8 @@ let () =
         test_project_env_honors_toolchain_pin;
       Alcotest.test_case "project_env walks transitive path deps" `Quick
         test_project_env_walks_transitive_path_deps;
+      Alcotest.test_case "fails on an unparsable sibling test file" `Quick
+        test_forge_test_fails_on_unparsable_sibling;
     ];
     "forge run", [
       Alcotest.test_case "interpreted run passes [ffi] sources to the compiler" `Quick

@@ -1,0 +1,7 @@
+-- Control for test_sibling_parse_error: the same two-file suite with a
+-- well-formed sibling compiles and runs BOTH tests.
+mod TestA do
+  test "a" do
+    assert 1 == 1
+  end
+end

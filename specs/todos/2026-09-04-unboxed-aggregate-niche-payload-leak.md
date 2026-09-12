@@ -74,3 +74,5 @@ A runtime live-object assertion in `test/test_codegen.ml`'s
 `unboxed_aggregates` group, in the shape of the two already there — warm the
 site, sample `march_live_allocs`, run 20 000 iterations, assert no growth. An
 output-only test cannot see this.
+
+> **Design spec (2026-09-11):** `specs/2026-09-11-codegen-leaks-design.md` — root cause re-verified against the tree, chosen fix, test plan with a RED control, effort and risk.

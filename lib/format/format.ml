@@ -579,8 +579,78 @@ let rec emit_stmt ctx e =
   | ECon (n, args, _) when trailing_multiline args ->
     emit_call_multiline ctx ~prefix:"" ~head:n.txt args
 
+  (* A list or record literal too wide for the 80-column budget breaks one
+     element (field) per line. Until 2026-09-11 literals had NO multi-line
+     renderer at all, so a 19,509-character list of records came out on one
+     line (specs/todos/2026-08-03-formatter-collapses-multiline-literals.md);
+     the width budget existed but was never consulted for them. A literal
+     that fits stays inline byte for byte. An element that is itself a single
+     over-wide atom (one long string, one `++` chain) still yields an
+     over-width line: nothing here splits atoms. *)
+  | ECon ({ txt = "Cons"; _ }, [_; _], _)
+    when try_collect_list [] e <> None && should_break ctx.indent e ->
+    emit_literal_multiline ctx ~suffix:"" e
+
+  | ERecord ((_ :: _), _) when should_break ctx.indent e ->
+    emit_literal_multiline ctx ~suffix:"" e
+
   | _ ->
     line ctx (expr_inline e)
+
+(** Emit a too-wide list or record literal across lines, with [suffix]
+    (a trailing "," when this literal is itself an element of an enclosing
+    broken literal) appended to the closing bracket. Elements recurse: a
+    record that fits on one line inside a broken list stays inline; one that
+    does not breaks at the next indent level. *)
+and emit_literal_multiline ctx ~suffix e =
+  let emit_elem render_inline el is_last =
+    let sfx = if is_last then "" else "," in
+    match el with
+    | ECon ({ txt = "Cons"; _ }, [_; _], _)
+      when try_collect_list [] el <> None && should_break ctx.indent el ->
+      emit_literal_multiline ctx ~suffix:sfx el
+    | ERecord ((_ :: _), _) when should_break ctx.indent el ->
+      emit_literal_multiline ctx ~suffix:sfx el
+    | _ -> line ctx (render_inline el ^ sfx)
+  in
+  let emit_elems render_inline elems =
+    let n = List.length elems in
+    List.iteri (fun i el -> emit_elem render_inline el (i = n - 1)) elems
+  in
+  match e with
+  | ERecord (flds, _) ->
+    line ctx "{";
+    indented ctx (fun () ->
+      let n = List.length flds in
+      List.iteri (fun i (name, v) ->
+        let sfx = if i = n - 1 then "" else "," in
+        let head = name.txt ^ ": " in
+        match v with
+        | (ECon ({ txt = "Cons"; _ }, [_; _], _) | ERecord ((_ :: _), _))
+          when should_break (ctx.indent + 1) v
+               && String.length head + String.length (expr_inline v) + ctx.indent * 2 > 80 ->
+          line ctx (head ^ (match v with ERecord _ -> "{" | _ -> "["));
+          (* Re-enter through the element path so nested literals break at
+             the next level; the opener was emitted with the field name. *)
+          (match v with
+           | ERecord (inner, _) ->
+             indented ctx (fun () ->
+               let m = List.length inner in
+               List.iteri (fun j (nm, iv) ->
+                 line ctx (Printf.sprintf "%s: %s%s" nm.txt (expr_inline iv)
+                             (if j = m - 1 then "" else ","))) inner);
+             line ctx ("}" ^ sfx)
+           | _ ->
+             let elems = match try_collect_list [] v with Some es -> es | None -> [] in
+             indented ctx (fun () -> emit_elems expr_inline elems);
+             line ctx ("]" ^ sfx))
+        | _ -> line ctx (Printf.sprintf "%s%s%s" head (expr_inline v) sfx)) flds);
+    line ctx ("}" ^ suffix)
+  | _ ->
+    let elems = match try_collect_list [] e with Some es -> es | None -> [] in
+    line ctx "[";
+    indented ctx (fun () -> emit_elems expr_inline elems);
+    line ctx ("]" ^ suffix)
 
 (** Emit a call whose last argument, possibly through a chain of wrapper
     calls/constructors in tail position (e.g. [Thunk(fn _ -> ...)] as the
@@ -1016,6 +1086,7 @@ and emit_decl ctx = function
     List.iter (fun opt -> line ctx (Printf.sprintf "cap %s" opt)) opts
 
   | DProtocol (name, proto, _) ->
+    List.iter (fun a -> line ctx (Printf.sprintf "@[%s]" a)) proto.proto_attrs;
     line ctx (Printf.sprintf "protocol %s do" name.txt);
     indented ctx (fun () ->
       List.iter (emit_proto_step ctx) proto.proto_steps);
@@ -1204,7 +1275,12 @@ and emit_proto_step ctx = function
         line ctx (Printf.sprintf "%s ->" label.txt);
         indented ctx (fun () -> List.iter (emit_proto_step ctx) steps)
       ) choices
-    )
+    );
+    (* The block's own `end`.  Without it the enclosing loop's `end` closed
+       the choice and the protocol's `end` closed the loop, so formatting any
+       protocol with a choice produced a program that no longer parsed
+       (witness: `--fmt` on specs/lang/types/accept/t105, 2026-09-11). *)
+    line ctx "end"
 
 (* ------------------------------------------------------------------ *)
 (* Public entry points                                                 *)

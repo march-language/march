@@ -88,10 +88,10 @@ include Typecheck_builtins
 (* =================================================================
    §1  Unification and §2 surface-type → internal-type conversion — now
    lib/typecheck/typecheck_unify.ml.  [include], not [open], for the same
-   reason as the modules above.  The band carries BOTH of this library's
-   top-level effects (the [inject_iface_exports_ref] and [expand_record_ref]
-   hook installations); typecheck_unify.ml's header records why moving them
-   cannot reorder anything observable.
+   reason as the modules above.  The band carries this library's one
+   top-level effect (the [expand_record_ref] hook installation);
+   typecheck_unify.ml's header records why moving it cannot reorder anything
+   observable.
    ================================================================= *)
 include Typecheck_unify
 
@@ -5966,6 +5966,13 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
      seeding from an existing env — a seeded check re-walks the bodies it
      cares about and re-records what it finds. *)
   March_ast.Json_dispatch.reset ();
+  (* Same discipline for the display-only record-name index: start from the
+     seed's snapshot (stdlib's names when seeded from the stdlib env; nothing
+     for a from-scratch check), never from whatever the previous check in this
+     process left behind. See [record_names_dump]. *)
+  record_names_load (match seed_env with
+    | Some (se : env) -> se.record_names_snapshot
+    | None -> []);
   let type_map = match seed_env with
     | Some (se : env) -> se.type_map
     | None -> Hashtbl.create 256
@@ -6326,7 +6333,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
   warn_unused_imports final_env;
   (* Pass 3: tail-call enforcement *)
   enforce_tail_calls_in_decls ~file_mod:m.Ast.mod_name.txt errors m.Ast.mod_decls;
-  (errors, type_map, final_env)
+  (errors, type_map, { final_env with record_names_snapshot = record_names_dump () })
 
 let check_module ?errors (m : Ast.module_) : Err.ctx * (Ast.span, ty) Hashtbl.t =
   let (errs, type_map, _env) = check_module_core ?errors m in
@@ -6359,6 +6366,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
      only caller is [lib/jit/repl_jit.ml] — which is what makes it the right
      place to carry the exemption rather than a flag threaded from the CLI. *)
   let env = { env with root_cap_allowed = true } in
+  record_names_load env.record_names_snapshot;   (* per-check, see [record_names_dump] *)
   let errors = env.errors in
   let type_map = env.type_map in
   let rec prebind_mod_members_inc ?(opaque = StringSet.empty) prefix e decls =
@@ -6564,7 +6572,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
   in
   (* Pass 2: full checking of new declarations *)
   let final_env = List.fold_left check_decl pre_env (reorder_decls m.Ast.mod_decls) in
-  last_with_env_final := final_env;
+  last_with_env_final := { final_env with record_names_snapshot = record_names_dump () };
   (* Pass 3: tail-call enforcement *)
   enforce_tail_calls_in_decls ~file_mod:m.Ast.mod_name.txt errors m.Ast.mod_decls;
   (errors, type_map)

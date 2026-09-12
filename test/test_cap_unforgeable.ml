@@ -170,19 +170,14 @@ end|} in
    `Json.parse` in it passes on the unknown-name error alone and would keep
    passing with the capability check deleted. *)
 
-(* The type and FIELD names below are deliberately distinctive (`FjdAlpha`,
-   `fjd_alpha`) rather than the obvious `A` / `a`. These tests share a process
-   with the rest of run_compiler, and some state outlives one [typecheck] call:
-   an earlier module declaring the structural record `{ a : Int }` changes the
-   diagnostic a LATER, unrelated test gets for its own same-name type collision
-   (test_compiler.ml's "same-name type collision" case, which then loses its
-   explanatory note and fails). Measured: with `type A = { a : Int }` here the
-   suite fails at that case and passes when run alone; renaming clears it. That
-   leak predates this work -- it reproduces with the dispatch recording
-   compiled out -- and is filed as
-   specs/todos/2026-09-09-typecheck-record-state-leaks-across-checks.md. Until
-   it is fixed, a new test that declares a plainly-named record is a landmine
-   for whatever runs after it. *)
+(* These tests once had to use deliberately distinctive type and field names
+   (`A` / `a`) because the record-name index leaked across
+   [typecheck] calls in one process and a plain `type A = { a : Int }` here
+   made test_compiler.ml's "same-name type collision" case lose its note.
+   That leak is fixed (the index is per-check now; see
+   specs/progress/2026-09-11-typecheck-record-state-per-check.md), so the
+   plain names are back -- and the suite staying green with them is the
+   third witness for the fix. *)
 
 let errors_mentioning ctx needle =
   List.filter (fun d ->
@@ -199,9 +194,9 @@ let errors_mentioning ctx needle =
 let test_forge_direct_cap_result_with_dispatch_live () =
   let ctx = typecheck {|mod ForgeDirect do
   needs IO
-  type FjdAlpha = { fjd_alpha : Int }
+  type A = { a : Int }
   type FjdBeta = { fjd_beta : Int }
-  derive Json for FjdAlpha
+  derive Json for A
   derive Json for FjdBeta
   fn main(cap : Cap(IO)) do
     let forged : Cap(IO) = from_json("{}")
@@ -222,9 +217,9 @@ end|} in
 let test_forge_cap_hidden_in_a_record_field () =
   let ctx = typecheck {|mod ForgeHidden do
   needs IO
-  type FjdAlpha = { fjd_alpha : Int }
+  type A = { a : Int }
   type FjdHolder = { fjd_cap : Cap(IO), fjd_n : Int }
-  derive Json for FjdAlpha
+  derive Json for A
   fn main(cap : Cap(IO)) do
     let h : FjdHolder = from_json("{}")
     println("forged")
@@ -240,12 +235,12 @@ end|} in
 let test_resolvable_dispatch_is_accepted () =
   let ctx = typecheck {|mod DispatchClean do
   needs IO
-  type FjdAlpha = { fjd_alpha : Int }
+  type A = { a : Int }
   type FjdBeta = { fjd_beta : Int }
-  derive Json for FjdAlpha
+  derive Json for A
   derive Json for FjdBeta
   fn main(cap : Cap(IO)) do
-    let x : FjdAlpha = from_json("{}")
+    let x : A = from_json("{}")
     let y : FjdBeta = from_json("{}")
     println("both")
   end

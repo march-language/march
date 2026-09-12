@@ -12,9 +12,20 @@
 #
 # i.e. GitHub's own legacy Jekyll runs over docs/ directly. There is no post-build hook in
 # that path, so a search index can only reach march-lang.org by being committed — exactly
-# the same reason the 114 generated stdlib API pages under docs/docs/stdlib/ are committed
-# (see gen-stdlib-docs.sh; note its header claims deploy-pages.yml serves march-lang.org,
-# which is not correct).
+# the same reason the generated stdlib API pages under docs/docs/stdlib/ are committed
+# (see gen-stdlib-docs.sh, whose header describes the same serving path).
+#
+# WHO WRITES IT: bots only. sync-docs-search-index.yml regenerates and pushes on every
+# push to main touching docs/**, and gen-stdlib-docs.yml does the same after a stdlib
+# change. A pull request must NOT carry docs/pagefind/ changes — ci.yml's doc-lint
+# rejects one that does — because two PRs that each regenerated the index conflict on
+# every hash-named file plus pagefind-entry.json, and the index is not reproducible so
+# the conflict has no textual resolution. If you regenerated it locally, drop it before
+# pushing:
+#
+#     git checkout origin/main -- docs/pagefind
+#
+# (specs/2026-09-11-ci-tooling-fixes-design.md §2.)
 #
 # Jekyll's source root is docs/, so a directory at docs/pagefind/ is served at /pagefind/,
 # which is where _includes/search.html looks for it.

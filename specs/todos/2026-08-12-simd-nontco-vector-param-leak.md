@@ -126,3 +126,5 @@ by whoever generalizes this fix, because both weaken it:
   the full ownership map of which call shapes transfer vs. retain.
 - `test/native/simd_vector_escape_arg.march` — the canary that makes the naive
   "release every box the call site created" fix fail loudly.
+
+> **Design spec (2026-09-11):** `specs/2026-09-11-codegen-leaks-design.md` — root cause re-verified against the tree, chosen fix, test plan with a RED control, effort and risk.

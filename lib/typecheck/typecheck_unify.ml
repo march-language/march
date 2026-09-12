@@ -7,17 +7,13 @@
     which was gated on a module-initialisation-order hazard that turned out
     not to exist).
 
-    {2 Why moving the two [let () =] hook installations is safe}
+    {2 Why moving the [let () =] hook installation is safe}
 
-    The whole initialisation-order surface of [lib/typecheck/] is two lines,
-    and both of them are in this band:
+    The whole initialisation-order surface of [lib/typecheck/] is one line,
+    and it is in this band (a second, [inject_iface_exports_ref], never had a
+    reader and was deleted 2026-09-11; see
+    specs/2026-09-11-correctness-fixes-design.md §4):
 
-    - [inject_iface_exports_ref] (declared in [Typecheck_env]) has no
-      dereference anywhere in the tree — the installation below has never had
-      a reader.  See
-      [specs/todos/2026-08-27-inject-iface-exports-hook-has-no-reader.md];
-      it is deliberately left in place as a breadcrumb.  An installation
-      nobody reads cannot have an ordering regression.
     - [expand_record_ref] moves as a closed unit: its declaration, its single
       read site (inside [unify]) and its installation are all three in this
       file, in that order.  [Typecheck_unify] initialises strictly before
@@ -806,40 +802,6 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
   | Ast.TyRefine (base, binder, pred) ->
     let b = match binder with None -> "_" | Some n -> n.Ast.txt in
     TRefine (surface_ty env ~tvars base, b, pred)
-
-(* Now that surface_ty and generalize are defined, wire up the forward ref so
-   resolve_qualified_var can inject interface method bindings cross-module. *)
-let () = inject_iface_exports_ref := (fun mod_name exports env ->
-  let open March_modules.Module_registry in
-  List.fold_left (fun env entry ->
-    match entry.ex_kind with
-    | ExInterface idef ->
-      List.fold_left (fun env (m : Ast.method_decl) ->
-        let qname = mod_name ^ "." ^ idef.iface_name.txt ^ "." ^ m.md_name.txt in
-        if StrMap.mem qname env.vars then env
-        else begin
-          (* Use level 1 for the interface type parameter so generalize 0 quantifies it. *)
-          let a = fresh_var 1 in
-          let tvars = ref [(idef.iface_param.txt, a)] in
-          (* No enclosing function checks a cross-module interface's own
-             method signature — see [with_no_caller]. *)
-          let ty = with_no_caller env (fun () -> surface_ty env ~tvars m.md_ty) in
-          let a_id = match a with
-            | TVar r -> (match !r with Unbound (id, _) -> id | _ -> 0)
-            | _ -> 0
-          in
-          let base_sch = generalize 0 ty in
-          let sch = match base_sch with
-            | Poly (ids, cs, t) ->
-              Poly (ids, CInterface (idef.iface_name.txt, a) :: cs, t)
-            | Mono t ->
-              Poly ([a_id], [CInterface (idef.iface_name.txt, a)], t)
-          in
-          { env with vars = StrMap.add qname sch env.vars }
-        end
-      ) env idef.iface_methods
-    | _ -> env
-  ) env exports.me_entries)
 
 (** Instantiate a constructor's type at the current level.
     Creates fresh unification variables for each type parameter of the

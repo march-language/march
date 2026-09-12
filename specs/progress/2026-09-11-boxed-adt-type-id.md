@@ -161,5 +161,10 @@ constructor, the same wrong answer `describable` refuses. Anonymous records
 and tuples (4) still have no name to hash. Cells the C runtime builds itself
 (`make_cons`, `make_some_i64`, `make_ok`, HTTP header pairs; ~100 sites)
 carry id 0 and fall back to today's rendering; stamping them is a separate
-follow-up. A `Trusted*`/`Safe` wrapper reaching an erased hole is rendered
+follow-up. The concrete case a reader is most likely to hit is the one
+`CHANGELOG.md` records under `Err(File.NotFound(p))`: the `file_*` builtins
+construct their error in C, so compiled `to_string` of it still prints
+`#<tag:0>` on this branch (verified, not assumed). That parenthetical in the
+changelog is still true after this change, and closing it means stamping the
+C builders. A `Trusted*`/`Safe` wrapper reaching an erased hole is rendered
 as `Safe("...")` and escaped (the safe direction), not unwrapped.
