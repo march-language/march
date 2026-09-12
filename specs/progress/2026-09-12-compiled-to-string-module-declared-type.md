@@ -83,14 +83,61 @@ is unaffected.
   and the single-case `file_open` guard likewise. Full stdlib suite: 879 tests,
   exit 0.
 
+## Also stamped, same day
+
+`make_nil` / `make_cons` (`List`) and `mk_ok` / `mk_ok_unit` / `mk_err`
+(`Result`) in `runtime/march_runtime.c`. Both types' C tags already matched
+the declaration order the descriptor is keyed by — Nil=0/Cons=1, Ok=0/Err=1 —
+and every call site in that file builds the type its helper's name says (14
+`mk_ok`, 3 `mk_err`, 10 `make_cons`, 15 `make_nil`, audited individually),
+so the id belongs to the helper rather than the caller.
+
+Measured effect, erased slot, against a worktree built at `origin/main`:
+
+| | `origin/main` | after |
+|---|---|---|
+| C-built `Result` (a `file_read` error) | `#<tag:1>` | `Err(NotFound("…"))` |
+
+which is byte-identical to the interpreter, nested `FileError` included. Pinned
+as the `erased=` line of `test/native/qualified_type_name_render`.
+
+`Option` is deliberately NOT stamped: it is niche-encoded, so `Some(x)` IS `x`
+and `None` is null — there is no cell to carry an id, and stamping the payload
+would make the renderer print the payload's constructor under the wrapper's
+name.
+
+## Cost
+
+One `i32` store per C-built cell, next to a `calloc` that already dominates.
+A/B against a compiler built at `origin/main`, same box, interleaved runs,
+first discarded:
+
+| | base | after |
+|---|---|---|
+| 2M C-built cons cells (`string_split` x400k), min | 208 ms | 208 ms |
+| `bench/binary_trees.march`, n=20, p25 | 257 ms | 257 ms |
+
+The micro-benchmark is the one that actually exercises the changed path and
+its minimum is unchanged. `binary_trees` does not use these builders at all,
+and its deltas invert depending on which statistic and which batch is read
+(min +3.3% / p25 +0.0% / median +0.6% in one run, min +0.8% / median +2.1% in
+another) under a machine load of 5-8 from other sessions — noise, with no
+mechanism behind it. Binary size grew 96 bytes on the micro-benchmark.
+
 ## Still open
 
-Only `mk_file_error` is stamped. The rest of the C builders (`make_cons`,
-`make_ok`, `make_some_i64`, HTTP header pairs; ~100 sites) still build
-unstamped cells, so a `List` or `Result` produced by the runtime and rendered
-through an erased slot keeps today's output. Stamping them is mechanical —
-give each `make_*` helper its type id — but it is a separate change with its
-own benchmark and IR-oracle obligations.
+Tuples and anonymous records have no declared type name to hash. The
+`march_extras.c` and `march_http.c` builders (their own `make_ok`/`make_err`/
+`make_cons`/`make_header`/`make_conn`, ~100 sites) are still unstamped; they
+need the same per-helper audit before they can be, since a helper reused for
+another shape would print a confidently WRONG constructor rather than a
+placeholder.
+
+Stamping also makes an existing renderer divergence reachable in more places:
+an erased render quotes nested strings (`["a", "b"]`) where the interpreter's
+`Show` path does not (`[a, b]`). That is pre-existing on `origin/main` —
+verified by compiling the same program with a compiler built there — and is
+filed as `specs/todos/2026-09-12-erased-render-quotes-nested-strings.md`.
 
 The short-name lookup gap itself is NOT closed, only routed around for stamped
 cells: a module-declared type whose value is built by compiled code and reaches

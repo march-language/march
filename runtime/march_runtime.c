@@ -5671,6 +5671,28 @@ double march_math_pow(double b, double e) { return pow(b, e); }
 /* ── Extended string builtins ────────────────────────────────────────── */
 
 /* Helper: None = raw 0 in the niche representation. */
+/* The other two types this runtime builds cells for itself.  Both are
+ * declared with BARE TIR names (the descriptor's `T` lines read `List` and
+ * `Result`), and the C builders' tags already match the declaration order the
+ * descriptor is keyed by -- Nil=0/Cons=1, Ok=0/Err=1 -- which is what makes
+ * the stamp meaningful rather than merely present.
+ *
+ * Every mk_ok/mk_err/make_cons/make_nil call site in this file builds the
+ * type its name says (audited: 14 mk_ok, 3 mk_err, 10 make_cons, 15
+ * make_nil), so the id is a property of the helper, not of the caller.  A
+ * helper reused for some other shape would print a confidently wrong
+ * constructor, which is strictly worse than the "#<tag:N>" being fixed. */
+static int32_t list_type_id(void) {
+    static int32_t id = 0;
+    if (id == 0) id = march_type_id_of_name("List");
+    return id;
+}
+static int32_t result_type_id(void) {
+    static int32_t id = 0;
+    if (id == 0) id = march_type_id_of_name("Result");
+    return id;
+}
+
 static void *make_none(void) {
     return (void *)0;
 }
@@ -5689,7 +5711,9 @@ static void *make_some_ptr(void *val) {
 
 /* Helper: allocate a Nil list node (tag=0). */
 static void *make_nil(void) {
-    return march_alloc(16);
+    void *nil = march_alloc(16);
+    ((march_hdr *)nil)->pad = list_type_id();
+    return nil;
 }
 
 /* Helper: allocate a Cons(head, tail) list node (tag=1). */
@@ -5697,6 +5721,7 @@ static void *make_cons(void *head, void *tail) {
     void *cons = march_alloc(16 + 16);  /* header + 2 ptr fields */
     int32_t *tp = (int32_t *)((char *)cons + 8);
     tp[0] = 1;  /* tag = Cons */
+    ((march_hdr *)cons)->pad = list_type_id();
     void **fp = (void **)((char *)cons + 16);
     fp[0] = head;
     fp[1] = tail;
@@ -6427,18 +6452,21 @@ int64_t march_dir_exists(void *s) {
 /* Create Result(Ok=0,Err=1) values; all file/dir/csv fns return Result. */
 static void *mk_ok(void *value) {
     void *r = march_alloc(24); /* tag=0 by default */
+    ((march_hdr *)r)->pad = result_type_id();
     MARCH_FIELD(r, 0) = (int64_t)value;
     return r;
 }
 static void *mk_ok_unit(void) {
     /* Ok(()) — unit value is null/0 */
     void *r = march_alloc(24);
+    ((march_hdr *)r)->pad = result_type_id();
     MARCH_FIELD(r, 0) = 0;
     return r;
 }
 static void *mk_err(void *msg_str) {
     void *r = march_alloc(24);
     MARCH_SET_TAG(r, 1);
+    ((march_hdr *)r)->pad = result_type_id();
     MARCH_FIELD(r, 0) = (int64_t)msg_str;
     return r;
 }
@@ -6483,7 +6511,6 @@ static int32_t file_error_type_id(void) {
     if (id == 0) id = march_type_id_of_name("File.FileError");
     return id;
 }
-
 static void *mk_file_error(int tag, void *payload_str) {
     void *cell = march_alloc(24); /* header(16) + 1 field(8) */
     MARCH_SET_TAG(cell, tag);

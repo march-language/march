@@ -110,8 +110,11 @@ git log is authoritative for exact commits.
   name it was not keyed by and the value fell through to the untyped
   renderer. The runtime now stamps the error cell it builds with that type's
   header id, so the renderer identifies the value from the cell itself rather
-  than from a name it could not resolve. The `file_*` / `dir_*` regression
-  table is tightened from "either form" to byte equality with the
+  than from a name it could not resolve. The `List` and `Result` cells the
+  runtime builds are stamped the same way, so a `file_read` error reaching a
+  renderer through an erased slot now prints
+  `Err(NotFound("/path"))` instead of `#<tag:1>`. The `file_*` / `dir_*`
+  regression table is tightened from "either form" to byte equality with the
   interpreter.
 
 ### Changed

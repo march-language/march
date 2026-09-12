@@ -45,11 +45,28 @@ mod QualifiedTypeNameRender do
     Err(e) -> println("dir_err=" ++ to_string(e))
     end
 
+    -- The SAME error reaching a renderer through an ERASED slot: no static
+    -- type at all, so this can only work from the cell's own header id. The
+    -- Result wrapper is stamped by the C runtime's mk_ok/mk_err and the
+    -- FileError payload by mk_file_error, so both name themselves.
+    let cb = Bx(Cons(fn x -> to_string(x), Nil))
+    println("erased=" ++ apply_first(cb, file_read("/definitely/missing/erased")))
+
     -- Ambiguous short name: must never print the OTHER module's constructor.
     let a = A.ADup(1)
     let b = B.BDup("s")
     println("dup_a_not_wrong=" ++ bool_to_string(not(string_contains(to_string(a), "BDup"))))
     println("dup_b_not_wrong=" ++ bool_to_string(not(string_contains(to_string(b), "ADup"))))
+  end
+
+  type Box = Bx(List(b))
+  pfn apply_first(box, v) do
+    match box do
+    Bx(fs) -> match fs do
+      Cons(f, _) -> f(v)
+      Nil        -> "empty"
+      end
+    end
   end
 
   mod A do
