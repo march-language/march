@@ -1,0 +1,11 @@
+-- EXPECT-ERROR: was never used
+mod Main do
+  needs IO.Console
+  -- The must-use half of t191: declaration order also decided whether
+  -- abandoning a linear value was caught.
+  fn main(c : Cap(IO.Console)) do
+    let a = S(1)
+    print_line("abandoned")
+  end
+  always_linear type S = S(Int)
+end

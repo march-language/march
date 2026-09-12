@@ -42,6 +42,25 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`always_linear` tracking no longer depends on declaration order.** The
+  registry of always-linear type names was filled only as declarations were
+  checked, in order, so a function checked *before* the type's declaration saw
+  an ordinary type and lost both halves of the guarantee: reusing a linear
+  value and abandoning one were each silently accepted. Top-level types were
+  affected as much as nested ones. Pass 1 now seeds the registry before any
+  body is checked. The same change routes the let-binding promotion through
+  the shadow-aware lookup, so a nested `always_linear` type no longer infects
+  an unrelated type of the same name declared in the current module — a false
+  positive on ordinary code that the ordering hole had been masking.
+
+- **An actor handler's parameters are tracked for linearity.** They were bound
+  without the promotion a named function's parameters get, so a linear value
+  arriving in a message could be duplicated or dropped by the handler with no
+  diagnostic at all — the sender's half of the documented zero-copy-move idiom
+  was enforced and the receiver's was not. Storing the parameter into the
+  returned state counts as consuming it, so an actor that holds a resource
+  needs no special case.
+
 - `march --fmt` dropped the `end` that closes a `choose by … :` block inside a
   `protocol`, so formatting a file with a choice produced a program that no
   longer parsed (the loop's `end` closed the choice and the protocol's `end`

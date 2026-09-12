@@ -5988,6 +5988,127 @@ let test_linear_letq_acquire_double_use () =
   end|} in
   Alcotest.(check bool) "let?-acquired linear value used twice: error" true (has_errors ctx)
 
+(* Declaration order must not decide whether `always_linear` is tracked.
+   `env.always_linear_types` was written only by `check_decl`, mid-fold, so a
+   function checked BEFORE the declaration saw an ordinary type and lost both
+   halves of the guarantee. Pass 1 now seeds the registry
+   (`Typecheck.always_linear_names`). Corpus: reject/t191-t193, accept/t194.
+   Each of these three was SILENTLY ACCEPTED before 2026-09-11. *)
+let test_always_linear_declared_after_use_reuse () =
+  let ctx = typecheck {|mod Test do
+    fn f() : Int do
+      let a = S(1)
+      step(a) + step(a)
+    end
+    fn step(s : S) : Int do match s do S(e) -> e end end
+    always_linear type S = S(Int)
+  end|} in
+  Alcotest.(check bool) "type declared after use: reuse is an error" true (has_errors ctx)
+
+let test_always_linear_declared_after_use_drop () =
+  let ctx = typecheck {|mod Test do
+    fn f() : Int do
+      let a = S(1)
+      0
+    end
+    always_linear type S = S(Int)
+  end|} in
+  Alcotest.(check bool) "type declared after use: drop is an error" true (has_errors ctx)
+
+let test_always_linear_nested_module_after_use () =
+  let ctx = typecheck {|mod Test do
+    fn f() : Int do
+      let a = G.S(1)
+      G.step(a) + G.step(a)
+    end
+    mod G do
+      always_linear type S = S(Int)
+      fn step(s : S) : Int do match s do S(e) -> e end end
+    end
+  end|} in
+  Alcotest.(check bool) "nested module declared after use: reuse is an error" true (has_errors ctx)
+
+(* The other half: the registry holds BARE names, so seeding it in pass 1
+   would infect an unrelated same-named ordinary type. The promotion goes
+   through `resolves_always_linear`, which prefers the current module's own
+   declaration. This one was REJECTED (a false positive on ordinary code)
+   before the same change. *)
+let test_always_linear_bare_name_does_not_infect () =
+  let ctx = typecheck {|mod Test do
+    mod G do
+      always_linear type S = S(Int)
+    end
+    type S = S(Int)
+    fn get(x : S) : Int do match x do S(v) -> v end end
+    fn f() : Int do
+      let a = S(1)
+      get(a) + get(a)
+    end
+  end|} in
+  Alcotest.(check bool) "a nested always_linear type does not infect a same-named ordinary type"
+    false (has_errors ctx)
+
+(* An actor handler's parameters were bound with a plain `bind_var`, so they
+   got none of the `always_linear` promotion a named function's parameters
+   get: tracked for NEITHER must-use nor at-most-once. Corpus: reject/t195-196,
+   accept/t197. Both rejects were silently accepted before 2026-09-11. *)
+let test_linear_actor_handler_param_reused () =
+  let ctx = typecheck {|mod Test do
+    always_linear type S = S(Int)
+    fn sink(x : S) : Int do match x do S(v) -> v end end
+    actor A do
+      state { n : Int }
+      init  { n: 0 }
+      on Take(s : S) do
+        { state with n: state.n + sink(s) + sink(s) }
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "handler param used twice: error" true (has_errors ctx)
+
+let test_linear_actor_handler_param_dropped () =
+  let ctx = typecheck {|mod Test do
+    always_linear type S = S(Int)
+    actor A do
+      state { n : Int }
+      init  { n: 0 }
+      on Take(s : S) do
+        { state with n: state.n + 1 }
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "handler param never used: error" true (has_errors ctx)
+
+let test_linear_actor_handler_param_consumed_ok () =
+  let ctx = typecheck {|mod Test do
+    always_linear type S = S(Int)
+    fn sink(x : S) : Int do match x do S(v) -> v end end
+    actor A do
+      state { n : Int }
+      init  { n: 0 }
+      on Take(s : S) do
+        { state with n: state.n + sink(s) }
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "handler param consumed once: no error" false (has_errors ctx)
+
+(* Storing the parameter into the returned state counts as consuming it: the
+   record update references it. Pinned so the fix cannot over-fire on the
+   shape an actor that HOLDS a resource must use. *)
+let test_linear_actor_handler_param_stored_ok () =
+  let ctx = typecheck {|mod Test do
+    always_linear type S = S(Int)
+    actor B do
+      state { held : S, n : Int }
+      init  { held: S(0), n: 0 }
+      on Keep(s : S) do
+        { held: s, n: state.n + 1 }
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "handler param stored into state: no error" false (has_errors ctx)
+
 (* Same gap via a single correct use — must NOT regress to a false positive. *)
 let test_linear_letq_acquire_single_use_ok () =
   let ctx = typecheck {|mod Test do
@@ -15421,6 +15542,14 @@ let compiler_suites =
           Alcotest.test_case "tag ctor usable as value"                  `Quick test_tag_usable_as_ctor;
           Alcotest.test_case "always_linear type: consumed ok"           `Quick test_always_linear_type_ok;
           Alcotest.test_case "always_linear type: drop is error"         `Quick test_always_linear_type_drop_error;
+          Alcotest.test_case "always_linear: declared after use, reuse"   `Quick test_always_linear_declared_after_use_reuse;
+          Alcotest.test_case "always_linear: declared after use, drop"    `Quick test_always_linear_declared_after_use_drop;
+          Alcotest.test_case "always_linear: nested module after use"     `Quick test_always_linear_nested_module_after_use;
+          Alcotest.test_case "always_linear: bare name does not infect"   `Quick test_always_linear_bare_name_does_not_infect;
+          Alcotest.test_case "actor handler param: reused"                `Quick test_linear_actor_handler_param_reused;
+          Alcotest.test_case "actor handler param: dropped"               `Quick test_linear_actor_handler_param_dropped;
+          Alcotest.test_case "actor handler param: consumed once ok"      `Quick test_linear_actor_handler_param_consumed_ok;
+          Alcotest.test_case "actor handler param: stored into state ok"  `Quick test_linear_actor_handler_param_stored_ok;
           Alcotest.test_case "transitions block: no errors"              `Quick test_transitions_parses;
           Alcotest.test_case "transitions via missing fn: error"         `Quick test_transitions_via_not_found_error;
           Alcotest.test_case "undeclared transition fn: warning emitted" `Quick test_transitions_warn_undeclared;

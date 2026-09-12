@@ -1,5 +1,7 @@
 # `[P2]` Linearity: `always_linear` tracking depends on declaration order
 
+**Shipped 2026-09-12.** See "What shipped" at the end.
+
 Found 2026-09-11 while closing out
 `specs/progress/2026-09-03-protocol-projector-typed-endpoints.md`, whose
 generator inserts its modules before the user's first ordinary declaration
@@ -168,3 +170,35 @@ hazard is fixed, or the constraint will be read as load-bearing forever.
 Related: [[2026-09-10-linear-lambda-parameter-not-must-use]],
 [[2026-09-11-linear-actor-handler-parameter-untracked]] — three holes in the
 same subsystem, each found by building something that depended on it.
+
+---
+
+## What shipped (2026-09-12)
+
+Both halves, as specced.
+
+- `Typecheck.always_linear_names ~modname decls` walks the declaration tree
+  and returns each `always_linear type`'s bare and module-qualified name,
+  spelled as `check_decl` spells them — a nested module qualifies with its own
+  bare name, because that is what `check_decl` sets `current_module` to. Pass 1
+  seeds it in **both** paths: `check_module_core` (folded into the same
+  `{ pre_env with current_module = … }` block) and `check_module_with_env`, the
+  incremental/REPL/LSP path.
+- The let-binding promotion at `typecheck.ml:237` now goes through
+  `resolves_always_linear` instead of reading the registry raw.
+
+Measured before and after on the same six orderings: top-level and nested,
+declared before and after the use, reuse and drop. The four that were silently
+accepted are now rejected; the two that were already correct still are. The
+L4 infection case went the other way, from rejected to accepted, which is the
+half that fails if only the seeding lands.
+
+Witnesses: `reject/t191`–`t193`, `accept/t194`, plus four unit cases in
+`test_compiler.ml`'s `tag_and_typestate` group. Full suite, corpus (315/315)
+and the TIR goldens are green.
+
+**Not done:** `lib/desugar/desugar_endpoints.ml` still inserts its generated
+modules ahead of the user's first ordinary declaration. That is now belt and
+braces rather than load-bearing; `reject/t193` is the guard either way. The
+comment there was left alone deliberately — changing generator placement is a
+separate diff from a typechecker fix.

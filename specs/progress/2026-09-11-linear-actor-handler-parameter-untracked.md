@@ -1,5 +1,7 @@
 # `[P2]` Linearity: an actor handler's parameters are not tracked at all
 
+**Shipped 2026-09-12.** See "What shipped" at the end.
+
 Found 2026-09-11 while designing the actor-hosted session endpoint
 (`2026-09-11-actor-hosted-session-endpoint.md`), whose first design put the
 session state in an actor message. Third hole in the same family as
@@ -127,3 +129,29 @@ Prove both rejects RED first: they are accepted today.
 Re-run the actor suites and `test/cap_mock/` — handler binding is on the path
 for every actor program, and a promotion that fires too eagerly turns ordinary
 actor state into a linearity error.
+
+---
+
+## What shipped (2026-09-12)
+
+Handler parameters are bound through `bind_lam_param`, the same helper a
+lambda's parameters use, so they get the `always_linear` / `TLin` promotion
+that a plain `bind_var` skipped; and `check_linear_all_consumed` now runs at
+the handler body's close over the parameter names, the way `check_fn` runs it
+over a function's.
+
+The question the spec said to settle and pin: **storing the parameter into the
+returned state counts as consuming it.** `{ state with held: s }` references
+`s`, which marks it used, so an actor that HOLDS a resource is legal without
+any special case. `accept/t197` pins both legal shapes, consumed-once and
+stored-into-state.
+
+Witnesses: `reject/t195`–`t196`, `accept/t197`, four unit cases. Both rejects
+were silently accepted before. Full suite green, including the actor suites and
+`test/cap_mock/`, which exercise handler binding on every actor program.
+
+**Shared fix with the lambda hole: no.** `bind_lam_param` was already correct;
+the handler fold simply did not call it. The lambda hole
+(`2026-09-10-linear-lambda-parameter-not-must-use.md`) is that a lambda's body
+close runs no `check_linear_all_consumed` at all, which is a different missing
+step and stays open.

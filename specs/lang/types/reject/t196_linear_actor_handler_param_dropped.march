@@ -1,0 +1,20 @@
+-- EXPECT-ERROR: was never used
+mod Main do
+  needs IO.Console
+  -- The must-use half of t195: a handler that ignores its linear parameter
+  -- leaks the resource, and said nothing at all before 2026-09-11.
+  always_linear type S = S(Int)
+  actor A do
+    state { n : Int }
+    init  { n: 0 }
+    on Take(s : S) do
+      print_line("ignored the resource")
+      { state with n: state.n + 1 }
+    end
+  end
+  fn main(c : Cap(IO.Console)) do
+    let p = spawn(A)
+    send(p, Take(S(1)))
+    run_until_idle()
+  end
+end
