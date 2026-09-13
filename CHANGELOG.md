@@ -170,6 +170,14 @@ git log is authoritative for exact commits.
   of a hand list that had named three deleted aliases for a month.
 
 
+### Documentation
+
+- **The linear-types chapter no longer describes four fixed bugs as open.**
+  It told readers that an `affine` parameter keyword is a parse error, that a
+  parameter-bound record's linear field is only warning-checked, that a
+  same-named plain type inherits `always_linear`, and that a `linear` return
+  type doesn't reach a plain `let`. None of that has been true since July.
+
 ## [0.4.0] - 2026-09-10
 
 ### Added

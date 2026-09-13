@@ -47,3 +47,14 @@ let-binding section for L8 by reading it, not by grepping for "L8".
   and which way it gets fixed is the open decision in
   [[2026-09-13-linear-consumed-on-one-branch-only]].
 - Both trees are served. `scripts/check-docs.sh` must stay green.
+
+---
+
+## Done (2026-09-13)
+
+Both trees rewritten to describe current behaviour, citing the corpus
+witnesses that already pin each fix: `reject/t77` (L3), `reject/t78` (L8),
+`accept/t80` (L1), `accept/t81` + `accept/t194` (L4). Practical Rule 6 (avoid
+names that collide with stdlib `always_linear` types) is deleted outright,
+since the collision it warned about no longer exists. Practical Rule 4 is
+untouched, as planned: the branch rule is being changed to match it.

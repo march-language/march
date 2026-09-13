@@ -83,8 +83,7 @@ Linear values must be consumed exactly once — they cannot be copied or ignored
 
 **Note:** the stdlib's own `Handle` type (used for files and similar resources) is
 always linear, even without writing the `linear` keyword; see [`always_linear`
-types](#always_linear-types) below for how that works (and for the name-collision
-hazard that shared linearity brings).
+types](#always_linear-types) below for how that works.
 
 ### Linear Let Bindings
 
@@ -98,11 +97,9 @@ end
 
 The `linear let` annotation tells the compiler this binding has linear semantics. The
 rule to remember: **the qualifier has to appear where you bind the value**, either as
-`linear let` or as a type annotation (`let h : linear Handle = ...`). It's not enough
-for the *function you're calling* to say it returns a `linear Handle`: if you write a
-plain `let h = open_file(p)` and never mark `h` itself, the compiler currently accepts
-it without complaint, even though you can now drop `h` unused. So always mark the
-binding, not just the source.
+`linear let` or as a type annotation (`let h : linear Handle = ...`). It also comes
+from the *function you're calling*: if `open_file` returns a `linear Handle`, a plain
+`let h = open_file(p)` is tracked as linear, and dropping `h` is an error.
 
 ---
 
@@ -110,9 +107,9 @@ binding, not just the source.
 
 An affine type may be used zero or one times. This is useful for values that have a cleanup operation but where "not using" is acceptable (e.g., an optional connection).
 
-**Spelling matters:** `affine` is a *type modifier* only; write it inside the
-type annotation. Unlike `linear`, there is no `affine` parameter keyword (the
-form `fn f(affine cap : T)` is a **parse error**) and no `affine let`:
+**Spelling:** `affine` works as a type modifier inside the annotation
+(`cap : affine NetworkCap`, below) and as a parameter keyword
+(`fn f(affine cap : NetworkCap)`). There is no `affine let`:
 
 ```march
 fn maybe_connect(cap : affine NetworkCap, should_connect : Bool) : () do
@@ -147,11 +144,10 @@ type Resource = {
 
 The compiler tracks each linear field independently. Accessing `r.fd` consumes that field; a second access rejects with `` The linear value `r.fd` is used more than once here. ``
 
-Two caveats worth knowing:
+Two notes:
 
-- **Field tracking only fully engages for locally-`let`-bound records.** If the record
-  arrives as a *function parameter*, a double field access degrades to a warning instead
-  of a hard error. Bind the record with a `let` first if you need real enforcement.
+- **Field tracking works for `let`-bound and parameter-bound records alike**: a double
+  field access is an error either way.
 - **Arithmetic on linear primitive fields works**: e.g. `r.count + 1` for a
   `linear count : Int` field is a valid single use.
 
@@ -177,11 +173,9 @@ This is exactly how the stdlib guarantees you can't forget to close a file: `Han
 declared `always_linear`, so every `Handle` value, everywhere in your program, is
 tracked as linear whether or not you write the word `linear` at all.
 
-> **Name-collision warning:** the `always_linear` registry is keyed by the bare type
-> NAME, globally. If your program declares a plain type with the same name as any
-> `always_linear` type, including the stdlib's `Handle`, your type silently inherits
-> linearity, and its constructors can confuse exhaustiveness checking. Avoid reusing
-> those names for unrelated types.
+> **Same-named types don't inherit linearity.** A plain type of your own called
+> `Handle` is an ordinary type, even though the stdlib's `Handle` is linear: the
+> compiler resolves which `Handle` a name refers to before deciding.
 
 ---
 
@@ -322,9 +316,7 @@ error, the same double-use rejection this chapter has covered throughout.
 
 4. **Pattern matching on a linear value consumes it**: each branch must use it in a compatible way.
 
-5. **Linear fields in records**: accessing the field consumes it. Enforcement is strongest for `let`-bound records; for parameter-bound records, double-access currently only warns.
-
-6. **Avoid type names that collide with stdlib `always_linear` types** (like `Handle`): the collision silently makes your type linear too.
+5. **Linear fields in records**: accessing the field consumes it, whether the record is `let`-bound or a parameter.
 
 ---
 
