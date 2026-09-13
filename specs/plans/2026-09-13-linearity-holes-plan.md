@@ -1,8 +1,10 @@
 # Linearity holes: survey, specs, and order of work
 
-**Status:** specced 2026-09-13. Nothing here is built. Each hole has its own
-file in `specs/todos/` (one item per file); this plan is the map across them,
-the measured matrix they all cite, and the order to build them in.
+**Status:** specced 2026-09-13, **all eight steps built the same day**, one
+commit each, in the order below. Each hole's file has moved to
+`specs/progress/` with a "What shipped" section recording what changed from
+its design. This plan is the map across them, the measured matrix they all
+cite, and the order they were built in.
 
 ## Why this exists
 
