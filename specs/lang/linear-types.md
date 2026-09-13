@@ -136,18 +136,35 @@ type Resource = {
 }
 ```
 
-The compiler tracks each linear field independently. Accessing `r.fd` consumes that field; a second access rejects with `` The linear value `r.fd` is used more than once here. ``
+The compiler tracks each linear field independently, and the record **owns**
+its linear fields. A field whose type is an `always_linear` type is a linear
+field too, with no qualifier needed. The rules:
 
-Two notes:
+1. **Accessing a field moves it out.** `r.fd` consumes that field; a second
+   access rejects with `` The linear value `r.fd` is used more than once here. ``
+2. **Using the whole record moves every field it still holds.** Passing `r` to
+   a function, returning it, or storing it hands its linear fields on too. So
+   consuming `r.fd` and then passing `r` along, or passing `r` along twice, is
+   a double use of `r.fd`.
+3. **`{ r with … }` keeps every field it doesn't replace.** After consuming
+   `r.fd`, write `{ r with fd: new_fd }`; `{ r with metadata: "x" }` would carry
+   the consumed `fd` into the new record, and is rejected with a note saying so.
+4. **Every linear field must be consumed by the end of the record's scope**,
+   by one of the three moves above. Otherwise it leaks: `` The linear value
+   `r.fd` was never used. ``
+5. **Reading an ordinary field moves nothing.** `r.metadata` never consumes
+   `r.fd`.
 
-- **Field tracking works for `let`-bound and parameter-bound records alike.**
-  A double field access on a record that arrived as a function parameter is
-  an error, not a warning (finding L3, fixed). Corpus witnesses:
-  `reject/t63` (let-bound), `reject/t77` (parameter-bound).
-- **Arithmetic on linear primitive fields works** (e.g. `r.count + 1` for a
-  `linear count : Int` field), but only since 2026-07-10: previously the
-  linearity wrapper leaked into `Num` resolution and rejected even a single,
-  correct use (finding L2, fixed). Corpus witness: `accept/t67`.
+This works the same for `let`-bound and parameter-bound records (a double
+field access on a parameter was once only a warning; finding L3, fixed), and
+for an actor's `state`; see [Linear Types and Actors](#linear-types-and-actors).
+Corpus witnesses: `reject/t63`, `reject/t77`, `reject/t216`–`t222`,
+`accept/t223`.
+
+One more note: **arithmetic on linear primitive fields works** (e.g.
+`r.count + 1` for a `linear count : Int` field), but only since 2026-07-10:
+previously the linearity wrapper leaked into `Num` resolution and rejected even
+a single, correct use (finding L2, fixed). Corpus witness: `accept/t67`.
 
 ---
 
@@ -211,6 +228,31 @@ directly"; that was never true, and it contradicted the zero-copy-move
 paragraph above; finding L6, resolved as this doc fix.) On the compiled backend the
 transfer is a zero-copy move; interpreted, it is an ordinary handoff; either
 way the type system prevents you from touching the value after the send.
+
+**An actor's state holds linear values the same way a record does.** A
+handler's `state` owns the state's linear fields (an `always_linear`-typed
+field, or one written `linear`) for the turn, under the record rules above.
+The two shapes to know:
+
+```march
+actor Ep do
+  state { st : Token, n : Int }        -- Token is always_linear
+  init  { st: new_token(), n: 0 }
+  on Step() do
+    { state with st: advance(state.st) }    -- OK: consumed and replaced
+  end
+  on Oops() do
+    let k = spend(state.st)
+    { state with n: k }                     -- error: the update keeps the old `st`
+  end
+end
+```
+
+A handler that returns a brand-new record must consume the old linear fields
+first, or they leak. A linear value arriving as a handler **parameter** is
+tracked too: it must be consumed, or stored into the returned state. Corpus
+witnesses: `reject/t195`–`t196`, `reject/t216`, `reject/t217`, `reject/t222`,
+`accept/t197`, `accept/t223`.
 
 For richer typed interaction patterns, the channel system below layers
 session types on top of the same linearity infrastructure.
@@ -353,7 +395,7 @@ the `consume` mode.)
 
 4. **Pattern matching on a linear value consumes it**: each branch must use it in a compatible way.
 
-5. **Linear fields in records**: accessing the field consumes it, whether the record is `let`-bound or a parameter.
+5. **Linear fields in records are owned by the record**: accessing one moves it out, using the record whole moves them all, `{ r with … }` keeps the ones it doesn't replace, and each must be consumed by the end of the record's scope.
 
 ---
 

@@ -886,6 +886,15 @@ let () = expand_record_ref := (fun env ty ->
   | TCon (name, _) when name_is_variant env name -> None
   | _ -> expand_record env ty)
 
+(** The linearity a record FIELD of type [fty] carries: a [linear]/[affine]
+    qualifier ([TLin]), or an [always_linear] type, which is [Linear] wherever
+    it is stored.  [None] for an ordinary field. *)
+let field_linearity env fty =
+  match repr fty with
+  | TLin (lin, _) when lin <> Ast.Unrestricted -> Some lin
+  | TCon (name, _) when resolves_always_linear name env -> Some Ast.Linear
+  | _ -> None
+
 (** Register per-field linear sentinels for a named record variable [varname].
     When [ty] is or expands to a TRecord with linear fields, adds phantom
     ["varname#fieldname"] entries to env.lin so that EField accesses on
@@ -894,8 +903,8 @@ let bind_linear_field_sentinels varname ty env =
   match expand_record env (repr ty) with
   | Some (TRecord flds) ->
     List.fold_left (fun acc_env (fname, fty) ->
-        match repr fty with
-        | TLin (lin, _) when lin <> Ast.Unrestricted ->
+        match field_linearity env fty with
+        | Some lin ->
           let key = varname ^ "#" ^ fname in
           let le = { le_name = key; le_lin = lin; le_used = ref false; le_first_use = ref None;
                      le_pending = None; le_dup = ref None } in

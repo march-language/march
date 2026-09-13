@@ -6097,13 +6097,18 @@ let test_linear_actor_handler_param_consumed_ok () =
    record update references it. Pinned so the fix cannot over-fire on the
    shape an actor that HOLDS a resource must use. *)
 let test_linear_actor_handler_param_stored_ok () =
+  (* Since 2026-09-13 the state's own linear fields are tracked too, so the
+     handler must consume the value it replaces: building a fresh record that
+     ignores the old `held` would leak it. *)
   let ctx = typecheck {|mod Test do
     always_linear type S = S(Int)
+    fn sink(x : S) : Int do match x do S(v) -> v end end
     actor B do
       state { held : S, n : Int }
       init  { held: S(0), n: 0 }
       on Keep(s : S) do
-        { held: s, n: state.n + 1 }
+        let old = sink(state.held)
+        { held: s, n: state.n + old }
       end
     end
   end|} in
@@ -6361,6 +6366,125 @@ let test_linear_unannotated_params_ok () =
       sink(id(S1(1))) + id(2) + per_branch(true, S1(3)) + g(S1(4)) + List.length(xs)
     end|}) in
   Alcotest.(check bool) "unannotated params used once / polymorphic: no error" false (has_errors ctx)
+
+(* Move-out rules for a record's linear fields (R1-R4): an always_linear field
+   was untracked everywhere, a field use and a whole-record use did not know
+   about each other, and actor state dropped `linear` qualifiers and had no
+   sentinels. Corpus: reject/t216-t222, accept/t223 (and t197 updated). *)
+let actor_mod body = linear_mod ({|
+    fn bump(s : S1) : S1 do match s do S1(e) -> S1(e + 1) end end
+    type R = { st : S1, n : Int }
+    fn eat(r : R) : Int do sink(r.st) end
+|} ^ body)
+
+let test_linear_record_actor_consume_retain () =
+  let ctx = typecheck (actor_mod {|
+    actor Ep do
+      state { st : S1, n : Int }
+      init  { st: S1(0), n: 0 }
+      on Tick() do
+        let k = sink(state.st)
+        { state with n: state.n + k }
+      end
+    end|}) in
+  Alcotest.(check bool) "actor: consume then { state with }" true
+    (linear_error ctx "The linear value `state.st` is used more than once here")
+
+let test_linear_record_actor_qualified_field () =
+  let ctx = typecheck {|mod Test do
+    type T = T(Int)
+    fn tsink(t : T) : Int do match t do T(e) -> e end end
+    actor Ep do
+      state { linear st : T, n : Int }
+      init  { st: T(0), n: 0 }
+      on Tick() do { state with n: tsink(state.st) + tsink(state.st) } end
+    end
+  end|} in
+  Alcotest.(check bool) "actor: `linear` state field honoured" true
+    (linear_error ctx "The linear value `state.st` is used more than once here")
+
+let test_linear_record_field_then_whole () =
+  let ctx = typecheck (actor_mod {|
+    fn f() : Int do
+      let r : R = { st: S1(0), n: 0 }
+      let k = sink(r.st)
+      k + eat(r)
+    end|}) in
+  Alcotest.(check bool) "field consumed, record passed whole" true
+    (linear_error ctx "The linear value `r.st` is used more than once here")
+
+let test_linear_record_always_linear_field_twice () =
+  let ctx = typecheck (actor_mod {|
+    fn f() : Int do
+      let r : R = { st: S1(0), n: 0 }
+      sink(r.st) + sink(r.st)
+    end|}) in
+  Alcotest.(check bool) "always_linear field accessed twice" true
+    (linear_error ctx "The linear value `r.st` is used more than once here")
+
+let test_linear_record_whole_twice () =
+  let ctx = typecheck (actor_mod {|
+    fn f() : Int do
+      let r : R = { st: S1(0), n: 0 }
+      eat(r) + eat(r)
+    end|}) in
+  Alcotest.(check bool) "record passed whole twice" true
+    (linear_error ctx "The linear value `r.st` is used more than once here")
+
+let test_linear_record_param_consume_retain () =
+  let ctx = typecheck (actor_mod {|
+    fn step(r : R) : R do
+      let k = sink(r.st)
+      { r with n: k }
+    end|}) in
+  Alcotest.(check bool) "param record: consume then { r with }" true
+    (linear_error ctx "The linear value `r.st` is used more than once here")
+
+let test_linear_record_field_never_used () =
+  let ctx = typecheck (actor_mod {|
+    fn f() : Int do
+      let r : R = { st: S1(0), n: 5 }
+      r.n
+    end
+    fn g(r : R) : Int do r.n end|}) in
+  let n = List.length (List.filter (fun (d : March_errors.Errors.diagnostic) ->
+      contains_substring d.message "The linear value `r.st` was never used")
+      ctx.March_errors.Errors.diagnostics) in
+  Alcotest.(check int) "let-bound and param record fields dropped" 2 n
+
+let test_linear_record_actor_fresh_state_leaks () =
+  let ctx = typecheck (actor_mod {|
+    actor Ep do
+      state { st : S1, n : Int }
+      init  { st: S1(0), n: 0 }
+      on Reset() do { st: S1(0), n: 0 } end
+    end|}) in
+  Alcotest.(check bool) "actor: fresh state ignores old field" true
+    (linear_error ctx "The linear value `state.st` was never used")
+
+let test_linear_record_moves_ok () =
+  let ctx = typecheck (actor_mod {|
+    actor Ep do
+      state { st : S1, n : Int }
+      init  { st: S1(0), n: 0 }
+      on Bump() do { state with st: bump(state.st) } end
+      on Tally() do { state with n: state.n + 1 } end
+      on Peek() do
+        let x = state.n
+        state
+      end
+      on Reset() do
+        let old = sink(state.st)
+        { st: S1(0), n: old }
+      end
+    end
+    fn rebuild() : Int do
+      let r : R = { st: S1(1), n: 0 }
+      let k = sink(r.st)
+      let r2 = { r with st: S1(k) }
+      sink(r2.st)
+    end|}) in
+  Alcotest.(check bool) "legal record moves: no error" false (has_errors ctx)
 
 (* Same gap via a single correct use — must NOT regress to a false positive. *)
 let test_linear_letq_acquire_single_use_ok () =
@@ -15825,6 +15949,15 @@ let compiler_suites =
           Alcotest.test_case "unannotated: lambda param reused"           `Quick test_linear_unannotated_lambda_param_reused;
           Alcotest.test_case "unannotated: handler param reused"          `Quick test_linear_unannotated_handler_param_reused;
           Alcotest.test_case "unannotated: used once / polymorphic ok"    `Quick test_linear_unannotated_params_ok;
+          Alcotest.test_case "record: actor consume then retain"          `Quick test_linear_record_actor_consume_retain;
+          Alcotest.test_case "record: actor `linear` field honoured"      `Quick test_linear_record_actor_qualified_field;
+          Alcotest.test_case "record: field then whole"                   `Quick test_linear_record_field_then_whole;
+          Alcotest.test_case "record: always_linear field twice"          `Quick test_linear_record_always_linear_field_twice;
+          Alcotest.test_case "record: whole twice"                        `Quick test_linear_record_whole_twice;
+          Alcotest.test_case "record: param consume then retain"          `Quick test_linear_record_param_consume_retain;
+          Alcotest.test_case "record: field never used"                   `Quick test_linear_record_field_never_used;
+          Alcotest.test_case "record: actor fresh state leaks"            `Quick test_linear_record_actor_fresh_state_leaks;
+          Alcotest.test_case "record: legal moves ok"                     `Quick test_linear_record_moves_ok;
           Alcotest.test_case "transitions block: no errors"              `Quick test_transitions_parses;
           Alcotest.test_case "transitions via missing fn: error"         `Quick test_transitions_via_not_found_error;
           Alcotest.test_case "undeclared transition fn: warning emitted" `Quick test_transitions_warn_undeclared;

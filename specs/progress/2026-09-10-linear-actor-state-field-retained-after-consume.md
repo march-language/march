@@ -238,3 +238,49 @@ binds `state` with sentinels), the session goldens, and
   handler-shaped `@[endpoints(actor)]` variant it lists as future work would
   hold states in actor state, and this item is its prerequisite. Note that
   there.
+
+---
+
+## What shipped (2026-09-13)
+
+R1–R5 as designed, R4 included (the recommended option, adopted when the
+build was approved).
+
+- `field_linearity` (`typecheck_unify.ml`) is the one definition of a linear
+  field: a `TLin` qualifier or an `always_linear` type. Sentinels and the
+  `EField` arm both use it.
+- R2 is `record_whole_use` in the `EVar` arm, over the sentinels of the
+  variable's *current* record type (so an inner, differently-typed binder of
+  the same name does not touch an outer record's sentinels).
+  `with_record_base` suppresses it for the `EVar` base of a field access and
+  of a record update.
+- R3 is `record_update_base_use` in `ERecordUpdate`.
+- R4 closes: `check_scope_consumed` no longer skips `#` entries (lambdas,
+  local fns), the block `let` close judges the sentinels its binding added,
+  `check_fn` adds its parameters' sentinels, and the actor handler adds
+  `state#…`.
+- Actor state: `state_ty` honours `fld_lin`, and `state` is bound with
+  sentinels.
+- Diagnostics: the double use keeps its familiar first line, plus a note
+  naming the move: "`r` is used as a whole here, …" or "`{ state with … }`
+  keeps every field it doesn't replace, … Replace it too: `{ state with st:
+  … }`."
+
+**One existing fixture changed, as predicted:** `accept/t197`'s `Keep` built a
+fresh state that ignored the old `held`, which R4 now reports as a leak. It
+consumes the old value first. Its unit twin changed the same way. Nothing else
+in the corpus moved (`types-oracle`).
+
+Verification: `reject/t216`–`t222`, `accept/t223`, nine unit cases. Proved
+able to fail rule by rule: R2 off, R3 off, and state sentinels off each fail
+the cases that exercise them. Stdlib diagnostics byte-identical to
+`8eb0d7ee` (user-file filter patched open). `scripts/run-tests.sh -q`: 3207
+OK. `dune build @test/runtest` (native goldens, session goldens,
+`test/cap_mock`): exit 0.
+
+Docs: "Linear Record Fields" rewritten as the five rules in both trees, and
+an actor-state paragraph added under "Linear Types and Actors".
+
+Limits, unchanged from the design: one level of fields; a record bound by a
+match-arm pattern gets sentinels but no R4 close; branches follow the path
+rule in [[2026-09-13-linear-consumed-on-one-branch-only]].

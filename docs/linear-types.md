@@ -142,14 +142,25 @@ type Resource = {
 }
 ```
 
-The compiler tracks each linear field independently. Accessing `r.fd` consumes that field; a second access rejects with `` The linear value `r.fd` is used more than once here. ``
+The record **owns** its linear fields, and a field whose type is an
+`always_linear` type counts as a linear field too:
 
-Two notes:
+1. **Accessing a field moves it out.** `r.fd` consumes that field; a second
+   access rejects with `` The linear value `r.fd` is used more than once here. ``
+2. **Using the whole record moves every field it still holds**: passing `r`
+   along, returning it, storing it. Consume `r.fd` and then pass `r` along, and
+   `fd` has been used twice.
+3. **`{ r with … }` keeps every field you don't replace.** After consuming
+   `r.fd`, write `{ r with fd: new_fd }`.
+4. **Every linear field must be consumed by the end of the record's scope**, or
+   the compiler reports it as never used.
+5. **Reading an ordinary field moves nothing**: `r.metadata` leaves `r.fd` alone.
 
-- **Field tracking works for `let`-bound and parameter-bound records alike**: a double
-  field access is an error either way.
-- **Arithmetic on linear primitive fields works**: e.g. `r.count + 1` for a
-  `linear count : Int` field is a valid single use.
+These rules apply to `let`-bound records, parameters, and an actor's `state`
+alike.
+
+One more note: **arithmetic on linear primitive fields works**: e.g.
+`r.count + 1` for a `linear count : Int` field is a valid single use.
 
 ---
 
@@ -212,6 +223,13 @@ take(r)                   -- error: The linear value `r` is used more than once 
 
 On the compiled backend the transfer is a zero-copy move; interpreted, it is an ordinary
 handoff; either way the type system prevents you from touching the value after the send.
+
+An actor's `state` holds linear values the way a record does: in a handler, `state`
+owns the state's linear fields under the record rules above. So
+`{ state with st: advance(state.st) }` is fine, while consuming `state.st` and then
+returning `{ state with n: k }` is an error, because the update would keep the old
+`st`. A handler that returns a brand-new record must consume the old linear fields
+first.
 
 ---
 
@@ -316,7 +334,7 @@ error, the same double-use rejection this chapter has covered throughout.
 
 4. **Pattern matching on a linear value consumes it**: each branch must use it in a compatible way.
 
-5. **Linear fields in records**: accessing the field consumes it, whether the record is `let`-bound or a parameter.
+5. **Linear fields in records are owned by the record**: accessing one moves it out, using the record whole moves them all, `{ r with … }` keeps the ones it doesn't replace, and each must be consumed by the end of the record's scope.
 
 ---
 

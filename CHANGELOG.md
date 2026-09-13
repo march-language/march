@@ -50,6 +50,17 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A record's linear fields can no longer be consumed and kept at the same
+  time, and actor state is covered.** In an actor handler, `sink(state.st)`
+  followed by `{ state with n: k }` left the consumed `st` in the state for the
+  next turn, silently. A record now owns its linear fields: accessing one moves
+  it out, using the record whole moves them all, `{ r with … }` keeps what it
+  doesn't replace, and each must be consumed before the record goes out of
+  scope. A field whose type is `always_linear` counts, and a `linear` qualifier
+  on an actor state field is no longer ignored. **This can reject code that
+  compiled before**: a handler that returns a brand-new state now has to
+  consume the old state's linear fields first.
+
 - **An unannotated parameter is checked for linearity once its body fixes its
   type.** `fn g(st) do sink(st) + sink(st) end`, where `sink` takes an
   `always_linear` value, used `st` twice without complaint (annotating `st`

@@ -116,7 +116,7 @@ let lin_display_name n =
     label on the use that consumed it first.  A double-use is a relationship
     between two sites: without the label the reader knows only that the value
     was already gone, not what took it. *)
-let report_double_use env ~lin le ~span =
+let report_double_use ?(notes = []) env ~lin le ~span =
   let name = lin_display_name le.le_name in
   let labels =
     match !(le.le_first_use) with
@@ -138,9 +138,9 @@ let report_double_use env ~lin le ~span =
          be copied or ignored." name
   in
   Err.report env.errors
-    { Err.severity = Err.Error; span; message; labels; notes = []; code = None; fix = None }
+    { Err.severity = Err.Error; span; message; labels; notes; code = None; fix = None }
 
-let record_use name span env =
+let record_use_noted ?(notes = []) name span env =
   (* Mark any import entry that matches this name as used.
      [import_tracker] can hold one entry per use/import/alias declaration
      across the WHOLE combined program (stdlib + every file pulled in via
@@ -192,11 +192,75 @@ let record_use name span env =
   | Some le ->
     (match le.le_lin with
      | (Ast.Linear | Ast.Affine) as lin when !(le.le_used) ->
-       report_double_use env ~lin le ~span
+       report_double_use ~notes env ~lin le ~span
      | (Ast.Linear | Ast.Affine) ->
        le.le_used := true;
        if !(le.le_first_use) = None then le.le_first_use := Some span
      | Ast.Unrestricted -> ())
+
+let record_use name span env = record_use_noted name span env
+
+(* ── Move-out semantics for a record's linear fields ─────────────────
+   A record variable [r] whose type has linear fields owns them through the
+   sentinels "r#f" ([bind_linear_field_sentinels]).  [r.f] uses one sentinel
+   (R1); any other use of [r] uses them all (R2), since it hands the whole
+   record, fields included, to someone else; [{ r with ... }] uses those it
+   does not replace (R3); and every sentinel must be used by the scope's close
+   (R4).  See specs/progress/2026-09-10-linear-actor-state-field-retained-after-consume.md. *)
+
+(** Set while inferring the [EVar] base of a field access or of a record
+    update, whose own arms account for the fields; the [EVar] arm then records
+    a plain use of the name only. *)
+let suppress_whole_record_use = ref false
+
+let with_record_base (base : Ast.expr) f =
+  match base with
+  | Ast.EVar _ ->
+    let saved = !suppress_whole_record_use in
+    suppress_whole_record_use := true;
+    Fun.protect ~finally:(fun () -> suppress_whole_record_use := saved) f
+  | _ -> f ()
+
+(** The linear fields of variable [name]'s current record type that have a
+    sentinel in scope. *)
+let linear_field_sentinels name env =
+  match lookup_var name env with
+  | Some (Mono t | Poly (_, _, t)) ->
+    (match expand_record env (repr t) with
+     | Some (TRecord flds) ->
+       List.filter_map (fun (fname, fty) ->
+           match field_linearity env fty with
+           | Some _ ->
+             let key = name ^ "#" ^ fname in
+             if List.exists (fun le -> le.le_name = key) env.lin
+             then Some (fname, key) else None
+           | None -> None) flds
+     | _ -> [])
+  | None -> []
+
+let whole_use_note name =
+  Printf.sprintf
+    "`%s` is used as a whole here, which hands on every field it still holds, \
+     including this one." name
+
+(** R2: a use of the whole record uses each of its linear fields. *)
+let record_whole_use name span env =
+  List.iter (fun (_, key) ->
+      record_use_noted ~notes:[ whole_use_note name ] key span env)
+    (linear_field_sentinels name env)
+
+(** R3: [{ name with <updated> }] keeps, and so uses, every linear field it
+    does not replace. *)
+let record_update_base_use name ~updated span env =
+  List.iter (fun (fname, key) ->
+      if not (List.mem fname updated) then
+        record_use_noted
+          ~notes:[ Printf.sprintf
+                     "`{ %s with … }` keeps every field it doesn't replace, so the \
+                      old `%s.%s` would survive into the new record. Replace it \
+                      too: `{ %s with %s: … }`." name name fname name fname ]
+          key span env)
+    (linear_field_sentinels name env)
 
 (** [bind_vars_with_linearity bindings env] is like [bind_vars] except it
     checks the repr'd type of each binding after unification: if the type
@@ -363,17 +427,17 @@ let judge_pending env ~scope_span entries =
              else report_linear_never_used env ~scope_span le))
     entries
 
-(** Must-use at the close of a parameter scope that has enclosing linear
-    binders (a lambda or a local [fn ... end]): every [Linear] entry the
-    parameters introduced must have been used.  Field sentinels ("r#f") and a
-    [_] parameter are left alone here: neither can be named in the body. *)
+(** Must-use at the close of a scope that has enclosing linear binders (a
+    lambda, a local [fn ... end], a block [let]): every [Linear] entry it
+    introduced must have been used, including a record binder's field
+    sentinels ("r#f", R4 of the move-out rules).  A [_] parameter is left to
+    [judge_pending] / the wildcard check. *)
 let check_scope_consumed ~before ~after ~scope_span =
   let added = lin_entries_added ~before ~after in
   List.iter (fun le ->
       if le.le_lin = Ast.Linear
       && not !(le.le_used)
-      && le.le_name <> "_"
-      && not (String.contains le.le_name '#') then
+      && le.le_name <> "_" then
         report_linear_never_used after ~scope_span le
     ) added;
   judge_pending after ~scope_span added
@@ -874,6 +938,8 @@ let rec infer_expr env (e : Ast.expr) : ty =
     (* ── Variables ────────────────────────────────────────────────── *)
     | Ast.EVar name ->
       record_use name.txt name.span env;
+      if not !suppress_whole_record_use then
+        record_whole_use name.txt name.span env;
       (* R2: the root capability is granted at the boundary, not taken.  The
          name stays BOUND (so this reports a capability error rather than
          "I cannot find `root_cap`", and so the inferred type below stays
@@ -2007,7 +2073,12 @@ let rec infer_expr env (e : Ast.expr) : ty =
 
     (* ── Record update: { base with f = e, … } ───────────────────── *)
     | Ast.ERecordUpdate (base, updates, sp) ->
-      let base_ty   = infer_expr env base in
+      let base_ty   = with_record_base base (fun () -> infer_expr env base) in
+      (match base with
+       | Ast.EVar v ->
+         record_update_base_use v.txt
+           ~updated:(List.map (fun ((n : Ast.name), _) -> n.txt) updates) sp env
+       | _ -> ());
       let update_tys =
         List.map (fun (n, e) -> (n.Ast.txt, infer_expr env e)) updates
       in
@@ -2085,7 +2156,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
       (match mod_access with
        | Some ty -> ty
        | None ->
-      let e_ty = infer_expr env e in
+      let e_ty = with_record_base e (fun () -> infer_expr env e) in
       (match expand_record env (repr e_ty) with
        | Some (TRecord flds) ->
          (match List.assoc_opt name.txt flds with
@@ -2094,8 +2165,8 @@ let rec infer_expr env (e : Ast.expr) : ty =
                field.  When the record is held in a named variable, a second
                access on the same variable is caught by [record_use].
                For non-variable expressions we emit a diagnostic here. *)
-            (match repr t with
-             | TLin (lin, _) when lin <> Ast.Unrestricted ->
+            (match field_linearity env t with
+             | Some lin ->
                (match e with
                 | Ast.EVar vname ->
                   (* Record is held in a named variable: check per-field sentinel.
@@ -3117,6 +3188,12 @@ and infer_block env exprs =
      | _lin ->
        let linear_names = List.map fst bindings' in
        check_linear_all_consumed env' ~scope_span:sp linear_names);
+    (* R4: a record bound here must have every linear field used by now. *)
+    List.iter (fun le ->
+        if le.le_lin = Ast.Linear && not !(le.le_used)
+        && String.contains le.le_name '#' then
+          report_linear_never_used env' ~scope_span:sp le)
+      (lin_entries_added ~before:env ~after:env');
     (* Session-specific must-close accounting (F7 hole a): a channel binding
        whose session state is `End` MUST be closed — dropping it leaks the
        endpoint.  This is NARROWER than full linear consumption on purpose: a
@@ -3619,7 +3696,12 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
           | Ast.FPNamed p -> Some p.param_name.txt
           | Ast.FPDefault (p, _) -> Some p.param_name.txt
           | Ast.FPPat _ -> None) clause.fc_params in
-      check_linear_all_consumed body_env ~scope_span:fn_span param_names;
+      let param_sentinels =
+        List.filter_map (fun le ->
+            match String.index_opt le.le_name '#' with
+            | Some i when List.mem (String.sub le.le_name 0 i) param_names -> Some le.le_name
+            | _ -> None) body_env.lin in
+      check_linear_all_consumed body_env ~scope_span:fn_span (param_names @ param_sentinels);
       let pat_var_names = List.filter_map (function
           | Ast.FPPat (Ast.PatVar n) -> Some n.txt
           | _ -> None) clause.fc_params in
@@ -4464,7 +4546,14 @@ let rec check_decl env (d : Ast.decl) : env =
     let state_ty =
       let tvars = ref [] in
       let flds = List.map (fun (f : Ast.field) ->
-          (f.fld_name.txt, surface_ty env ~tvars f.fld_ty)) actor.actor_state in
+          (* Honour a `linear`/`affine` field qualifier, as a record type
+             declaration does; it used to be dropped here, so a qualified state
+             field was an ordinary one. *)
+          let fty = match f.fld_lin with
+            | Ast.Unrestricted -> f.fld_ty
+            | lin -> Ast.TyLinear (lin, f.fld_ty)
+          in
+          (f.fld_name.txt, surface_ty env ~tvars fty)) actor.actor_state in
       TRecord (List.sort (fun (a,_)(b,_) -> String.compare a b) flds)
     in
     (* Check for duplicate handler names — two `on Msg(...)` arms for the
@@ -4513,6 +4602,9 @@ let rec check_decl env (d : Ast.decl) : env =
     (* Check handlers with state and message params in scope *)
     List.iter (fun (h : Ast.actor_handler) ->
         let handler_env = bind_var "state" (Mono state_ty) env_with_ctors in
+        (* The state's linear fields are owned by [state] for the turn: see the
+           move-out rules at [record_whole_use]. *)
+        let handler_env = bind_linear_field_sentinels "state" state_ty handler_env in
         (* Shadow the global `self` builtin (registered as plain Int — see
            its definition above) with this actor's own Pid[state_ty], the
            same type `spawn(name)` produces for this actor elsewhere.  Only
@@ -4541,8 +4633,12 @@ let rec check_decl env (d : Ast.decl) : env =
            references `s`, which marks it used. *)
         let handler_param_names =
           List.map (fun (p : Ast.param) -> p.Ast.param_name.Ast.txt) h.ah_params in
+        let state_sentinels =
+          List.filter_map (fun le ->
+              if String.length le.le_name > 6 && String.sub le.le_name 0 6 = "state#"
+              then Some le.le_name else None) handler_env.lin in
         check_linear_all_consumed handler_env ~scope_span:h.ah_msg.Ast.span
-          handler_param_names;
+          (handler_param_names @ state_sentinels);
         judge_pending handler_env ~scope_span:h.ah_msg.Ast.span
           (List.filter (fun le -> List.mem le.le_name handler_param_names)
              handler_env.lin);

@@ -1,0 +1,42 @@
+mod Main do
+  needs IO.Console
+  -- The legal shapes of the record move-out rules (2026-09-13). A field
+  -- consumed and replaced in the same update; a field never mentioned, which
+  -- moves into the new state; a handler that reads only an ordinary field and
+  -- returns the state unchanged (reading `state.n` never consumes `state.st`);
+  -- a let-bound record consumed and rebuilt; the old value consumed before a
+  -- fresh record replaces it.
+  always_linear type S1 = S1(Int)
+  fn sink(s : S1) : Int do match s do S1(e) -> e end end
+  fn bump(s : S1) : S1 do match s do S1(e) -> S1(e + 1) end end
+  type R = { st : S1, n : Int }
+  actor Ep do
+    state { st : S1, n : Int }
+    init  { st: S1(0), n: 0 }
+    on Bump() do { state with st: bump(state.st) } end
+    on Tally() do { state with n: state.n + 1 } end
+    on Peek() do
+      print_line(int_to_string(state.n))
+      state
+    end
+    on Reset() do
+      let old = sink(state.st)
+      { st: S1(0), n: old }
+    end
+  end
+  fn rebuild() : Int do
+    let r : R = { st: S1(1), n: 0 }
+    let k = sink(r.st)
+    let r2 = { r with st: S1(k) }
+    sink(r2.st)
+  end
+  fn main(c : Cap(IO.Console)) do
+    let p = spawn(Ep)
+    send(p, Bump())
+    send(p, Tally())
+    send(p, Peek())
+    send(p, Reset())
+    run_until_idle()
+    println(int_to_string(rebuild()))
+  end
+end
