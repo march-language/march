@@ -1,0 +1,26 @@
+mod Main do
+  needs IO.Console
+  -- Containers holding linear values, each used exactly once: a tuple
+  -- destructured once, an Option matched once, a tuple parameter consumed. A
+  -- record is NOT promoted this way (its fields are tracked individually), so
+  -- reading an ordinary field and then a linear one stays legal.
+  always_linear type S1 = S1(Int)
+  type R = { st : S1, n : Int }
+  fn sink(s : S1) : Int do match s do S1(e) -> e end end
+  fn both(p : (S1, S1)) : Int do
+    let (a, b) = p
+    sink(a) + sink(b)
+  end
+  fn main(c : Cap(IO.Console)) do
+    let p = (S1(1), 2)
+    let (a, n) = p
+    let o = Some(S1(3))
+    let m = match o do
+      Some(v) -> sink(v)
+      None -> 0
+    end
+    let r : R = { st: S1(4), n: 5 }
+    let k = r.n + sink(r.st)
+    println(int_to_string(sink(a) + n + m + k + both((S1(6), S1(7)))))
+  end
+end

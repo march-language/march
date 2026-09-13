@@ -1,0 +1,11 @@
+-- EXPECT-ERROR: This `_` discards a linear value of type `S1`
+mod Main do
+  needs IO.Console
+  -- A `_` lambda parameter can never be referenced, so a callback written
+  -- `fn _ -> …` against `S1 -> Int` abandons the value it is handed.
+  always_linear type S1 = S1(Int)
+  fn run(k : S1 -> Int) : Int do k(S1(1)) end
+  fn main(c : Cap(IO.Console)) do
+    println(int_to_string(run(fn _ -> 0)))
+  end
+end

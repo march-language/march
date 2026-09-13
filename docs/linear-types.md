@@ -83,8 +83,7 @@ Linear values must be consumed exactly once — they cannot be copied or ignored
 
 **Note:** the stdlib's own `Handle` type (used for files and similar resources) is
 always linear, even without writing the `linear` keyword; see [`always_linear`
-types](#always_linear-types) below for how that works (and for the name-collision
-hazard that shared linearity brings).
+types](#always_linear-types) below for how that works.
 
 ### Linear Let Bindings
 
@@ -98,11 +97,9 @@ end
 
 The `linear let` annotation tells the compiler this binding has linear semantics. The
 rule to remember: **the qualifier has to appear where you bind the value**, either as
-`linear let` or as a type annotation (`let h : linear Handle = ...`). It's not enough
-for the *function you're calling* to say it returns a `linear Handle`: if you write a
-plain `let h = open_file(p)` and never mark `h` itself, the compiler currently accepts
-it without complaint, even though you can now drop `h` unused. So always mark the
-binding, not just the source.
+`linear let` or as a type annotation (`let h : linear Handle = ...`). It also comes
+from the *function you're calling*: if `open_file` returns a `linear Handle`, a plain
+`let h = open_file(p)` is tracked as linear, and dropping `h` is an error.
 
 ---
 
@@ -110,9 +107,9 @@ binding, not just the source.
 
 An affine type may be used zero or one times. This is useful for values that have a cleanup operation but where "not using" is acceptable (e.g., an optional connection).
 
-**Spelling matters:** `affine` is a *type modifier* only; write it inside the
-type annotation. Unlike `linear`, there is no `affine` parameter keyword (the
-form `fn f(affine cap : T)` is a **parse error**) and no `affine let`:
+**Spelling:** `affine` works as a type modifier inside the annotation
+(`cap : affine NetworkCap`, below) and as a parameter keyword
+(`fn f(affine cap : NetworkCap)`). There is no `affine let`:
 
 ```march
 fn maybe_connect(cap : affine NetworkCap, should_connect : Bool) : () do
@@ -145,15 +142,25 @@ type Resource = {
 }
 ```
 
-The compiler tracks each linear field independently. Accessing `r.fd` consumes that field; a second access rejects with `` The linear value `r.fd` is used more than once here. ``
+The record **owns** its linear fields, and a field whose type is an
+`always_linear` type counts as a linear field too:
 
-Two caveats worth knowing:
+1. **Accessing a field moves it out.** `r.fd` consumes that field; a second
+   access rejects with `` The linear value `r.fd` is used more than once here. ``
+2. **Using the whole record moves every field it still holds**: passing `r`
+   along, returning it, storing it. Consume `r.fd` and then pass `r` along, and
+   `fd` has been used twice.
+3. **`{ r with … }` keeps every field you don't replace.** After consuming
+   `r.fd`, write `{ r with fd: new_fd }`.
+4. **Every linear field must be consumed by the end of the record's scope**, or
+   the compiler reports it as never used.
+5. **Reading an ordinary field moves nothing**: `r.metadata` leaves `r.fd` alone.
 
-- **Field tracking only fully engages for locally-`let`-bound records.** If the record
-  arrives as a *function parameter*, a double field access degrades to a warning instead
-  of a hard error. Bind the record with a `let` first if you need real enforcement.
-- **Arithmetic on linear primitive fields works**: e.g. `r.count + 1` for a
-  `linear count : Int` field is a valid single use.
+These rules apply to `let`-bound records, parameters, and an actor's `state`
+alike.
+
+One more note: **arithmetic on linear primitive fields works**: e.g.
+`r.count + 1` for a `linear count : Int` field is a valid single use.
 
 ---
 
@@ -177,11 +184,9 @@ This is exactly how the stdlib guarantees you can't forget to close a file: `Han
 declared `always_linear`, so every `Handle` value, everywhere in your program, is
 tracked as linear whether or not you write the word `linear` at all.
 
-> **Name-collision warning:** the `always_linear` registry is keyed by the bare type
-> NAME, globally. If your program declares a plain type with the same name as any
-> `always_linear` type, including the stdlib's `Handle`, your type silently inherits
-> linearity, and its constructors can confuse exhaustiveness checking. Avoid reusing
-> those names for unrelated types.
+> **Same-named types don't inherit linearity.** A plain type of your own called
+> `Handle` is an ordinary type, even though the stdlib's `Handle` is linear: the
+> compiler resolves which `Handle` a name refers to before deciding.
 
 ---
 
@@ -218,6 +223,13 @@ take(r)                   -- error: The linear value `r` is used more than once 
 
 On the compiled backend the transfer is a zero-copy move; interpreted, it is an ordinary
 handoff; either way the type system prevents you from touching the value after the send.
+
+An actor's `state` holds linear values the way a record does: in a handler, `state`
+owns the state's linear fields under the record rules above. So
+`{ state with st: advance(state.st) }` is fine, while consuming `state.st` and then
+returning `{ state with n: k }` is an error, because the update would keep the old
+`st`. A handler that returns a brand-new record must consume the old linear fields
+first.
 
 ---
 
@@ -312,6 +324,33 @@ error, the same double-use rejection this chapter has covered throughout.
 
 ---
 
+## Linear Values in Closures, Containers, and Generic Code
+
+A linear value has to stay traceable wherever it goes:
+
+- **Closures can't capture one.** A closure may run more than once, so an outer
+  linear value can't be used inside one; pass it in as a parameter. And a
+  lambda's own linear parameters must be consumed, just like a function's.
+- **`_` can't discard one.** `let _ = token` or `fn _ -> …` receiving a linear value
+  would drop it. Discarding a non-linear part (`Token(_)`) is fine.
+- **A container holding one is linear itself.** `(token, 1)`, `Some(token)` and
+  `[token]` must be used exactly once, like what they hold. Records are the exception:
+  their fields are tracked one by one.
+- **Generic functions must opt in.** A generic function may drop or duplicate a value
+  of its type parameter, so it can only receive a linear value if it marks that
+  parameter `linear`:
+
+  ```march
+  fn dup(x) do (x, x) end              -- dup(token): rejected, dup may duplicate
+  fn id(linear x : a) : a do x end     -- id(token): fine, x is checked linear
+  ```
+
+  Constructors, operators, and functions that only *return* their type variable need
+  nothing. Most stdlib generics haven't opted in, so `List.length([token])` is
+  rejected: it would drop the token.
+
+---
+
 ## Practical Rules
 
 1. **Use `linear` for resources with mandatory cleanup**: file handles, database connections, exclusive locks, capabilities you must return.
@@ -320,11 +359,11 @@ error, the same double-use rejection this chapter has covered throughout.
 
 3. **Ordinary values need no qualifier**: the default is unrestricted (can be copied, dropped, used many times).
 
-4. **Pattern matching on a linear value consumes it**: each branch must use it in a compatible way.
+4. **Branches must agree.** A linear value that one branch of an `if`, `match` or `match do` consumes must be consumed by every branch that returns; a branch that ends in `panic(…)` never returns and doesn't count. The early `Err` return of `let?` is a branch too, so consume linear values before a `let?` that could skip them. Affine values and session-channel endpoints may still be dropped on a branch.
 
-5. **Linear fields in records**: accessing the field consumes it. Enforcement is strongest for `let`-bound records; for parameter-bound records, double-access currently only warns.
+5. **Linear fields in records are owned by the record**: accessing one moves it out, using the record whole moves them all, `{ r with … }` keeps the ones it doesn't replace, and each must be consumed by the end of the record's scope.
 
-6. **Avoid type names that collide with stdlib `always_linear` types** (like `Handle`): the collision silently makes your type linear too.
+6. **Closures, wildcards and generic code don't get a pass**: a closure can't capture a linear value, `_` can't discard one, a tuple/list/ADT holding one is linear too, and a generic function receives one only through a parameter marked `linear`.
 
 ---
 

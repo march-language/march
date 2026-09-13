@@ -131,6 +131,58 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A generic function has to opt in to receiving a linear value, and a
+  container holding one is linear too.** `fn dup(x) do (x, x) end` turned one
+  `always_linear` value into two, `fn drop_it(x) do 0 end` leaked one, and a
+  tuple holding one could be destructured twice. A generic function now receives
+  a linear value only through a parameter marked `linear` (`fn id(linear x : a)
+  : a`), which its body must then use exactly once; constructors, operators and
+  functions that only return their type variable need nothing. A tuple, list or
+  ADT value holding a linear value is tracked like the value itself. **This can
+  reject code that compiled before**, including stdlib calls such as
+  `List.length` on a list of linear values.
+
+- **A linear value must be consumed on every branch that returns.** `if b do
+  sink(st) else 0 end` dropped `st` whenever `b` was false, and was accepted:
+  branches merged as "consumed on some branch". A branch that ends in `panic(…)`
+  is exempt, since it never returns, and so are affine values and session
+  channels. The early `Err` return of `let?` counts as a branch. **This can
+  reject code that compiled before.**
+
+- **A record's linear fields can no longer be consumed and kept at the same
+  time, and actor state is covered.** In an actor handler, `sink(state.st)`
+  followed by `{ state with n: k }` left the consumed `st` in the state for the
+  next turn, silently. A record now owns its linear fields: accessing one moves
+  it out, using the record whole moves them all, `{ r with … }` keeps what it
+  doesn't replace, and each must be consumed before the record goes out of
+  scope. A field whose type is `always_linear` counts, and a `linear` qualifier
+  on an actor state field is no longer ignored. **This can reject code that
+  compiled before**: a handler that returns a brand-new state now has to
+  consume the old state's linear fields first.
+
+- **An unannotated parameter is checked for linearity once its body fixes its
+  type.** `fn g(st) do sink(st) + sink(st) end`, where `sink` takes an
+  `always_linear` value, used `st` twice without complaint (annotating `st`
+  made it an error). The same held for inferred lambdas and actor handler
+  parameters.
+
+- **A closure passed straight to a function, or a local `fn`, can no longer
+  capture a linear value.** The "cannot be captured by a closure" rule only ran
+  for a lambda bound with `let`; `run2(fn () -> sink(s))` captured `s`, and a
+  `run2` that calls its callback twice consumed it twice.
+
+- **A `_` wildcard can no longer silently drop a linear value.** `let _ =
+  S1(1)`, `let (a, _) = (S1(1), S1(2))`, a `_ ->` arm on a linear scrutinee,
+  and a `fn _ -> …` callback receiving one were all accepted. Each now reports
+  "This `_` discards a linear value". Discarding a non-linear part (`S1(_)`,
+  `let _ = sink(s)`) and a `_` arm that ends in `panic(…)` stay legal.
+
+- **A lambda or local `fn` can no longer drop a linear parameter.** A
+  callback such as `run(fn st -> 0)` receiving an `always_linear` value, or a
+  local `fn g(st : S1)` that ignores `st`, was accepted silently; top-level
+  functions and actor handlers already rejected the same code. It now reports
+  "The linear value `st` was never used."
+
 - **A refinement on a lambda's, a block-level `fn`'s, or an actor handler's
   parameter is no longer assumed inside the body.** No caller was obliged by
   those positions (still true; they are the open coverage holes), but the body
@@ -274,6 +326,14 @@ git log is authoritative for exact commits.
 - The nightly quarantine job derives its alias list from the dune files instead
   of a hand list that had named three deleted aliases for a month.
 
+
+### Documentation
+
+- **The linear-types chapter no longer describes four fixed bugs as open.**
+  It told readers that an `affine` parameter keyword is a parse error, that a
+  parameter-bound record's linear field is only warning-checked, that a
+  same-named plain type inherits `always_linear`, and that a `linear` return
+  type doesn't reach a plain `let`. None of that has been true since July.
 
 ## [0.4.0] - 2026-09-10
 

@@ -1,0 +1,20 @@
+-- EXPECT-ERROR: The linear value `state.st` is used more than once here
+mod Main do
+  needs IO.Console
+  -- A `linear` qualifier on an actor state field was dropped when the state
+  -- type was built, so the field was ordinary: two uses went through.
+  type T = T(Int)
+  fn tsink(t : T) : Int do match t do T(e) -> e end end
+  actor Ep do
+    state { linear st : T, n : Int }
+    init  { st: T(0), n: 0 }
+    on Tick() do
+      { state with n: tsink(state.st) + tsink(state.st) }
+    end
+  end
+  fn main(c : Cap(IO.Console)) do
+    let p = spawn(Ep)
+    send(p, Tick())
+    run_until_idle()
+  end
+end

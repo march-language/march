@@ -34,6 +34,19 @@ type lin_entry = {
       and reporting only the second one leaves the reader to find the first by
       hand — so the diagnostic points at both. Kept in step with [le_used]
       everywhere that flag is saved and restored (see [iter_arms_linear]). *)
+  le_pending : ty option;
+  (** [Some t] for a parameter bound while its type [t] was still an unbound
+      variable, so its linearity could not be decided yet.  Its uses are
+      recorded but not judged ([le_lin] stays [Unrestricted]); the scope's close
+      resolves [t] and judges them.  See [bind_pending]. *)
+  le_dup : Ast.span option ref;
+  (** For a pending entry: the first use made while [le_used] was already set,
+      i.e. the would-be "used more than once".  Not saved or restored across
+      paths: a duplicate within any one path is real. *)
+  le_mixed : Ast.span option ref;
+  (** For a pending entry: the branch construct at which it was consumed on
+      some paths that fall through but not on others.  Judged, like
+      [le_dup], once the scope's close knows whether it is linear. *)
 }
 
 (** Constructor info — populated from [DType] declarations.
@@ -355,6 +368,18 @@ type env = {
       is gated inside [check_no_panic_module], which only runs for
       `cap no_panic` modules, so a PLAIN module's non-exhaustive match stays a
       Warning and is never promoted to an error. *)
+  linear_ok_ids : (int, unit) Hashtbl.t;
+  (** Type-variable ids a generic function has opted in to accepting a linear
+      type for, by marking a parameter of that type [linear] or [affine]
+      ([fn id(linear x : a) : a]).  Ids survive generalization and are what a
+      scheme's quantifier list holds, so this is consulted per instantiation.
+      Every other type variable is unrestricted: instantiating it with a linear
+      type in a position the function consumes is an error. *)
+  linear_generic_uses : (Ast.span, string * int list * ty list * ty) Hashtbl.t;
+  (** Every named polymorphic use: the name, the scheme's quantified ids, their
+      fresh instantiations, and the scheme body.  Swept once the module is
+      solved ([check_linear_instantiations]), when the instantiations are
+      known. *)
   cap_producer_ivars : (int, Ast.span) Hashtbl.t;
   (** Inner cap-argument [TVar] id → the [cap_narrow] application span that
       produced it.  A [cap_narrow(cap)] result is [Cap(a)]; we tag [a]'s id here.
@@ -616,6 +641,8 @@ let make_env errors type_map = {
   no_panic_mod = false;
   no_panic_modules = [];
   nonexhaustive_match_spans = ref [];
+  linear_ok_ids = Hashtbl.create 16;
+  linear_generic_uses = Hashtbl.create 256;
   cap_producer_ivars = Hashtbl.create 16;
   cap_narrow_factory_fns = Hashtbl.create 16;
   cap_dicts = [];
@@ -1469,13 +1496,22 @@ let bind_vars bindings env =
 
 (** Extend env with a new linear/affine variable. *)
 let bind_linear name lin ty env =
-  let le = { le_name = name; le_lin = lin; le_used = ref false; le_first_use = ref None } in
+  let le = { le_name = name; le_lin = lin; le_used = ref false; le_first_use = ref None;
+             le_pending = None; le_dup = ref None; le_mixed = ref None } in
   { env with
     vars = StrMap.add name (Mono ty) env.vars;
     fn_arities = StrMap.remove name env.fn_arities;
     plain_let_names = StringSet.remove name env.plain_let_names;
     lin  = le :: env.lin;
     offer_labels = List.filter (fun (n, _) -> n <> name) env.offer_labels }
+
+(** Bind a parameter whose type [ty] is still an unbound variable: an ordinary
+    binding plus a pending linear entry, judged when the scope closes. *)
+let bind_pending name ty env =
+  let le = { le_name = name; le_lin = Ast.Unrestricted; le_used = ref false;
+             le_first_use = ref None; le_pending = Some ty; le_dup = ref None;
+             le_mixed = ref None } in
+  { (bind_var name (Mono ty) env) with lin = le :: env.lin }
 
 (* =================================================================
    §8  Generalization and instantiation
@@ -1549,7 +1585,7 @@ let generalize level ty =
     with a fresh unification variable at [level].  Any class constraints
     carried by [sch] are instantiated and appended to [env.pending_constraints]
     so they can be discharged at the enclosing declaration boundary. *)
-let instantiate ?use_span level env = function
+let instantiate ?use_span ?use_name level env = function
   | Mono ty -> ty
   | Poly (ids, cs, ty) ->
     let subst = List.map (fun id -> (id, fresh_var level)) ids in
@@ -1605,4 +1641,8 @@ let instantiate ?use_span level env = function
     (match use_span with
      | Some sp -> Hashtbl.replace env.inst_witnesses sp (ids, List.map snd subst)
      | None -> ());
+    (match use_span, use_name with
+     | Some sp, Some name ->
+       Hashtbl.replace env.linear_generic_uses sp (name, ids, List.map snd subst, ty)
+     | _ -> ());
     inst ty

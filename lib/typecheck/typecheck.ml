@@ -112,7 +112,35 @@ let lin_display_name n =
       (String.sub n 0 i) (String.sub n (i + 1) (String.length n - i - 1))
   | None -> n
 
-let record_use name span env =
+(** "used more than once", for a linear or affine entry, at [span], with a
+    label on the use that consumed it first.  A double-use is a relationship
+    between two sites: without the label the reader knows only that the value
+    was already gone, not what took it. *)
+let report_double_use ?(notes = []) env ~lin le ~span =
+  let name = lin_display_name le.le_name in
+  let labels =
+    match !(le.le_first_use) with
+    | None -> []
+    | Some first ->
+      [{ Err.lbl_span = first;
+         Err.lbl_message = Printf.sprintf "`%s` was already consumed here" name }]
+  in
+  let message =
+    match lin with
+    | Ast.Affine ->
+      Printf.sprintf
+        "The affine value `%s` is used more than once here.\n\
+         Affine values may be used at most once." name
+    | _ ->
+      Printf.sprintf
+        "The linear value `%s` is used more than once here.\n\
+         Linear values must be consumed exactly once — they cannot \
+         be copied or ignored." name
+  in
+  Err.report env.errors
+    { Err.severity = Err.Error; span; message; labels; notes; code = None; fix = None }
+
+let record_use_noted ?(notes = []) name span env =
   (* Mark any import entry that matches this name as used.
      [import_tracker] can hold one entry per use/import/alias declaration
      across the WHOLE combined program (stdlib + every file pulled in via
@@ -152,39 +180,87 @@ let record_use name span env =
            end) entries);
   match List.find_opt (fun e -> e.le_name = name) env.lin with
   | None -> ()   (* unrestricted — no tracking needed *)
+  | Some le when le.le_pending <> None ->
+    (* Linearity not decided yet: record, never report.  The scope's close
+       judges [le_dup] once the type is known ([judge_pending]). *)
+    if !(le.le_used) then begin
+      if !(le.le_dup) = None then le.le_dup := Some span
+    end else begin
+      le.le_used := true;
+      if !(le.le_first_use) = None then le.le_first_use := Some span
+    end
   | Some le ->
-    (* A double-use is a relationship between two sites. Point at the earlier
-       one as well: without it the reader knows only that the value was already
-       gone, not what took it — which on a long function is the whole search. *)
-    let consumed_label () =
-      match !(le.le_first_use) with
-      | None -> []
-      | Some first ->
-        [{ Err.lbl_span = first;
-           Err.lbl_message =
-             Printf.sprintf "`%s` was already consumed here"
-               (lin_display_name name) }]
-    in
     (match le.le_lin with
-     | Ast.Linear when !(le.le_used) ->
-       Err.report env.errors
-         { Err.severity = Err.Error; span;
-           message = Printf.sprintf
-             "The linear value `%s` is used more than once here.\n\
-              Linear values must be consumed exactly once — they cannot \
-              be copied or ignored." (lin_display_name name);
-           labels = consumed_label (); notes = []; code = None; fix = None }
-     | Ast.Affine when !(le.le_used) ->
-       Err.report env.errors
-         { Err.severity = Err.Error; span;
-           message = Printf.sprintf
-             "The affine value `%s` is used more than once here.\n\
-              Affine values may be used at most once." (lin_display_name name);
-           labels = consumed_label (); notes = []; code = None; fix = None }
+     | (Ast.Linear | Ast.Affine) as lin when !(le.le_used) ->
+       report_double_use ~notes env ~lin le ~span
      | (Ast.Linear | Ast.Affine) ->
        le.le_used := true;
        if !(le.le_first_use) = None then le.le_first_use := Some span
      | Ast.Unrestricted -> ())
+
+let record_use name span env = record_use_noted name span env
+
+(* ── Move-out semantics for a record's linear fields ─────────────────
+   A record variable [r] whose type has linear fields owns them through the
+   sentinels "r#f" ([bind_linear_field_sentinels]).  [r.f] uses one sentinel
+   (R1); any other use of [r] uses them all (R2), since it hands the whole
+   record, fields included, to someone else; [{ r with ... }] uses those it
+   does not replace (R3); and every sentinel must be used by the scope's close
+   (R4).  See specs/progress/2026-09-10-linear-actor-state-field-retained-after-consume.md. *)
+
+(** Set while inferring the [EVar] base of a field access or of a record
+    update, whose own arms account for the fields; the [EVar] arm then records
+    a plain use of the name only. *)
+let suppress_whole_record_use = ref false
+
+let with_record_base (base : Ast.expr) f =
+  match base with
+  | Ast.EVar _ ->
+    let saved = !suppress_whole_record_use in
+    suppress_whole_record_use := true;
+    Fun.protect ~finally:(fun () -> suppress_whole_record_use := saved) f
+  | _ -> f ()
+
+(** The linear fields of variable [name]'s current record type that have a
+    sentinel in scope. *)
+let linear_field_sentinels name env =
+  match lookup_var name env with
+  | Some (Mono t | Poly (_, _, t)) ->
+    (match expand_record env (repr t) with
+     | Some (TRecord flds) ->
+       List.filter_map (fun (fname, fty) ->
+           match field_linearity env fty with
+           | Some _ ->
+             let key = name ^ "#" ^ fname in
+             if List.exists (fun le -> le.le_name = key) env.lin
+             then Some (fname, key) else None
+           | None -> None) flds
+     | _ -> [])
+  | None -> []
+
+let whole_use_note name =
+  Printf.sprintf
+    "`%s` is used as a whole here, which hands on every field it still holds, \
+     including this one." name
+
+(** R2: a use of the whole record uses each of its linear fields. *)
+let record_whole_use name span env =
+  List.iter (fun (_, key) ->
+      record_use_noted ~notes:[ whole_use_note name ] key span env)
+    (linear_field_sentinels name env)
+
+(** R3: [{ name with <updated> }] keeps, and so uses, every linear field it
+    does not replace. *)
+let record_update_base_use name ~updated span env =
+  List.iter (fun (fname, key) ->
+      if not (List.mem fname updated) then
+        record_use_noted
+          ~notes:[ Printf.sprintf
+                     "`{ %s with … }` keeps every field it doesn't replace, so the \
+                      old `%s.%s` would survive into the new record. Replace it \
+                      too: `{ %s with %s: … }`." name name fname name fname ]
+          key span env)
+    (linear_field_sentinels name env)
 
 (** [bind_vars_with_linearity bindings env] is like [bind_vars] except it
     checks the repr'd type of each binding after unification: if the type
@@ -238,7 +314,7 @@ let bind_pattern_bindings scrut_expr (bindings : (string * scheme) list) env =
        names, so a nested or imported `always_linear` type would otherwise
        infect an unrelated type of the same name declared here — a false
        positive on ordinary code, which the ordering hole above used to mask. *)
-    | TCon (name, _) when resolves_always_linear name env -> Some Ast.Linear
+    | t when holds_linear env t -> Some Ast.Linear
     | _ -> None
   in
   List.fold_left (fun acc_env (name, sch) ->
@@ -269,22 +345,133 @@ let bind_pattern_bindings scrut_expr (bindings : (string * scheme) list) env =
            bind_linear_field_sentinels name (repr t) env1)
     ) env bindings
 
+let report_linear_never_used env ~scope_span le =
+  Err.error env.errors ~span:scope_span
+    (Printf.sprintf
+       "The linear value `%s` was never used.\n\
+        Linear values must be consumed exactly once — did you \
+        mean to pass it somewhere?" (lin_display_name le.le_name))
+
 (** After a scope closes, check that every in-scope linear var was used. *)
 let check_linear_all_consumed env ~scope_span in_scope_names =
   List.iter (fun le ->
       if List.mem le.le_name in_scope_names
       && le.le_lin = Ast.Linear
       && not !(le.le_used) then
-        Err.error env.errors ~span:scope_span
-          (Printf.sprintf
-             "The linear value `%s` was never used.\n\
-              Linear values must be consumed exactly once — did you \
-              mean to pass it somewhere?" (lin_display_name le.le_name))
+        report_linear_never_used env ~scope_span le
     ) env.lin
+
+(** The linear entries a scope introduced: those in [after.lin] that were not
+    already in [before.lin].  Compared by the physical identity of each
+    entry's [le_used] cell, never by name, because a lambda's [env.lin] also
+    holds the enclosing scope's entries and a parameter may shadow one: a
+    name filter would judge the outer same-named value at the lambda's close,
+    while it is still in scope and may be consumed later.  [env.lin] is only
+    ever extended by consing, so the new entries are normally a prefix ending
+    at [before.lin] itself; the identity filter is the fallback if some
+    rebuild ever breaks that sharing. *)
+let is_unbound_var t =
+  match repr t with TVar { contents = Unbound _ } -> true | _ -> false
+
+let lin_entries_added ~before ~after =
+  let rec prefix l =
+    if l == before.lin then Some []
+    else match l with
+      | [] -> None
+      | le :: rest -> Option.map (fun r -> le :: r) (prefix rest)
+  in
+  match prefix after.lin with
+  | Some added -> added
+  | None ->
+    List.filter (fun le ->
+        not (List.exists (fun o -> o.le_used == le.le_used) before.lin))
+      after.lin
+
+(** The linearity a pending entry turns out to have, now that its type may be
+    known; a decided entry's own.  Mirrors [bind_lam_param]'s promotion: an
+    [always_linear] type is [Linear], a [TLin] wrapper on a parameter is
+    tracked [Affine]. *)
+let effective_lin env le =
+  match le.le_pending with
+  | None -> le.le_lin
+  | Some t ->
+    (match repr t with
+     | t when holds_linear env t -> Ast.Linear
+     | TLin (lin, _) when lin <> Ast.Unrestricted -> Ast.Affine
+     | _ -> Ast.Unrestricted)
+
+let mixed_message name =
+  Printf.sprintf
+    "The linear value `%s` is consumed on some branches but not others.\n\
+     On a branch that doesn't consume it, the value is dropped. Consume it on \
+     every branch, or end that branch with `panic(…)` if it never returns." name
+
+let report_wildcard_discard env ~span t =
+  Err.error env.errors ~span
+    (Printf.sprintf
+       "This `_` discards a linear value of type `%s`.\n\
+        Linear values must be consumed exactly once. Bind it to a name \
+        and pass it to something that consumes it." (pp_ty (repr t)))
+
+(** Judge the pending entries among [entries] at their scope's close: a
+    parameter bound before its type was known, whose type the body has since
+    fixed to a linear one, gets exactly the checks it would have had if it had
+    been annotated.  One still unresolved is polymorphic, and is left alone. *)
+let judge_pending env ~scope_span entries =
+  List.iter (fun le ->
+      match le.le_pending with
+      | None -> ()
+      | Some t ->
+        (match effective_lin env le with
+         | Ast.Unrestricted -> ()
+         | lin ->
+           (match !(le.le_dup) with
+            | Some span -> report_double_use env ~lin le ~span
+            | None -> ());
+           (match !(le.le_mixed) with
+            | Some span when lin = Ast.Linear ->
+              Err.error env.errors ~span (mixed_message (lin_display_name le.le_name))
+            | _ -> ());
+           if lin = Ast.Linear && not !(le.le_used) then
+             if le.le_name = "_" then report_wildcard_discard env ~span:scope_span t
+             else report_linear_never_used env ~scope_span le))
+    entries
+
+(** Must-use at the close of a scope that has enclosing linear binders (a
+    lambda, a local [fn ... end], a block [let]): every [Linear] entry it
+    introduced must have been used, including a record binder's field
+    sentinels ("r#f", R4 of the move-out rules).  A [_] parameter is left to
+    [judge_pending] / the wildcard check. *)
+let check_scope_consumed ~before ~after ~scope_span =
+  let added = lin_entries_added ~before ~after in
+  List.iter (fun le ->
+      if le.le_lin = Ast.Linear
+      && not !(le.le_used)
+      && le.le_name <> "_" then
+        report_linear_never_used after ~scope_span le
+    ) added;
+  judge_pending after ~scope_span added
 
 (* =================================================================
    §4  Pattern inference
    ================================================================= *)
+
+(** Where [infer_pattern] reports each wildcard it types, while a caller that
+    wants to judge them has one installed (see [with_wildcards]).  The span
+    and the wildcard's own type variable, which is only resolved once the
+    caller unifies the whole pattern.  [type_map] is not usable for this:
+    desugar-generated wildcards share spans, so a lookup by span can return
+    another wildcard's type. *)
+let wildcard_sink : (Ast.span * ty) list ref option ref = ref None
+
+(** [with_wildcards f] runs [f] (an [infer_pattern] call) and also returns the
+    wildcards it typed. *)
+let with_wildcards f =
+  let saved = !wildcard_sink in
+  let log = ref [] in
+  wildcard_sink := Some log;
+  let r = Fun.protect ~finally:(fun () -> wildcard_sink := saved) f in
+  (r, !log)
 
 (** Infer the type that a pattern *expects*, and return the list of
     (name, scheme) bindings it introduces.
@@ -297,6 +484,7 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
   match pat with
   | Ast.PatWild sp ->
     let t = fresh_var env.level in
+    (match !wildcard_sink with Some log -> log := (sp, t) :: !log | None -> ());
     (* Record in type_map so lower_match.ml's pattern-matrix compiler can look
        up the resolved (possibly-still-polymorphic) type via ty_of_span for
        constructor-field sub-patterns it discards — e.g. `Cons(_, t) -> ...`.
@@ -681,6 +869,212 @@ and ty_of_lit = function
    ================================================================= *)
 include Typecheck_exhaustive
 
+(* ── Linear captures by a closure ──────────────────────────────────── *)
+
+(** The used-flag of every linear entry in scope before a closure's body is
+    checked.  Keyed by the entry itself, not its name, so the closure's own
+    parameters (bound after the snapshot) never appear in it, even when one
+    shadows an outer name. *)
+let capture_snapshot env = List.map (fun le -> (le, !(le.le_used))) env.lin
+
+(** After a closure's body: an outer linear or affine value that was unused
+    before and is used now was captured, and a closure may be called any
+    number of times.  Shared by every closure-forming site (the [ELam] infer
+    arm, the [ELam] check-mode peel, [ELetFn]); it used to live only in the
+    infer arm, so a lambda passed straight to an annotated function, and a
+    local [fn ... end], could capture a linear value and duplicate it. *)
+let check_captures env ~span snapshot =
+  List.iter (fun (le, was_used) ->
+      if not was_used && !(le.le_used) && effective_lin env le <> Ast.Unrestricted then
+        let name = lin_display_name le.le_name in
+        Err.error env.errors ~span
+          (Printf.sprintf
+             "The linear value `%s` cannot be captured by a closure.\n\
+              A closure may be called multiple times, which would violate \
+              the exactly-once guarantee.\n\
+              Pass `%s` as a parameter to the closure instead." name name))
+    snapshot
+
+(* ── Linear discards by a wildcard ─────────────────────────────────── *)
+
+(** Builtins that never return.  March has no [Never] type ([panic : String ->
+    a]), so "this path does not fall through" is recognised syntactically; this
+    is the one list of names that counts. *)
+let diverging_builtins = [ "panic"; "panic_"; "todo_"; "unreachable_" ]
+
+(** Whether every way through [e] ends in a diverging builtin call, so nothing
+    after it runs.  Conservative: a user function that always panics is not
+    recognised. *)
+let rec path_diverges (e : Ast.expr) =
+  match e with
+  | Ast.EApp (Ast.EVar n, _, _) -> List.mem n.txt diverging_builtins
+  | Ast.EBlock (es, _) ->
+    (match List.rev es with last :: _ -> path_diverges last | [] -> false)
+  | Ast.EIf (_, t, f, _) -> path_diverges t && path_diverges f
+  | Ast.EMatch (_, brs, _) ->
+    brs <> [] && List.for_all (fun (br : Ast.branch) -> path_diverges br.branch_body) brs
+  | Ast.ECond (arms, _) ->
+    arms <> [] && List.for_all (fun (_, b) -> path_diverges b) arms
+  | _ -> false
+
+(* ── Linear values across branches ───────────────────────────────── *)
+
+let report_mixed_consumption env ~span le ~consumed_at ~skipped =
+  let name = lin_display_name le.le_name in
+  let labels =
+    (match consumed_at with
+     | Some sp ->
+       [ { Err.lbl_span = sp;
+           Err.lbl_message = Printf.sprintf "`%s` is consumed on this branch" name } ]
+     | None -> [])
+    @ (match skipped with
+       | Some e ->
+         [ { Err.lbl_span = span_of_expr e;
+             Err.lbl_message = "but not on this one, where it is dropped" } ]
+       | None -> [])
+  in
+  Err.report env.errors
+    { Err.severity = Err.Error; span; message = mixed_message name; labels;
+      notes = []; code = None; fix = None }
+
+(** Join the linear-use state of a branch construct's mutually exclusive
+    paths.  [snapshot] is each entry's (used, first use) on entry; [results]
+    pairs each path's body (for divergence and a label; [None] = unknown) with
+    each entry's (used, first use) after that path, in [snapshot]'s order.
+
+    An entry already used on entry stays used.  An affine or unrestricted one
+    is consumed iff some path consumed it: dropping it on a path is what affine
+    permits.  A [Linear] one (and a pending one, which may turn out linear)
+    must be consumed on EVERY path that can fall through, or on none of them;
+    a path that diverges runs nothing after it, so it does not count.  Mixed is
+    reported here for a decided entry and recorded in [le_mixed] for a pending
+    one, and the entry is then marked consumed so the scope's close does not
+    add a second report. *)
+let join_linear_paths env ~span snapshot results =
+  let results = List.map (fun (body, flags) -> (body, Array.of_list flags)) results in
+  List.iteri (fun i (le, was, was_first) ->
+      let per_path = List.map (fun (body, flags) -> (body, flags.(i))) results in
+      let any_used = List.exists (fun (_, (u, _)) -> u) per_path in
+      let first_span = List.find_map (fun (_, (u, sp)) -> if u then sp else None) per_path in
+      let union () =
+        le.le_used := any_used;
+        le.le_first_use := (if any_used then first_span else was_first)
+      in
+      if was then begin
+        le.le_used := true; le.le_first_use := was_first
+      end else begin
+        (* Session-channel endpoints keep their own discipline (drop leniency
+           for an undriven endpoint, the End-drop rule), even where a let-bound
+           one is tracked Linear; the strict rule is for everything else. *)
+        let is_channel =
+          match lookup_var le.le_name env with
+          | Some (Mono t) ->
+            (match repr t with
+             | TChan _ -> true
+             | TLin (_, inner) -> (match repr inner with TChan _ -> true | _ -> false)
+             | _ -> false)
+          | _ -> false
+        in
+        let strict = (le.le_pending <> None || le.le_lin = Ast.Linear) && not is_channel in
+        let fall =
+          List.filter (fun (body, _) ->
+              match body with Some e -> not (path_diverges e) | None -> true)
+            per_path
+        in
+        let used_fall = List.filter (fun (_, (u, _)) -> u) fall in
+        if not strict || fall = [] || not any_used
+           || List.length used_fall = List.length fall then union ()
+        else if used_fall = [] then begin
+          (* Consumed only on paths that never return: nothing after them runs,
+             so on every path that does return it is still unconsumed. *)
+          le.le_used := false; le.le_first_use := was_first
+        end else begin
+          let consumed_at = match used_fall with (_, (_, sp)) :: _ -> sp | [] -> None in
+          let skipped = List.find_map (fun (body, (u, _)) -> if u then None else body) fall in
+          (match le.le_pending with
+           | Some _ -> if !(le.le_mixed) = None then le.le_mixed := Some span
+           | None -> report_mixed_consumption env ~span le ~consumed_at ~skipped);
+          union ()
+        end
+      end)
+    snapshot
+
+(* ── Linear values and generic code ────────────────────────────────── *)
+
+(** Every type variable in [t], by id: marked linear-ok when [t] is the type of
+    a parameter declared [linear]/[affine]. *)
+let mark_linear_ok env t =
+  let rec go t = match repr t with
+    | TVar { contents = Unbound (id, _) } -> Hashtbl.replace env.linear_ok_ids id ()
+    | TArrow (a, b) -> go a; go b
+    | TCon (_, args) | TTuple args -> List.iter go args
+    | TRecord flds -> List.iter (fun (_, t) -> go t) flds
+    | TLin (_, t) -> go t
+    | _ -> ()
+  in
+  go t
+
+(** Ids of the type variables in a NEGATIVE position of [ty]: the ones the
+    function receives rather than produces.  [id : a -> a] consumes [a];
+    [panic : String -> a] and [task_spawn : (Int -> a) -> Task(a)] only
+    produce theirs, which is always safe. *)
+let consumed_var_ids ty =
+  let acc = ref [] in
+  let rec go positive t = match repr t with
+    | TVar { contents = Unbound (id, _) } -> if not positive then acc := id :: !acc
+    | TArrow (a, b) -> go (not positive) a; go positive b
+    | TCon (_, args) | TTuple args -> List.iter (go positive) args
+    | TRecord flds -> List.iter (fun (_, t) -> go positive t) flds
+    | TLin (_, t) -> go positive t
+    | _ -> ()
+  in
+  go true ty;
+  !acc
+
+(** Option B of specs/progress/2026-09-13-linear-generic-code-and-containers.md:
+    a type variable is unrestricted unless its function opted in, so a generic
+    function may drop or duplicate a value of that type, and instantiating it
+    with a linear type where the function consumes it is an error.  Swept once
+    the module is solved, over every named polymorphic use.  Constructors are
+    exempt by construction: they never go through [instantiate]. *)
+let check_linear_instantiations env =
+  (* An operator (`+`, `==`, …) reads each operand exactly once and keeps
+     none of them; a single use of a `linear Int` in `p.data + 1` is exactly
+     that (accept/t67). *)
+  let is_operator name =
+    name <> "" && not (Char.equal name.[0] '_' ||
+                       (Char.lowercase_ascii name.[0] <> Char.uppercase_ascii name.[0]))
+  in
+  Hashtbl.iter (fun sp (name, ids, tys, scheme_ty) ->
+    if not (is_operator name) then
+      let consumed = consumed_var_ids scheme_ty in
+      let reported = ref false in
+      List.iter2 (fun id t ->
+          if not !reported && List.mem id consumed
+             && not (Hashtbl.mem env.linear_ok_ids id)
+             && contains_linear env t then begin
+            reported := true;
+            Err.error env.errors ~span:sp
+              (Printf.sprintf
+                 "`%s` is linear, but `%s` is generic in a parameter of that type, \
+                  so it may drop or duplicate the value.\n\
+                  Consume the value here instead, or, if `%s` uses that parameter \
+                  exactly once, mark it `linear` where `%s` is defined \
+                  (`linear x : a`)."
+                 (pp_ty (repr t)) name name name)
+          end)
+        ids tys)
+    env.linear_generic_uses
+
+(** Report every wildcard in [wilds] (from [with_wildcards], after the pattern
+    has been unified) whose own type is linear: [_] drops the value, and March
+    has no destructor to run.  Judged on the wildcard's type, never the
+    scrutinee's, so [S1(_)] discarding an [Int] payload is fine. *)
+let check_wildcard_discards env (wilds : (Ast.span * ty) list) =
+  List.iter (fun (sp, t) ->
+      if is_linear_ty env t then report_wildcard_discard env ~span:sp t)
+    (List.rev wilds)
+
 (** [infer_expr env e] synthesises the type of [e], accumulating any
     errors into [env.errors]. *)
 let rec infer_expr env (e : Ast.expr) : ty =
@@ -693,6 +1087,8 @@ let rec infer_expr env (e : Ast.expr) : ty =
     (* ── Variables ────────────────────────────────────────────────── *)
     | Ast.EVar name ->
       record_use name.txt name.span env;
+      if not !suppress_whole_record_use then
+        record_whole_use name.txt name.span env;
       (* R2: the root capability is granted at the boundary, not taken.  The
          name stays BOUND (so this reports a capability error rather than
          "I cannot find `root_cap`", and so the inferred type below stays
@@ -734,7 +1130,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                           ref_kind = `Call;
                           ref_file = name.span.Ast.file;
                           ref_line = name.span.Ast.start_line } :: !(env.refs));
-         instantiate ~use_span:name.span env.level env sch
+         instantiate ~use_span:name.span ~use_name:name.txt env.level env sch
        | None     ->
          (* Try qualified module resolution: "Mod.func" *)
          match resolve_qualified_var name.txt env with
@@ -750,7 +1146,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                             ref_kind = `Call;
                             ref_file = name.span.Ast.file;
                             ref_line = name.span.Ast.start_line } :: !(env.refs));
-           instantiate ~use_span:name.span env.level env sch
+           instantiate ~use_span:name.span ~use_name:name.txt env.level env sch
          | _ when is_confirmed_private_qualified name.txt env ->
            (* A confirmed privacy violation (`Mod.priv_fn`) must be reported
               as such — falling through to the dot-suffix fallback below would
@@ -794,7 +1190,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                 | None -> try_suffix rest)
            in
            (match try_suffix name.txt with
-            | Some sch -> instantiate ~use_span:name.span env.level env sch
+            | Some sch -> instantiate ~use_span:name.span ~use_name:name.txt env.level env sch
             | None ->
               let msg =
                 if String.contains name.txt '.' then
@@ -1778,28 +2174,13 @@ let rec infer_expr env (e : Ast.expr) : ty =
          Any that become used during body checking were captured by the closure.
          Capturing a linear value in a closure is unsound because the closure
          could be called multiple times, violating the exactly-once guarantee. *)
-      let outer_lin_snapshot =
-        List.map (fun le -> (le.le_name, !(le.le_used))) env.lin
-      in
+      let captures = capture_snapshot env in
       let param_tys, env' = bind_lam_params env params in
       let body_ty = infer_expr env' body in
-      (* Detect captures: outer linear vars that were unused before but used now. *)
-      List.iter (fun le ->
-          let was_used_before =
-            match List.assoc_opt le.le_name outer_lin_snapshot with
-            | Some b -> b
-            | None   -> true  (* not in snapshot = lambda's own param, skip *)
-          in
-          if not was_used_before && !(le.le_used)
-          && le.le_lin <> Ast.Unrestricted then
-            Err.error env.errors ~span:lsp
-              (Printf.sprintf
-                 "The linear value `%s` cannot be captured by a closure.\n\
-                  A closure may be called multiple times, which would violate \
-                  the exactly-once guarantee.\n\
-                  Pass `%s` as a parameter to the closure instead."
-                 le.le_name le.le_name)
-        ) env.lin;
+      (* A linear parameter must be consumed by the time the lambda body
+         ends, as it must for a named function's parameters. *)
+      check_scope_consumed ~before:env ~after:env' ~scope_span:lsp;
+      check_captures env ~span:lsp captures;
       List.fold_right (fun pt acc -> TArrow (pt, acc)) param_tys body_ty
 
     (* ── do/end block ─────────────────────────────────────────────── *)
@@ -1813,9 +2194,11 @@ let rec infer_expr env (e : Ast.expr) : ty =
          a type annotation on the binding (`let x : T = e`) so the RHS is
          checked against it, mirroring the normal infer_block ELet arm. *)
       let rhs_ty = infer_let_annotated env sp b.bind_ty b.bind_expr in
-      let bindings, pat_ty = infer_pattern ~expected:rhs_ty env b.bind_pat in
+      let (bindings, pat_ty), wilds =
+        with_wildcards (fun () -> infer_pattern ~expected:rhs_ty env b.bind_pat) in
       let reason = Some (RLetBind sp) in
       unify env ~span:sp ~reason rhs_ty pat_ty;
+      check_wildcard_discards env wilds;
       (* Record variable name type for hover even in tail position *)
       (match b.bind_pat with
        | Ast.PatVar name -> Hashtbl.replace env.type_map name.span (repr rhs_ty)
@@ -1839,7 +2222,12 @@ let rec infer_expr env (e : Ast.expr) : ty =
 
     (* ── Record update: { base with f = e, … } ───────────────────── *)
     | Ast.ERecordUpdate (base, updates, sp) ->
-      let base_ty   = infer_expr env base in
+      let base_ty   = with_record_base base (fun () -> infer_expr env base) in
+      (match base with
+       | Ast.EVar v ->
+         record_update_base_use v.txt
+           ~updated:(List.map (fun ((n : Ast.name), _) -> n.txt) updates) sp env
+       | _ -> ());
       let update_tys =
         List.map (fun (n, e) -> (n.Ast.txt, infer_expr env e)) updates
       in
@@ -1894,7 +2282,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
         | Some prefix ->
           let qualified = prefix ^ "." ^ name.txt in
           (match lookup_var qualified env with
-           | Some sch -> Some (instantiate ~use_span:sp env.level env sch)
+           | Some sch -> Some (instantiate ~use_span:sp ~use_name:qualified env.level env sch)
            | None ->
              (* For multi-component paths like Conduit.Storage.workflow_load,
                 the interface method may be registered as just "Storage.workflow_load"
@@ -1908,7 +2296,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                  let rest = String.sub p (i + 1) (String.length p - i - 1) in
                  let candidate = rest ^ "." ^ member in
                  (match lookup_var candidate env with
-                  | Some sch -> Some (instantiate ~use_span:sp env.level env sch)
+                  | Some sch -> Some (instantiate ~use_span:sp ~use_name:candidate env.level env sch)
                   | None -> try_suffix rest)
              in
              try_suffix prefix)
@@ -1917,7 +2305,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
       (match mod_access with
        | Some ty -> ty
        | None ->
-      let e_ty = infer_expr env e in
+      let e_ty = with_record_base e (fun () -> infer_expr env e) in
       (match expand_record env (repr e_ty) with
        | Some (TRecord flds) ->
          (match List.assoc_opt name.txt flds with
@@ -1926,8 +2314,8 @@ let rec infer_expr env (e : Ast.expr) : ty =
                field.  When the record is held in a named variable, a second
                access on the same variable is caught by [record_use].
                For non-variable expressions we emit a diagnostic here. *)
-            (match repr t with
-             | TLin (lin, _) when lin <> Ast.Unrestricted ->
+            (match field_linearity env t with
+             | Some lin ->
                (match e with
                 | Ast.EVar vname ->
                   (* Record is held in a named variable: check per-field sentinel.
@@ -2048,9 +2436,9 @@ let rec infer_expr env (e : Ast.expr) : ty =
       (* The two branches are mutually exclusive, so each may consume the same
          outer linear value once — the same rule match arms get. *)
       let r_then = ref TError and r_else = ref TError in
-      iter_paths_linear env
-        [ (fun () -> r_then := infer_expr env then_);
-          (fun () -> r_else := infer_expr env else_) ];
+      iter_paths_linear env ~span:_sp
+        [ (Some then_, fun () -> r_then := infer_expr env then_);
+          (Some else_, fun () -> r_else := infer_expr env else_) ];
       let t_then = !r_then in
       let t_else = !r_else in
       (* Point primary error at the else branch; label points at then branch
@@ -2081,23 +2469,23 @@ let rec infer_expr env (e : Ast.expr) : ty =
             starting from the state its own condition left behind.
 
             Hence: check conditions against the shared state, run each body
-            rolled back, and apply the union of what the bodies consumed
-            once at the end. *)
-         let body_acc =
-           List.map (fun le -> (le, ref false, ref (None : Ast.span option)))
-             env.lin
+            rolled back, and join what the bodies consumed once at the end,
+            judged against the state on entry (a value consumed only by a later
+            condition is not consumed on an earlier body's path). *)
+         let snapshot =
+           List.map (fun le -> (le, !(le.le_used), !(le.le_first_use))) env.lin
          in
+         let results = ref [] in
          let run_body body_e =
            let saved =
              List.map (fun le -> (le, !(le.le_used), !(le.le_first_use)))
                env.lin
            in
            let ty = infer_expr env body_e in
-           List.iter (fun (le, acc, acc_span) ->
-               if !(le.le_used) then begin
-                 acc := true;
-                 if !acc_span = None then acc_span := !(le.le_first_use)
-               end) body_acc;
+           results :=
+             (Some body_e,
+              List.map (fun (le, _, _) -> (!(le.le_used), !(le.le_first_use))) snapshot)
+             :: !results;
            List.iter (fun (le, was, was_span) ->
                le.le_used := was; le.le_first_use := was_span) saved;
            ty
@@ -2111,11 +2499,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
              let arm_ty = run_body body_e in
              unify env ~span:sp ~reason:(Some (RMatchArm sp)) result_ty arm_ty
            ) rest;
-         List.iter (fun (le, acc, acc_span) ->
-             if !acc && not !(le.le_used) then begin
-               le.le_used := true;
-               if !(le.le_first_use) = None then le.le_first_use := !acc_span
-             end) body_acc;
+         join_linear_paths env ~span:sp snapshot (List.rev !results);
          result_ty)
 
     (* ── Pipes / Sigils — must be desugared before reaching us ───── *)
@@ -2223,7 +2607,11 @@ let rec infer_expr env (e : Ast.expr) : ty =
       let fn_ty = fresh_var env.level in
       let env_with_self = bind_var name.txt (Mono fn_ty) env in
       let param_tys, env_inner = bind_lam_params env_with_self params in
+      let captures = capture_snapshot env in
       let body_ty = infer_block env_inner [body] in
+      (* Same closes as the block-position [ELetFn] in [infer_block]. *)
+      check_scope_consumed ~before:env_with_self ~after:env_inner ~scope_span:sp;
+      check_captures env ~span:sp captures;
       let ret_ty  = match ret_ann with
         | None -> body_ty
         | Some ann ->
@@ -2262,12 +2650,32 @@ let rec infer_expr env (e : Ast.expr) : ty =
          (* [t_ok] is no longer a bare fresh var — the unify above bound it to
             the RHS's Ok payload — so it is a usable expected type here, and a
             record pattern needs it to open its field list. *)
-         let bindings, pat_ty = infer_pattern ~expected:t_ok env p in
+         let (bindings, pat_ty), wilds =
+           with_wildcards (fun () -> infer_pattern ~expected:t_ok env p) in
          unify env ~span:sp
            ~reason:(Some (RLetBind sp))
            t_ok pat_ty;
+         check_wildcard_discards env wilds;
          let env' = bind_pattern_bindings result_expr bindings env in
+         (* `let?` returns early on `Err`: everything after it is one path, the
+            early return the other.  A linear value still unconsumed here and
+            consumed in the continuation is dropped on the early return. *)
+         let before_cont =
+           List.map (fun le -> (le, !(le.le_used))) env.lin in
          let body_ty = infer_expr env' body in
+         List.iter (fun (le, was) ->
+             if not was && !(le.le_used) then
+               match le.le_pending with
+               | Some _ -> if !(le.le_mixed) = None then le.le_mixed := Some sp
+               | None when le.le_lin = Ast.Linear ->
+                 let name = lin_display_name le.le_name in
+                 Err.error env.errors ~span:sp
+                   (Printf.sprintf
+                      "The linear value `%s` is still unconsumed when `let?` returns early on `Err`.\n\
+                       On that path the value is dropped. Consume it before the `let?`, \
+                       or match on the result and consume it on the `Err` branch too." name)
+               | None -> ())
+           before_cont;
          let t_r = fresh_var env.level in
          unify env ~span:sp
            ~reason:(Some (RBuiltin
@@ -2345,8 +2753,10 @@ let rec infer_expr env (e : Ast.expr) : ty =
                           own type." flat_map_name)))
                     result_ty m_arg;
                   unify env' ~span:sp ~reason:(Some (RLetBind sp)) m_b1 m_b2;
-                  let bindings, pat_ty = infer_pattern ~expected:a_ty env' p in
+                  let (bindings, pat_ty), wilds =
+                    with_wildcards (fun () -> infer_pattern ~expected:a_ty env' p) in
                   unify env' ~span:sp ~reason:(Some (RLetBind sp)) a_ty pat_ty;
+                  check_wildcard_discards env' wilds;
                   let env'' = bind_pattern_bindings result_expr bindings env' in
                   let body_ty = infer_expr env'' body in
                   unify env'' ~span:sp
@@ -2384,6 +2794,15 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
 
   (* Lambda in check mode: peel arrow types one-by-one *)
   | Ast.ELam (params, body, lsp), _ ->
+    let env0 = env in
+    (* Must-use for the parameters bound on the way down, once the body has
+       been checked in the innermost env.  Not in the fallback arm below: that
+       re-enters [infer_expr]'s ELam arm, which runs its own check. *)
+    let captures = capture_snapshot env0 in
+    let close env =
+      check_scope_consumed ~before:env0 ~after:env ~scope_span:lsp;
+      check_captures env0 ~span:lsp captures
+    in
     let rec peel ps ty env =
       match ps, repr ty with
       | [], TArrow (param_ty, ret_ty)
@@ -2396,9 +2815,11 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
            `fn -> body` satisfy a `Unit -> Unit` callback param — the natural
            spelling — without forcing the `fn _ -> body` (1-arg discard) idiom.
            The symmetric call side (`cb()`) is handled in [infer_app]. *)
-        check_expr env body ret_ty ~reason
+        check_expr env body ret_ty ~reason;
+        close env
       | [], body_ty ->
-        check_expr env body body_ty ~reason
+        check_expr env body body_ty ~reason;
+        close env
       | p :: rest, TArrow (arg_ty, ret_ty) ->
         let env' = bind_lam_param env lsp p (Some arg_ty) in
         peel rest ret_ty env'
@@ -2411,9 +2832,12 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
   (* Match in check mode: check each arm against expected *)
   | Ast.EMatch (scrut, branches, msp), _ ->
     let scrut_ty = infer_expr env scrut in
-    iter_arms_linear env branches (fun (br : Ast.branch) ->
-        let bindings, pat_ty = infer_pattern ~expected:scrut_ty env br.branch_pat in
+    iter_arms_linear env ~span:msp branches (fun (br : Ast.branch) ->
+        let (bindings, pat_ty), wilds =
+          with_wildcards (fun () -> infer_pattern ~expected:scrut_ty env br.branch_pat) in
         unify env ~span:msp ~reason:(Some (RMatchArm msp)) scrut_ty pat_ty;
+        (* A diverging arm drops nothing that matters: nothing after it runs. *)
+        if not (path_diverges br.branch_body) then check_wildcard_discards env wilds;
         (* Propagate linearity from scrutinee to pattern-bound variables. *)
         let env' = bind_pattern_bindings scrut bindings env in
         (match br.branch_guard with
@@ -2639,57 +3063,51 @@ and with_offer_refinement env scrut (br : Ast.branch) (f : unit -> unit) =
     marked consumed) — eliminating the spurious "used more than once" a shared
     mutable flag would otherwise raise across arms, while still catching a
     genuine double-use WITHIN a single arm. *)
-and iter_arms_linear env (branches : Ast.branch list) (f : Ast.branch -> unit) : unit =
-  iter_paths_linear env (List.map (fun br () -> f br) branches)
+and iter_arms_linear env ~span (branches : Ast.branch list) (f : Ast.branch -> unit) : unit =
+  iter_paths_linear env ~span
+    (List.map (fun (br : Ast.branch) -> (Some br.branch_body, fun () -> f br)) branches)
 
 (** The mutual-exclusion discipline itself, over an arbitrary list of paths.
-    Every branching construct in the language shares it — [EMatch] arms via
-    [iter_arms_linear], the two branches of an [EIf], and the bodies of an
-    [ECond] — because "at most one of these runs" is the only property it
-    needs.  Each path is run with the linear-use flags reset to their state
-    on entry, and the union of what the paths consumed is applied once at the
-    end.
+    Every branching construct in the language shares it: [EMatch] arms via
+    [iter_arms_linear], the two branches of an [EIf], and (through
+    [join_linear_paths] directly) the bodies of an [ECond], because "at most
+    one of these runs" is the only property it needs.  Each path is run with
+    the linear-use flags reset to their state on entry; [join_linear_paths]
+    then decides the state after the construct.
 
     What this deliberately does NOT cover is code that runs on EVERY path: an
     [EIf]'s condition, or an [ECond]'s conditions, must be checked OUTSIDE the
     paths (before the relevant snapshot is taken), so that a value consumed
     there is still seen as consumed inside each branch.  Resetting around the
     condition too would turn a genuine double-use into an accepted program —
-    the one way this helper can be misused. *)
-and iter_paths_linear env (paths : (unit -> unit) list) : unit =
-  (* For each outer linear entry track (entry, pre-branch flag, union accumulator). *)
-  (* [le_first_use] is saved and restored alongside [le_used]. If it were not,
-     the first path to consume a value would leave its span behind, and a genuine
-     double-use in a LATER path would point at a line in a sibling path that never
-     ran on the same execution — a confidently wrong "already consumed here". *)
+    the one way this helper can be misused.
+
+    [le_first_use] is saved and restored alongside [le_used]. If it were not,
+    the first path to consume a value would leave its span behind, and a
+    genuine double-use in a LATER path would point at a line in a sibling path
+    that never ran on the same execution. *)
+and iter_paths_linear env ~span (paths : (Ast.expr option * (unit -> unit)) list) : unit =
   let snapshot =
-    List.map (fun le ->
-        (le, !(le.le_used), ref !(le.le_used),
-             !(le.le_first_use), ref !(le.le_first_use)))
-      env.lin
+    List.map (fun le -> (le, !(le.le_used), !(le.le_first_use))) env.lin
   in
-  List.iter (fun run_path ->
-      (* Reset each entry to its pre-branch state so this path starts fresh. *)
-      List.iter (fun (le, was, _acc, was_span, _acc_span) ->
-          le.le_used := was; le.le_first_use := was_span) snapshot;
-      run_path ();
-      (* Fold whatever this path consumed into the union accumulator. *)
-      List.iter (fun (le, _was, acc, _was_span, acc_span) ->
-          if !(le.le_used) then begin
-            acc := true;
-            if !acc_span = None then acc_span := !(le.le_first_use)
-          end) snapshot
-    ) paths;
-  (* Final: consumed iff consumed before the branch OR on some path. *)
-  List.iter (fun (le, _was, acc, _was_span, acc_span) ->
-      le.le_used := !acc; le.le_first_use := !acc_span) snapshot
+  let results =
+    List.map (fun (body, run_path) ->
+        List.iter (fun (le, was, was_span) ->
+            le.le_used := was; le.le_first_use := was_span) snapshot;
+        run_path ();
+        (body, List.map (fun (le, _, _) -> (!(le.le_used), !(le.le_first_use))) snapshot))
+      paths
+  in
+  join_linear_paths env ~span snapshot results
 
 (** Infer the result type of a match expression. *)
 and infer_match env span scrut scrut_ty branches =
   let result_ty = fresh_var env.level in
-  iter_arms_linear env branches (fun (br : Ast.branch) ->
-      let bindings, pat_ty = infer_pattern ~expected:scrut_ty env br.branch_pat in
+  iter_arms_linear env ~span branches (fun (br : Ast.branch) ->
+      let (bindings, pat_ty), wilds =
+        with_wildcards (fun () -> infer_pattern ~expected:scrut_ty env br.branch_pat) in
       unify env ~span ~reason:(Some (RMatchArm span)) scrut_ty pat_ty;
+      if not (path_diverges br.branch_body) then check_wildcard_discards env wilds;
       (* Propagate linearity from scrutinee to pattern-bound variables. *)
       let env' = bind_pattern_bindings scrut bindings env in
       (match br.branch_guard with
@@ -2790,8 +3208,10 @@ and infer_block env exprs =
        from just the fields it names and `let { code: c } = p` fails to unify
        against a wider `p`.  The [unify] below is then a no-op for records and
        unchanged for every other pattern shape. *)
-    let bindings, pat_ty = infer_pattern ~expected:rhs_ty env_rhs b.bind_pat in
+    let (bindings, pat_ty), wilds =
+      with_wildcards (fun () -> infer_pattern ~expected:rhs_ty env_rhs b.bind_pat) in
     unify env_rhs ~span:sp ~reason:(Some (RLetBind sp)) rhs_ty pat_ty;
+    check_wildcard_discards env_rhs wilds;
     (* Record the binding type in type_map so LSP hover over `let x = …` shows
        the RHS type rather than the enclosing block's return type. *)
     Hashtbl.replace env.type_map sp (repr rhs_ty);
@@ -2839,9 +3259,7 @@ and infer_block env exprs =
             before — promoting it to strict-linear would regress that. *)
          | TLin (lin, inner) when lin <> Ast.Unrestricted
              && (match repr inner with TChan _ -> false | _ -> true) -> lin
-         | TCon (name, _) ->
-           if resolves_always_linear name env then Ast.Linear else Ast.Unrestricted
-         | _ -> Ast.Unrestricted)
+         | t -> if holds_linear env t then Ast.Linear else Ast.Unrestricted)
       | lin -> lin
     in
     let env' = match auto_lin with
@@ -2923,6 +3341,12 @@ and infer_block env exprs =
      | _lin ->
        let linear_names = List.map fst bindings' in
        check_linear_all_consumed env' ~scope_span:sp linear_names);
+    (* R4: a record bound here must have every linear field used by now. *)
+    List.iter (fun le ->
+        if le.le_lin = Ast.Linear && not !(le.le_used)
+        && String.contains le.le_name '#' then
+          report_linear_never_used env' ~scope_span:sp le)
+      (lin_entries_added ~before:env ~after:env');
     (* Session-specific must-close accounting (F7 hole a): a channel binding
        whose session state is `End` MUST be closed — dropping it leaks the
        endpoint.  This is NARROWER than full linear consumption on purpose: a
@@ -2967,7 +3391,10 @@ and infer_block env exprs =
     List.iter2 (fun (p : Ast.param) pty ->
         Hashtbl.replace env.type_map p.param_name.span (repr pty)
       ) params param_tys;
+    let captures = capture_snapshot env in
     let body_ty = infer_block env_inner [body] in
+    check_scope_consumed ~before:env_with_self ~after:env_inner ~scope_span:sp;
+    check_captures env ~span:sp captures;
     (* Track whether the return-annotation unify (below) already reported a
        mismatch, so the later self-type/arrow-type reconciliation does not
        rediscover and DOUBLE-REPORT the identical conflict once it flows
@@ -3061,10 +3488,11 @@ and bind_lam_param env _sp (p : Ast.param) ann_ty =
     | None, Some t -> t
     | None, None   -> fresh_var env.level
   in
+  if p.param_lin <> Ast.Unrestricted then mark_linear_ok env t;
   let effective_lin = match p.param_lin with
     | Ast.Unrestricted ->
       (match repr t with
-       | TCon (name, _) when resolves_always_linear name env -> Ast.Linear
+       | t when holds_linear env t -> Ast.Linear
        (* A parameter whose resolved type is a linear/affine wrapper — e.g. a
           session channel `ch : Chan(Client, Echo)` resolving to
           `TLin(Linear, TChan …)` — is tracked as AFFINE so a re-read of the
@@ -3080,7 +3508,14 @@ and bind_lam_param env _sp (p : Ast.param) ann_ty =
   (* Track the linear parameter at its INNER (unwrapped) type, matching how
      [bind_pattern_bindings] registers linear let-bindings. *)
   let bind_ty = match repr t with TLin (_, inner) -> inner | _ -> t in
+  (* A `_` parameter can never be referenced, so a linear value bound to it is
+     dropped on the spot — the same discard as `let _ = …`. *)
+  if p.param_name.txt = "_" && effective_lin = Ast.Linear then
+    check_wildcard_discards env [ (p.param_name.span, t) ];
   match effective_lin with
+  | Ast.Unrestricted when is_unbound_var t ->
+    (* Not known yet: the body may still fix it to a linear type. *)
+    bind_pending p.param_name.txt t env
   | Ast.Unrestricted ->
     let env1 = bind_var p.param_name.txt (Mono t) env in
     bind_linear_field_sentinels p.param_name.txt t env1
@@ -3270,10 +3705,11 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
                 | Some ann -> surface_ty env' ~tvars:fn_tvars ann
                 | None -> fresh_var env'.level
               in
+              if p.param_lin <> Ast.Unrestricted then mark_linear_ok env' t;
               let effective_lin = match p.param_lin with
                 | Ast.Unrestricted ->
                   (match repr t with
-                   | TCon (tname, _) when resolves_always_linear tname env' -> Ast.Linear
+                   | t when holds_linear env' t -> Ast.Linear
                    (* A session-channel parameter (`ch : Chan(Role, Proto)`)
                       resolves to a [TLin] wrapper.  Track it as AFFINE so a
                       RE-READ of the endpoint inside the body is caught (F7 hole
@@ -3304,9 +3740,10 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
               in
               (t :: tys, env')
             | Ast.FPPat (Ast.PatVar name) ->
-              (* Single variable pattern — trivially named; bind it directly *)
+              (* Single variable pattern — trivially named.  Its type is not
+                 known yet, so its linearity is decided at the body's close. *)
               let t = fresh_var env'.level in
-              let env' = bind_var name.txt (Mono t) env in
+              let env' = bind_pending name.txt t env in
               (t :: tys, env')
             | Ast.FPPat pat ->
               (* Complex pattern parameter: should have been desugared into a
@@ -3414,7 +3851,18 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
           | Ast.FPNamed p -> Some p.param_name.txt
           | Ast.FPDefault (p, _) -> Some p.param_name.txt
           | Ast.FPPat _ -> None) clause.fc_params in
-      check_linear_all_consumed body_env ~scope_span:fn_span param_names;
+      let param_sentinels =
+        List.filter_map (fun le ->
+            match String.index_opt le.le_name '#' with
+            | Some i when List.mem (String.sub le.le_name 0 i) param_names -> Some le.le_name
+            | _ -> None) body_env.lin in
+      check_linear_all_consumed body_env ~scope_span:fn_span (param_names @ param_sentinels);
+      let pat_var_names = List.filter_map (function
+          | Ast.FPPat (Ast.PatVar n) -> Some n.txt
+          | _ -> None) clause.fc_params in
+      judge_pending body_env ~scope_span:fn_span
+        (List.filter (fun le -> List.mem le.le_name (param_names @ pat_var_names))
+           body_env.lin);
 
       (* Warn about unrestricted params not referenced in the body *)
       warn_unused_params env clause.fc_params clause.fc_body fn_span;
@@ -4253,7 +4701,14 @@ let rec check_decl env (d : Ast.decl) : env =
     let state_ty =
       let tvars = ref [] in
       let flds = List.map (fun (f : Ast.field) ->
-          (f.fld_name.txt, surface_ty env ~tvars f.fld_ty)) actor.actor_state in
+          (* Honour a `linear`/`affine` field qualifier, as a record type
+             declaration does; it used to be dropped here, so a qualified state
+             field was an ordinary one. *)
+          let fty = match f.fld_lin with
+            | Ast.Unrestricted -> f.fld_ty
+            | lin -> Ast.TyLinear (lin, f.fld_ty)
+          in
+          (f.fld_name.txt, surface_ty env ~tvars fty)) actor.actor_state in
       TRecord (List.sort (fun (a,_)(b,_) -> String.compare a b) flds)
     in
     (* Check for duplicate handler names — two `on Msg(...)` arms for the
@@ -4302,6 +4757,9 @@ let rec check_decl env (d : Ast.decl) : env =
     (* Check handlers with state and message params in scope *)
     List.iter (fun (h : Ast.actor_handler) ->
         let handler_env = bind_var "state" (Mono state_ty) env_with_ctors in
+        (* The state's linear fields are owned by [state] for the turn: see the
+           move-out rules at [record_whole_use]. *)
+        let handler_env = bind_linear_field_sentinels "state" state_ty handler_env in
         (* Shadow the global `self` builtin (registered as plain Int — see
            its definition above) with this actor's own Pid[state_ty], the
            same type `spawn(name)` produces for this actor elsewhere.  Only
@@ -4328,8 +4786,17 @@ let rec check_decl env (d : Ast.decl) : env =
         (* A linear parameter must be consumed by the time the handler returns.
            Storing it into the returned state counts: `{ state with st: s }`
            references `s`, which marks it used. *)
+        let handler_param_names =
+          List.map (fun (p : Ast.param) -> p.Ast.param_name.Ast.txt) h.ah_params in
+        let state_sentinels =
+          List.filter_map (fun le ->
+              if String.length le.le_name > 6 && String.sub le.le_name 0 6 = "state#"
+              then Some le.le_name else None) handler_env.lin in
         check_linear_all_consumed handler_env ~scope_span:h.ah_msg.Ast.span
-          (List.map (fun (p : Ast.param) -> p.Ast.param_name.Ast.txt) h.ah_params);
+          (handler_param_names @ state_sentinels);
+        judge_pending handler_env ~scope_span:h.ah_msg.Ast.span
+          (List.filter (fun le -> List.mem le.le_name handler_param_names)
+             handler_env.lin);
         let shadow_env = { handler_env with errors = Err.create () } in
         (* Note: pending_constraints and type_map are shared (shallow copy) —
            intentional; only error reporting is isolated. *)
@@ -6302,6 +6769,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
      enclosing fn/module context captured at record time). Shared ref → one sweep
      at the entry module covers every nested module's sites. *)
   check_mint_cap_sites final_env;
+  check_linear_instantiations final_env;
   check_cap_dict_decls final_env;
   check_cap_impl_sites final_env;
   check_json_cap_sites final_env;
