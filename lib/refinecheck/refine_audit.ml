@@ -624,11 +624,24 @@ let classify (site : site) : disposition =
       "an EAnnot expression annotation is not read by any refinement \
        extractor: EAnnot is produced only by desugar's DApp handling and is \
        never scope-checked"
-  | Actor_handler_param _ ->
-    Unenforced
-      "an actor handler parameter's declared type is never scope-checked: \
-       refined_param_ty is called only from a `fn`'s own parameter walk, \
-       never from an actor handler's"
+  | Actor_handler_param _ -> (
+    (* Since 2026-09-13 (plan phase 3) a handler's parameter refinement
+       obliges every construction of its message ([visit]'s [ECon] arm,
+       against [Refine_scope.collect_handler_sigs]), and the handler body
+       assumes it exactly then.  What [refined_param_ty] accepts is enforced;
+       a program-wide bare-name clash (another handler or a variant
+       constructor of the same name) withdraws the contract, fail closed —
+       a module-level fact this site cannot see, the same conservatism the
+       `impl`-method rule documents, accepted here because two handlers
+       sharing a message name is a shadowing the typechecker itself does not
+       flag. *)
+    match Refine_post.refined_param_ty (Some site.origin_ty) with
+    | Some _ -> Enforced
+    | None ->
+      Unenforced
+        "refined_param_ty does not accept this declared base type: only \
+         an Int, a String, a Bool, a Float, or a registered record/ADT \
+         base is scope-checked at a parameter")
   (* [origin] is set only by [start], which is called exclusively with a
      declaration-level position -- never with [Type_arg], [Arrow_domain] or
      [Arrow_codomain] (see [walk_ty]: those three are only ever passed as the

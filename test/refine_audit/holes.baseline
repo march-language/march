@@ -1,6 +1,5 @@
-holes_actor: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 2 unenforced
-holes_actor: coverage audit (user code): 0 enforced, 0 inert (warned), 2 unenforced
-holes_actor: coverage audit: test/refine_audit/holes/actor.march:12:28: actor handler `Increment` param #0: n > 0: an actor handler parameter's declared type is never scope-checked: refined_param_ty is called only from a `fn`'s own parameter walk, never from an actor handler's
+holes_actor: coverage audit (user + stdlib): 64 enforced, 0 inert (warned), 1 unenforced
+holes_actor: coverage audit (user code): 1 enforced, 0 inert (warned), 1 unenforced
 holes_actor: coverage audit: test/refine_audit/holes/actor.march:9:27: field `Counter.value`: value >= 0: a record (or actor-state) field's declared type is never re-examined once a value is constructed; the checker has no extractor for a stored field, only for a parameter, a return, or a let-binding
 holes_arrow_domain: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 1 unenforced
 holes_arrow_domain: coverage audit (user code): 0 enforced, 0 inert (warned), 1 unenforced

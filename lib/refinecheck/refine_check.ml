@@ -218,6 +218,25 @@ let callable_sig_of_actual (ctx : rctx) defs (cb : cbenv) (a : A.expr) : (string
 
 let fresh_cb_arg = "$cb_x"
 
+(* The module's enforced actor-handler contracts, message name -> signature
+   ([Refine_scope.collect_handler_sigs]).  Per module like [strict_verified]:
+   set by [check_module] before the walk, consulted by [visit]'s [ECon] arm
+   (the obligation) and [visit_decl]'s `DActor` arm (the assumption).  A name
+   absent here is either unrefined or withdrawn for a clash; both sides treat
+   absence the same way, so obligation and assumption can never disagree. *)
+let handler_sigs : (string, fn_sig) Hashtbl.t ref = ref (Hashtbl.create 1)
+
+(* A constructor spelled `M.Inc` resolves by its last segment: handler
+   messages are registered by bare name program-wide (and any bare-name
+   clash has already withdrawn the entry), so the qualifier adds nothing. *)
+let handler_sig_of_ctor (c : string) : fn_sig option =
+  let bare =
+    match String.rindex_opt c '.' with
+    | Some i -> String.sub c (i + 1) (String.length c - i - 1)
+    | None -> c
+  in
+  Hashtbl.find_opt !handler_sigs bare
+
 (* The scope entry for the symbolic argument, when passing a callable with
    signature [gsg] as argument [i] of a callee with signature [callee_sg] is a
    pass site this check covers; [None] otherwise.  A refined expected domain
@@ -290,7 +309,17 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
         | a, _ -> go a)
       args
   | A.EApp (f, args, _) -> go f; List.iter go args
-  | A.ECon (_, args, _) | A.EAtom (_, args, _) | A.ETuple (args, _) -> List.iter go args
+  (* Constructing an actor MESSAGE is the obligation site for its handler's
+     parameter refinements — see [Refine_scope.collect_handler_sigs].  A
+     message constructor is checked exactly like a call to the handler. *)
+  | A.ECon (c, args, sp) ->
+    (match handler_sig_of_ctor c.A.txt with
+     | Some sg ->
+       let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets; sc; re } in
+       List.iter (fun rp -> check_call cx ~span:sp ~callee:c.A.txt sg args rp) sg.refined
+     | None -> ());
+    List.iter go args
+  | A.EAtom (_, args, _) | A.ETuple (args, _) -> List.iter go args
   | A.EBlock (es, _) ->
     (* Thread the path context, the refined-local scope AND the callee env
        left-to-right: a `let` extends the scope (and, for a bare-alias RHS,
@@ -1314,16 +1343,21 @@ and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
     visit_expr ad.A.actor_init;
     List.iter
       (fun (h : A.actor_handler) ->
-        (* Handler parameters bind exactly like named function parameters —
-           but their REFINEMENTS are walked stripped, for the reason the
-           [A.ELam] arm of [visit] gives: no `send`/`call` constructing the
-           message is obliged by them yet (plan phase 3), so a body assuming
-           `n > 0` discharged obligations nobody proved. *)
+        (* Handler parameters bind exactly like named function parameters.
+           Their REFINEMENTS are assumed only when the message's contract is
+           enforced — every construction of `Msg(...)` in this program is
+           obliged through [handler_sigs] — and walked stripped otherwise
+           (a clashing name, see [Refine_scope.collect_handler_sigs]), the
+           rule phase 0 set for every unobliged position.
+
+           Stated trust boundary (plan decision (b)): a message that arrives
+           from a REMOTE node was constructed by code this compiler did not
+           check.  The assumption below is documented as that boundary in
+           specs/lang/refinement-types.md rather than withheld. *)
         let ps = List.map (fun p -> A.FPNamed p) h.A.ah_params in
-        let sc =
-          List.fold_left scope_add_fnparam []
-            (List.map (fun p -> A.FPNamed p) (strip_params_refinements h.A.ah_params))
-        in
+        let enforced = Hashtbl.mem !handler_sigs h.A.ah_msg.A.txt in
+        let assumed = if enforced then h.A.ah_params else strip_params_refinements h.A.ah_params in
+        let sc = List.fold_left scope_add_fnparam [] (List.map (fun p -> A.FPNamed p) assumed) in
         let re = List.fold_left recenv_add_fnparam [] ps in
         let cb = List.fold_left cb_add_fnparam [] ps in
         let ctx = local_shadow ctx (List.concat_map fnparam_binders ps) in
@@ -2226,6 +2260,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
       mfns
   end;
   let defs = collect_all_defs m.A.mod_decls in
+  handler_sigs := collect_handler_sigs m.A.mod_decls;
   (* Only POSITIVELY VERIFIED postconditions may be assumed at call sites. *)
   gate_unverified_posts ~root errctx defs m.A.mod_decls;
   (* Always walk: a function may have a refined *return* (postcondition) even

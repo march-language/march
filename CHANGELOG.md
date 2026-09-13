@@ -13,6 +13,15 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **An actor handler's parameter refinements are enforced.** `on Inc(n :
+  {Int | n > 0})` now obliges every construction of `Inc(...)` in the program
+  (`send`, `Actor.call`, or a message bound to a `let` first), so
+  `send(c, Inc(0 - 1))` is rejected where the message is built, and the
+  handler body assumes `n > 0`. A message name defined by two handlers or
+  shared with a variant constructor is neither obliged nor assumed (fail
+  closed). A message arriving from a remote node was built by code this
+  compiler did not check; the docs state that trust boundary.
+
 - **Passing a refined function is checked at the pass site, and a
   `let`-bound lambda's refinements are enforced.** `apply(take_n, -3)` with
   `fn apply(f : Int -> Int, x : Int)` and `take_n : {Int | _ >= 0} -> Int` is

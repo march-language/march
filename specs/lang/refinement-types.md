@@ -1795,19 +1795,21 @@ An empty baseline over real code is a true finding, not evidence the audit
 does nothing, but an audit that silently broke would also report an empty
 baseline, which is why a second, deliberately non-empty fixture set exists:
 `test/refine_audit/holes/`, one small program per known unenforced position
-(a non-adoptable `impl` method's parameter, an actor's state field and
-handler parameter, a nested field refinement, and a `{String | ...}` return;
-a fixture leaves the set when its position becomes enforced, as the
-block-level `fn` and lambda-parameter ones did on 2026-09-13),
+(a non-adoptable `impl` method's parameter, an actor's state field, a nested
+field refinement, and a `{String | ...}` return; a fixture leaves the set
+when its position becomes enforced, as the block-level `fn` and
+lambda-parameter ones did on 2026-09-13, and a line leaves a fixture the
+same way, as the actor fixture's handler-parameter line did),
 pinned at `test/refine_audit/holes.baseline`. If that baseline ever reports
 zero Unenforced sites, the audit itself is broken; the test that diffs it
 fails loudly rather than passing.
 
 The positions currently known to be Unenforced, none of which the corpus
 above happens to exercise. Unenforced cuts both ways: since 2026-09-13 the
-checker also walks an actor handler's body (and an escaping lambda's or
-block-level `fn`'s) with those parameter refinements *stripped* from scope,
-exactly as it already did for a non-adoptable `impl` method. Before that, the body assumed
+checker also walks an escaping lambda's or block-level `fn`'s body (and a
+handler's, when its message name clashes) with those parameter refinements
+*stripped* from scope, exactly as it already did for a non-adoptable `impl`
+method. Before that, the body assumed
 `n > 0` from a `fn (n : {Int | n > 0}) -> need(n)` while `g(0)` obliged
 nobody, and `cap verified` accepted the program. The plan that turns each
 position into a real contract, obligation and assumption together, is
@@ -1834,8 +1836,15 @@ position into a real contract, obligation and assumption together, is
   site cannot make that module-level judgement. When the method *is*
   adoptable the checker does enforce it, so this is a documented
   conservatism in the audit, not a hole in the checker.
-- An actor's state field, and a handler's own parameter: no extractor
-  exists for either.
+- An actor's state field: no extractor exists for a stored field.
+- (Closed 2026-09-13.) A handler's own parameter: `on Inc(n : {Int | n >
+  0})` obliges every construction of `Inc(...)` in the program (`send`,
+  `Actor.call`, a message bound to a `let` first), and the handler body
+  assumes `n > 0` exactly then. Fail closed: a message name defined by two
+  handlers, or shared with a variant constructor, is neither obliged nor
+  assumed. **Trust boundary:** a message arriving from a remote node was
+  built by code this compiler did not check; the handler's assumption is
+  stated here as that boundary, not enforced across it.
 - A record field or a variant constructor argument, once a value is
   constructed.
 - A refinement nested below the outermost position of a declared type.

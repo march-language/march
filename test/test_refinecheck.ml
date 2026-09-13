@@ -13687,7 +13687,11 @@ let unobliged_assume_suite =
         \    fn inner(n : Int) : Int do need(n) end\n\
         \    inner(0)\n\
         \  end\n";
-    pair "actor handler: `on Inc(n : {Int | n > 0})` does not assume n > 0"
+    (* Since phase 3 this half rejects for a DIFFERENT reason — `Inc(0 - 1)`
+       itself violates the handler's contract at the construction — and the
+       body legitimately assumes `n > 0`.  Kept as the pair it always was:
+       the control still rejects, and the refined half must never go green. *)
+    pair "actor handler: `on Inc(n : {Int | n > 0})` obliges the send that violates it"
       ~refined:
         "  actor Counter do\n\
         \    state { value : Int }\n\
@@ -13845,6 +13849,51 @@ let lambda_contract_suite =
           (contains text "its parameter refinement `_ >= 0`");
         Alcotest.(check bool) "names the callable" true (contains text "take_n")) ]
 
+(* ── Actor handler contracts (plan phase 3) ───────────────────────────────
+   `on Inc(n : {Int | n > 0})` obliges every CONSTRUCTION of `Inc(...)` in the
+   module (send, call, or a message bound first), and the handler body
+   assumes `n > 0` exactly when that obligation is in force.  A bare-name
+   clash (another handler or a variant constructor named `Inc`) withdraws
+   both sides, fail closed — the last case pins that from both sides. *)
+let actor_handler_suite =
+  let actor body =
+    "  actor Counter do\n\
+    \    state { value : Int }\n\
+    \    init { value: 0 }\n\
+    \    on Inc(n : {Int | n > 0}) do\n" ^ body ^ "    end\n  end\n"
+  in
+  let prog ?(extra = "") ~handler_body main =
+    "mod AH do\n  cap verified\n  fn need(k : {Int | k > 0}) : Int do k end\n"
+    ^ extra ^ actor handler_body ^ "  fn main() : Unit do\n    let c = spawn(Counter)\n"
+    ^ main ^ "    kill(c)\n  end\nend\n"
+  in
+  let plain_body = "      { state with value: n }\n" in
+  [ gated "sending a violating message is rejected at the construction" (fun () ->
+        Alcotest.(check bool) "Inc(0 - 1)" true
+          (has_refine_error_d (prog ~handler_body:plain_body "    let _ = send(c, Inc(0 - 1))\n"));
+        Alcotest.(check bool) "Inc(1)" false
+          (has_refine_error_d (prog ~handler_body:plain_body "    let _ = send(c, Inc(1))\n")));
+
+    gated "a message bound to a let first is checked where it is built" (fun () ->
+        Alcotest.(check bool) "let m = Inc(0 - 1)" true
+          (has_refine_error_d
+             (prog ~handler_body:plain_body "    let m = Inc(0 - 1)\n    let _ = send(c, m)\n")));
+
+    gated "the handler body assumes n > 0 once every construction is obliged" (fun () ->
+        Alcotest.(check bool) "need(n) discharged" false
+          (has_refine_error_d
+             (prog ~handler_body:"      { state with value: need(n) }\n" "    let _ = send(c, Inc(1))\n")));
+
+    gated "a clashing variant constructor withdraws BOTH obligation and assumption" (fun () ->
+        let extra = "  type Tok = Inc(Int) | Dec(Int)\n" in
+        Alcotest.(check bool) "Inc(0 - 1) is not obliged (fail closed)" false
+          (has_refine_error_d
+             (prog ~extra ~handler_body:plain_body "    let _ = send(c, Inc(0 - 1))\n"));
+        Alcotest.(check bool) "…and the body no longer assumes n > 0" true
+          (has_refine_error_d
+             (prog ~extra ~handler_body:"      { state with value: need(n) }\n"
+                "    let _ = send(c, Inc(1))\n"))) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -13931,4 +13980,5 @@ let () =
       ("const-fn-predicate", const_fn_suite);
       ("unobliged-assume", unobliged_assume_suite);
       ("local-fn-contract", local_fn_suite);
-      ("lambda-contract", lambda_contract_suite) ]
+      ("lambda-contract", lambda_contract_suite);
+      ("actor-handler-contract", actor_handler_suite) ]

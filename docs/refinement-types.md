@@ -1106,10 +1106,10 @@ machinery ran over an `ELam`'s parameters, so no call through it was ever
 obliged. A `let`-bound lambda is now a local function for the checker
 (direct calls obliged), and passing any refined callable is obliged at the
 pass site, so the position reports Enforced. Unenforced also cuts both ways:
-since the same date the body of an actor handler (and of a lambda or
-block-level `fn` that escapes as a value) is walked with its parameter
-refinements *stripped* from scope, the same treatment a non-adoptable
-`impl` method already got. Before that, the body
+since the same date the body of a lambda or block-level `fn` that escapes
+as a value (and of a handler whose message name clashes) is walked with its
+parameter refinements *stripped* from scope, the same treatment a
+non-adoptable `impl` method already got. Before that, the body
 assumed `n > 0` from `fn (n : {Int | n > 0}) -> need(n)` while `g(0)` obliged
 nobody, and `cap verified` accepted the program. The plan that turns each
 of these positions into a real contract, obligation and assumption together,
@@ -1126,7 +1126,7 @@ regenerated the same way the TIR golden snapshots are
 being empty is a true fact about today's corpus, not evidence the audit does
 nothing: `test/refine_audit/holes/` is a second, deliberately non-empty
 fixture set built from known holes (a non-adoptable `impl` method's
-parameter, an actor's state field and handler parameter, a nested field
+parameter, an actor's state field, a nested field
 refinement, and a `{String | ...}` return; a fixture leaves the set once its
 position is enforced, as the block-level `fn` and lambda-parameter ones did
 on 2026-09-13), pinned at
@@ -1158,8 +1158,15 @@ above happens to exercise:
   module-level judgement; when the method *is* actually adoptable the checker
   does enforce it, and this over-approximation is a documented conservatism,
   not a bug of its own.
-- An actor's state field, and a handler's own parameter. No extractor exists
-  for either.
+- An actor's state field. No extractor exists for a stored field.
+- (Closed 2026-09-13.) A handler's own parameter: `on Inc(n : {Int | n >
+  0})` obliges every construction of `Inc(...)` in the program (`send`,
+  `Actor.call`, a message bound to a `let` first), and the handler body
+  assumes `n > 0` exactly then. Fail closed: a message name defined by two
+  handlers, or shared with a variant constructor, is neither obliged nor
+  assumed. **Trust boundary:** a message arriving from a remote node was
+  built by code this compiler did not check; the handler's assumption is
+  stated here as that boundary, not enforced across it.
 - A record field or a variant constructor argument, once a value is
   constructed.
 - A refinement nested below the outermost position of a declared type (inside

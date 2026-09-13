@@ -1213,6 +1213,55 @@ let collect_all_defs (decls : A.decl list) : (string, fn_sig option) Hashtbl.t =
   go "" decls;
   tbl
 
+(* ── Actor handler contracts ───────────────────────────────────────────────
+   `on Inc(n : {Int | n > 0}) do ... end` declares a contract on the MESSAGE
+   `Inc(...)`: the typechecker registers each handler's message as an ordinary
+   constructor (`typecheck.ml`, the `DActor` arm of the env builder), so the
+   single place every route to the handler passes through — `send`,
+   `Actor.call`, a generated session endpoint, a message bound to a `let`
+   first — is the construction `Inc(x)` itself.  That is where [visit]'s
+   [ECon] arm files the obligation, against the signature built here.
+
+   Message constructors are registered by BARE name, program-wide, last one
+   wins.  So a name denotes one contract only when exactly one handler in the
+   whole decl tree defines it and no `type` variant constructor shares it;
+   any clash withdraws the name entirely — no caller obliged, and (see
+   [Refine_check.visit_decl]'s `DActor` arm) no handler body assuming.
+   Failing closed costs silence; failing open would check a user variant
+   `Inc(-1)` against an unrelated actor's predicate, the one failure this
+   subsystem must never have. *)
+let collect_handler_sigs (decls : A.decl list) : (string, fn_sig) Hashtbl.t =
+  let handlers : (string, fn_sig) Hashtbl.t = Hashtbl.create 16 in
+  let count : (string, int) Hashtbl.t = Hashtbl.create 16 in
+  let ctors : (string, unit) Hashtbl.t = Hashtbl.create 16 in
+  let bump n = Hashtbl.replace count n (1 + Option.value ~default:0 (Hashtbl.find_opt count n)) in
+  let rec go decls =
+    List.iter
+      (function
+        | A.DActor (_, _, ad, _) ->
+          List.iter
+            (fun (h : A.actor_handler) ->
+              bump h.A.ah_msg.A.txt;
+              let fd =
+                local_fn_def h.A.ah_msg h.A.ah_params None h.A.ah_body h.A.ah_msg.A.span
+              in
+              Hashtbl.replace handlers h.A.ah_msg.A.txt (sig_of_fn fd))
+            ad.A.actor_handlers
+        | A.DType (_, _, _, A.TDVariant vs, _) | A.DAlwaysLinearType (_, _, _, A.TDVariant vs, _) ->
+          List.iter (fun (v : A.variant) -> Hashtbl.replace ctors v.A.var_name.A.txt ()) vs
+        | A.DMod (_, _, ds, _) -> go ds
+        | _ -> ())
+      decls
+  in
+  go decls;
+  let out = Hashtbl.create 16 in
+  Hashtbl.iter
+    (fun n sg ->
+      if Hashtbl.find_opt count n = Some 1 && not (Hashtbl.mem ctors n) && sg.refined <> [] then
+        Hashtbl.replace out n sg)
+    handlers;
+  out
+
 (* Erase parameter refinements from [fd], leaving the return refinement alone.
    A stripped parameter contributes no fact to [scope], so a body checked with
    it can discharge nothing from a predicate no caller was obliged to

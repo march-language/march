@@ -74,3 +74,14 @@ in the audit's non-vacuity guard (`test/refine_audit/holes.baseline`).
 Actor state is exactly the kind of long-lived, mutated-in-place value a
 refinement is meant to protect (an invariant that must hold across every
 message), and today nothing enforces it.
+
+## 2026-09-13: the HANDLER half is closed (plan phase 3)
+
+`specs/progress/2026-09-13-actor-handler-param-refinement-enforced.md`. A
+handler's parameter refinement now obliges every construction of its message
+(`Refine_check.visit`'s `ECon` arm against `Refine_scope.collect_handler_sigs`)
+and the handler body assumes it exactly then. This file stays open for the
+STATE-FIELD half only, which is phase 4 of
+`specs/plans/2026-09-13-refinement-enforcement-holes-plan.md` (stored fields
+as an inductive invariant: `init` and every handler's result state checked as
+constructions, the incoming `state` assumed).
