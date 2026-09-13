@@ -592,6 +592,16 @@ type check_subject =
      satisfy precondition" would send the reader looking for an argument that
      was never written. *)
   | Callback_domain
+  (* A container-typed VARIABLE passed (or returned, or bound) where a
+     container with a refined element type is expected: `g(xs)` with
+     `xs : List({Int | _ >= 0})` and `g(ys : List({Int | _ > 0}))`.  The
+     obligation is element subtyping — the variable's own element refinement
+     must imply the expected one for every element — phrased as a check on a
+     fresh symbolic element `$elem` carrying the variable's refinement, so
+     it shares [Callback_domain]'s definite-failure rule: `$elem` has no
+     other constraint, so a model is a real element the caller may hold.
+     Container subtyping, 2026-09-13. *)
+  | Element_domain
 
 (* Span of an expression, for pointing a diagnostic at ONE argument instead of
    the whole call. [refinecheck] does not depend on [march_typecheck], so this
@@ -665,12 +675,14 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
     | Argument -> "argument"
     | Bound_expr -> "bound expression"
     | Callback_domain -> "expected function type's domain"
+    | Element_domain -> "container's elements"
   in
   let obligation_noun =
     match subject with
     | Argument -> "precondition"
     | Bound_expr -> "type annotation"
     | Callback_domain -> "its parameter refinement"
+    | Element_domain -> "the expected element refinement"
   in
   let name_pos = List.mapi (fun i n -> (n, i)) sg.param_names in
   (* A CALLER-scope name whose declared type is a record (see [recenv]).  Such a
@@ -790,7 +802,12 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
              "note: refine the domain of the expected function type so it \
               implies the passed function's own parameter refinement, weaken \
               that refinement, or remove `cap verified` from this module — it \
-              asks for every obligation to be discharged")
+              asks for every obligation to be discharged"
+           | Element_domain ->
+             "note: refine the container's declared element type so it implies \
+              the expected element refinement, build the container from \
+              elements the checker can see, or remove `cap verified` from this \
+              module — it asks for every obligation to be discharged")
       in
       Err.error errctx ~span
         (Printf.sprintf
@@ -2197,7 +2214,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
              holds, which is always. *)
           let definite =
             match subject, first with
-            | Callback_domain, Refine.Refuted _ -> true
+            | (Callback_domain | Element_domain), Refine.Refuted _ -> true
             | _ -> false
           in
           (match
@@ -2220,6 +2237,8 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                | Callback_domain, _ ->
                  Printf.sprintf
                    "the expected function type's domain, where `%s` is passed," callee
+               | Element_domain, _ ->
+                 Printf.sprintf "an element of the container passed as `%s`" callee
              in
              (* Point at the offending argument itself. The call span covers the
                 whole expression, which on a multi-argument call underlines
@@ -2277,6 +2296,12 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                          if that type's domain implies the function's own parameter \
                          refinement for EVERY value — refine the expected domain so it \
                          implies `%s`, or weaken the passed function's refinement"
+                        (pred_str rp.pred)
+                    | Element_domain ->
+                      Printf.sprintf
+                        "note: a container flows into a position expecting `%s` of every \
+                         element only if its own element refinement implies it — refine \
+                         the container's declared element type, or weaken the expected one"
                         (pred_str rp.pred));
                  labels; notes = []; code = None; fix = None }
            | _ ->
