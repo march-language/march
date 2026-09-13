@@ -345,7 +345,16 @@ type scope = (string * (string * A.expr * string option)) list
    1-constructor ADT, so [is_adt_base] already admits `{v : Config | v.port >=
    1}` and hands back the same `M_Config` sort name the record path in
    [check_call] keys on (see [is_record_sort]). *)
-let refined_param_ty : A.ty option -> (string * A.expr * string option) option = function
+(* A linearity wrapper is transparent to a VALUE's refinement: `linear {Int |
+   _ > 0}` promises `_ > 0` of the same Int.  Every extractor below strips it
+   first (plan phase 4); before that a refinement under `linear` parsed,
+   typechecked, and obliged nobody. *)
+let rec unlinear : A.ty -> A.ty = function
+  | A.TyLinear (_, t) -> unlinear t
+  | t -> t
+
+let refined_param_ty : A.ty option -> (string * A.expr * string option) option = fun t ->
+  match Option.map unlinear t with
   | Some (A.TyRefine (base, binder, pred)) when is_int_base base ->
     Some (binder_name binder, pred, None)
   | Some (A.TyRefine (base, binder, pred)) when is_string_base base ->
@@ -370,7 +379,7 @@ let refined_param_ty : A.ty option -> (string * A.expr * string option) option =
    [check_post_induction] — which applies the structural induction hypothesis
    under [structural_subvars]. *)
 let return_refine_sorted (fd : A.fn_def) : (string * A.expr * string option) option =
-  match fd.A.fn_ret_ty with
+  match Option.map unlinear fd.A.fn_ret_ty with
   | Some (A.TyRefine (base, binder, pred)) when is_int_base base ->
     Some (binder_name binder, pred, None)
   | Some (A.TyRefine (base, binder, pred)) when is_bool_base base ->
@@ -409,6 +418,7 @@ let callback_sig_of_ty (t : A.ty) : fn_sig option =
          { param_names = [ callback_param_name ]
          ; param_str = [ sort = Some str_sort ]
          ; param_scalar = [ scalar_sort_or_int sort ]
+         ; param_tys = [ Some dom ]
          ; refined = [ { idx = 0; binder; pred; sort } ]
          ; ret = None
          ; ret_sort = None
@@ -442,7 +452,8 @@ let scalar_sort_of_param_ty (t : A.ty option) : Smt.sort =
    None for an Int.  NOTE for consumers: `Some _` does NOT mean "record" —
    check against [str_sort], and against [is_meas_sort], before taking a
    record-specific path. *)
-let refined_scope_ty : A.ty option -> (string * A.expr * string option) option = function
+let refined_scope_ty : A.ty option -> (string * A.expr * string option) option = fun t ->
+  match Option.map unlinear t with
   | Some (A.TyRefine (base, binder, pred)) when is_int_base base ->
     Some (binder_name binder, pred, None)
   | Some (A.TyRefine (base, binder, pred)) when is_string_base base ->
@@ -538,6 +549,63 @@ let rec expr_mentions (names : string list) (e : A.expr) : bool =
   | A.EPipe (a, b, _) | A.ESend (a, b, _) -> expr_mentions names a || expr_mentions names b
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _)
   | A.EDbg (Some e, _) -> expr_mentions names e
+
+(* Does the local function [n] ESCAPE in [e] — occur anywhere other than as
+   the head of a call `n(...)`?  Passed as a value (`apply(n, 0)`), returned,
+   stored in a tuple, aliased by a `let`: all escapes.  A call through the
+   escaped value is not obliged by [n]'s own parameter refinements (only a
+   direct `n(...)` reaches the [cbenv] entry [visit] registers), so a body
+   that ASSUMED them would be assume-without-check exactly as before phase 0.
+   [visit] restores the assumption only when this is false for the body and
+   for every later statement of the enclosing block.
+
+   [pass_checked callee i] is the one exception: passing [n] as argument [i]
+   of a call to [callee] is NOT an escape when the caller tells us the pass
+   site is itself obliged — [Refine_check.visit]'s contravariant check proved
+   (or reported) that [callee]'s declared domain there implies [n]'s own
+   parameter refinement, so a call through that copy is covered.  Defaults
+   to "never", the conservative answer.
+
+   Deliberately OVER-approximate like [expr_mentions]: a rebinding of the
+   same name and every occurrence under it count as escapes.  Over-reporting
+   an escape only STRIPS an assumption (silence), never invents one. *)
+let rec name_escapes ?(pass_checked : string -> int -> bool = fun _ _ -> false) (n : string)
+    (e : A.expr) : bool =
+  let esc = name_escapes ~pass_checked n in
+  let any = List.exists esc in
+  match e with
+  | A.EApp (A.EVar m, args, _) when m.A.txt = n -> any args
+  | A.EApp (A.EVar f, args, _) ->
+    List.exists
+      (fun (i, a) ->
+        match a with
+        | A.EVar m when m.A.txt = n -> not (pass_checked f.A.txt i)
+        | a -> esc a)
+      (List.mapi (fun i a -> (i, a)) args)
+  | A.EVar m -> m.A.txt = n
+  | A.ELit _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> false
+  | A.EApp (f, args, _) -> esc f || any args
+  | A.ECon (_, args, _) | A.EAtom (_, args, _) | A.ETuple (args, _) -> any args
+  | A.ELam (_, body, _) -> esc body
+  | A.EBlock (es, _) -> any es
+  | A.ELet (b, _) -> esc b.A.bind_expr
+  | A.ELetFn (_, _, _, body, _) -> esc body
+  | A.ELetQ (_, e1, e2, _) | A.ELetStar (_, e1, e2, _) -> esc e1 || esc e2
+  | A.EMatch (subj, brs, _) ->
+    esc subj
+    || List.exists
+         (fun (br : A.branch) ->
+           (match br.A.branch_guard with Some g -> esc g | None -> false)
+           || esc br.A.branch_body)
+         brs
+  | A.ERecord (fs, _) -> List.exists (fun (_, v) -> esc v) fs
+  | A.ERecordUpdate (r, fs, _) -> esc r || List.exists (fun (_, v) -> esc v) fs
+  | A.EField (r, _, _) -> esc r
+  | A.EIf (c, t, el, _) -> any [ c; t; el ]
+  | A.ECond (arms, _) -> List.exists (fun (c, b) -> esc c || esc b) arms
+  | A.EPipe (a, b, _) | A.ESend (a, b, _) -> esc a || esc b
+  | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _)
+  | A.EDbg (Some e, _) -> esc e
 
 (* Does [e] mention [m] FREE — an occurrence not captured by an intervening
    binder of the same name?
@@ -1004,7 +1072,8 @@ let sig_of_clause (c : A.fn_clause) : fn_sig =
               | None -> None)
            | A.FPPat _ -> None)
   in
-  { param_names; param_str; param_scalar; refined; ret = None; ret_sort = None }
+  let param_tys = List.map param_ty_of c.A.fc_params in
+  { param_names; param_str; param_scalar; param_tys; refined; ret = None; ret_sort = None }
 
 (* Every function definition keyed by its fully-qualified name (e.g. "A.B.foo"),
    mapping to Some sig when it carries a refinement, None when it does not.
@@ -1017,18 +1086,41 @@ let sig_of_fn (fd : A.fn_def) : fn_sig =
     match fd.A.fn_clauses with
     | c :: _ -> sig_of_clause c
     | [] ->
-      { param_names = []; param_str = []; param_scalar = []; refined = []
+      { param_names = []; param_str = []; param_scalar = []; param_tys = []; refined = []
       ; ret = None; ret_sort = None }
   in
   match return_refine_sorted fd with
   | Some (b, p, srt) -> { base with ret = Some (b, p); ret_sort = srt }
   | None -> { base with ret = None; ret_sort = None }
 
+(* A block-level `fn n(ps) : ret do body end` ([A.ELetFn]) as the [A.fn_def]
+   every piece of function-level machinery consumes — [sig_of_fn] for its
+   callers' obligations, [check_fn_post_verdict] for its return refinement,
+   [strip_param_refinements] when the local escapes.  One clause, no guard,
+   no attributes: that is all the surface syntax of a local function admits.
+   Both spans are the [ELetFn]'s own; a diagnostic about the local's return
+   points at the whole definition, which is where the contract is written. *)
+let local_fn_def (n : A.name) (ps : A.param list) (ret_ty : A.ty option) (body : A.expr)
+    (sp : A.span) : A.fn_def =
+  { A.fn_name = n; fn_vis = A.Private; fn_doc = None; fn_attrs = []; fn_ret_ty = ret_ty
+  ; fn_clauses =
+      [ { A.fc_params = List.map (fun p -> A.FPNamed p) ps; fc_guard = None; fc_body = body
+        ; fc_span = sp; fc_params_span = sp } ]
+  ; fn_bounds = [] }
+
 (* Record the signature when EITHER side carries a refinement: a function with
    only a refined *return* must be resolvable so its postcondition reaches call
    sites, even though it has no refined params of its own to check. *)
+let has_arrow_param (sg : fn_sig) : bool =
+  List.exists (function Some (A.TyArrow _) -> true | _ -> false) sg.param_tys
+
+(* …and when a parameter is FUNCTION-typed (`apply(f : Int -> Int, x)`):
+   such a signature carries no obligation of its own ([refined] is empty, so
+   every consumer that iterates it does nothing), but the pass-site check in
+   [Refine_check.visit] needs the arrow's domain to oblige whoever passes a
+   refined callable there — see [fn_sig.param_tys]. *)
 let entry_of_sig (sg : fn_sig) : fn_sig option =
-  if sg.refined <> [] || Option.is_some sg.ret then Some sg else None
+  if sg.refined <> [] || Option.is_some sg.ret || has_arrow_param sg then Some sg else None
 
 (* ── Which `impl` method contracts may be trusted ──────────────────────────
    An `impl` method is callable under the enclosing module's spelling exactly
@@ -1131,19 +1223,202 @@ let collect_all_defs (decls : A.decl list) : (string, fn_sig option) Hashtbl.t =
   go "" decls;
   tbl
 
+(* ── Actor handler contracts ───────────────────────────────────────────────
+   `on Inc(n : {Int | n > 0}) do ... end` declares a contract on the MESSAGE
+   `Inc(...)`: the typechecker registers each handler's message as an ordinary
+   constructor (`typecheck.ml`, the `DActor` arm of the env builder), so the
+   single place every route to the handler passes through — `send`,
+   `Actor.call`, a generated session endpoint, a message bound to a `let`
+   first — is the construction `Inc(x)` itself.  That is where [visit]'s
+   [ECon] arm files the obligation, against the signature built here.
+
+   Message constructors are registered by BARE name, program-wide, last one
+   wins.  So a name denotes one contract only when exactly one handler in the
+   whole decl tree defines it and no `type` variant constructor shares it;
+   any clash withdraws the name entirely — no caller obliged, and (see
+   [Refine_check.visit_decl]'s `DActor` arm) no handler body assuming.
+   Failing closed costs silence; failing open would check a user variant
+   `Inc(-1)` against an unrelated actor's predicate, the one failure this
+   subsystem must never have. *)
+let collect_handler_sigs (decls : A.decl list) : (string, fn_sig) Hashtbl.t =
+  let handlers : (string, fn_sig) Hashtbl.t = Hashtbl.create 16 in
+  let count : (string, int) Hashtbl.t = Hashtbl.create 16 in
+  let ctors : (string, unit) Hashtbl.t = Hashtbl.create 16 in
+  let bump n = Hashtbl.replace count n (1 + Option.value ~default:0 (Hashtbl.find_opt count n)) in
+  let rec go decls =
+    List.iter
+      (function
+        | A.DActor (_, _, ad, _) ->
+          List.iter
+            (fun (h : A.actor_handler) ->
+              bump h.A.ah_msg.A.txt;
+              let fd =
+                local_fn_def h.A.ah_msg h.A.ah_params None h.A.ah_body h.A.ah_msg.A.span
+              in
+              Hashtbl.replace handlers h.A.ah_msg.A.txt (sig_of_fn fd))
+            ad.A.actor_handlers
+        | A.DType (_, _, _, A.TDVariant vs, _) | A.DAlwaysLinearType (_, _, _, A.TDVariant vs, _) ->
+          List.iter (fun (v : A.variant) -> Hashtbl.replace ctors v.A.var_name.A.txt ()) vs
+        | A.DMod (_, _, ds, _) -> go ds
+        | _ -> ())
+      decls
+  in
+  go decls;
+  let out = Hashtbl.create 16 in
+  Hashtbl.iter
+    (fun n sg ->
+      if Hashtbl.find_opt count n = Some 1 && not (Hashtbl.mem ctors n) && sg.refined <> [] then
+        Hashtbl.replace out n sg)
+    handlers;
+  out
+
+(* ── Stored-field contracts ────────────────────────────────────────────────
+   `type Box = { v : {Int | _ > 0} }`, `type W = W({Int | _ > 0})`, and an
+   actor's `state { value : {Int | value >= 0} }` each declare a contract on a
+   CONSTRUCTION: every record literal, `{ r with ... }` update, or constructor
+   application that builds the value must establish the field's predicate,
+   and every reader of a stored field may assume it.  The obligation side is
+   phrased as a call to a synthesised "constructor signature" — one parameter
+   per field, in declaration order, refined where the field is — so
+   [check_call] does the work unchanged; the assumption side is
+   [field_facts], pushed into the path context whenever a variable of that
+   type enters scope ([recenv] is the trigger, since it already tracks
+   exactly those variables).
+
+   Keyed by the CONSTRUCTOR's bare name: a record's is its type name, an
+   actor's its own name, a variant's the constructor's.  Fail closed on any
+   clash — two constructors, or a constructor and an actor message, sharing
+   a name withdraw the contract entirely (neither obliged nor assumed),
+   exactly as [collect_handler_sigs] does. *)
+let ctor_sig_of_fields (ctor : A.name) (fields : (string * A.ty) list) : fn_sig =
+  (* A field's binder is normalised to `_`.  `value : {Int | value >= 0}` names
+     its binder after the field itself, and inside [check_call] a binder that
+     is also the parameter's name collides with the projected actual
+     `state.value`: the obligation on `{ state with value: state.value }` came
+     back undecided while the identical predicate over `_` proved.  The
+     rewrite is exact — the binder is bound by the refinement, so renaming it
+     changes nothing the predicate says — and keeps this contract on the path
+     every other `_`-bound refinement already takes. *)
+  let anon (t : A.ty) : A.ty =
+    match unlinear t with
+    | A.TyRefine (base, Some b, pred) ->
+      A.TyRefine (base, None, subst_params [ (b.A.txt, A.EVar { A.txt = "_"; A.span = b.A.span }) ] pred)
+    | t -> t
+  in
+  let ps =
+    List.map
+      (fun (n, t) ->
+        A.FPNamed { A.param_name = { A.txt = n; A.span = ctor.A.span }; param_ty = Some (anon t)
+                  ; param_lin = A.Unrestricted })
+      fields
+  in
+  sig_of_clause
+    { A.fc_params = ps; fc_guard = None; fc_body = A.ELit (A.LitBool true, ctor.A.span)
+    ; fc_span = ctor.A.span; fc_params_span = ctor.A.span }
+
+type ctor_sigs = {
+  by_ctor : (string, fn_sig) Hashtbl.t;
+      (* constructor name -> signature; only REFINED, unambiguous ones *)
+  by_fields : (string list, string) Hashtbl.t;
+      (* sorted field-name set -> the unique record/actor constructor with
+         exactly those fields, for typing a bare literal `{ v: 0 }`; absent
+         when two types share the shape (fail closed) *)
+}
+
+let collect_ctor_sigs (decls : A.decl list) : ctor_sigs =
+  let all : (string, fn_sig) Hashtbl.t = Hashtbl.create 32 in
+  let count : (string, int) Hashtbl.t = Hashtbl.create 32 in
+  let shapes : (string list, string list) Hashtbl.t = Hashtbl.create 32 in
+  let bump n = Hashtbl.replace count n (1 + Option.value ~default:0 (Hashtbl.find_opt count n)) in
+  let add_record (name : A.name) (fields : A.field list) =
+    bump name.A.txt;
+    let fs = List.map (fun (f : A.field) -> (f.A.fld_name.A.txt, f.A.fld_ty)) fields in
+    Hashtbl.replace all name.A.txt (ctor_sig_of_fields name fs);
+    let key = List.sort compare (List.map fst fs) in
+    Hashtbl.replace shapes key (name.A.txt :: Option.value ~default:[] (Hashtbl.find_opt shapes key))
+  in
+  let rec go decls =
+    List.iter
+      (function
+        | A.DType (_, name, _, A.TDRecord fields, _)
+        | A.DAlwaysLinearType (_, name, _, A.TDRecord fields, _) -> add_record name fields
+        | A.DActor (_, name, ad, _) ->
+          add_record name ad.A.actor_state;
+          List.iter (fun (h : A.actor_handler) -> bump h.A.ah_msg.A.txt) ad.A.actor_handlers
+        | A.DType (_, _, _, A.TDVariant vs, _) | A.DAlwaysLinearType (_, _, _, A.TDVariant vs, _) ->
+          List.iter
+            (fun (v : A.variant) ->
+              bump v.A.var_name.A.txt;
+              let fs = List.mapi (fun i t -> (Printf.sprintf "$%d" i, t)) v.A.var_args in
+              Hashtbl.replace all v.A.var_name.A.txt (ctor_sig_of_fields v.A.var_name fs))
+            vs
+        | A.DMod (_, _, ds, _) -> go ds
+        | _ -> ())
+      decls
+  in
+  go decls;
+  let by_ctor = Hashtbl.create 32 in
+  Hashtbl.iter
+    (fun n sg ->
+      if Hashtbl.find_opt count n = Some 1 && sg.refined <> [] then Hashtbl.replace by_ctor n sg)
+    all;
+  let by_fields = Hashtbl.create 32 in
+  Hashtbl.iter
+    (fun key names -> match names with [ n ] -> Hashtbl.replace by_fields key n | _ -> ())
+    shapes;
+  { by_ctor; by_fields }
+
+(* The facts a variable [x] of a refined record/actor type contributes:
+   each refined field's predicate with the binder replaced by `x.field`,
+   which the path translator reflects through the sort's selector
+   ([path_resolve_field]).  Pushed as ordinary path facts, so the shadow
+   discipline that retires a fact when [x] is rebound applies unchanged. *)
+let field_facts (x : string) ~(span : A.span) (sg : fn_sig) : (A.expr * bool) list =
+  List.map
+    (fun rp ->
+      let fname = List.nth sg.param_names rp.idx in
+      let proj = A.EField (A.EVar { A.txt = x; A.span = span }, { A.txt = fname; A.span = span }, span) in
+      (* Both spellings of the subject: the binder (`_`, or a declared one),
+         AND the field's own name used free — `value : {Int | value >= 0}`
+         has binder [None] and refers to `value` exactly as `k : {Int | k >
+         0}` refers to its parameter, which [check_call] resolves through
+         [param_names]; a fact built here must resolve it the same way or
+         it mentions an unbound `value` and is silently dropped. *)
+      (subst_params [ (rp.binder, proj); (fname, proj) ] rp.pred, false))
+    sg.refined
+
+(* The constructor a [recenv] sort name denotes, when it is a record/actor. *)
+let ctor_of_sort (sort : string) : string option =
+  match Hashtbl.find_opt adt_ctors sort with
+  | Some [ ctor ] when Hashtbl.mem ctor_field_names ctor -> Some ctor
+  | _ -> None
+
 (* Erase parameter refinements from [fd], leaving the return refinement alone.
    A stripped parameter contributes no fact to [scope], so a body checked with
    it can discharge nothing from a predicate no caller was obliged to
    establish.  The return refinement is CHECKED rather than assumed, so it
    stays: dropping it would lose a real check, and checking it against the
    original (unstripped) parameters is what [visit_fn] keeps doing. *)
-let strip_param_refinements (fd : A.fn_def) : A.fn_def =
+let strip_param_refinement (p : A.param) : A.param =
   let rec strip = function
     | A.TyRefine (t, _, _) -> strip t
     | A.TyLinear (l, t) -> A.TyLinear (l, strip t)
     | t -> t
   in
-  let param (p : A.param) = { p with A.param_ty = Option.map strip p.A.param_ty } in
+  { p with A.param_ty = Option.map strip p.A.param_ty }
+
+(* The same erasure over a bare [A.param list] — a lambda's or an actor
+   handler's parameters, which carry no [fn_def].  Used by [visit] for exactly
+   the reason [strip_param_refinements] exists: until every construction of a
+   call through that binder is obliged (see
+   specs/plans/2026-09-13-refinement-enforcement-holes-plan.md), a refinement
+   declared there is assume-without-check, and `cap verified` accepted
+   `need(0)` through `let g = fn (n : {Int | n > 0}) -> need(n)  g(0)`. *)
+let strip_params_refinements (ps : A.param list) : A.param list =
+  List.map strip_param_refinement ps
+
+let strip_param_refinements (fd : A.fn_def) : A.fn_def =
+  let param = strip_param_refinement in
   let fp = function
     | A.FPNamed p -> A.FPNamed (param p)
     | A.FPDefault (p, e) -> A.FPDefault (param p, e)

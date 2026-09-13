@@ -1100,10 +1100,20 @@ obligation and a not-yet-filed obligation are different questions), and the
 audit stays consistent with it rather than inventing a second, incompatible
 notion of "checked."
 
-Contrast that with a lambda's own parameter (`fn (n : {Int | n > 0}) -> n`):
-no scope machinery ever runs over an `ELam`'s parameters at all, so *no*
-call through that lambda, ever, is obliged by it. That is genuinely
-Unenforced, not just uncalled.
+A lambda's own parameter (`fn (n : {Int | n > 0}) -> n`) was the textbook
+"genuinely Unenforced, not just uncalled" case until 2026-09-13: no scope
+machinery ran over an `ELam`'s parameters, so no call through it was ever
+obliged. A `let`-bound lambda is now a local function for the checker
+(direct calls obliged), and passing any refined callable is obliged at the
+pass site, so the position reports Enforced. Unenforced also cuts both ways:
+since the same date the body of a lambda or block-level `fn` that escapes
+as a value (and of a handler whose message name clashes) is walked with its
+parameter refinements *stripped* from scope, the same treatment a
+non-adoptable `impl` method already got. Before that, the body
+assumed `n > 0` from `fn (n : {Int | n > 0}) -> need(n)` while `g(0)` obliged
+nobody, and `cap verified` accepted the program. The plan that turns each
+of these positions into a real contract, obligation and assumption together,
+is `specs/plans/2026-09-13-refinement-enforcement-holes-plan.md`.
 
 ### Where the current baseline stands
 
@@ -1115,10 +1125,13 @@ regenerated the same way the TIR golden snapshots are
 (`UPDATE_SNAPSHOTS=1 ./_build/default/test/test_refinecheck.exe -e`). It
 being empty is a true fact about today's corpus, not evidence the audit does
 nothing: `test/refine_audit/holes/` is a second, deliberately non-empty
-fixture set built from known holes (a lambda's own parameter, a block-level
-`fn`'s parameter and return, a non-adoptable `impl` method's parameter, an
-actor's state field and handler parameter, a nested field refinement, and a
-`{String | ...}` return), pinned at `test/refine_audit/holes.baseline`. If
+fixture set built from known holes (a non-adoptable `impl` method's
+parameter, a refinement inside a type argument, a `{String | ...}` return,
+and the two desugar-dropped shapes; a fixture leaves the set once its
+position is enforced, as the block-level `fn`, lambda-parameter,
+nested-field, variant-argument, `linear`-wrapper and actor ones did on
+2026-09-13), pinned at
+`test/refine_audit/holes.baseline`. If
 that second baseline ever reported zero Unenforced sites, the audit itself
 would be broken, not the corpus; the test that diffs it fails loudly with
 exactly that message rather than passing vacuously.
@@ -1126,10 +1139,18 @@ exactly that message rather than passing vacuously.
 The positions currently known to be Unenforced, none of which the corpus
 above happens to exercise:
 
-- A lambda's own parameter (`fn (n : {Int | n > 0}) -> ...`).
-- A block-level `fn`'s own parameter and return type. `check_fn_post_verdict`
-  and `scope_add_param` are only reached through `A.DFn` / `A.DImpl`, never
-  through a local `A.ELetFn`.
+- (Closed 2026-09-13.) A lambda's own parameter (`fn (n : {Int | n > 0}) ->
+  ...`): a `let`-bound lambda obliges its direct callers like a block-level
+  `fn`, and passing any refined callable is obliged at the pass site. A
+  lambda returned or stored, and called later through a field, is the same
+  gap a top-level function has.
+- (Closed 2026-09-13.) A block-level `fn`'s own parameter and return type are
+  now enforced: every direct `inner(...)` after the definition and every
+  recursive call inside it is obliged, and the return refinement is verified
+  against the body. The body assumes its parameter refinements only while
+  `inner` never escapes callee position (returned, aliased, or passed where
+  the pass-site check cannot oblige it); an escaping local is checked with
+  them stripped.
 - An `impl` method's parameter, when the method's bare name is not adoptable
   (more than one `impl` defines it, or a top-level `fn` shares the name):
   `visit_decl` strips the refinement from the body in that case, and no
@@ -1138,13 +1159,32 @@ above happens to exercise:
   module-level judgement; when the method *is* actually adoptable the checker
   does enforce it, and this over-approximation is a documented conservatism,
   not a bug of its own.
-- An actor's state field, and a handler's own parameter. No extractor exists
-  for either.
-- A record field or a variant constructor argument, once a value is
-  constructed.
-- A refinement nested below the outermost position of a declared type (inside
-  a type argument, an arrow side, a tuple element, or a second layer of a
-  stacked refinement).
+- (Closed 2026-09-13.) An actor's state field: an inductive invariant. The
+  state's refined fields are obliged at `init` and at every handler's result
+  (an update `{ state with ... }`, or a fresh literal at a tail), and assumed
+  of the incoming `state` in every handler body.
+- (Closed 2026-09-13.) A handler's own parameter: `on Inc(n : {Int | n >
+  0})` obliges every construction of `Inc(...)` in the program (`send`,
+  `Actor.call`, a message bound to a `let` first), and the handler body
+  assumes `n > 0` exactly then. Fail closed: a message name defined by two
+  handlers, or shared with a variant constructor, is neither obliged nor
+  assumed. **Trust boundary:** a message arriving from a remote node was
+  built by code this compiler did not check; the handler's assumption is
+  stated here as that boundary, not enforced across it.
+- (Closed 2026-09-13.) A record field or a variant constructor argument:
+  every construction is obliged — a record literal (typed by its field set;
+  two types of one shape make it ambiguous and it is not obliged, fail
+  closed), an update `{ r with f: e }` for the updated fields, a constructor
+  application `W(e)` — and every reader of the field through a
+  record-typed variable assumes it. A `linear` wrapper is transparent.
+  Program-wide, two constructors (or a constructor and an actor message)
+  sharing a name withdraw the contract, neither obliged nor assumed.
+- A refinement nested below the outermost position of a declared type inside
+  a type argument (`List({Int | _ > 0})`, which needs container subtyping),
+  an arrow side, a tuple element, or a second layer of a stacked refinement.
+  A refinement one layer down at a record field, a constructor argument, or
+  an actor state field is enforced (see above), and a `linear` wrapper is
+  transparent.
 - A `{String | ...}` return type: `return_refine_ext` only recognizes Int,
   Bool, Float, and record bases.
 - A parameter refinement that desugar drops or relocates before the audit
@@ -1152,7 +1192,6 @@ above happens to exercise:
   function's mangled arity variant. See the next section.
 
 See `specs/todos/2026-09-03-lambda-param-refinement-unchecked.md`,
-`specs/todos/2026-09-03-block-fn-refinement-unchecked.md`,
 `specs/todos/2026-09-03-impl-method-param-refinement-unchecked.md`,
 `specs/todos/2026-09-03-actor-state-and-handler-refinement-unchecked.md`,
 `specs/todos/2026-09-01-nested-refinement-enforcement.md`,
@@ -1588,15 +1627,20 @@ dependent typing. Know the edges:
   every true property; quantified/measure facts in particular sometimes return
   "unknown" and are skipped. This never produces a false positive, but it does
   mean some real guarantees go unchecked.
-- **Higher-order: two shapes are checked, the rest are not.** A call made
-  through a parameter with a declared type that includes a refinement
+- **Higher-order: calls and passes are checked, inference is not.** A call
+  made through a parameter with a declared type that includes a refinement
   (`f : ({Int | _ >= 0}) -> Int`) is checked, and so is a call through a local
-  alias of a named refined function (`let g = takepos` then `g(-3)`). NOT
-  checked: a callback parameter with an unrefined declared type (so
-  `apply(take_n, -3)` with `apply(f : Int -> Int, x : Int)` still passes),
-  inferring a higher-order function's requirement from its body, dispatch
-  through an `interface`/`impl`, and multi-argument callback types. To
-  constrain a caller today, refine the higher-order function's *own* parameter.
+  alias of a named refined function (`let g = takepos` then `g(-3)`), a
+  `let`-bound lambda, or a block-level `fn`. Passing a refined callable where
+  a function type is expected is checked at the *pass site*: the expected
+  domain must imply the callable's own parameter refinement for every value,
+  so `apply(take_n, -3)` with `apply(f : Int -> Int, x : Int)` is rejected at
+  the pass of `take_n` (`Int` promises nothing; witness `-1`), and so is
+  passing a refined function to a generic combinator such as `List.map`. NOT
+  checked: inferring a higher-order function's requirement from its body,
+  dispatch through an `interface`/`impl`, and multi-parameter callables
+  (neither obliged nor assumed). To pass a refined function, refine the
+  higher-order function's *own* parameter to a domain that implies it.
 - **Measures see structure, not elements.** Element values inside a data
   structure are opaque to a measure (`size`/`len`/`depth` never inspect them).
   Measures are single-argument, recursive over structure, and return `Int`/`Bool`.

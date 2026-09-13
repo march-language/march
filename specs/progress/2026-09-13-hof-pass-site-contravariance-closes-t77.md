@@ -5,3 +5,19 @@
 ## 2026-08-04 disposition
 
 Reviewed as part of the refinement-types completion plan. This item is not actionable in its current form: completing it requires substantial type-system work. The requirement is verified by an existing passing witness (`accept/t77_refine_hof_bypass_limitation`) and already documented in `specs/lang/refinement-types.md`'s "Limitations" section. Closing this item would require either implementing contravariant subtyping at the call site or inferring `apply`'s own precondition from its body — both are architectural decisions beyond the scope of current refinement-type hardening. **Unblock condition:** a decision to pursue contravariant subtyping at the pass site (or equivalent type-system extension).
+
+## Closed 2026-09-13 (plan phase 2)
+
+Decision (a) of `specs/plans/2026-09-13-refinement-enforcement-holes-plan.md`
+chose contravariant subtyping at the pass site, and phase 2 implemented it
+(`specs/progress/2026-09-13-lambda-param-refinement-enforced.md` has the
+mechanism). `apply(take_n, -3)` through `f : Int -> Int` is now REJECTED at
+the pass of `take_n`: `Int` promises nothing, so `true ⇒ _ >= 0` is refuted
+with witness `-1`. The witness moved from
+`specs/lang/types/accept/t77_refine_hof_bypass_limitation.march` to
+`specs/lang/types/reject/t77_refine_hof_pass_site_rejected.march`, and the
+prose in `specs/lang/refinement-types.md`, `docs/refinement-types.md` and
+`specs/lang/core-march-types.md` §2.14 now describes the pass-site rule
+instead of the boundary. The "infer `apply`'s requirement from its body"
+alternative named above was not taken and is still not done; it is no
+longer needed for this shape.

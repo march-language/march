@@ -4793,18 +4793,21 @@ checked, at two different sites:
   `t76_refine_postcondition_satisfied`, reject
   `t72_refine_postcondition_violated`.
 
-**The candid scope boundary: direct calls only.** `refine_check` recognizes
-a **named** direct call; it does not trace a refined function passed as a
-first-class value through a higher-order call or interface dispatch.
-Live-verified: `apply(take_n, -3)` (calling `take_n` indirectly through a
-`HOF` parameter `f`) **accepts**, even though the identical literal at a
-direct `take_n(-3)` call site is rejected (reject/t71), because
-`refine_check` never associates `-3` with `take_n`'s precondition through
-the indirection. This is a real, documented limitation
-(`specs/lang/refinement-types.md`'s own "Limitations" section), not
-unsoundness: per (T-Refine-Erase) above, no runtime check is promised
-either, so an unverified call is just *unverified*, never *unsafe*.
-Witness: accept `t77_refine_hof_bypass_limitation`.
+**The scope boundary, and where it moved.** `refine_check` recognizes a
+**named** direct call, a call through a refined callback parameter, and a
+call through a local alias, local `fn`, or `let`-bound lambda; it does not
+trace a refined function through interface dispatch. Passing a refined
+function as a first-class value is obliged at the **pass site** since
+2026-09-13 (contravariant subtyping: the expected function type's domain
+must imply the callable's own parameter refinement for every value).
+Live-verified: `apply(take_n, -3)`, with `apply(f : Int -> Int, x : Int)`,
+**rejects** at the pass of `take_n` (`Int` promises nothing, `true ⇒ _ >= 0`
+is refuted with witness `-1`), where until then it accepted while the
+identical literal at a direct `take_n(-3)` was rejected (reject/t71). Per
+(T-Refine-Erase) above no runtime check is promised either way, so the
+change is from *unverified* to *verified*, never from unsafe to safe.
+Witness: reject `t77_refine_hof_pass_site_rejected` (the former accept
+`t77_refine_hof_bypass_limitation`).
 
 **A second, specialized consumer: `cap no_panic`'s division-safety check**
 (`lib/refinecheck/division_safety.ml`) reuses the identical

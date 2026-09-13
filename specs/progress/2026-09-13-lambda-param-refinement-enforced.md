@@ -59,3 +59,35 @@ fixtures in the audit's non-vacuity guard (`test/refine_audit/holes.baseline`).
 A user writing a locally-scoped helper as a lambda rather than a `fn` loses
 all enforcement of any refinement they write on its parameters, with no
 diagnostic warning them this happened.
+
+## Landed 2026-09-13 (plan phase 2)
+
+`specs/plans/2026-09-13-refinement-enforcement-holes-plan.md`, phase 2. The
+"refinement would need to travel with the closure value" concern above is
+resolved without a new mechanism:
+
+- A `let g = fn (ps) -> body` binding is routed by `Refine_check.visit`'s
+  `EBlock` walk through `visit_local_fn`, exactly like a block-level `fn`:
+  its signature is registered in `cbenv`, so every direct `g(...)` is
+  obliged, and the body assumes its parameter refinements only while `g`
+  never escapes callee position — where "escape" now excludes a pass site
+  the contravariant check below covers (`name_escapes ~pass_checked`).
+- Passing a refined callable (named, aliased, local `fn`, `let`-bound or
+  inline lambda) where a function type is expected files a `Callback_domain`
+  obligation at the pass site: a fresh `$cb_x` carrying the expected domain's
+  refinement (or `true` for an unrefined domain, over the callable's own
+  parameter base) is checked against the callable's parameter refinement
+  through the unchanged `check_call`. For this subject a `Refuted` model IS
+  the definite failure — `$cb_x`'s only constraint is the domain, so every
+  model is an argument the caller may pass — where an ordinary argument's
+  refutation is merely "cannot verify".
+- An inline lambda at a covered pass site assumes its own parameters
+  (`visit_lambda ~assume:true`); any other lambda position stays stripped.
+- Scope: single-parameter callables only; a multi-parameter callable is
+  neither obliged nor assumed.
+
+`Refine_audit.classify` reports `Lambda_param` Enforced when
+`refined_param_ty` accepts the type; the `lambda_param` hole fixture is
+retired. Tests: `test/test_refinecheck.ml`, group `lambda-contract` (7 cases;
+every violation asserted both under `cap verified` and in a plain module, so
+none can pass by escalation of a skip).
