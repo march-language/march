@@ -46,6 +46,14 @@ let return_refine_ext (fd : A.fn_def) : (string * A.expr * string option) option
     Some (binder_name binder, pred, Some bool_sort)
   | Some (A.TyRefine (base, binder, pred)) when is_float_base base ->
     Some (binder_name binder, pred, Some float_sort)
+  (* A String return, at the opaque `Str` sort a String PARAMETER already
+     reflects to ([refined_param_ty]).  Absent until 2026-09-13: a
+     `{String | ...}` return fell through to [check_post_induction], which
+     has nothing to say about a non-ADT, and filed NOTHING — not even a
+     skip — so `--refine-report` could not tell "no return refinement" from
+     "silently unchecked" (specs/todos/2026-09-03-string-return-…). *)
+  | Some (A.TyRefine (base, binder, pred)) when is_string_base base ->
+    Some (binder_name binder, pred, Some str_sort)
   | Some (A.TyRefine (A.TyCon ({ A.txt = name; _ }, []) as base, binder, pred))
     when is_record_base base ->
     Some (binder_name binder, pred, Some (adt_sort_name name))
@@ -177,6 +185,7 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
     ?(scalar_env : (string * Smt.sort) list = [])
     ?(fn_name : string option = None) ?(emit = true) ?(record = true)
     ?(fn_params : (string * A.ty option) list = [])
+    ?(string_ret = false)
     (sc : scope) (binder : string) (ret_pred : A.expr)
     ((path, tail_e) : (A.expr * bool) list * A.expr) : bool =
   (* Mirrors [check_call]'s [note]: every exit records an outcome, so a return
@@ -262,6 +271,31 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
   in
   let base_decls, base_assume, scope_has_record, scope_has_string = scope_facts sc in
   let decls = ref base_decls and assume = ref base_assume in
+  (* String literals, for a String RETURN ([string_ret]): the tail `"a"` and
+     the predicate's `"a"` must meet on ONE constant, minted here exactly as
+     [check_call]'s [str_lit_const] mints it — an indexed `$strN` at the `Str`
+     sort, its byte length pinned, distinct from every literal already seen.
+     [uses_string] attaches the string preamble when any was minted, the same
+     "only when actually used" discipline [scope_has_string] follows. *)
+  let str_lit_tbl : (string, string) Hashtbl.t = Hashtbl.create 4 in
+  let uses_string = ref false in
+  let str_lit_const (s : string) : Smt.term option =
+    if not (string_len_available ()) then None
+    else
+      match Hashtbl.find_opt str_lit_tbl s with
+      | Some c -> Some (Smt.Const c)
+      | None ->
+        let c = Printf.sprintf "$str%d" (Hashtbl.length str_lit_tbl) in
+        Hashtbl.replace str_lit_tbl s c;
+        uses_string := true;
+        decls := (c, Smt.SData str_sort) :: !decls;
+        assume :=
+          Smt.Eq (Smt.App (strlen_fn, [ Smt.Const c ]), Smt.IntLit (String.length s)) :: !assume;
+        Hashtbl.iter
+          (fun s' c' -> if s' <> s then assume := Smt.Ne (Smt.Const c, Smt.Const c') :: !assume)
+          str_lit_tbl;
+        Some (Smt.Const c)
+  in
   (* Scope names already declared into the `Str` sort by [scope_facts].  Both
      [var_const] and [resolve_measure] must agree with that sort, or the VC
      declares one symbol at two sorts and Z3 rejects the whole query. *)
@@ -348,12 +382,25 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
             | None -> rf_param varname fname)
       (fun _ _ -> None) sc
   in
-  let scalar e = smt_of ~resolve_var:var_const ~resolve_measure ~resolve_measure_app ~resolve_field:scope_field_resolver e in
+  let scalar e =
+    smt_of ~resolve_var:var_const ~resolve_measure ~resolve_measure_app
+      ~resolve_field:scope_field_resolver ~resolve_str_lit:str_lit_const e
+  in
   let tail_term_opt =
     match record_sort with
     | Some sort_name ->
       (match tail_e with
        | A.ERecord (fields, _) -> reflect_record_literal sort_name fields scalar
+       | _ -> scalar tail_e)
+    | None when string_ret ->
+      (* A String tail: a literal mints its constant; a String-sorted scope
+         name (a parameter the scope already declared at `Str`) denotes
+         itself; anything else goes through [scalar], whose string resolver
+         reflects a literal in a larger expression and nothing else.  A
+         string built by a call is opaque and files a recorded skip. *)
+      (match tail_e with
+       | A.ELit (A.LitString s, _) -> str_lit_const s
+       | A.EVar { A.txt = x; _ } when is_str_scope x -> uses_string := true; Some (Smt.Const x)
        | _ -> scalar tail_e)
     | None -> scalar tail_e
   in
@@ -422,7 +469,18 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
         | Some t -> assume := (if negated then Smt.Not t else t) :: !assume
         | None -> ())
       path;
-    (match smt_of_r ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app ret_pred with
+    (* `len(_)` over a String return is the string length of the returned
+       term — the same `$strlen` a String parameter's own `len` reflects to
+       ([resolve_measure] above) — not a fresh Int measure constant. *)
+    let goal_resolve_measure m name =
+      if string_ret && m = "len" && (name = binder || name = "_") && string_len_available ()
+      then Some (Smt.App (strlen_fn, [ tail_term ]))
+      else resolve_measure m name
+    in
+    (match
+       smt_of_r ~resolve_var ~resolve_measure:goal_resolve_measure ~resolve_field
+         ~resolve_measure_app ~resolve_str_lit:str_lit_const ret_pred
+     with
      | Error e ->
        if enum_witness_error () then note Obligation.Violated
        else note (Obligation.Skipped (Obligation.Unreflectable_predicate (pred_str e)));
@@ -450,7 +508,7 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
            !assume
        in
        let vc = { Smt.decls; assumptions; goal } in
-       let str_pre = if scope_has_string then string_preamble else "" in
+       let str_pre = if scope_has_string || !uses_string then string_preamble else "" in
        let preamble = str_pre ^
          if record_sort <> None || scope_has_record then
            (* When all measure apps were evaluated concretely (needs_axiom_preamble=false),
@@ -1003,9 +1061,15 @@ let check_fn_post_verdict ~root errctx ?(emit = true) (fd : A.fn_def) : bool =
        (`$Bool`) is not one: handing it here would send the return value down
        the record-literal reflection and the datatype preamble, for a sort
        nobody declares. *)
+    (* …nor is the opaque `Str` sort a record: a String return takes
+       [check_post]'s [string_ret] path (literal minting, `$strlen`), never
+       the record-literal reflection. *)
     let record_sort =
-      match marker with Some s when not (is_scalar_sort s) -> Some s | _ -> None
+      match marker with
+      | Some s when not (is_scalar_sort s) && s <> str_sort -> Some s
+      | _ -> None
     in
+    let string_ret = marker = Some str_sort in
     let clause_ok (c : A.fn_clause) =
       let sc = List.fold_left scope_add_fnparam [] c.A.fc_params in
       let scalar_env =
@@ -1022,7 +1086,7 @@ let check_fn_post_verdict ~root errctx ?(emit = true) (fd : A.fn_def) : bool =
       ts <> []
       && List.fold_left
            (fun acc t ->
-             check_post ~root errctx ~span:c.A.fc_span ~record_sort ~scalar_env
+             check_post ~root errctx ~span:c.A.fc_span ~record_sort ~scalar_env ~string_ret
                ~fn_name:(Some fd.A.fn_name.A.txt) ~emit ~record:emit ~fn_params
                sc binder ret_pred t
              && acc)

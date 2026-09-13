@@ -150,6 +150,22 @@ let resolve_call (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (fname 
     in
     aliased
 
+(* [resolve_call], then the DEFAULT-ARGUMENT arity variant.  A function with
+   a defaulted parameter, `fn f(a : Int, b : {Int | b > 0} \\ 1)`, does not
+   survive desugar under its own name: [Desugar.expand_defaults_decl]
+   replaces it with `f$1` (a short wrapper supplying the default) and `f$2`
+   (the full arity, keeping the refined parameter), and the runtime
+   dispatches a call `f(1, 0)` to `f$2` by its ARGUMENT COUNT.  Until
+   2026-09-13 the checker resolved only the spelling `f`, found nothing, and
+   `f(1, 0)` obliged nobody (specs/todos/2026-09-03-desugar-dropped-…).
+   Resolving `f$<arity>` after `f` is exactly the runtime's rule; the short
+   wrapper `f$1` carries no refinement of its own and its internal call
+   `f$2(a, 1)` is checked where it is written. *)
+let resolve_call_arity (ctx : rctx) defs (fname : string) (arity : int) : fn_sig option option =
+  match resolve_call ctx defs fname with
+  | None -> resolve_call ctx defs (Printf.sprintf "%s$%d" fname arity)
+  | r -> r
+
 (* True iff a call written as the bare [name] from inside [ctx]'s module
    resolves to exactly [sg] — i.e. the contract every caller is obliged to
    establish IS this definition's.  Used to decide whether an `impl` method's
@@ -203,7 +219,7 @@ let cb_add_binding (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (cb :
    for Int); see [fn_sig.ret_sort] for why every consumer must branch on it. *)
 let postcond_of (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (fname : string)
     (args : A.expr list) : (string * A.expr * string option) option =
-  match resolve_call ctx defs fname with
+  match resolve_call_arity ctx defs fname (List.length args) with
   | Some (Some sg) ->
     (match sg.ret with
      | Some (b, p) ->
