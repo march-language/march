@@ -87,3 +87,34 @@ fixtures in the audit's non-vacuity guard (`test/refine_audit/holes.baseline`).
 Any interface with more than one implementation loses all parameter
 enforcement on every method they share a name for, which is the common case
 for any interface with more than one conforming type.
+
+## Landed 2026-09-13 (plan phase 5)
+
+`specs/plans/2026-09-13-refinement-enforcement-holes-plan.md`, phase 5. The
+"type-directed dispatch resolution" the todo asked for is the same rule
+compilation already applies (`Lower_state.resolve_iface_method`): the impl
+for the FIRST argument's type.
+
+- `Refine_check.check_module` takes `?type_map`, the typechecker's span →
+  type table; `bin/main.ml` passes it at both call sites. The test harness's
+  other helpers do not, and are honest about it (below).
+- `Refine_scope.collect_impl_sigs` indexes every refined `impl` method's
+  signature by bare method name, then by the impl's bare type name.
+- `visit`'s `EApp` arm, when a call resolves to nothing by name and is not a
+  local: `check_impl_dispatch` looks up the first argument's checked type,
+  picks the single impl for that constructor, and files the ordinary
+  `check_call` obligations. When that cannot be decided (no type recorded, a
+  type variable, no or several matching impls) it records one SKIP per
+  distinct candidate predicate — counted by `--refine-report`, escalated
+  under `cap verified` — never silence.
+- Method bodies stay walked with the refinement stripped unless the name is
+  adoptable: obliging callers without letting the body assume is sound, and
+  lifting the strip needs a proof that no generic call site escapes
+  resolution, which is a separate change.
+
+`Refine_audit.classify` reports `Impl_method_fn` parameters Enforced when
+`refined_param_ty` accepts the type; the `impl_method` hole fixture is
+retired. Tests: `test/test_refinecheck.ml`, group `impl-dispatch` (3 cases:
+the violation through the receiver's type, the receiver selecting WHICH
+impl's contract applies — `Crate` needing `i >= 10` while `Box` needs
+`i >= 0` — and the recorded skip without a type map).

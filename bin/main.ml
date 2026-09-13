@@ -1151,7 +1151,7 @@ let run_test_cmd args =
        syntactic ban must leave the contracted names to it.  Set BEFORE
        [check_module] — the flag is read during that call. *)
     March_typecheck.Typecheck.proof_based_panic_surface := true;
-    let (errors, _type_map) = March_typecheck.Typecheck.check_module desugared in
+    let (errors, type_map) = March_typecheck.Typecheck.check_module desugared in
     (* Phase A1b: discharge refinement-precondition VCs at call sites. *)
     (* NOTE: --refine-audit cannot actually reach this pipeline from the CLI
        today. `march test` is dispatched to [run_test_cmd], whose own
@@ -1166,6 +1166,7 @@ let run_test_cmd args =
       ~stdlib_files:(stdlib_span_files stdlib_decls)
       ?audit:(if !refine_audit then Some (fun r -> audit_result := r) else None)
       ~pre_desugar_decls:module_ast.March_ast.Ast.mod_decls
+      ~type_map
       errors desugared;
     if !refine_report then print_refine_report ~filename ~user_files ();
     if !refine_audit then print_refine_audit ~filename ~user_files !audit_result;
@@ -1878,6 +1879,7 @@ let compile filename =
     ~stdlib_files:(stdlib_span_files stdlib_decls)
     ?audit:(if !refine_audit then Some (fun r -> audit_result := r) else None)
     ~pre_desugar_decls:module_ast.March_ast.Ast.mod_decls
+    ~type_map
     errors desugared;
   if !refine_report then print_refine_report ~filename ~user_files ();
   if !refine_audit then print_refine_audit ~filename ~user_files !audit_result;

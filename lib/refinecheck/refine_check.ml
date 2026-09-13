@@ -275,6 +275,101 @@ let fnparams_field_facts ~(span : A.span) (ps : A.fn_param list) : (A.expr * boo
   params_field_facts ~span
     (List.filter_map (function A.FPNamed p | A.FPDefault (p, _) -> Some p | A.FPPat _ -> None) ps)
 
+(* ── `impl` method dispatch by receiver type (plan phase 5) ────────────────
+   [impl_sigs]: every refined `impl` method's signature, by bare method name
+   then impl type ([Refine_scope.collect_impl_sigs]).  [call_type_map]: the
+   typechecker's span -> type table, handed in by the driver
+   ([check_module ?type_map]); absent under the test harness and any caller
+   that does not typecheck first, in which case an ambiguous method call is a
+   recorded skip rather than a guess. *)
+let impl_sigs : (string, (string * fn_sig) list) Hashtbl.t ref = ref (Hashtbl.create 1)
+let call_type_map : (A.span, March_typecheck.Typecheck.ty) Hashtbl.t option ref = ref None
+
+(* The bare constructor name of an expression's checked type, when the
+   typechecker recorded one and it is a plain constructor: the same rule
+   compilation dispatches an interface method by
+   ([Lower_state.resolve_iface_method]). *)
+let receiver_type_of (a : A.expr) : string option =
+  match !call_type_map with
+  | None -> None
+  | Some tm ->
+    (match Hashtbl.find_opt tm (March_typecheck.Typecheck.span_of_expr a) with
+     | None -> None
+     | Some t ->
+       (match March_typecheck.Typecheck.repr t with
+        | March_typecheck.Typecheck.TCon (n, _) ->
+          Some (match String.rindex_opt n '.' with
+                | Some i -> String.sub n (i + 1) (String.length n - i - 1)
+                | None -> n)
+        | _ -> None))
+
+(* An unresolved call whose bare name is an `impl` method: pick the impl for
+   the first argument's type and check its contract; when that cannot be
+   decided (no type recorded, a type variable, no or several impls for it)
+   record one SKIP per distinct candidate predicate so the report counts it
+   and `cap verified` escalates it, exactly as [check_call] does for a skip
+   of its own. *)
+let check_impl_dispatch ~root errctx defs (ctx : rctx) path lets sc re ~(span : A.span)
+    (fname : string) (args : A.expr list) : unit =
+  let bare = match String.rindex_opt fname '.' with
+    | Some i -> String.sub fname (i + 1) (String.length fname - i - 1) | None -> fname in
+  (* The same competitor rule [adoptable_impl_methods] applies, failing
+     closed the same way: a `use` that binds this bare name (an enumerated
+     import naming it), or one whose import set cannot be enumerated at all
+     ([UseAll] / [UseExcept] — a bare `import Other` parses to [UseAll]),
+     means the call may denote the imported function, not any impl, and
+     checking it against an impl's contract would be the false positive this
+     subsystem must never have.  Widened to EVERY `use` in scope rather than
+     the decl list's own, since [ctx.uses] carries all of them. *)
+  let use_competes =
+    String.contains fname '.' = false
+    && List.exists
+         (fun (_, sel, _) ->
+           match sel with
+           | A.UseAll | A.UseExcept _ -> true
+           | A.UseNames ns -> List.exists (fun (n : A.name) -> n.A.txt = bare) ns
+           | A.UseSingle -> false)
+         ctx.uses
+  in
+  match Hashtbl.find_opt !impl_sigs bare with
+  | None -> ()
+  | Some _ when use_competes -> ()
+  | Some impls ->
+    let chosen =
+      match args with
+      | a :: _ ->
+        (match receiver_type_of a with
+         | Some tn -> (match List.filter (fun (t, _) -> t = tn) impls with [ (_, sg) ] -> Some sg | _ -> None)
+         | None -> None)
+      | [] -> None
+    in
+    (match chosen with
+     | Some sg ->
+       let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets; sc; re } in
+       List.iter (fun rp -> check_call cx ~span ~callee:fname sg args rp) sg.refined
+     | None ->
+       let reason =
+         Obligation.Unreflectable_subject
+           (Printf.sprintf
+              "the receiver's type does not select one `impl` of `%s` (it is unknown to the \
+               typechecker here, a type variable, or several impls match)" bare)
+       in
+       let preds = List.sort_uniq compare (List.concat_map (fun (_, sg) -> List.map (fun rp -> pred_str rp.pred) sg.refined) impls) in
+       List.iter
+         (fun predicate ->
+           Obligation.record
+             { Obligation.span; callee = fname; predicate; verdict = Obligation.Skipped reason
+             ; kind = Obligation.Precondition };
+           if !strict_verified then
+             Err.error errctx ~span
+               (Printf.sprintf
+                  "`cap verified` module: cannot verify precondition `%s` on `%s` (%s: %s)\n\
+                   note: annotate the receiver so its type selects one `impl`, or remove \
+                   `cap verified` from this module — it asks for every obligation to be \
+                   discharged"
+                  predicate fname (Obligation.reason_name reason) (Obligation.reason_detail reason)))
+         preds)
+
 (* A constructor spelled `M.Inc` resolves by its last segment: handler
    messages are registered by bare name program-wide (and any bare-name
    clash has already withdrawn the entry), so the qualifier adds nothing. *)
@@ -336,12 +431,20 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
   let go_path p = visit ~root errctx defs ctx p lets sc re cb in
   match e with
   | A.EApp (A.EVar { A.txt = fname; _ }, args, sp) ->
-    let callee = callee_sig ctx defs cb fname in
+    let resolved = resolve_call ctx defs fname in
+    let callee =
+      match resolved with Some (Some sg) -> Some sg | _ -> List.assoc_opt fname cb
+    in
     (match callee with
      | Some sg ->
        let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets; sc; re } in
        List.iter (fun rp -> check_call cx ~span:sp ~callee:fname sg args rp) sg.refined;
        check_pass_sites ~root errctx defs ctx path lets sc re cb ~span:sp sg args
+     (* TRULY unresolved — not a named function (refined or not: [Some None]
+        is a real, unrefined callee and the call is its), not a callback or
+        local: an ambiguous `impl` method resolves by its receiver's type. *)
+     | None when resolved = None && not (List.mem fname ctx.locals) ->
+       check_impl_dispatch ~root errctx defs ctx path lets sc re ~span:sp fname args
      | None -> ());
     (* An INLINE lambda at a pass site the check above obliged may assume its
        own parameter refinements: the only way to call it is through the
@@ -2251,7 +2354,9 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
     ?(stdlib_files : string list = [])
     ?(audit : ((Refine_audit.site * Refine_audit.disposition) list -> unit) option)
     ?(pre_desugar_decls : A.decl list option)
+    ?(type_map : (A.span, March_typecheck.Typecheck.ty) Hashtbl.t option)
     (errctx : Err.ctx) (m : A.module_) : unit =
+  call_type_map := type_map;
   (* A module owns one solver declaration scope.  Z3 4.8.x does not reliably
      retract datatype declarations on [pop], even with [:global-decls false]:
      checking a later module that reuses a qualified type name with a different
@@ -2395,6 +2500,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   let defs = collect_all_defs m.A.mod_decls in
   handler_sigs := collect_handler_sigs m.A.mod_decls;
   ctor_sigs := collect_ctor_sigs m.A.mod_decls;
+  impl_sigs := collect_impl_sigs m.A.mod_decls;
   (* Only POSITIVELY VERIFIED postconditions may be assumed at call sites. *)
   gate_unverified_posts ~root errctx defs m.A.mod_decls;
   (* Always walk: a function may have a refined *return* (postcondition) even

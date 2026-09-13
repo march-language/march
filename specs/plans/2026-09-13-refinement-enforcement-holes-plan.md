@@ -184,6 +184,12 @@ below), not lifted. Phase 3 landed as sketched (`5c554497`).
 
 ### Phase 5: `impl` methods with ambiguous names
 
+*Landed 2026-09-13*; see
+`specs/progress/2026-09-13-impl-method-param-refinement-enforced.md`. As
+sketched, plus one thing the sketch left implicit: an unresolvable receiver
+is a RECORDED skip (one per distinct candidate predicate), so `--refine-report`
+counts it and `cap verified` escalates it. Phase 4 landed as `ff85ec53`.
+
 - `Refine_check.check_module` gains `?type_map`; only `bin/main.ml`'s two
   callers pass it, the test callers keep today's behaviour.
 - On an unresolved call whose name is defined by ≥1 `impl`, look up the FIRST

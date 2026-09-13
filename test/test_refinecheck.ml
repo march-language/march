@@ -38,6 +38,18 @@ let has_refine_error_d src =
   March_refinecheck.Refine_check.check_module ctx (March_desugar.Desugar.desugar_module (parse src));
   March_errors.Errors.has_errors ctx
 
+(* Desugared AND typechecked first, with the typechecker's span -> type table
+   handed to the checker exactly as the driver does ([check_module
+   ~type_map]).  Needed by anything that dispatches on a receiver's TYPE — an
+   ambiguous `impl` method call (plan phase 5) — which every other helper in
+   this file leaves as a recorded skip, since they never typecheck. *)
+let has_refine_error_typed src =
+  let desugared = March_desugar.Desugar.desugar_module (parse src) in
+  let _tc_errors, type_map = March_typecheck.Typecheck.check_module desugared in
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module ~type_map ctx desugared;
+  March_errors.Errors.has_errors ctx
+
 (* Same as [has_refine_error_d], but parsed AS IF it came from [file] and
    checked with [stdlib_files] declared as the standard library's own sources.
    Both are needed to exercise the ENABLING branch of the `List.length` measure
@@ -12615,14 +12627,14 @@ let audit_classify_fixloop1_suite =
               fn main() : Int do run(Box(1), 0) end
             end|}
         in
+        (* Finding 6 is CLOSED since 2026-09-13 (plan phase 5): the call is
+           resolved by the receiver's type.  Disposition and ledger fact flip
+           together — the ledger fact through the TYPED helper, since the
+           untyped one records a skip here rather than an error. *)
         let _, d = classify_only_site src in
-        Alcotest.(check string) "disposition" "Unenforced" (disposition_tag d);
-        (match d with
-         | RAudit.Unenforced reason ->
-           Alcotest.(check bool) "names adoptability" true (contains reason "adoptab")
-         | _ -> Alcotest.fail "expected Unenforced");
-        Alcotest.(check bool) "the violating call raises no error (the ledger fact)" false
-          (has_refine_error_d src))
+        Alcotest.(check string) "disposition" "Enforced" (disposition_tag d);
+        Alcotest.(check bool) "the violating call raises an error (the ledger fact)" true
+          (has_refine_error_typed src))
 
   ; (* The other side of finding 6, recorded rather than silently accepted:
        when the method name IS unambiguous (one impl), the SAME position is
@@ -12631,8 +12643,8 @@ let audit_classify_fixloop1_suite =
        two cases apart and a false [Enforced] is the error the design calls
        worse than none. This is real lost precision, not a bug; the ledger
        fact proves the checker really does enforce it here. *)
-    Alcotest.test_case "an impl method parameter is STILL reported Unenforced even when unambiguous \
-                         (deliberately conservative)"
+    Alcotest.test_case "an impl method parameter is Enforced when unambiguous (and, since phase 5, \
+                         when ambiguous too)"
       `Quick (fun () ->
         let src =
           {|mod IMPLSOLO1 do
@@ -12645,7 +12657,7 @@ let audit_classify_fixloop1_suite =
             end|}
         in
         let _, d = classify_only_site src in
-        Alcotest.(check string) "disposition" "Unenforced" (disposition_tag d);
+        Alcotest.(check string) "disposition" "Enforced" (disposition_tag d);
         Alcotest.(check bool) "the checker DOES enforce it here (the ledger fact)" true
           (has_refine_error_d src))
 
@@ -13972,6 +13984,54 @@ let stored_field_suite =
         Alcotest.(check bool) "init { value: -1 } is rejected" true
           (has_refine_error_d (prog bad_init))) ]
 
+(* ── `impl` method contracts by receiver type (plan phase 5) ──────────────
+   Two impls of `at` make the bare name non-adoptable; the call is now
+   resolved by the FIRST argument's type from the typechecker's type_map, so
+   the harness TYPECHECKS first and hands the map in, exactly as the driver
+   does.  Without a map (every other helper in this file) such a call is a
+   recorded skip, which the last case pins. *)
+let impl_dispatch_suite =
+  let prog ?(box_pred = "i >= 0") ?(crate_pred = "i >= 0") main =
+    Printf.sprintf
+      "mod ID do\n\
+      \  interface Indexable(a) do\n    fn at : a -> Int -> Int\n  end\n\
+      \  type Box = Box(Int)\n  type Crate = Crate(Int)\n\
+      \  impl Indexable(Box) do\n    fn at(b, i : {Int | %s}) do match b do Box(v) -> v end end\n  end\n\
+      \  impl Indexable(Crate) do\n    fn at(c, i : {Int | %s}) do match c do Crate(v) -> v end end\n  end\n\
+      \  fn main() : Int do\n%s  end\nend\n"
+      box_pred crate_pred main
+  in
+  [ gated "an ambiguous impl method is obliged through the receiver's type" (fun () ->
+        Alcotest.(check bool) "at(Crate(0), 0 - 1) violates i >= 0" true
+          (has_refine_error_typed (prog "    at(Crate(0), 0 - 1)\n"));
+        Alcotest.(check bool) "at(Crate(0), 1) passes" false
+          (has_refine_error_typed (prog "    at(Crate(0), 1)\n")));
+
+    gated "the receiver's type selects WHICH impl's contract applies" (fun () ->
+        let p = prog ~crate_pred:"i >= 10" in
+        Alcotest.(check bool) "Crate needs i >= 10: at(Crate(0), 5) rejected" true
+          (has_refine_error_typed (p "    at(Crate(0), 5)\n"));
+        Alcotest.(check bool) "Box needs i >= 0: at(Box(0), 5) passes" false
+          (has_refine_error_typed (p "    at(Box(0), 5)\n")));
+
+    Alcotest.test_case "without a type map the call is a RECORDED skip, not silence" `Quick (fun () ->
+        let src = prog "    at(Crate(0), 0 - 1)\n" in
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ctx
+          (March_desugar.Desugar.desugar_module (parse src));
+        Alcotest.(check bool) "no error without cap verified" false
+          (March_errors.Errors.has_errors ctx);
+        let skipped =
+          List.exists
+            (fun (o : March_refinecheck.Obligation.t) ->
+              o.March_refinecheck.Obligation.callee = "at"
+              && (match o.March_refinecheck.Obligation.verdict with
+                  | March_refinecheck.Obligation.Skipped _ -> true
+                  | _ -> false))
+            (March_refinecheck.Obligation.all ())
+        in
+        Alcotest.(check bool) "a Skipped obligation on `at` is in the ledger" true skipped) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -14060,4 +14120,5 @@ let () =
       ("local-fn-contract", local_fn_suite);
       ("lambda-contract", lambda_contract_suite);
       ("actor-handler-contract", actor_handler_suite);
-      ("stored-field-contract", stored_field_suite) ]
+      ("stored-field-contract", stored_field_suite);
+      ("impl-dispatch", impl_dispatch_suite) ]

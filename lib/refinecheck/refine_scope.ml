@@ -1393,6 +1393,42 @@ let ctor_of_sort (sort : string) : string option =
   | Some [ ctor ] when Hashtbl.mem ctor_field_names ctor -> Some ctor
   | _ -> None
 
+(* ── `impl` method contracts, by receiver type ─────────────────────────────
+   [collect_all_defs] adopts an `impl` method's contract only when its bare
+   name denotes ONE definition.  When it does not — two impls of `at`, or a
+   `fn at` beside one — a call `at(Crate(0), -1)` resolves to nothing and no
+   caller is obliged.  The call still has exactly one target at runtime: the
+   impl for the FIRST argument's type, which is the rule compilation applies
+   (`Lower_state.resolve_iface_method`).  This table holds every impl
+   method's signature keyed by bare method name, then by the impl's bare type
+   name, so [Refine_check.visit] can make that same choice from the
+   typechecker's [type_map] (plan phase 5).  Only refined signatures are
+   kept; an impl whose type is not a plain constructor (a tuple, a type
+   variable) is not indexed, since nothing dispatches on it by name. *)
+let collect_impl_sigs (decls : A.decl list) : (string, (string * fn_sig) list) Hashtbl.t =
+  let tbl : (string, (string * fn_sig) list) Hashtbl.t = Hashtbl.create 16 in
+  let bare n = match String.rindex_opt n '.' with Some i -> String.sub n (i + 1) (String.length n - i - 1) | None -> n in
+  let rec go decls =
+    List.iter
+      (function
+        | A.DImpl (idf, _) ->
+          (match idf.A.impl_ty with
+           | A.TyCon (tn, _) ->
+             List.iter
+               (fun ((mn : A.name), (fd : A.fn_def)) ->
+                 let sg = sig_of_fn fd in
+                 if sg.refined <> [] then
+                   Hashtbl.replace tbl mn.A.txt
+                     ((bare tn.A.txt, sg) :: Option.value ~default:[] (Hashtbl.find_opt tbl mn.A.txt)))
+               idf.A.impl_methods
+           | _ -> ())
+        | A.DMod (_, _, ds, _) -> go ds
+        | _ -> ())
+      decls
+  in
+  go decls;
+  tbl
+
 (* Erase parameter refinements from [fd], leaving the return refinement alone.
    A stripped parameter contributes no fact to [scope], so a body checked with
    it can discharge nothing from a predicate no caller was obliged to
