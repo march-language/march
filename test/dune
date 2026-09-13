@@ -1596,8 +1596,8 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 
 ; `self` inside an actor handler on the compiled backend. Did not build at all
 ; before 2026-09-12 (absent from llvm_builtins, so the emitter named an
-; undefined symbol). Deliberately does not compare `self` to the spawner's
-; pid: the backends disagree on that, and it is filed, not pinned.
+; undefined symbol). Delivery to `self` and its identity with the spawner's
+; pid are pinned by native_actor_send_to_self below.
 (rule
  (targets native_actor_self native_actor_self.out)
  (deps (file %{exe:../bin/main.exe})
@@ -1612,6 +1612,32 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/actor_self.expected native_actor_self.out)))
+
+; ── Regression: send(self, m) inside a handler delivers, and binding `self`
+; does not move the actor record's refcount. `self` was never BOUND by either
+; backend, so it fell through to the global builtin: compiled, march_send got
+; the builtin's static closure and returned None; interpreted, the send raised
+; and the handler's crash was swallowed. The refcount line is the hazard of the
+; fix's first cut (an owned `self` dropped at every handler exit): verified red
+; with Perceus's borrowed-self rule removed (SIGBUS, exit 138, 2 of 3 runs) and
+; red with the lowering fix removed (steps: 1). The interpreter half is
+; test_compiler.ml's "self-send delivers (interp)".
+; See specs/progress/2026-09-13-send-to-self-delivers.md.
+(rule
+ (targets native_actor_send_to_self native_actor_send_to_self.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/actor_send_to_self.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_send_to_self
+        native/actor_send_to_self.march)
+   (with-stdout-to native_actor_send_to_self.out
+        (system "./native_actor_send_to_self")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_send_to_self.expected native_actor_send_to_self.out)))
 
 ; ── Capability mocking reaching an actor handler ──────────────────────────
 ; The handler is entered from the scheduler, so the capability cannot be

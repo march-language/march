@@ -409,6 +409,20 @@ let actor_alive_field = "$e_alive"
     alphabetically sort after [actor_alive_field] — see module doc above. *)
 let actor_state_field = "$f_state"
 
+(** Name of every actor handler fn's implicit first parameter: the actor
+    struct itself, which is also the actor's Pid at the ABI. Producer:
+    [Lower_actor] (marks it [Lin], so no RC op ever touches it directly).
+    Consumer: [Perceus_core]'s borrowed-binding rule, which treats a binding
+    that ALIASES this parameter -- the handler's [self] -- as borrowed: a
+    consuming use dups it and scope exit does not drop it, because the
+    reference belongs to the scheduler that dispatched the handler, not to
+    the handler body. *)
+let actor_param = "$actor"
+
+(** Name the handler body sees its own pid under ([self]). Bound by
+    [Lower_actor] to an alias of [actor_param]. *)
+let actor_self_binder = "self"
+
 (** True if [fn_name] ends in the actor-struct-type suffix ("...( _Actor")
     — used at TCon-name granularity, e.g. checking [alloc_type_name].
     Mirrors llvm_emit.ml's inline EAlloc HCR-wiring check. *)

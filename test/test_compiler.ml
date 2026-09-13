@@ -6800,6 +6800,48 @@ let test_whereis_live_actor () =
   Alcotest.(check bool) "whereis returns Some(Pid) for live actor" true
     (match result with March_eval.Eval.VCon ("Some", [March_eval.Eval.VPid _]) -> true | _ -> false)
 
+(** [self] inside a handler is this actor's pid, on the interpreter.  It used
+    to resolve to the global [self] BUILTIN (a function value), so
+    [send(self, m)] raised inside the handler, [crash_actor] swallowed the
+    raise, and the program printed nothing and exited 0.  Pins both halves of
+    specs/progress/2026-09-13-send-to-self-delivers.md on this backend: a
+    self-driven state machine runs to completion, and [self] is the very pid
+    [spawn] returned.  (eval_module does not typecheck, so storing a Pid in an
+    Int field is how the identity is observed from OCaml.) *)
+let test_self_send_delivers_interp () =
+  let env = eval_module {|mod TestSelfSend do
+    actor Stepper do
+      state { steps : Int, me : Int }
+      init { steps: 0, me: 0 }
+      on Step() do
+        if state.steps < 3 do
+          let _ = send(self, Step())
+          { steps: state.steps + 1, me: self }
+        else
+          { steps: state.steps + 1, me: self }
+        end
+      end
+    end
+    fn main() do
+      let p = spawn(Stepper)
+      send(p, Step())
+      run_until_idle()
+      p
+    end
+  end|} in
+  let pid = match call_fn env "main" [] with
+    | March_eval.Eval.VPid p -> p | _ -> Alcotest.fail "main did not return a pid" in
+  let inst = match Hashtbl.find_opt March_eval.Eval.actor_registry pid with
+    | Some i -> i | None -> Alcotest.fail "spawned actor not registered" in
+  Alcotest.(check bool) "actor still alive (the self-send did not crash it)"
+    true inst.March_eval.Eval.ai_alive;
+  let field f = match inst.March_eval.Eval.ai_state with
+    | March_eval.Eval.VRecord fs -> List.assoc_opt f fs | _ -> None in
+  Alcotest.(check bool) "all four steps ran: three of them self-sent"
+    true (field "steps" = Some (March_eval.Eval.VInt 4));
+  Alcotest.(check bool) "self is the pid spawn returned"
+    true (field "me" = Some (March_eval.Eval.VPid pid))
+
 (** whereis on an unknown atom returns None *)
 let test_whereis_unknown () =
   let result = call_builtin "whereis" [March_eval.Eval.VAtom "no_such_process"] in
@@ -15746,6 +15788,7 @@ let compiler_suites =
           Alcotest.test_case "worker named spec"         `Quick (with_reset test_worker_named_spec);
           Alcotest.test_case "whereis named"             `Quick (with_reset test_whereis_named);
           Alcotest.test_case "whereis live actor"        `Quick (with_reset test_whereis_live_actor);
+          Alcotest.test_case "self-send delivers (interp)" `Quick (with_reset test_self_send_delivers_interp);
           Alcotest.test_case "whereis unknown"           `Quick (with_reset test_whereis_unknown);
           Alcotest.test_case "whereis_bang unknown"      `Quick (with_reset test_whereis_bang_unknown);
           Alcotest.test_case "name reregisters restart"  `Quick (with_reset test_name_reregisters_on_restart);

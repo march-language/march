@@ -10,16 +10,16 @@ mod ActorSelf do
   -- march_spawn returns one) -- invisible while nothing could reach it.
   --
   -- Filed: specs/todos/2026-09-11-self-in-an-actor-handler-does-not-compile.md.
-  -- What is still broken and filed separately: sending TO self does not
-  -- deliver, on either backend.
+  --
+  -- This golden stayed green while `self` was still WRONG: until 2026-09-13
+  -- a bare `self` was never bound by either backend and fell through to the
+  -- global builtin, so `note` below received the builtin's closure, not a
+  -- pid -- which `let _ = p` cannot tell apart. Sending to `self`, and the
+  -- refcount balance of binding it, are pinned by actor_send_to_self.march
+  -- (specs/progress/2026-09-13-send-to-self-delivers.md). This one remains
+  -- the guard that `self` compiles at all.
   needs IO.Console
 
-  -- Deliberately does NOT compare `self` to the spawner's pid: the two
-  -- backends disagree on that (compiled, they are equal -- `self` is the
-  -- actor pointer, which is what `spawn` hands back; interpreted, they are
-  -- not), and that divergence is filed rather than pinned here. What both
-  -- agree on, and what this golden is for, is that `self` is a usable value
-  -- inside a handler on the compiled backend at all.
   pfn note(p) : () do
     let _ = p
     print_line("handler holds its own pid")
