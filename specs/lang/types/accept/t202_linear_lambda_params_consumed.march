@@ -1,0 +1,34 @@
+mod Main do
+  needs IO.Console
+  -- The legal shapes t198-t201's fix must keep accepting. `shadow_*` guard
+  -- the fix's one subtle point: the close judges only the entries the
+  -- lambda's own parameters added, so an OUTER linear value with the same
+  -- name, still unused at the lambda and consumed after it, is not reported.
+  always_linear type S1 = S1(Int)
+  type T = T(Int)
+  fn sink(s : S1) : Int do match s do S1(e) -> e end end
+  fn run(k : S1 -> Int) : Int do k(S1(1)) end
+  fn once() : Int do run(fn st -> sink(st)) end
+  fn by_match() : Int do run(fn st -> match st do S1(e) -> e end) end
+  fn nested() : Int do run(fn s -> run(fn t -> sink(t)) + sink(s)) end
+  fn local() : Int do
+    fn g(st : S1) : Int do sink(st) end
+    g(S1(1))
+  end
+  fn shadow_infer() : Int do
+    let s = S1(1)
+    let g = fn (s : S1) -> sink(s)
+    g(S1(2)) + sink(s)
+  end
+  fn shadow_check() : Int do
+    let s = S1(1)
+    run(fn s -> sink(s)) + sink(s)
+  end
+  fn affine_dropped() : Int do
+    let g = fn (affine t : T) -> 0
+    g(T(1))
+  end
+  fn main(c : Cap(IO.Console)) do
+    println(int_to_string(once() + by_match() + nested() + local() + shadow_infer() + shadow_check() + affine_dropped()))
+  end
+end

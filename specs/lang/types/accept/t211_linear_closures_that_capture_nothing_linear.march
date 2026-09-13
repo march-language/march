@@ -1,0 +1,29 @@
+mod Main do
+  needs IO.Console
+  -- Closures t208-t210's fix keeps accepting. A lambda's OWN parameter that
+  -- shadows an outer linear name is not a capture of it (the snapshot is
+  -- keyed by entry, not name); capturing unrestricted values and capabilities
+  -- is fine; a callback nested inside a callback consumes only what it is
+  -- handed.
+  always_linear type S1 = S1(Int)
+  fn sink(s : S1) : Int do match s do S1(e) -> e end end
+  fn run(k : S1 -> Int) : Int do k(S1(1)) end
+  fn twice(k : Int -> Int) : Int do k(1) + k(2) end
+  fn say(c : Cap(IO.Console), m : String) : () do print_line(m) end
+  fn shadow() : Int do
+    let s = S1(1)
+    run(fn s -> sink(s)) + sink(s)
+  end
+  fn unrestricted() : Int do
+    let n = 10
+    twice(fn x -> x + n)
+  end
+  fn nested() : Int do run(fn s -> run(fn t -> sink(t)) + sink(s)) end
+  fn main(c : Cap(IO.Console)) do
+    let hello = fn () -> say(c, "hi")
+    hello()
+    hello()
+    fn local_sum(x : Int) : Int do x + unrestricted() end
+    println(int_to_string(shadow() + local_sum(1) + nested()))
+  end
+end

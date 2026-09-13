@@ -1,0 +1,18 @@
+-- EXPECT-ERROR: The linear value `state.st` was never used
+mod Main do
+  needs IO.Console
+  -- A handler that returns a brand-new state ignores the old `st`, which leaks.
+  always_linear type S1 = S1(Int)
+  actor Ep do
+    state { st : S1, n : Int }
+    init  { st: S1(0), n: 0 }
+    on Reset() do
+      { st: S1(0), n: 0 }
+    end
+  end
+  fn main(c : Cap(IO.Console)) do
+    let p = spawn(Ep)
+    send(p, Reset())
+    run_until_idle()
+  end
+end

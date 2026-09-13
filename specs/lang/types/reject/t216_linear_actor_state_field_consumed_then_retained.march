@@ -1,0 +1,23 @@
+-- EXPECT-ERROR: The linear value `state.st` is used more than once here
+mod Main do
+  needs IO.Console
+  -- An always_linear field of an actor's state, consumed in a handler and then
+  -- kept by `{ state with … }`: the value existed twice, once consumed and once
+  -- still in the state for the next turn. Accepted before 2026-09-13, not even
+  -- a warning. The update keeps every field it doesn't replace.
+  always_linear type S1 = S1(Int)
+  fn sink(s : S1) : Int do match s do S1(e) -> e end end
+  actor Ep do
+    state { st : S1, n : Int }
+    init  { st: S1(0), n: 0 }
+    on Tick() do
+      let k = sink(state.st)
+      { state with n: state.n + k }
+    end
+  end
+  fn main(c : Cap(IO.Console)) do
+    let p = spawn(Ep)
+    send(p, Tick())
+    run_until_idle()
+  end
+end
