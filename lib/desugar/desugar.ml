@@ -1133,9 +1133,46 @@ let desugar_fn_def (def : fn_def) (fn_span : span) : fn_def =
     { def with fn_clauses = [only'] }
 
   | first :: _ ->
-    (* General path: synthesise fresh arg names based on first clause's arity. *)
+    (* General path: synthesise fresh arg names based on first clause's arity.
+
+       Except when the FIRST clause dominates — no guard, every parameter a
+       plain variable — in which case every call goes to it, the later heads
+       are unreachable, and its declared parameter types (a refinement in
+       particular) ARE the function's contract.  Keep its names and types on
+       the merged clause then, so `fn f(n : {Int | n > 0}) do n end` followed
+       by `fn f(0) do 0 end` still obliges `f(0 - 1)`; until 2026-09-13 the
+       merge rebuilt every parameter untyped and the refinement was lost
+       before the checker ever saw it (specs/todos/2026-09-03-desugar-dropped-…).
+       Keeping the user's own names, not fresh ones, is what keeps the
+       predicate's `n` bound; capture in a later arm's body is impossible
+       since that arm never runs.  Any other shape (a literal or guard in
+       the first clause) keeps dropping the types: adopting a non-dominating
+       head's refinement as the whole function's contract would reject a
+       value another head legitimately handles. *)
+    let first_dominates =
+      first.fc_guard = None
+      && List.for_all
+           (function FPNamed _ | FPDefault _ | FPPat (PatVar _) -> true | FPPat _ -> false)
+           first.fc_params
+    in
     let arity = List.length first.fc_params in
-    let arg_names = List.init arity fresh_arg_name in
+    let arg_names =
+      if first_dominates then
+        List.map
+          (function
+            | FPNamed p | FPDefault (p, _) -> p.param_name
+            | FPPat (PatVar n) -> n
+            | FPPat _ -> assert false)
+          first.fc_params
+      else List.init arity fresh_arg_name
+    in
+    let merged_param i name =
+      if first_dominates then
+        match List.nth first.fc_params i with
+        | FPNamed p | FPDefault (p, _) -> FPNamed { p with param_name = name }
+        | FPPat _ -> mk_named_param name
+      else mk_named_param name
+    in
 
     (* Build the scrutinee expression from the generated arg names. *)
     let scrutinee : expr =
@@ -1166,7 +1203,7 @@ let desugar_fn_def (def : fn_def) (fn_span : span) : fn_def =
 
     (* Single merged clause with all FPNamed params *)
     let merged_clause : fn_clause =
-      { fc_params = List.map mk_named_param arg_names
+      { fc_params = List.mapi merged_param arg_names
       ; fc_guard  = None
       ; fc_body   = body
       ; fc_span   = fn_span

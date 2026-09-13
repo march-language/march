@@ -1795,11 +1795,10 @@ An empty baseline over real code is a true finding, not evidence the audit
 does nothing, but an audit that silently broke would also report an empty
 baseline, which is why a second, deliberately non-empty fixture set exists:
 `test/refine_audit/holes/`, one small program per known unenforced position
-(a refinement inside a type argument, a refinement in an arrow's domain, a
-`{String | ...}` return, and the two desugar-dropped shapes; a fixture
-leaves the set when its position becomes enforced, as the block-level `fn`,
-lambda-parameter, nested-field, variant-argument, `linear`-wrapper, actor
-and `impl`-method ones did on 2026-09-13),
+(a refinement inside a type argument, and a refinement in an arrow's
+domain; a fixture leaves the set when its position becomes enforced, as
+nine of them did on 2026-09-13, the String-return and desugar-dropped ones
+last),
 pinned at `test/refine_audit/holes.baseline`. If that baseline ever reports
 zero Unenforced sites, the audit itself is broken; the test that diffs it
 fails loudly rather than passing.
@@ -1860,11 +1859,19 @@ position into a real contract, obligation and assumption together, is
 - A refinement inside a type ARGUMENT (`List({Int | _ > 0})`), which needs
   container subtyping; a refinement one layer down at a field, constructor
   argument, or state field is enforced as above.
-- A `{String | ...}` return type: `return_refine_ext` only recognizes Int,
-  Bool, Float, and record bases.
-- A parameter refinement that desugar drops or relocates before the audit
-  ever sees it: a multi-head function's clause merge, or a default-argument
-  function's mangled arity variant. See below.
+- (Closed 2026-09-13.) A `{String | ...}` return type is verified against
+  the body: a literal tail and the predicate's literal meet on one `Str`
+  constant, `len(_)` is the returned string's byte length, and a String
+  built by a call is a recorded skip. Its postcondition does not yet
+  propagate to callers.
+- (Closed 2026-09-13, with one shape left open on purpose.) A refined
+  default parameter obliges a full-arity call: `f(1, 0)` resolves to the
+  `f$2` arity variant the runtime dispatches to. A multi-head function
+  keeps its first head's declared types through the clause merge when that
+  head dominates (no guard, every parameter a plain variable), so its
+  refinement is the function's contract; a refinement on a non-dominating
+  head is still dropped, since another head may legitimately handle the
+  value, and the audit keeps reporting it. See below.
 
 See `specs/todos/2026-09-03-lambda-param-refinement-unchecked.md`,
 `specs/todos/2026-09-03-impl-method-param-refinement-unchecked.md`,

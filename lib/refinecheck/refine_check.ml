@@ -431,7 +431,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
   let go_path p = visit ~root errctx defs ctx p lets sc re cb in
   match e with
   | A.EApp (A.EVar { A.txt = fname; _ }, args, sp) ->
-    let resolved = resolve_call ctx defs fname in
+    let resolved = resolve_call_arity ctx defs fname (List.length args) in
     let callee =
       match resolved with Some (Some sg) -> Some sg | _ -> List.assoc_opt fname cb
     in
