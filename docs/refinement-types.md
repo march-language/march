@@ -1103,7 +1103,14 @@ notion of "checked."
 Contrast that with a lambda's own parameter (`fn (n : {Int | n > 0}) -> n`):
 no scope machinery ever runs over an `ELam`'s parameters at all, so *no*
 call through that lambda, ever, is obliged by it. That is genuinely
-Unenforced, not just uncalled.
+Unenforced, not just uncalled. And unenforced cuts both ways: since
+2026-09-13 the body of a lambda, a block-level `fn`, or an actor handler is
+walked with its parameter refinements *stripped* from scope, the same
+treatment a non-adoptable `impl` method already got. Before that, the body
+assumed `n > 0` from `fn (n : {Int | n > 0}) -> need(n)` while `g(0)` obliged
+nobody, and `cap verified` accepted the program. The plan that turns each
+of these positions into a real contract, obligation and assumption together,
+is `specs/plans/2026-09-13-refinement-enforcement-holes-plan.md`.
 
 ### Where the current baseline stands
 

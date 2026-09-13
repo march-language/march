@@ -1799,7 +1799,14 @@ zero Unenforced sites, the audit itself is broken; the test that diffs it
 fails loudly rather than passing.
 
 The positions currently known to be Unenforced, none of which the corpus
-above happens to exercise:
+above happens to exercise. Unenforced cuts both ways: since 2026-09-13 the
+checker also walks a lambda's, a block-level `fn`'s, and an actor handler's
+body with those parameter refinements *stripped* from scope, exactly as it
+already did for a non-adoptable `impl` method. Before that, the body assumed
+`n > 0` from a `fn (n : {Int | n > 0}) -> need(n)` while `g(0)` obliged
+nobody, and `cap verified` accepted the program. The plan that turns each
+position into a real contract, obligation and assumption together, is
+`specs/plans/2026-09-13-refinement-enforcement-holes-plan.md`.
 
 - A lambda's own parameter.
 - A block-level `fn`'s own parameter and return type: `check_fn_post_verdict`

@@ -50,6 +50,17 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A refinement on a lambda's, a block-level `fn`'s, or an actor handler's
+  parameter is no longer assumed inside the body.** No caller was obliged by
+  those positions (still true; they are the open coverage holes), but the body
+  treated the predicate as a fact anyway, so `let g = fn (n : {Int | n > 0})
+  -> need(n)` followed by `g(0)` passed `cap verified`. The body is now walked
+  with the refinement stripped, the treatment a non-adoptable `impl` method
+  already got. Code that only verified through that unproved assumption now
+  fails under `cap verified`; see
+  `specs/plans/2026-09-13-refinement-enforcement-holes-plan.md` for the phases
+  that turn each position into an actual contract.
+
 - **`self` inside an actor handler compiles.** It was a real builtin in the
   interpreter but missing from the compiled backend's builtin table, so the
   emitter produced a call to an undefined symbol and *any* compiled program

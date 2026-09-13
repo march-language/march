@@ -1137,13 +1137,26 @@ let collect_all_defs (decls : A.decl list) : (string, fn_sig option) Hashtbl.t =
    establish.  The return refinement is CHECKED rather than assumed, so it
    stays: dropping it would lose a real check, and checking it against the
    original (unstripped) parameters is what [visit_fn] keeps doing. *)
-let strip_param_refinements (fd : A.fn_def) : A.fn_def =
+let strip_param_refinement (p : A.param) : A.param =
   let rec strip = function
     | A.TyRefine (t, _, _) -> strip t
     | A.TyLinear (l, t) -> A.TyLinear (l, strip t)
     | t -> t
   in
-  let param (p : A.param) = { p with A.param_ty = Option.map strip p.A.param_ty } in
+  { p with A.param_ty = Option.map strip p.A.param_ty }
+
+(* The same erasure over a bare [A.param list] — a lambda's or an actor
+   handler's parameters, which carry no [fn_def].  Used by [visit] for exactly
+   the reason [strip_param_refinements] exists: until every construction of a
+   call through that binder is obliged (see
+   specs/plans/2026-09-13-refinement-enforcement-holes-plan.md), a refinement
+   declared there is assume-without-check, and `cap verified` accepted
+   `need(0)` through `let g = fn (n : {Int | n > 0}) -> need(n)  g(0)`. *)
+let strip_params_refinements (ps : A.param list) : A.param list =
+  List.map strip_param_refinement ps
+
+let strip_param_refinements (fd : A.fn_def) : A.fn_def =
+  let param = strip_param_refinement in
   let fp = function
     | A.FPNamed p -> A.FPNamed (param p)
     | A.FPDefault (p, e) -> A.FPDefault (param p, e)

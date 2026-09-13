@@ -13640,6 +13640,80 @@ let const_fn_suite =
         Alcotest.(check int) "annotation error + bounds error" 2 (refine_error_count (prog "200"))) ]
 
 
+(* ── Unobliged parameter refinements must not be ASSUMED ──────────────────
+   A lambda's, a block-level `fn`'s, and an actor handler's own parameter
+   refinements parse and typecheck but oblige no caller today (the todos
+   closed phase by phase in
+   specs/plans/2026-09-13-refinement-enforcement-holes-plan.md).  Before
+   phase 0 the body nonetheless ASSUMED them: `need(n)` under `n : {Int |
+   n > 0}` discharged, and `cap verified` accepted `g(0)`.  Each case pairs
+   the refined program (must be rejected) with its unrefined control (already
+   rejected), so a regression that quietly re-admits the assumption shows as
+   the refined half going green while the control stays red — not as both
+   passing for an unrelated reason.
+
+   These are [gated]: the rejection here is the solver-undecided escalation on
+   `need`'s precondition, which needs z3 to be undecided rather than absent. *)
+let unobliged_assume_suite =
+  let need = "  fn need(k : {Int | k > 0}) : Int do k end\n" in
+  let prog body = "mod U do\n  cap verified\n" ^ need ^ body ^ "end\n" in
+  let pair name ~refined ~control =
+    gated name (fun () ->
+        Alcotest.(check bool) "control (unrefined) is rejected" true
+          (has_refine_error (prog control));
+        Alcotest.(check bool) "refined-but-unobliged is rejected too" true
+          (has_refine_error (prog refined)))
+  in
+  [ pair "lambda: `let g = fn (n : {Int | n > 0}) -> need(n)` does not assume n > 0"
+      ~refined:
+        "  fn main() : Int do\n\
+        \    let g = fn (n : {Int | n > 0}) -> need(n)\n\
+        \    g(0)\n\
+        \  end\n"
+      ~control:
+        "  fn main() : Int do\n\
+        \    let g = fn (n : Int) -> need(n)\n\
+        \    g(0)\n\
+        \  end\n";
+    pair "block fn: `fn inner(n : {Int | n > 0})` does not assume n > 0"
+      ~refined:
+        "  fn main() : Int do\n\
+        \    fn inner(n : {Int | n > 0}) : Int do need(n) end\n\
+        \    inner(0)\n\
+        \  end\n"
+      ~control:
+        "  fn main() : Int do\n\
+        \    fn inner(n : Int) : Int do need(n) end\n\
+        \    inner(0)\n\
+        \  end\n";
+    pair "actor handler: `on Inc(n : {Int | n > 0})` does not assume n > 0"
+      ~refined:
+        "  actor Counter do\n\
+        \    state { value : Int }\n\
+        \    init { value: 0 }\n\
+        \    on Inc(n : {Int | n > 0}) do\n\
+        \      { state with value: need(n) }\n\
+        \    end\n\
+        \  end\n\
+        \  fn main() : Unit do\n\
+        \    let c = spawn(Counter)\n\
+        \    let _ = send(c, Inc(0 - 1))\n\
+        \    kill(c)\n\
+        \  end\n"
+      ~control:
+        "  actor Counter do\n\
+        \    state { value : Int }\n\
+        \    init { value: 0 }\n\
+        \    on Inc(n : Int) do\n\
+        \      { state with value: need(n) }\n\
+        \    end\n\
+        \  end\n\
+        \  fn main() : Unit do\n\
+        \    let c = spawn(Counter)\n\
+        \    let _ = send(c, Inc(0 - 1))\n\
+        \    kill(c)\n\
+        \  end\n" ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -13723,4 +13797,5 @@ let () =
         audit_classify_suite @ audit_classify_reason_suite @ audit_classify_fixloop1_suite);
       ("audit-flag", audit_flag_suite);
       ("audit-baseline", audit_baseline_suite);
-      ("const-fn-predicate", const_fn_suite) ]
+      ("const-fn-predicate", const_fn_suite);
+      ("unobliged-assume", unobliged_assume_suite) ]

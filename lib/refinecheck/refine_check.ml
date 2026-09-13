@@ -311,11 +311,21 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
            (ctx', path', lets', sc', re', cb'))
          (ctx, path, lets, sc, re, cb) es)
   | A.ELet (b, _) -> go b.A.bind_expr
+  (* A lambda's and a block-level `fn`'s OWN parameter refinements are walked
+     STRIPPED from [scope] (the [strip_params_refinements] below), exactly as
+     a non-adoptable `impl` method's are in [visit_fn]: no call through either
+     binder is obliged by them yet (see
+     specs/plans/2026-09-13-refinement-enforcement-holes-plan.md, phases 1-2),
+     so admitting them let a body discharge `need(n)` from a `n > 0` nobody
+     ever proved — `cap verified` accepted `g(0)`.  The names are still
+     shadowed in every channel, and [recenv]/[cbenv] still see the declared
+     types: a record sort or a callback signature is not a fact about the
+     parameter's VALUE, only about its shape. *)
   | A.ELam (ps, body, _) ->
     let names = List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
     let ctx = local_shadow ctx names in
     visit ~root errctx defs ctx (path_shadow path names) (launder_shadow lets names)
-      (List.fold_left scope_add_param sc ps)
+      (List.fold_left scope_add_param sc (strip_params_refinements ps))
       (List.fold_left recenv_add_param re ps)
       (List.fold_left cb_add_param cb ps)
       body
@@ -326,7 +336,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     let cb = cb_shadow cb [ n.A.txt ] in
     let ctx = local_shadow ctx names in
     visit ~root errctx defs ctx (path_shadow path names) (launder_shadow lets names)
-      (List.fold_left scope_add_param sc ps)
+      (List.fold_left scope_add_param sc (strip_params_refinements ps))
       (List.fold_left recenv_add_param re ps)
       (List.fold_left cb_add_param cb ps)
       body
@@ -1089,10 +1099,16 @@ and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
     visit_expr ad.A.actor_init;
     List.iter
       (fun (h : A.actor_handler) ->
-        (* Handler parameters bind exactly like named function parameters, so
-           their refinements must be in scope for the body. *)
+        (* Handler parameters bind exactly like named function parameters —
+           but their REFINEMENTS are walked stripped, for the reason the
+           [A.ELam] arm of [visit] gives: no `send`/`call` constructing the
+           message is obliged by them yet (plan phase 3), so a body assuming
+           `n > 0` discharged obligations nobody proved. *)
         let ps = List.map (fun p -> A.FPNamed p) h.A.ah_params in
-        let sc = List.fold_left scope_add_fnparam [] ps in
+        let sc =
+          List.fold_left scope_add_fnparam []
+            (List.map (fun p -> A.FPNamed p) (strip_params_refinements h.A.ah_params))
+        in
         let re = List.fold_left recenv_add_fnparam [] ps in
         let cb = List.fold_left cb_add_fnparam [] ps in
         let ctx = local_shadow ctx (List.concat_map fnparam_binders ps) in
