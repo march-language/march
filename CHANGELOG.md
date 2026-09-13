@@ -171,6 +171,12 @@ git log is authoritative for exact commits.
   functions and actor handlers already rejected the same code. It now reports
   "The linear value `st` was never used."
 
+- **Comparing or measuring a fresh string or list no longer leaks it
+  (compiled).** `==`, `!=`, `<`, `<=`, `>`, `>=` and `string_length` never
+  freed a heap argument that had no other owner. A loop comparing freshly
+  built strings grew by one object per comparison, and a two-element list
+  leaked six. The interpreter was unaffected.
+
 - **A refinement on a lambda's, a block-level `fn`'s, or an actor handler's
   parameter is no longer assumed inside the body.** No caller was obliged by
   those positions (still true; they are the open coverage holes), but the body

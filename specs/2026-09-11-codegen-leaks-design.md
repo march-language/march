@@ -1,7 +1,10 @@
 # Six compiled-only leaks: one ownership story, six boundaries
 
 **Date:** 2026-09-11
-**Status:** design; nothing here has landed
+**Status:** design. §4 landed 2026-09-13, widened: the leak was the builtin
+borrow table's silent owned default, which also covered the comparison
+operators. See `specs/progress/2026-09-13-builtin-borrow-classification.md`.
+Nothing else here has landed.
 **Scope:** the six open `specs/todos/` items below. Every `file:line` was read
 on this date at `2b32b130`; where a todo's pointer has moved or its stated
 mechanism does not match the code, this doc says so rather than repeating it.

@@ -126,8 +126,7 @@ dec_rc $clo;
 let $t19 : '_ = >(step, 0) in
 case $t19 of
   True() -> dec_rc $t19;
-let $t20 : '_ = inc_rc i;
->=(i, stop) in
+let $t20 : '_ = >=(i, stop) in
 case $t20 of
   True() -> dec_rc $clo;
 dec_rc $t20;
@@ -138,8 +137,7 @@ let $t21 : '_ = inc_rc i;
 let $t22 : '_ = alloc Cons(i, acc) in
 call_ptr build($t21, $t22)
   _ -> dec_rc $t19;
-let $t23 : '_ = inc_rc i;
-<=(i, stop) in
+let $t23 : '_ = <=(i, stop) in
 case $t23 of
   True() -> dec_rc $clo;
 dec_rc $t23;
@@ -196,9 +194,7 @@ let $jp_clo497 : () -> '_ = alloc $Clo_$jp496$12($jp496$apply$12) in
 dec_rc $jp_clo497;
 let r : '_ = $f495 in
 let x : '_ = $f494 in
-let $t493 : '_ = inc_rc x;
-inc_rc m;
->(x, m) in
+let $t493 : '_ = >(x, m) in
 case $t493 of
   True() -> dec_rc $t493;
 call_ptr go(r, x)
@@ -234,8 +230,7 @@ fn go$apply$2($clo : Ptr(Unit), i : Int, acc : List(Int)) : List(Int) =
 $clo in
 let start : Int = $clo.$fv1 in
 dec_rc $clo;
-let $t14 : '_ = inc_rc i;
-<(i, start) in
+let $t14 : '_ = <(i, start) in
 case $t14 of
   True() -> dec_rc $clo;
 dec_rc $t14;
@@ -294,9 +289,7 @@ let $jp_clo484 : () -> '_ = alloc $Clo_$jp483$9($jp483$apply$9) in
 dec_rc $jp_clo484;
 let r : '_ = $f482 in
 let x : '_ = $f481 in
-let $t480 : '_ = inc_rc x;
-inc_rc m;
-<(x, m) in
+let $t480 : '_ = <(x, m) in
 case $t480 of
   True() -> dec_rc $t480;
 call_ptr go(r, x)

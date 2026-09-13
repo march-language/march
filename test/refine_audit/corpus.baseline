@@ -46,6 +46,8 @@ native_boxed_adt_atom_field_not_boxed: coverage audit (user + stdlib): 63 enforc
 native_boxed_adt_atom_field_not_boxed: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_boxed_adt_float_field: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_boxed_adt_float_field: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_builtin_borrow_leak_probe: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_builtin_borrow_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_builtin_link_backing: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_builtin_link_backing: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_bytes_u8_bridge: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced

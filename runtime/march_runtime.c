@@ -8208,6 +8208,10 @@ void *march_typed_array_to_list(void *arr) {
     void *lst = make_nil();
     for (int64_t i = len - 1; i >= 0; i--) {
         void *elem = *(void **)((char *)arr + TYPED_ARRAY_HDR_SIZE + i * 8);
+        /* The cons cell owns its head and releases it when the list dies;
+         * the array still holds the element, so the cell needs its own +1
+         * (same reasoning as march_typed_array_get). */
+        march_incrc(elem);
         lst = make_cons(elem, lst);
     }
     return lst;
@@ -8217,10 +8221,19 @@ int64_t march_typed_array_length(void *arr) {
     return *(int64_t *)((char *)arr + 16);
 }
 
+/* Returns an OWNED reference: the element stays in the array, so the caller
+ * gets its own +1.  It used to return the bare slot, which only stayed
+ * balanced because every consumer that received it was (wrongly) treated as
+ * consuming a reference it never released -- `==`, string_length, to_string.
+ * Once those borrow (borrow.ml), a borrowed consumer releases its dead-after
+ * argument, and a bare slot would be freed under the array.  A tagged
+ * immediate needs no reference (march_incrc ignores it). */
 void *march_typed_array_get(void *arr, int64_t i) {
     int64_t len = march_typed_array_length(arr);
     typed_array_check_bounds(i, len);
-    return *(void **)((char *)arr + TYPED_ARRAY_HDR_SIZE + i * 8);
+    void *elem = *(void **)((char *)arr + TYPED_ARRAY_HDR_SIZE + i * 8);
+    march_incrc(elem);
+    return elem;
 }
 
 void *march_typed_array_set(void *arr, int64_t i, void *val) {
