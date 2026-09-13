@@ -13,6 +13,16 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **An `impl` method's parameter refinements are enforced even when the
+  method name is ambiguous.** With two impls of `at`, a call
+  `at(Crate(0), 0 - 1)` used to resolve to nothing and oblige nobody; it is
+  now resolved by the first argument's type, the same rule compilation
+  dispatches by, and checked against that impl's own contract (so an impl
+  requiring `i >= 10` and one requiring `i >= 0` are told apart by the
+  receiver). A call whose receiver type the typechecker cannot name is a
+  recorded skip (counted by `--refine-report`, an error under
+  `cap verified`), never silence.
+
 - **Stored-field refinements are enforced.** A refined record field
   (`type Box = { v : {Int | _ > 0} }`), variant argument
   (`type W = W({Int | _ > 0})`), or actor state field is now a contract on

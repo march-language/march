@@ -1125,12 +1125,12 @@ regenerated the same way the TIR golden snapshots are
 (`UPDATE_SNAPSHOTS=1 ./_build/default/test/test_refinecheck.exe -e`). It
 being empty is a true fact about today's corpus, not evidence the audit does
 nothing: `test/refine_audit/holes/` is a second, deliberately non-empty
-fixture set built from known holes (a non-adoptable `impl` method's
-parameter, a refinement inside a type argument, a `{String | ...}` return,
-and the two desugar-dropped shapes; a fixture leaves the set once its
-position is enforced, as the block-level `fn`, lambda-parameter,
-nested-field, variant-argument, `linear`-wrapper and actor ones did on
-2026-09-13), pinned at
+fixture set built from known holes (a refinement inside a type argument,
+a refinement in an arrow's domain, a
+`{String | ...}` return, and the two desugar-dropped shapes; a fixture
+leaves the set once its position is enforced, as the block-level `fn`,
+lambda-parameter, nested-field, variant-argument, `linear`-wrapper, actor
+and `impl`-method ones did on 2026-09-13), pinned at
 `test/refine_audit/holes.baseline`. If
 that second baseline ever reported zero Unenforced sites, the audit itself
 would be broken, not the corpus; the test that diffs it fails loudly with
@@ -1151,14 +1151,15 @@ above happens to exercise:
   `inner` never escapes callee position (returned, aliased, or passed where
   the pass-site check cannot oblige it); an escaping local is checked with
   them stripped.
-- An `impl` method's parameter, when the method's bare name is not adoptable
-  (more than one `impl` defines it, or a top-level `fn` shares the name):
-  `visit_decl` strips the refinement from the body in that case, and no
-  caller is ever obliged. The audit reports every `impl` method parameter as
-  Unenforced regardless of adoptability, since a single site cannot make that
-  module-level judgement; when the method *is* actually adoptable the checker
-  does enforce it, and this over-approximation is a documented conservatism,
-  not a bug of its own.
+- (Closed 2026-09-13.) An `impl` method's parameter when the method's bare
+  name is not adoptable (more than one `impl` defines it, or a top-level
+  `fn` shares the name): the call is now resolved by the *first argument's
+  type*, the rule compilation dispatches by, and checked against that
+  impl's own contract. A call whose receiver type the typechecker cannot
+  name (a type variable, no or several matching impls) is a recorded skip,
+  counted by `--refine-report` and an error under `cap verified`. The
+  method body still assumes its parameter refinements only when the name is
+  adoptable; obliging callers without letting the body assume is sound.
 - (Closed 2026-09-13.) An actor's state field: an inductive invariant. The
   state's refined fields are obliged at `init` and at every handler's result
   (an update `{ state with ... }`, or a fresh literal at a tail), and assumed

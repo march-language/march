@@ -111,6 +111,7 @@ val check_module :
   ?stdlib_files:string list ->
   ?audit:((Refine_audit.site * Refine_audit.disposition) list -> unit) ->
   ?pre_desugar_decls:A.decl list ->
+  ?type_map:(A.span, March_typecheck.Typecheck.ty) Hashtbl.t ->
   Err.ctx ->
   A.module_ ->
   unit

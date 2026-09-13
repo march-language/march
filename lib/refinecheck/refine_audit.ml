@@ -567,16 +567,23 @@ let classify (site : site) : disposition =
           "refined_param_ty does not accept this declared base type: only \
            an Int, a String, a Bool, a Float, or a registered record/ADT \
            base is scope-checked at a parameter")
-    | Some Impl_method_fn ->
-      Unenforced
-        "this is an `impl` method's parameter, whose enforcement depends on \
-         a module-level fact a single site cannot determine: \
-         contract_is_enforced only assumes it when the method's bare name is \
-         adoptable (exactly one `impl` defines it and no top-level `fn` \
-         shares the name); when it is not, visit_decl strips the parameter \
-         refinement from the body and no caller is obliged. The audit \
-         reports Unenforced rather than guess at adoptability from this site \
-         alone"
+    (* Since 2026-09-13 (plan phase 5) an `impl` method's parameter
+       refinement obliges its callers whether or not the method's bare name
+       is adoptable: an unambiguous name resolves as before, and an
+       ambiguous one is resolved by the FIRST argument's type from the
+       typechecker's [type_map] (the rule compilation uses).  A call whose
+       receiver type is unknown to the typechecker is a RECORDED skip, never
+       silence.  The body still assumes the refinement only when the name
+       is adoptable; the audit classifies the contract, and the contract is
+       now enforced at every call the checker can attribute. *)
+    | Some Impl_method_fn -> (
+      match Refine_post.refined_param_ty (Some site.origin_ty) with
+      | Some _ -> Enforced
+      | None ->
+        Unenforced
+          "refined_param_ty does not accept this declared base type: only \
+           an Int, a String, a Bool, a Float, or a registered record/ADT \
+           base is scope-checked at a parameter")
     | None ->
       failwith
         "Refine_audit.classify: unreachable -- every Param site's fn_origin \
