@@ -68,3 +68,34 @@ fixtures in the audit's non-vacuity guard (`test/refine_audit/holes.baseline`).
 Refactoring a top-level function (which IS enforced) into a nested helper
 inside a bigger function silently drops all refinement checking on it, with
 no diagnostic marking the change in coverage.
+
+## Landed 2026-09-13 (plan phase 1)
+
+`specs/plans/2026-09-13-refinement-enforcement-holes-plan.md`, phase 1. The
+"design decision about how local-function obligations key into the ledger"
+the todo anticipated turned out not to be needed: `cbenv`, the lexically
+scoped callee environment a refined callback parameter already uses, is the
+right home. `Refine_check.visit`'s `EBlock` walk now hands every `A.ELetFn`
+to `visit_local_fn`, which
+
+- synthesises an `A.fn_def` (`Refine_scope.local_fn_def`) and registers
+  `sig_of_fn` of it in `cbenv` for the statements after it AND inside its own
+  body, so a direct `inner(0)` and a recursive `inner(n - 2)` are both
+  obliged through the same `check_call` a callback call takes;
+- runs `check_fn_post_verdict` on that definition, so the return refinement
+  is verified against the body's tails; the signature carries `ret` only on
+  a proved verdict (propagation of that fact to callers goes through
+  `postcond_of`, which resolves by name in `defs`, so it is honest but not
+  yet consumed — noted in the code);
+- lets the body ASSUME its parameter refinements only when the name never
+  escapes callee position (`Refine_scope.name_escapes`, over the body and
+  the rest of the block); an escaping local (`apply(inner, 5)`) is walked
+  stripped, since a call through the escaped value is not obliged until
+  phase 2's pass-site subtyping lands.
+
+`Refine_audit.classify` reports both sites `Enforced` (the `Return` site now
+carries the synthesised definition as its `origin_fn`); the hole fixture
+`test/refine_audit/holes/local_fn.march` is retired and its baseline
+regenerated. Tests: `test/test_refinecheck.ml`, group `local-fn-contract`
+(direct violation, recursive violation with its safe twin, return
+verification both ways, and the escape/non-escape pair).

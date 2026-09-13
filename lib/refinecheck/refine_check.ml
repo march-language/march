@@ -205,11 +205,25 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
        channels track Int/String/ADT VALUES, and a function name is never
        one), but it always shadows [cbenv]: a same-named outer refined
        callback parameter must not keep being checked against calls to this
-       new, unrelated local function. *)
-    ignore
-      (List.fold_left
-         (fun (ctx, path, lets, sc, re, cb) e ->
-           visit ~root errctx defs ctx path lets sc re cb e;
+       new, unrelated local function.
+
+       Explicit recursion rather than a fold because an [ELetFn] needs to see
+       the statements AFTER it: whether its name escapes there decides
+       whether its own body may assume its parameter refinements — see
+       [visit_local_fn]. *)
+    let rec loop (ctx, path, lets, sc, re, cb) = function
+      | [] -> ()
+      | e :: rest ->
+           (* A block-level `fn` is walked by [visit_local_fn], which also
+              returns the [cbenv] entry that obliges the calls after it (or
+              [None] when it carries no contract at all).  Everything else
+              takes the ordinary walk. *)
+           let local_fn_entry =
+             match e with
+             | A.ELetFn (n, ps, ret_ty, body, sp) ->
+               Some (visit_local_fn ~root errctx defs ctx path lets sc re cb ~rest n ps ret_ty body sp)
+             | _ -> visit ~root errctx defs ctx path lets sc re cb e; None
+           in
            (* An annotated `let`'s refinement is checked against its bound
               expression HERE, against the scope as it stands BEFORE the
               binding — exactly as a call's arguments are checked against the
@@ -305,11 +319,19 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
            let cb' =
              match e with
              | A.ELet (b, _) -> cb_add_binding ctx defs cb b
-             | A.ELetFn (n, _, _, _, _) -> cb_shadow cb [ n.A.txt ]
+             (* The local's own contract, so a later `n(...)` is obliged by
+                it exactly like a call through a refined callback parameter
+                ([resolve_call] refuses the name — [local_shadow] retired it
+                just above — and [EApp] falls through to this env). *)
+             | A.ELetFn (n, _, _, _, _) ->
+               (match local_fn_entry with
+                | Some (Some sg) -> (n.A.txt, sg) :: cb_shadow cb [ n.A.txt ]
+                | _ -> cb_shadow cb [ n.A.txt ])
              | _ -> cb
            in
-           (ctx', path', lets', sc', re', cb'))
-         (ctx, path, lets, sc, re, cb) es)
+           loop (ctx', path', lets', sc', re', cb') rest
+    in
+    loop (ctx, path, lets, sc, re, cb) es
   | A.ELet (b, _) -> go b.A.bind_expr
   (* A lambda's and a block-level `fn`'s OWN parameter refinements are walked
      STRIPPED from [scope] (the [strip_params_refinements] below), exactly as
@@ -560,6 +582,68 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
       sc re cb e2
   | A.EDbg (Some e, _) -> go e
   | A.ELit _ | A.EVar _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> ()
+
+(* A block-level `fn n(ps) : ret do body end`, reached from [visit]'s [EBlock]
+   walk with [rest] = the statements that follow it in the same block.  Does
+   for a local function what [visit_fn] does for a top-level one, and returns
+   the [cbenv] entry that obliges every later `n(...)` in the block ([None]
+   when the local carries no contract at all).
+
+   Three things are decided here, in this order:
+
+   · ESCAPE.  A call reaches the local's contract only as a direct `n(...)`
+     (through the [cbenv] entry).  If [n] occurs any other way in its own body
+     or in [rest] — passed to `apply`, returned, aliased — some call is not
+     obliged, and assuming the parameter refinements inside the body would be
+     the assume-without-check phase 0 removed.  So the body walks with them
+     stripped exactly then, and assumes them otherwise: every route to a call
+     is obliged.  Phase 2's pass-site subtyping check is what will make the
+     escaping case safe to assume too.
+
+   · RETURN.  A return refinement is VERIFIED against the body's tails by
+     [check_fn_post_verdict], never assumed; it is checked against the
+     declared parameters only when those are obliged everywhere (the
+     non-escaping case) and against the stripped ones otherwise, mirroring
+     the escape rule.  The signature carries [ret] only on a PROVED verdict,
+     the same gate [gate_unverified_posts] applies to the named-function
+     table, so a caller can never lean on a postcondition the definition did
+     not establish.  (Propagating that fact to a caller's scope goes through
+     [postcond_of], which resolves by NAME in [defs]; a local's proved return
+     is therefore honest but not yet consumed downstream.)
+
+   · RECURSION.  The body sees its own entry in [cbenv], so `n(n - 2)` inside
+     is obliged like any other call. *)
+and visit_local_fn ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
+    (lets : launder) (sc : scope) (re : recenv) (cb : cbenv) ~(rest : A.expr list)
+    (n : A.name) (ps : A.param list) (ret_ty : A.ty option) (body : A.expr) (sp : A.span)
+  : fn_sig option =
+  let fd = local_fn_def n ps ret_ty body sp in
+  let escapes = List.exists (name_escapes n.A.txt) (body :: rest) in
+  let sg = sig_of_fn fd in
+  let proved =
+    match ret_ty with
+    | Some (A.TyRefine _) ->
+      check_fn_post_verdict ~root errctx (if escapes then strip_param_refinements fd else fd)
+    | _ -> false
+  in
+  let sg = if proved then sg else { sg with ret = None; ret_sort = None } in
+  let entry = entry_of_sig sg in
+  let names = n.A.txt :: List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
+  let sc = scope_shadow sc [ n.A.txt ] in
+  let re = recenv_shadow re [ n.A.txt ] in
+  let cb =
+    match entry with
+    | Some sg -> (n.A.txt, sg) :: cb_shadow cb [ n.A.txt ]
+    | None -> cb_shadow cb [ n.A.txt ]
+  in
+  let ctx = local_shadow ctx names in
+  let assumed = if escapes then strip_params_refinements ps else ps in
+  visit ~root errctx defs ctx (path_shadow path names) (launder_shadow lets names)
+    (List.fold_left scope_add_param sc assumed)
+    (List.fold_left recenv_add_param re ps)
+    (List.fold_left cb_add_param cb ps)
+    body;
+  entry
 
 (* =================================================================
    §20 Refinement-placement warnings

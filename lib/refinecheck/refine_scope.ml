@@ -539,6 +539,48 @@ let rec expr_mentions (names : string list) (e : A.expr) : bool =
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _)
   | A.EDbg (Some e, _) -> expr_mentions names e
 
+(* Does the local function [n] ESCAPE in [e] — occur anywhere other than as
+   the head of a call `n(...)`?  Passed as a value (`apply(n, 0)`), returned,
+   stored in a tuple, aliased by a `let`: all escapes.  A call through the
+   escaped value is not obliged by [n]'s own parameter refinements (only a
+   direct `n(...)` reaches the [cbenv] entry [visit] registers), so a body
+   that ASSUMED them would be assume-without-check exactly as before phase 0.
+   [visit] restores the assumption only when this is false for the body and
+   for every later statement of the enclosing block.
+
+   Deliberately OVER-approximate like [expr_mentions]: a rebinding of the
+   same name and every occurrence under it count as escapes.  Over-reporting
+   an escape only STRIPS an assumption (silence), never invents one. *)
+let rec name_escapes (n : string) (e : A.expr) : bool =
+  let esc = name_escapes n in
+  let any = List.exists esc in
+  match e with
+  | A.EApp (A.EVar m, args, _) when m.A.txt = n -> any args
+  | A.EVar m -> m.A.txt = n
+  | A.ELit _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> false
+  | A.EApp (f, args, _) -> esc f || any args
+  | A.ECon (_, args, _) | A.EAtom (_, args, _) | A.ETuple (args, _) -> any args
+  | A.ELam (_, body, _) -> esc body
+  | A.EBlock (es, _) -> any es
+  | A.ELet (b, _) -> esc b.A.bind_expr
+  | A.ELetFn (_, _, _, body, _) -> esc body
+  | A.ELetQ (_, e1, e2, _) | A.ELetStar (_, e1, e2, _) -> esc e1 || esc e2
+  | A.EMatch (subj, brs, _) ->
+    esc subj
+    || List.exists
+         (fun (br : A.branch) ->
+           (match br.A.branch_guard with Some g -> esc g | None -> false)
+           || esc br.A.branch_body)
+         brs
+  | A.ERecord (fs, _) -> List.exists (fun (_, v) -> esc v) fs
+  | A.ERecordUpdate (r, fs, _) -> esc r || List.exists (fun (_, v) -> esc v) fs
+  | A.EField (r, _, _) -> esc r
+  | A.EIf (c, t, el, _) -> any [ c; t; el ]
+  | A.ECond (arms, _) -> List.exists (fun (c, b) -> esc c || esc b) arms
+  | A.EPipe (a, b, _) | A.ESend (a, b, _) -> esc a || esc b
+  | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _)
+  | A.EDbg (Some e, _) -> esc e
+
 (* Does [e] mention [m] FREE — an occurrence not captured by an intervening
    binder of the same name?
 
@@ -1023,6 +1065,21 @@ let sig_of_fn (fd : A.fn_def) : fn_sig =
   match return_refine_sorted fd with
   | Some (b, p, srt) -> { base with ret = Some (b, p); ret_sort = srt }
   | None -> { base with ret = None; ret_sort = None }
+
+(* A block-level `fn n(ps) : ret do body end` ([A.ELetFn]) as the [A.fn_def]
+   every piece of function-level machinery consumes — [sig_of_fn] for its
+   callers' obligations, [check_fn_post_verdict] for its return refinement,
+   [strip_param_refinements] when the local escapes.  One clause, no guard,
+   no attributes: that is all the surface syntax of a local function admits.
+   Both spans are the [ELetFn]'s own; a diagnostic about the local's return
+   points at the whole definition, which is where the contract is written. *)
+let local_fn_def (n : A.name) (ps : A.param list) (ret_ty : A.ty option) (body : A.expr)
+    (sp : A.span) : A.fn_def =
+  { A.fn_name = n; fn_vis = A.Private; fn_doc = None; fn_attrs = []; fn_ret_ty = ret_ty
+  ; fn_clauses =
+      [ { A.fc_params = List.map (fun p -> A.FPNamed p) ps; fc_guard = None; fc_body = body
+        ; fc_span = sp; fc_params_span = sp } ]
+  ; fn_bounds = [] }
 
 (* Record the signature when EITHER side carries a refinement: a function with
    only a refined *return* must be resolvable so its postcondition reaches call

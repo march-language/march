@@ -12513,21 +12513,27 @@ let audit_classify_reason_suite =
           Alcotest.(check bool) "names the sig warning" true
             (contains reason "warn_sig_fn_refinement")
         | _ -> Alcotest.fail "expected Inert_warned")
-  ; Alcotest.test_case "a block-level function's return refinement is Unenforced with its own reason"
-      `Quick (fun () ->
-        let _, d = classify_only_site
+  ; (* Since 2026-09-13 (plan phase 1) a block-level function's return
+       refinement is verified by [check_fn_post_verdict] on a synthesised
+       definition, so the site is Enforced -- and the ledger agrees: the
+       same local returning 0 under `_ > 0` is an error. *)
+    gated "a block-level function's return refinement is Enforced (verified against its body)"
+      (fun () ->
+        let prog ret =
+          Printf.sprintf
             {|mod M do
                 fn outer() : Int do
-                  fn helper() : {Int | _ > 0} do 1 end
+                  fn helper() : {Int | _ > 0} do %s end
                   helper()
                 end
               end|}
+            ret
         in
-        match d with
-        | RAudit.Unenforced reason ->
-          Alcotest.(check bool) "names ELetFn / block-level" true
-            (contains reason "block-level")
-        | _ -> Alcotest.fail "expected Unenforced")
+        let _, d = classify_only_site (prog "1") in
+        Alcotest.(check string) "disposition" "Enforced" (disposition_tag d);
+        Alcotest.(check bool) "returning 0 under _ > 0 is an error (the ledger fact)" true
+          (has_refine_error_d (prog "0"));
+        Alcotest.(check bool) "returning 1 is not" false (has_refine_error_d (prog "1")))
   ]
 
 (* ── Fix loop 1: three false-Enforced positions, the Inert_warned coupling,
@@ -12581,8 +12587,11 @@ let audit_classify_fixloop1_suite =
   ; (* Finding 5: a block-level `fn`'s PARAMETER, the other half of the
        ELetFn hole (the report already covers the Return half). Ledger fact:
        calling `helper(0)` raises no error. *)
-    Alcotest.test_case "a block-level fn's parameter refinement is Unenforced, not Enforced"
-      `Quick (fun () ->
+    (* Finding 5 is CLOSED since 2026-09-13 (plan phase 1): [visit]'s
+       [EBlock] walk registers the local's signature in [cbenv], so the
+       direct `helper(0)` IS obliged. Disposition and ledger flip together. *)
+    gated "a block-level fn's parameter refinement is Enforced (direct calls are obliged)"
+      (fun () ->
         let src =
           {|mod LETFNP1 do
               fn main() : Int do
@@ -12592,12 +12601,8 @@ let audit_classify_fixloop1_suite =
             end|}
         in
         let _, d = classify_only_site src in
-        Alcotest.(check string) "disposition" "Unenforced" (disposition_tag d);
-        (match d with
-         | RAudit.Unenforced reason ->
-           Alcotest.(check bool) "names the block-level fact" true (contains reason "block-level")
-         | _ -> Alcotest.fail "expected Unenforced");
-        Alcotest.(check bool) "the violating call raises no error (the ledger fact)" false
+        Alcotest.(check string) "disposition" "Enforced" (disposition_tag d);
+        Alcotest.(check bool) "the violating call raises an error (the ledger fact)" true
           (has_refine_error_d src))
 
   ; (* Finding 6: an `impl` method parameter whose method name is AMBIGUOUS
@@ -13157,8 +13162,8 @@ end
 
    2. [holes.baseline]: a SEPARATE, small, hand-built fixture set under
       test/refine_audit/holes/ that deliberately contains one program per
-      known unenforced position (a block-level fn's own param/return, a
-      lambda's own param, a non-adoptable impl method's param, an actor's
+      known unenforced position (a lambda's own param, a non-adoptable impl
+      method's param, an actor's
       state field and handler param, a nested field refinement, and a
       String return). Its baseline MUST be non-empty. This is the guard on
       the guard: if the corpus baseline were empty because the audit
@@ -13714,6 +13719,58 @@ let unobliged_assume_suite =
         \    kill(c)\n\
         \  end\n" ]
 
+(* ── Block-level `fn` contracts (plan phase 1) ────────────────────────────
+   A local `fn inner(...)` inside a body is now a contract on both ends: a
+   direct `inner(...)` after it (or a recursive one inside it) is obliged by
+   its parameter refinements through [cbenv], and its return refinement is
+   verified by [check_fn_post_verdict] on a synthesised [fn_def].  The body
+   ASSUMES its parameters only when `inner` never escapes callee position —
+   the last pair pins that rule from both sides.  Desugared, since a
+   block-level `fn` is what production feeds the checker. *)
+let local_fn_suite =
+  let prog body =
+    "mod L do\n  cap verified\n  fn need(k : {Int | k > 0}) : Int do k end\n\
+    \  fn apply(f : Int -> Int, x : Int) : Int do f(x) end\n" ^ body ^ "end\n"
+  in
+  let main body = "  fn main() : Int do\n" ^ body ^ "  end\n" in
+  [ gated "direct call `inner(0)` violates the local's parameter refinement" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error_d
+             (prog (main "    fn inner(n : {Int | n > 0}) : Int do n end\n    inner(0)\n")));
+        Alcotest.(check bool) "no error on inner(5)" false
+          (has_refine_error_d
+             (prog (main "    fn inner(n : {Int | n > 0}) : Int do n end\n    inner(5)\n"))));
+
+    gated "a recursive call inside the local is obliged too" (fun () ->
+        let rec_prog step =
+          prog
+            (main
+               ("    fn inner(n : {Int | n >= 0}) : Int do\n\
+                \      if n == 0 do 0 else inner(n - " ^ step ^ ") end\n\
+                \    end\n\
+                \    inner(4)\n"))
+        in
+        Alcotest.(check bool) "n - 2 can go negative from n = 1" true
+          (has_refine_error_d (rec_prog "2"));
+        Alcotest.(check bool) "n - 1 stays >= 0 under n != 0" false
+          (has_refine_error_d (rec_prog "1")));
+
+    gated "the local's return refinement is verified against its body" (fun () ->
+        Alcotest.(check bool) "returning the unrefined n is not > 0" true
+          (has_refine_error_d
+             (prog (main "    fn inner(n : Int) : {Int | _ > 0} do n end\n    inner(5)\n")));
+        Alcotest.(check bool) "n : {Int | n > 0} returned proves _ > 0" false
+          (has_refine_error_d
+             (prog
+                (main "    fn inner(n : {Int | n > 0}) : {Int | _ > 0} do n end\n    inner(5)\n"))));
+
+    gated "the body assumes its parameters only while `inner` never escapes" (fun () ->
+        let def = "    fn inner(n : {Int | n > 0}) : Int do need(n) end\n" in
+        Alcotest.(check bool) "non-escaping: need(n) discharged from n > 0" false
+          (has_refine_error_d (prog (main (def ^ "    inner(5)\n"))));
+        Alcotest.(check bool) "escaping via apply(inner, 5): need(n) is unproved" true
+          (has_refine_error_d (prog (main (def ^ "    apply(inner, 5)\n"))))) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -13798,4 +13855,5 @@ let () =
       ("audit-flag", audit_flag_suite);
       ("audit-baseline", audit_baseline_suite);
       ("const-fn-predicate", const_fn_suite);
-      ("unobliged-assume", unobliged_assume_suite) ]
+      ("unobliged-assume", unobliged_assume_suite);
+      ("local-fn-contract", local_fn_suite) ]

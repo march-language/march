@@ -5,7 +5,8 @@ Landed 2026-09-13. Phase 0 of
 todos this touches stay OPEN (their obligation side is still unenforced):
 
 - `specs/todos/2026-09-03-lambda-param-refinement-unchecked.md`
-- `specs/todos/2026-09-03-block-fn-refinement-unchecked.md`
+- `specs/todos/2026-09-03-block-fn-refinement-unchecked.md` (closed the same
+  day by phase 1; now `specs/progress/2026-09-13-block-fn-refinement-enforced.md`)
 - `specs/todos/2026-09-03-actor-state-and-handler-refinement-unchecked.md`
 
 ## What was wrong

@@ -18,10 +18,6 @@ holes_lambda_param: coverage audit: test/refine_audit/holes/lambda_param.march:1
 holes_linear_wrapper: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 1 unenforced
 holes_linear_wrapper: coverage audit (user code): 0 enforced, 0 inert (warned), 1 unenforced
 holes_linear_wrapper: coverage audit: test/refine_audit/holes/linear_wrapper.march:5:25: param `f` #0: _ > 0: below the outermost position of the declared type
-holes_local_fn: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 2 unenforced
-holes_local_fn: coverage audit (user code): 0 enforced, 0 inert (warned), 2 unenforced
-holes_local_fn: coverage audit: test/refine_audit/holes/local_fn.march:9:24: param `inner` #0: n > 0: this is a block-level function's own parameter: scope_add_param and sig_of_clause are reached only through visit_fn, which is called for A.DFn and A.DImpl, never for a local A.ELetFn, so no caller is ever obliged by it (the same reason this declaration form's Return site is Unenforced)
-holes_local_fn: coverage audit: test/refine_audit/holes/local_fn.march:9:41: return of `inner`: _ > 0: this is a block-level function's return type: check_fn_post_verdict is reached only through visit_fn, which is called for A.DFn and A.DImpl, never for a local A.ELetFn, so no extractor is ever consulted for this position
 holes_multi_head: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 1 unenforced
 holes_multi_head: coverage audit (user code): 0 enforced, 0 inert (warned), 1 unenforced
 holes_multi_head: coverage audit: test/refine_audit/holes/multi_head.march:9:18: param `f` #0: n > 0: this refinement was declared here, but no occurrence with the same enclosing name and predicate text survives desugaring: either the declared type was discarded entirely (a multi-head function's clause merge drops every parameter type before the checker ever sees it) or it now lives only under a mangled name a plain call cannot resolve to (a default-argument function's arity variant, e.g. `f$2`). See specs/todos/2026-09-03-desugar-dropped-refinement-unchecked.md.

@@ -1791,27 +1791,33 @@ An empty baseline over real code is a true finding, not evidence the audit
 does nothing, but an audit that silently broke would also report an empty
 baseline, which is why a second, deliberately non-empty fixture set exists:
 `test/refine_audit/holes/`, one small program per known unenforced position
-(a lambda's own parameter, a block-level `fn`'s parameter and return, a
-non-adoptable `impl` method's parameter, an actor's state field and handler
-parameter, a nested field refinement, and a `{String | ...}` return),
+(a lambda's own parameter, a non-adoptable `impl` method's parameter, an
+actor's state field and handler parameter, a nested field refinement, and a
+`{String | ...}` return; a fixture leaves the set when its position becomes
+enforced, as the block-level `fn` one did on 2026-09-13),
 pinned at `test/refine_audit/holes.baseline`. If that baseline ever reports
 zero Unenforced sites, the audit itself is broken; the test that diffs it
 fails loudly rather than passing.
 
 The positions currently known to be Unenforced, none of which the corpus
 above happens to exercise. Unenforced cuts both ways: since 2026-09-13 the
-checker also walks a lambda's, a block-level `fn`'s, and an actor handler's
-body with those parameter refinements *stripped* from scope, exactly as it
-already did for a non-adoptable `impl` method. Before that, the body assumed
+checker also walks a lambda's and an actor handler's body (and an escaping
+block-level `fn`'s) with those parameter refinements *stripped* from scope,
+exactly as it already did for a non-adoptable `impl` method. Before that, the body assumed
 `n > 0` from a `fn (n : {Int | n > 0}) -> need(n)` while `g(0)` obliged
 nobody, and `cap verified` accepted the program. The plan that turns each
 position into a real contract, obligation and assumption together, is
 `specs/plans/2026-09-13-refinement-enforcement-holes-plan.md`.
 
 - A lambda's own parameter.
-- A block-level `fn`'s own parameter and return type: `check_fn_post_verdict`
-  and `scope_add_param` are reached only through `A.DFn` / `A.DImpl`, never
-  through a local `A.ELetFn`.
+- (Closed 2026-09-13.) A block-level `fn`'s own parameter and return type are
+  now enforced: every direct `inner(...)` after the definition, and every
+  recursive call inside it, is obliged through the callee environment, and
+  the return refinement is verified against the body. The body assumes its
+  parameter refinements only while `inner` never escapes callee position
+  (passed to `apply`, returned, aliased); an escaping local is walked with
+  them stripped until the pass-site check lands. See
+  `specs/progress/2026-09-13-block-fn-refinement-enforced.md`.
 - An `impl` method's parameter, when the method's bare name is not
   adoptable (more than one `impl` defines it, or a top-level `fn` shares the
   name): `visit_decl` strips the refinement from the body in that case, and
@@ -1832,7 +1838,6 @@ position into a real contract, obligation and assumption together, is
   function's mangled arity variant. See below.
 
 See `specs/todos/2026-09-03-lambda-param-refinement-unchecked.md`,
-`specs/todos/2026-09-03-block-fn-refinement-unchecked.md`,
 `specs/todos/2026-09-03-impl-method-param-refinement-unchecked.md`,
 `specs/todos/2026-09-03-actor-state-and-handler-refinement-unchecked.md`,
 `specs/todos/2026-09-01-nested-refinement-enforcement.md`,

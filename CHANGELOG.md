@@ -13,6 +13,15 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **A block-level `fn`'s refinements are enforced.** A local
+  `fn inner(n : {Int | n > 0}) : {Int | _ > 0} do ... end` inside a function
+  body is now a contract on both ends: every direct `inner(...)` after it and
+  every recursive call inside it is obliged by the parameter refinement, and
+  the return refinement is verified against the body. The body may assume its
+  parameters only while `inner` is never passed around as a value; an
+  escaping local is checked with them stripped. `--refine-audit` reports both
+  positions Enforced.
+
 - **A session endpoint can be hosted in an actor.** `test/session/stream_actor.march`
   runs both roles of a protocol inside actors, with every resumption driven by
   a mailbox delivery, over the same generated `@[endpoints]` API and with the

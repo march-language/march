@@ -240,38 +240,29 @@ let rec walk_expr (sites : site list ref) (e : A.expr) : unit =
   | A.ESend (a, b, _) -> ge a; ge b
   | A.ESpawn (e, _) -> ge e
   | A.EDbg (eo, _) -> Option.iter ge eo
-  | A.ELetFn (n, ps, ret_ty, body, _) ->
+  | A.ELetFn (n, ps, ret_ty, body, sp) ->
     (* A block-level named function. There is no dedicated position for
        this in the design's [position] type, so it reuses [Param]/[Return]
        under the local function's own name, exactly as a top-level [DFn]
        would: qualitatively the same position, just reached through an
        expression rather than a decl.
 
-       No [~origin_fn] on the [Return] site below (it stays [None]): there
-       is no [A.fn_def] here at all, only bare params/return-type/body, and
-       even if one were synthesised it would misrepresent reality --
-       [check_fn_post_verdict] is invoked only through [visit_fn], reached
-       only from [A.DFn] / [A.DImpl] (see [refine_check.ml]'s [visit_decl]),
-       never from an [A.ELetFn]. A block-level function's return refinement
-       is not merely unreachable BY this module's extractors; the checker
-       itself never looks at it. [classify]'s [Return] rule reports this
-       directly rather than guessing at what an extractor would say about a
-       function definition that is never handed to one.
-
-       [~fn_origin:Local_fn] on BOTH sites below, for the identical reason on
-       the parameter side (Task 2's review, finding 5): [scope_add_param] /
-       [sig_of_clause] -- the machinery that makes a parameter refinement
-       oblige a caller -- consume an [A.fn_clause]'s params, reached only
-       through [visit_fn], never through an [A.ELetFn]. Calling
-       `helper(0)` against `fn helper(x : {Int | _ > 0}) : Int do x end`
-       written as a block-level function obliges no one; [classify]'s
-       [Param] rule must not report it as [Enforced] just because
-       [refined_param_ty] happens to accept the type. *)
+       Since 2026-09-13 (plan phase 1) the checker hands a local function to
+       the SAME machinery a top-level one gets: [Refine_check.visit_local_fn]
+       synthesises the [A.fn_def] below ([Refine_post.local_fn_def]), runs
+       [check_fn_post_verdict] on it for the return refinement, and
+       registers [sig_of_fn] of it in [cbenv] so every direct `helper(...)`
+       after it is obliged. So the [Return] site carries that synthesised
+       definition as its [~origin_fn], and [classify] consults
+       [return_refine_ext] on it exactly as for a [DFn]; the [Param] sites
+       keep [~fn_origin:Local_fn] as provenance, which [classify] now treats
+       like [Top_level_fn]. *)
+    let fd = Refine_post.local_fn_def n ps ret_ty body sp in
     List.iteri
       (fun idx (p : A.param) ->
-        Option.iter (start sites ~origin_fn:None ~fn_origin:(Some Local_fn) (Param (n.A.txt, idx))) p.A.param_ty)
+        Option.iter (start sites ~origin_fn:(Some fd) ~fn_origin:(Some Local_fn) (Param (n.A.txt, idx))) p.A.param_ty)
       ps;
-    Option.iter (start sites ~origin_fn:None ~fn_origin:(Some Local_fn) (Return n.A.txt)) ret_ty;
+    Option.iter (start sites ~origin_fn:(Some fd) ~fn_origin:(Some Local_fn) (Return n.A.txt)) ret_ty;
     ge body
   | A.ELetQ (_, e1, e2, _) | A.ELetStar (_, e1, e2, _) -> ge e1; ge e2
   | A.EAssert (e, _) -> ge e
@@ -548,13 +539,21 @@ let classify (site : site) : disposition =
        own parameter's refinement"
   | Param _ -> (
     match site.fn_origin with
-    | Some Local_fn ->
-      Unenforced
-        "this is a block-level function's own parameter: scope_add_param and \
-         sig_of_clause are reached only through visit_fn, which is called \
-         for A.DFn and A.DImpl, never for a local A.ELetFn, so no caller is \
-         ever obliged by it (the same reason this declaration form's Return \
-         site is Unenforced)"
+    (* A block-level function's parameter is obliged at every direct call
+       `inner(...)` since 2026-09-13: [visit]'s [EBlock] walk registers the
+       local's signature in [cbenv] (plan phase 1), the same route a refined
+       callback parameter takes.  What [refined_param_ty] accepts is
+       therefore enforced, exactly as for a top-level `fn`; a call through an
+       ESCAPED copy of the local (`apply(inner, 0)`) is the same gap a
+       top-level function has (phase 2), and is not a property of this site. *)
+    | Some Local_fn | Some Top_level_fn -> (
+      match Refine_post.refined_param_ty (Some site.origin_ty) with
+      | Some _ -> Enforced
+      | None ->
+        Unenforced
+          "refined_param_ty does not accept this declared base type: only \
+           an Int, a String, a Bool, a Float, or a registered record/ADT \
+           base is scope-checked at a parameter")
     | Some Impl_method_fn ->
       Unenforced
         "this is an `impl` method's parameter, whose enforcement depends on \
@@ -565,14 +564,6 @@ let classify (site : site) : disposition =
          refinement from the body and no caller is obliged. The audit \
          reports Unenforced rather than guess at adoptability from this site \
          alone"
-    | Some Top_level_fn -> (
-      match Refine_post.refined_param_ty (Some site.origin_ty) with
-      | Some _ -> Enforced
-      | None ->
-        Unenforced
-          "refined_param_ty does not accept this declared base type: only \
-           an Int, a String, a Bool, a Float, or a registered record/ADT \
-           base is scope-checked at a parameter")
     | None ->
       failwith
         "Refine_audit.classify: unreachable -- every Param site's fn_origin \

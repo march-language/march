@@ -1104,9 +1104,10 @@ Contrast that with a lambda's own parameter (`fn (n : {Int | n > 0}) -> n`):
 no scope machinery ever runs over an `ELam`'s parameters at all, so *no*
 call through that lambda, ever, is obliged by it. That is genuinely
 Unenforced, not just uncalled. And unenforced cuts both ways: since
-2026-09-13 the body of a lambda, a block-level `fn`, or an actor handler is
-walked with its parameter refinements *stripped* from scope, the same
-treatment a non-adoptable `impl` method already got. Before that, the body
+2026-09-13 the body of a lambda or an actor handler (and of a block-level
+`fn` that escapes as a value) is walked with its parameter refinements
+*stripped* from scope, the same treatment a non-adoptable `impl` method
+already got. Before that, the body
 assumed `n > 0` from `fn (n : {Int | n > 0}) -> need(n)` while `g(0)` obliged
 nobody, and `cap verified` accepted the program. The plan that turns each
 of these positions into a real contract, obligation and assumption together,
@@ -1122,10 +1123,14 @@ regenerated the same way the TIR golden snapshots are
 (`UPDATE_SNAPSHOTS=1 ./_build/default/test/test_refinecheck.exe -e`). It
 being empty is a true fact about today's corpus, not evidence the audit does
 nothing: `test/refine_audit/holes/` is a second, deliberately non-empty
-fixture set built from known holes (a lambda's own parameter, a block-level
-`fn`'s parameter and return, a non-adoptable `impl` method's parameter, an
-actor's state field and handler parameter, a nested field refinement, and a
-`{String | ...}` return), pinned at `test/refine_audit/holes.baseline`. If
+fixture set built from known holes (a lambda's own parameter, a
+non-adoptable `impl` method's parameter, an actor's state field and handler
+parameter, a nested field refinement, and a `{String | ...}` return; a
+fixture leaves the set once its position is enforced, as the block-level
+`fn` one did on 2026-09-13, when a local `fn`'s parameter refinements began
+obliging every direct and recursive call to it and its return refinement
+began being verified against its body), pinned at
+`test/refine_audit/holes.baseline`. If
 that second baseline ever reported zero Unenforced sites, the audit itself
 would be broken, not the corpus; the test that diffs it fails loudly with
 exactly that message rather than passing vacuously.
@@ -1134,9 +1139,13 @@ The positions currently known to be Unenforced, none of which the corpus
 above happens to exercise:
 
 - A lambda's own parameter (`fn (n : {Int | n > 0}) -> ...`).
-- A block-level `fn`'s own parameter and return type. `check_fn_post_verdict`
-  and `scope_add_param` are only reached through `A.DFn` / `A.DImpl`, never
-  through a local `A.ELetFn`.
+- (Closed 2026-09-13.) A block-level `fn`'s own parameter and return type are
+  now enforced: every direct `inner(...)` after the definition and every
+  recursive call inside it is obliged, and the return refinement is verified
+  against the body. The body assumes its parameter refinements only while
+  `inner` never escapes callee position (passed to `apply`, returned,
+  aliased); an escaping local is checked with them stripped until the
+  pass-site check lands.
 - An `impl` method's parameter, when the method's bare name is not adoptable
   (more than one `impl` defines it, or a top-level `fn` shares the name):
   `visit_decl` strips the refinement from the body in that case, and no
@@ -1159,7 +1168,6 @@ above happens to exercise:
   function's mangled arity variant. See the next section.
 
 See `specs/todos/2026-09-03-lambda-param-refinement-unchecked.md`,
-`specs/todos/2026-09-03-block-fn-refinement-unchecked.md`,
 `specs/todos/2026-09-03-impl-method-param-refinement-unchecked.md`,
 `specs/todos/2026-09-03-actor-state-and-handler-refinement-unchecked.md`,
 `specs/todos/2026-09-01-nested-refinement-enforcement.md`,
