@@ -549,6 +549,19 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
         v_lin = Tir.Unr } in
       Tir.EApp (fn_var, [ch']))
 
+  (* `self()` inside an actor handler, where [Lower_actor] has bound `self`
+     as a local Pid: the typechecker accepts it as the same value as a bare
+     `self` (a zero-arg call of a value is the value), so lower it as one.
+     Without this arm it lowered to an indirect call THROUGH the actor
+     pointer (SIGBUS).  Outside a handler `self` is not registered as a
+     local Pid and the call reaches the `self` builtin (march_self). *)
+  | Ast.EApp ((Ast.EVar { txt; _ } as self_var), [], _)
+    when txt = Tir_names.actor_self_binder
+      && (match Hashtbl.find_opt _fn_param_types txt with
+          | Some (Tir.TCon ("Pid", _)) -> true
+          | _ -> false) ->
+    lower_expr env self_var
+
   (* --- Function application (CPS: all args must be atoms) --- *)
   | Ast.EApp (f_expr, args, call_sp) ->
     (* Check for default-arg dispatch: if f is a plain EVar that names a

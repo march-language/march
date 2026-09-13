@@ -108,6 +108,13 @@ git log is authoritative for exact commits.
   `specs/plans/2026-09-13-refinement-enforcement-holes-plan.md` for the phases
   that turn each position into an actual contract.
 
+- **`send(self, msg)` inside an actor handler now delivers.** It silently did
+  nothing on both backends and still exited 0. The interpreter stopped the
+  handler at the send, and compiled code dropped the message. `self` was never
+  actually bound to the actor's pid, so it resolved to the `self` builtin
+  function instead. Both `self` and `self()` are now the handler's own pid, the
+  same value `spawn` returned.
+
 - **`self` inside an actor handler compiles.** It was a real builtin in the
   interpreter but missing from the compiled backend's builtin table, so the
   emitter produced a call to an undefined symbol and *any* compiled program
@@ -218,6 +225,12 @@ git log is authoritative for exact commits.
   are still read.
 
 ### Changed
+
+- **A compiled program that segfaults now says where.** A fatal SIGSEGV or
+  SIGBUS used to exit 139/138 with nothing on stderr. It now prints one
+  `march: fatal …` line first: signal, fault address, program counter, the
+  running green thread, and whether the address was in that thread's stack
+  guard page (overflow). The exit status is unchanged.
 
 - **Pull requests must not carry `docs/pagefind/`.** The search index is
   bot-owned; CI rejects a PR that touches it (fix: `git checkout origin/main --

@@ -5,6 +5,63 @@ file's own closing instruction was "a single SIGSEGV in the death path is worth
 a second sighting before it is dismissed." That sighting has now happened, on
 `main`, and it is confirmed intermittent rather than commit-specific.
 
+## Third investigation (2026-09-13): amd64 and ASAN, 60,000 runs, NOT reproduced; the next sighting will say where
+
+**The two untried axes are now tried.**
+
+**How the amd64 leg was covered cheaply.** The previous obstacle was building a
+full OCaml switch under emulation. It is unnecessary. `--emit-llvm` output is
+portable: the target triple is its only architecture-specific line, and clang
+overrides it. So the fixture's `.ll` was emitted on macOS and linked inside
+`ubuntu:24.04` `--platform linux/amd64` (Docker Desktop, Rosetta) with that
+image's clang 18.1.3, the same version as CI's leg. It used the driver's own
+flags, printed by `MARCH_ECHO_CC=1 MARCH_NO_RUNTIME_CACHE=1`, minus the
+blake3/reload pair the cross path drops. The build takes about a minute, and a
+run about 35 ms under Rosetta.
+
+| environment (runtime at `8eb0d7ee`) | runs | non-zero exits |
+|---|---|---|
+| Linux x86_64 (Rosetta), `MARCH_NUM_SCHEDULERS=4`, 14 CPUs visible | 20,000 | 0 |
+| Linux x86_64, same, every run `taskset -c 0-3` (a 4-vCPU CI runner) | 20,000 | 0 |
+| Linux x86_64, `taskset -c 0-3` with 6 busy loops pinned to the same 4 CPUs (dune's parallel load) | 10,000 | 0 |
+| Linux aarch64 (native), **`-fsanitize=address -O1 -g`**, `detect_leaks=0`, `MARCH_NUM_SCHEDULERS=4` | 10,000 | 0, no ASan report |
+
+Two caveats:
+- Rosetta is binary translation on an arm64 host: it executes x86 instructions
+  but does not reproduce x86's memory-ordering model. It covers "an x86
+  codegen difference", not "an x86 hardware race". The CI runners are genuine
+  amd64 virtual machines.
+- ASan warns that it "doesn't fully support makecontext/swapcontext". A
+  use-after-free on a green-thread stack could still slip past it. Heap UAFs
+  in the death path (monitor entries, control mailbox nodes) would not.
+
+Combined with the earlier 8,500 plain runs and 720,000 terminal-block
+exercises: there is still no local reproduction on any axis.
+
+**What changed so a third sighting is not wasted.** Both CI sightings printed
+the fixture's own stdout and nothing else, because the runtime's fatal-fault
+path was a bare `_exit(139)` in every non-`MARCH_DEBUG` build. It now writes one
+async-signal-safe line to stderr first, which dune includes in the failing
+rule's log (`specs/progress/2026-09-13-fatal-fault-report.md`):
+
+```
+march: fatal SIGSEGV si_code=1 addr=0x1000 pc=0x7ffffef0badd sched=0 pid=0 status=1 fault outside its stack
+```
+
+That line settles most of the open questions on first contact:
+- **pc**: which function. Resolve it against the CI binary with `addr2line` or
+  `nm`; the stress rule leaves `native_actor_monitor_down_reason` in
+  `_build/default/test`.
+- **addr**: NULL-ish, heap-like, or on a stack.
+- **pid / status**: whether a green thread was running at all, and whether it
+  was dead. `pid=-1` with "no green thread running" means scheduler or teardown
+  code.
+- **where**: guard page (overflow), uncommitted region (a growth fault the
+  handler refused), or outside the stack (wild or stale pointer).
+
+**Next step, when it recurs:** grep the job log for `march: fatal`, then resolve
+`pc` as above. Do not re-run these sweeps first.
+
 ## Second sighting (2026-09-10) — same crash, different iteration
 
 `test (ubuntu-24.04)`, run
