@@ -1775,6 +1775,16 @@ and eval_expr_inner (env : env) (e : expr) : value =
     let label = match name with Some n -> "?" ^ n.txt | None -> "?" in
     eval_error "typed hole `%s` reached the evaluator — the type checker should have caught this" label
 
+  | EApp (EVar ({ txt = "self"; _ } as n), [], _)
+    when (match List.assoc_opt "self" env with Some (VPid _) -> true | _ -> false) ->
+    (* `self()` inside an actor handler, where `self` is bound to this actor's
+       pid (see [run_scheduler]).  The typechecker accepts both spellings as
+       the same Pid (a zero-arg call of a value is the value), and the call
+       form is the one the Phase 4 actor tests and older code use; without
+       this arm it would apply a pid.  Outside a handler `self` is the
+       builtin, not a VPid, and the ordinary call below reaches it. *)
+    lookup n.txt env
+
   | EApp (f, args, sp) ->
     (* E-App-Clo / E-App-Prim — core-march.md §4.2 (dispatch on fn_val's shape
        happens inside apply/apply_inner: VClosure -> E-App-Clo, VBuiltin -> E-App-Prim) *)
@@ -2518,8 +2528,17 @@ let run_scheduler () =
                  List.map2 (fun p v -> (p.param_name.txt, v))
                    handler.ah_params msg_args
                in
+               (* `self` is a handler-scoped variable holding this actor's
+                  pid, as the typechecker binds it.  Without this binding a
+                  bare `self` resolved to the global `self` BUILTIN -- a
+                  function value, not a pid -- so `send(self, m)` raised,
+                  crash_actor swallowed it, and the handler silently stopped
+                  at the send with the process still exiting 0.  After the
+                  params, so a param named `self` shadows it, as in the
+                  typechecker. *)
                let handler_env =
-                 [("state", inst.ai_state)] @ param_bindings @ !(inst.ai_env_ref)
+                 [("state", inst.ai_state)] @ param_bindings
+                 @ [("self", VPid pid)] @ !(inst.ai_env_ref)
                in
                (match !eval_expr_hook handler_env handler.ah_body with
                 | new_state ->
@@ -3042,7 +3061,8 @@ let shutdown_actor_pid (pid : int) : unit =
                 handler.ah_params msg_args
             in
             let handler_env =
-              [("state", inst.ai_state)] @ param_bindings @ !(inst.ai_env_ref)
+              [("state", inst.ai_state)] @ param_bindings
+              @ [("self", VPid pid)] @ !(inst.ai_env_ref)
             in
             (match !eval_expr_hook handler_env handler.ah_body with
              | new_state -> inst.ai_state <- new_state

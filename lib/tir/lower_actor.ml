@@ -89,7 +89,7 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
      The actor is uniquely owned — FBIP can safely mutate it in-place.
      Fields $d_dispatch (index 0) and $e_alive (index 1) must stay first in
      alphabetical sort order so that GEP indices match the C runtime layout. *)
-  let actor_param = { Tir.v_name = "$actor";
+  let actor_param = { Tir.v_name = Tir_names.actor_param;
                       v_ty = Tir.TCon (actor_type_name, []);
                       v_lin = Tir.Lin } in
   let actor_atom  = Tir.AVar actor_param in
@@ -131,7 +131,36 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
     in
     List.iter (fun (v : Tir.var) ->
         Hashtbl.replace Lower_state._fn_param_types v.Tir.v_name v.Tir.v_ty) params;
-    let body_tir = Lower_match.lower_expr env h.ah_body in
+    (* `self` is a handler-scoped VARIABLE, bound to the actor pointer (which
+       is the actor's Pid at the ABI), exactly as the typechecker binds it
+       (typecheck.ml's handler env: `self : Pid(state)`).  Before this binding
+       existed, a bare `self` fell through to the global `self` builtin and
+       lowered to that builtin's static CLOSURE, so `send(self, m)` handed
+       march_send a closure address: its alive check read garbage and the
+       send returned None -- a self-send that silently never delivered.
+       Registered in [_fn_param_types] for the same reason the params are:
+       it is the shield that keeps a bare name local.  Perceus treats this
+       alias of [$actor] as borrowed (see [Tir_names.actor_param]).
+       See specs/progress/2026-09-13-send-to-self-delivers.md. *)
+    let self_name = Tir_names.actor_self_binder in
+    let body_tir =
+      (* A handler param named `self` shadows it, as in the typechecker; the
+         param is already registered above. *)
+      if List.exists (fun (p : Ast.param) -> p.param_name.txt = self_name) h.ah_params
+      then Lower_match.lower_expr env h.ah_body
+      else begin
+        let self_var = { Tir.v_name = self_name;
+                         v_ty = Tir.TCon ("Pid", [Tir.TCon (name ^ Tir_names.actor_state_suffix, [])]);
+                         v_lin = Tir.Unr } in
+        let saved_self = Hashtbl.find_opt Lower_state._fn_param_types self_name in
+        Hashtbl.replace Lower_state._fn_param_types self_name self_var.Tir.v_ty;
+        let body = Lower_match.lower_expr env h.ah_body in
+        (match saved_self with
+         | Some ty -> Hashtbl.replace Lower_state._fn_param_types self_name ty
+         | None -> Hashtbl.remove Lower_state._fn_param_types self_name);
+        Tir.ELet (self_var, Tir.EAtom actor_atom, body)
+      end
+    in
     List.iter (fun (v : Tir.var) ->
         Hashtbl.remove Lower_state._fn_param_types v.Tir.v_name) params;
     List.iter (fun (n, ty) ->

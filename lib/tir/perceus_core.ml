@@ -1000,6 +1000,17 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
              && StringSet.mem src.Tir.v_name env.borrowed_field_vars ->
         (* Alias of a borrowed field var — propagate the borrowed status. *)
         true
+      | Tir.EAtom (Tir.AVar src)
+        when needs_rc env v.Tir.v_ty
+             && src.Tir.v_name = Tir_names.actor_param ->
+        (* An actor handler's `self`: an alias of the handler's [$actor]
+           parameter.  [$actor] is Lin, so no RC op touches it; the reference
+           it carries belongs to the scheduler that dispatched this handler.
+           Classified owned, `self` was dropped at scope exit (a net -1 on the
+           actor record for every handler that names `self`) and passed to a
+           consuming callee without a dup.  Borrowed, a consuming use dups it
+           and scope exit leaves it alone. *)
+        true
       | _ -> false
     in
     (* Process e2 first to discover what's live going into it.

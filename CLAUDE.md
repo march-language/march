@@ -22,7 +22,9 @@ todo (Check E), and, with `CHECK_STDLIB_HTML=1` where the generated pages are ex
 fresh, that every public stdlib symbol is anchored on its generated page (Check D). A
 sibling, `scripts/check-runtime-sources.sh`, polices every hand-maintained runtime C link
 list (drivers, JIT, dune rules) against `runtime/sources.list`; adding a runtime `.c`
-means adding one manifest line with a role. It does
+means adding one manifest line with a role. `scripts/check-actor-rc-stores.sh` (also CI)
+forbids a plain store to an actor record's refcount word (word 0); change it only
+through `march_incrc`/`march_decrc`. It does
 **not** lint the historical corpus (`specs/plans/`, dated design specs, `specs/todos/`,
 `specs/progress/`). If a current doc must reference a since-removed file or a frozen
 count, say so in words ("no longer exists", "removed") or add a `doc-lint:ignore-count` /

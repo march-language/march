@@ -88,6 +88,12 @@ jobs:
       - name: Check runtime C source lists against runtime/sources.list
         run: scripts/check-runtime-sources.sh
 
+      # An actor record's word 0 is its refcount, shared with every thread.
+      # A plain store to it (the old `a[0] = 1` dispatch clobber) freed live
+      # actors; this forbids the pattern at the source level.
+      - name: Check no plain store to an actor record's refcount word
+        run: scripts/check-actor-rc-stores.sh
+
   # The long pole. Kept as its own job so nothing else waits behind it.
   test:
     strategy:

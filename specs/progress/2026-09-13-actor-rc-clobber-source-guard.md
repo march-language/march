@@ -1,3 +1,57 @@
+# The actor-dispatch premature-free window is pinned, at runtime and in source
+
+**Closed 2026-09-13.** Filed 2026-08-14 as
+`specs/todos/2026-08-14-deterministic-premature-free-reproducer.md`. The history
+of how the two runtime tests came to exist is kept below, unchanged.
+
+## What closed it: option (2), the source-level guard
+
+`scripts/check-actor-rc-stores.sh` runs in CI's `doc-lint` job, beside
+`check-runtime-sources.sh`. It fails on any plain store to an actor record's
+refcount word in `runtime/*.c`. Comments and string literals are stripped
+first, so the fix's own explanatory comments quoting `a[0] = 1` do not trip it.
+
+It recognises an actor view in two forms:
+- a cast `(int64_t *)EXPR` or `(march_hdr *)EXPR`, where EXPR is an identifier
+  path containing `actor` (`actor`, `meta->actor`, …);
+- a local alias declared from such a cast (`int64_t *a = (int64_t *)actor;`).
+
+A store is `=` (not `==`), a compound assignment, or `++`/`--` on `[0]`, `->rc`
+or `*alias`.
+
+Verified by injecting each shape into `actor_green_thread` on current `main`:
+
+| injected | guard |
+|---|---|
+| `int64_t saved_rc = a[0]; a[0] = 1;` (the original clobber) | RED |
+| `a[0] = saved_rc;` | RED |
+| `((int64_t *)actor)[0] = 1;` | RED |
+| `((march_hdr *)actor)->rc = 1;` | RED |
+| `*a = 1;` | RED |
+| `a[0]++;` / `++a[0];` | RED |
+| `int64_t *b = (int64_t *)meta->actor; b[0] = 7;` | RED |
+| `if (a[0] == 1) {}` / `int64_t x = a[0];` (reads) | green |
+| `a[4] = 1;` (the state word, written legitimately by migrate) | green |
+| unmodified runtime | green |
+
+Its first draft flagged three declarations (`int64_t *a = …`, `march_string *a
+= …`) as `*a =` stores. It was tightened to statement position before landing.
+
+**What it does not catch**, by design: a store through a pointer whose name and
+provenance never mention `actor`. The todo called this guard "crude but it
+directly pins the thing that regressed". The two runtime tests below cover the
+behaviour whatever the spelling, on the dispatch and crash paths they reach.
+
+**The related audit the todo asked for.** "Temporarily lie about a refcount" was
+re-grepped at close. No other `->rc`/`[0]` store in `runtime/*.c` targets an
+actor record; the remaining `->rc = 1` stores initialise freshly allocated
+objects. The same session found and fixed a DIFFERENT actor-record RC
+imbalance, on the compiler side rather than the runtime side: binding `self` as
+an owned local dropped the actor once per handler
+(`specs/progress/2026-09-13-send-to-self-delivers.md`).
+
+---
+
 `[P2]` # No regression test pins the actor-dispatch premature-free window
 
 The use-after-free fixed in `a9032530`
