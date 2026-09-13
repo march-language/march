@@ -118,6 +118,17 @@ under a private `HOME` with `.march/cas/vc` cleared once before the run;
 
 ### Phase 2: lambdas, and contravariant subtyping at the pass site
 
+*Landed 2026-09-13*; see
+`specs/progress/2026-09-13-lambda-param-refinement-enforced.md`. One thing
+the sketch below missed, found by running the driver on `t77` rather than
+trusting the alcotest cases: `check_call`'s definite-failure stance skips an
+unconstrained subject, so the pass-site VC came back as a hint, not a
+violation, and the tests only passed through `cap verified` escalation. For
+the `Callback_domain` subject a `Refuted` model IS the definite failure
+(`$cb_x`'s only constraint is the domain), and the tests now assert every
+violation in a plain module too. Phase 0 and 1 landed as sketched
+(`0043850a`, `a6e6e9eb`).
+
 - `cb_add_binding` learns the `let g = fn (...) -> ...` shape and registers
   `sig_of_clause` of the lambda's params. Direct `g(0)` is then obliged.
 - Pass-site rule (decision a): in `check_call`, when an actual is a variable in

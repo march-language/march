@@ -141,6 +141,7 @@ let check_let_annotation ~root errctx defs (ctx : rctx) (path : (A.expr * bool) 
       { param_names = [ name ]
       ; param_str = [ sort = Some str_sort ]
       ; param_scalar = [ scalar_sort_or_int sort ]
+      ; param_tys = [ b.A.bind_ty ]
       ; refined = [ { idx = 0; binder; pred; sort } ]
       ; ret = None
       ; ret_sort = None
@@ -169,26 +170,125 @@ let check_let_annotation ~root errctx defs (ctx : rctx) (path : (A.expr * bool) 
 
 (* ── Walk expressions, threading the refined-local scope, the record-typed
    variables ([recenv]) and the path context ─────────────────────────────── *)
+(* ── Pass-site contravariance ──────────────────────────────────────────────
+   `apply(take_n, -3)` with `fn apply(f : Int -> Int, x : Int) do f(x) end`
+   never associates `-3` with `take_n`'s `{Int | _ >= 0}`: the call to `f`
+   inside `apply` is through an unrefined callback type, so nothing there
+   states the requirement.  The obligation lives at the PASS site instead —
+   contravariant subtyping: `take_n` may be passed where `Int -> Int` is
+   expected only if the expected domain implies `take_n`'s own parameter
+   refinement for every value.  An unrefined domain promises `true`, so
+   `true ⇒ _ >= 0` is refuted and the pass is a violation, exactly as
+   `take_n(-3)` is.  (Decision (a) of
+   specs/plans/2026-09-13-refinement-enforcement-holes-plan.md.)
+
+   The check is phrased as a call `g($cb_x)` on a fresh symbolic argument
+   carrying the domain's refinement — [check_call] is reused unchanged, with
+   [Callback_domain] selecting the wording.
+
+   Scope: the passed callable must have exactly ONE parameter (a tupled or
+   curried domain has no single [rparam] to state the goal against); anything
+   else is neither obliged nor assumed, which is what [pass_site_obligation]
+   returning [None] means to BOTH its consumers — the check below, and
+   [name_escapes] through [visit_local_fn]'s [pass_checked] — so a pass site
+   this function does not oblige is always counted as an escape. *)
+
+(* The signature a call to [fname] is checked against, by either route
+   [visit]'s [EApp] arm takes: a resolvable named callee first, else the
+   callee env (a refined callback parameter, a local alias, a local `fn` or
+   `let`-bound lambda). *)
+let callee_sig (ctx : rctx) defs (cb : cbenv) (fname : string) : fn_sig option =
+  match resolve_call ctx defs fname with
+  | Some (Some sg) -> Some sg
+  | _ -> List.assoc_opt fname cb
+
+(* A refined callable in ARGUMENT position, with the name diagnostics call it
+   by: a variable whose signature is known (named, aliased, local), or an
+   inline lambda whose signature is built on the spot. *)
+let callable_sig_of_actual (ctx : rctx) defs (cb : cbenv) (a : A.expr) : (string * fn_sig) option =
+  match a with
+  | A.EVar { A.txt = g; _ } ->
+    (match callee_sig ctx defs cb g with
+     | Some sg when sg.refined <> [] -> Some (g, sg)
+     | _ -> None)
+  | A.ELam (ps, body, sp) ->
+    let sg = sig_of_fn (local_fn_def { A.txt = "<lambda>"; A.span = sp } ps None body sp) in
+    if sg.refined <> [] then Some ("<lambda>", sg) else None
+  | _ -> None
+
+let fresh_cb_arg = "$cb_x"
+
+(* The scope entry for the symbolic argument, when passing a callable with
+   signature [gsg] as argument [i] of a callee with signature [callee_sg] is a
+   pass site this check covers; [None] otherwise.  A refined expected domain
+   is used as written; an unrefined one becomes `{base | true}` over the
+   CALLABLE's own parameter base (the domain may be spelled as a type
+   variable, as `List.map`'s is, and still promises nothing). *)
+let pass_site_obligation (callee_sg : fn_sig) (i : int) (gsg : fn_sig) ~(span : A.span)
+  : (string * A.expr * string option) option =
+  if List.length gsg.param_names <> 1 then None
+  else
+    match List.nth_opt callee_sg.param_tys i with
+    | Some (Some (A.TyArrow (dom, _))) ->
+      let true_over base = A.TyRefine (base, None, A.ELit (A.LitBool true, span)) in
+      let dom_ref =
+        match dom with
+        | A.TyRefine _ -> dom
+        | _ ->
+          (match List.nth_opt gsg.param_tys 0 with
+           | Some (Some (A.TyRefine (base, _, _))) -> true_over base
+           | Some (Some base) -> true_over base
+           | _ -> dom)
+      in
+      refined_scope_ty (Some dom_ref)
+    | _ -> None
+
+let check_pass_sites ~root errctx defs (ctx : rctx) path lets sc re cb ~(span : A.span)
+    (callee_sg : fn_sig) (args : A.expr list) : unit =
+  List.iteri
+    (fun i a ->
+      match callable_sig_of_actual ctx defs cb a with
+      | None -> ()
+      | Some (gname, gsg) ->
+        let asp = match a with A.EVar n -> n.A.span | A.ELam (_, _, sp) -> sp | _ -> span in
+        (match pass_site_obligation callee_sg i gsg ~span:asp with
+         | None -> ()
+         | Some r ->
+           let sc = (fresh_cb_arg, r) :: scope_shadow sc [ fresh_cb_arg ] in
+           let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets; sc; re } in
+           let x = A.EVar { A.txt = fresh_cb_arg; A.span = asp } in
+           List.iter
+             (fun rp -> check_call cx ~span:asp ~callee:gname ~subject:Callback_domain gsg [ x ] rp)
+             gsg.refined))
+    args
+
 let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     (lets : launder) (sc : scope) (re : recenv) (cb : cbenv) (e : A.expr) : unit =
   let go = visit ~root errctx defs ctx path lets sc re cb in
   let go_path p = visit ~root errctx defs ctx p lets sc re cb in
   match e with
   | A.EApp (A.EVar { A.txt = fname; _ }, args, sp) ->
-    (match resolve_call ctx defs fname with
-     | Some (Some sg) ->
+    let callee = callee_sig ctx defs cb fname in
+    (match callee with
+     | Some sg ->
        let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets; sc; re } in
-       List.iter (fun rp -> check_call cx ~span:sp ~callee:fname sg args rp) sg.refined
-     | _ ->
-       (* Not a resolvable NAMED callee: fall back to the callee env — a call
-          made through a refined function-typed parameter, or through a local
-          alias of a named function (see [cbenv]). *)
-       (match List.assoc_opt fname cb with
-        | Some sg ->
-          let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets; sc; re } in
-          List.iter (fun rp -> check_call cx ~span:sp ~callee:fname sg args rp) sg.refined
-        | None -> ()));
-    List.iter go args
+       List.iter (fun rp -> check_call cx ~span:sp ~callee:fname sg args rp) sg.refined;
+       check_pass_sites ~root errctx defs ctx path lets sc re cb ~span:sp sg args
+     | None -> ());
+    (* An INLINE lambda at a pass site the check above obliged may assume its
+       own parameter refinements: the only way to call it is through the
+       callee's domain, which was just proved (or reported) to imply them.
+       Any other lambda argument stays stripped. *)
+    List.iteri
+      (fun i a ->
+        match a, callee with
+        | A.ELam (ps, body, _), Some csg
+          when (match callable_sig_of_actual ctx defs cb a with
+                | Some (_, gsg) -> pass_site_obligation csg i gsg ~span:sp <> None
+                | None -> false) ->
+          visit_lambda ~root errctx defs ctx path lets sc re cb ~assume:true ps body
+        | a, _ -> go a)
+      args
   | A.EApp (f, args, _) -> go f; List.iter go args
   | A.ECon (_, args, _) | A.EAtom (_, args, _) | A.ETuple (args, _) -> List.iter go args
   | A.EBlock (es, _) ->
@@ -222,6 +322,12 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
              match e with
              | A.ELetFn (n, ps, ret_ty, body, sp) ->
                Some (visit_local_fn ~root errctx defs ctx path lets sc re cb ~rest n ps ret_ty body sp)
+             (* `let g = fn (ps) -> body` is a local function in every respect
+                that matters here — a name, parameters, a body, and later
+                statements that call or pass it — so it takes the same walk,
+                and the same escape rule, as `fn g(ps) do body end`. *)
+             | A.ELet ({ A.bind_pat = A.PatVar g; bind_expr = A.ELam (ps, body, lsp); _ }, _) ->
+               Some (visit_local_fn ~root errctx defs ctx path lets sc re cb ~rest g ps None body lsp)
              | _ -> visit ~root errctx defs ctx path lets sc re cb e; None
            in
            (* An annotated `let`'s refinement is checked against its bound
@@ -318,6 +424,11 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
            let re' = match e with A.ELet (b, _) -> recenv_add_binding re b | _ -> re in
            let cb' =
              match e with
+             | A.ELet ({ A.bind_pat = A.PatVar g; _ }, _)
+               when (match local_fn_entry with Some (Some _) -> true | _ -> false) ->
+               (match local_fn_entry with
+                | Some (Some sg) -> (g.A.txt, sg) :: cb_shadow cb [ g.A.txt ]
+                | _ -> cb)
              | A.ELet (b, _) -> cb_add_binding ctx defs cb b
              (* The local's own contract, so a later `n(...)` is obliged by
                 it exactly like a call through a refined callback parameter
@@ -344,13 +455,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
      types: a record sort or a callback signature is not a fact about the
      parameter's VALUE, only about its shape. *)
   | A.ELam (ps, body, _) ->
-    let names = List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
-    let ctx = local_shadow ctx names in
-    visit ~root errctx defs ctx (path_shadow path names) (launder_shadow lets names)
-      (List.fold_left scope_add_param sc (strip_params_refinements ps))
-      (List.fold_left recenv_add_param re ps)
-      (List.fold_left cb_add_param cb ps)
-      body
+    visit_lambda ~root errctx defs ctx path lets sc re cb ~assume:false ps body
   | A.ELetFn (n, ps, _, body, _) ->
     let names = n.A.txt :: List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
     let sc = scope_shadow sc [ n.A.txt ] in
@@ -618,8 +723,16 @@ and visit_local_fn ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     (n : A.name) (ps : A.param list) (ret_ty : A.ty option) (body : A.expr) (sp : A.span)
   : fn_sig option =
   let fd = local_fn_def n ps ret_ty body sp in
-  let escapes = List.exists (name_escapes n.A.txt) (body :: rest) in
   let sg = sig_of_fn fd in
+  (* Passing the local to a callee whose declared domain the pass-site check
+     obliges is not an escape — see [name_escapes] and [pass_site_obligation],
+     which must agree on exactly which pass sites those are. *)
+  let pass_checked callee i =
+    match callee_sig ctx defs cb callee with
+    | Some csg -> pass_site_obligation csg i sg ~span:sp <> None
+    | None -> false
+  in
+  let escapes = List.exists (name_escapes ~pass_checked n.A.txt) (body :: rest) in
   let proved =
     match ret_ty with
     | Some (A.TyRefine _) ->
@@ -644,6 +757,24 @@ and visit_local_fn ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     (List.fold_left cb_add_param cb ps)
     body;
   entry
+
+(* A lambda's body.  [assume] says whether its own parameter refinements may
+   be admitted to scope: true only from a caller that has established every
+   call through this lambda is obliged (an inline argument at a covered pass
+   site — [visit]'s [EApp] arm), false for a lambda in any other position
+   (phase 0's rule).  A `let`-bound lambda never reaches here: the [EBlock]
+   walk routes it through [visit_local_fn]. *)
+and visit_lambda ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
+    (lets : launder) (sc : scope) (re : recenv) (cb : cbenv) ~(assume : bool)
+    (ps : A.param list) (body : A.expr) : unit =
+  let names = List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
+  let ctx = local_shadow ctx names in
+  let assumed = if assume then ps else strip_params_refinements ps in
+  visit ~root errctx defs ctx (path_shadow path names) (launder_shadow lets names)
+    (List.fold_left scope_add_param sc assumed)
+    (List.fold_left recenv_add_param re ps)
+    (List.fold_left cb_add_param cb ps)
+    body
 
 (* =================================================================
    §20 Refinement-placement warnings

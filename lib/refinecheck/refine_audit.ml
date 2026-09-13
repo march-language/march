@@ -531,12 +531,21 @@ let classify (site : site) : disposition =
      parameter is never routed through [scope_add_param] / [sig_of_clause] at
      all (those consume an [A.fn_clause]'s params; a lambda has none), so no
      call site is ever obliged by it. Task 2's review, finding 4. *)
-  | Lambda_param _ ->
-    Unenforced
-      "an A.ELam parameter is never scope-checked: scope_add_param and \
-       sig_of_clause both consume an A.fn_clause's params, which a lambda \
-       does not have, so no call through this lambda is ever obliged by its \
-       own parameter's refinement"
+  | Lambda_param _ -> (
+    (* Since 2026-09-13 (plan phase 2) a lambda's own parameter refinement
+       obliges its callers: a `let`-bound lambda is registered in [cbenv]
+       exactly like a block-level `fn` (direct calls), and passing ANY
+       refined callable where a function type is expected is checked at the
+       pass site (the expected domain must imply the refinement).  A lambda
+       returned or stored, and called later through a field, is the same gap
+       a top-level function has, and not a property of this site. *)
+    match Refine_post.refined_param_ty (Some site.origin_ty) with
+    | Some _ -> Enforced
+    | None ->
+      Unenforced
+        "refined_param_ty does not accept this declared base type: only \
+         an Int, a String, a Bool, a Float, or a registered record/ADT \
+         base is scope-checked at a parameter")
   | Param _ -> (
     match site.fn_origin with
     (* A block-level function's parameter is obliged at every direct call

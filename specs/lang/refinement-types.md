@@ -1772,9 +1772,13 @@ position is already wired in. This is the same distinction
 one that was never filed; the audit stays consistent with it instead of
 inventing an incompatible second notion of "checked."
 
-Contrast a lambda's own parameter (`fn (n : {Int | n > 0}) -> n`): no scope
-machinery ever runs over an `ELam`'s parameters, so *no* call through that
-lambda, ever, is obliged by it, so it is genuinely Unenforced rather than merely uncalled.
+A lambda's own parameter (`fn (n : {Int | n > 0}) -> n`) was the textbook
+case of "genuinely Unenforced rather than merely uncalled" until 2026-09-13:
+no scope machinery ran over an `ELam`'s parameters, so *no* call through it
+was ever obliged. A `let`-bound lambda is now a local function for the
+checker (direct calls obliged through the callee environment) and passing
+any refined callable is obliged at the pass site, so the position reports
+Enforced; see the Limitations section's higher-order entry.
 
 ### Where the current baseline stands
 
@@ -1791,17 +1795,17 @@ An empty baseline over real code is a true finding, not evidence the audit
 does nothing, but an audit that silently broke would also report an empty
 baseline, which is why a second, deliberately non-empty fixture set exists:
 `test/refine_audit/holes/`, one small program per known unenforced position
-(a lambda's own parameter, a non-adoptable `impl` method's parameter, an
-actor's state field and handler parameter, a nested field refinement, and a
-`{String | ...}` return; a fixture leaves the set when its position becomes
-enforced, as the block-level `fn` one did on 2026-09-13),
+(a non-adoptable `impl` method's parameter, an actor's state field and
+handler parameter, a nested field refinement, and a `{String | ...}` return;
+a fixture leaves the set when its position becomes enforced, as the
+block-level `fn` and lambda-parameter ones did on 2026-09-13),
 pinned at `test/refine_audit/holes.baseline`. If that baseline ever reports
 zero Unenforced sites, the audit itself is broken; the test that diffs it
 fails loudly rather than passing.
 
 The positions currently known to be Unenforced, none of which the corpus
 above happens to exercise. Unenforced cuts both ways: since 2026-09-13 the
-checker also walks a lambda's and an actor handler's body (and an escaping
+checker also walks an actor handler's body (and an escaping lambda's or
 block-level `fn`'s) with those parameter refinements *stripped* from scope,
 exactly as it already did for a non-adoptable `impl` method. Before that, the body assumed
 `n > 0` from a `fn (n : {Int | n > 0}) -> need(n)` while `g(0)` obliged
@@ -1809,14 +1813,18 @@ nobody, and `cap verified` accepted the program. The plan that turns each
 position into a real contract, obligation and assumption together, is
 `specs/plans/2026-09-13-refinement-enforcement-holes-plan.md`.
 
-- A lambda's own parameter.
+- (Closed 2026-09-13.) A lambda's own parameter: a `let`-bound lambda obliges
+  its direct callers like a block-level `fn`, and passing any refined
+  callable is obliged at the pass site (see the higher-order limitation
+  entry). A lambda that is returned or stored, and called later through a
+  field, is the same gap a top-level function has.
 - (Closed 2026-09-13.) A block-level `fn`'s own parameter and return type are
   now enforced: every direct `inner(...)` after the definition, and every
   recursive call inside it, is obliged through the callee environment, and
   the return refinement is verified against the body. The body assumes its
   parameter refinements only while `inner` never escapes callee position
-  (passed to `apply`, returned, aliased); an escaping local is walked with
-  them stripped until the pass-site check lands. See
+  (returned, aliased, or passed where the pass-site check cannot oblige it);
+  an escaping local is walked with them stripped. See
   `specs/progress/2026-09-13-block-fn-refinement-enforced.md`.
 - An `impl` method's parameter, when the method's bare name is not
   adoptable (more than one `impl` defines it, or a top-level `fn` shares the
@@ -2473,15 +2481,22 @@ edges:
   `let g = takepos  g(-3)` is rejected when `takepos`'s parameter is refined.
   Both are single-argument shapes only (a curried or tupled multi-argument
   callback type is out of scope, and fails typecheck on any call regardless).
+  Checked since 2026-09-13, at the **pass site** (contravariant subtyping):
+  passing a refined callable — a named function, a `let`-bound lambda, a
+  block-level `fn`, or an inline lambda — where a function type is expected
+  is allowed only if that type's *domain* implies the callable's own
+  parameter refinement for every value. `apply(f : Int -> Int, x : Int)`
+  called as `apply(take_n, -3)` is therefore rejected at the pass of
+  `take_n`, with a witness (`-1`), because `Int` promises nothing and
+  `true ⇒ _ >= 0` is refuted; it was the accept witness `t77` until then and
+  is `reject/t77_refine_hof_pass_site_rejected.march` now. The remedy is
+  unchanged: refine the higher-order function's *own* parameter type
+  (`f : ({Int | _ >= 0}) -> Int`), which both discharges the pass and obliges
+  the call inside. A domain spelled as a type variable (`List.map`'s) promises
+  nothing either, so passing a refined function to a generic combinator is
+  rejected the same way. Scope: the passed callable must have exactly one
+  parameter; a multi-parameter callable is neither obliged nor assumed.
   Still **not** checked:
-  - a callback parameter with a *declared* type that is unrefined, even when the
-    concrete function passed as an argument is itself refined: `apply(f :
-    Int -> Int, x : Int) : Int do f(x) end` called as `apply(take_n, -3)`
-    stays silent, because `apply` never declared a contract on `f` for the
-    checker to enforce (see `accept/t77_refine_hof_bypass_limitation.march`).
-    The existing workaround still applies: refine the higher-order function's
-    *own* parameter type (`f : ({Int | _ >= 0}) -> Int`) to make the caller's
-    obligation explicit and checkable;
   - inferring a higher-order function's own requirement from its body: the
     checker never looks inside `f` to derive what `f` needs, it only checks
     what the caller's own declared type or a resolvable alias already states;
@@ -2762,10 +2777,10 @@ pass this page already describes, at exactly two sites, both mechanically
 witnessed: a **precondition** at a direct call (accept/reject pair
 `t75`/`t71`) and a **postcondition** on the function's own body
 (`t76`/`t72`). The "direct calls only" limitation this page's own
-Limitations section states is now a passing corpus fact, not only prose:
-`accept/t77_refine_hof_bypass_limitation` proves a refined function called
-*through* a higher-order parameter is NOT checked, even when the identical
-literal at a direct call site is rejected. `cap no_panic`'s division-safety
+Limitations section stated was, at the time, a passing corpus fact:
+`accept/t77_refine_hof_bypass_limitation` proved a refined function called
+*through* a higher-order parameter was NOT checked (since closed; see the
+end of this section). `cap no_panic`'s division-safety
 check is confirmed as a second, independent `Refine.discharge` consumer
 (`t78`/`t73`). Golden `g46_refinement_erasure` witnesses the zero-runtime-
 footprint property this transparency implies: a program with obligations that
@@ -2778,11 +2793,12 @@ of 2026-07-29: 16 covering Tier 2 structural induction, 9 covering `Bool` and
 a call through a refined function-typed *parameter*, and a call through a
 *local alias* of a named refined function; both previously fell through
 `resolve_call`'s named-callee-only resolution and were silently skipped.
-`accept/t77_refine_hof_bypass_limitation.march` remains a passing, UNCHANGED
-fact of the corpus: its `apply`'s callback parameter is declared `Int -> Int`
-(unrefined), so it still demonstrates the boundary that *is* still out of
-reach: a caller's own contract is only enforced when it is actually
-declared refined, never inferred from what the callback happens to point to.
+The remaining boundary, `apply(take_n, -3)` through an unrefined
+`f : Int -> Int`, held as `accept/t77_refine_hof_bypass_limitation.march`
+until 2026-09-13, when contravariant subtyping at the pass site closed it
+(`specs/progress/2026-09-13-hof-pass-site-contravariance-closes-t77.md`);
+the same program is now `reject/t77_refine_hof_pass_site_rejected.march`,
+rejected at the pass of `take_n` rather than at the indirect call.
 
 The typing corpus now stands at **229 programs (114 accept, 115 reject)**, with
 each refinement feature bracketed from BOTH sides. That pairing is intentional

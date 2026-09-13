@@ -409,6 +409,7 @@ let callback_sig_of_ty (t : A.ty) : fn_sig option =
          { param_names = [ callback_param_name ]
          ; param_str = [ sort = Some str_sort ]
          ; param_scalar = [ scalar_sort_or_int sort ]
+         ; param_tys = [ Some dom ]
          ; refined = [ { idx = 0; binder; pred; sort } ]
          ; ret = None
          ; ret_sort = None
@@ -548,14 +549,29 @@ let rec expr_mentions (names : string list) (e : A.expr) : bool =
    [visit] restores the assumption only when this is false for the body and
    for every later statement of the enclosing block.
 
+   [pass_checked callee i] is the one exception: passing [n] as argument [i]
+   of a call to [callee] is NOT an escape when the caller tells us the pass
+   site is itself obliged — [Refine_check.visit]'s contravariant check proved
+   (or reported) that [callee]'s declared domain there implies [n]'s own
+   parameter refinement, so a call through that copy is covered.  Defaults
+   to "never", the conservative answer.
+
    Deliberately OVER-approximate like [expr_mentions]: a rebinding of the
    same name and every occurrence under it count as escapes.  Over-reporting
    an escape only STRIPS an assumption (silence), never invents one. *)
-let rec name_escapes (n : string) (e : A.expr) : bool =
-  let esc = name_escapes n in
+let rec name_escapes ?(pass_checked : string -> int -> bool = fun _ _ -> false) (n : string)
+    (e : A.expr) : bool =
+  let esc = name_escapes ~pass_checked n in
   let any = List.exists esc in
   match e with
   | A.EApp (A.EVar m, args, _) when m.A.txt = n -> any args
+  | A.EApp (A.EVar f, args, _) ->
+    List.exists
+      (fun (i, a) ->
+        match a with
+        | A.EVar m when m.A.txt = n -> not (pass_checked f.A.txt i)
+        | a -> esc a)
+      (List.mapi (fun i a -> (i, a)) args)
   | A.EVar m -> m.A.txt = n
   | A.ELit _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> false
   | A.EApp (f, args, _) -> esc f || any args
@@ -1046,7 +1062,8 @@ let sig_of_clause (c : A.fn_clause) : fn_sig =
               | None -> None)
            | A.FPPat _ -> None)
   in
-  { param_names; param_str; param_scalar; refined; ret = None; ret_sort = None }
+  let param_tys = List.map param_ty_of c.A.fc_params in
+  { param_names; param_str; param_scalar; param_tys; refined; ret = None; ret_sort = None }
 
 (* Every function definition keyed by its fully-qualified name (e.g. "A.B.foo"),
    mapping to Some sig when it carries a refinement, None when it does not.
@@ -1059,7 +1076,7 @@ let sig_of_fn (fd : A.fn_def) : fn_sig =
     match fd.A.fn_clauses with
     | c :: _ -> sig_of_clause c
     | [] ->
-      { param_names = []; param_str = []; param_scalar = []; refined = []
+      { param_names = []; param_str = []; param_scalar = []; param_tys = []; refined = []
       ; ret = None; ret_sort = None }
   in
   match return_refine_sorted fd with
@@ -1084,8 +1101,16 @@ let local_fn_def (n : A.name) (ps : A.param list) (ret_ty : A.ty option) (body :
 (* Record the signature when EITHER side carries a refinement: a function with
    only a refined *return* must be resolvable so its postcondition reaches call
    sites, even though it has no refined params of its own to check. *)
+let has_arrow_param (sg : fn_sig) : bool =
+  List.exists (function Some (A.TyArrow _) -> true | _ -> false) sg.param_tys
+
+(* …and when a parameter is FUNCTION-typed (`apply(f : Int -> Int, x)`):
+   such a signature carries no obligation of its own ([refined] is empty, so
+   every consumer that iterates it does nothing), but the pass-site check in
+   [Refine_check.visit] needs the arrow's domain to oblige whoever passes a
+   refined callable there — see [fn_sig.param_tys]. *)
 let entry_of_sig (sg : fn_sig) : fn_sig option =
-  if sg.refined <> [] || Option.is_some sg.ret then Some sg else None
+  if sg.refined <> [] || Option.is_some sg.ret || has_arrow_param sg then Some sg else None
 
 (* ── Which `impl` method contracts may be trusted ──────────────────────────
    An `impl` method is callable under the enclosing module's spelling exactly

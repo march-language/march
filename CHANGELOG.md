@@ -13,6 +13,22 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Passing a refined function is checked at the pass site, and a
+  `let`-bound lambda's refinements are enforced.** `apply(take_n, -3)` with
+  `fn apply(f : Int -> Int, x : Int)` and `take_n : {Int | _ >= 0} -> Int` is
+  now rejected where `take_n` is passed: the expected domain `Int` promises
+  nothing, so it cannot imply `_ >= 0` (witness `-1`). The rule is
+  contravariant subtyping: a refined callable (named, aliased, local `fn`,
+  `let`-bound or inline lambda) may be passed only where the expected
+  function type's domain implies its own parameter refinement for every
+  value; a domain refined at least as strongly passes, and a domain spelled
+  as a type variable (`List.map`'s) promises nothing. A `let g = fn (n : {Int
+  | n > 0}) -> ...` is also a contract for its direct callers now, and
+  assumes `n > 0` in its body while every use of `g` is obliged. The former
+  accept witness `t77_refine_hof_bypass_limitation` is the reject witness
+  `t77_refine_hof_pass_site_rejected`. Multi-parameter callables are neither
+  obliged nor assumed.
+
 - **A block-level `fn`'s refinements are enforced.** A local
   `fn inner(n : {Int | n > 0}) : {Int | _ > 0} do ... end` inside a function
   body is now a contract on both ends: every direct `inner(...)` after it and

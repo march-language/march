@@ -449,6 +449,14 @@ type fn_sig = {
      an argument at a Bool/Float position be DECLARED at that sort rather than
      silently at `Int`, which z3 rejects the moment the predicate uses it. *)
   param_scalar : Smt.sort list;
+  (* Parallel to [param_names]: each parameter's DECLARED type, refined or
+     not, [None] for a pattern parameter or an unannotated one.  Read by
+     exactly one consumer: the pass-site check in [Refine_check.visit], which
+     needs to know that `apply`'s first parameter is `Int -> Int` (an arrow
+     whose domain promises nothing) to oblige `apply(take_n, -3)` — a shape
+     that has no refined parameter of its own, which is why [entry_of_sig]
+     keeps a signature with an arrow parameter even when [refined] is empty. *)
+  param_tys : A.ty option list;
   refined : rparam list;
   ret : (string * A.expr) option;
   (* SMT sort of the refined RETURN value: [None] for an Int return (the Tier 0

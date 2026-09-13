@@ -4,7 +4,9 @@ Landed 2026-09-13. Phase 0 of
 `specs/plans/2026-09-13-refinement-enforcement-holes-plan.md`. The three
 todos this touches stay OPEN (their obligation side is still unenforced):
 
-- `specs/todos/2026-09-03-lambda-param-refinement-unchecked.md`
+- `specs/todos/2026-09-03-lambda-param-refinement-unchecked.md` (closed the
+  same day by phase 2; now
+  `specs/progress/2026-09-13-lambda-param-refinement-enforced.md`)
 - `specs/todos/2026-09-03-block-fn-refinement-unchecked.md` (closed the same
   day by phase 1; now `specs/progress/2026-09-13-block-fn-refinement-enforced.md`)
 - `specs/todos/2026-09-03-actor-state-and-handler-refinement-unchecked.md`

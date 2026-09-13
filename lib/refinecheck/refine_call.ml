@@ -581,6 +581,17 @@ let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
 type check_subject =
   | Argument
   | Bound_expr
+  (* A refined CALLABLE passed where a function type is expected (`apply(g, 0)`
+     with `g : ({Int | n > 0}) -> Int` and `apply : (Int -> Int, Int) -> Int`).
+     The obligation is contravariant subtyping at the pass site: the expected
+     domain must imply the callable's own parameter refinement, for every
+     value.  It reaches this function as a call `g($cb_x)` on a fresh
+     symbolic argument that carries the expected domain's refinement (or
+     `true`, when the domain is unrefined and so promises nothing), so the
+     machinery is unchanged and only the wording branches — "argument does not
+     satisfy precondition" would send the reader looking for an argument that
+     was never written. *)
+  | Callback_domain
 
 (* Span of an expression, for pointing a diagnostic at ONE argument instead of
    the whole call. [refinecheck] does not depend on [march_typecheck], so this
@@ -649,9 +660,17 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
   (* Destructured to the names the body has always used: this is a signature
      change, not a rewrite of 1,361 lines. *)
   let { root; errctx; postcond; path; lets; sc; re } = cx in
-  let subject_noun = match subject with Argument -> "argument" | Bound_expr -> "bound expression" in
+  let subject_noun =
+    match subject with
+    | Argument -> "argument"
+    | Bound_expr -> "bound expression"
+    | Callback_domain -> "expected function type's domain"
+  in
   let obligation_noun =
-    match subject with Argument -> "precondition" | Bound_expr -> "type annotation"
+    match subject with
+    | Argument -> "precondition"
+    | Bound_expr -> "type annotation"
+    | Callback_domain -> "its parameter refinement"
   in
   let name_pos = List.mapi (fun i n -> (n, i)) sg.param_names in
   (* A CALLER-scope name whose declared type is a record (see [recenv]).  Such a
@@ -766,7 +785,12 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
            | Bound_expr ->
              "note: bind an expression the checker can see satisfies this \
               annotation, weaken the annotation, or remove `cap verified` from \
-              this module — it asks for every obligation to be discharged")
+              this module — it asks for every obligation to be discharged"
+           | Callback_domain ->
+             "note: refine the domain of the expected function type so it \
+              implies the passed function's own parameter refinement, weaken \
+              that refinement, or remove `cap verified` from this module — it \
+              asks for every obligation to be discharged")
       in
       Err.error errctx ~span
         (Printf.sprintf
@@ -2162,7 +2186,24 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        (match Refine.discharge ~root ~preamble vc with
         | Refine.Verified -> note Obligation.Proved
         | first ->
-          (match Refine.discharge ~root ~preamble { vc with Smt.goal = Smt.Not goal } with
+          (* A pass-site obligation ([Callback_domain]) is the one case where
+             "G can fail" IS the definite failure: its subject `$cb_x` ranges
+             over exactly the expected domain's refinement — that refinement
+             is the ONLY assumption about it, by construction — so every model
+             the solver finds is an argument the caller is entitled to pass.
+             `∀x. dom(x) ⇒ pred(x)` is refuted by one such x; demanding that
+             pred fail for ALL of them (the `¬G` discharge below) would let
+             `apply(take_n, -3)` through whenever `_ >= 0` merely SOMETIMES
+             holds, which is always. *)
+          let definite =
+            match subject, first with
+            | Callback_domain, Refine.Refuted _ -> true
+            | _ -> false
+          in
+          (match
+             if definite then Refine.Verified
+             else Refine.discharge ~root ~preamble { vc with Smt.goal = Smt.Not goal }
+           with
            | Refine.Verified ->
              note Obligation.Violated;
              (* Name the parameter and callee rather than saying "argument".
@@ -2176,6 +2217,9 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                  Printf.sprintf "argument `%s` of `%s`" pname callee
                | Argument, _ -> Printf.sprintf "argument %d of `%s`" (rp.idx + 1) callee
                | Bound_expr, _ -> subject_noun
+               | Callback_domain, _ ->
+                 Printf.sprintf
+                   "the expected function type's domain, where `%s` is passed," callee
              in
              (* Point at the offending argument itself. The call span covers the
                 whole expression, which on a multi-argument call underlines
@@ -2226,7 +2270,14 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                     | Bound_expr ->
                       "note: a refined annotation on a `let` is CHECKED against the \
                        expression it annotates, not assumed — bind a value that satisfies \
-                       it, or weaken the annotation");
+                       it, or weaken the annotation"
+                    | Callback_domain ->
+                      Printf.sprintf
+                        "note: a function is passed where a function type is expected only \
+                         if that type's domain implies the function's own parameter \
+                         refinement for EVERY value — refine the expected domain so it \
+                         implies `%s`, or weaken the passed function's refinement"
+                        (pred_str rp.pred));
                  labels; notes = []; code = None; fix = None }
            | _ ->
              (* [!self_symbol] is what the CHECK runs against — see

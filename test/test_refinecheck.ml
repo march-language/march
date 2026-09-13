@@ -12562,11 +12562,11 @@ let compiler_warns (src : string) (needle : string) : bool =
     ctx.March_errors.Errors.diagnostics
 
 let audit_classify_fixloop1_suite =
-  [ (* Finding 4: a lambda's own parameter. Ledger fact: calling the lambda
-       with an argument that violates its predicate raises no error at all --
-       [scope_add_param] / [sig_of_clause] never see an [A.ELam]'s params. *)
-    Alcotest.test_case "a lambda's own parameter refinement is Unenforced, not Enforced"
-      `Quick (fun () ->
+  [ (* Finding 4 is CLOSED since 2026-09-13 (plan phase 2): a `let`-bound
+       lambda is registered in [cbenv] by [visit]'s [EBlock] walk, so `f(0)`
+       IS obliged.  Disposition and ledger fact flip together. *)
+    gated "a lambda's own parameter refinement is Enforced (direct calls are obliged)"
+      (fun () ->
         let src =
           {|mod LAM1 do
               fn main() : Int do
@@ -12576,12 +12576,8 @@ let audit_classify_fixloop1_suite =
             end|}
         in
         let _, d = classify_only_site src in
-        Alcotest.(check string) "disposition" "Unenforced" (disposition_tag d);
-        (match d with
-         | RAudit.Unenforced reason ->
-           Alcotest.(check bool) "names the lambda / ELam fact" true (contains reason "ELam")
-         | _ -> Alcotest.fail "expected Unenforced");
-        Alcotest.(check bool) "the violating call raises no error (the ledger fact)" false
+        Alcotest.(check string) "disposition" "Enforced" (disposition_tag d);
+        Alcotest.(check bool) "the violating call raises an error (the ledger fact)" true
           (has_refine_error_d src))
 
   ; (* Finding 5: a block-level `fn`'s PARAMETER, the other half of the
@@ -13771,6 +13767,84 @@ let local_fn_suite =
         Alcotest.(check bool) "escaping via apply(inner, 5): need(n) is unproved" true
           (has_refine_error_d (prog (main (def ^ "    apply(inner, 5)\n"))))) ]
 
+(* ── Lambda contracts and pass-site contravariance (plan phase 2) ─────────
+   A `let`-bound lambda is a local function: direct calls are obliged through
+   [cbenv].  Passing ANY refined callable (a lambda, a local `fn`, a named
+   function) where a function type is expected is obliged at the PASS site:
+   the expected domain must imply the callable's own parameter refinement for
+   every value, and an unrefined domain promises nothing (decision (a) of the
+   plan).  The `t77` shape, `apply(take_n, -3)` through `f : Int -> Int`, is
+   therefore now rejected — at the pass, not at the indirect call. *)
+let lambda_contract_suite =
+  (* [prog] is under `cap verified`, where an unverified skip is ALSO an
+     error; [plain] is not, so an error there is a demonstrated VIOLATION
+     (the definite-failure rule for [Callback_domain]), never an escalated
+     skip.  The violation cases assert BOTH, or they could pass by escalation
+     alone — which is exactly how the first draft of this suite passed while
+     the driver on `t77` printed a hint and exited 0. *)
+  let plain body =
+    "mod P do\n  fn need(k : {Int | k > 0}) : Int do k end\n\
+    \  fn take_n(n : {Int | _ >= 0}) : Int do n end\n\
+    \  fn apply(f : Int -> Int, x : Int) : Int do f(x) end\n\
+    \  fn apply_pos(f : ({Int | _ > 0}) -> Int, x : {Int | x > 0}) : Int do f(x) end\n\
+    \  fn apply_nn(f : ({Int | _ >= 0}) -> Int, x : {Int | x >= 0}) : Int do f(x) end\n"
+    ^ body ^ "end\n"
+  in
+  let prog body =
+    "mod P do\n  cap verified\n  fn need(k : {Int | k > 0}) : Int do k end\n\
+    \  fn take_n(n : {Int | _ >= 0}) : Int do n end\n\
+    \  fn apply(f : Int -> Int, x : Int) : Int do f(x) end\n\
+    \  fn apply_pos(f : ({Int | _ > 0}) -> Int, x : {Int | x > 0}) : Int do f(x) end\n\
+    \  fn apply_nn(f : ({Int | _ >= 0}) -> Int, x : {Int | x >= 0}) : Int do f(x) end\n"
+    ^ body ^ "end\n"
+  in
+  let main body = "  fn main() : Int do\n" ^ body ^ "  end\n" in
+  let g = "    let g = fn (n : {Int | n > 0}) -> n\n" in
+  [ gated "a let-bound lambda obliges its direct callers" (fun () ->
+        Alcotest.(check bool) "g(0) is rejected" true (has_refine_error_d (prog (main (g ^ "    g(0)\n"))));
+        Alcotest.(check bool) "g(5) passes" false (has_refine_error_d (prog (main (g ^ "    g(5)\n")))));
+
+    gated "passing a refined lambda to an UNREFINED domain is a violation" (fun () ->
+        Alcotest.(check bool) "apply(g, 5): Int -> Int promises nothing (cap verified)" true
+          (has_refine_error_d (prog (main (g ^ "    apply(g, 5)\n"))));
+        Alcotest.(check bool) "…and it is a VIOLATION, not an escalated skip (plain)" true
+          (has_refine_error_d (plain (main (g ^ "    apply(g, 5)\n")))));
+
+    gated "the expected domain must IMPLY the lambda's refinement" (fun () ->
+        Alcotest.(check bool) "{_ > 0} -> Int implies n > 0" false
+          (has_refine_error_d (prog (main (g ^ "    apply_pos(g, 5)\n"))));
+        Alcotest.(check bool) "{_ >= 0} -> Int does not imply n > 0 (cap verified)" true
+          (has_refine_error_d (prog (main (g ^ "    apply_nn(g, 5)\n"))));
+        Alcotest.(check bool) "…refuted by the model x = 0 (plain)" true
+          (has_refine_error_d (plain (main (g ^ "    apply_nn(g, 5)\n")))));
+
+    gated "the t77 shape: a NAMED refined function passed through `Int -> Int`" (fun () ->
+        Alcotest.(check bool) "apply(take_n, -3) is a violation at the pass site (plain)" true
+          (has_refine_error_d (plain (main "    apply(take_n, -3)\n")));
+        Alcotest.(check bool) "apply_nn(take_n, 3) passes: domain implies _ >= 0" false
+          (has_refine_error_d (prog (main "    apply_nn(take_n, 3)\n"))));
+
+    gated "an inline lambda argument is checked at the pass site, and assumes under a covered one" (fun () ->
+        Alcotest.(check bool) "apply(fn (n : {Int | n > 0}) -> need(n), 5): violation (plain)" true
+          (has_refine_error_d (plain (main "    apply(fn (n : {Int | n > 0}) -> need(n), 5)\n")));
+        Alcotest.(check bool) "apply_pos(fn (n : {Int | n > 0}) -> need(n), 5): proved, body assumes n > 0" false
+          (has_refine_error_d (prog (main "    apply_pos(fn (n : {Int | n > 0}) -> need(n), 5)\n"))));
+
+    gated "a let-bound lambda assumes its parameters only while every use is obliged" (fun () ->
+        let gn = "    let g = fn (n : {Int | n > 0}) -> need(n)\n" in
+        Alcotest.(check bool) "direct call only: need(n) discharged" false
+          (has_refine_error_d (prog (main (gn ^ "    g(5)\n"))));
+        Alcotest.(check bool) "passed to a covered domain: still discharged" false
+          (has_refine_error_d (prog (main (gn ^ "    apply_pos(g, 5)\n"))));
+        Alcotest.(check bool) "aliased (`let h = g`): escapes, need(n) unproved" true
+          (has_refine_error_d (prog (main (gn ^ "    let h = g\n    h(5)\n")))));
+
+    gated "the pass-site diagnostic names the obligation" (fun () ->
+        let text = refine_error_text_d (plain (main "    apply(take_n, -3)\n")) in
+        Alcotest.(check bool) "mentions the passed function's refinement" true
+          (contains text "its parameter refinement `_ >= 0`");
+        Alcotest.(check bool) "names the callable" true (contains text "take_n")) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -13856,4 +13930,5 @@ let () =
       ("audit-baseline", audit_baseline_suite);
       ("const-fn-predicate", const_fn_suite);
       ("unobliged-assume", unobliged_assume_suite);
-      ("local-fn-contract", local_fn_suite) ]
+      ("local-fn-contract", local_fn_suite);
+      ("lambda-contract", lambda_contract_suite) ]
