@@ -1795,11 +1795,11 @@ An empty baseline over real code is a true finding, not evidence the audit
 does nothing, but an audit that silently broke would also report an empty
 baseline, which is why a second, deliberately non-empty fixture set exists:
 `test/refine_audit/holes/`, one small program per known unenforced position
-(a non-adoptable `impl` method's parameter, an actor's state field, a nested
-field refinement, and a `{String | ...}` return; a fixture leaves the set
-when its position becomes enforced, as the block-level `fn` and
-lambda-parameter ones did on 2026-09-13, and a line leaves a fixture the
-same way, as the actor fixture's handler-parameter line did),
+(a non-adoptable `impl` method's parameter, a refinement inside a type
+argument, a `{String | ...}` return, and the two desugar-dropped shapes; a
+fixture leaves the set when its position becomes enforced, as the
+block-level `fn`, lambda-parameter, nested-field, variant-argument,
+`linear`-wrapper and actor ones did on 2026-09-13),
 pinned at `test/refine_audit/holes.baseline`. If that baseline ever reports
 zero Unenforced sites, the audit itself is broken; the test that diffs it
 fails loudly rather than passing.
@@ -1836,7 +1836,10 @@ position into a real contract, obligation and assumption together, is
   site cannot make that module-level judgement. When the method *is*
   adoptable the checker does enforce it, so this is a documented
   conservatism in the audit, not a hole in the checker.
-- An actor's state field: no extractor exists for a stored field.
+- (Closed 2026-09-13.) An actor's state field: an inductive invariant. The
+  state's refined fields are obliged at `init` and at every handler's result
+  (an update `{ state with ... }`, or a fresh literal at a tail), and assumed
+  of the incoming `state` in every handler body.
 - (Closed 2026-09-13.) A handler's own parameter: `on Inc(n : {Int | n >
   0})` obliges every construction of `Inc(...)` in the program (`send`,
   `Actor.call`, a message bound to a `let` first), and the handler body
@@ -1845,9 +1848,17 @@ position into a real contract, obligation and assumption together, is
   assumed. **Trust boundary:** a message arriving from a remote node was
   built by code this compiler did not check; the handler's assumption is
   stated here as that boundary, not enforced across it.
-- A record field or a variant constructor argument, once a value is
-  constructed.
-- A refinement nested below the outermost position of a declared type.
+- (Closed 2026-09-13.) A record field or a variant constructor argument:
+  every construction is obliged — a record literal (typed by its field set;
+  two types of one shape make it ambiguous and it is not obliged, fail
+  closed), an update `{ r with f: e }` for the updated fields, a constructor
+  application `W(e)` — and every reader of the field through a
+  record-typed variable assumes it. A `linear` wrapper is transparent.
+  Program-wide, two constructors (or a constructor and an actor message)
+  sharing a name withdraw the contract, neither obliged nor assumed.
+- A refinement inside a type ARGUMENT (`List({Int | _ > 0})`), which needs
+  container subtyping; a refinement one layer down at a field, constructor
+  argument, or state field is enforced as above.
 - A `{String | ...}` return type: `return_refine_ext` only recognizes Int,
   Bool, Float, and record bases.
 - A parameter refinement that desugar drops or relocates before the audit

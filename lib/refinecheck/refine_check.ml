@@ -226,6 +226,55 @@ let fresh_cb_arg = "$cb_x"
    absence the same way, so obligation and assumption can never disagree. *)
 let handler_sigs : (string, fn_sig) Hashtbl.t ref = ref (Hashtbl.create 1)
 
+(* The module's enforced stored-field contracts ([Refine_scope.collect_ctor_sigs]),
+   per module like [handler_sigs] and read by the same two kinds of site:
+   constructions (the obligation) and [recenv] entries (the assumption). *)
+let ctor_sigs : ctor_sigs ref = ref { by_ctor = Hashtbl.create 1; by_fields = Hashtbl.create 1 }
+
+let bare_ctor (c : string) : string =
+  match String.rindex_opt c '.' with
+  | Some i -> String.sub c (i + 1) (String.length c - i - 1)
+  | None -> c
+
+(* Check the fields of a construction of [callee] against its constructor
+   signature: [fields] by name, [only] restricting the obligations to the
+   named fields (an update touches only those; the untouched ones keep the
+   value the variable already held, whose contract was established where it
+   was built).  A literal missing a declared field is skipped, not guessed. *)
+let check_ctor_fields (cx : call_ctx) ~(span : A.span) ~(callee : string) (sg : fn_sig)
+    (fields : (string * A.expr) list) ~(only : string list option) : unit =
+  let args = List.map (fun pn -> List.assoc_opt pn fields) sg.param_names in
+  if List.for_all Option.is_some args then begin
+    let args = List.filter_map Fun.id args in
+    List.iter
+      (fun rp ->
+        let pn = List.nth sg.param_names rp.idx in
+        if (match only with None -> true | Some us -> List.mem pn us) then
+          check_call cx ~span ~callee sg args rp)
+      sg.refined
+  end
+
+(* The facts a [recenv] entry contributes — see [Refine_scope.field_facts]. *)
+let facts_of_recenv_entry ~(span : A.span) ((x, sort) : string * string) : (A.expr * bool) list =
+  match ctor_of_sort sort with
+  | Some c ->
+    (match Hashtbl.find_opt !ctor_sigs.by_ctor c with
+     | Some sg -> field_facts x ~span sg
+     | None -> [])
+  | None -> []
+
+let params_field_facts ~(span : A.span) (ps : A.param list) : (A.expr * bool) list =
+  List.concat_map
+    (fun (p : A.param) ->
+      match record_sort_of_ty p.A.param_ty with
+      | Some s -> facts_of_recenv_entry ~span (p.A.param_name.A.txt, s)
+      | None -> [])
+    ps
+
+let fnparams_field_facts ~(span : A.span) (ps : A.fn_param list) : (A.expr * bool) list =
+  params_field_facts ~span
+    (List.filter_map (function A.FPNamed p | A.FPDefault (p, _) -> Some p | A.FPPat _ -> None) ps)
+
 (* A constructor spelled `M.Inc` resolves by its last segment: handler
    messages are registered by bare name program-wide (and any bare-name
    clash has already withdrawn the entry), so the qualifier adds nothing. *)
@@ -313,11 +362,16 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
      parameter refinements — see [Refine_scope.collect_handler_sigs].  A
      message constructor is checked exactly like a call to the handler. *)
   | A.ECon (c, args, sp) ->
+    let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets; sc; re } in
     (match handler_sig_of_ctor c.A.txt with
-     | Some sg ->
-       let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets; sc; re } in
-       List.iter (fun rp -> check_call cx ~span:sp ~callee:c.A.txt sg args rp) sg.refined
-     | None -> ());
+     | Some sg -> List.iter (fun rp -> check_call cx ~span:sp ~callee:c.A.txt sg args rp) sg.refined
+     | None ->
+       (* …and a VARIANT constructor with a refined argument, the same way
+          ([Refine_scope.collect_ctor_sigs]; the two tables never share a
+          name, each having withdrawn it on the clash). *)
+       (match Hashtbl.find_opt !ctor_sigs.by_ctor (bare_ctor c.A.txt) with
+        | Some sg -> List.iter (fun rp -> check_call cx ~span:sp ~callee:c.A.txt sg args rp) sg.refined
+        | None -> ()));
     List.iter go args
   | A.EAtom (_, args, _) | A.ETuple (args, _) -> List.iter go args
   | A.EBlock (es, _) ->
@@ -451,6 +505,16 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
              | _ -> sc
            in
            let re' = match e with A.ELet (b, _) -> recenv_add_binding re b | _ -> re in
+           (* A `let` that brings a record-typed variable into [recenv] also
+              brings its refined fields' facts — see [field_facts]. *)
+           let path' =
+             match e with
+             | A.ELet ({ A.bind_pat = A.PatVar n; _ }, sp) ->
+               (match List.assoc_opt n.A.txt re' with
+                | Some s -> path' @ facts_of_recenv_entry ~span:sp (n.A.txt, s)
+                | None -> path')
+             | _ -> path'
+           in
            let cb' =
              match e with
              | A.ELet ({ A.bind_pat = A.PatVar g; _ }, _)
@@ -695,8 +759,47 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     go_path ((c, true) :: path) e
   | A.ECond (arms, _) ->
     List.iter (fun (c, b) -> go c; go_path ((c, false) :: path) b) arms
-  | A.ERecord (fields, _) -> List.iter (fun (_, v) -> go v) fields
-  | A.ERecordUpdate (r, fields, _) -> go r; List.iter (fun (_, v) -> go v) fields
+  (* A record LITERAL is a construction: its type is the unique record (or
+     actor state) with exactly this field set — two types of one shape make
+     it ambiguous and the literal is not obliged (fail closed). *)
+  | A.ERecord (fields, sp) ->
+    let fs = List.map (fun ((n : A.name), v) -> (n.A.txt, v)) fields in
+    (match Hashtbl.find_opt !ctor_sigs.by_fields (List.sort compare (List.map fst fs)) with
+     | Some ctor ->
+       (match Hashtbl.find_opt !ctor_sigs.by_ctor ctor with
+        | Some sg ->
+          let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets; sc; re } in
+          check_ctor_fields cx ~span:sp ~callee:ctor sg fs ~only:None
+        | None -> ())
+     | None -> ());
+    List.iter (fun (_, v) -> go v) fields
+  (* An UPDATE `{ r with f: e }` of a variable whose record type is known
+     ([recenv]) is obliged for the updated fields only; the others keep the
+     stored value, reflected as `r.f` through the sort's selector. *)
+  | A.ERecordUpdate (r, fields, sp) ->
+    (match r with
+     | A.EVar { A.txt = x; A.span = xsp } ->
+       (match Option.bind (List.assoc_opt x re) ctor_of_sort with
+        | Some ctor ->
+          (match Hashtbl.find_opt !ctor_sigs.by_ctor ctor with
+           | Some sg ->
+             let updated = List.map (fun ((n : A.name), v) -> (n.A.txt, v)) fields in
+             let fs =
+               List.map
+                 (fun pn ->
+                   match List.assoc_opt pn updated with
+                   | Some v -> (pn, v)
+                   | None ->
+                     (pn, A.EField (A.EVar { A.txt = x; A.span = xsp }, { A.txt = pn; A.span = xsp }, xsp)))
+                 sg.param_names
+             in
+             let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets; sc; re } in
+             check_ctor_fields cx ~span:sp ~callee:ctor sg fs ~only:(Some (List.map fst updated))
+           | None -> ())
+        | None -> ())
+     | _ -> ());
+    go r;
+    List.iter (fun (_, v) -> go v) fields
   | A.EField (r, _, _) -> go r
   | A.EPipe (a, b, _) -> go a; go b
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) -> go e
@@ -780,7 +883,8 @@ and visit_local_fn ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
   in
   let ctx = local_shadow ctx names in
   let assumed = if escapes then strip_params_refinements ps else ps in
-  visit ~root errctx defs ctx (path_shadow path names) (launder_shadow lets names)
+  let path = path_shadow path names @ params_field_facts ~span:sp ps in
+  visit ~root errctx defs ctx path (launder_shadow lets names)
     (List.fold_left scope_add_param sc assumed)
     (List.fold_left recenv_add_param re ps)
     (List.fold_left cb_add_param cb ps)
@@ -799,7 +903,9 @@ and visit_lambda ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
   let names = List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
   let ctx = local_shadow ctx names in
   let assumed = if assume then ps else strip_params_refinements ps in
-  visit ~root errctx defs ctx (path_shadow path names) (launder_shadow lets names)
+  let span = match body with A.EVar n -> n.A.span | _ -> A.dummy_span in
+  let path = path_shadow path names @ params_field_facts ~span ps in
+  visit ~root errctx defs ctx path (launder_shadow lets names)
     (List.fold_left scope_add_param sc assumed)
     (List.fold_left recenv_add_param re ps)
     (List.fold_left cb_add_param cb ps)
@@ -1252,6 +1358,9 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
            resolution inside this body too — see [local_shadow]. *)
         let ctx = local_shadow ctx (List.concat_map fnparam_binders c.A.fc_params) in
         let path = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
+        (* A record-typed parameter's refined fields are facts here: every
+           construction of that record was obliged to establish them. *)
+        let path = path @ fnparams_field_facts ~span:c.A.fc_span c.A.fc_params in
         visit ~root errctx defs ctx path [] sc re cb c.A.fc_body)
       walked.A.fn_clauses)
 
@@ -1339,7 +1448,27 @@ and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
        admit the proved fact into afterward. *)
     ignore (check_let_annotation ~root errctx defs ctx [] [] [] [] b);
     visit_expr b.A.bind_expr
-  | A.DActor (_, _, ad, _) ->
+  | A.DActor (_, aname, ad, _) ->
+    (* Actor state as an INDUCTIVE INVARIANT (plan phase 4).  The state's
+       refined fields are (1) obliged at `init`, (2) obliged at every
+       handler's result — an update `{ state with ... }` through [recenv]'s
+       `state` entry, a fresh literal through its field set, checked at the
+       handler's tails — and (3) assumed of the incoming `state` in every
+       handler body.  (1)+(2) establish the invariant for every state value
+       that can exist; (3) is the hypothesis they justify. *)
+    let actor_sig = Hashtbl.find_opt !ctor_sigs.by_ctor aname.A.txt in
+    let actor_sort = adt_sort_name aname.A.txt in
+    let state_re = [ ("state", actor_sort) ] in
+    let state_facts = facts_of_recenv_entry ~span:aname.A.span ("state", actor_sort) in
+    let check_state_literal ~path (e : A.expr) =
+      match actor_sig, e with
+      | Some sg, A.ERecord (fields, sp) ->
+        let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets = []; sc = []; re = state_re } in
+        check_ctor_fields cx ~span:sp ~callee:aname.A.txt sg
+          (List.map (fun ((n : A.name), v) -> (n.A.txt, v)) fields) ~only:None
+      | _ -> ()
+    in
+    check_state_literal ~path:[] ad.A.actor_init;
     visit_expr ad.A.actor_init;
     List.iter
       (fun (h : A.actor_handler) ->
@@ -1358,10 +1487,14 @@ and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
         let enforced = Hashtbl.mem !handler_sigs h.A.ah_msg.A.txt in
         let assumed = if enforced then h.A.ah_params else strip_params_refinements h.A.ah_params in
         let sc = List.fold_left scope_add_fnparam [] (List.map (fun p -> A.FPNamed p) assumed) in
-        let re = List.fold_left recenv_add_fnparam [] ps in
+        let re = List.fold_left recenv_add_fnparam state_re ps in
         let cb = List.fold_left cb_add_fnparam [] ps in
         let ctx = local_shadow ctx (List.concat_map fnparam_binders ps) in
-        visit ~root errctx defs ctx [] [] sc re cb h.A.ah_body)
+        let path = state_facts @ fnparams_field_facts ~span:h.A.ah_msg.A.span ps in
+        (* (2): a fresh state literal at a tail is a construction of THIS
+           actor's state, whatever other record shares its field set. *)
+        List.iter (fun (p, t) -> check_state_literal ~path:p t) (tails path h.A.ah_body);
+        visit ~root errctx defs ctx path [] sc re cb h.A.ah_body)
       ad.A.actor_handlers;
     (* The @invariant predicate is evaluated at run time like any other
        expression, so obligations inside it count. *)
@@ -2261,6 +2394,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   end;
   let defs = collect_all_defs m.A.mod_decls in
   handler_sigs := collect_handler_sigs m.A.mod_decls;
+  ctor_sigs := collect_ctor_sigs m.A.mod_decls;
   (* Only POSITIVELY VERIFIED postconditions may be assumed at call sites. *)
   gate_unverified_posts ~root errctx defs m.A.mod_decls;
   (* Always walk: a function may have a refined *return* (postcondition) even

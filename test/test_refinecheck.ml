@@ -12182,7 +12182,10 @@ let expected_audit_labels =
       ("Actor_handler_param(Bump,0)", "Actor_handler_param(Bump,0)", "Outermost", 16);
       ("Param(f,4)", "Param(f,4)", "Nested", 17);
       ("Param(f,5)", "Param(f,5)", "Nested", 18);
-      ("Param(f,6)", "Param(f,6)", "Nested", 19);
+      (* `linear {Int | ...}`: the wrapper is transparent since 2026-09-13
+         (plan phase 4), so the refinement is at the OUTERMOST position and
+         enforced like a bare one. *)
+      ("Param(f,6)", "Param(f,6)", "Outermost", 19);
       ("Param(f,7)", "Type_arg", "Nested", 20);
       ("Expr_annot", "Expr_annot", "Outermost", 23);
       ("Expr_annot", "Expr_annot", "Outermost", 24);
@@ -12421,7 +12424,7 @@ let audit_classify_suite =
             end
           end
         end|};
-    check_unenforced "a refined record field is Unenforced"
+    check_enforced "a refined record field is Enforced (plan phase 4: every construction obliged)"
       {|mod M do
           type Box = { v : {Int | _ > 0} }
         end|};
@@ -12439,7 +12442,7 @@ let audit_classify_suite =
             fn put : Int -> {Int | _ > 0}
           end
         end|};
-    check_unenforced "an actor state field refinement is Unenforced"
+    check_enforced "an actor state field refinement is Enforced (plan phase 4: an inductive invariant)"
       {|mod M do
           actor Counter do
             state { value : {Int | _ >= 50} }
@@ -12471,33 +12474,22 @@ let audit_classify_reason_suite =
           Alcotest.(check bool) "names the type-constructor argument" true
             (contains reason "type constructor's argument")
         | _ -> Alcotest.fail "expected Unenforced")
-  ; Alcotest.test_case "the record-field reason names the field, not the nested-position sentence"
+  (* The record-field and actor-state REASON discrimination cases that used
+     to sit here are moot since 2026-09-13 (plan phase 4): both positions are
+     Enforced, so there is no Unenforced sentence left to discriminate.  What
+     remains pinned is that a field whose base type the checker cannot place
+     still carries the field-specific sentence, not a shared placeholder. *)
+  ; Alcotest.test_case "an unplaceable field base keeps a field-specific Unenforced reason"
       `Quick (fun () ->
         let _, d = classify_only_site
             {|mod M do
-                type Box = { v : {Int | _ > 0} }
+                type Box = { v : {(Int, Int) | true} }
               end|}
         in
         match d with
         | RAudit.Unenforced reason ->
-          Alcotest.(check bool) "names the field" true (contains reason "field")
-        | _ -> Alcotest.fail "expected Unenforced")
-  ; Alcotest.test_case "the actor-state reason names it distinctly from the record-field reason"
-      `Quick (fun () ->
-        let _, d = classify_only_site
-            {|mod M do
-                actor Counter do
-                  state { value : {Int | _ >= 50} }
-                  init { value: 0 }
-                  on Bump(d : Int) do
-                    { state with value: state.value + d }
-                  end
-                end
-              end|}
-        in
-        match d with
-        | RAudit.Unenforced reason ->
-          Alcotest.(check bool) "names a stored field" true (contains reason "field")
+          Alcotest.(check bool) "names the stored-field position" true
+            (contains reason "stored field")
         | _ -> Alcotest.fail "expected Unenforced")
   ; Alcotest.test_case "the sig Inert_warned names warn_sig_fn_refinement"
       `Quick (fun () ->
@@ -12892,9 +12884,12 @@ let strip_audit_lines s =
   |> List.filter (fun l -> not (String.length l >= 14 && String.sub l 0 14 = "coverage audit"))
   |> String.concat "\n"
 
+(* The one Unenforced site is a refinement inside a TYPE ARGUMENT: a bare
+   refined field (`v : {Int | v > 0}`) has been Enforced since 2026-09-13
+   (plan phase 4), and this fixture exists to pin an Unenforced line exactly. *)
 let audit_flag_pinned_fixture =
   {|mod PINAUDIT1 do
-  type Box = { v : {Int | v > 0} }
+  type Box = { v : List({Int | v > 0}) }
 
   fn f(n : {Int | n > 0}) : {Int | _ > 0} do
     n
@@ -12952,10 +12947,11 @@ let audit_flag_suite =
           | [ unenforced_line; user_summary; stdlib_summary ] ->
             Alcotest.(check string) "the one Unenforced site's line"
               (Printf.sprintf
-                 "coverage audit: %s:2:26: field `Box.v`: v > 0: a record (or \
-                  actor-state) field's declared type is never re-examined once a \
-                  value is constructed; the checker has no extractor for a stored \
-                  field, only for a parameter, a return, or a let-binding"
+                 "coverage audit: %s:2:31: field `Box.v`: v > 0: the refinement sits \
+                  inside a type constructor's argument (for example `List({Int | _ > \
+                  0})`); refined_param_ty, refined_scope_ty and return_refine_ext all \
+                  match only an outermost TyRefine, so a refinement this deep is \
+                  invisible to every one of them"
                  path)
               unenforced_line;
             Alcotest.(check string) "user code bucket summary"
@@ -13099,9 +13095,12 @@ end
           write "prelude.march" "mod Prelude do
 end
 ";
+          (* A refinement inside a type ARGUMENT: the bare refined field this
+             used to declare has been Enforced since 2026-09-13 (plan phase
+             4), and this test needs one Unenforced stdlib site. *)
           write "list.march"
             "mod List do
-  type Box = { v : {Int | v > 0} }
+  type Box = { v : List({Int | v > 0}) }
 end
 ";
           let entry_path = write_march_fixture "mod E do
@@ -13894,6 +13893,85 @@ let actor_handler_suite =
              (prog ~extra ~handler_body:"      { state with value: need(n) }\n"
                 "    let _ = send(c, Inc(1))\n"))) ]
 
+(* ── Stored-field contracts (plan phase 4) ────────────────────────────────
+   A refined record field, variant argument, or actor state field is a
+   contract on every construction of the value and a fact for every reader.
+   Each case pairs a violating construction with a satisfying one; the
+   actor cases pin the inductive invariant from init, handler result, and
+   the assumed incoming state. *)
+let stored_field_suite =
+  let prog ?(extra = "") body =
+    "mod SF do\n  cap verified\n  fn need(k : {Int | k > 0}) : Int do k end\n" ^ extra ^ body
+    ^ "end\n"
+  in
+  let box = "  type Box = { v : {Int | _ > 0} }\n" in
+  let main body = "  fn main() : Int do\n" ^ body ^ "  end\n" in
+  [ gated "a record literal is obliged by its refined field" (fun () ->
+        Alcotest.(check bool) "{ v: 0 }" true
+          (has_refine_error_d (prog ~extra:box (main "    let b = { v: 0 }\n    b.v\n")));
+        Alcotest.(check bool) "{ v: 1 }" false
+          (has_refine_error_d (prog ~extra:box (main "    let b = { v: 1 }\n    b.v\n"))));
+
+    gated "a reader of the field assumes its refinement" (fun () ->
+        Alcotest.(check bool) "need(b.v) discharged from b : Box" false
+          (has_refine_error_d
+             (prog ~extra:box "  fn f(b : Box) : Int do need(b.v) end\n")));
+
+    gated "an update is obliged for the updated field, and may use the old one" (fun () ->
+        Alcotest.(check bool) "{ b with v: 0 }" true
+          (has_refine_error_d
+             (prog ~extra:box "  fn f(b : Box) : Box do { b with v: 0 } end\n"));
+        Alcotest.(check bool) "{ b with v: b.v + 1 }" false
+          (has_refine_error_d
+             (prog ~extra:box "  fn f(b : Box) : Box do { b with v: b.v + 1 } end\n")));
+
+    gated "a variant constructor is obliged by its refined argument" (fun () ->
+        let w = "  type Wrapped = Wrapped({Int | _ > 0})\n" in
+        Alcotest.(check bool) "Wrapped(0 - 1)" true
+          (has_refine_error_d (prog ~extra:w (main "    let _ = Wrapped(0 - 1)\n    0\n")));
+        Alcotest.(check bool) "Wrapped(1)" false
+          (has_refine_error_d (prog ~extra:w (main "    let _ = Wrapped(1)\n    0\n"))));
+
+    gated "a `linear` wrapper is transparent to the refinement" (fun () ->
+        let lin = "  fn f(x : linear {Int | _ > 0}) : Int do x end\n" in
+        Alcotest.(check bool) "f(0 - 1) against linear {Int | _ > 0}" true
+          (has_refine_error_d (prog ~extra:lin (main "    f(0 - 1)\n")));
+        Alcotest.(check bool) "f(1)" false
+          (has_refine_error_d (prog ~extra:lin (main "    f(1)\n"))));
+
+    gated "two record types of one shape make a bare literal ambiguous: fail closed" (fun () ->
+        let extra = box ^ "  type Box2 = { v : Int }\n" in
+        Alcotest.(check bool) "{ v: 0 } is not obliged" false
+          (has_refine_error_d (prog ~extra (main "    let b = { v: 0 }\n    0\n"))));
+
+    gated "actor state: init, handler result, and the assumed incoming state" (fun () ->
+        let actor result =
+          "  actor Counter do\n\
+          \    state { value : {Int | value >= 0} }\n\
+          \    init { value: 0 }\n\
+          \    on Inc(n : {Int | n > 0}) do\n      " ^ result ^ "\n    end\n  end\n\
+          \  fn main() : Unit do\n    let c = spawn(Counter)\n    let _ = send(c, Inc(1))\n    kill(c)\n  end\n"
+        in
+        Alcotest.(check bool) "state.value + n keeps value >= 0" false
+          (has_refine_error_d (prog (actor "{ state with value: state.value + n }")));
+        Alcotest.(check bool) "state.value - 1 can break it" true
+          (has_refine_error_d (prog (actor "{ state with value: state.value - 1 }")));
+        (* The call is its own statement: as the update's actual it would be
+           an opaque call result, and the UPDATE would then be unverifiable,
+           which is a different (and correct) verdict. *)
+        Alcotest.(check bool) "need(state.value + 1) discharged from the invariant" false
+          (has_refine_error_d
+             (prog (actor "let _ = need(state.value + 1)\n      { state with value: state.value + n }")));
+        let bad_init =
+          "  actor Counter do\n\
+          \    state { value : {Int | value >= 0} }\n\
+          \    init { value: 0 - 1 }\n\
+          \    on Inc(n : Int) do { state with value: state.value } end\n  end\n\
+          \  fn main() : Unit do\n    let c = spawn(Counter)\n    kill(c)\n  end\n"
+        in
+        Alcotest.(check bool) "init { value: -1 } is rejected" true
+          (has_refine_error_d (prog bad_init))) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -13981,4 +14059,5 @@ let () =
       ("unobliged-assume", unobliged_assume_suite);
       ("local-fn-contract", local_fn_suite);
       ("lambda-contract", lambda_contract_suite);
-      ("actor-handler-contract", actor_handler_suite) ]
+      ("actor-handler-contract", actor_handler_suite);
+      ("stored-field-contract", stored_field_suite) ]

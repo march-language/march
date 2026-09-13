@@ -345,7 +345,16 @@ type scope = (string * (string * A.expr * string option)) list
    1-constructor ADT, so [is_adt_base] already admits `{v : Config | v.port >=
    1}` and hands back the same `M_Config` sort name the record path in
    [check_call] keys on (see [is_record_sort]). *)
-let refined_param_ty : A.ty option -> (string * A.expr * string option) option = function
+(* A linearity wrapper is transparent to a VALUE's refinement: `linear {Int |
+   _ > 0}` promises `_ > 0` of the same Int.  Every extractor below strips it
+   first (plan phase 4); before that a refinement under `linear` parsed,
+   typechecked, and obliged nobody. *)
+let rec unlinear : A.ty -> A.ty = function
+  | A.TyLinear (_, t) -> unlinear t
+  | t -> t
+
+let refined_param_ty : A.ty option -> (string * A.expr * string option) option = fun t ->
+  match Option.map unlinear t with
   | Some (A.TyRefine (base, binder, pred)) when is_int_base base ->
     Some (binder_name binder, pred, None)
   | Some (A.TyRefine (base, binder, pred)) when is_string_base base ->
@@ -370,7 +379,7 @@ let refined_param_ty : A.ty option -> (string * A.expr * string option) option =
    [check_post_induction] — which applies the structural induction hypothesis
    under [structural_subvars]. *)
 let return_refine_sorted (fd : A.fn_def) : (string * A.expr * string option) option =
-  match fd.A.fn_ret_ty with
+  match Option.map unlinear fd.A.fn_ret_ty with
   | Some (A.TyRefine (base, binder, pred)) when is_int_base base ->
     Some (binder_name binder, pred, None)
   | Some (A.TyRefine (base, binder, pred)) when is_bool_base base ->
@@ -443,7 +452,8 @@ let scalar_sort_of_param_ty (t : A.ty option) : Smt.sort =
    None for an Int.  NOTE for consumers: `Some _` does NOT mean "record" —
    check against [str_sort], and against [is_meas_sort], before taking a
    record-specific path. *)
-let refined_scope_ty : A.ty option -> (string * A.expr * string option) option = function
+let refined_scope_ty : A.ty option -> (string * A.expr * string option) option = fun t ->
+  match Option.map unlinear t with
   | Some (A.TyRefine (base, binder, pred)) when is_int_base base ->
     Some (binder_name binder, pred, None)
   | Some (A.TyRefine (base, binder, pred)) when is_string_base base ->
@@ -1261,6 +1271,127 @@ let collect_handler_sigs (decls : A.decl list) : (string, fn_sig) Hashtbl.t =
         Hashtbl.replace out n sg)
     handlers;
   out
+
+(* ── Stored-field contracts ────────────────────────────────────────────────
+   `type Box = { v : {Int | _ > 0} }`, `type W = W({Int | _ > 0})`, and an
+   actor's `state { value : {Int | value >= 0} }` each declare a contract on a
+   CONSTRUCTION: every record literal, `{ r with ... }` update, or constructor
+   application that builds the value must establish the field's predicate,
+   and every reader of a stored field may assume it.  The obligation side is
+   phrased as a call to a synthesised "constructor signature" — one parameter
+   per field, in declaration order, refined where the field is — so
+   [check_call] does the work unchanged; the assumption side is
+   [field_facts], pushed into the path context whenever a variable of that
+   type enters scope ([recenv] is the trigger, since it already tracks
+   exactly those variables).
+
+   Keyed by the CONSTRUCTOR's bare name: a record's is its type name, an
+   actor's its own name, a variant's the constructor's.  Fail closed on any
+   clash — two constructors, or a constructor and an actor message, sharing
+   a name withdraw the contract entirely (neither obliged nor assumed),
+   exactly as [collect_handler_sigs] does. *)
+let ctor_sig_of_fields (ctor : A.name) (fields : (string * A.ty) list) : fn_sig =
+  (* A field's binder is normalised to `_`.  `value : {Int | value >= 0}` names
+     its binder after the field itself, and inside [check_call] a binder that
+     is also the parameter's name collides with the projected actual
+     `state.value`: the obligation on `{ state with value: state.value }` came
+     back undecided while the identical predicate over `_` proved.  The
+     rewrite is exact — the binder is bound by the refinement, so renaming it
+     changes nothing the predicate says — and keeps this contract on the path
+     every other `_`-bound refinement already takes. *)
+  let anon (t : A.ty) : A.ty =
+    match unlinear t with
+    | A.TyRefine (base, Some b, pred) ->
+      A.TyRefine (base, None, subst_params [ (b.A.txt, A.EVar { A.txt = "_"; A.span = b.A.span }) ] pred)
+    | t -> t
+  in
+  let ps =
+    List.map
+      (fun (n, t) ->
+        A.FPNamed { A.param_name = { A.txt = n; A.span = ctor.A.span }; param_ty = Some (anon t)
+                  ; param_lin = A.Unrestricted })
+      fields
+  in
+  sig_of_clause
+    { A.fc_params = ps; fc_guard = None; fc_body = A.ELit (A.LitBool true, ctor.A.span)
+    ; fc_span = ctor.A.span; fc_params_span = ctor.A.span }
+
+type ctor_sigs = {
+  by_ctor : (string, fn_sig) Hashtbl.t;
+      (* constructor name -> signature; only REFINED, unambiguous ones *)
+  by_fields : (string list, string) Hashtbl.t;
+      (* sorted field-name set -> the unique record/actor constructor with
+         exactly those fields, for typing a bare literal `{ v: 0 }`; absent
+         when two types share the shape (fail closed) *)
+}
+
+let collect_ctor_sigs (decls : A.decl list) : ctor_sigs =
+  let all : (string, fn_sig) Hashtbl.t = Hashtbl.create 32 in
+  let count : (string, int) Hashtbl.t = Hashtbl.create 32 in
+  let shapes : (string list, string list) Hashtbl.t = Hashtbl.create 32 in
+  let bump n = Hashtbl.replace count n (1 + Option.value ~default:0 (Hashtbl.find_opt count n)) in
+  let add_record (name : A.name) (fields : A.field list) =
+    bump name.A.txt;
+    let fs = List.map (fun (f : A.field) -> (f.A.fld_name.A.txt, f.A.fld_ty)) fields in
+    Hashtbl.replace all name.A.txt (ctor_sig_of_fields name fs);
+    let key = List.sort compare (List.map fst fs) in
+    Hashtbl.replace shapes key (name.A.txt :: Option.value ~default:[] (Hashtbl.find_opt shapes key))
+  in
+  let rec go decls =
+    List.iter
+      (function
+        | A.DType (_, name, _, A.TDRecord fields, _)
+        | A.DAlwaysLinearType (_, name, _, A.TDRecord fields, _) -> add_record name fields
+        | A.DActor (_, name, ad, _) ->
+          add_record name ad.A.actor_state;
+          List.iter (fun (h : A.actor_handler) -> bump h.A.ah_msg.A.txt) ad.A.actor_handlers
+        | A.DType (_, _, _, A.TDVariant vs, _) | A.DAlwaysLinearType (_, _, _, A.TDVariant vs, _) ->
+          List.iter
+            (fun (v : A.variant) ->
+              bump v.A.var_name.A.txt;
+              let fs = List.mapi (fun i t -> (Printf.sprintf "$%d" i, t)) v.A.var_args in
+              Hashtbl.replace all v.A.var_name.A.txt (ctor_sig_of_fields v.A.var_name fs))
+            vs
+        | A.DMod (_, _, ds, _) -> go ds
+        | _ -> ())
+      decls
+  in
+  go decls;
+  let by_ctor = Hashtbl.create 32 in
+  Hashtbl.iter
+    (fun n sg ->
+      if Hashtbl.find_opt count n = Some 1 && sg.refined <> [] then Hashtbl.replace by_ctor n sg)
+    all;
+  let by_fields = Hashtbl.create 32 in
+  Hashtbl.iter
+    (fun key names -> match names with [ n ] -> Hashtbl.replace by_fields key n | _ -> ())
+    shapes;
+  { by_ctor; by_fields }
+
+(* The facts a variable [x] of a refined record/actor type contributes:
+   each refined field's predicate with the binder replaced by `x.field`,
+   which the path translator reflects through the sort's selector
+   ([path_resolve_field]).  Pushed as ordinary path facts, so the shadow
+   discipline that retires a fact when [x] is rebound applies unchanged. *)
+let field_facts (x : string) ~(span : A.span) (sg : fn_sig) : (A.expr * bool) list =
+  List.map
+    (fun rp ->
+      let fname = List.nth sg.param_names rp.idx in
+      let proj = A.EField (A.EVar { A.txt = x; A.span = span }, { A.txt = fname; A.span = span }, span) in
+      (* Both spellings of the subject: the binder (`_`, or a declared one),
+         AND the field's own name used free — `value : {Int | value >= 0}`
+         has binder [None] and refers to `value` exactly as `k : {Int | k >
+         0}` refers to its parameter, which [check_call] resolves through
+         [param_names]; a fact built here must resolve it the same way or
+         it mentions an unbound `value` and is silently dropped. *)
+      (subst_params [ (rp.binder, proj); (fname, proj) ] rp.pred, false))
+    sg.refined
+
+(* The constructor a [recenv] sort name denotes, when it is a record/actor. *)
+let ctor_of_sort (sort : string) : string option =
+  match Hashtbl.find_opt adt_ctors sort with
+  | Some [ ctor ] when Hashtbl.mem ctor_field_names ctor -> Some ctor
+  | _ -> None
 
 (* Erase parameter refinements from [fd], leaving the return refinement alone.
    A stripped parameter contributes no fact to [scope], so a body checked with

@@ -13,6 +13,19 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Stored-field refinements are enforced.** A refined record field
+  (`type Box = { v : {Int | _ > 0} }`), variant argument
+  (`type W = W({Int | _ > 0})`), or actor state field is now a contract on
+  every construction, so `{ v: 0 }`, `{ b with v: 0 }`, `W(0 - 1)`, and an
+  `init { value: 0 - 1 }` under `value : {Int | value >= 0}` are rejected,
+  and a fact for every reader: `b.v` on a `b : Box` is known to satisfy
+  `_ > 0`, and a handler's incoming `state` is known to satisfy its
+  invariant (which `init` and every handler result must re-establish). A
+  `linear` wrapper is transparent to the refinement. A record literal is
+  typed by its field set; two types of one shape make it ambiguous and it is
+  not obliged. Refinements inside a type argument (`List({Int | _ > 0})`)
+  remain unenforced.
+
 - **An actor handler's parameter refinements are enforced.** `on Inc(n :
   {Int | n > 0})` now obliges every construction of `Inc(...)` in the program
   (`send`, `Actor.call`, or a message bound to a `let` first), so

@@ -154,6 +154,17 @@ violation in a plain module too. Phase 0 and 1 landed as sketched
 
 ### Phase 4: stored fields, variant arguments, actor state, one nesting layer
 
+*Landed 2026-09-13*; see
+`specs/progress/2026-09-13-stored-field-refinements-enforced.md`. Two things
+the sketch below did not know: `smt_sort_of_field` mapped a refined field
+type to the opaque `Elem` sort (it matched only bare `TyCon`s), and a field
+predicate written over the field's own name used free (`value : {Int | value
+>= 0}`, binder `None`) needs its fact substituted under BOTH spellings or it
+mentions an unbound name and is silently dropped — found by bisecting with
+driver probes (binder `_` vs named, actual `state.value` vs `n`). The
+witness-gate decline is KEPT and documented (the "keep the decline" option
+below), not lifted. Phase 3 landed as sketched (`5c554497`).
+
 - Obligation side: a record literal, a `{r with f: e}` update, and a variant
   constructor are checked as calls to a synthesized constructor `fn_sig` whose
   refined params are the refined fields/arguments (declared under the type's

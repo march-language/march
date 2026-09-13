@@ -181,7 +181,11 @@ let rec walk_ty (sites : site list ref) ~(origin : position) ~(origin_ty : A.ty)
     List.iter
       (fun (_, t) -> walk_ty sites ~origin ~origin_ty ~origin_fn ~fn_origin pos (depth + 1) t)
       fs
-  | A.TyLinear (_, t) -> walk_ty sites ~origin ~origin_ty ~origin_fn ~fn_origin pos (depth + 1) t
+  (* A linearity wrapper is transparent to the value's refinement (every
+     extractor strips it — [Refine_scope.unlinear], plan phase 4), so it does
+     not deepen the nesting: `linear {Int | _ > 0}` is an outermost
+     refinement, enforced exactly like `{Int | _ > 0}`. *)
+  | A.TyLinear (_, t) -> walk_ty sites ~origin ~origin_ty ~origin_fn ~fn_origin pos depth t
   | A.TyChan _ | A.TyVar _ | A.TyNat _ | A.TyNatOp _ -> ()
 
 (* Entry point for a declared type: [pos] IS the origin here, by
@@ -605,16 +609,24 @@ let classify (site : site) : disposition =
     match Refine_post.refined_scope_ty (Some site.origin_ty) with
     | Some _ -> Enforced
     | None -> Unenforced "refined_scope_ty does not accept this declared type at a local binding")
-  | Field _ ->
-    Unenforced
-      "a record (or actor-state) field's declared type is never re-examined \
-       once a value is constructed; the checker has no extractor for a \
-       stored field, only for a parameter, a return, or a let-binding"
-  | Variant_arg _ ->
-    Unenforced
-      "a variant constructor's argument type is never re-examined once a \
-       value is constructed; the checker has no extractor for a stored \
-       constructor argument"
+  (* Since 2026-09-13 (plan phase 4) a stored field is a contract on every
+     CONSTRUCTION — a record literal, a `{ r with ... }` update, an actor's
+     `init` and handler results, a variant constructor application — checked
+     against a synthesised constructor signature
+     ([Refine_scope.collect_ctor_sigs]), and a fact for every reader of the
+     field ([Refine_scope.field_facts]).  What [refined_param_ty] accepts at
+     the field's own type is enforced.  A program-wide bare-name clash
+     (two constructors, or a constructor and an actor message, sharing a
+     name) withdraws the contract, fail closed — a module-level fact this
+     site cannot see, the same conservatism the handler rule documents. *)
+  | Field _ | Variant_arg _ -> (
+    match Refine_post.refined_param_ty (Some site.origin_ty) with
+    | Some _ -> Enforced
+    | None ->
+      Unenforced
+        "refined_param_ty does not accept this declared base type: only \
+         an Int, a String, a Bool, a Float, or a registered record/ADT \
+         base is checked at a stored field or constructor argument")
   | Impl_ty _ ->
     Unenforced
       "the type an `impl Iface(T)` block names is a type ascription, not a \

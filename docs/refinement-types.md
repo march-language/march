@@ -1126,10 +1126,11 @@ regenerated the same way the TIR golden snapshots are
 being empty is a true fact about today's corpus, not evidence the audit does
 nothing: `test/refine_audit/holes/` is a second, deliberately non-empty
 fixture set built from known holes (a non-adoptable `impl` method's
-parameter, an actor's state field, a nested field
-refinement, and a `{String | ...}` return; a fixture leaves the set once its
-position is enforced, as the block-level `fn` and lambda-parameter ones did
-on 2026-09-13), pinned at
+parameter, a refinement inside a type argument, a `{String | ...}` return,
+and the two desugar-dropped shapes; a fixture leaves the set once its
+position is enforced, as the block-level `fn`, lambda-parameter,
+nested-field, variant-argument, `linear`-wrapper and actor ones did on
+2026-09-13), pinned at
 `test/refine_audit/holes.baseline`. If
 that second baseline ever reported zero Unenforced sites, the audit itself
 would be broken, not the corpus; the test that diffs it fails loudly with
@@ -1158,7 +1159,10 @@ above happens to exercise:
   module-level judgement; when the method *is* actually adoptable the checker
   does enforce it, and this over-approximation is a documented conservatism,
   not a bug of its own.
-- An actor's state field. No extractor exists for a stored field.
+- (Closed 2026-09-13.) An actor's state field: an inductive invariant. The
+  state's refined fields are obliged at `init` and at every handler's result
+  (an update `{ state with ... }`, or a fresh literal at a tail), and assumed
+  of the incoming `state` in every handler body.
 - (Closed 2026-09-13.) A handler's own parameter: `on Inc(n : {Int | n >
   0})` obliges every construction of `Inc(...)` in the program (`send`,
   `Actor.call`, a message bound to a `let` first), and the handler body
@@ -1167,11 +1171,20 @@ above happens to exercise:
   assumed. **Trust boundary:** a message arriving from a remote node was
   built by code this compiler did not check; the handler's assumption is
   stated here as that boundary, not enforced across it.
-- A record field or a variant constructor argument, once a value is
-  constructed.
-- A refinement nested below the outermost position of a declared type (inside
-  a type argument, an arrow side, a tuple element, or a second layer of a
-  stacked refinement).
+- (Closed 2026-09-13.) A record field or a variant constructor argument:
+  every construction is obliged — a record literal (typed by its field set;
+  two types of one shape make it ambiguous and it is not obliged, fail
+  closed), an update `{ r with f: e }` for the updated fields, a constructor
+  application `W(e)` — and every reader of the field through a
+  record-typed variable assumes it. A `linear` wrapper is transparent.
+  Program-wide, two constructors (or a constructor and an actor message)
+  sharing a name withdraw the contract, neither obliged nor assumed.
+- A refinement nested below the outermost position of a declared type inside
+  a type argument (`List({Int | _ > 0})`, which needs container subtyping),
+  an arrow side, a tuple element, or a second layer of a stacked refinement.
+  A refinement one layer down at a record field, a constructor argument, or
+  an actor state field is enforced (see above), and a `linear` wrapper is
+  transparent.
 - A `{String | ...}` return type: `return_refine_ext` only recognizes Int,
   Bool, Float, and record bases.
 - A parameter refinement that desugar drops or relocates before the audit

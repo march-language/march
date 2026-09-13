@@ -85,3 +85,11 @@ STATE-FIELD half only, which is phase 4 of
 `specs/plans/2026-09-13-refinement-enforcement-holes-plan.md` (stored fields
 as an inductive invariant: `init` and every handler's result state checked as
 constructions, the incoming `state` assumed).
+
+## 2026-09-13: the STATE half is closed too (plan phase 4)
+
+`specs/progress/2026-09-13-stored-field-refinements-enforced.md`. Actor state
+is now an inductive invariant: the state's refined fields are obliged at
+`init` and at every handler's result (an update through `recenv`'s `state`
+entry, a fresh literal at the handler's tails), and assumed of the incoming
+`state` in every handler body. Both halves of this file are closed.
