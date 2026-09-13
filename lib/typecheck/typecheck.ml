@@ -269,18 +269,57 @@ let bind_pattern_bindings scrut_expr (bindings : (string * scheme) list) env =
            bind_linear_field_sentinels name (repr t) env1)
     ) env bindings
 
+let report_linear_never_used env ~scope_span le =
+  Err.error env.errors ~span:scope_span
+    (Printf.sprintf
+       "The linear value `%s` was never used.\n\
+        Linear values must be consumed exactly once — did you \
+        mean to pass it somewhere?" (lin_display_name le.le_name))
+
 (** After a scope closes, check that every in-scope linear var was used. *)
 let check_linear_all_consumed env ~scope_span in_scope_names =
   List.iter (fun le ->
       if List.mem le.le_name in_scope_names
       && le.le_lin = Ast.Linear
       && not !(le.le_used) then
-        Err.error env.errors ~span:scope_span
-          (Printf.sprintf
-             "The linear value `%s` was never used.\n\
-              Linear values must be consumed exactly once — did you \
-              mean to pass it somewhere?" (lin_display_name le.le_name))
+        report_linear_never_used env ~scope_span le
     ) env.lin
+
+(** The linear entries a scope introduced: those in [after.lin] that were not
+    already in [before.lin].  Compared by the physical identity of each
+    entry's [le_used] cell, never by name, because a lambda's [env.lin] also
+    holds the enclosing scope's entries and a parameter may shadow one: a
+    name filter would judge the outer same-named value at the lambda's close,
+    while it is still in scope and may be consumed later.  [env.lin] is only
+    ever extended by consing, so the new entries are normally a prefix ending
+    at [before.lin] itself; the identity filter is the fallback if some
+    rebuild ever breaks that sharing. *)
+let lin_entries_added ~before ~after =
+  let rec prefix l =
+    if l == before.lin then Some []
+    else match l with
+      | [] -> None
+      | le :: rest -> Option.map (fun r -> le :: r) (prefix rest)
+  in
+  match prefix after.lin with
+  | Some added -> added
+  | None ->
+    List.filter (fun le ->
+        not (List.exists (fun o -> o.le_used == le.le_used) before.lin))
+      after.lin
+
+(** Must-use at the close of a parameter scope that has enclosing linear
+    binders (a lambda or a local [fn ... end]): every [Linear] entry the
+    parameters introduced must have been used.  Field sentinels ("r#f") and a
+    [_] parameter are left alone here: neither can be named in the body. *)
+let check_scope_consumed ~before ~after ~scope_span =
+  List.iter (fun le ->
+      if le.le_lin = Ast.Linear
+      && not !(le.le_used)
+      && le.le_name <> "_"
+      && not (String.contains le.le_name '#') then
+        report_linear_never_used after ~scope_span le
+    ) (lin_entries_added ~before ~after)
 
 (* =================================================================
    §4  Pattern inference
@@ -1783,6 +1822,9 @@ let rec infer_expr env (e : Ast.expr) : ty =
       in
       let param_tys, env' = bind_lam_params env params in
       let body_ty = infer_expr env' body in
+      (* A linear parameter must be consumed by the time the lambda body
+         ends, as it must for a named function's parameters. *)
+      check_scope_consumed ~before:env ~after:env' ~scope_span:lsp;
       (* Detect captures: outer linear vars that were unused before but used now. *)
       List.iter (fun le ->
           let was_used_before =
@@ -2384,6 +2426,11 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
 
   (* Lambda in check mode: peel arrow types one-by-one *)
   | Ast.ELam (params, body, lsp), _ ->
+    let env0 = env in
+    (* Must-use for the parameters bound on the way down, once the body has
+       been checked in the innermost env.  Not in the fallback arm below: that
+       re-enters [infer_expr]'s ELam arm, which runs its own check. *)
+    let close env = check_scope_consumed ~before:env0 ~after:env ~scope_span:lsp in
     let rec peel ps ty env =
       match ps, repr ty with
       | [], TArrow (param_ty, ret_ty)
@@ -2396,9 +2443,11 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
            `fn -> body` satisfy a `Unit -> Unit` callback param — the natural
            spelling — without forcing the `fn _ -> body` (1-arg discard) idiom.
            The symmetric call side (`cb()`) is handled in [infer_app]. *)
-        check_expr env body ret_ty ~reason
+        check_expr env body ret_ty ~reason;
+        close env
       | [], body_ty ->
-        check_expr env body body_ty ~reason
+        check_expr env body body_ty ~reason;
+        close env
       | p :: rest, TArrow (arg_ty, ret_ty) ->
         let env' = bind_lam_param env lsp p (Some arg_ty) in
         peel rest ret_ty env'
@@ -2968,6 +3017,7 @@ and infer_block env exprs =
         Hashtbl.replace env.type_map p.param_name.span (repr pty)
       ) params param_tys;
     let body_ty = infer_block env_inner [body] in
+    check_scope_consumed ~before:env_with_self ~after:env_inner ~scope_span:sp;
     (* Track whether the return-annotation unify (below) already reported a
        mismatch, so the later self-type/arrow-type reconciliation does not
        rediscover and DOUBLE-REPORT the identical conflict once it flows

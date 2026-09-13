@@ -6109,6 +6109,105 @@ let test_linear_actor_handler_param_stored_ok () =
   end|} in
   Alcotest.(check bool) "handler param stored into state: no error" false (has_errors ctx)
 
+(* Linearity holes, 2026-09-13 (specs/plans/2026-09-13-linearity-holes-plan.md).
+   [linear_error ctx sub]: an Error-severity diagnostic whose message contains
+   [sub], so a case cannot pass on some unrelated error. *)
+let linear_error ctx sub =
+  List.exists (fun (d : March_errors.Errors.diagnostic) ->
+      d.severity = March_errors.Errors.Error && contains_substring d.message sub)
+    ctx.March_errors.Errors.diagnostics
+
+let linear_prelude = {|
+    always_linear type S1 = S1(Int)
+    fn sink(s : S1) : Int do match s do S1(e) -> e end end
+    fn run(k : S1 -> Int) : Int do k(S1(1)) end
+|}
+
+let linear_mod body = "mod Test do\n" ^ linear_prelude ^ body ^ "\nend"
+
+(* A lambda's or a local fn's parameters got no must-use check at the scope's
+   close: check_fn and actor handlers ran check_linear_all_consumed, the ELam
+   arms and ELetFn did not. Corpus: reject/t198-t201, accept/t202. *)
+let test_linear_lambda_param_dropped_check_mode () =
+  let ctx = typecheck (linear_mod {|
+    fn f() : Int do run(fn st -> 0) end|}) in
+  Alcotest.(check bool) "check-mode lambda param dropped" true
+    (linear_error ctx "The linear value `st` was never used")
+
+let test_linear_lambda_param_dropped_infer_mode () =
+  let ctx = typecheck (linear_mod {|
+    fn f() : Int do
+      let g = fn (st : S1) -> 0
+      g(S1(1))
+    end|}) in
+  Alcotest.(check bool) "annotated infer-mode lambda param dropped" true
+    (linear_error ctx "The linear value `st` was never used")
+
+let test_linear_lambda_linear_keyword_dropped () =
+  let ctx = typecheck {|mod Test do
+    type T = T(Int)
+    fn f() : Int do
+      let g = fn (linear t : T) -> 0
+      g(T(1))
+    end
+  end|} in
+  Alcotest.(check bool) "`linear` keyword lambda param dropped" true
+    (linear_error ctx "The linear value `t` was never used")
+
+let test_linear_lambda_second_param_dropped () =
+  let ctx = typecheck (linear_mod {|
+    fn run2(k : S1 -> S1 -> Int) : Int do k(S1(1), S1(2)) end
+    fn f() : Int do run2(fn (a, b) -> sink(a)) end|}) in
+  Alcotest.(check bool) "second lambda param dropped" true
+    (linear_error ctx "The linear value `b` was never used")
+
+let test_linear_local_fn_param_dropped () =
+  let ctx = typecheck (linear_mod {|
+    fn f() : Int do
+      fn g(st : S1) : Int do 0 end
+      g(S1(1))
+    end|}) in
+  Alcotest.(check bool) "local fn param dropped" true
+    (linear_error ctx "The linear value `st` was never used")
+
+let test_linear_lambda_params_consumed_ok () =
+  let ctx = typecheck (linear_mod {|
+    fn once() : Int do run(fn st -> sink(st)) end
+    fn by_match() : Int do run(fn st -> match st do S1(e) -> e end) end
+    fn nested() : Int do run(fn s -> run(fn t -> sink(t)) + sink(s)) end
+    fn local() : Int do
+      fn g(st : S1) : Int do sink(st) end
+      g(S1(1))
+    end|}) in
+  Alcotest.(check bool) "lambda / local fn params consumed: no error" false (has_errors ctx)
+
+(* The close must judge only the entries the lambda's own parameters added. A
+   name filter would see the OUTER `s` (unused so far, consumed after the
+   call) and report it at the lambda. *)
+let test_linear_lambda_param_shadows_outer_ok () =
+  let ctx = typecheck (linear_mod {|
+    fn infer_mode() : Int do
+      let s = S1(1)
+      let g = fn (s : S1) -> sink(s)
+      g(S1(2)) + sink(s)
+    end
+    fn check_mode() : Int do
+      let s = S1(1)
+      run(fn s -> sink(s)) + sink(s)
+    end|}) in
+  Alcotest.(check bool) "lambda param shadowing an outer linear: no error" false (has_errors ctx)
+
+let test_linear_lambda_affine_param_dropped_ok () =
+  let ctx = typecheck {|mod Test do
+    type T = T(Int)
+    fn f() : Int do
+      let g = fn (affine t : T) -> 0
+      g(T(1))
+    end
+  end|} in
+  Alcotest.(check bool) "affine lambda param dropped: no error" false (has_errors ctx)
+
+
 (* Same gap via a single correct use — must NOT regress to a false positive. *)
 let test_linear_letq_acquire_single_use_ok () =
   let ctx = typecheck {|mod Test do
@@ -15550,6 +15649,14 @@ let compiler_suites =
           Alcotest.test_case "actor handler param: dropped"               `Quick test_linear_actor_handler_param_dropped;
           Alcotest.test_case "actor handler param: consumed once ok"      `Quick test_linear_actor_handler_param_consumed_ok;
           Alcotest.test_case "actor handler param: stored into state ok"  `Quick test_linear_actor_handler_param_stored_ok;
+          Alcotest.test_case "lambda param: dropped (check mode)"         `Quick test_linear_lambda_param_dropped_check_mode;
+          Alcotest.test_case "lambda param: dropped (infer mode)"         `Quick test_linear_lambda_param_dropped_infer_mode;
+          Alcotest.test_case "lambda param: linear keyword dropped"       `Quick test_linear_lambda_linear_keyword_dropped;
+          Alcotest.test_case "lambda param: second of two dropped"        `Quick test_linear_lambda_second_param_dropped;
+          Alcotest.test_case "local fn param: dropped"                    `Quick test_linear_local_fn_param_dropped;
+          Alcotest.test_case "lambda/local fn params: consumed ok"        `Quick test_linear_lambda_params_consumed_ok;
+          Alcotest.test_case "lambda param: shadows outer linear ok"      `Quick test_linear_lambda_param_shadows_outer_ok;
+          Alcotest.test_case "lambda param: affine dropped ok"            `Quick test_linear_lambda_affine_param_dropped_ok;
           Alcotest.test_case "transitions block: no errors"              `Quick test_transitions_parses;
           Alcotest.test_case "transitions via missing fn: error"         `Quick test_transitions_via_not_found_error;
           Alcotest.test_case "undeclared transition fn: warning emitted" `Quick test_transitions_warn_undeclared;

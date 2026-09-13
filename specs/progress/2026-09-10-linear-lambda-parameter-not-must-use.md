@@ -176,3 +176,26 @@ Before calling it done:
 When fixed, add a row for lambda and local-fn parameters to
 `specs/lang/linear-types.md`'s "Practical Rules" and mirror it into
 `docs/linear-types.md`; both trees are served.
+
+---
+
+## What shipped (2026-09-13)
+
+`check_scope_consumed` runs at the close of all three sites: the `ELam` infer
+arm, the `check_expr` `ELam` peel (both base cases; the fallback re-enters the
+infer arm and is not double-checked), and `ELetFn`. It judges
+`lin_entries_added ~before ~after`, the entries the parameters introduced,
+found as the prefix of `after.lin` ending at `before.lin` (physical
+identity), with an identity filter as fallback. `_` and `#` sentinel entries
+are skipped, as planned.
+
+Witnesses: `reject/t198`–`t201`, `accept/t202`, eight unit cases in
+`tag_and_typestate`. Proved non-vacuous twice: with the report disabled, the
+five reject cases fail; with the identity filter replaced by all of
+`env.lin`, the shadowing accept case fails.
+
+Blast radius, measured with `scripts/types-oracle.sh` over all 635 corpus
+fixtures: exactly one fixture moved, `reject/t189`, whose callback forges a
+`Yield` and really does abandon its session state; it now also reports
+"`st2` was never used". Full `scripts/run-tests.sh`: 4039 OK, exit 0.
+`@types-check --force`: 320/320.

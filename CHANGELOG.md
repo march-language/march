@@ -50,6 +50,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A lambda or local `fn` can no longer drop a linear parameter.** A
+  callback such as `run(fn st -> 0)` receiving an `always_linear` value, or a
+  local `fn g(st : S1)` that ignores `st`, was accepted silently; top-level
+  functions and actor handlers already rejected the same code. It now reports
+  "The linear value `st` was never used."
+
 - **`self` inside an actor handler compiles.** It was a real builtin in the
   interpreter but missing from the compiled backend's builtin table, so the
   emitter produced a call to an undefined symbol and *any* compiled program
