@@ -13,6 +13,18 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Two silent refinement holes are closed.** A `{String | ...}` return
+  type is now verified against the function's body (`fn f() : {String | _
+  == "a"} do "b" end` is a violation; `len(_) > 3` over `"xy"` is refuted),
+  where before it filed nothing, not even a skip. A refined default
+  parameter (`b : {Int | b > 0} \\ 1`) now obliges a full-arity call
+  `f(1, 0)`, resolved to the `f$2` arity variant the runtime dispatches to.
+  A multi-head function whose first head has no guard and only variable
+  parameters keeps that head's declared types through the clause merge, so
+  its refinement is the function's contract (`fn f(n : {Int | n > 0})` then
+  `fn f(0)` rejects `f(0 - 1)`); a refinement on a non-dominating head is
+  still not adopted, since another head may legitimately handle the value.
+
 - **An `impl` method's parameter refinements are enforced even when the
   method name is ambiguous.** With two impls of `at`, a call
   `at(Crate(0), 0 - 1)` used to resolve to nothing and oblige nobody; it is

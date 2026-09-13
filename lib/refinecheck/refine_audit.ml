@@ -766,9 +766,19 @@ type desugar_match_key =
   | By_predicate_only of string
   | By_origin of position * string
 
+(* A default-argument function's arity variants are `f$N`; the checker
+   resolves a call `f(...)` to `f$<arity>` since 2026-09-13
+   ([Refine_resolve.resolve_call_arity]), so a [Param] site that survives
+   under the mangled name IS still enforced and must match its pre-desugar
+   original.  Only the mangle suffix is stripped — a user identifier cannot
+   contain `$`. *)
+let unmangle (name : string) : string =
+  match String.index_opt name '$' with Some i -> String.sub name 0 i | None -> name
+
 let desugar_match_key (s : site) : desugar_match_key =
   match s.origin with
   | Return _ -> By_predicate_only s.predicate
+  | Param (n, i) -> By_origin (Param (unmangle n, i), s.predicate)
   | _ -> By_origin (s.origin, s.predicate)
 
 let desugar_dropped ~(pre : site list) ~(post : site list) : site list =

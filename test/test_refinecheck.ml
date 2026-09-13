@@ -4996,20 +4996,34 @@ end|} in
        this task switched from [smt_of]) passes no [~resolve_str_lit], so a
        string literal ALWAYS fails to reflect there, regardless of
        [string_len_available]. *)
+    (* Since 2026-09-13 the postcondition goal site DOES pass
+       [~resolve_str_lit] (the String-return fix), so the string-literal
+       fixture this case used to carry (`_ > 0 && "a" == "a"`) now simply
+       PROVES.  The property under test — a genuinely unreflectable LEAF of a
+       postcondition is what gets named, not the whole conjunction — is kept
+       on the one leaf shape no resolver can reflect: an opaque call. *)
     gated
-      "a genuine unreflectable predicate names the failing sub-expression: a string literal in \
+      "a genuine unreflectable predicate names the failing sub-expression: an opaque call in \
        a postcondition"
       (fun () ->
         let src = {|mod UP4 do
   cap verified
-  fn f() : {Int | _ > 0 && "a" == "a"} do 1 end
+  fn f() : {Int | _ > 0 && is_prime(_)} do 1 end
 end|} in
         Alcotest.(check (list string)) "slug" [ "unreflectable-predicate" ] (skip_reasons src);
         let text = refine_error_text_d src in
         Alcotest.(check bool) "exact detail names the leaf, not the whole predicate" true
-          (contains text "the predicate's `\"a\"` has no SMT translation");
+          (contains text "the predicate's `is_prime(_)` has no SMT translation");
         Alcotest.(check bool) "does not blame the whole conjunction" false
-          (contains text "the predicate's `_ > 0 && \"a\" == \"a\"` has no SMT translation"));
+          (contains text "the predicate's `_ > 0 && is_prime(_)` has no SMT translation");
+        (* And the shape that used to be the fixture now proves — pinned so
+           the resolver cannot quietly fall out of the goal site again. *)
+        Alcotest.(check bool) "a string-literal equality in a postcondition proves" false
+          (has_refine_error_d
+             {|mod UP4B do
+  cap verified
+  fn f() : {Int | _ > 0 && "a" == "a"} do 1 end
+end|}));
 
     (* ── fix-loop 1, finding 1: the postcondition's SUBJECT, not its
        predicate, is what failed at these two sites -- the tail expression
@@ -12405,7 +12419,7 @@ let audit_classify_suite =
       {|mod M do
           fn f(n : {Int | _ > 0}) : Int do n end
         end|};
-    check_unenforced "a refined String return is Unenforced (return_refine_ext has no String arm)"
+    check_enforced "a refined String return is Enforced (return_refine_ext gained its String arm, 2026-09-13)"
       {|mod M do
           fn f() : {String | _ == "a"} do "a" end
         end|};
@@ -14032,6 +14046,66 @@ let impl_dispatch_suite =
         in
         Alcotest.(check bool) "a Skipped obligation on `at` is in the ledger" true skipped) ]
 
+(* ── The two silent holes (2026-09-13) ────────────────────────────────────
+   Three shapes filed NOTHING — not a skip, nothing — so `cap verified` kept
+   its promise vacuously: a `{String | ...}` return ([return_refine_ext] had
+   no String arm), a refined DEFAULT parameter (desugar renames `f` to `f$N`
+   and a call `f(1, 0)` resolved to nothing), and a MULTI-HEAD function's
+   refinement (the clause merge rebuilt every parameter untyped).  Each case
+   pairs the violation with its satisfying twin; the last pins the one
+   multi-head shape deliberately NOT adopted. *)
+let silent_holes_suite =
+  let m body = "mod SH do\n  cap verified\n" ^ body ^ "end\n" in
+  [ gated "a `{String | ...}` return is verified against its body" (fun () ->
+        Alcotest.(check bool) "returning \"b\" under _ == \"a\" is a violation" true
+          (has_refine_error_d (m "  fn f() : {String | _ == \"a\"} do \"b\" end\n"));
+        Alcotest.(check bool) "returning \"a\" proves" false
+          (has_refine_error_d (m "  fn f() : {String | _ == \"a\"} do \"a\" end\n"));
+        Alcotest.(check bool) "len(_) > 0 over \"xy\" proves" false
+          (has_refine_error_d (m "  fn g() : {String | len(_) > 0} do \"xy\" end\n"));
+        Alcotest.(check bool) "len(_) > 3 over \"xy\" is a violation" true
+          (has_refine_error_d (m "  fn g() : {String | len(_) > 3} do \"xy\" end\n")));
+
+    gated "a String return built by a call is a RECORDED skip, not silence" (fun () ->
+        March_refinecheck.Obligation.reset ();
+        ignore
+          (has_refine_error_d
+             (m "  fn h(s : String) : String do s end\n\
+                \  fn f() : {String | _ == \"a\"} do h(\"a\") end\n"));
+        let skipped =
+          List.exists
+            (fun (o : March_refinecheck.Obligation.t) ->
+              o.March_refinecheck.Obligation.kind = March_refinecheck.Obligation.Postcondition
+              && (match o.March_refinecheck.Obligation.verdict with
+                  | March_refinecheck.Obligation.Skipped _ -> true
+                  | _ -> false))
+            (March_refinecheck.Obligation.all ())
+        in
+        Alcotest.(check bool) "a Skipped postcondition is in the ledger" true skipped);
+
+    gated "a refined DEFAULT parameter obliges a full-arity call through `f$N`" (fun () ->
+        let def = "  fn f(a : Int, b : {Int | b > 0} \\\\ 1) : Int do a + b end\n" in
+        Alcotest.(check bool) "f(1, 0) violates b > 0" true
+          (has_refine_error_d (m (def ^ "  fn main() : Int do f(1, 0) end\n")));
+        Alcotest.(check bool) "f(1, 2) and the defaulted f(1) pass" false
+          (has_refine_error_d (m (def ^ "  fn main() : Int do f(1, 2) + f(1) end\n"))));
+
+    gated "a dominating first head's refinement is the multi-head function's contract" (fun () ->
+        let def = "  fn f(n : {Int | n > 0}) do n end\n  fn f(0) do 0 end\n" in
+        Alcotest.(check bool) "f(0 - 1) violates n > 0" true
+          (has_refine_error_d (m (def ^ "  fn main() : Int do f(0 - 1) end\n")));
+        Alcotest.(check bool) "f(3) passes" false
+          (has_refine_error_d (m (def ^ "  fn main() : Int do f(3) end\n"))));
+
+    gated "a NON-dominating head's refinement is not adopted (a literal head runs first)" (fun () ->
+        March_refinecheck.Obligation.reset ();
+        Alcotest.(check bool) "g(0) is handled by the literal head: no error" false
+          (has_refine_error_d
+             (m "  fn g(0) do 0 end\n  fn g(n : {Int | n > 0}) do n end\n\
+                \  fn main() : Int do g(0) end\n"));
+        Alcotest.(check int) "and nothing is obliged (fail closed, as before)" 0
+          (List.length (March_refinecheck.Obligation.all ()))) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -14121,4 +14195,5 @@ let () =
       ("lambda-contract", lambda_contract_suite);
       ("actor-handler-contract", actor_handler_suite);
       ("stored-field-contract", stored_field_suite);
-      ("impl-dispatch", impl_dispatch_suite) ]
+      ("impl-dispatch", impl_dispatch_suite);
+      ("silent-holes", silent_holes_suite) ]

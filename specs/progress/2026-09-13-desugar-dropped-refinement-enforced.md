@@ -110,3 +110,35 @@ Both are checker/desugar changes, not audit changes; scope is intentionally
 left open here rather than assumed, since either fix interacts with how
 call sites are resolved for the mangled/merged shape, which the audit
 itself does not need to solve.
+
+## Landed 2026-09-13
+
+**Default parameters.** `Refine_resolve.resolve_call_arity`: a call that
+`resolve_call` cannot resolve under its own spelling is resolved under
+`f$<argument count>`, the very rule the runtime dispatches by. Used by
+`visit`'s `EApp` arm and by `postcond_of`. `f(1, 0)` against
+`fn f(a : Int, b : {Int | b > 0} \\ 1)` is now a violation; `f(1, 2)` and the
+defaulted `f(1)` pass (the short wrapper `f$1` has no refinement of its own,
+and its internal `f$2(a, 1)` is checked where it is written).
+`Refine_audit.desugar_match_key` strips the `$N` mangle from a `Param`
+site's name, so the surviving `f$2` site matches its pre-desugar original.
+
+**Multi-head functions.** `Desugar.desugar_fn_def`'s general merge path
+keeps the FIRST clause's parameter names and declared types on the merged
+clause when that clause DOMINATES — no guard, every parameter a plain
+variable — because then every call goes to it and the later heads are
+unreachable, so its refinement IS the function's contract. Keeping the
+user's own names (not fresh `__argN`) is what keeps the predicate's `n`
+bound; capture in a later arm's body is impossible since that arm never
+runs. `fn f(n : {Int | n > 0}) do n end` / `fn f(0) do 0 end` now rejects
+`f(0 - 1)`.
+
+Any other shape keeps dropping the types, on purpose: the suggestion above
+("preserve each clause's original parameter types") would adopt a
+NON-dominating head's refinement as the whole function's contract and reject
+a value another head legitimately handles — `fn g(0) do 0 end` followed by
+`fn g(n : {Int | n > 0})` must accept `g(0)`. That shape files nothing (the
+pre-existing behaviour) and the audit's `desugar_dropped` keeps reporting
+it. Tests: `test/test_refinecheck.ml`, group `silent-holes` (both fixtures
+plus the non-dominating control); the `default_param` and `multi_head` hole
+fixtures are retired.

@@ -94,3 +94,26 @@ as `Unenforced`, naming both `return_refine_ext` and `post_induction_shape`
 as the extractors that decline it; see
 `docs/refinement-types.md`/`specs/lang/refinement-types.md`'s "Coverage
 audit" section.
+
+## Landed 2026-09-13
+
+`return_refine_ext` (`lib/refinecheck/refine_post.ml`) gained the String arm
+the root cause above names, at the opaque `Str` sort a String parameter
+already reflects to, and `check_post` gained a `string_ret` path: a literal
+tail mints an indexed `$strN` constant exactly as `check_call`'s
+`str_lit_const` does (byte length pinned, distinct from every literal seen),
+a String-sorted scope name denotes itself, the goal site passes
+`~resolve_str_lit` so the predicate's own literal meets the tail on one
+constant, `len(_)` over the returned term is `$strlen`, and the string
+preamble attaches when any literal was minted. `check_fn_post_verdict` keeps
+`Str` out of `record_sort` so the record-literal reflection never sees it.
+
+Now: `fn f() : {String | _ == "a"} do "b" end` is a violation, `"a"` proves,
+`len(_) > 0` over `"xy"` proves and `len(_) > 3` is refuted. A String return
+built by a CALL (`h("a")`) is an opaque tail and files a recorded skip — the
+same verdict an opaque Int tail gets — which is the "zero visibility" this
+todo was about: the report now counts it. Postconditions on String returns
+do not yet propagate to callers (`return_refine_sorted` has no String arm;
+`fn_sig.ret` stays `None`), deliberately: propagation is a separate,
+assumption-side change. Tests: `test/test_refinecheck.ml`, group
+`silent-holes`; the `string_return` hole fixture is retired.
