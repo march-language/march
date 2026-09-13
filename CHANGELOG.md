@@ -50,6 +50,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A closure passed straight to a function, or a local `fn`, can no longer
+  capture a linear value.** The "cannot be captured by a closure" rule only ran
+  for a lambda bound with `let`; `run2(fn () -> sink(s))` captured `s`, and a
+  `run2` that calls its callback twice consumed it twice.
+
 - **A `_` wildcard can no longer silently drop a linear value.** `let _ =
   S1(1)`, `let (a, _) = (S1(1), S1(2))`, a `_ ->` arm on a linear scrutinee,
   and a `fn _ -> …` callback receiving one were all accepted. Each now reports

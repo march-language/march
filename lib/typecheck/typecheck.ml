@@ -738,6 +738,32 @@ and ty_of_lit = function
    ================================================================= *)
 include Typecheck_exhaustive
 
+(* ── Linear captures by a closure ──────────────────────────────────── *)
+
+(** The used-flag of every linear entry in scope before a closure's body is
+    checked.  Keyed by the entry itself, not its name, so the closure's own
+    parameters (bound after the snapshot) never appear in it, even when one
+    shadows an outer name. *)
+let capture_snapshot env = List.map (fun le -> (le, !(le.le_used))) env.lin
+
+(** After a closure's body: an outer linear or affine value that was unused
+    before and is used now was captured, and a closure may be called any
+    number of times.  Shared by every closure-forming site (the [ELam] infer
+    arm, the [ELam] check-mode peel, [ELetFn]); it used to live only in the
+    infer arm, so a lambda passed straight to an annotated function, and a
+    local [fn ... end], could capture a linear value and duplicate it. *)
+let check_captures env ~span snapshot =
+  List.iter (fun (le, was_used) ->
+      if not was_used && !(le.le_used) && le.le_lin <> Ast.Unrestricted then
+        let name = lin_display_name le.le_name in
+        Err.error env.errors ~span
+          (Printf.sprintf
+             "The linear value `%s` cannot be captured by a closure.\n\
+              A closure may be called multiple times, which would violate \
+              the exactly-once guarantee.\n\
+              Pass `%s` as a parameter to the closure instead." name name))
+    snapshot
+
 (* ── Linear discards by a wildcard ─────────────────────────────────── *)
 
 (** Builtins that never return.  March has no [Never] type ([panic : String ->
@@ -1881,31 +1907,13 @@ let rec infer_expr env (e : Ast.expr) : ty =
          Any that become used during body checking were captured by the closure.
          Capturing a linear value in a closure is unsound because the closure
          could be called multiple times, violating the exactly-once guarantee. *)
-      let outer_lin_snapshot =
-        List.map (fun le -> (le.le_name, !(le.le_used))) env.lin
-      in
+      let captures = capture_snapshot env in
       let param_tys, env' = bind_lam_params env params in
       let body_ty = infer_expr env' body in
       (* A linear parameter must be consumed by the time the lambda body
          ends, as it must for a named function's parameters. *)
       check_scope_consumed ~before:env ~after:env' ~scope_span:lsp;
-      (* Detect captures: outer linear vars that were unused before but used now. *)
-      List.iter (fun le ->
-          let was_used_before =
-            match List.assoc_opt le.le_name outer_lin_snapshot with
-            | Some b -> b
-            | None   -> true  (* not in snapshot = lambda's own param, skip *)
-          in
-          if not was_used_before && !(le.le_used)
-          && le.le_lin <> Ast.Unrestricted then
-            Err.error env.errors ~span:lsp
-              (Printf.sprintf
-                 "The linear value `%s` cannot be captured by a closure.\n\
-                  A closure may be called multiple times, which would violate \
-                  the exactly-once guarantee.\n\
-                  Pass `%s` as a parameter to the closure instead."
-                 le.le_name le.le_name)
-        ) env.lin;
+      check_captures env ~span:lsp captures;
       List.fold_right (fun pt acc -> TArrow (pt, acc)) param_tys body_ty
 
     (* ── do/end block ─────────────────────────────────────────────── *)
@@ -2331,7 +2339,11 @@ let rec infer_expr env (e : Ast.expr) : ty =
       let fn_ty = fresh_var env.level in
       let env_with_self = bind_var name.txt (Mono fn_ty) env in
       let param_tys, env_inner = bind_lam_params env_with_self params in
+      let captures = capture_snapshot env in
       let body_ty = infer_block env_inner [body] in
+      (* Same closes as the block-position [ELetFn] in [infer_block]. *)
+      check_scope_consumed ~before:env_with_self ~after:env_inner ~scope_span:sp;
+      check_captures env ~span:sp captures;
       let ret_ty  = match ret_ann with
         | None -> body_ty
         | Some ann ->
@@ -2500,7 +2512,11 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
     (* Must-use for the parameters bound on the way down, once the body has
        been checked in the innermost env.  Not in the fallback arm below: that
        re-enters [infer_expr]'s ELam arm, which runs its own check. *)
-    let close env = check_scope_consumed ~before:env0 ~after:env ~scope_span:lsp in
+    let captures = capture_snapshot env0 in
+    let close env =
+      check_scope_consumed ~before:env0 ~after:env ~scope_span:lsp;
+      check_captures env0 ~span:lsp captures
+    in
     let rec peel ps ty env =
       match ps, repr ty with
       | [], TArrow (param_ty, ret_ty)
@@ -3093,8 +3109,10 @@ and infer_block env exprs =
     List.iter2 (fun (p : Ast.param) pty ->
         Hashtbl.replace env.type_map p.param_name.span (repr pty)
       ) params param_tys;
+    let captures = capture_snapshot env in
     let body_ty = infer_block env_inner [body] in
     check_scope_consumed ~before:env_with_self ~after:env_inner ~scope_span:sp;
+    check_captures env ~span:sp captures;
     (* Track whether the return-annotation unify (below) already reported a
        mismatch, so the later self-type/arrow-type reconciliation does not
        rediscover and DOUBLE-REPORT the identical conflict once it flows

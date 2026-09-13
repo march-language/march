@@ -121,3 +121,25 @@ should be unaffected. That was checked, not assumed:
 
 So a hit in the session goldens means the change over-reaches, not a
 generator bug.
+
+---
+
+## What shipped (2026-09-13)
+
+`capture_snapshot` / `check_captures`, called by all four closure-forming
+sites: the `ELam` infer arm, the check-mode peel (snapshot before the first
+parameter is bound, checked in both base cases, not in the fallback that
+re-enters the infer arm), and both `ELetFn` paths (the block-position one in
+`infer_block` and the tail-position one in `infer_expr`, which the design
+above missed). The snapshot is keyed by entry. The diagnostic now renders a
+captured field sentinel as `r.f` rather than `r#f`.
+
+A correction to the design's reasoning: the old name-keyed snapshot was not
+fragile under shadowing (it iterated the OUTER entries, which `record_use`
+never reaches when an inner same-named binder exists), so `accept/t211`'s
+shadowing case is a regression witness, not a guard for that change.
+
+Witnesses: `reject/t208`–`t210`, `accept/t211`, five unit cases including
+"reported exactly once" (the infer arm and the peel must not both fire).
+Proved able to fail: with the report disabled, the four capture cases fail.
+`types-oracle`: no pre-existing fixture moved; session goldens identical.

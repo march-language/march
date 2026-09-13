@@ -6259,6 +6259,67 @@ let test_linear_wildcard_non_linear_ok () =
     fn unrestricted() : Int do cb(fn _ -> 0) end|}) in
   Alcotest.(check bool) "wildcards discarding nothing linear: no error" false (has_errors ctx)
 
+(* The capture rule lived only in the ELam infer arm; a check-mode lambda and a
+   local fn could capture a linear value and be called twice. Corpus:
+   reject/t208-t210, accept/t211. *)
+let capture_msg = "The linear value `s` cannot be captured by a closure"
+
+let test_linear_capture_check_mode () =
+  let ctx = typecheck (linear_mod {|
+    fn run2(k : () -> Int) : Int do k() + k() end
+    fn f() : Int do
+      let s = S1(1)
+      run2(fn () -> sink(s))
+    end|}) in
+  Alcotest.(check bool) "check-mode lambda captures linear" true (linear_error ctx capture_msg)
+
+let test_linear_capture_check_mode_with_param () =
+  let ctx = typecheck (linear_mod {|
+    fn run2(k : Int -> Int) : Int do k(1) + k(2) end
+    fn f() : Int do
+      let s = S1(1)
+      run2(fn x -> x + sink(s))
+    end|}) in
+  Alcotest.(check bool) "check-mode 1-arg lambda captures linear" true (linear_error ctx capture_msg)
+
+let test_linear_capture_local_fn () =
+  let ctx = typecheck (linear_mod {|
+    fn f() : Int do
+      let s = S1(1)
+      fn g() : Int do sink(s) end
+      g() + g()
+    end|}) in
+  Alcotest.(check bool) "local fn captures linear" true (linear_error ctx capture_msg)
+
+let test_linear_capture_reported_once () =
+  let ctx = typecheck (linear_mod {|
+    fn f() : Int do
+      let s = S1(1)
+      let g = fn () -> sink(s)
+      g()
+    end|}) in
+  let n = List.length (List.filter (fun (d : March_errors.Errors.diagnostic) ->
+      contains_substring d.message "cannot be captured") ctx.March_errors.Errors.diagnostics) in
+  Alcotest.(check int) "infer-mode capture reported exactly once" 1 n
+
+let test_linear_capture_nothing_linear_ok () =
+  let ctx = typecheck (linear_mod {|
+    fn twice(k : Int -> Int) : Int do k(1) + k(2) end
+    fn shadow() : Int do
+      let s = S1(1)
+      run(fn s -> sink(s)) + sink(s)
+    end
+    fn unrestricted() : Int do
+      let n = 10
+      twice(fn x -> x + n)
+    end
+    fn local_ok() : Int do
+      let n = 1
+      fn g(x : Int) : Int do x + n end
+      g(1) + g(2)
+    end|}) in
+  Alcotest.(check bool) "closures capturing nothing linear: no error" false (has_errors ctx)
+
 (* Same gap via a single correct use — must NOT regress to a false positive. *)
 let test_linear_letq_acquire_single_use_ok () =
   let ctx = typecheck {|mod Test do
@@ -15713,6 +15774,11 @@ let compiler_suites =
           Alcotest.test_case "wildcard: lambda param"                     `Quick test_linear_wildcard_lambda_param;
           Alcotest.test_case "wildcard: match arm on linear"              `Quick test_linear_wildcard_match_arm;
           Alcotest.test_case "wildcard: non-linear discards ok"           `Quick test_linear_wildcard_non_linear_ok;
+          Alcotest.test_case "capture: check-mode lambda"                 `Quick test_linear_capture_check_mode;
+          Alcotest.test_case "capture: check-mode lambda with param"      `Quick test_linear_capture_check_mode_with_param;
+          Alcotest.test_case "capture: local fn"                          `Quick test_linear_capture_local_fn;
+          Alcotest.test_case "capture: reported once"                     `Quick test_linear_capture_reported_once;
+          Alcotest.test_case "capture: nothing linear ok"                 `Quick test_linear_capture_nothing_linear_ok;
           Alcotest.test_case "transitions block: no errors"              `Quick test_transitions_parses;
           Alcotest.test_case "transitions via missing fn: error"         `Quick test_transitions_via_not_found_error;
           Alcotest.test_case "undeclared transition fn: warning emitted" `Quick test_transitions_warn_undeclared;
