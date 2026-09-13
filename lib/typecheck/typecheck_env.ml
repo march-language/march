@@ -43,6 +43,10 @@ type lin_entry = {
   (** For a pending entry: the first use made while [le_used] was already set,
       i.e. the would-be "used more than once".  Not saved or restored across
       paths: a duplicate within any one path is real. *)
+  le_mixed : Ast.span option ref;
+  (** For a pending entry: the branch construct at which it was consumed on
+      some paths that fall through but not on others.  Judged, like
+      [le_dup], once the scope's close knows whether it is linear. *)
 }
 
 (** Constructor info — populated from [DType] declarations.
@@ -1479,7 +1483,7 @@ let bind_vars bindings env =
 (** Extend env with a new linear/affine variable. *)
 let bind_linear name lin ty env =
   let le = { le_name = name; le_lin = lin; le_used = ref false; le_first_use = ref None;
-             le_pending = None; le_dup = ref None } in
+             le_pending = None; le_dup = ref None; le_mixed = ref None } in
   { env with
     vars = StrMap.add name (Mono ty) env.vars;
     fn_arities = StrMap.remove name env.fn_arities;
@@ -1491,7 +1495,8 @@ let bind_linear name lin ty env =
     binding plus a pending linear entry, judged when the scope closes. *)
 let bind_pending name ty env =
   let le = { le_name = name; le_lin = Ast.Unrestricted; le_used = ref false;
-             le_first_use = ref None; le_pending = Some ty; le_dup = ref None } in
+             le_first_use = ref None; le_pending = Some ty; le_dup = ref None;
+             le_mixed = ref None } in
   { (bind_var name (Mono ty) env) with lin = le :: env.lin }
 
 (* =================================================================

@@ -393,7 +393,7 @@ the `consume` mode.)
 
 3. **Ordinary values need no qualifier**: the default is unrestricted (can be copied, dropped, used many times).
 
-4. **Pattern matching on a linear value consumes it**: each branch must use it in a compatible way.
+4. **Branches must agree.** A linear value that one branch of an `if`, `match` or `match do` consumes must be consumed by every branch that returns; a branch that ends in `panic(…)` never returns and doesn't count. The early `Err` return of `let?` is a branch too, so consume linear values before a `let?` that could skip them. Affine values and session-channel endpoints may still be dropped on a branch.
 
 5. **Linear fields in records are owned by the record**: accessing one moves it out, using the record whole moves them all, `{ r with … }` keeps the ones it doesn't replace, and each must be consumed by the end of the record's scope.
 

@@ -155,3 +155,39 @@ predicate, not relax the rule.
 Whichever option is chosen, rewrite Practical Rule 4 in
 `specs/lang/linear-types.md` and `docs/linear-types.md` to say exactly what is
 enforced.
+
+---
+
+## What shipped (2026-09-13)
+
+Option A. `join_linear_paths` is the one join, used by `iter_paths_linear`
+(match arms, both `if` branches) and by `ECond`, whose inline union copy is
+gone. It judges against the state on entry, so a value consumed only by a
+later `match do` condition is correctly unconsumed on an earlier body's
+path. `path_diverges` came from the wildcard item. Pending entries record
+`le_mixed` and are judged in `judge_pending`. `let?` compares linear use
+before and after its continuation (`ELetQ` arm).
+
+**One change from the design, found by the corpus.** The first build moved
+five session-channel fixtures (`accept/t79`, `accept/t105`, `reject/t74`,
+`t97`, `t99`). A **let-bound** channel endpoint is tracked `Linear`, not
+affine (only a channel parameter is affine), so the design's "affine keeps
+the union" did not cover it. Channels keep their own discipline (drop
+leniency, the End-drop rule), so `join_linear_paths` now exempts any entry
+whose type is a `TChan`. After that, no pre-existing fixture moved.
+
+Witnesses: `reject/t224`–`t227`, `accept/t228`, seven unit cases. Proved
+able to fail guard by guard: strict rule off (four rejects fail), divergence
+exemption off (the accept case fails), channel exemption off (the channel
+case fails). Stdlib diagnostics byte-identical to `8eb0d7ee`; session goldens
+identical.
+
+Practical Rule 4 is rewritten in both trees to say what is enforced.
+
+Gates: `scripts/run-tests.sh -q` 3223 OK; `dune build @test/runtest` exit 0
+(one `native_supervisor_restart_transient` run was SIGKILLed at load ~11;
+rebuilt alone it matched its expected output, and the re-run was green).
+
+Not covered: a guard that fails and falls through to a later arm is treated
+as part of its own arm's path; `let*` continuations (a closure the monad may
+call any number of times) are left to the capture rule.

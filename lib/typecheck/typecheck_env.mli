@@ -36,6 +36,7 @@ type lin_entry = {
   le_first_use : Typecheck_types.Ast.span option ref;
   le_pending : Typecheck_types.ty option;
   le_dup : Typecheck_types.Ast.span option ref;
+  le_mixed : Typecheck_types.Ast.span option ref;
 }
 type ctor_info = {
   ci_type : string;

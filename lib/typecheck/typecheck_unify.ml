@@ -907,7 +907,7 @@ let bind_linear_field_sentinels varname ty env =
         | Some lin ->
           let key = varname ^ "#" ^ fname in
           let le = { le_name = key; le_lin = lin; le_used = ref false; le_first_use = ref None;
-                     le_pending = None; le_dup = ref None } in
+                     le_pending = None; le_dup = ref None; le_mixed = ref None } in
           { acc_env with lin = le :: acc_env.lin }
         | _ -> acc_env
       ) env flds

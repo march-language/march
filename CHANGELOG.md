@@ -50,6 +50,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A linear value must be consumed on every branch that returns.** `if b do
+  sink(st) else 0 end` dropped `st` whenever `b` was false, and was accepted:
+  branches merged as "consumed on some branch". A branch that ends in `panic(…)`
+  is exempt, since it never returns, and so are affine values and session
+  channels. The early `Err` return of `let?` counts as a branch. **This can
+  reject code that compiled before.**
+
 - **A record's linear fields can no longer be consumed and kept at the same
   time, and actor state is covered.** In an actor handler, `sink(state.st)`
   followed by `{ state with n: k }` left the consumed `st` in the state for the

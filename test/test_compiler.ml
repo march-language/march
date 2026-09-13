@@ -6486,6 +6486,105 @@ let test_linear_record_moves_ok () =
     end|}) in
   Alcotest.(check bool) "legal record moves: no error" false (has_errors ctx)
 
+(* Linear values across branches: a join used to UNION the paths, so a value
+   consumed on some path counted as consumed on all of them. Now it must be
+   consumed on every path that falls through; diverging paths are exempt, and
+   affine values and session channels keep the union. Corpus: reject/t224-t227,
+   accept/t228 (channels: accept/t79 and the session corpus). *)
+let mixed_msg name = Printf.sprintf "The linear value `%s` is consumed on some branches but not others" name
+
+let test_linear_branch_if_one_side () =
+  let ctx = typecheck (linear_mod {|
+    fn g(b : Bool, st : S1) : Int do if b do sink(st) else 0 end end|}) in
+  Alcotest.(check bool) "if: one branch only" true (linear_error ctx (mixed_msg "st"))
+
+let test_linear_branch_match_arms () =
+  let ctx = typecheck (linear_mod {|
+    fn f() : Int do
+      let s = S1(1)
+      match 2 do
+        1 -> sink(s)
+        2 -> sink(s) + 1
+        _ -> 0
+      end
+    end|}) in
+  Alcotest.(check bool) "match: two of three arms" true (linear_error ctx (mixed_msg "s"))
+
+let test_linear_branch_cond_chain () =
+  let ctx = typecheck (linear_mod {|
+    fn g(n : Int, st : S1) : Int do
+      match do
+        n > 0 -> sink(st)
+        true -> 0
+      end
+    end|}) in
+  Alcotest.(check bool) "match do: one body only" true (linear_error ctx (mixed_msg "st"))
+
+let test_linear_branch_letq_early_return () =
+  let ctx = typecheck (linear_mod {|
+    fn mk(i : Int) : Result(Int, String) do if i > 0 do Ok(i) else Err("neg") end end
+    fn g(st : S1, i : Int) : Result(Int, String) do
+      let? v = mk(i)
+      Ok(v + sink(st))
+    end|}) in
+  Alcotest.(check bool) "let? early return drops" true
+    (linear_error ctx "is still unconsumed when `let?` returns early on `Err`")
+
+let test_linear_branch_pending_param () =
+  let ctx = typecheck (linear_mod {|
+    fn g(b : Bool, st) : Int do if b do sink(st) else 0 end end|}) in
+  Alcotest.(check bool) "unannotated param, one branch only" true (linear_error ctx (mixed_msg "st"))
+
+let test_linear_branch_ok () =
+  let ctx = typecheck (linear_mod {|
+    type T = T(Int)
+    fn tsink(t : T) : Int do match t do T(e) -> e end end
+    fn every(b : Bool, st : S1) : Int do if b do sink(st) else sink(st) + 1 end end
+    fn gives_up(b : Bool, st : S1) : Int do if b do sink(st) else panic("no") end end
+    fn three(n : Int, st : S1) : Int do
+      match n do
+        1 -> sink(st)
+        2 -> panic("two")
+        _ -> sink(st) + 1
+      end
+    end
+    fn before(b : Bool, st : S1) : Int do
+      let k = sink(st)
+      if b do k else 0 end
+    end
+    fn optional(b : Bool, affine t : T) : Int do if b do tsink(t) else 0 end end|}) in
+  Alcotest.(check bool) "every returning branch consumes / diverging / affine: no error"
+    false (has_errors ctx)
+
+let test_linear_branch_channel_lenient_ok () =
+  let ctx = typecheck {|mod Test do
+    type Client = Client
+    type Server = Server
+    protocol Decision do
+      choose by Client:
+        ok  -> Client -> Server : Int
+        err -> Client -> Server : String
+      end
+    end
+    fn f() : () do
+      let (cc, sc) = Chan.new(Decision)
+      let cc2 = Chan.choose(cc, :err)
+      let cc3 = Chan.send(cc2, "boom")
+      Chan.close(cc3)
+      let (lbl, sc2) = Chan.offer(sc)
+      match lbl do
+        :ok ->
+          let (n, sc3) = Chan.recv(sc2)
+          Chan.close(sc3)
+        :err ->
+          let (s, sc3) = Chan.recv(sc2)
+          Chan.close(sc3)
+        _ -> ()
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "session endpoint driven on some arms: no error" false (has_errors ctx)
+
 (* Same gap via a single correct use — must NOT regress to a false positive. *)
 let test_linear_letq_acquire_single_use_ok () =
   let ctx = typecheck {|mod Test do
@@ -15958,6 +16057,13 @@ let compiler_suites =
           Alcotest.test_case "record: field never used"                   `Quick test_linear_record_field_never_used;
           Alcotest.test_case "record: actor fresh state leaks"            `Quick test_linear_record_actor_fresh_state_leaks;
           Alcotest.test_case "record: legal moves ok"                     `Quick test_linear_record_moves_ok;
+          Alcotest.test_case "branch: if one side"                        `Quick test_linear_branch_if_one_side;
+          Alcotest.test_case "branch: match arms"                         `Quick test_linear_branch_match_arms;
+          Alcotest.test_case "branch: match do chain"                     `Quick test_linear_branch_cond_chain;
+          Alcotest.test_case "branch: let? early return"                  `Quick test_linear_branch_letq_early_return;
+          Alcotest.test_case "branch: unannotated param"                  `Quick test_linear_branch_pending_param;
+          Alcotest.test_case "branch: every returning branch ok"          `Quick test_linear_branch_ok;
+          Alcotest.test_case "branch: session channel lenient ok"         `Quick test_linear_branch_channel_lenient_ok;
           Alcotest.test_case "transitions block: no errors"              `Quick test_transitions_parses;
           Alcotest.test_case "transitions via missing fn: error"         `Quick test_transitions_via_not_found_error;
           Alcotest.test_case "undeclared transition fn: warning emitted" `Quick test_transitions_warn_undeclared;
