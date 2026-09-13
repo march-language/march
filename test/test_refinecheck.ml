@@ -12182,7 +12182,10 @@ let expected_audit_labels =
       ("Actor_handler_param(Bump,0)", "Actor_handler_param(Bump,0)", "Outermost", 16);
       ("Param(f,4)", "Param(f,4)", "Nested", 17);
       ("Param(f,5)", "Param(f,5)", "Nested", 18);
-      ("Param(f,6)", "Param(f,6)", "Nested", 19);
+      (* `linear {Int | ...}`: the wrapper is transparent since 2026-09-13
+         (plan phase 4), so the refinement is at the OUTERMOST position and
+         enforced like a bare one. *)
+      ("Param(f,6)", "Param(f,6)", "Outermost", 19);
       ("Param(f,7)", "Type_arg", "Nested", 20);
       ("Expr_annot", "Expr_annot", "Outermost", 23);
       ("Expr_annot", "Expr_annot", "Outermost", 24);
@@ -12421,7 +12424,7 @@ let audit_classify_suite =
             end
           end
         end|};
-    check_unenforced "a refined record field is Unenforced"
+    check_enforced "a refined record field is Enforced (plan phase 4: every construction obliged)"
       {|mod M do
           type Box = { v : {Int | _ > 0} }
         end|};
@@ -12439,7 +12442,7 @@ let audit_classify_suite =
             fn put : Int -> {Int | _ > 0}
           end
         end|};
-    check_unenforced "an actor state field refinement is Unenforced"
+    check_enforced "an actor state field refinement is Enforced (plan phase 4: an inductive invariant)"
       {|mod M do
           actor Counter do
             state { value : {Int | _ >= 50} }
@@ -12471,33 +12474,22 @@ let audit_classify_reason_suite =
           Alcotest.(check bool) "names the type-constructor argument" true
             (contains reason "type constructor's argument")
         | _ -> Alcotest.fail "expected Unenforced")
-  ; Alcotest.test_case "the record-field reason names the field, not the nested-position sentence"
+  (* The record-field and actor-state REASON discrimination cases that used
+     to sit here are moot since 2026-09-13 (plan phase 4): both positions are
+     Enforced, so there is no Unenforced sentence left to discriminate.  What
+     remains pinned is that a field whose base type the checker cannot place
+     still carries the field-specific sentence, not a shared placeholder. *)
+  ; Alcotest.test_case "an unplaceable field base keeps a field-specific Unenforced reason"
       `Quick (fun () ->
         let _, d = classify_only_site
             {|mod M do
-                type Box = { v : {Int | _ > 0} }
+                type Box = { v : {(Int, Int) | true} }
               end|}
         in
         match d with
         | RAudit.Unenforced reason ->
-          Alcotest.(check bool) "names the field" true (contains reason "field")
-        | _ -> Alcotest.fail "expected Unenforced")
-  ; Alcotest.test_case "the actor-state reason names it distinctly from the record-field reason"
-      `Quick (fun () ->
-        let _, d = classify_only_site
-            {|mod M do
-                actor Counter do
-                  state { value : {Int | _ >= 50} }
-                  init { value: 0 }
-                  on Bump(d : Int) do
-                    { state with value: state.value + d }
-                  end
-                end
-              end|}
-        in
-        match d with
-        | RAudit.Unenforced reason ->
-          Alcotest.(check bool) "names a stored field" true (contains reason "field")
+          Alcotest.(check bool) "names the stored-field position" true
+            (contains reason "stored field")
         | _ -> Alcotest.fail "expected Unenforced")
   ; Alcotest.test_case "the sig Inert_warned names warn_sig_fn_refinement"
       `Quick (fun () ->
@@ -12513,21 +12505,27 @@ let audit_classify_reason_suite =
           Alcotest.(check bool) "names the sig warning" true
             (contains reason "warn_sig_fn_refinement")
         | _ -> Alcotest.fail "expected Inert_warned")
-  ; Alcotest.test_case "a block-level function's return refinement is Unenforced with its own reason"
-      `Quick (fun () ->
-        let _, d = classify_only_site
+  ; (* Since 2026-09-13 (plan phase 1) a block-level function's return
+       refinement is verified by [check_fn_post_verdict] on a synthesised
+       definition, so the site is Enforced -- and the ledger agrees: the
+       same local returning 0 under `_ > 0` is an error. *)
+    gated "a block-level function's return refinement is Enforced (verified against its body)"
+      (fun () ->
+        let prog ret =
+          Printf.sprintf
             {|mod M do
                 fn outer() : Int do
-                  fn helper() : {Int | _ > 0} do 1 end
+                  fn helper() : {Int | _ > 0} do %s end
                   helper()
                 end
               end|}
+            ret
         in
-        match d with
-        | RAudit.Unenforced reason ->
-          Alcotest.(check bool) "names ELetFn / block-level" true
-            (contains reason "block-level")
-        | _ -> Alcotest.fail "expected Unenforced")
+        let _, d = classify_only_site (prog "1") in
+        Alcotest.(check string) "disposition" "Enforced" (disposition_tag d);
+        Alcotest.(check bool) "returning 0 under _ > 0 is an error (the ledger fact)" true
+          (has_refine_error_d (prog "0"));
+        Alcotest.(check bool) "returning 1 is not" false (has_refine_error_d (prog "1")))
   ]
 
 (* ── Fix loop 1: three false-Enforced positions, the Inert_warned coupling,
@@ -12556,11 +12554,11 @@ let compiler_warns (src : string) (needle : string) : bool =
     ctx.March_errors.Errors.diagnostics
 
 let audit_classify_fixloop1_suite =
-  [ (* Finding 4: a lambda's own parameter. Ledger fact: calling the lambda
-       with an argument that violates its predicate raises no error at all --
-       [scope_add_param] / [sig_of_clause] never see an [A.ELam]'s params. *)
-    Alcotest.test_case "a lambda's own parameter refinement is Unenforced, not Enforced"
-      `Quick (fun () ->
+  [ (* Finding 4 is CLOSED since 2026-09-13 (plan phase 2): a `let`-bound
+       lambda is registered in [cbenv] by [visit]'s [EBlock] walk, so `f(0)`
+       IS obliged.  Disposition and ledger fact flip together. *)
+    gated "a lambda's own parameter refinement is Enforced (direct calls are obliged)"
+      (fun () ->
         let src =
           {|mod LAM1 do
               fn main() : Int do
@@ -12570,19 +12568,18 @@ let audit_classify_fixloop1_suite =
             end|}
         in
         let _, d = classify_only_site src in
-        Alcotest.(check string) "disposition" "Unenforced" (disposition_tag d);
-        (match d with
-         | RAudit.Unenforced reason ->
-           Alcotest.(check bool) "names the lambda / ELam fact" true (contains reason "ELam")
-         | _ -> Alcotest.fail "expected Unenforced");
-        Alcotest.(check bool) "the violating call raises no error (the ledger fact)" false
+        Alcotest.(check string) "disposition" "Enforced" (disposition_tag d);
+        Alcotest.(check bool) "the violating call raises an error (the ledger fact)" true
           (has_refine_error_d src))
 
   ; (* Finding 5: a block-level `fn`'s PARAMETER, the other half of the
        ELetFn hole (the report already covers the Return half). Ledger fact:
        calling `helper(0)` raises no error. *)
-    Alcotest.test_case "a block-level fn's parameter refinement is Unenforced, not Enforced"
-      `Quick (fun () ->
+    (* Finding 5 is CLOSED since 2026-09-13 (plan phase 1): [visit]'s
+       [EBlock] walk registers the local's signature in [cbenv], so the
+       direct `helper(0)` IS obliged. Disposition and ledger flip together. *)
+    gated "a block-level fn's parameter refinement is Enforced (direct calls are obliged)"
+      (fun () ->
         let src =
           {|mod LETFNP1 do
               fn main() : Int do
@@ -12592,12 +12589,8 @@ let audit_classify_fixloop1_suite =
             end|}
         in
         let _, d = classify_only_site src in
-        Alcotest.(check string) "disposition" "Unenforced" (disposition_tag d);
-        (match d with
-         | RAudit.Unenforced reason ->
-           Alcotest.(check bool) "names the block-level fact" true (contains reason "block-level")
-         | _ -> Alcotest.fail "expected Unenforced");
-        Alcotest.(check bool) "the violating call raises no error (the ledger fact)" false
+        Alcotest.(check string) "disposition" "Enforced" (disposition_tag d);
+        Alcotest.(check bool) "the violating call raises an error (the ledger fact)" true
           (has_refine_error_d src))
 
   ; (* Finding 6: an `impl` method parameter whose method name is AMBIGUOUS
@@ -12891,9 +12884,12 @@ let strip_audit_lines s =
   |> List.filter (fun l -> not (String.length l >= 14 && String.sub l 0 14 = "coverage audit"))
   |> String.concat "\n"
 
+(* The one Unenforced site is a refinement inside a TYPE ARGUMENT: a bare
+   refined field (`v : {Int | v > 0}`) has been Enforced since 2026-09-13
+   (plan phase 4), and this fixture exists to pin an Unenforced line exactly. *)
 let audit_flag_pinned_fixture =
   {|mod PINAUDIT1 do
-  type Box = { v : {Int | v > 0} }
+  type Box = { v : List({Int | v > 0}) }
 
   fn f(n : {Int | n > 0}) : {Int | _ > 0} do
     n
@@ -12951,10 +12947,11 @@ let audit_flag_suite =
           | [ unenforced_line; user_summary; stdlib_summary ] ->
             Alcotest.(check string) "the one Unenforced site's line"
               (Printf.sprintf
-                 "coverage audit: %s:2:26: field `Box.v`: v > 0: a record (or \
-                  actor-state) field's declared type is never re-examined once a \
-                  value is constructed; the checker has no extractor for a stored \
-                  field, only for a parameter, a return, or a let-binding"
+                 "coverage audit: %s:2:31: field `Box.v`: v > 0: the refinement sits \
+                  inside a type constructor's argument (for example `List({Int | _ > \
+                  0})`); refined_param_ty, refined_scope_ty and return_refine_ext all \
+                  match only an outermost TyRefine, so a refinement this deep is \
+                  invisible to every one of them"
                  path)
               unenforced_line;
             Alcotest.(check string) "user code bucket summary"
@@ -13098,9 +13095,12 @@ end
           write "prelude.march" "mod Prelude do
 end
 ";
+          (* A refinement inside a type ARGUMENT: the bare refined field this
+             used to declare has been Enforced since 2026-09-13 (plan phase
+             4), and this test needs one Unenforced stdlib site. *)
           write "list.march"
             "mod List do
-  type Box = { v : {Int | v > 0} }
+  type Box = { v : List({Int | v > 0}) }
 end
 ";
           let entry_path = write_march_fixture "mod E do
@@ -13157,8 +13157,8 @@ end
 
    2. [holes.baseline]: a SEPARATE, small, hand-built fixture set under
       test/refine_audit/holes/ that deliberately contains one program per
-      known unenforced position (a block-level fn's own param/return, a
-      lambda's own param, a non-adoptable impl method's param, an actor's
+      known unenforced position (a lambda's own param, a non-adoptable impl
+      method's param, an actor's
       state field and handler param, a nested field refinement, and a
       String return). Its baseline MUST be non-empty. This is the guard on
       the guard: if the corpus baseline were empty because the audit
@@ -13640,6 +13640,338 @@ let const_fn_suite =
         Alcotest.(check int) "annotation error + bounds error" 2 (refine_error_count (prog "200"))) ]
 
 
+(* ── Unobliged parameter refinements must not be ASSUMED ──────────────────
+   A lambda's, a block-level `fn`'s, and an actor handler's own parameter
+   refinements parse and typecheck but oblige no caller today (the todos
+   closed phase by phase in
+   specs/plans/2026-09-13-refinement-enforcement-holes-plan.md).  Before
+   phase 0 the body nonetheless ASSUMED them: `need(n)` under `n : {Int |
+   n > 0}` discharged, and `cap verified` accepted `g(0)`.  Each case pairs
+   the refined program (must be rejected) with its unrefined control (already
+   rejected), so a regression that quietly re-admits the assumption shows as
+   the refined half going green while the control stays red — not as both
+   passing for an unrelated reason.
+
+   These are [gated]: the rejection here is the solver-undecided escalation on
+   `need`'s precondition, which needs z3 to be undecided rather than absent. *)
+let unobliged_assume_suite =
+  let need = "  fn need(k : {Int | k > 0}) : Int do k end\n" in
+  let prog body = "mod U do\n  cap verified\n" ^ need ^ body ^ "end\n" in
+  let pair name ~refined ~control =
+    gated name (fun () ->
+        Alcotest.(check bool) "control (unrefined) is rejected" true
+          (has_refine_error (prog control));
+        Alcotest.(check bool) "refined-but-unobliged is rejected too" true
+          (has_refine_error (prog refined)))
+  in
+  [ pair "lambda: `let g = fn (n : {Int | n > 0}) -> need(n)` does not assume n > 0"
+      ~refined:
+        "  fn main() : Int do\n\
+        \    let g = fn (n : {Int | n > 0}) -> need(n)\n\
+        \    g(0)\n\
+        \  end\n"
+      ~control:
+        "  fn main() : Int do\n\
+        \    let g = fn (n : Int) -> need(n)\n\
+        \    g(0)\n\
+        \  end\n";
+    pair "block fn: `fn inner(n : {Int | n > 0})` does not assume n > 0"
+      ~refined:
+        "  fn main() : Int do\n\
+        \    fn inner(n : {Int | n > 0}) : Int do need(n) end\n\
+        \    inner(0)\n\
+        \  end\n"
+      ~control:
+        "  fn main() : Int do\n\
+        \    fn inner(n : Int) : Int do need(n) end\n\
+        \    inner(0)\n\
+        \  end\n";
+    (* Since phase 3 this half rejects for a DIFFERENT reason — `Inc(0 - 1)`
+       itself violates the handler's contract at the construction — and the
+       body legitimately assumes `n > 0`.  Kept as the pair it always was:
+       the control still rejects, and the refined half must never go green. *)
+    pair "actor handler: `on Inc(n : {Int | n > 0})` obliges the send that violates it"
+      ~refined:
+        "  actor Counter do\n\
+        \    state { value : Int }\n\
+        \    init { value: 0 }\n\
+        \    on Inc(n : {Int | n > 0}) do\n\
+        \      { state with value: need(n) }\n\
+        \    end\n\
+        \  end\n\
+        \  fn main() : Unit do\n\
+        \    let c = spawn(Counter)\n\
+        \    let _ = send(c, Inc(0 - 1))\n\
+        \    kill(c)\n\
+        \  end\n"
+      ~control:
+        "  actor Counter do\n\
+        \    state { value : Int }\n\
+        \    init { value: 0 }\n\
+        \    on Inc(n : Int) do\n\
+        \      { state with value: need(n) }\n\
+        \    end\n\
+        \  end\n\
+        \  fn main() : Unit do\n\
+        \    let c = spawn(Counter)\n\
+        \    let _ = send(c, Inc(0 - 1))\n\
+        \    kill(c)\n\
+        \  end\n" ]
+
+(* ── Block-level `fn` contracts (plan phase 1) ────────────────────────────
+   A local `fn inner(...)` inside a body is now a contract on both ends: a
+   direct `inner(...)` after it (or a recursive one inside it) is obliged by
+   its parameter refinements through [cbenv], and its return refinement is
+   verified by [check_fn_post_verdict] on a synthesised [fn_def].  The body
+   ASSUMES its parameters only when `inner` never escapes callee position —
+   the last pair pins that rule from both sides.  Desugared, since a
+   block-level `fn` is what production feeds the checker. *)
+let local_fn_suite =
+  let prog body =
+    "mod L do\n  cap verified\n  fn need(k : {Int | k > 0}) : Int do k end\n\
+    \  fn apply(f : Int -> Int, x : Int) : Int do f(x) end\n" ^ body ^ "end\n"
+  in
+  let main body = "  fn main() : Int do\n" ^ body ^ "  end\n" in
+  [ gated "direct call `inner(0)` violates the local's parameter refinement" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error_d
+             (prog (main "    fn inner(n : {Int | n > 0}) : Int do n end\n    inner(0)\n")));
+        Alcotest.(check bool) "no error on inner(5)" false
+          (has_refine_error_d
+             (prog (main "    fn inner(n : {Int | n > 0}) : Int do n end\n    inner(5)\n"))));
+
+    gated "a recursive call inside the local is obliged too" (fun () ->
+        let rec_prog step =
+          prog
+            (main
+               ("    fn inner(n : {Int | n >= 0}) : Int do\n\
+                \      if n == 0 do 0 else inner(n - " ^ step ^ ") end\n\
+                \    end\n\
+                \    inner(4)\n"))
+        in
+        Alcotest.(check bool) "n - 2 can go negative from n = 1" true
+          (has_refine_error_d (rec_prog "2"));
+        Alcotest.(check bool) "n - 1 stays >= 0 under n != 0" false
+          (has_refine_error_d (rec_prog "1")));
+
+    gated "the local's return refinement is verified against its body" (fun () ->
+        Alcotest.(check bool) "returning the unrefined n is not > 0" true
+          (has_refine_error_d
+             (prog (main "    fn inner(n : Int) : {Int | _ > 0} do n end\n    inner(5)\n")));
+        Alcotest.(check bool) "n : {Int | n > 0} returned proves _ > 0" false
+          (has_refine_error_d
+             (prog
+                (main "    fn inner(n : {Int | n > 0}) : {Int | _ > 0} do n end\n    inner(5)\n"))));
+
+    gated "the body assumes its parameters only while `inner` never escapes" (fun () ->
+        let def = "    fn inner(n : {Int | n > 0}) : Int do need(n) end\n" in
+        Alcotest.(check bool) "non-escaping: need(n) discharged from n > 0" false
+          (has_refine_error_d (prog (main (def ^ "    inner(5)\n"))));
+        Alcotest.(check bool) "escaping via apply(inner, 5): need(n) is unproved" true
+          (has_refine_error_d (prog (main (def ^ "    apply(inner, 5)\n"))))) ]
+
+(* ── Lambda contracts and pass-site contravariance (plan phase 2) ─────────
+   A `let`-bound lambda is a local function: direct calls are obliged through
+   [cbenv].  Passing ANY refined callable (a lambda, a local `fn`, a named
+   function) where a function type is expected is obliged at the PASS site:
+   the expected domain must imply the callable's own parameter refinement for
+   every value, and an unrefined domain promises nothing (decision (a) of the
+   plan).  The `t77` shape, `apply(take_n, -3)` through `f : Int -> Int`, is
+   therefore now rejected — at the pass, not at the indirect call. *)
+let lambda_contract_suite =
+  (* [prog] is under `cap verified`, where an unverified skip is ALSO an
+     error; [plain] is not, so an error there is a demonstrated VIOLATION
+     (the definite-failure rule for [Callback_domain]), never an escalated
+     skip.  The violation cases assert BOTH, or they could pass by escalation
+     alone — which is exactly how the first draft of this suite passed while
+     the driver on `t77` printed a hint and exited 0. *)
+  let plain body =
+    "mod P do\n  fn need(k : {Int | k > 0}) : Int do k end\n\
+    \  fn take_n(n : {Int | _ >= 0}) : Int do n end\n\
+    \  fn apply(f : Int -> Int, x : Int) : Int do f(x) end\n\
+    \  fn apply_pos(f : ({Int | _ > 0}) -> Int, x : {Int | x > 0}) : Int do f(x) end\n\
+    \  fn apply_nn(f : ({Int | _ >= 0}) -> Int, x : {Int | x >= 0}) : Int do f(x) end\n"
+    ^ body ^ "end\n"
+  in
+  let prog body =
+    "mod P do\n  cap verified\n  fn need(k : {Int | k > 0}) : Int do k end\n\
+    \  fn take_n(n : {Int | _ >= 0}) : Int do n end\n\
+    \  fn apply(f : Int -> Int, x : Int) : Int do f(x) end\n\
+    \  fn apply_pos(f : ({Int | _ > 0}) -> Int, x : {Int | x > 0}) : Int do f(x) end\n\
+    \  fn apply_nn(f : ({Int | _ >= 0}) -> Int, x : {Int | x >= 0}) : Int do f(x) end\n"
+    ^ body ^ "end\n"
+  in
+  let main body = "  fn main() : Int do\n" ^ body ^ "  end\n" in
+  let g = "    let g = fn (n : {Int | n > 0}) -> n\n" in
+  [ gated "a let-bound lambda obliges its direct callers" (fun () ->
+        Alcotest.(check bool) "g(0) is rejected" true (has_refine_error_d (prog (main (g ^ "    g(0)\n"))));
+        Alcotest.(check bool) "g(5) passes" false (has_refine_error_d (prog (main (g ^ "    g(5)\n")))));
+
+    gated "passing a refined lambda to an UNREFINED domain is a violation" (fun () ->
+        Alcotest.(check bool) "apply(g, 5): Int -> Int promises nothing (cap verified)" true
+          (has_refine_error_d (prog (main (g ^ "    apply(g, 5)\n"))));
+        Alcotest.(check bool) "…and it is a VIOLATION, not an escalated skip (plain)" true
+          (has_refine_error_d (plain (main (g ^ "    apply(g, 5)\n")))));
+
+    gated "the expected domain must IMPLY the lambda's refinement" (fun () ->
+        Alcotest.(check bool) "{_ > 0} -> Int implies n > 0" false
+          (has_refine_error_d (prog (main (g ^ "    apply_pos(g, 5)\n"))));
+        Alcotest.(check bool) "{_ >= 0} -> Int does not imply n > 0 (cap verified)" true
+          (has_refine_error_d (prog (main (g ^ "    apply_nn(g, 5)\n"))));
+        Alcotest.(check bool) "…refuted by the model x = 0 (plain)" true
+          (has_refine_error_d (plain (main (g ^ "    apply_nn(g, 5)\n")))));
+
+    gated "the t77 shape: a NAMED refined function passed through `Int -> Int`" (fun () ->
+        Alcotest.(check bool) "apply(take_n, -3) is a violation at the pass site (plain)" true
+          (has_refine_error_d (plain (main "    apply(take_n, -3)\n")));
+        Alcotest.(check bool) "apply_nn(take_n, 3) passes: domain implies _ >= 0" false
+          (has_refine_error_d (prog (main "    apply_nn(take_n, 3)\n"))));
+
+    gated "an inline lambda argument is checked at the pass site, and assumes under a covered one" (fun () ->
+        Alcotest.(check bool) "apply(fn (n : {Int | n > 0}) -> need(n), 5): violation (plain)" true
+          (has_refine_error_d (plain (main "    apply(fn (n : {Int | n > 0}) -> need(n), 5)\n")));
+        Alcotest.(check bool) "apply_pos(fn (n : {Int | n > 0}) -> need(n), 5): proved, body assumes n > 0" false
+          (has_refine_error_d (prog (main "    apply_pos(fn (n : {Int | n > 0}) -> need(n), 5)\n"))));
+
+    gated "a let-bound lambda assumes its parameters only while every use is obliged" (fun () ->
+        let gn = "    let g = fn (n : {Int | n > 0}) -> need(n)\n" in
+        Alcotest.(check bool) "direct call only: need(n) discharged" false
+          (has_refine_error_d (prog (main (gn ^ "    g(5)\n"))));
+        Alcotest.(check bool) "passed to a covered domain: still discharged" false
+          (has_refine_error_d (prog (main (gn ^ "    apply_pos(g, 5)\n"))));
+        Alcotest.(check bool) "aliased (`let h = g`): escapes, need(n) unproved" true
+          (has_refine_error_d (prog (main (gn ^ "    let h = g\n    h(5)\n")))));
+
+    gated "the pass-site diagnostic names the obligation" (fun () ->
+        let text = refine_error_text_d (plain (main "    apply(take_n, -3)\n")) in
+        Alcotest.(check bool) "mentions the passed function's refinement" true
+          (contains text "its parameter refinement `_ >= 0`");
+        Alcotest.(check bool) "names the callable" true (contains text "take_n")) ]
+
+(* ── Actor handler contracts (plan phase 3) ───────────────────────────────
+   `on Inc(n : {Int | n > 0})` obliges every CONSTRUCTION of `Inc(...)` in the
+   module (send, call, or a message bound first), and the handler body
+   assumes `n > 0` exactly when that obligation is in force.  A bare-name
+   clash (another handler or a variant constructor named `Inc`) withdraws
+   both sides, fail closed — the last case pins that from both sides. *)
+let actor_handler_suite =
+  let actor body =
+    "  actor Counter do\n\
+    \    state { value : Int }\n\
+    \    init { value: 0 }\n\
+    \    on Inc(n : {Int | n > 0}) do\n" ^ body ^ "    end\n  end\n"
+  in
+  let prog ?(extra = "") ~handler_body main =
+    "mod AH do\n  cap verified\n  fn need(k : {Int | k > 0}) : Int do k end\n"
+    ^ extra ^ actor handler_body ^ "  fn main() : Unit do\n    let c = spawn(Counter)\n"
+    ^ main ^ "    kill(c)\n  end\nend\n"
+  in
+  let plain_body = "      { state with value: n }\n" in
+  [ gated "sending a violating message is rejected at the construction" (fun () ->
+        Alcotest.(check bool) "Inc(0 - 1)" true
+          (has_refine_error_d (prog ~handler_body:plain_body "    let _ = send(c, Inc(0 - 1))\n"));
+        Alcotest.(check bool) "Inc(1)" false
+          (has_refine_error_d (prog ~handler_body:plain_body "    let _ = send(c, Inc(1))\n")));
+
+    gated "a message bound to a let first is checked where it is built" (fun () ->
+        Alcotest.(check bool) "let m = Inc(0 - 1)" true
+          (has_refine_error_d
+             (prog ~handler_body:plain_body "    let m = Inc(0 - 1)\n    let _ = send(c, m)\n")));
+
+    gated "the handler body assumes n > 0 once every construction is obliged" (fun () ->
+        Alcotest.(check bool) "need(n) discharged" false
+          (has_refine_error_d
+             (prog ~handler_body:"      { state with value: need(n) }\n" "    let _ = send(c, Inc(1))\n")));
+
+    gated "a clashing variant constructor withdraws BOTH obligation and assumption" (fun () ->
+        let extra = "  type Tok = Inc(Int) | Dec(Int)\n" in
+        Alcotest.(check bool) "Inc(0 - 1) is not obliged (fail closed)" false
+          (has_refine_error_d
+             (prog ~extra ~handler_body:plain_body "    let _ = send(c, Inc(0 - 1))\n"));
+        Alcotest.(check bool) "…and the body no longer assumes n > 0" true
+          (has_refine_error_d
+             (prog ~extra ~handler_body:"      { state with value: need(n) }\n"
+                "    let _ = send(c, Inc(1))\n"))) ]
+
+(* ── Stored-field contracts (plan phase 4) ────────────────────────────────
+   A refined record field, variant argument, or actor state field is a
+   contract on every construction of the value and a fact for every reader.
+   Each case pairs a violating construction with a satisfying one; the
+   actor cases pin the inductive invariant from init, handler result, and
+   the assumed incoming state. *)
+let stored_field_suite =
+  let prog ?(extra = "") body =
+    "mod SF do\n  cap verified\n  fn need(k : {Int | k > 0}) : Int do k end\n" ^ extra ^ body
+    ^ "end\n"
+  in
+  let box = "  type Box = { v : {Int | _ > 0} }\n" in
+  let main body = "  fn main() : Int do\n" ^ body ^ "  end\n" in
+  [ gated "a record literal is obliged by its refined field" (fun () ->
+        Alcotest.(check bool) "{ v: 0 }" true
+          (has_refine_error_d (prog ~extra:box (main "    let b = { v: 0 }\n    b.v\n")));
+        Alcotest.(check bool) "{ v: 1 }" false
+          (has_refine_error_d (prog ~extra:box (main "    let b = { v: 1 }\n    b.v\n"))));
+
+    gated "a reader of the field assumes its refinement" (fun () ->
+        Alcotest.(check bool) "need(b.v) discharged from b : Box" false
+          (has_refine_error_d
+             (prog ~extra:box "  fn f(b : Box) : Int do need(b.v) end\n")));
+
+    gated "an update is obliged for the updated field, and may use the old one" (fun () ->
+        Alcotest.(check bool) "{ b with v: 0 }" true
+          (has_refine_error_d
+             (prog ~extra:box "  fn f(b : Box) : Box do { b with v: 0 } end\n"));
+        Alcotest.(check bool) "{ b with v: b.v + 1 }" false
+          (has_refine_error_d
+             (prog ~extra:box "  fn f(b : Box) : Box do { b with v: b.v + 1 } end\n")));
+
+    gated "a variant constructor is obliged by its refined argument" (fun () ->
+        let w = "  type Wrapped = Wrapped({Int | _ > 0})\n" in
+        Alcotest.(check bool) "Wrapped(0 - 1)" true
+          (has_refine_error_d (prog ~extra:w (main "    let _ = Wrapped(0 - 1)\n    0\n")));
+        Alcotest.(check bool) "Wrapped(1)" false
+          (has_refine_error_d (prog ~extra:w (main "    let _ = Wrapped(1)\n    0\n"))));
+
+    gated "a `linear` wrapper is transparent to the refinement" (fun () ->
+        let lin = "  fn f(x : linear {Int | _ > 0}) : Int do x end\n" in
+        Alcotest.(check bool) "f(0 - 1) against linear {Int | _ > 0}" true
+          (has_refine_error_d (prog ~extra:lin (main "    f(0 - 1)\n")));
+        Alcotest.(check bool) "f(1)" false
+          (has_refine_error_d (prog ~extra:lin (main "    f(1)\n"))));
+
+    gated "two record types of one shape make a bare literal ambiguous: fail closed" (fun () ->
+        let extra = box ^ "  type Box2 = { v : Int }\n" in
+        Alcotest.(check bool) "{ v: 0 } is not obliged" false
+          (has_refine_error_d (prog ~extra (main "    let b = { v: 0 }\n    0\n"))));
+
+    gated "actor state: init, handler result, and the assumed incoming state" (fun () ->
+        let actor result =
+          "  actor Counter do\n\
+          \    state { value : {Int | value >= 0} }\n\
+          \    init { value: 0 }\n\
+          \    on Inc(n : {Int | n > 0}) do\n      " ^ result ^ "\n    end\n  end\n\
+          \  fn main() : Unit do\n    let c = spawn(Counter)\n    let _ = send(c, Inc(1))\n    kill(c)\n  end\n"
+        in
+        Alcotest.(check bool) "state.value + n keeps value >= 0" false
+          (has_refine_error_d (prog (actor "{ state with value: state.value + n }")));
+        Alcotest.(check bool) "state.value - 1 can break it" true
+          (has_refine_error_d (prog (actor "{ state with value: state.value - 1 }")));
+        (* The call is its own statement: as the update's actual it would be
+           an opaque call result, and the UPDATE would then be unverifiable,
+           which is a different (and correct) verdict. *)
+        Alcotest.(check bool) "need(state.value + 1) discharged from the invariant" false
+          (has_refine_error_d
+             (prog (actor "let _ = need(state.value + 1)\n      { state with value: state.value + n }")));
+        let bad_init =
+          "  actor Counter do\n\
+          \    state { value : {Int | value >= 0} }\n\
+          \    init { value: 0 - 1 }\n\
+          \    on Inc(n : Int) do { state with value: state.value } end\n  end\n\
+          \  fn main() : Unit do\n    let c = spawn(Counter)\n    kill(c)\n  end\n"
+        in
+        Alcotest.(check bool) "init { value: -1 } is rejected" true
+          (has_refine_error_d (prog bad_init))) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -13723,4 +14055,9 @@ let () =
         audit_classify_suite @ audit_classify_reason_suite @ audit_classify_fixloop1_suite);
       ("audit-flag", audit_flag_suite);
       ("audit-baseline", audit_baseline_suite);
-      ("const-fn-predicate", const_fn_suite) ]
+      ("const-fn-predicate", const_fn_suite);
+      ("unobliged-assume", unobliged_assume_suite);
+      ("local-fn-contract", local_fn_suite);
+      ("lambda-contract", lambda_contract_suite);
+      ("actor-handler-contract", actor_handler_suite);
+      ("stored-field-contract", stored_field_suite) ]

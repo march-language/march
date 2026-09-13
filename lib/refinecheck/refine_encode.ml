@@ -449,6 +449,14 @@ type fn_sig = {
      an argument at a Bool/Float position be DECLARED at that sort rather than
      silently at `Int`, which z3 rejects the moment the predicate uses it. *)
   param_scalar : Smt.sort list;
+  (* Parallel to [param_names]: each parameter's DECLARED type, refined or
+     not, [None] for a pattern parameter or an unannotated one.  Read by
+     exactly one consumer: the pass-site check in [Refine_check.visit], which
+     needs to know that `apply`'s first parameter is `Int -> Int` (an arrow
+     whose domain promises nothing) to oblige `apply(take_n, -3)` — a shape
+     that has no refined parameter of its own, which is why [entry_of_sig]
+     keeps a signature with an arrow parameter even when [refined] is empty. *)
+  param_tys : A.ty option list;
   refined : rparam list;
   ret : (string * A.expr) option;
   (* SMT sort of the refined RETURN value: [None] for an Int return (the Tier 0
@@ -832,8 +840,13 @@ let is_adt_base (t : A.ty) : bool =
    M-c) its datatype sort, everything else (type params, unmodelled types) the
    opaque `Elem`.  Requires every ADT name already registered in [adt_ctors] —
    hence the two-pass registration (names, then field sorts). *)
-let smt_sort_of_field (t : A.ty) : Smt.sort =
+(* A refinement or linearity wrapper says nothing about a value's SORT — a
+   `{Int | _ > 0}` field is an Int field.  Before 2026-09-13 this fell through
+   to the opaque `Elem` sort, which is harmless while nothing reads a refined
+   field, and wrong the moment a stored-field contract reflects one. *)
+let rec smt_sort_of_field (t : A.ty) : Smt.sort =
   match t with
+  | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> smt_sort_of_field b
   | A.TyCon ({ A.txt = "Int"; _ }, []) -> Smt.SInt
   | A.TyCon ({ A.txt = "Bool"; _ }, []) -> Smt.SBool
   | A.TyCon ({ A.txt; _ }, _) when Hashtbl.mem adt_ctors (adt_sort_name txt) ->
@@ -850,6 +863,13 @@ let rec register_adt_names (decls : A.decl list) : unit =
           (List.map (fun (v : A.variant) -> v.A.var_name.A.txt) variants)
       | A.DType (_, name, _, A.TDRecord _, _)
       | A.DAlwaysLinearType (_, name, _, A.TDRecord _, _) ->
+        Hashtbl.replace adt_ctors (adt_sort_name name.A.txt) [ name.A.txt ]
+      (* An actor's `state { ... }` is a record in every respect the checker
+         cares about — named fields, one constructor — registered under the
+         actor's own name so `state.value` in a handler and `{ state with
+         value: ... }` reflect through the same selectors a record does
+         (plan phase 4: actor state as an inductive invariant). *)
+      | A.DActor (_, name, _, _) ->
         Hashtbl.replace adt_ctors (adt_sort_name name.A.txt) [ name.A.txt ]
       | A.DMod (_, _, ds, _) -> register_adt_names ds
       | _ -> ())
@@ -873,6 +893,12 @@ let rec register_field_sorts (decls : A.decl list) : unit =
           (List.map (fun (f : A.field) -> smt_sort_of_field f.A.fld_ty) fields);
         Hashtbl.replace ctor_field_names ctor
           (List.map (fun (f : A.field) -> f.A.fld_name.A.txt) fields)
+      | A.DActor (_, name, ad, _) ->
+        let ctor = name.A.txt in
+        Hashtbl.replace ctor_field_sorts ctor
+          (List.map (fun (f : A.field) -> smt_sort_of_field f.A.fld_ty) ad.A.actor_state);
+        Hashtbl.replace ctor_field_names ctor
+          (List.map (fun (f : A.field) -> f.A.fld_name.A.txt) ad.A.actor_state)
       | A.DMod (_, _, ds, _) -> register_field_sorts ds
       | _ -> ())
     decls

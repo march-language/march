@@ -13,6 +13,53 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Stored-field refinements are enforced.** A refined record field
+  (`type Box = { v : {Int | _ > 0} }`), variant argument
+  (`type W = W({Int | _ > 0})`), or actor state field is now a contract on
+  every construction, so `{ v: 0 }`, `{ b with v: 0 }`, `W(0 - 1)`, and an
+  `init { value: 0 - 1 }` under `value : {Int | value >= 0}` are rejected,
+  and a fact for every reader: `b.v` on a `b : Box` is known to satisfy
+  `_ > 0`, and a handler's incoming `state` is known to satisfy its
+  invariant (which `init` and every handler result must re-establish). A
+  `linear` wrapper is transparent to the refinement. A record literal is
+  typed by its field set; two types of one shape make it ambiguous and it is
+  not obliged. Refinements inside a type argument (`List({Int | _ > 0})`)
+  remain unenforced.
+
+- **An actor handler's parameter refinements are enforced.** `on Inc(n :
+  {Int | n > 0})` now obliges every construction of `Inc(...)` in the program
+  (`send`, `Actor.call`, or a message bound to a `let` first), so
+  `send(c, Inc(0 - 1))` is rejected where the message is built, and the
+  handler body assumes `n > 0`. A message name defined by two handlers or
+  shared with a variant constructor is neither obliged nor assumed (fail
+  closed). A message arriving from a remote node was built by code this
+  compiler did not check; the docs state that trust boundary.
+
+- **Passing a refined function is checked at the pass site, and a
+  `let`-bound lambda's refinements are enforced.** `apply(take_n, -3)` with
+  `fn apply(f : Int -> Int, x : Int)` and `take_n : {Int | _ >= 0} -> Int` is
+  now rejected where `take_n` is passed: the expected domain `Int` promises
+  nothing, so it cannot imply `_ >= 0` (witness `-1`). The rule is
+  contravariant subtyping: a refined callable (named, aliased, local `fn`,
+  `let`-bound or inline lambda) may be passed only where the expected
+  function type's domain implies its own parameter refinement for every
+  value; a domain refined at least as strongly passes, and a domain spelled
+  as a type variable (`List.map`'s) promises nothing. A `let g = fn (n : {Int
+  | n > 0}) -> ...` is also a contract for its direct callers now, and
+  assumes `n > 0` in its body while every use of `g` is obliged. The former
+  accept witness `t77_refine_hof_bypass_limitation` is the reject witness
+  `t77_refine_hof_pass_site_rejected`. Multi-parameter callables are neither
+  obliged nor assumed.
+
+- **A block-level `fn`'s refinements are enforced.** A local
+  `fn inner(n : {Int | n > 0}) : {Int | _ > 0} do ... end` inside a function
+  body is now a contract on both ends: every direct `inner(...)` after it and
+  every recursive call inside it is obliged by the parameter refinement, and
+  the return refinement is verified against the body. The body may assume its
+  parameters only while `inner` is never passed around as a value; an
+  escaping local is checked with them stripped. `--refine-audit` reports both
+  positions Enforced.
+
 - **A session endpoint can be hosted in an actor.** `test/session/stream_actor.march`
   runs both roles of a protocol inside actors, with every resumption driven by
   a mailbox delivery, over the same generated `@[endpoints]` API and with the
@@ -101,6 +148,17 @@ git log is authoritative for exact commits.
   local `fn g(st : S1)` that ignores `st`, was accepted silently; top-level
   functions and actor handlers already rejected the same code. It now reports
   "The linear value `st` was never used."
+
+- **A refinement on a lambda's, a block-level `fn`'s, or an actor handler's
+  parameter is no longer assumed inside the body.** No caller was obliged by
+  those positions (still true; they are the open coverage holes), but the body
+  treated the predicate as a fact anyway, so `let g = fn (n : {Int | n > 0})
+  -> need(n)` followed by `g(0)` passed `cap verified`. The body is now walked
+  with the refinement stripped, the treatment a non-adoptable `impl` method
+  already got. Code that only verified through that unproved assumption now
+  fails under `cap verified`; see
+  `specs/plans/2026-09-13-refinement-enforcement-holes-plan.md` for the phases
+  that turn each position into an actual contract.
 
 - **`self` inside an actor handler compiles.** It was a real builtin in the
   interpreter but missing from the compiled backend's builtin table, so the
