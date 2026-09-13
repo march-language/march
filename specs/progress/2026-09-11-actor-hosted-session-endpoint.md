@@ -231,7 +231,8 @@ decide that case deliberately.
   observation with less machinery; wiring `supervise` adds the child-pid
   plumbing (a supervisor owns its children, so the spawn-site ownership
   registration has to move) without changing the answer.
-- The `@[endpoints(actor)]` parked/handler-shaped generator variant, still the
-  answer to "a callback cannot read the actor's state record", still out of
-  scope and still unneeded by anything.
+- ~~The `@[endpoints(actor)]` parked/handler-shaped generator variant~~ —
+  **shipped 2026-09-13** as the event API generated beside the callback one
+  (no new attribute): `specs/progress/2026-09-13-endpoints-event-api-actor-state.md`,
+  fixture `test/session/stream_actor_events.march`.
 - A network transport.

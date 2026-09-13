@@ -13,6 +13,17 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`@[endpoints]` also generates an event-shaped API, so a session endpoint
+  can live in an actor's state.** Beside the callback-shaped `recv_*`/`offer_*`,
+  every role module now has `Parked_<Role>` (an `always_linear` "awaiting a
+  delivery" value), `await_*`/`finish` to park an endpoint, and
+  `resume(parked, from, msg, ep)` returning a `Received_<Role>` the actor's own
+  handler matches with `state` in scope. Because `parked` is a linear state
+  field, a turn that resumes and forgets to park again, or keeps the consumed
+  value, is rejected. `test/session/stream_actor_events.march` runs the
+  `Stream` protocol this way with the same trace as the function-hosted
+  version.
+
 - **An `impl` method's parameter refinements are enforced even when the
   method name is ambiguous.** With two impls of `at`, a call
   `at(Crate(0), 0 - 1)` used to resolve to nothing and oblige nobody; it is

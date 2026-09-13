@@ -1594,6 +1594,26 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff session/stream_actor_restart.expected stream_actor_restart.out)))
 
+; The event-shaped endpoint API: the session state lives in ACTOR STATE (a
+; linear `Parked_<Role>` field), each step runs in the actor's own handler
+; with `state` in scope, and the trace is stream_endpoints' byte for byte.
+; Design: specs/todos/2026-09-13-endpoints-event-api-actor-state.md.
+(rule
+ (targets stream_actor_events_bin stream_actor_events.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file session/stream_actor_events.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o stream_actor_events_bin
+        session/stream_actor_events.march)
+   (with-stdout-to stream_actor_events.out (system "./stream_actor_events_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff session/stream_actor_events.expected stream_actor_events.out)))
+
 ; `self` inside an actor handler on the compiled backend. Did not build at all
 ; before 2026-09-12 (absent from llvm_builtins, so the emitter named an
 ; undefined symbol). Delivery to `self` and its identity with the spawner's

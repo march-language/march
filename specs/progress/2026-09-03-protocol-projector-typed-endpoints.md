@@ -538,10 +538,11 @@ Found on the way, not part of the design:
 
 Not done, deliberately:
 
-- **Step 6, the actor-hosted endpoint**, on item 3's two prerequisites:
-  linearity for actor-state fields
-  (`2026-09-10-linear-actor-state-field-retained-after-consume.md`) and a
-  transport whose `suspend` delivers into a mailbox.
+- ~~**Step 6, the actor-hosted endpoint**~~ — shipped 2026-09-12 with the
+  session state in the transport's continuation
+  (`2026-09-11-actor-hosted-session-endpoint.md`), and again on 2026-09-13
+  with the state IN ACTOR STATE once the linearity prerequisite landed
+  (`2026-09-13-endpoints-event-api-actor-state.md`, the event API).
 - Decision 3 (a named access point; `register` still takes an `Int`) and
   decision 4 (a typed sender for multiparty receives; the `from` is ignored).
 - An `--emit-endpoints` debugging flag. The LSP shows the generated modules,
