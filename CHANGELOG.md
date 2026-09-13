@@ -24,6 +24,18 @@ git log is authoritative for exact commits.
   `Stream` protocol this way with the same trace as the function-hosted
   version.
 
+- **Container subtyping: a refinement inside a `List(...)` or `Option(...)`
+  type argument is enforced.** `fn f(xs : List({Int | _ > 0}))` now obliges
+  every value flowing into `xs`: a list literal element-wise (`f([0, 0 - 1])`
+  is rejected twice), a container-typed variable by element implication
+  (`ys : List({Int | _ >= 0})` passed to `f` is rejected with witness `0`;
+  `List({Int | _ > 5})` passes), and anything else as a recorded skip. The
+  same applies to a container return type, an annotated `let`, and a record
+  field. On the other side, `match xs do Cons(h, t) -> …` knows `h > 0` and
+  `t : List({Int | _ > 0})`, and `Some(x)` knows the element fact. Other
+  containers, two layers of nesting, and elements reached through stdlib
+  functions remain unenforced and are reported by `--refine-audit`.
+
 - **Two silent refinement holes are closed.** A `{String | ...}` return
   type is now verified against the function's body (`fn f() : {String | _
   == "a"} do "b" end` is a violation; `len(_) > 3` over `"xy"` is refuted),

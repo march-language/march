@@ -878,6 +878,76 @@ let cb_add_fnparam (cb : cbenv) : A.fn_param -> cbenv = function
   | A.FPNamed p | A.FPDefault (p, _) -> cb_add_param cb p
   | A.FPPat pat -> cb_shadow cb (pat_binders pat)
 
+(* ── Container environment: variable name -> element refinement ───────────
+   `xs : List({Int | _ > 0})` promises every ELEMENT satisfies `_ > 0`; the
+   promise is a contract on every value that flows into such a position (a
+   list literal element-wise, another container-typed variable by
+   implication, anything else a recorded skip — see
+   [Refine_check.check_elements]) and a fact about every element taken out
+   of it (`match xs do Cons(h, t) -> …` gives `h` the predicate and `t` the
+   same element refinement).  Until 2026-09-13 a refinement inside a type
+   argument parsed, typechecked, and obliged nobody
+   (specs/todos/2026-09-01-nested-refinement-enforcement.md).
+
+   The fourth fact channel, exactly like [scope] / [recenv] / [cbenv]: every
+   binding construct retires a name it rebinds before adding any.  The
+   element refinement is stored in [refined_param_ty]'s shape so [elem_sig]
+   can hand it to [check_call] unchanged.  Containers: `List` and `Option`,
+   the two whose constructors the checker's ADT registry already knows
+   ([register_builtin_adts]); a refinement inside any other type argument
+   is still unenforced and the audit still says so. *)
+type contenv = (string * (string * (string * A.expr * string option))) list
+
+let cont_shadow (ce : contenv) (names : string list) : contenv =
+  if names = [] then ce else List.filter (fun (n, _) -> not (List.mem n names)) ce
+
+let elem_refinement (t : A.ty option) : (string * (string * A.expr * string option)) option =
+  match Option.map unlinear t with
+  | Some (A.TyCon ({ A.txt = ("List" | "Option") as c; _ }, [ arg ])) ->
+    (match refined_param_ty (Some arg) with Some r -> Some (c, r) | None -> None)
+  | _ -> None
+
+let cont_add_param (ce : contenv) (p : A.param) : contenv =
+  let ce = cont_shadow ce [ p.A.param_name.A.txt ] in
+  match elem_refinement p.A.param_ty with
+  | Some e -> (p.A.param_name.A.txt, e) :: ce
+  | None -> ce
+
+let cont_add_fnparam (ce : contenv) : A.fn_param -> contenv = function
+  | A.FPNamed p | A.FPDefault (p, _) -> cont_add_param ce p
+  | A.FPPat pat -> cont_shadow ce (pat_binders pat)
+
+(* A `let` enters the channel through an ANNOTATION only when its element
+   obligations were PROVED (the caller passes [~proved]; the same rule
+   [check_let_annotation] applies to a scalar annotation: an unproven
+   annotation grants nothing), or as a straight alias of a variable already
+   in it. *)
+let cont_add_binding ~(proved : bool) (ce : contenv) (b : A.binding) : contenv =
+  let ce = cont_shadow ce (pat_binders b.A.bind_pat) in
+  match b.A.bind_pat with
+  | A.PatVar n ->
+    (match elem_refinement b.A.bind_ty with
+     | Some e when proved -> (n.A.txt, e) :: ce
+     | Some _ -> ce
+     | None ->
+       (match b.A.bind_expr with
+        | A.EVar { A.txt = y; _ } ->
+          (match List.assoc_opt y ce with Some e -> (n.A.txt, e) :: ce | None -> ce)
+        | _ -> ce))
+  | _ -> ce
+
+(* A one-parameter signature carrying an element refinement, so one element
+   (or the symbolic element of a container-typed variable) is checked by
+   [check_call] exactly like an argument. *)
+let elem_sig ~(name : string) ((binder, pred, sort) : string * A.expr * string option) : fn_sig =
+  { param_names = [ name ]
+  ; param_str = [ sort = Some str_sort ]
+  ; param_scalar = [ scalar_sort_or_int sort ]
+  ; param_tys = [ None ]
+  ; refined = [ { idx = 0; binder; pred; sort } ]
+  ; ret = None
+  ; ret_sort = None }
+
 (* The SMT sort of a declared type when it names a registered record — through
    a refinement wrapper too, so `c : {v : Config | …}` is tracked as well (its
    predicate still travels through [scope]; this records only the sort). *)
@@ -1114,13 +1184,22 @@ let local_fn_def (n : A.name) (ps : A.param list) (ret_ty : A.ty option) (body :
 let has_arrow_param (sg : fn_sig) : bool =
   List.exists (function Some (A.TyArrow _) -> true | _ -> false) sg.param_tys
 
+(* …or a parameter whose CONTAINER type carries an element refinement
+   (`xs : List({Int | _ > 0})`): [fn_sig.refined] is empty for it (the
+   refinement is not outermost), but [Refine_check.check_arg_elements] needs
+   the signature to file the element obligations, so it must be resolvable. *)
+let has_elem_param (sg : fn_sig) : bool =
+  List.exists (fun t -> elem_refinement t <> None) sg.param_tys
+
 (* …and when a parameter is FUNCTION-typed (`apply(f : Int -> Int, x)`):
    such a signature carries no obligation of its own ([refined] is empty, so
    every consumer that iterates it does nothing), but the pass-site check in
    [Refine_check.visit] needs the arrow's domain to oblige whoever passes a
    refined callable there — see [fn_sig.param_tys]. *)
 let entry_of_sig (sg : fn_sig) : fn_sig option =
-  if sg.refined <> [] || Option.is_some sg.ret || has_arrow_param sg then Some sg else None
+  if sg.refined <> [] || Option.is_some sg.ret || has_arrow_param sg || has_elem_param sg
+  then Some sg
+  else None
 
 (* ── Which `impl` method contracts may be trusted ──────────────────────────
    An `impl` method is callable under the enclosing module's spelling exactly

@@ -56,3 +56,17 @@ shapes it declines a witness too (a function whose parameter type carries a
 refined field gets no executed witness), which is the "keep the decline and
 document it" option, chosen over teaching `admissible` / `zero_value` /
 `battery_values` to build admissible nested values in the same change.
+
+## 2026-09-13, later: container subtyping for `List` and `Option`
+
+`specs/progress/2026-09-13-container-subtyping.md`. The remaining shape —
+a refinement inside a `List(…)` / `Option(…)` type argument — is enforced:
+every value flowing into such a position owes an element obligation
+(literal element-wise, a container-typed variable by element implication,
+anything else a recorded skip) and every element a `match` takes out
+carries the fact. What is still not modelled, filed as
+`specs/todos/2026-09-13-container-subtyping-other-containers.md`: a
+refinement inside any OTHER container's type argument (`Map`, `Set`, a user
+ADT), two layers of nesting (`List(List({Int | p}))`), and elements reached
+through a stdlib function rather than a `match`. The witness gate keeps
+its decline for nested shapes, as this file's coupling note asks.
