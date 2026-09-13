@@ -147,3 +147,37 @@ Accept witnesses:
 - an unannotated parameter that resolves to a session endpoint and is used
   once;
 - the full `specs/lang/types/` corpus unchanged apart from the new rows.
+
+---
+
+## What shipped (2026-09-13)
+
+As designed: `lin_entry` gained `le_pending` and `le_dup`; `bind_pending`
+binds a parameter whose type is an unbound variable; `record_use` records a
+pending entry's uses without judging; `judge_pending` (with `effective_lin`)
+judges them at every parameter close: `check_scope_consumed` (lambdas, both
+`ELetFn` paths), `check_fn`, and actor handlers. The capture check uses
+`effective_lin` too. `report_double_use` is now the one place that words
+"used more than once", shared by `record_use` and `judge_pending`.
+
+Two notes from building it:
+
+- **Step 5 of the design (fold `check_fn`'s promotion onto `bind_lam_param`)
+  was not needed.** `check_fn`'s `FPNamed` forms always carry a type; only its
+  `FPPat (PatVar _)` arm binds an unannotated name, and it now calls
+  `bind_pending` directly. Its names are judged alongside `param_names`,
+  which excludes `FPPat` entries.
+- **No measurable cost.** `types-oracle` over 645 fixtures took 81.3s against
+  the 81.8s baseline, same box, load ~5.
+
+Stdlib, checked directly (its diagnostics are filtered from user output, so
+the corpus can't see a new false error there): with `bin/main.ml`'s user-file
+filter patched open, `--check` of a trivial program printed byte-identical
+stdlib diagnostics (796 lines, no errors) on `8eb0d7ee` and on this change,
+covering steps 2–5 together. The control: the base binary accepted
+`t213`'s program and this one rejected it, so the two runs really were
+different compilers.
+
+Witnesses: `reject/t212`–`t214`, `accept/t215`, four unit cases; with the
+pending duplicate report disabled, the three reject cases fail.
+`types-oracle`: no pre-existing fixture moved; session goldens identical.

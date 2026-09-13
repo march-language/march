@@ -1,0 +1,19 @@
+-- EXPECT-ERROR: The linear value `s` is used more than once here
+mod Main do
+  needs IO.Console
+  -- t212 for an actor handler's parameter.
+  always_linear type S1 = S1(Int)
+  fn sink(s : S1) : Int do match s do S1(e) -> e end end
+  actor A do
+    state { n : Int }
+    init  { n: 0 }
+    on Take(s) do
+      { state with n: sink(s) + sink(s) }
+    end
+  end
+  fn main(c : Cap(IO.Console)) do
+    let p = spawn(A)
+    send(p, Take(S1(1)))
+    run_until_idle()
+  end
+end

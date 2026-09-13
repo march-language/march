@@ -50,6 +50,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **An unannotated parameter is checked for linearity once its body fixes its
+  type.** `fn g(st) do sink(st) + sink(st) end`, where `sink` takes an
+  `always_linear` value, used `st` twice without complaint (annotating `st`
+  made it an error). The same held for inferred lambdas and actor handler
+  parameters.
+
 - **A closure passed straight to a function, or a local `fn`, can no longer
   capture a linear value.** The "cannot be captured by a closure" rule only ran
   for a lambda bound with `let`; `run2(fn () -> sink(s))` captured `s`, and a

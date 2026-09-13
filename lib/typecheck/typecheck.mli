@@ -145,6 +145,8 @@ type lin_entry = {
   le_lin : Ast.linearity;
   le_used : bool ref;
   le_first_use : Ast.span option ref;
+  le_pending : ty option;
+  le_dup : Ast.span option ref;
 }
 type ctor_info = {
   ci_type : string;

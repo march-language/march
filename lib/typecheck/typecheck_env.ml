@@ -34,6 +34,15 @@ type lin_entry = {
       and reporting only the second one leaves the reader to find the first by
       hand — so the diagnostic points at both. Kept in step with [le_used]
       everywhere that flag is saved and restored (see [iter_arms_linear]). *)
+  le_pending : ty option;
+  (** [Some t] for a parameter bound while its type [t] was still an unbound
+      variable, so its linearity could not be decided yet.  Its uses are
+      recorded but not judged ([le_lin] stays [Unrestricted]); the scope's close
+      resolves [t] and judges them.  See [bind_pending]. *)
+  le_dup : Ast.span option ref;
+  (** For a pending entry: the first use made while [le_used] was already set,
+      i.e. the would-be "used more than once".  Not saved or restored across
+      paths: a duplicate within any one path is real. *)
 }
 
 (** Constructor info — populated from [DType] declarations.
@@ -1469,13 +1478,21 @@ let bind_vars bindings env =
 
 (** Extend env with a new linear/affine variable. *)
 let bind_linear name lin ty env =
-  let le = { le_name = name; le_lin = lin; le_used = ref false; le_first_use = ref None } in
+  let le = { le_name = name; le_lin = lin; le_used = ref false; le_first_use = ref None;
+             le_pending = None; le_dup = ref None } in
   { env with
     vars = StrMap.add name (Mono ty) env.vars;
     fn_arities = StrMap.remove name env.fn_arities;
     plain_let_names = StringSet.remove name env.plain_let_names;
     lin  = le :: env.lin;
     offer_labels = List.filter (fun (n, _) -> n <> name) env.offer_labels }
+
+(** Bind a parameter whose type [ty] is still an unbound variable: an ordinary
+    binding plus a pending linear entry, judged when the scope closes. *)
+let bind_pending name ty env =
+  let le = { le_name = name; le_lin = Ast.Unrestricted; le_used = ref false;
+             le_first_use = ref None; le_pending = Some ty; le_dup = ref None } in
+  { (bind_var name (Mono ty) env) with lin = le :: env.lin }
 
 (* =================================================================
    §8  Generalization and instantiation

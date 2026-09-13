@@ -34,6 +34,8 @@ type lin_entry = {
   le_lin : Typecheck_types.Ast.linearity;
   le_used : bool ref;
   le_first_use : Typecheck_types.Ast.span option ref;
+  le_pending : Typecheck_types.ty option;
+  le_dup : Typecheck_types.Ast.span option ref;
 }
 type ctor_info = {
   ci_type : string;
@@ -280,6 +282,7 @@ val bind_linear :
   StrMap.key ->
   Typecheck_types.Ast.linearity ->
   Typecheck_types.ty -> env -> env
+val bind_pending : StrMap.key -> Typecheck_types.ty -> env -> env
 val generalize :
   int ->
   Typecheck_types.ty ->

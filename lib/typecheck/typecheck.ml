@@ -112,6 +112,34 @@ let lin_display_name n =
       (String.sub n 0 i) (String.sub n (i + 1) (String.length n - i - 1))
   | None -> n
 
+(** "used more than once", for a linear or affine entry, at [span], with a
+    label on the use that consumed it first.  A double-use is a relationship
+    between two sites: without the label the reader knows only that the value
+    was already gone, not what took it. *)
+let report_double_use env ~lin le ~span =
+  let name = lin_display_name le.le_name in
+  let labels =
+    match !(le.le_first_use) with
+    | None -> []
+    | Some first ->
+      [{ Err.lbl_span = first;
+         Err.lbl_message = Printf.sprintf "`%s` was already consumed here" name }]
+  in
+  let message =
+    match lin with
+    | Ast.Affine ->
+      Printf.sprintf
+        "The affine value `%s` is used more than once here.\n\
+         Affine values may be used at most once." name
+    | _ ->
+      Printf.sprintf
+        "The linear value `%s` is used more than once here.\n\
+         Linear values must be consumed exactly once — they cannot \
+         be copied or ignored." name
+  in
+  Err.report env.errors
+    { Err.severity = Err.Error; span; message; labels; notes = []; code = None; fix = None }
+
 let record_use name span env =
   (* Mark any import entry that matches this name as used.
      [import_tracker] can hold one entry per use/import/alias declaration
@@ -152,35 +180,19 @@ let record_use name span env =
            end) entries);
   match List.find_opt (fun e -> e.le_name = name) env.lin with
   | None -> ()   (* unrestricted — no tracking needed *)
+  | Some le when le.le_pending <> None ->
+    (* Linearity not decided yet: record, never report.  The scope's close
+       judges [le_dup] once the type is known ([judge_pending]). *)
+    if !(le.le_used) then begin
+      if !(le.le_dup) = None then le.le_dup := Some span
+    end else begin
+      le.le_used := true;
+      if !(le.le_first_use) = None then le.le_first_use := Some span
+    end
   | Some le ->
-    (* A double-use is a relationship between two sites. Point at the earlier
-       one as well: without it the reader knows only that the value was already
-       gone, not what took it — which on a long function is the whole search. *)
-    let consumed_label () =
-      match !(le.le_first_use) with
-      | None -> []
-      | Some first ->
-        [{ Err.lbl_span = first;
-           Err.lbl_message =
-             Printf.sprintf "`%s` was already consumed here"
-               (lin_display_name name) }]
-    in
     (match le.le_lin with
-     | Ast.Linear when !(le.le_used) ->
-       Err.report env.errors
-         { Err.severity = Err.Error; span;
-           message = Printf.sprintf
-             "The linear value `%s` is used more than once here.\n\
-              Linear values must be consumed exactly once — they cannot \
-              be copied or ignored." (lin_display_name name);
-           labels = consumed_label (); notes = []; code = None; fix = None }
-     | Ast.Affine when !(le.le_used) ->
-       Err.report env.errors
-         { Err.severity = Err.Error; span;
-           message = Printf.sprintf
-             "The affine value `%s` is used more than once here.\n\
-              Affine values may be used at most once." (lin_display_name name);
-           labels = consumed_label (); notes = []; code = None; fix = None }
+     | (Ast.Linear | Ast.Affine) as lin when !(le.le_used) ->
+       report_double_use env ~lin le ~span
      | (Ast.Linear | Ast.Affine) ->
        le.le_used := true;
        if !(le.le_first_use) = None then le.le_first_use := Some span
@@ -294,6 +306,9 @@ let check_linear_all_consumed env ~scope_span in_scope_names =
     ever extended by consing, so the new entries are normally a prefix ending
     at [before.lin] itself; the identity filter is the fallback if some
     rebuild ever breaks that sharing. *)
+let is_unbound_var t =
+  match repr t with TVar { contents = Unbound _ } -> true | _ -> false
+
 let lin_entries_added ~before ~after =
   let rec prefix l =
     if l == before.lin then Some []
@@ -308,18 +323,60 @@ let lin_entries_added ~before ~after =
         not (List.exists (fun o -> o.le_used == le.le_used) before.lin))
       after.lin
 
+(** The linearity a pending entry turns out to have, now that its type may be
+    known; a decided entry's own.  Mirrors [bind_lam_param]'s promotion: an
+    [always_linear] type is [Linear], a [TLin] wrapper on a parameter is
+    tracked [Affine]. *)
+let effective_lin env le =
+  match le.le_pending with
+  | None -> le.le_lin
+  | Some t ->
+    (match repr t with
+     | TCon (name, _) when resolves_always_linear name env -> Ast.Linear
+     | TLin (lin, _) when lin <> Ast.Unrestricted -> Ast.Affine
+     | _ -> Ast.Unrestricted)
+
+let report_wildcard_discard env ~span t =
+  Err.error env.errors ~span
+    (Printf.sprintf
+       "This `_` discards a linear value of type `%s`.\n\
+        Linear values must be consumed exactly once. Bind it to a name \
+        and pass it to something that consumes it." (pp_ty (repr t)))
+
+(** Judge the pending entries among [entries] at their scope's close: a
+    parameter bound before its type was known, whose type the body has since
+    fixed to a linear one, gets exactly the checks it would have had if it had
+    been annotated.  One still unresolved is polymorphic, and is left alone. *)
+let judge_pending env ~scope_span entries =
+  List.iter (fun le ->
+      match le.le_pending with
+      | None -> ()
+      | Some t ->
+        (match effective_lin env le with
+         | Ast.Unrestricted -> ()
+         | lin ->
+           (match !(le.le_dup) with
+            | Some span -> report_double_use env ~lin le ~span
+            | None -> ());
+           if lin = Ast.Linear && not !(le.le_used) then
+             if le.le_name = "_" then report_wildcard_discard env ~span:scope_span t
+             else report_linear_never_used env ~scope_span le))
+    entries
+
 (** Must-use at the close of a parameter scope that has enclosing linear
     binders (a lambda or a local [fn ... end]): every [Linear] entry the
     parameters introduced must have been used.  Field sentinels ("r#f") and a
     [_] parameter are left alone here: neither can be named in the body. *)
 let check_scope_consumed ~before ~after ~scope_span =
+  let added = lin_entries_added ~before ~after in
   List.iter (fun le ->
       if le.le_lin = Ast.Linear
       && not !(le.le_used)
       && le.le_name <> "_"
       && not (String.contains le.le_name '#') then
         report_linear_never_used after ~scope_span le
-    ) (lin_entries_added ~before ~after)
+    ) added;
+  judge_pending after ~scope_span added
 
 (* =================================================================
    §4  Pattern inference
@@ -754,7 +811,7 @@ let capture_snapshot env = List.map (fun le -> (le, !(le.le_used))) env.lin
     local [fn ... end], could capture a linear value and duplicate it. *)
 let check_captures env ~span snapshot =
   List.iter (fun (le, was_used) ->
-      if not was_used && !(le.le_used) && le.le_lin <> Ast.Unrestricted then
+      if not was_used && !(le.le_used) && effective_lin env le <> Ast.Unrestricted then
         let name = lin_display_name le.le_name in
         Err.error env.errors ~span
           (Printf.sprintf
@@ -802,12 +859,7 @@ let is_linear_ty env t =
     scrutinee's, so [S1(_)] discarding an [Int] payload is fine. *)
 let check_wildcard_discards env (wilds : (Ast.span * ty) list) =
   List.iter (fun (sp, t) ->
-      if is_linear_ty env t then
-        Err.error env.errors ~span:sp
-          (Printf.sprintf
-             "This `_` discards a linear value of type `%s`.\n\
-              Linear values must be consumed exactly once. Bind it to a name \
-              and pass it to something that consumes it." (pp_ty (repr t))))
+      if is_linear_ty env t then report_wildcard_discard env ~span:sp t)
     (List.rev wilds)
 
 (** [infer_expr env e] synthesises the type of [e], accumulating any
@@ -3230,6 +3282,9 @@ and bind_lam_param env _sp (p : Ast.param) ann_ty =
   if p.param_name.txt = "_" && effective_lin = Ast.Linear then
     check_wildcard_discards env [ (p.param_name.span, t) ];
   match effective_lin with
+  | Ast.Unrestricted when is_unbound_var t ->
+    (* Not known yet: the body may still fix it to a linear type. *)
+    bind_pending p.param_name.txt t env
   | Ast.Unrestricted ->
     let env1 = bind_var p.param_name.txt (Mono t) env in
     bind_linear_field_sentinels p.param_name.txt t env1
@@ -3453,9 +3508,10 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
               in
               (t :: tys, env')
             | Ast.FPPat (Ast.PatVar name) ->
-              (* Single variable pattern — trivially named; bind it directly *)
+              (* Single variable pattern — trivially named.  Its type is not
+                 known yet, so its linearity is decided at the body's close. *)
               let t = fresh_var env'.level in
-              let env' = bind_var name.txt (Mono t) env in
+              let env' = bind_pending name.txt t env in
               (t :: tys, env')
             | Ast.FPPat pat ->
               (* Complex pattern parameter: should have been desugared into a
@@ -3564,6 +3620,12 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
           | Ast.FPDefault (p, _) -> Some p.param_name.txt
           | Ast.FPPat _ -> None) clause.fc_params in
       check_linear_all_consumed body_env ~scope_span:fn_span param_names;
+      let pat_var_names = List.filter_map (function
+          | Ast.FPPat (Ast.PatVar n) -> Some n.txt
+          | _ -> None) clause.fc_params in
+      judge_pending body_env ~scope_span:fn_span
+        (List.filter (fun le -> List.mem le.le_name (param_names @ pat_var_names))
+           body_env.lin);
 
       (* Warn about unrestricted params not referenced in the body *)
       warn_unused_params env clause.fc_params clause.fc_body fn_span;
@@ -4477,8 +4539,13 @@ let rec check_decl env (d : Ast.decl) : env =
         (* A linear parameter must be consumed by the time the handler returns.
            Storing it into the returned state counts: `{ state with st: s }`
            references `s`, which marks it used. *)
+        let handler_param_names =
+          List.map (fun (p : Ast.param) -> p.Ast.param_name.Ast.txt) h.ah_params in
         check_linear_all_consumed handler_env ~scope_span:h.ah_msg.Ast.span
-          (List.map (fun (p : Ast.param) -> p.Ast.param_name.Ast.txt) h.ah_params);
+          handler_param_names;
+        judge_pending handler_env ~scope_span:h.ah_msg.Ast.span
+          (List.filter (fun le -> List.mem le.le_name handler_param_names)
+             handler_env.lin);
         let shadow_env = { handler_env with errors = Err.create () } in
         (* Note: pending_constraints and type_map are shared (shallow copy) —
            intentional; only error reporting is isolated. *)

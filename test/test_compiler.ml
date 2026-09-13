@@ -6320,6 +6320,48 @@ let test_linear_capture_nothing_linear_ok () =
     end|}) in
   Alcotest.(check bool) "closures capturing nothing linear: no error" false (has_errors ctx)
 
+(* An unannotated parameter's linearity used to be decided at bind time, from a
+   fresh type variable, so it was never tracked even when the body fixed its
+   type to a linear one. Now tracked as pending and judged at the close.
+   Corpus: reject/t212-t214, accept/t215. *)
+let test_linear_unannotated_fn_param_reused () =
+  let ctx = typecheck (linear_mod {|
+    fn g(st) : Int do sink(st) + sink(st) end|}) in
+  Alcotest.(check bool) "unannotated fn param reused" true
+    (linear_error ctx "The linear value `st` is used more than once here")
+
+let test_linear_unannotated_lambda_param_reused () =
+  let ctx = typecheck (linear_mod {|
+    fn f() : Int do
+      let g = fn st -> sink(st) + sink(st)
+      g(S1(1))
+    end|}) in
+  Alcotest.(check bool) "unannotated lambda param reused" true
+    (linear_error ctx "The linear value `st` is used more than once here")
+
+let test_linear_unannotated_handler_param_reused () =
+  let ctx = typecheck (linear_mod {|
+    actor A do
+      state { n : Int }
+      init  { n: 0 }
+      on Take(s) do { state with n: sink(s) + sink(s) } end
+    end|}) in
+  Alcotest.(check bool) "unannotated handler param reused" true
+    (linear_error ctx "The linear value `s` is used more than once here")
+
+let test_linear_unannotated_params_ok () =
+  let ctx = typecheck (linear_mod {|
+    fn per_branch(b : Bool, st) : Int do
+      if b do sink(st) else sink(st) end
+    end
+    fn id(x) do x end
+    fn f() : Int do
+      let g = fn st -> sink(st)
+      let xs = List.map([1, 2, 3], fn x -> x + 1)
+      sink(id(S1(1))) + id(2) + per_branch(true, S1(3)) + g(S1(4)) + List.length(xs)
+    end|}) in
+  Alcotest.(check bool) "unannotated params used once / polymorphic: no error" false (has_errors ctx)
+
 (* Same gap via a single correct use — must NOT regress to a false positive. *)
 let test_linear_letq_acquire_single_use_ok () =
   let ctx = typecheck {|mod Test do
@@ -15779,6 +15821,10 @@ let compiler_suites =
           Alcotest.test_case "capture: local fn"                          `Quick test_linear_capture_local_fn;
           Alcotest.test_case "capture: reported once"                     `Quick test_linear_capture_reported_once;
           Alcotest.test_case "capture: nothing linear ok"                 `Quick test_linear_capture_nothing_linear_ok;
+          Alcotest.test_case "unannotated: fn param reused"               `Quick test_linear_unannotated_fn_param_reused;
+          Alcotest.test_case "unannotated: lambda param reused"           `Quick test_linear_unannotated_lambda_param_reused;
+          Alcotest.test_case "unannotated: handler param reused"          `Quick test_linear_unannotated_handler_param_reused;
+          Alcotest.test_case "unannotated: used once / polymorphic ok"    `Quick test_linear_unannotated_params_ok;
           Alcotest.test_case "transitions block: no errors"              `Quick test_transitions_parses;
           Alcotest.test_case "transitions via missing fn: error"         `Quick test_transitions_via_not_found_error;
           Alcotest.test_case "undeclared transition fn: warning emitted" `Quick test_transitions_warn_undeclared;
