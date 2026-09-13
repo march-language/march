@@ -385,6 +385,48 @@ the `consume` mode.)
 
 ---
 
+## Linear Values in Closures, Containers, and Generic Code
+
+A linear value has to stay traceable wherever it goes, so four more places
+enforce the rule:
+
+- **Closures can't capture one.** A closure may run any number of times, so
+  `run(fn () -> sink(s))` with an outer linear `s` is rejected (`` The linear
+  value `s` cannot be captured by a closure ``), whether the closure is bound
+  with `let`, passed straight to a function, or written as a local
+  `fn … end`. Pass the value in as a parameter instead. A lambda's or local
+  fn's own linear parameters must be consumed by the end of its body, just like
+  a top-level function's (`reject/t198`–`t201`, `t208`–`t210`).
+- **`_` can't discard one.** `let _ = token`, `let (a, _) = pair_of_tokens`,
+  a `_ ->` arm on a linear value, or `fn _ -> …` receiving one all drop a
+  value that must be consumed. Discarding a non-linear part (`Token(_)`) is
+  fine, and so is a `_` arm that ends in `panic(…)` (`reject/t203`–`t206`).
+- **A container holding one is linear itself.** A tuple, list or ADT value
+  with a linear value inside (`(token, 1)`, `Some(token)`, `[token]`) must be
+  used exactly once, like the value it holds. Records are the exception: their
+  fields are tracked one by one, as above (`reject/t233`–`t234`).
+- **Generic functions must opt in.** A type variable is unrestricted: a generic
+  function may drop or duplicate a value of that type. So passing a linear
+  value to one is an error unless the function marks that parameter
+  `linear`, which makes the body use it exactly once:
+
+  ```march
+  fn dup(x) do (x, x) end              -- dup(token): rejected, dup may duplicate
+  fn id(linear x : a) : a do x end     -- id(token): fine, x is checked linear
+  ```
+
+  Constructors (`Some`, tuples, your own ADTs) store each argument once and need
+  nothing; neither do operators, nor functions whose type variable appears only
+  in what they return. Most stdlib generics have not opted in, so
+  `List.length([token])` is rejected: it would drop the token
+  (`reject/t229`–`t231`, `accept/t232`).
+
+An unannotated parameter is tracked as soon as its body fixes its type to a
+linear one: `fn g(st) do sink(st) + sink(st) end` is rejected just like the
+annotated form (`reject/t212`–`t214`).
+
+---
+
 ## Practical Rules
 
 1. **Use `linear` for resources with mandatory cleanup**: file handles, database connections, exclusive locks, capabilities you must return.
@@ -396,6 +438,8 @@ the `consume` mode.)
 4. **Branches must agree.** A linear value that one branch of an `if`, `match` or `match do` consumes must be consumed by every branch that returns; a branch that ends in `panic(…)` never returns and doesn't count. The early `Err` return of `let?` is a branch too, so consume linear values before a `let?` that could skip them. Affine values and session-channel endpoints may still be dropped on a branch.
 
 5. **Linear fields in records are owned by the record**: accessing one moves it out, using the record whole moves them all, `{ r with … }` keeps the ones it doesn't replace, and each must be consumed by the end of the record's scope.
+
+6. **Closures, wildcards and generic code don't get a pass**: a closure can't capture a linear value, `_` can't discard one, a tuple/list/ADT holding one is linear too, and a generic function receives one only through a parameter marked `linear`.
 
 ---
 

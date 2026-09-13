@@ -50,6 +50,17 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A generic function has to opt in to receiving a linear value, and a
+  container holding one is linear too.** `fn dup(x) do (x, x) end` turned one
+  `always_linear` value into two, `fn drop_it(x) do 0 end` leaked one, and a
+  tuple holding one could be destructured twice. A generic function now receives
+  a linear value only through a parameter marked `linear` (`fn id(linear x : a)
+  : a`), which its body must then use exactly once; constructors, operators and
+  functions that only return their type variable need nothing. A tuple, list or
+  ADT value holding a linear value is tracked like the value itself. **This can
+  reject code that compiled before**, including stdlib calls such as
+  `List.length` on a list of linear values.
+
 - **A linear value must be consumed on every branch that returns.** `if b do
   sink(st) else 0 end` dropped `st` whenever `b` was false, and was accepted:
   branches merged as "consumed on some branch". A branch that ends in `panic(…)`

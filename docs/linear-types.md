@@ -324,6 +324,33 @@ error, the same double-use rejection this chapter has covered throughout.
 
 ---
 
+## Linear Values in Closures, Containers, and Generic Code
+
+A linear value has to stay traceable wherever it goes:
+
+- **Closures can't capture one.** A closure may run more than once, so an outer
+  linear value can't be used inside one; pass it in as a parameter. And a
+  lambda's own linear parameters must be consumed, just like a function's.
+- **`_` can't discard one.** `let _ = token` or `fn _ -> …` receiving a linear value
+  would drop it. Discarding a non-linear part (`Token(_)`) is fine.
+- **A container holding one is linear itself.** `(token, 1)`, `Some(token)` and
+  `[token]` must be used exactly once, like what they hold. Records are the exception:
+  their fields are tracked one by one.
+- **Generic functions must opt in.** A generic function may drop or duplicate a value
+  of its type parameter, so it can only receive a linear value if it marks that
+  parameter `linear`:
+
+  ```march
+  fn dup(x) do (x, x) end              -- dup(token): rejected, dup may duplicate
+  fn id(linear x : a) : a do x end     -- id(token): fine, x is checked linear
+  ```
+
+  Constructors, operators, and functions that only *return* their type variable need
+  nothing. Most stdlib generics haven't opted in, so `List.length([token])` is
+  rejected: it would drop the token.
+
+---
+
 ## Practical Rules
 
 1. **Use `linear` for resources with mandatory cleanup**: file handles, database connections, exclusive locks, capabilities you must return.
@@ -335,6 +362,8 @@ error, the same double-use rejection this chapter has covered throughout.
 4. **Branches must agree.** A linear value that one branch of an `if`, `match` or `match do` consumes must be consumed by every branch that returns; a branch that ends in `panic(…)` never returns and doesn't count. The early `Err` return of `let?` is a branch too, so consume linear values before a `let?` that could skip them. Affine values and session-channel endpoints may still be dropped on a branch.
 
 5. **Linear fields in records are owned by the record**: accessing one moves it out, using the record whole moves them all, `{ r with … }` keeps the ones it doesn't replace, and each must be consumed by the end of the record's scope.
+
+6. **Closures, wildcards and generic code don't get a pass**: a closure can't capture a linear value, `_` can't discard one, a tuple/list/ADT holding one is linear too, and a generic function receives one only through a parameter marked `linear`.
 
 ---
 

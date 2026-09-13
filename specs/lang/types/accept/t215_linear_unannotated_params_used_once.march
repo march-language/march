@@ -2,8 +2,10 @@ mod Main do
   needs IO.Console
   -- What t212-t214's fix keeps accepting. An unannotated parameter used once
   -- on each path is fine (a use per branch is not a duplicate). One whose type
-  -- is never fixed inside its own body is polymorphic and untouched: `id` at
-  -- S1 and at Int, and every ordinary `fn x -> x + 1`.
+  -- is never fixed inside its own body is polymorphic and untouched by this
+  -- rule: `id` at Int, and every ordinary `fn x -> x + 1`. (Passing a linear
+  -- value to such a polymorphic parameter is the generic-code rule's business:
+  -- `id` would have to opt in with `linear x : a`, see reject/t229.)
   always_linear type S1 = S1(Int)
   fn sink(s : S1) : Int do match s do S1(e) -> e end end
   fn per_branch(b : Bool, st) : Int do
@@ -13,7 +15,7 @@ mod Main do
   fn main(c : Cap(IO.Console)) do
     let f = fn st -> sink(st)
     let xs = List.map([1, 2, 3], fn x -> x + 1)
-    let n = sink(id(S1(1))) + id(2) + per_branch(true, S1(3)) + f(S1(4))
+    let n = id(2) + per_branch(true, S1(3)) + f(S1(4))
     println(int_to_string(n + List.length(xs)))
   end
 end

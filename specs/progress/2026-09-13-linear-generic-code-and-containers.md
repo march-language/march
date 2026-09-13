@@ -140,3 +140,66 @@ Reject: `dup(S1(1))`; `drop_it(S1(1))`; the tuple destructured twice;
 Accept: `Some(S1(1))` matched and consumed; `Ok(h)` through `let?`; an
 opted-in `fn id(linear x : a) : a do x end` at `S1`; every generic stdlib
 call at unrestricted types (the corpus must not move).
+
+---
+
+## What shipped (2026-09-13)
+
+Option B, plus the containment rule, in one change.
+
+**Generic code.** `instantiate` records every named polymorphic use
+(`linear_generic_uses`: name, quantified ids, fresh instantiations, scheme
+body), and `check_linear_instantiations` sweeps them once the module is
+solved. A use is rejected when a quantified variable in a NEGATIVE position of
+the scheme (one the function receives: `consumed_var_ids`) is instantiated
+with a type that is or holds a linear value (`contains_linear`), and the
+variable's id is not in `linear_ok_ids`. A parameter declared `linear`/`affine`
+marks every type variable in its type linear-ok (`mark_linear_ok`, in
+`check_fn` and `bind_lam_param`); ids survive generalization, so the mark
+reaches every instantiation.
+
+Three exemptions, each forced by a measurement or a witness:
+
+- **Constructors** never go through `instantiate`, so they are exempt by
+  construction, as designed.
+- **Positive-only variables** (`panic : String -> a`, `task_spawn`'s result):
+  the function produces a value of that type and never drops one.
+- **Operators.** The first build moved `accept/t67` and `reject/t77`: `p.data
+  + 1` on a `linear Int` field instantiates `+`'s type variable with `linear
+  Int`. An operator reads each operand once and keeps none, so names that do
+  not start with a letter or `_` are exempt.
+
+Step 0's measurement (the planned warning-first count) was replaced by the
+measurement that matters for the decision already taken: with the rule on as
+an error, `types-oracle` moved no pre-existing fixture (after the operator
+exemption) and the stdlib's own diagnostics stayed byte-identical to
+`8eb0d7ee`. No stdlib function needed annotating for anything in-repo to keep
+checking.
+
+**Containment.** `holds_linear` (`typecheck_unify.ml`) promotes a binding whose
+type holds a linear value in an owning position: a tuple component, a `List`
+element, or a payload of a variant type. It is used at every promotion site
+that previously asked `resolves_always_linear`: `let` (`auto_lin`),
+pattern bindings, `check_fn` and `bind_lam_param` parameters, and pending
+entries. Records are excluded (their fields have sentinels; a linear record
+binder would count every field read as a whole use), as are type arguments of
+opaque types (`Pid`, `Vault`, `Task`), which refer to values rather than hold
+them.
+
+**One step-5 witness changed:** `accept/t215` used an unannotated `id` at `S1`
+to show polymorphic parameters are untouched by the pending rule; the generic
+rule now requires `id` to opt in, so that call was removed and the fixture says
+why.
+
+Gates: `scripts/run-tests.sh -q` 3231 OK; `dune build @test/runtest` exit 0.
+
+Witnesses: `reject/t229`–`t231`, `t233`–`t234`, `accept/t232`, `t235`; eight
+unit cases. Proved able to fail: sweep off (four generic rejects), opt-in
+ignored, operator exemption off, polarity off (each fails the accept case),
+containment off, records not excluded.
+
+Not covered: a closure is not a container here (the capture rule already
+forbids linear captures); a linear value stored into a `Vault` goes through
+`Vault.set`, whose element variable has not opted in, so it is rejected
+rather than tracked — storing linear values in shared tables stays
+unsupported.

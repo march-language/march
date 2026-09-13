@@ -895,6 +895,40 @@ let field_linearity env fty =
   | TCon (name, _) when resolves_always_linear name env -> Some Ast.Linear
   | _ -> None
 
+(** A type whose values must be consumed exactly once: a [TLin Linear] wrapper
+    (session channels excluded; they are tracked affine) or an
+    [always_linear] type. *)
+let is_linear_ty env t =
+  match repr t with
+  | TLin (Ast.Linear, inner) ->
+    (match repr inner with TChan _ -> false | _ -> true)
+  | TCon (name, _) -> resolves_always_linear name env
+  | _ -> false
+
+(** A type that is linear or holds a linear value by ownership: a tuple
+    component, a list element, an ADT payload, a record field.  Not the type
+    argument of an opaque handle ([Pid], [Vault], [Task]), which refers to
+    values rather than holding one. *)
+let rec contains_linear ?(records = true) env t =
+  is_linear_ty env t
+  || (match repr t with
+      | TTuple ts -> List.exists (contains_linear ~records env) ts
+      | TCon (n, args) when n = "List" || name_is_variant env n ->
+        List.exists (contains_linear ~records env) args
+      | TRecord flds when records ->
+        List.exists (fun (_, ft) -> field_linearity env ft <> None) flds
+      | _ -> false)
+
+(** The linearity a BINDING of type [t] gets by what it holds: an
+    [always_linear] type, or a tuple, list or ADT value holding a linear value,
+    is [Linear].  A record is not: its linear fields are tracked per field
+    ([bind_linear_field_sentinels]), and making the record itself linear would
+    count every field read as a use of the whole. *)
+let holds_linear env t =
+  match repr t with
+  | TLin _ | TRecord _ -> false
+  | _ -> contains_linear ~records:false env t
+
 (** Register per-field linear sentinels for a named record variable [varname].
     When [ty] is or expands to a TRecord with linear fields, adds phantom
     ["varname#fieldname"] entries to env.lin so that EField accesses on

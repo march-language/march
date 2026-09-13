@@ -6363,7 +6363,7 @@ let test_linear_unannotated_params_ok () =
     fn f() : Int do
       let g = fn st -> sink(st)
       let xs = List.map([1, 2, 3], fn x -> x + 1)
-      sink(id(S1(1))) + id(2) + per_branch(true, S1(3)) + g(S1(4)) + List.length(xs)
+      id(2) + per_branch(true, S1(3)) + g(S1(4)) + List.length(xs)
     end|}) in
   Alcotest.(check bool) "unannotated params used once / polymorphic: no error" false (has_errors ctx)
 
@@ -6584,6 +6584,105 @@ let test_linear_branch_channel_lenient_ok () =
     end
   end|} in
   Alcotest.(check bool) "session endpoint driven on some arms: no error" false (has_errors ctx)
+
+(* A type variable is unrestricted unless its function opts in with
+   `linear x : a`: instantiating one the function consumes with a linear type
+   is an error. Corpus: reject/t229-t231, accept/t232. *)
+let generic_msg name = Printf.sprintf "is linear, but `%s` is generic in a parameter of that type" name
+
+let test_linear_generic_dup () =
+  let ctx = typecheck (linear_mod {|
+    fn dup(x) do (x, x) end
+    fn f() : Int do
+      let (a, b) = dup(S1(1))
+      sink(a) + sink(b)
+    end|}) in
+  Alcotest.(check bool) "generic fn duplicating" true (linear_error ctx (generic_msg "dup"))
+
+let test_linear_generic_drop_annotated () =
+  let ctx = typecheck (linear_mod {|
+    fn drop_it(x : a) : Int do 0 end
+    fn f() : Int do drop_it(S1(1)) end|}) in
+  Alcotest.(check bool) "annotated generic fn dropping" true (linear_error ctx (generic_msg "drop_it"))
+
+let test_linear_generic_let_bound_lambda () =
+  let ctx = typecheck (linear_mod {|
+    fn f() : Int do
+      let g = fn st -> 0
+      g(S1(1))
+    end|}) in
+  Alcotest.(check bool) "generalized let lambda" true (linear_error ctx (generic_msg "g"))
+
+let test_linear_generic_container_arg () =
+  (* A local generic function: the unit harness does not load the stdlib, so
+     `List.length` itself is exercised by reject/t231. *)
+  let ctx = typecheck (linear_mod {|
+    fn count(xs : List(a)) : Int do 0 end
+    fn f() : Int do count([S1(1)]) end|}) in
+  Alcotest.(check bool) "list of linear to a generic fn" true
+    (linear_error ctx (generic_msg "count"))
+
+let test_linear_generic_ok () =
+  let ctx = typecheck (linear_mod {|
+    type Packet = { linear data : Int, size : Int }
+    fn id(linear x : a) : a do x end
+    fn bytes(p : Packet) : Int do p.data + 1 end
+    fn f() : Int do
+      let s = id(S1(1))
+      let o = Some(S1(2))
+      let n = match o do
+        Some(v) -> sink(v)
+        None -> 0
+      end
+      let xs = List.map([1, 2, 3], fn x -> x + 1)
+      sink(s) + n + List.length(xs)
+    end
+    fn never(b : Bool, st : S1) : S1 do if b do st else panic("no") end end|}) in
+  Alcotest.(check bool) "opted in / constructor / operator / producer: no error" false (has_errors ctx)
+
+(* A binding whose type holds a linear value (tuple component, list element,
+   ADT payload) is linear itself; a record is not (per-field sentinels).
+   Corpus: reject/t233-t234, accept/t235. *)
+let test_linear_container_tuple_twice () =
+  let ctx = typecheck (linear_mod {|
+    fn f() : Int do
+      let p = (S1(1), 1)
+      let (a, _) = p
+      let (b, _) = p
+      sink(a) + sink(b)
+    end|}) in
+  Alcotest.(check bool) "tuple holding linear destructured twice" true
+    (linear_error ctx "The linear value `p` is used more than once here")
+
+let test_linear_container_option_dropped () =
+  let ctx = typecheck (linear_mod {|
+    fn f() : Int do
+      let o = Some(S1(1))
+      0
+    end|}) in
+  Alcotest.(check bool) "Option holding linear dropped" true
+    (linear_error ctx "The linear value `o` was never used")
+
+let test_linear_container_ok () =
+  let ctx = typecheck (linear_mod {|
+    type R = { st : S1, n : Int }
+    fn both(p : (S1, S1)) : Int do
+      let (a, b) = p
+      sink(a) + sink(b)
+    end
+    fn f() : Int do
+      let p = (S1(1), 2)
+      let (a, n) = p
+      let o = Some(S1(3))
+      let m = match o do
+        Some(v) -> sink(v)
+        None -> 0
+      end
+      let r : R = { st: S1(4), n: 5 }
+      let k = r.n + sink(r.st)
+      sink(a) + n + m + k + both((S1(6), S1(7)))
+    end|}) in
+  Alcotest.(check bool) "containers used once, record field reads: no error" false (has_errors ctx)
 
 (* Same gap via a single correct use — must NOT regress to a false positive. *)
 let test_linear_letq_acquire_single_use_ok () =
@@ -16064,6 +16163,14 @@ let compiler_suites =
           Alcotest.test_case "branch: unannotated param"                  `Quick test_linear_branch_pending_param;
           Alcotest.test_case "branch: every returning branch ok"          `Quick test_linear_branch_ok;
           Alcotest.test_case "branch: session channel lenient ok"         `Quick test_linear_branch_channel_lenient_ok;
+          Alcotest.test_case "generic: duplicating fn"                    `Quick test_linear_generic_dup;
+          Alcotest.test_case "generic: annotated dropping fn"             `Quick test_linear_generic_drop_annotated;
+          Alcotest.test_case "generic: generalized let lambda"            `Quick test_linear_generic_let_bound_lambda;
+          Alcotest.test_case "generic: container to List.length"          `Quick test_linear_generic_container_arg;
+          Alcotest.test_case "generic: opt-in / ctor / operator ok"       `Quick test_linear_generic_ok;
+          Alcotest.test_case "container: tuple used twice"                `Quick test_linear_container_tuple_twice;
+          Alcotest.test_case "container: Option dropped"                  `Quick test_linear_container_option_dropped;
+          Alcotest.test_case "container: used once / records ok"          `Quick test_linear_container_ok;
           Alcotest.test_case "transitions block: no errors"              `Quick test_transitions_parses;
           Alcotest.test_case "transitions via missing fn: error"         `Quick test_transitions_via_not_found_error;
           Alcotest.test_case "undeclared transition fn: warning emitted" `Quick test_transitions_warn_undeclared;

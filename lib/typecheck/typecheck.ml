@@ -314,7 +314,7 @@ let bind_pattern_bindings scrut_expr (bindings : (string * scheme) list) env =
        names, so a nested or imported `always_linear` type would otherwise
        infect an unrelated type of the same name declared here — a false
        positive on ordinary code, which the ordering hole above used to mask. *)
-    | TCon (name, _) when resolves_always_linear name env -> Some Ast.Linear
+    | t when holds_linear env t -> Some Ast.Linear
     | _ -> None
   in
   List.fold_left (fun acc_env (name, sch) ->
@@ -396,7 +396,7 @@ let effective_lin env le =
   | None -> le.le_lin
   | Some t ->
     (match repr t with
-     | TCon (name, _) when resolves_always_linear name env -> Ast.Linear
+     | t when holds_linear env t -> Ast.Linear
      | TLin (lin, _) when lin <> Ast.Unrestricted -> Ast.Affine
      | _ -> Ast.Unrestricted)
 
@@ -999,15 +999,72 @@ let join_linear_paths env ~span snapshot results =
       end)
     snapshot
 
-(** A type whose values must be consumed exactly once: a [TLin Linear] wrapper
-    (session channels excluded; they are tracked affine) or an
-    [always_linear] type. *)
-let is_linear_ty env t =
-  match repr t with
-  | TLin (Ast.Linear, inner) ->
-    (match repr inner with TChan _ -> false | _ -> true)
-  | TCon (name, _) -> resolves_always_linear name env
-  | _ -> false
+(* ── Linear values and generic code ────────────────────────────────── *)
+
+(** Every type variable in [t], by id: marked linear-ok when [t] is the type of
+    a parameter declared [linear]/[affine]. *)
+let mark_linear_ok env t =
+  let rec go t = match repr t with
+    | TVar { contents = Unbound (id, _) } -> Hashtbl.replace env.linear_ok_ids id ()
+    | TArrow (a, b) -> go a; go b
+    | TCon (_, args) | TTuple args -> List.iter go args
+    | TRecord flds -> List.iter (fun (_, t) -> go t) flds
+    | TLin (_, t) -> go t
+    | _ -> ()
+  in
+  go t
+
+(** Ids of the type variables in a NEGATIVE position of [ty]: the ones the
+    function receives rather than produces.  [id : a -> a] consumes [a];
+    [panic : String -> a] and [task_spawn : (Int -> a) -> Task(a)] only
+    produce theirs, which is always safe. *)
+let consumed_var_ids ty =
+  let acc = ref [] in
+  let rec go positive t = match repr t with
+    | TVar { contents = Unbound (id, _) } -> if not positive then acc := id :: !acc
+    | TArrow (a, b) -> go (not positive) a; go positive b
+    | TCon (_, args) | TTuple args -> List.iter (go positive) args
+    | TRecord flds -> List.iter (fun (_, t) -> go positive t) flds
+    | TLin (_, t) -> go positive t
+    | _ -> ()
+  in
+  go true ty;
+  !acc
+
+(** Option B of specs/progress/2026-09-13-linear-generic-code-and-containers.md:
+    a type variable is unrestricted unless its function opted in, so a generic
+    function may drop or duplicate a value of that type, and instantiating it
+    with a linear type where the function consumes it is an error.  Swept once
+    the module is solved, over every named polymorphic use.  Constructors are
+    exempt by construction: they never go through [instantiate]. *)
+let check_linear_instantiations env =
+  (* An operator (`+`, `==`, …) reads each operand exactly once and keeps
+     none of them; a single use of a `linear Int` in `p.data + 1` is exactly
+     that (accept/t67). *)
+  let is_operator name =
+    name <> "" && not (Char.equal name.[0] '_' ||
+                       (Char.lowercase_ascii name.[0] <> Char.uppercase_ascii name.[0]))
+  in
+  Hashtbl.iter (fun sp (name, ids, tys, scheme_ty) ->
+    if not (is_operator name) then
+      let consumed = consumed_var_ids scheme_ty in
+      let reported = ref false in
+      List.iter2 (fun id t ->
+          if not !reported && List.mem id consumed
+             && not (Hashtbl.mem env.linear_ok_ids id)
+             && contains_linear env t then begin
+            reported := true;
+            Err.error env.errors ~span:sp
+              (Printf.sprintf
+                 "`%s` is linear, but `%s` is generic in a parameter of that type, \
+                  so it may drop or duplicate the value.\n\
+                  Consume the value here instead, or, if `%s` uses that parameter \
+                  exactly once, mark it `linear` where `%s` is defined \
+                  (`linear x : a`)."
+                 (pp_ty (repr t)) name name name)
+          end)
+        ids tys)
+    env.linear_generic_uses
 
 (** Report every wildcard in [wilds] (from [with_wildcards], after the pattern
     has been unified) whose own type is linear: [_] drops the value, and March
@@ -1073,7 +1130,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                           ref_kind = `Call;
                           ref_file = name.span.Ast.file;
                           ref_line = name.span.Ast.start_line } :: !(env.refs));
-         instantiate ~use_span:name.span env.level env sch
+         instantiate ~use_span:name.span ~use_name:name.txt env.level env sch
        | None     ->
          (* Try qualified module resolution: "Mod.func" *)
          match resolve_qualified_var name.txt env with
@@ -1089,7 +1146,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                             ref_kind = `Call;
                             ref_file = name.span.Ast.file;
                             ref_line = name.span.Ast.start_line } :: !(env.refs));
-           instantiate ~use_span:name.span env.level env sch
+           instantiate ~use_span:name.span ~use_name:name.txt env.level env sch
          | _ when is_confirmed_private_qualified name.txt env ->
            (* A confirmed privacy violation (`Mod.priv_fn`) must be reported
               as such — falling through to the dot-suffix fallback below would
@@ -1133,7 +1190,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                 | None -> try_suffix rest)
            in
            (match try_suffix name.txt with
-            | Some sch -> instantiate ~use_span:name.span env.level env sch
+            | Some sch -> instantiate ~use_span:name.span ~use_name:name.txt env.level env sch
             | None ->
               let msg =
                 if String.contains name.txt '.' then
@@ -2225,7 +2282,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
         | Some prefix ->
           let qualified = prefix ^ "." ^ name.txt in
           (match lookup_var qualified env with
-           | Some sch -> Some (instantiate ~use_span:sp env.level env sch)
+           | Some sch -> Some (instantiate ~use_span:sp ~use_name:qualified env.level env sch)
            | None ->
              (* For multi-component paths like Conduit.Storage.workflow_load,
                 the interface method may be registered as just "Storage.workflow_load"
@@ -2239,7 +2296,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                  let rest = String.sub p (i + 1) (String.length p - i - 1) in
                  let candidate = rest ^ "." ^ member in
                  (match lookup_var candidate env with
-                  | Some sch -> Some (instantiate ~use_span:sp env.level env sch)
+                  | Some sch -> Some (instantiate ~use_span:sp ~use_name:candidate env.level env sch)
                   | None -> try_suffix rest)
              in
              try_suffix prefix)
@@ -3202,9 +3259,7 @@ and infer_block env exprs =
             before — promoting it to strict-linear would regress that. *)
          | TLin (lin, inner) when lin <> Ast.Unrestricted
              && (match repr inner with TChan _ -> false | _ -> true) -> lin
-         | TCon (name, _) ->
-           if resolves_always_linear name env then Ast.Linear else Ast.Unrestricted
-         | _ -> Ast.Unrestricted)
+         | t -> if holds_linear env t then Ast.Linear else Ast.Unrestricted)
       | lin -> lin
     in
     let env' = match auto_lin with
@@ -3433,10 +3488,11 @@ and bind_lam_param env _sp (p : Ast.param) ann_ty =
     | None, Some t -> t
     | None, None   -> fresh_var env.level
   in
+  if p.param_lin <> Ast.Unrestricted then mark_linear_ok env t;
   let effective_lin = match p.param_lin with
     | Ast.Unrestricted ->
       (match repr t with
-       | TCon (name, _) when resolves_always_linear name env -> Ast.Linear
+       | t when holds_linear env t -> Ast.Linear
        (* A parameter whose resolved type is a linear/affine wrapper — e.g. a
           session channel `ch : Chan(Client, Echo)` resolving to
           `TLin(Linear, TChan …)` — is tracked as AFFINE so a re-read of the
@@ -3649,10 +3705,11 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
                 | Some ann -> surface_ty env' ~tvars:fn_tvars ann
                 | None -> fresh_var env'.level
               in
+              if p.param_lin <> Ast.Unrestricted then mark_linear_ok env' t;
               let effective_lin = match p.param_lin with
                 | Ast.Unrestricted ->
                   (match repr t with
-                   | TCon (tname, _) when resolves_always_linear tname env' -> Ast.Linear
+                   | t when holds_linear env' t -> Ast.Linear
                    (* A session-channel parameter (`ch : Chan(Role, Proto)`)
                       resolves to a [TLin] wrapper.  Track it as AFFINE so a
                       RE-READ of the endpoint inside the body is caught (F7 hole
@@ -6712,6 +6769,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
      enclosing fn/module context captured at record time). Shared ref → one sweep
      at the entry module covers every nested module's sites. *)
   check_mint_cap_sites final_env;
+  check_linear_instantiations final_env;
   check_cap_dict_decls final_env;
   check_cap_impl_sites final_env;
   check_json_cap_sites final_env;

@@ -176,6 +176,10 @@ type env = {
   no_panic_modules : string list;
   nonexhaustive_match_spans :
     Typecheck_types.Ast.span list ref;
+  linear_ok_ids : (int, unit) Hashtbl.t;
+  linear_generic_uses :
+    (Typecheck_types.Ast.span,
+     string * int list * Typecheck_types.ty list * Typecheck_types.ty) Hashtbl.t;
   cap_producer_ivars :
     (int, Typecheck_types.Ast.span) Hashtbl.t;
   cap_narrow_factory_fns :
@@ -290,6 +294,7 @@ val generalize :
   Typecheck_types.scheme
 val instantiate :
   ?use_span:Typecheck_types.Ast.span ->
+  ?use_name:string ->
   int ->
   env ->
   Typecheck_types.scheme ->
