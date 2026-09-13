@@ -50,6 +50,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A `_` wildcard can no longer silently drop a linear value.** `let _ =
+  S1(1)`, `let (a, _) = (S1(1), S1(2))`, a `_ ->` arm on a linear scrutinee,
+  and a `fn _ -> …` callback receiving one were all accepted. Each now reports
+  "This `_` discards a linear value". Discarding a non-linear part (`S1(_)`,
+  `let _ = sink(s)`) and a `_` arm that ends in `panic(…)` stay legal.
+
 - **A lambda or local `fn` can no longer drop a linear parameter.** A
   callback such as `run(fn st -> 0)` receiving an `always_linear` value, or a
   local `fn g(st : S1)` that ignores `st`, was accepted silently; top-level

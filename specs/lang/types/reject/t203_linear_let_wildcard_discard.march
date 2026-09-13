@@ -1,0 +1,12 @@
+-- EXPECT-ERROR: This `_` discards a linear value of type `S1`
+mod Main do
+  needs IO.Console
+  -- `let _ = …` on a linear value drops it. A wildcard introduces no binding,
+  -- so nothing was ever there to be checked for must-use; `let _s = …` was
+  -- already rejected. Accepted before 2026-09-13.
+  always_linear type S1 = S1(Int)
+  fn main(c : Cap(IO.Console)) do
+    let _ = S1(1)
+    println("dropped")
+  end
+end

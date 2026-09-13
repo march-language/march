@@ -325,6 +325,23 @@ let check_scope_consumed ~before ~after ~scope_span =
    §4  Pattern inference
    ================================================================= *)
 
+(** Where [infer_pattern] reports each wildcard it types, while a caller that
+    wants to judge them has one installed (see [with_wildcards]).  The span
+    and the wildcard's own type variable, which is only resolved once the
+    caller unifies the whole pattern.  [type_map] is not usable for this:
+    desugar-generated wildcards share spans, so a lookup by span can return
+    another wildcard's type. *)
+let wildcard_sink : (Ast.span * ty) list ref option ref = ref None
+
+(** [with_wildcards f] runs [f] (an [infer_pattern] call) and also returns the
+    wildcards it typed. *)
+let with_wildcards f =
+  let saved = !wildcard_sink in
+  let log = ref [] in
+  wildcard_sink := Some log;
+  let r = Fun.protect ~finally:(fun () -> wildcard_sink := saved) f in
+  (r, !log)
+
 (** Infer the type that a pattern *expects*, and return the list of
     (name, scheme) bindings it introduces.
 
@@ -336,6 +353,7 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
   match pat with
   | Ast.PatWild sp ->
     let t = fresh_var env.level in
+    (match !wildcard_sink with Some log -> log := (sp, t) :: !log | None -> ());
     (* Record in type_map so lower_match.ml's pattern-matrix compiler can look
        up the resolved (possibly-still-polymorphic) type via ty_of_span for
        constructor-field sub-patterns it discards — e.g. `Cons(_, t) -> ...`.
@@ -719,6 +737,52 @@ and ty_of_lit = function
    the modules above.
    ================================================================= *)
 include Typecheck_exhaustive
+
+(* ── Linear discards by a wildcard ─────────────────────────────────── *)
+
+(** Builtins that never return.  March has no [Never] type ([panic : String ->
+    a]), so "this path does not fall through" is recognised syntactically; this
+    is the one list of names that counts. *)
+let diverging_builtins = [ "panic"; "panic_"; "todo_"; "unreachable_" ]
+
+(** Whether every way through [e] ends in a diverging builtin call, so nothing
+    after it runs.  Conservative: a user function that always panics is not
+    recognised. *)
+let rec path_diverges (e : Ast.expr) =
+  match e with
+  | Ast.EApp (Ast.EVar n, _, _) -> List.mem n.txt diverging_builtins
+  | Ast.EBlock (es, _) ->
+    (match List.rev es with last :: _ -> path_diverges last | [] -> false)
+  | Ast.EIf (_, t, f, _) -> path_diverges t && path_diverges f
+  | Ast.EMatch (_, brs, _) ->
+    brs <> [] && List.for_all (fun (br : Ast.branch) -> path_diverges br.branch_body) brs
+  | Ast.ECond (arms, _) ->
+    arms <> [] && List.for_all (fun (_, b) -> path_diverges b) arms
+  | _ -> false
+
+(** A type whose values must be consumed exactly once: a [TLin Linear] wrapper
+    (session channels excluded; they are tracked affine) or an
+    [always_linear] type. *)
+let is_linear_ty env t =
+  match repr t with
+  | TLin (Ast.Linear, inner) ->
+    (match repr inner with TChan _ -> false | _ -> true)
+  | TCon (name, _) -> resolves_always_linear name env
+  | _ -> false
+
+(** Report every wildcard in [wilds] (from [with_wildcards], after the pattern
+    has been unified) whose own type is linear: [_] drops the value, and March
+    has no destructor to run.  Judged on the wildcard's type, never the
+    scrutinee's, so [S1(_)] discarding an [Int] payload is fine. *)
+let check_wildcard_discards env (wilds : (Ast.span * ty) list) =
+  List.iter (fun (sp, t) ->
+      if is_linear_ty env t then
+        Err.error env.errors ~span:sp
+          (Printf.sprintf
+             "This `_` discards a linear value of type `%s`.\n\
+              Linear values must be consumed exactly once. Bind it to a name \
+              and pass it to something that consumes it." (pp_ty (repr t))))
+    (List.rev wilds)
 
 (** [infer_expr env e] synthesises the type of [e], accumulating any
     errors into [env.errors]. *)
@@ -1855,9 +1919,11 @@ let rec infer_expr env (e : Ast.expr) : ty =
          a type annotation on the binding (`let x : T = e`) so the RHS is
          checked against it, mirroring the normal infer_block ELet arm. *)
       let rhs_ty = infer_let_annotated env sp b.bind_ty b.bind_expr in
-      let bindings, pat_ty = infer_pattern ~expected:rhs_ty env b.bind_pat in
+      let (bindings, pat_ty), wilds =
+        with_wildcards (fun () -> infer_pattern ~expected:rhs_ty env b.bind_pat) in
       let reason = Some (RLetBind sp) in
       unify env ~span:sp ~reason rhs_ty pat_ty;
+      check_wildcard_discards env wilds;
       (* Record variable name type for hover even in tail position *)
       (match b.bind_pat with
        | Ast.PatVar name -> Hashtbl.replace env.type_map name.span (repr rhs_ty)
@@ -2304,10 +2370,12 @@ let rec infer_expr env (e : Ast.expr) : ty =
          (* [t_ok] is no longer a bare fresh var — the unify above bound it to
             the RHS's Ok payload — so it is a usable expected type here, and a
             record pattern needs it to open its field list. *)
-         let bindings, pat_ty = infer_pattern ~expected:t_ok env p in
+         let (bindings, pat_ty), wilds =
+           with_wildcards (fun () -> infer_pattern ~expected:t_ok env p) in
          unify env ~span:sp
            ~reason:(Some (RLetBind sp))
            t_ok pat_ty;
+         check_wildcard_discards env wilds;
          let env' = bind_pattern_bindings result_expr bindings env in
          let body_ty = infer_expr env' body in
          let t_r = fresh_var env.level in
@@ -2387,8 +2455,10 @@ let rec infer_expr env (e : Ast.expr) : ty =
                           own type." flat_map_name)))
                     result_ty m_arg;
                   unify env' ~span:sp ~reason:(Some (RLetBind sp)) m_b1 m_b2;
-                  let bindings, pat_ty = infer_pattern ~expected:a_ty env' p in
+                  let (bindings, pat_ty), wilds =
+                    with_wildcards (fun () -> infer_pattern ~expected:a_ty env' p) in
                   unify env' ~span:sp ~reason:(Some (RLetBind sp)) a_ty pat_ty;
+                  check_wildcard_discards env' wilds;
                   let env'' = bind_pattern_bindings result_expr bindings env' in
                   let body_ty = infer_expr env'' body in
                   unify env'' ~span:sp
@@ -2461,8 +2531,11 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
   | Ast.EMatch (scrut, branches, msp), _ ->
     let scrut_ty = infer_expr env scrut in
     iter_arms_linear env branches (fun (br : Ast.branch) ->
-        let bindings, pat_ty = infer_pattern ~expected:scrut_ty env br.branch_pat in
+        let (bindings, pat_ty), wilds =
+          with_wildcards (fun () -> infer_pattern ~expected:scrut_ty env br.branch_pat) in
         unify env ~span:msp ~reason:(Some (RMatchArm msp)) scrut_ty pat_ty;
+        (* A diverging arm drops nothing that matters: nothing after it runs. *)
+        if not (path_diverges br.branch_body) then check_wildcard_discards env wilds;
         (* Propagate linearity from scrutinee to pattern-bound variables. *)
         let env' = bind_pattern_bindings scrut bindings env in
         (match br.branch_guard with
@@ -2737,8 +2810,10 @@ and iter_paths_linear env (paths : (unit -> unit) list) : unit =
 and infer_match env span scrut scrut_ty branches =
   let result_ty = fresh_var env.level in
   iter_arms_linear env branches (fun (br : Ast.branch) ->
-      let bindings, pat_ty = infer_pattern ~expected:scrut_ty env br.branch_pat in
+      let (bindings, pat_ty), wilds =
+        with_wildcards (fun () -> infer_pattern ~expected:scrut_ty env br.branch_pat) in
       unify env ~span ~reason:(Some (RMatchArm span)) scrut_ty pat_ty;
+      if not (path_diverges br.branch_body) then check_wildcard_discards env wilds;
       (* Propagate linearity from scrutinee to pattern-bound variables. *)
       let env' = bind_pattern_bindings scrut bindings env in
       (match br.branch_guard with
@@ -2839,8 +2914,10 @@ and infer_block env exprs =
        from just the fields it names and `let { code: c } = p` fails to unify
        against a wider `p`.  The [unify] below is then a no-op for records and
        unchanged for every other pattern shape. *)
-    let bindings, pat_ty = infer_pattern ~expected:rhs_ty env_rhs b.bind_pat in
+    let (bindings, pat_ty), wilds =
+      with_wildcards (fun () -> infer_pattern ~expected:rhs_ty env_rhs b.bind_pat) in
     unify env_rhs ~span:sp ~reason:(Some (RLetBind sp)) rhs_ty pat_ty;
+    check_wildcard_discards env_rhs wilds;
     (* Record the binding type in type_map so LSP hover over `let x = …` shows
        the RHS type rather than the enclosing block's return type. *)
     Hashtbl.replace env.type_map sp (repr rhs_ty);
@@ -3130,6 +3207,10 @@ and bind_lam_param env _sp (p : Ast.param) ann_ty =
   (* Track the linear parameter at its INNER (unwrapped) type, matching how
      [bind_pattern_bindings] registers linear let-bindings. *)
   let bind_ty = match repr t with TLin (_, inner) -> inner | _ -> t in
+  (* A `_` parameter can never be referenced, so a linear value bound to it is
+     dropped on the spot — the same discard as `let _ = …`. *)
+  if p.param_name.txt = "_" && effective_lin = Ast.Linear then
+    check_wildcard_discards env [ (p.param_name.span, t) ];
   match effective_lin with
   | Ast.Unrestricted ->
     let env1 = bind_var p.param_name.txt (Mono t) env in

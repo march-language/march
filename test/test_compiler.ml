@@ -6207,6 +6207,57 @@ let test_linear_lambda_affine_param_dropped_ok () =
   end|} in
   Alcotest.(check bool) "affine lambda param dropped: no error" false (has_errors ctx)
 
+(* A `_` wildcard on a linear value dropped it silently: a wildcard binds
+   nothing, so no must-use check could ever see it. Judged on the wildcard's
+   own type. Corpus: reject/t203-t206, accept/t207. *)
+let wildcard_msg = "This `_` discards a linear value of type `S1`"
+
+let test_linear_wildcard_let () =
+  let ctx = typecheck (linear_mod {|
+    fn f() : Int do
+      let _ = S1(1)
+      0
+    end|}) in
+  Alcotest.(check bool) "let _ = linear" true (linear_error ctx wildcard_msg)
+
+let test_linear_wildcard_tuple () =
+  let ctx = typecheck (linear_mod {|
+    fn f() : Int do
+      let (a, _) = (S1(1), S1(2))
+      sink(a)
+    end|}) in
+  Alcotest.(check bool) "tuple wildcard on linear" true (linear_error ctx wildcard_msg)
+
+let test_linear_wildcard_lambda_param () =
+  let ctx = typecheck (linear_mod {|
+    fn f() : Int do run(fn _ -> 0) end|}) in
+  Alcotest.(check bool) "fn _ -> against S1 -> Int" true (linear_error ctx wildcard_msg)
+
+let test_linear_wildcard_match_arm () =
+  let ctx = typecheck (linear_mod {|
+    fn f(st : S1) : Int do
+      match st do
+        _ -> 0
+      end
+    end|}) in
+  Alcotest.(check bool) "`_ ->` arm on linear scrutinee" true (linear_error ctx wildcard_msg)
+
+let test_linear_wildcard_non_linear_ok () =
+  let ctx = typecheck (linear_mod {|
+    fn payload(st : S1) : Int do match st do S1(_) -> 0 end end
+    fn result_dropped() : Int do
+      let s = S1(1)
+      let _ = sink(s)
+      0
+    end
+    fn gives_up(st : S1) : Int do
+      match st do
+        _ -> panic("gave up")
+      end
+    end
+    fn cb(k : Int -> Int) : Int do k(1) end
+    fn unrestricted() : Int do cb(fn _ -> 0) end|}) in
+  Alcotest.(check bool) "wildcards discarding nothing linear: no error" false (has_errors ctx)
 
 (* Same gap via a single correct use — must NOT regress to a false positive. *)
 let test_linear_letq_acquire_single_use_ok () =
@@ -15657,6 +15708,11 @@ let compiler_suites =
           Alcotest.test_case "lambda/local fn params: consumed ok"        `Quick test_linear_lambda_params_consumed_ok;
           Alcotest.test_case "lambda param: shadows outer linear ok"      `Quick test_linear_lambda_param_shadows_outer_ok;
           Alcotest.test_case "lambda param: affine dropped ok"            `Quick test_linear_lambda_affine_param_dropped_ok;
+          Alcotest.test_case "wildcard: let _ = linear"                   `Quick test_linear_wildcard_let;
+          Alcotest.test_case "wildcard: in a tuple pattern"               `Quick test_linear_wildcard_tuple;
+          Alcotest.test_case "wildcard: lambda param"                     `Quick test_linear_wildcard_lambda_param;
+          Alcotest.test_case "wildcard: match arm on linear"              `Quick test_linear_wildcard_match_arm;
+          Alcotest.test_case "wildcard: non-linear discards ok"           `Quick test_linear_wildcard_non_linear_ok;
           Alcotest.test_case "transitions block: no errors"              `Quick test_transitions_parses;
           Alcotest.test_case "transitions via missing fn: error"         `Quick test_transitions_via_not_found_error;
           Alcotest.test_case "undeclared transition fn: warning emitted" `Quick test_transitions_warn_undeclared;

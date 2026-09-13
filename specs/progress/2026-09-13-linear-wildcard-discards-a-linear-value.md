@@ -104,3 +104,30 @@ Blast radius: `scripts/types-oracle.sh` over the corpus, plus a grep of
 `stdlib/` and `test/` for `let _ =` on calls returning `Handle` or an
 `@[endpoints]` state. Any hit is either a real leak (record it) or a
 mistake in the type walk.
+
+---
+
+## What shipped (2026-09-13)
+
+`infer_pattern`'s `PatWild` arm reports each wildcard and its type variable to
+a sink installed by `with_wildcards`; after the caller unifies the pattern,
+`check_wildcard_discards` reports those whose type is linear (`is_linear_ty`:
+`TLin Linear` except channels, or an `always_linear` `TCon`). Wired at the
+block `let`, the tail `let`, `let?`, `let*`, and both match paths. A `_`
+lambda parameter is checked in `bind_lam_param`.
+
+Two things changed from the design above while building it:
+
+- **Not `type_map`.** The design read wildcard types back from `type_map` by
+  span. Desugar-generated wildcards share spans (`desugar_endpoints.ml` gives
+  every generated wildcard the protocol's span), so a lookup can return a
+  different wildcard's type. The sink carries the wildcard's own variable.
+- **Diverging arms are exempt now, not in step 7.** `path_diverges` (tail
+  call to a builtin in "Diverging primitives", or an `if`/`match`/`cond` all
+  of whose paths diverge) landed here, because `match st do _ -> panic(…) end`
+  is the natural spelling of "give up" and must stay legal. Step 7 reuses it.
+
+Witnesses: `reject/t203`–`t206`, `accept/t207`, five unit cases, each proved
+able to fail (report disabled: four rejects fail; divergence exemption
+removed: the accept case fails). `types-oracle`: no pre-existing fixture
+moved. The four `test/session` goldens are byte-identical.
