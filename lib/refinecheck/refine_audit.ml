@@ -455,10 +455,10 @@ let sites (decls : A.decl list) : site list =
 let nested_reason (pos : position) : string =
   match pos with
   | Type_arg ->
-    "the refinement sits inside a type constructor's argument (for example \
-     `List({Int | _ > 0})`); refined_param_ty, refined_scope_ty and \
-     return_refine_ext all match only an outermost TyRefine, so a refinement \
-     this deep is invisible to every one of them"
+    "the refinement sits inside a type constructor's argument of a container \
+     the checker does not model (only `List(…)` and `Option(…)` carry element \
+     contracts, at a parameter, return, `let` annotation or field; see \
+     Refine_scope.elem_refinement), or below one further layer of nesting"
   | Arrow_domain ->
     "the refinement sits in the domain of a function-typed value (for \
      example `({Int | _ > 0}) -> Int`); no extractor descends into an arrow \
@@ -521,6 +521,17 @@ let classify (site : site) : disposition =
   | Iface_method name ->
     inert_signature_verdict "warn_iface_method_refinement"
       (Printf.sprintf "the interface signature of `%s`" name) site
+  (* Container subtyping (2026-09-13): a refinement one layer down inside a
+     `List(…)` / `Option(…)` type argument, at a parameter, return, `let`
+     annotation or field, IS enforced — every value flowing into the
+     position owes an element obligation and every element taken out
+     carries the fact ([Refine_scope.elem_refinement] is the single test of
+     "does the checker model this container").  Tested before rule 1, which
+     would otherwise call every [Nested] site unenforced. *)
+  | (Param _ | Return _ | Let_annot _ | Field _)
+    when site.position = Type_arg
+         && Refine_post.elem_refinement (Some site.origin_ty) <> None ->
+    Enforced
   (* Rule 1: nesting, tested for everything rule 2 did not already dispose
      of. *)
   | (Param _ | Lambda_param _ | Return _ | Let_annot _ | Field _

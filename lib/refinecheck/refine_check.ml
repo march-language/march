@@ -253,7 +253,6 @@ let check_ctor_fields (cx : call_ctx) ~(span : A.span) ~(callee : string) (sg : 
           check_call cx ~span ~callee sg args rp)
       sg.refined
   end
-
 (* The facts a [recenv] entry contributes — see [Refine_scope.field_facts]. *)
 let facts_of_recenv_entry ~(span : A.span) ((x, sort) : string * string) : (A.expr * bool) list =
   match ctor_of_sort sort with
@@ -425,10 +424,112 @@ let check_pass_sites ~root errctx defs (ctx : rctx) path lets sc re cb ~(span : 
              gsg.refined))
     args
 
+(* ── Container subtyping: element obligations ─────────────────────────────
+   A value flowing into a position typed `List({Int | p})` / `Option({Int |
+   p})` — a call argument, a return, an annotated `let`, a record field —
+   must have every element satisfy `p`.  Three sources, three verdicts:
+
+   · a LITERAL (`[a, b]` is a `Cons`/`Nil` chain; `Some(x)`): each element is
+     checked by [check_call] as an ordinary argument against [elem_sig];
+   · a VARIABLE the container env knows (`xs : List({Int | q})`): element
+     subtyping, `q ⇒ p` for every element, phrased as a check on the fresh
+     symbolic element `$elem` carrying `q` — [Element_domain], with the
+     pass-site check's definite-failure rule;
+   · anything else (a call result, an unrefined variable): a RECORDED skip,
+     counted by `--refine-report` and escalated under `cap verified`.
+
+   Returns whether every element obligation was PROVED — what lets an
+   annotated `let` admit its container into the env. *)
+let record_elem_skip errctx ~(span : A.span) ~(callee : string) ~(predicate : string)
+    ~(what : string) : unit =
+  let reason = Obligation.Unreflectable_subject what in
+  Obligation.record
+    { Obligation.span; callee; predicate; verdict = Obligation.Skipped reason
+    ; kind = Obligation.Precondition };
+  if !strict_verified then
+    Err.error errctx ~span
+      (Printf.sprintf
+         "`cap verified` module: cannot verify element refinement `%s` on `%s` (%s: %s)\n\
+          note: build the container from elements the checker can see, or bind it to a \
+          variable whose declared element type implies the refinement, or remove `cap \
+          verified` from this module — it asks for every obligation to be discharged"
+         predicate callee (Obligation.reason_name reason) (Obligation.reason_detail reason))
+
+let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (ce : contenv)
+    ~(span : A.span) ~(callee : string)
+    ((container, r) : string * (string * A.expr * string option)) (a : A.expr) : bool =
+  let sg = elem_sig ~name:"$elem" r in
+  let rp = List.hd sg.refined in
+  let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets; sc; re } in
+  let check_one e =
+    let out = ref None in
+    check_call cx ~span ~callee ~verdict_out:out sg [ e ] rp;
+    !out = Some Obligation.Proved
+  in
+  let recur = check_elements ~root errctx defs ctx path lets sc re ce ~span ~callee (container, r) in
+  match a with
+  | A.ECon ({ A.txt = ("Nil" | "None"); _ }, [], _) -> true
+  | A.ECon ({ A.txt = "Cons"; _ }, [ h; t ], _) when container = "List" ->
+    let a1 = check_one h in
+    let a2 = recur t in
+    a1 && a2
+  | A.ECon ({ A.txt = "Some"; _ }, [ x ], _) when container = "Option" -> check_one x
+  | A.EVar { A.txt = x; A.span = xsp } ->
+    (match List.assoc_opt x ce with
+     | Some (c', q) when c' = container ->
+       let sc = ("$elem", q) :: scope_shadow sc [ "$elem" ] in
+       let cx = { cx with sc } in
+       let out = ref None in
+       check_call cx ~span:xsp ~callee:x ~subject:Element_domain ~verdict_out:out sg
+         [ A.EVar { A.txt = "$elem"; A.span = xsp } ] rp;
+       !out = Some Obligation.Proved
+     | _ ->
+       record_elem_skip errctx ~span:xsp ~callee ~predicate:(pred_str rp.pred)
+         ~what:(Printf.sprintf "the elements of `%s` are not known to satisfy it (no declared element refinement in scope)" x);
+       false)
+  | _ ->
+    record_elem_skip errctx ~span ~callee ~predicate:(pred_str rp.pred)
+      ~what:"the container is neither a literal nor a variable with a declared element refinement";
+    false
+
+(* The element obligations a call's arguments owe the callee's declared
+   parameter types. *)
+let check_arg_elements ~root errctx defs (ctx : rctx) path lets sc re (ce : contenv)
+    ~(span : A.span) ~(callee : string) (sg : fn_sig) (args : A.expr list) : unit =
+  List.iteri
+    (fun i a ->
+      match List.nth_opt sg.param_tys i with
+      | Some t ->
+        (match elem_refinement t with
+         | Some er ->
+           ignore (check_elements ~root errctx defs ctx path lets sc re ce ~span ~callee er a)
+         | None -> ())
+      | None -> ())
+    args
+
+(* …and the element obligations of a construction's container-typed FIELDS
+   (`type T = { xs : List({Int | p}) }`), the companion of
+   [check_ctor_fields]: [only] restricts to the updated fields of a
+   `{ r with … }`, exactly as there. *)
+let check_field_elements ~root errctx defs (ctx : rctx) path lets sc re (ce : contenv)
+    ~(span : A.span) ~(callee : string) (sg : fn_sig) (fields : (string * A.expr) list)
+    ~(only : string list option) : unit =
+  List.iteri
+    (fun i pn ->
+      if (match only with None -> true | Some us -> List.mem pn us) then
+        match List.nth_opt sg.param_tys i, List.assoc_opt pn fields with
+        | Some t, Some e ->
+          (match elem_refinement t with
+           | Some er ->
+             ignore (check_elements ~root errctx defs ctx path lets sc re ce ~span ~callee er e)
+           | None -> ())
+        | _ -> ())
+    sg.param_names
+
 let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
-    (lets : launder) (sc : scope) (re : recenv) (cb : cbenv) (e : A.expr) : unit =
-  let go = visit ~root errctx defs ctx path lets sc re cb in
-  let go_path p = visit ~root errctx defs ctx p lets sc re cb in
+    (lets : launder) (sc : scope) (re : recenv) (cb : cbenv) (ce : contenv) (e : A.expr) : unit =
+  let go = visit ~root errctx defs ctx path lets sc re cb ce in
+  let go_path p = visit ~root errctx defs ctx p lets sc re cb ce in
   match e with
   | A.EApp (A.EVar { A.txt = fname; _ }, args, sp) ->
     let resolved = resolve_call_arity ctx defs fname (List.length args) in
@@ -439,7 +540,8 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
      | Some sg ->
        let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets; sc; re } in
        List.iter (fun rp -> check_call cx ~span:sp ~callee:fname sg args rp) sg.refined;
-       check_pass_sites ~root errctx defs ctx path lets sc re cb ~span:sp sg args
+       check_pass_sites ~root errctx defs ctx path lets sc re cb ~span:sp sg args;
+       check_arg_elements ~root errctx defs ctx path lets sc re ce ~span:sp ~callee:fname sg args
      (* TRULY unresolved — not a named function (refined or not: [Some None]
         is a real, unrefined callee and the call is its), not a callback or
         local: an ambiguous `impl` method resolves by its receiver's type. *)
@@ -457,7 +559,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
           when (match callable_sig_of_actual ctx defs cb a with
                 | Some (_, gsg) -> pass_site_obligation csg i gsg ~span:sp <> None
                 | None -> false) ->
-          visit_lambda ~root errctx defs ctx path lets sc re cb ~assume:true ps body
+          visit_lambda ~root errctx defs ctx path lets sc re cb ce ~assume:true ps body
         | a, _ -> go a)
       args
   | A.EApp (f, args, _) -> go f; List.iter go args
@@ -497,7 +599,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
        the statements AFTER it: whether its name escapes there decides
        whether its own body may assume its parameter refinements — see
        [visit_local_fn]. *)
-    let rec loop (ctx, path, lets, sc, re, cb) = function
+    let rec loop (ctx, path, lets, sc, re, cb, ce) = function
       | [] -> ()
       | e :: rest ->
            (* A block-level `fn` is walked by [visit_local_fn], which also
@@ -507,14 +609,14 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
            let local_fn_entry =
              match e with
              | A.ELetFn (n, ps, ret_ty, body, sp) ->
-               Some (visit_local_fn ~root errctx defs ctx path lets sc re cb ~rest n ps ret_ty body sp)
+               Some (visit_local_fn ~root errctx defs ctx path lets sc re cb ce ~rest n ps ret_ty body sp)
              (* `let g = fn (ps) -> body` is a local function in every respect
                 that matters here — a name, parameters, a body, and later
                 statements that call or pass it — so it takes the same walk,
                 and the same escape rule, as `fn g(ps) do body end`. *)
              | A.ELet ({ A.bind_pat = A.PatVar g; bind_expr = A.ELam (ps, body, lsp); _ }, _) ->
-               Some (visit_local_fn ~root errctx defs ctx path lets sc re cb ~rest g ps None body lsp)
-             | _ -> visit ~root errctx defs ctx path lets sc re cb e; None
+               Some (visit_local_fn ~root errctx defs ctx path lets sc re cb ce ~rest g ps None body lsp)
+             | _ -> visit ~root errctx defs ctx path lets sc re cb ce e; None
            in
            (* An annotated `let`'s refinement is checked against its bound
               expression HERE, against the scope as it stands BEFORE the
@@ -525,6 +627,20 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
              match e with
              | A.ELet (b, _) -> check_let_annotation ~root errctx defs ctx path lets sc re b
              | _ -> None
+           in
+           (* A container-typed annotation (`let ys : List({Int | p}) = …`)
+              is an element obligation on the bound expression, checked
+              against the scope BEFORE the binding like [check_let_annotation];
+              only a proof admits `ys` into the container env. *)
+           let elem_proved =
+             match e with
+             | A.ELet (({ A.bind_pat = A.PatVar n; _ } as b), _) ->
+               (match elem_refinement b.A.bind_ty with
+                | Some er ->
+                  check_elements ~root errctx defs ctx path lets sc re ce ~span:n.A.span
+                    ~callee:(Printf.sprintf "let %s" n.A.txt) er b.A.bind_expr
+                | None -> false)
+             | _ -> false
            in
            (* A `let`/local-`fn` binder also retires the name for CALLEE
               RESOLUTION in the statements that follow — see [local_shadow]. *)
@@ -636,9 +752,15 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                 | _ -> cb_shadow cb [ n.A.txt ])
              | _ -> cb
            in
-           loop (ctx', path', lets', sc', re', cb') rest
+           let ce' =
+             match e with
+             | A.ELet (b, _) -> cont_add_binding ~proved:elem_proved ce b
+             | A.ELetFn (n, _, _, _, _) -> cont_shadow ce [ n.A.txt ]
+             | _ -> ce
+           in
+           loop (ctx', path', lets', sc', re', cb', ce') rest
     in
-    loop (ctx, path, lets, sc, re, cb) es
+    loop (ctx, path, lets, sc, re, cb, ce) es
   | A.ELet (b, _) -> go b.A.bind_expr
   (* A lambda's and a block-level `fn`'s OWN parameter refinements are walked
      STRIPPED from [scope] (the [strip_params_refinements] below), exactly as
@@ -651,7 +773,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
      types: a record sort or a callback signature is not a fact about the
      parameter's VALUE, only about its shape. *)
   | A.ELam (ps, body, _) ->
-    visit_lambda ~root errctx defs ctx path lets sc re cb ~assume:false ps body
+    visit_lambda ~root errctx defs ctx path lets sc re cb ce ~assume:false ps body
   | A.ELetFn (n, ps, _, body, _) ->
     let names = n.A.txt :: List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
     let sc = scope_shadow sc [ n.A.txt ] in
@@ -662,6 +784,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
       (List.fold_left scope_add_param sc (strip_params_refinements ps))
       (List.fold_left recenv_add_param re ps)
       (List.fold_left cb_add_param cb ps)
+      (List.fold_left cont_add_param (cont_shadow ce [ n.A.txt ]) ps)
       body
   | A.EMatch (subj, branches, _) ->
     go subj;
@@ -677,6 +800,11 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
         let lets = launder_shadow lets binders in
         (* …and a same-named callback/alias fact — see [cbenv]. *)
         let cb = cb_shadow cb binders in
+        (* …and a same-named container fact — see [contenv]; the OUTER env is
+           kept for the element facts a `Cons`/`Some` pattern on a
+           container-typed scrutinee hands its binders, below. *)
+        let ce_outer = ce in
+        let ce = cont_shadow ce binders in
         (* …and a same-named GLOBAL FUNCTION, for callee resolution. *)
         let ctx = local_shadow ctx binders in
         (* …and a same-named record IDENTITY, so an inner binder is not
@@ -853,7 +981,27 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
               p earlier
           | _ -> p
         in
-        visit ~root errctx defs ctx p lets sc re cb br.A.branch_body;
+        (* Element facts: destructuring a container-typed VARIABLE hands each
+           element binder the element refinement as a scope fact (`h` in
+           `Cons(h, t)`, `x` in `Some(x)`), and the tail binder the same
+           container refinement.  Only a direct `PatVar` sub-pattern gets a
+           fact; a deeper pattern has no single name to attach it to. *)
+        let sc, ce =
+          match subj, br.A.branch_pat with
+          | A.EVar s, A.PatCon ({ A.txt = "Cons"; _ }, [ hp; tp ]) ->
+            (match List.assoc_opt s.A.txt ce_outer with
+             | Some (("List", r) as entry) ->
+               let sc = match hp with A.PatVar h -> (h.A.txt, r) :: sc | _ -> sc in
+               let ce = match tp with A.PatVar t -> (t.A.txt, entry) :: ce | _ -> ce in
+               (sc, ce)
+             | _ -> (sc, ce))
+          | A.EVar s, A.PatCon ({ A.txt = "Some"; _ }, [ A.PatVar x ]) ->
+            (match List.assoc_opt s.A.txt ce_outer with
+             | Some ("Option", r) -> ((x.A.txt, r) :: sc, ce)
+             | _ -> (sc, ce))
+          | _ -> (sc, ce)
+        in
+        visit ~root errctx defs ctx p lets sc re cb ce br.A.branch_body;
         br :: earlier)
       [] branches
   | A.EIf (c, t, e, _) ->
@@ -872,7 +1020,9 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
        (match Hashtbl.find_opt !ctor_sigs.by_ctor ctor with
         | Some sg ->
           let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets; sc; re } in
-          check_ctor_fields cx ~span:sp ~callee:ctor sg fs ~only:None
+          check_ctor_fields cx ~span:sp ~callee:ctor sg fs ~only:None;
+          check_field_elements ~root errctx defs ctx path lets sc re ce ~span:sp ~callee:ctor sg fs
+            ~only:None
         | None -> ())
      | None -> ());
     List.iter (fun (_, v) -> go v) fields
@@ -897,7 +1047,9 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                  sg.param_names
              in
              let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets; sc; re } in
-             check_ctor_fields cx ~span:sp ~callee:ctor sg fs ~only:(Some (List.map fst updated))
+             check_ctor_fields cx ~span:sp ~callee:ctor sg fs ~only:(Some (List.map fst updated));
+             check_field_elements ~root errctx defs ctx path lets sc re ce ~span:sp ~callee:ctor sg
+               fs ~only:(Some (List.map fst updated))
            | None -> ())
         | None -> ())
      | _ -> ());
@@ -919,7 +1071,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     let cb = cb_shadow cb binders in
     let ctx = local_shadow ctx binders in
     visit ~root errctx defs ctx (path_shadow path binders) (launder_shadow lets binders)
-      sc re cb e2
+      sc re cb (cont_shadow ce binders) e2
   | A.EDbg (Some e, _) -> go e
   | A.ELit _ | A.EVar _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> ()
 
@@ -954,7 +1106,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
    · RECURSION.  The body sees its own entry in [cbenv], so `n(n - 2)` inside
      is obliged like any other call. *)
 and visit_local_fn ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
-    (lets : launder) (sc : scope) (re : recenv) (cb : cbenv) ~(rest : A.expr list)
+    (lets : launder) (sc : scope) (re : recenv) (cb : cbenv) (ce : contenv) ~(rest : A.expr list)
     (n : A.name) (ps : A.param list) (ret_ty : A.ty option) (body : A.expr) (sp : A.span)
   : fn_sig option =
   let fd = local_fn_def n ps ret_ty body sp in
@@ -991,6 +1143,7 @@ and visit_local_fn ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     (List.fold_left scope_add_param sc assumed)
     (List.fold_left recenv_add_param re ps)
     (List.fold_left cb_add_param cb ps)
+    (List.fold_left cont_add_param ce ps)
     body;
   entry
 
@@ -1001,7 +1154,7 @@ and visit_local_fn ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
    (phase 0's rule).  A `let`-bound lambda never reaches here: the [EBlock]
    walk routes it through [visit_local_fn]. *)
 and visit_lambda ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
-    (lets : launder) (sc : scope) (re : recenv) (cb : cbenv) ~(assume : bool)
+    (lets : launder) (sc : scope) (re : recenv) (cb : cbenv) (ce : contenv) ~(assume : bool)
     (ps : A.param list) (body : A.expr) : unit =
   let names = List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
   let ctx = local_shadow ctx names in
@@ -1012,6 +1165,7 @@ and visit_lambda ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     (List.fold_left scope_add_param sc assumed)
     (List.fold_left recenv_add_param re ps)
     (List.fold_left cb_add_param cb ps)
+    (List.fold_left cont_add_param ce ps)
     body
 
 (* =================================================================
@@ -1457,6 +1611,19 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
         let sc = List.fold_left scope_add_fnparam [] c.A.fc_params in
         let re = List.fold_left recenv_add_fnparam [] c.A.fc_params in
         let cb = List.fold_left cb_add_fnparam [] c.A.fc_params in
+        let ce = List.fold_left cont_add_fnparam [] c.A.fc_params in
+        (* A container-typed RETURN (`: List({Int | p})`) is an element
+           obligation on every tail, checked under the path reaching it. *)
+        (match elem_refinement fd.A.fn_ret_ty with
+         | Some er ->
+           let base = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
+           List.iter
+             (fun (p, t) ->
+               ignore
+                 (check_elements ~root errctx defs ctx p [] sc re ce ~span:c.A.fc_span
+                    ~callee:(Printf.sprintf "return of %s" fd.A.fn_name.A.txt) er t))
+             (tails base c.A.fc_body)
+         | None -> ());
         (* A PARAMETER named like a module-level function shadows it for callee
            resolution inside this body too — see [local_shadow]. *)
         let ctx = local_shadow ctx (List.concat_map fnparam_binders c.A.fc_params) in
@@ -1464,7 +1631,7 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
         (* A record-typed parameter's refined fields are facts here: every
            construction of that record was obliged to establish them. *)
         let path = path @ fnparams_field_facts ~span:c.A.fc_span c.A.fc_params in
-        visit ~root errctx defs ctx path [] sc re cb c.A.fc_body)
+        visit ~root errctx defs ctx path [] sc re cb ce c.A.fc_body)
       walked.A.fn_clauses)
 
 let rec visit_decls ~root errctx defs (ctx : rctx) (decls : A.decl list) : unit =
@@ -1511,7 +1678,7 @@ let rec visit_decls ~root errctx defs (ctx : rctx) (decls : A.decl list) : unit 
 and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
   (* A bare expression that is not a function clause: no parameters, no guard,
      hence empty scope/recenv/cbenv and an empty path condition. *)
-  let visit_expr e = visit ~root errctx defs ctx [] [] [] [] [] e in
+  let visit_expr e = visit ~root errctx defs ctx [] [] [] [] [] [] e in
   (* Decls that merely group other decls (`describe`) must NOT go through
      [visit_decls]: that would re-derive [strict_verified] from the inner list,
      which carries no `cap` directive of its own, and so would silently drop
@@ -1597,7 +1764,7 @@ and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
         (* (2): a fresh state literal at a tail is a construction of THIS
            actor's state, whatever other record shares its field set. *)
         List.iter (fun (p, t) -> check_state_literal ~path:p t) (tails path h.A.ah_body);
-        visit ~root errctx defs ctx path [] sc re cb h.A.ah_body)
+        visit ~root errctx defs ctx path [] sc re cb (List.fold_left cont_add_fnparam [] ps) h.A.ah_body)
       ad.A.actor_handlers;
     (* The @invariant predicate is evaluated at run time like any other
        expression, so obligations inside it count. *)
