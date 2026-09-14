@@ -735,7 +735,7 @@ Actor.set_queue_limit(pid, 1000, 3)   -- cap at 1000, block_sender policy
 | `0` | unbounded (default) | never rejects |
 | `1` | `drop_new` | the incoming message is discarded |
 | `2` | `drop_old` | the oldest queued message is evicted to make room |
-| `3` | `block_sender` | the sender parks until space frees up (compiled backend only) |
+| `3` | `block_sender` | the sender parks until space frees up (compiled backend only; the interpreter refuses it at the call rather than silently running unbounded) |
 
 Dropped messages (policies `1`/`2`) are counted in `Scheduler.dropped_messages()`. The
 interpreter's single-threaded eager scheduler cannot park a sender without deadlocking, so

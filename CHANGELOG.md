@@ -218,6 +218,12 @@ git log is authoritative for exact commits.
   enforced. A chain of `let`-bound `Set.insert`s now carries its membership
   facts through every link.
 
+- **The interpreter refuses the `block_sender` mailbox policy instead of
+  silently ignoring it.** `Actor.set_queue_limit(pid, n, 3)` under `march run`
+  used to run unbounded, so a program relying on backpressure got none there
+  and then behaved differently compiled. It now fails at the call with a
+  message naming `drop_new`/`drop_old` and the compiled backend.
+
 - **`node_discovery` is back on `dune runtest`.** It was quarantined on
   2026-08-08 for a torn-stdout race that was fixed on 2026-08-21
   (`march_stdout_mu`); the quarantine outlived the fix. The ubuntu CI job now
