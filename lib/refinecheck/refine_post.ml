@@ -57,6 +57,15 @@ let return_refine_ext (fd : A.fn_def) : (string * A.expr * string option) option
   | Some (A.TyRefine (A.TyCon ({ A.txt = name; _ }, []) as base, binder, pred))
     when is_record_base base ->
     Some (binder_name binder, pred, Some (adt_sort_name name))
+  (* A LIST return, at the MEASURE-ONLY marker: the returned list is never a
+     datatype term (its heads are opaque `Elem`), but its MEASURES are —
+     `elts(_)` over a literal or a returned parameter (set refinements,
+     specs/2026-09-13-set-refinements-design.md).  Before this arm a
+     `{List(Int) | …}` return fell through to [check_post_induction] and,
+     lacking an axiomatised list measure, filed nothing at all. *)
+  | Some (A.TyRefine ((A.TyCon ({ A.txt = "List"; _ }, _) as base), binder, pred))
+    when is_adt_base base ->
+    Some (binder_name binder, pred, Some (meas_sort_name "List"))
   | _ -> None
 
 (* Return-position expressions of a body, each with the path reaching it. *)
@@ -96,9 +105,25 @@ let rec tails (path : (A.expr * bool) list) (e : A.expr) : ((A.expr * bool) list
    predicate with a field resolver so `s.field` becomes the SMT selector
    applied to the opaque const.  `has_record` is true when any record entry
    is present — signals check_post to include the datatype preamble. *)
-let scope_facts (sc : scope) : (string * Smt.sort) list * Smt.term list * bool * bool =
+(* The fifth component, [complete], is true when EVERY refined scope entry's
+   own predicate was loaded as an assumption.  [check_post] may treat a
+   satisfiable model as a definite violation (the record fast path) only when
+   it is: a model is a real input only if it satisfies every precondition the
+   function declares, and a promise that failed to load is a precondition the
+   solver never saw.  The shape that exposed this: a record parameter (which
+   turns the fast path on) next to `xs : {List(Int) | len(_) > 0 &&
+   member(1, elts(_))}`, whose promise does not translate because of `len`,
+   so `elts(xs) = {}` — an input the contract forbids — was reported as the
+   counterexample to a return of `xs`. *)
+let scope_facts (sc : scope)
+    : (string * Smt.sort) list * Smt.term list * bool * bool * bool =
   let has_string =
     List.exists (fun (_, (_, _, sort)) -> sort = Some str_sort) sc
+  in
+  let dropped = ref false in
+  let loaded ds asm has_rec = function
+    | Some qa -> (ds, qa :: asm, has_rec)
+    | None -> dropped := true; (ds, asm, has_rec)
   in
   let ds, asm, has_rec =
   List.fold_left
@@ -114,9 +139,7 @@ let scope_facts (sc : scope) : (string * Smt.sort) list * Smt.term list * bool *
         let c = Smt.Const name in
         let rv n = if n = b || n = "_" then Some c else Some (Smt.Const n) in
         let ds = (name, s) :: ds in
-        (match smt_of ~resolve_var:rv ~resolve_measure:(fun _ _ -> None) q with
-         | Some qa -> (ds, qa :: asm, has_rec)
-         | None -> (ds, asm, has_rec))
+        loaded ds asm has_rec (smt_of ~resolve_var:rv ~resolve_measure:(fun _ _ -> None) q)
       | None -> (ds, asm, has_rec)
       (* A String-refined entry declares a `Str` constant and loads its
          predicate, but MUST NOT set [has_rec]: that flag switches check_post
@@ -132,9 +155,7 @@ let scope_facts (sc : scope) : (string * Smt.sort) list * Smt.term list * bool *
             Some (Smt.App (strlen_fn, [ c ]))
           else None
         in
-        (match smt_of ~resolve_var:rv ~resolve_measure:rm q with
-         | Some qa -> (ds, qa :: asm, has_rec)
-         | None -> (ds, asm, has_rec))
+        loaded ds asm has_rec (smt_of ~resolve_var:rv ~resolve_measure:rm q)
       (* A MEASURE-ONLY entry ([meas_sort_prefix]) contributes NOTHING here, and
          must not fall into the ADT arm below: `$Meas:M_List` is a marker, not a
          declared sort, so `(declare-const xs $Meas:M_List)` would be a z3
@@ -144,7 +165,28 @@ let scope_facts (sc : scope) : (string * Smt.sort) list * Smt.term list * bool *
          false-positive engine.  Skipping leaves [check_post] behaving exactly as
          it did before these entries existed; carrying a list measure through a
          POSTcondition is a separate piece of work. *)
-      | Some sort_name when is_meas_sort sort_name -> (ds, asm, has_rec)
+      | Some sort_name when is_meas_sort sort_name ->
+        (* …except for its SET facts: `elts(_)` in the entry's own predicate is
+           the constant `elts$name`, the very symbol [check_post]'s resolvers
+           build for `elts(name)` in the return predicate.  Anything else in
+           the predicate (a bare binder, `len`) drops the whole fact, as
+           before — carrying `len` through a postcondition is still separate
+           work, and adding only what set contracts need keeps every existing
+           verdict where it was. *)
+        let rv _ = None in
+        let used = ref [] in
+        let rm m n =
+          if is_builtin_set_measure m && (n = b || n = "_" || n = name) then begin
+            let c = set_const m name in
+            if not (List.mem c !used) then used := c :: !used;
+            Some (Smt.Const c)
+          end
+          else None
+        in
+        (match smt_of ~resolve_var:rv ~resolve_measure:rm q with
+         | Some qa ->
+           (List.map (fun c -> (c, Smt.SSet Smt.set_unknown_elem)) !used @ ds, qa :: asm, has_rec)
+         | None -> dropped := true; (ds, asm, has_rec))
       | Some sort_name ->
         let c = Smt.Const name in
         let ds = (name, Smt.SData sort_name) :: ds in
@@ -159,10 +201,10 @@ let scope_facts (sc : scope) : (string * Smt.sort) list * Smt.term list * bool *
          (* Predicate untranslatable: declare the const but don't set has_rec.
             Without a loaded assumption, scope_has_record would trigger the
             "SAT = definite error" path with an unconstrained cex — unsound. *)
-         | None -> (ds, asm, has_rec)))
+         | None -> dropped := true; (ds, asm, has_rec)))
     ([], [], false) sc
   in
-  (ds, asm, has_rec, has_string)
+  (ds, asm, has_rec, has_string, not !dropped)
 
 (* Check one return-position tail against the declared return refinement.
 
@@ -186,6 +228,7 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
     ?(fn_name : string option = None) ?(emit = true) ?(record = true)
     ?(fn_params : (string * A.ty option) list = [])
     ?(string_ret = false)
+    ?(list_ret = false)
     (sc : scope) (binder : string) (ret_pred : A.expr)
     ((path, tail_e) : (A.expr * bool) list * A.expr) : bool =
   (* Mirrors [check_call]'s [note]: every exit records an outcome, so a return
@@ -269,7 +312,9 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
             | _ -> false)
          | None -> false)
   in
-  let base_decls, base_assume, scope_has_record, scope_has_string = scope_facts sc in
+  let base_decls, base_assume, scope_has_record, scope_has_string, scope_complete =
+    scope_facts sc
+  in
   let decls = ref base_decls and assume = ref base_assume in
   (* String literals, for a String RETURN ([string_ret]): the tail `"a"` and
      the predicate's `"a"` must meet on ONE constant, minted here exactly as
@@ -326,6 +371,13 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
        return predicate talk about the same length. *)
     if m = "len" && string_len_available () && is_str_scope name then
       Some (Smt.App (strlen_fn, [ Smt.Const name ]))
+    (* `elts(xs)` over a body name: one set constant per name, at the
+       placeholder element sort [resolve_set_sorts] settles.  No `>= 0`. *)
+    else if is_builtin_set_measure m || is_set_measure m then begin
+      let nm = m ^ "$" ^ name in
+      decls := (nm, Smt.SSet Smt.set_unknown_elem) :: !decls;
+      Some (Smt.Const nm)
+    end
     else
       let c = Smt.Const (m ^ "$" ^ name) in
       decls := (m ^ "$" ^ name, Smt.SInt) :: !decls;
@@ -339,7 +391,17 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
        quantifiers that cause Z3 `unknown`); falls back to App(m,[arg]) for non-concrete
      - other: introduce a fresh symbolic constant with non-negativity if applicable *)
   let resolve_measure_app m arg_term =
-    if m = "len" then
+    if is_builtin_set_measure m then
+      (* A literal is folded by [smt_of_r] before this is consulted; anything
+         else is an opaque list/map, hence a fresh unconstrained set. *)
+      match if m = elts_measure then concrete_elts arg_term else None with
+      | Some t -> Some t
+      | None ->
+        incr post_measure_ctr;
+        let nm = Printf.sprintf "%s$app%d" m !post_measure_ctr in
+        decls := (nm, Smt.SSet Smt.set_unknown_elem) :: !decls;
+        Some (Smt.Const nm)
+    else if m = "len" then
       match concrete_len arg_term with
       | Some n -> Some (Smt.IntLit n)
       | None ->
@@ -392,6 +454,16 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
       (match tail_e with
        | A.ERecord (fields, _) -> reflect_record_literal sort_name fields scalar
        | _ -> scalar tail_e)
+    (* A LIST tail is represented by its SET OF ELEMENTS, never by itself: a
+       literal folds to a concrete set, a returned body name to that name's
+       `elts$x` constant (the same symbol its own contract and `elts(x)` in
+       the predicate resolve to).  A call or anything else is opaque and
+       files the usual unreflectable-subject skip. *)
+    | None when list_ret ->
+      (match tail_e with
+       | A.EVar { A.txt = x; _ } -> resolve_measure elts_measure x
+       | A.ECon _ -> (match scalar tail_e with Some t -> concrete_elts t | None -> None)
+       | _ -> None)
     | None when string_ret ->
       (* A String tail: a literal mints its constant; a String-sorted scope
          name (a parameter the scope already declared at `Str`) denotes
@@ -433,7 +505,12 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
       | Some sort_name -> make_field_resolver binder sort_name tail_term
       | None -> fun _ _ -> None
     in
-    let resolve_var name = if name = binder || name = "_" then Some tail_term else var_const name in
+    (* Under [list_ret] the binder denotes a LIST, which is not a term here;
+       only its measures are.  A predicate using it bare is untranslatable. *)
+    let resolve_var name =
+      if name = binder || name = "_" then (if list_ret then None else Some tail_term)
+      else var_const name
+    in
     (* ── Body-namespace resolvers, for the PATH CONTEXT only ────────────────
        A path condition was collected from the function BODY, so every name in
        it is a body name — a parameter or a local — and denotes itself.  The
@@ -475,6 +552,8 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
     let goal_resolve_measure m name =
       if string_ret && m = "len" && (name = binder || name = "_") && string_len_available ()
       then Some (Smt.App (strlen_fn, [ tail_term ]))
+      (* `elts(_)` over a list return IS the tail's set term. *)
+      else if list_ret && m = elts_measure && (name = binder || name = "_") then Some tail_term
       else resolve_measure m name
     in
     (match
@@ -507,6 +586,11 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
              else None)
            !assume
        in
+       (* Settle every set's element sort (or skip on a contradiction) before
+          rendering: see [resolve_set_sorts]. *)
+       match resolve_set_sorts decls goal assumptions with
+       | None -> note (Obligation.Skipped Obligation.Sort_conflict); false
+       | Some (decls, goal, assumptions) ->
        let vc = { Smt.decls; assumptions; goal } in
        let str_pre = if scope_has_string || !uses_string then string_preamble else "" in
        let preamble = str_pre ^
@@ -518,6 +602,18 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
            if !needs_axiom_preamble then record_vc_preamble ()
            else type_only_preamble ()
          else ""
+       in
+       let contains hay needle =
+         let n = String.length needle and h = String.length hay in
+         let rec at i = i + n <= h && (String.sub hay i n = needle || at (i + 1)) in
+         at 0
+       in
+       let preamble =
+         preamble
+         ^ set_preamble ~elem_declared:(contains preamble "(declare-sort Elem 0)")
+             ~str_declared:(str_pre <> "")
+             ~measure_attached:((record_sort <> None || scope_has_record) && !needs_axiom_preamble)
+             vc
        in
        (match Refine.discharge ~root ~preamble vc with
         | Refine.Verified -> note Obligation.Proved; true
@@ -575,9 +671,12 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
              merely gates whether we tell the user; [note] below must still
              record the true verdict either way. *)
           let violated =
-            if scope_has_record then
+            if scope_has_record && scope_complete then
               (* With concrete record preconditions in scope, a SAT counterexample
-                 satisfying those preconditions IS a real violation — report it. *)
+                 satisfying those preconditions IS a real violation — report it.
+                 Only when ALL of them were loaded ([scope_complete]): a model
+                 that ignores an untranslated promise may be an input the
+                 function's own signature rules out. *)
               (match first with Refine.Refuted _ -> emit_error (); true | _ -> false)
             else
               (match Refine.discharge ~root ~preamble { vc with Smt.goal = Smt.Not goal } with
@@ -1053,9 +1152,50 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
    [~record], though: its constructor-literal shape writes an obligation, and
    this function runs twice per refined-return function, so without the thread
    every such postcondition would be counted twice in `--refine-report`. *)
+(* Does a predicate apply a built-in set measure (`elts`, `keys`) anywhere? *)
+let rec pred_mentions_elts (e : A.expr) : bool =
+  match e with
+  | A.EApp (A.EVar { A.txt; _ }, args, _) ->
+    is_builtin_set_measure txt || List.exists pred_mentions_elts args
+  | A.EApp (f, args, _) -> pred_mentions_elts f || List.exists pred_mentions_elts args
+  | A.ECon (_, args, _) | A.ETuple (args, _) -> List.exists pred_mentions_elts args
+  | A.EField (r, _, _) | A.EAnnot (r, _, _) -> pred_mentions_elts r
+  | _ -> false
+
+(* ── `@[assume]`: an ASSUMED postcondition (plan §3.2) ─────────────────────
+   Liquid Haskell's `assume`: the declared return refinement propagates to
+   every call site WITHOUT a proof, and the body is not checked against it.
+   It exists for a contract about a body the checker cannot see into — the
+   stdlib `Set` HAMT, whose element set no measure can compute — and is
+   counted in the ledger under `trusted`, kind postcondition, so
+   `--refine-report` shows exactly how many facts a module takes on faith.
+   Distinct from `@[trusted]`, which accepts a SKIP inside `cap verified` and
+   never propagates anything. *)
+let is_assumed (fd : A.fn_def) : bool = List.mem "assume" fd.A.fn_attrs
+
+let assumed_return (fd : A.fn_def) : A.expr option =
+  match Option.map unlinear fd.A.fn_ret_ty with
+  | Some (A.TyRefine (_, _, pred)) -> Some pred
+  | _ -> None
+
 let check_fn_post_verdict ~root errctx ?(emit = true) (fd : A.fn_def) : bool =
+  match assumed_return fd with
+  | Some pred when is_assumed fd ->
+    if emit then
+      Obligation.record
+        { Obligation.span = fd.A.fn_name.A.span; callee = fd.A.fn_name.A.txt
+        ; predicate = pred_str pred; verdict = Obligation.Trusted
+        ; kind = Obligation.Postcondition };
+    true
+  | _ ->
   match return_refine_ext fd with
   | None -> check_post_induction ~root ~record:emit fd
+  (* A LIST return takes the elts path ONLY when its predicate uses `elts`;
+     a list contract over an Int measure (`llen(_) == llen(xs) + 1`) keeps
+     the Tier 2 induction path it always had, which the elts path cannot
+     replace (it never reduces a measure through the recursion). *)
+  | Some (_, ret_pred, Some marker) when is_meas_sort marker && not (pred_mentions_elts ret_pred) ->
+    check_post_induction ~root ~record:emit fd
   | Some (binder, ret_pred, marker) ->
     (* [record_sort] must carry only a DECLARED sort name.  A scalar marker
        (`$Bool`) is not one: handing it here would send the return value down
@@ -1066,10 +1206,11 @@ let check_fn_post_verdict ~root errctx ?(emit = true) (fd : A.fn_def) : bool =
        the record-literal reflection. *)
     let record_sort =
       match marker with
-      | Some s when not (is_scalar_sort s) && s <> str_sort -> Some s
+      | Some s when not (is_scalar_sort s) && s <> str_sort && not (is_meas_sort s) -> Some s
       | _ -> None
     in
     let string_ret = marker = Some str_sort in
+    let list_ret = (match marker with Some s -> is_meas_sort s | None -> false) in
     let clause_ok (c : A.fn_clause) =
       let sc = List.fold_left scope_add_fnparam [] c.A.fc_params in
       let scalar_env =
@@ -1087,7 +1228,7 @@ let check_fn_post_verdict ~root errctx ?(emit = true) (fd : A.fn_def) : bool =
       && List.fold_left
            (fun acc t ->
              check_post ~root errctx ~span:c.A.fc_span ~record_sort ~scalar_env ~string_ret
-               ~fn_name:(Some fd.A.fn_name.A.txt) ~emit ~record:emit ~fn_params
+               ~list_ret ~fn_name:(Some fd.A.fn_name.A.txt) ~emit ~record:emit ~fn_params
                sc binder ret_pred t
              && acc)
            true ts

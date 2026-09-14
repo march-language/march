@@ -608,6 +608,11 @@ let classify (site : site) : disposition =
          A.DImpl, never for a local A.ELetFn, so no extractor is ever \
          consulted for this position"
     | Some fd -> (
+      (* An `@[assume]`d return refinement is ASSUMED at every call site
+         ([Refine_post.check_fn_post_verdict]); it is a fact the program
+         takes on faith, counted under `trusted`, and never a hole. *)
+      if Refine_post.is_assumed fd && Refine_post.assumed_return fd <> None then Enforced
+      else
       match Refine_post.return_refine_ext fd with
       | Some _ -> Enforced
       | None ->

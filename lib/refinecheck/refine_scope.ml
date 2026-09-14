@@ -76,12 +76,13 @@ let float_lit_term (f : float) : Smt.term option =
    down still names the leaf, not each ancestor on the way up. [smt_of] is now
    this function with [Result.to_option] on the outside; the 18 existing
    callers, which want only the [option], are unchanged. *)
-let rec smt_of_r ~resolve_var ~resolve_measure ?(resolve_field = fun _ _ -> None)
+let rec smt_of_r_marked ~resolve_var ~resolve_measure ?(resolve_field = fun _ _ -> None)
     ?(resolve_measure_app = fun _ _ -> None) ?(resolve_tester = fun _ _ -> None)
     ?(resolve_str_lit = fun _ -> None)
+    ?(resolve_measure_call = fun _ _ _ -> None)
     (e : A.expr) : (Smt.term, A.expr) result =
-  let r = smt_of_r ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app
-            ~resolve_tester ~resolve_str_lit in
+  let r = smt_of_r_marked ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app
+            ~resolve_tester ~resolve_str_lit ~resolve_measure_call in
   let b2 f a b =
     match r a, r b with
     | Ok x, Ok y -> Ok (f x y)
@@ -126,8 +127,39 @@ let rec smt_of_r ~resolve_var ~resolve_measure ?(resolve_field = fun _ _ -> None
         | None ->
           (match r a with
            | Ok arg_term ->
-             (match resolve_measure_app m arg_term with Some t -> Ok t | None -> Error e)
+             (* `elts` of a LITERAL list is the concrete set of its (reflected)
+                heads, needing no resolver and no axiom; element sorts are
+                settled later by [resolve_set_sorts]. *)
+             (match if m = elts_measure then concrete_elts arg_term else None with
+              | Some t -> Ok t
+              | None ->
+                (match resolve_measure_app m arg_term with Some t -> Ok t | None -> Error e))
+           (* A measure over a CALL — `elts(Set.empty())` inside a substituted
+              contract — is the caller's business: [resolve_measure_call] may
+              stand the call up as a constant carrying its own contract. *)
+           | Error _ when (match a with A.EApp (A.EVar _, _, _) -> true | _ -> false) ->
+             (match a with
+              | A.EApp (A.EVar { A.txt = f; _ }, cargs, _) ->
+                (match resolve_measure_call m f cargs with Some t -> Ok t | None -> Error e)
+              | _ -> Error e)
            | Error e2 -> Error e2)))
+  (* ── The set vocabulary (specs/2026-09-13-set-refinements-design.md §3) ──
+     Predicate-only names, exactly like `len`: `member(x, s)`, `union(a, b)`,
+     `inter(a, b)`, `diff(a, b)`, `subset(a, b)`, `singleton(x)` and the
+     literal `empty`.  A set term's ELEMENT sort is left as the placeholder and
+     unified per VC by [resolve_set_sorts], so no resolver here needs to know
+     what a list holds. *)
+  | A.EApp (A.EVar { A.txt = "member"; _ }, [ x; st ], _) -> b2 (fun x s -> Smt.SetMem (x, s)) x st
+  | A.EApp (A.EVar { A.txt = "union"; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.SetUnion (x, y)) a b
+  | A.EApp (A.EVar { A.txt = "inter"; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.SetInter (x, y)) a b
+  | A.EApp (A.EVar { A.txt = "diff"; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.SetDiff (x, y)) a b
+  | A.EApp (A.EVar { A.txt = "subset"; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.SetSub (x, y)) a b
+  | A.EApp (A.EVar { A.txt = "singleton"; _ }, [ x ], _) ->
+    Result.map (fun t -> Smt.SetSng (Smt.set_unknown_elem, t)) (r x)
+  (* The empty-set literal exists only where [mark_set_empty] put it — a set
+     position.  A bare `empty` falls through to the ordinary variable arm
+     below, so a parameter or local of that name keeps its meaning. *)
+  | A.EVar { A.txt; _ } when txt = set_empty_literal -> Ok (Smt.SetEmpty Smt.set_unknown_elem)
   (* A constructor tester `is_Ctor(e)`: reflects to the Z3 datatype tester
      ((_ is Ctor) e).  [resolve_tester] owns reflecting [e] into a term of the
      right datatype sort (and declaring/registering it); a context that cannot
@@ -171,13 +203,24 @@ let rec smt_of_r ~resolve_var ~resolve_measure ?(resolve_field = fun _ _ -> None
      | _ -> Error e)
   | _ -> Error e
 
+(* Every predicate and guard is marked once, here at the entry, so the
+   recursion only ever sees [set_empty_literal] in set positions. *)
+let smt_of_r ~resolve_var ~resolve_measure ?(resolve_field = fun _ _ -> None)
+    ?(resolve_measure_app = fun _ _ -> None) ?(resolve_tester = fun _ _ -> None)
+    ?(resolve_str_lit = fun _ -> None)
+    ?(resolve_measure_call = fun _ _ _ -> None)
+    (e : A.expr) : (Smt.term, A.expr) result =
+  smt_of_r_marked ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app
+    ~resolve_tester ~resolve_str_lit ~resolve_measure_call (mark_set_empty e)
+
 let smt_of ~resolve_var ~resolve_measure ?(resolve_field = fun _ _ -> None)
     ?(resolve_measure_app = fun _ _ -> None) ?(resolve_tester = fun _ _ -> None)
     ?(resolve_str_lit = fun _ -> None)
+    ?(resolve_measure_call = fun _ _ _ -> None)
     (e : A.expr) : Smt.term option =
   Result.to_option
     (smt_of_r ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app
-       ~resolve_tester ~resolve_str_lit e)
+       ~resolve_tester ~resolve_str_lit ~resolve_measure_call e)
 
 (* =================================================================
    §8  Rendering: predicates, models, counterexamples
@@ -208,7 +251,7 @@ let rec pred_str (e : A.expr) : string =
   | A.ECon ({ A.txt = ctor; _ }, [], _) -> ctor
   | A.ECon ({ A.txt = ctor; _ }, args, _) ->
     ctor ^ "(" ^ String.concat ", " (List.map pred_str args) ^ ")"
-  | A.EVar { A.txt; _ } -> txt
+  | A.EVar { A.txt; _ } -> if txt = set_empty_literal then "empty" else txt
   | A.EField (recv, { A.txt = fname; _ }, _) -> pred_str recv ^ "." ^ fname
   | A.EApp (A.EVar { A.txt = ("&&" | "||" | ">=" | "<=" | ">" | "<" | "==" | "!="
                              | "+" | "-" | "*" | "/" | "%" | "+." | "-." | "*." | "/.") as op; _ },
@@ -253,6 +296,26 @@ let sexp_tokens (s : string) : string list =
    "(as nil ...)" → "[]".  Falls back to the raw string for unknown shapes. *)
 let rec pretty_smt_value (v : string) : string =
   let n = String.length v in
+  (* A SET model is a `store` chain over an all-false constant array:
+       ((as const (Array Int Bool)) false)                -> {}
+       (store ((as const (Array Int Bool)) false) 4 true) -> {4}
+     Anything else in array shape (a lambda, an `as-array`) stays raw. *)
+  let rec set_elems (t : string) : string list option =
+    let m = String.length t in
+    if m >= 2 && t.[0] = '(' && t.[m - 1] = ')' then
+      match sexp_tokens (String.sub t 1 (m - 2)) with
+      | [ "as"; "const"; _ ] | [ "as"; "const"; _; _ ] -> None
+      | [ inner; "false" ] when String.length inner > 8 && String.sub inner 0 8 = "(as cons" ->
+        Some []
+      | [ "store"; rest; x; "true" ] ->
+        Option.map (fun xs -> pretty_smt_value x :: xs) (set_elems rest)
+      | [ "store"; rest; _; "false" ] -> set_elems rest
+      | _ -> None
+    else None
+  in
+  match set_elems v with
+  | Some xs -> "{" ^ String.concat ", " (List.rev xs) ^ "}"
+  | None ->
   if n >= 2 && v.[0] = '(' && v.[n - 1] = ')' then begin
     let inner = String.sub v 1 (n - 2) in
     match sexp_tokens inner with
@@ -270,10 +333,15 @@ let rec pretty_smt_value (v : string) : string =
 
 (* True for the "ret<N>" suffix of a propagated-postcondition constant. *)
 let is_ret_suffix (s : string) : bool =
-  String.length s > 3
-  && String.sub s 0 3 = "ret"
-  && String.for_all (fun c -> c >= '0' && c <= '9')
-       (String.sub s 3 (String.length s - 3))
+  let tagged tag =
+    let k = String.length tag in
+    String.length s > k
+    && String.sub s 0 k = tag
+    && String.for_all (fun c -> c >= '0' && c <= '9') (String.sub s k (String.length s - k))
+  in
+  (* `ret<N>` (a scalar result), `set<N>` (a result's element set) and
+     `dt<N>` (a datatype result) are all "what this call can return". *)
+  tagged "ret" || tagged "set" || tagged "dt"
 
 (* Render one model entry.  Internal SMT constants use `$` to join a symbol to
    its subject:
@@ -1112,8 +1180,16 @@ let scope_add_binding
    ================================================================= *)
 
 (* ── Collect signatures, keyed by bare + qualified name ──────────────────── *)
+(* An UNANNOTATED parameter (`fn insert(s, elem, cmp)`) is parsed as a
+   pattern parameter `FPPat (PatVar s)`, not an `FPNamed`.  Until 2026-09-13
+   it was recorded as "_" here, so a relational postcondition mentioning it
+   (`elts(_) == union(elts(s), singleton(elem))`) was [Unusable] and never
+   reached a call site — every unannotated stdlib function's contract was
+   silently inert.  A variable pattern IS a name; only a genuinely
+   destructuring pattern has none. *)
 let param_name_of : A.fn_param -> string = function
   | A.FPNamed p | A.FPDefault (p, _) -> p.A.param_name.A.txt
+  | A.FPPat (A.PatVar n) -> n.A.txt
   | A.FPPat _ -> "_"
 
 let param_ty_of : A.fn_param -> A.ty option = function

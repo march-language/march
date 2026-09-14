@@ -223,6 +223,18 @@ let rec mentions_str (is_str : string -> bool) (t : Smt.term) : bool =
   | Smt.Le (a, b) | Smt.Gt (a, b) | Smt.Ge (a, b)
   | Smt.FpEq (a, b) | Smt.FpLt (a, b) | Smt.FpLe (a, b) | Smt.FpGt (a, b)
   | Smt.FpGe (a, b) -> m a || m b
+  (* A set is never itself `Str`-sorted; a `Str` constant INSIDE one (as an
+     element) is well-sorted there, and is [wellsorted]'s business. *)
+  | Smt.SetEmpty _ | Smt.SetSng _ | Smt.SetMem _ | Smt.SetUnion _ | Smt.SetInter _
+  | Smt.SetDiff _ | Smt.SetSub _ -> false
+
+(* Is [t] a set-valued term?  Used by the guards below so a set operand is
+   never mistaken for an Int one. *)
+let is_set_term (sort_of : string -> Smt.sort option) (t : Smt.term) : bool =
+  match t with
+  | Smt.SetEmpty _ | Smt.SetSng _ | Smt.SetUnion _ | Smt.SetInter _ | Smt.SetDiff _ -> true
+  | Smt.Const c -> (match sort_of c with Some (Smt.SSet _) -> true | _ -> false)
+  | _ -> false
 
 let rec wellsorted (is_str : string -> bool) (t : Smt.term) : bool =
   let w = wellsorted is_str and m = mentions_str is_str in
@@ -239,6 +251,13 @@ let rec wellsorted (is_str : string -> bool) (t : Smt.term) : bool =
   | Smt.Eq (a, b) | Smt.Ne (a, b) ->
     (match a, b with
      | Smt.Const x, Smt.Const y when is_str x && is_str y -> true
+     (* Set equality is extensional array equality; both sides are checked as
+        set terms.  A set constant (`elts$xs`) is a bare [Const] here and
+        passes as an "int side" — [resolve_set_sorts] is what pins its sort
+        against the other side. *)
+     | (Smt.SetEmpty _ | Smt.SetSng _ | Smt.SetUnion _ | Smt.SetInter _ | Smt.SetDiff _), _
+     | _, (Smt.SetEmpty _ | Smt.SetSng _ | Smt.SetUnion _ | Smt.SetInter _ | Smt.SetDiff _) ->
+       w a && w b
      | _ -> int_side a && int_side b)
   | Smt.Not a -> w a
   | Smt.Neg a | Smt.MulLit (_, a) -> int_side a
@@ -250,6 +269,15 @@ let rec wellsorted (is_str : string -> bool) (t : Smt.term) : bool =
      genuinely FLOATS is [float_wellsorted]'s job, not this guard's. *)
   | Smt.FpEq (a, b) | Smt.FpLt (a, b) | Smt.FpLe (a, b) | Smt.FpGt (a, b)
   | Smt.FpGe (a, b) -> (not (m a)) && not (m b)
+  (* A set ELEMENT may be a `Str` constant (a string-element set) or an Int
+     term; a set OPERAND is a set term, checked recursively.  Whether the
+     element sorts AGREE across a formula is [resolve_set_sorts]'s job. *)
+  | Smt.SetEmpty _ -> true
+  | Smt.SetSng (_, x) | Smt.SetMem (x, _) ->
+    (match x with Smt.Const c when is_str c -> true | _ -> int_side x)
+    && (match t with Smt.SetMem (_, s) -> w s | _ -> true)
+  | Smt.SetUnion (a, b) | Smt.SetInter (a, b) | Smt.SetDiff (a, b) | Smt.SetSub (a, b) ->
+    w a && w b
 
 (* ── Float: the IEEE rewrite and its well-sortedness guard ─────────────────
    March spells float comparison with the ORDINARY operators — `x >= 0.0`, not a
@@ -297,6 +325,10 @@ let rec mentions_float (is_float : string -> bool) (t : Smt.term) : bool =
   | Smt.Le (a, b) | Smt.Gt (a, b) | Smt.Ge (a, b)
   | Smt.FpEq (a, b) | Smt.FpLt (a, b) | Smt.FpLe (a, b) | Smt.FpGt (a, b)
   | Smt.FpGe (a, b) -> m a || m b
+  | Smt.SetEmpty _ -> false
+  | Smt.SetSng (_, a) -> m a
+  | Smt.SetMem (a, b) | Smt.SetUnion (a, b) | Smt.SetInter (a, b) | Smt.SetDiff (a, b)
+  | Smt.SetSub (a, b) -> m a || m b
 
 (* After [fp_rewrite], a float may appear ONLY as a direct operand of an `fp.*`
    comparison.  Anywhere else — an Int comparison [fp_rewrite] declined because
@@ -339,11 +371,14 @@ let rec formula_wellsorted (sort_of : string -> Smt.sort option) (t : Smt.term) 
   | Smt.And (a, b) | Smt.Or (a, b) | Smt.Implies (a, b) -> w a && w b
   | Smt.Eq _ | Smt.Ne _ | Smt.Lt _ | Smt.Le _ | Smt.Gt _ | Smt.Ge _
   | Smt.FpEq _ | Smt.FpLt _ | Smt.FpLe _ | Smt.FpGt _ | Smt.FpGe _ -> true
+  (* Membership and subset are the two Bool-valued set operators. *)
+  | Smt.SetMem _ | Smt.SetSub _ -> true
   (* Nothing in this checker declares an uninterpreted function at `Bool`
      (measures and selectors return Int or a datatype), so an application in
      Boolean position is a sort error just as arithmetic and literals are. *)
   | Smt.App _ | Smt.IntLit _ | Smt.FloatLit _ | Smt.Add _ | Smt.Sub _
-  | Smt.MulLit _ | Smt.Mul _ | Smt.Neg _ -> false
+  | Smt.MulLit _ | Smt.Mul _ | Smt.Neg _
+  | Smt.SetEmpty _ | Smt.SetSng _ | Smt.SetUnion _ | Smt.SetInter _ | Smt.SetDiff _ -> false
 
 (* =================================================================
    §3  Predicate scope and parameter substitution
@@ -365,12 +400,100 @@ let rec formula_wellsorted (sort_of : string -> Smt.sort option) (t : Smt.term) 
    unrecognised predicate is skipped rather than trusted. *)
 type pred_scope = Closed | Relational of string list | Unusable
 
+(* ── The built-in set measures and the set-valued user measure table ──────
+   Declared here, ahead of [classify_pred], because deciding whether a bare
+   `empty` is the empty set or a variable ([mark_set_empty]) needs to know
+   which applications are set-valued.  [set_measure_elem] is populated per
+   [check_module]; see its use in [set_ret_elem]. *)
+let elts_measure = "elts"
+(* `keys` is the same thing over a `Map(k, v)`: the set of its keys (plan
+   Phase C).  Both are "built-in set measures": predicate-only, uninterpreted
+   over an opaque carrier, connected to the program solely through the
+   `@[assume]`d stdlib contracts and the concrete-literal fold for `elts`. *)
+let keys_measure = "keys"
+let builtin_set_measures = [ elts_measure; keys_measure ]
+let is_builtin_set_measure (m : string) : bool = List.mem m builtin_set_measures
+
+(* name -> element sort of a `@[measure]` declared `: Set(T)`.  Populated once
+   per [check_module] from the declared return type, INDEPENDENTLY of whether
+   the measure was axiomatised: a call-site resolver must declare `m$x` at a
+   set sort for such a measure even under `--no-measure-axioms`, or the symbol
+   lands at `Int` and every set predicate over it is a sort conflict.
+   `Int` elements are concrete; everything else — including `String`, whose
+   constructor fields are the opaque `Elem` — is `Elem`. *)
+let set_measure_elem : (string, Smt.sort) Hashtbl.t = Hashtbl.create 8
+let is_set_measure (m : string) : bool = Hashtbl.mem set_measure_elem m
+
+(* ── `empty`: the empty set in a set position, a variable everywhere else ──
+   `empty` is an ordinary identifier — a parameter, a local, a Bool flag.
+   Reserving it outright (as the first cut of set refinements did) turned a
+   parameter named `empty` into a set term in every guard, relational
+   contract and scope fact, so `if empty > 0 do takepos(empty) end` lost its
+   proof and the else-branch `takepos(empty)` violation was silently
+   accepted.  It is the literal only where a SET is the only thing that can
+   stand: an operand of `union`/`inter`/`diff`/`subset`, the set operand of
+   `member`, and either side of `==`/`!=` whose other side is set-shaped.
+
+   [mark_set_empty] rewrites exactly those occurrences to [set_empty_literal],
+   whose `$` cannot occur in a March identifier, so no variable and no
+   parameter substitution can ever collide with it.  Every consumer that
+   reasons about a predicate's names — [classify_pred], [subst_params],
+   [smt_of_r] — marks before it looks, and the rewrite is idempotent.
+
+   [smt_of_r] marks again AFTER [subst_params] has put actuals in, so an actual
+   that is literally the variable `empty` is re-examined.  That can only
+   change it where it sits in a set position, and no program value is a set
+   (sets exist only in the logic), so a well-typed contract never puts an
+   actual there: element positions (`member(x, …)`, `singleton(x)`) are never
+   marked. *)
+let set_empty_literal = "$empty"
+
+(* Set-valued WITHOUT relying on `empty` itself: `elts(_) == empty` marks the
+   right-hand side, but `_ == empty` (an Int binder against a parameter named
+   `empty`, the shape a relational contract takes after substitution) does
+   not, because neither side is set-valued on its own. *)
+let rec is_set_shaped (e : A.expr) : bool =
+  match e with
+  | A.EVar { A.txt; _ } -> txt = set_empty_literal
+  | A.EApp (A.EVar { A.txt = ("union" | "inter" | "diff" | "singleton"); _ }, _, _) -> true
+  | A.EApp (A.EVar { A.txt = m; _ }, [ _ ], _) -> is_builtin_set_measure m || is_set_measure m
+  | A.EAnnot (inner, _, _) -> is_set_shaped inner
+  | _ -> false
+
+let rec mark_set_empty (e : A.expr) : A.expr =
+  let m = mark_set_empty in
+  let as_set (x : A.expr) : A.expr =
+    match x with
+    | A.EVar ({ A.txt = "empty"; _ } as n) -> A.EVar { n with A.txt = set_empty_literal }
+    | _ -> m x
+  in
+  match e with
+  | A.EApp ((A.EVar { A.txt = ("union" | "inter" | "diff" | "subset"); _ } as hd), [ a; b ], sp) ->
+    A.EApp (hd, [ as_set a; as_set b ], sp)
+  | A.EApp ((A.EVar { A.txt = "member"; _ } as hd), [ x; st ], sp) ->
+    A.EApp (hd, [ m x; as_set st ], sp)
+  | A.EApp ((A.EVar { A.txt = ("==" | "!="); _ } as hd), [ a; b ], sp)
+    when is_set_shaped a || is_set_shaped b ->
+    A.EApp (hd, [ as_set a; as_set b ], sp)
+  | A.EApp ((A.EVar _ as hd), args, sp) -> A.EApp (hd, List.map m args, sp)
+  | A.EApp (f, args, sp) -> A.EApp (m f, List.map m args, sp)
+  | A.ETuple (es, sp) -> A.ETuple (List.map m es, sp)
+  | A.ECon (c, es, sp) -> A.ECon (c, List.map m es, sp)
+  | A.EAtom (a, es, sp) -> A.EAtom (a, List.map m es, sp)
+  | A.EField (r, n, sp) -> A.EField (m r, n, sp)
+  | A.EAnnot (inner, t, sp) -> A.EAnnot (m inner, t, sp)
+  | _ -> e
+
 let classify_pred (binder : string) (params : string list) (pred : A.expr) : pred_scope =
   let used = ref [] and bad = ref false in
   let rec go (e : A.expr) =
     match e with
     | A.EVar { A.txt; _ } ->
       if txt = binder || txt = "_" then ()
+      (* The set literal, as marked by [mark_set_empty], names no value.  A
+         bare `empty` anywhere else is an ordinary name and is classified
+         like one below. *)
+      else if txt = set_empty_literal then ()
       else if List.mem txt params then
         (if not (List.mem txt !used) then used := txt :: !used)
       else bad := true
@@ -392,7 +515,7 @@ let classify_pred (binder : string) (params : string list) (pred : A.expr) : pre
     | A.ELit _ -> ()
     | _ -> bad := true
   in
-  go pred;
+  go (mark_set_empty pred);
   if !bad then Unusable
   else if !used = [] then Closed
   else Relational (List.rev !used)
@@ -408,8 +531,8 @@ let classify_pred (binder : string) (params : string list) (pred : A.expr) : pre
    practice and inert if reached.  An application's HEAD is deliberately left
    alone: it names a function, operator or measure, not a value, so a parameter
    that happens to share a measure's name must not rewrite the call itself. *)
-let rec subst_params (env : (string * A.expr) list) (e : A.expr) : A.expr =
-  let go = subst_params env in
+let rec subst_params_marked (env : (string * A.expr) list) (e : A.expr) : A.expr =
+  let go = subst_params_marked env in
   match e with
   | A.EVar { A.txt; _ } -> (match List.assoc_opt txt env with Some a -> a | None -> e)
   | A.EApp ((A.EVar _ as hd), args, sp) -> A.EApp (hd, List.map go args, sp)
@@ -425,6 +548,12 @@ let rec subst_params (env : (string * A.expr) list) (e : A.expr) : A.expr =
   | A.EField (r, n, sp) -> A.EField (go r, n, sp)
   | A.EAnnot (inner, t, sp) -> A.EAnnot (go inner, t, sp)
   | _ -> e
+
+(* Marking first means a set-position `empty` is already [set_empty_literal],
+   which no formal can be named, so a parameter called `empty` is substituted
+   everywhere it is a VALUE and nowhere it is the empty set. *)
+let subst_params (env : (string * A.expr) list) (e : A.expr) : A.expr =
+  subst_params_marked env (mark_set_empty e)
 
 (* =================================================================
    §4  Function signatures, measures, and stdlib-provided names
@@ -481,7 +610,23 @@ let rec list_len (e : A.expr) : int option =
 (* Registered measure names for this compilation: the builtin `len` plus any
    user function annotated `@[measure]`.  Set once per [check_module]. *)
 let registered_measures : string list ref = ref []
-let is_measure (m : string) : bool = m = "len" || List.mem m !registered_measures
+
+(* ── The set vocabulary (specs/2026-09-13-set-refinements-design.md §3) ──
+   `elts` is a BUILT-IN measure exactly as `len` is: meaningful only inside a
+   `{...}` predicate, never a callable function.  It maps a list to the set of
+   its elements.  It is deliberately NOT axiomatised over the datatype in v1
+   (the built-in `List` datatype's head field is the opaque `Elem`, so a list
+   of Ints is not a datatype term at all); it reflects the way non-axiom `len`
+   does — a concrete set term for a literal, a per-variable constant
+   `elts$xs` otherwise — which is what makes literal membership, relational
+   contracts and propagated postconditions provable without a quantifier. *)
+let is_measure (m : string) : bool =
+  m = "len" || is_builtin_set_measure m || List.mem m !registered_measures
+
+(* The predicate-only set operators.  `empty` is the empty-set literal ONLY in
+   a set position; see [mark_set_empty]. *)
+let set_operators = [ "member"; "union"; "inter"; "diff"; "subset"; "singleton" ]
+let is_set_operator (m : string) : bool = List.mem m set_operators
 
 (* ── Zero-argument constant functions ──────────────────────────────────────
    `fn size_x() : Int do 128 end` is, after inlining, the literal 128, so a
@@ -698,7 +843,8 @@ let predicate_operators =
      would be misleading. *)
   ; "+."; "-."; "*."; "/." ]
 
-let is_predicate_operator (m : string) : bool = List.mem m predicate_operators
+let is_predicate_operator (m : string) : bool =
+  List.mem m predicate_operators || is_set_operator m
 
 (* [known_predicate_fn] is defined below [adt_ctors], since the vocabulary now
    includes the auto-derived `is_<Ctor>` testers. *)
@@ -730,6 +876,294 @@ let measure_body_nonneg (self : string) (known : string list) (body : A.expr) : 
    type params / other ADTs -> opaque "Elem", Int/Bool concrete). *)
 let ctor_field_sorts : (string, Smt.sort list) Hashtbl.t = Hashtbl.create 32
 let adt_ctors : (string, string list) Hashtbl.t = Hashtbl.create 16
+
+(* ── Set-valued user measures (design §4.4) ────────────────────────────────
+   name -> element sort of a `@[measure]` declared `: Set(T)`.  Populated once
+   per [check_module] from the declared return type, INDEPENDENTLY of whether
+   the measure was axiomatised: a call-site resolver must declare `m$x` at a
+   set sort for such a measure even under `--no-measure-axioms`, or the symbol
+   lands at `Int` and every set predicate over it is a sort conflict.
+   `Int` elements are concrete; everything else — including `String`, whose
+   constructor fields are the opaque `Elem` — is `Elem`. *)
+
+let set_ret_elem (fd : A.fn_def) : Smt.sort option =
+  let rec go = function
+    | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> go b
+    | A.TyCon ({ A.txt = "Set"; _ }, [ A.TyCon ({ A.txt = "Int"; _ }, []) ]) -> Some Smt.SInt
+    | A.TyCon ({ A.txt = "Set"; _ }, [ _ ]) -> Some (Smt.SData "Elem")
+    | _ -> None
+  in
+  match fd.A.fn_ret_ty with Some t -> go t | None -> None
+
+(* Replace the placeholder element sort throughout a term with [elem] — for
+   measure AXIOMS, whose element sort is fixed by the declaration and which
+   are rendered once, outside any VC and hence outside [resolve_set_sorts]. *)
+let rec pin_set_sorts (elem : Smt.sort) (t : Smt.term) : Smt.term =
+  let p = pin_set_sorts elem in
+  match t with
+  | Smt.SetEmpty e -> Smt.SetEmpty (if e = Smt.set_unknown_elem then elem else e)
+  | Smt.SetSng (e, x) -> Smt.SetSng ((if e = Smt.set_unknown_elem then elem else e), p x)
+  | Smt.SetMem (a, b) -> Smt.SetMem (p a, p b)
+  | Smt.SetUnion (a, b) -> Smt.SetUnion (p a, p b)
+  | Smt.SetInter (a, b) -> Smt.SetInter (p a, p b)
+  | Smt.SetDiff (a, b) -> Smt.SetDiff (p a, p b)
+  | Smt.SetSub (a, b) -> Smt.SetSub (p a, p b)
+  | Smt.App (f, args) -> Smt.App (f, List.map p args)
+  | Smt.Add (a, b) -> Smt.Add (p a, p b)
+  | Smt.Sub (a, b) -> Smt.Sub (p a, p b)
+  | Smt.MulLit (k, a) -> Smt.MulLit (k, p a)
+  | Smt.Eq (a, b) -> Smt.Eq (p a, p b)
+  | Smt.Ne (a, b) -> Smt.Ne (p a, p b)
+  | Smt.And (a, b) -> Smt.And (p a, p b)
+  | Smt.Or (a, b) -> Smt.Or (p a, p b)
+  | Smt.Not a -> Smt.Not (p a)
+  | t -> t
+
+(* Set sorts the measure preamble has already `define-sort`ed, so a VC that
+   attaches it must not define them again (z3 rejects a duplicate inside one
+   push). *)
+let measure_preamble_set_sorts : (Smt.sort, unit) Hashtbl.t = Hashtbl.create 4
+
+(* ── Set element-sort resolution ───────────────────────────────────────────
+   A set term is built before anyone knows what its elements are: `elts$xs`
+   stands for an opaque list, `singleton(x)` for whatever `x` reflected to,
+   and `empty` for nothing at all.  Z3 needs every array sort spelled out, and
+   one symbol at two sorts is the `(error …)` this subsystem guards hardest
+   against.  So, once a VC's declarations are final, this pass UNIFIES the
+   element sort of every set-valued term in the VC: a literal element pins its
+   set (`member(3, s)` makes `s` an Int set, `member("a", s)` a `$Str` set),
+   union/intersection/difference/subset/equality make their operands agree,
+   and a set nothing pins defaults to the opaque `Elem`.  A contradiction
+   (`3` and `"a"` in one set) is a [None], which the caller records as
+   [Sort_conflict] — a skip, never a query.
+
+   The pass is TWO traversals in the same deterministic order: the first
+   allocates one class per `SetEmpty`/`SetSng` node and unifies, the second
+   rewrites each node's sort from its class.  Set-typed CONSTANTS are keyed by
+   name so the goal and every assumption agree on one class per symbol. *)
+let resolve_set_sorts (decls : (string * Smt.sort) list) (goal : Smt.term)
+    (assumptions : Smt.term list)
+    : ((string * Smt.sort) list * Smt.term * Smt.term list) option =
+  let parent : (int, int) Hashtbl.t = Hashtbl.create 16 in
+  let pinned : (int, Smt.sort) Hashtbl.t = Hashtbl.create 16 in
+  let next = ref 0 in
+  let fresh () = let i = !next in incr next; Hashtbl.replace parent i i; i in
+  let rec find i = let p = Hashtbl.find parent i in if p = i then i else find p in
+  let conflict = ref false in
+  let pin i (s : Smt.sort) =
+    let r = find i in
+    match Hashtbl.find_opt pinned r with
+    | None -> Hashtbl.replace pinned r s
+    | Some s' -> if s' <> s then conflict := true
+  in
+  let union i j =
+    let ri = find i and rj = find j in
+    if ri <> rj then begin
+      Hashtbl.replace parent ri rj;
+      (match Hashtbl.find_opt pinned ri with Some s -> pin rj s | None -> ())
+    end
+  in
+  let const_class : (string, int) Hashtbl.t = Hashtbl.create 8 in
+  let sort_of n = List.assoc_opt n decls in
+  let class_of_const n =
+    match Hashtbl.find_opt const_class n with
+    | Some i -> i
+    | None ->
+      let i = fresh () in
+      Hashtbl.replace const_class n i;
+      (match sort_of n with
+       | Some (Smt.SSet e) when e <> Smt.set_unknown_elem -> pin i e
+       | _ -> ());
+      i
+  in
+  (* The element sort a term pins, or None when it says nothing. *)
+  let elem_sort_of (x : Smt.term) : Smt.sort option =
+    match x with
+    | Smt.IntLit _ | Smt.Add _ | Smt.Sub _ | Smt.MulLit _ | Smt.Mul _ | Smt.Neg _ -> Some Smt.SInt
+    | Smt.BoolLit _ -> Some Smt.SBool
+    | Smt.FloatLit _ -> Some Smt.SFloat
+    | Smt.Const c -> (match sort_of c with Some (Smt.SSet _) -> None | s -> s)
+    | Smt.App (f, _) when Hashtbl.mem ctor_field_sorts f || Hashtbl.mem set_measure_elem f -> None
+    | Smt.App _ -> Some Smt.SInt
+    | _ -> None
+  in
+  (* Allocation order of the per-node classes, replayed by the rewrite. *)
+  let nodes : int list ref = ref [] in
+  (* Returns the class of a SET-valued term, None for anything else. *)
+  let rec infer (t : Smt.term) : int option =
+    match t with
+    | Smt.SetEmpty e ->
+      let i = fresh () in
+      nodes := i :: !nodes;
+      if e <> Smt.set_unknown_elem then pin i e;
+      Some i
+    | Smt.SetSng (e, x) ->
+      let i = fresh () in
+      nodes := i :: !nodes;
+      if e <> Smt.set_unknown_elem then pin i e;
+      (match elem_sort_of x with Some s -> pin i s | None -> ());
+      ignore (infer x);
+      Some i
+    | Smt.SetMem (x, s) ->
+      (match infer s with
+       | Some i -> (match elem_sort_of x with Some es -> pin i es | None -> ())
+       | None -> conflict := true);
+      ignore (infer x);
+      None
+    | Smt.SetUnion (a, b) | Smt.SetInter (a, b) | Smt.SetDiff (a, b) ->
+      (match infer a, infer b with
+       | Some i, Some j -> union i j; Some i
+       | _ -> conflict := true; None)
+    | Smt.SetSub (a, b) ->
+      (match infer a, infer b with
+       | Some i, Some j -> union i j
+       | _ -> conflict := true);
+      None
+    | Smt.Const c ->
+      (match sort_of c with Some (Smt.SSet _) -> Some (class_of_const c) | _ -> None)
+    | Smt.Eq (a, b) | Smt.Ne (a, b) ->
+      (match infer a, infer b with
+       | Some i, Some j -> union i j
+       | None, None -> ()
+       | _ -> conflict := true);
+      None
+    | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ -> None
+    (* An axiomatised set-valued measure applied to a datatype term is a set
+       at the measure's declared element sort. *)
+    | Smt.App (m, args) when Hashtbl.mem set_measure_elem m ->
+      List.iter (fun a -> ignore (infer a)) args;
+      let i = fresh () in
+      pin i (Hashtbl.find set_measure_elem m);
+      Some i
+    | Smt.App (_, args) -> List.iter (fun a -> ignore (infer a)) args; None
+    | Smt.IsCtor (_, a) | Smt.Not a | Smt.Neg a | Smt.MulLit (_, a) -> ignore (infer a); None
+    | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b) | Smt.And (a, b) | Smt.Or (a, b)
+    | Smt.Implies (a, b) | Smt.Lt (a, b) | Smt.Le (a, b) | Smt.Gt (a, b) | Smt.Ge (a, b)
+    | Smt.FpEq (a, b) | Smt.FpLt (a, b) | Smt.FpLe (a, b) | Smt.FpGt (a, b)
+    | Smt.FpGe (a, b) -> ignore (infer a); ignore (infer b); None
+  in
+  ignore (infer goal);
+  List.iter (fun a -> ignore (infer a)) assumptions;
+  if !conflict then None
+  else begin
+    let resolved i =
+      match Hashtbl.find_opt pinned (find i) with Some s -> s | None -> Smt.SData "Elem"
+    in
+    let queue = ref (List.rev !nodes) in
+    let pop () =
+      match !queue with i :: rest -> queue := rest; i | [] -> fresh ()
+    in
+    let rec rewrite (t : Smt.term) : Smt.term =
+      match t with
+      | Smt.SetEmpty _ -> let i = pop () in Smt.SetEmpty (resolved i)
+      | Smt.SetSng (_, x) -> let i = pop () in let s = resolved i in Smt.SetSng (s, rewrite x)
+      | Smt.SetMem (x, s) -> let s' = rewrite s in Smt.SetMem (rewrite x, s')
+      | Smt.SetUnion (a, b) -> let a' = rewrite a in Smt.SetUnion (a', rewrite b)
+      | Smt.SetInter (a, b) -> let a' = rewrite a in Smt.SetInter (a', rewrite b)
+      | Smt.SetDiff (a, b) -> let a' = rewrite a in Smt.SetDiff (a', rewrite b)
+      | Smt.SetSub (a, b) -> let a' = rewrite a in Smt.SetSub (a', rewrite b)
+      | Smt.Const _ | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ -> t
+      | Smt.App (f, args) -> Smt.App (f, List.map rewrite args)
+      | Smt.IsCtor (c, a) -> Smt.IsCtor (c, rewrite a)
+      | Smt.Not a -> Smt.Not (rewrite a)
+      | Smt.Neg a -> Smt.Neg (rewrite a)
+      | Smt.MulLit (k, a) -> Smt.MulLit (k, rewrite a)
+      | Smt.Add (a, b) -> let a' = rewrite a in Smt.Add (a', rewrite b)
+      | Smt.Sub (a, b) -> let a' = rewrite a in Smt.Sub (a', rewrite b)
+      | Smt.Mul (a, b) -> let a' = rewrite a in Smt.Mul (a', rewrite b)
+      | Smt.And (a, b) -> let a' = rewrite a in Smt.And (a', rewrite b)
+      | Smt.Or (a, b) -> let a' = rewrite a in Smt.Or (a', rewrite b)
+      | Smt.Implies (a, b) -> let a' = rewrite a in Smt.Implies (a', rewrite b)
+      | Smt.Eq (a, b) -> let a' = rewrite a in Smt.Eq (a', rewrite b)
+      | Smt.Ne (a, b) -> let a' = rewrite a in Smt.Ne (a', rewrite b)
+      | Smt.Lt (a, b) -> let a' = rewrite a in Smt.Lt (a', rewrite b)
+      | Smt.Le (a, b) -> let a' = rewrite a in Smt.Le (a', rewrite b)
+      | Smt.Gt (a, b) -> let a' = rewrite a in Smt.Gt (a', rewrite b)
+      | Smt.Ge (a, b) -> let a' = rewrite a in Smt.Ge (a', rewrite b)
+      | Smt.FpEq (a, b) -> let a' = rewrite a in Smt.FpEq (a', rewrite b)
+      | Smt.FpLt (a, b) -> let a' = rewrite a in Smt.FpLt (a', rewrite b)
+      | Smt.FpLe (a, b) -> let a' = rewrite a in Smt.FpLe (a', rewrite b)
+      | Smt.FpGt (a, b) -> let a' = rewrite a in Smt.FpGt (a', rewrite b)
+      | Smt.FpGe (a, b) -> let a' = rewrite a in Smt.FpGe (a', rewrite b)
+    in
+    let goal' = rewrite goal in
+    let assumptions' = List.map rewrite assumptions in
+    let decls' =
+      List.map
+        (fun (n, s) ->
+          match s with
+          | Smt.SSet _ ->
+            (n, Smt.SSet (match Hashtbl.find_opt const_class n with
+                          | Some i -> resolved i
+                          | None -> Smt.SData "Elem"))
+          | s -> (n, s))
+        decls
+    in
+    Some (decls', goal', assumptions')
+  end
+
+(* Every element sort a (resolved) VC's sets range over. *)
+let vc_set_elem_sorts (vc : Smt.vc) : Smt.sort list =
+  let acc = ref [] in
+  let add e = if not (List.mem e !acc) then acc := e :: !acc in
+  List.iter (fun (_, s) -> match s with Smt.SSet e -> add e | _ -> ()) vc.Smt.decls;
+  let rec go (t : Smt.term) =
+    match t with
+    | Smt.SetEmpty e -> add e
+    | Smt.SetSng (e, x) -> add e; go x
+    | Smt.SetMem (a, b) | Smt.SetUnion (a, b) | Smt.SetInter (a, b) | Smt.SetDiff (a, b)
+    | Smt.SetSub (a, b) -> go a; go b
+    | Smt.Const _ | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ -> ()
+    | Smt.App (_, args) -> List.iter go args
+    | Smt.IsCtor (_, a) | Smt.Not a | Smt.Neg a | Smt.MulLit (_, a) -> go a
+    | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b) | Smt.And (a, b) | Smt.Or (a, b)
+    | Smt.Implies (a, b) | Smt.Eq (a, b) | Smt.Ne (a, b) | Smt.Lt (a, b) | Smt.Le (a, b)
+    | Smt.Gt (a, b) | Smt.Ge (a, b) | Smt.FpEq (a, b) | Smt.FpLt (a, b) | Smt.FpLe (a, b)
+    | Smt.FpGt (a, b) | Smt.FpGe (a, b) -> go a; go b
+  in
+  go vc.Smt.goal;
+  List.iter go vc.Smt.assumptions;
+  !acc
+
+(* The set-sort preamble for a VC: the `define-sort`s its sets need, preceded
+   by whichever underlying sort (`Elem`, `$Str`) is needed and not already
+   declared by the preambles the caller has assembled.  Empty when the VC has
+   no sets, so a set-free VC pays nothing and its cache key is unchanged. *)
+let set_preamble ~(elem_declared : bool) ~(str_declared : bool) ?(measure_attached = false)
+    (vc : Smt.vc) : string =
+  let elems = List.map Smt.render_elem_sort (vc_set_elem_sorts vc) in
+  let elems =
+    if measure_attached then
+      List.filter (fun e -> not (Hashtbl.mem measure_preamble_set_sorts e)) elems
+    else elems
+  in
+  match elems with
+  | [] -> ""
+  | elems ->
+    let needs_elem = List.mem (Smt.SData "Elem") elems && not elem_declared in
+    let needs_str = List.mem (Smt.SData str_sort) elems && not str_declared in
+    (if needs_elem then "(declare-sort Elem 0)\n" else "")
+    ^ (if needs_str then Printf.sprintf "(declare-sort %s 0)\n" str_sort else "")
+    ^ Smt.set_sort_defs elems
+
+(* The set of a CONCRETE list term (a `Cons`/`Nil` constructor chain whose
+   heads already reflected): `{h1, h2, …}` as nested singletons and unions,
+   element sorts left for [resolve_set_sorts].  None for anything opaque. *)
+let rec concrete_elts (t : Smt.term) : Smt.term option =
+  match t with
+  | Smt.App ("Nil", []) -> Some (Smt.SetEmpty Smt.set_unknown_elem)
+  | Smt.App ("Cons", [ h; tl ]) ->
+    (match h with
+     | Smt.App (f, _) when Hashtbl.mem ctor_field_sorts f -> None
+     | _ ->
+       Option.map
+         (fun rest -> Smt.SetUnion (Smt.SetSng (Smt.set_unknown_elem, h), rest))
+         (concrete_elts tl))
+  | _ -> None
+
+(* The SMT symbol standing for `elts(x)` / `keys(x)` over a March name. *)
+let set_const (m : string) (x : string) : string = m ^ "$" ^ x
+let elts_const (x : string) : string = set_const elts_measure x
 
 (* ── Constructor testers ───────────────────────────────────────────────────
    Every constructor of every registered ADT implicitly gains an `is_<Ctor>`
@@ -1188,6 +1622,18 @@ let rec smt_of_axiom_body ~self ~allowed (bound : string list) (e : A.expr) : Sm
     (match r a, r b with Some x, Some y -> Some (Smt.Sub (x, y)) | _ -> None)
   | A.EApp (A.EVar { A.txt = "*"; _ }, [ A.ELit (A.LitInt k, _); b ], _) ->
     Option.map (fun y -> Smt.MulLit (k, y)) (r b)
+  (* The set vocabulary, for a set-valued measure body (design §4.4).  A
+     bound payload variable may be an ELEMENT (`singleton(x)`); element sorts
+     are pinned to the measure's declared sort by [arm_axiom]. *)
+  | A.EVar { A.txt = "empty"; _ } -> Some (Smt.SetEmpty Smt.set_unknown_elem)
+  | A.EApp (A.EVar { A.txt = "singleton"; _ }, [ x ], _) ->
+    Option.map (fun t -> Smt.SetSng (Smt.set_unknown_elem, t)) (r x)
+  | A.EApp (A.EVar { A.txt = "union"; _ }, [ a; b ], _) ->
+    (match r a, r b with Some x, Some y -> Some (Smt.SetUnion (x, y)) | _ -> None)
+  | A.EApp (A.EVar { A.txt = "inter"; _ }, [ a; b ], _) ->
+    (match r a, r b with Some x, Some y -> Some (Smt.SetInter (x, y)) | _ -> None)
+  | A.EApp (A.EVar { A.txt = "diff"; _ }, [ a; b ], _) ->
+    (match r a, r b with Some x, Some y -> Some (Smt.SetDiff (x, y)) | _ -> None)
   | _ -> None
 
 (* All ADT sorts reachable from [seeds] through constructor fields, so a single
@@ -1238,6 +1684,20 @@ let arm_axiom ~allowed (name : string) ((ctor, vars, body) : string * string lis
   match smt_of_axiom_body ~self:name ~allowed vars body with
   | None -> None
   | Some bsmt ->
+    (* A set-valued measure's arm is a set term; an Int measure's arm must
+       NOT be one (and vice versa), or the axiom is ill-sorted. *)
+    let is_set = function
+      | Smt.SetEmpty _ | Smt.SetSng _ | Smt.SetUnion _ | Smt.SetInter _ | Smt.SetDiff _ -> true
+      | Smt.App (m, _) -> Hashtbl.mem set_measure_elem m
+      | _ -> false
+    in
+    if is_set bsmt <> Hashtbl.mem set_measure_elem name then None
+    else
+    let bsmt =
+      match Hashtbl.find_opt set_measure_elem name with
+      | Some e -> pin_set_sorts e bsmt
+      | None -> bsmt
+    in
     let sorts = try Hashtbl.find ctor_field_sorts ctor with Not_found -> [] in
     if List.length vars <> List.length sorts then None
     else
@@ -1346,9 +1806,27 @@ let build_measure_preamble (mdefs : (string * A.fn_def) list) : unit =
   if axiomatized = [] then measure_preamble := ""
   else begin
     let buf = Buffer.create 256 in
+    (* … the set sorts any set-valued measure needs (after `Elem` and the
+       datatypes, before the declare-funs that mention them) … *)
+    Hashtbl.reset measure_preamble_set_sorts;
+    let set_elems =
+      List.filter_map
+        (fun (name, _, _) ->
+          match Hashtbl.find_opt set_measure_elem name with
+          | Some e -> Hashtbl.replace measure_preamble_set_sorts e (); Some e
+          | None -> None)
+        axiomatized
+    in
+    Buffer.add_string buf (Smt.set_sort_defs set_elems);
     (* declare-funs first … *)
     List.iter
-      (fun (name, adt, _) -> Buffer.add_string buf (Printf.sprintf "(declare-fun %s (%s) Int)\n" name adt))
+      (fun (name, adt, _) ->
+        let result =
+          match Hashtbl.find_opt set_measure_elem name with
+          | Some e -> Smt.string_of_sort (Smt.SSet e)
+          | None -> "Int"
+        in
+        Buffer.add_string buf (Printf.sprintf "(declare-fun %s (%s) %s)\n" name adt result))
       axiomatized;
     (* … then non-negativity axioms … *)
     List.iter

@@ -367,6 +367,9 @@ let rec term_fits_sort (sort : Smt.sort) (t : Smt.term) : bool =
      and if a later change makes it reachable, refusing the fit makes the record
      unreflectable and the call skipped, which is the safe direction. *)
   | Smt.SFloat -> false
+  (* No record field is a set: a set-sorted field never arises from
+     [smt_sort_of_field], so nothing fits it. *)
+  | Smt.SSet _ -> false
   | Smt.SData s ->
     (match t with
      | Smt.App (ctor, args) ->
@@ -578,13 +581,27 @@ let rec reflect_scalar
        incr ret_ctr;
        let nm = Printf.sprintf "%s$ret%d" fname !ret_ctr in
        let c = Smt.Const nm in
-       let rv n = if n = b || n = "_" then Some c else None in
+       (* [q] is in the CALLER's namespace: a name other than the binder is
+          a caller variable and reflects through the caller's own resolvers,
+          exactly as the refined-local arm above does — so a Bool contract
+          such as `_ == member(elem, elts(s))` keeps its `elts(s)` and its
+          `elem` rather than dropping the whole fact. *)
+       let extra = ref [] in
+       let rv n =
+         if n = b || n = "_" then Some c
+         else
+           match foreign_var n with
+           | Some (t, d) ->
+             if not (List.mem d !extra) then extra := d :: !extra;
+             Some t
+           | None -> None
+       in
        let assumptions =
-         match smt_of ~resolve_var:rv ~resolve_measure:(fun _ _ -> None) q with
+         match smt_of ~resolve_var:rv ~resolve_measure:foreign_measure q with
          | Some qa -> [ qa ]
          | None -> []
        in
-       Some (c, [ (nm, sort) ], assumptions)
+       Some (c, (nm, sort) :: !extra, assumptions)
      | Some _ | None -> plain actual)
   | _ -> plain actual
 

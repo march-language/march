@@ -357,21 +357,45 @@ mod Set do
 
   -- ── Public API ─────────────────────────────────────────────────────────────
 
-  doc "Returns an empty set."
-  fn empty() do
+  doc """
+  Returns an empty set.
+
+  This contract is ASSUMED, not proved: the set of elements is a fact about
+  the abstract set (`elts`) the refinement checker takes on faith, and it
+  holds only when `cmp` is a strict total order consistent with `==` on the
+  element type. See docs/refinement-types.md, "Set Refinements".
+  """
+  @[assume]
+  fn empty() : {Set(a) | elts(_) == empty} do
     HamtSet(0, SEmpty)
   end
 
-  doc "Returns a set containing exactly one element."
-  fn singleton(x) do
+  doc """
+  Returns a set containing exactly one element.
+
+  This contract is ASSUMED, not proved: the set of elements is a fact about
+  the abstract set (`elts`) the refinement checker takes on faith, and it
+  holds only when `cmp` is a strict total order consistent with `==` on the
+  element type. See docs/refinement-types.md, "Set Refinements".
+  """
+  @[assume]
+  fn singleton(x) : {Set(a) | elts(_) == singleton(x)} do
     let h = key_hash(x)
     HamtSet(1, SLeaf(h, x))
   end
 
   -- ---- Query ----
 
-  doc "Returns true if the set contains no elements."
-  fn is_empty(s) do
+  doc """
+  Returns true if the set contains no elements.
+
+  This contract is ASSUMED, not proved: the set of elements is a fact about
+  the abstract set (`elts`) the refinement checker takes on faith, and it
+  holds only when `cmp` is a strict total order consistent with `==` on the
+  element type. See docs/refinement-types.md, "Set Refinements".
+  """
+  @[assume]
+  fn is_empty(s) : {Bool | _ == (elts(s) == empty)} do
     match s do
     HamtSet(n, _) -> n == 0
     end
@@ -387,8 +411,14 @@ mod Set do
   doc """
   Returns true if the set contains elem.
   cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+
+  This contract is ASSUMED, not proved: the set of elements is a fact about
+  the abstract set (`elts`) the refinement checker takes on faith, and it
+  holds only when `cmp` is a strict total order consistent with `==` on the
+  element type. See docs/refinement-types.md, "Set Refinements".
   """
-  fn contains(s, elem, cmp) do
+  @[assume]
+  fn contains(s, elem, cmp) : {Bool | _ == member(elem, elts(s))} do
     match s do
     HamtSet(_, node) -> do
       let h = key_hash(elem)
@@ -403,8 +433,14 @@ mod Set do
   doc """
   Inserts elem into the set. Returns the set unchanged if elem is already present.
   cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+
+  This contract is ASSUMED, not proved: the set of elements is a fact about
+  the abstract set (`elts`) the refinement checker takes on faith, and it
+  holds only when `cmp` is a strict total order consistent with `==` on the
+  element type. See docs/refinement-types.md, "Set Refinements".
   """
-  fn insert(s, elem, cmp) do
+  @[assume]
+  fn insert(s, elem, cmp) : {Set(a) | elts(_) == union(elts(s), singleton(elem))} do
     match s do
     HamtSet(n, node) -> do
       let h = key_hash(elem)
@@ -418,8 +454,14 @@ mod Set do
   doc """
   Removes elem from the set. Returns the set unchanged if elem is absent.
   cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+
+  This contract is ASSUMED, not proved: the set of elements is a fact about
+  the abstract set (`elts`) the refinement checker takes on faith, and it
+  holds only when `cmp` is a strict total order consistent with `==` on the
+  element type. See docs/refinement-types.md, "Set Refinements".
   """
-  fn remove(s, elem, cmp) do
+  @[assume]
+  fn remove(s, elem, cmp) : {Set(a) | elts(_) == diff(elts(s), singleton(elem))} do
     match s do
     HamtSet(n, node) -> do
       let h = key_hash(elem)
@@ -435,8 +477,14 @@ mod Set do
   doc """
   Returns the union of two sets (all elements in either set).
   cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+
+  This contract is ASSUMED, not proved: the set of elements is a fact about
+  the abstract set (`elts`) the refinement checker takes on faith, and it
+  holds only when `cmp` is a strict total order consistent with `==` on the
+  element type. See docs/refinement-types.md, "Set Refinements".
   """
-  fn union(a, b, cmp) do
+  @[assume]
+  fn union(a, b, cmp) : {Set(a) | elts(_) == union(elts(a), elts(b))} do
     fn go(acc, x) do
       insert(acc, x, cmp)
     end
@@ -448,8 +496,14 @@ mod Set do
   doc """
   Returns the intersection of two sets (elements in both sets).
   cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+
+  This contract is ASSUMED, not proved: the set of elements is a fact about
+  the abstract set (`elts`) the refinement checker takes on faith, and it
+  holds only when `cmp` is a strict total order consistent with `==` on the
+  element type. See docs/refinement-types.md, "Set Refinements".
   """
-  fn intersection(a, b, cmp) do
+  @[assume]
+  fn intersection(a, b, cmp) : {Set(a) | elts(_) == inter(elts(a), elts(b))} do
     fn go(acc, x) do
       if contains(b, x, cmp) do insert(acc, x, cmp)
       else acc end
@@ -463,8 +517,14 @@ mod Set do
   doc """
   Returns elements in a that are not in b (set difference a \\ b).
   cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+
+  This contract is ASSUMED, not proved: the set of elements is a fact about
+  the abstract set (`elts`) the refinement checker takes on faith, and it
+  holds only when `cmp` is a strict total order consistent with `==` on the
+  element type. See docs/refinement-types.md, "Set Refinements".
   """
-  fn difference(a, b, cmp) do
+  @[assume]
+  fn difference(a, b, cmp) : {Set(a) | elts(_) == diff(elts(a), elts(b))} do
     fn go(acc, x) do
       if contains(b, x, cmp) do acc
       else insert(acc, x, cmp) end
@@ -475,8 +535,16 @@ mod Set do
     end
   end
 
-  doc "Returns true if a is a subset of b."
-  fn is_subset(a, b, cmp) do
+  doc """
+  Returns true if a is a subset of b.
+
+  This contract is ASSUMED, not proved: the set of elements is a fact about
+  the abstract set (`elts`) the refinement checker takes on faith, and it
+  holds only when `cmp` is a strict total order consistent with `==` on the
+  element type. See docs/refinement-types.md, "Set Refinements".
+  """
+  @[assume]
+  fn is_subset(a, b, cmp) : {Bool | _ == subset(elts(a), elts(b))} do
     fn check(ok, x) do
       ok && contains(b, x, cmp)
     end
@@ -488,8 +556,16 @@ mod Set do
 
   -- ---- Traversal ----
 
-  doc "Returns all elements as a list (hash-traversal order)."
-  fn to_list(s) do
+  doc """
+  Returns all elements as a list (hash-traversal order).
+
+  This contract is ASSUMED, not proved: the set of elements is a fact about
+  the abstract set (`elts`) the refinement checker takes on faith, and it
+  holds only when `cmp` is a strict total order consistent with `==` on the
+  element type. See docs/refinement-types.md, "Set Refinements".
+  """
+  @[assume]
+  fn to_list(s) : {List(a) | elts(_) == elts(s)} do
     match s do
     HamtSet(_, node) -> do
       let acc = node_fold(Nil, node, fn (xs, x) -> Cons(x, xs))
@@ -501,8 +577,14 @@ mod Set do
   doc """
   Builds a set from a list of elements.
   cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+
+  This contract is ASSUMED, not proved: the set of elements is a fact about
+  the abstract set (`elts`) the refinement checker takes on faith, and it
+  holds only when `cmp` is a strict total order consistent with `==` on the
+  element type. See docs/refinement-types.md, "Set Refinements".
   """
-  fn from_list(xs, cmp) do
+  @[assume]
+  fn from_list(xs, cmp) : {Set(a) | elts(_) == elts(xs)} do
     fn go(lst, acc) do
       match lst do
       Nil -> acc
@@ -527,8 +609,14 @@ mod Set do
   doc """
   Returns true if the two sets contain the same elements.
   cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+
+  This contract is ASSUMED, not proved: the set of elements is a fact about
+  the abstract set (`elts`) the refinement checker takes on faith, and it
+  holds only when `cmp` is a strict total order consistent with `==` on the
+  element type. See docs/refinement-types.md, "Set Refinements".
   """
-  fn eq(a, b, cmp) do
+  @[assume]
+  fn eq(a, b, cmp) : {Bool | _ == (elts(a) == elts(b))} do
     let sa = size(a)
     let sb = size(b)
     if sa != sb do false

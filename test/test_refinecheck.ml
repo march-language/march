@@ -14186,6 +14186,433 @@ let container_suite =
         in
         Alcotest.(check bool) "a Skipped obligation on `f` is in the ledger" true skipped) ]
 
+(* ── Set refinements, Phase A1 (specs/2026-09-13-set-refinements-design.md,
+   specs/plans/set-refinements-plan.md §1) ─────────────────────────────────
+   The built-in `elts` measure and the predicate-only set vocabulary
+   (`member`, `union`, `inter`, `diff`, `subset`, `singleton`, `empty`),
+   encoded as Z3 `(Array elem Bool)` terms with the element sort unified per
+   VC by [Refine_encode.resolve_set_sorts].
+
+   Every ACCEPT case here sits next to a REJECT case, because an accept-only
+   witness cannot distinguish a working encoding from one that proves
+   everything: with `SetMem` rendered as the literal `true` (the RED-first
+   control run before this suite was trusted), every `violated` count below
+   read 0 while every `proved` count stayed put.  The counts are the
+   desugared ledger `(proved, violated, skipped)` over USER obligations. *)
+let set_suite =
+  let m body = "mod M do\n" ^ body ^ "\nend\n" in
+  let need2 = "  fn need2(xs : {List(Int) | member(2, elts(_))}) : Int do 0 end\n" in
+  (* The stdlib `Set` contracts, restated (spellings from stdlib/set.march). *)
+  let set_stub =
+    "  mod Set do\n\
+    \    type Set(a) = HamtSet(Int)\n\
+    \    @[assume]\n\
+    \    fn empty() : {Set(a) | elts(_) == empty} do HamtSet(0) end\n\
+    \    @[assume]\n\
+    \    fn singleton(x) : {Set(a) | elts(_) == singleton(x)} do HamtSet(1) end\n\
+    \    @[assume]\n\
+    \    fn contains(s, elem, cmp) : {Bool | _ == member(elem, elts(s))} do true end\n\
+    \    @[assume]\n\
+    \    fn insert(s, elem, cmp) : {Set(a) | elts(_) == union(elts(s), singleton(elem))} do s end\n\
+    \    @[assume]\n\
+    \    fn remove(s, elem, cmp) : {Set(a) | elts(_) == diff(elts(s), singleton(elem))} do s end\n\
+    \    @[assume]\n\
+    \    fn union(a, b, cmp) : {Set(a) | elts(_) == union(elts(a), elts(b))} do a end\n\
+    \    @[assume]\n\
+    \    fn difference(a, b, cmp) : {Set(a) | elts(_) == diff(elts(a), elts(b))} do a end\n\
+    \    @[assume]\n\
+    \    fn to_list(s) : {List(a) | elts(_) == elts(s)} do [] end\n\
+    \    @[assume]\n\
+    \    fn from_list(xs, cmp) : {Set(a) | elts(_) == elts(xs)} do HamtSet(0) end\n\
+    \  end\n\
+    \  pfn int_cmp(a : Int) : Int -> Bool do\n\
+    \    fn b -> a < b\n\
+    \  end\n"
+  in
+  (* The stdlib `Map` contracts, restated (spellings from stdlib/map.march). *)
+  let map_stub =
+    "  mod Map do\n\
+    \    type Map(k, v) = HamtMap(Int)\n\
+    \    @[assume]\n\
+    \    fn empty() : {Map(k, v) | keys(_) == empty} do HamtMap(0) end\n\
+    \    @[assume]\n\
+    \    fn get(m, key, cmp) : {Option(v) | is_Some(_) == member(key, keys(m))} do None end\n\
+    \    @[assume]\n\
+    \    fn contains_key(m, key, cmp) : {Bool | _ == member(key, keys(m))} do true end\n\
+    \    @[assume]\n\
+    \    fn insert(m, key, val, cmp) : {Map(k, v) | keys(_) == union(keys(m), singleton(key))} do m end\n\
+    \    @[assume]\n\
+    \    fn keys(m) : {List(k) | elts(_) == keys(m)} do [] end\n\
+    \    @[assume]\n\
+    \    fn filter(m, pred, cmp) : {Map(k, v) | subset(keys(_), keys(m))} do m end\n\
+    \    @[assume]\n\
+    \    fn merge(a, b, cmp) : {Map(k, v) | keys(_) == union(keys(a), keys(b))} do a end\n\
+    \  end\n\
+    \  pfn int_cmp(a : Int) : Int -> Bool do\n\
+    \    fn b -> a < b\n\
+    \  end\n"
+  in
+  let fv_measure =
+    "  type Expr = Var(Int) | Lam(Int, Expr) | App(Expr, Expr)\n\
+    \  @[measure]\n\
+    \  fn free_vars(e : Expr) : Set(Int) do\n\
+    \    match e do\n\
+    \      Var(x) -> singleton(x)\n\
+    \      Lam(x, b) -> diff(free_vars(b), singleton(x))\n\
+    \      App(f, a) -> union(free_vars(f), free_vars(a))\n\
+    \    end\n\
+    \  end\n"
+  in
+  [ gated "member of a literal list: proved, and refuted" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (1, 1, 0)
+          (ledger_counts3
+             (m (need2
+                 ^ "  fn ok() : Int do need2([1, 2, 3]) end\n\
+                   \  fn bad() : Int do need2([1, 3]) end"))));
+
+    gated "a postcondition proved on a literal propagates through a call, a let, and a parameter's own promise" (fun () ->
+        (* 5 proved: `mk`'s and `keep`'s postconditions, `need2(mk())`,
+           `need2(ys)` after `let ys = mk()`, and `need2(zs)` under `zs`'s own
+           contract.  1 skipped: `lose` returns `[7]` against `elts(_) ==
+           elts(xs)` — not a DEFINITE failure (`xs` may be `[7]`), so it stays
+           silent rather than reported. *)
+        Alcotest.(check (triple int int int)) "ledger" (5, 0, 1)
+          (ledger_counts3
+             (m (need2
+                 ^ "  fn mk() : {List(Int) | member(2, elts(_))} do [2, 5] end\n\
+                   \  fn use_mk() : Int do need2(mk()) end\n\
+                   \  fn use_let() : Int do\n\
+                   \    let ys = mk()\n\
+                   \    need2(ys)\n\
+                   \  end\n\
+                   \  fn fwd(zs : {List(Int) | member(2, elts(_))}) : Int do need2(zs) end\n\
+                   \  fn keep(xs : List(Int)) : {List(Int) | elts(_) == elts(xs)} do xs end\n\
+                   \  fn lose(xs : List(Int)) : {List(Int) | elts(_) == elts(xs)} do [7] end"))));
+
+    gated "a postcondition a literal does NOT meet is reported at the definition" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (0, 1, 0)
+          (ledger_counts3
+             (m "  fn mk() : {List(Int) | member(2, elts(_))} do [3, 5] end")));
+
+    gated "subset, union, inter, diff, singleton and empty over literals: each proved and each refuted" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (6, 5, 0)
+          (ledger_counts3
+             (m "  fn need_sub(a : List(Int), b : {List(Int) | subset(elts(_), elts(a))}) : Int do 0 end\n\
+                \  fn ok() : Int do need_sub([1, 2], [2]) end\n\
+                \  fn bad() : Int do need_sub([1, 2], [3]) end\n\
+                \  fn ok_empty() : Int do need_sub([1], []) end\n\
+                \  fn need_empty(xs : {List(Int) | elts(_) == empty}) : Int do 0 end\n\
+                \  fn ok2() : Int do need_empty([]) end\n\
+                \  fn bad2() : Int do need_empty([1]) end\n\
+                \  fn need_union(a : List(Int), b : List(Int), c : {List(Int) | elts(_) == union(elts(a), elts(b))}) : Int do 0 end\n\
+                \  fn ok3() : Int do need_union([1], [2], [2, 1]) end\n\
+                \  fn bad3() : Int do need_union([1], [2], [1]) end\n\
+                \  fn need_inter(a : List(Int), b : List(Int), c : {List(Int) | subset(elts(_), inter(elts(a), elts(b)))}) : Int do 0 end\n\
+                \  fn ok4() : Int do need_inter([1, 2], [2, 3], [2]) end\n\
+                \  fn bad4() : Int do need_inter([1, 2], [2, 3], [1]) end\n\
+                \  fn need_diff(a : List(Int), c : {List(Int) | elts(_) == diff(elts(a), singleton(1))}) : Int do 0 end\n\
+                \  fn ok5() : Int do need_diff([1, 2], [2]) end\n\
+                \  fn bad5() : Int do need_diff([1, 2], [1, 2]) end")));
+
+    gated "string elements: literal distinctness decides membership both ways" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (1, 1, 0)
+          (ledger_counts3
+             (m "  fn need_a(xs : {List(String) | member(\"a\", elts(_))}) : Int do 0 end\n\
+                \  fn ok() : Int do need_a([\"b\", \"a\"]) end\n\
+                \  fn bad() : Int do need_a([\"b\"]) end")));
+
+    gated "an Int literal against a string-element set is a sort-conflict skip, never a report" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (0, 0, 1)
+          (ledger_counts3
+             (m "  fn need_mixed(xs : {List(String) | member(3, elts(_))}) : Int do 0 end\n\
+                \  fn clash() : Int do need_mixed([\"a\"]) end")));
+
+    gated "a rebound name loses its set promise (silence, not a proof)" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (0, 0, 1)
+          (ledger_counts3
+             (m (need2
+                 ^ "  fn shadow(zs : {List(Int) | member(2, elts(_))}) : Int do\n\
+                   \    let zs = [1]\n\
+                   \    need2(zs)\n\
+                   \  end"))));
+
+    gated "an opaque list is skipped, not reported" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (0, 0, 1)
+          (ledger_counts3 (m (need2 ^ "  fn unknown(zs : List(Int)) : Int do need2(zs) end"))));
+
+    gated "len beside elts: the length is decided by len alone (cardinality is out of scope)" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (1, 1, 0)
+          (ledger_counts3
+             (m "  fn need_both(xs : {List(Int) | len(_) == 2 && elts(_) == elts([1, 1])}) : Int do 0 end\n\
+                \  fn ok_both() : Int do need_both([1, 1]) end\n\
+                \  fn bad_both() : Int do need_both([1]) end")));
+
+    gated "a sort-conflict VC followed by string-set and Int-set VCs: every later verdict still decides (channel intact)" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (2, 2, 1)
+          (ledger_counts3
+             (m (need2
+                 ^ "  fn need_mixed(xs : {List(String) | member(3, elts(_))}) : Int do 0 end\n\
+                   \  fn clash() : Int do need_mixed([\"a\"]) end\n\
+                   \  fn need_a(xs : {List(String) | member(\"a\", elts(_))}) : Int do 0 end\n\
+                   \  fn ok_s() : Int do need_a([\"b\", \"a\"]) end\n\
+                   \  fn bad_s() : Int do need_a([\"b\"]) end\n\
+                   \  fn ok_i() : Int do need2([1, 2, 3]) end\n\
+                   \  fn bad_i() : Int do need2([1, 3]) end"))));
+
+    (* ── Phase A2: set-valued user measures (design §4.4, plan §2) ───────── *)
+    gated "a set-valued measure: closed terms prove, open terms refute, a symbolic subset proves by axiom" (fun () ->
+        (* 3 proved: two closed literals and the symbolic `App(f, a)` subset.
+           2 violated: `Var(2)` and `Lam(1, Var(2))`.  1 skipped: `App(f,
+           Var(9))` — `9` may well be free in `a`, so not definite. *)
+        Alcotest.(check (triple int int int)) "ledger" (3, 2, 1)
+          (ledger_counts3
+             (m (fv_measure
+                 ^ "  fn closed(e : {Expr | free_vars(_) == empty}) : Int do 0 end\n\
+                   \  fn ok1() : Int do closed(Lam(1, Var(1))) end\n\
+                   \  fn bad1() : Int do closed(Var(2)) end\n\
+                   \  fn bad2() : Int do closed(Lam(1, Var(2))) end\n\
+                   \  fn ok2() : Int do closed(App(Lam(1, Var(1)), Lam(2, Var(2)))) end\n\
+                   \  fn need_sub(f : Expr, a : Expr, e : {Expr | subset(free_vars(_), union(free_vars(f), free_vars(a)))}) : Int do 0 end\n\
+                   \  fn sym(f : Expr, a : Expr) : Int do need_sub(f, a, App(f, a)) end\n\
+                   \  fn sym_bad(f : Expr, a : Expr) : Int do need_sub(f, a, App(f, Var(9))) end"))));
+
+    Alcotest.test_case "a set-valued measure with a non-structural arm draws the gate error" `Quick (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (m "  type Expr = Var(Int) | Lam(Int, Expr) | App(Expr, Expr)\n\
+                \  @[measure]\n\
+                \  fn fv(e : Expr) : Set(Int) do\n\
+                \    match e do\n\
+                \      Var(x) -> singleton(x)\n\
+                \      Lam(x, b) -> diff(fv(e), singleton(x))\n\
+                \      App(f, a) -> union(fv(f), fv(a))\n\
+                \    end\n\
+                \  end")));
+
+    Alcotest.test_case "calling a set-valued measure in expression position is an error" `Quick (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (m (fv_measure
+                 ^ "  fn oops(e : Expr) : Int do\n\
+                   \    let s = free_vars(e)\n\
+                   \    0\n\
+                   \  end"))));
+
+    Alcotest.test_case "the set vocabulary typechecks inside a set-valued measure body, and only there" `Quick (fun () ->
+        let tc src =
+          let errs, _ = March_typecheck.Typecheck.check_module
+              (March_desugar.Desugar.desugar_module (parse src)) in
+          March_errors.Errors.has_errors errs
+        in
+        Alcotest.(check bool) "measure body typechecks" false (tc (m fv_measure));
+        Alcotest.(check bool) "ordinary code cannot use `union`" true
+          (tc (m "  fn f(x : Int) : Int do union(x, x) end")));
+
+    gated "--no-measure-axioms: a set-valued measure degrades to a skip, never a crash" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_no_axioms
+             (m (fv_measure
+                 ^ "  fn closed(e : {Expr | free_vars(_) == empty}) : Int do 0 end\n\
+                   \  fn bad1() : Int do closed(Var(2)) end"))));
+
+    gated "REGRESSION: a List return over an Int measure keeps its Tier 2 induction path" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (m "  @[measure]\n\
+                \  fn llen(xs : List(Int)) : Int do\n\
+                \    match xs do\n\
+                \      Nil -> 0\n\
+                \      Cons(_, t) -> 1 + llen(t)\n\
+                \    end\n\
+                \  end\n\
+                \  fn push(xs : List(Int), x : Int) : {List(Int) | llen(_) == llen(xs) + 1} do\n\
+                \    match xs do\n\
+                \      Nil -> Cons(x, Nil)\n\
+                \      Cons(h, t) -> Cons(h, push(t, x))\n\
+                \    end\n\
+                \  end\n\
+                \  fn needs_empty(ys : {List(Int) | llen(ys) < 1}) : Int do 0 end\n\
+                \  fn probe() : Int do needs_empty(push(Nil, 5)) end")));
+
+    (* ── Phase B: `@[assume]` and the stdlib `Set` contracts (plan §3) ──────
+       The stdlib contracts are restated inline (this harness prepends no
+       stdlib — see [nth_fixture]); the spellings are copied from
+       stdlib/set.march, and the runtime witnesses in test/stdlib/test_set.march
+       are what keep the two honest. *)
+    gated "assumed Set contracts: insert/let/parameter/union/from_list-to_list prove, absence and a lost element refute" (fun () ->
+        (* 5 proved: insert-then-need, the same through a let, `need_x` after an
+           insert of the very variable, union ⊇ a, from_list/to_list round trip.
+           2 violated: insert of 4 against `member(3, …)`, and a round trip of
+           `[1]` against `member(2, …)`.  1 skipped: `difference(b, a)` ⊇ a is
+           not DEFINITELY false (a may be empty). *)
+        Alcotest.(check (triple int int int)) "ledger" (5, 2, 1)
+          (ledger_counts3
+             (m (set_stub
+                 ^ "  fn need3(s : {Set(Int) | member(3, elts(_))}) : Int do 0 end\n\
+                   \  fn ok1() : Int do need3(Set.insert(Set.empty(), 3, int_cmp)) end\n\
+                   \  fn bad1() : Int do need3(Set.insert(Set.empty(), 4, int_cmp)) end\n\
+                   \  fn ok_let() : Int do\n\
+                   \    let s = Set.insert(Set.empty(), 3, int_cmp)\n\
+                   \    need3(s)\n\
+                   \  end\n\
+                   \  fn ok_var(x : Int) : Int do\n\
+                   \    let s = Set.insert(Set.empty(), x, int_cmp)\n\
+                   \    need_x(s, x)\n\
+                   \  end\n\
+                   \  fn need_x(s : Set(Int), x : {Int | member(_, elts(s))}) : Int do 0 end\n\
+                   \  fn need_sub(a : Set(Int), s : {Set(Int) | subset(elts(a), elts(_))}) : Int do 0 end\n\
+                   \  fn ok_union(a : Set(Int), b : Set(Int)) : Int do need_sub(a, Set.union(a, b, int_cmp)) end\n\
+                   \  fn bad_diff(a : Set(Int), b : Set(Int)) : Int do need_sub(a, Set.difference(b, a, int_cmp)) end\n\
+                   \  fn ok_round() : Int do\n\
+                   \    let s = Set.from_list([1, 2], int_cmp)\n\
+                   \    need_list(Set.to_list(s))\n\
+                   \  end\n\
+                   \  fn need_list(xs : {List(Int) | member(2, elts(_))}) : Int do 0 end\n\
+                   \  fn bad_round() : Int do\n\
+                   \    let s = Set.from_list([1], int_cmp)\n\
+                   \    need_list(Set.to_list(s))\n\
+                   \  end"))));
+
+    gated "a guard that IS `Set.contains` (or a Bool local bound to it) establishes membership on its branch; the wrong branch is refuted" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (2, 1, 1)
+          (ledger_counts3
+             (m (set_stub
+                 ^ "  fn need_x(s : Set(Int), x : {Int | member(_, elts(s))}) : Int do 0 end\n\
+                   \  fn guarded(s : Set(Int), x : Int) : Int do\n\
+                   \    if Set.contains(s, x, int_cmp) do need_x(s, x) else 0 end\n\
+                   \  end\n\
+                   \  fn guarded_let(s : Set(Int), x : Int) : Int do\n\
+                   \    let present = Set.contains(s, x, int_cmp)\n\
+                   \    if present do need_x(s, x) else 0 end\n\
+                   \  end\n\
+                   \  fn unguarded(s : Set(Int), x : Int) : Int do need_x(s, x) end\n\
+                   \  fn wrong_branch(s : Set(Int), x : Int) : Int do\n\
+                   \    if Set.contains(s, x, int_cmp) do 0 else need_x(s, x) end\n\
+                   \  end"))));
+
+    gated "REJECT CONTROL for @[assume]: a mis-stated `remove` contract changes the verdict" (fun () ->
+        let prog stub =
+          m (stub
+             ^ "  fn need3(s : {Set(Int) | member(3, elts(_))}) : Int do 0 end\n\
+               \  fn go() : Int do need3(Set.remove(Set.singleton(3), 3, int_cmp)) end")
+        in
+        (* Correct contract: removing 3 from {3} leaves {} — violated. *)
+        Alcotest.(check (triple int int int)) "correct contract" (0, 1, 0) (ledger_counts3 (prog set_stub));
+        (* Contract mis-stated as a union: the assumption is taken on faith and
+           the SAME call is proved.  This is what an assumed contract costs, and
+           why every one of them has a runtime witness. *)
+        let wrong =
+          Str.global_replace (Str.regexp_string "elts(_) == diff(elts(s), singleton(elem))")
+            "elts(_) == union(elts(s), singleton(elem))" set_stub
+        in
+        Alcotest.(check (triple int int int)) "mis-stated contract" (1, 0, 0) (ledger_counts3 (prog wrong)));
+
+    Alcotest.test_case "@[assume] on an unrefined function warns that it has no effect" `Quick (fun () ->
+        Alcotest.(check bool) "warning" true
+          (has_refine_warning (m "  @[assume]\n  fn plain(x : Int) : Int do x end")));
+
+    gated "assumed postconditions are counted in the ledger as trusted" (fun () ->
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d (m set_stub));
+        let trusted =
+          List.length
+            (List.filter
+               (fun (o : March_refinecheck.Obligation.t) ->
+                 o.March_refinecheck.Obligation.verdict = March_refinecheck.Obligation.Trusted)
+               (March_refinecheck.Obligation.all ()))
+        in
+        Alcotest.(check int) "trusted" 9 trusted);
+
+    (* ── Phase C: `keys` over the stdlib `Map` (plan §4) ─────────────────── *)
+    gated "assumed Map contracts: insert/get/contains_key/keys/filter/merge prove; an empty map refutes" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (6, 2, 1)
+          (ledger_counts3
+             (m (map_stub
+                 ^ "  fn need_key(m : Map(Int, String), k : {Int | member(_, keys(m))}) : Int do 0 end\n\
+                   \  fn need_some(o : {Option(String) | is_Some(_)}) : Int do 0 end\n\
+                   \  fn ok_insert(m : Map(Int, String)) : Int do\n\
+                   \    let m2 = Map.insert(m, 7, \"x\", int_cmp)\n\
+                   \    need_key(m2, 7)\n\
+                   \  end\n\
+                   \  fn bad_empty() : Int do need_key(Map.empty(), 7) end\n\
+                   \  fn ok_get(m : Map(Int, String)) : Int do\n\
+                   \    let m2 = Map.insert(m, 7, \"x\", int_cmp)\n\
+                   \    need_some(Map.get(m2, 7, int_cmp))\n\
+                   \  end\n\
+                   \  fn bad_get() : Int do need_some(Map.get(Map.empty(), 7, int_cmp)) end\n\
+                   \  fn ok_guard(m : Map(Int, String), k : Int) : Int do\n\
+                   \    if Map.contains_key(m, k, int_cmp) do need_key(m, k) else 0 end\n\
+                   \  end\n\
+                   \  fn need_keys_list(m : Map(Int, String), xs : {List(Int) | elts(_) == keys(m)}) : Int do 0 end\n\
+                   \  fn ok_keys(m : Map(Int, String)) : Int do need_keys_list(m, Map.keys(m)) end\n\
+                   \  fn need_sub(m : Map(Int, String), f : {Map(Int, String) | subset(keys(_), keys(m))}) : Int do 0 end\n\
+                   \  fn ok_filter(m : Map(Int, String)) : Int do need_sub(m, Map.filter(m, fn k -> fn v -> k > 0, int_cmp)) end\n\
+                   \  fn ok_merge(a : Map(Int, String), b : Map(Int, String)) : Int do need_sub(Map.merge(a, b, int_cmp), a) end\n\
+                   \  fn bad_merge(a : Map(Int, String), b : Map(Int, String)) : Int do need_key(Map.merge(a, Map.empty(), int_cmp), 3) end"))));
+
+    (* ── Phase D: set counterexamples render in source terms (plan §5) ───── *)
+    gated "a refuted set contract renders its model as a set literal" (fun () ->
+        let text =
+          refine_error_text_d
+            (m (set_stub
+                ^ "  fn need3(s : {Set(Int) | member(3, elts(_))}) : Int do 0 end\n\
+                  \  fn bad1() : Int do need3(Set.insert(Set.empty(), 4, int_cmp)) end\n\
+                  \  fn need_list(xs : {List(Int) | member(2, elts(_))}) : Int do 0 end\n\
+                  \  fn bad_round() : Int do\n\
+                  \    let s = Set.from_list([1], int_cmp)\n\
+                  \    need_list(Set.to_list(s))\n\
+                  \  end"))
+        in
+        Alcotest.(check bool) "insert model" true (contains text "Set.insert() can return {4}");
+        Alcotest.(check bool) "empty model" true (contains text "can return {}");
+        Alcotest.(check bool) "elts model" true (contains text "elts(s) = {1}");
+        Alcotest.(check bool) "no raw store" false (contains text "(store "));
+
+    (* ── Review fixes, 2026-09-14 ─────────────────────────────────────────── *)
+    gated "REGRESSION: a record parameter beside a promise that does not load is not a definite violation" (fun () ->
+        (* The record parameter turns on [check_post]'s "a SAT model is a
+           definite violation" fast path.  `f2`'s list promise does not
+           translate (its `len` conjunct), so the model `elts(xs) = {}` is an
+           input the signature forbids: it used to be REPORTED.  `il` is the
+           same hole without sets (`len(xs)` unpinned), reported before set
+           refinements existed.  Both must now skip; `g2` (promise loads) must
+           still prove and `lb` (a literal that really lacks 1) must still be
+           reported, so the fast path is narrowed, not removed. *)
+        Alcotest.(check (triple int int int)) "ledger" (1, 1, 2)
+          (ledger_counts3
+             (m "  type Rec = { n : Int }\n\
+                \  fn f2(r : {v : Rec | v.n > 0}, xs : {List(Int) | len(_) > 0 && member(1, elts(_))}) : {List(Int) | member(1, elts(_))} do xs end\n\
+                \  fn il(r : {v : Rec | v.n > 0}, xs : {List(Int) | len(_) > 0}) : {Int | _ < len(xs)} do 0 end\n\
+                \  fn g2(r : {v : Rec | v.n > 0}, xs : {List(Int) | member(1, elts(_))}) : {List(Int) | member(1, elts(_))} do xs end\n\
+                \  fn lb(r : {v : Rec | v.n > 0}) : {List(Int) | member(1, elts(_))} do [3] end")));
+
+    gated "REGRESSION: a parameter named `empty` is a variable; `empty` is the empty set only in a set position" (fun () ->
+        (* With `empty` reserved outright, the guard `empty > 0` was dropped and
+           the else-branch `takepos(empty)` violation silently accepted
+           (0 proved, 0 violated, 2 skipped).  The literal positions must keep
+           working in the same module. *)
+        Alcotest.(check (triple int int int)) "variable" (2, 1, 0)
+          (ledger_counts3
+             (m "  fn takepos(n : {Int | _ > 0}) : Int do n end\n\
+                \  fn id(x : Int) : {Int | _ == x} do x end\n\
+                \  fn go(empty : Int) : Int do\n\
+                \    if empty > 0 do takepos(id(empty)) else takepos(empty) end\n\
+                \  end"));
+        Alcotest.(check (triple int int int)) "literal" (2, 1, 0)
+          (ledger_counts3
+             (m "  fn need_e(xs : {List(Int) | elts(_) == empty}) : Int do 0 end\n\
+                \  fn ok() : Int do need_e([]) end\n\
+                \  fn bad() : Int do need_e([1]) end\n\
+                \  fn need_sub(xs : {List(Int) | subset(empty, elts(_)) && diff(elts(_), empty) == elts(_)}) : Int do 0 end\n\
+                \  fn ok2() : Int do need_sub([2]) end")));
+
+    (* z3-independent: the vocabulary is KNOWN, so no unrecognised-predicate
+       warning fires for a set predicate. *)
+    Alcotest.test_case "the set vocabulary draws no unrecognised-predicate warning" `Quick (fun () ->
+        Alcotest.(check bool) "no warning" false
+          (has_refine_warning
+             (m "  fn f(xs : {List(Int) | member(2, elts(_)) && subset(elts(_), union(singleton(2), empty))}) : Int do 0 end"))) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -14277,4 +14704,5 @@ let () =
       ("stored-field-contract", stored_field_suite);
       ("impl-dispatch", impl_dispatch_suite);
       ("silent-holes", silent_holes_suite);
-      ("container-subtyping", container_suite) ]
+      ("container-subtyping", container_suite);
+      ("set-refinements", set_suite) ]
