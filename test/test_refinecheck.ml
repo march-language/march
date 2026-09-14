@@ -15228,6 +15228,56 @@ let typed_instances_suite =
         Alcotest.(check string) "and declares nothing already declared" ""
           (E.query_instance_preamble ~declared:(pre ^ q) ~measures:false at_int (S.BoolLit true) [] [])) ]
 
+(* ── The single-element-type rule (plan step 1.5) ─────────────────────────
+   A set predicate whose operands have known, different element types is an
+   error at the predicate; before the rule it was a silent sort-conflict skip.
+   Unknown element types (a type variable, an unannotated value) are never an
+   error.  None of these fixtures reaches the solver. *)
+let refine_errors src =
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module ctx (March_desugar.Desugar.desugar_module (parse src));
+  List.filter_map
+    (fun (d : March_errors.Errors.diagnostic) ->
+      if d.March_errors.Errors.severity = March_errors.Errors.Error
+      then Some d.March_errors.Errors.message else None)
+    ctx.March_errors.Errors.diagnostics
+
+let single_element_type_suite =
+  let m body = "mod M do\n" ^ body ^ "\nend\n" in
+  let mixes msgs =
+    List.exists
+      (fun msg ->
+        let needle = "mixes element types" in
+        let n = String.length needle and h = String.length msg in
+        let rec at i = i + n <= h && (String.sub msg i n = needle || at (i + 1)) in
+        at 0)
+      msgs
+  in
+  let reject name src =
+    Alcotest.test_case name `Quick (fun () ->
+        Alcotest.(check bool) "mixed element types reported" true (mixes (refine_errors (m src))))
+  in
+  let accept name src =
+    Alcotest.test_case name `Quick (fun () ->
+        Alcotest.(check bool) "no mixed-element-type error" false (mixes (refine_errors (m src))))
+  in
+  [ reject "a String element tested against a List(Int)'s elements"
+      "  fn f(xs : {List(Int) | member(\"a\", elts(_))}) : Int do 0 end";
+    reject "two lists of different element types compared"
+      "  fn g(xs : List(Int), ys : {List(String) | elts(_) == elts(xs)}) : Int do 0 end";
+    reject "a Map's keys against a list of another type, in a return refinement"
+      "  fn h(m : Map(String, Int), xs : List(Int)) : {Bool | subset(keys(m), elts(xs))} do true end";
+    reject "a Bool element against a union of Int sets"
+      "  fn k(xs : List(Int), ys : List(Int)) : {Int | member(true, union(elts(xs), elts(ys)))} do 0 end";
+    accept "the same element type on both sides"
+      "  fn f(xs : List(Int), ys : {List(Int) | subset(elts(_), elts(xs)) && member(1, elts(_))}) : Int do 0 end";
+    accept "a type variable is never a clash"
+      "  fn f(x : a, xs : {List(Int) | member(x, elts(_))}) : Int do 0 end";
+    accept "an unannotated operand is never a clash"
+      "  fn f(x, xs : {List(Int) | member(x, elts(_))}) : Int do 0 end";
+    accept "a Map's keys against a list of the key type"
+      "  fn h(m : Map(String, Int), xs : List(String)) : {Bool | subset(keys(m), elts(xs))} do true end" ]
+
 (* ── z3 never rejects a query the checker builds ─────────────────────────
    A query z3 rejects comes back to the checker as [Unknown], an ordinary
    skip, so a wrong sort anywhere in the encoder passes every other test in
@@ -15357,5 +15407,6 @@ let () =
       ("container-subtyping-2", container2_suite);
       ("set-refinements", set_suite);
       ("typed-instances", typed_instances_suite);
+      ("single-element-type", single_element_type_suite);
       (* Must stay LAST: it measures every query the groups above sent. *)
       ("z3-well-formed", z3_wellformed_suite) ]
