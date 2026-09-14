@@ -52,6 +52,9 @@
 --   result_leg (5,000 awaits)    5,000        -     1/await: Task
 --   TOTAL                       15,002        2
 --
+-- The three FLOAT legs were added 2026-09-13 with the Task-tag release of a
+-- Float result's box (one box per Float task before it, under every route).
+--
 -- The healthy figure is a small constant; each defect is exactly one object
 -- per await. The dune rule asserts < 100, far below the leaked figure and far
 -- above the constant.
@@ -80,6 +83,33 @@ mod TaskLifetimeLeakProbe do
         Err(_) -> 0
       end
       result_leg(n - 1, acc + v)
+    end
+  end
+
+  -- LEG 3: a FLOAT result through task_await_unwrap. The apply fn returns a
+  -- march_alloc_float box that the Task owns in task[3]; the unwrap reads the
+  -- double without consuming it (a task may be awaited twice), so the box
+  -- must die with the Task. It did not: one box per await
+  -- (specs/progress/2026-09-13-float-task-result-box-released.md).
+  pfn float_unwrap_leg(n : Int, acc : Float) : Float do
+    if n <= 0 do acc
+    else
+      let t = task_spawn(fn _ -> 2.5)
+      float_unwrap_leg(n - 1, acc +. task_await_unwrap(t))
+    end
+  end
+
+  -- LEG 4: the same through task_await's Ok route, which takes its own +1 on
+  -- the box for the Ok cell; the Task's reference is still the one to free.
+  pfn float_result_leg(n : Int, acc : Float) : Float do
+    if n <= 0 do acc
+    else
+      let t = task_spawn(fn _ -> 1.25)
+      let v = match task_await(t) do
+        Ok(x) -> x
+        Err(_) -> 0.0
+      end
+      float_result_leg(n - 1, acc +. v)
     end
   end
 
@@ -114,6 +144,8 @@ mod TaskLifetimeLeakProbe do
     let before = live_allocs()
     println("unwrap=" ++ int_to_string(unwrap_leg(5000, 0)))
     println("result=" ++ int_to_string(result_leg(5000, 0)))
+    println("float_unwrap=" ++ sc(float_unwrap_leg(5000, 0.0)))
+    println("float_result=" ++ sc(float_result_leg(5000, 0.0)))
     let after = live_allocs()
     IO.warn(int_to_string(after - before))
   end

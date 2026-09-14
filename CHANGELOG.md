@@ -207,6 +207,10 @@ git log is authoritative for exact commits.
   catch-all arm** (a "pattern can never be reached" warning that became
   visible with the change above).
 
+- **Awaiting a task that returns a `Float` no longer leaks (compiled).** Each
+  `task_await_unwrap` or `task_await` of a `Float` task left one allocation
+  behind.
+
 - **Matching a small struct out of an `Option` no longer leaks (compiled).**
   `match o do Some(p) -> ... end` on an `Option` of a two-`Float` record-like
   type leaked one allocation per match.
