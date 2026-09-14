@@ -16,7 +16,23 @@ let version = "a0"
    violation exactly when it proves a predicate can never hold, so under a reals
    encoding it would "prove" that a perfectly ordinary float predicate is
    unsatisfiable and flag correct code.  Do not "simplify" this to Real. *)
-type sort = SInt | SBool | SFloat | SData of string  (* a named (algebraic-datatype) sort *)
+type sort =
+  | SInt
+  | SBool
+  | SFloat
+  | SData of string  (* a named (algebraic-datatype) sort *)
+  (* A finite set of elements at the given sort, encoded as Z3's
+     `(Array <elem> Bool)` — the Liquid Haskell / liquid-fixpoint encoding.
+     Every set operator below is a quantifier-free array term, so a VC that
+     mentions sets stays inside the decidable extensional-array fragment.
+     [set_unknown_elem] is the placeholder element sort a producer uses when
+     it cannot yet tell the element sort (an `elts$xs` constant standing for
+     an opaque list); [Refine_encode.resolve_set_sorts] unifies every set
+     term in a VC and replaces the placeholder before rendering.  A term that
+     still carries it at render time renders at the opaque `Elem` sort. *)
+  | SSet of sort
+
+let set_unknown_elem = SData "?"
 
 type term =
   | Const of string          (* a declared symbol: "_", "i", or a measure-applied const *)
@@ -63,6 +79,18 @@ type term =
   | FpLe of term * term
   | FpGt of term * term
   | FpGe of term * term
+  (* ── Finite sets (specs/2026-09-13-set-refinements-design.md §4.2) ─────
+     [SetEmpty]/[SetSng] carry the ELEMENT sort, because `(as const …)` needs
+     the full array sort spelled out; [SetMem] and [SetSub] are Bool-valued,
+     the rest set-valued.  Subset is DEFINED by union — `(= (union a b) b)` —
+     so no user VC ever contains a quantifier. *)
+  | SetEmpty of sort
+  | SetSng of sort * term
+  | SetMem of term * term
+  | SetUnion of term * term
+  | SetInter of term * term
+  | SetDiff of term * term
+  | SetSub of term * term
 
 type vc = {
   decls : (string * sort) list;   (* free symbols to declare *)
@@ -70,11 +98,41 @@ type vc = {
   goal : term;                    (* the predicate we want to hold *)
 }
 
-let string_of_sort = function
+(* The `define-sort` name of a set sort.  `$` cannot occur in a March
+   identifier, so no user symbol can collide with one of these. *)
+let rec string_of_sort = function
   | SInt -> "Int"
   | SBool -> "Bool"
   | SFloat -> "Float64"
   | SData n -> n
+  | SSet e -> "MSet$" ^ set_elem_tag e
+
+and set_elem_tag = function
+  | SInt -> "Int"
+  | SBool -> "Bool"
+  | SFloat -> "Float"
+  | SData "?" -> "Elem"
+  | SData "$Str" -> "Str"
+  | SData n -> n
+  | SSet e -> "Set" ^ set_elem_tag e
+
+(* The element sort actually RENDERED for a set: the placeholder becomes the
+   opaque `Elem` sort. *)
+let render_elem_sort = function
+  | SData "?" -> SData "Elem"
+  | s -> s
+
+(* One `(define-sort MSet$X () (Array X Bool))` line per element sort.  The
+   caller is responsible for the underlying sort (`Elem`, `$Str`) being
+   declared FIRST in the same push. *)
+let set_sort_defs (elems : sort list) : string =
+  String.concat ""
+    (List.map
+       (fun e ->
+         let e = render_elem_sort e in
+         Printf.sprintf "(define-sort %s () (Array %s Bool))\n"
+           (string_of_sort (SSet e)) (string_of_sort e))
+       (List.sort_uniq compare (List.map render_elem_sort elems)))
 
 (* Split a binary64 into (is_negative, plain SMT-LIB decimal magnitude), or
    [None] when it has no such form and must therefore not be reflected at all.
@@ -138,6 +196,17 @@ let rec render = function
   | FpLe (a, b) -> Printf.sprintf "(fp.leq %s %s)" (render a) (render b)
   | FpGt (a, b) -> Printf.sprintf "(fp.gt %s %s)" (render a) (render b)
   | FpGe (a, b) -> Printf.sprintf "(fp.geq %s %s)" (render a) (render b)
+  | SetEmpty e ->
+    Printf.sprintf "((as const %s) false)" (string_of_sort (SSet (render_elem_sort e)))
+  | SetSng (e, x) ->
+    Printf.sprintf "(store ((as const %s) false) %s true)"
+      (string_of_sort (SSet (render_elem_sort e))) (render x)
+  | SetMem (x, s) -> Printf.sprintf "(select %s %s)" (render s) (render x)
+  | SetUnion (a, b) -> Printf.sprintf "((_ map or) %s %s)" (render a) (render b)
+  | SetInter (a, b) -> Printf.sprintf "((_ map and) %s %s)" (render a) (render b)
+  | SetDiff (a, b) ->
+    Printf.sprintf "((_ map and) %s ((_ map not) %s))" (render a) (render b)
+  | SetSub (a, b) -> Printf.sprintf "(= ((_ map or) %s %s) %s)" (render a) (render b) (render b)
 
 (* The canonical assertion block for a VC: declare every free symbol, assert the
    hypotheses, and assert the NEGATED goal.  Sent to z3 between push/pop and also
@@ -147,6 +216,7 @@ let assertion_block (vc : vc) : string =
   let buf = Buffer.create 256 in
   List.iter
     (fun (name, sort) ->
+      let sort = match sort with SSet e -> SSet (render_elem_sort e) | s -> s in
       Buffer.add_string buf
         (Printf.sprintf "(declare-const %s %s)\n" name (string_of_sort sort)))
     vc.decls;

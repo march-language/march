@@ -152,6 +152,9 @@ let stdlib_file_list = [
   "global_registry.march";
   "cluster_conn.march";
   "node_call.march";
+  (* One-way actor messages to a GlobalPid (distributed actors 1/4); after
+     net_kernel and global_pid, which it frames and addresses with. *)
+  "node_send.march";
   (* dist_link.march / dist_supervisor.march: same lazy-load representation
      bug as above (see the deque.march / consistent_hash.march notes) — both
      export Option/Result-returning generics over concrete node/monitor

@@ -1818,6 +1818,14 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
      save/restore around a decl list — a nested `fn` (there is no such thing
      in March, but a fresh call into [visit_fn] for a sibling clearly must not
      inherit this) never sees a stale `true` left behind by a caller. *)
+  (* `@[assume]` on a function with no refined return assumes nothing — say
+     so, exactly as the `@[trusted]` no-effect case above does. *)
+  if is_assumed fd && assumed_return fd = None then
+    Err.warning errctx ~span:fd.A.fn_name.A.span
+      (Printf.sprintf
+         "`@[assume]` on `%s` has no effect: it declares no refined return \
+          type, so there is no postcondition to assume."
+         fd.A.fn_name.A.txt);
   let saved_trusted = !trusted_fn in
   let saved_enclosing = !enclosing_fn in
   trusted_fn := is_trusted;
@@ -2856,6 +2864,41 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
       all_mfns
   in
   registered_measures := List.map fst mfns;
+  (* Set-valued measures (design §4.4): remember each one's element sort,
+     axioms or not (see [set_measure_elem]). *)
+  Hashtbl.reset set_measure_elem;
+  List.iter
+    (fun (name, fd) ->
+      match set_ret_elem fd with
+      | Some e -> Hashtbl.replace set_measure_elem name e
+      | None -> ())
+    mfns;
+  (* A set-valued measure is LOGIC: it has no runtime meaning, so a call in
+     expression position anywhere in the module is an error, not a value. *)
+  let rec reject_set_measure_calls (decls : A.decl list) : unit =
+    List.iter
+      (function
+        | A.DFn (fd, _) ->
+          List.iter
+            (fun (c : A.fn_clause) ->
+              iter_all
+                (fun e ->
+                  match e with
+                  | A.EApp (A.EVar { A.txt; A.span }, _, _)
+                    when is_set_measure txt && not (List.mem "measure" fd.A.fn_attrs) ->
+                    Err.error errctx ~span
+                      (Printf.sprintf
+                         "`%s` is a set-valued @[measure]: it is meaningful only inside a \
+                          refinement predicate and cannot be called here."
+                         txt)
+                  | _ -> ())
+                c.A.fc_body)
+            fd.A.fn_clauses
+        | A.DMod (_, _, ds, _) -> reject_set_measure_calls ds
+        | _ -> ())
+      decls
+  in
+  if Hashtbl.length set_measure_elem > 0 then reject_set_measure_calls m.A.mod_decls;
   (* Determine which measures are non-negative (single pass; a measure depending
      only on already-classified ones, itself, and `len` is classified). *)
   measure_nonneg :=

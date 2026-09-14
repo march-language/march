@@ -5691,6 +5691,32 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/node_call_loopback.expected native_node_call_loopback.out)))
 
+; ── NodeSend loopback: a one-way actor message to a GlobalPid over TCP ──
+; Distributed actors 1/4 (specs/todos/2026-09-14-remote-send-to-a-global-pid.md):
+; ACTOR_MSG delivered into a remote actor's mailbox and answered by the same
+; primitive; then three DELIVERY_FAILED cases (stale creation, unknown pid,
+; unknown type) each reported back to the sender with its seq.
+; Ephemeral port, as node_call_loopback.
+(rule
+ (targets native_node_send_loopback native_node_send_loopback.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/node_send_loopback.march)
+       (file ../stdlib/node_send.march)
+       (file ../stdlib/global_pid.march)
+       (file ../stdlib/net_kernel.march)
+       (file ../stdlib/net_frame.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_node_send_loopback
+        native/node_send_loopback.march)
+   (with-stdout-to native_node_send_loopback.out
+        (system "./native_node_send_loopback")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/node_send_loopback.expected native_node_send_loopback.out)))
+
 ; ── Two-node SWIM discovery: authenticated peer-connection + membership ──
 ; node-a accepts, node-b connects; both run the ClusterConn handshake over
 ; real TCP loopback, then exchange a SwimPing/SwimPingAck pair and each
@@ -5730,24 +5756,22 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
   (with-stdout-to native_node_discovery.sorted.out
    (system "LC_ALL=C sort native_node_discovery.out"))))
 
-; RE-QUARANTINED 2026-08-08: un-quarantined earlier the same day (ephemeral-port
-; fix), which correctly resolved the fixed-port collision — but exposed a
-; DIFFERENT, pre-existing flake on Linux CI. Unlike node_call_loopback/
-; rpc_auto_enroll (whose client prints from a single green thread), this test has
-; node-a AND node-b println their status lines CONCURRENTLY, and roughly 1-in-2
-; ubuntu runs tears two lines together with a lost newline, e.g.
-; `node-b: handshake ok, peer=node-anode-a: handshake ok, peer=node-b` plus a
-; stray blank line — which the sort-before-diff golden cannot absorb (it tolerates
-; REORDERING, not torn lines). This is the SAME torn-output race as
-; signal_term_suppress (below): the ci-infra investigation determined it is NOT
-; I/O-level write interleaving (march_println already does one atomic writev, and
-; a writev-retry fix measured no benefit and was reverted) but a pre-write
-; allocator/GC race between concurrent green threads on >1 scheduler thread.
-; Un-quarantine only once that scheduler race is fixed. The ephemeral-port and
-; deadlock fixes still stand and keep node_call_loopback/rpc_auto_enroll green.
-; Runnable manually via `dune build @test/node_discovery_quarantined`.
+; Back on `runtest` 2026-09-14. It was re-quarantined on 2026-08-08 because
+; node-a and node-b println CONCURRENTLY and ~1-in-2 ubuntu CI runs tore two
+; lines together (`...peer=node-anode-a: handshake...`), which the
+; sort-before-diff golden cannot absorb. The comment that sat here blamed a
+; pre-write allocator/GC race. That diagnosis was superseded on 2026-08-21:
+; specs/progress/2026-08-21-println-writev-not-atomic-across-threads.md measured
+; the tear falling BETWEEN march_println's two iovecs (POSIX promises no
+; atomicity between competing writers) and added march_stdout_mu around the
+; writev. print_line compiles to march_println, so this fixture's output path
+; is locked. Measured 2026-09-14 by running the binary directly 60 times
+; (dune's cache would replay one run): 60/60 sorted matches, no crash. The
+; ubuntu `test` job in ci.yml additionally soaks this binary 200 times per
+; run, since ubuntu is where the tear was seen; see
+; specs/todos/2026-09-14-distributed-plane-known-gaps.md (A).
 (rule
- (alias node_discovery_quarantined)
+ (alias runtest)
  (action (diff native/node_discovery.expected native_node_discovery.sorted.out)))
 
 ; ── Compiler-emitted enroll/stub: auto-registration of __rpc_stub functions ──
