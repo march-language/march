@@ -1614,6 +1614,48 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff session/stream_actor_events.expected stream_actor_events.out)))
 
+; The callback-API endpoint actors under a real `supervise` block, routed by
+; NAME (names survive a restart, pids do not): the Cons host is killed after
+; the first delivery, the supervisor restarts it, and the session continues
+; from where it was -- its state is in the transport's continuation.
+; Design: specs/todos/2026-09-13-endpoint-actors-under-a-supervisor.md.
+(rule
+ (targets stream_actor_supervised_bin stream_actor_supervised.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file session/stream_actor_supervised.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o stream_actor_supervised_bin
+        session/stream_actor_supervised.march)
+   (with-stdout-to stream_actor_supervised.out (system "./stream_actor_supervised_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff session/stream_actor_supervised.expected stream_actor_supervised.out)))
+
+; The event-API endpoint actors under the same supervisor, routed through
+; actor CAPABILITIES: the parked session state dies with the killed host, the
+; replacement's cap is a different epoch, `send_checked` says so, and the
+; transport abandons the session and closes the peer instead of delivering
+; to an `Idle` replacement (which would crash it until the budget escalates).
+(rule
+ (targets stream_actor_events_supervised_bin stream_actor_events_supervised.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file session/stream_actor_events_supervised.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o stream_actor_events_supervised_bin
+        session/stream_actor_events_supervised.march)
+   (with-stdout-to stream_actor_events_supervised.out (system "./stream_actor_events_supervised_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff session/stream_actor_events_supervised.expected stream_actor_events_supervised.out)))
+
 ; `self` inside an actor handler on the compiled backend. Did not build at all
 ; before 2026-09-12 (absent from llvm_builtins, so the emitter named an
 ; undefined symbol). Delivery to `self` and its identity with the spawner's

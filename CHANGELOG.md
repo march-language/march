@@ -13,6 +13,14 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Endpoint actors under a supervisor, measured.** Two fixtures answer what
+  a restart means for a session: a callback-API host routed by name is
+  replaceable and the protocol continues (`test/session/stream_actor_supervised.march`);
+  an event-API host's parked state dies with it, so a transport routing through
+  epoch capabilities detects the restart and abandons the session cleanly
+  (`test/session/stream_actor_events_supervised.march`). Documented under
+  "Generated endpoints" in the session-types chapter.
+
 - **Container subtyping covers every registered ADT, two layers deep, and
   polymorphic calls.** Element refinements are now contracts for `Result`,
   user variant types (`Node(Leaf, 0, Leaf)` under `Tree({Int | _ > 0})` is

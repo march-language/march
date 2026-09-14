@@ -525,6 +525,20 @@ like the one in `test/session/stream_actor_events.march`, whose trace is
 `stream_endpoints`' byte for byte. Names carry the role (`Parked_Cons`,
 `Got_More`) because types and constructors share one namespace today.
 
+**Under a supervisor.** A restarted child has a fresh pid and fresh state, so
+the two APIs part ways:
+
+- The callback API's session state is in the transport, so the host is
+  replaceable: register each host under a **name** and route deliveries with
+  `Actor.whereis`, which survives a restart. The protocol continues from where
+  it was (`test/session/stream_actor_supervised.march`).
+- The event API's session state is the actor's `Parked_<Role>`, which dies with
+  the host; the replacement starts `Idle`, and delivering to it would only
+  crash it again. Route through actor **capabilities** (`get_cap`,
+  `send_checked`): a stale cap means the host that parked the endpoint is gone,
+  and the transport should abandon the session and close the peer
+  (`test/session/stream_actor_events_supervised.march`).
+
 ## See also
 
 - [Actors]({{ site.baseurl }}/docs/actors/): mailboxes, `spawn`/`send`, and the scheduler these channels run on.
