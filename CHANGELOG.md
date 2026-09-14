@@ -13,6 +13,10 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **A remote send's failure reaches the sending actor's mailbox**:
+  `NodeSend.cast_from` records the sender under the seq and `NodeSend.on_failure`
+  hands a `DELIVERY_FAILED` frame back to it through the caller's dispatch, the
+  way a monitor's `Down` arrives, instead of a synchronous read in `main`.
 - **SWIM stall-vs-death, executable**: the `stall` two-node scenario SIGSTOPs a
   node running a real SWIM loop; the observer takes it through `Suspect` to
   `Dead` on timeouts alone, and on resume the node refutes with a higher

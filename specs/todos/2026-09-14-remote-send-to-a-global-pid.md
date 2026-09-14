@@ -171,9 +171,22 @@ fails with `Permission denied` on the `.ll`. Delete the stray `.ll` before
 `@test/runtest`.
 
 Still open from the design: the typed wrapper (a `Node.send(conn, to, msg)`
-whose codec the compiler checks) and `DELIVERY_FAILED` delivered as a message
-to the sending actor rather than read synchronously. The per-peer reader
-shipped as `PeerReader` (2/4 step 1).
+whose codec the compiler checks). The per-peer reader shipped as
+`PeerReader` (2/4 step 1); `DELIVERY_FAILED` as a message to the sending
+actor shipped as `NodeSend.cast_from` / `on_failure` (below).
+
+## Shipped 2026-09-14: `DELIVERY_FAILED` as a message to the sending actor
+
+Decision 1's recommendation, built: `NodeSend.cast_from(fd, seq, from, to,
+type_tag, payload)` records the sending actor under the seq (one Vault per
+node process, `node_send_pending`) before writing; the per-peer reader hands
+a DELIVERY_FAILED frame to `NodeSend.on_failure(frame, deliver)`, which
+finds the sender, forgets the seq, and calls `deliver(sender, seq, reason)`
+— the caller's dispatch mints the actor's own constructor (`SendFailed`),
+as everywhere else in this layer. `recv_failure` stays for the synchronous
+cases. Witness `test/native/node_send_failed_msg.march`: a `Sender` actor
+casts to a pid node-b does not host and receives the refusal in its own
+mailbox. `NodeSend` now `needs IO.Mut` (reached only through these two).
 
 ## Shipped 2026-09-14: the `Session.Ops` network transport
 

@@ -33,6 +33,7 @@
 -- Type annotations use bare names where a qualified path would not unify
 -- (the NodeCall convention).
 mod NodeSend do
+  needs IO.Mut
 
   fn tag_actor_msg() : Int do 9 end
   fn tag_delivery_failed() : Int do 10 end
@@ -121,6 +122,44 @@ mod NodeSend do
         match decode_failed(frame_bytes) do
           Ok(f) -> Ok(f)
           Err(_) -> recv_failure(fd, rest)
+        end
+    end
+  end
+
+  -- ── failures as messages ────────────────────────────────────────────────
+  -- A remote send is made by an ACTOR, and its failure should reach that
+  -- actor's mailbox -- the way a monitor's Down does -- not a synchronous
+  -- read in main (`recv_failure`, kept for the simple cases). `cast_from`
+  -- records the sender under the seq before writing; `on_failure` decodes a
+  -- DELIVERY_FAILED frame from the per-peer reader, finds the sender,
+  -- forgets the seq, and hands (sender, seq, reason) to the caller's
+  -- dispatch, which mints the actor's own constructor (a library cannot
+  -- name it). One table per node process; the seq space is the caller's.
+
+  pfn pending() do
+    match Vault.whereis("node_send_pending") do
+      Some(t) -> t
+      None -> Vault.new("node_send_pending")
+    end
+  end
+
+  fn cast_from(fd : Int, seq : Int, from, to : Pid, type_tag : String, payload : List(Int)) : Result((), SendError) do
+    Vault.set(pending(), int_to_string(seq), from)
+    cast(fd, seq, to, type_tag, payload)
+  end
+
+  fn on_failure(frame : List(Int), deliver) : Result((), String) do
+    match decode_failed(frame) do
+      Err(e) -> Err(e)
+      Ok((seq, reason)) ->
+        let t = pending()
+        let key = int_to_string(seq)
+        match Vault.get(t, key) do
+          None -> Err("node_send: no sender recorded for seq " ++ key)
+          Some(p) ->
+            Vault.drop(t, key)
+            deliver(p, seq, reason)
+            Ok(())
         end
     end
   end
