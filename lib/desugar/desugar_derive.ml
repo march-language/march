@@ -258,13 +258,17 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
             end
           ) variants
         in
-        (* wildcard arm: _ -> false *)
+        (* wildcard arm: _ -> false, for the mixed-constructor pairs.  A
+           single-constructor type has no such pair, and the arm would be
+           unreachable -- a warning the user could neither see the source of
+           nor fix, now that diagnostics in generated code are reported. *)
         let wild_branch = {
           branch_pat  = PatWild dummy_span;
           branch_guard = None;
           branch_body  = ELit (LitBool false, dummy_span);
         } in
-        EMatch (pair, branches @ [wild_branch], dummy_span)
+        let arms = if List.length variants <= 1 then branches else branches @ [wild_branch] in
+        EMatch (pair, arms, dummy_span)
       | TDRecord fields ->
         (* compare each field: a.f == b.f && a.g == b.g && ... *)
         (match fields with

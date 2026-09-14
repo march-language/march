@@ -325,7 +325,98 @@ let event_forge = bad "a Parked cannot be forged: its constructors take the priv
     end
 |})
 
+(* ── through the real driver ──────────────────────────────────────────
+   These need the CLI: the stdlib as `march` loads it (the bare `Pid` is then
+   the Global_pid RECORD, which is what made `Pid(a)` an arity error), and the
+   driver's diagnostic filter, which until 2026-09-13 dropped every diagnostic
+   raised inside generated code.  Exe-relative like test_cap_ceiling. *)
+
+let compiler_exe =
+  let exe_dir = Filename.dirname Sys.executable_name in
+  Filename.concat exe_dir "../bin/main.exe"
+
+let check_cli src_text =
+  if not (Sys.file_exists compiler_exe) then Alcotest.failf "compiler not found at %s" compiler_exe;
+  let src = Filename.temp_file "endpoints_cli" ".march" in
+  let oc = open_out src in
+  output_string oc src_text;
+  close_out oc;
+  let out = Filename.temp_file "endpoints_cli" ".out" in
+  let rc =
+    Sys.command
+      (Printf.sprintf "%s --check %s > %s 2>&1" (Filename.quote compiler_exe) (Filename.quote src) (Filename.quote out))
+  in
+  let ic = open_in out in
+  let text = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  List.iter (fun f -> try Sys.remove f with Sys_error _ -> ()) [ src; out ];
+  (rc, text)
+
+let contains_text hay needle =
+  let n = String.length needle in
+  let rec go i = i + n <= String.length hay && (String.sub hay i n = needle || go (i + 1)) in
+  go 0
+
+let cli_pid_one_arg =
+  Alcotest.test_case "CLI: `p : Pid(state)` is accepted; a monitor program has no hidden error" `Quick (fun () ->
+      let rc, out = check_cli {|mod Main do
+  needs IO.Console
+  actor W do
+    state { n : Int }
+    init { n: 0 }
+    on Poke() do panic("bang") end
+  end
+  actor Watcher do
+    state { seen : Int }
+    init { seen: 0 }
+    on Watch(target : Pid({ n : Int })) do
+      let _r = monitor(target)
+      match receive() do
+        Down.Down(_ref, _t, DownReason.Crash(_m)) -> { state with seen: state.seen + 1 }
+        _ -> state
+      end
+    end
+  end
+  fn main(c : Cap(IO.Console)) do
+    let w = spawn(W)
+    let v = spawn(Watcher)
+    send(v, Watch(w))
+    send(w, Poke())
+    run_until_idle()
+  end
+end
+|} in
+      Alcotest.(check int) ("exit code (output: " ^ out ^ ")") 0 rc;
+      Alcotest.(check bool) "no arity error" false (contains_text out "expects 0 type argument"))
+
+let cli_no_unreachable_catch_all =
+  Alcotest.test_case "CLI: a fully covered message type gets no unreachable catch-all arm" `Quick (fun () ->
+      (* ONE message: the receiving state's single arm covers the whole
+         message type, so a catch-all after it can never be reached. *)
+      let rc, out = check_cli (wrap {|
+  @[endpoints]
+  protocol Ping do
+    A -> B : Int
+  end
+|}) in
+      Alcotest.(check int) "exit code" 0 rc;
+      Alcotest.(check bool) ("no unreachable-arm warning (output: " ^ out ^ ")") false
+        (contains_text out "never be reached"))
+
+let cli_derive_eq_single_ctor =
+  Alcotest.test_case "CLI: derive Eq on a single-constructor type emits no unreachable arm" `Quick (fun () ->
+      let rc, out = check_cli {|mod Main do
+  needs IO.Console
+  type V = V(Int, Int)
+  derive Eq for V
+  fn main(c : Cap(IO.Console)) do println(if V(1, 2) == V(1, 2) do "eq" else "ne" end) end
+end
+|} in
+      Alcotest.(check int) "exit code" 0 rc;
+      Alcotest.(check bool) ("no unreachable-arm warning (output: " ^ out ^ ")") false
+        (contains_text out "never be reached"))
+
 let tests =
-  [ stream_shape; relay_shape; no_attr_no_generation; bad_branch_head; same_label_two_payloads;
+  [ stream_shape; cli_pid_one_arg; cli_no_unreachable_catch_all; cli_derive_eq_single_ctor; relay_shape; no_attr_no_generation; bad_branch_head; same_label_two_payloads;
     prod_ok; wrong_order; replayed; abandoned; callback_forge; relay_ok; payload_declared_later;
     event_ok; event_retained; event_not_reparked; event_idle_dropped; event_forge ]
