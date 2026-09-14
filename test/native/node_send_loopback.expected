@@ -1,0 +1,6 @@
+node-b: ping 7 from node-a
+node-a: pong 70
+node-a: delivery 2 failed: stale creation 0, node is at 1
+node-a: delivery 3 failed: no live process 9999
+node-a: delivery 4 failed: unknown type NodeSendLoopback.Nope
+node-a: pongs delivered to the actor: 1
