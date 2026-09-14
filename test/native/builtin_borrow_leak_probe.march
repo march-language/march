@@ -1,0 +1,167 @@
+-- Leak guard: a builtin that only READS a heap argument must not leak it.
+--
+-- Perceus decides whether a builtin consumes an argument by looking the
+-- builtin's TIR name up in borrow.ml's extern_borrow_table, and a name that
+-- is not there defaults to OWNED: the caller hands its reference over and
+-- emits no release. When the C implementation only reads the value, nobody
+-- frees it. Measured on main before this guard, --compile --opt 2, one leaked
+-- object per call for each leg below except the List leg, which leaked 6 (both
+-- lists):
+--   - `==` / `!=` / `<` / `>=` on a fresh String:
+--     no table entry at all;
+--   - `string_length`: listed only under its C name
+--     (march_string_byte_length), which the lookup never uses. `to_string`
+--     had the same gap and got the same entry, but compiled code reaches its
+--     builtin only when monomorphisation cannot pick a Show impl, so it has no
+--     leg here; `to_string` of a List is Show$List.show, whose own leak is
+--     filed separately (specs/todos/2026-09-13-show-list-leaks-per-call.md);
+--   - `==` on a fresh List(Int) or a boxed ADT (the generated structural
+--     equality), and `==` on an erased operand (march_poly_eq).
+-- specs/todos/2026-08-22-boxed-ctor-heap-field-binder-not-dropped.md blamed
+-- the `One(s)` destructure; the destructure was innocent, as the `One` leg
+-- here shows by leaking identically to the ctor-free legs.
+--
+-- The typed-array legs guard the other half of the change. typed_array_get
+-- used to return an element WITHOUT a reference, so a consuming `==` was
+-- what kept it balanced; once `==` borrows, the getter has to hand out a
+-- real reference or the element is freed under the array. The last line
+-- reads the element back after 10,000 comparisons for exactly that reason.
+--
+-- SIGNAL: live_allocs() deltas, printed as booleans against a bound far
+-- below the iteration count, so the golden is deterministic.
+mod Main do
+  needs IO.Console
+
+  type One(a) = One(a) | Nothing
+  type Tagged = Tagged(String, Int)
+  derive Eq for Tagged
+
+  pfn same(a, b) : Bool do a == b end
+
+  pfn leg_eq(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let s = int_to_string(n)
+      leg_eq(n - 1, acc + (if s == "" do 0 else 1 end))
+    end
+  end
+  pfn leg_neq(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let s = int_to_string(n)
+      leg_neq(n - 1, acc + (if s != "5" do 1 else 0 end))
+    end
+  end
+  pfn leg_lt(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let s = int_to_string(n)
+      leg_lt(n - 1, acc + (if s < "5" do 1 else 0 end))
+    end
+  end
+  pfn leg_ge(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let s = int_to_string(n)
+      leg_ge(n - 1, acc + (if s >= "5" do 1 else 0 end))
+    end
+  end
+  pfn leg_length(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      leg_length(n - 1, acc + string_length(int_to_string(n)))
+    end
+  end
+  pfn leg_list(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let xs = [n, n]
+      leg_list(n - 1, acc + (if xs == [1, 2] do 1 else 0 end))
+    end
+  end
+  pfn leg_adt(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let t = Tagged(int_to_string(n), n)
+      leg_adt(n - 1, acc + (if t == Tagged("5", 5) do 1 else 0 end))
+    end
+  end
+  pfn leg_poly(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      leg_poly(n - 1, acc + (if same(int_to_string(n), "5") do 1 else 0 end))
+    end
+  end
+  pfn leg_one(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let c = One(int_to_string(n))
+      let v = match c do
+        One(s) -> string_length(s)
+        Nothing -> 0
+      end
+      leg_one(n - 1, acc + v)
+    end
+  end
+  pfn leg_typed_get(arr, n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let hit = if typed_array_get(arr, 1) == "20202" do 1 else 0 end
+      leg_typed_get(arr, n - 1, acc + hit)
+    end
+  end
+
+  -- `result` is PRINTED on purpose: a loop whose value is discarded with
+  -- `let _ = leg(n, 0)` is a pure call, and the optimizer deletes it, so the
+  -- delta measured nothing. The first draft of this probe did exactly that and
+  -- reported 9 of 11 legs flat on the unfixed compiler.
+  pfn flat(label : String, before : Int, result : Int) : () do
+    let grew = live_allocs() - before
+    println(label ++ " = " ++ int_to_string(result) ++ ", flat: " ++ bool_to_string(grew < 100))
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let n = 10000
+    leg_eq(5, 0)
+    let a = live_allocs()
+    let r_a = leg_eq(n, 0)
+    flat("String ==", a, r_a)
+    leg_neq(5, 0)
+    let b = live_allocs()
+    let r_b = leg_neq(n, 0)
+    flat("String !=", b, r_b)
+    leg_lt(5, 0)
+    let c = live_allocs()
+    let r_c = leg_lt(n, 0)
+    flat("String <", c, r_c)
+    leg_ge(5, 0)
+    let d = live_allocs()
+    let r_d = leg_ge(n, 0)
+    flat("String >=", d, r_d)
+    leg_length(5, 0)
+    let f = live_allocs()
+    let r_f = leg_length(n, 0)
+    flat("string_length", f, r_f)
+    leg_list(5, 0)
+    let h = live_allocs()
+    let r_h = leg_list(n, 0)
+    flat("List(Int) ==", h, r_h)
+    leg_adt(5, 0)
+    let i = live_allocs()
+    let r_i = leg_adt(n, 0)
+    flat("boxed ADT ==", i, r_i)
+    leg_poly(5, 0)
+    let j = live_allocs()
+    let r_j = leg_poly(n, 0)
+    flat("erased ==", j, r_j)
+    leg_one(5, 0)
+    let k = live_allocs()
+    let r_k = leg_one(n, 0)
+    flat("One(s) -> string_length(s)", k, r_k)
+    -- No warmup call before sampling here, deliberately: without the owned
+    -- return the element is freed on the FIRST comparison, and a sample taken
+    -- after a warmup would see a flat count over already-freed memory. A
+    -- freed element shows up as a NEGATIVE delta, hence the >= 0 bound; and
+    -- same-sized strings are allocated before the read-back so a stale read
+    -- sees reused memory rather than the old bytes.
+    let arr = typed_array_from_list([int_to_string(10), int_to_string(20202), int_to_string(30)])
+    let m = live_allocs()
+    let hits = leg_typed_get(arr, n, 0)
+    let grew_typed = live_allocs() - m
+    println("typed_array_get == = " ++ int_to_string(hits) ++ ", balanced: "
+            ++ bool_to_string(grew_typed >= 0 && grew_typed < 100))
+    let churn = [int_to_string(1000), int_to_string(2000), int_to_string(3000), int_to_string(4000)]
+    println("element intact after the loop: " ++ typed_array_get(arr, 1)
+            ++ " (churn " ++ int_to_string(List.length(churn)) ++ ")")
+  end
+end

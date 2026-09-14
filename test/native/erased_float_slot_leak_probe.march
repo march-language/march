@@ -71,12 +71,12 @@
 -- it is the control that says the fix targets the erased-Float slot rather
 -- than "boxed ADTs" generally. Do not "simplify" any other leg to Int.
 --
--- STILL OPEN, deliberately not asserted here: a heap (non-Float) field
--- extracted from a boxed generic ctor is not dropped by Perceus either --
--- `Cell(int_to_string(n), 0.5)` still leaks its String at 1/iteration, and
--- mixed_leg uses a string LITERAL (immortal) precisely so that separate
--- defect does not contaminate this measurement. See
--- specs/todos/2026-08-22-boxed-ctor-heap-field-binder-not-dropped.md.
+-- mixed_leg's String was a LITERAL until 2026-09-13, to keep a separate leak
+-- out of this measurement. That leak was filed as "a heap field extracted
+-- from a boxed generic ctor is never dropped" and was really string_length
+-- consuming a reference it never released
+-- (specs/progress/2026-09-13-builtin-borrow-classification.md). The leg now
+-- builds a fresh heap string, so it also checks the two fixes compose.
 mod ErasedFloatSlotLeakProbe do
   needs IO.Console
 
@@ -123,12 +123,14 @@ mod ErasedFloatSlotLeakProbe do
   -- LEG 3. A ctor with BOTH an ordinary heap field and an erased Float field,
   -- which is the arm that has to do two different things at once: dup the
   -- heap field on the shared path, release the Float box on the unique one.
-  -- The String is a literal (immortal) on purpose -- see the header's note on
-  -- the separate, still-open heap-field-binder leak.
+  -- The String is a fresh heap string, always 3 bytes so the sum matches the
+  -- literal this leg used to carry. It was a literal while string_length
+  -- leaked its argument (misfiled as a heap-field-binder leak); since that
+  -- fix it is the check that the two fixes compose.
   pfn mixed_leg(n : Int, acc : Float) : Float do
     if n <= 0 do acc
     else
-      let c = Cell("key", 0.5)
+      let c = Cell(int_to_string(100 + n % 900), 0.5)
       let v = match c do
         Cell(s, f) -> f +. int_to_float(string_length(s))
         Empty -> 0.0

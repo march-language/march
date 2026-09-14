@@ -15640,6 +15640,7 @@ let compiler_suites =
       ("tcenv_cli_cache", Test_tcenv_cli_cache.tests);
       ("cap_strip", Test_cap_strip.tests);
       ("cap_symbols", Test_cap_symbols.tests);
+      ("builtin_borrow_classification", Test_builtin_borrow_classification.tests);
       ("cap_markers", Test_cap_markers.tests);
       ("prog_argv", Test_prog_argv.tests);
       ("cap_package", Test_cap_package.tests);
