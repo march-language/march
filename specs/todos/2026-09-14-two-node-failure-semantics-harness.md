@@ -69,6 +69,36 @@ partition rule (needs sudo; the scenario is skipped without it, loudly).
 CI: a new `two-node` job on the ubuntu leg, Docker network, ~3 min. Not in
 `scripts/run-tests.sh`; it is a nightly-class gate like the sanitizer runs.
 
+## Shipped so far (2026-09-14): the harness and scenario 3
+
+`scripts/two-node.sh <scenario>`: compiles `test/two_node/<scenario>/node_{a,b}.march`
+(from a copy, so no `.ll` lands under `test/`), runs them as two OS
+processes on a random port, sources the scenario's `scenario.sh` with
+`start_node` / `kill_node` / `stop_node` / `cont_node` / `wait_line` /
+`wait_exit` in scope (every wait has a deadline and fails with both nodes'
+output), and diffs each node's sorted stdout against `node_{a,b}.expected`.
+Runs on the ubuntu CI leg after the `node_discovery` soak (~5 s); not in
+`scripts/run-tests.sh`.
+
+Scenario `restart` (item 3 above, minus the monitor half): node-b hosts an
+actor and announces its `GlobalPid` on connect; node-a sends one message;
+the harness SIGKILLs node-b after it prints the delivery and restarts it at
+the same port with creation 2, where deterministic spawn order gives the
+actor the SAME local pid; node-a notices the drop, reconnects, and its send
+to the pid it held is refused `stale creation 1, node is at 2` while its
+send to the re-announced pid is delivered. 5/5 runs identical locally.
+
+Measured on the way: a user fn named `connect` miscompiles into a stack
+overflow (second instance of
+[[2026-09-13-user-fn-named-own-miscompiled-as-resource-builtin]]); and
+there is no sleep builtin, so the reconnect backoff is
+`Process.run("sleep", …)`.
+
+Still open: the monitor half of scenario 3 (`NodeDown`, needs 2/4 step 4),
+scenarios 1 (SIGSTOP; the hooks exist, SWIM's refutation path does not
+yet have a driver), 2 (needs `pfctl`/`iptables`), 4, and the Docker
+network variant.
+
 ## Non-goals
 
 Three or more nodes (quorum behaviour), Byzantine peers, and performance

@@ -1,0 +1,7 @@
+node-a: connection to node-b lost
+node-a: delivery 2 failed: stale creation 1, node is at 2
+node-a: node-b hosts Pid(0) at creation 1
+node-a: node-b hosts Pid(0) at creation 2
+node-a: sent 1
+node-a: sent 2
+node-a: sent 3

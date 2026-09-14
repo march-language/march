@@ -13,6 +13,12 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Two-node failure-semantics harness**: `scripts/two-node.sh <scenario>` runs two
+  compiled March programs as two OS processes, applies a fault from outside
+  (SIGKILL/restart, SIGSTOP/SIGCONT), and diffs each node's sorted output. First
+  scenario, `restart`: a node restarted with a new creation at the same local pid
+  refuses a message addressed to its predecessor (`stale creation`) and accepts
+  one addressed to itself. Runs on the ubuntu CI leg.
 - **`pid_to_int(pid)`**, the inverse of `pid_of_int`: a Pid's spawn index (the `N`
   in its `Pid(N)` display), on both backends. Building a `GlobalPid` for a local
   actor previously meant parsing `to_string(pid)`.
@@ -212,6 +218,14 @@ git log is authoritative for exact commits.
   nothing when unset.
 
 ### Fixed
+- **A user function named after a C symbol the runtime links against (`connect`,
+  `log`, `time`, `strlen`, `write`, `exit`, …) no longer hijacks the runtime.**
+  Top-level user functions are emitted under their bare name in the same link
+  as the C runtime, so `fn connect` *was* the `connect()` the runtime's
+  `tcp_connect` called: the program recursed through it to a stack overflow
+  before its first print (a single-use `pfn` escaped only by being inlined).
+  A bare name in the reserved set is now emitted as `name$u` at its definition
+  and every reference; the interpreter was never affected.
 
 - **The interpreter refuses the `block_sender` mailbox policy instead of
   silently ignoring it.** `Actor.set_queue_limit(pid, n, 3)` under `march run`

@@ -498,9 +498,16 @@ causally-ordered clocks.
 (`NodeCall.call`/`serve_loop`), SWIM gossip *dispatch* to peer fds, and
 cross-node monitor firing require two real nodes and are exercised only by
 the native TCP-loopback tests under `test/native/`, never by a
-single-process golden. True multi-*machine* failure semantics (netsplit,
-node restart/incarnation, clock skew across hosts) remain undocumented in
-executable form.
+single-process golden. True multi-*process* failure semantics are exercised
+by `scripts/two-node.sh` (two compiled binaries as two OS processes, a fault
+script applied from outside, per-node sorted goldens under
+`test/two_node/<scenario>/`): the `restart` scenario SIGKILLs a node holding
+an actor, restarts it with a new creation at the same local pid, and pins
+that a send to the held `GlobalPid` is refused as stale while a send to the
+re-announced one is delivered. Netsplit (packet drop), stall-vs-death
+(SIGSTOP), and clock skew across hosts remain undocumented in executable
+form; the harness has the hooks for the first two
+(`specs/todos/2026-09-14-two-node-failure-semantics-harness.md`).
 
 **A compiled memory-safety gap, FIXED (finding C1, `specs/todos/`, 2026-07-11).**
 `VectorClock.compare` (and, transitively, `.concurrent`/`.happens_before` on
