@@ -638,37 +638,49 @@ let owning_apply_fns (m : Tir.tir_module) : (string, unit) Hashtbl.t =
     | Some false -> ()
     | _ -> Hashtbl.replace verdict name ok
   in
-  let rec scan (e : Tir.expr) : unit =
+  (* [k] says where the value of [e] goes, so an allocation in TAIL position
+     is judged by its destination rather than latched to false:
+     - [`Returned]: the enclosing function returns it.  A returned closure
+       escapes ([Borrow.closure_escapes]' "returned" rule), and a closure
+       allocation that is not ELet-bound is one [Borrow.owned_in]'s
+       non-escaping exception never applies to, so its captures were
+       transferred in: its environment owns them.  This is the shape of every
+       closure FACTORY (`fn mk(a, b) = fn x -> ...`), which the first version
+       of this gate declined outright.
+     - [`Bound (v, body)]: the tail of an ELet right-hand side flows into [v],
+       so the verdict is [v]'s escape through [body].
+     - [`Unknown]: a position this does not analyse (the left of an ESeq).
+       Fail closed. *)
+  let rec scan (k : [ `Returned | `Bound of Tir.var * Tir.expr | `Unknown ])
+      (e : Tir.expr) : unit =
     match e with
-    | Tir.ELet (v, Tir.EAlloc (Tir.TCon (n, _), _), e2)
-      when Tir_names.is_clo_struct n ->
-      (* Do NOT descend into the allocation itself: its arguments are atoms, so
-         there is nothing there to find, and the bare-[EAlloc] arm below would
-         re-note this very site as an unrecognised shape and latch it to false.
-         That bug made the gate answer false for EVERY closure type in the
-         module, which silently turned the whole pass off. *)
-      note n (Borrow.closure_escapes v.Tir.v_name e2);
-      scan e2
     | Tir.ELet (_, Tir.EStackAlloc (Tir.TCon (n, _), _), e2)
       when Tir_names.is_clo_struct n ->
       (* A stack-promoted environment is not a heap cell at all: it must never
          be handed to a release whose IS_HEAP_PTR guard would accept the stack
          address. *)
-      note n false; scan e2
-    | Tir.EAlloc (Tir.TCon (n, _), _) | Tir.EStackAlloc (Tir.TCon (n, _), _)
-      when Tir_names.is_clo_struct n ->
-      (* An allocation in any other position — an argument, a tail, a field —
-         is a shape this does not analyse.  Fail closed. *)
+      note n false; scan k e2
+    | Tir.EStackAlloc (Tir.TCon (n, _), _) when Tir_names.is_clo_struct n ->
       note n false
-    | Tir.ELet (_, e1, e2) | Tir.ESeq (e1, e2) -> scan e1; scan e2
+    | Tir.EAlloc (Tir.TCon (n, _), _) when Tir_names.is_clo_struct n ->
+      (* Do NOT reach this arm from an ELet by descending into the allocation
+         with the wrong context: that is how the first version latched EVERY
+         closure type to false and silently turned the pass off.  The ELet arm
+         passes [`Bound], which is the judgement it used to make inline. *)
+      note n (match k with
+          | `Returned -> true
+          | `Bound (v, body) -> Borrow.closure_escapes v.Tir.v_name body
+          | `Unknown -> false)
+    | Tir.ELet (v, e1, e2) -> scan (`Bound (v, e2)) e1; scan k e2
+    | Tir.ESeq (e1, e2) -> scan `Unknown e1; scan k e2
     | Tir.ELetRec (fns, body) ->
-      List.iter (fun f -> scan f.Tir.fn_body) fns; scan body
+      List.iter (fun f -> scan `Returned f.Tir.fn_body) fns; scan k body
     | Tir.ECase (_, brs, def) ->
-      List.iter (fun br -> scan br.Tir.br_body) brs;
-      Option.iter scan def
+      List.iter (fun br -> scan k br.Tir.br_body) brs;
+      Option.iter (scan k) def
     | _ -> ()
   in
-  List.iter (fun f -> scan f.Tir.fn_body) m.Tir.tm_fns;
+  List.iter (fun f -> scan `Returned f.Tir.fn_body) m.Tir.tm_fns;
   let owning = Hashtbl.create 64 in
   Hashtbl.iter (fun clo_name ok ->
       if ok then
@@ -725,7 +737,7 @@ let owning_apply_fns (m : Tir.tir_module) : (string, unit) Hashtbl.t =
     [$clo]-source bindings followed by [ESeq (EDecRC $clo, rest)].  Anything
     else means Perceus spliced no release here (a capture-free apply function,
     the REPL-only arm) and there is nothing to pair child releases with. *)
-let rewrite_apply_clo_drop (env : env) (body : Tir.expr) : Tir.expr =
+let rewrite_apply_clo_drop ?(module_fns : (string, unit) Hashtbl.t option) (env : env) (body : Tir.expr) : Tir.expr =
   let clo = Tir_names.clo_param_name in
   let clo_var =
     { Tir.v_name = clo; v_ty = Tir.TPtr Tir.TUnit; v_lin = Tir.Unr } in
@@ -742,7 +754,7 @@ let rewrite_apply_clo_drop (env : env) (body : Tir.expr) : Tir.expr =
       captures := v :: !captures
     end
   in
-  let drop_ops () =
+  let drop_ops_for (only : Tir.var -> bool) =
     List.rev_map (fun (v : Tir.var) ->
         if may_be_non_heap env v.Tir.v_ty then Tir.EDecRC (Tir.AVar v)
         else match drop_fn_for env v.Tir.v_ty with
@@ -752,7 +764,7 @@ let rewrite_apply_clo_drop (env : env) (body : Tir.expr) : Tir.expr =
                       v_lin = Tir.Unr } in
             Tir.EApp (f, [Tir.AVar v])
           | None -> Tir.EDecRC (Tir.AVar v))
-      !captures
+      (List.filter only !captures)
   in
   let rec chain = function
     | [] -> unit_expr
@@ -770,12 +782,49 @@ let rewrite_apply_clo_drop (env : env) (body : Tir.expr) : Tir.expr =
           branches,
         Option.map (push freed) default)
     | tail ->
-      let guarded =
+      let guarded only =
         Tir.ECase (Tir.AVar freed,
-          [ { Tir.br_tag = "True"; br_vars = []; br_body = chain (drop_ops ()) } ],
+          [ { Tir.br_tag = "True"; br_vars = []; br_body = chain (drop_ops_for only) } ],
           Some unit_expr)
       in
-      Tir.ESeq (guarded, tail)
+      (* The release must not precede a tail that still USES a capture.
+         `fn s -> a ++ s ++ b` has the tail `string_concat3(a, s, b)`, so a
+         release placed in front of it freed `a` and `b` and then concatenated
+         them: a wrong value the second time the closure ran and killed its
+         environment.  The pass got away with this only while its gate declined
+         every closure factory; see [owning_apply_fns].
+         - A tail that uses no capture keeps the release in front, as before.
+         - A tail CALL that uses one, to March code (a module function, or
+           any indirect call), releases only the captures it does not use.
+           The used ones leak on this one path, the safe direction, and the
+           call stays a tail call.  Binding it would put work after the call
+           on EVERY invocation, not only the one that frees the environment,
+           so a self- or mutually-recursive apply fn that llvm_tco folds into
+           a loop would grow a frame per iteration.
+         - Any other tail that uses one is bound first and released after:
+           `let r = tail in (release; r)`.  That includes a call to a builtin
+           or extern (not a module function), which cannot recurse back.  A
+           consuming use in the tail took its own reference, so releasing
+           the environment's afterwards is balanced. *)
+      let used (v : Tir.var) = Perceus_liveness.name_free_in v.Tir.v_name tail in
+      let may_recurse = match tail with
+        | Tir.ECallPtr _ -> true
+        | Tir.EApp (f, _) ->
+          (match module_fns with
+           | Some fns -> Hashtbl.mem fns f.Tir.v_name
+           | None -> true)
+        | _ -> false
+      in
+      if not (List.exists used !captures) then
+        Tir.ESeq (guarded (fun _ -> true), tail)
+      else if may_recurse then
+        Tir.ESeq (guarded (fun v -> not (used v)), tail)
+      else begin match tail with
+        | _ ->
+          let r = { Tir.v_name = fresh env "cres"; v_ty = Tir.TVar "_";
+                    v_lin = Tir.Unr } in
+          Tir.ELet (r, tail, Tir.ESeq (guarded (fun _ -> true), Tir.EAtom (Tir.AVar r)))
+      end
   in
   let rec walk (e : Tir.expr) : Tir.expr option =
     match e with
@@ -867,6 +916,8 @@ let run ?(k_table : Kind.table option) (m : Tir.tir_module) : Tir.tir_module =
      [owning_apply_fns] for why this gate is load-bearing rather than an
      optimisation. *)
   let owning = owning_apply_fns m in
+  let module_fns = Hashtbl.create 256 in
+  List.iter (fun f -> Hashtbl.replace module_fns f.Tir.fn_name ()) m.Tir.tm_fns;
   let fns = List.map (fun f ->
       let body = rewrite env f.Tir.fn_body in
       (* Only an apply function carries a [$clo] parameter to pair child
@@ -874,7 +925,7 @@ let run ?(k_table : Kind.table option) (m : Tir.tir_module) : Tir.tir_module =
          parsing is involved. *)
       let body =
         if f.Tir.fn_kind = Tir.FnApply && Hashtbl.mem owning f.Tir.fn_name
-        then rewrite_apply_clo_drop env body
+        then rewrite_apply_clo_drop ~module_fns env body
         else body
       in
       { f with Tir.fn_body = body }) m.Tir.tm_fns in

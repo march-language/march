@@ -1,0 +1,4 @@
+to_string(List(Int)) = 88894, flat: true
+to_string(List(String)) of literals = 70000, flat: true
+to_string(Option(List(Int))) = 118894, flat: true
+string_join of a fresh list = 68894, flat: true

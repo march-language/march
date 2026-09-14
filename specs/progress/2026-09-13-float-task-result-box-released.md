@@ -1,3 +1,56 @@
+# A Float task's result box is released when the Task dies
+
+**Landed 2026-09-13.** Closes
+`specs/todos/2026-08-12-float-boxing-task-trampoline-leak.md`, which is kept
+below the rule. This is §6 of `specs/2026-09-11-codegen-leaks-design.md`,
+built as designed.
+
+## The defect
+
+For a Float-returning task, the trampoline stores `task[3] = (box << 1) | 1`,
+where `box` is the `march_alloc_float` cell the apply fn returned.
+`task_await_unwrap` reads the double out of it without consuming it, because a
+task may legally be awaited twice. The Task therefore owns that reference.
+But a Task carried tag 0 (from `march_alloc`) and its free is generic and
+shallow, so the box outlived it: **one box per awaited Float task**.
+
+Measured by the probe below: 5,000 per leg, 10,004 across the two Float legs.
+
+## What landed
+
+- **`MARCH_TASK_TAG` (−7)** in `runtime/march_runtime.h`, set by both
+  `march_task_spawn_thunk` and `march_task_spawn_with_cancel_thunk`.
+- **`march_run_resource_dtor`**, the tag hook every RC free path already calls
+  (resource cells used it alone), gains a Task arm. When `task[3]` is a tagged
+  result whose untagged value is a heap object with `MARCH_FLOAT_TAG`, it is
+  released. Everything else is skipped:
+  - an unfinished task (`0`);
+  - the cancel path's untagged `Err` cell;
+  - a tagged scalar (it untags to an odd value);
+  - a heap result of any other tag, which the await routes hand to the caller
+    and account for.
+
+## Tests
+
+`test/native/task_lifetime_leak_probe.march` gains two Float legs inside its
+existing `< 100` live-object bound: 5,000 `task_await_unwrap` and 5,000
+`task_await` Ok-route awaits. The existing double-await witness, which
+includes a Float task awaited twice both ways, still prints `…/500/…/650`.
+
+| build | `live_allocs` delta |
+|---|---|
+| with the release | 4 (3 of 3 runs) |
+| release removed (control) | 10,004 |
+
+## Found alongside, filed
+
+A fire-and-forget task, spawned and never awaited, retains 3,500–4,500
+objects over 5,000 spawns. It does so for an `Int` result too, and the figure
+varies per run and does not settle with thousands of `task_yield`s. It is not
+the Float box: `specs/todos/2026-09-13-fire-and-forget-tasks-retain-objects.md`.
+
+---
+
 # Float-boxing erasure boundary: the `task_await_unwrap` site is still open
 
 Filed 2026-08-12. **Narrowed 2026-08-20**: the apply-wrapper/uniform-ABI half

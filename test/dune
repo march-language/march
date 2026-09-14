@@ -1633,6 +1633,92 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/actor_self.expected native_actor_self.out)))
 
+; ── Leak and use-after-free guard: a closure's environment and captures are
+; released when it dies (factories, captures used by the tail, closures in
+; lists/ctors, returned/wrapped captures). Values are compared against the
+; interpreter: releasing captures in front of a tail that uses them printed a
+; wrong value (43893 for 62786); restoring Perceus's $clo dup at capture reads
+; makes the factory legs leak.
+(rule
+ (targets native_closure_capture_release_probe native_closure_capture_release_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/closure_capture_release_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_closure_capture_release_probe
+        native/closure_capture_release_probe.march)
+   (with-stdout-to native_closure_capture_release_probe.out
+        (system "./native_closure_capture_release_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/closure_capture_release_probe.expected native_closure_capture_release_probe.out)))
+
+; ── Leak guard: `to_string` of a List (prelude's Show via string_join) and
+; string_join itself release the list. string_join's list argument was marked
+; owned in borrow.ml while march_string_join only reads it: 5 objects per
+; `to_string([n, 7])`. Red with the old table entries on all four legs.
+(rule
+ (targets native_show_list_leak_probe native_show_list_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/show_list_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_show_list_leak_probe
+        native/show_list_leak_probe.march)
+   (with-stdout-to native_show_list_leak_probe.out
+        (system "./native_show_list_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/show_list_leak_probe.expected native_show_list_leak_probe.out)))
+
+; ── Leak guard: an unboxed aggregate matched out of a niche-encoded Option
+; (`Some(P2(..))`) releases the box that IS the Some value, but only when the
+; scrutinee dies in the match. Red on main (one 32-byte cell per evaluation);
+; releasing unconditionally aborts at the matched-twice leg with RC underflow.
+(rule
+ (targets native_niche_aggregate_payload_leak_probe native_niche_aggregate_payload_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/niche_aggregate_payload_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_niche_aggregate_payload_leak_probe
+        native/niche_aggregate_payload_leak_probe.march)
+   (with-stdout-to native_niche_aggregate_payload_leak_probe.out
+        (system "./native_niche_aggregate_payload_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/niche_aggregate_payload_leak_probe.expected native_niche_aggregate_payload_leak_probe.out)))
+
+; ── compare_int / compare_float / compare_string: link compiled, return
+; -1/0/1 on both backends (the interpreter returned a Less/Equal/Greater ctor;
+; the compiled program failed to link), and compare_string releases a fresh
+; operand. Interpreter half: test_compiler.ml "compare builtins return Int".
+(rule
+ (targets native_compare_builtins native_compare_builtins.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/compare_builtins.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_compare_builtins
+        native/compare_builtins.march)
+   (with-stdout-to native_compare_builtins.out
+        (system "./native_compare_builtins")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/compare_builtins.expected native_compare_builtins.out)))
+
 ; ── Leak guard: builtins that only READ a heap argument release it. `==`,
 ; `!=`, `<`, `>=` on a fresh String, `==` on a List / boxed ADT / erased value,
 ; and `string_length` each leaked their argument once per call: absent from
@@ -6170,7 +6256,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
   (run bash -c
    "live=$(cat native_task_lifetime_leak_probe.live); \
     test -n \"$live\" || { echo 'could not read live_allocs delta from native_task_lifetime_leak_probe.live' >&2; exit 1; }; \
-    test \"$live\" -lt 100 || { echo \"native_task_lifetime_leak_probe leaked: live_allocs delta ${live} >= 100 objects. A spawn+await must not retain the 48-byte Task or allocate an Ok cell it throws away -- healthy is a small constant (2 on this fixture), and the unfixed tree measured 15,002 over the probe's 10,000 awaits (2 objects per task_await_unwrap, 1 per task_await). Check that task_await_unwrap and task_await in lib/tir/llvm_emit.ml still emit march_decrc on the task pointer, and that task_await_unwrap still calls ONLY march_task_await_value (march_task_await allocates the Ok wrapper).\" >&2; exit 1; }; \
+    test \"$live\" -lt 100 || { echo \"native_task_lifetime_leak_probe leaked: live_allocs delta ${live} >= 100 objects. A spawn+await must not retain the 48-byte Task or allocate an Ok cell it throws away -- healthy is a small constant (4 on this fixture), the unfixed tree measured 15,002 over the probe's 10,000 Int awaits (2 objects per task_await_unwrap, 1 per task_await), and without the Task-tag release of a Float result's box the two Float legs add one box per await (10,004 total). Check that task_await_unwrap and task_await in lib/tir/llvm_emit.ml still emit march_decrc on the task pointer, and that task_await_unwrap still calls ONLY march_task_await_value (march_task_await allocates the Ok wrapper), and that the Task still carries MARCH_TASK_TAG so march_run_resource_dtor releases a Float result's box.\" >&2; exit 1; }; \
     echo \"native_task_lifetime_leak_probe live_allocs delta = ${live} objects\"")))
 
 

@@ -1,0 +1,7 @@
+factory capturing two lists = 20000, flat: true
+string captures used by the tail = 62786, flat: true
+list of closures = 12657500, flat: true
+closure in a ctor = 12521393, flat: true
+capture reused after calls = 60000, flat: true
+closure returns its capture = 37786, flat: true
+closure wraps its capture = 37786, flat: true

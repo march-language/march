@@ -191,6 +191,18 @@ let builtins : builtin list = [
     in_is_builtin = false; declare_sig = Some "declare i64    @march_hash_string(ptr %x)" };
   { march_name = "march_hash_bool"; c_name = None; ret_ty = Some Tir.TInt;
     in_is_builtin = false; declare_sig = Some "declare i64    @march_hash_bool(i64 %x)" };
+  (* The user-facing three-way comparisons.  The typechecker has offered them
+     (typecheck_builtins.ml, each `(T, T) -> Int`) but only the
+     `march_compare_*` rows above existed, marked in_is_builtin = false, so a
+     compiled call fell through to the bare name and failed to link
+     (`_compare_string` undefined).  The C helpers return -1/0/1, the same
+     contract as the `Ord` method `compare`. *)
+  { march_name = "compare_int"; c_name = Some "march_compare_int"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64    @march_compare_int(i64 %x, i64 %y)" };
+  { march_name = "compare_float"; c_name = Some "march_compare_float"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64    @march_compare_float(double %x, double %y)" };
+  { march_name = "compare_string"; c_name = Some "march_compare_string"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64    @march_compare_string(ptr %x, ptr %y)" };
   { march_name = "string_length"; c_name = Some "march_string_byte_length"; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_string_byte_length(ptr %s)" };
   { march_name = "string_byte_length"; c_name = Some "march_string_byte_length"; ret_ty = Some Tir.TInt;

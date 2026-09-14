@@ -207,6 +207,27 @@ git log is authoritative for exact commits.
   catch-all arm** (a "pattern can never be reached" warning that became
   visible with the change above).
 
+- **Closures no longer leak their environment and captured values
+  (compiled).** A function that returns a closure (`fn adder(k) do fn x -> x
+  + k end`) leaked the closure and everything it captured on every call.
+
+- **`to_string` of a list and `string_join` no longer leak the list
+  (compiled).** Printing a list leaked the intermediate list and its element
+  strings on every call (five objects for a two-element list).
+
+- **Awaiting a task that returns a `Float` no longer leaks (compiled).** Each
+  `task_await_unwrap` or `task_await` of a `Float` task left one allocation
+  behind.
+
+- **Matching a small struct out of an `Option` no longer leaks (compiled).**
+  `match o do Some(p) -> ... end` on an `Option` of a two-`Float` record-like
+  type leaked one allocation per match.
+
+- **`compare_int`, `compare_float` and `compare_string` work.** Compiled
+  programs calling them failed to link, and the interpreter returned a
+  `Less`/`Equal`/`Greater` value where the type says `Int`. They now return
+  -1, 0 or 1 on both, like `compare`.
+
 - **A generic function has to opt in to receiving a linear value, and a
   container holding one is linear too.** `fn dup(x) do (x, x) end` turned one
   `always_linear` value into two, `fn drop_it(x) do 0 end` leaked one, and a

@@ -1,0 +1,83 @@
+-- Leak guard: an unboxed aggregate matched out of a niche-encoded Option.
+--
+-- `Option(P2)` with `type P2 = P2(Float, Float)` is niche-encoded: the inline
+-- struct cannot sit in one pointer word, so construction boxes it, and that
+-- box IS the `Some` value. The niche arm bound the payload as the raw pointer
+-- and strips the scrutinee's dec_rc ("scrut IS the payload"), and the
+-- binder's type is an aggregate, which Perceus never drops: one 32-byte cell
+-- leaked per evaluation (20,001 over 20,000 iterations on main).
+-- The arm now binds a COPY of the struct and releases the box when the
+-- scrutinee dies there. specs/progress/2026-09-13-niche-aggregate-payload-box-released.md.
+--
+-- `twice` and `keep` are the double-free witnesses: the Option is matched
+-- again after the first match, so the first release must NOT fire. Releasing
+-- unconditionally aborts this probe with RC underflow at `twice` (3 of 3).
+-- `wild` never uses the payload. Values are printed so no loop is dead-code
+-- eliminated.
+mod Main do
+  needs IO.Console
+  type P2 = P2(Float, Float)
+  pfn p2sum(p : P2) : Float do match p do P2(a, b) -> a +. b end end
+  pfn spin(i : Int, acc : Float) : Float do
+    if i == 0 do acc else
+      let o = Some(P2(1.0, 2.0))
+      let v = match o do
+        Some(p) -> p2sum(p)
+        None    -> 0.0
+      end
+      spin(i - 1, acc +. v)
+    end
+  end
+  pfn twice(i : Int, acc : Float) : Float do
+    if i == 0 do acc else
+      let o = Some(P2(int_to_float(i), 2.0))
+      let a = match o do
+        Some(p) -> p2sum(p)
+        None    -> 0.0
+      end
+      let b = match o do
+        Some(q) -> p2sum(q)
+        None    -> 0.0
+      end
+      twice(i - 1, acc +. a +. b)
+    end
+  end
+  pfn wild(i : Int, acc : Float) : Float do
+    if i == 0 do acc else
+      let o = Some(P2(1.0, 2.0))
+      let v = match o do
+        Some(_) -> 1.0
+        None    -> 0.0
+      end
+      wild(i - 1, acc +. v)
+    end
+  end
+  pfn keep(i : Int, acc : Float) : Float do
+    if i == 0 do acc else
+      let o = Some(P2(int_to_float(i), 1.0))
+      let v = match o do
+        Some(p) -> p2sum(p)
+        _ -> 0.0
+      end
+      let w = match o do
+        Some(p) -> p2sum(p)
+        None -> 0.0
+      end
+      keep(i - 1, acc +. v +. w)
+    end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    let a = live_allocs()
+    let r = spin(20000, 0.0)
+    println("spin " ++ float_to_string(r) ++ ", flat: " ++ bool_to_string(live_allocs() - a < 100))
+    let b = live_allocs()
+    let r2 = twice(20000, 0.0)
+    println("twice " ++ float_to_string(r2) ++ ", flat: " ++ bool_to_string(live_allocs() - b < 100))
+    let c = live_allocs()
+    let r3 = wild(20000, 0.0)
+    println("wild " ++ float_to_string(r3) ++ ", flat: " ++ bool_to_string(live_allocs() - c < 100))
+    let d = live_allocs()
+    let r4 = keep(20000, 0.0)
+    println("keep " ++ float_to_string(r4) ++ ", flat: " ++ bool_to_string(live_allocs() - d < 100))
+  end
+end
