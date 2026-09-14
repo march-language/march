@@ -22,7 +22,8 @@
 --     (`fn x -> f(f(x))`): the release is withheld to keep the tail call a tail
 --     call;
 --   - a capturing lambda passed to a HOF (`List.map(xs, fn x -> x + k)`):
---     specs/todos/2026-08-21-ecallptr-owned-arg-borrow-callee-leak.md.
+--     `map`'s own `go` closure is released shallowly, so its captured `f`
+--     leaks (specs/todos/2026-09-06-closure-capture-release-widening.md).
 mod Main do
   needs IO.Console
 

@@ -114,11 +114,16 @@ mod Main do
     -- What this pins is the dangerous direction: handlers that bind `self`
     -- (all of them), and one that hands it to a consuming callee twice, must
     -- not move the count at all.
+    --
+    -- The sends themselves each leave exactly one reference behind: pump
+    -- mints a fresh pid per send, pid_of_int takes a reference for it (since
+    -- 2026-09-14), and `send` keeps it. So the count moves by the number of
+    -- sends and by nothing the handlers do.
     let rc_before = actor_rc(victim)
     println("victim is multiply owned: " ++ bool_to_string(rc_before > 1))
     pump(victim, 5)
     run_until_idle()
     println("refcount unchanged by handlers that name self: "
-            ++ bool_to_string(actor_rc(victim) == rc_before))
+            ++ bool_to_string(actor_rc(victim) == rc_before + 10))
   end
 end

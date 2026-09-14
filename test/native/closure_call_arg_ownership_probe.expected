@@ -1,0 +1,11 @@
+fresh argument, reading lambda = 18893, flat: true
+argument live after the call = 37786, flat: true
+lambda ignores its argument = 35000, flat: true
+named function as a closure = 18893, flat: true
+lambda stores its argument = 10000, flat: true
+Float argument = 25005000., flat: true
+record-alias argument = 12521393, flat: true
+to_string of List(String) = 57789, flat: true
+List.filter predicate = 4991, flat: true
+fold lambda ignores the element = 12502500, flat: true
+named function to List.map = 28893, flat: true
