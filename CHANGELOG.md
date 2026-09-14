@@ -13,6 +13,14 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Bounds contracts on `Array.get`, `Array.set` and `Array.pop`.** A negative
+  index (`Array.get(v, -1)`) is a compile error, an `i >= 0 && i <
+  Array.length(v)` guard satisfies the contract, and `pop` needs
+  `Array.length(v) > 0`. An index the compiler can't bound stays silent, as
+  for `List.nth`; that includes a literal past the end of an array built by
+  `Array.from_list`, whose length the checker does not track. Swept first over
+  the stdlib, the native and stdlib test corpora and eighteen ecosystem
+  projects: no new errors. See `docs/refinement-types.md`.
 - **`NodeSend`: a one-way message to an actor on another node.** Everything
   cross-node was a synchronous `NodeCall` or a monitor frame. `NodeSend.cast`
   writes an `ACTOR_MSG` frame addressed by `GlobalPid`; `NodeSend.serve_one`
@@ -477,6 +485,16 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **`cap no_panic` accepts a guarded `Array.get`/`set`/`pop`.** They were
+  banned outright; they now join `List.nth` and friends in the proof-checked
+  set, so a call whose bounds guard proves the contract is accepted, and an
+  unguarded or off-by-one one is still a panic error.
+- **Non-recursive `@[measure]`s reach the solver as definitions, not
+  quantified axioms.** A measure whose arms call no measure is encoded as a
+  plain `define-fun`. Under the axioms z3 answered satisfiable queries over
+  such a measure only at its 3 s timeout, as `unknown`, which cost cold
+  checks minutes and left the obligation skipped; the same queries now
+  decide in milliseconds. Recursive and set-valued measures are unchanged.
 - **A compiled program that segfaults now says where.** A fatal SIGSEGV or
   SIGBUS used to exit 139/138 with nothing on stderr. It now prints one
   `march: fatal …` line first: signal, fault address, program counter, the

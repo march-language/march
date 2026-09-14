@@ -1440,7 +1440,10 @@ let rec qualified_name (e : A.expr) : string option =
    that advice merely swaps this warning for the unknown-name one, and the
    contract still enforces nothing. *)
 let qualified_measure_spelling (qname : string) : string option =
-  match qname with "List.length" | "String.byte_size" -> Some "len" | _ -> None
+  match qname with
+  | "List.length" | "String.byte_size" -> Some "len"
+  | "Array.length" -> Some "pvec_length"
+  | _ -> None
 
 (* ── Predicate-vocabulary warning ──────────────────────────────────────────
    A refinement predicate that calls a name [known_predicate_fn] does not
@@ -2812,6 +2815,9 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   string_byte_size_is_stdlib :=
     gate "String.byte_size" "len" ~str:true
       (string_byte_size_defs_ok ~mod_name m.A.mod_decls);
+  array_length_is_stdlib :=
+    gate "Array.length" "pvec_length" ~str:false
+      (stdlib_member_defs_ok ~md:"Array" ~fn:"length" ~mod_name m.A.mod_decls);
   string_byte_length_is_builtin :=
     gate "string_byte_length" "len" ~str:true
       (bare_builtin_undefined ~mod_name "string_byte_length" m.A.mod_decls);

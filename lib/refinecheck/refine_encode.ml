@@ -724,6 +724,16 @@ let list_length_is_stdlib : bool ref = ref false
    aliasing that would attach `$strlen`'s meaning to an arbitrary function. *)
 let string_byte_size_is_stdlib : bool ref = ref false
 
+(* `Array.length` is the stdlib's persistent-vector count, i.e. the same value
+   as the private `@[measure] pvec_length` its bounds contracts are written
+   over (stdlib/array.march).  Aliased only while no competing `Array.length`
+   is in scope, by the same gate as `List.length` ([stdlib_member_defs_ok]).
+   Without it a guard `if i < Array.length(v)` reflects to a different symbol
+   than the contract's `pvec_length(v)` and the two never meet, so no
+   bounds-checked `Array.get` could ever be proved (found by the 2026-09-13
+   contract sweep). *)
+let array_length_is_stdlib : bool ref = ref false
+
 (* And for the BARE `string_byte_length`.  This one is not a stdlib March
    function to be identified — it is a COMPILER BUILTIN (typecheck's builtin
    table; lowered to the `march_string_byte_length` C symbol), so there is no
@@ -803,6 +813,7 @@ let measure_alias (m : string) : string option =
   match m with
   | "List.length" when !list_length_is_stdlib -> Some "len"
   | "String.byte_size" when !string_byte_size_is_stdlib -> Some "len"
+  | "Array.length" when !array_length_is_stdlib -> Some "pvec_length"
   | "string_byte_length" when !string_byte_length_is_builtin -> Some "len"
   | _ -> None
 
@@ -1750,6 +1761,62 @@ let arm_axiom ~allowed (name : string) ((ctor, vars, body) : string * string lis
           (Printf.sprintf "(assert (forall (%s) (! (= %s %s) :pattern (%s))))"
              (String.concat " " bound) lhs (Smt.render bsmt) lhs)
 
+(* A NON-RECURSIVE measure as one quantifier-free definition, or [None].
+
+   `@[measure] fn length(v : PVec(a)) : Int do match v do PVec(n, _, _, _) ->
+   n end end` needs no quantifier at all: every arm's body is a term over the
+   arm's own pattern variables, and the match is exhaustive (the shape gate),
+   so the measure IS
+
+     (define-fun length ((x M_PVec)) Int
+       (let ((n (PVec_0 x)) (_w1 (PVec_1 x)) …) n))
+
+   with an `ite` over constructor testers when there are several arms.  Found
+   by the 2026-09-13 `Array` bounds-contract sweep: the recursion-equation
+   encoding ([arm_axiom]) is a `forall`, and z3's model-based quantifier
+   instantiation cannot close a SATISFIABLE query over it, so the negated-goal
+   discharge of every unprovable `Array.get(v, i)` returned `unknown
+   (incomplete quantifiers)` only when the 3 s per-query timeout fired — two
+   timeouts per call site, and the stdlib's own `aho_corasick` call sites are
+   checked in every program.  The same query over the definition answers in
+   ~30 ms, both ways.
+
+   A body qualifies when it translates with NO measure calls allowed and no
+   self call ([smt_of_axiom_body ~self:"" ~allowed:(fun _ -> false)]); a
+   recursive measure keeps the axioms, which are what makes induction over it
+   possible. *)
+let measure_definition (name : string) (adt : string)
+    (arms : (string * string list * A.expr) list) : string option =
+  let arm_term (ctor, vars, body) =
+    match smt_of_axiom_body ~self:"" ~allowed:(fun _ -> false) vars body with
+    | None -> None
+    | Some bsmt ->
+      let sorts = try Hashtbl.find ctor_field_sorts ctor with Not_found -> [] in
+      if List.length vars <> List.length sorts then None
+      else
+        let body_s = Smt.render bsmt in
+        let bound =
+          if vars = [] then body_s
+          else
+            Printf.sprintf "(let (%s) %s)"
+              (String.concat " " (List.mapi (fun i v -> Printf.sprintf "(%s (%s_%d x))" v ctor i) vars))
+              body_s
+        in
+        Some (ctor, bound)
+  in
+  let terms = List.map arm_term arms in
+  if List.exists Option.is_none terms then None
+  else
+    match List.rev (List.filter_map Fun.id terms) with
+    | [] -> None
+    | (_, last) :: earlier_rev ->
+      let body =
+        List.fold_left
+          (fun acc (ctor, t) -> Printf.sprintf "(ite ((_ is %s) x) %s %s)" ctor t acc)
+          last earlier_rev
+      in
+      Some (Printf.sprintf "(define-fun %s ((x %s)) Int %s)" name adt body)
+
 (* Build the global measure-axiom preamble; populates [axiom_measures].
 
    A measure is axiomatised iff (a) its body is an exhaustive `match` on its ADT
@@ -1854,6 +1921,24 @@ let build_measure_preamble (mdefs : (string * A.fn_def) list) : unit =
         axiomatized
     in
     Buffer.add_string buf (Smt.set_sort_defs set_elems);
+    (* Non-recursive measures become definitions ([measure_definition]); they
+       get no declare-fun, no non-negativity or base-case axiom (all implied
+       by the definition, and each of those is a quantifier too), and no
+       recursion-equation axioms.  A definition mentions no measure, so it
+       may sit anywhere after the datatypes.  Set-valued measures keep the
+       axiomatised encoding: a definition's result sort is Int. *)
+    let definitions =
+      List.filter_map
+        (fun (name, adt, arms) ->
+          if is_set_measure name then None
+          else Option.map (fun d -> (name, d)) (measure_definition name adt arms))
+        axiomatized
+    in
+    let defined name = List.mem_assoc name definitions in
+    let all_axiomatized = axiomatized in
+    let axiomatized_q = List.filter (fun (n, _, _) -> not (defined n)) axiomatized in
+    List.iter (fun (_, d) -> Buffer.add_string buf (d ^ "\n")) definitions;
+    let axiomatized = axiomatized_q in
     (* declare-funs first … *)
     List.iter
       (fun (name, adt, _) ->
@@ -1925,7 +2010,7 @@ let build_measure_preamble (mdefs : (string * A.fn_def) list) : unit =
           (fun arm -> match arm_axiom ~allowed name arm with Some s -> Buffer.add_string buf (s ^ "\n") | None -> ())
           arms)
       axiomatized;
-    let covered = adt_closure (List.map (fun (_, adt, _) -> adt) axiomatized) in
+    let covered = adt_closure (List.map (fun (_, adt, _) -> adt) all_axiomatized) in
     let dts = datatype_decls covered in
     measure_preamble := "(declare-sort Elem 0)\n" ^ dts ^ "\n" ^ Buffer.contents buf;
     Hashtbl.reset measure_preamble_sorts;

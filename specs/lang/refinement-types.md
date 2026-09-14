@@ -945,6 +945,19 @@ index is an undischarged precondition, and therefore a hard error, not a skip
 (see [`cap verified`: turning silence into an
 error](#cap-verified-turning-silence-into-an-error)).
 
+`Array.get` / `set` / `pop` carry the same cross-parameter treatment
+(2026-09-14): `idx : {Int | _ >= 0 && _ < pvec_length(v)}`, and
+`pop(v : {PVec(a) | pvec_length(_) > 0})`. `pvec_length` is a private
+single-arm `@[measure]` reading `PVec`'s count field (private so it cannot
+collide with a user `@[measure] fn length`); `Array.length(v)` in a guard is
+aliased to it, gated like `List.length` → `len` on the call really naming the
+stdlib member. Because the three moved from `cap no_panic`'s syntactic ban
+list to its proof-checked set, a guarded call is now accepted there and an
+unguarded one is still an error. Swept first over 1171 files (stdlib,
+`test/native`, `test/stdlib`, eighteen ecosystem projects): zero new
+violations, zero exit-code changes, only new skips at computed indices.
+Progress: `specs/progress/2026-09-13-array-bounds-contracts.md`.
+
 An ordinary `List.length(ys) > 0` guard **does** discharge this obligation, so
 the contract bites on a list you validated at runtime and not only on literals:
 
@@ -2834,8 +2847,10 @@ edges:
   on `n`; under-warning is the safe direction, but it means **silence is not
   evidence that a measure works**.
 
-  Consequence: `Array.get`/`set`/`pop` cannot be given a dischargeable bounds
-  contract today and remain on `cap no_panic`'s syntactic ban list. Fixing this
+  Consequence (historical, resolved 2026-09-13/14): `Array.get`/`set`/`pop`
+  could not be given a dischargeable bounds contract and stayed on
+  `cap no_panic`'s syntactic ban list; they are contracted now (see the
+  `List.nth` paragraph). Fixing this
   means reflecting a scalar field concretely when the actual argument is a
   literal (`term_fits_sort` already accepts a scalar term at an `SInt`/`SBool`
   field, so the ill-sorted-VC hazard that motivated the erasure does not apply
@@ -2912,7 +2927,16 @@ edges:
   reasoning is far more expensive per query than plain arithmetic. Verdicts are
   content-addressed and cached (warm rebuilds are fast), and the cost is
   isolated to call sites that actually mention a measure, but a cold build of
-  measure-heavy code pays for it. See the flag below.
+  measure-heavy code pays for it. See the flag below. A *non-recursive*,
+  Int-valued measure (every arm translates with no measure call) is emitted as
+  a quantifier-free `define-fun` (an `ite` over constructor testers with
+  `let`-bound selectors) instead of `declare-fun` + forall axioms
+  (`measure_definition`, 2026-09-14). Under the quantified encoding z3 answered
+  every *satisfiable* query over such a measure `unknown (incomplete
+  quantifiers)` only at the 3 s per-query timeout, so a single contracted
+  `Array.get` in the stdlib cost ~1 min of cold checking per program; the
+  definition decides the same query in ~30 ms in both directions. Recursive
+  and set-valued measures keep the axioms.
 - **A predicate can call a name the checker doesn't understand; it now tells
   you.** Predicate bodies aren't typechecked, so `{Int | totally_bogus_fn(_) >
   0}` used to compile clean and enforce no contract. The checker now warns when a
