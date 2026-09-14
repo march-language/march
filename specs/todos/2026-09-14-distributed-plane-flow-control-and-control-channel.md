@@ -79,8 +79,18 @@ This is the contract the supervised-endpoint fixtures assume implicitly: a
 
 ## Order of work
 
-1. `NetKernel.dispatch` refactor (from the remote-send spec) so all frame
-   arms are in one place.
+1. **A per-peer receive loop — new, not a refactor.** Measured 2026-09-14
+   while building `NodeSend`: there is no net-kernel receive loop to
+   refactor. Every consumer reads its own frames off the fd it was handed
+   (`NodeCall.recv_reply`/`serve_one`, `NodeSend.recv_failure`/`serve_one`,
+   the `node_discovery` fixture calling `SwimDriver.decode_msg`, the
+   `DistLink` callers), each skipping frames it does not recognise — which
+   means a frame for one consumer is silently consumed and dropped by
+   another reading the same connection. The "single `NetKernel.dispatch`"
+   the remote-send spec proposed as a refactor is therefore the first piece
+   of new machinery here: one reader per peer connection, dispatching by
+   tag to registered consumers, which is also the only place credit
+   accounting and the control/data split can live.
 2. Control/data split — a handshake and connection change, testable by
    asserting a `MONITOR_FIRE` arrives while a 64 MiB RPC reply is in flight
    on the data channel (today it would queue behind it).
