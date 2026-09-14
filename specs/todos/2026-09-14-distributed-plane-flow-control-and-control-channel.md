@@ -1,0 +1,99 @@
+# `[P2]` Distributed actors 2/4: flow control, a control channel, and a delivery contract for monitors
+
+Filed 2026-09-14. The design the three open plane items in
+[[2026-08-11-actor-hardening-distributed-plane]] (items 1, 2, 3) said they
+needed. Sequenced after [[2026-09-14-remote-send-to-a-global-pid]]: without
+an actor-message stream there is nothing to flow-control, and the control
+split is only observable once data traffic can starve it.
+
+## What is measured today
+
+- Outbound frames go straight to `Socket.write` (`NetKernel.send_frame`).
+  A peer that stops reading makes `write` block the green thread, or, if
+  the socket buffer absorbs it, grows nothing on our side — there is no
+  queue to grow *yet*, because there is no async remote send. With
+  `Node.send` there will be.
+- One TCP connection per peer carries SWIM, registry sync, monitors and
+  RPC. `MONITOR_FIRE` is written from `do_actor_death` by the C runtime
+  (`march_dist_monitor_fire_pid`), best-effort, ignoring `write` errors,
+  onto the watcher's fd — the same fd a large RPC reply may be mid-write on
+  from another thread. Nothing serialises those writes; a fire can
+  interleave into another frame.
+
+## Design
+
+### Flow control: per-peer credit, decided at the sender
+
+Each peer connection holds an outbound queue with a **byte budget**
+(default 4 MiB) and a credit counter the receiver replenishes:
+
+- The receiver sends `CREDIT(n)` (tag `0x0B`) after it has *consumed* — not
+  merely read — `n` bytes of data frames; consumption is the point at which
+  the frame's message is enqueued to a local mailbox (or rejected with
+  `DELIVERY_FAILED`).
+- The sender decrements credit on write; at zero it stops writing and the
+  queue absorbs new sends up to the budget.
+- At the budget, the policy is the sender's per-`Node.send` choice, the same
+  three the local bounded mailbox has (`Actor.set_queue_limit` policies):
+  `drop_new` (return `Err(Backpressure)` immediately), `drop_old`,
+  `block_sender` (park the sending green thread until credit returns; the
+  native scheduler can, the interpreter cannot — see
+  [[2026-09-14-distributed-plane-known-gaps]]).
+
+Why credit and not just a bounded queue: a bounded queue alone still lets
+the sender fill the kernel socket buffer of a peer that has stalled, and the
+stall is invisible until the next write blocks. Credit tells the sender the
+peer is *processing*, which is also the signal SWIM's suspicion should read
+before declaring a slow-but-alive peer dead.
+
+### Control channel: a second connection per peer
+
+Open two connections per peer during the handshake, tagged in the hello
+(`role: control | data`), authenticated identically. Control carries SWIM,
+registry sync, `MONITOR_REQ`/`FIRE`, `CREDIT`, `DELIVERY_FAILED`; data
+carries `ACTOR_MSG` and RPC. The control connection has no credit scheme
+(its frames are small and bounded in rate) and its writes are serialised
+through one writer per peer, which removes the interleaving above.
+
+Cost: doubles fds per peer and the handshake count. Alternative considered:
+priority lanes on one connection. Rejected because TCP has no way to let a
+control frame overtake bytes already written; only a second stream can.
+
+### `MONITOR_FIRE`: at-least-once, deduped by `(target_pid, creation, watcher_ref)`
+
+Today: at-most-once, and lost if the watcher's connection is mid-reconnect
+or the monitor registered after the death. Contract:
+
+- The firing node keeps the fire in a per-watcher-node retry table until
+  the watcher's control channel returns `MONITOR_ACK(ref)`, retrying on
+  reconnect with backoff; entries expire when the watcher node is declared
+  dead by SWIM (its watchers get `NodeDown` locally anyway).
+- A `MONITOR_REQ` for a pid that has already exited answers with an
+  immediate `MONITOR_FIRE(reason)` — the "registered after death" race
+  becomes a normal fire.
+- Watchers dedupe by `(target_pid, creation, ref)`, so a retried fire after
+  a lost ack delivers one `Down`.
+
+This is the contract the supervised-endpoint fixtures assume implicitly: a
+`DistSupervisor` that never learns a remote child died restarts nothing.
+
+## Order of work
+
+1. `NetKernel.dispatch` refactor (from the remote-send spec) so all frame
+   arms are in one place.
+2. Control/data split — a handshake and connection change, testable by
+   asserting a `MONITOR_FIRE` arrives while a 64 MiB RPC reply is in flight
+   on the data channel (today it would queue behind it).
+3. Credit-based flow control on the data channel, with the three policies.
+4. Monitor at-least-once with acks and the after-death answer.
+
+## Tests
+
+- Two-node loopback (native): a stalled reader (peer stops calling
+  `recv`) → sender's queue stops at the budget and `Node.send` returns
+  `Err(Backpressure)` under `drop_new`; resumes when the reader drains.
+- Control latency under data load: fire arrives within one scheduler tick
+  while the data channel is saturated.
+- Monitor: kill a target before the watcher's `MONITOR_REQ` arrives → one
+  `Down`; drop the watcher's connection between death and ack → one `Down`
+  after reconnect, not two.
