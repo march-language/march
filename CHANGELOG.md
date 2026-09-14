@@ -278,6 +278,14 @@ git log is authoritative for exact commits.
   catch-all arm** (a "pattern can never be reached" warning that became
   visible with the change above).
 
+- **Calling a closure no longer leaks its arguments (compiled).** A function
+  value called with a fresh heap argument (`f(int_to_string(n))`, a
+  `List.filter` predicate, the per-element `show` inside `to_string` of a
+  `List(String)`) leaked that argument on every call, and an argument still in
+  use afterwards could never be freed. This covered lambdas that only read
+  their argument or ignore it, a lambda parameter typed with a record alias,
+  and a named function passed as a value.
+
 - **Closures no longer leak their environment and captured values
   (compiled).** A function that returns a closure (`fn adder(k) do fn x -> x
   + k end`) leaked the closure and everything it captured on every call.
