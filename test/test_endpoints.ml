@@ -121,7 +121,11 @@ let stream_shape =
            ("Stream_Prod", "register"); ("Stream_Prod", "send_Msg_Prod_Cons_1");
            ("Stream_Prod", "offer_more_done"); ("Stream_Prod", "close");
            ("Stream_Cons", "register"); ("Stream_Cons", "recv_Msg_Prod_Cons_1");
-           ("Stream_Cons", "choose_more"); ("Stream_Cons", "choose_done"); ("Stream_Cons", "close") ])
+           ("Stream_Cons", "choose_more"); ("Stream_Cons", "choose_done"); ("Stream_Cons", "close");
+           (* the event API, beside the callback one, in the same modules *)
+           ("Stream_Prod", "idle"); ("Stream_Prod", "take_idle"); ("Stream_Prod", "await_more_done");
+           ("Stream_Prod", "finish"); ("Stream_Prod", "resume");
+           ("Stream_Cons", "await_Msg_Prod_Cons_1"); ("Stream_Cons", "finish"); ("Stream_Cons", "resume") ])
 
 let relay_shape =
   Alcotest.test_case "Relay: three roles, each with exactly its own send/recv" `Quick
@@ -257,6 +261,71 @@ let payload_declared_later = ok "a payload type declared after the protocol stil
   end
 |})
 
+(* ── the event API: session state in actor state ───────────────────────
+   specs/todos/2026-09-13-endpoints-event-api-actor-state.md.  The rejects
+   are the record move-out rules (PR #442) applied to the `parked` field; the
+   corpus twins are reject/t236-t238 and accept/t239. *)
+
+let cons_actor body = wrap (stream ^ {|
+  actor ConsActor do
+    state { budget : Int, parked : Stream_Cons.Parked_Cons }
+    init  { budget: 2, parked: Stream_Cons.idle() }
+|} ^ body ^ {|
+  end
+|})
+
+let event_ok = ok "an actor holding a Parked endpoint in its state, resuming and re-parking every turn" (cons_actor {|
+    on StartC(s : Cap(Session.Live)) do
+      Stream_Cons.take_idle(state.parked)
+      { state with parked: Stream_Cons.await_Msg_Prod_Cons_1(s, Stream_Cons.register(s, 0)) }
+    end
+    on DeliverC(s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
+      match Stream_Cons.resume(state.parked, from, msg, ep) do
+        Got_Msg_Prod_Cons_1(_n, st) ->
+          if state.budget > 1 do
+            { state with budget: state.budget - 1,
+                         parked: Stream_Cons.await_Msg_Prod_Cons_1(s, Stream_Cons.choose_more(s, st, true)) }
+          else
+            { state with parked: Stream_Cons.finish(s, Stream_Cons.choose_done(s, st, true)) }
+          end
+      end
+    end
+|})
+
+let event_retained = bad "resuming and then keeping the consumed Parked in the update" "`state.parked` is used more than once" (cons_actor {|
+    on DeliverC(s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
+      match Stream_Cons.resume(state.parked, from, msg, ep) do
+        Got_Msg_Prod_Cons_1(n, st) ->
+          let _ = Stream_Cons.finish(s, Stream_Cons.choose_done(s, st, true))
+          { state with budget: state.budget - n }
+      end
+    end
+|})
+
+let event_not_reparked = bad "resuming and returning the state unchanged" "`state.parked` is used more than once" (cons_actor {|
+    on DeliverC(s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
+      match Stream_Cons.resume(state.parked, from, msg, ep) do
+        Got_Msg_Prod_Cons_1(_n, st) ->
+          let _ = Stream_Cons.finish(s, Stream_Cons.choose_done(s, st, true))
+          state
+      end
+    end
+|})
+
+let event_idle_dropped = bad "a Start that parks without consuming the Idle placeholder" "`state.parked` was never used" (cons_actor {|
+    on StartC(s : Cap(Session.Live)) do
+      { budget: 2, parked: Stream_Cons.await_Msg_Prod_Cons_1(s, Stream_Cons.register(s, 0)) }
+    end
+|})
+
+let event_forge = bad "a Parked cannot be forged: its constructors take the private Secret" "Stream_Cons.Secret" (cons_actor {|
+    on StartC(s : Cap(Session.Live)) do
+      Stream_Cons.take_idle(state.parked)
+      { state with parked: Stream_Cons.Awaiting_S_recv_Msg_Prod_Cons_1(7, Stream_Cons.Secret) }
+    end
+|})
+
 let tests =
   [ stream_shape; relay_shape; no_attr_no_generation; bad_branch_head; same_label_two_payloads;
-    prod_ok; wrong_order; replayed; abandoned; callback_forge; relay_ok; payload_declared_later ]
+    prod_ok; wrong_order; replayed; abandoned; callback_forge; relay_ok; payload_declared_later;
+    event_ok; event_retained; event_not_reparked; event_idle_dropped; event_forge ]

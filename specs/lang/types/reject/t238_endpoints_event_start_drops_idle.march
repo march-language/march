@@ -1,0 +1,32 @@
+-- EXPECT-ERROR: The linear value `state.parked` was never used
+mod Main do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs Session.Live
+  @[endpoints]
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+  -- `init` holds the `Idle` placeholder, which is linear like every other
+  -- `Parked`: a `Start` that parks a fresh endpoint without consuming it
+  -- (`take_idle`) leaks it, and the checker says so.
+  actor ConsActor do
+    state { budget : Int, parked : Stream_Cons.Parked_Cons }
+    init  { budget: 2, parked: Stream_Cons.idle() }
+    on StartC(s : Cap(Session.Live)) do
+      { budget: 2, parked: Stream_Cons.await_Msg_Prod_Cons_1(s, Stream_Cons.register(s, 0)) }
+    end
+  end
+  fn main(c : Cap(IO)) do
+    let _ = spawn(ConsActor)
+    ()
+  end
+end

@@ -1,0 +1,160 @@
+mod StreamActorEvents do
+  -- The event-shaped endpoint API: the SESSION STATE LIVES IN ACTOR STATE.
+  -- Same `Stream` protocol, same generated `@[endpoints]` module, same
+  -- mailbox transport shape as stream_actor.march, and the same eight-line
+  -- trace -- but here nothing is captured in a continuation.  Each role is an
+  -- actor whose state holds a `Parked` endpoint (an always_linear value the
+  -- generated module hands out), and every session step runs inside the
+  -- actor's own `on` handler, where `state` is in scope: `Cons` reads
+  -- `state.budget` to decide `more` or `done`, which the callback-shaped
+  -- fixture could only do by threading the budget through a closure.
+  --
+  -- Design: specs/todos/2026-09-13-endpoints-event-api-actor-state.md.
+  --
+  -- What the checker enforces here, and did not before PR #442: `parked` is a
+  -- linear field of the state, so a handler that resumes it and returns
+  -- `{ state with budget: … }` (keeping the consumed value) or one that never
+  -- parks again is rejected; see reject/t236-t238.
+  --
+  -- Two shapes differ from stream_actor.march, both consequences of the state
+  -- living in the actor: ONE ACTOR TYPE PER ROLE (the role is the state's
+  -- type, so the router dispatches on the destination endpoint, which this
+  -- transport hands out as the role index), and the actor drives ITSELF to
+  -- its first suspension in `Start` -- `main` only spawns, starts, and routes.
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs Session.Live
+
+  @[endpoints]
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+
+  -- ── the mailbox transport, as in stream_actor.march ────────────────────
+  -- `await_*` still calls `Session.suspend`, so `handlers` records which
+  -- endpoints await and the router's guard keeps working; the installed
+  -- handler is never called (the actor resumes the endpoint itself), and
+  -- panics if a transport tries.
+  type Transport = { ops : Session.Ops }
+
+  pfn ekey(ep : Int) : String do "e" ++ int_to_string(ep) end
+
+  fn mailbox(handlers, pending) : Transport do
+    Vault.set(pending, "q", Deque.empty())
+    {
+      ops: {
+        register: fn (_ap, role) -> role,
+        emit: fn (ep, to, msg) -> do
+          let q = match Vault.get(pending, "q") do
+            Some(d) -> d
+            None    -> Deque.empty()
+          end
+          Vault.set(pending, "q", Deque.push_back(q, (to, ep, msg)))
+          ep
+        end,
+        suspend: fn (ep, handler) -> do
+          Vault.set(handlers, ekey(ep), handler)
+          ep
+        end,
+        close: fn ep -> print_line("close " ++ int_to_string(ep))
+      }
+    }
+  end
+
+  -- ── the endpoint actors ───────────────────────────────────────────────
+  actor ProdActor do
+    state { next : Int, parked : Stream_Prod.Parked_Prod }
+    init  { next: 1, parked: Stream_Prod.idle() }
+    on StartP(s : Cap(Session.Live)) do
+      Stream_Prod.take_idle(state.parked)
+      let st = Stream_Prod.register(s, 0)
+      { state with parked: step_prod(s, st, state.next), next: state.next + 1 }
+    end
+    on DeliverP(s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
+      match Stream_Prod.resume(state.parked, from, msg, ep) do
+        Got_More(_b, st) ->
+          print_line("Prod got More")
+          { state with parked: step_prod(s, st, state.next), next: state.next + 1 }
+        Got_Done(_b, st) ->
+          print_line("Prod got Done")
+          { state with parked: Stream_Prod.finish(s, st) }
+      end
+    end
+  end
+
+  -- At the loop head Prod sends, then awaits the offer.
+  pfn step_prod(s : Cap(Session.Live), st : Stream_Prod.S_send_Msg_Prod_Cons_1, next : Int) : Stream_Prod.Parked_Prod do
+    print_line("Prod sends Item(" ++ int_to_string(next) ++ ")")
+    Stream_Prod.await_more_done(s, Stream_Prod.send_Msg_Prod_Cons_1(s, st, next))
+  end
+
+  actor ConsActor do
+    state { budget : Int, parked : Stream_Cons.Parked_Cons }
+    init  { budget: 2, parked: Stream_Cons.idle() }
+    on StartC(s : Cap(Session.Live)) do
+      Stream_Cons.take_idle(state.parked)
+      { state with parked: Stream_Cons.await_Msg_Prod_Cons_1(s, Stream_Cons.register(s, 0)) }
+    end
+    on DeliverC(s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
+      match Stream_Cons.resume(state.parked, from, msg, ep) do
+        Got_Msg_Prod_Cons_1(n, st) ->
+          print_line("Cons got Item(" ++ int_to_string(n) ++ ")")
+          -- The step reads the actor's own state: this is what the event API
+          -- is for.
+          if state.budget > 1 do
+            let st2 = Stream_Cons.choose_more(s, st, true)
+            { state with budget: state.budget - 1,
+                         parked: Stream_Cons.await_Msg_Prod_Cons_1(s, st2) }
+          else
+            let st2 = Stream_Cons.choose_done(s, st, true)
+            { state with parked: Stream_Cons.finish(s, st2) }
+          end
+      end
+    end
+  end
+
+  -- One delivery per turn, to the actor that owns the destination role.
+  pfn route(s : Cap(Session.Live), pp, pc, handlers, pending) : () do
+    let q = match Vault.get(pending, "q") do
+      Some(d) -> d
+      None    -> Deque.empty()
+    end
+    match Deque.pop_front(q) do
+      (None, _) -> ()
+      (Some((to, from, msg)), rest) ->
+        Vault.set(pending, "q", rest)
+        match Vault.get(handlers, ekey(to)) do
+          None -> panic("stream_actor_events: delivery to " ++ int_to_string(to) ++ " with no endpoint awaiting")
+          Some(_) ->
+            if to == Stream_Msg.role_Prod() do
+              send(pp, DeliverP(s, from, msg, to))
+            else
+              send(pc, DeliverC(s, from, msg, to))
+            end
+            run_until_idle()
+            route(s, pp, pc, handlers, pending)
+        end
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let handlers = Vault.new("stream_actor_events_handlers")
+    let pending  = Vault.new("stream_actor_events_pending")
+    let t = mailbox(handlers, pending)
+    let s = Session.attach(c, t.ops)
+    let pc = spawn(ConsActor)
+    let pp = spawn(ProdActor)
+    send(pc, StartC(s))
+    send(pp, StartP(s))
+    run_until_idle()
+    route(s, pp, pc, handlers, pending)
+  end
+end
