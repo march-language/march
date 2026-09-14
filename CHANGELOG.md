@@ -142,6 +142,24 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Diagnostics inside generated code are reported.** An error or warning
+  the typechecker raised inside a `derive` expansion or an `@[endpoints]`
+  module was silently filtered out with the stdlib's, so `march --check`
+  exited 0 on a generated function that used a linear value twice. Such a
+  diagnostic now prints, without a source excerpt, with a note saying it is in
+  code generated for the file.
+
+- **`p : Pid(Int)` is accepted as a type annotation.** The bare name `Pid`
+  resolves to the stdlib's `Global_pid.Pid` record, so the one-argument actor
+  pid spelling was rejected with "`Pid` expects 0 type argument(s)", and every
+  program matching a monitor's `Down` carried the same error invisibly. The
+  one-argument form now means the actor pid.
+
+- **`derive Eq` on a single-constructor type, and `@[endpoints]` on a protocol
+  whose state can receive every message, no longer generate an unreachable
+  catch-all arm** (a "pattern can never be reached" warning that became
+  visible with the change above).
+
 - **A generic function has to opt in to receiving a linear value, and a
   container holding one is linear too.** `fn dup(x) do (x, x) end` turned one
   `always_linear` value into two, `fn drop_it(x) do 0 end` leaked one, and a
