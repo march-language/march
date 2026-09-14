@@ -239,6 +239,15 @@ jobs:
           #   else regressed. Note the 24 here vs the 28 recorded above:
           #   main had already travelled down to 24 since 2026-07-29.
           #
+          #   RAISED 2026-09-14, 34 -> 46, deliberately, for the same
+          #   reason: Array.get/set/pop gained bounds contracts, which
+          #   raises 15 obligations at the stdlib's own Array call sites
+          #   (aho_corasick, rrb_vec, …) in every program. Attributed with
+          #   scripts/refine-oracle.sh against a compiler built at main:
+          #   this file's slice went 17 proved / 33 skipped -> 19 proved /
+          #   46 skipped, exactly the +2 proved / +13 skipped every one of
+          #   the 326 other fixtures gained, and no verdict elsewhere moved.
+          #
           #   Lower is better — this bound
           #   may only ever be revised DOWN. This is the check that is
           #   actually sensitive to the pass checking less than it used to:
@@ -258,7 +267,7 @@ jobs:
           #   guard_discharges.march, whose `user code` slice is 1 proved /
           #   0 violated / 0 skipped (measured 2026-07-29). Higher is better
           #   — this bound may only ever be revised UP.
-          baseline=34
+          baseline=46
           proved_floor=1
           floor_fixture=specs/lang/types/accept/t118_refine_length_guard_discharges.march
           dune build bin/main.exe

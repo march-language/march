@@ -15093,6 +15093,260 @@ let container2_suite =
         Alcotest.(check bool) "control: xs : List(Int) gives x no fact" true
           (has_refine_error_d (m (body "Int")))) ]
 
+(* ── Array bounds contracts (2026-09-13) ───────────────────────────────────
+   `Array.get`/`Array.set` carry `idx : {Int | _ >= 0 && _ < pvec_length(v)}`
+   and `Array.pop` carries `{PVec(a) | pvec_length(_) > 0}`, over the private
+   `@[measure] pvec_length` in the REAL `stdlib/array.march` (loaded here, not
+   restated: the claim is about the shipped contract).  Three pieces have to
+   line up for a guarded call to prove, and each has a witness below that
+   fails without it:
+
+     - the `Array.length` -> `pvec_length` measure alias (a guard spelled
+       `i < Array.length(v)` otherwise reflects to a symbol the contract never
+       mentions, and nothing proves);
+     - the move of the three names from the syntactic `cap no_panic` ban list
+       to [panic_surface_contracted] (otherwise the guarded call is rejected by
+       NAME);
+     - the quantifier-free `define-fun` encoding of a non-recursive measure
+       (the forall encoding left every SATISFIABLE query `unknown` at the
+       timeout, so nothing was ever Violated, only Skipped).
+
+   Every accept sits next to a reject: an accept-only witness cannot tell a
+   working contract from one that proves everything. *)
+
+let stdlib_array_mod : (March_ast.Ast.decl * string) Lazy.t =
+  lazy
+    (let m, path = load_stdlib_march "array.march" in
+     ( March_ast.Ast.DMod
+         ( m.March_ast.Ast.mod_name, March_ast.Ast.Public,
+           m.March_ast.Ast.mod_decls, March_ast.Ast.dummy_span ),
+       path ))
+
+(* The production pipeline over the fixture with `array.march`, `list.march`
+   and prelude prepended — [no_panic_errors]' shape.  Returns the fixture-only
+   `cap no_panic` errors AND the fixture-only ledger records whose callee is an
+   `Array.*` name, so one run answers both "is it admitted" and "was it
+   actually proved". *)
+let array_pipeline (src : string) :
+    string list * March_refinecheck.Obligation.t list =
+  let m = March_desugar.Desugar.desugar_module (parse src) in
+  let listmod, list_path = Lazy.force stdlib_list_mod in
+  let arrmod, arr_path = Lazy.force stdlib_array_mod in
+  let prelude_decls, prelude_path = Lazy.force stdlib_prelude_decls in
+  let m =
+    { m with
+      March_ast.Ast.mod_decls =
+        (listmod :: arrmod :: prelude_decls) @ m.March_ast.Ast.mod_decls }
+  in
+  let is_user_file f = f = "" || f = "<unknown>" in
+  March_refinecheck.Obligation.reset ();
+  March_typecheck.Typecheck.proof_based_panic_surface := true;
+  let errors =
+    Fun.protect
+      ~finally:(fun () ->
+        March_typecheck.Typecheck.proof_based_panic_surface := false)
+      (fun () ->
+        let errors, _ = March_typecheck.Typecheck.check_module m in
+        March_refinecheck.Refine_check.check_module
+          ~stdlib_files:[ list_path; arr_path; prelude_path ] errors m;
+        March_refinecheck.Division_safety.check_module errors m;
+        March_refinecheck.Panic_surface_by_proof.check_module errors m;
+        errors)
+  in
+  let no_panic =
+    List.filter_map
+      (fun (d : March_errors.Errors.diagnostic) ->
+        if
+          d.March_errors.Errors.severity = March_errors.Errors.Error
+          && is_user_file d.March_errors.Errors.span.March_ast.Ast.file
+          && contains d.March_errors.Errors.message "(declared `cap no_panic`)"
+        then Some d.March_errors.Errors.message
+        else None)
+      errors.March_errors.Errors.diagnostics
+  in
+  let obligations =
+    List.filter
+      (fun (o : March_refinecheck.Obligation.t) ->
+        is_user_file o.March_refinecheck.Obligation.span.March_ast.Ast.file
+        && String.length o.March_refinecheck.Obligation.callee >= 6
+        && String.sub o.March_refinecheck.Obligation.callee 0 6 = "Array.")
+      (March_refinecheck.Obligation.all ())
+  in
+  (no_panic, obligations)
+
+(* The verdicts recorded at fixture call sites to [callee]. *)
+let array_verdicts (callee : string) (src : string) :
+    March_refinecheck.Obligation.verdict list =
+  List.filter_map
+    (fun (o : March_refinecheck.Obligation.t) ->
+      if o.March_refinecheck.Obligation.callee = callee
+      then Some o.March_refinecheck.Obligation.verdict
+      else None)
+    (snd (array_pipeline src))
+
+let all_proved = function
+  | [] -> false
+  | vs -> List.for_all (fun v -> v = March_refinecheck.Obligation.Proved) vs
+
+let none_proved = function
+  | [] -> false
+  | vs -> List.for_all (fun v -> v <> March_refinecheck.Obligation.Proved) vs
+
+let array_bounds_suite =
+  let m body = "mod AB do\n" ^ body ^ "end\n" in
+  let np body = "mod ABN do\n  cap no_panic\n" ^ body ^ "end\n" in
+  let guarded_get =
+    "  fn at(v, i) do\n\
+    \    if i >= 0 && i < Array.length(v) do Array.get(v, i) else 0 end\n\
+    \  end\n"
+  in
+  let unguarded_get = "  fn at(v, i) do Array.get(v, i) end\n" in
+  let off_by_one_get =
+    "  fn at(v, i) do\n\
+    \    if i >= 0 && i <= Array.length(v) do Array.get(v, i) else 0 end\n\
+    \  end\n"
+  in
+  [ gated "guarded Array.get proves through the Array.length alias; unguarded does not"
+      (fun () ->
+        (* Also the alias witness: the guard is spelled ONLY with
+           `Array.length`, and `pvec_length` is private, so without the alias
+           there is no fact connecting the guard to the contract. *)
+        Alcotest.(check bool) "guarded: every Array.get obligation Proved" true
+          (all_proved (array_verdicts "Array.get" (m guarded_get)));
+        Alcotest.(check bool) "unguarded: an Array.get obligation exists, none Proved" true
+          (none_proved (array_verdicts "Array.get" (m unguarded_get)));
+        Alcotest.(check bool) "off-by-one (<=): none Proved" true
+          (none_proved (array_verdicts "Array.get" (m off_by_one_get))));
+
+    gated "guarded Array.set proves; unguarded does not" (fun () ->
+        Alcotest.(check bool) "guarded set: Proved" true
+          (all_proved
+             (array_verdicts "Array.set"
+                (m "  fn put(v, i, x) do\n\
+                   \    if i >= 0 && i < Array.length(v) do Array.set(v, i, x) else v end\n\
+                   \  end\n")));
+        Alcotest.(check bool) "unguarded set: none Proved" true
+          (none_proved
+             (array_verdicts "Array.set" (m "  fn put(v, i, x) do Array.set(v, i, x) end\n"))));
+
+    gated "guarded Array.pop proves; unguarded and >= 0 guards do not" (fun () ->
+        Alcotest.(check bool) "Array.length(v) > 0: Proved" true
+          (all_proved
+             (array_verdicts "Array.pop"
+                (m "  fn drop_last(v) do\n\
+                   \    if Array.length(v) > 0 do Array.pop(v) else (v, 0) end\n\
+                   \  end\n")));
+        Alcotest.(check bool) "unguarded pop: none Proved" true
+          (none_proved (array_verdicts "Array.pop" (m "  fn drop_last(v) do Array.pop(v) end\n")));
+        Alcotest.(check bool) "Array.length(v) >= 0 (too weak): none Proved" true
+          (none_proved
+             (array_verdicts "Array.pop"
+                (m "  fn drop_last(v) do\n\
+                   \    if Array.length(v) >= 0 do Array.pop(v) else (v, 0) end\n\
+                   \  end\n"))));
+
+    gated "cap no_panic: guarded Array.get admitted; unguarded and off-by-one rejected"
+      (fun () ->
+        Alcotest.(check (list string)) "guarded get: no cap no_panic error" []
+          (fst (array_pipeline (np guarded_get)));
+        let unguarded = fst (array_pipeline (np unguarded_get)) in
+        Alcotest.(check bool) "unguarded get: rejected" true (unguarded <> []);
+        Alcotest.(check bool) "and the message says it can panic" true
+          (List.exists (fun e -> contains e "can panic") unguarded);
+        Alcotest.(check bool) "off-by-one get: rejected" true
+          (fst (array_pipeline (np off_by_one_get)) <> []));
+
+    gated "cap no_panic: guarded Array.set / Array.pop admitted; unguarded rejected"
+      (fun () ->
+        Alcotest.(check (list string)) "guarded set + pop: no error" []
+          (fst
+             (array_pipeline
+                (np "  fn put(v, i, x) do\n\
+                    \    if i >= 0 && i < Array.length(v) do Array.set(v, i, x) else v end\n\
+                    \  end\n\
+                    \  fn drop_last(v) do\n\
+                    \    if Array.length(v) > 0 do Array.pop(v) else (v, 0) end\n\
+                    \  end\n")));
+        Alcotest.(check int) "unguarded set + pop: two errors" 2
+          (List.length
+             (fst
+                (array_pipeline
+                   (np "  fn put(v, i, x) do Array.set(v, i, x) end\n\
+                       \  fn drop_last(v) do Array.pop(v) end\n"))))) ]
+
+(* ── Non-recursive measures as `define-fun` (2026-09-13) ───────────────────
+   A measure with no recursive call is encoded as one quantifier-free
+   definition rather than `forall` equations.  The observable property that
+   motivated it: a call that VIOLATES a refinement over such a measure must be
+   decided Violated (the forall encoding returned `unknown` at the timeout, a
+   Skip), and a satisfying call Proved.  Ledger counts, not error booleans —
+   under `cap verified` a skip and a violation are both errors. *)
+let measure_definition_suite =
+  let box =
+    "mod MD do\n  type Box = Box(Int, Int)\n\
+    \  @[measure]\n  fn first(b : Box) : Int do match b do Box(n, _) -> n end end\n\
+    \  fn need(b : Box, i : {Int | _ < first(b)}) : Int do i end\n"
+  in
+  let shape =
+    "mod MS do\n  type Shape = Dot | Seg(Int) | Tri(Int, Int)\n\
+    \  @[measure]\n  fn corners(s : Shape) : Int do\n\
+    \    match s do\n    Dot -> 1\n    Seg(_) -> 2\n    Tri(_, _) -> 3\n    end\n  end\n\
+    \  fn need3(s : {Shape | corners(_) >= 3}) : Int do 0 end\n"
+  in
+  let preamble_of src =
+    ignore (ledger_counts3 src);
+    !March_refinecheck.Refine_encode.measure_preamble
+  in
+  [ gated "a non-recursive single-ctor measure: one call Proved, one Violated, none skipped"
+      (fun () ->
+        Alcotest.(check (triple int int int)) "guarded opaque box proves" (1, 0, 0)
+          (ledger_counts3
+             (box ^ "  fn f(b : Box, i : Int) : Int do\n\
+                    \    if i < first(b) do need(b, i) else 0 end\n  end\nend\n"));
+        let violating =
+          box ^ "  fn f(b : Box, i : Int) : Int do\n\
+                 \    if i >= first(b) do need(b, i) else 0 end\n  end\nend\n"
+        in
+        Alcotest.(check (triple int int int)) "i >= first(b) is decided Violated" (0, 1, 0)
+          (ledger_counts3 violating);
+        (* The counterexample needs a SAT answer WITH a model, which is exactly
+           what the forall encoding could not give (z3 answered `unknown` at
+           the timeout).  The verdict alone survives that encoding, because the
+           refutation is an UNSAT query; the model does not. *)
+        Alcotest.(check bool) "the violation carries a concrete counterexample" true
+          (contains (refine_error_text_d violating) "(e.g. "));
+
+    gated "a non-recursive multi-ctor measure with literal arms: Proved and Violated"
+      (fun () ->
+        Alcotest.(check (triple int int int)) "need3(Tri(0, 0)) proves" (1, 0, 0)
+          (ledger_counts3 (shape ^ "  fn main() : Int do need3(Tri(0, 0)) end\nend\n"));
+        Alcotest.(check (triple int int int)) "need3(Seg(0)) is Violated" (0, 1, 0)
+          (ledger_counts3 (shape ^ "  fn main() : Int do need3(Seg(0)) end\nend\n"));
+        Alcotest.(check (triple int int int)) "opaque s with corners(s) < 3 is Violated" (0, 1, 0)
+          (ledger_counts3
+             (shape ^ "  fn f(s : Shape) : Int do\n\
+                      \    if corners(s) < 3 do need3(s) else 0 end\n  end\nend\n")));
+
+    gated "the preamble defines a non-recursive measure and quantifies only a recursive one"
+      (fun () ->
+        let p = preamble_of (box ^ "  fn main() : Int do need(Box(3, 0), 1) end\nend\n") in
+        Alcotest.(check bool) "define-fun first" true (contains p "(define-fun first ");
+        Alcotest.(check bool) "no declare-fun first" false (contains p "(declare-fun first ");
+        Alcotest.(check bool) "no quantifier at all" false (contains p "forall");
+        (* Control: a recursive measure must keep its axioms, or the check
+           above would pass against an encoder that dropped quantifiers
+           wholesale. *)
+        let q =
+          preamble_of
+            "mod MR do\n  type Nat = Z | S(Nat)\n\
+            \  @[measure]\n  fn depth(n : Nat) : Int do match n do Z -> 0\n    S(m) -> 1 + depth(m) end end\n\
+            \  fn need(n : {Nat | depth(_) > 0}) : Int do 0 end\n\
+            \  fn main() : Int do need(S(Z)) end\nend\n"
+        in
+        Alcotest.(check bool) "recursive depth: declare-fun" true (contains q "(declare-fun depth ");
+        Alcotest.(check bool) "recursive depth: forall axiom" true (contains q "forall");
+        Alcotest.(check bool) "recursive depth: no define-fun" false (contains q "(define-fun depth ")) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -15190,4 +15444,6 @@ let () =
       ("scalar-field-measure", scalar_field_measure_suite);
       ("arrow-codomain", arrow_codomain_suite);
       ("container-subtyping-2", container2_suite);
-      ("set-refinements", set_suite) ]
+      ("set-refinements", set_suite);
+      ("array-bounds-contracts", array_bounds_suite);
+      ("measure-definition", measure_definition_suite) ]

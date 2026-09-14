@@ -598,6 +598,14 @@ Under `cap verified`, though, that same unbindable index is a hard error
 instead of a silent skip: that mode's whole promise is that every obligation
 gets discharged, so "can't tell" is no longer good enough.
 
+`Array.get`, `Array.set` and `Array.pop` carry the same treatment (index in
+`0 <= i < Array.length(v)`; `pop` needs `Array.length(v) > 0`), and a guard
+written with `Array.length` satisfies it. `Array.get(v, -1)` is an error; a
+literal past the end of an array from `Array.from_list` is skipped, because
+the checker does not track the length `from_list` produces. Swept before shipping over the
+standard library, the native and stdlib test corpora and eighteen ecosystem
+projects: zero new errors, only new skips at computed indices.
+
 An ordinary `List.length(xs) > 0` guard **does** satisfy the requirement, so these
 contracts bite on a list you checked at runtime and not just on literals; see
 [the solver really does connect `List.length` to
@@ -1857,9 +1865,9 @@ dependent typing. Know the edges:
   value depending only on tags and sub-measures, and fatal for one with a value that
   *is* the field. So `length(PVec(3, 0, TrieEmpty, Nil))` reaches the solver as
   an unknown `Int`, and an obviously in-range index is neither proved nor
-  refuted: it is `solver-undecided` and silently accepted. This is why
-  `Array.get`/`set`/`pop` carry no bounds contract today and stay on the
-  `cap no_panic` ban list instead.
+  refuted: it is `solver-undecided` and silently accepted. (A scalar field whose actual
+  reflects, a literal or a refined local, is now reflected concretely, which
+  is what lets `Array.get`/`set`/`pop` carry a bounds contract.)
 
   The compiler **warns** at the measure's definition when it sees this, but the
   warning fires **only on a bare field read** (`-> n`). A body that only
@@ -1884,7 +1892,10 @@ dependent typing. Know the edges:
   reasoning is far more expensive per query than plain arithmetic. Verdicts are
   content-addressed and cached (warm rebuilds are fast), and the cost is
   isolated to call sites that actually mention a measure, but a cold build of
-  measure-heavy code pays for it. See the flag below.
+  measure-heavy code pays for it. See the flag below. A *non-recursive*
+  measure (every arm computes without calling a measure) is sent to the
+  solver as a plain definition rather than quantified axioms, so it costs no
+  more than arithmetic.
 
 ---
 
