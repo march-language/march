@@ -21,3 +21,8 @@ a refinement one layer down. Still unenforced, and reported so by
 
 Each is an extension of the same three sites (`check_elements`'s literal
 arms, `contenv`, the `EMatch` element facts); none needs a new mechanism.
+
+## Design (2026-09-13)
+
+`specs/2026-09-13-refinement-p3-designs.md` §2: the full design, soundness
+argument, test list and effort estimate for this item.

@@ -164,3 +164,8 @@ Until then `Array.get`/`Array.set`/`Array.pop` stay on the syntactic
 `cap no_panic` ban list. (`Array.pop` was on NEITHER list when this was filed
 and could panic inside `cap no_panic`; fixed the same day —
 `specs/progress/2026-08-05-array-pop-not-on-no-panic-ban-list.md`.)
+
+## Design (2026-09-13)
+
+`specs/2026-09-13-refinement-p3-designs.md` §4: the full design, soundness
+argument, test list and effort estimate for this item.

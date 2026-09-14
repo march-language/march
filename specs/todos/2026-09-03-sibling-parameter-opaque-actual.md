@@ -88,3 +88,8 @@ case as its own `Unenforced` position; it is filed as
 `unreflectable-predicate` under `--refine-report`, not as an audit site.
 Listed here only so a reader scanning `specs/todos/` for known refinement
 gaps finds it alongside the audit's own todos.
+
+## Design (2026-09-13)
+
+`specs/2026-09-13-refinement-p3-designs.md` §3: the full design, soundness
+argument, test list and effort estimate for this item.
