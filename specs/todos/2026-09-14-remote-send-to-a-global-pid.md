@@ -171,6 +171,25 @@ fails with `Permission denied` on the `.ll`. Delete the stray `.ll` before
 `@test/runtest`.
 
 Still open from the design: the typed wrapper (a `Node.send(conn, to, msg)`
-whose codec the compiler checks), `DELIVERY_FAILED` delivered as a message
-to the sending actor rather than read synchronously, and the `Session.Ops`
-network transport. The per-peer reader shipped as `PeerReader` (2/4 step 1).
+whose codec the compiler checks) and `DELIVERY_FAILED` delivered as a message
+to the sending actor rather than read synchronously. The per-peer reader
+shipped as `PeerReader` (2/4 step 1).
+
+## Shipped 2026-09-14: the `Session.Ops` network transport
+
+`test/two_node/stream/` — the Stream protocol's two endpoints on two OS
+processes (Prod on node-a, Cons on node-b), run by the harness of
+[[2026-09-14-two-node-failure-semantics-harness]]. The transport is the
+mailbox transport of `stream_actor.march` with one change, exactly as the
+design said: `emit` writes a `NodeSend` ACTOR_MSG (`Deliver [to, from, msg]`)
+to the peer node's endpoint actor instead of enqueueing for a local drain;
+`suspend`/`close` are unchanged and the session state still rides in the
+continuation. The receiving node's `PeerReader` loop hands each Deliver to
+its endpoint actor and runs that turn to completion before the next frame,
+the same one-delivery-per-turn rule the mailbox transport uses. The
+generated `@[endpoints]` API and the endpoint code are byte-identical to the
+in-process fixtures. Each node's trace is its projection of
+`stream_endpoints.expected`, in order (one actor prints per node); 6/6 runs
+identical, an order-swapped expectation fails. Nothing in `Session.Ops`
+changed. Routing is by the peer's announced `GlobalPid`; the global registry
+as the routing table is the multi-peer generalisation.

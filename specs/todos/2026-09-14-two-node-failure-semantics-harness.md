@@ -94,6 +94,13 @@ overflow (second instance of
 there is no sleep builtin, so the reconnect backoff is
 `Process.run("sleep", …)`.
 
+Scenario `stream` (added the same day, no fault): the Stream protocol's two
+endpoints on the two nodes over the `Session.Ops` network transport, each
+node's ORDERED trace its projection of `stream_endpoints.expected` — see
+[[2026-09-14-remote-send-to-a-global-pid]]. The harness gained `ORDERED=1`
+for a node that prints from one actor. CI runs every scenario
+(`scripts/two-node.sh --list`).
+
 Still open: the monitor half of scenario 3 (`NodeDown`, needs 2/4 step 4),
 scenarios 1 (SIGSTOP; the hooks exist, SWIM's refutation path does not
 yet have a driver), 2 (needs `pfctl`/`iptables`), 4, and the Docker

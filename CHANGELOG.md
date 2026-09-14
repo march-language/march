@@ -13,6 +13,11 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **The `Session.Ops` network transport**: the Stream session protocol's two
+  endpoints run on two nodes with every message crossing a TCP connection as a
+  `NodeSend` ACTOR_MSG, using the generated `@[endpoints]` API and endpoint code
+  unchanged from the in-process fixtures (`test/two_node/stream/`). The transport
+  is the mailbox one with `emit` sending to the peer node's endpoint actor.
 - **Two-node failure-semantics harness**: `scripts/two-node.sh <scenario>` runs two
   compiled March programs as two OS processes, applies a fault from outside
   (SIGKILL/restart, SIGSTOP/SIGCONT), and diffs each node's sorted output. First

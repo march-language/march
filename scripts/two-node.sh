@@ -16,6 +16,9 @@
 #   stop_node / cont_node <a|b>   SIGSTOP / SIGCONT (a stall, distinct from a crash)
 #   wait_line <a|b> <text>        block until the node's stdout contains <text>
 #   wait_exit <a|b>               block until the node's process exits
+#   ORDERED=1                     (set by the scenario) diff each node's stdout
+#                                 unsorted: only for a node that prints from one
+#                                 actor, whose order is then the protocol's
 #
 # Every wait has a deadline (TWO_NODE_TIMEOUT, default 60 s) and fails loudly
 # with both nodes' output. Why two processes and not two green threads: see
@@ -101,9 +104,11 @@ wait_exit() {
 source "$dir/scenario.sh"
 
 status=0
+ORDERED=${ORDERED:-0}
 for n in a b; do
   [ -f "$dir/node_$n.expected" ] || continue
-  if ! LC_ALL=C sort "$work/$n.out" | diff -u "$dir/node_$n.expected" - > "$work/$n.diff"; then
+  if [ "$ORDERED" = 1 ]; then normalise() { cat "$1"; }; else normalise() { LC_ALL=C sort "$1"; }; fi
+  if ! normalise "$work/$n.out" | diff -u "$dir/node_$n.expected" - > "$work/$n.diff"; then
     echo "two-node[$scenario]: node-$n output differs from node_$n.expected:" >&2
     cat "$work/$n.diff" >&2
     status=1

@@ -504,7 +504,10 @@ script applied from outside, per-node sorted goldens under
 `test/two_node/<scenario>/`): the `restart` scenario SIGKILLs a node holding
 an actor, restarts it with a new creation at the same local pid, and pins
 that a send to the held `GlobalPid` is refused as stale while a send to the
-re-announced one is delivered. Netsplit (packet drop), stall-vs-death
+re-announced one is delivered; the `stream` scenario runs the Stream
+session protocol's two endpoints on the two nodes over the `Session.Ops`
+network transport, each node's trace its projection of the in-process
+one. Netsplit (packet drop), stall-vs-death
 (SIGSTOP), and clock skew across hosts remain undocumented in executable
 form; the harness has the hooks for the first two
 (`specs/todos/2026-09-14-two-node-failure-semantics-harness.md`).
