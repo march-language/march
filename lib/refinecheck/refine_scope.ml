@@ -300,21 +300,71 @@ let rec pretty_smt_value (v : string) : string =
        ((as const (Array Int Bool)) false)                -> {}
        (store ((as const (Array Int Bool)) false) 4 true) -> {4}
      Anything else in array shape (a lambda, an `as-array`) stays raw. *)
-  let rec set_elems (t : string) : string list option =
+  (* Two spellings reach here depending on the z3 version, and both must
+     render: z3 4.16 prints a finite set as a `store` chain over an all-false
+     constant array, while z3 4.8 (the version Ubuntu 24.04 ships, and hence
+     CI) prints the same set as a membership lambda,
+     `(lambda ((x!1 Int)) (or (= x!1 4) (= x!1 5)))`.  A co-finite or
+     otherwise unrecognised array stays raw.  Elements are kept in the order
+     they are added, a later `store` overriding an earlier one. *)
+  let parens (t : string) : string option =
     let m = String.length t in
-    if m >= 2 && t.[0] = '(' && t.[m - 1] = ')' then
-      match sexp_tokens (String.sub t 1 (m - 2)) with
-      | [ "as"; "const"; _ ] | [ "as"; "const"; _; _ ] -> None
-      | [ inner; "false" ] when String.length inner > 8 && String.sub inner 0 8 = "(as cons" ->
-        Some []
-      | [ "store"; rest; x; "true" ] ->
-        Option.map (fun xs -> pretty_smt_value x :: xs) (set_elems rest)
-      | [ "store"; rest; _; "false" ] -> set_elems rest
+    if m >= 2 && t.[0] = '(' && t.[m - 1] = ')' then Some (String.sub t 1 (m - 2)) else None
+  in
+  let rec store_chain (t : string) : (string * bool) list option =
+    match parens t with
+    | None -> None
+    | Some inner ->
+      match sexp_tokens inner with
+      | [ c; "false" ] when String.length c > 8 && String.sub c 0 8 = "(as cons" -> Some []
+      | [ "store"; rest; x; ("true" | "false" as b) ] ->
+        Option.map (fun ops -> ops @ [ (x, b = "true") ]) (store_chain rest)
       | _ -> None
-    else None
+  in
+  let rec lambda_members (var : string) (body : string) : string list option =
+    if body = "false" then Some []
+    else
+      match parens body with
+      | None -> None
+      | Some inner ->
+        match sexp_tokens inner with
+        | [ "="; a; b ] when a = var -> Some [ b ]
+        | [ "="; a; b ] when b = var -> Some [ a ]
+        | "or" :: disjuncts ->
+          List.fold_left
+            (fun acc d ->
+              match acc, lambda_members var d with
+              | Some xs, Some ys -> Some (xs @ ys)
+              | _ -> None)
+            (Some []) disjuncts
+        | _ -> None
+  in
+  let set_elems (t : string) : string list option =
+    let add xs x = if List.mem x xs then xs else xs @ [ x ] in
+    match store_chain t with
+    | Some ops ->
+      Some
+        (List.fold_left
+           (fun xs (x, present) ->
+             let x = pretty_smt_value x in
+             if present then add xs x else List.filter (( <> ) x) xs)
+           [] ops)
+    | None ->
+      match Option.map sexp_tokens (parens t) with
+      | Some [ "lambda"; binders; body ] ->
+        (match Option.map sexp_tokens (parens binders) with
+         | Some [ binder ] ->
+           (match Option.map sexp_tokens (parens binder) with
+            | Some [ var; _sort ] ->
+              Option.map
+                (fun xs -> List.fold_left add [] (List.map pretty_smt_value xs))
+                (lambda_members var body)
+            | _ -> None)
+         | _ -> None)
+      | _ -> None
   in
   match set_elems v with
-  | Some xs -> "{" ^ String.concat ", " (List.rev xs) ^ "}"
+  | Some xs -> "{" ^ String.concat ", " xs ^ "}"
   | None ->
   if n >= 2 && v.[0] = '(' && v.[n - 1] = ')' then begin
     let inner = String.sub v 1 (n - 2) in

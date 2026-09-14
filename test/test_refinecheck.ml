@@ -14570,6 +14570,28 @@ let set_suite =
         Alcotest.(check bool) "elts model" true (contains text "elts(s) = {1}");
         Alcotest.(check bool) "no raw store" false (contains text "(store "));
 
+    (* z3-independent: both z3 spellings of a finite set render as the same
+       literal.  CI's z3 4.8 prints the membership-lambda form; a local z3 4.16
+       prints the store chain.  The set-counterexample case above passed on
+       4.16 and failed on 4.8 until the lambda form was understood. *)
+    Alcotest.test_case "set models render as literals under both z3 spellings" `Quick (fun () ->
+        let r = March_refinecheck.Refine_scope.pretty_smt_value in
+        Alcotest.(check string) "store chain" "{4}"
+          (r "(store ((as const (Array Int Bool)) false) 4 true)");
+        Alcotest.(check string) "later store overrides" "{}"
+          (r "(store (store ((as const (Array Int Bool)) false) 4 true) 4 false)");
+        Alcotest.(check string) "empty" "{}" (r "((as const (Array Int Bool)) false)");
+        Alcotest.(check string) "lambda singleton" "{4}"
+          (r "(lambda ((x!1 Int)) (= x!1 4))");
+        Alcotest.(check string) "lambda disjunction with a negative" "{4, -7}"
+          (r "(lambda ((x!1 Int)) (or (= x!1 4) (= x!1 (- 7))))");
+        Alcotest.(check string) "lambda empty" "{}" (r "(lambda ((x!1 Int)) false)");
+        Alcotest.(check string) "co-finite stays raw"
+          "(store ((as const (Array Int Bool)) true) 3 false)"
+          (r "(store ((as const (Array Int Bool)) true) 3 false)");
+        Alcotest.(check string) "unrecognised lambda stays raw"
+          "(lambda ((x!1 Int)) (> x!1 4))" (r "(lambda ((x!1 Int)) (> x!1 4))"));
+
     (* ── Review fixes, 2026-09-14 ─────────────────────────────────────────── *)
     gated "REGRESSION: a record parameter beside a promise that does not load is not a definite violation" (fun () ->
         (* The record parameter turns on [check_post]'s "a SAT model is a
