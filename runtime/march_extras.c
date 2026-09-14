@@ -1367,11 +1367,16 @@ void *march_vault_update(void *handle, void *key_val, void *f) {
          * march_http_internal.h's closure_fn_t for the same convention. */
         typedef void *(*fn1_t)(void *, void *);
         fn1_t fn  = *(fn1_t *)((char *)f + 16);
+        /* The call consumes [cur] unless it is a boxed Float
+         * (march_clo_arg_retain, march_runtime.h), so the reference
+         * march_vault_get handed us is released here only in that case. */
+        int cur_is_float = IS_HEAP_PTR(cur)
+            && ((march_hdr *)cur)->tag == MARCH_FLOAT_TAG;
         void *new_val = fn(f, cur);
         march_vault_set(handle, key_val, new_val);
         march_decrc(new_val);
+        if (cur_is_float) march_decrc(cur);
     }
-    march_decrc(cur);
     return march_alloc(16); /* Unit */
 }
 

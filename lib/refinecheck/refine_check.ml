@@ -1478,6 +1478,19 @@ let warn_qualified_call (errctx : Err.ctx) ~(span : A.span) (qname : string) : u
 let warn_predicate_expr (errctx : Err.ctx) (e : A.expr) : unit =
   let rec go (e : A.expr) =
     match e with
+    | A.EApp (A.EVar { A.txt = f; _ }, args, span)
+      when List.mem f set_vocabulary && not (set_app_well_formed f args) ->
+      (* A set-vocabulary name applied in some other shape: most likely the
+         program's own function of that name.  It is not a set operation, so
+         it translates to nothing (see [set_app_well_formed]). *)
+      Err.warning errctx ~span
+        (Printf.sprintf
+           "`%s` is set vocabulary in a refinement predicate, but this is not a well-formed \
+            set operation (`member(x, s)`, `union(a, b)`, `inter(a, b)`, `diff(a, b)`, \
+            `subset(a, b)`, `singleton(x)`, `elts(xs)`, `keys(m)`), so this refinement is \
+            not checked. A predicate cannot call a program function of that name."
+           f);
+      List.iter go args
     | A.EApp (A.EVar { A.txt = f; _ }, args, span) ->
       if not (known_predicate_fn f) then begin
         if String.contains f '.' then
@@ -2881,26 +2894,52 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
     mfns;
   (* A set-valued measure is LOGIC: it has no runtime meaning, so a call in
      expression position anywhere in the module is an error, not a value. *)
+  (* Every container of expression-position code is walked — plain `fn`
+     bodies, `impl` methods, interface default bodies, actor init/handlers,
+     top-level `let`s, `app` bodies, `describe`/`test`/`setup` blocks — the
+     same set [warn_predicate_decls] walks.  Walking only `fn` bodies let a
+     call from an `impl` method pass `--check` and then fail to link
+     (`_singleton`, `_union` undefined) under `--compile`. *)
   let rec reject_set_measure_calls (decls : A.decl list) : unit =
+    let expr (e : A.expr) =
+      iter_all
+        (fun e ->
+          match e with
+          | A.EApp (A.EVar { A.txt; A.span }, _, _) when is_set_measure txt ->
+            Err.error errctx ~span
+              (Printf.sprintf
+                 "`%s` is a set-valued @[measure]: it is meaningful only inside a \
+                  refinement predicate and cannot be called here."
+                 txt)
+          | _ -> ())
+        e
+    in
+    let fn (fd : A.fn_def) =
+      if not (List.mem "measure" fd.A.fn_attrs) then
+        List.iter
+          (fun (c : A.fn_clause) ->
+            List.iter (function A.FPDefault (_, d) -> expr d | _ -> ()) c.A.fc_params;
+            Option.iter expr c.A.fc_guard;
+            expr c.A.fc_body)
+          fd.A.fn_clauses
+    in
     List.iter
       (function
-        | A.DFn (fd, _) ->
-          List.iter
-            (fun (c : A.fn_clause) ->
-              iter_all
-                (fun e ->
-                  match e with
-                  | A.EApp (A.EVar { A.txt; A.span }, _, _)
-                    when is_set_measure txt && not (List.mem "measure" fd.A.fn_attrs) ->
-                    Err.error errctx ~span
-                      (Printf.sprintf
-                         "`%s` is a set-valued @[measure]: it is meaningful only inside a \
-                          refinement predicate and cannot be called here."
-                         txt)
-                  | _ -> ())
-                c.A.fc_body)
-            fd.A.fn_clauses
-        | A.DMod (_, _, ds, _) -> reject_set_measure_calls ds
+        | A.DFn (fd, _) -> fn fd
+        | A.DMod (_, _, ds, _) | A.DDescribe (_, ds, _) -> reject_set_measure_calls ds
+        | A.DImpl (idf, _) -> List.iter (fun (_, fd) -> fn fd) idf.A.impl_methods
+        | A.DInterface (idf, _) ->
+          List.iter (fun (m : A.method_decl) -> Option.iter expr m.A.md_default) idf.A.iface_methods
+        | A.DLet (_, b, _) -> expr b.A.bind_expr
+        | A.DActor (_, _, ad, _) ->
+          expr ad.A.actor_init;
+          List.iter (fun (h : A.actor_handler) -> expr h.A.ah_body) ad.A.actor_handlers
+        | A.DApp (app, _) ->
+          expr app.A.app_body;
+          Option.iter expr app.A.app_on_start;
+          Option.iter expr app.A.app_on_stop
+        | A.DTest (t, _) -> expr t.A.test_body
+        | A.DSetup (e, _) | A.DSetupAll (e, _) -> expr e
         | _ -> ())
       decls
   in

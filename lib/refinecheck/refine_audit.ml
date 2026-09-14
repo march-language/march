@@ -639,23 +639,23 @@ let classify (site : site) : disposition =
       (* An `@[assume]`d return refinement is ASSUMED at every call site
          ([Refine_post.check_fn_post_verdict]); it is a fact the program
          takes on faith, counted under `trusted`, and never a hole. *)
-      if Refine_post.is_assumed fd && Refine_post.assumed_return fd <> None then Enforced
+      (* [Refine_post.return_refinement_checked] is [check_fn_post_verdict]'s
+         own routing: a `{List(_) | …}` return whose predicate has no
+         `elts`/`keys` goes to Tier 2 (not the direct path), and Tier 2 checks
+         only a constructor-literal body or a match on a parameter with a
+         DECLARED ADT type — [post_induction_shape] alone accepts the
+         signature whatever the body is. *)
+      if Refine_post.return_refinement_checked fd then Enforced
       else
-      match Refine_post.return_refine_ext fd with
-      | Some _ -> Enforced
-      | None ->
-        if Refine_post.post_induction_shape fd <> None then Enforced
-        else
-          Unenforced
-            "the return refinement matches neither return_refine_ext's \
-             accepted bases (Int, Bool, Float, or a registered record) nor \
-             post_induction_shape's Tier 2 induction shape (a single clause \
-             with no guard, returning a non-record ADT with a usable \
-             predicate AND a measure already declared over that ADT -- \
-             post_induction_shape itself gates on measure_preamble_sorts, so \
-             this verdict is sensitive to --no-measure-axioms and to \
-             whether the audit's join point runs after that ADT's measure \
-             has been registered)"))
+        Unenforced
+          "the return refinement is routed to no path that checks it: it matches \
+           neither return_refine_ext's direct bases (Int, Bool, Float, String, a \
+           registered record, or a List predicate using elts/keys) nor a Tier 2 \
+           induction shape check_post_induction actually checks (a single \
+           guardless clause returning a non-record ADT with a usable predicate \
+           and a measure declared over it, whose body is a constructor literal \
+           or a match on a parameter of declared ADT type) -- sensitive to \
+           --no-measure-axioms, which empties measure_preamble_sorts"))
   | Let_annot _ -> (
     match Refine_post.refined_scope_ty (Some site.origin_ty) with
     | Some _ -> Enforced

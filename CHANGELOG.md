@@ -21,6 +21,16 @@ git log is authoritative for exact commits.
   `Array.from_list`, whose length the checker does not track. Swept first over
   the stdlib, the native and stdlib test corpora and eighteen ecosystem
   projects: no new errors. See `docs/refinement-types.md`.
+
+- **`PeerReader`: one reader per peer connection, dispatching frames by tag.**
+  There was no receive loop: every cross-node consumer read its own frames
+  off the shared connection and skipped the ones it did not recognise, so two
+  consumers stole each other's frames, and bytes read past a frame boundary
+  were dropped. `PeerReader.serve(fd, buf, on_frame)` reads each frame once,
+  reports its tag, and hands it to the caller's dispatch; leftovers carry to
+  the next frame. `test/native/peer_reader_loopback` delivers three frames for
+  two consumers from one `recv()`.
+
 - **`NodeSend`: a one-way message to an actor on another node.** Everything
   cross-node was a synchronous `NodeCall` or a monitor frame. `NodeSend.cast`
   writes an `ACTOR_MSG` frame addressed by `GlobalPid`; `NodeSend.serve_one`
@@ -209,6 +219,23 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Set refinements: six correctness fixes from review.** A module's own
+  function named like the set vocabulary (`keys`, `member`, …) used in a
+  guard is no longer read as a set operation, which had skipped the whole
+  call and hidden a real violation; a fact whose set element sorts clash is
+  dropped rather than skipping the check. A predicate that applies a set word
+  in a non-set shape (`member(xs, 3)`) warns again, and a `@[measure]` may not
+  take a set-vocabulary name. A `Set(Bool)` measure, or one whose declared
+  element type disagrees with its payload, no longer emits an ill-sorted
+  axiom that made every measure query in the module undecided. A record
+  field used as a set element (`member(v.name, …)`) now proves. Calling a
+  set-valued measure from an `impl` method, actor handler, `test` block or
+  top-level `let` is now a `--check` error instead of a link failure.
+  `--refine-audit` no longer reports a `{List(_) | len(_) > 0}` return with
+  no list measure, or a Tier 2 match on an unannotated parameter, as
+  enforced. A chain of `let`-bound `Set.insert`s now carries its membership
+  facts through every link.
+
 - **The interpreter refuses the `block_sender` mailbox policy instead of
   silently ignoring it.** `Actor.set_queue_limit(pid, n, 3)` under `march run`
   used to run unbounded, so a program relying on backpressure got none there
@@ -276,6 +303,14 @@ git log is authoritative for exact commits.
   whose state can receive every message, no longer generate an unreachable
   catch-all arm** (a "pattern can never be reached" warning that became
   visible with the change above).
+
+- **Calling a closure no longer leaks its arguments (compiled).** A function
+  value called with a fresh heap argument (`f(int_to_string(n))`, a
+  `List.filter` predicate, the per-element `show` inside `to_string` of a
+  `List(String)`) leaked that argument on every call, and an argument still in
+  use afterwards could never be freed. This covered lambdas that only read
+  their argument or ignore it, a lambda parameter typed with a record alias,
+  and a named function passed as a value.
 
 - **Closures no longer leak their environment and captured values
   (compiled).** A function that returns a closure (`fn adder(k) do fn x -> x

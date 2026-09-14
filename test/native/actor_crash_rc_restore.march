@@ -66,13 +66,17 @@ mod Main do
   fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) do
     let boss = spawn(Boss)
     let victim = current_child(boss)
+    -- Minted BEFORE the reading: pid_of_int takes a reference, and `send`
+    -- keeps the one it is handed
+    -- (specs/todos/2026-09-13-send-leaks-a-reference-to-a-live-pid.md).
+    let victim_pid = pid_of_int(victim)
     let rc_before = actor_rc(victim)
     println("victim is multiply owned: " ++ bool_to_string(rc_before > 1))
 
     -- Crash it from inside a handler (the setjmp/longjmp trap path), NOT via
     -- kill() -- kill runs the death sequence from outside the dispatch, so it
     -- never exercises the window this test is about.
-    send(pid_of_int(victim), Poison())
+    send(victim_pid, Poison())
     run_until_idle()
 
     println("rc preserved across crash: "

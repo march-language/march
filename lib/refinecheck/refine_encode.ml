@@ -898,17 +898,35 @@ let adt_ctors : (string, string list) Hashtbl.t = Hashtbl.create 16
    the measure was axiomatised: a call-site resolver must declare `m$x` at a
    set sort for such a measure even under `--no-measure-axioms`, or the symbol
    lands at `Int` and every set predicate over it is a sort conflict.
-   `Int` elements are concrete; everything else — including `String`, whose
-   constructor fields are the opaque `Elem` — is `Elem`. *)
+   `Int` and `Bool` elements are concrete, matching the sorts
+   [smt_sort_of_field] gives an `Int`/`Bool` constructor field; everything
+   else — including `String` and a type parameter, whose constructor fields
+   are the opaque `Elem` — is `Elem`.  (A measure whose declared element sort
+   still disagrees with a payload field it collects, `fv : Expr(Int) ->
+   Set(Int)` over `Var(a)`, is refused an axiom by [arm_axiom]'s sort check.) *)
 
 let set_ret_elem (fd : A.fn_def) : Smt.sort option =
   let rec go = function
     | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> go b
     | A.TyCon ({ A.txt = "Set"; _ }, [ A.TyCon ({ A.txt = "Int"; _ }, []) ]) -> Some Smt.SInt
+    | A.TyCon ({ A.txt = "Set"; _ }, [ A.TyCon ({ A.txt = "Bool"; _ }, []) ]) -> Some Smt.SBool
     | A.TyCon ({ A.txt = "Set"; _ }, [ _ ]) -> Some (Smt.SData "Elem")
     | _ -> None
   in
   match fd.A.fn_ret_ty with Some t -> go t | None -> None
+
+(* The declared sort of field selector [f], named `<Ctor>_<idx>` (see
+   [ctor_decl]); [None] when [f] is not a registered constructor's selector. *)
+let selector_field_sort (f : string) : Smt.sort option =
+  match String.rindex_opt f '_' with
+  | None -> None
+  | Some i ->
+    let ctor = String.sub f 0 i and idx = String.sub f (i + 1) (String.length f - i - 1) in
+    if idx = "" || not (String.for_all (fun c -> c >= '0' && c <= '9') idx) then None
+    else
+      match Hashtbl.find_opt ctor_field_sorts ctor with
+      | Some sorts -> (match int_of_string_opt idx with Some n -> List.nth_opt sorts n | None -> None)
+      | None -> None
 
 (* Replace the placeholder element sort throughout a term with [elem] — for
    measure AXIOMS, whose element sort is fixed by the declaration and which
@@ -956,7 +974,7 @@ let measure_preamble_set_sorts : (Smt.sort, unit) Hashtbl.t = Hashtbl.create 4
    allocates one class per `SetEmpty`/`SetSng` node and unifies, the second
    rewrites each node's sort from its class.  Set-typed CONSTANTS are keyed by
    name so the goal and every assumption agree on one class per symbol. *)
-let resolve_set_sorts (decls : (string * Smt.sort) list) (goal : Smt.term)
+let resolve_set_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
     (assumptions : Smt.term list)
     : ((string * Smt.sort) list * Smt.term * Smt.term list) option =
   let parent : (int, int) Hashtbl.t = Hashtbl.create 16 in
@@ -999,6 +1017,9 @@ let resolve_set_sorts (decls : (string * Smt.sort) list) (goal : Smt.term)
     | Smt.FloatLit _ -> Some Smt.SFloat
     | Smt.Const c -> (match sort_of c with Some (Smt.SSet _) -> None | s -> s)
     | Smt.App (f, _) when Hashtbl.mem ctor_field_sorts f || Hashtbl.mem set_measure_elem f -> None
+    (* A field selector (`(User_0 r)`) is at its field's declared sort — a
+       `String` field is the opaque `Elem`, not `Int`. *)
+    | Smt.App (f, [ _ ]) when selector_field_sort f <> None -> selector_field_sort f
     | Smt.App _ -> Some Smt.SInt
     | _ -> None
   in
@@ -1117,6 +1138,34 @@ let resolve_set_sorts (decls : (string * Smt.sort) list) (goal : Smt.term)
     Some (decls', goal', assumptions')
   end
 
+(* [resolve_set_sorts_exact], forgiving ASSUMPTIONS.  A contradiction that
+   only an assumption brings in (a guard over a program function whose name
+   happens to be set vocabulary, or any fact whose sorts disagree with the
+   goal's) used to skip the whole VC as a sort conflict, hiding a definite
+   violation.  An assumption is only ever a hypothesis, and dropping one makes
+   BOTH discharges harder — it can turn a report into a skip, never a skip
+   into a report the full hypothesis set would not also give — so the
+   assumptions are re-admitted one at a time, in order, keeping each one that
+   leaves the sorts consistent.  Only a conflict inside the GOAL itself is
+   still a [None].  The fallback runs only on a conflict, so a clean VC pays
+   one pass as before. *)
+let resolve_set_sorts (decls : (string * Smt.sort) list) (goal : Smt.term)
+    (assumptions : Smt.term list)
+    : ((string * Smt.sort) list * Smt.term * Smt.term list) option =
+  match resolve_set_sorts_exact decls goal assumptions with
+  | Some r -> Some r
+  | None ->
+    if resolve_set_sorts_exact decls goal [] = None then None
+    else
+      let kept =
+        List.fold_left
+          (fun kept a ->
+            let cand = kept @ [ a ] in
+            if resolve_set_sorts_exact decls goal cand <> None then cand else kept)
+          [] assumptions
+      in
+      resolve_set_sorts_exact decls goal kept
+
 (* Every element sort a (resolved) VC's sets range over. *)
 let vc_set_elem_sorts (vc : Smt.vc) : Smt.sort list =
   let acc = ref [] in
@@ -1201,6 +1250,31 @@ let ctor_of_tester (m : string) : string option =
 let known_predicate_fn (m : string) : bool =
   is_predicate_operator m || is_measure_app m || ctor_of_tester m <> None
   || is_const_fn m
+
+(* ── Set vocabulary: reserved names, and the well-formed application ──────
+   Every name the set feature gives meaning to in a predicate.  A `@[measure]`
+   may not take one ([measure_shape_error]): `is_measure` answers true for
+   `elts`/`keys` unconditionally, so a user measure of that name was folded
+   into the built-in meaning and rendered over an array constant. *)
+let set_vocabulary = builtin_set_measures @ set_operators @ [ "empty" ]
+
+(* Is `f(args)` a well-formed set-vocabulary application?  The vocabulary is
+   keyed on a NAME, and a predicate that calls a program function of the same
+   name with some other shape (`member(xs, 3)` for a list helper
+   `member(xs, x)`) is not a set operation at all — it translates to nothing
+   and the refinement enforces nothing, which is exactly what the predicate
+   vocabulary warning exists to say.  A set operand is anything set-shaped
+   ([is_set_shaped]) or the bare literal `empty`. *)
+let set_app_well_formed (f : string) (args : A.expr list) : bool =
+  let set_operand (x : A.expr) =
+    match x with A.EVar { A.txt = "empty"; _ } -> true | _ -> is_set_shaped x
+  in
+  match f, args with
+  | ("elts" | "keys"), [ _ ] -> true
+  | "singleton", [ _ ] -> true
+  | "member", [ _; st ] -> set_operand st
+  | ("union" | "inter" | "diff" | "subset"), [ a; b ] -> set_operand a && set_operand b
+  | _ -> false
 
 (* measures we soundly axiomatize: name -> its argument ADT name. *)
 let axiom_measures : (string, string) Hashtbl.t = Hashtbl.create 16
@@ -1582,6 +1656,14 @@ let register_const_fns ~(mod_name : string) (decls : A.decl list) : unit =
    one. *)
 let measure_shape_error (fd : A.fn_def) : string option =
   let name = fd.A.fn_name.A.txt in
+  if List.mem name set_vocabulary then
+    Some
+      (Printf.sprintf
+         "uses the name `%s`, which is reserved set vocabulary inside a refinement predicate \
+          (`elts`, `keys`, `member`, `union`, `inter`, `diff`, `subset`, `singleton`, \
+          `empty`). Rename the measure."
+         name)
+  else
   match fd.A.fn_clauses with
   | [] -> None
   | c :: _ -> (
@@ -1726,6 +1808,26 @@ let datatype_decls (adts : string list) : string =
     in
     Printf.sprintf "(declare-datatypes (%s) (%s))" sort_decls bodies
 
+(* The sort of a translated measure-arm body ([smt_of_axiom_body]'s output),
+   with pattern variables at their constructor-field sorts [env]; [None] when
+   the term is ill-sorted.  A measure application is taken at its declared
+   result sort. *)
+let rec axiom_body_sort (env : (string * Smt.sort) list) (t : Smt.term) : Smt.sort option =
+  let go = axiom_body_sort env in
+  let int2 a b = if go a = Some Smt.SInt && go b = Some Smt.SInt then Some Smt.SInt else None in
+  let set2 a b = match go a, go b with Some (Smt.SSet e), Some (Smt.SSet e') when e = e' -> Some (Smt.SSet e) | _ -> None in
+  match t with
+  | Smt.IntLit _ -> Some Smt.SInt
+  | Smt.Const v -> List.assoc_opt v env
+  | Smt.Add (a, b) | Smt.Sub (a, b) -> int2 a b
+  | Smt.MulLit (_, a) -> if go a = Some Smt.SInt then Some Smt.SInt else None
+  | Smt.App (m, _) ->
+    Some (match Hashtbl.find_opt set_measure_elem m with Some e -> Smt.SSet e | None -> Smt.SInt)
+  | Smt.SetEmpty e -> Some (Smt.SSet e)
+  | Smt.SetSng (e, x) -> if go x = Some e then Some (Smt.SSet e) else None
+  | Smt.SetUnion (a, b) | Smt.SetInter (a, b) | Smt.SetDiff (a, b) -> set2 a b
+  | _ -> None
+
 (* The recursion-equation axiom for one arm of [name] (None if untranslatable). *)
 let arm_axiom ~allowed (name : string) ((ctor, vars, body) : string * string list * A.expr) : string option =
   match smt_of_axiom_body ~self:name ~allowed vars body with
@@ -1747,6 +1849,16 @@ let arm_axiom ~allowed (name : string) ((ctor, vars, body) : string * string lis
     in
     let sorts = try Hashtbl.find ctor_field_sorts ctor with Not_found -> [] in
     if List.length vars <> List.length sorts then None
+    (* The axiom joins the module-wide measure preamble, so one ill-sorted
+       equation makes EVERY measure-using query in the module a z3 error (and
+       a silent solver-undecided skip).  Refuse the arm — and with it the
+       measure's axiomatisation — unless the body's sort is the measure's
+       declared one and every set element agrees with its set. *)
+    else if axiom_body_sort (List.combine vars sorts) bsmt
+            <> Some (match Hashtbl.find_opt set_measure_elem name with
+                     | Some e -> Smt.SSet e
+                     | None -> Smt.SInt)
+    then None
     else
       let lhs =
         if vars = [] then Printf.sprintf "(%s %s)" name ctor

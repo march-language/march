@@ -14,8 +14,7 @@ typedef struct { int64_t rc; int32_t tag; int32_t pad; } march_hdr;
 /* ── What the header pad word means ───────────────────────────────────
  *
  * `pad` is multiplexed, decided by SIGN and by tag:
- *   > 0   record shape id (march_record_shape_intern, tag 0 cells), the
- *         closure flag bits (MARCH_CLO_ARG0_BORROWED, "$Clo_" cells), or the
+ *   > 0   record shape id (march_record_shape_intern, tag 0 cells), or the
  *         SIMD lane kind (under MARCH_SIMD_TAG).
  *   == 0  nothing known.  march_alloc zeroes it, and every cell the C runtime
  *         builds itself (make_cons & friends, the message copier's strings,
@@ -174,29 +173,6 @@ void   *march_alloc_float(double v);
 /* Read the double out of a boxed Float. Undefined if [p] is not a float box. */
 double  march_unbox_float(void *p);
 
-/* ── Closure header flags (march_hdr.pad of a "$Clo_..." object) ──────────
- *
- * A closure's pad word is otherwise unused (tag is 0, the shape-id and
- * SIMD-kind uses of pad below are per-tag and never apply to a closure), so
- * the compiler uses it to hand the runtime ONE fact about the function the
- * closure dispatches to, which no dynamic test can recover:
- *
- *   MARCH_CLO_ARG0_BORROWED — the callee neither consumes nor retains its
- *   FIRST USER argument.  `fn (acc, x) -> int_to_string(len(acc) + x)` sets
- *   it; `fn (acc, x) -> Cons(x, acc)` and `fn (acc, _) -> acc` do not,
- *   because those store / hand back the caller's reference.
- *
- * The fold helpers in march_runtime.c need it to decide whether they still
- * own the accumulator they passed to call_closure_2 — see the comment on
- * fold_release_prev_acc there, and lib/tir/clo_flags.ml for the emission
- * side and the argument that a missing flag is always the SAFE direction
- * (it degrades to the pre-existing leak, never to a double free).
- *
- * march_alloc zeroes the header, so any closure built by a path that does
- * not stamp — the cross-heap message copier, hot reload, C-built cells —
- * reads back as "nothing known". */
-#define MARCH_CLO_ARG0_BORROWED ((int32_t)1)
-
 /* 128-bit SIMD vector box: march_hdr(16) + 16-byte payload = 32 bytes,
  * payload 16-aligned. kind lives in the hdr pad slot (byte offset 12):
  * 0=f32x4 1=f64x2 2=i32x4 3=i64x2 4=u8x16. Leaf cell — no interior
@@ -297,6 +273,19 @@ void    march_timer_cancel(void *tok);
  *      lower canonical half (bit 47 clear on x86-64, bit 48 on AArch64). */
 #define IS_HEAP_PTR(p) \
     (((uintptr_t)(p) & 1u) == 0 && (uintptr_t)(p) >= 4096u && (intptr_t)(p) > 0)
+
+/* ── The closure-call convention, from C ──────────────────────────────────
+ *
+ * Calling a March closure CONSUMES each heap argument, except a boxed Float
+ * (the callee unboxes it in its prologue and never releases the box). Every
+ * compiled caller follows that, and so must the runtime: a helper passing a
+ * value it keeps using, or that something else owns (an array element, the
+ * previous accumulator it still needs), hands the callee its own reference
+ * first. See lib/tir/clo_flags.ml for the compiler side. */
+static inline void march_clo_arg_retain(void *arg) {
+    if (IS_HEAP_PTR(arg) && ((march_hdr *)arg)->tag != MARCH_FLOAT_TAG)
+        march_incrc(arg);
+}
 
 /* Moved here from march_runtime.c: the inline-string encoding below is safe
  * only BECAUSE of this predicate's exact definition — an inline string sets the

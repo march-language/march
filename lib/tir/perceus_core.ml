@@ -863,18 +863,15 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
     (e'', lb)
 
   | Tir.ECallPtr (a, args) ->
-    (* Conservative borrow treatment (audit P5): we have no borrow map for
-       the indirect callee, so every arg is treated as owning.  For args
-       still live after the call, [find_inc_vars] inserts an EIncRC so the
-       callee's consumed reference is balanced against the caller's retained
-       one.  For dead-after args, no IncRC is emitted — the caller's
-       reference transfers to the callee, which is expected to decrement it
-       (the closure-apply ABI used for ECallPtr always consumes args).
-       The perf cost is extra Inc/Dec pairs around higher-order calls whose
-       underlying apply function actually borrows.  A full fix would require
-       attaching per-call-site borrow modes to closures at EAlloc time and
-       plumbing them through the call dispatch — a sizeable architectural
-       change deferred beyond this audit pass. *)
+    (* A closure call consumes its arguments (see [Clo_flags] for the whole
+       convention).  For args still live after the call, [find_inc_vars]
+       inserts an EIncRC so the callee's consumed reference is balanced
+       against the caller's retained one.  For dead-after args, no IncRC is
+       emitted — the caller's reference transfers to the callee.  The callee
+       side is what makes that true: [Borrow.infer_module] pins every apply-fn
+       parameter owned, and a [$clo_wrap] releases what its target borrows.
+       Before both, a read-only parameter stayed borrowed and a fresh argument
+       leaked once per call. *)
     let all_atoms = a :: args in
     let inc_vars = find_inc_vars env all_atoms live_after in
     let e' = wrap_incrcs env inc_vars e in
