@@ -411,7 +411,24 @@ let callback_param_name = "$cb_arg"
    out of scope and calling one fails typecheck anyway. *)
 let callback_sig_of_ty (t : A.ty) : fn_sig option =
   match t with
-  | A.TyArrow (dom, _) ->
+  | A.TyArrow (dom, cod) ->
+    (* The CODOMAIN's refinement is the callback's postcondition (P3 design
+       §1b): `let y = f(x)` inside `apply(f : Int -> {Int | _ > 0})` may learn
+       `y > 0`, because every callable passed for `f` was obliged at the pass
+       site to return a value satisfying it (§1c).  Extracted through the
+       same arms a named function's return uses, on a stand-in definition. *)
+    let ret, ret_sort =
+      match cod with
+      | A.TyRefine _ ->
+        let stand_in =
+          { A.fn_name = { A.txt = callback_param_name; A.span = A.dummy_span }; fn_vis = A.Private
+          ; fn_doc = None; fn_attrs = []; fn_ret_ty = Some cod; fn_clauses = []; fn_bounds = [] }
+        in
+        (match return_refine_sorted stand_in with
+         | Some (b, p, srt) -> (Some (b, p), srt)
+         | None -> (None, None))
+      | _ -> (None, None)
+    in
     (match refined_param_ty (Some dom) with
      | Some (binder, pred, sort) ->
        Some
@@ -420,8 +437,22 @@ let callback_sig_of_ty (t : A.ty) : fn_sig option =
          ; param_scalar = [ scalar_sort_or_int sort ]
          ; param_tys = [ Some dom ]
          ; refined = [ { idx = 0; binder; pred; sort } ]
-         ; ret = None
-         ; ret_sort = None
+         ; ret
+         ; ret_sort
+         ; ret_ty = Some cod
+         }
+     | None when ret <> None ->
+       (* An unrefined domain with a refined codomain still carries a
+          contract: no call through it is obliged, but its RESULT is known. *)
+       Some
+         { param_names = [ callback_param_name ]
+         ; param_str = [ false ]
+         ; param_scalar = [ Smt.SInt ]
+         ; param_tys = [ Some dom ]
+         ; refined = []
+         ; ret
+         ; ret_sort
+         ; ret_ty = Some cod
          }
      | None -> None)
   | _ -> None
@@ -896,15 +927,48 @@ let cb_add_fnparam (cb : cbenv) : A.fn_param -> cbenv = function
    the two whose constructors the checker's ADT registry already knows
    ([register_builtin_adts]); a refinement inside any other type argument
    is still unenforced and the audit still says so. *)
-type contenv = (string * (string * (string * A.expr * string option))) list
+(* One SLOT per type parameter of the container: the element refinement at
+   that parameter, a nested container carrying its own slots
+   (`List(List({Int | p}))`, P3 design §2b), or nothing.  A container entry
+   is the container's bare type name plus its slots; [elem_refinement]
+   returns one only when some slot is non-empty. *)
+type elem = Refined of (string * A.expr * string option) | Container of string * elem option list
+
+type contenv = (string * (string * elem option list)) list
 
 let cont_shadow (ce : contenv) (names : string list) : contenv =
   if names = [] then ce else List.filter (fun (n, _) -> not (List.mem n names)) ce
 
-let elem_refinement (t : A.ty option) : (string * (string * A.expr * string option)) option =
+(* A registered container: any ADT whose constructors' field roles are known
+   ([ctor_param_fields]) — the builtins `List` / `Option`
+   / `Result`, every user variant type, and every stdlib type defined as one
+   (`Map` is, so under the driver it is modelled too; its values come from
+   calls, so they flow as recorded skips or through the parametric rule).
+   A tuple, an arrow, or a type this module never registered is not. *)
+let is_container_type (name : string) : bool =
+  match Hashtbl.find_opt adt_ctors (adt_sort_name name) with
+  | Some ctors -> ctors <> [] && List.for_all (Hashtbl.mem ctor_param_fields) ctors
+  | None -> false
+
+let rec elem_refinement (t : A.ty option) : (string * elem option list) option =
   match Option.map unlinear t with
-  | Some (A.TyCon ({ A.txt = ("List" | "Option") as c; _ }, [ arg ])) ->
-    (match refined_param_ty (Some arg) with Some r -> Some (c, r) | None -> None)
+  (* A refinement on the CONTAINER itself (`{List({Int | p}) | len(_) > 0}`)
+     is a fact about the container, carried by [scope]; the element slots are
+     those of its base. *)
+  | Some (A.TyRefine (base, _, _)) -> elem_refinement (Some base)
+  | Some (A.TyCon ({ A.txt = c; _ }, args)) when args <> [] && is_container_type c ->
+    let slots =
+      List.map
+        (fun arg ->
+          match refined_param_ty (Some arg) with
+          | Some r -> Some (Refined r)
+          | None ->
+            (match elem_refinement (Some arg) with
+             | Some (c', slots') -> Some (Container (c', slots'))
+             | None -> None))
+        args
+    in
+    if List.exists Option.is_some slots then Some (c, slots) else None
   | _ -> None
 
 let cont_add_param (ce : contenv) (p : A.param) : contenv =
@@ -946,7 +1010,8 @@ let elem_sig ~(name : string) ((binder, pred, sort) : string * A.expr * string o
   ; param_tys = [ None ]
   ; refined = [ { idx = 0; binder; pred; sort } ]
   ; ret = None
-  ; ret_sort = None }
+  ; ret_sort = None
+  ; ret_ty = None }
 
 (* The SMT sort of a declared type when it names a registered record — through
    a refinement wrapper too, so `c : {v : Config | …}` is tracked as well (its
@@ -1143,7 +1208,8 @@ let sig_of_clause (c : A.fn_clause) : fn_sig =
            | A.FPPat _ -> None)
   in
   let param_tys = List.map param_ty_of c.A.fc_params in
-  { param_names; param_str; param_scalar; param_tys; refined; ret = None; ret_sort = None }
+  { param_names; param_str; param_scalar; param_tys; refined; ret = None; ret_sort = None
+  ; ret_ty = None }
 
 (* Every function definition keyed by its fully-qualified name (e.g. "A.B.foo"),
    mapping to Some sig when it carries a refinement, None when it does not.
@@ -1157,11 +1223,11 @@ let sig_of_fn (fd : A.fn_def) : fn_sig =
     | c :: _ -> sig_of_clause c
     | [] ->
       { param_names = []; param_str = []; param_scalar = []; param_tys = []; refined = []
-      ; ret = None; ret_sort = None }
+      ; ret = None; ret_sort = None; ret_ty = None }
   in
   match return_refine_sorted fd with
-  | Some (b, p, srt) -> { base with ret = Some (b, p); ret_sort = srt }
-  | None -> { base with ret = None; ret_sort = None }
+  | Some (b, p, srt) -> { base with ret = Some (b, p); ret_sort = srt; ret_ty = fd.A.fn_ret_ty }
+  | None -> { base with ret = None; ret_sort = None; ret_ty = fd.A.fn_ret_ty }
 
 (* A block-level `fn n(ps) : ret do body end` ([A.ELetFn]) as the [A.fn_def]
    every piece of function-level machinery consumes — [sig_of_fn] for its
@@ -1196,10 +1262,17 @@ let has_elem_param (sg : fn_sig) : bool =
    every consumer that iterates it does nothing), but the pass-site check in
    [Refine_check.visit] needs the arrow's domain to oblige whoever passes a
    refined callable there — see [fn_sig.param_tys]. *)
+(* Every definition keeps its signature since 2026-09-13 (P3 design §2c):
+   `List.head : List(a) -> Option(a)` carries no refinement, arrow or element
+   contract of its own, yet its DECLARED types are what lets a container's
+   element refinement flow through it ([Refine_check]'s block walk).  Every
+   consumer iterates [refined] (empty here) or reads [ret] ([None] here), so
+   an unrefined signature obliges and assumes nothing; the resolution result
+   `Some None` ("a real but unrefined callee") is thereby retired in favour
+   of `Some (Some sg)` with nothing in it. *)
 let entry_of_sig (sg : fn_sig) : fn_sig option =
-  if sg.refined <> [] || Option.is_some sg.ret || has_arrow_param sg || has_elem_param sg
-  then Some sg
-  else None
+  ignore (has_arrow_param, has_elem_param);
+  Some sg
 
 (* ── Which `impl` method contracts may be trusted ──────────────────────────
    An `impl` method is callable under the enclosing module's spelling exactly

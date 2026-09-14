@@ -13,6 +13,28 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Container subtyping covers every registered ADT, two layers deep, and
+  polymorphic calls.** Element refinements are now contracts for `Result`,
+  user variant types (`Node(Leaf, 0, Leaf)` under `Tree({Int | _ > 0})` is
+  rejected, and a `match` on it knows the element fact), and any stdlib type
+  defined as a variant; for two layers of nesting (`[[1], [0]]` under
+  `List(List({Int | _ > 0}))` is rejected); and through a polymorphic call's
+  declared signature (`let h = first(xs)` with `first : List(a) -> Option(a)`
+  carries `xs`'s element refinement to `h`; `let x = List.head(xs)` gives
+  `x` the refinement itself). The pass-through refuses any callee that could
+  manufacture an element (`put(xs : List(a), v : a)`). A tuple element or an
+  arrow inside a container remains unenforced.
+
+- **A callback's codomain refinement is a contract.** `fn apply(f : Int ->
+  {Int | _ > 0}, x : Int)` now knows `f(x) > 0` inside `apply`, and every
+  function passed for `f` must return a value satisfying it: a named function
+  through its own proved return refinement (`_ >= 0` does not imply `_ > 0`
+  and is refuted), an inline lambda through its body (`apply(fn n -> 0, 1)` is
+  rejected), and a function with no return refinement as a recorded skip. A
+  local `fn`'s or `let`-bound lambda's proved return refinement now reaches
+  its callers the same way. `--refine-audit` reports a single-argument
+  callback's domain and codomain at a parameter as Enforced.
+
 - **`@[endpoints]` also generates an event-shaped API, so a session endpoint
   can live in an actor's state.** Beside the callback-shaped `recv_*`/`offer_*`,
   every role module now has `Parked_<Role>` (an `always_linear` "awaiting a
@@ -141,6 +163,31 @@ git log is authoritative for exact commits.
   nothing when unset.
 
 ### Fixed
+
+- **A `@[measure]` whose value is a scalar constructor field is no longer
+  inert.** Call-site reflection erased every scalar constructor field to an
+  unknown, so a measure like `Array.length` (which reads `PVec`'s count)
+  proved nothing anywhere. A literal's field now reflects concretely
+  (`get(Box(3, 0), 5)` against `_ < size(b)` is refuted; `1` proves), and on
+  an opaque value a guard over the measure (`if i < size(b)`) decides the
+  contract. The measure-definition warning says exactly this instead of
+  "never proved or refuted".
+
+- **`--refine-audit` no longer reports a callback's domain refinement as
+  unenforced.** `fn apply(f : ({Int | _ > 0}) -> Int, x : Int)` has been
+  enforced for some time (a call `f(x)` inside `apply` is checked, and passing
+  a function to `apply` is checked where it is passed); the audit's nesting
+  rule fired first and called the site unenforced anyway. It now reports
+  Enforced for a single-argument arrow at a function or lambda parameter, and
+  says precisely what is not modelled (a tupled or curried domain, an arrow
+  at a `let` annotation, field, or return) otherwise.
+
+- **A skipped obligation blames the right thing when a sibling argument is
+  opaque.** `at(i, lane(4))` against `i : {Int | _ < n}` used to report
+  `unreflectable-predicate: the predicate's n has no SMT translation`; the
+  predicate is fine, and what failed to reflect was `lane(4)`, the argument
+  passed for `n`. It now reports an unreflectable *subject* naming that
+  argument. Diagnostic only; no verdict changes.
 
 - **Diagnostics inside generated code are reported.** An error or warning
   the typechecker raised inside a `derive` expansion or an `@[endpoints]`

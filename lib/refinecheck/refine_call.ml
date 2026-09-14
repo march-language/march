@@ -602,6 +602,13 @@ type check_subject =
      other constraint, so a model is a real element the caller may hold.
      Container subtyping, 2026-09-13. *)
   | Element_domain
+  (* A callable passed where an arrow with a refined CODOMAIN is expected
+     (`apply(pos_fn, 1)` with `apply(f : Int -> {Int | _ > 0})`): the
+     callable's own proved return refinement must imply the expected
+     codomain for every value, on a fresh symbolic result `$r` whose only
+     constraint is that return refinement — the same definite-failure rule.
+     P3 design §1c, 2026-09-13. *)
+  | Callback_codomain
 
 (* Span of an expression, for pointing a diagnostic at ONE argument instead of
    the whole call. [refinecheck] does not depend on [march_typecheck], so this
@@ -676,6 +683,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
     | Bound_expr -> "bound expression"
     | Callback_domain -> "expected function type's domain"
     | Element_domain -> "container's elements"
+    | Callback_codomain -> "passed function's return"
   in
   let obligation_noun =
     match subject with
@@ -683,6 +691,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
     | Bound_expr -> "type annotation"
     | Callback_domain -> "its parameter refinement"
     | Element_domain -> "the expected element refinement"
+    | Callback_codomain -> "the expected codomain refinement"
   in
   let name_pos = List.mapi (fun i n -> (n, i)) sg.param_names in
   (* A CALLER-scope name whose declared type is a record (see [recenv]).  Such a
@@ -807,7 +816,12 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
              "note: refine the container's declared element type so it implies \
               the expected element refinement, build the container from \
               elements the checker can see, or remove `cap verified` from this \
-              module — it asks for every obligation to be discharged")
+              module — it asks for every obligation to be discharged"
+           | Callback_codomain ->
+             "note: declare (and prove) a return refinement on the passed function \
+              that implies the expected codomain, weaken the expected codomain, or \
+              remove `cap verified` from this module — it asks for every obligation \
+              to be discharged")
       in
       Err.error errctx ~span
         (Printf.sprintf
@@ -1664,8 +1678,28 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
       | _ -> None
     and reflect_field a = function
       | Smt.SData sub when sub <> "Elem" -> reflect_dt sub a
+      | (Smt.SInt | Smt.SBool | Smt.SFloat) as sort
+        when (match absorb (reflect_scalar ~postcond ~sort sc a) with
+              | Some _ -> true
+              | None -> false) ->
+        (* A SCALAR field whose actual the ordinary scalar reflection can
+           place — a literal, a refined local, arithmetic over those — is
+           reflected CONCRETELY (P3 design §4a).  Until 2026-09-13 every
+           scalar field was erased to a fresh `_eN`, which is right for an
+           opaque value (the arm below) and wrong for `PVec(3, …)`: a measure
+           whose value IS that field (`Array.length`) then yielded `_e3`, and
+           every bounds obligation over it was solver-undecided
+           (specs/todos/2026-08-05-measure-over-scalar-ctor-field.md).
+           [term_fits_sort] already admits a scalar term at a scalar field,
+           so the datatype term stays well-sorted.  The reflection ran once
+           in the guard; run it again for the term — [reflect_scalar] is
+           pure apart from the decls/assumptions [absorb] just pushed, and
+           pushing them twice is a duplicate [decls] entry the de-duplication
+           below removes and a repeated assumption, both harmless. *)
+        absorb (reflect_scalar ~postcond ~sort sc a)
       | sort ->
-        (* element / Int field: irrelevant to a structural measure -> fresh const *)
+        (* element field, or an opaque scalar: irrelevant to a structural
+           measure, and unknowable for a value-carrying one -> fresh const *)
         incr dt_counter;
         let nm = Printf.sprintf "_e%d" !dt_counter in
         decls := (nm, sort) :: !decls;
@@ -2089,12 +2123,54 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
            in
            Printf.sprintf "the argument passed for `%s`" pname
        in
+       (* A SIBLING parameter's actual failing to reflect is the subject's
+          fault too, not the predicate's: `at(i, lane(4))` against `i : {Int |
+          _ < n}` reflects `i` fine and then fails on `n`, whose actual is
+          the opaque call.  [resolve_var] memoises that failure under the
+          sibling's own name (`Some None`), so read it back rather than
+          blame `_ < n` for "having no SMT translation" — the predicate is
+          entirely inside the fragment.  Only entries keyed by one of the
+          callee's OTHER parameter names count; `"$path$…"` keys are path
+          facts the translator already dropped by design, and a present
+          `Some (Some _)` entry reflected fine (specs/2026-09-13-refinement-
+          p3-designs.md §3; specs/todos/2026-09-03-sibling-parameter-…). *)
+       let sibling_failures =
+         List.filter_map
+           (fun (pname, i) ->
+             if i = rp.idx || pname = "" then None
+             else
+               match Hashtbl.find_opt reflect_cache pname with
+               | Some None -> Some (pname, i)
+               | _ -> None)
+           name_pos
+       in
+       let sibling_display =
+         match sibling_failures with
+         | [] -> ""
+         | (pname, i) :: rest ->
+           let actual =
+             match List.nth_opt args i with
+             | Some a when pred_str a <> "<predicate>" -> Printf.sprintf " (`%s`)" (pred_str a)
+             | _ -> ""
+           in
+           let more =
+             match List.length rest with
+             | 0 -> ""
+             | 1 -> " (and one more parameter's argument)"
+             | n -> Printf.sprintf " (and %d more parameters' arguments)" n
+           in
+           Printf.sprintf
+             "the argument passed for `%s`%s, which the predicate `%s` depends on%s"
+             pname actual (pred_str rp.pred) more
+       in
        note
          (Obligation.Skipped
             (match mode with
              | `Skip -> Obligation.Unreflectable_subject self_display
              | `Other when self_reflection_failed ->
                Obligation.Unreflectable_subject self_display
+             | `Other when sibling_failures <> [] ->
+               Obligation.Unreflectable_subject sibling_display
              | `Other | `Record _ ->
                Obligation.Unreflectable_predicate
                  (pred_str (Option.value !pred_fail_expr ~default:rp.pred))))
@@ -2214,7 +2290,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
              holds, which is always. *)
           let definite =
             match subject, first with
-            | (Callback_domain | Element_domain), Refine.Refuted _ -> true
+            | (Callback_domain | Element_domain | Callback_codomain), Refine.Refuted _ -> true
             | _ -> false
           in
           (match
@@ -2239,6 +2315,8 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                    "the expected function type's domain, where `%s` is passed," callee
                | Element_domain, _ ->
                  Printf.sprintf "an element of the container passed as `%s`" callee
+               | Callback_codomain, _ ->
+                 Printf.sprintf "the return of `%s`, passed where a refined codomain is expected," callee
              in
              (* Point at the offending argument itself. The call span covers the
                 whole expression, which on a multi-argument call underlines
@@ -2302,6 +2380,12 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                         "note: a container flows into a position expecting `%s` of every \
                          element only if its own element refinement implies it — refine \
                          the container's declared element type, or weaken the expected one"
+                        (pred_str rp.pred)
+                    | Callback_codomain ->
+                      Printf.sprintf
+                        "note: a function is passed where its result must satisfy `%s` only \
+                         if its own proved return refinement implies that — declare and \
+                         prove one on the passed function, or weaken the expected codomain"
                         (pred_str rp.pred));
                  labels; notes = []; code = None; fix = None }
            | _ ->

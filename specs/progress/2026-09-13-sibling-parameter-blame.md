@@ -88,3 +88,23 @@ case as its own `Unenforced` position; it is filed as
 `unreflectable-predicate` under `--refine-report`, not as an audit site.
 Listed here only so a reader scanning `specs/todos/` for known refinement
 gaps finds it alongside the audit's own todos.
+
+## Design (2026-09-13)
+
+`specs/2026-09-13-refinement-p3-designs.md` §3: the full design, soundness
+argument, test list and effort estimate for this item.
+
+## Landed 2026-09-13 (P3 design §3)
+
+`check_call`'s `None` arm now attributes three ways, in order: the self
+binder's memo entry (as before), then any OTHER parameter name whose
+`reflect_cache` entry is `Some None` — filed as `Unreflectable_subject`
+naming that parameter's actual ("the argument passed for `n` (`lane(4)`),
+which the predicate `_ < n` depends on"; several siblings name the first
+in parameter order and count the rest) — then the predicate leaf.
+`"$path$…"` keys and `Some (Some _)` entries are ignored, so a dropped path
+fact is never blamed as a subject. Diagnostic-only: the verdict stays
+`Skipped`; the slug moves from `unreflectable-predicate` to
+`unreflectable-subject` for exactly these obligations. Tests:
+`test/test_refinecheck.ml`, group `sibling-blame` (the `f6` fixture, the
+genuine-leaf control, and a two-sibling case).

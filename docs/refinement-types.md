@@ -1125,10 +1125,9 @@ regenerated the same way the TIR golden snapshots are
 (`UPDATE_SNAPSHOTS=1 ./_build/default/test/test_refinecheck.exe -e`). It
 being empty is a true fact about today's corpus, not evidence the audit does
 nothing: `test/refine_audit/holes/` is a second, deliberately non-empty
-fixture set built from known holes (a refinement in an arrow's domain; a
-fixture leaves the set once its position is enforced, as ten of them did on
-2026-09-13, the type-argument one last, when container subtyping landed),
-pinned at
+fixture set built from known holes (a refinement on a tuple element; a
+fixture leaves the set once its position is enforced, as twelve of them did
+on 2026-09-13, the two-layer container one last), pinned at
 `test/refine_audit/holes.baseline`. If
 that second baseline ever reported zero Unenforced sites, the audit itself
 would be broken, not the corpus; the test that diffs it fails loudly with
@@ -1178,17 +1177,22 @@ above happens to exercise:
   record-typed variable assumes it. A `linear` wrapper is transparent.
   Program-wide, two constructors (or a constructor and an actor message)
   sharing a name withdraw the contract, neither obliged nor assumed.
-- (Closed 2026-09-13 for `List` and `Option`.) A refinement inside a type
-  argument, `List({Int | _ > 0})` / `Option({Int | _ > 0})`, is a contract on
+- (Closed 2026-09-13.) A refinement inside a registered container's type
+  argument — `List`, `Option`, `Result`, a user variant such as `Tree({Int |
+  _ > 0})`, any stdlib type defined as one, and nested containers
+  (`List(List({Int | _ > 0}))`) — is a contract on
   every value flowing into the position — a literal element-wise, a
   container-typed variable by element implication (its own element
   refinement must imply the expected one, refuted with a witness element
   otherwise), anything else a recorded skip — at a parameter, a return, an
   annotated `let`, or a field; and a fact about every element a `match`
-  takes out (`Cons(h, t)`, `Some(x)`). Still unenforced: other containers'
-  type arguments, two layers of nesting, an arrow side, a tuple element, a
-  second layer of a stacked refinement, and elements reached through a
-  stdlib function rather than a `match`. A refinement one layer down at a
+  takes out (`Cons(h, t)`, `Some(x)`, `Node(_, x, right)`); a polymorphic
+  call carries it through its declared signature (`let h = first(xs)` with
+  `first : List(a) -> Option(a)`; `let x = List.head(xs)` gives `x` the
+  refinement itself), refusing any callee that could manufacture an element
+  (`put(xs : List(a), v : a)`). Still unenforced: a tuple element, an arrow
+  side, a second layer of a stacked refinement, and a type with no registered
+  constructor model. A refinement one layer down at a
   record field, a constructor argument, or an actor state field is enforced
   (see above), and a `linear` wrapper is transparent.
 - (Closed 2026-09-13.) A `{String | ...}` return type is verified against

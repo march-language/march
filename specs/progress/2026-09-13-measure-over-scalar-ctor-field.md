@@ -164,3 +164,38 @@ Until then `Array.get`/`Array.set`/`Array.pop` stay on the syntactic
 `cap no_panic` ban list. (`Array.pop` was on NEITHER list when this was filed
 and could panic inside `cap no_panic`; fixed the same day —
 `specs/progress/2026-08-05-array-pop-not-on-no-panic-ban-list.md`.)
+
+## Design (2026-09-13)
+
+`specs/2026-09-13-refinement-p3-designs.md` §4: the full design, soundness
+argument, test list and effort estimate for this item.
+
+## Landed 2026-09-13 (P3 design §4a, §4b verified, §4c reconsidered)
+
+**§4a.** `reflect_field` (call-site datatype reflection in `refine_call.ml`)
+now reflects a scalar constructor field CONCRETELY when the ordinary scalar
+reflection can place its actual — a literal, a refined local, arithmetic
+over those — and mints the fresh `_eN` only for an opaque value. The
+datatype term stays well-sorted (`term_fits_sort` already admitted a scalar
+term at a scalar field). `get(Box(3, 0), 1)` against `i : {Int | _ >= 0 && _
+< size(b)}` with `@[measure] fn size(b) do match b do Box(n, _) -> n end
+end` proves; `get(Box(3, 0), 5)` is refuted; `get(Box(n, 0), 3)` with
+`n : {Int | n > 5}` proves.
+
+**§4b, verified rather than assumed.** On an OPAQUE actual (`b : Box` a
+parameter) the field stays a fresh constant, and a guard `if i < size(b)`
+discharges `get(b, i)` from the guard alone: the guard and the goal meet on
+the uninterpreted application `size(b)`. Pinned by the `scalar-field-measure`
+group, with an unguarded control that escalates under `cap verified`.
+
+**§4c, reconsidered.** The definition warning was NOT hoisted out of the
+`measure_axioms` guard: its detection reads the arm shapes only
+`build_measure_preamble` computes, and after §4a the notice is advisory (the
+measure works on literals). It was reworded instead, from "will never be
+proved or refuted" (now false) to exactly when the measure is decidable.
+
+**Not done here:** contracting `Array.get` / `set` / `pop` and adding them to
+`Panic_surface_by_proof`'s covered set — a separate change gated on a full
+stdlib + ecosystem `--refine-report` sweep, as the design says, because
+widening what every contract can prove also widens what it can refute.
+Filed as `specs/todos/2026-09-13-array-bounds-contracts.md`.
