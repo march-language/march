@@ -5695,6 +5695,34 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/node_send_loopback.expected native_node_send_loopback.out)))
 
+; ── PeerReader loopback: one reader per connection, frames dispatched by tag ──
+; Distributed actors 2/4 step 1. Three frames for two consumers (SWIM ping,
+; ACTOR_MSG, SWIM ping) written in one burst arrive in one recv(); a single
+; PeerReader.serve loop hands each to its consumer in order. Pins that no
+; consumer steals another's frame and that bytes past a frame boundary carry
+; to the next frame (the ad-hoc readers dropped them).
+(rule
+ (targets native_peer_reader_loopback native_peer_reader_loopback.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/peer_reader_loopback.march)
+       (file ../stdlib/peer_reader.march)
+       (file ../stdlib/node_send.march)
+       (file ../stdlib/swim_driver.march)
+       (file ../stdlib/global_pid.march)
+       (file ../stdlib/net_kernel.march)
+       (file ../stdlib/net_frame.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_peer_reader_loopback
+        native/peer_reader_loopback.march)
+   (with-stdout-to native_peer_reader_loopback.out
+        (system "./native_peer_reader_loopback")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/peer_reader_loopback.expected native_peer_reader_loopback.out)))
+
 ; ── Two-node SWIM discovery: authenticated peer-connection + membership ──
 ; node-a accepts, node-b connects; both run the ClusterConn handshake over
 ; real TCP loopback, then exchange a SwimPing/SwimPingAck pair and each

@@ -13,6 +13,15 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`PeerReader`: one reader per peer connection, dispatching frames by tag.**
+  There was no receive loop: every cross-node consumer read its own frames
+  off the shared connection and skipped the ones it did not recognise, so two
+  consumers stole each other's frames, and bytes read past a frame boundary
+  were dropped. `PeerReader.serve(fd, buf, on_frame)` reads each frame once,
+  reports its tag, and hands it to the caller's dispatch; leftovers carry to
+  the next frame. `test/native/peer_reader_loopback` delivers three frames for
+  two consumers from one `recv()`.
+
 - **`NodeSend`: a one-way message to an actor on another node.** Everything
   cross-node was a synchronous `NodeCall` or a monitor frame. `NodeSend.cast`
   writes an `ACTOR_MSG` frame addressed by `GlobalPid`; `NodeSend.serve_one`

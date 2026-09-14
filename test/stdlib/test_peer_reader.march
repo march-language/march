@@ -1,0 +1,27 @@
+mod TestPeerReader do
+
+  describe "PeerReader.tag_of" do
+
+    test "reads each frame family's tag without decoding the rest" do
+      assert (PeerReader.tag_of(SwimDriver.encode_msg(SwimDriver.SwimPing("n1"))) == 0)
+      assert (PeerReader.tag_of(SwimDriver.encode_msg(SwimDriver.SwimPingAck("n1"))) == 1)
+      assert (PeerReader.tag_of(NetKernel.encode_registry_sync_req("h")) == 5)
+      assert (PeerReader.tag_of(DistLink.encode_req("node-a", 1, 2)) == 7)
+      assert (PeerReader.tag_of(NodeSend.encode_msg(1, GlobalPid.make("n", 1, 1), "T", Nil)) == 9)
+      assert (PeerReader.tag_of(NodeSend.encode_failed(1, "x")) == 10)
+    end
+
+    test "an RPC request carries no tag: its first element is the RemoteRef" do
+      let fref = RemoteCall.remote_ref("Math", "add", "s", "i")
+      let req = RemoteCall.request(fref, Nil, GlobalPid.make("n", 1, 1), 0, 7)
+      assert (PeerReader.tag_of(RemoteCall.encode_request(req)) == PeerReader.untagged())
+    end
+
+    test "garbage is untagged, not a panic" do
+      assert (PeerReader.tag_of(Cons(200, Cons(1, Nil))) == PeerReader.untagged())
+      assert (PeerReader.tag_of(Nil) == PeerReader.untagged())
+    end
+
+  end
+
+end
