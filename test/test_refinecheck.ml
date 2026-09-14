@@ -15093,6 +15093,36 @@ let container2_suite =
         Alcotest.(check bool) "control: xs : List(Int) gives x no fact" true
           (has_refine_error_d (m (body "Int")))) ]
 
+(* ── z3 never rejects a query the checker builds ─────────────────────────
+   A query z3 rejects comes back to the checker as [Unknown], an ordinary
+   skip, so a wrong sort anywhere in the encoder passes every other test in
+   this file.  [March_refine.Solver.malformed_count] counts rejections over
+   the whole run; this group runs LAST and requires the count to be zero
+   (specs/plans/set-refinements-strengthening-plan.md step 1.0).  The first
+   case proves the counter is live on a known-malformed shape, and undoes its
+   own contribution so the second case measures only the rest of the run. *)
+let z3_wellformed_suite =
+  [ gated "the rejection counter sees a malformed query" (fun () ->
+        let before = !March_refine.Solver.malformed_count in
+        let msgs = !March_refine.Solver.malformed_messages in
+        (* A record refinement spelled with the parameter's own name declares
+           the parameter at the record sort without the datatype preamble. *)
+        ignore
+          (has_refine_error_d
+             "mod M do\n  type Rec = { n : Int }\n  fn f(r : {Rec | r.n > 0}) : {Int | _ > 0} do 0 end\nend\n");
+        let seen = !March_refine.Solver.malformed_count - before in
+        March_refine.Solver.malformed_count := before;
+        March_refine.Solver.malformed_messages := msgs;
+        Alcotest.(check bool) "counted" true (seen > 0));
+
+    gated "no query in this run was rejected by z3" (fun () ->
+        let n = !March_refine.Solver.malformed_count in
+        if n > 0 then
+          Alcotest.failf "z3 rejected %d quer%s; first messages:\n%s\n\
+                          Re-run with MARCH_REFINE_Z3_ERRORS=<file> to capture the queries."
+            n (if n = 1 then "y" else "ies")
+            (String.concat "\n" (List.rev !March_refine.Solver.malformed_messages))) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -15190,4 +15220,6 @@ let () =
       ("scalar-field-measure", scalar_field_measure_suite);
       ("arrow-codomain", arrow_codomain_suite);
       ("container-subtyping-2", container2_suite);
-      ("set-refinements", set_suite) ]
+      ("set-refinements", set_suite);
+      (* Must stay LAST: it measures every query the groups above sent. *)
+      ("z3-well-formed", z3_wellformed_suite) ]

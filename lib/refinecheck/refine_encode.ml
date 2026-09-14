@@ -181,11 +181,23 @@ let scalar_sort_of_marker : string option -> Smt.sort option = function
 let scalar_sort_or_int (m : string option) : Smt.sort =
   match scalar_sort_of_marker m with Some s -> s | None -> Smt.SInt
 
+(* A datatype sort's number of type parameters; see [ctor_field_sorts_poly]
+   below.  Declared this early because [smt_sort_of_marker] needs it. *)
+let adt_arity : (string, int) Hashtbl.t = Hashtbl.create 16
+
+(* The instance of datatype [adt] every term uses today: each type argument is
+   the opaque `Elem`.  A name that is not a registered datatype (`$Str`,
+   `Elem`) is its own nullary sort. *)
+let adt_sort (adt : string) : Smt.sort =
+  match Hashtbl.find_opt adt_arity adt with
+  | Some n when n > 0 -> Smt.SData (adt, List.init n (fun _ -> Smt.sdata "Elem"))
+  | _ -> Smt.sdata adt
+
 (* The full SMT sort a marker denotes, scalar or declared. *)
 let smt_sort_of_marker (m : string option) : Smt.sort =
   match scalar_sort_of_marker m with
   | Some s -> s
-  | None -> (match m with Some s -> Smt.SData s | None -> Smt.SInt)
+  | None -> (match m with Some s -> adt_sort s | None -> Smt.SInt)
 
 (* A VC that declares one symbol at two different sorts is REJECTED by z3.  Each
    producer is supposed to agree with every other on a name's sort, and the
@@ -211,7 +223,7 @@ let rec mentions_str (is_str : string -> bool) (t : Smt.term) : bool =
   match t with
   | Smt.App (f, [ _ ]) when f = strlen_fn -> false
   | Smt.Const c -> is_str c
-  | Smt.App (_, args) -> List.exists m args
+  | Smt.App (_, args) | Smt.Ctor (_, _, args) -> List.exists m args
   (* A datatype tester ranges over an ADT sort, never over `Str`; it only
      "mentions a string" if its subject somehow does. *)
   | Smt.IsCtor (_, a) -> m a
@@ -244,6 +256,10 @@ let rec wellsorted (is_str : string -> bool) (t : Smt.term) : bool =
   | Smt.App (f, [ a ]) when f = strlen_fn ->
     (match a with Smt.Const c -> is_str c | _ -> false)
   | Smt.App (_, args) -> List.for_all int_side args
+  (* A constructor field may be a `Str` constant (a `String` payload) as
+     readily as an Int term; each argument is checked on its own. *)
+  | Smt.Ctor (_, _, args) ->
+    List.for_all (fun a -> match a with Smt.Const c when is_str c -> true | _ -> int_side a) args
   (* `((_ is Ctor) x)` is a Bool over a datatype subject.  It is well-sorted
      exactly when its subject is a datatype term, i.e. does not drag a `Str`
      constant in — which cannot happen, but is checked rather than assumed. *)
@@ -317,7 +333,7 @@ let rec mentions_float (is_float : string -> bool) (t : Smt.term) : bool =
   | Smt.FloatLit _ -> true
   | Smt.Const c -> is_float c
   | Smt.IntLit _ | Smt.BoolLit _ -> false
-  | Smt.App (_, args) -> List.exists m args
+  | Smt.App (_, args) | Smt.Ctor (_, _, args) -> List.exists m args
   | Smt.IsCtor (_, a) | Smt.Not a | Smt.Neg a | Smt.MulLit (_, a) -> m a
   | Smt.Mul (a, b)
   | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.And (a, b) | Smt.Or (a, b)
@@ -376,7 +392,7 @@ let rec formula_wellsorted (sort_of : string -> Smt.sort option) (t : Smt.term) 
   (* Nothing in this checker declares an uninterpreted function at `Bool`
      (measures and selectors return Int or a datatype), so an application in
      Boolean position is a sort error just as arithmetic and literals are. *)
-  | Smt.App _ | Smt.IntLit _ | Smt.FloatLit _ | Smt.Add _ | Smt.Sub _
+  | Smt.App _ | Smt.Ctor _ | Smt.IntLit _ | Smt.FloatLit _ | Smt.Add _ | Smt.Sub _
   | Smt.MulLit _ | Smt.Mul _ | Smt.Neg _
   | Smt.SetEmpty _ | Smt.SetSng _ | Smt.SetUnion _ | Smt.SetInter _ | Smt.SetDiff _ -> false
 
@@ -881,6 +897,49 @@ let measure_body_nonneg (self : string) (known : string list) (body : A.expr) : 
 let ctor_field_sorts : (string, Smt.sort list) Hashtbl.t = Hashtbl.create 32
 let adt_ctors : (string, string list) Hashtbl.t = Hashtbl.create 16
 
+(* ── Parametric datatypes (specs/plans/set-refinements-strengthening-plan.md
+   step 1.2) ───────────────────────────────────────────────────────────────
+   [adt_arity]: a datatype sort's number of type parameters (0 for a
+   monomorphic one).  [ctor_field_sorts_poly]: a constructor's field sorts as
+   DECLARED, with [Smt.SParam i] for the datatype's own [i]th parameter, used
+   only to emit `(par (T0 …) …)` declarations.  [ctor_field_sorts] stays the
+   table every reader uses, holding the same sorts instantiated at the opaque
+   `Elem` — the instance every datatype term uses until leaf sorts come from
+   March types (step 1.3). *)
+let ctor_field_sorts_poly : (string, Smt.sort list) Hashtbl.t = Hashtbl.create 32
+
+(* A constructor application at datatype [adt]'s instance.  Every producer of
+   a constructor term goes through this, so the instance z3 needs to resolve
+   a parametric constructor is never missing. *)
+let ctor_term (adt : string) (ctor : string) (args : Smt.term list) : Smt.term =
+  Smt.Ctor (ctor, adt_sort adt, args)
+
+(* A constructor application seen by a reader: the typed [Smt.Ctor], or a
+   plain [Smt.App] whose head is a registered constructor (the shape before
+   [ctor_term] existed, still produced for a constructor whose datatype is
+   ambiguous). *)
+let ctor_view (t : Smt.term) : (string * Smt.term list) option =
+  match t with
+  | Smt.Ctor (c, _, args) -> Some (c, args)
+  | Smt.App (c, args) when Hashtbl.mem ctor_field_sorts c -> Some (c, args)
+  | _ -> None
+
+(* Does a sort need the opaque `Elem` sort declared — at any depth, since a
+   field `(M_List Elem)` needs it as much as a bare `Elem` field does? *)
+let rec sort_mentions_elem (s : Smt.sort) : bool =
+  match s with
+  | Smt.SData ("Elem", []) -> true
+  | Smt.SData (_, args) -> List.exists sort_mentions_elem args
+  | Smt.SSet e -> sort_mentions_elem e
+  | _ -> false
+
+(* Record a constructor's declared field sorts and their `Elem` instance. *)
+let set_ctor_fields (adt : string) (ctor : string) (poly : Smt.sort list) : unit =
+  Hashtbl.replace ctor_field_sorts_poly ctor poly;
+  let n = try Hashtbl.find adt_arity adt with Not_found -> 0 in
+  let elem_args = List.init n (fun _ -> Smt.sdata "Elem") in
+  Hashtbl.replace ctor_field_sorts ctor (List.map (Smt.instantiate elem_args) poly)
+
 (* ── Set-valued user measures (design §4.4) ────────────────────────────────
    name -> element sort of a `@[measure]` declared `: Set(T)`.  Populated once
    per [check_module] from the declared return type, INDEPENDENTLY of whether
@@ -899,7 +958,7 @@ let set_ret_elem (fd : A.fn_def) : Smt.sort option =
     | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> go b
     | A.TyCon ({ A.txt = "Set"; _ }, [ A.TyCon ({ A.txt = "Int"; _ }, []) ]) -> Some Smt.SInt
     | A.TyCon ({ A.txt = "Set"; _ }, [ A.TyCon ({ A.txt = "Bool"; _ }, []) ]) -> Some Smt.SBool
-    | A.TyCon ({ A.txt = "Set"; _ }, [ _ ]) -> Some (Smt.SData "Elem")
+    | A.TyCon ({ A.txt = "Set"; _ }, [ _ ]) -> Some (Smt.sdata "Elem")
     | _ -> None
   in
   match fd.A.fn_ret_ty with Some t -> go t | None -> None
@@ -1005,6 +1064,7 @@ let resolve_set_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
     | Smt.BoolLit _ -> Some Smt.SBool
     | Smt.FloatLit _ -> Some Smt.SFloat
     | Smt.Const c -> (match sort_of c with Some (Smt.SSet _) -> None | s -> s)
+    | Smt.Ctor _ -> None
     | Smt.App (f, _) when Hashtbl.mem ctor_field_sorts f || Hashtbl.mem set_measure_elem f -> None
     (* A field selector (`(User_0 r)`) is at its field's declared sort — a
        `String` field is the opaque `Elem`, not `Int`. *)
@@ -1060,7 +1120,7 @@ let resolve_set_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
       let i = fresh () in
       pin i (Hashtbl.find set_measure_elem m);
       Some i
-    | Smt.App (_, args) -> List.iter (fun a -> ignore (infer a)) args; None
+    | Smt.App (_, args) | Smt.Ctor (_, _, args) -> List.iter (fun a -> ignore (infer a)) args; None
     | Smt.IsCtor (_, a) | Smt.Not a | Smt.Neg a | Smt.MulLit (_, a) -> ignore (infer a); None
     | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b) | Smt.And (a, b) | Smt.Or (a, b)
     | Smt.Implies (a, b) | Smt.Lt (a, b) | Smt.Le (a, b) | Smt.Gt (a, b) | Smt.Ge (a, b)
@@ -1072,7 +1132,7 @@ let resolve_set_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
   if !conflict then None
   else begin
     let resolved i =
-      match Hashtbl.find_opt pinned (find i) with Some s -> s | None -> Smt.SData "Elem"
+      match Hashtbl.find_opt pinned (find i) with Some s -> s | None -> Smt.sdata "Elem"
     in
     let queue = ref (List.rev !nodes) in
     let pop () =
@@ -1089,6 +1149,7 @@ let resolve_set_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
       | Smt.SetSub (a, b) -> let a' = rewrite a in Smt.SetSub (a', rewrite b)
       | Smt.Const _ | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ -> t
       | Smt.App (f, args) -> Smt.App (f, List.map rewrite args)
+      | Smt.Ctor (c, srt, args) -> Smt.Ctor (c, srt, List.map rewrite args)
       | Smt.IsCtor (c, a) -> Smt.IsCtor (c, rewrite a)
       | Smt.Not a -> Smt.Not (rewrite a)
       | Smt.Neg a -> Smt.Neg (rewrite a)
@@ -1120,7 +1181,7 @@ let resolve_set_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
           | Smt.SSet _ ->
             (n, Smt.SSet (match Hashtbl.find_opt const_class n with
                           | Some i -> resolved i
-                          | None -> Smt.SData "Elem"))
+                          | None -> Smt.sdata "Elem"))
           | s -> (n, s))
         decls
     in
@@ -1167,7 +1228,7 @@ let vc_set_elem_sorts (vc : Smt.vc) : Smt.sort list =
     | Smt.SetMem (a, b) | Smt.SetUnion (a, b) | Smt.SetInter (a, b) | Smt.SetDiff (a, b)
     | Smt.SetSub (a, b) -> go a; go b
     | Smt.Const _ | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ -> ()
-    | Smt.App (_, args) -> List.iter go args
+    | Smt.App (_, args) | Smt.Ctor (_, _, args) -> List.iter go args
     | Smt.IsCtor (_, a) | Smt.Not a | Smt.Neg a | Smt.MulLit (_, a) -> go a
     | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b) | Smt.And (a, b) | Smt.Or (a, b)
     | Smt.Implies (a, b) | Smt.Eq (a, b) | Smt.Ne (a, b) | Smt.Lt (a, b) | Smt.Le (a, b)
@@ -1193,8 +1254,8 @@ let set_preamble ~(elem_declared : bool) ~(str_declared : bool) ?(measure_attach
   match elems with
   | [] -> ""
   | elems ->
-    let needs_elem = List.mem (Smt.SData "Elem") elems && not elem_declared in
-    let needs_str = List.mem (Smt.SData str_sort) elems && not str_declared in
+    let needs_elem = List.mem (Smt.sdata "Elem") elems && not elem_declared in
+    let needs_str = List.mem (Smt.sdata str_sort) elems && not str_declared in
     (if needs_elem then "(declare-sort Elem 0)\n" else "")
     ^ (if needs_str then Printf.sprintf "(declare-sort %s 0)\n" str_sort else "")
     ^ Smt.set_sort_defs elems
@@ -1203,12 +1264,12 @@ let set_preamble ~(elem_declared : bool) ~(str_declared : bool) ?(measure_attach
    heads already reflected): `{h1, h2, …}` as nested singletons and unions,
    element sorts left for [resolve_set_sorts].  None for anything opaque. *)
 let rec concrete_elts (t : Smt.term) : Smt.term option =
-  match t with
-  | Smt.App ("Nil", []) -> Some (Smt.SetEmpty Smt.set_unknown_elem)
-  | Smt.App ("Cons", [ h; tl ]) ->
-    (match h with
-     | Smt.App (f, _) when Hashtbl.mem ctor_field_sorts f -> None
-     | _ ->
+  match ctor_view t with
+  | Some ("Nil", []) -> Some (Smt.SetEmpty Smt.set_unknown_elem)
+  | Some ("Cons", [ h; tl ]) ->
+    (match ctor_view h with
+     | Some _ -> None
+     | None ->
        Option.map
          (fun rest -> Smt.SetUnion (Smt.SetSng (Smt.set_unknown_elem, h), rest))
          (concrete_elts tl))
@@ -1318,6 +1379,7 @@ let sort_of_ctor (ctor : string) : string option =
     adt_ctors None
 
 
+
 (* declare-datatypes preamble for TDRecord types; included in every VC that
    refines over a record value.  Built after measure_preamble so sort
    deduplication (measure_preamble_sorts) works. *)
@@ -1377,33 +1439,54 @@ let is_adt_base (t : A.ty) : bool =
    `{Int | _ > 0}` field is an Int field.  Before 2026-09-13 this fell through
    to the opaque `Elem` sort, which is harmless while nothing reads a refined
    field, and wrong the moment a stored-field contract reflects one. *)
-let rec smt_sort_of_field (t : A.ty) : Smt.sort =
+let rec smt_sort_of_field ?(pnames : string list = []) (t : A.ty) : Smt.sort =
   match t with
-  | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> smt_sort_of_field b
+  | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> smt_sort_of_field ~pnames b
   | A.TyCon ({ A.txt = "Int"; _ }, []) -> Smt.SInt
   | A.TyCon ({ A.txt = "Bool"; _ }, []) -> Smt.SBool
-  | A.TyCon ({ A.txt; _ }, _) when Hashtbl.mem adt_ctors (adt_sort_name txt) ->
-    Smt.SData (adt_sort_name txt)
-  | _ -> Smt.SData "Elem"
+  (* The declaring datatype's own type parameter. *)
+  | A.TyVar v when List.mem v.A.txt pnames ->
+    (match List.find_index (fun n -> n = v.A.txt) pnames with
+     | Some i -> Smt.SParam i
+     | None -> Smt.sdata "Elem")
+  (* A registered datatype, at an instance whose arguments are the declaring
+     datatype's parameters where the field names one, and `Elem` otherwise.
+     (`List(Int)` in a field is `(M_List Elem)` until step 1.3 makes leaf
+     sorts typed, so every term of it agrees with every other list term.) *)
+  | A.TyCon ({ A.txt; _ }, args) when Hashtbl.mem adt_ctors (adt_sort_name txt) ->
+    let adt = adt_sort_name txt in
+    let n = try Hashtbl.find adt_arity adt with Not_found -> 0 in
+    if n = 0 then Smt.sdata adt
+    else
+      let arg i =
+        match List.nth_opt args i with
+        | Some (A.TyVar v) when List.mem v.A.txt pnames -> smt_sort_of_field ~pnames (A.TyVar v)
+        | _ -> Smt.sdata "Elem"
+      in
+      Smt.SData (adt, List.init n arg)
+  | _ -> Smt.sdata "Elem"
 
 (* Pass 1: register every ADT's constructor list (keyed by sort name). *)
 let rec register_adt_names (decls : A.decl list) : unit =
   List.iter
     (function
-      | A.DType (_, name, _, A.TDVariant variants, _)
-      | A.DAlwaysLinearType (_, name, _, A.TDVariant variants, _) ->
+      | A.DType (_, name, tparams, A.TDVariant variants, _)
+      | A.DAlwaysLinearType (_, name, tparams, A.TDVariant variants, _) ->
         Hashtbl.replace adt_ctors (adt_sort_name name.A.txt)
-          (List.map (fun (v : A.variant) -> v.A.var_name.A.txt) variants)
-      | A.DType (_, name, _, A.TDRecord _, _)
-      | A.DAlwaysLinearType (_, name, _, A.TDRecord _, _) ->
-        Hashtbl.replace adt_ctors (adt_sort_name name.A.txt) [ name.A.txt ]
+          (List.map (fun (v : A.variant) -> v.A.var_name.A.txt) variants);
+        Hashtbl.replace adt_arity (adt_sort_name name.A.txt) (List.length tparams)
+      | A.DType (_, name, tparams, A.TDRecord _, _)
+      | A.DAlwaysLinearType (_, name, tparams, A.TDRecord _, _) ->
+        Hashtbl.replace adt_ctors (adt_sort_name name.A.txt) [ name.A.txt ];
+        Hashtbl.replace adt_arity (adt_sort_name name.A.txt) (List.length tparams)
       (* An actor's `state { ... }` is a record in every respect the checker
          cares about — named fields, one constructor — registered under the
          actor's own name so `state.value` in a handler and `{ state with
          value: ... }` reflect through the same selectors a record does
          (plan phase 4: actor state as an inductive invariant). *)
       | A.DActor (_, name, _, _) ->
-        Hashtbl.replace adt_ctors (adt_sort_name name.A.txt) [ name.A.txt ]
+        Hashtbl.replace adt_ctors (adt_sort_name name.A.txt) [ name.A.txt ];
+        Hashtbl.replace adt_arity (adt_sort_name name.A.txt) 0
       | A.DMod (_, _, ds, _) -> register_adt_names ds
       | _ -> ())
     decls
@@ -1426,20 +1509,21 @@ let rec register_field_sorts (decls : A.decl list) : unit =
         in
         List.iter
           (fun (v : A.variant) ->
-            Hashtbl.replace ctor_field_sorts v.A.var_name.A.txt
-              (List.map smt_sort_of_field v.A.var_args);
+            set_ctor_fields (adt_sort_name tname.A.txt) v.A.var_name.A.txt
+              (List.map (smt_sort_of_field ~pnames) v.A.var_args);
             Hashtbl.replace ctor_param_fields v.A.var_name.A.txt (List.map role_of v.A.var_args))
           variants
-      | A.DType (_, name, _, A.TDRecord fields, _)
-      | A.DAlwaysLinearType (_, name, _, A.TDRecord fields, _) ->
+      | A.DType (_, name, tparams, A.TDRecord fields, _)
+      | A.DAlwaysLinearType (_, name, tparams, A.TDRecord fields, _) ->
         let ctor = name.A.txt in
-        Hashtbl.replace ctor_field_sorts ctor
-          (List.map (fun (f : A.field) -> smt_sort_of_field f.A.fld_ty) fields);
+        let pnames = List.map (fun (p : A.name) -> p.A.txt) tparams in
+        set_ctor_fields (adt_sort_name name.A.txt) ctor
+          (List.map (fun (f : A.field) -> smt_sort_of_field ~pnames f.A.fld_ty) fields);
         Hashtbl.replace ctor_field_names ctor
           (List.map (fun (f : A.field) -> f.A.fld_name.A.txt) fields)
       | A.DActor (_, name, ad, _) ->
         let ctor = name.A.txt in
-        Hashtbl.replace ctor_field_sorts ctor
+        set_ctor_fields (adt_sort_name name.A.txt) ctor
           (List.map (fun (f : A.field) -> smt_sort_of_field f.A.fld_ty) ad.A.actor_state);
         Hashtbl.replace ctor_field_names ctor
           (List.map (fun (f : A.field) -> f.A.fld_name.A.txt) ad.A.actor_state)
@@ -1764,9 +1848,14 @@ let adt_closure (seeds : string list) : string list =
       Hashtbl.replace seen a ();
       List.iter
         (fun c ->
-          List.iter
-            (function Smt.SData s when s <> "Elem" -> visit s | _ -> ())
-            (try Hashtbl.find ctor_field_sorts c with Not_found -> []))
+          let rec visit_sort = function
+            | Smt.SData (s, args) ->
+              if s <> "Elem" && Hashtbl.mem adt_ctors s then visit s;
+              List.iter visit_sort args
+            | Smt.SSet e -> visit_sort e
+            | _ -> ()
+          in
+          List.iter visit_sort (try Hashtbl.find ctor_field_sorts_poly c with Not_found -> []))
         (try Hashtbl.find adt_ctors a with Not_found -> [])
     end
   in
@@ -1774,28 +1863,102 @@ let adt_closure (seeds : string list) : string list =
   Hashtbl.fold (fun a () acc -> a :: acc) seen []
 
 let ctor_decl (c : string) : string =
-  let sorts = try Hashtbl.find ctor_field_sorts c with Not_found -> [] in
+  let sorts = try Hashtbl.find ctor_field_sorts_poly c with Not_found -> [] in
   if sorts = [] then Printf.sprintf "(%s)" c
   else
     Printf.sprintf "(%s %s)" c
       (String.concat " "
          (List.mapi (fun i s -> Printf.sprintf "(%s_%d %s)" c i (Smt.string_of_sort s)) sorts))
 
-(* One `declare-datatypes` declaring all [adts] sorts together (mutual recursion
-   among them resolves within the single command). *)
+(* The datatype declarations for [adts], one `declare-datatypes` per group of
+   mutually recursive sorts, dependencies first.
+
+   One command for everything (as this did while every datatype was
+   monomorphic) is rejected by z3 once a group mixes arities: a monomorphic
+   `M_Value` whose field is `(M_List Elem)` cannot share a command with the
+   parametric `M_List` ("mismatch between number of declared and supplied sort
+   parameters", 4.8 and 4.16 alike).  Splitting into strongly connected
+   components keeps genuine mutual recursion in one command and puts every
+   parametric sort a group merely USES in an earlier command. *)
 let datatype_decls (adts : string list) : string =
   if adts = [] then ""
   else
-    let sort_decls = String.concat " " (List.map (fun a -> Printf.sprintf "(%s 0)" a) adts) in
-    let bodies =
-      String.concat " "
-        (List.map
-           (fun a ->
-             Printf.sprintf "(%s)"
-               (String.concat " " (List.map ctor_decl (try Hashtbl.find adt_ctors a with Not_found -> []))))
-           adts)
+    let arity a = try Hashtbl.find adt_arity a with Not_found -> 0 in
+    let in_set a = List.mem a adts in
+    (* The datatypes [a]'s constructor fields mention, restricted to [adts]. *)
+    let deps a =
+      let acc = ref [] in
+      let rec visit_sort = function
+        | Smt.SData (s, args) ->
+          if in_set s && s <> a && not (List.mem s !acc) then acc := s :: !acc;
+          List.iter visit_sort args
+        | Smt.SSet e -> visit_sort e
+        | _ -> ()
+      in
+      List.iter
+        (fun c -> List.iter visit_sort (try Hashtbl.find ctor_field_sorts_poly c with Not_found -> []))
+        (try Hashtbl.find adt_ctors a with Not_found -> []);
+      !acc
     in
-    Printf.sprintf "(declare-datatypes (%s) (%s))" sort_decls bodies
+    (* Tarjan's strongly connected components; each component is emitted after
+       every component it depends on. *)
+    let index = Hashtbl.create 16 and low = Hashtbl.create 16 and on_stack = Hashtbl.create 16 in
+    let stack = ref [] and counter = ref 0 and comps = ref [] in
+    let rec strong a =
+      Hashtbl.replace index a !counter;
+      Hashtbl.replace low a !counter;
+      incr counter;
+      stack := a :: !stack;
+      Hashtbl.replace on_stack a ();
+      List.iter
+        (fun b ->
+          if not (Hashtbl.mem index b) then begin
+            strong b;
+            Hashtbl.replace low a (min (Hashtbl.find low a) (Hashtbl.find low b))
+          end
+          else if Hashtbl.mem on_stack b then
+            Hashtbl.replace low a (min (Hashtbl.find low a) (Hashtbl.find index b)))
+        (deps a);
+      if Hashtbl.find low a = Hashtbl.find index a then begin
+        let rec pop acc =
+          match !stack with
+          | x :: rest ->
+            stack := rest;
+            Hashtbl.remove on_stack x;
+            if x = a then x :: acc else pop (x :: acc)
+          | [] -> acc
+        in
+        comps := pop [] :: !comps
+      end
+    in
+    (* Deterministic order: the VC text is a cache key. *)
+    List.iter (fun a -> if not (Hashtbl.mem index a) then strong a) (List.sort compare adts);
+    (* Tarjan completes a component only after every component it reaches, so
+       the completion order (the reverse of [!comps]) is dependencies first. *)
+    let ordered = List.rev !comps in
+    let one_group group =
+      let group = List.sort compare group in
+      let sort_decls =
+        String.concat " " (List.map (fun a -> Printf.sprintf "(%s %d)" a (arity a)) group)
+      in
+      let bodies =
+        String.concat " "
+          (List.map
+             (fun a ->
+               let ctors =
+                 String.concat " " (List.map ctor_decl (try Hashtbl.find adt_ctors a with Not_found -> []))
+               in
+               match arity a with
+               | 0 -> Printf.sprintf "(%s)" ctors
+               | n ->
+                 Printf.sprintf "(par (%s) (%s))"
+                   (String.concat " " (List.init n (fun i -> "T" ^ string_of_int i)))
+                   ctors)
+             group)
+      in
+      Printf.sprintf "(declare-datatypes (%s) (%s))" sort_decls bodies
+    in
+    String.concat "\n" (List.map one_group ordered)
 
 (* The sort of a translated measure-arm body ([smt_of_axiom_body]'s output),
    with pattern variables at their constructor-field sorts [env]; [None] when
@@ -1926,7 +2089,7 @@ let build_measure_preamble (mdefs : (string * A.fn_def) list) : unit =
           let erased =
             List.filter_map
               (fun (v, s) ->
-                match s with Smt.SData sub when sub <> "Elem" -> None | _ -> Some v)
+                match s with Smt.SData (sub, _) when sub <> "Elem" -> None | _ -> Some v)
               (List.combine vars sorts)
           in
           body_is_bare_field_read erased body
@@ -1974,7 +2137,8 @@ let build_measure_preamble (mdefs : (string * A.fn_def) list) : unit =
           | Some e -> Smt.string_of_sort (Smt.SSet e)
           | None -> "Int"
         in
-        Buffer.add_string buf (Printf.sprintf "(declare-fun %s (%s) %s)\n" name adt result))
+        Buffer.add_string buf
+          (Printf.sprintf "(declare-fun %s (%s) %s)\n" name (Smt.string_of_sort (adt_sort adt)) result))
       axiomatized;
     (* … then non-negativity axioms … *)
     List.iter
@@ -1982,7 +2146,7 @@ let build_measure_preamble (mdefs : (string * A.fn_def) list) : unit =
         if is_nonneg_measure name then
           Buffer.add_string buf
             (Printf.sprintf "(assert (forall ((x %s)) (! (>= (%s x) 0) :pattern ((%s x)))))\n"
-               adt name name))
+               (Smt.string_of_sort (adt_sort adt)) name name))
       axiomatized;
     (* … then base-case linking axioms: for a measure whose base-case arm is a
        concrete integer literal, link that constructor's tester directly to the
@@ -2027,7 +2191,7 @@ let build_measure_preamble (mdefs : (string * A.fn_def) list) : unit =
               Buffer.add_string buf
                 (Printf.sprintf
                    "(assert (forall ((x %s)) (! (=> ((_ is %s) x) (= (%s x) %d)) :pattern ((%s x)))))\n"
-                   adt ctor name n name))
+                   (Smt.string_of_sort (adt_sort adt)) ctor name n name))
             bases)
       axiomatized;
     (* … then the recursion-equation axioms. *)
@@ -2054,15 +2218,20 @@ let build_measure_preamble (mdefs : (string * A.fn_def) list) : unit =
    tester cares about the tag, not the contents.  Seeded before user types so a
    user-defined `List`/`Option` (unusual) still overrides. *)
 let register_builtin_adts () : unit =
-  Hashtbl.replace adt_ctors (adt_sort_name "List") [ "Nil"; "Cons" ];
-  Hashtbl.replace ctor_field_sorts "Nil" [];
-  Hashtbl.replace ctor_field_sorts "Cons" [ Smt.SData "Elem"; Smt.SData (adt_sort_name "List") ];
-  Hashtbl.replace adt_ctors (adt_sort_name "Option") [ "None"; "Some" ];
-  Hashtbl.replace ctor_field_sorts "None" [];
-  Hashtbl.replace ctor_field_sorts "Some" [ Smt.SData "Elem" ];
-  Hashtbl.replace adt_ctors (adt_sort_name "Result") [ "Ok"; "Err" ];
-  Hashtbl.replace ctor_field_sorts "Ok" [ Smt.SData "Elem" ];
-  Hashtbl.replace ctor_field_sorts "Err" [ Smt.SData "Elem" ];
+  let list = adt_sort_name "List" and option = adt_sort_name "Option"
+  and result = adt_sort_name "Result" in
+  Hashtbl.replace adt_ctors list [ "Nil"; "Cons" ];
+  Hashtbl.replace adt_arity list 1;
+  set_ctor_fields list "Nil" [];
+  set_ctor_fields list "Cons" [ Smt.SParam 0; Smt.SData (list, [ Smt.SParam 0 ]) ];
+  Hashtbl.replace adt_ctors option [ "None"; "Some" ];
+  Hashtbl.replace adt_arity option 1;
+  set_ctor_fields option "None" [];
+  set_ctor_fields option "Some" [ Smt.SParam 0 ];
+  Hashtbl.replace adt_ctors result [ "Ok"; "Err" ];
+  Hashtbl.replace adt_arity result 2;
+  set_ctor_fields result "Ok" [ Smt.SParam 0 ];
+  set_ctor_fields result "Err" [ Smt.SParam 1 ];
   Hashtbl.replace ctor_param_fields "Nil" [];
   Hashtbl.replace ctor_param_fields "Cons" [ Param 0; Self ];
   Hashtbl.replace ctor_param_fields "None" [];
@@ -2121,8 +2290,7 @@ let type_only_preamble () : string =
           (fun sort ->
             List.exists
               (fun ctor ->
-                List.exists
-                  (fun s -> s = Smt.SData "Elem")
+                List.exists sort_mentions_elem
                   (try Hashtbl.find ctor_field_sorts ctor with Not_found -> []))
               (try Hashtbl.find adt_ctors sort with Not_found -> []))
           all_sorts
@@ -2144,8 +2312,7 @@ let adt_vc_preamble ~(skip : string -> bool) ~(skip_elem : bool) (seeds : string
            (fun sort ->
              List.exists
                (fun ctor ->
-                 List.exists
-                   (fun s -> s = Smt.SData "Elem")
+                 List.exists sort_mentions_elem
                    (try Hashtbl.find ctor_field_sorts ctor with Not_found -> []))
                (try Hashtbl.find adt_ctors sort with Not_found -> []))
            sorts

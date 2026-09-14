@@ -181,7 +181,11 @@ let rec smt_of_r_marked ?(vocab = true) ~resolve_var ~resolve_measure
     let reflected = List.map r args in
     (match List.find_map (function Error e -> Some e | Ok _ -> None) reflected with
      | Some e -> Error e
-     | None -> Ok (Smt.App (ctor, List.map (function Ok t -> t | Error _ -> assert false) reflected)))
+     | None ->
+       let ts = List.map (function Ok t -> t | Error _ -> assert false) reflected in
+       Ok (match sort_of_ctor ctor with
+           | Some adt -> ctor_term adt ctor ts
+           | None -> Smt.App (ctor, ts)))
   (* Field access on a bare variable: s.count → selector applied to s.
      Only EVar receivers are supported; complex receivers conservatively return
      None — safe under the definite-failure soundness stance. *)

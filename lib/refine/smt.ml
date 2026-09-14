@@ -20,7 +20,16 @@ type sort =
   | SInt
   | SBool
   | SFloat
-  | SData of string  (* a named (algebraic-datatype) sort *)
+  (* A named declared sort, with its type arguments when the datatype is
+     parametric: [SData ("M_List", [SInt])] is `(M_List Int)`, and
+     [SData ("M_Rec", [])] is the monomorphic `M_Rec`.  Opaque built-in sorts
+     (`Elem`, `$Str`) are nullary [SData] too. *)
+  | SData of string * sort list
+  (* The [i]th type parameter of the datatype a constructor field belongs to,
+     as written in that datatype's `(par (T0 … Tn) …)` declaration.  Only ever
+     appears inside a constructor's field sorts; [instantiate] replaces it
+     before a sort reaches a declaration or a term. *)
+  | SParam of int
   (* A finite set of elements at the given sort, encoded as Z3's
      `(Array <elem> Bool)` — the Liquid Haskell / liquid-fixpoint encoding.
      Every set operator below is a quantifier-free array term, so a VC that
@@ -32,11 +41,28 @@ type sort =
      still carries it at render time renders at the opaque `Elem` sort. *)
   | SSet of sort
 
-let set_unknown_elem = SData "?"
+let set_unknown_elem = SData ("?", [])
+
+(* A nullary named sort. *)
+let sdata (n : string) : sort = SData (n, [])
+
+(* Substitute a datatype instance's arguments for its type parameters. *)
+let rec instantiate (args : sort list) (s : sort) : sort =
+  match s with
+  | SParam i -> (match List.nth_opt args i with Some a -> a | None -> SData ("Elem", []))
+  | SData (n, xs) -> SData (n, List.map (instantiate args) xs)
+  | SSet e -> SSet (instantiate args e)
+  | SInt | SBool | SFloat -> s
 
 type term =
   | Const of string          (* a declared symbol: "_", "i", or a measure-applied const *)
-  | App of string * term list (* uninterpreted-fn / datatype-constructor application *)
+  | App of string * term list (* uninterpreted-fn application *)
+  (* A datatype constructor application at a known datatype instance.  The
+     instance is carried because z3 cannot always infer it: 4.8 rejects
+     `(Some_0 (Some x))` for a parametric `Option`, so a constructor of a
+     parametric datatype renders qualified, `((as Some (M_Option Int)) x)`.
+     A monomorphic constructor renders exactly as a plain application. *)
+  | Ctor of string * sort * term list
   | IsCtor of string * term  (* Z3 datatype tester: ((_ is Ctor) x) *)
   | IntLit of int
   | BoolLit of bool
@@ -104,22 +130,28 @@ let rec string_of_sort = function
   | SInt -> "Int"
   | SBool -> "Bool"
   | SFloat -> "Float64"
-  | SData n -> n
+  | SData (n, []) -> n
+  | SData (n, args) -> "(" ^ n ^ " " ^ String.concat " " (List.map string_of_sort args) ^ ")"
+  | SParam i -> "T" ^ string_of_int i
   | SSet e -> "MSet$" ^ set_elem_tag e
 
+(* A sort as a fragment of an SMT symbol (no spaces or parentheses), for
+   names derived from it: `MSet$Int`, `MSet$M_List$Int`. *)
 and set_elem_tag = function
   | SInt -> "Int"
   | SBool -> "Bool"
   | SFloat -> "Float"
-  | SData "?" -> "Elem"
-  | SData "$Str" -> "Str"
-  | SData n -> n
+  | SData ("?", []) -> "Elem"
+  | SData ("$Str", []) -> "Str"
+  | SData (n, []) -> n
+  | SData (n, args) -> n ^ "$" ^ String.concat "$" (List.map set_elem_tag args)
+  | SParam i -> "T" ^ string_of_int i
   | SSet e -> "Set" ^ set_elem_tag e
 
 (* The element sort actually RENDERED for a set: the placeholder becomes the
    opaque `Elem` sort. *)
 let render_elem_sort = function
-  | SData "?" -> SData "Elem"
+  | SData ("?", []) -> SData ("Elem", [])
   | s -> s
 
 (* One `(define-sort MSet$X () (Array X Bool))` line per element sort.  The
@@ -172,6 +204,16 @@ let rec render = function
   | Const s -> s
   | App (f, []) -> f
   | App (f, args) -> Printf.sprintf "(%s %s)" f (String.concat " " (List.map render args))
+  | Ctor (c, SData (_, []), []) -> c
+  | Ctor (c, SData (_, []), args) ->
+    Printf.sprintf "(%s %s)" c (String.concat " " (List.map render args))
+  | Ctor (c, s, []) -> Printf.sprintf "(as %s %s)" c (string_of_sort s)
+  | Ctor (c, s, args) ->
+    Printf.sprintf "((as %s %s) %s)" c (string_of_sort s) (String.concat " " (List.map render args))
+  (* A tester applied directly to a constructor term is decided here: z3
+     (4.8 and 4.16 alike) rejects `((_ is Some) ((as Some …) x))` for a
+     parametric datatype, and the answer is syntactic anyway. *)
+  | IsCtor (c, Ctor (c', _, _)) -> if c = c' then "true" else "false"
   | IsCtor (c, t) -> Printf.sprintf "((_ is %s) %s)" c (render t)
   | IntLit n -> if n < 0 then Printf.sprintf "(- %d)" (- n) else string_of_int n
   | BoolLit b -> if b then "true" else "false"

@@ -1077,7 +1077,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
               List.fold_left2
                 (fun re sub srt ->
                   match sub, srt with
-                  | A.PatVar n, Smt.SData s when is_record_sort s -> (n.A.txt, s) :: re
+                  | A.PatVar n, Smt.SData (s, _) when is_record_sort s -> (n.A.txt, s) :: re
                   | _ -> re)
                 re subpats sorts
           | _ -> re
@@ -2060,6 +2060,8 @@ and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
     that their selectors are available when check_post reflects field projections. *)
 let register_types_for_check (decls : A.decl list) : unit =
   Hashtbl.clear adt_ctors;
+  Hashtbl.clear adt_arity;
+  Hashtbl.clear ctor_field_sorts_poly;
   Hashtbl.clear ctor_field_sorts;
   Hashtbl.clear ctor_field_names;
   Hashtbl.clear ctor_param_fields;
@@ -2830,6 +2832,8 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
       (bare_builtin_undefined ~mod_name "string_byte_length" m.A.mod_decls);
   let all_mfns = collect_measure_fns m.A.mod_decls in
   Hashtbl.reset adt_ctors;
+  Hashtbl.reset adt_arity;
+  Hashtbl.reset ctor_field_sorts_poly;
   Hashtbl.reset ctor_field_sorts;
   Hashtbl.reset ctor_field_names;
   Hashtbl.reset ctor_param_fields;
