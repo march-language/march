@@ -131,6 +131,16 @@ plumbing.
 ---
 
 ## 2. Container subtyping beyond one layer of `List` / `Option`
+*Landed 2026-09-13* (all three parts); see
+`specs/progress/2026-09-13-container-subtyping-other-containers.md`. One
+correction to the text below: `Map` and `Set` are NOT opaque — the stdlib
+defines them as variants, so the general rule models them (their values flow
+as recorded skips or through the parametric rule); the shapes with no
+constructor model are tuples, arrows, and unregistered names. And condition
+(i)'s manufacture check turned out to be load-bearing, not theoretical: the
+first cut omitted it and `Map.put`'s result would have inherited the map's
+slot.
+
 
 Todo: `specs/todos/2026-09-13-container-subtyping-other-containers.md`.
 

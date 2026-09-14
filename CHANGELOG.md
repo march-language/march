@@ -13,6 +13,18 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Container subtyping covers every registered ADT, two layers deep, and
+  polymorphic calls.** Element refinements are now contracts for `Result`,
+  user variant types (`Node(Leaf, 0, Leaf)` under `Tree({Int | _ > 0})` is
+  rejected, and a `match` on it knows the element fact), and any stdlib type
+  defined as a variant; for two layers of nesting (`[[1], [0]]` under
+  `List(List({Int | _ > 0}))` is rejected); and through a polymorphic call's
+  declared signature (`let h = first(xs)` with `first : List(a) -> Option(a)`
+  carries `xs`'s element refinement to `h`; `let x = List.head(xs)` gives
+  `x` the refinement itself). The pass-through refuses any callee that could
+  manufacture an element (`put(xs : List(a), v : a)`). A tuple element or an
+  arrow inside a container remains unenforced.
+
 - **A callback's codomain refinement is a contract.** `fn apply(f : Int ->
   {Int | _ > 0}, x : Int)` now knows `f(x) > 0` inside `apply`, and every
   function passed for `f` must return a value satisfying it: a named function

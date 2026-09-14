@@ -468,6 +468,10 @@ type fn_sig = {
      and silently disables refinement checking for the rest of the
      compilation. *)
   ret_sort : string option;
+  (* The DECLARED return type, refined or not ([None] when unannotated): what
+     lets a container's element refinement flow through a polymorphic
+     signature such as `List.head : List(a) -> Option(a)` (P3 design §2c). *)
+  ret_ty : A.ty option;
 }
 
 (* Length of a list literal (a Cons/Nil ECon chain); None if not a literal. *)
@@ -785,6 +789,27 @@ let measure_preamble : string ref = ref ""
    1-ctor datatypes; used to map EField/ERecord field names to selector indices. *)
 let ctor_field_names : (string, string list) Hashtbl.t = Hashtbl.create 16
 
+(* ── Which constructor field carries which TYPE PARAMETER ──────────────────
+   Container subtyping (P3 design §2a) needs, per constructor, whether each
+   field holds an element of the container's type parameter `i` ([Param i]),
+   the container itself ([Self], `Cons`'s tail), or something else
+   ([Other]).  A refinement inside a type argument is then a contract on
+   every [Param i] field of every construction, and a fact about every
+   [Param i] binder of every `match` — table-driven, so `Cons`/`Some` are
+   the same case as a user `Tree(a)`'s `Node`.  Populated for the builtins
+   by hand below and for user variants by [register_field_sorts] from the
+   type's own parameter list; cleared with the other registries. *)
+type field_role = Param of int | Self | Other
+
+let ctor_param_fields : (string, field_role list) Hashtbl.t = Hashtbl.create 32
+
+(* The ADT sort a constructor belongs to, or [None]. *)
+let sort_of_ctor (ctor : string) : string option =
+  Hashtbl.fold
+    (fun sort ctors acc -> if acc = None && List.mem ctor ctors then Some sort else acc)
+    adt_ctors None
+
+
 (* declare-datatypes preamble for TDRecord types; included in every VC that
    refines over a record value.  Built after measure_preamble so sort
    deduplication (measure_preamble_sorts) works. *)
@@ -879,12 +904,23 @@ let rec register_adt_names (decls : A.decl list) : unit =
 let rec register_field_sorts (decls : A.decl list) : unit =
   List.iter
     (function
-      | A.DType (_, _, _, A.TDVariant variants, _)
-      | A.DAlwaysLinearType (_, _, _, A.TDVariant variants, _) ->
+      | A.DType (_, tname, tparams, A.TDVariant variants, _)
+      | A.DAlwaysLinearType (_, tname, tparams, A.TDVariant variants, _) ->
+        let pnames = List.map (fun (p : A.name) -> p.A.txt) tparams in
+        let role_of (t : A.ty) : field_role =
+          match t with
+          | A.TyVar v ->
+            (match List.find_index (fun n -> n = v.A.txt) pnames with
+             | Some i -> Param i
+             | None -> Other)
+          | A.TyCon (c, _) when c.A.txt = tname.A.txt -> Self
+          | _ -> Other
+        in
         List.iter
           (fun (v : A.variant) ->
             Hashtbl.replace ctor_field_sorts v.A.var_name.A.txt
-              (List.map smt_sort_of_field v.A.var_args))
+              (List.map smt_sort_of_field v.A.var_args);
+            Hashtbl.replace ctor_param_fields v.A.var_name.A.txt (List.map role_of v.A.var_args))
           variants
       | A.DType (_, name, _, A.TDRecord fields, _)
       | A.DAlwaysLinearType (_, name, _, A.TDRecord fields, _) ->
@@ -1436,7 +1472,13 @@ let register_builtin_adts () : unit =
   Hashtbl.replace ctor_field_sorts "Some" [ Smt.SData "Elem" ];
   Hashtbl.replace adt_ctors (adt_sort_name "Result") [ "Ok"; "Err" ];
   Hashtbl.replace ctor_field_sorts "Ok" [ Smt.SData "Elem" ];
-  Hashtbl.replace ctor_field_sorts "Err" [ Smt.SData "Elem" ]
+  Hashtbl.replace ctor_field_sorts "Err" [ Smt.SData "Elem" ];
+  Hashtbl.replace ctor_param_fields "Nil" [];
+  Hashtbl.replace ctor_param_fields "Cons" [ Param 0; Self ];
+  Hashtbl.replace ctor_param_fields "None" [];
+  Hashtbl.replace ctor_param_fields "Some" [ Param 0 ];
+  Hashtbl.replace ctor_param_fields "Ok" [ Param 0 ];
+  Hashtbl.replace ctor_param_fields "Err" [ Param 1 ]
 
 (* Build type_preamble from all registered TDRecord sorts, excluding any sorts
    already declared in measure_preamble (tracked in measure_preamble_sorts). *)

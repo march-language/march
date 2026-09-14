@@ -12458,9 +12458,13 @@ let audit_classify_suite =
       {|mod M do
           fn f(xs : List({Int | _ > 0})) : Int do 0 end
         end|};
-    check_unenforced "a refined element TWO layers down (List(List(...))) is still Unenforced, nested"
+    check_enforced "a refined element TWO layers down (List(List(...))) is Enforced (§2b)"
       {|mod M do
           fn f(xs : List(List({Int | _ > 0}))) : Int do 0 end
+        end|};
+    check_unenforced "a refined TUPLE element stays Unenforced (a tuple is not a registered ADT)"
+      {|mod M do
+          fn f(p : ({Int | _ > 0}, Int)) : Int do 0 end
         end|};
     (* The arrow-shaped case, not a nullary signature: this is the one that
        breaks if rule 2 (Inert_warned) is not tried before rule 1 (nesting),
@@ -12494,12 +12498,14 @@ let audit_classify_suite =
 let audit_classify_reason_suite =
   [ Alcotest.test_case "the nested List(...) reason names Type_arg, not a generic sentence"
       `Quick (fun () ->
-        (* Two layers down: one layer is Enforced since container subtyping
-           landed (2026-09-13), so the Type_arg REASON is exercised on the
-           shape the checker still does not model. *)
+        (* Every REGISTERED container is modelled since §2a/§2b (the stdlib
+           defines `Map` as a variant, so even that is), and the only way to
+           reach the Type_arg reason in this stdlib-less harness is a type the
+           harness never registers: a stand-in name.  `List(List(…))` has been
+           Enforced since §2b. *)
         let _, d = classify_only_site
             {|mod M do
-                fn f(xs : List(List({Int | _ > 0}))) : Int do 0 end
+                fn f(m : Unregistered({Int | _ > 0})) : Int do 0 end
               end|}
         in
         match d with
@@ -12917,14 +12923,14 @@ let strip_audit_lines s =
   |> List.filter (fun l -> not (String.length l >= 14 && String.sub l 0 14 = "coverage audit"))
   |> String.concat "\n"
 
-(* The one Unenforced site is a refinement TWO layers down a type argument:
-   a bare refined field (`v : {Int | v > 0}`) has been Enforced since
-   2026-09-13 (plan phase 4) and one layer (`List({Int | v > 0})`) since
-   container subtyping landed the same day, and this fixture exists to pin
-   an Unenforced line exactly. *)
+(* The one Unenforced site is a refinement on a TUPLE element: a bare refined
+   field has been Enforced since 2026-09-13 (plan phase 4), one and two
+   container layers since container subtyping landed the same day (every
+   registered ADT), and a tuple is the shape with no constructor model.  This
+   fixture exists to pin an Unenforced line exactly. *)
 let audit_flag_pinned_fixture =
   {|mod PINAUDIT1 do
-  type Box = { v : List(List({Int | v > 0})) }
+  type Box = { v : ({Int | v > 0}, Int) }
 
   fn f(n : {Int | n > 0}) : {Int | _ > 0} do
     n
@@ -12982,11 +12988,8 @@ let audit_flag_suite =
           | [ unenforced_line; user_summary; stdlib_summary ] ->
             Alcotest.(check string) "the one Unenforced site's line"
               (Printf.sprintf
-                 "coverage audit: %s:2:36: field `Box.v`: v > 0: the refinement sits \
-                  inside a type constructor's argument of a container the checker does \
-                  not model (only `List(…)` and `Option(…)` carry element contracts, at \
-                  a parameter, return, `let` annotation or field; see \
-                  Refine_scope.elem_refinement), or below one further layer of nesting"
+                 "coverage audit: %s:2:27: field `Box.v`: v > 0: below the outermost \
+                  position of the declared type"
                  path)
               unenforced_line;
             Alcotest.(check string) "user code bucket summary"
@@ -13130,13 +13133,12 @@ end
           write "prelude.march" "mod Prelude do
 end
 ";
-          (* A refinement TWO layers down a type argument: the bare refined
-             field this used to declare has been Enforced since 2026-09-13
-             (plan phase 4), one layer since container subtyping landed the
-             same day, and this test needs one Unenforced stdlib site. *)
+          (* A refinement on a TUPLE element: every container shape this
+             used to declare has been Enforced since 2026-09-13, and this test
+             needs one Unenforced stdlib site. *)
           write "list.march"
             "mod List do
-  type Box = { v : List(List({Int | v > 0})) }
+  type Box = { v : ({Int | v > 0}, Int) }
 end
 ";
           let entry_path = write_march_fixture "mod E do
@@ -14335,6 +14337,92 @@ let arrow_codomain_suite =
         in
         Alcotest.(check bool) "a Skipped obligation on `plain_fn` is in the ledger" true skipped) ]
 
+(* ── Container subtyping beyond one layer (2026-09-13, P3 design §2) ─────
+   §2a: any registered container (`Result`, a user `Tree(a)`) through the
+   constructor field-role registry; §2b: two layers; §2c: the parametric
+   rule through a polymorphic call's DECLARED signature (a user `first` and
+   the stdlib `List.head`), with an unrefined control for each. *)
+let container2_suite =
+  let m body =
+    "mod C2 do\n  cap verified\n  fn need(k : {Int | k > 0}) : Int do k end\n\
+    \  type Tree(a) = Leaf | Node(Tree(a), a, Tree(a))\n\
+    \  fn f(xs : List({Int | _ > 0})) : Int do 0 end\n\
+    \  fn r(x : Result({Int | _ > 0}, String)) : Int do 0 end\n\
+    \  fn t(tr : Tree({Int | _ > 0})) : Int do 0 end\n\
+    \  fn ff(xss : List(List({Int | _ > 0}))) : Int do 0 end\n\
+    \  fn first(xs : List(a)) : Option(a) do\n\
+    \    match xs do\n      Cons(h, _) -> Some(h)\n      Nil -> None\n    end\n  end\n" ^ body ^ "end\n"
+  in
+  [ gated "§2a: Result's Ok payload is obliged; Err is untouched" (fun () ->
+        Alcotest.(check bool) "r(Ok(0)) rejected" true (has_refine_error_d (m "  fn main() : Int do r(Ok(0)) end\n"));
+        Alcotest.(check bool) "r(Ok(1)) + r(Err(\"x\")) pass" false
+          (has_refine_error_d (m "  fn main() : Int do r(Ok(1)) + r(Err(\"x\")) end\n")));
+
+    gated "§2a: a user ADT's element field is obliged at construction and a fact at match" (fun () ->
+        Alcotest.(check bool) "Node(Leaf, 0, Leaf) rejected" true
+          (has_refine_error_d (m "  fn main() : Int do t(Node(Leaf, 0, Leaf)) end\n"));
+        Alcotest.(check bool) "nested Node literal with 2, 1 passes" false
+          (has_refine_error_d (m "  fn main() : Int do t(Node(Node(Leaf, 2, Leaf), 1, Leaf)) end\n"));
+        Alcotest.(check bool) "Node(_, x, right): need(x) and t(right) discharged" false
+          (has_refine_error_d
+             (m "  fn g(tr : Tree({Int | _ > 0})) : Int do\n\
+                \    match tr do\n      Node(_, x, right) -> need(x) + t(right)\n      Leaf -> 0\n    end\n  end\n")));
+
+    gated "§2b: two layers, at a literal and through a match" (fun () ->
+        Alcotest.(check bool) "ff([[1], [0]]) rejected" true
+          (has_refine_error_d (m "  fn main() : Int do ff([[1], [0]]) end\n"));
+        Alcotest.(check bool) "ff([[1], [2, 3]]) passes" false
+          (has_refine_error_d (m "  fn main() : Int do ff([[1], [2, 3]]) end\n"));
+        Alcotest.(check bool) "Cons(inner, _) hands inner the inner entry: f(inner) proves" false
+          (has_refine_error_d
+             (m "  fn g(xss : List(List({Int | _ > 0}))) : Int do\n\
+                \    match xss do\n      Cons(inner, _) -> f(inner)\n      Nil -> 0\n    end\n  end\n")));
+
+    gated "§2c: a polymorphic call carries the element refinement through its declared signature" (fun () ->
+        let body refined =
+          Printf.sprintf
+            "  fn g(xs : List(%s)) : Int do\n    let h = first(xs)\n\
+            \    match h do\n      Some(v) -> need(v)\n      None -> 0\n    end\n  end\n"
+            refined
+        in
+        Alcotest.(check bool) "first(xs) with xs : List({Int | _ > 0}): need(v) proves" false
+          (has_refine_error_d (m (body "{Int | _ > 0}")));
+        Alcotest.(check bool) "control: xs : List(Int) gives v no fact" true
+          (has_refine_error_d (m (body "Int"))));
+
+    gated "§2c soundness: a callee that can MANUFACTURE the element passes nothing through" (fun () ->
+        (* `put(xs : List(a), v : a) : List(a)` has `a` bare as `v`; its
+           result must not inherit `xs`'s slot, or an inserted `0 - 1` would be
+           assumed `> 0`.  Pinned by the obligation on the result being a
+           SKIP (escalated under cap verified), never a proof. *)
+        Alcotest.(check bool) "f(put(xs, 0 - 1)) via let: not proved" true
+          (has_refine_error_d
+             (m "  fn put(xs : List(a), v : a) : List(a) do Cons(v, xs) end\n\
+                \  fn g(xs : List({Int | _ > 0})) : Int do\n    let ys = put(xs, 0 - 1)\n    f(ys)\n  end\n"));
+        Alcotest.(check bool) "control: first(xs) (no bare `a` input) does pass through" false
+          (has_refine_error_d
+             (m "  fn g(xs : List({Int | _ > 0})) : Int do\n    let h = first(xs)\n\
+                \    match h do\n      Some(v) -> need(v)\n      None -> 0\n    end\n  end\n")));
+
+    gated "§2c, scalar return: `let x = hd(xs)` with `hd : List(a) -> a` gets the element refinement" (fun () ->
+        (* A user-defined `hd`: this harness never loads the stdlib, so
+           `List.head` is unresolvable here; its shape (a refined `{List(a) |
+           len(_) > 0}` parameter, a bare `a` return) is what the rule strips
+           and reads, and `hd` declares the same shape.  Only the checker
+           runs on these fixtures, so the `Nil` arm's self-call is never
+           evaluated. *)
+        let body refined =
+          Printf.sprintf
+            "  fn hd(xs : {List(a) | len(_) > 0}) : a do\n\
+            \    match xs do\n      Cons(h, _) -> h\n      Nil -> hd(xs)\n    end\n  end\n\
+            \  fn g(xs : {List(%s) | len(_) > 0}) : Int do\n    let x = hd(xs)\n    need(x)\n  end\n"
+            refined
+        in
+        Alcotest.(check bool) "xs : List({Int | _ > 0}): need(x) proves" false
+          (has_refine_error_d (m (body "{Int | _ > 0}")));
+        Alcotest.(check bool) "control: xs : List(Int) gives x no fact" true
+          (has_refine_error_d (m (body "Int")))) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -14430,4 +14518,5 @@ let () =
       ("sibling-blame", sibling_blame_suite);
       ("arrow-domain-audit", arrow_domain_audit_suite);
       ("scalar-field-measure", scalar_field_measure_suite);
-      ("arrow-codomain", arrow_codomain_suite) ]
+      ("arrow-codomain", arrow_codomain_suite);
+      ("container-subtyping-2", container2_suite) ]

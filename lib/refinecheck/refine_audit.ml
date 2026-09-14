@@ -455,10 +455,11 @@ let sites (decls : A.decl list) : site list =
 let nested_reason (pos : position) : string =
   match pos with
   | Type_arg ->
-    "the refinement sits inside a type constructor's argument of a container \
-     the checker does not model (only `List(…)` and `Option(…)` carry element \
-     contracts, at a parameter, return, `let` annotation or field; see \
-     Refine_scope.elem_refinement), or below one further layer of nesting"
+    "the refinement sits inside a type constructor's argument of a type with \
+     no registered constructor model (every registered ADT — List, Option, \
+     Result, a user variant, a stdlib type defined as one — carries element \
+     contracts at a parameter, return, `let` annotation or field; see \
+     Refine_scope.elem_refinement)"
   | Arrow_domain ->
     "the refinement sits in the domain of a function-typed value the checker \
      does not model: only a SINGLE-argument arrow at a function or lambda \

@@ -57,6 +57,7 @@ type fn_sig = {
   refined : rparam list;
   ret : (string * A.expr) option;
   ret_sort : string option;
+  ret_ty : A.ty option;
 }
 
 (** Resolution context for a call: the current module path, its aliases, its

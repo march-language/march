@@ -145,6 +145,7 @@ let check_let_annotation ~root errctx defs (ctx : rctx) (path : (A.expr * bool) 
       ; refined = [ { idx = 0; binder; pred; sort } ]
       ; ret = None
       ; ret_sort = None
+      ; ret_ty = None
       }
     in
     let out = ref None in
@@ -507,40 +508,99 @@ let record_elem_skip errctx ~(span : A.span) ~(callee : string) ~(predicate : st
           verified` from this module — it asks for every obligation to be discharged"
          predicate callee (Obligation.reason_name reason) (Obligation.reason_detail reason))
 
+(* A predicate to name in a skip for a whole container entry: the first
+   refined slot's, at any depth. *)
+let rec first_slot_pred (slots : elem option list) : string =
+  match slots with
+  | [] -> "<element refinement>"
+  | Some (Refined (_, p, _)) :: _ -> pred_str p
+  | Some (Container (_, inner)) :: rest ->
+    (match first_slot_pred inner with "<element refinement>" -> first_slot_pred rest | s -> s)
+  | None :: rest -> first_slot_pred rest
+
 let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (ce : contenv)
-    ~(span : A.span) ~(callee : string)
-    ((container, r) : string * (string * A.expr * string option)) (a : A.expr) : bool =
-  let sg = elem_sig ~name:"$elem" r in
-  let rp = List.hd sg.refined in
+    ~(span : A.span) ~(callee : string) ((container, slots) : string * elem option list)
+    (a : A.expr) : bool =
   let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets; sc; re } in
-  let check_one e =
+  (* One element against one REFINED slot: as an argument. *)
+  let check_one (r : string * A.expr * string option) (e : A.expr) : bool =
+    let sg = elem_sig ~name:"$elem" r in
+    let rp = List.hd sg.refined in
     let out = ref None in
     check_call cx ~span ~callee ~verdict_out:out sg [ e ] rp;
     !out = Some Obligation.Proved
   in
-  let recur = check_elements ~root errctx defs ctx path lets sc re ce ~span ~callee (container, r) in
+  (* One expression against one slot, whatever it holds. *)
+  let check_slot (slot : elem option) (e : A.expr) : bool =
+    match slot with
+    | None -> true
+    | Some (Refined r) -> check_one r e
+    | Some (Container (c', slots')) ->
+      check_elements ~root errctx defs ctx path lets sc re ce ~span ~callee (c', slots') e
+  in
+  let recur = check_elements ~root errctx defs ctx path lets sc re ce ~span ~callee (container, slots) in
   match a with
-  | A.ECon ({ A.txt = ("Nil" | "None"); _ }, [], _) -> true
-  | A.ECon ({ A.txt = "Cons"; _ }, [ h; t ], _) when container = "List" ->
-    let a1 = check_one h in
-    let a2 = recur t in
-    a1 && a2
-  | A.ECon ({ A.txt = "Some"; _ }, [ x ], _) when container = "Option" -> check_one x
+  (* A CONSTRUCTION of this container: each field at [Param i] is checked
+     against slot [i]; a [Self] field is the same container again. *)
+  | A.ECon (k, args, _)
+    when sort_of_ctor k.A.txt = Some (adt_sort_name container)
+         && Hashtbl.mem ctor_param_fields k.A.txt ->
+    let roles = Hashtbl.find ctor_param_fields k.A.txt in
+    if List.length roles <> List.length args then true
+    else
+      List.fold_left2
+        (fun acc role e ->
+          let ok =
+            match role with
+            | Param i -> check_slot (Option.join (List.nth_opt slots i)) e
+            | Self -> recur e
+            | Other -> true
+          in
+          acc && ok)
+        true roles args
+  (* A VARIABLE the container env knows: element subtyping slot by slot.  A
+     refined slot against a refined slot is the implication on a fresh
+     `$elem`; a slot the source promises nothing about is a recorded skip;
+     nested containers slot-to-slot are a recorded skip too (§2b covers
+     literals and `match` facts; a symbolic nested element has no scalar
+     stand-in). *)
   | A.EVar { A.txt = x; A.span = xsp } ->
     (match List.assoc_opt x ce with
-     | Some (c', q) when c' = container ->
-       let sc = ("$elem", q) :: scope_shadow sc [ "$elem" ] in
-       let cx = { cx with sc } in
-       let out = ref None in
-       check_call cx ~span:xsp ~callee:x ~subject:Element_domain ~verdict_out:out sg
-         [ A.EVar { A.txt = "$elem"; A.span = xsp } ] rp;
-       !out = Some Obligation.Proved
+     | Some (c', src_slots) when c' = container ->
+       let n = max (List.length slots) (List.length src_slots) in
+       List.fold_left
+         (fun acc i ->
+           let want = Option.join (List.nth_opt slots i) in
+           let have = Option.join (List.nth_opt src_slots i) in
+           let ok =
+             match want, have with
+             | None, _ -> true
+             | Some (Refined r), Some (Refined q) ->
+               let sg = elem_sig ~name:"$elem" r in
+               let rp = List.hd sg.refined in
+               let sc = ("$elem", q) :: scope_shadow sc [ "$elem" ] in
+               let cx = { cx with sc } in
+               let out = ref None in
+               check_call cx ~span:xsp ~callee:x ~subject:Element_domain ~verdict_out:out sg
+                 [ A.EVar { A.txt = "$elem"; A.span = xsp } ] rp;
+               !out = Some Obligation.Proved
+             | Some (Refined (_, p, _)), _ ->
+               record_elem_skip errctx ~span:xsp ~callee ~predicate:(pred_str p)
+                 ~what:(Printf.sprintf "the elements of `%s` are not known to satisfy it (its declared element type is not refined there)" x);
+               false
+             | Some (Container (_, inner)), _ ->
+               record_elem_skip errctx ~span:xsp ~callee ~predicate:(first_slot_pred inner)
+                 ~what:(Printf.sprintf "`%s`'s nested elements cannot be compared symbolically; build the nested container from literals or destructure it" x);
+               false
+           in
+           acc && ok)
+         true (List.init n Fun.id)
      | _ ->
-       record_elem_skip errctx ~span:xsp ~callee ~predicate:(pred_str rp.pred)
+       record_elem_skip errctx ~span:xsp ~callee ~predicate:(first_slot_pred slots)
          ~what:(Printf.sprintf "the elements of `%s` are not known to satisfy it (no declared element refinement in scope)" x);
        false)
   | _ ->
-    record_elem_skip errctx ~span ~callee ~predicate:(pred_str rp.pred)
+    record_elem_skip errctx ~span ~callee ~predicate:(first_slot_pred slots)
       ~what:"the container is neither a literal nor a variable with a declared element refinement";
     false
 
@@ -577,6 +637,96 @@ let check_field_elements ~root errctx defs (ctx : rctx) path lets sc re (ce : co
            | None -> ())
         | _ -> ())
     sg.param_names
+
+(* ── §2c: a container's element refinement through a POLYMORPHIC call ────
+   `let h = first(xs)` with `fn first(xs : List(a)) : Option(a)` and
+   `xs : List({Int | p})`: the callee's DECLARED signature puts the type
+   variable `a` at a container parameter position whose actual is a
+   container-env variable, and at a container position (or bare) in the
+   return type — so the result's element (or the result itself) satisfies
+   whatever `xs`'s slot for `a` says.  Purely parametric: nothing is
+   inferred from any body, only from the declared types; a parameter's own
+   refinement wrapper (`{List(a) | len(_) > 0}`, `List.head`'s) is that
+   parameter's precondition, checked where the call is, and stripped here.
+   Returns the container entry for a container return, the scalar
+   refinement for a bare type-variable return, [None] otherwise. *)
+let parametric_return (ctx : rctx) defs (cb : cbenv) (ce : contenv) (fname : string)
+    (args : A.expr list) : [ `Container of string * elem option list | `Scalar of string * A.expr * string option ] option =
+  match callee_sig ctx defs cb fname with
+  | None -> None
+  | Some sg ->
+    let strip_refine t =
+      match Option.map unlinear t with
+      | Some (A.TyRefine (b, _, _)) -> Some (unlinear b)
+      | t -> t
+    in
+    (* Does [v] occur anywhere in [t]? *)
+    let rec occurs v (t : A.ty) : bool =
+      match t with
+      | A.TyVar tv -> tv.A.txt = v
+      | A.TyCon (_, args) | A.TyTuple args -> List.exists (occurs v) args
+      | A.TyArrow (a, b) -> occurs v a || occurs v b
+      | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> occurs v b
+      | A.TyRecord fs -> List.exists (fun (_, t) -> occurs v t) fs
+      | A.TyChan _ | A.TyNat _ | A.TyNatOp _ -> false
+    in
+    (* SOUNDNESS (P3 design §2, condition (i)): the rule may carry `v`'s
+       refinement only if the callee cannot MANUFACTURE a `v`: every
+       occurrence of `v` in the parameter types must be a direct argument of
+       a container-typed parameter whose actual is a container-env variable
+       of that container.  `Map.put(m : Map(k, v), key : k, value : v)` has
+       `v` bare as `value`, so its result must NOT inherit `m`'s slot — the
+       inserted value was never obliged.  `first(xs : List(a)) : Option(a)`
+       and `List.head(xs : {List(a) | …}) : a` pass. *)
+    let safe (v : string) : bool =
+      List.for_all2
+        (fun pty a ->
+          match strip_refine pty with
+          | Some t when occurs v t ->
+            (match t, a with
+             | A.TyCon (pc, pargs), A.EVar { A.txt = ax; _ } when is_container_type pc.A.txt ->
+               (match List.assoc_opt ax ce with
+                | Some (c', _) when c' = pc.A.txt ->
+                  List.for_all
+                    (fun parg -> (match parg with A.TyVar _ -> true | _ -> not (occurs v parg)))
+                    pargs
+                | _ -> false)
+             | _ -> false)
+          | _ -> true)
+        (List.filteri (fun i _ -> i < List.length args) sg.param_tys)
+        (List.filteri (fun i _ -> i < List.length sg.param_tys) args)
+      && List.length sg.param_tys = List.length args
+    in
+    (* The slot a type variable resolves to, from the actuals. *)
+    let slot_of_var (v : string) : elem option =
+      if not (safe v) then None else
+      let found = ref None in
+      List.iteri
+        (fun i pty ->
+          match strip_refine pty, List.nth_opt args i with
+          | Some (A.TyCon (pc, pargs)), Some (A.EVar { A.txt = ax; _ })
+            when !found = None && is_container_type pc.A.txt ->
+            (match List.assoc_opt ax ce with
+             | Some (c', aslots) when c' = pc.A.txt ->
+               List.iteri
+                 (fun j parg ->
+                   match parg with
+                   | A.TyVar tv when tv.A.txt = v && !found = None ->
+                     found := Option.join (List.nth_opt aslots j)
+                   | _ -> ())
+                 pargs
+             | _ -> ())
+          | _ -> ())
+        sg.param_tys;
+      !found
+    in
+    (match strip_refine sg.ret_ty with
+     | Some (A.TyCon (rc, rargs)) when rargs <> [] && is_container_type rc.A.txt ->
+       let rslots = List.map (function A.TyVar tv -> slot_of_var tv.A.txt | _ -> None) rargs in
+       if List.exists Option.is_some rslots then Some (`Container (rc.A.txt, rslots)) else None
+     | Some (A.TyVar tv) ->
+       (match slot_of_var tv.A.txt with Some (Refined r) -> Some (`Scalar r) | _ -> None)
+     | _ -> None)
 
 let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     (lets : launder) (sc : scope) (re : recenv) (cb : cbenv) (ce : contenv) (e : A.expr) : unit =
@@ -772,7 +922,18 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                 discharged by a premise this binding failed to establish. *)
              | A.ELet (b, _) when annot_proved = Some false ->
                scope_shadow sc (pat_binders b.A.bind_pat)
-             | A.ELet (b, _) -> scope_add_binding ~postcond:(postcond_of ~cb ctx defs) sc b
+             | A.ELet (b, _) ->
+               let sc' = scope_add_binding ~postcond:(postcond_of ~cb ctx defs) sc b in
+               (* §2c, scalar half: `let x = List.head(xs)` with `head :
+                  {List(a) | …} -> a` and `xs : List({Int | p})` gives `x` the
+                  element refinement `p` as a scope fact. *)
+               (match b.A.bind_pat, b.A.bind_expr with
+                | A.PatVar n, A.EApp (A.EVar { A.txt = fname; _ }, args, _)
+                  when not (List.mem_assoc n.A.txt sc') ->
+                  (match parametric_return ctx defs cb ce fname args with
+                   | Some (`Scalar r) -> (n.A.txt, r) :: sc'
+                   | _ -> sc')
+                | _ -> sc')
              | _ -> sc
            in
            let re' = match e with A.ELet (b, _) -> recenv_add_binding re b | _ -> re in
@@ -806,7 +967,18 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
            in
            let ce' =
              match e with
-             | A.ELet (b, _) -> cont_add_binding ~proved:elem_proved ce b
+             | A.ELet (b, _) ->
+               let ce' = cont_add_binding ~proved:elem_proved ce b in
+               (* §2c, the parametric rule, container half: `let h = first(xs)`
+                  with `first : List(a) -> Option(a)` puts `h` in the env as
+                  `Option` with slot `a` = `xs`'s slot for `a`. *)
+               (match b.A.bind_pat, b.A.bind_expr with
+                | A.PatVar n, A.EApp (A.EVar { A.txt = fname; _ }, args, _)
+                  when not (List.mem_assoc n.A.txt ce') ->
+                  (match parametric_return ctx defs cb ce fname args with
+                   | Some (`Container entry) -> (n.A.txt, entry) :: ce'
+                   | _ -> ce')
+                | _ -> ce')
              | A.ELetFn (n, _, _, _, _) -> cont_shadow ce [ n.A.txt ]
              | _ -> ce
            in
@@ -1040,16 +1212,26 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
            fact; a deeper pattern has no single name to attach it to. *)
         let sc, ce =
           match subj, br.A.branch_pat with
-          | A.EVar s, A.PatCon ({ A.txt = "Cons"; _ }, [ hp; tp ]) ->
-            (match List.assoc_opt s.A.txt ce_outer with
-             | Some (("List", r) as entry) ->
-               let sc = match hp with A.PatVar h -> (h.A.txt, r) :: sc | _ -> sc in
-               let ce = match tp with A.PatVar t -> (t.A.txt, entry) :: ce | _ -> ce in
-               (sc, ce)
-             | _ -> (sc, ce))
-          | A.EVar s, A.PatCon ({ A.txt = "Some"; _ }, [ A.PatVar x ]) ->
-            (match List.assoc_opt s.A.txt ce_outer with
-             | Some ("Option", r) -> ((x.A.txt, r) :: sc, ce)
+          | A.EVar s, A.PatCon (k, subpats) ->
+            (match List.assoc_opt s.A.txt ce_outer, Hashtbl.find_opt ctor_param_fields k.A.txt with
+             | Some ((container, slots) as entry), Some roles
+               when sort_of_ctor k.A.txt = Some (adt_sort_name container)
+                    && List.length roles = List.length subpats ->
+               (* Table-driven (P3 design §2a): a `PatVar` at a [Param i]
+                  field takes slot [i] — a refined slot as a scope fact, a
+                  nested container as its own env entry — and a `PatVar` at
+                  a [Self] field takes the whole entry. *)
+               List.fold_left2
+                 (fun (sc, ce) role sub ->
+                   match role, sub with
+                   | Param i, A.PatVar v ->
+                     (match Option.join (List.nth_opt slots i) with
+                      | Some (Refined r) -> ((v.A.txt, r) :: sc, ce)
+                      | Some (Container (c', slots')) -> (sc, (v.A.txt, (c', slots')) :: ce)
+                      | None -> (sc, ce))
+                   | Self, A.PatVar v -> (sc, (v.A.txt, entry) :: ce)
+                   | _ -> (sc, ce))
+                 (sc, ce) roles subpats
              | _ -> (sc, ce))
           | _ -> (sc, ce)
         in
@@ -1859,6 +2041,7 @@ let register_types_for_check (decls : A.decl list) : unit =
   Hashtbl.clear adt_ctors;
   Hashtbl.clear ctor_field_sorts;
   Hashtbl.clear ctor_field_names;
+  Hashtbl.clear ctor_param_fields;
   Hashtbl.clear axiom_measures;
   Hashtbl.clear measure_base_cases;
   Hashtbl.clear measure_scalar_field_dep;
@@ -2628,6 +2811,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   Hashtbl.reset adt_ctors;
   Hashtbl.reset ctor_field_sorts;
   Hashtbl.reset ctor_field_names;
+  Hashtbl.reset ctor_param_fields;
   Hashtbl.reset axiom_measures;
   Hashtbl.reset measure_base_cases;
   Hashtbl.reset measure_scalar_field_dep;

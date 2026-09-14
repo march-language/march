@@ -1795,10 +1795,9 @@ An empty baseline over real code is a true finding, not evidence the audit
 does nothing, but an audit that silently broke would also report an empty
 baseline, which is why a second, deliberately non-empty fixture set exists:
 `test/refine_audit/holes/`, one small program per known unenforced position
-(a refinement two layers down a type argument, `List(List({Int | _ > 0}))`;
-a fixture leaves the set when its position becomes enforced, as eleven of
-them did on 2026-09-13, the arrow-domain one last, when the audit learned
-that a single-argument callback's domain is checked),
+(a refinement on a tuple element; a fixture leaves the set when its
+position becomes enforced, as twelve of them did on 2026-09-13, the two-layer
+container one last),
 pinned at `test/refine_audit/holes.baseline`. If that baseline ever reports
 zero Unenforced sites, the audit itself is broken; the test that diffs it
 fails loudly rather than passing.
@@ -1856,16 +1855,22 @@ position into a real contract, obligation and assumption together, is
   record-typed variable assumes it. A `linear` wrapper is transparent.
   Program-wide, two constructors (or a constructor and an actor message)
   sharing a name withdraw the contract, neither obliged nor assumed.
-- (Closed 2026-09-13 for `List` and `Option`.) A refinement inside a type
-  argument, `List({Int | _ > 0})` / `Option({Int | _ > 0})`, is a contract on
+- (Closed 2026-09-13.) A refinement inside a registered container's type
+  argument — `List`, `Option`, `Result`, a user variant such as `Tree({Int |
+  _ > 0})`, any stdlib type defined as one, and nested containers
+  (`List(List({Int | _ > 0}))`) — is a contract on
   every value flowing into the position — a literal element-wise, a
   container-typed variable by element implication (its own element
   refinement must imply the expected one, refuted with a witness element
   otherwise), anything else a recorded skip — at a parameter, a return, an
   annotated `let`, or a field; and a fact about every element a `match`
-  takes out (`Cons(h, t)`, `Some(x)`). Still open: other containers, two
-  layers of nesting, and elements reached through a stdlib function; see
-  `specs/todos/2026-09-13-container-subtyping-other-containers.md`.
+  takes out (`Cons(h, t)`, `Some(x)`, `Node(_, x, right)`); a polymorphic
+  call carries it through its declared signature (`let h = first(xs)` with
+  `first : List(a) -> Option(a)`; `let x = List.head(xs)` gives `x` the
+  refinement itself), refusing any callee that could manufacture an element
+  (`put(xs : List(a), v : a)`). Still unenforced: a tuple element, an arrow
+  side, a second layer of a stacked refinement, and a type with no registered
+  constructor model.
 - (Closed 2026-09-13.) A `{String | ...}` return type is verified against
   the body: a literal tail and the predicate's literal meet on one `Str`
   constant, `len(_)` is the returned string's byte length, and a String
