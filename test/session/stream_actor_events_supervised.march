@@ -1,0 +1,215 @@
+mod StreamActorEventsSupervised do
+  -- The event-shaped endpoints (session state IN ACTOR STATE) under a real
+  -- SUPERVISOR: what a restart means when the parked state dies with the
+  -- host.  The replacement starts `Idle`; a delivery to it would hit
+  -- `resume`'s "delivery before the endpoint was started" panic and, under
+  -- one_for_one, crash the replacement again until the restart budget
+  -- escalates.  So this transport routes through actor CAPABILITIES, which
+  -- carry the incarnation's epoch: `send_checked` on a cap taken from the
+  -- host that parked the endpoint returns `:error` once that host is gone,
+  -- and the transport ABANDONS the session -- reports which endpoint's host
+  -- restarted, closes the peer's endpoint so it is not left awaiting, and
+  -- stops.  That is the event API's trade, measured: the step can read the
+  -- actor's state because the session state IS actor state, and actor state
+  -- does not survive a restart.
+  --
+  -- Design: specs/todos/2026-09-13-endpoint-actors-under-a-supervisor.md.
+  -- Compare stream_actor_supervised.march, where the callback API's session
+  -- survives the same kill because its state lives in the transport.
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs Session.Live
+
+  @[endpoints]
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+
+  -- ── the mailbox transport, as in stream_actor.march ────────────────────
+  -- `await_*` still calls `Session.suspend`, so `handlers` records which
+  -- endpoints await and the router's guard keeps working; the installed
+  -- handler is never called (the actor resumes the endpoint itself), and
+  -- panics if a transport tries.
+  type Transport = { ops : Session.Ops }
+
+  pfn ekey(ep : Int) : String do "e" ++ int_to_string(ep) end
+
+  fn mailbox(handlers, pending) : Transport do
+    Vault.set(pending, "q", Deque.empty())
+    {
+      ops: {
+        register: fn (_ap, role) -> role,
+        emit: fn (ep, to, msg) -> do
+          let q = match Vault.get(pending, "q") do
+            Some(d) -> d
+            None    -> Deque.empty()
+          end
+          Vault.set(pending, "q", Deque.push_back(q, (to, ep, msg)))
+          ep
+        end,
+        suspend: fn (ep, handler) -> do
+          Vault.set(handlers, ekey(ep), handler)
+          ep
+        end,
+        close: fn ep -> print_line("close " ++ int_to_string(ep))
+      }
+    }
+  end
+
+  -- ── the endpoint actors ───────────────────────────────────────────────
+  actor ProdActor do
+    state { next : Int, parked : Stream_Prod.Parked_Prod }
+    init  { next: 1, parked: Stream_Prod.idle() }
+    on StartP(s : Cap(Session.Live)) do
+      Stream_Prod.take_idle(state.parked)
+      let st = Stream_Prod.register(s, 0)
+      { state with parked: step_prod(s, st, state.next), next: state.next + 1 }
+    end
+    on DeliverP(s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
+      match Stream_Prod.resume(state.parked, from, msg, ep) do
+        Got_More(_b, st) ->
+          print_line("Prod got More")
+          { state with parked: step_prod(s, st, state.next), next: state.next + 1 }
+        Got_Done(_b, st) ->
+          print_line("Prod got Done")
+          { state with parked: Stream_Prod.finish(s, st) }
+      end
+    end
+  end
+
+  -- At the loop head Prod sends, then awaits the offer.
+  pfn step_prod(s : Cap(Session.Live), st : Stream_Prod.S_send_Msg_Prod_Cons_1, next : Int) : Stream_Prod.Parked_Prod do
+    print_line("Prod sends Item(" ++ int_to_string(next) ++ ")")
+    Stream_Prod.await_more_done(s, Stream_Prod.send_Msg_Prod_Cons_1(s, st, next))
+  end
+
+  actor ConsActor do
+    state { budget : Int, parked : Stream_Cons.Parked_Cons }
+    init  { budget: 2, parked: Stream_Cons.idle() }
+    on StartC(s : Cap(Session.Live)) do
+      Stream_Cons.take_idle(state.parked)
+      { state with parked: Stream_Cons.await_Msg_Prod_Cons_1(s, Stream_Cons.register(s, 0)) }
+    end
+    on DeliverC(s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
+      match Stream_Cons.resume(state.parked, from, msg, ep) do
+        Got_Msg_Prod_Cons_1(n, st) ->
+          print_line("Cons got Item(" ++ int_to_string(n) ++ ")")
+          -- The step reads the actor's own state: this is what the event API
+          -- is for.
+          if state.budget > 1 do
+            let st2 = Stream_Cons.choose_more(s, st, true)
+            { state with budget: state.budget - 1,
+                         parked: Stream_Cons.await_Msg_Prod_Cons_1(s, st2) }
+          else
+            let st2 = Stream_Cons.choose_done(s, st, true)
+            { state with parked: Stream_Cons.finish(s, st2) }
+          end
+      end
+    end
+  end
+
+  -- One delivery per turn, through the cap of the host that PARKED the
+  -- destination endpoint.  A stale cap means that host was restarted and its
+  -- parked state is gone: abandon, and close the peer so nothing awaits.
+  pfn route(s : Cap(Session.Live), cp, cc, handlers, pending) : () do
+    let q = match Vault.get(pending, "q") do
+      Some(d) -> d
+      None    -> Deque.empty()
+    end
+    match Deque.pop_front(q) do
+      (None, _) -> ()
+      (Some((to, from, msg)), rest) ->
+        Vault.set(pending, "q", rest)
+        match Vault.get(handlers, ekey(to)) do
+          None -> panic("stream_actor_events_supervised: delivery to " ++ int_to_string(to) ++ " with no endpoint awaiting")
+          Some(_) ->
+            let delivered =
+              if to == Stream_Msg.role_Prod() do
+                send_checked(cp, DeliverP(s, from, msg, to))
+              else
+                send_checked(cc, DeliverC(s, from, msg, to))
+              end
+            match delivered do
+              :ok ->
+                run_until_idle()
+                route(s, cp, cc, handlers, pending)
+              _ ->
+                print_line("-- endpoint " ++ int_to_string(to) ++ ": its host was restarted and the parked session state is gone; abandoning --")
+                Session.close(s, from)
+            end
+        end
+    end
+  end
+
+  actor EpSup do
+    state { prod : Int, cons : Int }
+    init  { prod: 0, cons: 0 }
+    supervise do
+      strategy one_for_one
+      max_restarts 5 within 60
+      ProdActor prod
+      ConsActor cons
+    end
+  end
+
+  fn child(sup, field : String) do
+    match get_actor_field(sup, field) do
+      Some(n) -> pid_of_int(n)
+      None    -> panic("stream_actor_events_supervised: no child " ++ field)
+    end
+  end
+
+  fn cap_of(p) do
+    match get_cap(p) do
+      Some(cap) -> cap
+      None      -> panic("stream_actor_events_supervised: child not alive")
+    end
+  end
+
+  pfn route_one(s : Cap(Session.Live), cp, cc, _handlers, pending) : () do
+    let q = match Vault.get(pending, "q") do
+      Some(d) -> d
+      None    -> Deque.empty()
+    end
+    match Deque.pop_front(q) do
+      (None, _) -> ()
+      (Some((to, from, msg)), rest) ->
+        Vault.set(pending, "q", rest)
+        let _ = if to == Stream_Msg.role_Prod() do
+          send_checked(cp, DeliverP(s, from, msg, to))
+        else
+          send_checked(cc, DeliverC(s, from, msg, to))
+        end
+        run_until_idle()
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let handlers = Vault.new("stream_actor_events_sup_handlers")
+    let pending  = Vault.new("stream_actor_events_sup_pending")
+    let t = mailbox(handlers, pending)
+    let s = Session.attach(c, t.ops)
+    let sup = spawn(EpSup)
+    let pc = child(sup, "cons")
+    let pp = child(sup, "prod")
+    send(pc, StartC(s))
+    send(pp, StartP(s))
+    run_until_idle()
+    -- The caps are taken from the incarnations that parked the endpoints.
+    let cc = cap_of(pc)
+    let cp = cap_of(pp)
+    route_one(s, cp, cc, handlers, pending)
+    kill(pc)
+    run_until_idle()
+    print_line("-- Cons host killed; supervisor restarted it --")
+    route(s, cp, cc, handlers, pending)
+  end
+end
