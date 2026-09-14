@@ -231,6 +231,12 @@ git log is authoritative for exact commits.
   nothing when unset.
 
 ### Fixed
+- **A running actor is no longer freed when the program drops its last pid.**
+  `let a = spawn(W)` with `a` never used again released the actor record's only
+  reference right after spawn, and the actor's own thread then ran on freed
+  memory — invisible on macOS, a glibc `tcache` abort on Linux
+  (`native_actor_enumeration` on the ubuntu CI leg). The runtime now holds its
+  own reference to a live actor, released when its thread finishes.
 - **A user function named `own` with two arguments is the user's function again.**
   The lowering rewrote *any* two-argument `own(...)` into resource registration
   (`Drop$<Type>.drop`), so a user `fn own(ep, p)` called with a `Pid` failed to
