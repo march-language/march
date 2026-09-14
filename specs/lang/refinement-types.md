@@ -1249,6 +1249,18 @@ The definite-failure stance is unchanged: `fn lose(xs : List(Int)) :
 {List(Int) | elts(_) == elts(xs)} do [7] end` is **skipped**, not reported,
 because `xs` may well be `[7]`.
 
+A set holds **one element type**. A set predicate whose operands have known,
+different element types is an error at the predicate:
+
+```march
+fn f(xs : {List(Int) | member("a", elts(_))}) : Int do 0 end
+-- error: this set predicate mixes element types: the element type of
+-- `elts(_)` is `Int` but the type of `"a"` is `String`.
+```
+
+Element types are read from declared types, so an unannotated value or a type
+variable is never reported.
+
 ### The stdlib `Set` and `Map` carry assumed contracts
 
 `Set(a)` and `Map(k, v)` are hash tries no measure can see into, so their
@@ -1328,13 +1340,29 @@ fn need_sub(f : Expr, a : Expr,
 fn sym(f : Expr, a : Expr) : Int do need_sub(f, a, App(f, a)) end   -- proved by the axioms alone
 ```
 
-`Int` and `Bool` payloads are concrete; a `String` or type-parameter payload is
-opaque (its constructor field is the checker's opaque element sort), so a set
-measure over strings reasons symbolically but not about particular literals. A
-set measure whose declared element type disagrees with the payload it
-collects (`fv(e : Expr(Int)) : Set(Int)` over `type Expr(a) = Var(a) | …`)
-gets no recursion axioms: its calls are checked symbolically, and the other
-measures in the module are unaffected. A refuted set contract
+`Int` and `Bool` payloads are concrete, including the payload of a parametric
+type at a concrete instance: a measure declared over `Tree(Int)` or
+`Expr(Int)` reads its `Int` payloads, and a measure declared over `Tree(a)`
+applies at `Tree(Int)` too.
+
+```march
+type Tree(a) = Leaf | Node(Tree(a), a, Tree(a))
+
+@[measure]
+fn sum(t : Tree(Int)) : Int do
+  match t do
+    Leaf -> 0
+    Node(l, x, r) -> sum(l) + x + sum(r)
+  end
+end
+
+fn need_pos(t : {Tree(Int) | sum(_) > 0}) : Int do 0 end
+fn ok() : Int do need_pos(Node(Leaf, 5, Leaf)) end    -- proved
+fn bad() : Int do need_pos(Node(Leaf, 0, Leaf)) end   -- violation
+```
+
+A `String` or type-variable payload is opaque, so a set measure over strings
+reasons symbolically but not about particular literals. A refuted set contract
 renders its model as a set literal: `Set.insert() can return {4}`,
 `elts(s) = {1}`.
 

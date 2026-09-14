@@ -963,19 +963,6 @@ let set_ret_elem (fd : A.fn_def) : Smt.sort option =
   in
   match fd.A.fn_ret_ty with Some t -> go t | None -> None
 
-(* The declared sort of field selector [f], named `<Ctor>_<idx>` (see
-   [ctor_decl]); [None] when [f] is not a registered constructor's selector. *)
-let selector_field_sort (f : string) : Smt.sort option =
-  match String.rindex_opt f '_' with
-  | None -> None
-  | Some i ->
-    let ctor = String.sub f 0 i and idx = String.sub f (i + 1) (String.length f - i - 1) in
-    if idx = "" || not (String.for_all (fun c -> c >= '0' && c <= '9') idx) then None
-    else
-      match Hashtbl.find_opt ctor_field_sorts ctor with
-      | Some sorts -> (match int_of_string_opt idx with Some n -> List.nth_opt sorts n | None -> None)
-      | None -> None
-
 (* Replace the placeholder element sort throughout a term with [elem] — for
    measure AXIOMS, whose element sort is fixed by the declaration and which
    are rendered once, outside any VC and hence outside [resolve_set_sorts]. *)

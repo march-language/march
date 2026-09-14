@@ -13,6 +13,14 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Refinement measures read the payloads of parametric types.** A
+  `@[measure]` declared over `Tree(Int)` or `Expr(Int)` now reads its `Int`
+  payloads (`sum(l) + x + sum(r)`), a set-valued measure can collect them, and
+  a measure declared over `Tree(a)` applies at `Tree(Int)`. These contracts
+  were skipped before. A set predicate whose operands have known, different
+  element types (`member("a", elts(xs))` with `xs : List(Int)`) is now an
+  error at the predicate instead of a silent skip.
+
 - **`PeerReader`: one reader per peer connection, dispatching frames by tag.**
   There was no receive loop: every cross-node consumer read its own frames
   off the shared connection and skipped the ones it did not recognise, so two
