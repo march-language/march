@@ -13,6 +13,10 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **SWIM stall-vs-death, executable**: the `stall` two-node scenario SIGSTOPs a
+  node running a real SWIM loop; the observer takes it through `Suspect` to
+  `Dead` on timeouts alone, and on resume the node refutes with a higher
+  incarnation, which the observer accepts as `Alive` (`test/two_node/stall/`).
 - **The `Session.Ops` network transport**: the Stream session protocol's two
   endpoints run on two nodes with every message crossing a TCP connection as a
   `NodeSend` ACTOR_MSG, using the generated `@[endpoints]` API and endpoint code

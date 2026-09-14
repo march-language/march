@@ -101,10 +101,21 @@ node's ORDERED trace its projection of `stream_endpoints.expected` — see
 for a node that prints from one actor. CI runs every scenario
 (`scripts/two-node.sh --list`).
 
+Scenario `stall` (scenario 1, added the same day): both nodes run a real
+SWIM loop over one connection (`Socket.recv_timeout` for 50 ms, every
+complete frame to an event, `SwimDriver.step` with the wall clock, the
+actions performed; period 500 ms, ack timeout 300 ms, suspect timeout 1 s).
+The harness SIGSTOPs node-b after node-a's first ack — a stall, not a crash:
+the socket stays open and nothing is refused — and node-a takes node-b
+through `Suspect` to `Dead` on timeouts alone; on SIGCONT node-b reads the
+Dead gossip about itself, refutes at incarnation 2, and node-a accepts it as
+`Alive (incarnation 2)`. The SWIM refutation path had never executed in a
+golden. 6/6 runs identical; with the stall removed node-a never leaves
+`Alive` and the harness times out, as it must.
+
 Still open: the monitor half of scenario 3 (`NodeDown`, needs 2/4 step 4),
-scenarios 1 (SIGSTOP; the hooks exist, SWIM's refutation path does not
-yet have a driver), 2 (needs `pfctl`/`iptables`), 4, and the Docker
-network variant.
+scenario 2 (needs `pfctl`/`iptables`), scenario 4 (clock skew), and the
+Docker network variant.
 
 ## Non-goals
 

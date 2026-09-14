@@ -507,9 +507,10 @@ that a send to the held `GlobalPid` is refused as stale while a send to the
 re-announced one is delivered; the `stream` scenario runs the Stream
 session protocol's two endpoints on the two nodes over the `Session.Ops`
 network transport, each node's trace its projection of the in-process
-one. Netsplit (packet drop), stall-vs-death
-(SIGSTOP), and clock skew across hosts remain undocumented in executable
-form; the harness has the hooks for the first two
+one; the `stall` scenario SIGSTOPs a node running SWIM and pins
+Suspect → Dead on the observer and the incarnation refutation on resume.
+Netsplit (packet drop) and clock skew across hosts remain undocumented in
+executable form; the harness has the hooks for the first
 (`specs/todos/2026-09-14-two-node-failure-semantics-harness.md`).
 
 **A compiled memory-safety gap, FIXED (finding C1, `specs/todos/`, 2026-07-11).**
