@@ -624,8 +624,8 @@ A module with `cap no_panic` must not contain any expression that can panic at r
 
 **1. Unsafe calls.** Some functions can panic: `panic` itself, `List.tail` on an empty list, `Option.unwrap` on `None`. The compiler splits these into two groups:
 
-- **Always banned, no way around it**: `panic`/`panic_`/`todo_`/`unreachable_`, and `Array.get`/`Array.set`/`Array.pop`. No code you write can make these safe, so `cap no_panic` simply forbids calling them, directly or through a local helper that calls them (a helper that panics makes every one of its own callers unsafe too, and each gets its own error).
-- **Allowed if you prove it's safe**: partial functions that come with a refinement precondition: `List.nth`, `List.tail`, `List.head`, `Option.unwrap`, `Result.unwrap`, `Random.choice_weighted`, `Stats.percentile`, and similar. Guard the call with something that proves the precondition, and it's accepted:
+- **Always banned, no way around it**: `panic`/`panic_`/`todo_`/`unreachable_`. No code you write can make these safe, so `cap no_panic` simply forbids calling them, directly or through a local helper that calls them (a helper that panics makes every one of its own callers unsafe too, and each gets its own error).
+- **Allowed if you prove it's safe**: partial functions that come with a refinement precondition: `List.nth`, `List.tail`, `List.head`, `Option.unwrap`, `Result.unwrap`, `Random.choice_weighted`, `Stats.percentile`, `Array.get`/`Array.set`/`Array.pop` (index in bounds; `pop` on a non-empty array), and similar. Guard the call with something that proves the precondition, and it's accepted:
 
   ```march
   mod Safe do
@@ -633,6 +633,11 @@ A module with `cap no_panic` must not contain any expression that can panic at r
     -- Accepted: the guard proves `len(xs) > 0`, which is List.tail's contract.
     fn rest(xs : List(Int)) : List(Int) do
       if List.length(xs) > 0 do List.tail(xs) else xs end
+    end
+    -- Accepted: the guard proves the index is in bounds, Array.get's contract.
+    -- Without it (or with `i <= Array.length(v)`) this is a panic error.
+    fn at(v, i : Int) : Int do
+      if i >= 0 && i < Array.length(v) do Array.get(v, i) else 0 end
     end
   end
   ```

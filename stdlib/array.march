@@ -337,6 +337,21 @@ mod Array do
     end
   end
 
+  -- The refinement MEASURE behind the bounds contracts on `get` / `set` /
+  -- `pop`: the same count `length` returns, as a `@[measure]` over the private
+  -- `PVec` type. It is a separate private function, not `length` itself,
+  -- because measures are keyed by bare name program-wide and a user
+  -- `@[measure] fn length` over their own type is a natural thing to write.
+  -- A guard spelled `Array.length(v)` reaches it through the checker's
+  -- `Array.length` -> `pvec_length` alias (lib/refinecheck/refine_encode.ml,
+  -- [measure_alias]), gated on this module being the stdlib's own.
+  @[measure]
+  pfn pvec_length(v : PVec(a)) : Int do
+    match v do
+    PVec(n, _, _, _) -> n
+    end
+  end
+
   doc "Returns true if the vector is empty."
   fn is_empty(v) do
     match v do
@@ -348,7 +363,7 @@ mod Array do
   Returns the element at index idx (0-based). O(log₃₂ n).
   Panics if idx is out of range.
   """
-  fn get(v, idx) do
+  fn get(v : PVec(a), idx : {Int | _ >= 0 && _ < pvec_length(v)}) do
     match v do
     PVec(n, shift, root, tail) -> do
       if idx < 0 || idx >= n do panic("Array.get: index out of range")
@@ -368,7 +383,7 @@ mod Array do
   Returns a new vector with element at idx replaced by val. O(log₃₂ n).
   Panics if idx is out of range.
   """
-  fn set(v, idx, val) do
+  fn set(v : PVec(a), idx : {Int | _ >= 0 && _ < pvec_length(v)}, val) do
     match v do
     PVec(n, shift, root, tail) -> do
       if idx < 0 || idx >= n do panic("Array.set: index out of range")
@@ -407,7 +422,7 @@ mod Array do
   Removes the last element. Returns (new_vector, last_element).
   Panics if the vector is empty.
   """
-  fn pop(v) do
+  fn pop(v : {PVec(a) | pvec_length(_) > 0}) do
     match v do
     PVec(0, _, _, _) -> panic("Array.pop: empty vector")
     PVec(n, shift, root, tail) -> do

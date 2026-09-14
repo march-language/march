@@ -306,7 +306,7 @@ does discharge on an opaque value); §4c reconsidered* — the warning was
 reworded rather than hoisted, since its detection needs the arm shapes only
 `build_measure_preamble` computes and after §4a the notice is advisory. See
 `specs/progress/2026-09-13-measure-over-scalar-ctor-field.md`; the `Array`
-contracts are `specs/todos/2026-09-13-array-bounds-contracts.md`.
+contracts landed 2026-09-14, `specs/progress/2026-09-13-array-bounds-contracts.md`.
 
 
 Todo: `specs/todos/2026-08-05-measure-over-scalar-ctor-field.md`.
