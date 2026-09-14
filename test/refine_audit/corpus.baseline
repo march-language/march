@@ -62,6 +62,8 @@ native_closure_param_shadows_import: coverage audit (user + stdlib): 63 enforced
 native_closure_param_shadows_import: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_closure_scalar_abi: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_closure_scalar_abi: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_compare_builtins: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_compare_builtins: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_csv_niche_row: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_csv_niche_row: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_ctor_pattern_multi_param: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
@@ -236,6 +238,8 @@ native_nested_record_field_capture: coverage audit (user + stdlib): 63 enforced,
 native_nested_record_field_capture: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_newtype_counter: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_newtype_counter: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_niche_aggregate_payload_leak_probe: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_niche_aggregate_payload_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_niche_concrete_payload_drop: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_niche_concrete_payload_drop: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_niche_ctor_ambiguity: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
@@ -294,6 +298,8 @@ native_shadow_selfref_let: coverage audit (user + stdlib): 63 enforced, 0 inert 
 native_shadow_selfref_let: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_shadowed_builtin_name: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_shadowed_builtin_name: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_show_list_leak_probe: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
+native_show_list_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_signal_term_suppress: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
 native_signal_term_suppress: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_signal_watch: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 0 unenforced
