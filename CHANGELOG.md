@@ -218,6 +218,11 @@ git log is authoritative for exact commits.
   nothing when unset.
 
 ### Fixed
+- **A user function named `own` with two arguments is the user's function again.**
+  The lowering rewrote *any* two-argument `own(...)` into resource registration
+  (`Drop$<Type>.drop`), so a user `fn own(ep, p)` called with a `Pid` failed to
+  link with an error naming nothing the user wrote. The rewrite now applies only
+  when the module does not define its own `own`.
 - **A user function named after a C symbol the runtime links against (`connect`,
   `log`, `time`, `strlen`, `write`, `exit`, …) no longer hijacks the runtime.**
   Top-level user functions are emitted under their bare name in the same link

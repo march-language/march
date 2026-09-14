@@ -1,6 +1,21 @@
-# `[P2]` Codegen: a user function named `own` with two arguments is miscompiled as the resource-registration builtin
+# Codegen: a user function named `own` with two arguments was miscompiled as the resource-registration builtin
 
-Found 2026-09-13 while writing `test/session/stream_actor_supervised.march`.
+Found 2026-09-13 while writing `test/session/stream_actor_supervised.march`;
+fixed 2026-09-14.
+
+## Fix
+
+`lib/tir/lower_expr.ml`: the `own(pid, value)` → `register_resource` rewrite
+is gated on the current module NOT defining a free function named `own`
+(`Lower_state._current_module_fns`, the same table the interface-method
+shadowing check consults just above it). The typechecker had already bound
+the call to the user's fn; the lowering now agrees. Witness
+`test/native/user_fn_named_own.march`: `fn own(ep : Int, p) : Int` called
+twice with Pids, compiled output matches the interpreter (before:
+`use of undefined value '@Drop$Pid.drop'`). The session fixtures that use
+the real `own` (`stream_actor*.march`) are unchanged.
+
+The rest of this file is the original note.
 
 ## The bug
 

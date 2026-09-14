@@ -20,7 +20,7 @@ user's code. A single-call-site `pfn` dodged it only because it was inlined
 and never emitted — which is why the minimal repros passed and the bisect
 took three rounds.
 
-Distinct from [[2026-09-13-user-fn-named-own-miscompiled-as-resource-builtin]]
+Distinct from [[2026-09-14-user-fn-named-own-miscompiled-as-resource-builtin]]
 (a lowering special case keyed on a bare name); this one is at the link.
 
 ## Fix

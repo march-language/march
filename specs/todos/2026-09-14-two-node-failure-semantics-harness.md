@@ -90,7 +90,7 @@ send to the re-announced pid is delivered. 5/5 runs identical locally.
 
 Measured on the way: a user fn named `connect` miscompiles into a stack
 overflow (second instance of
-[[2026-09-13-user-fn-named-own-miscompiled-as-resource-builtin]]); and
+[[2026-09-14-user-fn-named-own-miscompiled-as-resource-builtin]]); and
 there is no sleep builtin, so the reconnect backoff is
 `Process.run("sleep", …)`.
 

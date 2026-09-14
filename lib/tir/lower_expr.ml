@@ -661,8 +661,14 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
              let $own_dropN = fn _ -> Drop$TypeName.drop(value) in
              register_resource(pid, "drop_TypeName", $own_dropN)
            This keeps the Drop impl alive through the mono pass and wires
-           the cleanup callback into the actor's kill/crash path. *)
-        if f_var.v_name = "own" && List.length arg_atoms = 2 then
+           the cleanup callback into the actor's kill/crash path.
+           Only for the BUILTIN: a user `fn own(a, b)` in this module shadows
+           it (the typechecker already bound the call to the user's fn), and
+           rewriting that call produced a `Drop$<Type>.drop` reference that
+           does not exist -- a link error naming nothing the user wrote
+           (specs/progress/2026-09-14-user-fn-named-own-miscompiled-as-resource-builtin.md). *)
+        if f_var.v_name = "own" && List.length arg_atoms = 2
+           && not (Hashtbl.mem !Lower_state._current_module_fns "own") then
           let pid_atom   = List.nth arg_atoms 0 in
           let value_atom = List.nth arg_atoms 1 in
           let value_ty = match value_atom with

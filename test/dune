@@ -5767,6 +5767,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/c_symbol_collision.expected native_c_symbol_collision.out)))
 
+; ── A user fn named `own` with two args is the user's, not the resource builtin ──
+; The lowering's own(pid, value) → register_resource rewrite used to fire on
+; the bare name; with a Pid argument that emitted `Drop$Pid.drop`, a link
+; error. Gated on the current module not defining `own`.
+(rule
+ (targets native_user_fn_named_own native_user_fn_named_own.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/user_fn_named_own.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_user_fn_named_own
+        native/user_fn_named_own.march)
+   (with-stdout-to native_user_fn_named_own.out
+        (system "./native_user_fn_named_own")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/user_fn_named_own.expected native_user_fn_named_own.out)))
+
 ; ── Two-node SWIM discovery: authenticated peer-connection + membership ──
 ; node-a accepts, node-b connects; both run the ClusterConn handshake over
 ; real TCP loopback, then exchange a SwimPing/SwimPingAck pair and each

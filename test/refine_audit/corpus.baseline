@@ -416,6 +416,8 @@ native_unboxed_aggregate_boundaries: coverage audit (user + stdlib): 87 enforced
 native_unboxed_aggregate_boundaries: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_unit_callback_zero_arg: coverage audit (user + stdlib): 87 enforced, 0 inert (warned), 0 unenforced
 native_unit_callback_zero_arg: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_user_fn_named_own: coverage audit (user + stdlib): 87 enforced, 0 inert (warned), 0 unenforced
+native_user_fn_named_own: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_vault_new_same_name: coverage audit (user + stdlib): 87 enforced, 0 inert (warned), 0 unenforced
 native_vault_new_same_name: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_vault_niche_unsafe_element: coverage audit (user + stdlib): 87 enforced, 0 inert (warned), 0 unenforced
