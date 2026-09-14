@@ -35,6 +35,13 @@ Shared facts every section relies on (verify before building; lines drift):
 ---
 
 ## 1. Arrow positions: the domain is enforced but reported otherwise; the codomain is not enforced
+*§1a, §1b and §1c landed 2026-09-13*; see
+`specs/progress/2026-09-13-arrow-position-refinements.md`. The `arrow_domain`
+hole fixture is retired and `type_arg_two_layers` keeps the non-vacuity set
+non-empty. One departure: the three helpers without a callee env in scope
+(`check_let_annotation`, `check_elements`, the actor state literal) keep
+name-only postcondition resolution.
+
 
 Todo: `specs/todos/2026-09-13-arrow-position-refinements.md`. Hole fixture:
 `test/refine_audit/holes/arrow_domain.march` (the last one in the set).
@@ -219,6 +226,10 @@ one to two days, and it should land last.
 ---
 
 ## 3. Sibling-parameter blame: `unreflectable-predicate` names the wrong leaf
+*Landed 2026-09-13* as designed; see
+`specs/progress/2026-09-13-sibling-parameter-blame.md`. The corpus baseline did
+not move: no stdlib obligation had this shape.
+
 
 Todo: `specs/todos/2026-09-03-sibling-parameter-opaque-actual.md`.
 
@@ -280,6 +291,13 @@ Effort: half a day.
 ---
 
 ## 4. `@[measure]` over a scalar constructor field is inert
+*§4a landed 2026-09-13; §4b verified (a guard over the measure application
+does discharge on an opaque value); §4c reconsidered* — the warning was
+reworded rather than hoisted, since its detection needs the arm shapes only
+`build_measure_preamble` computes and after §4a the notice is advisory. See
+`specs/progress/2026-09-13-measure-over-scalar-ctor-field.md`; the `Array`
+contracts are `specs/todos/2026-09-13-array-bounds-contracts.md`.
+
 
 Todo: `specs/todos/2026-08-05-measure-over-scalar-ctor-field.md`.
 

@@ -1125,10 +1125,11 @@ regenerated the same way the TIR golden snapshots are
 (`UPDATE_SNAPSHOTS=1 ./_build/default/test/test_refinecheck.exe -e`). It
 being empty is a true fact about today's corpus, not evidence the audit does
 nothing: `test/refine_audit/holes/` is a second, deliberately non-empty
-fixture set built from known holes (a refinement in an arrow's domain; a
-fixture leaves the set once its position is enforced, as ten of them did on
-2026-09-13, the type-argument one last, when container subtyping landed),
-pinned at
+fixture set built from known holes (a refinement two layers down a type
+argument, `List(List({Int | _ > 0}))`; a fixture leaves the set once its
+position is enforced, as eleven of them did on 2026-09-13, the arrow-domain
+one last, when the audit learned that a single-argument callback's domain
+is checked), pinned at
 `test/refine_audit/holes.baseline`. If
 that second baseline ever reported zero Unenforced sites, the audit itself
 would be broken, not the corpus; the test that diffs it fails loudly with

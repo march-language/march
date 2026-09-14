@@ -405,23 +405,75 @@ let pass_site_obligation (callee_sg : fn_sig) (i : int) (gsg : fn_sig) ~(span : 
       refined_scope_ty (Some dom_ref)
     | _ -> None
 
+(* A recorded skip filed outside [check_call], for an obligation whose
+   subject the checker cannot even attempt: counted by `--refine-report`
+   and escalated under `cap verified`, exactly as a [check_call] skip is. *)
+let record_skip_obligation errctx ~(span : A.span) ~(callee : string) ~(predicate : string)
+    ~(noun : string) ~(what : string) ~(remedy : string) : unit =
+  let reason = Obligation.Unreflectable_subject what in
+  Obligation.record
+    { Obligation.span; callee; predicate; verdict = Obligation.Skipped reason
+    ; kind = Obligation.Precondition };
+  if !strict_verified then
+    Err.error errctx ~span
+      (Printf.sprintf "`cap verified` module: cannot verify %s `%s` on `%s` (%s: %s)\nnote: %s"
+         noun predicate callee (Obligation.reason_name reason) (Obligation.reason_detail reason)
+         remedy)
+
 let check_pass_sites ~root errctx defs (ctx : rctx) path lets sc re cb ~(span : A.span)
     (callee_sg : fn_sig) (args : A.expr list) : unit =
   List.iteri
     (fun i a ->
-      match callable_sig_of_actual ctx defs cb a with
-      | None -> ()
-      | Some (gname, gsg) ->
-        let asp = match a with A.EVar n -> n.A.span | A.ELam (_, _, sp) -> sp | _ -> span in
-        (match pass_site_obligation callee_sg i gsg ~span:asp with
-         | None -> ()
-         | Some r ->
-           let sc = (fresh_cb_arg, r) :: scope_shadow sc [ fresh_cb_arg ] in
-           let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets; sc; re } in
-           let x = A.EVar { A.txt = fresh_cb_arg; A.span = asp } in
-           List.iter
-             (fun rp -> check_call cx ~span:asp ~callee:gname ~subject:Callback_domain gsg [ x ] rp)
-             gsg.refined))
+      let asp = match a with A.EVar n -> n.A.span | A.ELam (_, _, sp) -> sp | _ -> span in
+      (* DOMAIN: contravariance (plan phase 2). *)
+      (match callable_sig_of_actual ctx defs cb a with
+       | None -> ()
+       | Some (gname, gsg) ->
+         (match pass_site_obligation callee_sg i gsg ~span:asp with
+          | None -> ()
+          | Some r ->
+            let sc = (fresh_cb_arg, r) :: scope_shadow sc [ fresh_cb_arg ] in
+            let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re } in
+            let x = A.EVar { A.txt = fresh_cb_arg; A.span = asp } in
+            List.iter
+              (fun rp -> check_call cx ~span:asp ~callee:gname ~subject:Callback_domain gsg [ x ] rp)
+              gsg.refined));
+      (* CODOMAIN: covariance (P3 design §1c).  The callable's own return
+         must satisfy the expected codomain refinement for every value it can
+         return: a callable with a PROVED return refinement by implication on
+         a fresh `$r`, an inline lambda by verifying its body against the
+         expected codomain directly, anything else a recorded skip. *)
+      match List.nth_opt callee_sg.param_tys i with
+      | Some (Some (A.TyArrow (dom, (A.TyRefine _ as cod)))) ->
+        (match callback_sig_of_ty (A.TyArrow (dom, cod)) with
+         | Some { ret = Some (b, p); ret_sort = srt; _ } ->
+           let cod_sig = elem_sig ~name:"$r" (b, p, srt) in
+           let rp = List.hd cod_sig.refined in
+           (match a with
+            | A.ELam (ps, body, lsp) ->
+              ignore
+                (check_fn_post_verdict ~root errctx
+                   (local_fn_def { A.txt = "<lambda>"; A.span = lsp } ps (Some cod) body lsp))
+            | A.EVar { A.txt = g; _ } ->
+              (match callee_sig ctx defs cb g with
+               | Some { ret = Some (rb, rq); ret_sort = rsrt; _ } ->
+                 let sc = ("$r", (rb, rq, rsrt)) :: scope_shadow sc [ "$r" ] in
+                 let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re } in
+                 check_call cx ~span:asp ~callee:g ~subject:Callback_codomain cod_sig
+                   [ A.EVar { A.txt = "$r"; A.span = asp } ] rp
+               | _ ->
+                 record_skip_obligation errctx ~span:asp ~callee:g ~predicate:(pred_str p)
+                   ~noun:"the expected codomain refinement"
+                   ~what:(Printf.sprintf "`%s` declares no proved return refinement to imply it from" g)
+                   ~remedy:"declare (and prove) a return refinement on the passed function that \
+                            implies the expected codomain, or weaken the expected codomain")
+            | _ ->
+              record_skip_obligation errctx ~span:asp ~callee:"<callable>" ~predicate:(pred_str p)
+                ~noun:"the expected codomain refinement"
+                ~what:"the passed callable is neither a named function, a local, nor an inline lambda"
+                ~remedy:"bind the callable to a name whose return refinement the checker can see")
+         | _ -> ())
+      | _ -> ())
     args
 
 (* ── Container subtyping: element obligations ─────────────────────────────
@@ -538,7 +590,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     in
     (match callee with
      | Some sg ->
-       let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets; sc; re } in
+       let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re } in
        List.iter (fun rp -> check_call cx ~span:sp ~callee:fname sg args rp) sg.refined;
        check_pass_sites ~root errctx defs ctx path lets sc re cb ~span:sp sg args;
        check_arg_elements ~root errctx defs ctx path lets sc re ce ~span:sp ~callee:fname sg args
@@ -567,7 +619,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
      parameter refinements — see [Refine_scope.collect_handler_sigs].  A
      message constructor is checked exactly like a call to the handler. *)
   | A.ECon (c, args, sp) ->
-    let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets; sc; re } in
+    let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re } in
     (match handler_sig_of_ctor c.A.txt with
      | Some sg -> List.iter (fun rp -> check_call cx ~span:sp ~callee:c.A.txt sg args rp) sg.refined
      | None ->
@@ -720,7 +772,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                 discharged by a premise this binding failed to establish. *)
              | A.ELet (b, _) when annot_proved = Some false ->
                scope_shadow sc (pat_binders b.A.bind_pat)
-             | A.ELet (b, _) -> scope_add_binding ~postcond:(postcond_of ctx defs) sc b
+             | A.ELet (b, _) -> scope_add_binding ~postcond:(postcond_of ~cb ctx defs) sc b
              | _ -> sc
            in
            let re' = match e with A.ELet (b, _) -> recenv_add_binding re b | _ -> re in
@@ -1019,7 +1071,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
      | Some ctor ->
        (match Hashtbl.find_opt !ctor_sigs.by_ctor ctor with
         | Some sg ->
-          let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets; sc; re } in
+          let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re } in
           check_ctor_fields cx ~span:sp ~callee:ctor sg fs ~only:None;
           check_field_elements ~root errctx defs ctx path lets sc re ce ~span:sp ~callee:ctor sg fs
             ~only:None
@@ -1046,7 +1098,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                      (pn, A.EField (A.EVar { A.txt = x; A.span = xsp }, { A.txt = pn; A.span = xsp }, xsp)))
                  sg.param_names
              in
-             let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets; sc; re } in
+             let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re } in
              check_ctor_fields cx ~span:sp ~callee:ctor sg fs ~only:(Some (List.map fst updated));
              check_field_elements ~root errctx defs ctx path lets sc re ce ~span:sp ~callee:ctor sg
                fs ~only:(Some (List.map fst updated))
@@ -2643,12 +2695,22 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
               (Printf.sprintf "@[measure] `%s` %s" fd.A.fn_name.A.txt msg))
           (measure_gate_errors fd))
       mfns;
-    (* Silent-inertness warning.  A measure reading a scalar constructor field
-       is axiomatised correctly and still proves nothing, because call-site
-       reflection erased the field (see [measure_scalar_field_dep]).  Every
-       symptom of a working measure is present, so without this the author's
-       only signal is that contracts using it never fire — which is how this
-       cost a full investigation to find on `Array.length`.
+    (* Scalar-field measure notice.  A measure reading a scalar constructor
+       field (`Array.length` reading `PVec`'s count) is axiomatised correctly;
+       since 2026-09-13 (P3 design §4a) call-site reflection places that field
+       CONCRETELY when the constructor's actual is a value the checker can see,
+       so the measure proves over a literal.  Over an OPAQUE value (a parameter,
+       a call result) the field is still a fresh constant, and only a guard
+       or refinement over the measure application itself (`if i <
+       Array.length(v)`) can decide a contract using it.  Before §4a the
+       field was always erased and this warning said "never proved or
+       refuted", which cost a full investigation to find on `Array.length`;
+       it now says exactly when the measure is decidable.
+
+       Kept under [measure_axioms] deliberately: the detection reads the arm
+       shapes only [build_measure_preamble] computes, and after §4a the notice
+       is advisory (the measure works on literals), so factoring the detection
+       out to hoist it was not worth the duplication (§4c, reconsidered).
 
        A WARNING, not an error: the measure is sound and its predicates remain
        legal vocabulary, so nothing that compiles today stops compiling.  It
@@ -2659,8 +2721,10 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
           Err.warning errctx ~span:fd.A.fn_name.A.span
             (Printf.sprintf
                "@[measure] `%s` reads a constructor field that is not itself a \
-                data type, so its value cannot be computed at a call site and \
-                refinements using it will never be proved or refuted."
+                data type: its value is known at a call site only when the \
+                constructor is built from values the checker can see; over an \
+                opaque value, a contract using it is decided only by a guard or \
+                refinement over the measure itself."
                name))
       mfns
   end;

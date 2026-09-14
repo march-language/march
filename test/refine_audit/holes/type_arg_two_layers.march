@@ -1,0 +1,22 @@
+-- Fixture for the audit's non-vacuity guard: a refinement TWO layers down a
+-- type argument. One layer (`List({Int | _ > 0})`) has been enforced since
+-- container subtyping landed (2026-09-13); two layers are not modelled yet
+-- (specs/todos/2026-09-13-container-subtyping-other-containers.md, P3 design
+-- §2b), so this site is genuinely Unenforced and keeps the holes baseline
+-- non-empty now that every other hole fixture has been retired.
+mod HolesTypeArgTwoLayers do
+  fn f(xss : List(List({Int | _ > 0}))) : Int do
+    match xss do
+      Cons(xs, _) ->
+        match xs do
+          Cons(h, _) -> h
+          Nil -> 0
+        end
+      Nil -> 0
+    end
+  end
+
+  fn main() : Int do
+    f([[0, 0 - 1]])
+  end
+end

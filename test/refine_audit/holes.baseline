@@ -1,3 +1,3 @@
-holes_arrow_domain: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 1 unenforced
-holes_arrow_domain: coverage audit (user code): 0 enforced, 0 inert (warned), 1 unenforced
-holes_arrow_domain: coverage audit: test/refine_audit/holes/arrow_domain.march:5:23: param `apply` #0: _ > 0: the refinement sits in the domain of a function-typed value (for example `({Int | _ > 0}) -> Int`); no extractor descends into an arrow type looking for a nested refinement
+holes_type_arg_two_layers: coverage audit (user + stdlib): 63 enforced, 0 inert (warned), 1 unenforced
+holes_type_arg_two_layers: coverage audit (user code): 0 enforced, 0 inert (warned), 1 unenforced
+holes_type_arg_two_layers: coverage audit: test/refine_audit/holes/type_arg_two_layers.march:8:30: param `f` #0: _ > 0: the refinement sits inside a type constructor's argument of a container the checker does not model (only `List(…)` and `Option(…)` carry element contracts, at a parameter, return, `let` annotation or field; see Refine_scope.elem_refinement), or below one further layer of nesting

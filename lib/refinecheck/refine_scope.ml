@@ -411,7 +411,24 @@ let callback_param_name = "$cb_arg"
    out of scope and calling one fails typecheck anyway. *)
 let callback_sig_of_ty (t : A.ty) : fn_sig option =
   match t with
-  | A.TyArrow (dom, _) ->
+  | A.TyArrow (dom, cod) ->
+    (* The CODOMAIN's refinement is the callback's postcondition (P3 design
+       §1b): `let y = f(x)` inside `apply(f : Int -> {Int | _ > 0})` may learn
+       `y > 0`, because every callable passed for `f` was obliged at the pass
+       site to return a value satisfying it (§1c).  Extracted through the
+       same arms a named function's return uses, on a stand-in definition. *)
+    let ret, ret_sort =
+      match cod with
+      | A.TyRefine _ ->
+        let stand_in =
+          { A.fn_name = { A.txt = callback_param_name; A.span = A.dummy_span }; fn_vis = A.Private
+          ; fn_doc = None; fn_attrs = []; fn_ret_ty = Some cod; fn_clauses = []; fn_bounds = [] }
+        in
+        (match return_refine_sorted stand_in with
+         | Some (b, p, srt) -> (Some (b, p), srt)
+         | None -> (None, None))
+      | _ -> (None, None)
+    in
     (match refined_param_ty (Some dom) with
      | Some (binder, pred, sort) ->
        Some
@@ -420,8 +437,20 @@ let callback_sig_of_ty (t : A.ty) : fn_sig option =
          ; param_scalar = [ scalar_sort_or_int sort ]
          ; param_tys = [ Some dom ]
          ; refined = [ { idx = 0; binder; pred; sort } ]
-         ; ret = None
-         ; ret_sort = None
+         ; ret
+         ; ret_sort
+         }
+     | None when ret <> None ->
+       (* An unrefined domain with a refined codomain still carries a
+          contract: no call through it is obliged, but its RESULT is known. *)
+       Some
+         { param_names = [ callback_param_name ]
+         ; param_str = [ false ]
+         ; param_scalar = [ Smt.SInt ]
+         ; param_tys = [ Some dom ]
+         ; refined = []
+         ; ret
+         ; ret_sort
          }
      | None -> None)
   | _ -> None
