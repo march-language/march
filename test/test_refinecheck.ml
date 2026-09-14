@@ -12409,7 +12409,53 @@ let check_inert_warned name src =
       Alcotest.(check string) "disposition" "Inert_warned" (disposition_tag d))
 
 let audit_classify_suite =
-  [ (* The false-positive case the design exists to avoid: a refined
+  [ (* Review fix (2026-09-14): the audit follows [check_fn_post_verdict]'s
+       routing.  A List return whose predicate has no `elts`/`keys` goes to
+       Tier 2, which files nothing without a list measure; a Tier 2 match on
+       an UNANNOTATED parameter is not Shape 2. *)
+    check_unenforced "a {List(Int) | len(_) > 0} return with no list measure is Unenforced"
+      {|mod M do
+          fn f() : {List(Int) | len(_) > 0} do Nil end
+        end|};
+    check_enforced "control: a {List(Int) | member(1, elts(_))} return is Enforced"
+      {|mod M do
+          fn f() : {List(Int) | member(1, elts(_))} do [1] end
+        end|};
+    check_unenforced "a Tier 2 match on an unannotated parameter is Unenforced"
+      {|mod M do
+          type Tree = Leaf | Node(Tree, Int, Tree)
+          @[measure]
+          fn size(t : Tree) : Int do
+            match t do
+              Leaf -> 0
+              Node(l, _, r) -> size(l) + 1 + size(r)
+            end
+          end
+          fn push(t, x : Int) : {Tree | size(_) == size(t) + 1} do
+            match t do
+              Leaf -> Node(Leaf, x, Leaf)
+              Node(l, v, r) -> Node(push(l, x), v, r)
+            end
+          end
+        end|};
+    check_enforced "control: the same match on a `t : Tree` parameter is Enforced"
+      {|mod M do
+          type Tree = Leaf | Node(Tree, Int, Tree)
+          @[measure]
+          fn size(t : Tree) : Int do
+            match t do
+              Leaf -> 0
+              Node(l, _, r) -> size(l) + 1 + size(r)
+            end
+          end
+          fn push(t : Tree, x : Int) : {Tree | size(_) == size(t) + 1} do
+            match t do
+              Leaf -> Node(Leaf, x, Leaf)
+              Node(l, v, r) -> Node(push(l, x), v, r)
+            end
+          end
+        end|};
+    (* The false-positive case the design exists to avoid: a refined
        parameter that is never called still obliges nothing at a call site
        TODAY, but [refined_param_ty] accepts its declared type, so it is
        [Enforced] -- the checker's own machinery is in place for it, an
@@ -14635,7 +14681,182 @@ let set_suite =
     Alcotest.test_case "the set vocabulary draws no unrecognised-predicate warning" `Quick (fun () ->
         Alcotest.(check bool) "no warning" false
           (has_refine_warning
-             (m "  fn f(xs : {List(Int) | member(2, elts(_)) && subset(elts(_), union(singleton(2), empty))}) : Int do 0 end"))) ]
+             (m "  fn f(xs : {List(Int) | member(2, elts(_)) && subset(elts(_), union(singleton(2), empty))}) : Int do 0 end")));
+
+    (* ── Review fixes (2026-09-14, follow-up to PR #452) ─────────────────────
+       Each case below went RED on the unfixed checker first. *)
+    gated "a program's own `keys`/`member` in a GUARD is its function, not set vocabulary" (fun () ->
+        (* Before the fix the guard reflected `keys(r)` as a set and `[]` as a
+           list, the element sorts clashed, and the WHOLE call was skipped as a
+           sort conflict, hiding `need(0)`. *)
+        Alcotest.(check (triple int int int)) "ledger" (1, 2, 0)
+          (ledger_counts3
+             (m "  fn keys(r : Int) : List(Int) do [r] end\n\
+                \  fn member(xs : List(Int), x : Int) : Bool do false end\n\
+                \  fn need(n : {Int | _ > 0}) : Int do n end\n\
+                \  fn ok(r : Int) : Int do if keys(r) == [] do 0 else need(1) end end\n\
+                \  fn bad(r : Int) : Int do if keys(r) == [] do 0 else need(0) end end\n\
+                \  fn bad2(xs : List(Int)) : Int do if member(xs, 3) do need(0) else 0 end end")));
+
+    Alcotest.test_case "a set-sort conflict brought in only by an ASSUMPTION drops that assumption, not the VC" `Quick (fun () ->
+        let module E = March_refinecheck.Refine_encode in
+        let module S = March_refine.Smt in
+        let u = S.set_unknown_elem in
+        let goal = S.SetMem (S.IntLit 1, S.SetSng (u, S.IntLit 1)) in
+        let clash = S.SetMem (S.BoolLit true, S.SetSng (u, S.IntLit 2)) in
+        let fine = S.Eq (S.IntLit 1, S.IntLit 1) in
+        Alcotest.(check bool) "exact resolution conflicts" true
+          (E.resolve_set_sorts_exact [] goal [ clash; fine ] = None);
+        (match E.resolve_set_sorts [] goal [ clash; fine ] with
+         | Some (_, _, asms) ->
+           Alcotest.(check int) "only the clashing assumption is dropped" 1 (List.length asms)
+         | None -> Alcotest.fail "the goal alone is well-sorted: must not be a sort conflict");
+        Alcotest.(check bool) "a conflict inside the goal is still a conflict" true
+          (E.resolve_set_sorts [] (S.SetMem (S.BoolLit true, S.SetSng (u, S.IntLit 2))) [ fine ]
+           = None));
+
+    Alcotest.test_case "a set-vocabulary name applied in a non-set shape draws the vocabulary warning" `Quick (fun () ->
+        let ws =
+          refine_warnings
+            (m "  fn member(xs : List(Int), x : Int) : Bool do false end\n\
+                \  fn need(xs : {List(Int) | member(xs, 3)}) : Int do 0 end")
+        in
+        Alcotest.(check bool) "warned" true
+          (List.exists (fun w -> contains w "not a well-formed set operation") ws);
+        Alcotest.(check bool) "control: a well-formed member draws none" false
+          (List.exists (fun w -> contains w "set operation")
+             (refine_warnings (m "  fn need(xs : {List(Int) | member(3, elts(_))}) : Int do 0 end"))));
+
+    Alcotest.test_case "a @[measure] named like the set vocabulary is rejected" `Quick (fun () ->
+        let tree name =
+          m ("  type Tree = Leaf | Node(Tree, Int, Tree)\n\
+             \  @[measure]\n\
+             \  fn " ^ name ^ "(t : Tree) : Int do\n\
+             \    match t do\n\
+             \      Leaf -> 0\n\
+             \      Node(l, _, r) -> " ^ name ^ "(l) + 1 + " ^ name ^ "(r)\n\
+             \    end\n\
+             \  end")
+        in
+        Alcotest.(check bool) "`keys` is an error" true (has_refine_error (tree "keys"));
+        Alcotest.(check bool) "control: `nkeys` is fine" false (has_refine_error (tree "nkeys")));
+
+    gated "a Set(Bool) measure is axiomatised at Bool and does not poison the module's other measures" (fun () ->
+        (* The ill-sorted `singleton(b)` axiom sat in the shared preamble, so
+           the unrelated Int-measure call `get(…, 5)` was solver-undecided. *)
+        Alcotest.(check (triple int int int)) "ledger" (2, 2, 0)
+          (ledger_counts3
+             (m "  type T = F(Bool) | Both(T, T)\n\
+                \  @[measure]\n\
+                \  fn flags(t : T) : Set(Bool) do\n\
+                \    match t do\n\
+                \      F(b) -> singleton(b)\n\
+                \      Both(l, r) -> union(flags(l), flags(r))\n\
+                \    end\n\
+                \  end\n\
+                \  type Tree = Leaf | Node(Tree, Int, Tree)\n\
+                \  @[measure]\n\
+                \  fn size(t : Tree) : Int do\n\
+                \    match t do\n\
+                \      Leaf -> 0\n\
+                \      Node(l, _, r) -> size(l) + 1 + size(r)\n\
+                \    end\n\
+                \  end\n\
+                \  fn get(t : Tree, i : {Int | _ < size(t)}) : Int do 0 end\n\
+                \  fn ok() : Int do get(Node(Leaf, 1, Leaf), 0) end\n\
+                \  fn bad() : Int do get(Node(Leaf, 1, Leaf), 5) end\n\
+                \  fn need_t(t : {T | member(true, flags(_))}) : Int do 0 end\n\
+                \  fn ok_t() : Int do need_t(Both(F(false), F(true))) end\n\
+                \  fn bad_t() : Int do need_t(F(false)) end")));
+
+    gated "a set measure whose declared element sort disagrees with its payload field is refused an axiom, not emitted ill-sorted" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (1, 1, 0)
+          (ledger_counts3
+             (m "  type Expr(a) = Var(a) | App(Expr(a), Expr(a))\n\
+                \  @[measure]\n\
+                \  fn fv(e : Expr(Int)) : Set(Int) do\n\
+                \    match e do\n\
+                \      Var(x) -> singleton(x)\n\
+                \      App(f, a) -> union(fv(f), fv(a))\n\
+                \    end\n\
+                \  end\n\
+                \  type Tree = Leaf | Node(Tree, Int, Tree)\n\
+                \  @[measure]\n\
+                \  fn size(t : Tree) : Int do\n\
+                \    match t do\n\
+                \      Leaf -> 0\n\
+                \      Node(l, _, r) -> size(l) + 1 + size(r)\n\
+                \    end\n\
+                \  end\n\
+                \  fn get(t : Tree, i : {Int | _ < size(t)}) : Int do 0 end\n\
+                \  fn ok() : Int do get(Node(Leaf, 1, Leaf), 0) end\n\
+                \  fn bad() : Int do get(Node(Leaf, 1, Leaf), 5) end")));
+
+    gated "a record selector used as a set element takes its field's sort" (fun () ->
+        (* `v.name` is a String field, the opaque `Elem`; it was pinned to Int
+           and z3 rejected the query ("domain sort Elem and parameter sort Int"). *)
+        Alcotest.(check (triple int int int)) "ledger" (2, 2, 0)
+          (ledger_counts3
+             (m "  type User = { name : String, age : Int }\n\
+                \  fn need(u : {v : User | member(v.name, singleton(v.name))}) : Int do 0 end\n\
+                \  fn needx(u : {v : User | member(v.name, empty)}) : Int do 0 end\n\
+                \  fn needa(u : {v : User | member(v.age, singleton(3))}) : Int do 0 end\n\
+                \  fn ok() : Int do need({ name: \"a\", age: 1 }) end\n\
+                \  fn bad() : Int do needx({ name: \"a\", age: 1 }) end\n\
+                \  fn ok_age() : Int do needa({ name: \"a\", age: 3 }) end\n\
+                \  fn bad_age() : Int do needa({ name: \"a\", age: 1 }) end")));
+
+    Alcotest.test_case "a set-valued measure called from impl, test, and top-level let bodies is an error" `Quick (fun () ->
+        Alcotest.(check bool) "impl method" true
+          (has_refine_error_d
+             (m (fv_measure
+                 ^ "  impl Show(Expr) do\n\
+                   \    fn show(x) do\n\
+                   \      let s = free_vars(x)\n\
+                   \      \"e\"\n\
+                   \    end\n\
+                   \  end")));
+        Alcotest.(check bool) "top-level let" true
+          (has_refine_error_d (m (fv_measure ^ "  let top = free_vars(Var(1))")));
+        Alcotest.(check bool) "test block" true
+          (has_refine_error_d
+             (m (fv_measure
+                 ^ "  describe \"fv\" do\n\
+                   \    test \"t\" do\n\
+                   \      let s = free_vars(Var(2))\n\
+                   \      assert true\n\
+                   \    end\n\
+                   \  end")));
+        Alcotest.(check bool) "control: an impl method that does not call it" false
+          (has_refine_error_d
+             (m (fv_measure
+                 ^ "  impl Show(Expr) do\n\
+                   \    fn show(x) do\n\
+                   \      \"e\"\n\
+                   \    end\n\
+                   \  end"))));
+
+    gated "chained let-bound set promises load transitively" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (2, 1, 0)
+          (ledger_counts3
+             (m (set_stub
+                 ^ "  fn need3(s : {Set(Int) | member(3, elts(_))}) : Int do 0 end\n\
+                   \  fn ok2() : Int do\n\
+                   \    let s1 = Set.insert(Set.empty(), 3, int_cmp)\n\
+                   \    let s2 = Set.insert(s1, 4, int_cmp)\n\
+                   \    need3(s2)\n\
+                   \  end\n\
+                   \  fn ok3() : Int do\n\
+                   \    let s1 = Set.insert(Set.empty(), 3, int_cmp)\n\
+                   \    let s2 = Set.insert(s1, 4, int_cmp)\n\
+                   \    let s3 = Set.insert(s2, 5, int_cmp)\n\
+                   \    need3(s3)\n\
+                   \  end\n\
+                   \  fn bad2() : Int do\n\
+                   \    let s1 = Set.insert(Set.empty(), 7, int_cmp)\n\
+                   \    let s2 = Set.insert(s1, 4, int_cmp)\n\
+                   \    need3(s2)\n\
+                   \  end")))) ]
 
 (* ── Sibling-parameter blame (2026-09-13, P3 design §3) ──────────────────
    When a SIBLING parameter's actual is what failed to reflect, the skip is
