@@ -207,6 +207,10 @@ git log is authoritative for exact commits.
   catch-all arm** (a "pattern can never be reached" warning that became
   visible with the change above).
 
+- **Closures no longer leak their environment and captured values
+  (compiled).** A function that returns a closure (`fn adder(k) do fn x -> x
+  + k end`) leaked the closure and everything it captured on every call.
+
 - **`to_string` of a list and `string_join` no longer leak the list
   (compiled).** Printing a list leaked the intermediate list and its element
   strings on every call (five objects for a two-element list).

@@ -1633,6 +1633,29 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/actor_self.expected native_actor_self.out)))
 
+; ── Leak and use-after-free guard: a closure's environment and captures are
+; released when it dies (factories, captures used by the tail, closures in
+; lists/ctors, returned/wrapped captures). Values are compared against the
+; interpreter: releasing captures in front of a tail that uses them printed a
+; wrong value (43893 for 62786); restoring Perceus's $clo dup at capture reads
+; makes the factory legs leak.
+(rule
+ (targets native_closure_capture_release_probe native_closure_capture_release_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/closure_capture_release_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_closure_capture_release_probe
+        native/closure_capture_release_probe.march)
+   (with-stdout-to native_closure_capture_release_probe.out
+        (system "./native_closure_capture_release_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/closure_capture_release_probe.expected native_closure_capture_release_probe.out)))
+
 ; ── Leak guard: `to_string` of a List (prelude's Show via string_join) and
 ; string_join itself release the list. string_join's list argument was marked
 ; owned in borrow.ml while march_string_join only reads it: 5 objects per

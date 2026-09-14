@@ -1504,9 +1504,22 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
        box and once as the payload.  With that fixed (see the concrete-niche
        check there) the exclusion is sound, and record_pattern.march passes
        repeatedly. *)
+    (* A closure ENVIRONMENT ([$clo : TPtr], an apply fn's first param) is a
+       projection source for the same reason.  Every capture read of a
+       live-after [$clo] dup'd it, and the one release Perceus splices after
+       the capture-read prefix ([Perceus.insert_apply_fn_clo_drop]) only undid
+       that dup, so the reference the caller transferred into the apply fn was
+       never released: the environment, and with it every capture, lived
+       forever.  Measured on `fn mk(a, b) = fn x -> length(a) + length(b) + x`
+       called once per iteration: 6 objects per call (the environment and five
+       list cells).  This change and the widened gate in
+       [Drop.owning_apply_fns] land together: the spliced release now frees the
+       environment, and the drop pass must release the captures of exactly
+       the closures whose environment owns them.
+       See specs/progress/2026-09-13-closure-environment-released.md. *)
     let a_is_aggregate = match a with
       | Tir.AVar v -> (match v.Tir.v_ty with
-                       | Tir.TTuple _ | Tir.TRecord _ -> true
+                       | Tir.TTuple _ | Tir.TRecord _ | Tir.TPtr _ -> true
                        | _ -> false)
       | _ -> false
     in
