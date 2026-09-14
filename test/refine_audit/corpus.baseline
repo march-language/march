@@ -60,6 +60,8 @@ native_cap_epoch_plane: coverage audit (user + stdlib): 87 enforced, 0 inert (wa
 native_cap_epoch_plane: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_closure_bool_field: coverage audit (user + stdlib): 87 enforced, 0 inert (warned), 0 unenforced
 native_closure_bool_field: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_closure_call_arg_ownership_probe: coverage audit (user + stdlib): 87 enforced, 0 inert (warned), 0 unenforced
+native_closure_call_arg_ownership_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_closure_capture_release_probe: coverage audit (user + stdlib): 87 enforced, 0 inert (warned), 0 unenforced
 native_closure_capture_release_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_closure_param_shadows_import: coverage audit (user + stdlib): 87 enforced, 0 inert (warned), 0 unenforced

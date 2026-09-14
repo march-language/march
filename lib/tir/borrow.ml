@@ -775,8 +775,18 @@ let infer_module ?(k_table : Kind.table option) (m : Tir.tir_module) : borrow_ma
            It must live in [init], NOT in the post-fixpoint extern seeding
            below: [owned_in] consults [is_borrowed] during iteration, so a
            late seed would leave callers-of-callers classified against the
-           stale answer. *)
-        if i = 0 && Tir_names.is_apply_fn fn.Tir.fn_name then false
+           stale answer.
+
+           The same pin covers every USER parameter of an apply function, for
+           the same reason from the other side: every caller of a closure
+           transfers a reference to each argument (Perceus's [ECallPtr] case,
+           the C runtime's higher-order helpers), so a callee that left a
+           read-only parameter borrowed never released it — one leaked
+           argument per call, and an immortal one when the caller kept it.
+           An owned parameter the body never uses is released at entry by
+           [Perceus.insert_dead_apply_param_drops].  See [Clo_flags] for the
+           whole convention. *)
+        if Tir_names.is_apply_fn fn.Tir.fn_name then false
         else Kind.borrowable_of k_table (List.nth fn.Tir.fn_params i).Tir.v_ty
       ) in
       StringMap.add fn.Tir.fn_name modes acc
@@ -828,29 +838,3 @@ let infer_module ?(k_table : Kind.table option) (m : Tir.tir_module) : borrow_ma
   in
   if Lazy.force _borrow_debug then print_borrow_map m result;
   result
-
-(** True iff the FIRST USER ARGUMENT of [fn] is never used in an owning
-    position in its body — i.e. the callee neither consumes it (drops it,
-    transfers it onward) nor retains it (stores it in an allocation, returns
-    it).  "First user argument" skips the implicit [$clo] parameter of an
-    apply function.
-
-    WHY THIS IS NOT [is_borrowed m fn 1].  [infer_module]'s [init] seeds a
-    parameter as borrowed only when [Rc_types.borrow_eligible] accepts its
-    type, so a param typed [TVar "_"] — which is what [Lower] gives most
-    lifted-lambda params — reads back as "owned" from the map even though the
-    fixpoint never found an owning use for it.  That conflation is harmless
-    inside Perceus (a non-[needs_rc] type gets no RC ops either way) but it is
-    exactly wrong for the question the fold helpers ask, which is about the
-    CALLEE'S BEHAVIOUR, not about whether RC ops were emitted.  So this asks
-    [owned_in] directly, against the converged map.
-
-    Consumed by [Clo_flags] → [Llvm_emit], which stamps the answer into the
-    closure object's header pad word so [runtime/march_runtime.c]'s fold
-    helpers can tell whether they still own the accumulator they passed in.
-    See [Clo_flags] for the full argument. *)
-let first_user_arg_borrowed (bm : borrow_map) (fn : Tir.fn_def) : bool =
-  let idx = if Tir_names.is_apply_fn fn.Tir.fn_name then 1 else 0 in
-  match List.nth_opt fn.Tir.fn_params idx with
-  | None -> false
-  | Some p -> not (owned_in p.Tir.v_name bm fn.Tir.fn_body)

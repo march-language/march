@@ -320,9 +320,23 @@ let clo_wrap_declare wrap_name (param_ltys : string list) =
   Printf.sprintf "declare ptr @%s(%s)\n\n" wrap_name
     (String.concat ", " ("ptr" :: clo_wrap_param_tys param_ltys))
 
-let clo_wrap_define ?(drop_clo = false) wrap_name (param_ltys : string list)
-    target_ret fn_name =
+let clo_wrap_define ?(drop_clo = false) ?(borrowed = []) wrap_name
+    (param_ltys : string list) target_ret fn_name =
   let arg_names = List.mapi (fun i _ -> Printf.sprintf "%%a%d" i) param_ltys in
+  (* A closure call consumes its heap arguments ([Clo_flags]), but the target
+     is an ordinary function that may BORROW one, so the trampoline releases
+     those after forwarding.  [borrowed] is the target's per-parameter modes
+     ([Clo_flags.borrowed_params]); empty when unknown, which releases nothing.
+     A Float or Int parameter is never released: it crosses unboxed/tagged, and
+     a Float box stays the caller's. *)
+  let releases =
+    List.concat (List.mapi (fun i (ty, name) ->
+        match List.nth_opt borrowed i with
+        | Some true when ty <> "double" && ty <> "i64" ->
+          [Printf.sprintf "  call void @march_decrc(ptr %s)\n" name]
+        | _ -> [])
+      (List.combine param_ltys arg_names))
+    |> String.concat "" in
   (* Closure dispatch uses a uniform ptr ABI (see is_apply_fn / the ECallPtr
      call site).  A `double` param would land in an FP register while the
      dispatch reads a GP register — integer scalars coincide across the two
@@ -363,22 +377,22 @@ let clo_wrap_define ?(drop_clo = false) wrap_name (param_ltys : string list)
   in
   if target_ret = "void" then
     Printf.sprintf
-      "define ptr @%s(%s) alwaysinline {\nentry:\n%s  call void @%s(%s)\n  ret ptr null\n}\n\n"
-      wrap_name decl_str pro fn_name call_args
+      "define ptr @%s(%s) alwaysinline {\nentry:\n%s  call void @%s(%s)\n%s  ret ptr null\n}\n\n"
+      wrap_name decl_str pro fn_name call_args releases
   else if target_ret = "ptr" then
     Printf.sprintf
-      "define ptr @%s(%s) alwaysinline {\nentry:\n%s  %%r = call ptr @%s(%s)\n  ret ptr %%r\n}\n\n"
-      wrap_name decl_str pro fn_name call_args
+      "define ptr @%s(%s) alwaysinline {\nentry:\n%s  %%r = call ptr @%s(%s)\n%s  ret ptr %%r\n}\n\n"
+      wrap_name decl_str pro fn_name call_args releases
   else if target_ret = "double" then
     Printf.sprintf
-      "define ptr @%s(%s) alwaysinline {\nentry:\n%s  %%r = call double @%s(%s)\n  \
+      "define ptr @%s(%s) alwaysinline {\nentry:\n%s  %%r = call double @%s(%s)\n%s  \
        %%rp = call ptr @march_alloc_float(double %%r)\n  \
        ret ptr %%rp\n}\n\n"
-      wrap_name decl_str pro fn_name call_args
+      wrap_name decl_str pro fn_name call_args releases
   else
     (* scalar (i64): tag as (n<<1)|1 so the dispatch's conditional untag recovers it *)
     Printf.sprintf
-      "define ptr @%s(%s) alwaysinline {\nentry:\n%s  %%r = call %s @%s(%s)\n  \
+      "define ptr @%s(%s) alwaysinline {\nentry:\n%s  %%r = call %s @%s(%s)\n%s  \
        %%rs = shl nsw i64 %%r, 1\n  %%rt = or i64 %%rs, 1\n  \
        %%rp = inttoptr i64 %%rt to ptr\n  ret ptr %%rp\n}\n\n"
-      wrap_name decl_str pro target_ret fn_name call_args
+      wrap_name decl_str pro target_ret fn_name call_args releases

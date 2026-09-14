@@ -812,9 +812,19 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
     in
     let params' = List.mapi (fun i (p : Ast.param) ->
         { Tir.v_name = p.param_name.txt;
-          v_ty = (match p.param_ty with Some t -> lower_ty t
-                  | None -> List.nth_opt inferred_param_tys i
-                            |> Option.value ~default:unknown_ty);
+          v_ty = (match p.param_ty, List.nth_opt inferred_param_tys i with
+                  (* A record type alias ([p : Pt]) lowers syntactically to
+                     [TCon "Pt"], which no RC pass recognises as a record:
+                     field reads dup the whole record and the owned-aggregate
+                     parameter drop never fires, leaking the record and its
+                     fields once per call.  The typechecker has already
+                     expanded the alias. *)
+                  | Some t, Some (Tir.TRecord _ as inferred) ->
+                    (match lower_ty t with
+                     | Tir.TCon _ -> inferred
+                     | lowered -> lowered)
+                  | Some t, _ -> lower_ty t
+                  | None, inferred -> Option.value inferred ~default:unknown_ty);
           v_lin = lower_linearity p.param_lin }
       ) params in
     (* Lambda parameters take precedence over any outer function parameters

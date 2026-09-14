@@ -1528,7 +1528,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        rebound name is retired too, so `let r = push(t, 5)` followed by a rebind
        of `t` drops `r`'s promise rather than re-reading `t` at its new value. *)
     let scope_facts_loaded : (string, unit) Hashtbl.t = Hashtbl.create 4 in
-    let load_scope_measure_facts (x : string) : unit =
+    let rec load_scope_measure_facts (x : string) : unit =
       if not (Hashtbl.mem scope_facts_loaded x) then begin
         Hashtbl.replace scope_facts_loaded x ();
         match List.assoc_opt x sc with
@@ -1609,7 +1609,18 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                 decls := (n, Smt.SData adt) :: !decls;
                 Some (Smt.App (m', [ Smt.Const n ]))
               end
-              else measure_of_var m' n
+              else begin
+                (* A promise phrased over ANOTHER let-bound name
+                   (`let s2 = Set.insert(s1, 4, cmp)` carries
+                   `elts(_) == union(elts(s1), …)`) connects to nothing
+                   unless that name's own promise is loaded too — the same
+                   step [set_of_call]'s [rm] takes.  Recursing here is what
+                   makes a chain of any length transitive; the
+                   [scope_facts_loaded] memo (set before the recursion)
+                   makes it terminate on a cycle. *)
+                load_scope_measure_facts n;
+                measure_of_var m' n
+              end
             else if is_axiom_measure m' then begin
               (* Gate the quantified-axiom preamble on the SHARED per-VC ref, so
                  `(m x)` here and `(m x)` in the goal are interpreted by the same
@@ -2202,7 +2213,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
     List.iter
       (fun (cond, negated) ->
         match
-          smt_of ~resolve_var:path_resolve_var ~resolve_measure:path_resolve_measure
+          smt_of ~vocab:false ~resolve_var:path_resolve_var ~resolve_measure:path_resolve_measure
             ~resolve_field:path_resolve_field
             ~resolve_measure_app ~resolve_tester:path_resolve_tester
             ~resolve_str_lit:str_lit_const cond
@@ -2222,7 +2233,8 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
           in
           (match call with
            | A.EApp (A.EVar { A.txt = f; _ }, _, _)
-             when not (is_predicate_operator f) && not (is_measure_app f) ->
+             when not (List.mem f predicate_operators)
+                  && not (is_measure_app f && not (is_builtin_set_measure (measure_name f))) ->
              (match
                 reflect_scalar ~postcond ~foreign_var ~foreign_measure
                   ~foreign_field:arg_resolve_field ~sort:Smt.SBool sc call

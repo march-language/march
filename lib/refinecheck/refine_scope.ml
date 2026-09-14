@@ -76,12 +76,13 @@ let float_lit_term (f : float) : Smt.term option =
    down still names the leaf, not each ancestor on the way up. [smt_of] is now
    this function with [Result.to_option] on the outside; the 18 existing
    callers, which want only the [option], are unchanged. *)
-let rec smt_of_r_marked ~resolve_var ~resolve_measure ?(resolve_field = fun _ _ -> None)
+let rec smt_of_r_marked ?(vocab = true) ~resolve_var ~resolve_measure
+    ?(resolve_field = fun _ _ -> None)
     ?(resolve_measure_app = fun _ _ -> None) ?(resolve_tester = fun _ _ -> None)
     ?(resolve_str_lit = fun _ -> None)
     ?(resolve_measure_call = fun _ _ _ -> None)
     (e : A.expr) : (Smt.term, A.expr) result =
-  let r = smt_of_r_marked ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app
+  let r = smt_of_r_marked ~vocab ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app
             ~resolve_tester ~resolve_str_lit ~resolve_measure_call in
   let b2 f a b =
     match r a, r b with
@@ -114,7 +115,8 @@ let rec smt_of_r_marked ~resolve_var ~resolve_measure ?(resolve_field = fun _ _ 
   (* A measure application m(e): m(var) reflects to a consistent measure symbol;
      m(expr) is evaluated via resolve_measure_app (e.g. concrete_len for a list);
      len(list-literal) is computed concretely without needing resolve_measure_app. *)
-  | A.EApp (A.EVar { A.txt = m0; _ }, [ a ], _) when is_measure_app m0 ->
+  | A.EApp (A.EVar { A.txt = m0; _ }, [ a ], _)
+    when is_measure_app m0 && (vocab || not (is_builtin_set_measure (measure_name m0))) ->
     (* One normalization point for BOTH sides: a path condition and a predicate
        are translated by this same function, so aliasing here is what makes
        `List.length(ys) > 0` and `len(_) > 0` land on the same SMT symbol. *)
@@ -144,22 +146,23 @@ let rec smt_of_r_marked ~resolve_var ~resolve_measure ?(resolve_field = fun _ _ 
               | _ -> Error e)
            | Error e2 -> Error e2)))
   (* ── The set vocabulary (specs/2026-09-13-set-refinements-design.md §3) ──
+     Off under [~vocab:false] (program text; see [smt_of_r]).
      Predicate-only names, exactly like `len`: `member(x, s)`, `union(a, b)`,
      `inter(a, b)`, `diff(a, b)`, `subset(a, b)`, `singleton(x)` and the
      literal `empty`.  A set term's ELEMENT sort is left as the placeholder and
      unified per VC by [resolve_set_sorts], so no resolver here needs to know
      what a list holds. *)
-  | A.EApp (A.EVar { A.txt = "member"; _ }, [ x; st ], _) -> b2 (fun x s -> Smt.SetMem (x, s)) x st
-  | A.EApp (A.EVar { A.txt = "union"; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.SetUnion (x, y)) a b
-  | A.EApp (A.EVar { A.txt = "inter"; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.SetInter (x, y)) a b
-  | A.EApp (A.EVar { A.txt = "diff"; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.SetDiff (x, y)) a b
-  | A.EApp (A.EVar { A.txt = "subset"; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.SetSub (x, y)) a b
-  | A.EApp (A.EVar { A.txt = "singleton"; _ }, [ x ], _) ->
+  | A.EApp (A.EVar { A.txt = "member"; _ }, [ x; st ], _) when vocab -> b2 (fun x s -> Smt.SetMem (x, s)) x st
+  | A.EApp (A.EVar { A.txt = "union"; _ }, [ a; b ], _) when vocab -> b2 (fun x y -> Smt.SetUnion (x, y)) a b
+  | A.EApp (A.EVar { A.txt = "inter"; _ }, [ a; b ], _) when vocab -> b2 (fun x y -> Smt.SetInter (x, y)) a b
+  | A.EApp (A.EVar { A.txt = "diff"; _ }, [ a; b ], _) when vocab -> b2 (fun x y -> Smt.SetDiff (x, y)) a b
+  | A.EApp (A.EVar { A.txt = "subset"; _ }, [ a; b ], _) when vocab -> b2 (fun x y -> Smt.SetSub (x, y)) a b
+  | A.EApp (A.EVar { A.txt = "singleton"; _ }, [ x ], _) when vocab ->
     Result.map (fun t -> Smt.SetSng (Smt.set_unknown_elem, t)) (r x)
   (* The empty-set literal exists only where [mark_set_empty] put it — a set
      position.  A bare `empty` falls through to the ordinary variable arm
      below, so a parameter or local of that name keeps its meaning. *)
-  | A.EVar { A.txt; _ } when txt = set_empty_literal -> Ok (Smt.SetEmpty Smt.set_unknown_elem)
+  | A.EVar { A.txt; _ } when vocab && txt = set_empty_literal -> Ok (Smt.SetEmpty Smt.set_unknown_elem)
   (* A constructor tester `is_Ctor(e)`: reflects to the Z3 datatype tester
      ((_ is Ctor) e).  [resolve_tester] owns reflecting [e] into a term of the
      right datatype sort (and declaring/registering it); a context that cannot
@@ -204,22 +207,35 @@ let rec smt_of_r_marked ~resolve_var ~resolve_measure ?(resolve_field = fun _ _ 
   | _ -> Error e
 
 (* Every predicate and guard is marked once, here at the entry, so the
-   recursion only ever sees [set_empty_literal] in set positions. *)
-let smt_of_r ~resolve_var ~resolve_measure ?(resolve_field = fun _ _ -> None)
+   recursion only ever sees [set_empty_literal] in set positions.
+
+   [~vocab:false] is for PROGRAM TEXT — a path condition, i.e. an `if`/`cond`
+   guard or a match-arm guard.  The set vocabulary (`elts`, `keys`, `member`,
+   `union`, …) is logic: body code cannot call it, so a guard spelling one of
+   those names is necessarily a call to the program's OWN function of that
+   name (`fn keys(r)`, `fn member(xs, x)`), and reading it as a set term
+   asserted a fact about the wrong thing — or, as `keys(r) == []` did, made
+   the element sorts clash and skipped the whole call, hiding a definite
+   violation.  So a guard's vocabulary names reflect as the opaque calls they
+   are (and `empty` stays a variable).  Only the guard's own syntax is
+   affected: a resolver callback that reflects a callee's CONTRACT (a
+   `Set.contains` guard's promise) calls back in with the default. *)
+let smt_of_r ?(vocab = true) ~resolve_var ~resolve_measure ?(resolve_field = fun _ _ -> None)
     ?(resolve_measure_app = fun _ _ -> None) ?(resolve_tester = fun _ _ -> None)
     ?(resolve_str_lit = fun _ -> None)
     ?(resolve_measure_call = fun _ _ _ -> None)
     (e : A.expr) : (Smt.term, A.expr) result =
-  smt_of_r_marked ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app
-    ~resolve_tester ~resolve_str_lit ~resolve_measure_call (mark_set_empty e)
+  smt_of_r_marked ~vocab ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app
+    ~resolve_tester ~resolve_str_lit ~resolve_measure_call
+    (if vocab then mark_set_empty e else e)
 
-let smt_of ~resolve_var ~resolve_measure ?(resolve_field = fun _ _ -> None)
+let smt_of ?(vocab = true) ~resolve_var ~resolve_measure ?(resolve_field = fun _ _ -> None)
     ?(resolve_measure_app = fun _ _ -> None) ?(resolve_tester = fun _ _ -> None)
     ?(resolve_str_lit = fun _ -> None)
     ?(resolve_measure_call = fun _ _ _ -> None)
     (e : A.expr) : Smt.term option =
   Result.to_option
-    (smt_of_r ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app
+    (smt_of_r ~vocab ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app
        ~resolve_tester ~resolve_str_lit ~resolve_measure_call e)
 
 (* =================================================================

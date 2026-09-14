@@ -438,7 +438,9 @@ double march_run_blocking_d(void *fn, const int64_t *args, int n) {
  * march_make_int / march_str_new / …); the result is a march_value (read it by
  * the closure's known return type).  Up to 5 args (the closure ptr occupies the
  * 6th GP-register slot).  Borrow semantics: the closure and args are not dropped
- * here — March owns them across the call. */
+ * here — March owns them across the call.  A closure call consumes its heap
+ * arguments, so each one is given its own reference first
+ * (march_clo_arg_retain, march_runtime.h). */
 march_value march_call(march_value closure, int32_t nargs, const march_value *args) {
     void *clo = march_as_ptr(closure);
     void *fn  = *(void **)((char *)clo + 16);   /* field 0 = apply fn ptr */
@@ -446,7 +448,10 @@ march_value march_call(march_value closure, int32_t nargs, const march_value *ar
     if (nargs > 5) march_fatal("march_call: too many arguments (max 5)");
     int64_t a[6];
     a[0] = (int64_t)(intptr_t)clo;              /* apply(clo, args…) */
-    for (int32_t i = 0; i < nargs; i++) a[1 + i] = (int64_t)args[i];
+    for (int32_t i = 0; i < nargs; i++) {
+        a[1 + i] = (int64_t)args[i];
+        march_clo_arg_retain((void *)(intptr_t)args[i]);
+    }
     return (march_value)blk_call_i(fn, a, nargs + 1);
 }
 
@@ -614,5 +619,9 @@ extern void *march_pid_of_int(int64_t n);
 int64_t ffi_test_actor_rc(int64_t pid_index) {
     void *actor = march_pid_of_int(pid_index);
     if (!IS_HEAP_PTR(actor)) return -1;
-    return ((int64_t *)actor)[0];
+    /* march_pid_of_int takes a reference for its caller; report the count
+     * without it, and give it back. */
+    int64_t rc = ((int64_t *)actor)[0] - 1;
+    march_decrc(actor);
+    return rc;
 }

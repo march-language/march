@@ -1698,6 +1698,28 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/closure_capture_release_probe.expected native_closure_capture_release_probe.out)))
 
+; ── Leak guard: a closure call consumes its arguments on both sides. A
+; read-only apply-fn parameter was borrow-classified while every caller
+; transferred a reference, leaking one fresh argument per call; also a lambda
+; ignoring its argument, a record-alias parameter, and a named function's
+; $clo_wrap. Red with the apply-fn pin reverted (borrow.ml infer_module).
+(rule
+ (targets native_closure_call_arg_ownership_probe native_closure_call_arg_ownership_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/closure_call_arg_ownership_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_closure_call_arg_ownership_probe
+        native/closure_call_arg_ownership_probe.march)
+   (with-stdout-to native_closure_call_arg_ownership_probe.out
+        (system "./native_closure_call_arg_ownership_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/closure_call_arg_ownership_probe.expected native_closure_call_arg_ownership_probe.out)))
+
 ; ── Leak guard: `to_string` of a List (prelude's Show via string_join) and
 ; string_join itself release the list. string_join's list argument was marked
 ; owned in borrow.ml while march_string_join only reads it: 5 objects per
@@ -6252,7 +6274,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
   (run bash -c
    "live=$(cat native_arr_fold_acc_leak_probe.live); \
     test -n \"$live\" || { echo 'could not read live_allocs delta from native_arr_fold_acc_leak_probe.live' >&2; exit 1; }; \
-    test \"$live\" -lt 1000 || { echo \"native_arr_fold_acc_leak_probe leaked: live_allocs delta ${live} >= 1000 objects. Folding with a HEAP accumulator must not accumulate one dropped object per element -- healthy is a small constant (20 objects, and the Float half of it is identical at 500k/2M/8M elements). Two independent witnesses are being asserted here and the delta says which one broke: ~4,000,000 is the FLOAT half (native_float_arr_fold / native_f32_arr_fold no longer call fold_release_prev_acc after call_closure_2), ~1,000,000 is the STRING half (the MARCH_CLO_ARG0_BORROWED bit is no longer reaching the closure header -- check Perceus still populates Clo_flags and that llvm_emit still stamps the pad word at every closure-alloc site). Note stdout is identical either way, so the .expected diff will NOT have failed.\" >&2; exit 1; }; \
+    test \"$live\" -lt 1000 || { echo \"native_arr_fold_acc_leak_probe leaked: live_allocs delta ${live} >= 1000 objects. Folding with a HEAP accumulator must not accumulate one dropped object per element -- healthy is a small constant (20 objects, and the Float half of it is identical at 500k/2M/8M elements). Two independent witnesses are being asserted here and the delta says which one broke: ~4,000,000 is the FLOAT half (native_float_arr_fold / native_f32_arr_fold no longer call fold_release_prev_acc after call_closure_2), ~1,000,000 is the STRING half (the fold closure no longer releases its accumulator -- check Borrow.infer_module still pins every apply-fn parameter owned). Note stdout is identical either way, so the .expected diff will NOT have failed.\" >&2; exit 1; }; \
     echo \"native_arr_fold_acc_leak_probe live_allocs delta = ${live} objects\"")))
 
 ; Float-box uniform-ABI leak probe (call-site release of the erased-ABI Float

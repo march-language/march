@@ -240,6 +240,20 @@ let fn_ret_tir = Llvm_emit_call.fn_ret_tir
    closure_slot further down — both stay in this file, so re-export bare. *)
 let clo_wrap_define = Llvm_calls.clo_wrap_define
 
+(* The borrow modes a [$clo_wrap] for [name] releases after forwarding (see
+   [Clo_flags]): the module function's converged modes when Perceus registered
+   it, else the builtin/extern borrow table.
+
+   An actor's dispatch function releases nothing: the runtime's message loop
+   ([actor_green_thread]) calls its trampoline with the actor record and the
+   message without handing over a reference to either, so a release there
+   freed the live actor (ASAN, specs/lang/golden/g35_actor_spawn_send). *)
+let clo_wrap_borrowed (name : string) (nparams : int) : bool list =
+  if Tir_names.is_actor_dispatch_fn name then [] else
+  match Clo_flags.borrowed_params name with
+  | Some modes -> modes
+  | None -> List.init nparams (fun i -> Borrow.is_borrowed Borrow.empty name i)
+
 (* ── Known builtins ──────────────────────────────────────────────────── *)
 
 (** True for operator/function names that are builtin — not heap values.
@@ -413,11 +427,12 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
         (match wrap_kind with
          | `Declare -> Llvm_calls.clo_wrap_declare wrap_name param_tys
          | `Define  ->
-           clo_wrap_define ~drop_clo:ctx.repl wrap_name param_tys target_ret fn_name));
+           clo_wrap_define ~drop_clo:ctx.repl
+             ~borrowed:(clo_wrap_borrowed v.Tir.v_name (List.length param_tys))
+             wrap_name param_tys target_ret fn_name));
     (* Allocate closure: header(16) + fn_ptr(8) = 24 bytes *)
     if static_closure_ok ctx v.Tir.v_name then
-      ("ptr", Llvm_ctx.intern_static_closure
-                ~pad:(Clo_flags.pad_for v.Tir.v_name) ctx fn_name wrap_name)
+      ("ptr", Llvm_ctx.intern_static_closure ctx fn_name wrap_name)
     else begin
       let hp = fresh ctx "cwrap" in
       emit ctx (Printf.sprintf "%s = call ptr @march_alloc(i64 24)" hp);
@@ -544,10 +559,11 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
         (match wrap_kind with
          | `Declare -> Llvm_calls.clo_wrap_declare wrap_name param_ltys
          | `Define  ->
-           clo_wrap_define ~drop_clo:ctx.repl wrap_name param_ltys target_ret fn_name));
+           clo_wrap_define ~drop_clo:ctx.repl
+             ~borrowed:(clo_wrap_borrowed v.Tir.v_name (List.length param_ltys))
+             wrap_name param_ltys target_ret fn_name));
     if static_closure_ok ctx v.Tir.v_name then
-      ("ptr", Llvm_ctx.intern_static_closure
-                ~pad:(Clo_flags.pad_for v.Tir.v_name) ctx fn_name wrap_name)
+      ("ptr", Llvm_ctx.intern_static_closure ctx fn_name wrap_name)
     else begin
       let hp = fresh ctx "cwrap" in
       emit ctx (Printf.sprintf "%s = call ptr @march_alloc(i64 24)" hp);
@@ -600,10 +616,11 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
             (match wrap_kind with
              | `Declare -> Llvm_calls.clo_wrap_declare wrap_name param_tys
              | `Define  ->
-               clo_wrap_define ~drop_clo:ctx.repl wrap_name param_tys target_ret fn_name));
+               clo_wrap_define ~drop_clo:ctx.repl
+                 ~borrowed:(clo_wrap_borrowed resolved (List.length param_tys))
+                 wrap_name param_tys target_ret fn_name));
        if static_closure_ok ctx resolved then
-         ("ptr", Llvm_ctx.intern_static_closure
-                   ~pad:(Clo_flags.pad_for resolved) ctx fn_name wrap_name)
+         ("ptr", Llvm_ctx.intern_static_closure ctx fn_name wrap_name)
        else begin
          let hp  = fresh ctx "cwrap" in
          emit ctx (Printf.sprintf "%s = call ptr @march_alloc(i64 24)" hp);
