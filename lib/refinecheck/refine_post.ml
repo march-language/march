@@ -540,7 +540,7 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
     List.iter
       (fun (cond, negated) ->
         match
-          smt_of ~resolve_var:path_resolve_var ~resolve_measure
+          smt_of ~vocab:false ~resolve_var:path_resolve_var ~resolve_measure
             ~resolve_field:path_resolve_field ~resolve_measure_app cond
         with
         | Some t -> assume := (if negated then Smt.Not t else t) :: !assume
@@ -806,6 +806,32 @@ let post_induction_shape (fd : A.fn_def)
     | Closed | Relational _ -> None)
   | _ -> None
 
+(* Shape 2's scrutinee requirement: the matched parameter's DECLARED type is
+   an ADT the measure preamble declares.  An unannotated parameter has a name
+   ([param_name_of]) but no sort, and is not a Shape 2 match. *)
+let induction_match_adt (c : A.fn_clause) (mparam : string) : string option =
+  List.find_opt (fun fp -> param_name_of fp = mparam) c.A.fc_params
+  |> (fun o -> Option.bind o param_ty_of)
+  |> (fun o -> Option.bind o smt_sort_of_ty)
+  |> function
+  | Some (Smt.SData madt) when madt <> "Elem" && Hashtbl.mem measure_preamble_sorts madt ->
+    Some madt
+  | _ -> None
+
+(* Does [check_post_induction] reach a body shape it checks (Shape 1 or
+   Shape 2), rather than its final `| _ -> false`?  Solver-free, for
+   [Refine_audit]: [post_induction_shape] alone accepts the signature
+   whatever the body is. *)
+let post_induction_checks (fd : A.fn_def) : bool =
+  match post_induction_shape fd with
+  | None -> false
+  | Some (_, _, params, _, c, _) -> (
+    match c.A.fc_body with
+    | A.ECon _ -> true
+    | A.EMatch (A.EVar sv, _, _) when List.mem sv.A.txt params ->
+      induction_match_adt c sv.A.txt <> None
+    | _ -> false)
+
 let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
   let self = fd.A.fn_name.A.txt in
   let dummy_span = fd.A.fn_name.A.span in
@@ -930,7 +956,8 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
                 Some cst
               | _ -> None
             and reflect_int (e : A.expr) : Smt.term option =
-              smt_of ~resolve_var:rv_int ~resolve_measure:rm ~resolve_measure_app:rma e
+              (* Program text (a tail or a guard): no set vocabulary. *)
+              smt_of ~vocab:false ~resolve_var:rv_int ~resolve_measure:rm ~resolve_measure_app:rma e
             and rv_int (x : string) : Smt.term option =
               if declare x Smt.SInt then Some (Smt.Const x) else None
             and rm (m : string) (x : string) : Smt.term option =
@@ -1077,15 +1104,10 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
           in
           ix 0 params
         in
-        let mparam_ty =
-          List.find_opt (fun fp -> param_name_of fp = mparam) c.A.fc_params
-          |> (fun o -> Option.bind o param_ty_of)
-          |> (fun o -> Option.bind o smt_sort_of_ty)
-        in
-        match mparam_ty with
-        | Some (Smt.SData madt) when madt <> "Elem" ->
-          if not (Hashtbl.mem measure_preamble_sorts madt) then false
-          else begin
+        match induction_match_adt c mparam with
+        | None -> false
+        | Some madt ->
+          begin
             (* Structurally smaller variables, computed over the WHOLE clause
                body so a nested match contributes its components too. *)
             let sset = structural_subvars mparam c.A.fc_body in
@@ -1133,8 +1155,7 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
             in
             branches <> []
             && List.fold_left (fun acc br -> check_branch br && acc) true branches
-          end
-        | _ -> false)
+          end)
       | _ -> false)
 
 (* =================================================================
@@ -1177,6 +1198,21 @@ let assumed_return (fd : A.fn_def) : A.expr option =
   match Option.map unlinear fd.A.fn_ret_ty with
   | Some (A.TyRefine (_, _, pred)) -> Some pred
   | _ -> None
+
+(* Does [check_fn_post_verdict] actually CHECK [fd]'s return refinement —
+   file an obligation or produce a verdict — rather than fall through to a
+   path that silently files nothing?  The same routing, solver-free, so
+   [Refine_audit] cannot report Enforced for a contract the checker never
+   looks at (a `{List(Int) | len(_) > 0}` return with no list measure, or a
+   Tier 2 match on an unannotated parameter). *)
+let return_refinement_checked (fd : A.fn_def) : bool =
+  (is_assumed fd && assumed_return fd <> None)
+  ||
+  match return_refine_ext fd with
+  | None -> post_induction_checks fd
+  | Some (_, ret_pred, Some marker) when is_meas_sort marker && not (pred_mentions_elts ret_pred) ->
+    post_induction_checks fd
+  | Some _ -> true
 
 let check_fn_post_verdict ~root errctx ?(emit = true) (fd : A.fn_def) : bool =
   match assumed_return fd with
