@@ -207,6 +207,11 @@ git log is authoritative for exact commits.
   catch-all arm** (a "pattern can never be reached" warning that became
   visible with the change above).
 
+- **`compare_int`, `compare_float` and `compare_string` work.** Compiled
+  programs calling them failed to link, and the interpreter returned a
+  `Less`/`Equal`/`Greater` value where the type says `Int`. They now return
+  -1, 0 or 1 on both, like `compare`.
+
 - **A generic function has to opt in to receiving a linear value, and a
   container holding one is linear too.** `fn dup(x) do (x, x) end` turned one
   `always_linear` value into two, `fn drop_it(x) do 0 end` leaked one, and a

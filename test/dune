@@ -1633,6 +1633,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/actor_self.expected native_actor_self.out)))
 
+; ── compare_int / compare_float / compare_string: link compiled, return
+; -1/0/1 on both backends (the interpreter returned a Less/Equal/Greater ctor;
+; the compiled program failed to link), and compare_string releases a fresh
+; operand. Interpreter half: test_compiler.ml "compare builtins return Int".
+(rule
+ (targets native_compare_builtins native_compare_builtins.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/compare_builtins.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_compare_builtins
+        native/compare_builtins.march)
+   (with-stdout-to native_compare_builtins.out
+        (system "./native_compare_builtins")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/compare_builtins.expected native_compare_builtins.out)))
+
 ; ── Leak guard: builtins that only READ a heap argument release it. `==`,
 ; `!=`, `<`, `>=` on a fresh String, `==` on a List / boxed ADT / erased value,
 ; and `string_length` each leaked their argument once per call: absent from

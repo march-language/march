@@ -1430,19 +1430,23 @@ let base_env : env =
         | [VInt n] -> VString (String.make 1 (Char.chr (n land 0xFF)))
         | _ -> eval_error "char_from_int: expected int"))
 
-    (* ---- Comparison helpers ---- *)
+    (* ---- Comparison helpers ----
+       -1 / 0 / 1, as the typechecker declares them ((T, T) -> Int) and as the
+       compiled backend's march_compare_* return.  These used to return a
+       Less/Equal/Greater constructor, so any use as an Int failed at run time
+       ("int_to_string: expected int") while the compiled program did not even
+       link. *)
   ; ("compare_int", VBuiltin ("compare_int", function
-        | [VInt a; VInt b] ->
-          VCon ((if a < b then "Less" else if a > b then "Greater" else "Equal"), [])
+        | [VInt a; VInt b] -> VInt (compare a b)
         | _ -> eval_error "compare_int: expected two ints"))
   ; ("compare_float", VBuiltin ("compare_float", function
         | [VFloat a; VFloat b] ->
-          VCon ((if a < b then "Less" else if a > b then "Greater" else "Equal"), [])
+          VInt (if a < b then -1 else if a > b then 1 else 0)
         | _ -> eval_error "compare_float: expected two floats"))
   ; ("compare_string", VBuiltin ("compare_string", function
         | [VString a; VString b] ->
           let c = String.compare a b in
-          VCon ((if c < 0 then "Less" else if c > 0 then "Greater" else "Equal"), [])
+          VInt (if c < 0 then -1 else if c > 0 then 1 else 0)
         | _ -> eval_error "compare_string: expected two strings"))
 
     (* ---- Panic / diverging functions ---- *)

@@ -112,6 +112,7 @@ let extern_borrow_table : (string * bool list) list = [
      of every call.  march_value_to_string takes its own +1 when it returns a
      String argument unchanged, so borrowed is correct for it too. *)
   ("string_length",        [true]);
+  ("compare_string",       [true; true]);   (* march_compare_string only reads *)
   ("to_string",            [true]);
   ("string_eq",            [true; true]);
   ("string_concat",        [true; true]);

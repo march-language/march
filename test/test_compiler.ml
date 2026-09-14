@@ -6858,6 +6858,19 @@ let test_self_send_delivers_interp () =
   Alcotest.(check bool) "self is the pid spawn returned"
     true (field "me" = Some (March_eval.Eval.VPid pid))
 
+(** compare_int / compare_float / compare_string return -1/0/1 on the
+    interpreter, as the typechecker declares ((T, T) -> Int).  They returned a
+    Less/Equal/Greater constructor, so the first use as an Int failed at run
+    time.  The compiled half is test/native/compare_builtins.march. *)
+let test_compare_builtins_return_int () =
+  let env = eval_module {|mod TestCompare do
+    fn main() do
+      compare_int(3, 5) * 100 + compare_float(2.5, 2.5) * 10 + compare_string("b", "a")
+    end
+  end|} in
+  Alcotest.(check bool) "-100 + 0 + 1" true
+    (call_fn env "main" [] = March_eval.Eval.VInt (-99))
+
 (** whereis on an unknown atom returns None *)
 let test_whereis_unknown () =
   let result = call_builtin "whereis" [March_eval.Eval.VAtom "no_such_process"] in
@@ -15806,6 +15819,7 @@ let compiler_suites =
           Alcotest.test_case "whereis named"             `Quick (with_reset test_whereis_named);
           Alcotest.test_case "whereis live actor"        `Quick (with_reset test_whereis_live_actor);
           Alcotest.test_case "self-send delivers (interp)" `Quick (with_reset test_self_send_delivers_interp);
+          Alcotest.test_case "compare builtins return Int" `Quick test_compare_builtins_return_int;
           Alcotest.test_case "whereis unknown"           `Quick (with_reset test_whereis_unknown);
           Alcotest.test_case "whereis_bang unknown"      `Quick (with_reset test_whereis_bang_unknown);
           Alcotest.test_case "name reregisters restart"  `Quick (with_reset test_name_reregisters_on_restart);
