@@ -32,6 +32,16 @@ end
 long-lived argument doesn't show in live_allocs but its refcount grows by 1
 per call (caller pre-incs, nobody ever decs), making the object immortal.
 
+## Everyday reproducer (2026-09-13)
+
+`to_string` of a `List(String)` whose elements are fresh strings leaks one
+string per element: 20,004 over 10,000 calls of
+`to_string([int_to_string(n), int_to_string(n + 1)])`. prelude's Show impl
+maps `fn x -> show(x)` over the list, and `map` calls it through a closure, so
+this is the mismatch below. The list itself was a separate leak, fixed by
+`specs/progress/2026-09-13-string-join-borrows-its-list.md`. An identity lambda
+(`List.map(xs, fn s -> s)`) is flat, because its apply fn owns the parameter.
+
 ## Why
 
 The two sides of an indirect closure call implement different conventions:

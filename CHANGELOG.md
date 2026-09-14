@@ -207,6 +207,10 @@ git log is authoritative for exact commits.
   catch-all arm** (a "pattern can never be reached" warning that became
   visible with the change above).
 
+- **`to_string` of a list and `string_join` no longer leak the list
+  (compiled).** Printing a list leaked the intermediate list and its element
+  strings on every call (five objects for a two-element list).
+
 - **Awaiting a task that returns a `Float` no longer leaks (compiled).** Each
   `task_await_unwrap` or `task_await` of a `Float` task left one allocation
   behind.

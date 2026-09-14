@@ -1633,6 +1633,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/actor_self.expected native_actor_self.out)))
 
+; ── Leak guard: `to_string` of a List (prelude's Show via string_join) and
+; string_join itself release the list. string_join's list argument was marked
+; owned in borrow.ml while march_string_join only reads it: 5 objects per
+; `to_string([n, 7])`. Red with the old table entries on all four legs.
+(rule
+ (targets native_show_list_leak_probe native_show_list_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/show_list_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_show_list_leak_probe
+        native/show_list_leak_probe.march)
+   (with-stdout-to native_show_list_leak_probe.out
+        (system "./native_show_list_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/show_list_leak_probe.expected native_show_list_leak_probe.out)))
+
 ; ── Leak guard: an unboxed aggregate matched out of a niche-encoded Option
 ; (`Some(P2(..))`) releases the box that IS the Some value, but only when the
 ; scrutinee dies in the match. Red on main (one 32-byte cell per evaluation);

@@ -82,8 +82,14 @@ let extern_borrow_table : (string * bool list) list = [
   ("march_string_slice",     [true; false; false]);
   (* repeat(s, int_n)  — only s is a string *)
   ("march_string_repeat",    [true; false]);
-  (* join(list, sep)  — list is heap-owned by caller; sep is borrowed string *)
-  ("march_string_join",      [false; true]);
+  (* join(list, sep): BOTH borrowed.  march_string_join only walks the list and
+     copies bytes out of each element; it neither stores nor frees anything.
+     The list was marked owned from this table's first version (724adae3, no
+     recorded reason), so every list passed to string_join -- including the
+     mapped list inside prelude's `impl Show(List(a))` -- leaked with its
+     elements: 5 objects per `to_string` of a 2-element list.
+     Guard: test/native/show_list_leak_probe.march. *)
+  ("march_string_join",      [true; true]);
   (* pad_left/right(s, int_width, fill)  — s and fill are strings *)
   ("march_string_pad_left",  [true; false; true]);
   ("march_string_pad_right", [true; false; true]);
@@ -143,7 +149,7 @@ let extern_borrow_table : (string * bool list) list = [
   ("string_replace_all",   [true; true; true]);
   ("string_slice",         [true; false; false]);
   ("string_repeat",        [true; false]);
-  ("string_join",          [false; true]);
+  ("string_join",          [true; true]);    (* see march_string_join above *)
   ("string_pad_left",      [true; false; true]);
   ("string_pad_right",     [true; false; true]);
   (* ── Record introspection builtins ───────────────────────────────────────
