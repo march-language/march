@@ -201,6 +201,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`node_discovery` is back on `dune runtest`.** It was quarantined on
+  2026-08-08 for a torn-stdout race that was fixed on 2026-08-21
+  (`march_stdout_mu`); the quarantine outlived the fix. The ubuntu CI job now
+  also runs the compiled test 200 times per run as the guard.
+
 - **A record parameter no longer makes an unproven postcondition a "violation".**
   With a record-refined parameter in scope the checker reports any satisfiable
   counterexample directly; it now does so only when every parameter's own

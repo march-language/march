@@ -139,6 +139,32 @@ jobs:
           eval $(opam env)
           dune runtest
 
+      # node_discovery was quarantined 2026-08-08 for a torn-stdout race seen
+      # ~1-in-2 on THIS runner and fixed 2026-08-21 (march_stdout_mu). It is
+      # back on runtest; this step is the trial that justifies that, and the
+      # guard that keeps it: the compiled binary 200 times, each run's sorted
+      # output diffed against the golden, the first tear or crash reported
+      # verbatim. ~40s. See specs/todos/2026-09-14-distributed-plane-known-gaps.md.
+      - name: Soak node_discovery (torn-stdout guard)
+        if: matrix.os == 'ubuntu-24.04'
+        timeout-minutes: 5
+        run: |
+          eval $(opam env)
+          dune build test/native_node_discovery.out
+          bin=_build/default/test/native_node_discovery
+          exp=test/native/node_discovery.expected
+          for i in $(seq 1 200); do
+            if ! "$bin" > /tmp/nd.out 2>/tmp/nd.err; then
+              echo "::error::node_discovery run $i exited $? (stderr follows)"; cat /tmp/nd.err; exit 1
+            fi
+            if ! LC_ALL=C sort /tmp/nd.out | diff -q - "$exp" > /dev/null; then
+              echo "::error::node_discovery run $i: sorted output differs from the golden"
+              LC_ALL=C sort /tmp/nd.out | diff - "$exp" || true
+              exit 1
+            fi
+          done
+          echo "node_discovery: 200/200 runs matched the golden"
+
   # Static-semantics + grammar corpora, doc notebooks and formatting: all
   # independent of `dune runtest` and of each other, and all short — grouped
   # into one job rather than four so they don't each pay job-setup overhead.
