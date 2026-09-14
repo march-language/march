@@ -52,6 +52,8 @@ native_builtin_link_backing: coverage audit (user + stdlib): 87 enforced, 0 iner
 native_builtin_link_backing: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_bytes_u8_bridge: coverage audit (user + stdlib): 87 enforced, 0 inert (warned), 0 unenforced
 native_bytes_u8_bridge: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_c_symbol_collision: coverage audit (user + stdlib): 87 enforced, 0 inert (warned), 0 unenforced
+native_c_symbol_collision: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_cap_dictionary: coverage audit (user + stdlib): 87 enforced, 0 inert (warned), 0 unenforced
 native_cap_dictionary: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_cap_epoch_plane: coverage audit (user + stdlib): 87 enforced, 0 inert (warned), 0 unenforced

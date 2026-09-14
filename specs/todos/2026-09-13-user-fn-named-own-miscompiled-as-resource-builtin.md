@@ -33,3 +33,19 @@ a compiler-known one): name-based dispatch in lowering.
 - Witness: a program with `fn own(a : Int, b : Int) : Int do a + b end` that
   compiles and runs on both backends; today it fails to link.
 - Sweep `lower_expr.ml` for other bare-name special cases with the same shape.
+
+## Not a second instance (2026-09-14): a user fn named `connect`
+
+*Investigated and fixed the same day; a different bug at the link, not this
+lowering one — see [[2026-09-14-user-fn-named-after-c-symbol-hijacks-runtime]]
+in `specs/progress/`. The paragraph below is the original note.*
+
+`pfn connect(port : Int) : Int do match Socket.connect("127.0.0.1", port) …`
+in `test/two_node/restart/node_a.march` compiled to a program that died with
+`fatal SIGBUS … fault in its stack guard page (overflow)` before its first
+print; renamed to `dial`, byte-for-byte otherwise identical, it runs. Bisected
+by renaming only that fn (the other candidate, a zero-arg `sleep_100ms`, was
+innocent). Same shape as `own`: a bare user name colliding with a runtime
+builtin's name (`connect` / `tcp_connect` family) and resolved to the wrong
+callee at lowering. A reject or a rename at the collision would have made this
+a one-line diagnostic instead of a bisect.

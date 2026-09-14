@@ -1,0 +1,35 @@
+-- User functions named after C symbols the runtime links against.
+--
+-- A top-level user fn is emitted under its bare name, in the same link as
+-- the C runtime: before the `$u` mangling (lib/tir/llvm_builtins.ml,
+-- `c_reserved_symbols`) a user `fn connect` WAS the `connect` the runtime's
+-- tcp_connect called, and the program recursed through it to a stack
+-- overflow; `log`/`time`/`strlen` hijacked libm/libc the same way. Each fn
+-- here is used twice so it is not inlined away and its symbol is emitted.
+mod CSymbolCollision do
+  needs IO.Console
+  needs IO.NetConnect
+
+  fn connect(port : Int) : Int do
+    match Socket.connect("127.0.0.1", port) do
+      Ok(fd) -> fd
+      Err(_) -> 0 - port
+    end
+  end
+
+  fn log(line : String) : String do "[log] " ++ line end
+  fn time(n : Int) : Int do n * 2 end
+  fn strlen(_s : String) : Int do 7 end
+
+  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect)) do
+    println(log("a"))
+    println(log("b"))
+    -- port 1 is refused on loopback: the runtime's connect() must be libc's,
+    -- or this never returns.
+    println("connect: " ++ int_to_string(connect(1)) ++ " " ++ int_to_string(connect(1)))
+    println("time: " ++ int_to_string(time(1) + time(2)))
+    println("strlen: " ++ int_to_string(strlen("x") + strlen("yy")))
+    -- libm's log, not ours.
+    println("Math.log(1.0) = " ++ float_to_string(Math.log(1.0)))
+  end
+end

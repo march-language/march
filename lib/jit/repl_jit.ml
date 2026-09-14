@@ -340,7 +340,7 @@ let compile_fragment ctx (ir : string) : fragment_handle =
     changes its name). Such functions are already in the runtime .so and must
     not be re-defined in a JIT fragment or LLVM will reject the double-define. *)
 let is_c_runtime_fn name =
-  March_tir.Llvm_emit.mangle_extern name <> name
+  March_tir.Llvm_builtins.has_c_mapping name
 
 (** Classify functions into (new_fns, extern_fns) WITHOUT touching compiled_fns.
     - new_fns:    not yet compiled → will be defined in this fragment.

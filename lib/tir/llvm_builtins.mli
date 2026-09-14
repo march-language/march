@@ -67,4 +67,6 @@ val builtin_param_llvm_tys : string -> string list option
 val reset_called_syms : unit -> unit
 val called_c_symbols : unit -> string list
 val mangle_extern : string -> string
+val user_symbol_of : string -> string
+val has_c_mapping : string -> bool
 val c_symbol_of_march_name : string -> string
