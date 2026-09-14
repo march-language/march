@@ -1717,19 +1717,39 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        over: a constructor application becomes (ctor …) (so the recursion axioms
        fire); a variable becomes a fresh datatype constant. *)
     let dt_counter = ref 0 in
-    let rec reflect_dt adt e =
+    (* The datatype instance a callee parameter's DECLARED type gives
+       (`t : {Tree(Int) | …}` → [Int]), for the refined value and for another
+       parameter named in the predicate.  [None]: no declared instance; the
+       term takes the `Elem` instance and [resolve_sorts] may refine it. *)
+    let param_instance_args (name : string) : Smt.sort list option =
+      let idx = if is_self name then Some rp.idx else List.assoc_opt name name_pos in
+      match Option.bind idx (fun i -> List.nth_opt sg.param_tys i) with
+      | Some (Some ty) ->
+        (match instance_sort_of_ty ty with Smt.SData (_, a) when a <> [] -> Some a | _ -> None)
+      | _ -> None
+    in
+    (* [args]: the instance to reflect at.  A constructor's fields then have
+       their instantiated sorts, so an `Int` payload of a `Tree(Int)` reflects
+       as the integer it is instead of an opaque stand-in. *)
+    let rec reflect_dt ?(args : Smt.sort list option) adt e =
+      let inst = match args with Some a -> Smt.SData (adt, a) | None -> adt_sort adt in
       match e with
-      | A.ECon (ctor, args, _)
+      | A.ECon (ctor, cargs, _)
         when (match Hashtbl.find_opt adt_ctors adt with Some cs -> List.mem ctor.A.txt cs | None -> false) ->
-        let sorts = try Hashtbl.find ctor_field_sorts ctor.A.txt with Not_found -> [] in
-        if List.length args <> List.length sorts then None
+        let sorts =
+          match args with
+          | Some a ->
+            List.map (Smt.instantiate a) (try Hashtbl.find ctor_field_sorts_poly ctor.A.txt with Not_found -> [])
+          | None -> (try Hashtbl.find ctor_field_sorts ctor.A.txt with Not_found -> [])
+        in
+        if List.length cargs <> List.length sorts then None
         else
           List.fold_right2
             (fun a s acc ->
               match reflect_field a s, acc with Some t, Some ts -> Some (t :: ts) | _ -> None)
-            args sorts (Some [])
-          |> Option.map (fun ts -> ctor_term adt ctor.A.txt ts)
-      | A.EVar { A.txt = x; _ } -> decls := (x, adt_sort adt) :: !decls; Some (Smt.Const x)
+            cargs sorts (Some [])
+          |> Option.map (fun ts -> Smt.Ctor (ctor.A.txt, inst, ts))
+      | A.EVar { A.txt = x; _ } -> decls := (x, inst) :: !decls; Some (Smt.Const x)
       (* ── Tier 2 propagation ────────────────────────────────────────────────
          A CALL returning a value at this very datatype sort, whose callee has a
          PROVEN postcondition (an unproven one has already been cleared by
@@ -1807,7 +1827,8 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
         | _ -> None)
       | _ -> None
     and reflect_field a = function
-      | Smt.SData (sub, _) when sub <> "Elem" -> reflect_dt sub a
+      | Smt.SData (sub, sargs) when sub <> "Elem" ->
+        reflect_dt ?args:(if sargs = [] then None else Some sargs) sub a
       | (Smt.SInt | Smt.SBool | Smt.SFloat) as sort
         when (match absorb (reflect_scalar ~postcond ~sort sc a) with
               | Some _ -> true
@@ -1918,7 +1939,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
         | Some a ->
           (match a with A.EVar { A.txt = x; _ } -> load_scope_measure_facts x | _ -> ());
           mark_self name
-            (match reflect_dt adt a with
+            (match reflect_dt ?args:(param_instance_args name) adt a with
              | Some t -> Some (Smt.App (m, [ t ]))
              | None ->
                if is_self name then begin
@@ -2431,11 +2452,12 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
              else None)
            assumptions
        in
-       (* Settle every set's element sort, or skip on a contradiction — see
-          [resolve_set_sorts].  Runs on the finished declaration list. *)
-       match resolve_set_sorts decls goal assumptions with
+       (* Settle every sort the producers left open — set elements, datatype
+          instances, opaque payload constants — or skip on a contradiction; see
+          [resolve_sorts].  Runs on the finished declaration list. *)
+       match resolve_sorts decls goal assumptions with
        | None -> note (Obligation.Skipped Obligation.Sort_conflict)
-       | Some (decls, goal, assumptions) ->
+       | Some (decls, goal, assumptions, measure_instances) ->
        let sort_of n = List.assoc_opt n decls in
        let vc = { Smt.decls; assumptions; goal } in
        (* [user_assumptions]: the SAME two-step filter (sort-wellsortedness,
@@ -2491,6 +2513,14 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
            let n = String.length needle and h = String.length hay in
            let rec at i = i + n <= h && (String.sub hay i n = needle || at (i + 1)) in
            at 0
+         in
+         (* The datatype instances the query mentions that no preamble above
+            declares, then any measure [resolve_sorts] renamed to an instance
+            (only alongside the measure preamble that declares its template). *)
+         let mas =
+           mas
+           ^ query_instance_preamble ~declared:mas ~measures:(m <> "") vc.Smt.decls vc.Smt.goal
+               vc.Smt.assumptions measure_instances
          in
          mas
          ^ set_preamble ~elem_declared:(contains mas "(declare-sort Elem 0)")

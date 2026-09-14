@@ -2074,6 +2074,7 @@ let register_types_for_check (decls : A.decl list) : unit =
   Hashtbl.clear const_fns;
   Hashtbl.clear const_fn_rejected;
   measure_preamble := "";
+  global_instance_names := [];
   type_preamble := "";
   register_builtin_adts ();
   register_adt_names decls;
@@ -2842,6 +2843,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   Hashtbl.reset measure_scalar_field_dep;
   Hashtbl.reset measure_preamble_sorts;
   measure_preamble := "";
+  global_instance_names := [];
   type_preamble := "";
   (* Reset per-module so the SMT constant names a VC is built from are a
      function of the module alone.  Without this the counter drifts across

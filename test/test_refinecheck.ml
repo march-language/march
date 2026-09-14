@@ -14239,7 +14239,7 @@ let container_suite =
    The built-in `elts` measure and the predicate-only set vocabulary
    (`member`, `union`, `inter`, `diff`, `subset`, `singleton`, `empty`),
    encoded as Z3 `(Array elem Bool)` terms with the element sort unified per
-   VC by [Refine_encode.resolve_set_sorts].
+   VC by [Refine_encode.resolve_sorts].
 
    Every ACCEPT case here sits next to a REJECT case, because an accept-only
    witness cannot distinguish a working encoding from one that proves
@@ -14706,13 +14706,13 @@ let set_suite =
         let clash = S.SetMem (S.BoolLit true, S.SetSng (u, S.IntLit 2)) in
         let fine = S.Eq (S.IntLit 1, S.IntLit 1) in
         Alcotest.(check bool) "exact resolution conflicts" true
-          (E.resolve_set_sorts_exact [] goal [ clash; fine ] = None);
-        (match E.resolve_set_sorts [] goal [ clash; fine ] with
-         | Some (_, _, asms) ->
+          (E.resolve_sorts_exact [] goal [ clash; fine ] = None);
+        (match E.resolve_sorts [] goal [ clash; fine ] with
+         | Some (_, _, asms, _) ->
            Alcotest.(check int) "only the clashing assumption is dropped" 1 (List.length asms)
          | None -> Alcotest.fail "the goal alone is well-sorted: must not be a sort conflict");
         Alcotest.(check bool) "a conflict inside the goal is still a conflict" true
-          (E.resolve_set_sorts [] (S.SetMem (S.BoolLit true, S.SetSng (u, S.IntLit 2))) [ fine ]
+          (E.resolve_sorts [] (S.SetMem (S.BoolLit true, S.SetSng (u, S.IntLit 2))) [ fine ]
            = None));
 
     Alcotest.test_case "a set-vocabulary name applied in a non-set shape draws the vocabulary warning" `Quick (fun () ->
@@ -15093,6 +15093,141 @@ let container2_suite =
         Alcotest.(check bool) "control: xs : List(Int) gives x no fact" true
           (has_refine_error_d (m (body "Int")))) ]
 
+(* ── Datatype instances from declared types (plan steps 1.3 + 1.4) ──────
+   A parametric datatype is declared once with `(par …)`; a term's instance
+   comes from the declared type it is checked against and from what
+   [Refine_encode.resolve_sorts] infers; a measure is validated and declared
+   at its own parameter's instance, and applied at another instance through a
+   renamed specialisation.  Each case below was impossible before: an `Int`
+   payload of a parametric type was an opaque `Elem`, so `sum` was refused an
+   axiom, `fv : Expr(Int) -> Set(Int)` over `Var(a)` was refused as
+   ill-sorted, and a generic measure only ever saw the `Elem` instance.  Every
+   accept sits beside a reject; the ledger is (proved, violated, skipped). *)
+let typed_instances_suite =
+  let m body = "mod M do\n" ^ body ^ "\nend\n" in
+  let tree = "  type Tree(a) = Leaf | Node(Tree(a), a, Tree(a))\n" in
+  [ gated "a measure reading an Int payload of Tree(Int) proves and refutes" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (1, 1, 0)
+          (ledger_counts3
+             (m (tree
+                 ^ "  @[measure]\n\
+                   \  fn sum(t : Tree(Int)) : Int do\n\
+                   \    match t do\n\
+                   \      Leaf -> 0\n\
+                   \      Node(l, x, r) -> sum(l) + x + sum(r)\n\
+                   \    end\n\
+                   \  end\n\
+                   \  fn need_pos(t : {Tree(Int) | sum(_) > 0}) : Int do 0 end\n\
+                   \  fn ok() : Int do need_pos(Node(Leaf, 5, Leaf)) end\n\
+                   \  fn bad() : Int do need_pos(Node(Leaf, 0, Leaf)) end"))));
+
+    gated "a set-valued measure over Expr(Int) reads its Int payloads" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (1, 1, 0)
+          (ledger_counts3
+             (m "  type Expr(a) = Var(a) | App(Expr(a), Expr(a))\n\
+                \  @[measure]\n\
+                \  fn fv(e : Expr(Int)) : Set(Int) do\n\
+                \    match e do\n\
+                \      Var(x) -> singleton(x)\n\
+                \      App(f, g) -> union(fv(f), fv(g))\n\
+                \    end\n\
+                \  end\n\
+                \  fn just_one(e : {Expr(Int) | fv(_) == singleton(1)}) : Int do 0 end\n\
+                \  fn ok() : Int do just_one(App(Var(1), Var(1))) end\n\
+                \  fn bad() : Int do just_one(Var(2)) end")));
+
+    gated "a generic measure and an Int-instance measure combine in one predicate" (fun () ->
+        (* `size` is declared over `Tree(a)` and specialised to `Tree(Int)`;
+           `sum` is declared at `Tree(Int)`.  Both instances of `M_Tree` share
+           the query, which is also what made z3 reject the plain `(_ is Leaf)`
+           tester as ambiguous until testers at a parametric instance were
+           spelled as an equality (`Smt.IsCtorAt`). *)
+        Alcotest.(check (triple int int int)) "ledger" (1, 1, 0)
+          (ledger_counts3
+             (m (tree
+                 ^ "  @[measure]\n\
+                   \  fn size(t : Tree(a)) : Int do\n\
+                   \    match t do\n\
+                   \      Leaf -> 0\n\
+                   \      Node(l, _, r) -> 1 + size(l) + size(r)\n\
+                   \    end\n\
+                   \  end\n\
+                   \  @[measure]\n\
+                   \  fn sum(t : Tree(Int)) : Int do\n\
+                   \    match t do\n\
+                   \      Leaf -> 0\n\
+                   \      Node(l, x, r) -> sum(l) + x + sum(r)\n\
+                   \    end\n\
+                   \  end\n\
+                   \  fn need(t : {Tree(Int) | size(_) == 1 && sum(_) > 4}) : Int do 0 end\n\
+                   \  fn ok() : Int do need(Node(Leaf, 5, Leaf)) end\n\
+                   \  fn bad() : Int do need(Node(Leaf, 1, Leaf)) end"))));
+
+    (* Neutrality pins, not new capabilities: both of these already had this
+       ledger before instance-typed terms, through the `Elem` instance and an
+       opaque stand-in.  They guard the new path against regressing them. *)
+    gated "a generic measure still applies at a concrete instance" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (1, 1, 0)
+          (ledger_counts3
+             (m (tree
+                 ^ "  @[measure]\n\
+                   \  fn size(t : Tree(a)) : Int do\n\
+                   \    match t do\n\
+                   \      Leaf -> 0\n\
+                   \      Node(l, _, r) -> 1 + size(l) + size(r)\n\
+                   \    end\n\
+                   \  end\n\
+                   \  fn need(t : {Tree(Int) | size(_) > 0}) : Int do 0 end\n\
+                   \  fn ok() : Int do need(Node(Leaf, 5, Leaf)) end\n\
+                   \  fn bad() : Int do need(Leaf) end"))));
+
+    gated "a record with a List(Int) field and an Int list literal still decides its port" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (1, 1, 0)
+          (ledger_counts3
+             (m "  type Config = { port : Int, history : List(Int) }\n\
+                \  fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end\n\
+                \  fn ok() : Int do serve({ port: 8080, history: Cons(1, Nil) }) end\n\
+                \  fn bad() : Int do serve({ port: 0, history: Cons(1, Nil) }) end")));
+
+    (* z3 4.8.12 (CI) segfaults on a satisfiable query carrying a recursion
+       axiom over a `(par …)` datatype with two recursive fields, at any
+       instance; 4.16 does not, so the ledgers above only go red in CI.  This
+       pins the encoding that avoids it on any solver: the `Elem` instance is
+       the bare monomorphic sort, and a query at another instance declares that
+       instance once, as a monomorphic copy. *)
+    gated "datatype instances are declared monomorphically, never as (par …)" (fun () ->
+        let module E = March_refinecheck.Refine_encode in
+        let module S = March_refine.Smt in
+        let src =
+          m (tree
+             ^ "  @[measure]\n\
+               \  fn size(t : Tree(a)) : Int do\n\
+               \    match t do\n\
+               \      Leaf -> 0\n\
+               \      Node(l, _, r) -> 1 + size(l) + size(r)\n\
+               \    end\n\
+               \  end\n\
+               \  fn need(t : {Tree(Int) | size(_) > 0}) : Int do 0 end")
+        in
+        RC.check_module (March_errors.Errors.create ())
+          (March_desugar.Desugar.desugar_module (parse src));
+        let pre = !E.measure_preamble in
+        let contains hay needle =
+          let n = String.length needle and h = String.length hay in
+          let rec at i = i + n <= h && (String.sub hay i n = needle || at (i + 1)) in
+          at 0
+        in
+        Alcotest.(check bool) "no parametric declaration" false (contains pre "(par ");
+        Alcotest.(check bool) "the Elem instance keeps the bare name" true
+          (contains pre "(declare-datatypes ((M_Tree 0)) (((Leaf) (Node (Node_0 M_Tree) (Node_1 Elem) (Node_2 M_Tree)))))");
+        let at_int = [ ("t", S.SData ("M_Tree", [ S.SInt ])) ] in
+        let q = E.query_instance_preamble ~declared:pre ~measures:false at_int (S.BoolLit true) [] [] in
+        Alcotest.(check string) "a query at Tree(Int) declares that instance"
+          "(declare-datatypes ((M_Tree$Int 0)) (((Leaf) (Node (Node_0 M_Tree$Int) (Node_1 Int) (Node_2 M_Tree$Int)))))\n"
+          q;
+        Alcotest.(check string) "and declares nothing already declared" ""
+          (E.query_instance_preamble ~declared:(pre ^ q) ~measures:false at_int (S.BoolLit true) [] [])) ]
+
 (* ── z3 never rejects a query the checker builds ─────────────────────────
    A query z3 rejects comes back to the checker as [Unknown], an ordinary
    skip, so a wrong sort anywhere in the encoder passes every other test in
@@ -15221,5 +15356,6 @@ let () =
       ("arrow-codomain", arrow_codomain_suite);
       ("container-subtyping-2", container2_suite);
       ("set-refinements", set_suite);
+      ("typed-instances", typed_instances_suite);
       (* Must stay LAST: it measures every query the groups above sent. *)
       ("z3-well-formed", z3_wellformed_suite) ]

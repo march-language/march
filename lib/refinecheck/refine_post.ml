@@ -586,11 +586,11 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
              else None)
            !assume
        in
-       (* Settle every set's element sort (or skip on a contradiction) before
-          rendering: see [resolve_set_sorts]. *)
-       match resolve_set_sorts decls goal assumptions with
+       (* Settle every sort the producers left open (or skip on a
+          contradiction) before rendering: see [resolve_sorts]. *)
+       match resolve_sorts decls goal assumptions with
        | None -> note (Obligation.Skipped Obligation.Sort_conflict); false
-       | Some (decls, goal, assumptions) ->
+       | Some (decls, goal, assumptions, measure_instances) ->
        let vc = { Smt.decls; assumptions; goal } in
        let str_pre = if scope_has_string || !uses_string then string_preamble else "" in
        let preamble = str_pre ^
@@ -599,8 +599,10 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
               skip the quantified-axiom measure_preamble.  The quantified forall axioms
               cause Z3 to return `unknown` for SAT queries even when the goal is trivial
               and measures no longer appear in it.  Type preamble alone suffices. *)
-           if !needs_axiom_preamble then record_vc_preamble ()
-           else type_only_preamble ()
+           let base = if !needs_axiom_preamble then record_vc_preamble () else type_only_preamble () in
+           base ^ "\n"
+           ^ query_instance_preamble ~declared:(str_pre ^ base) ~measures:!needs_axiom_preamble decls goal
+               assumptions measure_instances
          else ""
        in
        let contains hay needle =
@@ -916,7 +918,7 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
                       | Some t, Some ts -> Some (t :: ts)
                       | _ -> None)
                     args fs (Some [])
-                  |> Option.map (fun ts -> Smt.App (ct.A.txt, ts))
+                  |> Option.map (fun ts -> ctor_term d ct.A.txt ts)
               (* ── THE INDUCTION HYPOTHESIS ─────────────────────────────────
                  A self-recursive call returning this datatype.  It becomes a
                  fresh opaque constant; the postcondition is assumed ABOUT that
@@ -1022,16 +1024,26 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
                     Hashtbl.fold (fun n s acc -> (n, s) :: acc) decls []
                     |> List.sort compare
                   in
-                  let vc = { Smt.decls; assumptions = !assume; goal } in
-                  match Refine.discharge ~root ~preamble:!measure_preamble vc with
+                  (* The same sort resolution every other query gets: a
+                     parameter declared at a generic instance meets measures
+                     declared at their own instances here. *)
+                  match resolve_sorts decls goal !assume with
+                  | None -> Some (Obligation.Skipped Obligation.Sort_conflict)
+                  | Some (decls, goal, assumptions, measure_instances) ->
+                  let vc = { Smt.decls; assumptions; goal } in
+                  let preamble =
+                    !measure_preamble ^ "\n"
+                    ^ query_instance_preamble ~declared:!measure_preamble ~measures:true decls goal
+                        assumptions measure_instances
+                  in
+                  match Refine.discharge ~root ~preamble vc with
                   | Refine.Verified -> Some Obligation.Proved
                   | _ when not refute -> Some (Obligation.Skipped Obligation.Solver_undecided)
                   (* DEFINITE failure only: "not proved" is not "violated".  The
                      predicate is reported as violated only when its NEGATION is
                      itself Verified — i.e. it can never hold. *)
                   | _ ->
-                    if Refine.discharge ~root ~preamble:!measure_preamble
-                         { vc with Smt.goal = Smt.Not goal }
+                    if Refine.discharge ~root ~preamble { vc with Smt.goal = Smt.Not goal }
                        = Refine.Verified
                     then Some Obligation.Violated
                     else Some (Obligation.Skipped Obligation.Solver_undecided))

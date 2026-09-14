@@ -21,14 +21,21 @@ type sort =
   | SBool
   | SFloat
   (* A named declared sort, with its type arguments when the datatype is
-     parametric: [SData ("M_List", [SInt])] is `(M_List Int)`, and
+     parametric: [SData ("M_List", [SInt])] is the List(Int) instance, and
      [SData ("M_Rec", [])] is the monomorphic `M_Rec`.  Opaque built-in sorts
-     (`Elem`, `$Str`) are nullary [SData] too. *)
+     (`Elem`, `$Str`) are nullary [SData] too.
+
+     Every instance is declared to z3 as a MONOMORPHIC datatype of its own,
+     named by [instance_name] (`M_List$Int`); the instance whose arguments
+     are all the opaque `Elem` keeps the bare datatype name (`M_List`), which
+     is exactly the declaration every query used before instances existed.
+     z3 4.8.12 (CI) segfaults on satisfiable queries that carry a recursion
+     axiom over a `(par …)` datatype with two recursive fields, so parametric
+     declarations are never emitted. *)
   | SData of string * sort list
-  (* The [i]th type parameter of the datatype a constructor field belongs to,
-     as written in that datatype's `(par (T0 … Tn) …)` declaration.  Only ever
-     appears inside a constructor's field sorts; [instantiate] replaces it
-     before a sort reaches a declaration or a term. *)
+  (* The [i]th type parameter of the datatype a constructor field belongs to.
+     Only ever appears inside a constructor's field sorts; [instantiate]
+     replaces it before a sort reaches a declaration or a term. *)
   | SParam of int
   (* A finite set of elements at the given sort, encoded as Z3's
      `(Array <elem> Bool)` — the Liquid Haskell / liquid-fixpoint encoding.
@@ -58,12 +65,18 @@ type term =
   | Const of string          (* a declared symbol: "_", "i", or a measure-applied const *)
   | App of string * term list (* uninterpreted-fn application *)
   (* A datatype constructor application at a known datatype instance.  The
-     instance is carried because z3 cannot always infer it: 4.8 rejects
-     `(Some_0 (Some x))` for a parametric `Option`, so a constructor of a
-     parametric datatype renders qualified, `((as Some (M_Option Int)) x)`.
-     A monomorphic constructor renders exactly as a plain application. *)
+     instance is carried because every instance of a datatype declares the
+     same constructor names, so a constructor of a parametric datatype renders
+     qualified, `((as Some M_Option$Int) x)`.  A monomorphic constructor
+     renders exactly as a plain application. *)
   | Ctor of string * sort * term list
   | IsCtor of string * term  (* Z3 datatype tester: ((_ is Ctor) x) *)
+  (* A tester at a known datatype instance, with the constructor's field
+     count.  z3 (4.8 and 4.16) rejects `(_ is C)` as ambiguous once two
+     instances of one datatype are in scope (they share constructor names), so
+     a parametric instance renders the equivalent `(= x ((as C S) (C_0 x) … ))`:
+     [x] is built by [C] iff it equals [C] applied to its own selectors. *)
+  | IsCtorAt of string * sort * int * term
   | IntLit of int
   | BoolLit of bool
   (* A binary64 literal, pre-rendered by [float_decimal] as (is_negative,
@@ -131,9 +144,20 @@ let rec string_of_sort = function
   | SBool -> "Bool"
   | SFloat -> "Float64"
   | SData (n, []) -> n
-  | SData (n, args) -> "(" ^ n ^ " " ^ String.concat " " (List.map string_of_sort args) ^ ")"
+  | SData (n, args) -> instance_name n args
   | SParam i -> "T" ^ string_of_int i
   | SSet e -> "MSet$" ^ set_elem_tag e
+
+(* The declared name of datatype [n]'s instance at [args]: the bare name when
+   every argument is the opaque `Elem`, else `n$arg1$…`.  Arities are fixed per
+   datatype, so the spelling is unambiguous. *)
+and instance_name (n : string) (args : sort list) : string =
+  if List.for_all is_elem_arg args then n
+  else n ^ "$" ^ String.concat "$" (List.map set_elem_tag args)
+
+and is_elem_arg = function
+  | SData (("Elem" | "?"), []) -> true
+  | _ -> false
 
 (* A sort as a fragment of an SMT symbol (no spaces or parentheses), for
    names derived from it: `MSet$Int`, `MSet$M_List$Int`. *)
@@ -144,7 +168,7 @@ and set_elem_tag = function
   | SData ("?", []) -> "Elem"
   | SData ("$Str", []) -> "Str"
   | SData (n, []) -> n
-  | SData (n, args) -> n ^ "$" ^ String.concat "$" (List.map set_elem_tag args)
+  | SData (n, args) -> instance_name n args
   | SParam i -> "T" ^ string_of_int i
   | SSet e -> "Set" ^ set_elem_tag e
 
@@ -200,6 +224,13 @@ let render_float (neg : bool) (d : string) : string =
   if neg then Printf.sprintf "((_ to_fp 11 53) RNE (- %s))" d
   else Printf.sprintf "((_ to_fp 11 53) RNE %s)" d
 
+(* The instance-qualified tester [IsCtorAt] renders to, over a rendered term. *)
+let tester_at (c : string) (s : sort) (n : int) (t : string) : string =
+  if n = 0 then Printf.sprintf "(= %s (as %s %s))" t c (string_of_sort s)
+  else
+    Printf.sprintf "(= %s ((as %s %s) %s))" t c (string_of_sort s)
+      (String.concat " " (List.init n (fun i -> Printf.sprintf "(%s_%d %s)" c i t)))
+
 let rec render = function
   | Const s -> s
   | App (f, []) -> f
@@ -211,10 +242,11 @@ let rec render = function
   | Ctor (c, s, args) ->
     Printf.sprintf "((as %s %s) %s)" c (string_of_sort s) (String.concat " " (List.map render args))
   (* A tester applied directly to a constructor term is decided here: z3
-     (4.8 and 4.16 alike) rejects `((_ is Some) ((as Some …) x))` for a
+     (4.8 and 4.16 alike) rejected `((_ is Some) ((as Some …) x))` for a
      parametric datatype, and the answer is syntactic anyway. *)
-  | IsCtor (c, Ctor (c', _, _)) -> if c = c' then "true" else "false"
-  | IsCtor (c, t) -> Printf.sprintf "((_ is %s) %s)" c (render t)
+  | IsCtor (c, Ctor (c', _, _)) | IsCtorAt (c, _, _, Ctor (c', _, _)) -> if c = c' then "true" else "false"
+  | IsCtor (c, t) | IsCtorAt (c, SData (_, []), _, t) -> Printf.sprintf "((_ is %s) %s)" c (render t)
+  | IsCtorAt (c, s, n, t) -> tester_at c s n (render t)
   | IntLit n -> if n < 0 then Printf.sprintf "(- %d)" (- n) else string_of_int n
   | BoolLit b -> if b then "true" else "false"
   | FloatLit (neg, d) -> render_float neg d

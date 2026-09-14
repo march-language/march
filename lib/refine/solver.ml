@@ -189,6 +189,14 @@ let check ?(preamble = "") (t : t) (vc : Smt.vc) : result =
   output_string t.oc (Smt.assertion_block vc);
   output_string t.oc "(check-sat)\n";
   flush t.oc;
+  (match Sys.getenv_opt "MARCH_REFINE_Z3_LOG" with
+   | Some path when path <> "" ->
+     (try
+        let oc = open_out_gen [ Open_append; Open_creat; Open_wronly ] 0o644 path in
+        Printf.fprintf oc ";; ==== sent\n%s\n%s\n" preamble (Smt.assertion_block vc);
+        close_out oc
+      with Sys_error _ -> ())
+   | _ -> ());
   let errors = ref [] in
   let verdict, saw_error = read_verdict ~errors t.ic ~saw_error:false in
   if saw_error then
@@ -213,6 +221,21 @@ let check ?(preamble = "") (t : t) (vc : Smt.vc) : result =
   in
   output_string t.oc "(pop 1)\n";
   flush t.oc;
+  (* [MARCH_REFINE_Z3_LOG=<file>]: append every query with the verdict z3
+     gave it.  A debugging aid for comparing solver versions: piping z3's
+     stdout through `tee` stalls this driver's line-by-line protocol, so the
+     log is written from inside instead. *)
+  (match Sys.getenv_opt "MARCH_REFINE_Z3_LOG" with
+   | Some path when path <> "" ->
+     (try
+        let oc = open_out_gen [ Open_append; Open_creat; Open_wronly ] 0o644 path in
+        let verdict_s =
+          match result with Unsat -> "unsat" | Unknown -> "unknown" | Sat _ -> "sat"
+        in
+        Printf.fprintf oc ";; ==== verdict: %s\n" verdict_s;
+        close_out oc
+      with Sys_error _ -> ())
+   | _ -> ());
   result
 
 (* Terminate and REAP the child.  Graceful (exit)+EOF first, then SIGKILL so
