@@ -293,6 +293,7 @@ let extern_owned_builtins : string list = [
     "actor_register"; "actor_unregister"; "actor_whereis"; "get_cap";
     "send_checked"; "revoke_cap"; "is_cap_valid"; "get_actor_field";
     "register_supervisor"; "register_supervisor_child"; "pid_index_of";
+    "pid_to_int";
 ]
 
 (** True iff parameter [idx] of C extern / TIR builtin [fn_name] is borrowed

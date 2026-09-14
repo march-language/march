@@ -1154,6 +1154,26 @@ let test_eval_block_sender_refused_interpreted () =
        go 0)
   | None -> Alcotest.fail "policy 3 was accepted by the interpreter"
 
+let test_eval_pid_to_int_roundtrip () =
+  let env = eval_module {|mod Test do
+    actor A do
+      state { x : Int }
+      init { x: 0 }
+      on Noop() do { x: state.x } end
+    end
+    fn main() do
+      let pa = spawn(A)
+      let n = pid_to_int(pa)
+      let back = pid_of_int(n)
+      (n, to_string(pa) == "Pid(" ++ int_to_string(n) ++ ")", is_alive(back))
+    end
+  end|} in
+  match call_fn env "main" [] with
+  | March_eval.Eval.VTuple [March_eval.Eval.VInt _; March_eval.Eval.VBool disp; March_eval.Eval.VBool alive] ->
+    Alcotest.(check bool) "pid_to_int is the Pid(N) display index" true disp;
+    Alcotest.(check bool) "pid_of_int(pid_to_int(p)) is p" true alive
+  | v -> Alcotest.fail ("unexpected result: " ^ March_eval.Eval_runtime.value_to_string v)
+
 let test_eval_monitor_down_target_is_pid () =
   let env = eval_module {|mod Test do
     actor Target do
@@ -13602,6 +13622,7 @@ let stdlib_suites =
         Alcotest.test_case "monitor builtin end-to-end"           `Quick (with_reset test_eval_monitor_builtin);
         Alcotest.test_case "block_sender refused under the interpreter" `Quick (with_reset test_eval_block_sender_refused_interpreted);
         Alcotest.test_case "Down target is a Pid in source"       `Quick (with_reset test_eval_monitor_down_target_is_pid);
+        Alcotest.test_case "pid_to_int round-trips with pid_of_int" `Quick (with_reset test_eval_pid_to_int_roundtrip);
       ]);
       ("supervision phase2", [
         Alcotest.test_case "one_for_one restart"          `Quick (with_reset test_supervision_one_for_one_restart);

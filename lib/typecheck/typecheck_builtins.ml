@@ -862,6 +862,9 @@ let builtin_bindings : (string * scheme) list =
     ("is_cap_valid", poly1 (fun a -> TArrow (TCon ("ActorCap", [a]), t_bool)));
     (* Utility: convert Int to Pid (unsafe but needed for supervisor state fields) *)
     ("pid_of_int",   poly1 (fun a -> TArrow (t_int, TCon ("Pid", [a]))));
+    (* The inverse: the spawn index a Pid displays as ("Pid(N)"), so a
+       GlobalPid for a local actor can be built without parsing to_string. *)
+    ("pid_to_int",   poly1 (fun a -> TArrow (TCon ("Pid", [a]), t_int)));
     (* Phase 5: task_spawn_link — like task_spawn but links to spawner *)
     ("task_spawn_link", poly1 (fun a -> TArrow (TArrow (t_int, a), TCon ("Task", [a]))));
     (* Phase 5B: cancellation token builtins.

@@ -99,7 +99,7 @@ let builtin_names : StringSet.t =
       (* Named registry (Task 4) *)
       "actor_register"; "actor_unregister"; "actor_whereis"; "actor_registered";
       "send_checked"; "revoke_cap"; "is_cap_valid";
-      "pid_of_int"; "get_actor_field";
+      "pid_of_int"; "pid_to_int"; "get_actor_field";
       (* Comparison builtins used by derived Ord instances *)
       "march_compare_int"; "march_compare_float"; "march_compare_string";
       (* Hash builtins used by derived Hash instances *)

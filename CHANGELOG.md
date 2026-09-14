@@ -13,6 +13,9 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`pid_to_int(pid)`**, the inverse of `pid_of_int`: a Pid's spawn index (the `N`
+  in its `Pid(N)` display), on both backends. Building a `GlobalPid` for a local
+  actor previously meant parsing `to_string(pid)`.
 - **`PeerReader`: one reader per peer connection, dispatching frames by tag.**
   There was no receive loop: every cross-node consumer read its own frames
   off the shared connection and skipped the ones it did not recognise, so two
