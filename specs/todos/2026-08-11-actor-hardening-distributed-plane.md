@@ -23,6 +23,19 @@ option identified is to run the *target* until it has room, from inside
 `send`, which re-enters handler evaluation from a send and was judged too
 risky to do without a design note. All six stay open.
 
+## Status 2026-09-14
+
+Specced as a four-file set, sequenced behind the one thing this file never
+listed — a remote `send` to an actor on another node, without which there
+is no message stream to flow-control:
+[[2026-09-14-remote-send-to-a-global-pid]] (1/4),
+[[2026-09-14-distributed-plane-flow-control-and-control-channel]] (2/4:
+items 1–3 below, with designs),
+[[2026-09-14-two-node-failure-semantics-harness]] (3/4),
+[[2026-09-14-distributed-plane-known-gaps]] (4/4: items 4 and 6 below, with
+the torn-stdout race that quarantines `node_discovery`). Item 5 (epoch proc
+reclamation) is single-node and stays here.
+
 ## Items
 
 1. **Per-peer flow control.** Cross-node sends currently have no
