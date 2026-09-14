@@ -438,6 +438,9 @@ let base_env : env =
   ; ("pid_of_int", VBuiltin ("pid_of_int", function
         | [VInt n] -> VPid n
         | _ -> eval_error "pid_of_int: expected int"))
+  ; ("pid_to_int", VBuiltin ("pid_to_int", function
+        | [VPid n] -> VInt n
+        | _ -> eval_error "pid_to_int: expected Pid"))
     (* Supervision: restart a supervised child actor.
        Accepts a Pid pointing to the child actor. Finds the supervisor,
        kills the child (if still alive), spawns a fresh instance, and

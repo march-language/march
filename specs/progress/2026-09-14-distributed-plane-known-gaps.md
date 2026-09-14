@@ -1,6 +1,9 @@
-# `[P2]` Distributed actors 4/4: the known small gaps, with fixes
+# Distributed actors 4/4: the known small gaps, with fixes
 
-Filed 2026-09-14. Two items already recorded elsewhere, each blocking one of
+Filed 2026-09-14; closed 2026-09-14 with A and B shipped (A: PR #455, the
+ubuntu 200-run soak was clean and `node_discovery` is back under `runtest`;
+B: PR #456, the call-site refusal). Item C was never blocking and moved to its
+own file, [[2026-09-14-declaration-site-mailbox-syntax]] in `specs/todos/`. Two items already recorded elsewhere, each blocking one of
 the other three files, each with a concrete fix proposed here so they stop
 being "known".
 
@@ -69,8 +72,6 @@ spelling and costs nothing. Unit test in `test_stdlib_suite.ml`
 ("block_sender refused under the interpreter"), proved to fail with the arm
 disabled. Docs updated in both trees.
 
-## C. Declaration-site `mailbox N policy` (item 4 of the hardening file)
+## C. Declaration-site `mailbox N policy`
 
-Not blocking anything above; listed so the set is complete. A parser +
-desugar slice lowering to `actor_set_mailbox_limit` after each spawn site.
-Do it when a fixture wants it; the runtime primitive exists.
+Moved to [[2026-09-14-declaration-site-mailbox-syntax]] (`specs/todos/`).

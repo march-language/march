@@ -806,6 +806,7 @@ to diverge or crash compiled (see the compiled-actor status note at the top of t
 | `revoke_cap(cap)` | `→ Atom` | both | Revoke a capability; a later `send_checked` on it returns `:error` |
 | `is_cap_valid(cap)` | `→ Bool` | both | Boolean form of the epoch/revocation/liveness check |
 | `pid_of_int(n)` | `→ Pid` | both | Convert Int to Pid (an unknown index resolves to a safe already-dead sentinel) |
+| `pid_to_int(pid)` | `→ Int` | both | The inverse: a Pid's spawn index, the `N` in its `Pid(N)` display (what `GlobalPid.make` takes for a local actor) |
 | `get_actor_field(pid, name)` | `→ Option(a)` | both | Read an actor's state field via the runtime shape registry |
 | `task_spawn(fn)` | `→ Task(a)` | both | Spawn a green-thread task (use `Task.async` instead) |
 | `task_await(t)` | `→ Result(a, String)` | both | Await a task (use `Task.await` instead) |

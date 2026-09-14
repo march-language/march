@@ -20,14 +20,6 @@ mod PeerReaderLoopback do
   needs IO.Spawn
   needs IO.NetConnect
 
-  pfn pid_int(p) : Int do
-    let s = to_string(p)
-    match String.to_int(String.slice(s, 4, string_length(s) - 5)) do
-      Ok(n) -> n
-      Err(_) -> panic("pid_int: unexpected pid text " ++ s)
-    end
-  end
-
   actor Sink do
     state { got : Int }
     init  { got: 0 }
@@ -121,7 +113,7 @@ mod PeerReaderLoopback do
     end
 
     -- Three frames, one write: SWIM ping, ACTOR_MSG, SWIM ping.
-    let target = GlobalPid.make("node-b", pid_int(sink_pid), 1)
+    let target = GlobalPid.make("node-b", pid_to_int(sink_pid), 1)
     let burst =
       List.append(NetFrame.encode(SwimDriver.encode_msg(SwimDriver.SwimPing("node-a"))),
       List.append(NetFrame.encode(NodeSend.encode_msg(1, target, "PeerReaderLoopback.Item", Cons(42, Nil))),

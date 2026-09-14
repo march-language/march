@@ -766,6 +766,7 @@ under the interpreter, but broken or unreliable compiled today.
 | `get_cap(pid)` | `→ Option(Cap(Msg))` | interpreter-only | Obtain an epoch-tagged capability |
 | `send_checked(cap, msg)` | `→ :ok \| :error` | interpreter-only | Epoch-validated send; compiled, returns a value that matches neither arm |
 | `pid_of_int(n)` | `→ Pid` | interpreter-only | Convert Int to Pid; crashes compiled |
+| `pid_to_int(pid)` | `→ Int` | both | The inverse: a Pid's spawn index, the `N` in its `Pid(N)` display (what `GlobalPid.make` takes for a local actor) |
 | `get_actor_field(pid, name)` | `→ Option(a)` | interpreter-only | Read an actor's state field from outside; crashes compiled |
 | `task_spawn(fn)` | `→ Task(a)` | both | Spawn a green-thread task (use `Task.async` instead) |
 | `task_await(t)` | `→ Result(a, String)` | both | Await a task (use `Task.await` instead) |

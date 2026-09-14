@@ -15,21 +15,13 @@
 --
 -- The payload is msgpack `[n, reply_to]`; a real message type would use its
 -- derived codec (the typed wrapper is the design's open compiler step).
--- `pid_int` reads the pid's integer out of its `to_string` form ("Pid(N)"):
--- there is no pid-to-int builtin yet, which this fixture is the case for.
+-- A local actor's GlobalPid index is `pid_to_int(pid)`, the builtin this
+-- fixture was originally the case for (it parsed `to_string(pid)`).
 mod NodeSendLoopback do
   needs IO.Console
   needs IO.NetListen
   needs IO.Spawn
   needs IO.NetConnect
-
-  pfn pid_int(p) : Int do
-    let s = to_string(p)
-    match String.to_int(String.slice(s, 4, string_length(s) - 5)) do
-      Ok(n) -> n
-      Err(_) -> panic("pid_int: unexpected pid text " ++ s)
-    end
-  end
 
   pfn encode_ping(n : Int, reply_to) : List(Int) do
     Msgpack.encode(Msgpack.array(Cons(Msgpack.int(n), Cons(GlobalPid.to_value(reply_to), Nil))))
@@ -73,7 +65,7 @@ mod NodeSendLoopback do
   pfn dispatch_b(fd : Int, ping_pid, d : Delivery) : Result((), String) do
     match d.type_tag do
       "NodeSendLoopback.Ping" ->
-        if d.to_local_pid == pid_int(ping_pid) && is_alive(ping_pid) do
+        if d.to_local_pid == pid_to_int(ping_pid) && is_alive(ping_pid) do
           let _ = send(ping_pid, PingMsg(fd, d.payload))
           Ok(())
         else
@@ -161,15 +153,15 @@ mod NodeSendLoopback do
       Err(e) -> panic("connect: " ++ Socket.error_message(e))
     end
 
-    let me = GlobalPid.make("node-a", pid_int(pong_pid), 1)
-    let ping_target = GlobalPid.make("node-b", pid_int(ping_pid), 1)
+    let me = GlobalPid.make("node-a", pid_to_int(pong_pid), 1)
+    let ping_target = GlobalPid.make("node-b", pid_to_int(ping_pid), 1)
 
     -- 1. a delivered message and its reply
     let _ = NodeSend.cast(conn_fd, 1, ping_target, "NodeSendLoopback.Ping", encode_ping(7, me))
     let _ = NodeSend.serve_one(conn_fd, 1, fn d -> dispatch_a(pong_pid, d))
 
     -- 2. stale creation
-    let _ = NodeSend.cast(conn_fd, 2, GlobalPid.make("node-b", pid_int(ping_pid), 0), "NodeSendLoopback.Ping", encode_ping(8, me))
+    let _ = NodeSend.cast(conn_fd, 2, GlobalPid.make("node-b", pid_to_int(ping_pid), 0), "NodeSendLoopback.Ping", encode_ping(8, me))
     report_failure(conn_fd)
 
     -- 3. a pid node-b does not host
