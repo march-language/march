@@ -13,6 +13,26 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Set refinements.** A predicate can now state which elements a collection
+  holds, Liquid Haskell style: `elts(xs)` and `keys(m)` map a `List`/`Map` to
+  its element/key set, and `member`, `union`, `inter`, `diff`, `subset`,
+  `singleton`, `empty` and `==` operate on sets, all encoded as quantifier-free
+  Z3 arrays. Literal membership, relational contracts (`{List(Int) | elts(_)
+  == elts(xs)}`), propagation through calls, `let`s and parameter promises,
+  and guards over `Set.contains`/`Map.contains_key` are proved or refuted;
+  cardinality is out of scope by design. A `@[measure]` may return a
+  `Set(a)` (`free_vars(e)`), typechecked as logic and rejected in expression
+  position. Refuted set contracts render their model as a set literal
+  (`Set.insert() can return {4}`). See "Set Refinements" in
+  `docs/refinement-types.md`.
+- **`@[assume]`: an assumed postcondition.** The declared return refinement
+  propagates to call sites without a proof and the body is not checked
+  against it (Liquid Haskell's `assume`); counted in `--refine-report` under
+  `trusted`. Distinct from `@[trusted]`, which only accepts a skip inside
+  `cap verified`. The stdlib `Set` and key-affecting `Map` operations now
+  carry `@[assume]`d `elts`/`keys` contracts, each with a runtime property
+  witness in `test/stdlib/test_set.march` and `test/stdlib/test_map.march`.
+
 - **Endpoint actors under a supervisor, measured.** Two fixtures answer what
   a restart means for a session: a callback-API host routed by name is
   replaceable and the protocol continues (`test/session/stream_actor_supervised.march`);
@@ -171,6 +191,20 @@ git log is authoritative for exact commits.
   nothing when unset.
 
 ### Fixed
+
+- **A record parameter no longer makes an unproven postcondition a "violation".**
+  With a record-refined parameter in scope the checker reports any satisfiable
+  counterexample directly; it now does so only when every parameter's own
+  contract was loaded as an assumption. A contract it cannot translate (a
+  `len` conjunct beside the record, for example) previously let the solver pick
+  an input that contract forbids and report correct code.
+- **An unannotated parameter's name now reaches a relational postcondition.**
+  `fn insert(s, elem, cmp) : {… | elts(_) == union(elts(s), …)}` was recorded
+  with parameter names `_`, so the contract was classified unusable and never
+  propagated; a variable pattern parameter is now a name. A Bool local bound
+  to a call with a contract (`let present = Set.contains(…)` then
+  `if present`) and a guard that is itself such a call now establish the
+  contract on their branch.
 
 - **A `@[measure]` whose value is a scalar constructor field is no longer
   inert.** Call-site reflection erased every scalar constructor field to an

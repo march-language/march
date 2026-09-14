@@ -82,8 +82,10 @@ fn count(xs : List(a)) : {Int | _ >= 0} do List.length(xs) end
 
 The supported predicate fragment is **`Int`/`Bool` linear arithmetic**:
 `+ - *` (multiplication by a literal), the comparisons `== != < <= > >=`, the
-connectives `&& || not`, integer/bool literals, **measures**, and ADT
-**constructor tags** (both below). `String` values are supported to the
+connectives `&& || not`, integer/bool literals, **measures**, ADT
+**constructor tags** (both below), and the **set vocabulary** over a
+collection's elements (`elts`, `keys`, `member`, `union`, `inter`, `diff`,
+`subset`, `singleton`, `empty`; see [Set Refinements](#set-refinements)). `String` values are supported to the
 narrower extent described in [String Refinements](#string-refinements): `len`
 and `==`/`!=` against literals. `Bool` values take the boolean operators against
 `true`/`false` ([Bool Refinements](#bool-refinements)); `Float` values take
@@ -1199,6 +1201,152 @@ scalar constructor field discharges neither a predicate nor its negation, and
 that case is not always warned about. See [Limitations](#limitations).
 
 ---
+
+## Set Refinements
+
+A predicate can talk about **which elements** a collection holds, not only how
+many. The vocabulary is Liquid Haskell's, in March spelling
+(`specs/2026-09-13-set-refinements-design.md`):
+
+| Predicate | Meaning |
+| --- | --- |
+| `elts(xs)` | the set of elements of a `List` |
+| `keys(m)` | the set of keys of a `Map` |
+| `member(x, s)` | `x` is in `s` |
+| `union(a, b)`, `inter(a, b)`, `diff(a, b)` | the usual set operations |
+| `subset(a, b)` | every element of `a` is in `b` |
+| `singleton(x)`, `empty` | the one-element set, the empty set |
+| `a == b`, `a != b` | extensional set equality |
+
+Like `len`, these names mean something **only inside a `{...}` predicate**; a
+function or variable of the same name in ordinary code is unaffected. `empty`
+is the empty set only in a **set position**: an operand of `union`, `inter`,
+`diff` or `subset`, the second argument of `member`, or a side of `==`/`!=`
+whose other side is a set (`elts(_) == empty`). Anywhere else it is an ordinary
+name, so a parameter or local called `empty` keeps its meaning. Sets are encoded as
+Z3 arrays from the element sort to `Bool`, so every set query is
+quantifier-free and decidable: `Int` and `String` elements are concrete (a
+string literal compares by literal distinctness, as elsewhere), any other
+element type is opaque.
+
+```march
+fn need2(xs : {List(Int) | member(2, elts(_))}) : Int do 0 end
+fn ok() : Int do need2([1, 2, 3]) end      -- proved
+fn bad() : Int do need2([1, 3]) end        -- refinement violation
+
+-- relational: a contract may relate a return to a parameter
+fn keep(xs : List(Int)) : {List(Int) | elts(_) == elts(xs)} do xs end
+
+-- and compose through a call, a `let`, or a parameter's own promise
+fn mk() : {List(Int) | member(2, elts(_))} do [2, 5] end
+fn use_it() : Int do
+  let ys = mk()
+  need2(ys)                                -- proved from `mk`'s contract
+end
+```
+
+The definite-failure stance is unchanged: `fn lose(xs : List(Int)) :
+{List(Int) | elts(_) == elts(xs)} do [7] end` is **skipped**, not reported,
+because `xs` may well be `[7]`.
+
+### The stdlib `Set` and `Map` carry assumed contracts
+
+`Set(a)` and `Map(k, v)` are hash tries no measure can see into, so their
+element sets are stated rather than proved: every public `Set` operation
+(`empty`, `singleton`, `insert`, `remove`, `union`, `intersection`,
+`difference`, `contains`, `is_subset`, `is_empty`, `eq`, `to_list`,
+`from_list`) and the key-affecting `Map` operations (`empty`, `singleton`,
+`insert`, `remove`, `get`, `contains_key`, `is_empty`, `keys`, `map_values`,
+`filter`, `merge`) declare their effect on `elts`/`keys` under `@[assume]`:
+
+```march
+@[assume]
+fn insert(s, elem, cmp) : {Set(a) | elts(_) == union(elts(s), singleton(elem))} do … end
+@[assume]
+fn get(m, key, cmp) : {Option(v) | is_Some(_) == member(key, keys(m))} do … end
+```
+
+`@[assume]` is the counterpart of Liquid Haskell's `assume`: the return
+refinement propagates to every call site **without a proof** and the body is
+not checked against it. It differs from `@[trusted]`, which only accepts a
+*skip* inside `cap verified` and never propagates. Each assumed contract is
+counted in `--refine-report` under `trusted`, and each one in the stdlib has a
+runtime property witness in `test/stdlib/test_set.march` /
+`test/stdlib/test_map.march`, because the contracts hold only when the
+comparator `cmp` is a strict total order consistent with `==` on the element
+type. That trust boundary is the price of an opaque implementation.
+
+With those contracts, membership flows through the API and through guards:
+
+```march
+fn need_x(s : Set(Int), x : {Int | member(_, elts(s))}) : Int do 0 end
+
+fn ok(x : Int) : Int do
+  let s = Set.insert(Set.empty(), x, int_cmp)
+  need_x(s, x)                                       -- proved
+end
+fn guarded(s : Set(Int), x : Int) : Int do
+  if Set.contains(s, x, int_cmp) do need_x(s, x) else 0 end   -- proved
+end
+fn wrong_branch(s : Set(Int), x : Int) : Int do
+  if Set.contains(s, x, int_cmp) do 0 else need_x(s, x) end   -- violation
+end
+fn need_some(o : {Option(String) | is_Some(_)}) : Int do 0 end
+fn lookup(m : Map(Int, String)) : Int do
+  need_some(Map.get(Map.insert(m, 7, "x", int_cmp), 7, int_cmp))   -- proved
+end
+```
+
+A guard that *is* a call with a Bool contract, or a Bool local bound to one
+(`let present = Set.contains(…)` then `if present`), establishes the contract
+on its branch and its negation on the other.
+
+### Set-valued measures
+
+A user `@[measure]` may return a set, under the same structural gate as an
+`Int` measure. Its body uses the set vocabulary, which is bound for that body
+only; such a measure is logic, and calling it in expression position is an
+error:
+
+```march
+type Expr = Var(Int) | Lam(Int, Expr) | App(Expr, Expr)
+
+@[measure]
+fn free_vars(e : Expr) : Set(Int) do
+  match e do
+    Var(x)    -> singleton(x)
+    Lam(x, b) -> diff(free_vars(b), singleton(x))
+    App(f, a) -> union(free_vars(f), free_vars(a))
+  end
+end
+
+fn closed(e : {Expr | free_vars(_) == empty}) : Int do 0 end
+fn ok() : Int do closed(Lam(1, Var(1))) end          -- proved
+fn bad() : Int do closed(Lam(1, Var(2))) end         -- violation
+fn need_sub(f : Expr, a : Expr,
+            e : {Expr | subset(free_vars(_), union(free_vars(f), free_vars(a)))}) : Int do 0 end
+fn sym(f : Expr, a : Expr) : Int do need_sub(f, a, App(f, a)) end   -- proved by the axioms alone
+```
+
+`Int` payloads are concrete; a `String` payload is opaque (its constructor
+field is the checker's opaque element sort), so a set measure over strings
+reasons symbolically but not about particular literals. A refuted set contract
+renders its model as a set literal: `Set.insert() can return {4}`,
+`elts(s) = {1}`.
+
+### What sets do not do
+
+- **No cardinality.** There is no decidable link between the array encoding
+  and a set's size; `len` remains the only size measure, so a permutation
+  contract writes both: `{List(Int) | elts(_) == elts(xs) && len(_) == len(xs)}`.
+- **`elts` is not axiomatised over the list structure.** It folds a
+  *literal* list to a concrete set and otherwise stands for an opaque set per
+  variable, so a contract proved by walking `Cons` cells (`elts(append(xs,
+  ys)) == union(elts(xs), elts(ys))` from `append`'s body) is skipped. A list
+  contract over an `Int` measure keeps the Tier 2 induction path it always had.
+- **Mixed element sorts skip.** `member(3, elts(_))` against a
+  `List(String)` is a sort conflict and is skipped, never reported.
+- **A rebound name loses its set promise**, exactly as it loses a `len` one.
 
 ## Bool Refinements
 
@@ -2448,8 +2596,11 @@ edges:
   [String Refinements](#string-refinements)). Over a **variant**
   (multi-constructor) ADT the checker reasons about the constructor tag only
   (`is_Some(_)`), never the payload: `{Option(Int) | is_Some(_)}` is checkable,
-  a predicate about the `Int` inside is not. Refinements over other types
-  aren't supported.
+  a predicate about the `Int` inside is not. **Sets of elements** are
+  supported through the set vocabulary (`elts`, `keys`, `member`, `subset`,
+  …; see [Set Refinements](#set-refinements)), with no cardinality and no
+  structural reasoning about `elts` over a symbolic list. Refinements over
+  other types aren't supported.
 - **A tag refinement composes only for the constructor the caller promised.**
   A constructor literal or a `match` narrowing establishes the fact where the
   call is written, and, since 2026-07-29, so does the caller's own parameter

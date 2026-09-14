@@ -3770,6 +3770,44 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
          own check_fn. *)
       let body_env = { body_env with cur_fn_public = (def.fn_vis = Ast.Public) } in
 
+      (* ── A set-valued `@[measure]` body is LOGIC, not code ──────────────────
+         (specs/2026-09-13-set-refinements-design.md §4.4, plan §2.1 option 1.)
+         Its body may use the refinement checker's set vocabulary — `union`,
+         `inter`, `diff`, `singleton`, `member`, `subset`, `empty` — which are
+         not functions anywhere else.  They are bound here, for THIS body only,
+         at the obvious types over the builtin `Set(a)` constructor, so the
+         body typechecks without those names leaking into ordinary code.  The
+         refinement checker separately rejects any expression-position CALL of
+         such a measure, since it has no runtime meaning. *)
+      let body_env =
+        let rec is_set_ty = function
+          | Ast.TyRefine (b, _, _) | Ast.TyLinear (_, b) -> is_set_ty b
+          | Ast.TyCon ({ Ast.txt = "Set"; _ }, [ _ ]) -> true
+          | _ -> false
+        in
+        if List.mem "measure" def.fn_attrs
+           && (match def.fn_ret_ty with Some t -> is_set_ty t | None -> false)
+        then begin
+          let poly1 f =
+            let a = fresh_var 0 in
+            let id = match a with TVar r -> (match !r with Unbound (id, _) -> id | _ -> 0) | _ -> 0 in
+            Poly ([ id ], [], f a)
+          in
+          let t_set a = TCon ("Set", [ a ]) in
+          let t_bool = TCon ("Bool", []) in
+          bind_vars
+            [ ("union", poly1 (fun a -> TArrow (t_set a, TArrow (t_set a, t_set a))));
+              ("inter", poly1 (fun a -> TArrow (t_set a, TArrow (t_set a, t_set a))));
+              ("diff", poly1 (fun a -> TArrow (t_set a, TArrow (t_set a, t_set a))));
+              ("singleton", poly1 (fun a -> TArrow (a, t_set a)));
+              ("member", poly1 (fun a -> TArrow (a, TArrow (t_set a, t_bool))));
+              ("subset", poly1 (fun a -> TArrow (t_set a, TArrow (t_set a, t_bool))));
+              ("empty", poly1 (fun a -> t_set a)) ]
+            body_env
+        end
+        else body_env
+      in
+
       (* Record each named parameter's type in the type map *)
       List.iter2 (fun fp pty ->
           match fp with
