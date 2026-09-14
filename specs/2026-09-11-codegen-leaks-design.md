@@ -4,6 +4,9 @@
 **Status:** design. §4 landed 2026-09-13, widened: the leak was the builtin
 borrow table's silent owned default, which also covered the comparison
 operators. See `specs/progress/2026-09-13-builtin-borrow-classification.md`.
+§2 landed 2026-09-13 with a corrected release condition (the scrutinee's
+dec_rc is never in the Some arm; see
+`specs/progress/2026-09-13-niche-aggregate-payload-box-released.md`).
 Nothing else here has landed.
 **Scope:** the six open `specs/todos/` items below. Every `file:line` was read
 on this date at `2b32b130`; where a todo's pointer has moved or its stated

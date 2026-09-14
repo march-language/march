@@ -1633,6 +1633,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/actor_self.expected native_actor_self.out)))
 
+; ── Leak guard: an unboxed aggregate matched out of a niche-encoded Option
+; (`Some(P2(..))`) releases the box that IS the Some value, but only when the
+; scrutinee dies in the match. Red on main (one 32-byte cell per evaluation);
+; releasing unconditionally aborts at the matched-twice leg with RC underflow.
+(rule
+ (targets native_niche_aggregate_payload_leak_probe native_niche_aggregate_payload_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/niche_aggregate_payload_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_niche_aggregate_payload_leak_probe
+        native/niche_aggregate_payload_leak_probe.march)
+   (with-stdout-to native_niche_aggregate_payload_leak_probe.out
+        (system "./native_niche_aggregate_payload_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/niche_aggregate_payload_leak_probe.expected native_niche_aggregate_payload_leak_probe.out)))
+
 ; ── compare_int / compare_float / compare_string: link compiled, return
 ; -1/0/1 on both backends (the interpreter returned a Less/Equal/Greater ctor;
 ; the compiled program failed to link), and compare_string releases a fresh

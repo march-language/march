@@ -207,6 +207,10 @@ git log is authoritative for exact commits.
   catch-all arm** (a "pattern can never be reached" warning that became
   visible with the change above).
 
+- **Matching a small struct out of an `Option` no longer leaks (compiled).**
+  `match o do Some(p) -> ... end` on an `Option` of a two-`Float` record-like
+  type leaked one allocation per match.
+
 - **`compare_int`, `compare_float` and `compare_string` work.** Compiled
   programs calling them failed to link, and the interpreter returned a
   `Less`/`Equal`/`Greater` value where the type says `Int`. They now return
