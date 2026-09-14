@@ -87,18 +87,56 @@ were fixed before landing, with RED-then-GREEN regression tests in the
   only in a set position; `classify_pred`, `subst_params` and `smt_of_r` mark
   before they look.
 
-Still open from that review (not fixed here): user functions named
-`keys`/`member`/`union`… are hijacked by the set vocabulary; a `Set(Bool)` or
-polymorphic-payload set measure emits an ill-sorted axiom into the shared
-preamble; a record selector used as a set element is pinned to `Int`;
-`reject_set_measure_calls` misses `impl`, test and top-level `let` bodies;
-`--refine-audit` reports some unchecked list and unannotated Tier 2 returns as
-Enforced; chained `let`-bound set promises are not loaded transitively; and
-set-free VCs pay for `resolve_set_sorts`/`set_preamble`.
+The other six were fixed in a follow-up (below). Still open: set-free VCs
+pay for `resolve_set_sorts`/`set_preamble`.
+
+## Follow-up review fixes (2026-09-14)
+
+Each with a regression test in `set-refinements` (or `audit-classify`) shown
+RED against the unfixed branch first, every accept beside a reject:
+
+- **The set vocabulary hijacked same-named program functions.** A guard
+  `if keys(r) == []` over a module's own `fn keys` reflected `keys(r)` as a
+  set, the element sorts clashed, and the whole call was skipped as a sort
+  conflict, hiding `need(0)`. Path conditions are program text, so
+  `Refine_scope.smt_of_r ~vocab:false` (used by the guard reflectors in
+  `refine_call.ml` and `refine_post.ml`) reads the vocabulary names as the
+  opaque calls they are. Independently, `Refine_encode.resolve_set_sorts` now
+  drops an ASSUMPTION that brings in a set-sort clash instead of skipping the
+  VC (only a clash inside the goal is still a `Sort_conflict`). Inside a
+  predicate the vocabulary stays reserved: a non-set-shaped application
+  (`member(xs, 3)`) draws the vocabulary warning again
+  (`set_app_well_formed`), and `measure_shape_error` rejects a `@[measure]`
+  named `elts`/`keys`/`member`/…/`empty`.
+- **`Set(Bool)` and mismatched-payload set measures poisoned the preamble.**
+  `set_ret_elem` maps `Set(Bool)` to `Bool`, and `arm_axiom` now checks the
+  translated arm's sorts (`axiom_body_sort`) and refuses the arm — hence the
+  measure's axiomatisation — when they disagree, so `fv : Expr(Int) ->
+  Set(Int)` over `Var(a)` degrades to symbolic instead of putting an
+  ill-sorted `forall` in every query of the module.
+- **A record selector used as a set element was pinned to `Int`.**
+  `resolve_set_sorts` looks the selector's field sort up
+  (`selector_field_sort`), so `member(v.name, singleton(v.name))` proves.
+- **Set-valued measure calls escaped rejection outside `fn` bodies.**
+  `reject_set_measure_calls` walks `impl` methods, interface defaults, actor
+  init/handlers, top-level `let`s, `app` bodies and `describe`/`test`/`setup`
+  blocks, the same containers `warn_predicate_decls` walks.
+- **`--refine-audit` over-reported Enforced returns.** It now asks
+  `Refine_post.return_refinement_checked`, which follows
+  `check_fn_post_verdict`'s routing: a `{List(_) | …}` predicate without
+  `elts`/`keys` goes to Tier 2, and Tier 2 checks only a constructor-literal
+  body or a match on a parameter with a declared ADT type
+  (`post_induction_checks`, sharing `induction_match_adt` with Shape 2).
+- **Chained `let`-bound set promises were not transitive.** The non-self
+  branch of `load_scope_measure_facts`'s `rm` loads the name's own promise
+  before `measure_of_var`; the `scope_facts_loaded` memo keeps it
+  terminating. The forward `ref` cell stays: `set_of_call` and the loader are
+  separated by definitions the loader uses, so a `let rec … and` would move a
+  large block for no behavioural gain.
 
 ## Verification
 
-`test/test_refinecheck.ml`, suite `set-refinements` (26 cases after the review fixes), every accept
+`test/test_refinecheck.ml`, suite `set-refinements` (26 cases after the review fixes, 35 after the follow-up), every accept
 beside a reject; the RED-first control (membership rendered as `true`) went
 red on seven of them before the encoding was trusted. `scripts/run-tests.sh
 -q`, the full z3 suite, and the stdlib `test_set`/`test_map` files all green

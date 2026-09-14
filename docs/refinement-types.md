@@ -868,9 +868,13 @@ fn need_sub(f : Expr, a : Expr,
 fn sym(f : Expr, a : Expr) : Int do need_sub(f, a, App(f, a)) end   -- proved by the axioms alone
 ```
 
-`Int` payloads are concrete; a `String` payload is opaque (its constructor
-field is the checker's opaque element sort), so a set measure over strings
-reasons symbolically but not about particular literals. A refuted set contract
+`Int` and `Bool` payloads are concrete; a `String` or type-parameter payload is
+opaque (its constructor field is the checker's opaque element sort), so a set
+measure over strings reasons symbolically but not about particular literals. A
+set measure whose declared element type disagrees with the payload it
+collects (`fv(e : Expr(Int)) : Set(Int)` over `type Expr(a) = Var(a) | …`)
+gets no recursion axioms: its calls are checked symbolically, and the other
+measures in the module are unaffected. A refuted set contract
 renders its model as a set literal: `Set.insert() can return {4}`,
 `elts(s) = {1}`.
 
@@ -885,7 +889,16 @@ renders its model as a set literal: `Set.insert() can return {4}`,
   ys)) == union(elts(xs), elts(ys))` from `append`'s body) is skipped. A list
   contract over an `Int` measure keeps the Tier 2 induction path it always had.
 - **Mixed element sorts skip.** `member(3, elts(_))` against a
-  `List(String)` is a sort conflict and is skipped, never reported.
+  `List(String)` is a sort conflict and is skipped, never reported. A clash
+  that only a *fact* brings in (a guard, a parameter's promise) drops that
+  fact instead, so the call is still checked without it.
+- **The vocabulary names are reserved in predicates, and only there.** Inside
+  `{...}`, `elts`, `keys`, `member`, `union`, `inter`, `diff`, `subset`,
+  `singleton` and `empty` always mean the set operations; a `@[measure]` may
+  not take one of those names, and a predicate that applies one in a non-set
+  shape (`member(xs, 3)`) draws the unrecognised-predicate warning. In
+  ordinary code, including an `if` guard, they are just names: a module's own
+  `fn keys(r)` or `fn member(xs, x)` is treated like any other function.
 - **A rebound name loses its set promise**, exactly as it loses a `len` one.
 
 ## Constructor Tags: Refining over ADT Variants

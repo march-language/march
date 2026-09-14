@@ -192,6 +192,23 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Set refinements: six correctness fixes from review.** A module's own
+  function named like the set vocabulary (`keys`, `member`, …) used in a
+  guard is no longer read as a set operation, which had skipped the whole
+  call and hidden a real violation; a fact whose set element sorts clash is
+  dropped rather than skipping the check. A predicate that applies a set word
+  in a non-set shape (`member(xs, 3)`) warns again, and a `@[measure]` may not
+  take a set-vocabulary name. A `Set(Bool)` measure, or one whose declared
+  element type disagrees with its payload, no longer emits an ill-sorted
+  axiom that made every measure query in the module undecided. A record
+  field used as a set element (`member(v.name, …)`) now proves. Calling a
+  set-valued measure from an `impl` method, actor handler, `test` block or
+  top-level `let` is now a `--check` error instead of a link failure.
+  `--refine-audit` no longer reports a `{List(_) | len(_) > 0}` return with
+  no list measure, or a Tier 2 match on an unannotated parameter, as
+  enforced. A chain of `let`-bound `Set.insert`s now carries its membership
+  facts through every link.
+
 - **A record parameter no longer makes an unproven postcondition a "violation".**
   With a record-refined parameter in scope the checker reports any satisfiable
   counterexample directly; it now does so only when every parameter's own
