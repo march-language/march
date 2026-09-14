@@ -1532,6 +1532,17 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="NodeRpc.html#fn-matches"><span class="sb-kind" style="color:var(--fn)">F</span>matches</a>
 <a class="sl" href="NodeRpc.html#fn-peer_down_error"><span class="sb-kind" style="color:var(--fn)">F</span>peer_down_error</a>
 <a class="sl" href="NodeRpc.html#fn-timed_out"><span class="sb-kind" style="color:var(--fn)">F</span>timed_out</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="NodeSend.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="NodeSend.html">NodeSend</a></div><div class="sb-sub"><a class="sl" href="NodeSend.html#type-SendError"><span class="sb-kind" style="color:var(--ty)">T</span>SendError</a>
+<a class="sl" href="NodeSend.html#type-Delivery"><span class="sb-kind" style="color:var(--ty)">T</span>Delivery</a>
+<a class="sl" href="NodeSend.html#fn-cast"><span class="sb-kind" style="color:var(--fn)">F</span>cast</a>
+<a class="sl" href="NodeSend.html#fn-decode_failed"><span class="sb-kind" style="color:var(--fn)">F</span>decode_failed</a>
+<a class="sl" href="NodeSend.html#fn-decode_msg"><span class="sb-kind" style="color:var(--fn)">F</span>decode_msg</a>
+<a class="sl" href="NodeSend.html#fn-encode_failed"><span class="sb-kind" style="color:var(--fn)">F</span>encode_failed</a>
+<a class="sl" href="NodeSend.html#fn-encode_msg"><span class="sb-kind" style="color:var(--fn)">F</span>encode_msg</a>
+<a class="sl" href="NodeSend.html#fn-recv_failure"><span class="sb-kind" style="color:var(--fn)">F</span>recv_failure</a>
+<a class="sl" href="NodeSend.html#fn-serve_one"><span class="sb-kind" style="color:var(--fn)">F</span>serve_one</a>
+<a class="sl" href="NodeSend.html#fn-tag_actor_msg"><span class="sb-kind" style="color:var(--fn)">F</span>tag_actor_msg</a>
+<a class="sl" href="NodeSend.html#fn-tag_delivery_failed"><span class="sb-kind" style="color:var(--fn)">F</span>tag_delivery_failed</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Option.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Option.html">Option</a></div><div class="sb-sub"><a class="sl" href="Option.html#fn-expect"><span class="sb-kind" style="color:var(--fn)">F</span>expect</a>
 <a class="sl" href="Option.html#fn-filter"><span class="sb-kind" style="color:var(--fn)">F</span>filter</a>
 <a class="sl" href="Option.html#fn-flat_map"><span class="sb-kind" style="color:var(--fn)">F</span>flat_map</a>
@@ -2424,7 +2435,7 @@ waiting for it blocks a test harness.
     let ref = Actor.send_after(pid, Tick, 100)
     -- ... later, before it fires ...
     Actor.cancel_timer(ref)</code></pre></div></div>
-<div class="item" id="fn-set_queue_limit"><div class="ih"><span class="badge bfn">fn</span><span class="name">set_queue_limit</span><span class="sig">set_queue_limit(pid, limit, policy)</span><a class="anchor-link" href="#fn-set_queue_limit" title="Link">#</a></div><div class="ib"><p>Bound this actor's mailbox. policy: 0 unbounded (default), 1 drop_new, 2 drop_old, 3 block_sender (compiled backend; interpreted treats 3 as 0 — the interpreter's single-threaded eager scheduler cannot park a sender without deadlocking). Dropped messages are counted in Scheduler.dropped_messages().</p><pre><code>Under a drop policy (1 or 2), a dropped Actor.call request or its reply is
+<div class="item" id="fn-set_queue_limit"><div class="ih"><span class="badge bfn">fn</span><span class="name">set_queue_limit</span><span class="sig">set_queue_limit(pid, limit, policy)</span><a class="anchor-link" href="#fn-set_queue_limit" title="Link">#</a></div><div class="ib"><p>Bound this actor's mailbox. policy: 0 unbounded (default), 1 drop_new, 2 drop_old, 3 block_sender (compiled backend only: the interpreter's single-threaded eager scheduler cannot park a sender, so under <code>march run</code> policy 3 is refused at this call rather than silently treated as 0). Dropped messages are counted in Scheduler.dropped_messages().</p><pre><code>Under a drop policy (1 or 2), a dropped Actor.call request or its reply is
 indistinguishable from a lost reply at the caller — both surface as a
 timeout Err from Actor.call. Callers that rely on Actor.call against a
 bounded actor should prefer the block policy (3) instead, so no request

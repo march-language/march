@@ -60,6 +60,15 @@ re-entrant alternative (run the target from inside `send` until it has
 room) was judged too risky in the 2026-09-10 review and nothing has changed
 that.
 
+**Shipped 2026-09-14**, one step short of the proposal: the refusal is at the
+*call* in the interpreter (`eval_builtins.ml`, `actor_set_mailbox_limit` with
+policy 3 raises with a message naming `drop_new`/`drop_old` and "compile this
+program"), not at typecheck. The policy is a runtime `Int`, so a static check
+would only catch the literal spelling; the call-site refusal catches every
+spelling and costs nothing. Unit test in `test_stdlib_suite.ml`
+("block_sender refused under the interpreter"), proved to fail with the arm
+disabled. Docs updated in both trees.
+
 ## C. Declaration-site `mailbox N policy` (item 4 of the hardening file)
 
 Not blocking anything above; listed so the set is complete. A parser +

@@ -37,21 +37,15 @@
 -- allocated by the callee" that the runtime can read off the VALUE, with no
 -- help from the compiler.
 --
--- THE OTHER HALF: A HEAP NON-FLOAT ACCUMULATOR. There is no tag that says
--- "freshly allocated String", so for those the COMPILER supplies the witness
--- instead: Borrow inference already knows whether an apply fn has any OWNING
--- use of its accumulator parameter, and lib/tir/clo_flags.ml stamps that one
--- bit (MARCH_CLO_ARG0_BORROWED) into the closure object's header pad word.
--- Set = the callee neither consumed nor retained the accumulator we passed,
--- so the fold loop still holds the only reference and must release it. The
--- string_acc_* legs below pin that half; they leaked exactly one String per
--- element before it (numbers at the bottom of this header).
---
--- Both witnesses are still needed. The Float one is intrinsic to the value
--- and survives every path that builds a closure; the stamped one is absent
--- (and the release correctly does not happen) whenever a closure is built by
--- a path that does not stamp -- REPL/JIT fragments, hot reload, the
--- cross-heap message copier.
+-- THE OTHER HALF: A HEAP NON-FLOAT ACCUMULATOR. Since 2026-09-14 a closure
+-- call CONSUMES every heap argument except a Float box, on every side
+-- (specs/progress/2026-09-14-closure-calls-consume-their-arguments.md): the
+-- apply fn releases or hands back the accumulator it was given, so the fold
+-- loop owns nothing more and releases nothing. The string_acc_* legs below
+-- pin that half; they leaked exactly one String per element while apply fns
+-- still borrowed a read-only accumulator (numbers at the bottom of this
+-- header). Until then a header bit (MARCH_CLO_ARG0_BORROWED) told the loop
+-- when to release it.
 --
 -- ACCUMULATOR TYPE IS LOAD-BEARING, in the opposite direction from the
 -- sibling probe, and it is the whole reason this defect hid twice. A
@@ -62,15 +56,6 @@
 -- must keep a HEAP accumulator: Float for the tag-witnessed half, String for
 -- the compiler-witnessed half. Do NOT "simplify" any of them to an Int --
 -- the probe would still pass, measuring nothing.
---
--- THE CLOSURE BODY IS LOAD-BEARING TOO, for the String legs specifically.
--- The stamped bit is only set when borrow inference can see that the
--- accumulator has no owning use, so the accumulator may only be passed to
--- callees whose borrow modes are DECLARED (borrow.ml's extern_borrow_table:
--- string_starts_with is, string_length is not) or ignored outright. Rewriting
--- `string_starts_with(acc, "s")` into `string_length(acc)` below turns the
--- accumulator owned, clears the bit, and re-leaks -- correctly, since a
--- consuming callee is exactly the case that must NOT be released.
 --
 -- SIGNAL: live_allocs(), NOT RSS -- see the long rationale in
 -- native_arr_fold_leak_probe.march. Short version: an absolute RSS threshold
@@ -87,9 +72,9 @@
 --     is still held by the caller and USED after the fold returns. The initial
 --     accumulator belongs to the CALLER; a fold that releases it hands back a
 --     dangling String and the trailing string_length(base) reads freed memory.
---   * elem_alias_leg -- the closure returns the ELEMENT, which the array owns
---     and the fold only borrows, so the chain of accumulators walks into the
---     array's own storage.
+--   * elem_alias_leg -- the closure returns the ELEMENT, which the array owns;
+--     the fold gives the closure its own reference to it, so the chain of
+--     accumulators must not walk into the array's own storage.
 --   * consume_acc_leg -- the closure STORES the accumulator into its result,
 --     which is the one shape where the callee really did take our reference
 --     and the release must not happen at all.
@@ -98,7 +83,7 @@
 -- march_decrc; the sibling probe's Int legs cover that direction.
 --
 -- Numbers measured on this fixture, Darwin arm64, --compile --opt 2:
---   fixed (both witnesses)            live_allocs delta =        20
+--   fixed                             live_allocs delta =        20
 --   whole compiler+runtime at 8897bb1a (i.e. before the closure borrow bit,
 --   with the Float half already in)   live_allocs delta = 1,000,018
 --   accumulator release removed altogether, measured 2026-08-20 on this

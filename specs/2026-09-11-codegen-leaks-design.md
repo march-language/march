@@ -11,7 +11,11 @@ dec_rc is never in the Some arm; see
 (`specs/progress/2026-09-13-float-task-result-box-released.md`).
 §1 A+B landed 2026-09-13, plus a use-after-free fix in the tail release
 (`specs/progress/2026-09-13-closure-environment-released.md`).
-Nothing else here has landed.
+§3 landed 2026-09-14 as option A, plus three callee shapes the design missed
+(unused parameters, record-alias lambda parameters, `$clo_wrap` targets) and an
+owned `pid_of_int`; its prediction that the caller-side Float releases must go
+was wrong (`specs/progress/2026-09-14-closure-calls-consume-their-arguments.md`).
+§5 has not landed.
 **Scope:** the six open `specs/todos/` items below. Every `file:line` was read
 on this date at `2b32b130`; where a todo's pointer has moved or its stated
 mechanism does not match the code, this doc says so rather than repeating it.
@@ -20,7 +24,7 @@ mechanism does not match the code, this doc says so rather than repeating it.
 |---|---|---|
 | [`2026-09-06-closure-capture-release-widening`](todos/2026-09-06-closure-capture-release-widening.md) | every capture read pins `$clo`; the deep-drop gate declines most closures | M |
 | [`2026-09-04-unboxed-aggregate-niche-payload-leak`](todos/2026-09-04-unboxed-aggregate-niche-payload-leak.md) | `Some(P2(..))` box never freed in the niche arm | S |
-| [`2026-08-21-ecallptr-owned-arg-borrow-callee-leak`](todos/2026-08-21-ecallptr-owned-arg-borrow-callee-leak.md) | caller says owned, apply fn says borrowed; fresh arg leaks | L |
+| [`2026-08-21-ecallptr-owned-arg-borrow-callee-leak`](progress/2026-09-14-closure-calls-consume-their-arguments.md) | caller says owned, apply fn says borrowed; fresh arg leaks | L |
 | [`2026-08-22-boxed-ctor-heap-field-binder-not-dropped`](todos/2026-08-22-boxed-ctor-heap-field-binder-not-dropped.md) | `One(s) -> string_length(s)` leaks `s` | S (see §4: attribution is likely wrong) |
 | [`2026-08-12-simd-nontco-vector-param-leak`](todos/2026-08-12-simd-nontco-vector-param-leak.md) | vec box for a `ptr`-slotted callee released by nobody | M |
 | [`2026-08-12-float-boxing-task-trampoline-leak`](todos/2026-08-12-float-boxing-task-trampoline-leak.md) | Float box aliased from `task[3]` outlives the Task | S |

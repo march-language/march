@@ -13,6 +13,15 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`PeerReader`: one reader per peer connection, dispatching frames by tag.**
+  There was no receive loop: every cross-node consumer read its own frames
+  off the shared connection and skipped the ones it did not recognise, so two
+  consumers stole each other's frames, and bytes read past a frame boundary
+  were dropped. `PeerReader.serve(fd, buf, on_frame)` reads each frame once,
+  reports its tag, and hands it to the caller's dispatch; leftovers carry to
+  the next frame. `test/native/peer_reader_loopback` delivers three frames for
+  two consumers from one `recv()`.
+
 - **`NodeSend`: a one-way message to an actor on another node.** Everything
   cross-node was a synchronous `NodeCall` or a monitor frame. `NodeSend.cast`
   writes an `ACTOR_MSG` frame addressed by `GlobalPid`; `NodeSend.serve_one`
@@ -218,6 +227,12 @@ git log is authoritative for exact commits.
   enforced. A chain of `let`-bound `Set.insert`s now carries its membership
   facts through every link.
 
+- **The interpreter refuses the `block_sender` mailbox policy instead of
+  silently ignoring it.** `Actor.set_queue_limit(pid, n, 3)` under `march run`
+  used to run unbounded, so a program relying on backpressure got none there
+  and then behaved differently compiled. It now fails at the call with a
+  message naming `drop_new`/`drop_old` and the compiled backend.
+
 - **`node_discovery` is back on `dune runtest`.** It was quarantined on
   2026-08-08 for a torn-stdout race that was fixed on 2026-08-21
   (`march_stdout_mu`); the quarantine outlived the fix. The ubuntu CI job now
@@ -279,6 +294,14 @@ git log is authoritative for exact commits.
   whose state can receive every message, no longer generate an unreachable
   catch-all arm** (a "pattern can never be reached" warning that became
   visible with the change above).
+
+- **Calling a closure no longer leaks its arguments (compiled).** A function
+  value called with a fresh heap argument (`f(int_to_string(n))`, a
+  `List.filter` predicate, the per-element `show` inside `to_string` of a
+  `List(String)`) leaked that argument on every call, and an argument still in
+  use afterwards could never be freed. This covered lambdas that only read
+  their argument or ignore it, a lambda parameter typed with a record alias,
+  and a named function passed as a value.
 
 - **Closures no longer leak their environment and captured values
   (compiled).** A function that returns a closure (`fn adder(k) do fn x -> x

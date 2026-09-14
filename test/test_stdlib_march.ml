@@ -169,6 +169,7 @@ let all_stdlib_decls =
     "node_rpc.march";
     "node_call.march";
     "node_send.march";
+    "peer_reader.march";
     "cluster_load.march";
     "work_dispatch.march";
     "dist_link.march";
@@ -579,6 +580,8 @@ let () =
         `Quick (run_stdlib_test "test_global_pid.march" "TestGlobalPid");
       Alcotest.test_case "node_send: ACTOR_MSG / DELIVERY_FAILED frames"
         `Quick (run_stdlib_test "test_node_send.march" "TestNodeSend");
+      Alcotest.test_case "peer_reader: tag_of over every frame family"
+        `Quick (run_stdlib_test "test_peer_reader.march" "TestPeerReader");
     ]);
     ("remote_call", [
       Alcotest.test_case "RemoteCall module"

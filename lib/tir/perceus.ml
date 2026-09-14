@@ -570,6 +570,35 @@ let insert_owned_aggregate_param_drops (env : env) (borrowed : StringSet.t)
     in
     push body
 
+(** Release the user parameters of an apply fn that its body never mentions.
+
+    [Borrow.infer_module] pins every apply-fn parameter owned, because every
+    caller of a closure (an [ECallPtr], the direct [EApp] [Known_call] rewrites
+    it into, and the C runtime's fold/map helpers) hands the callee a
+    reference.  RC insertion releases a parameter at its last use, but a
+    parameter with no use at all ([fn _ -> 0], [fn (acc, _) -> acc]) has no
+    last use to hang the release on, so without this the reference leaked once
+    per call.  The drop goes at entry: nothing reads the value, and a drop in
+    front of the body leaves every tail call in tail position.
+
+    [$clo] (param 0) is excluded: its release is [insert_apply_fn_clo_drop]'s,
+    and a capture-free native apply fn is called with an immortal static
+    closure. *)
+let insert_dead_apply_param_drops (env : env) (borrowed : StringSet.t)
+    (fn : Tir.fn_def) (body : Tir.expr) : Tir.expr =
+  if not (Tir_names.is_apply_fn fn.Tir.fn_name) then body
+  else
+    let user_params = match fn.Tir.fn_params with _ :: ps -> ps | [] -> [] in
+    let free = Dce.free_vars body in
+    List.fold_left (fun acc p ->
+        if (needs_rc env p.Tir.v_ty || is_aggregate_ty p.Tir.v_ty)
+           && not (StringSet.mem p.Tir.v_name borrowed)
+           && not (StringSet.mem p.Tir.v_name env.closure_fvs)
+           && not (StringSet.mem p.Tir.v_name free)
+        then Tir.ESeq (decrc_for env p (Tir.AVar p), acc)
+        else acc)
+      body user_params
+
 (** [insert_rc ~module_env ~borrowed fn] runs Phase 2 (RC insertion) over one
     function.  [module_env] carries the module-scoped fields (borrow_map,
     type_defs, extern_names) set once per [perceus] run; this
@@ -632,8 +661,9 @@ let insert_rc ~(module_env : env) ?(repl = false) ?(borrowed = StringSet.empty)
     then insert_apply_fn_clo_drop ~repl body'
     else body'
   in
-  let body_final =
+  let body_agg =
     insert_owned_aggregate_param_drops fn_env borrowed' fn' body_clo in
+  let body_final = insert_dead_apply_param_drops fn_env borrowed' fn' body_agg in
   { fn' with Tir.fn_body = body_final }
 
 (* ── Phase 3: RC Elision (cancel pairs) ──────────────────────────────────── *)
@@ -766,17 +796,17 @@ let perceus ?(repl : bool = false) ?(repl_vars : string list = [])
   let borrow_map = match borrow_map with
     | Some bm -> bm
     | None -> Borrow.infer_module m in
-  (* Phase 0b: publish, for every function, whether its FIRST USER ARGUMENT is
-     free of owning uses.  [Llvm_emit] stamps that bit into the header of each
-     closure object it materialises so the C runtime's fold helpers can tell
-     whether they still own the accumulator they handed to a closure — see
-     [Clo_flags] for why the runtime cannot decide this itself and why a
-     missing entry is safe.  Reset first: the table is process-global and the
-     REPL / test drivers compile many modules in one process. *)
+  (* Phase 0b: publish every function's parameter borrow modes, for the
+     [$clo_wrap] trampolines [Llvm_emit] synthesises: a closure call consumes
+     its arguments, so a trampoline whose target borrows one must release it
+     after forwarding.  See [Clo_flags].  Reset first: the table is
+     process-global and the REPL / test drivers compile many modules in one
+     process. *)
   Clo_flags.reset ();
   List.iter (fun fn ->
     Clo_flags.register fn.Tir.fn_name
-      (Borrow.first_user_arg_borrowed borrow_map fn)
+      (List.mapi (fun i _ -> Borrow.is_borrowed borrow_map fn.Tir.fn_name i)
+         fn.Tir.fn_params)
   ) m.Tir.tm_fns;
   let extern_names =
     List.fold_left (fun s (ed : Tir.extern_decl) ->

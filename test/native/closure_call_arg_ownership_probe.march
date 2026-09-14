@@ -1,0 +1,127 @@
+-- Leak guard: a closure call consumes its arguments, on both sides.
+--
+-- The caller of a closure (an indirect call, the direct call Known_call makes
+-- of it, or the C runtime's fold/map helpers) hands the callee a reference to
+-- every heap argument. The callee used to classify a read-only parameter as
+-- BORROWED and never release it, so each call leaked a fresh argument
+-- (`f(int_to_string(n))`) and made a long-lived one immortal
+-- (specs/progress/2026-09-14-closure-calls-consume-their-arguments.md).
+--
+-- Every leg is a callee shape that needs its own piece of the fix:
+--   - a reading lambda: apply-fn params pinned owned (Borrow.infer_module);
+--   - a lambda that ignores its argument: released at entry
+--     (Perceus.insert_dead_apply_param_drops);
+--   - a lambda annotated with a record type ALIAS (`p : Pt`): lowered to the
+--     expanded record so field reads don't dup the record;
+--   - a NAMED function used as a closure: its `$clo_wrap` trampoline releases
+--     the arguments the function borrows (Clo_flags);
+--   - a storing lambda and a Float argument: must stay balanced, not
+--     double-free.
+-- Each leg prints the value it computed, so a use-after-free that changes a
+-- result fails the golden, not just the flat check.
+mod Main do
+  needs IO.Console
+
+  type Pt = { name : String, x : Int }
+
+  pfn slen(s : String) : Int do string_length(s) end
+
+  pfn first_str(fs : List((String) -> Int)) : (String) -> Int do
+    match fs do
+      Cons(h, _) -> h
+      Nil -> slen
+    end
+  end
+
+  pfn call_fresh(f : (String) -> Int, n : Int, acc : Int) : Int do
+    if n <= 0 do acc else call_fresh(f, n - 1, acc + f(int_to_string(n))) end
+  end
+  pfn call_live(f : (String) -> Int, n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let s = int_to_string(n)
+      let v = f(s)
+      call_live(f, n - 1, acc + v + string_length(s))
+    end
+  end
+  pfn call_store(f : (String) -> List(String), n : Int, acc : Int) : Int do
+    if n <= 0 do acc else call_store(f, n - 1, acc + List.length(f(int_to_string(n)))) end
+  end
+  pfn call_float(f : (Float) -> Float, n : Int, acc : Float) : Float do
+    if n <= 0 do acc else call_float(f, n - 1, acc + f(int_to_float(n))) end
+  end
+  pfn call_rec(f : (Pt) -> Int, n : Int, acc : Int) : Int do
+    if n <= 0 do acc else call_rec(f, n - 1, acc + f({ name: int_to_string(n), x: n })) end
+  end
+  pfn leg_show(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      leg_show(n - 1, acc + string_length(to_string([int_to_string(n), int_to_string(n + 1)])))
+    end
+  end
+  pfn leg_filter(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let xs = List.filter([int_to_string(n), "a"], fn s -> string_length(s) > 1)
+      leg_filter(n - 1, acc + List.length(xs))
+    end
+  end
+  pfn leg_fold_ignores(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let v = List.fold_left([int_to_string(n), "b"], n, fn (a, _) -> a)
+      leg_fold_ignores(n - 1, acc + v)
+    end
+  end
+  pfn leg_named_map(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let xs = List.map([int_to_string(n), "ab"], slen)
+      leg_named_map(n - 1, acc + List.fold_left(xs, 0, fn (a, b) -> a + b))
+    end
+  end
+
+  pfn flat(label : String, before : Int, r : String) : () do
+    let grew = live_allocs() - before
+    println(label ++ " = " ++ r ++ ", flat: " ++ bool_to_string(grew < 200))
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let n = 5000
+    let reader = first_str([fn (s : String) -> string_length(s)])
+    let ignorer = first_str([fn (s : String) -> 7])
+    let named = first_str([slen])
+    let storers = [fn (s : String) -> [s, s]]
+    let storer = match storers do
+      Cons(h, _) -> h
+      Nil -> fn (s : String) -> []
+    end
+    let doublers = [fn (x : Float) -> x *. 2.0]
+    let doubler = match doublers do
+      Cons(h, _) -> h
+      Nil -> fn (x : Float) -> x
+    end
+    let pts = [fn (p : Pt) -> string_length(p.name) + p.x]
+    let pt = match pts do
+      Cons(h, _) -> h
+      Nil -> fn (p : Pt) -> 0
+    end
+    let a = live_allocs()
+    flat("fresh argument, reading lambda", a, int_to_string(call_fresh(reader, n, 0)))
+    let b = live_allocs()
+    flat("argument live after the call", b, int_to_string(call_live(reader, n, 0)))
+    let c = live_allocs()
+    flat("lambda ignores its argument", c, int_to_string(call_fresh(ignorer, n, 0)))
+    let d = live_allocs()
+    flat("named function as a closure", d, int_to_string(call_fresh(named, n, 0)))
+    let e = live_allocs()
+    flat("lambda stores its argument", e, int_to_string(call_store(storer, n, 0)))
+    let g = live_allocs()
+    flat("Float argument", g, float_to_string(call_float(doubler, n, 0.0)))
+    let h = live_allocs()
+    flat("record-alias argument", h, int_to_string(call_rec(pt, n, 0)))
+    let i = live_allocs()
+    flat("to_string of List(String)", i, int_to_string(leg_show(n, 0)))
+    let j = live_allocs()
+    flat("List.filter predicate", j, int_to_string(leg_filter(n, 0)))
+    let k = live_allocs()
+    flat("fold lambda ignores the element", k, int_to_string(leg_fold_ignores(n, 0)))
+    let l = live_allocs()
+    flat("named function to List.map", l, int_to_string(leg_named_map(n, 0)))
+  end
+end
