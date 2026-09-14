@@ -84,7 +84,10 @@ reclamation) is single-node and stays here.
    shrink after a load spike instead of holding its high-water mark
    permanently.
 
-6. **Interpreter `block` mailbox policy.** `Actor.set_queue_limit`'s
+6. **Interpreter `block` mailbox policy.** *(Resolved 2026-09-14 the honest
+   way: the interpreter refuses policy 3 at `actor_set_mailbox_limit` with a
+   message naming the alternatives, instead of silently running unbounded;
+   see [[2026-09-14-distributed-plane-known-gaps]] B.)* `Actor.set_queue_limit`'s
    `block_sender` policy (Task 8-9) is fully implemented and tested in the
    compiled/native runtime (parking the sender via the scheduler) but the
    tree-walking interpreter's `mailbox_enqueue` does not implement the

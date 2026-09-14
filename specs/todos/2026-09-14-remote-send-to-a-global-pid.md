@@ -111,11 +111,12 @@ key for a replaceable host. Nothing in `Session.Ops` changes.
    `DELIVERY_FAILED` is delivered later as a **`Down`-style message** to the
    sending actor (`Node.SendFailed(seq, reason)`), matching how monitors
    report. Synchronous acks belong to `NodeCall`.
-2. **Where the frame loop lives.** Today each of SWIM, registry and monitors
-   has its own decoder fed by one loop in `cluster_conn`/`swim_driver`. An
-   `ACTOR_MSG` arm adds a fourth. Recommend a single `NetKernel.dispatch`
-   over the tag byte with one arm per subsystem, done as its own refactor
-   commit first (an oracle-able move).
+2. **Where the frame loop lives.** *(Corrected 2026-09-14 while building:
+   there is no loop. Each consumer reads frames off the fd itself and skips
+   what it does not recognise, so two consumers on one connection steal each
+   other's frames. A single per-peer reader dispatching by tag is new
+   machinery, and is step 1 of
+   [[2026-09-14-distributed-plane-flow-control-and-control-channel]].)*
 
 ## Tests
 

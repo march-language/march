@@ -312,8 +312,17 @@ let base_env : env =
         | _ -> eval_error "sched_stat: expected Int"))
   ; ("actor_set_mailbox_limit", VBuiltin ("actor_set_mailbox_limit", function
         (* Task 9: bind a mailbox capacity + overflow policy to an actor.
-           policy: 0 unbounded, 1 drop_new, 2 drop_old, 3 block (treated as
-           unbounded in the interpreter — see mailbox_enqueue above). *)
+           policy: 0 unbounded, 1 drop_new, 2 drop_old, 3 block_sender.
+           The interpreter's eager single-threaded scheduler cannot park a
+           sender, and until 2026-09-14 it silently treated 3 as 0 -- a
+           program relying on backpressure got none under `march run` and
+           then behaved differently compiled, the worst kind of parity gap.
+           It is refused here, at the call, so the difference is loud. *)
+        | [VPid _; VInt _; VInt 3] ->
+          eval_error
+            "Actor.set_queue_limit: policy 3 (block_sender) needs the native \
+             scheduler, which parks the sender; the interpreter cannot. Compile \
+             this program, or use 1 (drop_new) / 2 (drop_old) under `march run`."
         | [VPid pid; VInt limit; VInt policy] ->
           (match Hashtbl.find_opt actor_registry pid with
            | Some inst ->

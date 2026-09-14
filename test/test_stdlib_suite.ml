@@ -1126,6 +1126,34 @@ let test_eval_monitor_builtin () =
   Alcotest.(check int) "mailbox_size counts queued user + Down exactly once" 2
     (match v with March_eval.Eval.VInt n -> n | _ -> -1)
 
+(* block_sender (policy 3) needs the native scheduler to park the sender;
+   the interpreter silently ran unbounded until 2026-09-14. Refused at the
+   call, with a message naming the alternatives. *)
+let test_eval_block_sender_refused_interpreted () =
+  let env = eval_module {|mod Test do
+    actor A do
+      state { x : Int }
+      init { x: 0 }
+      on Noop() do { x: state.x } end
+    end
+    fn main() do
+      let pa = spawn(A)
+      actor_set_mailbox_limit(pa, 4, 3)
+      0
+    end
+  end|} in
+  let raised =
+    try ignore (call_fn env "main" []); None
+    with March_eval.Eval.Eval_error m -> Some m
+  in
+  match raised with
+  | Some m ->
+    Alcotest.(check bool) ("names block_sender: " ^ m) true
+      (let n = String.length "block_sender" in
+       let rec go i = i + n <= String.length m && (String.sub m i n = "block_sender" || go (i + 1)) in
+       go 0)
+  | None -> Alcotest.fail "policy 3 was accepted by the interpreter"
+
 let test_eval_monitor_down_target_is_pid () =
   let env = eval_module {|mod Test do
     actor Target do
@@ -13572,6 +13600,7 @@ let stdlib_suites =
         Alcotest.test_case "Down killed reason"                    `Quick (with_reset test_down_message_killed_reason);
         Alcotest.test_case "Down dead-target fallback"             `Quick (with_reset test_down_message_dead_target_fallback);
         Alcotest.test_case "monitor builtin end-to-end"           `Quick (with_reset test_eval_monitor_builtin);
+        Alcotest.test_case "block_sender refused under the interpreter" `Quick (with_reset test_eval_block_sender_refused_interpreted);
         Alcotest.test_case "Down target is a Pid in source"       `Quick (with_reset test_eval_monitor_down_target_is_pid);
       ]);
       ("supervision phase2", [
