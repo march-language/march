@@ -1,0 +1,46 @@
+mod Main do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs Session.Live
+  @[endpoints]
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+  -- The event-shaped endpoint API's legal shape: `parked` is consumed by
+  -- `resume` and replaced by an `await_*` or `finish` on every returning
+  -- branch, and the step reads the actor's own state (`budget`) -- the
+  -- capability the callback API cannot give. The generated `Received_Cons`
+  -- is matched exhaustively without naming the other role's messages (types
+  -- and constructors carry the role because the namespace is flat).
+  actor ConsActor do
+    state { budget : Int, parked : Stream_Cons.Parked_Cons }
+    init  { budget: 2, parked: Stream_Cons.idle() }
+    on StartC(s : Cap(Session.Live)) do
+      Stream_Cons.take_idle(state.parked)
+      { state with parked: Stream_Cons.await_Msg_Prod_Cons_1(s, Stream_Cons.register(s, 0)) }
+    end
+    on DeliverC(s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
+      match Stream_Cons.resume(state.parked, from, msg, ep) do
+        Got_Msg_Prod_Cons_1(_n, st) ->
+          if state.budget > 1 do
+            { state with budget: state.budget - 1,
+                         parked: Stream_Cons.await_Msg_Prod_Cons_1(s, Stream_Cons.choose_more(s, st, true)) }
+          else
+            { state with parked: Stream_Cons.finish(s, Stream_Cons.choose_done(s, st, true)) }
+          end
+      end
+    end
+  end
+  fn main(c : Cap(IO)) do
+    let _ = spawn(ConsActor)
+    ()
+  end
+end
