@@ -1,0 +1,55 @@
+mod TestNodeSend do
+
+  describe "NodeSend ACTOR_MSG frames" do
+
+    test "round-trips seq, destination, type tag and payload" do
+      let to = GlobalPid.make("node-b", 42, 3)
+      let payload = Cons(1, Cons(2, Cons(255, Nil)))
+      match NodeSend.decode_msg(NodeSend.encode_msg(17, to, "App.Msg", payload)) do
+        Ok(d) ->
+          assert (d.seq == 17)
+          assert (d.to_local_pid == 42)
+          assert (d.to_creation == 3)
+          assert (d.type_tag == "App.Msg")
+          assert (d.payload == payload)
+        Err(_) -> assert (false)
+      end
+    end
+
+    test "an empty payload round-trips" do
+      match NodeSend.decode_msg(NodeSend.encode_msg(1, GlobalPid.make("n", 1, 1), "T", Nil)) do
+        Ok(d) -> assert (d.payload == Nil)
+        Err(_) -> assert (false)
+      end
+    end
+
+    test "a DELIVERY_FAILED frame is not an ACTOR_MSG, and vice versa" do
+      match NodeSend.decode_msg(NodeSend.encode_failed(5, "no")) do
+        Err(_) -> assert (true)
+        Ok(_) -> assert (false)
+      end
+      match NodeSend.decode_failed(NodeSend.encode_msg(5, GlobalPid.make("n", 1, 1), "T", Nil)) do
+        Err(_) -> assert (true)
+        Ok(_) -> assert (false)
+      end
+    end
+
+    test "garbage is an Err, not a panic" do
+      match NodeSend.decode_msg(Cons(9, Cons(9, Nil))) do
+        Err(_) -> assert (true)
+        Ok(_) -> assert (false)
+      end
+    end
+
+  end
+
+  describe "NodeSend DELIVERY_FAILED frames" do
+
+    test "round-trips the seq and reason" do
+      assert (NodeSend.decode_failed(NodeSend.encode_failed(7, "stale creation 0, node is at 1"))
+              == Ok((7, "stale creation 0, node is at 1")))
+    end
+
+  end
+
+end

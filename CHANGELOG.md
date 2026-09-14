@@ -13,6 +13,15 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`NodeSend`: a one-way message to an actor on another node.** Everything
+  cross-node was a synchronous `NodeCall` or a monitor frame. `NodeSend.cast`
+  writes an `ACTOR_MSG` frame addressed by `GlobalPid`; `NodeSend.serve_one`
+  checks the destination node's `creation` and hands the delivery to the
+  receiver's dispatch; every refusal (stale creation, unknown pid or type,
+  undecodable payload) comes back to the sender as `DELIVERY_FAILED`.
+  Documented in the clustering chapter; `test/native/node_send_loopback`
+  runs the exchange over TCP loopback.
+
 - **Set refinements.** A predicate can now state which elements a collection
   holds, Liquid Haskell style: `elts(xs)` and `keys(m)` map a `List`/`Map` to
   its element/key set, and `member`, `union`, `inter`, `diff`, `subset`,

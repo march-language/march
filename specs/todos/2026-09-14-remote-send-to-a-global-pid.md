@@ -62,8 +62,9 @@ reused by a restarted node (see harness spec, scenario 3).
 ### Serialisation: derive, not reflection
 
 RPC serialises through compiler-emitted stubs per enrolled function. Actor
-messages need per-**type** codecs, and those already exist: `derive Json for
-T` and `derive Msgpack for T`. `Node.send` requires the message type to
+messages need per-**type** codecs, and one already exists: `derive Json for
+T` (a `derive Msgpack` would be new; `@[endpoints]` ships Json over
+`Bytes`). `Node.send` requires the message type to
 carry one; the compiler enforces it the way `@[endpoints]` payloads are
 enforced (a missing derive is a typecheck error at the `Node.send` site, not
 a runtime `to_json: cannot determine type` panic — the failure `derive Json`
@@ -74,7 +75,7 @@ A `Pid` inside a payload is **not** serialisable. Sending a local pid across
 the wire would produce a number meaningful only on the sending node. A
 message that must carry an actor reference carries a `GlobalPid.Pid`, built
 by the sender from its own node identity. Enforced by the derive: a type
-with a `Pid(_)` field has no `Msgpack` instance.
+with a `Pid(_)` field gets no codec instance.
 
 ### Delivery
 
@@ -126,3 +127,45 @@ key for a replaceable host. Nothing in `Session.Ops` changes.
 - `DELIVERY_FAILED`: send to a pid that has exited; to a stale creation.
 - Then the session fixture: `stream_endpoints` over two nodes with the
   `Session.Ops` network transport, trace identical to the in-process one.
+
+
+---
+
+## Shipped so far (2026-09-14): the wire and the delivery contract
+
+`stdlib/node_send.march` (`NodeSend`): `ACTOR_MSG` (tag 9) and
+`DELIVERY_FAILED` (tag 10) frames, `cast`, `serve_one` with the creation
+check and the injected dispatch, `recv_failure`. Fixture
+`test/native/node_send_loopback.march` (compiled-only, like
+`node_call_loopback`: the interpreter's `tcp_accept` fails with EINTR on this
+shape, pre-existing) delivers a `Ping` into a remote actor's mailbox, gets a
+`Pong` back by the same primitive, then receives all three failure replies.
+Soaked 20/20 deterministic. Unit tests for the codecs in
+`test/stdlib/test_node_send.march`.
+
+Changed from the design while building:
+
+- **`cast`, not `send`.** `send` is the local actor primitive's reserved
+  name; a stdlib `fn send` does not parse.
+- **The receiving side is an injected dispatch, as in `NodeRpc`.** The
+  design's "look the local pid up; decode by type_tag; enqueue with the
+  ordinary local send" cannot live in the library: the message constructor
+  is minted by the actor that declares it. `serve_one` checks the creation
+  and reports; the dispatch names the actor and the constructor.
+- **No pid-to-int builtin exists.** The fixture reads the integer out of
+  `to_string(pid)` (`"Pid(N)"`). A `GlobalPid` for a local actor needs one;
+  that is a nine-site builtin addition, filed with this note.
+- **`run_until_idle` never returns while a task is parked in a socket
+  read.** The fixture prints the reply from main's own thread and drains only
+  after the server task has finished.
+
+One trap for the next person: a manual `march --compile` of a `test/native`
+or `test/session` fixture writes `<name>.ll` beside the source, and dune
+then copies it read-only into the sandbox, where the rule's own compile
+fails with `Permission denied` on the `.ll`. Delete the stray `.ll` before
+`@test/runtest`.
+
+Still open from the design: the typed wrapper (a `Node.send(conn, to, msg)`
+whose codec the compiler checks), `DELIVERY_FAILED` delivered as a message
+to the sending actor rather than read synchronously, the single
+`NetKernel.dispatch` refactor, and the `Session.Ops` network transport.

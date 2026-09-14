@@ -1,0 +1,160 @@
+-- NodeSend: an actor message to a process on another node (distributed actors 1/4).
+--
+-- Everything cross-node used to be a CALL (NodeCall, synchronous, typed by a
+-- RemoteRef) or a MONITOR frame. This is the missing primitive: a one-way
+-- message to a GlobalPid, the way `send(pid, msg)` is one-way locally.
+--
+-- Wire (msgpack payload behind the NetFrame length prefix; tag byte first,
+-- the P5 convention in NetKernel):
+--   0x09 ACTOR_MSG        [tag=9,  seq:Int, to_local_pid:Int, to_creation:Int,
+--                          type_tag:Str, payload:Bin]
+--   0x0A DELIVERY_FAILED  [tag=10, seq:Int, reason:Str]
+--
+-- `seq` is the sender's correlation number, echoed by DELIVERY_FAILED so the
+-- sender can tell which message a failure is about. `to_creation` is the
+-- receiving node's creation counter as the sender last knew it: a node that
+-- restarted reuses local pids, and a message carrying the old creation must
+-- be refused rather than delivered to whatever now owns that pid.
+-- `type_tag` names the message type (fully qualified), so a receiver can
+-- refuse a type it does not host without decoding the payload.
+--
+-- The receiving side is INJECTED, like NodeRpc's Targets: `serve_one` decodes
+-- the frame, checks the creation, and hands a `Delivery` to the caller's
+-- dispatch function, which knows which local actor hosts which type and
+-- which constructor to wrap the payload in (a constructor is minted by the
+-- actor that declares it; a library cannot name it). Any failure -- stale
+-- creation, a rejected type, a dead pid, an undecodable payload -- goes back
+-- to the sender as DELIVERY_FAILED. A remote send is not fire-and-forget.
+--
+-- Payload codec: the sender encodes its message with the type's derived
+-- codec (`derive Json` today, as `@[endpoints]` does) into bytes; this layer
+-- carries bytes. Design record: specs/todos/2026-09-14-remote-send-to-a-global-pid.md.
+--
+-- Type annotations use bare names where a qualified path would not unify
+-- (the NodeCall convention).
+mod NodeSend do
+
+  fn tag_actor_msg() : Int do 9 end
+  fn tag_delivery_failed() : Int do 10 end
+
+  type SendError = NoConnection | Refused(Int, String)
+
+  type Delivery = {
+    seq : Int,
+    to_local_pid : Int,
+    to_creation : Int,
+    type_tag : String,
+    payload : List(Int)
+  }
+
+  -- ── frames ──────────────────────────────────────────────────────────────
+
+  fn encode_msg(seq : Int, to : Pid, type_tag : String, payload : List(Int)) : List(Int) do
+    Msgpack.encode(Msgpack.array(
+      Cons(Msgpack.int(tag_actor_msg()),
+      Cons(Msgpack.int(seq),
+      Cons(Msgpack.int(to.local_pid),
+      Cons(Msgpack.int(to.creation),
+      Cons(Msgpack.str(type_tag),
+      Cons(Msgpack.bin(payload), Nil))))))))
+  end
+
+  fn decode_msg(bytes : List(Int)) : Result(Delivery, String) do
+    match Msgpack.decode(bytes) do
+      Err(e) -> Err(e)
+      Ok(v) ->
+        match v do
+          Msgpack.Array(Cons(Msgpack.Int(9),
+                        Cons(Msgpack.Int(seq),
+                        Cons(Msgpack.Int(lp),
+                        Cons(Msgpack.Int(cr),
+                        Cons(Msgpack.Str(tt),
+                        Cons(Msgpack.Bin(pl), Nil))))))) ->
+            Ok({ seq: seq, to_local_pid: lp, to_creation: cr, type_tag: tt, payload: pl })
+          _ -> Err("node_send: not an ACTOR_MSG frame")
+        end
+    end
+  end
+
+  fn encode_failed(seq : Int, reason : String) : List(Int) do
+    Msgpack.encode(Msgpack.array(
+      Cons(Msgpack.int(tag_delivery_failed()),
+      Cons(Msgpack.int(seq),
+      Cons(Msgpack.str(reason), Nil)))))
+  end
+
+  fn decode_failed(bytes : List(Int)) : Result((Int, String), String) do
+    match Msgpack.decode(bytes) do
+      Err(e) -> Err(e)
+      Ok(v) ->
+        match v do
+          Msgpack.Array(Cons(Msgpack.Int(10),
+                        Cons(Msgpack.Int(seq),
+                        Cons(Msgpack.Str(reason), Nil)))) -> Ok((seq, reason))
+          _ -> Err("node_send: not a DELIVERY_FAILED frame")
+        end
+    end
+  end
+
+  -- ── sender ──────────────────────────────────────────────────────────────
+
+  -- Write one ACTOR_MSG on [fd] (`cast`: `send` is the local actor
+  -- primitive's reserved name). Returns once the frame is written; a
+  -- delivery failure arrives later as a DELIVERY_FAILED frame (see
+  -- `recv_failure`), not here -- the acknowledgement question the design
+  -- record leaves to the flow-control item.
+  fn cast(fd : Int, seq : Int, to : Pid, type_tag : String, payload : List(Int)) : Result((), SendError) do
+    match NetKernel.send_frame(fd, encode_msg(seq, to, type_tag, payload)) do
+      Err(_) -> Err(NoConnection)
+      Ok(_) -> Ok(())
+    end
+  end
+
+  -- Read frames off [fd] until one is a DELIVERY_FAILED; other frames are
+  -- skipped (they belong to another consumer of this connection).
+  fn recv_failure(fd : Int, buf : List(Int)) : Result((Int, String), String) do
+    match NetKernel.recv_frame(fd, buf) do
+      Err(e) -> Err(e)
+      Ok(fr) ->
+        let frame_bytes = match fr do (f, _) -> f end
+        let rest = match fr do (_, r) -> r end
+        match decode_failed(frame_bytes) do
+          Ok(f) -> Ok(f)
+          Err(_) -> recv_failure(fd, rest)
+        end
+    end
+  end
+
+  -- ── receiver ────────────────────────────────────────────────────────────
+
+  -- Read one frame from [fd]. An ACTOR_MSG whose creation matches
+  -- [my_creation] is handed to [dispatch]; a stale creation, a frame that is
+  -- not an ACTOR_MSG, or a dispatch that returns Err is answered with a
+  -- DELIVERY_FAILED carrying the reason. Returns Err only on I/O failure.
+  fn serve_one(fd : Int, my_creation : Int, dispatch : Delivery -> Result((), String)) : Result((), String) do
+    match NetKernel.recv_frame(fd, Nil) do
+      Err(e) -> Err(e)
+      Ok(fr) ->
+        let frame_bytes = match fr do (f, _) -> f end
+        match decode_msg(frame_bytes) do
+          Err(_) -> Ok(())
+          Ok(d) ->
+            let outcome =
+              if d.to_creation != my_creation do
+                Err("stale creation " ++ int_to_string(d.to_creation) ++ ", node is at " ++ int_to_string(my_creation))
+              else
+                dispatch(d)
+              end
+            match outcome do
+              Ok(_) -> Ok(())
+              Err(reason) ->
+                match NetKernel.send_frame(fd, encode_failed(d.seq, reason)) do
+                  Err(e) -> Err(e)
+                  Ok(_) -> Ok(())
+                end
+            end
+        end
+    end
+  end
+
+end

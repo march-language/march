@@ -5669,6 +5669,32 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/node_call_loopback.expected native_node_call_loopback.out)))
 
+; ── NodeSend loopback: a one-way actor message to a GlobalPid over TCP ──
+; Distributed actors 1/4 (specs/todos/2026-09-14-remote-send-to-a-global-pid.md):
+; ACTOR_MSG delivered into a remote actor's mailbox and answered by the same
+; primitive; then three DELIVERY_FAILED cases (stale creation, unknown pid,
+; unknown type) each reported back to the sender with its seq.
+; Ephemeral port, as node_call_loopback.
+(rule
+ (targets native_node_send_loopback native_node_send_loopback.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/node_send_loopback.march)
+       (file ../stdlib/node_send.march)
+       (file ../stdlib/global_pid.march)
+       (file ../stdlib/net_kernel.march)
+       (file ../stdlib/net_frame.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_node_send_loopback
+        native/node_send_loopback.march)
+   (with-stdout-to native_node_send_loopback.out
+        (system "./native_node_send_loopback")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/node_send_loopback.expected native_node_send_loopback.out)))
+
 ; ── Two-node SWIM discovery: authenticated peer-connection + membership ──
 ; node-a accepts, node-b connects; both run the ClusterConn handshake over
 ; real TCP loopback, then exchange a SwimPing/SwimPingAck pair and each
