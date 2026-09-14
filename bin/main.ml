@@ -3,6 +3,53 @@
 open Toolchain
 open Flags
 
+(** The file tag of every span inside code the desugarer GENERATES — a
+    `derive` expansion, an `@[endpoints]` module — after
+    [Desugar_derive.respan_derived_decl].  Such a diagnostic is the user's:
+    the generated code came from a declaration in their file, and a bug in
+    the generator (or a derive on a type it cannot serialise) is reported
+    nowhere else.  Until 2026-09-13 every diagnostic with this tag was
+    filtered out with the stdlib's, so `--check` exited 0 on a generated
+    function that used a linear value twice; see
+    specs/progress/2026-09-13-generated-code-diagnostics-dropped-at-the-cli.md. *)
+let synthetic_file = "<none>"
+
+(** Whether a diagnostic at file [f] belongs to the user's program: the entry
+    file, a module loaded as user code (source dir / MARCH_LIB_PATH), a
+    string-parsed fixture's spelling, or generated code (above). *)
+let user_diag_file ~filename ~user_files f =
+  f = filename || f = "" || f = "<unknown>" || f = synthetic_file || List.mem f user_files
+
+(** Whether to show diagnostic [d] to the user.  A HINT inside generated code
+    is dropped: a hint asks for an edit (qualify this constructor, rename
+    that), and the user cannot edit what a `derive` expanded -- the flat
+    constructor namespace makes a derived `Eq` on a type whose constructor
+    name the stdlib also uses hint on every run.  Errors and warnings there
+    are kept: they are the generator's bugs and the user's problem. *)
+let user_diag ~filename ~user_files (d : March_errors.Errors.diagnostic) =
+  let f = d.span.March_ast.Ast.file in
+  user_diag_file ~filename ~user_files f
+  && not (f = synthetic_file && d.severity = March_errors.Errors.Hint)
+
+(** Render a diagnostic against the file its span points into — an
+    imported-module error must not be shown with the entry file's lines.  A
+    synthetic span has no source at all (its line number is a counter), so it
+    is rendered without an excerpt and says where the code came from. *)
+let render_user_diag ~src ~filename ~read_file (d : March_errors.Errors.diagnostic) =
+  let f = d.span.March_ast.Ast.file in
+  if f = synthetic_file then
+    let d = { d with March_errors.Errors.notes =
+                       d.March_errors.Errors.notes
+                       @ [ "in code generated for this file by a `derive` or `@[endpoints]` \
+                            declaration; the excerpt cannot be shown" ] } in
+    March_errors.Errors.render_diagnostic ~src:"" ~filename d
+  else
+    let (d_src, d_file) =
+      if f = filename || f = "" || f = "<unknown>" then (src, filename)
+      else (try read_file f with Sys_error _ -> src), f
+    in
+    March_errors.Errors.render_diagnostic ~src:d_src ~filename:d_file d
+
 (** The set of source files a batch of stdlib declarations actually came from.
 
     The refinement checker needs to know whether a `List.length` in scope is
@@ -1199,26 +1246,14 @@ let run_test_cmd args =
     let diags = March_errors.Errors.sorted errors in
     (* Fatal when the diagnostic points into any file loaded as user code:
        the entry file or imported modules (source dir / MARCH_LIB_PATH). *)
-    let is_user_file (d : March_errors.Errors.diagnostic) =
-      let f = d.span.March_ast.Ast.file in
-      f = filename || f = "" || f = "<unknown>" || List.mem f user_files
-    in
+    let is_user_file = user_diag ~filename ~user_files in
     let has_user_errors = List.exists (fun (d : March_errors.Errors.diagnostic) ->
         d.severity = March_errors.Errors.Error && is_user_file d
       ) diags in
     if has_user_errors then begin
       List.iter (fun (d : March_errors.Errors.diagnostic) ->
-        if is_user_file d && d.severity = March_errors.Errors.Error then begin
-          (* Render against the file the span points into — imported-module
-             errors must not be shown with the entry file's source lines. *)
-          let f = d.span.March_ast.Ast.file in
-          let (d_src, d_file) =
-            if f = filename || f = "" || f = "<unknown>" then (src, filename)
-            else (try read_file f with Sys_error _ -> src), f
-          in
-          Printf.eprintf "%s\n\n\n"
-            (March_errors.Errors.render_diagnostic ~src:d_src ~filename:d_file d)
-        end
+        if is_user_file d && d.severity = March_errors.Errors.Error then
+          Printf.eprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d)
       ) diags;
       exit 1
     end;
@@ -1940,10 +1975,7 @@ let compile filename =
      downstream consumer of [diags] (human-readable printing below,
      --check-json, --emit-core-ast) sees the same de-duplicated set. *)
   let diags = dedupe_cap_hints (March_errors.Errors.sorted errors) in
-  let is_user_file (d : March_errors.Errors.diagnostic) =
-    let f = d.span.March_ast.Ast.file in
-    f = filename || f = "" || f = "<unknown>" || List.mem f user_files
-  in
+  let is_user_file = user_diag ~filename ~user_files in
   (* Same accept/reject condition --check uses below (has_user_errors ||
      has_parse_errors || has_resolve_errors || has_desugar_errors) — hoisted
      here (rather than left at its original position further down) so
@@ -1967,17 +1999,8 @@ let compile filename =
       ~rejected:(has_user_errors || has_parse_errors || has_resolve_errors
                  || has_desugar_errors);
   List.iter (fun (d : March_errors.Errors.diagnostic) ->
-      if is_user_file d then begin
-        (* Render against the file the span points into — imported-module
-           errors must not be shown with the entry file's source lines. *)
-        let f = d.span.March_ast.Ast.file in
-        let (d_src, d_file) =
-          if f = filename || f = "" || f = "<unknown>" then (src, filename)
-          else (try read_file f with Sys_error _ -> src), f
-        in
-        Printf.eprintf "%s\n\n\n"
-          (March_errors.Errors.render_diagnostic ~src:d_src ~filename:d_file d)
-      end
+      if is_user_file d then
+        Printf.eprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d)
     ) diags;
   let compile_mode = !dump_tir || !emit_llvm || !do_compile || !dump_phases in
   (* --jit: replace the tree-walking interpreter with the in-process ORC JIT
@@ -2451,13 +2474,7 @@ let compile filename =
                  (March_caps.Cap_ceiling.describe v))
           violations;
         List.iter (fun (d : March_errors.Errors.diagnostic) ->
-            let f = d.span.March_ast.Ast.file in
-            let (d_src, d_file) =
-              if f = filename || f = "" || f = "<unknown>" then (src, filename)
-              else (try read_file f with Sys_error _ -> src), f
-            in
-            Printf.eprintf "%s\n\n\n"
-              (March_errors.Errors.render_diagnostic ~src:d_src ~filename:d_file d)
+            Printf.eprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d)
           ) (March_errors.Errors.sorted ctx);
         Printf.eprintf
           "%d capability ceiling violation(s). Every module's emitted code \
@@ -2502,13 +2519,7 @@ let compile filename =
       pipe.March_tir.Contract_pipeline.vectorize_diags
       @ pipe.March_tir.Contract_pipeline.contract_diags in
     List.iter (fun (d : March_errors.Errors.diagnostic) ->
-        let f = d.span.March_ast.Ast.file in
-        let (d_src, d_file) =
-          if f = filename || f = "" || f = "<unknown>" then (src, filename)
-          else (try read_file f with Sys_error _ -> src), f
-        in
-        Printf.eprintf "%s\n\n\n"
-          (March_errors.Errors.render_diagnostic ~src:d_src ~filename:d_file d)
+        Printf.eprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d)
       ) vectorize_diags;
     if List.exists (fun (d : March_errors.Errors.diagnostic) ->
         d.severity = March_errors.Errors.Error) vectorize_diags

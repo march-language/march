@@ -6684,6 +6684,22 @@ let test_linear_container_ok () =
     end|}) in
   Alcotest.(check bool) "containers used once, record field reads: no error" false (has_errors ctx)
 
+let warnings ctx =
+  List.filter (fun (d : March_errors.Errors.diagnostic) -> d.severity = March_errors.Errors.Warning)
+    ctx.March_errors.Errors.diagnostics
+
+let test_derive_eq_single_ctor_no_unreachable_arm () =
+  let ctx = typecheck {|mod Test do
+    type V = V(Int, Int)
+    derive Eq for V
+    type C = R | G
+    derive Eq for C
+  end|} in
+  Alcotest.(check bool) "no error" false (has_errors ctx);
+  Alcotest.(check int) "no unreachable-arm warning in the derived Eq" 0
+    (List.length (List.filter (fun (d : March_errors.Errors.diagnostic) ->
+         contains_substring d.message "never be reached") (warnings ctx)))
+
 (* Same gap via a single correct use — must NOT regress to a false positive. *)
 let test_linear_letq_acquire_single_use_ok () =
   let ctx = typecheck {|mod Test do
@@ -16215,6 +16231,7 @@ let compiler_suites =
           Alcotest.test_case "container: tuple used twice"                `Quick test_linear_container_tuple_twice;
           Alcotest.test_case "container: Option dropped"                  `Quick test_linear_container_option_dropped;
           Alcotest.test_case "container: used once / records ok"          `Quick test_linear_container_ok;
+          Alcotest.test_case "derive Eq: no unreachable arm"              `Quick test_derive_eq_single_ctor_no_unreachable_arm;
           Alcotest.test_case "transitions block: no errors"              `Quick test_transitions_parses;
           Alcotest.test_case "transitions via missing fn: error"         `Quick test_transitions_via_not_found_error;
           Alcotest.test_case "undeclared transition fn: warning emitted" `Quick test_transitions_warn_undeclared;
