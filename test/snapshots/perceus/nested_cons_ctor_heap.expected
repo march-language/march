@@ -137,8 +137,7 @@ call_ptr go(xs, 0)
 fn build$apply$1($clo : Ptr(Unit), i : Int, acc : List(Int)) : List(Int) =
   let build : (Int, List(Int)) -> List(Int) = inc_rc $clo;
 $clo in
-let step : Int = inc_rc $clo;
-$clo.$fv1 in
+let step : Int = $clo.$fv1 in
 let stop : Int = $clo.$fv2 in
 dec_rc $clo;
 let $t20 : '_ = >(step, 0) in

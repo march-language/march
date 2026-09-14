@@ -1,0 +1,207 @@
+mod StreamActorSupervised do
+  -- The actor-hosted (callback-API) endpoints under a real SUPERVISOR.
+  -- stream_actor_restart.march showed the host is replaceable by respawning
+  -- it by hand; here `supervise` does the respawning, and the transport
+  -- routes deliveries by NAME (`Actor.register` at the spawn site,
+  -- `Actor.whereis` at delivery time), because names survive a restart and
+  -- pids do not.  After the first delivery the Cons host is killed; the
+  -- supervisor restarts it with a fresh pid, the name carries forward, the
+  -- next delivery reaches the replacement, and the continuation stored by
+  -- the transport resumes inside its turn.  The trace is
+  -- stream_endpoints.expected's with one marker line at the kill.
+  --
+  -- Design: specs/todos/2026-09-13-endpoint-actors-under-a-supervisor.md.
+  -- Non-vacuous: routing by the pid captured at spawn instead delivers to a
+  -- dead actor and the trace stops after the marker.
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs Session.Live
+
+  @[endpoints]
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+
+  -- ── the mailbox transport ─────────────────────────────────────────────
+  -- `handlers`: endpoint -> installed continuation (closures).
+  -- names:      endpoint -> the actor that drives it, by `Actor.register`.
+  -- `pending`:  FIFO of (to, from, msg), drained one delivery per turn.
+  type Transport = { ops : Session.Ops }
+
+  pfn ekey(ep : Int) : String do "e" ++ int_to_string(ep) end
+
+  -- Ownership is a NAME.  `Actor.register` refuses a name a live actor holds,
+  -- which never happens here (one registration per endpoint, at spawn).
+  fn claim(ep : Int, p) : () do
+    let _ = Actor.register(p, ekey(ep))
+    ()
+  end
+
+  fn fire(handlers, ep : Int, from : Int, msg : Bytes) : Int do
+    match Vault.get(handlers, ekey(ep)) do
+      Some(k) -> k(from, msg, ep)
+      None    -> panic("stream_actor_supervised: delivery to " ++ int_to_string(ep) ++ " with no continuation installed")
+    end
+  end
+
+  fn mailbox(handlers, pending) : Transport do
+    Vault.set(pending, "q", Deque.empty())
+    {
+      ops: {
+        register: fn (_ap, role) -> role,
+        emit: fn (ep, to, msg) -> do
+          let q = match Vault.get(pending, "q") do
+            Some(d) -> d
+            None    -> Deque.empty()
+          end
+          Vault.set(pending, "q", Deque.push_back(q, (to, ep, msg)))
+          ep
+        end,
+        suspend: fn (ep, handler) -> do
+          Vault.set(handlers, ekey(ep), handler)
+          ep
+        end,
+        close: fn ep -> print_line("close " ++ int_to_string(ep))
+      }
+    }
+  end
+
+  -- One delivery per turn: hand it to the owning actor's mailbox, let the
+  -- scheduler run that turn to completion, then take the next.  The fixed
+  -- order is what makes the trace reproducible.
+  pfn route(handlers, pending) : () do
+    let q = match Vault.get(pending, "q") do
+      Some(d) -> d
+      None    -> Deque.empty()
+    end
+    match Deque.pop_front(q) do
+      (None, _) -> ()
+      (Some((to, from, msg)), rest) ->
+        Vault.set(pending, "q", rest)
+        -- Both checks happen HERE, in the driver, not in the handler. A
+        -- `panic` inside a handler is absorbed by actor crash isolation: the
+        -- actor dies, the program exits 0, and the trace simply stops --
+        -- indistinguishable from a protocol that ended early, which is the
+        -- very failure mode the in-process transport's panic was added to
+        -- prevent. `fire` keeps its own panic as a backstop for a delivery
+        -- that reaches an actor another way.
+        match Vault.get(handlers, ekey(to)) do
+          None -> panic("stream_actor_supervised: delivery to " ++ int_to_string(to) ++ " with no continuation installed")
+          Some(_) ->
+            match Actor.whereis(ekey(to)) do
+              Some(p) ->
+                send(p, Deliver(handlers, to, from, msg))
+                run_until_idle()
+                route(handlers, pending)
+              None -> panic("stream_actor_supervised: delivery to " ++ int_to_string(to) ++ " with no live owner")
+            end
+        end
+    end
+  end
+
+  -- ── the endpoints, identical to the function-hosted fixture ────────────
+  pfn prod(s : Cap(Session.Live), st : Stream_Prod.S_send_Msg_Prod_Cons_1, next : Int) : Stream_Prod.Yield do
+    print_line("Prod sends Item(" ++ int_to_string(next) ++ ")")
+    let st1 = Stream_Prod.send_Msg_Prod_Cons_1(s, st, next)
+    Stream_Prod.offer_more_done(s, st1,
+      fn (_b, st2) ->
+        print_line("Prod got More")
+        prod(s, st2, next + 1),
+      fn (_b, st2) ->
+        print_line("Prod got Done")
+        Stream_Prod.close(s, st2))
+  end
+
+  pfn cons(s : Cap(Session.Live), st : Stream_Cons.S_recv_Msg_Prod_Cons_1, budget : Int) : Stream_Cons.Yield do
+    Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
+      print_line("Cons got Item(" ++ int_to_string(n) ++ ")")
+      if budget > 1 do
+        let st2 = Stream_Cons.choose_more(s, st1, true)
+        cons(s, st2, budget - 1)
+      else
+        let st2 = Stream_Cons.choose_done(s, st1, true)
+        Stream_Cons.close(s, st2)
+      end)
+  end
+
+  -- ── the endpoint actors, supervised ──────────────────────────────────
+  -- ONE actor type, two instances, as in stream_actor.march; here both are
+  -- children of `EpSup`, whose state fields hold the current child pids.
+  actor Ep do
+    state { n : Int }
+    init  { n: 0 }
+    on Deliver(handlers, ep : Int, from : Int, msg : Bytes) do
+      let _ = fire(handlers, ep, from, msg)
+      { state with n: state.n + 1 }
+    end
+  end
+
+  actor EpSup do
+    state { cons : Int, prod : Int }
+    init  { cons: 0, prod: 0 }
+    supervise do
+      strategy one_for_one
+      max_restarts 5 within 60
+      Ep cons
+      Ep prod
+    end
+  end
+
+  fn child(sup, field : String) do
+    match get_actor_field(sup, field) do
+      Some(n) -> pid_of_int(n)
+      None    -> panic("stream_actor_supervised: no child " ++ field)
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let handlers = Vault.new("stream_actor_sup_handlers")
+    let pending  = Vault.new("stream_actor_sup_pending")
+    let t = mailbox(handlers, pending)
+    let s = Session.attach(c, t.ops)
+
+    let sup = spawn(EpSup)
+    let pc = child(sup, "cons")
+    claim(2, pc)
+    claim(1, child(sup, "prod"))
+
+    let cons_st = Stream_Cons.register(s, 0)
+    let _ = cons(s, cons_st, 2)
+    let prod_st = Stream_Prod.register(s, 0)
+    let _ = prod(s, prod_st, 1)
+
+    -- Drain one delivery, then kill the Cons host.  The supervisor restarts
+    -- it (first restart: no backoff); the name follows the replacement.
+    route_one(handlers, pending)
+    kill(pc)
+    run_until_idle()
+    print_line("-- Cons host killed; supervisor restarted it --")
+    route(handlers, pending)
+  end
+
+  pfn route_one(handlers, pending) : () do
+    let q = match Vault.get(pending, "q") do
+      Some(d) -> d
+      None    -> Deque.empty()
+    end
+    match Deque.pop_front(q) do
+      (None, _) -> ()
+      (Some((to, from, msg)), rest) ->
+        Vault.set(pending, "q", rest)
+        match Actor.whereis(ekey(to)) do
+          Some(p) ->
+            send(p, Deliver(handlers, to, from, msg))
+            run_until_idle()
+          None -> panic("stream_actor_supervised: delivery to " ++ int_to_string(to) ++ " with no live owner")
+        end
+    end
+  end
+end

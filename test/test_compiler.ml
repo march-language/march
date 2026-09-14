@@ -6684,6 +6684,22 @@ let test_linear_container_ok () =
     end|}) in
   Alcotest.(check bool) "containers used once, record field reads: no error" false (has_errors ctx)
 
+let warnings ctx =
+  List.filter (fun (d : March_errors.Errors.diagnostic) -> d.severity = March_errors.Errors.Warning)
+    ctx.March_errors.Errors.diagnostics
+
+let test_derive_eq_single_ctor_no_unreachable_arm () =
+  let ctx = typecheck {|mod Test do
+    type V = V(Int, Int)
+    derive Eq for V
+    type C = R | G
+    derive Eq for C
+  end|} in
+  Alcotest.(check bool) "no error" false (has_errors ctx);
+  Alcotest.(check int) "no unreachable-arm warning in the derived Eq" 0
+    (List.length (List.filter (fun (d : March_errors.Errors.diagnostic) ->
+         contains_substring d.message "never be reached") (warnings ctx)))
+
 (* Same gap via a single correct use — must NOT regress to a false positive. *)
 let test_linear_letq_acquire_single_use_ok () =
   let ctx = typecheck {|mod Test do
@@ -6841,6 +6857,19 @@ let test_self_send_delivers_interp () =
     true (field "steps" = Some (March_eval.Eval.VInt 4));
   Alcotest.(check bool) "self is the pid spawn returned"
     true (field "me" = Some (March_eval.Eval.VPid pid))
+
+(** compare_int / compare_float / compare_string return -1/0/1 on the
+    interpreter, as the typechecker declares ((T, T) -> Int).  They returned a
+    Less/Equal/Greater constructor, so the first use as an Int failed at run
+    time.  The compiled half is test/native/compare_builtins.march. *)
+let test_compare_builtins_return_int () =
+  let env = eval_module {|mod TestCompare do
+    fn main() do
+      compare_int(3, 5) * 100 + compare_float(2.5, 2.5) * 10 + compare_string("b", "a")
+    end
+  end|} in
+  Alcotest.(check bool) "-100 + 0 + 1" true
+    (call_fn env "main" [] = March_eval.Eval.VInt (-99))
 
 (** whereis on an unknown atom returns None *)
 let test_whereis_unknown () =
@@ -15790,6 +15819,7 @@ let compiler_suites =
           Alcotest.test_case "whereis named"             `Quick (with_reset test_whereis_named);
           Alcotest.test_case "whereis live actor"        `Quick (with_reset test_whereis_live_actor);
           Alcotest.test_case "self-send delivers (interp)" `Quick (with_reset test_self_send_delivers_interp);
+          Alcotest.test_case "compare builtins return Int" `Quick test_compare_builtins_return_int;
           Alcotest.test_case "whereis unknown"           `Quick (with_reset test_whereis_unknown);
           Alcotest.test_case "whereis_bang unknown"      `Quick (with_reset test_whereis_bang_unknown);
           Alcotest.test_case "name reregisters restart"  `Quick (with_reset test_name_reregisters_on_restart);
@@ -16215,6 +16245,7 @@ let compiler_suites =
           Alcotest.test_case "container: tuple used twice"                `Quick test_linear_container_tuple_twice;
           Alcotest.test_case "container: Option dropped"                  `Quick test_linear_container_option_dropped;
           Alcotest.test_case "container: used once / records ok"          `Quick test_linear_container_ok;
+          Alcotest.test_case "derive Eq: no unreachable arm"              `Quick test_derive_eq_single_ctor_no_unreachable_arm;
           Alcotest.test_case "transitions block: no errors"              `Quick test_transitions_parses;
           Alcotest.test_case "transitions via missing fn: error"         `Quick test_transitions_via_not_found_error;
           Alcotest.test_case "undeclared transition fn: warning emitted" `Quick test_transitions_warn_undeclared;

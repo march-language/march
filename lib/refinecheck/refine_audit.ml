@@ -455,18 +455,23 @@ let sites (decls : A.decl list) : site list =
 let nested_reason (pos : position) : string =
   match pos with
   | Type_arg ->
-    "the refinement sits inside a type constructor's argument of a container \
-     the checker does not model (only `List(…)` and `Option(…)` carry element \
-     contracts, at a parameter, return, `let` annotation or field; see \
-     Refine_scope.elem_refinement), or below one further layer of nesting"
+    "the refinement sits inside a type constructor's argument of a type with \
+     no registered constructor model (every registered ADT — List, Option, \
+     Result, a user variant, a stdlib type defined as one — carries element \
+     contracts at a parameter, return, `let` annotation or field; see \
+     Refine_scope.elem_refinement)"
   | Arrow_domain ->
-    "the refinement sits in the domain of a function-typed value (for \
-     example `({Int | _ > 0}) -> Int`); no extractor descends into an arrow \
-     type looking for a nested refinement"
+    "the refinement sits in the domain of a function-typed value the checker \
+     does not model: only a SINGLE-argument arrow at a function or lambda \
+     parameter carries a domain contract (callback_sig_of_ty); a tupled or \
+     curried domain, or an arrow at a `let` annotation, field, or return, \
+     does not"
   | Arrow_codomain ->
-    "the refinement sits in the codomain of a function-typed value (for \
-     example `Int -> {Int | _ > 0}`); no extractor descends into an arrow \
-     type looking for a nested refinement"
+    "the refinement sits in the codomain of a function-typed value the \
+     checker does not model: only a SINGLE-argument arrow at a function or \
+     lambda parameter carries a codomain contract (callback_sig_of_ty); an \
+     arrow at a `let` annotation, field, or return, or with a tupled or \
+     curried domain, does not"
   | Param _ | Return _ | Let_annot _ | Field _ | Variant_arg _ | Impl_ty _
   | Lambda_param _ | Expr_annot | Sig_fn _ | Extern_fn _ | Iface_method _
   | Actor_handler_param _ ->
@@ -531,6 +536,29 @@ let classify (site : site) : disposition =
   | (Param _ | Return _ | Let_annot _ | Field _)
     when site.position = Type_arg
          && Refine_post.elem_refinement (Some site.origin_ty) <> None ->
+    Enforced
+  (* Arrow DOMAIN at a function or lambda parameter (P3 design §1a): a call
+     through the parameter is checked against the domain refinement via the
+     callback env ([cb_add_param] / [callback_sig_of_ty]), and passing a
+     callable there is checked at the pass site (contravariance, plan phase
+     2).  Enforced whenever [callback_sig_of_ty] accepts the declared arrow —
+     a single-argument arrow with a refined domain; a tupled or curried
+     domain is not modelled, and rule 1 keeps saying so.  A `let` annotation
+     is deliberately excluded: [cb_add_binding] reads only an ALIAS's target,
+     never a declared arrow type. *)
+  | (Param _ | Lambda_param _)
+    when site.position = Arrow_domain
+         && Refine_post.callback_sig_of_ty site.origin_ty <> None ->
+    Enforced
+  (* Arrow CODOMAIN at a function or lambda parameter (P3 design §1b/§1c):
+     the codomain refinement is the callback's postcondition inside the
+     function ([callback_sig_of_ty] fills [ret]) and is obliged of every
+     callable passed at the pass site ([check_pass_sites]'s covariant half). *)
+  | (Param _ | Lambda_param _)
+    when site.position = Arrow_codomain
+         && (match Refine_post.callback_sig_of_ty site.origin_ty with
+             | Some { ret = Some _; _ } -> true
+             | _ -> false) ->
     Enforced
   (* Rule 1: nesting, tested for everything rule 2 did not already dispose
      of. *)

@@ -667,7 +667,16 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
       | None -> name.txt
     in
     let args' = List.map (surface_ty env ~tvars) args in
-    if List.length args' <> arity then
+    (* `Pid(a)` is the actor pid, a builtin whose one parameter is the actor's
+       state type ([t_pid]); the bare name `Pid` in scope is the stdlib's
+       `Global_pid.Pid` RECORD (arity 0), a flat-namespace collision.  The
+       one-argument spelling is the builtin's -- it is how `is_alive : Pid(a)
+       -> Bool` and the builtin `Down` constructor's payload are typed -- so
+       it must not be measured against the record's arity.  Reported nowhere
+       before 2026-09-13 only because the `Down` constructor's table carries
+       a dummy span and such diagnostics were filtered out. *)
+    let actor_pid = name.txt = "Pid" && List.length args' = 1 in
+    if List.length args' <> arity && not actor_pid then
       Err.error env.errors ~span:name.span
         (Printf.sprintf "`%s` expects %d type argument(s) but got %d."
            name.txt arity (List.length args'));

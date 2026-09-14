@@ -353,7 +353,7 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
         | _ -> failwith "emit_case: newtype branch has multiple field vars (impossible)");
        emit_expr ctx (strip_decrc br.Tir.br_body)
      | _ -> failwith "emit_case: newtype type has multiple branches (impossible)")
-  | Kind.Niche { payload = _; tagged = niche_tagged } ->
+  | Kind.Niche { payload = niche_payload; tagged = niche_tagged } ->
     (* Niche fast path: None = 0, Some(x) = x.
        Emit an icmp eq null + conditional br.  Branch bodies handle their own
        RC via Perceus, but for the Some(ptr) case the DecRC Perceus inserts on
@@ -433,14 +433,39 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
     Llvm_ctx.emit_label ctx some_lbl;
     (match some_branch with
      | Some br ->
+       (* An UNBOXED AGGREGATE payload (`Some(P2(1.0, 2.0))` with
+          `type P2 = P2(Float, Float)`).  The inline struct cannot sit in the
+          niche's single pointer word, so [Llvm_ctx.coerce] boxed it at
+          construction and that box IS the `Some` value.  Binding the payload
+          as that raw `ptr` left the box with no owner: the scrutinee's
+          DecRC is stripped below ("scrut IS the payload"), and the binder's
+          type is an aggregate, for which [Rc_types.needs_rc] is false, so
+          Perceus drops nothing.  One 32-byte cell leaked per evaluation.
+          Bind a COPY of the struct instead, the boxed path's [is_boxed_agg]
+          treatment, and release the box below when the scrutinee was
+          Perceus-dead here.
+          See specs/progress/2026-09-13-niche-aggregate-payload-box-released.md. *)
+       (* Decided from the NICHE's payload type, not the branch var's: the
+          pattern compiler binds a generic `$f` whose type is the ctor's
+          declared `a`, which lowers to `ptr` even when the scrutinee is
+          `Option(P2)`. *)
+       let niche_agg_ty =
+         match br.Tir.br_vars with
+         | [_] when not niche_tagged ->
+           let lty = Llvm_ctx.llvm_ty ctx niche_payload in
+           if Kind.unboxed_of_llvm_ty ctx.Llvm_ctx.k_table lty <> None then Some lty
+           else None
+         | _ -> None
+       in
        (* Bind the field variable to the extracted payload *)
        (match br.Tir.br_vars with
         | [field_var] ->
           let (fty, fval) =
             if niche_tagged then
               ("i64", Llvm_ctx.emit_untag_known_scalar ctx ~raw:"niche_raw" ~unt:"niche_unt" scrut_p)
-            else
-              ("ptr", scrut_p)
+            else match niche_agg_ty with
+              | Some sty -> (sty, Llvm_ctx.coerce ctx "ptr" scrut_p sty)
+              | None -> ("ptr", scrut_p)
           in
           let slot = Llvm_ctx.alloca_name ctx (Llvm_ctx.llvm_name field_var.Tir.v_name) in
           Llvm_ctx.emit ctx (Printf.sprintf "%%%s.addr = alloca %s" slot fty);
@@ -452,6 +477,51 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
           - Some(int): IS_HEAP_PTR(odd)=false, was a no-op anyway
           - Some(ptr): stripping is REQUIRED — scrut IS the payload *)
        let body = strip_decrc_niche br.Tir.br_body in
+       (* Releasing the box is right exactly when the scrutinee DIES here.
+          Perceus never puts that dec_rc in this arm: a dead scrutinee's
+          reference TRANSFERS to the binder (and the binder, an aggregate,
+          gets no drop), while a live one has the binder dup'd with an
+          `inc_rc` that is inert on a struct slot.  The evidence Perceus does
+          leave is in the SIBLING arms: a dead scrutinee is dropped at the head
+          of every arm that does not consume it, the None arm or the
+          compiler-added default.  Measured on both shapes:
+            let v = match o do Some(p) -> ... end          -- `_ -> dec_rc o`
+            let a = match o do ... end  (o used again)     -- no dec_rc o
+          No evidence means no release, the safe direction (a leak, not a
+          free).  Never when the body reuses the scrutinee's cell (FBIP),
+          which would write into the box just released. *)
+       let rec heads_with_scrut_dec e =
+         match e with
+         | Tir.ESeq (Tir.EDecRC (Tir.AVar v), _)
+         | Tir.ESeq (Tir.EAtomicDecRC (Tir.AVar v), _)
+           when String.equal v.Tir.v_name scrut_name -> true
+         | Tir.ESeq (_, rest) -> heads_with_scrut_dec rest
+         | _ -> false
+       in
+       let scrut_dies_here =
+         scrut_name <> ""
+         && ((match none_branch with
+              | Some nb -> heads_with_scrut_dec nb.Tir.br_body
+              | None -> false)
+             || (match default_opt with
+                 | Some d -> heads_with_scrut_dec d
+                 | None -> false))
+       in
+       (match niche_agg_ty with
+        | Some _ when scrut_dies_here ->
+          let rec reuses e =
+            match e with
+            | Tir.EReuse (Tir.AVar v, _, _) -> String.equal v.Tir.v_name scrut_name
+            | Tir.ELet (_, e1, e2) | Tir.ESeq (e1, e2) -> reuses e1 || reuses e2
+            | Tir.ECase (_, brs, d) ->
+              List.exists (fun b -> reuses b.Tir.br_body) brs
+              || Option.fold ~none:false ~some:reuses d
+            | Tir.ELetRec (_, b) -> reuses b
+            | _ -> false
+          in
+          if not (reuses body) then
+            Llvm_ctx.emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" scrut_p)
+        | _ -> ());
        let (bty, bval) = emit_expr ctx body in
        record_niche_arm_ty body bty;
        Llvm_ctx.emit ctx (Printf.sprintf "store ptr %s, ptr %s"

@@ -33,6 +33,36 @@ git log is authoritative for exact commits.
   carry `@[assume]`d `elts`/`keys` contracts, each with a runtime property
   witness in `test/stdlib/test_set.march` and `test/stdlib/test_map.march`.
 
+- **Endpoint actors under a supervisor, measured.** Two fixtures answer what
+  a restart means for a session: a callback-API host routed by name is
+  replaceable and the protocol continues (`test/session/stream_actor_supervised.march`);
+  an event-API host's parked state dies with it, so a transport routing through
+  epoch capabilities detects the restart and abandons the session cleanly
+  (`test/session/stream_actor_events_supervised.march`). Documented under
+  "Generated endpoints" in the session-types chapter.
+
+- **Container subtyping covers every registered ADT, two layers deep, and
+  polymorphic calls.** Element refinements are now contracts for `Result`,
+  user variant types (`Node(Leaf, 0, Leaf)` under `Tree({Int | _ > 0})` is
+  rejected, and a `match` on it knows the element fact), and any stdlib type
+  defined as a variant; for two layers of nesting (`[[1], [0]]` under
+  `List(List({Int | _ > 0}))` is rejected); and through a polymorphic call's
+  declared signature (`let h = first(xs)` with `first : List(a) -> Option(a)`
+  carries `xs`'s element refinement to `h`; `let x = List.head(xs)` gives
+  `x` the refinement itself). The pass-through refuses any callee that could
+  manufacture an element (`put(xs : List(a), v : a)`). A tuple element or an
+  arrow inside a container remains unenforced.
+
+- **A callback's codomain refinement is a contract.** `fn apply(f : Int ->
+  {Int | _ > 0}, x : Int)` now knows `f(x) > 0` inside `apply`, and every
+  function passed for `f` must return a value satisfying it: a named function
+  through its own proved return refinement (`_ >= 0` does not imply `_ > 0`
+  and is refuted), an inline lambda through its body (`apply(fn n -> 0, 1)` is
+  rejected), and a function with no return refinement as a recorded skip. A
+  local `fn`'s or `let`-bound lambda's proved return refinement now reaches
+  its callers the same way. `--refine-audit` reports a single-argument
+  callback's domain and codomain at a parameter as Enforced.
+
 - **`@[endpoints]` also generates an event-shaped API, so a session endpoint
   can live in an actor's state.** Beside the callback-shaped `recv_*`/`offer_*`,
   every role module now has `Parked_<Role>` (an `always_linear` "awaiting a
@@ -174,8 +204,71 @@ git log is authoritative for exact commits.
   propagated; a variable pattern parameter is now a name. A Bool local bound
   to a call with a contract (`let present = Set.contains(…)` then
   `if present`) and a guard that is itself such a call now establish the
-  contract on their branch; an `Int` literal constructor payload is reflected
-  as itself rather than erased, so a measure reading it is live at a literal.
+  contract on their branch.
+
+- **A `@[measure]` whose value is a scalar constructor field is no longer
+  inert.** Call-site reflection erased every scalar constructor field to an
+  unknown, so a measure like `Array.length` (which reads `PVec`'s count)
+  proved nothing anywhere. A literal's field now reflects concretely
+  (`get(Box(3, 0), 5)` against `_ < size(b)` is refuted; `1` proves), and on
+  an opaque value a guard over the measure (`if i < size(b)`) decides the
+  contract. The measure-definition warning says exactly this instead of
+  "never proved or refuted".
+
+- **`--refine-audit` no longer reports a callback's domain refinement as
+  unenforced.** `fn apply(f : ({Int | _ > 0}) -> Int, x : Int)` has been
+  enforced for some time (a call `f(x)` inside `apply` is checked, and passing
+  a function to `apply` is checked where it is passed); the audit's nesting
+  rule fired first and called the site unenforced anyway. It now reports
+  Enforced for a single-argument arrow at a function or lambda parameter, and
+  says precisely what is not modelled (a tupled or curried domain, an arrow
+  at a `let` annotation, field, or return) otherwise.
+
+- **A skipped obligation blames the right thing when a sibling argument is
+  opaque.** `at(i, lane(4))` against `i : {Int | _ < n}` used to report
+  `unreflectable-predicate: the predicate's n has no SMT translation`; the
+  predicate is fine, and what failed to reflect was `lane(4)`, the argument
+  passed for `n`. It now reports an unreflectable *subject* naming that
+  argument. Diagnostic only; no verdict changes.
+
+- **Diagnostics inside generated code are reported.** An error or warning
+  the typechecker raised inside a `derive` expansion or an `@[endpoints]`
+  module was silently filtered out with the stdlib's, so `march --check`
+  exited 0 on a generated function that used a linear value twice. Such a
+  diagnostic now prints, without a source excerpt, with a note saying it is in
+  code generated for the file.
+
+- **`p : Pid(Int)` is accepted as a type annotation.** The bare name `Pid`
+  resolves to the stdlib's `Global_pid.Pid` record, so the one-argument actor
+  pid spelling was rejected with "`Pid` expects 0 type argument(s)", and every
+  program matching a monitor's `Down` carried the same error invisibly. The
+  one-argument form now means the actor pid.
+
+- **`derive Eq` on a single-constructor type, and `@[endpoints]` on a protocol
+  whose state can receive every message, no longer generate an unreachable
+  catch-all arm** (a "pattern can never be reached" warning that became
+  visible with the change above).
+
+- **Closures no longer leak their environment and captured values
+  (compiled).** A function that returns a closure (`fn adder(k) do fn x -> x
+  + k end`) leaked the closure and everything it captured on every call.
+
+- **`to_string` of a list and `string_join` no longer leak the list
+  (compiled).** Printing a list leaked the intermediate list and its element
+  strings on every call (five objects for a two-element list).
+
+- **Awaiting a task that returns a `Float` no longer leaks (compiled).** Each
+  `task_await_unwrap` or `task_await` of a `Float` task left one allocation
+  behind.
+
+- **Matching a small struct out of an `Option` no longer leaks (compiled).**
+  `match o do Some(p) -> ... end` on an `Option` of a two-`Float` record-like
+  type leaked one allocation per match.
+
+- **`compare_int`, `compare_float` and `compare_string` work.** Compiled
+  programs calling them failed to link, and the interpreter returned a
+  `Less`/`Equal`/`Greater` value where the type says `Int`. They now return
+  -1, 0 or 1 on both, like `compare`.
 
 - **A generic function has to opt in to receiving a linear value, and a
   container holding one is linear too.** `fn dup(x) do (x, x) end` turned one

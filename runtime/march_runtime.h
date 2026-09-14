@@ -234,6 +234,13 @@ typedef struct { int64_t rc; int32_t tag; int32_t pad; int64_t len; char data[];
  * arrays were barred from actor messages (GAPS.md G44) rather than copied.
  * See native_arr_alloc, which sets it, and march_message.c's copy_value. */
 #define MARCH_NATIVE_ARR_TAG ((int32_t)-6)
+/* The 48-byte Task object returned by march_task_spawn_thunk /
+ * march_task_spawn_with_cancel_thunk. It used to carry tag 0, which made it
+ * indistinguishable from an ADT cell, so no free path could release what it
+ * owns. It owns the reference to a Float result's march_alloc_float box in
+ * task[3] (task_await_unwrap unboxes without consuming, since a task may be
+ * awaited twice); march_run_resource_dtor releases it when the Task dies. */
+#define MARCH_TASK_TAG ((int32_t)-7)
 
 /* send_after(pid, msg, delay_ms) : TimerRef — schedule msg for delivery to
  * the actor `actor` after delay_ms milliseconds. RC contract matches

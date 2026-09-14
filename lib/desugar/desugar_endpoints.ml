@@ -381,7 +381,7 @@ let msg_module (errors : Err.ctx) ~proto ~span (ctors : (string * ty) list) (rol
 
 (** `<P>_<Role>`: one [always_linear] type per state and one function per
     transition, plus the unforgeable [Yield]. *)
-let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) (role : string) (root : lty) : decl =
+let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors : int) (role : string) (root : lty) : decl =
   let mname = proto ^ "_" ^ role in
   let msg = proto ^ "_Msg" in
   let names = state_names root in
@@ -405,6 +405,10 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) (role : s
      and dispatches on the constructor, hands the callback the payload and the
      NEXT state built on the continuation endpoint, and returns the endpoint
      as the raw handler's `Int`. *)
+  (* The catch-all for a message this state cannot receive.  Omitted when the
+     listed arms already cover every constructor of `<P>_Msg`: it would be
+     unreachable, and a warning the user can neither see nor fix. *)
+  let unexpected_arm covered body = if covered >= nctors then [] else [ (PatWild sp, body) ] in
   let suspend_with ep arms =
     app "Session.suspend"
       [ var "s"; ep;
@@ -415,7 +419,8 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) (role : s
                    ( pcon (msg ^ "." ^ ctor) [ pvar "v" ],
                      block [ let_wild (app cb [ var "v"; con next_nm [ var "ep1" ] ]); var "ep1" ] ))
                 arms
-              @ [ (PatWild sp, panic (Printf.sprintf "%s, role %s: unexpected message" proto role)) ])) ]
+              @ unexpected_arm (List.length arms)
+                  (panic (Printf.sprintf "%s, role %s: unexpected message" proto role)))) ]
   in
   let transitions =
     List.concat_map
@@ -573,7 +578,8 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) (role : s
                                    (fun (ctor, _, nx) ->
                                       (pcon (msg ^ "." ^ ctor) [ pvar "v" ], con ("Got_" ^ ctor) [ var "v"; con nx [ var "ep" ] ]))
                                    arms
-                                 @ [ (PatWild sp, panic (Printf.sprintf "%s: unexpected message in state %s" where this)) ]),
+                                 @ unexpected_arm (List.length arms)
+                                     (panic (Printf.sprintf "%s: unexpected message in state %s" where this))),
                               panic (where ^ ": delivery for another endpoint"),
                               sp ) ))
                      receiving)
@@ -616,7 +622,9 @@ let expand (errors : Err.ctx) (decls : decl list) : decl list =
               let msg = msg_module errors ~proto ~span ctors roles in
               let role_mods =
                 List.map
-                  (fun role -> role_module errors ~proto ~span ~roles role (project ~proto ~multiparty steps role LEnd))
+                  (fun role ->
+                     role_module errors ~proto ~span ~roles ~nctors:(List.length ctors) role
+                       (project ~proto ~multiparty steps role LEnd))
                   roles
               in
               List.map respan_mod (msg :: role_mods)))

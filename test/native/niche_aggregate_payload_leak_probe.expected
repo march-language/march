@@ -1,0 +1,4 @@
+spin 60000., flat: true
+twice 400100000., flat: true
+wild 20000., flat: true
+keep 400060000., flat: true

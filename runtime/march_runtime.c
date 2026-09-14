@@ -393,11 +393,32 @@ int64_t march_live_allocs(void) {
 /* If [p] is an FFI resource cell (MARCH_RESOURCE_TAG), run its destructor on
  * the wrapped native pointer before the cell itself is freed.  Called from
  * every RC free-on-zero path.  Cell layout: native_ptr@16, dtor@24. */
+void march_decrc(void *p);
 static inline void march_run_resource_dtor(void *p) {
-    if (((march_hdr *)p)->tag == MARCH_RESOURCE_TAG) {
+    int32_t tag = ((march_hdr *)p)->tag;
+    if (tag == MARCH_RESOURCE_TAG) {
         void (*dtor)(void *) = *(void (**)(void *))((char *)p + 24);
         void *native = *(void **)((char *)p + 16);
         if (dtor) dtor(native);
+    } else if (tag == MARCH_TASK_TAG) {
+        /* A Task owns the box of a Float result. The trampoline stores
+         * task[3] = (raw << 1) | 1; for a Float task raw is the
+         * march_alloc_float box the apply fn returned, and task_await_unwrap
+         * reads the double out of it WITHOUT consuming it (awaiting twice is
+         * legal), so until now the box outlived the Task: one leaked box per
+         * awaited Float task.
+         *
+         * Release only that case. An untagged task[3] (0 = never finished, or
+         * the cancel path's Err cell) is skipped; a tagged scalar untags to an
+         * odd value and fails IS_HEAP_PTR; a heap result of any other tag is
+         * handed to the caller by the await paths, which account for it, so it
+         * is not ours to release. */
+        int64_t slot = ((int64_t *)p)[3];
+        if (slot & 1) {
+            void *raw = (void *)(intptr_t)(slot >> 1);
+            if (IS_HEAP_PTR(raw) && ((march_hdr *)raw)->tag == MARCH_FLOAT_TAG)
+                march_decrc(raw);
+        }
     }
 }
 
@@ -5064,6 +5085,7 @@ void *march_task_spawn_thunk(void *clo_ptr) {
     /* Allocate Task at 48 bytes (header + proc ptr + result ptr + done flag
      * + in-scheduler waiter — see task_wait_done). */
     int64_t *task = (int64_t *)march_alloc(48);
+    if (task) ((march_hdr *)task)->tag = MARCH_TASK_TAG;  /* see march_run_resource_dtor */
     /* Extra RC hold for the trampoline's wa->task raw pointer.  The caller
      * owns RC=1; this bumps to RC=2 so a fire-and-forget drop (RC→1) doesn't
      * free the object before the trampoline writes the result. */
@@ -5126,6 +5148,7 @@ void *march_task_spawn_with_cancel_thunk(void *clo_ptr, void *tok_ptr) {
     }
     march_ensure_sched_started();
     int64_t *task = (int64_t *)march_alloc(48);  /* see march_task_spawn_thunk layout */
+    if (task) ((march_hdr *)task)->tag = MARCH_TASK_TAG;
     if (task) march_incrc(task);  /* trampoline's RC hold — see march_task_spawn_thunk */
     march_thunk_arg *wa = (march_thunk_arg *)malloc(sizeof(march_thunk_arg));
     if (!wa) { return (void *)task; }

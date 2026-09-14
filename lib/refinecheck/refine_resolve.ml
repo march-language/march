@@ -217,9 +217,20 @@ let cb_add_binding (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (cb :
 
    The third component of the result is the returned value's SMT sort ([None]
    for Int); see [fn_sig.ret_sort] for why every consumer must branch on it. *)
-let postcond_of (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (fname : string)
-    (args : A.expr list) : (string * A.expr * string option) option =
-  match resolve_call_arity ctx defs fname (List.length args) with
+let postcond_of ?(cb : cbenv = []) (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t)
+    (fname : string) (args : A.expr list) : (string * A.expr * string option) option =
+  (* A callee the callee ENV knows — a refined callback parameter with a
+     refined codomain, a local `fn` or `let`-bound lambda whose return was
+     proved — carries a postcondition too (P3 design §1b).  Name resolution
+     first, exactly as [visit]'s [EApp] arm orders them; the env only when
+     the name resolves to nothing. *)
+  let resolved =
+    match resolve_call_arity ctx defs fname (List.length args) with
+    | Some (Some sg) -> Some (Some sg)
+    | Some None -> Some None
+    | None -> (match List.assoc_opt fname cb with Some sg -> Some (Some sg) | None -> None)
+  in
+  match resolved with
   | Some (Some sg) ->
     (match sg.ret with
      | Some (b, p) ->

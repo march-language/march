@@ -1,0 +1,40 @@
+-- compare_int / compare_float / compare_string on both backends.
+--
+-- The typechecker has offered all three as (T, T) -> Int since they were
+-- added, but the backends never agreed with it:
+--   - compiled: llvm_builtins.ml had only the march_compare_* rows, marked
+--     in_is_builtin = false, so the call lowered to the bare name and the
+--     program failed to LINK ("_compare_string" undefined);
+--   - interpreted: they returned a Less/Equal/Greater constructor, so the
+--     first use as an Int failed at run time ("int_to_string: expected int").
+-- Now -1/0/1 everywhere, the contract of the Ord method `compare`.
+--
+-- The last line is the leak half: compare_string only reads its operands, so
+-- a fresh string compared once must be released (borrow.ml entry). The count
+-- is printed with the loop's value so the loop is not dead-code eliminated.
+mod Main do
+  needs IO.Console
+
+  pfn cmp_loop(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else cmp_loop(n - 1, acc + compare_string(int_to_string(n), "5"))
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    println("compare_int(3, 5) = " ++ int_to_string(compare_int(3, 5)))
+    println("compare_int(5, 5) = " ++ int_to_string(compare_int(5, 5)))
+    println("compare_int(7, 5) = " ++ int_to_string(compare_int(7, 5)))
+    println("compare_float(1.5, 2.5) = " ++ int_to_string(compare_float(1.5, 2.5)))
+    println("compare_float(2.5, 2.5) = " ++ int_to_string(compare_float(2.5, 2.5)))
+    println("compare_float(3.5, 2.5) = " ++ int_to_string(compare_float(3.5, 2.5)))
+    println("compare_string(\"apple\", \"banana\") = " ++ int_to_string(compare_string("apple", "banana")))
+    println("compare_string(\"same\", \"same\") = " ++ int_to_string(compare_string("same", "same")))
+    println("compare_string(\"ab\", \"a\") = " ++ int_to_string(compare_string("ab", "a")))
+    println("compare_string(\"\", \"a\") = " ++ int_to_string(compare_string("", "a")))
+    let before = live_allocs()
+    let r = cmp_loop(10000, 0)
+    let grew = live_allocs() - before
+    println("compare_string on fresh strings = " ++ int_to_string(r) ++ ", flat: " ++ bool_to_string(grew < 100))
+  end
+end

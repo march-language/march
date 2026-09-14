@@ -1,0 +1,65 @@
+-- Leak guard: `to_string` of a List releases the list it builds internally.
+--
+-- prelude's `impl Show(List(a))` is `"[" ++ string_join(map(xs, show), ", ")
+-- ++ "]"`. borrow.ml marked string_join's LIST argument owned, but
+-- march_string_join only reads it, so the mapped list and its element strings
+-- leaked on every call: 5 objects per `to_string([n, 7])`, 50,004 over this
+-- probe's 10,000 on main. See specs/progress/2026-09-13-string-join-borrows-its-list.md.
+--
+-- Deliberately NOT a leg: `to_string` of a List of FRESH strings. Its
+-- remaining one-object-per-element leak is `map` calling the `show` lambda
+-- through a closure (the caller hands each element over, the read-only apply
+-- fn never releases it), which is specs/todos/2026-08-21-ecallptr-owned-arg-
+-- borrow-callee-leak.md, not this.
+--
+-- Values are printed so no loop is dead-code eliminated.
+mod Main do
+  needs IO.Console
+
+  pfn leg_ints(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let xs = [n, 7]
+      leg_ints(n - 1, acc + string_length(to_string(xs)))
+    end
+  end
+
+  pfn leg_literals(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let xs = ["a", "bc"]
+      leg_literals(n - 1, acc + string_length(to_string(xs)))
+    end
+  end
+
+  pfn leg_nested(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      leg_nested(n - 1, acc + string_length(to_string(Some([n]))))
+    end
+  end
+
+  pfn leg_join(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      leg_join(n - 1, acc + string_length(string_join([int_to_string(n), "b"], ", ")))
+    end
+  end
+
+  pfn flat(label : String, before : Int, result : Int) : () do
+    let grew = live_allocs() - before
+    println(label ++ " = " ++ int_to_string(result) ++ ", flat: " ++ bool_to_string(grew < 100))
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let n = 10000
+    let a = live_allocs()
+    let ra = leg_ints(n, 0)
+    flat("to_string(List(Int))", a, ra)
+    let b = live_allocs()
+    let rb = leg_literals(n, 0)
+    flat("to_string(List(String)) of literals", b, rb)
+    let c = live_allocs()
+    let rc = leg_nested(n, 0)
+    flat("to_string(Option(List(Int)))", c, rc)
+    let d = live_allocs()
+    let rd = leg_join(n, 0)
+    flat("string_join of a fresh list", d, rd)
+  end
+end
