@@ -1,0 +1,64 @@
+-- PeerReader: ONE reader per peer connection, dispatching frames by tag.
+--
+-- Distributed actors 2/4, step 1 (the per-peer receive loop):
+-- specs/todos/2026-09-14-distributed-plane-flow-control-and-control-channel.md.
+--
+-- Until this module there was no receive loop at all. Every consumer read
+-- its own frames off the fd it was handed -- NodeCall.recv_reply,
+-- NodeSend.recv_failure, the discovery fixture's SwimDriver.decode_msg --
+-- and each SKIPPED the frames it did not recognise. Two consumers on one
+-- connection therefore stole each other's frames: a MONITOR_FIRE read by a
+-- NodeSend loop waiting for a DELIVERY_FAILED was simply gone. A frame must
+-- be read once, by one reader, and handed to the consumer its tag names.
+--
+-- Tag space (the first element of the frame's msgpack array, an Int):
+--   0..3  SWIM (SwimDriver)        5,6  REGISTRY_SYNC_REQ/RESP (GlobalRegistry)
+--   7,8   MONITOR_REQ/FIRE (DistLink)   9,10 ACTOR_MSG/DELIVERY_FAILED (NodeSend)
+-- RPC frames (RemoteCall) carry NO tag: a request begins with the module
+-- name (a Str) and a reply with its correlation number (an Int that lands
+-- anywhere in the tag space). `tag_of` reports a request as `untagged()`;
+-- a reply is indistinguishable from a tagged frame by its first element, so
+-- RPC keeps its own connection (as NodeCall already requires) until the
+-- control/data split gives it a tagged envelope. That is the one wire change
+-- the split will make.
+--
+-- The dispatch is INJECTED, as in NodeRpc and NodeSend: a library cannot
+-- name an actor's constructors, so the caller's `on_frame(tag, frame)`
+-- decides what each tag means on this connection. Returning `Err` stops the
+-- loop (the reason is returned); returning `Ok(false)` stops it cleanly.
+mod PeerReader do
+
+  -- The tag reported for a frame that is not a msgpack array whose first
+  -- element is an Int (an RPC request, or garbage).
+  fn untagged() : Int do -1 end
+
+  -- The frame's tag without decoding the rest of it.
+  fn tag_of(frame : List(Int)) : Int do
+    match Msgpack.decode(frame) do
+      Ok(Msgpack.Array(Cons(Msgpack.Int(tag), _))) -> tag
+      _ -> untagged()
+    end
+  end
+
+  -- Read frames off [fd] until the connection closes, an I/O error occurs,
+  -- or [on_frame] asks to stop. [buf] carries bytes read past a frame
+  -- boundary from one frame to the next -- the leftover every ad-hoc reader
+  -- dropped (NodeCall.serve_one, NodeSend.serve_one), which lost any frame
+  -- that arrived in the same recv() as its predecessor.
+  --   Ok(true)  -> keep reading      Ok(false) -> stop, return Ok(())
+  --   Err(e)    -> stop, return Err(e)
+  fn serve(fd : Int, buf : List(Int), on_frame : Int -> List(Int) -> Result(Bool, String)) : Result((), String) do
+    match NetKernel.recv_frame(fd, buf) do
+      Err(e) -> Err(e)
+      Ok(fr) ->
+        let frame = match fr do (f, _) -> f end
+        let rest = match fr do (_, r) -> r end
+        match on_frame(tag_of(frame), frame) do
+          Err(e) -> Err(e)
+          Ok(false) -> Ok(())
+          Ok(true) -> serve(fd, rest, on_frame)
+        end
+    end
+  end
+
+end

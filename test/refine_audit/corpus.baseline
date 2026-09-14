@@ -262,6 +262,8 @@ native_or_pattern: coverage audit (user + stdlib): 87 enforced, 0 inert (warned)
 native_or_pattern: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_peak_rss: coverage audit (user + stdlib): 87 enforced, 0 inert (warned), 0 unenforced
 native_peak_rss: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_peer_reader_loopback: coverage audit (user + stdlib): 87 enforced, 0 inert (warned), 0 unenforced
+native_peer_reader_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_pid_of_int_roundtrip: coverage audit (user + stdlib): 87 enforced, 0 inert (warned), 0 unenforced
 native_pid_of_int_roundtrip: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_preempt_starvation: coverage audit (user + stdlib): 87 enforced, 0 inert (warned), 0 unenforced
@@ -570,6 +572,8 @@ stdlib_parser: coverage audit (user + stdlib): 87 enforced, 0 inert (warned), 0 
 stdlib_parser: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_path: coverage audit (user + stdlib): 87 enforced, 0 inert (warned), 0 unenforced
 stdlib_path: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_peer_reader: coverage audit (user + stdlib): 87 enforced, 0 inert (warned), 0 unenforced
+stdlib_peer_reader: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_peer_registry: coverage audit (user + stdlib): 87 enforced, 0 inert (warned), 0 unenforced
 stdlib_peer_registry: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_plot: coverage audit (user + stdlib): 87 enforced, 0 inert (warned), 0 unenforced

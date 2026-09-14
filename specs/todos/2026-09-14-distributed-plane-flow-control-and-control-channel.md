@@ -107,3 +107,27 @@ This is the contract the supervised-endpoint fixtures assume implicitly: a
 - Monitor: kill a target before the watcher's `MONITOR_REQ` arrives → one
   `Down`; drop the watcher's connection between death and ack → one `Down`
   after reconnect, not two.
+
+
+---
+
+## Shipped so far (2026-09-14): step 1, the per-peer reader
+
+`stdlib/peer_reader.march` (`PeerReader`): `tag_of(frame)` reads the tag
+without decoding the rest; `serve(fd, buf, on_frame)` reads frames once and
+hands each to the caller's dispatch with its tag, carrying bytes past a frame
+boundary to the next read (every ad-hoc reader dropped them). The dispatch is
+injected, as in `NodeRpc`/`NodeSend`, because a library cannot name an
+actor's constructors. RPC frames carry no tag (a request begins with the
+`RemoteRef`, a reply with its correlation `Int`, which lands anywhere in the
+tag space), so RPC keeps its own connection until the control/data split
+gives it a tagged envelope — that is the one wire change the split makes.
+
+Witness: `test/native/peer_reader_loopback.march` — three frames for two
+consumers written in one burst, all three delivered in order by one reader.
+Proved non-vacuous: with the leftover bytes dropped (the ad-hoc readers'
+behaviour), only the first frame arrives and the reader waits forever.
+Unit test `test/stdlib/test_peer_reader.march` covers every frame family's
+tag, an untagged RPC request, and garbage.
+
+Steps 2–4 (control/data split, credit, monitor acks) remain.

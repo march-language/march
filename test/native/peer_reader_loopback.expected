@@ -1,0 +1,6 @@
+node-a: wrote 3 frames in one burst
+node-b: swim ping from node-a
+node-b: actor message PeerReaderLoopback.Item seq 1
+node-b: swim ping from node-a
+node-b: reader stopped after 3 frames
+node-b: actor received 1 item(s)

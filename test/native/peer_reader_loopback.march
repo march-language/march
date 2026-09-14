@@ -1,0 +1,140 @@
+-- PeerReader loopback (distributed actors 2/4, step 1).
+--
+-- ONE connection carrying frames for TWO consumers, read by ONE reader.
+-- node-a writes three frames back to back -- a SWIM ping, an ACTOR_MSG for
+-- an actor on node-b, another SWIM ping -- in one burst, so they arrive in
+-- one recv(). node-b's single PeerReader.serve loop hands each to the
+-- consumer its tag names, in order, and stops after the third.
+--
+-- What this pins that the ad-hoc readers could not do:
+--   * no consumer steals another's frame (a NodeSend reader would have
+--     skipped the SWIM pings; a SWIM reader the ACTOR_MSG);
+--   * bytes read past a frame boundary carry to the next frame instead of
+--     being dropped with the pair (NodeCall/NodeSend.serve_one both dropped
+--     the leftover), which is why three frames in one recv() all arrive.
+-- Design: specs/todos/2026-09-14-distributed-plane-flow-control-and-control-channel.md.
+mod PeerReaderLoopback do
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.NetConnect
+
+  pfn pid_int(p) : Int do
+    let s = to_string(p)
+    match String.to_int(String.slice(s, 4, string_length(s) - 5)) do
+      Ok(n) -> n
+      Err(_) -> panic("pid_int: unexpected pid text " ++ s)
+    end
+  end
+
+  actor Sink do
+    state { got : Int }
+    init  { got: 0 }
+    on Item(_payload : List(Int)) do
+      { state with got: state.got + 1 }
+    end
+  end
+
+  -- node-b's dispatch: which consumer each tag belongs to on this connection.
+  pfn on_frame(sink_pid, seen : Int, tag : Int, frame : List(Int)) : Result(Bool, String) do
+    let outcome =
+      if tag == 0 do
+        match SwimDriver.decode_msg(frame) do
+          Ok(SwimDriver.SwimPing(sender)) -> Ok("node-b: swim ping from " ++ sender)
+          _ -> Err("bad swim frame")
+        end
+      else
+        if tag == NodeSend.tag_actor_msg() do
+          match NodeSend.decode_msg(frame) do
+            Ok(d) ->
+              let _ = send(sink_pid, Item(d.payload))
+              Ok("node-b: actor message " ++ d.type_tag ++ " seq " ++ int_to_string(d.seq))
+            Err(e) -> Err(e)
+          end
+        else
+          Err("unexpected tag " ++ int_to_string(tag))
+        end
+      end
+    match outcome do
+      Ok(line) ->
+        println(line)
+        Ok(seen + 1 < 3)
+      Err(e) -> Err(e)
+    end
+  end
+
+  pfn serve_b(conn_fd : Int, listen_fd : Int, sink_pid) do
+    let r = PeerReader.serve(conn_fd, Nil, fn (tag, frame) -> on_frame(sink_pid, frame_count(), tag, frame))
+    match r do
+      Ok(_) -> println("node-b: reader stopped after 3 frames")
+      Err(e) -> println("node-b: reader error: " ++ e)
+    end
+    tcp_close(conn_fd)
+    tcp_close(listen_fd)
+  end
+
+  -- The reader counts frames through a Vault: the dispatch closure is called
+  -- per frame and cannot carry state between calls.
+  pfn frame_count() : Int do
+    let v = Vault.open("peer_reader_frames")
+    let n = match Vault.get(v, "n") do
+      Some(k) -> k
+      None -> 0
+    end
+    Vault.set(v, "n", n + 1)
+    n
+  end
+
+  pfn run_server(listen_fd : Int, sink_pid) do
+    match tcp_accept(listen_fd) do
+      Ok(conn_fd) -> serve_b(conn_fd, listen_fd, sink_pid)
+      Err(e) ->
+        tcp_close(listen_fd)
+        panic("accept: " ++ e)
+    end
+  end
+
+  pfn connect_with_retry(host : String, port : Int, attempts_left : Int) : Result(Int, Socket.SocketError) do
+    match Socket.connect(host, port) do
+      Ok(fd) -> Ok(fd)
+      Err(e) ->
+        if attempts_left <= 1 do Err(e) else connect_with_retry(host, port, attempts_left - 1) end
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen), _cap_spawn : Cap(IO.Spawn), _cap_mut : Cap(IO.Mut)) do
+    let _ = Vault.new("peer_reader_frames")
+    let listen_fd = match tcp_listen(0) do
+      Ok(fd) -> fd
+      Err(e) -> panic("listen: " ++ e)
+    end
+    let port = match tcp_local_port(listen_fd) do
+      Ok(p) -> p
+      Err(e) -> panic("local_port: " ++ e)
+    end
+    let sink_pid = spawn(Sink)
+    let srv = task_spawn(fn _ -> run_server(listen_fd, sink_pid))
+    let conn_fd = match connect_with_retry("127.0.0.1", port, 5) do
+      Ok(fd) -> fd
+      Err(e) -> panic("connect: " ++ Socket.error_message(e))
+    end
+
+    -- Three frames, one write: SWIM ping, ACTOR_MSG, SWIM ping.
+    let target = GlobalPid.make("node-b", pid_int(sink_pid), 1)
+    let burst =
+      List.append(NetFrame.encode(SwimDriver.encode_msg(SwimDriver.SwimPing("node-a"))),
+      List.append(NetFrame.encode(NodeSend.encode_msg(1, target, "PeerReaderLoopback.Item", Cons(42, Nil))),
+                  NetFrame.encode(SwimDriver.encode_msg(SwimDriver.SwimPing("node-a")))))
+    let _ = Socket.write(conn_fd, NetKernel.bytes_to_str(burst))
+    println("node-a: wrote 3 frames in one burst")
+
+    let _ = task_await(srv)
+    tcp_close(conn_fd)
+    run_until_idle()
+    match get_actor_field(sink_pid, "got") do
+      Some(n) -> println("node-b: actor received " ++ int_to_string(n) ++ " item(s)")
+      None -> println("node-b: sink gone")
+    end
+  end
+end
