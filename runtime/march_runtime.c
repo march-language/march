@@ -5680,6 +5680,22 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
  * reference is ever retired; a handler that never replies simply leaks it
  * along with the unhandled message, same as an unreplied raw result today.
  */
+/* march_actor_reply_retain: take a SECOND reference to a reply-ref so a
+ * handler may hold it in its state and answer on a LATER turn.  Without
+ * this, the ref's only reference is retired with the message envelope when
+ * the handler returns, and an Actor.reply from a later turn is a
+ * use-after-free (SIGBUS on the scheduler thread; NodeQueue's BlockSender
+ * found it).  Balanced by march_actor_reply, which retires one reference
+ * per reply -- so a held ref must be replied to exactly once, even after
+ * its caller timed out (the mismatched-correlation reply is discarded).
+ * A non-ref value (the interpreter-parity raw proc path) is returned as is. */
+void *march_actor_reply_retain(void *ref_ptr) {
+    if (IS_HEAP_PTR(ref_ptr)
+            && ((march_hdr *)ref_ptr)->tag == MARCH_CALL_REPLY_TAG)
+        march_incrc(ref_ptr);
+    return ref_ptr;
+}
+
 void march_actor_reply(void *ref_ptr, void *result) {
     if (!IS_HEAP_PTR(ref_ptr)
             || ((march_hdr *)ref_ptr)->tag != MARCH_CALL_REPLY_TAG) {

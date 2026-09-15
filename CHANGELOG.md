@@ -12,6 +12,12 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`NodeQueue.BlockSender(timeout_ms)`**: a remote send that does not fit the peer's
+  budget blocks the caller until credit admits the frame (`Ok`), the connection dies
+  (`Err(NoConnection)`), or the timeout passes (`Err(Backpressure)`, frame withdrawn).
+  Compiled backend; under the interpreter a send that cannot be admitted at once is
+  `Err(Backpressure)`. `actor_reply_retain(ref)` lets a handler hold an `Actor.call`
+  reply and answer it on a later turn (`test/native/block_sender_loopback`).
 - Two-node scenario `monitor_reconnect`: a watcher that drops its connection between a
   remote actor's death and the ack still gets exactly one `Down` after reconnecting; and the
   `restart` scenario's monitor half: a crashed node's monitors fire `NodeDown` locally, once.
@@ -311,6 +317,10 @@ git log is authoritative for exact commits.
   nothing when unset.
 
 ### Fixed
+- `NodeQueue.take_evicted` reached the writer's `Configure` handler instead of its
+  own: `Actor.call` routes by the sentinel's constructor index. It now answers.
+- Interpreter: a handler of an actor declared in a module can call a fn declared
+  after the actor (was "stub X called before initialisation").
 - A cross-node `MONITOR_FIRE` written to a connection whose peer had already closed raised
   SIGPIPE and could kill the node; it now fails quietly and stays pending for resend.
 - `stdlib/dist_supervisor.march` failed a standalone `--check` ("Constructor `Normal` is

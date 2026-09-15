@@ -3365,6 +3365,18 @@ let rec eval_decl (env : env) (d : decl) : env =
         eval_mod_decls rest e'
     in
     let mod_env = eval_mod_decls decls !inner_ref in
+    (* An actor declared in this module was registered with the env as it
+       stood at ITS declaration -- pass-1 stubs for every fn declared after
+       it -- and nothing re-pointed it, so a handler calling such a fn died
+       with "stub X called before initialisation" (NodeQueue's Writer never
+       ran interpreted; its tests passed against the Vault counters alone).
+       Re-point every actor of this module at the module's final env. *)
+    List.iter (function
+        | DActor (_, aname, _, _) ->
+          (match Hashtbl.find_opt actor_defs_tbl aname.txt with
+           | Some (_, r) -> r := mod_env
+           | None -> ())
+        | _ -> ()) decls;
     module_stack := List.tl !module_stack;
     (* Collect names actually defined by this module's declarations
        (DFn, DLet top bindings, nested DMod names).  We only expose
