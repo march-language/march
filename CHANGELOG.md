@@ -12,6 +12,10 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- Two-node scenario `partition`: two processes running SWIM stop hearing each other,
+  each claims the same `GlobalRegistry` name, and both converge on one winner after the
+  heal. It needs Linux root for iptables; `scripts/two-node-docker.sh` runs any scenario
+  from any host.
 - **`Node.enqueue(q, to, msg, policy)`**: the typed remote send through a peer's
   `NodeQueue`, so a typed send gets credit-based flow control. It has the same contract
   as `Node.send`: `msg`'s type must `derive Json`, which is checked at the call site,
@@ -322,6 +326,10 @@ git log is authoritative for exact commits.
   nothing when unset.
 
 ### Fixed
+- `GlobalRegistry` replicas now converge after a network partition. `REGISTRY_SYNC_RESP`
+  dropped each entry's vector clock, so a received binding always lost to the local one
+  and both sides kept their own. Leaves now carry the clock, and the old encoding still
+  decodes.
 - Load-aware routing no longer depends on peers' clocks agreeing: a load report received
   through `SwimDriver` is aged from its arrival on the receiving node, so a peer whose
   clock ran ahead no longer sent reports that never went stale (or, behind, stale on

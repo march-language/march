@@ -14,6 +14,13 @@
 #                                 node-a gets MARCH_PEER_PORT)
 #   kill_node <a|b>               SIGKILL it (a crash, distinct from a close)
 #   stop_node / cont_node <a|b>   SIGSTOP / SIGCONT (a stall, distinct from a crash)
+#   drop_link / heal              drop every TCP packet to or from the scenario
+#                                 port (a partition: nothing is refused, nothing
+#                                 arrives) / remove the rule. Linux iptables, as
+#                                 root or via passwordless sudo; anywhere else the
+#                                 scenario exits 3, "skipped: needs root", which
+#                                 CI's loop treats as a failure and a local run
+#                                 reads as a skip. Rules are removed on exit.
 #   wait_line <a|b> <text>        block until the node's stdout contains <text>
 #   wait_exit <a|b>               block until the node's process exits
 #   ORDERED=1                     (set by the scenario) diff each node's stdout
@@ -40,8 +47,10 @@ PORT=$((40000 + RANDOM % 20000))
 pid_a=""; pid_b=""            # bash 3 (macOS): no associative arrays
 pid_of() { eval "echo \"\$pid_$1\""; }
 
+link_dropped=0
 cleanup() {
   for n in a b; do p=$(pid_of "$n"); [ -n "$p" ] && kill -9 "$p" 2>/dev/null; done
+  [ "$link_dropped" = 1 ] && heal
   return 0
 }
 trap cleanup EXIT
@@ -80,6 +89,34 @@ start_node() {
 kill_node() { local p; p=$(pid_of "$1"); kill -9 "$p" 2>/dev/null; wait "$p" 2>/dev/null; eval "pid_$1=''"; }
 stop_node() { kill -STOP "$(pid_of "$1")"; }
 cont_node() { kill -CONT "$(pid_of "$1")"; }
+
+# The iptables invocation for this host, or nothing when a partition cannot be
+# applied here (not Linux, no iptables, no root and no passwordless sudo).
+iptables_cmd() {
+  [ "$(uname -s)" = Linux ] || return 1
+  command -v iptables > /dev/null 2>&1 || return 1
+  if [ "$(id -u)" = 0 ]; then echo iptables
+  elif sudo -n true 2> /dev/null; then echo "sudo -n iptables"
+  else return 1
+  fi
+}
+
+# Both directions on loopback: a packet to the port and one from it. TCP keeps
+# the connection (retransmitting) through the drop, so heal delivers what was
+# queued -- a partition, not a close.
+drop_link() {
+  local ipt; ipt=$(iptables_cmd) || { echo "two-node[$scenario]: skipped: needs root (Linux iptables) to drop packets" >&2; exit 3; }
+  $ipt -I INPUT -i lo -p tcp --dport "$PORT" -j DROP || fail "iptables: could not add the drop rule (dport)"
+  $ipt -I INPUT -i lo -p tcp --sport "$PORT" -j DROP || fail "iptables: could not add the drop rule (sport)"
+  link_dropped=1
+}
+
+heal() {
+  local ipt; ipt=$(iptables_cmd) || return 0
+  $ipt -D INPUT -i lo -p tcp --dport "$PORT" -j DROP 2> /dev/null
+  $ipt -D INPUT -i lo -p tcp --sport "$PORT" -j DROP 2> /dev/null
+  link_dropped=0
+}
 
 wait_line() {
   local n=$1 text=$2 i=0

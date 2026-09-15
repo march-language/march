@@ -513,10 +513,13 @@ the `skew` scenario runs one node 30 s ahead and pins that its load report is
 aged on the receiver's clock (a received `NodeLoad`'s `sampled_at` is its
 receipt time, so peer clocks need not agree for `SwimDriver.peer_load`'s
 10 s staleness). `VectorClock` ordering takes no wall-clock input and is
-unaffected by skew by construction.
-Netsplit (packet drop) remains undocumented in executable form; the harness
-has the hooks for it
-(`specs/progress/2026-09-14-two-node-failure-semantics-harness.md`).
+unaffected by skew by construction; the `partition` scenario drops every
+packet between two nodes running SWIM until each marks the other Dead, lets
+each bind the same `GlobalRegistry` name in its own half, and pins that the
+post-heal sync picks the same winner on both sides (a `REGISTRY_SYNC_RESP`
+leaf carries the entry's `VectorClock`; the merge orders by it). `partition`
+needs Linux and root for iptables; `scripts/two-node-docker.sh` runs it from
+any host (`specs/progress/2026-09-14-two-node-failure-semantics-harness.md`).
 
 **A compiled memory-safety gap, FIXED (finding C1, `specs/todos/`, 2026-07-11).**
 `VectorClock.compare` (and, transitively, `.concurrent`/`.happens_before` on

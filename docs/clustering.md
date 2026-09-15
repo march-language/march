@@ -505,9 +505,11 @@ handshake, synchronous RPC transport, SWIM gossip dispatch to peer file descript
 cross-node monitor firing require two real nodes and are covered by native multi-process
 integration tests rather than the same conformance corpus as the pure logic above. Clock skew between nodes does not affect load-aware routing: a node ages a peer's load
 report from when it arrived, on its own clock, so peer clocks need not agree (a two-process
-test runs one node 30 s ahead). True multi-*machine* failure semantics (netsplit, node
-restart/incarnation across hosts) aren't yet covered by an automated test at all; treat
-them as less battle-tested than the single-process core.
+test runs one node 30 s ahead). A network partition is exercised too: two processes stop
+hearing each other, each marks the other dead and registers the same `GlobalRegistry`
+name, and after the partition heals both converge on the same winner. These tests run on
+one host over loopback; failure semantics across real machines and networks aren't covered
+by an automated test, so treat them as less battle-tested than the single-process core.
 
 ---
 
