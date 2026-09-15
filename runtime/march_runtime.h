@@ -604,6 +604,7 @@ void march_test_actor_bind_green_thread(void *actor, void *proc);
  *   (hot-reload: [4]=ptr-to-state-record instead of inline state fields) */
 void    march_kill(void *actor);
 int64_t march_is_alive(void *actor);
+void    march_dist_monitor_register_pid(int64_t target_pid, void *node_str, int64_t watcher_pid, int64_t fd);
 /* Register an actor with the scheduler; returns actor unchanged. */
 void    march_set_actor_caps(void *actor, void *caps);
 void   *march_actor_caps(void *actor);

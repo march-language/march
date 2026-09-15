@@ -86,6 +86,8 @@ native_default_args_nested: coverage audit (user + stdlib): 90 enforced, 0 inert
 native_default_args_nested: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_default_method_args: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced
 native_default_method_args: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_dist_monitor_loopback: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced
+native_dist_monitor_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_erased_float_slot_leak_probe: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced
 native_erased_float_slot_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_erased_type_id: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced
