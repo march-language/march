@@ -159,6 +159,22 @@ Two things measured while building it:
   interpreter's runs at `run_until_idle`. Tests assert admission/refusal,
   never depth after an admitted frame.
 
+Step 4 shipped too: `NodeQueue.cast(q, seq, to, type_tag, payload, policy)`
+is the remote-send path through the queue, and the `stream` two-node
+scenario runs on it — split connections, `emit` through the queue, the
+data reader accounting each delivery as consumed (in the mailbox) and the
+control reader feeding CREDIT back. Two things it taught:
+- `run_until_idle()` inside a reader never returns while another task is
+  parked in a socket read (the control reader), so the data reader no
+  longer drains the actor per frame; the endpoint actor runs on the
+  scheduler in mailbox order, which keeps one node's prints in protocol
+  order — and "consumed" is "in the mailbox", the spec's definition.
+- Ending two readers per node without a symmetric deadlock: an endpoint's
+  `close` sends a `Bye` on the data connection (through the queue) and each
+  node sends a `Bye` on control after its data reader ends; a peer close
+  after the local endpoint has closed is a clean end (the peer's Bye may
+  still be in its writer when it closes).
+
 Witness `test/native/credit_backpressure_loopback`: budget 100, two 44-byte
 frames admitted, the third `Backpressure`; the receiver consumes after a
 "go" on control, its CREDIT re-admits the third; receiver consumed 3.

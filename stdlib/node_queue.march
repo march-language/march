@@ -210,6 +210,13 @@ mod NodeQueue do
     end
   end
 
+  -- An ACTOR_MSG through the queue: NodeSend's frame, NetFrame-encoded,
+  -- as Bytes. The remote-send path a program should use once it has a
+  -- queue for the peer; NodeSend.cast writes straight to a socket.
+  fn cast(q, seq : Int, to : Pid, type_tag : String, payload : List(Int), policy : Policy) : Result((), EnqueueError) do
+    enqueue(q, seq, Bytes.from_list(NetFrame.encode(NodeSend.encode_msg(seq, to, type_tag, payload))), policy)
+  end
+
   -- Bytes queued and not yet written (the monitoring probe).
   fn depth(q) : Int do
     match q do (_, fd) -> Vault.get_or(table(), "q" ++ int_to_string(fd), 0) end

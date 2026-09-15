@@ -46,4 +46,16 @@ mod TestNodeQueue do
 
   end
 
+  describe "NodeQueue.cast" do
+
+    test "an ACTOR_MSG is charged by its framed size" do
+      let q = NodeQueue.start(-4, 60)
+      let to = GlobalPid.make("n", 1, 1)
+      assert (NodeQueue.cast(q, 1, to, "T.M", Nil, NodeQueue.DropNew) == Ok(()))
+      let framed = 4 + List.length(NodeSend.encode_msg(1, to, "T.M", Nil))
+      assert (NodeQueue.depth(q) == framed)
+    end
+
+  end
+
 end

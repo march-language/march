@@ -19,6 +19,8 @@ git log is authoritative for exact commits.
   queued, and at the budget `drop_new` refuses with `Backpressure` at once while
   `drop_old` evicts the oldest (reported by `take_evicted`). A stalled peer is
   visible as queue depth, not as a green thread stuck in `write()`.
+  `NodeQueue.cast` is the remote-send path through it; the `stream` two-node
+  scenario (the `Session.Ops` network transport) runs on it.
 - **`mailbox N policy` on an actor declaration** (`mailbox 1000 drop_old`, after
   `init`): the bound `Actor.set_queue_limit` sets per spawn site, declared once
   with the actor and applied at every `spawn`, on both backends. The policy is

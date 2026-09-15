@@ -14,6 +14,7 @@ mod StreamOverNodesA do
   needs IO.Mut
   needs IO.NetConnect
   needs IO.Process
+  needs IO.Random
   needs Session.Live
 
   @[endpoints]
@@ -67,12 +68,16 @@ mod StreamOverNodesA do
     end
   end
 
-  fn network(handlers, meta, fd : Int, peer : Pid) : Transport do
+  pfn budget() : Int do 4096 end
+
+  -- `emit` goes through the peer's NodeQueue (credit-based flow control on
+  -- the data connection); the receiver's CREDIT frames arrive on control.
+  fn network(handlers, meta, q, peer : Pid) : Transport do
     {
       ops: {
         register: fn (_ap, role) -> role,
         emit: fn (ep, to, msg) -> do
-          let _ = NodeSend.cast(fd, next_seq(meta), peer, "StreamOverNodes.Deliver", encode_deliver(to, ep, msg))
+          let _ = NodeQueue.cast(q, next_seq(meta), peer, "StreamOverNodes.Deliver", encode_deliver(to, ep, msg), NodeQueue.DropNew)
           ep
         end,
         suspend: fn (ep, handler) -> do
@@ -82,6 +87,9 @@ mod StreamOverNodesA do
         close: fn ep -> do
           print_line("close " ++ int_to_string(ep))
           Vault.set(meta, "closed", 1)
+          -- Tell the peer's data reader this endpoint is done (see on_frame).
+          let _ = NodeQueue.cast(q, next_seq(meta), peer, "StreamOverNodes.Bye", Nil, NodeQueue.DropNew)
+          ()
         end
       }
     }
@@ -97,26 +105,60 @@ mod StreamOverNodesA do
     end
   end
 
-  -- A frame from the peer: a Deliver goes to this node's endpoint actor and
-  -- its turn runs to completion before the next frame is read (the fixed
-  -- order that makes the trace reproducible); the loop stops once this
-  -- node's endpoint has closed.
-  pfn on_frame(handlers, meta, ep_pid, tag : Int, frame : List(Int)) : Result(Bool, String) do
+  -- A frame from the peer: a Deliver goes to this node's endpoint actor's
+  -- mailbox (that is "consumed" for credit); its turn runs on the
+  -- scheduler, in mailbox order, so one actor's prints stay in protocol
+  -- order. No run_until_idle here: with the control reader parked in a
+  -- socket read it would never return. The loop stops at the peer's Bye,
+  -- which its endpoint's close sends on this connection.
+  pfn on_frame(handlers, meta, ep_pid, control_fd : Int, tag : Int, frame : List(Int)) : Result(Bool, String) do
     if tag == NodeSend.tag_actor_msg() do
       match NodeSend.decode_msg(frame) do
         Err(e) -> Err(e)
         Ok(d) ->
-          if d.type_tag == "StreamOverNodes.Deliver" do
+          if d.type_tag == "StreamOverNodes.Bye" do
+            Ok(false)
+          else if d.type_tag == "StreamOverNodes.Deliver" do
             match decode_deliver(d.payload) do
               Err(e) -> Err(e)
               Ok((to, from, msg)) ->
                 send(ep_pid, Deliver(handlers, to, from, msg))
-                run_until_idle()
-                Ok(Vault.get(meta, "closed") == None)
+                -- consumed: the delivery is in the mailbox; announce credit
+                -- to the peer on the control connection.
+                let _ = NodeQueue.consumed(control_fd, budget(), List.length(frame) + 4)
+                Ok(true)
             end
           else
             Err("unexpected type " ++ d.type_tag)
-          end
+          end end
+      end
+    else
+      Err("unexpected tag " ++ int_to_string(tag) ++ " on the data connection")
+    end
+  end
+
+  -- The control connection carries CREDIT (and would carry DELIVERY_FAILED).
+  -- Ends when the peer closes it.
+  -- A Bye on control ends the peer's control reader without either side
+  -- having to close first (each side awaits its own reader: closing first
+  -- and awaiting would deadlock symmetrically).
+  pfn bye_out(fd : Int) do
+    let _ = NodeSend.cast(fd, 0, GlobalPid.make("peer", 0, 0), "StreamOverNodes.Bye", Nil)
+    ()
+  end
+
+  pfn on_control(q, tag : Int, frame : List(Int)) : Result(Bool, String) do
+    if tag == NodeSend.tag_actor_msg() do
+      match NodeSend.decode_msg(frame) do
+        Ok(d) -> Ok(d.type_tag != "StreamOverNodes.Bye")
+        Err(e) -> Err(e)
+      end
+    else if tag == NodeQueue.tag_credit() do
+      match NodeQueue.decode_credit(frame) do
+        Ok(total) ->
+          NodeQueue.credit(q, total)
+          Ok(true)
+        Err(e) -> Err(e)
       end
     else
       if tag == NodeSend.tag_delivery_failed() do
@@ -125,8 +167,15 @@ mod StreamOverNodesA do
           Err(e) -> Err(e)
         end
       else
-        Err("unexpected tag " ++ int_to_string(tag))
+        Err("unexpected tag " ++ int_to_string(tag) ++ " on the control connection")
       end
+    end end
+  end
+
+  pfn serve_control(control_fd : Int, q) : Int do
+    match PeerReader.serve(control_fd, Nil, fn (tag, frame) -> on_control(q, tag, frame)) do
+      Ok(_) -> 0
+      Err(_) -> 0   -- the peer closed the control connection: done
     end
   end
 
@@ -150,10 +199,13 @@ mod StreamOverNodesA do
     end
   end
 
-  pfn serve(fd : Int, handlers, meta, ep_pid) do
-    match PeerReader.serve(fd, Nil, fn (tag, frame) -> on_frame(handlers, meta, ep_pid, tag, frame)) do
+  pfn serve(data_fd : Int, control_fd : Int, handlers, meta, ep_pid) do
+    match PeerReader.serve(data_fd, Nil, fn (tag, frame) -> on_frame(handlers, meta, ep_pid, control_fd, tag, frame)) do
       Ok(_) -> ()
-      Err(e) -> panic("reader: " ++ e)
+      Err(e) ->
+        -- Once this endpoint has closed, the peer closing the data
+        -- connection (its Bye may still be in its writer) is a clean end.
+        if Vault.get(meta, "closed") != None do () else panic("reader: " ++ e) end
     end
   end
 
@@ -170,15 +222,17 @@ mod StreamOverNodesA do
         Stream_Prod.close(s, st2))
   end
 
-  pfn connect_with_retry(host : String, port : Int, attempts_left : Int) : Result(Int, Socket.SocketError) do
-    match Socket.connect(host, port) do
-      Ok(fd) -> Ok(fd)
+  pfn secret() do "stream-secret" end
+
+  pfn connect_split_retry(port : Int, attempts_left : Int) do
+    match ClusterConn.connect_split(PeerRegistry.empty(), "127.0.0.1", port, NodeIdentity.make("node-a", "pk-a", 1), secret()) do
+      Ok((_reg, p)) -> Ok(p)
       Err(e) ->
         if attempts_left <= 1 do
           Err(e)
         else
           let _ = Process.run("sleep", Cons("0.1", Nil))
-          connect_with_retry(host, port, attempts_left - 1)
+          connect_split_retry(port, attempts_left - 1)
         end
     end
   end
@@ -187,21 +241,27 @@ mod StreamOverNodesA do
     let port = Env.require_int("MARCH_PEER_PORT")
     let handlers = Vault.new("stream_a_handlers")
     let meta     = Vault.new("stream_a_meta")
-    let fd = match connect_with_retry("127.0.0.1", port, 100) do
-      Ok(fd) -> fd
-      Err(e) -> panic("connect: " ++ Socket.error_message(e))
+    let peer_conn = match connect_split_retry(port, 100) do
+      Ok(p) -> p
+      Err(e) -> panic("connect: " ++ e)
     end
     let ep_pid = spawn(Ep)
-    -- node-b announces first (it accepted), then we do.
-    let peer = hello_in(fd)
-    hello_out(fd, GlobalPid.make("node-a", pid_to_int(ep_pid), 1))
-    let t = network(handlers, meta, fd, peer)
+    -- Hellos travel on the control connection: node-b announces first (it
+    -- accepted), then we do.
+    let peer = hello_in(peer_conn.fd)
+    hello_out(peer_conn.fd, GlobalPid.make("node-a", pid_to_int(ep_pid), 1))
+    let q = NodeQueue.start(peer_conn.data_fd, budget())
+    let ctl = task_spawn(fn _ -> serve_control(peer_conn.fd, q))
+    let t = network(handlers, meta, q, peer)
     let s = Session.attach(c, t.ops)
     -- Drive Prod to its first suspension (its first Item is on the wire),
     -- then every resumption runs inside the actor's turn, per frame.
     let prod_st = Stream_Prod.register(s, 0)
     let _ = prod(s, prod_st, 1)
-    serve(fd, handlers, meta, ep_pid)
-    tcp_close(fd)
+    serve(peer_conn.data_fd, peer_conn.fd, handlers, meta, ep_pid)
+    tcp_close(peer_conn.data_fd)
+    bye_out(peer_conn.fd)
+    let _ = task_await(ctl)
+    tcp_close(peer_conn.fd)
   end
 end
