@@ -33,6 +33,27 @@ mod TestNode do
       end
     end
 
+    -- `Node.enqueue`: the same rewrite, through a NodeQueue. Its own body
+    -- panics too, so `Ok` proves the arm went through `enqueue_tagged`; a
+    -- frame that fits the budget is admitted whatever the fd does later.
+    test "a typed enqueue that fits the budget is admitted, not the unresolved-body panic" do
+      let q = NodeQueue.start(-1, 1000)
+      let p : Ping = { n: 4, who: "w" }
+      match Node.enqueue(q, GlobalPid.make("nobody", 7, 1), p, NodeQueue.DropNew) do
+        Ok(seq) -> assert (seq > 0)
+        Err(_) -> assert (false)
+      end
+    end
+
+    test "a typed enqueue past the budget under DropNew is Err(Backpressure)" do
+      let q = NodeQueue.start(-1, 10)
+      let p : Ping = { n: 5, who: "x" }
+      match Node.enqueue(q, GlobalPid.make("nobody", 7, 1), p, NodeQueue.DropNew) do
+        Err(NodeQueue.Backpressure) -> assert (true)
+        _ -> assert (false)
+      end
+    end
+
     -- The receiver's half: a delivery's payload is the JSON text of the
     -- derived encoding, and `from_json` pinned to the type gets it back.
     test "payload decodes what the derived encoder wrote" do

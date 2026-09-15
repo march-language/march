@@ -1,0 +1,7 @@
+node-b: ack received
+node-b: connection 1 dropped; pending fires: 1
+node-b: monitor registered for node-a
+node-b: pending fires after ack: 0
+node-b: resent 1 fire(s) on connection 2
+node-b: target killed on request
+node-b: up

@@ -1,0 +1,103 @@
+-- Two-node harness, scenario "monitor_reconnect": node-b (the target's host).
+--
+-- Connection 1: announce the Target's global pid, register node-a's monitor
+-- (MONITOR_REQ, tag 7) with the C runtime's registry, kill the Target on
+-- request. The death path writes MONITOR_FIRE on connection 1 -- which
+-- node-a has dropped by then, so the write fails and the fire stays PENDING.
+-- Connection 2: node-a is back; `DistLink.resend_pending` writes the fire on
+-- the connection the registry now maps node-a to; the MONITOR_ACK (tag 12)
+-- clears it. Prints what it can prove: the pending count before and after.
+mod MonitorReconnectB do
+  needs IO.Console
+  needs IO.NetListen
+  needs IO.NetConnect
+  needs IO.Spawn
+  needs IO.Mut
+  needs IO.Process
+
+  actor Target do
+    state { n : Int }
+    init  { n: 0 }
+    on Tick() do { n: state.n + 1 } end
+  end
+
+  pfn on_conn1(fd : Int, target, tag : Int, frame : List(Int)) : Result(Bool, String) do
+    if tag == 7 do
+      match DistLink.decode_req(frame) do
+        Ok((watcher_node, watcher_pid, target_pid)) ->
+          dist_monitor_register(target_pid, watcher_node, watcher_pid, fd)
+          println("node-b: monitor registered for " ++ watcher_node)
+          Ok(true)
+        Err(e) -> Err(e)
+      end
+    else
+      if tag == NodeSend.tag_actor_msg() do
+        match NodeSend.decode_msg(frame) do
+          Ok(d) ->
+            if d.type_tag == "MonitorReconnect.Kill" do
+              kill(target)
+              println("node-b: target killed on request")
+              Ok(true)          -- keep reading: the peer's close ends this reader
+            else
+              Err("unexpected type " ++ d.type_tag)
+            end
+          Err(e) -> Err(e)
+        end
+      else
+        Err("unexpected tag " ++ int_to_string(tag))
+      end
+    end
+  end
+
+  pfn on_conn2(tag : Int, frame : List(Int)) : Result(Bool, String) do
+    if tag == DistLink.tag_ack() do
+      match DistLink.decode_ack(frame) do
+        Ok((target_pid, watcher_pid)) ->
+          dist_monitor_ack(target_pid, watcher_pid)
+          println("node-b: ack received")
+          Ok(false)
+        Err(e) -> Err(e)
+      end
+    else
+      Err("unexpected tag " ++ int_to_string(tag))
+    end
+  end
+
+  pfn accept_or_panic(listen_fd : Int) : Int do
+    match tcp_accept(listen_fd) do
+      Ok(fd) -> fd
+      Err(e) -> panic("accept: " ++ e)
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console), _cap_netlisten : Cap(IO.NetListen), _cap_netconnect : Cap(IO.NetConnect), _cap_spawn : Cap(IO.Spawn), _cap_mut : Cap(IO.Mut), _cap_process : Cap(IO.Process)) do
+    let port = Env.require_int("MARCH_NODE_PORT")
+    let creation = Env.require_int("MARCH_NODE_CREATION")
+    let target = spawn(Target)
+    let listen_fd = match tcp_listen(port) do
+      Ok(fd) -> fd
+      Err(e) -> panic("listen: " ++ e)
+    end
+    println("node-b: up")
+    let fd1 = accept_or_panic(listen_fd)
+    let me = GlobalPid.make("node-b", pid_to_int(target), creation)
+    let _ = NodeSend.cast(fd1, 0, GlobalPid.make("node-a", 0, 0), "MonitorReconnect.Hello", GlobalPid.encode(me))
+    let _ = PeerReader.serve(fd1, Nil, fn (tag, frame) -> on_conn1(fd1, target, tag, frame))
+    -- Connection 1 is gone (node-a dropped it). The fire it was written on
+    -- is pending; run the actor's turn so the death path has fired.
+    run_until_idle()
+    let before = List.length(dist_monitor_pending())
+    println("node-b: connection 1 dropped; pending fires: " ++ int_to_string(before))
+    let fd2 = accept_or_panic(listen_fd)
+    let reg = PeerRegistry.add(PeerRegistry.empty(),
+                { node_id: "node-a", identity: NodeIdentity.make("node-a", "pk-a", 1), fd: fd2, data_fd: PeerRegistry.no_fd() })
+    let resent = DistLink.resend_pending(reg)
+    println("node-b: resent " ++ int_to_string(resent) ++ " fire(s) on connection 2")
+    let _ = PeerReader.serve(fd2, Nil, on_conn2)
+    let after = List.length(dist_monitor_pending())
+    println("node-b: pending fires after ack: " ++ int_to_string(after))
+    tcp_close(fd2)
+    tcp_close(fd1)
+    tcp_close(listen_fd)
+  end
+end

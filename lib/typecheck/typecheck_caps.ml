@@ -1762,12 +1762,13 @@ let check_json_cap_sites (env : env) : unit =
     ) !(env.json_cap_sites)
 
 (** The typed remote send, the call-site half (stdlib/node.march).  For every
-    recorded `Node.send(peer, to, msg)` site: resolve `msg`'s solved type to
+    recorded `Node.send(peer, to, msg)` or `Node.enqueue(q, to, msg, policy)` site: resolve `msg`'s solved type to
     the declaration it names, require that declaration to have a `derive Json`
     codec (a `JsonTo` impl -- the pseudo-interface [Desugar_derive] registers),
     and record the resolved name in [March_ast.Json_dispatch] under the call's
     span.  Both backends read that entry and rewrite the call to
-    `Node.send_tagged(peer, to, "<name>", JsonTo$<short>.to_json(msg))`.
+    `Node.send_tagged(peer, to, "<name>", JsonTo$<short>.to_json(msg))` (or
+    `Node.enqueue_tagged(q, to, "<name>", ..., policy)`).
 
     The wire tag is the name QUALIFIED by the declaring module when the
     declaration has one ("Outer.Inner.Ping"), so two nodes compiled from the
@@ -1823,10 +1824,10 @@ let check_node_send_sites (env : env) : unit =
         | Some n -> short n = s
         | None -> false) !(env.json_codecs)
   in
-  List.iter (fun (sp, f_ty) ->
+  List.iter (fun (sp, callee, f_ty) ->
       match third_param f_ty with
       | None ->
-        (* Not a three-arrow: `Node.send` itself did not resolve (an unknown
+        (* Not a three-arrow: the callee itself did not resolve (an unknown
            module, say), which is already reported at the site.  Nothing to
            add. *)
         ()
@@ -1835,7 +1836,7 @@ let check_node_send_sites (env : env) : unit =
          | None ->
            Err.error env.errors ~span:sp
              (render_parts [
-               MPCode "Node.send"; MPText " cannot choose a codec for a message of type ";
+               MPCode callee; MPText " cannot choose a codec for a message of type ";
                MPCode (pp_ty (repr msg_ty)); MPText ".";
                MPBreak;
                MPText "hint: the message must be a declared type with "; MPCode "derive Json";
@@ -1847,7 +1848,7 @@ let check_node_send_sites (env : env) : unit =
            else
              Err.error env.errors ~span:sp
                (render_parts [
-                 MPCode "Node.send"; MPText " needs a JSON codec for ";
+                 MPCode callee; MPText " needs a JSON codec for ";
                  MPCode s; MPText ", and none is derived.";
                  MPBreak;
                  MPText "hint: add "; MPCode ("derive Json for " ^ s);

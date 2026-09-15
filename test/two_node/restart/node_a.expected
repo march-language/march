@@ -1,7 +1,11 @@
+node-a: Down for Pid(0) reason=NodeDown (node-b crashed)
 node-a: connection to node-b lost
 node-a: delivery 2 failed: stale creation 1, node is at 2
+node-a: fired NodeDown for 1 monitor(s)
+node-a: monitoring Pid(0) on node-b
 node-a: node-b hosts Pid(0) at creation 1
 node-a: node-b hosts Pid(0) at creation 2
 node-a: sent 1
 node-a: sent 2
 node-a: sent 3
+node-a: watcher saw 1 Down(s)

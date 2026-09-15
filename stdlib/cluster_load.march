@@ -24,7 +24,8 @@ mod ClusterLoad do
     cpu_load_milli : Int,   -- 1-min load average × 1000
     mem_total_mb : Int,
     mem_avail_mb : Int,
-    sampled_at : Int        -- unix_time_ms when the sample was taken
+    sampled_at : Int        -- unix_time_ms when the sample was taken (a load received
+                            -- through SwimDriver: when it arrived, on the receiver's clock)
   }
 
   doc "Sample the local node's current CPU/memory headroom at [now_ms]."

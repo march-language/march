@@ -20,6 +20,30 @@
 #include <stdio.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <sys/socket.h>
+#include <errno.h>
+
+/* A MONITOR_FIRE is written to whatever fd the watcher registered; by the
+ * time the target dies that peer may have dropped the connection (the
+ * two-node `monitor_reconnect` scenario does exactly this).  A plain write()
+ * on a socket whose peer has closed raises SIGPIPE and kills the node -- the
+ * fire must instead fail quietly and stay PENDING for resend_pending.  Linux
+ * suppresses the signal per call (MSG_NOSIGNAL); macOS/BSD per socket
+ * (SO_NOSIGPIPE), set here on every write so a registration that came in
+ * over a plain fd is covered too. */
+static ssize_t write_nosigpipe(int fd, const uint8_t *buf, size_t len) {
+#if defined(MSG_NOSIGNAL)
+    ssize_t n = send(fd, buf, len, MSG_NOSIGNAL);
+    if (n < 0 && errno == ENOTSOCK) n = write(fd, buf, len);
+    return n;
+#else
+#if defined(SO_NOSIGPIPE)
+    int one = 1;
+    (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+#endif
+    return write(fd, buf, len);
+#endif
+}
 
 /* ── Simple msgpack encoder (only int + str + array, enough for MONITOR_FIRE) ─ */
 
@@ -194,7 +218,7 @@ void march_dist_monitor_fire_pid(int64_t target_pid, int reason_tag,
             /* Best-effort write; ignore errors (watcher may have disconnected). */
             size_t written = 0;
             while (written < frame_len) {
-                ssize_t n = write(w->fd, frame + written, frame_len - written);
+                ssize_t n = write_nosigpipe(w->fd, frame + written, frame_len - written);
                 if (n <= 0) break;
                 written += (size_t)n;
             }
@@ -321,8 +345,8 @@ void march_dist_monitor_fire_nodedown(const char *node_id) {
                     if (frame) {
                         size_t written = 0;
                         while (written < frame_len) {
-                            ssize_t n = write(w->fd, frame + written,
-                                              frame_len - written);
+                            ssize_t n = write_nosigpipe(w->fd, frame + written,
+                                                        frame_len - written);
                             if (n <= 0) break;
                             written += (size_t)n;
                         }

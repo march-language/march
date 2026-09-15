@@ -4175,6 +4175,11 @@ let base_env : env =
                    VCon ("Err", [VString "no reply (timeout or unhandled Call)"]))))
         | _ -> eval_error "actor_call: expected (Pid, message, Int)"))
   (* actor_reply: store a reply for a pending call.  Called from actor handlers. *)
+  (* actor_reply_retain: the interpreter's reply refs are plain ints in a
+     table, safe to hold; the compiled runtime needs a second reference. *)
+  ; ("actor_reply_retain", VBuiltin ("actor_reply_retain", function
+        | [v] -> v
+        | _ -> eval_error "actor_reply_retain: expected one argument"))
   ; ("actor_reply", VBuiltin ("actor_reply", function
         | [VInt ref_id; result] ->
           Hashtbl.replace pending_replies ref_id result;
