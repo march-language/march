@@ -1006,6 +1006,19 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
       && string_len_available ()
       && caller_sort_of name = Some (Smt.sdata str_sort)
     in
+    (* A caller name the typechecker (or its refinement marker) says is a
+       registered, non-record datatype: its datatype sort name.  Never a name
+       a callee parameter pinned to a scalar sort (every consumer tests the
+       string registry first). *)
+    let caller_dt name : string option =
+      if Hashtbl.mem caller_scalar name then None
+      else
+        match caller_sort_of name with
+        | Some (Smt.SData (adt, _))
+          when adt <> str_sort && Hashtbl.mem adt_ctors adt && not (is_record_sort adt) ->
+          Some adt
+        | _ -> None
+    in
     (* Attach the (expensive) datatype/quantifier preamble ONLY to VCs that
        actually reference an axiomatised measure; a plain Int/Bool VC pays no
        axiom cost.  Set when [resolve_measure] reflects an axiom measure. *)
@@ -1361,7 +1374,14 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
          exactly as a known string name is. *)
       else if caller_is_str name then (ignore (reflect_str ("$caller$" ^ name) (A.EVar { A.txt = name; A.span })); None)
       else if is_recvar name then None
-      else Some (Smt.Const name, (name, caller_scalar_of name))
+      else
+        match caller_dt name with
+        (* A caller datatype value denotes itself at its datatype sort, the
+           declaration [reflect_dt]'s `EVar` arm gives the same name. *)
+        | Some adt ->
+          if not (List.mem adt !adt_sorts) then adt_sorts := adt :: !adt_sorts;
+          Some (Smt.Const name, (name, adt_sort adt))
+        | None -> Some (Smt.Const name, (name, caller_scalar_of name))
     in
     (* Route measures through the SAME memo the goal side uses, so a promise
        about `len(xs)` and a goal about `len(xs)` land on the one `len$xs`
@@ -1553,7 +1573,11 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
              the sub-term instead just loses a fact (silence). *)
           else if is_recvar name then None
           else begin
-            decls := (name, caller_scalar_of name) :: !decls;
+            (match caller_dt name with
+             | Some adt ->
+               if not (List.mem adt !adt_sorts) then adt_sorts := adt :: !adt_sorts;
+               decls := (name, adt_sort adt) :: !decls
+             | None -> decls := (name, caller_scalar_of name) :: !decls);
             Some (Smt.Const name)
           end
     in
@@ -2173,6 +2197,21 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        — the very term [reflect_scalar]/[reflect_dt] give an `EVar` actual, so
        when the argument really IS that variable the two sides still meet on
        the same SMT symbol and the narrowing keeps working. *)
+    (* The constructors the goal predicate tests (`is_Some(_)` -> `Some`). *)
+    let goal_ctors : string list =
+      let rec go (e : A.expr) : string list =
+        match e with
+        | A.EApp (A.EVar { A.txt = t; _ }, args, _) ->
+          (match ctor_of_tester t, args with
+           | Some c, [ _ ] -> [ c ]
+           | _ -> [])
+          @ List.concat_map go args
+        | A.EApp (f, args, _) -> go f @ List.concat_map go args
+        | A.ETuple (args, _) | A.ECon (_, args, _) -> List.concat_map go args
+        | _ -> []
+      in
+      List.sort_uniq compare (go rp.pred)
+    in
     let path_resolve_var name =
       (* A name already declared into the `Str` sort denotes ITSELF at that
          sort.  [reflect_scalar] would unconditionally declare it `Int`, and a
@@ -2190,6 +2229,21 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
          scalar.  Returning None drops the sub-term — and with it the whole
          condition — which only loses a fact. *)
       else if is_recvar name then None
+      (* A caller DATATYPE value (design B3): the opaque datatype constant
+         [reflect_dt] builds for it, the very term a tester or an actual over
+         the same name reflects to — so `if o == p do unwrap(o)` compares two
+         `Option` constants instead of declaring `o` an Int beside the goal's
+         `M_Option`.  The name's own tag promise is loaded first for every
+         constructor the goal tests, under [load_scope_tester_facts]' rules. *)
+      else if caller_dt name <> None then begin
+        let adt = Option.get (caller_dt name) in
+        List.iter (fun c -> load_scope_tester_facts adt c name) goal_ctors;
+        match reflect_dt adt (A.EVar { A.txt = name; A.span }) with
+        | Some t ->
+          if not (List.mem adt !adt_sorts) then adt_sorts := adt :: !adt_sorts;
+          Some t
+        | None -> None
+      end
       else
         absorb
           (reflect_cached ("$path$" ^ name) (fun () ->

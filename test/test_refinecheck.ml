@@ -15601,6 +15601,57 @@ let caller_sorts_suite =
                   (m "CSR4"
                      "  fn need_pos(n : {Int | _ > 0}) : Int do n end\n\
                      \  fn r(k : {Int | _ > 1}, y) : Int do need_mem(y, [y]) + need_pos(k) end")));
+    (* ── origin 5: path-condition variables of a datatype sort ── *)
+    gated "path: a datatype guard variable meets the goal at its datatype sort" (fun () ->
+        ignore (ledger "e" (1, 0, 0)
+                  (m "CSE1"
+                     "  fn unwrap(p : {Option(Int) | is_Some(_)}) : Int do\n\
+                     \    match p do\n\
+                     \      Some(v) -> v\n\
+                     \      None -> 0\n\
+                     \    end\n\
+                     \  end\n\
+                     \  fn e(o : Option(Int), p : {Option(Int) | is_Some(_)}) : Int do\n\
+                     \    if o == p do unwrap(o) else 0 end\n\
+                     \  end")));
+    gated "path REJECT: a guard against an unrefined value is a plain skip, not a sort-conflict" (fun () ->
+        let rs = ledger "eu" (0, 0, 1)
+            (m "CSE2"
+               "  fn unwrap(p : {Option(Int) | is_Some(_)}) : Int do\n\
+               \    match p do\n\
+               \      Some(v) -> v\n\
+               \      None -> 0\n\
+               \    end\n\
+               \  end\n\
+               \  fn e(o : Option(Int), p : Option(Int)) : Int do\n\
+               \    if o == p do unwrap(o) else 0 end\n\
+               \  end") in
+        Alcotest.(check bool) "no sort-conflict" false (List.mem "sort-conflict" rs));
+    gated "path REJECT: a promised tag other than the goal's is not loaded" (fun () ->
+        let rs = ledger "en" (0, 0, 1)
+            (m "CSE3"
+               "  fn unwrap(p : {Option(Int) | is_Some(_)}) : Int do\n\
+               \    match p do\n\
+               \      Some(v) -> v\n\
+               \      None -> 0\n\
+               \    end\n\
+               \  end\n\
+               \  fn e(o : Option(Int), p : {Option(Int) | is_None(_)}) : Int do\n\
+               \    if o == p do unwrap(o) else 0 end\n\
+               \  end") in
+        Alcotest.(check bool) "no sort-conflict" false (List.mem "sort-conflict" rs));
+    gated "path control: type-variable guard variables keep their verdict" (fun () ->
+        ignore (ledger "ev" (1, 0, 0)
+                  (m "CSE4"
+                     "  fn unwrap(p : {Option(Int) | is_Some(_)}) : Int do\n\
+                     \    match p do\n\
+                     \      Some(v) -> v\n\
+                     \      None -> 0\n\
+                     \    end\n\
+                     \  end\n\
+                     \  fn ev(x, y, p : {Option(Int) | is_Some(_)}) : Int do\n\
+                     \    if x == y do unwrap(p) else 0 end\n\
+                     \  end")));
   ]
 
 (* ── z3 never rejects a query the checker builds ─────────────────────────
