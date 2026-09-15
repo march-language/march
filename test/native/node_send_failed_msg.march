@@ -18,8 +18,11 @@ mod NodeSendFailedMsg do
     state { failed : Int }
     init  { failed: 0 }
     on Go(fd : Int, me) do
-      let _ = NodeSend.cast_from(fd, 1, me, GlobalPid.make("node-b", 9999, 1), "NodeSendFailedMsg.Nope", Nil)
+      -- Printed BEFORE the cast so the trace is causal: node-b can only refuse
+      -- after the frame is written, which is after this line. (Printed after
+      -- it, the two lines raced on the ubuntu leg's multi-threaded scheduler.)
       println("sender: cast 1 to node-b")
+      let _ = NodeSend.cast_from(fd, 1, me, GlobalPid.make("node-b", 9999, 1), "NodeSendFailedMsg.Nope", Nil)
       state
     end
     on SendFailed(seq : Int, reason : String) do

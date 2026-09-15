@@ -56,11 +56,15 @@ mod ControlChannelLoopback do
   end
 
   -- ── node-a: two readers ─────────────────────────────────────────────────
+  -- Reads until EOF; on an error, remembers it so a short count is
+  -- diagnosable from the golden diff rather than a bare "false".
   pfn read_data(fd : Int, got : Int) : Int do
     match Socket.recv(fd, 1048576) do
       Ok(s) ->
         if String.is_empty(s) do got else read_data(fd, got + string_length(s)) end
-      Err(_) -> got
+      Err(e) ->
+        Vault.set(Vault.open("cc_times"), "err", Socket.error_message(e))
+        got
     end
   end
 
@@ -108,7 +112,11 @@ mod ControlChannelLoopback do
       Err(e) -> panic("data reader: " ++ e)
     end
     let _ = task_await(srv)
-    println("node-a: data stream complete: " ++ bool_to_string(n == data_len() + 8))
+    if n == data_len() + 8 do
+      println("node-a: data stream complete: true")
+    else
+      println("node-a: data stream complete: false (got " ++ int_to_string(n) ++ " of " ++ int_to_string(data_len() + 8) ++ ", last error: " ++ Vault.get_or(Vault.open("cc_times"), "err", "none") ++ ")")
+    end
     let t_ping = Vault.get_or(Vault.open("cc_times"), "ping", 0)
     let t_data = Vault.get_or(Vault.open("cc_times"), "data", 0)
     println("node-a: control ping arrived before the data stream finished: " ++ bool_to_string(t_ping > 0 && t_ping <= t_data))
