@@ -5865,6 +5865,25 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/dist_monitor_loopback.expected native_dist_monitor_loopback.out)))
 
+; ── Node.send: the typed remote send, tag minted by the compiler, codec
+;    derived, nested-module message types, decoded by from_json ──
+(rule
+ (targets native_node_send_typed_loopback native_node_send_typed_loopback.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/node_send_typed_loopback.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_node_send_typed_loopback
+        native/node_send_typed_loopback.march)
+   (with-stdout-to native_node_send_typed_loopback.out
+        (system "./native_node_send_typed_loopback")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/node_send_typed_loopback.expected native_node_send_typed_loopback.out)))
+
 ; ── A monitor registered after the target died is answered at once ──
 (rule
  (targets native_monitor_after_death_loopback native_monitor_after_death_loopback.out)

@@ -1,0 +1,91 @@
+-- Node: the typed remote send (distributed actors, last piece of 1/4).
+--
+-- `Node.send(peer, to, msg)` is what a user writes; everything under it
+-- exists already (NodeSend carries bytes, PeerReader reads them, the
+-- control/data split, GlobalPid). What this layer adds is the codec
+-- contract, and the compiler enforces it:
+--
+--   * `msg`'s type must `derive Json`. A missing codec is a TYPECHECK error
+--     at the call site, naming the type -- not the runtime panic a generic
+--     `to_json` gives.
+--   * The wire `type_tag` is the message type's name as the compiler resolves
+--     it (module-qualified where the type is declared inside a module), the
+--     same name `derive Json for T` registers its codec under, so a sender and
+--     a receiver agree on the tag by construction. No string to keep in step.
+--   * A `Pid` anywhere in the type is refused by `derive Json` itself: a local
+--     pid means nothing on another node. Carry a `GlobalPid.Pid`.
+--
+-- Mechanism. `send` below is an ordinary stdlib function whose BODY is never
+-- reached: the typechecker records, per `Node.send` call site, the resolved
+-- message type (Typecheck_caps.check_node_send_sites, after the whole module
+-- is solved -- the argument's type is usually pinned later than the call),
+-- and both backends rewrite the call to `send_tagged(peer, to, "<tag>",
+-- JsonTo$T.to_json(msg))` -- the interpreter in Eval's EApp arm, the compiler
+-- in Lower_expr, both off the March_ast.Json_dispatch table that `from_json`
+-- already uses. An UNCHECKED interpreter run (the stdlib March test
+-- harness never typechecks) has no table; there the interpreter names the
+-- type from the value itself, the way the generic `to_json` does, and the
+-- tag is that runtime name. The body below is reached only by a value no
+-- table and no runtime shape can name; it says so loudly.
+--
+-- Receiving is the caller's: read the ACTOR_MSG (`NodeSend.serve_one` or a
+-- PeerReader), compare `d.type_tag` with the tag the sender's compiler minted
+-- (a receiver hosting `T` in the same module tree writes the same qualified
+-- name), and decode with `Node.payload(d)` pinned to `T` by the result type --
+-- `from_json` dispatch is the typechecker's already.
+-- Design: specs/progress/2026-09-14-remote-send-to-a-global-pid.md.
+mod Node do
+  needs IO.Mut
+  needs IO.NetConnect
+
+  -- One sequence space per node process; the seq is returned to the caller
+  -- so a later DELIVERY_FAILED (which echoes it) can be matched.
+  pfn seqs() do
+    match Vault.whereis("node_send_seq") do
+      Some(t) -> t
+      None -> Vault.new("node_send_seq")
+    end
+  end
+
+  pfn next_seq() : Int do
+    let t = seqs()
+    let n = match Vault.get(t, "seq") do
+      Some(k) -> k
+      None -> 0
+    end
+    Vault.set(t, "seq", n + 1)
+    n + 1
+  end
+
+  -- The connection a message rides: the data connection when the peer has
+  -- one (the control/data split), else the single connection.
+  pfn wire_fd(peer : Peer) : Int do
+    if PeerRegistry.has_data(peer) do peer.data_fd else peer.fd end
+  end
+
+  -- The explicit form: the tag and the JSON value in hand. `send` lowers to
+  -- this; a receiver-side helper or a test may call it directly.
+  fn send_tagged(peer : Peer, to : Pid, type_tag : String, json) : Result(Int, SendError) do
+    let seq = next_seq()
+    let payload = Bytes.to_list(Bytes.from_string(Json.to_string(json)))
+    match NodeSend.cast(wire_fd(peer), seq, to, type_tag, payload) do
+      Ok(_) -> Ok(seq)
+      Err(e) -> Err(e)
+    end
+  end
+
+  -- The typed send. `msg`'s type must `derive Json`; see the module comment
+  -- for what the compiler does with this call. Returns the message's seq.
+  fn send(peer : Peer, to : Pid, msg) : Result(Int, SendError) do
+    let _ = peer
+    let _ = to
+    let _ = msg
+    panic("Node.send: this call was not resolved by the compiler -- the typechecker records every Node.send site and both backends rewrite it to send_tagged; a pipeline entry point skipped that table")
+  end
+
+  -- The receiver's half of the codec: the delivery's payload as JSON, ready
+  -- for a `from_json` pinned to the hosted type.
+  fn payload(d : Delivery) : Result(JsonValue, String) do
+    Json.parse(Bytes.to_string(Bytes.from_list(d.payload)))
+  end
+end

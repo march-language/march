@@ -50,3 +50,39 @@ let find (sp : Ast.span) : string option = Hashtbl.find_opt tbl sp
     top-level function name are built from. *)
 let impl_symbol (type_name : string) : string =
   "JsonFrom$" ^ type_name ^ ".from_json"
+
+(** The typed remote send shares this table (stdlib/node.march).  For a
+    `Node.send(peer, to, msg)` site the recorded string is the MESSAGE type's
+    name, module-qualified where its declaration is ("Outer.Inner.Ping"): that
+    string is the wire type tag, minted here so sender and receiver agree by
+    construction.  The impl symbol keys on the short name, as every impl
+    lookup does; [short] recovers it.  Consumers tell the two uses apart by
+    the callee, never by the recorded string. *)
+let short (type_name : string) : string =
+  match String.rindex_opt type_name '.' with
+  | Some i -> String.sub type_name (i + 1) (String.length type_name - i - 1)
+  | None -> type_name
+
+(** `JsonTo$<short>.to_json`: the encoder `derive Json` generates for a type. *)
+let encoder_symbol (type_name : string) : string =
+  "JsonTo$" ^ short type_name ^ ".to_json"
+
+(** Both backends' rewrite of a resolved `Node.send` site, in one place so
+    they cannot drift:
+      Node.send(peer, to, msg)
+        ==> Node.send_tagged(peer, to, "<tag>", JsonTo$T.to_json(msg))
+    [None] when the site was not recorded (the typechecker then already
+    reported it, or this is not a three-argument `Node.send`). *)
+let node_send_rewrite (e : Ast.expr) : Ast.expr option =
+  match e with
+  | Ast.EApp (Ast.EVar { txt = "Node.send"; span = fsp }, [peer; to_; msg], sp) ->
+    (match find sp with
+     | None -> None
+     | Some tag ->
+       Some (Ast.EApp (Ast.EVar { txt = "Node.send_tagged"; span = fsp },
+                       [ peer; to_;
+                         Ast.ELit (Ast.LitString tag, sp);
+                         Ast.EApp (Ast.EVar { txt = encoder_symbol tag; span = fsp },
+                                   [msg], sp) ],
+                       sp)))
+  | _ -> None

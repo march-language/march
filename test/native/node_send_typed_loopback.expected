@@ -1,0 +1,6 @@
+node-a: sent seq=1
+node-a: sent seq=2
+node-a: sent seq=3
+node-b: seq=1 to=42 tag=Msgs.Ping -> Ping n=7 who=node-a
+node-b: seq=2 to=42 tag=Msgs.Report -> Report Hot(99)
+node-b: seq=3 to=42 tag=Msgs.Report -> Report Cold

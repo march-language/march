@@ -448,6 +448,23 @@ type env = {
       LATER unification.  See
       [specs/lang/types/reject/t155_cap_narrow_widen_deferred.march], which
       exists to fail if this is ever made eager. *)
+  node_send_sites : (Ast.span * ty) list ref;
+  (** Every `Node.send(peer, to, msg)` application site, as (span, the
+      INSTANTIATED arrow type of `Node.send`).  Swept after checking by
+      [Typecheck_caps.check_node_send_sites]: the message argument's type
+      must have a `derive Json` codec (a `JsonTo` impl), and the resolved type
+      name is recorded in [March_ast.Json_dispatch] so both backends can
+      rewrite the call to `Node.send_tagged` with the compiler-minted tag.
+      Deferred for the same reason as [json_cap_sites]: the argument is often
+      a bare var at the call and is pinned by LATER unification. *)
+  json_codecs : ty list ref;
+  (** The head type of every `JsonTo` impl checked so far -- i.e. every type
+      that has `derive Json` -- across NESTED modules too.  [env.impls] is
+      per-module scope (a nested module's impls are not exported to its
+      parent), but a derived codec is a module-wide fact for both backends
+      (a global impl table, a global mangled symbol), and
+      [check_node_send_sites] runs on the outermost env.  A shared ref, like
+      [node_send_sites], so every env copy sees one list. *)
   json_cap_sites : (Ast.span * ty * string) list ref;
   (** Every [to_json] / [from_json] / [from_json_events] application site,
       recorded as (span, the INSTANTIATED arrow type of the builtin, builtin
@@ -652,6 +669,8 @@ let make_env errors type_map = {
   mint_cap_sites = ref [];
   cap_narrow_sites = ref [];
   json_cap_sites = ref [];
+  node_send_sites = ref [];
+  json_codecs = ref [];
   pure_mod = false;
   no_extern_mod = false;
   deterministic_mod = false;

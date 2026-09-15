@@ -525,6 +525,25 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
          cap type_name.txt type_name.txt);
     []
 
+  | "Json" when March_caps.Cap_surface_ty.type_def_mentions_tycon "Pid" td ->
+    (* A local [Pid] is an index into THIS node's actor table.  Encoded and
+       sent anywhere else it names whatever lives at that slot there, so a
+       codec over it is a wrong-delivery route dressed as serialization.
+       Refused here, at the declaration, for the same reasons as the [Cap]
+       arm above: the generated encoder would otherwise fall through to a
+       generic [to_json] and fail at RUN time with no useful span, and
+       `Node.send` (whose codec contract this derive is) needs the refusal to
+       be a compile-time one.  The cross-node identity is `GlobalPid.Pid`, a
+       plain record that derives like any other. *)
+    Err.error errors ~span:iface_span
+      (Printf.sprintf
+         "`Pid` cannot be serialized — a local pid only names an actor on \
+          this node, so `%s` cannot derive Json.\n\
+          hint: carry a `GlobalPid.Pid` (node id, local pid, creation) in \
+          `%s` instead; it is a plain record and derives Json."
+         type_name.txt type_name.txt);
+    []
+
   | "Json" ->
     (* derive Json: generate standalone to_json and from_json functions.
        to_json(x : T) : JsonValue   — structural encoding to JSON

@@ -1,0 +1,21 @@
+-- `send` is a keyword (the actor primitive `send(pid, msg)` is its own
+-- expression form), and until 2026-09-15 no module could DECLARE a function
+-- called `send` -- `fn send(...)` was "I got stuck here".  `fn_decl_name` now
+-- admits it at the declaration, so `Node.send(...)` (stdlib/node.march) can
+-- exist; the call form was already admitted qualified (`expr_field DOT SEND`,
+-- for `Chan.send`).  The bare call form is still the actor primitive.
+mod FnNamedSend do
+  needs IO.Console
+
+  mod Mailer do
+    fn send(to : String, body : String) : String do to ++ ": " ++ body end
+    pfn send_twice(to : String, body : String) : String do send_one(to, body) ++ " " ++ send_one(to, body) end
+    pfn send_one(to : String, body : String) : String do Mailer.send(to, body) end
+    fn twice(to : String, body : String) : String do send_twice(to, body) end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    println(Mailer.send("a", "hi"))
+    println(Mailer.twice("b", "yo"))
+  end
+end

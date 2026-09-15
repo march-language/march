@@ -1,4 +1,9 @@
-# `[P2]` `Node.send(conn, to, msg)`: the typed remote send whose codec the compiler checks
+# `[P3]` `@[endpoints]` over `Node.send`: the generated network transport
+
+**Steps 1–3 shipped 2026-09-15** — `Node.send(peer, to, msg)` exists, with
+the codec checked at the call site, the tag minted, and `Pid` refused by the
+derive: [[2026-09-15-typed-node-send]]. What remains is step 4 below (the
+generator) and the receiver-side dispatch table it needs.
 
 Filed 2026-09-14 as the last open part of
 [[2026-09-14-remote-send-to-a-global-pid]] (now a progress record). Every

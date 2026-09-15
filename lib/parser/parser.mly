@@ -560,8 +560,17 @@ decl:
 fn_bound_param:
   | name = lower_name; COLON; t = ty { (name, t) }
 
+(* The name a `fn`/`pfn` DECLARES.  `send` is a keyword (the actor primitive
+   `send(pid, msg)` is its own expression form), but a module may still define
+   a function called `send` -- reached only qualified, `Node.send(...)`, which
+   `expr_field` already admits for `Chan.send`.  The bare call form stays the
+   actor primitive, so nothing a program already says changes meaning. *)
+fn_decl_name:
+  | n = lower_name { n }
+  | SEND           { mk_name "send" $loc }
+
 fn_decl:
-  | FN; name = lower_name; _lp = LPAREN; params = separated_list(COMMA, fn_param); _rp = RPAREN;
+  | FN; name = fn_decl_name; _lp = LPAREN; params = separated_list(COMMA, fn_param); _rp = RPAREN;
     ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
     { DFn ({ fn_name = name;
              fn_vis = Public;
@@ -576,7 +585,7 @@ fn_decl:
                                mk_span ($startpos(_lp), $endpos(_rp)) }];
              fn_bounds = [] },
            mk_span ($loc)) }
-  | FN; name = lower_name;
+  | FN; name = fn_decl_name;
     LBRACKET; bounds = separated_nonempty_list(COMMA, fn_bound_param); RBRACKET;
     _lp = LPAREN; params = separated_list(COMMA, fn_param); _rp = RPAREN;
     ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
@@ -593,7 +602,7 @@ fn_decl:
                                mk_span ($startpos(_lp), $endpos(_rp)) }];
              fn_bounds = bounds },
            mk_span ($loc)) }
-  | PFN; name = lower_name; _lp = LPAREN; params = separated_list(COMMA, fn_param); _rp = RPAREN;
+  | PFN; name = fn_decl_name; _lp = LPAREN; params = separated_list(COMMA, fn_param); _rp = RPAREN;
     ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
     { DFn ({ fn_name = name;
              fn_vis = Private;
@@ -608,7 +617,7 @@ fn_decl:
                                mk_span ($startpos(_lp), $endpos(_rp)) }];
              fn_bounds = [] },
            mk_span ($loc)) }
-  | PFN; name = lower_name;
+  | PFN; name = fn_decl_name;
     LBRACKET; bounds = separated_nonempty_list(COMMA, fn_bound_param); RBRACKET;
     _lp = LPAREN; params = separated_list(COMMA, fn_param); _rp = RPAREN;
     ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
@@ -625,12 +634,12 @@ fn_decl:
                                mk_span ($startpos(_lp), $endpos(_rp)) }];
              fn_bounds = bounds },
            mk_span ($loc)) }
-  | FN; _n = lower_name; LPAREN; _ps = separated_list(COMMA, fn_param); RPAREN; error
+  | FN; _n = fn_decl_name; LPAREN; _ps = separated_list(COMMA, fn_param); RPAREN; error
     { error_raise
         "I was expecting `do` to start the function body here:"
         (Some "fn name(params) do\n    body\nend")
         $startpos($6) }
-  | PFN; _n = lower_name; LPAREN; _ps = separated_list(COMMA, fn_param); RPAREN; error
+  | PFN; _n = fn_decl_name; LPAREN; _ps = separated_list(COMMA, fn_param); RPAREN; error
     { error_raise
         "I was expecting `do` to start the function body here:"
         (Some "pfn name(params) do\n    body\nend")
