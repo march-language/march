@@ -979,7 +979,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
       if not (Hashtbl.mem str_names c) then begin
         Hashtbl.replace str_names c ();
         uses_string := true;
-        decls := (c, Smt.SData str_sort) :: !decls
+        decls := (c, Smt.sdata str_sort) :: !decls
       end
     in
     (* A string literal's constant, minted on first sight.  Literal text is NOT
@@ -1077,7 +1077,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
          | Some t ->
            if not (List.mem sort_name !adt_sorts) then
              adt_sorts := sort_name :: !adt_sorts;
-           Some (t, [ (varname, Smt.SData sort_name) ]))
+           Some (t, [ (varname, adt_sort sort_name) ]))
     in
     (* Reflection must be stable per binder within one [check_call]: two
        syntactic occurrences of the same binder (or the same cross-argument
@@ -1147,7 +1147,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
         (match List.assoc_opt x sc with
          | Some (b, q, Some s) when s = sort_name ->
            let c = Smt.Const x in
-           decls := (x, Smt.SData sort_name) :: !decls;
+           decls := (x, adt_sort sort_name) :: !decls;
            (* The carried predicate must resolve `b.field` against the SAME
               term the goal projects from, or the assumption constrains a
               different value than the one being checked. *)
@@ -1172,7 +1172,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
          | _ ->
            (match List.assoc_opt x re with
             | Some s when s = sort_name ->
-              decls := (x, Smt.SData sort_name) :: !decls;
+              decls := (x, adt_sort sort_name) :: !decls;
               Some (Smt.Const x)
             | _ -> None))
       (* A direct CALL returning a record, whose callee has a PROVEN
@@ -1199,7 +1199,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
           incr ret_ctr;
           let nm = Printf.sprintf "%s$rec%d" fname !ret_ctr in
           let c = Smt.Const nm in
-          decls := (nm, Smt.SData sort_name) :: !decls;
+          decls := (nm, adt_sort sort_name) :: !decls;
           (* [q] is already in the CALLER's namespace ([postcond_of] substituted
              the actuals).  Its binder — and its `b.field` projections — must
              resolve against the SAME term the goal projects from. *)
@@ -1606,7 +1606,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
               else if is_axiom_measure m' then begin
                 let adt = Hashtbl.find axiom_measures m' in
                 uses_axiom := true;
-                decls := (n, Smt.SData adt) :: !decls;
+                decls := (n, adt_sort adt) :: !decls;
                 Some (Smt.App (m', [ Smt.Const n ]))
               end
               else begin
@@ -1630,7 +1630,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                  of the same name from re-loading the fact at all. *)
               let adt = Hashtbl.find axiom_measures m' in
               uses_axiom := true;
-              decls := (x, Smt.SData adt) :: !decls;
+              decls := (x, adt_sort adt) :: !decls;
               Some (Smt.App (m', [ Smt.Const x ]))
             end
             else measure_of_var m' x
@@ -1705,7 +1705,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
             when n = b || n = "_" || n = x -> (
             match ctor_of_tester t with
             | Some ctor when ctor = goal_ctor && sort_of_ctor ctor = Some adt ->
-              decls := (x, Smt.SData adt) :: !decls;
+              decls := (x, adt_sort adt) :: !decls;
               if not (List.mem adt !adt_sorts) then adt_sorts := adt :: !adt_sorts;
               push_user (Smt.IsCtor (ctor, Smt.Const x))
             | _ -> ())
@@ -1717,19 +1717,39 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        over: a constructor application becomes (ctor …) (so the recursion axioms
        fire); a variable becomes a fresh datatype constant. *)
     let dt_counter = ref 0 in
-    let rec reflect_dt adt e =
+    (* The datatype instance a callee parameter's DECLARED type gives
+       (`t : {Tree(Int) | …}` → [Int]), for the refined value and for another
+       parameter named in the predicate.  [None]: no declared instance; the
+       term takes the `Elem` instance and [resolve_sorts] may refine it. *)
+    let param_instance_args (name : string) : Smt.sort list option =
+      let idx = if is_self name then Some rp.idx else List.assoc_opt name name_pos in
+      match Option.bind idx (fun i -> List.nth_opt sg.param_tys i) with
+      | Some (Some ty) ->
+        (match instance_sort_of_ty ty with Smt.SData (_, a) when a <> [] -> Some a | _ -> None)
+      | _ -> None
+    in
+    (* [args]: the instance to reflect at.  A constructor's fields then have
+       their instantiated sorts, so an `Int` payload of a `Tree(Int)` reflects
+       as the integer it is instead of an opaque stand-in. *)
+    let rec reflect_dt ?(args : Smt.sort list option) adt e =
+      let inst = match args with Some a -> Smt.SData (adt, a) | None -> adt_sort adt in
       match e with
-      | A.ECon (ctor, args, _)
+      | A.ECon (ctor, cargs, _)
         when (match Hashtbl.find_opt adt_ctors adt with Some cs -> List.mem ctor.A.txt cs | None -> false) ->
-        let sorts = try Hashtbl.find ctor_field_sorts ctor.A.txt with Not_found -> [] in
-        if List.length args <> List.length sorts then None
+        let sorts =
+          match args with
+          | Some a ->
+            List.map (Smt.instantiate a) (try Hashtbl.find ctor_field_sorts_poly ctor.A.txt with Not_found -> [])
+          | None -> (try Hashtbl.find ctor_field_sorts ctor.A.txt with Not_found -> [])
+        in
+        if List.length cargs <> List.length sorts then None
         else
           List.fold_right2
             (fun a s acc ->
               match reflect_field a s, acc with Some t, Some ts -> Some (t :: ts) | _ -> None)
-            args sorts (Some [])
-          |> Option.map (fun ts -> Smt.App (ctor.A.txt, ts))
-      | A.EVar { A.txt = x; _ } -> decls := (x, Smt.SData adt) :: !decls; Some (Smt.Const x)
+            cargs sorts (Some [])
+          |> Option.map (fun ts -> Smt.Ctor (ctor.A.txt, inst, ts))
+      | A.EVar { A.txt = x; _ } -> decls := (x, inst) :: !decls; Some (Smt.Const x)
       (* ── Tier 2 propagation ────────────────────────────────────────────────
          A CALL returning a value at this very datatype sort, whose callee has a
          PROVEN postcondition (an unproven one has already been cleared by
@@ -1745,7 +1765,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
           incr ret_ctr;
           let nm = Printf.sprintf "%s$dt%d" fname !ret_ctr in
           let c = Smt.Const nm in
-          decls := (nm, Smt.SData adt) :: !decls;
+          decls := (nm, adt_sort adt) :: !decls;
           (* [q] is already in the CALLER's namespace (postcond_of substituted
              the actuals), so every remaining variable denotes itself.  A
              measure over the binder applies to [c]; a measure over any other
@@ -1807,7 +1827,8 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
         | _ -> None)
       | _ -> None
     and reflect_field a = function
-      | Smt.SData sub when sub <> "Elem" -> reflect_dt sub a
+      | Smt.SData (sub, sargs) when sub <> "Elem" ->
+        reflect_dt ?args:(if sargs = [] then None else Some sargs) sub a
       | (Smt.SInt | Smt.SBool | Smt.SFloat) as sort
         when (match absorb (reflect_scalar ~postcond ~sort sc a) with
               | Some _ -> true
@@ -1913,16 +1934,16 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
         let actual = if is_self name then Some self_actual else actual_of_name name in
         match actual with
         | None ->
-          decls := (name, Smt.SData adt) :: !decls;
+          decls := (name, adt_sort adt) :: !decls;
           Some (Smt.App (m, [ Smt.Const name ]))
         | Some a ->
           (match a with A.EVar { A.txt = x; _ } -> load_scope_measure_facts x | _ -> ());
           mark_self name
-            (match reflect_dt adt a with
+            (match reflect_dt ?args:(param_instance_args name) adt a with
              | Some t -> Some (Smt.App (m, [ t ]))
              | None ->
                if is_self name then begin
-                 decls := (self_dt_sym, Smt.SData adt) :: !decls;
+                 decls := (self_dt_sym, adt_sort adt) :: !decls;
                  Some (Smt.App (m, [ Smt.Const self_dt_sym ]))
                end
                else None))
@@ -2092,7 +2113,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
         (match make_field_resolver varname sort_name c varname fname with
          | None -> None
          | Some t ->
-           decls := (varname, Smt.SData sort_name) :: !decls;
+           decls := (varname, adt_sort sort_name) :: !decls;
            if not (List.mem sort_name !adt_sorts) then adt_sorts := sort_name :: !adt_sorts;
            Some t)
     in
@@ -2100,7 +2121,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
       if is_axiom_measure m then (
         uses_axiom := true;
         let adt = Hashtbl.find axiom_measures m in
-        decls := (name, Smt.SData adt) :: !decls;
+        decls := (name, adt_sort adt) :: !decls;
         Some (Smt.App (m, [ Smt.Const name ])))
       (* `len` over a name ALREADY declared into the `Str` sort is the string
          length, i.e. the same `($strlen name)` the predicate side produces —
@@ -2431,11 +2452,12 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
              else None)
            assumptions
        in
-       (* Settle every set's element sort, or skip on a contradiction — see
-          [resolve_set_sorts].  Runs on the finished declaration list. *)
-       match resolve_set_sorts decls goal assumptions with
+       (* Settle every sort the producers left open — set elements, datatype
+          instances, opaque payload constants — or skip on a contradiction; see
+          [resolve_sorts].  Runs on the finished declaration list. *)
+       match resolve_sorts decls goal assumptions with
        | None -> note (Obligation.Skipped Obligation.Sort_conflict)
-       | Some (decls, goal, assumptions) ->
+       | Some (decls, goal, assumptions, measure_instances) ->
        let sort_of n = List.assoc_opt n decls in
        let vc = { Smt.decls; assumptions; goal } in
        (* [user_assumptions]: the SAME two-step filter (sort-wellsortedness,
@@ -2491,6 +2513,14 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
            let n = String.length needle and h = String.length hay in
            let rec at i = i + n <= h && (String.sub hay i n = needle || at (i + 1)) in
            at 0
+         in
+         (* The datatype instances the query mentions that no preamble above
+            declares, then any measure [resolve_sorts] renamed to an instance
+            (only alongside the measure preamble that declares its template). *)
+         let mas =
+           mas
+           ^ query_instance_preamble ~declared:mas ~measures:(m <> "") vc.Smt.decls vc.Smt.goal
+               vc.Smt.assumptions measure_instances
          in
          mas
          ^ set_preamble ~elem_declared:(contains mas "(declare-sort Elem 0)")

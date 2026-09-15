@@ -148,7 +148,7 @@ let scope_facts (sc : scope)
          nothing, so flipping it there would be a false-positive engine. *)
       | Some sort_name when sort_name = str_sort ->
         let c = Smt.Const name in
-        let ds = (name, Smt.SData str_sort) :: ds in
+        let ds = (name, Smt.sdata str_sort) :: ds in
         let rv n = if n = b || n = "_" then Some c else None in
         let rm m n =
           if m = "len" && string_len_available () && (n = b || n = "_") then
@@ -189,7 +189,7 @@ let scope_facts (sc : scope)
          | None -> dropped := true; (ds, asm, has_rec))
       | Some sort_name ->
         let c = Smt.Const name in
-        let ds = (name, Smt.SData sort_name) :: ds in
+        let ds = (name, adt_sort sort_name) :: ds in
         let rv n = if n = b || n = "_" then Some c else Some (Smt.Const n) in
         let rf = make_field_resolver b sort_name c in
         let rma m arg =
@@ -333,7 +333,7 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
         let c = Printf.sprintf "$str%d" (Hashtbl.length str_lit_tbl) in
         Hashtbl.replace str_lit_tbl s c;
         uses_string := true;
-        decls := (c, Smt.SData str_sort) :: !decls;
+        decls := (c, Smt.sdata str_sort) :: !decls;
         assume :=
           Smt.Eq (Smt.App (strlen_fn, [ Smt.Const c ]), Smt.IntLit (String.length s)) :: !assume;
         Hashtbl.iter
@@ -586,11 +586,11 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
              else None)
            !assume
        in
-       (* Settle every set's element sort (or skip on a contradiction) before
-          rendering: see [resolve_set_sorts]. *)
-       match resolve_set_sorts decls goal assumptions with
+       (* Settle every sort the producers left open (or skip on a
+          contradiction) before rendering: see [resolve_sorts]. *)
+       match resolve_sorts decls goal assumptions with
        | None -> note (Obligation.Skipped Obligation.Sort_conflict); false
-       | Some (decls, goal, assumptions) ->
+       | Some (decls, goal, assumptions, measure_instances) ->
        let vc = { Smt.decls; assumptions; goal } in
        let str_pre = if scope_has_string || !uses_string then string_preamble else "" in
        let preamble = str_pre ^
@@ -599,8 +599,10 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
               skip the quantified-axiom measure_preamble.  The quantified forall axioms
               cause Z3 to return `unknown` for SAT queries even when the goal is trivial
               and measures no longer appear in it.  Type preamble alone suffices. *)
-           if !needs_axiom_preamble then record_vc_preamble ()
-           else type_only_preamble ()
+           let base = if !needs_axiom_preamble then record_vc_preamble () else type_only_preamble () in
+           base ^ "\n"
+           ^ query_instance_preamble ~declared:(str_pre ^ base) ~measures:!needs_axiom_preamble decls goal
+               assumptions measure_instances
          else ""
        in
        let contains hay needle =
@@ -767,7 +769,7 @@ let rec smt_sort_of_ty (t : A.ty) : Smt.sort option =
   | A.TyCon ({ A.txt = "Int"; _ }, []) -> Some Smt.SInt
   | A.TyCon ({ A.txt = "Bool"; _ }, []) -> Some Smt.SBool
   | A.TyCon ({ A.txt; _ }, _) when Hashtbl.mem adt_ctors (adt_sort_name txt) ->
-    Some (Smt.SData (adt_sort_name txt))
+    Some (adt_sort (adt_sort_name txt))
   | _ -> None
 
 let ctor_belongs (ctor : string) (adt : string) : bool =
@@ -814,7 +816,7 @@ let induction_match_adt (c : A.fn_clause) (mparam : string) : string option =
   |> (fun o -> Option.bind o param_ty_of)
   |> (fun o -> Option.bind o smt_sort_of_ty)
   |> function
-  | Some (Smt.SData madt) when madt <> "Elem" && Hashtbl.mem measure_preamble_sorts madt ->
+  | Some (Smt.SData (madt, _)) when madt <> "Elem" && Hashtbl.mem measure_preamble_sorts madt ->
     Some madt
   | _ -> None
 
@@ -879,7 +881,7 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
             let ok = ref true in
             (match mctx with
              | Some (mparam, madt, _, _) ->
-               if not (declare mparam (Smt.SData madt)) then ok := false
+               if not (declare mparam (adt_sort madt)) then ok := false
              | None -> ());
             (match pat with
              | Some (_, binder_sorts) ->
@@ -896,7 +898,7 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
             (* ── Reflection, always at a KNOWN expected sort ─────────────── *)
             let rec reflect_at (s : Smt.sort) (e : A.expr) : Smt.term option =
               match s with
-              | Smt.SData d when d <> "Elem" -> reflect_dt d e
+              | Smt.SData (d, _) when d <> "Elem" -> reflect_dt d e
               | Smt.SInt -> reflect_int e
               (* An `Elem` or Bool field is invisible to a structural measure:
                  an unconstrained constant of the right sort keeps the VC
@@ -905,7 +907,7 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
             and reflect_dt (d : string) (e : A.expr) : Smt.term option =
               match e with
               | A.EVar { A.txt = x; _ } ->
-                if declare x (Smt.SData d) then Some (Smt.Const x) else None
+                if declare x (adt_sort d) then Some (Smt.Const x) else None
               | A.ECon (ct, args, _) when ctor_belongs ct.A.txt d ->
                 let fs = try Hashtbl.find ctor_field_sorts ct.A.txt with Not_found -> [] in
                 if List.length fs <> List.length args then None
@@ -916,7 +918,7 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
                       | Some t, Some ts -> Some (t :: ts)
                       | _ -> None)
                     args fs (Some [])
-                  |> Option.map (fun ts -> Smt.App (ct.A.txt, ts))
+                  |> Option.map (fun ts -> ctor_term d ct.A.txt ts)
               (* ── THE INDUCTION HYPOTHESIS ─────────────────────────────────
                  A self-recursive call returning this datatype.  It becomes a
                  fresh opaque constant; the postcondition is assumed ABOUT that
@@ -930,7 +932,7 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
               | A.EApp (A.EVar { A.txt = f; _ }, args, _) when f = self && d = ret_adt ->
                 incr ctr;
                 let nm = Printf.sprintf "$t2rec%d" !ctr in
-                Hashtbl.replace decls nm (Smt.SData ret_adt);
+                Hashtbl.replace decls nm (adt_sort ret_adt);
                 let cst = Smt.Const nm in
                 let ih_arg =
                   match mctx with
@@ -991,12 +993,12 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
                goal provable that would otherwise fail. *)
             (match pat, mctx with
              | None, _ -> ()
-             | Some (ctor, binder_sorts), Some (mparam, _, _, _) ->
+             | Some (ctor, binder_sorts), Some (mparam, madt, _, _) ->
                let pat_eq =
                  List.fold_right
                    (fun (n, _) acc -> Option.map (fun ts -> Smt.Const n :: ts) acc)
                    binder_sorts (Some [])
-                 |> Option.map (fun ts -> Smt.Eq (Smt.Const mparam, Smt.App (ctor, ts)))
+                 |> Option.map (fun ts -> Smt.Eq (Smt.Const mparam, ctor_term madt ctor ts))
                in
                (match pat_eq with Some t -> assume := t :: !assume | None -> ok := false)
              (* A pattern with no matched parameter is not a shape we build. *)
@@ -1022,16 +1024,26 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
                     Hashtbl.fold (fun n s acc -> (n, s) :: acc) decls []
                     |> List.sort compare
                   in
-                  let vc = { Smt.decls; assumptions = !assume; goal } in
-                  match Refine.discharge ~root ~preamble:!measure_preamble vc with
+                  (* The same sort resolution every other query gets: a
+                     parameter declared at a generic instance meets measures
+                     declared at their own instances here. *)
+                  match resolve_sorts decls goal !assume with
+                  | None -> Some (Obligation.Skipped Obligation.Sort_conflict)
+                  | Some (decls, goal, assumptions, measure_instances) ->
+                  let vc = { Smt.decls; assumptions; goal } in
+                  let preamble =
+                    !measure_preamble ^ "\n"
+                    ^ query_instance_preamble ~declared:!measure_preamble ~measures:true decls goal
+                        assumptions measure_instances
+                  in
+                  match Refine.discharge ~root ~preamble vc with
                   | Refine.Verified -> Some Obligation.Proved
                   | _ when not refute -> Some (Obligation.Skipped Obligation.Solver_undecided)
                   (* DEFINITE failure only: "not proved" is not "violated".  The
                      predicate is reported as violated only when its NEGATION is
                      itself Verified — i.e. it can never hold. *)
                   | _ ->
-                    if Refine.discharge ~root ~preamble:!measure_preamble
-                         { vc with Smt.goal = Smt.Not goal }
+                    if Refine.discharge ~root ~preamble { vc with Smt.goal = Smt.Not goal }
                        = Refine.Verified
                     then Some Obligation.Violated
                     else Some (Obligation.Skipped Obligation.Solver_undecided))

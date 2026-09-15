@@ -13,6 +13,14 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Refinement measures read the payloads of parametric types.** A
+  `@[measure]` declared over `Tree(Int)` or `Expr(Int)` now reads its `Int`
+  payloads (`sum(l) + x + sum(r)`), a set-valued measure can collect them, and
+  a measure declared over `Tree(a)` applies at `Tree(Int)`. These contracts
+  were skipped before. A set predicate whose operands have known, different
+  element types (`member("a", elts(xs))` with `xs : List(Int)`) is now an
+  error at the predicate instead of a silent skip.
+
 - **A remote send's failure reaches the sending actor's mailbox**:
   `NodeSend.cast_from` records the sender under the seq and `NodeSend.on_failure`
   hands a `DELIVERY_FAILED` frame back to it through the caller's dispatch, the

@@ -162,7 +162,7 @@ let rec collect_consts (acc : (string, unit) Hashtbl.t) (t : Smt.term) : unit =
   | Smt.And (a, b) | Smt.Or (a, b) | Smt.Implies (a, b) ->
     collect_consts acc a; collect_consts acc b
   | Smt.MulLit (_, t) | Smt.Neg t | Smt.Not t -> collect_consts acc t
-  | Smt.App (_, ts) -> List.iter (collect_consts acc) ts
+  | Smt.App (_, ts) | Smt.Ctor (_, _, ts) -> List.iter (collect_consts acc) ts
   | _ -> ()
 
 let probe ~root (decls : (string * Smt.sort) list) (assumptions : Smt.term list)

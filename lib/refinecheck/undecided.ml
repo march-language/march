@@ -18,8 +18,8 @@ let rec consts (t : Smt.term) : string list =
   match t with
   | Smt.Const n -> [ n ]
   | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ -> []
-  | Smt.App (_, ts) -> List.concat_map consts ts
-  | Smt.IsCtor (_, a) | Smt.Neg a | Smt.Not a -> consts a
+  | Smt.App (_, ts) | Smt.Ctor (_, _, ts) -> List.concat_map consts ts
+  | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) | Smt.Neg a | Smt.Not a -> consts a
   | Smt.MulLit (_, a) -> consts a
   | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b)
   | Smt.And (a, b) | Smt.Or (a, b) | Smt.Implies (a, b)
@@ -35,8 +35,8 @@ let rec consts (t : Smt.term) : string list =
 let rec app_heads (t : Smt.term) : string list =
   match t with
   | Smt.Const _ | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ -> []
-  | Smt.App (f, ts) -> f :: List.concat_map app_heads ts
-  | Smt.IsCtor (_, a) | Smt.Neg a | Smt.Not a -> app_heads a
+  | Smt.App (f, ts) | Smt.Ctor (f, _, ts) -> f :: List.concat_map app_heads ts
+  | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) | Smt.Neg a | Smt.Not a -> app_heads a
   | Smt.MulLit (_, a) -> app_heads a
   | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b)
   | Smt.And (a, b) | Smt.Or (a, b) | Smt.Implies (a, b)
