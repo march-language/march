@@ -335,6 +335,12 @@ git log is authoritative for exact commits.
   with "non-exhaustive pattern match ... { cmp: <fn>, tree: Leaf }" both
   compiled and interpreted, and `--check stdlib/sorted_set.march` reported 17
   type errors.
+- **Interpreter: a user function no longer hijacks a Prelude function's
+  internal call of the same name.** With a `pfn show` (or `fn show`) over
+  some type in your program, `println("hi")` panicked when interpreted
+  (`match failure`) because Prelude's `println` called your `show` instead of
+  the builtin one; the compiled binary was already correct. A Prelude
+  function's bare references now resolve in Prelude's own scope.
 - **No more false "Non-exhaustive pattern match" on matches that mix wildcard
   and constructor sub-patterns in one position.** A fully covered match such as
   `Nd(Lf(a), Lf(b))`, `Nd(Nd(_, _), Lf(b))`, `Nd(_, Nd(_, _))`, `Lf(n)` warned

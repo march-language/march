@@ -4886,6 +4886,58 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/iface_method_collision.expected native_iface_method_collision.out)))
 
+(rule
+ (targets interp_iface_method_collision.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/iface_method_collision.march))
+ (action
+  (with-stdout-to interp_iface_method_collision.out
+    (run %{exe:../bin/main.exe} native/iface_method_collision.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/iface_method_collision.expected interp_iface_method_collision.out)))
+
+; ── Regression: under the interpreter a prelude function's bare free reference
+; ── (println -> show) resolves in the prelude's own scope, never to an
+; ── entry-module fn/pfn of the same name. Both backends, one .expected.
+(rule
+ (targets native_prelude_scope_user_shadow native_prelude_scope_user_shadow.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/prelude_scope_user_shadow.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_prelude_scope_user_shadow
+        native/prelude_scope_user_shadow.march)
+   (with-stdout-to native_prelude_scope_user_shadow.out
+        (system "./native_prelude_scope_user_shadow")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/prelude_scope_user_shadow.expected native_prelude_scope_user_shadow.out)))
+
+(rule
+ (targets interp_prelude_scope_user_shadow.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/prelude_scope_user_shadow.march))
+ (action
+  (with-stdout-to interp_prelude_scope_user_shadow.out
+    (run %{exe:../bin/main.exe} native/prelude_scope_user_shadow.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/prelude_scope_user_shadow.expected interp_prelude_scope_user_shadow.out)))
+
 ; ── Regression: an ambiguous general-interface call (same-short-name colliding
 ; ── types) must not be silently resolved to whichever impl was registered
 ; ── first at LOWER time — test_ambiguous_iface_call_stays_unresolved_at_lower_time
