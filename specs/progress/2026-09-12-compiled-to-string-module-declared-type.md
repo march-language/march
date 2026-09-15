@@ -88,9 +88,35 @@ is unaffected.
 `make_nil` / `make_cons` (`List`) and `mk_ok` / `mk_ok_unit` / `mk_err`
 (`Result`) in `runtime/march_runtime.c`. Both types' C tags already matched
 the declaration order the descriptor is keyed by — Nil=0/Cons=1, Ok=0/Err=1 —
-and every call site in that file builds the type its helper's name says (14
-`mk_ok`, 3 `mk_err`, 10 `make_cons`, 15 `make_nil`, audited individually),
-so the id belongs to the helper rather than the caller.
+and the id belongs to the helper rather than the caller only if every call
+site returns the type the helper names, because a helper reused for another
+shape would print a confidently WRONG constructor instead of a placeholder.
+
+**Correction (2026-09-15).** This paragraph first said "14 `mk_ok`, 3
+`mk_err`, 10 `make_cons`, 15 `make_nil`, audited individually". Those were
+`grep -c` hits that counted each helper's definition and forward declaration
+as call sites, and not every site had actually been read. The audit was then
+done properly, against the merged tree, by mapping each enclosing C function
+to its builtin and reading the builtin's declared type in
+`lib/typecheck/typecheck_builtins.ml`:
+
+| helper | call sites | every caller declared as |
+|---|---|---|
+| `make_nil` | 15 | `List(...)`: string_chars/split/to_codepoints, process_argv, typed_array_to_list, actor_pid_indices, dist_monitor_pending, ring_buf_to_list, and the macro-generated `native_{int,float,f32,i32,u8}_arr_to_list`; `list_concat`/`list_append` have no surface declaration, and their compiled `ret_ty` in `lib/tir/llvm_builtins.ml` is `List` |
+| `make_cons` | 10 | `List(...)`, same callers |
+| `mk_ok` | 12 | `Result(...)` (file_read/stat/open, dir_list, csv_open, process_spawn_sync/lines/async, dns_resolve, actor_call, task_await) |
+| `mk_err` | 2 | wrappers: `mk_err_cstr` (dns_resolve, actor_call, process_spawn_*, task_await, and task_cancel_by_id, which writes `Err("task cancelled")` into the slot task_await returns) and `mk_err_file` (the file/dir errno paths) — all `Result(...)` |
+| `mk_ok_unit` | 11 | `Result(Unit, FileError)` for nine file/dir builtins — **except two** |
+
+The two exceptions are pre-existing and not introduced here: `file_close` is
+declared `Int -> Unit` and `csv_close` `Int -> Atom`, the interpreter returns
+`:ok` for both, and the compiled C returns a heap `Ok(())` cell. Three
+different answers. Stamping changes one observable thing for them: such a
+value reaching an ERASED render now prints `Ok(())` where it printed
+`#<tag:0>`. Neither matches the interpreter's `:ok`, and the cell really is a
+`Result`, so the stamp is truthful about what was built; the declaration is
+what disagrees. Filed as
+`specs/todos/2026-09-15-file-close-csv-close-return-type-mismatch.md`.
 
 Measured effect, erased slot, against a worktree built at `origin/main`:
 
