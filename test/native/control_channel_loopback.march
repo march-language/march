@@ -1,0 +1,126 @@
+-- The control/data split (distributed actors 2/4, step 2): a control frame
+-- is not stuck behind a large data frame.
+--
+-- node-b writes a 16 MiB frame on the DATA connection and, a quarter of the
+-- way through, a SWIM ping on the CONTROL connection. node-a reads both
+-- connections in two tasks and timestamps the ping's arrival and the data
+-- stream's completion. On one connection the ping would sit behind the
+-- remaining 12 MiB (TCP cannot reorder bytes already written); on two, it
+-- arrives while the data is still streaming. The data body is streamed as
+-- raw bytes on both sides -- NetKernel.recv_frame accumulates a List(Int)
+-- with List.append per chunk, which is quadratic in the frame size (noted
+-- in the design record).
+-- Design: specs/todos/2026-09-14-distributed-plane-flow-control-and-control-channel.md.
+mod ControlChannelLoopback do
+  needs IO.Console
+  needs IO.Mut
+  needs IO.Clock
+  needs IO.NetListen
+  needs IO.NetConnect
+  needs IO.Random
+  needs IO.Spawn
+
+  pfn secret() do "test-cluster-secret" end
+  pfn node_a_id() do NodeIdentity.make("node-a", "pk-a", 1) end
+  pfn node_b_id() do NodeIdentity.make("node-b", "pk-b", 1) end
+
+  pfn data_len() : Int do 16777216 end
+  pfn chunk() : String do String.repeat("x", 65536) end
+
+  pfn write_chunks(fd : Int, n : Int) : () do
+    if n <= 0 do ()
+    else
+      let _ = Socket.write(fd, chunk())
+      write_chunks(fd, n - 1)
+    end
+  end
+
+  -- ── node-b: acceptor, writes the data stream and the ping ───────────────
+  pfn run_node_b(listen_fd : Int) do
+    match ClusterConn.accept_split(PeerRegistry.empty(), listen_fd, node_b_id(), secret()) do
+      Err(e) -> panic("node-b accept: " ++ e)
+      Ok((_reg, peer)) ->
+        -- (node-b prints nothing: its lines would race node-a's.)
+        -- frame header for data_len() bytes, then the body in 64 KiB chunks
+        let _ = Socket.write(peer.data_fd, NetKernel.bytes_to_str(NetFrame.encode(Nil)))
+        let _ = Socket.write(peer.data_fd, NetKernel.bytes_to_str(
+          Cons(int_shr(data_len(), 24), Cons(int_and(int_shr(data_len(), 16), 255),
+          Cons(int_and(int_shr(data_len(), 8), 255), Cons(int_and(data_len(), 255), Nil))))))
+        write_chunks(peer.data_fd, 64)
+        let _ = NetKernel.send_frame(peer.fd, SwimDriver.encode_msg(SwimDriver.SwimPing("node-b")))
+        write_chunks(peer.data_fd, 192)
+        tcp_close(peer.data_fd)
+        tcp_close(peer.fd)
+        tcp_close(listen_fd)
+    end
+  end
+
+  -- ── node-a: two readers ─────────────────────────────────────────────────
+  -- Reads until EOF; on an error, remembers it so a short count is
+  -- diagnosable from the golden diff rather than a bare "false".
+  pfn read_data(fd : Int, got : Int) : Int do
+    match Socket.recv(fd, 1048576) do
+      Ok(s) ->
+        if String.is_empty(s) do got else read_data(fd, got + string_length(s)) end
+      Err(e) ->
+        Vault.set(Vault.open("cc_times"), "err", Socket.error_message(e))
+        got
+    end
+  end
+
+  pfn on_control(tag : Int, frame : List(Int)) : Result(Bool, String) do
+    if tag == 0 do
+      match SwimDriver.decode_msg(frame) do
+        Ok(SwimDriver.SwimPing(from)) ->
+          Vault.set(Vault.open("cc_times"), "ping", unix_time_ms())
+          println("node-a: control ping from " ++ from)
+          Ok(false)
+        _ -> Err("bad swim frame")
+      end
+    else
+      Err("unexpected tag " ++ int_to_string(tag))
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen), _cap_random : Cap(IO.Random), _cap_spawn : Cap(IO.Spawn), _cap_mut : Cap(IO.Mut), _cap_clock : Cap(IO.Clock)) do
+    let _ = Vault.new("cc_times")
+    let listen_fd = match tcp_listen(0) do
+      Ok(fd) -> fd
+      Err(e) -> panic("listen: " ++ e)
+    end
+    let port = match tcp_local_port(listen_fd) do
+      Ok(p) -> p
+      Err(e) -> panic("local_port: " ++ e)
+    end
+    let srv = task_spawn(fn _ -> run_node_b(listen_fd))
+    let peer = match ClusterConn.connect_split(PeerRegistry.empty(), "127.0.0.1", port, node_a_id(), secret()) do
+      Err(e) -> panic("node-a connect: " ++ e)
+      Ok((_reg, p)) -> p
+    end
+    println("node-a: peer " ++ peer.identity.name ++ ", control fd and data fd differ: " ++ bool_to_string(peer.fd != peer.data_fd))
+    let ctl = task_spawn(fn _ -> match PeerReader.serve(peer.fd, Nil, on_control) do
+      Ok(_) -> 0
+      Err(e) -> panic("control reader: " ++ e)
+    end)
+    let dat = task_spawn(fn _ ->
+      let n = read_data(peer.data_fd, 0)
+      Vault.set(Vault.open("cc_times"), "data", unix_time_ms())
+      n)
+    let _ = task_await(ctl)
+    let n = match task_await(dat) do
+      Ok(k) -> k
+      Err(e) -> panic("data reader: " ++ e)
+    end
+    let _ = task_await(srv)
+    if n == data_len() + 8 do
+      println("node-a: data stream complete: true")
+    else
+      println("node-a: data stream complete: false (got " ++ int_to_string(n) ++ " of " ++ int_to_string(data_len() + 8) ++ ", last error: " ++ Vault.get_or(Vault.open("cc_times"), "err", "none") ++ ")")
+    end
+    let t_ping = Vault.get_or(Vault.open("cc_times"), "ping", 0)
+    let t_data = Vault.get_or(Vault.open("cc_times"), "data", 0)
+    println("node-a: control ping arrived before the data stream finished: " ++ bool_to_string(t_ping > 0 && t_ping <= t_data))
+    tcp_close(peer.fd)
+    tcp_close(peer.data_fd)
+  end
+end

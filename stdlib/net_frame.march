@@ -27,6 +27,16 @@ mod NetFrame do
 
   -- Pull one complete frame off the front of [buf]. Returns Some((payload, rest))
   -- when a full header + body have arrived, or None when more bytes are needed.
+  -- The body length a buffer's first four bytes announce (caller checks
+  -- there are four).
+  fn body_length(buf : List(Int)) : Int do
+    match List.take(buf, 4) do
+      Cons(b0, Cons(b1, Cons(b2, Cons(b3, _)))) ->
+        b0 * 16777216 + b1 * 65536 + b2 * 256 + b3
+      _ -> 0
+    end
+  end
+
   fn decode(buf : List(Int)) : Option((List(Int), List(Int))) do
     if List.length(buf) < 4 do
       None

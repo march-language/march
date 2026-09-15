@@ -8,19 +8,33 @@
 -- I/O (framing via NetFrame, send/recv) lives in the net-kernel on top.
 mod Handshake do
 
-  type Hello = { identity : NodeIdentity.Identity, nonce : String }
+  -- `role` names the connection this hello opens: "control" (SWIM, registry
+  -- sync, monitors, CREDIT, DELIVERY_FAILED) or "data" (ACTOR_MSG, RPC). One
+  -- of each per peer since the control/data split
+  -- (specs/todos/2026-09-14-distributed-plane-flow-control-and-control-channel.md,
+  -- step 2). A hello without the field -- every node before the split -- is
+  -- a control connection, so the two wire shapes interoperate.
+  type Hello = { identity : NodeIdentity.Identity, nonce : String, role : String }
+
+  fn role_control() : String do "control" end
+  fn role_data() : String do "data" end
 
   fn make_hello(identity : NodeIdentity.Identity, nonce : String) : Hello do
-    { identity: identity, nonce: nonce }
+    { identity: identity, nonce: nonce, role: role_control() }
   end
 
-  -- Serialize a Hello to MessagePack bytes: [name, node_id, incarnation, nonce].
+  fn make_hello_role(identity : NodeIdentity.Identity, nonce : String, role : String) : Hello do
+    { identity: identity, nonce: nonce, role: role }
+  end
+
+  -- Serialize a Hello to MessagePack bytes: [name, node_id, incarnation, nonce, role].
   fn encode_hello(h : Hello) : List(Int) do
     Msgpack.encode(Msgpack.array(
       Cons(Msgpack.str(h.identity.name),
       Cons(Msgpack.str(h.identity.node_id),
       Cons(Msgpack.int(h.identity.incarnation),
-      Cons(Msgpack.str(h.nonce), Nil))))))
+      Cons(Msgpack.str(h.nonce),
+      Cons(Msgpack.str(h.role), Nil)))))))
   end
 
   fn decode_hello(bytes : List(Int)) : Result(Hello, String) do
@@ -31,9 +45,16 @@ mod Handshake do
           Msgpack.Array(Cons(Msgpack.Str(name),
                         Cons(Msgpack.Str(nid),
                         Cons(Msgpack.Int(inc),
+                        Cons(Msgpack.Str(nonce),
+                        Cons(Msgpack.Str(role), Nil)))))) ->
+            Ok({ identity: { name: name, node_id: nid, incarnation: inc },
+                 nonce: nonce, role: role })
+          Msgpack.Array(Cons(Msgpack.Str(name),
+                        Cons(Msgpack.Str(nid),
+                        Cons(Msgpack.Int(inc),
                         Cons(Msgpack.Str(nonce), Nil))))) ->
             Ok({ identity: { name: name, node_id: nid, incarnation: inc },
-                 nonce: nonce })
+                 nonce: nonce, role: role_control() })
           _ -> Err("Handshake: malformed hello")
         end
     end

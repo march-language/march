@@ -171,6 +171,13 @@ mod NodeSend do
   -- not an ACTOR_MSG, or a dispatch that returns Err is answered with a
   -- DELIVERY_FAILED carrying the reason. Returns Err only on I/O failure.
   fn serve_one(fd : Int, my_creation : Int, dispatch : Delivery -> Result((), String)) : Result((), String) do
+    serve_one_reply(fd, fd, my_creation, dispatch)
+  end
+
+  -- As `serve_one`, but DELIVERY_FAILED goes on [reply_fd]: with the
+  -- control/data split the message arrives on the data connection and the
+  -- failure travels back on the control one.
+  fn serve_one_reply(fd : Int, reply_fd : Int, my_creation : Int, dispatch : Delivery -> Result((), String)) : Result((), String) do
     match NetKernel.recv_frame(fd, Nil) do
       Err(e) -> Err(e)
       Ok(fr) ->
@@ -187,7 +194,7 @@ mod NodeSend do
             match outcome do
               Ok(_) -> Ok(())
               Err(reason) ->
-                match NetKernel.send_frame(fd, encode_failed(d.seq, reason)) do
+                match NetKernel.send_frame(reply_fd, encode_failed(d.seq, reason)) do
                   Err(e) -> Err(e)
                   Ok(_) -> Ok(())
                 end

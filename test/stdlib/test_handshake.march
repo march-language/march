@@ -11,6 +11,27 @@ mod TestHandshake do
       assert (Handshake.decode_hello(Handshake.encode_hello(h)) == Ok(h))
     end
 
+    test "a hello carries its connection role; the default is control" do
+      let h = Handshake.make_hello(alice(), "n")
+      assert (h.role == Handshake.role_control())
+      let d = Handshake.make_hello_role(alice(), "n", Handshake.role_data())
+      assert (Handshake.decode_hello(Handshake.encode_hello(d)) == Ok(d))
+    end
+
+    test "a pre-split hello (no role field) decodes as a control connection" do
+      -- the four-element wire shape every node sent before the split
+      let a = alice()
+      let legacy = Msgpack.encode(Msgpack.array(
+        Cons(Msgpack.str("alice@host"), Cons(Msgpack.str(a.node_id),
+        Cons(Msgpack.int(1), Cons(Msgpack.str("nonce-abc"), Nil))))))
+      match Handshake.decode_hello(legacy) do
+        Ok(h) ->
+          assert (h.role == Handshake.role_control())
+          assert (h.nonce == "nonce-abc")
+        Err(_) -> assert false
+      end
+    end
+
     test "decode rejects malformed bytes" do
       match Handshake.decode_hello(Cons(255, Cons(255, Nil))) do
         Ok(_) -> assert false

@@ -5766,6 +5766,48 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/node_send_failed_msg.expected native_node_send_failed_msg.out)))
 
+; ── The control/data split: a control frame is not stuck behind a 16 MiB data frame ──
+; ClusterConn.connect_split / accept_split open two connections per peer,
+; told apart by the hello's role; node-a reads both in two tasks and
+; timestamps the ping's arrival against the data stream's completion.
+(rule
+ (targets native_control_channel_loopback native_control_channel_loopback.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/control_channel_loopback.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_control_channel_loopback
+        native/control_channel_loopback.march)
+   (with-stdout-to native_control_channel_loopback.out
+        (system "./native_control_channel_loopback")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/control_channel_loopback.expected native_control_channel_loopback.out)))
+
+; ── NetKernel.recv_frame is linear in the frame size ──
+; A 1 MiB frame plus a small one arriving in the same recv(): one
+; recv_exact and one append per frame (4.1 s under the old per-chunk
+; append, 0.3 s now, measured 2026-09-14).
+(rule
+ (targets native_net_frame_large_loopback native_net_frame_large_loopback.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/net_frame_large_loopback.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_net_frame_large_loopback
+        native/net_frame_large_loopback.march)
+   (with-stdout-to native_net_frame_large_loopback.out
+        (system "./native_net_frame_large_loopback")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/net_frame_large_loopback.expected native_net_frame_large_loopback.out)))
+
 ; ── User fns named after C symbols the runtime links against ──
 ; `fn connect`/`log`/`time`/`strlen`, each used twice so its symbol is
 ; emitted. Before the `$u` mangling (llvm_builtins.ml, c_reserved_symbols)

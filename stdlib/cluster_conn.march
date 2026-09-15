@@ -29,8 +29,77 @@ mod ClusterConn do
         tcp_close(fd)
         Err(e)
       Ok(peer_id) ->
-        let peer = { node_id: peer_id.node_id, identity: peer_id, fd: fd }
+        let peer = { node_id: peer_id.node_id, identity: peer_id, fd: fd, data_fd: PeerRegistry.no_fd() }
         Ok((PeerRegistry.add(reg, peer), peer))
+    end
+  end
+
+  -- ── the control/data split ──────────────────────────────────────────────
+  -- Two connections per peer, opened in the handshake and told apart by the
+  -- hello's role: control (SWIM, registry sync, monitors, CREDIT,
+  -- DELIVERY_FAILED) and data (ACTOR_MSG, RPC). A control frame can then
+  -- never queue behind a large data frame -- TCP has no way to let one
+  -- overtake bytes already written on the same stream; only a second stream
+  -- can. The single-connection `connect_to_peer` / `accept_one` stay for
+  -- pre-split peers and fixtures.
+
+  pfn dial(host, port, my_id, secret, role) do
+    match Socket.connect(host, port) do
+      Err(e) -> Err(Socket.error_message(e))
+      Ok(fd) ->
+        match NetKernel.handshake_role(fd, my_id, secret, NetKernel.fresh_nonce(), role) do
+          Err(e) -> Err(e)
+          Ok((peer_id, _)) -> Ok((fd, peer_id))
+        end
+    end
+  end
+
+  -- Dial [host]:[port] twice -- control first, then data -- and register the
+  -- peer with both.
+  fn connect_split(reg, host, port, my_id, secret) do
+    match dial(host, port, my_id, secret, Handshake.role_control()) do
+      Err(e) -> Err(e)
+      Ok((cfd, peer_id)) ->
+        match dial(host, port, my_id, secret, Handshake.role_data()) do
+          Err(e) -> Err(e)
+          Ok((dfd, _)) ->
+            let peer = { node_id: peer_id.node_id, identity: peer_id, fd: cfd, data_fd: dfd }
+            Ok((PeerRegistry.add(reg, peer), peer))
+        end
+    end
+  end
+
+  pfn take(listen_fd, my_id, secret) do
+    match tcp_accept(listen_fd) do
+      Err(e) -> Err(e)
+      Ok(fd) ->
+        match NetKernel.handshake_role(fd, my_id, secret, NetKernel.fresh_nonce(), Handshake.role_control()) do
+          Err(e) -> Err(e)
+          Ok((peer_id, role)) -> Ok((fd, peer_id, role))
+        end
+    end
+  end
+
+  -- Accept one peer's TWO connections (in the order the peer dials them:
+  -- control, then data) and register it with both.
+  fn accept_split(reg, listen_fd, my_id, secret) do
+    match take(listen_fd, my_id, secret) do
+      Err(e) -> Err(e)
+      Ok((cfd, peer_id, role1)) ->
+        if role1 != Handshake.role_control() do
+          Err("ClusterConn: expected the control connection first, got " ++ role1)
+        else
+          match take(listen_fd, my_id, secret) do
+            Err(e) -> Err(e)
+            Ok((dfd, peer_id2, role2)) ->
+              if role2 != Handshake.role_data() || peer_id2.node_id != peer_id.node_id do
+                Err("ClusterConn: expected " ++ peer_id.node_id ++ "'s data connection, got " ++ role2 ++ " from " ++ peer_id2.node_id)
+              else
+                let peer = { node_id: peer_id.node_id, identity: peer_id, fd: cfd, data_fd: dfd }
+                Ok((PeerRegistry.add(reg, peer), peer))
+              end
+          end
+        end
     end
   end
 
