@@ -123,6 +123,7 @@ let builtin_cap_table : (string * string) list = [
   ("dist_monitor_register", "IO.NetConnect");
   ("dist_monitor_pending",  "IO.NetConnect");
   ("dist_monitor_ack",      "IO.NetConnect");
+  ("dist_monitor_forget_node", "IO.NetConnect");
   ("tcp_recv_http",         "IO.NetConnect");
   ("tcp_recv_http_headers", "IO.NetConnect");
   ("tcp_recv_chunk",        "IO.NetConnect");
@@ -844,6 +845,9 @@ let builtin_bindings : (string * scheme) list =
        for the March-side resend; the ack that forgets one. *)
     ("dist_monitor_pending", Mono (TArrow (t_unit, TCon ("List", [TTuple [t_int; TTuple [t_string; TTuple [t_int; TTuple [t_int; t_string]]]]]))));
     ("dist_monitor_ack",     Mono (TArrow (t_int, TArrow (t_int, t_unit))));
+    (* SWIM declared the watcher node dead: drop its watchers and pending
+       fires; returns how many. Nothing is written. *)
+    ("dist_monitor_forget_node", Mono (TArrow (t_string, t_int)));
     ("actor_unregister", Mono (TArrow (t_string, t_bool)));
     ("actor_whereis",    poly1 (fun a -> TArrow (t_string, TCon ("Option", [TCon ("Pid", [a])]))));
     ("actor_registered", Mono (TArrow (t_unit, TCon ("List", [t_string]))));

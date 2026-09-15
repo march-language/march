@@ -53,6 +53,7 @@ let table : (string * string) list = [
   ("march_dist_monitor_register_pid", "IO.NetConnect");
   ("march_dist_monitor_pending",   "IO.NetConnect");
   ("march_dist_monitor_ack_pid",   "IO.NetConnect");
+  ("march_dist_monitor_forget_node_str", "IO.NetConnect");
   ("march_tcp_recv_http",          "IO.NetConnect");
   ("march_tcp_recv_http_headers",  "IO.NetConnect");
   ("march_tcp_recv_chunk",         "IO.NetConnect");

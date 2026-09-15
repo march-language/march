@@ -5809,6 +5809,18 @@ void *march_dist_monitor_pending(void) {
     return list;
 }
 
+int64_t march_dist_monitor_forget_node_str(void *node_str) {
+    if (!node_str) return 0;
+    march_string *s = (march_string *)node_str;
+    size_t n = (size_t)s->len;
+    char *node = (char *)malloc(n + 1);
+    if (!node) return 0;
+    memcpy(node, s->data, n); node[n] = 0;
+    int64_t r = march_dist_monitor_forget_node(node);
+    free(node);
+    return r;
+}
+
 void march_dist_monitor_ack_pid(int64_t target_pid, int64_t watcher_pid) {
     march_dist_monitor_ack(target_pid, watcher_pid);
 }

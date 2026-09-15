@@ -1,0 +1,2 @@
+node-a: monitoring node-b's actor 1, killing it, reading nothing back
+node-b: pending fires before node-a was declared dead: 1, dropped: 1, after: 0
