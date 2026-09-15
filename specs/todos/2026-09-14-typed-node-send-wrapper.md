@@ -1,11 +1,15 @@
-# `[P3]` `@[endpoints]` over `Node.send`: the generated network transport
+# `[P3]` `Node.dispatch`: the generated receiver-side table for typed sends to user actors
 
 **Steps 1–3 shipped 2026-09-15** — `Node.send(peer, to, msg)` exists, with
 the codec checked at the call site, the tag minted, and `Pid` refused by the
 derive: [[2026-09-15-typed-node-send]]. Step 2's queued half shipped the same
-day as `Node.enqueue(q, to, msg, policy)`: [[2026-09-15-node-enqueue]]. What
-remains is step 4 below (the generator) and the receiver-side dispatch table
-it needs.
+day as `Node.enqueue(q, to, msg, policy)`: [[2026-09-15-node-enqueue]]. Step 4's
+transport half shipped as the stdlib `SessionNode` rather than generated code:
+[[2026-09-15-session-node-transport]]. `Session.Ops` speaks in endpoint ids and
+bytes, so the transport names no protocol constructor. What remains is the one piece
+that does need the generator: the receiver-side dispatch table below
+(`Node.dispatch`), which routes a typed `Node.send` to a USER actor's
+constructors.
 
 Filed 2026-09-14 as the last open part of
 [[2026-09-14-remote-send-to-a-global-pid]] (now a progress record). Every

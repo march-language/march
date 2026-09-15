@@ -1,0 +1,232 @@
+-- SessionNode: the `Session.Ops` network transport. A protocol's
+-- `@[endpoints]` roles on two nodes talk over one peer connection
+-- (distributed actors, step 4 of specs/todos/2026-09-14-typed-node-send-wrapper.md).
+--
+-- The transport is protocol-independent: `Session.Ops` speaks in endpoint
+-- ids (Int) and encoded messages (Bytes, the generated `<P>_Msg.encode`), so
+-- nothing here names a protocol's constructors and nothing needs generating.
+-- What a node writes:
+--
+--   let link = SessionNode.open(conn, "node-a", false, fn ep -> ...)   -- after connect_split / accept_split
+--   let s = Session.attach(io, SessionNode.ops(link))
+--   let st = Stream_Prod.register(s, 0)
+--   ... drive the role to its first suspension ...
+--   SessionNode.serve(link)        -- deliveries, until the peer's endpoint closes
+--   SessionNode.finish(link)
+--
+-- On the wire, per peer connection (the control/data split):
+--   data     ACTOR_MSG "SessionNode.Deliver" [to, from, msg], through a
+--            NodeQueue (credit-based flow control); "SessionNode.Bye" when an
+--            endpoint closes.
+--   control  "SessionNode.Hello" (the endpoint actor's GlobalPid; the ACCEPTING
+--            side announces first), CREDIT, and a final Bye.
+--
+-- Receiving: a delivery is sent to this node's endpoint actor, whose turn
+-- runs the continuation `suspend` installed. One actor, so one node's
+-- resumptions (and prints) run in mailbox order, which is the protocol's.
+-- "Consumed" for credit is "in the mailbox".
+mod SessionNode do
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.Spawn
+
+  pfn budget() : Int do 4096 end
+
+  -- Everything one peer connection needs. `handlers` holds the installed
+  -- continuations by endpoint; `meta` the send seq and the closed flag.
+  type Link = { data_fd : Int, control_fd : Int, peer : GlobalPid.Pid, handlers : Vault(Int -> Bytes -> Int -> Int), meta : Vault(Int), ep : Pid({ n : Int }), q : (Pid(NodeQueue.WriterState), Int), control : Task(Int), on_close : Int -> Unit }
+
+  pfn ekey(ep : Int) : String do "e" ++ int_to_string(ep) end
+
+  pfn encode_deliver(to : Int, from : Int, msg : Bytes) : List(Int) do
+    Msgpack.encode(Msgpack.array(
+      Cons(Msgpack.int(to), Cons(Msgpack.int(from), Cons(Msgpack.bin(Bytes.to_list(msg)), Nil)))))
+  end
+
+  pfn decode_deliver(payload : List(Int)) : Result((Int, Int, Bytes), String) do
+    match Msgpack.decode(payload) do
+      Ok(Msgpack.Array(Cons(Msgpack.Int(to), Cons(Msgpack.Int(from), Cons(Msgpack.Bin(m), Nil))))) ->
+        Ok((to, from, Bytes.from_list(m)))
+      _ -> Err("session_node: bad Deliver payload")
+    end
+  end
+
+  pfn next_seq(meta : Vault(Int)) : Int do
+    Vault.incr(meta, "seq", 1)
+  end
+
+  fn fire(handlers : Vault(Int -> Bytes -> Int -> Int), ep : Int, from : Int, msg : Bytes) : Int do
+    match Vault.get(handlers, ekey(ep)) do
+      Some(k) -> k(from, msg, ep)
+      None    -> panic("session_node: delivery to endpoint " ++ int_to_string(ep) ++ " with no continuation installed")
+    end
+  end
+
+  -- The endpoint actor: a delivery's continuation runs in its turn.
+  actor Endpoint do
+    state { n : Int }
+    init  { n: 0 }
+    on Deliver(handlers : Vault(Int -> Bytes -> Int -> Int), ep : Int, from : Int, msg : Bytes) do
+      let _ = fire(handlers, ep, from, msg)
+      { n: state.n + 1 }
+    end
+  end
+
+  pfn announce(fd : Int, me : GlobalPid.Pid) : () do
+    let _ = NodeSend.cast(fd, 0, GlobalPid.make("peer", 0, 0), "SessionNode.Hello", GlobalPid.encode(me))
+    ()
+  end
+
+  pfn await_hello(fd : Int) : GlobalPid.Pid do
+    match NetKernel.recv_frame_exact(fd) do
+      Err(e) -> panic("session_node: hello: " ++ e)
+      Ok(frame) ->
+        match NodeSend.decode_msg(frame) do
+          Ok(d) ->
+            if d.type_tag != "SessionNode.Hello" do panic("session_node: expected a Hello, got " ++ d.type_tag) else () end
+            match GlobalPid.decode(d.payload) do
+              Ok(p) -> p
+              Err(e) -> panic("session_node: hello pid: " ++ e)
+            end
+          Err(e) -> panic("session_node: hello frame: " ++ e)
+        end
+    end
+  end
+
+  -- The control connection: CREDIT feeds the queue; a Bye ends it (each side
+  -- awaits its own reader, so closing first and awaiting would deadlock).
+  pfn on_control(q : (Pid(NodeQueue.WriterState), Int), tag : Int, frame : List(Int)) : Result(Bool, String) do
+    if tag == NodeQueue.tag_credit() do
+      match NodeQueue.decode_credit(frame) do
+        Ok(total) ->
+          NodeQueue.credit(q, total)
+          Ok(true)
+        Err(e) -> Err(e)
+      end
+    else
+      if tag == NodeSend.tag_actor_msg() do
+        match NodeSend.decode_msg(frame) do
+          Ok(d) -> Ok(d.type_tag != "SessionNode.Bye")
+          Err(e) -> Err(e)
+        end
+      else
+        if tag == NodeSend.tag_delivery_failed() do
+          match NodeSend.decode_failed(frame) do
+            Ok((seq, reason)) -> Err("session_node: delivery " ++ int_to_string(seq) ++ " failed: " ++ reason)
+            Err(e) -> Err(e)
+          end
+        else
+          Err("session_node: unexpected tag " ++ int_to_string(tag) ++ " on the control connection")
+        end
+      end
+    end
+  end
+
+  pfn serve_control(control_fd : Int, q : (Pid(NodeQueue.WriterState), Int)) : Int do
+    match PeerReader.serve(control_fd, Nil, fn (tag, frame) -> on_control(q, tag, frame)) do
+      Ok(_) -> 0
+      Err(_) -> 0
+    end
+  end
+
+  doc """
+  Open the transport on a split peer connection (`ClusterConn.connect_split` /
+  `accept_split`). Spawns this node's endpoint actor, exchanges endpoint pids
+  on the control connection (the accepting side, [accepted] = true, announces
+  first), starts the data connection's NodeQueue and the control reader.
+  [on_close] runs when a local endpoint closes, with its endpoint id.
+  """
+  fn open(conn : Peer, node_id : String, accepted : Bool, on_close : Int -> Unit) : Link do
+    let ep = spawn(Endpoint)
+    let me = GlobalPid.make(node_id, pid_to_int(ep), 1)
+    let peer = if accepted do
+      announce(conn.fd, me)
+      await_hello(conn.fd)
+    else
+      let p = await_hello(conn.fd)
+      announce(conn.fd, me)
+      p
+    end
+    let tag = node_id ++ "." ++ int_to_string(conn.data_fd)
+    let handlers = Vault.new("session_node_handlers_" ++ tag)
+    let meta = Vault.new("session_node_meta_" ++ tag)
+    let q = NodeQueue.start(conn.data_fd, budget())
+    let control = task_spawn(fn _ -> serve_control(conn.fd, q))
+    { data_fd: conn.data_fd, control_fd: conn.fd, peer: peer, handlers: handlers, meta: meta, ep: ep, q: q, control: control, on_close: on_close }
+  end
+
+  doc "The `Session.Ops` for [link]: hand it to `Session.attach`."
+  fn ops(link : Link) : Session.Ops do
+    let q = link.q
+    let meta = link.meta
+    let handlers = link.handlers
+    let peer = link.peer
+    let on_close = link.on_close
+    {
+      register: fn (_ap, role) -> role,
+      emit: fn (ep, to, msg) -> do
+        let _ = NodeQueue.cast(q, next_seq(meta), peer, "SessionNode.Deliver", encode_deliver(to, ep, msg), NodeQueue.DropNew)
+        ep
+      end,
+      suspend: fn (ep, handler) -> do
+        Vault.set(handlers, ekey(ep), handler)
+        ep
+      end,
+      close: fn ep -> do
+        on_close(ep)
+        Vault.set(meta, "closed", 1)
+        let _ = NodeQueue.cast(q, next_seq(meta), peer, "SessionNode.Bye", Nil, NodeQueue.DropNew)
+        ()
+      end
+    }
+  end
+
+  pfn on_frame(link : Link, tag : Int, frame : List(Int)) : Result(Bool, String) do
+    if tag == NodeSend.tag_actor_msg() do
+      match NodeSend.decode_msg(frame) do
+        Err(e) -> Err(e)
+        Ok(d) ->
+          if d.type_tag == "SessionNode.Bye" do
+            Ok(false)
+          else
+            if d.type_tag == "SessionNode.Deliver" do
+              match decode_deliver(d.payload) do
+                Err(e) -> Err(e)
+                Ok((to, from, msg)) ->
+                  send(link.ep, Deliver(link.handlers, to, from, msg))
+                  let _ = NodeQueue.consumed(link.control_fd, budget(), List.length(frame) + 4)
+                  Ok(true)
+              end
+            else
+              Err("session_node: unexpected type " ++ d.type_tag)
+            end
+          end
+      end
+    else
+      Err("session_node: unexpected tag " ++ int_to_string(tag) ++ " on the data connection")
+    end
+  end
+
+  doc """
+  Read deliveries on the data connection until the peer's endpoint closes.
+  Every resumption runs in this node's endpoint actor, so call it after
+  driving the local role to its first suspension.
+  """
+  fn serve(link : Link) : Unit do
+    match PeerReader.serve(link.data_fd, Nil, fn (tag, frame) -> on_frame(link, tag, frame)) do
+      Ok(_) -> ()
+      Err(e) ->
+        -- Once a local endpoint has closed, the peer closing the data
+        -- connection (its Bye may still be in its writer) is a clean end.
+        if Vault.get(link.meta, "closed") != None do () else panic("session_node: reader: " ++ e) end
+    end
+  end
+
+  doc "Tear the link down: close data, say Bye on control, await the control reader, close control."
+  fn finish(link : Link) : Unit do
+    tcp_close(link.data_fd)
+    let _ = NodeSend.cast(link.control_fd, 0, GlobalPid.make("peer", 0, 0), "SessionNode.Bye", Nil)
+    let _ = task_await(link.control)
+    tcp_close(link.control_fd)
+  end
+end

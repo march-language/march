@@ -12,6 +12,12 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`SessionNode`**: the `Session.Ops` network transport. An `@[endpoints]` protocol's
+  roles run on two nodes over one split peer connection:
+  `SessionNode.open(conn, node_id, accepted, on_close)`, `Session.attach(io,
+  SessionNode.ops(link))`, `SessionNode.serve(link)`, `SessionNode.finish(link)`. Flow
+  control uses the credit-based `NodeQueue`. The two-node `stream` scenario now uses it
+  (267 + 250 lines became 73 + 59).
 - Two-node scenario `partition`: two processes running SWIM stop hearing each other,
   each claims the same `GlobalRegistry` name, and both converge on one winner after the
   heal. It needs Linux root for iptables; `scripts/two-node-docker.sh` runs any scenario
