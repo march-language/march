@@ -40,7 +40,7 @@ let render_user_diag ~src ~filename ~read_file (d : March_errors.Errors.diagnost
   if f = synthetic_file then
     let d = { d with March_errors.Errors.notes =
                        d.March_errors.Errors.notes
-                       @ [ "in code generated for this file by a `derive` or `@[endpoints]` \
+                       @ [ "in code generated for this file by a `derive`, `@[endpoints]` or `@[remote]` \
                             declaration; the excerpt cannot be shown" ] } in
     March_errors.Errors.render_diagnostic ~src:"" ~filename d
   else

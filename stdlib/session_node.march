@@ -1,6 +1,6 @@
 -- SessionNode: the `Session.Ops` network transport. A protocol's
 -- `@[endpoints]` roles on two nodes talk over one peer connection
--- (distributed actors, step 4 of specs/todos/2026-09-14-typed-node-send-wrapper.md).
+-- (distributed actors, step 4 of specs/progress/2026-09-15-remote-actor-dispatch.md).
 --
 -- The transport is protocol-independent: `Session.Ops` speaks in endpoint
 -- ids (Int) and encoded messages (Bytes, the generated `<P>_Msg.encode`), so

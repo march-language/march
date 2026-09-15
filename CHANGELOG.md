@@ -12,6 +12,12 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`@[remote]` on an actor**: the compiler generates `<Actor>_Remote.dispatch(pid,
+  delivery)`, which routes a typed `Node.send` delivery to the handler that takes its type.
+  It returns `Ok(true)` when delivered, `Ok(false)` when no handler takes that type, and
+  `Err` when the payload doesn't decode. The receiver's tag comparison uses the same tag the
+  sender's compiler mints. A handler type without a codec is a compile error, and so is a
+  `@[remote]` actor with no routable handler.
 - **`SessionNode`**: the `Session.Ops` network transport. An `@[endpoints]` protocol's
   roles run on two nodes over one split peer connection:
   `SessionNode.open(conn, node_id, accepted, on_close)`, `Session.attach(io,
@@ -332,6 +338,10 @@ git log is authoritative for exact commits.
   nothing when unset.
 
 ### Fixed
+- `Node.send` minted a different wire tag for a message type declared at the entry
+  module's top level depending on the entry module's name (`App.Note` rather than
+  `Note`), so two separately built nodes could not agree on it. The entry module's name
+  is now unwrapped, as it already was for nested types.
 - `GlobalRegistry` replicas now converge after a network partition. `REGISTRY_SYNC_RESP`
   dropped each entry's vector clock, so a received binding always lost to the local one
   and both sides kept their own. Leaves now carry the clock, and the old encoding still

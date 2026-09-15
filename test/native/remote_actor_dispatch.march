@@ -1,0 +1,81 @@
+-- `@[remote]` on an actor: the generated `Counter_Remote.dispatch(pid, d)`
+-- routes a typed remote delivery to the actor's handler by the wire tag the
+-- sender's compiler mints (specs/progress/2026-09-15-remote-actor-dispatch.md).
+--
+-- No sockets, so both backends run it: each delivery is built with the
+-- sender's own codec (`NodeSend.encode_msg` over the derived JSON), exactly
+-- the bytes `Node.send` puts on the wire, and decoded as a receiver would.
+-- The tags are the ones `Node.send` mints: `Msgs.Hit` for a nested-module
+-- type, `Note` for one declared at the entry module's top level (the entry
+-- module's own name is unwrapped for both; minting `RemoteDispatch.Note` made
+-- a top-level type's tag depend on the program's entry-module name).
+mod RemoteDispatch do
+  needs IO.Console
+
+  mod Msgs do
+    type Hit = { n : Int }
+    derive Json for Hit
+  end
+
+  type Note = { text : String }
+  derive Json for Note
+
+  type Stray = { x : Int }
+  derive Json for Stray
+
+  @[remote]
+  actor Counter do
+    state { total : Int }
+    init  { total: 0 }
+    on Bump(h : Msgs.Hit) do
+      println("Counter: Bump n=" ++ int_to_string(h.n) ++ " total=" ++ int_to_string(state.total + h.n))
+      { total: state.total + h.n }
+    end
+    on Say(t : Note) do
+      println("Counter: Say " ++ t.text)
+      state
+    end
+    -- Not routable (no parameter): still an ordinary local message.
+    on Reset() do
+      println("Counter: Reset")
+      { total: 0 }
+    end
+  end
+
+  pfn delivery(tag : String, json : String) : Delivery do
+    let bytes = Bytes.to_list(Bytes.from_string(json))
+    match NodeSend.decode_msg(NodeSend.encode_msg(1, GlobalPid.make("here", 1, 1), tag, bytes)) do
+      Ok(d) -> d
+      Err(e) -> panic("delivery: " ++ e)
+    end
+  end
+
+  pfn outcome(r : Result(Bool, String)) : String do
+    match r do
+      Ok(true) -> "delivered"
+      Ok(false) -> "not for this actor"
+      Err(e) -> "error: " ++ e
+    end
+  end
+
+  pfn report(label : String, r : Result(Bool, String)) : () do
+    run_until_idle()
+    println(label ++ ": " ++ outcome(r))
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let c = spawn(Counter)
+    let hit : Msgs.Hit = { n: 5 }
+    let note : Note = { text: "hello" }
+    let stray : Stray = { x: 1 }
+    -- Each dispatch, then the actor's turn (run_until_idle), then its result:
+    -- one order on both backends.
+    report("hit", Counter_Remote.dispatch(c, delivery("Msgs.Hit", Json.to_string(to_json(hit)))))
+    report("note", Counter_Remote.dispatch(c, delivery("Note", Json.to_string(to_json(note)))))
+    report("stray", Counter_Remote.dispatch(c, delivery("Stray", Json.to_string(to_json(stray)))))
+    report("bad payload", Counter_Remote.dispatch(c, delivery("Msgs.Hit", "{\"nope\": true}")))
+    report("not json", Counter_Remote.dispatch(c, delivery("Note", "}{")))
+    send(c, Reset())
+    run_until_idle()
+  end
+end

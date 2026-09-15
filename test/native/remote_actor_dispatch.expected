@@ -1,0 +1,8 @@
+Counter: Bump n=5 total=5
+hit: delivered
+Counter: Say hello
+note: delivered
+stray: not for this actor
+bad payload: error: Counter: the payload does not decode as Bump's message
+not json: error: unexpected character: '}'
+Counter: Reset

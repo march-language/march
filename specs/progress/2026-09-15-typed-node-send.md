@@ -1,7 +1,7 @@
 # `Node.send(peer, to, msg)`: the typed remote send, shipped
 
 Shipped 2026-09-15. Closes steps 1–3 of
-[[2026-09-14-typed-node-send-wrapper]] (the todo is trimmed to its step 4,
+[[2026-09-15-remote-actor-dispatch]] (the todo is trimmed to its step 4,
 the `@[endpoints]` generator's `Node` transport). Design record:
 [[2026-09-14-remote-send-to-a-global-pid]].
 

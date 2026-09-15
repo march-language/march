@@ -1,0 +1,27 @@
+-- EXPECT-ERROR: has no handler a remote message can reach
+-- `@[remote]` (2026-09-15): a routable handler takes exactly one parameter
+-- annotated with a declared type (not a builtin like `Int`). An actor with none would get a dispatch that
+-- accepts nothing, so the attribute is refused rather than silently useless.
+mod RemoteNothingRoutable do
+  needs IO.Console
+
+  @[remote]
+  actor Counter do
+    state { total : Int }
+    init  { total: 0 }
+    on Set(n : Int) do
+      { total: n }
+    end
+    on Add(a : Int, b : Int) do
+      { total: state.total + a + b }
+    end
+    on Reset() do
+      { total: 0 }
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let _ = spawn(Counter)
+    ()
+  end
+end

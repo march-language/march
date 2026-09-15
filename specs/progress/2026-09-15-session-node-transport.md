@@ -1,7 +1,7 @@
 # `SessionNode`: the `Session.Ops` network transport, as a library
 
 Shipped 2026-09-15 as the transport half of step 4 in
-[[2026-09-14-typed-node-send-wrapper]]. That todo stays open for `Node.dispatch`, the
+[[2026-09-15-remote-actor-dispatch]]. `Node.dispatch` (shipped the same day as `@[remote]`) is the
 generated receiver-side table for typed sends to user actors.
 
 ## Decision: a stdlib module, not generated code
