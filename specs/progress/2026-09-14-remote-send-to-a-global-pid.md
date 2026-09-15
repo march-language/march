@@ -1,4 +1,13 @@
-# `[P1]` Distributed actors 1/4: `send` to an actor on another node
+# Distributed actors 1/4: `send` to an actor on another node
+
+**Closed as a design record 2026-09-14.** Everything below shipped except the
+typed wrapper, which is its own item now:
+[[2026-09-14-typed-node-send-wrapper]]. Shipped: the wire and delivery
+contract (`NodeSend`, #454), `pid_to_int` (#461), `DELIVERY_FAILED` as a
+message to the sending actor (`cast_from`/`on_failure`, #462), the
+`Session.Ops` network transport (`stream` scenario, #462), the per-peer
+reader (`PeerReader`, #459).
+
 
 Filed 2026-09-14. The piece the phrase "distributed actors" implies and the
 cluster stack does not have. The other three files in this set

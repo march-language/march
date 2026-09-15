@@ -1,4 +1,11 @@
-# `[P2]` Distributed actors 2/4: flow control, a control channel, and a delivery contract for monitors
+# Distributed actors 2/4: flow control, a control channel, and a delivery contract for monitors
+
+**Closed as a design record 2026-09-14.** Steps 1 and 2 shipped (`PeerReader`
+#459; the control/data split #465, plus linear `recv_frame` and the
+handshake exact-read fix #466). Steps 3 and 4 are their own items now:
+[[2026-09-14-credit-based-flow-control]] and
+[[2026-09-14-monitor-fire-at-least-once]].
+
 
 Filed 2026-09-14. The design the three open plane items in
 [[2026-08-11-actor-hardening-distributed-plane]] (items 1, 2, 3) said they

@@ -64,7 +64,8 @@ reclamation) is single-node and stays here.
    is the current de facto behavior; decide whether at-least-once is
    required and what dedup key that implies).
 
-4. **Declaration-site `mailbox N policy` syntax.** Task 7-9 shipped
+4. **Declaration-site `mailbox N policy` syntax.** *(Shipped 2026-09-14 —
+   [[2026-09-14-declaration-site-mailbox-syntax]] in `specs/progress/`.)* Task 7-9 shipped
    `Actor.set_queue_limit(pid, limit, policy)` as a runtime call. The plan's
    ergonomics goal was also a declaration-site form (e.g. `actor Foo do
    mailbox 1000 drop_old ... end`) so bounds are visible in the actor

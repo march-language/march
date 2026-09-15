@@ -2133,6 +2133,21 @@ and eval_expr_inner (env : env) (e : expr) : value =
                     ai_linear_values = [];
                     ai_mbox_limit = 0; ai_mbox_policy = 0 } in
        Hashtbl.add actor_registry pid inst;
+       (* `mailbox N policy` on the declaration: the same binding
+          Actor.set_queue_limit makes, applied at every spawn of this actor.
+          policy 3 (block_sender) is refused exactly as the builtin refuses
+          it: the interpreter cannot park a sender. *)
+       (match def.actor_mailbox with
+        | None -> ()
+        | Some (_, 3) ->
+          eval_error
+            "actor %s: `mailbox N block_sender` needs the native scheduler, which \
+             parks the sender; the interpreter cannot. Compile this program, or \
+             declare drop_new / drop_old under `march run`." actor_name
+        | Some (limit, policy) ->
+          (match Hashtbl.find_opt actor_registry pid with
+           | Some inst -> inst.ai_mbox_limit <- limit; inst.ai_mbox_policy <- policy
+           | None -> ()));
        VPid pid)
 
   | ESend (cap_expr, msg_expr, _) ->

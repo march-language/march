@@ -12,6 +12,12 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`mailbox N policy` on an actor declaration** (`mailbox 1000 drop_old`, after
+  `init`): the bound `Actor.set_queue_limit` sets per spawn site, declared once
+  with the actor and applied at every `spawn`, on both backends. The policy is
+  named (`drop_new` / `drop_old` / `block_sender`); an unknown name is a parse
+  error, and `block_sender` under the interpreter fails at the spawn with the
+  same message the call gives.
 - **Control/data split for peer connections**: `ClusterConn.connect_split` /
   `accept_split` open two authenticated connections per peer, told apart by a
   `role` in the hello (a pre-split hello still reads as control); SWIM,

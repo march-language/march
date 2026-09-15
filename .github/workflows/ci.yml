@@ -167,7 +167,7 @@ jobs:
 
       # Two real OS processes, a fault applied from outside (SIGKILL + restart
       # with a new creation), per-node goldens. ~5s per scenario. Each scenario
-      # is test/two_node/<name>/; see specs/todos/2026-09-14-two-node-failure-semantics-harness.md.
+      # is test/two_node/<name>/; see specs/progress/2026-09-14-two-node-failure-semantics-harness.md.
       - name: Two-node scenarios
         if: matrix.os == 'ubuntu-24.04'
         timeout-minutes: 10

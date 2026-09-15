@@ -6,7 +6,7 @@
 -- `NodeSend.on_failure`, which finds the sender and lets the dispatch mint
 -- the actor's own `SendFailed` -- so the failure arrives in the Sender's
 -- mailbox, the way a monitor's Down does, not in a synchronous read.
--- Design: specs/todos/2026-09-14-remote-send-to-a-global-pid.md.
+-- Design: specs/progress/2026-09-14-remote-send-to-a-global-pid.md.
 mod NodeSendFailedMsg do
   needs IO.Console
   needs IO.Mut

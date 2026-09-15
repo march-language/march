@@ -6,7 +6,7 @@
 -- connection and starts a second at the same port with creation 2. Spawn
 -- order is deterministic, so the second incarnation's Sink gets the SAME
 -- local pid as the first: the pid-reuse the creation counter exists for.
--- Design: specs/todos/2026-09-14-two-node-failure-semantics-harness.md.
+-- Design: specs/progress/2026-09-14-two-node-failure-semantics-harness.md.
 mod TwoNodeRestartB do
   needs IO.Console
   needs IO.NetListen

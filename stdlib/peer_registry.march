@@ -8,7 +8,7 @@ mod PeerRegistry do
 
   -- `fd` is the CONTROL connection; `data_fd` the data one, -1 until it is
   -- up (a pre-split peer never opens one). See the control/data split in
-  -- specs/todos/2026-09-14-distributed-plane-flow-control-and-control-channel.md.
+  -- specs/progress/2026-09-14-distributed-plane-flow-control-and-control-channel.md.
   type Peer = { node_id : String, identity : NodeIdentity.Identity, fd : Int, data_fd : Int }
 
   fn no_fd() : Int do -1 end

@@ -46,7 +46,7 @@ mod NetKernel do
   -- the rest of the body is read with ONE tcp_recv_exact and appended ONCE.
   -- The first version appended every 4 KiB chunk to the accumulated list,
   -- quadratic in the frame size -- a 16 MiB frame was impractical
-  -- (specs/todos/2026-09-14-distributed-plane-flow-control-and-control-channel.md).
+  -- (specs/progress/2026-09-14-distributed-plane-flow-control-and-control-channel.md).
   -- Bytes read past the frame boundary come back as the leftover for the
   -- next call, as before.
   fn recv_frame(fd : Int, buf : List(Int)) : Result((List(Int), List(Int)), String) do

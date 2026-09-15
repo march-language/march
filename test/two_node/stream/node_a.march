@@ -6,7 +6,7 @@
 --
 -- This node's trace is the Prod projection of stream_endpoints.expected, in
 -- order: one actor prints, so its order is the protocol's.
--- Design: specs/todos/2026-09-14-remote-send-to-a-global-pid.md ("One
+-- Design: specs/progress/2026-09-14-remote-send-to-a-global-pid.md ("One
 -- transport for endpoints and actors").
 mod StreamOverNodesA do
   needs IO
