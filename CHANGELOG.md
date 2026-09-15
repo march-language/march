@@ -330,6 +330,14 @@ git log is authoritative for exact commits.
 - `stdlib/dist_supervisor.march` failed a standalone `--check` ("Constructor `Normal` is
   ambiguous between multiple modules"): its restart decision matched `DistLink.DownReason`
   with bare arms that also name the local monitor's constructors. Qualified, and guarded.
+- **Refinement checks no longer skip a caller value because it is not an
+  `Int`.** A value the callee did not pin to a scalar sort was declared `Int`
+  in the solver query, so a `String` element (`need(["a", s])` against
+  `member("a", elts(_))`) or an `Option` in a guard (`if o == p do unwrap(o)`)
+  met its real sort in the same query and the obligation was silently skipped
+  as `sort-conflict`. Parameters, `let` binders, pattern variables, refined
+  binders and guard variables now take the type the typechecker gave them, so
+  these obligations are proved or reported.
 - `derive` inside a nested `mod` was a silent no-op: the derive was never expanded, so
   `derive Json for T` in `mod Inner` generated nothing and the first `from_json` to `T`
   failed at run time. Nested derives (and `satisfy`) now expand at every level.

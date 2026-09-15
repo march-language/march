@@ -669,6 +669,10 @@ type call_ctx = {
       (* Record-typed variables in scope, name -> SMT sort name, so a
          predicate's `v.field` projections can be resolved through that
          sort's selectors. *)
+  binds : (string * A.span) list;
+      (* Caller names -> their BINDING-site spans ([rctx.binds]), read with
+         [caller_sort_at] to give a caller value its typechecked sort instead
+         of the `Int` default.  Shadowed exactly like [sc]. *)
 }
 
 let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
@@ -676,7 +680,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
     (sg : fn_sig) (args : A.expr list) (rp : rparam) : unit =
   (* Destructured to the names the body has always used: this is a signature
      change, not a rewrite of 1,361 lines. *)
-  let { root; errctx; postcond; path; lets; sc; re } = cx in
+  let { root; errctx; postcond; path; lets; sc; re; binds } = cx in
   let subject_noun =
     match subject with
     | Argument -> "argument"
@@ -954,8 +958,67 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
           if s <> Smt.SInt then Hashtbl.replace caller_scalar x s
         | _ -> ())
       args;
+    (* ── Caller sorts from the typechecker (design B2/B3) ──────────────────
+       A caller name's sort as the typechecker recorded it at its BINDING
+       site ([binds] -> [caller_sort_at]); [None] when no type table was
+       handed in, the binder recorded no span, or the type has no sort here.
+       A record name is never answered: records keep their [recenv] route.
+       The answer is ROUTED, never folded into [caller_scalar] wholesale:
+       [caller_scalar_of n <> SInt] means "a non-Int SCALAR" to the three
+       measure-refusal guards, so only `Bool`/`Float` reach it; a `String`
+       goes to the `Str` constants ([caller_is_str]). *)
+    let caller_sort_of name : Smt.sort option =
+      if is_recvar name then None
+      else
+        match Option.bind (List.assoc_opt name binds) caller_sort_at with
+        | Some s -> Some s
+        (* No table answer: a REFINED binder in scope still says its sort, in
+           its marker — `s : {String | …}`, `b : {Bool | …}`, a measured
+           datatype.  [sc] is shadow-disciplined like [binds], so the entry
+           is this very binding's.  An `Int` marker says nothing new. *)
+        | None ->
+          (match List.assoc_opt name sc with
+           | Some (_, _, Some m) when m = str_sort -> Some (Smt.sdata str_sort)
+           | Some (_, _, Some m) when is_meas_sort m ->
+             let adt =
+               String.sub m (String.length meas_sort_prefix)
+                 (String.length m - String.length meas_sort_prefix)
+             in
+             Some (adt_sort adt)
+           | Some (_, _, m) ->
+             (match scalar_sort_of_marker m with
+              | Some ((Smt.SBool | Smt.SFloat) as srt) -> Some srt
+              | _ -> None)
+           | None -> None)
+    in
     let caller_scalar_of name =
-      match Hashtbl.find_opt caller_scalar name with Some s -> s | None -> Smt.SInt
+      match Hashtbl.find_opt caller_scalar name with
+      | Some s -> s
+      | None ->
+        (match caller_sort_of name with
+         | Some ((Smt.SBool | Smt.SFloat) as s) -> s
+         | _ -> Smt.SInt)
+    in
+    (* A caller name the typechecker says is a `String`, while the string
+       encoding is available (the same gate [reflect_str] applies) and no
+       callee parameter already pinned it to a scalar sort. *)
+    let caller_is_str name =
+      (not (Hashtbl.mem caller_scalar name))
+      && string_len_available ()
+      && caller_sort_of name = Some (Smt.sdata str_sort)
+    in
+    (* A caller name the typechecker (or its refinement marker) says is a
+       registered, non-record datatype: its datatype sort name.  Never a name
+       a callee parameter pinned to a scalar sort (every consumer tests the
+       string registry first). *)
+    let caller_dt name : string option =
+      if Hashtbl.mem caller_scalar name then None
+      else
+        match caller_sort_of name with
+        | Some (Smt.SData (adt, _))
+          when adt <> str_sort && Hashtbl.mem adt_ctors adt && not (is_record_sort adt) ->
+          Some adt
+        | _ -> None
     in
     (* Attach the (expensive) datatype/quantifier preamble ONLY to VCs that
        actually reference an axiomatised measure; a plain Int/Bool VC pays no
@@ -1307,8 +1370,19 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        with it the fact, which only loses a proof. *)
     let foreign_var name =
       if Hashtbl.mem str_names name then None
+      (* A caller `String` (design B3): pinned into the `Str` sort like any
+         other string name, so every later producer agrees, and dropped here
+         exactly as a known string name is. *)
+      else if caller_is_str name then (ignore (reflect_str ("$caller$" ^ name) (A.EVar { A.txt = name; A.span })); None)
       else if is_recvar name then None
-      else Some (Smt.Const name, (name, caller_scalar_of name))
+      else
+        match caller_dt name with
+        (* A caller datatype value denotes itself at its datatype sort, the
+           declaration [reflect_dt]'s `EVar` arm gives the same name. *)
+        | Some adt ->
+          if not (List.mem adt !adt_sorts) then adt_sorts := adt :: !adt_sorts;
+          Some (Smt.Const name, (name, adt_sort adt))
+        | None -> Some (Smt.Const name, (name, caller_scalar_of name))
     in
     (* Route measures through the SAME memo the goal side uses, so a promise
        about `len(xs)` and a goal about `len(xs)` land on the one `len$xs`
@@ -1339,6 +1413,10 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
       | A.ELit (A.LitString str, _) -> str_lit_const str
       | A.EVar { A.txt = x; _ } ->
         if Hashtbl.mem str_names x then Some (Smt.Const x)
+        (* A caller `String` element is a `Str` constant carrying its own
+           scope refinement, as a `String` actual is ([reflect_str]); the key
+           is caller-namespaced so it never meets a callee parameter's. *)
+        else if caller_is_str x then reflect_str ("$caller$" ^ x) a
         else if is_recvar x then None
         else begin
           decls := (x, caller_scalar_of x) :: !decls;
@@ -1490,12 +1568,17 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
         | None ->
           (* a caller-scope variable from the path context *)
           if Hashtbl.mem str_names name then Some (Smt.Const name)
+          else if caller_is_str name then reflect_str ("$caller$" ^ name) (A.EVar { A.txt = name; A.span })
           (* …unless it is a caller-scope RECORD, which lives at a datatype sort.
              Declaring it `Int` here would put one symbol at two sorts; dropping
              the sub-term instead just loses a fact (silence). *)
           else if is_recvar name then None
           else begin
-            decls := (name, caller_scalar_of name) :: !decls;
+            (match caller_dt name with
+             | Some adt ->
+               if not (List.mem adt !adt_sorts) then adt_sorts := adt :: !adt_sorts;
+               decls := (name, adt_sort adt) :: !decls
+             | None -> decls := (name, caller_scalar_of name) :: !decls);
             Some (Smt.Const name)
           end
     in
@@ -2115,6 +2198,21 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        — the very term [reflect_scalar]/[reflect_dt] give an `EVar` actual, so
        when the argument really IS that variable the two sides still meet on
        the same SMT symbol and the narrowing keeps working. *)
+    (* The constructors the goal predicate tests (`is_Some(_)` -> `Some`). *)
+    let goal_ctors : string list =
+      let rec go (e : A.expr) : string list =
+        match e with
+        | A.EApp (A.EVar { A.txt = t; _ }, args, _) ->
+          (match ctor_of_tester t, args with
+           | Some c, [ _ ] -> [ c ]
+           | _ -> [])
+          @ List.concat_map go args
+        | A.EApp (f, args, _) -> go f @ List.concat_map go args
+        | A.ETuple (args, _) | A.ECon (_, args, _) -> List.concat_map go args
+        | _ -> []
+      in
+      List.sort_uniq compare (go rp.pred)
+    in
     let path_resolve_var name =
       (* A name already declared into the `Str` sort denotes ITSELF at that
          sort.  [reflect_scalar] would unconditionally declare it `Int`, and a
@@ -2124,11 +2222,29 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
          compilation.  So the string sort wins here, exactly as it does in
          [resolve_var]'s caller-scope fallback. *)
       if Hashtbl.mem str_names name then Some (Smt.Const name)
+      (* A caller `String` the typechecker recorded (design B3) takes the same
+         route, declared into `Str` on first sight. *)
+      else if caller_is_str name then reflect_str ("$caller$" ^ name) (A.EVar { A.txt = name; A.span })
       (* Same rule for a caller-scope RECORD: it is declared at its datatype
          sort by [path_resolve_field], so it must never also be reflected as a
          scalar.  Returning None drops the sub-term — and with it the whole
          condition — which only loses a fact. *)
       else if is_recvar name then None
+      (* A caller DATATYPE value (design B3): the opaque datatype constant
+         [reflect_dt] builds for it, the very term a tester or an actual over
+         the same name reflects to — so `if o == p do unwrap(o)` compares two
+         `Option` constants instead of declaring `o` an Int beside the goal's
+         `M_Option`.  The name's own tag promise is loaded first for every
+         constructor the goal tests, under [load_scope_tester_facts]' rules. *)
+      else if caller_dt name <> None then begin
+        let adt = Option.get (caller_dt name) in
+        List.iter (fun c -> load_scope_tester_facts adt c name) goal_ctors;
+        match reflect_dt adt (A.EVar { A.txt = name; A.span }) with
+        | Some t ->
+          if not (List.mem adt !adt_sorts) then adt_sorts := adt :: !adt_sorts;
+          Some t
+        | None -> None
+      end
       else
         absorb
           (reflect_cached ("$path$" ^ name) (fun () ->
@@ -2172,6 +2288,9 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
          has no callable `len`, so a guard could not mention this measure. *)
       else if m = "len" && string_len_available () && Hashtbl.mem str_names name then
         Some (Smt.App (strlen_fn, [ Smt.Const name ]))
+      else if m = "len" && caller_is_str name then
+        Option.map (fun t -> Smt.App (strlen_fn, [ t ]))
+          (reflect_str ("$caller$" ^ name) (A.EVar { A.txt = name; A.span }))
       else measure_of_var m name
     in
     let path_resolve_tester ctor arg =

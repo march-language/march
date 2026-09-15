@@ -1288,6 +1288,68 @@ let rec instance_sort_of_ty (t : A.ty) : Smt.sort =
              match List.nth_opt args i with Some a -> instance_sort_of_ty a | None -> Smt.sdata "Elem"))
   | _ -> Smt.sdata "Elem"
 
+(* ── Caller sorts from the typechecker (design B1) ───────────────────────
+   [call_type_map]: the typechecker's span -> type table, handed in by the
+   driver ([Refine_check.check_module ?type_map]) and assigned (so reset) at
+   the top of every [check_module]; [None] under a caller that does not
+   typecheck first, where every lookup below answers [None].  Keys are
+   expression spans AND binding-site spans (a parameter's name, a `let`
+   pattern variable, a `match` pattern variable); the caller-sort lookup
+   reads BINDING sites only — see [rctx.binds]. *)
+let call_type_map : (A.span, March_typecheck.Typecheck.ty) Hashtbl.t option ref = ref None
+
+(* The SMT sort a typechecker type denotes for a CALLER value, or [None] for
+   "not known here" (which keeps the pre-existing `Int` default): `Int`,
+   `Bool`, `Float`, `String` (the `Str` sort), and a registered non-record
+   datatype at its instance (arguments as [instance_sort_of_ty] reads a
+   declared type).  A type variable, a record (records go
+   through [recenv]), a tuple, an arrow, `Char`, unit, a channel: [None]. *)
+let sort_of_tc_ty (t : March_typecheck.Typecheck.ty) : Smt.sort option =
+  let module T = March_typecheck.Typecheck in
+  let short n =
+    match String.rindex_opt n '.' with
+    | Some i -> String.sub n (i + 1) (String.length n - i - 1)
+    | None -> n
+  in
+  let rec strip t = match T.repr t with T.TLin (_, b) -> strip b | t -> t in
+  (* An instance argument, as [instance_sort_of_ty] reads one. *)
+  let rec inst t =
+    match strip t with
+    | T.TCon ("Int", []) -> Smt.SInt
+    | T.TCon ("Bool", []) -> Smt.SBool
+    | T.TCon (n, args) when Hashtbl.mem adt_ctors (adt_sort_name (short n)) ->
+      let adt = adt_sort_name (short n) in
+      let k = try Hashtbl.find adt_arity adt with Not_found -> 0 in
+      if k = 0 then Smt.sdata adt
+      else
+        Smt.SData (adt, List.init k (fun i ->
+            match List.nth_opt args i with Some a -> inst a | None -> Smt.sdata "Elem"))
+    | _ -> Smt.sdata "Elem"
+  in
+  match strip t with
+  | T.TCon ("Int", []) -> Some Smt.SInt
+  | T.TCon ("Bool", []) -> Some Smt.SBool
+  | T.TCon ("Float", []) -> Some Smt.SFloat
+  | T.TCon ("String", []) -> Some (Smt.sdata str_sort)
+  (* No `Set(t)` -> `SSet` arm: a March `Set` VALUE is a datatype here (the
+     stdlib's `type Set(a) = …`), and the SMT set sort is only ever the
+     result of a set measure over it (`elts(s)`, `keys(m)`), never the sort
+     of the value itself. *)
+  | T.TCon (n, _) as ty ->
+    let adt = adt_sort_name (short n) in
+    (match Hashtbl.find_opt adt_ctors adt with
+     | Some [ ctor ] when Hashtbl.mem ctor_field_names ctor -> None
+     | Some _ -> Some (inst ty)
+     | None -> None)
+  | _ -> None
+
+(* The caller sort recorded at a BINDING span, if the driver handed a type
+   table in and the typechecker recorded a known sort there. *)
+let caller_sort_at (sp : A.span) : Smt.sort option =
+  match !call_type_map with
+  | None -> None
+  | Some tm -> Option.bind (Hashtbl.find_opt tm sp) sort_of_tc_ty
+
 (* A refinement or linearity wrapper says nothing about a value's SORT — a
    `{Int | _ > 0}` field is an Int field.  Before 2026-09-13 this fell through
    to the opaque `Elem` sort, which is harmless while nothing reads a refined
