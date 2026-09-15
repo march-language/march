@@ -1908,10 +1908,111 @@ let reset_called_syms () = Hashtbl.reset called_syms
 let called_c_symbols () =
   Hashtbl.fold (fun k () acc -> k :: acc) called_syms []
 
+(* C symbols a bare user function name must not be emitted as.
+
+   A top-level user function is emitted under its own name (`fn connect` →
+   `define @connect`), in the same link as the C runtime and the libc/libm it
+   calls. A user `connect` therefore IS the `connect` the runtime's
+   `tcp_connect` calls: the link resolves the runtime's undefined `connect`
+   to the user's definition before libSystem/libc, and the program recurses
+   through its own function until the stack guard page (measured 2026-09-14,
+   `test/two_node/restart/node_a.march`: SIGBUS before the first print). A
+   `pfn` with one call site dodges it only because it is inlined and never
+   emitted. `log`, `time`, `strlen`, `write`, `close`, `exit` … are all
+   plausible user names with the same fate, each crashing somewhere in the
+   runtime far from the user's code.
+
+   The fix is at the one place a March name becomes a symbol: a bare name in
+   this set is emitted as `name$u`, at its definition and every reference
+   (both go through [mangle_extern] / [c_symbol_of_march_name]). Qualified
+   names (`Socket.connect`) and compiler-generated ones (`$clo_wrap`) are
+   never touched; nor is a name the builtin table maps itself (`main` →
+   `march_main`).
+
+   The set: every symbol `runtime/*.c` imports on macOS (nm -u over the
+   compiled objects, 2026-09-14, minus mach/CommonCrypto-private and
+   runtime-internal names) plus the common libc/libm/POSIX/Linux surface a
+   future runtime change or the Linux build plausibly imports. NOT the
+   runtime's own `march_*` names: those are how a builtin resolved by the
+   identity fallthrough (`march_decrc_freed`, `uuid_v7`, `logger_*`) reaches
+   its C definition, so they must pass through unchanged. Regenerate the
+   first part with:
+     for f in runtime/*.c; do clang -c -w -I runtime -o /tmp/o/$f.o $f; done
+     nm -u /tmp/o/*.o | sed 's/^ *//; s/^_//' | grep -v '^march_\|^__' | sort -u *)
+let c_reserved_symbols : (string, unit) Hashtbl.t =
+  let tbl = Hashtbl.create 512 in
+  List.iter (fun n -> Hashtbl.replace tbl n ()) [
+    "_Exit"; "abort"; "abs"; "accept"; "accept4"; "access"; "acos"; "adler32"; "alarm";
+    "aligned_alloc"; "alloca"; "arc4random_buf"; "asctime"; "asin"; "assert";
+    "at_quick_exit"; "atan"; "atan2"; "atexit"; "atof"; "atoi"; "atol"; "atoll";
+    "backtrace"; "backtrace_symbols_fd"; "base64_encode"; "basename"; "bind"; "bsearch";
+    "bzero"; "calloc"; "cbrt"; "ceil"; "chdir"; "chmod"; "chown"; "clearenv"; "clock";
+    "clock_gettime"; "clock_nanosleep"; "close"; "closedir"; "compressBound"; "connect";
+    "cos"; "cosh"; "crc32"; "creat"; "ctime"; "deflate"; "deflateEnd"; "deflateInit2_";
+    "difftime"; "dirname"; "div"; "dladdr"; "dlclose"; "dlerror"; "dlopen"; "dlsym"; "dup";
+    "dup2"; "dup3"; "environ"; "epoll_create"; "epoll_create1"; "epoll_ctl"; "epoll_wait";
+    "errno"; "execl"; "execv"; "execve"; "execvp"; "exit"; "exp"; "exp2"; "expm1"; "fabs";
+    "fclose"; "fcntl"; "fdopen"; "fdopendir"; "fflush"; "fgetc"; "fgets"; "floor"; "fmod";
+    "fopen"; "fork"; "fprintf"; "fputc"; "fputs"; "fread"; "free"; "freeaddrinfo"; "fscanf";
+    "fseek"; "fstat"; "fsync"; "ftell"; "ftruncate"; "fwrite"; "gai_strerror";
+    "getaddrinfo"; "getchar"; "getcontext"; "getcwd"; "getegid"; "getenv"; "geteuid";
+    "getgid"; "gethostbyname"; "gethostname"; "getloadavg"; "getpeername"; "getpid";
+    "getppid"; "getpwnam"; "getpwuid"; "getrandom"; "getrusage"; "getsockname";
+    "getsockopt"; "gettimeofday"; "getuid"; "gmtime"; "gmtime_r"; "htonl"; "htons"; "hypot";
+    "inet_aton"; "inet_ntop"; "inet_pton"; "inflate"; "inflateEnd"; "inflateInit2_";
+    "ioctl"; "isalnum"; "isalpha"; "isatty"; "isdigit"; "isinf"; "islower"; "isnan";
+    "isspace"; "isupper"; "iswalpha"; "kevent"; "kill"; "killpg"; "kqueue"; "labs"; "link";
+    "listen"; "llabs"; "localeconv"; "localtime"; "localtime_r"; "log"; "log10"; "log1p";
+    "log2"; "longjmp"; "lseek"; "lstat"; "madvise"; "makecontext"; "malloc"; "mbstowcs";
+    "md5"; "memchr"; "memcmp"; "memcpy"; "memmove"; "memset"; "mkdir"; "mkdtemp"; "mkstemp";
+    "mktime"; "mlock"; "mmap"; "mprotect"; "msync"; "munlock"; "munmap"; "nanosleep";
+    "ntohl"; "ntohs"; "open"; "openat"; "opendir"; "pause"; "pclose"; "perror"; "pipe";
+    "pipe2"; "poll"; "popen"; "posix_memalign"; "pow"; "pread"; "printf";
+    "pthread_attr_destroy"; "pthread_attr_getstacksize"; "pthread_attr_init";
+    "pthread_attr_setdetachstate"; "pthread_attr_setstacksize"; "pthread_cancel";
+    "pthread_cond_broadcast"; "pthread_cond_destroy"; "pthread_cond_init";
+    "pthread_cond_signal"; "pthread_cond_timedwait"; "pthread_cond_wait"; "pthread_create";
+    "pthread_detach"; "pthread_equal"; "pthread_exit"; "pthread_getspecific";
+    "pthread_join"; "pthread_key_create"; "pthread_key_delete"; "pthread_kill";
+    "pthread_mutex_destroy"; "pthread_mutex_init"; "pthread_mutex_lock";
+    "pthread_mutex_trylock"; "pthread_mutex_unlock"; "pthread_once";
+    "pthread_rwlock_destroy"; "pthread_rwlock_init"; "pthread_rwlock_rdlock";
+    "pthread_rwlock_unlock"; "pthread_rwlock_wrlock"; "pthread_self"; "pthread_setspecific";
+    "pthread_sigmask"; "pthread_yield"; "putchar"; "putenv"; "puts"; "pwrite"; "qsort";
+    "quick_exit"; "raise"; "rand"; "random"; "read"; "readdir"; "readlink"; "readv";
+    "realloc"; "realpath"; "recv"; "recvfrom"; "recvmsg"; "remove"; "rename"; "rmdir";
+    "round"; "scandir"; "scanf"; "sched_yield"; "select"; "sem_close"; "sem_destroy";
+    "sem_init"; "sem_open"; "sem_post"; "sem_wait"; "send"; "sendfile"; "sendmsg"; "sendto";
+    "setcontext"; "setenv"; "setgid"; "sethostname"; "setjmp"; "setlocale"; "setsockopt";
+    "setuid"; "sha1"; "sha256"; "shm_open"; "shm_unlink"; "shutdown"; "sigaction";
+    "sigaddset"; "sigaltstack"; "sigdelset"; "sigemptyset"; "sigfillset"; "siglongjmp";
+    "signal"; "sigprocmask"; "sigsetjmp"; "sigwait"; "sin"; "sinh"; "sleep"; "snprintf";
+    "socket"; "socketpair"; "sprintf"; "sqrt"; "srand"; "srandom"; "sscanf"; "stat";
+    "strcat"; "strchr"; "strcmp"; "strcpy"; "strdup"; "strerror"; "strerror_r"; "strftime";
+    "strlen"; "strncat"; "strncmp"; "strncpy"; "strptime"; "strrchr"; "strstr"; "strtod";
+    "strtok"; "strtol"; "strtoll"; "strtoul"; "strtoull"; "swapcontext"; "symlink"; "sync";
+    "sysconf"; "system"; "tan"; "tanh"; "tcgetattr"; "tcsetattr"; "time"; "times";
+    "tmpfile"; "tmpnam"; "tolower"; "toupper"; "trunc"; "truncate"; "ttyname"; "umask";
+    "ungetc"; "unlink"; "unsetenv"; "usleep"; "vfprintf"; "vsnprintf"; "wait"; "wait3";
+    "wait4"; "waitpid"; "wcslen"; "wcstombs"; "write"; "writev";
+  ];
+  tbl
+
+let user_symbol_of (name : string) : string =
+  let bare = not (String.contains name '.') && not (String.contains name '$') in
+  if bare && Hashtbl.mem c_reserved_symbols name then name ^ "$u" else name
+
 let mangle_extern (name : string) : string =
   match Hashtbl.find_opt mangle_extern_tbl name with
   | Some c -> Hashtbl.replace called_syms c (); c
-  | None -> Hashtbl.replace called_syms name (); name
+  | None -> let s = user_symbol_of name in Hashtbl.replace called_syms s (); s
+
+(** True iff [name] is a March builtin the table maps to a C runtime symbol
+    (so it lives in the runtime, not in emitted code). The JIT used to ask
+    `mangle_extern name <> name`, which [user_symbol_of] would now answer
+    "yes" for a user `fn connect`; membership is the question it meant. *)
+let has_c_mapping (name : string) : bool =
+  Hashtbl.mem mangle_extern_tbl name
 
 (** [mangle_extern] without the [called_syms] side effect: same March-name →
     C-symbol resolution, including the identity fallthrough.
@@ -1923,4 +2024,4 @@ let mangle_extern (name : string) : string =
 let c_symbol_of_march_name (name : string) : string =
   match Hashtbl.find_opt mangle_extern_tbl name with
   | Some c -> c
-  | None -> name
+  | None -> user_symbol_of name

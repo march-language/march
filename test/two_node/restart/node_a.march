@@ -1,0 +1,97 @@
+-- Two-node harness, scenario "restart": node-a.
+--
+-- Connects to node-b (MARCH_PEER_PORT), learns the global pid of node-b's
+-- Sink from its Hello, and sends it one message. The harness then kills
+-- node-b and restarts it with a new creation; this program notices the
+-- connection drop, reconnects, and sends twice: once to the pid it HELD
+-- (creation 1, refused as stale by the new incarnation) and once to the
+-- pid the new incarnation announced (delivered). Pins the claim in
+-- specs/todos/2026-09-14-remote-send-to-a-global-pid.md that a restarted
+-- node reusing a local pid cannot receive a message meant for its
+-- predecessor.
+mod TwoNodeRestartA do
+  needs IO.Console
+  needs IO.NetConnect
+  needs IO.Process
+
+  pfn sleep_100ms() do
+    let _ = Process.run("sleep", Cons("0.1", Nil))
+    ()
+  end
+
+  pfn connect_with_retry(host : String, port : Int, attempts_left : Int) : Result(Int, Socket.SocketError) do
+    match Socket.connect(host, port) do
+      Ok(fd) -> Ok(fd)
+      Err(e) ->
+        if attempts_left <= 1 do
+          Err(e)
+        else
+          sleep_100ms()
+          connect_with_retry(host, port, attempts_left - 1)
+        end
+    end
+  end
+
+  -- Was `connect`, which found the C-symbol collision fixed in
+  -- specs/progress/2026-09-14-user-fn-named-after-c-symbol-hijacks-runtime.md.
+  pfn dial(port : Int) : Int do
+    match connect_with_retry("127.0.0.1", port, 100) do
+      Ok(fd) -> fd
+      Err(e) -> panic("connect: " ++ Socket.error_message(e))
+    end
+  end
+
+  -- node-b's first frame on a connection is its Hello.
+  pfn read_hello(fd : Int) : Pid do
+    match NetKernel.recv_frame(fd, Nil) do
+      Err(e) -> panic("hello: " ++ e)
+      Ok((frame, _)) ->
+        match NodeSend.decode_msg(frame) do
+          Ok(d) ->
+            if d.type_tag == "TwoNodeRestart.Hello" do
+              match GlobalPid.decode(d.payload) do
+                Ok(p) ->
+                  println("node-a: node-b hosts Pid(" ++ int_to_string(p.local_pid) ++ ") at creation " ++ int_to_string(p.creation))
+                  p
+                Err(e) -> panic("hello pid: " ++ e)
+              end
+            else
+              panic("expected Hello, got " ++ d.type_tag)
+            end
+          Err(e) -> panic("hello frame: " ++ e)
+        end
+    end
+  end
+
+  pfn item(fd : Int, seq : Int, to : Pid) do
+    let _ = NodeSend.cast(fd, seq, to, "TwoNodeRestart.Item", Msgpack.encode(Msgpack.str("node-a")))
+    println("node-a: sent " ++ int_to_string(seq))
+  end
+
+  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_process : Cap(IO.Process)) do
+    let port = Env.require_int("MARCH_PEER_PORT")
+
+    -- Incarnation 1.
+    let fd1 = dial(port)
+    let held = read_hello(fd1)
+    item(fd1, 1, held)
+    -- Nothing more is expected on this connection; the next read returns
+    -- only when node-b is gone.
+    match NetKernel.recv_frame(fd1, Nil) do
+      Ok(_) -> println("node-a: unexpected frame before the restart")
+      Err(_) -> println("node-a: connection to node-b lost")
+    end
+    tcp_close(fd1)
+
+    -- Incarnation 2: same port, same local pid, new creation.
+    let fd2 = dial(port)
+    let fresh = read_hello(fd2)
+    item(fd2, 2, held)
+    match NodeSend.recv_failure(fd2, Nil) do
+      Ok((seq, reason)) -> println("node-a: delivery " ++ int_to_string(seq) ++ " failed: " ++ reason)
+      Err(e) -> println("node-a: recv error: " ++ e)
+    end
+    item(fd2, 3, fresh)
+    tcp_close(fd2)
+  end
+end

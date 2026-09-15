@@ -5745,6 +5745,70 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/peer_reader_loopback.expected native_peer_reader_loopback.out)))
 
+; ── DELIVERY_FAILED as a message to the sending actor ──
+; NodeSend.cast_from records the sender under the seq; the per-peer reader
+; hands the failure frame to NodeSend.on_failure, whose injected dispatch
+; mints the actor's own SendFailed. The failure lands in the mailbox.
+(rule
+ (targets native_node_send_failed_msg native_node_send_failed_msg.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/node_send_failed_msg.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_node_send_failed_msg
+        native/node_send_failed_msg.march)
+   (with-stdout-to native_node_send_failed_msg.out
+        (system "./native_node_send_failed_msg")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/node_send_failed_msg.expected native_node_send_failed_msg.out)))
+
+; ── User fns named after C symbols the runtime links against ──
+; `fn connect`/`log`/`time`/`strlen`, each used twice so its symbol is
+; emitted. Before the `$u` mangling (llvm_builtins.ml, c_reserved_symbols)
+; the user's `connect` WAS the one the runtime's tcp_connect called, and
+; the program recursed to a stack overflow; this golden is the witness.
+(rule
+ (targets native_c_symbol_collision native_c_symbol_collision.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/c_symbol_collision.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_c_symbol_collision
+        native/c_symbol_collision.march)
+   (with-stdout-to native_c_symbol_collision.out
+        (system "./native_c_symbol_collision")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/c_symbol_collision.expected native_c_symbol_collision.out)))
+
+; ── A user fn named `own` with two args is the user's, not the resource builtin ──
+; The lowering's own(pid, value) → register_resource rewrite used to fire on
+; the bare name; with a Pid argument that emitted `Drop$Pid.drop`, a link
+; error. Gated on the current module not defining `own`.
+(rule
+ (targets native_user_fn_named_own native_user_fn_named_own.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/user_fn_named_own.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_user_fn_named_own
+        native/user_fn_named_own.march)
+   (with-stdout-to native_user_fn_named_own.out
+        (system "./native_user_fn_named_own")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/user_fn_named_own.expected native_user_fn_named_own.out)))
+
 ; ── Two-node SWIM discovery: authenticated peer-connection + membership ──
 ; node-a accepts, node-b connects; both run the ClusterConn handshake over
 ; real TCP loopback, then exchange a SwimPing/SwimPingAck pair and each

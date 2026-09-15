@@ -1,0 +1,20 @@
+-- A user fn named `own` with two arguments, called with a Pid: the
+-- lowering used to rewrite ANY 2-arg `own(...)` into resource
+-- registration (`Drop$Pid.drop`, which does not exist).
+mod UserFnNamedOwn do
+  needs IO.Console
+  needs IO.Spawn
+  actor A do
+    state { n : Int }
+    init { n: 0 }
+    on Tick() do { n: state.n + 1 } end
+  end
+  fn own(ep : Int, p) : Int do
+    if is_alive(p) do ep * 10 else 0 - ep end
+  end
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+    let pc = spawn(A)
+    let pd = spawn(A)
+    println("own: " ++ int_to_string(own(2, pc)) ++ " " ++ int_to_string(own(3, pd)))
+  end
+end

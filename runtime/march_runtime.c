@@ -3195,6 +3195,9 @@ static void actor_green_thread(void *arg) {
          * march_actor_call / do_actor_death / mailbox_size /
          * set_mbox_limit). */
         atomic_store_explicit(&meta->green_thread, NULL, memory_order_release);
+        /* The live actor's own reference (taken in march_spawn_common):
+         * nothing on this thread touches the record after this. */
+        march_decrc(actor);
         return;
     }
 
@@ -3394,6 +3397,8 @@ static void actor_green_thread(void *arg) {
     /* Same rationale as the crash-trap exit above: the mutex protected only
      * this field, now converted to a release store. */
     atomic_store_explicit(&meta->green_thread, NULL, memory_order_release);
+    /* The live actor's own reference (taken in march_spawn_common). */
+    march_decrc(actor);
 }
 
 /* ── Public actor API ────────────────────────────────────────────── */
@@ -4710,6 +4715,17 @@ static void *march_spawn_common(void *actor, int defer_activation) {
     /* A normal actor is runnable immediately. A supervise-block child uses
      * the deferred entry point and is activated by register_child only after
      * its supervisor pointer and restart slot are fully published. */
+    /* The LIVE actor owns one reference to its own record, released by
+     * actor_green_thread at its very last access (both exit paths). Without
+     * it the record was kept alive only by whatever pids the program still
+     * held: `let a = spawn(W)` with `a` never used again dropped the ONLY
+     * reference right after spawn, freeing a running actor whose thread
+     * then read and wrote its `alive` word in freed memory (ASAN, 2026-09-14:
+     * heap-use-after-free in actor_green_thread / do_actor_death; glibc
+     * saw it as `tcache_thread_shutdown(): unaligned tcache chunk` on the
+     * ubuntu leg, test/native/actor_enumeration). A pid is a handle to a
+     * running actor; the actor's lifetime is its own. */
+    march_incrc(actor);
     if (!defer_activation) activate_actor_green_thread(meta);
     /* Start the scheduler in a background thread so actor green threads run
      * even when the main thread is blocked inside the HTTP event loop.

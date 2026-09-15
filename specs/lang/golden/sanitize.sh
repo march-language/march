@@ -108,6 +108,11 @@ export MARCH_STDLIB="${MARCH_STDLIB:-$root/stdlib}"
 #     band. ASAN's shadow memory and redzones invalidate that band by
 #     construction.
 native_curated=(
+  # actor record ownership: a running actor holds its own reference, and
+  # every pid-producing builtin returns an owned one. Both were use-after-frees
+  # only ASAN saw (specs/progress/2026-09-14-live-actor-freed-by-dropping-its-last-pid.md,
+  # …/2026-09-14-pid-ownership-settled-send-borrows-self-owned.md).
+  actor_enumeration
   # array-backed Bytes
   bytes_u8_bridge
   closure_param_shadows_import

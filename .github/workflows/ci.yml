@@ -165,6 +165,17 @@ jobs:
           done
           echo "node_discovery: 200/200 runs matched the golden"
 
+      # Two real OS processes, a fault applied from outside (SIGKILL + restart
+      # with a new creation), per-node goldens. ~5s per scenario. Each scenario
+      # is test/two_node/<name>/; see specs/todos/2026-09-14-two-node-failure-semantics-harness.md.
+      - name: Two-node scenarios
+        if: matrix.os == 'ubuntu-24.04'
+        timeout-minutes: 10
+        run: |
+          eval $(opam env)
+          dune build bin/main.exe
+          for s in $(scripts/two-node.sh --list); do scripts/two-node.sh "$s" || exit 1; done
+
   # Static-semantics + grammar corpora, doc notebooks and formatting: all
   # independent of `dune runtest` and of each other, and all short — grouped
   # into one job rather than four so they don't each pay job-setup overhead.

@@ -1,0 +1,95 @@
+-- DELIVERY_FAILED as a message to the sending ACTOR (distributed actors 1/4).
+--
+-- node-a's Sender actor casts to a pid node-b does not host, via
+-- `NodeSend.cast_from`, which records the sender under the seq. node-b
+-- refuses with DELIVERY_FAILED; node-a's per-peer reader hands the frame to
+-- `NodeSend.on_failure`, which finds the sender and lets the dispatch mint
+-- the actor's own `SendFailed` -- so the failure arrives in the Sender's
+-- mailbox, the way a monitor's Down does, not in a synchronous read.
+-- Design: specs/todos/2026-09-14-remote-send-to-a-global-pid.md.
+mod NodeSendFailedMsg do
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.NetConnect
+
+  actor Sender do
+    state { failed : Int }
+    init  { failed: 0 }
+    on Go(fd : Int, me) do
+      let _ = NodeSend.cast_from(fd, 1, me, GlobalPid.make("node-b", 9999, 1), "NodeSendFailedMsg.Nope", Nil)
+      println("sender: cast 1 to node-b")
+      state
+    end
+    on SendFailed(seq : Int, reason : String) do
+      println("sender: delivery " ++ int_to_string(seq) ++ " failed: " ++ reason)
+      { state with failed: state.failed + 1 }
+    end
+  end
+
+  -- node-b hosts nothing: every delivery is refused.
+  pfn run_server(listen_fd : Int) do
+    match tcp_accept(listen_fd) do
+      Ok(conn_fd) ->
+        let _ = NodeSend.serve_one(conn_fd, 1, fn d ->
+          println("node-b: refused " ++ int_to_string(d.seq))
+          Err("no live process " ++ int_to_string(d.to_local_pid)))
+        tcp_close(conn_fd)
+        tcp_close(listen_fd)
+      Err(e) ->
+        tcp_close(listen_fd)
+        panic("accept: " ++ e)
+    end
+  end
+
+  -- node-a's reader: a DELIVERY_FAILED goes back to whoever sent the seq.
+  pfn on_frame(tag : Int, frame : List(Int)) : Result(Bool, String) do
+    if tag == NodeSend.tag_delivery_failed() do
+      match NodeSend.on_failure(frame, fn (p, seq, reason) -> send(p, SendFailed(seq, reason))) do
+        Ok(_) -> Ok(false)
+        Err(e) -> Err(e)
+      end
+    else
+      Err("unexpected tag " ++ int_to_string(tag))
+    end
+  end
+
+  pfn connect_with_retry(host : String, port : Int, attempts_left : Int) : Result(Int, Socket.SocketError) do
+    match Socket.connect(host, port) do
+      Ok(fd) -> Ok(fd)
+      Err(e) ->
+        if attempts_left <= 1 do Err(e) else connect_with_retry(host, port, attempts_left - 1) end
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen), _cap_spawn : Cap(IO.Spawn), _cap_mut : Cap(IO.Mut)) do
+    let listen_fd = match tcp_listen(0) do
+      Ok(fd) -> fd
+      Err(e) -> panic("listen: " ++ e)
+    end
+    let port = match tcp_local_port(listen_fd) do
+      Ok(p) -> p
+      Err(e) -> panic("local_port: " ++ e)
+    end
+    let srv = task_spawn(fn _ -> run_server(listen_fd))
+    let conn_fd = match connect_with_retry("127.0.0.1", port, 5) do
+      Ok(fd) -> fd
+      Err(e) -> panic("connect: " ++ Socket.error_message(e))
+    end
+    let sender = spawn(Sender)
+    -- The Sender's turn runs when main blocks in the reader below.
+    let _ = send(sender, Go(conn_fd, sender))
+    match PeerReader.serve(conn_fd, Nil, on_frame) do
+      Ok(_) -> ()
+      Err(e) -> println("node-a: reader error: " ++ e)
+    end
+    let _ = task_await(srv)
+    tcp_close(conn_fd)
+    run_until_idle()
+    match get_actor_field(sender, "failed") do
+      Some(n) -> println("done: " ++ int_to_string(n) ++ " failure(s) reached the sender's mailbox")
+      None -> println("done: sender gone")
+    end
+  end
+end

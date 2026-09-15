@@ -1,0 +1,6 @@
+[log] a
+[log] b
+connect: -1 -1
+time: 6
+strlen: 14
+Math.log(1.0) = 0.

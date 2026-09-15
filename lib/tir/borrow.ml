@@ -50,6 +50,30 @@ let extern_borrow_table : (string * bool list) list = [
   ("print",         [true]);   (* TIR builtin name before LLVM mangling *)
   ("println",       [true]);
   ("print_line",    [true]);
+  (* ── Actors: the pid is a HANDLE, read but never stored or released by
+     these runtime functions (audited 2026-09-14: march_send, march_kill,
+     march_actor_stop, march_is_alive, march_actor_is_draining,
+     march_mailbox_size, march_get_cap contain no decrc of the actor).
+     Borrowing them was tried 2026-09-13 and backed out because a live actor
+     then had NO reference of its own and the drop at the pid's last use freed
+     it; since specs/progress/2026-09-14-live-actor-freed-by-dropping-its-last-pid.md
+     the running actor holds one, so releasing the program's pids is safe.
+     `send`'s MESSAGE stays owned (the runtime enqueues it). *)
+  ("send",              [true; false]);
+  ("actor_cast",        [true; false]);
+  ("march_send",        [true; false]);
+  ("kill",              [true]);
+  ("march_kill",        [true]);
+  ("actor_stop",        [true; false]);
+  ("march_actor_stop",  [true; false]);
+  ("is_alive",          [true]);
+  ("march_is_alive",    [true]);
+  ("actor_is_draining", [true]);
+  ("march_actor_is_draining", [true]);
+  ("mailbox_size",      [true]);
+  ("march_mailbox_size", [true]);
+  ("get_cap",           [true]);
+  ("march_get_cap",     [true]);
   (* ── Core string operations ─────────────────────────────────────────────── *)
   ("march_string_eq",          [true; true]);
   ("march_string_concat",      [true; true]);
@@ -238,10 +262,11 @@ let all_args_borrowed_builtins = [ "string_concat_n" ]
     that nothing hands it a reference it does not own.  The second is not
     hypothetical: [typed_array_get] returned array elements without a
     reference, which only stayed balanced while `==` consumed them.  Actor pids
-    are the known remaining case ([pid_of_int] returns an unowned pid), so the
-    actor family stays here until
-    specs/todos/2026-09-13-send-leaks-a-reference-to-a-live-pid.md settles pid
-    ownership. *)
+    were that case until 2026-09-14: every pid-producing builtin now returns an
+    OWNED reference (pid_of_int, self, actor_whereis, spawn) and the running
+    actor holds one of its own, so the read-only actor family moved to
+    [extern_borrow_table] — see
+    specs/progress/2026-09-14-pid-ownership-settled-send-borrows-self-owned.md. *)
 let extern_owned_builtins : string list = [
     "panic_"; "unreachable_"; "todo_"; "print_stderr"; "char_to_int";
     "char_is_digit"; "char_is_alphanumeric"; "char_is_whitespace";
@@ -255,8 +280,7 @@ let extern_owned_builtins : string list = [
     "base64_encode"; "stdlib_base64_encode"; "base64_decode";
     "stdlib_base64_decode"; "bytes_to_u8_arr"; "u8_arr_to_bytes";
     "remote_register_stub"; "remote_check"; "remote_invoke";
-    "logger_add_context"; "logger_write"; "kill"; "actor_stop";
-    "actor_is_draining"; "is_alive"; "send"; "actor_cast"; "spawn";
+    "logger_add_context"; "logger_write"; "spawn";
     "spawn_supervised"; "actor_get_int"; "actor_call"; "actor_reply";
     "actor_send_after"; "actor_cancel_timer"; "http_server_spawn_n";
     "file_exists"; "dir_exists"; "file_open"; "file_close"; "file_read";
@@ -289,8 +313,8 @@ let extern_owned_builtins : string list = [
     "tcp_connect"; "http_serialize_request"; "http_parse_response";
     "csv_open"; "csv_next_row"; "csv_close"; "own"; "cap_narrow"; "mint_cap";
     "cap_impl"; "cap_dict"; "set_actor_caps"; "actor_caps"; "monitor";
-    "mailbox_size"; "actor_set_mailbox_limit"; "register_resource";
-    "actor_register"; "actor_unregister"; "actor_whereis"; "get_cap";
+    "actor_set_mailbox_limit"; "register_resource";
+    "actor_register"; "actor_unregister"; "actor_whereis";
     "send_checked"; "revoke_cap"; "is_cap_valid"; "get_actor_field";
     "register_supervisor"; "register_supervisor_child"; "pid_index_of";
     "pid_to_int";
