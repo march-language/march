@@ -666,32 +666,43 @@ mod RealTimeDSP do
 end
 ```
 
-`no_alloc.ml` walks every function body and flags heap-allocating expressions:
+`cap no_alloc` puts every function in the module (nested modules, impl methods
+and actor handlers included) under a hard `@[no_alloc]` contract (see
+[surface syntax](surface-syntax.md)). There is one check, and the cap and the
+attribute get the same answer from it. It runs on the compiled program, after
+Perceus reference counting and escape analysis, so:
 
-| Allocating expression | Error |
-|-----------------------|-------|
-| `ETuple` with ≥1 items | tuple construction allocates |
-| `ERecord` | record construction allocates |
-| `ECon` with ≥1 args (e.g. `Some(x)`) | boxed constructor allocates |
-| `ELam` | lambda/closure allocates |
+- a constructor the compiler reuses in place (a functional-but-in-place update
+  of a value nothing else holds) passes, and so does a value it promotes to the
+  stack;
+- it is transitive: a call into a helper that allocates fails, and the error
+  names the helper and what it allocates;
+- the error names the cap: `` `mix` is in `cap no_alloc` module `RealTimeDSP`
+  but allocates. ``
 
-Nullary constructors (`None`, `True`, `False`, custom zero-arg tags) and unit `()` are safe: they compile to immediate integer tags with no heap allocation.
+What fails is whatever the compiled code actually allocates: a tuple, record
+or closure that is built rather than reused, a record update, string
+concatenation and interpolation, a `Float` boxed where it crosses an erased
+slot, a call through a closure or an extern the checker cannot see into.
+Nullary constructors are **not** automatically free: an all-nullary enum and a
+niche-shaped `Option` compile to immediate tags, but a nullary case of a type
+that also has payload-carrying cases (`Nil` of `List`) is a real 16-byte heap
+cell, so a function that returns a fresh `Nil` fails while one that returns the
+empty list it matched passes.
 
-The check recurses into sub-expressions inside `if`, `match`, `let`, blocks, etc.
+An explicit per-function form inside the module wins, so one helper can opt out
+visibly: `@[no_alloc(warn)]` turns its failure into a warning,
+`@[no_alloc(assume)]` asserts it (for a call the checker cannot see through),
+and `@[no_alloc(transient)]` allows allocations released before it returns.
 
-**`cap no_alloc` and `@[no_alloc]` are different checks.** `cap no_alloc` is
-syntactic and pre-optimisation: it walks the source of every function in the
-module and rejects the constructs in the table above, in every mode including
-the interpreter. The `@[no_alloc]` attribute (see
-[surface syntax](surface-syntax.md)) is a per-function *contract* checked on
-the compiled program, after Perceus reference counting and escape analysis, so
-a constructor the compiler reuses in place and a value it promotes to the stack
-both pass. It is also transitive: everything the function calls must be
-allocation-free too. Use the cap when the question is "does this source
-construct heap values"; use the contract when the question is "does the
-compiled binary allocate". The two are not unified yet — the contract has no
-answer under the interpreter, where no TIR exists (see
-`specs/todos/2026-09-03-unify-cap-no-alloc-with-contract.md`).
+Where it is judged: `march --compile`, `forge build`/`forge test`, the editor,
+`march --check` and `march check` (which lower the program on demand when, and
+only when, it contains a `cap no_alloc` module or an `@[no_alloc]` function; a
+program that cannot be lowered gets a `no_alloc_unchecked` warning per function
+instead of a verdict). The interpreter, `--jit`, the REPL and `march test`
+never lower, so they cannot judge it: they print one `no_alloc_unchecked` hint
+and run the program. `--no-opt` downgrades a hard failure to a warning, since
+the reuse the verdict relies on comes from the optimiser.
 
 ### `cap no_extern`: no foreign calls
 
@@ -757,13 +768,13 @@ $ echo $?
 | I want to… | Use |
 |------------|-----|
 | Prove no integer division can panic, and rule out non-exhaustive matches | `cap no_panic` + Int refinements on divisor params |
-| Guarantee safe use in a realtime audio callback | `cap no_alloc` (+ `Tagged(DSP, Realtime)` for the calling site) |
+| Guarantee safe use in a realtime audio callback | `cap no_alloc`, checked on the compiled code by `forge build`, `march --check` and the editor (+ `Tagged(DSP, Realtime)` for the calling site) |
 | Keep a module free of C/FFI trust-boundary crossings | `cap no_extern` |
 | Guarantee a module has zero side effects, not just no IO caps declared | `cap pure` |
 | Guarantee reproducible output (no clock, no RNG) while still allowing ordinary IO | `cap deterministic` |
 | Both: pure, panic-free, zero-alloc | `cap no_panic` and `cap no_alloc` together |
 
-All five declarations can coexist in the same module. Each is checked by its own independent pass, and none of them subsumes or implies any other.
+All five declarations can coexist in the same module. Each is checked by its own independent pass, and none of them subsumes or implies any other. (`cap no_alloc` is judged on the compiled program rather than during typechecking, so the interpreter reports it as unchecked; see above.)
 
 ---
 
@@ -1373,5 +1384,5 @@ end
 | Exclude allocation/IO from a realtime callback | `Tagged(DSP, Realtime)` |
 | Thread many caps without adding parameters | Capability environment record |
 | Prove integer division can never panic | `cap no_panic` + Int refinements on divisor params |
-| Guarantee zero heap allocation (realtime/embedded) | `cap no_alloc` |
+| Guarantee zero heap allocation (realtime/embedded) | `cap no_alloc` for a whole module, `@[no_alloc]` for one function (the same check) |
 | Small script, just want it to work | `needs IO`: don't overthink it |

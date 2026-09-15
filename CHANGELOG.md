@@ -662,6 +662,18 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **`cap no_alloc` and `@[no_alloc]` are one check.** `cap no_alloc` now puts
+  every function in the module (nested modules, impl methods and actor
+  handlers included) under a hard `@[no_alloc]` contract, judged on the
+  compiled program; the syntactic walk that used to answer for the cap is
+  gone. A module whose function calls an allocating helper is now rejected,
+  and one that builds a constructor the compiler reuses in place is now
+  accepted. An explicit `@[no_alloc(warn)]` (or `assume`/`transient`) on a
+  function inside the module overrides the cap. `march --check` and
+  `march check` now report both forms, lowering the program when it contains
+  either (about 0.9 s extra on a small file, nothing for programs without
+  them); the interpreter, `--jit`, the REPL and `march test` print one
+  `no_alloc_unchecked` hint instead of judging.
 - **`cap no_panic` accepts a guarded `Array.get`/`set`/`pop`.** They were
   banned outright; they now join `List.nth` and friends in the proof-checked
   set, so a call whose bounds guard proves the contract is accepted, and an
