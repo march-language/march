@@ -1,0 +1,261 @@
+-- NodeQueue: the per-peer outbound queue with credit-based flow control
+-- (distributed actors 2/4, step 3; design record:
+-- specs/todos/2026-09-14-credit-based-flow-control.md).
+--
+-- A remote send is a write to THIS queue, never to the socket. One writer
+-- actor per peer owns the data connection for writing: it sends a frame only
+-- while the receiver has granted credit for it, so the kernel buffer never
+-- fills behind a peer that stopped consuming and a stalled peer is visible
+-- here, as queue depth, rather than as a green thread stuck in write().
+--
+-- Budget: bytes queued but not yet written, bounded by the queue's budget.
+-- The check is made by the SENDER, synchronously, through an atomic
+-- Vault.incr, so drop_new can refuse at once; the writer actor only ever
+-- sees frames that fit. Credit: bytes the receiver has CONSUMED (handed to a
+-- mailbox, or answered with DELIVERY_FAILED) and announced with a CREDIT
+-- frame on the control connection; the writer holds a frame until credit
+-- covers it.
+--
+-- Policies at the budget, the three the local bounded mailbox has:
+--   drop_new     refuse the new frame (Err(Backpressure))
+--   drop_old     admit it, evicting the oldest queued frames until it fits;
+--                the evicted seqs are reported through `take_evicted`
+--   block_sender not offered here yet: there is no primitive to park the
+--                calling green thread on the queue; a caller that wants it
+--                retries on Backpressure (the design record's step 3).
+mod NodeQueue do
+  needs IO.Mut
+  needs IO.NetConnect
+
+  fn tag_credit() : Int do 11 end
+
+  type Policy = DropNew | DropOld
+  type EnqueueError = Backpressure | NoConnection
+
+  -- ── wire ────────────────────────────────────────────────────────────────
+  -- CREDIT carries the receiver's TOTAL consumed byte count, not a delta,
+  -- so a duplicated or replayed CREDIT never over-credits.
+  fn encode_credit(total_consumed : Int) : List(Int) do
+    Msgpack.encode(Msgpack.array(Cons(Msgpack.int(tag_credit()), Cons(Msgpack.int(total_consumed), Nil))))
+  end
+
+  fn decode_credit(bytes : List(Int)) : Result(Int, String) do
+    match Msgpack.decode(bytes) do
+      Err(e) -> Err(e)
+      Ok(Msgpack.Array(Cons(Msgpack.Int(11), Cons(Msgpack.Int(n), Nil)))) -> Ok(n)
+      Ok(_) -> Err("node_queue: not a CREDIT frame")
+    end
+  end
+
+  -- ── the writer ──────────────────────────────────────────────────────────
+  -- `sent` is a total; `granted` = the receiver's last announced consumed
+  -- total + the budget, so at most one budget of bytes is ever in flight
+  -- (written but not yet consumed). A frame may go when sent + len <= granted.
+  -- `dead`: a write failed (the connection is gone). Nothing further is
+  -- written and nothing already queued is charged off the budget: a failed
+  -- write is not a sent frame.
+  type WriterState = { fd : Int, granted : Int, sent : Int, pending : Deque.Deque((Int, Bytes)), evicted : List(Int), budget : Int, dead : Bool }
+
+  actor Writer do
+    state { fd : Int, granted : Int, sent : Int, pending : Deque.Deque((Int, Bytes)), evicted : List(Int), budget : Int, dead : Bool }
+    init  { fd: -1, granted: 0, sent: 0, pending: Deque.empty(), evicted: Nil, budget: 0, dead: false }
+    on Configure(fd : Int, budget : Int) do
+      configure(state, fd, budget)
+    end
+    on Enqueue(seq : Int, frame : Bytes) do
+      admit(state, seq, frame)
+    end
+    on EnqueueEvicting(seq : Int, frame : Bytes) do
+      admit_evicting(state, seq, frame)
+    end
+    on Credit(total : Int) do
+      grant(state, total)
+    end
+    on TakeEvicted(reply_to) do
+      Actor.reply(reply_to, state.evicted)
+      forget_evicted(state)
+    end
+  end
+
+  -- The handlers delegate to annotated helpers: a `{ state with .. }` built
+  -- inside a handler and passed to a function does not carry the state's
+  -- full record type, while the same update on a `WriterState` parameter
+  -- does.
+  -- Records are rebuilt whole rather than `{ st with .. }`-updated: inside
+  -- these helpers the checker typed such an update as only its updated
+  -- fields (a smaller stand-alone program did not reproduce it; unisolated).
+  pfn mk(fd : Int, granted : Int, sent : Int, pending : Deque.Deque((Int, Bytes)), evicted : List(Int), budget : Int) : WriterState do
+    { fd: fd, granted: granted, sent: sent, pending: pending, evicted: evicted, budget: budget, dead: false }
+  end
+
+  pfn with_dead(st : WriterState) : WriterState do
+    { fd: st.fd, granted: st.granted, sent: st.sent, pending: st.pending, evicted: st.evicted, budget: st.budget, dead: true }
+  end
+
+  pfn keep_dead(st : WriterState, dead : Bool) : WriterState do
+    if dead do with_dead(st) else st end
+  end
+
+  pfn configure(st : WriterState, fd : Int, budget : Int) : WriterState do
+    keep_dead(mk(fd, budget, st.sent, st.pending, st.evicted, budget), st.dead)
+  end
+
+  pfn admit(st : WriterState, seq : Int, frame : Bytes) : WriterState do
+    drain(keep_dead(mk(st.fd, st.granted, st.sent, Deque.push_back(st.pending, (seq, frame)), st.evicted, st.budget), st.dead))
+  end
+
+  pfn admit_evicting(st : WriterState, seq : Int, frame : Bytes) : WriterState do
+    let st2 = evict_until_fits(st, Bytes.length(frame))
+    drain(keep_dead(mk(st2.fd, st2.granted, st2.sent, Deque.push_back(st2.pending, (seq, frame)), st2.evicted, st2.budget), st2.dead))
+  end
+
+  pfn grant(st : WriterState, consumed_total : Int) : WriterState do
+    let g = consumed_total + st.budget
+    drain(keep_dead(mk(st.fd, if g > st.granted do g else st.granted end, st.sent, st.pending, st.evicted, st.budget), st.dead))
+  end
+
+  pfn forget_evicted(st : WriterState) : WriterState do
+    keep_dead(mk(st.fd, st.granted, st.sent, st.pending, Nil, st.budget), st.dead)
+  end
+
+  type EvictedReq = EvictedReq
+
+  pfn queued_key(w) : String do "q" ++ int_to_string(pid_to_int(w)) end
+  pfn budget_key(w) : String do "b" ++ int_to_string(pid_to_int(w)) end
+  pfn table() do
+    match Vault.whereis("node_queue") do
+      Some(t) -> t
+      None -> Vault.new("node_queue")
+    end
+  end
+
+  pfn queued_bytes(pending : Deque.Deque((Int, Bytes))) : Int do
+    List.fold_left(Deque.to_list(pending), 0, fn (acc, e) -> match e do (_, f) -> acc + Bytes.length(f) end)
+  end
+
+  -- Pop the oldest until `need` more bytes fit in the budget.
+  pfn evict_until_fits(st : WriterState, need : Int) : WriterState do
+    if queued_bytes(st.pending) + need <= st.budget || Deque.is_empty(st.pending) do
+      st
+    else
+      match Deque.pop_front(st.pending) do
+        (None, _) -> st
+        (Some((seq, frame)), rest) ->
+          let _ = Vault.incr(table(), "q" ++ int_to_string(st_pid(st)), 0 - Bytes.length(frame))
+          evict_until_fits(keep_dead(mk(st.fd, st.granted, st.sent, rest, List.append(st.evicted, Cons(seq, Nil)), st.budget), st.dead), need)
+      end
+    end
+  end
+
+  -- The writer's own pid, for the budget table: `self` is not available
+  -- inside a handler, so the fd doubles as the key (one writer per fd).
+  pfn st_pid(st : WriterState) : Int do st.fd end
+
+  -- Write while credit covers the head of the queue.
+  pfn drain(st : WriterState) : WriterState do
+    if st.dead do st
+    else
+      match Deque.peek_front(st.pending) do
+        None -> st
+        Some((_seq, frame)) ->
+          let len = Bytes.length(frame)
+          if st.sent + len <= st.granted do
+            match Socket.write(st.fd, Bytes.to_string(frame)) do
+              Err(_) -> with_dead(st)
+              Ok(_) ->
+                let _ = Vault.incr(table(), "q" ++ int_to_string(st.fd), 0 - len)
+                match Deque.pop_front(st.pending) do
+                  (_, rest) -> drain(mk(st.fd, st.granted, st.sent + len, rest, st.evicted, st.budget))
+                end
+            end
+          else
+            st
+          end
+      end
+    end
+  end
+
+  -- ── sender API ──────────────────────────────────────────────────────────
+  -- Start a writer for the data connection [fd] with a byte [budget].
+  fn start(fd : Int, budget : Int) do
+    let w = spawn(Writer)
+    let _ = send(w, Configure(fd, budget))
+    Vault.set(table(), "b" ++ int_to_string(fd), budget)
+    Vault.set(table(), "q" ++ int_to_string(fd), 0)
+    (w, fd)
+  end
+
+  -- Queue one frame under [policy]. Synchronous: returns as soon as the
+  -- frame is admitted or refused; the write happens in the writer's turn.
+  fn enqueue(q, seq : Int, frame : Bytes, policy : Policy) : Result((), EnqueueError) do
+    match q do
+      (w, fd) ->
+        let len = Bytes.length(frame)
+        let t = table()
+        let budget = Vault.get_or(t, "b" ++ int_to_string(fd), 0)
+        let now = Vault.incr(t, "q" ++ int_to_string(fd), len)
+        if now <= budget do
+          let _ = send(w, Enqueue(seq, frame))
+          Ok(())
+        else
+          match policy do
+            DropNew ->
+              let _ = Vault.incr(t, "q" ++ int_to_string(fd), 0 - len)
+              Err(Backpressure)
+            DropOld ->
+              let _ = send(w, EnqueueEvicting(seq, frame))
+              Ok(())
+          end
+        end
+    end
+  end
+
+  -- An ACTOR_MSG through the queue: NodeSend's frame, NetFrame-encoded,
+  -- as Bytes. The remote-send path a program should use once it has a
+  -- queue for the peer; NodeSend.cast writes straight to a socket.
+  fn cast(q, seq : Int, to : Pid, type_tag : String, payload : List(Int), policy : Policy) : Result((), EnqueueError) do
+    enqueue(q, seq, Bytes.from_list(NetFrame.encode(NodeSend.encode_msg(seq, to, type_tag, payload))), policy)
+  end
+
+  -- Bytes queued and not yet written (the monitoring probe).
+  fn depth(q) : Int do
+    match q do (_, fd) -> Vault.get_or(table(), "q" ++ int_to_string(fd), 0) end
+  end
+
+  -- Apply a CREDIT frame's total to the writer.
+  fn credit(q, total_consumed : Int) : () do
+    match q do
+      (w, _) ->
+        let _ = send(w, Credit(total_consumed))
+        ()
+    end
+  end
+
+  -- The seqs drop_old has evicted since the last call.
+  fn take_evicted(q) : List(Int) do
+    match q do
+      (w, _) ->
+        match Actor.call(w, EvictedReq, 5000) do
+          Ok(seqs) -> seqs
+          Err(_) -> Nil
+        end
+    end
+  end
+
+  -- ── receiver API ────────────────────────────────────────────────────────
+  -- Account [len] consumed bytes from the peer whose control fd is
+  -- [control_fd]; every budget/4 bytes, announce the running total with a
+  -- CREDIT frame. Returns the total consumed so far.
+  fn consumed(control_fd : Int, budget : Int, len : Int) : Int do
+    let t = table()
+    let total = Vault.incr(t, "c" ++ int_to_string(control_fd), len)
+    let last = Vault.get_or(t, "l" ++ int_to_string(control_fd), 0)
+    if total - last >= budget / 4 do
+      Vault.set(t, "l" ++ int_to_string(control_fd), total)
+      let _ = NetKernel.send_frame(control_fd, encode_credit(total))
+      total
+    else
+      total
+    end
+  end
+end
