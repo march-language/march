@@ -2428,6 +2428,42 @@ type measure_instance = { mi_name : string; mi_measure : string; mi_adt : string
 let measure_instance_name (m : string) (adt : string) (args : Smt.sort list) : string =
   m ^ "$" ^ Smt.set_elem_tag (Smt.SData (adt, args))
 
+(* ── Built-in list measures over list STRUCTURE (plan step 2.1) ─────────────
+   Call-site checking treats `len(xs)`/`elts(xs)` as per-variable constants
+   (`len$xs`, `elts$xs`) and folds literal lists; nothing there walks list
+   cells.  A proof by induction over a list must, so the Tier 2 check reflects
+   `len`/`elts` of a list TERM to these two internal measures.  [resolve_sorts]
+   types them and renames each to its list instance (`$len$M_List$Int`), and
+   [query_instance_preamble] declares every instance with its recursion
+   axioms.  The `$` keeps both names out of the March namespace and apart from
+   the `len$x` constants. *)
+let list_len_measure = "$len"
+let list_elts_measure = "$elts"
+let is_list_structure_measure (m : string) : bool = m = list_len_measure || m = list_elts_measure
+let list_adt : string = adt_sort_name "List"
+
+(* The declarations and axioms of list measure [m] at list instance [args]. *)
+let list_measure_text (name : string) (m : string) (args : Smt.sort list) : string =
+  let lst = Smt.string_of_sort (Smt.SData (list_adt, args)) in
+  let elem =
+    Smt.string_of_sort (Smt.render_elem_sort (match args with e :: _ -> e | [] -> Smt.sdata "Elem"))
+  in
+  let nil = Printf.sprintf "(as Nil %s)" lst and cons = Printf.sprintf "((as Cons %s) h t)" lst in
+  let recursion rhs =
+    Printf.sprintf "(assert (forall ((h %s) (t %s)) (! (= (%s %s) %s) :pattern ((%s %s)))))\n"
+      elem lst name cons rhs name cons
+  in
+  if m = list_len_measure then
+    Printf.sprintf "(declare-fun %s (%s) Int)\n" name lst
+    ^ Printf.sprintf "(assert (forall ((x %s)) (! (>= (%s x) 0) :pattern ((%s x)))))\n" lst name name
+    ^ Printf.sprintf "(assert (= (%s %s) 0))\n" name nil
+    ^ recursion (Printf.sprintf "(+ 1 (%s t))" name)
+  else
+    let set = Printf.sprintf "(Array %s Bool)" elem in
+    Printf.sprintf "(declare-fun %s (%s) %s)\n" name lst set
+    ^ Printf.sprintf "(assert (= (%s %s) ((as const %s) false)))\n" name nil set
+    ^ recursion (Printf.sprintf "(store (%s t) h true)" name)
+
 let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
     (assumptions : Smt.term list)
     : ((string * Smt.sort) list * Smt.term * Smt.term list * measure_instance list) option =
@@ -2560,6 +2596,12 @@ let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
       IBool
     | Smt.App (f, [ a ]) when f = strlen_fn ->
       unify (infer a) (INamed (str_sort, [])); IInt
+    | Smt.App (m, [ a ]) when is_list_structure_measure m ->
+      let params, it = fresh_instance list_adt in
+      unify (infer a) it;
+      slot it;
+      if m = list_len_measure then IInt
+      else ISet (if Array.length params > 0 then params.(0) else fresh ())
     | Smt.App (m, [ a ]) when Hashtbl.mem axiom_measures m ->
       (* The measure's declared instance: a concrete argument pins, an `Elem`
          one is open, so a generic measure applies at any instance. *)
@@ -2653,6 +2695,13 @@ let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
            Smt.IsCtorAt (c, inst, n, a')
          | _ -> Smt.IsCtor (c, a'))
       | Smt.App (f, [ a ]) when f = strlen_fn -> Smt.App (f, [ rewrite a ])
+      | Smt.App (m, [ a ]) when is_list_structure_measure m ->
+        let a' = rewrite a in
+        let args = match to_sort (pop ()) with Smt.SData (_, args) -> args | _ -> [] in
+        let name = measure_instance_name m list_adt args in
+        if not (List.exists (fun i -> i.mi_name = name) !instances) then
+          instances := { mi_name = name; mi_measure = m; mi_adt = list_adt; mi_args = args } :: !instances;
+        Smt.App (name, [ a' ])
       | Smt.App (m, [ a ]) when Hashtbl.mem axiom_measures m ->
         let a' = rewrite a in
         let inst = to_sort (pop ()) in
@@ -2713,12 +2762,19 @@ let rec term_sorts (acc : Smt.sort list) (t : Smt.term) : Smt.sort list =
 let query_instance_preamble ~(declared : string) ~(measures : bool)
     (decls : (string * Smt.sort) list) (goal : Smt.term) (assumptions : Smt.term list)
     (mis : measure_instance list) : string =
+  let list_mis, user_mis = List.partition (fun mi -> is_list_structure_measure mi.mi_measure) mis in
   let mtext, _, msorts =
-    if measures && mis <> [] then
+    if measures && user_mis <> [] then
       instance_measure_text ~skip:!global_instance_names
-        (List.map (fun mi -> (mi.mi_name, mi.mi_measure, mi.mi_adt, mi.mi_args)) mis)
+        (List.map (fun mi -> (mi.mi_name, mi.mi_measure, mi.mi_adt, mi.mi_args)) user_mis)
     else ("", [], [])
   in
+  (* The built-in list measures need no measure preamble, so they are declared
+     whether or not [measures] is set. *)
+  let ltext =
+    String.concat "" (List.map (fun mi -> list_measure_text mi.mi_name mi.mi_measure mi.mi_args) list_mis)
+  in
+  let msorts = msorts @ List.map (fun mi -> Smt.SData (list_adt, mi.mi_args)) list_mis in
   let sorts = List.fold_left term_sorts (List.map snd decls @ msorts) (goal :: assumptions) in
   let contains hay needle =
     let n = String.length needle and h = String.length hay in
@@ -2729,11 +2785,12 @@ let query_instance_preamble ~(declared : string) ~(measures : bool)
     instance_decls ~skip:(fun k -> contains declared ("(" ^ k ^ " 0)")) (instance_closure sorts)
   in
   let elem =
-    if dts <> "" && contains dts " Elem)" && not (contains declared "(declare-sort Elem 0)")
+    if (contains dts " Elem)" || contains ltext " Elem")
+       && not (contains declared "(declare-sort Elem 0)")
     then "(declare-sort Elem 0)\n"
     else ""
   in
-  elem ^ (if dts = "" then "" else dts ^ "\n") ^ mtext
+  elem ^ (if dts = "" then "" else dts ^ "\n") ^ ltext ^ mtext
 
 (* [resolve_sorts_exact], forgiving ASSUMPTIONS.  A contradiction that only an
    assumption brings in (a guard over a program function whose name happens to
