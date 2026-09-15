@@ -1077,7 +1077,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
               List.fold_left2
                 (fun re sub srt ->
                   match sub, srt with
-                  | A.PatVar n, Smt.SData s when is_record_sort s -> (n.A.txt, s) :: re
+                  | A.PatVar n, Smt.SData (s, _) when is_record_sort s -> (n.A.txt, s) :: re
                   | _ -> re)
                 re subpats sorts
           | _ -> re
@@ -1557,6 +1557,137 @@ let rec warn_predicate_ty (errctx : Err.ctx) (t : A.ty) : unit =
   | A.TyLinear (_, t) -> warn_predicate_ty errctx t
   | A.TyChan _ | A.TyVar _ | A.TyNat _ | A.TyNatOp _ -> ()
 
+(* ── The single-element-type rule (strengthening design §2.4) ─────────────
+   A set holds elements of ONE type.  A set predicate whose operands have
+   known, different element types — `member("a", elts(ints))`, `elts(xs) ==
+   keys(m)` over a `List(Int)` and a `Map(String, _)` — is an error at the
+   predicate: it is ill-typed, not merely unprovable, and before this rule it
+   was a silent sort-conflict skip.  Element types are read syntactically from
+   declared types only; anything not known that way (an unannotated
+   parameter, a type variable, a record field, `empty`) is never an error. *)
+
+(* A declared type as a comparable key, refinements stripped; [None] when it
+   mentions a type variable or a shape this rule does not compare. *)
+let rec elem_ty_key (t : A.ty) : string option =
+  match t with
+  | A.TyRefine (base, _, _) | A.TyLinear (_, base) -> elem_ty_key base
+  | A.TyCon ({ A.txt; _ }, []) -> Some txt
+  | A.TyCon ({ A.txt; _ }, args) ->
+    let keys = List.map elem_ty_key args in
+    if List.for_all Option.is_some keys then
+      Some (txt ^ "(" ^ String.concat ", " (List.map Option.get keys) ^ ")")
+    else None
+  | A.TyTuple ts ->
+    let keys = List.map elem_ty_key ts in
+    if List.for_all Option.is_some keys then
+      Some ("(" ^ String.concat ", " (List.map Option.get keys) ^ ")")
+    else None
+  | A.TyVar _ | A.TyArrow _ | A.TyRecord _ | A.TyNat _ | A.TyNatOp _ | A.TyChan _ -> None
+
+let rec strip_refine_ty (t : A.ty) : A.ty =
+  match t with A.TyRefine (base, _, _) | A.TyLinear (_, base) -> strip_refine_ty base | _ -> t
+
+(* [env]: variable -> declared type.  [set_fns]: function -> element type of
+   its declared `Set(T)` result. *)
+let set_element_type_errors ~(env : (string * A.ty) list) ~(set_fns : (string * A.ty) list)
+    (pred : A.expr) : (A.span * string) list =
+  let errors = ref [] in
+  let scalar_ty (e : A.expr) : A.ty option =
+    match e with
+    | A.ELit (A.LitInt _, sp) -> Some (A.TyCon ({ A.txt = "Int"; span = sp }, []))
+    | A.ELit (A.LitString _, sp) -> Some (A.TyCon ({ A.txt = "String"; span = sp }, []))
+    | A.ELit (A.LitBool _, sp) -> Some (A.TyCon ({ A.txt = "Bool"; span = sp }, []))
+    | A.ELit (A.LitFloat _, sp) -> Some (A.TyCon ({ A.txt = "Float"; span = sp }, []))
+    | A.EVar { A.txt; _ } -> Option.map strip_refine_ty (List.assoc_opt txt env)
+    | _ -> None
+  in
+  let rec set_elem (e : A.expr) : A.ty option =
+    match e with
+    | A.EAnnot (inner, _, _) -> set_elem inner
+    | A.EApp (A.EVar { A.txt = "elts"; _ }, [ x ], _) ->
+      (match Option.map strip_refine_ty (scalar_ty x) with
+       | Some (A.TyCon ({ A.txt = ("List" | "Set"); _ }, [ t ])) -> Some t
+       | _ -> None)
+    | A.EApp (A.EVar { A.txt = "keys"; _ }, [ x ], _) ->
+      (match Option.map strip_refine_ty (scalar_ty x) with
+       | Some (A.TyCon ({ A.txt = "Map"; _ }, [ k; _ ])) -> Some k
+       | _ -> None)
+    | A.EApp (A.EVar { A.txt = "singleton"; _ }, [ x ], _) -> scalar_ty x
+    | A.EApp (A.EVar { A.txt = ("union" | "inter" | "diff"); _ }, [ a; b ], _) ->
+      (match set_elem a with Some t -> Some t | None -> set_elem b)
+    | A.EApp (A.EVar { A.txt = f; _ }, [ _ ], _) -> List.assoc_opt f set_fns
+    | _ -> None
+  in
+  let rec show (e : A.expr) =
+    match e with
+    | A.ELit (A.LitString s, _) -> Printf.sprintf "\"%s\"" s
+    | A.ELit (A.LitInt n, _) -> string_of_int n
+    | A.ELit (A.LitBool b, _) -> string_of_bool b
+    | A.EVar { A.txt; _ } -> txt
+    | A.EAnnot (inner, _, _) -> show inner
+    | A.EApp (A.EVar { A.txt; _ }, args, _) when List.length args <= 2 ->
+      txt ^ "(" ^ String.concat ", " (List.map show args) ^ ")"
+    | _ -> "…"
+  in
+  let clash ~span (a : string) (ta : A.ty option) (b : string) (tb : A.ty option) =
+    match Option.bind ta elem_ty_key, Option.bind tb elem_ty_key with
+    | Some ka, Some kb when ka <> kb ->
+      errors :=
+        ( span,
+          Printf.sprintf
+            "this set predicate mixes element types: %s is `%s` but %s is `%s`. A set holds \
+             one element type, so this refinement is ill-typed."
+            a ka b kb )
+        :: !errors
+    | _ -> ()
+  in
+  let elems_of e = Printf.sprintf "the element type of `%s`" (show e) in
+  let rec go (e : A.expr) =
+    (match e with
+     | A.EApp (A.EVar { A.txt = "member"; _ }, [ x; st ], span) ->
+       clash ~span (elems_of st) (set_elem st) (Printf.sprintf "the type of `%s`" (show x)) (scalar_ty x)
+     | A.EApp (A.EVar { A.txt = ("union" | "inter" | "diff" | "subset" | "==" | "!="); _ }, [ a; b ], span)
+       ->
+       clash ~span (elems_of a) (set_elem a) (elems_of b) (set_elem b)
+     | _ -> ());
+    match e with
+    | A.EApp (f, args, _) -> go f; List.iter go args
+    | A.ETuple (es, _) | A.ECon (_, es, _) | A.EAtom (_, es, _) -> List.iter go es
+    | A.EAnnot (x, _, _) -> go x
+    | _ -> ()
+  in
+  go pred;
+  List.rev !errors
+
+(* Every refinement in [fd]'s signature, checked against the parameters'
+   declared types; a refinement's binder (`_` or its name) is its base type. *)
+let check_set_element_types (errctx : Err.ctx) ~(set_fns : (string * A.ty) list) (fd : A.fn_def) : unit =
+  (* [Err.error] drops an identical re-report, so a refinement shared by
+     several clauses is reported once. *)
+  let report (span, msg) = Err.error errctx ~span msg in
+  List.iter
+    (fun (c : A.fn_clause) ->
+      let params =
+        List.filter_map
+          (function
+            | A.FPNamed p | A.FPDefault (p, _) ->
+              Option.map (fun t -> (p.A.param_name.A.txt, t)) p.A.param_ty
+            | A.FPPat _ -> None)
+          c.A.fc_params
+      in
+      let env0 = List.map (fun (n, t) -> (n, strip_refine_ty t)) params in
+      let check_ty (t : A.ty) =
+        match t with
+        | A.TyRefine (base, binder, pred) ->
+          let b = match binder with Some n -> n.A.txt | None -> "_" in
+          let env = (b, strip_refine_ty base) :: ("_", strip_refine_ty base) :: env0 in
+          List.iter report (set_element_type_errors ~env ~set_fns pred)
+        | _ -> ()
+      in
+      List.iter (fun (_, t) -> check_ty t) params;
+      Option.iter check_ty fd.A.fn_ret_ty)
+    fd.A.fn_clauses
+
 (* ── Interface-signature refinement warning ────────────────────────────────
    A refinement written in an `interface` method signature (`A.method_decl`'s
    [md_ty]) is inert.  NOTHING in this pass reads [md_ty]: [visit_decl]'s
@@ -1719,7 +1850,18 @@ let decls_declare_verified (decls : A.decl list) : bool =
    module and inherits the flag unchanged, matching [visit_decl]'s own
    [visit_group] treatment of `DDescribe`. *)
 let rec warn_predicate_decls (errctx : Err.ctx) ~(strict : bool) (decls : A.decl list) : unit =
+  let set_fns =
+    List.filter_map
+      (function
+        | A.DFn (fd, _) ->
+          (match Option.map strip_refine_ty fd.A.fn_ret_ty with
+           | Some (A.TyCon ({ A.txt = "Set"; _ }, [ t ])) -> Some (fd.A.fn_name.A.txt, t)
+           | _ -> None)
+        | _ -> None)
+      decls
+  in
   let warn_fn (fd : A.fn_def) =
+    check_set_element_types errctx ~set_fns fd;
     Option.iter (warn_predicate_ty errctx) fd.A.fn_ret_ty;
     List.iter
       (fun (c : A.fn_clause) ->
@@ -2063,6 +2205,8 @@ and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
     that their selectors are available when check_post reflects field projections. *)
 let register_types_for_check (decls : A.decl list) : unit =
   Hashtbl.clear adt_ctors;
+  Hashtbl.clear adt_arity;
+  Hashtbl.clear ctor_field_sorts_poly;
   Hashtbl.clear ctor_field_sorts;
   Hashtbl.clear ctor_field_names;
   Hashtbl.clear ctor_param_fields;
@@ -2075,6 +2219,7 @@ let register_types_for_check (decls : A.decl list) : unit =
   Hashtbl.clear const_fns;
   Hashtbl.clear const_fn_rejected;
   measure_preamble := "";
+  global_instance_names := [];
   type_preamble := "";
   register_builtin_adts ();
   register_adt_names decls;
@@ -2836,6 +2981,8 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
       (bare_builtin_undefined ~mod_name "string_byte_length" m.A.mod_decls);
   let all_mfns = collect_measure_fns m.A.mod_decls in
   Hashtbl.reset adt_ctors;
+  Hashtbl.reset adt_arity;
+  Hashtbl.reset ctor_field_sorts_poly;
   Hashtbl.reset ctor_field_sorts;
   Hashtbl.reset ctor_field_names;
   Hashtbl.reset ctor_param_fields;
@@ -2844,6 +2991,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   Hashtbl.reset measure_scalar_field_dep;
   Hashtbl.reset measure_preamble_sorts;
   measure_preamble := "";
+  global_instance_names := [];
   type_preamble := "";
   (* Reset per-module so the SMT constant names a VC is built from are a
      function of the module alone.  Without this the counter drifts across

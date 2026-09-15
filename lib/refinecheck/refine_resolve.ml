@@ -296,7 +296,8 @@ let make_field_resolver (binder : string) (sort_name : string) (binder_term : Sm
    through record field projections like State_1(State(1, Nil)) → Nil. *)
 let rec selector_reduce (term : Smt.term) : Smt.term =
   match term with
-  | Smt.App (selector, [ (Smt.App (ctor, args) as inner) ]) ->
+  | Smt.App (selector, [ inner ]) when ctor_view inner <> None ->
+    let ctor, args = Option.get (ctor_view inner) in
     let prefix = ctor ^ "_" in
     let plen = String.length prefix in
     if String.length selector > plen && String.sub selector 0 plen = prefix then
@@ -310,9 +311,9 @@ let rec selector_reduce (term : Smt.term) : Smt.term =
    Returns None for opaque (variable/unknown) terms — avoids quantifier-based
    axioms that would cause Z3 to return `unknown` instead of sat/unsat. *)
 let rec concrete_len (term : Smt.term) : int option =
-  match selector_reduce term with
-  | Smt.App ("Nil", []) -> Some 0
-  | Smt.App ("Cons", [ _h; t ]) -> Option.map (( + ) 1) (concrete_len t)
+  match ctor_view (selector_reduce term) with
+  | Some ("Nil", []) -> Some 0
+  | Some ("Cons", [ _h; t ]) -> Option.map (( + ) 1) (concrete_len t)
   | _ -> None
 
 (* Try to evaluate an axiom measure on a concrete SMT term.
@@ -325,11 +326,11 @@ let concrete_measure_app (name : string) (arg_term : Smt.term) : int option =
   | None -> None
   | Some bases ->
     let go term =
-      match selector_reduce term with
-        | Smt.App (ctor, []) ->
+      match ctor_view (selector_reduce term) with
+        | Some (ctor, []) ->
           (* Zero-arg constructor: look up in base cases *)
           List.assoc_opt ctor bases
-        | Smt.App (_ctor, _args) ->
+        | Some (_ctor, _args) ->
           (* Multi-arg constructor: not a base case for simple measures;
              would need the step case — give up for now *)
           None
@@ -367,10 +368,7 @@ let concrete_measure_app (name : string) (arg_term : Smt.term) : int option =
    function exists to prevent — so a list literal with concrete elements makes
    the record unreflectable, and the call is skipped. *)
 let rec term_fits_sort (sort : Smt.sort) (t : Smt.term) : bool =
-  let is_ctor_app = function
-    | Smt.App (c, _) -> Hashtbl.mem ctor_field_sorts c
-    | _ -> false
-  in
+  let is_ctor_app t = ctor_view t <> None in
   match sort with
   | Smt.SInt | Smt.SBool -> not (is_ctor_app t)
   (* Float RECORD FIELDS are out of scope: [smt_sort_of_field] never produces
@@ -381,9 +379,11 @@ let rec term_fits_sort (sort : Smt.sort) (t : Smt.term) : bool =
   (* No record field is a set: a set-sorted field never arises from
      [smt_sort_of_field], so nothing fits it. *)
   | Smt.SSet _ -> false
-  | Smt.SData s ->
-    (match t with
-     | Smt.App (ctor, args) ->
+  (* An uninstantiated type parameter never reaches a fit check. *)
+  | Smt.SParam _ -> false
+  | Smt.SData (s, _) ->
+    (match ctor_view t with
+     | Some (ctor, args) ->
        (match Hashtbl.find_opt adt_ctors s with
         | Some cs when List.mem ctor cs ->
           (* Every argument must sit at its own declared field sort.  An arity
@@ -444,7 +444,7 @@ let reflect_record_literal ?(opaque : (Smt.sort -> Smt.term) option)
              in_order fsorts
          in
          if List.exists Option.is_none reflected then None
-         else Some (Smt.App (ctor, List.filter_map Fun.id reflected))
+         else Some (ctor_term sort_name ctor (List.filter_map Fun.id reflected))
      | _ -> None)
   | _ -> None
 
