@@ -179,3 +179,53 @@ Witness `test/native/credit_backpressure_loopback`: budget 100, two 44-byte
 frames admitted, the third `Backpressure`; the receiver consumes after a
 "go" on control, its CREDIT re-admits the third; receiver consumed 3.
 Unit tests in `test/stdlib/test_node_queue.march`.
+
+---
+
+## Shipped 2026-09-15: `BlockSender(timeout_ms)` — the last policy; item closed
+
+`NodeQueue.Policy` gains `BlockSender(timeout_ms)`. It needs no new
+scheduler primitive: it rides `Actor.call` on the writer. A frame that does
+not fit is sent as `Waiting(key, seq, frame)` (uncharged; the writer charges
+it on admission), and the caller blocks in `Actor.call(w, WaitReq, timeout_ms)`.
+The writer keeps two FIFO lines, waiting frames and blocked callers, one
+entry each per call; every admission from the frame line (on credit, or
+whenever something else frees budget) answers the oldest caller `true`. A
+dead connection answers everyone `false` (`Err(NoConnection)`); a timed-out
+caller sends `Withdraw(key)`, which drops its frame if still waiting and
+answers one caller entry `false` so the lines stay the same length. Under
+the interpreter `Actor.call` cannot park the caller across later credit, so
+a send that cannot be admitted at once is `Err(Backpressure)` there.
+
+Holding a reply across handler turns needed one runtime helper,
+`actor_reply_retain(ref)` (`march_actor_reply_retain`): a reply ref's only
+reference is retired with the call envelope when the handler returns, so a
+reply from a LATER turn was a use-after-free. `retain` takes a second
+reference; `march_actor_reply` retires one per reply, so a held ref must be
+answered exactly once.
+
+Measured while building it:
+- **A reply ref must never sit in an Int-typed slot.** The first cut held
+  refs in `Deque(Int)`; the ref was Int-tagged on the way in, so the later
+  `Actor.reply` saw a non-ref, took the legacy raw-proc path, and sent to a
+  garbage proc (SIGBUS in `march_sched_send`, 5/5 runs). The writer now holds
+  each blocked caller as the closure that answers it (`Bool -> Unit`), so the
+  ref stays a counted heap value. The crash pc was first misattributed to
+  `Bytes.length` by guessing the symbol from the page offset; `dladdr` in the
+  fault report named the real function at once.
+- `Actor.call` routes a sentinel to the handler at the sentinel's
+  constructor index, so `TakeEvicted` and `Wait` are the writer's first two
+  handlers (`WriterReq = EvictedReq | WaitReq`). `take_evicted` had used a
+  one-constructor sentinel against handler 0 = `Configure` and nothing
+  exercised it; an interpreter unit test now does.
+- Interpreter: an actor declared in a module captured the env as of its own
+  declaration, so a handler calling a fn declared after it died with "stub X
+  called before initialisation". `eval_decl` now re-points every actor of a
+  module at the module's final env.
+
+Witness `test/native/block_sender_loopback`: budget 100, 44-byte frames; two
+written at once, two queued behind the credit line, the fifth enqueued under
+`BlockSender(5000)` returns `Ok` only after the receiver's delayed consumption
+(wall clock >= 150 ms), and the receiver consumes all five. Unit tests in
+`test/stdlib/test_node_queue.march` (admits at once when it fits; a dead
+connection is `NoConnection` at once with nothing queued; `take_evicted`).

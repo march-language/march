@@ -1,0 +1,154 @@
+-- Two-node harness, scenario "skew": node-a is the observer, its clock right.
+-- node-b runs 30 s ahead and sends one load report stamped with its own clock.
+-- node-a prints whether that report is fresh when it arrives and whether it
+-- is stale 11 s later (SwimDriver.load_stale_ms is 10 s). A load's age must be
+-- measured on ONE clock: if node-a ages node-b's report by node-b's stamp, a
+-- report from a clock ahead never goes stale (and one from a clock behind is
+-- stale on arrival), which is what this scenario was written to find.
+-- Booleans only: the scenario's lines must not depend on the wall clock.
+-- Design: specs/todos/2026-09-14-two-node-scenarios-partition-skew-monitor.md.
+mod TwoNodeSkewA do
+  needs IO.Console
+  needs IO.NetConnect
+  needs IO.Process
+  needs IO.Clock
+
+  -- ── a SWIM node over one connection ──────────────────────────────────
+  -- SwimDriver.step is a pure transition; this is the I/O loop around it:
+  -- read for up to 50 ms, turn every complete frame into an event (a Ping is
+  -- answered on the spot), step with the wall clock, perform the actions.
+  -- Period 500 ms, ack timeout 300 ms, suspect timeout 1000 ms, no helpers
+  -- (two nodes: nobody to ask).
+  pfn cfg() : Swim.Config do Swim.config(300, 1000, 0) end
+
+  pfn write_msg(fd : Int, msg : SwimDriver.WireMsg) : () do
+    let _ = Socket.write(fd, NetKernel.bytes_to_str(NetFrame.encode(SwimDriver.encode_msg(msg))))
+    ()
+  end
+
+  pfn perform(fd : Int, acts : List(Swim.Action)) : () do
+    match acts do
+      Nil -> ()
+      Cons(a, rest) ->
+        match a do
+          Swim.SendPing(_target) -> write_msg(fd, SwimDriver.SwimPing(me()))
+          Swim.SendPingReq(_, _) -> ()
+          Swim.Gossip(m) -> write_msg(fd, SwimDriver.SwimGossip(m.node_id, m.status, m.incarnation))
+        end
+        perform(fd, rest)
+    end
+  end
+
+  -- Split every complete frame off [buf]; answer pings; collect events.
+  pfn drain(fd : Int, buf : List(Int), events : List(SwimDriver.Event), acked : Bool) : (List(Int), List(SwimDriver.Event), Bool) do
+    match NetFrame.decode(buf) do
+      None -> (buf, events, acked)
+      Some((frame, rest)) ->
+        match SwimDriver.decode_msg(frame) do
+          Err(_) -> drain(fd, rest, events, acked)
+          Ok(msg) ->
+            match msg do
+              SwimDriver.SwimPing(_sender) ->
+                write_msg(fd, SwimDriver.SwimPingAck(me()))
+                drain(fd, rest, events, acked)
+              SwimDriver.SwimPingAck(_) ->
+                match SwimDriver.msg_to_event(msg) do
+                  Some(ev) -> drain(fd, rest, List.append(events, Cons(ev, Nil)), true)
+                  None -> drain(fd, rest, events, acked)
+                end
+              _ ->
+                match SwimDriver.msg_to_event(msg) do
+                  Some(ev) -> drain(fd, rest, List.append(events, Cons(ev, Nil)), acked)
+                  None -> drain(fd, rest, events, acked)
+                end
+            end
+        end
+    end
+  end
+
+  -- One tick: read, drain, step, perform. Returns the new driver state, the
+  -- leftover bytes, whether an ack arrived, and whether the peer closed.
+  pfn tick(fd : Int, s : SwimDriver.State, buf : List(Int)) : (SwimDriver.State, List(Int), Bool, Bool) do
+    let got = match Socket.recv_timeout(fd, 4096, 50) do
+      Ok(chunk) -> if String.is_empty(chunk) do (buf, false, true) else (List.append(buf, NetKernel.str_to_bytes(chunk)), false, false) end
+      Err(Socket.RecvTimeout(_)) -> (buf, false, false)
+      Err(_) -> (buf, false, true)
+    end
+    match got do
+      (_, _, true) -> (s, buf, false, true)
+      (buf1, _, false) ->
+        let d = drain(fd, buf1, Nil, false)
+        match d do
+          (buf2, events, acked) ->
+            match SwimDriver.step(s, unix_time_ms(), events) do
+              (s2, acts) ->
+                perform(fd, acts)
+                (s2, buf2, acked, false)
+            end
+        end
+    end
+  end
+
+  pfn initial(peer : String) : SwimDriver.State do
+    let ms = Membership.observe(Membership.observe(Membership.empty(), Membership.alive(me(), 1)), Membership.alive(peer, 1))
+    SwimDriver.make(me(), 1, ms, cfg(), 500, 7)
+  end
+
+  pfn me() : String do "node-a" end
+
+  pfn connect_with_retry(host : String, port : Int, attempts_left : Int) : Result(Int, Socket.SocketError) do
+    match Socket.connect(host, port) do
+      Ok(fd) -> Ok(fd)
+      Err(e) ->
+        if attempts_left <= 1 do
+          Err(e)
+        else
+          let _ = Process.run("sleep", Cons("0.1", Nil))
+          connect_with_retry(host, port, attempts_left - 1)
+        end
+    end
+  end
+
+  -- Wait for node-b's load report; judge it on arrival and 11 s later.
+  -- `arrived` is node-a's own clock at arrival, 0 until then.
+  pfn observe(fd : Int, s : SwimDriver.State, buf : List(Int), arrived : Int) : () do
+    match tick(fd, s, buf) do
+      (_, _, _, true) -> println("node-a: peer closed early")
+      (s2, buf2, _, false) ->
+        let t = unix_time_ms()
+        if arrived == 0 do
+          match Map.get(s2.peer_loads, "node-b", Map.str_cmp) do
+            None -> observe(fd, s2, buf2, 0)
+            Some(_) ->
+              let fresh = match SwimDriver.peer_load(s2, "node-b", t) do
+                Some(_) -> true
+                None -> false
+              end
+              println("node-a: node-b load fresh on arrival: " ++ bool_to_string(fresh))
+              observe(fd, s2, buf2, t)
+          end
+        else
+          if t - arrived >= 11000 do
+            let stale = match SwimDriver.peer_load(s2, "node-b", t) do
+              Some(_) -> false
+              None -> true
+            end
+            println("node-a: node-b load stale 11 s after its only report: " ++ bool_to_string(stale))
+            println("node-a: done")
+          else
+            observe(fd, s2, buf2, arrived)
+          end
+        end
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_process : Cap(IO.Process), _cap_clock : Cap(IO.Clock)) do
+    let port = Env.require_int("MARCH_PEER_PORT")
+    let fd = match connect_with_retry("127.0.0.1", port, 100) do
+      Ok(fd) -> fd
+      Err(e) -> panic("connect: " ++ Socket.error_message(e))
+    end
+    observe(fd, initial("node-b"), Nil, 0)
+    tcp_close(fd)
+  end
+end

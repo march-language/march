@@ -5884,6 +5884,24 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/node_send_typed_loopback.expected native_node_send_typed_loopback.out)))
 
+; ── NodeQueue.BlockSender: the caller blocks until credit admits the frame ──
+(rule
+ (targets native_block_sender_loopback native_block_sender_loopback.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/block_sender_loopback.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_block_sender_loopback
+        native/block_sender_loopback.march)
+   (with-stdout-to native_block_sender_loopback.out
+        (system "./native_block_sender_loopback")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/block_sender_loopback.expected native_block_sender_loopback.out)))
+
 ; ── A monitor registered after the target died is answered at once ──
 (rule
  (targets native_monitor_after_death_loopback native_monitor_after_death_loopback.out)

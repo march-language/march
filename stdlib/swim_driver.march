@@ -30,7 +30,8 @@
 --   bump_anti_entropy(s, now) resets the timer after firing.
 --
 -- Load gossip (P4):
---   peer_loads tracks the last NodeLoad heard from each live peer.
+--   peer_loads tracks the last NodeLoad heard from each live peer, stamped
+--   with its receipt time on this node's clock (never the sender's).
 --   dispatch_all_with_load embeds the local NodeLoad in outgoing Gossip frames.
 mod SwimDriver do
 
@@ -130,12 +131,19 @@ mod SwimDriver do
     end
   end
 
-  -- Fold load samples from events into the peer_loads map.
-  pfn apply_load_events(peer_loads : Map(String, NodeLoad), evs : List(Event)) : Map(String, NodeLoad) do
+  -- Fold load samples from events into the peer_loads map, restamped with
+  -- [now]: a stored load's `sampled_at` is when THIS node received it. The
+  -- sender's stamp is on the sender's clock, and staleness is `now -
+  -- sampled_at` on ours, so a peer whose clock ran ahead sent reports that
+  -- never went stale and one behind sent reports stale on arrival
+  -- (test/two_node/skew).
+  pfn apply_load_events(peer_loads : Map(String, NodeLoad), evs : List(Event), now : Int) : Map(String, NodeLoad) do
     List.fold_left(evs, peer_loads, fn (acc, ev) ->
       match ev do
         GossipWithLoad(_member, nl) ->
-          Map.insert(acc, nl.node_id, nl, Map.str_cmp)
+          let received = { node_id: nl.node_id, cpu_count: nl.cpu_count, cpu_load_milli: nl.cpu_load_milli,
+                           mem_total_mb: nl.mem_total_mb, mem_avail_mb: nl.mem_avail_mb, sampled_at: now }
+          Map.insert(acc, nl.node_id, received, Map.str_cmp)
         _ -> acc
       end)
   end
@@ -163,7 +171,7 @@ mod SwimDriver do
     let ev_acts = match ev_out do (_, a) -> a end
 
     -- 1b. Update peer load table from any GossipWithLoad events.
-    let new_peer_loads = apply_load_events(s.peer_loads, events)
+    let new_peer_loads = apply_load_events(s.peer_loads, events, now)
 
     -- 2. Period boundary?
     if now >= s.period_end do

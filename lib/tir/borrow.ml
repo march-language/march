@@ -64,6 +64,8 @@ let extern_borrow_table : (string * bool list) list = [
      the running actor holds one, so releasing the program's pids is safe.
      `send`'s MESSAGE stays owned (the runtime enqueues it). *)
   ("send",              [true; false]);
+    (* the ref is read, incrc'd, and returned as a NEW owned reference *)
+    ("actor_reply_retain", [true]);
   ("actor_cast",        [true; false]);
   ("march_send",        [true; false]);
   ("kill",              [true]);
