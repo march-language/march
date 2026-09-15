@@ -331,14 +331,17 @@ let rec pretty_smt_value (v : string) : string =
     let m = String.length t in
     if m >= 2 && t.[0] = '(' && t.[m - 1] = ')' then Some (String.sub t 1 (m - 2)) else None
   in
-  let rec store_chain (t : string) : (string * bool) list option =
+  (* The base constant's value (a co-finite set sits on an all-TRUE array)
+     and the stores over it, in order. *)
+  let rec store_chain (t : string) : (bool * (string * bool) list) option =
     match parens t with
     | None -> None
     | Some inner ->
       match sexp_tokens inner with
-      | [ c; "false" ] when String.length c > 8 && String.sub c 0 8 = "(as cons" -> Some []
+      | [ c; ("true" | "false" as b) ] when String.length c > 8 && String.sub c 0 8 = "(as cons" ->
+        Some (b = "true", [])
       | [ "store"; rest; x; ("true" | "false" as b) ] ->
-        Option.map (fun ops -> ops @ [ (x, b = "true") ]) (store_chain rest)
+        Option.map (fun (base, ops) -> (base, ops @ [ (x, b = "true") ])) (store_chain rest)
       | _ -> None
   in
   let rec lambda_members (var : string) (body : string) : string list option =
@@ -362,13 +365,14 @@ let rec pretty_smt_value (v : string) : string =
   let set_elems (t : string) : string list option =
     let add xs x = if List.mem x xs then xs else xs @ [ x ] in
     match store_chain t with
-    | Some ops ->
+    | Some (false, ops) ->
       Some
         (List.fold_left
            (fun xs (x, present) ->
              let x = pretty_smt_value x in
              if present then add xs x else List.filter (( <> ) x) xs)
            [] ops)
+    | Some (true, _) -> None
     | None ->
       match Option.map sexp_tokens (parens t) with
       | Some [ "lambda"; binders; body ] ->
@@ -386,6 +390,23 @@ let rec pretty_smt_value (v : string) : string =
   match set_elems v with
   | Some xs -> "{" ^ String.concat ", " xs ^ "}"
   | None ->
+  (* A co-finite set: every value, less the ones stored false. *)
+  match store_chain v with
+  | Some (true, ops) ->
+    let missing =
+      List.fold_left
+        (fun xs (x, present) ->
+          let x = pretty_smt_value x in
+          if present then List.filter (( <> ) x) xs else if List.mem x xs then xs else xs @ [ x ])
+        [] ops
+    in
+    if missing = [] then "{every value}"
+    else "{every value except " ^ String.concat ", " missing ^ "}"
+  | _ ->
+  (* z3 4.8's spelling of the full set. *)
+  match Option.map sexp_tokens (parens v) with
+  | Some [ "lambda"; _; "true" ] -> "{every value}"
+  | _ ->
   if n >= 2 && v.[0] = '(' && v.[n - 1] = ')' then begin
     let inner = String.sub v 1 (n - 2) in
     match sexp_tokens inner with
@@ -411,7 +432,7 @@ let is_ret_suffix (s : string) : bool =
   in
   (* `ret<N>` (a scalar result), `set<N>` (a result's element set) and
      `dt<N>` (a datatype result) are all "what this call can return". *)
-  tagged "ret" || tagged "set" || tagged "dt"
+  tagged "ret" || tagged "set" || tagged "dt" || tagged "len"
 
 (* Render one model entry.  Internal SMT constants use `$` to join a symbol to
    its subject:
@@ -428,7 +449,10 @@ let render_model_entry (k, v) : string =
   | Some i ->
     let head = String.sub k 0 i in
     let tail = String.sub k (i + 1) (String.length k - i - 1) in
-    if is_ret_suffix tail then Printf.sprintf "%s() can return %s" head v'
+    if is_ret_suffix tail && String.length tail > 3 && String.sub tail 0 3 = "len" then
+      (* `f$len1`: the built-in length of what `f` returns. *)
+      Printf.sprintf "len(%s()) can be %s" head v'
+    else if is_ret_suffix tail then Printf.sprintf "%s() can return %s" head v'
     else Printf.sprintf "%s(%s) = %s" head tail v'
   | None -> Printf.sprintf "%s = %s" k v'
 

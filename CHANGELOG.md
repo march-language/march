@@ -16,6 +16,15 @@ git log is authoritative for exact commits.
   remote actor's death and the ack still gets exactly one `Down` after reconnecting; and the
   `restart` scenario's monitor half: a crashed node's monitors fire `NodeDown` locally, once.
   `NodeSend.handle_frame` is the frame-level receiver for readers that dispatch by tag.
+- **List contracts proved from list code.** A function that recurses over a
+  list can have its `elts` and `len` return refinement proved from its body,
+  including through a local helper `fn`, a call to another proved function,
+  and a parameter refinement used as an invariant. `List.reverse`,
+  `List.append`, `List.filter` and `List.dedup` now carry proved element
+  contracts, so `member(x, elts(List.reverse(xs)))` follows from
+  `member(x, elts(xs))` at a call site. A contract is used only once proved,
+  in any declaration order. See "Proved list contracts" in
+  `docs/refinement-types.md`.
 - `Node.send(peer, to, msg)`: the typed remote send. `msg`'s type must `derive Json`
   (a missing codec is a typecheck error at the call site naming the type, not a
   run-time `to_json` panic), the wire type tag is minted by the compiler from the

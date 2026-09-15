@@ -1323,6 +1323,15 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        postcondition about `elts(_)` becomes a fresh set constant carrying
        that postcondition, the set analogue of [reflect_scalar]'s call
        branch: `need(mk())` then discharges from `mk`'s own contract. *)
+    (* Forward cell for [load_scope_measure_facts] (defined below), which
+       itself resolves nested calls through [set_of_call]. *)
+    let load_scope_measure_facts_ref : (string -> unit) ref = ref (fun _ -> ()) in
+    (* Measures a call result can carry through its callee's postcondition:
+       the built-in set measures, and the built-in `len` when no user measure
+       took that name. *)
+    let is_call_measure (m : string) : bool =
+      is_builtin_set_measure m || (m = "len" && not (is_axiom_measure "len"))
+    in
     let reflect_set_head (a : A.expr) : Smt.term option =
       match a with
       | A.ELit (A.LitInt n, _) -> Some (Smt.IntLit n)
@@ -1340,25 +1349,41 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
       match a with
       | A.ECon ({ A.txt = "Nil"; _ }, [], _) -> Some (Smt.SetEmpty Smt.set_unknown_elem)
       | A.ECon ({ A.txt = "Cons"; _ }, [ h; tl ], _) ->
-        (match reflect_set_head h, reflect_list_literal tl with
+        (match reflect_set_head h, reflect_list_tail tl with
          | Some ht, Some rest -> Some (Smt.SetUnion (Smt.SetSng (Smt.set_unknown_elem, ht), rest))
          | _ -> None)
       | _ -> None
+    (* The tail of a constructor chain may be a NAME (`Cons(h, acc)` in an
+       accumulator call, plan step 2.5): its elements are that name's own
+       `elts$acc` constant, carrying whatever the caller's scope promises. *)
+    and reflect_list_tail (tl : A.expr) : Smt.term option =
+      match tl with
+      | A.EVar { A.txt = x; _ } when not (is_recvar x) && not (Hashtbl.mem str_names x) ->
+        !load_scope_measure_facts_ref x;
+        measure_of_var elts_measure x
+      | _ -> reflect_list_literal tl
     in
     (* [load_scope_measure_facts] is defined below and itself resolves nested
        calls through [elts_of_call]; a forward cell breaks the cycle.  A
        measure over a caller NAME inside a substituted contract must load
        that name's own promise first, or `let s = from_list([1,2])` followed
        by `to_list(s)` connects `elts$s` to nothing. *)
-    let load_scope_measure_facts_ref : (string -> unit) ref = ref (fun _ -> ()) in
     let rec set_of_call (m0 : string) (fname : string) (cargs : A.expr list) : Smt.term option =
       match postcond fname cargs with
       | None -> None
       | Some (b, q, _) ->
         incr ret_ctr;
-        let nm = Printf.sprintf "%s$set%d" fname !ret_ctr in
+        (* `elts`/`keys` of the call is a set; the built-in `len` of it (plan
+           step 2.2: a list contract proved by induction reaches the call site
+           through here) is a non-negative Int. *)
+        let is_len = m0 = "len" in
+        let nm = Printf.sprintf "%s$%s%d" fname (if is_len then "len" else "set") !ret_ctr in
         let c = Smt.Const nm in
-        decls := (nm, Smt.SSet Smt.set_unknown_elem) :: !decls;
+        if is_len then begin
+          decls := (nm, Smt.SInt) :: !decls;
+          push_structural (Smt.Ge (c, Smt.IntLit 0))
+        end
+        else decls := (nm, Smt.SSet Smt.set_unknown_elem) :: !decls;
         (* [q] is already in the CALLER's namespace.  Its binder's `elts` is
            this constant; a measure over any other name is that caller name's
            own memoized symbol, under the same sort guards the scope-fact
@@ -1381,13 +1406,17 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
             measure_of_var m n
           end
         in
-        let rmc m f cargs' = if is_builtin_set_measure m then set_of_call m f cargs' else None in
+        let rmc m f cargs' = if is_call_measure m then set_of_call m f cargs' else None in
         (match smt_of ~resolve_var:rv ~resolve_measure:rm ~resolve_str_lit:str_lit_const
                  ~resolve_measure_call:rmc q with
          | Some qa -> push_user qa
          | None -> ());
         Some c
     in
+    (* Whether [set_of_call] would find a contract: a call whose callee has
+       none keeps the fallback below (a fresh non-negative length), so the
+       skip it produces stays the same undecided one it always was. *)
+    let set_of_call_available fname cargs = postcond fname cargs <> None in
     let self_dt_sym = "$self" in
     let self_is_str = rp_is_str rp in
     (* The SMT symbol the subject ("_"/[rp.binder]) actually reflects to in
@@ -1637,7 +1666,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
           in
           (* `elts(Set.empty())` in a substituted contract: a measure over a
              nested call stands that call up with its own contract. *)
-          let rmc m f cargs = if is_builtin_set_measure m then set_of_call m f cargs else None in
+          let rmc m f cargs = if is_call_measure m then set_of_call m f cargs else None in
           (match smt_of ~resolve_var:rv ~resolve_measure:rm ~resolve_str_lit:str_lit_const
                    ~resolve_measure_call:rmc q with
            | Some qa -> push_user qa
@@ -1816,7 +1845,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                | _ -> None)
             | _ -> None
           in
-          let rmc m f cargs' = if is_builtin_set_measure m then set_of_call m f cargs' else None in
+          let rmc m f cargs' = if is_call_measure m then set_of_call m f cargs' else None in
           (match smt_of ~resolve_var:rv ~resolve_measure:rm ~resolve_measure_app:rma
                    ~resolve_tester:rt ~resolve_str_lit:str_lit_const ~resolve_measure_call:rmc q with
            | Some qa -> push_user qa
@@ -1985,6 +2014,11 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                  | A.EVar { A.txt = x; _ } ->
                    load_scope_measure_facts x;
                    measure_of_var m x
+                 (* The built-in `len` of a call: a constant carrying the
+                    callee's proved postcondition, as for `elts`. *)
+                 | A.EApp (A.EVar { A.txt = fname; _ }, cargs, _)
+                   when is_call_measure m && set_of_call_available fname cargs ->
+                   set_of_call m fname cargs
                  (* A non-variable, non-literal actual (a call, a field…): no
                     symbol to share with the caller's facts.  For the binder
                     spellings keep the fresh non-negative constant — it is what

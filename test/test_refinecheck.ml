@@ -2673,13 +2673,12 @@ let tier2_suite =
   fn probe() : Int do needs_empty(push(Nil, 5)) end
 end|}));
 
-    (* FRONTIER, pinned deliberately: the BUILT-IN `len` is not an axiomatised
-       measure ([is_axiom_measure] covers only user `@[measure]`s), so it has no
-       recursion equations for the induction to reduce through and the
-       postcondition stays unproven.  Silence, not a wrong answer.  Declaring a
-       user measure over the same list (above) is the workaround. *)
-    gated "the built-in `len` does not yet carry Tier 2 induction" (fun () ->
-        Alcotest.(check bool) "no error" false
+    (* Was a FRONTIER until plan step 2.2: the built-in `len` had no recursion
+       equations, so this postcondition stayed unproven and the call was
+       silent.  Tier 2 now reflects `len` of a list term to the structural
+       `$len` measure, and the proved contract reaches the call site. *)
+    gated "the built-in `len` carries Tier 2 induction" (fun () ->
+        Alcotest.(check bool) "error" true
           (has_refine_error
              {|mod P do
   fn push(xs : List(Int), x : Int) : {List(Int) | len(_) == len(xs) + 1} do
@@ -5423,13 +5422,11 @@ end|} post body
         Alcotest.(check bool) "no error" false (has_refine_error_d src);
         let proved, violated, skips = March_refinecheck.Obligation.summary () in
         Alcotest.(check int) "violated" 0 violated;
-        (* The EMatch path deliberately still records NOTHING in the ledger —
-           extending the accounting to it would move counts under every existing
-           Tier 2 fixture and is a separate change.  Pinned exactly so that if
-           someone does extend it, this test fails and forces the decision to be
-           made on purpose rather than as a side effect. *)
-        Alcotest.(check int) "the EMatch path records no obligation" 0 proved;
-        Alcotest.(check int) "…and no skip either" 0
+        (* The EMatch path records its verdict exactly once since plan step
+           2.4 (it recorded nothing before, so a proved induction was invisible
+           to `--refine-report`). *)
+        Alcotest.(check int) "the EMatch path records one proved obligation" 1 proved;
+        Alcotest.(check int) "…and no skip" 0
           (List.fold_left (fun a (_, n) -> a + n) 0 skips))
   ]
 
@@ -12414,7 +12411,10 @@ let audit_classify_suite =
        routing.  A List return whose predicate has no `elts`/`keys` goes to
        Tier 2, which files nothing without a list measure; a Tier 2 match on
        an UNANNOTATED parameter is not Shape 2. *)
-    check_unenforced "a {List(Int) | len(_) > 0} return with no list measure is Unenforced"
+    (* Unenforced until plan step 2.2: Tier 2 had no list measure and filed
+       nothing.  The built-in `len` is now structural there, so the
+       constructor-literal body is checked (and refuted). *)
+    check_enforced "a {List(Int) | len(_) > 0} return with no list measure is Enforced"
       {|mod M do
           fn f() : {List(Int) | len(_) > 0} do Nil end
         end|};
@@ -14633,9 +14633,12 @@ let set_suite =
         Alcotest.(check string) "lambda disjunction with a negative" "{4, -7}"
           (r "(lambda ((x!1 Int)) (or (= x!1 4) (= x!1 (- 7))))");
         Alcotest.(check string) "lambda empty" "{}" (r "(lambda ((x!1 Int)) false)");
-        Alcotest.(check string) "co-finite stays raw"
-          "(store ((as const (Array Int Bool)) true) 3 false)"
+        (* Co-finite sets appear in propagated-contract models since plan
+           step 2.6 (`List.reverse() can return …`), so they render too. *)
+        Alcotest.(check string) "co-finite" "{every value except 3}"
           (r "(store ((as const (Array Int Bool)) true) 3 false)");
+        Alcotest.(check string) "full set" "{every value}" (r "((as const (Array Int Bool)) true)");
+        Alcotest.(check string) "full set, lambda" "{every value}" (r "(lambda ((x!1 Int)) true)");
         Alcotest.(check string) "unrecognised lambda stays raw"
           "(lambda ((x!1 Int)) (> x!1 4))" (r "(lambda ((x!1 Int)) (> x!1 4))"));
 
@@ -15247,6 +15250,162 @@ let typed_instances_suite =
         Alcotest.(check string) "and declares nothing already declared" ""
           (E.query_instance_preamble ~declared:(pre ^ q) ~measures:false at_int (S.BoolLit true) [] [])) ]
 
+(* ── Structural `len` and `elts` in induction (plan steps 2.1 to 2.4) ─────
+   Each accept case is RED on the code before step 2.2: the postcondition was
+   never proved, so it did not propagate and the call below it was silent.
+   The wrong-contract case pins the other direction: an unproved list contract
+   still does not travel. *)
+let list_structure_suite =
+  let m body = "mod P do\n" ^ body ^ "\nend\n" in
+  let no_two = "  fn no_two(zs : {List(Int) | !member(2, elts(_))}) : Int do 0 end\n" in
+  let cat2 contract =
+    "  fn cat2(xs : List(Int), ys : List(Int)) : {List(Int) | " ^ contract ^ "} do\n\
+    \    match xs do\n\
+    \      Nil -> ys\n\
+    \      Cons(h, t) -> Cons(h, cat2(t, ys))\n\
+    \    end\n\
+    \  end\n"
+  in
+  [ gated "an elts contract proved by recursion propagates to a call" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (1, 1, 0)
+          (ledger_counts3
+             (m (cat2 "elts(_) == union(elts(xs), elts(ys))" ^ no_two
+                 ^ "  fn bad(ys : {List(Int) | member(2, elts(_))}) : Int do no_two(cat2(Nil, ys)) end"))));
+
+    gated "a false elts contract is not proved and does not propagate" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             (m (cat2 "elts(_) == elts(xs)" ^ no_two
+                 ^ "  fn bad(ys : {List(Int) | member(2, elts(_))}) : Int do no_two(cat2(Nil, ys)) end"))));
+
+    gated "an accumulator's elts contract is proved through a constructor argument" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (1, 1, 0)
+          (ledger_counts3
+             (m ("  fn onto(lst : List(Int), acc : List(Int)) : {List(Int) | elts(_) == union(elts(lst), elts(acc))} do\n\
+                 \    match lst do\n\
+                 \      Nil -> acc\n\
+                 \      Cons(h, t) -> onto(t, Cons(h, acc))\n\
+                 \    end\n\
+                 \  end\n" ^ no_two
+                 ^ "  fn bad(ys : {List(Int) | member(2, elts(_))}) : Int do no_two(onto(ys, Nil)) end"))));
+
+    gated "a guard over a list head does not stop a subset contract" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (2, 0, 0)
+          (ledger_counts3
+             (m ("  fn keep_pos(xs : List(Int)) : {List(Int) | subset(elts(_), elts(xs))} do\n\
+                 \    match xs do\n\
+                 \      Nil -> Nil\n\
+                 \      Cons(h, t) -> if h > 0 do Cons(h, keep_pos(t)) else keep_pos(t) end\n\
+                 \    end\n\
+                 \  end\n" ^ no_two
+                 ^ "  fn good(ys : {List(Int) | !member(2, elts(_))}) : Int do no_two(keep_pos(ys)) end"))));
+
+    (* ── Plan step 2.5: callee and local contracts in a postcondition check ── *)
+    gated "a local helper's proved contract proves the enclosing return" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (2, 1, 0)
+          (ledger_counts3 (m {|  fn rev(xs : List(Int)) : {List(Int) | elts(_) == elts(xs)} do
+    fn go(lst : List(Int), acc : List(Int)) : {List(Int) | elts(_) == union(elts(lst), elts(acc))} do
+      match lst do
+        Nil -> acc
+        Cons(h, t) -> go(t, Cons(h, acc))
+      end
+    end
+    go(xs, Nil)
+  end
+  fn no_two(zs : {List(Int) | !member(2, elts(_))}) : Int do 0 end
+  fn bad(ys : {List(Int) | member(2, elts(_))}) : Int do no_two(rev(ys)) end|})));
+
+    gated "append through reverse and filter with a callback guard, stdlib-shaped" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (7, 1, 0)
+          (ledger_counts3 (m {|  fn rev(xs : List(a)) : {List(a) | elts(_) == elts(xs)} do
+    fn go(lst : List(a), acc : List(a)) : {List(a) | elts(_) == union(elts(lst), elts(acc))} do
+      match lst do
+      Nil        -> acc
+      Cons(h, t) -> go(t, Cons(h, acc))
+      end
+    end
+    go(xs, Nil)
+  end
+
+  fn cat(xs : List(a), ys : List(a)) : {List(a) | elts(_) == union(elts(xs), elts(ys))} do
+    fn go(lst : List(a), acc : List(a)) : {List(a) | elts(_) == union(elts(lst), elts(acc))} do
+      match lst do
+      Nil        -> acc
+      Cons(h, t) -> go(t, Cons(h, acc))
+      end
+    end
+    go(rev(xs), ys)
+  end
+
+  fn keep(xs : List(a), pred : a -> Bool) : {List(a) | subset(elts(_), elts(xs))} do
+    fn go(lst : List(a), acc : List(a)) : {List(a) | subset(elts(_), union(elts(lst), elts(acc)))} do
+      match lst do
+      Nil        -> rev(acc)
+      Cons(h, t) ->
+        if pred(h) do go(t, Cons(h, acc)) else go(t, acc) end
+      end
+    end
+    go(xs, Nil)
+  end
+
+  fn no_two(zs : {List(Int) | !member(2, elts(_))}) : Int do 0 end
+  fn bad_cat(ys : {List(Int) | member(2, elts(_))}) : Int do no_two(cat(Nil, ys)) end
+  fn ok_keep(ys : {List(Int) | !member(2, elts(_))}) : Int do no_two(keep(ys, fn x -> x > 0)) end|})));
+
+    gated "a local's parameter refinement is the invariant that proves dedup" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (7, 1, 0)
+          (ledger_counts3 (m {|  fn rev(xs : List(a)) : {List(a) | elts(_) == elts(xs)} do
+    fn go(lst : List(a), acc : List(a)) : {List(a) | elts(_) == union(elts(lst), elts(acc))} do
+      match lst do
+      Nil        -> acc
+      Cons(h, t) -> go(t, Cons(h, acc))
+      end
+    end
+    go(xs, Nil)
+  end
+
+  fn dd(xs : List(a)) : {List(a) | elts(_) == elts(xs)} do
+    fn go(lst : List(a), prev : a, acc : {List(a) | member(prev, elts(_))}) : {List(a) | elts(_) == union(elts(lst), elts(acc))} do
+      match lst do
+      Nil        -> rev(acc)
+      Cons(h, t) -> do
+        if h == prev do go(t, h, acc)
+        else go(t, h, Cons(h, acc)) end
+      end
+      end
+    end
+    match xs do
+    Nil        -> Nil
+    Cons(h, t) -> go(t, h, Cons(h, Nil))
+    end
+  end
+
+  fn no_two(zs : {List(Int) | !member(2, elts(_))}) : Int do 0 end
+  fn bad(ys : {List(Int) | member(2, elts(_))}) : Int do no_two(dd(ys)) end|})));
+
+    (* Soundness of the fixpoint gate: a contract is used only once proved. *)
+    gated "an unproved callee contract proves nothing for its caller" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d (m {|  fn liar(xs : List(Int)) : {List(Int) | elts(_) == empty} do xs end
+  fn user(xs : List(Int)) : {List(Int) | elts(_) == empty} do liar(xs) end
+  fn need_empty(zs : {List(Int) | elts(_) == empty}) : Int do 0 end
+  fn probe(ys : {List(Int) | member(2, elts(_))}) : Int do need_empty(user(ys)) end|})));
+
+    gated "two functions cannot prove each other's contracts" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d (m {|  fn f(xs : List(Int)) : {List(Int) | elts(_) == empty} do g(xs) end
+  fn g(xs : List(Int)) : {List(Int) | elts(_) == empty} do f(xs) end
+  fn need_empty(zs : {List(Int) | elts(_) == empty}) : Int do 0 end
+  fn probe(ys : {List(Int) | member(2, elts(_))}) : Int do need_empty(f(ys)) end|})));
+
+    gated "a chain of contracts proves in any declaration order" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (3, 1, 0)
+          (ledger_counts3 (m {|  fn no_two(zs : {List(Int) | !member(2, elts(_))}) : Int do 0 end
+  fn probe(ys : {List(Int) | member(2, elts(_))}) : Int do no_two(top(ys)) end
+  fn top(xs : List(Int)) : {List(Int) | elts(_) == elts(xs)} do mid(xs) end
+  fn mid(xs : List(Int)) : {List(Int) | elts(_) == elts(xs)} do base(xs) end
+  fn base(xs : List(Int)) : {List(Int) | elts(_) == elts(xs)} do xs end|}))) ]
+
 (* ── The single-element-type rule (plan step 1.5) ─────────────────────────
    A set predicate whose operands have known, different element types is an
    error at the predicate; before the rule it was a silent sort-conflict skip.
@@ -15681,6 +15840,7 @@ let () =
       ("set-refinements", set_suite);
       ("typed-instances", typed_instances_suite);
       ("single-element-type", single_element_type_suite);
+      ("list-structure", list_structure_suite);
       ("array-bounds-contracts", array_bounds_suite);
       ("measure-definition", measure_definition_suite);
       (* Must stay LAST: it measures every query the groups above sent. *)
