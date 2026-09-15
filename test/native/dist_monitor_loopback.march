@@ -81,11 +81,19 @@ mod DistMonitorLoopback do
     end
   end
 
-  pfn on_frame_a(watcher, tag : Int, frame : List(Int)) : Result(Bool, String) do
+  -- Local pids come from one process-wide counter shared by both "nodes",
+  -- so their numeric value depends on spawn scheduling; print a stable label
+  -- and check the fired pid against the one node-b announced instead.
+  pfn target_label(fired_pid : Int, monitored_pid : Int) : String do
+    if fired_pid == monitored_pid do "the monitored target"
+    else "UNEXPECTED target " ++ int_to_string(fired_pid) ++ " (monitored " ++ int_to_string(monitored_pid) ++ ")" end
+  end
+
+  pfn on_frame_a(watcher, monitored_pid : Int, tag : Int, frame : List(Int)) : Result(Bool, String) do
     if tag == 8 do
       match DistLink.decode_fire(frame) do
         Ok((target_pid, reason)) ->
-          println("node-a: MONITOR_FIRE for target " ++ int_to_string(target_pid) ++ " reason=" ++ reason_text(reason))
+          println("node-a: MONITOR_FIRE for " ++ target_label(target_pid, monitored_pid) ++ " reason=" ++ reason_text(reason))
           let _ = send(watcher, RemoteDown(target_pid, reason_text(reason)))
           Ok(false)
         Err(e) -> Err(e)
@@ -133,10 +141,10 @@ mod DistMonitorLoopback do
     end
     let watcher = spawn(Watcher)
     let target = read_hello(fd)
-    println("node-a: monitoring " ++ target.node_id ++ "'s actor " ++ int_to_string(target.local_pid))
+    println("node-a: monitoring " ++ target.node_id ++ "'s target actor")
     let _ = NetKernel.send_frame(fd, DistLink.encode_req("node-a", pid_to_int(watcher), target.local_pid))
     let _ = NodeSend.cast(fd, 1, target, "DistMonitorLoopback.Kill", Nil)
-    match PeerReader.serve(fd, Nil, fn (tag, frame) -> on_frame_a(watcher, tag, frame)) do
+    match PeerReader.serve(fd, Nil, fn (tag, frame) -> on_frame_a(watcher, target.local_pid, tag, frame)) do
       Ok(_) -> ()
       Err(e) -> println("node-a: reader error: " ++ e)
     end

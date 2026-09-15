@@ -100,7 +100,7 @@ mod MonitorExpiryLoopback do
     end
     let watcher = spawn(Watcher)
     let target = read_hello(fd)
-    println("node-a: monitoring " ++ target.node_id ++ "'s actor " ++ int_to_string(target.local_pid) ++ ", killing it, reading nothing back")
+    println("node-a: monitoring " ++ target.node_id ++ "'s target actor, killing it, reading nothing back")
     let _ = NetKernel.send_frame(fd, DistLink.encode_req("node-a", pid_to_int(watcher), target.local_pid))
     let _ = NodeSend.cast(fd, 1, target, "MonitorExpiryLoopback.Kill", Nil)
     let counts = match task_await(srv) do
