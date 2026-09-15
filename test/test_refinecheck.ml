@@ -50,6 +50,22 @@ let has_refine_error_typed src =
   March_refinecheck.Refine_check.check_module ~type_map ctx desugared;
   March_errors.Errors.has_errors ctx
 
+(* The ledger of a TYPED check ([has_refine_error_typed]): proved, violated,
+   skipped, and the skip reasons in order.  The caller-sort fixtures need the
+   typechecker's table, which every other ledger helper leaves out. *)
+let typed_ledger src =
+  March_refinecheck.Obligation.reset ();
+  ignore (has_refine_error_typed src);
+  List.fold_left
+    (fun (p, v, s, rs) (o : March_refinecheck.Obligation.t) ->
+      match o.March_refinecheck.Obligation.verdict with
+      | March_refinecheck.Obligation.Proved -> (p + 1, v, s, rs)
+      | March_refinecheck.Obligation.Violated -> (p, v + 1, s, rs)
+      | March_refinecheck.Obligation.Skipped r ->
+        (p, v, s + 1, rs @ [ March_refinecheck.Obligation.reason_name r ])
+      | _ -> (p, v, s, rs))
+    (0, 0, 0, []) (March_refinecheck.Obligation.all ())
+
 (* Same as [has_refine_error_d], but parsed AS IF it came from [file] and
    checked with [stdlib_files] declared as the standard library's own sources.
    Both are needed to exercise the ENABLING branch of the `List.length` measure
@@ -1870,8 +1886,11 @@ let string_suite =
        against a string constant.  z3 rejects the mixed-sort term outright, with
        the same channel-corrupting consequence. *)
     gated "a mixed-sort guard does not corrupt the check it guards" (fun () ->
-        (* `u` is neither the binder nor a parameter of the callee, so it is
-           reflected as an Int while `"a"` reflects into the string sort.  The
+        (* `u` is neither the binder nor a parameter of the callee, and this
+           helper hands the checker no type table, so `u` keeps the caller
+           default and is reflected as an Int while `"a"` reflects into the
+           string sort.  (With the driver's table, `u` is a `Str` constant
+           and the guard is well-sorted; the count is the same.)  The
            resulting `(= u $str…)` is ill-sorted and must be DROPPED from the
            assumptions; sending it makes z3 reject the query and the violation
            in the very same VC is lost. *)
@@ -15539,6 +15558,185 @@ let single_element_type_suite =
     accept "a Map's keys against a list of the key type"
       "  fn h(m : Map(String, Int), xs : List(String)) : {Bool | subset(keys(m), elts(xs))} do true end" ]
 
+(* ── Caller values take their typechecked sort (design B,
+   specs/2026-09-15-refinement-remaining-designs.md) ────────────────────────
+   A caller value used to reach the solver at `Int` unless a callee parameter
+   pinned it; a `String`/datatype value meeting its real sort in the same VC
+   skipped the obligation as `sort-conflict`.  One group per value origin:
+   the skip -> proved fixture, a REJECT twin, and a control whose value the
+   typechecker leaves a type variable (it keeps its old verdict). *)
+let caller_sorts_suite =
+  let need_a = "  fn need_a(xs : {List(String) | member(\"a\", elts(_))}) : Int do 0 end\n" in
+  let need_mem = "  fn need_mem(x, xs : {List(a) | member(x, elts(_))}) : Int do 0 end\n" in
+  let m name body = "mod " ^ name ^ " do\n" ^ need_a ^ need_mem ^ body ^ "\nend\n" in
+  let ledger label (p, v, s) src =
+    let (p', v', s', rs) = typed_ledger src in
+    Alcotest.(check int) (label ^ ": proved") p p';
+    Alcotest.(check int) (label ^ ": violated") v v';
+    Alcotest.(check int) (label ^ ": skipped") s s';
+    rs
+  in
+  [ (* ── origin 1: parameters ── *)
+    gated "param: a String parameter in a list literal proves" (fun () ->
+        ignore (ledger "p" (1, 0, 0)
+                  (m "CSP1" "  fn p(s : String) : Int do need_a([\"a\", s]) end")));
+    gated "param REJECT: an unknown String element is a plain skip, not a sort-conflict" (fun () ->
+        let rs = ledger "pb" (0, 0, 1)
+            (m "CSP2" "  fn p(s : String) : Int do need_a([\"b\", s]) end") in
+        Alcotest.(check bool) "no sort-conflict" false (List.mem "sort-conflict" rs));
+    gated "param control: with no type table the parameter keeps the Int default" (fun () ->
+        Alcotest.(check (list string)) "untyped: sort-conflict" [ "sort-conflict" ]
+          (skip_reasons (m "CSP3" "  fn p(s : String) : Int do need_a([\"a\", s]) end")));
+    gated "param control: a type-variable parameter keeps its verdict" (fun () ->
+        ignore (ledger "pt" (1, 0, 0)
+                  (m "CSP4" "  fn t(y, ys) : Int do need_mem(y, [y]) end")));
+    gated "param: a Bool parameter no callee pins is a usable guard" (fun () ->
+        ignore (ledger "pbool" (1, 0, 0)
+                  (m "CSP5"
+                     "  fn need_t(b : {Bool | _ == true}) : Int do 0 end\n\
+                     \  fn g(b : Bool, c : Bool) : Int do if b == c && c do need_t(b) else 0 end end")));
+    gated "param: a typed String guard beside a violated call keeps the violation" (fun () ->
+        (* The typed twin of "a mixed-sort guard does not corrupt the check it
+           guards": `u == "a"` is now a well-sorted `Str` fact, and the
+           violation in the same VC is still reported. *)
+        ignore (ledger "pguard" (0, 1, 0)
+                  "mod CSP6 do\n\
+                  \  fn nonempty(s : {String | len(_) > 0}) : Int do 1 end\n\
+                  \  fn g(u : String) : Int do\n\
+                  \    if u == \"a\" do nonempty(\"\") else 0 end\n\
+                  \  end\n\
+                   end\n"));
+    (* ── origin 2: `let` binders ── *)
+    gated "let: a String let binder in a list literal proves" (fun () ->
+        ignore (ledger "l" (1, 0, 0)
+                  (m "CSL1"
+                     "  fn l(t : String) : Int do\n\
+                     \    let s = t\n\
+                     \    need_a([\"a\", s])\n\
+                     \  end")));
+    gated "let REJECT: an unknown String let binder is a plain skip, not a sort-conflict" (fun () ->
+        let rs = ledger "lb" (0, 0, 1)
+            (m "CSL2"
+               "  fn l(t : String) : Int do\n\
+               \    let s = t\n\
+               \    need_a([\"b\", s])\n\
+               \  end") in
+        Alcotest.(check bool) "no sort-conflict" false (List.mem "sort-conflict" rs));
+    gated "let control: a type-variable let binder keeps its verdict" (fun () ->
+        ignore (ledger "lt" (1, 0, 0)
+                  (m "CSL4"
+                     "  fn t(y, ys) : Int do\n\
+                     \    let z = y\n\
+                     \    need_mem(z, [z])\n\
+                     \  end")));
+    (* ── origin 3: pattern variables ── *)
+    gated "pattern: a String match binder in a list literal proves" (fun () ->
+        ignore (ledger "m" (1, 0, 0)
+                  (m "CSM1"
+                     "  fn mm(o : Option(String)) : Int do\n\
+                     \    match o do\n\
+                     \      Some(s) -> need_a([\"a\", s])\n\
+                     \      None -> 0\n\
+                     \    end\n\
+                     \  end")));
+    gated "pattern: a String binder of a destructuring let proves" (fun () ->
+        ignore (ledger "mt" (1, 0, 0)
+                  (m "CSM2"
+                     "  fn mt(p : (String, Int)) : Int do\n\
+                     \    let (s, _) = p\n\
+                     \    need_a([\"a\", s])\n\
+                     \  end")));
+    gated "pattern REJECT: an unknown String match binder is a plain skip, not a sort-conflict" (fun () ->
+        let rs = ledger "mb" (0, 0, 1)
+            (m "CSM3"
+               "  fn mm(o : Option(String)) : Int do\n\
+               \    match o do\n\
+               \      Some(s) -> need_a([\"b\", s])\n\
+               \      None -> 0\n\
+               \    end\n\
+               \  end") in
+        Alcotest.(check bool) "no sort-conflict" false (List.mem "sort-conflict" rs));
+    gated "pattern control: a type-variable match binder keeps its verdict" (fun () ->
+        ignore (ledger "mv" (1, 0, 0)
+                  (m "CSM4"
+                     "  fn mv(o) : Int do\n\
+                     \    match o do\n\
+                     \      Some(y) -> need_mem(y, [y])\n\
+                     \      None -> 0\n\
+                     \    end\n\
+                     \  end")));
+    (* ── origin 4: refinement binders ── *)
+    gated "refinement binder: a refined String proves with no type table" (fun () ->
+        Alcotest.(check (triple int int int)) "untyped (proved, violated, skipped)" (1, 0, 0)
+          (ledger_counts3
+             (m "CSR1" "  fn r(s : {String | len(_) > 0}) : Int do need_a([\"a\", s]) end")));
+    gated "refinement binder REJECT: a refined String known to differ reports" (fun () ->
+        ignore (ledger "rv" (0, 1, 0)
+                  (m "CSR2" "  fn r(s : {String | _ == \"b\"}) : Int do need_a([\"c\", s]) end")));
+    gated "refinement binder REJECT: its promise loads where a guard names it" (fun () ->
+        ignore (ledger "rg" (0, 1, 0)
+                  (m "CSR3"
+                     "  fn g(t : {String | _ == \"b\"}, s : String) : Int do\n\
+                     \    if s == t do need_a([\"c\", s]) else 0 end\n\
+                     \  end")));
+    gated "refinement binder control: a refined Int binder keeps its verdict" (fun () ->
+        ignore (ledger "ri" (2, 0, 0)
+                  (m "CSR4"
+                     "  fn need_pos(n : {Int | _ > 0}) : Int do n end\n\
+                     \  fn r(k : {Int | _ > 1}, y) : Int do need_mem(y, [y]) + need_pos(k) end")));
+    (* ── origin 5: path-condition variables of a datatype sort ── *)
+    gated "path: a datatype guard variable meets the goal at its datatype sort" (fun () ->
+        ignore (ledger "e" (1, 0, 0)
+                  (m "CSE1"
+                     "  fn unwrap(p : {Option(Int) | is_Some(_)}) : Int do\n\
+                     \    match p do\n\
+                     \      Some(v) -> v\n\
+                     \      None -> 0\n\
+                     \    end\n\
+                     \  end\n\
+                     \  fn e(o : Option(Int), p : {Option(Int) | is_Some(_)}) : Int do\n\
+                     \    if o == p do unwrap(o) else 0 end\n\
+                     \  end")));
+    gated "path REJECT: a guard against an unrefined value is a plain skip, not a sort-conflict" (fun () ->
+        let rs = ledger "eu" (0, 0, 1)
+            (m "CSE2"
+               "  fn unwrap(p : {Option(Int) | is_Some(_)}) : Int do\n\
+               \    match p do\n\
+               \      Some(v) -> v\n\
+               \      None -> 0\n\
+               \    end\n\
+               \  end\n\
+               \  fn e(o : Option(Int), p : Option(Int)) : Int do\n\
+               \    if o == p do unwrap(o) else 0 end\n\
+               \  end") in
+        Alcotest.(check bool) "no sort-conflict" false (List.mem "sort-conflict" rs));
+    gated "path REJECT: a promised tag other than the goal's is not loaded" (fun () ->
+        let rs = ledger "en" (0, 0, 1)
+            (m "CSE3"
+               "  fn unwrap(p : {Option(Int) | is_Some(_)}) : Int do\n\
+               \    match p do\n\
+               \      Some(v) -> v\n\
+               \      None -> 0\n\
+               \    end\n\
+               \  end\n\
+               \  fn e(o : Option(Int), p : {Option(Int) | is_None(_)}) : Int do\n\
+               \    if o == p do unwrap(o) else 0 end\n\
+               \  end") in
+        Alcotest.(check bool) "no sort-conflict" false (List.mem "sort-conflict" rs));
+    gated "path control: type-variable guard variables keep their verdict" (fun () ->
+        ignore (ledger "ev" (1, 0, 0)
+                  (m "CSE4"
+                     "  fn unwrap(p : {Option(Int) | is_Some(_)}) : Int do\n\
+                     \    match p do\n\
+                     \      Some(v) -> v\n\
+                     \      None -> 0\n\
+                     \    end\n\
+                     \  end\n\
+                     \  fn ev(x, y, p : {Option(Int) | is_Some(_)}) : Int do\n\
+                     \    if x == y do unwrap(p) else 0 end\n\
+                     \  end")));
+  ]
+
 (* ── z3 never rejects a query the checker builds ─────────────────────────
    A query z3 rejects comes back to the checker as [Unknown], an ordinary
    skip, so a wrong sort anywhere in the encoder passes every other test in
@@ -15757,6 +15955,163 @@ let array_bounds_suite =
    decided Violated (the forall encoding returned `unknown` at the timeout, a
    Skip), and a satisfying call Proved.  Ledger counts, not error booleans —
    under `cap verified` a skip and a violation are both errors. *)
+(* The user-file error messages the [array_pipeline] run produced, every
+   severity, alongside its Array.* ledger records. *)
+let array_messages (src : string) : string list =
+  let m = March_desugar.Desugar.desugar_module (parse src) in
+  let listmod, list_path = Lazy.force stdlib_list_mod in
+  let arrmod, arr_path = Lazy.force stdlib_array_mod in
+  let prelude_decls, prelude_path = Lazy.force stdlib_prelude_decls in
+  let m =
+    { m with
+      March_ast.Ast.mod_decls =
+        (listmod :: arrmod :: prelude_decls) @ m.March_ast.Ast.mod_decls }
+  in
+  let is_user_file f = f = "" || f = "<unknown>" in
+  March_refinecheck.Obligation.reset ();
+  let errors, _ = March_typecheck.Typecheck.check_module m in
+  March_refinecheck.Refine_check.check_module
+    ~stdlib_files:[ list_path; arr_path; prelude_path ] errors m;
+  List.filter_map
+    (fun (d : March_errors.Errors.diagnostic) ->
+      if is_user_file d.March_errors.Errors.span.March_ast.Ast.file
+      then
+        Some
+          (String.concat "\n"
+             (d.March_errors.Errors.message
+              :: List.map
+                   (fun (l : March_errors.Errors.label) -> l.March_errors.Errors.lbl_message)
+                   d.March_errors.Errors.labels))
+      else None)
+    errors.March_errors.Errors.diagnostics
+
+(* #460 follow-ups: diagnostics spell `Array.length`, not the private
+   `pvec_length`; a closed index gets no `negate = 0` example; and the
+   length postconditions on `empty`/`push`/`set`/`map`/`from_list` reach
+   call sites.  Design: specs/2026-09-15-refinement-remaining-designs.md §A. *)
+let array_followups_suite =
+  let m body = "mod AF do\n" ^ body ^ "end\n" in
+  let has_violation msgs =
+    List.exists (fun s -> contains s "refinement violation") msgs
+  in
+  [ gated "violation text spells Array.length, never pvec_length or negate" (fun () ->
+        let msgs = array_messages (m "  fn g(v) : Int do Array.get(v, -1) end\n") in
+        Alcotest.(check bool) "a violation is reported" true (has_violation msgs);
+        Alcotest.(check bool) "mentions Array.length(v)" true
+          (List.exists (fun s -> contains s "Array.length(v)") msgs);
+        Alcotest.(check bool) "never mentions pvec_length" false
+          (List.exists (fun s -> contains s "pvec_length") msgs);
+        Alcotest.(check bool) "no negate example" false
+          (List.exists (fun s -> contains s "negate") msgs);
+        (* The note's own "guard the call (e.g. `if …`)" is not an example;
+           a counterexample follows the quoted predicate. *)
+        Alcotest.(check bool) "a closed index gets no example" false
+          (List.exists (fun s -> contains s "v)` (e.g.") msgs));
+
+    gated "a symbolic index still gets a validated example" (fun () ->
+        let msgs =
+          array_messages (m "  fn k(v, i : {Int | _ < 0}) : Int do Array.get(v, i) end\n")
+        in
+        Alcotest.(check bool) "(e.g. i = -1)" true
+          (List.exists (fun s -> contains s "(e.g. i = -1)") msgs));
+
+    gated "the unverified hint spells Array.length in its held/missing split" (fun () ->
+        let msgs =
+          array_messages
+            (m "  fn f(v, i : Int) : Int do\n\
+               \    if i >= 0 && i < Array.length(v) do Array.get(v, i - 1) else 0 end\n\
+               \  end\n")
+        in
+        Alcotest.(check bool) "`_ < Array.length(v)` established" true
+          (List.exists (fun s -> contains s "`_ < Array.length(v)` established") msgs);
+        Alcotest.(check bool) "never mentions pvec_length" false
+          (List.exists (fun s -> contains s "pvec_length") msgs));
+
+    Alcotest.test_case "display_measures: gated, and only at an identifier boundary" `Quick
+      (fun () ->
+        let open March_refinecheck.Refine_encode in
+        let saved = !array_length_is_stdlib in
+        Fun.protect ~finally:(fun () -> array_length_is_stdlib := saved) (fun () ->
+            array_length_is_stdlib := false;
+            Alcotest.(check string) "ungated: untouched" "_ < pvec_length(v)"
+              (display_measures "_ < pvec_length(v)");
+            array_length_is_stdlib := true;
+            Alcotest.(check string) "gated: renamed" "_ < Array.length(v)"
+              (display_measures "_ < pvec_length(v)");
+            Alcotest.(check string) "a longer identifier is left alone"
+              "my_pvec_length(v) < Array.length(w)"
+              (display_measures "my_pvec_length(v) < pvec_length(w)")));
+
+    gated "from_list's length reaches a literal index: past the end violated, in range proved"
+      (fun () ->
+        Alcotest.(check (list string)) "index 7 of a 3-element array: Violated"
+          [ "violated" ]
+          (List.map March_refinecheck.Obligation.verdict_name
+             (array_verdicts "Array.get"
+                (m "  fn a() : Int do Array.get(Array.from_list([1, 2, 3]), 7) end\n")));
+        Alcotest.(check (list string)) "index 3 (== length): Violated"
+          [ "violated" ]
+          (List.map March_refinecheck.Obligation.verdict_name
+             (array_verdicts "Array.get"
+                (m "  fn c() : Int do Array.get(Array.from_list([1, 2, 3]), 3) end\n")));
+        Alcotest.(check bool) "index 2: Proved" true
+          (all_proved
+             (array_verdicts "Array.get"
+                (m "  fn b() : Int do Array.get(Array.from_list([1, 2, 3]), 2) end\n")));
+        Alcotest.(check bool) "guarded by List.length(xs): Proved" true
+          (all_proved
+             (array_verdicts "Array.get"
+                (m "  fn g(xs : List(Int)) : Int do\n\
+                   \    let v = Array.from_list(xs)\n\
+                   \    if List.length(xs) > 0 do Array.get(v, 0) else 0 end\n\
+                   \  end\n"))));
+
+    gated "push, set and map carry the length relation to a let-bound result" (fun () ->
+        let guarded body = m ("  fn f(v, x : Int) : Int do\n" ^ body ^ "  end\n") in
+        Alcotest.(check bool) "push: index 3 after length > 2: Proved" true
+          (all_proved
+             (array_verdicts "Array.get"
+                (guarded
+                   "    if Array.length(v) > 2 do\n\
+                   \      let p = Array.push(v, x)\n\
+                   \      Array.get(p, 3)\n\
+                   \    else 0 end\n")));
+        Alcotest.(check bool) "push: index 4 after length > 2: not Proved" true
+          (none_proved
+             (array_verdicts "Array.get"
+                (guarded
+                   "    if Array.length(v) > 2 do\n\
+                   \      let p = Array.push(v, x)\n\
+                   \      Array.get(p, 4)\n\
+                   \    else 0 end\n")));
+        let set_get i =
+          array_verdicts "Array.get"
+            (guarded
+               (Printf.sprintf
+                  "    if Array.length(v) > 1 do\n\
+                  \      let w = Array.set(v, 0, x)\n\
+                  \      Array.get(w, %d)\n\
+                  \    else 0 end\n" i))
+        in
+        Alcotest.(check bool) "set: index 1 after length > 1: Proved" true (all_proved (set_get 1));
+        Alcotest.(check bool) "set: index 2 after length > 1: not Proved" true (none_proved (set_get 2));
+        let map_get i =
+          array_verdicts "Array.get"
+            (m (Printf.sprintf
+                  "  fn h(w) : Int do\n\
+                  \    let mm = Array.map(w, fn y -> y + 1)\n\
+                  \    if Array.length(w) > 3 do Array.get(mm, %d) else 0 end\n\
+                  \  end\n" i))
+        in
+        Alcotest.(check bool) "map: index 3 after length > 3: Proved" true (all_proved (map_get 3));
+        Alcotest.(check bool) "map: index 4 after length > 3: not Proved" true (none_proved (map_get 4)));
+
+    gated "empty() has length 0: any index is violated" (fun () ->
+        Alcotest.(check (list string)) "Array.get(Array.empty(), 0): Violated" [ "violated" ]
+          (List.map March_refinecheck.Obligation.verdict_name
+             (array_verdicts "Array.get" (m "  fn e() : Int do Array.get(Array.empty(), 0) end\n"))));
+  ]
+
 let measure_definition_suite =
   let box =
     "mod MD do\n  type Box = Box(Int, Int)\n\
@@ -15927,5 +16282,7 @@ let () =
       ("cardinality", card_suite);
       ("array-bounds-contracts", array_bounds_suite);
       ("measure-definition", measure_definition_suite);
+      ("caller-sorts", caller_sorts_suite);
+      ("array-contract-followups", array_followups_suite);
       (* Must stay LAST: it measures every query the groups above sent. *)
       ("z3-well-formed", z3_wellformed_suite) ]

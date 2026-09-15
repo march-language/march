@@ -209,18 +209,34 @@ let emit_ensure ctx : unit =
   Llvm_ctx.emit ctx (Printf.sprintf
     "%s = call i32 @march_ctor_table_ensure(ptr %s, ptr %s)" base dg cg)
 
-(** [emit_ensure] iff [ty] has an erased component a boxed ADT could hide in.
+(** [emit_ensure] iff a value of [ty] could reach the runtime as a heap cell
+    the table might identify — an erased component a boxed ADT hides in, or a
+    named type at all.
+
+    A bare [TCon] counts even though it looks fully static, because the name
+    the call site carries is not always the name the type LOWERED under: a
+    `ptype` inside `mod File` lowers to `File.FileError` while every
+    annotation denotes the canonical bare `FileError`, so [id_for] answers
+    [None] and the site falls back to the untyped renderer.  That renderer can
+    still name the value from its header type id, but only once some
+    descriptor has been registered — and nothing on the runtime side can find
+    one by itself.  Registering here is what makes the dynamic path available;
+    it does not decide anything, so a value whose header says nothing (a
+    C-built cell that predates stamping, a niche value with no cell at all)
+    renders exactly as it did before.
+
     Gated like [id_for]: the runtime half lives in march_extras.c, which the
     WASM runtime does not build. *)
 let emit_ensure_if_erased ctx (ty : Tir.ty) : unit =
-  let rec erased = function
+  let rec renderable = function
     | Tir.TVar _ -> true
-    | Tir.TCon (_, args) -> List.exists erased args
-    | Tir.TTuple ts -> List.exists erased ts
-    | Tir.TRecord fs -> List.exists (fun (_, t) -> erased t) fs
+    | Tir.TCon (("Int"|"Float"|"Bool"|"Unit"|"String"|"Atom"), _) -> false
+    | Tir.TCon (_, _) -> true
+    | Tir.TTuple ts -> List.exists renderable ts
+    | Tir.TRecord fs -> List.exists (fun (_, t) -> renderable t) fs
     | _ -> false
   in
-  if ctx.Llvm_ctx.shape_meta && erased ty then emit_ensure ctx
+  if ctx.Llvm_ctx.shape_meta && renderable ty then emit_ensure ctx
 
 (** Emit `march_value_to_string_typed(v, base + local_id)`, registering the
     table on first use.  Returns the ("ptr", ssa) pair of the result string. *)

@@ -159,6 +159,7 @@ let check_let_annotation ~root errctx defs (ctx : rctx) (path : (A.expr * bool) 
       ; lets = launder_shadow lets names
       ; sc = scope_shadow sc names
       ; re = recenv_shadow re names
+      ; binds = List.filter (fun (n, _) -> not (List.mem n names)) ctx.binds
       }
     in
     check_call cx ~span:n.A.span
@@ -283,7 +284,8 @@ let fnparams_field_facts ~(span : A.span) (ps : A.fn_param list) : (A.expr * boo
    that does not typecheck first, in which case an ambiguous method call is a
    recorded skip rather than a guess. *)
 let impl_sigs : (string, (string * fn_sig) list) Hashtbl.t ref = ref (Hashtbl.create 1)
-let call_type_map : (A.span, March_typecheck.Typecheck.ty) Hashtbl.t option ref = ref None
+(* [call_type_map] itself is defined in [Refine_encode], so the call-site
+   builder ([Refine_call]) can read caller sorts from it too. *)
 
 (* The bare constructor name of an expression's checked type, when the
    typechecker recorded one and it is a plain constructor: the same rule
@@ -345,7 +347,7 @@ let check_impl_dispatch ~root errctx defs (ctx : rctx) path lets sc re ~(span : 
     in
     (match chosen with
      | Some sg ->
-       let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets; sc; re } in
+       let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets; sc; re; binds = ctx.binds } in
        List.iter (fun rp -> check_call cx ~span ~callee:fname sg args rp) sg.refined
      | None ->
        let reason =
@@ -434,7 +436,7 @@ let check_pass_sites ~root errctx defs (ctx : rctx) path lets sc re cb ~(span : 
           | None -> ()
           | Some r ->
             let sc = (fresh_cb_arg, r) :: scope_shadow sc [ fresh_cb_arg ] in
-            let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re } in
+            let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re; binds = ctx.binds } in
             let x = A.EVar { A.txt = fresh_cb_arg; A.span = asp } in
             List.iter
               (fun rp -> check_call cx ~span:asp ~callee:gname ~subject:Callback_domain gsg [ x ] rp)
@@ -459,7 +461,7 @@ let check_pass_sites ~root errctx defs (ctx : rctx) path lets sc re cb ~(span : 
               (match callee_sig ctx defs cb g with
                | Some { ret = Some (rb, rq); ret_sort = rsrt; _ } ->
                  let sc = ("$r", (rb, rq, rsrt)) :: scope_shadow sc [ "$r" ] in
-                 let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re } in
+                 let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re; binds = ctx.binds } in
                  check_call cx ~span:asp ~callee:g ~subject:Callback_codomain cod_sig
                    [ A.EVar { A.txt = "$r"; A.span = asp } ] rp
                | _ ->
@@ -521,7 +523,7 @@ let rec first_slot_pred (slots : elem option list) : string =
 let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (ce : contenv)
     ~(span : A.span) ~(callee : string) ((container, slots) : string * elem option list)
     (a : A.expr) : bool =
-  let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets; sc; re } in
+  let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets; sc; re; binds = ctx.binds } in
   (* One element against one REFINED slot: as an argument. *)
   let check_one (r : string * A.expr * string option) (e : A.expr) : bool =
     let sg = elem_sig ~name:"$elem" r in
@@ -740,7 +742,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     in
     (match callee with
      | Some sg ->
-       let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re } in
+       let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re; binds = ctx.binds } in
        List.iter (fun rp -> check_call cx ~span:sp ~callee:fname sg args rp) sg.refined;
        check_pass_sites ~root errctx defs ctx path lets sc re cb ~span:sp sg args;
        check_arg_elements ~root errctx defs ctx path lets sc re ce ~span:sp ~callee:fname sg args
@@ -769,7 +771,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
      parameter refinements — see [Refine_scope.collect_handler_sigs].  A
      message constructor is checked exactly like a call to the handler. *)
   | A.ECon (c, args, sp) ->
-    let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re } in
+    let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re; binds = ctx.binds } in
     (match handler_sig_of_ctor c.A.txt with
      | Some sg -> List.iter (fun rp -> check_call cx ~span:sp ~callee:c.A.txt sg args rp) sg.refined
      | None ->
@@ -848,7 +850,12 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
               RESOLUTION in the statements that follow — see [local_shadow]. *)
            let ctx' =
              match e with
-             | A.ELet (b, _) -> local_shadow ctx (pat_binders b.A.bind_pat)
+             (* A plain `let n = …` records its binder's span, so a later
+                call reads `n`'s typechecked sort ([rctx.binds]). *)
+             | A.ELet (({ A.bind_pat = A.PatVar n; _ } as b), _) ->
+               local_shadow ~spans:[ (n.A.txt, n.A.span) ] ctx (pat_binders b.A.bind_pat)
+             | A.ELet (b, _) ->
+               local_shadow ~spans:(pat_binder_spans b.A.bind_pat) ctx (pat_binders b.A.bind_pat)
              | A.ELetFn (n, _, _, _, _) -> local_shadow ctx [ n.A.txt ]
              | _ -> ctx
            in
@@ -1003,7 +1010,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     let sc = scope_shadow sc [ n.A.txt ] in
     let re = recenv_shadow re [ n.A.txt ] in
     let cb = cb_shadow cb [ n.A.txt ] in
-    let ctx = local_shadow ctx names in
+    let ctx = local_shadow ~spans:(param_spans ps) ctx names in
     visit ~root errctx defs ctx (path_shadow path names) (launder_shadow lets names)
       (List.fold_left scope_add_param sc (strip_params_refinements ps))
       (List.fold_left recenv_add_param re ps)
@@ -1030,7 +1037,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
         let ce_outer = ce in
         let ce = cont_shadow ce binders in
         (* …and a same-named GLOBAL FUNCTION, for callee resolution. *)
-        let ctx = local_shadow ctx binders in
+        let ctx = local_shadow ~spans:(pat_binder_spans br.A.branch_pat) ctx binders in
         (* …and a same-named record IDENTITY, so an inner binder is not
            reflected as the outer record's SMT constant.  A bare `PatVar`
            binder on a record-typed variable scrutinee then re-enters the env
@@ -1253,7 +1260,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
      | Some ctor ->
        (match Hashtbl.find_opt !ctor_sigs.by_ctor ctor with
         | Some sg ->
-          let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re } in
+          let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re; binds = ctx.binds } in
           check_ctor_fields cx ~span:sp ~callee:ctor sg fs ~only:None;
           check_field_elements ~root errctx defs ctx path lets sc re ce ~span:sp ~callee:ctor sg fs
             ~only:None
@@ -1280,7 +1287,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                      (pn, A.EField (A.EVar { A.txt = x; A.span = xsp }, { A.txt = pn; A.span = xsp }, xsp)))
                  sg.param_names
              in
-             let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re } in
+             let cx = { root; errctx; postcond = postcond_of ~cb ctx defs; path; lets; sc; re; binds = ctx.binds } in
              check_ctor_fields cx ~span:sp ~callee:ctor sg fs ~only:(Some (List.map fst updated));
              check_field_elements ~root errctx defs ctx path lets sc re ce ~span:sp ~callee:ctor sg
                fs ~only:(Some (List.map fst updated))
@@ -1303,7 +1310,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     let sc = scope_shadow sc binders in
     let re = recenv_shadow re binders in
     let cb = cb_shadow cb binders in
-    let ctx = local_shadow ctx binders in
+    let ctx = local_shadow ~spans:(pat_binder_spans p) ctx binders in
     visit ~root errctx defs ctx (path_shadow path binders) (launder_shadow lets binders)
       sc re cb (cont_shadow ce binders) e2
   | A.EDbg (Some e, _) -> go e
@@ -1371,7 +1378,7 @@ and visit_local_fn ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     | Some sg -> (n.A.txt, sg) :: cb_shadow cb [ n.A.txt ]
     | None -> cb_shadow cb [ n.A.txt ]
   in
-  let ctx = local_shadow ctx names in
+  let ctx = local_shadow ~spans:(param_spans ps) ctx names in
   let assumed = if escapes then strip_params_refinements ps else ps in
   let path = path_shadow path names @ params_field_facts ~span:sp ps in
   visit ~root errctx defs ctx path (launder_shadow lets names)
@@ -1392,7 +1399,7 @@ and visit_lambda ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     (lets : launder) (sc : scope) (re : recenv) (cb : cbenv) (ce : contenv) ~(assume : bool)
     (ps : A.param list) (body : A.expr) : unit =
   let names = List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
-  let ctx = local_shadow ctx names in
+  let ctx = local_shadow ~spans:(param_spans ps) ctx names in
   let assumed = if assume then ps else strip_params_refinements ps in
   let span = match body with A.EVar n -> n.A.span | _ -> A.dummy_span in
   let path = path_shadow path names @ params_field_facts ~span ps in
@@ -2027,7 +2034,10 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
          | None -> ());
         (* A PARAMETER named like a module-level function shadows it for callee
            resolution inside this body too — see [local_shadow]. *)
-        let ctx = local_shadow ctx (List.concat_map fnparam_binders c.A.fc_params) in
+        let ctx =
+          local_shadow ~spans:(List.concat_map fnparam_spans c.A.fc_params) ctx
+            (List.concat_map fnparam_binders c.A.fc_params)
+        in
         let path = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
         (* A record-typed parameter's refined fields are facts here: every
            construction of that record was obliged to establish them. *)
@@ -2134,7 +2144,7 @@ and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
     let check_state_literal ~path (e : A.expr) =
       match actor_sig, e with
       | Some sg, A.ERecord (fields, sp) ->
-        let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets = []; sc = []; re = state_re } in
+        let cx = { root; errctx; postcond = postcond_of ctx defs; path; lets = []; sc = []; re = state_re; binds = ctx.binds } in
         check_ctor_fields cx ~span:sp ~callee:aname.A.txt sg
           (List.map (fun ((n : A.name), v) -> (n.A.txt, v)) fields) ~only:None
       | _ -> ()
@@ -2160,7 +2170,10 @@ and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
         let sc = List.fold_left scope_add_fnparam [] (List.map (fun p -> A.FPNamed p) assumed) in
         let re = List.fold_left recenv_add_fnparam state_re ps in
         let cb = List.fold_left cb_add_fnparam [] ps in
-        let ctx = local_shadow ctx (List.concat_map fnparam_binders ps) in
+        let ctx =
+          local_shadow ~spans:(List.concat_map fnparam_spans ps) ctx
+            (List.concat_map fnparam_binders ps)
+        in
         let path = state_facts @ fnparams_field_facts ~span:h.A.ah_msg.A.span ps in
         (* (2): a fresh state literal at a tail is a construction of THIS
            actor's state, whatever other record shares its field set. *)

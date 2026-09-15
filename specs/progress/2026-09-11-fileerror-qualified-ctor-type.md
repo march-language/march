@@ -17,10 +17,14 @@
 > `native_actor_monitor_down_reason`, against 0/30 on main); two narrowings of
 > that alias did not help. The full measurement trail, the two ruled-out
 > mechanisms and three alternative designs are in
-> `specs/todos/2026-09-11-compiled-to-string-of-module-declared-type.md`.
-> `test_stdlib_suite.ml`'s table therefore keeps accepting `#<tag:N>`, and
-> `test/native/file_error_ctor_match.march` prints a classification string
-> rather than the error value.
+> `specs/progress/2026-09-12-compiled-to-string-module-declared-type.md`,
+> which CLOSED it on 2026-09-12 — not by resolving the name (that is
+> genuinely unsound: the mis-resolution was `Pid`, a builtin runtime handle
+> sharing a short name with stdlib's `GlobalPid.Pid`) but by stamping the
+> cell the C runtime builds with its type id, so the renderer identifies the
+> value rather than the name. `test_stdlib_suite.ml`'s table is now byte
+> equality with the interpreter; `test/native/file_error_ctor_match.march`
+> still prints a classification string rather than the error value.
 >
 > While that alias was briefly in place it did expose a SEPARATE backend
 > divergence, which is fixed and kept: the interpreter's `file_rename`
