@@ -9,10 +9,45 @@
 -- specs/progress/2026-09-14-remote-send-to-a-global-pid.md that a restarted
 -- node reusing a local pid cannot receive a message meant for its
 -- predecessor.
+--
+-- The monitor half (monitor-fire step 4): before the first item, node-a
+-- registers a monitor on the held pid. The crash is a connection loss, not
+-- a MONITOR_FIRE -- nothing on node-b survives to write one -- so node-a's
+-- DistLink table answers it locally: every monitor on node-b fires
+-- `NodeDown`, never `Normal`, and exactly once.
 mod TwoNodeRestartA do
   needs IO.Console
   needs IO.NetConnect
   needs IO.Process
+  needs IO.Spawn
+
+  actor Watcher do
+    state { downs : Int, last : String }
+    init  { downs: 0, last: "" }
+    on RemoteDown(_target : Int, reason : String) do
+      { downs: state.downs + 1, last: reason }
+    end
+  end
+
+  pfn reason_text(r : DistLink.DownReason) : String do
+    match r do
+      DistLink.Normal -> "Normal"
+      DistLink.Killed -> "Killed"
+      DistLink.Crash(m) -> "Crash(" ++ m ++ ")"
+      DistLink.NodeDown -> "NodeDown"
+    end
+  end
+
+  -- The node is gone: fire every monitor this node holds on it, locally.
+  pfn fire_node_down(tbl : DistLink.MonitorTable, node_id : String, watcher) : Int do
+    List.fold_left(DistLink.monitors_on_node(tbl, node_id), 0, fn (n, m) ->
+      match DistLink.down_msg(m, DistLink.NodeDown) do
+        (_ref, target_pid, reason) ->
+          println("node-a: Down for Pid(" ++ int_to_string(target_pid) ++ ") reason=" ++ reason_text(reason) ++ " (node-b crashed)")
+          let _ = send(watcher, RemoteDown(target_pid, reason_text(reason)))
+          n + 1
+      end)
+  end
 
   pfn sleep_100ms() do
     let _ = Process.run("sleep", Cons("0.1", Nil))
@@ -68,18 +103,28 @@ mod TwoNodeRestartA do
     println("node-a: sent " ++ int_to_string(seq))
   end
 
-  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_process : Cap(IO.Process)) do
+  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_process : Cap(IO.Process), _cap_spawn : Cap(IO.Spawn)) do
     let port = Env.require_int("MARCH_PEER_PORT")
+    let watcher = spawn(Watcher)
 
     -- Incarnation 1.
     let fd1 = dial(port)
     let held = read_hello(fd1)
+    -- Monitor the held pid: MONITOR_REQ to node-b, and a local table entry
+    -- so a connection loss can be answered without node-b's help.
+    let _ = NetKernel.send_frame(fd1, DistLink.encode_req("node-a", pid_to_int(watcher), held.local_pid))
+    let tbl = DistLink.insert_monitor(DistLink.empty_table(),
+                DistLink.make_monitor(DistLink.MonitorRef(1), "node-b", held.local_pid, GlobalPid.make("node-a", pid_to_int(watcher), 1)))
+    println("node-a: monitoring Pid(" ++ int_to_string(held.local_pid) ++ ") on node-b")
     item(fd1, 1, held)
     -- Nothing more is expected on this connection; the next read returns
     -- only when node-b is gone.
     match NetKernel.recv_frame(fd1, Nil) do
       Ok(_) -> println("node-a: unexpected frame before the restart")
-      Err(_) -> println("node-a: connection to node-b lost")
+      Err(_) ->
+        println("node-a: connection to node-b lost")
+        let fired = fire_node_down(tbl, "node-b", watcher)
+        println("node-a: fired NodeDown for " ++ int_to_string(fired) ++ " monitor(s)")
     end
     tcp_close(fd1)
 
@@ -93,5 +138,10 @@ mod TwoNodeRestartA do
     end
     item(fd2, 3, fresh)
     tcp_close(fd2)
+    run_until_idle()
+    match get_actor_field(watcher, "downs") do
+      Some(n) -> println("node-a: watcher saw " ++ int_to_string(n) ++ " Down(s)")
+      None -> println("node-a: watcher gone")
+    end
   end
 end

@@ -508,9 +508,14 @@ re-announced one is delivered; the `stream` scenario runs the Stream
 session protocol's two endpoints on the two nodes over the `Session.Ops`
 network transport, each node's trace its projection of the in-process
 one; the `stall` scenario SIGSTOPs a node running SWIM and pins
-Suspect → Dead on the observer and the incarnation refutation on resume.
-Netsplit (packet drop) and clock skew across hosts remain undocumented in
-executable form; the harness has the hooks for the first
+Suspect → Dead on the observer and the incarnation refutation on resume;
+the `skew` scenario runs one node 30 s ahead and pins that its load report is
+aged on the receiver's clock (a received `NodeLoad`'s `sampled_at` is its
+receipt time, so peer clocks need not agree for `SwimDriver.peer_load`'s
+10 s staleness). `VectorClock` ordering takes no wall-clock input and is
+unaffected by skew by construction.
+Netsplit (packet drop) remains undocumented in executable form; the harness
+has the hooks for it
 (`specs/progress/2026-09-14-two-node-failure-semantics-harness.md`).
 
 **A compiled memory-safety gap, FIXED (finding C1, `specs/todos/`, 2026-07-11).**

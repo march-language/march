@@ -1,4 +1,4 @@
-# `[P2]` Two-node scenarios still to write: partition, clock skew, monitor-across-reconnect, and the Docker variant
+# `[P2]` Two-node scenarios still to write: partition, clock skew, and the Docker variant
 
 Filed 2026-09-14 as the remainder of
 [[2026-09-14-two-node-failure-semantics-harness]] (now a progress record).
@@ -30,20 +30,13 @@ SWIM (the `stall` programs' loop plus the `anti_entropy_peers` timer, which
 
 ## Scenario `skew` (was 4)
 
-Start node-b with its clock 30 s ahead. `faketime` is not on the runners;
-instead the node programs honour `MARCH_CLOCK_SKEW_MS`, added to
-`unix_time_ms()` at every read in the fixture (not in the runtime — the
-skew is the scenario's, and a runtime knob would be a footgun). Claims:
-`VectorClock` ordering is unaffected (causal, never wall-clock); the load
-gossip's staleness (`SwimDriver.load_stale_ms`, wall-clock) mis-ages B's
-reports on A. The scenario prints which; the outcome decides whether
-`load_stale_ms` becomes a documented limit ("peer clocks within N s") or a
-bug (age by *receipt* time, not the sender's stamp — the likely fix, and a
-one-line one).
+**Shipped 2026-09-15** with [[2026-09-15-two-node-skew-scenario]] (progress record): the
+outcome was the bug, not a documented limit, and the one-line-class fix (age a load by
+receipt time) landed with it; nothing left here.
 
 ## Scenario `monitor_reconnect` (was 5) and the `restart` monitor half
 
-Both need [[2026-09-14-monitor-fire-at-least-once]]; specified there.
+**Shipped 2026-09-15** with [[2026-09-15-monitor-fire-at-least-once]] (progress record); nothing left here.
 
 ## The Docker-network variant
 

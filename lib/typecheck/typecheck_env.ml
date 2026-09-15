@@ -448,13 +448,16 @@ type env = {
       LATER unification.  See
       [specs/lang/types/reject/t155_cap_narrow_widen_deferred.march], which
       exists to fail if this is ever made eager. *)
-  node_send_sites : (Ast.span * ty) list ref;
-  (** Every `Node.send(peer, to, msg)` application site, as (span, the
-      INSTANTIATED arrow type of `Node.send`).  Swept after checking by
+  node_send_sites : (Ast.span * string * ty) list ref;
+  (** Every typed-send application site -- `Node.send(peer, to, msg)` and
+      `Node.enqueue(q, to, msg, policy)` -- as (span, the callee's name, the
+      INSTANTIATED arrow type of the callee; the message is the third
+      parameter of both).  Swept after checking by
       [Typecheck_caps.check_node_send_sites]: the message argument's type
       must have a `derive Json` codec (a `JsonTo` impl), and the resolved type
       name is recorded in [March_ast.Json_dispatch] so both backends can
-      rewrite the call to `Node.send_tagged` with the compiler-minted tag.
+      rewrite the call to `Node.send_tagged` / `Node.enqueue_tagged` with the
+      compiler-minted tag.
       Deferred for the same reason as [json_cap_sites]: the argument is often
       a bare var at the call and is pinned by LATER unification. *)
   json_codecs : ty list ref;

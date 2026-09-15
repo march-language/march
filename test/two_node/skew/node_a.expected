@@ -1,0 +1,3 @@
+node-a: node-b load fresh on arrival: true
+node-a: node-b load stale 11 s after its only report: true
+node-a: done

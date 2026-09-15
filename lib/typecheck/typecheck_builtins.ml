@@ -1054,6 +1054,8 @@ let builtin_bindings : (string * scheme) list =
       Poly ([get_id pid_a; get_id msg_b; get_id ret_c], [],
         TArrow (pid_a, TArrow (msg_b, TArrow (t_int, t_result ret_c t_string)))));
     ("actor_reply", poly2 (fun a b -> TArrow (a, TArrow (b, t_unit))));
+    (* Hold a call's reply ref across handler turns (see march_actor_reply_retain). *)
+    ("actor_reply_retain", poly1 (fun a -> TArrow (a, a)));
     (* actor_send_after/actor_cancel_timer (specs/progress/2026-08-12-language-
        level-timers.md): schedule msg for delivery to pid after delay_ms
        milliseconds, returning an opaque TimerRef; actor_cancel_timer(ref)

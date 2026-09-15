@@ -134,7 +134,7 @@ let builtin_names : StringSet.t =
       "tls_client_ctx"; "tls_server_ctx"; "tls_ctx_free";
       "tls_negotiated_alpn"; "tls_peer_cn";
       (* Actor builtins *)
-      "actor_call"; "actor_cast"; "actor_reply"; "self"; "receive";
+      "actor_call"; "actor_cast"; "actor_reply"; "actor_reply_retain"; "self"; "receive";
       (* actor_send_after/actor_cancel_timer (specs/progress/2026-08-12-
          language-level-timers.md) *)
       "actor_send_after"; "actor_cancel_timer";

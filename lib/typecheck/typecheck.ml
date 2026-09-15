@@ -1856,14 +1856,17 @@ let rec infer_expr env (e : Ast.expr) : ty =
        a `derive Json` codec for `msg`'s solved type and mint the wire type
        tag from it.  The arrow is demoted for the same reason [from_json]'s is
        just below: the recorded node must be the one the later pin flows into.
-       Only the exact three-argument, qualified spelling is a typed send;
+       Only the exact qualified spelling at full arity is a typed send;
        a partial application or an alias is an ordinary call of a function
-       whose body refuses to run (see stdlib/node.march). *)
-    | Ast.EApp ((Ast.EVar { txt = "Node.send"; _ }) as fv, ([_; _; _] as args), sp) ->
+       whose body refuses to run (see stdlib/node.march).
+       `Node.enqueue(q, to, msg, policy)` is the same contract through a
+       NodeQueue: its message is the third argument too. *)
+    | Ast.EApp ((Ast.EVar { txt = ("Node.send" | "Node.enqueue") as callee; _ }) as fv, args, sp)
+      when List.length args = (if callee = "Node.send" then 3 else 4) ->
       let f_ty = infer_expr env fv in
       let rty = infer_app env sp f_ty args 0 in
       demote_to_monomorphic f_ty;
-      env.node_send_sites := (sp, f_ty) :: !(env.node_send_sites);
+      env.node_send_sites := (sp, callee, f_ty) :: !(env.node_send_sites);
       rty
 
     | Ast.EApp ((Ast.EVar { txt = ("to_json" | "from_json" | "from_json_events"); _ }) as fv,
