@@ -401,8 +401,16 @@ mod Set do
     end
   end
 
-  doc "Returns the number of elements in the set. O(1)."
-  fn size(s) do
+  doc """
+  Returns the number of elements in the set. O(1).
+
+  This contract is ASSUMED, not proved: the element count is a fact about the
+  abstract set (`card(elts(s))`) the refinement checker takes on faith, and it
+  holds only when `cmp` is a strict total order consistent with `==` on the
+  element type. See docs/refinement-types.md, "Set Refinements".
+  """
+  @[assume]
+  fn size(s) : {Int | _ == card(elts(s))} do
     match s do
     HamtSet(n, _) -> n
     end

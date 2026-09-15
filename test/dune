@@ -8600,6 +8600,11 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 
 (rule
  (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_sorted_set.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_sorted_set.march)))
+
+(rule
+ (alias runtest)
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_sigil.march))
  (action (run %{exe:../bin/main.exe} test stdlib/test_sigil.march)))
 

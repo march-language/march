@@ -362,6 +362,7 @@ let known_unregistered_stdlib_test_files = [
   "test_set.march";
   "test_sigil.march";
   "test_sort.march";
+  "test_sorted_set.march";
   "test_string.march";
   "test_string_utf8.march";
   "test_task.march";

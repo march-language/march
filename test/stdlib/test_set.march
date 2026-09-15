@@ -288,6 +288,30 @@ pfn oracle_diff(a : List(Int), b : List(Int)) : List(Int) do
   List.filter(a, fn x -> !List.member(b, x))
 end
 
+-- The number of distinct values in a list, the oracle for `card`.
+pfn count_distinct(xs : List(Int)) : Int do
+  fn go(ys : List(Int), seen : List(Int)) : Int do
+    match ys do
+      Nil -> List.length(seen)
+      Cons(y, rest) -> if List.member(seen, y) do go(rest, seen) else go(rest, Cons(y, seen)) end
+    end
+  end
+  go(xs, Nil)
+end
+
+describe "assumed card contract (runtime witness)" do
+  test "size is the number of distinct elements: size(s) == card(elts(s))" do
+    Check.all(Gen.tuple2(Gen.list(Gen.int(0, 30)), Gen.int(0, 30)), fn pair ->
+      match pair do
+        (xs, x) ->
+          Set.size(set_of(xs)) == count_distinct(xs)
+            && Set.size(Set.insert(set_of(xs), x, int_cmp)) == count_distinct(Cons(x, xs))
+            && Set.size(Set.remove(set_of(xs), x, int_cmp)) == count_distinct(List.filter(xs, fn y -> y != x))
+      end
+    )
+  end
+end
+
 describe "assumed elts contracts (runtime witnesses)" do
   test "empty has no elements" do
     assert same_elts(Set.empty(), Nil)

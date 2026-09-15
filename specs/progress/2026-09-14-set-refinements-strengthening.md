@@ -7,11 +7,20 @@ there is no cardinality. Design: `specs/2026-09-14-set-refinements-strengthening
 Phase 1 (typed element sorts) landed 2026-09-14; see
 `specs/progress/2026-09-14-set-refinements-typed-element-sorts.md`. Phase 2
 (structural `elts`/`len`, proved stdlib list contracts) landed 2026-09-15; see
-`specs/progress/2026-09-15-set-refinements-structural-lists.md`. Remaining:
-phases 3 and 4.
+`specs/progress/2026-09-15-set-refinements-structural-lists.md`. Phase 3
+(ground cardinality) landed 2026-09-15; see
+`specs/progress/2026-09-15-set-refinements-cardinality.md`. Remaining: phase 4.
 Four phases, one PR each: (1) derive every element sort from March types, with parametric datatypes and per-instance measures, and enforce the single-element-type rule;
 (2) axiomatise `elts` and `len` over `M_List` and extend Tier 2 induction to
 set predicates and local functions, proving `List.reverse`/`append`/`filter`/
 `dedup` as written; (3) ground-instantiated `card`; (4) prove `SortedSet`'s
 tree operations modulo one assumed comparator law. Depends on the six
 set-refinement defect fixes (PR #453) reaching `main`.
+
+## Closed 2026-09-15: all four phases landed
+
+Phase 4 (`SortedSet` proved as far as the unordered fragment allows) landed
+2026-09-15; see `specs/progress/2026-09-15-set-refinements-sorted-set.md`.
+Follow-ups that remain open, each in its own file:
+`specs/todos/2026-09-14-refine-caller-values-default-to-int.md` and
+`specs/todos/2026-09-15-generic-set-measure-instances.md`.

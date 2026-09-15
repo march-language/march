@@ -31,6 +31,7 @@ let rec consts (t : Smt.term) : string list =
   | Smt.SetSng (_, a) -> consts a
   | Smt.SetMem (a, b) | Smt.SetUnion (a, b) | Smt.SetInter (a, b) | Smt.SetDiff (a, b)
   | Smt.SetSub (a, b) -> consts a @ consts b
+  | Smt.SetCard (_, a) -> consts a
 
 let rec app_heads (t : Smt.term) : string list =
   match t with
@@ -48,6 +49,7 @@ let rec app_heads (t : Smt.term) : string list =
   | Smt.SetSng (_, a) -> app_heads a
   | Smt.SetMem (a, b) | Smt.SetUnion (a, b) | Smt.SetInter (a, b) | Smt.SetDiff (a, b)
   | Smt.SetSub (a, b) -> app_heads a @ app_heads b
+  | Smt.SetCard (_, a) -> app_heads a
 
 (* Function symbols the PREAMBLE — a raw SMT-LIB string assembled alongside
    [vc], not part of it — already declares and axiomatises: the string-length
