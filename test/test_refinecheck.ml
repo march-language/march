@@ -14632,9 +14632,12 @@ let set_suite =
         Alcotest.(check string) "lambda disjunction with a negative" "{4, -7}"
           (r "(lambda ((x!1 Int)) (or (= x!1 4) (= x!1 (- 7))))");
         Alcotest.(check string) "lambda empty" "{}" (r "(lambda ((x!1 Int)) false)");
-        Alcotest.(check string) "co-finite stays raw"
-          "(store ((as const (Array Int Bool)) true) 3 false)"
+        (* Co-finite sets appear in propagated-contract models since plan
+           step 2.6 (`List.reverse() can return …`), so they render too. *)
+        Alcotest.(check string) "co-finite" "{every value except 3}"
           (r "(store ((as const (Array Int Bool)) true) 3 false)");
+        Alcotest.(check string) "full set" "{every value}" (r "((as const (Array Int Bool)) true)");
+        Alcotest.(check string) "full set, lambda" "{every value}" (r "(lambda ((x!1 Int)) true)");
         Alcotest.(check string) "unrecognised lambda stays raw"
           "(lambda ((x!1 Int)) (> x!1 4))" (r "(lambda ((x!1 Int)) (> x!1 4))"));
 
@@ -15294,7 +15297,113 @@ let list_structure_suite =
                  \      Cons(h, t) -> if h > 0 do Cons(h, keep_pos(t)) else keep_pos(t) end\n\
                  \    end\n\
                  \  end\n" ^ no_two
-                 ^ "  fn good(ys : {List(Int) | !member(2, elts(_))}) : Int do no_two(keep_pos(ys)) end")))) ]
+                 ^ "  fn good(ys : {List(Int) | !member(2, elts(_))}) : Int do no_two(keep_pos(ys)) end"))));
+
+    (* ── Plan step 2.5: callee and local contracts in a postcondition check ── *)
+    gated "a local helper's proved contract proves the enclosing return" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (2, 1, 0)
+          (ledger_counts3 (m {|  fn rev(xs : List(Int)) : {List(Int) | elts(_) == elts(xs)} do
+    fn go(lst : List(Int), acc : List(Int)) : {List(Int) | elts(_) == union(elts(lst), elts(acc))} do
+      match lst do
+        Nil -> acc
+        Cons(h, t) -> go(t, Cons(h, acc))
+      end
+    end
+    go(xs, Nil)
+  end
+  fn no_two(zs : {List(Int) | !member(2, elts(_))}) : Int do 0 end
+  fn bad(ys : {List(Int) | member(2, elts(_))}) : Int do no_two(rev(ys)) end|})));
+
+    gated "append through reverse and filter with a callback guard, stdlib-shaped" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (7, 1, 0)
+          (ledger_counts3 (m {|  fn rev(xs : List(a)) : {List(a) | elts(_) == elts(xs)} do
+    fn go(lst : List(a), acc : List(a)) : {List(a) | elts(_) == union(elts(lst), elts(acc))} do
+      match lst do
+      Nil        -> acc
+      Cons(h, t) -> go(t, Cons(h, acc))
+      end
+    end
+    go(xs, Nil)
+  end
+
+  fn cat(xs : List(a), ys : List(a)) : {List(a) | elts(_) == union(elts(xs), elts(ys))} do
+    fn go(lst : List(a), acc : List(a)) : {List(a) | elts(_) == union(elts(lst), elts(acc))} do
+      match lst do
+      Nil        -> acc
+      Cons(h, t) -> go(t, Cons(h, acc))
+      end
+    end
+    go(rev(xs), ys)
+  end
+
+  fn keep(xs : List(a), pred : a -> Bool) : {List(a) | subset(elts(_), elts(xs))} do
+    fn go(lst : List(a), acc : List(a)) : {List(a) | subset(elts(_), union(elts(lst), elts(acc)))} do
+      match lst do
+      Nil        -> rev(acc)
+      Cons(h, t) ->
+        if pred(h) do go(t, Cons(h, acc)) else go(t, acc) end
+      end
+    end
+    go(xs, Nil)
+  end
+
+  fn no_two(zs : {List(Int) | !member(2, elts(_))}) : Int do 0 end
+  fn bad_cat(ys : {List(Int) | member(2, elts(_))}) : Int do no_two(cat(Nil, ys)) end
+  fn ok_keep(ys : {List(Int) | !member(2, elts(_))}) : Int do no_two(keep(ys, fn x -> x > 0)) end|})));
+
+    gated "a local's parameter refinement is the invariant that proves dedup" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (7, 1, 0)
+          (ledger_counts3 (m {|  fn rev(xs : List(a)) : {List(a) | elts(_) == elts(xs)} do
+    fn go(lst : List(a), acc : List(a)) : {List(a) | elts(_) == union(elts(lst), elts(acc))} do
+      match lst do
+      Nil        -> acc
+      Cons(h, t) -> go(t, Cons(h, acc))
+      end
+    end
+    go(xs, Nil)
+  end
+
+  fn dd(xs : List(a)) : {List(a) | elts(_) == elts(xs)} do
+    fn go(lst : List(a), prev : a, acc : {List(a) | member(prev, elts(_))}) : {List(a) | elts(_) == union(elts(lst), elts(acc))} do
+      match lst do
+      Nil        -> rev(acc)
+      Cons(h, t) -> do
+        if h == prev do go(t, h, acc)
+        else go(t, h, Cons(h, acc)) end
+      end
+      end
+    end
+    match xs do
+    Nil        -> Nil
+    Cons(h, t) -> go(t, h, Cons(h, Nil))
+    end
+  end
+
+  fn no_two(zs : {List(Int) | !member(2, elts(_))}) : Int do 0 end
+  fn bad(ys : {List(Int) | member(2, elts(_))}) : Int do no_two(dd(ys)) end|})));
+
+    (* Soundness of the fixpoint gate: a contract is used only once proved. *)
+    gated "an unproved callee contract proves nothing for its caller" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d (m {|  fn liar(xs : List(Int)) : {List(Int) | elts(_) == empty} do xs end
+  fn user(xs : List(Int)) : {List(Int) | elts(_) == empty} do liar(xs) end
+  fn need_empty(zs : {List(Int) | elts(_) == empty}) : Int do 0 end
+  fn probe(ys : {List(Int) | member(2, elts(_))}) : Int do need_empty(user(ys)) end|})));
+
+    gated "two functions cannot prove each other's contracts" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d (m {|  fn f(xs : List(Int)) : {List(Int) | elts(_) == empty} do g(xs) end
+  fn g(xs : List(Int)) : {List(Int) | elts(_) == empty} do f(xs) end
+  fn need_empty(zs : {List(Int) | elts(_) == empty}) : Int do 0 end
+  fn probe(ys : {List(Int) | member(2, elts(_))}) : Int do need_empty(f(ys)) end|})));
+
+    gated "a chain of contracts proves in any declaration order" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (3, 1, 0)
+          (ledger_counts3 (m {|  fn no_two(zs : {List(Int) | !member(2, elts(_))}) : Int do 0 end
+  fn probe(ys : {List(Int) | member(2, elts(_))}) : Int do no_two(top(ys)) end
+  fn top(xs : List(Int)) : {List(Int) | elts(_) == elts(xs)} do mid(xs) end
+  fn mid(xs : List(Int)) : {List(Int) | elts(_) == elts(xs)} do base(xs) end
+  fn base(xs : List(Int)) : {List(Int) | elts(_) == elts(xs)} do xs end|}))) ]
 
 (* ── The single-element-type rule (plan step 1.5) ─────────────────────────
    A set predicate whose operands have known, different element types is an

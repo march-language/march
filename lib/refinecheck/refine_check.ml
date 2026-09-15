@@ -1357,7 +1357,8 @@ and visit_local_fn ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
   let proved =
     match ret_ty with
     | Some (A.TyRefine _) ->
-      check_fn_post_verdict ~root errctx (if escapes then strip_param_refinements fd else fd)
+      with_post_lookup (postcond_of ~cb ctx defs) (fun () ->
+          check_fn_post_verdict ~root errctx (if escapes then strip_param_refinements fd else fd))
     | _ -> false
   in
   let sg = if proved then sg else { sg with ret = None; ret_sort = None } in
@@ -2004,7 +2005,7 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
       trusted_fn := saved_trusted;
       enclosing_fn := saved_enclosing)
     (fun () ->
-    check_fn_post ~root errctx fd;
+    with_post_lookup (postcond_of ctx defs) (fun () -> check_fn_post ~root errctx fd);
     let walked = if assume_params then fd else strip_param_refinements fd in
     List.iter
       (fun (c : A.fn_clause) ->

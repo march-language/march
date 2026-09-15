@@ -1323,6 +1323,9 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        postcondition about `elts(_)` becomes a fresh set constant carrying
        that postcondition, the set analogue of [reflect_scalar]'s call
        branch: `need(mk())` then discharges from `mk`'s own contract. *)
+    (* Forward cell for [load_scope_measure_facts] (defined below), which
+       itself resolves nested calls through [set_of_call]. *)
+    let load_scope_measure_facts_ref : (string -> unit) ref = ref (fun _ -> ()) in
     (* Measures a call result can carry through its callee's postcondition:
        the built-in set measures, and the built-in `len` when no user measure
        took that name. *)
@@ -1346,17 +1349,25 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
       match a with
       | A.ECon ({ A.txt = "Nil"; _ }, [], _) -> Some (Smt.SetEmpty Smt.set_unknown_elem)
       | A.ECon ({ A.txt = "Cons"; _ }, [ h; tl ], _) ->
-        (match reflect_set_head h, reflect_list_literal tl with
+        (match reflect_set_head h, reflect_list_tail tl with
          | Some ht, Some rest -> Some (Smt.SetUnion (Smt.SetSng (Smt.set_unknown_elem, ht), rest))
          | _ -> None)
       | _ -> None
+    (* The tail of a constructor chain may be a NAME (`Cons(h, acc)` in an
+       accumulator call, plan step 2.5): its elements are that name's own
+       `elts$acc` constant, carrying whatever the caller's scope promises. *)
+    and reflect_list_tail (tl : A.expr) : Smt.term option =
+      match tl with
+      | A.EVar { A.txt = x; _ } when not (is_recvar x) && not (Hashtbl.mem str_names x) ->
+        !load_scope_measure_facts_ref x;
+        measure_of_var elts_measure x
+      | _ -> reflect_list_literal tl
     in
     (* [load_scope_measure_facts] is defined below and itself resolves nested
        calls through [elts_of_call]; a forward cell breaks the cycle.  A
        measure over a caller NAME inside a substituted contract must load
        that name's own promise first, or `let s = from_list([1,2])` followed
        by `to_list(s)` connects `elts$s` to nothing. *)
-    let load_scope_measure_facts_ref : (string -> unit) ref = ref (fun _ -> ()) in
     let rec set_of_call (m0 : string) (fname : string) (cargs : A.expr list) : Smt.term option =
       match postcond fname cargs with
       | None -> None
