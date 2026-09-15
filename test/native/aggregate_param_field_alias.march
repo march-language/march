@@ -1,0 +1,56 @@
+-- An owned record parameter whose field is passed to a BORROWING callee in
+-- tail position.  Perceus's aggregate-parameter drop was pushed ahead of the
+-- tail call, freeing the record (and the field it owns) before the callee read
+-- the field: `SortedSet.size` of a uniquely-held set panicked with
+-- "non-exhaustive pattern match" when compiled.  The interpreter was fine.
+mod AggregateParamFieldAlias do
+  needs IO
+
+  type T = Twig | Fork(T, Int, T)
+
+  fn icmp(a : Int, b : Int) : Int do a - b end
+
+  -- only reads its argument, so Perceus infers it BORROWED and does not dup
+  -- a field alias passed to it (the shape of SortedSet.tree_size)
+  pfn count(t : T) : Int do
+    match t do
+    Twig -> 0
+    Fork(l, _, r) -> 1 + count(l) + count(r)
+    end
+  end
+
+  -- field alias passed straight to a borrowing callee
+  fn box_size(b : {label: String, tree: T}) : Int do
+    count(b.tree)
+  end
+
+  -- pattern variable bound by matching a field alias
+  fn left_size(b : {label: String, tree: T}) : Int do
+    match b.tree do
+    Twig -> 0
+    Fork(l, _, _) -> count(l)
+    end
+  end
+
+  -- projection out of a projection
+  fn inner_size(o : {name: String, inner: {label: String, tree: T}}) : Int do
+    let i = o.inner
+    count(i.tree)
+  end
+
+  fn mk() : {label: String, tree: T} do
+    {label: "box" ++ int_to_string(1), tree: Fork(Fork(Twig, 1, Twig), 2, Fork(Twig, 3, Fork(Twig, 4, Twig)))}
+  end
+
+  fn main(cap : Cap(IO)) do
+    println(int_to_string(SortedSet.size(SortedSet.new(icmp))))
+    println(int_to_string(SortedSet.size(SortedSet.add(SortedSet.new(icmp), 5))))
+    let s = SortedSet.add(SortedSet.add(SortedSet.add(SortedSet.new(icmp), 5), 3), 9)
+    println(int_to_string(SortedSet.size(s)))
+    let u = SortedSet.add(SortedSet.add(SortedSet.add(SortedSet.new(icmp), 1), 2), 3)
+    println(int_to_string(SortedSet.size(u)))
+    println(int_to_string(box_size(mk())))
+    println(int_to_string(left_size(mk())))
+    println(int_to_string(inner_size({name: "outer", inner: mk()})))
+  end
+end

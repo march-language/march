@@ -335,6 +335,14 @@ git log is authoritative for exact commits.
   (`match failure`) because Prelude's `println` called your `show` instead of
   the builtin one; the compiled binary was already correct. A Prelude
   function's bare references now resolve in Prelude's own scope.
+- **A function that reads a field of a record parameter and hands it to a
+  read-only helper no longer frees the record first when compiled.**
+  `SortedSet.size(s)` on a set nothing else held panicked with
+  "non-exhaustive pattern match" (`SortedSet.size(SortedSet.new(cmp))` was
+  enough) while the interpreter printed the size. It only seemed to depend on
+  which `SortedSet` functions a program called because a later use of `s`
+  kept the set alive. User code of the same shape (`fn f(b) do count(b.tree)
+  end`, a match on `b.tree`, or `o.inner.tree`) was affected too.
 - Load-aware routing no longer depends on peers' clocks agreeing: a load report received
   through `SwimDriver` is aged from its arrival on the receiving node, so a peer whose
   clock ran ahead no longer sent reports that never went stale (or, behind, stale on
