@@ -15582,6 +15582,25 @@ let caller_sorts_suite =
                      \      None -> 0\n\
                      \    end\n\
                      \  end")));
+    (* ── origin 4: refinement binders ── *)
+    gated "refinement binder: a refined String proves with no type table" (fun () ->
+        Alcotest.(check (triple int int int)) "untyped (proved, violated, skipped)" (1, 0, 0)
+          (ledger_counts3
+             (m "CSR1" "  fn r(s : {String | len(_) > 0}) : Int do need_a([\"a\", s]) end")));
+    gated "refinement binder REJECT: a refined String known to differ reports" (fun () ->
+        ignore (ledger "rv" (0, 1, 0)
+                  (m "CSR2" "  fn r(s : {String | _ == \"b\"}) : Int do need_a([\"c\", s]) end")));
+    gated "refinement binder REJECT: its promise loads where a guard names it" (fun () ->
+        ignore (ledger "rg" (0, 1, 0)
+                  (m "CSR3"
+                     "  fn g(t : {String | _ == \"b\"}, s : String) : Int do\n\
+                     \    if s == t do need_a([\"c\", s]) else 0 end\n\
+                     \  end")));
+    gated "refinement binder control: a refined Int binder keeps its verdict" (fun () ->
+        ignore (ledger "ri" (2, 0, 0)
+                  (m "CSR4"
+                     "  fn need_pos(n : {Int | _ > 0}) : Int do n end\n\
+                     \  fn r(k : {Int | _ > 1}, y) : Int do need_mem(y, [y]) + need_pos(k) end")));
   ]
 
 (* ── z3 never rejects a query the checker builds ─────────────────────────

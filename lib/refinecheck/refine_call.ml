@@ -968,7 +968,27 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        goes to the `Str` constants ([caller_is_str]). *)
     let caller_sort_of name : Smt.sort option =
       if is_recvar name then None
-      else match List.assoc_opt name binds with Some sp -> caller_sort_at sp | None -> None
+      else
+        match Option.bind (List.assoc_opt name binds) caller_sort_at with
+        | Some s -> Some s
+        (* No table answer: a REFINED binder in scope still says its sort, in
+           its marker — `s : {String | …}`, `b : {Bool | …}`, a measured
+           datatype.  [sc] is shadow-disciplined like [binds], so the entry
+           is this very binding's.  An `Int` marker says nothing new. *)
+        | None ->
+          (match List.assoc_opt name sc with
+           | Some (_, _, Some m) when m = str_sort -> Some (Smt.sdata str_sort)
+           | Some (_, _, Some m) when is_meas_sort m ->
+             let adt =
+               String.sub m (String.length meas_sort_prefix)
+                 (String.length m - String.length meas_sort_prefix)
+             in
+             Some (adt_sort adt)
+           | Some (_, _, m) ->
+             (match scalar_sort_of_marker m with
+              | Some ((Smt.SBool | Smt.SFloat) as srt) -> Some srt
+              | _ -> None)
+           | None -> None)
     in
     let caller_scalar_of name =
       match Hashtbl.find_opt caller_scalar name with
@@ -1339,7 +1359,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
       (* A caller `String` (design B3): pinned into the `Str` sort like any
          other string name, so every later producer agrees, and dropped here
          exactly as a known string name is. *)
-      else if caller_is_str name then (declare_str_const name; None)
+      else if caller_is_str name then (ignore (reflect_str ("$caller$" ^ name) (A.EVar { A.txt = name; A.span })); None)
       else if is_recvar name then None
       else Some (Smt.Const name, (name, caller_scalar_of name))
     in
@@ -1527,7 +1547,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
         | None ->
           (* a caller-scope variable from the path context *)
           if Hashtbl.mem str_names name then Some (Smt.Const name)
-          else if caller_is_str name then (declare_str_const name; Some (Smt.Const name))
+          else if caller_is_str name then reflect_str ("$caller$" ^ name) (A.EVar { A.txt = name; A.span })
           (* …unless it is a caller-scope RECORD, which lives at a datatype sort.
              Declaring it `Int` here would put one symbol at two sorts; dropping
              the sub-term instead just loses a fact (silence). *)
@@ -2164,7 +2184,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
       if Hashtbl.mem str_names name then Some (Smt.Const name)
       (* A caller `String` the typechecker recorded (design B3) takes the same
          route, declared into `Str` on first sight. *)
-      else if caller_is_str name then (declare_str_const name; Some (Smt.Const name))
+      else if caller_is_str name then reflect_str ("$caller$" ^ name) (A.EVar { A.txt = name; A.span })
       (* Same rule for a caller-scope RECORD: it is declared at its datatype
          sort by [path_resolve_field], so it must never also be reflected as a
          scalar.  Returning None drops the sub-term — and with it the whole
@@ -2213,10 +2233,9 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
          has no callable `len`, so a guard could not mention this measure. *)
       else if m = "len" && string_len_available () && Hashtbl.mem str_names name then
         Some (Smt.App (strlen_fn, [ Smt.Const name ]))
-      else if m = "len" && caller_is_str name then begin
-        declare_str_const name;
-        Some (Smt.App (strlen_fn, [ Smt.Const name ]))
-      end
+      else if m = "len" && caller_is_str name then
+        Option.map (fun t -> Smt.App (strlen_fn, [ t ]))
+          (reflect_str ("$caller$" ^ name) (A.EVar { A.txt = name; A.span }))
       else measure_of_var m name
     in
     let path_resolve_tester ctor arg =
