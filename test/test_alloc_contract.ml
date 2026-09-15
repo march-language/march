@@ -97,7 +97,8 @@ let call f = T.EApp (v f T.TInt, [])
 let lit n = T.ALit (March_ast.Ast.LitInt n)
 let decl ?form n = { AC.d_name = n; d_form = form;
                      d_name_span = March_ast.Ast.dummy_span;
-                     d_decl_span = March_ast.Ast.dummy_span }
+                     d_decl_span = March_ast.Ast.dummy_span;
+                     d_cap = None; d_alt_name = None }
 
 let test_builtin_table_total_and_conservative () =
   Alcotest.(check bool) "+ does not allocate" false (AC.builtin_allocates "+");
@@ -300,21 +301,53 @@ let test_opt_level_does_not_change_verdict () =
   let (rc2, _) = compile ~flags:"--opt 2" live_src in
   Alcotest.(check bool) "both reject" true (rc0 <> 0 && rc2 <> 0)
 
-let test_interpreter_ignores_attribute () =
-  let (_, _, _, interp_out) = compile_and_run live_src in
-  Alcotest.(check string) "interpreted runs" "3\n" interp_out
-
-let test_check_ignores_attribute () =
+(* Runs [exe args file] on [src] in a temp file; (rc, stdout+stderr). *)
+let run_cli ?(stdout_only = false) ~args src =
   let exe = Test_cap_ceiling.compiler_exe in
   let f = Filename.temp_file "noalloc" ".march" in
-  let oc = open_out f in output_string oc live_src; close_out oc;
+  let oc = open_out f in output_string oc src; close_out oc;
   let log = Filename.temp_file "noalloc" ".log" in
-  let rc = Sys.command (Printf.sprintf "%s --check %s > %s 2>&1"
-                          (Filename.quote exe) (Filename.quote f) (Filename.quote log)) in
+  let rc = Sys.command (Printf.sprintf "%s %s %s > %s %s"
+                          (Filename.quote exe) args (Filename.quote f) (Filename.quote log)
+                          (if stdout_only then "2>/dev/null" else "2>&1")) in
   let ic = open_in log in
   let out = really_input_string ic (in_channel_length ic) in
   close_in ic;
   List.iter (fun p -> try Sys.remove p with _ -> ()) [f; log];
+  (rc, out)
+
+let check_cli src = run_cli ~args:"--check" src
+
+let count_substring needle hay =
+  let n = String.length hay and k = String.length needle in
+  let rec go i acc =
+    if i + k > n then acc
+    else if String.sub hay i k = needle then go (i + k) (acc + 1)
+    else go (i + 1) acc in
+  go 0 0
+
+(* The interpreter never lowers, so it cannot judge the contract: it says so
+   once and runs the program. *)
+let test_interpreter_hints_and_runs () =
+  let (_, _, _, interp_out) = compile_and_run live_src in
+  Alcotest.(check string) "interpreted runs" "3\n" interp_out;
+  let (rc, out) = run_cli ~args:"" live_src in
+  Alcotest.(check int) "interpreter rc" 0 rc;
+  Alcotest.(check int) "one no_alloc_unchecked hint" 1
+    (count_substring "not when interpreting" out)
+
+(* --check lowers on demand and gives the build's verdict (it used to be
+   silent here). *)
+let test_check_judges_attribute () =
+  let (rc, out) = check_cli live_src in
+  Alcotest.(check int) "--check rc" 1 rc;
+  Alcotest.(check bool) "names the contract" true
+    (contains "`bump_copied` is marked @[no_alloc] but allocates" out)
+
+(* A program that mentions neither form pays nothing and prints nothing. *)
+let test_check_without_contracts_is_silent () =
+  let src = replace_first live_src ~sub:"@[no_alloc]" ~by:"" in
+  let (rc, out) = check_cli src in
   Alcotest.(check int) "--check rc" 0 rc;
   Alcotest.(check bool) "silent" false (contains "no_alloc" out)
 
@@ -326,8 +359,9 @@ let e2e_tests = [
   Alcotest.test_case "warn form exits 0"                    `Quick test_warn_form_exit_zero;
   Alcotest.test_case "--no-opt downgrades to a warning"     `Quick test_no_opt_downgrades;
   Alcotest.test_case "--opt N does not change the verdict"  `Quick test_opt_level_does_not_change_verdict;
-  Alcotest.test_case "interpreter ignores the attribute"    `Quick test_interpreter_ignores_attribute;
-  Alcotest.test_case "--check ignores the attribute"        `Quick test_check_ignores_attribute;
+  Alcotest.test_case "interpreter hints once and runs"      `Quick test_interpreter_hints_and_runs;
+  Alcotest.test_case "--check judges the attribute"         `Quick test_check_judges_attribute;
+  Alcotest.test_case "--check without contracts is silent"  `Quick test_check_without_contracts_is_silent;
 ]
 let tests = tests @ e2e_tests
 
@@ -842,3 +876,230 @@ let report_tests = [
   Alcotest.test_case "allocating functions skipped"        `Quick test_report_contracts_skips_allocating;
 ]
 let tests = tests @ report_tests
+
+(* ── `cap no_alloc`: a module-wide hard contract ──────────────────────────
+   specs/2026-09-15-refinement-remaining-designs.md §C.  The cap used to be a
+   syntactic AST walk (lib/refinecheck/no_alloc.ml, deleted) with different
+   answers; every case here is judged by the same TIR contract as
+   @[no_alloc], under --compile and --check alike. *)
+
+let test_collect_cap_marks_module () =
+  let m = parse_and_desugar {|mod T do
+  fn outside(x : Int) : Int do x end
+  mod Dsp do
+    cap no_alloc
+    fn f(x : Int) : Int do x end
+    @[no_alloc(warn)]
+    fn g(x : Int) : Int do x end
+    mod Inner do
+      fn h(x : Int) : Int do x end
+    end
+  end
+end|} in
+  let ds = AC.collect m in
+  let find n = match List.find_opt (fun d -> d.AC.d_name = n) ds with
+    | Some d -> d | None -> Alcotest.failf "%s not collected" n in
+  let f = find "Dsp.f" and g = find "Dsp.g" and h = find "Dsp.Inner.h"
+  and o = find "outside" in
+  Alcotest.(check bool) "f is Hard from the cap" true
+    (f.AC.d_form = Some AC.Hard && f.AC.d_cap = Some "Dsp");
+  Alcotest.(check bool) "explicit warn wins" true
+    (g.AC.d_form = Some AC.Warn && g.AC.d_cap = None);
+  Alcotest.(check bool) "nested module inherits" true
+    (h.AC.d_form = Some AC.Hard && h.AC.d_cap = Some "Dsp");
+  Alcotest.(check bool) "outside the module is untouched" true (o.AC.d_form = None)
+
+let cap_src body = Printf.sprintf {|mod Main do
+needs IO
+%s
+end|} body
+
+(* NEW with the unification: the syntactic walk never looked at callees. *)
+let cap_callee_src = cap_src {|fn format_row(xs : List(String)) : String do
+  match xs do
+    Nil -> ""
+    Cons(h, t) -> h ++ format_row(t)
+  end
+end
+mod Render do
+  cap no_alloc
+  fn render(xs : List(String)) : String do format_row(xs) end
+end
+fn main(cap : Cap(IO)) : Unit do println(Render.render(["a", "b"])) end|}
+
+let test_cap_rejects_allocating_callee () =
+  let needle = "`Render.render` is in `cap no_alloc` module `Render` but allocates" in
+  rejects "cap callee" cap_callee_src needle;
+  rejects "cap callee names it" cap_callee_src "calls `format_row`, which allocates";
+  let (rc, out) = check_cli cap_callee_src in
+  Alcotest.(check int) "--check rejects too" 1 rc;
+  Alcotest.(check bool) "--check names the cap" true (contains needle out)
+
+(* NEW with the unification: the syntactic walk rejected every constructor
+   application, including one Perceus reuses in place. *)
+(* Constructor names deliberately unlike any stdlib type's: a nested-module
+   `Tree.Leaf` pattern matched from outside the module miscompiles today
+   (compiled `panic: non-exhaustive pattern match`, missing `LWWRegister`),
+   with or without the cap -- a separate namespace bug, not this contract. *)
+let cap_reuse_src = cap_src {|mod Tree do
+  cap no_alloc
+  type Shape = Tip(Int) | Fork(Shape, Shape)
+  fn inc_leaves(t : Shape) : Shape do
+    match t do
+      Tip(n) -> Tip(n + 1)
+      Fork(l, r) -> Fork(inc_leaves(l), inc_leaves(r))
+    end
+  end
+end
+fn sum(t : Tree.Shape) : Int do
+  match t do
+    Tree.Tip(n) -> n
+    Tree.Fork(l, r) -> sum(l) + sum(r)
+  end
+end
+fn main(cap : Cap(IO)) : Unit do
+  println(int_to_string(sum(Tree.inc_leaves(Tree.Fork(Tree.Tip(1), Tree.Tip(2))))))
+end|}
+
+let test_cap_accepts_reused_ctor () =
+  accepts "cap reuse" cap_reuse_src "5\n";
+  let (rc, out) = check_cli cap_reuse_src in
+  if rc <> 0 then Alcotest.failf "--check should accept:\n%s" out
+
+let cap_tuple_src = cap_src {|mod Pair do
+  cap no_alloc
+  fn make_pair(a : Int, b : Int) : (Int, Int) do (a, b) end
+end
+fn main(cap : Cap(IO)) : Unit do
+  let (a, b) = Pair.make_pair(1, 2)
+  println(int_to_string(a + b))
+end|}
+
+let test_cap_rejects_tuple () =
+  let needle = "`Pair.make_pair` is in `cap no_alloc` module `Pair` but allocates" in
+  rejects "cap tuple" cap_tuple_src needle;
+  rejects "cap tuple reason" cap_tuple_src "a tuple is allocated here";
+  let (rc, out) = check_cli cap_tuple_src in
+  Alcotest.(check int) "--check rejects" 1 rc;
+  Alcotest.(check bool) "--check message" true (contains needle out)
+
+let cap_arith_src = cap_src {|mod Math do
+  cap no_alloc
+  fn max3(a : Int, b : Int, c : Int) : Int do
+    if a > b do
+      if a > c do a else c end
+    else
+      if b > c do b else c end
+    end
+  end
+  fn abs_diff(a : Int, b : Int) : Int do
+    let d = a - b
+    if d > 0 do d else 0 - d end
+  end
+end
+fn main(cap : Cap(IO)) : Unit do
+  println(int_to_string(Math.max3(1, 7, 3) + Math.abs_diff(2, 5)))
+end|}
+
+let test_cap_accepts_arithmetic () =
+  accepts "cap arithmetic" cap_arith_src "10\n";
+  let (rc, out) = check_cli cap_arith_src in
+  if rc <> 0 then Alcotest.failf "--check should accept:\n%s" out
+
+(* Nested modules and impl methods are covered (the walk saw neither). *)
+let cap_nested_src = cap_src {|interface Mix(a) do
+  fn mix: a -> Int
+end
+mod Dsp do
+  cap no_alloc
+  type Sample = Sample(Int)
+  impl Mix(Sample) do
+    fn mix(s) do
+      match s do
+        Sample(x) ->
+          let (a, b) = pick((x, x + 1))
+          a + b
+      end
+    end
+  end
+  pfn pick(p : (Int, Int)) : (Int, Int) do p end
+  mod Inner do
+    fn spread(x : Int) : (Int, Int) do (x, x + 1) end
+  end
+end
+fn main(cap : Cap(IO)) : Unit do
+  let (a, _) = Dsp.Inner.spread(1)
+  println(int_to_string(mix(Dsp.Sample(a))))
+end|}
+
+let test_cap_covers_nested_module_and_impl () =
+  rejects "cap nested module" cap_nested_src
+    "`Dsp.Inner.spread` is in `cap no_alloc` module `Dsp` but allocates";
+  rejects "cap impl method" cap_nested_src
+    "`impl Mix(Sample).mix` is in `cap no_alloc` module `Dsp` but allocates"
+
+(* An explicit per-function form inside the module wins: the helper opts out
+   visibly, as a warning, and the build succeeds. *)
+let cap_warn_src = replace_first cap_tuple_src
+    ~sub:"  fn make_pair" ~by:"  @[no_alloc(warn)]\n  fn make_pair"
+
+let test_cap_explicit_warn_opts_out () =
+  let (rc, out) = compile cap_warn_src in
+  if rc <> 0 then Alcotest.failf "warn opt-out should build:\n%s" out;
+  Alcotest.(check bool) "warning, not error" true
+    (contains "-- WARNING --" out
+     && contains "`Pair.make_pair` is marked @[no_alloc] but allocates" out
+     && not (contains "-- ERROR --" out))
+
+let test_cap_interpreter_hints_once () =
+  let (rc, out) = run_cli ~args:"" cap_tuple_src in
+  Alcotest.(check int) "interpreter runs the program" 0 rc;
+  Alcotest.(check bool) "program output" true (contains "3" out);
+  Alcotest.(check int) "exactly one hint" 1 (count_substring "not when interpreting" out)
+
+(* `march check` (the subcommand) judges it too.  It wraps each checked file
+   in a module named after the file's own, so names come out qualified by it. *)
+let test_march_check_subcommand_judges_cap () =
+  let (rc, out) = run_cli ~args:"check" cap_tuple_src in
+  Alcotest.(check int) "march check rc" 1 rc;
+  Alcotest.(check bool) "names the cap" true
+    (contains "is in `cap no_alloc` module `Main.Pair` but allocates" out)
+
+(* A program the compiled backend cannot lower (the interpreter-only
+   supervisor DSL) is not rejected by --check: its contract is reported as
+   unchecked. *)
+let unlowerable_src = {|mod WorkerDsl do
+  needs IO.Console
+  actor Counter do
+    state { n : Int }
+    init  { n: 0 }
+    on Inc() do { n: state.n + 1 } end
+  end
+  @[no_alloc]
+  fn add(a : Int, b : Int) : Int do a + b end
+  fn main(_c : Cap(IO.Console)) do
+    let _spec = worker(Counter)
+    println(int_to_string(add(1, 2)))
+  end
+end|}
+
+let test_check_unlowerable_warns_unchecked () =
+  let (rc, out) = check_cli unlowerable_src in
+  Alcotest.(check int) "--check accepts" 0 rc;
+  Alcotest.(check bool) "unchecked warning" true
+    (contains "-- WARNING --" out
+     && contains "`add` is under @[no_alloc], but its allocation contract was not checked" out)
+
+let cap_tests = [
+  Alcotest.test_case "collect: cap marks the module"         `Quick test_collect_cap_marks_module;
+  Alcotest.test_case "cap: allocating callee rejected"       `Quick test_cap_rejects_allocating_callee;
+  Alcotest.test_case "cap: reused constructor accepted"      `Quick test_cap_accepts_reused_ctor;
+  Alcotest.test_case "cap: tuple rejected"                   `Quick test_cap_rejects_tuple;
+  Alcotest.test_case "cap: arithmetic accepted"              `Quick test_cap_accepts_arithmetic;
+  Alcotest.test_case "cap: nested module and impl covered"   `Quick test_cap_covers_nested_module_and_impl;
+  Alcotest.test_case "cap: explicit warn opts out"           `Quick test_cap_explicit_warn_opts_out;
+  Alcotest.test_case "cap: interpreter hints once"           `Quick test_cap_interpreter_hints_once;
+  Alcotest.test_case "cap: march check judges it"            `Quick test_march_check_subcommand_judges_cap;
+  Alcotest.test_case "--check: unlowerable is unchecked"     `Quick test_check_unlowerable_warns_unchecked;
+]
+let tests = tests @ cap_tests

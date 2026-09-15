@@ -13,6 +13,7 @@
    march_errors
    march_eval
    march_jit
+   march_tir
    march_modules
    march_cas
    march_resolver))
