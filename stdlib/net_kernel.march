@@ -74,6 +74,27 @@ mod NetKernel do
     end
   end
 
+  -- Read exactly one frame and not a byte more: the 4-byte prefix, then
+  -- exactly the body. For the handshake, where the frames that follow
+  -- belong to whoever the connection is handed to. `recv_frame` reads in
+  -- chunks and returns the over-read as a leftover the caller must carry;
+  -- the handshake used it and DROPPED that leftover, so a peer that
+  -- finished its side of the handshake and immediately wrote (the
+  -- control/data split's data stream) lost its first bytes whenever they
+  -- landed in the same recv() as the proof -- 2 runs in 20 under load,
+  -- never unloaded (control_channel_loopback, 2026-09-14).
+  fn recv_frame_exact(fd : Int) : Result(List(Int), String) do
+    match tcp_recv_exact(fd, 4) do
+      Err(e) -> Err("net-kernel: " ++ e)
+      Ok(hdr) ->
+        let hb = Bytes.to_list(hdr)
+        match tcp_recv_exact(fd, NetFrame.body_length(hb)) do
+          Err(e) -> Err("net-kernel: " ++ e)
+          Ok(body) -> Ok(Bytes.to_list(body))
+        end
+    end
+  end
+
   -- ── symmetric authenticated handshake ──────────────────────────────────────
   -- Both peers run the same sequence: send hello, recv hello, send proof bound
   -- to the peer's nonce, recv proof, authenticate (peer's proof must bind to
@@ -96,28 +117,25 @@ mod NetKernel do
     match send_frame(fd, hello) do
       Err(e) -> Err(e)
       Ok(_) ->
-        match recv_frame(fd, Nil) do
+        -- Exact reads: nothing past the handshake's own two frames is
+        -- consumed, so the connection is handed over with the peer's first
+        -- real frame still unread in the socket (see recv_frame_exact).
+        match recv_frame_exact(fd) do
           Err(e) -> Err(e)
-          Ok(r1) ->
-            match r1 do
-              (hbytes, buf1) ->
-                match Handshake.decode_hello(hbytes) do
+          Ok(hbytes) ->
+            match Handshake.decode_hello(hbytes) do
+              Err(e) -> Err(e)
+              Ok(peer) ->
+                match send_frame(fd, str_to_bytes(ClusterAuth.prove(secret, peer.nonce))) do
                   Err(e) -> Err(e)
-                  Ok(peer) ->
-                    match send_frame(fd, str_to_bytes(ClusterAuth.prove(secret, peer.nonce))) do
+                  Ok(_) ->
+                    match recv_frame_exact(fd) do
                       Err(e) -> Err(e)
-                      Ok(_) ->
-                        match recv_frame(fd, buf1) do
+                      Ok(pbytes) ->
+                        match Handshake.authenticate(secret, my_nonce, peer,
+                                                     bytes_to_str(pbytes)) do
                           Err(e) -> Err(e)
-                          Ok(r2) ->
-                            match r2 do
-                              (pbytes, _buf2) ->
-                                match Handshake.authenticate(secret, my_nonce, peer,
-                                                             bytes_to_str(pbytes)) do
-                                  Err(e) -> Err(e)
-                                  Ok(id) -> Ok((id, peer.role))
-                                end
-                            end
+                          Ok(id) -> Ok((id, peer.role))
                         end
                     end
                 end
