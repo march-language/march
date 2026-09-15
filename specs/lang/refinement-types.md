@@ -1389,10 +1389,13 @@ renders its model as a set literal: `Set.insert() can return {4}`,
   variable, so a contract proved by walking `Cons` cells (`elts(append(xs,
   ys)) == union(elts(xs), elts(ys))` from `append`'s body) is skipped. A list
   contract over an `Int` measure keeps the Tier 2 induction path it always had.
-- **Mixed element sorts skip.** `member(3, elts(_))` against a
-  `List(String)` is a sort conflict and is skipped, never reported. A clash
-  that only a *fact* brings in (a guard, a parameter's promise) drops that
-  fact instead, so the call is still checked without it.
+- **Mixed element types are an error only when both are declared.**
+  `member(3, elts(_))` against a `List(String)` is reported at the predicate
+  (see above). A clash the declared types cannot show, such as an unannotated
+  operand or a type variable instantiated differently at a call, is a sort
+  conflict and is skipped, never reported. A clash that only a *fact* brings in
+  (a guard, a parameter's promise) drops that fact instead, so the call is
+  still checked without it.
 - **The vocabulary names are reserved in predicates, and only there.** Inside
   `{...}`, `elts`, `keys`, `member`, `union`, `inter`, `diff`, `subset`,
   `singleton` and `empty` always mean the set operations; a `@[measure]` may
