@@ -3,7 +3,7 @@
 **Closed as a design record 2026-09-14.** Steps 1 and 2 shipped (`PeerReader`
 #459; the control/data split #465, plus linear `recv_frame` and the
 handshake exact-read fix #466). Steps 3 and 4 are their own items now:
-[[2026-09-14-credit-based-flow-control]] and
+[[2026-09-15-credit-based-flow-control]] and
 [[2026-09-14-monitor-fire-at-least-once]].
 
 

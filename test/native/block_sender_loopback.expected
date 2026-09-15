@@ -1,0 +1,5 @@
+node-a: two frames admitted: true
+node-a: two more queued behind the credit line: true
+node-a: fifth admitted by blocking: true
+node-a: blocked until credit (>= 150 ms): true
+node-b: consumed 5 frames

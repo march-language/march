@@ -1,4 +1,5 @@
--- `Node.send(peer, to, msg)`: the typed remote send, end to end, both
+-- `Node.send(peer, to, msg)` (and `Node.enqueue` through a NodeQueue): the
+-- typed remote send, end to end, both
 -- backends (specs/todos/2026-09-14-typed-node-send-wrapper.md).
 --
 -- The message types live in a NESTED module and derive Json. The sender
@@ -64,7 +65,7 @@ mod TypedSendLoopback do
             None -> Nil
           end
           Vault.set(seen, "lines", Cons(line, prior))
-          Ok(d.seq < 3)
+          Ok(d.seq < 4)
         Err(e) -> Err(e)
       end
     else
@@ -97,6 +98,14 @@ mod TypedSendLoopback do
       Ok(seq) -> "sent seq=" ++ int_to_string(seq)
       Err(NodeSend.NoConnection) -> "no connection"
       Err(NodeSend.Refused(_, why)) -> "refused: " ++ why
+    end
+  end
+
+  pfn show_queued(r : Result(Int, NodeQueue.EnqueueError)) : String do
+    match r do
+      Ok(seq) -> "queued seq=" ++ int_to_string(seq)
+      Err(NodeQueue.Backpressure) -> "backpressure"
+      Err(NodeQueue.NoConnection) -> "no connection"
     end
   end
 
@@ -133,6 +142,11 @@ mod TypedSendLoopback do
     println("node-a: " ++ show_sent(Node.send(peer, target, ping)))
     println("node-a: " ++ show_sent(Node.send(peer, target, Msgs.Hot(99))))
     println("node-a: " ++ show_sent(Node.send(peer, target, Msgs.Cold)))
+    -- The fourth through a NodeQueue on the same connection: the same
+    -- rewrite (`Node.enqueue` -> `enqueue_tagged`), admitted under DropNew and
+    -- written by the queue's writer within the initial credit.
+    let q = NodeQueue.start(fd, 4096)
+    println("node-a: " ++ show_queued(Node.enqueue(q, target, Msgs.Hot(7), NodeQueue.DropNew)))
     let _ = task_await(srv)
     tcp_close(fd)
     match Vault.get(seen, "lines") do

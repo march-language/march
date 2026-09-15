@@ -1,0 +1,118 @@
+-- Two-node harness, scenario "monitor_reconnect": node-a (the watcher).
+--
+-- Connection 1: read node-b's Hello, register a monitor on the Target
+-- (MONITOR_REQ), ask for the kill, then CLOSE the connection without reading
+-- -- a dropped watcher connection between the death and the ack, the case the
+-- at-least-once contract exists for. Connection 2: the pending fire arrives
+-- here; deliver exactly one Down to the Watcher, ack it, close.
+mod MonitorReconnectA do
+  needs IO.Console
+  needs IO.NetConnect
+  needs IO.Spawn
+  needs IO.Mut
+  needs IO.Process
+
+  actor Watcher do
+    state { downs : Int, last : String }
+    init  { downs: 0, last: "" }
+    on RemoteDown(_target : Int, reason : String) do
+      { downs: state.downs + 1, last: reason }
+    end
+  end
+
+  pfn reason_text(r : DistLink.DownReason) : String do
+    match r do
+      DistLink.Normal -> "Normal"
+      DistLink.Killed -> "Killed"
+      DistLink.Crash(m) -> "Crash(" ++ m ++ ")"
+      DistLink.NodeDown -> "NodeDown"
+    end
+  end
+
+  pfn sleep_100ms() do
+    let _ = Process.run("sleep", Cons("0.1", Nil))
+    ()
+  end
+
+  pfn connect_with_retry(host : String, port : Int, attempts_left : Int) : Result(Int, Socket.SocketError) do
+    match Socket.connect(host, port) do
+      Ok(fd) -> Ok(fd)
+      Err(e) ->
+        if attempts_left <= 1 do
+          Err(e)
+        else
+          sleep_100ms()
+          connect_with_retry(host, port, attempts_left - 1)
+        end
+    end
+  end
+
+  pfn dial(port : Int) : Int do
+    match connect_with_retry("127.0.0.1", port, 100) do
+      Ok(fd) -> fd
+      Err(e) -> panic("connect: " ++ Socket.error_message(e))
+    end
+  end
+
+  pfn read_hello(fd : Int) : Pid do
+    match NetKernel.recv_frame(fd, Nil) do
+      Err(e) -> panic("hello: " ++ e)
+      Ok((frame, _)) ->
+        match NodeSend.decode_msg(frame) do
+          Ok(d) ->
+            match GlobalPid.decode(d.payload) do
+              Ok(p) -> p
+              Err(e) -> panic("hello pid: " ++ e)
+            end
+          Err(e) -> panic("hello frame: " ++ e)
+        end
+    end
+  end
+
+  -- Connection 2: deliver a fire once per target (dedupe), ack every copy.
+  pfn on_fire(fd : Int, watcher, seen, tag : Int, frame : List(Int)) : Result(Bool, String) do
+    if tag == 8 do
+      match DistLink.decode_fire(frame) do
+        Ok((target_pid, reason)) ->
+          let copies = Vault.incr(seen, "t" ++ int_to_string(target_pid), 1)
+          if copies == 1 do
+            println("node-a: Down for Pid(" ++ int_to_string(target_pid) ++ ") reason=" ++ reason_text(reason) ++ " after reconnect")
+            let _ = send(watcher, RemoteDown(target_pid, reason_text(reason)))
+            ()
+          else
+            println("node-a: duplicate fire deduped")
+          end
+          let _ = NetKernel.send_frame(fd, DistLink.encode_ack(target_pid, pid_to_int(watcher)))
+          Ok(false)
+        Err(e) -> Err(e)
+      end
+    else
+      Err("unexpected tag " ++ int_to_string(tag))
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_spawn : Cap(IO.Spawn), _cap_mut : Cap(IO.Mut), _cap_process : Cap(IO.Process)) do
+    let port = Env.require_int("MARCH_PEER_PORT")
+    let seen = Vault.new("monitor_reconnect_seen")
+    let watcher = spawn(Watcher)
+    let fd1 = dial(port)
+    let target = read_hello(fd1)
+    println("node-a: monitoring node-b's Pid(" ++ int_to_string(target.local_pid) ++ ")")
+    let _ = NetKernel.send_frame(fd1, DistLink.encode_req("node-a", pid_to_int(watcher), target.local_pid))
+    let _ = NodeSend.cast(fd1, 1, target, "MonitorReconnect.Kill", Nil)
+    -- The fault: drop the connection without reading the fire.
+    tcp_close(fd1)
+    println("node-a: dropped connection 1 before reading the fire")
+    let fd2 = dial(port)
+    match PeerReader.serve(fd2, Nil, fn (tag, frame) -> on_fire(fd2, watcher, seen, tag, frame)) do
+      Ok(_) -> ()
+      Err(e) -> println("node-a: reader error: " ++ e)
+    end
+    tcp_close(fd2)
+    run_until_idle()
+    match get_actor_field(watcher, "downs") do
+      Some(n) -> println("node-a: watcher saw " ++ int_to_string(n) ++ " Down(s)")
+      None -> println("node-a: watcher gone")
+    end
+  end
+end
