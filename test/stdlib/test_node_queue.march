@@ -1,0 +1,49 @@
+mod TestNodeQueue do
+
+  pfn xs(n : Int, acc : List(Int)) : List(Int) do
+    if n <= 0 do acc else xs(n - 1, Cons(120, acc)) end
+  end
+
+  pfn frame40() : Bytes do Bytes.from_list(xs(40, Nil)) end
+
+  describe "NodeQueue CREDIT frames" do
+
+    test "round-trips the consumed total" do
+      assert (NodeQueue.decode_credit(NodeQueue.encode_credit(4096)) == Ok(4096))
+      assert (NodeQueue.decode_credit(NodeQueue.encode_credit(0)) == Ok(0))
+    end
+
+    test "another tag is not a CREDIT" do
+      match NodeQueue.decode_credit(NodeSend.encode_failed(1, "x")) do
+        Err(_) -> assert true
+        Ok(_) -> assert false
+      end
+    end
+
+  end
+
+  describe "NodeQueue budget" do
+
+    test "drop_new refuses the frame that would exceed the budget, synchronously" do
+      let q = NodeQueue.start(-1, 100)
+      assert (NodeQueue.enqueue(q, 1, frame40(), NodeQueue.DropNew) == Ok(()))
+      assert (NodeQueue.enqueue(q, 2, frame40(), NodeQueue.DropNew) == Ok(()))
+      assert (NodeQueue.enqueue(q, 3, frame40(), NodeQueue.DropNew) == Err(NodeQueue.Backpressure))
+    end
+
+    test "a refused frame is not charged to the budget" do
+      let q = NodeQueue.start(-2, 50)
+      assert (NodeQueue.enqueue(q, 1, frame40(), NodeQueue.DropNew) == Ok(()))
+      assert (NodeQueue.enqueue(q, 2, frame40(), NodeQueue.DropNew) == Err(NodeQueue.Backpressure))
+      assert (NodeQueue.depth(q) == 40)
+    end
+
+    test "drop_old admits the frame" do
+      let q = NodeQueue.start(-3, 50)
+      assert (NodeQueue.enqueue(q, 1, frame40(), NodeQueue.DropOld) == Ok(()))
+      assert (NodeQueue.enqueue(q, 2, frame40(), NodeQueue.DropOld) == Ok(()))
+    end
+
+  end
+
+end

@@ -12,6 +12,13 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`NodeQueue`: credit-based flow control for remote sends.** A per-peer
+  outbound queue whose writer actor alone owns the data connection: a frame is
+  written only while the receiver has granted credit for it (`CREDIT` frames on
+  the control connection carry the consumed total), a byte budget bounds what is
+  queued, and at the budget `drop_new` refuses with `Backpressure` at once while
+  `drop_old` evicts the oldest (reported by `take_evicted`). A stalled peer is
+  visible as queue depth, not as a green thread stuck in `write()`.
 - **`mailbox N policy` on an actor declaration** (`mailbox 1000 drop_old`, after
   `init`): the bound `Actor.set_queue_limit` sets per spawn site, declared once
   with the actor and applied at every `spawn`, on both backends. The policy is

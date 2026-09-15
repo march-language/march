@@ -129,3 +129,37 @@ is decision 1 of [[2026-09-14-remote-send-to-a-global-pid]], unchanged.
    delta (simpler; a duplicated CREDIT over-credits). Recommend total: the
    control connection is reliable TCP, but a reconnect (step 4's retry
    table) replays state, and totals survive replay.
+
+
+---
+
+## Shipped so far (2026-09-14): steps 1–2, and `drop_old`
+
+`stdlib/node_queue.march` (`NodeQueue`): `start(fd, budget)` spawns the
+writer actor — a library-owned actor, which works on both backends (the
+constructor question is moot: the library sends to its own actor) — and
+returns the queue handle; `enqueue(q, seq, frame : Bytes, policy)` checks
+the budget synchronously with one atomic `Vault.incr` and hands the frame
+to the writer; `credit(q, total)` applies a CREDIT; `depth(q)`;
+`take_evicted(q)`; receiver side `consumed(control_fd, budget, len)` sends
+`CREDIT(total)` every budget/4 bytes. Wire: tag 11, the consumed TOTAL
+(decision 2: totals, so a replayed CREDIT never over-credits). The writer
+holds `granted = consumed_total + budget`, so at most one budget of bytes
+is ever written-but-unconsumed. `block_sender` is not offered: there is no
+primitive to park a green thread on the queue; callers retry on
+`Backpressure` (its step is still open, as is `NodeSend.enqueue` and the
+`stream` scenario switch).
+
+Two things measured while building it:
+- Inside the writer's helpers a `{ st with … }` update was typed as only its
+  updated fields (a smaller stand-alone program did not reproduce it); the
+  helpers rebuild the record whole. Unisolated; not filed until it is.
+- Queue depth read from `main` differs between backends by design: the
+  compiled writer runs concurrently and may have written already; the
+  interpreter's runs at `run_until_idle`. Tests assert admission/refusal,
+  never depth after an admitted frame.
+
+Witness `test/native/credit_backpressure_loopback`: budget 100, two 44-byte
+frames admitted, the third `Backpressure`; the receiver consumes after a
+"go" on control, its CREDIT re-admits the third; receiver consumed 3.
+Unit tests in `test/stdlib/test_node_queue.march`.
