@@ -9631,12 +9631,10 @@ let test_derive_known_type_ok () =
 
 (* ── cap no_alloc tests ─────────────────────────────────────────────────── *)
 
-(* Helper: run typecheck + no_alloc pass together. *)
-let check_no_alloc src =
-  let m = parse_and_desugar src in
-  let (errors, _) = March_typecheck.Typecheck.check_module m in
-  March_refinecheck.No_alloc.check_module errors m;
-  errors
+(* The allocation verdict itself (formerly the syntactic No_alloc walk, tested
+   here) is now the TIR contract, driven through the cap in
+   test_alloc_contract.ml ("cap no_alloc" cases).  Only the surface-syntax
+   cases stay here. *)
 
 let test_cap_no_alloc_lexes () =
   let lexbuf = Lexing.from_string "cap no_alloc" in
@@ -9652,71 +9650,6 @@ let test_cap_verified_parses () =
     (List.exists
        (function March_ast.Ast.DOpts (opts, _) -> List.mem "verified" opts | _ -> false)
        m.March_ast.Ast.mod_decls)
-
-let test_cap_no_alloc_tuple_error () =
-  let ctx = check_no_alloc {|mod M do
-    cap no_alloc
-    fn f() : Int do
-      let _ = (1, 2)
-      0
-    end
-  end|} in
-  Alcotest.(check bool) "cap no_alloc + tuple: error" true (has_errors ctx)
-
-let test_cap_no_alloc_record_error () =
-  let ctx = check_no_alloc {|mod M do
-    cap no_alloc
-    fn f() : Bool do
-      let _ = {x: 1}
-      true
-    end
-  end|} in
-  Alcotest.(check bool) "cap no_alloc + record: error" true (has_errors ctx)
-
-let test_cap_no_alloc_some_error () =
-  let ctx = check_no_alloc {|mod M do
-    cap no_alloc
-    fn f(x : Int) : Int do
-      let _ = Some(x)
-      x
-    end
-  end|} in
-  Alcotest.(check bool) "cap no_alloc + Some(x): error" true (has_errors ctx)
-
-let test_cap_no_alloc_lambda_error () =
-  let ctx = check_no_alloc {|mod M do
-    cap no_alloc
-    fn f() : Int do
-      let g = fn x -> x
-      g(1)
-    end
-  end|} in
-  Alcotest.(check bool) "cap no_alloc + lambda: error" true (has_errors ctx)
-
-let test_cap_no_alloc_arithmetic_ok () =
-  let ctx = check_no_alloc {|mod M do
-    cap no_alloc
-    fn add(a : Int, b : Int) : Int do a + b end
-  end|} in
-  Alcotest.(check bool) "cap no_alloc + pure arithmetic: no error" false (has_errors ctx)
-
-let test_cap_no_alloc_if_ok () =
-  let ctx = check_no_alloc {|mod M do
-    cap no_alloc
-    fn abs(x : Int) : Int do
-      if x >= 0 do x else 0 - x end
-    end
-  end|} in
-  Alcotest.(check bool) "cap no_alloc + if/match: no error" false (has_errors ctx)
-
-let test_cap_not_set_tuple_ok () =
-  let ctx = check_no_alloc {|mod M do
-    fn f() : Int do
-      let _ = (1, 2)
-      0
-    end
-  end|} in
-  Alcotest.(check bool) "no cap no_alloc + tuple: no error" false (has_errors ctx)
 
 (* ── Record field auto-satisfy tests ───────────────────────────────────── *)
 
@@ -15133,6 +15066,45 @@ let test_nested_or_pattern_exhaustiveness () =
   Alcotest.(check bool) "Some(1 | 2) does not cover Some(_)" true
     warns_nonexhaustive
 
+(* A variant declared in a NESTED module and matched from its parent with
+   module-qualified patterns (`Tree.Leaf(n)`) must be checked against ITS OWN
+   constructors only. [ctors_for_type] gathers constructors by the parent
+   type's BARE name, so a sibling type of the same bare name (`Reg.T`, or
+   stdlib's `CRDT.LWWRegister.T` in a real program) merged into the universe
+   and a fully covered match warned `missing case: Reg(_)`; the local-shadow
+   rule only recognised a type declared by the CURRENT module. *)
+let test_nested_module_same_bare_type_name_exhaustiveness () =
+  let ctx = typecheck {|mod Outer do
+    mod Reg do
+      type T = Reg(Int)
+    end
+    mod Tree do
+      type T = Leaf(Int) | Node(T, T)
+    end
+    fn size(t : Tree.T) : Int do
+      match t do
+        Tree.Leaf(_) -> 1
+        Tree.Node(l, r) -> size(l) + size(r)
+      end
+    end
+    fn first(t : Tree.T) : Int do
+      match t do
+        Tree.Leaf(n) -> n
+      end
+    end
+  end|} in
+  let nonexhaustive_mentioning s =
+    List.exists (fun (d : March_errors.Errors.diagnostic) ->
+        d.severity = March_errors.Errors.Warning
+        && _contains_substr d.message "Non-exhaustive pattern match"
+        && _contains_substr d.message s)
+      ctx.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check bool) "no foreign Reg(_) case demanded" false
+    (nonexhaustive_mentioning "Reg(");
+  Alcotest.(check bool) "genuinely missing Node still warns" true
+    (nonexhaustive_mentioning "Node(")
+
 let test_nested_or_pattern_arm_not_flagged_redundant () =
   let ctx = typecheck {|mod T do
     type P = P(Int, Int)
@@ -15777,6 +15749,8 @@ let compiler_suites =
             test_partial_record_destructure_in_letq;
           Alcotest.test_case "let record destructure unknown field rejected" `Quick
             test_let_record_destructure_unknown_field_rejected;
+          Alcotest.test_case "nested-module type sharing a bare name: no foreign missing case" `Quick
+            test_nested_module_same_bare_type_name_exhaustiveness;
           Alcotest.test_case "record match non-exhaustive is reported" `Quick
             test_record_pattern_non_exhaustive_is_reported;
           Alcotest.test_case "covered record match is silent" `Quick
@@ -16522,13 +16496,6 @@ let compiler_suites =
       ( "cap_no_alloc", [
           Alcotest.test_case "cap no_alloc lexes as CAP_NO_ALLOC token"   `Quick test_cap_no_alloc_lexes;
           Alcotest.test_case "cap verified parses as DOpts [verified]"    `Quick test_cap_verified_parses;
-          Alcotest.test_case "cap no_alloc + tuple: error"                 `Quick test_cap_no_alloc_tuple_error;
-          Alcotest.test_case "cap no_alloc + record: error"                `Quick test_cap_no_alloc_record_error;
-          Alcotest.test_case "cap no_alloc + Some(x): error"              `Quick test_cap_no_alloc_some_error;
-          Alcotest.test_case "cap no_alloc + lambda: error"                `Quick test_cap_no_alloc_lambda_error;
-          Alcotest.test_case "cap no_alloc + pure arithmetic: no error"   `Quick test_cap_no_alloc_arithmetic_ok;
-          Alcotest.test_case "cap no_alloc + if/match: no error"           `Quick test_cap_no_alloc_if_ok;
-          Alcotest.test_case "no cap no_alloc + tuple: no error"           `Quick test_cap_not_set_tuple_ok;
         ] );
       ( "record_auto_satisfy", [
           Alcotest.test_case "matching field auto-satisfies"    `Quick test_record_auto_satisfy_ok;

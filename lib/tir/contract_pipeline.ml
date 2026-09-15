@@ -41,6 +41,7 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
     ?(before_opt = fun _ -> ()) ?(extra_roots = [])
     ?(wasm_island = false) ?(is_js = false) ?(hot_reload = None)
     ?iface_methods ?(decls = []) ~opt ~trmc (tir : Tir.tir_module) : result =
+  let decls = Alloc_contract.resolve_names decls tir in
   (* TRMC eligibility analysis (gated on MARCH_TRMC_REPORT).  Must run here:
      by tir-perceus the stdlib's nested `go` helpers are closures invoked via
      ECallPtr, so self-recursion is no longer syntactically visible. *)
@@ -248,3 +249,39 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   let contract_diags =
     Alloc_contract.check ~decls ~allocating ~retaining ~opt ~trmc ~trmc_eligible tir in
   { pre_opt; final = tir; vectorize_diags; contract_diags; allocating; retaining; k_table }
+
+(** The allocation contracts, judged without emitting anything: what `march
+    --check` and `march check` run when the program carries an obligation
+    (`cap no_alloc` or a function-level @[no_alloc] form).  Lowers [m] (the
+    whole program, stdlib included, as the build lowers it) and runs the SAME
+    pipeline the build runs, so the verdict is the build's — in particular
+    with the optimiser on unless the caller passed --no-opt, or a constructor
+    Perceus reuses in place would be rejected here and accepted compiled.
+
+    [user_decls] are the obligations to report on.  When the program has
+    none this costs nothing.  When lowering or a pass raises (a construct the
+    compiled backend does not support), each obligation gets a
+    [no_alloc_unchecked] warning instead of a rejection: the check could not
+    run, which is not evidence the contract is broken. *)
+let check_contracts ?type_map ~opt ~trmc ~(user_decls : Alloc_contract.decl_info list)
+    (m : March_ast.Ast.module_) : March_errors.Errors.diagnostic list =
+  if not (List.exists Alloc_contract.is_obligation user_decls) then []
+  else
+    match
+      (try
+         let tir = Lower.lower_module ?type_map m in
+         let iface_methods = Lower.get_iface_methods () in
+         let pipe = run ~iface_methods ~decls:(Alloc_contract.collect m) ~opt ~trmc tir in
+         Ok pipe.contract_diags
+       with
+       | (Out_of_memory | Stack_overflow) as e -> raise e
+       | Failure msg -> Error msg
+       | e -> Error (Printexc.to_string e))
+    with
+    | Ok diags -> diags
+    | Error why ->
+      (* Keep the reason to one line: a positioned lowering rejection is
+         already "file:line:col: error: ...". *)
+      let why = match String.index_opt why '\n' with
+        | Some i -> String.sub why 0 i | None -> why in
+      Alloc_contract.unchecked_warnings ~why user_decls

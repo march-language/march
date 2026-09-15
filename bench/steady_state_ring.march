@@ -20,8 +20,8 @@ mod SteadyStateRing do
   needs IO.Process
 
   -- ── Hot request-handling kernel (compiler-enforced zero allocation) ─────
-  -- cap no_alloc statically rejects the four allocating AST shapes
-  -- (non-empty tuple / record / constructor application / lambda).
+  -- cap no_alloc puts every function below under a hard @[no_alloc] contract,
+  -- judged on the compiled TIR (transitively over callees) by forge build and --check.
   mod Hot do
     cap no_alloc
 

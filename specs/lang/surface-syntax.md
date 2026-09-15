@@ -756,9 +756,11 @@ closure or an `extern`, which fails unless the enclosing function is
 `assume`. `fn` and `pfn` only — on an actor or with any other payload it is a
 parse error. A `doc` string comes FIRST, then the attributes, then the
 declaration (`doc "..."` / `@[no_alloc]` / `fn f() ...`); the reverse order is
-a parse error. The interpreter and `march --check` ignore the attribute. See
-[memory model](memory-model.md) for how to make a function pass, and
-[capabilities](capabilities.md) for how this differs from `cap no_alloc`.
+a parse error. `march --check` and `march check` judge it too (they lower the program when
+it carries a contract); the interpreter, `--jit` and the REPL cannot, and
+print one `no_alloc_unchecked` hint. `cap no_alloc` on a module applies the
+hard form to every function in it. See [memory model](memory-model.md) for
+how to make a function pass, and [capabilities](capabilities.md) for the cap.
 
 `transient` asks a different question: not "did it allocate" but "does anything
 it allocated outlive the call". A function fails it when it returns something

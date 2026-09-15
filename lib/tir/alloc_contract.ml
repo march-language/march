@@ -30,25 +30,127 @@ type decl_info = {
   d_form      : form option;
   d_name_span : March_ast.Ast.span;     (** the identifier *)
   d_decl_span : March_ast.Ast.span;     (** the whole [DFn] *)
+  d_cap       : string option;
+  (** [Some m] when the obligation comes from `cap no_alloc` on module [m]
+      rather than an attribute on the function itself — the diagnostic
+      names the cap then. *)
+  d_alt_name  : string option;
+  (** An impl method's module-qualified spelling.  [Lower] qualifies an impl
+      symbol by its declaring module only when the type's short name
+      collides, which the AST alone cannot decide; [resolve_names] picks the
+      spelling the lowered module actually contains. *)
 }
 
+(** True for a form that puts an obligation on the function ([Assume] only
+    asserts one, so there is nothing to check). *)
+let is_obligation (d : decl_info) : bool =
+  match d.d_form with
+  | Some (Hard | Warn | Transient) -> true
+  | Some Assume | None -> false
+
+let has_cap_no_alloc (decls : March_ast.Ast.decl list) : March_ast.Ast.span option =
+  List.find_map (function
+      | March_ast.Ast.DOpts (opts, sp) when List.mem "no_alloc" opts -> Some sp
+      | _ -> None) decls
+
 (* Same walk as [Vectorize_mark.collect_attrs]: the module-qualified name is
-   exactly what [Lower] gives the TIR fn_def before Mono mangles it. *)
-let rec collect_prefixed (prefix : string) (decls : March_ast.Ast.decl list)
-  : decl_info list =
+   exactly what [Lower] gives the TIR fn_def before Mono mangles it.
+
+   [cap] is the innermost enclosing `cap no_alloc`: the module's display name
+   and the file the `cap` line is in.  A function is covered when its name is
+   spelled in that same file.  That scoping matters for the entry module,
+   whose declarations the driver splices into one top-level list together
+   with the prelude and every resolved import — without it, `cap no_alloc`
+   at the top of the entry file would claim the prelude too — and it also
+   leaves out derive-generated impl methods (their name spans are synthetic,
+   file "<none>"), which the user did not write and cannot annotate. *)
+let rec collect_prefixed ?(cap : (string * string) option) (prefix : string)
+    (decls : March_ast.Ast.decl list) : decl_info list =
+  let module A = March_ast.Ast in
+  let cap =
+    match has_cap_no_alloc decls with
+    | Some sp ->
+      let m = if prefix = "" then "" else String.sub prefix 0 (String.length prefix - 1) in
+      Some (m, sp.A.file)
+    | None -> cap
+  in
+  (* An explicit form always wins; otherwise the cap makes it Hard. *)
+  let form_and_cap (attrs : string list) (name_span : A.span) =
+    match form_of_attrs attrs, cap with
+    | (Some _ as f), _ -> (f, None)
+    | None, Some (m, file) when name_span.A.file = file -> (Some Hard, Some m)
+    | None, _ -> (None, None)
+  in
   List.concat_map (function
-      | March_ast.Ast.DFn (def, span) ->
-        [ { d_name = prefix ^ def.March_ast.Ast.fn_name.March_ast.Ast.txt;
-            d_form = form_of_attrs def.March_ast.Ast.fn_attrs;
-            d_name_span = def.March_ast.Ast.fn_name.March_ast.Ast.span;
-            d_decl_span = span } ]
-      | March_ast.Ast.DMod (nm, _, inner, _) ->
-        collect_prefixed (prefix ^ nm.March_ast.Ast.txt ^ ".") inner
+      | A.DFn (def, span) ->
+        let (d_form, d_cap) =
+          form_and_cap def.A.fn_attrs def.A.fn_name.A.span in
+        [ { d_name = prefix ^ def.A.fn_name.A.txt;
+            d_form; d_cap;
+            d_name_span = def.A.fn_name.A.span;
+            d_decl_span = span; d_alt_name = None } ]
+      | A.DMod (nm, _, inner, _) ->
+        collect_prefixed ?cap (prefix ^ nm.A.txt ^ ".") inner
+      | A.DImpl (idef, span) ->
+        (* Mirrors [Lower]'s impl symbol: "Iface$Type.method", with Type
+           qualified by the declaring module when it collides. *)
+        let type_name = match idef.A.impl_ty with
+          | A.TyCon ({ A.txt = n; _ }, _) -> n
+          | A.TyTuple tys -> Printf.sprintf "$Tuple%d" (List.length tys)
+          | A.TyRecord _ -> "$Record"
+          | _ -> "$Unknown"
+        in
+        let iface = idef.A.impl_iface.A.txt in
+        List.filter_map (fun ((mname : A.name), (mdef : A.fn_def)) ->
+            match form_and_cap mdef.A.fn_attrs mname.A.span with
+            | (None, _) -> None  (* uncovered impl methods were never collected *)
+            | (d_form, d_cap) ->
+              Some { d_name = Printf.sprintf "%s$%s.%s" iface type_name mname.A.txt;
+                     d_alt_name =
+                       (if prefix = "" then None
+                        else Some (Printf.sprintf "%s$%s%s.%s"
+                                     iface prefix type_name mname.A.txt));
+                     d_form; d_cap;
+                     d_name_span = mname.A.span; d_decl_span = span })
+          idef.A.impl_methods
+      | A.DActor (_, aname, adef, span) ->
+        (* A handler lowers to the BARE "Actor_Msg" whatever module declares
+           it (see [Lower]'s DActor arm).  Handlers carry no attributes, so
+           only the cap can cover one. *)
+        List.filter_map (fun (h : A.actor_handler) ->
+            match form_and_cap [] h.A.ah_msg.A.span with
+            | (None, _) -> None
+            | (d_form, d_cap) ->
+              Some { d_name = aname.A.txt ^ "_" ^ h.A.ah_msg.A.txt;
+                     d_alt_name = None; d_form; d_cap;
+                     d_name_span = h.A.ah_msg.A.span; d_decl_span = span })
+          adef.A.actor_handlers
       | _ -> [])
     decls
 
 let collect (m : March_ast.Ast.module_) : decl_info list =
-  collect_prefixed "" m.March_ast.Ast.mod_decls
+  let top = m.March_ast.Ast.mod_name.March_ast.Ast.txt in
+  (* The top level carries no prefix, but a `cap no_alloc` there still has a
+     module name to report. *)
+  List.map (fun d ->
+      match d.d_cap with
+      | Some "" -> { d with d_cap = Some top }
+      | _ -> d)
+    (collect_prefixed "" m.March_ast.Ast.mod_decls)
+
+(** Swap an impl method's name for its module-qualified spelling when that is
+    the one [m] (the module as lowered, before Mono) actually contains. *)
+let resolve_names (decls : decl_info list) (m : Tir.tir_module) : decl_info list =
+  if not (List.exists (fun d -> d.d_alt_name <> None) decls) then decls
+  else begin
+    let names = Hashtbl.create 256 in
+    List.iter (fun (fn : Tir.fn_def) -> Hashtbl.replace names fn.Tir.fn_name ())
+      m.Tir.tm_fns;
+    List.map (fun d ->
+        match d.d_alt_name with
+        | Some q when Hashtbl.mem names q -> { d with d_name = q }
+        | _ -> d) decls
+  end
 
 (* ── What counts as an allocation ─────────────────────────────────────── *)
 
@@ -809,6 +911,17 @@ let failure_message ~head ~name ~suffix (reason : reason) : string =
   | r ->
     Printf.sprintf "%s but allocates.%s\n  In `%s`: %s." head suffix name (describe r)
 
+(* How a contract's function is named to the user.  An impl method's TIR
+   symbol ("Iface$Type.method", possibly "Iface$Mod.Type.method") reads as
+   "impl Iface(Type).method"; everything else is already its source name. *)
+let source_name (n : string) : string =
+  match String.index_opt n '$', String.rindex_opt n '.' with
+  | Some i, Some j when i < j && i > 0 ->
+    Printf.sprintf "impl %s(%s).%s" (String.sub n 0 i)
+      (String.sub n (i + 1) (j - i - 1))
+      (String.sub n (j + 1) (String.length n - j - 1))
+  | _ -> n
+
 (* Fires only when TRMC is OFF, which since 2026-09-09 means the user passed
    --no-trmc (or MARCH_NO_TRMC=1). The note used to read "compiling with --trmc
    turns the constructor into an in-place write", which was correct while the
@@ -922,7 +1035,7 @@ let check ~decls ~(allocating : (string, reason) Hashtbl.t)
       | Some ({ d_form = Some ((Hard | Warn) as form); _ } as d), Some reason
         when not (Hashtbl.mem seen d.d_name) ->
         Hashtbl.replace seen d.d_name ();
-        let name = d.d_name in
+        let name = source_name d.d_name in
         let severity, suffix =
           match form, opt with
           | Warn, _ -> (March_errors.Errors.Warning, "")
@@ -935,10 +1048,12 @@ let check ~decls ~(allocating : (string, reason) Hashtbl.t)
         in
         let notes =
           match reason with
-          | Ctor _ when (not trmc) && trmc_eligible name -> [ trmc_note ]
+          | Ctor _ when (not trmc) && trmc_eligible d.d_name -> [ trmc_note ]
           | _ -> []
         in
-        let head = Printf.sprintf "`%s` is marked @[no_alloc]" name in
+        let head = match d.d_cap with
+          | Some m -> Printf.sprintf "`%s` is in `cap no_alloc` module `%s`" name m
+          | None -> Printf.sprintf "`%s` is marked @[no_alloc]" name in
         Some (diag ~severity ~span:d.d_name_span ~code:"no_alloc" ~notes
                 (failure_message ~head ~name ~suffix reason))
       | _ -> None) m.Tir.tm_fns
@@ -967,3 +1082,38 @@ let check ~decls ~(allocating : (string, reason) Hashtbl.t)
          Some (diag ~severity:March_errors.Errors.Error ~span:d.d_name_span
                  ~code:"no_alloc_transient" ~notes msg)
        | _ -> None) m.Tir.tm_fns)
+
+(* ── Where the contract is not judged ──────────────────────────────────── *)
+
+let unchecked_code = "no_alloc_unchecked"
+
+(** One warning per obligation when the check paths could not lower the
+    program (an interpreter-only construct, say): the guarantee is unknown,
+    which is not the same as broken. *)
+let unchecked_warnings ~(why : string) (decls : decl_info list)
+  : March_errors.Errors.diagnostic list =
+  List.filter_map (fun d ->
+      if not (is_obligation d) then None
+      else
+        let what = match d.d_cap with
+          | Some m -> Printf.sprintf "`cap no_alloc` module `%s`" m
+          | None -> "@[no_alloc]" in
+        Some (diag ~severity:March_errors.Errors.Warning ~span:d.d_name_span
+                ~code:unchecked_code
+                (Printf.sprintf
+                   "`%s` is under %s, but its allocation contract was not checked: \
+                    this program could not be lowered to TIR (%s)."
+                   (source_name d.d_name) what why)))
+    decls
+
+(** The single hint the interpreter, `--jit`, the REPL and `march test` give
+    for a program with any obligation: they never lower, so they cannot
+    judge it, and they say so instead of pretending to. *)
+let interpreter_hint (decls : decl_info list) : March_errors.Errors.diagnostic option =
+  match List.find_opt is_obligation decls with
+  | None -> None
+  | Some d ->
+    Some (diag ~severity:March_errors.Errors.Hint ~span:d.d_name_span
+            ~code:unchecked_code
+            "allocation guarantees (`cap no_alloc`, `@[no_alloc]`) are checked by \
+             `march --check`, `forge build` and the editor, not when interpreting.")

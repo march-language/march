@@ -321,6 +321,13 @@ git log is authoritative for exact commits.
   `Nd(Lf(a), Lf(b))`, `Nd(Nd(_, _), Lf(b))`, `Nd(_, Nd(_, _))`, `Lf(n)` warned
   `missing case: Nd(_, Lf(0))`; the same happened with tuples like
   `(true, _)`, `(_, true)`, `(false, false)`. A genuinely missing arm still warns.
+- **Module-qualified constructor patterns whose module name is also a stdlib
+  type name now match when compiled.** With a nested `mod Tree do type T =
+  Leaf(Int) | Node(T, T) end`, a match on `Tree.Leaf(n)` resolved to the stdlib
+  `OrderedMap.Tree`/`SortedSet.Tree` constructors, so the compiled binary
+  panicked with "non-exhaustive pattern match" while the interpreter was
+  correct. The same program no longer warns about a missing `LWWRegister` case
+  (a stdlib type that shares the bare name `T`).
 - **Refinement violations on `Array` calls name `Array.length`.** The
   message and its suggested guard spelled the private measure `pvec_length`,
   which does not compile in user code; a literal negative index also showed
@@ -328,6 +335,14 @@ git log is authoritative for exact commits.
 - `stdlib/dist_supervisor.march` failed a standalone `--check` ("Constructor `Normal` is
   ambiguous between multiple modules"): its restart decision matched `DistLink.DownReason`
   with bare arms that also name the local monitor's constructors. Qualified, and guarded.
+- **Refinement checks no longer skip a caller value because it is not an
+  `Int`.** A value the callee did not pin to a scalar sort was declared `Int`
+  in the solver query, so a `String` element (`need(["a", s])` against
+  `member("a", elts(_))`) or an `Option` in a guard (`if o == p do unwrap(o)`)
+  met its real sort in the same query and the obligation was silently skipped
+  as `sort-conflict`. Parameters, `let` binders, pattern variables, refined
+  binders and guard variables now take the type the typechecker gave them, so
+  these obligations are proved or reported.
 - `derive` inside a nested `mod` was a silent no-op: the derive was never expanded, so
   `derive Json for T` in `mod Inner` generated nothing and the first `from_json` to `T`
   failed at run time. Nested derives (and `satisfy`) now expand at every level.
@@ -602,8 +617,8 @@ git log is authoritative for exact commits.
   annotation and builtin signature denotes the canonical bare name, so the two
   never unified ("expected `FileError` but got `File.FileError`") and a bare
   `NotFound(p)` resolved to the DNS constructor of the same name. Compiled
-  `to_string` of such an error still renders `#<tag:N>`; that rendering gap is
-  tracked separately.
+  `to_string` of such an error rendered `#<tag:N>` for a second reason, fixed
+  in the entry below.
 - **The interpreter's `file_rename` error now names the path**, as the
   compiled runtime and every other file builtin already did.
 - **A record type declared in one typecheck no longer changes a later,
@@ -664,9 +679,36 @@ git log is authoritative for exact commits.
   published digest as provenance, and a `[lockfile] version = 2` marker lets a
   reader tell an old file's registry `hash` from a new one's. Older lockfiles
   are still read.
+- **Compiled `to_string` of a file error names its constructor.** `file_read`
+  on a missing path printed `#<tag:0>` compiled where the interpreter printed
+  `NotFound("/path")`, and the same for the twelve other `file_*` / `dir_*`
+  builtins. `mod File`'s `ptype FileError` lowers to the TIR name
+  `File.FileError`, but every builtin signature denotes it by the canonical
+  bare `FileError`, so the constructor-name descriptor was looked up under a
+  name it was not keyed by and the value fell through to the untyped
+  renderer. The runtime now stamps the error cell it builds with that type's
+  header id, so the renderer identifies the value from the cell itself rather
+  than from a name it could not resolve. The `List` and `Result` cells the
+  runtime builds are stamped the same way, so a `file_read` error reaching a
+  renderer through an erased slot now prints
+  `Err(NotFound("/path"))` instead of `#<tag:1>`. The `file_*` / `dir_*`
+  regression table is tightened from "either form" to byte equality with the
+  interpreter.
 
 ### Changed
 
+- **`cap no_alloc` and `@[no_alloc]` are one check.** `cap no_alloc` now puts
+  every function in the module (nested modules, impl methods and actor
+  handlers included) under a hard `@[no_alloc]` contract, judged on the
+  compiled program; the syntactic walk that used to answer for the cap is
+  gone. A module whose function calls an allocating helper is now rejected,
+  and one that builds a constructor the compiler reuses in place is now
+  accepted. An explicit `@[no_alloc(warn)]` (or `assume`/`transient`) on a
+  function inside the module overrides the cap. `march --check` and
+  `march check` now report both forms, lowering the program when it contains
+  either (about 0.9 s extra on a small file, nothing for programs without
+  them); the interpreter, `--jit`, the REPL and `march test` print one
+  `no_alloc_unchecked` hint instead of judging.
 - **`cap no_panic` accepts a guarded `Array.get`/`set`/`pop`.** They were
   banned outright; they now join `List.nth` and friends in the proof-checked
   set, so a call whose bounds guard proves the contract is accepted, and an
