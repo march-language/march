@@ -42,18 +42,34 @@ mod NetKernel do
 
   -- Read one complete frame off [fd], starting from already-buffered [buf].
   -- Returns (payload, leftover_bytes); None-from-decode means read more.
+  -- Linear in the frame size: once the 4-byte length prefix is in [buf],
+  -- the rest of the body is read with ONE tcp_recv_exact and appended ONCE.
+  -- The first version appended every 4 KiB chunk to the accumulated list,
+  -- quadratic in the frame size -- a 16 MiB frame was impractical
+  -- (specs/todos/2026-09-14-distributed-plane-flow-control-and-control-channel.md).
+  -- Bytes read past the frame boundary come back as the leftover for the
+  -- next call, as before.
   fn recv_frame(fd : Int, buf : List(Int)) : Result((List(Int), List(Int)), String) do
     match NetFrame.decode(buf) do
       Some(result) -> Ok(result)
       None ->
-        match Socket.recv(fd, 4096) do
-          Err(e) -> Err(Socket.error_message(e))
-          Ok(chunk) ->
-            if String.is_empty(chunk) do
-              Err("net-kernel: connection closed mid-frame")
-            else
-              recv_frame(fd, List.append(buf, str_to_bytes(chunk)))
-            end
+        let have = List.length(buf)
+        if have < 4 do
+          match Socket.recv(fd, 4096) do
+            Err(e) -> Err(Socket.error_message(e))
+            Ok(chunk) ->
+              if String.is_empty(chunk) do
+                Err("net-kernel: connection closed mid-frame")
+              else
+                recv_frame(fd, List.append(buf, str_to_bytes(chunk)))
+              end
+          end
+        else
+          let len = NetFrame.body_length(buf)
+          match tcp_recv_exact(fd, len - (have - 4)) do
+            Err(e) -> Err("net-kernel: " ++ e)
+            Ok(rest) -> recv_frame(fd, List.append(buf, Bytes.to_list(rest)))
+          end
         end
     end
   end

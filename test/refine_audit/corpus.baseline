@@ -244,6 +244,8 @@ native_nested_mod_qualcall: coverage audit (user + stdlib): 90 enforced, 0 inert
 native_nested_mod_qualcall: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_nested_record_field_capture: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced
 native_nested_record_field_capture: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_net_frame_large_loopback: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced
+native_net_frame_large_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_newtype_counter: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced
 native_newtype_counter: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_niche_aggregate_payload_leak_probe: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced

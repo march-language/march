@@ -247,6 +247,10 @@ git log is authoritative for exact commits.
   nothing when unset.
 
 ### Fixed
+- **`NetKernel.recv_frame` is linear in the frame size.** It appended every
+  4 KiB chunk to the accumulated list, quadratic in the frame: a 1 MiB frame
+  took 4.1 s. Once the length prefix is known the rest is read with one
+  `tcp_recv_exact` and appended once (0.3 s), leftover bytes carried as before.
 - **`send` no longer leaks a reference to the actor it sends to.** `send`,
   `kill`, `actor_stop`, `is_alive`, `mailbox_size` and `get_cap` now borrow the
   pid (their runtime implementations only read it), and `self` returns an owned

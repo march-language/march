@@ -149,10 +149,16 @@ control; node-a's two readers timestamp the ping's arrival before the data
 stream's completion (on one connection the ping would sit behind the
 remaining 12 MiB). 5/5 identical runs.
 
-Measured on the way: `NetKernel.recv_frame` accumulates the frame with
+Measured on the way: `NetKernel.recv_frame` accumulated the frame with
 `List.append` per 4 KiB chunk, quadratic in the frame size — a 16 MiB frame
-is impractical through it; the witness streams the body as raw bytes. Credit
-accounting (step 3) should carry frames as `Bytes`, not `List(Int)`.
+was impractical through it, so the witness streams the body as raw bytes.
+**Fixed the same day:** once the 4-byte prefix is in the buffer the rest of
+the body is read with one `tcp_recv_exact` and appended once (linear per
+frame; API unchanged). `test/native/net_frame_large_loopback`: a 1 MiB
+frame in 0.3 s against 4.1 s before, with a small frame arriving in the
+same `recv()` to check the leftover carry. Credit accounting (step 3)
+should still carry frames as `Bytes` rather than `List(Int)`; the list is
+now merely large, not quadratic.
 
 Not yet moved to the control connection: the C runtime's `MONITOR_FIRE`
 write (`march_dist_monitor_fire_pid`) still targets the fd `DistLink`
