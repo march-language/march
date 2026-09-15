@@ -1227,8 +1227,6 @@ let run_test_cmd args =
        typechecker, where the syntactic ban lives, that index does not exist
        yet. *)
     March_refinecheck.Panic_surface_by_proof.check_module errors desugared;
-    (* Allocation checker: flag heap-allocating exprs in `cap no_alloc` modules. *)
-    March_refinecheck.No_alloc.check_module errors desugared;
     (* Cap-infer: emit hints at call sites missing a `needs` declaration. *)
     March_refinecheck.Cap_infer.check_module errors desugared;
     (* A promoted call-site failure (a requirement the enclosing function
@@ -1257,6 +1255,14 @@ let run_test_cmd args =
       ) diags;
       exit 1
     end;
+    (* `cap no_alloc` / @[no_alloc] are judged on lowered TIR, which
+       `march test` never builds: say so (once) rather than stay silent.  This
+       path prints only errors above, so the hint is printed on its own. *)
+    (match March_tir.Alloc_contract.interpreter_hint
+             (March_tir.Alloc_contract.collect desugared) with
+     | Some h when is_user_file h ->
+       Printf.eprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file h)
+     | Some _ | None -> ());
     (* Enable coverage tracking for this file's test run. *)
     if !coverage then begin
       March_coverage.Coverage.reset ();
@@ -1947,8 +1953,6 @@ let compile filename =
     print_refine_suggestions ~filename ~user_files desugared;
   if !refine_suggest_post <> None || !refine_suggest_post_all then
     print_refine_postconditions ~filename ~user_files desugared;
-  (* Allocation checker: flag heap-allocating exprs in `cap no_alloc` modules. *)
-  March_refinecheck.No_alloc.check_module errors desugared;
   (* Cap-infer: emit hints at call sites missing a `needs` declaration. *)
   March_refinecheck.Cap_infer.check_module errors desugared;
   (* A promoted call-site failure (a requirement the enclosing function
@@ -1965,6 +1969,20 @@ let compile filename =
      --check-migration below lazily respawns; its child is reaped by at_exit. *)
   March_refine.Refine.shutdown ();
   stamp "typecheck";
+  (* Allocation contracts (`cap no_alloc` modules and @[no_alloc] functions)
+     are judged on lowered TIR.  --check lowers on demand for them (below);
+     the interpreter and --jit never lower, so they give one
+     [no_alloc_unchecked] hint and run.  [user_only_desugared]: only the
+     user's own obligations count. *)
+  let user_contract_decls =
+    March_tir.Alloc_contract.collect user_only_desugared in
+  let interpreting =
+    not (!dump_tir || !emit_llvm || !do_compile || !dump_phases || !do_check
+         || !check_json || !check_migration || !emit_core_ast_file <> None)
+  in
+  if interpreting then
+    Option.iter (March_errors.Errors.report errors)
+      (March_tir.Alloc_contract.interpreter_hint user_contract_decls);
   (* Print diagnostics sorted by position, filtering stdlib-internal errors.
      "User" means any file loaded as user code: the entry file AND modules
      resolved from the source dir / MARCH_LIB_PATH.  Filtering by entry
@@ -2065,6 +2083,22 @@ let compile filename =
      as a pass.  Warnings do not fail the exit code — consistent with eval and
      compile modes. *)
   else if !do_check then begin
+    (* Allocation contracts: lower and run the build's post-lower pipeline
+       (no emission) when, and only when, the program carries an obligation,
+       so --check gives the answer `forge build` gives.  A lowering failure
+       downgrades to a [no_alloc_unchecked] warning per obligation. *)
+    let contract_diags =
+      List.filter is_user_file
+        (March_tir.Contract_pipeline.check_contracts ~type_map
+           ~opt:!opt_enabled ~trmc:!March_tir.Trmc.enabled
+           ~user_decls:user_contract_decls desugared)
+    in
+    List.iter (fun (d : March_errors.Errors.diagnostic) ->
+        Printf.eprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d)
+      ) contract_diags;
+    if List.exists (fun (d : March_errors.Errors.diagnostic) ->
+        d.severity = March_errors.Errors.Error) contract_diags
+    then exit 1;
     (* Cache successful check result so the next identical-source invocation
        exits immediately without re-running the typecheck pipeline (the early
        CAS hit at the top of this function does `exit 0` printing nothing).
@@ -2081,7 +2115,7 @@ let compile filename =
        print the same diagnostics every run. This does not change WHICH
        diagnostics are emitted — only whether the cache may suppress them. *)
     let printed_user_diag =
-      List.exists is_user_file diags
+      List.exists is_user_file diags || contract_diags <> []
     in
     (match source_cas_state with
      | Some (src_store, src_ch) when not printed_user_diag ->
@@ -3875,7 +3909,7 @@ let run_check_cmd ?(emit_caps = false) files =
   let dummy_span = March_ast.Ast.{
     file = ""; start_line = 0; start_col = 0; end_line = 0; end_col = 0
   } in
-  let errors =
+  let (errors, check_type_map) =
     if no_shadowing then begin
       let seed_env = get_stdlib_tc_env
         ~for_js:(parse_target !target_str = March_tir.Llvm_emit.Js) stdlib_decls in
@@ -3883,10 +3917,10 @@ let run_check_cmd ?(emit_caps = false) files =
         March_ast.Ast.mod_name = { March_ast.Ast.txt = "LibCheck"; span = dummy_span };
         March_ast.Ast.mod_decls = all_decls;
       } in
-      let (errs, _tm, env) =
+      let (errs, tm, env) =
         March_typecheck.Typecheck.check_module_core ~seed_env user_only in
       caps_env := Some env;
-      errs
+      (errs, tm)
     end else begin
       let combined = {
         March_ast.Ast.mod_name = { March_ast.Ast.txt = "LibCheck"; span = dummy_span };
@@ -3897,10 +3931,10 @@ let run_check_cmd ?(emit_caps = false) files =
          package shadows a stdlib module name — bastion does — so without it
          `march caps` failed on exactly those packages with "capability
          closures unavailable". *)
-      let (errs, _type_map, env) =
+      let (errs, tm, env) =
         March_typecheck.Typecheck.check_module_full combined in
       caps_env := Some env;
-      errs
+      (errs, tm)
     end
   in
   let diags = March_errors.Errors.sorted errors in
@@ -3933,6 +3967,29 @@ let run_check_cmd ?(emit_caps = false) files =
          knowable capability set; refusing to report a partial one\n"
         (List.length user_errors);
     exit 1
+  end;
+  (* Allocation contracts, as `march --check` judges them: lower the combined
+     program and run the build's post-lower pipeline (no emission), only when
+     the checked code carries a `cap no_alloc` module or an @[no_alloc]
+     function.  `march caps` reports capabilities, not verdicts; skip it. *)
+  if not emit_caps then begin
+    let program decls = {
+      March_ast.Ast.mod_name = { March_ast.Ast.txt = "LibCheck"; span = dummy_span };
+      March_ast.Ast.mod_decls = decls;
+    } in
+    let contract_diags =
+      List.filter is_user_file
+        (March_tir.Contract_pipeline.check_contracts ~type_map:check_type_map
+           ~opt:!opt_enabled ~trmc:!March_tir.Trmc.enabled
+           ~user_decls:(March_tir.Alloc_contract.collect (program all_decls))
+           (program (stdlib_decls @ all_decls)))
+    in
+    let sev_is sev (d : March_errors.Errors.diagnostic) = d.severity = sev in
+    List.iter (print_diag "warning")
+      (List.filter (sev_is March_errors.Errors.Warning) contract_diags);
+    List.iter (print_diag "error")
+      (List.filter (sev_is March_errors.Errors.Error) contract_diags);
+    if List.exists (sev_is March_errors.Errors.Error) contract_diags then exit 1
   end;
   if emit_caps then begin
     match !caps_env with

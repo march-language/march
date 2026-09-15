@@ -15872,6 +15872,163 @@ let array_bounds_suite =
    decided Violated (the forall encoding returned `unknown` at the timeout, a
    Skip), and a satisfying call Proved.  Ledger counts, not error booleans —
    under `cap verified` a skip and a violation are both errors. *)
+(* The user-file error messages the [array_pipeline] run produced, every
+   severity, alongside its Array.* ledger records. *)
+let array_messages (src : string) : string list =
+  let m = March_desugar.Desugar.desugar_module (parse src) in
+  let listmod, list_path = Lazy.force stdlib_list_mod in
+  let arrmod, arr_path = Lazy.force stdlib_array_mod in
+  let prelude_decls, prelude_path = Lazy.force stdlib_prelude_decls in
+  let m =
+    { m with
+      March_ast.Ast.mod_decls =
+        (listmod :: arrmod :: prelude_decls) @ m.March_ast.Ast.mod_decls }
+  in
+  let is_user_file f = f = "" || f = "<unknown>" in
+  March_refinecheck.Obligation.reset ();
+  let errors, _ = March_typecheck.Typecheck.check_module m in
+  March_refinecheck.Refine_check.check_module
+    ~stdlib_files:[ list_path; arr_path; prelude_path ] errors m;
+  List.filter_map
+    (fun (d : March_errors.Errors.diagnostic) ->
+      if is_user_file d.March_errors.Errors.span.March_ast.Ast.file
+      then
+        Some
+          (String.concat "\n"
+             (d.March_errors.Errors.message
+              :: List.map
+                   (fun (l : March_errors.Errors.label) -> l.March_errors.Errors.lbl_message)
+                   d.March_errors.Errors.labels))
+      else None)
+    errors.March_errors.Errors.diagnostics
+
+(* #460 follow-ups: diagnostics spell `Array.length`, not the private
+   `pvec_length`; a closed index gets no `negate = 0` example; and the
+   length postconditions on `empty`/`push`/`set`/`map`/`from_list` reach
+   call sites.  Design: specs/2026-09-15-refinement-remaining-designs.md §A. *)
+let array_followups_suite =
+  let m body = "mod AF do\n" ^ body ^ "end\n" in
+  let has_violation msgs =
+    List.exists (fun s -> contains s "refinement violation") msgs
+  in
+  [ gated "violation text spells Array.length, never pvec_length or negate" (fun () ->
+        let msgs = array_messages (m "  fn g(v) : Int do Array.get(v, -1) end\n") in
+        Alcotest.(check bool) "a violation is reported" true (has_violation msgs);
+        Alcotest.(check bool) "mentions Array.length(v)" true
+          (List.exists (fun s -> contains s "Array.length(v)") msgs);
+        Alcotest.(check bool) "never mentions pvec_length" false
+          (List.exists (fun s -> contains s "pvec_length") msgs);
+        Alcotest.(check bool) "no negate example" false
+          (List.exists (fun s -> contains s "negate") msgs);
+        (* The note's own "guard the call (e.g. `if …`)" is not an example;
+           a counterexample follows the quoted predicate. *)
+        Alcotest.(check bool) "a closed index gets no example" false
+          (List.exists (fun s -> contains s "v)` (e.g.") msgs));
+
+    gated "a symbolic index still gets a validated example" (fun () ->
+        let msgs =
+          array_messages (m "  fn k(v, i : {Int | _ < 0}) : Int do Array.get(v, i) end\n")
+        in
+        Alcotest.(check bool) "(e.g. i = -1)" true
+          (List.exists (fun s -> contains s "(e.g. i = -1)") msgs));
+
+    gated "the unverified hint spells Array.length in its held/missing split" (fun () ->
+        let msgs =
+          array_messages
+            (m "  fn f(v, i : Int) : Int do\n\
+               \    if i >= 0 && i < Array.length(v) do Array.get(v, i - 1) else 0 end\n\
+               \  end\n")
+        in
+        Alcotest.(check bool) "`_ < Array.length(v)` established" true
+          (List.exists (fun s -> contains s "`_ < Array.length(v)` established") msgs);
+        Alcotest.(check bool) "never mentions pvec_length" false
+          (List.exists (fun s -> contains s "pvec_length") msgs));
+
+    Alcotest.test_case "display_measures: gated, and only at an identifier boundary" `Quick
+      (fun () ->
+        let open March_refinecheck.Refine_encode in
+        let saved = !array_length_is_stdlib in
+        Fun.protect ~finally:(fun () -> array_length_is_stdlib := saved) (fun () ->
+            array_length_is_stdlib := false;
+            Alcotest.(check string) "ungated: untouched" "_ < pvec_length(v)"
+              (display_measures "_ < pvec_length(v)");
+            array_length_is_stdlib := true;
+            Alcotest.(check string) "gated: renamed" "_ < Array.length(v)"
+              (display_measures "_ < pvec_length(v)");
+            Alcotest.(check string) "a longer identifier is left alone"
+              "my_pvec_length(v) < Array.length(w)"
+              (display_measures "my_pvec_length(v) < pvec_length(w)")));
+
+    gated "from_list's length reaches a literal index: past the end violated, in range proved"
+      (fun () ->
+        Alcotest.(check (list string)) "index 7 of a 3-element array: Violated"
+          [ "violated" ]
+          (List.map March_refinecheck.Obligation.verdict_name
+             (array_verdicts "Array.get"
+                (m "  fn a() : Int do Array.get(Array.from_list([1, 2, 3]), 7) end\n")));
+        Alcotest.(check (list string)) "index 3 (== length): Violated"
+          [ "violated" ]
+          (List.map March_refinecheck.Obligation.verdict_name
+             (array_verdicts "Array.get"
+                (m "  fn c() : Int do Array.get(Array.from_list([1, 2, 3]), 3) end\n")));
+        Alcotest.(check bool) "index 2: Proved" true
+          (all_proved
+             (array_verdicts "Array.get"
+                (m "  fn b() : Int do Array.get(Array.from_list([1, 2, 3]), 2) end\n")));
+        Alcotest.(check bool) "guarded by List.length(xs): Proved" true
+          (all_proved
+             (array_verdicts "Array.get"
+                (m "  fn g(xs : List(Int)) : Int do\n\
+                   \    let v = Array.from_list(xs)\n\
+                   \    if List.length(xs) > 0 do Array.get(v, 0) else 0 end\n\
+                   \  end\n"))));
+
+    gated "push, set and map carry the length relation to a let-bound result" (fun () ->
+        let guarded body = m ("  fn f(v, x : Int) : Int do\n" ^ body ^ "  end\n") in
+        Alcotest.(check bool) "push: index 3 after length > 2: Proved" true
+          (all_proved
+             (array_verdicts "Array.get"
+                (guarded
+                   "    if Array.length(v) > 2 do\n\
+                   \      let p = Array.push(v, x)\n\
+                   \      Array.get(p, 3)\n\
+                   \    else 0 end\n")));
+        Alcotest.(check bool) "push: index 4 after length > 2: not Proved" true
+          (none_proved
+             (array_verdicts "Array.get"
+                (guarded
+                   "    if Array.length(v) > 2 do\n\
+                   \      let p = Array.push(v, x)\n\
+                   \      Array.get(p, 4)\n\
+                   \    else 0 end\n")));
+        let set_get i =
+          array_verdicts "Array.get"
+            (guarded
+               (Printf.sprintf
+                  "    if Array.length(v) > 1 do\n\
+                  \      let w = Array.set(v, 0, x)\n\
+                  \      Array.get(w, %d)\n\
+                  \    else 0 end\n" i))
+        in
+        Alcotest.(check bool) "set: index 1 after length > 1: Proved" true (all_proved (set_get 1));
+        Alcotest.(check bool) "set: index 2 after length > 1: not Proved" true (none_proved (set_get 2));
+        let map_get i =
+          array_verdicts "Array.get"
+            (m (Printf.sprintf
+                  "  fn h(w) : Int do\n\
+                  \    let mm = Array.map(w, fn y -> y + 1)\n\
+                  \    if Array.length(w) > 3 do Array.get(mm, %d) else 0 end\n\
+                  \  end\n" i))
+        in
+        Alcotest.(check bool) "map: index 3 after length > 3: Proved" true (all_proved (map_get 3));
+        Alcotest.(check bool) "map: index 4 after length > 3: not Proved" true (none_proved (map_get 4)));
+
+    gated "empty() has length 0: any index is violated" (fun () ->
+        Alcotest.(check (list string)) "Array.get(Array.empty(), 0): Violated" [ "violated" ]
+          (List.map March_refinecheck.Obligation.verdict_name
+             (array_verdicts "Array.get" (m "  fn e() : Int do Array.get(Array.empty(), 0) end\n"))));
+  ]
+
 let measure_definition_suite =
   let box =
     "mod MD do\n  type Box = Box(Int, Int)\n\
@@ -16042,5 +16199,6 @@ let () =
       ("array-bounds-contracts", array_bounds_suite);
       ("measure-definition", measure_definition_suite);
       ("caller-sorts", caller_sorts_suite);
+      ("array-contract-followups", array_followups_suite);
       (* Must stay LAST: it measures every query the groups above sent. *)
       ("z3-well-formed", z3_wellformed_suite) ]

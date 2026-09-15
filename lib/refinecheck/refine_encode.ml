@@ -837,6 +837,35 @@ let measure_alias (m : string) : string option =
    normalize through this BEFORE consulting [is_measure]/[resolve_measure], or
    the guard reflects to one symbol and the predicate to another and the two
    never meet. *)
+(* User-facing spelling of a measure that user code cannot write.  The stdlib
+   `Array` contracts are stated over the private measure `pvec_length`, so a
+   diagnostic that quotes the predicate verbatim tells the user to guard with
+   a name that does not compile; the public spelling is the `Array.length`
+   alias above.  Applied to finished message TEXT at the call-site
+   diagnostic sites (the predicate, the held/missing conjuncts in a
+   [Partial_conjunct] detail, the suggested guard), never to the ledger's
+   [Obligation.predicate], which keeps the raw spelling as a stable identity
+   for `--refine-report`, the audit baselines and the oracles.  Gated like the
+   alias: only when the stdlib `Array.length` is the one in scope.  A match
+   must start at an identifier boundary, so `my_pvec_length(` is left alone. *)
+let display_measures (text : string) : string =
+  if not !array_length_is_stdlib then text
+  else begin
+    let from = "pvec_length(" and into = "Array.length(" in
+    let n = String.length text and k = String.length from in
+    let buf = Buffer.create (n + 16) in
+    let is_ident c =
+      match c with 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' | '.' -> true | _ -> false
+    in
+    let i = ref 0 in
+    while !i < n do
+      if !i + k <= n && String.sub text !i k = from && (!i = 0 || not (is_ident text.[!i - 1]))
+      then (Buffer.add_string buf into; i := !i + k)
+      else (Buffer.add_char buf text.[!i]; incr i)
+    done;
+    Buffer.contents buf
+  end
+
 let measure_name (m : string) : string =
   match measure_alias m with Some m' -> m' | None -> m
 

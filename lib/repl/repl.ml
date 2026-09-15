@@ -36,6 +36,16 @@ let make_input_img s cur =
      <|> string A.(bg white ++ fg black) cur_c
      <|> Highlight.highlight right)
 
+(* `cap no_alloc` / @[no_alloc] are judged on lowered TIR, which the REPL
+   never builds for a declaration: say so once per declaration that carries
+   an obligation rather than accept it silently. *)
+let report_no_alloc_unchecked ctx (d : March_ast.Ast.decl) =
+  let m = { March_ast.Ast.mod_name = { txt = "Repl"; span = March_ast.Ast.dummy_span };
+            mod_decls = [d] } in
+  match March_tir.Alloc_contract.interpreter_hint (March_tir.Alloc_contract.collect m) with
+  | Some h -> March_errors.Errors.report ctx h
+  | None -> ()
+
 let history_path () =
   match Sys.getenv_opt "MARCH_HISTORY_FILE" with
   | Some p -> p
@@ -891,6 +901,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                  let input_tc  = { !tc_env with errors = input_ctx } in
                  let new_tc    = March_typecheck.Typecheck.check_decl input_tc d' in
                  let tc_ok = not (March_errors.Errors.has_errors input_ctx) in
+                 report_no_alloc_unchecked input_ctx d';
                  (* In debug mode, skip typecheck gate — the eval env has
                     bindings the typechecker doesn't know about. *)
                  if not is_debug then
@@ -1482,6 +1493,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
       let input_tc  = { !tc_env with errors = input_ctx } in
       let new_tc    = March_typecheck.Typecheck.check_decl input_tc d' in
       let tc_ok = not (March_errors.Errors.has_errors input_ctx) in
+      report_no_alloc_unchecked input_ctx d';
       if not is_debug then
         List.iter (fun (diag : March_errors.Errors.diagnostic) ->
           let (label, attr) = match diag.severity with
