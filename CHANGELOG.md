@@ -316,6 +316,13 @@ git log is authoritative for exact commits.
   nothing when unset.
 
 ### Fixed
+
+- **Interpreter: a user function no longer hijacks a Prelude function's
+  internal call of the same name.** With a `pfn show` (or `fn show`) over
+  some type in your program, `println("hi")` panicked when interpreted
+  (`match failure`) because Prelude's `println` called your `show` instead of
+  the builtin one; the compiled binary was already correct. A Prelude
+  function's bare references now resolve in Prelude's own scope.
 - **Refinement violations on `Array` calls name `Array.length`.** The
   message and its suggested guard spelled the private measure `pvec_length`,
   which does not compile in user code; a literal negative index also showed

@@ -1557,14 +1557,35 @@ let base_env = Eval_builtins.base_env
 let global_tail : env ref = ref []
 let global_tbl : (string, value) Hashtbl.t = Hashtbl.create 1024
 
+(* Secondary tails, same contract as [global_tail]: the final environment of
+   each EARLIER source-file scope of the top-level module (in practice
+   prelude.march's), which [eval_module_env] closes that file's own
+   functions over instead of the program-wide environment — see
+   [top_level_file_runs]. Without a table here every prelude-function call
+   would scan its whole ~650-entry tail linearly. *)
+let scope_tails : (env * (string, value) Hashtbl.t) list ref = ref []
+
+let tbl_of_env (tail : env) : (string, value) Hashtbl.t =
+  let tbl = Hashtbl.create 1024 in
+  List.iter (fun (k, v) -> Hashtbl.replace tbl k v) (List.rev tail);
+  tbl
+
 let install_global_tail (tail : env) : unit =
   global_tail := tail;
   Hashtbl.reset global_tbl;
   List.iter (fun (k, v) -> Hashtbl.replace global_tbl k v) (List.rev tail)
 
+let install_scope_tails (tails : env list) : unit =
+  scope_tails := List.map (fun t -> (t, tbl_of_env t)) tails
+
 let clear_global_tail () : unit =
   global_tail := [];
-  Hashtbl.reset global_tbl
+  Hashtbl.reset global_tbl;
+  scope_tails := []
+
+let rec find_scope_tbl (env : env) = function
+  | [] -> None
+  | (t, tbl) :: rest -> if t == env then Some tbl else find_scope_tbl env rest
 
 (** Monomorphic assoc over [env]. [List.assoc_opt] goes through polymorphic
     [compare] (caml_compare → compare_val → memcmp per entry); on a ~650-entry
@@ -1574,7 +1595,15 @@ let rec assoc_str (name : string) (env : env) : value option =
   else
   match env with
   | [] -> None
-  | (k, v) :: rest -> if String.equal k name then Some v else assoc_str name rest
+  | (k, v) :: rest ->
+    if String.equal k name then Some v
+    else
+      match !scope_tails with
+      | [] -> assoc_str name rest
+      | tails ->
+        (match find_scope_tbl env tails with
+         | Some tbl -> Hashtbl.find_opt tbl name
+         | None -> assoc_str name rest)
 
 let lookup name env =
   match assoc_str name env with
@@ -3691,6 +3720,47 @@ let rec eval_decl (env : env) (d : decl) : env =
     List.iter (fun (k, v) -> Hashtbl.replace module_registry k v) reg_additions;
     (env_additions @ reg_additions) @ env
 
+(** Split a top-level declaration list into maximal runs of consecutive
+    declarations from the same source file.
+
+    The interpreted pipeline hands [eval_module_env] ONE flat list:
+    prelude.march's declarations (unwrapped into bare top-level decls, see
+    [check_no_prelude_collision] in bin/toolchain.ml) followed by the entry
+    module's own (also unwrapped). If every top-level function closed over the
+    one program-wide environment, a prelude body's bare free reference (e.g.
+    [println]'s internal [show]) would resolve to an entry-module function of
+    the same name — even a [pfn] — which the compiled backend never does
+    (it resolves [show] by type). Evaluating each file's run against its own
+    scope keeps a stdlib function's free names in its own module scope.
+
+    A declaration with no real source file (a stdlib [DMod]'s dummy span, a
+    string-parsed fixture's [""]) joins the current run, so a single-file
+    module is exactly one run and behaves as before. *)
+let top_level_file_runs (decls : decl list) : decl list list =
+  let decl_span = function
+    | DFn (_, sp) | DLet (_, _, sp) | DType (_, _, _, _, sp) | DActor (_, _, _, sp)
+    | DProtocol (_, _, sp) | DMod (_, _, _, sp) | DSig (_, _, sp)
+    | DInterface (_, sp) | DImpl (_, sp) | DExtern (_, sp) | DUse (_, sp)
+    | DAlias (_, sp) | DNeeds (_, sp) | DProofCap (_, _, sp) | DOpts (_, sp)
+    | DAlwaysLinearType (_, _, _, _, sp) | DTransitions (_, _, sp) | DApp (_, sp)
+    | DDeriving (_, _, sp) | DSatisfy (_, _, sp) | DTest (_, sp)
+    | DDescribe (_, _, sp) | DSetup (_, sp) | DSetupAll (_, sp) -> sp
+  in
+  let file_of d =
+    let f = (decl_span d).file in
+    if f = "" || f = March_ast.Ast.dummy_span.file then None else Some f
+  in
+  let flush cur runs = if cur = [] then runs else List.rev cur :: runs in
+  let rec go cur cur_file runs = function
+    | [] -> List.rev (flush cur runs)
+    | d :: rest ->
+      (match file_of d, cur_file with
+       | Some f, Some g when f <> g -> go [d] (Some f) (flush cur runs) rest
+       | Some f, None -> go (d :: cur) (Some f) runs rest
+       | _ -> go (d :: cur) cur_file runs rest)
+  in
+  go [] None [] decls
+
 let eval_module_env (m : module_) : env =
   (* Reset global actor and task state for this module run *)
   closure_prefix_override := None;
@@ -3724,26 +3794,25 @@ let eval_module_env (m : module_) : env =
      stale collision entry left over from an unrelated earlier module. *)
   compute_type_collision_set m.mod_decls;
 
-  (* Pass 1: stubs.  We use a ref cell shared across all stubs so that
-     closures created in pass 2 can see the final environment. *)
-  let env_ref : env ref = ref (task_builtins @ base_env) in
-
-  (* Install a placeholder for every top-level fn *)
-  let install_stub = function
-    | DFn (def, _) ->
-      (* Placeholder that will be overwritten in pass 2 *)
-      let stub = VBuiltin ("<stub:" ^ def.fn_name.txt ^ ">",
-                           fun _ -> eval_error "stub %s called before initialisation"
-                               def.fn_name.txt) in
-      env_ref := (def.fn_name.txt, stub) :: !env_ref
-    | _ -> ()
+  (* Pass 1: stubs.  Installed per source-file run (see
+     [top_level_file_runs]) right before that run's pass 2, onto a ref cell
+     shared by the run's closures, so that closures created in pass 2 see
+     the run's final environment at call time. *)
+  let install_stubs (decls : decl list) (env : env) : env =
+    List.fold_left (fun env -> function
+      | DFn (def, _) ->
+        (* Placeholder that will be overwritten in pass 2 *)
+        let stub = VBuiltin ("<stub:" ^ def.fn_name.txt ^ ">",
+                             fun _ -> eval_error "stub %s called before initialisation"
+                                 def.fn_name.txt) in
+        (def.fn_name.txt, stub) :: env
+      | _ -> env) env decls
   in
-  List.iter install_stub m.mod_decls;
 
   (* Pass 2: evaluate declarations in order, building up real closures.
      Each closure closes over [env_ref], which by the time any function
      is *called* will hold the full environment. *)
-  let rec make_recursive_env decls env =
+  let rec make_recursive_env env_ref decls env =
     match decls with
     | [] -> env
     | DFn (def, _) :: rest ->
@@ -3813,7 +3882,7 @@ let eval_module_env (m : module_) : env =
         | _ -> env'
       in
       env_ref := env'';
-      make_recursive_env rest env''
+      make_recursive_env env_ref rest env''
 
     | DLet (_, b, _) :: rest ->
       let v = eval_expr env b.bind_expr in
@@ -3822,7 +3891,7 @@ let eval_module_env (m : module_) : env =
         | None    -> eval_error "top-level let pattern failed"
       in
       env_ref := env';
-      make_recursive_env rest env'
+      make_recursive_env env_ref rest env'
 
     | DActor (_, name, def, _) :: rest ->
       (* Register actor with the shared env_ref so handlers can call module fns.
@@ -3831,7 +3900,7 @@ let eval_module_env (m : module_) : env =
       let qual = current_doc_prefix () ^ name.txt in
       if qual <> name.txt then
         Hashtbl.replace actor_defs_tbl qual (def, env_ref);
-      make_recursive_env rest env
+      make_recursive_env env_ref rest env
 
     | DMod _ as d :: rest ->
       (* Evaluate nested module via eval_decl (which handles module_stack push/pop
@@ -3839,7 +3908,7 @@ let eval_module_env (m : module_) : env =
          as a side effect of eval_decl recursing into the module body. *)
       let env' = eval_decl env d in
       env_ref := env';
-      make_recursive_env rest env'
+      make_recursive_env env_ref rest env'
 
     | DImpl _ as d :: rest ->
       (* Delegate to eval_decl's DImpl arm rather than duplicating its
@@ -3854,12 +3923,12 @@ let eval_module_env (m : module_) : env =
          own DMod recursion. Delegating removes the duplicate outright. *)
       let env' = eval_decl env d in
       env_ref := env';
-      make_recursive_env rest env'
+      make_recursive_env env_ref rest env'
 
     | (DUse _ | DAlias _) as d :: rest ->
       let env' = eval_decl env d in
       env_ref := env';
-      make_recursive_env rest env'
+      make_recursive_env env_ref rest env'
 
     | DType (_, name, _, td, _) :: rest ->
       (* Populate ctor_type_tbl and record_type_tbl for dispatch *)
@@ -3875,23 +3944,36 @@ let eval_module_env (m : module_) : env =
        | TDVariant [] -> Hashtbl.replace ffi_resource_tbl name.txt ()
        | TDVariant _ | TDRecord _ -> Hashtbl.replace ffi_type_decl_tbl name.txt td
        | _ -> ());
-      make_recursive_env rest env
+      make_recursive_env env_ref rest env
 
     | DProtocol _ as d :: rest ->
       ignore (eval_decl env d);
-      make_recursive_env rest env
+      make_recursive_env env_ref rest env
 
     | DExtern _ as d :: rest ->
       let env' = eval_decl env d in
       env_ref := env';
-      make_recursive_env rest env'
+      make_recursive_env env_ref rest env'
 
-    | _ :: rest -> make_recursive_env rest env
+    | _ :: rest -> make_recursive_env env_ref rest env
   in
 
-  let final_env = make_recursive_env m.mod_decls !env_ref in
-  env_ref := final_env;
+  (* Each source-file run closes over its OWN final environment: an earlier
+     run (prelude.march, unwrapped into this same flat list ahead of the entry
+     module) never sees a later run's top-level bindings, while a later run
+     sees everything before it. *)
+  scope_tails := [];
+  let run_envs, final_env =
+    List.fold_left (fun (acc, env) run ->
+        let scope_ref = ref (install_stubs run env) in
+        let run_env = make_recursive_env scope_ref run !scope_ref in
+        scope_ref := run_env;
+        (run_env :: acc, run_env))
+      ([], task_builtins @ base_env) (top_level_file_runs m.mod_decls)
+  in
   install_global_tail final_env;
+  install_scope_tails
+    (match run_envs with _last :: earlier -> earlier | [] -> []);
   final_env
 
 (** Call an optional hook stored as [Some(fn)] / [None] in a VCon. *)
