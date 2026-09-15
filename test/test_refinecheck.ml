@@ -15523,6 +15523,29 @@ let caller_sorts_suite =
                   \    if u == \"a\" do nonempty(\"\") else 0 end\n\
                   \  end\n\
                    end\n"));
+    (* ── origin 2: `let` binders ── *)
+    gated "let: a String let binder in a list literal proves" (fun () ->
+        ignore (ledger "l" (1, 0, 0)
+                  (m "CSL1"
+                     "  fn l(t : String) : Int do\n\
+                     \    let s = t\n\
+                     \    need_a([\"a\", s])\n\
+                     \  end")));
+    gated "let REJECT: an unknown String let binder is a plain skip, not a sort-conflict" (fun () ->
+        let rs = ledger "lb" (0, 0, 1)
+            (m "CSL2"
+               "  fn l(t : String) : Int do\n\
+               \    let s = t\n\
+               \    need_a([\"b\", s])\n\
+               \  end") in
+        Alcotest.(check bool) "no sort-conflict" false (List.mem "sort-conflict" rs));
+    gated "let control: a type-variable let binder keeps its verdict" (fun () ->
+        ignore (ledger "lt" (1, 0, 0)
+                  (m "CSL4"
+                     "  fn t(y, ys) : Int do\n\
+                     \    let z = y\n\
+                     \    need_mem(z, [z])\n\
+                     \  end")));
   ]
 
 (* ── z3 never rejects a query the checker builds ─────────────────────────

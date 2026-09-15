@@ -850,6 +850,10 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
               RESOLUTION in the statements that follow — see [local_shadow]. *)
            let ctx' =
              match e with
+             (* A plain `let n = …` records its binder's span, so a later
+                call reads `n`'s typechecked sort ([rctx.binds]). *)
+             | A.ELet (({ A.bind_pat = A.PatVar n; _ } as b), _) ->
+               local_shadow ~spans:[ (n.A.txt, n.A.span) ] ctx (pat_binders b.A.bind_pat)
              | A.ELet (b, _) -> local_shadow ctx (pat_binders b.A.bind_pat)
              | A.ELetFn (n, _, _, _, _) -> local_shadow ctx [ n.A.txt ]
              | _ -> ctx
