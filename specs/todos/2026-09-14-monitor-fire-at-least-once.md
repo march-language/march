@@ -10,6 +10,24 @@ gets nothing. The supervised-endpoint fixtures assume the contract this file
 states: a `DistSupervisor` that never learns a remote child died restarts
 nothing.
 
+## Measured 2026-09-15 before starting: the cross-node monitor path is not wired at all
+
+`runtime/march_monitor_registry.c` has the registry (`march_dist_monitor_register`,
+`_fire_pid` from `do_actor_death`, `_fire_nodedown`, `_clear_fd`) and
+`stdlib/dist_link.march` has the codecs and the March-side table — but no
+builtin exposes the registry to March (nothing in `typecheck_builtins.ml`,
+`llvm_builtins.ml` or `eval_builtins.ml` names `dist_monitor`), and no
+fixture sends a `MONITOR_REQ` end to end. `DistSupervisor` monitors its
+children "via DistLink.encode_req frames" in comments only. So this item
+has a step 0 before the contract below: expose registration
+(`dist_monitor_register(target_pid, watcher_node, watcher_pid, control_fd)`,
+a nine-site builtin; the interpreter keeps its own table and fires from its
+actor-death path), have the receiving node's `PeerReader` dispatch for tag 7
+call it with the peer's control fd, deliver tag 8 as a `Down` to the local
+watcher, and pin it with a loopback fixture (node-a monitors an actor on
+node-b, kills it through a remote call, receives exactly one `Down`). Only
+then do acks and retries mean anything.
+
 ## Contract
 
 - `MONITOR_FIRE(target_pid, reason, ref)` is retried until the watcher's
