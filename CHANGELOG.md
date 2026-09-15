@@ -13,6 +13,13 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`Array` operations state their effect on the length.** `Array.empty`,
+  `from_list`, `push`, `set` and `map` carry length postconditions, so
+  `Array.get(Array.from_list([1, 2, 3]), 7)` is a compile error and a guard on
+  `List.length(xs)` or `Array.length(v)` carries through them. `empty`'s is
+  proved; the other four are `@[assume]`d, each with a runtime property
+  witness.
+
 - **List contracts proved from list code.** A function that recurses over a
   list can have its `elts` and `len` return refinement proved from its body,
   including through a local helper `fn`, a call to another proved function,
@@ -309,6 +316,11 @@ git log is authoritative for exact commits.
   nothing when unset.
 
 ### Fixed
+- **Refinement violations on `Array` calls name `Array.length`.** The
+  message and its suggested guard spelled the private measure `pvec_length`,
+  which does not compile in user code; a literal negative index also showed
+  a meaningless `(e.g. negate = 0)` example, which is now omitted.
+
 - `derive` inside a nested `mod` was a silent no-op: the derive was never expanded, so
   `derive Json for T` in `mod Inner` generated nothing and the first `from_json` to `T`
   failed at run time. Nested derives (and `satisfy`) now expand at every level.

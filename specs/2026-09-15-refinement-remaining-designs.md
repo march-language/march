@@ -39,19 +39,16 @@ users cannot write it, and the guard the note suggests does not compile.
 The checker already knows the public spelling: `measure_alias` maps
 `Array.length` → `pvec_length`.
 
-**Design.** A display inverse of the alias table,
-`Refine_encode.measure_display : string -> string option`, holding only
-the aliases whose target is not itself writable in user code
-(`pvec_length` → `Array.length`; `len` stays `len`, which users write).
-`pred_str` gets a `~display:true` mode, used by every user-facing
-rendering of a callee's predicate (the violation message, its label, the
-note, the hint's `established`/`not` lists, `--refine-report` obligation
-lines), that rewrites `EApp (EVar m, args)` to the display name when
-`measure_display m` is `Some`. The ledger key (`Obligation.predicate`) keeps
-the raw spelling so the audit baselines and oracle keep a stable identity;
-only text a person reads changes. Gate it the way the alias is gated
-(`array_length_is_stdlib`), so a user's own `pvec_length` measure is never
-renamed.
+**Design (as landed).** `Refine_encode.display_measures` rewrites
+`pvec_length(` to `Array.length(` in finished message text, at an identifier
+boundary, only while `array_length_is_stdlib` holds (the alias's own gate),
+at every call-site diagnostic in `refine_call.ml`: the violation message and
+its label, the unverified hint including a `Partial_conjunct`'s held/missing
+split, the `cap verified` error and the propagation warning. A text rewrite
+rather than a `pred_str` mode, because the held/missing strings are produced
+by `pred_str` far from the message and compared back against it. The
+ledger's `Obligation.predicate` keeps the raw spelling, so `--refine-report`,
+the audit baselines and the oracles keep a stable identity.
 
 ### A2. The counterexample names `negate`
 
