@@ -180,4 +180,54 @@ describe "to_list and from_list" do
   end
 end
 
+
+-- ── Runtime witnesses for the @[assume]d length contracts in stdlib/array.march ─
+-- `push`, `set`, `map` and `from_list` declare their effect on `pvec_length`
+-- (what `Array.length` returns) under `@[assume]`: the checker takes them on
+-- faith, so each is exercised here, at the sizes where the representation
+-- changes shape (the 32-element tail and the first trie levels) and over
+-- random lists.
+
+pfn boundary_sizes() : List(Int) do
+  [0, 1, 2, 31, 32, 33, 63, 64, 65, 1023, 1024, 1025, 1057]
+end
+
+pfn list_of_size(n : Int) : List(Int) do
+  fn go(i : Int, acc : List(Int)) : List(Int) do
+    if i <= 0 do acc else go(i - 1, Cons(i, acc)) end
+  end
+  go(n, Nil)
+end
+
+describe "assumed length contracts (runtime witnesses)" do
+  test "from_list: length == List.length(xs), at boundary sizes" do
+    assert List.all(boundary_sizes(), fn n ->
+      Array.length(Array.from_list(list_of_size(n))) == n)
+  end
+
+  test "from_list: length == List.length(xs), random lists" do
+    Check.all(Gen.list(Gen.int(0, 100)), fn xs ->
+      Array.length(Array.from_list(xs)) == List.length(xs))
+  end
+
+  test "push: length grows by exactly one, at boundary sizes" do
+    assert List.all(boundary_sizes(), fn n ->
+      let v = Array.from_list(list_of_size(n))
+      Array.length(Array.push(v, 7)) == Array.length(v) + 1)
+  end
+
+  test "set: length is preserved, at every tail and trie position" do
+    assert List.all(boundary_sizes(), fn n ->
+      let v = Array.from_list(list_of_size(n))
+      List.all(list_of_size(n), fn i ->
+        Array.length(Array.set(v, i - 1, 0)) == n))
+  end
+
+  test "map: length is preserved, at boundary sizes" do
+    assert List.all(boundary_sizes(), fn n ->
+      let v = Array.from_list(list_of_size(n))
+      Array.length(Array.map(v, fn x -> x * 2)) == Array.length(v))
+  end
+end
+
 end

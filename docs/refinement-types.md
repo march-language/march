@@ -600,9 +600,14 @@ gets discharged, so "can't tell" is no longer good enough.
 
 `Array.get`, `Array.set` and `Array.pop` carry the same treatment (index in
 `0 <= i < Array.length(v)`; `pop` needs `Array.length(v) > 0`), and a guard
-written with `Array.length` satisfies it. `Array.get(v, -1)` is an error; a
-literal past the end of an array from `Array.from_list` is skipped, because
-the checker does not track the length `from_list` produces. Swept before shipping over the
+written with `Array.length` satisfies it. `Array.get(v, -1)` is an error.
+`Array.empty`, `from_list`, `push`, `set` and `map` state what they do to the
+length, so `Array.get(Array.from_list([1, 2, 3]), 7)` is an error too, and a
+`List.length(xs) > 0` guard proves `Array.get(Array.from_list(xs), 0)`. The
+facts go one call deep: `push` of a `let`-bound `push` of `empty()` does not
+compose, and is skipped. Only `empty`'s is proved; the other four are
+`@[assume]`d (see below) with runtime witnesses in
+`test/stdlib/test_array.march`. Swept before shipping over the
 standard library, the native and stdlib test corpora and eighteen ecosystem
 projects: zero new errors, only new skips at computed indices.
 
