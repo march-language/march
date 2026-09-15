@@ -1997,7 +1997,17 @@ let arm_axiom ~allowed ?(args : Smt.sort list option) ?(self_name : string optio
          instances of the datatype in one query z3 cannot tell them apart. *)
       let inst =
         match args with
-        | Some a when a <> [] -> Some (Smt.SData (adt_of_measure_ctor ctor, a))
+        | Some a when a <> [] ->
+          (* The measure's OWN datatype first: constructor names are not
+             unique across datatypes (`Leaf` in a user type and in a stdlib
+             tree), and the first match qualified a nullary constructor with
+             the wrong sort. *)
+          let own =
+            match Hashtbl.find_opt axiom_measures name with
+            | Some adt when (match Hashtbl.find_opt adt_ctors adt with Some cs -> List.mem ctor cs | None -> false) -> adt
+            | _ -> adt_of_measure_ctor ctor
+          in
+          Some (Smt.SData (own, a))
         | _ -> None
       in
       let lhs =
@@ -2026,7 +2036,29 @@ let arm_axiom ~allowed ?(args : Smt.sort list option) ?(self_name : string optio
 (* Instance symbols the global measure preamble declares. *)
 let global_instance_names : string list ref = ref []
 
-let instance_measure_text ?(skip : string list = [])
+(* ── Quantified measure axioms, attached per query (plan step 4.5) ─────────
+   A quantified axiom stalls z3 on queries that never mention its measure:
+   adding `SortedSet`'s `tree_elts` recursion equation to the module-wide
+   preamble turned every stdlib `Array` bounds check from an instant answer
+   into a 1.5 s `unknown`, which cost every program's cold check 20 s.  So the
+   global preamble keeps datatypes, set sorts, `declare-fun`s and quantifier-
+   free definitions, and each measure symbol's quantified axioms (non-
+   negativity, base-case links, recursion equations) live here, keyed by the
+   symbol.  [query_instance_preamble] attaches the axioms of the symbols a
+   query mentions, closed under the symbols those axioms mention.  Dropping
+   the axioms of a symbol a query never mentions cannot change whether it is
+   satisfiable: they constrain only that symbol. *)
+let measure_axioms_by_symbol : (string, Buffer.t) Hashtbl.t = Hashtbl.create 16
+
+let add_measure_axiom (sym : string) (text : string) : unit =
+  let b =
+    match Hashtbl.find_opt measure_axioms_by_symbol sym with
+    | Some b -> b
+    | None -> let b = Buffer.create 128 in Hashtbl.replace measure_axioms_by_symbol sym b; b
+  in
+  Buffer.add_string b text
+
+let instance_measure_text ?(skip : string list = []) ?(axiom_sink : (string -> string -> unit) option)
     (requests : (string * string * string * Smt.sort list) list)
     : string * string list * Smt.sort list =
   let decls = Buffer.create 128 and axioms = Buffer.create 256 in
@@ -2053,11 +2085,14 @@ let instance_measure_text ?(skip : string list = [])
         let translated = List.map (fun arm -> arm_axiom ~allowed ~args ~self_name:iname m arm) arms in
         let further = !arm_instance_requests in
         if arms <> [] && List.for_all Option.is_some translated then begin
+          let emit text =
+            match axiom_sink with Some sink -> sink iname text | None -> Buffer.add_string axioms text
+          in
           if is_nonneg_measure m then
-            Buffer.add_string axioms
+            emit
               (Printf.sprintf "(assert (forall ((x %s)) (! (>= (%s x) 0) :pattern ((%s x)))))\n"
                  arg_sort iname iname);
-          List.iter (function Some t -> Buffer.add_string axioms (t ^ "\n") | None -> ()) translated
+          List.iter (function Some t -> emit (t ^ "\n") | None -> ()) translated
         end;
         go (further @ rest)
       end
@@ -2243,6 +2278,7 @@ let build_measure_preamble (mdefs : (string * A.fn_def) list) : unit =
       if bases <> [] then Hashtbl.replace measure_base_cases name bases)
     axiomatized;
   global_instance_names := [];
+  Hashtbl.reset measure_axioms_by_symbol;
   if axiomatized = [] then measure_preamble := ""
   else begin
     let buf = Buffer.create 256 in
@@ -2294,7 +2330,7 @@ let build_measure_preamble (mdefs : (string * A.fn_def) list) : unit =
     List.iter
       (fun (name, adt, _) ->
         if is_nonneg_measure name then
-          Buffer.add_string buf
+          add_measure_axiom name
             (Printf.sprintf "(assert (forall ((x %s)) (! (>= (%s x) 0) :pattern ((%s x)))))\n"
                (Smt.string_of_sort (Option.value (measure_arg_sort name) ~default:(adt_sort adt)))
                name name))
@@ -2339,7 +2375,7 @@ let build_measure_preamble (mdefs : (string * A.fn_def) list) : unit =
         | Some bases ->
           List.iter
             (fun (ctor, n) ->
-              Buffer.add_string buf
+              add_measure_axiom name
                 (let srt = Option.value (measure_arg_sort name) ~default:(adt_sort adt) in
                  let tester =
                    match srt with
@@ -2355,23 +2391,21 @@ let build_measure_preamble (mdefs : (string * A.fn_def) list) : unit =
       axiomatized;
     (* … then the recursion-equation axioms. *)
     arm_instance_requests := [];
-    let axioms = Buffer.create 256 in
     List.iter
       (fun (name, _, arms) ->
         List.iter
           (fun arm ->
             match arm_axiom ~allowed ?args:(decl_args name) name arm with
-            | Some s -> Buffer.add_string axioms (s ^ "\n")
+            | Some s -> add_measure_axiom name (s ^ "\n")
             | None -> ())
           arms)
       axiomatized;
     (* A measure body applying another measure at a non-declared instance
        needs that instance declared before any axiom mentions it. *)
     let requested = !arm_instance_requests in
-    let text, names, instance_sorts = instance_measure_text requested in
+    let text, names, instance_sorts = instance_measure_text ~axiom_sink:add_measure_axiom requested in
     global_instance_names := names;
     Buffer.add_string buf text;
-    Buffer.add_buffer buf axioms;
     let covered = adt_closure (List.map (fun (_, adt, _) -> adt) all_axiomatized) in
     (* The instances measures are declared at, beyond the `Elem` ones. *)
     let extra =
@@ -2643,12 +2677,19 @@ let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
       in
       unify (infer a) it;
       slot it;
+      (* A set measure's result is its DECLARED set sort: `Set(Elem)` names
+         the opaque sort itself, not an open element, because the measure's
+         `declare-fun` is fixed at it.  Reading it as a variable let a guessed
+         `Int` element unify with it and produced a query z3 rejects. *)
       (match Hashtbl.find_opt set_measure_elem m with
+       | Some (Smt.SData ("Elem", [])) -> ISet (INamed ("Elem", []))
        | Some e -> ISet (of_sort e)
        | None -> IInt)
     | Smt.App (m, args) when Hashtbl.mem set_measure_elem m ->
       List.iter (fun a -> ignore (infer a)) args;
-      ISet (of_sort (Hashtbl.find set_measure_elem m))
+      (match Hashtbl.find set_measure_elem m with
+       | Smt.SData ("Elem", []) -> ISet (INamed ("Elem", []))
+       | e -> ISet (of_sort e))
     | Smt.App (f, [ a ]) when selector f <> None ->
       let ctor, k = Option.get (selector f) in
       (match adt_of_ctor ctor with
@@ -2844,7 +2885,32 @@ let query_instance_preamble ~(declared : string) ~(measures : bool)
     then "(declare-sort Elem 0)\n"
     else ""
   in
-  elem ^ (if dts = "" then "" else dts ^ "\n") ^ ltext ^ mtext
+  (* The quantified axioms of every measure symbol the query (or the
+     per-query measure text) mentions, closed under what those axioms mention;
+     only alongside the measure preamble that declares the symbols. *)
+  let axioms =
+    if not measures || Hashtbl.length measure_axioms_by_symbol = 0 then ""
+    else begin
+      let mentions text sym = contains text ("(" ^ sym ^ " ") in
+      let symbols = Hashtbl.fold (fun k _ acc -> k :: acc) measure_axioms_by_symbol [] |> List.sort compare in
+      let seen = Hashtbl.create 8 in
+      let rec visit text =
+        List.iter
+          (fun sym ->
+            if (not (Hashtbl.mem seen sym)) && mentions text sym then begin
+              Hashtbl.replace seen sym ();
+              visit (Buffer.contents (Hashtbl.find measure_axioms_by_symbol sym))
+            end)
+          symbols
+      in
+      visit (String.concat "\n" (mtext :: List.map Smt.render (goal :: assumptions)));
+      String.concat ""
+        (List.filter_map
+           (fun sym -> if Hashtbl.mem seen sym then Some (Buffer.contents (Hashtbl.find measure_axioms_by_symbol sym)) else None)
+           symbols)
+    end
+  in
+  elem ^ (if dts = "" then "" else dts ^ "\n") ^ ltext ^ mtext ^ axioms
 
 (* [resolve_sorts_exact], forgiving ASSUMPTIONS.  A contradiction that only an
    assumption brings in (a guard over a program function whose name happens to

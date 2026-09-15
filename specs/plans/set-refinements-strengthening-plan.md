@@ -331,6 +331,30 @@ changes, so a stdlib failure is never the first sign of a checker gap.
 - A differential property test checks `Set` against `SortedSet`.
 - A compiled benchmark confirms the `compare` wrapper costs nothing.
 
+**Landed** on the Phase 4 branch, 4.1 to 4.5, with these differences from the
+step list:
+
+- The comparator law is `compare_by`: `compare` collides with a prelude
+  interface method.
+- Also needed: a measure over a call inside a callee contract reflects that
+  call; a type-variable parameter is an opaque `Elem` and the Int resolver
+  keeps an existing declaration; guard calls with identical variable arguments
+  share one constant (an inlined `let` copies its call); a set measure's
+  declared `Set(Elem)` result is fixed in sort resolution.
+- Not proved, left unclaimed: `tree_delete` (its equal branch needs
+  `tree_min`'s payload, an `Option` fact) and `tree_member` (a `Bool` return,
+  which Tier 2 does not cover). The public API is unannotated: a refinement
+  over its anonymous record type does not translate.
+- A generic set measure at a concrete-element instance is a sort-conflict skip
+  (`specs/todos/2026-09-15-generic-set-measure-instances.md`).
+- Found and filed separately: `SortedSet.from_list`/`union`/`intersect`/
+  `difference` pass `List.fold_left` its arguments in the wrong order, and a
+  compiled-only panic when a program uses `SortedSet.size` without `to_list` or
+  `member`. Both predate this phase.
+- Benchmark: an insert-heavy compiled program (600k inserts, `--opt 2`), 12
+  interleaved runs each, median 2311 ms before and 2338 ms after at load
+  average ~8; the fastest run is the new build. No measurable cost.
+
 ### Phase 4 exit
 
 - The Phase 3 gates.

@@ -2221,6 +2221,7 @@ let register_types_for_check (decls : A.decl list) : unit =
   Hashtbl.clear const_fn_rejected;
   measure_preamble := "";
   global_instance_names := [];
+  Hashtbl.reset measure_axioms_by_symbol;
   type_preamble := "";
   register_builtin_adts ();
   register_adt_names decls;
@@ -2993,6 +2994,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   Hashtbl.reset measure_preamble_sorts;
   measure_preamble := "";
   global_instance_names := [];
+  Hashtbl.reset measure_axioms_by_symbol;
   type_preamble := "";
   (* Reset per-module so the SMT constant names a VC is built from are a
      function of the module alone.  Without this the counter drifts across
@@ -3103,6 +3105,16 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
         | _ -> known)
       [] mfns;
   if measure_axioms then begin
+    (* Measure symbols are not module-qualified, so two `@[measure]`s with one
+       name (a user's and a stdlib module's) would each emit a `declare-fun`
+       for it, and z3 rejects every query that attaches the preamble.  Neither
+       is axiomatised; their predicates skip, which only loses proofs
+       (specs/todos/2026-09-15-refine-sort-and-measure-names-unqualified.md). *)
+    let mfns =
+      List.filter
+        (fun (name, _) -> List.length (List.filter (fun (n, _) -> n = name) mfns) = 1)
+        mfns
+    in
     build_measure_preamble mfns;
     build_type_preamble ();
     (* M-b soundness gate: a `@[measure]` must be a total, terminating, pure

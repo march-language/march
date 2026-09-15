@@ -1,0 +1,66 @@
+-- Tests for the SortedSet stdlib module (AVL tree)
+-- Run with: dune exec march -- test test/stdlib/test_sorted_set.march
+--
+-- The tree operations carry refinement contracts proved against the
+-- `sorted_set_elts` measure (make_node, the rotations, balance, tree_insert,
+-- tree_delete_min, tree_to_list), resting on one assumed comparator law,
+-- `compare_by`. The differential test below checks SortedSet against the
+-- hash-trie Set on random operation sequences, so the assumed Set contracts
+-- are witnessed against a partly proved reference.
+
+mod TestSortedSet do
+
+pfn icmp(a : Int, b : Int) : Int do a - b end
+
+pfn int_lt(a : Int) : Int -> Bool do
+  fn b -> a < b
+end
+
+-- Apply (insert?, value) operations to a SortedSet.
+pfn run_sorted(ops : List((Bool, Int))) do
+  List.fold_left(ops, SortedSet.new(icmp), fn (s, op) ->
+    match op do
+      (true, v) -> SortedSet.add(s, v)
+      (false, v) -> SortedSet.remove(s, v)
+    end)
+end
+
+-- The same operations on the hash-trie Set.
+pfn run_hamt(ops : List((Bool, Int))) do
+  List.fold_left(ops, Set.empty(), fn (s, op) ->
+    match op do
+      (true, v) -> Set.insert(s, v, int_lt)
+      (false, v) -> Set.remove(s, v, int_lt)
+    end)
+end
+
+describe "basic operations" do
+  test "add, remove, member, size, to_list" do
+    let s = SortedSet.add(SortedSet.add(SortedSet.add(SortedSet.new(icmp), 5), 3), 5)
+    assert (SortedSet.size(s) == 2)
+    assert SortedSet.member(s, 3)
+    assert !SortedSet.member(s, 4)
+    assert (SortedSet.to_list(s) == [3, 5])
+    let s2 = SortedSet.remove(s, 3)
+    assert !SortedSet.member(s2, 3)
+    assert (SortedSet.to_list(s2) == [5])
+  end
+end
+
+describe "differential against Set" do
+  test "random insert/remove sequences agree on members, size and order" do
+    let op = Gen.tuple2(Gen.bool(), Gen.int(0, 25))
+    Check.all(Gen.list(op), fn ops ->
+      let ss = run_sorted(ops)
+      let hs = run_hamt(ops)
+      let xs = SortedSet.to_list(ss)
+      SortedSet.size(ss) == Set.size(hs)
+        && List.length(xs) == Set.size(hs)
+        && List.all(xs, fn x -> Set.contains(hs, x, int_lt))
+        && List.all(Set.to_list(hs), fn y -> SortedSet.member(ss, y))
+        && xs == Sort.sort(xs, fn a -> fn b -> a < b)
+    )
+  end
+end
+
+end

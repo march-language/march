@@ -13,6 +13,14 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`SortedSet`'s tree operations are proved against its element set.**
+  Insertion, rebalancing, both rotations, node construction, minimum deletion
+  and flattening carry refinement contracts proved from their bodies, on one
+  assumed comparator law; a differential property test checks `SortedSet`
+  against `Set`. The refinement checker gained what that needed: `let` in
+  proofs by recursion, nested constructor patterns and catch-all arms, callee
+  contracts at any datatype, and scalar contract calls in guards.
+
 - **`card(s)` in refinements: the number of elements of a set.** A query that
   mentions `card` gets finite-set facts about the set terms it contains, so
   `card(elts([7, 7])) == 1`, `card(elts(xs)) <= len(xs)` and "a subset is no

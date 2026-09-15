@@ -16,3 +16,11 @@ set predicates and local functions, proving `List.reverse`/`append`/`filter`/
 `dedup` as written; (3) ground-instantiated `card`; (4) prove `SortedSet`'s
 tree operations modulo one assumed comparator law. Depends on the six
 set-refinement defect fixes (PR #453) reaching `main`.
+
+## Closed 2026-09-15: all four phases landed
+
+Phase 4 (`SortedSet` proved as far as the unordered fragment allows) landed
+2026-09-15; see `specs/progress/2026-09-15-set-refinements-sorted-set.md`.
+Follow-ups that remain open, each in its own file:
+`specs/todos/2026-09-14-refine-caller-values-default-to-int.md` and
+`specs/todos/2026-09-15-generic-set-measure-instances.md`.

@@ -15948,7 +15948,15 @@ let measure_definition_suite =
             \  fn main() : Int do need(S(Z)) end\nend\n"
         in
         Alcotest.(check bool) "recursive depth: declare-fun" true (contains q "(declare-fun depth ");
-        Alcotest.(check bool) "recursive depth: forall axiom" true (contains q "forall");
+        (* Quantified axioms are attached per query since plan step 4.5, so
+           they live beside the preamble, keyed by the measure symbol. *)
+        let depth_axioms =
+          match Hashtbl.find_opt March_refinecheck.Refine_encode.measure_axioms_by_symbol "depth" with
+          | Some b -> Buffer.contents b
+          | None -> ""
+        in
+        Alcotest.(check bool) "recursive depth: forall axiom" true (contains depth_axioms "forall");
+        Alcotest.(check bool) "the global preamble carries no quantifier" false (contains q "forall");
         Alcotest.(check bool) "recursive depth: no define-fun" false (contains q "(define-fun depth ")) ]
 
 let () =

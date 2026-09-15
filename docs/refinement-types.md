@@ -897,6 +897,19 @@ contract that is not proved is still not reported unless it can never hold,
 and it does not reach call sites. `List.map` has no such contract: the
 elements of an arbitrary callback's image have no set expression.
 
+### `SortedSet` is proved, not assumed
+
+`SortedSet` is an AVL tree the checker can see into, so its tree operations
+carry contracts **proved** from their bodies against a set-valued measure over
+the tree, `sorted_set_elts`: building a node, both rotations, rebalancing, insertion
+(`sorted_set_elts(_) == union(sorted_set_elts(t), singleton(x))`), deleting the minimum,
+and flattening to a list. One fact is assumed, the comparator law, stated once
+as `compare_by(cmp, x, k) : {Int | (_ == 0) == (x == k)}`; every comparison in
+the tree goes through it. What needs the search-tree ordering invariant
+(exact membership, exact deletion) is a quantified property and stays
+unclaimed. A differential property test checks `SortedSet` against the hash-trie
+`Set` on random operation sequences.
+
 ### Cardinality
 
 `card(s)` is the number of elements of a set, predicate-only like the rest of
