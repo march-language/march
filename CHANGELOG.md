@@ -320,7 +320,9 @@ git log is authoritative for exact commits.
   message and its suggested guard spelled the private measure `pvec_length`,
   which does not compile in user code; a literal negative index also showed
   a meaningless `(e.g. negate = 0)` example, which is now omitted.
-
+- `stdlib/dist_supervisor.march` failed a standalone `--check` ("Constructor `Normal` is
+  ambiguous between multiple modules"): its restart decision matched `DistLink.DownReason`
+  with bare arms that also name the local monitor's constructors. Qualified, and guarded.
 - `derive` inside a nested `mod` was a silent no-op: the derive was never expanded, so
   `derive Json for T` in `mod Inner` generated nothing and the first `from_json` to `T`
   failed at run time. Nested derives (and `satisfy`) now expand at every level.

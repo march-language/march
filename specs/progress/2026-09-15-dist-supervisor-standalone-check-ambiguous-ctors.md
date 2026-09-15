@@ -17,3 +17,11 @@ shows; a program that `use`s both would hit the same ambiguity.
 
 Fix: qualify the matches in `dist_supervisor.march` (`DistLink.Killed`), and
 add the file to the exact-check list so it stays checkable standalone.
+
+## Shipped 2026-09-15
+
+Arms qualified (`DistLink.Normal` etc.) in `should_restart`; `--check
+stdlib/dist_supervisor.march` exits 0 (one pre-existing non-tail-recursion
+warning on `update_child_go`, unrelated). Guard: `test_compiler.ml`'s
+`entry_mod_qual_erasure` group gained "dist_supervisor.march exact CLI
+check", the same shape as dist_link's.
