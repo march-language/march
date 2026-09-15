@@ -12,6 +12,11 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`Node.enqueue(q, to, msg, policy)`**: the typed remote send through a peer's
+  `NodeQueue`, so a typed send gets credit-based flow control. It has the same contract
+  as `Node.send`: `msg`'s type must `derive Json`, which is checked at the call site,
+  and the compiler mints the wire tag. Returns `Ok(seq)` once admitted, or the queue's
+  `Backpressure` / `NoConnection`.
 - **`NodeQueue.BlockSender(timeout_ms)`**: a remote send that does not fit the peer's
   budget blocks the caller until credit admits the frame (`Ok`), the connection dies
   (`Err(NoConnection)`), or the timeout passes (`Err(Backpressure)`, frame withdrawn).
