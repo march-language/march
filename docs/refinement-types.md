@@ -861,6 +861,41 @@ A guard that *is* a call with a Bool contract, or a Bool local bound to one
 (`let present = Set.contains(…)` then `if present`), establishes the contract
 on its branch and its negation on the other.
 
+### Proved list contracts
+
+A function that recurses over a list parameter can have its `elts` and `len`
+contract **proved** rather than assumed: the checker unfolds `len` and `elts`
+over the matched list's `Cons` cells and assumes the contract for the
+recursive call on its tail. A proved contract reaches call sites like any
+other. The stdlib's `List.reverse`, `List.append`, `List.filter` and
+`List.dedup` carry such contracts, proved from their bodies as written:
+
+```march
+fn reverse(xs : List(a)) : {List(a) | elts(_) == elts(xs)} do
+  fn go(lst : List(a), acc : List(a)) : {List(a) | elts(_) == union(elts(lst), elts(acc))} do
+    match lst do
+    Nil        -> acc
+    Cons(h, t) -> go(t, Cons(h, acc))
+    end
+  end
+  go(xs, Nil)
+end
+
+fn no_two(zs : {List(Int) | !member(2, elts(_))}) : Int do 0 end
+fn bad(ys : {List(Int) | member(2, elts(_))}) : Int do no_two(List.reverse(ys)) end
+-- refinement violation
+```
+
+The pieces that make this work: a local `fn` like `go` is proved first and
+its contract used by the body around it; a call to another function uses that
+function's proved contract; and a parameter refinement is an invariant the
+body may assume (`dedup`'s helper takes `acc : {List(a) | member(prev,
+elts(_))}`). A contract is used only once it is proved, whatever the
+declaration order, so two functions cannot prove each other's claims. A
+contract that is not proved is still not reported unless it can never hold,
+and it does not reach call sites. `List.map` has no such contract: the
+elements of an arbitrary callback's image have no set expression.
+
 ### Set-valued measures
 
 A user `@[measure]` may return a set, under the same structural gate as an
@@ -919,15 +954,18 @@ renders its model as a set literal: `Set.insert() can return {4}`,
 - **No cardinality.** There is no decidable link between the array encoding
   and a set's size; `len` remains the only size measure, so a permutation
   contract writes both: `{List(Int) | elts(_) == elts(xs) && len(_) == len(xs)}`.
-- **`elts` is not axiomatised over the list structure.** It folds a
-  *literal* list to a concrete set and otherwise stands for an opaque set per
-  variable, so a contract proved by walking `Cons` cells (`elts(append(xs,
-  ys)) == union(elts(xs), elts(ys))` from `append`'s body) is skipped. A list
-  contract over an `Int` measure keeps the Tier 2 induction path it always had.
-- **Mixed element sorts skip.** `member(3, elts(_))` against a
-  `List(String)` is a sort conflict and is skipped, never reported. A clash
-  that only a *fact* brings in (a guard, a parameter's promise) drops that
-  fact instead, so the call is still checked without it.
+- **List structure is followed only inside a proof by recursion.** A
+  contract on a function that recurses over a list (see "Proved list
+  contracts" above) is proved through its `Cons` cells. Everywhere else `elts`
+  folds a list built from constructors whose tail is a literal or a name
+  (`Cons(h, acc)`) and otherwise stands for one opaque set per variable.
+- **Mixed element types are an error only when both are declared.**
+  `member(3, elts(_))` against a `List(String)` is reported at the predicate
+  (see above). A clash the declared types cannot show, such as an unannotated
+  operand or a type variable instantiated differently at a call, is a sort
+  conflict and is skipped, never reported. A clash that only a *fact* brings in
+  (a guard, a parameter's promise) drops that fact instead, so the call is
+  still checked without it.
 - **The vocabulary names are reserved in predicates, and only there.** Inside
   `{...}`, `elts`, `keys`, `member`, `union`, `inter`, `diff`, `subset`,
   `singleton` and `empty` always mean the set operations; a `@[measure]` may

@@ -168,8 +168,79 @@ declared over `(M_Tree Elem)` is ill-sorted.
   six-fix code, every diff line explained in the PR.
 - `--refine-report` wall time over `stdlib/*.march`, before and after.
 
-## 2. Later phases
+## 2. Phase 2 — structural `elts` and `len`, induction that reaches the stdlib
 
-Phases 2 to 4 (structural `elts`/`len` with Tier 2 for local functions and set
-predicates, ground cardinality, `SortedSet`) get their own step lists when
-Phase 1 lands; the design's §3 to §5 are the starting point.
+Design §3. Call-site checking of `len` and `elts` (the per-variable
+`len$x`/`elts$x` constants and literal folding) is not touched: it is correct,
+cheap, and every existing contract depends on it. Structure is added only
+where a proof walks list cells, the Tier 2 induction check.
+
+### 2.1 Built-in list measures in the logic
+
+- Two internal measures, `$len` and `$elts` (the `$` keeps them out of the
+  March namespace and away from `len$x` constants), applied to list terms.
+- `resolve_sorts` types them: the argument is an `M_List` instance, `$len` is
+  `Int`, `$elts` is a set of the instance's element. The rewrite renames each
+  to its instance (`$len$M_List$Int`) and reports it like a measure instance.
+- `query_instance_preamble` declares each instance with its axioms: non-negative
+  length, the `Nil` value, and one recursion equation over `Cons` with a
+  `Cons`-headed pattern.
+
+### 2.2 Tier 2 over built-in list returns and parameters
+
+- `post_induction_shape` and `induction_match_adt` accept `List` when the
+  measure preamble does not declare it, since each query now declares its list
+  instances.
+- In the predicate and in guards, `len`/`elts` applied to a list term reflect
+  to `$len`/`$elts` (unless a user measure named `len` is registered).
+- An `Elem` constructor payload that is a variable reflects as that variable
+  instead of a fresh constant, so `Cons(h, acc)` keeps `h`.
+- RED: the test `the built-in len does not yet carry Tier 2 induction` flips;
+  new accept and reject fixtures for an `elts` contract proved by recursion.
+
+### 2.3 Routing
+
+- A `List` return whose predicate uses `elts` tries Tier 2 before the existing
+  elts path, which still runs (and reports) when Tier 2 does not prove it.
+
+### 2.4 Ledger for the match shape
+
+- Shape 2 records its verdict exactly once, as Shape 1 does. Expect ledger
+  count changes under existing Tier 2 fixtures; each is reviewed.
+
+### 2.5 Local functions
+
+- A block-level `fn` with a refined return is checked like a top-level one,
+  the induction hypothesis keyed on the local name, and its proven contract
+  propagates to its calls in the enclosing body.
+
+### 2.6 Stdlib contracts
+
+- `reverse`, `append`, `filter`, `dedup` and their `go` helpers get proved
+  contracts (design §3.3), bodies unchanged. Oracle diff reviewed line by line;
+  audit baselines regenerated with the reason recorded.
+
+**Landed** on the Phase 2 branch, 2.1 to 2.6, with these additions found
+necessary on the way:
+
+- The built-in `len` of a CALL carries the callee's proved contract at call
+  sites (it only existed for `elts`), without which the flipped frontier test
+  could not report.
+- A postcondition check uses callee contracts (`post_lookup`), so the
+  verification gate became a monotone fixpoint; local `fn` contracts are
+  proved first and overlaid; Tier 2 accepts leading local `fn`s and assumes
+  parameter refinements (`dedup`'s helper keeps `member(prev, elts(acc))`).
+- Call sites fold `elts(Cons(h, acc))` with a named tail.
+- The gate took a declaration's key without checking that the declaration
+  itself carried the refinement; checking `stdlib/list.march` directly (the
+  CI skip ratchet) put the prelude's unrefined `reverse` beside `List`'s and
+  dropped the real contract.
+
+### Phase 2 exit
+
+- The Phase 1 gates, including the full suite under z3 4.8.12.
+
+## 3. Later phases
+
+Phases 3 and 4 (ground cardinality, `SortedSet`) get their own step lists when
+Phase 2 lands; the design's §4 and §5 are the starting point.
