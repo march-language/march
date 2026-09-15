@@ -6,7 +6,12 @@
 -- one live connection per peer, the invariant the L2 net-kernel maintains.
 mod PeerRegistry do
 
-  type Peer = { node_id : String, identity : NodeIdentity.Identity, fd : Int }
+  -- `fd` is the CONTROL connection; `data_fd` the data one, -1 until it is
+  -- up (a pre-split peer never opens one). See the control/data split in
+  -- specs/todos/2026-09-14-distributed-plane-flow-control-and-control-channel.md.
+  type Peer = { node_id : String, identity : NodeIdentity.Identity, fd : Int, data_fd : Int }
+
+  fn no_fd() : Int do -1 end
 
   type Registry = Registry(Map(String, Peer))
 
@@ -22,6 +27,16 @@ mod PeerRegistry do
       Registry(m) -> Registry(Map.insert(m, peer.node_id, peer, Map.str_cmp))
     end
   end
+
+  -- Attach the data connection to an already-registered peer.
+  fn add_data(reg : Registry, node_id : String, data_fd : Int) : Result(Registry, String) do
+    match lookup(reg, node_id) do
+      None -> Err("PeerRegistry: data connection for unknown peer " ++ node_id)
+      Some(p) -> Ok(add(reg, { p with data_fd: data_fd }))
+    end
+  end
+
+  fn has_data(p : Peer) : Bool do p.data_fd != no_fd() end
 
   fn lookup(reg : Registry, node_id : String) : Option(Peer) do
     match reg do Registry(m) -> Map.get(m, node_id, Map.str_cmp) end

@@ -130,4 +130,32 @@ behaviour), only the first frame arrives and the reader waits forever.
 Unit test `test/stdlib/test_peer_reader.march` covers every frame family's
 tag, an untagged RPC request, and garbage.
 
-Steps 2–4 (control/data split, credit, monitor acks) remain.
+## Shipped so far (2026-09-14): step 2, the control/data split
+
+`Handshake.Hello` carries a `role` (`"control"` | `"data"`), a fifth
+element on the wire; a four-element hello — every node before the split —
+decodes as control, so the shapes interoperate. `NetKernel.handshake_role`
+returns the peer's identity and the role it announced;
+`PeerRegistry.Peer` gains `data_fd` (`no_fd()` = -1 for a pre-split peer;
+`add_data`, `has_data`); `ClusterConn.connect_split` dials control then
+data, `accept_split` takes a peer's two connections in that order.
+`NodeSend.serve_one_reply(fd, reply_fd, …)` sends DELIVERY_FAILED on the
+control connection while the message arrived on data. The single-connection
+`connect_to_peer` / `accept_one` stay.
+
+Witness: `test/native/control_channel_loopback.march` — node-b writes a
+16 MiB frame on data and, a quarter of the way through, a SWIM ping on
+control; node-a's two readers timestamp the ping's arrival before the data
+stream's completion (on one connection the ping would sit behind the
+remaining 12 MiB). 5/5 identical runs.
+
+Measured on the way: `NetKernel.recv_frame` accumulates the frame with
+`List.append` per 4 KiB chunk, quadratic in the frame size — a 16 MiB frame
+is impractical through it; the witness streams the body as raw bytes. Credit
+accounting (step 3) should carry frames as `Bytes`, not `List(Int)`.
+
+Not yet moved to the control connection: the C runtime's `MONITOR_FIRE`
+write (`march_dist_monitor_fire_pid`) still targets the fd `DistLink`
+registered, which is whatever connection the MONITOR_REQ arrived on — a
+caller that receives MONITOR_REQ on control (as the split intends) already
+gets fires on control. Steps 3–4 (credit, monitor acks) remain.

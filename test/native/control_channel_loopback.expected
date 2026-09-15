@@ -1,0 +1,4 @@
+node-a: peer node-b, control fd and data fd differ: true
+node-a: control ping from node-b
+node-a: data stream complete: true
+node-a: control ping arrived before the data stream finished: true

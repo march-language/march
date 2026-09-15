@@ -12,6 +12,12 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **Control/data split for peer connections**: `ClusterConn.connect_split` /
+  `accept_split` open two authenticated connections per peer, told apart by a
+  `role` in the hello (a pre-split hello still reads as control); SWIM,
+  monitors and `DELIVERY_FAILED` travel on the control connection, actor
+  messages and RPC on data, so a control frame never queues behind a large data
+  frame (`test/native/control_channel_loopback`).
 
 - **A remote send's failure reaches the sending actor's mailbox**:
   `NodeSend.cast_from` records the sender under the seq and `NodeSend.on_failure`

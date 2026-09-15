@@ -64,7 +64,19 @@ mod NetKernel do
   -- the nonce WE issued). Returns the authenticated peer identity or a reason.
   fn handshake(fd : Int, my_id : NodeIdentity.Identity, secret : String,
                my_nonce : String) : Result(NodeIdentity.Identity, String) do
-    let hello = Handshake.encode_hello(Handshake.make_hello(my_id, my_nonce))
+    match handshake_role(fd, my_id, secret, my_nonce, Handshake.role_control()) do
+      Err(e) -> Err(e)
+      Ok((id, _role)) -> Ok(id)
+    end
+  end
+
+  -- The same handshake, opening a connection of [role] ("control" or "data",
+  -- Handshake.role_*); returns the peer's identity AND the role the peer
+  -- announced, so an acceptor knows which of a peer's two connections it
+  -- just took. A pre-split peer announces no role and reads as control.
+  fn handshake_role(fd : Int, my_id : NodeIdentity.Identity, secret : String,
+                    my_nonce : String, role : String) : Result((NodeIdentity.Identity, String), String) do
+    let hello = Handshake.encode_hello(Handshake.make_hello_role(my_id, my_nonce, role))
     match send_frame(fd, hello) do
       Err(e) -> Err(e)
       Ok(_) ->
@@ -84,8 +96,11 @@ mod NetKernel do
                           Ok(r2) ->
                             match r2 do
                               (pbytes, _buf2) ->
-                                Handshake.authenticate(secret, my_nonce, peer,
-                                                       bytes_to_str(pbytes))
+                                match Handshake.authenticate(secret, my_nonce, peer,
+                                                             bytes_to_str(pbytes)) do
+                                  Err(e) -> Err(e)
+                                  Ok(id) -> Ok((id, peer.role))
+                                end
                             end
                         end
                     end
