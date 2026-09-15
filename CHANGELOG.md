@@ -23,6 +23,12 @@ git log is authoritative for exact commits.
   in any declaration order. See "Proved list contracts" in
   `docs/refinement-types.md`.
 
+- **Cross-node monitors are reachable from March**: `dist_monitor_register(target_pid,
+  watcher_node, watcher_pid, fd)` is the surface of the runtime's monitor
+  registry, so a node's reader can register a `MONITOR_REQ` and the actor-death
+  path fires `MONITOR_FIRE` back to the watcher's node (compiled backend; the
+  interpreter refuses it loudly). `test/native/dist_monitor_loopback` pins one
+  `Down`, with the real reason, for a remotely killed actor.
 - **`NodeQueue`: credit-based flow control for remote sends.** A per-peer
   outbound queue whose writer actor alone owns the data connection: a frame is
   written only while the receiver has granted credit for it (`CREDIT` frames on
