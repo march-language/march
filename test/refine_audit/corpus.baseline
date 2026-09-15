@@ -36,6 +36,8 @@ native_actor_stop_drains_mailbox: coverage audit (user + stdlib): 104 enforced, 
 native_actor_stop_drains_mailbox: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_stop_tree: coverage audit (user + stdlib): 104 enforced, 0 inert (warned), 0 unenforced
 native_actor_stop_tree: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_aggregate_param_field_alias: coverage audit (user + stdlib): 104 enforced, 0 inert (warned), 0 unenforced
+native_aggregate_param_field_alias: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_as_pattern: coverage audit (user + stdlib): 104 enforced, 0 inert (warned), 0 unenforced
 native_as_pattern: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_atom_ctor_field: coverage audit (user + stdlib): 104 enforced, 0 inert (warned), 0 unenforced

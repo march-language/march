@@ -1448,6 +1448,32 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/default_args_nested.expected native_default_args_nested.out)))
 
+; ── owned record param: field alias outlives the param's drop ──────────────
+; Perceus pushes an owned aggregate parameter's drop ahead of each tail
+; expression, rebinding the tail only when it mentioned the parameter itself.
+; A tail passing a FIELD ALIAS (`let t = s.tree`, a pattern var bound from it,
+; or a projection of a projection) to a borrowing callee therefore ran after
+; the record, and the field it owns, had been freed: `SortedSet.size` of a
+; uniquely-held set panicked "non-exhaustive pattern match" compiled while the
+; interpreter printed the size.  Needs the stdlib (SortedSet), hence
+; (source_tree ../stdlib).
+(rule
+ (targets native_aggregate_param_field_alias native_aggregate_param_field_alias.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/aggregate_param_field_alias.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_aggregate_param_field_alias
+        native/aggregate_param_field_alias.march)
+   (with-stdout-to native_aggregate_param_field_alias.out
+        (system "./native_aggregate_param_field_alias")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/aggregate_param_field_alias.expected native_aggregate_param_field_alias.out)))
+
 ; ── n-ary string concat, compiled ─────────────────────────────────────────
 ; Desugar folds a 4+ operand interpolation into `string_concat_n`, whose ABI
 ; the generic builtin call path cannot emit: codegen spreads the operands into

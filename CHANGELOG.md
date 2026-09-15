@@ -316,6 +316,14 @@ git log is authoritative for exact commits.
   nothing when unset.
 
 ### Fixed
+- **A function that reads a field of a record parameter and hands it to a
+  read-only helper no longer frees the record first when compiled.**
+  `SortedSet.size(s)` on a set nothing else held panicked with
+  "non-exhaustive pattern match" (`SortedSet.size(SortedSet.new(cmp))` was
+  enough) while the interpreter printed the size. It only seemed to depend on
+  which `SortedSet` functions a program called because a later use of `s`
+  kept the set alive. User code of the same shape (`fn f(b) do count(b.tree)
+  end`, a match on `b.tree`, or `o.inner.tree`) was affected too.
 - **Module-qualified constructor patterns whose module name is also a stdlib
   type name now match when compiled.** With a nested `mod Tree do type T =
   Leaf(Int) | Node(T, T) end`, a match on `Tree.Leaf(n)` resolved to the stdlib
