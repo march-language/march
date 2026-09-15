@@ -67,22 +67,33 @@ let short (type_name : string) : string =
 let encoder_symbol (type_name : string) : string =
   "JsonTo$" ^ short type_name ^ ".to_json"
 
-(** Both backends' rewrite of a resolved `Node.send` site, in one place so
+(** The explicit form a typed send lowers to, by callee and arity:
+    `Node.send` (3 args) and `Node.enqueue` (4: the queue's policy last).
+    The message is the third argument of both. *)
+let tagged_callee (callee : string) (arity : int) : string option =
+  match callee, arity with
+  | "Node.send", 3 -> Some "Node.send_tagged"
+  | "Node.enqueue", 4 -> Some "Node.enqueue_tagged"
+  | _ -> None
+
+(** Both backends' rewrite of a resolved typed-send site, in one place so
     they cannot drift:
       Node.send(peer, to, msg)
         ==> Node.send_tagged(peer, to, "<tag>", JsonTo$T.to_json(msg))
+      Node.enqueue(q, to, msg, policy)
+        ==> Node.enqueue_tagged(q, to, "<tag>", JsonTo$T.to_json(msg), policy)
     [None] when the site was not recorded (the typechecker then already
-    reported it, or this is not a three-argument `Node.send`). *)
+    reported it) or the call is not one of the two shapes above. *)
 let node_send_rewrite (e : Ast.expr) : Ast.expr option =
   match e with
-  | Ast.EApp (Ast.EVar { txt = "Node.send"; span = fsp }, [peer; to_; msg], sp) ->
-    (match find sp with
-     | None -> None
-     | Some tag ->
-       Some (Ast.EApp (Ast.EVar { txt = "Node.send_tagged"; span = fsp },
-                       [ peer; to_;
+  | Ast.EApp (Ast.EVar { txt; span = fsp }, (dst :: to_ :: msg :: rest as args), sp) ->
+    (match tagged_callee txt (List.length args), find sp with
+     | Some tagged, Some tag ->
+       Some (Ast.EApp (Ast.EVar { txt = tagged; span = fsp },
+                       [ dst; to_;
                          Ast.ELit (Ast.LitString tag, sp);
                          Ast.EApp (Ast.EVar { txt = encoder_symbol tag; span = fsp },
-                                   [msg], sp) ],
-                       sp)))
+                                   [msg], sp) ] @ rest,
+                       sp))
+     | _ -> None)
   | _ -> None

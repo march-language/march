@@ -182,22 +182,31 @@ mod NodeSend do
       Err(e) -> Err(e)
       Ok(fr) ->
         let frame_bytes = match fr do (f, _) -> f end
-        match decode_msg(frame_bytes) do
-          Err(_) -> Ok(())
-          Ok(d) ->
-            let outcome =
-              if d.to_creation != my_creation do
-                Err("stale creation " ++ int_to_string(d.to_creation) ++ ", node is at " ++ int_to_string(my_creation))
-              else
-                dispatch(d)
-              end
-            match outcome do
+        handle_frame(frame_bytes, reply_fd, my_creation, dispatch)
+    end
+  end
+
+  -- The frame-level half of `serve_one_reply`, for a reader that already
+  -- has the frame in hand (a `PeerReader` dispatching by tag: ACTOR_MSG here,
+  -- MONITOR_REQ to the registry, ...). A frame that is not an ACTOR_MSG is
+  -- ignored (`Ok`); a stale creation or a dispatch `Err` is answered on
+  -- [reply_fd] with DELIVERY_FAILED. `Err` only on I/O failure.
+  fn handle_frame(frame : List(Int), reply_fd : Int, my_creation : Int, dispatch : Delivery -> Result((), String)) : Result((), String) do
+    match decode_msg(frame) do
+      Err(_) -> Ok(())
+      Ok(d) ->
+        let outcome =
+          if d.to_creation != my_creation do
+            Err("stale creation " ++ int_to_string(d.to_creation) ++ ", node is at " ++ int_to_string(my_creation))
+          else
+            dispatch(d)
+          end
+        match outcome do
+          Ok(_) -> Ok(())
+          Err(reason) ->
+            match NetKernel.send_frame(reply_fd, encode_failed(d.seq, reason)) do
+              Err(e) -> Err(e)
               Ok(_) -> Ok(())
-              Err(reason) ->
-                match NetKernel.send_frame(reply_fd, encode_failed(d.seq, reason)) do
-                  Err(e) -> Err(e)
-                  Ok(_) -> Ok(())
-                end
             end
         end
     end

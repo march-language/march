@@ -44,6 +44,8 @@ native_atom_ctor_field: coverage audit (user + stdlib): 104 enforced, 0 inert (w
 native_atom_ctor_field: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_bare_none_print: coverage audit (user + stdlib): 104 enforced, 0 inert (warned), 0 unenforced
 native_bare_none_print: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_block_sender_loopback: coverage audit (user + stdlib): 104 enforced, 0 inert (warned), 0 unenforced
+native_block_sender_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_boxed_adt_atom_field_not_boxed: coverage audit (user + stdlib): 104 enforced, 0 inert (warned), 0 unenforced
 native_boxed_adt_atom_field_not_boxed: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_boxed_adt_float_field: coverage audit (user + stdlib): 104 enforced, 0 inert (warned), 0 unenforced

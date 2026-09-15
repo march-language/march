@@ -1,0 +1,4 @@
+node-a: Down for Pid(0) reason=Killed after reconnect
+node-a: dropped connection 1 before reading the fire
+node-a: monitoring node-b's Pid(0)
+node-a: watcher saw 1 Down(s)
