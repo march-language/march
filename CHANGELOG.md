@@ -309,6 +309,13 @@ git log is authoritative for exact commits.
   nothing when unset.
 
 ### Fixed
+- **Module-qualified constructor patterns whose module name is also a stdlib
+  type name now match when compiled.** With a nested `mod Tree do type T =
+  Leaf(Int) | Node(T, T) end`, a match on `Tree.Leaf(n)` resolved to the stdlib
+  `OrderedMap.Tree`/`SortedSet.Tree` constructors, so the compiled binary
+  panicked with "non-exhaustive pattern match" while the interpreter was
+  correct. The same program no longer warns about a missing `LWWRegister` case
+  (a stdlib type that shares the bare name `T`).
 - `stdlib/dist_supervisor.march` failed a standalone `--check` ("Constructor `Normal` is
   ambiguous between multiple modules"): its restart decision matched `DistLink.DownReason`
   with bare arms that also name the local monitor's constructors. Qualified, and guarded.
