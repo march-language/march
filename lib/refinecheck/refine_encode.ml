@@ -2745,6 +2745,15 @@ let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
         let inst = to_sort (pop ()) in
         let decl = try Hashtbl.find measure_decl_args m with Not_found -> [] in
         (match inst with
+         (* A set-valued measure whose element is opaque (`Set(a)` over
+            `Tree(a)`) has no instance with a concrete element yet: its axioms
+            would state `Set(Elem)` results for `Tree(Int)` arguments.  The
+            query is a sort conflict, a skip, rather than a z3 rejection
+            (specs/todos/2026-09-15-generic-set-measure-instances.md). *)
+         | Smt.SData (_, args)
+           when args <> decl && List.exists (fun x -> x <> Smt.sdata "Elem") args
+                && Hashtbl.find_opt set_measure_elem m = Some (Smt.sdata "Elem") ->
+           raise Exit
          | Smt.SData (adt, args) when args <> decl && List.exists (fun x -> x <> Smt.sdata "Elem") args ->
            let name = measure_instance_name m adt args in
            if not (List.exists (fun i -> i.mi_name = name) !instances) then
@@ -2766,8 +2775,13 @@ let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
        applications; the node itself first for nothing.  [infer] allocates a
        constructor's slot AFTER its arguments and a [SetSng]'s BEFORE its
        element, and the rewrite mirrors each. *)
-    let goal' = rewrite goal in
-    let assumptions' = List.map rewrite assumptions in
+    match
+      let goal' = rewrite goal in
+      let assumptions' = List.map rewrite assumptions in
+      (goal', assumptions')
+    with
+    | exception Exit -> None
+    | goal', assumptions' ->
     let decls' = List.map (fun (n, _) -> (n, to_sort (sort_of_const n))) decls in
     Some (decls', goal', assumptions', List.rev !instances)
   end
