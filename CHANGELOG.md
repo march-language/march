@@ -329,6 +329,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`SortedSet.from_list`, `union`, `intersect` and `difference` work.** All
+  four passed their arguments to `List.fold_left` in the wrong order with a
+  curried callback, so `SortedSet.from_list([5, 3, 9, 3, 1], cmp)` panicked
+  with "non-exhaustive pattern match ... { cmp: <fn>, tree: Leaf }" both
+  compiled and interpreted, and `--check stdlib/sorted_set.march` reported 17
+  type errors.
 - **No more false "Non-exhaustive pattern match" on matches that mix wildcard
   and constructor sub-patterns in one position.** A fully covered match such as
   `Nd(Lf(a), Lf(b))`, `Nd(Nd(_, _), Lf(b))`, `Nd(_, Nd(_, _))`, `Lf(n)` warned
