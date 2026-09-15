@@ -326,7 +326,7 @@ mod Array do
   -- ── Public API ─────────────────────────────────────────────────────────────
 
   doc "Returns an empty persistent vector."
-  fn empty() do
+  fn empty() : {PVec(a) | pvec_length(_) == 0} do
     PVec(0, 0, TrieEmpty, Nil)
   end
 
@@ -383,7 +383,10 @@ mod Array do
   Returns a new vector with element at idx replaced by val. O(log₃₂ n).
   Panics if idx is out of range.
   """
-  fn set(v : PVec(a), idx : {Int | _ >= 0 && _ < pvec_length(v)}, val) do
+  -- Assumed, not proved: the checker cannot reflect the nested `if` that
+  -- picks tail vs trie.  Witnessed in test/stdlib/test_array.march.
+  @[assume]
+  fn set(v : PVec(a), idx : {Int | _ >= 0 && _ < pvec_length(v)}, val) : {PVec(a) | pvec_length(_) == pvec_length(v)} do
     match v do
     PVec(n, shift, root, tail) -> do
       if idx < 0 || idx >= n do panic("Array.set: index out of range")
@@ -400,7 +403,10 @@ mod Array do
   end
 
   doc "Appends an element at the end. O(1) amortized."
-  fn push(v, elem) do
+  -- Assumed, not proved (the tail-full branch goes through push_leaf's
+  -- tuple).  Witnessed in test/stdlib/test_array.march.
+  @[assume]
+  fn push(v : PVec(a), elem) : {PVec(a) | pvec_length(_) == pvec_length(v) + 1} do
     match v do
     PVec(n, shift, root, tail) -> do
       let tail_len = lst_len(tail)
@@ -465,7 +471,10 @@ mod Array do
   end
 
   doc "Applies f to each element, returning a new vector with the results. O(n)."
-  fn map(v, f) do
+  -- Assumed, not proved (rebuilds through to_list/from_list).  Witnessed in
+  -- test/stdlib/test_array.march.
+  @[assume]
+  fn map(v : PVec(a), f) : {PVec(b) | pvec_length(_) == pvec_length(v)} do
     let lst = to_list(v)
     fn apply_f(xs) do
       match xs do
@@ -502,7 +511,10 @@ mod Array do
   end
 
   doc "Builds a persistent vector from a list. O(n)."
-  fn from_list(xs) do
+  -- Assumed, not proved (an accumulator loop over push).  Witnessed in
+  -- test/stdlib/test_array.march.
+  @[assume]
+  fn from_list(xs : List(a)) : {PVec(a) | pvec_length(_) == len(xs)} do
     fn go(lst, acc) do
       match lst do
       Nil -> acc

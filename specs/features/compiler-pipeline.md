@@ -41,8 +41,6 @@ Source Code
     ↓
 [Division Safety Check] (lib/refinecheck/division_safety.ml — Division_safety.check_module, `cap no_panic` modules only)
     ↓
-[No-Alloc Check] (lib/refinecheck/no_alloc.ml — No_alloc.check_module, `cap no_alloc` modules only)
-    ↓
 [Capability Inference Hints] (lib/refinecheck/cap_infer.ml — Cap_infer.check_module, emits `needs` hints)
     ↓
 [Return Refinement Inference] (lib/refinecheck/return_infer.ml — Return_infer.infer_module, Z3 sign probing)
@@ -1241,7 +1239,7 @@ Renders TIR expressions and types as readable text for debugging (`--dump-tir`).
 | Join points | `lib/tir/join_points.ml` | ✓ Complete |
 | Refinement check | `lib/refinecheck/refine_check.ml` | ✓ Complete (post-typecheck) |
 | Division safety | `lib/refinecheck/division_safety.ml` | ✓ Complete (`cap no_panic`: proves divisors ≠ 0 via Z3) |
-| No-alloc check | `lib/refinecheck/no_alloc.ml` | ✓ Complete (`cap no_alloc`: bans heap-allocating exprs) |
+| Allocation contracts | `lib/tir/alloc_contract.ml` | ✓ Complete (`cap no_alloc` modules and `@[no_alloc]` functions, judged on the final TIR at the end of `Contract_pipeline.run`; `--check`/`march check` lower on demand via `Contract_pipeline.check_contracts`; the syntactic `lib/refinecheck/no_alloc.ml` walk was removed 2026-09-15) |
 | Capability inference | `lib/refinecheck/cap_infer.ml` | ✓ Complete (emits `needs` hint at call sites missing cap decl) |
 | Return refinement inference | `lib/refinecheck/return_infer.ml` | ✓ Complete (Z3 sign-candidate probing for return type hints) |
 | Inlining | `lib/tir/inline.ml` | ✓ Complete |

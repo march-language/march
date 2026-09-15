@@ -3978,14 +3978,16 @@ boolean flag on the typechecking `env` inside `check_decl`'s `DOpts` arm
 (`typecheck.ml:7634-7637`: `no_panic_mod`/`pure_mod`/`no_extern_mod`/
 `deterministic_mod`), each consulted once, at the end of module checking, by
 its own dedicated pass (`typecheck.ml:8312-8323`). **`cap no_alloc` is the
-one exception**: it has no `env` field of its own at all; instead
-`lib/refinecheck/no_alloc.ml`'s `check_decls` (`:72-83`) re-scans the raw
-`Ast.decl list` for a `DOpts` entry containing `"no_alloc"` independently,
-as its own free-standing post-typecheck refinecheck pass (parallel to
-`Division_safety`, §2.8's opening paragraph): a module can be simultaneously
-`cap no_panic` (an `env`-flag-driven `typecheck.ml` pass) and `cap no_alloc`
-(a from-scratch AST re-scan in a different file), and the two checks never
-share state.
+one exception**: it has no `env` field and is not a typecheck pass at all.
+Since 2026-09-15 it is a module-wide hard `@[no_alloc]` contract:
+`Alloc_contract.collect` (`lib/tir/alloc_contract.ml`) finds the `DOpts`
+entry containing `"no_alloc"` and marks every function the module declares
+(nested modules, impl methods, actor handlers) `Hard`, and the contract is
+judged on the final TIR at the end of `Contract_pipeline.run`. `--check`
+lowers the program on demand to judge it; the interpreter reports it as
+unchecked. A module can be simultaneously `cap no_panic` (an
+`env`-flag-driven `typecheck.ml` pass) and `cap no_alloc` (a post-lowering
+TIR check), and the two checks never share state.
 
 **`cap no_panic`** (`check_no_panic_module`, `typecheck.ml:6523-6621`) bans
 direct and TRANSITIVE calls to a fixed "panic surface" (three unioned name
@@ -4028,24 +4030,20 @@ passes independently gate on the SAME `no_panic_mod`/`env.no_panic_modules`
 flag, so a `cap no_panic` module's unsafe division is caught even though
 `check_no_panic_module` itself never inspects division at all.
 
-**`cap no_alloc`** (`lib/refinecheck/no_alloc.ml:17-65`) is a purely
-syntactic per-function-body scan for four heap-allocating expression shapes:
-a non-empty `ETuple` (the empty tuple `()` is explicitly exempted, `:20`, as
-with no heap cell), any `ERecord` literal, an `ECon` with one or more
-arguments (a nullary constructor, `:29`, allocates no memory, since a
-zero-arg ADT variant is represented as an immediate tag, not a boxed cell,
-consistent with `core-march.md`'s niche-representation account of nullary
-ADTs), and any `ELam` (closure literal, capturing a lambda's environment
-requires a heap allocation). The scan recurses into every other expression
-form (`if`/`match`/`let`/blocks/pipe/assert/sigil/`dbg`/`send`/record-update
-(`:38-63`)), so an allocation nested arbitrarily deep inside control flow is
-still caught, not just a top-level allocation. Unlike `cap no_panic`, there
-is **no transitive closure across function calls**: `check_decls` visits
-each `DFn` in the module independently (`:78-83`) and does not track which
-LOCAL helper functions allocate, so a `cap no_alloc` module calling its own
-allocating helper is flagged only at the definition site of the helper
-itself, not additionally at each call site (contrast `cap no_panic`'s
-fixpoint, which DOES propagate transitively through local calls).
+**`cap no_alloc`** is the `@[no_alloc]` allocation contract applied to every
+function in the module (`lib/tir/alloc_contract.ml`; design
+`specs/2026-09-15-refinement-remaining-designs.md` §C). It is judged on the
+final TIR, after Perceus and escape analysis, so a constructor reused in
+place (FBIP) or promoted to the stack does not count, while a tuple, record,
+closure, record update, string concatenation, boxed `Float` at an erased slot
+or payload-sharing nullary cell (`Nil`) that the compiled code really
+allocates does. It is **transitive**: a fixpoint over the monomorphised module
+blames a function that calls an allocating callee, naming the callee (like
+`cap no_panic`'s fixpoint). Calls through an unknown closure or an extern fail
+unless the function is marked `@[no_alloc(assume)]`; an explicit per-function
+form inside the module wins over the cap. (Until 2026-09-15 this was a
+syntactic walk of four AST shapes in `lib/refinecheck/no_alloc.ml` (removed),
+which gave different answers in both directions.)
 
 **`cap pure`** (`check_pure_module`, `typecheck.ml:6645-6661`) and **`cap
 deterministic`** (`check_deterministic_module`, `typecheck.ml:6710-6727`)
@@ -4261,8 +4259,8 @@ witnesses shipped with the Task 5/6 fixes, described after this list:
   or not.
 - **`t55_cap_no_alloc_arithmetic`**: `NoAllocMath` (`cap no_alloc`) declares
   `max3` (nested `if`/`else`) and `abs_diff` (`let` + arithmetic negation);
-  neither touches any of `no_alloc.ml`'s four allocating shapes. `--check`
-  exit 0.
+  both compile to scalar code with no heap cell and no allocating callee, so
+  the allocation contract the cap imposes holds. `--check` exit 0.
 - **`t56_cap_no_extern_ok`**: `NoFFIService` (`cap no_extern`, `needs
   IO.Network`) declares one ordinary `fn ping(_cap : Cap(IO.Network), host :
   String) : Int` calling `string_length`; no `DExtern` block, no `needs
@@ -4274,8 +4272,9 @@ witnesses shipped with the Task 5/6 fixes, described after this list:
   calls `panic`, which can panic ``.
 - **`t43_cap_no_alloc_tuple`**: `NoAllocPair` (`cap no_alloc`) declares
   `fn make_pair(a, b) : (Int, Int) do (a, b) end`; the non-empty 2-tuple
-  return trips `no_alloc.ml`'s `ETuple` arm. Pinned: `` tuple construction
-  allocates in a `cap no_alloc` module ``.
+  return is a heap tuple escaping the call, so the contract the cap imposes
+  fails. Pinned: `` `make_pair` is in `cap no_alloc` module `NoAllocPair`
+  but allocates ``.
 - **`t44_cap_no_extern_extern_block`**: `NoFFI` (`cap no_extern`, `needs
   IO.FileSystem`) declares an `extern "libc" : Cap(IO.FileSystem) do ... end`
   block; `check_no_extern_module`'s `DExtern` arm raises unconditionally,
@@ -5788,7 +5787,7 @@ five BEHAVIORAL module caps (`cap no_panic`/`no_alloc`/`no_extern`/`pure`/
 `deterministic`), a mechanism orthogonal to the IO-permission `needs`/`Cap(X)`
 infrastructure Tasks 1–3 cover (shares only the `cap` keyword and the `Ast.DOpts`
 AST node). `cap no_panic` (`check_no_panic_module`, `typecheck.ml:6489-6566`)
-and `cap no_alloc` (`lib/refinecheck/no_alloc.ml`) are CORRECT for the shapes
+and `cap no_alloc` (then `lib/refinecheck/no_alloc.ml`, removed 2026-09-15 for the TIR allocation contract) are CORRECT for the shapes
 this task's corpus witnesses (explicit `panic`/unsafe division; non-empty
 tuple/record/`ECon`/`ELam` construction). `cap no_extern`
 (`check_no_extern_module`, `typecheck.ml:6604-6628`) is likewise correct for

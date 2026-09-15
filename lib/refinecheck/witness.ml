@@ -895,6 +895,11 @@ let free_vars (e : A.expr) : string list =
   let add n = if n <> "_" && not (List.mem n !acc) then acc := n :: !acc in
   let rec go = function
     | A.EVar { A.txt; _ } -> add txt
+    (* The head of an application is a callee, not a value the example can
+       assign: `-1` parses as `negate(1)`, and treating `negate` as a free
+       variable rendered the example `(e.g. negate = 0)`.  A local closure
+       called as a head would not be renderable as a value either. *)
+    | A.EApp (A.EVar _, args, _) -> List.iter go args
     | A.EApp (f, args, _) -> go f; List.iter go args
     | A.ECon (_, args, _) -> List.iter go args
     | A.EField (r, _, _) -> go r

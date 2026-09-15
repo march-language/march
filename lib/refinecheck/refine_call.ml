@@ -824,10 +824,11 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
               to be discharged")
       in
       Err.error errctx ~span
-        (Printf.sprintf
-           "`cap verified` module: cannot verify %s `%s` on `%s` (%s: %s)\n%s"
-           obligation_noun (pred_str rp.pred) callee (Obligation.reason_name r)
-           (Obligation.reason_detail r) remedy)
+        (display_measures
+           (Printf.sprintf
+              "`cap verified` module: cannot verify %s `%s` on `%s` (%s: %s)\n%s"
+              obligation_noun (pred_str rp.pred) callee (Obligation.reason_name r)
+              (Obligation.reason_detail r) remedy))
     (* Outside `cap verified`, a skip stays non-fatal. A DIAGNOSED cause is
        specific and actionable, so it reports at every call site; the residual
        reasons keep the once-per-module throttle, whose rationale — "advice
@@ -894,7 +895,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
             obligation_noun (pred_str rp.pred) callee
             (Obligation.reason_name r) (Obligation.reason_detail r)
       in
-      Err.hint errctx ~span body
+      Err.hint errctx ~span (display_measures body)
     | _ -> ()
   in
   match List.nth_opt args rp.idx with
@@ -2621,8 +2622,9 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                  else
                    [{ Err.lbl_span = sp;
                       Err.lbl_message =
-                        Printf.sprintf "this argument must satisfy `%s`"
-                          (pred_str rp.pred) }]
+                        display_measures
+                          (Printf.sprintf "this argument must satisfy `%s`"
+                             (pred_str rp.pred)) }]
                | _ -> []
              in
              (* The inline example: prefer a witness-validated, shrunk,
@@ -2632,6 +2634,10 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
              let cx_str =
                let fallback () = format_cx (model_of first) in
                match subject, List.nth_opt args rp.idx with
+               (* A closed argument (`Array.get(v, -1)`) IS its own example: the
+                  message already quotes the call, and the raw model names only
+                  solver symbols. *)
+               | Argument, Some arg when Witness.free_vars arg = [] -> ""
                | Argument, Some arg ->
                  (match
                     Witness.confirm_precond ~sc ~path ~pred:rp.pred
@@ -2646,7 +2652,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
              in
              Err.report errctx
                { Err.severity = Err.Error; span;
-                 message = Printf.sprintf
+                 message = display_measures @@ Printf.sprintf
                    "refinement violation: %s does not satisfy %s `%s`%s\n%s"
                    param_label obligation_noun (pred_str rp.pred)
                    cx_str
@@ -2770,6 +2776,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                    every unrefined wrapper around a panicking function is in
                    that category.  `cap verified` is the established opt-in for
                    turning unverifiable obligations into errors. *)
+                let text = display_measures text in
                 if !strict_verified then Err.error errctx ~span text
                 else Err.warning errctx ~span text;
                 (* Record the site for the post-walk suggestion pass.  The
