@@ -43,6 +43,12 @@ git log is authoritative for exact commits.
   remote actor's death and the ack still gets exactly one `Down` after reconnecting; and the
   `restart` scenario's monitor half: a crashed node's monitors fire `NodeDown` locally, once.
   `NodeSend.handle_frame` is the frame-level receiver for readers that dispatch by tag.
+- **`Array` operations state their effect on the length.** `Array.empty`,
+  `from_list`, `push`, `set` and `map` carry length postconditions, so
+  `Array.get(Array.from_list([1, 2, 3]), 7)` is a compile error and a guard on
+  `List.length(xs)` or `Array.length(v)` carries through them. `empty`'s is
+  proved; the other four are `@[assume]`d, each with a runtime property
+  witness.
 - **List contracts proved from list code.** A function that recurses over a
   list can have its `elts` and `len` return refinement proved from its body,
   including through a local helper `fn`, a call to another proved function,
@@ -356,6 +362,10 @@ git log is authoritative for exact commits.
   after the actor (was "stub X called before initialisation").
 - A cross-node `MONITOR_FIRE` written to a connection whose peer had already closed raised
   SIGPIPE and could kill the node; it now fails quietly and stays pending for resend.
+- **Refinement violations on `Array` calls name `Array.length`.** The
+  message and its suggested guard spelled the private measure `pvec_length`,
+  which does not compile in user code; a literal negative index also showed
+  a meaningless `(e.g. negate = 0)` example, which is now omitted.
 - `stdlib/dist_supervisor.march` failed a standalone `--check` ("Constructor `Normal` is
   ambiguous between multiple modules"): its restart decision matched `DistLink.DownReason`
   with bare arms that also name the local monitor's constructors. Qualified, and guarded.
@@ -698,6 +708,18 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **`cap no_alloc` and `@[no_alloc]` are one check.** `cap no_alloc` now puts
+  every function in the module (nested modules, impl methods and actor
+  handlers included) under a hard `@[no_alloc]` contract, judged on the
+  compiled program; the syntactic walk that used to answer for the cap is
+  gone. A module whose function calls an allocating helper is now rejected,
+  and one that builds a constructor the compiler reuses in place is now
+  accepted. An explicit `@[no_alloc(warn)]` (or `assume`/`transient`) on a
+  function inside the module overrides the cap. `march --check` and
+  `march check` now report both forms, lowering the program when it contains
+  either (about 0.9 s extra on a small file, nothing for programs without
+  them); the interpreter, `--jit`, the REPL and `march test` print one
+  `no_alloc_unchecked` hint instead of judging.
 - **`cap no_panic` accepts a guarded `Array.get`/`set`/`pop`.** They were
   banned outright; they now join `List.nth` and friends in the proof-checked
   set, so a call whose bounds guard proves the contract is accepted, and an
