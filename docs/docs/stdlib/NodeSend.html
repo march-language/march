@@ -378,6 +378,8 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="sb-group"><div class="sb-group-hdr" data-href="ClusterAuth.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="ClusterAuth.html">ClusterAuth</a></div><div class="sb-sub"><a class="sl" href="ClusterAuth.html#fn-prove"><span class="sb-kind" style="color:var(--fn)">F</span>prove</a>
 <a class="sl" href="ClusterAuth.html#fn-verify"><span class="sb-kind" style="color:var(--fn)">F</span>verify</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="ClusterConn.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="ClusterConn.html">ClusterConn</a></div><div class="sb-sub"><a class="sl" href="ClusterConn.html#fn-accept_one"><span class="sb-kind" style="color:var(--fn)">F</span>accept_one</a>
+<a class="sl" href="ClusterConn.html#fn-accept_split"><span class="sb-kind" style="color:var(--fn)">F</span>accept_split</a>
+<a class="sl" href="ClusterConn.html#fn-connect_split"><span class="sb-kind" style="color:var(--fn)">F</span>connect_split</a>
 <a class="sl" href="ClusterConn.html#fn-connect_to_peer"><span class="sb-kind" style="color:var(--fn)">F</span>connect_to_peer</a>
 <a class="sl" href="ClusterConn.html#fn-listen"><span class="sb-kind" style="color:var(--fn)">F</span>listen</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="ClusterLoad.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="ClusterLoad.html">ClusterLoad</a></div><div class="sb-sub"><a class="sl" href="ClusterLoad.html#type-NodeLoad"><span class="sb-kind" style="color:var(--ty)">T</span>NodeLoad</a>
@@ -876,7 +878,10 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Handshake.html#fn-authenticate"><span class="sb-kind" style="color:var(--fn)">F</span>authenticate</a>
 <a class="sl" href="Handshake.html#fn-decode_hello"><span class="sb-kind" style="color:var(--fn)">F</span>decode_hello</a>
 <a class="sl" href="Handshake.html#fn-encode_hello"><span class="sb-kind" style="color:var(--fn)">F</span>encode_hello</a>
-<a class="sl" href="Handshake.html#fn-make_hello"><span class="sb-kind" style="color:var(--fn)">F</span>make_hello</a></div></div>
+<a class="sl" href="Handshake.html#fn-make_hello"><span class="sb-kind" style="color:var(--fn)">F</span>make_hello</a>
+<a class="sl" href="Handshake.html#fn-make_hello_role"><span class="sb-kind" style="color:var(--fn)">F</span>make_hello_role</a>
+<a class="sl" href="Handshake.html#fn-role_control"><span class="sb-kind" style="color:var(--fn)">F</span>role_control</a>
+<a class="sl" href="Handshake.html#fn-role_data"><span class="sb-kind" style="color:var(--fn)">F</span>role_data</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="HashMap.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="HashMap.html">HashMap</a></div><div class="sb-sub"><a class="sl" href="HashMap.html#type-HEntry"><span class="sb-kind" style="color:var(--ty)">T</span>HEntry</a>
 <a class="sl" href="HashMap.html#type-HashMap"><span class="sb-kind" style="color:var(--ty)">T</span>HashMap</a>
 <a class="sl" href="HashMap.html#fn-delete"><span class="sb-kind" style="color:var(--fn)">F</span>delete</a>
@@ -1496,7 +1501,8 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="NativeArray.html#fn-to_list_u8"><span class="sb-kind" style="color:var(--fn)">F</span>to_list_u8</a>
 <a class="sl" href="NativeArray.html#fn-u8_to_f32_arr"><span class="sb-kind" style="color:var(--fn)">F</span>u8_to_f32_arr</a>
 <a class="sl" href="NativeArray.html#fn-u8_to_int_arr"><span class="sb-kind" style="color:var(--fn)">F</span>u8_to_int_arr</a></div></div>
-<div class="sb-group"><div class="sb-group-hdr" data-href="NetFrame.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="NetFrame.html">NetFrame</a></div><div class="sb-sub"><a class="sl" href="NetFrame.html#fn-decode"><span class="sb-kind" style="color:var(--fn)">F</span>decode</a>
+<div class="sb-group"><div class="sb-group-hdr" data-href="NetFrame.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="NetFrame.html">NetFrame</a></div><div class="sb-sub"><a class="sl" href="NetFrame.html#fn-body_length"><span class="sb-kind" style="color:var(--fn)">F</span>body_length</a>
+<a class="sl" href="NetFrame.html#fn-decode"><span class="sb-kind" style="color:var(--fn)">F</span>decode</a>
 <a class="sl" href="NetFrame.html#fn-encode"><span class="sb-kind" style="color:var(--fn)">F</span>encode</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="NetKernel.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="NetKernel.html">NetKernel</a></div><div class="sb-sub"><a class="sl" href="NetKernel.html#fn-bytes_to_str"><span class="sb-kind" style="color:var(--fn)">F</span>bytes_to_str</a>
 <a class="sl" href="NetKernel.html#fn-decode_monitor_fire"><span class="sb-kind" style="color:var(--fn)">F</span>decode_monitor_fire</a>
@@ -1510,7 +1516,9 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="NetKernel.html#fn-frame_tag"><span class="sb-kind" style="color:var(--fn)">F</span>frame_tag</a>
 <a class="sl" href="NetKernel.html#fn-fresh_nonce"><span class="sb-kind" style="color:var(--fn)">F</span>fresh_nonce</a>
 <a class="sl" href="NetKernel.html#fn-handshake"><span class="sb-kind" style="color:var(--fn)">F</span>handshake</a>
+<a class="sl" href="NetKernel.html#fn-handshake_role"><span class="sb-kind" style="color:var(--fn)">F</span>handshake_role</a>
 <a class="sl" href="NetKernel.html#fn-recv_frame"><span class="sb-kind" style="color:var(--fn)">F</span>recv_frame</a>
+<a class="sl" href="NetKernel.html#fn-recv_frame_exact"><span class="sb-kind" style="color:var(--fn)">F</span>recv_frame_exact</a>
 <a class="sl" href="NetKernel.html#fn-send_frame"><span class="sb-kind" style="color:var(--fn)">F</span>send_frame</a>
 <a class="sl" href="NetKernel.html#fn-str_to_bytes"><span class="sb-kind" style="color:var(--fn)">F</span>str_to_bytes</a>
 <a class="sl" href="NetKernel.html#fn-to_wire"><span class="sb-kind" style="color:var(--fn)">F</span>to_wire</a></div></div>
@@ -1543,6 +1551,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="NodeSend.html#fn-on_failure"><span class="sb-kind" style="color:var(--fn)">F</span>on_failure</a>
 <a class="sl" href="NodeSend.html#fn-recv_failure"><span class="sb-kind" style="color:var(--fn)">F</span>recv_failure</a>
 <a class="sl" href="NodeSend.html#fn-serve_one"><span class="sb-kind" style="color:var(--fn)">F</span>serve_one</a>
+<a class="sl" href="NodeSend.html#fn-serve_one_reply"><span class="sb-kind" style="color:var(--fn)">F</span>serve_one_reply</a>
 <a class="sl" href="NodeSend.html#fn-tag_actor_msg"><span class="sb-kind" style="color:var(--fn)">F</span>tag_actor_msg</a>
 <a class="sl" href="NodeSend.html#fn-tag_delivery_failed"><span class="sb-kind" style="color:var(--fn)">F</span>tag_delivery_failed</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Option.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Option.html">Option</a></div><div class="sb-sub"><a class="sl" href="Option.html#fn-expect"><span class="sb-kind" style="color:var(--fn)">F</span>expect</a>
@@ -1636,9 +1645,12 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="sb-group"><div class="sb-group-hdr" data-href="PeerRegistry.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="PeerRegistry.html">PeerRegistry</a></div><div class="sb-sub"><a class="sl" href="PeerRegistry.html#type-Peer"><span class="sb-kind" style="color:var(--ty)">T</span>Peer</a>
 <a class="sl" href="PeerRegistry.html#type-Registry"><span class="sb-kind" style="color:var(--ty)">T</span>Registry</a>
 <a class="sl" href="PeerRegistry.html#fn-add"><span class="sb-kind" style="color:var(--fn)">F</span>add</a>
+<a class="sl" href="PeerRegistry.html#fn-add_data"><span class="sb-kind" style="color:var(--fn)">F</span>add_data</a>
 <a class="sl" href="PeerRegistry.html#fn-contains"><span class="sb-kind" style="color:var(--fn)">F</span>contains</a>
 <a class="sl" href="PeerRegistry.html#fn-empty"><span class="sb-kind" style="color:var(--fn)">F</span>empty</a>
+<a class="sl" href="PeerRegistry.html#fn-has_data"><span class="sb-kind" style="color:var(--fn)">F</span>has_data</a>
 <a class="sl" href="PeerRegistry.html#fn-lookup"><span class="sb-kind" style="color:var(--fn)">F</span>lookup</a>
+<a class="sl" href="PeerRegistry.html#fn-no_fd"><span class="sb-kind" style="color:var(--fn)">F</span>no_fd</a>
 <a class="sl" href="PeerRegistry.html#fn-peers"><span class="sb-kind" style="color:var(--fn)">F</span>peers</a>
 <a class="sl" href="PeerRegistry.html#fn-remove"><span class="sb-kind" style="color:var(--fn)">F</span>remove</a>
 <a class="sl" href="PeerRegistry.html#fn-size"><span class="sb-kind" style="color:var(--fn)">F</span>size</a></div></div>
@@ -2391,6 +2403,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="item" id="fn-on_failure"><div class="ih"><span class="badge bfn">fn</span><span class="name">on_failure</span><span class="sig">on_failure(frame : List(Int), deliver) : Result((), String)</span><a class="anchor-link" href="#fn-on_failure" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="fn-recv_failure"><div class="ih"><span class="badge bfn">fn</span><span class="name">recv_failure</span><span class="sig">recv_failure(fd : Int, buf : List(Int)) : Result((Int, String), String)</span><a class="anchor-link" href="#fn-recv_failure" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="fn-serve_one"><div class="ih"><span class="badge bfn">fn</span><span class="name">serve_one</span><span class="sig">serve_one(fd : Int, my_creation : Int, dispatch : <a href="#type-Delivery">Delivery</a> -&gt; Result((), String)) : Result((), String)</span><a class="anchor-link" href="#fn-serve_one" title="Link">#</a></div><div class="ib"></div></div>
+<div class="item" id="fn-serve_one_reply"><div class="ih"><span class="badge bfn">fn</span><span class="name">serve_one_reply</span><span class="sig">serve_one_reply(fd : Int, reply_fd : Int, my_creation : Int, dispatch : <a href="#type-Delivery">Delivery</a> -&gt; Result((), String)) : Result((), String)</span><a class="anchor-link" href="#fn-serve_one_reply" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="fn-tag_actor_msg"><div class="ih"><span class="badge bfn">fn</span><span class="name">tag_actor_msg</span><span class="sig">tag_actor_msg() : Int do 9 end</span><a class="anchor-link" href="#fn-tag_actor_msg" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="fn-tag_delivery_failed"><div class="ih"><span class="badge bfn">fn</span><span class="name">tag_delivery_failed</span><span class="sig">tag_delivery_failed() : Int do 10 end</span><a class="anchor-link" href="#fn-tag_delivery_failed" title="Link">#</a></div><div class="ib"></div></div></main></div><script>
 /* Theme toggle */

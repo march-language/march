@@ -378,6 +378,8 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="sb-group"><div class="sb-group-hdr" data-href="ClusterAuth.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="ClusterAuth.html">ClusterAuth</a></div><div class="sb-sub"><a class="sl" href="ClusterAuth.html#fn-prove"><span class="sb-kind" style="color:var(--fn)">F</span>prove</a>
 <a class="sl" href="ClusterAuth.html#fn-verify"><span class="sb-kind" style="color:var(--fn)">F</span>verify</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="ClusterConn.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="ClusterConn.html">ClusterConn</a></div><div class="sb-sub"><a class="sl" href="ClusterConn.html#fn-accept_one"><span class="sb-kind" style="color:var(--fn)">F</span>accept_one</a>
+<a class="sl" href="ClusterConn.html#fn-accept_split"><span class="sb-kind" style="color:var(--fn)">F</span>accept_split</a>
+<a class="sl" href="ClusterConn.html#fn-connect_split"><span class="sb-kind" style="color:var(--fn)">F</span>connect_split</a>
 <a class="sl" href="ClusterConn.html#fn-connect_to_peer"><span class="sb-kind" style="color:var(--fn)">F</span>connect_to_peer</a>
 <a class="sl" href="ClusterConn.html#fn-listen"><span class="sb-kind" style="color:var(--fn)">F</span>listen</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="ClusterLoad.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="ClusterLoad.html">ClusterLoad</a></div><div class="sb-sub"><a class="sl" href="ClusterLoad.html#type-NodeLoad"><span class="sb-kind" style="color:var(--ty)">T</span>NodeLoad</a>
@@ -876,7 +878,10 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Handshake.html#fn-authenticate"><span class="sb-kind" style="color:var(--fn)">F</span>authenticate</a>
 <a class="sl" href="Handshake.html#fn-decode_hello"><span class="sb-kind" style="color:var(--fn)">F</span>decode_hello</a>
 <a class="sl" href="Handshake.html#fn-encode_hello"><span class="sb-kind" style="color:var(--fn)">F</span>encode_hello</a>
-<a class="sl" href="Handshake.html#fn-make_hello"><span class="sb-kind" style="color:var(--fn)">F</span>make_hello</a></div></div>
+<a class="sl" href="Handshake.html#fn-make_hello"><span class="sb-kind" style="color:var(--fn)">F</span>make_hello</a>
+<a class="sl" href="Handshake.html#fn-make_hello_role"><span class="sb-kind" style="color:var(--fn)">F</span>make_hello_role</a>
+<a class="sl" href="Handshake.html#fn-role_control"><span class="sb-kind" style="color:var(--fn)">F</span>role_control</a>
+<a class="sl" href="Handshake.html#fn-role_data"><span class="sb-kind" style="color:var(--fn)">F</span>role_data</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="HashMap.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="HashMap.html">HashMap</a></div><div class="sb-sub"><a class="sl" href="HashMap.html#type-HEntry"><span class="sb-kind" style="color:var(--ty)">T</span>HEntry</a>
 <a class="sl" href="HashMap.html#type-HashMap"><span class="sb-kind" style="color:var(--ty)">T</span>HashMap</a>
 <a class="sl" href="HashMap.html#fn-delete"><span class="sb-kind" style="color:var(--fn)">F</span>delete</a>
@@ -1496,7 +1501,8 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="NativeArray.html#fn-to_list_u8"><span class="sb-kind" style="color:var(--fn)">F</span>to_list_u8</a>
 <a class="sl" href="NativeArray.html#fn-u8_to_f32_arr"><span class="sb-kind" style="color:var(--fn)">F</span>u8_to_f32_arr</a>
 <a class="sl" href="NativeArray.html#fn-u8_to_int_arr"><span class="sb-kind" style="color:var(--fn)">F</span>u8_to_int_arr</a></div></div>
-<div class="sb-group"><div class="sb-group-hdr" data-href="NetFrame.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="NetFrame.html">NetFrame</a></div><div class="sb-sub"><a class="sl" href="NetFrame.html#fn-decode"><span class="sb-kind" style="color:var(--fn)">F</span>decode</a>
+<div class="sb-group"><div class="sb-group-hdr" data-href="NetFrame.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="NetFrame.html">NetFrame</a></div><div class="sb-sub"><a class="sl" href="NetFrame.html#fn-body_length"><span class="sb-kind" style="color:var(--fn)">F</span>body_length</a>
+<a class="sl" href="NetFrame.html#fn-decode"><span class="sb-kind" style="color:var(--fn)">F</span>decode</a>
 <a class="sl" href="NetFrame.html#fn-encode"><span class="sb-kind" style="color:var(--fn)">F</span>encode</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="NetKernel.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="NetKernel.html">NetKernel</a></div><div class="sb-sub"><a class="sl" href="NetKernel.html#fn-bytes_to_str"><span class="sb-kind" style="color:var(--fn)">F</span>bytes_to_str</a>
 <a class="sl" href="NetKernel.html#fn-decode_monitor_fire"><span class="sb-kind" style="color:var(--fn)">F</span>decode_monitor_fire</a>
@@ -1510,7 +1516,9 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="NetKernel.html#fn-frame_tag"><span class="sb-kind" style="color:var(--fn)">F</span>frame_tag</a>
 <a class="sl" href="NetKernel.html#fn-fresh_nonce"><span class="sb-kind" style="color:var(--fn)">F</span>fresh_nonce</a>
 <a class="sl" href="NetKernel.html#fn-handshake"><span class="sb-kind" style="color:var(--fn)">F</span>handshake</a>
+<a class="sl" href="NetKernel.html#fn-handshake_role"><span class="sb-kind" style="color:var(--fn)">F</span>handshake_role</a>
 <a class="sl" href="NetKernel.html#fn-recv_frame"><span class="sb-kind" style="color:var(--fn)">F</span>recv_frame</a>
+<a class="sl" href="NetKernel.html#fn-recv_frame_exact"><span class="sb-kind" style="color:var(--fn)">F</span>recv_frame_exact</a>
 <a class="sl" href="NetKernel.html#fn-send_frame"><span class="sb-kind" style="color:var(--fn)">F</span>send_frame</a>
 <a class="sl" href="NetKernel.html#fn-str_to_bytes"><span class="sb-kind" style="color:var(--fn)">F</span>str_to_bytes</a>
 <a class="sl" href="NetKernel.html#fn-to_wire"><span class="sb-kind" style="color:var(--fn)">F</span>to_wire</a></div></div>
@@ -1543,6 +1551,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="NodeSend.html#fn-on_failure"><span class="sb-kind" style="color:var(--fn)">F</span>on_failure</a>
 <a class="sl" href="NodeSend.html#fn-recv_failure"><span class="sb-kind" style="color:var(--fn)">F</span>recv_failure</a>
 <a class="sl" href="NodeSend.html#fn-serve_one"><span class="sb-kind" style="color:var(--fn)">F</span>serve_one</a>
+<a class="sl" href="NodeSend.html#fn-serve_one_reply"><span class="sb-kind" style="color:var(--fn)">F</span>serve_one_reply</a>
 <a class="sl" href="NodeSend.html#fn-tag_actor_msg"><span class="sb-kind" style="color:var(--fn)">F</span>tag_actor_msg</a>
 <a class="sl" href="NodeSend.html#fn-tag_delivery_failed"><span class="sb-kind" style="color:var(--fn)">F</span>tag_delivery_failed</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Option.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Option.html">Option</a></div><div class="sb-sub"><a class="sl" href="Option.html#fn-expect"><span class="sb-kind" style="color:var(--fn)">F</span>expect</a>
@@ -1636,9 +1645,12 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="sb-group"><div class="sb-group-hdr" data-href="PeerRegistry.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="PeerRegistry.html">PeerRegistry</a></div><div class="sb-sub"><a class="sl" href="PeerRegistry.html#type-Peer"><span class="sb-kind" style="color:var(--ty)">T</span>Peer</a>
 <a class="sl" href="PeerRegistry.html#type-Registry"><span class="sb-kind" style="color:var(--ty)">T</span>Registry</a>
 <a class="sl" href="PeerRegistry.html#fn-add"><span class="sb-kind" style="color:var(--fn)">F</span>add</a>
+<a class="sl" href="PeerRegistry.html#fn-add_data"><span class="sb-kind" style="color:var(--fn)">F</span>add_data</a>
 <a class="sl" href="PeerRegistry.html#fn-contains"><span class="sb-kind" style="color:var(--fn)">F</span>contains</a>
 <a class="sl" href="PeerRegistry.html#fn-empty"><span class="sb-kind" style="color:var(--fn)">F</span>empty</a>
+<a class="sl" href="PeerRegistry.html#fn-has_data"><span class="sb-kind" style="color:var(--fn)">F</span>has_data</a>
 <a class="sl" href="PeerRegistry.html#fn-lookup"><span class="sb-kind" style="color:var(--fn)">F</span>lookup</a>
+<a class="sl" href="PeerRegistry.html#fn-no_fd"><span class="sb-kind" style="color:var(--fn)">F</span>no_fd</a>
 <a class="sl" href="PeerRegistry.html#fn-peers"><span class="sb-kind" style="color:var(--fn)">F</span>peers</a>
 <a class="sl" href="PeerRegistry.html#fn-remove"><span class="sb-kind" style="color:var(--fn)">F</span>remove</a>
 <a class="sl" href="PeerRegistry.html#fn-size"><span class="sb-kind" style="color:var(--fn)">F</span>size</a></div></div>
@@ -2396,7 +2408,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a href="Cli.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Cli</h3><p>Cli module: parse argv-style command-line arguments into typed values.</p><div class="st"><span>11 functions</span><span>4 types</span></div></div></a>
 <a href="Cluster.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Cluster</h3><p>Cluster: peer address discovery for distributed March applications.</p><div class="st"><span>2 functions</span><span>1 types</span></div></div></a>
 <a href="ClusterAuth.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>ClusterAuth</h3><p>ClusterAuth: shared-secret challenge/response for the net-kernel handshake.</p><div class="st"><span>2 functions</span><span>0 types</span></div></div></a>
-<a href="ClusterConn.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>ClusterConn</h3><p>ClusterConn: the net-kernel connection lifecycle (distributed P1, L2).</p><div class="st"><span>3 functions</span><span>0 types</span></div></div></a>
+<a href="ClusterConn.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>ClusterConn</h3><p>ClusterConn: the net-kernel connection lifecycle (distributed P1, L2).</p><div class="st"><span>5 functions</span><span>0 types</span></div></div></a>
 <a href="ClusterLoad.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>ClusterLoad</h3><p>ClusterLoad: per-node CPU/memory headroom for capacity-aware RPC routing.</p><div class="st"><span>6 functions</span><span>1 types</span></div></div></a>
 <a href="Compress.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Compress</h3><p>Compress module: gzip, deflate, zstd, and brotli compression.</p><div class="st"><span>2 functions</span><span>5 types</span></div></div></a>
 <a href="Config.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Config</h3><p>Config module: layered application configuration backed by Vault.</p><div class="st"><span>26 functions</span><span>0 types</span></div></div></a>
@@ -2422,7 +2434,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a href="GlobalRegistry.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>GlobalRegistry</h3><p>GlobalRegistry: the cluster-wide name registry as a composite CRDT (P1 L5).</p><div class="st"><span>12 functions</span><span>2 types</span></div></div></a>
 <a href="Hamt.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Hamt</h3><p>HAMT — Hash Array Mapped Trie engine.</p><div class="st"><span>6 functions</span><span>1 types</span></div></div></a>
 <a href="Handle.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Handle</h3><div class="st"><span>0 functions</span><span>0 types</span></div></div></a>
-<a href="Handshake.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Handshake</h3><p>Handshake: the net-kernel greeting + authentication decision.</p><div class="st"><span>4 functions</span><span>1 types</span></div></div></a>
+<a href="Handshake.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Handshake</h3><p>Handshake: the net-kernel greeting + authentication decision.</p><div class="st"><span>7 functions</span><span>1 types</span></div></div></a>
 <a href="HashMap.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>HashMap</h3><p>HashMap module: persistent hash-array-mapped-trie map.</p><div class="st"><span>19 functions</span><span>2 types</span></div></div></a>
 <a href="Html.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Html</h3><p>Html module: HTML escaping, safe HTML helpers, and template composition.</p><div class="st"><span>21 functions</span><span>6 types</span></div></div></a>
 <a href="Http.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Http</h3><p>Http module: pure HTTP protocol types, constructors, and transforms.</p><div class="st"><span>50 functions</span><span>7 types</span></div></div></a>
@@ -2446,19 +2458,19 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a href="Merkle.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Merkle</h3><p>Merkle: content-addressed hash tree.</p><div class="st"><span>9 functions</span><span>1 types</span></div></div></a>
 <a href="Msgpack.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Msgpack</h3><p>Msgpack module: MessagePack binary serialization.</p><div class="st"><span>10 functions</span><span>1 types</span></div></div></a>
 <a href="NativeArray.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NativeArray</h3><p>NativeArray — flat numeric arrays for high-performance numeric loops.</p><div class="st"><span>59 functions</span><span>0 types</span></div></div></a>
-<a href="NetFrame.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NetFrame</h3><p>NetFrame: length-prefixed framing for the distributed net-kernel transport.</p><div class="st"><span>2 functions</span><span>0 types</span></div></div></a>
-<a href="NetKernel.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NetKernel</h3><p>NetKernel: the socket-level transport for distributed OTP (P1).</p><div class="st"><span>16 functions</span><span>0 types</span></div></div></a>
+<a href="NetFrame.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NetFrame</h3><p>NetFrame: length-prefixed framing for the distributed net-kernel transport.</p><div class="st"><span>3 functions</span><span>0 types</span></div></div></a>
+<a href="NetKernel.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NetKernel</h3><p>NetKernel: the socket-level transport for distributed OTP (P1).</p><div class="st"><span>18 functions</span><span>0 types</span></div></div></a>
 <a href="NodeCall.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NodeCall</h3><p>NodeCall: caller-side Node.call and server-side RPC dispatch loop (P3 L4).</p><div class="st"><span>3 functions</span><span>0 types</span></div></div></a>
 <a href="NodeIdentity.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NodeIdentity</h3><p>NodeIdentity: a cluster node's identity, exchanged in the net-kernel handshake.</p><div class="st"><span>4 functions</span><span>1 types</span></div></div></a>
 <a href="NodeRpc.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NodeRpc</h3><p>NodeRpc: the receive-side RPC dispatcher + caller-side reply logic (P1 L4).</p><div class="st"><span>8 functions</span><span>2 types</span></div></div></a>
-<a href="NodeSend.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NodeSend</h3><p>NodeSend: an actor message to a process on another node (distributed actors 1/4).</p><div class="st"><span>11 functions</span><span>2 types</span></div></div></a>
+<a href="NodeSend.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NodeSend</h3><p>NodeSend: an actor message to a process on another node (distributed actors 1/4).</p><div class="st"><span>12 functions</span><span>2 types</span></div></div></a>
 <a href="Option.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Option</h3><p>Option module: operations on Option(a) = Some(a) None</p><div class="st"><span>13 functions</span><span>0 types</span></div></div></a>
 <a href="OrderedMap.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>OrderedMap</h3><p>OrderedMap module: AVL tree-based sorted map.</p><div class="st"><span>17 functions</span><span>1 types</span></div></div></a>
 <a href="Parallel.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Parallel</h3><p>Parallel map-reduce over RRB.Vec.</p><div class="st"><span>9 functions</span><span>0 types</span></div></div></a>
 <a href="Parser.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Parser</h3><p>Parser module: parser combinator core.</p><div class="st"><span>30 functions</span><span>4 types</span></div></div></a>
 <a href="Path.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Path</h3><p>Path module: pure path manipulation (no I/O).</p><div class="st"><span>11 functions</span><span>0 types</span></div></div></a>
 <a href="PeerReader.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>PeerReader</h3><p>PeerReader: ONE reader per peer connection, dispatching frames by tag.</p><div class="st"><span>3 functions</span><span>0 types</span></div></div></a>
-<a href="PeerRegistry.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>PeerRegistry</h3><p>PeerRegistry: the net-kernel's one-connection-per-peer table.</p><div class="st"><span>7 functions</span><span>2 types</span></div></div></a>
+<a href="PeerRegistry.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>PeerRegistry</h3><p>PeerRegistry: the net-kernel's one-connection-per-peer table.</p><div class="st"><span>10 functions</span><span>2 types</span></div></div></a>
 <a href="Plot.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Plot</h3><p>Plot module: SVG chart generation.</p><div class="st"><span>22 functions</span><span>6 types</span></div></div></a>
 <a href="Prelude.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Prelude</h3><p>March Standard Library Prelude</p><div class="st"><span>22 functions</span><span>0 types</span></div></div></a>
 <a href="Presence.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Presence</h3><p>Presence module: per-topic user presence tracking for Channels.</p><div class="st"><span>17 functions</span><span>3 types</span></div></div></a>
