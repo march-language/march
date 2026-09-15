@@ -1,5 +1,5 @@
-node-a: monitoring node-b's actor 1, then killing it, never reading connection 1 again
-node-a: MONITOR_FIRE for target 1 reason=Killed (delivered)
+node-a: monitoring node-b's target actor, then killing it, never reading connection 1 again
+node-a: MONITOR_FIRE for the monitored target reason=Killed (delivered)
 node-a: MONITOR_FIRE copy 2 (deduped)
 node-b: resent 1 then 1; pending after acks: 0
 node-a: watcher saw 1 Down(s)
