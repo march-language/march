@@ -664,6 +664,7 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
        match resolve_sorts decls goal assumptions with
        | None -> note (Obligation.Skipped Obligation.Sort_conflict); false
        | Some (decls, goal, assumptions, measure_instances) ->
+       let assumptions = card_facts decls goal assumptions in
        let vc = { Smt.decls; assumptions; goal } in
        let str_pre = if scope_has_string || !uses_string then string_preamble else "" in
        let preamble = str_pre ^
@@ -1235,6 +1236,7 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
                   match resolve_sorts decls goal !assume with
                   | None -> Some (Obligation.Skipped Obligation.Sort_conflict)
                   | Some (decls, goal, assumptions, measure_instances) ->
+                  let assumptions = card_facts decls goal assumptions in
                   let vc = { Smt.decls; assumptions; goal } in
                   let preamble =
                     !measure_preamble ^ "\n"

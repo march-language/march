@@ -238,7 +238,7 @@ let rec mentions_str (is_str : string -> bool) (t : Smt.term) : bool =
   (* A set is never itself `Str`-sorted; a `Str` constant INSIDE one (as an
      element) is well-sorted there, and is [wellsorted]'s business. *)
   | Smt.SetEmpty _ | Smt.SetSng _ | Smt.SetMem _ | Smt.SetUnion _ | Smt.SetInter _
-  | Smt.SetDiff _ | Smt.SetSub _ -> false
+  | Smt.SetDiff _ | Smt.SetSub _ | Smt.SetCard _ -> false
 
 (* Is [t] a set-valued term?  Used by the guards below so a set operand is
    never mistaken for an Int one. *)
@@ -294,6 +294,8 @@ let rec wellsorted (is_str : string -> bool) (t : Smt.term) : bool =
     && (match t with Smt.SetMem (_, s) -> w s | _ -> true)
   | Smt.SetUnion (a, b) | Smt.SetInter (a, b) | Smt.SetDiff (a, b) | Smt.SetSub (a, b) ->
     w a && w b
+  (* An Int whose operand is a set term. *)
+  | Smt.SetCard (_, a) -> w a
 
 (* ── Float: the IEEE rewrite and its well-sortedness guard ─────────────────
    March spells float comparison with the ORDINARY operators — `x >= 0.0`, not a
@@ -345,6 +347,7 @@ let rec mentions_float (is_float : string -> bool) (t : Smt.term) : bool =
   | Smt.SetSng (_, a) -> m a
   | Smt.SetMem (a, b) | Smt.SetUnion (a, b) | Smt.SetInter (a, b) | Smt.SetDiff (a, b)
   | Smt.SetSub (a, b) -> m a || m b
+  | Smt.SetCard (_, a) -> m a
 
 (* After [fp_rewrite], a float may appear ONLY as a direct operand of an `fp.*`
    comparison.  Anywhere else — an Int comparison [fp_rewrite] declined because
@@ -394,7 +397,8 @@ let rec formula_wellsorted (sort_of : string -> Smt.sort option) (t : Smt.term) 
      Boolean position is a sort error just as arithmetic and literals are. *)
   | Smt.App _ | Smt.Ctor _ | Smt.IntLit _ | Smt.FloatLit _ | Smt.Add _ | Smt.Sub _
   | Smt.MulLit _ | Smt.Mul _ | Smt.Neg _
-  | Smt.SetEmpty _ | Smt.SetSng _ | Smt.SetUnion _ | Smt.SetInter _ | Smt.SetDiff _ -> false
+  | Smt.SetEmpty _ | Smt.SetSng _ | Smt.SetUnion _ | Smt.SetInter _ | Smt.SetDiff _
+  | Smt.SetCard _ -> false
 
 (* =================================================================
    §3  Predicate scope and parameter substitution
@@ -488,6 +492,7 @@ let rec mark_set_empty (e : A.expr) : A.expr =
     A.EApp (hd, [ as_set a; as_set b ], sp)
   | A.EApp ((A.EVar { A.txt = "member"; _ } as hd), [ x; st ], sp) ->
     A.EApp (hd, [ m x; as_set st ], sp)
+  | A.EApp ((A.EVar { A.txt = "card"; _ } as hd), [ st ], sp) -> A.EApp (hd, [ as_set st ], sp)
   | A.EApp ((A.EVar { A.txt = ("==" | "!="); _ } as hd), [ a; b ], sp)
     when is_set_shaped a || is_set_shaped b ->
     A.EApp (hd, [ as_set a; as_set b ], sp)
@@ -645,7 +650,7 @@ let is_measure (m : string) : bool =
 
 (* The predicate-only set operators.  `empty` is the empty-set literal ONLY in
    a set position; see [mark_set_empty]. *)
-let set_operators = [ "member"; "union"; "inter"; "diff"; "subset"; "singleton" ]
+let set_operators = [ "member"; "union"; "inter"; "diff"; "subset"; "singleton"; "card" ]
 let is_set_operator (m : string) : bool = List.mem m set_operators
 
 (* ── Zero-argument constant functions ──────────────────────────────────────
@@ -987,6 +992,7 @@ let rec pin_set_sorts (elem : Smt.sort) (t : Smt.term) : Smt.term =
   | Smt.SetInter (a, b) -> Smt.SetInter (p a, p b)
   | Smt.SetDiff (a, b) -> Smt.SetDiff (p a, p b)
   | Smt.SetSub (a, b) -> Smt.SetSub (p a, p b)
+  | Smt.SetCard (e, a) -> Smt.SetCard ((if e = Smt.set_unknown_elem then elem else e), p a)
   | Smt.App (f, args) -> Smt.App (f, List.map p args)
   | Smt.Add (a, b) -> Smt.Add (p a, p b)
   | Smt.Sub (a, b) -> Smt.Sub (p a, p b)
@@ -1014,6 +1020,7 @@ let vc_set_elem_sorts (vc : Smt.vc) : Smt.sort list =
     | Smt.SetSng (e, x) -> add e; go x
     | Smt.SetMem (a, b) | Smt.SetUnion (a, b) | Smt.SetInter (a, b) | Smt.SetDiff (a, b)
     | Smt.SetSub (a, b) -> go a; go b
+    | Smt.SetCard (e, a) -> add e; go a
     | Smt.Const _ | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ -> ()
     | Smt.App (_, args) | Smt.Ctor (_, _, args) -> List.iter go args
     | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) | Smt.Not a | Smt.Neg a | Smt.MulLit (_, a) -> go a
@@ -1038,14 +1045,37 @@ let set_preamble ~(elem_declared : bool) ~(str_declared : bool) ?(measure_attach
       List.filter (fun e -> not (Hashtbl.mem measure_preamble_set_sorts e)) elems
     else elems
   in
+  (* One `card$<elem>` per element sort a `card` term uses (plan step 3.1);
+     no module preamble declares these, so they are never filtered. *)
+  let card_elems =
+    let acc = ref [] in
+    let rec go (t : Smt.term) =
+      (match t with
+       | Smt.SetCard (e, _) ->
+         let e = Smt.render_elem_sort e in
+         if not (List.mem e !acc) then acc := e :: !acc
+       | _ -> ());
+      List.iter go (Smt.children t)
+    in
+    List.iter go (vc.Smt.goal :: vc.Smt.assumptions);
+    List.rev !acc
+  in
+  let card_decls =
+    String.concat ""
+      (List.map
+         (fun e ->
+           Printf.sprintf "(declare-fun %s (%s) Int)\n" (Smt.card_fn e) (Smt.string_of_sort (Smt.SSet e)))
+         card_elems)
+  in
   match elems with
-  | [] -> ""
+  | [] -> card_decls
   | elems ->
     let needs_elem = List.mem (Smt.sdata "Elem") elems && not elem_declared in
     let needs_str = List.mem (Smt.sdata str_sort) elems && not str_declared in
     (if needs_elem then "(declare-sort Elem 0)\n" else "")
     ^ (if needs_str then Printf.sprintf "(declare-sort %s 0)\n" str_sort else "")
     ^ Smt.set_sort_defs elems
+    ^ card_decls
 
 (* The set of a CONCRETE list term (a `Cons`/`Nil` constructor chain whose
    heads already reflected): `{h1, h2, …}` as nested singletons and unions,
@@ -1109,6 +1139,7 @@ let set_app_well_formed (f : string) (args : A.expr list) : bool =
   match f, args with
   | ("elts" | "keys"), [ _ ] -> true
   | "singleton", [ _ ] -> true
+  | "card", [ st ] -> set_operand st
   | "member", [ _; st ] -> set_operand st
   | ("union" | "inter" | "diff" | "subset"), [ a; b ] -> set_operand a && set_operand b
   | _ -> false
@@ -2647,6 +2678,13 @@ let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
       let tb = infer b in
       let v = fresh () in
       unify ta (ISet v); unify tb (ISet v); IBool
+    (* The element slot is allocated AFTER the operand, and the rewrite pops
+       it after rewriting the operand. *)
+    | Smt.SetCard (_, a) ->
+      let v = fresh () in
+      unify (infer a) (ISet v);
+      slot v;
+      IInt
   in
   let _ = infer goal in
   List.iter (fun a -> ignore (infer a)) assumptions;
@@ -2721,6 +2759,7 @@ let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
       | Smt.SetInter (a, b) -> let a' = rewrite a in Smt.SetInter (a', rewrite b)
       | Smt.SetDiff (a, b) -> let a' = rewrite a in Smt.SetDiff (a', rewrite b)
       | Smt.SetSub (a, b) -> let a' = rewrite a in Smt.SetSub (a', rewrite b)
+      | Smt.SetCard (_, a) -> let a' = rewrite a in Smt.SetCard (to_sort (pop ()), a')
     in
     (* The rewrite must visit slots in exactly the order [infer] allocated
        them: children before the node for [Ctor], [SetSng] and measure
@@ -2751,6 +2790,7 @@ let rec term_sorts (acc : Smt.sort list) (t : Smt.term) : Smt.sort list =
   | Smt.FpGt (a, b) | Smt.FpGe (a, b) | Smt.SetMem (a, b) | Smt.SetUnion (a, b)
   | Smt.SetInter (a, b) | Smt.SetDiff (a, b) | Smt.SetSub (a, b) ->
     term_sorts (term_sorts acc a) b
+  | Smt.SetCard (e, a) -> term_sorts (e :: acc) a
 
 (* The declarations a query finished by [resolve_sorts] needs beyond
    [declared], the preamble text it is sent with: the datatype instances it
@@ -2818,6 +2858,133 @@ let resolve_sorts (decls : (string * Smt.sort) list) (goal : Smt.term)
           [] assumptions
       in
       resolve_sorts_exact decls goal kept
+
+(* ── Cardinality by ground instantiation (plan step 3.2) ───────────────────
+   `card` is an uninterpreted function, so it knows nothing about sets.  For a
+   query that mentions it, this adds, for every set term the query contains,
+   the facts the design (§4) lists; each is a theorem of FINITE sets, and
+   every March set is finite, so anything proved from them is true.  The
+   scheme is incomplete by design (no quantifier, no fact about a term the
+   query does not contain).  Equal sets have equal cardinality by congruence,
+   which z3 applies without help.  Runs after [resolve_sorts], so every
+   element sort is settled; a set term whose element sort cannot be read gets
+   no facts, which only loses a proof.  A query without `card` is returned
+   unchanged. *)
+let card_facts (decls : (string * Smt.sort) list) (goal : Smt.term) (assumptions : Smt.term list)
+    : Smt.term list =
+  let rec any (p : Smt.term -> bool) (t : Smt.term) = p t || List.exists (any p) (Smt.children t) in
+  if not (List.exists (any (function Smt.SetCard _ -> true | _ -> false)) (goal :: assumptions))
+  then assumptions
+  else begin
+    let rec elem_of (t : Smt.term) : Smt.sort option =
+      match t with
+      | Smt.SetEmpty e | Smt.SetSng (e, _) -> Some e
+      | Smt.SetUnion (a, b) | Smt.SetInter (a, b) | Smt.SetDiff (a, b) -> (
+        match elem_of a with Some e -> Some e | None -> elem_of b)
+      | Smt.Const c -> (match List.assoc_opt c decls with Some (Smt.SSet e) -> Some e | _ -> None)
+      | _ -> None
+    in
+    let sets : (string, Smt.term * Smt.sort) Hashtbl.t = Hashtbl.create 8 in
+    let order = ref [] in
+    let add (t : Smt.term) (hint : Smt.sort option) =
+      let e = match elem_of t with Some e -> Some e | None -> hint in
+      match e with
+      | Some e ->
+        let k = Smt.render t in
+        if not (Hashtbl.mem sets k) then begin
+          Hashtbl.replace sets k (t, e);
+          order := k :: !order
+        end
+      | None -> ()
+    in
+    let subsets = ref [] in
+    let members = ref [] in
+    let apps = ref [] in
+    let rec collect (t : Smt.term) =
+      (match t with
+       | Smt.SetCard (e, a) -> add a (Some e)
+       | Smt.SetMem (x, a) ->
+         add a (elem_of a);
+         members := (x, a) :: !members
+       | Smt.SetUnion (a, b) | Smt.SetInter (a, b) | Smt.SetDiff (a, b) ->
+         let h = elem_of t in
+         add t h; add a h; add b h
+       | Smt.SetSub (a, b) ->
+         let h = match elem_of a with Some e -> Some e | None -> elem_of b in
+         add a h; add b h;
+         subsets := (a, b, h) :: !subsets
+       | Smt.Eq (a, b) | Smt.Ne (a, b) -> (
+         match elem_of a, elem_of b with
+         | Some e, _ | None, Some e -> add a (Some e); add b (Some e)
+         | None, None -> ())
+       | Smt.App (f, [ _ ]) -> apps := (f, t) :: !apps
+       | _ -> ());
+      List.iter collect (Smt.children t)
+    in
+    List.iter collect (goal :: assumptions);
+    let card e t = Smt.SetCard (e, t) in
+    let one = Smt.IntLit 1 in
+    let facts = ref [] in
+    let fact f = facts := f :: !facts in
+    List.iter
+      (fun k ->
+        let t, e = Hashtbl.find sets k in
+        let c = card e t in
+        fact (Smt.Ge (c, Smt.IntLit 0));
+        (match t with
+         | Smt.SetEmpty _ -> fact (Smt.Eq (c, Smt.IntLit 0))
+         | Smt.SetSng _ -> fact (Smt.Eq (c, one))
+         | _ -> ());
+        (match t with
+         | Smt.SetUnion (a, Smt.SetSng (_, x)) | Smt.SetUnion (Smt.SetSng (_, x), a) ->
+           fact (Smt.Implies (Smt.SetMem (x, a), Smt.Eq (c, card e a)));
+           fact (Smt.Implies (Smt.Not (Smt.SetMem (x, a)), Smt.Eq (c, Smt.Add (card e a, one))))
+         | Smt.SetDiff (a, Smt.SetSng (_, x)) ->
+           fact (Smt.Implies (Smt.SetMem (x, a), Smt.Eq (c, Smt.Sub (card e a, one))));
+           fact (Smt.Implies (Smt.Not (Smt.SetMem (x, a)), Smt.Eq (c, card e a)))
+         | _ -> ());
+        (match t with
+         | Smt.SetUnion (a, b) ->
+           fact (Smt.Le (card e a, c));
+           fact (Smt.Le (card e b, c));
+           fact (Smt.Le (c, Smt.Add (card e a, card e b)));
+           fact
+             (Smt.Implies
+                (Smt.Eq (Smt.SetInter (a, b), Smt.SetEmpty e), Smt.Eq (c, Smt.Add (card e a, card e b))))
+         | Smt.SetInter (a, b) ->
+           fact (Smt.Le (c, card e a));
+           fact (Smt.Le (c, card e b))
+         | Smt.SetDiff (a, _) -> fact (Smt.Le (c, card e a))
+         | _ -> ());
+        (* A list's element set has at most as many elements as the list:
+           `elts$xs` beside `len$xs` at a call site, `$elts`/`$len` of one
+           term inside an induction. *)
+        (match t with
+         | Smt.Const n when String.length n > 5 && String.sub n 0 5 = "elts$" ->
+           let l = "len$" ^ String.sub n 5 (String.length n - 5) in
+           if List.mem_assoc l decls then fact (Smt.Le (c, Smt.Const l))
+         | Smt.App (f, [ arg ]) when String.length f > 6 && String.sub f 0 6 = "$elts$" ->
+           let lf = "$len$" ^ String.sub f 6 (String.length f - 6) in
+           let k' = Smt.render arg in
+           if List.exists (fun (g, u) -> g = lf && (match u with Smt.App (_, [ a ]) -> Smt.render a = k' | _ -> false)) !apps
+           then fact (Smt.Le (c, Smt.App (lf, [ arg ])))
+         | _ -> ()))
+      (List.rev !order);
+    List.iter
+      (fun (a, b, h) ->
+        match h with
+        | Some e -> fact (Smt.Implies (Smt.SetSub (a, b), Smt.Le (card e a, card e b)))
+        | None -> ())
+      !subsets;
+    (* A set with a member is not empty. *)
+    List.iter
+      (fun (x, a) ->
+        match Hashtbl.find_opt sets (Smt.render a) with
+        | Some (_, e) -> fact (Smt.Implies (Smt.SetMem (x, a), Smt.Ge (card e a, one)))
+        | None -> ())
+      !members;
+    assumptions @ List.rev !facts
+  end
 
 (* Build type_preamble from all registered TDRecord sorts, excluding any sorts
    already declared in measure_preamble (tracked in measure_preamble_sorts). *)

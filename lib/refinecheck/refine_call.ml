@@ -1417,6 +1417,8 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        none keeps the fallback below (a fresh non-negative length), so the
        skip it produces stays the same undecided one it always was. *)
     let set_of_call_available fname cargs = postcond fname cargs <> None in
+    (* A measure over a nested call inside a scalar callee's contract. *)
+    let rmc_scalar m f cargs = if is_call_measure m then set_of_call m f cargs else None in
     let self_dt_sym = "$self" in
     let self_is_str = rp_is_str rp in
     (* The SMT symbol the subject ("_"/[rp.binder]) actually reflects to in
@@ -1475,7 +1477,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
         mark_self name
           (absorb
              (reflect_cached "$self" (fun () ->
-                  reflect_scalar ~postcond ~foreign_var ~foreign_measure
+                  reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call:rmc_scalar
                     ~foreign_field:arg_resolve_field
                     ~sort:self_scalar sc self_actual)))
       else
@@ -1483,7 +1485,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
         | Some a ->
           absorb
             (reflect_cached name (fun () ->
-                 reflect_scalar ~postcond ~foreign_var ~foreign_measure
+                 reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call:rmc_scalar
                    ~foreign_field:arg_resolve_field
                    ~sort:(scalar_of_name name) sc a))
         | None ->
@@ -2291,7 +2293,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
              when not (List.mem f predicate_operators)
                   && not (is_measure_app f && not (is_builtin_set_measure (measure_name f))) ->
              (match
-                reflect_scalar ~postcond ~foreign_var ~foreign_measure
+                reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call:rmc_scalar
                   ~foreign_field:arg_resolve_field ~sort:Smt.SBool sc call
               with
               | Some (t, ds, asms) ->
@@ -2492,6 +2494,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        match resolve_sorts decls goal assumptions with
        | None -> note (Obligation.Skipped Obligation.Sort_conflict)
        | Some (decls, goal, assumptions, measure_instances) ->
+       let assumptions = card_facts decls goal assumptions in
        let sort_of n = List.assoc_opt n decls in
        let vc = { Smt.decls; assumptions; goal } in
        (* [user_assumptions]: the SAME two-step filter (sort-wellsortedness,

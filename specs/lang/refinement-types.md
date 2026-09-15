@@ -1230,6 +1230,7 @@ many. The vocabulary is Liquid Haskell's, in March spelling
 | `subset(a, b)` | every element of `a` is in `b` |
 | `singleton(x)`, `empty` | the one-element set, the empty set |
 | `a == b`, `a != b` | extensional set equality |
+| `card(s)` | the number of elements of `s` |
 
 Like `len`, these names mean something **only inside a `{...}` predicate**; a
 function or variable of the same name in ordinary code is unaffected. `empty`
@@ -1361,6 +1362,33 @@ contract that is not proved is still not reported unless it can never hold,
 and it does not reach call sites. `List.map` has no such contract: the
 elements of an arbitrary callback's image have no set expression.
 
+### Cardinality
+
+`card(s)` is the number of elements of a set, predicate-only like the rest of
+the vocabulary. It has no quantified axiom. Instead, a query that mentions
+`card` gets facts about every set term it contains, each a theorem of finite
+sets: a count is non-negative, `empty` has 0 elements and `singleton(x)` has
+1, adding or removing one element changes the count by at most one depending
+on membership, a union is no smaller than either side and no larger than
+both together, a subset is no larger than its superset, a set with a member
+is non-empty, and a list's element set is no larger than the list. Equal sets
+have equal counts automatically.
+
+`Set.size` and `Map.size` carry assumed contracts, `{Int | _ == card(elts(s))}`
+and `{Int | _ == card(keys(m))}`, with runtime witnesses in the stdlib tests:
+
+```march
+fn need1(n : {Int | _ == 1}) : Int do 0 end
+fn need2(n : {Int | _ == 2}) : Int do 0 end
+fn one(x : Int) : Int do need1(Set.size(Set.insert(Set.empty(), x, lt))) end      -- proved
+fn two(x : Int) : Int do need2(Set.size(Set.insert(Set.empty(), x, lt))) end      -- violation
+
+fn need_same(a : Int, b : {Int | _ == a}) : Int do 0 end
+fn present(s : Set(Int), x : Int) : Int do
+  if Set.contains(s, x, lt) do need_same(Set.size(s), Set.size(Set.insert(s, x, lt))) else 0 end
+end                                                                               -- proved
+```
+
 ### Set-valued measures
 
 A user `@[measure]` may return a set, under the same structural gate as an
@@ -1416,9 +1444,12 @@ renders its model as a set literal: `Set.insert() can return {4}`,
 
 ### What sets do not do
 
-- **No cardinality.** There is no decidable link between the array encoding
-  and a set's size; `len` remains the only size measure, so a permutation
-  contract writes both: `{List(Int) | elts(_) == elts(xs) && len(_) == len(xs)}`.
+- **Cardinality knows only what the query's own set terms imply.** `card` has
+  no general axiom; each query gets the finite-set facts about the set terms
+  it contains (see "Cardinality" above). A property that needs a quantifier,
+  such as "this list has no duplicates" (`card(elts(xs)) == len(xs)` after
+  `List.dedup`), is not provable, and a permutation contract still writes
+  both halves: `{List(Int) | elts(_) == elts(xs) && len(_) == len(xs)}`.
 - **List structure is followed only inside a proof by recursion.** A
   contract on a function that recurses over a list (see "Proved list
   contracts" above) is proved through its `Cons` cells. Everywhere else `elts`
@@ -2690,8 +2721,9 @@ edges:
   (`is_Some(_)`), never the payload: `{Option(Int) | is_Some(_)}` is checkable,
   a predicate about the `Int` inside is not. **Sets of elements** are
   supported through the set vocabulary (`elts`, `keys`, `member`, `subset`,
-  …; see [Set Refinements](#set-refinements)), with no cardinality and no
-  structural reasoning about `elts` over a symbolic list. Refinements over
+  …; see [Set Refinements](#set-refinements)), with cardinality through
+  ground facts only and list structure only inside a proof by recursion.
+  Refinements over
   other types aren't supported.
 - **A tag refinement composes only for the constructor the caller promised.**
   A constructor literal or a `match` narrowing establishes the fact where the

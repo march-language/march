@@ -240,7 +240,54 @@ necessary on the way:
 
 - The Phase 1 gates, including the full suite under z3 4.8.12.
 
-## 3. Later phases
+## 3. Phase 3 — cardinality by ground instantiation
 
-Phases 3 and 4 (ground cardinality, `SortedSet`) get their own step lists when
-Phase 2 lands; the design's §4 and §5 are the starting point.
+Design §4. Stacked on the Phase 2 branch (it reuses the per-query set
+declarations and callee contracts).
+
+### 3.1 Vocabulary and term
+
+- `card(s)` joins the set vocabulary: predicate-only, well-formed on one set
+  operand, an `empty` argument is the set literal.
+- `Smt.SetCard of sort * term` carries the element sort; it renders
+  `(card$<elem> s)`, and `set_preamble` declares one `card$<elem>` per element
+  sort a query uses, beside that sort's `define-sort`. `resolve_sorts` types
+  it (its operand is a set, its value an Int).
+
+### 3.2 Ground facts
+
+- Only for a query that mentions `card`, after sort resolution: every set
+  subterm gets the design's facts (non-negative; `empty` 0; `singleton` 1;
+  union and difference with a singleton by membership; general union, inter
+  and diff bounds; `subset` monotonicity), and a set constant `elts$x` beside
+  `len$x` (or `$elts`/`$len` of one term) gets `card <= len`. Equality needs
+  nothing: `card` is a function, so congruence already gives it.
+- Every fact is a theorem of finite sets; a query without `card` is unchanged.
+
+### 3.3 Contracts
+
+- `Set.size : {Int | _ == card(elts(s))}` and `Map.size : {Int | _ ==
+  card(keys(m))}`, `@[assume]`d, each with a property witness in
+  `test/stdlib/test_set.march` / `test_map.march`.
+- Accept: `Set.size(Set.insert(Set.empty(), x, cmp)) == 1`, size unchanged by
+  inserting a present element, `size(remove(s, x)) <= size(s)`. Reject
+  control: `Set.size(Set.insert(Set.empty(), x, cmp)) == 2` is reported.
+
+**Landed** on the Phase 3 branch, 3.1 to 3.3, with two additions:
+
+- A set with a member is non-empty (`member(x, s) => card(s) >= 1`), a
+  finite-set theorem the design's table lacked; without it `member(3,
+  elts(ys))` did not give `card(elts(ys)) > 0`.
+- A scalar callee's contract translates a measure over a NESTED call
+  (`card(elts(Set.insert(…)))` in `Set.size`'s), through the same call-contract
+  translation a call-site actual uses.
+
+### Phase 3 exit
+
+- The Phase 2 gates; the oracle diff is expected to be empty outside `Set`
+  and `Map` contract counts, since no existing query mentions `card`.
+
+## 4. Later phases
+
+Phase 4 (`SortedSet`) gets its own step list when Phase 3 lands; the design's
+§5 is the starting point.

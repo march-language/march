@@ -13,6 +13,13 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`card(s)` in refinements: the number of elements of a set.** A query that
+  mentions `card` gets finite-set facts about the set terms it contains, so
+  `card(elts([7, 7])) == 1`, `card(elts(xs)) <= len(xs)` and "a subset is no
+  larger" are proved. `Set.size` and `Map.size` carry assumed `card`
+  contracts: `Set.size(Set.insert(Set.empty(), x, cmp)) == 1` is proved, and a
+  claim of 2 is reported. See "Cardinality" in `docs/refinement-types.md`.
+
 - **List contracts proved from list code.** A function that recurses over a
   list can have its `elts` and `len` return refinement proved from its body,
   including through a local helper `fn`, a call to another proved function,

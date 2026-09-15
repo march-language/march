@@ -15406,6 +15406,89 @@ let list_structure_suite =
   fn mid(xs : List(Int)) : {List(Int) | elts(_) == elts(xs)} do base(xs) end
   fn base(xs : List(Int)) : {List(Int) | elts(_) == elts(xs)} do xs end|}))) ]
 
+(* ── Cardinality by ground instantiation (plan steps 3.1 to 3.3) ─────────
+   Each accept case is RED before step 3.1: `card` was not vocabulary, so
+   every predicate here drew the unrecognised-predicate warning and checked
+   nothing.  `Set`/`Map` are restated inline, as in [set_suite]; the spellings
+   match stdlib/set.march and stdlib/map.march, and the runtime witnesses in
+   test/stdlib/test_set.march and test_map.march keep them honest. *)
+let card_suite =
+  let m body = "mod C do\n" ^ body ^ "\nend\n" in
+  let stubs =
+    "  mod Set do\n\
+    \    type Set(a) = HamtSet(Int)\n\
+    \    @[assume]\n\
+    \    fn empty() : {Set(a) | elts(_) == empty} do HamtSet(0) end\n\
+    \    @[assume]\n\
+    \    fn contains(s, elem, cmp) : {Bool | _ == member(elem, elts(s))} do true end\n\
+    \    @[assume]\n\
+    \    fn insert(s, elem, cmp) : {Set(a) | elts(_) == union(elts(s), singleton(elem))} do s end\n\
+    \    @[assume]\n\
+    \    fn remove(s, elem, cmp) : {Set(a) | elts(_) == diff(elts(s), singleton(elem))} do s end\n\
+    \    @[assume]\n\
+    \    fn size(s) : {Int | _ == card(elts(s))} do 0 end\n\
+    \  end\n\
+    \  mod Map do\n\
+    \    type Map(k, v) = HamtMap(Int)\n\
+    \    @[assume]\n\
+    \    fn empty() : {Map(k, v) | keys(_) == empty} do HamtMap(0) end\n\
+    \    @[assume]\n\
+    \    fn insert(m, key, value, cmp) : {Map(k, v) | keys(_) == union(keys(m), singleton(key))} do m end\n\
+    \    @[assume]\n\
+    \    fn size(m) : {Int | _ == card(keys(m))} do 0 end\n\
+    \  end\n"
+  in
+  [ gated "card over list literals, beside len, and from membership" (fun () ->
+        (* proved: [7, 7] has one element; any list's elements <= its length; a
+           list with a member is non-empty.  violated: [1, 2] is not a one-element
+           set; Nil has no element. *)
+        Alcotest.(check (triple int int int)) "ledger" (3, 2, 0)
+          (ledger_counts3 (m {|  fn need1(xs : {List(Int) | card(elts(_)) == 1}) : Int do 0 end
+  fn ok() : Int do need1([7, 7]) end
+  fn bad() : Int do need1([1, 2]) end
+  fn need_le(xs : {List(Int) | card(elts(_)) <= len(_)}) : Int do 0 end
+  fn any_list(ys : List(Int)) : Int do need_le(ys) end
+  fn need_pos(xs : {List(Int) | card(elts(_)) > 0}) : Int do 0 end
+  fn nonempty(ys : {List(Int) | member(3, elts(_))}) : Int do need_pos(ys) end
+  fn empty_bad() : Int do need_pos(Nil) end
+  fn sub_le(a : List(Int), b : {List(Int) | subset(elts(a), elts(_))}, c : {List(Int) | card(elts(_)) > card(elts(b))}) : Int do 0 end|})));
+
+    gated "a subset has no more elements than its superset" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (1, 0, 0)
+          (ledger_counts3
+             (m "  fn need_le(a : List(Int), b : {List(Int) | card(elts(_)) <= card(elts(a))}) : Int do 0 end\n\
+                 \  fn sub(a : List(Int), b : {List(Int) | subset(elts(_), elts(a))}) : Int do need_le(a, b) end")));
+
+    gated "Set.size and Map.size carry card through insert and remove" (fun () ->
+        (* proved: one insert into empty has size 1; inserting a present element
+           keeps the size; remove does not grow it; the same for Map keys.
+           violated: one insert into empty does not have size 2. *)
+        Alcotest.(check (triple int int int)) "ledger" (4, 1, 0)
+          (ledger_counts3
+             (m (stubs ^ {|  fn lt(a : Int, b : Int) : Bool do a < b end
+  fn need1(n : {Int | _ == 1}) : Int do 0 end
+  fn need2(n : {Int | _ == 2}) : Int do 0 end
+  fn need_same(a : Int, b : {Int | _ == a}) : Int do 0 end
+  fn need_le(a : Int, b : {Int | _ <= a}) : Int do 0 end
+  fn one(x : Int) : Int do need1(Set.size(Set.insert(Set.empty(), x, lt))) end
+  fn two_bad(x : Int) : Int do need2(Set.size(Set.insert(Set.empty(), x, lt))) end
+  fn present(s : Set(Int), x : Int) : Int do
+    if Set.contains(s, x, lt) do need_same(Set.size(s), Set.size(Set.insert(s, x, lt))) else 0 end
+  end
+  fn shrink(s : Set(Int), x : Int) : Int do need_le(Set.size(s), Set.size(Set.remove(s, x, lt))) end
+  fn keys_one(k : Int) : Int do need1(Map.size(Map.insert(Map.empty(), k, "v", lt))) end|}))));
+
+    Alcotest.test_case "card applied to a non-set is not a set operation" `Quick (fun () ->
+        let warns = refine_warnings (m "  fn f(x : {Int | card(3) > 0}) : Int do 0 end") in
+        Alcotest.(check bool) "unrecognised-shape warning" true
+          (List.exists
+             (fun w ->
+               let needle = "not a well-formed set operation" in
+               let n = String.length needle and h = String.length w in
+               let rec at i = i + n <= h && (String.sub w i n = needle || at (i + 1)) in
+               at 0)
+             warns)) ]
+
 (* ── The single-element-type rule (plan step 1.5) ─────────────────────────
    A set predicate whose operands have known, different element types is an
    error at the predicate; before the rule it was a silent sort-conflict skip.
@@ -15841,6 +15924,7 @@ let () =
       ("typed-instances", typed_instances_suite);
       ("single-element-type", single_element_type_suite);
       ("list-structure", list_structure_suite);
+      ("cardinality", card_suite);
       ("array-bounds-contracts", array_bounds_suite);
       ("measure-definition", measure_definition_suite);
       (* Must stay LAST: it measures every query the groups above sent. *)
