@@ -220,6 +220,22 @@ where a proof walks list cells, the Tier 2 induction check.
   contracts (design §3.3), bodies unchanged. Oracle diff reviewed line by line;
   audit baselines regenerated with the reason recorded.
 
+**Landed** on the Phase 2 branch, 2.1 to 2.6, with these additions found
+necessary on the way:
+
+- The built-in `len` of a CALL carries the callee's proved contract at call
+  sites (it only existed for `elts`), without which the flipped frontier test
+  could not report.
+- A postcondition check uses callee contracts (`post_lookup`), so the
+  verification gate became a monotone fixpoint; local `fn` contracts are
+  proved first and overlaid; Tier 2 accepts leading local `fn`s and assumes
+  parameter refinements (`dedup`'s helper keeps `member(prev, elts(acc))`).
+- Call sites fold `elts(Cons(h, acc))` with a named tail.
+- The gate took a declaration's key without checking that the declaration
+  itself carried the refinement; checking `stdlib/list.march` directly (the
+  CI skip ratchet) put the prelude's unrefined `reverse` beside `List`'s and
+  dropped the real contract.
+
 ### Phase 2 exit
 
 - The Phase 1 gates, including the full suite under z3 4.8.12.

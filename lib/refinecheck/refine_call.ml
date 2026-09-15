@@ -1413,6 +1413,10 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
          | None -> ());
         Some c
     in
+    (* Whether [set_of_call] would find a contract: a call whose callee has
+       none keeps the fallback below (a fresh non-negative length), so the
+       skip it produces stays the same undecided one it always was. *)
+    let set_of_call_available fname cargs = postcond fname cargs <> None in
     let self_dt_sym = "$self" in
     let self_is_str = rp_is_str rp in
     (* The SMT symbol the subject ("_"/[rp.binder]) actually reflects to in
@@ -2012,7 +2016,8 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                    measure_of_var m x
                  (* The built-in `len` of a call: a constant carrying the
                     callee's proved postcondition, as for `elts`. *)
-                 | A.EApp (A.EVar { A.txt = fname; _ }, cargs, _) when is_call_measure m ->
+                 | A.EApp (A.EVar { A.txt = fname; _ }, cargs, _)
+                   when is_call_measure m && set_of_call_available fname cargs ->
                    set_of_call m fname cargs
                  (* A non-variable, non-literal actual (a call, a field…): no
                     symbol to share with the caller's facts.  For the binder

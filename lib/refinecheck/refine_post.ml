@@ -1629,7 +1629,12 @@ let gate_unverified_posts ~root errctx (defs : (string, fn_sig option) Hashtbl.t
         | A.DFn (fd, _) ->
           let key = if prefix = "" then fd.A.fn_name.A.txt else prefix ^ "." ^ fd.A.fn_name.A.txt in
           (match Hashtbl.find_opt defs key with
-           | Some (Some sg) when Option.is_some sg.ret ->
+           (* Only a declaration that itself carries a refined return: two
+              declarations can share a key (checking `stdlib/list.march`
+              directly puts `List`'s functions beside the prelude's own
+              unrefined `reverse`), and checking the unrefined one used to
+              drop the other's postcondition. *)
+           | Some (Some sg) when Option.is_some sg.ret && assumed_return fd <> None ->
              (* Keep the entry (it must still shadow an outer same-named
                 function for [resolve_call]); drop the postcondition until it
                 is proved. *)

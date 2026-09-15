@@ -12,6 +12,16 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+
+- **List contracts proved from list code.** A function that recurses over a
+  list can have its `elts` and `len` return refinement proved from its body,
+  including through a local helper `fn`, a call to another proved function,
+  and a parameter refinement used as an invariant. `List.reverse`,
+  `List.append`, `List.filter` and `List.dedup` now carry proved element
+  contracts, so `member(x, elts(List.reverse(xs)))` follows from
+  `member(x, elts(xs))` at a call site. A contract is used only once proved,
+  in any declaration order. See "Proved list contracts" in
+  `docs/refinement-types.md`.
 - **Control/data split for peer connections**: `ClusterConn.connect_split` /
   `accept_split` open two authenticated connections per peer, told apart by a
   `role` in the hello (a pre-split hello still reads as control); SWIM,
