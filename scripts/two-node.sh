@@ -22,7 +22,7 @@
 #
 # Every wait has a deadline (TWO_NODE_TIMEOUT, default 60 s) and fails loudly
 # with both nodes' output. Why two processes and not two green threads: see
-# specs/todos/2026-09-14-two-node-failure-semantics-harness.md.
+# specs/progress/2026-09-14-two-node-failure-semantics-harness.md.
 set -u
 
 root=$(cd "$(dirname "$0")/.." && pwd)

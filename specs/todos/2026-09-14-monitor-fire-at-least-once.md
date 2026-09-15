@@ -1,0 +1,89 @@
+# `[P2]` `MONITOR_FIRE` at-least-once, and the fire written on the control connection
+
+Filed 2026-09-14 as the remaining step 4 of
+[[2026-09-14-distributed-plane-flow-control-and-control-channel]] (now a
+progress record). Today a cross-node monitor fires once, best-effort, from
+the C runtime (`march_dist_monitor_fire_pid` in `do_actor_death`, ignoring
+write errors) onto whatever fd the `MONITOR_REQ` arrived on; a fire during
+a reconnect is lost, and a `MONITOR_REQ` for a pid that has already died
+gets nothing. The supervised-endpoint fixtures assume the contract this file
+states: a `DistSupervisor` that never learns a remote child died restarts
+nothing.
+
+## Contract
+
+- `MONITOR_FIRE(target_pid, reason, ref)` is retried until the watcher's
+  node answers `MONITOR_ACK(ref)` (new tag `0x0C`), with backoff, across
+  reconnects; the entry expires when SWIM declares the watcher node dead
+  (its watchers get `NodeDown` locally anyway).
+- A `MONITOR_REQ` for a pid that has already exited is answered at once
+  with `MONITOR_FIRE(reason)` — the "registered after death" race becomes
+  a normal fire. The terminal reason is already kept on the actor meta
+  (`terminal_message`, `terminal_set`).
+- Watchers dedupe by `(target_pid, creation, ref)`, so a retried fire after
+  a lost ack delivers one `Down`.
+- The fire is written on the peer's **control** connection. Today the C
+  runtime writes to the fd `DistLink` registered with
+  `march_dist_register_watcher(..., watcher_fd)` — whichever connection the
+  REQ arrived on. With the split (#465) the REQ arrives on control when the
+  caller dispatches it there, so the fd is already right for a split peer;
+  this item makes it explicit: the registration takes the peer's control fd
+  from the `PeerRegistry` entry, not the REQ's fd.
+
+## Design
+
+### Where the retry table lives
+
+Not in the C runtime. `do_actor_death` fires once, as now, and additionally
+records `(watcher_node, watcher_pid, target_pid, reason, ref)` in a March-
+visible pending table (`march_dist_pending_fires` → a builtin that drains
+it, or a `Vault` the runtime cannot reach — so the builtin). A `MonitorRetry`
+March task per node drains the pending table every 200 ms, re-sends fires
+whose ack has not arrived, doubling the interval per entry up to 5 s, and
+drops entries whose watcher node SWIM marks `Dead`. Acks arrive on the
+control connection and are handed to `MonitorRetry.ack(ref)` by the
+`PeerReader` dispatch.
+
+Why March and not C: the retry needs SWIM's membership (March) and the
+peer registry (March), and a reconnect changes the fd — the runtime knows
+none of that. The runtime's job stays "fire once at death, from the death
+path"; the table is the only new runtime surface.
+
+### After-death answer
+
+`DistLink`'s REQ handler (March) consults `is_alive(pid_of_int(target))`
+and, when false, the meta's terminal reason through a small builtin
+(`actor_terminal_reason(pid) : Option((Int, String))`) and fires
+immediately with it instead of registering. `pid_of_int` on a pid whose
+record has been freed returns the dead sentinel; the terminal reason for a
+long-dead pid is then `Normal` — documented as the limit: a watcher that
+registers after the record is gone learns "dead", not "why".
+
+### Dedupe
+
+`DistLink.MonitorTable` keeps the refs it has delivered a `Down` for until
+the monitor is removed; a second `MONITOR_FIRE` for a delivered ref is
+acked and dropped.
+
+## Tests
+
+- Unit (interpreter): `MonitorRetry` with an injected send function —
+  backoff schedule, ack removes the entry, `Dead` node expires it.
+- `test/native/monitor_after_death_loopback.march`: kill the target, then
+  send the REQ; exactly one `Down` with the real reason.
+- Two-node scenario `monitor_reconnect` (harness scenario 5): register a
+  monitor, `kill_node`-and-restart the *watcher's* connection between the
+  death and the ack (drop the control connection with `stop_node` timing
+  or a fault that closes the socket); exactly one `Down` after reconnect.
+- The monitor half of the `restart` scenario: node-a's monitor on the
+  killed node-b actor fires `NodeDown`, not `Normal`, once SWIM marks the
+  incarnation dead.
+
+## Order of work
+
+1. Control-fd registration (small, unblocks nothing but removes an
+   assumption).
+2. After-death answer + `actor_terminal_reason` builtin (nine-site
+   addition; see the memory note on builtin sites).
+3. `MONITOR_ACK` + pending table + `MonitorRetry` task + dedupe.
+4. Scenario 5 and the `restart` monitor half.

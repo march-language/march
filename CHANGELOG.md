@@ -22,6 +22,13 @@ git log is authoritative for exact commits.
   `member(x, elts(xs))` at a call site. A contract is used only once proved,
   in any declaration order. See "Proved list contracts" in
   `docs/refinement-types.md`.
+
+- **`mailbox N policy` on an actor declaration** (`mailbox 1000 drop_old`, after
+  `init`): the bound `Actor.set_queue_limit` sets per spawn site, declared once
+  with the actor and applied at every `spawn`, on both backends. The policy is
+  named (`drop_new` / `drop_old` / `block_sender`); an unknown name is a parse
+  error, and `block_sender` under the interpreter fails at the spawn with the
+  same message the call gives.
 - **Control/data split for peer connections**: `ClusterConn.connect_split` /
   `accept_split` open two authenticated connections per peer, told apart by a
   `role` in the hello (a pre-split hello still reads as control); SWIM,
@@ -265,6 +272,11 @@ git log is authoritative for exact commits.
   nothing when unset.
 
 ### Fixed
+- **The cluster handshake no longer swallows the peer's first bytes.** It read
+  its two frames in 4 KiB chunks and dropped the over-read, so a peer that
+  finished the handshake and immediately wrote lost whatever landed in the same
+  `recv()` as the proof (reproduced only under load). The handshake now reads
+  exactly its own frames (`NetKernel.recv_frame_exact`).
 - **`NetKernel.recv_frame` is linear in the frame size.** It appended every
   4 KiB chunk to the accumulated list, quadratic in the frame: a 1 MiB frame
   took 4.1 s. Once the length prefix is known the rest is read with one

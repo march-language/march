@@ -897,6 +897,18 @@ let pid = spawn(Counter)
 send(pid, Increment())
 ```
 
+A mailbox bound declared with the actor (after `init`, before any `supervise`
+block; the policy by name, `drop_new` / `drop_old` / `block_sender`):
+
+```march
+actor Worker do
+  state { n : Int }
+  init { n: 0 }
+  mailbox 1000 drop_old
+  on Work() do { n: state.n + 1 } end
+end
+```
+
 Supervision block inside an actor:
 
 ```march
