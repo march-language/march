@@ -906,18 +906,113 @@ let induction_match_adt (c : A.fn_clause) (mparam : string) : string option =
     Some madt
   | _ -> None
 
-(* A clause body with its leading local `fn` definitions set aside: `dedup`
-   defines `go` and then matches on its parameter, which is Shape 2 once the
-   definition is out of the way.  The locals' contracts reach the remaining
-   body through [post_lookup] ([check_fn_post_verdict]). *)
-let induction_body (e : A.expr) : A.expr =
+(* ── `let` in induction bodies (plan step 4.1) ────────────────────────────
+   Tier 2 reads a body as constructors, calls and a match, so a `let` hides
+   its value: `let new_r = make_node(lr, k, r); make_node(ll, lk, new_r)`.
+   [inline_lets] substitutes each simple `let x = e` into the rest of its
+   block, which is exactly the value the tail computes.  It is conservative:
+   a later binder of `x` or of a name free in `e` would capture, and a node
+   this substitution does not understand might bind names, so either gives
+   [None] and the body is used as written (the tail is then not attempted,
+   as before).  Leading local `fn`s are dropped here; their contracts reach
+   the body through [post_lookup]. *)
+let rec expr_vars (acc : string list) (e : A.expr) : string list option =
+  let fold acc es =
+    List.fold_left (fun acc x -> Option.bind acc (fun acc -> expr_vars acc x)) (Some acc) es
+  in
   match e with
-  | A.EBlock (es, _) -> (
-    match List.rev es with
-    | last :: before when before <> [] && List.for_all (function A.ELetFn _ -> true | _ -> false) before ->
-      last
-    | _ -> e)
-  | _ -> e
+  | A.EVar { A.txt; _ } -> Some (txt :: acc)
+  | A.ELit _ -> Some acc
+  | A.EApp (f, args, _) -> fold acc (f :: args)
+  | A.ECon (_, es, _) | A.ETuple (es, _) | A.EAtom (_, es, _) | A.EBlock (es, _) -> fold acc es
+  | A.EField (r, _, _) | A.EAnnot (r, _, _) -> expr_vars acc r
+  | A.EIf (c, t, f, _) -> fold acc [ c; t; f ]
+  | A.ELet (b, _) -> fold (pat_binders b.A.bind_pat @ acc) [ b.A.bind_expr ]
+  | A.EMatch (x, brs, _) ->
+    List.fold_left
+      (fun acc (br : A.branch) ->
+        Option.bind acc (fun acc ->
+            let acc = pat_binders br.A.branch_pat @ acc in
+            let acc = match br.A.branch_guard with Some g -> expr_vars acc g | None -> Some acc in
+            Option.bind acc (fun acc -> expr_vars acc br.A.branch_body)))
+      (expr_vars acc x) brs
+  | _ -> None
+
+(* [e] with [x := rhs], or [None] when that could capture or [e] has a node
+   this does not model.  [expr_vars] over-approximates every name a node
+   binds or mentions, which is all the capture test needs. *)
+let subst_let (x : string) (rhs : A.expr) (e : A.expr) : A.expr option =
+  match expr_vars [] rhs, expr_vars [] e with
+  | Some rhs_vars, Some _ ->
+    let rec go (e : A.expr) : A.expr option =
+      let all es = List.fold_right (fun a acc -> match go a, acc with Some a, Some l -> Some (a :: l) | _ -> None) es (Some []) in
+      match e with
+      | A.EVar { A.txt; _ } -> Some (if txt = x then rhs else e)
+      | A.ELit _ -> Some e
+      | A.EApp (f, args, sp) -> (match go f, all args with Some f, Some a -> Some (A.EApp (f, a, sp)) | _ -> None)
+      | A.ECon (c, es, sp) -> Option.map (fun es -> A.ECon (c, es, sp)) (all es)
+      | A.ETuple (es, sp) -> Option.map (fun es -> A.ETuple (es, sp)) (all es)
+      | A.EAtom (a, es, sp) -> Option.map (fun es -> A.EAtom (a, es, sp)) (all es)
+      | A.EField (r, n, sp) -> Option.map (fun r -> A.EField (r, n, sp)) (go r)
+      | A.EAnnot (r, t, sp) -> Option.map (fun r -> A.EAnnot (r, t, sp)) (go r)
+      | A.EIf (c, t, f, sp) -> (
+        match go c, go t, go f with Some c, Some t, Some f -> Some (A.EIf (c, t, f, sp)) | _ -> None)
+      | A.EBlock (es, sp) -> Option.map (fun es -> A.EBlock (es, sp)) (all es)
+      | A.ELet (b, sp) ->
+        let bs = pat_binders b.A.bind_pat in
+        if List.exists (fun n -> n = x || List.mem n rhs_vars) bs then None
+        else Option.map (fun r -> A.ELet ({ b with A.bind_expr = r }, sp)) (go b.A.bind_expr)
+      | A.EMatch (s, brs, sp) ->
+        let branch (br : A.branch) =
+          let bs = pat_binders br.A.branch_pat in
+          if List.exists (fun n -> n = x || List.mem n rhs_vars) bs then None
+          else
+            let g = match br.A.branch_guard with Some g -> Option.map Option.some (go g) | None -> Some None in
+            match g, go br.A.branch_body with
+            | Some g, Some b -> Some { br with A.branch_guard = g; branch_body = b }
+            | _ -> None
+        in
+        let brs' = List.fold_right (fun br acc -> match branch br, acc with Some b, Some l -> Some (b :: l) | _ -> None) brs (Some []) in
+        (match go s, brs' with Some s, Some brs -> Some (A.EMatch (s, brs, sp)) | _ -> None)
+      | _ -> None
+    in
+    go e
+  | _ -> None
+
+let rec inline_lets (e : A.expr) : A.expr option =
+  match e with
+  | A.EBlock (es, _) ->
+    let rec block = function
+      | [] -> None
+      | [ last ] -> inline_lets last
+      | A.ELetFn _ :: rest -> block rest
+      | A.ELet ({ A.bind_pat = A.PatVar { A.txt = x; _ }; bind_expr = rhs; _ }, _) :: rest -> (
+        let rest' =
+          List.fold_right
+            (fun st acc -> match subst_let x rhs st, acc with Some st, Some l -> Some (st :: l) | _ -> None)
+            rest (Some [])
+        in
+        match rest' with Some rest -> block rest | None -> None)
+      | _ -> None
+    in
+    block es
+  | A.EIf (c, t, f, sp) -> (
+    match inline_lets t, inline_lets f with Some t, Some f -> Some (A.EIf (c, t, f, sp)) | _ -> None)
+  | A.EMatch (s, brs, sp) ->
+    let brs' =
+      List.fold_right
+        (fun (br : A.branch) acc ->
+          match inline_lets br.A.branch_body, acc with
+          | Some b, Some l -> Some ({ br with A.branch_body = b } :: l)
+          | _ -> None)
+        brs (Some [])
+    in
+    Option.map (fun brs -> A.EMatch (s, brs, sp)) brs'
+  | _ -> Some e
+
+(* The body Tier 2 reads: lets inlined where that is safe, else as written. *)
+let induction_body (e : A.expr) : A.expr =
+  match inline_lets e with Some b -> b | None -> e
 
 (* Does [check_post_induction] reach a body shape it checks (Shape 1 or
    Shape 2), rather than its final `| _ -> false`?  Solver-free, for
@@ -955,7 +1050,8 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
          [postcond_infer.ml:25]. *)
       let check_tail
           ~(mctx : (string * string * int * (string, unit) Hashtbl.t) option)
-          ~(pat : (string * (string * Smt.sort) list) option) ~(refute : bool)
+          ~(pat : ((string * Smt.sort) list * (string * string * string * string list) list) option)
+          ~(refute : bool)
           ((path, tail_e) : (A.expr * bool) list * A.expr) : Obligation.verdict option =
             (* ── Per-VC state ───────────────────────────────────────────────
                [declare] is the well-sortedness guard: one symbol at two sorts
@@ -998,16 +1094,20 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
                if not (declare mparam (adt_sort madt)) then ok := false
              | None -> ());
             (match pat with
-             | Some (_, binder_sorts) ->
+             | Some (binder_sorts, _) ->
                List.iter
                  (fun (n, s) -> if not (declare n s) then ok := false)
                  binder_sorts
              | None -> ());
             List.iter
               (fun fp ->
-                match Option.bind (param_ty_of fp) smt_sort_of_ty with
-                | Some s -> if not (declare (param_name_of fp) s) then ok := false
-                | None -> ())
+                match param_ty_of fp with
+                (* A type-variable parameter is an opaque element. *)
+                | Some (A.TyVar _) -> if not (declare (param_name_of fp) (Smt.sdata "Elem")) then ok := false
+                | t -> (
+                  match Option.bind t smt_sort_of_ty with
+                  | Some s -> if not (declare (param_name_of fp) s) then ok := false
+                  | None -> ()))
               c.A.fc_params;
             (* Hypotheses loaded after the reflectors are defined (below). *)
             let param_refinements =
@@ -1026,7 +1126,9 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
             let rec reflect_at (s : Smt.sort) (e : A.expr) : Smt.term option =
               match s with
               | Smt.SData (d, _) when d <> "Elem" -> reflect_dt d e
-              | Smt.SInt -> reflect_int e
+              (* An Int payload the reflection cannot place (an `if` computing
+                 a height) is an unconstrained Int: weaker, never wrong. *)
+              | Smt.SInt -> (match reflect_int e with Some t -> Some t | None -> Some (fresh s))
               (* An `Elem` payload that is a variable stays that variable, so
                  `Cons(h, acc)` keeps `h` for a structural `elts`; its sort
                  is whatever the variable already has, or `Elem`, and
@@ -1114,11 +1216,12 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
                       | None -> ())
                  | None -> ());
                 Some cst
-              (* Another function's call at list sort: a constant carrying
-                 that function's PROVED contract (plan step 2.5), conjunct by
-                 conjunct, so `Nil -> reverse(acc)` in a helper reads
-                 `reverse`'s postcondition. *)
-              | A.EApp (A.EVar { A.txt = f; _ }, args, _) when d = list_adt -> (
+              (* Another function's call at a datatype sort Tier 2 declares: a
+                 constant carrying that function's PROVED contract (plan steps
+                 2.5 and 4.2), conjunct by conjunct, so `Nil -> reverse(acc)`
+                 reads `reverse`'s postcondition and `make_node(l, k, r)` reads
+                 `make_node`'s. *)
+              | A.EApp (A.EVar { A.txt = f; _ }, args, _) when tier2_adt d -> (
                 match !post_lookup f args with
                 | None -> None
                 | Some (b, q, _) ->
@@ -1137,8 +1240,13 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
             and reflect_int (e : A.expr) : Smt.term option =
               (* Program text (a tail or a guard): no set vocabulary. *)
               smt_of ~vocab:false ~resolve_var:rv_int ~resolve_measure:rm ~resolve_measure_app:rma e
+            (* A name already declared (a type-variable parameter at `Elem`)
+               keeps its sort; [resolve_sorts] settles it from its uses.  Only
+               a name nothing declared is taken to be an Int. *)
             and rv_int (x : string) : Smt.term option =
-              if declare x Smt.SInt then Some (Smt.Const x) else None
+              if Hashtbl.mem decls x then Some (Smt.Const x)
+              else if declare x Smt.SInt then Some (Smt.Const x)
+              else None
             and rm (m : string) (x : string) : Smt.term option =
               match list_structure_measure m with
               | Some lm -> Option.map (fun t -> Smt.App (lm, [ t ])) (reflect_dt list_adt (evar x))
@@ -1175,7 +1283,24 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
                 else if x = bnd || x = "_" then Some (Smt.App (m, [ bt ]))
                 else rm m x
               in
-              smt_of ~resolve_var:rv ~resolve_measure:rm' ~resolve_measure_app:rma p
+              (* A measure over a CALL (`tree_elts(make_node(lr, k, r))` in a
+                 substituted callee contract) reflects the call through
+                 [reflect_dt], which carries that callee's own contract. *)
+              let rmc m f cargs =
+                let adt =
+                  match list_structure_measure m with
+                  | Some _ -> Some list_adt
+                  | None -> if is_axiom_measure m then Hashtbl.find_opt axiom_measures m else None
+                in
+                match adt with
+                | Some a ->
+                  Option.bind
+                    (reflect_dt a (A.EApp (A.EVar { A.txt = f; A.span = dummy_span }, cargs, dummy_span)))
+                    (fun t -> rma m t)
+                | None -> None
+              in
+              smt_of ~resolve_var:rv ~resolve_measure:rm' ~resolve_measure_app:rma
+                ~resolve_measure_call:rmc p
             in
             (* The pattern equation.  Without it a match arm knows nothing about
                the scrutinee, and even the BASE case (`size(t) + 1` with `t =
@@ -1185,14 +1310,16 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
                goal provable that would otherwise fail. *)
             (match pat, mctx with
              | None, _ -> ()
-             | Some (ctor, binder_sorts), Some (mparam, madt, _, _) ->
-               let pat_eq =
-                 List.fold_right
-                   (fun (n, _) acc -> Option.map (fun ts -> Smt.Const n :: ts) acc)
-                   binder_sorts (Some [])
-                 |> Option.map (fun ts -> Smt.Eq (Smt.Const mparam, ctor_term madt ctor ts))
-               in
-               (match pat_eq with Some t -> assume := t :: !assume | None -> ok := false)
+             (* One equation per constructor pattern, nested ones included
+                (plan step 4.3): `var = Ctor(names)`, the first over the
+                matched parameter, each nested one over its fresh name. *)
+             | Some (_, equations), Some _ ->
+               List.iter
+                 (fun (var, adt, ctor, names) ->
+                   assume :=
+                     Smt.Eq (Smt.Const var, ctor_term adt ctor (List.map (fun n -> Smt.Const n) names))
+                     :: !assume)
+                 equations
              (* A pattern with no matched parameter is not a shape we build. *)
              | Some _, None -> ok := false);
             (* A parameter's refinement is a hypothesis: every call site is
@@ -1212,9 +1339,52 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
             (* Reflecting the tail is what mints the IH assumptions, so it must
                happen before the assumption list is read. *)
             let tail_term = reflect_dt ret_adt tail_e in
+            (* A scalar call in a guard (`compare_by(cmp, x, k) < 0`, plan step
+               4.4) becomes a constant carrying its callee's PROVED contract,
+               so `c == 0` in the equal branch gives `x == k`.  A call with no
+               scalar contract is left alone, and the guard then does not
+               translate, as before. *)
+            (* One constant per callee and variable arguments: `let c =
+               compare_by(cmp, x, k)` is inlined into every guard that reads
+               `c`, and those copies are one value.  Only all-variable
+               arguments are identified, the shape an inlined `let` leaves. *)
+            let call_consts : (string, string) Hashtbl.t = Hashtbl.create 4 in
+            let rec abstract_calls (e : A.expr) : A.expr =
+              match e with
+              | A.EApp ((A.EVar { A.txt = f; _ } as hd), args, sp)
+                when not (List.mem f predicate_operators) && not (is_measure_app f) -> (
+                let args = List.map abstract_calls args in
+                let key =
+                  if List.for_all (function A.EVar _ -> true | _ -> false) args then
+                    Some (f ^ "(" ^ String.concat "," (List.map (function A.EVar { A.txt; _ } -> txt | _ -> "") args) ^ ")")
+                  else None
+                in
+                match Option.bind key (Hashtbl.find_opt call_consts) with
+                | Some nm -> A.EVar { A.txt = nm; A.span = sp }
+                | None ->
+                match !post_lookup f args with
+                | Some (b, q, marker) when scalar_sort_of_marker marker <> None ->
+                  let srt = Option.get (scalar_sort_of_marker marker) in
+                  incr ctr;
+                  let nm = Printf.sprintf "$t2s%d" !ctr in
+                  Option.iter (fun k -> Hashtbl.replace call_consts k nm) key;
+                  Hashtbl.replace decls nm srt;
+                  let rv x = if x = b || x = "_" then Some (Smt.Const nm) else rv_int x in
+                  List.iter
+                    (fun conj ->
+                      match smt_of ~resolve_var:rv ~resolve_measure:rm ~resolve_measure_app:rma conj with
+                      | Some t -> assume := t :: !assume
+                      | None -> ())
+                    (pred_conjuncts q);
+                  A.EVar { A.txt = nm; A.span = sp }
+                | _ -> A.EApp (hd, args, sp))
+              | A.EApp (f, args, sp) -> A.EApp (abstract_calls f, List.map abstract_calls args, sp)
+              | A.EAnnot (x, t, sp) -> A.EAnnot (abstract_calls x, t, sp)
+              | _ -> e
+            in
             List.iter
               (fun (cond, negated) ->
-                match reflect_int cond with
+                match reflect_int (abstract_calls cond) with
                 | Some t -> assume := (if negated then Smt.Not t else t) :: !assume
                 | None -> ())
               path;
@@ -1356,45 +1526,74 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
               v = Obligation.Proved
             in
             let reject () = verdicts := unbuilt () :: !verdicts; false in
+            (* A constructor pattern as the binders it introduces and one
+               equation per constructor in it, nested ones under fresh names
+               (plan step 4.3).  [None] for a sub-pattern this does not model
+               (a literal, a tuple). *)
+            let pat_ctr = ref 0 in
+            let rec flatten (var : string) (adt : string) (ctor : string) (subpats : A.pattern list)
+                : ((string * Smt.sort) list * (string * string * string * string list) list) option =
+              let fsorts = try Hashtbl.find ctor_field_sorts ctor with Not_found -> [] in
+              if List.length subpats <> List.length fsorts then None
+              else
+                let parts =
+                  List.map2
+                    (fun p fs ->
+                      match p with
+                      | A.PatVar n -> Some (n.A.txt, [ (n.A.txt, fs) ], [])
+                      | A.PatWild _ ->
+                        incr pat_ctr;
+                        let n = Printf.sprintf "$w%s%d" ctor !pat_ctr in
+                        Some (n, [ (n, fs) ], [])
+                      | A.PatCon (ct, sub) -> (
+                        match fs with
+                        | Smt.SData (sub_adt, _) when ctor_belongs ct.A.txt sub_adt -> (
+                          incr pat_ctr;
+                          let n = Printf.sprintf "$p%d" !pat_ctr in
+                          match flatten n sub_adt ct.A.txt sub with
+                          | Some (bs, eqs) -> Some (n, (n, fs) :: bs, eqs)
+                          | None -> None)
+                        | _ -> None)
+                      | _ -> None)
+                    subpats fsorts
+                in
+                if List.exists Option.is_none parts then None
+                else
+                  let parts = List.map Option.get parts in
+                  let names = List.map (fun (n, _, _) -> n) parts in
+                  Some
+                    ( List.concat_map (fun (_, bs, _) -> bs) parts,
+                      (var, adt, ctor, names) :: List.concat_map (fun (_, _, eqs) -> eqs) parts )
+            in
             let check_branch (br : A.branch) : bool =
+              let base_path =
+                match br.A.branch_guard with Some g -> [ (g, false) ] | None -> []
+              in
+              (* Fold, not for_all: no short-circuit, so the VC cache is warmed
+                 uniformly and the verdict is order-independent. *)
+              let check_tails ~pat body =
+                let ts = tails base_path body in
+                (ts <> [] || reject ())
+                && List.fold_left (fun acc t -> proved_tail ~mctx ~pat t && acc) true ts
+              in
               match br.A.branch_pat with
               | A.PatCon (ct, subpats) when ctor_belongs ct.A.txt madt -> (
-                let ctor = ct.A.txt in
-                let fsorts = try Hashtbl.find ctor_field_sorts ctor with Not_found -> [] in
-                if List.length subpats <> List.length fsorts then reject ()
-                else
-                  (* Only flat PatVar / PatWild sub-patterns: a nested pattern
-                     would need an equation we do not build. *)
-                  let names =
-                    List.mapi
-                      (fun i p ->
-                        match p with
-                        | A.PatVar n -> Some n.A.txt
-                        | A.PatWild _ -> Some (Printf.sprintf "$w%s%d" ctor i)
-                        | _ -> None)
-                      subpats
-                  in
-                  if List.exists Option.is_none names then reject ()
-                  else
-                    let names = List.map Option.get names in
-                    (* A binder that reuses a parameter's name would be
-                       conflated with it (both reflect to `Const name`). *)
-                    if List.exists (fun n -> List.mem n params) names then reject ()
-                    else
-                      let binder_sorts = List.combine names fsorts in
-                      let base_path =
-                        match br.A.branch_guard with Some g -> [ (g, false) ] | None -> []
-                      in
-                      let ts = tails base_path br.A.branch_body in
-                      (* Fold, not for_all: no short-circuit, so the VC cache is
-                         warmed uniformly and the verdict is order-independent. *)
-                      (ts <> [] || reject ())
-                      && List.fold_left
-                           (fun acc t ->
-                             proved_tail ~mctx ~pat:(Some (ctor, binder_sorts)) t && acc)
-                           true ts)
-              (* A catch-all arm binds no constructor, so there is no pattern
-                 equation pinning the scrutinee — nothing to prove from. *)
+                match flatten mparam madt ct.A.txt subpats with
+                | None -> reject ()
+                | Some (binder_sorts, equations) ->
+                  (* A binder that reuses a parameter's name would be
+                     conflated with it (both reflect to `Const name`). *)
+                  if List.exists (fun (n, _) -> List.mem n params) binder_sorts then reject ()
+                  else check_tails ~pat:(Some (binder_sorts, equations)) br.A.branch_body)
+              (* A catch-all arm pins nothing about the scrutinee, so it is
+                 checked with no pattern equation, which is weaker: whatever
+                 it proves holds for every value that reaches it (plan step
+                 4.3).  A variable pattern names the matched parameter. *)
+              | A.PatWild _ -> check_tails ~pat:None br.A.branch_body
+              | A.PatVar v -> (
+                match subst_let v.A.txt (A.EVar { A.txt = mparam; A.span = v.A.span }) br.A.branch_body with
+                | Some body -> check_tails ~pat:None body
+                | None -> reject ())
               | _ -> reject ()
             in
             let ok =

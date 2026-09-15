@@ -5095,19 +5095,22 @@ end|} in
       Node(l, _, r) -> 1 + size(l) + size(r)
     end
   end
-  fn hidden(k : Int) : Int do k end
-  fn mk() : {Tree | size(_) == 1} do Node(Leaf, hidden(1), Leaf) end
+  fn hidden(k : Int) : Tree do Leaf end
+  fn mk() : {Tree | size(_) == 1} do Node(Leaf, 1, hidden(1)) end
 end|} in
         Alcotest.(check (list string)) "slug" [ "unreflectable-subject" ] (skip_reasons src);
         let details = skip_reason_details src in
-        (* [body] at the filing site is the WHOLE constructor-literal tail
-           (`Node(Leaf, hidden(), Leaf)`), not just its opaque field -- same
+        (* The opaque field is a DATATYPE (a call with no contract): an opaque
+           Int payload has reflected as an unconstrained constant since plan
+           step 4.1, which proves this size contract instead of skipping it.
+           [body] at the filing site is the WHOLE constructor-literal tail
+           (`Node(Leaf, 1, hidden(1))`), not just its opaque field -- same
            granularity finding 1 asked for at the sibling site (there too the
            record-literal reproducer named the whole tail, `v.name == "a"`,
            not an isolated field). Still names `hidden()` as a substring of
            that tail, which is enough to point a reader at the actual cause. *)
         Alcotest.(check bool) "names the tail as a return expression, including `hidden()`" true
-          (List.exists (fun d -> contains d "the return expression `Node(Leaf, hidden(1), Leaf)`") details);
+          (List.exists (fun d -> contains d "the return expression `Node(Leaf, 1, hidden(1))`") details);
         Alcotest.(check bool) "does not blame the (reflectable) measure predicate" false
           (List.exists (fun d -> contains d "has no SMT translation") details))
   ]
@@ -15508,6 +15511,131 @@ let card_suite =
                at 0)
              warns)) ]
 
+(* ── An AVL tree proved by induction (plan steps 4.1 to 4.4) ─────────────
+   A user copy of `stdlib/sorted_set.march`'s tree.  Each proof needs every
+   Phase 4 checker step: `make_node` a constructor behind `let`s (4.1),
+   `rotate_*` a nested pattern and a catch-all arm (4.3) over callee contracts
+   (4.2), `balance` calls nested in calls, and `tree_insert` the comparator law
+   read from a guard (4.4).  All of them were skipped before step 4.1. *)
+let avl_suite =
+  let m body = "mod T do\n" ^ body ^ "\nend\n" in
+  let avl = {|  type Tree(a) = Leaf | Node(Tree(a), a, Tree(a), Int)
+
+  @[measure]
+  fn tree_elts(t : Tree(a)) : Set(a) do
+    match t do
+      Leaf -> empty
+      Node(l, k, r, _) -> union(tree_elts(l), union(singleton(k), tree_elts(r)))
+    end
+  end
+
+  fn height(t : Tree(a)) : Int do
+    match t do
+    Leaf -> 0
+    Node(_, _, _, h) -> h
+    end
+  end
+
+  fn make_node(l : Tree(a), k : a, r : Tree(a)) : {Tree(a) | tree_elts(_) == union(tree_elts(l), union(singleton(k), tree_elts(r)))} do
+    let lh = height(l)
+    let rh = height(r)
+    let h = if lh > rh do lh + 1 else rh + 1 end
+    Node(l, k, r, h)
+  end
+
+  fn rotate_right(t : Tree(a)) : {Tree(a) | tree_elts(_) == tree_elts(t)} do
+    match t do
+    Node(Node(ll, lk, lr, _), k, r, _) ->
+      let new_r = make_node(lr, k, r)
+      make_node(ll, lk, new_r)
+    _ -> t
+    end
+  end
+
+  fn rotate_left(t : Tree(a)) : {Tree(a) | tree_elts(_) == tree_elts(t)} do
+    match t do
+    Node(l, k, Node(rl, rk, rr, _), _) ->
+      let new_l = make_node(l, k, rl)
+      make_node(new_l, rk, rr)
+    _ -> t
+    end
+  end
+
+  fn bf(t : Tree(a)) : Int do
+    match t do
+    Leaf -> 0
+    Node(l, _, r, _) -> height(l) - height(r)
+    end
+  end
+
+  fn balance(t : Tree(a)) : {Tree(a) | tree_elts(_) == tree_elts(t)} do
+    match t do
+    Leaf -> Leaf
+    Node(l, k, r, _) ->
+      let b = height(l) - height(r)
+      if b > 1 do
+        if bf(l) < 0 do
+          rotate_right(make_node(rotate_left(l), k, r))
+        else
+          rotate_right(t)
+        end
+      else
+        if b < -1 do
+          if bf(r) > 0 do
+            rotate_left(make_node(l, k, rotate_right(r)))
+          else
+            rotate_left(t)
+          end
+        else
+          make_node(l, k, r)
+        end
+      end
+    end
+  end
+
+  @[assume]
+  fn compare_by(cmp : a -> a -> Int, x : a, k : a) : {Int | (_ == 0) == (x == k)} do
+    cmp(x, k)
+  end
+
+  fn tree_insert(t : Tree(a), cmp : a -> a -> Int, x : a) : {Tree(a) | tree_elts(_) == union(tree_elts(t), singleton(x))} do
+    match t do
+    Leaf -> Node(Leaf, x, Leaf, 1)
+    Node(l, k, r, _) ->
+      let c = compare_by(cmp, x, k)
+      if c < 0 do
+        balance(make_node(tree_insert(l, cmp, x), k, r))
+      else
+        if c > 0 do
+          balance(make_node(l, k, tree_insert(r, cmp, x)))
+        else
+          t
+        end
+      end
+    end
+  end|} in
+  let replace ~sub ~by str =
+    let n = String.length sub in
+    let rec go i = if i + n > String.length str then str
+      else if String.sub str i n = sub then String.sub str 0 i ^ by ^ String.sub str (i + n) (String.length str - i - n)
+      else go (i + 1) in
+    go 0
+  in
+  [ gated "make_node, rotations, balance and tree_insert are proved" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (5, 0, 0) (ledger_counts3 (m avl)));
+
+    gated "without the comparator law tree_insert is not proved" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (4, 0, 1)
+          (ledger_counts3
+             (m (replace ~sub:"let c = compare_by(cmp, x, k)" ~by:"let c = cmp(x, k)" avl))));
+
+    gated "a false insert contract is refuted, not proved" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (4, 1, 0)
+          (ledger_counts3
+             (m (replace
+                   ~sub:"{Tree(a) | tree_elts(_) == union(tree_elts(t), singleton(x))}"
+                   ~by:"{Tree(a) | tree_elts(_) == tree_elts(t)}" avl)))) ]
+
 (* ── The single-element-type rule (plan step 1.5) ─────────────────────────
    A set predicate whose operands have known, different element types is an
    error at the predicate; before the rule it was a silent sort-conflict skip.
@@ -16175,7 +16303,15 @@ let measure_definition_suite =
             \  fn main() : Int do need(S(Z)) end\nend\n"
         in
         Alcotest.(check bool) "recursive depth: declare-fun" true (contains q "(declare-fun depth ");
-        Alcotest.(check bool) "recursive depth: forall axiom" true (contains q "forall");
+        (* Quantified axioms are attached per query since plan step 4.5, so
+           they live beside the preamble, keyed by the measure symbol. *)
+        let depth_axioms =
+          match Hashtbl.find_opt March_refinecheck.Refine_encode.measure_axioms_by_symbol "depth" with
+          | Some b -> Buffer.contents b
+          | None -> ""
+        in
+        Alcotest.(check bool) "recursive depth: forall axiom" true (contains depth_axioms "forall");
+        Alcotest.(check bool) "the global preamble carries no quantifier" false (contains q "forall");
         Alcotest.(check bool) "recursive depth: no define-fun" false (contains q "(define-fun depth ")) ]
 
 let () =
@@ -16280,6 +16416,7 @@ let () =
       ("single-element-type", single_element_type_suite);
       ("list-structure", list_structure_suite);
       ("cardinality", card_suite);
+      ("avl-induction", avl_suite);
       ("array-bounds-contracts", array_bounds_suite);
       ("measure-definition", measure_definition_suite);
       ("caller-sorts", caller_sorts_suite);
