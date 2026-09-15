@@ -296,6 +296,8 @@ native_pid_of_int_roundtrip: coverage audit (user + stdlib): 104 enforced, 0 ine
 native_pid_of_int_roundtrip: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_preempt_starvation: coverage audit (user + stdlib): 104 enforced, 0 inert (warned), 0 unenforced
 native_preempt_starvation: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_prelude_scope_user_shadow: coverage audit (user + stdlib): 104 enforced, 0 inert (warned), 0 unenforced
+native_prelude_scope_user_shadow: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_println_line_atomic: coverage audit (user + stdlib): 104 enforced, 0 inert (warned), 0 unenforced
 native_println_line_atomic: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_qualified_ctor_pattern: coverage audit (user + stdlib): 104 enforced, 0 inert (warned), 0 unenforced
