@@ -48,6 +48,35 @@ mod TestNodeQueue do
 
   describe "NodeQueue.cast" do
 
+    test "take_evicted reports what drop_old evicted (call routing to handler 0)" do
+      let q = NodeQueue.start(-1, 10)
+      let _ = NodeQueue.enqueue(q, 1, Bytes.from_string("aaaaaaaa"), NodeQueue.DropNew)
+      let _ = NodeQueue.enqueue(q, 2, Bytes.from_string("bbbbbbbb"), NodeQueue.DropOld)
+      assert (NodeQueue.take_evicted(q) == Cons(1, Nil))
+      assert (NodeQueue.take_evicted(q) == Nil)
+    end
+
+    test "block_sender admits at once when the frame fits" do
+      let q = NodeQueue.start(-1, 10)
+      match NodeQueue.enqueue(q, 1, Bytes.from_string("aaaa"), NodeQueue.BlockSender(100)) do
+        Ok(_) -> assert (true)
+        Err(_) -> assert (false)
+      end
+      assert (NodeQueue.depth(q) == 4)
+    end
+
+    -- fd -1: the writer's first write fails and marks the connection dead.
+    -- A blocking send then must not wait for credit that can never come.
+    test "block_sender on a dead connection is NoConnection at once, nothing queued" do
+      let q = NodeQueue.start(-1, 10)
+      let _ = NodeQueue.enqueue(q, 1, Bytes.from_string("aaaaaaaa"), NodeQueue.DropNew)
+      match NodeQueue.enqueue(q, 2, Bytes.from_string("bbbbbbbb"), NodeQueue.BlockSender(50)) do
+        Err(NodeQueue.NoConnection) -> assert (true)
+        _ -> assert (false)
+      end
+      assert (NodeQueue.depth(q) == 8)
+    end
+
     test "an ACTOR_MSG is charged by its framed size" do
       let q = NodeQueue.start(-4, 60)
       let to = GlobalPid.make("n", 1, 1)

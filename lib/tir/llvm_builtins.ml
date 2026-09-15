@@ -502,6 +502,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_actor_call(ptr %actor, ptr %msg, i64 %timeout_ms)" };
   { march_name = "actor_reply"; c_name = Some "march_actor_reply"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_actor_reply(ptr %ref, ptr %result)" };
+  { march_name = "actor_reply_retain"; c_name = Some "march_actor_reply_retain"; ret_ty = Some (Tir.TVar "a");
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_actor_reply_retain(ptr %ref)" };
   (* actor_send_after/actor_cancel_timer (specs/progress/2026-08-12-language-
      level-timers.md). Same (ptr, ptr, i64) -> ptr shape as actor_call above
      -- pid and msg go through the general EApp path exactly like
@@ -1433,6 +1435,7 @@ let native_actor_items : preamble_item list = [   (* native-only: actors + sched
   PDeclare "march_actor_get_int";
   PDeclare "march_actor_call";
   PDeclare "march_actor_reply";
+  PDeclare "march_actor_reply_retain";
   PDeclare "march_send_after";
   PDeclare "march_timer_cancel";
   PDeclare "march_run_scheduler";

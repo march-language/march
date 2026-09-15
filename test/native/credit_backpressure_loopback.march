@@ -4,7 +4,7 @@
 -- arrives on the control connection. Two connections per peer (the split);
 -- the receiver reads the data connection only after a "go" on control, so
 -- the budget is really what refuses the third frame.
--- Design: specs/todos/2026-09-14-credit-based-flow-control.md.
+-- Design: specs/progress/2026-09-15-credit-based-flow-control.md.
 mod CreditBackpressureLoopback do
   needs IO.Console
   needs IO.Mut

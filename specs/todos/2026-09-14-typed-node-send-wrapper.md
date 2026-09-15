@@ -2,8 +2,10 @@
 
 **Steps 1–3 shipped 2026-09-15** — `Node.send(peer, to, msg)` exists, with
 the codec checked at the call site, the tag minted, and `Pid` refused by the
-derive: [[2026-09-15-typed-node-send]]. What remains is step 4 below (the
-generator) and the receiver-side dispatch table it needs.
+derive: [[2026-09-15-typed-node-send]]. Step 2's queued half shipped the same
+day as `Node.enqueue(q, to, msg, policy)`: [[2026-09-15-node-enqueue]]. What
+remains is step 4 below (the generator) and the receiver-side dispatch table
+it needs.
 
 Filed 2026-09-14 as the last open part of
 [[2026-09-14-remote-send-to-a-global-pid]] (now a progress record). Every
@@ -49,7 +51,7 @@ rule holds; the generator can.
    fully-qualified type name on the call for lowering.
 2. Lowering: `Node.send(peer, to, msg)` →
    `NodeSend.enqueue(queue_of(peer), next_seq(), to, "<fqn>", Bytes.to_list(Json.encode(T_to_json(msg))))`
-   — once [[2026-09-14-credit-based-flow-control]] provides the queue;
+   — once [[2026-09-15-credit-based-flow-control]] provides the queue;
    until then `cast_from` on `peer.data_fd`.
 3. A `Pid(_)` anywhere in `m` is rejected by the derive (a local pid is
    meaningless on another node); the message carries `GlobalPid.Pid`.

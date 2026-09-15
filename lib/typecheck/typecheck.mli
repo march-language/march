@@ -279,7 +279,7 @@ type env = {
   cap_dict_sites : Ast.span list ref;
   mint_cap_sites : (Ast.span * ty * bool * string) list ref;
   cap_narrow_sites : (Ast.span * ty) list ref;
-  node_send_sites : (Ast.span * ty) list ref;
+  node_send_sites : (Ast.span * string * ty) list ref;
   json_codecs : ty list ref;
   json_cap_sites : (Ast.span * ty * string) list ref;
   pure_mod : bool;

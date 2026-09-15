@@ -1,6 +1,6 @@
 -- NodeQueue: the per-peer outbound queue with credit-based flow control
 -- (distributed actors 2/4, step 3; design record:
--- specs/todos/2026-09-14-credit-based-flow-control.md).
+-- specs/progress/2026-09-15-credit-based-flow-control.md).
 --
 -- A remote send is a write to THIS queue, never to the socket. One writer
 -- actor per peer owns the data connection for writing: it sends a frame only
@@ -20,16 +20,28 @@
 --   drop_new     refuse the new frame (Err(Backpressure))
 --   drop_old     admit it, evicting the oldest queued frames until it fits;
 --                the evicted seqs are reported through `take_evicted`
---   block_sender not offered here yet: there is no primitive to park the
---                calling green thread on the queue; a caller that wants it
---                retries on Backpressure (the design record's step 3).
+--   block_sender the caller blocks until the frame is admitted or its
+--                timeout passes (`BlockSender(timeout_ms)`, below)
 mod NodeQueue do
   needs IO.Mut
   needs IO.NetConnect
 
   fn tag_credit() : Int do 11 end
 
-  type Policy = DropNew | DropOld
+  -- `BlockSender(timeout_ms)`: the caller BLOCKS until the frame is admitted
+  -- or the deadline passes (then `Err(Backpressure)`, and the frame is
+  -- withdrawn). Rides `Actor.call` on the writer -- no runtime primitive.
+  -- The writer keeps a FIFO line of waiting frames and a FIFO line of blocked
+  -- callers, one entry each per call; every admission from the line answers
+  -- the oldest caller. So `Ok` means: the writer has admitted a frame at or
+  -- ahead of yours, and yours is admitted in order -- the same promise
+  -- `DropNew`'s `Ok` makes (queued, not delivered). A call that times out
+  -- withdraws its own frame; if admission raced the deadline the frame may
+  -- still go out. Under the interpreter `Actor.call` cannot park the caller
+  -- across later credit, so a blocking send that cannot be admitted at once
+  -- returns `Err(Backpressure)` there (as `Actor.set_queue_limit` policy 3 is
+  -- refused); the compiled backend blocks for real.
+  type Policy = DropNew | DropOld | BlockSender(Int)
   type EnqueueError = Backpressure | NoConnection
 
   -- ── wire ────────────────────────────────────────────────────────────────
@@ -54,11 +66,48 @@ mod NodeQueue do
   -- `dead`: a write failed (the connection is gone). Nothing further is
   -- written and nothing already queued is charged off the budget: a failed
   -- write is not a sent frame.
-  type WriterState = { fd : Int, granted : Int, sent : Int, pending : Deque.Deque((Int, Bytes)), evicted : List(Int), budget : Int, dead : Bool }
+  type WriterState = { fd : Int, granted : Int, sent : Int, pending : Deque.Deque((Int, Bytes)), evicted : List(Int), budget : Int, dead : Bool,
+                       waiting : Deque.Deque((Int, Int, Bytes)), waiters : Deque.Deque(Bool -> Unit) }
 
+  -- Handler ORDER is load-bearing for the first two: `Actor.call` routes a
+  -- sentinel to the handler at the sentinel's constructor index within its
+  -- own type (`WriterReq`: `EvictedReq` = 0, `WaitReq` = 1). `take_evicted`
+  -- used a single-constructor sentinel against handler 0 = `Configure`, and
+  -- nothing exercised it; the interpreter test does now.
   actor Writer do
-    state { fd : Int, granted : Int, sent : Int, pending : Deque.Deque((Int, Bytes)), evicted : List(Int), budget : Int, dead : Bool }
-    init  { fd: -1, granted: 0, sent: 0, pending: Deque.empty(), evicted: Nil, budget: 0, dead: false }
+    state { fd : Int, granted : Int, sent : Int, pending : Deque.Deque((Int, Bytes)), evicted : List(Int), budget : Int, dead : Bool,
+            waiting : Deque.Deque((Int, Int, Bytes)), waiters : Deque.Deque(Bool -> Unit) }
+    init  { fd: -1, granted: 0, sent: 0, pending: Deque.empty(), evicted: Nil, budget: 0, dead: false,
+            waiting: Deque.empty(), waiters: Deque.empty() }
+    on TakeEvicted(reply_to) do
+      Actor.reply(reply_to, state.evicted)
+      forget_evicted(state)
+    end
+    on Wait(reply_to) do
+      if state.dead do
+        Actor.reply(reply_to, false)
+        state
+      else
+        -- The caller's `Waiting` frame came first and may already have been
+        -- admitted (answering nobody: no caller was queued yet). Every
+        -- `Waiting` adds one to the frame line and every admission removes
+        -- one, so if the caller line is already as long as the frame line,
+        -- this caller's frame is in the queue: answer now, queue nothing.
+        if Deque.size(state.waiters) >= Deque.size(state.waiting) do
+          Actor.reply(reply_to, true)
+          state
+        else
+          -- Held across turns: the runtime retires a reply ref with the
+          -- message envelope unless retained (actor_reply_retain). Held as
+          -- the closure that answers it, never as an Int: a reply ref is a
+          -- heap object, and an Int-typed slot tags it, so the later reply
+          -- saw a non-ref and sent to a garbage proc (SIGBUS in
+          -- march_sched_send).
+          let r = actor_reply_retain(reply_to)
+          admit_waiting(rebuild(state, state.pending, state.evicted, state.waiting, Deque.push_back(state.waiters, fn ok -> Actor.reply(r, ok))))
+        end
+      end
+    end
     on Configure(fd : Int, budget : Int) do
       configure(state, fd, budget)
     end
@@ -71,9 +120,11 @@ mod NodeQueue do
     on Credit(total : Int) do
       grant(state, total)
     end
-    on TakeEvicted(reply_to) do
-      Actor.reply(reply_to, state.evicted)
-      forget_evicted(state)
+    on Waiting(key : Int, seq : Int, frame : Bytes) do
+      admit_waiting(rebuild(state, state.pending, state.evicted, Deque.push_back(state.waiting, (key, seq, frame)), state.waiters))
+    end
+    on Withdraw(key : Int) do
+      withdraw(state, key)
     end
   end
 
@@ -84,12 +135,32 @@ mod NodeQueue do
   -- Records are rebuilt whole rather than `{ st with .. }`-updated: inside
   -- these helpers the checker typed such an update as only its updated
   -- fields (a smaller stand-alone program did not reproduce it; unisolated).
+  pfn mk2(fd : Int, granted : Int, sent : Int, pending : Deque.Deque((Int, Bytes)), evicted : List(Int), budget : Int, dead : Bool,
+          waiting : Deque.Deque((Int, Int, Bytes)), waiters : Deque.Deque(Bool -> Unit)) : WriterState do
+    { fd: fd, granted: granted, sent: sent, pending: pending, evicted: evicted, budget: budget, dead: dead,
+      waiting: waiting, waiters: waiters }
+  end
+
+  -- The pre-blocking helpers rebuild through `mk`, which carries the two
+  -- blocking lines through from... nothing: they take no state. So `mk`
+  -- is applied to a state whose lines are then restored by the caller via
+  -- `keep_lines`. Kept this shape rather than threading two more parameters
+  -- through every helper.
   pfn mk(fd : Int, granted : Int, sent : Int, pending : Deque.Deque((Int, Bytes)), evicted : List(Int), budget : Int) : WriterState do
-    { fd: fd, granted: granted, sent: sent, pending: pending, evicted: evicted, budget: budget, dead: false }
+    mk2(fd, granted, sent, pending, evicted, budget, false, Deque.empty(), Deque.empty())
+  end
+
+  pfn keep_lines(st : WriterState, from : WriterState) : WriterState do
+    mk2(st.fd, st.granted, st.sent, st.pending, st.evicted, st.budget, st.dead, from.waiting, from.waiters)
+  end
+
+  pfn rebuild(st : WriterState, pending : Deque.Deque((Int, Bytes)), evicted : List(Int),
+              waiting : Deque.Deque((Int, Int, Bytes)), waiters : Deque.Deque(Bool -> Unit)) : WriterState do
+    mk2(st.fd, st.granted, st.sent, pending, evicted, st.budget, st.dead, waiting, waiters)
   end
 
   pfn with_dead(st : WriterState) : WriterState do
-    { fd: st.fd, granted: st.granted, sent: st.sent, pending: st.pending, evicted: st.evicted, budget: st.budget, dead: true }
+    mk2(st.fd, st.granted, st.sent, st.pending, st.evicted, st.budget, true, st.waiting, st.waiters)
   end
 
   pfn keep_dead(st : WriterState, dead : Bool) : WriterState do
@@ -97,28 +168,89 @@ mod NodeQueue do
   end
 
   pfn configure(st : WriterState, fd : Int, budget : Int) : WriterState do
-    keep_dead(mk(fd, budget, st.sent, st.pending, st.evicted, budget), st.dead)
+    keep_lines(keep_dead(mk(fd, budget, st.sent, st.pending, st.evicted, budget), st.dead), st)
   end
 
   pfn admit(st : WriterState, seq : Int, frame : Bytes) : WriterState do
-    drain(keep_dead(mk(st.fd, st.granted, st.sent, Deque.push_back(st.pending, (seq, frame)), st.evicted, st.budget), st.dead))
+    admit_waiting(keep_lines(drain(keep_dead(mk(st.fd, st.granted, st.sent, Deque.push_back(st.pending, (seq, frame)), st.evicted, st.budget), st.dead)), st))
   end
 
   pfn admit_evicting(st : WriterState, seq : Int, frame : Bytes) : WriterState do
     let st2 = evict_until_fits(st, Bytes.length(frame))
-    drain(keep_dead(mk(st2.fd, st2.granted, st2.sent, Deque.push_back(st2.pending, (seq, frame)), st2.evicted, st2.budget), st2.dead))
+    admit_waiting(keep_lines(drain(keep_dead(mk(st2.fd, st2.granted, st2.sent, Deque.push_back(st2.pending, (seq, frame)), st2.evicted, st2.budget), st2.dead)), st))
   end
 
   pfn grant(st : WriterState, consumed_total : Int) : WriterState do
     let g = consumed_total + st.budget
-    drain(keep_dead(mk(st.fd, if g > st.granted do g else st.granted end, st.sent, st.pending, st.evicted, st.budget), st.dead))
+    admit_waiting(keep_lines(drain(keep_dead(mk(st.fd, if g > st.granted do g else st.granted end, st.sent, st.pending, st.evicted, st.budget), st.dead)), st))
   end
 
   pfn forget_evicted(st : WriterState) : WriterState do
-    keep_dead(mk(st.fd, st.granted, st.sent, st.pending, Nil, st.budget), st.dead)
+    keep_lines(keep_dead(mk(st.fd, st.granted, st.sent, st.pending, Nil, st.budget), st.dead), st)
   end
 
-  type EvictedReq = EvictedReq
+  -- Move waiting frames into the queue while they fit the budget; each one
+  -- answers the oldest blocked caller. Then write what credit allows.
+  -- Pop-first, never peek-then-pop: a frame borrowed from a peeked tuple
+  -- is freed with that tuple when the deque drops it (the read-then-update
+  -- hazard `drain` and `evict_until_fits` avoid the same way).
+  pfn admit_waiting(st : WriterState) : WriterState do
+    if st.dead do
+      -- A dead connection: answer everyone `false`, keep nothing.
+      let _ = Deque.fold_left(st.waiters, 0, fn (n, answer) -> do
+        answer(false)
+        n + 1
+      end)
+      rebuild(st, st.pending, st.evicted, Deque.empty(), Deque.empty())
+    else
+      let t = table()
+      let qk = "q" ++ int_to_string(st.fd)
+      let queued = Vault.get_or(t, qk, 0)
+      match Deque.pop_front(st.waiting) do
+        (None, _) -> st
+        (Some((_key, seq, frame)), waiting2) ->
+          let len = Bytes.length(frame)
+          if queued + len <= st.budget do
+            let _ = Vault.incr(t, qk, len)
+            let waiters2 = match Deque.pop_front(st.waiters) do
+              (Some(answer), rest) ->
+                answer(true)
+                rest
+              (None, rest) -> rest
+            end
+            let st2 = rebuild(st, Deque.push_back(st.pending, (seq, frame)), st.evicted, waiting2, waiters2)
+            admit_waiting(keep_lines(drain(st2), st2))
+          else
+            -- Does not fit yet: keep the line as it was (the popped entry
+            -- is the head of the unchanged `st.waiting`).
+            st
+          end
+      end
+    end
+  end
+
+  -- A blocked caller timed out: drop its frame if still waiting, and one
+  -- caller entry with it, so the two lines stay the same length.
+  pfn withdraw(st : WriterState, key : Int) : WriterState do
+    let before = Deque.size(st.waiting)
+    let waiting2 = Deque.filter(st.waiting, fn e -> match e do (k, _, _) -> k != key end)
+    if Deque.size(waiting2) == before do
+      st
+    else
+      -- The popped ref is ANSWERED (false): a held ref must be replied to
+      -- exactly once to be retired; the timed-out caller discards it.
+      let waiters2 = match Deque.pop_front(st.waiters) do
+        (Some(answer), rest) ->
+          answer(false)
+          rest
+        (None, rest) -> rest
+      end
+      rebuild(st, st.pending, st.evicted, waiting2, waiters2)
+    end
+  end
+
+  -- `Actor.call` sentinels: constructor index = handler index (see Writer).
+  type WriterReq = EvictedReq | WaitReq
 
   pfn queued_key(w) : String do "q" ++ int_to_string(pid_to_int(w)) end
   pfn budget_key(w) : String do "b" ++ int_to_string(pid_to_int(w)) end
@@ -205,6 +337,18 @@ mod NodeQueue do
             DropOld ->
               let _ = send(w, EnqueueEvicting(seq, frame))
               Ok(())
+            BlockSender(timeout_ms) ->
+              -- Not charged yet: the writer charges it on admission.
+              let _ = Vault.incr(t, "q" ++ int_to_string(fd), 0 - len)
+              let key = Vault.incr(t, "k", 1)
+              let _ = send(w, Waiting(key, seq, frame))
+              match Actor.call(w, WaitReq, timeout_ms) do
+                Ok(true) -> Ok(())
+                Ok(_) -> Err(EnqueueError.NoConnection)
+                Err(_) ->
+                  let _ = send(w, Withdraw(key))
+                  Err(Backpressure)
+              end
           end
         end
     end
