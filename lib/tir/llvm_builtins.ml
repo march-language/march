@@ -950,6 +950,10 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare void @march_actor_register_child(ptr %sup, ptr %child, ptr %spawn_fn, i64 %word_idx, i64 %restart_type, i64 %shutdown_ms)" };
   { march_name = "pid_index_of"; c_name = Some "march_pid_index_of"; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_pid_index_of(ptr %actor)" };
+  (* The surface name for the same C symbol (pid_index_of is the lowering's
+     internal name, used by supervisor child registration); no second PDeclare. *)
+  { march_name = "pid_to_int"; c_name = Some "march_pid_index_of"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = None };
   { march_name = "to_string"; c_name = Some "march_value_to_string"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_value_to_string(ptr %v)" };
   { march_name = "chan_new"; c_name = Some "march_chan_new"; ret_ty = Some (Tir.TTuple [Tir.TCon ("Chan", []); Tir.TCon ("Chan", [])]);

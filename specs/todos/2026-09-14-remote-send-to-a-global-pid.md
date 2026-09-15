@@ -153,9 +153,13 @@ Changed from the design while building:
   ordinary local send" cannot live in the library: the message constructor
   is minted by the actor that declares it. `serve_one` checks the creation
   and reports; the dispatch names the actor and the constructor.
-- **No pid-to-int builtin exists.** The fixture reads the integer out of
-  `to_string(pid)` (`"Pid(N)"`). A `GlobalPid` for a local actor needs one;
-  that is a nine-site builtin addition, filed with this note.
+- **No pid-to-int builtin existed.** The fixture first read the integer out
+  of `to_string(pid)` (`"Pid(N)"`). `pid_to_int(pid)` now exists on both
+  backends (the compiled runtime already had the symbol, `march_pid_index_of`,
+  as the lowering's internal name for supervisor child registration; the
+  surface name maps to it) — see
+  [[2026-09-14-pid-to-int-builtin]] in `specs/progress/`. Both loopback
+  fixtures use it.
 - **`run_until_idle` never returns while a task is parked in a socket
   read.** The fixture prints the reply from main's own thread and drains only
   after the server task has finished.
@@ -168,5 +172,5 @@ fails with `Permission denied` on the `.ll`. Delete the stray `.ll` before
 
 Still open from the design: the typed wrapper (a `Node.send(conn, to, msg)`
 whose codec the compiler checks), `DELIVERY_FAILED` delivered as a message
-to the sending actor rather than read synchronously, the single
-`NetKernel.dispatch` refactor, and the `Session.Ops` network transport.
+to the sending actor rather than read synchronously, and the `Session.Ops`
+network transport. The per-peer reader shipped as `PeerReader` (2/4 step 1).
