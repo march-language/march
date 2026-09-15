@@ -72,6 +72,8 @@ native_compare_builtins: coverage audit (user + stdlib): 90 enforced, 0 inert (w
 native_compare_builtins: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_control_channel_loopback: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced
 native_control_channel_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_credit_backpressure_loopback: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced
+native_credit_backpressure_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_csv_niche_row: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced
 native_csv_niche_row: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_ctor_pattern_multi_param: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced
@@ -572,6 +574,8 @@ stdlib_node_call: coverage audit (user + stdlib): 90 enforced, 0 inert (warned),
 stdlib_node_call: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_node_identity: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced
 stdlib_node_identity: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_node_queue: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced
+stdlib_node_queue: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_node_rpc: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced
 stdlib_node_rpc: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_node_send: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced

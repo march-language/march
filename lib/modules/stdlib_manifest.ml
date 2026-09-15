@@ -158,6 +158,8 @@ let stdlib_file_list = [
   (* One reader per peer connection, dispatching frames by tag (distributed
      actors 2/4 step 1); after net_kernel, which it reads frames with. *)
   "peer_reader.march";
+  (* the per-peer outbound queue with credit-based flow control (2/4 step 3) *)
+  "node_queue.march";
   (* dist_link.march / dist_supervisor.march: same lazy-load representation
      bug as above (see the deque.march / consistent_hash.march notes) — both
      export Option/Result-returning generics over concrete node/monitor
