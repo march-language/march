@@ -854,7 +854,8 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                 call reads `n`'s typechecked sort ([rctx.binds]). *)
              | A.ELet (({ A.bind_pat = A.PatVar n; _ } as b), _) ->
                local_shadow ~spans:[ (n.A.txt, n.A.span) ] ctx (pat_binders b.A.bind_pat)
-             | A.ELet (b, _) -> local_shadow ctx (pat_binders b.A.bind_pat)
+             | A.ELet (b, _) ->
+               local_shadow ~spans:(pat_binder_spans b.A.bind_pat) ctx (pat_binders b.A.bind_pat)
              | A.ELetFn (n, _, _, _, _) -> local_shadow ctx [ n.A.txt ]
              | _ -> ctx
            in
@@ -1036,7 +1037,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
         let ce_outer = ce in
         let ce = cont_shadow ce binders in
         (* …and a same-named GLOBAL FUNCTION, for callee resolution. *)
-        let ctx = local_shadow ctx binders in
+        let ctx = local_shadow ~spans:(pat_binder_spans br.A.branch_pat) ctx binders in
         (* …and a same-named record IDENTITY, so an inner binder is not
            reflected as the outer record's SMT constant.  A bare `PatVar`
            binder on a record-typed variable scrutinee then re-enters the env
@@ -1309,7 +1310,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     let sc = scope_shadow sc binders in
     let re = recenv_shadow re binders in
     let cb = cb_shadow cb binders in
-    let ctx = local_shadow ctx binders in
+    let ctx = local_shadow ~spans:(pat_binder_spans p) ctx binders in
     visit ~root errctx defs ctx (path_shadow path binders) (launder_shadow lets binders)
       sc re cb (cont_shadow ce binders) e2
   | A.EDbg (Some e, _) -> go e

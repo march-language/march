@@ -15546,6 +15546,42 @@ let caller_sorts_suite =
                      \    let z = y\n\
                      \    need_mem(z, [z])\n\
                      \  end")));
+    (* ── origin 3: pattern variables ── *)
+    gated "pattern: a String match binder in a list literal proves" (fun () ->
+        ignore (ledger "m" (1, 0, 0)
+                  (m "CSM1"
+                     "  fn mm(o : Option(String)) : Int do\n\
+                     \    match o do\n\
+                     \      Some(s) -> need_a([\"a\", s])\n\
+                     \      None -> 0\n\
+                     \    end\n\
+                     \  end")));
+    gated "pattern: a String binder of a destructuring let proves" (fun () ->
+        ignore (ledger "mt" (1, 0, 0)
+                  (m "CSM2"
+                     "  fn mt(p : (String, Int)) : Int do\n\
+                     \    let (s, _) = p\n\
+                     \    need_a([\"a\", s])\n\
+                     \  end")));
+    gated "pattern REJECT: an unknown String match binder is a plain skip, not a sort-conflict" (fun () ->
+        let rs = ledger "mb" (0, 0, 1)
+            (m "CSM3"
+               "  fn mm(o : Option(String)) : Int do\n\
+               \    match o do\n\
+               \      Some(s) -> need_a([\"b\", s])\n\
+               \      None -> 0\n\
+               \    end\n\
+               \  end") in
+        Alcotest.(check bool) "no sort-conflict" false (List.mem "sort-conflict" rs));
+    gated "pattern control: a type-variable match binder keeps its verdict" (fun () ->
+        ignore (ledger "mv" (1, 0, 0)
+                  (m "CSM4"
+                     "  fn mv(o) : Int do\n\
+                     \    match o do\n\
+                     \      Some(y) -> need_mem(y, [y])\n\
+                     \      None -> 0\n\
+                     \    end\n\
+                     \  end")));
   ]
 
 (* ── z3 never rejects a query the checker builds ─────────────────────────

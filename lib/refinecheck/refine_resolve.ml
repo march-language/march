@@ -92,12 +92,25 @@ let local_shadow ?(spans : (string * A.span) list = []) (ctx : rctx) (names : st
         spans @ List.filter (fun (n, _) -> not (List.mem n names)) ctx.binds
     }
 
+(* The binding spans of a pattern's variables (the name span the typechecker
+   records each one's type under).  An or-pattern records none: its
+   alternatives bind the name at different spans, and [local_shadow] still
+   retires every name [pat_binders] lists, so the name is simply unknown. *)
+let rec pat_binder_spans (p : A.pattern) : (string * A.span) list =
+  match p with
+  | A.PatVar n -> [ (n.A.txt, n.A.span) ]
+  | A.PatAs (sub, n, _) -> (n.A.txt, n.A.span) :: pat_binder_spans sub
+  | A.PatCon (_, ps) | A.PatAtom (_, ps, _) | A.PatTuple (ps, _) ->
+    List.concat_map pat_binder_spans ps
+  | A.PatRecord (fps, _) -> List.concat_map (fun (_, sub) -> pat_binder_spans sub) fps
+  | A.PatOr _ | A.PatWild _ | A.PatLit _ -> []
+
 (* The binding spans of a parameter list: a named parameter's name span (the
-   key the typechecker records its type under).  A pattern parameter records
-   none. *)
+   key the typechecker records its type under); a pattern parameter, its
+   pattern variables'. *)
 let fnparam_spans : A.fn_param -> (string * A.span) list = function
   | A.FPNamed p | A.FPDefault (p, _) -> [ (p.A.param_name.A.txt, p.A.param_name.A.span) ]
-  | A.FPPat _ -> []
+  | A.FPPat pat -> pat_binder_spans pat
 
 let param_spans (ps : A.param list) : (string * A.span) list =
   List.map (fun (p : A.param) -> (p.A.param_name.A.txt, p.A.param_name.A.span)) ps
