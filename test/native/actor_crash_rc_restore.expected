@@ -2,3 +2,4 @@ victim is multiply owned: true
 rc across crash is exactly the live reference released: true
 restarted: true
 replacement alive: true
+victim pid still held: true

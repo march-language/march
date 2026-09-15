@@ -1,4 +1,43 @@
-`[P3]` # `send` of a pid that is still live afterwards leaks one actor reference
+# Pid ownership settled: `send` and the read-only actor builtins borrow the pid; every pid-producing builtin returns an owned reference
+
+Closed 2026-09-14. The original note (filed 2026-09-13 as "`send` of a pid
+that is still live afterwards leaks one actor reference") follows the
+resolution.
+
+## Resolution
+
+Both halves, at once, as the note asked:
+
+- **Borrowed:** `send`, `actor_cast`, `kill`, `actor_stop`, `is_alive`,
+  `actor_is_draining`, `mailbox_size`, `get_cap` (`lib/tir/borrow.ml`,
+  `extern_borrow_table`). Audited: none of their C implementations stores or
+  releases the actor. `send`'s MESSAGE stays owned (the runtime enqueues it).
+- **Owned returns:** `pid_of_int` (already), and now `self` /
+  `march_self` (`runtime/march_scheduler.c`, with a weak `march_incrc`
+  fallback so the standalone scheduler unit harnesses still link — the same
+  discipline as `march_signal_drain`). `actor_whereis` and `spawn` already
+  transferred a reference.
+- **Prerequisite** that made the 2026-09-13 attempt SIGSEGV:
+  [[2026-09-14-live-actor-freed-by-dropping-its-last-pid]] — a running actor
+  now holds one reference of its own, so releasing the program's pids at
+  their last use is safe.
+
+Measured on the way (container, ASAN): with `send` borrowing but `self`
+still unowned, `actor_send_to_self`'s count moved by −1 per in-handler
+`send(self, m)` — the reference the program released was the actor's own.
+
+The three refcount-probe fixtures now assert the contract rather than the
+leak: `actor_send_to_self` asserted `rc_before + 10` for ten sends (the leak
+pinned as if it were the rule) and now asserts `rc_before`;
+`actor_dispatch_rc_window` and `actor_crash_rc_restore` keep their `victim_pid`
+alive across the measurement so the count they compare includes the
+program's own reference.
+
+Verified: `@test/runtest` (all native/session goldens), and an ASAN sweep of
+50 actor-related native and session fixtures in a Linux container, clean.
+
+---
+
 
 Found 2026-09-13 while fixing send-to-self
 (`specs/progress/2026-09-13-send-to-self-delivers.md`), measured with the

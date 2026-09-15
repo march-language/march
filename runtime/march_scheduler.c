@@ -1556,6 +1556,12 @@ static int wake_idle_daemons(void) {
  * scheduler loop body — a normal C stack, never signal context. */
 __attribute__((weak)) void march_signal_drain(void) { }
 
+/* march_incrc lives in march_runtime.c (STRONG); this WEAK no-op is the same
+ * standalone-unit-test fallback as march_signal_drain above, so march_self
+ * can take the reference it hands out without the scheduler harnesses
+ * failing to link. */
+__attribute__((weak)) void march_incrc(void *p) { (void)p; }
+
 static void sched_loop(march_scheduler *sched) {
     /* Set up the per-thread alternate signal stack before running any green
      * threads.  The SIGSEGV handler for lazy stack growth requires SA_ONSTACK
@@ -2210,6 +2216,13 @@ void *march_self(void) {
      * the typechecker binds the global `self` as Int, so a top-level use
      * lowers to the closure's address rather than a call.  Making THAT an
      * error is a typechecker change, filed with this item. */
+    /* An OWNED reference, like pid_of_int and every value-producing builtin:
+     * the program drops the pid `self` gave it at its last use (or hands it
+     * to a borrowing builtin such as `send`, which then drops it), and a
+     * reference it never took would come out of the running actor's own
+     * (see march_spawn_common). Measured 2026-09-14 the day `send` became
+     * borrowing: actor_send_to_self's count moved by -1 per send. */
+    if (cur && cur->actor) march_incrc(cur->actor);
     return cur ? cur->actor : NULL;
 }
 

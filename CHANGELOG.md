@@ -241,6 +241,12 @@ git log is authoritative for exact commits.
   nothing when unset.
 
 ### Fixed
+- **`send` no longer leaks a reference to the actor it sends to.** `send`,
+  `kill`, `actor_stop`, `is_alive`, `mailbox_size` and `get_cap` now borrow the
+  pid (their runtime implementations only read it), and `self` returns an owned
+  reference like `pid_of_int`; together with the runtime holding a running
+  actor's own reference, the refcount of an actor is now exactly the references
+  the program holds plus one while it runs.
 - **A running actor is no longer freed when the program drops its last pid.**
   `let a = spawn(W)` with `a` never used again released the actor record's only
   reference right after spawn, and the actor's own thread then ran on freed
