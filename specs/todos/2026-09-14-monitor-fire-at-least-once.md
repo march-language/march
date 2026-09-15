@@ -128,3 +128,49 @@ a rule with a runtime dep does. The fd registered is whatever connection
 the REQ arrived on — with the split, callers dispatch REQ on control, so
 that is already the control fd; the explicit registration from the
 `PeerRegistry` entry is still the contract's step 1.
+
+## Shipped (2026-09-15): the after-death answer (order-of-work step 2)
+
+`actor_terminal_reason(pid_index : Int) : Option((Int, String))` — a
+nine-site builtin on both backends (the interpreter reads its own
+`ai_terminal_reason`; the runtime reads the META's terminal fields by pid
+index, never the record, so a request for a pid whose record has been freed
+is safe). Witness `test/native/monitor_after_death_loopback`: node-a asks
+node-b to kill the target FIRST, then sends `MONITOR_REQ`; node-b's reader
+finds it dead and answers `MONITOR_FIRE(Killed)` at once instead of
+registering a watcher that would never fire. Exactly one Down; 10/10.
+The "registered after the record is gone" case reads `None` and the
+fixture answers `NodeDown` for it, the documented limit.
+
+Remaining: step 1 (registration takes the peer's control fd from the
+`PeerRegistry` entry — today the fixture passes the REQ's fd, which under
+the split is control), step 3 (`MONITOR_ACK`, the pending table, the
+`MonitorRetry` task, dedupe), step 4 (scenario 5 and the `restart` monitor
+half).
+
+## Shipped (2026-09-15): at-least-once with acks (order-of-work step 3)
+
+Runtime: `march_dist_monitor_fire_pid` no longer frees a watcher after the
+best-effort write — the entry moves to the target's `fired` list with its
+reason and stays there until `march_dist_monitor_ack(target_pid,
+watcher_pid)`; `march_dist_monitor_pending_walk` exposes the list. March
+surface: `dist_monitor_pending() : List((target_pid, (watcher_node,
+(watcher_pid, (reason_tag, reason_msg)))))` (nested pairs: the runtime can
+build tuples and cons cells, not records) and `dist_monitor_ack(target_pid,
+watcher_pid)`; both `IO.NetConnect`, both refused by the interpreter.
+`DistLink`: `encode_ack`/`decode_ack` (tag 12) and `resend_pending(reg)`,
+which writes each pending fire on the watcher node's CURRENT control
+connection from the peer registry — the fd it was first written on may be
+gone. The retry cadence is the caller's (a timer, or after a reconnect);
+the `MonitorRetry` task the design named is a loop around it.
+
+Witness `test/native/monitor_ack_retry_loopback`: node-a monitors, asks for
+the kill, and never reads connection 1 again (the fire is written into a
+socket nobody drains); node-a reconnects; node-b resends twice; node-a
+delivers ONE Down (dedupe by target pid), acks both; pending is empty.
+10/10 identical.
+
+Remaining: expiry of pending entries when SWIM declares the watcher node
+dead (needs the SWIM loop of the `stall` scenario wired to
+`dist_monitor_pending`), and step 4 (scenario 5 in the harness, the
+`restart` monitor half).

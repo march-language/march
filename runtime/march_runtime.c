@@ -5763,6 +5763,65 @@ static void *make_cons(void *head, void *tail) {
 }
 
 /* Helper: allocate a 2-element tuple (tag=0, 2 ptr fields). */
+/* actor_terminal_reason(pid_index) -> Option((tag, message)): the reason a
+ * local actor died, with DistLink's wire tags (0 Normal, 1 Killed, 2 Crash),
+ * or None while it is alive or unknown. Looks up the META by pid index and
+ * reads only its terminal fields: a MONITOR_REQ for a pid whose record has
+ * already been freed must not touch the record (the meta outlives it). */
+static void *make_tuple2(void *a, void *b);
+static void *make_cons(void *head, void *tail);
+static void *make_nil(void);
+
+/* dist_monitor_pending() -> List((target_pid, (watcher_node, (watcher_pid,
+ * (reason_tag, reason_msg))))): every fired-but-unacked MONITOR_FIRE, for the
+ * March-side resend. Nested pairs because the runtime can build tuples and
+ * cons cells but not records. Collected under the registry lock, allocated
+ * outside it. */
+struct pending_acc { int64_t *tp; char **node; int64_t *wp; int *tag; char **msg; int n, cap; };
+static void pending_cb(int64_t target_pid, const char *watcher_node, int64_t watcher_pid,
+                       int reason_tag, const char *reason_msg, void *ctx) {
+    struct pending_acc *a = (struct pending_acc *)ctx;
+    if (a->n == a->cap) {
+        int nc = a->cap ? a->cap * 2 : 8;
+        a->tp = realloc(a->tp, sizeof(int64_t) * nc); a->node = realloc(a->node, sizeof(char *) * nc);
+        a->wp = realloc(a->wp, sizeof(int64_t) * nc); a->tag = realloc(a->tag, sizeof(int) * nc);
+        a->msg = realloc(a->msg, sizeof(char *) * nc); a->cap = nc;
+    }
+    a->tp[a->n] = target_pid; a->node[a->n] = strdup(watcher_node ? watcher_node : "");
+    a->wp[a->n] = watcher_pid; a->tag[a->n] = reason_tag;
+    a->msg[a->n] = strdup(reason_msg ? reason_msg : ""); a->n++;
+}
+void *march_dist_monitor_pending(void) {
+    struct pending_acc a = {0};
+    march_dist_monitor_pending_walk(pending_cb, &a);
+    void *list = make_nil();
+    for (int i = a.n - 1; i >= 0; i--) {
+        void *tagged_tp = (void *)((a.tp[i] << 1) | 1);
+        void *tagged_wp = (void *)((a.wp[i] << 1) | 1);
+        void *tagged_tag = (void *)(((int64_t)a.tag[i] << 1) | 1);
+        void *inner = make_tuple2(tagged_tag, march_string_lit(a.msg[i], (int64_t)strlen(a.msg[i])));
+        void *p2 = make_tuple2(tagged_wp, inner);
+        void *p1 = make_tuple2(march_string_lit(a.node[i], (int64_t)strlen(a.node[i])), p2);
+        list = make_cons(make_tuple2(tagged_tp, p1), list);
+        free(a.node[i]); free(a.msg[i]);
+    }
+    free(a.tp); free(a.node); free(a.wp); free(a.tag); free(a.msg);
+    return list;
+}
+
+void march_dist_monitor_ack_pid(int64_t target_pid, int64_t watcher_pid) {
+    march_dist_monitor_ack(target_pid, watcher_pid);
+}
+
+void *march_actor_terminal_reason(int64_t pid_index) {
+    march_actor_meta *meta = find_meta_by_pid_index(pid_index);
+    if (!meta || !meta->terminal_set) return NULL;
+    void *tag = (void *)(((int64_t)meta->terminal_reason << 1) | 1);
+    const char *m = meta->terminal_message ? meta->terminal_message : "";
+    size_t n = meta->terminal_message ? meta->terminal_message_len : 0;
+    return make_tuple2(tag, march_string_lit(m, (int64_t)n));
+}
+
 static void *make_tuple2(void *a, void *b) {
     void *tup = march_alloc(16 + 16);
     /* tag stays 0 */

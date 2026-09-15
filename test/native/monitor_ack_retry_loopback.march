@@ -1,0 +1,191 @@
+-- MONITOR_FIRE at-least-once (monitor-fire step 3):
+-- specs/todos/2026-09-14-monitor-fire-at-least-once.md.
+--
+-- node-a monitors an actor on node-b over connection 1, asks node-b to kill
+-- it, and never reads connection 1 again: the runtime's fire is written into
+-- a socket nobody drains, as if the connection had dropped. The fire stays
+-- PENDING in the registry until acked. node-a connects again; node-b's
+-- `DistLink.resend_pending(reg)` writes the fire on the new connection --
+-- twice, to show the watcher side dedupes -- node-a delivers ONE Down and
+-- acks both; node-b's pending table is then empty.
+-- Prints from node-a's main thread only.
+mod MonitorAckRetryLoopback do
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.NetConnect
+
+  actor Target do
+    state { n : Int }
+    init  { n: 0 }
+    on Tick() do { n: state.n + 1 } end
+  end
+
+  -- connection 1 on node-b: register the monitor, then kill on request.
+  pfn on_conn1(fd : Int, target, tag : Int, frame : List(Int)) : Result(Bool, String) do
+    if tag == 7 do
+      match DistLink.decode_req(frame) do
+        Ok((watcher_node, watcher_pid, target_pid)) ->
+          dist_monitor_register(target_pid, watcher_node, watcher_pid, fd)
+          Ok(true)
+        Err(e) -> Err(e)
+      end
+    else
+      if tag == NodeSend.tag_actor_msg() do
+        kill(target)          -- the death path writes MONITOR_FIRE on fd (unread)
+        Ok(false)
+      else
+        Err("unexpected tag " ++ int_to_string(tag))
+      end
+    end
+  end
+
+  -- connection 2 on node-b: acks arrive here.
+  pfn on_conn2(tag : Int, frame : List(Int)) : Result(Bool, String) do
+    if tag == DistLink.tag_ack() do
+      match DistLink.decode_ack(frame) do
+        Ok((target_pid, watcher_pid)) ->
+          dist_monitor_ack(target_pid, watcher_pid)
+          Ok(true)
+        Err(e) -> Err(e)
+      end
+    else
+      Err("unexpected tag " ++ int_to_string(tag))
+    end
+  end
+
+  pfn accept_or_panic(listen_fd : Int) : Int do
+    match tcp_accept(listen_fd) do
+      Ok(fd) -> fd
+      Err(e) -> panic("accept: " ++ e)
+    end
+  end
+
+  pfn run_node_b(listen_fd : Int) : (Int, Int, Int) do
+    let fd1 = accept_or_panic(listen_fd)
+    let target = spawn(Target)
+    let _ = NodeSend.cast(fd1, 0, GlobalPid.make("node-a", 0, 0), "MonitorAckRetryLoopback.Hello",
+                          GlobalPid.encode(GlobalPid.make("node-b", pid_to_int(target), 1)))
+    let _ = PeerReader.serve(fd1, Nil, fn (tag, frame) -> on_conn1(fd1, target, tag, frame))
+    -- node-a reconnects; the registry now maps node-a to the new connection.
+    let fd2 = accept_or_panic(listen_fd)
+    let reg = PeerRegistry.add(PeerRegistry.empty(),
+                { node_id: "node-a", identity: NodeIdentity.make("node-a", "pk-a", 1), fd: fd2, data_fd: PeerRegistry.no_fd() })
+    let n1 = DistLink.resend_pending(reg)
+    let n2 = DistLink.resend_pending(reg)
+    let _ = PeerReader.serve(fd2, Nil, on_conn2)   -- ends when node-a closes
+    let left = List.length(dist_monitor_pending())
+    tcp_close(fd2)
+    tcp_close(fd1)
+    tcp_close(listen_fd)
+    (n1, n2, left)
+  end
+
+  actor Watcher do
+    state { downs : Int }
+    init  { downs: 0 }
+    on RemoteDown(_target : Int, _reason : String) do { downs: state.downs + 1 } end
+  end
+
+  pfn reason_text(r : DistLink.DownReason) : String do
+    match r do
+      DistLink.Normal -> "Normal"
+      DistLink.Killed -> "Killed"
+      DistLink.Crash(m) -> "Crash(" ++ m ++ ")"
+      DistLink.NodeDown -> "NodeDown"
+    end
+  end
+
+  -- node-a on connection 2: deliver a FIRE once per target (dedupe), ack
+  -- every one, stop after the second copy.
+  pfn on_fire(fd : Int, watcher, seen, tag : Int, frame : List(Int)) : Result(Bool, String) do
+    if tag == 8 do
+      match DistLink.decode_fire(frame) do
+        Ok((target_pid, reason)) ->
+          let key = "t" ++ int_to_string(target_pid)
+          let copies = Vault.incr(seen, key, 1)
+          if copies == 1 do
+            println("node-a: MONITOR_FIRE for target " ++ int_to_string(target_pid) ++ " reason=" ++ reason_text(reason) ++ " (delivered)")
+            let _ = send(watcher, RemoteDown(target_pid, reason_text(reason)))
+            ()
+          else
+            println("node-a: MONITOR_FIRE copy " ++ int_to_string(copies) ++ " (deduped)")
+          end
+          let _ = NetKernel.send_frame(fd, DistLink.encode_ack(target_pid, pid_to_int(watcher)))
+          Ok(copies < 2)
+        Err(e) -> Err(e)
+      end
+    else
+      Err("unexpected tag " ++ int_to_string(tag))
+    end
+  end
+
+  pfn read_hello(fd : Int) : Pid do
+    match NetKernel.recv_frame(fd, Nil) do
+      Err(e) -> panic("hello: " ++ e)
+      Ok((frame, _)) ->
+        match NodeSend.decode_msg(frame) do
+          Ok(d) ->
+            match GlobalPid.decode(d.payload) do
+              Ok(p) -> p
+              Err(e) -> panic("hello pid: " ++ e)
+            end
+          Err(e) -> panic("hello frame: " ++ e)
+        end
+    end
+  end
+
+  pfn connect_with_retry(host : String, port : Int, attempts_left : Int) : Result(Int, Socket.SocketError) do
+    match Socket.connect(host, port) do
+      Ok(fd) -> Ok(fd)
+      Err(e) -> if attempts_left <= 1 do Err(e) else connect_with_retry(host, port, attempts_left - 1) end
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen), _cap_spawn : Cap(IO.Spawn), _cap_mut : Cap(IO.Mut)) do
+    let seen = Vault.new("monitor_ack_seen")
+    let listen_fd = match tcp_listen(0) do
+      Ok(fd) -> fd
+      Err(e) -> panic("listen: " ++ e)
+    end
+    let port = match tcp_local_port(listen_fd) do
+      Ok(p) -> p
+      Err(e) -> panic("local_port: " ++ e)
+    end
+    let srv = task_spawn(fn _ -> run_node_b(listen_fd))
+    let fd1 = match connect_with_retry("127.0.0.1", port, 5) do
+      Ok(fd) -> fd
+      Err(e) -> panic("connect: " ++ Socket.error_message(e))
+    end
+    let watcher = spawn(Watcher)
+    let target = read_hello(fd1)
+    println("node-a: monitoring " ++ target.node_id ++ "'s actor " ++ int_to_string(target.local_pid) ++ ", then killing it, never reading connection 1 again")
+    let _ = NetKernel.send_frame(fd1, DistLink.encode_req("node-a", pid_to_int(watcher), target.local_pid))
+    let _ = NodeSend.cast(fd1, 1, target, "MonitorAckRetryLoopback.Kill", Nil)
+    -- Connection 2: the pending fire reaches us here.
+    let fd2 = match connect_with_retry("127.0.0.1", port, 5) do
+      Ok(fd) -> fd
+      Err(e) -> panic("connect 2: " ++ Socket.error_message(e))
+    end
+    match PeerReader.serve(fd2, Nil, fn (tag, frame) -> on_fire(fd2, watcher, seen, tag, frame)) do
+      Ok(_) -> ()
+      Err(e) -> println("node-a: reader error: " ++ e)
+    end
+    tcp_close(fd2)
+    tcp_close(fd1)
+    let counts = match task_await(srv) do
+      Ok(c) -> c
+      Err(e) -> panic("node-b: " ++ e)
+    end
+    run_until_idle()
+    match counts do
+      (n1, n2, left) ->
+        println("node-b: resent " ++ int_to_string(n1) ++ " then " ++ int_to_string(n2) ++ "; pending after acks: " ++ int_to_string(left))
+    end
+    match get_actor_field(watcher, "downs") do
+      Some(n) -> println("node-a: watcher saw " ++ int_to_string(n) ++ " Down(s)")
+      None -> println("node-a: watcher gone")
+    end
+  end
+end
