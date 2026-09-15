@@ -11,7 +11,7 @@ mod Handshake do
   -- `role` names the connection this hello opens: "control" (SWIM, registry
   -- sync, monitors, CREDIT, DELIVERY_FAILED) or "data" (ACTOR_MSG, RPC). One
   -- of each per peer since the control/data split
-  -- (specs/todos/2026-09-14-distributed-plane-flow-control-and-control-channel.md,
+  -- (specs/progress/2026-09-14-distributed-plane-flow-control-and-control-channel.md,
   -- step 2). A hello without the field -- every node before the split -- is
   -- a control connection, so the two wire shapes interoperate.
   type Hello = { identity : NodeIdentity.Identity, nonce : String, role : String }

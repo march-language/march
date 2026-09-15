@@ -511,7 +511,7 @@ one; the `stall` scenario SIGSTOPs a node running SWIM and pins
 Suspect → Dead on the observer and the incarnation refutation on resume.
 Netsplit (packet drop) and clock skew across hosts remain undocumented in
 executable form; the harness has the hooks for the first
-(`specs/todos/2026-09-14-two-node-failure-semantics-harness.md`).
+(`specs/progress/2026-09-14-two-node-failure-semantics-harness.md`).
 
 **A compiled memory-safety gap, FIXED (finding C1, `specs/todos/`, 2026-07-11).**
 `VectorClock.compare` (and, transitively, `.concurrent`/`.happens_before` on

@@ -6,7 +6,7 @@
 -- the Dead gossip about itself and refutes with a higher incarnation, which
 -- node-a must accept as Alive. The SWIM refutation path, which no
 -- single-process golden executes.
--- Design: specs/todos/2026-09-14-two-node-failure-semantics-harness.md (scenario 1).
+-- Design: specs/progress/2026-09-14-two-node-failure-semantics-harness.md (scenario 1).
 mod TwoNodeStallA do
   needs IO.Console
   needs IO.NetConnect

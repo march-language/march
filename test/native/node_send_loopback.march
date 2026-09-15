@@ -11,7 +11,7 @@
 --   4. A sends a type B's dispatch does not know → DELIVERY_FAILED (unknown type).
 --
 -- Each failure comes BACK to the sender with its seq: a remote send is not
--- fire-and-forget. Design: specs/todos/2026-09-14-remote-send-to-a-global-pid.md.
+-- fire-and-forget. Design: specs/progress/2026-09-14-remote-send-to-a-global-pid.md.
 --
 -- The payload is msgpack `[n, reply_to]`; a real message type would use its
 -- derived codec (the typed wrapper is the design's open compiler step).

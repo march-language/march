@@ -28,7 +28,7 @@
 --
 -- Payload codec: the sender encodes its message with the type's derived
 -- codec (`derive Json` today, as `@[endpoints]` does) into bytes; this layer
--- carries bytes. Design record: specs/todos/2026-09-14-remote-send-to-a-global-pid.md.
+-- carries bytes. Design record: specs/progress/2026-09-14-remote-send-to-a-global-pid.md.
 --
 -- Type annotations use bare names where a qualified path would not unify
 -- (the NodeCall convention).

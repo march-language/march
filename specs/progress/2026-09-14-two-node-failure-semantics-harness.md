@@ -1,4 +1,10 @@
-# `[P2]` Distributed actors 3/4: executable failure semantics (two real processes, partitions, restarts)
+# Distributed actors 3/4: executable failure semantics (two real processes, partitions, restarts)
+
+**Closed as a design record 2026-09-14.** The harness and scenarios
+`restart`, `stream`, `stall` shipped (#462). The remaining scenarios and the
+Docker variant are their own item now:
+[[2026-09-14-two-node-scenarios-partition-skew-monitor]].
+
 
 Filed 2026-09-14. `specs/lang/clustering.md`'s conformance status says it
 plainly: the live layers are exercised only by single-process TCP-loopback

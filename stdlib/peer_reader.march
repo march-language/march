@@ -1,7 +1,7 @@
 -- PeerReader: ONE reader per peer connection, dispatching frames by tag.
 --
 -- Distributed actors 2/4, step 1 (the per-peer receive loop):
--- specs/todos/2026-09-14-distributed-plane-flow-control-and-control-channel.md.
+-- specs/progress/2026-09-14-distributed-plane-flow-control-and-control-channel.md.
 --
 -- Until this module there was no receive loop at all. Every consumer read
 -- its own frames off the fd it was handed -- NodeCall.recv_reply,

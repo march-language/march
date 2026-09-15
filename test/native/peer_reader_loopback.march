@@ -12,7 +12,7 @@
 --   * bytes read past a frame boundary carry to the next frame instead of
 --     being dropped with the pair (NodeCall/NodeSend.serve_one both dropped
 --     the leftover), which is why three frames in one recv() all arrive.
--- Design: specs/todos/2026-09-14-distributed-plane-flow-control-and-control-channel.md.
+-- Design: specs/progress/2026-09-14-distributed-plane-flow-control-and-control-channel.md.
 mod PeerReaderLoopback do
   needs IO.Console
   needs IO.Mut

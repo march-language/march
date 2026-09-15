@@ -6,7 +6,7 @@
 -- connection drop, reconnects, and sends twice: once to the pid it HELD
 -- (creation 1, refused as stale by the new incarnation) and once to the
 -- pid the new incarnation announced (delivered). Pins the claim in
--- specs/todos/2026-09-14-remote-send-to-a-global-pid.md that a restarted
+-- specs/progress/2026-09-14-remote-send-to-a-global-pid.md that a restarted
 -- node reusing a local pid cannot receive a message meant for its
 -- predecessor.
 mod TwoNodeRestartA do
