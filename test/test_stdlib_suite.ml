@@ -10807,12 +10807,17 @@ let test_compiled_file_open_err_is_real_fileerror () =
        (a separate, pre-existing gap: compiled Show can't resolve the
        *name* of the bare/unqualified "FileError" type used by the file_*
        builtin signatures) falls back to "#<tag:0>" -- still proof the
-       cell's tag is correct, just not its printed name. Either output is
-       acceptable here; the raw errno string is not. *)
-    Alcotest.(check bool)
-      "compiled output reflects a real, correctly-tagged FileError cell (tag 0 = NotFound), not the misread raw errno string"
-      true
-      (compiled_out = interp_out || compiled_out = "#<tag:0>")
+       cell's tag is correct, just not its printed name.
+
+       That name gap is now CLOSED (2026-09-12): the C builder stamps the
+       cell's header with File.FileError's type id, so the type-erased
+       renderer identifies it from the value rather than from the static
+       name it could not resolve.  Asserted as byte equality with the
+       interpreter -- the "#<tag:0>" alternative this used to accept would
+       now be a regression, not a tolerated gap. *)
+    Alcotest.(check string)
+      "compiled output matches the interpreter's FileError rendering"
+      interp_out compiled_out
 
 (* Regression (todo 2026-08-08-file-dir-builtins-bare-string-errno-fileerror):
    the sibling follow-up to test_compiled_file_open_err_is_real_fileerror
@@ -10836,18 +10841,25 @@ let test_compiled_file_open_err_is_real_fileerror () =
 
    All thirteen cases live in one March program so the whole table costs a
    single compile.  Interpreted output is the oracle: it prints the friendly
-   ctor form (NotFound("...")).  Compiled Show cannot resolve the NAME of a
-   module-declared type: the ctor-descriptor table is keyed by the LOWERED
-   name (File.FileError) while a call site looks it up by the bare static one
-   these builtins are declared with -- a separate, still-open gap, now
-   specs/todos/2026-09-11-compiled-to-string-of-module-declared-type.md (a
-   first attempt to close it by aliasing the bare suffix caused a
-   deterministic SIGSEGV; see that todo).  So it prints "#<tag:N>"; that N is
-   exactly the assertion we want, since it is the cell's real tag under
-   stdlib/file.march's declaration order (NotFound=0, Permission=1,
-   IsDirectory=2, NotEmpty=3, IoError=4).  Pre-fix of the representation bug,
-   the compiled line was the raw errno string leaking through a misread
-   march_string, which matches neither. *)
+   ctor form (NotFound("...")), and compiled output must now match it BYTE
+   FOR BYTE.
+
+   It did not always.  Compiled Show could not resolve the NAME of a
+   module-declared type -- the ctor-descriptor table is keyed by the LOWERED
+   name (File.FileError) while these builtins are declared with the bare
+   static one -- so this table accepted "#<tag:N>" as an alternative, which
+   at least pinned the cell's real tag under stdlib/file.march's declaration
+   order (NotFound=0, Permission=1, IsDirectory=2, NotEmpty=3, IoError=4).
+
+   Closed 2026-09-12 by stamping the C builder's cell with the type id, so
+   the renderer identifies the value from its own header instead of from a
+   name.  Resolving the bare name to the qualified descriptor at compile time
+   was tried FIRST and is unsound -- `Pid` is both a builtin runtime handle
+   and the short name of stdlib's GlobalPid.Pid, so the alias handed an actor
+   handle a constructor descriptor (deterministic SIGSEGV, 40/40).  See
+   specs/progress/2026-09-12-compiled-to-string-module-declared-type.md.
+   Pre-fix of the representation bug, the compiled line was the raw errno
+   string leaking through a misread march_string, which matches neither. *)
 let test_compiled_file_dir_err_are_real_fileerrors () =
   let main_exe = find_main_exe () in
   let tmp = Filename.temp_file "march_filedirerr" "" in
@@ -10924,13 +10936,12 @@ let test_compiled_file_dir_err_are_real_fileerrors () =
     Alcotest.(check int) "compiled printed one line per case"
       (List.length cases) (List.length compiled_lines);
     List.iter2 (fun ((label, _, ctor, tag), interp_line) compiled_line ->
-      Alcotest.(check bool)
+      ignore tag;
+      Alcotest.(check string)
         (Printf.sprintf
-           "compiled %s builds a real FileError cell tagged %d (%s), not a misread march_string (got %S)"
-           label tag ctor compiled_line)
-        true
-        (compiled_line = interp_line
-         || compiled_line = Printf.sprintf "#<tag:%d>" tag))
+           "compiled %s renders the real FileError cell as %s, matching the interpreter"
+           label ctor)
+        interp_line compiled_line)
       (List.combine cases interp_lines) compiled_lines
 
 (* Regression (P0, perceus.ml same_arity): the FBIP arity check compared a

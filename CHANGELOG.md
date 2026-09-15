@@ -604,8 +604,8 @@ git log is authoritative for exact commits.
   annotation and builtin signature denotes the canonical bare name, so the two
   never unified ("expected `FileError` but got `File.FileError`") and a bare
   `NotFound(p)` resolved to the DNS constructor of the same name. Compiled
-  `to_string` of such an error still renders `#<tag:N>`; that rendering gap is
-  tracked separately.
+  `to_string` of such an error rendered `#<tag:N>` for a second reason, fixed
+  in the entry below.
 - **The interpreter's `file_rename` error now names the path**, as the
   compiled runtime and every other file builtin already did.
 - **A record type declared in one typecheck no longer changes a later,
@@ -666,6 +666,21 @@ git log is authoritative for exact commits.
   published digest as provenance, and a `[lockfile] version = 2` marker lets a
   reader tell an old file's registry `hash` from a new one's. Older lockfiles
   are still read.
+- **Compiled `to_string` of a file error names its constructor.** `file_read`
+  on a missing path printed `#<tag:0>` compiled where the interpreter printed
+  `NotFound("/path")`, and the same for the twelve other `file_*` / `dir_*`
+  builtins. `mod File`'s `ptype FileError` lowers to the TIR name
+  `File.FileError`, but every builtin signature denotes it by the canonical
+  bare `FileError`, so the constructor-name descriptor was looked up under a
+  name it was not keyed by and the value fell through to the untyped
+  renderer. The runtime now stamps the error cell it builds with that type's
+  header id, so the renderer identifies the value from the cell itself rather
+  than from a name it could not resolve. The `List` and `Result` cells the
+  runtime builds are stamped the same way, so a `file_read` error reaching a
+  renderer through an erased slot now prints
+  `Err(NotFound("/path"))` instead of `#<tag:1>`. The `file_*` / `dir_*`
+  regression table is tightened from "either form" to byte equality with the
+  interpreter.
 
 ### Changed
 
