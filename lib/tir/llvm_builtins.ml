@@ -899,6 +899,10 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare i64  @march_monitor(ptr %watcher, ptr %target)" };
   { march_name = "actor_terminal_reason"; c_name = Some "march_actor_terminal_reason"; ret_ty = Some (Tir.TCon ("Option", [Tir.TTuple [Tir.TInt; Tir.TString]]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_actor_terminal_reason(i64 %pid_index)" };
+  { march_name = "dist_monitor_pending"; c_name = Some "march_dist_monitor_pending"; ret_ty = Some (Tir.TCon ("List", [Tir.TPtr Tir.TUnit]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_dist_monitor_pending()" };
+  { march_name = "dist_monitor_ack"; c_name = Some "march_dist_monitor_ack_pid"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void @march_dist_monitor_ack_pid(i64 %target_pid, i64 %watcher_pid)" };
   { march_name = "dist_monitor_register"; c_name = Some "march_dist_monitor_register_pid"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_dist_monitor_register_pid(i64 %target_pid, ptr %node, i64 %watcher_pid, i64 %fd)" };
   { march_name = "mailbox_size"; c_name = Some "march_mailbox_size"; ret_ty = Some Tir.TInt;
@@ -1647,6 +1651,8 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_demonitor";
   PDeclare "march_monitor";
   PDeclare "march_actor_terminal_reason";
+  PDeclare "march_dist_monitor_pending";
+  PDeclare "march_dist_monitor_ack_pid";
   PDeclare "march_dist_monitor_register_pid";
   PDeclare "march_mailbox_size";
   PDeclare "march_sched_stat";

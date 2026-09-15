@@ -102,10 +102,24 @@ typedef struct dist_watcher {
 
 #define DIST_MON_BUCKETS 256
 
+/* A MONITOR_FIRE that has been written once and not yet acknowledged
+ * (MONITOR_ACK from the watcher's node). Kept so the March-side retry can
+ * resend it -- on a new connection if the old one is gone -- until the ack
+ * arrives or the watcher's node is declared dead. The at-least-once half of
+ * specs/todos/2026-09-14-monitor-fire-at-least-once.md. */
+typedef struct dist_fired {
+    char       *watcher_node;   /* malloc'd */
+    int64_t     watcher_pid;
+    int         reason_tag;
+    char       *reason_msg;     /* malloc'd, may be NULL */
+    struct dist_fired *next;
+} dist_fired;
+
 typedef struct dist_target {
     int64_t          target_pid;
     char            *target_node;  /* node_id that hosts this target (NULL = local) */
     dist_watcher    *watchers;
+    dist_fired      *fired;        /* written once, awaiting MONITOR_ACK */
     struct dist_target *next;
 } dist_target;
 
@@ -186,10 +200,64 @@ void march_dist_monitor_fire_pid(int64_t target_pid, int reason_tag,
             }
             free(frame);
         }
-        free(w->watcher_node);
+        /* Not freed: the fire is now PENDING until the watcher's node acks
+         * it (march_dist_monitor_ack) -- the write above was best-effort and
+         * the connection may be gone. Moved, under the lock, to the target's
+         * fired list, which march_dist_monitor_pending_walk exposes for the
+         * March-side resend. */
+        dist_fired *f = (dist_fired *)calloc(1, sizeof(dist_fired));
+        if (f) {
+            f->watcher_node = w->watcher_node;   /* ownership moves */
+            f->watcher_pid  = w->watcher_pid;
+            f->reason_tag   = reason_tag;
+            f->reason_msg   = reason_msg ? strdup(reason_msg) : NULL;
+            pthread_mutex_lock(&g_mu);
+            dist_target *t2 = find_or_create_target(target_pid);
+            f->next = t2->fired;
+            t2->fired = f;
+            pthread_mutex_unlock(&g_mu);
+        } else {
+            free(w->watcher_node);
+        }
         free(w);
         w = next;
     }
+}
+
+/* MONITOR_ACK from (watcher_node's) watcher_pid for target_pid: forget the
+ * pending fire. Idempotent. */
+void march_dist_monitor_ack(int64_t target_pid, int64_t watcher_pid) {
+    pthread_mutex_lock(&g_mu);
+    dist_target *t = find_target(target_pid);
+    if (t) {
+        dist_fired **pp = &t->fired;
+        while (*pp) {
+            dist_fired *f = *pp;
+            if (f->watcher_pid == watcher_pid) {
+                *pp = f->next;
+                free(f->watcher_node);
+                free(f->reason_msg);
+                free(f);
+            } else {
+                pp = &f->next;
+            }
+        }
+    }
+    pthread_mutex_unlock(&g_mu);
+}
+
+/* Walk every pending (fired, unacked) entry under the lock. The callback
+ * must not call back into this registry. */
+void march_dist_monitor_pending_walk(void (*cb)(int64_t target_pid, const char *watcher_node,
+                                                int64_t watcher_pid, int reason_tag,
+                                                const char *reason_msg, void *ctx),
+                                     void *ctx) {
+    pthread_mutex_lock(&g_mu);
+    for (int b = 0; b < DIST_MON_BUCKETS; b++)
+        for (dist_target *t = g_buckets[b]; t; t = t->next)
+            for (dist_fired *f = t->fired; f; f = f->next)
+                cb(t->target_pid, f->watcher_node, f->watcher_pid, f->reason_tag, f->reason_msg, ctx);
+    pthread_mutex_unlock(&g_mu);
 }
 
 void march_dist_monitor_fire_nodedown(const char *node_id) {

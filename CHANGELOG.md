@@ -12,6 +12,12 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`MONITOR_FIRE` is at-least-once.** A fire the runtime writes stays pending in
+  its registry until the watcher's node answers `MONITOR_ACK` (tag 12);
+  `dist_monitor_pending()` lists the unacked fires and `DistLink.resend_pending(reg)`
+  rewrites each on the watcher node's current control connection, so a fire lost
+  to a dropped connection is delivered after the reconnect; watchers dedupe, so a
+  resent copy is one `Down` (`test/native/monitor_ack_retry_loopback`).
 - **`actor_terminal_reason(pid_index)`**: the reason a local actor died —
   `Some((tag, message))` with the wire's tags (0 Normal, 1 Killed, 2 Crash), `None`
   while alive or unknown — on both backends, keyed by spawn index so a monitor

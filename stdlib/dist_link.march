@@ -20,6 +20,7 @@
 --
 -- MonitorRef is an opaque integer; demonitor(ref) cancels the monitor.
 mod DistLink do
+  needs IO.NetConnect   -- resend_pending writes MONITOR_FIRE frames
 
   type DownReason = Normal | Killed | Crash(String) | NodeDown
 
@@ -78,6 +79,43 @@ mod DistLink do
           (tp, rt, rm) -> Ok((tp, reason_of_tag(rt, rm)))
         end
     end
+  end
+
+  -- MONITOR_ACK (tag 12): the watcher's node has delivered the Down for
+  -- (target_pid, watcher_pid); the firing node forgets the pending fire.
+  fn tag_ack() : Int do 12 end
+
+  fn encode_ack(target_pid : Int, watcher_pid : Int) : List(Int) do
+    Msgpack.encode(Msgpack.array(
+      Cons(Msgpack.int(tag_ack()), Cons(Msgpack.int(target_pid), Cons(Msgpack.int(watcher_pid), Nil)))))
+  end
+
+  fn decode_ack(bytes : List(Int)) : Result((Int, Int), String) do
+    match Msgpack.decode(bytes) do
+      Err(e) -> Err(e)
+      Ok(Msgpack.Array(Cons(Msgpack.Int(12), Cons(Msgpack.Int(tp), Cons(Msgpack.Int(wp), Nil))))) -> Ok((tp, wp))
+      Ok(_) -> Err("DistLink: not a MONITOR_ACK frame")
+    end
+  end
+
+  -- At-least-once: resend every fired-but-unacked MONITOR_FIRE to the
+  -- watcher's node's CURRENT control connection (from the peer registry --
+  -- the fd the fire was first written on may be gone). Returns how many
+  -- were resent; entries whose node is not connected wait for the next
+  -- call. Call from a timer or after a reconnect.
+  fn resend_pending(reg : PeerRegistry.Registry) : Int do
+    List.fold_left(dist_monitor_pending(), 0, fn (n, entry) ->
+      match entry do
+        (target_pid, (watcher_node, (_watcher_pid, (rtag, rmsg)))) ->
+          match PeerRegistry.lookup(reg, watcher_node) do
+            None -> n
+            Some(peer) ->
+              match NetKernel.send_frame(peer.fd, encode_fire(target_pid, reason_of_tag(rtag, rmsg))) do
+                Ok(_) -> n + 1
+                Err(_) -> n
+              end
+          end
+      end)
   end
 
   -- Decode an inbound MONITOR_REQ frame.

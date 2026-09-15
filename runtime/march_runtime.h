@@ -606,6 +606,8 @@ void    march_kill(void *actor);
 int64_t march_is_alive(void *actor);
 void    march_dist_monitor_register_pid(int64_t target_pid, void *node_str, int64_t watcher_pid, int64_t fd);
 void   *march_actor_terminal_reason(int64_t pid_index);
+void   *march_dist_monitor_pending(void);
+void    march_dist_monitor_ack_pid(int64_t target_pid, int64_t watcher_pid);
 /* Register an actor with the scheduler; returns actor unchanged. */
 void    march_set_actor_caps(void *actor, void *caps);
 void   *march_actor_caps(void *actor);
