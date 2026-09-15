@@ -56,6 +56,7 @@ void march_dist_monitor_clear_fd(int watcher_fd);
 
 /* At-least-once: a fired MONITOR_FIRE stays pending until acked. */
 void march_dist_monitor_ack(int64_t target_pid, int64_t watcher_pid);
+int64_t march_dist_monitor_forget_node(const char *node_id);
 void march_dist_monitor_pending_walk(void (*cb)(int64_t target_pid, const char *watcher_node,
                                                 int64_t watcher_pid, int reason_tag,
                                                 const char *reason_msg, void *ctx),

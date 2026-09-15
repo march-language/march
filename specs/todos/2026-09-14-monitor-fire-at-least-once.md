@@ -174,3 +174,18 @@ Remaining: expiry of pending entries when SWIM declares the watcher node
 dead (needs the SWIM loop of the `stall` scenario wired to
 `dist_monitor_pending`), and step 4 (scenario 5 in the harness, the
 `restart` monitor half).
+
+## Shipped (2026-09-15): expiry on node death
+
+`dist_monitor_forget_node(node_id : String) : Int` — drops that node's
+watchers AND pending fires, writes nothing, returns the count (a nine-site
+builtin, `IO.NetConnect`, refused by the interpreter). The caller is the
+SWIM loop's `Dead` transition (the `stall` scenario's loop is the template:
+on a status change to `Dead` for a peer, `dist_monitor_forget_node(peer)`).
+Witness `test/native/monitor_expiry_loopback`: the fire is pending (written
+into a connection nobody reads); "node-a is dead" drops it: before 1,
+dropped 1, after 0. 10/10.
+
+Remaining: step 4 only — scenario 5 (`monitor_reconnect`) and the
+`restart` scenario's monitor half in the harness, both of which now have
+every primitive they need.

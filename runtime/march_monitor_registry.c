@@ -246,6 +246,35 @@ void march_dist_monitor_ack(int64_t target_pid, int64_t watcher_pid) {
     pthread_mutex_unlock(&g_mu);
 }
 
+/* The watcher node was declared dead (SWIM): forget its watchers AND its
+ * pending fires -- nothing is written, its watchers get NodeDown locally.
+ * Returns how many entries were dropped. */
+int64_t march_dist_monitor_forget_node(const char *node_id) {
+    if (!node_id) return 0;
+    int64_t dropped = 0;
+    pthread_mutex_lock(&g_mu);
+    for (int b = 0; b < DIST_MON_BUCKETS; b++) {
+        for (dist_target *t = g_buckets[b]; t; t = t->next) {
+            dist_watcher **pw = &t->watchers;
+            while (*pw) {
+                dist_watcher *w = *pw;
+                if (w->watcher_node && strcmp(w->watcher_node, node_id) == 0) {
+                    *pw = w->next; free(w->watcher_node); free(w); dropped++;
+                } else pw = &w->next;
+            }
+            dist_fired **pf = &t->fired;
+            while (*pf) {
+                dist_fired *f = *pf;
+                if (f->watcher_node && strcmp(f->watcher_node, node_id) == 0) {
+                    *pf = f->next; free(f->watcher_node); free(f->reason_msg); free(f); dropped++;
+                } else pf = &f->next;
+            }
+        }
+    }
+    pthread_mutex_unlock(&g_mu);
+    return dropped;
+}
+
 /* Walk every pending (fired, unacked) entry under the lock. The callback
  * must not call back into this registry. */
 void march_dist_monitor_pending_walk(void (*cb)(int64_t target_pid, const char *watcher_node,
