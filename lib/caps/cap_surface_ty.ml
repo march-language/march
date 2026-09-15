@@ -67,3 +67,35 @@ let caps_in_type_def (td : Ast.type_def) : string list =
     List.concat_map (fun (v : Ast.variant) ->
         List.concat_map caps_in_ty v.var_args) variants
   | Ast.TDAlias t -> caps_in_ty t
+
+(** [mentions_tycon name ty] — does a type constructor called [name] occur
+    anywhere in [ty]?  Same walk as [caps_in_ty], same exhaustiveness
+    discipline (a new [Ast.ty] constructor breaks the build here on purpose).
+
+    First use: [derive Json] refuses a type with a [Pid] anywhere in it.  A
+    local pid is an index into THIS node's actor table; on another node it
+    names whatever happens to live at that slot, so a codec over it is a
+    wrong-delivery route, not a serialization.  The cross-node identity is
+    [GlobalPid.Pid], which is a plain record and derives like any other. *)
+let rec mentions_tycon (name : string) (ty : Ast.ty) : bool =
+  match ty with
+  | Ast.TyCon (con, args) ->
+    con.txt = name || List.exists (mentions_tycon name) args
+  | Ast.TyArrow (a, b) -> mentions_tycon name a || mentions_tycon name b
+  | Ast.TyTuple ts -> List.exists (mentions_tycon name) ts
+  | Ast.TyRecord fields -> List.exists (fun (_, t) -> mentions_tycon name t) fields
+  | Ast.TyLinear (_, t) -> mentions_tycon name t
+  | Ast.TyNatOp (_, a, b) -> mentions_tycon name a || mentions_tycon name b
+  | Ast.TyRefine (base, _, _) -> mentions_tycon name base
+  | Ast.TyVar _ | Ast.TyNat _ | Ast.TyChan _ -> false
+
+(** [type_def_mentions_tycon name td]: [mentions_tycon] over every position
+    of a declaration body, the way [caps_in_type_def] lifts [caps_in_ty]. *)
+let type_def_mentions_tycon (name : string) (td : Ast.type_def) : bool =
+  match td with
+  | Ast.TDRecord fields ->
+    List.exists (fun (f : Ast.field) -> mentions_tycon name f.fld_ty) fields
+  | Ast.TDVariant variants ->
+    List.exists (fun (v : Ast.variant) ->
+        List.exists (mentions_tycon name) v.var_args) variants
+  | Ast.TDAlias t -> mentions_tycon name t

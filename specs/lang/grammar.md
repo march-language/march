@@ -858,6 +858,12 @@ explicitly re-admitted as field names here so that `Chan.send(…)`,
 `Chan.choose(…)`, `Chan.offer(…)` parse as ordinary method-call-shaped
 field access rather than colliding with those keywords (§3.2 documents the
 token_filter-level part of the `CHOOSE` disambiguation specifically).
+The declaration side has the matching admission for `send` alone:
+`fn_decl_name` (used by every `fn`/`pfn` production of `fn_decl`) is
+`lower_name | SEND`, so a module can *declare* `fn send(…)` — that is how
+`Node.send`, the typed remote send in `stdlib/node.march`, exists — while the
+bare call form `send(pid, msg)` stays the actor primitive. Confirmed live by
+[`parse/p37_fn_named_send_in_module.march`](grammar/parse/p37_fn_named_send_in_module.march).
 Confirmed live by
 [`parse/p06_field_access_vs_application.march`](grammar/parse/p06_field_access_vs_application.march):
 `get(b.get)` prints `105`; the field access `b.get` (an `Int`) is fully
@@ -1763,10 +1769,12 @@ error-recovery alternatives already established:
 ### 8.2 `fn` / `pfn`: function declarations, and how multi-head clauses merge
 
 ```ebnf
-fn_decl ::= "fn"  lower_name "(" fn_param,* ")" ret_annot? when_guard? "do" block_body "end"
-          | "fn"  lower_name "[" fn_bound_param,+ "]" "(" fn_param,* ")" ret_annot? when_guard? "do" block_body "end"
-          | "pfn" lower_name "(" fn_param,* ")" ret_annot? when_guard? "do" block_body "end"
-          | "pfn" lower_name "[" fn_bound_param,+ "]" "(" fn_param,* ")" ret_annot? when_guard? "do" block_body "end"
+fn_decl ::= "fn"  fn_decl_name "(" fn_param,* ")" ret_annot? when_guard? "do" block_body "end"
+          | "fn"  fn_decl_name "[" fn_bound_param,+ "]" "(" fn_param,* ")" ret_annot? when_guard? "do" block_body "end"
+          | "pfn" fn_decl_name "(" fn_param,* ")" ret_annot? when_guard? "do" block_body "end"
+          | "pfn" fn_decl_name "[" fn_bound_param,+ "]" "(" fn_param,* ")" ret_annot? when_guard? "do" block_body "end"
+
+fn_decl_name ::= lower_name | "send"        -- `send` admitted at the declaration only (2026-09-15; §4.8)
 ```
 
 (`parser.mly:341–397`; the bracketed `fn_bound_param,+` form,
