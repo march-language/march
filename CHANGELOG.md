@@ -316,6 +316,12 @@ git log is authoritative for exact commits.
   nothing when unset.
 
 ### Fixed
+- **`SortedSet.from_list`, `union`, `intersect` and `difference` work.** All
+  four passed their arguments to `List.fold_left` in the wrong order with a
+  curried callback, so `SortedSet.from_list([5, 3, 9, 3, 1], cmp)` panicked
+  with "non-exhaustive pattern match ... { cmp: <fn>, tree: Leaf }" both
+  compiled and interpreted, and `--check stdlib/sorted_set.march` reported 17
+  type errors.
 - **Module-qualified constructor patterns whose module name is also a stdlib
   type name now match when compiled.** With a nested `mod Tree do type T =
   Leaf(Int) | Node(T, T) end`, a match on `Tree.Leaf(n)` resolved to the stdlib
