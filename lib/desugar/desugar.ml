@@ -2192,20 +2192,35 @@ let desugar_module ?errors ?(is_entry = true) (m : module_) : module_ =
       let (lead, rest) = split [] m.mod_decls in
       { m with mod_decls = lead @ generated @ rest }
   in
-  (* Collect type definitions so derive expansion can reference them. *)
-  let type_defs = collect_type_defs m.mod_decls in
   (* Collect interfaces and fns for satisfy expansion. *)
   let raw_ifaces = collect_interfaces m.mod_decls in
   let raw_fns    = collect_fns m.mod_decls in
-  (* Expand DDeriving and DSatisfy nodes; desugar everything else. *)
-  let expanded = List.concat_map (fun d ->
-      match d with
-      | DDeriving (type_name, ifaces, sp) ->
-        expand_derive errors type_defs type_name ifaces sp
-      | DSatisfy (iface_names, type_names, sp) ->
-        expand_satisfy errors raw_ifaces raw_fns iface_names type_names sp
-      | _ -> expand_defaults_decl d
-    ) m.mod_decls in
+  (* Expand DDeriving and DSatisfy nodes; desugar everything else.
+     Recurses into nested [DMod]s (2026-09-15): a `derive` inside a nested
+     module used to reach the typechecker unexpanded, where the [DDeriving]
+     arm silently returns the env -- so `derive Json for T` in `mod Inner`
+     generated NOTHING, and the first `from_json` pinned to `T` failed at run
+     time as "cannot determine type".  The typed remote send made the hole
+     visible (its codec check fails closed).  A nested level resolves type
+     names against its own declarations first, then the enclosing ones, the
+     way a bare type reference in that module does. *)
+  let rec expand_level outer_type_defs (decls : decl list) : decl list =
+    let type_defs = collect_type_defs decls @ outer_type_defs in
+    List.concat_map (fun d ->
+        match d with
+        | DDeriving (type_name, ifaces, sp) ->
+          expand_derive errors type_defs type_name ifaces sp
+        | DSatisfy (iface_names, type_names, sp) ->
+          expand_satisfy errors raw_ifaces raw_fns iface_names type_names sp
+        | DMod (name, vis, inner, sp) ->
+          (* [expand_defaults_decl]'s own [DMod] arm recurses for default-arg
+             variants; going through it here keeps that, and adds the derive
+             and satisfy expansion at every level. *)
+          [DMod (name, vis, expand_level type_defs inner, sp)]
+        | _ -> expand_defaults_decl d
+      ) decls
+  in
+  let expanded = expand_level [] m.mod_decls in
   (* Auto-generate island bridge functions if this is an island module. *)
   let expanded = maybe_inject_island_bridges m.mod_decls expanded in
   let interfaces = collect_interfaces expanded in

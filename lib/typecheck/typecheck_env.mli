@@ -200,6 +200,9 @@ type env = {
     (Typecheck_types.Ast.span *
      Typecheck_types.ty)
     list ref;
+  node_send_sites : (Typecheck_types.Ast.span * Typecheck_types.ty) list ref;
+  json_codecs : Typecheck_types.ty list ref;
+  (** Every `Node.send(peer, to, msg)` site (span, instantiated arrow); see the .ml. *)
   json_cap_sites :
     (Typecheck_types.Ast.span *
      Typecheck_types.ty * string)

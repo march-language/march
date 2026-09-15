@@ -1646,8 +1646,7 @@ let check_cap_narrow_sites (env : env) : unit =
     Returns the type's own name only. A [derive Json] on a parameterised type
     still registers one impl under the bare head name, which is the key both
     backends look up, so the arguments are deliberately not part of it. *)
-let json_dispatch_target (env : env) (jname : string) (result_ty : ty)
-  : string option =
+let json_dispatch_head (env : env) (t : ty) : string option =
   (* A NAMED record type reaches here structurally, as [TRecord], not as the
      [TCon] its declaration produced — the same thing Mono works around with
      its [record_to_typename] table.  Recover the declared name by matching the
@@ -1687,12 +1686,14 @@ let json_dispatch_target (env : env) (jname : string) (result_ty : ty)
       List.sort_uniq String.compare (List.map short matches) in
     match distinct with [ n ] -> Some n | _ -> None
   in
-  let head t =
-    match repr t with
-    | TCon (n, _) -> Some n
-    | TRecord flds -> record_type_name flds
-    | _ -> None
-  in
+  match repr t with
+  | TCon (n, _) -> Some n
+  | TRecord flds -> record_type_name flds
+  | _ -> None
+
+let json_dispatch_target (env : env) (jname : string) (result_ty : ty)
+  : string option =
+  let head = json_dispatch_head env in
   match repr result_ty with
   | TCon ("Result", payload :: _) ->
     if jname = "from_json_events" then
@@ -1759,6 +1760,100 @@ let check_json_cap_sites (env : env) : unit =
             MPText "hint: "; MPCode jname;
             MPText " places no constraint on the type it produces, so it would fabricate authority from data. Receive the capability as a parameter and pass it through instead." ])
     ) !(env.json_cap_sites)
+
+(** The typed remote send, the call-site half (stdlib/node.march).  For every
+    recorded `Node.send(peer, to, msg)` site: resolve `msg`'s solved type to
+    the declaration it names, require that declaration to have a `derive Json`
+    codec (a `JsonTo` impl -- the pseudo-interface [Desugar_derive] registers),
+    and record the resolved name in [March_ast.Json_dispatch] under the call's
+    span.  Both backends read that entry and rewrite the call to
+    `Node.send_tagged(peer, to, "<name>", JsonTo$<short>.to_json(msg))`.
+
+    The wire tag is the name QUALIFIED by the declaring module when the
+    declaration has one ("Outer.Inner.Ping"), so two nodes compiled from the
+    same module tree mint the same string; the impl symbol uses the SHORT name
+    because that is what impl dispatch keys on (see [json_dispatch_target]).
+    The consumer derives the short name from the recorded one.
+
+    Fail CLOSED, unlike [check_json_cap_sites]: an unresolved message type is
+    not "never used", it is a send whose codec cannot be chosen, and a runtime
+    `to_json: cannot determine type` is exactly the failure this call exists
+    to remove.  So an unpinned or structurally anonymous type is an error
+    naming the site. *)
+let check_node_send_sites (env : env) : unit =
+  let third_param f_ty =
+    match repr f_ty with
+    | TArrow (_, r1) ->
+      (match repr r1 with
+       | TArrow (_, r2) ->
+         (match repr r2 with
+          | TArrow (m, _) -> Some m
+          | _ -> None)
+       | _ -> None)
+    | _ -> None
+  in
+  let short n =
+    match String.rindex_opt n '.' with
+    | Some i -> String.sub n (i + 1) (String.length n - i - 1)
+    | None -> n
+  in
+  (* The declared name, module-qualified when the declaration is registered
+     under a qualified alias too ("Point" and "FJ.Point" -- see
+     [json_dispatch_target]).  Records live in [env.records]; a variant type
+     is in [env.types] only, so both are consulted.  The longest qualified
+     key wins: a nested module registers "Inner.T" and "Outer.Inner.T". *)
+  let qualified_name n =
+    let s = short n in
+    let suffix = "." ^ s in
+    let ends_with k =
+      let lk = String.length k and ls = String.length suffix in
+      lk > ls && String.sub k (lk - ls) ls = suffix
+    in
+    let keys =
+      StrMap.fold (fun k _ acc -> if ends_with k then k :: acc else acc) env.records []
+      @ StrMap.fold (fun k _ acc -> if ends_with k then k :: acc else acc) env.types []
+    in
+    match List.sort (fun a b -> compare (String.length b) (String.length a)) keys with
+    | k :: _ -> k
+    | [] -> n
+  in
+  let has_json_codec s =
+    List.exists (fun t ->
+        match json_dispatch_head env t with
+        | Some n -> short n = s
+        | None -> false) !(env.json_codecs)
+  in
+  List.iter (fun (sp, f_ty) ->
+      match third_param f_ty with
+      | None ->
+        (* Not a three-arrow: `Node.send` itself did not resolve (an unknown
+           module, say), which is already reported at the site.  Nothing to
+           add. *)
+        ()
+      | Some msg_ty ->
+        (match json_dispatch_head env msg_ty with
+         | None ->
+           Err.error env.errors ~span:sp
+             (render_parts [
+               MPCode "Node.send"; MPText " cannot choose a codec for a message of type ";
+               MPCode (pp_ty (repr msg_ty)); MPText ".";
+               MPBreak;
+               MPText "hint: the message must be a declared type with "; MPCode "derive Json";
+               MPText " -- the compiler mints the wire type tag from that declaration's name."])
+         | Some name ->
+           let s = short name in
+           if has_json_codec s then
+             March_ast.Json_dispatch.record sp (qualified_name name)
+           else
+             Err.error env.errors ~span:sp
+               (render_parts [
+                 MPCode "Node.send"; MPText " needs a JSON codec for ";
+                 MPCode s; MPText ", and none is derived.";
+                 MPBreak;
+                 MPText "hint: add "; MPCode ("derive Json for " ^ s);
+                 MPText " next to its declaration; the compiler then mints the wire type tag from it, and a receiver decodes with ";
+                 MPCode "from_json"; MPText "."]))
+    ) !(env.node_send_sites)
 
 (** Validate every `proof cap X with T` clause.  Deferred rather than checked
     at the declaration because a capability may name a record type declared

@@ -1850,6 +1850,22 @@ let rec infer_expr env (e : Ast.expr) : ty =
        solved at sweep time.  No [demote_to_monomorphic] here — see
        [check_json_cap_sites] for why an unsolved var is handled by the sweep
        rather than forced at the call site. *)
+    (* `Node.send(peer, to, msg)`: an ordinary stdlib function, typed and
+       applied exactly as written -- plus the site is RECORDED, so the
+       end-of-module sweep ([Typecheck_caps.check_node_send_sites]) can demand
+       a `derive Json` codec for `msg`'s solved type and mint the wire type
+       tag from it.  The arrow is demoted for the same reason [from_json]'s is
+       just below: the recorded node must be the one the later pin flows into.
+       Only the exact three-argument, qualified spelling is a typed send;
+       a partial application or an alias is an ordinary call of a function
+       whose body refuses to run (see stdlib/node.march). *)
+    | Ast.EApp ((Ast.EVar { txt = "Node.send"; _ }) as fv, ([_; _; _] as args), sp) ->
+      let f_ty = infer_expr env fv in
+      let rty = infer_app env sp f_ty args 0 in
+      demote_to_monomorphic f_ty;
+      env.node_send_sites := (sp, f_ty) :: !(env.node_send_sites);
+      rty
+
     | Ast.EApp ((Ast.EVar { txt = ("to_json" | "from_json" | "from_json_events"); _ }) as fv,
                 [arg], sp) ->
       let jname = (match fv with Ast.EVar n -> n.txt | _ -> assert false) in
@@ -5269,6 +5285,9 @@ let rec check_decl env (d : Ast.decl) : env =
        (* Pass-2 re-registration for constraint discharge; coherence is enforced
           in [register_impl_shape] (Pass 1). Carry the span for the new shape. *)
        StrMap.add key ((inst_ty, idef.impl_iface.span, None) :: lst) env.impls) } in
+    (* A derived Json encoder is a module-wide fact (see [env.json_codecs]). *)
+    if idef.impl_iface.txt = "JsonTo" then
+      env.json_codecs := inst_ty :: !(env.json_codecs);
     (* Check 'when' constraints: each C(T) must already be implemented. *)
     List.iter (fun ((cname : Ast.name), ctys) ->
         (* A `when C(T)` constraint type is also part of the impl header,
@@ -6811,6 +6830,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
   check_cap_dict_decls final_env;
   check_cap_impl_sites final_env;
   check_json_cap_sites final_env;
+  check_node_send_sites final_env;
   check_cap_narrow_sites final_env;
   (* Validate capability declarations for the top-level module *)
   (* The entry module's own name is NOT a prefix segment for cap-closure keys:

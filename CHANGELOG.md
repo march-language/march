@@ -23,6 +23,13 @@ git log is authoritative for exact commits.
   in any declaration order. See "Proved list contracts" in
   `docs/refinement-types.md`.
 
+- `Node.send(peer, to, msg)`: the typed remote send. `msg`'s type must `derive Json`
+  (a missing codec is a typecheck error at the call site naming the type, not a
+  run-time `to_json` panic), the wire type tag is minted by the compiler from the
+  declaration's qualified name so sender and receiver agree by construction, and
+  `derive Json` now refuses a type with a local `Pid` anywhere in it (carry a
+  `GlobalPid.Pid`). `Node.payload(d)` is the receiver's half. A module may now
+  declare `fn send(...)` (reached qualified; the bare call stays the actor primitive).
 - **`dist_monitor_forget_node(node_id)`**: when SWIM declares a watcher node dead,
   its watchers and pending `MONITOR_FIRE`s are dropped without writing anything
   (its watchers learn `NodeDown` locally); returns how many were dropped
@@ -302,6 +309,9 @@ git log is authoritative for exact commits.
   nothing when unset.
 
 ### Fixed
+- `derive` inside a nested `mod` was a silent no-op: the derive was never expanded, so
+  `derive Json for T` in `mod Inner` generated nothing and the first `from_json` to `T`
+  failed at run time. Nested derives (and `satisfy`) now expand at every level.
 - **The cluster handshake no longer swallows the peer's first bytes.** It read
   its two frames in 4 KiB chunks and dropped the over-read, so a peer that
   finished the handshake and immediately wrote lost whatever landed in the same

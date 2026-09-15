@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t141 accept, t01–t142 reject) <!-- doc-lint:ignore-count: accept/reject share one numbering pool with no reuse across sides, so the highest id on each side is NOT that side's file count (123 accept, 121 reject; see the Result line below) -->
+# Typing corpus index (t01–t141 accept, t01–t240 reject) <!-- doc-lint:ignore-count: accept/reject share one numbering pool with no reuse across sides, so the highest id on each side is NOT that side's file count (123 accept, 121 reject; see the Result line below) -->
 
 **Two-repo rule.** This corpus is also checked by
 [march-language/march-lean](https://github.com/march-language/march-lean), an
@@ -248,7 +248,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 357/357: 157 accept, 200
+Exit 0 iff every program behaves as declared (currently 359/359: 157 accept, 202
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -598,7 +598,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t178_letstar_no_flat_map` | **`let*` (generalized monadic bind, 2026-08-14, `specs/lang/let-star-generalized-bind.md`): no matching `flat_map`.** `let*` resolves `<Type>.flat_map` from the RHS's inferred type; a type with no `flat_map` in a same-named module (here a bare `Widget`) is a clear, actionable error naming exactly what to define, not a crash or a generic "unbound variable" | ``let*` needs `Widget.flat_map`, but it doesn't exist.` |
 | `t179_letstar_last_expr` | **`let*`: trailing binder rejected, mirrors `let?`'s `t67`/`r05`.** A `let*` with an empty continuation can never unify against `M(b)`, so it is caught with the same "cannot be the last expression in a block" shape `let?` already has, generalized to name the RHS's own type instead of hardcoding `Result` | ``let*` cannot be the last expression in a block.` |
 
-**Result: 357 / 357 (157 accept, 200 reject).** `reject/t169`–`t170`
+**Result: 359 / 359 (157 accept, 202 reject).** `reject/t169`–`t170`
 (`NativeF32Arr`/`NativeU8Arr` non-sendable in actor messages, added
 2026-08-09 alongside the narrow-element-width work) are not yet written up
 as their own table entries; they mirror the existing `t164`/`t165` pattern
@@ -664,6 +664,8 @@ their own table entries.
 | `t236_endpoints_event_parked_consumed_then_retained` | **A session state in actor state is held to the protocol (2026-09-13).** The event-shaped endpoint API keeps `Parked_<Role>` in a linear state field; a handler that `resume`s it and returns `{ state with budget: … }` keeps the consumed value (R3), so the next delivery would resume a state already resumed | `The linear value `state.parked` is used more than once here` |
 | `t237_endpoints_event_never_parked_again` | **Resuming and returning `state` unchanged**: R2 moves the already-moved field | `The linear value `state.parked` is used more than once here` |
 | `t238_endpoints_event_start_drops_idle` | **The `Idle` placeholder `init` holds is linear too**: a `Start` that parks a fresh endpoint without `take_idle` leaks it | `The linear value `state.parked` was never used` |
+| `t239_node_send_no_codec` | **The typed remote send's codec contract (2026-09-15, `stdlib/node.march`):** `Node.send(peer, to, msg)` with a `msg` type that does not `derive Json` is refused at the CALL SITE, naming the type — a deferred, fail-closed sweep over recorded sites (`Typecheck_caps.check_node_send_sites`), not the run-time `to_json: cannot determine type` | `needs a JSON codec for `Ping`` |
+| `t240_json_derive_pid_field` | **`derive Json` refuses a type with a local `Pid` anywhere in it (2026-09-15):** a pid indexes THIS node's actor table, so a codec over it is a wrong-delivery route on any other node; refused at the declaration like a `Cap` field, which is what makes `Node.send` of such a message a compile-time refusal | `` `Pid` cannot be serialized `` |
 
 ## Coverage notes (intentionally absent programs, and why)
 

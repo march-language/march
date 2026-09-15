@@ -562,6 +562,17 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
           | _ -> false) ->
     lower_expr env self_var
 
+  (* The typed remote send: the typechecker recorded the message type per
+     site (Typecheck_caps.check_node_send_sites); rewrite to the explicit
+     form and lower THAT, so downstream sees an ordinary call of a stdlib
+     function and a direct call of the derived encoder.  The rewrite itself
+     lives beside the table so the interpreter's is the same one. *)
+  | Ast.EApp (Ast.EVar { txt = "Node.send"; _ }, [_; _; _], _)
+    when March_ast.Json_dispatch.node_send_rewrite e <> None ->
+    (match March_ast.Json_dispatch.node_send_rewrite e with
+     | Some e' -> lower_expr env e'
+     | None -> assert false)
+
   (* --- Function application (CPS: all args must be atoms) --- *)
   | Ast.EApp (f_expr, args, call_sp) ->
     (* Check for default-arg dispatch: if f is a plain EVar that names a
