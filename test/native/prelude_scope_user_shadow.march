@@ -1,0 +1,24 @@
+-- Regression: the interpreter must resolve a prelude function's bare free
+-- reference in the prelude's own scope, never to an entry-module function of
+-- the same name. prelude.march's `println(x)` calls `show(x)` bare; a user
+-- `pfn show` over a different type used to hijack it under the interpreter
+-- ("match failure ... no branch matched the value \"hi ok\"") while the
+-- compiled binary (type-directed `show`) printed the right thing. Run through
+-- BOTH backends against the same .expected.
+mod PreludeScopeUserShadow do
+  needs IO.Console
+
+  pfn show(r : Result(Bool, String)) : String do
+    match r do
+      Ok(_) -> "ok"
+      Err(e) -> e
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    println("hi " ++ show(Ok(true)))
+    println(show(Err("err")))
+    println([1, 2, 3])
+    println(Some(4))
+  end
+end

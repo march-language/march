@@ -15229,6 +15229,62 @@ let test_nested_record_pattern_non_exhaustive_is_reported () =
   Alcotest.(check bool) "nested record match reported non-exhaustive" true
     warns_missing
 
+(* A column mixing wildcard rows with constructor rows must specialize per
+   constructor when the constructors form a complete signature.  The checker
+   used to jump straight to the default matrix whenever ANY row led with a
+   wildcard, which keeps only the wildcard rows and forgets what the
+   constructor rows cover: after specializing on `Nd`, the second column holds
+   `Lf`, `Lf`, `Nd` under a first column of `Lf`, `Nd`, `_`, and the default
+   matrix `[[Nd]]` spuriously "missed" `Nd(_, Lf(0))`. *)
+let mixed_wild_ctor_src ~with_row2 =
+  Printf.sprintf {|mod T do
+    type Zz = Lf(Int) | Nd(Zz, Zz)
+    fn f(t : Zz) : Int do
+      match t do
+      Nd(Lf(a), Lf(b)) -> a * 10 + b
+      %s
+      Nd(_, Nd(_, _)) -> 200
+      Lf(n) -> n
+      end
+    end
+  end|} (if with_row2 then "Nd(Nd(_, _), Lf(b)) -> 100 + b" else "")
+
+let non_exhaustive_warnings ctx =
+  List.filter (fun (d : March_errors.Errors.diagnostic) ->
+      d.severity = March_errors.Errors.Warning
+      && contains "Non-exhaustive" d.message)
+    ctx.March_errors.Errors.diagnostics
+
+let test_mixed_wild_ctor_column_exhaustive_is_silent () =
+  let ctx = typecheck (mixed_wild_ctor_src ~with_row2:true) in
+  Alcotest.(check bool) "no errors" false (has_errors ctx);
+  Alcotest.(check int) "fully covered mixed wildcard/ctor match: no warning" 0
+    (List.length (non_exhaustive_warnings ctx))
+
+let test_mixed_wild_ctor_column_missing_row_warns () =
+  let ctx = typecheck (mixed_wild_ctor_src ~with_row2:false) in
+  let warns = non_exhaustive_warnings ctx in
+  Alcotest.(check bool) "dropping the Nd(Nd, Lf) row still warns" true
+    (warns <> []);
+  Alcotest.(check bool) "counterexample is an Nd(_, Lf) value" true
+    (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+         contains "Nd(_, Lf(" d.message) warns)
+
+(* Same defect through a single-shape column: tuple rows plus wildcard rows. *)
+let test_mixed_wild_tuple_column_exhaustive_is_silent () =
+  let ctx = typecheck {|mod T do
+    fn f(a : Bool, b : Bool) : Int do
+      match (a, b) do
+      (true, _) -> 1
+      (_, true) -> 2
+      (false, false) -> 3
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "no errors" false (has_errors ctx);
+  Alcotest.(check int) "covered tuple match with wildcard rows: no warning" 0
+    (List.length (non_exhaustive_warnings ctx))
+
 (* ── Open field lists in binding positions ─────────────────────────────────
    `infer_pattern` takes an optional `~expected` that a record pattern uses to
    drive its field types (that is what makes field lists open). The match path
@@ -15703,6 +15759,12 @@ let compiler_suites =
             test_record_pattern_genuinely_redundant_is_reported;
           Alcotest.test_case "nested record match non-exhaustive is reported" `Quick
             test_nested_record_pattern_non_exhaustive_is_reported;
+          Alcotest.test_case "mixed wildcard/ctor column exhaustive is silent" `Quick
+            test_mixed_wild_ctor_column_exhaustive_is_silent;
+          Alcotest.test_case "mixed wildcard/ctor column missing row warns" `Quick
+            test_mixed_wild_ctor_column_missing_row_warns;
+          Alcotest.test_case "mixed wildcard/tuple column exhaustive is silent" `Quick
+            test_mixed_wild_tuple_column_exhaustive_is_silent;
           Alcotest.test_case "redundant arm warned in checking position" `Quick
             test_redundant_arm_in_checking_position;
           Alcotest.test_case "redundant arm warned in inference position" `Quick
