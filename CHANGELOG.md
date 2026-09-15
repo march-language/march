@@ -247,6 +247,11 @@ git log is authoritative for exact commits.
   nothing when unset.
 
 ### Fixed
+- **The cluster handshake no longer swallows the peer's first bytes.** It read
+  its two frames in 4 KiB chunks and dropped the over-read, so a peer that
+  finished the handshake and immediately wrote lost whatever landed in the same
+  `recv()` as the proof (reproduced only under load). The handshake now reads
+  exactly its own frames (`NetKernel.recv_frame_exact`).
 - **`NetKernel.recv_frame` is linear in the frame size.** It appended every
   4 KiB chunk to the accumulated list, quadratic in the frame: a 1 MiB frame
   took 4.1 s. Once the length prefix is known the rest is read with one

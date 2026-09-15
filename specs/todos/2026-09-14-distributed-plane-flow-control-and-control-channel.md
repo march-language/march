@@ -160,6 +160,17 @@ same `recv()` to check the leftover carry. Credit accounting (step 3)
 should still carry frames as `Bytes` rather than `List(Int)`; the list is
 now merely large, not quadratic.
 
+Found by the witness on the macOS CI leg and reproduced locally only under
+load (2 runs in 20 with eight `yes` processes; never unloaded): the
+handshake read its two frames with `recv_frame`, which reads in 4 KiB
+chunks and returns the over-read as a leftover — and the handshake DROPPED
+that leftover. A peer that finished its side and immediately wrote (node-b's
+first 8 bytes on the data connection) lost them whenever they landed in the
+same `recv()` as the proof. Same class `PeerReader` exists for, one layer
+earlier. Fixed: `NetKernel.recv_frame_exact` reads the prefix and exactly
+the body, and the handshake uses it, so a connection is handed over with the
+peer's first real frame still unread in the socket; 30/30 under load after.
+
 Not yet moved to the control connection: the C runtime's `MONITOR_FIRE`
 write (`march_dist_monitor_fire_pid`) still targets the fd `DistLink`
 registered, which is whatever connection the MONITOR_REQ arrived on — a
