@@ -67,6 +67,7 @@ type rctx = {
   aliases : (string * string) list;
   uses : (string * A.use_selector * string) list;
   locals : string list;
+  binds : (string * A.span) list;
 }
 
 (** The empty context — module path [""], nothing aliased, used or shadowed. *)

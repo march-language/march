@@ -842,6 +842,35 @@ let measure_alias (m : string) : string option =
    normalize through this BEFORE consulting [is_measure]/[resolve_measure], or
    the guard reflects to one symbol and the predicate to another and the two
    never meet. *)
+(* User-facing spelling of a measure that user code cannot write.  The stdlib
+   `Array` contracts are stated over the private measure `pvec_length`, so a
+   diagnostic that quotes the predicate verbatim tells the user to guard with
+   a name that does not compile; the public spelling is the `Array.length`
+   alias above.  Applied to finished message TEXT at the call-site
+   diagnostic sites (the predicate, the held/missing conjuncts in a
+   [Partial_conjunct] detail, the suggested guard), never to the ledger's
+   [Obligation.predicate], which keeps the raw spelling as a stable identity
+   for `--refine-report`, the audit baselines and the oracles.  Gated like the
+   alias: only when the stdlib `Array.length` is the one in scope.  A match
+   must start at an identifier boundary, so `my_pvec_length(` is left alone. *)
+let display_measures (text : string) : string =
+  if not !array_length_is_stdlib then text
+  else begin
+    let from = "pvec_length(" and into = "Array.length(" in
+    let n = String.length text and k = String.length from in
+    let buf = Buffer.create (n + 16) in
+    let is_ident c =
+      match c with 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' | '.' -> true | _ -> false
+    in
+    let i = ref 0 in
+    while !i < n do
+      if !i + k <= n && String.sub text !i k = from && (!i = 0 || not (is_ident text.[!i - 1]))
+      then (Buffer.add_string buf into; i := !i + k)
+      else (Buffer.add_char buf text.[!i]; incr i)
+    done;
+    Buffer.contents buf
+  end
+
 let measure_name (m : string) : string =
   match measure_alias m with Some m' -> m' | None -> m
 
@@ -1289,6 +1318,68 @@ let rec instance_sort_of_ty (t : A.ty) : Smt.sort =
         (adt, List.init n (fun i ->
              match List.nth_opt args i with Some a -> instance_sort_of_ty a | None -> Smt.sdata "Elem"))
   | _ -> Smt.sdata "Elem"
+
+(* ── Caller sorts from the typechecker (design B1) ───────────────────────
+   [call_type_map]: the typechecker's span -> type table, handed in by the
+   driver ([Refine_check.check_module ?type_map]) and assigned (so reset) at
+   the top of every [check_module]; [None] under a caller that does not
+   typecheck first, where every lookup below answers [None].  Keys are
+   expression spans AND binding-site spans (a parameter's name, a `let`
+   pattern variable, a `match` pattern variable); the caller-sort lookup
+   reads BINDING sites only — see [rctx.binds]. *)
+let call_type_map : (A.span, March_typecheck.Typecheck.ty) Hashtbl.t option ref = ref None
+
+(* The SMT sort a typechecker type denotes for a CALLER value, or [None] for
+   "not known here" (which keeps the pre-existing `Int` default): `Int`,
+   `Bool`, `Float`, `String` (the `Str` sort), and a registered non-record
+   datatype at its instance (arguments as [instance_sort_of_ty] reads a
+   declared type).  A type variable, a record (records go
+   through [recenv]), a tuple, an arrow, `Char`, unit, a channel: [None]. *)
+let sort_of_tc_ty (t : March_typecheck.Typecheck.ty) : Smt.sort option =
+  let module T = March_typecheck.Typecheck in
+  let short n =
+    match String.rindex_opt n '.' with
+    | Some i -> String.sub n (i + 1) (String.length n - i - 1)
+    | None -> n
+  in
+  let rec strip t = match T.repr t with T.TLin (_, b) -> strip b | t -> t in
+  (* An instance argument, as [instance_sort_of_ty] reads one. *)
+  let rec inst t =
+    match strip t with
+    | T.TCon ("Int", []) -> Smt.SInt
+    | T.TCon ("Bool", []) -> Smt.SBool
+    | T.TCon (n, args) when Hashtbl.mem adt_ctors (adt_sort_name (short n)) ->
+      let adt = adt_sort_name (short n) in
+      let k = try Hashtbl.find adt_arity adt with Not_found -> 0 in
+      if k = 0 then Smt.sdata adt
+      else
+        Smt.SData (adt, List.init k (fun i ->
+            match List.nth_opt args i with Some a -> inst a | None -> Smt.sdata "Elem"))
+    | _ -> Smt.sdata "Elem"
+  in
+  match strip t with
+  | T.TCon ("Int", []) -> Some Smt.SInt
+  | T.TCon ("Bool", []) -> Some Smt.SBool
+  | T.TCon ("Float", []) -> Some Smt.SFloat
+  | T.TCon ("String", []) -> Some (Smt.sdata str_sort)
+  (* No `Set(t)` -> `SSet` arm: a March `Set` VALUE is a datatype here (the
+     stdlib's `type Set(a) = …`), and the SMT set sort is only ever the
+     result of a set measure over it (`elts(s)`, `keys(m)`), never the sort
+     of the value itself. *)
+  | T.TCon (n, _) as ty ->
+    let adt = adt_sort_name (short n) in
+    (match Hashtbl.find_opt adt_ctors adt with
+     | Some [ ctor ] when Hashtbl.mem ctor_field_names ctor -> None
+     | Some _ -> Some (inst ty)
+     | None -> None)
+  | _ -> None
+
+(* The caller sort recorded at a BINDING span, if the driver handed a type
+   table in and the typechecker recorded a known sort there. *)
+let caller_sort_at (sp : A.span) : Smt.sort option =
+  match !call_type_map with
+  | None -> None
+  | Some tm -> Option.bind (Hashtbl.find_opt tm sp) sort_of_tc_ty
 
 (* A refinement or linearity wrapper says nothing about a value's SORT — a
    `{Int | _ > 0}` field is an Int field.  Before 2026-09-13 this fell through

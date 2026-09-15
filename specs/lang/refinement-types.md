@@ -958,6 +958,22 @@ unguarded one is still an error. Swept first over 1171 files (stdlib,
 violations, zero exit-code changes, only new skips at computed indices.
 Progress: `specs/progress/2026-09-13-array-bounds-contracts.md`.
 
+Length postconditions followed (2026-09-15): `empty() : {PVec(a) |
+pvec_length(_) == 0}` (proved: a bare constructor application), and under
+`@[assume]` `push` (`== pvec_length(v) + 1`), `set` and `map`
+(`== pvec_length(v)`) and `from_list` (`== len(xs)`). Neither `set`'s nor
+`push`'s body proves (`unreflectable-subject`: the tail/trie `if` and
+`push_leaf`'s tuple); `map` and `from_list` recurse through local helpers.
+Each assumed one has a runtime witness at the representation's boundary
+sizes (0, 1, 31–33, 63–65, 1023–1025, 1057) in `test/stdlib/test_array.march`.
+The facts compose one call deep: a relation over a parameter or a guarded
+value reaches a `let`-bound result, but `push(push(empty(), 1), 2)` through
+two `let`s does not, since the checker does not chain a let-bound call's
+postcondition into the next call's. Diagnostics render `pvec_length(x)` as
+`Array.length(x)` (`Refine_encode.display_measures`, message text only; the
+ledger keeps the raw predicate). Progress:
+`specs/progress/2026-09-15-array-contract-followups.md`.
+
 An ordinary `List.length(ys) > 0` guard **does** discharge this obligation, so
 the contract bites on a list you validated at runtime and not only on literals:
 
