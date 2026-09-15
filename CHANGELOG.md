@@ -316,6 +316,11 @@ git log is authoritative for exact commits.
   nothing when unset.
 
 ### Fixed
+- **No more false "Non-exhaustive pattern match" on matches that mix wildcard
+  and constructor sub-patterns in one position.** A fully covered match such as
+  `Nd(Lf(a), Lf(b))`, `Nd(Nd(_, _), Lf(b))`, `Nd(_, Nd(_, _))`, `Lf(n)` warned
+  `missing case: Nd(_, Lf(0))`; the same happened with tuples like
+  `(true, _)`, `(_, true)`, `(false, false)`. A genuinely missing arm still warns.
 - **Refinement violations on `Array` calls name `Array.length`.** The
   message and its suggested guard spelled the private measure `pvec_length`,
   which does not compile in user code; a literal negative index also showed
