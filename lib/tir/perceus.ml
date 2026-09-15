@@ -549,26 +549,77 @@ let insert_owned_aggregate_param_drops (env : env) (borrowed : StringSet.t)
         (fun acc p -> Tir.ESeq (decrc_for env p (Tir.AVar p), acc))
         tail_expr candidates
     in
-    let uses_candidate e =
+    (* [aliases] holds the heap values on the current path that still point
+       INTO a candidate without owning a reference of their own: a borrowed
+       field projection ([let t = s.tree]), an alias of one, a projection out
+       of one, or a pattern variable bound by matching one.  Releasing the
+       candidate frees the cell those point into, so a tail that still mentions
+       one must run before the drop, exactly like a tail that reads the
+       candidate itself.  Missing this, [fn size(s) do tree_size(s.tree) end]
+       became [let t = s.tree in dec_rc s; tree_size(t)]: tree_size BORROWS
+       its argument, so nothing dup'd [t], and a uniquely-held set's tree was
+       freed before it was walked (compiled-only "non-exhaustive pattern
+       match").  An alias Perceus has dup'd on this path ([inc_rc t]) is
+       independently owned again (the consuming uses in [member]/[to_list])
+       and leaves the set, which is what keeps the drop ahead of those tail
+       calls. *)
+    let is_candidate_or_alias aliases (w : Tir.var) =
+      StringSet.mem w.Tir.v_name aliases
+      || List.exists (fun p -> String.equal p.Tir.v_name w.Tir.v_name)
+           candidates
+    in
+    let rec rhs_aliases aliases (e1 : Tir.expr) =
+      match e1 with
+      | Tir.EField (Tir.AVar src, _) -> is_candidate_or_alias aliases src
+      | Tir.EAtom (Tir.AVar src) -> StringSet.mem src.Tir.v_name aliases
+      | Tir.ELet (iv, ie1, ibody) ->
+        let aliases' =
+          if needs_rc env iv.Tir.v_ty && rhs_aliases aliases ie1
+          then StringSet.add iv.Tir.v_name aliases else aliases in
+        rhs_aliases aliases' ibody
+      | Tir.ESeq (_, e2) -> rhs_aliases aliases e2
+      | _ -> false
+    in
+    let uses_candidate aliases e =
       List.exists
         (fun p -> Perceus_liveness.name_free_in p.Tir.v_name e) candidates
+      || StringSet.exists
+           (fun a -> Perceus_liveness.name_free_in a e) aliases
     in
-    let rec push (e : Tir.expr) : Tir.expr =
+    let rec push aliases (e : Tir.expr) : Tir.expr =
       match e with
-      | Tir.ELet (v, e1, e2) -> Tir.ELet (v, e1, push e2)
-      | Tir.ESeq (e1, e2) -> Tir.ESeq (e1, push e2)
+      | Tir.ELet (v, e1, e2) ->
+        let aliases =
+          if needs_rc env v.Tir.v_ty && rhs_aliases aliases e1
+          then StringSet.add v.Tir.v_name aliases
+          else StringSet.remove v.Tir.v_name aliases in
+        Tir.ELet (v, e1, push aliases e2)
+      | Tir.ESeq ((Tir.EIncRC (Tir.AVar w) | Tir.EAtomicIncRC (Tir.AVar w)
+                   as e1), e2) ->
+        Tir.ESeq (e1, push (StringSet.remove w.Tir.v_name aliases) e2)
+      | Tir.ESeq (e1, e2) -> Tir.ESeq (e1, push aliases e2)
       | Tir.ECase (a, branches, default) ->
+        let scrut_aliased = match a with
+          | Tir.AVar w -> is_candidate_or_alias aliases w
+          | _ -> false in
+        let branch_aliases br =
+          List.fold_left (fun acc bv ->
+              if scrut_aliased && needs_rc env bv.Tir.v_ty
+              then StringSet.add bv.Tir.v_name acc
+              else StringSet.remove bv.Tir.v_name acc)
+            aliases br.Tir.br_vars in
         Tir.ECase (a,
-          List.map (fun br -> { br with Tir.br_body = push br.Tir.br_body })
+          List.map (fun br ->
+              { br with Tir.br_body = push (branch_aliases br) br.Tir.br_body })
             branches,
-          Option.map push default)
-      | Tir.ELetRec (fns, inner) -> Tir.ELetRec (fns, push inner)
-      | tail when uses_candidate tail ->
+          Option.map (push aliases) default)
+      | Tir.ELetRec (fns, inner) -> Tir.ELetRec (fns, push aliases inner)
+      | tail when uses_candidate aliases tail ->
         let tmp = fresh_rc_var fn.Tir.fn_ret_ty in
         Tir.ELet (tmp, tail, drop_ops (Tir.EAtom (Tir.AVar tmp)))
       | tail -> drop_ops tail
     in
-    push body
+    push StringSet.empty body
 
 (** Release the user parameters of an apply fn that its body never mentions.
 
