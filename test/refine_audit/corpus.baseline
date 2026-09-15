@@ -308,6 +308,8 @@ native_record_pattern: coverage audit (user + stdlib): 104 enforced, 0 inert (wa
 native_record_pattern: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_record_pattern_partial: coverage audit (user + stdlib): 104 enforced, 0 inert (warned), 0 unenforced
 native_record_pattern_partial: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_remote_actor_dispatch: coverage audit (user + stdlib): 104 enforced, 0 inert (warned), 0 unenforced
+native_remote_actor_dispatch: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_remote_ref_hashes: coverage audit (user + stdlib): 104 enforced, 0 inert (warned), 0 unenforced
 native_remote_ref_hashes: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_result_int_match: coverage audit (user + stdlib): 104 enforced, 0 inert (warned), 0 unenforced
@@ -640,6 +642,8 @@ stdlib_seq: coverage audit (user + stdlib): 104 enforced, 0 inert (warned), 0 un
 stdlib_seq: coverage audit (user code): 1 enforced, 0 inert (warned), 0 unenforced
 stdlib_session: coverage audit (user + stdlib): 104 enforced, 0 inert (warned), 0 unenforced
 stdlib_session: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_session_node: coverage audit (user + stdlib): 104 enforced, 0 inert (warned), 0 unenforced
+stdlib_session_node: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_set: coverage audit (user + stdlib): 104 enforced, 0 inert (warned), 0 unenforced
 stdlib_set: coverage audit (user code): 13 enforced, 0 inert (warned), 0 unenforced
 stdlib_sigil: coverage audit (user + stdlib): 104 enforced, 0 inert (warned), 0 unenforced
