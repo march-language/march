@@ -5763,6 +5763,21 @@ static void *make_cons(void *head, void *tail) {
 }
 
 /* Helper: allocate a 2-element tuple (tag=0, 2 ptr fields). */
+/* actor_terminal_reason(pid_index) -> Option((tag, message)): the reason a
+ * local actor died, with DistLink's wire tags (0 Normal, 1 Killed, 2 Crash),
+ * or None while it is alive or unknown. Looks up the META by pid index and
+ * reads only its terminal fields: a MONITOR_REQ for a pid whose record has
+ * already been freed must not touch the record (the meta outlives it). */
+static void *make_tuple2(void *a, void *b);
+void *march_actor_terminal_reason(int64_t pid_index) {
+    march_actor_meta *meta = find_meta_by_pid_index(pid_index);
+    if (!meta || !meta->terminal_set) return NULL;
+    void *tag = (void *)(((int64_t)meta->terminal_reason << 1) | 1);
+    const char *m = meta->terminal_message ? meta->terminal_message : "";
+    size_t n = meta->terminal_message ? meta->terminal_message_len : 0;
+    return make_tuple2(tag, march_string_lit(m, (int64_t)n));
+}
+
 static void *make_tuple2(void *a, void *b) {
     void *tup = march_alloc(16 + 16);
     /* tag stays 0 */

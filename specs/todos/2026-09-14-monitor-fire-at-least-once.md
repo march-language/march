@@ -128,3 +128,22 @@ a rule with a runtime dep does. The fd registered is whatever connection
 the REQ arrived on — with the split, callers dispatch REQ on control, so
 that is already the control fd; the explicit registration from the
 `PeerRegistry` entry is still the contract's step 1.
+
+## Shipped (2026-09-15): the after-death answer (order-of-work step 2)
+
+`actor_terminal_reason(pid_index : Int) : Option((Int, String))` — a
+nine-site builtin on both backends (the interpreter reads its own
+`ai_terminal_reason`; the runtime reads the META's terminal fields by pid
+index, never the record, so a request for a pid whose record has been freed
+is safe). Witness `test/native/monitor_after_death_loopback`: node-a asks
+node-b to kill the target FIRST, then sends `MONITOR_REQ`; node-b's reader
+finds it dead and answers `MONITOR_FIRE(Killed)` at once instead of
+registering a watcher that would never fire. Exactly one Down; 10/10.
+The "registered after the record is gone" case reads `None` and the
+fixture answers `NodeDown` for it, the documented limit.
+
+Remaining: step 1 (registration takes the peer's control fd from the
+`PeerRegistry` entry — today the fixture passes the REQ's fd, which under
+the split is control), step 3 (`MONITOR_ACK`, the pending table, the
+`MonitorRetry` task, dedupe), step 4 (scenario 5 and the `restart` monitor
+half).

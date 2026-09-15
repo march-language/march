@@ -1226,6 +1226,28 @@ let test_eval_mailbox_is_not_a_reserved_word () =
   | March_eval.Eval.VInt n -> Alcotest.(check int) "fn mailbox and let mailbox both still work" 2 n
   | v -> Alcotest.fail ("unexpected result: " ^ March_eval.Eval_runtime.value_to_string v)
 
+let test_eval_actor_terminal_reason () =
+  let env = eval_module {|mod Test do
+    actor A do
+      state { x : Int }
+      init { x: 0 }
+      on Noop() do { x: state.x } end
+    end
+    fn main() do
+      let p = spawn(A)
+      let before = actor_terminal_reason(pid_to_int(p))
+      kill(p)
+      run_until_idle()
+      (before, actor_terminal_reason(pid_to_int(p)), actor_terminal_reason(9999))
+    end
+  end|} in
+  match call_fn env "main" [] with
+  | March_eval.Eval.VTuple [before; after; unknown] ->
+    Alcotest.(check string) "alive: None" "None" (March_eval.Eval_runtime.value_to_string before);
+    Alcotest.(check string) "killed: Some((1, \"\"))" "Some((1, \"\"))" (March_eval.Eval_runtime.value_to_string after);
+    Alcotest.(check string) "unknown index: None" "None" (March_eval.Eval_runtime.value_to_string unknown)
+  | v -> Alcotest.fail ("unexpected result: " ^ March_eval.Eval_runtime.value_to_string v)
+
 let test_eval_pid_to_int_roundtrip () =
   let env = eval_module {|mod Test do
     actor A do
@@ -13698,6 +13720,7 @@ let stdlib_suites =
         Alcotest.test_case "mailbox N policy on the declaration bounds every spawn" `Quick (with_reset test_eval_mailbox_decl_bounds_at_spawn);
         Alcotest.test_case "mailbox N block_sender refused under the interpreter" `Quick (with_reset test_eval_mailbox_decl_block_sender_refused);
         Alcotest.test_case "mailbox is not a reserved word" `Quick (with_reset test_eval_mailbox_is_not_a_reserved_word);
+        Alcotest.test_case "actor_terminal_reason: None alive, Some((1, \"\")) after kill" `Quick (with_reset test_eval_actor_terminal_reason);
       ]);
       ("supervision phase2", [
         Alcotest.test_case "one_for_one restart"          `Quick (with_reset test_supervision_one_for_one_restart);

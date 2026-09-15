@@ -13532,6 +13532,7 @@ declare ptr  @march_actor_caps(ptr %actor)
 ; Monitor/supervision builtins
 declare void @march_demonitor(i64 %ref)
 declare i64  @march_monitor(ptr %watcher, ptr %target)
+declare ptr  @march_actor_terminal_reason(i64 %pid_index)
 declare void @march_dist_monitor_register_pid(i64 %target_pid, ptr %node, i64 %watcher_pid, i64 %fd)
 declare i64  @march_mailbox_size(ptr %pid)
 declare i64  @march_sched_stat(i64 %which)

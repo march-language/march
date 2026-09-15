@@ -94,7 +94,7 @@ let builtin_names : StringSet.t =
       "cap_narrow"; "root_cap"; "mint_cap"; "cap_impl"; "cap_dict";
       "set_actor_caps"; "actor_caps";
       (* Monitor/supervision builtins *)
-      "demonitor"; "monitor"; "dist_monitor_register"; "mailbox_size"; "sched_stat"; "actor_set_mailbox_limit";
+      "demonitor"; "monitor"; "dist_monitor_register"; "actor_terminal_reason"; "mailbox_size"; "sched_stat"; "actor_set_mailbox_limit";
       "run_until_idle"; "register_resource"; "get_cap";
       (* Named registry (Task 4) *)
       "actor_register"; "actor_unregister"; "actor_whereis"; "actor_registered";

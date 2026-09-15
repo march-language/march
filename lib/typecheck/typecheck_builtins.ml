@@ -832,6 +832,11 @@ let builtin_bindings : (string * scheme) list =
        through the control connection [fd], watches local actor [target_pid];
        the runtime writes MONITOR_FIRE on [fd] when it dies. *)
     ("dist_monitor_register", Mono (TArrow (t_int, TArrow (t_string, TArrow (t_int, TArrow (t_int, t_unit))))));
+    (* The reason a local actor (by spawn index) died: Some((tag, message))
+       with the wire's tags (0 Normal, 1 Killed, 2 Crash), None while it is
+       alive or unknown. By INDEX, so a monitor request for a pid whose
+       record is already freed never touches the record. *)
+    ("actor_terminal_reason", Mono (TArrow (t_int, t_option (TTuple [t_int; t_string]))));
     ("actor_unregister", Mono (TArrow (t_string, t_bool)));
     ("actor_whereis",    poly1 (fun a -> TArrow (t_string, TCon ("Option", [TCon ("Pid", [a])]))));
     ("actor_registered", Mono (TArrow (t_unit, TCon ("List", [t_string]))));
