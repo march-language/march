@@ -1,0 +1,116 @@
+-- Pending MONITOR_FIREs expire when the watcher's node is declared dead
+-- (monitor-fire contract): specs/todos/2026-09-14-monitor-fire-at-least-once.md.
+--
+-- The dist_monitor_loopback shape up to the kill: the fire is written on a
+-- connection node-a never reads, so it is PENDING. Then node-b is told (as
+-- SWIM would tell it) that node-a is dead: `dist_monitor_forget_node` drops
+-- the pending fire -- nothing is written, node-a's watchers would learn
+-- NodeDown locally. Counts before and after come back to node-a's main,
+-- which is the only thing that prints.
+mod MonitorExpiryLoopback do
+  needs IO.Console
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.NetConnect
+
+  actor Target do
+    state { n : Int }
+    init  { n: 0 }
+    on Tick() do { n: state.n + 1 } end
+  end
+
+  pfn on_frame_b(fd : Int, target, tag : Int, frame : List(Int)) : Result(Bool, String) do
+    if tag == 7 do
+      match DistLink.decode_req(frame) do
+        Ok((watcher_node, watcher_pid, target_pid)) ->
+          dist_monitor_register(target_pid, watcher_node, watcher_pid, fd)
+          Ok(true)
+        Err(e) -> Err(e)
+      end
+    else
+      if tag == NodeSend.tag_actor_msg() do
+        kill(target)
+        Ok(false)
+      else
+        Err("unexpected tag " ++ int_to_string(tag))
+      end
+    end
+  end
+
+  pfn run_node_b(listen_fd : Int) : (Int, Int, Int) do
+    match tcp_accept(listen_fd) do
+      Ok(fd) ->
+        let target = spawn(Target)
+        let _ = NodeSend.cast(fd, 0, GlobalPid.make("node-a", 0, 0), "MonitorExpiryLoopback.Hello",
+                              GlobalPid.encode(GlobalPid.make("node-b", pid_to_int(target), 1)))
+        let _ = PeerReader.serve(fd, Nil, fn (tag, frame) -> on_frame_b(fd, target, tag, frame))
+        let before = List.length(dist_monitor_pending())
+        let dropped = dist_monitor_forget_node("node-a")
+        let after = List.length(dist_monitor_pending())
+        tcp_close(fd)
+        tcp_close(listen_fd)
+        (before, dropped, after)
+      Err(e) ->
+        tcp_close(listen_fd)
+        panic("accept: " ++ e)
+    end
+  end
+
+  actor Watcher do
+    state { downs : Int }
+    init  { downs: 0 }
+    on RemoteDown(_target : Int, _reason : String) do { downs: state.downs + 1 } end
+  end
+
+  pfn read_hello(fd : Int) : Pid do
+    match NetKernel.recv_frame(fd, Nil) do
+      Err(e) -> panic("hello: " ++ e)
+      Ok((frame, _)) ->
+        match NodeSend.decode_msg(frame) do
+          Ok(d) ->
+            match GlobalPid.decode(d.payload) do
+              Ok(p) -> p
+              Err(e) -> panic("hello pid: " ++ e)
+            end
+          Err(e) -> panic("hello frame: " ++ e)
+        end
+    end
+  end
+
+  pfn connect_with_retry(host : String, port : Int, attempts_left : Int) : Result(Int, Socket.SocketError) do
+    match Socket.connect(host, port) do
+      Ok(fd) -> Ok(fd)
+      Err(e) -> if attempts_left <= 1 do Err(e) else connect_with_retry(host, port, attempts_left - 1) end
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen), _cap_spawn : Cap(IO.Spawn)) do
+    let listen_fd = match tcp_listen(0) do
+      Ok(fd) -> fd
+      Err(e) -> panic("listen: " ++ e)
+    end
+    let port = match tcp_local_port(listen_fd) do
+      Ok(p) -> p
+      Err(e) -> panic("local_port: " ++ e)
+    end
+    let srv = task_spawn(fn _ -> run_node_b(listen_fd))
+    let fd = match connect_with_retry("127.0.0.1", port, 5) do
+      Ok(fd) -> fd
+      Err(e) -> panic("connect: " ++ Socket.error_message(e))
+    end
+    let watcher = spawn(Watcher)
+    let target = read_hello(fd)
+    println("node-a: monitoring " ++ target.node_id ++ "'s actor " ++ int_to_string(target.local_pid) ++ ", killing it, reading nothing back")
+    let _ = NetKernel.send_frame(fd, DistLink.encode_req("node-a", pid_to_int(watcher), target.local_pid))
+    let _ = NodeSend.cast(fd, 1, target, "MonitorExpiryLoopback.Kill", Nil)
+    let counts = match task_await(srv) do
+      Ok(c) -> c
+      Err(e) -> panic("node-b: " ++ e)
+    end
+    tcp_close(fd)
+    match counts do
+      (before, dropped, after) ->
+        println("node-b: pending fires before node-a was declared dead: " ++ int_to_string(before) ++ ", dropped: " ++ int_to_string(dropped) ++ ", after: " ++ int_to_string(after))
+    end
+  end
+end

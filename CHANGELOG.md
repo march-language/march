@@ -12,6 +12,10 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`dist_monitor_forget_node(node_id)`**: when SWIM declares a watcher node dead,
+  its watchers and pending `MONITOR_FIRE`s are dropped without writing anything
+  (its watchers learn `NodeDown` locally); returns how many were dropped
+  (`test/native/monitor_expiry_loopback`).
 - **`MONITOR_FIRE` is at-least-once.** A fire the runtime writes stays pending in
   its registry until the watcher's node answers `MONITOR_ACK` (tag 12);
   `dist_monitor_pending()` lists the unacked fires and `DistLink.resend_pending(reg)`

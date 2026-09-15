@@ -448,6 +448,8 @@ let base_env : env =
         | _ -> eval_error "dist_monitor_register: expected (target_pid, watcher_node, watcher_pid, fd)"))
   ; ("dist_monitor_pending", VBuiltin ("dist_monitor_pending", function
         | _ -> eval_error "dist_monitor_pending: cross-node monitors need the native runtime; the interpreter cannot. Compile this program."))
+  ; ("dist_monitor_forget_node", VBuiltin ("dist_monitor_forget_node", function
+        | _ -> eval_error "dist_monitor_forget_node: cross-node monitors need the native runtime; the interpreter cannot. Compile this program."))
   ; ("dist_monitor_ack", VBuiltin ("dist_monitor_ack", function
         | _ -> eval_error "dist_monitor_ack: cross-node monitors need the native runtime; the interpreter cannot. Compile this program."))
   ; ("actor_terminal_reason", VBuiltin ("actor_terminal_reason", function

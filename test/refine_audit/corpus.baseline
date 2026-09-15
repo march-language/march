@@ -212,6 +212,8 @@ native_monitor_ack_retry_loopback: coverage audit (user + stdlib): 90 enforced, 
 native_monitor_ack_retry_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_monitor_after_death_loopback: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced
 native_monitor_after_death_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_monitor_expiry_loopback: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced
+native_monitor_expiry_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_multihead_literal_arg: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced
 native_multihead_literal_arg: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_native_arr_bounds_panic: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced
