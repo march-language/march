@@ -121,6 +121,8 @@ let builtin_cap_table : (string * string) list = [
   ("tcp_recv_all",          "IO.NetConnect");
   ("tcp_recv_exact",        "IO.NetConnect");
   ("dist_monitor_register", "IO.NetConnect");
+  ("dist_monitor_pending",  "IO.NetConnect");
+  ("dist_monitor_ack",      "IO.NetConnect");
   ("tcp_recv_http",         "IO.NetConnect");
   ("tcp_recv_http_headers", "IO.NetConnect");
   ("tcp_recv_chunk",        "IO.NetConnect");
@@ -832,6 +834,16 @@ let builtin_bindings : (string * scheme) list =
        through the control connection [fd], watches local actor [target_pid];
        the runtime writes MONITOR_FIRE on [fd] when it dies. *)
     ("dist_monitor_register", Mono (TArrow (t_int, TArrow (t_string, TArrow (t_int, TArrow (t_int, t_unit))))));
+    (* The reason a local actor (by spawn index) died: Some((tag, message))
+       with the wire's tags (0 Normal, 1 Killed, 2 Crash), None while it is
+       alive or unknown. By INDEX, so a monitor request for a pid whose
+       record is already freed never touches the record. *)
+    ("actor_terminal_reason", Mono (TArrow (t_int, t_option (TTuple [t_int; t_string]))));
+    (* At-least-once fires: every MONITOR_FIRE written and not yet acked, as
+       (target_pid, (watcher_node, (watcher_pid, (reason_tag, reason_msg))))
+       for the March-side resend; the ack that forgets one. *)
+    ("dist_monitor_pending", Mono (TArrow (t_unit, TCon ("List", [TTuple [t_int; TTuple [t_string; TTuple [t_int; TTuple [t_int; t_string]]]]]))));
+    ("dist_monitor_ack",     Mono (TArrow (t_int, TArrow (t_int, t_unit))));
     ("actor_unregister", Mono (TArrow (t_string, t_bool)));
     ("actor_whereis",    poly1 (fun a -> TArrow (t_string, TCon ("Option", [TCon ("Pid", [a])]))));
     ("actor_registered", Mono (TArrow (t_unit, TCon ("List", [t_string]))));

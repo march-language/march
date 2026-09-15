@@ -446,6 +446,19 @@ let base_env : env =
         | [VInt _; VString _; VInt _; VInt _] ->
           eval_error "dist_monitor_register: cross-node monitors need the native runtime, which fires MONITOR_FIRE from the actor-death path; the interpreter cannot. Compile this program."
         | _ -> eval_error "dist_monitor_register: expected (target_pid, watcher_node, watcher_pid, fd)"))
+  ; ("dist_monitor_pending", VBuiltin ("dist_monitor_pending", function
+        | _ -> eval_error "dist_monitor_pending: cross-node monitors need the native runtime; the interpreter cannot. Compile this program."))
+  ; ("dist_monitor_ack", VBuiltin ("dist_monitor_ack", function
+        | _ -> eval_error "dist_monitor_ack: cross-node monitors need the native runtime; the interpreter cannot. Compile this program."))
+  ; ("actor_terminal_reason", VBuiltin ("actor_terminal_reason", function
+        | [VInt pid] ->
+          (match Hashtbl.find_opt actor_registry pid with
+           | Some inst when not inst.ai_alive ->
+             let tag, msg = (match inst.ai_terminal_reason with
+                 | Normal -> 0, "" | Killed -> 1, "" | Crash m -> 2, m) in
+             VCon ("Some", [VTuple [VInt tag; VString msg]])
+           | _ -> VCon ("None", []))
+        | _ -> eval_error "actor_terminal_reason: expected Int (pid index)"))
   ; ("pid_to_int", VBuiltin ("pid_to_int", function
         | [VPid n] -> VInt n
         | _ -> eval_error "pid_to_int: expected Pid"))

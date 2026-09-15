@@ -12,6 +12,17 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`MONITOR_FIRE` is at-least-once.** A fire the runtime writes stays pending in
+  its registry until the watcher's node answers `MONITOR_ACK` (tag 12);
+  `dist_monitor_pending()` lists the unacked fires and `DistLink.resend_pending(reg)`
+  rewrites each on the watcher node's current control connection, so a fire lost
+  to a dropped connection is delivered after the reconnect; watchers dedupe, so a
+  resent copy is one `Down` (`test/native/monitor_ack_retry_loopback`).
+- **`actor_terminal_reason(pid_index)`**: the reason a local actor died —
+  `Some((tag, message))` with the wire's tags (0 Normal, 1 Killed, 2 Crash), `None`
+  while alive or unknown — on both backends, keyed by spawn index so a monitor
+  request for an already-freed record never touches it. A `MONITOR_REQ` for a pid
+  that has already exited can now be answered at once (`test/native/monitor_after_death_loopback`).
 - **Cross-node monitors are reachable from March**: `dist_monitor_register(target_pid,
   watcher_node, watcher_pid, fd)` is the surface of the runtime's monitor
   registry, so a node's reader can register a `MONITOR_REQ` and the actor-death
