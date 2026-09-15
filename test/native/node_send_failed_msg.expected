@@ -1,0 +1,4 @@
+sender: cast 1 to node-b
+node-b: refused 1
+sender: delivery 1 failed: no live process 9999
+done: 1 failure(s) reached the sender's mailbox

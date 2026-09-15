@@ -48,6 +48,14 @@ re-run `test/native/actor_send_to_self.march`,
 `actor_dispatch_rc_window.march` and `actor_crash_rc_restore.march`. All three
 read the refcount directly.
 
+**Update 2026-09-14 (later):** the other half is settled for `spawn`: the
+runtime now holds its own reference to a live actor, taken in `march_spawn`
+and released when the actor's green thread finishes
+([[2026-09-14-live-actor-freed-by-dropping-its-last-pid]] in
+`specs/progress/`). Dropping every pid to a running actor no longer frees
+it, so classifying `send`/`is_alive`/`mailbox_size` as borrowing can be
+retried without the SIGSEGVs that backed it out.
+
 ## Impact
 
 A leak only: an actor that is sent to while its pid stays live is never freed

@@ -13,6 +13,25 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **A remote send's failure reaches the sending actor's mailbox**:
+  `NodeSend.cast_from` records the sender under the seq and `NodeSend.on_failure`
+  hands a `DELIVERY_FAILED` frame back to it through the caller's dispatch, the
+  way a monitor's `Down` arrives, instead of a synchronous read in `main`.
+- **SWIM stall-vs-death, executable**: the `stall` two-node scenario SIGSTOPs a
+  node running a real SWIM loop; the observer takes it through `Suspect` to
+  `Dead` on timeouts alone, and on resume the node refutes with a higher
+  incarnation, which the observer accepts as `Alive` (`test/two_node/stall/`).
+- **The `Session.Ops` network transport**: the Stream session protocol's two
+  endpoints run on two nodes with every message crossing a TCP connection as a
+  `NodeSend` ACTOR_MSG, using the generated `@[endpoints]` API and endpoint code
+  unchanged from the in-process fixtures (`test/two_node/stream/`). The transport
+  is the mailbox one with `emit` sending to the peer node's endpoint actor.
+- **Two-node failure-semantics harness**: `scripts/two-node.sh <scenario>` runs two
+  compiled March programs as two OS processes, applies a fault from outside
+  (SIGKILL/restart, SIGSTOP/SIGCONT), and diffs each node's sorted output. First
+  scenario, `restart`: a node restarted with a new creation at the same local pid
+  refuses a message addressed to its predecessor (`stale creation`) and accepts
+  one addressed to itself. Runs on the ubuntu CI leg.
 - **Bounds contracts on `Array.get`, `Array.set` and `Array.pop`.** A negative
   index (`Array.get(v, -1)`) is a compile error, an `i >= 0 && i <
   Array.length(v)` guard satisfies the contract, and `pop` needs
@@ -222,6 +241,25 @@ git log is authoritative for exact commits.
   nothing when unset.
 
 ### Fixed
+- **A running actor is no longer freed when the program drops its last pid.**
+  `let a = spawn(W)` with `a` never used again released the actor record's only
+  reference right after spawn, and the actor's own thread then ran on freed
+  memory — invisible on macOS, a glibc `tcache` abort on Linux
+  (`native_actor_enumeration` on the ubuntu CI leg). The runtime now holds its
+  own reference to a live actor, released when its thread finishes.
+- **A user function named `own` with two arguments is the user's function again.**
+  The lowering rewrote *any* two-argument `own(...)` into resource registration
+  (`Drop$<Type>.drop`), so a user `fn own(ep, p)` called with a `Pid` failed to
+  link with an error naming nothing the user wrote. The rewrite now applies only
+  when the module does not define its own `own`.
+- **A user function named after a C symbol the runtime links against (`connect`,
+  `log`, `time`, `strlen`, `write`, `exit`, …) no longer hijacks the runtime.**
+  Top-level user functions are emitted under their bare name in the same link
+  as the C runtime, so `fn connect` *was* the `connect()` the runtime's
+  `tcp_connect` called: the program recursed through it to a stack overflow
+  before its first print (a single-use `pfn` escaped only by being inlined).
+  A bare name in the reserved set is now emitted as `name$u` at its definition
+  and every reference; the interpreter was never affected.
 
 - **Set refinements: six correctness fixes from review.** A module's own
   function named like the set vocabulary (`keys`, `member`, …) used in a

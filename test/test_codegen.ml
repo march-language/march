@@ -14767,6 +14767,35 @@ let test_compiled_worker_local_fn_still_compiles () =
     ~expected:"42"
     ()
 
+(* A bare user fn named after a C symbol the runtime links against must not
+   be emitted under that symbol: `fn connect` as `@connect` IS the connect()
+   the runtime's tcp_connect calls (llvm_builtins.ml, c_reserved_symbols). *)
+let test_user_fn_named_after_c_symbol_is_mangled () =
+  let src = {|mod T do
+  fn connect(port : Int) : Int do port + 1 end
+  fn helper(x : Int) : Int do x * 3 end
+  fn main() do
+    let a = connect(1)
+    let b = connect(2)
+    a + b + helper(a) + helper(b)
+  end
+end|} in
+  let m = parse_and_desugar src in
+  let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let iface_methods = March_tir.Lower.get_iface_methods () in
+  let tir = March_tir.Mono.monomorphize ~iface_methods tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  let tir = March_tir.Perceus.perceus tir in
+  let tir = March_tir.Dce.prune_unreachable tir in
+  let ir = March_tir.Llvm_emit.emit_module tir in
+  Alcotest.(check bool) "define uses the mangled symbol" true
+    (ir_contains ir "@connect$u(");
+  Alcotest.(check bool) "no bare @connect definition or call" false
+    (ir_contains ir "@connect(");
+  Alcotest.(check bool) "a non-colliding user fn keeps its name" true
+    (ir_contains ir "@helper(")
+
 let codegen_suites =
   [
       ( "vectorize_check", [
@@ -15725,6 +15754,7 @@ let codegen_suites =
           Alcotest.test_case "dom extern reaches output"     `Quick test_js_pipeline_dom_extern_reaches_output;
           Alcotest.test_case "dom event_key reaches output"  `Quick test_js_pipeline_dom_event_key_reaches_output;
           Alcotest.test_case "simd builtin rejected"         `Quick test_js_pipeline_simd_builtin_rejected;
+          Alcotest.test_case "user fn named after a C symbol is mangled" `Quick test_user_fn_named_after_c_symbol_is_mangled;
         ] );
   ]
   @ Test_ir_verify.suites (* W2.1: LLVM IR validity gate over test/native/*.march *)

@@ -115,7 +115,7 @@ Two things learned while building:
   resource-registration builtin's `Drop$<Type>.drop` call (link error on the
   compiled backend only; the interpreter is fine). The first version of the
   callback fixture hit it; the helper is named `claim`. Filed as
-  [[2026-09-13-user-fn-named-own-miscompiled-as-resource-builtin]].
+  [[2026-09-14-user-fn-named-own-miscompiled-as-resource-builtin]].
 - `kill` on a supervised child restarts it within the same `run_until_idle`:
   the first restart has no backoff, so `whereis` never returned `None` here.
   A driver that can see backoff should retry, as the design says; untested.

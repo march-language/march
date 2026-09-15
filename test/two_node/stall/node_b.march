@@ -1,0 +1,134 @@
+-- Two-node harness, scenario "stall": node-b, the node that gets stalled.
+-- Same SWIM loop as node-a; prints when its own incarnation changes (the
+-- refutation) and exits when the peer closes the connection.
+mod TwoNodeStallB do
+  needs IO.Console
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Process
+  needs IO.Clock
+
+  -- ── a SWIM node over one connection ──────────────────────────────────
+  -- SwimDriver.step is a pure transition; this is the I/O loop around it:
+  -- read for up to 50 ms, turn every complete frame into an event (a Ping is
+  -- answered on the spot), step with the wall clock, perform the actions.
+  -- Period 500 ms, ack timeout 300 ms, suspect timeout 1000 ms, no helpers
+  -- (two nodes: nobody to ask).
+  pfn cfg() : Swim.Config do Swim.config(300, 1000, 0) end
+
+  pfn status_text(st : MemberStatus) : String do
+    match st do
+      Membership.Alive -> "Alive"
+      Membership.Suspect -> "Suspect"
+      Membership.Dead -> "Dead"
+    end
+  end
+
+  pfn peer_view(s : SwimDriver.State, peer : String) : String do
+    match Membership.get(s.swim.members, peer) do
+      Some(m) -> status_text(m.status) ++ " (incarnation " ++ int_to_string(m.incarnation) ++ ")"
+      None -> "unknown"
+    end
+  end
+
+  pfn write_msg(fd : Int, msg : SwimDriver.WireMsg) : () do
+    let _ = Socket.write(fd, NetKernel.bytes_to_str(NetFrame.encode(SwimDriver.encode_msg(msg))))
+    ()
+  end
+
+  pfn perform(fd : Int, acts : List(Swim.Action)) : () do
+    match acts do
+      Nil -> ()
+      Cons(a, rest) ->
+        match a do
+          Swim.SendPing(_target) -> write_msg(fd, SwimDriver.SwimPing(me()))
+          Swim.SendPingReq(_, _) -> ()
+          Swim.Gossip(m) -> write_msg(fd, SwimDriver.SwimGossip(m.node_id, m.status, m.incarnation))
+        end
+        perform(fd, rest)
+    end
+  end
+
+  -- Split every complete frame off [buf]; answer pings; collect events.
+  pfn drain(fd : Int, buf : List(Int), events : List(SwimDriver.Event), acked : Bool) : (List(Int), List(SwimDriver.Event), Bool) do
+    match NetFrame.decode(buf) do
+      None -> (buf, events, acked)
+      Some((frame, rest)) ->
+        match SwimDriver.decode_msg(frame) do
+          Err(_) -> drain(fd, rest, events, acked)
+          Ok(msg) ->
+            match msg do
+              SwimDriver.SwimPing(_sender) ->
+                write_msg(fd, SwimDriver.SwimPingAck(me()))
+                drain(fd, rest, events, acked)
+              SwimDriver.SwimPingAck(_) ->
+                match SwimDriver.msg_to_event(msg) do
+                  Some(ev) -> drain(fd, rest, List.append(events, Cons(ev, Nil)), true)
+                  None -> drain(fd, rest, events, acked)
+                end
+              _ ->
+                match SwimDriver.msg_to_event(msg) do
+                  Some(ev) -> drain(fd, rest, List.append(events, Cons(ev, Nil)), acked)
+                  None -> drain(fd, rest, events, acked)
+                end
+            end
+        end
+    end
+  end
+
+  -- One tick: read, drain, step, perform. Returns the new driver state, the
+  -- leftover bytes, whether an ack arrived, and whether the peer closed.
+  pfn tick(fd : Int, s : SwimDriver.State, buf : List(Int)) : (SwimDriver.State, List(Int), Bool, Bool) do
+    let got = match Socket.recv_timeout(fd, 4096, 50) do
+      Ok(chunk) -> if String.is_empty(chunk) do (buf, false, true) else (List.append(buf, NetKernel.str_to_bytes(chunk)), false, false) end
+      Err(Socket.RecvTimeout(_)) -> (buf, false, false)
+      Err(_) -> (buf, false, true)
+    end
+    match got do
+      (_, _, true) -> (s, buf, false, true)
+      (buf1, _, false) ->
+        let d = drain(fd, buf1, Nil, false)
+        match d do
+          (buf2, events, acked) ->
+            match SwimDriver.step(s, unix_time_ms(), events) do
+              (s2, acts) ->
+                perform(fd, acts)
+                (s2, buf2, acked, false)
+            end
+        end
+    end
+  end
+
+  pfn initial(peer : String) : SwimDriver.State do
+    let ms = Membership.observe(Membership.observe(Membership.empty(), Membership.alive(me(), 1)), Membership.alive(peer, 1))
+    SwimDriver.make(me(), 1, ms, cfg(), 500, 7)
+  end
+
+  pfn me() : String do "node-b" end
+
+  pfn serve(fd : Int, s : SwimDriver.State, buf : List(Int), inc : Int) : () do
+    match tick(fd, s, buf) do
+      (_, _, _, true) -> println("node-b: peer closed")
+      (s2, buf2, _, false) ->
+        let inc2 = s2.swim.incarnation
+        if inc2 != inc do println("node-b: refuted, incarnation " ++ int_to_string(inc2)) else () end
+        serve(fd, s2, buf2, inc2)
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console), _cap_netlisten : Cap(IO.NetListen), _cap_netconnect : Cap(IO.NetConnect), _cap_process : Cap(IO.Process), _cap_clock : Cap(IO.Clock)) do
+    let port = Env.require_int("MARCH_NODE_PORT")
+    let listen_fd = match tcp_listen(port) do
+      Ok(fd) -> fd
+      Err(e) -> panic("listen: " ++ e)
+    end
+    println("node-b: up")
+    let fd = match tcp_accept(listen_fd) do
+      Ok(fd) -> fd
+      Err(e) -> panic("accept: " ++ e)
+    end
+    serve(fd, initial("node-a"), Nil, 1)
+    tcp_close(fd)
+    tcp_close(listen_fd)
+  end
+end

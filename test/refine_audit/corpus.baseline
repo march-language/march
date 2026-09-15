@@ -52,6 +52,8 @@ native_builtin_link_backing: coverage audit (user + stdlib): 90 enforced, 0 iner
 native_builtin_link_backing: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_bytes_u8_bridge: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced
 native_bytes_u8_bridge: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_c_symbol_collision: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced
+native_c_symbol_collision: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_cap_dictionary: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced
 native_cap_dictionary: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_cap_epoch_plane: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced
@@ -254,6 +256,8 @@ native_node_call_loopback: coverage audit (user + stdlib): 90 enforced, 0 inert 
 native_node_call_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_node_discovery: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced
 native_node_discovery: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_node_send_failed_msg: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced
+native_node_send_failed_msg: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_node_send_loopback: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced
 native_node_send_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_option_adt_eq: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced
@@ -414,6 +418,8 @@ native_unboxed_aggregate_boundaries: coverage audit (user + stdlib): 90 enforced
 native_unboxed_aggregate_boundaries: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_unit_callback_zero_arg: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced
 native_unit_callback_zero_arg: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_user_fn_named_own: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced
+native_user_fn_named_own: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_vault_new_same_name: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced
 native_vault_new_same_name: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_vault_niche_unsafe_element: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced

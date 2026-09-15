@@ -69,6 +69,54 @@ partition rule (needs sudo; the scenario is skipped without it, loudly).
 CI: a new `two-node` job on the ubuntu leg, Docker network, ~3 min. Not in
 `scripts/run-tests.sh`; it is a nightly-class gate like the sanitizer runs.
 
+## Shipped so far (2026-09-14): the harness and scenario 3
+
+`scripts/two-node.sh <scenario>`: compiles `test/two_node/<scenario>/node_{a,b}.march`
+(from a copy, so no `.ll` lands under `test/`), runs them as two OS
+processes on a random port, sources the scenario's `scenario.sh` with
+`start_node` / `kill_node` / `stop_node` / `cont_node` / `wait_line` /
+`wait_exit` in scope (every wait has a deadline and fails with both nodes'
+output), and diffs each node's sorted stdout against `node_{a,b}.expected`.
+Runs on the ubuntu CI leg after the `node_discovery` soak (~5 s); not in
+`scripts/run-tests.sh`.
+
+Scenario `restart` (item 3 above, minus the monitor half): node-b hosts an
+actor and announces its `GlobalPid` on connect; node-a sends one message;
+the harness SIGKILLs node-b after it prints the delivery and restarts it at
+the same port with creation 2, where deterministic spawn order gives the
+actor the SAME local pid; node-a notices the drop, reconnects, and its send
+to the pid it held is refused `stale creation 1, node is at 2` while its
+send to the re-announced pid is delivered. 5/5 runs identical locally.
+
+Measured on the way: a user fn named `connect` miscompiles into a stack
+overflow (second instance of
+[[2026-09-14-user-fn-named-own-miscompiled-as-resource-builtin]]); and
+there is no sleep builtin, so the reconnect backoff is
+`Process.run("sleep", …)`.
+
+Scenario `stream` (added the same day, no fault): the Stream protocol's two
+endpoints on the two nodes over the `Session.Ops` network transport, each
+node's ORDERED trace its projection of `stream_endpoints.expected` — see
+[[2026-09-14-remote-send-to-a-global-pid]]. The harness gained `ORDERED=1`
+for a node that prints from one actor. CI runs every scenario
+(`scripts/two-node.sh --list`).
+
+Scenario `stall` (scenario 1, added the same day): both nodes run a real
+SWIM loop over one connection (`Socket.recv_timeout` for 50 ms, every
+complete frame to an event, `SwimDriver.step` with the wall clock, the
+actions performed; period 500 ms, ack timeout 300 ms, suspect timeout 1 s).
+The harness SIGSTOPs node-b after node-a's first ack — a stall, not a crash:
+the socket stays open and nothing is refused — and node-a takes node-b
+through `Suspect` to `Dead` on timeouts alone; on SIGCONT node-b reads the
+Dead gossip about itself, refutes at incarnation 2, and node-a accepts it as
+`Alive (incarnation 2)`. The SWIM refutation path had never executed in a
+golden. 6/6 runs identical; with the stall removed node-a never leaves
+`Alive` and the harness times out, as it must.
+
+Still open: the monitor half of scenario 3 (`NodeDown`, needs 2/4 step 4),
+scenario 2 (needs `pfctl`/`iptables`), scenario 4 (clock skew), and the
+Docker network variant.
+
 ## Non-goals
 
 Three or more nodes (quorum behaviour), Byzantine peers, and performance
