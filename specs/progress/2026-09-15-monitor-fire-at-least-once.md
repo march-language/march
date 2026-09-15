@@ -189,3 +189,23 @@ dropped 1, after 0. 10/10.
 Remaining: step 4 only — scenario 5 (`monitor_reconnect`) and the
 `restart` scenario's monitor half in the harness, both of which now have
 every primitive they need.
+
+## Shipped (2026-09-15): step 4 -- the harness scenarios. Item closed.
+
+- `test/two_node/monitor_reconnect`: node-a monitors node-b's actor, asks for
+  the kill, and CLOSES its connection before reading the fire (the fault is
+  the socket drop). The fire is written into a dead connection and stays
+  pending (`pending fires: 1`); node-a reconnects; `resend_pending` writes it
+  on connection 2 (`resent 1`); node-a delivers exactly one Down, acks;
+  `pending fires after ack: 0`. 10/10 locally.
+- The `restart` monitor half: node-a registers a monitor on the held pid
+  (MONITOR_REQ, which node-b's reader now dispatches by tag through the new
+  `NodeSend.handle_frame`); the SIGKILL is a connection loss, and node-a's
+  `DistLink` table answers it locally: `Down ... reason=NodeDown (node-b
+  crashed)`, fired for 1 monitor, the watcher saw 1 Down.
+- Hardening found by the first: a MONITOR_FIRE written to a socket whose
+  peer has closed raised SIGPIPE and would kill the node (it only survived
+  by winning a race with the FIN). `runtime/march_monitor_registry.c` now
+  writes through `write_nosigpipe` (MSG_NOSIGNAL on Linux, SO_NOSIGPIPE on
+  macOS) at both fire sites, so the write fails quietly and the fire stays
+  pending, which is the contract.

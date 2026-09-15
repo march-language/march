@@ -12,6 +12,10 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- Two-node scenario `monitor_reconnect`: a watcher that drops its connection between a
+  remote actor's death and the ack still gets exactly one `Down` after reconnecting; and the
+  `restart` scenario's monitor half: a crashed node's monitors fire `NodeDown` locally, once.
+  `NodeSend.handle_frame` is the frame-level receiver for readers that dispatch by tag.
 - `Node.send(peer, to, msg)`: the typed remote send. `msg`'s type must `derive Json`
   (a missing codec is a typecheck error at the call site naming the type, not a
   run-time `to_json` panic), the wire type tag is minted by the compiler from the
@@ -298,6 +302,8 @@ git log is authoritative for exact commits.
   nothing when unset.
 
 ### Fixed
+- A cross-node `MONITOR_FIRE` written to a connection whose peer had already closed raised
+  SIGPIPE and could kill the node; it now fails quietly and stays pending for resend.
 - `stdlib/dist_supervisor.march` failed a standalone `--check` ("Constructor `Normal` is
   ambiguous between multiple modules"): its restart decision matched `DistLink.DownReason`
   with bare arms that also name the local monitor's constructors. Qualified, and guarded.

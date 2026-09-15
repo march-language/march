@@ -1,4 +1,4 @@
-# `[P2]` Two-node scenarios still to write: partition, clock skew, monitor-across-reconnect, and the Docker variant
+# `[P2]` Two-node scenarios still to write: partition, clock skew, and the Docker variant
 
 Filed 2026-09-14 as the remainder of
 [[2026-09-14-two-node-failure-semantics-harness]] (now a progress record).
@@ -43,7 +43,7 @@ one-line one).
 
 ## Scenario `monitor_reconnect` (was 5) and the `restart` monitor half
 
-Both need [[2026-09-14-monitor-fire-at-least-once]]; specified there.
+**Shipped 2026-09-15** with [[2026-09-15-monitor-fire-at-least-once]] (progress record); nothing left here.
 
 ## The Docker-network variant
 
