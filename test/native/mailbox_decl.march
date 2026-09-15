@@ -1,0 +1,42 @@
+-- `mailbox N policy` on the actor declaration (distributed actors 4/4, item
+-- C): the bound Actor.set_queue_limit sets per spawn site, declared once
+-- with the actor. Same shape as mailbox_bounded.march, which sets the limit
+-- at the spawn site; here no caller has to remember to.
+mod MailboxDecl do
+  needs IO.Console
+
+  actor Slow do
+    state { n : Int }
+    init  { n: 0 }
+    mailbox 8 drop_new
+    on GetN(reply_to) do
+      Actor.reply(reply_to, state.n)
+      state
+    end
+    on Bump() do
+      let _ = List.fold_left(Range.to_list(Range.new(0, 1000)), 0, fn (a, b) -> a + b)
+      { n: state.n + 1 }
+    end
+  end
+
+  type GetNReq = GetNReq
+
+  fn flood(pid, k) do
+    if k == 0 do () else
+      send(pid, Bump())
+      flood(pid, k - 1)
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    let pid = spawn(Slow)
+    flood(pid, 5000)
+    run_until_idle()
+    let dropped = Scheduler.dropped_messages()
+    println("some dropped: " ++ bool_to_string(dropped > 0))
+    match Actor.call(pid, GetNReq, 10000) do
+      Ok(n)  -> println("processed <= sent: " ++ bool_to_string(n <= 5000))
+      Err(e) -> println("err: " ++ e)
+    end
+  end
+end

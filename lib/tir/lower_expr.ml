@@ -956,8 +956,25 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
       v_ty = Tir.TPtr Tir.TUnit;
       v_lin = Tir.Unr
     } in
-    Tir.ELet (raw_var, Tir.EApp (spawn_fn, []),
-              Tir.EApp (march_spawn, [Tir.AVar raw_var]))
+    (match Hashtbl.find_opt Lower_state._actor_mailboxes actor_name with
+     | None ->
+       Tir.ELet (raw_var, Tir.EApp (spawn_fn, []),
+                 Tir.EApp (march_spawn, [Tir.AVar raw_var]))
+     | Some (limit, policy) ->
+       (* `mailbox N policy` on the declaration: bind the limit right after
+          the spawn, once per spawn site, so no caller has to remember
+          Actor.set_queue_limit. *)
+       let pid_var : Tir.var = { v_name = fresh_name "spawned"; v_ty = Tir.TPtr Tir.TUnit; v_lin = Tir.Unr } in
+       let set_var : Tir.var = {
+         v_name = "actor_set_mailbox_limit";
+         v_ty = Tir.TFn ([Tir.TPtr Tir.TUnit; Tir.TInt; Tir.TInt], Tir.TUnit);
+         v_lin = Tir.Unr } in
+       let unit_var : Tir.var = { v_name = fresh_name "mbox_set"; v_ty = Tir.TUnit; v_lin = Tir.Unr } in
+       Tir.ELet (raw_var, Tir.EApp (spawn_fn, []),
+         Tir.ELet (pid_var, Tir.EApp (march_spawn, [Tir.AVar raw_var]),
+           Tir.ELet (unit_var,
+             Tir.EApp (set_var, [Tir.AVar pid_var; Tir.ALit (Ast.LitInt limit); Tir.ALit (Ast.LitInt policy)]),
+             Tir.EAtom (Tir.AVar pid_var)))))
 
   | Ast.ESpawn _ ->
     failwith "TIR lower: ESpawn argument must be a plain actor name"

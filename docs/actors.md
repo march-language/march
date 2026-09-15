@@ -692,6 +692,23 @@ the mailbox without limit. `Actor.set_queue_limit(pid, limit, policy)` bounds it
 Actor.set_queue_limit(pid, 1000, 3)   -- cap at 1000, block_sender policy
 ```
 
+Or declare the bound with the actor, so every spawn gets it and no caller has
+to remember the call:
+
+```march
+actor Worker do
+  state { n : Int }
+  init  { n: 0 }
+  mailbox 1000 drop_old        -- after init, before any supervise block
+  on Work() do ... end
+end
+```
+
+`mailbox N policy` takes the policy by name — `drop_new`, `drop_old` or
+`block_sender` — and lowers to `Actor.set_queue_limit(pid, N, policy)` right
+after each `spawn(Worker)`. `block_sender` is compiled-only there too: under the
+interpreter the spawn fails with the same message the call does.
+
 `policy` is one of:
 
 | Value | Policy | Behavior when the mailbox is full |

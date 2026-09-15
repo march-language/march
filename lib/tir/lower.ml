@@ -107,6 +107,18 @@ let builtin_type_defs : Tir.type_def list = [
   Tir.TDVariant ("List", [("Nil", []); ("Cons", [Tir.TVar "a"; Tir.TCon ("List", [Tir.TVar "a"])])]);
 ]
 
+(** Declaration-site mailbox bounds, keyed by bare actor name (the spawn
+    site names the actor bare too). Reset per module. *)
+let rec collect_actor_mailboxes decls =
+  List.iter (fun d -> match d with
+      | Ast.DActor (_, name, actor_def, _) ->
+        (match actor_def.Ast.actor_mailbox with
+         | Some mb -> Hashtbl.replace Lower_state._actor_mailboxes name.txt mb
+         | None -> Hashtbl.remove Lower_state._actor_mailboxes name.txt)
+      | Ast.DMod (_, _, inner_decls, _) -> collect_actor_mailboxes inner_decls
+      | _ -> ()
+    ) decls
+
 (** Pre-Pass-1 AST walker that reproduces the SET of TIR type NAMES Pass 2
     will eventually populate into [tm_types], computed BEFORE
     [collect_iface_impls] (Pass 1) runs — the [types] ref Pass 2 fills is
@@ -174,6 +186,9 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
      at the late/tag-assignment site. A user type bare-named "Result" (etc.)
      then silently aliased the builtin's OWN ctor_info entry at construction
      (P0: builtin-ctor-collision-gap, 2026-07-22). *)
+  Hashtbl.reset Lower_state._actor_mailboxes;
+  collect_actor_mailboxes stdlib_context;
+  collect_actor_mailboxes m.mod_decls;
   let collision_set =
     Collision_set.compute
       (builtin_type_defs @

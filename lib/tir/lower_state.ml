@@ -480,6 +480,12 @@ let _use_aliases : (string, string) Hashtbl.t ref = ref (Hashtbl.create 0)
     routing in send/recv lines up with the endpoint tuple positions. *)
 let _protocol_roles : (string, string list) Hashtbl.t = Hashtbl.create 8
 
+(** Actor name -> (limit, policy) from a declaration-site `mailbox N policy`
+    clause, filled by [Lower.collect_actor_mailboxes] before any function is
+    lowered so a spawn site can wrap itself in actor_set_mailbox_limit. Bare
+    actor names, like the actor type names (see [collect_type_names]). *)
+let _actor_mailboxes : (string, int * int) Hashtbl.t = Hashtbl.create 8
+
 (** Module-alias prefix table: maps a `alias Long.Path as Short` declaration's
     short name to its full module path (e.g. "PubSub" -> "Bastion.PubSub").
     Consulted as an ORDER-INDEPENDENT fallback in [resolve_use_alias]: a

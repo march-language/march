@@ -196,6 +196,8 @@ native_let_tuple_nested: coverage audit (user + stdlib): 90 enforced, 0 inert (w
 native_let_tuple_nested: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_mailbox_bounded: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced
 native_mailbox_bounded: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_mailbox_decl: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced
+native_mailbox_decl: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_mailbox_depth: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced
 native_mailbox_depth: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_main_cap_io: coverage audit (user + stdlib): 90 enforced, 0 inert (warned), 0 unenforced

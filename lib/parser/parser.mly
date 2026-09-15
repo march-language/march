@@ -728,13 +728,45 @@ actor_decl:
   | ACTOR; name = upper_name; DO;
     STATE; LBRACE; fields = separated_list(COMMA, field); RBRACE;
     INIT; init_expr = expr;
+    mb = option(mailbox_clause);
     sup = option(supervise_block);
     handlers = list(actor_handler);
     END
     { DActor (Public, name,
               { actor_state = fields; actor_init = init_expr; actor_handlers = handlers;
-                actor_supervise = sup; actor_compat = "full"; actor_invariant = None },
+                actor_supervise = sup; actor_compat = "full"; actor_invariant = None;
+                actor_mailbox = mb },
               mk_span ($loc)) }
+
+(** mailbox N policy — a bound on the actor's mailbox, declared with the
+    actor rather than at every spawn site. Lowers to
+    actor_set_mailbox_limit(pid, N, policy) right after each spawn. The
+    policies are Actor.set_queue_limit's: drop_new 1, drop_old 2,
+    block_sender 3 (compiled backend only).
+
+    `mailbox` is CONTEXTUAL, not a reserved word: it is recognised only in
+    this position (after `init`, before `supervise`/`on`, where no other
+    lower-case identifier can start anything), so `fn mailbox(...)` and
+    `let mailbox = ...` keep working — test/session/stream_actor.march
+    names its transport constructor exactly that. *)
+mailbox_clause:
+  | kw = lower_name; n = INT; p = lower_name
+    { if kw.txt <> "mailbox" then
+        error_raise
+          (Printf.sprintf "I don't recognize `%s` here -- after `init`, an actor body continues with `mailbox N policy`, a `supervise` block, or `on` handlers." kw.txt)
+          (Some "mailbox 1000 drop_old")
+          $startpos(kw);
+      let policy = match p.txt with
+        | "drop_new" -> 1
+        | "drop_old" -> 2
+        | "block_sender" -> 3
+        | other ->
+          error_raise
+            (Printf.sprintf "I don't know the mailbox policy `%s` -- it must be drop_new, drop_old or block_sender." other)
+            (Some "mailbox 1000 drop_old")
+            $startpos(p)
+      in
+      (n, policy) }
 
 (** Application entry point:
       app MyApp do
