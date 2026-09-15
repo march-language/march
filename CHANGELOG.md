@@ -335,6 +335,11 @@ git log is authoritative for exact commits.
   (`match failure`) because Prelude's `println` called your `show` instead of
   the builtin one; the compiled binary was already correct. A Prelude
   function's bare references now resolve in Prelude's own scope.
+- **No more false "Non-exhaustive pattern match" on matches that mix wildcard
+  and constructor sub-patterns in one position.** A fully covered match such as
+  `Nd(Lf(a), Lf(b))`, `Nd(Nd(_, _), Lf(b))`, `Nd(_, Nd(_, _))`, `Lf(n)` warned
+  `missing case: Nd(_, Lf(0))`; the same happened with tuples like
+  `(true, _)`, `(_, true)`, `(false, false)`. A genuinely missing arm still warns.
 - **A function that reads a field of a record parameter and hands it to a
   read-only helper no longer frees the record first when compiled.**
   `SortedSet.size(s)` on a set nothing else held panicked with
