@@ -669,6 +669,10 @@ type call_ctx = {
       (* Record-typed variables in scope, name -> SMT sort name, so a
          predicate's `v.field` projections can be resolved through that
          sort's selectors. *)
+  binds : (string * A.span) list;
+      (* Caller names -> their BINDING-site spans ([rctx.binds]), read with
+         [caller_sort_at] to give a caller value its typechecked sort instead
+         of the `Int` default.  Shadowed exactly like [sc]. *)
 }
 
 let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
@@ -676,7 +680,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
     (sg : fn_sig) (args : A.expr list) (rp : rparam) : unit =
   (* Destructured to the names the body has always used: this is a signature
      change, not a rewrite of 1,361 lines. *)
-  let { root; errctx; postcond; path; lets; sc; re } = cx in
+  let { root; errctx; postcond; path; lets; sc; re; binds } = cx in
   let subject_noun =
     match subject with
     | Argument -> "argument"
@@ -953,8 +957,34 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
           if s <> Smt.SInt then Hashtbl.replace caller_scalar x s
         | _ -> ())
       args;
+    (* ── Caller sorts from the typechecker (design B2/B3) ──────────────────
+       A caller name's sort as the typechecker recorded it at its BINDING
+       site ([binds] -> [caller_sort_at]); [None] when no type table was
+       handed in, the binder recorded no span, or the type has no sort here.
+       A record name is never answered: records keep their [recenv] route.
+       The answer is ROUTED, never folded into [caller_scalar] wholesale:
+       [caller_scalar_of n <> SInt] means "a non-Int SCALAR" to the three
+       measure-refusal guards, so only `Bool`/`Float` reach it; a `String`
+       goes to the `Str` constants ([caller_is_str]). *)
+    let caller_sort_of name : Smt.sort option =
+      if is_recvar name then None
+      else match List.assoc_opt name binds with Some sp -> caller_sort_at sp | None -> None
+    in
     let caller_scalar_of name =
-      match Hashtbl.find_opt caller_scalar name with Some s -> s | None -> Smt.SInt
+      match Hashtbl.find_opt caller_scalar name with
+      | Some s -> s
+      | None ->
+        (match caller_sort_of name with
+         | Some ((Smt.SBool | Smt.SFloat) as s) -> s
+         | _ -> Smt.SInt)
+    in
+    (* A caller name the typechecker says is a `String`, while the string
+       encoding is available (the same gate [reflect_str] applies) and no
+       callee parameter already pinned it to a scalar sort. *)
+    let caller_is_str name =
+      (not (Hashtbl.mem caller_scalar name))
+      && string_len_available ()
+      && caller_sort_of name = Some (Smt.sdata str_sort)
     in
     (* Attach the (expensive) datatype/quantifier preamble ONLY to VCs that
        actually reference an axiomatised measure; a plain Int/Bool VC pays no
@@ -1306,6 +1336,10 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        with it the fact, which only loses a proof. *)
     let foreign_var name =
       if Hashtbl.mem str_names name then None
+      (* A caller `String` (design B3): pinned into the `Str` sort like any
+         other string name, so every later producer agrees, and dropped here
+         exactly as a known string name is. *)
+      else if caller_is_str name then (declare_str_const name; None)
       else if is_recvar name then None
       else Some (Smt.Const name, (name, caller_scalar_of name))
     in
@@ -1338,6 +1372,10 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
       | A.ELit (A.LitString str, _) -> str_lit_const str
       | A.EVar { A.txt = x; _ } ->
         if Hashtbl.mem str_names x then Some (Smt.Const x)
+        (* A caller `String` element is a `Str` constant carrying its own
+           scope refinement, as a `String` actual is ([reflect_str]); the key
+           is caller-namespaced so it never meets a callee parameter's. *)
+        else if caller_is_str x then reflect_str ("$caller$" ^ x) a
         else if is_recvar x then None
         else begin
           decls := (x, caller_scalar_of x) :: !decls;
@@ -1489,6 +1527,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
         | None ->
           (* a caller-scope variable from the path context *)
           if Hashtbl.mem str_names name then Some (Smt.Const name)
+          else if caller_is_str name then (declare_str_const name; Some (Smt.Const name))
           (* …unless it is a caller-scope RECORD, which lives at a datatype sort.
              Declaring it `Int` here would put one symbol at two sorts; dropping
              the sub-term instead just loses a fact (silence). *)
@@ -2123,6 +2162,9 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
          compilation.  So the string sort wins here, exactly as it does in
          [resolve_var]'s caller-scope fallback. *)
       if Hashtbl.mem str_names name then Some (Smt.Const name)
+      (* A caller `String` the typechecker recorded (design B3) takes the same
+         route, declared into `Str` on first sight. *)
+      else if caller_is_str name then (declare_str_const name; Some (Smt.Const name))
       (* Same rule for a caller-scope RECORD: it is declared at its datatype
          sort by [path_resolve_field], so it must never also be reflected as a
          scalar.  Returning None drops the sub-term — and with it the whole
@@ -2171,6 +2213,10 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
          has no callable `len`, so a guard could not mention this measure. *)
       else if m = "len" && string_len_available () && Hashtbl.mem str_names name then
         Some (Smt.App (strlen_fn, [ Smt.Const name ]))
+      else if m = "len" && caller_is_str name then begin
+        declare_str_const name;
+        Some (Smt.App (strlen_fn, [ Smt.Const name ]))
+      end
       else measure_of_var m name
     in
     let path_resolve_tester ctor arg =

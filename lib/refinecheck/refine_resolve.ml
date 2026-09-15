@@ -50,9 +50,17 @@ type rctx = {
      parameter, local `fn` name/parameter, `match` arm binder).  See
      [local_shadow]. *)
   locals : string list;
+  (* The BINDING-SITE span of each enclosing binder that recorded one, most
+     recent first — how a caller value's type is read from the typechecker's
+     span table ([caller_sort_at]) without looking up an occurrence span
+     (a synthesised `EVar` reuses its call's span).  Every [local_shadow]
+     retires the names it is given from here too, so a rebinding that does
+     not record a span leaves the name unknown (the `Int` default), never
+     pointing at the outer binder's type. *)
+  binds : (string * A.span) list;
 }
 
-let rctx0 = { modpath = ""; aliases = []; uses = []; locals = [] }
+let rctx0 = { modpath = ""; aliases = []; uses = []; locals = []; binds = [] }
 
 (* ── The FOURTH fact channel: callee resolution ────────────────────────────
    [scope], [path], [recenv] and [cbenv] each carry facts keyed by a variable
@@ -74,8 +82,25 @@ let rctx0 = { modpath = ""; aliases = []; uses = []; locals = [] }
 
    Retiring a name here can only turn a check into a SKIP, never the reverse,
    so over-approximating [locals] is always safe. *)
-let local_shadow (ctx : rctx) (names : string list) : rctx =
-  if names = [] then ctx else { ctx with locals = names @ ctx.locals }
+let local_shadow ?(spans : (string * A.span) list = []) (ctx : rctx) (names : string list)
+  : rctx =
+  if names = [] then ctx
+  else
+    { ctx with
+      locals = names @ ctx.locals
+    ; binds =
+        spans @ List.filter (fun (n, _) -> not (List.mem n names)) ctx.binds
+    }
+
+(* The binding spans of a parameter list: a named parameter's name span (the
+   key the typechecker records its type under).  A pattern parameter records
+   none. *)
+let fnparam_spans : A.fn_param -> (string * A.span) list = function
+  | A.FPNamed p | A.FPDefault (p, _) -> [ (p.A.param_name.A.txt, p.A.param_name.A.span) ]
+  | A.FPPat _ -> []
+
+let param_spans (ps : A.param list) : (string * A.span) list =
+  List.map (fun (p : A.param) -> (p.A.param_name.A.txt, p.A.param_name.A.span)) ps
 
 let fnparam_binders : A.fn_param -> string list = function
   | A.FPNamed p | A.FPDefault (p, _) -> [ p.A.param_name.A.txt ]
