@@ -42,12 +42,29 @@ mod TwoNodeRestartB do
     end
   end
 
-  -- Serve until the peer goes away (recv error).
-  pfn serve(fd : Int, creation : Int, sink) do
-    match NodeSend.serve_one(fd, creation, fn d -> dispatch(sink, d)) do
-      Ok(_) -> serve(fd, creation, sink)
-      Err(_) -> ()
+  -- One reader, dispatching by tag: MONITOR_REQ (7) goes to the runtime's
+  -- registry (node-a monitors the Sink), ACTOR_MSG (9) to the Sink. Ends
+  -- when the peer goes away.
+  pfn on_frame(fd : Int, creation : Int, sink, tag : Int, frame : List(Int)) : Result(Bool, String) do
+    if tag == 7 do
+      match DistLink.decode_req(frame) do
+        Ok((watcher_node, watcher_pid, target_pid)) ->
+          dist_monitor_register(target_pid, watcher_node, watcher_pid, fd)
+          println("node-b: monitor registered for " ++ watcher_node)
+          Ok(true)
+        Err(e) -> Err(e)
+      end
+    else
+      match NodeSend.handle_frame(frame, fd, creation, fn d -> dispatch(sink, d)) do
+        Ok(_) -> Ok(true)
+        Err(e) -> Err(e)
+      end
     end
+  end
+
+  pfn serve(fd : Int, creation : Int, sink) do
+    let _ = PeerReader.serve(fd, Nil, fn (tag, frame) -> on_frame(fd, creation, sink, tag, frame))
+    ()
   end
 
   fn main(_cap_console : Cap(IO.Console), _cap_netlisten : Cap(IO.NetListen), _cap_netconnect : Cap(IO.NetConnect), _cap_spawn : Cap(IO.Spawn), _cap_process : Cap(IO.Process)) do

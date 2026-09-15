@@ -12,14 +12,27 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
-
+- **`Node.enqueue(q, to, msg, policy)`**: the typed remote send through a peer's
+  `NodeQueue`, so a typed send gets credit-based flow control. It has the same contract
+  as `Node.send`: `msg`'s type must `derive Json`, which is checked at the call site,
+  and the compiler mints the wire tag. Returns `Ok(seq)` once admitted, or the queue's
+  `Backpressure` / `NoConnection`.
+- **`NodeQueue.BlockSender(timeout_ms)`**: a remote send that does not fit the peer's
+  budget blocks the caller until credit admits the frame (`Ok`), the connection dies
+  (`Err(NoConnection)`), or the timeout passes (`Err(Backpressure)`, frame withdrawn).
+  Compiled backend; under the interpreter a send that cannot be admitted at once is
+  `Err(Backpressure)`. `actor_reply_retain(ref)` lets a handler hold an `Actor.call`
+  reply and answer it on a later turn (`test/native/block_sender_loopback`).
+- Two-node scenario `monitor_reconnect`: a watcher that drops its connection between a
+  remote actor's death and the ack still gets exactly one `Down` after reconnecting; and the
+  `restart` scenario's monitor half: a crashed node's monitors fire `NodeDown` locally, once.
+  `NodeSend.handle_frame` is the frame-level receiver for readers that dispatch by tag.
 - **`Array` operations state their effect on the length.** `Array.empty`,
   `from_list`, `push`, `set` and `map` carry length postconditions, so
   `Array.get(Array.from_list([1, 2, 3]), 7)` is a compile error and a guard on
   `List.length(xs)` or `Array.length(v)` carries through them. `empty`'s is
   proved; the other four are `@[assume]`d, each with a runtime property
   witness.
-
 - **List contracts proved from list code.** A function that recurses over a
   list can have its `elts` and `len` return refinement proved from its body,
   including through a local helper `fn`, a call to another proved function,
@@ -29,7 +42,6 @@ git log is authoritative for exact commits.
   `member(x, elts(xs))` at a call site. A contract is used only once proved,
   in any declaration order. See "Proved list contracts" in
   `docs/refinement-types.md`.
-
 - `Node.send(peer, to, msg)`: the typed remote send. `msg`'s type must `derive Json`
   (a missing codec is a typecheck error at the call site naming the type, not a
   run-time `to_json` panic), the wire type tag is minted by the compiler from the
@@ -323,6 +335,23 @@ git log is authoritative for exact commits.
   (`match failure`) because Prelude's `println` called your `show` instead of
   the builtin one; the compiled binary was already correct. A Prelude
   function's bare references now resolve in Prelude's own scope.
+- Load-aware routing no longer depends on peers' clocks agreeing: a load report received
+  through `SwimDriver` is aged from its arrival on the receiving node, so a peer whose
+  clock ran ahead no longer sent reports that never went stale (or, behind, stale on
+  arrival). Pinned by the two-node scenario `skew`.
+- `NodeQueue.take_evicted` reached the writer's `Configure` handler instead of its
+  own: `Actor.call` routes by the sentinel's constructor index. It now answers.
+- Interpreter: a handler of an actor declared in a module can call a fn declared
+  after the actor (was "stub X called before initialisation").
+- A cross-node `MONITOR_FIRE` written to a connection whose peer had already closed raised
+  SIGPIPE and could kill the node; it now fails quietly and stays pending for resend.
+- **Module-qualified constructor patterns whose module name is also a stdlib
+  type name now match when compiled.** With a nested `mod Tree do type T =
+  Leaf(Int) | Node(T, T) end`, a match on `Tree.Leaf(n)` resolved to the stdlib
+  `OrderedMap.Tree`/`SortedSet.Tree` constructors, so the compiled binary
+  panicked with "non-exhaustive pattern match" while the interpreter was
+  correct. The same program no longer warns about a missing `LWWRegister` case
+  (a stdlib type that shares the bare name `T`).
 - **Refinement violations on `Array` calls name `Array.length`.** The
   message and its suggested guard spelled the private measure `pvec_length`,
   which does not compile in user code; a literal negative index also showed
@@ -330,6 +359,14 @@ git log is authoritative for exact commits.
 - `stdlib/dist_supervisor.march` failed a standalone `--check` ("Constructor `Normal` is
   ambiguous between multiple modules"): its restart decision matched `DistLink.DownReason`
   with bare arms that also name the local monitor's constructors. Qualified, and guarded.
+- **Refinement checks no longer skip a caller value because it is not an
+  `Int`.** A value the callee did not pin to a scalar sort was declared `Int`
+  in the solver query, so a `String` element (`need(["a", s])` against
+  `member("a", elts(_))`) or an `Option` in a guard (`if o == p do unwrap(o)`)
+  met its real sort in the same query and the obligation was silently skipped
+  as `sort-conflict`. Parameters, `let` binders, pattern variables, refined
+  binders and guard variables now take the type the typechecker gave them, so
+  these obligations are proved or reported.
 - `derive` inside a nested `mod` was a silent no-op: the derive was never expanded, so
   `derive Json for T` in `mod Inner` generated nothing and the first `from_json` to `T`
   failed at run time. Nested derives (and `satisfy`) now expand at every level.
@@ -604,8 +641,8 @@ git log is authoritative for exact commits.
   annotation and builtin signature denotes the canonical bare name, so the two
   never unified ("expected `FileError` but got `File.FileError`") and a bare
   `NotFound(p)` resolved to the DNS constructor of the same name. Compiled
-  `to_string` of such an error still renders `#<tag:N>`; that rendering gap is
-  tracked separately.
+  `to_string` of such an error rendered `#<tag:N>` for a second reason, fixed
+  in the entry below.
 - **The interpreter's `file_rename` error now names the path**, as the
   compiled runtime and every other file builtin already did.
 - **A record type declared in one typecheck no longer changes a later,
@@ -666,6 +703,21 @@ git log is authoritative for exact commits.
   published digest as provenance, and a `[lockfile] version = 2` marker lets a
   reader tell an old file's registry `hash` from a new one's. Older lockfiles
   are still read.
+- **Compiled `to_string` of a file error names its constructor.** `file_read`
+  on a missing path printed `#<tag:0>` compiled where the interpreter printed
+  `NotFound("/path")`, and the same for the twelve other `file_*` / `dir_*`
+  builtins. `mod File`'s `ptype FileError` lowers to the TIR name
+  `File.FileError`, but every builtin signature denotes it by the canonical
+  bare `FileError`, so the constructor-name descriptor was looked up under a
+  name it was not keyed by and the value fell through to the untyped
+  renderer. The runtime now stamps the error cell it builds with that type's
+  header id, so the renderer identifies the value from the cell itself rather
+  than from a name it could not resolve. The `List` and `Result` cells the
+  runtime builds are stamped the same way, so a `file_read` error reaching a
+  renderer through an erased slot now prints
+  `Err(NotFound("/path"))` instead of `#<tag:1>`. The `file_*` / `dir_*`
+  regression table is tightened from "either form" to byte equality with the
+  interpreter.
 
 ### Changed
 

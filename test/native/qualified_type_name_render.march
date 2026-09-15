@@ -1,0 +1,78 @@
+-- Regression: compiled `to_string` printed `#<tag:N>` for any type DECLARED
+-- inside a module but DENOTED by its bare short name.
+--
+-- A `ptype` in `mod File` lowers to the TIR name `File.FileError`, but every
+-- annotation and builtin signature denotes it bare, so the value reaching a
+-- render site has static type `FileError`. `Llvm_ctor_desc.id_for` looked the
+-- descriptor up by EXACT name, missed, and fell through to the untyped
+-- renderer -- while the interpreter, which keeps the declaration, printed the
+-- constructor. `file_read` on a missing path is the case a user actually hits.
+--
+-- This is the same bare-vs-qualified split `Llvm_data.ctor_entry` already
+-- resolved for CONSTRUCTOR keys by suffix search; type names needed it too.
+-- `assign_ids` now also registers each qualified name's short name as an
+-- alias for the same descriptor id.
+--
+-- Note what this is NOT: the error cell here is built by the C runtime
+-- (`mk_file_error`, runtime/march_runtime.c), so its header carries no type
+-- id. It renders correctly anyway, because the STATIC path walks the
+-- descriptor by tag and never consults the header. Stamping the C builders is
+-- a separate, still-open item.
+--
+-- The `dup_` lines pin the deliberately CONSERVATIVE half: a short name
+-- declared by two modules is ambiguous, so no alias is registered and the
+-- value keeps the placeholder it has always had. Two control runs with the
+-- ambiguity guard removed showed it prevents no wrong name on its own
+-- (colliding types get globally-unique tags, which cannot match a C-built
+-- cell's declaration-order tag, and a stamped cell is corrected by its own
+-- header id) -- the guard is kept so that correctness does not RELY on either
+-- of those, and its cost is only that these two lines stay placeholders.
+-- Asserted as a boolean, not exact text: the placeholder embeds a global tag
+-- number that any unrelated tag renumbering would shift.
+
+mod QualifiedTypeNameRender do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn main(_c : Cap(IO.Console), _f : Cap(IO.FileRead)) : Unit do
+    match file_read("/definitely/missing/path.txt") do
+    Ok(_)  -> println("file=ok")
+    Err(e) -> println("file_err=" ++ to_string(e))
+    end
+
+    match dir_list("/definitely/missing/dir") do
+    Ok(_)  -> println("dir=ok")
+    Err(e) -> println("dir_err=" ++ to_string(e))
+    end
+
+    -- The SAME error reaching a renderer through an ERASED slot: no static
+    -- type at all, so this can only work from the cell's own header id. The
+    -- Result wrapper is stamped by the C runtime's mk_ok/mk_err and the
+    -- FileError payload by mk_file_error, so both name themselves.
+    let cb = Bx(Cons(fn x -> to_string(x), Nil))
+    println("erased=" ++ apply_first(cb, file_read("/definitely/missing/erased")))
+
+    -- Ambiguous short name: must never print the OTHER module's constructor.
+    let a = A.ADup(1)
+    let b = B.BDup("s")
+    println("dup_a_not_wrong=" ++ bool_to_string(not(string_contains(to_string(a), "BDup"))))
+    println("dup_b_not_wrong=" ++ bool_to_string(not(string_contains(to_string(b), "ADup"))))
+  end
+
+  type Box = Bx(List(b))
+  pfn apply_first(box, v) do
+    match box do
+    Bx(fs) -> match fs do
+      Cons(f, _) -> f(v)
+      Nil        -> "empty"
+      end
+    end
+  end
+
+  mod A do
+    type Dup = ADup(Int)
+  end
+  mod B do
+    type Dup = BDup(String)
+  end
+end

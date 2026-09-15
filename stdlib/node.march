@@ -28,6 +28,10 @@
 -- tag is that runtime name. The body below is reached only by a value no
 -- table and no runtime shape can name; it says so loudly.
 --
+-- `Node.enqueue(q, to, msg, policy)` is the same contract through a peer's
+-- NodeQueue (credit-based flow control): same codec check, same minted tag,
+-- rewritten to `enqueue_tagged(q, to, "<tag>", JsonTo$T.to_json(msg), policy)`.
+--
 -- Receiving is the caller's: read the ACTOR_MSG (`NodeSend.serve_one` or a
 -- PeerReader), compare `d.type_tag` with the tag the sender's compiler minted
 -- (a receiver hosting `T` in the same module tree writes the same qualified
@@ -81,6 +85,31 @@ mod Node do
     let _ = to
     let _ = msg
     panic("Node.send: this call was not resolved by the compiler -- the typechecker records every Node.send site and both backends rewrite it to send_tagged; a pipeline entry point skipped that table")
+  end
+
+  -- The same send through a peer's outbound queue (NodeQueue, credit-based
+  -- flow control): the frame is admitted under [policy] and written by the
+  -- queue's writer when the receiver's credit covers it. `Ok(seq)` means
+  -- admitted, not written; `Err(Backpressure)` / `Err(NoConnection)` are the
+  -- queue's. `enqueue` lowers to this exactly as `send` lowers to
+  -- `send_tagged`.
+  fn enqueue_tagged(q, to : Pid, type_tag : String, json, policy : NodeQueue.Policy) : Result(Int, NodeQueue.EnqueueError) do
+    let seq = next_seq()
+    let payload = Bytes.to_list(Bytes.from_string(Json.to_string(json)))
+    match NodeQueue.cast(q, seq, to, type_tag, payload, policy) do
+      Ok(_) -> Ok(seq)
+      Err(e) -> Err(e)
+    end
+  end
+
+  -- The typed send through a queue: `msg`'s type must `derive Json`, the
+  -- compiler mints the tag, exactly as for `send`. Returns the message's seq.
+  fn enqueue(q, to : Pid, msg, policy : NodeQueue.Policy) : Result(Int, NodeQueue.EnqueueError) do
+    let _ = q
+    let _ = to
+    let _ = msg
+    let _ = policy
+    panic("Node.enqueue: this call was not resolved by the compiler -- the typechecker records every Node.enqueue site and both backends rewrite it to enqueue_tagged; a pipeline entry point skipped that table")
   end
 
   -- The receiver's half of the codec: the delivery's payload as JSON, ready

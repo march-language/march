@@ -15066,6 +15066,45 @@ let test_nested_or_pattern_exhaustiveness () =
   Alcotest.(check bool) "Some(1 | 2) does not cover Some(_)" true
     warns_nonexhaustive
 
+(* A variant declared in a NESTED module and matched from its parent with
+   module-qualified patterns (`Tree.Leaf(n)`) must be checked against ITS OWN
+   constructors only. [ctors_for_type] gathers constructors by the parent
+   type's BARE name, so a sibling type of the same bare name (`Reg.T`, or
+   stdlib's `CRDT.LWWRegister.T` in a real program) merged into the universe
+   and a fully covered match warned `missing case: Reg(_)`; the local-shadow
+   rule only recognised a type declared by the CURRENT module. *)
+let test_nested_module_same_bare_type_name_exhaustiveness () =
+  let ctx = typecheck {|mod Outer do
+    mod Reg do
+      type T = Reg(Int)
+    end
+    mod Tree do
+      type T = Leaf(Int) | Node(T, T)
+    end
+    fn size(t : Tree.T) : Int do
+      match t do
+        Tree.Leaf(_) -> 1
+        Tree.Node(l, r) -> size(l) + size(r)
+      end
+    end
+    fn first(t : Tree.T) : Int do
+      match t do
+        Tree.Leaf(n) -> n
+      end
+    end
+  end|} in
+  let nonexhaustive_mentioning s =
+    List.exists (fun (d : March_errors.Errors.diagnostic) ->
+        d.severity = March_errors.Errors.Warning
+        && _contains_substr d.message "Non-exhaustive pattern match"
+        && _contains_substr d.message s)
+      ctx.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check bool) "no foreign Reg(_) case demanded" false
+    (nonexhaustive_mentioning "Reg(");
+  Alcotest.(check bool) "genuinely missing Node still warns" true
+    (nonexhaustive_mentioning "Node(")
+
 let test_nested_or_pattern_arm_not_flagged_redundant () =
   let ctx = typecheck {|mod T do
     type P = P(Int, Int)
@@ -15654,6 +15693,8 @@ let compiler_suites =
             test_partial_record_destructure_in_letq;
           Alcotest.test_case "let record destructure unknown field rejected" `Quick
             test_let_record_destructure_unknown_field_rejected;
+          Alcotest.test_case "nested-module type sharing a bare name: no foreign missing case" `Quick
+            test_nested_module_same_bare_type_name_exhaustiveness;
           Alcotest.test_case "record match non-exhaustive is reported" `Quick
             test_record_pattern_non_exhaustive_is_reported;
           Alcotest.test_case "covered record match is silent" `Quick

@@ -1828,32 +1828,38 @@ and eval_expr_inner (env : env) (e : expr) : value =
      ([type_name_of_value]: a record's registered shape, a constructor's
      parent type).  On that path the tag is the runtime (short) name.  Only a
      value no table and no shape can name reaches the panicking body. *)
-  | EApp (EVar { txt = "Node.send"; span = fsp } as f, [peer_e; to_e; msg_e], sp) ->
-    (* Each argument is evaluated exactly once, in order, before the type is
-       resolved -- a guard that peeked at the message would evaluate it twice. *)
-    let peer = eval_expr env peer_e in
-    let to_ = eval_expr env to_e in
-    let msg = eval_expr env msg_e in
-    let tag =
-      match March_ast.Json_dispatch.find sp with
-      | Some t -> Some t
-      | None -> type_name_of_value msg
-    in
-    (match tag with
-     | None ->
-       (* Neither the table nor the value names the type: the ordinary call,
-          i.e. `Node.send`'s own body, which panics saying so. *)
-       apply (eval_expr env f) [peer; to_; msg]
-     | Some tag ->
-       let codec =
-         match Hashtbl.find_opt impl_tbl ("JsonTo", March_ast.Json_dispatch.short tag) with
-         | Some c -> c
-         | None ->
-           eval_error "Node.send: no derived Json encoder registered for `%s`" tag
+  | EApp (EVar { txt = ("Node.send" | "Node.enqueue") as callee; span = fsp } as f, args, sp)
+    when March_ast.Json_dispatch.tagged_callee callee (List.length args) <> None ->
+    (* `Node.enqueue(q, to, msg, policy)` is the same send through a NodeQueue:
+       the message is the third argument of both, and the tagged form keeps
+       any trailing arguments.  Each argument is evaluated exactly once, in
+       order, before the type is resolved -- a guard that peeked at the
+       message would evaluate it twice. *)
+    let vals = List.map (eval_expr env) args in
+    let tagged = Option.get (March_ast.Json_dispatch.tagged_callee callee (List.length args)) in
+    (match vals with
+     | dst :: to_ :: msg :: rest ->
+       let tag =
+         match March_ast.Json_dispatch.find sp with
+         | Some t -> Some t
+         | None -> type_name_of_value msg
        in
-       let json = apply codec [msg] in
-       let send = eval_expr env (EVar { txt = "Node.send_tagged"; span = fsp }) in
-       apply send [peer; to_; VString tag; json])
+       (match tag with
+        | None ->
+          (* Neither the table nor the value names the type: the ordinary
+             call, i.e. the callee's own body, which panics saying so. *)
+          apply (eval_expr env f) vals
+        | Some tag ->
+          let codec =
+            match Hashtbl.find_opt impl_tbl ("JsonTo", March_ast.Json_dispatch.short tag) with
+            | Some c -> c
+            | None ->
+              eval_error "%s: no derived Json encoder registered for `%s`" callee tag
+          in
+          let json = apply codec [msg] in
+          let send = eval_expr env (EVar { txt = tagged; span = fsp }) in
+          apply send ([dst; to_; VString tag; json] @ rest))
+     | _ -> assert false)
 
   | EApp (f, args, sp) ->
     (* E-App-Clo / E-App-Prim — core-march.md §4.2 (dispatch on fn_val's shape
@@ -3394,6 +3400,18 @@ let rec eval_decl (env : env) (d : decl) : env =
         eval_mod_decls rest e'
     in
     let mod_env = eval_mod_decls decls !inner_ref in
+    (* An actor declared in this module was registered with the env as it
+       stood at ITS declaration -- pass-1 stubs for every fn declared after
+       it -- and nothing re-pointed it, so a handler calling such a fn died
+       with "stub X called before initialisation" (NodeQueue's Writer never
+       ran interpreted; its tests passed against the Vault counters alone).
+       Re-point every actor of this module at the module's final env. *)
+    List.iter (function
+        | DActor (_, aname, _, _) ->
+          (match Hashtbl.find_opt actor_defs_tbl aname.txt with
+           | Some (_, r) -> r := mod_env
+           | None -> ())
+        | _ -> ()) decls;
     module_stack := List.tl !module_stack;
     (* Collect names actually defined by this module's declarations
        (DFn, DLet top bindings, nested DMod names).  We only expose

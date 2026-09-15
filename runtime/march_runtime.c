@@ -5680,6 +5680,22 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
  * reference is ever retired; a handler that never replies simply leaks it
  * along with the unhandled message, same as an unreplied raw result today.
  */
+/* march_actor_reply_retain: take a SECOND reference to a reply-ref so a
+ * handler may hold it in its state and answer on a LATER turn.  Without
+ * this, the ref's only reference is retired with the message envelope when
+ * the handler returns, and an Actor.reply from a later turn is a
+ * use-after-free (SIGBUS on the scheduler thread; NodeQueue's BlockSender
+ * found it).  Balanced by march_actor_reply, which retires one reference
+ * per reply -- so a held ref must be replied to exactly once, even after
+ * its caller timed out (the mismatched-correlation reply is discarded).
+ * A non-ref value (the interpreter-parity raw proc path) is returned as is. */
+void *march_actor_reply_retain(void *ref_ptr) {
+    if (IS_HEAP_PTR(ref_ptr)
+            && ((march_hdr *)ref_ptr)->tag == MARCH_CALL_REPLY_TAG)
+        march_incrc(ref_ptr);
+    return ref_ptr;
+}
+
 void march_actor_reply(void *ref_ptr, void *result) {
     if (!IS_HEAP_PTR(ref_ptr)
             || ((march_hdr *)ref_ptr)->tag != MARCH_CALL_REPLY_TAG) {
@@ -5730,6 +5746,28 @@ double march_math_pow(double b, double e) { return pow(b, e); }
 /* ── Extended string builtins ────────────────────────────────────────── */
 
 /* Helper: None = raw 0 in the niche representation. */
+/* The other two types this runtime builds cells for itself.  Both are
+ * declared with BARE TIR names (the descriptor's `T` lines read `List` and
+ * `Result`), and the C builders' tags already match the declaration order the
+ * descriptor is keyed by -- Nil=0/Cons=1, Ok=0/Err=1 -- which is what makes
+ * the stamp meaningful rather than merely present.
+ *
+ * Every mk_ok/mk_err/make_cons/make_nil call site in this file builds the
+ * type its name says (audited: 14 mk_ok, 3 mk_err, 10 make_cons, 15
+ * make_nil), so the id is a property of the helper, not of the caller.  A
+ * helper reused for some other shape would print a confidently wrong
+ * constructor, which is strictly worse than the "#<tag:N>" being fixed. */
+static int32_t list_type_id(void) {
+    static int32_t id = 0;
+    if (id == 0) id = march_type_id_of_name("List");
+    return id;
+}
+static int32_t result_type_id(void) {
+    static int32_t id = 0;
+    if (id == 0) id = march_type_id_of_name("Result");
+    return id;
+}
+
 static void *make_none(void) {
     return (void *)0;
 }
@@ -5748,7 +5786,9 @@ static void *make_some_ptr(void *val) {
 
 /* Helper: allocate a Nil list node (tag=0). */
 static void *make_nil(void) {
-    return march_alloc(16);
+    void *nil = march_alloc(16);
+    ((march_hdr *)nil)->pad = list_type_id();
+    return nil;
 }
 
 /* Helper: allocate a Cons(head, tail) list node (tag=1). */
@@ -5756,6 +5796,7 @@ static void *make_cons(void *head, void *tail) {
     void *cons = march_alloc(16 + 16);  /* header + 2 ptr fields */
     int32_t *tp = (int32_t *)((char *)cons + 8);
     tp[0] = 1;  /* tag = Cons */
+    ((march_hdr *)cons)->pad = list_type_id();
     void **fp = (void **)((char *)cons + 16);
     fp[0] = head;
     fp[1] = tail;
@@ -6557,18 +6598,21 @@ int64_t march_dir_exists(void *s) {
 /* Create Result(Ok=0,Err=1) values; all file/dir/csv fns return Result. */
 static void *mk_ok(void *value) {
     void *r = march_alloc(24); /* tag=0 by default */
+    ((march_hdr *)r)->pad = result_type_id();
     MARCH_FIELD(r, 0) = (int64_t)value;
     return r;
 }
 static void *mk_ok_unit(void) {
     /* Ok(()) — unit value is null/0 */
     void *r = march_alloc(24);
+    ((march_hdr *)r)->pad = result_type_id();
     MARCH_FIELD(r, 0) = 0;
     return r;
 }
 static void *mk_err(void *msg_str) {
     void *r = march_alloc(24);
     MARCH_SET_TAG(r, 1);
+    ((march_hdr *)r)->pad = result_type_id();
     MARCH_FIELD(r, 0) = (int64_t)msg_str;
     return r;
 }
@@ -6590,9 +6634,33 @@ static void *mk_err_errno(void) {
 #define FILEERR_NOT_EMPTY    3
 #define FILEERR_IO_ERROR     4
 
+/* File.FileError's header type id (see the march_hdr comment in
+ * march_runtime.h).  Cells the C runtime builds carry no type id by default,
+ * which is why compiled `to_string` of a file error printed "#<tag:0>" while
+ * the interpreter printed NotFound("..."): the value's STATIC type is the
+ * bare `FileError` (that is the canonical spelling every builtin signature
+ * uses) but the descriptor is keyed on the name the ptype LOWERS to,
+ * `File.FileError`, so the static lookup missed and the renderer had only a
+ * tag to go on.
+ *
+ * Stamping the cell answers it from the value instead of from the name.
+ * Resolving the bare name to the qualified descriptor at compile time was
+ * tried and is NOT sound: `Pid` is a builtin runtime handle and also the
+ * short name of stdlib's `GlobalPid.Pid`, so a bare-name alias handed an
+ * actor handle a constructor descriptor and the renderer read it as a cell
+ * (deterministic SIGSEGV in native_actor_monitor_down_reason, 40/40; see
+ * specs/progress/2026-09-12-compiled-to-string-module-declared-type.md).
+ * A header id cannot make that mistake: it is written by whoever built the
+ * cell. */
+static int32_t file_error_type_id(void) {
+    static int32_t id = 0;
+    if (id == 0) id = march_type_id_of_name("File.FileError");
+    return id;
+}
 static void *mk_file_error(int tag, void *payload_str) {
     void *cell = march_alloc(24); /* header(16) + 1 field(8) */
     MARCH_SET_TAG(cell, tag);
+    ((march_hdr *)cell)->pad = file_error_type_id();
     MARCH_FIELD(cell, 0) = (int64_t)payload_str;
     return cell;
 }

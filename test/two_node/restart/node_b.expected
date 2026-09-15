@@ -1,5 +1,6 @@
 node-b: item 1 from node-a
 node-b: item 3 from node-a
+node-b: monitor registered for node-a
 node-b: peer closed, delivered 1 message(s)
 node-b: up, creation 1, hosting Pid(0)
 node-b: up, creation 2, hosting Pid(0)

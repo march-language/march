@@ -13051,6 +13051,52 @@ let test_module_qualified_colliding_ctor_pattern_compiled () =
     ~expected:"array\nnull\nobject\nstr\nother"
     ()
 
+(** MODULE-qualified pattern whose qualifier is ALSO a stdlib type name.
+
+    A user's nested `mod Tree do type T = Leaf(Int) | Node(T, T) end`, matched
+    from the parent as `Tree.Leaf(n)`: "Tree" is a module there, but stdlib's
+    `OrderedMap.Tree` and `SortedSet.Tree` also declare `Leaf`/`Node`, so
+    lowering took the TYPE reading, left the tag as "Tree.Leaf", and
+    [qualified_br_key] resolved it to a stdlib `Tree`'s collision tag. No arm
+    could match a value built with `Tree.T`'s tags, so the compiled binary
+    panicked "non-exhaustive pattern match" while the interpreter printed the
+    right answer. `f` also exercises nested sub-patterns, whose scrutinee type
+    is unknown at lowering and so resolve through the enclosing-module rule.
+    The type is deliberately named `T` so stdlib's `CRDT.LWWRegister.T` is in
+    play too (that collision produced the spurious "missing case:
+    LWWRegister(_, _)" warning in the original report). *)
+let test_module_qualified_pattern_qualifier_is_stdlib_type_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_modqual_pattern_stdlib_type_name"
+    ~src:"mod ModQualTreeLeaf do\n\
+    \  needs IO.Console\n\
+         \  mod Tree do\n\
+         \    type T = Leaf(Int) | Node(T, T)\n\
+         \  end\n\
+         \  fn top(t : Tree.T) : Int do\n\
+         \    match t do\n\
+         \      Tree.Leaf(n) -> n\n\
+         \      Tree.Node(_, _) -> 1000\n\
+         \    end\n\
+         \  end\n\
+         \  fn f(t : Tree.T) : Int do\n\
+         \    match t do\n\
+         \      Tree.Node(Tree.Leaf(a), Tree.Leaf(b)) -> a * 10 + b\n\
+         \      Tree.Node(_, _) -> 99\n\
+         \      Tree.Leaf(n) -> n\n\
+         \    end\n\
+         \  end\n\
+         \  fn main(_cap_console : Cap(IO.Console)) do\n\
+         \    println(String.from_int(top(Tree.Leaf(6))))\n\
+         \    println(String.from_int(top(Tree.Node(Tree.Leaf(1), Tree.Leaf(2)))))\n\
+         \    println(String.from_int(f(Tree.Node(Tree.Leaf(1), Tree.Leaf(2)))))\n\
+         \    println(String.from_int(f(Tree.Node(Tree.Leaf(1), Tree.Node(Tree.Leaf(2), Tree.Leaf(3))))))\n\
+         \    println(String.from_int(f(Tree.Leaf(5))))\n\
+         \  end\n\
+          end\n"
+    ~expected:"6\n1000\n12\n99\n5"
+    ()
+
 (** [W3C2.4 / HAZARD H2] Golden preamble byte-diff test.
 
     These four strings are VERBATIM COPIES of llvm_emit.ml's deleted
@@ -13314,6 +13360,7 @@ declare ptr  @march_spawn_supervised(ptr %actor)
 declare i64  @march_actor_get_int(ptr %actor, i64 %index)
 declare ptr  @march_actor_call(ptr %actor, ptr %msg, i64 %timeout_ms)
 declare void @march_actor_reply(ptr %ref, ptr %result)
+declare ptr  @march_actor_reply_retain(ptr %ref)
 declare ptr  @march_send_after(ptr %actor, ptr %msg, i64 %delay_ms)
 declare void @march_timer_cancel(ptr %tok)
 declare void @march_run_scheduler()
@@ -15684,6 +15731,8 @@ let codegen_suites =
             test_msgpack_cross_module_ctor_resolution_compiled;
           Alcotest.test_case "module-qualified pattern for colliding ctor name" `Quick
             test_module_qualified_colliding_ctor_pattern_compiled;
+          Alcotest.test_case "module-qualified pattern whose qualifier is a stdlib type name" `Quick
+            test_module_qualified_pattern_qualifier_is_stdlib_type_compiled;
         ] );
       ( "string_codepoint", [
           Alcotest.test_case "String.from_codepoint/to_codepoints usable compiled (pure-March codec)" `Quick
