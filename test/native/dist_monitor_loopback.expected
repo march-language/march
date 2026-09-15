@@ -1,0 +1,3 @@
+node-a: monitoring node-b's actor 1
+node-a: MONITOR_FIRE for target 1 reason=Killed
+node-a: watcher saw 1 Down(s)

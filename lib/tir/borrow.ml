@@ -50,6 +50,8 @@ let extern_borrow_table : (string * bool list) list = [
   ("print",         [true]);   (* TIR builtin name before LLVM mangling *)
   ("println",       [true]);
   ("print_line",    [true]);
+  ("dist_monitor_register", [false; true; false; false]);
+  ("march_dist_monitor_register_pid", [false; true; false; false]);
   (* ── Actors: the pid is a HANDLE, read but never stored or released by
      these runtime functions (audited 2026-09-14: march_send, march_kill,
      march_actor_stop, march_is_alive, march_actor_is_draining,

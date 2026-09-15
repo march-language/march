@@ -120,6 +120,7 @@ let builtin_cap_table : (string * string) list = [
   ("tcp_send_all",          "IO.NetConnect");
   ("tcp_recv_all",          "IO.NetConnect");
   ("tcp_recv_exact",        "IO.NetConnect");
+  ("dist_monitor_register", "IO.NetConnect");
   ("tcp_recv_http",         "IO.NetConnect");
   ("tcp_recv_http_headers", "IO.NetConnect");
   ("tcp_recv_chunk",        "IO.NetConnect");
@@ -827,6 +828,10 @@ let builtin_bindings : (string * scheme) list =
        so no March-level naming call happens. Arg order matches monitor/kill
        (pid first). *)
     ("actor_register",   poly1 (fun a -> TArrow (TCon ("Pid", [a]), TArrow (t_string, t_bool))));
+    (* Cross-node monitors: record that (watcher_node, watcher_pid), reached
+       through the control connection [fd], watches local actor [target_pid];
+       the runtime writes MONITOR_FIRE on [fd] when it dies. *)
+    ("dist_monitor_register", Mono (TArrow (t_int, TArrow (t_string, TArrow (t_int, TArrow (t_int, t_unit))))));
     ("actor_unregister", Mono (TArrow (t_string, t_bool)));
     ("actor_whereis",    poly1 (fun a -> TArrow (t_string, TCon ("Option", [TCon ("Pid", [a])]))));
     ("actor_registered", Mono (TArrow (t_unit, TCon ("List", [t_string]))));

@@ -105,3 +105,26 @@ acked and dropped.
    addition; see the memory note on builtin sites).
 3. `MONITOR_ACK` + pending table + `MonitorRetry` task + dedupe.
 4. Scenario 5 and the `restart` monitor half.
+
+
+---
+
+## Shipped so far (2026-09-15): step 0
+
+`dist_monitor_register(target_pid, watcher_node, watcher_pid, fd)` — the
+March surface of `march_dist_monitor_register` (nine-site builtin; the
+runtime wrapper `march_dist_monitor_register_pid` copies the March string
+to a C string; capability `IO.NetConnect`; the interpreter refuses it with
+a message naming the compiled backend, the `block_sender` discipline).
+Witness `test/native/dist_monitor_loopback`: node-a's Watcher monitors an
+actor on node-b by `MONITOR_REQ`, node-b's reader registers it with the
+connection's fd, node-a asks node-b to `kill` it, the runtime's death path
+writes `MONITOR_FIRE` on that fd, node-a's reader delivers a `RemoteDown`
+to the Watcher: exactly one Down, reason `Killed`. 10/10 identical.
+
+Measured: `dune build @install` does not restage `_build/default/runtime`
+either (the first compile of the witness failed to link the new symbol);
+a rule with a runtime dep does. The fd registered is whatever connection
+the REQ arrived on — with the split, callers dispatch REQ on control, so
+that is already the control fd; the explicit registration from the
+`PeerRegistry` entry is still the contract's step 1.

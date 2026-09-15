@@ -438,6 +438,14 @@ let base_env : env =
   ; ("pid_of_int", VBuiltin ("pid_of_int", function
         | [VInt n] -> VPid n
         | _ -> eval_error "pid_of_int: expected int"))
+  ; ("dist_monitor_register", VBuiltin ("dist_monitor_register", function
+        (* The cross-node monitor registry lives in the C runtime
+           (march_monitor_registry.c) and fires from the compiled actor-death
+           path; the interpreter has no equivalent. Refused loudly, like
+           block_sender, rather than silently recording nothing. *)
+        | [VInt _; VString _; VInt _; VInt _] ->
+          eval_error "dist_monitor_register: cross-node monitors need the native runtime, which fires MONITOR_FIRE from the actor-death path; the interpreter cannot. Compile this program."
+        | _ -> eval_error "dist_monitor_register: expected (target_pid, watcher_node, watcher_pid, fd)"))
   ; ("pid_to_int", VBuiltin ("pid_to_int", function
         | [VPid n] -> VInt n
         | _ -> eval_error "pid_to_int: expected Pid"))

@@ -4614,6 +4614,23 @@ int64_t march_is_alive(void *actor) {
     return actor_alive_load(actor);
 }
 
+/* dist_monitor_register(target_pid, watcher_node, watcher_pid, fd): the March
+ * surface of march_dist_monitor_register. The node id arrives as a March
+ * string (length-prefixed, not NUL-terminated); the registry wants a C string
+ * and strdup()s it, so a bounded copy is made here. */
+void march_dist_monitor_register_pid(int64_t target_pid, void *node_str,
+                                     int64_t watcher_pid, int64_t fd) {
+    if (!node_str) return;
+    march_string *s = (march_string *)node_str;
+    size_t n = (size_t)s->len;
+    char *node = (char *)malloc(n + 1);
+    if (!node) return;
+    memcpy(node, s->data, n);
+    node[n] = 0;
+    march_dist_monitor_register(target_pid, node, watcher_pid, (int)fd);
+    free(node);
+}
+
 /* Dispose an undelivered/overflow-dropped/orphaned actor message. Registered
  * with the scheduler (march_sched_set_msg_dtor) below, at scheduler
  * lazy-init time, so it is called for: MARCH_MBOX_DROP_NEW's rejected
