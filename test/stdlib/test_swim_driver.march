@@ -256,8 +256,29 @@ mod TestSwimDriver do
       let events = Cons(GossipWithLoad({ node_id: "b@h", status: Alive, incarnation: 1 }, nl), Nil)
       let result = SwimDriver.step(s, 500, events)
       let s2 = match result do (st, _) -> st end
-      -- now_ms = 100 + 10001 → stale
-      assert (SwimDriver.peer_load(s2, "b@h", 10200) == None)
+      -- Aged from receipt (500), not the sender's stamp (100): fresh at
+      -- 10200, stale past 500 + 10000.
+      assert (SwimDriver.peer_load(s2, "b@h", 10200) != None)
+      assert (SwimDriver.peer_load(s2, "b@h", 10501) == None)
+    end
+
+    test "a load stamped by a clock far ahead still goes stale on the receiver's clock" do
+      let s = driver_a()
+      let nl = { node_id: "b@h", cpu_count: 4, cpu_load_milli: 2000,
+                 mem_total_mb: 8192, mem_avail_mb: 4096, sampled_at: 30500 }
+      let result = SwimDriver.step(s, 500, Cons(GossipWithLoad({ node_id: "b@h", status: Alive, incarnation: 1 }, nl), Nil))
+      let s2 = match result do (st, _) -> st end
+      assert (SwimDriver.peer_load(s2, "b@h", 10501) == None)
+      assert (List.length(SwimDriver.fresh_peer_loads(s2, 10501)) == 0)
+    end
+
+    test "a load stamped by a clock far behind is fresh on arrival" do
+      let s = driver_a()
+      let nl = { node_id: "b@h", cpu_count: 4, cpu_load_milli: 2000,
+                 mem_total_mb: 8192, mem_avail_mb: 4096, sampled_at: 0 - 29500 }
+      let result = SwimDriver.step(s, 500, Cons(GossipWithLoad({ node_id: "b@h", status: Alive, incarnation: 1 }, nl), Nil))
+      let s2 = match result do (st, _) -> st end
+      assert (SwimDriver.peer_load(s2, "b@h", 600) != None)
     end
 
     test "anti_entropy_peers fires on first tick (anti_entropy_next=0)" do

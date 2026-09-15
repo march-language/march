@@ -317,6 +317,10 @@ git log is authoritative for exact commits.
   nothing when unset.
 
 ### Fixed
+- Load-aware routing no longer depends on peers' clocks agreeing: a load report received
+  through `SwimDriver` is aged from its arrival on the receiving node, so a peer whose
+  clock ran ahead no longer sent reports that never went stale (or, behind, stale on
+  arrival). Pinned by the two-node scenario `skew`.
 - `NodeQueue.take_evicted` reached the writer's `Configure` handler instead of its
   own: `Actor.call` routes by the sentinel's constructor index. It now answers.
 - Interpreter: a handler of an actor declared in a module can call a fn declared

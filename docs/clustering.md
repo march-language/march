@@ -503,10 +503,11 @@ conformance suite covering the CRDT merge laws (commutative, associative, idempo
 **Live-network layers are exercised, but less exhaustively.** The actual socket
 handshake, synchronous RPC transport, SWIM gossip dispatch to peer file descriptors, and
 cross-node monitor firing require two real nodes and are covered by native multi-process
-integration tests rather than the same conformance corpus as the pure logic above. True
-multi-*machine* failure semantics (netsplit, node restart/incarnation, clock skew across
-hosts) aren't yet covered by an automated test at all; treat them as less battle-tested
-than the single-process core.
+integration tests rather than the same conformance corpus as the pure logic above. Clock skew between nodes does not affect load-aware routing: a node ages a peer's load
+report from when it arrived, on its own clock, so peer clocks need not agree (a two-process
+test runs one node 30 s ahead). True multi-*machine* failure semantics (netsplit, node
+restart/incarnation across hosts) aren't yet covered by an automated test at all; treat
+them as less battle-tested than the single-process core.
 
 ---
 
