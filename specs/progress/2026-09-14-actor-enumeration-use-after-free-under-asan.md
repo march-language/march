@@ -1,4 +1,17 @@
-`[P2]` # `test/native/actor_enumeration.march` is a use-after-free under ASAN, on main
+# `test/native/actor_enumeration.march` was a use-after-free under ASAN, on main
+
+**Closed 2026-09-14, the same day, by a different session that met it as the
+ubuntu CI leg's `tcache_thread_shutdown(): unaligned tcache chunk detected`
+abort:** the diagnosis below was right. The 40-byte object is the actor
+record; `main` releasing its unused `a` freed a running actor because the
+runtime held no reference of its own. Fix and reproduction in
+[[2026-09-14-live-actor-freed-by-dropping-its-last-pid]]; the ownership
+question the last paragraph raises is settled in
+[[2026-09-14-pid-ownership-settled-send-borrows-self-owned]]. The original
+note follows.
+
+---
+
 
 Found 2026-09-14 while sweeping this branch's ASAN corpus
 (`specs/progress/2026-09-14-closure-calls-consume-their-arguments.md`). It is
