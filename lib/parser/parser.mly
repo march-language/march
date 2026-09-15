@@ -560,8 +560,17 @@ decl:
 fn_bound_param:
   | name = lower_name; COLON; t = ty { (name, t) }
 
+(* The name a `fn`/`pfn` DECLARES.  `send` is a keyword (the actor primitive
+   `send(pid, msg)` is its own expression form), but a module may still define
+   a function called `send` -- reached only qualified, `Node.send(...)`, which
+   `expr_field` already admits for `Chan.send`.  The bare call form stays the
+   actor primitive, so nothing a program already says changes meaning. *)
+fn_decl_name:
+  | n = lower_name { n }
+  | SEND           { mk_name "send" $loc }
+
 fn_decl:
-  | FN; name = lower_name; _lp = LPAREN; params = separated_list(COMMA, fn_param); _rp = RPAREN;
+  | FN; name = fn_decl_name; _lp = LPAREN; params = separated_list(COMMA, fn_param); _rp = RPAREN;
     ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
     { DFn ({ fn_name = name;
              fn_vis = Public;
@@ -576,7 +585,7 @@ fn_decl:
                                mk_span ($startpos(_lp), $endpos(_rp)) }];
              fn_bounds = [] },
            mk_span ($loc)) }
-  | FN; name = lower_name;
+  | FN; name = fn_decl_name;
     LBRACKET; bounds = separated_nonempty_list(COMMA, fn_bound_param); RBRACKET;
     _lp = LPAREN; params = separated_list(COMMA, fn_param); _rp = RPAREN;
     ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
@@ -593,7 +602,7 @@ fn_decl:
                                mk_span ($startpos(_lp), $endpos(_rp)) }];
              fn_bounds = bounds },
            mk_span ($loc)) }
-  | PFN; name = lower_name; _lp = LPAREN; params = separated_list(COMMA, fn_param); _rp = RPAREN;
+  | PFN; name = fn_decl_name; _lp = LPAREN; params = separated_list(COMMA, fn_param); _rp = RPAREN;
     ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
     { DFn ({ fn_name = name;
              fn_vis = Private;
@@ -608,7 +617,7 @@ fn_decl:
                                mk_span ($startpos(_lp), $endpos(_rp)) }];
              fn_bounds = [] },
            mk_span ($loc)) }
-  | PFN; name = lower_name;
+  | PFN; name = fn_decl_name;
     LBRACKET; bounds = separated_nonempty_list(COMMA, fn_bound_param); RBRACKET;
     _lp = LPAREN; params = separated_list(COMMA, fn_param); _rp = RPAREN;
     ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
@@ -625,12 +634,12 @@ fn_decl:
                                mk_span ($startpos(_lp), $endpos(_rp)) }];
              fn_bounds = bounds },
            mk_span ($loc)) }
-  | FN; _n = lower_name; LPAREN; _ps = separated_list(COMMA, fn_param); RPAREN; error
+  | FN; _n = fn_decl_name; LPAREN; _ps = separated_list(COMMA, fn_param); RPAREN; error
     { error_raise
         "I was expecting `do` to start the function body here:"
         (Some "fn name(params) do\n    body\nend")
         $startpos($6) }
-  | PFN; _n = lower_name; LPAREN; _ps = separated_list(COMMA, fn_param); RPAREN; error
+  | PFN; _n = fn_decl_name; LPAREN; _ps = separated_list(COMMA, fn_param); RPAREN; error
     { error_raise
         "I was expecting `do` to start the function body here:"
         (Some "pfn name(params) do\n    body\nend")
@@ -728,13 +737,45 @@ actor_decl:
   | ACTOR; name = upper_name; DO;
     STATE; LBRACE; fields = separated_list(COMMA, field); RBRACE;
     INIT; init_expr = expr;
+    mb = option(mailbox_clause);
     sup = option(supervise_block);
     handlers = list(actor_handler);
     END
     { DActor (Public, name,
               { actor_state = fields; actor_init = init_expr; actor_handlers = handlers;
-                actor_supervise = sup; actor_compat = "full"; actor_invariant = None },
+                actor_supervise = sup; actor_compat = "full"; actor_invariant = None;
+                actor_mailbox = mb },
               mk_span ($loc)) }
+
+(** mailbox N policy — a bound on the actor's mailbox, declared with the
+    actor rather than at every spawn site. Lowers to
+    actor_set_mailbox_limit(pid, N, policy) right after each spawn. The
+    policies are Actor.set_queue_limit's: drop_new 1, drop_old 2,
+    block_sender 3 (compiled backend only).
+
+    `mailbox` is CONTEXTUAL, not a reserved word: it is recognised only in
+    this position (after `init`, before `supervise`/`on`, where no other
+    lower-case identifier can start anything), so `fn mailbox(...)` and
+    `let mailbox = ...` keep working — test/session/stream_actor.march
+    names its transport constructor exactly that. *)
+mailbox_clause:
+  | kw = lower_name; n = INT; p = lower_name
+    { if kw.txt <> "mailbox" then
+        error_raise
+          (Printf.sprintf "I don't recognize `%s` here -- after `init`, an actor body continues with `mailbox N policy`, a `supervise` block, or `on` handlers." kw.txt)
+          (Some "mailbox 1000 drop_old")
+          $startpos(kw);
+      let policy = match p.txt with
+        | "drop_new" -> 1
+        | "drop_old" -> 2
+        | "block_sender" -> 3
+        | other ->
+          error_raise
+            (Printf.sprintf "I don't know the mailbox policy `%s` -- it must be drop_new, drop_old or block_sender." other)
+            (Some "mailbox 1000 drop_old")
+            $startpos(p)
+      in
+      (n, policy) }
 
 (** Application entry point:
       app MyApp do

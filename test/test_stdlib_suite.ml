@@ -1126,6 +1126,148 @@ let test_eval_monitor_builtin () =
   Alcotest.(check int) "mailbox_size counts queued user + Down exactly once" 2
     (match v with March_eval.Eval.VInt n -> n | _ -> -1)
 
+(* block_sender (policy 3) needs the native scheduler to park the sender;
+   the interpreter silently ran unbounded until 2026-09-14. Refused at the
+   call, with a message naming the alternatives. *)
+let test_eval_block_sender_refused_interpreted () =
+  let env = eval_module {|mod Test do
+    actor A do
+      state { x : Int }
+      init { x: 0 }
+      on Noop() do { x: state.x } end
+    end
+    fn main() do
+      let pa = spawn(A)
+      actor_set_mailbox_limit(pa, 4, 3)
+      0
+    end
+  end|} in
+  let raised =
+    try ignore (call_fn env "main" []); None
+    with March_eval.Eval.Eval_error m -> Some m
+  in
+  match raised with
+  | Some m ->
+    Alcotest.(check bool) ("names block_sender: " ^ m) true
+      (let n = String.length "block_sender" in
+       let rec go i = i + n <= String.length m && (String.sub m i n = "block_sender" || go (i + 1)) in
+       go 0)
+  | None -> Alcotest.fail "policy 3 was accepted by the interpreter"
+
+let test_eval_mailbox_decl_bounds_at_spawn () =
+  let env = eval_module {|mod Test do
+    actor Slow do
+      state { n : Int }
+      init  { n: 0 }
+      mailbox 2 drop_new
+      on Bump() do { n: state.n + 1 } end
+    end
+    fn main() do
+      let pid = spawn(Slow)
+      let _ = send(pid, Bump())
+      let _ = send(pid, Bump())
+      let _ = send(pid, Bump())
+      let _ = send(pid, Bump())
+      let _ = send(pid, Bump())
+      run_until_idle()
+      match get_actor_field(pid, "n") do
+        Some(n) -> n
+        None -> -1
+      end
+    end
+  end|} in
+  match call_fn env "main" [] with
+  | March_eval.Eval.VInt n -> Alcotest.(check int) "two of five delivered under mailbox 2 drop_new" 2 n
+  | v -> Alcotest.fail ("unexpected result: " ^ March_eval.Eval_runtime.value_to_string v)
+
+let test_eval_mailbox_decl_block_sender_refused () =
+  let env = eval_module {|mod Test do
+    actor A do
+      state { x : Int }
+      init { x: 0 }
+      mailbox 4 block_sender
+      on Noop() do { x: state.x } end
+    end
+    fn main() do
+      let _ = spawn(A)
+      0
+    end
+  end|} in
+  let raised =
+    try ignore (call_fn env "main" []); None
+    with March_eval.Eval.Eval_error m -> Some m
+  in
+  match raised with
+  | Some m ->
+    Alcotest.(check bool) ("names block_sender: " ^ m) true
+      (let n = String.length "block_sender" in
+       let rec go i = i + n <= String.length m && (String.sub m i n = "block_sender" || go (i + 1)) in
+       go 0)
+  | None -> Alcotest.fail "`mailbox N block_sender` was accepted by the interpreter"
+
+(* `mailbox` is contextual, not reserved: the first cut made it a keyword and
+   broke every fixture with `fn mailbox(...)` (test/session/stream_actor.march). *)
+let test_eval_mailbox_is_not_a_reserved_word () =
+  let env = eval_module {|mod Test do
+    fn mailbox(x : Int) : Int do x + 1 end
+    actor A do
+      state { n : Int }
+      init  { n: 0 }
+      mailbox 3 drop_old
+      on Noop() do { n: state.n } end
+    end
+    fn main() do
+      let mailbox = mailbox(1)
+      let _ = spawn(A)
+      mailbox
+    end
+  end|} in
+  match call_fn env "main" [] with
+  | March_eval.Eval.VInt n -> Alcotest.(check int) "fn mailbox and let mailbox both still work" 2 n
+  | v -> Alcotest.fail ("unexpected result: " ^ March_eval.Eval_runtime.value_to_string v)
+
+let test_eval_actor_terminal_reason () =
+  let env = eval_module {|mod Test do
+    actor A do
+      state { x : Int }
+      init { x: 0 }
+      on Noop() do { x: state.x } end
+    end
+    fn main() do
+      let p = spawn(A)
+      let before = actor_terminal_reason(pid_to_int(p))
+      kill(p)
+      run_until_idle()
+      (before, actor_terminal_reason(pid_to_int(p)), actor_terminal_reason(9999))
+    end
+  end|} in
+  match call_fn env "main" [] with
+  | March_eval.Eval.VTuple [before; after; unknown] ->
+    Alcotest.(check string) "alive: None" "None" (March_eval.Eval_runtime.value_to_string before);
+    Alcotest.(check string) "killed: Some((1, \"\"))" "Some((1, \"\"))" (March_eval.Eval_runtime.value_to_string after);
+    Alcotest.(check string) "unknown index: None" "None" (March_eval.Eval_runtime.value_to_string unknown)
+  | v -> Alcotest.fail ("unexpected result: " ^ March_eval.Eval_runtime.value_to_string v)
+
+let test_eval_pid_to_int_roundtrip () =
+  let env = eval_module {|mod Test do
+    actor A do
+      state { x : Int }
+      init { x: 0 }
+      on Noop() do { x: state.x } end
+    end
+    fn main() do
+      let pa = spawn(A)
+      let n = pid_to_int(pa)
+      let back = pid_of_int(n)
+      (n, to_string(pa) == "Pid(" ++ int_to_string(n) ++ ")", is_alive(back))
+    end
+  end|} in
+  match call_fn env "main" [] with
+  | March_eval.Eval.VTuple [March_eval.Eval.VInt _; March_eval.Eval.VBool disp; March_eval.Eval.VBool alive] ->
+    Alcotest.(check bool) "pid_to_int is the Pid(N) display index" true disp;
+    Alcotest.(check bool) "pid_of_int(pid_to_int(p)) is p" true alive
+  | v -> Alcotest.fail ("unexpected result: " ^ March_eval.Eval_runtime.value_to_string v)
+
 let test_eval_monitor_down_target_is_pid () =
   let env = eval_module {|mod Test do
     actor Target do
@@ -13583,7 +13725,13 @@ let stdlib_suites =
         Alcotest.test_case "Down killed reason"                    `Quick (with_reset test_down_message_killed_reason);
         Alcotest.test_case "Down dead-target fallback"             `Quick (with_reset test_down_message_dead_target_fallback);
         Alcotest.test_case "monitor builtin end-to-end"           `Quick (with_reset test_eval_monitor_builtin);
+        Alcotest.test_case "block_sender refused under the interpreter" `Quick (with_reset test_eval_block_sender_refused_interpreted);
         Alcotest.test_case "Down target is a Pid in source"       `Quick (with_reset test_eval_monitor_down_target_is_pid);
+        Alcotest.test_case "pid_to_int round-trips with pid_of_int" `Quick (with_reset test_eval_pid_to_int_roundtrip);
+        Alcotest.test_case "mailbox N policy on the declaration bounds every spawn" `Quick (with_reset test_eval_mailbox_decl_bounds_at_spawn);
+        Alcotest.test_case "mailbox N block_sender refused under the interpreter" `Quick (with_reset test_eval_mailbox_decl_block_sender_refused);
+        Alcotest.test_case "mailbox is not a reserved word" `Quick (with_reset test_eval_mailbox_is_not_a_reserved_word);
+        Alcotest.test_case "actor_terminal_reason: None alive, Some((1, \"\")) after kill" `Quick (with_reset test_eval_actor_terminal_reason);
       ]);
       ("supervision phase2", [
         Alcotest.test_case "one_for_one restart"          `Quick (with_reset test_supervision_one_for_one_restart);

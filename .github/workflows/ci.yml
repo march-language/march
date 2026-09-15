@@ -88,6 +88,12 @@ jobs:
       - name: Check runtime C source lists against runtime/sources.list
         run: scripts/check-runtime-sources.sh
 
+      # An actor record's word 0 is its refcount, shared with every thread.
+      # A plain store to it (the old `a[0] = 1` dispatch clobber) freed live
+      # actors; this forbids the pattern at the source level.
+      - name: Check no plain store to an actor record's refcount word
+        run: scripts/check-actor-rc-stores.sh
+
   # The long pole. Kept as its own job so nothing else waits behind it.
   test:
     strategy:
@@ -132,6 +138,43 @@ jobs:
         run: |
           eval $(opam env)
           dune runtest
+
+      # node_discovery was quarantined 2026-08-08 for a torn-stdout race seen
+      # ~1-in-2 on THIS runner and fixed 2026-08-21 (march_stdout_mu). It is
+      # back on runtest; this step is the trial that justifies that, and the
+      # guard that keeps it: the compiled binary 200 times, each run's sorted
+      # output diffed against the golden, the first tear or crash reported
+      # verbatim. ~40s. See specs/todos/2026-09-14-distributed-plane-known-gaps.md.
+      - name: Soak node_discovery (torn-stdout guard)
+        if: matrix.os == 'ubuntu-24.04'
+        timeout-minutes: 5
+        run: |
+          eval $(opam env)
+          dune build test/native_node_discovery.out
+          bin=_build/default/test/native_node_discovery
+          exp=test/native/node_discovery.expected
+          for i in $(seq 1 200); do
+            if ! "$bin" > /tmp/nd.out 2>/tmp/nd.err; then
+              echo "::error::node_discovery run $i exited $? (stderr follows)"; cat /tmp/nd.err; exit 1
+            fi
+            if ! LC_ALL=C sort /tmp/nd.out | diff -q - "$exp" > /dev/null; then
+              echo "::error::node_discovery run $i: sorted output differs from the golden"
+              LC_ALL=C sort /tmp/nd.out | diff - "$exp" || true
+              exit 1
+            fi
+          done
+          echo "node_discovery: 200/200 runs matched the golden"
+
+      # Two real OS processes, a fault applied from outside (SIGKILL + restart
+      # with a new creation), per-node goldens. ~5s per scenario. Each scenario
+      # is test/two_node/<name>/; see specs/progress/2026-09-14-two-node-failure-semantics-harness.md.
+      - name: Two-node scenarios
+        if: matrix.os == 'ubuntu-24.04'
+        timeout-minutes: 10
+        run: |
+          eval $(opam env)
+          dune build bin/main.exe
+          for s in $(scripts/two-node.sh --list); do scripts/two-node.sh "$s" || exit 1; done
 
   # Static-semantics + grammar corpora, doc notebooks and formatting: all
   # independent of `dune runtest` and of each other, and all short — grouped
@@ -196,6 +239,15 @@ jobs:
           #   else regressed. Note the 24 here vs the 28 recorded above:
           #   main had already travelled down to 24 since 2026-07-29.
           #
+          #   RAISED 2026-09-14, 34 -> 46, deliberately, for the same
+          #   reason: Array.get/set/pop gained bounds contracts, which
+          #   raises 15 obligations at the stdlib's own Array call sites
+          #   (aho_corasick, rrb_vec, …) in every program. Attributed with
+          #   scripts/refine-oracle.sh against a compiler built at main:
+          #   this file's slice went 17 proved / 33 skipped -> 19 proved /
+          #   46 skipped, exactly the +2 proved / +13 skipped every one of
+          #   the 326 other fixtures gained, and no verdict elsewhere moved.
+          #
           #   Lower is better — this bound
           #   may only ever be revised DOWN. This is the check that is
           #   actually sensitive to the pass checking less than it used to:
@@ -215,7 +267,7 @@ jobs:
           #   guard_discharges.march, whose `user code` slice is 1 proved /
           #   0 violated / 0 skipped (measured 2026-07-29). Higher is better
           #   — this bound may only ever be revised UP.
-          baseline=34
+          baseline=46
           proved_floor=1
           floor_fixture=specs/lang/types/accept/t118_refine_length_guard_discharges.march
           dune build bin/main.exe
@@ -492,7 +544,7 @@ jobs:
   # exhaustion with the TRMC variable itself and made failures non-reproducible.
   trmc-suite:
     runs-on: ubuntu-24.04
-    timeout-minutes: 50
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@v4
 
@@ -511,8 +563,12 @@ jobs:
           dune build bin/main.exe
 
       - name: Test suite with TRMC disabled
-        timeout-minutes: 35
-        # Cold build + full test suite (~20 min of tests) with TRMC turned off.
+        timeout-minutes: 45
+        # Cold build + full test suite with TRMC turned off. 35 minutes stopped
+        # being enough in September 2026: the run on main at 16e27ab1, and
+        # PR #449's, printed "All suites passed." in the same second the step
+        # timed out (the z3-backed refinecheck suite alone takes ~11 minutes
+        # here). The job cap moves with it: setup 12 + build 10 + this 45.
         run: |
           eval $(opam env)
           MARCH_NO_TRMC=1 ./scripts/run-tests.sh

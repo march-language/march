@@ -136,21 +136,48 @@ let scan_sexp ~(depth : int) ~(in_string : bool) (line : string) : int * bool =
     line;
   (!d, !q)
 
-let rec read_verdict (ic : in_channel) ~(saw_error : bool) : string * bool =
+(* ── Malformed-query accounting ───────────────────────────────────────────
+   A query z3 rejects is reported to callers as [Unknown], which every caller
+   treats as "not proved" — so a sort the checker got wrong looks exactly like
+   an ordinary skip.  That is the right runtime behaviour and the wrong test
+   behaviour: it is how an ill-sorted leaf survives a green suite.  Every
+   rejection is therefore counted here, with z3's message, and when
+   [MARCH_REFINE_Z3_ERRORS] names a file the full query is appended to it.
+   The refinement test suite asserts the count stays at zero
+   (specs/2026-09-14-set-refinements-strengthening-design.md §2.5). *)
+let malformed_count = ref 0
+let malformed_messages : string list ref = ref []
+
+let record_malformed ~(query : string) (messages : string list) : unit =
+  incr malformed_count;
+  let msg = String.concat " " messages in
+  if List.length !malformed_messages < 50 then malformed_messages := msg :: !malformed_messages;
+  match Sys.getenv_opt "MARCH_REFINE_Z3_ERRORS" with
+  | Some path when path <> "" ->
+    (try
+       let oc = open_out_gen [ Open_append; Open_creat; Open_wronly ] 0o644 path in
+       Printf.fprintf oc ";; ---- z3 rejected this query: %s\n%s\n" msg query;
+       close_out oc
+     with Sys_error _ -> ())
+  | _ -> ()
+
+let rec read_verdict ?(errors = ref []) (ic : in_channel) ~(saw_error : bool) : string * bool =
   let line = String.trim (input_line ic) in
-  if line = "" then read_verdict ic ~saw_error
+  if line = "" then read_verdict ~errors ic ~saw_error
   else if String.starts_with ~prefix:"(error" line then begin
     (* Consume the rest of this error s-expression, however many lines it takes. *)
     let d = ref 0 and q = ref false in
     let d0, q0 = scan_sexp ~depth:0 ~in_string:false line in
     d := d0;
     q := q0;
+    errors := line :: !errors;
     while !d > 0 do
-      let d1, q1 = scan_sexp ~depth:!d ~in_string:!q (input_line ic) in
+      let next = input_line ic in
+      let d1, q1 = scan_sexp ~depth:!d ~in_string:!q next in
       d := d1;
       q := q1
     done;
-    read_verdict ic ~saw_error:true
+    read_verdict ~errors ic ~saw_error:true
   end
   else (line, saw_error)
 
@@ -162,7 +189,18 @@ let check ?(preamble = "") (t : t) (vc : Smt.vc) : result =
   output_string t.oc (Smt.assertion_block vc);
   output_string t.oc "(check-sat)\n";
   flush t.oc;
-  let verdict, saw_error = read_verdict t.ic ~saw_error:false in
+  (match Sys.getenv_opt "MARCH_REFINE_Z3_LOG" with
+   | Some path when path <> "" ->
+     (try
+        let oc = open_out_gen [ Open_append; Open_creat; Open_wronly ] 0o644 path in
+        Printf.fprintf oc ";; ==== sent\n%s\n%s\n" preamble (Smt.assertion_block vc);
+        close_out oc
+      with Sys_error _ -> ())
+   | _ -> ());
+  let errors = ref [] in
+  let verdict, saw_error = read_verdict ~errors t.ic ~saw_error:false in
+  if saw_error then
+    record_malformed ~query:(preamble ^ "\n" ^ Smt.assertion_block vc) (List.rev !errors);
   let result =
     if saw_error then
       (* Malformed VC: the verdict is untrustworthy (see [read_verdict]).  We
@@ -183,6 +221,21 @@ let check ?(preamble = "") (t : t) (vc : Smt.vc) : result =
   in
   output_string t.oc "(pop 1)\n";
   flush t.oc;
+  (* [MARCH_REFINE_Z3_LOG=<file>]: append every query with the verdict z3
+     gave it.  A debugging aid for comparing solver versions: piping z3's
+     stdout through `tee` stalls this driver's line-by-line protocol, so the
+     log is written from inside instead. *)
+  (match Sys.getenv_opt "MARCH_REFINE_Z3_LOG" with
+   | Some path when path <> "" ->
+     (try
+        let oc = open_out_gen [ Open_append; Open_creat; Open_wronly ] 0o644 path in
+        let verdict_s =
+          match result with Unsat -> "unsat" | Unknown -> "unknown" | Sat _ -> "sat"
+        in
+        Printf.fprintf oc ";; ==== verdict: %s\n" verdict_s;
+        close_out oc
+      with Sys_error _ -> ())
+   | _ -> ());
   result
 
 (* Terminate and REAP the child.  Graceful (exit)+EOF first, then SIGKILL so

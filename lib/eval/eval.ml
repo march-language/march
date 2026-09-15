@@ -1775,6 +1775,57 @@ and eval_expr_inner (env : env) (e : expr) : value =
     let label = match name with Some n -> "?" ^ n.txt | None -> "?" in
     eval_error "typed hole `%s` reached the evaluator — the type checker should have caught this" label
 
+  | EApp (EVar ({ txt = "self"; _ } as n), [], _)
+    when (match List.assoc_opt "self" env with Some (VPid _) -> true | _ -> false) ->
+    (* `self()` inside an actor handler, where `self` is bound to this actor's
+       pid (see [run_scheduler]).  The typechecker accepts both spellings as
+       the same Pid (a zero-arg call of a value is the value), and the call
+       form is the one the Phase 4 actor tests and older code use; without
+       this arm it would apply a pid.  Outside a handler `self` is the
+       builtin, not a VPid, and the ordinary call below reaches it. *)
+    lookup n.txt env
+
+  (* The typed remote send (stdlib/node.march).  Encode with the derived
+     `JsonTo` impl taken straight out of [impl_tbl] (the bare `to_json`
+     binding is the LAST derive's, as the `from_json` note below explains)
+     and call the explicit form.
+
+     The type comes from the typechecker's per-site record when there is one
+     (March_ast.Json_dispatch, the same tag the compiled rewrite puts on the
+     wire, module-qualified), and otherwise from the VALUE -- the interpreter
+     runs unchecked programs too (the stdlib March test harness parses,
+     desugars and evaluates, and never typechecks), and a message in hand
+     names its own type the way the generic `to_json` builtin resolves it
+     ([type_name_of_value]: a record's registered shape, a constructor's
+     parent type).  On that path the tag is the runtime (short) name.  Only a
+     value no table and no shape can name reaches the panicking body. *)
+  | EApp (EVar { txt = "Node.send"; span = fsp } as f, [peer_e; to_e; msg_e], sp) ->
+    (* Each argument is evaluated exactly once, in order, before the type is
+       resolved -- a guard that peeked at the message would evaluate it twice. *)
+    let peer = eval_expr env peer_e in
+    let to_ = eval_expr env to_e in
+    let msg = eval_expr env msg_e in
+    let tag =
+      match March_ast.Json_dispatch.find sp with
+      | Some t -> Some t
+      | None -> type_name_of_value msg
+    in
+    (match tag with
+     | None ->
+       (* Neither the table nor the value names the type: the ordinary call,
+          i.e. `Node.send`'s own body, which panics saying so. *)
+       apply (eval_expr env f) [peer; to_; msg]
+     | Some tag ->
+       let codec =
+         match Hashtbl.find_opt impl_tbl ("JsonTo", March_ast.Json_dispatch.short tag) with
+         | Some c -> c
+         | None ->
+           eval_error "Node.send: no derived Json encoder registered for `%s`" tag
+       in
+       let json = apply codec [msg] in
+       let send = eval_expr env (EVar { txt = "Node.send_tagged"; span = fsp }) in
+       apply send [peer; to_; VString tag; json])
+
   | EApp (f, args, sp) ->
     (* E-App-Clo / E-App-Prim — core-march.md §4.2 (dispatch on fn_val's shape
        happens inside apply/apply_inner: VClosure -> E-App-Clo, VBuiltin -> E-App-Prim) *)
@@ -2123,6 +2174,21 @@ and eval_expr_inner (env : env) (e : expr) : value =
                     ai_linear_values = [];
                     ai_mbox_limit = 0; ai_mbox_policy = 0 } in
        Hashtbl.add actor_registry pid inst;
+       (* `mailbox N policy` on the declaration: the same binding
+          Actor.set_queue_limit makes, applied at every spawn of this actor.
+          policy 3 (block_sender) is refused exactly as the builtin refuses
+          it: the interpreter cannot park a sender. *)
+       (match def.actor_mailbox with
+        | None -> ()
+        | Some (_, 3) ->
+          eval_error
+            "actor %s: `mailbox N block_sender` needs the native scheduler, which \
+             parks the sender; the interpreter cannot. Compile this program, or \
+             declare drop_new / drop_old under `march run`." actor_name
+        | Some (limit, policy) ->
+          (match Hashtbl.find_opt actor_registry pid with
+           | Some inst -> inst.ai_mbox_limit <- limit; inst.ai_mbox_policy <- policy
+           | None -> ()));
        VPid pid)
 
   | ESend (cap_expr, msg_expr, _) ->
@@ -2518,8 +2584,17 @@ let run_scheduler () =
                  List.map2 (fun p v -> (p.param_name.txt, v))
                    handler.ah_params msg_args
                in
+               (* `self` is a handler-scoped variable holding this actor's
+                  pid, as the typechecker binds it.  Without this binding a
+                  bare `self` resolved to the global `self` BUILTIN -- a
+                  function value, not a pid -- so `send(self, m)` raised,
+                  crash_actor swallowed it, and the handler silently stopped
+                  at the send with the process still exiting 0.  After the
+                  params, so a param named `self` shadows it, as in the
+                  typechecker. *)
                let handler_env =
-                 [("state", inst.ai_state)] @ param_bindings @ !(inst.ai_env_ref)
+                 [("state", inst.ai_state)] @ param_bindings
+                 @ [("self", VPid pid)] @ !(inst.ai_env_ref)
                in
                (match !eval_expr_hook handler_env handler.ah_body with
                 | new_state ->
@@ -3042,7 +3117,8 @@ let shutdown_actor_pid (pid : int) : unit =
                 handler.ah_params msg_args
             in
             let handler_env =
-              [("state", inst.ai_state)] @ param_bindings @ !(inst.ai_env_ref)
+              [("state", inst.ai_state)] @ param_bindings
+              @ [("self", VPid pid)] @ !(inst.ai_env_ref)
             in
             (match !eval_expr_hook handler_env handler.ah_body with
              | new_state -> inst.ai_state <- new_state

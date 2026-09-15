@@ -1,0 +1,6 @@
+node-a: node-b Alive (incarnation 1)
+node-a: first ack from node-b
+node-a: node-b Suspect (incarnation 1)
+node-a: node-b Dead (incarnation 1)
+node-a: node-b Alive (incarnation 2)
+node-a: done

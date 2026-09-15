@@ -191,6 +191,18 @@ let builtins : builtin list = [
     in_is_builtin = false; declare_sig = Some "declare i64    @march_hash_string(ptr %x)" };
   { march_name = "march_hash_bool"; c_name = None; ret_ty = Some Tir.TInt;
     in_is_builtin = false; declare_sig = Some "declare i64    @march_hash_bool(i64 %x)" };
+  (* The user-facing three-way comparisons.  The typechecker has offered them
+     (typecheck_builtins.ml, each `(T, T) -> Int`) but only the
+     `march_compare_*` rows above existed, marked in_is_builtin = false, so a
+     compiled call fell through to the bare name and failed to link
+     (`_compare_string` undefined).  The C helpers return -1/0/1, the same
+     contract as the `Ord` method `compare`. *)
+  { march_name = "compare_int"; c_name = Some "march_compare_int"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64    @march_compare_int(i64 %x, i64 %y)" };
+  { march_name = "compare_float"; c_name = Some "march_compare_float"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64    @march_compare_float(double %x, double %y)" };
+  { march_name = "compare_string"; c_name = Some "march_compare_string"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64    @march_compare_string(ptr %x, ptr %y)" };
   { march_name = "string_length"; c_name = Some "march_string_byte_length"; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_string_byte_length(ptr %s)" };
   { march_name = "string_byte_length"; c_name = Some "march_string_byte_length"; ret_ty = Some Tir.TInt;
@@ -885,6 +897,16 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare void @march_demonitor(i64 %ref)" };
   { march_name = "monitor"; c_name = Some "march_monitor"; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_monitor(ptr %watcher, ptr %target)" };
+  { march_name = "actor_terminal_reason"; c_name = Some "march_actor_terminal_reason"; ret_ty = Some (Tir.TCon ("Option", [Tir.TTuple [Tir.TInt; Tir.TString]]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_actor_terminal_reason(i64 %pid_index)" };
+  { march_name = "dist_monitor_pending"; c_name = Some "march_dist_monitor_pending"; ret_ty = Some (Tir.TCon ("List", [Tir.TPtr Tir.TUnit]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_dist_monitor_pending()" };
+  { march_name = "dist_monitor_forget_node"; c_name = Some "march_dist_monitor_forget_node_str"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_dist_monitor_forget_node_str(ptr %node)" };
+  { march_name = "dist_monitor_ack"; c_name = Some "march_dist_monitor_ack_pid"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void @march_dist_monitor_ack_pid(i64 %target_pid, i64 %watcher_pid)" };
+  { march_name = "dist_monitor_register"; c_name = Some "march_dist_monitor_register_pid"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void @march_dist_monitor_register_pid(i64 %target_pid, ptr %node, i64 %watcher_pid, i64 %fd)" };
   { march_name = "mailbox_size"; c_name = Some "march_mailbox_size"; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_mailbox_size(ptr %pid)" };
   { march_name = "sched_stat"; c_name = Some "march_sched_stat"; ret_ty = Some Tir.TInt;
@@ -921,6 +943,13 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare i64  @march_revoke_cap(ptr %cap)" };
   { march_name = "is_cap_valid"; c_name = Some "march_is_cap_valid"; ret_ty = Some Tir.TBool;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_is_cap_valid(ptr %cap)" };
+  (* `self` inside an actor handler.  The typechecker shadows the global
+     binding with this actor's own Pid (typecheck.ml's DActor arm); the
+     interpreter has had a real builtin since actors landed, but this table
+     did not, so the emitter produced `call ptr @self()` naming a symbol
+     nothing defined and the module died in clang. *)
+  { march_name = "self"; c_name = Some "march_self"; ret_ty = Some (Tir.TCon ("Pid", [Tir.TVar "a"]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_self()" };
   { march_name = "pid_of_int"; c_name = Some "march_pid_of_int"; ret_ty = Some (Tir.TCon ("Pid", [Tir.TVar "a"]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_pid_of_int(i64 %n)" };
   { march_name = "get_actor_field"; c_name = Some "march_get_actor_field"; ret_ty = Some (Tir.TCon ("Option", [Tir.TVar "a"]));
@@ -931,6 +960,10 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare void @march_actor_register_child(ptr %sup, ptr %child, ptr %spawn_fn, i64 %word_idx, i64 %restart_type, i64 %shutdown_ms)" };
   { march_name = "pid_index_of"; c_name = Some "march_pid_index_of"; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_pid_index_of(ptr %actor)" };
+  (* The surface name for the same C symbol (pid_index_of is the lowering's
+     internal name, used by supervisor child registration); no second PDeclare. *)
+  { march_name = "pid_to_int"; c_name = Some "march_pid_index_of"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = None };
   { march_name = "to_string"; c_name = Some "march_value_to_string"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_value_to_string(ptr %v)" };
   { march_name = "chan_new"; c_name = Some "march_chan_new"; ret_ty = Some (Tir.TTuple [Tir.TCon ("Chan", []); Tir.TCon ("Chan", [])]);
@@ -1619,6 +1652,11 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PComment "; Monitor/supervision builtins";
   PDeclare "march_demonitor";
   PDeclare "march_monitor";
+  PDeclare "march_actor_terminal_reason";
+  PDeclare "march_dist_monitor_pending";
+  PDeclare "march_dist_monitor_forget_node_str";
+  PDeclare "march_dist_monitor_ack_pid";
+  PDeclare "march_dist_monitor_register_pid";
   PDeclare "march_mailbox_size";
   PDeclare "march_sched_stat";
   PDeclare "march_actor_set_mbox_limit";
@@ -1633,6 +1671,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_send_checked";
   PDeclare "march_revoke_cap";
   PDeclare "march_is_cap_valid";
+  PDeclare "march_self";
   PDeclare "march_pid_of_int";
   PDeclare "march_get_actor_field";
   PDeclare "march_register_supervisor";
@@ -1884,10 +1923,111 @@ let reset_called_syms () = Hashtbl.reset called_syms
 let called_c_symbols () =
   Hashtbl.fold (fun k () acc -> k :: acc) called_syms []
 
+(* C symbols a bare user function name must not be emitted as.
+
+   A top-level user function is emitted under its own name (`fn connect` →
+   `define @connect`), in the same link as the C runtime and the libc/libm it
+   calls. A user `connect` therefore IS the `connect` the runtime's
+   `tcp_connect` calls: the link resolves the runtime's undefined `connect`
+   to the user's definition before libSystem/libc, and the program recurses
+   through its own function until the stack guard page (measured 2026-09-14,
+   `test/two_node/restart/node_a.march`: SIGBUS before the first print). A
+   `pfn` with one call site dodges it only because it is inlined and never
+   emitted. `log`, `time`, `strlen`, `write`, `close`, `exit` … are all
+   plausible user names with the same fate, each crashing somewhere in the
+   runtime far from the user's code.
+
+   The fix is at the one place a March name becomes a symbol: a bare name in
+   this set is emitted as `name$u`, at its definition and every reference
+   (both go through [mangle_extern] / [c_symbol_of_march_name]). Qualified
+   names (`Socket.connect`) and compiler-generated ones (`$clo_wrap`) are
+   never touched; nor is a name the builtin table maps itself (`main` →
+   `march_main`).
+
+   The set: every symbol `runtime/*.c` imports on macOS (nm -u over the
+   compiled objects, 2026-09-14, minus mach/CommonCrypto-private and
+   runtime-internal names) plus the common libc/libm/POSIX/Linux surface a
+   future runtime change or the Linux build plausibly imports. NOT the
+   runtime's own `march_*` names: those are how a builtin resolved by the
+   identity fallthrough (`march_decrc_freed`, `uuid_v7`, `logger_*`) reaches
+   its C definition, so they must pass through unchanged. Regenerate the
+   first part with:
+     for f in runtime/*.c; do clang -c -w -I runtime -o /tmp/o/$f.o $f; done
+     nm -u /tmp/o/*.o | sed 's/^ *//; s/^_//' | grep -v '^march_\|^__' | sort -u *)
+let c_reserved_symbols : (string, unit) Hashtbl.t =
+  let tbl = Hashtbl.create 512 in
+  List.iter (fun n -> Hashtbl.replace tbl n ()) [
+    "_Exit"; "abort"; "abs"; "accept"; "accept4"; "access"; "acos"; "adler32"; "alarm";
+    "aligned_alloc"; "alloca"; "arc4random_buf"; "asctime"; "asin"; "assert";
+    "at_quick_exit"; "atan"; "atan2"; "atexit"; "atof"; "atoi"; "atol"; "atoll";
+    "backtrace"; "backtrace_symbols_fd"; "base64_encode"; "basename"; "bind"; "bsearch";
+    "bzero"; "calloc"; "cbrt"; "ceil"; "chdir"; "chmod"; "chown"; "clearenv"; "clock";
+    "clock_gettime"; "clock_nanosleep"; "close"; "closedir"; "compressBound"; "connect";
+    "cos"; "cosh"; "crc32"; "creat"; "ctime"; "deflate"; "deflateEnd"; "deflateInit2_";
+    "difftime"; "dirname"; "div"; "dladdr"; "dlclose"; "dlerror"; "dlopen"; "dlsym"; "dup";
+    "dup2"; "dup3"; "environ"; "epoll_create"; "epoll_create1"; "epoll_ctl"; "epoll_wait";
+    "errno"; "execl"; "execv"; "execve"; "execvp"; "exit"; "exp"; "exp2"; "expm1"; "fabs";
+    "fclose"; "fcntl"; "fdopen"; "fdopendir"; "fflush"; "fgetc"; "fgets"; "floor"; "fmod";
+    "fopen"; "fork"; "fprintf"; "fputc"; "fputs"; "fread"; "free"; "freeaddrinfo"; "fscanf";
+    "fseek"; "fstat"; "fsync"; "ftell"; "ftruncate"; "fwrite"; "gai_strerror";
+    "getaddrinfo"; "getchar"; "getcontext"; "getcwd"; "getegid"; "getenv"; "geteuid";
+    "getgid"; "gethostbyname"; "gethostname"; "getloadavg"; "getpeername"; "getpid";
+    "getppid"; "getpwnam"; "getpwuid"; "getrandom"; "getrusage"; "getsockname";
+    "getsockopt"; "gettimeofday"; "getuid"; "gmtime"; "gmtime_r"; "htonl"; "htons"; "hypot";
+    "inet_aton"; "inet_ntop"; "inet_pton"; "inflate"; "inflateEnd"; "inflateInit2_";
+    "ioctl"; "isalnum"; "isalpha"; "isatty"; "isdigit"; "isinf"; "islower"; "isnan";
+    "isspace"; "isupper"; "iswalpha"; "kevent"; "kill"; "killpg"; "kqueue"; "labs"; "link";
+    "listen"; "llabs"; "localeconv"; "localtime"; "localtime_r"; "log"; "log10"; "log1p";
+    "log2"; "longjmp"; "lseek"; "lstat"; "madvise"; "makecontext"; "malloc"; "mbstowcs";
+    "md5"; "memchr"; "memcmp"; "memcpy"; "memmove"; "memset"; "mkdir"; "mkdtemp"; "mkstemp";
+    "mktime"; "mlock"; "mmap"; "mprotect"; "msync"; "munlock"; "munmap"; "nanosleep";
+    "ntohl"; "ntohs"; "open"; "openat"; "opendir"; "pause"; "pclose"; "perror"; "pipe";
+    "pipe2"; "poll"; "popen"; "posix_memalign"; "pow"; "pread"; "printf";
+    "pthread_attr_destroy"; "pthread_attr_getstacksize"; "pthread_attr_init";
+    "pthread_attr_setdetachstate"; "pthread_attr_setstacksize"; "pthread_cancel";
+    "pthread_cond_broadcast"; "pthread_cond_destroy"; "pthread_cond_init";
+    "pthread_cond_signal"; "pthread_cond_timedwait"; "pthread_cond_wait"; "pthread_create";
+    "pthread_detach"; "pthread_equal"; "pthread_exit"; "pthread_getspecific";
+    "pthread_join"; "pthread_key_create"; "pthread_key_delete"; "pthread_kill";
+    "pthread_mutex_destroy"; "pthread_mutex_init"; "pthread_mutex_lock";
+    "pthread_mutex_trylock"; "pthread_mutex_unlock"; "pthread_once";
+    "pthread_rwlock_destroy"; "pthread_rwlock_init"; "pthread_rwlock_rdlock";
+    "pthread_rwlock_unlock"; "pthread_rwlock_wrlock"; "pthread_self"; "pthread_setspecific";
+    "pthread_sigmask"; "pthread_yield"; "putchar"; "putenv"; "puts"; "pwrite"; "qsort";
+    "quick_exit"; "raise"; "rand"; "random"; "read"; "readdir"; "readlink"; "readv";
+    "realloc"; "realpath"; "recv"; "recvfrom"; "recvmsg"; "remove"; "rename"; "rmdir";
+    "round"; "scandir"; "scanf"; "sched_yield"; "select"; "sem_close"; "sem_destroy";
+    "sem_init"; "sem_open"; "sem_post"; "sem_wait"; "send"; "sendfile"; "sendmsg"; "sendto";
+    "setcontext"; "setenv"; "setgid"; "sethostname"; "setjmp"; "setlocale"; "setsockopt";
+    "setuid"; "sha1"; "sha256"; "shm_open"; "shm_unlink"; "shutdown"; "sigaction";
+    "sigaddset"; "sigaltstack"; "sigdelset"; "sigemptyset"; "sigfillset"; "siglongjmp";
+    "signal"; "sigprocmask"; "sigsetjmp"; "sigwait"; "sin"; "sinh"; "sleep"; "snprintf";
+    "socket"; "socketpair"; "sprintf"; "sqrt"; "srand"; "srandom"; "sscanf"; "stat";
+    "strcat"; "strchr"; "strcmp"; "strcpy"; "strdup"; "strerror"; "strerror_r"; "strftime";
+    "strlen"; "strncat"; "strncmp"; "strncpy"; "strptime"; "strrchr"; "strstr"; "strtod";
+    "strtok"; "strtol"; "strtoll"; "strtoul"; "strtoull"; "swapcontext"; "symlink"; "sync";
+    "sysconf"; "system"; "tan"; "tanh"; "tcgetattr"; "tcsetattr"; "time"; "times";
+    "tmpfile"; "tmpnam"; "tolower"; "toupper"; "trunc"; "truncate"; "ttyname"; "umask";
+    "ungetc"; "unlink"; "unsetenv"; "usleep"; "vfprintf"; "vsnprintf"; "wait"; "wait3";
+    "wait4"; "waitpid"; "wcslen"; "wcstombs"; "write"; "writev";
+  ];
+  tbl
+
+let user_symbol_of (name : string) : string =
+  let bare = not (String.contains name '.') && not (String.contains name '$') in
+  if bare && Hashtbl.mem c_reserved_symbols name then name ^ "$u" else name
+
 let mangle_extern (name : string) : string =
   match Hashtbl.find_opt mangle_extern_tbl name with
   | Some c -> Hashtbl.replace called_syms c (); c
-  | None -> Hashtbl.replace called_syms name (); name
+  | None -> let s = user_symbol_of name in Hashtbl.replace called_syms s (); s
+
+(** True iff [name] is a March builtin the table maps to a C runtime symbol
+    (so it lives in the runtime, not in emitted code). The JIT used to ask
+    `mangle_extern name <> name`, which [user_symbol_of] would now answer
+    "yes" for a user `fn connect`; membership is the question it meant. *)
+let has_c_mapping (name : string) : bool =
+  Hashtbl.mem mangle_extern_tbl name
 
 (** [mangle_extern] without the [called_syms] side effect: same March-name →
     C-symbol resolution, including the identity fallthrough.
@@ -1899,4 +2039,4 @@ let mangle_extern (name : string) : string =
 let c_symbol_of_march_name (name : string) : string =
   match Hashtbl.find_opt mangle_extern_tbl name with
   | Some c -> c
-  | None -> name
+  | None -> user_symbol_of name

@@ -186,8 +186,8 @@ mod List do
   -- ---- Transforming ----
 
   doc "Returns the list in reverse order."
-  fn reverse(xs : List(a)) : List(a) do
-    fn go(lst : List(a), acc : List(a)) : List(a) do
+  fn reverse(xs : List(a)) : {List(a) | elts(_) == elts(xs)} do
+    fn go(lst : List(a), acc : List(a)) : {List(a) | elts(_) == union(elts(lst), elts(acc))} do
       match lst do
       Nil        -> acc
       Cons(h, t) -> go(t, Cons(h, acc))
@@ -206,8 +206,8 @@ mod List do
       march> List.append([], [1, 2])
       [1, 2]
   """
-  fn append(xs : List(a), ys : List(a)) : List(a) do
-    fn go(lst : List(a), acc : List(a)) : List(a) do
+  fn append(xs : List(a), ys : List(a)) : {List(a) | elts(_) == union(elts(xs), elts(ys))} do
+    fn go(lst : List(a), acc : List(a)) : {List(a) | elts(_) == union(elts(lst), elts(acc))} do
       match lst do
       Nil        -> acc
       Cons(h, t) -> go(t, Cons(h, acc))
@@ -284,8 +284,8 @@ mod List do
       march> 
       ["foo", "bar"]
   """
-  fn filter(xs : List(a), pred : a -> Bool) : List(a) do
-    fn go(lst : List(a), acc : List(a)) : List(a) do
+  fn filter(xs : List(a), pred : a -> Bool) : {List(a) | subset(elts(_), elts(xs))} do
+    fn go(lst : List(a), acc : List(a)) : {List(a) | subset(elts(_), union(elts(lst), elts(acc)))} do
       match lst do
       Nil        -> reverse(acc)
       Cons(h, t) ->
@@ -804,8 +804,8 @@ mod List do
   end
 
   doc "Removes consecutive duplicate elements (keeps first of each run).  Uses structural equality."
-  fn dedup(xs : List(a)) : List(a) do
-    fn go(lst : List(a), prev : a, acc : List(a)) : List(a) do
+  fn dedup(xs : List(a)) : {List(a) | elts(_) == elts(xs)} do
+    fn go(lst : List(a), prev : a, acc : {List(a) | member(prev, elts(_))}) : {List(a) | elts(_) == union(elts(lst), elts(acc))} do
       match lst do
       Nil        -> reverse(acc)
       Cons(h, t) -> do

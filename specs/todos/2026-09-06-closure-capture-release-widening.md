@@ -7,6 +7,26 @@ types qualified in `cube_forge`'s `probes/drop_xmod` — so the leak it closes i
 real but narrow: `WHICH=5` went 1,073 MB -> 9.5 MB, while `WHICH=4` and
 `cube_forge`'s own gauge (86 live objects a frame) did not move at all.
 
+> **Update 2026-09-13: item 1 landed, and item 2 in part**
+> (`specs/progress/2026-09-13-closure-environment-released.md`). Perceus no
+> longer dups `$clo` at capture reads. The gate now admits a closure allocated
+> in tail position, which is every closure factory, and an ELet right-hand
+> side's tail. Landing it exposed and fixed a use-after-free in
+> `rewrite_apply_clo_drop`: it released captures in front of a tail that used
+> them. Items 3 (the outer release site), 4 (`Array.lst_replace_nth`'s mono
+> mismatch) and 5 (`node_discovery`) are untouched. So is item 2's per-SITE
+> verdict: the gate is still per closure type. Measured leftovers are in the
+> progress entry.
+
+> **Update 2026-09-14:** measured shape of item 2 after closure calls started
+> consuming their arguments
+> (`specs/progress/2026-09-14-closure-calls-consume-their-arguments.md`):
+> `List.map(xs, fn s -> string_length(s) + k)` leaks exactly one object per
+> `map` call, the capturing lambda's environment. `map` allocates a `go`
+> closure capturing `f` and `go$apply` drops it with a plain `dec_rc go`, so
+> `f` is never released. For item 3: a closure header's pad word is now
+> entirely free (`MARCH_CLO_ARG0_BORROWED` was retired).
+
 ## 1. Perceus dups `$clo` at every capture read and nothing undoes it
 
 `find_inc_vars` at an `EField` treats the source atom as sitting at a consuming
@@ -48,8 +68,7 @@ A bare `EDecRC` on a closure value that was never applied, or was extracted
 from a data structure, is still shallow. Its type there is a function type,
 which names no layout, and the environment is not in hand to read captures out
 of. Needs a table keyed by the code pointer in field 0, or a small drop id in
-the closure header's `pad` word (which already carries
-`MARCH_CLO_ARG0_BORROWED` and is otherwise free). Either touches the REPL/JIT,
+the closure header's `pad` word (free since 2026-09-14). Either touches the REPL/JIT,
 where per-fragment modules must append to rather than replace the table, and
 hot reload.
 

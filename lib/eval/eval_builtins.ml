@@ -312,8 +312,17 @@ let base_env : env =
         | _ -> eval_error "sched_stat: expected Int"))
   ; ("actor_set_mailbox_limit", VBuiltin ("actor_set_mailbox_limit", function
         (* Task 9: bind a mailbox capacity + overflow policy to an actor.
-           policy: 0 unbounded, 1 drop_new, 2 drop_old, 3 block (treated as
-           unbounded in the interpreter — see mailbox_enqueue above). *)
+           policy: 0 unbounded, 1 drop_new, 2 drop_old, 3 block_sender.
+           The interpreter's eager single-threaded scheduler cannot park a
+           sender, and until 2026-09-14 it silently treated 3 as 0 -- a
+           program relying on backpressure got none under `march run` and
+           then behaved differently compiled, the worst kind of parity gap.
+           It is refused here, at the call, so the difference is loud. *)
+        | [VPid _; VInt _; VInt 3] ->
+          eval_error
+            "Actor.set_queue_limit: policy 3 (block_sender) needs the native \
+             scheduler, which parks the sender; the interpreter cannot. Compile \
+             this program, or use 1 (drop_new) / 2 (drop_old) under `march run`."
         | [VPid pid; VInt limit; VInt policy] ->
           (match Hashtbl.find_opt actor_registry pid with
            | Some inst ->
@@ -429,6 +438,32 @@ let base_env : env =
   ; ("pid_of_int", VBuiltin ("pid_of_int", function
         | [VInt n] -> VPid n
         | _ -> eval_error "pid_of_int: expected int"))
+  ; ("dist_monitor_register", VBuiltin ("dist_monitor_register", function
+        (* The cross-node monitor registry lives in the C runtime
+           (march_monitor_registry.c) and fires from the compiled actor-death
+           path; the interpreter has no equivalent. Refused loudly, like
+           block_sender, rather than silently recording nothing. *)
+        | [VInt _; VString _; VInt _; VInt _] ->
+          eval_error "dist_monitor_register: cross-node monitors need the native runtime, which fires MONITOR_FIRE from the actor-death path; the interpreter cannot. Compile this program."
+        | _ -> eval_error "dist_monitor_register: expected (target_pid, watcher_node, watcher_pid, fd)"))
+  ; ("dist_monitor_pending", VBuiltin ("dist_monitor_pending", function
+        | _ -> eval_error "dist_monitor_pending: cross-node monitors need the native runtime; the interpreter cannot. Compile this program."))
+  ; ("dist_monitor_forget_node", VBuiltin ("dist_monitor_forget_node", function
+        | _ -> eval_error "dist_monitor_forget_node: cross-node monitors need the native runtime; the interpreter cannot. Compile this program."))
+  ; ("dist_monitor_ack", VBuiltin ("dist_monitor_ack", function
+        | _ -> eval_error "dist_monitor_ack: cross-node monitors need the native runtime; the interpreter cannot. Compile this program."))
+  ; ("actor_terminal_reason", VBuiltin ("actor_terminal_reason", function
+        | [VInt pid] ->
+          (match Hashtbl.find_opt actor_registry pid with
+           | Some inst when not inst.ai_alive ->
+             let tag, msg = (match inst.ai_terminal_reason with
+                 | Normal -> 0, "" | Killed -> 1, "" | Crash m -> 2, m) in
+             VCon ("Some", [VTuple [VInt tag; VString msg]])
+           | _ -> VCon ("None", []))
+        | _ -> eval_error "actor_terminal_reason: expected Int (pid index)"))
+  ; ("pid_to_int", VBuiltin ("pid_to_int", function
+        | [VPid n] -> VInt n
+        | _ -> eval_error "pid_to_int: expected Pid"))
     (* Supervision: restart a supervised child actor.
        Accepts a Pid pointing to the child actor. Finds the supervisor,
        kills the child (if still alive), spawns a fresh instance, and
@@ -1430,19 +1465,23 @@ let base_env : env =
         | [VInt n] -> VString (String.make 1 (Char.chr (n land 0xFF)))
         | _ -> eval_error "char_from_int: expected int"))
 
-    (* ---- Comparison helpers ---- *)
+    (* ---- Comparison helpers ----
+       -1 / 0 / 1, as the typechecker declares them ((T, T) -> Int) and as the
+       compiled backend's march_compare_* return.  These used to return a
+       Less/Equal/Greater constructor, so any use as an Int failed at run time
+       ("int_to_string: expected int") while the compiled program did not even
+       link. *)
   ; ("compare_int", VBuiltin ("compare_int", function
-        | [VInt a; VInt b] ->
-          VCon ((if a < b then "Less" else if a > b then "Greater" else "Equal"), [])
+        | [VInt a; VInt b] -> VInt (compare a b)
         | _ -> eval_error "compare_int: expected two ints"))
   ; ("compare_float", VBuiltin ("compare_float", function
         | [VFloat a; VFloat b] ->
-          VCon ((if a < b then "Less" else if a > b then "Greater" else "Equal"), [])
+          VInt (if a < b then -1 else if a > b then 1 else 0)
         | _ -> eval_error "compare_float: expected two floats"))
   ; ("compare_string", VBuiltin ("compare_string", function
         | [VString a; VString b] ->
           let c = String.compare a b in
-          VCon ((if c < 0 then "Less" else if c > 0 then "Greater" else "Equal"), [])
+          VInt (if c < 0 then -1 else if c > 0 then 1 else 0)
         | _ -> eval_error "compare_string: expected two strings"))
 
     (* ---- Panic / diverging functions ---- *)

@@ -150,6 +150,22 @@ let resolve_call (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (fname 
     in
     aliased
 
+(* [resolve_call], then the DEFAULT-ARGUMENT arity variant.  A function with
+   a defaulted parameter, `fn f(a : Int, b : {Int | b > 0} \\ 1)`, does not
+   survive desugar under its own name: [Desugar.expand_defaults_decl]
+   replaces it with `f$1` (a short wrapper supplying the default) and `f$2`
+   (the full arity, keeping the refined parameter), and the runtime
+   dispatches a call `f(1, 0)` to `f$2` by its ARGUMENT COUNT.  Until
+   2026-09-13 the checker resolved only the spelling `f`, found nothing, and
+   `f(1, 0)` obliged nobody (specs/todos/2026-09-03-desugar-dropped-…).
+   Resolving `f$<arity>` after `f` is exactly the runtime's rule; the short
+   wrapper `f$1` carries no refinement of its own and its internal call
+   `f$2(a, 1)` is checked where it is written. *)
+let resolve_call_arity (ctx : rctx) defs (fname : string) (arity : int) : fn_sig option option =
+  match resolve_call ctx defs fname with
+  | None -> resolve_call ctx defs (Printf.sprintf "%s$%d" fname arity)
+  | r -> r
+
 (* True iff a call written as the bare [name] from inside [ctx]'s module
    resolves to exactly [sg] — i.e. the contract every caller is obliged to
    establish IS this definition's.  Used to decide whether an `impl` method's
@@ -201,9 +217,20 @@ let cb_add_binding (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (cb :
 
    The third component of the result is the returned value's SMT sort ([None]
    for Int); see [fn_sig.ret_sort] for why every consumer must branch on it. *)
-let postcond_of (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (fname : string)
-    (args : A.expr list) : (string * A.expr * string option) option =
-  match resolve_call ctx defs fname with
+let postcond_of ?(cb : cbenv = []) (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t)
+    (fname : string) (args : A.expr list) : (string * A.expr * string option) option =
+  (* A callee the callee ENV knows — a refined callback parameter with a
+     refined codomain, a local `fn` or `let`-bound lambda whose return was
+     proved — carries a postcondition too (P3 design §1b).  Name resolution
+     first, exactly as [visit]'s [EApp] arm orders them; the env only when
+     the name resolves to nothing. *)
+  let resolved =
+    match resolve_call_arity ctx defs fname (List.length args) with
+    | Some (Some sg) -> Some (Some sg)
+    | Some None -> Some None
+    | None -> (match List.assoc_opt fname cb with Some sg -> Some (Some sg) | None -> None)
+  in
+  match resolved with
   | Some (Some sg) ->
     (match sg.ret with
      | Some (b, p) ->
@@ -269,7 +296,8 @@ let make_field_resolver (binder : string) (sort_name : string) (binder_term : Sm
    through record field projections like State_1(State(1, Nil)) → Nil. *)
 let rec selector_reduce (term : Smt.term) : Smt.term =
   match term with
-  | Smt.App (selector, [ (Smt.App (ctor, args) as inner) ]) ->
+  | Smt.App (selector, [ inner ]) when ctor_view inner <> None ->
+    let ctor, args = Option.get (ctor_view inner) in
     let prefix = ctor ^ "_" in
     let plen = String.length prefix in
     if String.length selector > plen && String.sub selector 0 plen = prefix then
@@ -283,9 +311,9 @@ let rec selector_reduce (term : Smt.term) : Smt.term =
    Returns None for opaque (variable/unknown) terms — avoids quantifier-based
    axioms that would cause Z3 to return `unknown` instead of sat/unsat. *)
 let rec concrete_len (term : Smt.term) : int option =
-  match selector_reduce term with
-  | Smt.App ("Nil", []) -> Some 0
-  | Smt.App ("Cons", [ _h; t ]) -> Option.map (( + ) 1) (concrete_len t)
+  match ctor_view (selector_reduce term) with
+  | Some ("Nil", []) -> Some 0
+  | Some ("Cons", [ _h; t ]) -> Option.map (( + ) 1) (concrete_len t)
   | _ -> None
 
 (* Try to evaluate an axiom measure on a concrete SMT term.
@@ -298,11 +326,11 @@ let concrete_measure_app (name : string) (arg_term : Smt.term) : int option =
   | None -> None
   | Some bases ->
     let go term =
-      match selector_reduce term with
-        | Smt.App (ctor, []) ->
+      match ctor_view (selector_reduce term) with
+        | Some (ctor, []) ->
           (* Zero-arg constructor: look up in base cases *)
           List.assoc_opt ctor bases
-        | Smt.App (_ctor, _args) ->
+        | Some (_ctor, _args) ->
           (* Multi-arg constructor: not a base case for simple measures;
              would need the step case — give up for now *)
           None
@@ -340,10 +368,7 @@ let concrete_measure_app (name : string) (arg_term : Smt.term) : int option =
    function exists to prevent — so a list literal with concrete elements makes
    the record unreflectable, and the call is skipped. *)
 let rec term_fits_sort (sort : Smt.sort) (t : Smt.term) : bool =
-  let is_ctor_app = function
-    | Smt.App (c, _) -> Hashtbl.mem ctor_field_sorts c
-    | _ -> false
-  in
+  let is_ctor_app t = ctor_view t <> None in
   match sort with
   | Smt.SInt | Smt.SBool -> not (is_ctor_app t)
   (* Float RECORD FIELDS are out of scope: [smt_sort_of_field] never produces
@@ -351,9 +376,14 @@ let rec term_fits_sort (sort : Smt.sort) (t : Smt.term) : bool =
      and if a later change makes it reachable, refusing the fit makes the record
      unreflectable and the call skipped, which is the safe direction. *)
   | Smt.SFloat -> false
-  | Smt.SData s ->
-    (match t with
-     | Smt.App (ctor, args) ->
+  (* No record field is a set: a set-sorted field never arises from
+     [smt_sort_of_field], so nothing fits it. *)
+  | Smt.SSet _ -> false
+  (* An uninstantiated type parameter never reaches a fit check. *)
+  | Smt.SParam _ -> false
+  | Smt.SData (s, _) ->
+    (match ctor_view t with
+     | Some (ctor, args) ->
        (match Hashtbl.find_opt adt_ctors s with
         | Some cs when List.mem ctor cs ->
           (* Every argument must sit at its own declared field sort.  An arity
@@ -414,7 +444,7 @@ let reflect_record_literal ?(opaque : (Smt.sort -> Smt.term) option)
              in_order fsorts
          in
          if List.exists Option.is_none reflected then None
-         else Some (Smt.App (ctor, List.filter_map Fun.id reflected))
+         else Some (ctor_term sort_name ctor (List.filter_map Fun.id reflected))
      | _ -> None)
   | _ -> None
 
@@ -562,13 +592,27 @@ let rec reflect_scalar
        incr ret_ctr;
        let nm = Printf.sprintf "%s$ret%d" fname !ret_ctr in
        let c = Smt.Const nm in
-       let rv n = if n = b || n = "_" then Some c else None in
+       (* [q] is in the CALLER's namespace: a name other than the binder is
+          a caller variable and reflects through the caller's own resolvers,
+          exactly as the refined-local arm above does — so a Bool contract
+          such as `_ == member(elem, elts(s))` keeps its `elts(s)` and its
+          `elem` rather than dropping the whole fact. *)
+       let extra = ref [] in
+       let rv n =
+         if n = b || n = "_" then Some c
+         else
+           match foreign_var n with
+           | Some (t, d) ->
+             if not (List.mem d !extra) then extra := d :: !extra;
+             Some t
+           | None -> None
+       in
        let assumptions =
-         match smt_of ~resolve_var:rv ~resolve_measure:(fun _ _ -> None) q with
+         match smt_of ~resolve_var:rv ~resolve_measure:foreign_measure q with
          | Some qa -> [ qa ]
          | None -> []
        in
-       Some (c, [ (nm, sort) ], assumptions)
+       Some (c, (nm, sort) :: !extra, assumptions)
      | Some _ | None -> plain actual)
   | _ -> plain actual
 

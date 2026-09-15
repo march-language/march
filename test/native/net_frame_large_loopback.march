@@ -1,0 +1,73 @@
+-- NetKernel.recv_frame is linear in the frame size: a 1 MiB frame over
+-- loopback, sent with send_frame and received with recv_frame, followed by
+-- a small frame that arrives in the same recv() to check the leftover carry.
+-- Under the first version (List.append per 4 KiB chunk, quadratic) this took
+-- seconds; it is now one recv_exact and one append per frame.
+mod NetFrameLargeLoopback do
+  needs IO.Console
+  needs IO.NetListen
+  needs IO.NetConnect
+  needs IO.Spawn
+
+  pfn big() : Int do 1048576 end
+
+  pfn fill(n : Int, acc : List(Int)) : List(Int) do
+    if n <= 0 do acc else fill(n - 1, Cons(int_and(n, 255), acc)) end
+  end
+
+  pfn run_server(listen_fd : Int) do
+    match tcp_accept(listen_fd) do
+      Ok(fd) ->
+        let _ = NetKernel.send_frame(fd, List.append(fill(big(), Nil), Nil))
+        let _ = NetKernel.send_frame(fd, Cons(7, Cons(8, Cons(9, Nil))))
+        tcp_close(fd)
+        tcp_close(listen_fd)
+      Err(e) ->
+        tcp_close(listen_fd)
+        panic("accept: " ++ e)
+    end
+  end
+
+  pfn connect_with_retry(host : String, port : Int, attempts_left : Int) : Result(Int, Socket.SocketError) do
+    match Socket.connect(host, port) do
+      Ok(fd) -> Ok(fd)
+      Err(e) -> if attempts_left <= 1 do Err(e) else connect_with_retry(host, port, attempts_left - 1) end
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen), _cap_spawn : Cap(IO.Spawn)) do
+    let listen_fd = match tcp_listen(0) do
+      Ok(fd) -> fd
+      Err(e) -> panic("listen: " ++ e)
+    end
+    let port = match tcp_local_port(listen_fd) do
+      Ok(p) -> p
+      Err(e) -> panic("local_port: " ++ e)
+    end
+    let srv = task_spawn(fn _ -> run_server(listen_fd))
+    let fd = match connect_with_retry("127.0.0.1", port, 5) do
+      Ok(fd) -> fd
+      Err(e) -> panic("connect: " ++ Socket.error_message(e))
+    end
+    match NetKernel.recv_frame(fd, Nil) do
+      Err(e) -> println("recv error: " ++ e)
+      Ok((frame, rest)) ->
+        println("frame length: " ++ int_to_string(List.length(frame)))
+        let first = match List.head_opt(frame) do
+          Some(b) -> b
+          None -> -1
+        end
+        let last = match List.head_opt(List.reverse(frame)) do
+          Some(b) -> b
+          None -> -1
+        end
+        println("first byte: " ++ int_to_string(first) ++ ", last byte: " ++ int_to_string(last))
+        match NetKernel.recv_frame(fd, rest) do
+          Err(e) -> println("second recv error: " ++ e)
+          Ok((frame2, _)) -> println("second frame: " ++ to_string(frame2))
+        end
+    end
+    let _ = task_await(srv)
+    tcp_close(fd)
+  end
+end

@@ -50,6 +50,34 @@ let extern_borrow_table : (string * bool list) list = [
   ("print",         [true]);   (* TIR builtin name before LLVM mangling *)
   ("println",       [true]);
   ("print_line",    [true]);
+  ("dist_monitor_register", [false; true; false; false]);
+  ("march_dist_monitor_register_pid", [false; true; false; false]);
+  ("dist_monitor_forget_node", [true]);
+  ("march_dist_monitor_forget_node_str", [true]);
+  (* ── Actors: the pid is a HANDLE, read but never stored or released by
+     these runtime functions (audited 2026-09-14: march_send, march_kill,
+     march_actor_stop, march_is_alive, march_actor_is_draining,
+     march_mailbox_size, march_get_cap contain no decrc of the actor).
+     Borrowing them was tried 2026-09-13 and backed out because a live actor
+     then had NO reference of its own and the drop at the pid's last use freed
+     it; since specs/progress/2026-09-14-live-actor-freed-by-dropping-its-last-pid.md
+     the running actor holds one, so releasing the program's pids is safe.
+     `send`'s MESSAGE stays owned (the runtime enqueues it). *)
+  ("send",              [true; false]);
+  ("actor_cast",        [true; false]);
+  ("march_send",        [true; false]);
+  ("kill",              [true]);
+  ("march_kill",        [true]);
+  ("actor_stop",        [true; false]);
+  ("march_actor_stop",  [true; false]);
+  ("is_alive",          [true]);
+  ("march_is_alive",    [true]);
+  ("actor_is_draining", [true]);
+  ("march_actor_is_draining", [true]);
+  ("mailbox_size",      [true]);
+  ("march_mailbox_size", [true]);
+  ("get_cap",           [true]);
+  ("march_get_cap",     [true]);
   (* ── Core string operations ─────────────────────────────────────────────── *)
   ("march_string_eq",          [true; true]);
   ("march_string_concat",      [true; true]);
@@ -82,12 +110,44 @@ let extern_borrow_table : (string * bool list) list = [
   ("march_string_slice",     [true; false; false]);
   (* repeat(s, int_n)  — only s is a string *)
   ("march_string_repeat",    [true; false]);
-  (* join(list, sep)  — list is heap-owned by caller; sep is borrowed string *)
-  ("march_string_join",      [false; true]);
+  (* join(list, sep): BOTH borrowed.  march_string_join only walks the list and
+     copies bytes out of each element; it neither stores nor frees anything.
+     The list was marked owned from this table's first version (724adae3, no
+     recorded reason), so every list passed to string_join -- including the
+     mapped list inside prelude's `impl Show(List(a))` -- leaked with its
+     elements: 5 objects per `to_string` of a 2-element list.
+     Guard: test/native/show_list_leak_probe.march. *)
+  ("march_string_join",      [true; true]);
   (* pad_left/right(s, int_width, fill)  — s and fill are strings *)
   ("march_string_pad_left",  [true; false; true]);
   ("march_string_pad_right", [true; false; true]);
+  (* ── Comparison operators ─────────────────────────────────────────────────
+     Every emit path for these only READS its operands (llvm_emit_arith.ml):
+     march_string_eq / march_compare_string, the inline field compare of an
+     unboxed aggregate, the generated structural equality from Llvm_eq (which
+     calls only other generated eq fns and those two C helpers), and
+     march_poly_eq / march_poly_compare for an erased operand.  Absent from
+     this table they defaulted to OWNED, so a fresh String or List compared
+     once was handed over and never released: one leaked object per `==` on a
+     fresh string, six per `==` on a two-element list.  Scalars are unaffected
+     (no RC op is emitted for them either way).
+     Guard: test/native/builtin_borrow_leak_probe.march. *)
+  ("==",                   [true; true]);
+  ("!=",                   [true; true]);
+  ("<",                    [true; true]);
+  ("<=",                   [true; true]);
+  (">",                    [true; true]);
+  (">=",                   [true; true]);
   (* ── TIR builtin names (pre-mangling) ───────────────────────────────────── *)
+  (* [is_borrowed] is keyed by the EApp callee's TIR name, never by the C
+     name, so a builtin whose TIR name differs from its C symbol must be
+     listed under the TIR name.  These two were listed only as
+     march_string_byte_length / march_value_to_string and leaked the argument
+     of every call.  march_value_to_string takes its own +1 when it returns a
+     String argument unchanged, so borrowed is correct for it too. *)
+  ("string_length",        [true]);
+  ("compare_string",       [true; true]);   (* march_compare_string only reads *)
+  ("to_string",            [true]);
   ("string_eq",            [true; true]);
   ("string_concat",        [true; true]);
   ("++",                   [true; true]);
@@ -117,7 +177,7 @@ let extern_borrow_table : (string * bool list) list = [
   ("string_replace_all",   [true; true; true]);
   ("string_slice",         [true; false; false]);
   ("string_repeat",        [true; false]);
-  ("string_join",          [false; true]);
+  ("string_join",          [true; true]);    (* see march_string_join above *)
   ("string_pad_left",      [true; false; true]);
   ("string_pad_right",     [true; false; true]);
   (* ── Record introspection builtins ───────────────────────────────────────
@@ -188,6 +248,81 @@ let extern_borrow_table : (string * bool list) list = [
     implementation borrows all its parts, that leaks every operand past the
     third. *)
 let all_args_borrowed_builtins = [ "string_concat_n" ]
+
+(** Builtins with a heap ([ptr]) parameter that are deliberately OWNED: each
+    either consumes its argument (it stores or frees it -- e.g. [send]'s
+    message, [vault_set]'s value) or has not been audited yet and keeps the
+    pre-2026-09-13 default.
+
+    Every [in_is_builtin] row of [Llvm_builtins.builtins] with a [ptr]
+    parameter must appear in exactly one of [extern_borrow_table],
+    [all_args_borrowed_builtins] or this list; test_builtin_borrow_classification
+    fails otherwise.  Before that guard, an unlisted builtin silently defaulted
+    to owned, and every read-only one (`==`, `string_length`) leaked the
+    argument of each call.
+
+    Moving a name from here to [extern_borrow_table] needs two checks, not
+    one: that its C implementation neither stores nor frees the argument, AND
+    that nothing hands it a reference it does not own.  The second is not
+    hypothetical: [typed_array_get] returned array elements without a
+    reference, which only stayed balanced while `==` consumed them.  Actor pids
+    were that case until 2026-09-14: every pid-producing builtin now returns an
+    OWNED reference (pid_of_int, self, actor_whereis, spawn) and the running
+    actor holds one of its own, so the read-only actor family moved to
+    [extern_borrow_table] — see
+    specs/progress/2026-09-14-pid-ownership-settled-send-borrows-self-owned.md. *)
+let extern_owned_builtins : string list = [
+    "panic_"; "unreachable_"; "todo_"; "print_stderr"; "char_to_int";
+    "char_is_digit"; "char_is_alphanumeric"; "char_is_whitespace";
+    "string_chars"; "string_from_chars"; "list_append"; "list_concat";
+    "iolist_hash_fnv1a"; "vault_new"; "vault_whereis"; "vault_set";
+    "vault_set_ttl"; "vault_put_new"; "vault_incr"; "vault_push_capped";
+    "vault_get"; "vault_drop"; "vault_update"; "vault_size"; "vault_keys";
+    "vault_ns_set"; "vault_ns_get"; "vault_ns_drop"; "md5"; "sha256";
+    "stdlib_sha256"; "sha512"; "stdlib_sha512"; "hmac_sha256";
+    "stdlib_hmac_sha256"; "hmac_sha256_bytes"; "pbkdf2_sha256";
+    "base64_encode"; "stdlib_base64_encode"; "base64_decode";
+    "stdlib_base64_decode"; "bytes_to_u8_arr"; "u8_arr_to_bytes";
+    "remote_register_stub"; "remote_check"; "remote_invoke";
+    "logger_add_context"; "logger_write"; "spawn";
+    "spawn_supervised"; "actor_get_int"; "actor_call"; "actor_reply";
+    "actor_send_after"; "actor_cancel_timer"; "http_server_spawn_n";
+    "file_exists"; "dir_exists"; "file_open"; "file_close"; "file_read";
+    "file_read_line"; "file_read_chunk"; "file_write"; "file_append";
+    "file_delete"; "file_copy"; "file_rename"; "file_stat"; "dir_mkdir";
+    "dir_mkdir_p"; "dir_rmdir"; "dir_rm_rf"; "dir_list"; "dir_list_full";
+    "process_env"; "process_set_env"; "process_spawn_sync";
+    "process_spawn_lines"; "process_spawn_async"; "process_read_line";
+    "process_write"; "process_kill_proc"; "process_wait_proc";
+    "tls_client_ctx"; "tls_server_ctx"; "tls_connect"; "tls_write";
+    "typed_array_create"; "typed_array_from_list"; "typed_array_to_list";
+    "typed_array_length"; "typed_array_get"; "typed_array_set";
+    "typed_array_map"; "typed_array_filter"; "typed_array_fold";
+    "native_int_arr_set"; "native_int_arr_min"; "native_int_arr_max";
+    "native_int_arr_sumsq_dev"; "native_int_arr_map"; "native_int_arr_map2";
+    "native_int_arr_to_float_arr"; "native_int_arr_fold";
+    "native_int_arr_from_list"; "native_int_arr_filter_mask";
+    "native_float_arr_set"; "native_float_arr_min"; "native_float_arr_max";
+    "native_float_arr_sumsq_dev"; "native_float_arr_map";
+    "native_float_arr_map2"; "native_float_arr_fold";
+    "native_float_arr_from_list"; "native_float_arr_filter_mask";
+    "native_f32_arr_set"; "native_f32_arr_map"; "native_f32_arr_map2";
+    "native_f32_arr_fold"; "native_f32_arr_from_list"; "native_i32_arr_set";
+    "native_i32_arr_map"; "native_i32_arr_map2"; "native_i32_arr_fold";
+    "native_i32_arr_from_list"; "native_u8_arr_set"; "native_u8_arr_map";
+    "native_u8_arr_map2"; "native_u8_arr_fold"; "native_u8_arr_from_list";
+    "native_float_to_f32_arr"; "native_f32_to_float_arr";
+    "native_int_to_i32_arr"; "native_i32_to_int_arr"; "native_int_to_u8_arr";
+    "native_u8_to_int_arr"; "native_i32_to_f32_arr"; "native_u8_to_f32_arr";
+    "tcp_connect"; "http_serialize_request"; "http_parse_response";
+    "csv_open"; "csv_next_row"; "csv_close"; "own"; "cap_narrow"; "mint_cap";
+    "cap_impl"; "cap_dict"; "set_actor_caps"; "actor_caps"; "monitor";
+    "actor_set_mailbox_limit"; "register_resource";
+    "actor_register"; "actor_unregister"; "actor_whereis";
+    "send_checked"; "revoke_cap"; "is_cap_valid"; "get_actor_field";
+    "register_supervisor"; "register_supervisor_child"; "pid_index_of";
+    "pid_to_int";
+]
 
 (** True iff parameter [idx] of C extern / TIR builtin [fn_name] is borrowed
     according to the hardcoded ABI table.  Used as a fallback in [is_borrowed]
@@ -668,8 +803,18 @@ let infer_module ?(k_table : Kind.table option) (m : Tir.tir_module) : borrow_ma
            It must live in [init], NOT in the post-fixpoint extern seeding
            below: [owned_in] consults [is_borrowed] during iteration, so a
            late seed would leave callers-of-callers classified against the
-           stale answer. *)
-        if i = 0 && Tir_names.is_apply_fn fn.Tir.fn_name then false
+           stale answer.
+
+           The same pin covers every USER parameter of an apply function, for
+           the same reason from the other side: every caller of a closure
+           transfers a reference to each argument (Perceus's [ECallPtr] case,
+           the C runtime's higher-order helpers), so a callee that left a
+           read-only parameter borrowed never released it — one leaked
+           argument per call, and an immortal one when the caller kept it.
+           An owned parameter the body never uses is released at entry by
+           [Perceus.insert_dead_apply_param_drops].  See [Clo_flags] for the
+           whole convention. *)
+        if Tir_names.is_apply_fn fn.Tir.fn_name then false
         else Kind.borrowable_of k_table (List.nth fn.Tir.fn_params i).Tir.v_ty
       ) in
       StringMap.add fn.Tir.fn_name modes acc
@@ -721,29 +866,3 @@ let infer_module ?(k_table : Kind.table option) (m : Tir.tir_module) : borrow_ma
   in
   if Lazy.force _borrow_debug then print_borrow_map m result;
   result
-
-(** True iff the FIRST USER ARGUMENT of [fn] is never used in an owning
-    position in its body — i.e. the callee neither consumes it (drops it,
-    transfers it onward) nor retains it (stores it in an allocation, returns
-    it).  "First user argument" skips the implicit [$clo] parameter of an
-    apply function.
-
-    WHY THIS IS NOT [is_borrowed m fn 1].  [infer_module]'s [init] seeds a
-    parameter as borrowed only when [Rc_types.borrow_eligible] accepts its
-    type, so a param typed [TVar "_"] — which is what [Lower] gives most
-    lifted-lambda params — reads back as "owned" from the map even though the
-    fixpoint never found an owning use for it.  That conflation is harmless
-    inside Perceus (a non-[needs_rc] type gets no RC ops either way) but it is
-    exactly wrong for the question the fold helpers ask, which is about the
-    CALLEE'S BEHAVIOUR, not about whether RC ops were emitted.  So this asks
-    [owned_in] directly, against the converged map.
-
-    Consumed by [Clo_flags] → [Llvm_emit], which stamps the answer into the
-    closure object's header pad word so [runtime/march_runtime.c]'s fold
-    helpers can tell whether they still own the accumulator they passed in.
-    See [Clo_flags] for the full argument. *)
-let first_user_arg_borrowed (bm : borrow_map) (fn : Tir.fn_def) : bool =
-  let idx = if Tir_names.is_apply_fn fn.Tir.fn_name then 1 else 0 in
-  match List.nth_opt fn.Tir.fn_params idx with
-  | None -> false
-  | Some p -> not (owned_in p.Tir.v_name bm fn.Tir.fn_body)

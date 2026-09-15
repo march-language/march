@@ -1262,7 +1262,10 @@ let mailbox_enqueue (inst : actor_inst) (msg : value) : unit =
     Queue.push msg inst.ai_mailbox
   else
     match inst.ai_mbox_policy with
-    | 3 -> Queue.push msg inst.ai_mailbox (* block: unbounded in the interpreter *)
+    | 3 -> Queue.push msg inst.ai_mailbox
+      (* block_sender: unreachable since 2026-09-14 -- actor_set_mailbox_limit
+         refuses policy 3 under the interpreter (eval_builtins.ml). Kept as the
+         safe fallback should a policy arrive another way. *)
     | 1 ->
       if Queue.length inst.ai_mailbox < limit then
         Queue.push msg inst.ai_mailbox

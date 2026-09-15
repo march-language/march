@@ -13532,6 +13532,11 @@ declare ptr  @march_actor_caps(ptr %actor)
 ; Monitor/supervision builtins
 declare void @march_demonitor(i64 %ref)
 declare i64  @march_monitor(ptr %watcher, ptr %target)
+declare ptr  @march_actor_terminal_reason(i64 %pid_index)
+declare ptr  @march_dist_monitor_pending()
+declare i64  @march_dist_monitor_forget_node_str(ptr %node)
+declare void @march_dist_monitor_ack_pid(i64 %target_pid, i64 %watcher_pid)
+declare void @march_dist_monitor_register_pid(i64 %target_pid, ptr %node, i64 %watcher_pid, i64 %fd)
 declare i64  @march_mailbox_size(ptr %pid)
 declare i64  @march_sched_stat(i64 %which)
 declare void @march_actor_set_mbox_limit(ptr %pid, i64 %limit, i64 %policy)
@@ -13546,6 +13551,7 @@ declare ptr  @march_get_cap(ptr %pid)
 declare i64  @march_send_checked(ptr %cap, ptr %msg)
 declare i64  @march_revoke_cap(ptr %cap)
 declare i64  @march_is_cap_valid(ptr %cap)
+declare ptr  @march_self()
 declare ptr  @march_pid_of_int(i64 %n)
 declare ptr  @march_get_actor_field(ptr %pid, ptr %name)
 declare void @march_register_supervisor(ptr %supervisor, i64 %strategy, i64 %max_restarts, i64 %window_secs, i64 %backoff_base_ms, i64 %backoff_cap_ms, i64 %backoff_jitter_pct)
@@ -14766,6 +14772,35 @@ let test_compiled_worker_local_fn_still_compiles () =
     ~expected:"42"
     ()
 
+(* A bare user fn named after a C symbol the runtime links against must not
+   be emitted under that symbol: `fn connect` as `@connect` IS the connect()
+   the runtime's tcp_connect calls (llvm_builtins.ml, c_reserved_symbols). *)
+let test_user_fn_named_after_c_symbol_is_mangled () =
+  let src = {|mod T do
+  fn connect(port : Int) : Int do port + 1 end
+  fn helper(x : Int) : Int do x * 3 end
+  fn main() do
+    let a = connect(1)
+    let b = connect(2)
+    a + b + helper(a) + helper(b)
+  end
+end|} in
+  let m = parse_and_desugar src in
+  let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let iface_methods = March_tir.Lower.get_iface_methods () in
+  let tir = March_tir.Mono.monomorphize ~iface_methods tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  let tir = March_tir.Perceus.perceus tir in
+  let tir = March_tir.Dce.prune_unreachable tir in
+  let ir = March_tir.Llvm_emit.emit_module tir in
+  Alcotest.(check bool) "define uses the mangled symbol" true
+    (ir_contains ir "@connect$u(");
+  Alcotest.(check bool) "no bare @connect definition or call" false
+    (ir_contains ir "@connect(");
+  Alcotest.(check bool) "a non-colliding user fn keeps its name" true
+    (ir_contains ir "@helper(")
+
 let codegen_suites =
   [
       ( "vectorize_check", [
@@ -15724,6 +15759,7 @@ let codegen_suites =
           Alcotest.test_case "dom extern reaches output"     `Quick test_js_pipeline_dom_extern_reaches_output;
           Alcotest.test_case "dom event_key reaches output"  `Quick test_js_pipeline_dom_event_key_reaches_output;
           Alcotest.test_case "simd builtin rejected"         `Quick test_js_pipeline_simd_builtin_rejected;
+          Alcotest.test_case "user fn named after a C symbol is mangled" `Quick test_user_fn_named_after_c_symbol_is_mangled;
         ] );
   ]
   @ Test_ir_verify.suites (* W2.1: LLVM IR validity gate over test/native/*.march *)

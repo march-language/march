@@ -27,6 +27,11 @@ val check_module_needs :
 
 val check_cap_narrow_sites : env -> unit
 val check_json_cap_sites : env -> unit
+
+(** The typed remote send: every recorded `Node.send` site must have a
+    `derive Json` codec for its message type; records the minted type tag in
+    [March_ast.Json_dispatch].  Fails closed on an unresolved type. *)
+val check_node_send_sites : env -> unit
 val check_cap_dict_decls : env -> unit
 val check_cap_impl_sites : env -> unit
 val check_mint_cap_sites : env -> unit

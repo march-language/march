@@ -549,6 +549,30 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
         v_lin = Tir.Unr } in
       Tir.EApp (fn_var, [ch']))
 
+  (* `self()` inside an actor handler, where [Lower_actor] has bound `self`
+     as a local Pid: the typechecker accepts it as the same value as a bare
+     `self` (a zero-arg call of a value is the value), so lower it as one.
+     Without this arm it lowered to an indirect call THROUGH the actor
+     pointer (SIGBUS).  Outside a handler `self` is not registered as a
+     local Pid and the call reaches the `self` builtin (march_self). *)
+  | Ast.EApp ((Ast.EVar { txt; _ } as self_var), [], _)
+    when txt = Tir_names.actor_self_binder
+      && (match Hashtbl.find_opt _fn_param_types txt with
+          | Some (Tir.TCon ("Pid", _)) -> true
+          | _ -> false) ->
+    lower_expr env self_var
+
+  (* The typed remote send: the typechecker recorded the message type per
+     site (Typecheck_caps.check_node_send_sites); rewrite to the explicit
+     form and lower THAT, so downstream sees an ordinary call of a stdlib
+     function and a direct call of the derived encoder.  The rewrite itself
+     lives beside the table so the interpreter's is the same one. *)
+  | Ast.EApp (Ast.EVar { txt = "Node.send"; _ }, [_; _; _], _)
+    when March_ast.Json_dispatch.node_send_rewrite e <> None ->
+    (match March_ast.Json_dispatch.node_send_rewrite e with
+     | Some e' -> lower_expr env e'
+     | None -> assert false)
+
   (* --- Function application (CPS: all args must be atoms) --- *)
   | Ast.EApp (f_expr, args, call_sp) ->
     (* Check for default-arg dispatch: if f is a plain EVar that names a
@@ -648,8 +672,14 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
              let $own_dropN = fn _ -> Drop$TypeName.drop(value) in
              register_resource(pid, "drop_TypeName", $own_dropN)
            This keeps the Drop impl alive through the mono pass and wires
-           the cleanup callback into the actor's kill/crash path. *)
-        if f_var.v_name = "own" && List.length arg_atoms = 2 then
+           the cleanup callback into the actor's kill/crash path.
+           Only for the BUILTIN: a user `fn own(a, b)` in this module shadows
+           it (the typechecker already bound the call to the user's fn), and
+           rewriting that call produced a `Drop$<Type>.drop` reference that
+           does not exist -- a link error naming nothing the user wrote
+           (specs/progress/2026-09-14-user-fn-named-own-miscompiled-as-resource-builtin.md). *)
+        if f_var.v_name = "own" && List.length arg_atoms = 2
+           && not (Hashtbl.mem !Lower_state._current_module_fns "own") then
           let pid_atom   = List.nth arg_atoms 0 in
           let value_atom = List.nth arg_atoms 1 in
           let value_ty = match value_atom with
@@ -799,9 +829,19 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
     in
     let params' = List.mapi (fun i (p : Ast.param) ->
         { Tir.v_name = p.param_name.txt;
-          v_ty = (match p.param_ty with Some t -> lower_ty t
-                  | None -> List.nth_opt inferred_param_tys i
-                            |> Option.value ~default:unknown_ty);
+          v_ty = (match p.param_ty, List.nth_opt inferred_param_tys i with
+                  (* A record type alias ([p : Pt]) lowers syntactically to
+                     [TCon "Pt"], which no RC pass recognises as a record:
+                     field reads dup the whole record and the owned-aggregate
+                     parameter drop never fires, leaking the record and its
+                     fields once per call.  The typechecker has already
+                     expanded the alias. *)
+                  | Some t, Some (Tir.TRecord _ as inferred) ->
+                    (match lower_ty t with
+                     | Tir.TCon _ -> inferred
+                     | lowered -> lowered)
+                  | Some t, _ -> lower_ty t
+                  | None, inferred -> Option.value inferred ~default:unknown_ty);
           v_lin = lower_linearity p.param_lin }
       ) params in
     (* Lambda parameters take precedence over any outer function parameters
@@ -927,8 +967,25 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
       v_ty = Tir.TPtr Tir.TUnit;
       v_lin = Tir.Unr
     } in
-    Tir.ELet (raw_var, Tir.EApp (spawn_fn, []),
-              Tir.EApp (march_spawn, [Tir.AVar raw_var]))
+    (match Hashtbl.find_opt Lower_state._actor_mailboxes actor_name with
+     | None ->
+       Tir.ELet (raw_var, Tir.EApp (spawn_fn, []),
+                 Tir.EApp (march_spawn, [Tir.AVar raw_var]))
+     | Some (limit, policy) ->
+       (* `mailbox N policy` on the declaration: bind the limit right after
+          the spawn, once per spawn site, so no caller has to remember
+          Actor.set_queue_limit. *)
+       let pid_var : Tir.var = { v_name = fresh_name "spawned"; v_ty = Tir.TPtr Tir.TUnit; v_lin = Tir.Unr } in
+       let set_var : Tir.var = {
+         v_name = "actor_set_mailbox_limit";
+         v_ty = Tir.TFn ([Tir.TPtr Tir.TUnit; Tir.TInt; Tir.TInt], Tir.TUnit);
+         v_lin = Tir.Unr } in
+       let unit_var : Tir.var = { v_name = fresh_name "mbox_set"; v_ty = Tir.TUnit; v_lin = Tir.Unr } in
+       Tir.ELet (raw_var, Tir.EApp (spawn_fn, []),
+         Tir.ELet (pid_var, Tir.EApp (march_spawn, [Tir.AVar raw_var]),
+           Tir.ELet (unit_var,
+             Tir.EApp (set_var, [Tir.AVar pid_var; Tir.ALit (Ast.LitInt limit); Tir.ALit (Ast.LitInt policy)]),
+             Tir.EAtom (Tir.AVar pid_var)))))
 
   | Ast.ESpawn _ ->
     failwith "TIR lower: ESpawn argument must be a plain actor name"

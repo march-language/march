@@ -1,0 +1,143 @@
+-- `Node.send(peer, to, msg)`: the typed remote send, end to end, both
+-- backends (specs/todos/2026-09-14-typed-node-send-wrapper.md).
+--
+-- The message types live in a NESTED module and derive Json. The sender
+-- writes ONE line per message with no type tag and no codec in sight; the
+-- compiler mints the wire tag from the declaration's qualified name and
+-- picks the derived encoder. The receiver prints the tag it got (that is
+-- the "minted tag equals the derive's registered name" check, on a nested-
+-- module type: `Msgs.Ping`, the path from the entry module, whose own name
+-- is unwrapped) and decodes with a `from_json` pinned by its result type.
+-- Compiled only: the interpreter parks on the loopback accept (as every
+-- socket fixture here does); its half of the rewrite is unit-tested in
+-- test/stdlib/test_node.march.
+-- Prints from node-b (the receiver) ride node-a's console only after the
+-- reader returns, so the trace order is deterministic.
+mod TypedSendLoopback do
+  needs IO.Console
+  needs IO.NetListen
+  needs IO.NetConnect
+  needs IO.Spawn
+  needs IO.Mut
+
+  mod Msgs do
+    type Ping = { n : Int, who : String }
+    derive Json for Ping
+    type Report = Hot(Int) | Cold
+    derive Json for Report
+  end
+
+  -- ── node-b: receive ─────────────────────────────────────────────────
+  pfn describe(d : Delivery) : String do
+    match Node.payload(d) do
+      Err(e) -> "bad json: " ++ e
+      Ok(v) ->
+        if d.type_tag == "Msgs.Ping" do
+          let r : Result(Ping, Json.DecodeError) = from_json(v)
+          match r do
+            Ok(p) -> "Ping n=" ++ int_to_string(p.n) ++ " who=" ++ p.who
+            Err(_) -> "ping-decode-failed"
+          end
+        else
+          if d.type_tag == "Msgs.Report" do
+            let r : Result(Report, Json.DecodeError) = from_json(v)
+            match r do
+              Ok(Msgs.Hot(t)) -> "Report Hot(" ++ int_to_string(t) ++ ")"
+              Ok(Msgs.Cold) -> "Report Cold"
+              Err(_) -> "report-decode-failed"
+            end
+          else
+            "unknown tag"
+          end
+        end
+    end
+  end
+
+  pfn on_frame_b(seen, tag : Int, frame : List(Int)) : Result(Bool, String) do
+    if tag == NodeSend.tag_actor_msg() do
+      match NodeSend.decode_msg(frame) do
+        Ok(d) ->
+          let line = "node-b: seq=" ++ int_to_string(d.seq) ++ " to=" ++ int_to_string(d.to_local_pid)
+                  ++ " tag=" ++ d.type_tag ++ " -> " ++ describe(d)
+          let prior = match Vault.get(seen, "lines") do
+            Some(ls) -> ls
+            None -> Nil
+          end
+          Vault.set(seen, "lines", Cons(line, prior))
+          Ok(d.seq < 3)
+        Err(e) -> Err(e)
+      end
+    else
+      Err("unexpected tag " ++ int_to_string(tag))
+    end
+  end
+
+  pfn run_node_b(listen_fd : Int, seen) do
+    match tcp_accept(listen_fd) do
+      Ok(fd) ->
+        let _ = PeerReader.serve(fd, Nil, fn (tag, frame) -> on_frame_b(seen, tag, frame))
+        tcp_close(fd)
+        tcp_close(listen_fd)
+      Err(e) ->
+        tcp_close(listen_fd)
+        panic("accept: " ++ e)
+    end
+  end
+
+  -- ── node-a: send ────────────────────────────────────────────────────
+  pfn connect_with_retry(host : String, port : Int, attempts_left : Int) : Result(Int, Socket.SocketError) do
+    match Socket.connect(host, port) do
+      Ok(fd) -> Ok(fd)
+      Err(e) -> if attempts_left <= 1 do Err(e) else connect_with_retry(host, port, attempts_left - 1) end
+    end
+  end
+
+  pfn show_sent(r : Result(Int, NodeSend.SendError)) : String do
+    match r do
+      Ok(seq) -> "sent seq=" ++ int_to_string(seq)
+      Err(NodeSend.NoConnection) -> "no connection"
+      Err(NodeSend.Refused(_, why)) -> "refused: " ++ why
+    end
+  end
+
+  pfn print_all(ls : List(String)) : () do
+    match ls do
+      Nil -> ()
+      Cons(l, rest) ->
+        println(l)
+        print_all(rest)
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen), _cap_spawn : Cap(IO.Spawn), _cap_mut : Cap(IO.Mut)) do
+    let listen_fd = match tcp_listen(0) do
+      Ok(fd) -> fd
+      Err(e) -> panic("listen: " ++ e)
+    end
+    let port = match tcp_local_port(listen_fd) do
+      Ok(p) -> p
+      Err(e) -> panic("local_port: " ++ e)
+    end
+    let seen = Vault.new("typed_send_seen")
+    let srv = task_spawn(fn _ -> run_node_b(listen_fd, seen))
+    let fd = match connect_with_retry("127.0.0.1", port, 5) do
+      Ok(fd) -> fd
+      Err(e) -> panic("connect: " ++ Socket.error_message(e))
+    end
+    let peer : Peer = {
+      node_id: "node-b", identity: NodeIdentity.make("node-b", "pk", 1), fd: fd, data_fd: PeerRegistry.no_fd()
+    }
+    let target = GlobalPid.make("node-b", 42, 1)
+    let ping : Ping = { n: 7, who: "node-a" }
+    -- Three typed sends. No tag, no codec: the compiler supplies both.
+    println("node-a: " ++ show_sent(Node.send(peer, target, ping)))
+    println("node-a: " ++ show_sent(Node.send(peer, target, Msgs.Hot(99))))
+    println("node-a: " ++ show_sent(Node.send(peer, target, Msgs.Cold)))
+    let _ = task_await(srv)
+    tcp_close(fd)
+    match Vault.get(seen, "lines") do
+      Some(ls) -> print_all(List.reverse(ls))
+      None -> println("node-b saw nothing")
+    end
+  end
+end

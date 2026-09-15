@@ -1,0 +1,32 @@
+mod Main do
+  needs IO.Console
+  -- Wildcards t203-t206's fix must keep accepting. The rule is judged on the
+  -- WILDCARD's own type, never the scrutinee's: `S1(_)` discards an Int
+  -- payload, `let _ = sink(s)` an Int result. A `_` arm that panics drops
+  -- nothing that matters, since nothing after it runs.
+  always_linear type S1 = S1(Int)
+  type Msg = Ping(Int) | Pong
+  fn sink(s : S1) : Int do match s do S1(e) -> e end end
+  fn payload(st : S1) : Int do match st do S1(_) -> 0 end end
+  fn result_dropped() : Int do
+    let s = S1(1)
+    let _ = sink(s)
+    0
+  end
+  fn diverging_arm(m : Msg, st : S1) : Int do
+    match m do
+      Ping(n) -> n + sink(st)
+      _ -> panic("unexpected")
+    end
+  end
+  fn gives_up(st : S1) : Int do
+    match st do
+      _ -> panic("gave up")
+    end
+  end
+  fn unrestricted_callback(k : Int -> Int) : Int do k(1) end
+  fn main(c : Cap(IO.Console)) do
+    let a = payload(S1(1)) + result_dropped() + diverging_arm(Ping(1), S1(2))
+    println(int_to_string(a + unrestricted_callback(fn _ -> 0)))
+  end
+end

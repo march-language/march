@@ -1,0 +1,58 @@
+mod TestNode do
+
+  type Ping = { n : Int, who : String }
+  derive Json for Ping
+
+  pfn dead_peer() : Peer do
+    { node_id: "nobody", identity: NodeIdentity.make("nobody", "pk", 1), fd: -1, data_fd: PeerRegistry.no_fd() }
+  end
+
+  describe "Node.send, the typed remote send" do
+
+    -- The interpreter's half of the rewrite. `Node.send`'s own body PANICS
+    -- ("not resolved by the compiler"), so reaching `Err(NoConnection)` --
+    -- the write on a closed fd -- proves the interpreter's arm took the
+    -- derived encoder out of impl_tbl and went through `send_tagged`. This
+    -- harness never typechecks, so this is the VALUE-named path (the tag is
+    -- the runtime type name); the table-named path, with a real socket and
+    -- the qualified tag on the wire, is test/native/node_send_typed_loopback.march.
+    test "a typed send on a dead connection is Err(NoConnection), not the unresolved-body panic" do
+      let p : Ping = { n: 1, who: "t" }
+      match Node.send(dead_peer(), GlobalPid.make("nobody", 7, 1), p) do
+        Err(NodeSend.NoConnection) -> assert (true)
+        Err(_) -> assert (false)
+        Ok(_) -> assert (false)
+      end
+    end
+
+    test "send_tagged on a dead connection is Err(NoConnection) too" do
+      match Node.send_tagged(dead_peer(), GlobalPid.make("nobody", 7, 1), "TestNode.Ping", to_json({ n: 2, who: "u" })) do
+        Err(NodeSend.NoConnection) -> assert (true)
+        Err(_) -> assert (false)
+        Ok(_) -> assert (false)
+      end
+    end
+
+    -- The receiver's half: a delivery's payload is the JSON text of the
+    -- derived encoding, and `from_json` pinned to the type gets it back.
+    test "payload decodes what the derived encoder wrote" do
+      let p : Ping = { n: 3, who: "v" }
+      let bytes = Bytes.to_list(Bytes.from_string(Json.to_string(to_json(p))))
+      match NodeSend.decode_msg(NodeSend.encode_msg(9, GlobalPid.make("n", 1, 1), "TestNode.Ping", bytes)) do
+        Ok(d) ->
+          match Node.payload(d) do
+            Ok(v) ->
+              let r : Result(Ping, Json.DecodeError) = from_json(v)
+              match r do
+                Ok(q) ->
+                  assert (q.n == 3)
+                  assert (q.who == "v")
+                Err(_) -> assert (false)
+              end
+            Err(_) -> assert (false)
+          end
+        Err(_) -> assert (false)
+      end
+    end
+  end
+end

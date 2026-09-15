@@ -13,6 +13,274 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **List contracts proved from list code.** A function that recurses over a
+  list can have its `elts` and `len` return refinement proved from its body,
+  including through a local helper `fn`, a call to another proved function,
+  and a parameter refinement used as an invariant. `List.reverse`,
+  `List.append`, `List.filter` and `List.dedup` now carry proved element
+  contracts, so `member(x, elts(List.reverse(xs)))` follows from
+  `member(x, elts(xs))` at a call site. A contract is used only once proved,
+  in any declaration order. See "Proved list contracts" in
+  `docs/refinement-types.md`.
+
+- `Node.send(peer, to, msg)`: the typed remote send. `msg`'s type must `derive Json`
+  (a missing codec is a typecheck error at the call site naming the type, not a
+  run-time `to_json` panic), the wire type tag is minted by the compiler from the
+  declaration's qualified name so sender and receiver agree by construction, and
+  `derive Json` now refuses a type with a local `Pid` anywhere in it (carry a
+  `GlobalPid.Pid`). `Node.payload(d)` is the receiver's half. A module may now
+  declare `fn send(...)` (reached qualified; the bare call stays the actor primitive).
+- **`dist_monitor_forget_node(node_id)`**: when SWIM declares a watcher node dead,
+  its watchers and pending `MONITOR_FIRE`s are dropped without writing anything
+  (its watchers learn `NodeDown` locally); returns how many were dropped
+  (`test/native/monitor_expiry_loopback`).
+- **`MONITOR_FIRE` is at-least-once.** A fire the runtime writes stays pending in
+  its registry until the watcher's node answers `MONITOR_ACK` (tag 12);
+  `dist_monitor_pending()` lists the unacked fires and `DistLink.resend_pending(reg)`
+  rewrites each on the watcher node's current control connection, so a fire lost
+  to a dropped connection is delivered after the reconnect; watchers dedupe, so a
+  resent copy is one `Down` (`test/native/monitor_ack_retry_loopback`).
+- **`actor_terminal_reason(pid_index)`**: the reason a local actor died —
+  `Some((tag, message))` with the wire's tags (0 Normal, 1 Killed, 2 Crash), `None`
+  while alive or unknown — on both backends, keyed by spawn index so a monitor
+  request for an already-freed record never touches it. A `MONITOR_REQ` for a pid
+  that has already exited can now be answered at once (`test/native/monitor_after_death_loopback`).
+- **Cross-node monitors are reachable from March**: `dist_monitor_register(target_pid,
+  watcher_node, watcher_pid, fd)` is the surface of the runtime's monitor
+  registry, so a node's reader can register a `MONITOR_REQ` and the actor-death
+  path fires `MONITOR_FIRE` back to the watcher's node (compiled backend; the
+  interpreter refuses it loudly). `test/native/dist_monitor_loopback` pins one
+  `Down`, with the real reason, for a remotely killed actor.
+- **`NodeQueue`: credit-based flow control for remote sends.** A per-peer
+  outbound queue whose writer actor alone owns the data connection: a frame is
+  written only while the receiver has granted credit for it (`CREDIT` frames on
+  the control connection carry the consumed total), a byte budget bounds what is
+  queued, and at the budget `drop_new` refuses with `Backpressure` at once while
+  `drop_old` evicts the oldest (reported by `take_evicted`). A stalled peer is
+  visible as queue depth, not as a green thread stuck in `write()`.
+  `NodeQueue.cast` is the remote-send path through it; the `stream` two-node
+  scenario (the `Session.Ops` network transport) runs on it.
+- **`mailbox N policy` on an actor declaration** (`mailbox 1000 drop_old`, after
+  `init`): the bound `Actor.set_queue_limit` sets per spawn site, declared once
+  with the actor and applied at every `spawn`, on both backends. The policy is
+  named (`drop_new` / `drop_old` / `block_sender`); an unknown name is a parse
+  error, and `block_sender` under the interpreter fails at the spawn with the
+  same message the call gives.
+- **Control/data split for peer connections**: `ClusterConn.connect_split` /
+  `accept_split` open two authenticated connections per peer, told apart by a
+  `role` in the hello (a pre-split hello still reads as control); SWIM,
+  monitors and `DELIVERY_FAILED` travel on the control connection, actor
+  messages and RPC on data, so a control frame never queues behind a large data
+  frame (`test/native/control_channel_loopback`).
+
+- **Refinement measures read the payloads of parametric types.** A
+  `@[measure]` declared over `Tree(Int)` or `Expr(Int)` now reads its `Int`
+  payloads (`sum(l) + x + sum(r)`), a set-valued measure can collect them, and
+  a measure declared over `Tree(a)` applies at `Tree(Int)`. These contracts
+  were skipped before. A set predicate whose operands have known, different
+  element types (`member("a", elts(xs))` with `xs : List(Int)`) is now an
+  error at the predicate instead of a silent skip.
+
+- **A remote send's failure reaches the sending actor's mailbox**:
+  `NodeSend.cast_from` records the sender under the seq and `NodeSend.on_failure`
+  hands a `DELIVERY_FAILED` frame back to it through the caller's dispatch, the
+  way a monitor's `Down` arrives, instead of a synchronous read in `main`.
+- **SWIM stall-vs-death, executable**: the `stall` two-node scenario SIGSTOPs a
+  node running a real SWIM loop; the observer takes it through `Suspect` to
+  `Dead` on timeouts alone, and on resume the node refutes with a higher
+  incarnation, which the observer accepts as `Alive` (`test/two_node/stall/`).
+- **The `Session.Ops` network transport**: the Stream session protocol's two
+  endpoints run on two nodes with every message crossing a TCP connection as a
+  `NodeSend` ACTOR_MSG, using the generated `@[endpoints]` API and endpoint code
+  unchanged from the in-process fixtures (`test/two_node/stream/`). The transport
+  is the mailbox one with `emit` sending to the peer node's endpoint actor.
+- **Two-node failure-semantics harness**: `scripts/two-node.sh <scenario>` runs two
+  compiled March programs as two OS processes, applies a fault from outside
+  (SIGKILL/restart, SIGSTOP/SIGCONT), and diffs each node's sorted output. First
+  scenario, `restart`: a node restarted with a new creation at the same local pid
+  refuses a message addressed to its predecessor (`stale creation`) and accepts
+  one addressed to itself. Runs on the ubuntu CI leg.
+- **Bounds contracts on `Array.get`, `Array.set` and `Array.pop`.** A negative
+  index (`Array.get(v, -1)`) is a compile error, an `i >= 0 && i <
+  Array.length(v)` guard satisfies the contract, and `pop` needs
+  `Array.length(v) > 0`. An index the compiler can't bound stays silent, as
+  for `List.nth`; that includes a literal past the end of an array built by
+  `Array.from_list`, whose length the checker does not track. Swept first over
+  the stdlib, the native and stdlib test corpora and eighteen ecosystem
+  projects: no new errors. See `docs/refinement-types.md`.
+
+- **`pid_to_int(pid)`**, the inverse of `pid_of_int`: a Pid's spawn index (the `N`
+  in its `Pid(N)` display), on both backends. Building a `GlobalPid` for a local
+  actor previously meant parsing `to_string(pid)`.
+
+- **`PeerReader`: one reader per peer connection, dispatching frames by tag.**
+  There was no receive loop: every cross-node consumer read its own frames
+  off the shared connection and skipped the ones it did not recognise, so two
+  consumers stole each other's frames, and bytes read past a frame boundary
+  were dropped. `PeerReader.serve(fd, buf, on_frame)` reads each frame once,
+  reports its tag, and hands it to the caller's dispatch; leftovers carry to
+  the next frame. `test/native/peer_reader_loopback` delivers three frames for
+  two consumers from one `recv()`.
+
+- **`NodeSend`: a one-way message to an actor on another node.** Everything
+  cross-node was a synchronous `NodeCall` or a monitor frame. `NodeSend.cast`
+  writes an `ACTOR_MSG` frame addressed by `GlobalPid`; `NodeSend.serve_one`
+  checks the destination node's `creation` and hands the delivery to the
+  receiver's dispatch; every refusal (stale creation, unknown pid or type,
+  undecodable payload) comes back to the sender as `DELIVERY_FAILED`.
+  Documented in the clustering chapter; `test/native/node_send_loopback`
+  runs the exchange over TCP loopback.
+
+- **Set refinements.** A predicate can now state which elements a collection
+  holds, Liquid Haskell style: `elts(xs)` and `keys(m)` map a `List`/`Map` to
+  its element/key set, and `member`, `union`, `inter`, `diff`, `subset`,
+  `singleton`, `empty` and `==` operate on sets, all encoded as quantifier-free
+  Z3 arrays. Literal membership, relational contracts (`{List(Int) | elts(_)
+  == elts(xs)}`), propagation through calls, `let`s and parameter promises,
+  and guards over `Set.contains`/`Map.contains_key` are proved or refuted;
+  cardinality is out of scope by design. A `@[measure]` may return a
+  `Set(a)` (`free_vars(e)`), typechecked as logic and rejected in expression
+  position. Refuted set contracts render their model as a set literal
+  (`Set.insert() can return {4}`). See "Set Refinements" in
+  `docs/refinement-types.md`.
+- **`@[assume]`: an assumed postcondition.** The declared return refinement
+  propagates to call sites without a proof and the body is not checked
+  against it (Liquid Haskell's `assume`); counted in `--refine-report` under
+  `trusted`. Distinct from `@[trusted]`, which only accepts a skip inside
+  `cap verified`. The stdlib `Set` and key-affecting `Map` operations now
+  carry `@[assume]`d `elts`/`keys` contracts, each with a runtime property
+  witness in `test/stdlib/test_set.march` and `test/stdlib/test_map.march`.
+
+- **Endpoint actors under a supervisor, measured.** Two fixtures answer what
+  a restart means for a session: a callback-API host routed by name is
+  replaceable and the protocol continues (`test/session/stream_actor_supervised.march`);
+  an event-API host's parked state dies with it, so a transport routing through
+  epoch capabilities detects the restart and abandons the session cleanly
+  (`test/session/stream_actor_events_supervised.march`). Documented under
+  "Generated endpoints" in the session-types chapter.
+
+- **Container subtyping covers every registered ADT, two layers deep, and
+  polymorphic calls.** Element refinements are now contracts for `Result`,
+  user variant types (`Node(Leaf, 0, Leaf)` under `Tree({Int | _ > 0})` is
+  rejected, and a `match` on it knows the element fact), and any stdlib type
+  defined as a variant; for two layers of nesting (`[[1], [0]]` under
+  `List(List({Int | _ > 0}))` is rejected); and through a polymorphic call's
+  declared signature (`let h = first(xs)` with `first : List(a) -> Option(a)`
+  carries `xs`'s element refinement to `h`; `let x = List.head(xs)` gives
+  `x` the refinement itself). The pass-through refuses any callee that could
+  manufacture an element (`put(xs : List(a), v : a)`). A tuple element or an
+  arrow inside a container remains unenforced.
+
+- **A callback's codomain refinement is a contract.** `fn apply(f : Int ->
+  {Int | _ > 0}, x : Int)` now knows `f(x) > 0` inside `apply`, and every
+  function passed for `f` must return a value satisfying it: a named function
+  through its own proved return refinement (`_ >= 0` does not imply `_ > 0`
+  and is refuted), an inline lambda through its body (`apply(fn n -> 0, 1)` is
+  rejected), and a function with no return refinement as a recorded skip. A
+  local `fn`'s or `let`-bound lambda's proved return refinement now reaches
+  its callers the same way. `--refine-audit` reports a single-argument
+  callback's domain and codomain at a parameter as Enforced.
+
+- **`@[endpoints]` also generates an event-shaped API, so a session endpoint
+  can live in an actor's state.** Beside the callback-shaped `recv_*`/`offer_*`,
+  every role module now has `Parked_<Role>` (an `always_linear` "awaiting a
+  delivery" value), `await_*`/`finish` to park an endpoint, and
+  `resume(parked, from, msg, ep)` returning a `Received_<Role>` the actor's own
+  handler matches with `state` in scope. Because `parked` is a linear state
+  field, a turn that resumes and forgets to park again, or keeps the consumed
+  value, is rejected. `test/session/stream_actor_events.march` runs the
+  `Stream` protocol this way with the same trace as the function-hosted
+  version.
+
+- **Container subtyping: a refinement inside a `List(...)` or `Option(...)`
+  type argument is enforced.** `fn f(xs : List({Int | _ > 0}))` now obliges
+  every value flowing into `xs`: a list literal element-wise (`f([0, 0 - 1])`
+  is rejected twice), a container-typed variable by element implication
+  (`ys : List({Int | _ >= 0})` passed to `f` is rejected with witness `0`;
+  `List({Int | _ > 5})` passes), and anything else as a recorded skip. The
+  same applies to a container return type, an annotated `let`, and a record
+  field. On the other side, `match xs do Cons(h, t) -> …` knows `h > 0` and
+  `t : List({Int | _ > 0})`, and `Some(x)` knows the element fact. Other
+  containers, two layers of nesting, and elements reached through stdlib
+  functions remain unenforced and are reported by `--refine-audit`.
+
+- **Two silent refinement holes are closed.** A `{String | ...}` return
+  type is now verified against the function's body (`fn f() : {String | _
+  == "a"} do "b" end` is a violation; `len(_) > 3` over `"xy"` is refuted),
+  where before it filed nothing, not even a skip. A refined default
+  parameter (`b : {Int | b > 0} \\ 1`) now obliges a full-arity call
+  `f(1, 0)`, resolved to the `f$2` arity variant the runtime dispatches to.
+  A multi-head function whose first head has no guard and only variable
+  parameters keeps that head's declared types through the clause merge, so
+  its refinement is the function's contract (`fn f(n : {Int | n > 0})` then
+  `fn f(0)` rejects `f(0 - 1)`); a refinement on a non-dominating head is
+  still not adopted, since another head may legitimately handle the value.
+
+- **An `impl` method's parameter refinements are enforced even when the
+  method name is ambiguous.** With two impls of `at`, a call
+  `at(Crate(0), 0 - 1)` used to resolve to nothing and oblige nobody; it is
+  now resolved by the first argument's type, the same rule compilation
+  dispatches by, and checked against that impl's own contract (so an impl
+  requiring `i >= 10` and one requiring `i >= 0` are told apart by the
+  receiver). A call whose receiver type the typechecker cannot name is a
+  recorded skip (counted by `--refine-report`, an error under
+  `cap verified`), never silence.
+
+- **Stored-field refinements are enforced.** A refined record field
+  (`type Box = { v : {Int | _ > 0} }`), variant argument
+  (`type W = W({Int | _ > 0})`), or actor state field is now a contract on
+  every construction, so `{ v: 0 }`, `{ b with v: 0 }`, `W(0 - 1)`, and an
+  `init { value: 0 - 1 }` under `value : {Int | value >= 0}` are rejected,
+  and a fact for every reader: `b.v` on a `b : Box` is known to satisfy
+  `_ > 0`, and a handler's incoming `state` is known to satisfy its
+  invariant (which `init` and every handler result must re-establish). A
+  `linear` wrapper is transparent to the refinement. A record literal is
+  typed by its field set; two types of one shape make it ambiguous and it is
+  not obliged. Refinements inside a type argument (`List({Int | _ > 0})`)
+  remain unenforced.
+
+- **An actor handler's parameter refinements are enforced.** `on Inc(n :
+  {Int | n > 0})` now obliges every construction of `Inc(...)` in the program
+  (`send`, `Actor.call`, or a message bound to a `let` first), so
+  `send(c, Inc(0 - 1))` is rejected where the message is built, and the
+  handler body assumes `n > 0`. A message name defined by two handlers or
+  shared with a variant constructor is neither obliged nor assumed (fail
+  closed). A message arriving from a remote node was built by code this
+  compiler did not check; the docs state that trust boundary.
+
+- **Passing a refined function is checked at the pass site, and a
+  `let`-bound lambda's refinements are enforced.** `apply(take_n, -3)` with
+  `fn apply(f : Int -> Int, x : Int)` and `take_n : {Int | _ >= 0} -> Int` is
+  now rejected where `take_n` is passed: the expected domain `Int` promises
+  nothing, so it cannot imply `_ >= 0` (witness `-1`). The rule is
+  contravariant subtyping: a refined callable (named, aliased, local `fn`,
+  `let`-bound or inline lambda) may be passed only where the expected
+  function type's domain implies its own parameter refinement for every
+  value; a domain refined at least as strongly passes, and a domain spelled
+  as a type variable (`List.map`'s) promises nothing. A `let g = fn (n : {Int
+  | n > 0}) -> ...` is also a contract for its direct callers now, and
+  assumes `n > 0` in its body while every use of `g` is obliged. The former
+  accept witness `t77_refine_hof_bypass_limitation` is the reject witness
+  `t77_refine_hof_pass_site_rejected`. Multi-parameter callables are neither
+  obliged nor assumed.
+
+- **A block-level `fn`'s refinements are enforced.** A local
+  `fn inner(n : {Int | n > 0}) : {Int | _ > 0} do ... end` inside a function
+  body is now a contract on both ends: every direct `inner(...)` after it and
+  every recursive call inside it is obliged by the parameter refinement, and
+  the return refinement is verified against the body. The body may assume its
+  parameters only while `inner` is never passed around as a value; an
+  escaping local is checked with them stripped. `--refine-audit` reports both
+  positions Enforced.
+
+- **A session endpoint can be hosted in an actor.** `test/session/stream_actor.march`
+  runs both roles of a protocol inside actors, with every resumption driven by
+  a mailbox delivery, over the same generated `@[endpoints]` API and with the
+  same trace as the function-hosted version. The session state lives in the
+  transport's continuation rather than in actor state, so the endpoint's host
+  turns out to be replaceable: swapping an endpoint's actor for a fresh one
+  mid-session continues the protocol from where it was.
+
 - **`@[endpoints]` on a `protocol` generates a typed endpoint API for every
   role**, over the `Session` transport capability. Each session state becomes
   an `always_linear` type and each protocol step a function between them, so
@@ -41,6 +309,266 @@ git log is authoritative for exact commits.
   nothing when unset.
 
 ### Fixed
+- `stdlib/dist_supervisor.march` failed a standalone `--check` ("Constructor `Normal` is
+  ambiguous between multiple modules"): its restart decision matched `DistLink.DownReason`
+  with bare arms that also name the local monitor's constructors. Qualified, and guarded.
+- `derive` inside a nested `mod` was a silent no-op: the derive was never expanded, so
+  `derive Json for T` in `mod Inner` generated nothing and the first `from_json` to `T`
+  failed at run time. Nested derives (and `satisfy`) now expand at every level.
+- **The cluster handshake no longer swallows the peer's first bytes.** It read
+  its two frames in 4 KiB chunks and dropped the over-read, so a peer that
+  finished the handshake and immediately wrote lost whatever landed in the same
+  `recv()` as the proof (reproduced only under load). The handshake now reads
+  exactly its own frames (`NetKernel.recv_frame_exact`).
+- **`NetKernel.recv_frame` is linear in the frame size.** It appended every
+  4 KiB chunk to the accumulated list, quadratic in the frame: a 1 MiB frame
+  took 4.1 s. Once the length prefix is known the rest is read with one
+  `tcp_recv_exact` and appended once (0.3 s), leftover bytes carried as before.
+- **`send` no longer leaks a reference to the actor it sends to.** `send`,
+  `kill`, `actor_stop`, `is_alive`, `mailbox_size` and `get_cap` now borrow the
+  pid (their runtime implementations only read it), and `self` returns an owned
+  reference like `pid_of_int`; together with the runtime holding a running
+  actor's own reference, the refcount of an actor is now exactly the references
+  the program holds plus one while it runs.
+- **A running actor is no longer freed when the program drops its last pid.**
+  `let a = spawn(W)` with `a` never used again released the actor record's only
+  reference right after spawn, and the actor's own thread then ran on freed
+  memory — invisible on macOS, a glibc `tcache` abort on Linux
+  (`native_actor_enumeration` on the ubuntu CI leg). The runtime now holds its
+  own reference to a live actor, released when its thread finishes.
+- **A user function named `own` with two arguments is the user's function again.**
+  The lowering rewrote *any* two-argument `own(...)` into resource registration
+  (`Drop$<Type>.drop`), so a user `fn own(ep, p)` called with a `Pid` failed to
+  link with an error naming nothing the user wrote. The rewrite now applies only
+  when the module does not define its own `own`.
+- **A user function named after a C symbol the runtime links against (`connect`,
+  `log`, `time`, `strlen`, `write`, `exit`, …) no longer hijacks the runtime.**
+  Top-level user functions are emitted under their bare name in the same link
+  as the C runtime, so `fn connect` *was* the `connect()` the runtime's
+  `tcp_connect` called: the program recursed through it to a stack overflow
+  before its first print (a single-use `pfn` escaped only by being inlined).
+  A bare name in the reserved set is now emitted as `name$u` at its definition
+  and every reference; the interpreter was never affected.
+
+- **Set refinements: six correctness fixes from review.** A module's own
+  function named like the set vocabulary (`keys`, `member`, …) used in a
+  guard is no longer read as a set operation, which had skipped the whole
+  call and hidden a real violation; a fact whose set element sorts clash is
+  dropped rather than skipping the check. A predicate that applies a set word
+  in a non-set shape (`member(xs, 3)`) warns again, and a `@[measure]` may not
+  take a set-vocabulary name. A `Set(Bool)` measure, or one whose declared
+  element type disagrees with its payload, no longer emits an ill-sorted
+  axiom that made every measure query in the module undecided. A record
+  field used as a set element (`member(v.name, …)`) now proves. Calling a
+  set-valued measure from an `impl` method, actor handler, `test` block or
+  top-level `let` is now a `--check` error instead of a link failure.
+  `--refine-audit` no longer reports a `{List(_) | len(_) > 0}` return with
+  no list measure, or a Tier 2 match on an unannotated parameter, as
+  enforced. A chain of `let`-bound `Set.insert`s now carries its membership
+  facts through every link.
+
+- **The interpreter refuses the `block_sender` mailbox policy instead of
+  silently ignoring it.** `Actor.set_queue_limit(pid, n, 3)` under `march run`
+  used to run unbounded, so a program relying on backpressure got none there
+  and then behaved differently compiled. It now fails at the call with a
+  message naming `drop_new`/`drop_old` and the compiled backend.
+
+- **`node_discovery` is back on `dune runtest`.** It was quarantined on
+  2026-08-08 for a torn-stdout race that was fixed on 2026-08-21
+  (`march_stdout_mu`); the quarantine outlived the fix. The ubuntu CI job now
+  also runs the compiled test 200 times per run as the guard.
+
+- **A record parameter no longer makes an unproven postcondition a "violation".**
+  With a record-refined parameter in scope the checker reports any satisfiable
+  counterexample directly; it now does so only when every parameter's own
+  contract was loaded as an assumption. A contract it cannot translate (a
+  `len` conjunct beside the record, for example) previously let the solver pick
+  an input that contract forbids and report correct code.
+- **An unannotated parameter's name now reaches a relational postcondition.**
+  `fn insert(s, elem, cmp) : {… | elts(_) == union(elts(s), …)}` was recorded
+  with parameter names `_`, so the contract was classified unusable and never
+  propagated; a variable pattern parameter is now a name. A Bool local bound
+  to a call with a contract (`let present = Set.contains(…)` then
+  `if present`) and a guard that is itself such a call now establish the
+  contract on their branch.
+
+- **A `@[measure]` whose value is a scalar constructor field is no longer
+  inert.** Call-site reflection erased every scalar constructor field to an
+  unknown, so a measure like `Array.length` (which reads `PVec`'s count)
+  proved nothing anywhere. A literal's field now reflects concretely
+  (`get(Box(3, 0), 5)` against `_ < size(b)` is refuted; `1` proves), and on
+  an opaque value a guard over the measure (`if i < size(b)`) decides the
+  contract. The measure-definition warning says exactly this instead of
+  "never proved or refuted".
+
+- **`--refine-audit` no longer reports a callback's domain refinement as
+  unenforced.** `fn apply(f : ({Int | _ > 0}) -> Int, x : Int)` has been
+  enforced for some time (a call `f(x)` inside `apply` is checked, and passing
+  a function to `apply` is checked where it is passed); the audit's nesting
+  rule fired first and called the site unenforced anyway. It now reports
+  Enforced for a single-argument arrow at a function or lambda parameter, and
+  says precisely what is not modelled (a tupled or curried domain, an arrow
+  at a `let` annotation, field, or return) otherwise.
+
+- **A skipped obligation blames the right thing when a sibling argument is
+  opaque.** `at(i, lane(4))` against `i : {Int | _ < n}` used to report
+  `unreflectable-predicate: the predicate's n has no SMT translation`; the
+  predicate is fine, and what failed to reflect was `lane(4)`, the argument
+  passed for `n`. It now reports an unreflectable *subject* naming that
+  argument. Diagnostic only; no verdict changes.
+
+- **Diagnostics inside generated code are reported.** An error or warning
+  the typechecker raised inside a `derive` expansion or an `@[endpoints]`
+  module was silently filtered out with the stdlib's, so `march --check`
+  exited 0 on a generated function that used a linear value twice. Such a
+  diagnostic now prints, without a source excerpt, with a note saying it is in
+  code generated for the file.
+
+- **`p : Pid(Int)` is accepted as a type annotation.** The bare name `Pid`
+  resolves to the stdlib's `Global_pid.Pid` record, so the one-argument actor
+  pid spelling was rejected with "`Pid` expects 0 type argument(s)", and every
+  program matching a monitor's `Down` carried the same error invisibly. The
+  one-argument form now means the actor pid.
+
+- **`derive Eq` on a single-constructor type, and `@[endpoints]` on a protocol
+  whose state can receive every message, no longer generate an unreachable
+  catch-all arm** (a "pattern can never be reached" warning that became
+  visible with the change above).
+
+- **Calling a closure no longer leaks its arguments (compiled).** A function
+  value called with a fresh heap argument (`f(int_to_string(n))`, a
+  `List.filter` predicate, the per-element `show` inside `to_string` of a
+  `List(String)`) leaked that argument on every call, and an argument still in
+  use afterwards could never be freed. This covered lambdas that only read
+  their argument or ignore it, a lambda parameter typed with a record alias,
+  and a named function passed as a value.
+
+- **Closures no longer leak their environment and captured values
+  (compiled).** A function that returns a closure (`fn adder(k) do fn x -> x
+  + k end`) leaked the closure and everything it captured on every call.
+
+- **`to_string` of a list and `string_join` no longer leak the list
+  (compiled).** Printing a list leaked the intermediate list and its element
+  strings on every call (five objects for a two-element list).
+
+- **Awaiting a task that returns a `Float` no longer leaks (compiled).** Each
+  `task_await_unwrap` or `task_await` of a `Float` task left one allocation
+  behind.
+
+- **Matching a small struct out of an `Option` no longer leaks (compiled).**
+  `match o do Some(p) -> ... end` on an `Option` of a two-`Float` record-like
+  type leaked one allocation per match.
+
+- **`compare_int`, `compare_float` and `compare_string` work.** Compiled
+  programs calling them failed to link, and the interpreter returned a
+  `Less`/`Equal`/`Greater` value where the type says `Int`. They now return
+  -1, 0 or 1 on both, like `compare`.
+
+- **A generic function has to opt in to receiving a linear value, and a
+  container holding one is linear too.** `fn dup(x) do (x, x) end` turned one
+  `always_linear` value into two, `fn drop_it(x) do 0 end` leaked one, and a
+  tuple holding one could be destructured twice. A generic function now receives
+  a linear value only through a parameter marked `linear` (`fn id(linear x : a)
+  : a`), which its body must then use exactly once; constructors, operators and
+  functions that only return their type variable need nothing. A tuple, list or
+  ADT value holding a linear value is tracked like the value itself. **This can
+  reject code that compiled before**, including stdlib calls such as
+  `List.length` on a list of linear values.
+
+- **A linear value must be consumed on every branch that returns.** `if b do
+  sink(st) else 0 end` dropped `st` whenever `b` was false, and was accepted:
+  branches merged as "consumed on some branch". A branch that ends in `panic(…)`
+  is exempt, since it never returns, and so are affine values and session
+  channels. The early `Err` return of `let?` counts as a branch. **This can
+  reject code that compiled before.**
+
+- **A record's linear fields can no longer be consumed and kept at the same
+  time, and actor state is covered.** In an actor handler, `sink(state.st)`
+  followed by `{ state with n: k }` left the consumed `st` in the state for the
+  next turn, silently. A record now owns its linear fields: accessing one moves
+  it out, using the record whole moves them all, `{ r with … }` keeps what it
+  doesn't replace, and each must be consumed before the record goes out of
+  scope. A field whose type is `always_linear` counts, and a `linear` qualifier
+  on an actor state field is no longer ignored. **This can reject code that
+  compiled before**: a handler that returns a brand-new state now has to
+  consume the old state's linear fields first.
+
+- **An unannotated parameter is checked for linearity once its body fixes its
+  type.** `fn g(st) do sink(st) + sink(st) end`, where `sink` takes an
+  `always_linear` value, used `st` twice without complaint (annotating `st`
+  made it an error). The same held for inferred lambdas and actor handler
+  parameters.
+
+- **A closure passed straight to a function, or a local `fn`, can no longer
+  capture a linear value.** The "cannot be captured by a closure" rule only ran
+  for a lambda bound with `let`; `run2(fn () -> sink(s))` captured `s`, and a
+  `run2` that calls its callback twice consumed it twice.
+
+- **A `_` wildcard can no longer silently drop a linear value.** `let _ =
+  S1(1)`, `let (a, _) = (S1(1), S1(2))`, a `_ ->` arm on a linear scrutinee,
+  and a `fn _ -> …` callback receiving one were all accepted. Each now reports
+  "This `_` discards a linear value". Discarding a non-linear part (`S1(_)`,
+  `let _ = sink(s)`) and a `_` arm that ends in `panic(…)` stay legal.
+
+- **A lambda or local `fn` can no longer drop a linear parameter.** A
+  callback such as `run(fn st -> 0)` receiving an `always_linear` value, or a
+  local `fn g(st : S1)` that ignores `st`, was accepted silently; top-level
+  functions and actor handlers already rejected the same code. It now reports
+  "The linear value `st` was never used."
+
+- **Comparing or measuring a fresh string or list no longer leaks it
+  (compiled).** `==`, `!=`, `<`, `<=`, `>`, `>=` and `string_length` never
+  freed a heap argument that had no other owner. A loop comparing freshly
+  built strings grew by one object per comparison, and a two-element list
+  leaked six. The interpreter was unaffected.
+
+- **A refinement on a lambda's, a block-level `fn`'s, or an actor handler's
+  parameter is no longer assumed inside the body.** No caller was obliged by
+  those positions (still true; they are the open coverage holes), but the body
+  treated the predicate as a fact anyway, so `let g = fn (n : {Int | n > 0})
+  -> need(n)` followed by `g(0)` passed `cap verified`. The body is now walked
+  with the refinement stripped, the treatment a non-adoptable `impl` method
+  already got. Code that only verified through that unproved assumption now
+  fails under `cap verified`; see
+  `specs/plans/2026-09-13-refinement-enforcement-holes-plan.md` for the phases
+  that turn each position into an actual contract.
+
+- **`send(self, msg)` inside an actor handler now delivers.** It silently did
+  nothing on both backends and still exited 0. The interpreter stopped the
+  handler at the send, and compiled code dropped the message. `self` was never
+  actually bound to the actor's pid, so it resolved to the `self` builtin
+  function instead. Both `self` and `self()` are now the handler's own pid, the
+  same value `spawn` returned.
+
+- **`self` inside an actor handler compiles.** It was a real builtin in the
+  interpreter but missing from the compiled backend's builtin table, so the
+  emitter produced a call to an undefined symbol and *any* compiled program
+  naming `self` failed to link. The runtime accessor it should have pointed
+  at existed but returned the wrong thing — a scheduler process pointer
+  rather than the actor pointer a pid actually is — which nothing could
+  notice while no compiled program could reach it. Both are fixed, and
+  `self` outside a handler now fails loudly instead of yielding a stray
+  address. Sending *to* `self` still does not deliver, on either backend;
+  that is tracked separately.
+
+- **`always_linear` tracking no longer depends on declaration order.** The
+  registry of always-linear type names was filled only as declarations were
+  checked, in order, so a function checked *before* the type's declaration saw
+  an ordinary type and lost both halves of the guarantee: reusing a linear
+  value and abandoning one were each silently accepted. Top-level types were
+  affected as much as nested ones. Pass 1 now seeds the registry before any
+  body is checked. The same change routes the let-binding promotion through
+  the shadow-aware lookup, so a nested `always_linear` type no longer infects
+  an unrelated type of the same name declared in the current module — a false
+  positive on ordinary code that the ordering hole had been masking.
+
+- **An actor handler's parameters are tracked for linearity.** They were bound
+  without the promotion a named function's parameters get, so a linear value
+  arriving in a message could be duplicated or dropped by the handler with no
+  diagnostic at all — the sender's half of the documented zero-copy-move idiom
+  was enforced and the receiver's was not. Storing the parameter into the
+  returned state counts as consuming it, so an actor that holds a resource
+  needs no special case.
 
 - `march --fmt` dropped the `end` that closes a `choose by … :` block inside a
   `protocol`, so formatting a file with a choice produced a program that no
@@ -80,7 +608,6 @@ git log is authoritative for exact commits.
   `supervise do … end` alternative, instead of failing at link time with
   `Undefined symbols: _worker`. That value-level supervisor DSL is
   interpreter-only. A user function named `worker` is unaffected.
-
 - **A `--test` build no longer silently drops a sibling test file that fails
   to parse.** `forge test` compiles one entry and discovers the rest via
   `MARCH_LIB_PATH`; an unparsable sibling used to be dropped with a stderr
@@ -101,6 +628,26 @@ git log is authoritative for exact commits.
   the existing tag store and costs no extra instruction at `--opt 2`. Niche
   `Option`, single-field wrapper types, tuples and anonymous records still
   render `#<tag:N>` — they have no cell of their own to stamp.
+- **Installing one version of a dependency no longer destroys another.** The
+  cache was keyed by dependency NAME alone, so every project on a machine
+  shared one directory per name. A registry install did an unconditional
+  `rm -rf` of it with no check at all, so `forge deps` in a project wanting
+  `bastion 0.3.1` silently deleted the `bastion 0.2.0` tree another project was
+  building against, which then failed with `Unknown module` for everything that
+  dependency provided. Installs now live at
+  `~/.march/cas/deps/<name>/<coordinate>` — the resolved commit for a git
+  dependency, the exact version for a registry one — so versions coexist, and
+  `forge.lock` is read at build time to select the right one. An existing flat
+  install is migrated on the next `forge deps` rather than re-downloaded.
+- **`forge.lock`'s `hash` field had two incompatible meanings.** For a registry
+  dependency it was the published checksum of the `.tar.gz`; for a git
+  dependency it was a hash of the extracted source tree. No single integrity
+  check could cover both, including the one the code has claimed to perform in
+  a comment since it was written. `hash` is now uniformly the tree hash for
+  every dependency kind, a new optional `checksum` field carries the registry's
+  published digest as provenance, and a `[lockfile] version = 2` marker lets a
+  reader tell an old file's registry `hash` from a new one's. Older lockfiles
+  are still read.
 - **Compiled `to_string` of a file error names its constructor.** `file_read`
   on a missing path printed `#<tag:0>` compiled where the interpreter printed
   `NotFound("/path")`, and the same for the twelve other `file_*` / `dir_*`
@@ -119,6 +666,22 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **`cap no_panic` accepts a guarded `Array.get`/`set`/`pop`.** They were
+  banned outright; they now join `List.nth` and friends in the proof-checked
+  set, so a call whose bounds guard proves the contract is accepted, and an
+  unguarded or off-by-one one is still a panic error.
+- **Non-recursive `@[measure]`s reach the solver as definitions, not
+  quantified axioms.** A measure whose arms call no measure is encoded as a
+  plain `define-fun`. Under the axioms z3 answered satisfiable queries over
+  such a measure only at its 3 s timeout, as `unknown`, which cost cold
+  checks minutes and left the obligation skipped; the same queries now
+  decide in milliseconds. Recursive and set-valued measures are unchanged.
+- **A compiled program that segfaults now says where.** A fatal SIGSEGV or
+  SIGBUS used to exit 139/138 with nothing on stderr. It now prints one
+  `march: fatal …` line first: signal, fault address, program counter, the
+  running green thread, and whether the address was in that thread's stack
+  guard page (overflow). The exit status is unchanged.
+
 - **Pull requests must not carry `docs/pagefind/`.** The search index is
   bot-owned; CI rejects a PR that touches it (fix: `git checkout origin/main --
   docs/pagefind`). This ends the merge conflicts between any two docs PRs.
@@ -127,6 +690,14 @@ git log is authoritative for exact commits.
 - The nightly quarantine job derives its alias list from the dune files instead
   of a hand list that had named three deleted aliases for a month.
 
+
+### Documentation
+
+- **The linear-types chapter no longer describes four fixed bugs as open.**
+  It told readers that an `affine` parameter keyword is a parse error, that a
+  parameter-bound record's linear field is only warning-checked, that a
+  same-named plain type inherits `always_linear`, and that a `linear` return
+  type doesn't reach a plain `let`. None of that has been true since July.
 
 ## [0.4.0] - 2026-09-10
 

@@ -1,0 +1,10 @@
+-- EXPECT-ERROR: The linear value `st` was never used
+mod Main do
+  needs IO.Console
+  -- The infer-mode twin of t198: an annotated lambda parameter, never used.
+  always_linear type S1 = S1(Int)
+  fn main(c : Cap(IO.Console)) do
+    let g = fn (st : S1) -> 0
+    println(int_to_string(g(S1(1))))
+  end
+end

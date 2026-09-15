@@ -88,10 +88,15 @@ mod Main do
   fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) do
     let boss = spawn(Boss)
     let victim = current_child(boss)
+    -- Minted BEFORE the reading: pid_of_int takes a reference, and `send`
+    -- keeps the one it is handed
+    -- (specs/progress/2026-09-14-pid-ownership-settled-send-borrows-self-owned.md), so a
+    -- pid minted inside the window would read one above the true count.
+    let victim_pid = pid_of_int(victim)
     let rc_outside = actor_rc(victim)
     println("victim is multiply owned: " ++ bool_to_string(rc_outside > 1))
 
-    send(pid_of_int(victim), Look(victim))
+    send(victim_pid, Look(victim))
     run_until_idle()
 
     -- The load-bearing line.  With the clobber present this reads 1 while
@@ -102,5 +107,9 @@ mod Main do
     -- And the handler really did run, so a probe that silently never fired
     -- cannot masquerade as a pass.
     println("handler observed something: " ++ bool_to_string(seen_by(victim) > 0))
+    -- `victim_pid` is still held here, so its reference was part of both
+    -- counts above (a borrowing `send` does not release it; its drop is at
+    -- this last use, after the measurement).
+    println("victim pid still held: " ++ bool_to_string(is_alive(victim_pid)))
   end
 end

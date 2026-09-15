@@ -268,4 +268,89 @@ describe "string sets" do
   end
 end
 
+-- ── Runtime witnesses for the @[assume]d contracts in stdlib/set.march ─────
+-- Every assumed `elts` contract is exercised here against a list-based
+-- oracle over random inputs with the standard Int comparator: an assumed
+-- contract with no runtime witness would be a fact taken purely on faith
+-- (specs/2026-09-13-set-refinements-design.md §6.2).
+
+pfn same_elts(s, xs : List(Int)) : Bool do
+  -- every element of xs is in s, and every element of s is in xs
+  List.all(xs, fn x -> Set.contains(s, x, int_cmp))
+    && List.all(Set.to_list(s), fn y -> List.member(xs, y))
+end
+
+pfn oracle_union(a : List(Int), b : List(Int)) : List(Int) do List.append(a, b) end
+pfn oracle_inter(a : List(Int), b : List(Int)) : List(Int) do
+  List.filter(a, fn x -> List.member(b, x))
+end
+pfn oracle_diff(a : List(Int), b : List(Int)) : List(Int) do
+  List.filter(a, fn x -> !List.member(b, x))
+end
+
+describe "assumed elts contracts (runtime witnesses)" do
+  test "empty has no elements" do
+    assert same_elts(Set.empty(), Nil)
+  end
+
+  test "singleton(x) has exactly x" do
+    Check.all(Gen.int(-50, 50), fn x -> same_elts(Set.singleton(x), Cons(x, Nil)))
+  end
+
+  test "from_list / to_list preserve the element set" do
+    Check.all(Gen.list(Gen.int(0, 30)), fn xs -> same_elts(set_of(xs), xs))
+  end
+
+  test "insert adds exactly x: elts(insert(s, x)) == elts(s) + {x}" do
+    Check.all(Gen.tuple2(Gen.list(Gen.int(0, 30)), Gen.int(0, 30)), fn pair ->
+      match pair do
+        (xs, x) -> same_elts(Set.insert(set_of(xs), x, int_cmp), Cons(x, xs))
+      end
+    )
+  end
+
+  test "remove drops exactly x: elts(remove(s, x)) == elts(s) - {x}" do
+    Check.all(Gen.tuple2(Gen.list(Gen.int(0, 30)), Gen.int(0, 30)), fn pair ->
+      match pair do
+        (xs, x) -> same_elts(Set.remove(set_of(xs), x, int_cmp), List.filter(xs, fn y -> y != x))
+      end
+    )
+  end
+
+  test "contains agrees with membership" do
+    Check.all(Gen.tuple2(Gen.list(Gen.int(0, 30)), Gen.int(0, 30)), fn pair ->
+      match pair do
+        (xs, x) -> Set.contains(set_of(xs), x, int_cmp) == List.member(xs, x)
+      end
+    )
+  end
+
+  test "union / intersection / difference agree with the list oracle" do
+    Check.all(Gen.tuple2(Gen.list(Gen.int(0, 20)), Gen.list(Gen.int(0, 20))), fn pair ->
+      match pair do
+        (a, b) ->
+          let sa = set_of(a)
+          let sb = set_of(b)
+          same_elts(Set.union(sa, sb, int_cmp), oracle_union(a, b))
+            && same_elts(Set.intersection(sa, sb, int_cmp), oracle_inter(a, b))
+            && same_elts(Set.difference(sa, sb, int_cmp), oracle_diff(a, b))
+      end
+    )
+  end
+
+  test "is_subset / eq / is_empty agree with the list oracle" do
+    Check.all(Gen.tuple2(Gen.list(Gen.int(0, 12)), Gen.list(Gen.int(0, 12))), fn pair ->
+      match pair do
+        (a, b) ->
+          let sa = set_of(a)
+          let sb = set_of(b)
+          Set.is_subset(sa, sb, int_cmp) == List.all(a, fn x -> List.member(b, x))
+            && Set.eq(sa, sb, int_cmp)
+               == (List.all(a, fn x -> List.member(b, x)) && List.all(b, fn y -> List.member(a, y)))
+            && Set.is_empty(sa) == (a == Nil)
+      end
+    )
+  end
+end
+
 end

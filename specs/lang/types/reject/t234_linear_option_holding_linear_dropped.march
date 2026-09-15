@@ -1,0 +1,10 @@
+-- EXPECT-ERROR: The linear value `o` was never used
+mod Main do
+  needs IO.Console
+  -- An ADT value holding a linear payload leaks it when dropped.
+  always_linear type S1 = S1(Int)
+  fn main(c : Cap(IO.Console)) do
+    let o = Some(S1(1))
+    println("dropped")
+  end
+end

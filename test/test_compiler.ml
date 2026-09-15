@@ -5988,6 +5988,718 @@ let test_linear_letq_acquire_double_use () =
   end|} in
   Alcotest.(check bool) "let?-acquired linear value used twice: error" true (has_errors ctx)
 
+(* Declaration order must not decide whether `always_linear` is tracked.
+   `env.always_linear_types` was written only by `check_decl`, mid-fold, so a
+   function checked BEFORE the declaration saw an ordinary type and lost both
+   halves of the guarantee. Pass 1 now seeds the registry
+   (`Typecheck.always_linear_names`). Corpus: reject/t191-t193, accept/t194.
+   Each of these three was SILENTLY ACCEPTED before 2026-09-11. *)
+let test_always_linear_declared_after_use_reuse () =
+  let ctx = typecheck {|mod Test do
+    fn f() : Int do
+      let a = S(1)
+      step(a) + step(a)
+    end
+    fn step(s : S) : Int do match s do S(e) -> e end end
+    always_linear type S = S(Int)
+  end|} in
+  Alcotest.(check bool) "type declared after use: reuse is an error" true (has_errors ctx)
+
+let test_always_linear_declared_after_use_drop () =
+  let ctx = typecheck {|mod Test do
+    fn f() : Int do
+      let a = S(1)
+      0
+    end
+    always_linear type S = S(Int)
+  end|} in
+  Alcotest.(check bool) "type declared after use: drop is an error" true (has_errors ctx)
+
+let test_always_linear_nested_module_after_use () =
+  let ctx = typecheck {|mod Test do
+    fn f() : Int do
+      let a = G.S(1)
+      G.step(a) + G.step(a)
+    end
+    mod G do
+      always_linear type S = S(Int)
+      fn step(s : S) : Int do match s do S(e) -> e end end
+    end
+  end|} in
+  Alcotest.(check bool) "nested module declared after use: reuse is an error" true (has_errors ctx)
+
+(* The other half: the registry holds BARE names, so seeding it in pass 1
+   would infect an unrelated same-named ordinary type. The promotion goes
+   through `resolves_always_linear`, which prefers the current module's own
+   declaration. This one was REJECTED (a false positive on ordinary code)
+   before the same change. *)
+let test_always_linear_bare_name_does_not_infect () =
+  let ctx = typecheck {|mod Test do
+    mod G do
+      always_linear type S = S(Int)
+    end
+    type S = S(Int)
+    fn get(x : S) : Int do match x do S(v) -> v end end
+    fn f() : Int do
+      let a = S(1)
+      get(a) + get(a)
+    end
+  end|} in
+  Alcotest.(check bool) "a nested always_linear type does not infect a same-named ordinary type"
+    false (has_errors ctx)
+
+(* An actor handler's parameters were bound with a plain `bind_var`, so they
+   got none of the `always_linear` promotion a named function's parameters
+   get: tracked for NEITHER must-use nor at-most-once. Corpus: reject/t195-196,
+   accept/t197. Both rejects were silently accepted before 2026-09-11. *)
+let test_linear_actor_handler_param_reused () =
+  let ctx = typecheck {|mod Test do
+    always_linear type S = S(Int)
+    fn sink(x : S) : Int do match x do S(v) -> v end end
+    actor A do
+      state { n : Int }
+      init  { n: 0 }
+      on Take(s : S) do
+        { state with n: state.n + sink(s) + sink(s) }
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "handler param used twice: error" true (has_errors ctx)
+
+let test_linear_actor_handler_param_dropped () =
+  let ctx = typecheck {|mod Test do
+    always_linear type S = S(Int)
+    actor A do
+      state { n : Int }
+      init  { n: 0 }
+      on Take(s : S) do
+        { state with n: state.n + 1 }
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "handler param never used: error" true (has_errors ctx)
+
+let test_linear_actor_handler_param_consumed_ok () =
+  let ctx = typecheck {|mod Test do
+    always_linear type S = S(Int)
+    fn sink(x : S) : Int do match x do S(v) -> v end end
+    actor A do
+      state { n : Int }
+      init  { n: 0 }
+      on Take(s : S) do
+        { state with n: state.n + sink(s) }
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "handler param consumed once: no error" false (has_errors ctx)
+
+(* Storing the parameter into the returned state counts as consuming it: the
+   record update references it. Pinned so the fix cannot over-fire on the
+   shape an actor that HOLDS a resource must use. *)
+let test_linear_actor_handler_param_stored_ok () =
+  (* Since 2026-09-13 the state's own linear fields are tracked too, so the
+     handler must consume the value it replaces: building a fresh record that
+     ignores the old `held` would leak it. *)
+  let ctx = typecheck {|mod Test do
+    always_linear type S = S(Int)
+    fn sink(x : S) : Int do match x do S(v) -> v end end
+    actor B do
+      state { held : S, n : Int }
+      init  { held: S(0), n: 0 }
+      on Keep(s : S) do
+        let old = sink(state.held)
+        { held: s, n: state.n + old }
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "handler param stored into state: no error" false (has_errors ctx)
+
+(* Linearity holes, 2026-09-13 (specs/plans/2026-09-13-linearity-holes-plan.md).
+   [linear_error ctx sub]: an Error-severity diagnostic whose message contains
+   [sub], so a case cannot pass on some unrelated error. *)
+let linear_error ctx sub =
+  List.exists (fun (d : March_errors.Errors.diagnostic) ->
+      d.severity = March_errors.Errors.Error && contains_substring d.message sub)
+    ctx.March_errors.Errors.diagnostics
+
+let linear_prelude = {|
+    always_linear type S1 = S1(Int)
+    fn sink(s : S1) : Int do match s do S1(e) -> e end end
+    fn run(k : S1 -> Int) : Int do k(S1(1)) end
+|}
+
+let linear_mod body = "mod Test do\n" ^ linear_prelude ^ body ^ "\nend"
+
+(* A lambda's or a local fn's parameters got no must-use check at the scope's
+   close: check_fn and actor handlers ran check_linear_all_consumed, the ELam
+   arms and ELetFn did not. Corpus: reject/t198-t201, accept/t202. *)
+let test_linear_lambda_param_dropped_check_mode () =
+  let ctx = typecheck (linear_mod {|
+    fn f() : Int do run(fn st -> 0) end|}) in
+  Alcotest.(check bool) "check-mode lambda param dropped" true
+    (linear_error ctx "The linear value `st` was never used")
+
+let test_linear_lambda_param_dropped_infer_mode () =
+  let ctx = typecheck (linear_mod {|
+    fn f() : Int do
+      let g = fn (st : S1) -> 0
+      g(S1(1))
+    end|}) in
+  Alcotest.(check bool) "annotated infer-mode lambda param dropped" true
+    (linear_error ctx "The linear value `st` was never used")
+
+let test_linear_lambda_linear_keyword_dropped () =
+  let ctx = typecheck {|mod Test do
+    type T = T(Int)
+    fn f() : Int do
+      let g = fn (linear t : T) -> 0
+      g(T(1))
+    end
+  end|} in
+  Alcotest.(check bool) "`linear` keyword lambda param dropped" true
+    (linear_error ctx "The linear value `t` was never used")
+
+let test_linear_lambda_second_param_dropped () =
+  let ctx = typecheck (linear_mod {|
+    fn run2(k : S1 -> S1 -> Int) : Int do k(S1(1), S1(2)) end
+    fn f() : Int do run2(fn (a, b) -> sink(a)) end|}) in
+  Alcotest.(check bool) "second lambda param dropped" true
+    (linear_error ctx "The linear value `b` was never used")
+
+let test_linear_local_fn_param_dropped () =
+  let ctx = typecheck (linear_mod {|
+    fn f() : Int do
+      fn g(st : S1) : Int do 0 end
+      g(S1(1))
+    end|}) in
+  Alcotest.(check bool) "local fn param dropped" true
+    (linear_error ctx "The linear value `st` was never used")
+
+let test_linear_lambda_params_consumed_ok () =
+  let ctx = typecheck (linear_mod {|
+    fn once() : Int do run(fn st -> sink(st)) end
+    fn by_match() : Int do run(fn st -> match st do S1(e) -> e end) end
+    fn nested() : Int do run(fn s -> run(fn t -> sink(t)) + sink(s)) end
+    fn local() : Int do
+      fn g(st : S1) : Int do sink(st) end
+      g(S1(1))
+    end|}) in
+  Alcotest.(check bool) "lambda / local fn params consumed: no error" false (has_errors ctx)
+
+(* The close must judge only the entries the lambda's own parameters added. A
+   name filter would see the OUTER `s` (unused so far, consumed after the
+   call) and report it at the lambda. *)
+let test_linear_lambda_param_shadows_outer_ok () =
+  let ctx = typecheck (linear_mod {|
+    fn infer_mode() : Int do
+      let s = S1(1)
+      let g = fn (s : S1) -> sink(s)
+      g(S1(2)) + sink(s)
+    end
+    fn check_mode() : Int do
+      let s = S1(1)
+      run(fn s -> sink(s)) + sink(s)
+    end|}) in
+  Alcotest.(check bool) "lambda param shadowing an outer linear: no error" false (has_errors ctx)
+
+let test_linear_lambda_affine_param_dropped_ok () =
+  let ctx = typecheck {|mod Test do
+    type T = T(Int)
+    fn f() : Int do
+      let g = fn (affine t : T) -> 0
+      g(T(1))
+    end
+  end|} in
+  Alcotest.(check bool) "affine lambda param dropped: no error" false (has_errors ctx)
+
+(* A `_` wildcard on a linear value dropped it silently: a wildcard binds
+   nothing, so no must-use check could ever see it. Judged on the wildcard's
+   own type. Corpus: reject/t203-t206, accept/t207. *)
+let wildcard_msg = "This `_` discards a linear value of type `S1`"
+
+let test_linear_wildcard_let () =
+  let ctx = typecheck (linear_mod {|
+    fn f() : Int do
+      let _ = S1(1)
+      0
+    end|}) in
+  Alcotest.(check bool) "let _ = linear" true (linear_error ctx wildcard_msg)
+
+let test_linear_wildcard_tuple () =
+  let ctx = typecheck (linear_mod {|
+    fn f() : Int do
+      let (a, _) = (S1(1), S1(2))
+      sink(a)
+    end|}) in
+  Alcotest.(check bool) "tuple wildcard on linear" true (linear_error ctx wildcard_msg)
+
+let test_linear_wildcard_lambda_param () =
+  let ctx = typecheck (linear_mod {|
+    fn f() : Int do run(fn _ -> 0) end|}) in
+  Alcotest.(check bool) "fn _ -> against S1 -> Int" true (linear_error ctx wildcard_msg)
+
+let test_linear_wildcard_match_arm () =
+  let ctx = typecheck (linear_mod {|
+    fn f(st : S1) : Int do
+      match st do
+        _ -> 0
+      end
+    end|}) in
+  Alcotest.(check bool) "`_ ->` arm on linear scrutinee" true (linear_error ctx wildcard_msg)
+
+let test_linear_wildcard_non_linear_ok () =
+  let ctx = typecheck (linear_mod {|
+    fn payload(st : S1) : Int do match st do S1(_) -> 0 end end
+    fn result_dropped() : Int do
+      let s = S1(1)
+      let _ = sink(s)
+      0
+    end
+    fn gives_up(st : S1) : Int do
+      match st do
+        _ -> panic("gave up")
+      end
+    end
+    fn cb(k : Int -> Int) : Int do k(1) end
+    fn unrestricted() : Int do cb(fn _ -> 0) end|}) in
+  Alcotest.(check bool) "wildcards discarding nothing linear: no error" false (has_errors ctx)
+
+(* The capture rule lived only in the ELam infer arm; a check-mode lambda and a
+   local fn could capture a linear value and be called twice. Corpus:
+   reject/t208-t210, accept/t211. *)
+let capture_msg = "The linear value `s` cannot be captured by a closure"
+
+let test_linear_capture_check_mode () =
+  let ctx = typecheck (linear_mod {|
+    fn run2(k : () -> Int) : Int do k() + k() end
+    fn f() : Int do
+      let s = S1(1)
+      run2(fn () -> sink(s))
+    end|}) in
+  Alcotest.(check bool) "check-mode lambda captures linear" true (linear_error ctx capture_msg)
+
+let test_linear_capture_check_mode_with_param () =
+  let ctx = typecheck (linear_mod {|
+    fn run2(k : Int -> Int) : Int do k(1) + k(2) end
+    fn f() : Int do
+      let s = S1(1)
+      run2(fn x -> x + sink(s))
+    end|}) in
+  Alcotest.(check bool) "check-mode 1-arg lambda captures linear" true (linear_error ctx capture_msg)
+
+let test_linear_capture_local_fn () =
+  let ctx = typecheck (linear_mod {|
+    fn f() : Int do
+      let s = S1(1)
+      fn g() : Int do sink(s) end
+      g() + g()
+    end|}) in
+  Alcotest.(check bool) "local fn captures linear" true (linear_error ctx capture_msg)
+
+let test_linear_capture_reported_once () =
+  let ctx = typecheck (linear_mod {|
+    fn f() : Int do
+      let s = S1(1)
+      let g = fn () -> sink(s)
+      g()
+    end|}) in
+  let n = List.length (List.filter (fun (d : March_errors.Errors.diagnostic) ->
+      contains_substring d.message "cannot be captured") ctx.March_errors.Errors.diagnostics) in
+  Alcotest.(check int) "infer-mode capture reported exactly once" 1 n
+
+let test_linear_capture_nothing_linear_ok () =
+  let ctx = typecheck (linear_mod {|
+    fn twice(k : Int -> Int) : Int do k(1) + k(2) end
+    fn shadow() : Int do
+      let s = S1(1)
+      run(fn s -> sink(s)) + sink(s)
+    end
+    fn unrestricted() : Int do
+      let n = 10
+      twice(fn x -> x + n)
+    end
+    fn local_ok() : Int do
+      let n = 1
+      fn g(x : Int) : Int do x + n end
+      g(1) + g(2)
+    end|}) in
+  Alcotest.(check bool) "closures capturing nothing linear: no error" false (has_errors ctx)
+
+(* An unannotated parameter's linearity used to be decided at bind time, from a
+   fresh type variable, so it was never tracked even when the body fixed its
+   type to a linear one. Now tracked as pending and judged at the close.
+   Corpus: reject/t212-t214, accept/t215. *)
+let test_linear_unannotated_fn_param_reused () =
+  let ctx = typecheck (linear_mod {|
+    fn g(st) : Int do sink(st) + sink(st) end|}) in
+  Alcotest.(check bool) "unannotated fn param reused" true
+    (linear_error ctx "The linear value `st` is used more than once here")
+
+let test_linear_unannotated_lambda_param_reused () =
+  let ctx = typecheck (linear_mod {|
+    fn f() : Int do
+      let g = fn st -> sink(st) + sink(st)
+      g(S1(1))
+    end|}) in
+  Alcotest.(check bool) "unannotated lambda param reused" true
+    (linear_error ctx "The linear value `st` is used more than once here")
+
+let test_linear_unannotated_handler_param_reused () =
+  let ctx = typecheck (linear_mod {|
+    actor A do
+      state { n : Int }
+      init  { n: 0 }
+      on Take(s) do { state with n: sink(s) + sink(s) } end
+    end|}) in
+  Alcotest.(check bool) "unannotated handler param reused" true
+    (linear_error ctx "The linear value `s` is used more than once here")
+
+let test_linear_unannotated_params_ok () =
+  let ctx = typecheck (linear_mod {|
+    fn per_branch(b : Bool, st) : Int do
+      if b do sink(st) else sink(st) end
+    end
+    fn id(x) do x end
+    fn f() : Int do
+      let g = fn st -> sink(st)
+      let xs = List.map([1, 2, 3], fn x -> x + 1)
+      id(2) + per_branch(true, S1(3)) + g(S1(4)) + List.length(xs)
+    end|}) in
+  Alcotest.(check bool) "unannotated params used once / polymorphic: no error" false (has_errors ctx)
+
+(* Move-out rules for a record's linear fields (R1-R4): an always_linear field
+   was untracked everywhere, a field use and a whole-record use did not know
+   about each other, and actor state dropped `linear` qualifiers and had no
+   sentinels. Corpus: reject/t216-t222, accept/t223 (and t197 updated). *)
+let actor_mod body = linear_mod ({|
+    fn bump(s : S1) : S1 do match s do S1(e) -> S1(e + 1) end end
+    type R = { st : S1, n : Int }
+    fn eat(r : R) : Int do sink(r.st) end
+|} ^ body)
+
+let test_linear_record_actor_consume_retain () =
+  let ctx = typecheck (actor_mod {|
+    actor Ep do
+      state { st : S1, n : Int }
+      init  { st: S1(0), n: 0 }
+      on Tick() do
+        let k = sink(state.st)
+        { state with n: state.n + k }
+      end
+    end|}) in
+  Alcotest.(check bool) "actor: consume then { state with }" true
+    (linear_error ctx "The linear value `state.st` is used more than once here")
+
+let test_linear_record_actor_qualified_field () =
+  let ctx = typecheck {|mod Test do
+    type T = T(Int)
+    fn tsink(t : T) : Int do match t do T(e) -> e end end
+    actor Ep do
+      state { linear st : T, n : Int }
+      init  { st: T(0), n: 0 }
+      on Tick() do { state with n: tsink(state.st) + tsink(state.st) } end
+    end
+  end|} in
+  Alcotest.(check bool) "actor: `linear` state field honoured" true
+    (linear_error ctx "The linear value `state.st` is used more than once here")
+
+let test_linear_record_field_then_whole () =
+  let ctx = typecheck (actor_mod {|
+    fn f() : Int do
+      let r : R = { st: S1(0), n: 0 }
+      let k = sink(r.st)
+      k + eat(r)
+    end|}) in
+  Alcotest.(check bool) "field consumed, record passed whole" true
+    (linear_error ctx "The linear value `r.st` is used more than once here")
+
+let test_linear_record_always_linear_field_twice () =
+  let ctx = typecheck (actor_mod {|
+    fn f() : Int do
+      let r : R = { st: S1(0), n: 0 }
+      sink(r.st) + sink(r.st)
+    end|}) in
+  Alcotest.(check bool) "always_linear field accessed twice" true
+    (linear_error ctx "The linear value `r.st` is used more than once here")
+
+let test_linear_record_whole_twice () =
+  let ctx = typecheck (actor_mod {|
+    fn f() : Int do
+      let r : R = { st: S1(0), n: 0 }
+      eat(r) + eat(r)
+    end|}) in
+  Alcotest.(check bool) "record passed whole twice" true
+    (linear_error ctx "The linear value `r.st` is used more than once here")
+
+let test_linear_record_param_consume_retain () =
+  let ctx = typecheck (actor_mod {|
+    fn step(r : R) : R do
+      let k = sink(r.st)
+      { r with n: k }
+    end|}) in
+  Alcotest.(check bool) "param record: consume then { r with }" true
+    (linear_error ctx "The linear value `r.st` is used more than once here")
+
+let test_linear_record_field_never_used () =
+  let ctx = typecheck (actor_mod {|
+    fn f() : Int do
+      let r : R = { st: S1(0), n: 5 }
+      r.n
+    end
+    fn g(r : R) : Int do r.n end|}) in
+  let n = List.length (List.filter (fun (d : March_errors.Errors.diagnostic) ->
+      contains_substring d.message "The linear value `r.st` was never used")
+      ctx.March_errors.Errors.diagnostics) in
+  Alcotest.(check int) "let-bound and param record fields dropped" 2 n
+
+let test_linear_record_actor_fresh_state_leaks () =
+  let ctx = typecheck (actor_mod {|
+    actor Ep do
+      state { st : S1, n : Int }
+      init  { st: S1(0), n: 0 }
+      on Reset() do { st: S1(0), n: 0 } end
+    end|}) in
+  Alcotest.(check bool) "actor: fresh state ignores old field" true
+    (linear_error ctx "The linear value `state.st` was never used")
+
+let test_linear_record_moves_ok () =
+  let ctx = typecheck (actor_mod {|
+    actor Ep do
+      state { st : S1, n : Int }
+      init  { st: S1(0), n: 0 }
+      on Bump() do { state with st: bump(state.st) } end
+      on Tally() do { state with n: state.n + 1 } end
+      on Peek() do
+        let x = state.n
+        state
+      end
+      on Reset() do
+        let old = sink(state.st)
+        { st: S1(0), n: old }
+      end
+    end
+    fn rebuild() : Int do
+      let r : R = { st: S1(1), n: 0 }
+      let k = sink(r.st)
+      let r2 = { r with st: S1(k) }
+      sink(r2.st)
+    end|}) in
+  Alcotest.(check bool) "legal record moves: no error" false (has_errors ctx)
+
+(* Linear values across branches: a join used to UNION the paths, so a value
+   consumed on some path counted as consumed on all of them. Now it must be
+   consumed on every path that falls through; diverging paths are exempt, and
+   affine values and session channels keep the union. Corpus: reject/t224-t227,
+   accept/t228 (channels: accept/t79 and the session corpus). *)
+let mixed_msg name = Printf.sprintf "The linear value `%s` is consumed on some branches but not others" name
+
+let test_linear_branch_if_one_side () =
+  let ctx = typecheck (linear_mod {|
+    fn g(b : Bool, st : S1) : Int do if b do sink(st) else 0 end end|}) in
+  Alcotest.(check bool) "if: one branch only" true (linear_error ctx (mixed_msg "st"))
+
+let test_linear_branch_match_arms () =
+  let ctx = typecheck (linear_mod {|
+    fn f() : Int do
+      let s = S1(1)
+      match 2 do
+        1 -> sink(s)
+        2 -> sink(s) + 1
+        _ -> 0
+      end
+    end|}) in
+  Alcotest.(check bool) "match: two of three arms" true (linear_error ctx (mixed_msg "s"))
+
+let test_linear_branch_cond_chain () =
+  let ctx = typecheck (linear_mod {|
+    fn g(n : Int, st : S1) : Int do
+      match do
+        n > 0 -> sink(st)
+        true -> 0
+      end
+    end|}) in
+  Alcotest.(check bool) "match do: one body only" true (linear_error ctx (mixed_msg "st"))
+
+let test_linear_branch_letq_early_return () =
+  let ctx = typecheck (linear_mod {|
+    fn mk(i : Int) : Result(Int, String) do if i > 0 do Ok(i) else Err("neg") end end
+    fn g(st : S1, i : Int) : Result(Int, String) do
+      let? v = mk(i)
+      Ok(v + sink(st))
+    end|}) in
+  Alcotest.(check bool) "let? early return drops" true
+    (linear_error ctx "is still unconsumed when `let?` returns early on `Err`")
+
+let test_linear_branch_pending_param () =
+  let ctx = typecheck (linear_mod {|
+    fn g(b : Bool, st) : Int do if b do sink(st) else 0 end end|}) in
+  Alcotest.(check bool) "unannotated param, one branch only" true (linear_error ctx (mixed_msg "st"))
+
+let test_linear_branch_ok () =
+  let ctx = typecheck (linear_mod {|
+    type T = T(Int)
+    fn tsink(t : T) : Int do match t do T(e) -> e end end
+    fn every(b : Bool, st : S1) : Int do if b do sink(st) else sink(st) + 1 end end
+    fn gives_up(b : Bool, st : S1) : Int do if b do sink(st) else panic("no") end end
+    fn three(n : Int, st : S1) : Int do
+      match n do
+        1 -> sink(st)
+        2 -> panic("two")
+        _ -> sink(st) + 1
+      end
+    end
+    fn before(b : Bool, st : S1) : Int do
+      let k = sink(st)
+      if b do k else 0 end
+    end
+    fn optional(b : Bool, affine t : T) : Int do if b do tsink(t) else 0 end end|}) in
+  Alcotest.(check bool) "every returning branch consumes / diverging / affine: no error"
+    false (has_errors ctx)
+
+let test_linear_branch_channel_lenient_ok () =
+  let ctx = typecheck {|mod Test do
+    type Client = Client
+    type Server = Server
+    protocol Decision do
+      choose by Client:
+        ok  -> Client -> Server : Int
+        err -> Client -> Server : String
+      end
+    end
+    fn f() : () do
+      let (cc, sc) = Chan.new(Decision)
+      let cc2 = Chan.choose(cc, :err)
+      let cc3 = Chan.send(cc2, "boom")
+      Chan.close(cc3)
+      let (lbl, sc2) = Chan.offer(sc)
+      match lbl do
+        :ok ->
+          let (n, sc3) = Chan.recv(sc2)
+          Chan.close(sc3)
+        :err ->
+          let (s, sc3) = Chan.recv(sc2)
+          Chan.close(sc3)
+        _ -> ()
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "session endpoint driven on some arms: no error" false (has_errors ctx)
+
+(* A type variable is unrestricted unless its function opts in with
+   `linear x : a`: instantiating one the function consumes with a linear type
+   is an error. Corpus: reject/t229-t231, accept/t232. *)
+let generic_msg name = Printf.sprintf "is linear, but `%s` is generic in a parameter of that type" name
+
+let test_linear_generic_dup () =
+  let ctx = typecheck (linear_mod {|
+    fn dup(x) do (x, x) end
+    fn f() : Int do
+      let (a, b) = dup(S1(1))
+      sink(a) + sink(b)
+    end|}) in
+  Alcotest.(check bool) "generic fn duplicating" true (linear_error ctx (generic_msg "dup"))
+
+let test_linear_generic_drop_annotated () =
+  let ctx = typecheck (linear_mod {|
+    fn drop_it(x : a) : Int do 0 end
+    fn f() : Int do drop_it(S1(1)) end|}) in
+  Alcotest.(check bool) "annotated generic fn dropping" true (linear_error ctx (generic_msg "drop_it"))
+
+let test_linear_generic_let_bound_lambda () =
+  let ctx = typecheck (linear_mod {|
+    fn f() : Int do
+      let g = fn st -> 0
+      g(S1(1))
+    end|}) in
+  Alcotest.(check bool) "generalized let lambda" true (linear_error ctx (generic_msg "g"))
+
+let test_linear_generic_container_arg () =
+  (* A local generic function: the unit harness does not load the stdlib, so
+     `List.length` itself is exercised by reject/t231. *)
+  let ctx = typecheck (linear_mod {|
+    fn count(xs : List(a)) : Int do 0 end
+    fn f() : Int do count([S1(1)]) end|}) in
+  Alcotest.(check bool) "list of linear to a generic fn" true
+    (linear_error ctx (generic_msg "count"))
+
+let test_linear_generic_ok () =
+  let ctx = typecheck (linear_mod {|
+    type Packet = { linear data : Int, size : Int }
+    fn id(linear x : a) : a do x end
+    fn bytes(p : Packet) : Int do p.data + 1 end
+    fn f() : Int do
+      let s = id(S1(1))
+      let o = Some(S1(2))
+      let n = match o do
+        Some(v) -> sink(v)
+        None -> 0
+      end
+      let xs = List.map([1, 2, 3], fn x -> x + 1)
+      sink(s) + n + List.length(xs)
+    end
+    fn never(b : Bool, st : S1) : S1 do if b do st else panic("no") end end|}) in
+  Alcotest.(check bool) "opted in / constructor / operator / producer: no error" false (has_errors ctx)
+
+(* A binding whose type holds a linear value (tuple component, list element,
+   ADT payload) is linear itself; a record is not (per-field sentinels).
+   Corpus: reject/t233-t234, accept/t235. *)
+let test_linear_container_tuple_twice () =
+  let ctx = typecheck (linear_mod {|
+    fn f() : Int do
+      let p = (S1(1), 1)
+      let (a, _) = p
+      let (b, _) = p
+      sink(a) + sink(b)
+    end|}) in
+  Alcotest.(check bool) "tuple holding linear destructured twice" true
+    (linear_error ctx "The linear value `p` is used more than once here")
+
+let test_linear_container_option_dropped () =
+  let ctx = typecheck (linear_mod {|
+    fn f() : Int do
+      let o = Some(S1(1))
+      0
+    end|}) in
+  Alcotest.(check bool) "Option holding linear dropped" true
+    (linear_error ctx "The linear value `o` was never used")
+
+let test_linear_container_ok () =
+  let ctx = typecheck (linear_mod {|
+    type R = { st : S1, n : Int }
+    fn both(p : (S1, S1)) : Int do
+      let (a, b) = p
+      sink(a) + sink(b)
+    end
+    fn f() : Int do
+      let p = (S1(1), 2)
+      let (a, n) = p
+      let o = Some(S1(3))
+      let m = match o do
+        Some(v) -> sink(v)
+        None -> 0
+      end
+      let r : R = { st: S1(4), n: 5 }
+      let k = r.n + sink(r.st)
+      sink(a) + n + m + k + both((S1(6), S1(7)))
+    end|}) in
+  Alcotest.(check bool) "containers used once, record field reads: no error" false (has_errors ctx)
+
+let warnings ctx =
+  List.filter (fun (d : March_errors.Errors.diagnostic) -> d.severity = March_errors.Errors.Warning)
+    ctx.March_errors.Errors.diagnostics
+
+let test_derive_eq_single_ctor_no_unreachable_arm () =
+  let ctx = typecheck {|mod Test do
+    type V = V(Int, Int)
+    derive Eq for V
+    type C = R | G
+    derive Eq for C
+  end|} in
+  Alcotest.(check bool) "no error" false (has_errors ctx);
+  Alcotest.(check int) "no unreachable-arm warning in the derived Eq" 0
+    (List.length (List.filter (fun (d : March_errors.Errors.diagnostic) ->
+         contains_substring d.message "never be reached") (warnings ctx)))
+
 (* Same gap via a single correct use — must NOT regress to a false positive. *)
 let test_linear_letq_acquire_single_use_ok () =
   let ctx = typecheck {|mod Test do
@@ -6103,6 +6815,61 @@ let test_whereis_live_actor () =
   let result = call_builtin "whereis" [March_eval.Eval.VAtom "live_svc"] in
   Alcotest.(check bool) "whereis returns Some(Pid) for live actor" true
     (match result with March_eval.Eval.VCon ("Some", [March_eval.Eval.VPid _]) -> true | _ -> false)
+
+(** [self] inside a handler is this actor's pid, on the interpreter.  It used
+    to resolve to the global [self] BUILTIN (a function value), so
+    [send(self, m)] raised inside the handler, [crash_actor] swallowed the
+    raise, and the program printed nothing and exited 0.  Pins both halves of
+    specs/progress/2026-09-13-send-to-self-delivers.md on this backend: a
+    self-driven state machine runs to completion, and [self] is the very pid
+    [spawn] returned.  (eval_module does not typecheck, so storing a Pid in an
+    Int field is how the identity is observed from OCaml.) *)
+let test_self_send_delivers_interp () =
+  let env = eval_module {|mod TestSelfSend do
+    actor Stepper do
+      state { steps : Int, me : Int }
+      init { steps: 0, me: 0 }
+      on Step() do
+        if state.steps < 3 do
+          let _ = send(self, Step())
+          { steps: state.steps + 1, me: self }
+        else
+          { steps: state.steps + 1, me: self }
+        end
+      end
+    end
+    fn main() do
+      let p = spawn(Stepper)
+      send(p, Step())
+      run_until_idle()
+      p
+    end
+  end|} in
+  let pid = match call_fn env "main" [] with
+    | March_eval.Eval.VPid p -> p | _ -> Alcotest.fail "main did not return a pid" in
+  let inst = match Hashtbl.find_opt March_eval.Eval.actor_registry pid with
+    | Some i -> i | None -> Alcotest.fail "spawned actor not registered" in
+  Alcotest.(check bool) "actor still alive (the self-send did not crash it)"
+    true inst.March_eval.Eval.ai_alive;
+  let field f = match inst.March_eval.Eval.ai_state with
+    | March_eval.Eval.VRecord fs -> List.assoc_opt f fs | _ -> None in
+  Alcotest.(check bool) "all four steps ran: three of them self-sent"
+    true (field "steps" = Some (March_eval.Eval.VInt 4));
+  Alcotest.(check bool) "self is the pid spawn returned"
+    true (field "me" = Some (March_eval.Eval.VPid pid))
+
+(** compare_int / compare_float / compare_string return -1/0/1 on the
+    interpreter, as the typechecker declares ((T, T) -> Int).  They returned a
+    Less/Equal/Greater constructor, so the first use as an Int failed at run
+    time.  The compiled half is test/native/compare_builtins.march. *)
+let test_compare_builtins_return_int () =
+  let env = eval_module {|mod TestCompare do
+    fn main() do
+      compare_int(3, 5) * 100 + compare_float(2.5, 2.5) * 10 + compare_string("b", "a")
+    end
+  end|} in
+  Alcotest.(check bool) "-100 + 0 + 1" true
+    (call_fn env "main" [] = March_eval.Eval.VInt (-99))
 
 (** whereis on an unknown atom returns None *)
 let test_whereis_unknown () =
@@ -13637,6 +14404,21 @@ let test_stdlib_dist_link_cli_check () =
        "exact `--check stdlib/dist_link.march` succeeds; output:\n%s" output)
     0 rc
 
+(* dist_supervisor.march matches `DistLink.DownReason`, whose `Normal`/`Killed`/
+   `Crash` constructors are also the LOCAL monitor's (typecheck_builtins); bare
+   arms were "ambiguous between multiple modules" on a standalone check, which
+   nothing ran (2026-09-15). The arms are qualified now; this keeps it so. *)
+let test_stdlib_dist_supervisor_cli_check () =
+  let project_root = march_project_root () in
+  let main_exe = find_main_exe () in
+  let cmd = Printf.sprintf "cd %s && %s --check stdlib/dist_supervisor.march"
+      (Filename.quote project_root) (Filename.quote main_exe) in
+  let rc, output = run_capture cmd in
+  Alcotest.(check int)
+    (Printf.sprintf
+       "exact `--check stdlib/dist_supervisor.march` succeeds; output:\n%s" output)
+    0 rc
+
 (* ── Green guards: the fix must not over-reject legitimate entry-qualified use ── *)
 
 let test_entry_qual_same_type_ok () =
@@ -14902,6 +15684,7 @@ let compiler_suites =
       ("tcenv_cli_cache", Test_tcenv_cli_cache.tests);
       ("cap_strip", Test_cap_strip.tests);
       ("cap_symbols", Test_cap_symbols.tests);
+      ("builtin_borrow_classification", Test_builtin_borrow_classification.tests);
       ("cap_markers", Test_cap_markers.tests);
       ("prog_argv", Test_prog_argv.tests);
       ("cap_package", Test_cap_package.tests);
@@ -15050,6 +15833,8 @@ let compiler_suites =
           Alcotest.test_case "worker named spec"         `Quick (with_reset test_worker_named_spec);
           Alcotest.test_case "whereis named"             `Quick (with_reset test_whereis_named);
           Alcotest.test_case "whereis live actor"        `Quick (with_reset test_whereis_live_actor);
+          Alcotest.test_case "self-send delivers (interp)" `Quick (with_reset test_self_send_delivers_interp);
+          Alcotest.test_case "compare builtins return Int" `Quick test_compare_builtins_return_int;
           Alcotest.test_case "whereis unknown"           `Quick (with_reset test_whereis_unknown);
           Alcotest.test_case "whereis_bang unknown"      `Quick (with_reset test_whereis_bang_unknown);
           Alcotest.test_case "name reregisters restart"  `Quick (with_reset test_name_reregisters_on_restart);
@@ -15421,6 +16206,61 @@ let compiler_suites =
           Alcotest.test_case "tag ctor usable as value"                  `Quick test_tag_usable_as_ctor;
           Alcotest.test_case "always_linear type: consumed ok"           `Quick test_always_linear_type_ok;
           Alcotest.test_case "always_linear type: drop is error"         `Quick test_always_linear_type_drop_error;
+          Alcotest.test_case "always_linear: declared after use, reuse"   `Quick test_always_linear_declared_after_use_reuse;
+          Alcotest.test_case "always_linear: declared after use, drop"    `Quick test_always_linear_declared_after_use_drop;
+          Alcotest.test_case "always_linear: nested module after use"     `Quick test_always_linear_nested_module_after_use;
+          Alcotest.test_case "always_linear: bare name does not infect"   `Quick test_always_linear_bare_name_does_not_infect;
+          Alcotest.test_case "actor handler param: reused"                `Quick test_linear_actor_handler_param_reused;
+          Alcotest.test_case "actor handler param: dropped"               `Quick test_linear_actor_handler_param_dropped;
+          Alcotest.test_case "actor handler param: consumed once ok"      `Quick test_linear_actor_handler_param_consumed_ok;
+          Alcotest.test_case "actor handler param: stored into state ok"  `Quick test_linear_actor_handler_param_stored_ok;
+          Alcotest.test_case "lambda param: dropped (check mode)"         `Quick test_linear_lambda_param_dropped_check_mode;
+          Alcotest.test_case "lambda param: dropped (infer mode)"         `Quick test_linear_lambda_param_dropped_infer_mode;
+          Alcotest.test_case "lambda param: linear keyword dropped"       `Quick test_linear_lambda_linear_keyword_dropped;
+          Alcotest.test_case "lambda param: second of two dropped"        `Quick test_linear_lambda_second_param_dropped;
+          Alcotest.test_case "local fn param: dropped"                    `Quick test_linear_local_fn_param_dropped;
+          Alcotest.test_case "lambda/local fn params: consumed ok"        `Quick test_linear_lambda_params_consumed_ok;
+          Alcotest.test_case "lambda param: shadows outer linear ok"      `Quick test_linear_lambda_param_shadows_outer_ok;
+          Alcotest.test_case "lambda param: affine dropped ok"            `Quick test_linear_lambda_affine_param_dropped_ok;
+          Alcotest.test_case "wildcard: let _ = linear"                   `Quick test_linear_wildcard_let;
+          Alcotest.test_case "wildcard: in a tuple pattern"               `Quick test_linear_wildcard_tuple;
+          Alcotest.test_case "wildcard: lambda param"                     `Quick test_linear_wildcard_lambda_param;
+          Alcotest.test_case "wildcard: match arm on linear"              `Quick test_linear_wildcard_match_arm;
+          Alcotest.test_case "wildcard: non-linear discards ok"           `Quick test_linear_wildcard_non_linear_ok;
+          Alcotest.test_case "capture: check-mode lambda"                 `Quick test_linear_capture_check_mode;
+          Alcotest.test_case "capture: check-mode lambda with param"      `Quick test_linear_capture_check_mode_with_param;
+          Alcotest.test_case "capture: local fn"                          `Quick test_linear_capture_local_fn;
+          Alcotest.test_case "capture: reported once"                     `Quick test_linear_capture_reported_once;
+          Alcotest.test_case "capture: nothing linear ok"                 `Quick test_linear_capture_nothing_linear_ok;
+          Alcotest.test_case "unannotated: fn param reused"               `Quick test_linear_unannotated_fn_param_reused;
+          Alcotest.test_case "unannotated: lambda param reused"           `Quick test_linear_unannotated_lambda_param_reused;
+          Alcotest.test_case "unannotated: handler param reused"          `Quick test_linear_unannotated_handler_param_reused;
+          Alcotest.test_case "unannotated: used once / polymorphic ok"    `Quick test_linear_unannotated_params_ok;
+          Alcotest.test_case "record: actor consume then retain"          `Quick test_linear_record_actor_consume_retain;
+          Alcotest.test_case "record: actor `linear` field honoured"      `Quick test_linear_record_actor_qualified_field;
+          Alcotest.test_case "record: field then whole"                   `Quick test_linear_record_field_then_whole;
+          Alcotest.test_case "record: always_linear field twice"          `Quick test_linear_record_always_linear_field_twice;
+          Alcotest.test_case "record: whole twice"                        `Quick test_linear_record_whole_twice;
+          Alcotest.test_case "record: param consume then retain"          `Quick test_linear_record_param_consume_retain;
+          Alcotest.test_case "record: field never used"                   `Quick test_linear_record_field_never_used;
+          Alcotest.test_case "record: actor fresh state leaks"            `Quick test_linear_record_actor_fresh_state_leaks;
+          Alcotest.test_case "record: legal moves ok"                     `Quick test_linear_record_moves_ok;
+          Alcotest.test_case "branch: if one side"                        `Quick test_linear_branch_if_one_side;
+          Alcotest.test_case "branch: match arms"                         `Quick test_linear_branch_match_arms;
+          Alcotest.test_case "branch: match do chain"                     `Quick test_linear_branch_cond_chain;
+          Alcotest.test_case "branch: let? early return"                  `Quick test_linear_branch_letq_early_return;
+          Alcotest.test_case "branch: unannotated param"                  `Quick test_linear_branch_pending_param;
+          Alcotest.test_case "branch: every returning branch ok"          `Quick test_linear_branch_ok;
+          Alcotest.test_case "branch: session channel lenient ok"         `Quick test_linear_branch_channel_lenient_ok;
+          Alcotest.test_case "generic: duplicating fn"                    `Quick test_linear_generic_dup;
+          Alcotest.test_case "generic: annotated dropping fn"             `Quick test_linear_generic_drop_annotated;
+          Alcotest.test_case "generic: generalized let lambda"            `Quick test_linear_generic_let_bound_lambda;
+          Alcotest.test_case "generic: container to List.length"          `Quick test_linear_generic_container_arg;
+          Alcotest.test_case "generic: opt-in / ctor / operator ok"       `Quick test_linear_generic_ok;
+          Alcotest.test_case "container: tuple used twice"                `Quick test_linear_container_tuple_twice;
+          Alcotest.test_case "container: Option dropped"                  `Quick test_linear_container_option_dropped;
+          Alcotest.test_case "container: used once / records ok"          `Quick test_linear_container_ok;
+          Alcotest.test_case "derive Eq: no unreachable arm"              `Quick test_derive_eq_single_ctor_no_unreachable_arm;
           Alcotest.test_case "transitions block: no errors"              `Quick test_transitions_parses;
           Alcotest.test_case "transitions via missing fn: error"         `Quick test_transitions_via_not_found_error;
           Alcotest.test_case "undeclared transition fn: warning emitted" `Quick test_transitions_warn_undeclared;
@@ -15945,6 +16785,7 @@ let compiler_suites =
           Alcotest.test_case "sorted_set.march cmp/fold: curried, no internal error"  `Quick test_stdlib_sorted_set_cmp_curried;
           Alcotest.test_case "range.march reduce: curried, no internal error"         `Quick test_stdlib_range_reduce_curried;
           Alcotest.test_case "dist_link.march exact CLI check"                         `Quick test_stdlib_dist_link_cli_check;
+          Alcotest.test_case "dist_supervisor.march exact CLI check"                   `Quick test_stdlib_dist_supervisor_cli_check;
           Alcotest.test_case "Main.id used at Int only: no error"                 `Quick test_entry_qual_same_type_ok;
           Alcotest.test_case "Main.id used at Int AND String: no error"           `Quick test_entry_qual_polymorphic_ok;
           Alcotest.test_case "Main.identity (a->a) used at Int: no error"         `Quick test_entry_qual_annotated_same_tvar_ok;

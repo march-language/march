@@ -56,11 +56,15 @@ mod DistSupervisor do
       Permanent -> true
       Temporary -> false
       Transient ->
+        -- Qualified: `Normal`/`Killed`/`Crash` are also the LOCAL monitor's
+        -- `DownReason` constructors (typecheck_builtins), so bare arms are
+        -- ambiguous in any program that sees both -- including this file's
+        -- own standalone `--check`.
         match reason do
-          Normal   -> false
-          NodeDown -> true
-          Killed   -> true
-          Crash(_) -> true
+          DistLink.Normal   -> false
+          DistLink.NodeDown -> true
+          DistLink.Killed   -> true
+          DistLink.Crash(_) -> true
         end
     end
   end

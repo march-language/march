@@ -598,6 +598,14 @@ Under `cap verified`, though, that same unbindable index is a hard error
 instead of a silent skip: that mode's whole promise is that every obligation
 gets discharged, so "can't tell" is no longer good enough.
 
+`Array.get`, `Array.set` and `Array.pop` carry the same treatment (index in
+`0 <= i < Array.length(v)`; `pop` needs `Array.length(v) > 0`), and a guard
+written with `Array.length` satisfies it. `Array.get(v, -1)` is an error; a
+literal past the end of an array from `Array.from_list` is skipped, because
+the checker does not track the length `from_list` produces. Swept before shipping over the
+standard library, the native and stdlib test corpora and eighteen ecosystem
+projects: zero new errors, only new skips at computed indices.
+
 An ordinary `List.length(xs) > 0` guard **does** satisfy the requirement, so these
 contracts bite on a list you checked at runtime and not just on literals; see
 [the solver really does connect `List.length` to
@@ -741,6 +749,231 @@ skipped rather than approximated. Arithmetic over float *literals* is different:
 negative literal (which March has no direct spelling for) still works.
 
 ---
+
+## Set Refinements
+
+A predicate can talk about **which elements** a collection holds, not only how
+many. The vocabulary is Liquid Haskell's, in March spelling
+(`specs/2026-09-13-set-refinements-design.md`):
+
+| Predicate | Meaning |
+| --- | --- |
+| `elts(xs)` | the set of elements of a `List` |
+| `keys(m)` | the set of keys of a `Map` |
+| `member(x, s)` | `x` is in `s` |
+| `union(a, b)`, `inter(a, b)`, `diff(a, b)` | the usual set operations |
+| `subset(a, b)` | every element of `a` is in `b` |
+| `singleton(x)`, `empty` | the one-element set, the empty set |
+| `a == b`, `a != b` | extensional set equality |
+
+Like `len`, these names mean something **only inside a `{...}` predicate**; a
+function or variable of the same name in ordinary code is unaffected. `empty`
+is the empty set only in a **set position**: an operand of `union`, `inter`,
+`diff` or `subset`, the second argument of `member`, or a side of `==`/`!=`
+whose other side is a set (`elts(_) == empty`). Anywhere else it is an ordinary
+name, so a parameter or local called `empty` keeps its meaning. Sets are encoded as
+Z3 arrays from the element sort to `Bool`, so every set query is
+quantifier-free and decidable: `Int` and `String` elements are concrete (a
+string literal compares by literal distinctness, as elsewhere), any other
+element type is opaque.
+
+```march
+fn need2(xs : {List(Int) | member(2, elts(_))}) : Int do 0 end
+fn ok() : Int do need2([1, 2, 3]) end      -- proved
+fn bad() : Int do need2([1, 3]) end        -- refinement violation
+
+-- relational: a contract may relate a return to a parameter
+fn keep(xs : List(Int)) : {List(Int) | elts(_) == elts(xs)} do xs end
+
+-- and compose through a call, a `let`, or a parameter's own promise
+fn mk() : {List(Int) | member(2, elts(_))} do [2, 5] end
+fn use_it() : Int do
+  let ys = mk()
+  need2(ys)                                -- proved from `mk`'s contract
+end
+```
+
+The definite-failure stance is unchanged: `fn lose(xs : List(Int)) :
+{List(Int) | elts(_) == elts(xs)} do [7] end` is **skipped**, not reported,
+because `xs` may well be `[7]`.
+
+A set holds **one element type**. A set predicate whose operands have known,
+different element types is an error at the predicate:
+
+```march
+fn f(xs : {List(Int) | member("a", elts(_))}) : Int do 0 end
+-- error: this set predicate mixes element types: the element type of
+-- `elts(_)` is `Int` but the type of `"a"` is `String`.
+```
+
+Element types are read from declared types, so an unannotated value or a type
+variable is never reported.
+
+### The stdlib `Set` and `Map` carry assumed contracts
+
+`Set(a)` and `Map(k, v)` are hash tries no measure can see into, so their
+element sets are stated rather than proved: every public `Set` operation
+(`empty`, `singleton`, `insert`, `remove`, `union`, `intersection`,
+`difference`, `contains`, `is_subset`, `is_empty`, `eq`, `to_list`,
+`from_list`) and the key-affecting `Map` operations (`empty`, `singleton`,
+`insert`, `remove`, `get`, `contains_key`, `is_empty`, `keys`, `map_values`,
+`filter`, `merge`) declare their effect on `elts`/`keys` under `@[assume]`:
+
+```march
+@[assume]
+fn insert(s, elem, cmp) : {Set(a) | elts(_) == union(elts(s), singleton(elem))} do … end
+@[assume]
+fn get(m, key, cmp) : {Option(v) | is_Some(_) == member(key, keys(m))} do … end
+```
+
+`@[assume]` is the counterpart of Liquid Haskell's `assume`: the return
+refinement propagates to every call site **without a proof** and the body is
+not checked against it. It differs from `@[trusted]`, which only accepts a
+*skip* inside `cap verified` and never propagates. Each assumed contract is
+counted in `--refine-report` under `trusted`, and each one in the stdlib has a
+runtime property witness in `test/stdlib/test_set.march` /
+`test/stdlib/test_map.march`, because the contracts hold only when the
+comparator `cmp` is a strict total order consistent with `==` on the element
+type. That trust boundary is the price of an opaque implementation.
+
+With those contracts, membership flows through the API and through guards:
+
+```march
+fn need_x(s : Set(Int), x : {Int | member(_, elts(s))}) : Int do 0 end
+
+fn ok(x : Int) : Int do
+  let s = Set.insert(Set.empty(), x, int_cmp)
+  need_x(s, x)                                       -- proved
+end
+fn guarded(s : Set(Int), x : Int) : Int do
+  if Set.contains(s, x, int_cmp) do need_x(s, x) else 0 end   -- proved
+end
+fn wrong_branch(s : Set(Int), x : Int) : Int do
+  if Set.contains(s, x, int_cmp) do 0 else need_x(s, x) end   -- violation
+end
+fn need_some(o : {Option(String) | is_Some(_)}) : Int do 0 end
+fn lookup(m : Map(Int, String)) : Int do
+  need_some(Map.get(Map.insert(m, 7, "x", int_cmp), 7, int_cmp))   -- proved
+end
+```
+
+A guard that *is* a call with a Bool contract, or a Bool local bound to one
+(`let present = Set.contains(…)` then `if present`), establishes the contract
+on its branch and its negation on the other.
+
+### Proved list contracts
+
+A function that recurses over a list parameter can have its `elts` and `len`
+contract **proved** rather than assumed: the checker unfolds `len` and `elts`
+over the matched list's `Cons` cells and assumes the contract for the
+recursive call on its tail. A proved contract reaches call sites like any
+other. The stdlib's `List.reverse`, `List.append`, `List.filter` and
+`List.dedup` carry such contracts, proved from their bodies as written:
+
+```march
+fn reverse(xs : List(a)) : {List(a) | elts(_) == elts(xs)} do
+  fn go(lst : List(a), acc : List(a)) : {List(a) | elts(_) == union(elts(lst), elts(acc))} do
+    match lst do
+    Nil        -> acc
+    Cons(h, t) -> go(t, Cons(h, acc))
+    end
+  end
+  go(xs, Nil)
+end
+
+fn no_two(zs : {List(Int) | !member(2, elts(_))}) : Int do 0 end
+fn bad(ys : {List(Int) | member(2, elts(_))}) : Int do no_two(List.reverse(ys)) end
+-- refinement violation
+```
+
+The pieces that make this work: a local `fn` like `go` is proved first and
+its contract used by the body around it; a call to another function uses that
+function's proved contract; and a parameter refinement is an invariant the
+body may assume (`dedup`'s helper takes `acc : {List(a) | member(prev,
+elts(_))}`). A contract is used only once it is proved, whatever the
+declaration order, so two functions cannot prove each other's claims. A
+contract that is not proved is still not reported unless it can never hold,
+and it does not reach call sites. `List.map` has no such contract: the
+elements of an arbitrary callback's image have no set expression.
+
+### Set-valued measures
+
+A user `@[measure]` may return a set, under the same structural gate as an
+`Int` measure. Its body uses the set vocabulary, which is bound for that body
+only; such a measure is logic, and calling it in expression position is an
+error:
+
+```march
+type Expr = Var(Int) | Lam(Int, Expr) | App(Expr, Expr)
+
+@[measure]
+fn free_vars(e : Expr) : Set(Int) do
+  match e do
+    Var(x)    -> singleton(x)
+    Lam(x, b) -> diff(free_vars(b), singleton(x))
+    App(f, a) -> union(free_vars(f), free_vars(a))
+  end
+end
+
+fn closed(e : {Expr | free_vars(_) == empty}) : Int do 0 end
+fn ok() : Int do closed(Lam(1, Var(1))) end          -- proved
+fn bad() : Int do closed(Lam(1, Var(2))) end         -- violation
+fn need_sub(f : Expr, a : Expr,
+            e : {Expr | subset(free_vars(_), union(free_vars(f), free_vars(a)))}) : Int do 0 end
+fn sym(f : Expr, a : Expr) : Int do need_sub(f, a, App(f, a)) end   -- proved by the axioms alone
+```
+
+`Int` and `Bool` payloads are concrete, including the payload of a parametric
+type at a concrete instance: a measure declared over `Tree(Int)` or
+`Expr(Int)` reads its `Int` payloads, and a measure declared over `Tree(a)`
+applies at `Tree(Int)` too.
+
+```march
+type Tree(a) = Leaf | Node(Tree(a), a, Tree(a))
+
+@[measure]
+fn sum(t : Tree(Int)) : Int do
+  match t do
+    Leaf -> 0
+    Node(l, x, r) -> sum(l) + x + sum(r)
+  end
+end
+
+fn need_pos(t : {Tree(Int) | sum(_) > 0}) : Int do 0 end
+fn ok() : Int do need_pos(Node(Leaf, 5, Leaf)) end    -- proved
+fn bad() : Int do need_pos(Node(Leaf, 0, Leaf)) end   -- violation
+```
+
+A `String` or type-variable payload is opaque, so a set measure over strings
+reasons symbolically but not about particular literals. A refuted set contract
+renders its model as a set literal: `Set.insert() can return {4}`,
+`elts(s) = {1}`.
+
+### What sets do not do
+
+- **No cardinality.** There is no decidable link between the array encoding
+  and a set's size; `len` remains the only size measure, so a permutation
+  contract writes both: `{List(Int) | elts(_) == elts(xs) && len(_) == len(xs)}`.
+- **List structure is followed only inside a proof by recursion.** A
+  contract on a function that recurses over a list (see "Proved list
+  contracts" above) is proved through its `Cons` cells. Everywhere else `elts`
+  folds a list built from constructors whose tail is a literal or a name
+  (`Cons(h, acc)`) and otherwise stands for one opaque set per variable.
+- **Mixed element types are an error only when both are declared.**
+  `member(3, elts(_))` against a `List(String)` is reported at the predicate
+  (see above). A clash the declared types cannot show, such as an unannotated
+  operand or a type variable instantiated differently at a call, is a sort
+  conflict and is skipped, never reported. A clash that only a *fact* brings in
+  (a guard, a parameter's promise) drops that fact instead, so the call is
+  still checked without it.
+- **The vocabulary names are reserved in predicates, and only there.** Inside
+  `{...}`, `elts`, `keys`, `member`, `union`, `inter`, `diff`, `subset`,
+  `singleton` and `empty` always mean the set operations; a `@[measure]` may
+  not take one of those names, and a predicate that applies one in a non-set
+  shape (`member(xs, 3)`) draws the unrecognised-predicate warning. In
+  ordinary code, including an `if` guard, they are just names: a module's own
+  `fn keys(r)` or `fn member(xs, x)` is treated like any other function.
+- **A rebound name loses its set promise**, exactly as it loses a `len` one.
 
 ## Constructor Tags: Refining over ADT Variants
 
@@ -1100,10 +1333,20 @@ obligation and a not-yet-filed obligation are different questions), and the
 audit stays consistent with it rather than inventing a second, incompatible
 notion of "checked."
 
-Contrast that with a lambda's own parameter (`fn (n : {Int | n > 0}) -> n`):
-no scope machinery ever runs over an `ELam`'s parameters at all, so *no*
-call through that lambda, ever, is obliged by it. That is genuinely
-Unenforced, not just uncalled.
+A lambda's own parameter (`fn (n : {Int | n > 0}) -> n`) was the textbook
+"genuinely Unenforced, not just uncalled" case until 2026-09-13: no scope
+machinery ran over an `ELam`'s parameters, so no call through it was ever
+obliged. A `let`-bound lambda is now a local function for the checker
+(direct calls obliged), and passing any refined callable is obliged at the
+pass site, so the position reports Enforced. Unenforced also cuts both ways:
+since the same date the body of a lambda or block-level `fn` that escapes
+as a value (and of a handler whose message name clashes) is walked with its
+parameter refinements *stripped* from scope, the same treatment a
+non-adoptable `impl` method already got. Before that, the body
+assumed `n > 0` from `fn (n : {Int | n > 0}) -> need(n)` while `g(0)` obliged
+nobody, and `cap verified` accepted the program. The plan that turns each
+of these positions into a real contract, obligation and assumption together,
+is `specs/plans/2026-09-13-refinement-enforcement-holes-plan.md`.
 
 ### Where the current baseline stands
 
@@ -1115,10 +1358,10 @@ regenerated the same way the TIR golden snapshots are
 (`UPDATE_SNAPSHOTS=1 ./_build/default/test/test_refinecheck.exe -e`). It
 being empty is a true fact about today's corpus, not evidence the audit does
 nothing: `test/refine_audit/holes/` is a second, deliberately non-empty
-fixture set built from known holes (a lambda's own parameter, a block-level
-`fn`'s parameter and return, a non-adoptable `impl` method's parameter, an
-actor's state field and handler parameter, a nested field refinement, and a
-`{String | ...}` return), pinned at `test/refine_audit/holes.baseline`. If
+fixture set built from known holes (a refinement on a tuple element; a
+fixture leaves the set once its position is enforced, as twelve of them did
+on 2026-09-13, the two-layer container one last), pinned at
+`test/refine_audit/holes.baseline`. If
 that second baseline ever reported zero Unenforced sites, the audit itself
 would be broken, not the corpus; the test that diffs it fails loudly with
 exactly that message rather than passing vacuously.
@@ -1126,33 +1369,80 @@ exactly that message rather than passing vacuously.
 The positions currently known to be Unenforced, none of which the corpus
 above happens to exercise:
 
-- A lambda's own parameter (`fn (n : {Int | n > 0}) -> ...`).
-- A block-level `fn`'s own parameter and return type. `check_fn_post_verdict`
-  and `scope_add_param` are only reached through `A.DFn` / `A.DImpl`, never
-  through a local `A.ELetFn`.
-- An `impl` method's parameter, when the method's bare name is not adoptable
-  (more than one `impl` defines it, or a top-level `fn` shares the name):
-  `visit_decl` strips the refinement from the body in that case, and no
-  caller is ever obliged. The audit reports every `impl` method parameter as
-  Unenforced regardless of adoptability, since a single site cannot make that
-  module-level judgement; when the method *is* actually adoptable the checker
-  does enforce it, and this over-approximation is a documented conservatism,
-  not a bug of its own.
-- An actor's state field, and a handler's own parameter. No extractor exists
-  for either.
-- A record field or a variant constructor argument, once a value is
-  constructed.
-- A refinement nested below the outermost position of a declared type (inside
-  a type argument, an arrow side, a tuple element, or a second layer of a
-  stacked refinement).
-- A `{String | ...}` return type: `return_refine_ext` only recognizes Int,
-  Bool, Float, and record bases.
-- A parameter refinement that desugar drops or relocates before the audit
-  ever sees it: a multi-head function's clause merge, or a default-argument
-  function's mangled arity variant. See the next section.
+- (Closed 2026-09-13.) A lambda's own parameter (`fn (n : {Int | n > 0}) ->
+  ...`): a `let`-bound lambda obliges its direct callers like a block-level
+  `fn`, and passing any refined callable is obliged at the pass site. A
+  lambda returned or stored, and called later through a field, is the same
+  gap a top-level function has.
+- (Closed 2026-09-13.) A block-level `fn`'s own parameter and return type are
+  now enforced: every direct `inner(...)` after the definition and every
+  recursive call inside it is obliged, and the return refinement is verified
+  against the body. The body assumes its parameter refinements only while
+  `inner` never escapes callee position (returned, aliased, or passed where
+  the pass-site check cannot oblige it); an escaping local is checked with
+  them stripped.
+- (Closed 2026-09-13.) An `impl` method's parameter when the method's bare
+  name is not adoptable (more than one `impl` defines it, or a top-level
+  `fn` shares the name): the call is now resolved by the *first argument's
+  type*, the rule compilation dispatches by, and checked against that
+  impl's own contract. A call whose receiver type the typechecker cannot
+  name (a type variable, no or several matching impls) is a recorded skip,
+  counted by `--refine-report` and an error under `cap verified`. The
+  method body still assumes its parameter refinements only when the name is
+  adoptable; obliging callers without letting the body assume is sound.
+- (Closed 2026-09-13.) An actor's state field: an inductive invariant. The
+  state's refined fields are obliged at `init` and at every handler's result
+  (an update `{ state with ... }`, or a fresh literal at a tail), and assumed
+  of the incoming `state` in every handler body.
+- (Closed 2026-09-13.) A handler's own parameter: `on Inc(n : {Int | n >
+  0})` obliges every construction of `Inc(...)` in the program (`send`,
+  `Actor.call`, a message bound to a `let` first), and the handler body
+  assumes `n > 0` exactly then. Fail closed: a message name defined by two
+  handlers, or shared with a variant constructor, is neither obliged nor
+  assumed. **Trust boundary:** a message arriving from a remote node was
+  built by code this compiler did not check; the handler's assumption is
+  stated here as that boundary, not enforced across it.
+- (Closed 2026-09-13.) A record field or a variant constructor argument:
+  every construction is obliged — a record literal (typed by its field set;
+  two types of one shape make it ambiguous and it is not obliged, fail
+  closed), an update `{ r with f: e }` for the updated fields, a constructor
+  application `W(e)` — and every reader of the field through a
+  record-typed variable assumes it. A `linear` wrapper is transparent.
+  Program-wide, two constructors (or a constructor and an actor message)
+  sharing a name withdraw the contract, neither obliged nor assumed.
+- (Closed 2026-09-13.) A refinement inside a registered container's type
+  argument — `List`, `Option`, `Result`, a user variant such as `Tree({Int |
+  _ > 0})`, any stdlib type defined as one, and nested containers
+  (`List(List({Int | _ > 0}))`) — is a contract on
+  every value flowing into the position — a literal element-wise, a
+  container-typed variable by element implication (its own element
+  refinement must imply the expected one, refuted with a witness element
+  otherwise), anything else a recorded skip — at a parameter, a return, an
+  annotated `let`, or a field; and a fact about every element a `match`
+  takes out (`Cons(h, t)`, `Some(x)`, `Node(_, x, right)`); a polymorphic
+  call carries it through its declared signature (`let h = first(xs)` with
+  `first : List(a) -> Option(a)`; `let x = List.head(xs)` gives `x` the
+  refinement itself), refusing any callee that could manufacture an element
+  (`put(xs : List(a), v : a)`). Still unenforced: a tuple element, an arrow
+  side, a second layer of a stacked refinement, and a type with no registered
+  constructor model. A refinement one layer down at a
+  record field, a constructor argument, or an actor state field is enforced
+  (see above), and a `linear` wrapper is transparent.
+- (Closed 2026-09-13.) A `{String | ...}` return type is verified against
+  the body: a literal tail and the predicate's literal meet on one `Str`
+  constant, `len(_)` is the returned string's byte length, and a String
+  built by a call is a recorded skip. Its postcondition does not yet
+  propagate to callers.
+- (Closed 2026-09-13, with one shape left open on purpose.) A refined
+  default parameter obliges a full-arity call: `f(1, 0)` resolves to the
+  `f$2` arity variant the runtime dispatches to. A multi-head function
+  keeps its first head's declared types through the clause merge when that
+  head dominates (no guard, every parameter a plain variable), so its
+  refinement is the function's contract; a refinement on a non-dominating
+  head is still dropped, since another head may legitimately handle the
+  value, and the audit keeps reporting it. See the next section.
 
 See `specs/todos/2026-09-03-lambda-param-refinement-unchecked.md`,
-`specs/todos/2026-09-03-block-fn-refinement-unchecked.md`,
 `specs/todos/2026-09-03-impl-method-param-refinement-unchecked.md`,
 `specs/todos/2026-09-03-actor-state-and-handler-refinement-unchecked.md`,
 `specs/todos/2026-09-01-nested-refinement-enforcement.md`,
@@ -1555,8 +1845,11 @@ adoption happens.
 No refinement system is complete; this one is intentionally a *pragmatic slice* of
 dependent typing. Know the edges:
 
-- **`Int`, `Bool`, `Float`, `String` (narrowly), records and ADT tags.**
-  Predicates over other types aren't supported. `Float` predicates are
+- **`Int`, `Bool`, `Float`, `String` (narrowly), records, ADT tags, and sets
+  of elements.** The set vocabulary (`elts`, `keys`, `member`, `subset`, …;
+  see [Set Refinements](#set-refinements)) has no cardinality and does not
+  reason about `elts` over a symbolic list's structure. Predicates over other
+  types aren't supported. `Float` predicates are
   **comparisons only**; float arithmetic inside one is skipped rather than
   guessed at, and a `Float` sitting inside a record or a constructor is opaque.
   See [Bool and Float Refinements](#bool-and-float-refinements) and
@@ -1588,15 +1881,20 @@ dependent typing. Know the edges:
   every true property; quantified/measure facts in particular sometimes return
   "unknown" and are skipped. This never produces a false positive, but it does
   mean some real guarantees go unchecked.
-- **Higher-order: two shapes are checked, the rest are not.** A call made
-  through a parameter with a declared type that includes a refinement
+- **Higher-order: calls and passes are checked, inference is not.** A call
+  made through a parameter with a declared type that includes a refinement
   (`f : ({Int | _ >= 0}) -> Int`) is checked, and so is a call through a local
-  alias of a named refined function (`let g = takepos` then `g(-3)`). NOT
-  checked: a callback parameter with an unrefined declared type (so
-  `apply(take_n, -3)` with `apply(f : Int -> Int, x : Int)` still passes),
-  inferring a higher-order function's requirement from its body, dispatch
-  through an `interface`/`impl`, and multi-argument callback types. To
-  constrain a caller today, refine the higher-order function's *own* parameter.
+  alias of a named refined function (`let g = takepos` then `g(-3)`), a
+  `let`-bound lambda, or a block-level `fn`. Passing a refined callable where
+  a function type is expected is checked at the *pass site*: the expected
+  domain must imply the callable's own parameter refinement for every value,
+  so `apply(take_n, -3)` with `apply(f : Int -> Int, x : Int)` is rejected at
+  the pass of `take_n` (`Int` promises nothing; witness `-1`), and so is
+  passing a refined function to a generic combinator such as `List.map`. NOT
+  checked: inferring a higher-order function's requirement from its body,
+  dispatch through an `interface`/`impl`, and multi-parameter callables
+  (neither obliged nor assumed). To pass a refined function, refine the
+  higher-order function's *own* parameter to a domain that implies it.
 - **Measures see structure, not elements.** Element values inside a data
   structure are opaque to a measure (`size`/`len`/`depth` never inspect them).
   Measures are single-argument, recursive over structure, and return `Int`/`Bool`.
@@ -1633,9 +1931,9 @@ dependent typing. Know the edges:
   value depending only on tags and sub-measures, and fatal for one with a value that
   *is* the field. So `length(PVec(3, 0, TrieEmpty, Nil))` reaches the solver as
   an unknown `Int`, and an obviously in-range index is neither proved nor
-  refuted: it is `solver-undecided` and silently accepted. This is why
-  `Array.get`/`set`/`pop` carry no bounds contract today and stay on the
-  `cap no_panic` ban list instead.
+  refuted: it is `solver-undecided` and silently accepted. (A scalar field whose actual
+  reflects, a literal or a refined local, is now reflected concretely, which
+  is what lets `Array.get`/`set`/`pop` carry a bounds contract.)
 
   The compiler **warns** at the measure's definition when it sees this, but the
   warning fires **only on a bare field read** (`-> n`). A body that only
@@ -1660,7 +1958,10 @@ dependent typing. Know the edges:
   reasoning is far more expensive per query than plain arithmetic. Verdicts are
   content-addressed and cached (warm rebuilds are fast), and the cost is
   isolated to call sites that actually mention a measure, but a cold build of
-  measure-heavy code pays for it. See the flag below.
+  measure-heavy code pays for it. See the flag below. A *non-recursive*
+  measure (every arm computes without calling a measure) is sent to the
+  solver as a plain definition rather than quantified axioms, so it costs no
+  more than arithmetic.
 
 ---
 

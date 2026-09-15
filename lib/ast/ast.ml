@@ -359,6 +359,7 @@ and actor_def = {
   actor_supervise : supervise_config option;   (** Some = supervisor actor *)
   actor_compat   : string;                     (** @compat policy: "full" | "forward" | "any" *)
   actor_invariant : expr option;               (** @invariant predicate, if any *)
+  actor_mailbox  : (int * int) option;         (** `mailbox N policy`: (limit, policy int) *)
 }
 
 and actor_handler = {

@@ -121,7 +121,11 @@ let stream_shape =
            ("Stream_Prod", "register"); ("Stream_Prod", "send_Msg_Prod_Cons_1");
            ("Stream_Prod", "offer_more_done"); ("Stream_Prod", "close");
            ("Stream_Cons", "register"); ("Stream_Cons", "recv_Msg_Prod_Cons_1");
-           ("Stream_Cons", "choose_more"); ("Stream_Cons", "choose_done"); ("Stream_Cons", "close") ])
+           ("Stream_Cons", "choose_more"); ("Stream_Cons", "choose_done"); ("Stream_Cons", "close");
+           (* the event API, beside the callback one, in the same modules *)
+           ("Stream_Prod", "idle"); ("Stream_Prod", "take_idle"); ("Stream_Prod", "await_more_done");
+           ("Stream_Prod", "finish"); ("Stream_Prod", "resume");
+           ("Stream_Cons", "await_Msg_Prod_Cons_1"); ("Stream_Cons", "finish"); ("Stream_Cons", "resume") ])
 
 let relay_shape =
   Alcotest.test_case "Relay: three roles, each with exactly its own send/recv" `Quick
@@ -257,6 +261,162 @@ let payload_declared_later = ok "a payload type declared after the protocol stil
   end
 |})
 
+(* ── the event API: session state in actor state ───────────────────────
+   specs/todos/2026-09-13-endpoints-event-api-actor-state.md.  The rejects
+   are the record move-out rules (PR #442) applied to the `parked` field; the
+   corpus twins are reject/t236-t238 and accept/t239. *)
+
+let cons_actor body = wrap (stream ^ {|
+  actor ConsActor do
+    state { budget : Int, parked : Stream_Cons.Parked_Cons }
+    init  { budget: 2, parked: Stream_Cons.idle() }
+|} ^ body ^ {|
+  end
+|})
+
+let event_ok = ok "an actor holding a Parked endpoint in its state, resuming and re-parking every turn" (cons_actor {|
+    on StartC(s : Cap(Session.Live)) do
+      Stream_Cons.take_idle(state.parked)
+      { state with parked: Stream_Cons.await_Msg_Prod_Cons_1(s, Stream_Cons.register(s, 0)) }
+    end
+    on DeliverC(s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
+      match Stream_Cons.resume(state.parked, from, msg, ep) do
+        Got_Msg_Prod_Cons_1(_n, st) ->
+          if state.budget > 1 do
+            { state with budget: state.budget - 1,
+                         parked: Stream_Cons.await_Msg_Prod_Cons_1(s, Stream_Cons.choose_more(s, st, true)) }
+          else
+            { state with parked: Stream_Cons.finish(s, Stream_Cons.choose_done(s, st, true)) }
+          end
+      end
+    end
+|})
+
+let event_retained = bad "resuming and then keeping the consumed Parked in the update" "`state.parked` is used more than once" (cons_actor {|
+    on DeliverC(s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
+      match Stream_Cons.resume(state.parked, from, msg, ep) do
+        Got_Msg_Prod_Cons_1(n, st) ->
+          let _ = Stream_Cons.finish(s, Stream_Cons.choose_done(s, st, true))
+          { state with budget: state.budget - n }
+      end
+    end
+|})
+
+let event_not_reparked = bad "resuming and returning the state unchanged" "`state.parked` is used more than once" (cons_actor {|
+    on DeliverC(s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
+      match Stream_Cons.resume(state.parked, from, msg, ep) do
+        Got_Msg_Prod_Cons_1(_n, st) ->
+          let _ = Stream_Cons.finish(s, Stream_Cons.choose_done(s, st, true))
+          state
+      end
+    end
+|})
+
+let event_idle_dropped = bad "a Start that parks without consuming the Idle placeholder" "`state.parked` was never used" (cons_actor {|
+    on StartC(s : Cap(Session.Live)) do
+      { budget: 2, parked: Stream_Cons.await_Msg_Prod_Cons_1(s, Stream_Cons.register(s, 0)) }
+    end
+|})
+
+let event_forge = bad "a Parked cannot be forged: its constructors take the private Secret" "Stream_Cons.Secret" (cons_actor {|
+    on StartC(s : Cap(Session.Live)) do
+      Stream_Cons.take_idle(state.parked)
+      { state with parked: Stream_Cons.Awaiting_S_recv_Msg_Prod_Cons_1(7, Stream_Cons.Secret) }
+    end
+|})
+
+(* ── through the real driver ──────────────────────────────────────────
+   These need the CLI: the stdlib as `march` loads it (the bare `Pid` is then
+   the Global_pid RECORD, which is what made `Pid(a)` an arity error), and the
+   driver's diagnostic filter, which until 2026-09-13 dropped every diagnostic
+   raised inside generated code.  Exe-relative like test_cap_ceiling. *)
+
+let compiler_exe =
+  let exe_dir = Filename.dirname Sys.executable_name in
+  Filename.concat exe_dir "../bin/main.exe"
+
+let check_cli src_text =
+  if not (Sys.file_exists compiler_exe) then Alcotest.failf "compiler not found at %s" compiler_exe;
+  let src = Filename.temp_file "endpoints_cli" ".march" in
+  let oc = open_out src in
+  output_string oc src_text;
+  close_out oc;
+  let out = Filename.temp_file "endpoints_cli" ".out" in
+  let rc =
+    Sys.command
+      (Printf.sprintf "%s --check %s > %s 2>&1" (Filename.quote compiler_exe) (Filename.quote src) (Filename.quote out))
+  in
+  let ic = open_in out in
+  let text = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  List.iter (fun f -> try Sys.remove f with Sys_error _ -> ()) [ src; out ];
+  (rc, text)
+
+let contains_text hay needle =
+  let n = String.length needle in
+  let rec go i = i + n <= String.length hay && (String.sub hay i n = needle || go (i + 1)) in
+  go 0
+
+let cli_pid_one_arg =
+  Alcotest.test_case "CLI: `p : Pid(state)` is accepted; a monitor program has no hidden error" `Quick (fun () ->
+      let rc, out = check_cli {|mod Main do
+  needs IO.Console
+  actor W do
+    state { n : Int }
+    init { n: 0 }
+    on Poke() do panic("bang") end
+  end
+  actor Watcher do
+    state { seen : Int }
+    init { seen: 0 }
+    on Watch(target : Pid({ n : Int })) do
+      let _r = monitor(target)
+      match receive() do
+        Down.Down(_ref, _t, DownReason.Crash(_m)) -> { state with seen: state.seen + 1 }
+        _ -> state
+      end
+    end
+  end
+  fn main(c : Cap(IO.Console)) do
+    let w = spawn(W)
+    let v = spawn(Watcher)
+    send(v, Watch(w))
+    send(w, Poke())
+    run_until_idle()
+  end
+end
+|} in
+      Alcotest.(check int) ("exit code (output: " ^ out ^ ")") 0 rc;
+      Alcotest.(check bool) "no arity error" false (contains_text out "expects 0 type argument"))
+
+let cli_no_unreachable_catch_all =
+  Alcotest.test_case "CLI: a fully covered message type gets no unreachable catch-all arm" `Quick (fun () ->
+      (* ONE message: the receiving state's single arm covers the whole
+         message type, so a catch-all after it can never be reached. *)
+      let rc, out = check_cli (wrap {|
+  @[endpoints]
+  protocol Ping do
+    A -> B : Int
+  end
+|}) in
+      Alcotest.(check int) "exit code" 0 rc;
+      Alcotest.(check bool) ("no unreachable-arm warning (output: " ^ out ^ ")") false
+        (contains_text out "never be reached"))
+
+let cli_derive_eq_single_ctor =
+  Alcotest.test_case "CLI: derive Eq on a single-constructor type emits no unreachable arm" `Quick (fun () ->
+      let rc, out = check_cli {|mod Main do
+  needs IO.Console
+  type V = V(Int, Int)
+  derive Eq for V
+  fn main(c : Cap(IO.Console)) do println(if V(1, 2) == V(1, 2) do "eq" else "ne" end) end
+end
+|} in
+      Alcotest.(check int) "exit code" 0 rc;
+      Alcotest.(check bool) ("no unreachable-arm warning (output: " ^ out ^ ")") false
+        (contains_text out "never be reached"))
+
 let tests =
-  [ stream_shape; relay_shape; no_attr_no_generation; bad_branch_head; same_label_two_payloads;
-    prod_ok; wrong_order; replayed; abandoned; callback_forge; relay_ok; payload_declared_later ]
+  [ stream_shape; cli_pid_one_arg; cli_no_unreachable_catch_all; cli_derive_eq_single_ctor; relay_shape; no_attr_no_generation; bad_branch_head; same_label_two_payloads;
+    prod_ok; wrong_order; replayed; abandoned; callback_forge; relay_ok; payload_declared_later;
+    event_ok; event_retained; event_not_reparked; event_idle_dropped; event_forge ]

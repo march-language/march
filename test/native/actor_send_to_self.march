@@ -1,0 +1,134 @@
+-- Regression: `send(self, m)` inside an actor handler delivers, and naming
+-- `self` leaves the actor record's refcount exactly where it was.
+--
+-- `self` was typechecked as a handler-scoped Pid but never BOUND as one by
+-- either backend, so a bare `self` fell through to the global `self` builtin:
+--   - compiled, it lowered to that builtin's static closure, so march_send got
+--     a closure address, its alive check failed, and the send returned None;
+--     the program printed the first line and then nothing, exiting 0.
+--   - interpreted, it was the builtin's function value, so the send raised,
+--     the handler's crash was swallowed, and the program printed NOTHING,
+--     exiting 0.
+-- See specs/progress/2026-09-13-send-to-self-delivers.md.
+--
+-- The refcount half is the hazard the fix itself introduced on its first cut:
+-- bound as an ordinary owned local, `self` was dropped at every handler's scope
+-- exit -- a net -1 on the actor record per handler, i.e. a premature free of a
+-- live actor (the class specs/progress/2026-08-14-actor-dispatch-rc-clobber-uaf.md
+-- fixed once already).  It is bound as a BORROWED alias of the handler's
+-- actor parameter instead.  `ffi_test_actor_rc` is the test-only probe
+-- (runtime/march_ffi.c) that actor_dispatch_rc_window.march also uses.  The
+-- victim is a supervised child so its true count exceeds 1 by construction;
+-- the first line is the non-vacuity guard for the last.
+mod Main do
+  needs IO.Console
+  needs Ffi
+  needs IO.Foreign
+
+  extern "rt" : Cap(Ffi) do
+    fn actor_rc(pid : Int) : Int = "ffi_test_actor_rc"
+  end
+
+  -- A consuming callee: it owns its Pid parameter and drops it.  Passing a
+  -- borrowed `self` here must dup it first.
+  pfn hold(p) : () do
+    let _ = p
+    ()
+  end
+
+  actor Victim do
+    state { steps : Int }
+    init  { steps: 0 }
+
+    on Advance() do
+      if state.steps < 3 do
+        let _ = send(self, Advance())
+        println("step " ++ int_to_string(state.steps) ++ ": re-sent to self")
+      else
+        println("step " ++ int_to_string(state.steps) ++ ": resumed via self, done")
+      end
+      { steps: state.steps + 1 }
+    end
+
+    -- Both spellings: the typechecker accepts `self()` as the same Pid.
+    on Lend() do
+      hold(self)
+      hold(self())
+      { steps: state.steps }
+    end
+
+    -- Never mentions `self`; the binding still exists in every handler.
+    on Quiet() do
+      { steps: state.steps }
+    end
+  end
+
+  actor Boss do
+    state { child : Int }
+    init  { child: 0 }
+
+    supervise do
+      strategy one_for_one
+      max_restarts 10 within 60
+      Victim child
+    end
+  end
+
+  fn current_child(boss) do
+    match get_actor_field(boss, "child") do
+      None    -> -1
+      Some(n) -> n
+    end
+  end
+
+  -- Takes the pid INDEX and mints a fresh pid per send, so no pid is live
+  -- across a send (see the leak note in main).
+  fn pump(idx : Int, n : Int) : () do
+    if n <= 0 do ()
+    else
+      send(pid_of_int(idx), Lend())
+      send(pid_of_int(idx), Quiet())
+      pump(idx, n - 1)
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) do
+    let boss = spawn(Boss)
+    let victim = current_child(boss)
+
+    send(pid_of_int(victim), Advance())
+    run_until_idle()
+
+    let steps = match get_actor_field(pid_of_int(victim), "steps") do
+      None    -> -1
+      Some(n) -> n
+    end
+    println("steps: " ++ int_to_string(steps))
+
+    -- Measured AFTER the self-sends, deliberately: each `send` of a pid that
+    -- is still live afterwards leaks one reference today (Perceus dups the
+    -- pid for a `send` it treats as consuming; march_send never releases
+    -- it), in main as much as in a handler.  That is a leak, not a premature
+    -- free, and it is filed separately:
+    -- specs/progress/2026-09-14-pid-ownership-settled-send-borrows-self-owned.md.
+    -- What this pins is the dangerous direction: handlers that bind `self`
+    -- (all of them), and one that hands it to a consuming callee twice, must
+    -- not move the count at all.
+    --
+    -- The sends themselves each leave exactly one reference behind: pump
+    -- mints a fresh pid per send, pid_of_int takes a reference for it (since
+    -- 2026-09-14), and `send` keeps it. So the count moves by the number of
+    -- sends and by nothing the handlers do.
+    let rc_before = actor_rc(victim)
+    println("victim is multiply owned: " ++ bool_to_string(rc_before > 1))
+    pump(victim, 5)
+    run_until_idle()
+    -- Ten sends from `pump`, each with a fresh owned pid (pid_of_int) handed
+    -- to a BORROWING `send` and dropped after it: net zero. Until 2026-09-14
+    -- `send` consumed its pid and the runtime never released it, so this line
+    -- asserted `rc_before + 10` -- the leak, pinned as if it were the contract
+    -- (specs/progress/2026-09-14-pid-ownership-settled-send-borrows-self-owned.md).
+    println("refcount unchanged by handlers that name self: "
+            ++ bool_to_string(actor_rc(victim) == rc_before))
+  end
+end

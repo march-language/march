@@ -89,7 +89,7 @@ fn read_file(path : String) : String do
 end
 ```
 
-The `linear let` annotation tells the compiler this binding has linear semantics. **The qualifier must appear at the binding site**: either the `linear let` keyword form, or a type annotation on the binding (`let h : linear Handle = ...`). A `linear` qualifier on the *callee's return type* by itself does NOT currently propagate to a plain `let` binding of the result (verified 2026-07-10: a dropped `let h = open_file(p)` with `open_file : ... -> linear Handle` is silently accepted; finding L8, `specs/todos/`). Earlier versions of this chapter claimed the return type was enough.
+The `linear let` annotation tells the compiler this binding has linear semantics. You can also get it from a type annotation on the binding (`let h : linear Handle = ...`) or from the callee: a plain `let h = open_file(p)` with `open_file : ... -> linear Handle` is tracked as linear too, so dropping `h` rejects with `` The linear value `h` was never used. `` (finding L8, fixed; corpus witness `reject/t78`).
 
 ---
 
@@ -97,10 +97,10 @@ The `linear let` annotation tells the compiler this binding has linear semantics
 
 An affine type may be used zero or one times. This is useful for values that have a cleanup operation but where "not using" is acceptable (e.g., an optional connection).
 
-**Spelling matters:** `affine` is a *type modifier* only; write it inside the
-type annotation. Unlike `linear`, there is no `affine` parameter keyword (the
-form `fn f(affine cap : T)` is a **parse error**) and no `affine let`
-(finding L1, `specs/todos/`):
+**Spelling:** `affine` works as a type modifier inside the annotation
+(`cap : affine NetworkCap`, below) and as a parameter keyword
+(`fn f(affine cap : NetworkCap)`, finding L1, fixed; corpus witness
+`accept/t80`). There is no `affine let`:
 
 ```march
 fn maybe_connect(cap : affine NetworkCap, should_connect : Bool) : () do
@@ -136,20 +136,35 @@ type Resource = {
 }
 ```
 
-The compiler tracks each linear field independently. Accessing `r.fd` consumes that field; a second access rejects with `` The linear value `r.fd` is used more than once here. ``
+The compiler tracks each linear field independently, and the record **owns**
+its linear fields. A field whose type is an `always_linear` type is a linear
+field too, with no qualifier needed. The rules:
 
-Two candid caveats (both live-verified, 2026-07-10):
+1. **Accessing a field moves it out.** `r.fd` consumes that field; a second
+   access rejects with `` The linear value `r.fd` is used more than once here. ``
+2. **Using the whole record moves every field it still holds.** Passing `r` to
+   a function, returning it, or storing it hands its linear fields on too. So
+   consuming `r.fd` and then passing `r` along, or passing `r` along twice, is
+   a double use of `r.fd`.
+3. **`{ r with … }` keeps every field it doesn't replace.** After consuming
+   `r.fd`, write `{ r with fd: new_fd }`; `{ r with metadata: "x" }` would carry
+   the consumed `fd` into the new record, and is rejected with a note saying so.
+4. **Every linear field must be consumed by the end of the record's scope**,
+   by one of the three moves above. Otherwise it leaks: `` The linear value
+   `r.fd` was never used. ``
+5. **Reading an ordinary field moves nothing.** `r.metadata` never consumes
+   `r.fd`.
 
-- **Field tracking only engages for locally-`let`-bound records.** If the
-  record arrives as a *function parameter*, the tracker has no sentinel for it
-  and a double field access degrades to a warning (`Field `fd` has a linear
-  type but linearity tracking is not available for `r` at this binding
-  site.`); finding L3, open in `specs/todos/`. Bind the record with a
-  `let` first to get real enforcement. Corpus witness: `reject/t63`.
-- **Arithmetic on linear primitive fields works** (e.g. `r.count + 1` for a
-  `linear count : Int` field), but only since 2026-07-10: previously the
-  linearity wrapper leaked into `Num` resolution and rejected even a single,
-  correct use (finding L2, fixed). Corpus witness: `accept/t67`.
+This works the same for `let`-bound and parameter-bound records (a double
+field access on a parameter was once only a warning; finding L3, fixed), and
+for an actor's `state`; see [Linear Types and Actors](#linear-types-and-actors).
+Corpus witnesses: `reject/t63`, `reject/t77`, `reject/t216`–`t222`,
+`accept/t223`.
+
+One more note: **arithmetic on linear primitive fields works** (e.g.
+`r.count + 1` for a `linear count : Int` field), but only since 2026-07-10:
+previously the linearity wrapper leaked into `Num` resolution and rejected even
+a single, correct use (finding L2, fixed). Corpus witness: `accept/t67`.
 
 ---
 
@@ -173,12 +188,11 @@ end
 See `surface-syntax.md`'s always_linear/`tag` section for the full typestate
 pattern, and `core-march-types.md` §2.9.1 for the promotion rule.
 
-> **Name-collision warning (finding L4, `specs/todos/`):** the
-> `always_linear` registry is keyed by the bare type NAME, globally. If your
-> program declares a plain type with the same name as any `always_linear`
-> type, including the stdlib's `Handle`, your type silently inherits
-> linearity, and its constructors confuse exhaustiveness checking. Until
-> this is fixed, avoid reusing such names.
+> **Same-named types don't inherit linearity.** Whether a type is
+> `always_linear` is resolved against the type the name actually refers to,
+> so a plain type of your own called `Handle` is an ordinary type, even though
+> the stdlib's `Handle` is linear (finding L4, fixed; corpus witnesses
+> `accept/t81`, `accept/t194`).
 
 ---
 
@@ -211,9 +225,34 @@ take(r)                   -- error: The linear value `r` is used more than once 
 (Verified live; corpus witnesses `accept/t68` + `reject/t66`. Earlier
 versions of this chapter claimed a linear value "cannot be sent as a message
 directly"; that was never true, and it contradicted the zero-copy-move
-paragraph above; finding L6, `specs/todos/`.) On the compiled backend the
+paragraph above; finding L6, resolved as this doc fix.) On the compiled backend the
 transfer is a zero-copy move; interpreted, it is an ordinary handoff; either
 way the type system prevents you from touching the value after the send.
+
+**An actor's state holds linear values the same way a record does.** A
+handler's `state` owns the state's linear fields (an `always_linear`-typed
+field, or one written `linear`) for the turn, under the record rules above.
+The two shapes to know:
+
+```march
+actor Ep do
+  state { st : Token, n : Int }        -- Token is always_linear
+  init  { st: new_token(), n: 0 }
+  on Step() do
+    { state with st: advance(state.st) }    -- OK: consumed and replaced
+  end
+  on Oops() do
+    let k = spend(state.st)
+    { state with n: k }                     -- error: the update keeps the old `st`
+  end
+end
+```
+
+A handler that returns a brand-new record must consume the old linear fields
+first, or they leak. A linear value arriving as a handler **parameter** is
+tracked too: it must be consumed, or stored into the returned state. Corpus
+witnesses: `reject/t195`–`t196`, `reject/t216`, `reject/t217`, `reject/t222`,
+`accept/t197`, `accept/t223`.
 
 For richer typed interaction patterns, the channel system below layers
 session types on top of the same linearity infrastructure.
@@ -346,6 +385,48 @@ the `consume` mode.)
 
 ---
 
+## Linear Values in Closures, Containers, and Generic Code
+
+A linear value has to stay traceable wherever it goes, so four more places
+enforce the rule:
+
+- **Closures can't capture one.** A closure may run any number of times, so
+  `run(fn () -> sink(s))` with an outer linear `s` is rejected (`` The linear
+  value `s` cannot be captured by a closure ``), whether the closure is bound
+  with `let`, passed straight to a function, or written as a local
+  `fn … end`. Pass the value in as a parameter instead. A lambda's or local
+  fn's own linear parameters must be consumed by the end of its body, just like
+  a top-level function's (`reject/t198`–`t201`, `t208`–`t210`).
+- **`_` can't discard one.** `let _ = token`, `let (a, _) = pair_of_tokens`,
+  a `_ ->` arm on a linear value, or `fn _ -> …` receiving one all drop a
+  value that must be consumed. Discarding a non-linear part (`Token(_)`) is
+  fine, and so is a `_` arm that ends in `panic(…)` (`reject/t203`–`t206`).
+- **A container holding one is linear itself.** A tuple, list or ADT value
+  with a linear value inside (`(token, 1)`, `Some(token)`, `[token]`) must be
+  used exactly once, like the value it holds. Records are the exception: their
+  fields are tracked one by one, as above (`reject/t233`–`t234`).
+- **Generic functions must opt in.** A type variable is unrestricted: a generic
+  function may drop or duplicate a value of that type. So passing a linear
+  value to one is an error unless the function marks that parameter
+  `linear`, which makes the body use it exactly once:
+
+  ```march
+  fn dup(x) do (x, x) end              -- dup(token): rejected, dup may duplicate
+  fn id(linear x : a) : a do x end     -- id(token): fine, x is checked linear
+  ```
+
+  Constructors (`Some`, tuples, your own ADTs) store each argument once and need
+  nothing; neither do operators, nor functions whose type variable appears only
+  in what they return. Most stdlib generics have not opted in, so
+  `List.length([token])` is rejected: it would drop the token
+  (`reject/t229`–`t231`, `accept/t232`).
+
+An unannotated parameter is tracked as soon as its body fixes its type to a
+linear one: `fn g(st) do sink(st) + sink(st) end` is rejected just like the
+annotated form (`reject/t212`–`t214`).
+
+---
+
 ## Practical Rules
 
 1. **Use `linear` for resources with mandatory cleanup**: file handles, database connections, exclusive locks, capabilities you must return.
@@ -354,11 +435,11 @@ the `consume` mode.)
 
 3. **Ordinary values need no qualifier**: the default is unrestricted (can be copied, dropped, used many times).
 
-4. **Pattern matching on a linear value consumes it**: each branch must use it in a compatible way.
+4. **Branches must agree.** A linear value that one branch of an `if`, `match` or `match do` consumes must be consumed by every branch that returns; a branch that ends in `panic(…)` never returns and doesn't count. The early `Err` return of `let?` is a branch too, so consume linear values before a `let?` that could skip them. Affine values and session-channel endpoints may still be dropped on a branch.
 
-5. **Linear fields in records**: accessing the field consumes it. Enforcement engages for `let`-bound records; for parameter-bound records tracking currently degrades to a warning (finding L3 above).
+5. **Linear fields in records are owned by the record**: accessing one moves it out, using the record whole moves them all, `{ r with … }` keeps the ones it doesn't replace, and each must be consumed by the end of the record's scope.
 
-6. **Avoid type names that collide with stdlib `always_linear` types** (like `Handle`) until finding L4 is fixed; the collision silently makes your type linear.
+6. **Closures, wildcards and generic code don't get a pass**: a closure can't capture a linear value, `_` can't discard one, a tuple/list/ADT holding one is linear too, and a generic function receives one only through a parameter marked `linear`.
 
 ---
 

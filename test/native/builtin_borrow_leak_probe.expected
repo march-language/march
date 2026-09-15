@@ -1,0 +1,11 @@
+String == = 10000, flat: true
+String != = 9999, flat: true
+String < = 4445, flat: true
+String >= = 5555, flat: true
+string_length = 38894, flat: true
+List(Int) == = 0, flat: true
+boxed ADT == = 1, flat: true
+erased == = 1, flat: true
+One(s) -> string_length(s) = 38894, flat: true
+typed_array_get == = 10000, balanced: true
+element intact after the loop: 20202 (churn 4)

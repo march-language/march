@@ -475,6 +475,70 @@ sees the generated modules like any other code. The runnable twin of the
 example above, with an in-process transport and a pinned trace, is
 `test/session/stream_endpoints.march`.
 
+### Hosting an endpoint in an actor: the event API
+
+The functions above are callback-shaped: a receive takes a closure, and the
+session state rides in that closure. A step written that way cannot read an
+actor's own `state`. So every role module also gets an **event-shaped** API,
+for an endpoint whose state lives in the actor that drives it:
+
+- `Parked_<Role>`, an `always_linear` type: "this endpoint awaits a delivery".
+  `idle()` gives the placeholder `init` needs; `take_idle` consumes it.
+- `await_<msg>(s, st)` / `await_<labels>(s, st)` for each receiving state, and
+  `finish(s, st)` for the end: each consumes the state and returns a
+  `Parked_<Role>`.
+- `resume(parked, from, msg, ep)` turns a delivery into a `Received_<Role>`
+  value — one constructor per message the role can receive, `Got_<msg>(payload,
+  next_state)` — which the handler matches with `state` in scope.
+
+```march
+actor ConsActor do
+  state { budget : Int, parked : Stream_Cons.Parked_Cons }
+  init  { budget: 2, parked: Stream_Cons.idle() }
+  on Start(s : Cap(Session.Live)) do
+    Stream_Cons.take_idle(state.parked)
+    { state with parked: Stream_Cons.await_Msg_Prod_Cons_1(s, Stream_Cons.register(s, 0)) }
+  end
+  on Deliver(s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
+    match Stream_Cons.resume(state.parked, from, msg, ep) do
+      Got_Msg_Prod_Cons_1(_n, st) ->
+        if state.budget > 1 do
+          { state with budget: state.budget - 1,
+                       parked: Stream_Cons.await_Msg_Prod_Cons_1(s, Stream_Cons.choose_more(s, st, true)) }
+        else
+          { state with parked: Stream_Cons.finish(s, Stream_Cons.choose_done(s, st, true)) }
+        end
+    end
+  end
+end
+```
+
+Because `parked` is a linear field, the checker holds every turn to the
+protocol: a handler that resumes and returns `{ state with budget: … }` keeps
+the consumed value ("used more than once"), one that never parks again is
+caught the same way, and a `Start` that does not `take_idle` leaks the
+placeholder ("never used"). The two APIs coexist: which one drives a role is
+chosen per instance, not per protocol. An event-shaped endpoint is resumed by
+its actor, never by the transport calling the installed handler (which
+panics if called), so it needs a transport that routes deliveries to actors,
+like the one in `test/session/stream_actor_events.march`, whose trace is
+`stream_endpoints`' byte for byte. Names carry the role (`Parked_Cons`,
+`Got_More`) because types and constructors share one namespace today.
+
+**Under a supervisor.** A restarted child has a fresh pid and fresh state, so
+the two APIs part ways:
+
+- The callback API's session state is in the transport, so the host is
+  replaceable: register each host under a **name** and route deliveries with
+  `Actor.whereis`, which survives a restart. The protocol continues from where
+  it was (`test/session/stream_actor_supervised.march`).
+- The event API's session state is the actor's `Parked_<Role>`, which dies with
+  the host; the replacement starts `Idle`, and delivering to it would only
+  crash it again. Route through actor **capabilities** (`get_cap`,
+  `send_checked`): a stale cap means the host that parked the endpoint is gone,
+  and the transport should abandon the session and close the peer
+  (`test/session/stream_actor_events_supervised.march`).
+
 ## See also
 
 - [Actors]({{ site.baseurl }}/docs/actors/): mailboxes, `spawn`/`send`, and the scheduler these channels run on.

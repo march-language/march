@@ -18,8 +18,8 @@ let rec consts (t : Smt.term) : string list =
   match t with
   | Smt.Const n -> [ n ]
   | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ -> []
-  | Smt.App (_, ts) -> List.concat_map consts ts
-  | Smt.IsCtor (_, a) | Smt.Neg a | Smt.Not a -> consts a
+  | Smt.App (_, ts) | Smt.Ctor (_, _, ts) -> List.concat_map consts ts
+  | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) | Smt.Neg a | Smt.Not a -> consts a
   | Smt.MulLit (_, a) -> consts a
   | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b)
   | Smt.And (a, b) | Smt.Or (a, b) | Smt.Implies (a, b)
@@ -27,12 +27,16 @@ let rec consts (t : Smt.term) : string list =
   | Smt.Lt (a, b) | Smt.Le (a, b) | Smt.Gt (a, b) | Smt.Ge (a, b)
   | Smt.FpEq (a, b) | Smt.FpLt (a, b) | Smt.FpLe (a, b)
   | Smt.FpGt (a, b) | Smt.FpGe (a, b) -> consts a @ consts b
+  | Smt.SetEmpty _ -> []
+  | Smt.SetSng (_, a) -> consts a
+  | Smt.SetMem (a, b) | Smt.SetUnion (a, b) | Smt.SetInter (a, b) | Smt.SetDiff (a, b)
+  | Smt.SetSub (a, b) -> consts a @ consts b
 
 let rec app_heads (t : Smt.term) : string list =
   match t with
   | Smt.Const _ | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ -> []
-  | Smt.App (f, ts) -> f :: List.concat_map app_heads ts
-  | Smt.IsCtor (_, a) | Smt.Neg a | Smt.Not a -> app_heads a
+  | Smt.App (f, ts) | Smt.Ctor (f, _, ts) -> f :: List.concat_map app_heads ts
+  | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) | Smt.Neg a | Smt.Not a -> app_heads a
   | Smt.MulLit (_, a) -> app_heads a
   | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b)
   | Smt.And (a, b) | Smt.Or (a, b) | Smt.Implies (a, b)
@@ -40,6 +44,10 @@ let rec app_heads (t : Smt.term) : string list =
   | Smt.Lt (a, b) | Smt.Le (a, b) | Smt.Gt (a, b) | Smt.Ge (a, b)
   | Smt.FpEq (a, b) | Smt.FpLt (a, b) | Smt.FpLe (a, b)
   | Smt.FpGt (a, b) | Smt.FpGe (a, b) -> app_heads a @ app_heads b
+  | Smt.SetEmpty _ -> []
+  | Smt.SetSng (_, a) -> app_heads a
+  | Smt.SetMem (a, b) | Smt.SetUnion (a, b) | Smt.SetInter (a, b) | Smt.SetDiff (a, b)
+  | Smt.SetSub (a, b) -> app_heads a @ app_heads b
 
 (* Function symbols the PREAMBLE — a raw SMT-LIB string assembled alongside
    [vc], not part of it — already declares and axiomatises: the string-length

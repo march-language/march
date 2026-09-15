@@ -665,6 +665,102 @@ static void setup_alt_stack(void) {
  * (see the long comment there for why re-raising the signal is unsafe from a
  * green-thread altstack context).
  */
+/* ── Fatal-fault report (async-signal-safe) ──────────────────────────────
+ *
+ * A non-stack-growth fault used to end in a bare _exit(139) with nothing on
+ * stderr, in every build but MARCH_DEBUG.  An intermittent CI crash therefore
+ * carried no information at all: native_actor_monitor_down_reason died with
+ * 139 twice on the Linux amd64 leg, after correct output, and neither
+ * sighting said where (specs/todos/2026-09-04-actor-monitor-down-reason-
+ * sigsegv-on-linux.md).  This writes ONE line with what a triage needs first:
+ * the signal, si_code, fault address, faulting pc, the scheduler and green
+ * thread that were running, and where the address sits relative to that
+ * green thread's stack reservation.
+ *
+ * Signal context, possibly on a corrupted heap, so: write(2) only, a fixed
+ * stack buffer, hand-rolled hex, no stdio, no locks, no allocation, and only
+ * fields of the CURRENT proc (the MARCH_DEBUG path's registry walk stays
+ * debug-only). */
+static size_t fatal_put_str(char *buf, size_t at, size_t cap, const char *s) {
+    while (*s && at + 1 < cap) buf[at++] = *s++;
+    return at;
+}
+
+static size_t fatal_put_hex(char *buf, size_t at, size_t cap, uint64_t v) {
+    char tmp[16];
+    int n = 0;
+    do { tmp[n++] = "0123456789abcdef"[v & 0xf]; v >>= 4; } while (v && n < 16);
+    at = fatal_put_str(buf, at, cap, "0x");
+    while (n > 0 && at + 1 < cap) buf[at++] = tmp[--n];
+    return at;
+}
+
+static size_t fatal_put_dec(char *buf, size_t at, size_t cap, int64_t v) {
+    char tmp[24];
+    int n = 0;
+    uint64_t u = v < 0 ? (uint64_t)(-(v + 1)) + 1 : (uint64_t)v;
+    do { tmp[n++] = (char)('0' + u % 10); u /= 10; } while (u && n < 24);
+    if (v < 0 && at + 1 < cap) buf[at++] = '-';
+    while (n > 0 && at + 1 < cap) buf[at++] = tmp[--n];
+    return at;
+}
+
+static uint64_t fatal_fault_pc(void *uctx) {
+    if (!uctx) return 0;
+    ucontext_t *uc = (ucontext_t *)uctx;
+#if defined(__APPLE__) && defined(__aarch64__)
+    return uc->uc_mcontext ? (uint64_t)uc->uc_mcontext->__ss.__pc : 0;
+#elif defined(__APPLE__) && defined(__x86_64__)
+    return uc->uc_mcontext ? (uint64_t)uc->uc_mcontext->__ss.__rip : 0;
+#elif defined(__linux__) && defined(__x86_64__)
+    return (uint64_t)uc->uc_mcontext.gregs[REG_RIP];
+#elif defined(__linux__) && defined(__aarch64__)
+    return (uint64_t)uc->uc_mcontext.pc;
+#else
+    (void)uc;
+    return 0;
+#endif
+}
+
+static void march_report_fatal_fault(int sig, siginfo_t *info, void *uctx) {
+    char buf[512];
+    size_t cap = sizeof buf, at = 0;
+    at = fatal_put_str(buf, at, cap, "march: fatal ");
+    at = fatal_put_str(buf, at, cap, sig == SIGSEGV ? "SIGSEGV" : sig == SIGBUS ? "SIGBUS" : "signal");
+    at = fatal_put_str(buf, at, cap, " si_code=");
+    at = fatal_put_dec(buf, at, cap, info ? info->si_code : -1);
+    at = fatal_put_str(buf, at, cap, " addr=");
+    at = fatal_put_hex(buf, at, cap, info ? (uint64_t)(uintptr_t)info->si_addr : 0);
+    at = fatal_put_str(buf, at, cap, " pc=");
+    at = fatal_put_hex(buf, at, cap, fatal_fault_pc(uctx));
+    march_scheduler *s = tl_sched;
+    at = fatal_put_str(buf, at, cap, " sched=");
+    at = fatal_put_dec(buf, at, cap, s ? s->id : -1);
+    march_proc *p = s ? s->current : NULL;
+    at = fatal_put_str(buf, at, cap, " pid=");
+    at = fatal_put_dec(buf, at, cap, p ? p->pid : -1);
+    if (p) {
+        at = fatal_put_str(buf, at, cap, " status=");
+        at = fatal_put_dec(buf, at, cap,
+                           (int64_t)atomic_load_explicit(&p->status, memory_order_acquire));
+        char *lo = (char *)p->stack_mmap_base;
+        char *addr = info ? (char *)info->si_addr : NULL;
+        const char *where = "outside its stack";
+        if (lo && addr) {
+            if (addr >= lo && addr < lo + g_page_size) where = "in its stack guard page (overflow)";
+            else if (addr >= lo && addr < (char *)p->stack_base) where = "in its uncommitted stack region";
+            else if (addr >= lo && addr < lo + p->stack_alloc) where = "inside its committed stack";
+        }
+        at = fatal_put_str(buf, at, cap, " fault ");
+        at = fatal_put_str(buf, at, cap, where);
+    } else {
+        at = fatal_put_str(buf, at, cap, " (no green thread running on this scheduler)");
+    }
+    buf[at++] = '\n';
+    ssize_t ignored = write(2, buf, at);
+    (void)ignored;
+}
+
 static void march_sigsegv_handler(int sig, siginfo_t *info, void *uctx) {
     (void)uctx;
 
@@ -814,6 +910,7 @@ fatal:
      * is WIFSIGNALED / a core dump — an acceptable trade for a fault path
      * that must never hang.  The oracle sweep's is_divergence treats a
      * 128+fatal-signo exit as a crash divergence to match. */
+    march_report_fatal_fault(sig, info, uctx);
     _exit(128 + sig);
 }
 
@@ -1459,6 +1556,12 @@ static int wake_idle_daemons(void) {
  * scheduler loop body — a normal C stack, never signal context. */
 __attribute__((weak)) void march_signal_drain(void) { }
 
+/* march_incrc lives in march_runtime.c (STRONG); this WEAK no-op is the same
+ * standalone-unit-test fallback as march_signal_drain above, so march_self
+ * can take the reference it hands out without the scheduler harnesses
+ * failing to link. */
+__attribute__((weak)) void march_incrc(void *p) { (void)p; }
+
 static void sched_loop(march_scheduler *sched) {
     /* Set up the per-thread alternate signal stack before running any green
      * threads.  The SIGSEGV handler for lazy stack growth requires SA_ONSTACK
@@ -2093,10 +2196,34 @@ int march_sched_in_scheduler(void) {
     return tl_sched != NULL;
 }
 
-/* self() builtin — returns the current green thread's proc pointer (the PID
- * value used as first arg to send/receive in the compiled binary). */
+/* self() builtin — the ACTOR whose handler is running.
+ *
+ * This used to return the proc pointer, on the theory that it was "the PID
+ * value used as first arg to send".  It is not: a Pid at the ABI is the
+ * ACTOR pointer (march_send takes one, march_spawn returns one,
+ * march_pid_of_int hands back meta->actor).  The mistake was invisible
+ * because nothing reached this function — `self` was missing from
+ * llvm_builtins, so every compiled program naming it died in clang on an
+ * undefined symbol instead, and no caller inside the runtime uses it.
+ * Returns NULL outside an actor handler (compiled `main` is itself a green
+ * thread, and its proc's actor field is NULL because procs are calloc'd).
+ * See specs/todos/2026-09-11-self-in-an-actor-handler-does-not-compile.md. */
 void *march_self(void) {
-    return (void *)march_sched_current();
+    march_proc *cur = march_sched_current();
+    /* NULL outside an actor handler.  Not a panic: this file is linked on its
+     * own by the C unit-test harnesses in test/dune, which have no
+     * march_panic, and the out-of-handler case never reaches here anyway --
+     * the typechecker binds the global `self` as Int, so a top-level use
+     * lowers to the closure's address rather than a call.  Making THAT an
+     * error is a typechecker change, filed with this item. */
+    /* An OWNED reference, like pid_of_int and every value-producing builtin:
+     * the program drops the pid `self` gave it at its last use (or hands it
+     * to a borrowing builtin such as `send`, which then drops it), and a
+     * reference it never took would come out of the running actor's own
+     * (see march_spawn_common). Measured 2026-09-14 the day `send` became
+     * borrowing: actor_send_to_self's count moved by -1 per send. */
+    if (cur && cur->actor) march_incrc(cur->actor);
+    return cur ? cur->actor : NULL;
 }
 
 int64_t march_sched_total_spawned(void) {

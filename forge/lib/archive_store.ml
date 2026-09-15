@@ -333,7 +333,11 @@ let dep_lib_paths_for_archive archive_root =
                Deliberately NO wildcard arm: Project.dep is a closed variant,
                so listing every constructor makes a future dep form a compile
                error here instead of a silently empty search path. *)
-            (match Project.git_dep_lib_path dep_name with
+            (* Version-aware: the archive's own root is the project whose
+               forge.lock names the coordinates (same source cmd_build uses). *)
+            (match Project.git_dep_lib_path
+                     ~coords:(Project.dep_coords ~project_root:archive_root)
+                     dep_name with
              | Some p ->
                (* p is either <dep_root>/lib or <dep_root> itself *)
                let dep_root =

@@ -94,12 +94,12 @@ let builtin_names : StringSet.t =
       "cap_narrow"; "root_cap"; "mint_cap"; "cap_impl"; "cap_dict";
       "set_actor_caps"; "actor_caps";
       (* Monitor/supervision builtins *)
-      "demonitor"; "monitor"; "mailbox_size"; "sched_stat"; "actor_set_mailbox_limit";
+      "demonitor"; "monitor"; "dist_monitor_register"; "actor_terminal_reason"; "dist_monitor_pending"; "dist_monitor_ack"; "dist_monitor_forget_node"; "mailbox_size"; "sched_stat"; "actor_set_mailbox_limit";
       "run_until_idle"; "register_resource"; "get_cap";
       (* Named registry (Task 4) *)
       "actor_register"; "actor_unregister"; "actor_whereis"; "actor_registered";
       "send_checked"; "revoke_cap"; "is_cap_valid";
-      "pid_of_int"; "get_actor_field";
+      "pid_of_int"; "pid_to_int"; "get_actor_field";
       (* Comparison builtins used by derived Ord instances *)
       "march_compare_int"; "march_compare_float"; "march_compare_string";
       (* Hash builtins used by derived Hash instances *)

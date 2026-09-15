@@ -372,6 +372,44 @@ end
 
 ---
 
+## Remote actor messages: `NodeSend`
+
+A `NodeCall` is a synchronous call to a *function*. To send a one-way
+*message* to an actor on another node, the way `send(pid, msg)` does locally,
+use `NodeSend`:
+
+```march
+-- sender: a frame on the peer connection, addressed by GlobalPid
+let target = GlobalPid.make("node-b", their_local_pid, their_creation)
+let _ = NodeSend.cast(conn_fd, seq, target, "App.Ping", payload_bytes)
+
+-- receiver: decode one frame and hand it to a dispatch that knows which
+-- local actor hosts which message type
+let _ = NodeSend.serve_one(conn_fd, my_creation, fn d ->
+  match d.type_tag do
+    "App.Ping" -> let _ = send(ping_actor, Ping(d.payload))
+                  Ok(())
+    other      -> Err("unknown type " ++ other)
+  end)
+```
+
+`cast` (not `send`, which is the local primitive's name) writes an
+`ACTOR_MSG` frame `[9, seq, local_pid, creation, type_tag, payload]` and
+returns once it is written. The receiving node checks the `creation` against
+its own before dispatching, so a message addressed to a pid from before that
+node restarted is refused rather than delivered to whatever now owns the
+number. Any refusal — stale creation, a type the dispatch does not host, a
+pid that is not alive, a payload it cannot decode — goes **back to the
+sender** as a `DELIVERY_FAILED` frame `[10, seq, reason]`, read with
+`NodeSend.recv_failure`. A remote send is not fire-and-forget.
+
+Two things are the caller's, by design: the dispatch (a constructor is minted
+by the actor that declares it, so a library cannot wrap the payload), and the
+payload codec (encode the message with its `derive`d codec into bytes; the
+frame carries bytes). Pids never travel: a message that must name an actor
+carries a `GlobalPid`. `test/native/node_send_loopback.march` runs the whole
+exchange over TCP loopback, including all three failure replies.
+
 ## Putting It Together
 
 > **This is a layered API-reference skeleton, not a runnable program.** It shows how the pieces connect (identity, listen/connect, handshake, then a `RemoteCall`) but elides two things you must supply for real: (1) the actual byte transport over the socket `fd`, and (2) concrete `sig_hash` / `impl_hash` values, which the compiler bakes into your binary for the specific functions you enroll. The send/recv framing is `NetFrame`'s job (length-prefixed frames); see the *Wiring up the transport* note after the skeleton for how to close the loop.
@@ -460,9 +498,20 @@ causally-ordered clocks.
 (`NodeCall.call`/`serve_loop`), SWIM gossip *dispatch* to peer fds, and
 cross-node monitor firing require two real nodes and are exercised only by
 the native TCP-loopback tests under `test/native/`, never by a
-single-process golden. True multi-*machine* failure semantics (netsplit,
-node restart/incarnation, clock skew across hosts) remain undocumented in
-executable form.
+single-process golden. True multi-*process* failure semantics are exercised
+by `scripts/two-node.sh` (two compiled binaries as two OS processes, a fault
+script applied from outside, per-node sorted goldens under
+`test/two_node/<scenario>/`): the `restart` scenario SIGKILLs a node holding
+an actor, restarts it with a new creation at the same local pid, and pins
+that a send to the held `GlobalPid` is refused as stale while a send to the
+re-announced one is delivered; the `stream` scenario runs the Stream
+session protocol's two endpoints on the two nodes over the `Session.Ops`
+network transport, each node's trace its projection of the in-process
+one; the `stall` scenario SIGSTOPs a node running SWIM and pins
+Suspect → Dead on the observer and the incarnation refutation on resume.
+Netsplit (packet drop) and clock skew across hosts remain undocumented in
+executable form; the harness has the hooks for the first
+(`specs/progress/2026-09-14-two-node-failure-semantics-harness.md`).
 
 **A compiled memory-safety gap, FIXED (finding C1, `specs/todos/`, 2026-07-11).**
 `VectorClock.compare` (and, transitively, `.concurrent`/`.happens_before` on

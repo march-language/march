@@ -1,0 +1,185 @@
+-- NodeSend loopback integration test (distributed actors 1/4).
+--
+-- Two "nodes" in one process over real TCP loopback, as node_call_loopback:
+-- node-b listens and serves ACTOR_MSG frames, node-a connects. What is
+-- exercised, in order:
+--   1. A sends `Ping` to an actor on B, carrying its own GlobalPid; B's
+--      dispatch routes it into the actor's mailbox; the actor replies with
+--      `Pong` by NodeSend to the GlobalPid it was handed.
+--   2. A sends with a stale creation → DELIVERY_FAILED (stale creation).
+--   3. A sends to a local pid B does not host → DELIVERY_FAILED (no process).
+--   4. A sends a type B's dispatch does not know → DELIVERY_FAILED (unknown type).
+--
+-- Each failure comes BACK to the sender with its seq: a remote send is not
+-- fire-and-forget. Design: specs/progress/2026-09-14-remote-send-to-a-global-pid.md.
+--
+-- The payload is msgpack `[n, reply_to]`; a real message type would use its
+-- derived codec (the typed wrapper is the design's open compiler step).
+-- A local actor's GlobalPid index is `pid_to_int(pid)`, the builtin this
+-- fixture was originally the case for (it parsed `to_string(pid)`).
+mod NodeSendLoopback do
+  needs IO.Console
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.NetConnect
+
+  pfn encode_ping(n : Int, reply_to) : List(Int) do
+    Msgpack.encode(Msgpack.array(Cons(Msgpack.int(n), Cons(GlobalPid.to_value(reply_to), Nil))))
+  end
+
+  pfn decode_ping(bytes : List(Int)) : Result((Int, Pid), String) do
+    match Msgpack.decode(bytes) do
+      Err(e) -> Err(e)
+      Ok(v) ->
+        match v do
+          Msgpack.Array(Cons(Msgpack.Int(n), Cons(pv, Nil))) ->
+            match GlobalPid.of_value(pv) do
+              Ok(p) -> Ok((n, p))
+              Err(e) -> Err(e)
+            end
+          _ -> Err("ping: bad payload")
+        end
+    end
+  end
+
+  -- ── node-b: the actor that hosts `Ping` ──────────────────────────────
+  actor PingActor do
+    state { seen : Int }
+    init  { seen: 0 }
+    on PingMsg(fd : Int, payload : List(Int)) do
+      match decode_ping(payload) do
+        Ok((n, reply_to)) ->
+          println("node-b: ping " ++ int_to_string(n) ++ " from " ++ reply_to.node_id)
+          let pong = Msgpack.encode(Msgpack.int(n * 10))
+          let _ = NodeSend.cast(fd, 100 + n, reply_to, "NodeSendLoopback.Pong", pong)
+          { state with seen: state.seen + 1 }
+        Err(e) ->
+          println("node-b: undecodable ping: " ++ e)
+          state
+      end
+    end
+  end
+
+  -- B's dispatch: which local actor hosts which type. A constructor is
+  -- minted by the actor that declares it, so this cannot live in the library.
+  pfn dispatch_b(fd : Int, ping_pid, d : Delivery) : Result((), String) do
+    match d.type_tag do
+      "NodeSendLoopback.Ping" ->
+        if d.to_local_pid == pid_to_int(ping_pid) && is_alive(ping_pid) do
+          let _ = send(ping_pid, PingMsg(fd, d.payload))
+          Ok(())
+        else
+          Err("no live process " ++ int_to_string(d.to_local_pid))
+        end
+      other -> Err("unknown type " ++ other)
+    end
+  end
+
+  pfn serve_n(conn_fd : Int, listen_fd : Int, ping_pid, n : Int) do
+    if n <= 0 do
+      tcp_close(conn_fd)
+      tcp_close(listen_fd)
+    else
+      let _ = NodeSend.serve_one(conn_fd, 1, fn d -> dispatch_b(conn_fd, ping_pid, d))
+      serve_n(conn_fd, listen_fd, ping_pid, n - 1)
+    end
+  end
+
+  pfn run_server(listen_fd : Int, ping_pid) do
+    match tcp_accept(listen_fd) do
+      Ok(conn_fd) -> serve_n(conn_fd, listen_fd, ping_pid, 4)
+      Err(e) ->
+        tcp_close(listen_fd)
+        panic("accept: " ++ e)
+    end
+  end
+
+  -- ── node-a: the actor that receives `Pong` ───────────────────────────
+  actor PongActor do
+    state { got : Int }
+    init  { got: 0 }
+    on PongMsg(_payload : List(Int)) do
+      { state with got: state.got + 1 }
+    end
+  end
+
+  pfn dispatch_a(pong_pid, d : Delivery) : Result((), String) do
+    match d.type_tag do
+      "NodeSendLoopback.Pong" ->
+        -- Printed from main's own thread: an actor's turn runs whenever main
+        -- next blocks, which would make its position in the trace depend on
+        -- the scheduler. The actor only counts; the count is read at the end.
+        match Msgpack.decode(d.payload) do
+          Ok(Msgpack.Int(n)) -> println("node-a: pong " ++ int_to_string(n))
+          _ -> println("node-a: bad pong")
+        end
+        let _ = send(pong_pid, PongMsg(d.payload))
+        Ok(())
+      other -> Err("unknown type " ++ other)
+    end
+  end
+
+  pfn report_failure(fd : Int) do
+    match NodeSend.recv_failure(fd, Nil) do
+      Ok((seq, reason)) -> println("node-a: delivery " ++ int_to_string(seq) ++ " failed: " ++ reason)
+      Err(e) -> println("node-a: recv error: " ++ e)
+    end
+  end
+
+  pfn connect_with_retry(host : String, port : Int, attempts_left : Int) : Result(Int, Socket.SocketError) do
+    match Socket.connect(host, port) do
+      Ok(fd) -> Ok(fd)
+      Err(e) ->
+        if attempts_left <= 1 do Err(e) else connect_with_retry(host, port, attempts_left - 1) end
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen), _cap_spawn : Cap(IO.Spawn)) do
+    let listen_fd = match tcp_listen(0) do
+      Ok(fd) -> fd
+      Err(e) -> panic("listen: " ++ e)
+    end
+    let port = match tcp_local_port(listen_fd) do
+      Ok(p) -> p
+      Err(e) -> panic("local_port: " ++ e)
+    end
+
+    let ping_pid = spawn(PingActor)
+    let pong_pid = spawn(PongActor)
+    let srv = task_spawn(fn _ -> run_server(listen_fd, ping_pid))
+
+    let conn_fd = match connect_with_retry("127.0.0.1", port, 5) do
+      Ok(fd) -> fd
+      Err(e) -> panic("connect: " ++ Socket.error_message(e))
+    end
+
+    let me = GlobalPid.make("node-a", pid_to_int(pong_pid), 1)
+    let ping_target = GlobalPid.make("node-b", pid_to_int(ping_pid), 1)
+
+    -- 1. a delivered message and its reply
+    let _ = NodeSend.cast(conn_fd, 1, ping_target, "NodeSendLoopback.Ping", encode_ping(7, me))
+    let _ = NodeSend.serve_one(conn_fd, 1, fn d -> dispatch_a(pong_pid, d))
+
+    -- 2. stale creation
+    let _ = NodeSend.cast(conn_fd, 2, GlobalPid.make("node-b", pid_to_int(ping_pid), 0), "NodeSendLoopback.Ping", encode_ping(8, me))
+    report_failure(conn_fd)
+
+    -- 3. a pid node-b does not host
+    let _ = NodeSend.cast(conn_fd, 3, GlobalPid.make("node-b", 9999, 1), "NodeSendLoopback.Ping", encode_ping(9, me))
+    report_failure(conn_fd)
+
+    -- 4. a type node-b's dispatch does not know
+    let _ = NodeSend.cast(conn_fd, 4, ping_target, "NodeSendLoopback.Nope", encode_ping(10, me))
+    report_failure(conn_fd)
+
+    tcp_close(conn_fd)
+    let _ = task_await(srv)
+    -- No task is parked in a socket read any more, so draining is safe (a
+    -- `run_until_idle` while the server task was blocked never returned).
+    run_until_idle()
+    match get_actor_field(pong_pid, "got") do
+      Some(n) -> println("node-a: pongs delivered to the actor: " ++ int_to_string(n))
+      None -> println("node-a: pong actor gone")
+    end
+  end
+end

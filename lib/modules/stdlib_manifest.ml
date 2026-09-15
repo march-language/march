@@ -152,6 +152,18 @@ let stdlib_file_list = [
   "global_registry.march";
   "cluster_conn.march";
   "node_call.march";
+  (* One-way actor messages to a GlobalPid (distributed actors 1/4); after
+     net_kernel and global_pid, which it frames and addresses with. *)
+  "node_send.march";
+  (* One reader per peer connection, dispatching frames by tag (distributed
+     actors 2/4 step 1); after net_kernel, which it reads frames with. *)
+  "peer_reader.march";
+  (* the per-peer outbound queue with credit-based flow control (2/4 step 3) *)
+  "node_queue.march";
+  (* the typed remote send, `Node.send(peer, to, msg)` (1/4, last piece):
+     after node_send, peer_registry, global_pid and json, which it composes;
+     the codec check and the tag are the compiler's (Typecheck_caps). *)
+  "node.march";
   (* dist_link.march / dist_supervisor.march: same lazy-load representation
      bug as above (see the deque.march / consistent_hash.march notes) — both
      export Option/Result-returning generics over concrete node/monitor

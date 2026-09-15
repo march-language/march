@@ -1,0 +1,19 @@
+-- EXPECT-ERROR: is still unconsumed when `let?` returns early on `Err`
+mod Main do
+  needs IO.Console
+  -- `let?` is a hidden branch: on `Err` it returns at once, dropping any linear
+  -- value that the code after it would have consumed.
+  always_linear type S1 = S1(Int)
+  fn sink(s : S1) : Int do match s do S1(e) -> e end end
+  fn mk(i : Int) : Result(Int, String) do if i > 0 do Ok(i) else Err("neg") end end
+  fn g(st : S1, i : Int) : Result(Int, String) do
+    let? v = mk(i)
+    Ok(v + sink(st))
+  end
+  fn main(c : Cap(IO.Console)) do
+    match g(S1(1), 0) do
+      Ok(v) -> println(int_to_string(v))
+      Err(e) -> println(e)
+    end
+  end
+end

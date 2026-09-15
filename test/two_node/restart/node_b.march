@@ -1,0 +1,79 @@
+-- Two-node harness, scenario "restart": node-b.
+--
+-- Hosts one actor (`Sink`) and serves ACTOR_MSG frames for it on one
+-- connection. Started by scripts/two-node.sh with MARCH_NODE_PORT and
+-- MARCH_NODE_CREATION; the harness SIGKILLs the first incarnation mid-
+-- connection and starts a second at the same port with creation 2. Spawn
+-- order is deterministic, so the second incarnation's Sink gets the SAME
+-- local pid as the first: the pid-reuse the creation counter exists for.
+-- Design: specs/progress/2026-09-14-two-node-failure-semantics-harness.md.
+mod TwoNodeRestartB do
+  needs IO.Console
+  needs IO.NetListen
+  needs IO.NetConnect
+  needs IO.Spawn
+  needs IO.Process
+
+  actor Sink do
+    state { got : Int }
+    init  { got: 0 }
+    on Item(_seq : Int) do
+      { state with got: state.got + 1 }
+    end
+  end
+
+  -- Printed from main's own thread (the actor only counts), so the trace
+  -- does not depend on when the actor's turn runs.
+  pfn dispatch(sink, d : Delivery) : Result((), String) do
+    match d.type_tag do
+      "TwoNodeRestart.Item" ->
+        if d.to_local_pid == pid_to_int(sink) && is_alive(sink) do
+          let from = match Msgpack.decode(d.payload) do
+            Ok(Msgpack.Str(s)) -> s
+            _ -> "?"
+          end
+          println("node-b: item " ++ int_to_string(d.seq) ++ " from " ++ from)
+          let _ = send(sink, Item(d.seq))
+          Ok(())
+        else
+          Err("no live process " ++ int_to_string(d.to_local_pid))
+        end
+      other -> Err("unknown type " ++ other)
+    end
+  end
+
+  -- Serve until the peer goes away (recv error).
+  pfn serve(fd : Int, creation : Int, sink) do
+    match NodeSend.serve_one(fd, creation, fn d -> dispatch(sink, d)) do
+      Ok(_) -> serve(fd, creation, sink)
+      Err(_) -> ()
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console), _cap_netlisten : Cap(IO.NetListen), _cap_netconnect : Cap(IO.NetConnect), _cap_spawn : Cap(IO.Spawn), _cap_process : Cap(IO.Process)) do
+    let port = Env.require_int("MARCH_NODE_PORT")
+    let creation = Env.require_int("MARCH_NODE_CREATION")
+    let sink = spawn(Sink)
+    let listen_fd = match tcp_listen(port) do
+      Ok(fd) -> fd
+      Err(e) -> panic("listen: " ++ e)
+    end
+    println("node-b: up, creation " ++ int_to_string(creation) ++ ", hosting " ++ to_string(sink))
+    let conn_fd = match tcp_accept(listen_fd) do
+      Ok(fd) -> fd
+      Err(e) -> panic("accept: " ++ e)
+    end
+    -- Announce the Sink's global pid to the peer: an ACTOR_MSG whose payload
+    -- is the pid, addressed to nobody (node-a reads it by type tag).
+    let me = GlobalPid.make("node-b", pid_to_int(sink), creation)
+    let _ = NodeSend.cast(conn_fd, 0, GlobalPid.make("node-a", 0, 0), "TwoNodeRestart.Hello", GlobalPid.encode(me))
+    serve(conn_fd, creation, sink)
+    tcp_close(conn_fd)
+    tcp_close(listen_fd)
+    run_until_idle()
+    match get_actor_field(sink, "got") do
+      Some(n) -> println("node-b: peer closed, delivered " ++ int_to_string(n) ++ " message(s)")
+      None -> println("node-b: sink gone")
+    end
+  end
+end

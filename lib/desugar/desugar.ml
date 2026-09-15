@@ -1133,9 +1133,46 @@ let desugar_fn_def (def : fn_def) (fn_span : span) : fn_def =
     { def with fn_clauses = [only'] }
 
   | first :: _ ->
-    (* General path: synthesise fresh arg names based on first clause's arity. *)
+    (* General path: synthesise fresh arg names based on first clause's arity.
+
+       Except when the FIRST clause dominates — no guard, every parameter a
+       plain variable — in which case every call goes to it, the later heads
+       are unreachable, and its declared parameter types (a refinement in
+       particular) ARE the function's contract.  Keep its names and types on
+       the merged clause then, so `fn f(n : {Int | n > 0}) do n end` followed
+       by `fn f(0) do 0 end` still obliges `f(0 - 1)`; until 2026-09-13 the
+       merge rebuilt every parameter untyped and the refinement was lost
+       before the checker ever saw it (specs/todos/2026-09-03-desugar-dropped-…).
+       Keeping the user's own names, not fresh ones, is what keeps the
+       predicate's `n` bound; capture in a later arm's body is impossible
+       since that arm never runs.  Any other shape (a literal or guard in
+       the first clause) keeps dropping the types: adopting a non-dominating
+       head's refinement as the whole function's contract would reject a
+       value another head legitimately handles. *)
+    let first_dominates =
+      first.fc_guard = None
+      && List.for_all
+           (function FPNamed _ | FPDefault _ | FPPat (PatVar _) -> true | FPPat _ -> false)
+           first.fc_params
+    in
     let arity = List.length first.fc_params in
-    let arg_names = List.init arity fresh_arg_name in
+    let arg_names =
+      if first_dominates then
+        List.map
+          (function
+            | FPNamed p | FPDefault (p, _) -> p.param_name
+            | FPPat (PatVar n) -> n
+            | FPPat _ -> assert false)
+          first.fc_params
+      else List.init arity fresh_arg_name
+    in
+    let merged_param i name =
+      if first_dominates then
+        match List.nth first.fc_params i with
+        | FPNamed p | FPDefault (p, _) -> FPNamed { p with param_name = name }
+        | FPPat _ -> mk_named_param name
+      else mk_named_param name
+    in
 
     (* Build the scrutinee expression from the generated arg names. *)
     let scrutinee : expr =
@@ -1166,7 +1203,7 @@ let desugar_fn_def (def : fn_def) (fn_span : span) : fn_def =
 
     (* Single merged clause with all FPNamed params *)
     let merged_clause : fn_clause =
-      { fc_params = List.map mk_named_param arg_names
+      { fc_params = List.mapi merged_param arg_names
       ; fc_guard  = None
       ; fc_body   = body
       ; fc_span   = fn_span
@@ -2155,20 +2192,35 @@ let desugar_module ?errors ?(is_entry = true) (m : module_) : module_ =
       let (lead, rest) = split [] m.mod_decls in
       { m with mod_decls = lead @ generated @ rest }
   in
-  (* Collect type definitions so derive expansion can reference them. *)
-  let type_defs = collect_type_defs m.mod_decls in
   (* Collect interfaces and fns for satisfy expansion. *)
   let raw_ifaces = collect_interfaces m.mod_decls in
   let raw_fns    = collect_fns m.mod_decls in
-  (* Expand DDeriving and DSatisfy nodes; desugar everything else. *)
-  let expanded = List.concat_map (fun d ->
-      match d with
-      | DDeriving (type_name, ifaces, sp) ->
-        expand_derive errors type_defs type_name ifaces sp
-      | DSatisfy (iface_names, type_names, sp) ->
-        expand_satisfy errors raw_ifaces raw_fns iface_names type_names sp
-      | _ -> expand_defaults_decl d
-    ) m.mod_decls in
+  (* Expand DDeriving and DSatisfy nodes; desugar everything else.
+     Recurses into nested [DMod]s (2026-09-15): a `derive` inside a nested
+     module used to reach the typechecker unexpanded, where the [DDeriving]
+     arm silently returns the env -- so `derive Json for T` in `mod Inner`
+     generated NOTHING, and the first `from_json` pinned to `T` failed at run
+     time as "cannot determine type".  The typed remote send made the hole
+     visible (its codec check fails closed).  A nested level resolves type
+     names against its own declarations first, then the enclosing ones, the
+     way a bare type reference in that module does. *)
+  let rec expand_level outer_type_defs (decls : decl list) : decl list =
+    let type_defs = collect_type_defs decls @ outer_type_defs in
+    List.concat_map (fun d ->
+        match d with
+        | DDeriving (type_name, ifaces, sp) ->
+          expand_derive errors type_defs type_name ifaces sp
+        | DSatisfy (iface_names, type_names, sp) ->
+          expand_satisfy errors raw_ifaces raw_fns iface_names type_names sp
+        | DMod (name, vis, inner, sp) ->
+          (* [expand_defaults_decl]'s own [DMod] arm recurses for default-arg
+             variants; going through it here keeps that, and adds the derive
+             and satisfy expansion at every level. *)
+          [DMod (name, vis, expand_level type_defs inner, sp)]
+        | _ -> expand_defaults_decl d
+      ) decls
+  in
+  let expanded = expand_level [] m.mod_decls in
   (* Auto-generate island bridge functions if this is an island module. *)
   let expanded = maybe_inject_island_bridges m.mod_decls expanded in
   let interfaces = collect_interfaces expanded in

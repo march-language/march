@@ -34,6 +34,9 @@ type lin_entry = {
   le_lin : Typecheck_types.Ast.linearity;
   le_used : bool ref;
   le_first_use : Typecheck_types.Ast.span option ref;
+  le_pending : Typecheck_types.ty option;
+  le_dup : Typecheck_types.Ast.span option ref;
+  le_mixed : Typecheck_types.Ast.span option ref;
 }
 type ctor_info = {
   ci_type : string;
@@ -173,6 +176,10 @@ type env = {
   no_panic_modules : string list;
   nonexhaustive_match_spans :
     Typecheck_types.Ast.span list ref;
+  linear_ok_ids : (int, unit) Hashtbl.t;
+  linear_generic_uses :
+    (Typecheck_types.Ast.span,
+     string * int list * Typecheck_types.ty list * Typecheck_types.ty) Hashtbl.t;
   cap_producer_ivars :
     (int, Typecheck_types.Ast.span) Hashtbl.t;
   cap_narrow_factory_fns :
@@ -193,6 +200,9 @@ type env = {
     (Typecheck_types.Ast.span *
      Typecheck_types.ty)
     list ref;
+  node_send_sites : (Typecheck_types.Ast.span * Typecheck_types.ty) list ref;
+  json_codecs : Typecheck_types.ty list ref;
+  (** Every `Node.send(peer, to, msg)` site (span, instantiated arrow); see the .ml. *)
   json_cap_sites :
     (Typecheck_types.Ast.span *
      Typecheck_types.ty * string)
@@ -280,12 +290,14 @@ val bind_linear :
   StrMap.key ->
   Typecheck_types.Ast.linearity ->
   Typecheck_types.ty -> env -> env
+val bind_pending : StrMap.key -> Typecheck_types.ty -> env -> env
 val generalize :
   int ->
   Typecheck_types.ty ->
   Typecheck_types.scheme
 val instantiate :
   ?use_span:Typecheck_types.Ast.span ->
+  ?use_name:string ->
   int ->
   env ->
   Typecheck_types.scheme ->

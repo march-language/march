@@ -863,18 +863,15 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
     (e'', lb)
 
   | Tir.ECallPtr (a, args) ->
-    (* Conservative borrow treatment (audit P5): we have no borrow map for
-       the indirect callee, so every arg is treated as owning.  For args
-       still live after the call, [find_inc_vars] inserts an EIncRC so the
-       callee's consumed reference is balanced against the caller's retained
-       one.  For dead-after args, no IncRC is emitted — the caller's
-       reference transfers to the callee, which is expected to decrement it
-       (the closure-apply ABI used for ECallPtr always consumes args).
-       The perf cost is extra Inc/Dec pairs around higher-order calls whose
-       underlying apply function actually borrows.  A full fix would require
-       attaching per-call-site borrow modes to closures at EAlloc time and
-       plumbing them through the call dispatch — a sizeable architectural
-       change deferred beyond this audit pass. *)
+    (* A closure call consumes its arguments (see [Clo_flags] for the whole
+       convention).  For args still live after the call, [find_inc_vars]
+       inserts an EIncRC so the callee's consumed reference is balanced
+       against the caller's retained one.  For dead-after args, no IncRC is
+       emitted — the caller's reference transfers to the callee.  The callee
+       side is what makes that true: [Borrow.infer_module] pins every apply-fn
+       parameter owned, and a [$clo_wrap] releases what its target borrows.
+       Before both, a read-only parameter stayed borrowed and a fresh argument
+       leaked once per call. *)
     let all_atoms = a :: args in
     let inc_vars = find_inc_vars env all_atoms live_after in
     let e' = wrap_incrcs env inc_vars e in
@@ -999,6 +996,17 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
         when needs_rc env v.Tir.v_ty
              && StringSet.mem src.Tir.v_name env.borrowed_field_vars ->
         (* Alias of a borrowed field var — propagate the borrowed status. *)
+        true
+      | Tir.EAtom (Tir.AVar src)
+        when needs_rc env v.Tir.v_ty
+             && src.Tir.v_name = Tir_names.actor_param ->
+        (* An actor handler's `self`: an alias of the handler's [$actor]
+           parameter.  [$actor] is Lin, so no RC op touches it; the reference
+           it carries belongs to the scheduler that dispatched this handler.
+           Classified owned, `self` was dropped at scope exit (a net -1 on the
+           actor record for every handler that names `self`) and passed to a
+           consuming callee without a dup.  Borrowed, a consuming use dups it
+           and scope exit leaves it alone. *)
         true
       | _ -> false
     in
@@ -1493,9 +1501,22 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
        box and once as the payload.  With that fixed (see the concrete-niche
        check there) the exclusion is sound, and record_pattern.march passes
        repeatedly. *)
+    (* A closure ENVIRONMENT ([$clo : TPtr], an apply fn's first param) is a
+       projection source for the same reason.  Every capture read of a
+       live-after [$clo] dup'd it, and the one release Perceus splices after
+       the capture-read prefix ([Perceus.insert_apply_fn_clo_drop]) only undid
+       that dup, so the reference the caller transferred into the apply fn was
+       never released: the environment, and with it every capture, lived
+       forever.  Measured on `fn mk(a, b) = fn x -> length(a) + length(b) + x`
+       called once per iteration: 6 objects per call (the environment and five
+       list cells).  This change and the widened gate in
+       [Drop.owning_apply_fns] land together: the spliced release now frees the
+       environment, and the drop pass must release the captures of exactly
+       the closures whose environment owns them.
+       See specs/progress/2026-09-13-closure-environment-released.md. *)
     let a_is_aggregate = match a with
       | Tir.AVar v -> (match v.Tir.v_ty with
-                       | Tir.TTuple _ | Tir.TRecord _ -> true
+                       | Tir.TTuple _ | Tir.TRecord _ | Tir.TPtr _ -> true
                        | _ -> false)
       | _ -> false
     in

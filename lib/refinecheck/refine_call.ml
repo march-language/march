@@ -581,6 +581,34 @@ let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
 type check_subject =
   | Argument
   | Bound_expr
+  (* A refined CALLABLE passed where a function type is expected (`apply(g, 0)`
+     with `g : ({Int | n > 0}) -> Int` and `apply : (Int -> Int, Int) -> Int`).
+     The obligation is contravariant subtyping at the pass site: the expected
+     domain must imply the callable's own parameter refinement, for every
+     value.  It reaches this function as a call `g($cb_x)` on a fresh
+     symbolic argument that carries the expected domain's refinement (or
+     `true`, when the domain is unrefined and so promises nothing), so the
+     machinery is unchanged and only the wording branches — "argument does not
+     satisfy precondition" would send the reader looking for an argument that
+     was never written. *)
+  | Callback_domain
+  (* A container-typed VARIABLE passed (or returned, or bound) where a
+     container with a refined element type is expected: `g(xs)` with
+     `xs : List({Int | _ >= 0})` and `g(ys : List({Int | _ > 0}))`.  The
+     obligation is element subtyping — the variable's own element refinement
+     must imply the expected one for every element — phrased as a check on a
+     fresh symbolic element `$elem` carrying the variable's refinement, so
+     it shares [Callback_domain]'s definite-failure rule: `$elem` has no
+     other constraint, so a model is a real element the caller may hold.
+     Container subtyping, 2026-09-13. *)
+  | Element_domain
+  (* A callable passed where an arrow with a refined CODOMAIN is expected
+     (`apply(pos_fn, 1)` with `apply(f : Int -> {Int | _ > 0})`): the
+     callable's own proved return refinement must imply the expected
+     codomain for every value, on a fresh symbolic result `$r` whose only
+     constraint is that return refinement — the same definite-failure rule.
+     P3 design §1c, 2026-09-13. *)
+  | Callback_codomain
 
 (* Span of an expression, for pointing a diagnostic at ONE argument instead of
    the whole call. [refinecheck] does not depend on [march_typecheck], so this
@@ -649,9 +677,21 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
   (* Destructured to the names the body has always used: this is a signature
      change, not a rewrite of 1,361 lines. *)
   let { root; errctx; postcond; path; lets; sc; re } = cx in
-  let subject_noun = match subject with Argument -> "argument" | Bound_expr -> "bound expression" in
+  let subject_noun =
+    match subject with
+    | Argument -> "argument"
+    | Bound_expr -> "bound expression"
+    | Callback_domain -> "expected function type's domain"
+    | Element_domain -> "container's elements"
+    | Callback_codomain -> "passed function's return"
+  in
   let obligation_noun =
-    match subject with Argument -> "precondition" | Bound_expr -> "type annotation"
+    match subject with
+    | Argument -> "precondition"
+    | Bound_expr -> "type annotation"
+    | Callback_domain -> "its parameter refinement"
+    | Element_domain -> "the expected element refinement"
+    | Callback_codomain -> "the expected codomain refinement"
   in
   let name_pos = List.mapi (fun i n -> (n, i)) sg.param_names in
   (* A CALLER-scope name whose declared type is a record (see [recenv]).  Such a
@@ -766,7 +806,22 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
            | Bound_expr ->
              "note: bind an expression the checker can see satisfies this \
               annotation, weaken the annotation, or remove `cap verified` from \
-              this module — it asks for every obligation to be discharged")
+              this module — it asks for every obligation to be discharged"
+           | Callback_domain ->
+             "note: refine the domain of the expected function type so it \
+              implies the passed function's own parameter refinement, weaken \
+              that refinement, or remove `cap verified` from this module — it \
+              asks for every obligation to be discharged"
+           | Element_domain ->
+             "note: refine the container's declared element type so it implies \
+              the expected element refinement, build the container from \
+              elements the checker can see, or remove `cap verified` from this \
+              module — it asks for every obligation to be discharged"
+           | Callback_codomain ->
+             "note: declare (and prove) a return refinement on the passed function \
+              that implies the expected codomain, weaken the expected codomain, or \
+              remove `cap verified` from this module — it asks for every obligation \
+              to be discharged")
       in
       Err.error errctx ~span
         (Printf.sprintf
@@ -924,7 +979,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
       if not (Hashtbl.mem str_names c) then begin
         Hashtbl.replace str_names c ();
         uses_string := true;
-        decls := (c, Smt.SData str_sort) :: !decls
+        decls := (c, Smt.sdata str_sort) :: !decls
       end
     in
     (* A string literal's constant, minted on first sight.  Literal text is NOT
@@ -1022,7 +1077,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
          | Some t ->
            if not (List.mem sort_name !adt_sorts) then
              adt_sorts := sort_name :: !adt_sorts;
-           Some (t, [ (varname, Smt.SData sort_name) ]))
+           Some (t, [ (varname, adt_sort sort_name) ]))
     in
     (* Reflection must be stable per binder within one [check_call]: two
        syntactic occurrences of the same binder (or the same cross-argument
@@ -1092,7 +1147,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
         (match List.assoc_opt x sc with
          | Some (b, q, Some s) when s = sort_name ->
            let c = Smt.Const x in
-           decls := (x, Smt.SData sort_name) :: !decls;
+           decls := (x, adt_sort sort_name) :: !decls;
            (* The carried predicate must resolve `b.field` against the SAME
               term the goal projects from, or the assumption constrains a
               different value than the one being checked. *)
@@ -1117,7 +1172,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
          | _ ->
            (match List.assoc_opt x re with
             | Some s when s = sort_name ->
-              decls := (x, Smt.SData sort_name) :: !decls;
+              decls := (x, adt_sort sort_name) :: !decls;
               Some (Smt.Const x)
             | _ -> None))
       (* A direct CALL returning a record, whose callee has a PROVEN
@@ -1144,7 +1199,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
           incr ret_ctr;
           let nm = Printf.sprintf "%s$rec%d" fname !ret_ctr in
           let c = Smt.Const nm in
-          decls := (nm, Smt.SData sort_name) :: !decls;
+          decls := (nm, adt_sort sort_name) :: !decls;
           (* [q] is already in the CALLER's namespace ([postcond_of] substituted
              the actuals).  Its binder — and its `b.field` projections — must
              resolve against the SAME term the goal projects from. *)
@@ -1220,7 +1275,12 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
       | Some cached -> cached
       | None ->
         let c = Smt.Const nm in
-        decls := (nm, Smt.SInt) :: !decls;
+        (* `elts(x)` is a SET constant at the placeholder element sort
+           ([resolve_set_sorts] settles it per VC); every other measure is
+           an Int. *)
+        if is_builtin_set_measure m || is_set_measure m then
+          decls := (nm, Smt.SSet Smt.set_unknown_elem) :: !decls
+        else decls := (nm, Smt.SInt) :: !decls;
         (* `len` is known non-negative; user measures get no axiom in v1 (sound;
            guarded uses still discharge via the path context). *)
         if is_nonneg_measure m then push_structural (Smt.Ge (c, Smt.IntLit 0));
@@ -1255,6 +1315,108 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        integers and the fact would connect to nothing — a skip that looks
        exactly like a proof from outside. *)
     let foreign_measure m name = measure_of_var m name in
+    (* ── `elts` over a LITERAL list or a CALL actual ────────────────────────
+       A literal reflects to the concrete set of its heads: an Int literal,
+       a string literal (minted like any other), or a caller variable at its
+       caller sort — any other head (a nested constructor, a call) makes the
+       whole list opaque.  A call whose callee has a PROVEN (or assumed)
+       postcondition about `elts(_)` becomes a fresh set constant carrying
+       that postcondition, the set analogue of [reflect_scalar]'s call
+       branch: `need(mk())` then discharges from `mk`'s own contract. *)
+    (* Forward cell for [load_scope_measure_facts] (defined below), which
+       itself resolves nested calls through [set_of_call]. *)
+    let load_scope_measure_facts_ref : (string -> unit) ref = ref (fun _ -> ()) in
+    (* Measures a call result can carry through its callee's postcondition:
+       the built-in set measures, and the built-in `len` when no user measure
+       took that name. *)
+    let is_call_measure (m : string) : bool =
+      is_builtin_set_measure m || (m = "len" && not (is_axiom_measure "len"))
+    in
+    let reflect_set_head (a : A.expr) : Smt.term option =
+      match a with
+      | A.ELit (A.LitInt n, _) -> Some (Smt.IntLit n)
+      | A.ELit (A.LitString str, _) -> str_lit_const str
+      | A.EVar { A.txt = x; _ } ->
+        if Hashtbl.mem str_names x then Some (Smt.Const x)
+        else if is_recvar x then None
+        else begin
+          decls := (x, caller_scalar_of x) :: !decls;
+          Some (Smt.Const x)
+        end
+      | _ -> None
+    in
+    let rec reflect_list_literal (a : A.expr) : Smt.term option =
+      match a with
+      | A.ECon ({ A.txt = "Nil"; _ }, [], _) -> Some (Smt.SetEmpty Smt.set_unknown_elem)
+      | A.ECon ({ A.txt = "Cons"; _ }, [ h; tl ], _) ->
+        (match reflect_set_head h, reflect_list_tail tl with
+         | Some ht, Some rest -> Some (Smt.SetUnion (Smt.SetSng (Smt.set_unknown_elem, ht), rest))
+         | _ -> None)
+      | _ -> None
+    (* The tail of a constructor chain may be a NAME (`Cons(h, acc)` in an
+       accumulator call, plan step 2.5): its elements are that name's own
+       `elts$acc` constant, carrying whatever the caller's scope promises. *)
+    and reflect_list_tail (tl : A.expr) : Smt.term option =
+      match tl with
+      | A.EVar { A.txt = x; _ } when not (is_recvar x) && not (Hashtbl.mem str_names x) ->
+        !load_scope_measure_facts_ref x;
+        measure_of_var elts_measure x
+      | _ -> reflect_list_literal tl
+    in
+    (* [load_scope_measure_facts] is defined below and itself resolves nested
+       calls through [elts_of_call]; a forward cell breaks the cycle.  A
+       measure over a caller NAME inside a substituted contract must load
+       that name's own promise first, or `let s = from_list([1,2])` followed
+       by `to_list(s)` connects `elts$s` to nothing. *)
+    let rec set_of_call (m0 : string) (fname : string) (cargs : A.expr list) : Smt.term option =
+      match postcond fname cargs with
+      | None -> None
+      | Some (b, q, _) ->
+        incr ret_ctr;
+        (* `elts`/`keys` of the call is a set; the built-in `len` of it (plan
+           step 2.2: a list contract proved by induction reaches the call site
+           through here) is a non-negative Int. *)
+        let is_len = m0 = "len" in
+        let nm = Printf.sprintf "%s$%s%d" fname (if is_len then "len" else "set") !ret_ctr in
+        let c = Smt.Const nm in
+        if is_len then begin
+          decls := (nm, Smt.SInt) :: !decls;
+          push_structural (Smt.Ge (c, Smt.IntLit 0))
+        end
+        else decls := (nm, Smt.SSet Smt.set_unknown_elem) :: !decls;
+        (* [q] is already in the CALLER's namespace.  Its binder's `elts` is
+           this constant; a measure over any other name is that caller name's
+           own memoized symbol, under the same sort guards the scope-fact
+           loader applies; a bare caller variable (`singleton(x)`) reflects
+           through [foreign_var]; a measure over a NESTED call
+           (`elts(Set.empty())` after substitution) recurses. *)
+        let rv n =
+          if n = b || n = "_" then None
+          else match foreign_var n with Some (t, d) -> decls := d :: !decls; Some t | None -> None
+        in
+        let rm m n =
+          (* The binder's OWN measure (`elts(_)` for an `elts` request,
+             `keys(_)` for a `keys` request) is this constant; a contract
+             phrased in a different measure says nothing about it. *)
+          if n = b || n = "_" then (if m = m0 then Some c else None)
+          else if Hashtbl.mem str_names n || is_recvar n || caller_scalar_of n <> Smt.SInt then None
+          else if is_axiom_measure m then None
+          else begin
+            !load_scope_measure_facts_ref n;
+            measure_of_var m n
+          end
+        in
+        let rmc m f cargs' = if is_call_measure m then set_of_call m f cargs' else None in
+        (match smt_of ~resolve_var:rv ~resolve_measure:rm ~resolve_str_lit:str_lit_const
+                 ~resolve_measure_call:rmc q with
+         | Some qa -> push_user qa
+         | None -> ());
+        Some c
+    in
+    (* Whether [set_of_call] would find a contract: a call whose callee has
+       none keeps the fallback below (a fresh non-negative length), so the
+       skip it produces stays the same undecided one it always was. *)
+    let set_of_call_available fname cargs = postcond fname cargs <> None in
     let self_dt_sym = "$self" in
     let self_is_str = rp_is_str rp in
     (* The SMT symbol the subject ("_"/[rp.binder]) actually reflects to in
@@ -1395,17 +1557,25 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        rebound name is retired too, so `let r = push(t, 5)` followed by a rebind
        of `t` drops `r`'s promise rather than re-reading `t` at its new value. *)
     let scope_facts_loaded : (string, unit) Hashtbl.t = Hashtbl.create 4 in
-    let load_scope_measure_facts (x : string) : unit =
+    let rec load_scope_measure_facts (x : string) : unit =
       if not (Hashtbl.mem scope_facts_loaded x) then begin
         Hashtbl.replace scope_facts_loaded x ();
         match List.assoc_opt x sc with
         | Some (b, q, Some s) when is_meas_sort s ->
-          let rv _ = None in
           (* All three spellings of the refined value — `_`, the declared binder
              [b], and the scope entry's own name [x] — denote it.  See the note
              above; the goal side's [is_self]/[actual_of_name] pair already
              accepts the same three. *)
           let is_self_spelling n = n = b || n = "_" || n = x in
+          (* The refined value itself is a LIST/SET, not a scalar: a bare self
+             spelling reflects to nothing.  Any OTHER bare name is a caller
+             variable (a relational contract's `singleton(x)` after
+             substitution) and reflects through the caller's own resolver,
+             the same way [rm] below treats a measure over a foreign name. *)
+          let rv n =
+            if is_self_spelling n then None
+            else match foreign_var n with Some (t, d) -> decls := d :: !decls; Some t | None -> None
+          in
           (* ── A RELATIONAL carried predicate's OTHER names ───────────────────
              `fn push(t, x) : {Tree | size(_) == size(t) + 1}` stored against
              `let r = push(t, 5)` arrives here as `size(_) == size(t) + 1`,
@@ -1465,10 +1635,21 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
               else if is_axiom_measure m' then begin
                 let adt = Hashtbl.find axiom_measures m' in
                 uses_axiom := true;
-                decls := (n, Smt.SData adt) :: !decls;
+                decls := (n, adt_sort adt) :: !decls;
                 Some (Smt.App (m', [ Smt.Const n ]))
               end
-              else measure_of_var m' n
+              else begin
+                (* A promise phrased over ANOTHER let-bound name
+                   (`let s2 = Set.insert(s1, 4, cmp)` carries
+                   `elts(_) == union(elts(s1), …)`) connects to nothing
+                   unless that name's own promise is loaded too — the same
+                   step [set_of_call]'s [rm] takes.  Recursing here is what
+                   makes a chain of any length transitive; the
+                   [scope_facts_loaded] memo (set before the recursion)
+                   makes it terminate on a cycle. *)
+                load_scope_measure_facts n;
+                measure_of_var m' n
+              end
             else if is_axiom_measure m' then begin
               (* Gate the quantified-axiom preamble on the SHARED per-VC ref, so
                  `(m x)` here and `(m x)` in the goal are interpreted by the same
@@ -1478,17 +1659,22 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                  of the same name from re-loading the fact at all. *)
               let adt = Hashtbl.find axiom_measures m' in
               uses_axiom := true;
-              decls := (x, Smt.SData adt) :: !decls;
+              decls := (x, adt_sort adt) :: !decls;
               Some (Smt.App (m', [ Smt.Const x ]))
             end
             else measure_of_var m' x
           in
-          (match smt_of ~resolve_var:rv ~resolve_measure:rm q with
+          (* `elts(Set.empty())` in a substituted contract: a measure over a
+             nested call stands that call up with its own contract. *)
+          let rmc m f cargs = if is_call_measure m then set_of_call m f cargs else None in
+          (match smt_of ~resolve_var:rv ~resolve_measure:rm ~resolve_str_lit:str_lit_const
+                   ~resolve_measure_call:rmc q with
            | Some qa -> push_user qa
            | None -> ())
         | _ -> ()
       end
     in
+    load_scope_measure_facts_ref := load_scope_measure_facts;
     (* ── A caller-scope refined ADT parameter's own CONSTRUCTOR-TAG promise ───
        The tester analogue of [load_scope_measure_facts], and the same gap:
 
@@ -1548,7 +1734,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
             when n = b || n = "_" || n = x -> (
             match ctor_of_tester t with
             | Some ctor when ctor = goal_ctor && sort_of_ctor ctor = Some adt ->
-              decls := (x, Smt.SData adt) :: !decls;
+              decls := (x, adt_sort adt) :: !decls;
               if not (List.mem adt !adt_sorts) then adt_sorts := adt :: !adt_sorts;
               push_user (Smt.IsCtor (ctor, Smt.Const x))
             | _ -> ())
@@ -1560,19 +1746,39 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        over: a constructor application becomes (ctor …) (so the recursion axioms
        fire); a variable becomes a fresh datatype constant. *)
     let dt_counter = ref 0 in
-    let rec reflect_dt adt e =
+    (* The datatype instance a callee parameter's DECLARED type gives
+       (`t : {Tree(Int) | …}` → [Int]), for the refined value and for another
+       parameter named in the predicate.  [None]: no declared instance; the
+       term takes the `Elem` instance and [resolve_sorts] may refine it. *)
+    let param_instance_args (name : string) : Smt.sort list option =
+      let idx = if is_self name then Some rp.idx else List.assoc_opt name name_pos in
+      match Option.bind idx (fun i -> List.nth_opt sg.param_tys i) with
+      | Some (Some ty) ->
+        (match instance_sort_of_ty ty with Smt.SData (_, a) when a <> [] -> Some a | _ -> None)
+      | _ -> None
+    in
+    (* [args]: the instance to reflect at.  A constructor's fields then have
+       their instantiated sorts, so an `Int` payload of a `Tree(Int)` reflects
+       as the integer it is instead of an opaque stand-in. *)
+    let rec reflect_dt ?(args : Smt.sort list option) adt e =
+      let inst = match args with Some a -> Smt.SData (adt, a) | None -> adt_sort adt in
       match e with
-      | A.ECon (ctor, args, _)
+      | A.ECon (ctor, cargs, _)
         when (match Hashtbl.find_opt adt_ctors adt with Some cs -> List.mem ctor.A.txt cs | None -> false) ->
-        let sorts = try Hashtbl.find ctor_field_sorts ctor.A.txt with Not_found -> [] in
-        if List.length args <> List.length sorts then None
+        let sorts =
+          match args with
+          | Some a ->
+            List.map (Smt.instantiate a) (try Hashtbl.find ctor_field_sorts_poly ctor.A.txt with Not_found -> [])
+          | None -> (try Hashtbl.find ctor_field_sorts ctor.A.txt with Not_found -> [])
+        in
+        if List.length cargs <> List.length sorts then None
         else
           List.fold_right2
             (fun a s acc ->
               match reflect_field a s, acc with Some t, Some ts -> Some (t :: ts) | _ -> None)
-            args sorts (Some [])
-          |> Option.map (fun ts -> Smt.App (ctor.A.txt, ts))
-      | A.EVar { A.txt = x; _ } -> decls := (x, Smt.SData adt) :: !decls; Some (Smt.Const x)
+            cargs sorts (Some [])
+          |> Option.map (fun ts -> Smt.Ctor (ctor.A.txt, inst, ts))
+      | A.EVar { A.txt = x; _ } -> decls := (x, inst) :: !decls; Some (Smt.Const x)
       (* ── Tier 2 propagation ────────────────────────────────────────────────
          A CALL returning a value at this very datatype sort, whose callee has a
          PROVEN postcondition (an unproven one has already been cleared by
@@ -1588,14 +1794,29 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
           incr ret_ctr;
           let nm = Printf.sprintf "%s$dt%d" fname !ret_ctr in
           let c = Smt.Const nm in
-          decls := (nm, Smt.SData adt) :: !decls;
+          decls := (nm, adt_sort adt) :: !decls;
           (* [q] is already in the CALLER's namespace (postcond_of substituted
              the actuals), so every remaining variable denotes itself.  A
              measure over the binder applies to [c]; a measure over any other
              term is reflected at the measure's own ADT sort. *)
-          let rv n = if n = b || n = "_" then Some c else None in
+          (* A caller variable in the contract (`member(key, keys(m))` after
+             substitution) reflects through the caller's resolver; a BUILT-IN
+             set measure over a caller name is that name's memoized set
+             symbol, with the name's own scope promise loaded first. *)
+          let rv n =
+            if n = b || n = "_" then Some c
+            else match foreign_var n with Some (t, d) -> decls := d :: !decls; Some t | None -> None
+          in
           let rm m x =
-            if not (is_axiom_measure m) then None
+            if is_builtin_set_measure m then begin
+              if x = b || x = "_" then None
+              else if Hashtbl.mem str_names x || is_recvar x || caller_scalar_of x <> Smt.SInt then None
+              else begin
+                !load_scope_measure_facts_ref x;
+                measure_of_var m x
+              end
+            end
+            else if not (is_axiom_measure m) then None
             else begin
               uses_axiom := true;
               if x = b || x = "_" then Some (Smt.App (m, [ c ]))
@@ -1613,7 +1834,20 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
               | Some n -> Some (Smt.IntLit n)
               | None -> uses_axiom := true; Some (Smt.App (m, [ arg_term ]))
           in
-          (match smt_of ~resolve_var:rv ~resolve_measure:rm ~resolve_measure_app:rma q with
+          (* A tester over the BINDER (`is_Some(_) == member(key, keys(m))`,
+             `Map.get`'s contract) is the tester applied to this very
+             constant; the constructor must belong to this datatype. *)
+          let rt ctor arg =
+            match arg with
+            | A.EVar { A.txt = x; _ } when x = b || x = "_" ->
+              (match sort_of_ctor ctor with
+               | Some a when a = adt -> Some (Smt.IsCtor (ctor, c))
+               | _ -> None)
+            | _ -> None
+          in
+          let rmc m f cargs' = if is_call_measure m then set_of_call m f cargs' else None in
+          (match smt_of ~resolve_var:rv ~resolve_measure:rm ~resolve_measure_app:rma
+                   ~resolve_tester:rt ~resolve_str_lit:str_lit_const ~resolve_measure_call:rmc q with
            | Some qa -> push_user qa
            (* Untranslatable predicate: the constant stays unconstrained, which
               proves nothing in either direction — the call is simply skipped. *)
@@ -1622,9 +1856,30 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
         | _ -> None)
       | _ -> None
     and reflect_field a = function
-      | Smt.SData sub when sub <> "Elem" -> reflect_dt sub a
+      | Smt.SData (sub, sargs) when sub <> "Elem" ->
+        reflect_dt ?args:(if sargs = [] then None else Some sargs) sub a
+      | (Smt.SInt | Smt.SBool | Smt.SFloat) as sort
+        when (match absorb (reflect_scalar ~postcond ~sort sc a) with
+              | Some _ -> true
+              | None -> false) ->
+        (* A SCALAR field whose actual the ordinary scalar reflection can
+           place — a literal, a refined local, arithmetic over those — is
+           reflected CONCRETELY (P3 design §4a).  Until 2026-09-13 every
+           scalar field was erased to a fresh `_eN`, which is right for an
+           opaque value (the arm below) and wrong for `PVec(3, …)`: a measure
+           whose value IS that field (`Array.length`) then yielded `_e3`, and
+           every bounds obligation over it was solver-undecided
+           (specs/todos/2026-08-05-measure-over-scalar-ctor-field.md).
+           [term_fits_sort] already admits a scalar term at a scalar field,
+           so the datatype term stays well-sorted.  The reflection ran once
+           in the guard; run it again for the term — [reflect_scalar] is
+           pure apart from the decls/assumptions [absorb] just pushed, and
+           pushing them twice is a duplicate [decls] entry the de-duplication
+           below removes and a repeated assumption, both harmless. *)
+        absorb (reflect_scalar ~postcond ~sort sc a)
       | sort ->
-        (* element / Int field: irrelevant to a structural measure -> fresh const *)
+        (* element field, or an opaque scalar: irrelevant to a structural
+           measure, and unknowable for a value-carrying one -> fresh const *)
         incr dt_counter;
         let nm = Printf.sprintf "_e%d" !dt_counter in
         decls := (nm, sort) :: !decls;
@@ -1708,16 +1963,16 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
         let actual = if is_self name then Some self_actual else actual_of_name name in
         match actual with
         | None ->
-          decls := (name, Smt.SData adt) :: !decls;
+          decls := (name, adt_sort adt) :: !decls;
           Some (Smt.App (m, [ Smt.Const name ]))
         | Some a ->
           (match a with A.EVar { A.txt = x; _ } -> load_scope_measure_facts x | _ -> ());
           mark_self name
-            (match reflect_dt adt a with
+            (match reflect_dt ?args:(param_instance_args name) adt a with
              | Some t -> Some (Smt.App (m, [ t ]))
              | None ->
                if is_self name then begin
-                 decls := (self_dt_sym, Smt.SData adt) :: !decls;
+                 decls := (self_dt_sym, adt_sort adt) :: !decls;
                  Some (Smt.App (m, [ Smt.Const self_dt_sym ]))
                end
                else None))
@@ -1735,6 +1990,18 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
            renaming a parameter silently unenforced a working contract. *)
         let actual = if is_self name then Some self_actual else actual_of_name name in
         match actual with
+        | Some a when is_builtin_set_measure m ->
+          mark_self name
+            (match if m = elts_measure then reflect_list_literal a else None with
+             | Some t -> Some t
+             | None ->
+               (match a with
+                | A.EVar { A.txt = x; _ } ->
+                  load_scope_measure_facts x;
+                  measure_of_var m x
+                | A.EApp (A.EVar { A.txt = fname; _ }, cargs, _) -> set_of_call m fname cargs
+                | _ when is_self name -> measure_of_var m self_dt_sym
+                | _ -> None))
         | Some a ->
           mark_self name
             (match (if m = "len" then list_len a else None) with
@@ -1747,6 +2014,11 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                  | A.EVar { A.txt = x; _ } ->
                    load_scope_measure_facts x;
                    measure_of_var m x
+                 (* The built-in `len` of a call: a constant carrying the
+                    callee's proved postcondition, as for `elts`. *)
+                 | A.EApp (A.EVar { A.txt = fname; _ }, cargs, _)
+                   when is_call_measure m && set_of_call_available fname cargs ->
+                   set_of_call m fname cargs
                  (* A non-variable, non-literal actual (a call, a field…): no
                     symbol to share with the caller's facts.  For the binder
                     spellings keep the fresh non-negative constant — it is what
@@ -1875,7 +2147,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
         (match make_field_resolver varname sort_name c varname fname with
          | None -> None
          | Some t ->
-           decls := (varname, Smt.SData sort_name) :: !decls;
+           decls := (varname, adt_sort sort_name) :: !decls;
            if not (List.mem sort_name !adt_sorts) then adt_sorts := sort_name :: !adt_sorts;
            Some t)
     in
@@ -1883,7 +2155,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
       if is_axiom_measure m then (
         uses_axiom := true;
         let adt = Hashtbl.find axiom_measures m in
-        decls := (name, Smt.SData adt) :: !decls;
+        decls := (name, adt_sort adt) :: !decls;
         Some (Smt.App (m, [ Smt.Const name ])))
       (* `len` over a name ALREADY declared into the `Str` sort is the string
          length, i.e. the same `($strlen name)` the predicate side produces —
@@ -1949,16 +2221,86 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        outside the supported fragment — sound, just weaker).  Names resolve in
        the CALLER's namespace; string literals still reflect to this VC's `Str`
        constants so a guard mentioning one lines up with the predicate. *)
+    (* ── A refined SCALAR local mentioned by a guard carries its own fact ──
+       `let present = Set.contains(s, x, cmp)` files `present` in [sc] with
+       the callee's (proven or assumed) Bool postcondition; `if present do …`
+       then names it.  Until 2026-09-13 the guard reflected `present` as an
+       unconstrained INT constant (the caller-scope default), which the
+       Boolean-position guard dropped, and the fact never connected.  So:
+       pin the name to its scope sort FIRST (so [path_resolve_var] declares
+       it right), then load the entry's predicate over that same symbol,
+       through the caller's own resolvers — the identical discipline
+       [reflect_scalar]'s refined-local arm applies to an ACTUAL. *)
+    let scalar_path_facts_loaded : (string, unit) Hashtbl.t = Hashtbl.create 4 in
+    let rec guard_names (e : A.expr) : string list =
+      match e with
+      | A.EVar { A.txt; _ } -> [ txt ]
+      | A.EApp (f, args, _) -> guard_names f @ List.concat_map guard_names args
+      | A.ECon (_, args, _) | A.ETuple (args, _) -> List.concat_map guard_names args
+      | A.EField (r, _, _) | A.EAnnot (r, _, _) -> guard_names r
+      | _ -> []
+    in
+    List.iter
+      (fun (cond, _) ->
+        List.iter
+          (fun x ->
+            if not (Hashtbl.mem scalar_path_facts_loaded x) then begin
+              Hashtbl.replace scalar_path_facts_loaded x ();
+              match List.assoc_opt x sc with
+              | Some (b, q, m) when scalar_sort_of_marker m <> None
+                                 && not (Hashtbl.mem str_names x) && not (is_recvar x) ->
+                let srt = scalar_sort_or_int m in
+                if srt <> Smt.SInt then Hashtbl.replace caller_scalar x srt;
+                let xc = Smt.Const x in
+                decls := (x, srt) :: !decls;
+                let rv n =
+                  if n = b || n = "_" || n = x then Some xc
+                  else match foreign_var n with Some (t, d) -> decls := d :: !decls; Some t | None -> None
+                in
+                (match smt_of ~resolve_var:rv ~resolve_measure:foreign_measure
+                         ~resolve_str_lit:str_lit_const q with
+                 | Some qa -> push_user qa
+                 | None -> ())
+              | _ -> ()
+            end)
+          (guard_names cond))
+      path;
     List.iter
       (fun (cond, negated) ->
         match
-          smt_of ~resolve_var:path_resolve_var ~resolve_measure:path_resolve_measure
+          smt_of ~vocab:false ~resolve_var:path_resolve_var ~resolve_measure:path_resolve_measure
             ~resolve_field:path_resolve_field
             ~resolve_measure_app ~resolve_tester:path_resolve_tester
             ~resolve_str_lit:str_lit_const cond
         with
         | Some t -> push_user (if negated then Smt.Not t else t)
-        | None -> ())
+        | None ->
+          (* A guard that IS a call (`if Set.contains(s, x, cmp) do …`, or its
+             negation): stand the call up as a Bool constant carrying the
+             callee's postcondition, exactly as an ACTUAL in Bool position
+             would be, and use that constant as the fact.  Nothing is
+             invented — a callee with no usable postcondition yields an
+             unconstrained constant, i.e. no fact at all. *)
+          let call, inner_neg =
+            match cond with
+            | A.EApp (A.EVar { A.txt = "not"; _ }, [ inner ], _) -> (inner, true)
+            | c -> (c, false)
+          in
+          (match call with
+           | A.EApp (A.EVar { A.txt = f; _ }, _, _)
+             when not (List.mem f predicate_operators)
+                  && not (is_measure_app f && not (is_builtin_set_measure (measure_name f))) ->
+             (match
+                reflect_scalar ~postcond ~foreign_var ~foreign_measure
+                  ~foreign_field:arg_resolve_field ~sort:Smt.SBool sc call
+              with
+              | Some (t, ds, asms) ->
+                List.iter (fun d -> decls := d :: !decls) ds;
+                List.iter push_user asms;
+                let t = if inner_neg then Smt.Not t else t in
+                push_user (if negated then Smt.Not t else t)
+              | None -> ())
+           | _ -> ()))
       path;
     (* [`Skip]: a record parameter whose actual could not be reflected — build
        no goal at all, so neither discharge runs and the call is passed over. *)
@@ -2048,12 +2390,54 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
            in
            Printf.sprintf "the argument passed for `%s`" pname
        in
+       (* A SIBLING parameter's actual failing to reflect is the subject's
+          fault too, not the predicate's: `at(i, lane(4))` against `i : {Int |
+          _ < n}` reflects `i` fine and then fails on `n`, whose actual is
+          the opaque call.  [resolve_var] memoises that failure under the
+          sibling's own name (`Some None`), so read it back rather than
+          blame `_ < n` for "having no SMT translation" — the predicate is
+          entirely inside the fragment.  Only entries keyed by one of the
+          callee's OTHER parameter names count; `"$path$…"` keys are path
+          facts the translator already dropped by design, and a present
+          `Some (Some _)` entry reflected fine (specs/2026-09-13-refinement-
+          p3-designs.md §3; specs/todos/2026-09-03-sibling-parameter-…). *)
+       let sibling_failures =
+         List.filter_map
+           (fun (pname, i) ->
+             if i = rp.idx || pname = "" then None
+             else
+               match Hashtbl.find_opt reflect_cache pname with
+               | Some None -> Some (pname, i)
+               | _ -> None)
+           name_pos
+       in
+       let sibling_display =
+         match sibling_failures with
+         | [] -> ""
+         | (pname, i) :: rest ->
+           let actual =
+             match List.nth_opt args i with
+             | Some a when pred_str a <> "<predicate>" -> Printf.sprintf " (`%s`)" (pred_str a)
+             | _ -> ""
+           in
+           let more =
+             match List.length rest with
+             | 0 -> ""
+             | 1 -> " (and one more parameter's argument)"
+             | n -> Printf.sprintf " (and %d more parameters' arguments)" n
+           in
+           Printf.sprintf
+             "the argument passed for `%s`%s, which the predicate `%s` depends on%s"
+             pname actual (pred_str rp.pred) more
+       in
        note
          (Obligation.Skipped
             (match mode with
              | `Skip -> Obligation.Unreflectable_subject self_display
              | `Other when self_reflection_failed ->
                Obligation.Unreflectable_subject self_display
+             | `Other when sibling_failures <> [] ->
+               Obligation.Unreflectable_subject sibling_display
              | `Other | `Record _ ->
                Obligation.Unreflectable_predicate
                  (pred_str (Option.value !pred_fail_expr ~default:rp.pred))))
@@ -2102,6 +2486,13 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
              else None)
            assumptions
        in
+       (* Settle every sort the producers left open — set elements, datatype
+          instances, opaque payload constants — or skip on a contradiction; see
+          [resolve_sorts].  Runs on the finished declaration list. *)
+       match resolve_sorts decls goal assumptions with
+       | None -> note (Obligation.Skipped Obligation.Sort_conflict)
+       | Some (decls, goal, assumptions, measure_instances) ->
+       let sort_of n = List.assoc_opt n decls in
        let vc = { Smt.decls; assumptions; goal } in
        (* [user_assumptions]: the SAME two-step filter (sort-wellsortedness,
           then float-rewrite-and-wellsortedness) applied to [user_assume]
@@ -2149,7 +2540,25 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
          in
          let s = if !uses_string then string_preamble else "" in
          let ma = match m, a with "", x | x, "" -> x | x, y -> x ^ "\n" ^ y in
-         match ma, s with "", x | x, "" -> x | x, y -> x ^ "\n" ^ y
+         let mas = match ma, s with "", x | x, "" -> x | x, y -> x ^ "\n" ^ y in
+         (* The set sorts come LAST: their `define-sort`s name `Elem` and
+            `$Str`, which the preambles above may already have declared. *)
+         let contains hay needle =
+           let n = String.length needle and h = String.length hay in
+           let rec at i = i + n <= h && (String.sub hay i n = needle || at (i + 1)) in
+           at 0
+         in
+         (* The datatype instances the query mentions that no preamble above
+            declares, then any measure [resolve_sorts] renamed to an instance
+            (only alongside the measure preamble that declares its template). *)
+         let mas =
+           mas
+           ^ query_instance_preamble ~declared:mas ~measures:(m <> "") vc.Smt.decls vc.Smt.goal
+               vc.Smt.assumptions measure_instances
+         in
+         mas
+         ^ set_preamble ~elem_declared:(contains mas "(declare-sort Elem 0)")
+             ~str_declared:(s <> "") ~measure_attached:(m <> "") vc
        in
        (* Report a violation ONLY when the precondition can *never* hold under
           the assumptions (a definite failure).  If it merely *might* fail
@@ -2162,7 +2571,24 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        (match Refine.discharge ~root ~preamble vc with
         | Refine.Verified -> note Obligation.Proved
         | first ->
-          (match Refine.discharge ~root ~preamble { vc with Smt.goal = Smt.Not goal } with
+          (* A pass-site obligation ([Callback_domain]) is the one case where
+             "G can fail" IS the definite failure: its subject `$cb_x` ranges
+             over exactly the expected domain's refinement — that refinement
+             is the ONLY assumption about it, by construction — so every model
+             the solver finds is an argument the caller is entitled to pass.
+             `∀x. dom(x) ⇒ pred(x)` is refuted by one such x; demanding that
+             pred fail for ALL of them (the `¬G` discharge below) would let
+             `apply(take_n, -3)` through whenever `_ >= 0` merely SOMETIMES
+             holds, which is always. *)
+          let definite =
+            match subject, first with
+            | (Callback_domain | Element_domain | Callback_codomain), Refine.Refuted _ -> true
+            | _ -> false
+          in
+          (match
+             if definite then Refine.Verified
+             else Refine.discharge ~root ~preamble { vc with Smt.goal = Smt.Not goal }
+           with
            | Refine.Verified ->
              note Obligation.Violated;
              (* Name the parameter and callee rather than saying "argument".
@@ -2176,6 +2602,13 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                  Printf.sprintf "argument `%s` of `%s`" pname callee
                | Argument, _ -> Printf.sprintf "argument %d of `%s`" (rp.idx + 1) callee
                | Bound_expr, _ -> subject_noun
+               | Callback_domain, _ ->
+                 Printf.sprintf
+                   "the expected function type's domain, where `%s` is passed," callee
+               | Element_domain, _ ->
+                 Printf.sprintf "an element of the container passed as `%s`" callee
+               | Callback_codomain, _ ->
+                 Printf.sprintf "the return of `%s`, passed where a refined codomain is expected," callee
              in
              (* Point at the offending argument itself. The call span covers the
                 whole expression, which on a multi-argument call underlines
@@ -2226,7 +2659,26 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                     | Bound_expr ->
                       "note: a refined annotation on a `let` is CHECKED against the \
                        expression it annotates, not assumed — bind a value that satisfies \
-                       it, or weaken the annotation");
+                       it, or weaken the annotation"
+                    | Callback_domain ->
+                      Printf.sprintf
+                        "note: a function is passed where a function type is expected only \
+                         if that type's domain implies the function's own parameter \
+                         refinement for EVERY value — refine the expected domain so it \
+                         implies `%s`, or weaken the passed function's refinement"
+                        (pred_str rp.pred)
+                    | Element_domain ->
+                      Printf.sprintf
+                        "note: a container flows into a position expecting `%s` of every \
+                         element only if its own element refinement implies it — refine \
+                         the container's declared element type, or weaken the expected one"
+                        (pred_str rp.pred)
+                    | Callback_codomain ->
+                      Printf.sprintf
+                        "note: a function is passed where its result must satisfy `%s` only \
+                         if its own proved return refinement implies that — declare and \
+                         prove one on the passed function, or weaken the expected codomain"
+                        (pred_str rp.pred));
                  labels; notes = []; code = None; fix = None }
            | _ ->
              (* [!self_symbol] is what the CHECK runs against — see

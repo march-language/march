@@ -78,9 +78,9 @@ mod Actor do
 
   doc """
   Bound this actor's mailbox. policy: 0 unbounded (default), 1 drop_new,
-  2 drop_old, 3 block_sender (compiled backend; interpreted treats 3 as 0 —
-  the interpreter's single-threaded eager scheduler cannot park a sender
-  without deadlocking).
+  2 drop_old, 3 block_sender (compiled backend only: the interpreter's
+  single-threaded eager scheduler cannot park a sender, so under `march run`
+  policy 3 is refused at this call rather than silently treated as 0).
   Dropped messages are counted in Scheduler.dropped_messages().
 
   Under a drop policy (1 or 2), a dropped Actor.call request or its reply is

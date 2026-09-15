@@ -728,6 +728,23 @@ the mailbox without limit. `Actor.set_queue_limit(pid, limit, policy)` bounds it
 Actor.set_queue_limit(pid, 1000, 3)   -- cap at 1000, block_sender policy
 ```
 
+Or declare the bound with the actor, so every spawn gets it and no caller has
+to remember the call:
+
+```march
+actor Worker do
+  state { n : Int }
+  init  { n: 0 }
+  mailbox 1000 drop_old        -- after init, before any supervise block
+  on Work() do ... end
+end
+```
+
+`mailbox N policy` takes the policy by name — `drop_new`, `drop_old` or
+`block_sender` — and lowers to `Actor.set_queue_limit(pid, N, policy)` right
+after each `spawn(Worker)`. `block_sender` is compiled-only there too: under the
+interpreter the spawn fails with the same message the call does.
+
 `policy` is one of:
 
 | Value | Policy | Behavior when the mailbox is full |
@@ -735,7 +752,7 @@ Actor.set_queue_limit(pid, 1000, 3)   -- cap at 1000, block_sender policy
 | `0` | unbounded (default) | never rejects |
 | `1` | `drop_new` | the incoming message is discarded |
 | `2` | `drop_old` | the oldest queued message is evicted to make room |
-| `3` | `block_sender` | the sender parks until space frees up (compiled backend only) |
+| `3` | `block_sender` | the sender parks until space frees up (compiled backend only; the interpreter refuses it at the call rather than silently running unbounded) |
 
 Dropped messages (policies `1`/`2`) are counted in `Scheduler.dropped_messages()`. The
 interpreter's single-threaded eager scheduler cannot park a sender without deadlocking, so
@@ -806,6 +823,7 @@ to diverge or crash compiled (see the compiled-actor status note at the top of t
 | `revoke_cap(cap)` | `→ Atom` | both | Revoke a capability; a later `send_checked` on it returns `:error` |
 | `is_cap_valid(cap)` | `→ Bool` | both | Boolean form of the epoch/revocation/liveness check |
 | `pid_of_int(n)` | `→ Pid` | both | Convert Int to Pid (an unknown index resolves to a safe already-dead sentinel) |
+| `pid_to_int(pid)` | `→ Int` | both | The inverse: a Pid's spawn index, the `N` in its `Pid(N)` display (what `GlobalPid.make` takes for a local actor) |
 | `get_actor_field(pid, name)` | `→ Option(a)` | both | Read an actor's state field via the runtime shape registry |
 | `task_spawn(fn)` | `→ Task(a)` | both | Spawn a green-thread task (use `Task.async` instead) |
 | `task_await(t)` | `→ Result(a, String)` | both | Await a task (use `Task.await` instead) |

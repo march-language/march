@@ -53,9 +53,11 @@ type fn_sig = {
   param_names : string list;
   param_str : bool list;
   param_scalar : Smt.sort list;
+  param_tys : A.ty option list;
   refined : rparam list;
   ret : (string * A.expr) option;
   ret_sort : string option;
+  ret_ty : A.ty option;
 }
 
 (** Resolution context for a call: the current module path, its aliases, its
@@ -110,6 +112,7 @@ val check_module :
   ?stdlib_files:string list ->
   ?audit:((Refine_audit.site * Refine_audit.disposition) list -> unit) ->
   ?pre_desugar_decls:A.decl list ->
+  ?type_map:(A.span, March_typecheck.Typecheck.ty) Hashtbl.t ->
   Err.ctx ->
   A.module_ ->
   unit

@@ -281,4 +281,65 @@ describe "string keys" do
   end
 end
 
+-- ── Runtime witnesses for the @[assume]d `keys` contracts in stdlib/map.march
+-- (specs/2026-09-13-set-refinements-design.md §6.2): every assumed contract
+-- is exercised against a list-based oracle over random Int keys.
+
+pfn map_of(ks : List(Int)) do
+  Map.from_list_int(List.map(ks, fn k -> (k, k * 10)))
+end
+
+pfn same_keys(m, ks : List(Int)) : Bool do
+  List.all(ks, fn k -> Map.contains_key(m, k, int_cmp))
+    && List.all(Map.keys(m), fn k -> List.member(ks, k))
+end
+
+describe "assumed keys contracts (runtime witnesses)" do
+  test "empty has no keys; singleton has exactly its key" do
+    assert same_keys(Map.empty(), Nil)
+    Check.all(Gen.int(-50, 50), fn k -> same_keys(Map.singleton(k, 0), Cons(k, Nil)))
+  end
+
+  test "insert adds exactly the key, remove drops exactly the key" do
+    Check.all(Gen.tuple2(Gen.list(Gen.int(0, 30)), Gen.int(0, 30)), fn pair ->
+      match pair do
+        (ks, k) ->
+          same_keys(Map.insert(map_of(ks), k, 1, int_cmp), Cons(k, ks))
+            && same_keys(Map.remove(map_of(ks), k, int_cmp), List.filter(ks, fn j -> j != k))
+      end
+    )
+  end
+
+  test "get is Some exactly when the key is present; contains_key and is_empty agree" do
+    Check.all(Gen.tuple2(Gen.list(Gen.int(0, 30)), Gen.int(0, 30)), fn pair ->
+      match pair do
+        (ks, k) ->
+          let m = map_of(ks)
+          let present = List.member(ks, k)
+          let got_some = match Map.get(m, k, int_cmp) do
+            Some(_) -> true
+            None -> false
+          end
+          got_some == present
+            && Map.contains_key(m, k, int_cmp) == present
+            && Map.is_empty(m) == (ks == Nil)
+      end
+    )
+  end
+
+  test "keys, map_values, filter and merge agree with the list oracle" do
+    Check.all(Gen.tuple2(Gen.list(Gen.int(0, 20)), Gen.list(Gen.int(0, 20))), fn pair ->
+      match pair do
+        (a, b) ->
+          let ma = map_of(a)
+          let mb = map_of(b)
+          same_keys(ma, Map.keys(ma))
+            && same_keys(Map.map_values(ma, fn v -> v + 1), a)
+            && List.all(Map.keys(Map.filter(ma, fn k -> fn _v -> k % 2 == 0, int_cmp)), fn k -> List.member(a, k))
+            && same_keys(Map.merge(ma, mb, int_cmp), List.append(a, b))
+      end
+    )
+  end
+end
+
 end

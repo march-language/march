@@ -1,0 +1,38 @@
+-- EXPECT-ERROR: The linear value `state.parked` is used more than once here
+mod Main do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs Session.Live
+  @[endpoints]
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+  -- The event-shaped endpoint API keeps the session state in ACTOR STATE
+  -- (specs/todos/2026-09-13-endpoints-event-api-actor-state.md), which only
+  -- became safe with the record move-out rules: this handler resumes the
+  -- parked endpoint and then returns an update that KEEPS the consumed value,
+  -- so the next delivery would resume a state that was already resumed.
+  actor ConsActor do
+    state { budget : Int, parked : Stream_Cons.Parked_Cons }
+    init  { budget: 2, parked: Stream_Cons.idle() }
+    on DeliverC(s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
+      match Stream_Cons.resume(state.parked, from, msg, ep) do
+        Got_Msg_Prod_Cons_1(n, st) ->
+          let _ = Stream_Cons.finish(s, Stream_Cons.choose_done(s, st, true))
+          { state with budget: state.budget - n }
+      end
+    end
+  end
+  fn main(c : Cap(IO)) do
+    let _ = spawn(ConsActor)
+    ()
+  end
+end

@@ -393,11 +393,32 @@ int64_t march_live_allocs(void) {
 /* If [p] is an FFI resource cell (MARCH_RESOURCE_TAG), run its destructor on
  * the wrapped native pointer before the cell itself is freed.  Called from
  * every RC free-on-zero path.  Cell layout: native_ptr@16, dtor@24. */
+void march_decrc(void *p);
 static inline void march_run_resource_dtor(void *p) {
-    if (((march_hdr *)p)->tag == MARCH_RESOURCE_TAG) {
+    int32_t tag = ((march_hdr *)p)->tag;
+    if (tag == MARCH_RESOURCE_TAG) {
         void (*dtor)(void *) = *(void (**)(void *))((char *)p + 24);
         void *native = *(void **)((char *)p + 16);
         if (dtor) dtor(native);
+    } else if (tag == MARCH_TASK_TAG) {
+        /* A Task owns the box of a Float result. The trampoline stores
+         * task[3] = (raw << 1) | 1; for a Float task raw is the
+         * march_alloc_float box the apply fn returned, and task_await_unwrap
+         * reads the double out of it WITHOUT consuming it (awaiting twice is
+         * legal), so until now the box outlived the Task: one leaked box per
+         * awaited Float task.
+         *
+         * Release only that case. An untagged task[3] (0 = never finished, or
+         * the cancel path's Err cell) is skipped; a tagged scalar untags to an
+         * odd value and fails IS_HEAP_PTR; a heap result of any other tag is
+         * handed to the caller by the await paths, which account for it, so it
+         * is not ours to release. */
+        int64_t slot = ((int64_t *)p)[3];
+        if (slot & 1) {
+            void *raw = (void *)(intptr_t)(slot >> 1);
+            if (IS_HEAP_PTR(raw) && ((march_hdr *)raw)->tag == MARCH_FLOAT_TAG)
+                march_decrc(raw);
+        }
     }
 }
 
@@ -3087,6 +3108,9 @@ static void actor_green_thread(void *arg) {
      * not a _Thread_local — this scheduler steals procs across OS
      * threads, so a raw thread-local would go stale after a migration). */
     march_proc *self = march_sched_current();
+    /* Publish the actor this proc is running, so `self` in a handler body can
+     * find it (march_self, in march_scheduler.c). */
+    if (self) self->actor = actor;
     jmp_buf crash_jmp;
     jmp_buf *saved_jmp = self ? self->crash_jmp : NULL;
     /* Supervise-block children reach this function only after deferred spawn
@@ -3171,6 +3195,9 @@ static void actor_green_thread(void *arg) {
          * march_actor_call / do_actor_death / mailbox_size /
          * set_mbox_limit). */
         atomic_store_explicit(&meta->green_thread, NULL, memory_order_release);
+        /* The live actor's own reference (taken in march_spawn_common):
+         * nothing on this thread touches the record after this. */
+        march_decrc(actor);
         return;
     }
 
@@ -3370,6 +3397,8 @@ static void actor_green_thread(void *arg) {
     /* Same rationale as the crash-trap exit above: the mutex protected only
      * this field, now converted to a release store. */
     atomic_store_explicit(&meta->green_thread, NULL, memory_order_release);
+    /* The live actor's own reference (taken in march_spawn_common). */
+    march_decrc(actor);
 }
 
 /* ── Public actor API ────────────────────────────────────────────── */
@@ -4585,6 +4614,23 @@ int64_t march_is_alive(void *actor) {
     return actor_alive_load(actor);
 }
 
+/* dist_monitor_register(target_pid, watcher_node, watcher_pid, fd): the March
+ * surface of march_dist_monitor_register. The node id arrives as a March
+ * string (length-prefixed, not NUL-terminated); the registry wants a C string
+ * and strdup()s it, so a bounded copy is made here. */
+void march_dist_monitor_register_pid(int64_t target_pid, void *node_str,
+                                     int64_t watcher_pid, int64_t fd) {
+    if (!node_str) return;
+    march_string *s = (march_string *)node_str;
+    size_t n = (size_t)s->len;
+    char *node = (char *)malloc(n + 1);
+    if (!node) return;
+    memcpy(node, s->data, n);
+    node[n] = 0;
+    march_dist_monitor_register(target_pid, node, watcher_pid, (int)fd);
+    free(node);
+}
+
 /* Dispose an undelivered/overflow-dropped/orphaned actor message. Registered
  * with the scheduler (march_sched_set_msg_dtor) below, at scheduler
  * lazy-init time, so it is called for: MARCH_MBOX_DROP_NEW's rejected
@@ -4686,6 +4732,17 @@ static void *march_spawn_common(void *actor, int defer_activation) {
     /* A normal actor is runnable immediately. A supervise-block child uses
      * the deferred entry point and is activated by register_child only after
      * its supervisor pointer and restart slot are fully published. */
+    /* The LIVE actor owns one reference to its own record, released by
+     * actor_green_thread at its very last access (both exit paths). Without
+     * it the record was kept alive only by whatever pids the program still
+     * held: `let a = spawn(W)` with `a` never used again dropped the ONLY
+     * reference right after spawn, freeing a running actor whose thread
+     * then read and wrote its `alive` word in freed memory (ASAN, 2026-09-14:
+     * heap-use-after-free in actor_green_thread / do_actor_death; glibc
+     * saw it as `tcache_thread_shutdown(): unaligned tcache chunk` on the
+     * ubuntu leg, test/native/actor_enumeration). A pid is a handle to a
+     * running actor; the actor's lifetime is its own. */
+    march_incrc(actor);
     if (!defer_activation) activate_actor_green_thread(meta);
     /* Start the scheduler in a background thread so actor green threads run
      * even when the main thread is blocked inside the HTTP event loop.
@@ -5061,6 +5118,7 @@ void *march_task_spawn_thunk(void *clo_ptr) {
     /* Allocate Task at 48 bytes (header + proc ptr + result ptr + done flag
      * + in-scheduler waiter — see task_wait_done). */
     int64_t *task = (int64_t *)march_alloc(48);
+    if (task) ((march_hdr *)task)->tag = MARCH_TASK_TAG;  /* see march_run_resource_dtor */
     /* Extra RC hold for the trampoline's wa->task raw pointer.  The caller
      * owns RC=1; this bumps to RC=2 so a fire-and-forget drop (RC→1) doesn't
      * free the object before the trampoline writes the result. */
@@ -5123,6 +5181,7 @@ void *march_task_spawn_with_cancel_thunk(void *clo_ptr, void *tok_ptr) {
     }
     march_ensure_sched_started();
     int64_t *task = (int64_t *)march_alloc(48);  /* see march_task_spawn_thunk layout */
+    if (task) ((march_hdr *)task)->tag = MARCH_TASK_TAG;
     if (task) march_incrc(task);  /* trampoline's RC hold — see march_task_spawn_thunk */
     march_thunk_arg *wa = (march_thunk_arg *)malloc(sizeof(march_thunk_arg));
     if (!wa) { return (void *)task; }
@@ -5729,6 +5788,77 @@ static void *make_cons(void *head, void *tail) {
 }
 
 /* Helper: allocate a 2-element tuple (tag=0, 2 ptr fields). */
+/* actor_terminal_reason(pid_index) -> Option((tag, message)): the reason a
+ * local actor died, with DistLink's wire tags (0 Normal, 1 Killed, 2 Crash),
+ * or None while it is alive or unknown. Looks up the META by pid index and
+ * reads only its terminal fields: a MONITOR_REQ for a pid whose record has
+ * already been freed must not touch the record (the meta outlives it). */
+static void *make_tuple2(void *a, void *b);
+static void *make_cons(void *head, void *tail);
+static void *make_nil(void);
+
+/* dist_monitor_pending() -> List((target_pid, (watcher_node, (watcher_pid,
+ * (reason_tag, reason_msg))))): every fired-but-unacked MONITOR_FIRE, for the
+ * March-side resend. Nested pairs because the runtime can build tuples and
+ * cons cells but not records. Collected under the registry lock, allocated
+ * outside it. */
+struct pending_acc { int64_t *tp; char **node; int64_t *wp; int *tag; char **msg; int n, cap; };
+static void pending_cb(int64_t target_pid, const char *watcher_node, int64_t watcher_pid,
+                       int reason_tag, const char *reason_msg, void *ctx) {
+    struct pending_acc *a = (struct pending_acc *)ctx;
+    if (a->n == a->cap) {
+        int nc = a->cap ? a->cap * 2 : 8;
+        a->tp = realloc(a->tp, sizeof(int64_t) * nc); a->node = realloc(a->node, sizeof(char *) * nc);
+        a->wp = realloc(a->wp, sizeof(int64_t) * nc); a->tag = realloc(a->tag, sizeof(int) * nc);
+        a->msg = realloc(a->msg, sizeof(char *) * nc); a->cap = nc;
+    }
+    a->tp[a->n] = target_pid; a->node[a->n] = strdup(watcher_node ? watcher_node : "");
+    a->wp[a->n] = watcher_pid; a->tag[a->n] = reason_tag;
+    a->msg[a->n] = strdup(reason_msg ? reason_msg : ""); a->n++;
+}
+void *march_dist_monitor_pending(void) {
+    struct pending_acc a = {0};
+    march_dist_monitor_pending_walk(pending_cb, &a);
+    void *list = make_nil();
+    for (int i = a.n - 1; i >= 0; i--) {
+        void *tagged_tp = (void *)((a.tp[i] << 1) | 1);
+        void *tagged_wp = (void *)((a.wp[i] << 1) | 1);
+        void *tagged_tag = (void *)(((int64_t)a.tag[i] << 1) | 1);
+        void *inner = make_tuple2(tagged_tag, march_string_lit(a.msg[i], (int64_t)strlen(a.msg[i])));
+        void *p2 = make_tuple2(tagged_wp, inner);
+        void *p1 = make_tuple2(march_string_lit(a.node[i], (int64_t)strlen(a.node[i])), p2);
+        list = make_cons(make_tuple2(tagged_tp, p1), list);
+        free(a.node[i]); free(a.msg[i]);
+    }
+    free(a.tp); free(a.node); free(a.wp); free(a.tag); free(a.msg);
+    return list;
+}
+
+int64_t march_dist_monitor_forget_node_str(void *node_str) {
+    if (!node_str) return 0;
+    march_string *s = (march_string *)node_str;
+    size_t n = (size_t)s->len;
+    char *node = (char *)malloc(n + 1);
+    if (!node) return 0;
+    memcpy(node, s->data, n); node[n] = 0;
+    int64_t r = march_dist_monitor_forget_node(node);
+    free(node);
+    return r;
+}
+
+void march_dist_monitor_ack_pid(int64_t target_pid, int64_t watcher_pid) {
+    march_dist_monitor_ack(target_pid, watcher_pid);
+}
+
+void *march_actor_terminal_reason(int64_t pid_index) {
+    march_actor_meta *meta = find_meta_by_pid_index(pid_index);
+    if (!meta || !meta->terminal_set) return NULL;
+    void *tag = (void *)(((int64_t)meta->terminal_reason << 1) | 1);
+    const char *m = meta->terminal_message ? meta->terminal_message : "";
+    size_t n = meta->terminal_message ? meta->terminal_message_len : 0;
+    return make_tuple2(tag, march_string_lit(m, (int64_t)n));
+}
+
 static void *make_tuple2(void *a, void *b) {
     void *tup = march_alloc(16 + 16);
     /* tag stays 0 */
@@ -7840,9 +7970,12 @@ void *march_actor_pid_indices(void) {
     return list;
 }
 
+/* Returns an OWNED reference, like every other value-producing builtin: the
+ * Pid it hands back is dropped by whatever holds it (a list cell, a closure
+ * parameter), and a borrowed alias dropped that way frees a live actor. */
 void *march_pid_of_int(int64_t n) {
     march_actor_meta *m = find_meta_by_pid_index(n);
-    if (m) return m->actor;
+    if (m) { march_incrc(m->actor); return m->actor; }
     return &march_dead_actor_sentinel;
 }
 
@@ -8257,6 +8390,10 @@ void *march_typed_array_to_list(void *arr) {
     void *lst = make_nil();
     for (int64_t i = len - 1; i >= 0; i--) {
         void *elem = *(void **)((char *)arr + TYPED_ARRAY_HDR_SIZE + i * 8);
+        /* The cons cell owns its head and releases it when the list dies;
+         * the array still holds the element, so the cell needs its own +1
+         * (same reasoning as march_typed_array_get). */
+        march_incrc(elem);
         lst = make_cons(elem, lst);
     }
     return lst;
@@ -8266,10 +8403,19 @@ int64_t march_typed_array_length(void *arr) {
     return *(int64_t *)((char *)arr + 16);
 }
 
+/* Returns an OWNED reference: the element stays in the array, so the caller
+ * gets its own +1.  It used to return the bare slot, which only stayed
+ * balanced because every consumer that received it was (wrongly) treated as
+ * consuming a reference it never released -- `==`, string_length, to_string.
+ * Once those borrow (borrow.ml), a borrowed consumer releases its dead-after
+ * argument, and a bare slot would be freed under the array.  A tagged
+ * immediate needs no reference (march_incrc ignores it). */
 void *march_typed_array_get(void *arr, int64_t i) {
     int64_t len = march_typed_array_length(arr);
     typed_array_check_bounds(i, len);
-    return *(void **)((char *)arr + TYPED_ARRAY_HDR_SIZE + i * 8);
+    void *elem = *(void **)((char *)arr + TYPED_ARRAY_HDR_SIZE + i * 8);
+    march_incrc(elem);
+    return elem;
 }
 
 void *march_typed_array_set(void *arr, int64_t i, void *val) {
@@ -8313,6 +8459,7 @@ void *march_typed_array_map(void *arr, void *f) {
     for (int64_t i = 0; i < len; i++) {
         void *elem = *(void **)((char *)arr + TYPED_ARRAY_HDR_SIZE + i * 8);
         march_incrc(f);
+        march_clo_arg_retain(elem);   /* the array keeps its element */
         void *result = call_closure_1(f, elem);
         *(void **)((char *)new_arr + TYPED_ARRAY_HDR_SIZE + i * 8) = result;
     }
@@ -8349,63 +8496,33 @@ void *march_typed_array_filter(void *arr, void *mask) {
     return new_arr;
 }
 
-/* Release a fold's PREVIOUS accumulator — the missing half of the fold RC
- * discipline. [prev] is the accumulator just handed to the closure, [result]
- * is what the closure returned, [acc] is the fold's INITIAL accumulator, which
- * belongs to our CALLER and must never be released here.
+/* Release a fold's PREVIOUS accumulator when the closure did not. [prev] is
+ * the accumulator just handed to the closure, [result] what it returned, [acc]
+ * the fold's INITIAL accumulator.
  *
- * NEITHER GUARD BELOW IS A SHORTCUT; each is a witness that this loop still
- * owns [prev], and without one the release is a use-after-free. Two facts make
- * that so. An apply fn does NOT return an owned reference in general: for a
- * `ptr` parameter returned unchanged it emits a bare `ret ptr %x` with no
- * inc_rc, handing back a BORROWED alias of something still owned elsewhere (a
- * live array element, a closure capture) — verified by reading the emitted IR
- * for `fn (acc, x) -> x`. And the closure-apply ABI CONSUMES its arguments
- * (perceus.ml's ECallPtr case), so an apply fn with an owning use of the
- * accumulator — `fn (acc, x) -> Cons(x, acc)` — stores the reference we passed
- * into its own result with no inc_rc; releasing it there frees the tail of the
- * list being built.
+ * A closure call consumes its heap arguments (march_clo_arg_retain in
+ * march_runtime.h), so a non-Float [prev] is the callee's to release or to
+ * hand back as [result]; this loop owns nothing more, and may not even look
+ * at it again: the callee may already have freed it. That is why the Float
+ * test is taken BEFORE the call ([fold_acc_is_float], passed in as
+ * [prev_is_float]) — reading [prev]'s tag afterwards is a use-after-free
+ * (caught by ASAN on native_arr_fold_acc_leak_probe).
  *
- * A Float is provably different. The uniform-ptr ABI unboxes a Float parameter
- * to a raw `double` in the apply fn's entry prologue (Llvm_toplevel.emit_fn)
- * and re-boxes on return via march_alloc_float (Llvm_ctx.coerce); Float
- * closure captures are stored as raw doubles too. So EVERY Float-typed value
- * coming out of an apply fn is a FRESH box that this loop solely owns — it
- * cannot alias the array, the caller's accumulator, or a capture. The tag is
- * a witness of that on its own, with no help from the compiler, hence the
- * check survives unchanged.
- *
- * THE OTHER WITNESS: MARCH_CLO_ARG0_BORROWED (march_runtime.h). A heap
- * NON-Float accumulator has no such intrinsic tell, so the COMPILER supplies
- * one: Borrow inference already knows whether the apply fn has any OWNING use
- * of its first user parameter, and lib/tir/clo_flags.ml stamps that one bit
- * into the closure object's header pad word. When it is set, the callee
- * neither consumed nor retained [prev] — it cannot have stored it (that is an
- * owning use) and it cannot have returned it (likewise, and `prev != result`
- * covers that case anyway) — so this loop still holds the only reference to
- * [prev] and must release it. When it is clear (a closure from a path that
- * does not stamp, or a genuinely accumulator-consuming closure such as
- * `fn (acc, x) -> Cons(x, acc)`, which stores our reference into its result)
- * nothing is released, which is exactly the pre-2026-08-22 behaviour.
- *
- * `prev != result` additionally covers a closure that threads its accumulator
- * through unchanged, and a wire-tagged (non-pointer) accumulator is handled by
- * the IS_HEAP_PTR guard before the tag is ever loaded.
+ * A boxed Float is the exception: the apply fn unboxes it in its prologue and
+ * never releases the box, and every Float coming out of an apply fn is a FRESH
+ * box (re-boxed on return by march_alloc_float), so a Float [prev] that is not
+ * [result] is still solely ours. [acc] is left alone as before.
  *
  * Pinned by test/native/native_arr_fold_acc_leak_probe.march: the Float and
- * String accumulator legs (leak direction, one per witness) and the identity
- * + element-alias legs (double-free direction). */
-static inline int fold_clo_arg0_borrowed(void *f) {
-    return IS_HEAP_PTR(f)
-        && (((march_hdr *)f)->pad & MARCH_CLO_ARG0_BORROWED) != 0;
+ * String accumulator legs (leak direction) and the identity + element-alias
+ * legs (double-free direction). */
+static inline int fold_acc_is_float(void *prev) {
+    return IS_HEAP_PTR(prev) && ((march_hdr *)prev)->tag == MARCH_FLOAT_TAG;
 }
 
-static inline void fold_release_prev_acc(void *prev, void *result, void *acc,
-                                         void *f) {
-    if (prev == result || prev == acc) return;
-    if (!IS_HEAP_PTR(prev)) return;
-    if (((march_hdr *)prev)->tag != MARCH_FLOAT_TAG
-        && !fold_clo_arg0_borrowed(f)) return;
+static inline void fold_release_prev_acc(void *prev, int prev_is_float,
+                                         void *result, void *acc) {
+    if (!prev_is_float || prev == result || prev == acc) return;
     march_decrc(prev);
 }
 
@@ -8419,23 +8536,17 @@ void *march_typed_array_fold(void *arr, void *acc, void *f) {
     for (int64_t i = 0; i < len; i++) {
         void *elem = *(void **)((char *)arr + TYPED_ARRAY_HDR_SIZE + i * 8);
         void *prev = result;
+        int prev_is_float = fold_acc_is_float(prev);
         march_incrc(f);
-        result = call_closure_2(f, prev, elem);
         /* Unlike every other fold helper here, [elem] is a pointer the ARRAY
-         * owns — borrowed, not materialised for the call (the int/i32/u8
-         * helpers wire-tag an immediate; the f64/f32 helpers box a fresh one
-         * and release it themselves). So a closure that hands the element
-         * straight back (`fn (acc, x) -> x`) returns a reference this loop
-         * does NOT own: the apply fn classifies that parameter as OWNED and
-         * moves it out without an inc_rc, but we never gave it one. Take a
-         * reference now, so that (a) the next iteration's
-         * fold_release_prev_acc releases OURS rather than the array's, and
-         * (b) the value we finally return to our caller is owned, as the
-         * calling convention requires. Guarded on prev != result so an
-         * accumulator that is itself an element is not double-counted. */
-        if (result == elem && result != prev && IS_HEAP_PTR(result))
-            march_incrc(result);
-        fold_release_prev_acc(prev, result, acc, f);
+         * owns (the int/i32/u8 helpers wire-tag an immediate; the f64/f32
+         * helpers box a fresh one and release it themselves), and the call
+         * consumes it, so the callee gets its own reference. That also makes
+         * a closure that hands the element straight back (`fn (acc, x) -> x`)
+         * return a reference this loop owns. */
+        march_clo_arg_retain(elem);
+        result = call_closure_2(f, prev, elem);
+        fold_release_prev_acc(prev, prev_is_float, result, acc);
     }
     march_decrc(f);
     return result;
@@ -8711,9 +8822,10 @@ void *native_int_arr_fold(void *acc, void *arr, void *f) {
         int64_t x = *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8);
         void *elem = (void *)(intptr_t)((x << 1) | 1);   /* wire-tag */
         void *prev = result;
+        int prev_is_float = fold_acc_is_float(prev);
         march_incrc(f);
         result = call_closure_2(f, prev, elem);
-        fold_release_prev_acc(prev, result, acc, f);
+        fold_release_prev_acc(prev, prev_is_float, result, acc);
     }
     march_decrc(f);
     return result;
@@ -8920,8 +9032,7 @@ void *native_float_arr_map2(void *arr1, void *arr2, void *f) {
  * the next accumulator with nobody releasing the previous one — was the
  * second ~32 B/element leak in this loop. Fixed 2026-08-20 by the
  * fold_release_prev_acc call below; see that helper for why the release is
- * MARCH_FLOAT_TAG-guarded rather than unconditional, and for the residual
- * (non-Float heap accumulators) that is still open. Pinned by
+ * MARCH_FLOAT_TAG-guarded rather than unconditional. Pinned by
  * test/native/native_arr_fold_acc_leak_probe.march. */
 void *native_float_arr_fold(void *acc, void *arr, void *f) {
     int64_t len = native_float_arr_length(arr);
@@ -8931,10 +9042,11 @@ void *native_float_arr_fold(void *acc, void *arr, void *f) {
         memcpy(&x, (char *)arr + NATIVE_ARR_HDR + i * 8, 8);
         void *elem = march_alloc_float(x);
         void *prev = result;
+        int prev_is_float = fold_acc_is_float(prev);
         march_incrc(f);
         result = call_closure_2(f, prev, elem);
         march_decrc(elem);
-        fold_release_prev_acc(prev, result, acc, f);
+        fold_release_prev_acc(prev, prev_is_float, result, acc);
     }
     march_decrc(f);
     return result;
@@ -9064,9 +9176,10 @@ void *PREFIX##_fold(void *acc, void *arr, void *f) {                         \
         int64_t x = (int64_t)*(CTYPE *)((char *)arr + NATIVE_ARR_HDR + i * sizeof(CTYPE)); \
         void *elem = (void *)(intptr_t)((x << 1) | 1);                       \
         void *prev = result;                                                 \
+        int prev_is_float = fold_acc_is_float(prev);                         \
         march_incrc(f);                                                      \
         result = call_closure_2(f, prev, elem);                              \
-        fold_release_prev_acc(prev, result, acc, f);                         \
+        fold_release_prev_acc(prev, prev_is_float, result, acc);             \
     }                                                                        \
     march_decrc(f);                                                          \
     return result;                                                           \
@@ -9194,10 +9307,11 @@ void *native_f32_arr_fold(void *acc, void *arr, void *f) {
         double x = (double)*(float *)((char *)arr + NATIVE_ARR_HDR + i * 4);
         void *elem = march_alloc_float(x);
         void *prev = result;
+        int prev_is_float = fold_acc_is_float(prev);
         march_incrc(f);
         result = call_closure_2(f, prev, elem);
         march_decrc(elem);
-        fold_release_prev_acc(prev, result, acc, f);
+        fold_release_prev_acc(prev, prev_is_float, result, acc);
     }
     march_decrc(f);
     return result;

@@ -145,6 +145,9 @@ type lin_entry = {
   le_lin : Ast.linearity;
   le_used : bool ref;
   le_first_use : Ast.span option ref;
+  le_pending : ty option;
+  le_dup : Ast.span option ref;
+  le_mixed : Ast.span option ref;
 }
 type ctor_info = {
   ci_type : string;
@@ -266,6 +269,8 @@ type env = {
   no_panic_mod : bool;
   no_panic_modules : string list;
   nonexhaustive_match_spans : Ast.span list ref;
+  linear_ok_ids : (int, unit) Hashtbl.t;
+  linear_generic_uses : (Ast.span, string * int list * ty list * ty) Hashtbl.t;
   cap_producer_ivars : (int, Ast.span) Hashtbl.t;
   cap_narrow_factory_fns : (string, Ast.span) Hashtbl.t;
   cap_dicts : (string * string) list;
@@ -274,6 +279,8 @@ type env = {
   cap_dict_sites : Ast.span list ref;
   mint_cap_sites : (Ast.span * ty * bool * string) list ref;
   cap_narrow_sites : (Ast.span * ty) list ref;
+  node_send_sites : (Ast.span * ty) list ref;
+  json_codecs : ty list ref;
   json_cap_sites : (Ast.span * ty * string) list ref;
   pure_mod : bool;
   no_extern_mod : bool;
@@ -296,7 +303,7 @@ val make_env : Err.ctx -> (Ast.span, ty) Hashtbl.t -> env
 val lookup_ctor : StrMap.key -> env -> ctor_info option
 val add_ctor :
   string -> ctor_info -> ctor_info list StrMap.t -> ctor_info list StrMap.t
-val instantiate : ?use_span:Ast.span -> int -> env -> scheme -> ty
+val instantiate : ?use_span:Ast.span -> ?use_name:string -> int -> env -> scheme -> ty
 val stdlib_source_files : string list ref
 val cap_strict_ceiling : bool ref
 val builtin_cap_table : (string * string) list

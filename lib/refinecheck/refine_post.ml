@@ -46,9 +46,26 @@ let return_refine_ext (fd : A.fn_def) : (string * A.expr * string option) option
     Some (binder_name binder, pred, Some bool_sort)
   | Some (A.TyRefine (base, binder, pred)) when is_float_base base ->
     Some (binder_name binder, pred, Some float_sort)
+  (* A String return, at the opaque `Str` sort a String PARAMETER already
+     reflects to ([refined_param_ty]).  Absent until 2026-09-13: a
+     `{String | ...}` return fell through to [check_post_induction], which
+     has nothing to say about a non-ADT, and filed NOTHING — not even a
+     skip — so `--refine-report` could not tell "no return refinement" from
+     "silently unchecked" (specs/todos/2026-09-03-string-return-…). *)
+  | Some (A.TyRefine (base, binder, pred)) when is_string_base base ->
+    Some (binder_name binder, pred, Some str_sort)
   | Some (A.TyRefine (A.TyCon ({ A.txt = name; _ }, []) as base, binder, pred))
     when is_record_base base ->
     Some (binder_name binder, pred, Some (adt_sort_name name))
+  (* A LIST return, at the MEASURE-ONLY marker: the returned list is never a
+     datatype term (its heads are opaque `Elem`), but its MEASURES are —
+     `elts(_)` over a literal or a returned parameter (set refinements,
+     specs/2026-09-13-set-refinements-design.md).  Before this arm a
+     `{List(Int) | …}` return fell through to [check_post_induction] and,
+     lacking an axiomatised list measure, filed nothing at all. *)
+  | Some (A.TyRefine ((A.TyCon ({ A.txt = "List"; _ }, _) as base), binder, pred))
+    when is_adt_base base ->
+    Some (binder_name binder, pred, Some (meas_sort_name "List"))
   | _ -> None
 
 (* Return-position expressions of a body, each with the path reaching it. *)
@@ -88,9 +105,25 @@ let rec tails (path : (A.expr * bool) list) (e : A.expr) : ((A.expr * bool) list
    predicate with a field resolver so `s.field` becomes the SMT selector
    applied to the opaque const.  `has_record` is true when any record entry
    is present — signals check_post to include the datatype preamble. *)
-let scope_facts (sc : scope) : (string * Smt.sort) list * Smt.term list * bool * bool =
+(* The fifth component, [complete], is true when EVERY refined scope entry's
+   own predicate was loaded as an assumption.  [check_post] may treat a
+   satisfiable model as a definite violation (the record fast path) only when
+   it is: a model is a real input only if it satisfies every precondition the
+   function declares, and a promise that failed to load is a precondition the
+   solver never saw.  The shape that exposed this: a record parameter (which
+   turns the fast path on) next to `xs : {List(Int) | len(_) > 0 &&
+   member(1, elts(_))}`, whose promise does not translate because of `len`,
+   so `elts(xs) = {}` — an input the contract forbids — was reported as the
+   counterexample to a return of `xs`. *)
+let scope_facts (sc : scope)
+    : (string * Smt.sort) list * Smt.term list * bool * bool * bool =
   let has_string =
     List.exists (fun (_, (_, _, sort)) -> sort = Some str_sort) sc
+  in
+  let dropped = ref false in
+  let loaded ds asm has_rec = function
+    | Some qa -> (ds, qa :: asm, has_rec)
+    | None -> dropped := true; (ds, asm, has_rec)
   in
   let ds, asm, has_rec =
   List.fold_left
@@ -106,9 +139,7 @@ let scope_facts (sc : scope) : (string * Smt.sort) list * Smt.term list * bool *
         let c = Smt.Const name in
         let rv n = if n = b || n = "_" then Some c else Some (Smt.Const n) in
         let ds = (name, s) :: ds in
-        (match smt_of ~resolve_var:rv ~resolve_measure:(fun _ _ -> None) q with
-         | Some qa -> (ds, qa :: asm, has_rec)
-         | None -> (ds, asm, has_rec))
+        loaded ds asm has_rec (smt_of ~resolve_var:rv ~resolve_measure:(fun _ _ -> None) q)
       | None -> (ds, asm, has_rec)
       (* A String-refined entry declares a `Str` constant and loads its
          predicate, but MUST NOT set [has_rec]: that flag switches check_post
@@ -117,16 +148,14 @@ let scope_facts (sc : scope) : (string * Smt.sort) list * Smt.term list * bool *
          nothing, so flipping it there would be a false-positive engine. *)
       | Some sort_name when sort_name = str_sort ->
         let c = Smt.Const name in
-        let ds = (name, Smt.SData str_sort) :: ds in
+        let ds = (name, Smt.sdata str_sort) :: ds in
         let rv n = if n = b || n = "_" then Some c else None in
         let rm m n =
           if m = "len" && string_len_available () && (n = b || n = "_") then
             Some (Smt.App (strlen_fn, [ c ]))
           else None
         in
-        (match smt_of ~resolve_var:rv ~resolve_measure:rm q with
-         | Some qa -> (ds, qa :: asm, has_rec)
-         | None -> (ds, asm, has_rec))
+        loaded ds asm has_rec (smt_of ~resolve_var:rv ~resolve_measure:rm q)
       (* A MEASURE-ONLY entry ([meas_sort_prefix]) contributes NOTHING here, and
          must not fall into the ADT arm below: `$Meas:M_List` is a marker, not a
          declared sort, so `(declare-const xs $Meas:M_List)` would be a z3
@@ -136,10 +165,31 @@ let scope_facts (sc : scope) : (string * Smt.sort) list * Smt.term list * bool *
          false-positive engine.  Skipping leaves [check_post] behaving exactly as
          it did before these entries existed; carrying a list measure through a
          POSTcondition is a separate piece of work. *)
-      | Some sort_name when is_meas_sort sort_name -> (ds, asm, has_rec)
+      | Some sort_name when is_meas_sort sort_name ->
+        (* …except for its SET facts: `elts(_)` in the entry's own predicate is
+           the constant `elts$name`, the very symbol [check_post]'s resolvers
+           build for `elts(name)` in the return predicate.  Anything else in
+           the predicate (a bare binder, `len`) drops the whole fact, as
+           before — carrying `len` through a postcondition is still separate
+           work, and adding only what set contracts need keeps every existing
+           verdict where it was. *)
+        let rv _ = None in
+        let used = ref [] in
+        let rm m n =
+          if is_builtin_set_measure m && (n = b || n = "_" || n = name) then begin
+            let c = set_const m name in
+            if not (List.mem c !used) then used := c :: !used;
+            Some (Smt.Const c)
+          end
+          else None
+        in
+        (match smt_of ~resolve_var:rv ~resolve_measure:rm q with
+         | Some qa ->
+           (List.map (fun c -> (c, Smt.SSet Smt.set_unknown_elem)) !used @ ds, qa :: asm, has_rec)
+         | None -> dropped := true; (ds, asm, has_rec))
       | Some sort_name ->
         let c = Smt.Const name in
-        let ds = (name, Smt.SData sort_name) :: ds in
+        let ds = (name, adt_sort sort_name) :: ds in
         let rv n = if n = b || n = "_" then Some c else Some (Smt.Const n) in
         let rf = make_field_resolver b sort_name c in
         let rma m arg =
@@ -151,10 +201,10 @@ let scope_facts (sc : scope) : (string * Smt.sort) list * Smt.term list * bool *
          (* Predicate untranslatable: declare the const but don't set has_rec.
             Without a loaded assumption, scope_has_record would trigger the
             "SAT = definite error" path with an unconstrained cex — unsound. *)
-         | None -> (ds, asm, has_rec)))
+         | None -> dropped := true; (ds, asm, has_rec)))
     ([], [], false) sc
   in
-  (ds, asm, has_rec, has_string)
+  (ds, asm, has_rec, has_string, not !dropped)
 
 (* Check one return-position tail against the declared return refinement.
 
@@ -173,10 +223,52 @@ let scope_facts (sc : scope) : (string * Smt.sort) list * Smt.term list * bool *
    fixes one — the clause's `Bool` parameters.  [sc] only carries REFINED
    locals, so without this a bare `fn f(b : Bool) : {Bool | _ == true} do b end`
    would declare `b` at `Int` and use it as a Bool. *)
+(* ── Callee contracts inside a postcondition check (plan step 2.5) ─────────
+   A return refinement whose tail is a CALL (`go(xs, Nil)` in `reverse`) is
+   provable from the callee's own postcondition, exactly as a call site uses
+   it.  The lookup is a cell rather than a parameter because every entry point
+   ([gate_unverified_posts], the walk, a local `fn`) already threads a
+   different context; each installs a lookup that sees only PROVED contracts,
+   since an unproved one assumed here would make a false postcondition
+   provable. *)
+let post_lookup : (string -> A.expr list -> (string * A.expr * string option) option) ref =
+  ref (fun _ _ -> None)
+
+let with_post_lookup lookup (f : unit -> 'a) : 'a =
+  let saved = !post_lookup in
+  post_lookup := lookup;
+  Fun.protect ~finally:(fun () -> post_lookup := saved) f
+
+(* [sg]'s postcondition instantiated at [args], in the caller's namespace
+   (the same rule [postcond_of] applies to a resolved callee). *)
+let ret_instance (sg : fn_sig) (args : A.expr list) : (string * A.expr * string option) option =
+  match sg.ret with
+  | None -> None
+  | Some (b, p) -> (
+    match classify_pred b sg.param_names p with
+    | Closed -> Some (b, p, sg.ret_sort)
+    | Unusable -> None
+    | Relational ps ->
+      let env =
+        List.mapi (fun i n -> (n, List.nth_opt args i)) sg.param_names
+        |> List.filter_map (function "_", _ | _, None -> None | n, Some a -> Some (n, a))
+      in
+      if List.for_all (fun q -> List.mem_assoc q env) ps then Some (b, subst_params env p, sg.ret_sort)
+      else None)
+
+(* The conjuncts of a predicate, so one untranslatable conjunct of a callee's
+   contract drops only itself. *)
+let rec pred_conjuncts (e : A.expr) : A.expr list =
+  match e with
+  | A.EApp (A.EVar { A.txt = "&&"; _ }, [ a; b ], _) -> pred_conjuncts a @ pred_conjuncts b
+  | _ -> [ e ]
+
 let check_post ~root errctx ~span ?(record_sort : string option = None)
     ?(scalar_env : (string * Smt.sort) list = [])
     ?(fn_name : string option = None) ?(emit = true) ?(record = true)
     ?(fn_params : (string * A.ty option) list = [])
+    ?(string_ret = false)
+    ?(list_ret = false)
     (sc : scope) (binder : string) (ret_pred : A.expr)
     ((path, tail_e) : (A.expr * bool) list * A.expr) : bool =
   (* Mirrors [check_call]'s [note]: every exit records an outcome, so a return
@@ -260,8 +352,35 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
             | _ -> false)
          | None -> false)
   in
-  let base_decls, base_assume, scope_has_record, scope_has_string = scope_facts sc in
+  let base_decls, base_assume, scope_has_record, scope_has_string, scope_complete =
+    scope_facts sc
+  in
   let decls = ref base_decls and assume = ref base_assume in
+  (* String literals, for a String RETURN ([string_ret]): the tail `"a"` and
+     the predicate's `"a"` must meet on ONE constant, minted here exactly as
+     [check_call]'s [str_lit_const] mints it — an indexed `$strN` at the `Str`
+     sort, its byte length pinned, distinct from every literal already seen.
+     [uses_string] attaches the string preamble when any was minted, the same
+     "only when actually used" discipline [scope_has_string] follows. *)
+  let str_lit_tbl : (string, string) Hashtbl.t = Hashtbl.create 4 in
+  let uses_string = ref false in
+  let str_lit_const (s : string) : Smt.term option =
+    if not (string_len_available ()) then None
+    else
+      match Hashtbl.find_opt str_lit_tbl s with
+      | Some c -> Some (Smt.Const c)
+      | None ->
+        let c = Printf.sprintf "$str%d" (Hashtbl.length str_lit_tbl) in
+        Hashtbl.replace str_lit_tbl s c;
+        uses_string := true;
+        decls := (c, Smt.sdata str_sort) :: !decls;
+        assume :=
+          Smt.Eq (Smt.App (strlen_fn, [ Smt.Const c ]), Smt.IntLit (String.length s)) :: !assume;
+        Hashtbl.iter
+          (fun s' c' -> if s' <> s then assume := Smt.Ne (Smt.Const c, Smt.Const c') :: !assume)
+          str_lit_tbl;
+        Some (Smt.Const c)
+  in
   (* Scope names already declared into the `Str` sort by [scope_facts].  Both
      [var_const] and [resolve_measure] must agree with that sort, or the VC
      declares one symbol at two sorts and Z3 rejects the whole query. *)
@@ -292,6 +411,13 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
        return predicate talk about the same length. *)
     if m = "len" && string_len_available () && is_str_scope name then
       Some (Smt.App (strlen_fn, [ Smt.Const name ]))
+    (* `elts(xs)` over a body name: one set constant per name, at the
+       placeholder element sort [resolve_set_sorts] settles.  No `>= 0`. *)
+    else if is_builtin_set_measure m || is_set_measure m then begin
+      let nm = m ^ "$" ^ name in
+      decls := (nm, Smt.SSet Smt.set_unknown_elem) :: !decls;
+      Some (Smt.Const nm)
+    end
     else
       let c = Smt.Const (m ^ "$" ^ name) in
       decls := (m ^ "$" ^ name, Smt.SInt) :: !decls;
@@ -305,7 +431,17 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
        quantifiers that cause Z3 `unknown`); falls back to App(m,[arg]) for non-concrete
      - other: introduce a fresh symbolic constant with non-negativity if applicable *)
   let resolve_measure_app m arg_term =
-    if m = "len" then
+    if is_builtin_set_measure m then
+      (* A literal is folded by [smt_of_r] before this is consulted; anything
+         else is an opaque list/map, hence a fresh unconstrained set. *)
+      match if m = elts_measure then concrete_elts arg_term else None with
+      | Some t -> Some t
+      | None ->
+        incr post_measure_ctr;
+        let nm = Printf.sprintf "%s$app%d" m !post_measure_ctr in
+        decls := (nm, Smt.SSet Smt.set_unknown_elem) :: !decls;
+        Some (Smt.Const nm)
+    else if m = "len" then
       match concrete_len arg_term with
       | Some n -> Some (Smt.IntLit n)
       | None ->
@@ -330,6 +466,38 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
       Some (Smt.Const nm)
     end
   in
+  (* A built-in list measure of a CALL: a constant carrying the callee's
+     proved contract, conjunct by conjunct; a nested call in that contract
+     (`elts(reverse(xs))`) recurses. *)
+  let call_ctr = ref 0 in
+  let rec measure_of_call (m0 : string) (f : string) (cargs : A.expr list) : Smt.term option =
+    match !post_lookup f cargs with
+    | None -> None
+    | Some (b, q, _) ->
+      incr call_ctr;
+      let nm = Printf.sprintf "%s$%s%d" f (if m0 = "len" then "len" else "set") !call_ctr in
+      let c = Smt.Const nm in
+      if m0 = "len" then begin
+        decls := (nm, Smt.SInt) :: !decls;
+        assume := Smt.Ge (c, Smt.IntLit 0) :: !assume
+      end
+      else decls := (nm, Smt.SSet Smt.set_unknown_elem) :: !decls;
+      let rv n = if n = b || n = "_" then None else var_const n in
+      let rm m n = if n = b || n = "_" then (if m = m0 then Some c else None) else resolve_measure m n in
+      let rmc m g gargs =
+        if is_builtin_set_measure m || m = "len" then measure_of_call m g gargs else None
+      in
+      List.iter
+        (fun conj ->
+          match
+            smt_of ~resolve_var:rv ~resolve_measure:rm ~resolve_measure_app
+              ~resolve_str_lit:str_lit_const ~resolve_measure_call:rmc conj
+          with
+          | Some t -> assume := t :: !assume
+          | None -> ())
+        (pred_conjuncts q);
+      Some c
+  in
   (* Field resolver covering record-typed scope params: resolves `old.field` in
      the return expression via the SMT selector for the opaque param const. *)
   let scope_field_resolver : string -> string -> Smt.term option =
@@ -348,12 +516,36 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
             | None -> rf_param varname fname)
       (fun _ _ -> None) sc
   in
-  let scalar e = smt_of ~resolve_var:var_const ~resolve_measure ~resolve_measure_app ~resolve_field:scope_field_resolver e in
+  let scalar e =
+    smt_of ~resolve_var:var_const ~resolve_measure ~resolve_measure_app
+      ~resolve_field:scope_field_resolver ~resolve_str_lit:str_lit_const e
+  in
   let tail_term_opt =
     match record_sort with
     | Some sort_name ->
       (match tail_e with
        | A.ERecord (fields, _) -> reflect_record_literal sort_name fields scalar
+       | _ -> scalar tail_e)
+    (* A LIST tail is represented by its SET OF ELEMENTS, never by itself: a
+       literal folds to a concrete set, a returned body name to that name's
+       `elts$x` constant (the same symbol its own contract and `elts(x)` in
+       the predicate resolve to).  A call or anything else is opaque and
+       files the usual unreflectable-subject skip. *)
+    | None when list_ret ->
+      (match tail_e with
+       | A.EVar { A.txt = x; _ } -> resolve_measure elts_measure x
+       | A.ECon _ -> (match scalar tail_e with Some t -> concrete_elts t | None -> None)
+       | A.EApp (A.EVar { A.txt = f; _ }, cargs, _) -> measure_of_call elts_measure f cargs
+       | _ -> None)
+    | None when string_ret ->
+      (* A String tail: a literal mints its constant; a String-sorted scope
+         name (a parameter the scope already declared at `Str`) denotes
+         itself; anything else goes through [scalar], whose string resolver
+         reflects a literal in a larger expression and nothing else.  A
+         string built by a call is opaque and files a recorded skip. *)
+      (match tail_e with
+       | A.ELit (A.LitString s, _) -> str_lit_const s
+       | A.EVar { A.txt = x; _ } when is_str_scope x -> uses_string := true; Some (Smt.Const x)
        | _ -> scalar tail_e)
     | None -> scalar tail_e
   in
@@ -386,7 +578,12 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
       | Some sort_name -> make_field_resolver binder sort_name tail_term
       | None -> fun _ _ -> None
     in
-    let resolve_var name = if name = binder || name = "_" then Some tail_term else var_const name in
+    (* Under [list_ret] the binder denotes a LIST, which is not a term here;
+       only its measures are.  A predicate using it bare is untranslatable. *)
+    let resolve_var name =
+      if name = binder || name = "_" then (if list_ret then None else Some tail_term)
+      else var_const name
+    in
     (* ── Body-namespace resolvers, for the PATH CONTEXT only ────────────────
        A path condition was collected from the function BODY, so every name in
        it is a body name — a parameter or a local — and denotes itself.  The
@@ -416,13 +613,26 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
     List.iter
       (fun (cond, negated) ->
         match
-          smt_of ~resolve_var:path_resolve_var ~resolve_measure
+          smt_of ~vocab:false ~resolve_var:path_resolve_var ~resolve_measure
             ~resolve_field:path_resolve_field ~resolve_measure_app cond
         with
         | Some t -> assume := (if negated then Smt.Not t else t) :: !assume
         | None -> ())
       path;
-    (match smt_of_r ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app ret_pred with
+    (* `len(_)` over a String return is the string length of the returned
+       term — the same `$strlen` a String parameter's own `len` reflects to
+       ([resolve_measure] above) — not a fresh Int measure constant. *)
+    let goal_resolve_measure m name =
+      if string_ret && m = "len" && (name = binder || name = "_") && string_len_available ()
+      then Some (Smt.App (strlen_fn, [ tail_term ]))
+      (* `elts(_)` over a list return IS the tail's set term. *)
+      else if list_ret && m = elts_measure && (name = binder || name = "_") then Some tail_term
+      else resolve_measure m name
+    in
+    (match
+       smt_of_r ~resolve_var ~resolve_measure:goal_resolve_measure ~resolve_field
+         ~resolve_measure_app ~resolve_str_lit:str_lit_const ret_pred
+     with
      | Error e ->
        if enum_witness_error () then note Obligation.Violated
        else note (Obligation.Skipped (Obligation.Unreflectable_predicate (pred_str e)));
@@ -449,17 +659,36 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
              else None)
            !assume
        in
+       (* Settle every sort the producers left open (or skip on a
+          contradiction) before rendering: see [resolve_sorts]. *)
+       match resolve_sorts decls goal assumptions with
+       | None -> note (Obligation.Skipped Obligation.Sort_conflict); false
+       | Some (decls, goal, assumptions, measure_instances) ->
        let vc = { Smt.decls; assumptions; goal } in
-       let str_pre = if scope_has_string then string_preamble else "" in
+       let str_pre = if scope_has_string || !uses_string then string_preamble else "" in
        let preamble = str_pre ^
          if record_sort <> None || scope_has_record then
            (* When all measure apps were evaluated concretely (needs_axiom_preamble=false),
               skip the quantified-axiom measure_preamble.  The quantified forall axioms
               cause Z3 to return `unknown` for SAT queries even when the goal is trivial
               and measures no longer appear in it.  Type preamble alone suffices. *)
-           if !needs_axiom_preamble then record_vc_preamble ()
-           else type_only_preamble ()
+           let base = if !needs_axiom_preamble then record_vc_preamble () else type_only_preamble () in
+           base ^ "\n"
+           ^ query_instance_preamble ~declared:(str_pre ^ base) ~measures:!needs_axiom_preamble decls goal
+               assumptions measure_instances
          else ""
+       in
+       let contains hay needle =
+         let n = String.length needle and h = String.length hay in
+         let rec at i = i + n <= h && (String.sub hay i n = needle || at (i + 1)) in
+         at 0
+       in
+       let preamble =
+         preamble
+         ^ set_preamble ~elem_declared:(contains preamble "(declare-sort Elem 0)")
+             ~str_declared:(str_pre <> "")
+             ~measure_attached:((record_sort <> None || scope_has_record) && !needs_axiom_preamble)
+             vc
        in
        (match Refine.discharge ~root ~preamble vc with
         | Refine.Verified -> note Obligation.Proved; true
@@ -517,9 +746,12 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
              merely gates whether we tell the user; [note] below must still
              record the true verdict either way. *)
           let violated =
-            if scope_has_record then
+            if scope_has_record && scope_complete then
               (* With concrete record preconditions in scope, a SAT counterexample
-                 satisfying those preconditions IS a real violation — report it. *)
+                 satisfying those preconditions IS a real violation — report it.
+                 Only when ALL of them were loaded ([scope_complete]): a model
+                 that ignores an untranslated promise may be an input the
+                 function's own signature rules out. *)
               (match first with Refine.Refuted _ -> emit_error (); true | _ -> false)
             else
               (match Refine.discharge ~root ~preamble { vc with Smt.goal = Smt.Not goal } with
@@ -610,7 +842,7 @@ let rec smt_sort_of_ty (t : A.ty) : Smt.sort option =
   | A.TyCon ({ A.txt = "Int"; _ }, []) -> Some Smt.SInt
   | A.TyCon ({ A.txt = "Bool"; _ }, []) -> Some Smt.SBool
   | A.TyCon ({ A.txt; _ }, _) when Hashtbl.mem adt_ctors (adt_sort_name txt) ->
-    Some (Smt.SData (adt_sort_name txt))
+    Some (adt_sort (adt_sort_name txt))
   | _ -> None
 
 let ctor_belongs (ctor : string) (adt : string) : bool =
@@ -632,6 +864,18 @@ let ctor_belongs (ctor : string) (adt : string) : bool =
    deep inside [check_tail] below, well past everything this function
    decides. Returns the destructured pieces the caller needs so nothing is
    computed twice. *)
+(* A datatype Tier 2 can build queries over: one the measure preamble
+   declares, or the built-in `List`, whose instances and structural `len`/`elts`
+   each query declares itself (plan step 2.2). *)
+let tier2_adt (adt : string) : bool = Hashtbl.mem measure_preamble_sorts adt || adt = list_adt
+
+(* The internal structural measure a predicate's [m] means over a list, when it
+   means one: `len` unless a user measure took that name, and `elts`. *)
+let list_structure_measure (m : string) : string option =
+  if m = "len" && not (is_axiom_measure "len") then Some list_len_measure
+  else if m = elts_measure then Some list_elts_measure
+  else None
+
 let post_induction_shape (fd : A.fn_def)
   : (string * string * string list * A.expr * A.fn_clause * string list) option =
   match fd.A.fn_ret_ty, fd.A.fn_clauses with
@@ -642,12 +886,51 @@ let post_induction_shape (fd : A.fn_def)
     let params = List.map param_name_of c.A.fc_params in
     match classify_pred binder params pred with
     | Unusable -> None
-    | Closed when Hashtbl.mem measure_preamble_sorts ret_adt ->
+    | Closed when tier2_adt ret_adt ->
       Some (ret_adt, binder, params, pred, c, [])
-    | Relational ps when Hashtbl.mem measure_preamble_sorts ret_adt ->
+    | Relational ps when tier2_adt ret_adt ->
       Some (ret_adt, binder, params, pred, c, ps)
     | Closed | Relational _ -> None)
   | _ -> None
+
+(* Shape 2's scrutinee requirement: the matched parameter's DECLARED type is
+   an ADT the measure preamble declares.  An unannotated parameter has a name
+   ([param_name_of]) but no sort, and is not a Shape 2 match. *)
+let induction_match_adt (c : A.fn_clause) (mparam : string) : string option =
+  List.find_opt (fun fp -> param_name_of fp = mparam) c.A.fc_params
+  |> (fun o -> Option.bind o param_ty_of)
+  |> (fun o -> Option.bind o smt_sort_of_ty)
+  |> function
+  | Some (Smt.SData (madt, _)) when madt <> "Elem" && tier2_adt madt ->
+    Some madt
+  | _ -> None
+
+(* A clause body with its leading local `fn` definitions set aside: `dedup`
+   defines `go` and then matches on its parameter, which is Shape 2 once the
+   definition is out of the way.  The locals' contracts reach the remaining
+   body through [post_lookup] ([check_fn_post_verdict]). *)
+let induction_body (e : A.expr) : A.expr =
+  match e with
+  | A.EBlock (es, _) -> (
+    match List.rev es with
+    | last :: before when before <> [] && List.for_all (function A.ELetFn _ -> true | _ -> false) before ->
+      last
+    | _ -> e)
+  | _ -> e
+
+(* Does [check_post_induction] reach a body shape it checks (Shape 1 or
+   Shape 2), rather than its final `| _ -> false`?  Solver-free, for
+   [Refine_audit]: [post_induction_shape] alone accepts the signature
+   whatever the body is. *)
+let post_induction_checks (fd : A.fn_def) : bool =
+  match post_induction_shape fd with
+  | None -> false
+  | Some (_, _, params, _, c, _) -> (
+    match induction_body c.A.fc_body with
+    | A.ECon _ -> true
+    | A.EMatch (A.EVar sv, _, _) when List.mem sv.A.txt params ->
+      induction_match_adt c sv.A.txt <> None
+    | _ -> false)
 
 let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
   let self = fd.A.fn_name.A.txt in
@@ -680,10 +963,25 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
                rest of the compilation.  Any conflict abandons the whole VC. *)
             let decls : (string, Smt.sort) Hashtbl.t = Hashtbl.create 16 in
             let conflict = ref false in
+            (* The opaque `Elem` is "not known yet" (see [resolve_sorts]), so it
+               agrees with any sort and gives way to a concrete one: a list
+               pattern's `h` is `Elem` until a guard `h > 0` reads it as Int. *)
+            let rec meet (a : Smt.sort) (b : Smt.sort) : Smt.sort option =
+              match a, b with
+              | Smt.SData ("Elem", []), x | x, Smt.SData ("Elem", []) -> Some x
+              | Smt.SData (n, xs), Smt.SData (m, ys) when n = m && List.length xs = List.length ys ->
+                let zs = List.map2 meet xs ys in
+                if List.for_all Option.is_some zs then Some (Smt.SData (n, List.map Option.get zs)) else None
+              | Smt.SSet x, Smt.SSet y -> Option.map (fun z -> Smt.SSet z) (meet x y)
+              | x, y -> if x = y then Some x else None
+            in
             let declare n s =
               match Hashtbl.find_opt decls n with
               | None -> Hashtbl.replace decls n s; true
-              | Some s' -> if s' = s then true else (conflict := true; false)
+              | Some s' -> (
+                match meet s' s with
+                | Some m -> Hashtbl.replace decls n m; true
+                | None -> conflict := true; false)
             in
             let assume = ref [] in
             let ctr = ref 0 in
@@ -696,7 +994,7 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
             let ok = ref true in
             (match mctx with
              | Some (mparam, madt, _, _) ->
-               if not (declare mparam (Smt.SData madt)) then ok := false
+               if not (declare mparam (adt_sort madt)) then ok := false
              | None -> ());
             (match pat with
              | Some (_, binder_sorts) ->
@@ -710,19 +1008,40 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
                 | Some s -> if not (declare (param_name_of fp) s) then ok := false
                 | None -> ())
               c.A.fc_params;
+            (* Hypotheses loaded after the reflectors are defined (below). *)
+            let param_refinements =
+              List.filter_map
+                (fun fp ->
+                  match param_ty_of fp with
+                  | Some (A.TyRefine (base, bnd, p)) ->
+                    let adt =
+                      match smt_sort_of_ty base with Some (Smt.SData (n, _)) -> n | _ -> ""
+                    in
+                    Some (param_name_of fp, binder_name bnd, adt, p)
+                  | _ -> None)
+                c.A.fc_params
+            in
             (* ── Reflection, always at a KNOWN expected sort ─────────────── *)
             let rec reflect_at (s : Smt.sort) (e : A.expr) : Smt.term option =
               match s with
-              | Smt.SData d when d <> "Elem" -> reflect_dt d e
+              | Smt.SData (d, _) when d <> "Elem" -> reflect_dt d e
               | Smt.SInt -> reflect_int e
-              (* An `Elem` or Bool field is invisible to a structural measure:
-                 an unconstrained constant of the right sort keeps the VC
-                 well-sorted and asserts nothing. *)
+              (* An `Elem` payload that is a variable stays that variable, so
+                 `Cons(h, acc)` keeps `h` for a structural `elts`; its sort
+                 is whatever the variable already has, or `Elem`, and
+                 [resolve_sorts] settles the instance. *)
+              | Smt.SData ("Elem", []) -> (
+                match e with
+                | A.EVar { A.txt = x; _ } -> if declare x s then Some (Smt.Const x) else None
+                | _ -> Some (fresh s))
+              (* A Bool field, or any other payload, is invisible to a
+                 structural measure: an unconstrained constant of the right
+                 sort keeps the VC well-sorted and asserts nothing. *)
               | _ -> Some (fresh s)
             and reflect_dt (d : string) (e : A.expr) : Smt.term option =
               match e with
               | A.EVar { A.txt = x; _ } ->
-                if declare x (Smt.SData d) then Some (Smt.Const x) else None
+                if declare x (adt_sort d) then Some (Smt.Const x) else None
               | A.ECon (ct, args, _) when ctor_belongs ct.A.txt d ->
                 let fs = try Hashtbl.find ctor_field_sorts ct.A.txt with Not_found -> [] in
                 if List.length fs <> List.length args then None
@@ -733,7 +1052,7 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
                       | Some t, Some ts -> Some (t :: ts)
                       | _ -> None)
                     args fs (Some [])
-                  |> Option.map (fun ts -> Smt.App (ct.A.txt, ts))
+                  |> Option.map (fun ts -> ctor_term d ct.A.txt ts)
               (* ── THE INDUCTION HYPOTHESIS ─────────────────────────────────
                  A self-recursive call returning this datatype.  It becomes a
                  fresh opaque constant; the postcondition is assumed ABOUT that
@@ -747,7 +1066,7 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
               | A.EApp (A.EVar { A.txt = f; _ }, args, _) when f = self && d = ret_adt ->
                 incr ctr;
                 let nm = Printf.sprintf "$t2rec%d" !ctr in
-                Hashtbl.replace decls nm (Smt.SData ret_adt);
+                Hashtbl.replace decls nm (adt_sort ret_adt);
                 let cst = Smt.Const nm in
                 let ih_arg =
                   match mctx with
@@ -759,11 +1078,34 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
                 in
                 (match ih_arg with
                  | Some _ ->
+                   (* A non-variable actual (`Cons(h, acc)` in an accumulator
+                      call) is bound to a fresh constant reflected at its
+                      parameter's sort, so the hypothesis reads a measure of a
+                      NAME: the predicate translator would otherwise re-reflect
+                      the constructor with its own resolvers, declaring `h`
+                      at a sort that disagrees with its pattern binder. *)
+                   let param_sort i =
+                     match List.nth_opt c.A.fc_params i with
+                     | Some fp -> Option.bind (param_ty_of fp) smt_sort_of_ty
+                     | None -> None
+                   in
                    let env =
-                     List.mapi (fun i n -> (n, List.nth_opt args i)) params
+                     List.mapi (fun i n -> (i, n, List.nth_opt args i)) params
                      |> List.filter_map (function
-                          | "_", _ | _, None -> None
-                          | n, Some a -> Some (n, a))
+                          | _, "_", _ | _, _, None -> None
+                          | _, n, Some (A.EVar _ as a) -> Some (n, a)
+                          | i, n, Some a -> (
+                            match param_sort i with
+                            | Some srt -> (
+                              match reflect_at srt a with
+                              | Some t ->
+                                incr ctr;
+                                let nm = Printf.sprintf "$t2arg%d" !ctr in
+                                Hashtbl.replace decls nm srt;
+                                assume := Smt.Eq (Smt.Const nm, t) :: !assume;
+                                Some (n, evar nm)
+                              | None -> None)
+                            | None -> Some (n, a)))
                    in
                    if List.for_all (fun p -> List.mem_assoc p env) ps then
                      (match pred_term cst (subst_params env pred) with
@@ -771,17 +1113,43 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
                       | None -> ())
                  | None -> ());
                 Some cst
+              (* Another function's call at list sort: a constant carrying
+                 that function's PROVED contract (plan step 2.5), conjunct by
+                 conjunct, so `Nil -> reverse(acc)` in a helper reads
+                 `reverse`'s postcondition. *)
+              | A.EApp (A.EVar { A.txt = f; _ }, args, _) when d = list_adt -> (
+                match !post_lookup f args with
+                | None -> None
+                | Some (b, q, _) ->
+                  incr ctr;
+                  let nm = Printf.sprintf "$t2call%d" !ctr in
+                  Hashtbl.replace decls nm (adt_sort d);
+                  let cst = Smt.Const nm in
+                  List.iter
+                    (fun conj ->
+                      match pred_term_as ~bnd:b ~adt:d cst conj with
+                      | Some t -> assume := t :: !assume
+                      | None -> ())
+                    (pred_conjuncts q);
+                  Some cst)
               | _ -> None
             and reflect_int (e : A.expr) : Smt.term option =
-              smt_of ~resolve_var:rv_int ~resolve_measure:rm ~resolve_measure_app:rma e
+              (* Program text (a tail or a guard): no set vocabulary. *)
+              smt_of ~vocab:false ~resolve_var:rv_int ~resolve_measure:rm ~resolve_measure_app:rma e
             and rv_int (x : string) : Smt.term option =
               if declare x Smt.SInt then Some (Smt.Const x) else None
             and rm (m : string) (x : string) : Smt.term option =
+              match list_structure_measure m with
+              | Some lm -> Option.map (fun t -> Smt.App (lm, [ t ])) (reflect_dt list_adt (evar x))
+              | None ->
               if not (is_axiom_measure m) then None
               else
                 let a = Hashtbl.find axiom_measures m in
                 Option.map (fun t -> Smt.App (m, [ t ])) (reflect_dt a (evar x))
             and rma (m : string) (arg : Smt.term) : Smt.term option =
+              match list_structure_measure m with
+              | Some lm -> Some (Smt.App (lm, [ arg ]))
+              | None ->
               if not (is_axiom_measure m) then None
               else
                 match concrete_measure_app m arg with
@@ -791,10 +1159,19 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
                The binder is ADT-valued, so it can appear only under a measure
                (`size(_)`) or as a bare occurrence; both route to [bt]. *)
             and pred_term (bt : Smt.term) (p : A.expr) : Smt.term option =
-              let rv x = if x = binder || x = "_" then Some bt else rv_int x in
+              pred_term_as ~bnd:binder ~adt:ret_adt bt p
+            (* A predicate whose binder [bnd] stands for [bt], a term of datatype
+               [adt]: this function's own return, or a callee's. *)
+            and pred_term_as ~(bnd : string) ~(adt : string) (bt : Smt.term) (p : A.expr) :
+                Smt.term option =
+              let rv x = if x = bnd || x = "_" then Some bt else rv_int x in
               let rm' m x =
+                match list_structure_measure m with
+                | Some lm when (x = bnd || x = "_") && adt = list_adt -> Some (Smt.App (lm, [ bt ]))
+                | Some _ -> rm m x
+                | None ->
                 if not (is_axiom_measure m) then None
-                else if x = binder || x = "_" then Some (Smt.App (m, [ bt ]))
+                else if x = bnd || x = "_" then Some (Smt.App (m, [ bt ]))
                 else rm m x
               in
               smt_of ~resolve_var:rv ~resolve_measure:rm' ~resolve_measure_app:rma p
@@ -807,16 +1184,30 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
                goal provable that would otherwise fail. *)
             (match pat, mctx with
              | None, _ -> ()
-             | Some (ctor, binder_sorts), Some (mparam, _, _, _) ->
+             | Some (ctor, binder_sorts), Some (mparam, madt, _, _) ->
                let pat_eq =
                  List.fold_right
                    (fun (n, _) acc -> Option.map (fun ts -> Smt.Const n :: ts) acc)
                    binder_sorts (Some [])
-                 |> Option.map (fun ts -> Smt.Eq (Smt.Const mparam, Smt.App (ctor, ts)))
+                 |> Option.map (fun ts -> Smt.Eq (Smt.Const mparam, ctor_term madt ctor ts))
                in
                (match pat_eq with Some t -> assume := t :: !assume | None -> ok := false)
              (* A pattern with no matched parameter is not a shape we build. *)
              | Some _, None -> ok := false);
+            (* A parameter's refinement is a hypothesis: every call site is
+               obliged to establish it (a local that escapes reaches here with
+               its parameter refinements stripped, see
+               [Refine_check.visit_local_fn]).  A conjunct that does not
+               translate is dropped, which only loses a proof. *)
+            List.iter
+              (fun (name, bnd, adt, p) ->
+                List.iter
+                  (fun conj ->
+                    match pred_term_as ~bnd ~adt (Smt.Const name) conj with
+                    | Some t -> assume := t :: !assume
+                    | None -> ())
+                  (pred_conjuncts p))
+              param_refinements;
             (* Reflecting the tail is what mints the IH assumptions, so it must
                happen before the assumption list is read. *)
             let tail_term = reflect_dt ret_adt tail_e in
@@ -838,24 +1229,43 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
                     Hashtbl.fold (fun n s acc -> (n, s) :: acc) decls []
                     |> List.sort compare
                   in
-                  let vc = { Smt.decls; assumptions = !assume; goal } in
-                  match Refine.discharge ~root ~preamble:!measure_preamble vc with
+                  (* The same sort resolution every other query gets: a
+                     parameter declared at a generic instance meets measures
+                     declared at their own instances here. *)
+                  match resolve_sorts decls goal !assume with
+                  | None -> Some (Obligation.Skipped Obligation.Sort_conflict)
+                  | Some (decls, goal, assumptions, measure_instances) ->
+                  let vc = { Smt.decls; assumptions; goal } in
+                  let preamble =
+                    !measure_preamble ^ "\n"
+                    ^ query_instance_preamble ~declared:!measure_preamble ~measures:true decls goal
+                        assumptions measure_instances
+                  in
+                  (* Set literals (`elts(Cons(h, Nil))` folds to one) need their
+                     `define-sort`s, after everything that declares `Elem`. *)
+                  let preamble =
+                    let contains hay needle =
+                      let n = String.length needle and h = String.length hay in
+                      let rec at i = i + n <= h && (String.sub hay i n = needle || at (i + 1)) in
+                      at 0
+                    in
+                    preamble
+                    ^ set_preamble ~elem_declared:(contains preamble "(declare-sort Elem 0)")
+                        ~str_declared:false ~measure_attached:(!measure_preamble <> "") vc
+                  in
+                  match Refine.discharge ~root ~preamble vc with
                   | Refine.Verified -> Some Obligation.Proved
                   | _ when not refute -> Some (Obligation.Skipped Obligation.Solver_undecided)
                   (* DEFINITE failure only: "not proved" is not "violated".  The
                      predicate is reported as violated only when its NEGATION is
                      itself Verified — i.e. it can never hold. *)
                   | _ ->
-                    if Refine.discharge ~root ~preamble:!measure_preamble
-                         { vc with Smt.goal = Smt.Not goal }
+                    if Refine.discharge ~root ~preamble { vc with Smt.goal = Smt.Not goal }
                        = Refine.Verified
                     then Some Obligation.Violated
                     else Some (Obligation.Skipped Obligation.Solver_undecided))
       in
-      let proved_tail ~mctx ~pat t =
-        check_tail ~mctx ~pat ~refute:false t = Some Obligation.Proved
-      in
-      (match c.A.fc_body with
+      (match induction_body c.A.fc_body with
       (* ── Shape 1: a constructor-literal body ───────────────────────────────
          The simplest possible case, and one that needs no induction at all:
          there is no recursive call to hypothesise over, so the goal is just the
@@ -920,25 +1330,36 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
           in
           ix 0 params
         in
-        let mparam_ty =
-          List.find_opt (fun fp -> param_name_of fp = mparam) c.A.fc_params
-          |> (fun o -> Option.bind o param_ty_of)
-          |> (fun o -> Option.bind o smt_sort_of_ty)
-        in
-        match mparam_ty with
-        | Some (Smt.SData madt) when madt <> "Elem" ->
-          if not (Hashtbl.mem measure_preamble_sorts madt) then false
-          else begin
+        match induction_match_adt c mparam with
+        | None -> false
+        | Some madt ->
+          begin
             (* Structurally smaller variables, computed over the WHOLE clause
                body so a nested match contributes its components too. *)
-            let sset = structural_subvars mparam c.A.fc_body in
+            let sset = structural_subvars mparam (induction_body c.A.fc_body) in
             let mctx = Some (mparam, madt, mparam_idx, sset) in
+            (* Every tail's verdict, for the ledger (plan step 2.4).  A tail or
+               branch no query could be built for is an unreflectable subject,
+               as in Shape 1. *)
+            let verdicts : Obligation.verdict list ref = ref [] in
+            let unbuilt () =
+              Obligation.Skipped
+                (Obligation.Unreflectable_subject (Printf.sprintf "the return expression of `%s`" self))
+            in
+            let proved_tail ~mctx ~pat t =
+              let v =
+                match check_tail ~mctx ~pat ~refute:record t with Some v -> v | None -> unbuilt ()
+              in
+              verdicts := v :: !verdicts;
+              v = Obligation.Proved
+            in
+            let reject () = verdicts := unbuilt () :: !verdicts; false in
             let check_branch (br : A.branch) : bool =
               match br.A.branch_pat with
               | A.PatCon (ct, subpats) when ctor_belongs ct.A.txt madt -> (
                 let ctor = ct.A.txt in
                 let fsorts = try Hashtbl.find ctor_field_sorts ctor with Not_found -> [] in
-                if List.length subpats <> List.length fsorts then false
+                if List.length subpats <> List.length fsorts then reject ()
                 else
                   (* Only flat PatVar / PatWild sub-patterns: a nested pattern
                      would need an equation we do not build. *)
@@ -951,12 +1372,12 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
                         | _ -> None)
                       subpats
                   in
-                  if List.exists Option.is_none names then false
+                  if List.exists Option.is_none names then reject ()
                   else
                     let names = List.map Option.get names in
                     (* A binder that reuses a parameter's name would be
                        conflated with it (both reflect to `Const name`). *)
-                    if List.exists (fun n -> List.mem n params) names then false
+                    if List.exists (fun n -> List.mem n params) names then reject ()
                     else
                       let binder_sorts = List.combine names fsorts in
                       let base_path =
@@ -965,19 +1386,38 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
                       let ts = tails base_path br.A.branch_body in
                       (* Fold, not for_all: no short-circuit, so the VC cache is
                          warmed uniformly and the verdict is order-independent. *)
-                      ts <> []
+                      (ts <> [] || reject ())
                       && List.fold_left
                            (fun acc t ->
                              proved_tail ~mctx ~pat:(Some (ctor, binder_sorts)) t && acc)
                            true ts)
               (* A catch-all arm binds no constructor, so there is no pattern
                  equation pinning the scrutinee — nothing to prove from. *)
-              | _ -> false
+              | _ -> reject ()
             in
-            branches <> []
-            && List.fold_left (fun acc br -> check_branch br && acc) true branches
-          end
-        | _ -> false)
+            let ok =
+              branches <> []
+              && List.fold_left (fun acc br -> check_branch br && acc) true branches
+            in
+            if record then begin
+              let vs = List.rev !verdicts in
+              let v =
+                if ok then Obligation.Proved
+                else if List.mem Obligation.Violated vs then Obligation.Violated
+                else
+                  match List.find_opt (fun v -> v <> Obligation.Proved) vs with
+                  | Some v -> v
+                  | None -> unbuilt ()
+              in
+              Obligation.record
+                { Obligation.span = fd.A.fn_name.A.span
+                ; callee = self
+                ; predicate = pred_str pred
+                ; verdict = v
+                ; kind = Obligation.Postcondition }
+            end;
+            ok
+          end)
       | _ -> false)
 
 (* =================================================================
@@ -995,17 +1435,129 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
    [~record], though: its constructor-literal shape writes an obligation, and
    this function runs twice per refined-return function, so without the thread
    every such postcondition would be counted twice in `--refine-report`. *)
-let check_fn_post_verdict ~root errctx ?(emit = true) (fd : A.fn_def) : bool =
+(* Does a predicate apply a built-in set measure (`elts`, `keys`) anywhere? *)
+let rec pred_mentions_elts (e : A.expr) : bool =
+  match e with
+  | A.EApp (A.EVar { A.txt; _ }, args, _) ->
+    is_builtin_set_measure txt || List.exists pred_mentions_elts args
+  | A.EApp (f, args, _) -> pred_mentions_elts f || List.exists pred_mentions_elts args
+  | A.ECon (_, args, _) | A.ETuple (args, _) -> List.exists pred_mentions_elts args
+  | A.EField (r, _, _) | A.EAnnot (r, _, _) -> pred_mentions_elts r
+  | _ -> false
+
+(* ── `@[assume]`: an ASSUMED postcondition (plan §3.2) ─────────────────────
+   Liquid Haskell's `assume`: the declared return refinement propagates to
+   every call site WITHOUT a proof, and the body is not checked against it.
+   It exists for a contract about a body the checker cannot see into — the
+   stdlib `Set` HAMT, whose element set no measure can compute — and is
+   counted in the ledger under `trusted`, kind postcondition, so
+   `--refine-report` shows exactly how many facts a module takes on faith.
+   Distinct from `@[trusted]`, which accepts a SKIP inside `cap verified` and
+   never propagates anything. *)
+let is_assumed (fd : A.fn_def) : bool = List.mem "assume" fd.A.fn_attrs
+
+let assumed_return (fd : A.fn_def) : A.expr option =
+  match Option.map unlinear fd.A.fn_ret_ty with
+  | Some (A.TyRefine (_, _, pred)) -> Some pred
+  | _ -> None
+
+(* Does [check_fn_post_verdict] actually CHECK [fd]'s return refinement —
+   file an obligation or produce a verdict — rather than fall through to a
+   path that silently files nothing?  The same routing, solver-free, so
+   [Refine_audit] cannot report Enforced for a contract the checker never
+   looks at (a `{List(Int) | len(_) > 0}` return with no list measure, or a
+   Tier 2 match on an unannotated parameter). *)
+let return_refinement_checked (fd : A.fn_def) : bool =
+  (is_assumed fd && assumed_return fd <> None)
+  ||
+  match return_refine_ext fd with
+  | None -> post_induction_checks fd
+  | Some (_, ret_pred, Some marker) when is_meas_sort marker && not (pred_mentions_elts ret_pred) ->
+    post_induction_checks fd
+  | Some _ -> true
+
+let rec check_fn_post_verdict ~root errctx ?(emit = true) (fd : A.fn_def) : bool =
+  (* A local `fn` with a refined return, defined in a clause's top-level block
+     (`reverse`'s `go`), is proved first; each one proved joins the contract
+     lookup for the functions after it and for the enclosing body (plan step
+     2.5).  Checked with [~emit:false]: the walk checks and reports it again
+     through [Refine_check.visit_local_fn]. *)
+  let locals =
+    List.concat_map
+      (fun (c : A.fn_clause) ->
+        match c.A.fc_body with
+        | A.EBlock (es, _) ->
+          List.filter_map
+            (function
+              | A.ELetFn (n, ps, (Some (A.TyRefine _) as rt), body, sp) ->
+                Some (n.A.txt, local_fn_def n ps rt body sp)
+              | _ -> None)
+            es
+        | _ -> [])
+      fd.A.fn_clauses
+  in
+  if locals = [] then check_fn_post_verdict_core ~root errctx ~emit fd
+  else
+    let lookup =
+      List.fold_left
+        (fun lookup (n, lfd) ->
+          if with_post_lookup lookup (fun () -> check_fn_post_verdict ~root errctx ~emit:false lfd)
+          then
+            let sg = sig_of_fn lfd in
+            fun f args -> if f = n then ret_instance sg args else lookup f args
+          else fun f args -> if f = n then None else lookup f args)
+        !post_lookup locals
+    in
+    with_post_lookup lookup (fun () -> check_fn_post_verdict_core ~root errctx ~emit fd)
+
+and check_fn_post_verdict_core ~root errctx ?(emit = true) (fd : A.fn_def) : bool =
+  match assumed_return fd with
+  | Some pred when is_assumed fd ->
+    if emit then
+      Obligation.record
+        { Obligation.span = fd.A.fn_name.A.span; callee = fd.A.fn_name.A.txt
+        ; predicate = pred_str pred; verdict = Obligation.Trusted
+        ; kind = Obligation.Postcondition };
+    true
+  | _ ->
   match return_refine_ext fd with
   | None -> check_post_induction ~root ~record:emit fd
+  (* A LIST return takes the elts path ONLY when its predicate uses `elts`;
+     a list contract over an Int measure (`llen(_) == llen(xs) + 1`) keeps
+     the Tier 2 induction path it always had, which the elts path cannot
+     replace (it never reduces a measure through the recursion). *)
+  | Some (_, ret_pred, Some marker) when is_meas_sort marker && not (pred_mentions_elts ret_pred) ->
+    check_post_induction ~root ~record:emit fd
+  (* An `elts` list contract whose body recurses over a list parameter is
+     proved by induction when it can be (plan step 2.3); the elts path below,
+     which reports definite failures but never reduces through the
+     recursion, still runs when induction does not prove it. *)
+  | Some (_, ret_pred, Some marker)
+    when is_meas_sort marker && post_induction_checks fd
+         && check_post_induction ~root ~record:false fd ->
+    (* Recorded here, once: the elts path records its own verdict when it runs
+       instead, so the induction attempt itself must not. *)
+    if emit then
+      Obligation.record
+        { Obligation.span = fd.A.fn_name.A.span; callee = fd.A.fn_name.A.txt
+        ; predicate = pred_str ret_pred; verdict = Obligation.Proved
+        ; kind = Obligation.Postcondition };
+    true
   | Some (binder, ret_pred, marker) ->
     (* [record_sort] must carry only a DECLARED sort name.  A scalar marker
        (`$Bool`) is not one: handing it here would send the return value down
        the record-literal reflection and the datatype preamble, for a sort
        nobody declares. *)
+    (* …nor is the opaque `Str` sort a record: a String return takes
+       [check_post]'s [string_ret] path (literal minting, `$strlen`), never
+       the record-literal reflection. *)
     let record_sort =
-      match marker with Some s when not (is_scalar_sort s) -> Some s | _ -> None
+      match marker with
+      | Some s when not (is_scalar_sort s) && s <> str_sort && not (is_meas_sort s) -> Some s
+      | _ -> None
     in
+    let string_ret = marker = Some str_sort in
+    let list_ret = (match marker with Some s -> is_meas_sort s | None -> false) in
     let clause_ok (c : A.fn_clause) =
       let sc = List.fold_left scope_add_fnparam [] c.A.fc_params in
       let scalar_env =
@@ -1022,8 +1574,8 @@ let check_fn_post_verdict ~root errctx ?(emit = true) (fd : A.fn_def) : bool =
       ts <> []
       && List.fold_left
            (fun acc t ->
-             check_post ~root errctx ~span:c.A.fc_span ~record_sort ~scalar_env
-               ~fn_name:(Some fd.A.fn_name.A.txt) ~emit ~record:emit ~fn_params
+             check_post ~root errctx ~span:c.A.fc_span ~record_sort ~scalar_env ~string_ret
+               ~list_ret ~fn_name:(Some fd.A.fn_name.A.txt) ~emit ~record:emit ~fn_params
                sc binder ret_pred t
              && acc)
            true ts
@@ -1057,25 +1609,87 @@ let check_fn_post ~root errctx (fd : A.fn_def) : unit =
    order-independent only by construction of that index; a pre-pass reuses
    [collect_all_defs]'s own traversal, is order-independent by construction, and
    keeps [visit] unchanged.  Diagnostics are emitted exactly once, later, by
-   [check_fn_post] during the walk; the repeated discharge hits the VC cache. *)
+   [check_fn_post] during the walk; the repeated discharge hits the VC cache. 
+
+
+   Since plan step 2.5 a postcondition check may itself use a callee's
+   contract ([post_lookup]), so the gate is a monotone fixpoint: every
+   postcondition starts unproven (absent from [defs]), each round checks the
+   ones not yet proven with only the contracts proven so far in view, and a
+   proof is admitted to [defs] at once.  A contract is therefore never used
+   before it is proved, cycles included (neither side of a mutual dependency
+   can be proved from the other's unproven contract).  A later round
+   re-checks only a function that calls a name proved in the round before. *)
 let gate_unverified_posts ~root errctx (defs : (string, fn_sig option) Hashtbl.t)
     (decls : A.decl list) : unit =
-  let rec go prefix decls =
+  let pending = ref [] in
+  let rec collect prefix decls =
     List.iter
       (function
         | A.DFn (fd, _) ->
           let key = if prefix = "" then fd.A.fn_name.A.txt else prefix ^ "." ^ fd.A.fn_name.A.txt in
           (match Hashtbl.find_opt defs key with
-           | Some (Some sg) when Option.is_some sg.ret ->
-             if not (check_fn_post_verdict ~root errctx ~emit:false fd) then
-               (* Keep the entry (it must still shadow an outer same-named
-                  function for [resolve_call]); drop only the postcondition. *)
-               Hashtbl.replace defs key (Some { sg with ret = None })
+           (* Only a declaration that itself carries a refined return: two
+              declarations can share a key (checking `stdlib/list.march`
+              directly puts `List`'s functions beside the prelude's own
+              unrefined `reverse`), and checking the unrefined one used to
+              drop the other's postcondition. *)
+           | Some (Some sg) when Option.is_some sg.ret && assumed_return fd <> None ->
+             (* Keep the entry (it must still shadow an outer same-named
+                function for [resolve_call]); drop the postcondition until it
+                is proved. *)
+             Hashtbl.replace defs key (Some { sg with ret = None });
+             pending := (key, prefix, fd, sg) :: !pending
            | _ -> ())
         | A.DMod (name, _, ds, _) ->
-          go (if prefix = "" then name.A.txt else prefix ^ "." ^ name.A.txt) ds
+          collect (if prefix = "" then name.A.txt else prefix ^ "." ^ name.A.txt) ds
         | _ -> ())
       decls
   in
-  go "" decls
+  collect "" decls;
+  let rec calls_of (acc : string list) (e : A.expr) : string list =
+    match e with
+    | A.EApp (A.EVar { A.txt; _ }, args, _) -> List.fold_left calls_of (txt :: acc) args
+    | A.EApp (f, args, _) -> List.fold_left calls_of (calls_of acc f) args
+    | A.EBlock (es, _) | A.ETuple (es, _) | A.ECon (_, es, _) | A.EAtom (_, es, _) ->
+      List.fold_left calls_of acc es
+    | A.ELet (b, _) -> calls_of acc b.A.bind_expr
+    | A.ELetFn (_, _, _, body, _) | A.ELam (_, body, _) -> calls_of acc body
+    | A.EMatch (x, brs, _) ->
+      List.fold_left
+        (fun acc (br : A.branch) ->
+          let acc = match br.A.branch_guard with Some g -> calls_of acc g | None -> acc in
+          calls_of acc br.A.branch_body)
+        (calls_of acc x) brs
+    | A.EIf (c, t, f, _) -> calls_of (calls_of (calls_of acc c) t) f
+    | A.EPipe (a, b, _) -> calls_of (calls_of acc a) b
+    | A.EAnnot (x, _, _) | A.EField (x, _, _) -> calls_of acc x
+    | _ -> acc
+  in
+  let short key = match String.rindex_opt key '.' with Some i -> String.sub key (i + 1) (String.length key - i - 1) | None -> key in
+  let check (key, prefix, fd, sg) =
+    let lookup = postcond_of { rctx0 with modpath = prefix } defs in
+    if with_post_lookup lookup (fun () -> check_fn_post_verdict ~root errctx ~emit:false fd) then begin
+      Hashtbl.replace defs key (Some sg);
+      true
+    end
+    else false
+  in
+  let rec rounds (todo : (string * string * A.fn_def * fn_sig) list) (fresh : string list option) =
+    let eligible (_, _, (fd : A.fn_def), _) =
+      match fresh with
+      | None -> true
+      | Some names ->
+        let called =
+          List.concat_map (fun (c : A.fn_clause) -> calls_of [] c.A.fc_body) fd.A.fn_clauses
+        in
+        List.exists (fun n -> List.mem n names || List.mem (short n) names) called
+    in
+    let proved, rest =
+      List.partition (fun item -> eligible item && check item) todo
+    in
+    if proved <> [] && rest <> [] then
+      rounds rest (Some (List.concat_map (fun (k, _, _, _) -> [ k; short k ]) proved))
+  in
+  rounds (List.rev !pending) None
 

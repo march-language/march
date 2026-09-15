@@ -23,6 +23,19 @@ option identified is to run the *target* until it has room, from inside
 `send`, which re-enters handler evaluation from a send and was judged too
 risky to do without a design note. All six stay open.
 
+## Status 2026-09-14
+
+Specced as a four-file set, sequenced behind the one thing this file never
+listed — a remote `send` to an actor on another node, without which there
+is no message stream to flow-control:
+[[2026-09-14-remote-send-to-a-global-pid]] (1/4),
+[[2026-09-14-distributed-plane-flow-control-and-control-channel]] (2/4:
+items 1–3 below, with designs),
+[[2026-09-14-two-node-failure-semantics-harness]] (3/4),
+[[2026-09-14-distributed-plane-known-gaps]] (4/4: items 4 and 6 below, with
+the torn-stdout race that quarantines `node_discovery`). Item 5 (epoch proc
+reclamation) is single-node and stays here.
+
 ## Items
 
 1. **Per-peer flow control.** Cross-node sends currently have no
@@ -51,7 +64,8 @@ risky to do without a design note. All six stay open.
    is the current de facto behavior; decide whether at-least-once is
    required and what dedup key that implies).
 
-4. **Declaration-site `mailbox N policy` syntax.** Task 7-9 shipped
+4. **Declaration-site `mailbox N policy` syntax.** *(Shipped 2026-09-14 —
+   [[2026-09-14-declaration-site-mailbox-syntax]] in `specs/progress/`.)* Task 7-9 shipped
    `Actor.set_queue_limit(pid, limit, policy)` as a runtime call. The plan's
    ergonomics goal was also a declaration-site form (e.g. `actor Foo do
    mailbox 1000 drop_old ... end`) so bounds are visible in the actor
@@ -71,7 +85,10 @@ risky to do without a design note. All six stay open.
    shrink after a load spike instead of holding its high-water mark
    permanently.
 
-6. **Interpreter `block` mailbox policy.** `Actor.set_queue_limit`'s
+6. **Interpreter `block` mailbox policy.** *(Resolved 2026-09-14 the honest
+   way: the interpreter refuses policy 3 at `actor_set_mailbox_limit` with a
+   message naming the alternatives, instead of silently running unbounded;
+   see [[2026-09-14-distributed-plane-known-gaps]] B.)* `Actor.set_queue_limit`'s
    `block_sender` policy (Task 8-9) is fully implemented and tested in the
    compiled/native runtime (parking the sender via the scheduler) but the
    tree-walking interpreter's `mailbox_enqueue` does not implement the

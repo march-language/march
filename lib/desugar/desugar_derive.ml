@@ -258,13 +258,17 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
             end
           ) variants
         in
-        (* wildcard arm: _ -> false *)
+        (* wildcard arm: _ -> false, for the mixed-constructor pairs.  A
+           single-constructor type has no such pair, and the arm would be
+           unreachable -- a warning the user could neither see the source of
+           nor fix, now that diagnostics in generated code are reported. *)
         let wild_branch = {
           branch_pat  = PatWild dummy_span;
           branch_guard = None;
           branch_body  = ELit (LitBool false, dummy_span);
         } in
-        EMatch (pair, branches @ [wild_branch], dummy_span)
+        let arms = if List.length variants <= 1 then branches else branches @ [wild_branch] in
+        EMatch (pair, arms, dummy_span)
       | TDRecord fields ->
         (* compare each field: a.f == b.f && a.g == b.g && ... *)
         (match fields with
@@ -519,6 +523,25 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
           hint: hold the capability in a separate value and pass it as a \
           parameter, keeping `%s` free of capability fields."
          cap type_name.txt type_name.txt);
+    []
+
+  | "Json" when March_caps.Cap_surface_ty.type_def_mentions_tycon "Pid" td ->
+    (* A local [Pid] is an index into THIS node's actor table.  Encoded and
+       sent anywhere else it names whatever lives at that slot there, so a
+       codec over it is a wrong-delivery route dressed as serialization.
+       Refused here, at the declaration, for the same reasons as the [Cap]
+       arm above: the generated encoder would otherwise fall through to a
+       generic [to_json] and fail at RUN time with no useful span, and
+       `Node.send` (whose codec contract this derive is) needs the refusal to
+       be a compile-time one.  The cross-node identity is `GlobalPid.Pid`, a
+       plain record that derives like any other. *)
+    Err.error errors ~span:iface_span
+      (Printf.sprintf
+         "`Pid` cannot be serialized — a local pid only names an actor on \
+          this node, so `%s` cannot derive Json.\n\
+          hint: carry a `GlobalPid.Pid` (node id, local pid, creation) in \
+          `%s` instead; it is a plain record and derives Json."
+         type_name.txt type_name.txt);
     []
 
   | "Json" ->

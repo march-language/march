@@ -66,22 +66,34 @@ mod Main do
   fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) do
     let boss = spawn(Boss)
     let victim = current_child(boss)
+    -- Minted BEFORE the reading: pid_of_int takes a reference, and `send`
+    -- keeps the one it is handed
+    -- (specs/progress/2026-09-14-pid-ownership-settled-send-borrows-self-owned.md).
+    let victim_pid = pid_of_int(victim)
     let rc_before = actor_rc(victim)
     println("victim is multiply owned: " ++ bool_to_string(rc_before > 1))
 
     -- Crash it from inside a handler (the setjmp/longjmp trap path), NOT via
     -- kill() -- kill runs the death sequence from outside the dispatch, so it
     -- never exercises the window this test is about.
-    send(pid_of_int(victim), Poison())
+    send(victim_pid, Poison())
     run_until_idle()
 
-    println("rc preserved across crash: "
-            ++ bool_to_string(actor_rc(victim) == rc_before))
+    -- Exactly ONE reference fewer: the live actor's own (taken by
+    -- march_spawn, released when its green thread finishes -- see
+    -- specs/progress/2026-09-14-live-actor-freed-by-dropping-its-last-pid.md).
+    -- Every reference the PROGRAM holds survives the crash; a leak or a lost
+    -- reference in the crash path would move this by more or less than one.
+    println("rc across crash is exactly the live reference released: "
+            ++ bool_to_string(actor_rc(victim) == rc_before - 1))
 
     -- The supervisor still restarts it: nothing here changes what a crash
     -- means for supervision.
     let replacement = current_child(boss)
     println("restarted: " ++ bool_to_string(replacement != victim))
     println("replacement alive: " ++ bool_to_string(is_alive(pid_of_int(replacement))))
+    -- `victim_pid` is still held here, so the program's own reference was
+    -- part of both counts above; only the live actor's own went at death.
+    println("victim pid still held: " ++ bool_to_string(is_alive(victim_pid) == false))
   end
 end

@@ -16,12 +16,67 @@ let version = "a0"
    violation exactly when it proves a predicate can never hold, so under a reals
    encoding it would "prove" that a perfectly ordinary float predicate is
    unsatisfiable and flag correct code.  Do not "simplify" this to Real. *)
-type sort = SInt | SBool | SFloat | SData of string  (* a named (algebraic-datatype) sort *)
+type sort =
+  | SInt
+  | SBool
+  | SFloat
+  (* A named declared sort, with its type arguments when the datatype is
+     parametric: [SData ("M_List", [SInt])] is the List(Int) instance, and
+     [SData ("M_Rec", [])] is the monomorphic `M_Rec`.  Opaque built-in sorts
+     (`Elem`, `$Str`) are nullary [SData] too.
+
+     Every instance is declared to z3 as a MONOMORPHIC datatype of its own,
+     named by [instance_name] (`M_List$Int`); the instance whose arguments
+     are all the opaque `Elem` keeps the bare datatype name (`M_List`), which
+     is exactly the declaration every query used before instances existed.
+     z3 4.8.12 (CI) segfaults on satisfiable queries that carry a recursion
+     axiom over a `(par …)` datatype with two recursive fields, so parametric
+     declarations are never emitted. *)
+  | SData of string * sort list
+  (* The [i]th type parameter of the datatype a constructor field belongs to.
+     Only ever appears inside a constructor's field sorts; [instantiate]
+     replaces it before a sort reaches a declaration or a term. *)
+  | SParam of int
+  (* A finite set of elements at the given sort, encoded as Z3's
+     `(Array <elem> Bool)` — the Liquid Haskell / liquid-fixpoint encoding.
+     Every set operator below is a quantifier-free array term, so a VC that
+     mentions sets stays inside the decidable extensional-array fragment.
+     [set_unknown_elem] is the placeholder element sort a producer uses when
+     it cannot yet tell the element sort (an `elts$xs` constant standing for
+     an opaque list); [Refine_encode.resolve_set_sorts] unifies every set
+     term in a VC and replaces the placeholder before rendering.  A term that
+     still carries it at render time renders at the opaque `Elem` sort. *)
+  | SSet of sort
+
+let set_unknown_elem = SData ("?", [])
+
+(* A nullary named sort. *)
+let sdata (n : string) : sort = SData (n, [])
+
+(* Substitute a datatype instance's arguments for its type parameters. *)
+let rec instantiate (args : sort list) (s : sort) : sort =
+  match s with
+  | SParam i -> (match List.nth_opt args i with Some a -> a | None -> SData ("Elem", []))
+  | SData (n, xs) -> SData (n, List.map (instantiate args) xs)
+  | SSet e -> SSet (instantiate args e)
+  | SInt | SBool | SFloat -> s
 
 type term =
   | Const of string          (* a declared symbol: "_", "i", or a measure-applied const *)
-  | App of string * term list (* uninterpreted-fn / datatype-constructor application *)
+  | App of string * term list (* uninterpreted-fn application *)
+  (* A datatype constructor application at a known datatype instance.  The
+     instance is carried because every instance of a datatype declares the
+     same constructor names, so a constructor of a parametric datatype renders
+     qualified, `((as Some M_Option$Int) x)`.  A monomorphic constructor
+     renders exactly as a plain application. *)
+  | Ctor of string * sort * term list
   | IsCtor of string * term  (* Z3 datatype tester: ((_ is Ctor) x) *)
+  (* A tester at a known datatype instance, with the constructor's field
+     count.  z3 (4.8 and 4.16) rejects `(_ is C)` as ambiguous once two
+     instances of one datatype are in scope (they share constructor names), so
+     a parametric instance renders the equivalent `(= x ((as C S) (C_0 x) … ))`:
+     [x] is built by [C] iff it equals [C] applied to its own selectors. *)
+  | IsCtorAt of string * sort * int * term
   | IntLit of int
   | BoolLit of bool
   (* A binary64 literal, pre-rendered by [float_decimal] as (is_negative,
@@ -63,6 +118,18 @@ type term =
   | FpLe of term * term
   | FpGt of term * term
   | FpGe of term * term
+  (* ── Finite sets (specs/2026-09-13-set-refinements-design.md §4.2) ─────
+     [SetEmpty]/[SetSng] carry the ELEMENT sort, because `(as const …)` needs
+     the full array sort spelled out; [SetMem] and [SetSub] are Bool-valued,
+     the rest set-valued.  Subset is DEFINED by union — `(= (union a b) b)` —
+     so no user VC ever contains a quantifier. *)
+  | SetEmpty of sort
+  | SetSng of sort * term
+  | SetMem of term * term
+  | SetUnion of term * term
+  | SetInter of term * term
+  | SetDiff of term * term
+  | SetSub of term * term
 
 type vc = {
   decls : (string * sort) list;   (* free symbols to declare *)
@@ -70,11 +137,58 @@ type vc = {
   goal : term;                    (* the predicate we want to hold *)
 }
 
-let string_of_sort = function
+(* The `define-sort` name of a set sort.  `$` cannot occur in a March
+   identifier, so no user symbol can collide with one of these. *)
+let rec string_of_sort = function
   | SInt -> "Int"
   | SBool -> "Bool"
   | SFloat -> "Float64"
-  | SData n -> n
+  | SData (n, []) -> n
+  | SData (n, args) -> instance_name n args
+  | SParam i -> "T" ^ string_of_int i
+  | SSet e -> "MSet$" ^ set_elem_tag e
+
+(* The declared name of datatype [n]'s instance at [args]: the bare name when
+   every argument is the opaque `Elem`, else `n$arg1$…`.  Arities are fixed per
+   datatype, so the spelling is unambiguous. *)
+and instance_name (n : string) (args : sort list) : string =
+  if List.for_all is_elem_arg args then n
+  else n ^ "$" ^ String.concat "$" (List.map set_elem_tag args)
+
+and is_elem_arg = function
+  | SData (("Elem" | "?"), []) -> true
+  | _ -> false
+
+(* A sort as a fragment of an SMT symbol (no spaces or parentheses), for
+   names derived from it: `MSet$Int`, `MSet$M_List$Int`. *)
+and set_elem_tag = function
+  | SInt -> "Int"
+  | SBool -> "Bool"
+  | SFloat -> "Float"
+  | SData ("?", []) -> "Elem"
+  | SData ("$Str", []) -> "Str"
+  | SData (n, []) -> n
+  | SData (n, args) -> instance_name n args
+  | SParam i -> "T" ^ string_of_int i
+  | SSet e -> "Set" ^ set_elem_tag e
+
+(* The element sort actually RENDERED for a set: the placeholder becomes the
+   opaque `Elem` sort. *)
+let render_elem_sort = function
+  | SData ("?", []) -> SData ("Elem", [])
+  | s -> s
+
+(* One `(define-sort MSet$X () (Array X Bool))` line per element sort.  The
+   caller is responsible for the underlying sort (`Elem`, `$Str`) being
+   declared FIRST in the same push. *)
+let set_sort_defs (elems : sort list) : string =
+  String.concat ""
+    (List.map
+       (fun e ->
+         let e = render_elem_sort e in
+         Printf.sprintf "(define-sort %s () (Array %s Bool))\n"
+           (string_of_sort (SSet e)) (string_of_sort e))
+       (List.sort_uniq compare (List.map render_elem_sort elems)))
 
 (* Split a binary64 into (is_negative, plain SMT-LIB decimal magnitude), or
    [None] when it has no such form and must therefore not be reflected at all.
@@ -110,11 +224,29 @@ let render_float (neg : bool) (d : string) : string =
   if neg then Printf.sprintf "((_ to_fp 11 53) RNE (- %s))" d
   else Printf.sprintf "((_ to_fp 11 53) RNE %s)" d
 
+(* The instance-qualified tester [IsCtorAt] renders to, over a rendered term. *)
+let tester_at (c : string) (s : sort) (n : int) (t : string) : string =
+  if n = 0 then Printf.sprintf "(= %s (as %s %s))" t c (string_of_sort s)
+  else
+    Printf.sprintf "(= %s ((as %s %s) %s))" t c (string_of_sort s)
+      (String.concat " " (List.init n (fun i -> Printf.sprintf "(%s_%d %s)" c i t)))
+
 let rec render = function
   | Const s -> s
   | App (f, []) -> f
   | App (f, args) -> Printf.sprintf "(%s %s)" f (String.concat " " (List.map render args))
-  | IsCtor (c, t) -> Printf.sprintf "((_ is %s) %s)" c (render t)
+  | Ctor (c, SData (_, []), []) -> c
+  | Ctor (c, SData (_, []), args) ->
+    Printf.sprintf "(%s %s)" c (String.concat " " (List.map render args))
+  | Ctor (c, s, []) -> Printf.sprintf "(as %s %s)" c (string_of_sort s)
+  | Ctor (c, s, args) ->
+    Printf.sprintf "((as %s %s) %s)" c (string_of_sort s) (String.concat " " (List.map render args))
+  (* A tester applied directly to a constructor term is decided here: z3
+     (4.8 and 4.16 alike) rejected `((_ is Some) ((as Some …) x))` for a
+     parametric datatype, and the answer is syntactic anyway. *)
+  | IsCtor (c, Ctor (c', _, _)) | IsCtorAt (c, _, _, Ctor (c', _, _)) -> if c = c' then "true" else "false"
+  | IsCtor (c, t) | IsCtorAt (c, SData (_, []), _, t) -> Printf.sprintf "((_ is %s) %s)" c (render t)
+  | IsCtorAt (c, s, n, t) -> tester_at c s n (render t)
   | IntLit n -> if n < 0 then Printf.sprintf "(- %d)" (- n) else string_of_int n
   | BoolLit b -> if b then "true" else "false"
   | FloatLit (neg, d) -> render_float neg d
@@ -138,6 +270,17 @@ let rec render = function
   | FpLe (a, b) -> Printf.sprintf "(fp.leq %s %s)" (render a) (render b)
   | FpGt (a, b) -> Printf.sprintf "(fp.gt %s %s)" (render a) (render b)
   | FpGe (a, b) -> Printf.sprintf "(fp.geq %s %s)" (render a) (render b)
+  | SetEmpty e ->
+    Printf.sprintf "((as const %s) false)" (string_of_sort (SSet (render_elem_sort e)))
+  | SetSng (e, x) ->
+    Printf.sprintf "(store ((as const %s) false) %s true)"
+      (string_of_sort (SSet (render_elem_sort e))) (render x)
+  | SetMem (x, s) -> Printf.sprintf "(select %s %s)" (render s) (render x)
+  | SetUnion (a, b) -> Printf.sprintf "((_ map or) %s %s)" (render a) (render b)
+  | SetInter (a, b) -> Printf.sprintf "((_ map and) %s %s)" (render a) (render b)
+  | SetDiff (a, b) ->
+    Printf.sprintf "((_ map and) %s ((_ map not) %s))" (render a) (render b)
+  | SetSub (a, b) -> Printf.sprintf "(= ((_ map or) %s %s) %s)" (render a) (render b) (render b)
 
 (* The canonical assertion block for a VC: declare every free symbol, assert the
    hypotheses, and assert the NEGATED goal.  Sent to z3 between push/pop and also
@@ -147,6 +290,7 @@ let assertion_block (vc : vc) : string =
   let buf = Buffer.create 256 in
   List.iter
     (fun (name, sort) ->
+      let sort = match sort with SSet e -> SSet (render_elem_sort e) | s -> s in
       Buffer.add_string buf
         (Printf.sprintf "(declare-const %s %s)\n" name (string_of_sort sort)))
     vc.decls;

@@ -411,13 +411,29 @@ mod Map do
 
   -- ── Public API ─────────────────────────────────────────────────────────────
 
-  doc "Returns an empty map."
-  fn empty() do
+  doc """
+  Returns an empty map.
+
+  This contract is ASSUMED, not proved: the set of keys is a fact about the
+  abstract map (`keys`) the refinement checker takes on faith, and it holds
+  only when `cmp` is a strict total order consistent with `==` on the key
+  type. See docs/refinement-types.md, "Set Refinements".
+  """
+  @[assume]
+  fn empty() : {Map(k, v) | keys(_) == empty} do
     HamtMap(HEmpty)
   end
 
-  doc "Returns a map containing exactly one key-value pair."
-  fn singleton(k, v) do
+  doc """
+  Returns a map containing exactly one key-value pair.
+
+  This contract is ASSUMED, not proved: the set of keys is a fact about the
+  abstract map (`keys`) the refinement checker takes on faith, and it holds
+  only when `cmp` is a strict total order consistent with `==` on the key
+  type. See docs/refinement-types.md, "Set Refinements".
+  """
+  @[assume]
+  fn singleton(k, v) : {Map(k, v) | keys(_) == singleton(k)} do
     let h = key_hash(k)
     HamtMap(HLeaf(h, k, v))
   end
@@ -451,8 +467,16 @@ mod Map do
 
   -- ---- Query ----
 
-  doc "Returns true if the map contains no entries."
-  fn is_empty(m) do
+  doc """
+  Returns true if the map contains no entries.
+
+  This contract is ASSUMED, not proved: the set of keys is a fact about the
+  abstract map (`keys`) the refinement checker takes on faith, and it holds
+  only when `cmp` is a strict total order consistent with `==` on the key
+  type. See docs/refinement-types.md, "Set Refinements".
+  """
+  @[assume]
+  fn is_empty(m) : {Bool | _ == (keys(m) == empty)} do
     match m do
     HamtMap(HEmpty) -> true
     _               -> false
@@ -469,8 +493,14 @@ mod Map do
   doc """
   Returns Some(value) if key is present, or None.
   cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
+
+  This contract is ASSUMED, not proved: the set of keys is a fact about the
+  abstract map (`keys`) the refinement checker takes on faith, and it holds
+  only when `cmp` is a strict total order consistent with `==` on the key
+  type. See docs/refinement-types.md, "Set Refinements".
   """
-  fn get(m, key, cmp) do
+  @[assume]
+  fn get(m, key, cmp) : {Option(v) | is_Some(_) == member(key, keys(m))} do
     match m do
     HamtMap(node) -> do
       let h = key_hash(key)
@@ -488,8 +518,16 @@ mod Map do
     end
   end
 
-  doc "Returns true if key is present in the map."
-  fn contains_key(m, key, cmp) do
+  doc """
+  Returns true if key is present in the map.
+
+  This contract is ASSUMED, not proved: the set of keys is a fact about the
+  abstract map (`keys`) the refinement checker takes on faith, and it holds
+  only when `cmp` is a strict total order consistent with `==` on the key
+  type. See docs/refinement-types.md, "Set Refinements".
+  """
+  @[assume]
+  fn contains_key(m, key, cmp) : {Bool | _ == member(key, keys(m))} do
     match get(m, key, cmp) do
     Some(_) -> true
     None    -> false
@@ -502,8 +540,14 @@ mod Map do
   Inserts or updates a key-value pair. Returns the new map.
   If the key is already present its value is replaced.
   cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
+
+  This contract is ASSUMED, not proved: the set of keys is a fact about the
+  abstract map (`keys`) the refinement checker takes on faith, and it holds
+  only when `cmp` is a strict total order consistent with `==` on the key
+  type. See docs/refinement-types.md, "Set Refinements".
   """
-  fn insert(m, key, val, cmp) do
+  @[assume]
+  fn insert(m, key, val, cmp) : {Map(k, v) | keys(_) == union(keys(m), singleton(key))} do
     match m do
     HamtMap(node) -> do
       let h = key_hash(key)
@@ -516,8 +560,14 @@ mod Map do
   doc """
   Removes a key from the map. Returns the map unchanged if the key is absent.
   cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
+
+  This contract is ASSUMED, not proved: the set of keys is a fact about the
+  abstract map (`keys`) the refinement checker takes on faith, and it holds
+  only when `cmp` is a strict total order consistent with `==` on the key
+  type. See docs/refinement-types.md, "Set Refinements".
   """
-  fn remove(m, key, cmp) do
+  @[assume]
+  fn remove(m, key, cmp) : {Map(k, v) | keys(_) == diff(keys(m), singleton(key))} do
     match m do
     HamtMap(node) -> do
       let h = key_hash(key)
@@ -540,8 +590,16 @@ mod Map do
     end
   end
 
-  doc "Returns all keys as a list (hash-traversal order)."
-  fn keys(m) do
+  doc """
+  Returns all keys as a list (hash-traversal order).
+
+  This contract is ASSUMED, not proved: the set of keys is a fact about the
+  abstract map (`keys`) the refinement checker takes on faith, and it holds
+  only when `cmp` is a strict total order consistent with `==` on the key
+  type. See docs/refinement-types.md, "Set Refinements".
+  """
+  @[assume]
+  fn keys(m) : {List(k) | elts(_) == keys(m)} do
     let pairs = fold(m, Nil, fn (acc, k, _v) -> Cons(k, acc))
     lst_rev(pairs)
   end
@@ -585,8 +643,16 @@ mod Map do
 
   -- ---- Transformation ----
 
-  doc "Applies f to each value, returning a new map with the same keys."
-  fn map_values(m, f) do
+  doc """
+  Applies f to each value, returning a new map with the same keys.
+
+  This contract is ASSUMED, not proved: the set of keys is a fact about the
+  abstract map (`keys`) the refinement checker takes on faith, and it holds
+  only when `cmp` is a strict total order consistent with `==` on the key
+  type. See docs/refinement-types.md, "Set Refinements".
+  """
+  @[assume]
+  fn map_values(m, f) : {Map(k, w) | keys(_) == keys(m)} do
     fn go(node) do
       match node do
       HEmpty -> HEmpty
@@ -629,8 +695,14 @@ mod Map do
   Returns a map containing only entries where pred(key)(value) is true.
   cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
   pred : k -> v -> Bool (curried).
+
+  This contract is ASSUMED, not proved: the set of keys is a fact about the
+  abstract map (`keys`) the refinement checker takes on faith, and it holds
+  only when `cmp` is a strict total order consistent with `==` on the key
+  type. See docs/refinement-types.md, "Set Refinements".
   """
-  fn filter(m, pred, cmp) do
+  @[assume]
+  fn filter(m, pred, cmp) : {Map(k, v) | subset(keys(_), keys(m))} do
     fn go(lst, acc) do
       match lst do
       Nil -> acc
@@ -649,8 +721,14 @@ mod Map do
   Merges two maps. When a key appears in both maps, the value from b takes
   precedence. O(n log n) in the size of b.
   cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
+
+  This contract is ASSUMED, not proved: the set of keys is a fact about the
+  abstract map (`keys`) the refinement checker takes on faith, and it holds
+  only when `cmp` is a strict total order consistent with `==` on the key
+  type. See docs/refinement-types.md, "Set Refinements".
   """
-  fn merge(a, b, cmp) do
+  @[assume]
+  fn merge(a, b, cmp) : {Map(k, v) | keys(_) == union(keys(a), keys(b))} do
     fn go(lst, acc) do
       match lst do
       Nil -> acc

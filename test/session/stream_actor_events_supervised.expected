@@ -1,0 +1,7 @@
+Prod sends Item(1)
+Cons got Item(1)
+-- Cons host killed; supervisor restarted it --
+Prod got More
+Prod sends Item(2)
+-- endpoint 2: its host was restarted and the parked session state is gone; abandoning --
+close 1

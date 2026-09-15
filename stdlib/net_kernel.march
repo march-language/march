@@ -42,18 +42,55 @@ mod NetKernel do
 
   -- Read one complete frame off [fd], starting from already-buffered [buf].
   -- Returns (payload, leftover_bytes); None-from-decode means read more.
+  -- Linear in the frame size: once the 4-byte length prefix is in [buf],
+  -- the rest of the body is read with ONE tcp_recv_exact and appended ONCE.
+  -- The first version appended every 4 KiB chunk to the accumulated list,
+  -- quadratic in the frame size -- a 16 MiB frame was impractical
+  -- (specs/progress/2026-09-14-distributed-plane-flow-control-and-control-channel.md).
+  -- Bytes read past the frame boundary come back as the leftover for the
+  -- next call, as before.
   fn recv_frame(fd : Int, buf : List(Int)) : Result((List(Int), List(Int)), String) do
     match NetFrame.decode(buf) do
       Some(result) -> Ok(result)
       None ->
-        match Socket.recv(fd, 4096) do
-          Err(e) -> Err(Socket.error_message(e))
-          Ok(chunk) ->
-            if String.is_empty(chunk) do
-              Err("net-kernel: connection closed mid-frame")
-            else
-              recv_frame(fd, List.append(buf, str_to_bytes(chunk)))
-            end
+        let have = List.length(buf)
+        if have < 4 do
+          match Socket.recv(fd, 4096) do
+            Err(e) -> Err(Socket.error_message(e))
+            Ok(chunk) ->
+              if String.is_empty(chunk) do
+                Err("net-kernel: connection closed mid-frame")
+              else
+                recv_frame(fd, List.append(buf, str_to_bytes(chunk)))
+              end
+          end
+        else
+          let len = NetFrame.body_length(buf)
+          match tcp_recv_exact(fd, len - (have - 4)) do
+            Err(e) -> Err("net-kernel: " ++ e)
+            Ok(rest) -> recv_frame(fd, List.append(buf, Bytes.to_list(rest)))
+          end
+        end
+    end
+  end
+
+  -- Read exactly one frame and not a byte more: the 4-byte prefix, then
+  -- exactly the body. For the handshake, where the frames that follow
+  -- belong to whoever the connection is handed to. `recv_frame` reads in
+  -- chunks and returns the over-read as a leftover the caller must carry;
+  -- the handshake used it and DROPPED that leftover, so a peer that
+  -- finished its side of the handshake and immediately wrote (the
+  -- control/data split's data stream) lost its first bytes whenever they
+  -- landed in the same recv() as the proof -- 2 runs in 20 under load,
+  -- never unloaded (control_channel_loopback, 2026-09-14).
+  fn recv_frame_exact(fd : Int) : Result(List(Int), String) do
+    match tcp_recv_exact(fd, 4) do
+      Err(e) -> Err("net-kernel: " ++ e)
+      Ok(hdr) ->
+        let hb = Bytes.to_list(hdr)
+        match tcp_recv_exact(fd, NetFrame.body_length(hb)) do
+          Err(e) -> Err("net-kernel: " ++ e)
+          Ok(body) -> Ok(Bytes.to_list(body))
         end
     end
   end
@@ -64,29 +101,41 @@ mod NetKernel do
   -- the nonce WE issued). Returns the authenticated peer identity or a reason.
   fn handshake(fd : Int, my_id : NodeIdentity.Identity, secret : String,
                my_nonce : String) : Result(NodeIdentity.Identity, String) do
-    let hello = Handshake.encode_hello(Handshake.make_hello(my_id, my_nonce))
+    match handshake_role(fd, my_id, secret, my_nonce, Handshake.role_control()) do
+      Err(e) -> Err(e)
+      Ok((id, _role)) -> Ok(id)
+    end
+  end
+
+  -- The same handshake, opening a connection of [role] ("control" or "data",
+  -- Handshake.role_*); returns the peer's identity AND the role the peer
+  -- announced, so an acceptor knows which of a peer's two connections it
+  -- just took. A pre-split peer announces no role and reads as control.
+  fn handshake_role(fd : Int, my_id : NodeIdentity.Identity, secret : String,
+                    my_nonce : String, role : String) : Result((NodeIdentity.Identity, String), String) do
+    let hello = Handshake.encode_hello(Handshake.make_hello_role(my_id, my_nonce, role))
     match send_frame(fd, hello) do
       Err(e) -> Err(e)
       Ok(_) ->
-        match recv_frame(fd, Nil) do
+        -- Exact reads: nothing past the handshake's own two frames is
+        -- consumed, so the connection is handed over with the peer's first
+        -- real frame still unread in the socket (see recv_frame_exact).
+        match recv_frame_exact(fd) do
           Err(e) -> Err(e)
-          Ok(r1) ->
-            match r1 do
-              (hbytes, buf1) ->
-                match Handshake.decode_hello(hbytes) do
+          Ok(hbytes) ->
+            match Handshake.decode_hello(hbytes) do
+              Err(e) -> Err(e)
+              Ok(peer) ->
+                match send_frame(fd, str_to_bytes(ClusterAuth.prove(secret, peer.nonce))) do
                   Err(e) -> Err(e)
-                  Ok(peer) ->
-                    match send_frame(fd, str_to_bytes(ClusterAuth.prove(secret, peer.nonce))) do
+                  Ok(_) ->
+                    match recv_frame_exact(fd) do
                       Err(e) -> Err(e)
-                      Ok(_) ->
-                        match recv_frame(fd, buf1) do
+                      Ok(pbytes) ->
+                        match Handshake.authenticate(secret, my_nonce, peer,
+                                                     bytes_to_str(pbytes)) do
                           Err(e) -> Err(e)
-                          Ok(r2) ->
-                            match r2 do
-                              (pbytes, _buf2) ->
-                                Handshake.authenticate(secret, my_nonce, peer,
-                                                       bytes_to_str(pbytes))
-                            end
+                          Ok(id) -> Ok((id, peer.role))
                         end
                     end
                 end

@@ -1,0 +1,127 @@
+-- Leak and use-after-free guard: a closure's environment and captures are
+-- released when the closure dies.
+--
+-- Three pieces landed together (specs/progress/2026-09-13-closure-environment-released.md):
+--   1. Perceus no longer dups `$clo` at each capture read. The release it
+--      splices after the capture-read prefix only undid that dup, so the
+--      reference the caller handed to the apply fn was never released:
+--      `adder`-style factories leaked the environment AND every capture on each
+--      call (6 objects per call for two captured lists).
+--   2. Drop.owning_apply_fns judges a closure allocation in TAIL position by
+--      where it goes. A returned closure escapes and owns its captures; the gate
+--      used to decline every closure factory.
+--   3. Drop.rewrite_apply_clo_drop no longer releases captures in front of a
+--      tail that still USES them. `fn s -> a ++ s ++ b` released `a` and `b`
+--      and then concatenated them: a WRONG VALUE the second time the closure ran
+--      (this probe's `string captures` leg printed 43893 instead of 62786 with
+--      pieces 1 and 2 alone). That is why every leg prints its computed value,
+--      and why the golden must match the interpreter.
+--
+-- Deliberately not legs (still leak, both documented in the progress entry):
+--   - a closure whose tail is an INDIRECT call using a capture
+--     (`fn x -> f(f(x))`): the release is withheld to keep the tail call a tail
+--     call;
+--   - a capturing lambda passed to a HOF (`List.map(xs, fn x -> x + k)`):
+--     `map`'s own `go` closure is released shallowly, so its captured `f`
+--     leaks (specs/todos/2026-09-06-closure-capture-release-widening.md).
+mod Main do
+  needs IO.Console
+
+  type Holder = Holder(Int -> Int, String)
+  type Boxed = Boxed(String)
+
+  fn adder(k : Int) : (Int) -> Int do fn x -> x + k end
+  fn lengths(a : List(Int), b : List(Int)) : (Int) -> Int do
+    fn x -> List.length(a) + List.length(b) + x
+  end
+  fn joiner(a : String, b : String) : (String) -> String do fn s -> a ++ s ++ b end
+  fn pick(flag : Bool, xs : List(Int)) : (Int) -> Int do
+    if flag do fn x -> x + List.length(xs) else fn x -> x - List.length(xs) end
+  end
+  fn keeper(s : String) : (Int) -> String do fn _ -> s end
+  fn boxer(s : String) : (Int) -> Boxed do fn _ -> Boxed(s) end
+
+  pfn leg_lists(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let f = lengths([n], [n, n])
+      leg_lists(n - 1, acc + f(1))
+    end
+  end
+  pfn leg_strings(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let g = joiner(int_to_string(n), "!")
+      leg_strings(n - 1, acc + string_length(g("<")) + string_length(g(">>")))
+    end
+  end
+  pfn leg_list_of_closures(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let fs = [adder(n), adder(1), pick(n % 2 == 0, [n, n])]
+      let total = List.fold_left(fs, 0, fn (s, f) -> s + f(10))
+      leg_list_of_closures(n - 1, acc + total)
+    end
+  end
+  pfn leg_holder(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let h = Holder(adder(n), int_to_string(n))
+      let v = match h do
+        Holder(f, s) -> f(string_length(s))
+      end
+      leg_holder(n - 1, acc + v)
+    end
+  end
+  pfn leg_capture_reused(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let xs = [n, 2, 3]
+      let f = fn x -> x + List.length(xs)
+      let a = f(1)
+      let b = f(2)
+      leg_capture_reused(n - 1, acc + a + b + List.length(xs))
+    end
+  end
+  pfn leg_returns_capture(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let k = keeper(int_to_string(n))
+      let s1 = k(0)
+      let s2 = k(1)
+      leg_returns_capture(n - 1, acc + string_length(s1) + string_length(s2))
+    end
+  end
+  pfn leg_wraps_capture(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let w = boxer(int_to_string(n))
+      let v = match w(0) do Boxed(s) -> string_length(s) end
+      let u = match w(1) do Boxed(s) -> string_length(s) end
+      leg_wraps_capture(n - 1, acc + v + u)
+    end
+  end
+
+  pfn flat(label : String, before : Int, r : Int) : () do
+    let grew = live_allocs() - before
+    println(label ++ " = " ++ int_to_string(r) ++ ", flat: " ++ bool_to_string(grew < 200))
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let n = 5000
+    let a = live_allocs()
+    let r1 = leg_lists(n, 0)
+    flat("factory capturing two lists", a, r1)
+    let b = live_allocs()
+    let r2 = leg_strings(n, 0)
+    flat("string captures used by the tail", b, r2)
+    let c = live_allocs()
+    let r3 = leg_list_of_closures(n, 0)
+    flat("list of closures", c, r3)
+    let d = live_allocs()
+    let r4 = leg_holder(n, 0)
+    flat("closure in a ctor", d, r4)
+    let e = live_allocs()
+    let r5 = leg_capture_reused(n, 0)
+    flat("capture reused after calls", e, r5)
+    let f = live_allocs()
+    let r6 = leg_returns_capture(n, 0)
+    flat("closure returns its capture", f, r6)
+    let g = live_allocs()
+    let r7 = leg_wraps_capture(n, 0)
+    flat("closure wraps its capture", g, r7)
+  end
+end

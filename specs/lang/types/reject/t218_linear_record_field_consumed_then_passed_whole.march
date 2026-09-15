@@ -1,0 +1,15 @@
+-- EXPECT-ERROR: The linear value `r.st` is used more than once here
+mod Main do
+  needs IO.Console
+  -- Not actor-specific: a field consumed, then the record handed on whole,
+  -- which carries the consumed field with it.
+  always_linear type S1 = S1(Int)
+  fn sink(s : S1) : Int do match s do S1(e) -> e end end
+  type R = { st : S1, n : Int }
+  fn eat(r : R) : Int do sink(r.st) end
+  fn main(c : Cap(IO.Console)) do
+    let r : R = { st: S1(0), n: 0 }
+    let k = sink(r.st)
+    println(int_to_string(k + eat(r)))
+  end
+end

@@ -1,0 +1,23 @@
+-- EXPECT-ERROR: needs a JSON codec for `Ping`
+-- The typed remote send's codec contract (2026-09-15, stdlib/node.march):
+-- `Node.send(peer, to, msg)` requires `msg`'s type to `derive Json`, and a
+-- missing codec is THIS error, at the call site, naming the type — not the
+-- run-time `to_json: cannot determine type` a generic encoder gives.
+--
+-- The check is a deferred sweep over recorded sites (the message argument's
+-- type is often pinned by LATER unification), and it fails CLOSED: an
+-- unresolved message type is a send whose codec cannot be chosen.
+mod NoCodec do
+  needs IO.Console
+  needs IO.NetConnect
+  needs IO.Mut
+
+  type Ping = { n : Int }
+
+  fn main(_c : Cap(IO.Console), _n : Cap(IO.NetConnect), _m : Cap(IO.Mut)) do
+    let peer : Peer = { node_id: "b", identity: NodeIdentity.make("b", "pk", 1), fd: 3, data_fd: -1 }
+    let p : Ping = { n: 1 }
+    let _ = Node.send(peer, GlobalPid.make("b", 1, 1), p)
+    ()
+  end
+end

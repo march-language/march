@@ -1,0 +1,44 @@
+mod Main do
+  needs IO.Console
+  -- What the strict branch rule keeps accepting (2026-09-13): consumed once on
+  -- every branch; a branch that never returns (`panic`) exempt, in an `if`, a
+  -- three-arm `match`, and a `match do` condition chain; a value consumed
+  -- before the branch and touched by neither; an AFFINE value dropped on one
+  -- branch, which is what affine permits.
+  always_linear type S1 = S1(Int)
+  type T = T(Int)
+  fn sink(s : S1) : Int do match s do S1(e) -> e end end
+  fn tsink(t : T) : Int do match t do T(e) -> e end end
+  fn every(b : Bool, st : S1) : Int do
+    if b do sink(st) else sink(st) + 1 end
+  end
+  fn gives_up(b : Bool, st : S1) : Int do
+    if b do sink(st) else panic("no") end
+  end
+  fn three(n : Int, st : S1) : Int do
+    match n do
+      1 -> sink(st)
+      2 -> panic("two")
+      _ -> sink(st) + 1
+    end
+  end
+  fn chain(n : Int, st : S1) : Int do
+    match do
+      n > 10 -> sink(st)
+      n > 0 -> sink(st) + 1
+      true -> panic("negative")
+    end
+  end
+  fn before(b : Bool, st : S1) : Int do
+    let k = sink(st)
+    if b do k else 0 end
+  end
+  fn optional(b : Bool, affine t : T) : Int do
+    if b do tsink(t) else 0 end
+  end
+  fn main(c : Cap(IO.Console)) do
+    let n = every(true, S1(1)) + gives_up(true, S1(2)) + three(1, S1(3))
+    let m = chain(5, S1(4)) + before(false, S1(5)) + optional(false, T(6))
+    println(int_to_string(n + m))
+  end
+end

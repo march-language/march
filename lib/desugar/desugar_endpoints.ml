@@ -381,7 +381,7 @@ let msg_module (errors : Err.ctx) ~proto ~span (ctors : (string * ty) list) (rol
 
 (** `<P>_<Role>`: one [always_linear] type per state and one function per
     transition, plus the unforgeable [Yield]. *)
-let role_module ~proto ~(roles : string list) (role : string) (root : lty) : decl =
+let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors : int) (role : string) (root : lty) : decl =
   let mname = proto ^ "_" ^ role in
   let msg = proto ^ "_Msg" in
   let names = state_names root in
@@ -405,6 +405,10 @@ let role_module ~proto ~(roles : string list) (role : string) (root : lty) : dec
      and dispatches on the constructor, hands the callback the payload and the
      NEXT state built on the continuation endpoint, and returns the endpoint
      as the raw handler's `Int`. *)
+  (* The catch-all for a message this state cannot receive.  Omitted when the
+     listed arms already cover every constructor of `<P>_Msg`: it would be
+     unreachable, and a warning the user can neither see nor fix. *)
+  let unexpected_arm covered body = if covered >= nctors then [] else [ (PatWild sp, body) ] in
   let suspend_with ep arms =
     app "Session.suspend"
       [ var "s"; ep;
@@ -415,7 +419,8 @@ let role_module ~proto ~(roles : string list) (role : string) (root : lty) : dec
                    ( pcon (msg ^ "." ^ ctor) [ pvar "v" ],
                      block [ let_wild (app cb [ var "v"; con next_nm [ var "ep1" ] ]); var "ep1" ] ))
                 arms
-              @ [ (PatWild sp, panic (Printf.sprintf "%s, role %s: unexpected message" proto role)) ])) ]
+              @ unexpected_arm (List.length arms)
+                  (panic (Printf.sprintf "%s, role %s: unexpected message" proto role)))) ]
   in
   let transitions =
     List.concat_map
@@ -461,6 +466,127 @@ let role_module ~proto ~(roles : string list) (role : string) (root : lty) : dec
          | LRec _ | LVar _ -> [])
       names
   in
+  (* ── the event API: the same states, driven from an actor's own handler ──
+     `await_*` parks an endpoint (a linear [Parked] the actor keeps in its
+     state), `resume` turns a delivery into an [Event] carrying the payload and
+     the next state, matched with `state` in scope.  Design record:
+     specs/todos/2026-09-13-endpoints-event-api-actor-state.md. *)
+  (* Types and constructors live in one flat namespace today (the FQN-identity
+     plan is open), so every name here carries the role: two roles' `Parked`
+     would be ONE nominal type with both roles' constructors, and the user's
+     `match` on a `resume` result would be told the other role's messages are
+     missing.  Message-shaped constructors are prefixed `Got_` for the same
+     reason: `More` is already `<P>_Msg`'s constructor. *)
+  let parked_name = "Parked_" ^ role and received_name = "Received_" ^ role in
+  let idle_c = "Idle_" ^ role and closed_c = "Closed_" ^ role in
+  let t_parked = tycon parked_name [] in
+  let secret_v = con "Secret" [] in
+  let receiving =
+    List.filter_map
+      (fun (node, this) ->
+         match node with
+         | LRecv (_, ctor, payload, next) -> Some (this, [ (ctor, payload, state_of next) ])
+         | LOffer (_, brs) -> Some (this, List.map (fun (_, ctor, payload, next) -> (ctor, payload, state_of next)) brs)
+         | _ -> None)
+      names
+  in
+  let event_ctors =
+    List.fold_left
+      (fun acc (_, arms) ->
+         List.fold_left
+           (fun acc (ctor, payload, nx) ->
+              match List.assoc_opt ctor acc with
+              | None -> acc @ [ (ctor, (payload, nx)) ]
+              | Some (_, nx') ->
+                if nx <> nx' then
+                  Err.error errors ~span
+                    (Printf.sprintf
+                       "Protocol `%s`, role %s: message `%s` is received in two states with \
+                        different continuations, so the event API cannot give it one \
+                        constructor. Rename one of them."
+                       proto role ctor);
+                acc)
+           acc arms)
+      [] receiving
+  in
+  let parked_ty =
+    DAlwaysLinearType
+      ( Public, n parked_name, [],
+        TDVariant
+          ((variant idle_c [ tycon "Secret" [] ]
+            :: List.map (fun (this, _) -> variant ("Awaiting_" ^ this) [ t_int; tycon "Secret" [] ]) receiving)
+           @ [ variant closed_c [ tycon "Secret" [] ] ]),
+        sp )
+  in
+  let event_ty =
+    if event_ctors = [] then []
+    else
+      [ DType (Public, n received_name, [],
+               TDVariant (List.map (fun (ctor, (payload, nx)) -> variant ("Got_" ^ ctor) [ payload; sty nx ]) event_ctors), sp) ]
+  in
+  let where = Printf.sprintf "%s, role %s" proto role in
+  let idle = fn "idle" [] t_parked (con idle_c [ secret_v ]) in
+  let take_idle =
+    fn "take_idle" [ ("p", t_parked) ] (TyTuple [])
+      (match_ (var "p")
+         [ (pcon idle_c [ PatWild sp ], ETuple ([], sp));
+           (PatWild sp, panic (where ^ ": take_idle on an endpoint that was already started")) ])
+  in
+  let await_fn name this =
+    (* Suspend so the transport knows the endpoint awaits; the handler must
+       never run -- the actor resumes the endpoint itself.  `ep` is bound from
+       a linear scrutinee and inherits its linearity, so it is used ONCE:
+       `suspend` returns the endpoint, and that result is what gets parked. *)
+    fn name [ ("s", t_cap_session); ("st", sty this) ] t_parked
+      (match_ (var "st")
+         [ ( pcon this [ pvar "ep" ],
+             con ("Awaiting_" ^ this)
+               [ app "Session.suspend"
+                   [ var "s"; var "ep";
+                     lam [ "_from"; "_msg"; "_ep" ]
+                       (panic (where ^ ": this endpoint is actor-hosted; deliver through `resume`, not the transport handler")) ];
+                 secret_v ] ) ])
+  in
+  let awaits =
+    List.concat_map
+      (fun (node, this) ->
+         match node with
+         | LRecv (_, ctor, _, _) -> [ await_fn ("await_" ^ ctor) this ]
+         | LOffer (_, brs) -> [ await_fn ("await_" ^ String.concat "_" (List.map (fun (l, _, _, _) -> l) brs)) this ]
+         | LEnd ->
+           [ fn "finish" [ ("s", t_cap_session); ("st", sty this) ] t_parked
+               (match_ (var "st")
+                  [ (pcon this [ pvar "ep" ],
+                     block [ let_wild (app "Session.close" [ var "s"; var "ep" ]); con closed_c [ secret_v ] ]) ]) ]
+         | _ -> [])
+      names
+  in
+  let resume =
+    if event_ctors = [] then []
+    else
+      [ fn "resume" [ ("p", t_parked); ("from", t_int); ("msg", t_bytes); ("ep", t_int) ] (tycon received_name [])
+          (block
+             [ let_wild (var "from");
+               match_ (var "p")
+                 ((List.map
+                     (fun (this, arms) ->
+                        ( pcon ("Awaiting_" ^ this) [ pvar "ep0"; PatWild sp ],
+                          EIf
+                            ( app "==" [ var "ep"; var "ep0" ],
+                              match_ (app (msg ^ ".decode") [ var "msg" ])
+                                (List.map
+                                   (fun (ctor, _, nx) ->
+                                      (pcon (msg ^ "." ^ ctor) [ pvar "v" ], con ("Got_" ^ ctor) [ var "v"; con nx [ var "ep" ] ]))
+                                   arms
+                                 @ unexpected_arm (List.length arms)
+                                     (panic (Printf.sprintf "%s: unexpected message in state %s" where this))),
+                              panic (where ^ ": delivery for another endpoint"),
+                              sp ) ))
+                     receiving)
+                  @ [ (pcon idle_c [ PatWild sp ], panic (where ^ ": delivery before the endpoint was started"));
+                      (pcon closed_c [ PatWild sp ], panic (where ^ ": delivery to a closed endpoint")) ]) ]) ]
+  in
+  let event_api = (parked_ty :: event_ty) @ (idle :: take_idle :: awaits) @ resume in
   let entry = state_of root in
   let register =
     fn "register" [ ("s", t_cap_session); ("ap", t_int) ] (sty entry)
@@ -471,7 +597,7 @@ let role_module ~proto ~(roles : string list) (role : string) (root : lty) : dec
      the dependency itself rather than leaning on the enclosing module's
      manifest -- the capability checker asks each module for its own. *)
   let needs = DNeeds ([ ([ n "Session"; n "Live" ], None) ], sp) in
-  DMod (n mname, Public, (needs :: secret :: yield_ty :: state_types) @ (register :: transitions), sp)
+  DMod (n mname, Public, (needs :: secret :: yield_ty :: state_types) @ (register :: transitions) @ event_api, sp)
 
 (** Every generated declaration for the `@[endpoints]` protocols in [decls],
     or [] -- the common case -- when there are none.  Generated functions are
@@ -496,7 +622,9 @@ let expand (errors : Err.ctx) (decls : decl list) : decl list =
               let msg = msg_module errors ~proto ~span ctors roles in
               let role_mods =
                 List.map
-                  (fun role -> role_module ~proto ~roles role (project ~proto ~multiparty steps role LEnd))
+                  (fun role ->
+                     role_module errors ~proto ~span ~roles ~nctors:(List.length ctors) role
+                       (project ~proto ~multiparty steps role LEnd))
                   roles
               in
               List.map respan_mod (msg :: role_mods)))
