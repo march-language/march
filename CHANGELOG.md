@@ -335,6 +335,11 @@ git log is authoritative for exact commits.
   with "non-exhaustive pattern match ... { cmp: <fn>, tree: Leaf }" both
   compiled and interpreted, and `--check stdlib/sorted_set.march` reported 17
   type errors.
+- **No more false "Non-exhaustive pattern match" on matches that mix wildcard
+  and constructor sub-patterns in one position.** A fully covered match such as
+  `Nd(Lf(a), Lf(b))`, `Nd(Nd(_, _), Lf(b))`, `Nd(_, Nd(_, _))`, `Lf(n)` warned
+  `missing case: Nd(_, Lf(0))`; the same happened with tuples like
+  `(true, _)`, `(_, true)`, `(false, false)`. A genuinely missing arm still warns.
 - **A function that reads a field of a record parameter and hands it to a
   read-only helper no longer frees the record first when compiled.**
   `SortedSet.size(s)` on a set nothing else held panicked with
