@@ -1,0 +1,8 @@
+A: sends 7
+A: got true
+A: closed
+B: sends 9
+B: closed
+C: got 7 from A
+C: got 9 from B
+C: closed

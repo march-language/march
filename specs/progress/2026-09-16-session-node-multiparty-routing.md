@@ -1,6 +1,7 @@
-# `[P2]` `SessionNode`: multiparty routing (3+ roles on 3+ nodes)
+# `SessionNode`: multiparty routing (3+ roles on 3+ nodes)
 
-Filed 2026-09-15, after [[2026-09-15-session-node-transport]] shipped the binary
+Planned 2026-09-15, **shipped 2026-09-16** (what changed against the plan is at the
+end). Follows [[2026-09-15-session-node-transport]], which shipped the binary
 transport. The projector has been multiparty since
 [[2026-09-03-protocol-projector-typed-endpoints]] (step 5, `Relay`): it projects
 any number of roles and checks them for pairwise duality. The transport is the
@@ -171,3 +172,68 @@ has the information, so the transport should not have to guess.
   connects: the transport reports the failure, the protocol does not resume.
 - The `Chan`/`MPST` same-thread runtime, which this does not touch
   ([[2026-07-06-p2-compiler-session-types-protocols-channels]] F6).
+
+---
+
+## Shipped 2026-09-16
+
+Built as planned, with one deviation: the `suspend` change (step 4) landed WITH steps
+1–2 rather than after them. The parking is not separable — `deliver` has to know what
+the continuation expects — so splitting it would have meant writing the routing twice.
+
+### What exists
+
+- **`Party`** replaces `Link` as the thing `ops` closes over: one endpoint actor, one
+  continuation table (`handlers`), one expected-sender table (`waiting`), one parked
+  queue (`pending`), and a list of `Link`s keyed by remote role.
+- **`party(my_role, node_id, on_close)`**, then `accept_from(p, conn)` (learns the
+  peer's role from its hello) or `connect_to(p, their_role, conn)` per peer.
+  `open(conn, node_id, accepted, on_close)` stays, as party + one join.
+- **Routing:** `emit`'s `to` picks the link. A party with exactly one peer routes
+  everything to it whatever the role numbers say, which is why the two-party case never
+  needs them and `test/two_node/stream` is untouched.
+- **`serve`** reads one peer on the calling green thread (the old path, byte-identical)
+  and spawns a reader task per peer beyond that. `close` sends Bye to every peer.
+- **The hello** is now `[role, pid]`, so a listener learns which role connected.
+
+### The ordering fix
+
+`Session.Ops.suspend` takes the role the continuation expects:
+`suspend : Int -> Int -> (Int -> Bytes -> Int -> Int) -> Int` (0 = any). The projection
+already carried it at every receive (`LRecv (from, …)`, `LOffer (from, …)`) and the
+generator was discarding it as `_from`; `suspend_with` now passes `role_idx from`, and
+so does the actor-hosted `await_*`. `SessionNode.deliver` runs the continuation only for
+the expected sender and parks anything else per `(endpoint, sender)`, draining after each
+resumption. Per-peer FIFO is preserved by taking the oldest parked entry from that
+sender.
+
+Updated with the signature: `stdlib/session.march`, the seven transports under
+`test/session/`, `stream_replay`'s two direct `Session.suspend` calls, and
+`test/test_endpoints.ml`'s harness.
+
+### Witness, and the proof it is not vacuous
+
+`test/native/session_node_fan_loopback` (both the rule and a 5/5 stability run):
+protocol `Fan` is `A -> C`, `B -> C`, `C -> A`, so C receives from two peers over two
+connections, and A sleeps 300 ms before sending — B's message provably arrives first.
+Roles are numbered by first appearance (A = 1, C = 2, B = 3), so the connect rule puts
+listeners on A and C.
+
+The control: with `deliver`'s expected-sender check disabled (`want = 0`), the same
+binary dies with `panic: Fan, role C: unexpected message` — the generated catch-all,
+reached because C's continuation was handed B's message. That is the failure the parking
+exists to prevent, and it is what a `Relay`-only test would have missed (each `Relay`
+role receives from exactly one peer).
+
+Binary regression: `stream_endpoints`, `stream_replay`, `stream_actor`,
+`stream_actor_events` goldens byte-identical, and the two-node `stream` scenario passes.
+
+### Still open
+
+- **A three-process scenario.** `scripts/two-node.sh` is two-node by construction
+  (`node_a`/`node_b`, one port); the loopback fixture covers the semantics in one
+  process. Generalising the harness to N nodes stays its own task.
+- **A role's links are supplied by the caller.** The projection knows which roles a role
+  exchanges messages with; `party`/`join` could take the protocol's role set and check
+  that every needed link exists before the session starts, instead of failing at the
+  first `emit` with "no connection to role N".

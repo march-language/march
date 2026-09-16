@@ -472,16 +472,33 @@ handler's type, so the two sides cannot drift. A handler whose type has no codec
 compile error, and so is a `@[remote]` actor with no routable handler.
 
 **Session protocols across nodes.** `SessionNode` is the `Session.Ops` transport for an
-`@[endpoints]` protocol whose roles run on two nodes. It uses a split peer connection
-(`ClusterConn.connect_split` / `accept_split`):
+`@[endpoints]` protocol whose roles run on different nodes, over split peer connections
+(`ClusterConn.connect_split` / `accept_split`). Two roles:
 
 ```march
-let link = SessionNode.open(conn, "node-a", false, fn ep -> ())
-let s = Session.attach(io, SessionNode.ops(link))
+let p = SessionNode.open(conn, "node-a", false, fn ep -> ())
+let s = Session.attach(io, SessionNode.ops(p))
 let _ = run_role(s, Stream_Prod.register(s, 0))
-SessionNode.serve(link)
-SessionNode.finish(link)
+SessionNode.serve(p)
+SessionNode.finish(p)
 ```
+
+Three or more: start a party in your role, then add one connection per peer. The side
+that ACCEPTS learns the peer's role from its hello (a listener does not know which role
+connects next); the side that connects names it. Connect so that, for roles `i < j`, `i`
+listens and `j` connects — then no configuration is needed and nothing deadlocks.
+
+```march
+let p0 = SessionNode.party(Relay_Msg.role_Server(), "node-b", fn ep -> ())
+let p1 = SessionNode.accept_from(p0, conn_from_client)        -- role learned from its hello
+let p  = SessionNode.connect_to(p1, Relay_Msg.role_Logger(), conn_to_logger)
+```
+
+`emit` picks the connection from the message's destination role, and `serve` reads every
+peer at once. Messages from different peers race — each connection is FIFO, but two are
+not ordered against each other — so a delivery that arrives before the continuation that
+wants it is parked and replayed when that continuation is installed. The generated code
+tells the transport which role each receive expects, so this needs nothing from you.
 
 ## Putting It Together
 

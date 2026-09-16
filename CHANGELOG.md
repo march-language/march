@@ -12,6 +12,15 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`SessionNode` routes by role, so an `@[endpoints]` protocol can run its roles on
+  three or more nodes.** `SessionNode.party(my_role, node_id, on_close)` plus
+  `accept_from` / `connect_to` per peer; `emit` picks the connection from the message's
+  destination role and `serve` reads every peer. The two-node `SessionNode.open` is
+  unchanged, and a single-peer party still routes everything to its one connection.
+- **`Session.Ops.suspend` takes the role its continuation expects** (0 = any). Messages
+  from different peers race, so a transport with several connections parks a delivery
+  that arrives before the continuation that wants it. The projector knows the expected
+  sender at every receive and now passes it, so generated endpoint code needs no change.
 - **`@[remote]` on an actor**: the compiler generates `<Actor>_Remote.dispatch(pid,
   delivery)`, which routes a typed `Node.send` delivery to the handler that takes its type.
   It returns `Ok(true)` when delivered, `Ok(false)` when no handler takes that type, and

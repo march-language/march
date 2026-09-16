@@ -409,9 +409,14 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
      listed arms already cover every constructor of `<P>_Msg`: it would be
      unreachable, and a warning the user can neither see nor fix. *)
   let unexpected_arm covered body = if covered >= nctors then [] else [ (PatWild sp, body) ] in
-  let suspend_with ep arms =
+  (* `from` is the role this state receives from, which the projection carries
+     (LRecv/LOffer).  A transport with several peers parks a delivery from
+     anyone else until the continuation that wants it is installed; a
+     same-thread or two-party transport ignores it.  Passing 0 here would be
+     the old "whoever speaks next", which reorders under a real network. *)
+  let suspend_with from ep arms =
     app "Session.suspend"
-      [ var "s"; ep;
+      [ var "s"; ep; role_idx from;
         lam [ "_from"; "msg"; "ep1" ]
           (match_ (app (msg ^ ".decode") [ var "msg" ])
              (List.map
@@ -444,13 +449,13 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
                         [ app "Session.emit"
                             [ var "s"; var "ep"; role_idx to_; app (msg ^ ".encode") [ con (msg ^ "." ^ ctor) [ var "v" ] ] ] ])))
              brs
-         | LRecv (_, ctor, payload, next) ->
+         | LRecv (from, ctor, payload, next) ->
            let nx = state_of next in
            [ fn ("recv_" ^ ctor)
                [ ("s", t_cap_session); ("st", sty this); ("k", TyArrow (payload, TyArrow (sty nx, t_yield))) ]
                t_yield
-               (on_ep (block [ let_wild (suspend_with (var "ep") [ (ctor, "k", nx) ]); yield ])) ]
-         | LOffer (_, brs) ->
+               (on_ep (block [ let_wild (suspend_with from (var "ep") [ (ctor, "k", nx) ]); yield ])) ]
+         | LOffer (from, brs) ->
            let cbs = List.map (fun (lbl, ctor, payload, next) -> (lbl, ctor, payload, state_of next)) brs in
            [ fn ("offer_" ^ String.concat "_" (List.map (fun (l, _, _, _) -> l) brs))
                ([ ("s", t_cap_session); ("st", sty this) ]
@@ -458,7 +463,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
                t_yield
                (on_ep
                   (block
-                     [ let_wild (suspend_with (var "ep") (List.map (fun (lbl, ctor, _, nx) -> (ctor, "on_" ^ lbl, nx)) cbs));
+                     [ let_wild (suspend_with from (var "ep") (List.map (fun (lbl, ctor, _, nx) -> (ctor, "on_" ^ lbl, nx)) cbs));
                        yield ])) ]
          | LEnd ->
            [ fn "close" [ ("s", t_cap_session); ("st", sty this) ] t_yield
@@ -532,7 +537,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
          [ (pcon idle_c [ PatWild sp ], ETuple ([], sp));
            (PatWild sp, panic (where ^ ": take_idle on an endpoint that was already started")) ])
   in
-  let await_fn name this =
+  let await_fn ~from name this =
     (* Suspend so the transport knows the endpoint awaits; the handler must
        never run -- the actor resumes the endpoint itself.  `ep` is bound from
        a linear scrutinee and inherits its linearity, so it is used ONCE:
@@ -542,7 +547,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
          [ ( pcon this [ pvar "ep" ],
              con ("Awaiting_" ^ this)
                [ app "Session.suspend"
-                   [ var "s"; var "ep";
+                   [ var "s"; var "ep"; role_idx from;
                      lam [ "_from"; "_msg"; "_ep" ]
                        (panic (where ^ ": this endpoint is actor-hosted; deliver through `resume`, not the transport handler")) ];
                  secret_v ] ) ])
@@ -551,8 +556,8 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
     List.concat_map
       (fun (node, this) ->
          match node with
-         | LRecv (_, ctor, _, _) -> [ await_fn ("await_" ^ ctor) this ]
-         | LOffer (_, brs) -> [ await_fn ("await_" ^ String.concat "_" (List.map (fun (l, _, _, _) -> l) brs)) this ]
+         | LRecv (from, ctor, _, _) -> [ await_fn ~from ("await_" ^ ctor) this ]
+         | LOffer (from, brs) -> [ await_fn ~from ("await_" ^ String.concat "_" (List.map (fun (l, _, _, _) -> l) brs)) this ]
          | LEnd ->
            [ fn "finish" [ ("s", t_cap_session); ("st", sty this) ] t_parked
                (match_ (var "st")

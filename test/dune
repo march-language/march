@@ -5962,6 +5962,28 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/node_send_typed_loopback.expected native_node_send_typed_loopback.out)))
 
+; ── SessionNode with three roles: per-role routing, and the cross-peer race ──
+; A and B both send to C over separate connections, A late, so B's message
+; arrives first and must be parked until C asks for it. Compiled only (the
+; loopback accept parks the interpreter).
+; specs/progress/2026-09-16-session-node-multiparty-routing.md.
+(rule
+ (targets native_session_node_fan_loopback native_session_node_fan_loopback.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/session_node_fan_loopback.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_session_node_fan_loopback
+        native/session_node_fan_loopback.march)
+   (with-stdout-to native_session_node_fan_loopback.out
+        (system "./native_session_node_fan_loopback")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/session_node_fan_loopback.expected native_session_node_fan_loopback.out)))
+
 ; ── @[remote] actor: the generated dispatch routes a typed delivery to its handler ──
 ; Both backends (no sockets): specs/progress/2026-09-15-remote-actor-dispatch.md.
 (rule

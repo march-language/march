@@ -80,7 +80,7 @@ mod StreamEndpoints do
           Vault.set(pending, "q", Deque.push_back(q, (to, ep, msg)))
           ep
         end,
-        suspend: fn (ep, handler) -> do
+        suspend: fn (ep, _from, handler) -> do
           Vault.set(handlers, int_to_string(ep), handler)
           ep
         end,
