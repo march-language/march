@@ -365,10 +365,6 @@ let known_unregistered_stdlib_test_files = [
   "test_set.march";
   "test_sigil.march";
   "test_sort.march";
-  (* test_sorted_set.march: its differential property test drives Gen/Check,
-     which this harness does not prepend; the dune rule in test/dune runs it
-     against the whole stdlib instead. *)
-  "test_sorted_set.march";
   "test_string.march";
   "test_string_utf8.march";
   "test_task.march";
@@ -544,6 +540,10 @@ let () =
     ("deque", [
       Alcotest.test_case "Deque module"
         `Quick (run_stdlib_test "test_deque.march" "TestDeque");
+    ]);
+    ("sorted_set", [
+      Alcotest.test_case "SortedSet module"
+        `Quick (run_stdlib_test "test_sorted_set.march" "TestSortedSet");
     ]);
     ("ring_buf", [
       Alcotest.test_case "RingBuf module"
