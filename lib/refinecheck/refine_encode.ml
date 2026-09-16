@@ -86,12 +86,15 @@ let is_float_base : A.ty -> bool = function
    do NOT use Z3's string theory (`str.len`, `str.++`, the built-in `String`
    sort, regex): staying decidable and cheap is the whole point of the scoping.
 
-   The consequence to keep in mind is that `Str` is opaque: knowing a value is
-   DISTINCT from the empty literal does not establish its length (there is no
-   injectivity axiom relating a string to its length).  So an `s == ""` guard
-   proves nothing about `len(s)` in the else-branch, and the checker stays
-   silent there — correct under the definite-failure stance, and documented as
-   a limitation rather than papered over.
+   `Str` is otherwise opaque, with one fact added back: since 2026-09-16 each
+   declared string constant carries the ground implication
+   `c != "" -> $strlen(c) > 0` (pushed by [Refine_call]'s [pin_nonempty_len]),
+   so an `s == ""` guard DOES establish `len(s) > 0` in the else-branch.  That
+   is true of byte length — the empty string is the only string of length 0 —
+   and it stays inside this fragment: a ground implication per constant, not a
+   quantified injectivity axiom, since quantified axioms are what once turned
+   every stdlib `Array` bounds check into a 1.5 s `unknown`.  Nothing else
+   relates a string's identity to its length.
 
    All three SMT names below contain `$`, which is legal in an SMT-LIB simple
    symbol but CANNOT occur in a March identifier.  That is load-bearing, not
@@ -670,6 +673,39 @@ let is_set_operator (m : string) : bool = List.mem m set_operators
 let const_fns : (string, Smt.term) Hashtbl.t = Hashtbl.create 16
 let const_fn_rejected : (string, string) Hashtbl.t = Hashtbl.create 16
 
+(* ── Return contracts on BUILTINS ──────────────────────────────────────────
+   A builtin has no [fn_def], so [postcond_of] can compute nothing for it and
+   a `let n = pmap_threshold()` reaches the next call site as an
+   unconstrained constant — three of `stdlib/list.march`'s four user-code
+   skips were exactly that (see
+   specs/progress/2026-09-16-refine-skip-census.md).  This table supplies the
+   missing contract, as (builtin name -> binder, predicate) in the same shape
+   [fn_sig.ret] uses, so [postcond_of] can hand it back unchanged.
+
+   THE BAR FOR ADDING AN ENTRY, which is higher than `@[assume]`'s: the
+   contract must be true BY CONSTRUCTION, enforced somewhere a test pins, not
+   merely believed.  A propagated postcondition is added to the assumption
+   set of every downstream proof, so a wrong entry here is a false-POSITIVE
+   engine — it would make the checker certify code that can fail.  `@[assume]`
+   at least declares its trust in the source and counts itself in the ledger's
+   `trusted` column; an entry here is invisible to a reader of the program,
+   which is why "somebody enforces it" is the price of admission.
+
+   `pmap_threshold` qualifies: its only producer is `--pmap-threshold`, and
+   bin/main.ml rejects a value below 1 before the flag reaches the
+   interpreter or codegen (a non-positive cutoff hangs `List.pmap` outright,
+   so the check earns its place independently of this table). *)
+let builtin_ret_refinements : (string * (string * A.expr)) list =
+  let v (n : string) : A.expr = A.EVar { A.txt = n; A.span = A.dummy_span } in
+  let app (op : string) (a : A.expr) (b : A.expr) : A.expr =
+    A.EApp (v op, [ a; b ], A.dummy_span)
+  in
+  let int_lit (n : int) : A.expr = A.ELit (A.LitInt n, A.dummy_span) in
+  [ ("pmap_threshold", ("_", app ">" (v "_") (int_lit 0))) ]
+
+let builtin_ret_refinement (fname : string) : (string * A.expr) option =
+  List.assoc_opt fname builtin_ret_refinements
+
 (* Names bound ANYWHERE inside the function currently being visited
    ([Refine_check.visit_fn] sets and restores it; see [fn_binders]).  A
    constant function is folded wherever [smt_of_r] runs — a predicate, a
@@ -1008,6 +1044,58 @@ let set_ret_elem (fd : A.fn_def) : Smt.sort option =
   in
   match fd.A.fn_ret_ty with Some t -> go t | None -> None
 
+(* ── A generic set measure's element PARAMETER (P3, 2026-09-15) ───────────
+   `fn tree_elts(t : Tree(a)) : Set(a)` returns the opaque `Elem` from
+   [set_ret_elem] — sound at the measure's own DECLARED (generic) instance,
+   but every consumer that reads a result sort at a CONCRETE instance
+   (`tree_elts` applied to a `Tree(Int)` term) used to read the same fixed
+   `Elem` there too, which z3 rejects once anything pins the element to a
+   real sort.  [set_ret_elem_param] instead records WHICH type parameter of
+   the measure's own declared argument type the `Set(_)` element names — `0`
+   for `Tree(a)`'s `a` — so [set_measure_elem_at] can substitute the
+   INSTANCE's own argument at that position ([Int] for `Tree(Int)`) wherever
+   a result sort is read at a concrete instance: [instance_measure_text]'s
+   `declare-fun`, [arm_axiom]'s pin and body-sort check, and
+   [resolve_sorts_exact]'s inference and rewrite of the application.  [None]
+   when the return type does not name a single type variable this way (a
+   measure declared with a concrete element, `Set(Int)`, needs no
+   substitution: [set_measure_elem] already carries the right, fixed sort). *)
+let set_measure_elem_param : (string, int) Hashtbl.t = Hashtbl.create 8
+
+let set_ret_elem_param (fd : A.fn_def) : int option =
+  let rec ret_tv = function
+    | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> ret_tv b
+    | A.TyCon ({ A.txt = "Set"; _ }, [ A.TyVar v ]) -> Some v.A.txt
+    | _ -> None
+  in
+  match fd.A.fn_ret_ty with
+  | None -> None
+  | Some ret_ty -> (
+    match ret_tv ret_ty with
+    | None -> None
+    | Some v -> (
+      match fd.A.fn_clauses with
+      | { A.fc_params = (A.FPNamed p | A.FPDefault (p, _)) :: _; _ } :: _ -> (
+        match p.A.param_ty with
+        | Some (A.TyCon (_, targs)) ->
+          List.find_index (function A.TyVar w -> w.A.txt = v | _ -> false) targs
+        | _ -> None)
+      | _ -> None))
+
+(* The concrete element sort of set measure [name] at ADT instance arguments
+   [inst_args] — the instance's own argument at [set_measure_elem_param]'s
+   recorded index, falling back to the measure's globally DECLARED element
+   sort ([set_measure_elem]) when no parameter is recorded, or the index is
+   out of range (an ill-formed instance — safe to leave opaque, exactly the
+   pre-existing behaviour). *)
+let set_measure_elem_at (name : string) (inst_args : Smt.sort list) : Smt.sort option =
+  match Hashtbl.find_opt set_measure_elem_param name with
+  | Some i -> (
+    match List.nth_opt inst_args i with
+    | Some concrete -> Some concrete
+    | None -> Hashtbl.find_opt set_measure_elem name)
+  | None -> Hashtbl.find_opt set_measure_elem name
+
 (* Replace the placeholder element sort throughout a term with [elem] — for
    measure AXIOMS, whose element sort is fixed by the declaration and which
    are rendered once, outside any VC and hence outside [resolve_set_sorts]. *)
@@ -1259,8 +1347,116 @@ let measure_preamble_sorts : (string, unit) Hashtbl.t = Hashtbl.create 8
    `Array`, `Seq`, `Set`, …); keeping our datatype sorts in a private `M_`
    namespace guarantees no user/builtin ADT name collides with a reserved one.
    [adt_ctors] / [SData] are keyed by this safe name; constructors are not
-   renamed. *)
-let adt_sort_name (march_name : string) : string = "M_" ^ march_name
+   renamed.
+
+   ── Module-qualification (2026-09-15, P2) ──────────────────────────────
+   A program sees the WHOLE stdlib merged into one decl list (the stdlib is
+   prepended by the driver), so two `type Tree` in two different `mod … do
+   end` blocks — or a user's own `type Tree` and a stdlib one — used to
+   collide on the bare key "M_Tree": whichever was registered LAST silently
+   clobbered the other's constructor list in [adt_ctors]/[adt_arity].
+
+   [register_adt_names] now records, per bare name, every (module path,
+   qualified key) pair it sees ([adt_decl_paths]), and stores each
+   declaration under its OWN qualified key ([adt_sort_name_at]) rather than
+   the bare one.  [finalize_adt_canonical], run once pass 1 completes,
+   decides what the bare name CANONICALLY denotes:
+
+     - exactly one declarant anywhere -> its data is (re-)filed under the
+       plain bare key too, and [adt_sort_name] keeps returning that bare
+       key — byte-for-byte what every existing non-colliding type/module got
+       before this change, so the overwhelming majority of the codebase
+       (every stdlib module that does not collide) is untouched.
+     - two or more declarants -> each keeps its OWN qualified key
+       (`M_<path>$<Name>`) and NO bare key is filed at all, so a stray
+       unqualified reference cannot come back with a random mix of two
+       ADTs' constructors again; [adt_sort_name] resolves the bare spelling
+       to a single PREFERRED declarant (the entry/top-level one, `path =
+       ""`, if there is one — the same "current module wins an ambiguous
+       name" convention the compiler already uses for ambiguous
+       constructors; otherwise the first one registered) for every caller
+       that does not carry its own module path.
+
+   This is deliberately not full lexical scope resolution (a reference
+   written INSIDE the losing module still resolves to the preferred
+   declarant, not to its own type) — see the discussion in
+   specs/progress/2026-09-15-refine-sort-and-measure-names-unqualified.md.
+   Misresolving a sort here can only turn a proof into a
+   [Sort_conflict]/`Exit` skip elsewhere in this file, never a false
+   "proved": every consumer of [adt_ctors] already treats a sort mismatch as
+   a reason to give up, not to guess. *)
+let adt_sort_name_at (path : string) (name : string) : string =
+  if path = "" then "M_" ^ name else Printf.sprintf "M_%s$%s" path name
+
+(* bare "M_<name>" -> every (module path, qualified key) registered under
+   that bare name, most-recently-registered first.  Populated by
+   [register_adt_names]; consumed (and then made moot) by
+   [finalize_adt_canonical]. *)
+let adt_decl_paths : (string, (string * string) list) Hashtbl.t = Hashtbl.create 32
+
+(* bare "M_<name>" -> the qualified key [adt_sort_name] should resolve it to,
+   when that bare name was ambiguous.  Only holds entries for AMBIGUOUS
+   names — an unambiguous name is filed under its own bare key directly (see
+   [finalize_adt_canonical]), so this table is empty for every program with
+   no colliding declarations, i.e. unchanged status quo. *)
+let adt_canonical : (string, string) Hashtbl.t = Hashtbl.create 8
+
+let adt_sort_name (march_name : string) : string =
+  let bare = "M_" ^ march_name in
+  match Hashtbl.find_opt adt_canonical bare with Some key -> key | None -> bare
+
+(* Finalize the bare-name -> qualified-key resolution once [register_adt_names]
+   (pass 1) has seen every declaration.  Must run before [register_field_sorts]
+   (pass 2) and before anything else calls [adt_sort_name], since pass 2's
+   cross-type field references and every later consumer read through it. *)
+let finalize_adt_canonical () : unit =
+  Hashtbl.reset adt_canonical;
+  Hashtbl.iter
+    (fun bare entries ->
+      let distinct =
+        List.sort_uniq compare (List.map fst entries) (* distinct module paths *)
+      in
+      match distinct with
+      | [] | [ _ ] -> (
+        (* Unambiguous: (re-)file the sole declarant's data under the plain
+           bare key too, so every existing bare-name consumer keeps working
+           unchanged. *)
+        match entries with
+        | (_, qualified) :: _ when qualified <> bare ->
+          (match Hashtbl.find_opt adt_ctors qualified with
+           | Some ctors ->
+             Hashtbl.replace adt_ctors bare ctors;
+             Hashtbl.remove adt_ctors qualified
+           | None -> ());
+          (match Hashtbl.find_opt adt_arity qualified with
+           | Some n ->
+             Hashtbl.replace adt_arity bare n;
+             Hashtbl.remove adt_arity qualified
+           | None -> ())
+        | _ -> ())
+      | _ ->
+        (* Ambiguous: every declarant keeps its own qualified key — already
+           stored there by [register_adt_names], EXCEPT a [path = ""]
+           declarant, whose qualified key ([adt_sort_name_at]) already IS
+           the bare one: its data lives at [bare] and must stay there.  Only
+           clear [bare] when no declarant sits at the top level (every
+           qualified key is then genuinely distinct from it) — clearing it
+           unconditionally deleted a real entry/top-level declarant's own
+           correctly-registered ctors/arity out from under it, which is
+           exactly the module-qualification bug this function exists to
+           fix, reintroduced one level up. *)
+        let entry_decl = List.find_opt (fun (p, _) -> p = "") entries in
+        if entry_decl = None then begin
+          Hashtbl.remove adt_ctors bare;
+          Hashtbl.remove adt_arity bare
+        end;
+        let preferred =
+          match entry_decl with
+          | Some (_, key) -> key
+          | None -> snd (List.nth entries (List.length entries - 1))
+        in
+        if preferred <> bare then Hashtbl.replace adt_canonical bare preferred)
+    adt_decl_paths
 
 (* The MEASURE-ONLY marker for a March ADT — see [meas_sort_prefix]. *)
 let meas_sort_name (march_name : string) : string =
@@ -1416,28 +1612,44 @@ let rec smt_sort_of_field ?(pnames : string list = []) (t : A.ty) : Smt.sort =
       Smt.SData (adt, List.init n arg)
   | _ -> Smt.sdata "Elem"
 
-(* Pass 1: register every ADT's constructor list (keyed by sort name). *)
-let rec register_adt_names (decls : A.decl list) : unit =
+(* Pass 1: register every ADT's constructor list (keyed by sort name).
+   [path] is the dotted module path of [decls]' immediate enclosing `mod`
+   ("" at the top of the compilation unit) — see the module-qualification
+   comment on [adt_sort_name]. Each declaration is filed under its OWN
+   qualified key; [finalize_adt_canonical] decides afterwards whether that
+   key also becomes the plain bare one. *)
+let rec register_adt_names ?(path : string = "") (decls : A.decl list) : unit =
+  let record_key (name : string) : string =
+    let bare = "M_" ^ name in
+    let key = adt_sort_name_at path name in
+    Hashtbl.replace adt_decl_paths bare
+      ((path, key) :: (try Hashtbl.find adt_decl_paths bare with Not_found -> []));
+    key
+  in
   List.iter
     (function
       | A.DType (_, name, tparams, A.TDVariant variants, _)
       | A.DAlwaysLinearType (_, name, tparams, A.TDVariant variants, _) ->
-        Hashtbl.replace adt_ctors (adt_sort_name name.A.txt)
+        let key = record_key name.A.txt in
+        Hashtbl.replace adt_ctors key
           (List.map (fun (v : A.variant) -> v.A.var_name.A.txt) variants);
-        Hashtbl.replace adt_arity (adt_sort_name name.A.txt) (List.length tparams)
+        Hashtbl.replace adt_arity key (List.length tparams)
       | A.DType (_, name, tparams, A.TDRecord _, _)
       | A.DAlwaysLinearType (_, name, tparams, A.TDRecord _, _) ->
-        Hashtbl.replace adt_ctors (adt_sort_name name.A.txt) [ name.A.txt ];
-        Hashtbl.replace adt_arity (adt_sort_name name.A.txt) (List.length tparams)
+        let key = record_key name.A.txt in
+        Hashtbl.replace adt_ctors key [ name.A.txt ];
+        Hashtbl.replace adt_arity key (List.length tparams)
       (* An actor's `state { ... }` is a record in every respect the checker
          cares about — named fields, one constructor — registered under the
          actor's own name so `state.value` in a handler and `{ state with
          value: ... }` reflect through the same selectors a record does
          (plan phase 4: actor state as an inductive invariant). *)
       | A.DActor (_, name, _, _) ->
-        Hashtbl.replace adt_ctors (adt_sort_name name.A.txt) [ name.A.txt ];
-        Hashtbl.replace adt_arity (adt_sort_name name.A.txt) 0
-      | A.DMod (_, _, ds, _) -> register_adt_names ds
+        let key = record_key name.A.txt in
+        Hashtbl.replace adt_ctors key [ name.A.txt ];
+        Hashtbl.replace adt_arity key 0
+      | A.DMod (n, _, ds, _) ->
+        register_adt_names ~path:(if path = "" then n.A.txt else path ^ "." ^ n.A.txt) ds
       | _ -> ())
     decls
 
@@ -1986,8 +2198,9 @@ let datatype_decl_names ?(extra : Smt.sort list = []) (adts : string list) : str
    with pattern variables at their constructor-field sorts [env]; [None] when
    the term is ill-sorted.  A measure application is taken at its declared
    result sort. *)
-let rec axiom_body_sort (env : (string * Smt.sort) list) (t : Smt.term) : Smt.sort option =
-  let go = axiom_body_sort env in
+let rec axiom_body_sort ?(elem_of : string -> Smt.sort option = fun m -> Hashtbl.find_opt set_measure_elem m)
+    (env : (string * Smt.sort) list) (t : Smt.term) : Smt.sort option =
+  let go = axiom_body_sort ~elem_of env in
   let int2 a b = if go a = Some Smt.SInt && go b = Some Smt.SInt then Some Smt.SInt else None in
   let set2 a b = match go a, go b with Some (Smt.SSet e), Some (Smt.SSet e') when e = e' -> Some (Smt.SSet e) | _ -> None in
   match t with
@@ -1996,9 +2209,12 @@ let rec axiom_body_sort (env : (string * Smt.sort) list) (t : Smt.term) : Smt.so
   | Smt.Add (a, b) | Smt.Sub (a, b) -> int2 a b
   | Smt.MulLit (_, a) -> if go a = Some Smt.SInt then Some Smt.SInt else None
   | Smt.App (m, _) ->
-    (* An instance symbol `m$…` has its measure's result sort. *)
+    (* An instance symbol `m$…` has its measure's result sort.  [elem_of]
+       lets the caller answer for the SELF measure at the instance it is
+       currently axiomatising (P3: a generic set measure's element at a
+       concrete instance is not what [set_measure_elem] alone would say). *)
     let m = match String.index_opt m '$' with Some i -> String.sub m 0 i | None -> m in
-    Some (match Hashtbl.find_opt set_measure_elem m with Some e -> Smt.SSet e | None -> Smt.SInt)
+    Some (match elem_of m with Some e -> Smt.SSet e | None -> Smt.SInt)
   | Smt.SetEmpty e -> Some (Smt.SSet e)
   | Smt.SetSng (e, x) -> if go x = Some e then Some (Smt.SSet e) else None
   | Smt.SetUnion (a, b) | Smt.SetInter (a, b) | Smt.SetDiff (a, b) -> set2 a b
@@ -2035,8 +2251,22 @@ let arm_axiom ~allowed ?(args : Smt.sort list option) ?(self_name : string optio
     in
     if is_set bsmt <> Hashtbl.mem set_measure_elem name then None
     else
+    (* [name]'s element sort AT THIS AXIOM'S INSTANCE (P3): the declared,
+       opaque `Elem` when axiomatising at the measure's own declared
+       instance ([args] = [None], or an instance that does not resolve a
+       concrete element), but the instance's own concrete argument at
+       [set_measure_elem_param]'s recorded position when one is known — so a
+       generic `fn tree_elts(t : Tree(a)) : Set(a)` axiomatised at
+       `Tree(Int)` pins its arms' sets to `Set(Int)`, not the fixed `Set(Elem)`
+       that always disagreed with a concrete element used elsewhere in the
+       same predicate. *)
+    let inst_elem =
+      match args with
+      | Some a -> set_measure_elem_at name a
+      | None -> Hashtbl.find_opt set_measure_elem name
+    in
     let bsmt =
-      match Hashtbl.find_opt set_measure_elem name with
+      match inst_elem with
       | Some e -> pin_set_sorts e bsmt
       | None -> bsmt
     in
@@ -2078,8 +2308,10 @@ let arm_axiom ~allowed ?(args : Smt.sort list option) ?(self_name : string optio
        a silent solver-undecided skip).  Refuse the arm — and with it the
        measure's axiomatisation — unless the body's sort is the measure's
        declared one and every set element agrees with its set. *)
-    else if axiom_body_sort (List.combine vars sorts) bsmt
-            <> Some (match Hashtbl.find_opt set_measure_elem name with
+    else if axiom_body_sort
+              ~elem_of:(fun m -> if m = name then inst_elem else Hashtbl.find_opt set_measure_elem m)
+              (List.combine vars sorts) bsmt
+            <> Some (match inst_elem with
                      | Some e -> Smt.SSet e
                      | None -> Smt.SInt)
     then None
@@ -2165,7 +2397,7 @@ let instance_measure_text ?(skip : string list = []) ?(axiom_sink : (string -> s
         arg_sorts := Smt.SData (adt, args) :: !arg_sorts;
         let arg_sort = Smt.string_of_sort (Smt.SData (adt, args)) in
         let result =
-          match Hashtbl.find_opt set_measure_elem m with
+          match set_measure_elem_at m args with
           | Some e -> Smt.string_of_sort (Smt.SSet e)
           | None -> "Int"
         in
@@ -2771,9 +3003,20 @@ let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
       (* A set measure's result is its DECLARED set sort: `Set(Elem)` names
          the opaque sort itself, not an open element, because the measure's
          `declare-fun` is fixed at it.  Reading it as a variable let a guessed
-         `Int` element unify with it and produced a query z3 rejects. *)
+         `Int` element unify with it and produced a query z3 rejects.
+
+         P3 exception: when [set_measure_elem_param] recorded WHICH of the
+         argument ADT's own type parameters the element is (`Tree(a)`'s `a`,
+         param 0), reuse THAT SAME inference variable from [it] instead of
+         the fixed name — it is already unified with the argument's own
+         instance above, so a `Tree(Int)` argument here makes this
+         application's result `Set(Int)` by the ordinary unification the
+         opaque case forgoes, not a name z3 can never resolve to one. *)
       (match Hashtbl.find_opt set_measure_elem m with
-       | Some (Smt.SData ("Elem", [])) -> ISet (INamed ("Elem", []))
+       | Some (Smt.SData ("Elem", [])) -> (
+         match Hashtbl.find_opt set_measure_elem_param m, it with
+         | Some i, INamed (_, params) when i < List.length params -> ISet (List.nth params i)
+         | _ -> ISet (INamed ("Elem", [])))
        | Some e -> ISet (of_sort e)
        | None -> IInt)
     | Smt.App (m, args) when Hashtbl.mem set_measure_elem m ->
@@ -2878,13 +3121,22 @@ let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
         let decl = try Hashtbl.find measure_decl_args m with Not_found -> [] in
         (match inst with
          (* A set-valued measure whose element is opaque (`Set(a)` over
-            `Tree(a)`) has no instance with a concrete element yet: its axioms
-            would state `Set(Elem)` results for `Tree(Int)` arguments.  The
-            query is a sort conflict, a skip, rather than a z3 rejection
+            `Tree(a)`) has no instance with a concrete element UNLESS
+            [set_measure_elem_param] recorded which of the argument ADT's
+            own parameters `a` is (P3) — in which case the branch below
+            resolves it from [args] itself ([instance_measure_text] and
+            [arm_axiom] read the same table for the `declare-fun` and its
+            axioms), and this is exactly the ordinary "measure at a fresh
+            instance" case just below.  Only genuinely UNRESOLVABLE opaque
+            elements (no recorded parameter at all) still give up: the
+            axioms would otherwise state `Set(Elem)` results for a
+            `Tree(Int)` argument, which z3 rejects.  The query is then a
+            sort conflict, a skip, rather than a z3 rejection
             (specs/todos/2026-09-15-generic-set-measure-instances.md). *)
          | Smt.SData (_, args)
            when args <> decl && List.exists (fun x -> x <> Smt.sdata "Elem") args
-                && Hashtbl.find_opt set_measure_elem m = Some (Smt.sdata "Elem") ->
+                && Hashtbl.find_opt set_measure_elem m = Some (Smt.sdata "Elem")
+                && Hashtbl.find_opt set_measure_elem_param m = None ->
            raise Exit
          | Smt.SData (adt, args) when args <> decl && List.exists (fun x -> x <> Smt.sdata "Elem") args ->
            let name = measure_instance_name m adt args in
@@ -2938,6 +3190,28 @@ let rec term_sorts (acc : Smt.sort list) (t : Smt.term) : Smt.sort list =
     term_sorts (term_sorts acc a) b
   | Smt.SetCard (e, a) -> term_sorts (e :: acc) a
 
+(* The element sorts [query_instance_preamble]'s own `mis` need `MSet$<elem>`
+   DEFINED for (P3, 2026-09-15): a generic set-valued `@[measure]` instanced
+   at a concrete ADT argument (`tree_elts` over `Tree(Int)`) needs
+   `(define-sort MSet$Int () (Array Int Bool))` in the query preamble, but
+   that need never shows up as a structural [Smt.SSet] node anywhere in the
+   [Smt.vc] a caller's [set_preamble] call inspects — the instance's
+   `MSet$Int`-sorted `declare-fun`/axioms are opaque SMT-LIB TEXT
+   ([instance_measure_text]'s own output), not a typed [Smt.term].
+   [query_instance_preamble] itself is the only caller (see its own
+   [set_defs]): it emits this text BEFORE the instance text that uses it,
+   since SMT-LIB has no forward declarations — appending it afterwards
+   (an earlier attempt, via [set_preamble]) produced valid-looking but
+   WRONGLY ORDERED text that z3 still rejected. *)
+let measure_instance_set_elems (mis : measure_instance list) : Smt.sort list =
+  List.filter_map
+    (fun mi ->
+      if is_list_structure_measure mi.mi_measure then None
+      else if Hashtbl.mem set_measure_elem mi.mi_measure then
+        set_measure_elem_at mi.mi_measure mi.mi_args
+      else None)
+    mis
+
 (* The declarations a query finished by [resolve_sorts] needs beyond
    [declared], the preamble text it is sent with: the datatype instances it
    mentions (a parameter at `Tree(Int)` names `M_Tree$Int`, which no module
@@ -2976,6 +3250,25 @@ let query_instance_preamble ~(declared : string) ~(measures : bool)
     then "(declare-sort Elem 0)\n"
     else ""
   in
+  (* `MSet$<elem>` for every generic set-valued measure instance in [mis]
+     (P3, 2026-09-15): `mtext` below uses this sort name in its
+     `declare-fun`/axioms the moment a set-valued measure like `tree_elts`
+     is instanced at a concrete element (`Tree(Int)`), but nothing else
+     ([set_preamble], run by the caller AFTER this text) ever discovers the
+     need — the instance's `MSet$Int`-sorted terms are opaque SMT-LIB TEXT
+     here, not a typed [Smt.SSet] node [set_preamble]'s structural scan can
+     see, and even if it could, appending its `define-sort` AFTER [mtext]
+     would still leave [mtext]'s own OWN declare-fun/axioms referencing an
+     undefined sort at the point z3 reads them — SMT-LIB has no forward
+     declarations.  Must be emitted HERE, before [mtext]. *)
+  let set_defs =
+    String.concat ""
+      (List.filter_map
+         (fun e ->
+           let d = Smt.set_sort_defs [ e ] in
+           if d = "" || contains declared d then None else Some d)
+         (List.sort_uniq compare (List.map Smt.render_elem_sort (measure_instance_set_elems mis))))
+  in
   (* The quantified axioms of every measure symbol the query (or the
      per-query measure text) mentions, closed under what those axioms mention;
      only alongside the measure preamble that declares the symbols. *)
@@ -3001,7 +3294,7 @@ let query_instance_preamble ~(declared : string) ~(measures : bool)
            symbols)
     end
   in
-  elem ^ (if dts = "" then "" else dts ^ "\n") ^ ltext ^ mtext ^ axioms
+  elem ^ (if dts = "" then "" else dts ^ "\n") ^ set_defs ^ ltext ^ mtext ^ axioms
 
 (* [resolve_sorts_exact], forgiving ASSUMPTIONS.  A contradiction that only an
    assumption brings in (a guard over a program function whose name happens to

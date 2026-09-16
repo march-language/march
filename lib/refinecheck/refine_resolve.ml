@@ -269,6 +269,17 @@ let postcond_of ?(cb : cbenv = []) (ctx : rctx) (defs : (string, fn_sig option) 
     | None -> (match List.assoc_opt fname cb with Some sg -> Some (Some sg) | None -> None)
   in
   match resolved with
+  (* A BUILTIN resolves to nothing at all — it has no [fn_def] — so its
+     contract, if it has one, comes from the table instead.  Checked after
+     name resolution and the callee env, never before: a user function or a
+     local binding that happens to share a builtin's spelling is the one the
+     call actually reaches, and its contract must win.  The predicate is
+     [Closed] by construction (the table admits only `_`-only predicates), so
+     there are no actuals to substitute and no arity to agree on. *)
+  | None when builtin_ret_refinement fname <> None ->
+    (match builtin_ret_refinement fname with
+     | Some (b, p) -> Some (b, p, None)
+     | None -> None)
   | Some (Some sg) ->
     (match sg.ret with
      | Some (b, p) ->
