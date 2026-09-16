@@ -1,0 +1,188 @@
+-- Two-node harness, scenario "partition": node-b (listens; answers the
+-- post-heal sync with its own registry). See node_a.march for the scenario.
+mod TwoNodePartitionB do
+  needs IO.Console
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Process
+  needs IO.Clock
+
+  pfn me() : String do "node-b" end
+  pfn peer() : String do "node-a" end
+  pfn my_pid() : Int do 200 end
+
+  -- ── a SWIM node over one connection, plus a GlobalRegistry replica ─────
+  -- The loop is `stall`'s (read up to 50 ms, frames -> events, step, perform),
+  -- extended with REGISTRY_SYNC_RESP frames: a sync carries the sender's
+  -- root hash and every entry, and is merged with GlobalRegistry.diff_entries.
+  -- Period 500 ms, ack timeout 300 ms, suspect timeout 1000 ms, no helpers.
+  pfn cfg() : Swim.Config do Swim.config(300, 1000, 0) end
+
+  pfn peer_status(s : SwimDriver.State) : String do
+    match Membership.get(s.swim.members, peer()) do
+      Some(m) ->
+        match m.status do
+          Membership.Alive -> "Alive"
+          Membership.Suspect -> "Suspect"
+          Membership.Dead -> "Dead"
+        end
+      None -> "unknown"
+    end
+  end
+
+  pfn write_frame(fd : Int, bytes : List(Int)) : () do
+    let _ = Socket.write(fd, NetKernel.bytes_to_str(NetFrame.encode(bytes)))
+    ()
+  end
+
+  pfn write_msg(fd : Int, msg : SwimDriver.WireMsg) : () do write_frame(fd, SwimDriver.encode_msg(msg)) end
+
+  pfn send_sync(fd : Int, reg : GlobalRegistry.Names) : () do
+    write_frame(fd, NetKernel.encode_registry_sync_resp(GlobalRegistry.root_hash(reg), GlobalRegistry.all_entries(reg)))
+  end
+
+  pfn perform(fd : Int, acts : List(Swim.Action)) : () do
+    match acts do
+      Nil -> ()
+      Cons(a, rest) ->
+        match a do
+          Swim.SendPing(_target) -> write_msg(fd, SwimDriver.SwimPing(me()))
+          Swim.SendPingReq(_, _) -> ()
+          Swim.Gossip(m) -> write_msg(fd, SwimDriver.SwimGossip(m.node_id, m.status, m.incarnation))
+        end
+        perform(fd, rest)
+    end
+  end
+
+  -- Split every complete frame off [buf]: answer pings, collect SWIM events,
+  -- and fold any registry sync into [reg] (reporting that one arrived).
+  pfn drain(fd : Int, buf : List(Int), events : List(SwimDriver.Event), acked : Bool, reg : GlobalRegistry.Names, synced : Bool)
+      : (List(Int), List(SwimDriver.Event), Bool, GlobalRegistry.Names, Bool) do
+    match NetFrame.decode(buf) do
+      None -> (buf, events, acked, reg, synced)
+      Some((frame, rest)) ->
+        if NetKernel.frame_tag(frame) == Some(6) do
+          match NetKernel.decode_registry_sync_resp(frame) do
+            Ok((rh, leaves)) -> drain(fd, rest, events, acked, GlobalRegistry.diff_entries(reg, rh, leaves), true)
+            Err(_) -> drain(fd, rest, events, acked, reg, synced)
+          end
+        else
+          match SwimDriver.decode_msg(frame) do
+            Err(_) -> drain(fd, rest, events, acked, reg, synced)
+            Ok(msg) ->
+              match msg do
+                SwimDriver.SwimPing(_sender) ->
+                  write_msg(fd, SwimDriver.SwimPingAck(me()))
+                  drain(fd, rest, events, acked, reg, synced)
+                SwimDriver.SwimPingAck(_) ->
+                  match SwimDriver.msg_to_event(msg) do
+                    Some(ev) -> drain(fd, rest, List.append(events, Cons(ev, Nil)), true, reg, synced)
+                    None -> drain(fd, rest, events, acked, reg, synced)
+                  end
+                _ ->
+                  match SwimDriver.msg_to_event(msg) do
+                    Some(ev) -> drain(fd, rest, List.append(events, Cons(ev, Nil)), acked, reg, synced)
+                    None -> drain(fd, rest, events, acked, reg, synced)
+                  end
+              end
+          end
+        end
+    end
+  end
+
+  type Tick = { s : SwimDriver.State, buf : List(Int), acked : Bool, closed : Bool, reg : GlobalRegistry.Names, synced : Bool }
+
+  pfn tick(fd : Int, s : SwimDriver.State, buf : List(Int), reg : GlobalRegistry.Names) : Tick do
+    let got = match Socket.recv_timeout(fd, 4096, 50) do
+      Ok(chunk) -> if String.is_empty(chunk) do (buf, true) else (List.append(buf, NetKernel.str_to_bytes(chunk)), false) end
+      Err(Socket.RecvTimeout(_)) -> (buf, false)
+      Err(_) -> (buf, true)
+    end
+    match got do
+      (_, true) -> { s: s, buf: buf, acked: false, closed: true, reg: reg, synced: false }
+      (buf1, false) ->
+        match drain(fd, buf1, Nil, false, reg, false) do
+          (buf2, events, acked, reg2, synced) ->
+            match SwimDriver.step(s, unix_time_ms(), events) do
+              (s2, acts) ->
+                perform(fd, acts)
+                { s: s2, buf: buf2, acked: acked, closed: false, reg: reg2, synced: synced }
+            end
+        end
+    end
+  end
+
+  pfn initial() : SwimDriver.State do
+    let ms = Membership.observe(Membership.observe(Membership.empty(), Membership.alive(me(), 1)), Membership.alive(peer(), 1))
+    SwimDriver.make(me(), 1, ms, cfg(), 500, 7)
+  end
+
+  pfn leader_text(reg : GlobalRegistry.Names) : String do
+    match GlobalRegistry.lookup(reg, "leader") do
+      Some((nid, _)) -> nid
+      None -> "none"
+    end
+  end
+
+  -- Phases: 0 before the first ack; 1 connected; 2 the peer is Dead and this
+  -- node has claimed "leader" for itself; 3 the peer is Alive again (healed);
+  -- 4 merged. [clock] is this node's VectorClock.
+  pfn run(fd : Int, s : SwimDriver.State, buf : List(Int), reg : GlobalRegistry.Names, clock : VectorClock, phase : Int) : () do
+    let t = tick(fd, s, buf, reg)
+    if t.closed do
+      println(me() ++ ": peer closed")
+    else
+      let st = peer_status(t.s)
+      if phase == 0 && t.acked do
+        println(me() ++ ": first ack from " ++ peer())
+        run(fd, t.s, t.buf, t.reg, clock, 1)
+      else
+        if phase == 1 && st == "Dead" do
+          let clock2 = VectorClock.increment(clock, me())
+          let reg2 = GlobalRegistry.register(t.reg, "leader", me(), my_pid(), clock2)
+          println(me() ++ ": " ++ peer() ++ " Dead; registered leader -> " ++ leader_text(reg2))
+          run(fd, t.s, t.buf, reg2, clock2, 2)
+        else
+          if phase == 2 && st == "Alive" do
+            println(me() ++ ": " ++ peer() ++ " Alive again")
+            on_healed(fd, t.reg)
+            run(fd, t.s, t.buf, t.reg, clock, 3)
+          else
+            if t.synced && phase >= 2 do
+              println(me() ++ ": leader after merge -> " ++ leader_text(t.reg))
+              if after_merge(fd, t.reg) do () else run(fd, t.s, t.buf, t.reg, clock, 4) end
+            else
+              run(fd, t.s, t.buf, t.reg, clock, phase)
+            end
+          end
+        end
+      end
+    end
+  end
+
+  -- node-b waits for node-a's sync.
+  pfn on_healed(_fd : Int, _reg : GlobalRegistry.Names) : () do () end
+
+  -- node-b answers the merge with its merged registry and keeps serving
+  -- until node-a closes.
+  pfn after_merge(fd : Int, reg : GlobalRegistry.Names) : Bool do
+    send_sync(fd, reg)
+    false
+  end
+
+  fn main(_cap_console : Cap(IO.Console), _cap_netlisten : Cap(IO.NetListen), _cap_netconnect : Cap(IO.NetConnect), _cap_process : Cap(IO.Process), _cap_clock : Cap(IO.Clock)) do
+    let port = Env.require_int("MARCH_NODE_PORT")
+    let listen_fd = match tcp_listen(port) do
+      Ok(fd) -> fd
+      Err(e) -> panic("listen: " ++ e)
+    end
+    println("node-b: up")
+    let fd = match tcp_accept(listen_fd) do
+      Ok(fd) -> fd
+      Err(e) -> panic("accept: " ++ e)
+    end
+    run(fd, initial(), Nil, GlobalRegistry.empty(), VectorClock.new(), 0)
+    tcp_close(fd)
+    tcp_close(listen_fd)
+  end
+end

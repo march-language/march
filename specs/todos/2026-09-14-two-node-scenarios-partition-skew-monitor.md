@@ -1,4 +1,4 @@
-# `[P2]` Two-node scenarios still to write: partition, clock skew, and the Docker variant
+# `[P3]` Two-node scenarios: the two-container Docker-network variant
 
 Filed 2026-09-14 as the remainder of
 [[2026-09-14-two-node-failure-semantics-harness]] (now a progress record).
@@ -9,24 +9,11 @@ the docs still make in prose only.
 
 ## Scenario `partition` (was 2)
 
-Drop packets A→B for 10 s while both run SWIM (the `stall` programs, both
-sides symmetric); both mark the other `Dead`; each keeps its own registry
-bindings (`GlobalRegistry`); on heal, `GlobalRegistry.merge`'s tiebreak on
-`(node_id, pid)` picks the same winner on both sides — the CRDT law in a
-real split rather than the in-process `g44` merge.
-
-Fault hooks: on the ubuntu CI leg `sudo iptables -I INPUT -p tcp --sport
-$PORT -j DROP` (GitHub runners have passwordless sudo — the CI workflow
-already uses it for apt); on macOS `pfctl` needs sudo and is skipped with
-a loud message unless `TWO_NODE_SUDO=1`. The harness gains `drop_from
-<a|b>` / `heal` helpers that apply and remove the rule and record whether
-they ran; a scenario that needs them and cannot get them exits 3 ("skipped:
-needs root"), which CI treats as failure and local runs as skip.
-
-Registry traffic today is the sync frames on the control connection; the
-scenario needs the `GlobalRegistry` sync loop driven by the same tick as
-SWIM (the `stall` programs' loop plus the `anti_entropy_peers` timer, which
-`SwimDriver` already exposes).
+**Shipped 2026-09-15** with [[2026-09-15-two-node-partition-scenario]] (progress record).
+It found the bug it was written to catch: `REGISTRY_SYNC_RESP` dropped every entry's
+`VectorClock`, so after a split each side kept its own binding. Fixed in the same change.
+`drop_link` / `heal` drop both directions on the scenario port; pfctl is not implemented,
+and macOS runs it through `scripts/two-node-docker.sh`.
 
 ## Scenario `skew` (was 4)
 
@@ -40,14 +27,14 @@ receipt time) landed with it; nothing left here.
 
 ## The Docker-network variant
 
-The same scenarios with the two nodes in two containers on a user-defined
-network: real routing, a real `iptables` inside the container (no sudo
-needed), and the only way to run `partition` without touching the host.
-`scripts/two-node.sh --docker` builds one image from `ci/Dockerfile.ubuntu`
-(only `bin/main.exe`; its own `dune build` needs `node`, see the memory
-note), starts `node_b` and `node_a` containers, and applies faults with
-`docker exec` / `docker pause` (`pause` is `stall`'s SIGSTOP). A separate
-CI job, nightly-class (~5 min), on the ubuntu leg.
+**Half shipped 2026-09-15.** `scripts/two-node-docker.sh` (image `ci/Dockerfile.two-node`)
+runs any scenario on Linux from any host: both nodes in one container, with iptables
+applied to its own loopback. What remains is the variant this section asked for: the two
+nodes in **two containers** on a user-defined network, with real routing, faults through
+`docker exec` / `docker pause`, and a nightly-class CI job. The single-container runner
+covers every fault the scenarios apply today, so nothing currently needs this; it is
+worth building when a scenario needs a fault loopback cannot express (latency, MTU, one
+host unreachable while another is not).
 
 ## Also
 

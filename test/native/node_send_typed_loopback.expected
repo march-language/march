@@ -6,3 +6,7 @@ node-b: seq=1 to=42 tag=Msgs.Ping -> Ping n=7 who=node-a
 node-b: seq=2 to=42 tag=Msgs.Report -> Report Hot(99)
 node-b: seq=3 to=42 tag=Msgs.Report -> Report Cold
 node-b: seq=4 to=42 tag=Msgs.Report -> Report Hot(7)
+inbox: GotPing n=7
+inbox: GotReport Hot(99)
+inbox: GotReport Cold
+inbox: GotReport Hot(7)

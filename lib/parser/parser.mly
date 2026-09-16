@@ -504,8 +504,11 @@ decl:
           let n = String.length a in
           if n > 7 && String.sub a 0 7 = "compat:" then String.sub a 7 (n - 7) else acc
         ) "full" attrs in
+      (* `@[remote]`: generate the receiver-side dispatch for the actor's typed
+         remote messages (lib/desugar/desugar_remote.ml). *)
+      let remote = List.mem "remote" attrs in
       match d with
-      | DActor (vis, name, adef, span) -> DActor (vis, name, { adef with actor_compat = compat }, span)
+      | DActor (vis, name, adef, span) -> DActor (vis, name, { adef with actor_compat = compat; actor_remote = remote }, span)
       | d -> d }
   | AT; INVARIANT; LPAREN; inv = expr; RPAREN; d = actor_decl
     { match d with
@@ -744,7 +747,7 @@ actor_decl:
     { DActor (Public, name,
               { actor_state = fields; actor_init = init_expr; actor_handlers = handlers;
                 actor_supervise = sup; actor_compat = "full"; actor_invariant = None;
-                actor_mailbox = mb },
+                actor_mailbox = mb; actor_remote = false },
               mk_span ($loc)) }
 
 (** mailbox N policy — a bound on the actor's mailbox, declared with the

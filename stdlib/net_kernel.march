@@ -12,7 +12,9 @@
 --
 -- P5 frame types (tag byte prepended before the msgpack payload):
 --   0x05 REGISTRY_SYNC_REQ  [tag=5, root_hash:Str]
---   0x06 REGISTRY_SYNC_RESP [tag=6, root_hash:Str, leaves:[[name,nid,pid,clock_json,present],...]]
+--   0x06 REGISTRY_SYNC_RESP [tag=6, root_hash:Str, leaves:[[name,nid,pid,present,clock],...]]
+--     clock: [[actor_id:Str, ts:Int],...]; a 4-element leaf (no clock, the
+--     original encoding) still decodes, with an empty clock
 --   0x07 MONITOR_REQ        [tag=7, watcher_node:Str, watcher_pid:Int, target_pid:Int]
 --   0x08 MONITOR_FIRE       [tag=8, target_pid:Int, reason_tag:Int, reason_msg:Str]
 --     reason_tag: 0=Normal, 1=Killed, 2=Crash, 3=NodeDown
@@ -152,20 +154,38 @@ mod NetKernel do
   end
 
   -- REGISTRY_SYNC_RESP: our root hash + any leaves that differ.
-  -- Each leaf is encoded as [name, node_id, pid, present_int].
+  -- Each leaf is encoded as [name, node_id, pid, present_int, clock], clock
+  -- the entry's VectorClock as [[actor_id, ts], ...]. The clock is what
+  -- GlobalRegistry.merge orders bindings by: a leaf without it decodes as
+  -- causally OLDER than any local claim, so after a partition each side kept
+  -- its own binding and the replicas never converged (test/two_node/partition).
   fn encode_registry_sync_resp(root_hash : String,
                                 leaves : List((String, GlobalRegistry.Entry))) : List(Int) do
     let leaf_vals = List.map(leaves, fn pair ->
       match pair do
         (name, e) ->
+          let clock = Msgpack.array(List.map(VectorClock.entries(e.clock), fn kv ->
+            match kv do
+              (aid, ts) -> Msgpack.array(Cons(Msgpack.str(aid), Cons(Msgpack.int(ts), Nil)))
+            end))
           Msgpack.array(Cons(Msgpack.str(name),
             Cons(Msgpack.str(e.node_id),
             Cons(Msgpack.int(e.pid),
-            Cons(Msgpack.int(if e.present do 1 else 0 end), Nil)))))
+            Cons(Msgpack.int(if e.present do 1 else 0 end),
+            Cons(clock, Nil))))))
       end)
     Msgpack.encode(Msgpack.array(Cons(Msgpack.int(6),
       Cons(Msgpack.str(root_hash),
       Cons(Msgpack.array(leaf_vals), Nil)))))
+  end
+
+  -- A leaf's clock: [[actor_id, ts], ...]; a malformed pair is skipped.
+  pfn decode_clock(pairs : List(Msgpack.Value)) : VectorClock do
+    List.fold_left(pairs, VectorClock.new(), fn (vc, p) ->
+      match p do
+        Msgpack.Array(Cons(Msgpack.Str(aid), Cons(Msgpack.Int(ts), Nil))) -> VectorClock.advance(vc, aid, ts)
+        _ -> vc
+      end)
   end
 
   fn decode_registry_sync_req(bytes : List(Int)) : Result(String, String) do
@@ -192,9 +212,13 @@ mod NetKernel do
                   Msgpack.Array(Cons(Msgpack.Str(name),
                     Cons(Msgpack.Str(nid),
                     Cons(Msgpack.Int(pid),
-                    Cons(Msgpack.Int(present_int), Nil))))) ->
+                    Cons(Msgpack.Int(present_int), more))))) ->
+                      let clock = match more do
+                        Cons(Msgpack.Array(pairs), Nil) -> decode_clock(pairs)
+                        _ -> VectorClock.new()
+                      end
                       let entry = { node_id: nid, pid: pid,
-                                    clock: VectorClock.new(),
+                                    clock: clock,
                                     present: present_int != 0 }
                       Some((name, entry))
                   _ -> None

@@ -2775,9 +2775,10 @@ the net-kernel handshake (`NetKernel.handshake`, `ClusterConn`), synchronous RPC
 transport (`NodeCall.call`/`serve_loop`), SWIM gossip *dispatch* to peer fds
 (`SwimDriver.dispatch*`), the compiler-emitted `__rpc_stub` → C-registry
 dispatch (a no-op under the interpreter, `eval.ml` `remote_check`→0), and
-cross-node monitor firing (`march_monitor_registry.c` writes to fds). True
-multi-*machine* semantics (netsplit, node restart/incarnation, cross-host clock
-skew) remain prose-only.
+cross-node monitor firing (`march_monitor_registry.c` writes to fds).
+Multi-*process* semantics (restart/incarnation, stall, netsplit, clock skew)
+are pinned by the two-node harness (`scripts/two-node.sh`, see
+`clustering.md`); across real machines they remain prose-only.
 
 **Finding C1: FIXED (2026-07-11).** `VectorClock.compare`, and any code
 that reduces over a map's own keys and looks each one up in that map, after the map was

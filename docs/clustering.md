@@ -421,6 +421,68 @@ frame carries bytes). Pids never travel: a message that must name an actor
 carries a `GlobalPid`. `test/native/node_send_loopback.march` runs the whole
 exchange over TCP loopback, including all three failure replies.
 
+## Typed remote messages: `Node.send` and `@[remote]`
+
+`NodeSend.cast` carries bytes under a string tag you keep in step by hand. The typed layer
+checks and generates both halves.
+
+**Sending.** `msg`'s type must `derive Json`; a missing codec is a compile error at the call.
+The wire tag is the type's declared name, minted by the compiler. It is module-qualified
+below the entry module (`Msgs.Ping` for `mod Msgs` inside the entry file), so the sender and
+the receiver agree when both programs declare the type in the same module path.
+
+```march
+mod Msgs do
+  type Ping = { n : Int, who : String }
+  derive Json for Ping
+end
+
+let _ = Node.send(peer, target, ping)                       -- straight to the connection
+let _ = Node.enqueue(q, target, ping, NodeQueue.DropNew)    -- through the peer's NodeQueue
+```
+
+`Node.send` writes the message to the connection immediately. `Node.enqueue` adds it to the
+peer's credit-based `NodeQueue`. Both return `Ok(seq)`; a later `DELIVERY_FAILED` echoes
+that seq. The queue's policy decides what happens when the peer's budget is full:
+- `DropNew` refuses the new message with `Err(Backpressure)`.
+- `DropOld` evicts the oldest queued messages to make room.
+- `BlockSender(timeout_ms)` makes the caller wait for credit.
+
+**Receiving.** Mark the actor `@[remote]`. Every handler that takes one parameter of a
+declared type becomes a routing target, and the compiler generates `<Actor>_Remote.dispatch`:
+
+```march
+@[remote]
+actor Inbox do
+  state { n : Int }
+  init  { n: 0 }
+  on GotPing(p : Ping) do ... end
+end
+
+-- in the node's reader, per ACTOR_MSG delivery `d`:
+match Inbox_Remote.dispatch(inbox_pid, d) do
+  Ok(true)  -> ()                          -- decoded and sent to the actor's mailbox
+  Ok(false) -> ...                         -- no handler of Inbox takes this type
+  Err(e)    -> ...                         -- not JSON, or not the type its tag names
+end
+```
+
+The dispatch compares the delivery's tag with the tag the sender's compiler minted for each
+handler's type, so the two sides cannot drift. A handler whose type has no codec is a
+compile error, and so is a `@[remote]` actor with no routable handler.
+
+**Session protocols across nodes.** `SessionNode` is the `Session.Ops` transport for an
+`@[endpoints]` protocol whose roles run on two nodes. It uses a split peer connection
+(`ClusterConn.connect_split` / `accept_split`):
+
+```march
+let link = SessionNode.open(conn, "node-a", false, fn ep -> ())
+let s = Session.attach(io, SessionNode.ops(link))
+let _ = run_role(s, Stream_Prod.register(s, 0))
+SessionNode.serve(link)
+SessionNode.finish(link)
+```
+
 ## Putting It Together
 
 > **This is a layered API-reference skeleton, not a runnable program.** It shows how the pieces connect (identity, listen/connect, handshake, then a `RemoteCall`) but elides two things you must supply for real: (1) the actual byte transport over the socket `fd`, and (2) concrete `sig_hash` / `impl_hash` values, which the compiler bakes into your binary for the specific functions you enroll. The send/recv framing is `NetFrame`'s job (length-prefixed frames); see the *Wiring up the transport* note after the skeleton for how to close the loop.
@@ -505,9 +567,11 @@ handshake, synchronous RPC transport, SWIM gossip dispatch to peer file descript
 cross-node monitor firing require two real nodes and are covered by native multi-process
 integration tests rather than the same conformance corpus as the pure logic above. Clock skew between nodes does not affect load-aware routing: a node ages a peer's load
 report from when it arrived, on its own clock, so peer clocks need not agree (a two-process
-test runs one node 30 s ahead). True multi-*machine* failure semantics (netsplit, node
-restart/incarnation across hosts) aren't yet covered by an automated test at all; treat
-them as less battle-tested than the single-process core.
+test runs one node 30 s ahead). A network partition is exercised too: two processes stop
+hearing each other, each marks the other dead and registers the same `GlobalRegistry`
+name, and after the partition heals both converge on the same winner. These tests run on
+one host over loopback; failure semantics across real machines and networks aren't covered
+by an automated test, so treat them as less battle-tested than the single-process core.
 
 ---
 

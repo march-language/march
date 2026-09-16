@@ -42,4 +42,51 @@ mod TestNetKernel do
 
   end
 
+
+  describe "NetKernel REGISTRY_SYNC_RESP carries each entry's VectorClock" do
+
+    test "a leaf's clock survives encode + decode" do
+      let clock = VectorClock.increment(VectorClock.increment(VectorClock.new(), "node-a"), "node-a")
+      let reg = GlobalRegistry.register(GlobalRegistry.empty(), "leader", "node-a", 100, clock)
+      match NetKernel.decode_registry_sync_resp(NetKernel.encode_registry_sync_resp("h", GlobalRegistry.all_entries(reg))) do
+        Ok((rh, Cons((name, e), Nil))) ->
+          assert (rh == "h")
+          assert (name == "leader")
+          assert (e.node_id == "node-a")
+          assert (VectorClock.get(e.clock, "node-a") == 2)
+        _ -> assert false
+      end
+    end
+
+    test "a four-element leaf (the original encoding, no clock) still decodes" do
+      let leaf = Msgpack.array(Cons(Msgpack.str("svc"), Cons(Msgpack.str("n1"), Cons(Msgpack.int(7), Cons(Msgpack.int(1), Nil)))))
+      let bytes = Msgpack.encode(Msgpack.array(Cons(Msgpack.int(6), Cons(Msgpack.str("r"), Cons(Msgpack.array(Cons(leaf, Nil)), Nil)))))
+      match NetKernel.decode_registry_sync_resp(bytes) do
+        Ok((_, Cons((name, e), Nil))) ->
+          assert (name == "svc")
+          assert (e.pid == 7)
+          assert (VectorClock.sum(e.clock) == 0)
+        _ -> assert false
+      end
+    end
+
+    -- The partition shape: each side claimed "leader" concurrently; each
+    -- merges the OTHER's registry as it arrives over the wire. Both must pick
+    -- the same winner (tiebreak: the higher node_id).
+    test "concurrent claims merged through the wire converge on both sides" do
+      let a = GlobalRegistry.register(GlobalRegistry.empty(), "leader", "node-a", 100, VectorClock.increment(VectorClock.new(), "node-a"))
+      let b = GlobalRegistry.register(GlobalRegistry.empty(), "leader", "node-b", 200, VectorClock.increment(VectorClock.new(), "node-b"))
+      let over = fn reg -> NetKernel.decode_registry_sync_resp(NetKernel.encode_registry_sync_resp(GlobalRegistry.root_hash(reg), GlobalRegistry.all_entries(reg)))
+      match (over(b), over(a)) do
+        (Ok((rb, lb)), Ok((ra, la))) ->
+          let a2 = GlobalRegistry.diff_entries(a, rb, lb)
+          let b2 = GlobalRegistry.diff_entries(b, ra, la)
+          assert (GlobalRegistry.lookup(a2, "leader") == Some(("node-b", 200)))
+          assert (GlobalRegistry.lookup(b2, "leader") == Some(("node-b", 200)))
+        _ -> assert false
+      end
+    end
+
+  end
+
 end

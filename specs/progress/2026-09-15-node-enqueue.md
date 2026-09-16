@@ -1,7 +1,7 @@
 # `Node.enqueue`: the typed remote send through a NodeQueue
 
 Shipped 2026-09-15. This is step 2's queued half of
-[[2026-09-14-typed-node-send-wrapper]] ("once
+[[2026-09-15-remote-actor-dispatch]] ("once
 [[2026-09-15-credit-based-flow-control]] provides the queue"), which stays open
 for step 4, the `@[endpoints]` Node transport.
 

@@ -19,7 +19,7 @@ let dummy_actor_def = March_ast.Ast.{
   actor_init      = ELit (LitInt 0, March_ast.Ast.dummy_span);
   actor_handlers  = [];
   actor_supervise = None;
-  actor_mailbox = None;
+  actor_mailbox = None; actor_remote = false;
   actor_compat    = "full";
   actor_invariant = None;
 }
