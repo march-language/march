@@ -4,12 +4,12 @@
 # send, so B's message reaches C first and C must park it until it has asked
 # for it -- the cross-peer race, across real processes.
 
-# Each node is its own process, but node-c alone keeps FOUR readers in
-# blocking socket calls (two data, two control) and accept/recv block their
-# scheduler thread (specs/todos/2026-09-16-blocking-accept-starves-the-scheduler.md).
-# Measured: 1 and 2 threads stall node-c after "up"; 4 pass. A 4-CPU runner
-# resolves "auto" to exactly 4, which is too close to the floor to rely on.
-export MARCH_NUM_SCHEDULERS=8
+# Socket waits park the green thread (march_sched_wait_fd), so node-c's four
+# readers cost no thread each; pinned to ONE scheduler thread per node so a
+# wait that blocked the thread again would stall node-c right after "up", as
+# it did before that change at 1 or 2 threads
+# (specs/progress/2026-09-16-park-socket-waits.md).
+export MARCH_NUM_SCHEDULERS=1
 
 ORDERED=1
 start_node a

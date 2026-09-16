@@ -41,6 +41,11 @@ varying):
 step timeout on both CI legs with the fixture as the orphaned process. The dune rule now
 pins `MARCH_NUM_SCHEDULERS=8` for that fixture, with the reasoning next to it.
 
+The three-process form of the same protocol (`test/two_node/fan`) had the floor per
+node: node-c holds four blocked readers (two data, two control), and with
+`MARCH_NUM_SCHEDULERS` at 1 or 2 it stalled right after "up"; 4 passed. A process per
+node lowered the floor; it did not remove it.
+
 This is not specific to sessions. Any program that accepts several connections from
 several green threads in one process has the same floor: an HTTP server accepting on
 multiple listeners, a node that talks to several peers, a test harness that runs both
