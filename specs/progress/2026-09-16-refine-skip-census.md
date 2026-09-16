@@ -29,7 +29,7 @@ attribute as:
 | 11 | `aho_corasick.march` | `Array.get(nodes, state)` where `state` is an unannotated parameter of an internal helper (`child_of`, `get_fail`, `get_outputs`). Needs a declared param refinement, not a local-value fact. |
 | 6 | `stats.march` | Wrappers forwarding to a contracted callee without declaring the same contract: `median(xs : List(Float))` calls `percentile(xs, 50.0)`, whose parameter is `{List(Float) | len(_) > 0}`. The doc string already says "Panics on empty list"; the signature does not. |
 | 4 | `list.march:321,344,363,395` | 3 are `let t = pmap_threshold()`, a builtin with no contract; 1 is an `if`-shaped `let` RHS. |
-| 2 | `datetime.march:547,555` | **A real bug.** `fixed_zone_hm(sign * h, m)` takes `{Int | _ >= 0 && _ < 60}`; `m` comes from `parse_digits(r, 2)`, which admits 60–99. |
+| 2 | `datetime.march:547,555` | **A real bug.** `fixed_zone_hm(sign * h, m)` takes `{Int | _ >= 0 && _ < 60}`; `m` comes from `parse_digits(r, 2)`, which admits 60–99. *Fixed 2026-09-16: both skips are now one proved obligation — see `2026-09-16-datetime-parse-offset-panics-on-malformed-offset.md`.* |
 | 3 | `seq.march:388`, `flow.march:113`, `gen.march:390` | Same wrapper-contract shape as `stats.march`. |
 
 ## Both "real bug" rows were confirmed by execution

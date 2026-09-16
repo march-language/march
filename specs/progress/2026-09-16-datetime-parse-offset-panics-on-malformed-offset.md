@@ -72,8 +72,19 @@ merged into one; the guard's `then` branch gives the checker exactly the
 `m >= 0 && m < 60` that `fixed_zone_hm` demands. The stdlib-wide totals move in
 step (`unconstrained-subject` 55 -> 53, proved 40 -> 41).
 
-Note the task's reproduction command used `--refine-report-sites`, which does
-not exist on this branch; `--refine-report` prints the same per-site hints.
+`--refine-report-sites` (which landed on main alongside
+`specs/progress/2026-09-16-refine-skip-census.md` while this fix was in
+flight) agrees, and is the check the census itself uses:
+
+```
+rm -rf .march/cas/artifacts-v2
+./_build/default/bin/main.exe --check --refine-report-sites stdlib/list.march \
+  2>&1 | grep datetime
+```
+
+prints nothing, where it used to print the two `datetime.march:547,555` rows.
+That run still emits 40 skip rows for other modules, so the empty grep is a
+real absence and not an empty run.
 
 ## The tests did not run
 
