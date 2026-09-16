@@ -21,8 +21,9 @@ mod Session do
   -- No `recv`: an event-driven endpoint never blocks; delivery is the handler
   -- passed to `suspend`.
 
-  -- The transport. `suspend(ep, handler)` installs `handler` for the next
-  -- delivery on `ep` and yields; the handler receives `(from, msg, ep)` and
+  -- The transport. `suspend(ep, from, handler)` installs `handler` for the next
+  -- delivery on `ep` from a given role (0 = any) and yields; the handler
+  -- receives `(from, msg, ep)` and
   -- returns the next suspension. It is tail-resumptive only: a handler
   -- resumes exactly once, in tail position, as a plain call through this
   -- record.  (A `doc` is only accepted before a function; on a `type` it is a
@@ -30,7 +31,7 @@ mod Session do
   type Ops = {
     register : Int -> Int -> Int,
     emit     : Int -> Int -> Bytes -> Int,
-    suspend  : Int -> (Int -> Bytes -> Int -> Int) -> Int,
+    suspend  : Int -> Int -> (Int -> Bytes -> Int -> Int) -> Int,
     close    : Int -> ()
   }
 
@@ -61,10 +62,17 @@ mod Session do
     end
   end
 
-  doc "Install `handler` for the next delivery on `ep` and yield."
-  fn suspend(c : Cap(Session.Live), ep : Int, handler : Int -> Bytes -> Int -> Int) : Int do
+  doc """
+  Install `handler` for the next delivery on `ep` and yield. `from` is the
+  role the continuation expects to hear from -- the projection knows it at
+  every receive -- or 0 for "any", which a same-thread transport and a
+  two-party session pass. A transport that carries several peers uses it to
+  park a delivery that arrives before the continuation that wants it
+  (messages from different peers race; see `SessionNode`).
+  """
+  fn suspend(c : Cap(Session.Live), ep : Int, from : Int, handler : Int -> Bytes -> Int -> Int) : Int do
     match cap_dict(c) do
-      Some(d) -> d.suspend(ep, handler)
+      Some(d) -> d.suspend(ep, from, handler)
       None    -> no_transport()
     end
   end

@@ -102,7 +102,7 @@ mod StreamReplay do
           Vault.set(pending, "q", Deque.push_back(q, (to, ep, msg)))
           ep
         end,
-        suspend: fn (ep, handler) -> do
+        suspend: fn (ep, _from, handler) -> do
           Vault.set(handlers, int_to_string(ep), handler)
           ep
         end,
@@ -116,7 +116,7 @@ mod StreamReplay do
   pfn prod_send(s : Cap(Session.Live), ep : Int, next : Int) : Int do
     print_line("Prod sends Item(" ++ int_to_string(next) ++ ")")
     let ep1 = Session.emit(s, ep, cons(), enc_item(next))
-    Session.suspend(s, ep1, fn (_from, msg, ep2) ->
+    Session.suspend(s, ep1, 0, fn (_from, msg, ep2) ->
       if tag(msg) == "M" do
         print_line("Prod got More")
         prod_send(s, ep2, next + 1)
@@ -129,7 +129,7 @@ mod StreamReplay do
 
   -- ── role Cons:  Rec X. Recv(Int, Choose{more: Send(Bool,X), done: Send(Bool,End)})
   pfn cons_wait(s : Cap(Session.Live), ep : Int, budget : Int) : Int do
-    Session.suspend(s, ep, fn (_from, msg, ep1) ->
+    Session.suspend(s, ep, 0, fn (_from, msg, ep1) ->
       let n = item_of(msg)
       print_line("Cons got Item(" ++ int_to_string(n) ++ ")")
       if budget > 1 do

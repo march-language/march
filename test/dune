@@ -6005,6 +6005,44 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/node_send_typed_loopback.expected native_node_send_typed_loopback.out)))
 
+; ── SessionNode with three roles: per-role routing, and the cross-peer race ──
+; A and B both send to C over separate connections, A late, so B's message
+; arrives first and must be parked until C asks for it. Compiled only (the
+; loopback accept parks the interpreter).
+; specs/progress/2026-09-16-session-node-multiparty-routing.md.
+;
+; MARCH_NUM_SCHEDULERS=8 is load-bearing, not tuning. `tcp_accept` and the
+; socket reads block the OS thread they run on (march_http.c's
+; tcp_accept_raw calls accept() directly; nothing parks the green thread), and
+; this fixture is the unusual case of THREE session roles in ONE process: six
+; readers and handshakes sit in blocking syscalls at once. With the scheduler
+; thread count at or below that, every thread is blocked and no actor turn can
+; run -- the fixture hangs. Measured on this program: 4 threads hang 3/3, 8
+; hang 0/3. A CI runner with 4 usable CPUs resolves "auto" to 4, which is why
+; it hung there and not on a developer laptop. The constraint is the runtime's,
+; not the transport's (a node per process never has more than its own readers):
+; specs/todos/2026-09-16-blocking-accept-starves-the-scheduler.md.
+(rule
+ (targets native_session_node_fan_loopback native_session_node_fan_loopback.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/session_node_fan_loopback.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_session_node_fan_loopback
+        native/session_node_fan_loopback.march)
+   (setenv MARCH_NUM_SCHEDULERS 8
+    (with-stdout-to native_session_node_fan_loopback.out
+         ; perl, not `timeout`: coreutils is not on every macOS runner. A
+         ; stall here used to burn the whole 30-minute step and report
+         ; nothing; now it fails in 90s with each role's phase on stderr.
+         (system "perl -e 'alarm 90; exec @ARGV' ./native_session_node_fan_loopback"))))))
+
+(rule
+ (alias runtest)
+ (action (diff native/session_node_fan_loopback.expected native_session_node_fan_loopback.out)))
+
 ; ── @[remote] actor: the generated dispatch routes a typed delivery to its handler ──
 ; Both backends (no sockets): specs/progress/2026-09-15-remote-actor-dispatch.md.
 (rule
