@@ -50,6 +50,22 @@ let has_refine_error_typed src =
   March_refinecheck.Refine_check.check_module ~type_map ctx desugared;
   March_errors.Errors.has_errors ctx
 
+(* The ledger of a TYPED check ([has_refine_error_typed]): proved, violated,
+   skipped, and the skip reasons in order.  The caller-sort fixtures need the
+   typechecker's table, which every other ledger helper leaves out. *)
+let typed_ledger src =
+  March_refinecheck.Obligation.reset ();
+  ignore (has_refine_error_typed src);
+  List.fold_left
+    (fun (p, v, s, rs) (o : March_refinecheck.Obligation.t) ->
+      match o.March_refinecheck.Obligation.verdict with
+      | March_refinecheck.Obligation.Proved -> (p + 1, v, s, rs)
+      | March_refinecheck.Obligation.Violated -> (p, v + 1, s, rs)
+      | March_refinecheck.Obligation.Skipped r ->
+        (p, v, s + 1, rs @ [ March_refinecheck.Obligation.reason_name r ])
+      | _ -> (p, v, s, rs))
+    (0, 0, 0, []) (March_refinecheck.Obligation.all ())
+
 (* Same as [has_refine_error_d], but parsed AS IF it came from [file] and
    checked with [stdlib_files] declared as the standard library's own sources.
    Both are needed to exercise the ENABLING branch of the `List.length` measure
@@ -1870,8 +1886,11 @@ let string_suite =
        against a string constant.  z3 rejects the mixed-sort term outright, with
        the same channel-corrupting consequence. *)
     gated "a mixed-sort guard does not corrupt the check it guards" (fun () ->
-        (* `u` is neither the binder nor a parameter of the callee, so it is
-           reflected as an Int while `"a"` reflects into the string sort.  The
+        (* `u` is neither the binder nor a parameter of the callee, and this
+           helper hands the checker no type table, so `u` keeps the caller
+           default and is reflected as an Int while `"a"` reflects into the
+           string sort.  (With the driver's table, `u` is a `Str` constant
+           and the guard is well-sorted; the count is the same.)  The
            resulting `(= u $str…)` is ill-sorted and must be DROPPED from the
            assumptions; sending it makes z3 reject the query and the violation
            in the very same VC is lost. *)
@@ -15456,6 +15475,185 @@ let single_element_type_suite =
     accept "a Map's keys against a list of the key type"
       "  fn h(m : Map(String, Int), xs : List(String)) : {Bool | subset(keys(m), elts(xs))} do true end" ]
 
+(* ── Caller values take their typechecked sort (design B,
+   specs/2026-09-15-refinement-remaining-designs.md) ────────────────────────
+   A caller value used to reach the solver at `Int` unless a callee parameter
+   pinned it; a `String`/datatype value meeting its real sort in the same VC
+   skipped the obligation as `sort-conflict`.  One group per value origin:
+   the skip -> proved fixture, a REJECT twin, and a control whose value the
+   typechecker leaves a type variable (it keeps its old verdict). *)
+let caller_sorts_suite =
+  let need_a = "  fn need_a(xs : {List(String) | member(\"a\", elts(_))}) : Int do 0 end\n" in
+  let need_mem = "  fn need_mem(x, xs : {List(a) | member(x, elts(_))}) : Int do 0 end\n" in
+  let m name body = "mod " ^ name ^ " do\n" ^ need_a ^ need_mem ^ body ^ "\nend\n" in
+  let ledger label (p, v, s) src =
+    let (p', v', s', rs) = typed_ledger src in
+    Alcotest.(check int) (label ^ ": proved") p p';
+    Alcotest.(check int) (label ^ ": violated") v v';
+    Alcotest.(check int) (label ^ ": skipped") s s';
+    rs
+  in
+  [ (* ── origin 1: parameters ── *)
+    gated "param: a String parameter in a list literal proves" (fun () ->
+        ignore (ledger "p" (1, 0, 0)
+                  (m "CSP1" "  fn p(s : String) : Int do need_a([\"a\", s]) end")));
+    gated "param REJECT: an unknown String element is a plain skip, not a sort-conflict" (fun () ->
+        let rs = ledger "pb" (0, 0, 1)
+            (m "CSP2" "  fn p(s : String) : Int do need_a([\"b\", s]) end") in
+        Alcotest.(check bool) "no sort-conflict" false (List.mem "sort-conflict" rs));
+    gated "param control: with no type table the parameter keeps the Int default" (fun () ->
+        Alcotest.(check (list string)) "untyped: sort-conflict" [ "sort-conflict" ]
+          (skip_reasons (m "CSP3" "  fn p(s : String) : Int do need_a([\"a\", s]) end")));
+    gated "param control: a type-variable parameter keeps its verdict" (fun () ->
+        ignore (ledger "pt" (1, 0, 0)
+                  (m "CSP4" "  fn t(y, ys) : Int do need_mem(y, [y]) end")));
+    gated "param: a Bool parameter no callee pins is a usable guard" (fun () ->
+        ignore (ledger "pbool" (1, 0, 0)
+                  (m "CSP5"
+                     "  fn need_t(b : {Bool | _ == true}) : Int do 0 end\n\
+                     \  fn g(b : Bool, c : Bool) : Int do if b == c && c do need_t(b) else 0 end end")));
+    gated "param: a typed String guard beside a violated call keeps the violation" (fun () ->
+        (* The typed twin of "a mixed-sort guard does not corrupt the check it
+           guards": `u == "a"` is now a well-sorted `Str` fact, and the
+           violation in the same VC is still reported. *)
+        ignore (ledger "pguard" (0, 1, 0)
+                  "mod CSP6 do\n\
+                  \  fn nonempty(s : {String | len(_) > 0}) : Int do 1 end\n\
+                  \  fn g(u : String) : Int do\n\
+                  \    if u == \"a\" do nonempty(\"\") else 0 end\n\
+                  \  end\n\
+                   end\n"));
+    (* ── origin 2: `let` binders ── *)
+    gated "let: a String let binder in a list literal proves" (fun () ->
+        ignore (ledger "l" (1, 0, 0)
+                  (m "CSL1"
+                     "  fn l(t : String) : Int do\n\
+                     \    let s = t\n\
+                     \    need_a([\"a\", s])\n\
+                     \  end")));
+    gated "let REJECT: an unknown String let binder is a plain skip, not a sort-conflict" (fun () ->
+        let rs = ledger "lb" (0, 0, 1)
+            (m "CSL2"
+               "  fn l(t : String) : Int do\n\
+               \    let s = t\n\
+               \    need_a([\"b\", s])\n\
+               \  end") in
+        Alcotest.(check bool) "no sort-conflict" false (List.mem "sort-conflict" rs));
+    gated "let control: a type-variable let binder keeps its verdict" (fun () ->
+        ignore (ledger "lt" (1, 0, 0)
+                  (m "CSL4"
+                     "  fn t(y, ys) : Int do\n\
+                     \    let z = y\n\
+                     \    need_mem(z, [z])\n\
+                     \  end")));
+    (* ── origin 3: pattern variables ── *)
+    gated "pattern: a String match binder in a list literal proves" (fun () ->
+        ignore (ledger "m" (1, 0, 0)
+                  (m "CSM1"
+                     "  fn mm(o : Option(String)) : Int do\n\
+                     \    match o do\n\
+                     \      Some(s) -> need_a([\"a\", s])\n\
+                     \      None -> 0\n\
+                     \    end\n\
+                     \  end")));
+    gated "pattern: a String binder of a destructuring let proves" (fun () ->
+        ignore (ledger "mt" (1, 0, 0)
+                  (m "CSM2"
+                     "  fn mt(p : (String, Int)) : Int do\n\
+                     \    let (s, _) = p\n\
+                     \    need_a([\"a\", s])\n\
+                     \  end")));
+    gated "pattern REJECT: an unknown String match binder is a plain skip, not a sort-conflict" (fun () ->
+        let rs = ledger "mb" (0, 0, 1)
+            (m "CSM3"
+               "  fn mm(o : Option(String)) : Int do\n\
+               \    match o do\n\
+               \      Some(s) -> need_a([\"b\", s])\n\
+               \      None -> 0\n\
+               \    end\n\
+               \  end") in
+        Alcotest.(check bool) "no sort-conflict" false (List.mem "sort-conflict" rs));
+    gated "pattern control: a type-variable match binder keeps its verdict" (fun () ->
+        ignore (ledger "mv" (1, 0, 0)
+                  (m "CSM4"
+                     "  fn mv(o) : Int do\n\
+                     \    match o do\n\
+                     \      Some(y) -> need_mem(y, [y])\n\
+                     \      None -> 0\n\
+                     \    end\n\
+                     \  end")));
+    (* ── origin 4: refinement binders ── *)
+    gated "refinement binder: a refined String proves with no type table" (fun () ->
+        Alcotest.(check (triple int int int)) "untyped (proved, violated, skipped)" (1, 0, 0)
+          (ledger_counts3
+             (m "CSR1" "  fn r(s : {String | len(_) > 0}) : Int do need_a([\"a\", s]) end")));
+    gated "refinement binder REJECT: a refined String known to differ reports" (fun () ->
+        ignore (ledger "rv" (0, 1, 0)
+                  (m "CSR2" "  fn r(s : {String | _ == \"b\"}) : Int do need_a([\"c\", s]) end")));
+    gated "refinement binder REJECT: its promise loads where a guard names it" (fun () ->
+        ignore (ledger "rg" (0, 1, 0)
+                  (m "CSR3"
+                     "  fn g(t : {String | _ == \"b\"}, s : String) : Int do\n\
+                     \    if s == t do need_a([\"c\", s]) else 0 end\n\
+                     \  end")));
+    gated "refinement binder control: a refined Int binder keeps its verdict" (fun () ->
+        ignore (ledger "ri" (2, 0, 0)
+                  (m "CSR4"
+                     "  fn need_pos(n : {Int | _ > 0}) : Int do n end\n\
+                     \  fn r(k : {Int | _ > 1}, y) : Int do need_mem(y, [y]) + need_pos(k) end")));
+    (* ── origin 5: path-condition variables of a datatype sort ── *)
+    gated "path: a datatype guard variable meets the goal at its datatype sort" (fun () ->
+        ignore (ledger "e" (1, 0, 0)
+                  (m "CSE1"
+                     "  fn unwrap(p : {Option(Int) | is_Some(_)}) : Int do\n\
+                     \    match p do\n\
+                     \      Some(v) -> v\n\
+                     \      None -> 0\n\
+                     \    end\n\
+                     \  end\n\
+                     \  fn e(o : Option(Int), p : {Option(Int) | is_Some(_)}) : Int do\n\
+                     \    if o == p do unwrap(o) else 0 end\n\
+                     \  end")));
+    gated "path REJECT: a guard against an unrefined value is a plain skip, not a sort-conflict" (fun () ->
+        let rs = ledger "eu" (0, 0, 1)
+            (m "CSE2"
+               "  fn unwrap(p : {Option(Int) | is_Some(_)}) : Int do\n\
+               \    match p do\n\
+               \      Some(v) -> v\n\
+               \      None -> 0\n\
+               \    end\n\
+               \  end\n\
+               \  fn e(o : Option(Int), p : Option(Int)) : Int do\n\
+               \    if o == p do unwrap(o) else 0 end\n\
+               \  end") in
+        Alcotest.(check bool) "no sort-conflict" false (List.mem "sort-conflict" rs));
+    gated "path REJECT: a promised tag other than the goal's is not loaded" (fun () ->
+        let rs = ledger "en" (0, 0, 1)
+            (m "CSE3"
+               "  fn unwrap(p : {Option(Int) | is_Some(_)}) : Int do\n\
+               \    match p do\n\
+               \      Some(v) -> v\n\
+               \      None -> 0\n\
+               \    end\n\
+               \  end\n\
+               \  fn e(o : Option(Int), p : {Option(Int) | is_None(_)}) : Int do\n\
+               \    if o == p do unwrap(o) else 0 end\n\
+               \  end") in
+        Alcotest.(check bool) "no sort-conflict" false (List.mem "sort-conflict" rs));
+    gated "path control: type-variable guard variables keep their verdict" (fun () ->
+        ignore (ledger "ev" (1, 0, 0)
+                  (m "CSE4"
+                     "  fn unwrap(p : {Option(Int) | is_Some(_)}) : Int do\n\
+                     \    match p do\n\
+                     \      Some(v) -> v\n\
+                     \      None -> 0\n\
+                     \    end\n\
+                     \  end\n\
+                     \  fn ev(x, y, p : {Option(Int) | is_Some(_)}) : Int do\n\
+                     \    if x == y do unwrap(p) else 0 end\n\
+                     \  end")));
+  ]
+
 (* ── z3 never rejects a query the checker builds ─────────────────────────
    A query z3 rejects comes back to the checker as [Unknown], an ordinary
    skip, so a wrong sort anywhere in the encoder passes every other test in
@@ -16000,6 +16198,7 @@ let () =
       ("list-structure", list_structure_suite);
       ("array-bounds-contracts", array_bounds_suite);
       ("measure-definition", measure_definition_suite);
+      ("caller-sorts", caller_sorts_suite);
       ("array-contract-followups", array_followups_suite);
       (* Must stay LAST: it measures every query the groups above sent. *)
       ("z3-well-formed", z3_wellformed_suite) ]

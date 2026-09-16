@@ -36,6 +36,8 @@ native_actor_stop_drains_mailbox: coverage audit (user + stdlib): 104 enforced, 
 native_actor_stop_drains_mailbox: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_stop_tree: coverage audit (user + stdlib): 104 enforced, 0 inert (warned), 0 unenforced
 native_actor_stop_tree: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_aggregate_param_field_alias: coverage audit (user + stdlib): 104 enforced, 0 inert (warned), 0 unenforced
+native_aggregate_param_field_alias: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_as_pattern: coverage audit (user + stdlib): 104 enforced, 0 inert (warned), 0 unenforced
 native_as_pattern: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_atom_ctor_field: coverage audit (user + stdlib): 104 enforced, 0 inert (warned), 0 unenforced
@@ -294,10 +296,14 @@ native_pid_of_int_roundtrip: coverage audit (user + stdlib): 104 enforced, 0 ine
 native_pid_of_int_roundtrip: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_preempt_starvation: coverage audit (user + stdlib): 104 enforced, 0 inert (warned), 0 unenforced
 native_preempt_starvation: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_prelude_scope_user_shadow: coverage audit (user + stdlib): 104 enforced, 0 inert (warned), 0 unenforced
+native_prelude_scope_user_shadow: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_println_line_atomic: coverage audit (user + stdlib): 104 enforced, 0 inert (warned), 0 unenforced
 native_println_line_atomic: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_qualified_ctor_pattern: coverage audit (user + stdlib): 104 enforced, 0 inert (warned), 0 unenforced
 native_qualified_ctor_pattern: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_qualified_type_name_render: coverage audit (user + stdlib): 104 enforced, 0 inert (warned), 0 unenforced
+native_qualified_type_name_render: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_record_erased_field_repr: coverage audit (user + stdlib): 104 enforced, 0 inert (warned), 0 unenforced
 native_record_erased_field_repr: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_record_field_erased_int: coverage audit (user + stdlib): 104 enforced, 0 inert (warned), 0 unenforced

@@ -242,11 +242,41 @@ let pat_tag_and_subs (env : Lower_state.env) (scrut : Tir.atom) (pat : Ast.patte
              | Some j -> String.sub q (j + 1) (String.length q - j - 1)
              | None   -> q
            in
-           if Lower_state.type_declares_ctor qual_tail short_tag then tag
+           (* A qualifier can read BOTH ways at once: the user's nested
+              `mod Tree do type T = Leaf(Int) | ... end` makes `Tree.Leaf` a
+              module-qualified ctor, while stdlib's `OrderedMap.Tree` /
+              `SortedSet.Tree` also make "Tree" a TYPE declaring `Leaf`.
+              Taking the type reading unconditionally handed codegen the key
+              of a stdlib type whose tags this scrutinee never carries, so
+              every arm fell to the non-exhaustive panic (compiled only; the
+              interpreter matched correctly). Break the tie with the
+              scrutinee's inferred type when it names one, else with the
+              enclosing module: code inside the module declaring the type
+              `Tree` means that type; everywhere else the lexically visible
+              module wins. *)
+           let module_reading =
+             Option.map (fun type_name -> type_name ^ "." ^ short_tag)
+               (Lower_state.module_ctor_type qual short_tag)
+           in
+           if not (Lower_state.type_declares_ctor qual_tail short_tag) then
+             Option.value module_reading ~default:tag
            else
-             (match Lower_state.module_ctor_type qual short_tag with
-              | Some type_name -> type_name ^ "." ^ short_tag
-              | None -> tag))
+             (match Lower_state.module_ctor_type qual short_tag, scrut with
+              | None, _ -> tag
+              | Some module_ty, _ when String.equal module_ty qual_tail -> tag
+              | Some module_ty,
+                Tir.AVar { Tir.v_ty = Tir.TCon (scrut_ty, _); _ } ->
+                let scrut_short = match String.rindex_opt scrut_ty '.' with
+                  | Some j -> String.sub scrut_ty (j + 1) (String.length scrut_ty - j - 1)
+                  | None -> scrut_ty
+                in
+                if String.equal scrut_short module_ty then
+                  Option.value module_reading ~default:tag
+                else tag
+              | Some _, _ ->
+                (match Lower_state.module_ctor_type env.Lower_state.mod_prefix short_tag with
+                 | Some local_ty when String.equal local_ty qual_tail -> tag
+                 | _ -> Option.value module_reading ~default:tag)))
     in
     Some (tag, subs)
   | Ast.PatTuple (subs, _) ->

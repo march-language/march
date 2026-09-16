@@ -150,7 +150,7 @@ let norm_pat_rows (p : Ast.pattern) : spat list =
 (** All [(ctor_name, arity)] pairs for a type name, in declaration order.
     Qualified aliases (keys containing '.') are skipped so that exhaustiveness
     analysis only sees each constructor once under its bare name. *)
-let ctors_for_type (env : env) type_name =
+let ctors_for_type ?(seen = []) (env : env) type_name =
   (* Gather (ctor_key, ci) for every bare-keyed constructor whose parent type's
      BARE name is [type_name].  Because [ci_type] is bare (kept so for
      cross-module unification), two same-named types from DIFFERENT modules both
@@ -181,6 +181,26 @@ let ctors_for_type (env : env) type_name =
   let matches =
     if local_shadow
     then List.filter (fun (_, ci) -> ci.ci_module = env.current_module) matches
+    else matches
+  in
+  (* The local-shadow rule above only sees a type declared by the CURRENT
+     module. A type declared in a NESTED module and matched from its parent
+     (`mod Tree do type T = Leaf(Int) | Node(T, T) end` matched as
+     `Tree.Leaf(n)` from the enclosing module) still merged with every other
+     same-bare-named type — stdlib's `CRDT.LWWRegister.T` — and reported a
+     spurious `missing case: LWWRegister(_, _)`. When the universe still spans
+     several declaring modules, keep only the modules that declare a
+     constructor the match actually names: a foreign type none of whose
+     constructors appear in the patterns cannot be the scrutinee's type. *)
+  let matches =
+    let modules = List.sort_uniq compare (List.map (fun (_, ci) -> ci.ci_module) matches) in
+    let named_modules =
+      List.sort_uniq compare
+        (List.filter_map (fun (k, ci) ->
+             if List.mem k seen then Some ci.ci_module else None) matches)
+    in
+    if List.length modules > 1 && named_modules <> [] then
+      List.filter (fun (_, ci) -> List.mem ci.ci_module named_modules) matches
     else matches
   in
   List.map (fun (k, (ci : ctor_info)) -> (k, List.length ci.ci_arg_tys)) matches
@@ -346,21 +366,28 @@ let rec find_missing_mc (env : env) (tys : ty list) (matrix : spat list list)
     if matrix = [] then Some [] else None
   | ty :: rest_tys ->
     let ty = repr ty in
-    (* If any row starts with a wildcard, it covers all values in this column.
-       Check the wildcard rows' remaining columns via the default matrix. *)
+    (* Does any row start with a wildcard?  This must NOT short-circuit to the
+       default matrix on its own: the default matrix keeps only the wildcard
+       rows, so it forgets every value the constructor rows cover.  With rows
+       [Lf; Lf], [Nd; Lf], [_; Nd] the default matrix is just [[Nd]], which
+       "misses" [_, Lf] even though rows 1 and 2 together cover it.  Maranget's
+       rule: when the explicit constructors in the column form a COMPLETE
+       signature (or the type is single-shape, like a tuple/record, or a
+       two-valued Bool with both literals present), specialize per constructor
+       — [spec_*_mc] carries the wildcard rows along — and only fall back to
+       the default matrix when the signature is incomplete. *)
     let has_first_wild =
       List.exists
         (fun row -> match row with SPWild :: _ -> true | _ -> false)
         matrix
     in
-    if has_first_wild then begin
-      let def = default_mc matrix in
-      match find_missing_mc env rest_tys def with
+    (* Incomplete signature with a wildcard row: the default matrix decides,
+       and the first column is reported as a placeholder. *)
+    let wild_default () =
+      match find_missing_mc env rest_tys (default_mc matrix) with
       | None -> None
-      | Some rest_exs ->
-        (* First column is covered; use a placeholder for the counterexample. *)
-        Some ("_" :: rest_exs)
-    end else
+      | Some rest_exs -> Some ("_" :: rest_exs)
+    in
     match ty with
     | TError -> None   (* error recovery — skip *)
     | TRefine _ -> None  (* unreachable: [ty] was repr'd above, which strips it *)
@@ -370,6 +397,13 @@ let rec find_missing_mc (env : env) (tys : ty list) (matrix : spat list list)
       (match find_missing_mc env rest_tys def with
        | None -> None
        | Some rest_exs -> Some ("_" :: rest_exs))
+    | TCon ("Bool", [])
+      when has_first_wild
+           && not (List.exists (fun row ->
+                      match row with SPLit (Ast.LitBool true) :: _ -> true | _ -> false) matrix
+                   && List.exists (fun row ->
+                      match row with SPLit (Ast.LitBool false) :: _ -> true | _ -> false) matrix) ->
+      wild_default ()
     | TCon ("Bool", []) ->
       (* Bool has exactly two values: true and false (literal patterns). *)
       let check_lit b =
@@ -390,7 +424,13 @@ let rec find_missing_mc (env : env) (tys : ty list) (matrix : spat list list)
        | None -> None
        | Some rest_exs -> Some ("_" :: rest_exs))
     | TCon (name, parent_args) ->
-      let ctors = ctors_for_type env name in
+      (* Which constructors appear in the first column. *)
+      let seen =
+        List.filter_map
+          (fun row -> match row with SPCon (c, _) :: _ -> Some c | _ -> None)
+          matrix
+      in
+      let ctors = ctors_for_type ~seen env name in
       if ctors = [] then
         (* Opaque / unknown type: conservative skip. *)
         let def = default_mc matrix in
@@ -398,14 +438,8 @@ let rec find_missing_mc (env : env) (tys : ty list) (matrix : spat list list)
          | None -> None
          | Some rest_exs -> Some ("_" :: rest_exs))
       else begin
-        (* Collect which constructors appear in the first column. *)
-        let seen =
-          List.filter_map
-            (fun row -> match row with SPCon (c, _) :: _ -> Some c | _ -> None)
-            matrix
-        in
-        (* Is the signature complete? (All ctors present — no wildcards since
-           those were handled above.) *)
+        (* Is the signature complete?  Wildcard rows are deliberately NOT
+           counted: they ride along in each specialization instead. *)
         let is_complete =
           List.for_all (fun (c, _) -> List.mem c seen) ctors
         in
@@ -427,6 +461,7 @@ let rec find_missing_mc (env : env) (tys : ty list) (matrix : spat list list)
               in
               Some (ctor_str :: rest_exs)
           ) ctors
+        else if has_first_wild then wild_default ()
         else begin
           (* Some constructor missing from first col and no wildcards:
              find one and report it. *)
@@ -468,7 +503,8 @@ let rec find_missing_mc (env : env) (tys : ty list) (matrix : spat list list)
             Printf.sprintf "(%s)" (String.concat ", " tup_exs)
           in
           Some (tup_str :: rest_exs)
-      end else begin
+      end else if has_first_wild then wild_default ()
+      else begin
         (* No tuple patterns and no wildcards: entirely missing. *)
         let def = default_mc matrix in
         match find_missing_mc env rest_tys def with
@@ -507,7 +543,8 @@ let rec find_missing_mc (env : env) (tys : ty list) (matrix : spat list list)
                                      fields fld_exs))
           in
           Some (rec_str :: rest_exs)
-      end else begin
+      end else if has_first_wild then wild_default ()
+      else begin
         (* No record patterns and no wildcards: entirely missing. *)
         let def = default_mc matrix in
         match find_missing_mc env rest_tys def with
@@ -560,11 +597,11 @@ let rec is_useful (env : env) (tys : ty list) (matrix : spat list list)
           else
             is_useful env rest_tys (default_mc matrix) row_rest
         | TCon (name, parent_args) when ctors_for_type env name <> [] ->
-          let ctors = ctors_for_type env name in
           (* sigma = constructors EXPLICITLY listed in the matrix's first column
              (wildcards are NOT counted — this is the termination invariant). *)
           let sigma = List.filter_map (fun row ->
             match row with SPCon (c, _) :: _ -> Some c | _ -> None) matrix in
+          let ctors = ctors_for_type ~seen:sigma env name in
           let is_complete =
             List.for_all (fun (c, _) -> List.mem c sigma) ctors in
           if is_complete then

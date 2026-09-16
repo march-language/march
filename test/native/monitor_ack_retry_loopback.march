@@ -97,16 +97,24 @@ mod MonitorAckRetryLoopback do
     end
   end
 
+  -- Local pids come from one process-wide counter shared by both "nodes",
+  -- so their numeric value depends on spawn scheduling; print a stable label
+  -- and check the fired pid against the one node-b announced instead.
+  pfn target_label(fired_pid : Int, monitored_pid : Int) : String do
+    if fired_pid == monitored_pid do "the monitored target"
+    else "UNEXPECTED target " ++ int_to_string(fired_pid) ++ " (monitored " ++ int_to_string(monitored_pid) ++ ")" end
+  end
+
   -- node-a on connection 2: deliver a FIRE once per target (dedupe), ack
   -- every one, stop after the second copy.
-  pfn on_fire(fd : Int, watcher, seen, tag : Int, frame : List(Int)) : Result(Bool, String) do
+  pfn on_fire(fd : Int, watcher, seen, monitored_pid : Int, tag : Int, frame : List(Int)) : Result(Bool, String) do
     if tag == 8 do
       match DistLink.decode_fire(frame) do
         Ok((target_pid, reason)) ->
           let key = "t" ++ int_to_string(target_pid)
           let copies = Vault.incr(seen, key, 1)
           if copies == 1 do
-            println("node-a: MONITOR_FIRE for target " ++ int_to_string(target_pid) ++ " reason=" ++ reason_text(reason) ++ " (delivered)")
+            println("node-a: MONITOR_FIRE for " ++ target_label(target_pid, monitored_pid) ++ " reason=" ++ reason_text(reason) ++ " (delivered)")
             let _ = send(watcher, RemoteDown(target_pid, reason_text(reason)))
             ()
           else
@@ -160,7 +168,7 @@ mod MonitorAckRetryLoopback do
     end
     let watcher = spawn(Watcher)
     let target = read_hello(fd1)
-    println("node-a: monitoring " ++ target.node_id ++ "'s actor " ++ int_to_string(target.local_pid) ++ ", then killing it, never reading connection 1 again")
+    println("node-a: monitoring " ++ target.node_id ++ "'s target actor, then killing it, never reading connection 1 again")
     let _ = NetKernel.send_frame(fd1, DistLink.encode_req("node-a", pid_to_int(watcher), target.local_pid))
     let _ = NodeSend.cast(fd1, 1, target, "MonitorAckRetryLoopback.Kill", Nil)
     -- Connection 2: the pending fire reaches us here.
@@ -168,7 +176,7 @@ mod MonitorAckRetryLoopback do
       Ok(fd) -> fd
       Err(e) -> panic("connect 2: " ++ Socket.error_message(e))
     end
-    match PeerReader.serve(fd2, Nil, fn (tag, frame) -> on_fire(fd2, watcher, seen, tag, frame)) do
+    match PeerReader.serve(fd2, Nil, fn (tag, frame) -> on_fire(fd2, watcher, seen, target.local_pid, tag, frame)) do
       Ok(_) -> ()
       Err(e) -> println("node-a: reader error: " ++ e)
     end
