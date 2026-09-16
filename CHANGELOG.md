@@ -13,6 +13,11 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **An `s == ""` guard now establishes `len(s) > 0` in the else-branch.**
+  Previously documented as a gap: the checker knew only that `s` differed from
+  the empty literal, and a downstream `{String | len(_) > 0}` contract was
+  skipped.
+
 - **A `let` bound to an `if` carries both arms' facts forward.**
   `let c = if x < 1 do 1 else x end` now discharges a downstream `{Int | _ > 0}`
   contract: the checker records the case split rather than dropping the

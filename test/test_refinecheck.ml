@@ -1919,17 +1919,51 @@ let string_suite =
              \  fn main() : Int do f(\"x\") end\n\
               end\n"));
 
-    gated "an `s == \"\"` guard does not manufacture a length fact" (fun () ->
-        (* Distinctness from the empty literal does NOT establish a length —
-           there is no injectivity axiom.  Silence here is correct. *)
-        Alcotest.(check bool) "no error" false
-          (has_refine_error
-             "mod M do\n\
-             \  fn nonempty(s : {String | len(_) > 0}) : Int do 1 end\n\
-             \  fn f(s : String) : Int do\n\
-             \    if s == \"\" do 0 else nonempty(s) end\n\
-             \  end\n\
-              end\n")) ]
+    gated "an `s == \"\"` guard establishes a length in the else-branch" (fun () ->
+        (* Was a documented limitation until 2026-09-16: `Str` is
+           uninterpreted and `$strlen` was constrained only by
+           non-negativity, so distinctness from the empty literal said
+           nothing about a length and this skipped.  The missing fact — the
+           empty string is the only string of length 0 — is now pushed as a
+           ground implication per declared string constant. *)
+        let proved, skipped =
+          ledger_counts
+            {|mod M do
+  fn nonempty(s : {String | len(_) > 0}) : Int do 1 end
+  fn f(s : String) : Int do
+    if s == "" do 0 else nonempty(s) end
+  end
+end|}
+        in
+        Alcotest.(check (pair int int)) "proved" (1, 0) (proved, skipped));
+
+    (* The mirror: the THEN-branch must not prove the same call. If the
+       implication were pushed unconditionally (rather than under `s != ""`)
+       this would wrongly prove too, and the fixture above could not tell the
+       difference. *)
+    gated "the empty branch does not prove a non-empty contract" (fun () ->
+        let proved, _violated, _skipped =
+          ledger_counts3
+            {|mod M2 do
+  fn nonempty(s : {String | len(_) > 0}) : Int do 1 end
+  fn f(s : String) : Int do
+    if s == "" do nonempty(s) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check int) "not proved" 0 proved);
+
+    (* An unguarded call stays undecided: the implication is a fact about
+       strings, not a licence to assume non-emptiness. *)
+    gated "an unguarded string is still undecided" (fun () ->
+        let proved, skipped =
+          ledger_counts
+            {|mod M3 do
+  fn nonempty(s : {String | len(_) > 0}) : Int do 1 end
+  fn f(s : String) : Int do nonempty(s) end
+end|}
+        in
+        Alcotest.(check (pair int int)) "skipped" (0, 1) (proved, skipped)) ]
 
 (* ── Shared predicate-vocabulary foundation ────────────────────────────────
    Task 1 is pure plumbing: it adds the registry without wiring it to

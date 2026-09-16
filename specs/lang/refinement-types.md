@@ -1193,22 +1193,30 @@ withdraws only if its resolved target really provides the
 competitor; see
 [`List.length` is an alias of the `len` measure](#listlength-is-an-alias-of-the-len-measure).
 
+### A `== ""` guard establishes a length
+
+```march
+if s == "" do 0 else nonempty(s) end
+```
+
+The else-branch discharges `nonempty`'s `{String | len(_) > 0}`. `Str` is an
+opaque sort and `$strlen` is otherwise constrained only by non-negativity, so
+this does not come for free: each declared string constant carries the ground
+implication `s != "" -> len(s) > 0`, which is true of byte length (the empty
+string is the only string of length 0) and needs no string theory. It is a
+ground implication per constant rather than a quantified axiom on purpose —
+quantified axioms are what once turned every stdlib `Array` bounds check into
+a 1.5 s `unknown`.
+
+The then-branch proves nothing: the fact is conditional on `s != ""`, so a
+call guarded the wrong way round stays skipped, as it should.
+
 ### What String refinements do *not* do
 
 The encoding models `String` as an **opaque sort** with `len` as an uninterpreted
 function, intentionally outside any SMT string theory, so queries stay decidable
-and cheap. Two consequences are worth spelling out clearly:
+and cheap. The consequence worth spelling out clearly:
 
-- **A `== ""` guard does not establish a length.** In
-
-  ```march
-  if s == "" do 0 else nonempty(s) end
-  ```
-
-  the else-branch knows only that `s` is *distinct from* the empty literal. There
-  is no axiom relating a string's identity to its length, so `len(s) > 0` does not
-  follow and the call is silently skipped. This is a real gap, not an oversight:
-  closing it needs an injectivity axiom with a cost assessed as not worth it.
 - **No prefix, suffix, contains, concatenation, or regex reasoning.** Only `len`
   and `==`/`!=` against literals are understood. Any other string operation in a
   predicate makes the obligation unreflectable, and unreflectable means skipped.

@@ -86,12 +86,15 @@ let is_float_base : A.ty -> bool = function
    do NOT use Z3's string theory (`str.len`, `str.++`, the built-in `String`
    sort, regex): staying decidable and cheap is the whole point of the scoping.
 
-   The consequence to keep in mind is that `Str` is opaque: knowing a value is
-   DISTINCT from the empty literal does not establish its length (there is no
-   injectivity axiom relating a string to its length).  So an `s == ""` guard
-   proves nothing about `len(s)` in the else-branch, and the checker stays
-   silent there — correct under the definite-failure stance, and documented as
-   a limitation rather than papered over.
+   `Str` is otherwise opaque, with one fact added back: since 2026-09-16 each
+   declared string constant carries the ground implication
+   `c != "" -> $strlen(c) > 0` (pushed by [Refine_call]'s [pin_nonempty_len]),
+   so an `s == ""` guard DOES establish `len(s) > 0` in the else-branch.  That
+   is true of byte length — the empty string is the only string of length 0 —
+   and it stays inside this fragment: a ground implication per constant, not a
+   quantified injectivity axiom, since quantified axioms are what once turned
+   every stdlib `Array` bounds check into a 1.5 s `unknown`.  Nothing else
+   relates a string's identity to its length.
 
    All three SMT names below contain `$`, which is legal in an SMT-LIB simple
    symbol but CANNOT occur in a March identifier.  That is load-bearing, not
