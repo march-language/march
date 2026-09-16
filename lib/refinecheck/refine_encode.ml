@@ -670,6 +670,39 @@ let is_set_operator (m : string) : bool = List.mem m set_operators
 let const_fns : (string, Smt.term) Hashtbl.t = Hashtbl.create 16
 let const_fn_rejected : (string, string) Hashtbl.t = Hashtbl.create 16
 
+(* ── Return contracts on BUILTINS ──────────────────────────────────────────
+   A builtin has no [fn_def], so [postcond_of] can compute nothing for it and
+   a `let n = pmap_threshold()` reaches the next call site as an
+   unconstrained constant — three of `stdlib/list.march`'s four user-code
+   skips were exactly that (see
+   specs/progress/2026-09-16-refine-skip-census.md).  This table supplies the
+   missing contract, as (builtin name -> binder, predicate) in the same shape
+   [fn_sig.ret] uses, so [postcond_of] can hand it back unchanged.
+
+   THE BAR FOR ADDING AN ENTRY, which is higher than `@[assume]`'s: the
+   contract must be true BY CONSTRUCTION, enforced somewhere a test pins, not
+   merely believed.  A propagated postcondition is added to the assumption
+   set of every downstream proof, so a wrong entry here is a false-POSITIVE
+   engine — it would make the checker certify code that can fail.  `@[assume]`
+   at least declares its trust in the source and counts itself in the ledger's
+   `trusted` column; an entry here is invisible to a reader of the program,
+   which is why "somebody enforces it" is the price of admission.
+
+   `pmap_threshold` qualifies: its only producer is `--pmap-threshold`, and
+   bin/main.ml rejects a value below 1 before the flag reaches the
+   interpreter or codegen (a non-positive cutoff hangs `List.pmap` outright,
+   so the check earns its place independently of this table). *)
+let builtin_ret_refinements : (string * (string * A.expr)) list =
+  let v (n : string) : A.expr = A.EVar { A.txt = n; A.span = A.dummy_span } in
+  let app (op : string) (a : A.expr) (b : A.expr) : A.expr =
+    A.EApp (v op, [ a; b ], A.dummy_span)
+  in
+  let int_lit (n : int) : A.expr = A.ELit (A.LitInt n, A.dummy_span) in
+  [ ("pmap_threshold", ("_", app ">" (v "_") (int_lit 0))) ]
+
+let builtin_ret_refinement (fname : string) : (string * A.expr) option =
+  List.assoc_opt fname builtin_ret_refinements
+
 (* Names bound ANYWHERE inside the function currently being visited
    ([Refine_check.visit_fn] sets and restores it; see [fn_binders]).  A
    constant function is folded wherever [smt_of_r] runs — a predicate, a

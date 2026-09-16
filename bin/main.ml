@@ -4467,6 +4467,19 @@ let () =
     print_string (March_typecheck.Io_ops_gen.dispatch_wrappers_source ());
     exit 0
   end;
+  (* A non-positive cutoff is not a slower setting, it is a broken one:
+     `--pmap-threshold 0` makes `List.pmap` hang rather than fall back to the
+     sequential path.  Rejecting it here is also what makes the checker's
+     `pmap_threshold() : {Int | _ > 0}` contract TRUE BY CONSTRUCTION rather
+     than assumed — this flag is the value's only producer, so the contract is
+     enforced at the boundary (see [Refine_encode.builtin_ret_refinements]). *)
+  if !pmap_threshold < 1 then begin
+    Printf.eprintf
+      "march: --pmap-threshold must be at least 1 (got %d); it is the element \
+       count below which List.pmap/pfilter/preduce run sequentially\n"
+      !pmap_threshold;
+    exit 1
+  end;
   March_eval.Eval.pmap_threshold_value := !pmap_threshold;
   (* Propagate --test to the typechecker's build-mode flag.  [cap_impl] on an
      IO capability (mocking an IO effect) is admitted only in a test build; see

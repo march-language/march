@@ -13,6 +13,11 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`pmap_threshold()` carries the contract `{Int | _ > 0}`.** The three
+  `List.pmap`/`pfilter`/`preduce` call sites that pass it to `chunks` are now
+  proved rather than skipped, and the refinement checker can propagate return
+  contracts for builtins generally.
+
 - **`--refine-report-sites`: every skipped refinement obligation, one line
   each** — `file:line:col`, reason, kind, callee and predicate, tab-separated
   and labelled user or stdlib. `--refine-report` counts skips per reason;
@@ -357,6 +362,9 @@ git log is authoritative for exact commits.
   nothing when unset.
 
 ### Fixed
+
+- **`--pmap-threshold` below 1 is rejected instead of hanging.** A cutoff of
+  `0` made `List.pmap` never return; the flag now fails with a message.
 
 - **`SortedSet.from_list`, `union`, `intersect` and `difference` work.** All
   four passed their arguments to `List.fold_left` in the wrong order with a

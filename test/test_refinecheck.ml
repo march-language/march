@@ -13173,6 +13173,80 @@ let audit_flag_verdict_invariance name src =
           Alcotest.(check string) "stderr, minus the coverage-audit block"
             (strip_audit_lines err_off) (strip_audit_lines err_on)))
 
+(* Return contracts on builtins ([Refine_encode.builtin_ret_refinements]).
+
+   A builtin has no [fn_def], so before 2026-09-16 `let t = pmap_threshold()`
+   reached the next call site as an unconstrained constant: three of
+   `stdlib/list.march`'s four user-code skips (List.pmap, pfilter, preduce,
+   each calling `chunks(xs, t)` against `{Int | _ > 0}`) were that and nothing
+   else.
+
+   The entry is only sound because the contract is enforced, not assumed:
+   `--pmap-threshold` is the value's only producer and bin/main.ml rejects
+   anything below 1. The CLI half of that is pinned below, in the same group
+   as the contract it justifies — separating them is how the enforcement
+   quietly disappears later while the contract stays. *)
+let builtin_contract_suite =
+  [ gated "a builtin's return contract discharges a downstream precondition" (fun () ->
+        (* RED before the table existed: (0, 1), unconstrained-subject. *)
+        let proved, skipped =
+          ledger_counts
+            {|mod BC1 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn go() : Int do
+    let t = pmap_threshold()
+    pos(t)
+  end
+end|}
+        in
+        Alcotest.(check (pair int int)) "proved" (1, 0) (proved, skipped));
+
+    gated "an inline builtin call carries the same contract" (fun () ->
+        let proved, skipped =
+          ledger_counts
+            {|mod BC2 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn go() : Int do pos(pmap_threshold()) end
+end|}
+        in
+        Alcotest.(check (pair int int)) "proved" (1, 0) (proved, skipped));
+
+    (* A user function shadowing a builtin's spelling must win: the call
+       reaches the user's body, so the builtin's contract would be a fact
+       about a function that is not being called. *)
+    gated "a user function shadowing the spelling wins over the table" (fun () ->
+        (* The user's body returns -5, so the call is a VIOLATION. Asserting
+           that (rather than merely "not proved") is what distinguishes the
+           user's definition winning from the checker losing track of the call
+           altogether — a skip would satisfy "not proved" while hiding a real
+           failure, and the table taking precedence would report nothing at
+           all. *)
+        let proved, violated, skipped =
+          ledger_counts3
+            {|mod BC3 do
+  fn pmap_threshold() : Int do 0 - 5 end
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn go() : Int do pos(pmap_threshold()) end
+end|}
+        in
+        Alcotest.(check (triple int int int)) "violated" (0, 1, 0)
+          (proved, violated, skipped));
+
+    (* The enforcement the contract rests on. A non-positive cutoff also hangs
+       List.pmap outright, so this check earns its place twice over. *)
+    Alcotest.test_case "--pmap-threshold below 1 is rejected" `Quick (fun () ->
+        let path = write_march_fixture "mod PT do\n  fn main() : Int do 0 end\nend\n" in
+        Fun.protect ~finally:(fun () -> try Sys.remove path with Sys_error _ -> ()) (fun () ->
+          let rc_zero, _, err_zero = run_march_on [ "--check"; "--pmap-threshold"; "0" ] path in
+          Alcotest.(check int) "exit 1" 1 rc_zero;
+          Alcotest.(check bool) "says what is wrong" true
+            (contains err_zero "--pmap-threshold must be at least 1");
+          let rc_neg, _, _ = run_march_on [ "--check"; "--pmap-threshold"; "-3" ] path in
+          Alcotest.(check int) "negative rejected too" 1 rc_neg;
+          let rc_ok, _, _ = run_march_on [ "--check"; "--pmap-threshold"; "1" ] path in
+          Alcotest.(check int) "1 is accepted" 0 rc_ok))
+  ]
+
 (* --refine-report-sites: the ledger's skips, one line each.  Written for the
    census that Part A0 of the refinement-precision plan asks for -- deciding
    which incompleteness to attack next needs the skips ATTRIBUTED, and
@@ -16600,6 +16674,7 @@ let () =
         audit_classify_suite @ audit_classify_reason_suite @ audit_classify_fixloop1_suite);
       ("audit-flag", audit_flag_suite);
       ("report-sites", report_sites_suite);
+      ("builtin-contract", builtin_contract_suite);
       ("audit-baseline", audit_baseline_suite);
       ("const-fn-predicate", const_fn_suite);
       ("unobliged-assume", unobliged_assume_suite);
