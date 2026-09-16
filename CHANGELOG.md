@@ -429,6 +429,12 @@ git log is authoritative for exact commits.
   dropped each entry's vector clock, so a received binding always lost to the local one
   and both sides kept their own. Leaves now carry the clock, and the old encoding still
   decodes.
+
+- **`List.map` and `List.filter` no longer leak a capturing lambda
+  (compiled).** Each call leaked the lambda's environment and everything it
+  captured — one object per call. Their internal loop hands the callback down a
+  recursion through an alias, and it was that alias's release, not the one the
+  compiler had keyed its deep drop on, that ended the environment's life.
 - **`SortedSet.from_list`, `union`, `intersect` and `difference` work.** All
   four passed their arguments to `List.fold_left` in the wrong order with a
   curried callback, so `SortedSet.from_list([5, 3, 9, 3, 1], cmp)` panicked

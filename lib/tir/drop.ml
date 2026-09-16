@@ -826,24 +826,53 @@ let rewrite_apply_clo_drop ?(module_fns : (string, unit) Hashtbl.t option) (env 
           Tir.ELet (r, tail, Tir.ESeq (guarded (fun _ -> true), Tir.EAtom (Tir.AVar r)))
       end
   in
+  let decrc_freed_fn =
+    { Tir.v_name = "march_decrc_freed";
+      v_ty = Tir.TFn ([Tir.TPtr Tir.TUnit], Tir.TBool); v_lin = Tir.Unr } in
+  let freed_release (target : Tir.var) (rest : Tir.expr) : Tir.expr =
+    let freed = { Tir.v_name = fresh env "cfree"; v_ty = Tir.TBool;
+                  v_lin = Tir.Unr } in
+    Tir.ELet (freed, Tir.EApp (decrc_freed_fn, [Tir.AVar target]),
+              push freed rest)
+  in
+  (* The SELF-BINDING ALIAS's release needs the same treatment, and in a
+     self-recursive apply function it is the one that actually frees.
+     `let go = inc_rc $clo; $clo in … dec_rc $clo; … dec_rc go` is what Perceus
+     emits for [List.map]'s inner loop: the dup keeps the environment alive past
+     the spliced [dec_rc $clo] (which therefore frees nothing and whose guard
+     never fires), the reference is handed down the recursion, and the last
+     iteration's [dec_rc go] is the release that reaches zero — shallow, so the
+     captured lambda leaked once per [map] call.  Rewriting both releases is
+     safe because only ONE of them can reach zero, so exactly one guard fires. *)
+  let aliases : (string, unit) Hashtbl.t = Hashtbl.create 4 in
+  let rec rewrite_alias_drops (e : Tir.expr) : Tir.expr =
+    match e with
+    | Tir.ESeq (Tir.EDecRC (Tir.AVar v), rest)
+      when Hashtbl.mem aliases v.Tir.v_name ->
+      freed_release v (rewrite_alias_drops rest)
+    | Tir.ELet (v, e1, e2) ->
+      Tir.ELet (v, rewrite_alias_drops e1, rewrite_alias_drops e2)
+    | Tir.ESeq (e1, e2) ->
+      Tir.ESeq (rewrite_alias_drops e1, rewrite_alias_drops e2)
+    | Tir.ELetRec (fns, inner) -> Tir.ELetRec (fns, rewrite_alias_drops inner)
+    | Tir.ECase (a, branches, default) ->
+      Tir.ECase (a,
+        List.map (fun br ->
+            { br with Tir.br_body = rewrite_alias_drops br.Tir.br_body })
+          branches,
+        Option.map rewrite_alias_drops default)
+    | other -> other
+  in
   let rec walk (e : Tir.expr) : Tir.expr option =
     match e with
     | Tir.ELet (v, e1, rest) when is_clo_source clo e1 ->
       (match capture_read clo e1 with
        | Some field -> note_capture field v
-       | None -> ());
+       | None -> Hashtbl.replace aliases v.Tir.v_name ());
       Option.map (fun rest' -> Tir.ELet (v, e1, rest')) (walk rest)
     | Tir.ESeq (Tir.EDecRC (Tir.AVar v), rest) when String.equal v.Tir.v_name clo ->
       if !captures = [] then None
-      else begin
-        let freed = { Tir.v_name = fresh env "cfree"; v_ty = Tir.TBool;
-                      v_lin = Tir.Unr } in
-        let decrc_freed =
-          { Tir.v_name = "march_decrc_freed";
-            v_ty = Tir.TFn ([Tir.TPtr Tir.TUnit], Tir.TBool); v_lin = Tir.Unr } in
-        Some (Tir.ELet (freed, Tir.EApp (decrc_freed, [Tir.AVar clo_var]),
-                        push freed rest))
-      end
+      else Some (freed_release clo_var (rewrite_alias_drops rest))
     | _ -> None
   in
   match walk body with Some body' -> body' | None -> body
@@ -919,16 +948,17 @@ let run ?(k_table : Kind.table option) (m : Tir.tir_module) : Tir.tir_module =
   let module_fns = Hashtbl.create 256 in
   List.iter (fun f -> Hashtbl.replace module_fns f.Tir.fn_name ()) m.Tir.tm_fns;
   let fns = List.map (fun f ->
-      let body = rewrite env f.Tir.fn_body in
-      (* Only an apply function carries a [$clo] parameter to pair child
-         releases with; [fn_kind] is defun's own tag for one, so no name
-         parsing is involved. *)
+      (* The apply-function rewrite runs FIRST: it matches the raw
+         [dec_rc $clo] / [dec_rc <self alias>] shapes Perceus spliced in, which
+         the generic rewrite below would already have turned into calls.  The
+         capture releases it inserts then go through that rewrite in turn, so a
+         captured closure is itself deep-dropped. *)
       let body =
         if f.Tir.fn_kind = Tir.FnApply && Hashtbl.mem owning f.Tir.fn_name
-        then rewrite_apply_clo_drop ~module_fns env body
-        else body
+        then rewrite_apply_clo_drop ~module_fns env f.Tir.fn_body
+        else f.Tir.fn_body
       in
-      { f with Tir.fn_body = body }) m.Tir.tm_fns in
+      { f with Tir.fn_body = rewrite env body }) m.Tir.tm_fns in
   (* Synthesized bodies are built already-rewritten (drop_fn_for is called
      directly when emitting each field op), so they are appended as-is. *)
   { m with Tir.tm_fns = fns @ List.rev env.fns }

@@ -1,0 +1,4 @@
+map over a capturing lambda = 58893, flat: true
+filter over a capturing lambda = 9991, flat: true
+closure inside a constructor = 12517500, flat: true
+capture read on every call = 72786, flat: true
