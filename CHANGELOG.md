@@ -329,6 +329,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A lambda's captured values are released when the lambda is (compiled).**
+  Passing a capturing lambda to a higher-order function leaked
+  what it captured: one object per `List.map`/`List.filter` call, three per
+  `List.fold_left` over a locally-built closure. A closure released without
+  being applied — dropped by the function it was passed to, or pulled out of a
+  data structure and discarded — now releases its captures too.
+
 - **`SortedSet.from_list`, `union`, `intersect` and `difference` work.** All
   four passed their arguments to `List.fold_left` in the wrong order with a
   curried callback, so `SortedSet.from_list([5, 3, 9, 3, 1], cmp)` panicked

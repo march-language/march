@@ -630,7 +630,7 @@ let apply_name_of_clo (clo_name : string) : string option =
     [Borrow.closure_escapes] is reused verbatim rather than re-derived, so this
     pass and the borrow fixpoint cannot drift apart on the one question that
     decides whether the release is a reclaim or a double free. *)
-let owning_apply_fns (m : Tir.tir_module) : (string, unit) Hashtbl.t =
+let owning_clo_types (m : Tir.tir_module) : (string, unit) Hashtbl.t =
   (* clo type name -> false as soon as one site fails to transfer ownership. *)
   let verdict : (string, bool) Hashtbl.t = Hashtbl.create 64 in
   let note name ok =
@@ -683,10 +683,17 @@ let owning_apply_fns (m : Tir.tir_module) : (string, unit) Hashtbl.t =
   List.iter (fun f -> scan `Returned f.Tir.fn_body) m.Tir.tm_fns;
   let owning = Hashtbl.create 64 in
   Hashtbl.iter (fun clo_name ok ->
-      if ok then
-        match apply_name_of_clo clo_name with
-        | Some apply_name -> Hashtbl.replace owning apply_name ()
-        | None -> ()) verdict;
+      if ok then Hashtbl.replace owning clo_name ()) verdict;
+  owning
+
+(** The same verdict, keyed by apply-function name — what
+    [rewrite_apply_clo_drop]'s caller gates on. *)
+let owning_apply_fns (m : Tir.tir_module) : (string, unit) Hashtbl.t =
+  let owning = Hashtbl.create 64 in
+  Hashtbl.iter (fun clo_name () ->
+      match apply_name_of_clo clo_name with
+      | Some apply_name -> Hashtbl.replace owning apply_name ()
+      | None -> ()) (owning_clo_types m);
   owning
 
 (** Release a capturing apply function's captures when its own release of the
@@ -826,28 +833,100 @@ let rewrite_apply_clo_drop ?(module_fns : (string, unit) Hashtbl.t option) (env 
           Tir.ELet (r, tail, Tir.ESeq (guarded (fun _ -> true), Tir.EAtom (Tir.AVar r)))
       end
   in
+  let decrc_freed_fn =
+    { Tir.v_name = "march_decrc_freed";
+      v_ty = Tir.TFn ([Tir.TPtr Tir.TUnit], Tir.TBool); v_lin = Tir.Unr } in
+  let freed_release (target : Tir.var) (rest : Tir.expr) : Tir.expr =
+    let freed = { Tir.v_name = fresh env "cfree"; v_ty = Tir.TBool;
+                  v_lin = Tir.Unr } in
+    Tir.ELet (freed, Tir.EApp (decrc_freed_fn, [Tir.AVar target]),
+              push freed rest)
+  in
+  (* The SELF-BINDING ALIAS's release needs the same treatment, and in a
+     self-recursive apply function it is the one that actually frees.
+     `let go = inc_rc $clo; $clo in … dec_rc $clo; … dec_rc go` is what Perceus
+     emits for [List.map]'s inner loop: the dup keeps the environment alive past
+     the spliced [dec_rc $clo] (which therefore frees nothing and whose guard
+     never fires), the reference is handed down the recursion, and the last
+     iteration's [dec_rc go] is the release that reaches zero — shallow, so the
+     captured lambda leaked once per [map] call.  Rewriting both releases is
+     safe because only ONE of them can reach zero, so exactly one guard fires. *)
+  let aliases : (string, unit) Hashtbl.t = Hashtbl.create 4 in
+  let rec rewrite_alias_drops (e : Tir.expr) : Tir.expr =
+    match e with
+    | Tir.ESeq (Tir.EDecRC (Tir.AVar v), rest)
+      when Hashtbl.mem aliases v.Tir.v_name ->
+      freed_release v (rewrite_alias_drops rest)
+    | Tir.ELet (v, e1, e2) ->
+      Tir.ELet (v, rewrite_alias_drops e1, rewrite_alias_drops e2)
+    | Tir.ESeq (e1, e2) ->
+      Tir.ESeq (rewrite_alias_drops e1, rewrite_alias_drops e2)
+    | Tir.ELetRec (fns, inner) -> Tir.ELetRec (fns, rewrite_alias_drops inner)
+    | Tir.ECase (a, branches, default) ->
+      Tir.ECase (a,
+        List.map (fun br ->
+            { br with Tir.br_body = rewrite_alias_drops br.Tir.br_body })
+          branches,
+        Option.map rewrite_alias_drops default)
+    | other -> other
+  in
   let rec walk (e : Tir.expr) : Tir.expr option =
     match e with
     | Tir.ELet (v, e1, rest) when is_clo_source clo e1 ->
       (match capture_read clo e1 with
        | Some field -> note_capture field v
-       | None -> ());
+       | None -> Hashtbl.replace aliases v.Tir.v_name ());
       Option.map (fun rest' -> Tir.ELet (v, e1, rest')) (walk rest)
     | Tir.ESeq (Tir.EDecRC (Tir.AVar v), rest) when String.equal v.Tir.v_name clo ->
       if !captures = [] then None
-      else begin
-        let freed = { Tir.v_name = fresh env "cfree"; v_ty = Tir.TBool;
-                      v_lin = Tir.Unr } in
-        let decrc_freed =
-          { Tir.v_name = "march_decrc_freed";
-            v_ty = Tir.TFn ([Tir.TPtr Tir.TUnit], Tir.TBool); v_lin = Tir.Unr } in
-        Some (Tir.ELet (freed, Tir.EApp (decrc_freed, [Tir.AVar clo_var]),
-                        push freed rest))
-      end
+      else Some (freed_release clo_var (rewrite_alias_drops rest))
     | _ -> None
   in
   match walk body with Some body' -> body' | None -> body
 
+
+(** The deep drop for ONE closure type's environment, read out of the cell by
+    field: [__drop_clo$X($c) = let a = $c.$fv1 in drop a; …].
+
+    It does not release the environment itself.  [march_drop_closure] calls it
+    while the cell is still alive — the fields have to be readable — and does
+    the cell's own release afterwards.  [None] when the environment captures
+    nothing that needs releasing, so no function is synthesized and no pair is
+    registered (the release stays the bare [march_decrc] it is today). *)
+let synth_clo_drop (env : env) (clo_name : string) (field_tys : Tir.ty list)
+  : string option =
+  let fname = Tir_names.clo_drop_fn_prefix ^ clo_name in
+  (* Field 0 is the apply-fn pointer; captures are 1-based ($fv1, $fv2, …),
+     matching [Defun.lift_lambda]'s struct and the prefix an apply function
+     reads its captures out of. *)
+  let captures =
+    List.filteri (fun i _ -> i > 0) field_tys
+    |> List.mapi (fun i ty -> (i + 1, ty))
+    |> List.filter (fun (_, ty) -> Kind.needs_rc_of env.k_table ty)
+  in
+  if captures = [] then None
+  else begin
+    let c = { Tir.v_name = "$c"; v_ty = Tir.TPtr Tir.TUnit; v_lin = Tir.Unr } in
+    let drop_op (v : Tir.var) =
+      if may_be_non_heap env v.Tir.v_ty then Tir.EDecRC (Tir.AVar v)
+      else match drop_fn_for env v.Tir.v_ty with
+        | Some callee ->
+          let f = { Tir.v_name = callee;
+                    v_ty = Tir.TFn ([v.Tir.v_ty], Tir.TUnit); v_lin = Tir.Unr } in
+          Tir.EApp (f, [Tir.AVar v])
+        | None -> Tir.EDecRC (Tir.AVar v)
+    in
+    let body =
+      List.fold_right (fun (idx, ty) rest ->
+          let v = { Tir.v_name = fresh env "cap"; v_ty = ty; v_lin = Tir.Unr } in
+          Tir.ELet (v, Tir.EField (Tir.AVar c, Tir_names.fv_field idx),
+                    Tir.ESeq (drop_op v, rest)))
+        captures (Tir.ETuple [])
+    in
+    env.fns <- { Tir.fn_name = fname; fn_params = [c]; fn_ret_ty = Tir.TUnit;
+                 fn_body = body; fn_kind = Tir.FnNormal } :: env.fns;
+    Some fname
+  end
 
 (* ── Rewriting bare drops at their use sites ───────────────────────────── *)
 
@@ -912,23 +991,52 @@ let run ?(k_table : Kind.table option) (m : Tir.tir_module) : Tir.tir_module =
   let collision_set = Collision_set.compute m.Tir.tm_types in
   let env = { type_defs = m.Tir.tm_types; collision_set; k_table;
               names = Hashtbl.create 32; fns = []; ctr = 0 } in
-  (* Apply functions whose environment owns what it captured — see
-     [owning_apply_fns] for why this gate is load-bearing rather than an
-     optimisation. *)
-  let owning = owning_apply_fns m in
+  (* Closure types whose environment owns what it captured — see
+     [owning_clo_types] for why this gate is load-bearing rather than an
+     optimisation.  Both the apply-function release and the outer one are
+     gated on it. *)
+  let owning_clos = owning_clo_types m in
+  let owning = Hashtbl.create 64 in
+  Hashtbl.iter (fun clo_name () ->
+      match apply_name_of_clo clo_name with
+      | Some apply_name -> Hashtbl.replace owning apply_name ()
+      | None -> ()) owning_clos;
+  (* Deep drops for the OUTER release of a closure value, keyed at run time by
+     the apply-fn pointer the cell carries.  Synthesized before the bodies are
+     rewritten so [env.fns] carries them out with the rest. *)
+  Clo_drops.reset ();
+  List.iter (fun td ->
+      match td with
+      | Tir.TDClosure (clo_name, field_tys) when Hashtbl.mem owning_clos clo_name ->
+        (match apply_name_of_clo clo_name with
+         | Some apply_fn ->
+           (match synth_clo_drop env clo_name field_tys with
+            | Some drop_fn -> Clo_drops.register ~apply_fn ~drop_fn
+            | None -> ())
+         | None -> ())
+      | _ -> ()) m.Tir.tm_types;
   let module_fns = Hashtbl.create 256 in
   List.iter (fun f -> Hashtbl.replace module_fns f.Tir.fn_name ()) m.Tir.tm_fns;
   let fns = List.map (fun f ->
-      let body = rewrite env f.Tir.fn_body in
-      (* Only an apply function carries a [$clo] parameter to pair child
-         releases with; [fn_kind] is defun's own tag for one, so no name
-         parsing is involved. *)
+      (* The apply-function rewrite runs FIRST: it matches the raw
+         [dec_rc $clo] / [dec_rc <self alias>] shapes Perceus spliced in, which
+         the generic rewrite below would already have turned into calls.  The
+         capture releases it inserts then go through that rewrite in turn, so a
+         captured closure is itself deep-dropped. *)
       let body =
         if f.Tir.fn_kind = Tir.FnApply && Hashtbl.mem owning f.Tir.fn_name
-        then rewrite_apply_clo_drop ~module_fns env body
-        else body
+        then rewrite_apply_clo_drop ~module_fns env f.Tir.fn_body
+        else f.Tir.fn_body
       in
-      { f with Tir.fn_body = body }) m.Tir.tm_fns in
+      { f with Tir.fn_body = rewrite env body }) m.Tir.tm_fns in
   (* Synthesized bodies are built already-rewritten (drop_fn_for is called
-     directly when emitting each field op), so they are appended as-is. *)
+     directly when emitting each field op), so they are appended as-is.
+
+     A closure deep drop has no caller in the TIR — the module's constructor
+     calls it, and that is emitted long after DCE.  [Dce.reachable_fns] keeps
+     one alive exactly while the apply function of its closure is alive, which
+     is both the right lifetime and the reason this does NOT root them through
+     [tm_exports]: doing that tells the capability ceiling a main-less module
+     has an entry point, and it then stops charging the module for its own
+     capability use (test/test_cap_ceiling.ml's main-less case). *)
   { m with Tir.tm_fns = fns @ List.rev env.fns }

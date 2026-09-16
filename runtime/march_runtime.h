@@ -287,6 +287,22 @@ static inline void march_clo_arg_retain(void *arg) {
         march_incrc(arg);
 }
 
+/* ── Releasing a closure VALUE ────────────────────────────────────────────
+ *
+ * A bare release of a closure (a lambda a higher-order function drops when it
+ * is done with it, one pulled out of a data structure and discarded) is a
+ * shallow free: nothing releases what the lambda captured. The cell's layout
+ * is not known at the release site — a function type names none — but the cell
+ * itself identifies its shape through the apply-function pointer in field 0,
+ * so the compiler registers one deep-drop per closure type against that
+ * pointer (march_register_clo_drop, emitted by lib/tir/clo_drops.ml's
+ * consumer) and this releases the captures when the release is the last one.
+ *
+ * Unregistered closures (the REPL/JIT, cells the runtime builds itself) take
+ * the plain path and leak their captures exactly as before. */
+void  march_register_clo_drop(void *apply_fn, void *drop_fn);
+void  march_drop_closure(void *c);
+
 /* Moved here from march_runtime.c: the inline-string encoding below is safe
  * only BECAUSE of this predicate's exact definition — an inline string sets the
  * sign bit and so fails guard 3 — and march_sso_selftest asserts exactly that.

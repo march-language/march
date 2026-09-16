@@ -242,7 +242,7 @@ let scalar_builtins = [
   (* Reference counting and freeing, not allocating: [Drop.run] synthesizes a
      call to [march_decrc_freed] inside every generated __drop$T helper, so
      without this entry any function that drops an owned value fails. *)
-  "march_decrc_freed"; "march_decrc_local_freed";
+  "march_decrc_freed"; "march_decrc_local_freed"; "march_drop_closure";
   "march_incrc"; "march_decrc"; "march_free";
   "native_int_arr_get"; "native_int_arr_length"; "native_int_arr_set"; "native_int_arr_sum";
   "native_float_arr_get"; "native_float_arr_length"; "native_float_arr_set"; "native_float_arr_sum";

@@ -18,6 +18,15 @@ real but narrow: `WHICH=5` went 1,073 MB -> 9.5 MB, while `WHICH=4` and
 > verdict: the gate is still per closure type. Measured leftovers are in the
 > progress entry.
 
+> **Update 2026-09-15: items 2 and 3 landed**
+> (`specs/progress/2026-09-15-closure-captures-released-at-every-site.md`).
+> The HOF-loop half of item 2 was not the gate at all: `map`'s `go` closure
+> already qualified, but the release that reaches zero is the SELF-ALIAS's
+> (`dec_rc go`), not the `dec_rc $clo` the deep drop was keyed on. Item 3 is
+> the runtime table it asked for, keyed by the apply-fn pointer rather than by
+> a drop id in the pad word, so no header bit was spent. What remains of item 2
+> is the per-SITE verdict: the gate is still per closure type.
+>
 > **Update 2026-09-14:** measured shape of item 2 after closure calls started
 > consuming their arguments
 > (`specs/progress/2026-09-14-closure-calls-consume-their-arguments.md`):

@@ -492,6 +492,90 @@ void march_decrc(void *p) {
     }
 }
 
+/* ── Deep release of a closure value ──────────────────────────────────────
+ *
+ * Registered by the compiled module's constructor, one entry per closure type
+ * whose environment OWNS its captures (lib/tir/drop.ml's owning_clo_types is
+ * the gate; a borrowed capture must never be released here). The key is the
+ * apply-function pointer the cell carries in field 0 — the only thing a
+ * closure value carries that identifies its layout.
+ *
+ * Registration happens once, at program start, before any March code runs, so
+ * the table needs no locking for readers. */
+typedef void (*march_clo_drop_fn)(void *);
+
+typedef struct { void *apply_fn; march_clo_drop_fn drop_fn; } march_clo_drop_ent;
+
+static march_clo_drop_ent *g_clo_drops = NULL;
+static size_t g_clo_drops_cap = 0;   /* always a power of two, or 0 */
+static size_t g_clo_drops_len = 0;
+
+static inline size_t clo_drop_hash(void *p) {
+    uintptr_t x = (uintptr_t)p >> 4;
+    x *= (uintptr_t)0x9E3779B97F4A7C15ull;
+    return (size_t)(x >> 32);
+}
+
+static void clo_drop_insert(march_clo_drop_ent *tbl, size_t cap,
+                            void *apply_fn, march_clo_drop_fn drop_fn) {
+    size_t mask = cap - 1;
+    size_t i = clo_drop_hash(apply_fn) & mask;
+    while (tbl[i].apply_fn && tbl[i].apply_fn != apply_fn) i = (i + 1) & mask;
+    tbl[i].apply_fn = apply_fn;
+    tbl[i].drop_fn = drop_fn;
+}
+
+void march_register_clo_drop(void *apply_fn, void *drop_fn) {
+    if (!apply_fn || !drop_fn) return;
+    /* Grow at half load. */
+    if (g_clo_drops_len * 2 + 2 > g_clo_drops_cap) {
+        size_t ncap = g_clo_drops_cap ? g_clo_drops_cap * 2 : 64;
+        march_clo_drop_ent *ntbl = calloc(ncap, sizeof(march_clo_drop_ent));
+        if (!ntbl) return;   /* out of memory: degrade to the shallow free */
+        for (size_t i = 0; i < g_clo_drops_cap; i++)
+            if (g_clo_drops[i].apply_fn)
+                clo_drop_insert(ntbl, ncap, g_clo_drops[i].apply_fn,
+                                g_clo_drops[i].drop_fn);
+        free(g_clo_drops);
+        g_clo_drops = ntbl;
+        g_clo_drops_cap = ncap;
+    }
+    clo_drop_insert(g_clo_drops, g_clo_drops_cap, apply_fn,
+                    (march_clo_drop_fn)drop_fn);
+    g_clo_drops_len++;
+}
+
+static march_clo_drop_fn clo_drop_lookup(void *apply_fn) {
+    if (!g_clo_drops_cap) return NULL;
+    size_t mask = g_clo_drops_cap - 1;
+    size_t i = clo_drop_hash(apply_fn) & mask;
+    while (g_clo_drops[i].apply_fn) {
+        if (g_clo_drops[i].apply_fn == apply_fn) return g_clo_drops[i].drop_fn;
+        i = (i + 1) & mask;
+    }
+    return NULL;
+}
+
+/* Release one reference to a closure value, releasing what it captured when
+ * that reference was the last one.
+ *
+ * The captures are released BEFORE the cell's own decrement, because the drop
+ * reads them out of the cell and the decrement frees it. Taking the "am I
+ * last?" decision from a plain rc load is safe: another owner means rc > 1 and
+ * we only decrement (whoever ends up last does the deep drop), and an immortal
+ * cell (a static closure) never reads as 1. */
+void march_drop_closure(void *c) {
+    if (!IS_HEAP_PTR(c)) return;
+    int64_t rc = atomic_load_explicit(
+        (_Atomic int64_t *)&((march_hdr *)c)->rc, memory_order_acquire);
+    if (rc == 1) {
+        void *apply_fn = *(void **)((char *)c + 16);
+        march_clo_drop_fn drop = clo_drop_lookup(apply_fn);
+        if (drop) drop(c);
+    }
+    march_decrc(c);
+}
+
 int64_t march_decrc_freed(void *p) {
     if (!IS_HEAP_PTR(p)) return 1;
     int32_t tag  = ((march_hdr *)p)->tag;

@@ -1746,6 +1746,29 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/closure_call_arg_ownership_probe.expected native_closure_call_arg_ownership_probe.out)))
 
+; ── Leak guard: a capturing lambda handed to a higher-order function is
+; released with everything it captured -- by the HOF's internal loop (whose
+; self-alias release, not the spliced one, is what reaches zero) and by the
+; outer release of a closure VALUE (whose layout comes from the apply-fn
+; pointer via the runtime table, lib/tir/clo_drops.ml). Red before either:
+; 1 object per map/filter call, 3 per fold over a local closure.
+(rule
+ (targets native_closure_capture_outer_release_probe native_closure_capture_outer_release_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/closure_capture_outer_release_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_closure_capture_outer_release_probe
+        native/closure_capture_outer_release_probe.march)
+   (with-stdout-to native_closure_capture_outer_release_probe.out
+        (system "./native_closure_capture_outer_release_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/closure_capture_outer_release_probe.expected native_closure_capture_outer_release_probe.out)))
+
 ; ── Leak guard: `to_string` of a List (prelude's Show via string_join) and
 ; string_join itself release the list. string_join's list argument was marked
 ; owned in borrow.ml while march_string_join only reads it: 5 objects per
