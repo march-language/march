@@ -148,6 +148,9 @@ let all_stdlib_decls =
     "sigil.march";
     "crypto.march";
     "deque.march";
+    "sorted_set.march";
+    "gen.march";
+    "check.march";
     "ring_buf.march";
     "vector_clock.march";
     "merkle.march";
@@ -538,6 +541,10 @@ let () =
     ("deque", [
       Alcotest.test_case "Deque module"
         `Quick (run_stdlib_test "test_deque.march" "TestDeque");
+    ]);
+    ("sorted_set", [
+      Alcotest.test_case "SortedSet module"
+        `Quick (run_stdlib_test "test_sorted_set.march" "TestSortedSet");
     ]);
     ("ring_buf", [
       Alcotest.test_case "RingBuf module"

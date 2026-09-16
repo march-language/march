@@ -230,7 +230,7 @@ mod SortedSet do
 
   doc "Builds a set from a list of elements."
   fn from_list(items : List(a), cmp : a -> a -> Int) : {cmp: a -> a -> Int, tree: AvlTree(a)} do
-    List.fold_left(new(cmp), items, fn s -> fn v -> add(s, v))
+    List.fold_left(items, new(cmp), fn (s, v) -> add(s, v))
   end
 
   doc "Returns the number of elements in the set."
@@ -250,18 +250,18 @@ mod SortedSet do
 
   doc "Returns a set containing all elements in either a or b."
   fn union(a : {cmp: k -> k -> Int, tree: AvlTree(k)}, b : {cmp: k -> k -> Int, tree: AvlTree(k)}) : {cmp: k -> k -> Int, tree: AvlTree(k)} do
-    List.fold_left(a, to_list(b), fn s -> fn v -> add(s, v))
+    List.fold_left(to_list(b), a, fn (s, v) -> add(s, v))
   end
 
   doc "Returns a set containing only elements in both a and b."
   fn intersect(a : {cmp: k -> k -> Int, tree: AvlTree(k)}, b : {cmp: k -> k -> Int, tree: AvlTree(k)}) : {cmp: k -> k -> Int, tree: AvlTree(k)} do
-    List.fold_left(new(a.cmp), to_list(a), fn s -> fn v ->
+    List.fold_left(to_list(a), new(a.cmp), fn (s, v) ->
       if tree_member(b.tree, b.cmp, v) do add(s, v) else s end)
   end
 
   doc "Returns a set of elements in a that are not in b."
   fn difference(a : {cmp: k -> k -> Int, tree: AvlTree(k)}, b : {cmp: k -> k -> Int, tree: AvlTree(k)}) : {cmp: k -> k -> Int, tree: AvlTree(k)} do
-    List.fold_left(a, to_list(b), fn s -> fn v -> remove(s, v))
+    List.fold_left(to_list(b), a, fn (s, v) -> remove(s, v))
   end
 
   doc "Folds over the set in sorted order: f(acc, element) -> acc."
