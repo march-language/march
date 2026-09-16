@@ -13,7 +13,7 @@
 #   doc-lint                            (standalone, ~10s)
 #   test          (ubuntu, macos)       `dune runtest`
 #   conformance   (ubuntu, macos)       @types-check, @grammar-check, @vault-scale, docs, fmt
-#   sanitize-gate (ubuntu)              ASAN gate: golden corpus + curated SIMD/NativeArray
+#   sanitize-gate (ubuntu)              ASAN gate: golden corpus + curated native + two-node
 #   ocaml-build   (ubuntu, macos) ─┬─ property-tests × 3 (per OS)
 #                  ubuntu leg only ─┼─ cross-linux-oracle
 #                                   └─ property-oracle × 8
@@ -515,13 +515,17 @@ jobs:
           eval $(opam env)
           dune fmt 2>&1 || true
 
-  # AddressSanitizer sweep over two corpora on this runner.
-  # sanitize.sh covers two corpora: every specs/lang/golden/*.march, plus a
-  # curated by-name list of test/native/*.march SIMD / NativeArray-narrow-width /
-  # array-backed-Bytes programs — that second corpus was added 2026-08-20 because
+  # AddressSanitizer sweep over three corpora on this runner.
+  # sanitize.sh covers every specs/lang/golden/*.march; a curated by-name list of
+  # test/native/*.march SIMD / NativeArray-narrow-width / array-backed-Bytes and
+  # closure-ownership programs — that second corpus was added 2026-08-20 because
   # no sanitizer had ever compiled that code (the golden corpus contains zero
-  # SIMD/NativeArray programs). See the script header for why the curated list is
-  # a list and not a glob, and why those programs are not simply new goldens.
+  # SIMD/NativeArray programs); and, since 2026-09-16, the two-node scenarios,
+  # which run two compiled programs as two processes over a real socket. That
+  # third corpus exists because on 2026-09-16 a closure deep drop released a node
+  # id the members Map still owned and BOTH other corpora swept clean while
+  # `two-node[skew]` died. See the script header for why the curated list is a
+  # list and not a glob, and why those programs are not simply new goldens.
   #
   # Ubuntu-only: the gate no-ops on a Mac running CrowdStrike Falcon, whose
   # syscall interception hangs ASAN's shadow-memory setup.

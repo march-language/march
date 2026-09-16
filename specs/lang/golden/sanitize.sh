@@ -116,6 +116,18 @@ native_curated=(
   # array-backed Bytes
   bytes_u8_bridge
   closure_param_shadows_import
+  # closure environments: who releases a lambda's captures, and when. Every one
+  # of these guarded a release that was wrong in one direction or the other
+  # (specs/progress/2026-09-13-closure-environment-released.md,
+  # …/2026-09-14-closure-calls-consume-their-arguments.md,
+  # …/2026-09-15-closure-captures-released-by-the-hof-loop.md). They are
+  # 5,000-iteration probes, not the multi-million ones excluded above.
+  closure_capture_release_probe
+  closure_capture_hof_loop_probe
+  closure_call_arg_ownership_probe
+  # the Msgpack/actor/socket program whose guard-page crash is why the
+  # closure deep-drop gate exists at all
+  node_discovery
   # NativeArray: narrow widths, fold, map/map2, and the inline-loop lowerings
   native_arr_fold
   native_arr_map2
@@ -191,6 +203,43 @@ sweep() {
 sweep golden 25 "$here"/*.march
 echo
 sweep native 25 "${native_files[@]}"
+
+# ── Corpus 3: the two-node scenarios ──────────────────────────────────────
+# Two compiled programs as two OS processes over a real socket, with a fault
+# applied from outside (scripts/two-node.sh). They are the ONLY fixtures that
+# exercise ownership across the actor plane and a live connection, and that is
+# not a theoretical distinction: on 2026-09-16 a closure deep drop released a
+# node id that the members Map still owned, and BOTH corpora above swept clean
+# while `two-node[skew]` died. This corpus is that gate
+# (specs/progress/2026-09-15-closure-captures-released-by-the-hof-loop.md).
+#
+# Slower than the per-program sweeps (two processes, real timeouts, ASAN's
+# 2-20x), so each scenario gets its own generous deadline via the harness's own
+# TWO_NODE_TIMEOUT rather than the `perl alarm` the sweep() helper uses.
+# A scenario that needs root it does not have (partition, iptables) exits 3;
+# that is reported as SKIP, not as a pass — the count at the end is what says
+# whether this gate ran.
+two_node_sweep() {
+  local pass=0 fail=0 skip=0 s rc
+  for s in $("$root/scripts/two-node.sh" --list); do
+    MARCH_BIN="$bin" MARCH_SANITIZE=1 TWO_NODE_TIMEOUT="${TWO_NODE_ASAN_TIMEOUT:-240}" \
+      "$root/scripts/two-node.sh" "$s" >"$work/two-node-$s.log" 2>&1; rc=$?
+    if [ $rc -eq 3 ]; then
+      echo "  [two-node/$s] SKIP (needs root)"; skip=$((skip+1))
+    elif [ $rc -ne 0 ] || grep -qiE "AddressSanitizer|runtime error:" "$work/two-node-$s.log"; then
+      echo "  [two-node/$s] SANITIZER FAIL (rc=$rc)"; sed 's/^/    /' "$work/two-node-$s.log"
+      fail=$((fail+1))
+    else
+      echo "  [two-node/$s] CLEAN"; pass=$((pass+1))
+    fi
+  done
+  echo "=== two-node sanitize: $pass clean, $fail failed, $skip skipped ==="
+  total_pass=$((total_pass+pass)); total_fail=$((total_fail+fail))
+  total_ran=$((total_ran+pass+fail))
+}
+
+echo
+two_node_sweep
 
 # Report the program count explicitly. A green exit code alone is NOT evidence
 # this gate ran: the Darwin/Falcon branch above exits 0 having compiled nothing,

@@ -360,6 +360,8 @@ native_simd_mutual_tco: coverage audit (user + stdlib): 114 enforced, 0 inert (w
 native_simd_mutual_tco: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_simd_nested_closure_acc: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
 native_simd_nested_closure_acc: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_simd_nontco_leak_probe: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
+native_simd_nontco_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_simd_poly_eq: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
 native_simd_poly_eq: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_simd_residency: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced

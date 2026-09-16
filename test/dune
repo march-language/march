@@ -1768,6 +1768,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/closure_capture_hof_loop_probe.expected native_closure_capture_hof_loop_probe.out)))
 
+; ── Leak guard: a SIMD vector crossing a `ptr`-slotted parameter is released
+; -- by the call site when the callee borrows it (non-TCO fn), by the callee
+; when it owns it (a closure's apply fn). Red before the fix: 1 march_simd_alloc
+; cell per call on both legs. The third leg is a crash witness, not a leak one.
+(rule
+ (targets native_simd_nontco_leak_probe native_simd_nontco_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/simd_nontco_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_simd_nontco_leak_probe
+        native/simd_nontco_leak_probe.march)
+   (with-stdout-to native_simd_nontco_leak_probe.out
+        (system "./native_simd_nontco_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/simd_nontco_leak_probe.expected native_simd_nontco_leak_probe.out)))
+
 ; ── Leak guard: `to_string` of a List (prelude's Show via string_join) and
 ; string_join itself release the list. string_join's list argument was marked
 ; owned in borrow.ml while march_string_join only reads it: 5 objects per

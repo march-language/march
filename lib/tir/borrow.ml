@@ -251,6 +251,42 @@ let extern_borrow_table : (string * bool list) list = [
     third. *)
 let all_args_borrowed_builtins = [ "string_concat_n" ]
 
+let ends_with ~(suffix : string) (s : string) : bool =
+  let sl = String.length suffix and n = String.length s in
+  n >= sl && String.sub s (n - sl) sl = suffix
+
+(** True for a SIMD vector builtin ([simd_f32x4_add], [simd_u8x16_sum], …).
+
+    Every one of them READS its vector operands: they lower to LLVM vector
+    instructions in [Llvm_emit_simd], not to a C call that could store or free
+    anything, and the only heap object in sight is the [march_simd_alloc] box a
+    call site makes when a vector crosses a [ptr] slot.  Classifying them owned
+    — the pre-2026-09-16 default — made every function that merely reads its
+    vector parameter own it, so nobody released that box: one leaked 32-byte
+    cell per call to any non-TCO callee with a vector parameter
+    (specs/todos/2026-08-12-simd-nontco-vector-param-leak.md).
+
+    Matched by name rather than listed: the grid is 127 names across five lane
+    types, and a list would rot the moment a lane type gains an operation.  The
+    prefix is minted by [Defun]'s builtin table, which is the same source the
+    arity grid comes from. *)
+let is_simd_builtin (fn_name : string) : bool =
+  let p = "simd_" in
+  String.length fn_name > String.length p
+  && String.sub fn_name 0 (String.length p) = p
+  (* …except the two that touch a NativeArray rather than only vectors.
+     [simd_<lane>_load] reads lanes out of an array and [_store] writes them
+     back; their FIRST parameter is that array, and the array's ownership is
+     the array builtins' story, not this one.  Classifying it borrowed moved
+     the release of a live array to its last syntactic use and broke
+     simd_vector_mem ("native_f32_arr_get: index 2 out of bounds (len=0)"),
+     simd_vector_core and native_arr_map_inline_vectorize.  The vector operand
+     they also take is the one this rule is about, and it is not the leak this
+     closes: a vector reaching an array builtin is stored lane-wise, never
+     boxed. *)
+  && not (ends_with ~suffix:"_load" fn_name)
+  && not (ends_with ~suffix:"_store" fn_name)
+
 (** Builtins with a heap ([ptr]) parameter that are deliberately OWNED: each
     either consumes its argument (it stores or frees it -- e.g. [send]'s
     message, [vault_set]'s value) or has not been audited yet and keeps the
@@ -330,7 +366,7 @@ let extern_owned_builtins : string list = [
     according to the hardcoded ABI table.  Used as a fallback in [is_borrowed]
     when the function is not a March-defined function. *)
 let is_extern_borrowed (fn_name : string) (param_idx : int) : bool =
-  if List.mem fn_name all_args_borrowed_builtins then true
+  if List.mem fn_name all_args_borrowed_builtins || is_simd_builtin fn_name then true
   else
   match List.assoc_opt fn_name extern_borrow_table with
   | Some borrows ->

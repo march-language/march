@@ -126,9 +126,25 @@ let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
              = Some (List.length arg_pairs) -> idxs
       | Some _ | None -> []
     in
+    (* The second party that provably does not retain the pointer: a callee
+       whose parameter borrow inference classified BORROWED.  That is the same
+       question the native-slot table answers for one shape, asked of every
+       shape — a borrowed parameter is by definition never stored, returned or
+       handed to an owning position, so `fn wrap(v) = [v]` (which IS owned)
+       stays excluded and keeps its box, and the read-only callee that leaked
+       one per call does not.  [Clo_flags] carries the modes Perceus converged
+       on; a callee it did not register reads as "not borrowed", i.e. today's
+       behaviour.  Same arity guard as above: the modes are positional. *)
+    let borrowed_vec_param i =
+      match Clo_flags.borrowed_params resolved_name with
+      | Some modes when List.length modes = List.length arg_pairs ->
+        (match List.nth_opt modes i with Some b -> b | None -> false)
+      | Some _ | None -> false
+    in
     let temp_boxes : string list ref = ref [] in
     let record_temp_box i ~from_ty ~to_ty boxed =
-      if is_vec_ty from_ty && to_ty = "ptr" && List.mem i native_vec_idxs then
+      if is_vec_ty from_ty && to_ty = "ptr"
+         && (List.mem i native_vec_idxs || borrowed_vec_param i) then
         temp_boxes := boxed :: !temp_boxes
     in
     (* Boundary B: a direct call to an apply fn (known_call rewrote a
