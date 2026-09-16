@@ -405,6 +405,18 @@ git log is authoritative for exact commits.
   and the query preamble that declares them.
 - **`--pmap-threshold` below 1 is rejected instead of hanging.** A cutoff of
   `0` made `List.pmap` never return; the flag now fails with a message.
+- **`DateTime.parse_offset` returns `Err` on a malformed offset instead of
+  panicking.** The offset minutes were parsed as any two digits and handed
+  straight to `fixed_zone_hm`, whose `{Int | _ >= 0 && _ < 60}` contract
+  panicked, so `"2026-01-02T03:04:05+01:75"` aborted the process rather than
+  failing the parse like every other malformed field. Both the `+HH:MM` and the
+  colon-less `+HHMM` path are now range-checked, and the hour is bounded to
+  RFC 3339's 00-23 (`"+99:00"` used to be accepted as a zone 356400 seconds from
+  UTC). Found by the refinement checker: both call sites were
+  `unconstrained-subject` skips, and are now one proved obligation.
+- **`test/stdlib/test_datetime.march` actually runs.** It was on
+  `test_stdlib_march.ml`'s known-orphan allowlist, so its tests had never
+  executed; it is now registered with the other stdlib test files.
 - `Node.send` minted a different wire tag for a message type declared at the entry
   module's top level depending on the entry module's name (`App.Note` rather than
   `Note`), so two separately built nodes could not agree on it. The entry module's name

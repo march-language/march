@@ -523,6 +523,10 @@ mod DateTime do
 
   -- Parse an offset suffix from position 0 of `s`.  Accepts `Z`, `+HH:MM`,
   -- `-HH:MM`, `+HHMM`, `-HHMM`.  Returns `Some((tz, rest))` on success.
+  -- An out-of-range offset (hour outside [0, 24), minute outside [0, 60))
+  -- is a parse failure, not a panic: `parse_digits` admits 00-99, but
+  -- `fixed_zone_hm` requires `minutes` in [0, 60), so the range check has to
+  -- happen here.  The hour bound follows RFC 3339's `time-hour` (00-23).
   pfn parse_offset_suffix(s : String) : Option((Tz, String)) do
     let len = string_byte_length(s)
     if len == 0 do None
@@ -536,26 +540,21 @@ mod DateTime do
           let rest = string_slice(s, 1, len - 1)
           match parse_digits(rest, 2) do
           None -> None
-          Some((h, r1)) ->
+          Some((h, r1)) -> do
             -- Accept either "HH:MM" or "HHMM" forms
-            match expect_prefix(r1, ":") do
-            Some(r2) ->
-              match parse_digits(r2, 2) do
-              None -> None
-              Some((m, r3)) -> do
-                let offset = sign * (h * 3600 + m * 60)
+            let minutes =
+              match expect_prefix(r1, ":") do
+              Some(r2) -> parse_digits(r2, 2)
+              None     -> parse_digits(r1, 2)
+              end
+            match minutes do
+            None -> None
+            Some((m, r3)) ->
+              if h >= 0 && h < 24 && m >= 0 && m < 60 do
                 Some((fixed_zone_hm(sign * h, m), r3))
-              end
-              end
-            None ->
-              match parse_digits(r1, 2) do
-              None -> None
-              Some((m, r3)) -> do
-                let offset = sign * (h * 3600 + m * 60)
-                Some((fixed_zone_hm(sign * h, m), r3))
-              end
-              end
+              else None end
             end
+          end
           end
         end end
       end end
@@ -574,7 +573,9 @@ mod DateTime do
 
   Bare UTC instants (no offset suffix) parse as UTC.  The `T`/space
   separator is required.  Offsets may use `:` (ISO form) or the compact
-  `+HHMM` form.  Civil fields are range-validated.
+  `+HHMM` form.  Civil fields are range-validated, as is the offset
+  itself: an hour outside `[0, 24)` or a minute outside `[0, 60)`
+  (e.g. `"+01:60"`) is an `Err`, not a panic.
   """
   fn parse_offset(s : String) : Result(LocalDateTime, String) do
     if string_byte_length(s) < 19 do
