@@ -13,6 +13,11 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **A `let` bound to an `if` carries both arms' facts forward.**
+  `let c = if x < 1 do 1 else x end` now discharges a downstream `{Int | _ > 0}`
+  contract: the checker records the case split rather than dropping the
+  binding.
+
 - **`pmap_threshold()` carries the contract `{Int | _ > 0}`.** The three
   `List.pmap`/`pfilter`/`preduce` call sites that pass it to `chunks` are now
   proved rather than skipped, and the refinement checker can propagate return

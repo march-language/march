@@ -13173,6 +13173,103 @@ let audit_flag_verdict_invariance name src =
           Alcotest.(check string) "stderr, minus the coverage-audit block"
             (strip_audit_lines err_off) (strip_audit_lines err_on)))
 
+(* An `if`-shaped `let` RHS pushes a DISJUNCTION.
+
+   `let c = if x < 1 do 1 else x end` makes `c` at least 1 whichever arm ran,
+   but a flat `c == rhs` cannot say so — the value depends on the guard.  The
+   fact pushed is `(g && c == 1) || (not g && c == x)`.  This is the one
+   pure local-value-flow site in the whole stdlib (`stdlib/list.march`'s
+   `csize2`, per specs/progress/2026-09-16-refine-skip-census.md), which is
+   also the honest reason this phase is small.
+
+   These use [typed_ledger]: admitting a BARE VARIABLE arm requires the
+   typechecker's span table to confirm the binder is `Int`, and every other
+   ledger helper leaves that table out. *)
+let let_if_suite =
+  [ gated "an if-shaped let RHS discharges a bound both arms establish" (fun () ->
+        (* RED before the arm existed: 0 proved / 1 skipped
+           (unconstrained-subject on `c`). *)
+        let proved, violated, skipped, _rs =
+          typed_ledger
+            {|mod LI1 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn go(x : Int) : Int do
+    let c = if x < 1 do 1 else x end
+    pos(c)
+  end
+end|}
+        in
+        Alcotest.(check (triple int int int)) "proved" (1, 0, 0)
+          (proved, violated, skipped));
+
+    (* The disjunction must be a real case split, not a claim that the value
+       is whichever arm the checker likes: an arm that VIOLATES the bound must
+       keep the obligation from proving. *)
+    gated "an if-shaped RHS with one bad arm does not prove" (fun () ->
+        let proved, _violated, _skipped, _rs =
+          typed_ledger
+            {|mod LI2 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn go(x : Int) : Int do
+    let c = if x < 1 do 0 else x end
+    pos(c)
+  end
+end|}
+        in
+        Alcotest.(check int) "not proved" 0 proved);
+
+    (* The guard carries the weight in the else-arm: without it, `c == x`
+       says nothing, so this is the case that distinguishes pushing the
+       disjunction from pushing two bare equalities. *)
+    gated "the guard is what makes the variable arm usable" (fun () ->
+        let proved, _v, skipped, rs =
+          typed_ledger
+            {|mod LI3 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn go(x : Int) : Int do
+    let c = if x > 5 do x else 1 end
+    pos(c)
+  end
+end|}
+        in
+        Alcotest.(check (pair int int)) "proved" (1, 0) (proved, skipped);
+        Alcotest.(check (list string)) "no skips" [] rs);
+
+    (* A self-referential arm must not be pushed, for the same reason a flat
+       `let k = k - 100` is not: both occurrences resolve to one constant. *)
+    gated "a self-mentioning if-shaped RHS pushes nothing" (fun () ->
+        let proved, _v, _s, _rs =
+          typed_ledger
+            {|mod LI4 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn go(x : Int) : Int do
+    let c = 7
+    let c = if x < 1 do 1 else c end
+    pos(c)
+  end
+end|}
+        in
+        Alcotest.(check int) "not proved from a retired fact" 0 proved);
+
+    (* A non-Int arm stays excluded: aliasing an ADT-typed name at the integer
+       sort is what makes the sort-conflict gate drop the WHOLE VC, unrelated
+       obligations included (the reason [let_equality_rhs] excludes a bare
+       variable in the first place).  The obligation on `t` must still be
+       DECIDED as a skip, and `sort-conflict` must not appear. *)
+    gated "a datatype-typed arm is not aliased into the integer sort" (fun () ->
+        let _p, _v, _s, rs =
+          typed_ledger
+            {|mod LI5 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn go(o : Option(Int), p : Option(Int), k : Int) : Int do
+    let u = if k < 1 do o else p end
+    pos(k)
+  end
+end|}
+        in
+        Alcotest.(check bool) "no sort-conflict" false (List.mem "sort-conflict" rs))
+  ]
+
 (* Return contracts on builtins ([Refine_encode.builtin_ret_refinements]).
 
    A builtin has no [fn_def], so before 2026-09-16 `let t = pmap_threshold()`
@@ -16675,6 +16772,7 @@ let () =
       ("audit-flag", audit_flag_suite);
       ("report-sites", report_sites_suite);
       ("builtin-contract", builtin_contract_suite);
+      ("let-if", let_if_suite);
       ("audit-baseline", audit_baseline_suite);
       ("const-fn-predicate", const_fn_suite);
       ("unobliged-assume", unobliged_assume_suite);
