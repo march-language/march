@@ -184,6 +184,9 @@ let all_stdlib_decls =
     "cluster.march";
     "rrb_vec.march";
     "parallel.march";
+    (* Loaded last: datetime.march's Date/Time/Tz constructors must not steal
+       bare-name lookups from modules loaded before it. *)
+    "datetime.march";
   ] in
   lazy (List.concat_map load_stdlib_decls files)
 
@@ -339,7 +342,6 @@ let known_unregistered_stdlib_test_files = [
   "test_cli.march";
   "test_csv.march";
   "test_dataframe.march";
-  "test_datetime.march";
   "test_decimal.march";
   "test_derive_json.march";
   "test_derive_json_multi.march";
@@ -474,6 +476,10 @@ let () =
     ("config", [
       Alcotest.test_case "Config module"
         `Quick (run_stdlib_test "test_config.march" "TestConfig");
+    ]);
+    ("datetime", [
+      Alcotest.test_case "DateTime module"
+        `Quick (run_stdlib_test "test_datetime.march" "TestDateTime");
     ]);
     ("hash_map", [
       Alcotest.test_case "HashMap module"
