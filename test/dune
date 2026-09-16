@@ -5985,6 +5985,38 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/node_send_typed_loopback.expected native_node_send_typed_loopback.out)))
 
+; ── @[remote] actor: the generated dispatch routes a typed delivery to its handler ──
+; Both backends (no sockets): specs/progress/2026-09-15-remote-actor-dispatch.md.
+(rule
+ (targets native_remote_actor_dispatch native_remote_actor_dispatch.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/remote_actor_dispatch.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_remote_actor_dispatch
+        native/remote_actor_dispatch.march)
+   (with-stdout-to native_remote_actor_dispatch.out
+        (system "./native_remote_actor_dispatch")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/remote_actor_dispatch.expected native_remote_actor_dispatch.out)))
+
+(rule
+ (targets interp_remote_actor_dispatch.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/remote_actor_dispatch.march))
+ (action
+  (with-stdout-to interp_remote_actor_dispatch.out
+    (run %{exe:../bin/main.exe} native/remote_actor_dispatch.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/remote_actor_dispatch.expected interp_remote_actor_dispatch.out)))
+
 ; ── NodeQueue.BlockSender: the caller blocks until credit admits the frame ──
 (rule
  (targets native_block_sender_loopback native_block_sender_loopback.out)
@@ -8672,6 +8704,11 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_set.march))
  (action (run %{exe:../bin/main.exe} test stdlib/test_set.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_sorted_set.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_sorted_set.march)))
 
 (rule
  (alias runtest)

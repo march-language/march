@@ -360,6 +360,7 @@ and actor_def = {
   actor_compat   : string;                     (** @compat policy: "full" | "forward" | "any" *)
   actor_invariant : expr option;               (** @invariant predicate, if any *)
   actor_mailbox  : (int * int) option;         (** `mailbox N policy`: (limit, policy int) *)
+  actor_remote   : bool;                       (** `@[remote]`: generate `<Actor>_Remote.dispatch` (Desugar_remote) *)
 }
 
 and actor_handler = {

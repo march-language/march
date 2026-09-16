@@ -5095,19 +5095,22 @@ end|} in
       Node(l, _, r) -> 1 + size(l) + size(r)
     end
   end
-  fn hidden(k : Int) : Int do k end
-  fn mk() : {Tree | size(_) == 1} do Node(Leaf, hidden(1), Leaf) end
+  fn hidden(k : Int) : Tree do Leaf end
+  fn mk() : {Tree | size(_) == 1} do Node(Leaf, 1, hidden(1)) end
 end|} in
         Alcotest.(check (list string)) "slug" [ "unreflectable-subject" ] (skip_reasons src);
         let details = skip_reason_details src in
-        (* [body] at the filing site is the WHOLE constructor-literal tail
-           (`Node(Leaf, hidden(), Leaf)`), not just its opaque field -- same
+        (* The opaque field is a DATATYPE (a call with no contract): an opaque
+           Int payload has reflected as an unconstrained constant since plan
+           step 4.1, which proves this size contract instead of skipping it.
+           [body] at the filing site is the WHOLE constructor-literal tail
+           (`Node(Leaf, 1, hidden(1))`), not just its opaque field -- same
            granularity finding 1 asked for at the sibling site (there too the
            record-literal reproducer named the whole tail, `v.name == "a"`,
            not an isolated field). Still names `hidden()` as a substring of
            that tail, which is enough to point a reader at the actual cause. *)
         Alcotest.(check bool) "names the tail as a return expression, including `hidden()`" true
-          (List.exists (fun d -> contains d "the return expression `Node(Leaf, hidden(1), Leaf)`") details);
+          (List.exists (fun d -> contains d "the return expression `Node(Leaf, 1, hidden(1))`") details);
         Alcotest.(check bool) "does not blame the (reflectable) measure predicate" false
           (List.exists (fun d -> contains d "has no SMT translation") details))
   ]
@@ -12155,7 +12158,7 @@ module Audit_fixture = struct
         actor_init = A.ELet (init_binding, dummy);
         actor_handlers = [ { A.ah_msg = nm "Bump"; ah_params = [ actor_param ]; ah_body = A.ELit (A.LitInt 0, dummy) } ];
         actor_supervise = Some supervise_cfg;
-        actor_mailbox = None;
+        actor_mailbox = None; actor_remote = false;
         actor_compat = "full";
         actor_invariant = Some (A.EAnnot (A.ELit (A.LitBool true, dummy), refine_or_plain 33 int_ty, dummy)) }
     in
@@ -15425,6 +15428,214 @@ let list_structure_suite =
   fn mid(xs : List(Int)) : {List(Int) | elts(_) == elts(xs)} do base(xs) end
   fn base(xs : List(Int)) : {List(Int) | elts(_) == elts(xs)} do xs end|}))) ]
 
+(* ── Cardinality by ground instantiation (plan steps 3.1 to 3.3) ─────────
+   Each accept case is RED before step 3.1: `card` was not vocabulary, so
+   every predicate here drew the unrecognised-predicate warning and checked
+   nothing.  `Set`/`Map` are restated inline, as in [set_suite]; the spellings
+   match stdlib/set.march and stdlib/map.march, and the runtime witnesses in
+   test/stdlib/test_set.march and test_map.march keep them honest. *)
+let card_suite =
+  let m body = "mod C do\n" ^ body ^ "\nend\n" in
+  let stubs =
+    "  mod Set do\n\
+    \    type Set(a) = HamtSet(Int)\n\
+    \    @[assume]\n\
+    \    fn empty() : {Set(a) | elts(_) == empty} do HamtSet(0) end\n\
+    \    @[assume]\n\
+    \    fn contains(s, elem, cmp) : {Bool | _ == member(elem, elts(s))} do true end\n\
+    \    @[assume]\n\
+    \    fn insert(s, elem, cmp) : {Set(a) | elts(_) == union(elts(s), singleton(elem))} do s end\n\
+    \    @[assume]\n\
+    \    fn remove(s, elem, cmp) : {Set(a) | elts(_) == diff(elts(s), singleton(elem))} do s end\n\
+    \    @[assume]\n\
+    \    fn size(s) : {Int | _ == card(elts(s))} do 0 end\n\
+    \  end\n\
+    \  mod Map do\n\
+    \    type Map(k, v) = HamtMap(Int)\n\
+    \    @[assume]\n\
+    \    fn empty() : {Map(k, v) | keys(_) == empty} do HamtMap(0) end\n\
+    \    @[assume]\n\
+    \    fn insert(m, key, value, cmp) : {Map(k, v) | keys(_) == union(keys(m), singleton(key))} do m end\n\
+    \    @[assume]\n\
+    \    fn size(m) : {Int | _ == card(keys(m))} do 0 end\n\
+    \  end\n"
+  in
+  [ gated "card over list literals, beside len, and from membership" (fun () ->
+        (* proved: [7, 7] has one element; any list's elements <= its length; a
+           list with a member is non-empty.  violated: [1, 2] is not a one-element
+           set; Nil has no element. *)
+        Alcotest.(check (triple int int int)) "ledger" (3, 2, 0)
+          (ledger_counts3 (m {|  fn need1(xs : {List(Int) | card(elts(_)) == 1}) : Int do 0 end
+  fn ok() : Int do need1([7, 7]) end
+  fn bad() : Int do need1([1, 2]) end
+  fn need_le(xs : {List(Int) | card(elts(_)) <= len(_)}) : Int do 0 end
+  fn any_list(ys : List(Int)) : Int do need_le(ys) end
+  fn need_pos(xs : {List(Int) | card(elts(_)) > 0}) : Int do 0 end
+  fn nonempty(ys : {List(Int) | member(3, elts(_))}) : Int do need_pos(ys) end
+  fn empty_bad() : Int do need_pos(Nil) end
+  fn sub_le(a : List(Int), b : {List(Int) | subset(elts(a), elts(_))}, c : {List(Int) | card(elts(_)) > card(elts(b))}) : Int do 0 end|})));
+
+    gated "a subset has no more elements than its superset" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (1, 0, 0)
+          (ledger_counts3
+             (m "  fn need_le(a : List(Int), b : {List(Int) | card(elts(_)) <= card(elts(a))}) : Int do 0 end\n\
+                 \  fn sub(a : List(Int), b : {List(Int) | subset(elts(_), elts(a))}) : Int do need_le(a, b) end")));
+
+    gated "Set.size and Map.size carry card through insert and remove" (fun () ->
+        (* proved: one insert into empty has size 1; inserting a present element
+           keeps the size; remove does not grow it; the same for Map keys.
+           violated: one insert into empty does not have size 2. *)
+        Alcotest.(check (triple int int int)) "ledger" (4, 1, 0)
+          (ledger_counts3
+             (m (stubs ^ {|  fn lt(a : Int, b : Int) : Bool do a < b end
+  fn need1(n : {Int | _ == 1}) : Int do 0 end
+  fn need2(n : {Int | _ == 2}) : Int do 0 end
+  fn need_same(a : Int, b : {Int | _ == a}) : Int do 0 end
+  fn need_le(a : Int, b : {Int | _ <= a}) : Int do 0 end
+  fn one(x : Int) : Int do need1(Set.size(Set.insert(Set.empty(), x, lt))) end
+  fn two_bad(x : Int) : Int do need2(Set.size(Set.insert(Set.empty(), x, lt))) end
+  fn present(s : Set(Int), x : Int) : Int do
+    if Set.contains(s, x, lt) do need_same(Set.size(s), Set.size(Set.insert(s, x, lt))) else 0 end
+  end
+  fn shrink(s : Set(Int), x : Int) : Int do need_le(Set.size(s), Set.size(Set.remove(s, x, lt))) end
+  fn keys_one(k : Int) : Int do need1(Map.size(Map.insert(Map.empty(), k, "v", lt))) end|}))));
+
+    Alcotest.test_case "card applied to a non-set is not a set operation" `Quick (fun () ->
+        let warns = refine_warnings (m "  fn f(x : {Int | card(3) > 0}) : Int do 0 end") in
+        Alcotest.(check bool) "unrecognised-shape warning" true
+          (List.exists
+             (fun w ->
+               let needle = "not a well-formed set operation" in
+               let n = String.length needle and h = String.length w in
+               let rec at i = i + n <= h && (String.sub w i n = needle || at (i + 1)) in
+               at 0)
+             warns)) ]
+
+(* ── An AVL tree proved by induction (plan steps 4.1 to 4.4) ─────────────
+   A user copy of `stdlib/sorted_set.march`'s tree.  Each proof needs every
+   Phase 4 checker step: `make_node` a constructor behind `let`s (4.1),
+   `rotate_*` a nested pattern and a catch-all arm (4.3) over callee contracts
+   (4.2), `balance` calls nested in calls, and `tree_insert` the comparator law
+   read from a guard (4.4).  All of them were skipped before step 4.1. *)
+let avl_suite =
+  let m body = "mod T do\n" ^ body ^ "\nend\n" in
+  let avl = {|  type Tree(a) = Leaf | Node(Tree(a), a, Tree(a), Int)
+
+  @[measure]
+  fn tree_elts(t : Tree(a)) : Set(a) do
+    match t do
+      Leaf -> empty
+      Node(l, k, r, _) -> union(tree_elts(l), union(singleton(k), tree_elts(r)))
+    end
+  end
+
+  fn height(t : Tree(a)) : Int do
+    match t do
+    Leaf -> 0
+    Node(_, _, _, h) -> h
+    end
+  end
+
+  fn make_node(l : Tree(a), k : a, r : Tree(a)) : {Tree(a) | tree_elts(_) == union(tree_elts(l), union(singleton(k), tree_elts(r)))} do
+    let lh = height(l)
+    let rh = height(r)
+    let h = if lh > rh do lh + 1 else rh + 1 end
+    Node(l, k, r, h)
+  end
+
+  fn rotate_right(t : Tree(a)) : {Tree(a) | tree_elts(_) == tree_elts(t)} do
+    match t do
+    Node(Node(ll, lk, lr, _), k, r, _) ->
+      let new_r = make_node(lr, k, r)
+      make_node(ll, lk, new_r)
+    _ -> t
+    end
+  end
+
+  fn rotate_left(t : Tree(a)) : {Tree(a) | tree_elts(_) == tree_elts(t)} do
+    match t do
+    Node(l, k, Node(rl, rk, rr, _), _) ->
+      let new_l = make_node(l, k, rl)
+      make_node(new_l, rk, rr)
+    _ -> t
+    end
+  end
+
+  fn bf(t : Tree(a)) : Int do
+    match t do
+    Leaf -> 0
+    Node(l, _, r, _) -> height(l) - height(r)
+    end
+  end
+
+  fn balance(t : Tree(a)) : {Tree(a) | tree_elts(_) == tree_elts(t)} do
+    match t do
+    Leaf -> Leaf
+    Node(l, k, r, _) ->
+      let b = height(l) - height(r)
+      if b > 1 do
+        if bf(l) < 0 do
+          rotate_right(make_node(rotate_left(l), k, r))
+        else
+          rotate_right(t)
+        end
+      else
+        if b < -1 do
+          if bf(r) > 0 do
+            rotate_left(make_node(l, k, rotate_right(r)))
+          else
+            rotate_left(t)
+          end
+        else
+          make_node(l, k, r)
+        end
+      end
+    end
+  end
+
+  @[assume]
+  fn compare_by(cmp : a -> a -> Int, x : a, k : a) : {Int | (_ == 0) == (x == k)} do
+    cmp(x, k)
+  end
+
+  fn tree_insert(t : Tree(a), cmp : a -> a -> Int, x : a) : {Tree(a) | tree_elts(_) == union(tree_elts(t), singleton(x))} do
+    match t do
+    Leaf -> Node(Leaf, x, Leaf, 1)
+    Node(l, k, r, _) ->
+      let c = compare_by(cmp, x, k)
+      if c < 0 do
+        balance(make_node(tree_insert(l, cmp, x), k, r))
+      else
+        if c > 0 do
+          balance(make_node(l, k, tree_insert(r, cmp, x)))
+        else
+          t
+        end
+      end
+    end
+  end|} in
+  let replace ~sub ~by str =
+    let n = String.length sub in
+    let rec go i = if i + n > String.length str then str
+      else if String.sub str i n = sub then String.sub str 0 i ^ by ^ String.sub str (i + n) (String.length str - i - n)
+      else go (i + 1) in
+    go 0
+  in
+  [ gated "make_node, rotations, balance and tree_insert are proved" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (5, 0, 0) (ledger_counts3 (m avl)));
+
+    gated "without the comparator law tree_insert is not proved" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (4, 0, 1)
+          (ledger_counts3
+             (m (replace ~sub:"let c = compare_by(cmp, x, k)" ~by:"let c = cmp(x, k)" avl))));
+
+    gated "a false insert contract is refuted, not proved" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (4, 1, 0)
+          (ledger_counts3
+             (m (replace
+                   ~sub:"{Tree(a) | tree_elts(_) == union(tree_elts(t), singleton(x))}"
+                   ~by:"{Tree(a) | tree_elts(_) == tree_elts(t)}" avl)))) ]
+
 (* ── The single-element-type rule (plan step 1.5) ─────────────────────────
    A set predicate whose operands have known, different element types is an
    error at the predicate; before the rule it was a silent sort-conflict skip.
@@ -16092,7 +16303,15 @@ let measure_definition_suite =
             \  fn main() : Int do need(S(Z)) end\nend\n"
         in
         Alcotest.(check bool) "recursive depth: declare-fun" true (contains q "(declare-fun depth ");
-        Alcotest.(check bool) "recursive depth: forall axiom" true (contains q "forall");
+        (* Quantified axioms are attached per query since plan step 4.5, so
+           they live beside the preamble, keyed by the measure symbol. *)
+        let depth_axioms =
+          match Hashtbl.find_opt March_refinecheck.Refine_encode.measure_axioms_by_symbol "depth" with
+          | Some b -> Buffer.contents b
+          | None -> ""
+        in
+        Alcotest.(check bool) "recursive depth: forall axiom" true (contains depth_axioms "forall");
+        Alcotest.(check bool) "the global preamble carries no quantifier" false (contains q "forall");
         Alcotest.(check bool) "recursive depth: no define-fun" false (contains q "(define-fun depth ")) ]
 
 let () =
@@ -16196,6 +16415,8 @@ let () =
       ("typed-instances", typed_instances_suite);
       ("single-element-type", single_element_type_suite);
       ("list-structure", list_structure_suite);
+      ("cardinality", card_suite);
+      ("avl-induction", avl_suite);
       ("array-bounds-contracts", array_bounds_suite);
       ("measure-definition", measure_definition_suite);
       ("caller-sorts", caller_sorts_suite);

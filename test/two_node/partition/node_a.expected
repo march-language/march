@@ -1,0 +1,5 @@
+node-a: done
+node-a: first ack from node-b
+node-a: leader after merge -> node-b
+node-a: node-b Alive again
+node-a: node-b Dead; registered leader -> node-a

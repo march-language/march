@@ -1,0 +1,39 @@
+# Image for scripts/two-node-docker.sh: the two-node failure-semantics
+# scenarios on Linux from any host (macOS included), with iptables for the
+# `partition` scenario. The ubuntu-24.04 CI toolchain (ci/Dockerfile.ubuntu)
+# plus iptables, WITHOUT the source: the checkout is bind-mounted at run time
+# and built into a named volume, so an edit needs no image rebuild.
+#
+#   docker build -f ci/Dockerfile.two-node -t march-two-node .
+#   scripts/two-node-docker.sh partition        # or: --all
+
+FROM ocaml/opam:ubuntu-24.04
+
+USER root
+
+RUN apt-get update && apt-get install -y \
+      build-essential clang git pkg-config curl \
+      libgmp-dev libssl-dev zlib1g-dev \
+      libbrotli-dev libzstd-dev \
+      llvm-dev iptables \
+   && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3 \
+ && cd /tmp/blake3/c \
+ && gcc -O2 -shared -fPIC -DBLAKE3_USE_NEON=0 -o libblake3.so \
+      blake3.c blake3_dispatch.c blake3_portable.c \
+ && cp libblake3.so /usr/local/lib/libblake3.so \
+ && cp blake3.h /usr/local/include/blake3.h \
+ && ldconfig \
+ && rm -rf /tmp/blake3
+
+USER opam
+RUN opam switch create 5.3.0 ocaml-base-compiler.5.3.0 && opam update
+
+# Only the package manifests: the dependency layer is cached until they change.
+WORKDIR /deps
+COPY --chown=opam:opam dune-project march.opam forge.opam march-lsp.opam ./
+RUN opam exec -- opam install --deps-only -y ./march.opam ./forge.opam
+
+# iptables needs root; the scenarios run as root inside the container.
+USER root

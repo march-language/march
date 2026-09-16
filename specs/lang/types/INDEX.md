@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t141 accept, t01–t241 reject) <!-- doc-lint:ignore-count: accept/reject share one numbering pool with no reuse across sides, so the highest id on each side is NOT that side's file count (123 accept, 121 reject; see the Result line below) -->
+# Typing corpus index (t01–t141 accept, t01–t243 reject) <!-- doc-lint:ignore-count: accept/reject share one numbering pool with no reuse across sides, so the highest id on each side is NOT that side's file count (123 accept, 121 reject; see the Result line below) -->
 
 **Two-repo rule.** This corpus is also checked by
 [march-language/march-lean](https://github.com/march-language/march-lean), an
@@ -248,7 +248,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 360/360: 157 accept, 203
+Exit 0 iff every program behaves as declared (currently 362/362: 157 accept, 205
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -598,7 +598,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t178_letstar_no_flat_map` | **`let*` (generalized monadic bind, 2026-08-14, `specs/lang/let-star-generalized-bind.md`): no matching `flat_map`.** `let*` resolves `<Type>.flat_map` from the RHS's inferred type; a type with no `flat_map` in a same-named module (here a bare `Widget`) is a clear, actionable error naming exactly what to define, not a crash or a generic "unbound variable" | ``let*` needs `Widget.flat_map`, but it doesn't exist.` |
 | `t179_letstar_last_expr` | **`let*`: trailing binder rejected, mirrors `let?`'s `t67`/`r05`.** A `let*` with an empty continuation can never unify against `M(b)`, so it is caught with the same "cannot be the last expression in a block" shape `let?` already has, generalized to name the RHS's own type instead of hardcoding `Result` | ``let*` cannot be the last expression in a block.` |
 
-**Result: 360 / 360 (157 accept, 203 reject).** `reject/t169`–`t170`
+**Result: 362 / 362 (157 accept, 205 reject).** `reject/t169`–`t170`
 (`NativeF32Arr`/`NativeU8Arr` non-sendable in actor messages, added
 2026-08-09 alongside the narrow-element-width work) are not yet written up
 as their own table entries; they mirror the existing `t164`/`t165` pattern
@@ -667,6 +667,8 @@ their own table entries.
 | `t239_node_send_no_codec` | **The typed remote send's codec contract (2026-09-15, `stdlib/node.march`):** `Node.send(peer, to, msg)` with a `msg` type that does not `derive Json` is refused at the CALL SITE, naming the type — a deferred, fail-closed sweep over recorded sites (`Typecheck_caps.check_node_send_sites`), not the run-time `to_json: cannot determine type` | `needs a JSON codec for `Ping`` |
 | `t240_json_derive_pid_field` | **`derive Json` refuses a type with a local `Pid` anywhere in it (2026-09-15):** a pid indexes THIS node's actor table, so a codec over it is a wrong-delivery route on any other node; refused at the declaration like a `Cap` field, which is what makes `Node.send` of such a message a compile-time refusal | `` `Pid` cannot be serialized `` |
 | `t241_node_enqueue_no_codec` | **The typed send through a NodeQueue keeps the codec contract (2026-09-15, `stdlib/node.march`):** `Node.enqueue(q, to, msg, policy)` records its site in the same deferred sweep as `Node.send` (the message is the third argument of both), so a `msg` type without `derive Json` is refused at the call site, the diagnostic naming `Node.enqueue` | ``` `Node.enqueue` needs a JSON codec for `Ping` ``` |
+| `t242_remote_actor_handler_no_codec` | **`@[remote]` on an actor keeps the codec contract (2026-09-15, `lib/desugar/desugar_remote.ml`):** the generated dispatch tests each routable handler's type with `Node.accepts`, recorded in the same deferred sweep as `Node.send`, so a handler whose parameter type does not `derive Json` is refused, the diagnostic naming `@[remote] dispatch` and the type | ``` `@[remote] dispatch` needs a JSON codec for `Hit` ``` |
+| `t243_remote_actor_no_routable_handler` | **An `@[remote]` actor must have a routable handler (2026-09-15):** one taking exactly one parameter annotated with a declared, non-builtin type; an actor with none (`Set(n : Int)`, `Add(a, b)`, `Reset()`) is refused at desugar rather than given a dispatch that accepts nothing | `has no handler a remote message can reach` |
 
 ## Coverage notes (intentionally absent programs, and why)
 
