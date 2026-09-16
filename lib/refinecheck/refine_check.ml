@@ -2228,6 +2228,8 @@ let register_types_for_check (decls : A.decl list) : unit =
   Hashtbl.clear measure_base_cases;
   Hashtbl.clear measure_scalar_field_dep;
   Hashtbl.clear measure_preamble_sorts;
+  Hashtbl.reset adt_decl_paths;
+  Hashtbl.reset adt_canonical;
   registered_measures := [];
   measure_nonneg := [];
   Hashtbl.clear const_fns;
@@ -2238,12 +2240,27 @@ let register_types_for_check (decls : A.decl list) : unit =
   type_preamble := "";
   register_builtin_adts ();
   register_adt_names decls;
+  finalize_adt_canonical ();
   register_field_sorts decls;
   build_type_preamble ()
 
 (** Entry point: check refinement preconditions across [m], emitting
     diagnostics into [errctx].  [root] is the project root for the VC cache. *)
-(* Functions annotated `@[measure]` as (bare name, fn_def). *)
+(* Functions annotated `@[measure]` as (bare name, fn_def).
+
+   Deliberately NOT module-qualified, unlike [register_adt_names]'s ADT
+   sorts (see [adt_sort_name]'s comment): qualifying an ambiguous measure
+   name to a single "preferred declarant" was tried and reverted — every
+   call site sharing the bare spelling, INCLUDING THE LOSING DECLARANT'S OWN
+   RECURSIVE CALLS, silently resolved to the winner's axioms, which can
+   attach a heavy quantified preamble to a query that has nothing to do
+   with it and made z3 grind for minutes on a small fixture (a
+   global-preamble-attachment / z3-perf hazard, exactly the class of
+   regression the per-query axiom design elsewhere in this file exists to
+   avoid — see [measure_axioms_by_symbol]'s own comment). Excluding every
+   duplicate-named measure from axiomatisation outright (below, under
+   [measure_axioms]) is the variant proven safe so far; see
+   specs/progress/2026-09-15-refine-sort-and-measure-names-unqualified.md. *)
 let rec collect_measure_fns (decls : A.decl list) : (string * A.fn_def) list =
   List.concat_map
     (function
@@ -3005,6 +3022,8 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   Hashtbl.reset measure_base_cases;
   Hashtbl.reset measure_scalar_field_dep;
   Hashtbl.reset measure_preamble_sorts;
+  Hashtbl.reset adt_decl_paths;
+  Hashtbl.reset adt_canonical;
   measure_preamble := "";
   global_instance_names := [];
   Hashtbl.reset measure_axioms_by_symbol;
@@ -3023,6 +3042,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
      and produced a warning that is simply false. *)
   register_builtin_adts ();
   register_adt_names m.A.mod_decls;
+  finalize_adt_canonical ();
   register_field_sorts m.A.mod_decls;
   (* Zero-argument constant functions a predicate may name (`_ < size_x()`).
      Independent of [measure_axioms]: a constant folds to a literal, no axiom
@@ -3122,7 +3142,15 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
        name (a user's and a stdlib module's) would each emit a `declare-fun`
        for it, and z3 rejects every query that attaches the preamble.  Neither
        is axiomatised; their predicates skip, which only loses proofs
-       (specs/todos/2026-09-15-refine-sort-and-measure-names-unqualified.md). *)
+       (specs/todos/2026-09-15-refine-sort-and-measure-names-unqualified.md —
+       a global-preamble-attachment / z3-perf hazard was found when a
+       "resolve the ambiguous bare name to one preferred declarant" scheme
+       was tried instead: EVERY unrelated call site sharing the bare name,
+       including the LOSING declarant's own internal recursive calls,
+       silently picked up the winner's axioms, which can attach a heavy
+       quantified preamble to queries that have nothing to do with it and
+       made z3 grind for minutes on a small fixture. Excluding both from
+       axiomatisation, as here, is the only variant proven safe so far). *)
     let mfns =
       List.filter
         (fun (name, _) -> List.length (List.filter (fun (n, _) -> n = name) mfns) = 1)

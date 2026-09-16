@@ -1259,8 +1259,116 @@ let measure_preamble_sorts : (string, unit) Hashtbl.t = Hashtbl.create 8
    `Array`, `Seq`, `Set`, …); keeping our datatype sorts in a private `M_`
    namespace guarantees no user/builtin ADT name collides with a reserved one.
    [adt_ctors] / [SData] are keyed by this safe name; constructors are not
-   renamed. *)
-let adt_sort_name (march_name : string) : string = "M_" ^ march_name
+   renamed.
+
+   ── Module-qualification (2026-09-15, P2) ──────────────────────────────
+   A program sees the WHOLE stdlib merged into one decl list (the stdlib is
+   prepended by the driver), so two `type Tree` in two different `mod … do
+   end` blocks — or a user's own `type Tree` and a stdlib one — used to
+   collide on the bare key "M_Tree": whichever was registered LAST silently
+   clobbered the other's constructor list in [adt_ctors]/[adt_arity].
+
+   [register_adt_names] now records, per bare name, every (module path,
+   qualified key) pair it sees ([adt_decl_paths]), and stores each
+   declaration under its OWN qualified key ([adt_sort_name_at]) rather than
+   the bare one.  [finalize_adt_canonical], run once pass 1 completes,
+   decides what the bare name CANONICALLY denotes:
+
+     - exactly one declarant anywhere -> its data is (re-)filed under the
+       plain bare key too, and [adt_sort_name] keeps returning that bare
+       key — byte-for-byte what every existing non-colliding type/module got
+       before this change, so the overwhelming majority of the codebase
+       (every stdlib module that does not collide) is untouched.
+     - two or more declarants -> each keeps its OWN qualified key
+       (`M_<path>$<Name>`) and NO bare key is filed at all, so a stray
+       unqualified reference cannot come back with a random mix of two
+       ADTs' constructors again; [adt_sort_name] resolves the bare spelling
+       to a single PREFERRED declarant (the entry/top-level one, `path =
+       ""`, if there is one — the same "current module wins an ambiguous
+       name" convention the compiler already uses for ambiguous
+       constructors; otherwise the first one registered) for every caller
+       that does not carry its own module path.
+
+   This is deliberately not full lexical scope resolution (a reference
+   written INSIDE the losing module still resolves to the preferred
+   declarant, not to its own type) — see the discussion in
+   specs/progress/2026-09-15-refine-sort-and-measure-names-unqualified.md.
+   Misresolving a sort here can only turn a proof into a
+   [Sort_conflict]/`Exit` skip elsewhere in this file, never a false
+   "proved": every consumer of [adt_ctors] already treats a sort mismatch as
+   a reason to give up, not to guess. *)
+let adt_sort_name_at (path : string) (name : string) : string =
+  if path = "" then "M_" ^ name else Printf.sprintf "M_%s$%s" path name
+
+(* bare "M_<name>" -> every (module path, qualified key) registered under
+   that bare name, most-recently-registered first.  Populated by
+   [register_adt_names]; consumed (and then made moot) by
+   [finalize_adt_canonical]. *)
+let adt_decl_paths : (string, (string * string) list) Hashtbl.t = Hashtbl.create 32
+
+(* bare "M_<name>" -> the qualified key [adt_sort_name] should resolve it to,
+   when that bare name was ambiguous.  Only holds entries for AMBIGUOUS
+   names — an unambiguous name is filed under its own bare key directly (see
+   [finalize_adt_canonical]), so this table is empty for every program with
+   no colliding declarations, i.e. unchanged status quo. *)
+let adt_canonical : (string, string) Hashtbl.t = Hashtbl.create 8
+
+let adt_sort_name (march_name : string) : string =
+  let bare = "M_" ^ march_name in
+  match Hashtbl.find_opt adt_canonical bare with Some key -> key | None -> bare
+
+(* Finalize the bare-name -> qualified-key resolution once [register_adt_names]
+   (pass 1) has seen every declaration.  Must run before [register_field_sorts]
+   (pass 2) and before anything else calls [adt_sort_name], since pass 2's
+   cross-type field references and every later consumer read through it. *)
+let finalize_adt_canonical () : unit =
+  Hashtbl.reset adt_canonical;
+  Hashtbl.iter
+    (fun bare entries ->
+      let distinct =
+        List.sort_uniq compare (List.map fst entries) (* distinct module paths *)
+      in
+      match distinct with
+      | [] | [ _ ] -> (
+        (* Unambiguous: (re-)file the sole declarant's data under the plain
+           bare key too, so every existing bare-name consumer keeps working
+           unchanged. *)
+        match entries with
+        | (_, qualified) :: _ when qualified <> bare ->
+          (match Hashtbl.find_opt adt_ctors qualified with
+           | Some ctors ->
+             Hashtbl.replace adt_ctors bare ctors;
+             Hashtbl.remove adt_ctors qualified
+           | None -> ());
+          (match Hashtbl.find_opt adt_arity qualified with
+           | Some n ->
+             Hashtbl.replace adt_arity bare n;
+             Hashtbl.remove adt_arity qualified
+           | None -> ())
+        | _ -> ())
+      | _ ->
+        (* Ambiguous: every declarant keeps its own qualified key — already
+           stored there by [register_adt_names], EXCEPT a [path = ""]
+           declarant, whose qualified key ([adt_sort_name_at]) already IS
+           the bare one: its data lives at [bare] and must stay there.  Only
+           clear [bare] when no declarant sits at the top level (every
+           qualified key is then genuinely distinct from it) — clearing it
+           unconditionally deleted a real entry/top-level declarant's own
+           correctly-registered ctors/arity out from under it, which is
+           exactly the module-qualification bug this function exists to
+           fix, reintroduced one level up. *)
+        let entry_decl = List.find_opt (fun (p, _) -> p = "") entries in
+        if entry_decl = None then begin
+          Hashtbl.remove adt_ctors bare;
+          Hashtbl.remove adt_arity bare
+        end;
+        let preferred =
+          match entry_decl with
+          | Some (_, key) -> key
+          | None -> snd (List.nth entries (List.length entries - 1))
+        in
+        if preferred <> bare then Hashtbl.replace adt_canonical bare preferred)
+    adt_decl_paths
 
 (* The MEASURE-ONLY marker for a March ADT — see [meas_sort_prefix]. *)
 let meas_sort_name (march_name : string) : string =
@@ -1416,28 +1524,44 @@ let rec smt_sort_of_field ?(pnames : string list = []) (t : A.ty) : Smt.sort =
       Smt.SData (adt, List.init n arg)
   | _ -> Smt.sdata "Elem"
 
-(* Pass 1: register every ADT's constructor list (keyed by sort name). *)
-let rec register_adt_names (decls : A.decl list) : unit =
+(* Pass 1: register every ADT's constructor list (keyed by sort name).
+   [path] is the dotted module path of [decls]' immediate enclosing `mod`
+   ("" at the top of the compilation unit) — see the module-qualification
+   comment on [adt_sort_name]. Each declaration is filed under its OWN
+   qualified key; [finalize_adt_canonical] decides afterwards whether that
+   key also becomes the plain bare one. *)
+let rec register_adt_names ?(path : string = "") (decls : A.decl list) : unit =
+  let record_key (name : string) : string =
+    let bare = "M_" ^ name in
+    let key = adt_sort_name_at path name in
+    Hashtbl.replace adt_decl_paths bare
+      ((path, key) :: (try Hashtbl.find adt_decl_paths bare with Not_found -> []));
+    key
+  in
   List.iter
     (function
       | A.DType (_, name, tparams, A.TDVariant variants, _)
       | A.DAlwaysLinearType (_, name, tparams, A.TDVariant variants, _) ->
-        Hashtbl.replace adt_ctors (adt_sort_name name.A.txt)
+        let key = record_key name.A.txt in
+        Hashtbl.replace adt_ctors key
           (List.map (fun (v : A.variant) -> v.A.var_name.A.txt) variants);
-        Hashtbl.replace adt_arity (adt_sort_name name.A.txt) (List.length tparams)
+        Hashtbl.replace adt_arity key (List.length tparams)
       | A.DType (_, name, tparams, A.TDRecord _, _)
       | A.DAlwaysLinearType (_, name, tparams, A.TDRecord _, _) ->
-        Hashtbl.replace adt_ctors (adt_sort_name name.A.txt) [ name.A.txt ];
-        Hashtbl.replace adt_arity (adt_sort_name name.A.txt) (List.length tparams)
+        let key = record_key name.A.txt in
+        Hashtbl.replace adt_ctors key [ name.A.txt ];
+        Hashtbl.replace adt_arity key (List.length tparams)
       (* An actor's `state { ... }` is a record in every respect the checker
          cares about — named fields, one constructor — registered under the
          actor's own name so `state.value` in a handler and `{ state with
          value: ... }` reflect through the same selectors a record does
          (plan phase 4: actor state as an inductive invariant). *)
       | A.DActor (_, name, _, _) ->
-        Hashtbl.replace adt_ctors (adt_sort_name name.A.txt) [ name.A.txt ];
-        Hashtbl.replace adt_arity (adt_sort_name name.A.txt) 0
-      | A.DMod (_, _, ds, _) -> register_adt_names ds
+        let key = record_key name.A.txt in
+        Hashtbl.replace adt_ctors key [ name.A.txt ];
+        Hashtbl.replace adt_arity key 0
+      | A.DMod (n, _, ds, _) ->
+        register_adt_names ~path:(if path = "" then n.A.txt else path ^ "." ^ n.A.txt) ds
       | _ -> ())
     decls
 

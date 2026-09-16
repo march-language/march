@@ -345,6 +345,16 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Refinement checker: a user datatype colliding by bare name with a stdlib
+  module's own no longer clobbers it.** `stdlib/ordered_map.march` declares
+  `type Tree`; a user `type Tree` joined the same unqualified sort before
+  this fix, and whichever was registered last silently overwrote the
+  other's constructors. Datatype sort names are now qualified by declaring
+  module when two or more collide, resolving to the entry/top-level
+  declarant for an unqualified reference from the same top-level code.
+  `@[measure]` names are not (an attempt regressed a proof's z3 time from
+  instant to minutes); a stdlib rename that dodges a measure-name collision
+  (`SortedSet`'s `sorted_set_elts`) is unaffected.
 - **`SortedSet.from_list`, `union`, `intersect` and `difference` work.** All
   four passed their arguments to `List.fold_left` in the wrong order with a
   curried callback, so `SortedSet.from_list([5, 3, 9, 3, 1], cmp)` panicked

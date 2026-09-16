@@ -16314,6 +16314,107 @@ let measure_definition_suite =
         Alcotest.(check bool) "the global preamble carries no quantifier" false (contains q "forall");
         Alcotest.(check bool) "recursive depth: no define-fun" false (contains q "(define-fun depth ")) ]
 
+
+(* ── Module-qualified datatype sort names (P2, 2026-09-15) ─────────────────
+   specs/progress/2026-09-15-refine-sort-and-measure-names-unqualified.md.
+   A user's own top-level `type Tree` collides in bare name with the real
+   `stdlib/ordered_map.march`'s own `Tree(k, v) = Leaf | Node(...)`,
+   prepended exactly as the production driver prepends the whole stdlib into
+   every module it checks — the actual historical shape of this bug (two
+   `type Tree` in different `mod … do end` blocks; `OrderedMap`'s own is
+   unrelated to and unchanged by this fixture).  Before the fix,
+   [register_adt_names] files every declaration under the bare, unqualified
+   `M_Tree` unconditionally, so whichever declarant is registered LAST wins
+   outright — here `OrderedMap`'s, since it is merged in AFTER the fixture's
+   own decls (matching how a real multi-file program's stdlib-then-user
+   ordering would go) — and the user's own `tree_elts` measure, checked
+   against the WRONG (`OrderedMap`'s) constructor list, is no longer total:
+   a hard error, not a skip.  After the fix each declarant keeps its own
+   qualified key, the user's own top-level (`path = ""`) `Tree` is preferred
+   for a bare, unqualified reference in the SAME top-level code (the
+   "current module wins an ambiguous name" convention the compiler already
+   uses for ambiguous constructors), and the ACCEPT witness proves while the
+   REJECT witness is refuted (not merely skipped — the same ledger
+   discipline [arm_exclusion_nested_suite] uses to catch a false "provable"
+   turning into a false [Violated] or vice versa).
+
+   Measure NAMES are deliberately left unqualified by this fix (see
+   [collect_measure_fns]'s own comment on the perf hazard that reverted an
+   earlier attempt), so this fixture's `tree_elts` does not collide with
+   anything else by name — only the ADT SORT collision above is exercised. *)
+let stdlib_ordered_map_mod : (March_ast.Ast.decl * string) Lazy.t =
+  lazy
+    (let m, path = load_stdlib_march "ordered_map.march" in
+     ( March_ast.Ast.DMod
+         ( m.March_ast.Ast.mod_name, March_ast.Ast.Public,
+           m.March_ast.Ast.mod_decls, March_ast.Ast.dummy_span ),
+       path ))
+
+let ledger_counts3_with_ordered_map (src : string) : int * int * int =
+  March_refinecheck.Obligation.reset ();
+  let m = March_desugar.Desugar.desugar_module (parse src) in
+  let ommod, _path = Lazy.force stdlib_ordered_map_mod in
+  (* Appended AFTER the fixture's own decls (not prepended): the fixture's
+     own top-level `Tree` must be seen FIRST by [register_adt_names] so a
+     PRE-FIX build (naive, unqualified "last registered wins") gives the
+     collision to `OrderedMap` — the failure this witness exists to catch —
+     rather than accidentally leaving the fixture's own `Tree` intact by
+     sheer merge-order luck. *)
+  let m = { m with March_ast.Ast.mod_decls = m.March_ast.Ast.mod_decls @ [ ommod ] } in
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module ctx m;
+  let is_user_file f = f = "" || f = "<unknown>" in
+  List.fold_left
+    (fun (p, v, s) (o : March_refinecheck.Obligation.t) ->
+      if not (is_user_file o.March_refinecheck.Obligation.span.March_ast.Ast.file) then (p, v, s)
+      else
+        match o.March_refinecheck.Obligation.verdict with
+        | March_refinecheck.Obligation.Proved -> (p + 1, v, s)
+        | March_refinecheck.Obligation.Violated -> (p, v + 1, s)
+        | March_refinecheck.Obligation.Skipped _ -> (p, v, s + 1)
+        | _ -> (p, v, s))
+    (0, 0, 0) (March_refinecheck.Obligation.all ())
+
+let module_qualified_measure_and_sort_suite =
+  (* Parsed as `mod User do … end` only because the test-harness [parse]
+     entry point ([March_parser.Parser.module_]) requires some enclosing
+     `mod`; [ledger_counts3_with_ordered_map] takes `User`'s OWN decls
+     (`m.mod_decls`, not a `DMod` wrapping them) as the checked module's
+     top-level content — exactly path `""`, precisely what a real program's
+     own entry file's decls are (the driver never wraps them in a synthetic
+     `mod` either; see [list_length_is_stdlib]'s own comment on this). *)
+  let fixture ~pred =
+    String.concat "\n"
+      [ "mod User do";
+        "  type Tree = UTip | UBranch(Tree, Int, Tree)";
+        "";
+        "  @[measure]";
+        "  fn tree_elts(t : Tree) : Set(Int) do";
+        "    match t do";
+        "      UTip -> empty";
+        "      UBranch(l, x, r) -> union(union(tree_elts(l), singleton(x)), tree_elts(r))";
+        "    end";
+        "  end";
+        "";
+        Printf.sprintf "  fn probe() : {Tree | %s} do" pred;
+        "    UBranch(UTip, 3, UTip)";
+        "  end";
+        "end";
+        ""
+      ]
+  in
+  [ gated
+      "a user's own top-level Tree, colliding with the real stdlib OrderedMap.Tree \
+       once its whole stdlib is prepended, proves a literal member"
+      (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (1, 0, 0)
+          (ledger_counts3_with_ordered_map (fixture ~pred:"member(3, tree_elts(_))")));
+
+    gated "...and refutes a literal that is not a member, not merely skipping" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (0, 1, 0)
+          (ledger_counts3_with_ordered_map (fixture ~pred:"member(99, tree_elts(_))")));
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -16376,6 +16477,7 @@ let () =
       ("arm-exclusion-nested", arm_exclusion_nested_suite);
       ("measure-base-case-axiom", measure_base_case_axiom_suite);
       ("measure-scalar-field-warn", measure_scalar_field_suite);
+      ("module-qualified-measure-and-sort", module_qualified_measure_and_sort_suite);
       ("post-compose-closed", post_compose_closed_suite);
       ("post-compose-relational", post_compose_relational_suite);
       ("stdlib-nth-contract", stdlib_nth_contract_suite);
