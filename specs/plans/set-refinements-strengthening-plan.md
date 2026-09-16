@@ -240,7 +240,121 @@ necessary on the way:
 
 - The Phase 1 gates, including the full suite under z3 4.8.12.
 
-## 3. Later phases
+## 3. Phase 3 — cardinality by ground instantiation
 
-Phases 3 and 4 (ground cardinality, `SortedSet`) get their own step lists when
-Phase 2 lands; the design's §4 and §5 are the starting point.
+Design §4. Stacked on the Phase 2 branch (it reuses the per-query set
+declarations and callee contracts).
+
+### 3.1 Vocabulary and term
+
+- `card(s)` joins the set vocabulary: predicate-only, well-formed on one set
+  operand, an `empty` argument is the set literal.
+- `Smt.SetCard of sort * term` carries the element sort; it renders
+  `(card$<elem> s)`, and `set_preamble` declares one `card$<elem>` per element
+  sort a query uses, beside that sort's `define-sort`. `resolve_sorts` types
+  it (its operand is a set, its value an Int).
+
+### 3.2 Ground facts
+
+- Only for a query that mentions `card`, after sort resolution: every set
+  subterm gets the design's facts (non-negative; `empty` 0; `singleton` 1;
+  union and difference with a singleton by membership; general union, inter
+  and diff bounds; `subset` monotonicity), and a set constant `elts$x` beside
+  `len$x` (or `$elts`/`$len` of one term) gets `card <= len`. Equality needs
+  nothing: `card` is a function, so congruence already gives it.
+- Every fact is a theorem of finite sets; a query without `card` is unchanged.
+
+### 3.3 Contracts
+
+- `Set.size : {Int | _ == card(elts(s))}` and `Map.size : {Int | _ ==
+  card(keys(m))}`, `@[assume]`d, each with a property witness in
+  `test/stdlib/test_set.march` / `test_map.march`.
+- Accept: `Set.size(Set.insert(Set.empty(), x, cmp)) == 1`, size unchanged by
+  inserting a present element, `size(remove(s, x)) <= size(s)`. Reject
+  control: `Set.size(Set.insert(Set.empty(), x, cmp)) == 2` is reported.
+
+**Landed** on the Phase 3 branch, 3.1 to 3.3, with two additions:
+
+- A set with a member is non-empty (`member(x, s) => card(s) >= 1`), a
+  finite-set theorem the design's table lacked; without it `member(3,
+  elts(ys))` did not give `card(elts(ys)) > 0`.
+- A scalar callee's contract translates a measure over a NESTED call
+  (`card(elts(Set.insert(…)))` in `Set.size`'s), through the same call-contract
+  translation a call-site actual uses.
+
+### Phase 3 exit
+
+- The Phase 2 gates; the oracle diff is expected to be empty outside `Set`
+  and `Map` contract counts, since no existing query mentions `card`.
+
+## 4. Phase 4 — prove `SortedSet` as far as the unordered fragment allows
+
+Design §5. Stacked on the Phase 3 branch. Every checker step is built and
+pinned against a user-defined copy of the AVL tree before `stdlib/sorted_set.march`
+changes, so a stdlib failure is never the first sign of a checker gap.
+
+### 4.1 `let` in induction tails
+
+- Tier 2 inlines a `let x = e` whose name no later statement rebinds into the
+  block's tail, so `let new_r = make_node(lr, k, r); make_node(ll, lk, new_r)`
+  reads `new_r`'s definition. A binding that shadows a parameter or a pattern
+  binder is not inlined, and the tail is not attempted.
+- A constructor-literal body behind `let`s (`make_node`) is Shape 1.
+
+### 4.2 Contracts of any datatype callee
+
+- The Phase 2 callee-contract reflection in Tier 2 applies at every datatype
+  sort the measure preamble declares, not only `List`.
+
+### 4.3 Nested patterns and catch-all arms
+
+- A nested constructor sub-pattern gets a fresh name and its own pattern
+  equation (`Node(Node(ll, lk, lr, _), k, r, _)`), recursively.
+- A catch-all arm (`_` or a variable pattern) is checked with no pattern
+  equation, which is weaker, so anything it proves is true.
+
+### 4.4 Scalar callee contracts in guards
+
+- A guard over a call whose callee has a proved scalar contract
+  (`compare(cmp, x, k) < 0`) reflects the call as a constant carrying that
+  contract, so `c == 0` in the equal branch gives `x == k`.
+
+### 4.5 The tree contracts
+
+- `tree_elts`, the assumed `compare` law, and `let c = compare(cmp, x, k)`
+  replacing each `cmp(x, k)` in the tree functions.
+- Proved: `make_node`, `rotate_right`, `rotate_left`, `balance`,
+  `tree_insert` (union with `x`), `tree_to_list` (`elts` of the result),
+  `tree_delete_min` and `tree_delete` (subset).
+- Public API contracts over `tree_elts(s.tree)` where the record field path
+  carries them; anything that needs the ordering invariant stays unclaimed.
+- A differential property test checks `Set` against `SortedSet`.
+- A compiled benchmark confirms the `compare` wrapper costs nothing.
+
+**Landed** on the Phase 4 branch, 4.1 to 4.5, with these differences from the
+step list:
+
+- The comparator law is `compare_by`: `compare` collides with a prelude
+  interface method.
+- Also needed: a measure over a call inside a callee contract reflects that
+  call; a type-variable parameter is an opaque `Elem` and the Int resolver
+  keeps an existing declaration; guard calls with identical variable arguments
+  share one constant (an inlined `let` copies its call); a set measure's
+  declared `Set(Elem)` result is fixed in sort resolution.
+- Not proved, left unclaimed: `tree_delete` (its equal branch needs
+  `tree_min`'s payload, an `Option` fact) and `tree_member` (a `Bool` return,
+  which Tier 2 does not cover). The public API is unannotated: a refinement
+  over its anonymous record type does not translate.
+- A generic set measure at a concrete-element instance is a sort-conflict skip
+  (`specs/todos/2026-09-15-generic-set-measure-instances.md`).
+- Found and filed separately: `SortedSet.from_list`/`union`/`intersect`/
+  `difference` pass `List.fold_left` its arguments in the wrong order, and a
+  compiled-only panic when a program uses `SortedSet.size` without `to_list` or
+  `member`. Both predate this phase.
+- Benchmark: an insert-heavy compiled program (600k inserts, `--opt 2`), 12
+  interleaved runs each, median 2311 ms before and 2338 ms after at load
+  average ~8; the fastest run is the new build. No measurable cost.
+
+### Phase 4 exit
+
+- The Phase 3 gates.

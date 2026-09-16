@@ -512,6 +512,10 @@ let rec reflect_scalar
     ~(postcond : string -> A.expr list -> (string * A.expr * string option) option)
     ?(foreign_var : (string -> (Smt.term * (string * Smt.sort)) option) option)
     ?(foreign_measure : (string -> string -> Smt.term option) option)
+    (* A measure over a NESTED call inside a callee's contract
+       (`card(elts(Set.insert(…)))` in `Set.size`'s): the caller's own
+       translation of that call, when it has one. *)
+    ?(foreign_measure_call : (string -> string -> A.expr list -> Smt.term option) option)
     ?(foreign_field :
         (string -> string -> (Smt.term * (string * Smt.sort) list) option) option)
     ?(sort : Smt.sort = Smt.SInt) (sc : scope) (actual : A.expr)
@@ -520,6 +524,7 @@ let rec reflect_scalar
   let foreign_measure =
     Option.value foreign_measure ~default:(fun _ _ -> None)
   in
+  let foreign_measure_call = Option.value foreign_measure_call ~default:(fun _ _ _ -> None) in
   (* A field read in ACTUAL position — `takepos(a.rem)`.  The caller supplies
      the same selector term its PATH conditions reflect `a.rem` to, so a guard
      (`if a.rem >= 0`) and this goal meet on one symbol; without it the field
@@ -570,7 +575,7 @@ let rec reflect_scalar
            | None -> None
        in
        let assumptions =
-         match smt_of ~resolve_var:rv ~resolve_measure:foreign_measure q with
+         match smt_of ~resolve_var:rv ~resolve_measure:foreign_measure ~resolve_measure_call:foreign_measure_call q with
          | Some qa -> [ qa ]
          | None -> []
        in
@@ -598,9 +603,9 @@ let rec reflect_scalar
      `float-sort-gate`). *)
   | A.EApp (A.EVar { A.txt = ("+" | "-") as op; _ }, [ a; b ], _) when sort = Smt.SInt ->
     (match
-       reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_field ~sort sc
+       reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call ~foreign_field ~sort sc
          a,
-       reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_field ~sort sc
+       reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call ~foreign_field ~sort sc
          b
      with
      | Some (ta, da, aa), Some (tb, db, ab) ->
@@ -611,7 +616,7 @@ let rec reflect_scalar
     (match a, b with
      | A.ELit (A.LitInt k, _), e | e, A.ELit (A.LitInt k, _) ->
        (match
-          reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_field
+          reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call ~foreign_field
             ~sort sc e
         with
         | Some (te, de, ae) -> Some (Smt.MulLit (k, te), de, ae)
@@ -646,7 +651,7 @@ let rec reflect_scalar
            | None -> None
        in
        let assumptions =
-         match smt_of ~resolve_var:rv ~resolve_measure:foreign_measure q with
+         match smt_of ~resolve_var:rv ~resolve_measure:foreign_measure ~resolve_measure_call:foreign_measure_call q with
          | Some qa -> [ qa ]
          | None -> []
        in

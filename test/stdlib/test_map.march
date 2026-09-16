@@ -294,6 +294,30 @@ pfn same_keys(m, ks : List(Int)) : Bool do
     && List.all(Map.keys(m), fn k -> List.member(ks, k))
 end
 
+-- The number of distinct values in a list, the oracle for `card`.
+pfn count_distinct_keys(xs : List(Int)) : Int do
+  fn go(ys : List(Int), seen : List(Int)) : Int do
+    match ys do
+      Nil -> List.length(seen)
+      Cons(y, rest) -> if List.member(seen, y) do go(rest, seen) else go(rest, Cons(y, seen)) end
+    end
+  end
+  go(xs, Nil)
+end
+
+describe "assumed card contract (runtime witness)" do
+  test "size is the number of distinct keys: size(m) == card(keys(m))" do
+    Check.all(Gen.tuple2(Gen.list(Gen.int(0, 30)), Gen.int(0, 30)), fn pair ->
+      match pair do
+        (ks, k) ->
+          Map.size(map_of(ks)) == count_distinct_keys(ks)
+            && Map.size(Map.insert(map_of(ks), k, 1, int_cmp)) == count_distinct_keys(Cons(k, ks))
+            && Map.size(Map.remove(map_of(ks), k, int_cmp)) == count_distinct_keys(List.filter(ks, fn j -> j != k))
+      end
+    )
+  end
+end
+
 describe "assumed keys contracts (runtime witnesses)" do
   test "empty has no keys; singleton has exactly its key" do
     assert same_keys(Map.empty(), Nil)
