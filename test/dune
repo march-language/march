@@ -1813,6 +1813,29 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/simd_nontco_leak_probe.expected native_simd_nontco_leak_probe.out)))
 
+; ── Leak guard: a heap value live on ONE side of an `if` and dead on the other
+; is released on the dead side. Perceus's cross-branch dead-variable pass took
+; its "live elsewhere" union over the TAGGED branches of the ECase only, and an
+; `if` is one tagged branch plus a default -- so a value used only on the `else`
+; side was released nowhere. Red before the fix: every leg but the `match`
+; control reads `flat: false`, one leaked object per call over 20,000 calls.
+(rule
+ (targets native_if_branch_dead_value_probe native_if_branch_dead_value_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/if_branch_dead_value_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_if_branch_dead_value_probe
+        native/if_branch_dead_value_probe.march)
+   (with-stdout-to native_if_branch_dead_value_probe.out
+        (system "./native_if_branch_dead_value_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/if_branch_dead_value_probe.expected native_if_branch_dead_value_probe.out)))
+
 ; ── Leak guard: `to_string` of a List (prelude's Show via string_join) and
 ; string_join itself release the list. string_join's list argument was marked
 ; owned in borrow.ml while march_string_join only reads it: 5 objects per

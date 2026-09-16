@@ -94,7 +94,7 @@ mod SessionNodeFan do
     let conn = accept_on(listen_fd, "node-a")
     phase("A", "accepted C")
     let p0 = SessionNode.party(Fan_Msg.role_A(), "node-a", fn _ep -> note("A", "A: closed"))
-    let p = SessionNode.accept_from(p0, conn)
+    let p = SessionNode.require(SessionNode.accept_from(p0, conn), Fan_Msg.peers_A())
     phase("A", "joined C")
     let s = Session.attach(c, SessionNode.ops(p))
     -- The delay that makes the race deterministic: B's message reaches C
@@ -120,7 +120,7 @@ mod SessionNodeFan do
     let conn = connect_retry(port_c, "node-b", 100)
     phase("B", "connected to C")
     let p0 = SessionNode.party(Fan_Msg.role_B(), "node-b", fn _ep -> note("B", "B: closed"))
-    let p = SessionNode.connect_to(p0, Fan_Msg.role_C(), conn)
+    let p = SessionNode.require(SessionNode.connect_to(p0, Fan_Msg.role_C(), conn), Fan_Msg.peers_B())
     phase("B", "joined C")
     let s = Session.attach(c, SessionNode.ops(p))
     note("B", "B: sends 9")
@@ -140,7 +140,9 @@ mod SessionNodeFan do
     let p0 = SessionNode.party(Fan_Msg.role_C(), "node-c", fn _ep -> note("C", "C: closed"))
     let p1 = SessionNode.connect_to(p0, Fan_Msg.role_A(), conn_a)
     phase("C", "joined A")
-    let p = SessionNode.accept_from(p1, accept_on(listen_fd, "node-c"))
+    -- `require` against the generated peer set: C exchanges messages with A
+    -- and B, and both connections must exist before the session starts.
+    let p = SessionNode.require(SessionNode.accept_from(p1, accept_on(listen_fd, "node-c")), Fan_Msg.peers_C())
     phase("C", "joined B")
     let s = Session.attach(c, SessionNode.ops(p))
     let _ = Fan_C.recv_Msg_A_C_1(s, Fan_C.register(s, 0), fn (a, st1) ->

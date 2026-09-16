@@ -12,6 +12,12 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`SessionNode.require(party, peers)`** checks a multiparty session has a connection to
+  every role it will exchange messages with — the generated `<P>_Msg.peers_<Role>()` — and
+  names the missing ones at startup rather than failing at the first message.
+- The two-node harness (`scripts/two-node.sh`) accepts an optional third node, each node
+  with its own listen port (`MARCH_PORT_A`/`_B`/`_C`); the `fan` scenario runs a
+  three-role session protocol as three processes.
 - **`SessionNode` routes by role, so an `@[endpoints]` protocol can run its roles on
   three or more nodes.** `SessionNode.party(my_role, node_id, on_close)` plus
   `accept_from` / `connect_to` per peer; `emit` picks the connection from the message's
@@ -400,6 +406,16 @@ git log is authoritative for exact commits.
   scheduler services), so a program with many connections waiting at once no longer needs
   more scheduler threads than waiters — before, six readers in one process hung a 4-thread
   scheduler solid. A fd's `SO_RCVTIMEO` still bounds an untimed `Socket.recv`.
+- **An `if` no longer leaks a value that is dead on one side (compiled).**
+  Every `if`/`else` whose two sides disagreed about a heap value leaked that
+  value, once per evaluation — a String, a list, a record, a closure
+  environment, a SIMD box. Perceus releases a variable in the arms where it is
+  dead provided it is live in some other arm, and "some other arm" was computed
+  over the tagged branches of the case only; an `if` is one tagged branch plus a
+  default, so a value used only on the `else` side was released nowhere. A
+  `match` over a variant has all arms tagged and was always correct. The
+  vector-in-a-list leak reported against the SIMD fix below was this bug, not a
+  gap in the generated drop.
 - **A SIMD vector passed to a function that is not tail-recursive, or to a
   closure, no longer leaks (compiled).** Crossing such a parameter boxes the
   vector, and nothing released that box: one 32-byte cell per call. SIMD

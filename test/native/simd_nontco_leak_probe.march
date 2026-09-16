@@ -15,14 +15,15 @@
 --     CALLEE releases it at last use.
 -- `keep` is the double-free witness: it stores the vector into a list, which
 -- then owns the box, so releasing at the call site would free a live element.
--- Its length is printed rather than asserted flat, because the box a vector
--- reaches a list field in is NOT released when that list dies -- a separate,
--- pre-existing gap measured here and filed as
--- specs/todos/2026-09-16-simd-box-in-an-aggregate-field-is-never-released.md.
--- What this leg guards is the crash direction: an over-eager call-site release
--- frees a live element, which shows up as a wrong length or a fault
+-- It guards both directions. The crash direction: an over-eager call-site
+-- release frees a live element, which shows up as a wrong length or a fault
 -- (test/native/simd_vector_escape_arg.march pins the same direction at
--- 2,000,000 calls).
+-- 2,000,000 calls). The leak direction: this leg read 60,000 until 2026-09-16,
+-- which looked like a gap in the synthesized `__drop$List_F32x4` and was not --
+-- `keep`'s base case never released the vector it was handed, because Perceus
+-- left the default arm of an `if` out of its cross-branch liveness union
+-- (specs/progress/2026-09-16-if-else-drops-the-dead-side.md). Nothing here is
+-- SIMD-specific; the same shape leaked a String.
 mod Main do
   needs IO.Console
 
@@ -68,6 +69,7 @@ mod Main do
     end
     let b = live_allocs()
     flat("closure with a vector parameter", b, float_to_string(call_clo(f, n, 0.0)))
-    println("vector stored into a list = " ++ int_to_string(loop_keep(n, 0)))
+    let c = live_allocs()
+    flat("vector stored into a list", c, int_to_string(loop_keep(n, 0)))
   end
 end

@@ -175,6 +175,26 @@ let roles_of (steps : astep list) : string list =
   go steps;
   List.rev !seen
 
+(** The roles [role] exchanges a message with, in role-index order.  A
+    network transport needs one connection per entry, and checks it has them
+    before the session starts (`SessionNode.require`) instead of failing at
+    the first `emit` with "no connection to role N". *)
+let peers_of (steps : astep list) (roles : string list) (role : string) : string list =
+  let pairs = ref [] in
+  let rec go = function
+    | [] -> ()
+    | AMsg (s, r, _, _) :: rest -> pairs := (s, r) :: !pairs; go rest
+    | ALoop inner :: rest -> go inner; go rest
+    | AChoice (_, brs) :: rest -> List.iter (fun (_, arm) -> go arm) brs; go rest
+    | AStop :: rest -> go rest
+  in
+  go steps;
+  List.filter
+    (fun other ->
+       other <> role
+       && List.exists (fun (s, r) -> (s = role && r = other) || (s = other && r = role)) !pairs)
+    roles
+
 (** Project onto [role].  Same rules as [project_steps]: a loop is a binder
     whose back-edge is the loop's own variable, `stop` is [LEnd] outright, and
     a non-chooser merges a choice only in a multiparty protocol and only when
@@ -353,7 +373,8 @@ let collect_ctors (errors : Err.ctx) ~proto ~span (steps : astep list) : (string
 (** `<P>_Msg`: the message type, its `Json` codec over `Bytes`, and the role
     indices.  The derive is expanded HERE, inside the generated module, so it
     rebinds nobody's bare `to_json`/`from_json` in the user's module. *)
-let msg_module (errors : Err.ctx) ~proto ~span (ctors : (string * ty) list) (roles : string list) : decl =
+let msg_module (errors : Err.ctx) ~proto ~span (ctors : (string * ty) list) (roles : string list)
+    (peers : (string * string list) list) : decl =
   let mname = proto ^ "_Msg" in
   let msg_td = TDVariant (List.map (fun (c, t) -> variant c [ t ]) ctors) in
   let msg_decl = DType (Public, n "Msg", [], msg_td, sp) in
@@ -377,7 +398,11 @@ let msg_module (errors : Err.ctx) ~proto ~span (ctors : (string * ty) list) (rol
   in
   (* 1-based, in order of first appearance; see [roles_of]. *)
   let role_fns = List.mapi (fun i r -> fn ("role_" ^ r) [] t_int (lit_int (i + 1))) roles in
-  DMod (n mname, Public, (msg_decl :: json_fns) @ [ encode; decode ] @ role_fns, sp)
+  let index_of r = 1 + Option.get (List.find_index (fun x -> x = r) roles) in
+  let int_list rs = List.fold_right (fun r acc -> con "Cons" [ lit_int (index_of r); acc ]) rs (con "Nil" []) in
+  (* `peers_<R>()`: the role indices [R] exchanges a message with; see [peers_of]. *)
+  let peer_fns = List.map (fun (r, ps) -> fn ("peers_" ^ r) [] (tycon "List" [ t_int ]) (int_list ps)) peers in
+  DMod (n mname, Public, (msg_decl :: json_fns) @ [ encode; decode ] @ role_fns @ peer_fns, sp)
 
 (** `<P>_<Role>`: one [always_linear] type per state and one function per
     transition, plus the unforgeable [Yield]. *)
@@ -624,7 +649,8 @@ let expand (errors : Err.ctx) (decls : decl list) : decl list =
                 | DMod (nm, vis, ds, s) -> DMod (nm, vis, List.map D.respan_derived_decl ds, s)
                 | d -> d
               in
-              let msg = msg_module errors ~proto ~span ctors roles in
+              let peers = List.map (fun r -> (r, peers_of steps roles r)) roles in
+              let msg = msg_module errors ~proto ~span ctors roles peers in
               let role_mods =
                 List.map
                   (fun role ->

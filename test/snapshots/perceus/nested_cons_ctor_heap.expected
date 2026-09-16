@@ -145,7 +145,7 @@ case $t20 of
   True() -> dec_rc $t20;
 let $t21 : '_ = >=(i, stop) in
 case $t21 of
-  True() -> dec_rc $clo;
+  True() -> dec_rc build;
 dec_rc $t21;
 List.reverse(acc)
   _ -> dec_rc $t21;
@@ -156,7 +156,7 @@ call_ptr build($t22, $t23)
   _ -> dec_rc $t20;
 let $t24 : '_ = <=(i, stop) in
 case $t24 of
-  True() -> dec_rc $clo;
+  True() -> dec_rc build;
 dec_rc $t24;
 List.reverse(acc)
   _ -> dec_rc $t24;
@@ -173,7 +173,7 @@ let start : Int = $clo.$fv1 in
 dec_rc $clo;
 let $t15 : '_ = <(i, start) in
 case $t15 of
-  True() -> dec_rc $clo;
+  True() -> dec_rc go;
 dec_rc $t15;
 acc
   _ -> dec_rc $t15;
