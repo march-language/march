@@ -1526,7 +1526,9 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="NetKernel.html#fn-send_frame"><span class="sb-kind" style="color:var(--fn)">F</span>send_frame</a>
 <a class="sl" href="NetKernel.html#fn-str_to_bytes"><span class="sb-kind" style="color:var(--fn)">F</span>str_to_bytes</a>
 <a class="sl" href="NetKernel.html#fn-to_wire"><span class="sb-kind" style="color:var(--fn)">F</span>to_wire</a></div></div>
-<div class="sb-group"><div class="sb-group-hdr" data-href="Node.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Node.html">Node</a></div><div class="sb-sub"><a class="sl" href="Node.html#fn-payload"><span class="sb-kind" style="color:var(--fn)">F</span>payload</a>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Node.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Node.html">Node</a></div><div class="sb-sub"><a class="sl" href="Node.html#fn-enqueue"><span class="sb-kind" style="color:var(--fn)">F</span>enqueue</a>
+<a class="sl" href="Node.html#fn-enqueue_tagged"><span class="sb-kind" style="color:var(--fn)">F</span>enqueue_tagged</a>
+<a class="sl" href="Node.html#fn-payload"><span class="sb-kind" style="color:var(--fn)">F</span>payload</a>
 <a class="sl" href="Node.html#fn-send"><span class="sb-kind" style="color:var(--fn)">F</span>send</a>
 <a class="sl" href="Node.html#fn-send_tagged"><span class="sb-kind" style="color:var(--fn)">F</span>send_tagged</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="NodeCall.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="NodeCall.html">NodeCall</a></div><div class="sb-sub"><a class="sl" href="NodeCall.html#fn-call"><span class="sb-kind" style="color:var(--fn)">F</span>call</a>
@@ -1540,7 +1542,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="sb-group"><div class="sb-group-hdr" data-href="NodeQueue.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="NodeQueue.html">NodeQueue</a></div><div class="sb-sub"><a class="sl" href="NodeQueue.html#type-Policy"><span class="sb-kind" style="color:var(--ty)">T</span>Policy</a>
 <a class="sl" href="NodeQueue.html#type-EnqueueError"><span class="sb-kind" style="color:var(--ty)">T</span>EnqueueError</a>
 <a class="sl" href="NodeQueue.html#type-WriterState"><span class="sb-kind" style="color:var(--ty)">T</span>WriterState</a>
-<a class="sl" href="NodeQueue.html#type-EvictedReq"><span class="sb-kind" style="color:var(--ty)">T</span>EvictedReq</a>
+<a class="sl" href="NodeQueue.html#type-WriterReq"><span class="sb-kind" style="color:var(--ty)">T</span>WriterReq</a>
 <a class="sl" href="NodeQueue.html#fn-cast"><span class="sb-kind" style="color:var(--fn)">F</span>cast</a>
 <a class="sl" href="NodeQueue.html#fn-consumed"><span class="sb-kind" style="color:var(--fn)">F</span>consumed</a>
 <a class="sl" href="NodeQueue.html#fn-credit"><span class="sb-kind" style="color:var(--fn)">F</span>credit</a>
@@ -1569,6 +1571,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="NodeSend.html#fn-decode_msg"><span class="sb-kind" style="color:var(--fn)">F</span>decode_msg</a>
 <a class="sl" href="NodeSend.html#fn-encode_failed"><span class="sb-kind" style="color:var(--fn)">F</span>encode_failed</a>
 <a class="sl" href="NodeSend.html#fn-encode_msg"><span class="sb-kind" style="color:var(--fn)">F</span>encode_msg</a>
+<a class="sl" href="NodeSend.html#fn-handle_frame"><span class="sb-kind" style="color:var(--fn)">F</span>handle_frame</a>
 <a class="sl" href="NodeSend.html#fn-on_failure"><span class="sb-kind" style="color:var(--fn)">F</span>on_failure</a>
 <a class="sl" href="NodeSend.html#fn-recv_failure"><span class="sb-kind" style="color:var(--fn)">F</span>recv_failure</a>
 <a class="sl" href="NodeSend.html#fn-serve_one"><span class="sb-kind" style="color:var(--fn)">F</span>serve_one</a>
@@ -2418,7 +2421,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 2. step() mid-period: if ack_timeout has elapsed and probe is unacked,
    escalate to k-way indirect ping-req.
 3. Transport delivers PingAck events when acks arrive; GossipFrame events
-   when gossip frames are decoded; PeerDown events on socket close.</code></pre><p>Anti-entropy (P5a): anti_entropy_peers(s, now) returns live peers when the 30s timer fires. The transport calls this each tick and sends REGISTRY_SYNC_REQ to peers. bump_anti_entropy(s, now) resets the timer after firing.</p><p>Load gossip (P4): peer_loads tracks the last NodeLoad heard from each live peer. dispatch_all_with_load embeds the local NodeLoad in outgoing Gossip frames.</p></div><h2>Types</h2><div class="item" id="type-State"><div class="ih"><span class="badge bty">type</span><span class="name">State</span><span class="sig"><a href="DistSupervisor.html#type-State">State</a> = {</span><a class="anchor-link" href="#type-State" title="Link">#</a></div><div class="ib"></div></div>
+   when gossip frames are decoded; PeerDown events on socket close.</code></pre><p>Anti-entropy (P5a): anti_entropy_peers(s, now) returns live peers when the 30s timer fires. The transport calls this each tick and sends REGISTRY_SYNC_REQ to peers. bump_anti_entropy(s, now) resets the timer after firing.</p><p>Load gossip (P4): peer_loads tracks the last NodeLoad heard from each live peer, stamped with its receipt time on this node's clock (never the sender's). dispatch_all_with_load embeds the local NodeLoad in outgoing Gossip frames.</p></div><h2>Types</h2><div class="item" id="type-State"><div class="ih"><span class="badge bty">type</span><span class="name">State</span><span class="sig"><a href="DistSupervisor.html#type-State">State</a> = {</span><a class="anchor-link" href="#type-State" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="type-Event"><div class="ih"><span class="badge bty">type</span><span class="name">Event</span><span class="sig"><a href="JsonStream.html#type-Event">Event</a> =</span><a class="anchor-link" href="#type-Event" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="type-WireMsg"><div class="ih"><span class="badge bty">type</span><span class="name">WireMsg</span><span class="sig"><a href="#type-WireMsg">WireMsg</a> =</span><a class="anchor-link" href="#type-WireMsg" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-anti_entropy_peers"><div class="ih"><span class="badge bfn">fn</span><span class="name">anti_entropy_peers</span><span class="sig">anti_entropy_peers(s : <a href="DistSupervisor.html#type-State">State</a>, now : Int) : List(String)</span><a class="anchor-link" href="#fn-anti_entropy_peers" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="fn-bump_anti_entropy"><div class="ih"><span class="badge bfn">fn</span><span class="name">bump_anti_entropy</span><span class="sig">bump_anti_entropy(s : <a href="DistSupervisor.html#type-State">State</a>, now : Int) : <a href="DistSupervisor.html#type-State">State</a></span><a class="anchor-link" href="#fn-bump_anti_entropy" title="Link">#</a></div><div class="ib"></div></div>
