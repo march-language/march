@@ -16,7 +16,12 @@
 -- generated `Fan_Msg.role_*()` are the truth.
 --
 -- The three roles run as three tasks in ONE process over loopback, the way
--- node_send_typed_loopback runs two. Each records its own lines; main prints
+-- node_send_typed_loopback runs two. That needs MARCH_NUM_SCHEDULERS=8 (set
+-- by the dune rule): `tcp_accept` and the socket reads block the OS thread
+-- they run on, and three roles in one process keep six of them blocked at
+-- once, so a scheduler with fewer threads has none left to run an actor turn
+-- (measured: 4 threads hang, 8 do not). A node per process -- the two-node
+-- scenarios -- never has more readers than its own. Each records its own lines; main prints
 -- them per role after every task has ended, so the trace is deterministic
 -- although the tasks interleave. Compiled only (the interpreter parks on the
 -- loopback accept, as every socket fixture here does).

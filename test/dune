@@ -5989,6 +5989,18 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; arrives first and must be parked until C asks for it. Compiled only (the
 ; loopback accept parks the interpreter).
 ; specs/progress/2026-09-16-session-node-multiparty-routing.md.
+;
+; MARCH_NUM_SCHEDULERS=8 is load-bearing, not tuning. `tcp_accept` and the
+; socket reads block the OS thread they run on (march_http.c's
+; tcp_accept_raw calls accept() directly; nothing parks the green thread), and
+; this fixture is the unusual case of THREE session roles in ONE process: six
+; readers and handshakes sit in blocking syscalls at once. With the scheduler
+; thread count at or below that, every thread is blocked and no actor turn can
+; run -- the fixture hangs. Measured on this program: 4 threads hang 3/3, 8
+; hang 0/3. A CI runner with 4 usable CPUs resolves "auto" to 4, which is why
+; it hung there and not on a developer laptop. The constraint is the runtime's,
+; not the transport's (a node per process never has more than its own readers):
+; specs/todos/2026-09-16-blocking-accept-starves-the-scheduler.md.
 (rule
  (targets native_session_node_fan_loopback native_session_node_fan_loopback.out)
  (deps (file %{exe:../bin/main.exe})
@@ -5999,8 +6011,9 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
   (progn
    (run %{exe:../bin/main.exe} --compile -o native_session_node_fan_loopback
         native/session_node_fan_loopback.march)
-   (with-stdout-to native_session_node_fan_loopback.out
-        (system "./native_session_node_fan_loopback")))))
+   (setenv MARCH_NUM_SCHEDULERS 8
+    (with-stdout-to native_session_node_fan_loopback.out
+         (system "./native_session_node_fan_loopback"))))))
 
 (rule
  (alias runtest)

@@ -228,6 +228,25 @@ role receives from exactly one peer).
 Binary regression: `stream_endpoints`, `stream_replay`, `stream_actor`,
 `stream_actor_events` goldens byte-identical, and the two-node `stream` scenario passes.
 
+### The fixture needs 8 scheduler threads, and why that is the runtime's fault
+
+CI hung on both legs where a laptop passed: a 30-minute step timeout with the fixture as
+the orphaned process. `march_tcp_accept` calls `accept()` directly (`march_http.c:216`)
+and the handshake reads block too, so a green thread waiting on a socket costs a whole
+SCHEDULER thread rather than parking. Three roles in one process keep six of them blocked
+at once, so a scheduler with that many threads has none left to run an actor turn, and
+the work that would unblock the sockets is queued behind them.
+
+Measured on the same binary, varying only the thread count: 1, 2 and 4 hang 3/3; 8 and 16
+pass 3/3. "Auto" is the usable CPU count, so a 4-CPU runner hangs and a laptop does not.
+The dune rule pins `MARCH_NUM_SCHEDULERS=8` with that reasoning beside it.
+
+Nothing here is specific to sessions or to this transport — a node per process never has
+more readers than its own — so the underlying constraint is filed separately as
+[[2026-09-16-blocking-accept-starves-the-scheduler]], with this fixture named as the
+regression test: when accepts and reads park, the `setenv` comes out and it should pass at
+`MARCH_NUM_SCHEDULERS=1`.
+
 ### Still open
 
 - **A three-process scenario.** `scripts/two-node.sh` is two-node by construction
