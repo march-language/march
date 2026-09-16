@@ -7,12 +7,20 @@
 -- whose entire premise is "if it compiles, it is proved". A `cap verified`
 -- module with an undischargeable return contract exited 0.
 --
--- `mk` declares `{Int | _ > 0}` as its return type over a body the checker
--- cannot decide: `z * z + 1` is nonlinear, outside the reflectable fragment,
--- and TRUE on every input so the witness battery finds no counterexample
--- either (2026-08-30: the original body `z` became a witness-CONFIRMED
--- violation -- a different, stronger error that no longer mentions `cap
--- verified`). The obligation is therefore SKIPPED
+-- `mk` declares `{Int | _ >= 0}` as its return type over a body the checker
+-- cannot decide: `av` carries no contract, so its result reflects to an
+-- unconstrained constant, while `|z|` really is non-negative on every input
+-- so the witness battery finds no counterexample either.
+--
+-- Finding a body that stays undecided is harder than it looks, and this
+-- fixture has now been re-based twice. The original `z` became a
+-- witness-CONFIRMED violation (2026-08-30) -- a different, stronger error
+-- that no longer mentions `cap verified`. Its replacement `z * z + 1`
+-- became PROVED (2026-09-16) when the predicate translator started
+-- reflecting non-linear products. An uncontracted callee is the shape that
+-- survives both: unprovable because the checker cannot see through it, and
+-- unrefutable because the contract is actually true. The obligation is
+-- therefore SKIPPED
 -- -- and under `cap verified` that skip is now an error,
 -- exactly as an undischarged precondition already was (see
 -- `check_call`'s escalation, which this mirrors for the return position).
@@ -26,8 +34,12 @@ mod T134 do
 
   cap verified
 
-  fn mk(z : Int) : {Int | _ > 0} do
-    z * z + 1
+  fn av(z : Int) : Int do
+    if z < 0 do 0 - z else z end
+  end
+
+  fn mk(z : Int) : {Int | _ >= 0} do
+    av(z)
   end
 
   fn main() : Int do

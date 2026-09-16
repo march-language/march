@@ -13,6 +13,49 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **An `s == ""` guard now establishes `len(s) > 0` in the else-branch.**
+  Previously documented as a gap: the checker knew only that `s` differed from
+  the empty literal, and a downstream `{String | len(_) > 0}` contract was
+  skipped.
+
+- **A `let` bound to an `if` carries both arms' facts forward.**
+  `let c = if x < 1 do 1 else x end` now discharges a downstream `{Int | _ > 0}`
+  contract: the checker records the case split rather than dropping the
+  binding.
+
+- **`pmap_threshold()` carries the contract `{Int | _ > 0}`.** The three
+  `List.pmap`/`pfilter`/`preduce` call sites that pass it to `chunks` are now
+  proved rather than skipped, and the refinement checker can propagate return
+  contracts for builtins generally.
+
+- **`--refine-report-sites`: every skipped refinement obligation, one line
+  each** — `file:line:col`, reason, kind, callee and predicate, tab-separated
+  and labelled user or stdlib. `--refine-report` counts skips per reason;
+  this attributes them, which is what deciding where to spend effort needs.
+
+- **Refinements may multiply two variables.** `{Int | _ * _ >= 0}` and other
+  non-linear predicates now reach the solver instead of being skipped as
+  untranslatable: refusing them never bought soundness, since `v * v > 0` is
+  exactly `v != 0` over the integers. Multiplication by a literal still keeps a
+  query in linear arithmetic; where the solver cannot settle a non-linear goal
+  the obligation is skipped with the new reason `nonlinear-goal`, which
+  `--refine-report` counts separately from the residual `solver-undecided`.
+- **`@[remote]` on an actor**: the compiler generates `<Actor>_Remote.dispatch(pid,
+  delivery)`, which routes a typed `Node.send` delivery to the handler that takes its type.
+  It returns `Ok(true)` when delivered, `Ok(false)` when no handler takes that type, and
+  `Err` when the payload doesn't decode. The receiver's tag comparison uses the same tag the
+  sender's compiler mints. A handler type without a codec is a compile error, and so is a
+  `@[remote]` actor with no routable handler.
+- **`SessionNode`**: the `Session.Ops` network transport. An `@[endpoints]` protocol's
+  roles run on two nodes over one split peer connection:
+  `SessionNode.open(conn, node_id, accepted, on_close)`, `Session.attach(io,
+  SessionNode.ops(link))`, `SessionNode.serve(link)`, `SessionNode.finish(link)`. Flow
+  control uses the credit-based `NodeQueue`. The two-node `stream` scenario now uses it
+  (267 + 250 lines became 73 + 59).
+- Two-node scenario `partition`: two processes running SWIM stop hearing each other,
+  each claims the same `GlobalRegistry` name, and both converge on one winner after the
+  heal. It needs Linux root for iptables; `scripts/two-node-docker.sh` runs any scenario
+  from any host.
 - **`SortedSet`'s tree operations are proved against its element set.**
   Insertion, rebalancing, both rotations, node construction, minimum deletion
   and flattening carry refinement contracts proved from their bodies, on one
@@ -27,7 +70,6 @@ git log is authoritative for exact commits.
   larger" are proved. `Set.size` and `Map.size` carry assumed `card`
   contracts: `Set.size(Set.insert(Set.empty(), x, cmp)) == 1` is proved, and a
   claim of 2 is reported. See "Cardinality" in `docs/refinement-types.md`.
-
 - **`Node.enqueue(q, to, msg, policy)`**: the typed remote send through a peer's
   `NodeQueue`, so a typed send gets credit-based flow control. It has the same contract
   as `Node.send`: `msg`'s type must `derive Json`, which is checked at the call site,
@@ -361,6 +403,16 @@ git log is authoritative for exact commits.
   which of the measure's own type parameters its set element is and
   resolves it at the concrete instance, both for the instance's own axioms
   and the query preamble that declares them.
+- **`--pmap-threshold` below 1 is rejected instead of hanging.** A cutoff of
+  `0` made `List.pmap` never return; the flag now fails with a message.
+- `Node.send` minted a different wire tag for a message type declared at the entry
+  module's top level depending on the entry module's name (`App.Note` rather than
+  `Note`), so two separately built nodes could not agree on it. The entry module's name
+  is now unwrapped, as it already was for nested types.
+- `GlobalRegistry` replicas now converge after a network partition. `REGISTRY_SYNC_RESP`
+  dropped each entry's vector clock, so a received binding always lost to the local one
+  and both sides kept their own. Leaves now carry the clock, and the old encoding still
+  decodes.
 - **`SortedSet.from_list`, `union`, `intersect` and `difference` work.** All
   four passed their arguments to `List.fold_left` in the wrong order with a
   curried callback, so `SortedSet.from_list([5, 3, 9, 3, 1], cmp)` panicked

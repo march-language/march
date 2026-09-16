@@ -248,6 +248,19 @@ jobs:
           #   46 skipped, exactly the +2 proved / +13 skipped every one of
           #   the 326 other fixtures gained, and no verdict elsewhere moved.
           #
+          #   LOWERED 2026-09-16, 46 -> 43: `pmap_threshold()` gained a
+          #   `{Int | _ > 0}` contract (Refine_encode.builtin_ret_
+          #   refinements), which discharges the three `chunks(xs, t)` call
+          #   sites in List.pmap/pfilter/preduce that were previously
+          #   unconstrained-subject skips. Measured on this file: 38 proved /
+          #   46 skipped -> 41 proved / 43 skipped, +3 proved / -3 skipped,
+          #   the same three sites --refine-report-sites attributes.
+          #
+          #   LOWERED 2026-09-16, 43 -> 42: an `if`-shaped `let` RHS now
+          #   pushes the disjunction `(g && n == a) || (!g && n == b)`, which
+          #   discharges List.pfilter's `chunks(xs, csize2)` — the one pure
+          #   local-value-flow site in the stdlib.
+          #
           #   Lower is better — this bound
           #   may only ever be revised DOWN. This is the check that is
           #   actually sensitive to the pass checking less than it used to:
@@ -267,7 +280,7 @@ jobs:
           #   guard_discharges.march, whose `user code` slice is 1 proved /
           #   0 violated / 0 skipped (measured 2026-07-29). Higher is better
           #   — this bound may only ever be revised UP.
-          baseline=46
+          baseline=42
           proved_floor=1
           floor_fixture=specs/lang/types/accept/t118_refine_length_guard_discharges.march
           dune build bin/main.exe

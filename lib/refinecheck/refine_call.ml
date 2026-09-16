@@ -857,10 +857,17 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                   verbatim everywhere — so it reports per-site like the other
                   named reasons above, not throttled. *)
                | Obligation.Unreflectable_predicate _ -> true
+               (* Throttled with the residual family, not reported per site
+                  with the diagnosed ones: the sentence is a fact about the
+                  PREDICATE's shape, so it reads identically at every call
+                  site of the same callee — which is exactly the case the
+                  throttle exists for. *)
+               | Obligation.Nonlinear_goal
                | Obligation.Solver_undecided
                | Obligation.Sort_conflict
                | Obligation.Float_sort_gate -> not !unverified_hinted) ->
       (match r with
+       | Obligation.Nonlinear_goal
        | Obligation.Solver_undecided
        | Obligation.Sort_conflict
        | Obligation.Float_sort_gate -> unverified_hinted := true
@@ -879,6 +886,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
         | Obligation.Unreflectable_predicate _ ->
           Printf.sprintf "%s `%s` on `%s` was NOT verified here.\n%s"
             obligation_noun (pred_str rp.pred) callee (Obligation.reason_detail r)
+        | Obligation.Nonlinear_goal
         | Obligation.Solver_undecided
         | Obligation.Sort_conflict
         | Obligation.Float_sort_gate
@@ -1039,11 +1047,38 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
     let str_lit_tbl : (string, string) Hashtbl.t = Hashtbl.create 4 in
     let str_names : (string, unit) Hashtbl.t = Hashtbl.create 4 in
     let uses_string = ref false in
+    (* `s != "" -> len(s) > 0`, as a GROUND implication per declared string
+       constant rather than a quantified axiom.
+
+       The `Str` sort is uninterpreted and `$strlen` is constrained only by
+       non-negativity, so knowing a value is distinct from the empty literal
+       said nothing about its length: `if s == "" do … else <needs len(s) > 0>`
+       skipped in the else-branch, the one string limitation the docs call out
+       by name.  The missing fact is true of byte length — the empty string is
+       the only string of length 0 — and stating it needs no string theory.
+
+       Ground, not `forall`: the fact is only ever needed about constants this
+       VC already declares, and a quantified axiom is what turned every
+       stdlib Array bounds check into a 1.5 s `unknown` once before (see
+       [Refine_encode.build_measure_preamble]'s note).  Registered from BOTH
+       sides because the empty literal and the variable can be minted in
+       either order. *)
+    let pin_nonempty_len (c : string) (empty_c : string) =
+      if c <> empty_c then
+        push_structural
+          (Smt.Implies
+             ( Smt.Ne (Smt.Const c, Smt.Const empty_c)
+             , Smt.Gt (Smt.App (strlen_fn, [ Smt.Const c ]), Smt.IntLit 0) ))
+    in
     let declare_str_const c =
       if not (Hashtbl.mem str_names c) then begin
         Hashtbl.replace str_names c ();
         uses_string := true;
-        decls := (c, Smt.sdata str_sort) :: !decls
+        decls := (c, Smt.sdata str_sort) :: !decls;
+        (* The empty literal may already have been minted. *)
+        match Hashtbl.find_opt str_lit_tbl "" with
+        | Some empty_c -> pin_nonempty_len c empty_c
+        | None -> ()
       end
     in
     (* A string literal's constant, minted on first sight.  Literal text is NOT
@@ -1078,6 +1113,11 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
             (fun s' c' ->
               if s' <> s then push_structural (Smt.Ne (Smt.Const c, Smt.Const c')))
             str_lit_tbl;
+          (* ...and the mirror of [declare_str_const]'s registration: if THIS
+             is the empty literal, every string constant already declared
+             gains its `!= "" -> len > 0` implication. *)
+          if s = "" then
+            Hashtbl.iter (fun c' () -> pin_nonempty_len c' c) str_names;
           Some (Smt.Const c)
     in
     (* Reflect a STRING-typed actual.  Side effects (declarations, assumptions)

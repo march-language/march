@@ -1828,6 +1828,14 @@ and eval_expr_inner (env : env) (e : expr) : value =
      ([type_name_of_value]: a record's registered shape, a constructor's
      parent type).  On that path the tag is the runtime (short) name.  Only a
      value no table and no shape can name reaches the panicking body. *)
+  | EApp (EVar { txt = "Node.accepts"; _ }, [ _; _ ], sp)
+    when March_ast.Json_dispatch.find sp <> None ->
+    (* `@[remote]`'s tag test (Desugar_remote): the typechecker minted the tag
+       from the witness's parameter type; compare the delivery's tag with it.
+       Unchecked runs have no table and reach `Node.accepts`'s panicking body. *)
+    (match March_ast.Json_dispatch.node_send_rewrite e with
+     | Some e' -> eval_expr env e'
+     | None -> assert false)
   | EApp (EVar { txt = ("Node.send" | "Node.enqueue") as callee; span = fsp } as f, args, sp)
     when March_ast.Json_dispatch.tagged_callee callee (List.length args) <> None ->
     (* `Node.enqueue(q, to, msg, policy)` is the same send through a NodeQueue:

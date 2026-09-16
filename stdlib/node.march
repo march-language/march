@@ -112,6 +112,21 @@ mod Node do
     panic("Node.enqueue: this call was not resolved by the compiler -- the typechecker records every Node.enqueue site and both backends rewrite it to enqueue_tagged; a pipeline entry point skipped that table")
   end
 
+  -- `@[remote]`'s tag test (a generated `<Actor>_Remote.dispatch` calls it):
+  -- does [d] carry a message of the witness's parameter type? The compiler
+  -- rewrites the call to `tag_is(d, "<tag>")` with the tag `Node.send` mints
+  -- for that type; the body is reached only if an entry point skipped that.
+  fn accepts(d : Delivery, witness) : Bool do
+    let _ = d
+    let _ = witness
+    panic("Node.accepts: this call was not resolved by the compiler -- the typechecker records it and both backends rewrite it to tag_is")
+  end
+
+  -- The resolved form of `accepts`.
+  fn tag_is(d : Delivery, tag : String) : Bool do
+    d.type_tag == tag
+  end
+
   -- The receiver's half of the codec: the delivery's payload as JSON, ready
   -- for a `from_json` pinned to the hosted type.
   fn payload(d : Delivery) : Result(JsonValue, String) do

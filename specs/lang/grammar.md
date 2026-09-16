@@ -2145,7 +2145,10 @@ alternatives that each parse a prefix (`nonempty_list(fn_attr)` and/or `AT;
 INVARIANT; LPAREN; expr; RPAREN`) before delegating to `d = actor_decl` and
 then post-processing the resulting `DActor` to fold the attribute/invariant
 in (`parser.mly:284–305`), mirroring how `fn_attr`-prefixed `fn_decl`s work
-(`parser.mly:280–283`). This is a case where the grammar's own structure,
+(`parser.mly:280–283`). The actor attributes the post-processing reads are
+`@compat:<policy>` and `@[remote]` (2026-09-15: sets `actor_remote`, and
+`lib/desugar/desugar_remote.ml` generates `<Actor>_Remote.dispatch`); any
+other attribute is currently ignored. This is a case where the grammar's own structure,
 decoration as a wrapper *around* a plain declaration, not a parameter *of*
 it, is only visible by reading `decl` itself, not `actor_decl` in
 isolation.
