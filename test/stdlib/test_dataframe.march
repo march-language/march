@@ -959,4 +959,140 @@ describe "col_native_min_max" do
   end
 end
 
+-- ── col_describe: zero-row frames ──────────────────────────────────────────
+-- A frame with columns but no rows is not exotic: head(df, 0) and any filter
+-- that matches nothing produce one. col_describe used to hand the empty
+-- column list straight to Stats.mean and friends, which declare
+-- {List(Float) | len(_) > 0} and panic on it. See
+-- specs/progress/2026-09-16-dataframe-col-describe-zero-rows.md.
+describe "col_describe on zero-row frames" do
+  test "Int column with zero rows: count 0, every statistic None" do
+    let df = DataFrame.make_df([IntCol("x", native_int_arr_from_list([1, 2]))])
+    let empty = DataFrame.head(df, 0)
+    assert (DataFrame.row_count(empty) == 0)
+    assert (DataFrame.col_count(empty) == 1)
+    let stats = DataFrame.col_describe(empty)
+    assert (List.length(stats) == 1)
+    match List.nth(stats, 0) do
+    ColStats(nm, tp, cnt, mean_, std_, mn, p25_, med, p75_, mx) -> do
+      assert (nm == "x")
+      assert (tp == "Int")
+      assert (cnt == 0)
+      assert (mean_ == None)
+      assert (std_ == None)
+      assert (mn == None)
+      assert (p25_ == None)
+      assert (med == None)
+      assert (p75_ == None)
+      assert (mx == None)
+      end
+    end
+  end
+
+  test "Float column with zero rows: count 0, every statistic None" do
+    let df = DataFrame.make_df([FloatCol("y", native_float_arr_from_list([1.0, 2.0]))])
+    let empty = DataFrame.head(df, 0)
+    assert (DataFrame.row_count(empty) == 0)
+    let stats = DataFrame.col_describe(empty)
+    match List.nth(stats, 0) do
+    ColStats(nm, tp, cnt, mean_, std_, mn, p25_, med, p75_, mx) -> do
+      assert (nm == "y")
+      assert (tp == "Float")
+      assert (cnt == 0)
+      assert (mean_ == None)
+      assert (std_ == None)
+      assert (mn == None)
+      assert (p25_ == None)
+      assert (med == None)
+      assert (p75_ == None)
+      assert (mx == None)
+      end
+    end
+  end
+
+  test "zero rows reached via a filter that matches nothing" do
+    let df = DataFrame.make_df([IntCol("n", native_int_arr_from_list([1, 2, 3]))])
+    let result = DataFrame.lazy(df)
+      |> DataFrame.filter(Gt(Col("n"), LitInt(99)))
+      |> DataFrame.collect()
+    match result do
+    Err(_) -> assert false
+    Ok(df2) -> do
+      assert (DataFrame.row_count(df2) == 0)
+      let stats = DataFrame.col_describe(df2)
+      assert (List.length(stats) == 1)
+      match List.nth(stats, 0) do
+      ColStats(_, tp, cnt, mean_, _, mn, _, _, _, mx) -> do
+        assert (tp == "Int")
+        assert (cnt == 0)
+        assert (mean_ == None)
+        assert (mn == None)
+        assert (mx == None)
+        end
+      end
+      end
+    end
+  end
+
+  -- summarize() goes through col_describe, so it panicked on a zero-row frame
+  -- too. It reports one row per column with count 0. (The numeric stat columns
+  -- are all-null here and summarize's widening renders those as StrVal("")
+  -- rather than NullVal -- pre-existing behaviour, shared with any String-only
+  -- frame, and out of scope for this fix.)
+  test "summarize on a zero-row frame reports one row with count 0" do
+    let df = DataFrame.make_df([IntCol("x", native_int_arr_from_list([1, 2]))])
+    let empty = DataFrame.head(df, 0)
+    let d = DataFrame.summarize(empty)
+    assert (DataFrame.row_count(d) == 1)
+    -- Match rather than compare: `==` on Value is not structural here (even
+    -- StrVal("x") == StrVal("x") is false), which is why every other test in
+    -- this file destructures Values too.
+    match DataFrame.col_value_at_by_name(d, "column", 0) do
+    StrVal(nm) -> assert (nm == "x")
+    _          -> assert false
+    end
+    match DataFrame.col_value_at_by_name(d, "type", 0) do
+    StrVal(tp) -> assert (tp == "Int")
+    _          -> assert false
+    end
+    match DataFrame.col_value_at_by_name(d, "count", 0) do
+    IntVal(c) -> assert (c == 0)
+    _         -> assert false
+    end
+  end
+
+  -- Control: the guard must not have changed the populated path.
+  test "non-empty Int column still reports real statistics" do
+    let df = DataFrame.make_df([IntCol("x", native_int_arr_from_list([1, 2, 3, 4, 5]))])
+    let stats = DataFrame.col_describe(df)
+    match List.nth(stats, 0) do
+    ColStats(nm, tp, cnt, mean_, _, mn, _, med, _, mx) -> do
+      assert (nm == "x")
+      assert (tp == "Int")
+      assert (cnt == 5)
+      assert (mean_ == Some(3.0))
+      assert (mn == Some(1.0))
+      assert (med == Some(3.0))
+      assert (mx == Some(5.0))
+      end
+    end
+  end
+
+  test "non-empty Float column still reports real statistics" do
+    let df = DataFrame.make_df([FloatCol("y", native_float_arr_from_list([2.0, 4.0, 6.0]))])
+    let stats = DataFrame.col_describe(df)
+    match List.nth(stats, 0) do
+    ColStats(nm, tp, cnt, mean_, _, mn, _, med, _, mx) -> do
+      assert (nm == "y")
+      assert (tp == "Float")
+      assert (cnt == 3)
+      assert (mean_ == Some(4.0))
+      assert (mn == Some(2.0))
+      assert (med == Some(4.0))
+      assert (mx == Some(6.0))
+      end
+    end
+  end
+end
+
 end -- mod TestDataFrame
