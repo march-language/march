@@ -2657,19 +2657,31 @@ mod DataFrame do
     match col do
     IntCol(_, data) -> do
       let xs = List.map(native_int_arr_to_list(data), fn x -> int_to_float(x))
-      ColStats(name, "Int", n,
-        Some(Stats.mean(xs)), Some(Stats.std_dev(xs)),
-        Some(Stats.min_val(xs)), Some(Stats.percentile(xs, 25.0)),
-        Some(Stats.median(xs)), Some(Stats.percentile(xs, 75.0)),
-        Some(Stats.max_val(xs)))
+      -- A frame can have columns and zero rows -- head(df, 0), or a filter that
+      -- matched nothing. Every Stats.* below declares {List(Float) | len(_) > 0}
+      -- and panics on an empty list, so report each statistic as None instead.
+      if List.length(xs) == 0 do
+        ColStats(name, "Int", n, None, None, None, None, None, None, None)
+      else
+        ColStats(name, "Int", n,
+          Some(Stats.mean(xs)), Some(Stats.std_dev(xs)),
+          Some(Stats.min_val(xs)), Some(Stats.percentile(xs, 25.0)),
+          Some(Stats.median(xs)), Some(Stats.percentile(xs, 75.0)),
+          Some(Stats.max_val(xs)))
+      end
       end
     FloatCol(_, data) -> do
       let lst = native_float_arr_to_list(data)
-      ColStats(name, "Float", n,
-        Some(Stats.mean(lst)), Some(Stats.std_dev(lst)),
-        Some(Stats.min_val(lst)), Some(Stats.percentile(lst, 25.0)),
-        Some(Stats.median(lst)), Some(Stats.percentile(lst, 75.0)),
-        Some(Stats.max_val(lst)))
+      -- Same zero-row guard as the IntCol arm above.
+      if List.length(lst) == 0 do
+        ColStats(name, "Float", n, None, None, None, None, None, None, None)
+      else
+        ColStats(name, "Float", n,
+          Some(Stats.mean(lst)), Some(Stats.std_dev(lst)),
+          Some(Stats.min_val(lst)), Some(Stats.percentile(lst, 25.0)),
+          Some(Stats.median(lst)), Some(Stats.percentile(lst, 75.0)),
+          Some(Stats.max_val(lst)))
+      end
       end
     StrCol(_, _) ->
       ColStats(name, "String", n, None, None, None, None, None, None, None)

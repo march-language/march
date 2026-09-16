@@ -386,7 +386,6 @@ git log is authoritative for exact commits.
   nothing when unset.
 
 ### Fixed
-
 - **Refinement checker: a user datatype colliding by bare name with a stdlib
   module's own no longer clobbers it.** `stdlib/ordered_map.march` declares
   `type Tree`; a user `type Tree` joined the same unqualified sort before
@@ -417,6 +416,11 @@ git log is authoritative for exact commits.
 - **`test/stdlib/test_datetime.march` actually runs.** It was on
   `test_stdlib_march.ml`'s known-orphan allowlist, so its tests had never
   executed; it is now registered with the other stdlib test files.
+- `DataFrame.col_describe` (and `summarize`, which uses it) panicked with
+  `Stats.mean: empty list` on a frame that has columns but zero rows — the shape
+  `head(df, 0)` produces, and the shape any filter that matches nothing produces.
+  Numeric columns with no rows now report `count = 0` and `None` for every
+  statistic, which is what the non-numeric columns already did.
 - `Node.send` minted a different wire tag for a message type declared at the entry
   module's top level depending on the entry module's name (`App.Note` rather than
   `Note`), so two separately built nodes could not agree on it. The entry module's name
