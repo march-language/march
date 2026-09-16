@@ -387,6 +387,22 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Refinement checker: a user datatype colliding by bare name with a stdlib
+  module's own no longer clobbers it.** `stdlib/ordered_map.march` declares
+  `type Tree`; a user `type Tree` joined the same unqualified sort before
+  this fix, and whichever was registered last silently overwrote the
+  other's constructors. Datatype sort names are now qualified by declaring
+  module when two or more collide, resolving to the entry/top-level
+  declarant for an unqualified reference from the same top-level code.
+  `@[measure]` names are not (an attempt regressed a proof's z3 time from
+  instant to minutes); a stdlib rename that dodges a measure-name collision
+  (`SortedSet`'s `sorted_set_elts`) is unaffected.
+- **A `@[measure]` returning `Set(a)` over a generic `Tree(a)` now proves
+  when applied to a concrete instance.** Applying such a measure to a
+  `Tree(Int)` term was always a sort-conflict skip; the checker now tracks
+  which of the measure's own type parameters its set element is and
+  resolves it at the concrete instance, both for the instance's own axioms
+  and the query preamble that declares them.
 - **`--pmap-threshold` below 1 is rejected instead of hanging.** A cutoff of
   `0` made `List.pmap` never return; the flag now fails with a message.
 - `Node.send` minted a different wire tag for a message type declared at the entry
