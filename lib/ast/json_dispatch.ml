@@ -74,6 +74,7 @@ let tagged_callee (callee : string) (arity : int) : string option =
   match callee, arity with
   | "Node.send", 3 -> Some "Node.send_tagged"
   | "Node.enqueue", 4 -> Some "Node.enqueue_tagged"
+  | "Node.accepts", 2 -> Some "Node.tag_is"
   | _ -> None
 
 (** Both backends' rewrite of a resolved typed-send site, in one place so
@@ -82,10 +83,20 @@ let tagged_callee (callee : string) (arity : int) : string option =
         ==> Node.send_tagged(peer, to, "<tag>", JsonTo$T.to_json(msg))
       Node.enqueue(q, to, msg, policy)
         ==> Node.enqueue_tagged(q, to, "<tag>", JsonTo$T.to_json(msg), policy)
+      Node.accepts(d, fn (_ : T) -> ())
+        ==> Node.tag_is(d, "<tag>")
     [None] when the site was not recorded (the typechecker then already
     reported it) or the call is not one of the two shapes above. *)
 let node_send_rewrite (e : Ast.expr) : Ast.expr option =
   match e with
+  | Ast.EApp (Ast.EVar { txt = "Node.accepts"; span = fsp }, [ d; _witness ], sp) ->
+    (* The receiver's half: `Node.accepts(d, fn (_ : T) -> ())` ==>
+       `Node.tag_is(d, "<tag of T>")`.  The witness is only a type carrier. *)
+    (match find sp with
+     | None -> None
+     | Some tag ->
+       Some (Ast.EApp (Ast.EVar { txt = "Node.tag_is"; span = fsp },
+                       [ d; Ast.ELit (Ast.LitString tag, sp) ], sp)))
   | Ast.EApp (Ast.EVar { txt; span = fsp }, (dst :: to_ :: msg :: rest as args), sp) ->
     (match tagged_callee txt (List.length args), find sp with
      | Some tagged, Some tag ->

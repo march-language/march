@@ -171,8 +171,11 @@ let stdlib_file_list = [
   "dist_link.march";
   "dist_supervisor.march";
   (* Session transport capability (proof cap + dictionary). References
-     Bytes, so it must sit after bytes.march; it has no dependents. *)
-  "session.march"
+     Bytes, so it must sit after bytes.march. *)
+  "session.march";
+  (* the Session.Ops network transport over a split peer connection: after
+     session (Ops), node_queue, node_send, peer_reader and global_pid. *)
+  "session_node.march"
 ]
 
 let js_only_stdlib_file_list = ["dom.march"; "canvas.march"; "audio.march"]

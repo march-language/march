@@ -1,0 +1,6 @@
+node-b: first ack from node-a
+node-b: leader after merge -> node-b
+node-b: node-a Alive again
+node-b: node-a Dead; registered leader -> node-b
+node-b: peer closed
+node-b: up

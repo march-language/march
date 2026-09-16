@@ -2192,6 +2192,10 @@ let desugar_module ?errors ?(is_entry = true) (m : module_) : module_ =
       let (lead, rest) = split [] m.mod_decls in
       { m with mod_decls = lead @ generated @ rest }
   in
+  (* `@[remote]` actors get an `<Actor>_Remote` module right AFTER the actor
+     (Desugar_remote): its dispatch names the actor's message constructors,
+     which a nested module sees only once the actor is declared. *)
+  let m = { m with mod_decls = Desugar_remote.expand errors m.mod_decls } in
   (* Collect interfaces and fns for satisfy expansion. *)
   let raw_ifaces = collect_interfaces m.mod_decls in
   let raw_fns    = collect_fns m.mod_decls in
