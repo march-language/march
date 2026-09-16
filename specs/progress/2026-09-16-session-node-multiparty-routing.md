@@ -243,7 +243,7 @@ The dune rule pins `MARCH_NUM_SCHEDULERS=8` with that reasoning beside it.
 
 Nothing here is specific to sessions or to this transport — a node per process never has
 more readers than its own — so the underlying constraint is filed separately as
-[[2026-09-16-blocking-accept-starves-the-scheduler]], with this fixture named as the
+[[2026-09-16-park-socket-waits]], with this fixture named as the
 regression test: when accepts and reads park, the `setenv` comes out and it should pass at
 `MARCH_NUM_SCHEDULERS=1`.
 
