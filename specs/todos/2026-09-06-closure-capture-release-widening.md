@@ -111,11 +111,16 @@ Measured shape of what still leaks on `Array.set`'s trie path, per update:
 cell. `trie_update`'s `ascend` also never releases its `stk` spine or the frame
 tuples it walks.
 
-## 5. `node_discovery` has pre-existing memory bugs on main
+## 5. `node_discovery` has pre-existing memory bugs on main — RESOLVED 2026-09-16
 
-Not caused by any of the above, and they make that test a poor oracle. One run
-hung for over an hour. Worth fixing on its own account; until then, compare
-per-signal counts across interleaved runs.
+Closed. The fatal fault was root-caused and fixed on 2026-09-09 (a Perceus
+borrowed-field lookahead gap on nested record projections,
+`specs/progress/2026-09-09-nested-record-field-capture-uaf.md`); the torn-output
+race it had also been quarantined for was fixed on 2026-08-21. It is back on
+`runtest`, soaked 200x per ubuntu CI run, and since 2026-09-16 it is in the ASAN
+gate's curated native corpus. Re-measured here: 60/60 clean, exit 0 and a
+matching sorted golden every time. It is a usable oracle again; the
+"compare per-signal counts across interleaved runs" workaround is retired.
 
 **Superseded 2026-09-09:** the "`Msgpack.encode_val`/`list_append`" framing
 below turned out to be a debugging artifact (an `lldb` backtrace always shows

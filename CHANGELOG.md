@@ -386,6 +386,17 @@ git log is authoritative for exact commits.
   nothing when unset.
 
 ### Fixed
+- **An `if` no longer leaks a value that is dead on one side (compiled).**
+  Every `if`/`else` whose two sides disagreed about a heap value leaked that
+  value, once per evaluation — a String, a list, a record, a closure
+  environment, a SIMD box. Perceus releases a variable in the arms where it is
+  dead provided it is live in some other arm, and "some other arm" was computed
+  over the tagged branches of the case only; an `if` is one tagged branch plus a
+  default, so a value used only on the `else` side was released nowhere. A
+  `match` over a variant has all arms tagged and was always correct. The
+  vector-in-a-list leak reported against the SIMD fix below was this bug, not a
+  gap in the generated drop.
+
 - **A SIMD vector passed to a function that is not tail-recursive, or to a
   closure, no longer leaks (compiled).** Crossing such a parameter boxes the
   vector, and nothing released that box: one 32-byte cell per call. SIMD

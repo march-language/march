@@ -1,0 +1,97 @@
+-- Leak guard: a heap value that is live on one side of an `if` and dead on the
+-- other is released on the dead side.
+--
+-- Perceus's cross-branch dead-variable pass computes "dead here, live
+-- elsewhere" against the union of the arms' live sets, and until 2026-09-16
+-- that union was taken over the TAGGED branches of the ECase only -- the
+-- default arm's live set was left out. An `if` lowers to exactly one tagged
+-- branch plus a default, so a value used only on the `else` side was invisible
+-- to the `then` side's dead set and was never released there. A `match` over a
+-- variant, whose arms are all tagged, was always flat; that asymmetry is why
+-- this survived so long (specs/progress/2026-09-16-if-else-drops-the-dead-side.md).
+--
+-- Four shapes, all of which leaked exactly one object per call:
+--   `param`  an owned PARAMETER, consumed by a Cons on one side only;
+--   `local`  the same for an ELet-bound local;
+--   `ret`    the live side RETURNS the value rather than storing it;
+--   `rec`    the recursive shape the gap was found in -- every call but the
+--            base one consumes its argument, and the base case dropped it.
+-- `tagged` is the control: the same question asked with a `match`, which was
+-- flat before the fix and must stay flat.
+mod Main do
+  needs IO.Console
+
+  type W = Zero | One
+
+  pfn p_pick(s : String, k : Int) : List(String) do
+    if k <= 0 do Nil else Cons(s, Nil) end
+  end
+
+  pfn l_pick(k : Int, n : Int) : List(String) do
+    let s = "x" ++ int_to_string(n)
+    if k <= 0 do Nil else Cons(s, Nil) end
+  end
+
+  pfn r_pick(s : String, k : Int) : String do
+    if k <= 0 do "" else s end
+  end
+
+  pfn keep(s : String, k : Int) : List(String) do
+    if k <= 0 do Nil else Cons(s, keep(s, k - 1)) end
+  end
+
+  pfn t_pick(s : String, w : W) : List(String) do
+    match w do
+      Zero -> Nil
+      One -> Cons(s, Nil)
+    end
+  end
+
+  pfn p_loop(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else p_loop(n - 1, acc + List.length(p_pick("x" ++ int_to_string(n), 0))) end
+  end
+
+  pfn l_loop(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else l_loop(n - 1, acc + List.length(l_pick(0, n))) end
+  end
+
+  pfn r_loop(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else r_loop(n - 1, acc + string_length(r_pick("x" ++ int_to_string(n), 0))) end
+  end
+
+  pfn k_loop(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else k_loop(n - 1, acc + List.length(keep("x" ++ int_to_string(n), 3))) end
+  end
+
+  pfn t_loop(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else t_loop(n - 1, acc + List.length(t_pick("x" ++ int_to_string(n), Zero))) end
+  end
+
+  pfn flat(label : String, before : Int) : () do
+    let grew = live_allocs() - before
+    println(label ++ ", flat: " ++ bool_to_string(grew < 200))
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let n = 20000
+    let a = live_allocs()
+    let ra = p_loop(n, 0)
+    flat("owned param dead on one side = " ++ int_to_string(ra), a)
+    let b = live_allocs()
+    let rb = l_loop(n, 0)
+    flat("local dead on one side = " ++ int_to_string(rb), b)
+    let c = live_allocs()
+    let rc = r_loop(n, 0)
+    flat("live side returns it = " ++ int_to_string(rc), c)
+    let d = live_allocs()
+    let rd = k_loop(n, 0)
+    flat("recursive, dead in the base case = " ++ int_to_string(rd), d)
+    let e = live_allocs()
+    let re = t_loop(n, 0)
+    flat("control: match, all arms tagged = " ++ int_to_string(re), e)
+  end
+end

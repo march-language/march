@@ -14,7 +14,8 @@ let $jp_clo2 : () -> '_ = alloc $Clo_$jp1$1($jp1$apply$1) in
 let n : Int = x in
 let $guard3 : Bool = <(n, 0) in
 case $guard3 of
-  true() -> "neg"
+  true() -> dec_rc $jp_clo2;
+"neg"
   _ -> call_ptr $jp_clo2()
 
 ## classify
@@ -23,7 +24,8 @@ fn classify(x : Int) : String =
 let n : Int = x in
 let $guard8 : Bool = >(n, 0) in
 case $guard8 of
-  true() -> "pos"
+  true() -> dec_rc $jp_clo7;
+"pos"
   _ -> call_ptr $jp_clo7()
 
 ## main

@@ -4,7 +4,8 @@
 fn both(owned : String, borrowed : String, n : Int) : String =
   let $t1 : Bool = >(n, 0) in
 case $t1 of
-  True() -> owned
+  True() -> dec_rc borrowed;
+owned
   _ -> dec_rc owned;
 borrowed
 
