@@ -386,6 +386,12 @@ git log is authoritative for exact commits.
   nothing when unset.
 
 ### Fixed
+- **A SIMD vector passed to a function that is not tail-recursive, or to a
+  closure, no longer leaks (compiled).** Crossing such a parameter boxes the
+  vector, and nothing released that box: one 32-byte cell per call. SIMD
+  builtins now borrow the vectors they read, which is what makes the release
+  safe to place.
+
 - **Refinement checker: a user datatype colliding by bare name with a stdlib
   module's own no longer clobbers it.** `stdlib/ordered_map.march` declares
   `type Tree`; a user `type Tree` joined the same unqualified sort before

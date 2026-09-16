@@ -1,0 +1,3 @@
+non-tail-recursive vector parameter = 80000., flat: true
+closure with a vector parameter = 80000., flat: true
+vector stored into a list = 60000

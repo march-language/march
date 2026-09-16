@@ -1,0 +1,73 @@
+-- Leak guard: a SIMD vector crossing a `ptr`-slotted parameter is released.
+--
+-- A vector value lives in a register, but a parameter slot that is not a
+-- native TCO vector slot is `ptr`, so the call site boxes the argument
+-- (march_simd_alloc, 32 bytes). Until 2026-09-16 nobody released that box for
+-- a callee outside `ctx.native_vec_params`: one leaked cell per call to any
+-- non-tail-recursive function or closure with a vector parameter
+-- (specs/progress/2026-09-16-simd-vector-box-released.md).
+--
+-- The two legs are the two shapes that leaked, and they are fixed by opposite
+-- halves of the same ownership answer:
+--   - `nt` only READS its vector, so borrow inference marks the parameter
+--     borrowed and the CALL SITE releases the box it made;
+--   - a closure's apply fn owns every parameter (the closure ABI), so the
+--     CALLEE releases it at last use.
+-- `keep` is the double-free witness: it stores the vector into a list, which
+-- then owns the box, so releasing at the call site would free a live element.
+-- Its length is printed rather than asserted flat, because the box a vector
+-- reaches a list field in is NOT released when that list dies -- a separate,
+-- pre-existing gap measured here and filed as
+-- specs/todos/2026-09-16-simd-box-in-an-aggregate-field-is-never-released.md.
+-- What this leg guards is the crash direction: an over-eager call-site release
+-- frees a live element, which shows up as a wrong length or a fault
+-- (test/native/simd_vector_escape_arg.march pins the same direction at
+-- 2,000,000 calls).
+mod Main do
+  needs IO.Console
+
+  pfn nt(v : F32x4, k : Int) : Float do
+    if k <= 0 do Simd.sum_f32x4(v)
+    else Simd.sum_f32x4(v) +. nt(v, k - 1) *. 0.0
+    end
+  end
+
+  pfn call_clo(f : (F32x4) -> Float, n : Int, acc : Float) : Float do
+    if n <= 0 do acc else
+      call_clo(f, n - 1, acc +. f(Simd.splat_f32x4(1.0)))
+    end
+  end
+
+  pfn keep(v : F32x4, k : Int) : List(F32x4) do
+    if k <= 0 do Nil else Cons(v, keep(v, k - 1)) end
+  end
+
+  pfn loop_nt(n : Int, acc : Float) : Float do
+    if n <= 0 do acc
+    else loop_nt(n - 1, acc +. nt(Simd.splat_f32x4(1.0), 2)) end
+  end
+
+  pfn loop_keep(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else loop_keep(n - 1, acc + List.length(keep(Simd.splat_f32x4(1.0), 3))) end
+  end
+
+  pfn flat(label : String, before : Int, r : String) : () do
+    let grew = live_allocs() - before
+    println(label ++ " = " ++ r ++ ", flat: " ++ bool_to_string(grew < 200))
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let n = 20000
+    let a = live_allocs()
+    flat("non-tail-recursive vector parameter", a, float_to_string(loop_nt(n, 0.0)))
+    let fs = [fn (v : F32x4) -> Simd.sum_f32x4(v)]
+    let f = match fs do
+      Cons(h, _) -> h
+      Nil -> fn (v : F32x4) -> 0.0
+    end
+    let b = live_allocs()
+    flat("closure with a vector parameter", b, float_to_string(call_clo(f, n, 0.0)))
+    println("vector stored into a list = " ++ int_to_string(loop_keep(n, 0)))
+  end
+end
