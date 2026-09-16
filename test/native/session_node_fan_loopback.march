@@ -51,6 +51,12 @@ mod SessionNodeFan do
     end
   end
 
+  -- Progress to stderr: stdout is the golden, but if this ever stalls the
+  -- CI log should say WHICH phase each role reached rather than nothing.
+  pfn phase(role : String, what : String) : () do
+    IO.warn("[" ++ role ++ "] " ++ what)
+  end
+
   pfn note(role : String, line : String) : () do
     let t = log()
     Vault.set(t, role, List.append(Vault.get_or(t, role, Nil), Cons(line, Nil)))
@@ -86,51 +92,68 @@ mod SessionNodeFan do
   -- ── role A: sends to C (late), then hears back ──────────────────────────
   fn run_a(c : Cap(IO), listen_fd : Int) : Int do
     let conn = accept_on(listen_fd, "node-a")
+    phase("A", "accepted C")
     let p0 = SessionNode.party(Fan_Msg.role_A(), "node-a", fn _ep -> note("A", "A: closed"))
     let p = SessionNode.accept_from(p0, conn)
+    phase("A", "joined C")
     let s = Session.attach(c, SessionNode.ops(p))
     -- The delay that makes the race deterministic: B's message reaches C
     -- while C is still waiting for this one.
     let _ = Process.run("sleep", Cons("0.3", Nil))
     note("A", "A: sends 7")
     let st1 = Fan_A.send_Msg_A_C_1(s, Fan_A.register(s, 0), 7)
+    phase("A", "sent")
     let _ = Fan_A.recv_Msg_C_A_1(s, st1, fn (ok, st2) ->
       note("A", "A: got " ++ bool_to_string(ok))
       Fan_A.close(s, st2))
+    phase("A", "serving")
     SessionNode.serve(p)
+    phase("A", "served; finishing")
     SessionNode.finish(p)
     tcp_close(listen_fd)
+    phase("A", "done")
     0
   end
 
   -- ── role B: sends to C at once ──────────────────────────────────────────
   fn run_b(c : Cap(IO), port_c : Int) : Int do
     let conn = connect_retry(port_c, "node-b", 100)
+    phase("B", "connected to C")
     let p0 = SessionNode.party(Fan_Msg.role_B(), "node-b", fn _ep -> note("B", "B: closed"))
     let p = SessionNode.connect_to(p0, Fan_Msg.role_C(), conn)
+    phase("B", "joined C")
     let s = Session.attach(c, SessionNode.ops(p))
     note("B", "B: sends 9")
     let _ = Fan_B.close(s, Fan_B.send_Msg_B_C_1(s, Fan_B.register(s, 0), 9))
+    phase("B", "serving")
     SessionNode.serve(p)
+    phase("B", "served; finishing")
     SessionNode.finish(p)
+    phase("B", "done")
     0
   end
 
   -- ── role C: receives A then B, answers A ────────────────────────────────
   fn run_c(c : Cap(IO), port_a : Int, listen_fd : Int) : Int do
     let conn_a = connect_retry(port_a, "node-c", 100)
+    phase("C", "connected to A")
     let p0 = SessionNode.party(Fan_Msg.role_C(), "node-c", fn _ep -> note("C", "C: closed"))
     let p1 = SessionNode.connect_to(p0, Fan_Msg.role_A(), conn_a)
+    phase("C", "joined A")
     let p = SessionNode.accept_from(p1, accept_on(listen_fd, "node-c"))
+    phase("C", "joined B")
     let s = Session.attach(c, SessionNode.ops(p))
     let _ = Fan_C.recv_Msg_A_C_1(s, Fan_C.register(s, 0), fn (a, st1) ->
       note("C", "C: got " ++ int_to_string(a) ++ " from A")
       Fan_C.recv_Msg_B_C_1(s, st1, fn (b, st2) ->
         note("C", "C: got " ++ int_to_string(b) ++ " from B")
         Fan_C.close(s, Fan_C.send_Msg_C_A_1(s, st2, a + b == 16))))
+    phase("C", "serving")
     SessionNode.serve(p)
+    phase("C", "served; finishing")
     SessionNode.finish(p)
     tcp_close(listen_fd)
+    phase("C", "done")
     0
   end
 

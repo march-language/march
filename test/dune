@@ -6013,7 +6013,10 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
         native/session_node_fan_loopback.march)
    (setenv MARCH_NUM_SCHEDULERS 8
     (with-stdout-to native_session_node_fan_loopback.out
-         (system "./native_session_node_fan_loopback"))))))
+         ; perl, not `timeout`: coreutils is not on every macOS runner. A
+         ; stall here used to burn the whole 30-minute step and report
+         ; nothing; now it fails in 90s with each role's phase on stderr.
+         (system "perl -e 'alarm 90; exec @ARGV' ./native_session_node_fan_loopback"))))))
 
 (rule
  (alias runtest)
