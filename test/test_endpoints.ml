@@ -219,7 +219,7 @@ let replayed = bad "sending twice on one state is a linearity error (replay)" "i
 
 let abandoned = bad "registering and never driving the session is a linearity error (abandon)" "was never used" (wrap (stream ^ {|
   fn go(c : Cap(IO)) do
-    let s = Session.attach(c, { register: fn (_a, r) -> r, emit: fn (e, _t, _m) -> e, suspend: fn (e, _h) -> e, close: fn _e -> () })
+    let s = Session.attach(c, { register: fn (_a, r) -> r, emit: fn (e, _t, _m) -> e, suspend: fn (e, _f, _h) -> e, close: fn _e -> () })
     let st = Stream_Prod.register(s, 0)
     ()
   end

@@ -1,0 +1,187 @@
+-- `SessionNode` with THREE roles on three connections, and the arrival race
+-- two parties never have (specs/progress/2026-09-16-session-node-multiparty-routing.md).
+--
+-- Protocol `Fan`: A and B both send to C, C answers A. C therefore receives
+-- from two different peers, in the order the protocol fixes (A first), over
+-- two independent TCP connections -- and A sleeps before its send, so B's
+-- message provably arrives FIRST. Without the expected-sender argument to
+-- `Session.suspend` and the transport's parking, C's continuation (which
+-- wants A's) would be handed B's and the generated catch-all would panic
+-- ("Fan, role C: unexpected message"). With them, B's delivery waits until C
+-- has asked for it.
+--
+-- Roles are numbered by first appearance: A = 1, C = 2, B = 3. The connect
+-- rule is "for roles i < j, i listens and j connects", so A listens (C
+-- connects) and C listens (B connects). Never spell the numbers: the
+-- generated `Fan_Msg.role_*()` are the truth.
+--
+-- The three roles run as three tasks in ONE process over loopback, the way
+-- node_send_typed_loopback runs two. That needs MARCH_NUM_SCHEDULERS=8 (set
+-- by the dune rule): `tcp_accept` and the socket reads block the OS thread
+-- they run on, and three roles in one process keep six of them blocked at
+-- once, so a scheduler with fewer threads has none left to run an actor turn
+-- (measured: 4 threads hang, 8 do not). A node per process -- the two-node
+-- scenarios -- never has more readers than its own. Each records its own lines; main prints
+-- them per role after every task has ended, so the trace is deterministic
+-- although the tasks interleave. Compiled only (the interpreter parks on the
+-- loopback accept, as every socket fixture here does).
+mod SessionNodeFan do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Process
+  needs IO.Random
+  needs IO.Spawn
+  needs Session.Live
+
+  @[endpoints]
+  protocol Fan do
+    A -> C : Int
+    B -> C : Int
+    C -> A : Bool
+  end
+
+  pfn secret() do "fan-secret" end
+  pfn log() do
+    match Vault.whereis("fan_log") do
+      Some(t) -> t
+      None -> Vault.new("fan_log")
+    end
+  end
+
+  -- Progress to stderr: stdout is the golden, but if this ever stalls the
+  -- CI log should say WHICH phase each role reached rather than nothing.
+  pfn phase(role : String, what : String) : () do
+    IO.warn("[" ++ role ++ "] " ++ what)
+  end
+
+  pfn note(role : String, line : String) : () do
+    let t = log()
+    Vault.set(t, role, List.append(Vault.get_or(t, role, Nil), Cons(line, Nil)))
+  end
+
+  pfn print_role(role : String) : () do
+    let _ = List.map(Vault.get_or(log(), role, Nil), fn l -> println(l))
+    ()
+  end
+
+  pfn identity(name : String) do NodeIdentity.make(name, "pk-" ++ name, 1) end
+
+  pfn connect_retry(port : Int, name : String, attempts : Int) : Peer do
+    match ClusterConn.connect_split(PeerRegistry.empty(), "127.0.0.1", port, identity(name), secret()) do
+      Ok((_reg, p)) -> p
+      Err(e) ->
+        if attempts <= 1 do
+          panic(name ++ " connect: " ++ e)
+        else
+          let _ = Process.run("sleep", Cons("0.05", Nil))
+          connect_retry(port, name, attempts - 1)
+        end
+    end
+  end
+
+  pfn accept_on(listen_fd : Int, name : String) : Peer do
+    match ClusterConn.accept_split(PeerRegistry.empty(), listen_fd, identity(name), secret()) do
+      Ok((_reg, p)) -> p
+      Err(e) -> panic(name ++ " accept: " ++ e)
+    end
+  end
+
+  -- ── role A: sends to C (late), then hears back ──────────────────────────
+  fn run_a(c : Cap(IO), listen_fd : Int) : Int do
+    let conn = accept_on(listen_fd, "node-a")
+    phase("A", "accepted C")
+    let p0 = SessionNode.party(Fan_Msg.role_A(), "node-a", fn _ep -> note("A", "A: closed"))
+    let p = SessionNode.accept_from(p0, conn)
+    phase("A", "joined C")
+    let s = Session.attach(c, SessionNode.ops(p))
+    -- The delay that makes the race deterministic: B's message reaches C
+    -- while C is still waiting for this one.
+    let _ = Process.run("sleep", Cons("0.3", Nil))
+    note("A", "A: sends 7")
+    let st1 = Fan_A.send_Msg_A_C_1(s, Fan_A.register(s, 0), 7)
+    phase("A", "sent")
+    let _ = Fan_A.recv_Msg_C_A_1(s, st1, fn (ok, st2) ->
+      note("A", "A: got " ++ bool_to_string(ok))
+      Fan_A.close(s, st2))
+    phase("A", "serving")
+    SessionNode.serve(p)
+    phase("A", "served; finishing")
+    SessionNode.finish(p)
+    tcp_close(listen_fd)
+    phase("A", "done")
+    0
+  end
+
+  -- ── role B: sends to C at once ──────────────────────────────────────────
+  fn run_b(c : Cap(IO), port_c : Int) : Int do
+    let conn = connect_retry(port_c, "node-b", 100)
+    phase("B", "connected to C")
+    let p0 = SessionNode.party(Fan_Msg.role_B(), "node-b", fn _ep -> note("B", "B: closed"))
+    let p = SessionNode.connect_to(p0, Fan_Msg.role_C(), conn)
+    phase("B", "joined C")
+    let s = Session.attach(c, SessionNode.ops(p))
+    note("B", "B: sends 9")
+    let _ = Fan_B.close(s, Fan_B.send_Msg_B_C_1(s, Fan_B.register(s, 0), 9))
+    phase("B", "serving")
+    SessionNode.serve(p)
+    phase("B", "served; finishing")
+    SessionNode.finish(p)
+    phase("B", "done")
+    0
+  end
+
+  -- ── role C: receives A then B, answers A ────────────────────────────────
+  fn run_c(c : Cap(IO), port_a : Int, listen_fd : Int) : Int do
+    let conn_a = connect_retry(port_a, "node-c", 100)
+    phase("C", "connected to A")
+    let p0 = SessionNode.party(Fan_Msg.role_C(), "node-c", fn _ep -> note("C", "C: closed"))
+    let p1 = SessionNode.connect_to(p0, Fan_Msg.role_A(), conn_a)
+    phase("C", "joined A")
+    let p = SessionNode.accept_from(p1, accept_on(listen_fd, "node-c"))
+    phase("C", "joined B")
+    let s = Session.attach(c, SessionNode.ops(p))
+    let _ = Fan_C.recv_Msg_A_C_1(s, Fan_C.register(s, 0), fn (a, st1) ->
+      note("C", "C: got " ++ int_to_string(a) ++ " from A")
+      Fan_C.recv_Msg_B_C_1(s, st1, fn (b, st2) ->
+        note("C", "C: got " ++ int_to_string(b) ++ " from B")
+        Fan_C.close(s, Fan_C.send_Msg_C_A_1(s, st2, a + b == 16))))
+    phase("C", "serving")
+    SessionNode.serve(p)
+    phase("C", "served; finishing")
+    SessionNode.finish(p)
+    tcp_close(listen_fd)
+    phase("C", "done")
+    0
+  end
+
+  fn main(c : Cap(IO)) do
+    let listen_a = match tcp_listen(0) do
+      Ok(fd) -> fd
+      Err(e) -> panic("listen a: " ++ e)
+    end
+    let listen_c = match tcp_listen(0) do
+      Ok(fd) -> fd
+      Err(e) -> panic("listen c: " ++ e)
+    end
+    let port_a = match tcp_local_port(listen_a) do
+      Ok(p) -> p
+      Err(e) -> panic("port a: " ++ e)
+    end
+    let port_c = match tcp_local_port(listen_c) do
+      Ok(p) -> p
+      Err(e) -> panic("port c: " ++ e)
+    end
+    let ta = task_spawn(fn _ -> run_a(c, listen_a))
+    let tc = task_spawn(fn _ -> run_c(c, port_a, listen_c))
+    let tb = task_spawn(fn _ -> run_b(c, port_c))
+    let _ = task_await(ta)
+    let _ = task_await(tb)
+    let _ = task_await(tc)
+    print_role("A")
+    print_role("B")
+    print_role("C")
+  end
+end

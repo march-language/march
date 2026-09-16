@@ -12,7 +12,15 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
-
+- **`SessionNode` routes by role, so an `@[endpoints]` protocol can run its roles on
+  three or more nodes.** `SessionNode.party(my_role, node_id, on_close)` plus
+  `accept_from` / `connect_to` per peer; `emit` picks the connection from the message's
+  destination role and `serve` reads every peer. The two-node `SessionNode.open` is
+  unchanged, and a single-peer party still routes everything to its one connection.
+- **`Session.Ops.suspend` takes the role its continuation expects** (0 = any). Messages
+  from different peers race, so a transport with several connections parks a delivery
+  that arrives before the continuation that wants it. The projector knows the expected
+  sender at every receive and now passes it, so generated endpoint code needs no change.
 - **An `s == ""` guard now establishes `len(s) > 0` in the else-branch.**
   Previously documented as a gap: the checker knew only that `s` differed from
   the empty literal, and a downstream `{String | len(_) > 0}` contract was
