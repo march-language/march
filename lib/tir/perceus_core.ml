@@ -1413,9 +1413,40 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
       | Tir.AVar v -> Some v.Tir.v_name
       | _ -> None
     in
-    let union_live_br = List.fold_left (fun acc (_, _, lb, _) ->
-      StringSet.union acc lb
-    ) StringSet.empty branches_processed in
+    (* The default arm is processed HERE, before the union, because its live
+       set is part of the "live elsewhere" half of "dead here, live
+       elsewhere".  Leaving it out made the union a union over the TAGGED
+       branches only, so a variable live ONLY in the default arm was invisible
+       to every other arm's [dead_here] and was never released there.  That is
+       exactly the shape an `if` lowers to — one tagged branch plus a default —
+       so `if k <= 0 do Nil else Cons(s, Nil) end` leaked [s] on the `Nil`
+       side, on EVERY path through an if/else whose two sides disagree about a
+       heap value.  A `match` over a variant, whose arms are all tagged, was
+       always flat; that asymmetry is what made this survive so long.
+       The [insert_rc_expr] calls still run branches-then-default, so the
+       fresh-name counter sees the same order it always did. *)
+    let default_processed = Option.map (fun d ->
+      let (d_rc, d_lb) = insert_rc_expr env d live_after in
+      (* Default branch: no constructor tag known, use original type.
+         Only free the scrutinee if the branch body does NOT use it directly —
+         if the body uses it, ownership transfers into the body. *)
+      let d_rc' = (match a with
+       | Tir.AVar v when needs_rc env v.Tir.v_ty
+                      && not (StringSet.mem v.Tir.v_name live_after)
+                      && not (name_free_in v.Tir.v_name d) ->
+         Tir.ESeq (decrc_for env v (Tir.AVar v), d_rc)
+       | _ -> d_rc)
+      in
+      (d_rc', d_lb)
+    ) default in
+    let union_live_br =
+      let from_branches =
+        List.fold_left (fun acc (_, _, lb, _) -> StringSet.union acc lb)
+          StringSet.empty branches_processed in
+      match default_processed with
+      | Some (_, d_lb) -> StringSet.union from_branches d_lb
+      | None -> from_branches
+    in
     let add_cross_decrcs (live_before_br : live_set) (bound : StringSet.t)
                          (body : Tir.expr) : Tir.expr =
       let dead_here =
@@ -1443,21 +1474,10 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
       let body_with_cross = add_cross_decrcs live_before_br bound body_with_scrut in
       { br with Tir.br_body = body_with_cross }
     ) branches_processed in
-    let default' = Option.map (fun d ->
-      let (d_rc, d_lb) = insert_rc_expr env d live_after in
-      (* Default branch: no constructor tag known, use original type.
-         Only free the scrutinee if the branch body does NOT use it directly —
-         if the body uses it, ownership transfers into the body. *)
-      let d_rc' = (match a with
-       | Tir.AVar v when needs_rc env v.Tir.v_ty
-                      && not (StringSet.mem v.Tir.v_name live_after)
-                      && not (name_free_in v.Tir.v_name d) ->
-         Tir.ESeq (decrc_for env v (Tir.AVar v), d_rc)
-       | _ -> d_rc)
-      in
+    let default' = Option.map (fun (d_rc', d_lb) ->
       (* Cross-branch EDecRC for the default arm too *)
       add_cross_decrcs d_lb StringSet.empty d_rc'
-    ) default in
+    ) default_processed in
     (* Compute live_before from the original liveness *)
     let lb = live_before e live_after in
     (Tir.ECase (a, branches', default'), lb)

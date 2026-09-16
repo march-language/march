@@ -125,6 +125,13 @@ native_curated=(
   closure_capture_release_probe
   closure_capture_hof_loop_probe
   closure_call_arg_ownership_probe
+  # an `if` whose two sides disagree about a heap value: the release on the dead
+  # side was missing entirely until 2026-09-16
+  # (specs/progress/2026-09-16-if-else-drops-the-dead-side.md). It is here for
+  # the OTHER direction — a release that fires on a path where the value is
+  # still owned elsewhere is a use-after-free, and detect_leaks=0 means the
+  # probe's own flat assertions are what cover the leak half.
+  if_branch_dead_value_probe
   # the Msgpack/actor/socket program whose guard-page crash is why the
   # closure deep-drop gate exists at all
   node_discovery
