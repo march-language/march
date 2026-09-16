@@ -3076,6 +3076,16 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
       | Some e -> Hashtbl.replace set_measure_elem name e
       | None -> ())
     mfns;
+  (* P3: which of the argument ADT's own type parameters a generic set
+     measure's element names (`Tree(a)`'s `a`, param 0) — see
+     [set_measure_elem_param]. *)
+  Hashtbl.reset set_measure_elem_param;
+  List.iter
+    (fun (name, fd) ->
+      match set_ret_elem_param fd with
+      | Some i -> Hashtbl.replace set_measure_elem_param name i
+      | None -> ())
+    mfns;
   (* A set-valued measure is LOGIC: it has no runtime meaning, so a call in
      expression position anywhere in the module is an error, not a value. *)
   (* Every container of expression-position code is walked — plain `fn`

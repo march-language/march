@@ -355,6 +355,12 @@ git log is authoritative for exact commits.
   `@[measure]` names are not (an attempt regressed a proof's z3 time from
   instant to minutes); a stdlib rename that dodges a measure-name collision
   (`SortedSet`'s `sorted_set_elts`) is unaffected.
+- **A `@[measure]` returning `Set(a)` over a generic `Tree(a)` now proves
+  when applied to a concrete instance.** Applying such a measure to a
+  `Tree(Int)` term was always a sort-conflict skip; the checker now tracks
+  which of the measure's own type parameters its set element is and
+  resolves it at the concrete instance, both for the instance's own axioms
+  and the query preamble that declares them.
 - **`SortedSet.from_list`, `union`, `intersect` and `difference` work.** All
   four passed their arguments to `List.fold_left` in the wrong order with a
   curried callback, so `SortedSet.from_list([5, 3, 9, 3, 1], cmp)` panicked

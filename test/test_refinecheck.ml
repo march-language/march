@@ -16314,7 +16314,6 @@ let measure_definition_suite =
         Alcotest.(check bool) "the global preamble carries no quantifier" false (contains q "forall");
         Alcotest.(check bool) "recursive depth: no define-fun" false (contains q "(define-fun depth ")) ]
 
-
 (* ── Module-qualified datatype sort names (P2, 2026-09-15) ─────────────────
    specs/progress/2026-09-15-refine-sort-and-measure-names-unqualified.md.
    A user's own top-level `type Tree` collides in bare name with the real
@@ -16415,6 +16414,63 @@ let module_qualified_measure_and_sort_suite =
           (ledger_counts3_with_ordered_map (fixture ~pred:"member(99, tree_elts(_))")));
   ]
 
+(* ── Generic set-measure instances (P3, 2026-09-15) ────────────────────────
+   specs/progress/2026-09-15-generic-set-measure-instances.md.  Reuses
+   [avl_suite]'s own `Tree(a)`/`tree_elts` shape (a generic set-valued
+   measure) but applies it at the CONCRETE instance `Tree(Int)` via a
+   PARAMETER refinement (`need`, called with a literal) — the same idiom
+   [typed_instances_suite] uses for its own (Int-valued) generic-measure-at-
+   an-instance fixtures, so this pins the analogous SET-valued case against
+   the same style of witness.
+
+   Before the fix this was a `Sort_conflict` skip ([resolve_sorts_exact]
+   gave up on a `Set(a)` measure applied to a non-`Elem` instance, `raise
+   Exit`).  Fixing THAT alone still left it a skip: once resolved, the
+   instance's `MSet$Int` sort was referenced (`declare-fun tree_elts$…
+   (M_Tree$Int) MSet$Int`) but never `define-sort`ed anywhere in the query
+   preamble — the instance text is opaque SMT-LIB, not a structural
+   [Smt.SSet] node [set_preamble]'s scan can see — so z3 saw an undefined
+   sort name and the checker mis-attributed the failure to
+   [Undecided]'s `opaque-application` (a bare [is_measure] lookup does not
+   recognise an instance-qualified symbol either).  Fixed by
+   [Refine_encode.measure_instance_set_elems] /
+   [query_instance_preamble]'s own `set_defs`, emitted BEFORE the instance
+   text that needs them.  Both witnesses below SKIP before the fix and
+   resolve correctly (proved / refuted) after it. *)
+let generic_set_measure_instance_suite =
+  let m body = "mod GSM do\n" ^ body ^ "\nend\n" in
+  let tree_elts_over_a =
+    String.concat "\n"
+      [ "  type Tree(a) = Leaf | Node(Tree(a), a, Tree(a))";
+        "";
+        "  @[measure]";
+        "  fn tree_elts(t : Tree(a)) : Set(a) do";
+        "    match t do";
+        "      Leaf -> empty";
+        "      Node(l, k, r) -> union(tree_elts(l), union(singleton(k), tree_elts(r)))";
+        "    end";
+        "  end";
+        ""
+      ]
+  in
+  let fixture ~pred =
+    m (tree_elts_over_a
+       ^ String.concat "\n"
+           [ Printf.sprintf "  fn need(t : {Tree(Int) | %s}) : Int do 0 end" pred;
+             "  fn ok() : Int do need(Node(Leaf, 3, Leaf)) end";
+             ""
+           ])
+  in
+  [ gated "a generic set measure applied at a concrete Tree(Int) instance proves a literal member"
+      (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (1, 0, 0)
+          (ledger_counts3 (fixture ~pred:"member(3, tree_elts(_))")));
+
+    gated "...and refutes a literal that is not a member, not merely skipping" (fun () ->
+        Alcotest.(check (triple int int int)) "ledger" (0, 1, 0)
+          (ledger_counts3 (fixture ~pred:"member(99, tree_elts(_))")));
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -16478,6 +16534,7 @@ let () =
       ("measure-base-case-axiom", measure_base_case_axiom_suite);
       ("measure-scalar-field-warn", measure_scalar_field_suite);
       ("module-qualified-measure-and-sort", module_qualified_measure_and_sort_suite);
+      ("generic-set-measure-instance", generic_set_measure_instance_suite);
       ("post-compose-closed", post_compose_closed_suite);
       ("post-compose-relational", post_compose_relational_suite);
       ("stdlib-nth-contract", stdlib_nth_contract_suite);
