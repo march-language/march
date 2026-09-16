@@ -97,11 +97,16 @@ fn chunks(xs : List(a), size : {Int | _ > 0}) : List(List(a)) do ... end
 fn count(xs : List(a)) : {Int | _ >= 0} do List.length(xs) end
 ```
 
-The supported predicate fragment is **`Int`/`Bool` linear arithmetic**:
-`+ - *` (multiplication by a literal), the comparisons `== != < <= > >=`, the
-connectives `&& || not`, integer/bool literals, and **measures** (below).
-`Bool` and `Float` values are refinable too; see
-[Bool and Float Refinements](#bool-and-float-refinements).
+The supported predicate fragment is **`Int`/`Bool` arithmetic**: `+ - *`, the
+comparisons `== != < <= > >=`, the connectives `&& || not`, integer/bool
+literals, and **measures** (below). `Bool` and `Float` values are refinable
+too; see [Bool and Float Refinements](#bool-and-float-refinements).
+
+Multiplying by a literal keeps the question in linear arithmetic, where the
+solver always has an answer. You can multiply two variables as well — `v * v > 0`
+is just `v != 0` over the integers — but there the solver may run out of road, and
+a question it can't settle is skipped (reported as `nonlinear-goal`), never turned
+into a complaint. Division (`/`, `%`) isn't part of the fragment.
 
 ---
 
@@ -187,19 +192,21 @@ but next_slot(15) returns 16.
 ### Why running it matters
 
 The formula the solver sees is an *approximation* of your program. Anything March
-can't translate into logic — nonlinear arithmetic, a call it can't see inside — is
-dropped from the question rather than guessed at. That keeps proofs honest, but it
-means a raw "here's a failing input" answer can describe a situation your program
-never actually reaches:
+can't translate into logic — a call it can't see inside, symbolic float arithmetic
+— is dropped from the question rather than guessed at. That keeps proofs honest,
+but it means a raw "here's a failing input" answer can describe a situation your
+program never actually reaches:
 
 ```march
+fn magnitude(x : Int) : Int do if x < 0 do 0 - x else x end end
+
 fn always_one(x : Int) : {Int | _ >= 0} do
-  if x * x >= 0 do 1 else x end     -- the else branch can never run
+  if magnitude(x) >= 0 do 1 else x end     -- the else branch can never run
 end
 ```
 
-`x * x >= 0` is nonlinear, so the guard is dropped, and the solver duly "finds" a
-failure down the `else` branch. Printing that would be a false alarm on correct
+`magnitude` has no contract, so the guard tells the solver nothing and is dropped;
+it duly "finds" a failure down the `else` branch. Printing that would be a false alarm on correct
 code — the one thing this design refuses to do. Running the candidate returns `1`,
 the predicate holds, the answer is thrown away, and **the checker stays quiet**.
 

@@ -68,16 +68,19 @@ type reason =
      detail, not the slug, so `--refine-report` groups all unconstrained
      subjects into one bucket instead of one bucket per variable.
 
-     A third variant, [Nonlinear_goal], was cut before it shipped: the only
-     [smt_of] used to build a goal never produces [Smt.Mul] for two
-     non-literal operands (it returns [None], so such a predicate fails
-     earlier as [Unreflectable_predicate]), so the diagnosis was dead code
-     with no reachable fixture.  Making it reachable would mean teaching
-     [smt_of] to reflect general multiplication, which sends previously
-     unreflectable predicates to z3 for the first time — an improvement in
-     checker PRECISION, out of scope for a task that only explains existing
-     skips. *)
+     [Nonlinear_goal] was cut before it first shipped, because [smt_of] then
+     never produced [Smt.Mul] for two non-literal operands — such a predicate
+     failed earlier as [Unreflectable_predicate], so the diagnosis was dead
+     code with no reachable fixture.  Since 2026-09-16 the predicate
+     translator reflects general multiplication (see [Refine_scope.smt_of]'s
+     `*` arm), so the variant is reachable and carries its own advice: z3 is
+     INCOMPLETE on non-linear integer arithmetic, so "the solver proved
+     neither the predicate nor its negation" is not a fact about the guard
+     the author wrote, and every remedy [Solver_undecided] offers (guard the
+     call, rewrite the predicate) may be one they already applied.  Naming
+     the non-linearity is the only actionable part. *)
   | Unconstrained_subject of string  (* the subject appears in no assumption *)
+  | Nonlinear_goal                   (* the goal multiplies two non-literal terms *)
   | Opaque_application of string     (* goal names an undeclared function symbol *)
   (* The goal is a top-level conjunction and the per-conjunct discharge (over
      the SAME assumption set as the whole-goal proof attempt — no new facts,
@@ -259,6 +262,7 @@ let reason_name = function
      as many buckets as there are names.  The spelling belongs in the detail. *)
   | Alias_withdrawn _ -> "alias-withdrawn"
   | Unconstrained_subject _ -> "unconstrained-subject"
+  | Nonlinear_goal -> "nonlinear-goal"
   | Opaque_application _ -> "opaque-application"
   | Partial_conjunct _ -> "partial-conjunct"
 
@@ -286,6 +290,9 @@ let reason_detail = function
       spelling
   | Unconstrained_subject name ->
     Printf.sprintf "no fact the checker derived constrains `%s`" name
+  | Nonlinear_goal ->
+    "the goal multiplies two non-constant terms, and the solver is incomplete \
+     on non-linear integer arithmetic"
   | Opaque_application name ->
     Printf.sprintf
       "the checker has no meaning for `%s`, so it cannot reason through it" name
