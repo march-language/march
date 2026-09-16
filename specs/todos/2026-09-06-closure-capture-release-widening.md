@@ -18,14 +18,29 @@ real but narrow: `WHICH=5` went 1,073 MB -> 9.5 MB, while `WHICH=4` and
 > verdict: the gate is still per closure type. Measured leftovers are in the
 > progress entry.
 
-> **Update 2026-09-15: items 2 and 3 landed**
-> (`specs/progress/2026-09-15-closure-captures-released-at-every-site.md`).
-> The HOF-loop half of item 2 was not the gate at all: `map`'s `go` closure
-> already qualified, but the release that reaches zero is the SELF-ALIAS's
-> (`dec_rc go`), not the `dec_rc $clo` the deep drop was keyed on. Item 3 is
-> the runtime table it asked for, keyed by the apply-fn pointer rather than by
-> a drop id in the pad word, so no header bit was spent. What remains of item 2
-> is the per-SITE verdict: the gate is still per closure type.
+> **Update 2026-09-15: item 2's HOF-loop half landed; item 3 was built and
+> BACKED OUT** (`specs/progress/2026-09-15-closure-captures-released-by-the-hof-loop.md`).
+> The gate was never the problem for `map`/`filter`: their `go` closure already
+> qualified, but the release that reaches zero is the SELF-ALIAS's
+> (`dec_rc go`), not the `dec_rc $clo` the deep drop was keyed on. That is
+> fixed.
+>
+> Item 3 (the outer release of a closure value) was implemented as the runtime
+> table this file asks for — keyed by the apply-fn pointer rather than a pad-word
+> drop id, so no header bit is needed — and it is a USE-AFTER-FREE as gated.
+> ASAN, on `two-node[skew]`: a node id decoded off the wire and still owned by
+> the members `Map` was freed by the deep drop of a closure that had captured
+> it. **The verdict this file's gate computes is per closure TYPE and asks
+> whether the environment escapes. The outer release needs a different question:
+> did THIS allocation site take its own reference to each capture?** Perceus
+> emits no RC op when a closure captures a borrowed alias (a field of a live
+> record, an entry a map still owns), so such an environment owns nothing and
+> must release nothing.
+>
+> A sound version registers a closure type only when every allocation site of it
+> demonstrably took its own reference to every capture that needs one — an
+> `inc_rc` immediately before the alloc, or a capture whose last use IS the
+> alloc. Both are visible in the TIR at [Drop], which runs after RC insertion.
 >
 > **Update 2026-09-14:** measured shape of item 2 after closure calls started
 > consuming their arguments

@@ -152,19 +152,7 @@ let reachable_fns ?(extra_root = fun _ -> false) ?(fail_open = true)
             match Dispatch_registry.lookup name with
             | Some rows -> List.iter (fun (_, sym) -> Queue.push sym queue) rows
             | None -> ())
-          body_refs;
-        (* A closure's deep drop ([Drop.synth_clo_drop], called by the module's
-           constructor through [Clo_drops] — never from the TIR) is live exactly
-           when the apply function of the closure it drops is live.  Rooting it
-           unconditionally instead would keep one per closure type in the
-           binary, and — because [root_names] only applies its caller-supplied
-           roots when nothing else rooted the module — would also tell the
-           capability ceiling that a main-less module has an entry point,
-           silencing it. *)
-        if Tir_names.is_apply_fn name then
-          match Tir_names.clo_drop_fn_of_apply name with
-          | Some drop_fn when StringSet.mem drop_fn fn_names -> Queue.push drop_fn queue
-          | _ -> ()
+          body_refs
     end
   done;
   !visited

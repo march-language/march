@@ -367,12 +367,11 @@ git log is authoritative for exact commits.
   and both sides kept their own. Leaves now carry the clock, and the old encoding still
   decodes.
 
-- **A lambda's captured values are released when the lambda is (compiled).**
-  Passing a capturing lambda to a higher-order function leaked
-  what it captured: one object per `List.map`/`List.filter` call, three per
-  `List.fold_left` over a locally-built closure. A closure released without
-  being applied — dropped by the function it was passed to, or pulled out of a
-  data structure and discarded — now releases its captures too.
+- **`List.map` and `List.filter` no longer leak a capturing lambda
+  (compiled).** Each call leaked the lambda's environment and everything it
+  captured — one object per call. Their internal loop hands the callback down a
+  recursion through an alias, and it was that alias's release, not the one the
+  compiler had keyed its deep drop on, that ended the environment's life.
 - **`SortedSet.from_list`, `union`, `intersect` and `difference` work.** All
   four passed their arguments to `List.fold_left` in the wrong order with a
   curried callback, so `SortedSet.from_list([5, 3, 9, 3, 1], cmp)` panicked

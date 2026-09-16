@@ -1,21 +1,20 @@
--- Leak guard: a capturing lambda handed to a higher-order function is
--- released with everything it captured, whichever side does the releasing.
+-- Leak guard: a capturing lambda handed to a higher-order function is released
+-- with everything it captured when the HOF's own loop lets it go.
 --
--- Two halves landed together
--- (specs/progress/2026-09-15-closure-captures-released-at-every-site.md):
+-- `List.map`/`List.filter` build an internal `go` closure over the callback and
+-- hand it down a recursion. Perceus binds `$clo` to a local alias with a dup
+-- (`let go = inc_rc $clo; $clo`) and splices its release after the capture-read
+-- prefix, so THAT release never reaches zero and the deep drop keyed on it
+-- never fired. The release that does reach zero is the last iteration's
+-- `dec_rc go`, and it was shallow: the callback (and everything the callback
+-- captured) leaked once per `map` call.
+-- specs/progress/2026-09-15-closure-captures-released-by-the-hof-loop.md
 --
---   1. The HOF's own loop. `List.map`/`List.filter` build an internal `go`
---      closure over the callback, and `go$apply` binds `$clo` to a local alias
---      it hands down the recursion. The release Perceus splices in
---      (`dec_rc $clo`) is therefore never the one that reaches zero -- the last
---      iteration's `dec_rc go` is -- so the deep drop keyed on the spliced
---      release never fired and the callback leaked once per `map` call.
---   2. The OUTER release. A HOF that drops its callback (`List.fold_left` ends
---      with `dec_rc f`) releases a closure VALUE, whose type names no layout.
---      That free was shallow, so a lambda's captures leaked once per call --
---      3 objects per iteration for `fn (a, b) -> a + b + List.length(ys)`.
---      The layout now comes from the apply-fn pointer the cell carries, via a
---      table the module registers at startup (lib/tir/clo_drops.ml).
+-- NOT covered here, still open: a closure released by the function it was
+-- passed to (`List.fold_left` ends with `dec_rc f`). That release names no
+-- layout and is still shallow — see
+-- specs/todos/2026-09-06-closure-capture-release-widening.md item 3, which
+-- records why the obvious runtime table is not sound as gated.
 --
 -- Every leg prints the value it computed: a release that is too eager frees a
 -- capture the closure still reads, which shows up as a wrong number (or a
@@ -35,23 +34,6 @@ mod Main do
     if n <= 0 do acc else
       let xs = List.filter([int_to_string(n), "ab"], fn s -> string_length(s) > k)
       leg_filter_capture(n - 1, k, acc + List.length(xs))
-    end
-  end
-  -- The outer release: `step` is a closure VALUE the fold releases.
-  pfn leg_local_closure(n : Int, acc : Int) : Int do
-    if n <= 0 do acc else
-      let ys = [n, n + 1]
-      let step = fn (a, b) -> a + b + List.length(ys)
-      leg_local_closure(n - 1, acc + List.fold_left(ys, 0, step))
-    end
-  end
-  -- A closure that is never applied at all, just dropped.
-  pfn leg_never_applied(n : Int, acc : Int) : Int do
-    if n <= 0 do acc else
-      let ys = [int_to_string(n), "z"]
-      let f = fn (x : Int) -> x + List.length(ys)
-      let v = if n % 2 == 0 do f(1) else 0 end
-      leg_never_applied(n - 1, acc + v)
     end
   end
   -- A closure inside a constructor, released with the cell around it.
@@ -84,10 +66,6 @@ mod Main do
     flat("map over a capturing lambda", a, leg_map_capture(n, 3, 0))
     let b = live_allocs()
     flat("filter over a capturing lambda", b, leg_filter_capture(n, 1, 0))
-    let c = live_allocs()
-    flat("closure value released by the fold", c, leg_local_closure(n, 0))
-    let d = live_allocs()
-    flat("closure dropped unapplied", d, leg_never_applied(n, 0))
     let e = live_allocs()
     flat("closure inside a constructor", e, leg_in_ctor(n, 0))
     let f = live_allocs()

@@ -1747,27 +1747,26 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (diff native/closure_call_arg_ownership_probe.expected native_closure_call_arg_ownership_probe.out)))
 
 ; ── Leak guard: a capturing lambda handed to a higher-order function is
-; released with everything it captured -- by the HOF's internal loop (whose
-; self-alias release, not the spliced one, is what reaches zero) and by the
-; outer release of a closure VALUE (whose layout comes from the apply-fn
-; pointer via the runtime table, lib/tir/clo_drops.ml). Red before either:
-; 1 object per map/filter call, 3 per fold over a local closure.
+; released with everything it captured when the HOF's own loop lets it go. The
+; release that reaches zero there is the SELF-ALIAS's (`dec_rc go`), not the
+; one Perceus splices in, which the deep drop used to be keyed on alone.
+; Red before the fix: 1 object per map/filter call.
 (rule
- (targets native_closure_capture_outer_release_probe native_closure_capture_outer_release_probe.out)
+ (targets native_closure_capture_hof_loop_probe native_closure_capture_hof_loop_probe.out)
  (deps (file %{exe:../bin/main.exe})
        (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (source_tree ../stdlib)
-       (file native/closure_capture_outer_release_probe.march))
+       (file native/closure_capture_hof_loop_probe.march))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_closure_capture_outer_release_probe
-        native/closure_capture_outer_release_probe.march)
-   (with-stdout-to native_closure_capture_outer_release_probe.out
-        (system "./native_closure_capture_outer_release_probe")))))
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_closure_capture_hof_loop_probe
+        native/closure_capture_hof_loop_probe.march)
+   (with-stdout-to native_closure_capture_hof_loop_probe.out
+        (system "./native_closure_capture_hof_loop_probe")))))
 
 (rule
  (alias runtest)
- (action (diff native/closure_capture_outer_release_probe.expected native_closure_capture_outer_release_probe.out)))
+ (action (diff native/closure_capture_hof_loop_probe.expected native_closure_capture_hof_loop_probe.out)))
 
 ; ── Leak guard: `to_string` of a List (prelude's Show via string_join) and
 ; string_join itself release the list. string_join's list argument was marked

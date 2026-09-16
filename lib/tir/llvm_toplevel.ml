@@ -1029,27 +1029,9 @@ let emit_module ~emit_expr
                            "io_read_byte"; "read_byte"] in
   let migrate_suffix = "_migrate_state" in
   let migrate_suffix_len = String.length migrate_suffix in
-  (* A closure deep drop is rooted through tm_exports so DCE keeps it (nothing
-     in the TIR calls it — the module's constructor does), but the closure type
-     it drops may itself be gone.  Emit only the ones the constructor will
-     register: same condition, so the two cannot disagree. *)
-  let live_fn_names = Hashtbl.create 256 in
-  List.iter (fun (f : Tir.fn_def) -> Hashtbl.replace live_fn_names f.Tir.fn_name ())
-    m.Tir.tm_fns;
-  let registrable =
-    List.filter (fun (a, d) ->
-        Hashtbl.mem live_fn_names a && Hashtbl.mem live_fn_names d)
-      (Clo_drops.pairs ())
-  in
-  let registrable_drops = Hashtbl.create 32 in
-  List.iter (fun (_, d) -> Hashtbl.replace registrable_drops d ()) registrable;
-  let clo_drop_is_live (name : string) : bool =
-    not (Tir_names.is_clo_drop_fn name) || Hashtbl.mem registrable_drops name
-  in
   List.iter (fun fn ->
       if List.mem fn.Tir.fn_name preamble_declared then ()
       else if List.mem fn.Tir.fn_name mutual_fn_names then ()
-      else if not (clo_drop_is_live fn.Tir.fn_name) then ()
       else begin
         let fname = fn.Tir.fn_name in
         let flen = String.length fname in
@@ -1481,36 +1463,6 @@ let emit_module ~emit_expr
   emit_atom_show_table ctx;
   (* Append closure wrapper functions generated for top-level fn-as-value *)
   Buffer.add_buffer out ctx.Llvm_ctx.extra_fns;
-
-  (* Register one deep drop per closure type whose environment owns its
-     captures, keyed by the apply-fn pointer the cell carries.  A constructor
-     rather than a call from main: the same module is also linked as a shared
-     object (--compile-so) and as a hot-reload patch, where there is no main to
-     hang it off, and the table must be populated before any March code runs.
-     [Clo_drops] explains why a missing registration only ever leaks.  The
-     REPL/JIT does not run constructors, so it keeps today's behaviour. *)
-  (* [registrable] (computed with the function emission above) is the pairs
-     whose halves both survived: a constructor referencing a symbol this module
-     does not define is a link error, and an unregistered closure simply keeps
-     the shallow release it always had. *)
-  (match registrable with
-   | [] -> ()
-   | pairs ->
-     Buffer.add_string out
-       "\ndeclare void @march_register_clo_drop(ptr %apply, ptr %drop)\n";
-     Buffer.add_string out
-       "define internal void @march_clo_drops_init() {\nentry:\n";
-     List.iter (fun (apply_fn, drop_fn) ->
-         Buffer.add_string out
-           (Printf.sprintf
-              "  call void @march_register_clo_drop(ptr @%s, ptr @%s)\n"
-              (Llvm_ctx.llvm_name (Llvm_builtins.mangle_extern apply_fn))
-              (Llvm_ctx.llvm_name (Llvm_builtins.mangle_extern drop_fn))))
-       pairs;
-     Buffer.add_string out "  ret void\n}\n";
-     Buffer.add_string out
-       "@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] \
-        [{ i32, ptr, ptr } { i32 65535, ptr @march_clo_drops_init, ptr null }]\n");
 
   (* Capability markers (specs/2026-08-03-forge-cap-audit-design.md §4.3, C).
      Derived from the C symbols the emitted code actually resolved through

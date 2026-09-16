@@ -2236,29 +2236,8 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", "0")
   | Tir.EDecRC atom ->
     let (ty, v) = emit_atom ctx atom in
-    if ty = "ptr" then begin
-      (* A closure VALUE released here (a lambda a higher-order function drops
-         when it is done with it, one pulled out of a data structure) carries a
-         function type, which names no layout, so a plain release orphans
-         everything the lambda captured.  The runtime recovers the layout from
-         the apply-fn pointer in field 0 and releases the captures when this
-         release is the last one; an unregistered closure behaves exactly as
-         before.  See [Clo_drops].
-
-         Emitted HERE rather than rewritten in TIR (where [Drop] rewrites the
-         other bare releases): a call in the TIR makes its argument escape, so
-         a stack-promoted closure environment would be forced back onto the
-         heap and a `@[no_alloc]` function containing one stops compiling. *)
-      let is_closure_val =
-        match atom with
-        | Tir.AVar v -> (match v.Tir.v_ty with Tir.TFn _ -> true | _ -> false)
-        | _ -> false
-      in
-      if is_closure_val then
-        emit ctx (Printf.sprintf "call void @march_drop_closure(ptr %s)" v)
-      else
-        emit ctx (Printf.sprintf "call void @march_decrc_local(ptr %s)" v)
-    end;
+    if ty = "ptr" then
+      emit ctx (Printf.sprintf "call void @march_decrc_local(ptr %s)" v);
     ("i64", "0")
 
   | Tir.EAtomicIncRC atom

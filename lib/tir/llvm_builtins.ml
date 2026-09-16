@@ -1090,7 +1090,6 @@ let runtime_only_declares : (string * string) list = [
   ("march_incrc", "declare void @march_incrc(ptr %p)");
   ("march_decrc", "declare void @march_decrc(ptr %p)");
   ("march_decrc_freed", "declare i64  @march_decrc_freed(ptr %p)");
-  ("march_drop_closure", "declare void @march_drop_closure(ptr %p)");
   ("march_incrc_local", "declare void @march_incrc_local(ptr %p)");
   ("march_decrc_local", "declare void @march_decrc_local(ptr %p)");
   ("march_decrc_local_freed", "declare i64  @march_decrc_local_freed(ptr %p)");
@@ -1204,7 +1203,6 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_incrc";
   PDeclare "march_decrc";
   PDeclare "march_decrc_freed";
-  PDeclare "march_drop_closure";
   PDeclare "march_incrc_local";
   PDeclare "march_decrc_local";
   PDeclare "march_decrc_local_freed";

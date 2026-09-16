@@ -605,40 +605,6 @@ let has_runtime_prefix (name : string) : bool =
     identifier (the lexer's [ident] rule admits no [$]). *)
 let drop_fn_prefix = "__drop$"
 
-(** Name prefix of the per-closure-type deep drops [Drop.run] synthesizes for
-    the OUTER release of a closure value ([__drop_clo$$Clo_f$7]).  Distinct
-    from [drop_fn_prefix] because these have no TIR caller — the module's
-    constructor calls them (see [Clo_drops]) — so they are rooted by name. *)
-let clo_drop_fn_prefix = "__drop_clo$"
-
-(** The deep drop synthesized for the closure an apply function belongs to:
-    ["go$apply$7"] -> [Some "__drop_clo$$Clo_go$7"].  Inverse of
-    [clo_struct_name] composed with [clo_drop_fn_prefix]; [None] when [name] is
-    not an apply function. *)
-let clo_drop_fn_of_apply (name : string) : string option =
-  let marker = "$apply$" in
-  let ml = String.length marker and nl = String.length name in
-  (* LAST occurrence, mirroring [Drop.apply_name_of_clo]'s "uid is everything
-     after the last [$]": a lambda's defun-minted name can itself contain a
-     [$] ([$lam30269], [$jp7650]). *)
-  let rec last_marker i best =
-    if i + ml > nl then best
-    else last_marker (i + 1) (if String.sub name i ml = marker then Some i else best)
-  in
-  match last_marker 0 None with
-  | None -> None
-  | Some i ->
-    let fn_name = String.sub name 0 i in
-    let uid = String.sub name (i + ml) (nl - i - ml) in
-    (match int_of_string_opt uid with
-     | Some uid -> Some (clo_drop_fn_prefix ^ clo_struct_name ~fn_name ~lam_uid:uid)
-     | None -> None)
-
-let is_clo_drop_fn (name : string) : bool =
-  let p = clo_drop_fn_prefix in
-  String.length name > String.length p
-  && String.sub name 0 (String.length p) = p
-
 (** True if [name] is a synthesized deep-drop function.
 
     These calls REPLACE a bare [EDecRC] and are, like it, evaluated purely for
