@@ -123,6 +123,26 @@ holds its thread for the handshake), `Socket.write`/`send`, the WebSocket reads,
 anything through OpenSSL. Each is the same mechanical change; none was on the path that
 hung.
 
+### Readiness is a hint, so no syscall after a wait may block
+
+A wake can be stale: the daemon dequeues an event for an fd, the waiter that owned it
+times out and leaves, a new waiter registers the same fd, and the daemon — holding an
+event it already took — marks the new one done. A blocking `recv()` after such a hint
+would hold the scheduler thread, the very thing the poller exists to prevent. So every
+syscall that follows a wait is non-blocking (`MSG_DONTWAIT` for `recv`; a zero-timeout
+`poll` before `accept`) and loops back to the wait on `EAGAIN`, deadline still counting.
+The first cut did not do this. It never showed up on macOS; CI's x86 leg was the first
+run where the `partition` scenario went unstable.
+
+### A scenario race the timing change exposed
+
+`test/two_node/partition` tracked the post-heal events as a linear phase counter, so a
+node that merged the registry sync before its own SWIM view flipped the peer back to
+Alive skipped the "Alive again" print forever. Reads that park wake at the poller's
+tick rather than at `poll()`'s return, which was enough to change the order. The two
+events are now separate flags, in either order. Not a runtime bug, but found by this
+change: it reproduced 1/3 in the Linux container.
+
 ### The measurements that decide it
 
 - **`test/test_scheduler_fdwait.c`**, built at `-DMARCH_NUM_SCHEDULERS=1` on purpose:
