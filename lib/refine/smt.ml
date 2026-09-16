@@ -130,12 +130,30 @@ type term =
   | SetInter of term * term
   | SetDiff of term * term
   | SetSub of term * term
+  (* The number of elements of a set, at the set's element sort (plan step
+     3.1).  An uninterpreted `card$<elem>` per element sort: no quantified
+     axiom ever mentions it; [Refine_encode.card_facts] adds ground facts that
+     are theorems of finite sets, and congruence gives `a == b => card a ==
+     card b` for free. *)
+  | SetCard of sort * term
 
 type vc = {
   decls : (string * sort) list;   (* free symbols to declare *)
   assumptions : term list;        (* hypotheses (path context + known refinements) *)
   goal : term;                    (* the predicate we want to hold *)
 }
+
+(* A term's immediate subterms. *)
+let children (t : term) : term list =
+  match t with
+  | Const _ | IntLit _ | BoolLit _ | FloatLit _ | SetEmpty _ -> []
+  | App (_, args) | Ctor (_, _, args) -> args
+  | IsCtor (_, a) | IsCtorAt (_, _, _, a) | MulLit (_, a) | Neg a | Not a | SetSng (_, a)
+  | SetCard (_, a) -> [ a ]
+  | Add (a, b) | Sub (a, b) | Mul (a, b) | And (a, b) | Or (a, b) | Implies (a, b) | Eq (a, b)
+  | Ne (a, b) | Lt (a, b) | Le (a, b) | Gt (a, b) | Ge (a, b) | FpEq (a, b) | FpLt (a, b)
+  | FpLe (a, b) | FpGt (a, b) | FpGe (a, b) | SetMem (a, b) | SetUnion (a, b) | SetInter (a, b)
+  | SetDiff (a, b) | SetSub (a, b) -> [ a; b ]
 
 (* The `define-sort` name of a set sort.  `$` cannot occur in a March
    identifier, so no user symbol can collide with one of these. *)
@@ -171,6 +189,9 @@ and set_elem_tag = function
   | SData (n, args) -> instance_name n args
   | SParam i -> "T" ^ string_of_int i
   | SSet e -> "Set" ^ set_elem_tag e
+
+(* The uninterpreted cardinality function over sets of [e]. *)
+let card_fn (e : sort) : string = "card$" ^ set_elem_tag e
 
 (* The element sort actually RENDERED for a set: the placeholder becomes the
    opaque `Elem` sort. *)
@@ -281,6 +302,7 @@ let rec render = function
   | SetDiff (a, b) ->
     Printf.sprintf "((_ map and) %s ((_ map not) %s))" (render a) (render b)
   | SetSub (a, b) -> Printf.sprintf "(= ((_ map or) %s %s) %s)" (render a) (render b) (render b)
+  | SetCard (e, a) -> Printf.sprintf "(%s %s)" (card_fn (render_elem_sort e)) (render a)
 
 (* The canonical assertion block for a VC: declare every free symbol, assert the
    hypotheses, and assert the NEGATED goal.  Sent to z3 between push/pop and also

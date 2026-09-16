@@ -8,54 +8,76 @@
 
 mod SortedSet do
 
-  -- Internal AVL tree (same as OrderedMap, keyed by element, value: unit)
-  type Tree(a) = Leaf | Node(Tree(a), a, Tree(a), Int)
+  -- Internal AVL tree (same as OrderedMap, keyed by element, value: unit).
+  -- Named apart from OrderedMap's `Tree`/`Leaf`/`Node`: the refinement checker
+  -- does not qualify datatype or constructor names by module, and the proofs
+  -- below need this tree's constructors to be its own.
+  type AvlTree(a) = AvlLeaf | AvlNode(AvlTree(a), a, AvlTree(a), Int)
 
   -- ---- Internal helpers ----
 
-  pfn height(t : Tree(a)) : Int do
+  -- The elements of a tree, as a set.  Logic only: the refinement checker
+  -- proves the tree operations below against it.
+  @[measure]
+  pfn sorted_set_elts(t : AvlTree(a)) : Set(a) do
     match t do
-    Leaf -> 0
-    Node(_, _, _, h) -> h
+    AvlLeaf -> empty
+    AvlNode(l, k, r, _) -> union(sorted_set_elts(l), union(singleton(k), sorted_set_elts(r)))
     end
   end
 
-  pfn make_node(l : Tree(a), k : a, r : Tree(a)) : Tree(a) do
+  -- The comparator law, stated once: every proof below that needs `x` to be
+  -- the element `k` it compared equal to reads it from here.  ASSUMED: it
+  -- holds when `cmp` returns 0 exactly for equal elements, the same trust the
+  -- module's documented comparator contract already asks for.
+  @[assume]
+  pfn compare_by(cmp : a -> a -> Int, x : a, k : a) : {Int | (_ == 0) == (x == k)} do
+    cmp(x, k)
+  end
+
+  pfn height(t : AvlTree(a)) : Int do
+    match t do
+    AvlLeaf -> 0
+    AvlNode(_, _, _, h) -> h
+    end
+  end
+
+  pfn make_node(l : AvlTree(a), k : a, r : AvlTree(a)) : {AvlTree(a) | sorted_set_elts(_) == union(sorted_set_elts(l), union(singleton(k), sorted_set_elts(r)))} do
     let lh = height(l)
     let rh = height(r)
     let h = if lh > rh do lh + 1 else rh + 1 end
-    Node(l, k, r, h)
+    AvlNode(l, k, r, h)
   end
 
-  pfn rotate_right(t : Tree(a)) : Tree(a) do
+  pfn rotate_right(t : AvlTree(a)) : {AvlTree(a) | sorted_set_elts(_) == sorted_set_elts(t)} do
     match t do
-    Node(Node(ll, lk, lr, _), k, r, _) ->
+    AvlNode(AvlNode(ll, lk, lr, _), k, r, _) ->
       let new_r = make_node(lr, k, r)
       make_node(ll, lk, new_r)
     _ -> t
     end
   end
 
-  pfn rotate_left(t : Tree(a)) : Tree(a) do
+  pfn rotate_left(t : AvlTree(a)) : {AvlTree(a) | sorted_set_elts(_) == sorted_set_elts(t)} do
     match t do
-    Node(l, k, Node(rl, rk, rr, _), _) ->
+    AvlNode(l, k, AvlNode(rl, rk, rr, _), _) ->
       let new_l = make_node(l, k, rl)
       make_node(new_l, rk, rr)
     _ -> t
     end
   end
 
-  pfn bf(t : Tree(a)) : Int do
+  pfn bf(t : AvlTree(a)) : Int do
     match t do
-    Leaf -> 0
-    Node(l, _, r, _) -> height(l) - height(r)
+    AvlLeaf -> 0
+    AvlNode(l, _, r, _) -> height(l) - height(r)
     end
   end
 
-  pfn balance(t : Tree(a)) : Tree(a) do
+  pfn balance(t : AvlTree(a)) : {AvlTree(a) | sorted_set_elts(_) == sorted_set_elts(t)} do
     match t do
-    Leaf -> Leaf
-    Node(l, k, r, _) ->
+    AvlLeaf -> AvlLeaf
+    AvlNode(l, k, r, _) ->
       let b = height(l) - height(r)
       if b > 1 do
         if bf(l) < 0 do
@@ -77,11 +99,11 @@ mod SortedSet do
     end
   end
 
-  pfn tree_insert(t : Tree(a), cmp : a -> a -> Int, x : a) : Tree(a) do
+  pfn tree_insert(t : AvlTree(a), cmp : a -> a -> Int, x : a) : {AvlTree(a) | sorted_set_elts(_) == union(sorted_set_elts(t), singleton(x))} do
     match t do
-    Leaf -> Node(Leaf, x, Leaf, 1)
-    Node(l, k, r, _) ->
-      let c = cmp(x, k)
+    AvlLeaf -> AvlNode(AvlLeaf, x, AvlLeaf, 1)
+    AvlNode(l, k, r, _) ->
+      let c = compare_by(cmp, x, k)
       if c < 0 do
         balance(make_node(tree_insert(l, cmp, x), k, r))
       else
@@ -94,11 +116,11 @@ mod SortedSet do
     end
   end
 
-  pfn tree_member(t : Tree(a), cmp : a -> a -> Int, x : a) : Bool do
+  pfn tree_member(t : AvlTree(a), cmp : a -> a -> Int, x : a) : Bool do
     match t do
-    Leaf -> false
-    Node(l, k, r, _) ->
-      let c = cmp(x, k)
+    AvlLeaf -> false
+    AvlNode(l, k, r, _) ->
+      let c = compare_by(cmp, x, k)
       if c < 0 do
         tree_member(l, cmp, x)
       else
@@ -111,27 +133,27 @@ mod SortedSet do
     end
   end
 
-  pfn tree_min(t : Tree(a)) : Option(a) do
+  pfn tree_min(t : AvlTree(a)) : Option(a) do
     match t do
-    Leaf -> None
-    Node(Leaf, k, _, _) -> Some(k)
-    Node(l, _, _, _) -> tree_min(l)
+    AvlLeaf -> None
+    AvlNode(AvlLeaf, k, _, _) -> Some(k)
+    AvlNode(l, _, _, _) -> tree_min(l)
     end
   end
 
-  pfn tree_delete_min(t : Tree(a)) : Tree(a) do
+  pfn tree_delete_min(t : AvlTree(a)) : {AvlTree(a) | subset(sorted_set_elts(_), sorted_set_elts(t))} do
     match t do
-    Leaf -> Leaf
-    Node(Leaf, _, r, _) -> r
-    Node(l, k, r, _) -> balance(make_node(tree_delete_min(l), k, r))
+    AvlLeaf -> AvlLeaf
+    AvlNode(AvlLeaf, _, r, _) -> r
+    AvlNode(l, k, r, _) -> balance(make_node(tree_delete_min(l), k, r))
     end
   end
 
-  pfn tree_delete(t : Tree(a), cmp : a -> a -> Int, x : a) : Tree(a) do
+  pfn tree_delete(t : AvlTree(a), cmp : a -> a -> Int, x : a) : AvlTree(a) do
     match t do
-    Leaf -> Leaf
-    Node(l, k, r, _) ->
-      let c = cmp(x, k)
+    AvlLeaf -> AvlLeaf
+    AvlNode(l, k, r, _) ->
+      let c = compare_by(cmp, x, k)
       if c < 0 do
         balance(make_node(tree_delete(l, cmp, x), k, r))
       else
@@ -147,116 +169,116 @@ mod SortedSet do
     end
   end
 
-  pfn tree_to_list(t : Tree(a), acc : List(a)) : List(a) do
+  pfn tree_to_list(t : AvlTree(a), acc : List(a)) : {List(a) | elts(_) == union(sorted_set_elts(t), elts(acc))} do
     match t do
-    Leaf -> acc
-    Node(l, k, r, _) -> tree_to_list(l, Cons(k, tree_to_list(r, acc)))
+    AvlLeaf -> acc
+    AvlNode(l, k, r, _) -> tree_to_list(l, Cons(k, tree_to_list(r, acc)))
     end
   end
 
-  pfn tree_size(t : Tree(a)) : Int do
+  pfn tree_size(t : AvlTree(a)) : Int do
     match t do
-    Leaf -> 0
-    Node(l, _, r, _) -> 1 + tree_size(l) + tree_size(r)
+    AvlLeaf -> 0
+    AvlNode(l, _, r, _) -> 1 + tree_size(l) + tree_size(r)
     end
   end
 
-  pfn tree_fold(t : Tree(a), acc : b, f : b -> a -> b) : b do
+  pfn tree_fold(t : AvlTree(a), acc : b, f : b -> a -> b) : b do
     match t do
-    Leaf -> acc
-    Node(l, k, r, _) ->
+    AvlLeaf -> acc
+    AvlNode(l, k, r, _) ->
       let acc2 = tree_fold(l, acc, f)
       let acc3 = f(acc2, k)
       tree_fold(r, acc3, f)
     end
   end
 
-  pfn tree_max(t : Tree(a)) : Option(a) do
+  pfn tree_max(t : AvlTree(a)) : Option(a) do
     match t do
-    Leaf -> None
-    Node(_, k, Leaf, _) -> Some(k)
-    Node(_, _, r, _) -> tree_max(r)
+    AvlLeaf -> None
+    AvlNode(_, k, AvlLeaf, _) -> Some(k)
+    AvlNode(_, _, r, _) -> tree_max(r)
     end
   end
 
   -- ---- Public API ----
 
   doc "Creates a new empty sorted set with the given comparator."
-  fn new(cmp : a -> a -> Int) : {cmp: a -> a -> Int, tree: Tree(a)} do
-    {cmp: cmp, tree: Leaf}
+  fn new(cmp : a -> a -> Int) : {cmp: a -> a -> Int, tree: AvlTree(a)} do
+    {cmp: cmp, tree: AvlLeaf}
   end
 
   doc "Adds element v to the set. No-op if already present."
-  fn add(s : {cmp: a -> a -> Int, tree: Tree(a)}, v : a) : {cmp: a -> a -> Int, tree: Tree(a)} do
+  fn add(s : {cmp: a -> a -> Int, tree: AvlTree(a)}, v : a) : {cmp: a -> a -> Int, tree: AvlTree(a)} do
     {cmp: s.cmp, tree: tree_insert(s.tree, s.cmp, v)}
   end
 
   doc "Removes element v from the set. No-op if not present."
-  fn remove(s : {cmp: a -> a -> Int, tree: Tree(a)}, v : a) : {cmp: a -> a -> Int, tree: Tree(a)} do
+  fn remove(s : {cmp: a -> a -> Int, tree: AvlTree(a)}, v : a) : {cmp: a -> a -> Int, tree: AvlTree(a)} do
     {cmp: s.cmp, tree: tree_delete(s.tree, s.cmp, v)}
   end
 
   doc "Returns true if v is in the set."
-  fn member(s : {cmp: a -> a -> Int, tree: Tree(a)}, v : a) : Bool do
+  fn member(s : {cmp: a -> a -> Int, tree: AvlTree(a)}, v : a) : Bool do
     tree_member(s.tree, s.cmp, v)
   end
 
   doc "Returns all elements in sorted order."
-  fn to_list(s : {cmp: a -> a -> Int, tree: Tree(a)}) : List(a) do
+  fn to_list(s : {cmp: a -> a -> Int, tree: AvlTree(a)}) : List(a) do
     tree_to_list(s.tree, Nil)
   end
 
   doc "Builds a set from a list of elements."
-  fn from_list(items : List(a), cmp : a -> a -> Int) : {cmp: a -> a -> Int, tree: Tree(a)} do
+  fn from_list(items : List(a), cmp : a -> a -> Int) : {cmp: a -> a -> Int, tree: AvlTree(a)} do
     List.fold_left(items, new(cmp), fn (s, v) -> add(s, v))
   end
 
   doc "Returns the number of elements in the set."
-  fn size(s : {cmp: a -> a -> Int, tree: Tree(a)}) : Int do
+  fn size(s : {cmp: a -> a -> Int, tree: AvlTree(a)}) : Int do
     tree_size(s.tree)
   end
 
   doc "Returns the smallest element, or None if empty."
-  fn min(s : {cmp: a -> a -> Int, tree: Tree(a)}) : Option(a) do
+  fn min(s : {cmp: a -> a -> Int, tree: AvlTree(a)}) : Option(a) do
     tree_min(s.tree)
   end
 
   doc "Returns the largest element, or None if empty."
-  fn max(s : {cmp: a -> a -> Int, tree: Tree(a)}) : Option(a) do
+  fn max(s : {cmp: a -> a -> Int, tree: AvlTree(a)}) : Option(a) do
     tree_max(s.tree)
   end
 
   doc "Returns a set containing all elements in either a or b."
-  fn union(a : {cmp: k -> k -> Int, tree: Tree(k)}, b : {cmp: k -> k -> Int, tree: Tree(k)}) : {cmp: k -> k -> Int, tree: Tree(k)} do
+  fn union(a : {cmp: k -> k -> Int, tree: AvlTree(k)}, b : {cmp: k -> k -> Int, tree: AvlTree(k)}) : {cmp: k -> k -> Int, tree: AvlTree(k)} do
     List.fold_left(to_list(b), a, fn (s, v) -> add(s, v))
   end
 
   doc "Returns a set containing only elements in both a and b."
-  fn intersect(a : {cmp: k -> k -> Int, tree: Tree(k)}, b : {cmp: k -> k -> Int, tree: Tree(k)}) : {cmp: k -> k -> Int, tree: Tree(k)} do
+  fn intersect(a : {cmp: k -> k -> Int, tree: AvlTree(k)}, b : {cmp: k -> k -> Int, tree: AvlTree(k)}) : {cmp: k -> k -> Int, tree: AvlTree(k)} do
     List.fold_left(to_list(a), new(a.cmp), fn (s, v) ->
       if tree_member(b.tree, b.cmp, v) do add(s, v) else s end)
   end
 
   doc "Returns a set of elements in a that are not in b."
-  fn difference(a : {cmp: k -> k -> Int, tree: Tree(k)}, b : {cmp: k -> k -> Int, tree: Tree(k)}) : {cmp: k -> k -> Int, tree: Tree(k)} do
+  fn difference(a : {cmp: k -> k -> Int, tree: AvlTree(k)}, b : {cmp: k -> k -> Int, tree: AvlTree(k)}) : {cmp: k -> k -> Int, tree: AvlTree(k)} do
     List.fold_left(to_list(b), a, fn (s, v) -> remove(s, v))
   end
 
   doc "Folds over the set in sorted order: f(acc, element) -> acc."
-  fn fold(s : {cmp: a -> a -> Int, tree: Tree(a)}, acc : b, f : b -> a -> b) : b do
+  fn fold(s : {cmp: a -> a -> Int, tree: AvlTree(a)}, acc : b, f : b -> a -> b) : b do
     tree_fold(s.tree, acc, f)
   end
 
   doc "Returns true if the set is empty."
-  fn is_empty(s : {cmp: a -> a -> Int, tree: Tree(a)}) : Bool do
+  fn is_empty(s : {cmp: a -> a -> Int, tree: AvlTree(a)}) : Bool do
     match s.tree do
-    Leaf -> true
+    AvlLeaf -> true
     _ -> false
     end
   end
 
   doc "Returns true if a is a subset of b (every element of a is in b)."
-  fn subset(a : {cmp: k -> k -> Int, tree: Tree(k)}, b : {cmp: k -> k -> Int, tree: Tree(k)}) : Bool do
+  fn subset(a : {cmp: k -> k -> Int, tree: AvlTree(k)}, b : {cmp: k -> k -> Int, tree: AvlTree(k)}) : Bool do
     List.all(to_list(a), fn v -> tree_member(b.tree, b.cmp, v))
   end
 

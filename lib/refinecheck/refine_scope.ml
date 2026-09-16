@@ -157,6 +157,8 @@ let rec smt_of_r_marked ?(vocab = true) ~resolve_var ~resolve_measure
   | A.EApp (A.EVar { A.txt = "inter"; _ }, [ a; b ], _) when vocab -> b2 (fun x y -> Smt.SetInter (x, y)) a b
   | A.EApp (A.EVar { A.txt = "diff"; _ }, [ a; b ], _) when vocab -> b2 (fun x y -> Smt.SetDiff (x, y)) a b
   | A.EApp (A.EVar { A.txt = "subset"; _ }, [ a; b ], _) when vocab -> b2 (fun x y -> Smt.SetSub (x, y)) a b
+  | A.EApp (A.EVar { A.txt = "card"; _ }, [ st ], _) when vocab ->
+    Result.map (fun t -> Smt.SetCard (Smt.set_unknown_elem, t)) (r st)
   | A.EApp (A.EVar { A.txt = "singleton"; _ }, [ x ], _) when vocab ->
     Result.map (fun t -> Smt.SetSng (Smt.set_unknown_elem, t)) (r x)
   (* The empty-set literal exists only where [mark_set_empty] put it — a set
