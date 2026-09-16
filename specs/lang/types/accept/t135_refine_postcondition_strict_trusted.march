@@ -21,9 +21,13 @@ mod T135 do
 
   cap verified
 
+  fn av(z : Int) : Int do
+    if z < 0 do 0 - z else z end
+  end
+
   @[trusted]
-  fn mk(z : Int) : {Int | _ > 0} do
-    z * z + 1
+  fn mk(z : Int) : {Int | _ >= 0} do
+    av(z)
   end
 
   fn main() : Int do
