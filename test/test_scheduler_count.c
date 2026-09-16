@@ -49,6 +49,7 @@
 #include <unistd.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <time.h>
 
 static int g_tests_passed = 0, g_tests_failed = 0;
 #define TEST_ASSERT(cond, msg) do { if (!(cond)) { \
@@ -129,11 +130,28 @@ static void test_request_above_default_is_honoured(void) {
 #define N_REQUESTED   7
 #define N_WORKERS     224          /* 32 green threads per scheduler thread  */
 
+/* How long the workers keep circulating while waiting for the last scheduler
+ * thread to dispatch one of them.  Only a build where a requested thread never
+ * dispatches at all ever reaches this; a healthy run observes all seven within
+ * milliseconds and leaves the wait immediately. */
+#define SEEN_WAIT_S   10.0
+
 static pthread_t     g_seen[N_REQUESTED * 8];
 static _Atomic int   g_seen_len   = 0;
 static _Atomic int   g_seen_lock  = 0;
 static _Atomic int   g_work_done  = 0;
-static _Atomic int   g_spinning   = 0;   /* workers currently inside the spin */
+static double        g_seen_deadline = 0.0;   /* set before the spawn loop, read-only after */
+
+static double mono_now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+static void burn(int64_t iters) {
+    volatile int64_t x = 0;
+    for (int64_t i = 0; i < iters; i++) x += i;
+}
 
 static void seen_record(pthread_t t) {
     while (atomic_exchange_explicit(&g_seen_lock, 1, memory_order_acquire)) { /* spin */ }
@@ -147,21 +165,38 @@ static void seen_record(pthread_t t) {
     atomic_store_explicit(&g_seen_lock, 0, memory_order_release);
 }
 
+/* Hold every scheduler busy until each requested thread has been observed
+ * dispatching a green thread.
+ *
+ * The fixed round count alone was a race, not a test: whether a scheduler
+ * thread ever dispatched anything depended on whether the OS scheduled it
+ * before the last worker finished, so on a loaded 4-CPU runner two of the
+ * seven threads could exist, spin up, and find the run queue already drained
+ * -- "distinct dispatching OS threads: 5, requested 7" with nothing wrong in
+ * the runtime.  (The old comment claimed workers refused to finish until
+ * their peers were resident; the g_spinning counter that was supposed to
+ * enforce it was incremented and decremented but never read.)
+ *
+ * So after a floor of real work, every worker stays RUNNABLE -- yielding, so
+ * the procs keep circulating through the global run queue that all schedulers
+ * pop -- until either all N_REQUESTED threads have dispatched one, or the
+ * deadline passes.  A thread that exists therefore cannot avoid being
+ * observed, and a count that is genuinely short still fails (after the
+ * wait), which is the property this test is here for. */
 static void worker_fn(void *arg) {
     (void)arg;
-    /* Hold every scheduler busy at once: each worker records its thread and
-     * then refuses to finish until enough peers are simultaneously resident,
-     * so a scheduler thread that exists cannot avoid being observed.  The
-     * yield keeps this cooperative rather than a hard barrier (a scheduler
-     * with no work would otherwise deadlock the run). */
     for (int round = 0; round < 40; round++) {
         seen_record(pthread_self());
-        atomic_fetch_add(&g_spinning, 1);
-        volatile int64_t x = 0;
-        for (int64_t i = 0; i < 200000; i++) x += i;
-        atomic_fetch_sub(&g_spinning, 1);
+        burn(200000);
         march_sched_yield();
     }
+    while (atomic_load_explicit(&g_seen_len, memory_order_relaxed) < N_REQUESTED
+           && mono_now() < g_seen_deadline) {
+        seen_record(pthread_self());
+        burn(20000);
+        march_sched_yield();
+    }
+    seen_record(pthread_self());
     atomic_fetch_add(&g_work_done, 1);
 }
 
@@ -171,6 +206,7 @@ static void test_live_scheduler_threads_match_request(void) {
     TEST_ASSERT(n == N_REQUESTED, "setup: 7 schedulers requested");
     atomic_store(&g_seen_len, 0);
     atomic_store(&g_work_done, 0);
+    g_seen_deadline = mono_now() + SEEN_WAIT_S;
     for (int i = 0; i < N_WORKERS; i++) march_sched_spawn(worker_fn, NULL);
     march_sched_request_shutdown();
     march_sched_run();
@@ -180,7 +216,10 @@ static void test_live_scheduler_threads_match_request(void) {
         fprintf(stderr, "  (distinct dispatching OS threads: %d, requested %d)\n",
                 distinct, N_REQUESTED);
     TEST_ASSERT(distinct == N_REQUESTED,
-                "green threads must be dispatched by exactly as many OS threads as requested");
+                "green threads must be dispatched by exactly as many OS threads as "
+                "requested -- the workers stayed runnable for up to SEEN_WAIT_S "
+                "waiting for the missing thread, so this is a real shortfall, not "
+                "a thread that merely started late");
     TEST_PASS();
 }
 

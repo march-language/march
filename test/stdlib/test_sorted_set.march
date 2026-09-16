@@ -63,4 +63,82 @@ describe "differential against Set" do
   end
 end
 
+
+  describe "from_list" do
+
+    test "dedups and sorts" do
+      let s = SortedSet.from_list([5, 3, 9, 3, 1], icmp)
+      assert (SortedSet.to_list(s) == [1, 3, 5, 9])
+    end
+
+    test "size counts distinct elements" do
+      assert (SortedSet.size(SortedSet.from_list([5, 3, 9, 3, 1], icmp)) == 4)
+    end
+
+    test "empty list gives empty set" do
+      assert (SortedSet.is_empty(SortedSet.from_list([], icmp)))
+    end
+
+    test "members are found" do
+      let s = SortedSet.from_list([5, 3, 9], icmp)
+      assert (SortedSet.member(s, 9))
+      assert (not(SortedSet.member(s, 4)))
+    end
+
+  end
+
+  describe "union" do
+
+    test "overlapping sets" do
+      let a = SortedSet.from_list([1, 3, 5], icmp)
+      let b = SortedSet.from_list([3, 4, 6], icmp)
+      assert (SortedSet.to_list(SortedSet.union(a, b)) == [1, 3, 4, 5, 6])
+    end
+
+    test "with empty" do
+      let a = SortedSet.from_list([2, 1], icmp)
+      let e = SortedSet.new(icmp)
+      assert (SortedSet.to_list(SortedSet.union(a, e)) == [1, 2])
+      assert (SortedSet.to_list(SortedSet.union(e, a)) == [1, 2])
+    end
+
+  end
+
+  describe "intersect" do
+
+    test "overlapping sets" do
+      let a = SortedSet.from_list([1, 3, 5, 7], icmp)
+      let b = SortedSet.from_list([3, 4, 7], icmp)
+      assert (SortedSet.to_list(SortedSet.intersect(a, b)) == [3, 7])
+    end
+
+    test "disjoint sets" do
+      let a = SortedSet.from_list([1, 2], icmp)
+      let b = SortedSet.from_list([3, 4], icmp)
+      assert (SortedSet.is_empty(SortedSet.intersect(a, b)))
+    end
+
+  end
+
+  describe "difference" do
+
+    test "removes elements of b from a" do
+      let a = SortedSet.from_list([1, 3, 5, 7], icmp)
+      let b = SortedSet.from_list([3, 4, 7], icmp)
+      assert (SortedSet.to_list(SortedSet.difference(a, b)) == [1, 5])
+    end
+
+    test "is not symmetric" do
+      let a = SortedSet.from_list([1, 3, 5, 7], icmp)
+      let b = SortedSet.from_list([3, 4, 7], icmp)
+      assert (SortedSet.to_list(SortedSet.difference(b, a)) == [4])
+    end
+
+    test "minus empty is identity" do
+      let a = SortedSet.from_list([2, 1], icmp)
+      assert (SortedSet.to_list(SortedSet.difference(a, SortedSet.new(icmp))) == [1, 2])
+    end
+
+  end
+
 end

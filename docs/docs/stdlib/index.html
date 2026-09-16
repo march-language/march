@@ -1526,7 +1526,9 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="NetKernel.html#fn-send_frame"><span class="sb-kind" style="color:var(--fn)">F</span>send_frame</a>
 <a class="sl" href="NetKernel.html#fn-str_to_bytes"><span class="sb-kind" style="color:var(--fn)">F</span>str_to_bytes</a>
 <a class="sl" href="NetKernel.html#fn-to_wire"><span class="sb-kind" style="color:var(--fn)">F</span>to_wire</a></div></div>
-<div class="sb-group"><div class="sb-group-hdr" data-href="Node.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Node.html">Node</a></div><div class="sb-sub"><a class="sl" href="Node.html#fn-payload"><span class="sb-kind" style="color:var(--fn)">F</span>payload</a>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Node.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Node.html">Node</a></div><div class="sb-sub"><a class="sl" href="Node.html#fn-enqueue"><span class="sb-kind" style="color:var(--fn)">F</span>enqueue</a>
+<a class="sl" href="Node.html#fn-enqueue_tagged"><span class="sb-kind" style="color:var(--fn)">F</span>enqueue_tagged</a>
+<a class="sl" href="Node.html#fn-payload"><span class="sb-kind" style="color:var(--fn)">F</span>payload</a>
 <a class="sl" href="Node.html#fn-send"><span class="sb-kind" style="color:var(--fn)">F</span>send</a>
 <a class="sl" href="Node.html#fn-send_tagged"><span class="sb-kind" style="color:var(--fn)">F</span>send_tagged</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="NodeCall.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="NodeCall.html">NodeCall</a></div><div class="sb-sub"><a class="sl" href="NodeCall.html#fn-call"><span class="sb-kind" style="color:var(--fn)">F</span>call</a>
@@ -1540,7 +1542,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="sb-group"><div class="sb-group-hdr" data-href="NodeQueue.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="NodeQueue.html">NodeQueue</a></div><div class="sb-sub"><a class="sl" href="NodeQueue.html#type-Policy"><span class="sb-kind" style="color:var(--ty)">T</span>Policy</a>
 <a class="sl" href="NodeQueue.html#type-EnqueueError"><span class="sb-kind" style="color:var(--ty)">T</span>EnqueueError</a>
 <a class="sl" href="NodeQueue.html#type-WriterState"><span class="sb-kind" style="color:var(--ty)">T</span>WriterState</a>
-<a class="sl" href="NodeQueue.html#type-EvictedReq"><span class="sb-kind" style="color:var(--ty)">T</span>EvictedReq</a>
+<a class="sl" href="NodeQueue.html#type-WriterReq"><span class="sb-kind" style="color:var(--ty)">T</span>WriterReq</a>
 <a class="sl" href="NodeQueue.html#fn-cast"><span class="sb-kind" style="color:var(--fn)">F</span>cast</a>
 <a class="sl" href="NodeQueue.html#fn-consumed"><span class="sb-kind" style="color:var(--fn)">F</span>consumed</a>
 <a class="sl" href="NodeQueue.html#fn-credit"><span class="sb-kind" style="color:var(--fn)">F</span>credit</a>
@@ -1569,6 +1571,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="NodeSend.html#fn-decode_msg"><span class="sb-kind" style="color:var(--fn)">F</span>decode_msg</a>
 <a class="sl" href="NodeSend.html#fn-encode_failed"><span class="sb-kind" style="color:var(--fn)">F</span>encode_failed</a>
 <a class="sl" href="NodeSend.html#fn-encode_msg"><span class="sb-kind" style="color:var(--fn)">F</span>encode_msg</a>
+<a class="sl" href="NodeSend.html#fn-handle_frame"><span class="sb-kind" style="color:var(--fn)">F</span>handle_frame</a>
 <a class="sl" href="NodeSend.html#fn-on_failure"><span class="sb-kind" style="color:var(--fn)">F</span>on_failure</a>
 <a class="sl" href="NodeSend.html#fn-recv_failure"><span class="sb-kind" style="color:var(--fn)">F</span>recv_failure</a>
 <a class="sl" href="NodeSend.html#fn-serve_one"><span class="sb-kind" style="color:var(--fn)">F</span>serve_one</a>
@@ -2481,12 +2484,12 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a href="NativeArray.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NativeArray</h3><p>NativeArray — flat numeric arrays for high-performance numeric loops.</p><div class="st"><span>59 functions</span><span>0 types</span></div></div></a>
 <a href="NetFrame.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NetFrame</h3><p>NetFrame: length-prefixed framing for the distributed net-kernel transport.</p><div class="st"><span>3 functions</span><span>0 types</span></div></div></a>
 <a href="NetKernel.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NetKernel</h3><p>NetKernel: the socket-level transport for distributed OTP (P1).</p><div class="st"><span>18 functions</span><span>0 types</span></div></div></a>
-<a href="Node.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Node</h3><p>Node: the typed remote send (distributed actors, last piece of 1/4).</p><div class="st"><span>3 functions</span><span>0 types</span></div></div></a>
+<a href="Node.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Node</h3><p>Node: the typed remote send (distributed actors, last piece of 1/4).</p><div class="st"><span>5 functions</span><span>0 types</span></div></div></a>
 <a href="NodeCall.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NodeCall</h3><p>NodeCall: caller-side Node.call and server-side RPC dispatch loop (P3 L4).</p><div class="st"><span>3 functions</span><span>0 types</span></div></div></a>
 <a href="NodeIdentity.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NodeIdentity</h3><p>NodeIdentity: a cluster node's identity, exchanged in the net-kernel handshake.</p><div class="st"><span>4 functions</span><span>1 types</span></div></div></a>
 <a href="NodeQueue.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NodeQueue</h3><p>NodeQueue: the per-peer outbound queue with credit-based flow control</p><div class="st"><span>10 functions</span><span>4 types</span></div></div></a>
 <a href="NodeRpc.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NodeRpc</h3><p>NodeRpc: the receive-side RPC dispatcher + caller-side reply logic (P1 L4).</p><div class="st"><span>8 functions</span><span>2 types</span></div></div></a>
-<a href="NodeSend.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NodeSend</h3><p>NodeSend: an actor message to a process on another node (distributed actors 1/4).</p><div class="st"><span>12 functions</span><span>2 types</span></div></div></a>
+<a href="NodeSend.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NodeSend</h3><p>NodeSend: an actor message to a process on another node (distributed actors 1/4).</p><div class="st"><span>13 functions</span><span>2 types</span></div></div></a>
 <a href="Option.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Option</h3><p>Option module: operations on Option(a) = Some(a) None</p><div class="st"><span>13 functions</span><span>0 types</span></div></div></a>
 <a href="OrderedMap.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>OrderedMap</h3><p>OrderedMap module: AVL tree-based sorted map.</p><div class="st"><span>17 functions</span><span>1 types</span></div></div></a>
 <a href="Parallel.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Parallel</h3><p>Parallel map-reduce over RRB.Vec.</p><div class="st"><span>9 functions</span><span>0 types</span></div></div></a>

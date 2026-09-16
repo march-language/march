@@ -4025,8 +4025,6 @@ static void march_supervisor_notify(void *supervisor, march_actor_meta *crashed_
         drops_before = sup_meta->pending_drop_count;
         claimed_sync_batch = 1;
     }
-    pthread_mutex_unlock(&g_supervise_mu);
-
     int64_t delay = 0;
     if (streak > 1) {
         /* Same curve as ever, with the three constants now read from the
@@ -4059,6 +4057,15 @@ static void march_supervisor_notify(void *supervisor, march_actor_meta *crashed_
                 child_idx, streak, (long long)delay,
                 skip_due_to_pending
                     ? " (batch restart already pending, skipped)" : "");
+    /* The unlock sits AFTER the trace line, not right after the decision
+     * above, so trace lines from racing siblings come out in the order the
+     * lock decided them: a claimant's line always precedes the line of the
+     * sibling it deflected. Printed after the unlock, the deflected thread
+     * could win the race to stderr and invert them, which made
+     * test/native/supervisor_deflected_crash_absorbed flaky on CI. The delay
+     * arithmetic above is lock-free and cheap; the stderr write under the
+     * leaf lock only happens with MARCH_SUP_TRACE set. */
+    pthread_mutex_unlock(&g_supervise_mu);
 
     if (skip_due_to_pending) return;
 

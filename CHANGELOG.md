@@ -345,6 +345,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`SortedSet.from_list`, `union`, `intersect` and `difference` work.** All
+  four passed their arguments to `List.fold_left` in the wrong order with a
+  curried callback, so `SortedSet.from_list([5, 3, 9, 3, 1], cmp)` panicked
+  with "non-exhaustive pattern match ... { cmp: <fn>, tree: Leaf }" both
+  compiled and interpreted, and `--check stdlib/sorted_set.march` reported 17
+  type errors.
 - **Interpreter: a user function no longer hijacks a Prelude function's
   internal call of the same name.** With a `pfn show` (or `fn show`) over
   some type in your program, `println("hi")` panicked when interpreted

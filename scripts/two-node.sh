@@ -36,7 +36,33 @@ dir=$root/test/two_node/$scenario
 [ -x "$MARCH" ] || { echo "two-node: compiler not built: $MARCH" >&2; exit 2; }
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/two-node-$scenario.XXXXXX")
-PORT=$((40000 + RANDOM % 20000))
+
+# node-b's listen port, chosen BELOW the OS's ephemeral range.
+#
+# The old 40000-59999 overlapped Linux's default ephemeral range
+# (32768-60999), which is where the kernel draws the local port of every
+# OUTGOING connection.  A client socket an earlier scenario opened can
+# therefore be sitting on exactly the port node-b is about to bind, and
+# node-b dies with "panic: listen: tcp_listen: bind failed" having never met
+# a competing listener -- the CI flake this range avoids.  Below the
+# ephemeral floor a port is only ever taken by something that asked for it by
+# number, which start_node retries out of.
+ephemeral_floor() {
+  if [ -r /proc/sys/net/ipv4/ip_local_port_range ]; then
+    awk '{ print $1 }' /proc/sys/net/ipv4/ip_local_port_range
+  else
+    echo 49152        # the IANA/BSD default, which is what macOS uses
+  fi
+}
+port_lo=20000
+port_hi=$(( $(ephemeral_floor) - 1 ))
+[ "$port_hi" -gt "$port_lo" ] || { port_lo=10000; port_hi=19999; }
+# $$ as well as $RANDOM: two harnesses started in the same second seed $RANDOM
+# identically and would otherwise pick the same "random" port as each other.
+pick_port() { PORT=$(( port_lo + (RANDOM ^ $$) % (port_hi - port_lo + 1) )); }
+pick_port
+port_settled=0                # see start_node: PORT is only movable before
+                              # anything has been told which port to use
 pid_a=""; pid_b=""            # bash 3 (macOS): no associative arrays
 pid_of() { eval "echo \"\$pid_$1\""; }
 
@@ -66,15 +92,49 @@ compile() {
     || { cat "$work/compile_$n.log" >&2; fail "node_$n.march did not compile"; }
 }
 
+# Did the node-b just launched die on its bind()?  True only for that: a
+# node-b still alive at the end of the grace period bound its port, and one
+# that died some other way is the scenario's problem, surfaced by whatever
+# wait_line/wait_exit comes next.  Only reached before the port settles, so
+# truncating the two logs discards nothing a golden wants.
+bind_failed() {
+  local i=0
+  while [ "$i" -lt 15 ]; do                       # up to ~300 ms
+    if ! kill -0 "$pid_b" 2>/dev/null; then
+      wait "$pid_b" 2>/dev/null
+      grep -qF "bind failed" "$work/b.err" 2>/dev/null || return 1
+      : > "$work/b.err"; : > "$work/b.out"
+      pid_b=""
+      return 0
+    fi
+    i=$((i + 1)); sleep 0.02
+  done
+  return 1
+}
+
 start_node() {
   local n=$1 creation=${2:-1}
   compile "$n"
   if [ "$n" = b ]; then
-    MARCH_NODE_PORT=$PORT MARCH_NODE_CREATION=$creation "$work/node_b" >> "$work/b.out" 2>> "$work/b.err" &
+    local tries=1
+    while :; do
+      MARCH_NODE_PORT=$PORT MARCH_NODE_CREATION=$creation "$work/node_b" >> "$work/b.out" 2>> "$work/b.err" &
+      pid_b=$!
+      bind_failed || break
+      # Something else holds the port.  Before node-b has ever bound and
+      # before node-a has been told where to connect, a different port is
+      # still free to choose; after that the port IS the scenario (`restart`
+      # restarts node-b on the same one), so a collision is a real failure.
+      [ "$port_settled" = 0 ] || fail "node-b could not bind port $PORT"
+      tries=$((tries + 1))
+      [ "$tries" -gt 10 ] && fail "node-b found no free port in 10 attempts (last $PORT)"
+      pick_port
+    done
   else
     MARCH_PEER_PORT=$PORT "$work/node_a" >> "$work/a.out" 2>> "$work/a.err" &
+    pid_a=$!
   fi
-  eval "pid_$n=$!"
+  port_settled=1
 }
 
 kill_node() { local p; p=$(pid_of "$1"); kill -9 "$p" 2>/dev/null; wait "$p" 2>/dev/null; eval "pid_$1=''"; }
