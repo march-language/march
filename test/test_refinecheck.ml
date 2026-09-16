@@ -3220,16 +3220,23 @@ let b2_suite =
        unknown), so the postcondition is never proven and must not travel.
        Bypassing the gate here would turn a legal program into an error. *)
     gated "an UNPROVEN record postcondition does not propagate" (fun () ->
-        (* `x * x + 1 >= 1` is TRUE but unprovable (nonlinear), so the
-           postcondition stays unproven without being witness-confirmable —
-           the original `{ port: x }` body became a confirmed def-site
-           violation once counterexample surfacing landed, which is a
-           different property than the propagation gating pinned here. *)
+        (* The body must be TRUE for every input yet unprovable, or this stops
+           testing propagation gating: `{ port: x }` became a confirmed
+           def-site violation once counterexample surfacing landed, and
+           `{ port: x * x + 1 }` — the stand-in that replaced it — became
+           PROVED on 2026-09-16 when the predicate translator started
+           reflecting non-linear products, which then propagated `v.port >= 1`
+           and turned `needLow` into a definite violation.  Routing through
+           the uncontracted `av` keeps the field genuinely undecided: `av(x)`
+           reflects to an unconstrained constant, so `v.port >= 1` cannot be
+           proved, while `|x| + 1 >= 1` really does hold everywhere, so no
+           witness confirms a violation. *)
         Alcotest.(check bool) "no error" false
           (has_refine_error
              {|mod T do
   type Cfg = { port : Int }
-  fn mk_bad(x : Int) : {v : Cfg | v.port >= 1} do { port: x * x + 1 } end
+  fn av(x : Int) : Int do if x < 0 do 0 - x else x end end
+  fn mk_bad(x : Int) : {v : Cfg | v.port >= 1} do { port: av(x) + 1 } end
   fn needLow(c : {v : Cfg | v.port <= 0}) : Int do 0 end
   fn probe(y : Int) : Int do needLow(mk_bad(y)) end
 end|}));
@@ -7595,14 +7602,22 @@ end|});
   ; gated "an UNDECIDABLE postcondition is recorded as skipped" (fun () ->
         (* PRE-FIX: 0 proved, 0 violated, 0 skipped, exit 0. This is the case
            Task 3 will escalate; it must be countable first.
-           `z * z + 1 > 0` is TRUE but unprovable — the earlier `do z end`
-           body became a witness-CONFIRMED violation (recorded as such) once
-           counterexample surfacing landed; the skip accounting pinned here
-           needs a contract that stays genuinely undecided. *)
+
+           The contract has to stay genuinely undecided, which is harder than
+           it looks: `do z end` became a witness-CONFIRMED violation once
+           counterexample surfacing landed, and `z * z + 1 > 0` — the stand-in
+           that replaced it — became PROVED on 2026-09-16 when the predicate
+           translator started reflecting non-linear products.  A true-for-every
+           -input postcondition routed through an UNCONTRACTED callee is the
+           shape that survives both: `av` is opaque, so the return reflects to
+           an unconstrained constant and the goal is unprovable, while the
+           predicate really does hold for every input, so no witness can
+           confirm a violation either. *)
         March_refinecheck.Obligation.reset ();
         ignore (has_refine_error_d {|
 mod PL3 do
-  fn mk(z : Int) : {Int | _ > 0} do z * z + 1 end
+  fn av(z : Int) : Int do if z < 0 do 0 - z else z end end
+  fn mk(z : Int) : {Int | _ >= 0} do av(z) end
   fn main() : Int do mk(1) end
 end|});
         let proved, violated, skips = summary () in
@@ -11827,6 +11842,130 @@ end|}
    no lower-bound guard on `i` must still be a DIAGNOSED skip about `i`
    (unconstrained-subject or solver-undecided), never
    unreflectable-predicate. *)
+(* Non-linear multiplication in a predicate.
+
+   Before 2026-09-16 [Refine_scope.smt_of]'s `*` arm required one LITERAL
+   factor and returned [Error] otherwise, so `_ * _ >= 0` -- a tautology over
+   the integers that z3 decides instantly -- was an `unreflectable-predicate`
+   skip.  [Smt.Mul] already existed and [Division_safety] already emitted it;
+   only the predicate translator refused.  These cases pin the three
+   observable consequences: a decidable non-linear predicate now PROVES, a
+   definitely-false one now REFUTES with an executed witness, and a goal z3
+   cannot decide is named [Nonlinear_goal] rather than left in the residual
+   [Solver_undecided] bucket. *)
+let nonlinear_suite =
+  [ gated "a tautological non-linear predicate is proved, not skipped" (fun () ->
+        (* Fails before the change with (0, 1) and slug
+           `unreflectable-predicate`: the predicate never reached z3. *)
+        let proved, skipped =
+          ledger_counts
+            {|mod NL1 do
+  fn sq_nonneg(n : {Int | _ * _ >= 0}) : Int do n end
+  fn go(k : Int) : Int do sq_nonneg(k) end
+end|}
+        in
+        Alcotest.(check (pair int int)) "proved" (1, 0) (proved, skipped));
+
+    (* The consequence that moved two existing fixtures: a non-linear
+       POSTCONDITION proves too, so `z * z + 1 > 0` is no longer available as
+       a stand-in for "true but unprovable".  Pinned here so the next reader
+       of those fixtures can see where their stand-in went. *)
+    gated "a non-linear postcondition is proved" (fun () ->
+        let proved, skipped =
+          ledger_counts
+            {|mod NL4 do
+  fn mk(z : Int) : {Int | _ > 0} do z * z + 1 end
+  fn main() : Int do mk(1) end
+end|}
+        in
+        Alcotest.(check (pair int int)) "proved" (1, 0) (proved, skipped));
+
+    gated "a non-linear predicate is no longer unreflectable" (fun () ->
+        let rs =
+          skip_reasons
+            {|mod NL2 do
+  fn sq_nonneg(n : {Int | _ * _ >= 0}) : Int do n end
+  fn go(k : Int) : Int do sq_nonneg(k) end
+end|}
+        in
+        Alcotest.(check bool) "no unreflectable-predicate" false
+          (List.mem "unreflectable-predicate" rs));
+
+    (* The other direction: reflecting a predicate is only a win if a DEFINITE
+       failure is still definite.  `3 * 3 < 0` is false, and the witness
+       evaluator already handles `*` ([Witness.eval_operand]), so this reports
+       with an executed witness rather than going quiet. *)
+    gated "a definitely-false non-linear predicate is still a violation" (fun () ->
+        let text =
+          refine_error_text_d
+            {|mod NL3 do
+  fn sq_neg(n : {Int | _ * _ < 0}) : Int do n end
+  fn go() : Int do sq_neg(3) end
+end|}
+        in
+        Alcotest.(check bool) "violation reported" true
+          (contains text "sq_neg" && contains text "_ * _ < 0"));
+
+    (* A literal factor must STAY in [MulLit]: it keeps the query in LIA,
+       where z3 is complete.  Asserted through the diagnosis rather than the
+       encoding, since [Nonlinear_goal] fires only on [Smt.Mul]. *)
+    Alcotest.test_case "a literal coefficient is not diagnosed as non-linear" `Quick
+      (fun () ->
+        let vc =
+          { March_refine.Smt.decls = [ ("x", March_refine.Smt.SInt) ]
+          ; assumptions = [ March_refine.Smt.Gt (March_refine.Smt.Const "x", March_refine.Smt.IntLit 0) ]
+          ; goal =
+              March_refine.Smt.Gt
+                ( March_refine.Smt.MulLit (2, March_refine.Smt.Const "x")
+                , March_refine.Smt.IntLit 0 ) }
+        in
+        Alcotest.(check (option string)) "no diagnosis" None
+          (Option.map March_refinecheck.Obligation.reason_name
+             (March_refinecheck.Undecided.diagnose ~subject_sym:(Some "x")
+                ~subject_name:(Some "x") vc)));
+
+    (* The slug itself, asserted where it is deterministic: driving a real z3
+       `unknown` from a fixture would pin the test to one solver version. *)
+    Alcotest.test_case "a non-linear goal is diagnosed as nonlinear-goal" `Quick
+      (fun () ->
+        let vc =
+          { March_refine.Smt.decls =
+              [ ("x", March_refine.Smt.SInt); ("y", March_refine.Smt.SInt) ]
+          ; assumptions =
+              [ March_refine.Smt.Gt (March_refine.Smt.Const "x", March_refine.Smt.IntLit 0) ]
+          ; goal =
+              March_refine.Smt.Gt
+                ( March_refine.Smt.Mul
+                    (March_refine.Smt.Const "x", March_refine.Smt.Const "y")
+                , March_refine.Smt.IntLit 0 ) }
+        in
+        Alcotest.(check (option string)) "nonlinear-goal" (Some "nonlinear-goal")
+          (Option.map March_refinecheck.Obligation.reason_name
+             (March_refinecheck.Undecided.diagnose ~subject_sym:(Some "x")
+                ~subject_name:(Some "x") vc)));
+
+    (* An unconstrained subject outranks non-linearity: it is the more
+       actionable of the two, and naming the solver's incompleteness when the
+       real problem is a missing guard sends the reader to the wrong fix. *)
+    Alcotest.test_case "an unconstrained subject still outranks non-linearity" `Quick
+      (fun () ->
+        let vc =
+          { March_refine.Smt.decls =
+              [ ("x", March_refine.Smt.SInt); ("y", March_refine.Smt.SInt) ]
+          ; assumptions = []
+          ; goal =
+              March_refine.Smt.Gt
+                ( March_refine.Smt.Mul
+                    (March_refine.Smt.Const "x", March_refine.Smt.Const "y")
+                , March_refine.Smt.IntLit 0 ) }
+        in
+        Alcotest.(check (option string)) "unconstrained-subject"
+          (Some "unconstrained-subject")
+          (Option.map March_refinecheck.Obligation.reason_name
+             (March_refinecheck.Undecided.diagnose ~subject_sym:(Some "x")
+                ~subject_name:(Some "x") vc)))
+  ]
+
 let arith_actual_suite =
   [ gated "an arithmetic actual carries its operand's guard" (fun () ->
         let proved, skipped =
@@ -16392,6 +16531,7 @@ let () =
       ("let-equality", let_equality_suite);
       ("let-equality-alias", let_equality_alias_suite);
       ("arith-actual", arith_actual_suite);
+      ("nonlinear-mul", nonlinear_suite);
       ("audit-sites", audit_sites_suite @ audit_stacked_refinement_suite @ audit_arrow_signature_suite);
       ("audit-classify",
         audit_classify_suite @ audit_classify_reason_suite @ audit_classify_fixloop1_suite);

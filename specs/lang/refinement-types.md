@@ -80,8 +80,7 @@ fn chunks(xs : List(a), size : {Int | _ > 0}) : List(List(a)) do ... end
 fn count(xs : List(a)) : {Int | _ >= 0} do List.length(xs) end
 ```
 
-The supported predicate fragment is **`Int`/`Bool` linear arithmetic**:
-`+ - *` (multiplication by a literal), the comparisons `== != < <= > >=`, the
+The supported predicate fragment is **`Int`/`Bool` arithmetic**: `+ - *`, the
 connectives `&& || not`, integer/bool literals, **measures**, ADT
 **constructor tags** (both below), and the **set vocabulary** over a
 collection's elements (`elts`, `keys`, `member`, `union`, `inter`, `diff`,
@@ -91,6 +90,14 @@ and `==`/`!=` against literals. `Bool` values take the boolean operators against
 `true`/`false` ([Bool Refinements](#bool-refinements)); `Float` values take
 comparisons against float literals, discharged through Z3's bit-precise IEEE-754
 theory rather than reals ([Float Refinements](#float-refinements)).
+
+Multiplication by a literal keeps a query in linear arithmetic, where the
+solver is complete and fast. A product of two non-constant terms is accepted
+too — `v * v > 0` is exactly `v != 0` over the integers, and refusing it only
+turned a decidable predicate into a skip — but the solver is *incomplete*
+there, so a non-linear goal it cannot settle is reported as the skip reason
+`nonlinear-goal` rather than as a violation. Division (`/`, `%`) is not part
+of the predicate fragment.
 
 ---
 
@@ -177,19 +184,22 @@ but next_slot(15) returns 16.
 ### Why execution, and not just the model
 
 A verification condition is an *approximation* of your program: predicates the
-checker cannot translate to SMT (nonlinear arithmetic, an opaque call) are
-dropped from the query rather than guessed at. That keeps the checker sound
-when it *proves* things, but it means a raw "here is a failing input" model
-can describe a state your program never reaches:
+checker cannot translate to SMT (a call it cannot see inside, symbolic float
+arithmetic) are dropped from the query rather than guessed at. That keeps the
+checker sound when it *proves* things, but it means a raw "here is a failing
+input" model can describe a state your program never reaches:
 
 ```march
+fn magnitude(x : Int) : Int do if x < 0 do 0 - x else x end end
+
 fn always_one(x : Int) : {Int | _ >= 0} do
-  if x * x >= 0 do 1 else x end     -- the else branch is unreachable
+  if magnitude(x) >= 0 do 1 else x end     -- the else branch is unreachable
 end
 ```
 
-`x * x >= 0` is nonlinear, so the guard is dropped and the solver happily
-"refutes" the contract through the `else` branch. Printing that model would
+`magnitude` carries no contract, so the guard says nothing the solver can use
+and it is dropped; the solver then happily "refutes" the contract through the
+`else` branch. Printing that model would
 be a false positive on correct code — the exact failure mode this design
 exists to avoid. Running the candidate returns `1`, the predicate holds, the
 model is discarded, and **the checker stays silent.**

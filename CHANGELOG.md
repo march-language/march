@@ -13,6 +13,14 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Refinements may multiply two variables.** `{Int | _ * _ >= 0}` and other
+  non-linear predicates now reach the solver instead of being skipped as
+  untranslatable: refusing them never bought soundness, since `v * v > 0` is
+  exactly `v != 0` over the integers. Multiplication by a literal still keeps a
+  query in linear arithmetic; where the solver cannot settle a non-linear goal
+  the obligation is skipped with the new reason `nonlinear-goal`, which
+  `--refine-report` counts separately from the residual `solver-undecided`.
+
 - **`SortedSet`'s tree operations are proved against its element set.**
   Insertion, rebalancing, both rotations, node construction, minimum deletion
   and flattening carry refinement contracts proved from their bodies, on one

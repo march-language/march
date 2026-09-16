@@ -95,6 +95,34 @@ let known_head (f : string) : bool =
          suffix <> "" && String.for_all (fun c -> c >= '0' && c <= '9') suffix)
        Refine_encode.ctor_field_names false
 
+(* Does the goal multiply two non-constant terms?  [Smt.MulLit] does not count:
+   a literal coefficient keeps the query in linear arithmetic, where z3 is
+   complete, so an undecided LIA goal is NOT explained by non-linearity and
+   must stay in the residual bucket.  Only [Smt.Mul], which
+   [Refine_scope.smt_of] emits for two non-literal factors, is the real thing.
+
+   Deliberately asked of the GOAL only, not the assumptions: a non-linear fact
+   the author supplied is not why their goal went undecided, and attributing
+   it there would send them to rewrite a guard that is doing its job. *)
+let rec nonlinear (t : Smt.term) : bool =
+  match t with
+  | Smt.Mul (_, _) -> true
+  | Smt.Const _ | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ -> false
+  | Smt.App (_, ts) | Smt.Ctor (_, _, ts) -> List.exists nonlinear ts
+  | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) | Smt.Neg a | Smt.Not a -> nonlinear a
+  | Smt.MulLit (_, a) -> nonlinear a
+  | Smt.Add (a, b) | Smt.Sub (a, b)
+  | Smt.And (a, b) | Smt.Or (a, b) | Smt.Implies (a, b)
+  | Smt.Eq (a, b) | Smt.Ne (a, b)
+  | Smt.Lt (a, b) | Smt.Le (a, b) | Smt.Gt (a, b) | Smt.Ge (a, b)
+  | Smt.FpEq (a, b) | Smt.FpLt (a, b) | Smt.FpLe (a, b)
+  | Smt.FpGt (a, b) | Smt.FpGe (a, b) -> nonlinear a || nonlinear b
+  | Smt.SetEmpty _ -> false
+  | Smt.SetSng (_, a) -> nonlinear a
+  | Smt.SetMem (a, b) | Smt.SetUnion (a, b) | Smt.SetInter (a, b) | Smt.SetDiff (a, b)
+  | Smt.SetSub (a, b) -> nonlinear a || nonlinear b
+  | Smt.SetCard (_, a) -> nonlinear a
+
 (* Ordered most-specific-first.
 
    [subject_sym] must be the actual SMT symbol the subject reflected to IN
@@ -126,4 +154,4 @@ let diagnose ~(subject_sym : string option) ~(subject_name : string option)
        when not
               (List.exists (fun a -> List.mem s (consts a)) vc.Smt.assumptions) ->
        Some (Obligation.Unconstrained_subject name)
-     | _ -> None)
+     | _ -> if nonlinear vc.Smt.goal then Some Obligation.Nonlinear_goal else None)
