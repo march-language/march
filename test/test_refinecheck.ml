@@ -13173,6 +13173,69 @@ let audit_flag_verdict_invariance name src =
           Alcotest.(check string) "stderr, minus the coverage-audit block"
             (strip_audit_lines err_off) (strip_audit_lines err_on)))
 
+(* --refine-report-sites: the ledger's skips, one line each.  Written for the
+   census that Part A0 of the refinement-precision plan asks for -- deciding
+   which incompleteness to attack next needs the skips ATTRIBUTED, and
+   `--refine-report`'s per-reason counts cannot do that.  Reading them out of
+   the hint text is not a substitute: the residual hints are throttled to one
+   per module, so most skips never print one. *)
+let report_sites_suite =
+  [ Alcotest.test_case "--refine-report-sites prints one line per skipped obligation" `Quick
+      (fun () ->
+        let rc, stdout_s, stderr_s, path =
+          run_march_capturing [ "--check"; "--refine-report-sites" ]
+            {|mod RS do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn go(k : Int) : Int do pos(k) end
+end
+|}
+        in
+        Fun.protect ~finally:(fun () -> try Sys.remove path with Sys_error _ -> ()) (fun () ->
+          Alcotest.(check int) "exit 0" 0 rc;
+          Alcotest.(check string) "stdout empty" "" stdout_s;
+          (* The compiler prepends the whole stdlib, so its skips are printed
+             too — the reason each row carries its own user/stdlib slice. *)
+          let rows =
+            List.filter
+              (fun l -> String.length l >= 10 && String.sub l 0 10 = "skip\tuser\t")
+              (nonempty_lines stderr_s)
+          in
+          Alcotest.(check int) "one user skip row" 1 (List.length rows);
+          match String.split_on_char '\t' (List.hd rows) with
+          | [ "skip"; slice; _loc; reason; kind; callee; predicate ] ->
+            Alcotest.(check string) "slice" "user" slice;
+            Alcotest.(check string) "reason" "unconstrained-subject" reason;
+            Alcotest.(check string) "kind" "precondition" kind;
+            Alcotest.(check string) "callee" "pos" callee;
+            Alcotest.(check string) "predicate" "_ > 0" predicate
+          | other ->
+            Alcotest.failf "expected 7 tab-separated fields, got %d" (List.length other)))
+
+  ; (* The flag is a REPORT: it must not change a verdict or any other output,
+       the same invariance --refine-audit is held to. *)
+    Alcotest.test_case "--refine-report-sites changes no verdict" `Quick (fun () ->
+        let src =
+          {|mod RS2 do
+  fn pos(n : {Int | _ > 0}) : Int do n end
+  fn go() : Int do pos(-1) end
+end
+|}
+        in
+        let path = write_march_fixture src in
+        Fun.protect ~finally:(fun () -> try Sys.remove path with Sys_error _ -> ()) (fun () ->
+          let rc_off, out_off, err_off = run_march_on [ "--check" ] path in
+          let rc_on, out_on, err_on = run_march_on [ "--check"; "--refine-report-sites" ] path in
+          let strip s =
+            String.concat "\n"
+              (List.filter
+                 (fun l -> not (String.length l >= 5 && String.sub l 0 5 = "skip\t"))
+                 (String.split_on_char '\n' s))
+          in
+          Alcotest.(check int) "exit code" rc_off rc_on;
+          Alcotest.(check string) "stdout" out_off out_on;
+          Alcotest.(check string) "stderr minus the skip rows" (strip err_off) (strip err_on)))
+  ]
+
 let audit_flag_suite =
   [ (* The exact printed output for a small fixture, pinned line by line.
        The `user code` slice is fully determined by this fixture alone (one
@@ -16536,6 +16599,7 @@ let () =
       ("audit-classify",
         audit_classify_suite @ audit_classify_reason_suite @ audit_classify_fixloop1_suite);
       ("audit-flag", audit_flag_suite);
+      ("report-sites", report_sites_suite);
       ("audit-baseline", audit_baseline_suite);
       ("const-fn-predicate", const_fn_suite);
       ("unobliged-assume", unobliged_assume_suite);

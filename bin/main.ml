@@ -567,6 +567,37 @@ let print_refine_report ~filename ~user_files () =
   print_block "user code" user_obligations;
   print_block "user + stdlib" all_obligations
 
+(* --refine-report-sites: the ledger's skips, one line each, most useful when
+   deciding which incompleteness to work on next.  Same user-code/whole-ledger
+   split and the same [is_user_span] test as [print_refine_report]; the
+   whole-ledger half is labelled per line rather than in a second block, since
+   the point of this flag is to sort and group the lines with ordinary shell
+   tools. *)
+let print_refine_report_sites ~filename ~user_files () =
+  let is_user_span (span : March_ast.Ast.span) =
+    let f = span.March_ast.Ast.file in
+    f = filename || f = "" || f = "<unknown>" || List.mem f user_files
+  in
+  List.iter
+    (fun (o : March_refinecheck.Obligation.t) ->
+      match o.verdict with
+      | March_refinecheck.Obligation.Skipped r ->
+        let span = o.span in
+        let kind =
+          match o.kind with
+          | March_refinecheck.Obligation.Precondition -> "precondition"
+          | March_refinecheck.Obligation.Postcondition -> "postcondition"
+          | March_refinecheck.Obligation.Division -> "division"
+        in
+        Printf.eprintf "skip\t%s\t%s:%d:%d\t%s\t%s\t%s\t%s\n"
+          (if is_user_span span then "user" else "stdlib")
+          span.March_ast.Ast.file span.March_ast.Ast.start_line
+          span.March_ast.Ast.start_col
+          (March_refinecheck.Obligation.reason_name r)
+          kind o.callee o.predicate
+      | _ -> ())
+    (March_refinecheck.Obligation.all ())
+
 (* --refine-audit: every declared refinement occurrence
    ([March_refinecheck.Refine_audit.sites]), classified
    ([March_refinecheck.Refine_audit.classify]) against what the checker
@@ -1216,6 +1247,7 @@ let run_test_cmd args =
       ~type_map
       errors desugared;
     if !refine_report then print_refine_report ~filename ~user_files ();
+    if !refine_report_sites then print_refine_report_sites ~filename ~user_files ();
     if !refine_audit then print_refine_audit ~filename ~user_files !audit_result;
     (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
     March_refinecheck.Division_safety.check_module errors desugared;
@@ -1592,7 +1624,7 @@ let compile filename =
        --refine-report came to look broken.  Correctness of a diagnostic flag
        beats a cache hit on the run that asked for the diagnostic. *)
     if
-      refine_suggest_active () || !refine_report || !refine_audit
+      refine_suggest_active () || !refine_report || !refine_report_sites || !refine_audit
       || !report_contracts
     then None
     else if not !do_compile && not !do_check then None
@@ -1923,6 +1955,7 @@ let compile filename =
     ~type_map
     errors desugared;
   if !refine_report then print_refine_report ~filename ~user_files ();
+  if !refine_report_sites then print_refine_report_sites ~filename ~user_files ();
   if !refine_audit then print_refine_audit ~filename ~user_files !audit_result;
   (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
   March_refinecheck.Division_safety.check_module errors desugared;
@@ -4366,6 +4399,8 @@ let () =
      "<globs>  Comma-separated module/function globs (e.g. 'Dsp.*,Audio.mix') that --report-contracts considers in scope even without in-place reuse");
     ("--refine-report", Arg.Set refine_report,
      " Print a summary of refinement obligations: proved, violated, and skipped by reason (user code and user+stdlib)");
+    ("--refine-report-sites", Arg.Set refine_report_sites,
+     " Print one line per skipped refinement obligation: file:line:col, reason, callee, predicate");
     ("--refine-audit", Arg.Set refine_audit,
      " Print every declared refinement the checker never enforces or only warns about, plus bucket counts (user code and user+stdlib); changes no verdict");
     ("--refine-suggest", Arg.String (fun s -> refine_suggest_target := Some s),

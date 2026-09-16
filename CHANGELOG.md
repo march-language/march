@@ -13,6 +13,11 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`--refine-report-sites`: every skipped refinement obligation, one line
+  each** — `file:line:col`, reason, kind, callee and predicate, tab-separated
+  and labelled user or stdlib. `--refine-report` counts skips per reason;
+  this attributes them, which is what deciding where to spend effort needs.
+
 - **Refinements may multiply two variables.** `{Int | _ * _ >= 0}` and other
   non-linear predicates now reach the solver instead of being skipped as
   untranslatable: refusing them never bought soundness, since `v * v > 0` is
