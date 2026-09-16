@@ -21,6 +21,33 @@ git log is authoritative for exact commits.
   from different peers race, so a transport with several connections parks a delivery
   that arrives before the continuation that wants it. The projector knows the expected
   sender at every receive and now passes it, so generated endpoint code needs no change.
+- **An `s == ""` guard now establishes `len(s) > 0` in the else-branch.**
+  Previously documented as a gap: the checker knew only that `s` differed from
+  the empty literal, and a downstream `{String | len(_) > 0}` contract was
+  skipped.
+
+- **A `let` bound to an `if` carries both arms' facts forward.**
+  `let c = if x < 1 do 1 else x end` now discharges a downstream `{Int | _ > 0}`
+  contract: the checker records the case split rather than dropping the
+  binding.
+
+- **`pmap_threshold()` carries the contract `{Int | _ > 0}`.** The three
+  `List.pmap`/`pfilter`/`preduce` call sites that pass it to `chunks` are now
+  proved rather than skipped, and the refinement checker can propagate return
+  contracts for builtins generally.
+
+- **`--refine-report-sites`: every skipped refinement obligation, one line
+  each** — `file:line:col`, reason, kind, callee and predicate, tab-separated
+  and labelled user or stdlib. `--refine-report` counts skips per reason;
+  this attributes them, which is what deciding where to spend effort needs.
+
+- **Refinements may multiply two variables.** `{Int | _ * _ >= 0}` and other
+  non-linear predicates now reach the solver instead of being skipped as
+  untranslatable: refusing them never bought soundness, since `v * v > 0` is
+  exactly `v != 0` over the integers. Multiplication by a literal still keeps a
+  query in linear arithmetic; where the solver cannot settle a non-linear goal
+  the obligation is skipped with the new reason `nonlinear-goal`, which
+  `--refine-report` counts separately from the residual `solver-undecided`.
 - **`@[remote]` on an actor**: the compiler generates `<Actor>_Remote.dispatch(pid,
   delivery)`, which routes a typed `Node.send` delivery to the handler that takes its type.
   It returns `Ok(true)` when delivered, `Ok(false)` when no handler takes that type, and
@@ -367,6 +394,41 @@ git log is authoritative for exact commits.
   nothing when unset.
 
 ### Fixed
+- **Refinement checker: a user datatype colliding by bare name with a stdlib
+  module's own no longer clobbers it.** `stdlib/ordered_map.march` declares
+  `type Tree`; a user `type Tree` joined the same unqualified sort before
+  this fix, and whichever was registered last silently overwrote the
+  other's constructors. Datatype sort names are now qualified by declaring
+  module when two or more collide, resolving to the entry/top-level
+  declarant for an unqualified reference from the same top-level code.
+  `@[measure]` names are not (an attempt regressed a proof's z3 time from
+  instant to minutes); a stdlib rename that dodges a measure-name collision
+  (`SortedSet`'s `sorted_set_elts`) is unaffected.
+- **A `@[measure]` returning `Set(a)` over a generic `Tree(a)` now proves
+  when applied to a concrete instance.** Applying such a measure to a
+  `Tree(Int)` term was always a sort-conflict skip; the checker now tracks
+  which of the measure's own type parameters its set element is and
+  resolves it at the concrete instance, both for the instance's own axioms
+  and the query preamble that declares them.
+- **`--pmap-threshold` below 1 is rejected instead of hanging.** A cutoff of
+  `0` made `List.pmap` never return; the flag now fails with a message.
+- **`DateTime.parse_offset` returns `Err` on a malformed offset instead of
+  panicking.** The offset minutes were parsed as any two digits and handed
+  straight to `fixed_zone_hm`, whose `{Int | _ >= 0 && _ < 60}` contract
+  panicked, so `"2026-01-02T03:04:05+01:75"` aborted the process rather than
+  failing the parse like every other malformed field. Both the `+HH:MM` and the
+  colon-less `+HHMM` path are now range-checked, and the hour is bounded to
+  RFC 3339's 00-23 (`"+99:00"` used to be accepted as a zone 356400 seconds from
+  UTC). Found by the refinement checker: both call sites were
+  `unconstrained-subject` skips, and are now one proved obligation.
+- **`test/stdlib/test_datetime.march` actually runs.** It was on
+  `test_stdlib_march.ml`'s known-orphan allowlist, so its tests had never
+  executed; it is now registered with the other stdlib test files.
+- `DataFrame.col_describe` (and `summarize`, which uses it) panicked with
+  `Stats.mean: empty list` on a frame that has columns but zero rows — the shape
+  `head(df, 0)` produces, and the shape any filter that matches nothing produces.
+  Numeric columns with no rows now report `count = 0` and `None` for every
+  statistic, which is what the non-numeric columns already did.
 - `Node.send` minted a different wire tag for a message type declared at the entry
   module's top level depending on the entry module's name (`App.Note` rather than
   `Note`), so two separately built nodes could not agree on it. The entry module's name
@@ -375,6 +437,12 @@ git log is authoritative for exact commits.
   dropped each entry's vector clock, so a received binding always lost to the local one
   and both sides kept their own. Leaves now carry the clock, and the old encoding still
   decodes.
+
+- **`List.map` and `List.filter` no longer leak a capturing lambda
+  (compiled).** Each call leaked the lambda's environment and everything it
+  captured — one object per call. Their internal loop hands the callback down a
+  recursion through an alias, and it was that alias's release, not the one the
+  compiler had keyed its deep drop on, that ended the environment's life.
 - **`SortedSet.from_list`, `union`, `intersect` and `difference` work.** All
   four passed their arguments to `List.fold_left` in the wrong order with a
   curried callback, so `SortedSet.from_list([5, 3, 9, 3, 1], cmp)` panicked

@@ -1,0 +1,74 @@
+-- Leak guard: a capturing lambda handed to a higher-order function is released
+-- with everything it captured when the HOF's own loop lets it go.
+--
+-- `List.map`/`List.filter` build an internal `go` closure over the callback and
+-- hand it down a recursion. Perceus binds `$clo` to a local alias with a dup
+-- (`let go = inc_rc $clo; $clo`) and splices its release after the capture-read
+-- prefix, so THAT release never reaches zero and the deep drop keyed on it
+-- never fired. The release that does reach zero is the last iteration's
+-- `dec_rc go`, and it was shallow: the callback (and everything the callback
+-- captured) leaked once per `map` call.
+-- specs/progress/2026-09-15-closure-captures-released-by-the-hof-loop.md
+--
+-- NOT covered here, still open: a closure released by the function it was
+-- passed to (`List.fold_left` ends with `dec_rc f`). That release names no
+-- layout and is still shallow — see
+-- specs/todos/2026-09-06-closure-capture-release-widening.md item 3, which
+-- records why the obvious runtime table is not sound as gated.
+--
+-- Every leg prints the value it computed: a release that is too eager frees a
+-- capture the closure still reads, which shows up as a wrong number (or a
+-- crash) rather than as a leak. The golden must match the interpreter.
+mod Main do
+  needs IO.Console
+
+  type Holder = Holder((Int) -> Int)
+
+  pfn leg_map_capture(n : Int, k : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let xs = List.map([int_to_string(n), "ab"], fn s -> string_length(s) + k)
+      leg_map_capture(n - 1, k, acc + List.fold_left(xs, 0, fn (a, b) -> a + b))
+    end
+  end
+  pfn leg_filter_capture(n : Int, k : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let xs = List.filter([int_to_string(n), "ab"], fn s -> string_length(s) > k)
+      leg_filter_capture(n - 1, k, acc + List.length(xs))
+    end
+  end
+  -- A closure inside a constructor, released with the cell around it.
+  pfn leg_in_ctor(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let ys = [n, n, n]
+      let h = Holder(fn x -> x + List.length(ys))
+      let v = match h do Holder(g) -> g(n) end
+      leg_in_ctor(n - 1, acc + v)
+    end
+  end
+  -- A capture the closure reads on EVERY call: an over-eager release shows up
+  -- as a wrong value on the second call, not as a leak.
+  pfn leg_reused_capture(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let ys = [int_to_string(n), "pq"]
+      let f = fn (x : Int) -> x + string_length(List.fold_left(ys, "", fn (a, b) -> a ++ b))
+      leg_reused_capture(n - 1, acc + f(1) + f(2))
+    end
+  end
+
+  pfn flat(label : String, before : Int, r : Int) : () do
+    let grew = live_allocs() - before
+    println(label ++ " = " ++ int_to_string(r) ++ ", flat: " ++ bool_to_string(grew < 200))
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let n = 5000
+    let a = live_allocs()
+    flat("map over a capturing lambda", a, leg_map_capture(n, 3, 0))
+    let b = live_allocs()
+    flat("filter over a capturing lambda", b, leg_filter_capture(n, 1, 0))
+    let e = live_allocs()
+    flat("closure inside a constructor", e, leg_in_ctor(n, 0))
+    let f = live_allocs()
+    flat("capture read on every call", f, leg_reused_capture(n, 0))
+  end
+end

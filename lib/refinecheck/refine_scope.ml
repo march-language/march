@@ -205,11 +205,21 @@ let rec smt_of_r_marked ?(vocab = true) ~resolve_var ~resolve_measure
   | A.EApp (A.EVar { A.txt = "+"; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.Add (x, y)) a b
   | A.EApp (A.EVar { A.txt = "-"; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.Sub (x, y)) a b
   | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], _) -> Result.map (fun x -> Smt.Neg x) (r a)
+  (* A literal factor still reflects as [MulLit], which keeps the query in
+     LIA where z3 is complete and fast.  Two non-literal factors reflect as a
+     general [Smt.Mul] rather than failing: refusing them was never a safety
+     measure — `{v : Int | v * v > 0}` is exactly `v != 0` over the integers
+     and z3 decides it instantly — it only turned a decidable predicate into
+     an `unreflectable-predicate` skip.  Where z3 cannot decide a non-linear
+     goal the answer is `unknown`, which is already not-proved, and
+     [Undecided.diagnose] names it [Nonlinear_goal] rather than leaving it in
+     the residual bucket.  [Division_safety] has reflected general products
+     this way since it shipped; this is the predicate translator catching up. *)
   | A.EApp (A.EVar { A.txt = "*"; _ }, [ a; b ], _) ->
     (match a, b with
      | A.ELit (A.LitInt k, _), _ -> Result.map (fun y -> Smt.MulLit (k, y)) (r b)
      | _, A.ELit (A.LitInt k, _) -> Result.map (fun x -> Smt.MulLit (k, x)) (r a)
-     | _ -> Error e)
+     | _ -> b2 (fun x y -> Smt.Mul (x, y)) a b)
   | _ -> Error e
 
 (* Every predicate and guard is marked once, here at the entry, so the

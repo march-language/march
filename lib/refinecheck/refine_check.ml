@@ -730,6 +730,29 @@ let parametric_return (ctx : rctx) defs (cb : cbenv) (ce : contenv) (fname : str
        (match slot_of_var tv.A.txt with Some (Refined r) -> Some (`Scalar r) | _ -> None)
      | _ -> None)
 
+(* Is this `if` ARM an admitted right-hand side for the disjunctive let fact?
+
+   [let_equality_rhs] excludes a BARE VARIABLE for a documented reason: the
+   path translator reflects a variable at the INTEGER sort, so aliasing an
+   ADT-typed name (`let u = o` with `o : Option(Int)`) mixes sorts in one VC
+   and the sort-conflict gate drops the WHOLE VC — unrelated obligations
+   included.  An `if` arm is where a bare variable actually earns its keep
+   (`if c < 1 do 1 else c end` is the shape the stdlib writes), so admit one
+   only when the typechecker's span table says the binder really is `Int`.
+
+   No table (most unit fixtures) and no recorded binding span both answer
+   "not admitted": conservative in the direction that costs a proof rather
+   than soundness.  [Refine_check.check_module]'s production path always
+   passes the table, so this is a test-harness distinction, not a user-facing
+   one — assert on it with [has_refine_error_typed]. *)
+let if_arm_admitted (ctx : rctx) (e : A.expr) : bool =
+  match e with
+  | A.EVar { A.txt = v; _ } ->
+    (match List.assoc_opt v ctx.binds with
+     | Some sp -> caller_sort_at sp = Some Smt.SInt
+     | None -> false)
+  | _ -> let_equality_rhs e
+
 let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     (lets : launder) (sc : scope) (re : recenv) (cb : cbenv) (ce : contenv) (e : A.expr) : unit =
   let go = visit ~root errctx defs ctx path lets sc re cb ce in
@@ -890,6 +913,38 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                       , sp )
                   in
                   (eq, false) :: path
+                (* An `if`-shaped RHS: push the DISJUNCTION
+                   `(g && n == a) || (not g && n == b)` rather than a flat
+                   equality, since the value depends on which arm ran.  This
+                   is what lets `let c = if x < 1 do 1 else x end` discharge a
+                   `{Int | _ > 0}` obligation when the else-arm's guard
+                   supplies the bound — `stdlib/list.march`'s `csize2`, the
+                   one site of its kind in the whole stdlib (see
+                   specs/progress/2026-09-16-refine-skip-census.md).
+
+                   Both arms must be admitted RHS shapes and the GUARD must
+                   translate, or nothing is pushed: a dropped guard would
+                   leave `n == a || n == b` claiming the value is one of two
+                   things under no condition at all, which is weaker than
+                   silence in the direction that matters (it is a fact about
+                   `n` the checker cannot discharge but a later shadowing
+                   pass must still retire).  The self-mention guard applies to
+                   all three sub-expressions for the same reason it applies to
+                   a flat RHS. *)
+                | A.PatVar n, A.EIf (g, a, b, _)
+                  when if_arm_admitted ctx a && if_arm_admitted ctx b
+                       && not (expr_mentions names g)
+                       && not (expr_mentions names a)
+                       && not (expr_mentions names b) ->
+                  let sp = n.A.span in
+                  let var = A.EVar { A.txt = n.A.txt; A.span = sp } in
+                  let app op args = A.EApp (A.EVar { A.txt = op; A.span = sp }, args, sp) in
+                  let arm cond value = app "&&" [ cond; app "==" [ var; value ] ] in
+                  let disj =
+                    app "||"
+                      [ arm g a; arm (app "not" [ g ]) b ]
+                  in
+                  (disj, false) :: path
                 | _ -> path)
              | A.ELetFn (n, _, _, _, _) -> path_shadow path [ n.A.txt ]
              | _ -> path
@@ -2228,6 +2283,8 @@ let register_types_for_check (decls : A.decl list) : unit =
   Hashtbl.clear measure_base_cases;
   Hashtbl.clear measure_scalar_field_dep;
   Hashtbl.clear measure_preamble_sorts;
+  Hashtbl.reset adt_decl_paths;
+  Hashtbl.reset adt_canonical;
   registered_measures := [];
   measure_nonneg := [];
   Hashtbl.clear const_fns;
@@ -2238,12 +2295,27 @@ let register_types_for_check (decls : A.decl list) : unit =
   type_preamble := "";
   register_builtin_adts ();
   register_adt_names decls;
+  finalize_adt_canonical ();
   register_field_sorts decls;
   build_type_preamble ()
 
 (** Entry point: check refinement preconditions across [m], emitting
     diagnostics into [errctx].  [root] is the project root for the VC cache. *)
-(* Functions annotated `@[measure]` as (bare name, fn_def). *)
+(* Functions annotated `@[measure]` as (bare name, fn_def).
+
+   Deliberately NOT module-qualified, unlike [register_adt_names]'s ADT
+   sorts (see [adt_sort_name]'s comment): qualifying an ambiguous measure
+   name to a single "preferred declarant" was tried and reverted — every
+   call site sharing the bare spelling, INCLUDING THE LOSING DECLARANT'S OWN
+   RECURSIVE CALLS, silently resolved to the winner's axioms, which can
+   attach a heavy quantified preamble to a query that has nothing to do
+   with it and made z3 grind for minutes on a small fixture (a
+   global-preamble-attachment / z3-perf hazard, exactly the class of
+   regression the per-query axiom design elsewhere in this file exists to
+   avoid — see [measure_axioms_by_symbol]'s own comment). Excluding every
+   duplicate-named measure from axiomatisation outright (below, under
+   [measure_axioms]) is the variant proven safe so far; see
+   specs/progress/2026-09-15-refine-sort-and-measure-names-unqualified.md. *)
 let rec collect_measure_fns (decls : A.decl list) : (string * A.fn_def) list =
   List.concat_map
     (function
@@ -3005,6 +3077,8 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   Hashtbl.reset measure_base_cases;
   Hashtbl.reset measure_scalar_field_dep;
   Hashtbl.reset measure_preamble_sorts;
+  Hashtbl.reset adt_decl_paths;
+  Hashtbl.reset adt_canonical;
   measure_preamble := "";
   global_instance_names := [];
   Hashtbl.reset measure_axioms_by_symbol;
@@ -3023,6 +3097,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
      and produced a warning that is simply false. *)
   register_builtin_adts ();
   register_adt_names m.A.mod_decls;
+  finalize_adt_canonical ();
   register_field_sorts m.A.mod_decls;
   (* Zero-argument constant functions a predicate may name (`_ < size_x()`).
      Independent of [measure_axioms]: a constant folds to a literal, no axiom
@@ -3054,6 +3129,16 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
     (fun (name, fd) ->
       match set_ret_elem fd with
       | Some e -> Hashtbl.replace set_measure_elem name e
+      | None -> ())
+    mfns;
+  (* P3: which of the argument ADT's own type parameters a generic set
+     measure's element names (`Tree(a)`'s `a`, param 0) — see
+     [set_measure_elem_param]. *)
+  Hashtbl.reset set_measure_elem_param;
+  List.iter
+    (fun (name, fd) ->
+      match set_ret_elem_param fd with
+      | Some i -> Hashtbl.replace set_measure_elem_param name i
       | None -> ())
     mfns;
   (* A set-valued measure is LOGIC: it has no runtime meaning, so a call in
@@ -3122,7 +3207,15 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
        name (a user's and a stdlib module's) would each emit a `declare-fun`
        for it, and z3 rejects every query that attaches the preamble.  Neither
        is axiomatised; their predicates skip, which only loses proofs
-       (specs/todos/2026-09-15-refine-sort-and-measure-names-unqualified.md). *)
+       (specs/todos/2026-09-15-refine-sort-and-measure-names-unqualified.md —
+       a global-preamble-attachment / z3-perf hazard was found when a
+       "resolve the ambiguous bare name to one preferred declarant" scheme
+       was tried instead: EVERY unrelated call site sharing the bare name,
+       including the LOSING declarant's own internal recursive calls,
+       silently picked up the winner's axioms, which can attach a heavy
+       quantified preamble to queries that have nothing to do with it and
+       made z3 grind for minutes on a small fixture. Excluding both from
+       axiomatisation, as here, is the only variant proven safe so far). *)
     let mfns =
       List.filter
         (fun (name, _) -> List.length (List.filter (fun (n, _) -> n = name) mfns) = 1)

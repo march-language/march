@@ -214,7 +214,7 @@ val gate_unverified_posts :
     Called by [--check-migration], which runs [check_fn_post] against a
     synthesised signature and so must register the sorts itself. *)
 
-val register_adt_names : A.decl list -> unit
+val register_adt_names : ?path:string -> A.decl list -> unit
 val register_field_sorts : A.decl list -> unit
 
 (** {1 The inert-signature warning's own condition}
