@@ -149,6 +149,8 @@ let all_stdlib_decls =
     "crypto.march";
     "deque.march";
     "sorted_set.march";
+    "gen.march";
+    "check.march";
     "ring_buf.march";
     "vector_clock.march";
     "merkle.march";
