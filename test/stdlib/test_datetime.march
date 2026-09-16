@@ -3,6 +3,23 @@
 
 mod TestDateTime do
 
+-- Helper: assert the offset parses and carries `want` seconds.
+pfn assert_offset_secs(s : String, want : Int) do
+  match DateTime.parse_offset(s) do
+  Err(e) -> panic("parse_offset failed for " ++ s ++ ": " ++ e)
+  Ok(ldt) ->
+    assert (DateTime.zone_offset_seconds(DateTime.local_zone(ldt)) == want)
+  end
+end
+
+-- Helper: assert the offset is rejected (Err, never a panic).
+pfn assert_offset_err(s : String) do
+  match DateTime.parse_offset(s) do
+  Err(_) -> ()
+  Ok(_)  -> panic("malformed offset should return Err: " ++ s)
+  end
+end
+
 describe "DateTime" do
 
   describe "from_timestamp and to_timestamp" do
@@ -242,6 +259,58 @@ describe "DateTime" do
       Err(_) -> ()
       Ok(_) -> panic("short string should return Err")
       end
+    end
+
+  end
+
+  describe "parse_offset" do
+
+    test "valid colon offset parses" do
+      assert_offset_secs("2026-01-02T03:04:05+01:30", 5400)
+    end
+
+    test "valid colon-less offset parses" do
+      assert_offset_secs("2026-01-02T03:04:05+0130", 5400)
+    end
+
+    test "valid negative offset parses" do
+      assert_offset_secs("2026-01-02T03:04:05-05:45", -20700)
+    end
+
+    test "Z parses as UTC" do
+      assert_offset_secs("2026-01-02T03:04:05Z", 0)
+    end
+
+    test "boundary offset 23:59 parses" do
+      assert_offset_secs("2026-01-02T03:04:05+23:59", 86340)
+    end
+
+    test "minutes 60 returns Err" do
+      assert_offset_err("2026-01-02T03:04:05+01:60")
+    end
+
+    test "minutes 99 returns Err" do
+      assert_offset_err("2026-01-02T03:04:05+01:99")
+    end
+
+    test "colon-less minutes 60 returns Err" do
+      assert_offset_err("2026-01-02T03:04:05+0160")
+    end
+
+    test "colon-less minutes 99 returns Err" do
+      assert_offset_err("2026-01-02T03:04:05+0199")
+    end
+
+    test "hour 24 returns Err" do
+      assert_offset_err("2026-01-02T03:04:05+24:00")
+    end
+
+    test "hour 99 returns Err" do
+      assert_offset_err("2026-01-02T03:04:05+99:00")
+    end
+
+    test "colon-less hour 24 returns Err" do
+      assert_offset_err("2026-01-02T03:04:05-2400")
     end
 
   end
