@@ -484,7 +484,10 @@ let p  = SessionNode.connect_to(p1, Relay_Msg.role_Logger(), conn_to_logger)
 ```
 
 `emit` picks the connection from the message's destination role, and `serve` reads every
-peer at once. Messages from different peers race — each connection is FIFO, but two are
+peer at once. `SessionNode.require(p, Relay_Msg.peers_Server())` checks, before the session
+starts, that the party has a connection to every role the projection says `Server`
+exchanges messages with — the generated `peers_<Role>()` — and names the missing ones.
+A wiring mistake fails at startup, not at the first message to an unreachable role. Messages from different peers race — each connection is FIFO, but two are
 not ordered against each other — so a delivery that arrives before the continuation that
 wants it is parked and replayed when that continuation is installed. The generated code
 tells the transport which role each receive expects, so this needs nothing from you.

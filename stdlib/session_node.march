@@ -320,6 +320,42 @@ mod SessionNode do
 
   -- ── routing ─────────────────────────────────────────────────────────────
 
+  pfn has_link(links : List(Link), role : Int) : Bool do
+    match List.find(links, fn l -> l.role == role) do
+      Some(_) -> true
+      None -> false
+    end
+  end
+
+  pfn show_roles(rs : List(Int)) : String do
+    match rs do
+      Nil -> ""
+      Cons(r, Nil) -> int_to_string(r)
+      Cons(r, rest) -> int_to_string(r) ++ ", " ++ show_roles(rest)
+    end
+  end
+
+  doc """
+  Check that [p] has a connection to every role in [peers] -- the generated
+  `<P>_Msg.peers_<R>()`, every role [R] exchanges a message with -- and panic
+  naming the missing ones. Call it before `serve`, so a wiring mistake fails
+  at startup rather than at the first `emit` to an unreachable role. A party
+  with exactly one peer passes: it routes everything to that connection
+  whatever the role numbers say (the two-party case, where `open` never asked
+  for them).
+  """
+  fn require(p : Party, peers : List(Int)) : Party do
+    match p.links do
+      Cons(_, Nil) -> p
+      _ ->
+        let missing = List.filter(peers, fn r -> has_link(p.links, r) == false)
+        match missing do
+          Nil -> p
+          _ -> panic("session_node: role " ++ int_to_string(p.my_role) ++ " has no connection to role(s) " ++ show_roles(missing))
+        end
+    end
+  end
+
   -- The connection that reaches role [to]. A party with exactly ONE peer
   -- routes everything to it, whatever the role numbers say: that is the
   -- two-party case, where `open` never asked for role numbers at all.

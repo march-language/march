@@ -12,6 +12,12 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`SessionNode.require(party, peers)`** checks a multiparty session has a connection to
+  every role it will exchange messages with — the generated `<P>_Msg.peers_<Role>()` — and
+  names the missing ones at startup rather than failing at the first message.
+- The two-node harness (`scripts/two-node.sh`) accepts an optional third node, each node
+  with its own listen port (`MARCH_PORT_A`/`_B`/`_C`); the `fan` scenario runs a
+  three-role session protocol as three processes.
 - **`SessionNode` routes by role, so an `@[endpoints]` protocol can run its roles on
   three or more nodes.** `SessionNode.party(my_role, node_id, on_close)` plus
   `accept_from` / `connect_to` per peer; `emit` picks the connection from the message's
