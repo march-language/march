@@ -2896,15 +2896,24 @@ byte-equal output (this corpus's usual check); the post-Perceus TIR
 matches `test/snapshots/perceus/mixed_owned_borrowed_args.expected` exactly
 (one `inc_rc s` before the call, one `dec_rc` after); and the compiled
 binary runs clean under `MARCH_SANITIZE=1`: exit 0, no ASan/UBSan report
-(live-verified 2026-07-11; not yet a standing CI gate; no broad sanitizer
-sweep exists over the corpus, a documented gap, not built in this
-docs-only slice).
+(live-verified 2026-07-11). Since 2026-08-20 this IS a standing CI gate —
+the `sanitize-gate` job runs `specs/lang/golden/sanitize.sh` over three
+corpora (every golden program, a curated by-name set of `test/native`
+fixtures, and since 2026-09-16 the `scripts/two-node.sh` scenarios), 84
+programs as of 2026-09-16.
 
 **What this section intentionally excludes.** FBIP/reuse (`lib/tir/
 perceus_fbip.ml`) needs an "reuse preserves semantics" theorem to state as a
 real rule, not just an arity-compatibility check; excluded pending that
-metatheory. Atomic RC mode-selection (`specs/atomic-rc-design.md`) is an
-undesigned draft; no code implements it today. Escape-analysis stack
+metatheory. Atomic RC mode-selection is excluded in the form
+`specs/atomic-rc-design.md` designs it — a general escape-analysis-driven
+pass, which does not exist (no `rc_mode` pass module under `lib/tir/`, and
+no `rc_mode` field on the TIR). A NARROWER selection does ship and is not covered by a
+rule here: `Perceus_core.incrc_for`/`decrc_for` emit `EAtomicIncRC` /
+`EAtomicDecRC` for any variable in `actor_sent` — the values reachable by
+`send()` — and `Llvm_emit` lowers those to C11 atomics. Stating a rule for
+it would need the escape argument that makes "sent to an actor" the right
+boundary, which is the same metatheory the general pass is waiting on. Escape-analysis stack
 promotion (`lib/tir/escape.ml`) is an orthogonal optimization with no
 correctness content of its own to formalize (its one correctness
 obligation, never stack-promote an erased-repr alloc, was already the L7
