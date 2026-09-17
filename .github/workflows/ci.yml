@@ -179,6 +179,38 @@ jobs:
   # Static-semantics + grammar corpora, doc notebooks and formatting: all
   # independent of `dune runtest` and of each other, and all short — grouped
   # into one job rather than four so they don't each pay job-setup overhead.
+  # Compiles every gated bench/*.march with --opt 2, runs it, and checks the
+  # value it prints. This is the only thing in CI that runs the benchmarks at
+  # all: they are not part of runtest, and three of them (tree_transform,
+  # iolist_template, string_pipeline) were silently broken for weeks before the
+  # gate existed. The gate was written to prevent exactly that, then was never
+  # wired up, so 17 benches drifted out of the manifest unnoticed — see
+  # specs/progress/2026-09-16-bench-gate-manifest-and-ci.md.
+  #
+  # Its OWN job, deliberately, not a step in `conformance`. It compiles and runs
+  # 43 programs, which leaves far more workspace state behind than a check
+  # ought to impose on whatever runs after it: as a `conformance` step it was
+  # followed by a reproducible failure of the NEXT step (the stdlib doctest
+  # REPL returning `false` for `Path.is_absolute("/etc")`) that did not occur
+  # on main with the identical compiler and stdlib. A job boundary is the
+  # cheapest way to keep a benchmark runner from being able to do that, and it
+  # runs in parallel besides. ~72s locally for 43 benches, compile-dominated.
+  bench-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up toolchain
+        timeout-minutes: 12
+        uses: ./.github/actions/march-setup
+
+      - name: Benchmark output gate (not part of runtest)
+        timeout-minutes: 15
+        run: |
+          eval $(opam env)
+          dune build @bench_gate
+
   conformance:
     strategy:
       fail-fast: false
@@ -485,24 +517,6 @@ jobs:
         run: |
           eval $(opam env)
           dune build @vault-scale
-
-      # Compiles every gated bench/*.march with --opt 2, runs it, and checks the
-      # value it prints. This is the only thing in CI that runs the benchmarks
-      # at all: they are not part of runtest, and three of them (tree_transform,
-      # iolist_template, string_pipeline) were silently broken for weeks before
-      # the gate existed. It was written to prevent exactly that and then was
-      # never wired up, so 17 benches drifted out of the manifest unnoticed —
-      # see specs/progress/2026-09-16-bench-gate-manifest-and-ci.md.
-      #
-      # ~72s locally for 43 benches, compile-dominated. It lives in this job
-      # rather than `test` because it is a slow-lane check like its neighbours,
-      # and because keeping it off the critical path is what the `test` job's
-      # own comments ask for.
-      - name: Benchmark output gate (not part of runtest)
-        timeout-minutes: 15
-        run: |
-          eval $(opam env)
-          dune build @bench_gate
 
       - name: Check doc notebooks (.scrollmd) compile
         timeout-minutes: 5

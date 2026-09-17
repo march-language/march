@@ -48,9 +48,33 @@ A new check, `test_ignore_timing_entries_have_anchors`, makes an anchorless
 anchor list naming a bench that is not gated. Verified non-vacuous by deleting
 one anchor list: it fails naming `simd_sum`.
 
-The alias is now wired into CI, in the `conformance` job alongside the other
-slow-lane checks that are "not part of runtest". The full gate is ~72 s locally
-for 43 benchmarks, compile-dominated.
+The alias is now wired into CI as **its own job**, not as a step inside
+`conformance`. The full gate is ~72 s locally for 43 benchmarks,
+compile-dominated.
+
+The job boundary is not cosmetic. Wired first as a `conformance` step, it was
+followed by a **reproducible** failure of the very next step — the stdlib
+doctest REPL returning `false` for `Path.is_absolute("/etc")`, which is
+`String.starts_with(path, "/")`. Twice on the same commit, while `main` was
+green six runs running with a byte-identical compiler and stdlib: this branch
+touches only `test/test_bench_gate.ml` (a test executable that `dune build
+bin/main.exe` does not build), `ci.yml` and a spec file, so nothing in it can
+change what `march repl` computes. The added step was the only variable.
+
+The mechanism was not identified. Ruled out: `ensure_runtime_so`'s
+`~/.cache/march` runtime `.so`, whose four callers are all JIT/REPL/FFI paths
+and never `--compile`. Still open, and the most likely candidate, is dune
+workspace state — `dune build @bench_gate` stages `stdlib/` and `runtime/`
+into `_build/default/`, which is where a later `march repl` resolves them
+exe-relative, and the doctest step's own `dune build bin/main.exe` does not
+stage them. That is the same staleness trap recorded elsewhere in this repo,
+seen from the other side.
+
+Rather than chase it further, the gate got a job of its own: a check that
+compiles and runs 43 programs should not be able to disturb whatever runs
+after it, and it now runs in parallel instead of extending a serial job. If
+the interaction is ever worth understanding properly, the repro is one
+`conformance` step away.
 
 ## Floats and cross-platform pinning
 
