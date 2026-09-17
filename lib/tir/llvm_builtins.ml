@@ -1858,6 +1858,37 @@ let builtin_boxed_generic_params_tbl : (string, int list) Hashtbl.t =
   Hashtbl.replace tbl "typed_array_fold" [1];
   tbl
 
+(** Builtins whose declared `ptr` return is a FRESHLY ALLOCATED box that the
+    caller owns, for the call sites where the concrete March return type is a
+    scalar and the call site therefore unboxes it.
+
+    An allowlist, not a predicate, because "returns ptr where March says Float"
+    is NOT sufficient: [typed_array_get] hands back an element the ARRAY still
+    owns (see [Borrow.extern_owned_builtins]' note on it), and releasing that
+    at the call site is a use-after-free rather than a leak fixed.  Only names
+    whose C implementation is known to return a value with no surviving alias
+    belong here.
+
+    The fold family qualifies: the returned accumulator is whatever the last
+    [call_closure_2] returned, and every Float coming out of an apply fn is a
+    fresh [march_alloc_float] box (re-boxed on return).  A zero-length fold
+    returns the caller's own initial accumulator instead, which the call site
+    allocated fresh for this call and equally owns.
+
+    Measured before this release: exactly 2 leaked objects per
+    [NativeArray.fold_float] call, length-independent — this return box and
+    the initial accumulator box, the latter fixed in
+    [fold_release_prev_acc].  See
+    specs/todos/2026-09-16-native-float-arr-fold-leaks-two-boxes-per-call.md. *)
+let builtin_owned_boxed_return_tbl : (string, unit) Hashtbl.t =
+  let tbl = Hashtbl.create 8 in
+  List.iter (fun n -> Hashtbl.replace tbl n ())
+    [ "native_float_arr_fold"; "native_f32_arr_fold"; "typed_array_fold" ];
+  tbl
+
+let builtin_owned_boxed_return (name : string) : bool =
+  Hashtbl.mem builtin_owned_boxed_return_tbl name
+
 (** True iff parameter [idx] of builtin [name] is a generic erased slot that
     must receive a boxed scalar (see [builtin_boxed_generic_params_tbl]). *)
 let builtin_param_is_boxed_generic (name : string) (idx : int) : bool =

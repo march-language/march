@@ -1,0 +1,79 @@
+-- Leak guard: the two Float boxes that cross the March/C boundary at a
+-- `fold_float` call are released.
+--
+-- The per-ELEMENT boxing inside runtime/march_runtime.c's fold loop has been
+-- released since 2026-08-20 and is pinned by native_arr_fold_leak_probe and
+-- native_arr_fold_acc_leak_probe. This probe guards the two that are NOT
+-- per-element, and whose cost is therefore invisible to a long array:
+--
+--   * the INITIAL accumulator box. The call site allocates it fresh
+--     (Llvm_builtins.builtin_boxed_generic_params_tbl boxes the generic 'a
+--     slot), the helper is classified owned, and `fold_release_prev_acc` used
+--     to exclude it from release on the intuition that it belonged to the
+--     caller. It did not.
+--   * the RETURNED box. The helper's declared return is a generic `ptr`; at a
+--     Float call site the caller unboxes it and used to drop it on the floor.
+--
+-- Measured before the fix: exactly 2 live objects per `fold_float` call,
+-- INDEPENDENT of length -- 4, 16, 64 and 256 elements all grew by the same
+-- 4,001 over 2,000 calls. That independence is the whole tell, and it is why
+-- the leg below folds a SHORT array many times rather than a long one once.
+-- specs/todos/2026-09-16-native-float-arr-fold-leaks-two-boxes-per-call.md
+--
+-- `fold_int` is the control that isolates the cause: clo_call_int_int
+-- wire-tags its scalar instead of boxing, and it was always flat.
+--
+-- The last three legs are the DOUBLE-FREE direction, which is what an
+-- over-eager release of either box looks like: an identity closure returns the
+-- accumulator it was handed (the `prev == result` guard), a zero-length fold
+-- never enters the loop and hands the caller's own initial accumulator back,
+-- and both must still report the right number.
+mod Main do
+  needs IO.Console
+
+  pfn flat(label : String, before : Int, r : String) : () do
+    let grew = live_allocs() - before
+    println(label ++ " = " ++ r ++ ", flat: " ++ bool_to_string(grew < 200))
+  end
+
+  pfn ffold(a : NativeFloatArr, k : Int, acc : Float) : Float do
+    if k <= 0 do acc else ffold(a, k - 1, acc +. NativeArray.fold_float(a, 0.0, fn (p, x) -> p +. x)) end
+  end
+
+  pfn f32fold(a : NativeF32Arr, k : Int, acc : Float) : Float do
+    if k <= 0 do acc else f32fold(a, k - 1, acc +. NativeArray.fold_f32(a, 0.0, fn (p, x) -> p +. x)) end
+  end
+
+  pfn ifold(a : NativeIntArr, k : Int, acc : Int) : Int do
+    if k <= 0 do acc else ifold(a, k - 1, acc + NativeArray.fold_int(a, 0, fn (p, x) -> p + x)) end
+  end
+
+  -- identity: the closure hands back the accumulator box it was given
+  pfn idfold(a : NativeFloatArr, k : Int, acc : Float) : Float do
+    if k <= 0 do acc else idfold(a, k - 1, acc +. NativeArray.fold_float(a, 1.0, fn (p, x) -> p)) end
+  end
+
+  -- zero-length: the loop never runs, so the initial accumulator IS the result
+  pfn emptyfold(e : NativeFloatArr, k : Int, acc : Float) : Float do
+    if k <= 0 do acc else emptyfold(e, k - 1, acc +. NativeArray.fold_float(e, 2.0, fn (p, x) -> p +. x)) end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let n = 20000
+    let fa = NativeArray.make_float(4, 1.5)
+    let f3 = NativeArray.make_f32(4, 1.5)
+    let ia = NativeArray.make_int(4, 3)
+    let ea = NativeArray.make_float(0, 0.0)
+
+    let a = live_allocs()
+    flat("fold_float", a, float_to_string(ffold(fa, n, 0.0)))
+    let b = live_allocs()
+    flat("fold_f32", b, float_to_string(f32fold(f3, n, 0.0)))
+    let c = live_allocs()
+    flat("fold_int (control)", c, int_to_string(ifold(ia, n, 0)))
+    let d = live_allocs()
+    flat("identity closure", d, float_to_string(idfold(fa, n, 0.0)))
+    let e = live_allocs()
+    flat("zero-length fold", e, float_to_string(emptyfold(ea, n, 0.0)))
+  end
+end

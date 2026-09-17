@@ -1,0 +1,5 @@
+fold_float = 120000., flat: true
+fold_f32 = 120000., flat: true
+fold_int (control) = 240000, flat: true
+identity closure = 20000., flat: true
+zero-length fold = 40000., flat: true

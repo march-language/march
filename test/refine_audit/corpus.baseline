@@ -230,6 +230,8 @@ native_native_arr_fold: coverage audit (user + stdlib): 114 enforced, 0 inert (w
 native_native_arr_fold: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_native_arr_fold_acc_leak_probe: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
 native_native_arr_fold_acc_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_fold_boundary_box_probe: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_fold_boundary_box_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_native_arr_fold_leak_probe: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
 native_native_arr_fold_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_native_arr_map2: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced

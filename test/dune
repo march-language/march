@@ -1836,6 +1836,32 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/if_branch_dead_value_probe.expected native_if_branch_dead_value_probe.out)))
 
+; ── Leak guard: the two Float boxes that cross the March/C boundary at a
+; `fold_float` call -- the initial accumulator box the call site allocates and
+; the box the helper returns -- are released. NOT the per-element boxing, which
+; the two fold probes above already pin: these two are length-independent, so
+; the legs fold a SHORT array many times. Red before the fix: every leg but the
+; `fold_int` control reads `flat: false`, 2 objects per call.
+(rule
+ (targets native_native_arr_fold_boundary_box_probe
+          native_native_arr_fold_boundary_box_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/native_arr_fold_boundary_box_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2
+        -o native_native_arr_fold_boundary_box_probe
+        native/native_arr_fold_boundary_box_probe.march)
+   (with-stdout-to native_native_arr_fold_boundary_box_probe.out
+        (system "./native_native_arr_fold_boundary_box_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_fold_boundary_box_probe.expected
+               native_native_arr_fold_boundary_box_probe.out)))
+
 ; ── Leak guard: `to_string` of a List (prelude's Show via string_join) and
 ; string_join itself release the list. string_join's list argument was marked
 ; owned in borrow.ml while march_string_join only reads it: 5 objects per
