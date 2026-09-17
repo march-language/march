@@ -53,3 +53,25 @@ deleting the guard fails a test instead of silently passing.
 
 The note itself is unchanged. Nothing about the `no_alloc` contract was in
 question and nothing about it moved.
+
+## The test must not inherit the ambient TRMC default
+
+The first version asserted the note's ABSENCE with `compile ~flags:""`, i.e.
+whatever the build default happens to be. That passes locally and fails in
+`ci.yml`'s `trmc-suite` job, which runs the entire suite under
+`MARCH_NO_TRMC=1` — there `flags:""` means TRMC is OFF, the note is present,
+and the assertion inverts.
+
+Both halves now pass the flag explicitly (`--trmc` / `--no-trmc`). The env
+forms are seeded before `Arg.parse` precisely so an explicit flag wins, which
+is what makes the case configuration-independent — and it is a better test for
+it: the claim is about the guard, not about what the default is this month.
+
+Verified in both configurations: the case passes plain and under
+`MARCH_NO_TRMC=1`, and the full compiler suite passes under `MARCH_NO_TRMC=1`
+(1112 tests).
+
+**Worth knowing generally:** a test that compiles a fixture and asserts on
+TRMC-dependent output has TWO configurations in CI, not one. `scripts/run-tests.sh`
+locally is the first; `MARCH_NO_TRMC=1 scripts/run-tests.sh` is the second, and
+only the `trmc-suite` job runs it.

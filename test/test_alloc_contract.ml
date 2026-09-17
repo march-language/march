@@ -488,14 +488,20 @@ let test_trmc_hint_present_when_off () =
     (contains "marked @[no_alloc] but allocates" out);
   Alcotest.(check bool) "and carries the TRMC hint" true
     (contains "TRMC-eligible" out);
-  (* Control, and the sharper half: the SAME fixture on the default build
-     still reports no_alloc -- TRMC makes the `Cons` an in-place write but the
-     base case's `Nil` is allocated either way, which is the constructor the
+  (* Control, and the sharper half: the SAME fixture with TRMC ON still
+     reports no_alloc -- TRMC makes the `Cons` an in-place write but the base
+     case's `Nil` is allocated either way, which is the constructor the
      diagnostic names -- and carries NO note. Same fixture, same diagnostic,
      note present iff the transform is off: that is exactly the guard
-     `(not trmc) && trmc_eligible name`, with nothing else varying. *)
-  let (_, out_on) = compile ~flags:"" trmc_note_src in
-  Alcotest.(check bool) "no_alloc still fires on the default build" true
+     `(not trmc) && trmc_eligible name`, with nothing else varying.
+
+     `--trmc` EXPLICITLY, not the ambient default: ci.yml's `trmc-suite` job
+     runs the whole suite under `MARCH_NO_TRMC=1`, where `flags:""` means TRMC
+     is OFF and this assertion inverts. The env forms are seeded before
+     Arg.parse precisely so an explicit flag wins, which is what makes this
+     case configuration-independent. *)
+  let (_, out_on) = compile ~flags:"--trmc" trmc_note_src in
+  Alcotest.(check bool) "no_alloc still fires with TRMC on" true
     (contains "marked @[no_alloc] but allocates" out_on);
   Alcotest.(check bool) "but carries no TRMC hint" false
     (contains "TRMC-eligible" out_on)
