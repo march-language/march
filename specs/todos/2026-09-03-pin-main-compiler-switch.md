@@ -1,4 +1,19 @@
-# Bake `MARCH_PIN_MAIN` into a binary (compiler / forge.toml switch)
+# Bake `MARCH_PIN_MAIN` into a binary — forge.toml half remaining
+
+> **The compiler half landed 2026-09-17**
+> (`specs/progress/2026-09-17-pin-main-compiler-switch.md`): `march --pin-main`
+> emits `march_spawn_main_pinned` instead of `march_spawn_main`, so the binary
+> carries the requirement itself. CAS-tagged, so a non-pinned cached artifact
+> cannot satisfy a `--pin-main` build.
+>
+> **Remaining: `forge.toml` `[package] pin_main = true`.** Not done, and it is
+> not quite a one-liner: `forge/lib/toml.ml`'s `value` type has only `Str`,
+> `InlineTable` and `Array` — there is no `Bool` — so `pin_main = true` either
+> lexes as `Str "true"` or is not representable, and which one it is decides
+> whether the getter is `get_string pkg "pin_main" = Some "true"` or whether
+> the TOML value type needs a `Bool` first. Settle that before writing the
+> field. Then: a field on `Project.t`, and `Cmd_build.compile_entry` needs the
+> project threaded to it (it currently takes no project) to add the flag.
 
 Filed 2026-09-03 alongside `specs/progress/2026-09-03-pin-main-green-thread-to-scheduler-0.md`.
 
