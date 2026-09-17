@@ -113,6 +113,7 @@ are not sorting a `NativeArray` and this does not apply to you.
 **It sorts in place only when the array is uniquely owned.** Threading the
 result through the same binding allocates nothing:
 
+<!-- scroll:skip -->
 ```march
 let arr = NativeArray.sort_int(arr)          -- in place, no copy
 ```
@@ -120,6 +121,7 @@ let arr = NativeArray.sort_int(arr)          -- in place, no copy
 Keep the original alive and you get copy-on-write instead, which is what makes
 that safe:
 
+<!-- scroll:skip -->
 ```march
 let sorted = NativeArray.sort_int(original)  -- `original` is unchanged
 ```
