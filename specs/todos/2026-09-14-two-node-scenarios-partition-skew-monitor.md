@@ -2,10 +2,12 @@
 
 Filed 2026-09-14 as the remainder of
 [[2026-09-14-two-node-failure-semantics-harness]] (now a progress record).
-The harness (`scripts/two-node.sh`) and three scenarios exist: `restart`
-(creation counter), `stream` (`Session.Ops` over the network), `stall`
-(SWIM suspect → dead → refutation). Each remaining scenario pins a claim
-the docs still make in prose only.
+
+**Validated 2026-09-17:** every scenario this file listed has shipped (`partition`, `skew`,
+`monitor_reconnect`, and since then `fan`, `gone`, `hosted`, `hosted_restart`,
+`protocol`); `scripts/two-node.sh --list` is the live inventory. The one open item is the
+section at the end, the two-container variant, and it stays P3: nothing needs a fault
+loopback cannot express yet. The shipped sections are kept below for the links.
 
 ## Scenario `partition` (was 2)
 

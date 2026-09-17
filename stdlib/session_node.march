@@ -52,7 +52,10 @@
 -- The role runner (`run`, at the end of this file) does all of the above
 -- from a role, its peer set and a role->address table, in the order that
 -- cannot deadlock; the generated `<P>_Run.run_<Role>` is its typed front.
--- Design: specs/progress/2026-09-16-role-runner.md.
+-- `run_hosted` is the same party driving a role hosted in an actor (the
+-- generated event API) -- `<P>_Run.host_<Role>`.
+-- Design: specs/progress/2026-09-16-role-runner.md and
+-- specs/progress/2026-09-17-actor-hosted-runner.md.
 mod SessionNode do
   needs IO.Mut
   needs IO.NetConnect
@@ -74,10 +77,15 @@ mod SessionNode do
   -- The whole session on this node. `handlers` holds the installed
   -- continuation per local endpoint and `waiting` the role each expects;
   -- `pending` holds deliveries that arrived before their continuation.
-  -- `meta` carries the send seq and the closed flag.
+  -- `meta` carries the send seq, the closed flag and the host-gone flag.
+  -- `forward` (key "f") is set only for a HOSTED party (`run_hosted`): a
+  -- delivery for an awaiting endpoint then goes to the user's actor through
+  -- it, instead of the installed handler running here, and the actor
+  -- resumes the endpoint itself (the generated event API).
   type Party = { my_role : Int, node_id : String,
                  handlers : Vault(Int -> Bytes -> Int -> Int), waiting : Vault(Int),
                  pending : Vault(List((Int, Bytes))), meta : Vault(Int),
+                 forward : Vault(Int -> Bytes -> Int -> Unit), why : Vault(String),
                  ep : Pid(EndpointState), links : List(Link), on_close : Int -> Unit }
 
   pfn ekey(ep : Int) : String do "e" ++ int_to_string(ep) end
@@ -132,6 +140,81 @@ mod SessionNode do
     Vault.set(pending, ekey(ep), List.append(Vault.get_or(pending, ekey(ep), Nil), Cons((from, msg), Nil)))
   end
 
+  -- The endpoint's host is gone (restarted: its parked session state died
+  -- with it). The session cannot continue and must not look as if it ended
+  -- cleanly: no Bye goes out, every reader is ended (peers then see the
+  -- connection drop and get `PeerGone`), and `run_hosted` reports `HostGone`.
+  -- A host that exits after closing its endpoint is not this.
+  pfn host_gone(p : Party, ep : Int) : Int do
+    match Vault.get(p.meta, "closed") do
+      Some(_) -> ep
+      None ->
+        Vault.set(p.meta, "host_gone", ep)
+        let _ = List.map(p.links, fn l -> tcp_shutdown(l.data_fd))
+        ep
+    end
+  end
+
+  -- The generated code could not deliver a message to [ep]'s continuation
+  -- (`Session.fail`): the peer that sent it is not speaking the protocol,
+  -- and the session is abandoned the way a dead host's is -- no Bye, readers
+  -- ended, `run` reports `Protocol(from, why)`.  `from` is the sender of the
+  -- delivery being resumed (recorded by `resume_with`).
+  pfn protocol_failed(p : Party, ep : Int, why : String) : () do
+    match Vault.get(p.meta, "closed") do
+      Some(_) -> ()
+      None ->
+        Vault.set(p.why, "protocol", why)
+        Vault.set(p.meta, "protocol", Vault.get_or(p.meta, "from", 0))
+        let _ = List.map(p.links, fn l -> tcp_shutdown(l.data_fd))
+        let _ = ep
+        ()
+    end
+  end
+
+  -- Watches a hosted party's actor: its `Down` -- a crash, a kill, a
+  -- supervisor's restart -- is the session's end, whether or not a delivery
+  -- was in flight. (Detecting it at the next delivery is not enough: a host
+  -- that dies between resuming and re-parking has no handler installed, so
+  -- the next delivery is parked and nothing would ever look.) `Down` is a
+  -- raw mailbox message, so a dedicated actor reads it with `receive`;
+  -- `run_hosted` sets the monitor (`monitor(watcher, host)`, from outside
+  -- the actor, as the monitor fixture does) and sends `Stop` when the
+  -- session ends, so the watcher is not left parked in `receive`.
+  actor HostWatch do
+    state { n : Int }
+    init  { n: 0 }
+    on Watch(p : Party, ep : Int) do
+      match receive() do
+        Down.Down(_, _, _) ->
+          let _ = host_gone(p, ep)
+          ()
+        _ -> ()
+      end
+      { n: state.n + 1 }
+    end
+    on Stop() do state end
+  end
+
+  -- Hand [msg] to the continuation that awaits on [ep]: the installed handler
+  -- (callback API), or the host actor through `forward` (hosted party), which
+  -- gets ONE delivery per suspension -- it re-suspends when it has resumed,
+  -- and that drains the next.
+  pfn resume_with(p : Party, k : Int -> Bytes -> Int -> Int, ep : Int, from : Int, msg : Bytes) : Int do
+    let _ = Vault.delete(p.handlers, ekey(ep))
+    -- Who this delivery is from, for `fail`: a message the continuation
+    -- cannot take is reported against its sender (RunError.Protocol).
+    Vault.set(p.meta, "from", from)
+    match Vault.get(p.forward, "f") do
+      None ->
+        let _ = k(from, msg, ep)
+        drain(p, ep)
+      Some(f) ->
+        f(from, msg, ep)
+        ep
+    end
+  end
+
   -- Run the continuation installed on [ep] with [msg] from [from], then drain
   -- whatever the new continuation is now willing to take. A delivery nobody
   -- expects yet is parked, not dropped.
@@ -145,9 +228,7 @@ mod SessionNode do
         if want == 0 || want == from do
           -- This continuation is consumed by the call; anything parked is for
           -- whatever it installs next.
-          let _ = Vault.delete(p.handlers, ekey(ep))
-          let _ = k(from, msg, ep)
-          drain(p, ep)
+          resume_with(p, k, ep, from, msg)
         else
           park(p.pending, ep, from, msg)
           ep
@@ -164,10 +245,7 @@ mod SessionNode do
           None -> ep
           Some(entry) ->
             match entry do
-              (from, msg) ->
-                let _ = Vault.delete(p.handlers, ekey(ep))
-                let _ = k(from, msg, ep)
-                drain(p, ep)
+              (from, msg) -> resume_with(p, k, ep, from, msg)
             end
         end
     end
@@ -223,6 +301,13 @@ mod SessionNode do
       else
         st
       end
+    end
+    -- A hosted party's `suspend` runs in the HOST actor's turn; the drain of
+    -- what was parked meanwhile runs here, in this actor's turn, so every
+    -- look-then-act on `handlers`/`pending` happens in one mailbox order.
+    on Drain(p : Party, ep : Int) do
+      let _ = drain(p, ep)
+      state
     end
   end
 
@@ -320,13 +405,15 @@ mod SessionNode do
       waiting: Vault.new("session_node_waiting_" ++ tag),
       pending: Vault.new("session_node_pending_" ++ tag),
       meta: Vault.new("session_node_meta_" ++ tag),
+      forward: Vault.new("session_node_forward_" ++ tag),
+      why: Vault.new("session_node_why_" ++ tag),
       ep: ep, links: Nil, on_close: on_close }
   end
 
   pfn with_link(p : Party, l : Link) : Party do
     { my_role: p.my_role, node_id: p.node_id, handlers: p.handlers, waiting: p.waiting,
-      pending: p.pending, meta: p.meta, ep: p.ep, links: List.append(p.links, Cons(l, Nil)),
-      on_close: p.on_close }
+      pending: p.pending, meta: p.meta, forward: p.forward, why: p.why, ep: p.ep,
+      links: List.append(p.links, Cons(l, Nil)), on_close: p.on_close }
   end
 
   pfn start_link(p : Party, their_role : Int, conn : Peer, peer_pid : GlobalPid.Pid) : Party do
@@ -433,6 +520,9 @@ mod SessionNode do
     let handlers = p.handlers
     let waiting = p.waiting
     let on_close = p.on_close
+    let forward = p.forward
+    let ep_actor = p.ep
+    let party = p
     {
       register: fn (_ap, role) -> role,
       emit: fn (ep, to, msg) -> do
@@ -443,6 +533,13 @@ mod SessionNode do
       suspend: fn (ep, from, handler) -> do
         Vault.set(waiting, ekey(ep), from)
         Vault.set(handlers, ekey(ep), handler)
+        -- Hosted: this runs in the host actor's turn. A delivery parked
+        -- while the host was resuming is drained in the endpoint actor's
+        -- turn, never here (see `Drain`).
+        match Vault.get(forward, "f") do
+          None -> ()
+          Some(_) -> send(ep_actor, Drain(party, ep))
+        end
         ep
       end,
       close: fn ep -> do
@@ -452,7 +549,8 @@ mod SessionNode do
         let _ = List.map(links, fn l ->
           NodeQueue.cast(l.q, next_seq(meta), l.peer, "SessionNode.Bye", Nil, NodeQueue.DropNew))
         ()
-      end
+      end,
+      fail: fn (ep, why) -> protocol_failed(party, ep, why)
     }
   end
 
@@ -490,7 +588,13 @@ mod SessionNode do
   pfn read_link(p : Party, l : Link) : String do
     match PeerReader.serve(l.data_fd, Nil, fn (tag, frame) -> on_frame(p, l, tag, frame)) do
       Ok(_) -> ""
-      Err(e) -> if Vault.get(p.meta, "closed") != None do "" else e end
+      Err(e) ->
+        if Vault.get(p.meta, "closed") != None do ""
+        else
+          -- The party ended this reader itself (host gone): still a failure,
+          -- so the outcome settles, but `run_hosted` reports HostGone.
+          e
+        end
     end
   end
 
@@ -573,6 +677,9 @@ mod SessionNode do
   -- Where a role listens: its own entry says where; a peer's entry says
   -- where to dial it.
   type Addr = { role : Int, host : String, port : Int }
+  -- Signatures below say `List(Addr)` outright: an alias does not unify
+  -- with its expansion across a module boundary, and a caller building the
+  -- table by hand (`Cons(addr, Nil)`) must be able to pass it.
   type Addrs = List(Addr)
 
   -- Why `run` ended other than by the protocol reaching its end. A session
@@ -581,16 +688,20 @@ mod SessionNode do
   -- party and fresh connections) is the caller's decision.
   --
   -- - `PeerGone(role, why)`: that peer's connection ended mid-session.
-  -- - `Protocol(role, why)`: that peer sent what this transport cannot
-  --   deliver (a message the generated code cannot decode still panics: it
-  --   runs inside the endpoint actor, where there is no caller to return to).
+  -- - `Protocol(role, why)`: that peer sent what cannot be delivered -- a
+  --   message the generated code could not decode or one its state cannot
+  --   receive (`Session.fail`), or a frame this transport cannot read.
+  -- - `HostGone(ep)`: a hosted party's actor is gone (restarted); its parked
+  --   session state died with it, so the session is abandoned, and the peers
+  --   see the connection drop (`PeerGone`).
   -- - `Listen(port, why)` / `Accept(why)` / `Connect(role, why)`: wiring.
-  type RunError = PeerGone(Int, String) | Protocol(Int, String) | Listen(Int, String) | Accept(String) | Connect(Int, String)
+  type RunError = PeerGone(Int, String) | Protocol(Int, String) | HostGone(Int) | Listen(Int, String) | Accept(String) | Connect(Int, String)
 
   fn run_error_message(e : RunError) : String do
     match e do
       PeerGone(role, why) -> "session_node: role " ++ int_to_string(role) ++ " is gone: " ++ why
       Protocol(role, why) -> "session_node: role " ++ int_to_string(role) ++ ": " ++ why
+      HostGone(ep) -> "session_node: endpoint " ++ int_to_string(ep) ++ ": its host actor is gone and the parked session state with it; session abandoned"
       Listen(port, why) -> "session_node: listen on port " ++ int_to_string(port) ++ ": " ++ why
       Accept(why) -> "session_node: accept: " ++ why
       Connect(role, why) -> "session_node: connect to role " ++ int_to_string(role) ++ ": " ++ why
@@ -607,11 +718,11 @@ mod SessionNode do
     List.filter(peers, fn r -> r > my_role)
   end
 
-  fn addr_of(addrs : Addrs, role : Int) : Option(Addr) do
+  fn addr_of(addrs : List(Addr), role : Int) : Option(Addr) do
     List.find(addrs, fn a -> a.role == role)
   end
 
-  pfn has_addr(addrs : Addrs, role : Int) : Bool do
+  pfn has_addr(addrs : List(Addr), role : Int) : Bool do
     match addr_of(addrs, role) do
       Some(_) -> true
       None -> false
@@ -622,7 +733,7 @@ mod SessionNode do
   The roles [my_role] needs an address for and [addrs] lacks: every peer it
   dials, and itself if it accepts anyone. Empty means `run` can start.
   """
-  fn missing_addrs(my_role : Int, peers : List(Int), addrs : Addrs) : List(Int) do
+  fn missing_addrs(my_role : Int, peers : List(Int), addrs : List(Addr)) : List(Int) do
     let need = match accepts(my_role, peers) do
       Nil -> dials(my_role, peers)
       _ -> Cons(my_role, dials(my_role, peers))
@@ -649,7 +760,7 @@ mod SessionNode do
   roles it needed; a set one that does not parse panics. The generated
   `<P>_Run.addrs_from_env()` passes the protocol's name and roles.
   """
-  fn addrs_from_env(prefix : String, roles : List((String, Int))) : Addrs do
+  fn addrs_from_env(prefix : String, roles : List((String, Int))) : List(Addr) do
     List.flat_map(roles, fn r -> match r do
       (name, idx) ->
         let key = String.to_uppercase(prefix ++ "_" ++ name ++ "_ADDR")
@@ -678,7 +789,7 @@ mod SessionNode do
     end
   end
 
-  pfn dial_all(p : Party, roles : List(Int), addrs : Addrs, me, secret : String) : Result(Party, RunError) do
+  pfn dial_all(p : Party, roles : List(Int), addrs : List(Addr), me, secret : String) : Result(Party, RunError) do
     match roles do
       Nil -> Ok(p)
       Cons(r, rest) ->
@@ -722,7 +833,7 @@ mod SessionNode do
     end
   end
 
-  pfn open_listener(my_role : Int, higher : List(Int), addrs : Addrs) : Result(Int, RunError) do
+  pfn open_listener(my_role : Int, higher : List(Int), addrs : List(Addr)) : Result(Int, RunError) do
     match higher do
       Nil -> Ok(-1)
       _ ->
@@ -752,7 +863,41 @@ mod SessionNode do
   the session, after the party has been torn down.
   """
   fn run(io : Cap(IO), my_role : Int, peers : List(Int), node_id : String, secret : String,
-         addrs : Addrs, on_close : Int -> Unit, body : Cap(Session.Live) -> Unit) : Result((), RunError) do
+         addrs : List(Addr), on_close : Int -> Unit, body : Cap(Session.Live) -> Unit) : Result((), RunError) do
+    run_party(io, my_role, peers, node_id, secret, addrs, on_close, fn (_p, s) -> body(s))
+  end
+
+  doc """
+  `run`, with the role HOSTED IN AN ACTOR [host] (its pid as an Int,
+  `pid_to_int`): the generated event API (`Parked_<Role>` in the actor's
+  state, `await_*`/`resume`) instead of a body. [start] runs once the party
+  is connected, with the session capability: send it to the actor, whose
+  start handler registers and parks. [deliver] is called for every delivery
+  the actor's parked endpoint awaits -- `(s, from, msg, ep)`, what its resume
+  handler takes: send them on. Deliveries are one per suspension, in mailbox
+  order, and one that arrives before the host has re-parked is held for it.
+
+  The host is monitored: its `Down` (a crash, a kill, a supervisor's restart)
+  ends the session with `Err(HostGone(ep))`, no Bye sent, so the peers see
+  the connection drop (`PeerGone`). A restarted actor starts `Idle` and
+  cannot continue a session its predecessor parked; run again for a new one.
+  The generated `<P>_Run.host_<Role>` supplies the role and its peers.
+  """
+  fn run_hosted(io : Cap(IO), my_role : Int, peers : List(Int), node_id : String, secret : String,
+                addrs : List(Addr), on_close : Int -> Unit, host : Int, start : Cap(Session.Live) -> Unit,
+                deliver : Cap(Session.Live) -> Int -> Bytes -> Int -> Unit) : Result((), RunError) do
+    run_party(io, my_role, peers, node_id, secret, addrs, on_close, fn (p, s) -> do
+      Vault.set(p.forward, "f", fn (from, msg, ep) -> deliver(s, from, msg, ep))
+      let w = spawn(HostWatch)
+      send(w, Watch(p, my_role))
+      let _ = monitor(w, pid_of_int(host))
+      Vault.set(p.meta, "watch", pid_to_int(w))
+      start(s)
+    end)
+  end
+
+  pfn run_party(io : Cap(IO), my_role : Int, peers : List(Int), node_id : String, secret : String,
+                addrs : List(Addr), on_close : Int -> Unit, drive : Party -> Cap(Session.Live) -> Unit) : Result((), RunError) do
     match missing_addrs(my_role, peers, addrs) do
       Nil -> ()
       missing -> panic("session_node: role " ++ int_to_string(my_role) ++ " needs an address for role(s) " ++ show_roles(missing))
@@ -765,14 +910,26 @@ mod SessionNode do
     let? p2 = accept_all(p1, higher, listen_fd, me, secret)
     let p = require(p2, peers)
     let s = Session.attach(io, ops(p))
-    body(s)
+    drive(p, s)
     let failed = serve_outcome(p)
     finish(p)
     if listen_fd >= 0 do tcp_close(listen_fd) else () end
-    match failed do
-      Nil -> Ok(())
-      Cons((role, why), _) ->
-        if String.starts_with(why, "session_node:") do Err(Protocol(role, why)) else Err(PeerGone(role, why)) end
+    match Vault.get(p.meta, "watch") do
+      Some(w) -> send(pid_of_int(w), Stop)
+      None -> ()
+    end
+    match Vault.get(p.meta, "protocol") do
+      Some(from) -> Err(Protocol(from, Vault.get_or(p.why, "protocol", "protocol error")))
+      None ->
+        match Vault.get(p.meta, "host_gone") do
+          Some(ep) -> Err(HostGone(ep))
+          None ->
+            match failed do
+              Nil -> Ok(())
+              Cons((role, why), _) ->
+                if String.starts_with(why, "session_node:") do Err(Protocol(role, why)) else Err(PeerGone(role, why)) end
+            end
+        end
     end
   end
 end

@@ -514,8 +514,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_send_after(ptr %actor, ptr %msg, i64 %delay_ms)" };
   { march_name = "actor_cancel_timer"; c_name = Some "march_timer_cancel"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_timer_cancel(ptr %tok)" };
-  { march_name = "receive"; c_name = Some "march_sched_recv"; ret_ty = Some (Tir.TPtr Tir.TUnit);
-    in_is_builtin = true; declare_sig = Some "declare ptr  @march_sched_recv()" };
+  { march_name = "receive"; c_name = Some "march_actor_recv"; ret_ty = Some (Tir.TPtr Tir.TUnit);
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_actor_recv()" };
   { march_name = "tcp_listen"; c_name = Some "march_tcp_listen"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_tcp_listen(i64 %port)" };
   { march_name = "tcp_accept"; c_name = Some "march_tcp_accept"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]));
@@ -1449,7 +1449,7 @@ let native_actor_items : preamble_item list = [   (* native-only: actors + sched
   PDeclare "march_task_await";
   PDeclare "march_task_await_value";
   PDeclare "march_sched_yield";
-  PDeclare "march_sched_recv";
+  PDeclare "march_actor_recv";
   PDeclare "march_cancel_token_new";
   PDeclare "march_cancel_token_cancel";
   PDeclare "march_cancel_token_is_cancelled";
@@ -1714,7 +1714,7 @@ let wasm_scheduler_stub_items : preamble_item list = [   (* WASM-only: no-op sch
   PDeclare "march_task_await";
   PDeclare "march_task_await_value";
   PDeclare "march_sched_yield";
-  PDeclare "march_sched_recv";
+  PDeclare "march_actor_recv";
   PDeclare "march_cancel_token_new";
   PDeclare "march_cancel_token_cancel";
   PDeclare "march_cancel_token_is_cancelled";

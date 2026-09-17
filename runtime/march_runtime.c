@@ -3151,6 +3151,20 @@ static void actor_green_thread(void *arg) {
     volatile uint32_t  pinned_version  = 0;
     volatile int       dispatch_pinned = 0;
 
+    /* The stop trap, for every actor: a nested `receive()` told to stop
+     * lands here (march_actor_recv) and the actor dies the normal way.  The
+     * setjmp is placed before the crash trap's so a longjmp from either
+     * frame finds its own buffer; both restore their saved pointer on exit. */
+    jmp_buf stop_jmp;
+    jmp_buf *saved_stop = self ? self->stop_jmp : NULL;
+    if (self) self->stop_jmp = &stop_jmp;
+    if (self && setjmp(stop_jmp) != 0) {
+        if (dispatch_pinned) {
+            march_dispatch_leave(meta->dispatch_name_id, pinned_version);
+            dispatch_pinned = 0;
+        }
+        goto stopped;
+    }
     if (has_supervisor && self) {
         /* Only a supervised child gets crash-isolated — an unsupervised
          * actor's panic keeps today's exit(1) behavior (see march_panic). */
@@ -3162,6 +3176,7 @@ static void actor_green_thread(void *arg) {
          * (since this actor has a supervisor) triggers a restart — kill/
          * crash-notify parity with the interpreter's kill = crash_actor. */
         self->crash_jmp = saved_jmp;
+        self->stop_jmp = saved_stop;
 
         /* Release the code-version pin the longjmp jumped over, BEFORE
          * do_actor_death and the restart it triggers run.  A hot-reload
@@ -3409,16 +3424,34 @@ static void actor_green_thread(void *arg) {
     }
 
     /* The loop has exited (actor killed, or woken without a message at
-     * scheduler shutdown) and this proc is about to die and be freed by
-     * sched_loop.  Clear the meta handle so march_kill / march_send observe
-     * NULL instead of waking or enqueueing on a freed proc (use-after-free). */
-    if (self) self->crash_jmp = saved_jmp;
+     * scheduler shutdown -- from its own receive, or from a `receive()`
+     * nested in a handler, which longjmp's to `stopped`) and this proc is
+     * about to die and be freed by sched_loop.  Clear the meta handle so
+     * march_kill / march_send observe NULL instead of waking or enqueueing
+     * on a freed proc (use-after-free). */
+stopped:
+    if (self) { self->crash_jmp = saved_jmp; self->stop_jmp = saved_stop; }
     do_actor_death(actor, MARCH_DEATH_NORMAL, NULL, 0);
     /* Same rationale as the crash-trap exit above: the mutex protected only
      * this field, now converted to a release store. */
     atomic_store_explicit(&meta->green_thread, NULL, memory_order_release);
     /* The live actor's own reference (taken in march_spawn_common). */
     march_decrc(actor);
+}
+
+/* The compiled `receive()` builtin: a blocking mailbox pop from user code,
+ * i.e. from INSIDE a handler (the dispatch loop uses march_sched_recv_user
+ * directly).  MARCH_RECV_NO_MSG means "you were told to stop" (kill, or the
+ * shutdown endgame); it must never reach user code, which would match on
+ * the static sentinel and drop it.  An actor lands on its loop's death path
+ * through stop_jmp; a task or main simply ends this green thread. */
+void *march_actor_recv(void) {
+    void *msg = march_sched_recv();
+    if (msg != MARCH_RECV_NO_MSG) return msg;
+    march_proc *p = march_sched_current();
+    if (p && p->stop_jmp) longjmp(*p->stop_jmp, 1);
+    march_sched_exit();
+    return MARCH_RECV_NO_MSG;   /* not reached */
 }
 
 /* ── Public actor API ────────────────────────────────────────────── */

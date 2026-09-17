@@ -1,0 +1,31 @@
+-- A proc parked in `receive()` INSIDE a handler when `main` returns.  The
+-- shutdown endgame wakes idle daemons so their loops exit; a nested receive
+-- used to get MARCH_RECV_NO_MSG back into user code, which matched the
+-- static sentinel as a message and dropped it: "RC underflow (rc was 0)",
+-- abort.  Now the stop lands on the actor's death path (stop_jmp): "woken"
+-- never prints, main's line does, and the process exits 0.
+-- specs/progress/2026-09-17-receive-in-handler-shutdown-rc-underflow.md
+mod ReceiveInHandlerAtExit do
+  needs IO
+  needs IO.Console
+  needs IO.Spawn
+
+  actor Waiter do
+    state { n : Int }
+    init  { n: 0 }
+    on Park() do
+      println("waiter: parked in receive")
+      match receive() do
+        _ -> println("waiter: woken")   -- never: nothing is ever sent
+      end
+      { n: state.n + 1 }
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let w = spawn(Waiter)
+    send(w, Park)
+    sleep_ms(100)
+    println("main: done")
+  end
+end

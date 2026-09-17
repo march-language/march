@@ -3494,6 +3494,71 @@ int march_sched_wait_fd(int fd, int want_write, int64_t deadline_ms) {
     return result;
 }
 
+/* march_sched_wait_fd over up to four fds: one entry per fd, one park.
+ * Returns index+1 of a ready fd, 0 on timeout, -1 on error. */
+__attribute__((noinline))
+int march_sched_wait_fds(const int *fds, int n, int64_t deadline_ms) {
+    if (n <= 0 || n > 4) { errno = EINVAL; return MARCH_FDWAIT_ERROR; }
+    march_proc *p = tl_sched ? tl_sched->current : NULL;
+    if (!p || !atomic_load_explicit(&g_preempt_active, memory_order_acquire)) {
+        struct pollfd pfds[4];
+        for (int i = 0; i < n; i++) { pfds[i].fd = fds[i]; pfds[i].events = POLLIN; pfds[i].revents = 0; }
+        int rc;
+        for (;;) {
+            int ms = -1;
+            if (deadline_ms > 0) {
+                int64_t rem = deadline_ms - march_now_ms();
+                if (rem <= 0) return MARCH_FDWAIT_TIMEOUT;
+                ms = rem > INT_MAX ? INT_MAX : (int)rem;
+            }
+            rc = poll(pfds, (nfds_t)n, ms);
+            if (rc < 0 && errno == EINTR) continue;
+            break;
+        }
+        if (rc < 0) return MARCH_FDWAIT_ERROR;
+        if (rc == 0) return MARCH_FDWAIT_TIMEOUT;
+        for (int i = 0; i < n; i++) if (pfds[i].revents) return i + 1;
+        return MARCH_FDWAIT_TIMEOUT;
+    }
+
+    fdwait_ent ents[4];
+    pthread_mutex_lock(&g_fdwait_mu);
+    if (fdwait_open() < 0) {
+        pthread_mutex_unlock(&g_fdwait_mu);
+        errno = ENOSYS;
+        return MARCH_FDWAIT_ERROR;
+    }
+    for (int i = 0; i < n; i++) {
+        ents[i].fd = fds[i]; ents[i].want_write = 0; ents[i].proc = p; ents[i].done = 0;
+        ents[i].next = g_fdwait_head;
+        g_fdwait_head = &ents[i];
+        if (fdwait_arm(fds[i], 0) < 0) {
+            int saved = errno;
+            for (int j = 0; j <= i; j++) fdwait_remove(&ents[j]);
+            pthread_mutex_unlock(&g_fdwait_mu);
+            errno = saved;
+            return MARCH_FDWAIT_ERROR;
+        }
+    }
+    pthread_mutex_unlock(&g_fdwait_mu);
+
+    int result;
+    for (;;) {
+        int64_t chunk = march_now_ms() + 60000;
+        int64_t until = (deadline_ms > 0 && deadline_ms < chunk) ? deadline_ms : chunk;
+        (void)march_sched_park_self_until(until);
+        pthread_mutex_lock(&g_fdwait_mu);
+        result = MARCH_FDWAIT_TIMEOUT;
+        for (int i = 0; i < n; i++) if (ents[i].done) { result = i + 1; break; }
+        if (result > 0) break;
+        if (deadline_ms > 0 && march_now_ms() >= deadline_ms) break;
+        pthread_mutex_unlock(&g_fdwait_mu);
+    }
+    for (int i = 0; i < n; i++) fdwait_remove(&ents[i]);   /* still under g_fdwait_mu */
+    pthread_mutex_unlock(&g_fdwait_mu);
+    return result;
+}
+
 static void *preempt_daemon(void *arg) {
     (void)arg;
     struct timespec ts;

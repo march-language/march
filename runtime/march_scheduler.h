@@ -338,6 +338,14 @@ typedef struct march_proc {
     char                      *crash_message; /* Panic text copied before crash_jmp fires;
                                                 consumed by actor_green_thread. */
     size_t                     crash_message_len; /* Byte length; embedded NUL-safe. */
+    /* Set by actor_green_thread for EVERY actor (supervised or not) around
+     * its dispatch loop.  A `receive()` nested inside a handler that is told
+     * to stop (kill, or the shutdown endgame's wake_idle_daemons) longjmp's
+     * here instead of returning MARCH_RECV_NO_MSG into user code, which
+     * would treat the static sentinel as a message and drop it (RC
+     * underflow, abort).  The landing site is the loop's normal death path.
+     * Same migration argument as crash_jmp: lives on the proc, not in TLS. */
+    jmp_buf                   *stop_jmp;
 #ifdef MARCH_ASAN_BUILD
     /* ASan fiber-switch bookkeeping: this proc's own "fake stack" handle,
      * threaded through __sanitizer_start_switch_fiber/finish_switch_fiber
@@ -637,6 +645,13 @@ void *march_sched_recv_user_until(int64_t deadline_ms);
 #define MARCH_FDWAIT_READY    1
 #define MARCH_FDWAIT_TIMEOUT  0
 #define MARCH_FDWAIT_ERROR   -1
+
+/* Wait until ANY of fds[0..n-1] (n <= 4) is readable, or the deadline.
+ * Returns index + 1 of a ready fd (the first found; readiness is a hint,
+ * confirm with a zero-timeout poll), MARCH_FDWAIT_TIMEOUT (0) or
+ * MARCH_FDWAIT_ERROR (-1): the same three-way shape as march_sched_wait_fd,
+ * and the same contract -- never call it under the preempt mask. */
+int march_sched_wait_fds(const int *fds, int n, int64_t deadline_ms);
 int march_sched_wait_fd(int fd, int want_write, int64_t deadline_ms);
 
 /* Return the process with the given PID, or NULL if not found.

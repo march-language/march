@@ -1,0 +1,3 @@
+node-b: up
+B: got A's message; replies garbage
+B: done

@@ -6114,6 +6114,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/session_node_fan_loopback.expected native_session_node_fan_loopback.out)))
 
+; ── receive() nested in a handler, parked at process exit ─────────────────
+; Exit 0 and no "woken" line; used to abort with an RC underflow.
+; specs/progress/2026-09-17-receive-in-handler-shutdown-rc-underflow.md
+(rule
+ (targets native_receive_in_handler_at_exit native_receive_in_handler_at_exit.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/receive_in_handler_at_exit.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_receive_in_handler_at_exit
+        native/receive_in_handler_at_exit.march)
+   (setenv MARCH_NUM_SCHEDULERS 1
+    (with-stdout-to native_receive_in_handler_at_exit.out
+         (system "perl -e 'alarm 60; exec @ARGV' ./native_receive_in_handler_at_exit"))))))
+
+(rule
+ (alias runtest)
+ (action (diff native/receive_in_handler_at_exit.expected native_receive_in_handler_at_exit.out)))
+
 ; ── @[remote] actor: the generated dispatch routes a typed delivery to its handler ──
 ; Both backends (no sockets): specs/progress/2026-09-15-remote-actor-dispatch.md.
 (rule

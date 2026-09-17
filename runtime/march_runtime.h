@@ -524,6 +524,10 @@ typedef enum {
    declaration order, each with its own `shutdown` budget from the child spec.
    Contrast march_kill, which is immediate and drops the mailbox. */
 int64_t march_actor_stop(void *actor, int64_t timeout_ms);
+/* The `receive()` builtin: march_sched_recv, but a stop ends the proc
+ * (an actor: through its stop_jmp) instead of returning the no-message
+ * sentinel to user code.  See actor_green_thread. */
+void   *march_actor_recv(void);
 
 /* Process enumeration: List(Int) of every live actor's pid index, ascending.
    Lock-free (same bucket walk as find_meta); a snapshot, so inherently racy.

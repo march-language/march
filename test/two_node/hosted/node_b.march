@@ -1,0 +1,64 @@
+-- Two-node harness scenario "hosted": node-b hosts Cons IN AN ACTOR (see
+-- node_a.march). `Stream_Run.host_Cons` connects the party and then hands
+-- the session capability to the actor's start handler and every delivery to
+-- its resume handler; the actor decides `more`/`done` from `state.budget`.
+mod HostedNodeB do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs Session.Live
+
+  @[endpoints]
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+
+  actor ConsActor do
+    state { budget : Int, parked : Stream_Cons.Parked_Cons }
+    init  { budget: 2, parked: Stream_Cons.idle() }
+    on StartC(s : Cap(Session.Live)) do
+      Stream_Cons.take_idle(state.parked)
+      { state with parked: Stream_Cons.await_Msg_Prod_Cons_1(s, Stream_Cons.register(s, 0)) }
+    end
+    on DeliverC(s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
+      match Stream_Cons.resume(state.parked, from, msg, ep) do
+        Got_Msg_Prod_Cons_1(n, st) ->
+          println("Cons got Item(" ++ int_to_string(n) ++ ")")
+          -- The step reads the actor's own state: what the event API is for.
+          if state.budget > 1 do
+            let st2 = Stream_Cons.choose_more(s, st, true)
+            { state with budget: state.budget - 1,
+                         parked: Stream_Cons.await_Msg_Prod_Cons_1(s, st2) }
+          else
+            let st2 = Stream_Cons.choose_done(s, st, true)
+            { state with parked: Stream_Cons.finish(s, st2) }
+          end
+      end
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    println("node-b: up")
+    let pc = spawn(ConsActor)
+    let start = fn s ->
+      let _ = send(pc, StartC(s))
+      ()
+    let deliver = fn (s, from, msg, ep) ->
+      let _ = send(pc, DeliverC(s, from, msg, ep))
+      ()
+    match Stream_Run.host_Cons(c, "node-b", "stream-secret", Stream_Run.addrs_from_env(), pc, start, deliver) do
+      Ok(_) -> println("Cons: closed")
+      Err(e) -> panic(SessionNode.run_error_message(e))
+    end
+  end
+end

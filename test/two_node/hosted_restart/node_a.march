@@ -1,0 +1,50 @@
+-- Two-node harness scenario "hosted_restart": the Stream protocol across two
+-- processes, Prod as a plain body on node-a (the callback API, `run_Prod`)
+-- and Cons HOSTED IN AN ACTOR on node-b (the event API, `host_Cons`): the
+-- session state lives in the actor's state and every step runs in its own
+-- handler, with `state` in scope. Same trace as test/session/
+-- stream_actor_events, split across the two nodes. Prod = 1 listens
+-- (STREAM_PROD_ADDR); Cons = 2 dials.
+-- Design: specs/progress/2026-09-17-actor-hosted-runner.md.
+mod HostedRestartNodeA do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs Session.Live
+
+  @[endpoints]
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+
+  pfn prod(s : Cap(Session.Live), st : Stream_Prod.S_send_Msg_Prod_Cons_1, next : Int) : Stream_Prod.Yield do
+    println("Prod sends Item(" ++ int_to_string(next) ++ ")")
+    let st1 = Stream_Prod.send_Msg_Prod_Cons_1(s, st, next)
+    Stream_Prod.offer_more_done(s, st1,
+      fn (_b, st2) ->
+        println("Prod got More")
+        prod(s, st2, next + 1),
+      fn (_b, st2) ->
+        println("Prod got Done")
+        Stream_Prod.close(s, st2))
+  end
+
+  fn main(c : Cap(IO)) do
+    println("node-a: up")
+    match Stream_Run.run_Prod(c, "node-a", "stream-secret", Stream_Run.addrs_from_env(), fn (s, st) -> prod(s, st, 1)) do
+      Ok(_) -> println("Prod: closed")
+      Err(SessionNode.PeerGone(role, _)) -> println("Prod: role " ++ int_to_string(role) ++ " gone")
+      Err(e) -> panic(SessionNode.run_error_message(e))
+    end
+  end
+end

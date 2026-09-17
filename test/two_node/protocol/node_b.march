@@ -1,0 +1,37 @@
+-- Two-node harness scenario "protocol": node-b is role B = 2 of `Bad`
+-- written against the RAW `Session` API -- no `@[endpoints]`, no generated
+-- code -- so it can answer node-a's message with bytes that are not a
+-- `Bad_Msg`.  It uses `SessionNode.run` directly with the role numbers the
+-- generator would have minted (A = 1, B = 2) and closes right after, so its
+-- own run ends cleanly; node-a's is the one that reports the error.
+mod ProtocolNodeB do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs Session.Live
+
+  pfn body(s : Cap(Session.Live)) : Unit do
+    let ep = Session.register(s, 0, 2)
+    let _ = Session.suspend(s, ep, 1, fn (_from, _msg, ep1) ->
+      println("B: got A's message; replies garbage")
+      let _ = Session.emit(s, ep1, 1, Bytes.from_string("this is not a Bad_Msg"))
+      Session.close(s, ep1)
+      ep1)
+    ()
+  end
+
+  fn main(c : Cap(IO)) do
+    println("node-b: up")
+    let addrs = match SessionNode.parse_addr(1, Env.require("BAD_A_ADDR")) do
+      Ok(a) -> Cons(a, Nil)
+      Err(e) -> panic(e)
+    end
+    match SessionNode.run(c, 2, Cons(1, Nil), "node-b", "bad-secret", addrs, fn _ep -> (), fn s -> body(s)) do
+      Ok(_) -> println("B: done")
+      Err(e) -> panic(SessionNode.run_error_message(e))
+    end
+  end
+end
