@@ -83,6 +83,61 @@ f32-vs-f64 speedup numbers (~2.0-2.4x at N=5M).
 
 ---
 
+## Sorting a large numeric array
+
+`List.sort_by` is a stable mergesort over cons cells, which is the right
+default for a list of anything. For a large array of plain numbers it is the
+wrong shape twice over: it chases pointers instead of walking flat memory, and
+it allocates. `NativeArray.sort_int` sorts the array itself, in place when
+nothing else is holding it:
+
+```march
+mod SortDemo do
+  needs IO.Console
+
+  fn main(_cap : Cap(IO.Console)) : () do
+    let arr = NativeArray.from_list_int([5, 3, 9, 1, 7])
+    let sorted = NativeArray.sort_int(arr)
+    println(NativeArray.to_list_int(sorted))   -- [1, 3, 5, 7, 9]
+  end
+end
+```
+
+Two things to know before you reach for it.
+
+**It is unstable, and that is free here.** Stability decides what happens to
+elements that compare equal. Two equal `Int`s carry nothing to tell apart, so
+no program can observe the difference. If you are sorting records by a key, you
+are not sorting a `NativeArray` and this does not apply to you.
+
+**It sorts in place only when the array is uniquely owned.** Threading the
+result through the same binding allocates nothing:
+
+```march
+let arr = NativeArray.sort_int(arr)          -- in place, no copy
+```
+
+Keep the original alive and you get copy-on-write instead, which is what makes
+that safe:
+
+```march
+let sorted = NativeArray.sort_int(original)  -- `original` is unchanged
+```
+
+The sort adapts to the data rather than always doing the same `n log n` work.
+Already-sorted and reversed input are recognised in a single linear pass, and
+input with few distinct values is close to linear. At a million elements that
+is ~0.3 ms for sorted input and ~13.6 ms for random, against ~0.7-1.2 seconds
+for `List.sort_by` on the same data. See [Benchmarks](https://github.com/march-language/march/blob/main/specs/benchmarks.md)
+for the full table and the caveat that some of that gap is the data structure
+rather than the algorithm.
+
+Only `Int` arrays for now. The float and narrow-width sorts are not
+implemented — sorting floats needs a decision about where `NaN` goes, since it
+compares false against everything including itself.
+
+---
+
 ## Aggregating a CSV column the fast-path way
 
 The [Files cookbook]({{ site.baseurl }}/docs/cookbook/files/#aggregating-a-column)

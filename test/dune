@@ -6572,6 +6572,40 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/native_arr_fold.expected native_arr_fold.out)))
 
+; ── NativeArray.sort_int: ipnsort-style in-place sort ──────────────────
+; Correctness witness for the C sort added in runtime/march_runtime.c; the
+; algorithm, its measurements and the rejected alternatives are in
+; specs/todos/2026-09-16-native-array-sort-ipnsort.md.
+;
+; Every case cross-checks against List.sort_by (stdlib's independent
+; mergesort), because "the output is sorted" alone would pass a sort that
+; dropped or duplicated elements. Eight input patterns x 13 sizes, each
+; pattern printing its own score so a regression names the branch it broke
+; (the patterns map one-to-one onto the algorithm's special cases: the
+; full-run scan, the equal-partition, the pattern-breaking step).
+;
+; The `alias original intact` line is the load-bearing one: it is the only
+; case that fails if the rc > 1 copy-on-write branch is dropped and the sort
+; mutates a SHARED array in place. Verified non-vacuous on 2026-09-16 by
+; forcing the in-place path unconditionally -- that line, and only that
+; line, flipped to false.
+(rule
+ (targets native_arr_sort native_arr_sort.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_sort.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_arr_sort
+        native/native_arr_sort.march)
+   (with-stdout-to native_arr_sort.out
+        (system "./native_arr_sort")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_sort.expected native_arr_sort.out)))
+
 ; ── fold per-element float box: live-object guard ──────────────────────
 ; The rule above diffs OUTPUT ONLY, and a leak is invisible to an output
 ; diff: native_float_arr_fold / native_f32_arr_fold return the right number

@@ -1,0 +1,107 @@
+-- NativeArray.sort_int benchmark — the SHIPPED builtin, end to end.
+--
+-- Why this exists alongside bench/c/native_sort_bench.c: that harness compares
+-- sorting algorithms against each other in isolation, but it measures its own
+-- copy of the algorithm, not `native_int_arr_sort`. This one calls the real
+-- builtin through the real March call path, so it also covers the parts the C
+-- harness cannot see — the builtin call, the owned/consumed argument, and the
+-- FBIP in-place path at rc == 1.
+--
+-- Against List.sort_by (stdlib's mergesort over cons cells) for scale, since
+-- that is what a March program sorting numbers had to use before this.
+--
+-- Each pattern is aimed at one branch of the sort:
+--   sorted / reversed  — the top-level full-run scan; should be ~linear
+--   equal / dist10     — the equal-partition path for a repeated pivot
+--   sawtooth           — periodic input, which defeats fixed-stride pivot
+--                        sampling unless the pattern-breaking step runs
+--   random             — the ordinary branchless-Lomuto path
+--
+-- Run COMPILED. Interpreted numbers measure the interpreter's list handling,
+-- not the sort:
+--   march --compile --opt 2 bench/array_sort.march -o /tmp/array_sort && /tmp/array_sort
+mod ArraySort do
+  needs IO.Console
+  needs IO.Clock
+
+  -- Microseconds, not milliseconds: at n = 1e6 the full-run-scan patterns
+  -- finish in well under a millisecond, and a millisecond counter reports
+  -- those as a flat "0 ms" that looks like the sort was skipped.
+  pfn elapsed_us(t0 : Float, t1 : Float) : Int do
+    float_to_int((t1 -. t0) *. 1000000.0)
+  end
+
+  -- Build [f(0), ..., f(n-1)], tail-recursively.
+  pfn build(n : Int, f : Int -> Int) : List(Int) do
+    fn go(i : Int, acc : List(Int)) : List(Int) do
+      if i < 0 do acc else go(i - 1, Cons(f(i), acc)) end
+    end
+    go(n - 1, Nil)
+  end
+
+  -- Deterministic scramble, so every run sorts the same bytes.
+  pfn scramble(i : Int) : Int do
+    let x = (i * 2654435761) % 1000003
+    if x < 0 do 0 - x else x end
+  end
+
+  -- Timed: the native sort. Prints the first element as well as the time so a
+  -- sort that was optimised away, or one that silently did nothing, is visible
+  -- rather than showing up as an impossibly good number.
+  pfn bench_native(label : String, xs : List(Int)) : Unit do
+    let arr = native_int_arr_from_list(xs)
+    let t0 = unix_time(())
+    let sorted = NativeArray.sort_int(arr)
+    let t1 = unix_time(())
+    let head_val = NativeArray.get_int(sorted, 0)
+    println("  native " ++ label ++ ": " ++ int_to_string(elapsed_us(t0, t1))
+            ++ " us  (first=" ++ int_to_string(head_val) ++ ")")
+  end
+
+  pfn bench_list(label : String, xs : List(Int)) : Unit do
+    let t0 = unix_time(())
+    let sorted = List.sort_by(xs, fn (a, b) -> a <= b)
+    let t1 = unix_time(())
+    let head_val = match sorted do
+      Cons(h, _) -> h
+      Nil -> 0
+    end
+    println("  list   " ++ label ++ ": " ++ int_to_string(elapsed_us(t0, t1))
+            ++ " us  (first=" ++ int_to_string(head_val) ++ ")")
+  end
+
+  fn main(_cap_clock : Cap(IO.Clock), _cap_console : Cap(IO.Console)) : Unit do
+    let n = 1000000
+    println("NativeArray.sort_int benchmark  (n = " ++ int_to_string(n) ++ ")")
+    println("")
+
+    let random_xs = build(n, fn i -> scramble(i))
+    let sorted_xs = build(n, fn i -> i)
+    let reversed_xs = build(n, fn i -> n - i)
+    let equal_xs = build(n, fn _ -> 42)
+    let dist10_xs = build(n, fn i -> scramble(i) % 10)
+    let sawtooth_xs = build(n, fn i -> i % 1000)
+
+    println("random:")
+    bench_native("", random_xs)
+    bench_list("", random_xs)
+    println("sorted:")
+    bench_native("", sorted_xs)
+    bench_list("", sorted_xs)
+    println("reversed:")
+    bench_native("", reversed_xs)
+    bench_list("", reversed_xs)
+    println("equal:")
+    bench_native("", equal_xs)
+    bench_list("", equal_xs)
+    println("dist10:")
+    bench_native("", dist10_xs)
+    bench_list("", dist10_xs)
+    println("sawtooth:")
+    bench_native("", sawtooth_xs)
+    bench_list("", sawtooth_xs)
+
+    println("")
+    println("Done.")
+  end
+end

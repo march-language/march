@@ -336,7 +336,8 @@ let extern_owned_builtins : string list = [
     "typed_array_create"; "typed_array_from_list"; "typed_array_to_list";
     "typed_array_length"; "typed_array_get"; "typed_array_set";
     "typed_array_map"; "typed_array_filter"; "typed_array_fold";
-    "native_int_arr_set"; "native_int_arr_min"; "native_int_arr_max";
+    "native_int_arr_set"; "native_int_arr_sort";
+    "native_int_arr_min"; "native_int_arr_max";
     "native_int_arr_sumsq_dev"; "native_int_arr_map"; "native_int_arr_map2";
     "native_int_arr_to_float_arr"; "native_int_arr_fold";
     "native_int_arr_from_list"; "native_int_arr_filter_mask";

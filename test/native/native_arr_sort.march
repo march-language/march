@@ -1,0 +1,100 @@
+-- Compiled witness for NativeArray.sort_int (ipnsort-style, implemented in the
+-- C runtime; see specs/todos/2026-09-16-native-array-sort-ipnsort.md).
+--
+-- Every case cross-checks the C sort against List.sort_by, an INDEPENDENT
+-- implementation (stdlib/list.march's mergesort over cons cells). Asserting
+-- only "the output is sorted" would pass a sort that dropped or duplicated
+-- elements, which is exactly how a mis-indexed partition fails.
+--
+-- The input patterns are the ones in bench/c/native_sort_bench.c, each aimed
+-- at a specific branch of the algorithm:
+--   sorted / reversed  — the top-level full-run scan (and its reverse-in-place)
+--   equal / dist10     — the equal-partition path for a repeated pivot
+--   sawtooth           — periodic input, which defeats fixed-stride pivot
+--                        sampling unless the pattern-breaking step runs
+--   organ              — a classic median-of-3 killer shape
+--   random             — the ordinary branchless-Lomuto path
+--
+-- Each pattern runs at 13 sizes straddling the n <= 32 small-sort cutoff and
+-- the 8-element network blocks (0, 1, 2, 7, 8, 9, 31, 32, 33, 64, 65, 200,
+-- 1000): an off-by-one in either boundary is invisible at a single size. Each
+-- line prints how many of the 13 agreed, so a regression names its pattern
+-- instead of just failing.
+--
+-- The aliasing case is the one that catches an FBIP mistake: sorting a SHARED
+-- array must copy rather than mutate, or the original binding silently changes
+-- under its owner. A sort that ignores the rc > 1 branch passes every other
+-- case here and only fails that one.
+mod NativeArrSort do
+  needs IO.Console
+
+  -- Build [f(0), f(1), ..., f(n-1)]. Tail-recursive with an accumulator.
+  pfn build(n : Int, f : Int -> Int) : List(Int) do
+    fn go(i : Int, acc : List(Int)) : List(Int) do
+      if i < 0 do acc else go(i - 1, Cons(f(i), acc)) end
+    end
+    go(n - 1, Nil)
+  end
+
+  -- Deterministic scramble: a fixed sequence keeps a failure reproducible.
+  pfn scramble(i : Int) : Int do
+    let x = (i * 2654435761) % 1000003
+    if x < 0 do 0 - x else x end
+  end
+
+  pfn sorted_l(n : Int) : List(Int) do build(n, fn i -> i) end
+  pfn reversed_l(n : Int) : List(Int) do build(n, fn i -> n - i) end
+  pfn equal_l(n : Int) : List(Int) do build(n, fn _ -> 42) end
+  pfn dist10_l(n : Int) : List(Int) do build(n, fn i -> scramble(i) % 10) end
+  pfn sawtooth_l(n : Int) : List(Int) do build(n, fn i -> i % 17) end
+  pfn organ_l(n : Int) : List(Int) do
+    build(n, fn i -> if i < n / 2 do i else n - i end)
+  end
+  pfn random_l(n : Int) : List(Int) do build(n, fn i -> scramble(i)) end
+  pfn nearly_l(n : Int) : List(Int) do
+    build(n, fn i -> if i % 50 == 0 do scramble(i) % 100 else i end)
+  end
+
+  pfn expected(xs : List(Int)) : List(Int) do
+    List.sort_by(xs, fn (a, b) -> a <= b)
+  end
+
+  pfn agrees(xs : List(Int)) : Bool do
+    let got = NativeArray.to_list_int(
+      NativeArray.sort_int(NativeArray.from_list_int(xs)))
+    got == expected(xs)
+  end
+
+  -- How many of the 13 sizes the C sort got right for this pattern.
+  pfn score(gen : Int -> List(Int)) : Int do
+    let sizes = [0, 1, 2, 7, 8, 9, 31, 32, 33, 64, 65, 200, 1000]
+    List.fold_left(sizes, 0, fn (acc, n) ->
+      if agrees(gen(n)) do acc + 1 else acc end)
+  end
+
+  fn main(_cap : Cap(IO.Console)) : () do
+    println("sorted: " ++ int_to_string(score(sorted_l)))
+    println("reversed: " ++ int_to_string(score(reversed_l)))
+    println("equal: " ++ int_to_string(score(equal_l)))
+    println("dist10: " ++ int_to_string(score(dist10_l)))
+    println("sawtooth: " ++ int_to_string(score(sawtooth_l)))
+    println("organ: " ++ int_to_string(score(organ_l)))
+    println("random: " ++ int_to_string(score(random_l)))
+    println("nearly: " ++ int_to_string(score(nearly_l)))
+
+    -- rc > 1: `shared` is still live after the sort, so sort_int must copy.
+    -- An unconditional in-place sort leaves `shared` sorted and fails here.
+    let shared = NativeArray.from_list_int([5, 3, 1, 4, 2])
+    let sorted = NativeArray.sort_int(shared)
+    println("alias original intact: "
+            ++ bool_to_string(NativeArray.to_list_int(shared) == [5, 3, 1, 4, 2]))
+    println("alias result sorted: "
+            ++ bool_to_string(NativeArray.to_list_int(sorted) == [1, 2, 3, 4, 5]))
+
+    -- Sorting an already-sorted array must not corrupt it (full-run fast path).
+    let once = NativeArray.sort_int(NativeArray.from_list_int(random_l(100)))
+    let twice = NativeArray.sort_int(once)
+    println("idempotent: "
+            ++ bool_to_string(NativeArray.to_list_int(twice) == expected(random_l(100))))
+  end
+end

@@ -4240,6 +4240,16 @@ let base_env : env =
           a'.(i) <- v;
           VNativeIntArr a'
         | _ -> eval_error "native_int_arr_set: expected (NativeIntArr, Int, Int)"))
+  ; ("native_int_arr_sort", VBuiltin ("native_int_arr_sort", function
+        | [VNativeIntArr a] ->
+          (* Value semantics, like native_int_arr_set's arm: copy, then sort.
+             The compiled backend mutates in place only when the array is
+             uniquely owned, which is unobservable. Compare.compare on int is
+             the same total order the C sort implements. *)
+          let a' = Array.copy a in
+          Array.sort compare a';
+          VNativeIntArr a'
+        | _ -> eval_error "native_int_arr_sort: expected NativeIntArr"))
   ; ("native_int_arr_sum", VBuiltin ("native_int_arr_sum", function
         | [VNativeIntArr a] ->
           let s = ref 0 in

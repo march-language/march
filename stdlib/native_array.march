@@ -85,6 +85,25 @@ mod NativeArray do
     native_int_arr_sum(arr)
   end
 
+  doc """
+  Sort ascending. Unstable and in place when the array is uniquely owned,
+  so a threaded `let a = NativeArray.sort_int(a)` allocates nothing.
+
+  ipnsort-style: a full-run scan makes already-sorted and reversed input
+  O(n), an equal-partition makes low-cardinality input near-linear, and a
+  heapsort fallback bounds the worst case at O(n log n). Measured 5-30x
+  faster than libc qsort at 5M elements; see
+  `specs/todos/2026-09-16-native-array-sort-ipnsort.md`.
+
+  Unstable is unobservable here: i64 elements carry no payload to reorder.
+
+      march> NativeArray.to_list_int(NativeArray.sort_int(NativeArray.from_list_int([3, 1, 2])))
+      [1, 2, 3]
+  """
+  fn sort_int(arr) do
+    native_int_arr_sort(arr)
+  end
+
   doc "Apply [f] to every element, returning a new NativeIntArr. O(n)."
   fn map_int(arr, f) do
     native_int_arr_map(arr, f)

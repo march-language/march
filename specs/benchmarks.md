@@ -249,6 +249,81 @@ dune exec march -- --compile --opt 2 bench/<name>.march -o /tmp/<name>
 
 ---
 
+## bench/array_sort.march — NativeArray.sort_int vs List.sort_by
+
+The benchmark for the **shipped builtin**. Its sibling below
+(`bench/c/native_sort_bench.c`) compares sorting algorithms against each other,
+but it measures its own copy of the algorithm; this one calls
+`native_int_arr_sort` through the real March call path, so it also covers the
+builtin call, the owned/consumed argument and the FBIP in-place path. Run both:
+neither alone tells you the shipped feature is fast.
+
+**Command:** `march --compile --opt 2 bench/array_sort.march -o /tmp/array_sort && /tmp/array_sort`
+**Expected output:** six patterns, each timed for the native sort and for
+`List.sort_by`, with the first element printed alongside — a sort that was
+optimised away or silently did nothing shows a wrong first element rather than
+an impossibly good time.
+
+Measured 2026-09-16, n = 1,000,000, arm64, load average ~5.6 (contended, so
+these are conservative):
+
+| pattern | `sort_int` | `List.sort_by` | ratio |
+|---|---:|---:|---:|
+| random | 13.6 ms | 1164 ms | 86x |
+| sorted | 0.32 ms | 709 ms | 2237x |
+| reversed | 0.53 ms | 798 ms | 1503x |
+| equal | 0.33 ms | 719 ms | 2171x |
+| 10 distinct | 2.2 ms | 1101 ms | 496x |
+| sawtooth | 10.2 ms | 992 ms | 98x |
+
+Some of that gap is the data structure, not the sort: `List.sort_by` walks cons
+cells and allocates, while the native sort runs over flat memory in place. That
+is the point of the comparison — it is the cost of sorting numbers in March
+before and after — but it is not an algorithm-to-algorithm result. For that,
+use the C harness below.
+
+**What to watch:** `random` should scale linearly in n against the C harness
+(13.6 ms at 1M implies ~68 ms at 5M, and the harness measures 71 ms — if those
+two stop agreeing, one of them is measuring something other than the sort).
+The three sub-millisecond rows are the full-run scan and the equal-partition;
+any of them climbing into the milliseconds means a special case stopped firing.
+
+---
+
+## bench/c/native_sort_bench.c — NativeArray.sort_int (i64 sorting)
+
+A standalone C harness, not a March program: it measures the runtime's
+`native_int_arr_sort` against libc `qsort`, a naive introsort and an LSD radix
+sort, so a change to the sort is judged against alternatives rather than
+against its own past absolute timings.
+
+**Command:** `cc -O2 -fno-strict-aliasing -fwrapv -o /tmp/nsb bench/c/native_sort_bench.c && /tmp/nsb`
+(add `quick` for a fast pass). Those are the flags the driver builds the
+runtime with; `-O3` flatters the branchless partition and misleads.
+
+**Expected output:** `verify: ok (0 mismatches)` first — every variant is
+`memcmp`'d against `qsort`'s output before anything is timed — then three
+tables.
+
+| Feature exercised | Notes |
+|-------------------|-------|
+| Full-run scan | `sorted` / `reversed` patterns; O(n) or it regresses ~10x |
+| Equal-partition | `equal` / `dist10`; near-linear or it regresses ~20x |
+| Pivot sampling | `sawtooth` is periodic and defeats a fixed stride without the pattern-breaking step |
+| Branchless partition | `random`; a branchy rewrite costs ~3x |
+| Small-sort network | sizes below 32, and the 8-element blocks above |
+
+**Comparison baseline:** libc `qsort` in the same run, on the same data.
+**What to watch:** the `ipn/qsort` column. Any pattern dropping below ~1.5x
+means a special case stopped firing; `sawtooth` alone regressing means pivot
+sampling is being defeated again. Run it after any change to the sort, and
+after a clang upgrade — the partition's speed depends on `csel` being emitted.
+
+Touching the sort? Also run `dune build --root . test/native_arr_sort.out`,
+which is the correctness half. Speed without a multiset check is meaningless.
+
+---
+
 ## bench/fib.march — Naive recursive Fibonacci
 
 **Command:** `fib(40)`

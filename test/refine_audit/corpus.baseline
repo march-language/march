@@ -252,6 +252,8 @@ native_native_arr_narrow: coverage audit (user + stdlib): 114 enforced, 0 inert 
 native_native_arr_narrow: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_native_arr_narrow_inline: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
 native_native_arr_narrow_inline: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_sort: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_sort: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_native_float_box_abi_leak_probe: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
 native_native_float_box_abi_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_nested_cons_ctor_heap: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
