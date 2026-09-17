@@ -1023,6 +1023,12 @@ let consumed_var_ids ty =
   let rec go positive t = match repr t with
     | TVar { contents = Unbound (id, _) } -> if not positive then acc := id :: !acc
     | TArrow (a, b) -> go (not positive) a; go positive b
+    (* `Pid(a)` is a handle: its parameter is phantom, the actor's state
+       never travels with it, so receiving a pid can neither drop nor
+       duplicate that state.  Without this, `pid_to_int(p)` -- or any
+       function taking `Pid(a)` -- is refused for an actor whose state holds
+       a linear value, such as a host of an `@[endpoints]` role. *)
+    | TCon ("Pid", _) -> ()
     | TCon (_, args) | TTuple args -> List.iter (go positive) args
     | TRecord flds -> List.iter (fun (_, t) -> go positive t) flds
     | TLin (_, t) -> go positive t
@@ -1988,17 +1994,37 @@ let rec infer_expr env (e : Ast.expr) : ty =
          flag a direct call of a name in [fn_arities] whose actual callee type
          is at least as deep as its declared arity — so a local binding that
          shadows the name (different shape) is never falsely rejected. *)
+      let rec count_arrows t =
+        match repr t with TArrow (_, r) -> 1 + count_arrows r | _ -> 0 in
       let arity_error =
         match f with
         | Ast.EVar name ->
           (match StrMap.find_opt name.txt env.fn_arities with
            | Some (arity, def_span) ->
              let n_args = List.length args in
-             let rec count_arrows t =
-               match repr t with TArrow (_, r) -> 1 + count_arrows r | _ -> 0 in
-             if n_args <> arity && count_arrows f_ty >= arity then Some (name, arity, n_args, def_span)
+             if n_args <> arity && count_arrows f_ty >= arity then Some (name, arity, n_args, Some def_span)
              else None
-           | None -> None)
+           | None ->
+             (* The same rule for a BUILTIN, under-application only: its scheme
+                is a curried arrow chain, so `monitor(p)` (two parameters)
+                used to typecheck as a `Pid(a) -> Int` value -- a partial
+                application the language does not have, which `let _ =`
+                then discarded silently, so the monitor was never set.  A
+                local `let` of the same name is not a builtin (plain_let_names). *)
+             if StringSet.mem name.txt env.plain_let_names then None
+             else
+               (match List.assoc_opt name.txt builtin_bindings with
+                | Some scheme ->
+                  let sch_ty = match scheme with Mono t -> t | Poly (_, _, t) -> t in
+                  let arity = count_arrows sch_ty in
+                  let n_args = List.length args in
+                  (* Some arguments, fewer than the parameters.  A zero-argument
+                     call is never flagged: a nullary builtin is typed as
+                     `() -> T` and called `f()`, which infer_app's base case
+                     accepts by design (see [noncallable_error] below). *)
+                  if n_args >= 1 && n_args < arity && count_arrows f_ty >= arity then Some (name, arity, n_args, None)
+                  else None
+                | None -> None))
         | _ -> None
       in
       (* Reject a zero-arg call of a plain, non-function VALUE — e.g.
@@ -2048,10 +2074,15 @@ let rec infer_expr env (e : Ast.expr) : ty =
                "Function `%s` expects %d argument%s, but got %d.\n\
                 March has no partial application — a call must supply all arguments."
                name.txt arity (if arity = 1 then "" else "s") n_args;
-             labels = [{ Err.lbl_span = def_span;
-                         Err.lbl_message = Printf.sprintf "defined here with %d parameter%s"
-                           arity (if arity = 1 then "" else "s") }];
-             notes = []; code = None; fix = None };
+             labels =
+               (match def_span with
+                | Some def_span ->
+                  [{ Err.lbl_span = def_span;
+                     Err.lbl_message = Printf.sprintf "defined here with %d parameter%s"
+                       arity (if arity = 1 then "" else "s") }]
+                | None -> []);
+             notes = (if def_span = None then [ Printf.sprintf "`%s` is a builtin taking %d argument%s." name.txt arity (if arity = 1 then "" else "s") ] else []);
+             code = None; fix = None };
          (* Return the declared return type so downstream inference stays sane. *)
          let rec peel n t =
            if n <= 0 then t

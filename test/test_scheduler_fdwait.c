@@ -61,6 +61,30 @@ static void waiter_ready_already(void *arg) {
     atomic_store(&g_waited, march_now_ms() - start);
 }
 
+/* 5. shutdown(2) on the fd another green thread is parked on wakes it:
+ * what tcp_shutdown relies on to end a survivor's readers (a close() would
+ * silently drop the poller registration and never wake anyone). */
+static void late_shutdown(void *arg) {
+    (void)arg;
+    nap(60);
+    (void)shutdown(g_sv[0], SHUT_RDWR);
+}
+
+/* 6. march_sched_wait_fds: two fds, the SECOND becomes readable. */
+static int g_sv2[2];
+static _Atomic int g_which = -99;
+static void waiter_any(void *arg) {
+    (void)arg;
+    int fds[2] = { g_sv[0], g_sv2[0] };
+    atomic_store(&g_which, march_sched_wait_fds(fds, 2, march_now_ms() + 5000));
+}
+static void late_writer_second(void *arg) {
+    (void)arg;
+    nap(60);
+    char c = 'z';
+    (void)write(g_sv2[1], &c, 1);
+}
+
 /* 4. Two waiters on one fd are both woken by one write. */
 static void second_waiter(void *arg) {
     (void)arg;
@@ -134,6 +158,32 @@ int main(void) {
     assert(atomic_load(&g_result) == MARCH_FDWAIT_READY);
     assert(atomic_load(&g_second) == MARCH_FDWAIT_READY);
     drain(g_sv[0]); close(g_sv[0]); close(g_sv[1]);
+
+    /* 5 */
+    fresh_pair();
+    atomic_store(&g_result, -99);
+    march_sched_init();
+    march_sched_spawn(waiter_woken, NULL);
+    march_sched_spawn(late_shutdown, NULL);
+    march_sched_request_shutdown();
+    march_sched_run();
+    assert(atomic_load(&g_result) == MARCH_FDWAIT_READY);
+    {
+        int64_t w = atomic_load(&g_waited);
+        assert(w >= 40 && w < 2000);    /* woke for the shutdown, not the deadline */
+    }
+    close(g_sv[0]); close(g_sv[1]);
+
+    /* 6 */
+    fresh_pair();
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, g_sv2) == 0);
+    march_sched_init();
+    march_sched_spawn(waiter_any, NULL);
+    march_sched_spawn(late_writer_second, NULL);
+    march_sched_request_shutdown();
+    march_sched_run();
+    assert(atomic_load(&g_which) == 2);    /* index 1, reported as index + 1 */
+    drain(g_sv2[0]); close(g_sv[0]); close(g_sv[1]); close(g_sv2[0]); close(g_sv2[1]);
 
     printf("test_scheduler_fdwait: all passed\n");
     return 0;

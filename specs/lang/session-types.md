@@ -366,8 +366,9 @@ operation dispatches through it:
 type Ops = {
   register : Int -> Int -> Int,                     -- access point, role -> endpoint
   emit     : Int -> Int -> Bytes -> Int,            -- endpoint, to-role, msg -> endpoint
-  suspend  : Int -> (Int -> Bytes -> Int -> Int) -> Int,  -- install a handler, yield
-  close    : Int -> ()
+  suspend  : Int -> Int -> (Int -> Bytes -> Int -> Int) -> Int,  -- install a handler for the next delivery from a role (0 = any), yield
+  close    : Int -> (),
+  fail     : Int -> String -> ()   -- a delivery the continuation cannot take; the transport decides
 }
 ```
 

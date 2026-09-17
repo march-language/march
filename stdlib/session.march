@@ -28,11 +28,17 @@ mod Session do
   -- resumes exactly once, in tail position, as a plain call through this
   -- record.  (A `doc` is only accepted before a function; on a `type` it is a
   -- parse error, which the stdlib loader reports as "Unknown module".)
+  -- `fail(ep, why)`: the generated code could not deliver a message to
+  -- `ep`'s continuation -- it did not decode, or it is one the state cannot
+  -- receive.  The transport decides what that means: the same-thread ones
+  -- panic (the message is a bug in the program that sent it); a network one
+  -- ends the session and reports it (`SessionNode`: `RunError.Protocol`).
   type Ops = {
     register : Int -> Int -> Int,
     emit     : Int -> Int -> Bytes -> Int,
     suspend  : Int -> Int -> (Int -> Bytes -> Int -> Int) -> Int,
-    close    : Int -> ()
+    close    : Int -> (),
+    fail     : Int -> String -> ()
   }
 
   proof cap Live with Ops
@@ -81,6 +87,20 @@ mod Session do
   fn close(c : Cap(Session.Live), ep : Int) : () do
     match cap_dict(c) do
       Some(d) -> d.close(ep)
+      None    -> no_transport()
+    end
+  end
+
+  doc """
+  A message for `ep` that its continuation cannot take (undecodable, or one
+  the session state cannot receive): hand the transport [why]. The
+  generated endpoint code calls this; what happens next is the transport's
+  (a same-thread transport panics, `SessionNode` ends the session with
+  `Protocol`).
+  """
+  fn fail(c : Cap(Session.Live), ep : Int, why : String) : () do
+    match cap_dict(c) do
+      Some(d) -> d.fail(ep, why)
       None    -> no_transport()
     end
   end

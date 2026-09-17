@@ -1,0 +1,5 @@
+node-a: up
+Prod sends Item(1)
+Prod got More
+Prod sends Item(2)
+Prod: role 2 gone

@@ -1,0 +1,41 @@
+-- Two-node harness scenario "protocol": a peer that does not speak the
+-- protocol.  node-a runs role A of `Bad` through the generated runner and
+-- sends 1; node-b (role B, written against the raw Session API, no
+-- generated code) answers with bytes that are not a `Bad_Msg`.  The
+-- generated receive handler cannot decode them and hands them to the
+-- transport (`Session.fail`); `run_A` returns `Err(Protocol(2, _))`, where
+-- the handler used to panic inside the endpoint actor's turn.
+-- A = 1 listens (BAD_A_ADDR); B = 2 dials.
+-- Design: specs/progress/2026-09-17-protocol-errors-and-parked-socket-waits.md.
+mod ProtocolNodeA do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs Session.Live
+
+  @[endpoints]
+  protocol Bad do
+    A -> B : Int
+    B -> A : Int
+  end
+
+  pfn role_a(s : Cap(Session.Live), st : Bad_A.S_send_Msg_A_B_1) : Bad_A.Yield do
+    println("A: sends 1")
+    Bad_A.recv_Msg_B_A_1(s, Bad_A.send_Msg_A_B_1(s, st, 1), fn (n, st1) ->
+      println("A: got " ++ int_to_string(n))
+      Bad_A.close(s, st1))
+  end
+
+  fn main(c : Cap(IO)) do
+    println("node-a: up")
+    match Bad_Run.run_A(c, "node-a", "bad-secret", Bad_Run.addrs_from_env(), fn (s, st) -> role_a(s, st)) do
+      Ok(_) -> println("A: clean end")
+      Err(SessionNode.Protocol(role, why)) ->
+        println("A: protocol error from role " ++ int_to_string(role) ++ ": " ++ why)
+      Err(e) -> panic(SessionNode.run_error_message(e))
+    end
+  end
+end

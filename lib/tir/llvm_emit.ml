@@ -1415,10 +1415,10 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     emit ctx "call void @march_sched_yield()";
     ("i64", "0")
 
-  (* receive() → cooperative blocking mailbox pop via march_sched_recv *)
+  (* receive() → cooperative blocking mailbox pop via march_actor_recv (a stop ends the proc) *)
   | Tir.EApp (f, []) when Builtin_name.is Builtin_name.Receive f.Tir.v_name ->
     let r = fresh ctx "recv_msg" in
-    emit ctx (Printf.sprintf "%s = call ptr @march_sched_recv()" r);
+    emit ctx (Printf.sprintf "%s = call ptr @march_actor_recv()" r);
     ("ptr", r)
 
   (* task_spawn_steal(pool, thunk_closure) → spawn as async green thread *)

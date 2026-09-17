@@ -466,7 +466,7 @@ let test_receive_ordering_fifo () =
   (* FIFO: Push(1)→Push(2)→Push(3) ⟹ ((0*10+1)*10+2)*10+3 = 123 *)
   Alcotest.(check int) "FIFO ordering preserved: acc = 123" 123 acc
 
-(** LLVM IR for receive() must call @march_sched_recv and the preamble
+(** LLVM IR for receive() must call @march_actor_recv and the preamble
     must declare it.  This catches the wiring in llvm_emit.ml. *)
 let test_receive_llvm_declaration () =
   (* The actor must be spawned+used in main() so the handler is not DCE'd. *)
@@ -486,10 +486,10 @@ let test_receive_llvm_declaration () =
       ()
     end
   end|} in
-  Alcotest.(check bool) "preamble declares march_sched_recv" true
-    (ir_contains ir "declare ptr  @march_sched_recv()");
-  Alcotest.(check bool) "body calls march_sched_recv" true
-    (ir_contains ir "call ptr @march_sched_recv()")
+  Alcotest.(check bool) "preamble declares march_actor_recv" true
+    (ir_contains ir "declare ptr  @march_actor_recv()");
+  Alcotest.(check bool) "body calls march_actor_recv" true
+    (ir_contains ir "call ptr @march_actor_recv()")
 
 (* ── send_after / cancel_timer (specs/progress/2026-08-12-language-level-
    timers.md) ─────────────────────────────────────────────────────────── *)
@@ -13804,7 +13804,7 @@ let stdlib_suites =
           (with_reset test_receive_does_not_deadlock_on_empty);
         Alcotest.test_case "receive preserves FIFO ordering"  `Quick
           (with_reset test_receive_ordering_fifo);
-        Alcotest.test_case "receive emits march_sched_recv in LLVM" `Quick
+        Alcotest.test_case "receive emits march_actor_recv in LLVM" `Quick
           test_receive_llvm_declaration;
       ]);
       ("actor timers", [

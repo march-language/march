@@ -64,7 +64,8 @@ mod StreamActorEvents do
           Vault.set(handlers, ekey(ep), handler)
           ep
         end,
-        close: fn ep -> print_line("close " ++ int_to_string(ep))
+        close: fn ep -> print_line("close " ++ int_to_string(ep)),
+        fail: fn (_ep, why) -> panic(why)
       }
     }
   end
