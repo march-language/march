@@ -11,6 +11,13 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Changed
+- `tcp_connect`'s name lookup (`getaddrinfo`) runs on a helper thread and parks the
+  green thread: a slow resolver no longer stalls a scheduler thread. That was the last
+  blocking call on the dial path.
+- An unrefined `Chan.offer` continuation is a session state (`SOfferPending`) rather than
+  a checker side table; diagnostics and accepted programs are unchanged.
+
 ### Added
 - **`Session.fail(s, ep, why)`** and the `fail` op on `Session.Ops`: a delivery the
   generated endpoint code cannot take (undecodable, or a message the state does not

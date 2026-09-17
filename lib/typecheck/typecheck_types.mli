@@ -116,6 +116,7 @@ and session_ty =
   | SRecv of ty * session_ty
   | SChoose of (string * session_ty) list
   | SOffer of (string * session_ty) list
+  | SOfferPending of (string * session_ty) list
   | SEnd
   | SRec of string * session_ty
   | SVar of string

@@ -1447,16 +1447,17 @@ let rec infer_expr env (e : Ast.expr) : ty =
                   fresh session ref against the full branch map so that a later
                   `match <label>` can refine it PER ARM to the branch actually
                   taken (F5 path-dependent refinement). *)
-               let cont_ref = ref sty in
+               (* If the branches continue differently, the first-branch type
+                  would be a GUESS: the channel's state is then [SOfferPending],
+                  which no [Chan.*] operation accepts until a `match` on the
+                  label refines it ([with_offer_refinement]). *)
+               let differing =
+                 match branches with
+                 | (_, first) :: rest -> not (List.for_all (fun (_, s) -> session_ty_exact_equal s first) rest)
+                 | [] -> false
+               in
+               let cont_ref = ref (if differing then SOfferPending branches else sty) in
                env.offer_conts := (cont_ref, branches) :: !(env.offer_conts);
-               (* If the branches continue differently, the first-branch type is
-                  a GUESS — mark the ref as needing a `match`-driven refinement
-                  before any operation may use it. *)
-               (match branches with
-                | (_, first) :: rest
-                  when not (List.for_all (fun (_, s) -> session_ty_exact_equal s first) rest) ->
-                  env.offer_unrefined := cont_ref :: !(env.offer_unrefined)
-                | _ -> ());
                TTuple [t_atom; TLin (Ast.Linear, TChan cont_ref)]
              | [] ->
                TTuple [t_atom; TError])
@@ -3078,16 +3079,9 @@ and with_offer_refinement env scrut (br : Ast.branch) (f : unit -> unit) =
   in
   match applied with
   | Some (r, saved) ->
-    (* Snapshot-and-restore the WHOLE list rather than re-adding [r] on the way
-       out: safe because [Chan.offer] only ever PREPENDS, so anything registered
-       while [f] runs is a strictly newer, unrelated ref whose own scope ended
-       with [f] — restoring the snapshot cannot resurrect a stale mark or drop a
-       live one for a ref still reachable after this arm. *)
-    let saved_unrefined = !(env.offer_unrefined) in
-    env.offer_unrefined := List.filter (fun r' -> not (r' == r)) saved_unrefined;
-    Fun.protect
-      ~finally:(fun () -> r := saved; env.offer_unrefined := saved_unrefined)
-      f
+    (* The ref holds the arm's branch for the duration of [f] and goes back
+       to what it held ([SOfferPending] when the branches differ) after. *)
+    Fun.protect ~finally:(fun () -> r := saved) f
   | None ->
     (* No refinement applied.  If the scrutinee IS an offer label but this arm
        names no branch (a `_`/variable catch-all), the user demonstrably DID

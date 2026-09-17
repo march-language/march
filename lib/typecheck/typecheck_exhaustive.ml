@@ -791,6 +791,7 @@ let rec unfold_srec s =
       | SRecv (t, s')              -> SRecv (t, subst_inner s')
       | SChoose bs                 -> SChoose (List.map (fun (l, s') -> (l, subst_inner s')) bs)
       | SOffer  bs                 -> SOffer  (List.map (fun (l, s') -> (l, subst_inner s')) bs)
+      | SOfferPending bs           -> SOfferPending (List.map (fun (l, s') -> (l, subst_inner s')) bs)
       | SMSend (r, t, s')          -> SMSend (r, t, subst_inner s')
       | SMRecv (r, t, s')          -> SMRecv (r, t, subst_inner s')
       | SRec (y, s') when y <> x  -> SRec (y, subst_inner s')
@@ -801,9 +802,9 @@ let rec unfold_srec s =
 
 (** Reject a [Chan.*] operation on a channel whose session ref came from an
     [offer] with differing branch continuations and has not been refined by a
-    `match` on the paired label (F5 residual). *)
+    `match` on the paired label (F5 residual): its state is [SOfferPending]. *)
 let offer_unrefined_error env span (r : session_ty ref) op =
-  if offer_ref_unrefined env r then begin
+  if session_pending !r then begin
     Err.error env.errors ~span
       (offer_unrefined_message (Printf.sprintf "%s: this channel" op));
     true

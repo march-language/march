@@ -232,7 +232,6 @@ type env = {
      (Typecheck_types.session_ty ref *
       (string * Typecheck_types.session_ty) list))
     list;
-  offer_unrefined : Typecheck_types.session_ty ref list ref;
 }
 val make_env :
   Typecheck_types.Err.ctx ->
@@ -242,8 +241,7 @@ val make_env :
 val enter_level : env -> env
 val leave_level : env -> env
 val with_no_caller : env -> (unit -> 'a) -> 'a
-val offer_ref_unrefined :
-  env -> Typecheck_types.session_ty ref -> bool
+val session_pending : Typecheck_types.session_ty -> bool
 val offer_catchall_depth : int ref
 val offer_unrefined_message : string -> string
 val demote_to_monomorphic : Typecheck_types.ty -> unit

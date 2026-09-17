@@ -646,6 +646,17 @@ void *march_sched_recv_user_until(int64_t deadline_ms);
 #define MARCH_FDWAIT_TIMEOUT  0
 #define MARCH_FDWAIT_ERROR   -1
 
+/* getaddrinfo(3) without holding this scheduler thread: the lookup runs on
+ * a helper pthread and the calling green thread parks until it is done.  A
+ * slow resolver (a remote DNS, a stalled /etc/hosts lookup) then stalls one
+ * green thread, not a scheduler.  Same return as getaddrinfo; the caller
+ * owns *res and frees it with freeaddrinfo.  Outside a scheduler, or when
+ * the helper cannot be created, it is a plain getaddrinfo with SIGUSR1
+ * masked (the call is not async-signal-safe on macOS). */
+struct addrinfo;
+int march_sched_getaddrinfo(const char *host, const char *port,
+                            const struct addrinfo *hints, struct addrinfo **res);
+
 /* Wait until ANY of fds[0..n-1] (n <= 4) is readable, or the deadline.
  * Returns index + 1 of a ready fd (the first found; readiness is a hint,
  * confirm with a zero-timeout poll), MARCH_FDWAIT_TIMEOUT (0) or
