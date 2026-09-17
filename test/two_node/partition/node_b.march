@@ -132,7 +132,7 @@ mod TwoNodePartitionB do
   -- otherwise never print "Alive again" (seen once the transport's reads
   -- parked instead of blocking, which changed the timing). [clock] is this
   -- node's VectorClock.
-  pfn run(fd : Int, s : SwimDriver.State, buf : List(Int), reg : GlobalRegistry.Names, clock : VectorClock, phase : Int, alive : Bool, merged : Bool) : () do
+  pfn run(fd : Int, s : SwimDriver.State, buf : List(Int), reg : GlobalRegistry.Names, clock : VectorClock, phase : Int, alive : Bool, merged : Bool, reply_due : Bool) : () do
     let t = tick(fd, s, buf, reg)
     if t.closed do
       println(me() ++ ": peer closed")
@@ -140,32 +140,35 @@ mod TwoNodePartitionB do
       let st = peer_status(t.s)
       if phase == 0 && t.acked do
         println(me() ++ ": first ack from " ++ peer())
-        run(fd, t.s, t.buf, t.reg, clock, 1, false, false)
+        run(fd, t.s, t.buf, t.reg, clock, 1, false, false, false)
       else
         if phase == 1 && st == "Dead" do
           let clock2 = VectorClock.increment(clock, me())
           let reg2 = GlobalRegistry.register(t.reg, "leader", me(), my_pid(), clock2)
           println(me() ++ ": " ++ peer() ++ " Dead; registered leader -> " ++ leader_text(reg2))
-          run(fd, t.s, t.buf, reg2, clock2, 2, false, false)
+          run(fd, t.s, t.buf, reg2, clock2, 2, false, false, false)
         else
           if phase == 2 do
             let alive2 = if alive == false && st == "Alive" do
               println(me() ++ ": " ++ peer() ++ " Alive again")
               on_healed(fd, t.reg)
+              -- A reply that was held back until now (see on_merged) goes out
+              -- here: node-a ends the session when it gets it, so node-b's
+              -- "Alive again" is always printed before node-a can close.
+              if reply_due do send_sync(fd, t.reg) else () end
               true
             else alive end
             if merged == false && t.synced do
               println(me() ++ ": leader after merge -> " ++ leader_text(t.reg))
-              -- node-a is done once merged (it always saw Alive first: its
-              -- merge is a reply to the sync it sent on Alive); node-b keeps
-              -- serving until the peer closes, so its "Alive again" is still
-              -- printed if the sync got here first.
-              if after_merge(fd, t.reg) do () else run(fd, t.s, t.buf, t.reg, clock, 2, alive2, true) end
+              match on_merged(fd, t.reg, alive2) do
+                (true, _) -> ()
+                (false, due) -> run(fd, t.s, t.buf, t.reg, clock, 2, alive2, true, due)
+              end
             else
-              run(fd, t.s, t.buf, t.reg, clock, 2, alive2, merged)
+              run(fd, t.s, t.buf, t.reg, clock, 2, alive2, merged, reply_due)
             end
           else
-            run(fd, t.s, t.buf, t.reg, clock, phase, alive, merged)
+            run(fd, t.s, t.buf, t.reg, clock, phase, alive, merged, reply_due)
           end
         end
       end
@@ -176,10 +179,18 @@ mod TwoNodePartitionB do
   pfn on_healed(_fd : Int, _reg : GlobalRegistry.Names) : () do () end
 
   -- node-b answers the merge with its merged registry and keeps serving
-  -- until node-a closes.
-  pfn after_merge(fd : Int, reg : GlobalRegistry.Names) : Bool do
-    send_sync(fd, reg)
-    false
+  -- until node-a closes. The reply is what lets node-a finish and close, so
+  -- it is HELD until this node has seen node-a Alive again: node-a's sync
+  -- can arrive before this node's SWIM view flips (it did, under ASAN), and
+  -- an immediate reply let node-a close before "Alive again" was printed.
+  -- Returns (done, reply still due).
+  pfn on_merged(fd : Int, reg : GlobalRegistry.Names, alive : Bool) : (Bool, Bool) do
+    if alive do
+      send_sync(fd, reg)
+      (false, false)
+    else
+      (false, true)
+    end
   end
 
   fn main(_cap_console : Cap(IO.Console), _cap_netlisten : Cap(IO.NetListen), _cap_netconnect : Cap(IO.NetConnect), _cap_process : Cap(IO.Process), _cap_clock : Cap(IO.Clock)) do
@@ -193,7 +204,7 @@ mod TwoNodePartitionB do
       Ok(fd) -> fd
       Err(e) -> panic("accept: " ++ e)
     end
-    run(fd, initial(), Nil, GlobalRegistry.empty(), VectorClock.new(), 0, false, false)
+    run(fd, initial(), Nil, GlobalRegistry.empty(), VectorClock.new(), 0, false, false, false)
     tcp_close(fd)
     tcp_close(listen_fd)
   end
