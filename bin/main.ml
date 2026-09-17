@@ -897,6 +897,11 @@ let codegen_cas_tags () =
   @ (if (try Sys.getenv "MARCH_HTTP_EVLOOP" = "1" with Not_found -> false)
      then ["evloop"] else [])
   @ (if !fast_math then ["fast-math"] else [])
+  (* --pin-main changes the emitted entry point (march_spawn_main_pinned
+     instead of march_spawn_main), so a non-pinned cached artifact must never
+     satisfy a --pin-main build -- the failure would be a GUI program that
+     silently does not own the main thread. *)
+  @ (if !March_tir.Llvm_toplevel.pin_main then ["pin-main"] else [])
   @ (if !debug_mode || !debug_tui_mode then ["dbg"] else [])
   (* --test changes the emitted program: [lower_module ~test_mode] builds a
      test-runner entry point instead of the ordinary one, and the
@@ -4423,6 +4428,11 @@ let () =
     ("--fast-math",  Arg.Set fast_math,  " Emit 'fast' on all FP LLVM instructions");
     ("--trmc", Arg.Unit (fun () -> March_tir.Trmc.enabled := true),
      " Enable tail-recursion-modulo-cons (destination-passing rewrite)");
+    ("--pin-main",
+     Arg.Unit (fun () -> March_tir.Llvm_toplevel.pin_main := true),
+     " pin `main` to the process main thread (Cocoa/GLFW need it); bakes in\n\
+     \      what MARCH_PIN_MAIN=1 does at run time, so a double-clickable app\n\
+     \      does not depend on the environment");
     ("--no-trmc", Arg.Unit (fun () -> March_tir.Trmc.enabled := false),
      " Disable tail-recursion-modulo-cons");
     ("--pmap-threshold", Arg.Set_int pmap_threshold, "<N>  List.pmap/pfilter/preduce fall back to sequential below N elements (default 1024)");

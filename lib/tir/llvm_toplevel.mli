@@ -31,6 +31,13 @@ type target_config =
   | Wasm32Wasi
   | Wasm32Unknown
   | Js
+(** [--pin-main]: emit `march_spawn_main_pinned` rather than
+    `march_spawn_main`, so a compiled GUI program pins `main` to the process
+    main thread on its own account instead of depending on MARCH_PIN_MAIN
+    being set in the environment. Read by bin/main.ml for the CAS tag too:
+    the choice changes the emitted binary. *)
+val pin_main : bool ref
+
 val is_wasm_target : target_config -> bool
 val is_wasm32 : target_config -> bool
 external get_native_triple : unit -> string = "march_tir_native_triple"

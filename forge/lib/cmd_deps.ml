@@ -604,8 +604,45 @@ let clone_git_dep ~name ~url ~ref_name ~depth1 ~version =
           checksum = None }
   end
 
+(** Express [p] relative to [root] when it can be, so a path dep's recorded
+    source is the same on every machine.
+
+    `forge.lock` is committed and shared, but a path dep's `source` was stored
+    in whatever spelling the manifest used, so an absolute declaration leaked
+    the author's home directory into version control and made two developers
+    with identical `forge.toml` files produce different lockfiles — and
+    different `manifest_hash`es, since [content_hash] takes the source string.
+    Relative declarations were already machine-independent and are returned
+    unchanged, so only the absolute ones move, once.
+
+    Falls back to the absolute path when no relative spelling exists (a
+    different volume on Windows, or a root that is not a prefix and cannot be
+    walked out of). Cosmetic today — nothing reads `source` to LOCATE a dep —
+    but the offline-cache design makes the lockfile authoritative for dep
+    identity, at which point an absolute path becomes a real failure.
+    specs/todos/2026-09-11-lockfile-path-dep-source-is-sometimes-absolute.md *)
+let relativize_to_root ~(root : string) (p : string) : string =
+  if Filename.is_relative p then p
+  else if root = "" || Filename.is_relative root then p
+  else begin
+    let split path =
+      String.split_on_char '/' path |> List.filter (fun c -> c <> "" && c <> ".")
+    in
+    let rec strip_common a b =
+      match a, b with
+      | x :: xs, y :: ys when String.equal x y -> strip_common xs ys
+      | _ -> (a, b)
+    in
+    let (root_rest, p_rest) = strip_common (split root) (split p) in
+    (* A ".." for each root component left over, then the remainder of [p]. *)
+    let ups = List.map (fun _ -> Filename.parent_dir_name) root_rest in
+    match ups @ p_rest with
+    | [] -> Filename.current_dir_name
+    | parts -> String.concat "/" parts
+  end
+
 (** Install a dep for the first time.  Returns a (lock_entry, error option). *)
-let install_dep name (dep : Project.dep) =
+let install_dep ?(project_root = "") name (dep : Project.dep) =
   Project.mkdir_p (cas_deps_dir ());
   match dep with
 
@@ -641,9 +678,11 @@ let install_dep name (dep : Project.dep) =
   | Project.PathDep path ->
     if Sys.file_exists path then begin
       Printf.printf "  %s: found at %s\n%!" name path;
-      let hash = content_hash ~name ~source:("path:" ^ path) path in
+      (* Record the machine-independent spelling, not the declared one. *)
+      let recorded = relativize_to_root ~root:project_root path in
+      let hash = content_hash ~name ~source:("path:" ^ recorded) path in
       let e = Resolver_lockfile.{ name; version = None;
-                                   source = "path:" ^ path;
+                                   source = "path:" ^ recorded;
                                    commit = None;
                                    hash;
                                    checksum = None } in
@@ -712,7 +751,9 @@ let rec bfs_install visited ~reg_acc ~project_root wave =
           reg_acc := (name, version) :: !reg_acc; false
         | _ -> true
       ) fresh in
-    let results = List.map (fun (name, dep) -> (name, dep, install_dep name dep)) fresh in
+    let results =
+      List.map (fun (name, dep) ->
+        (name, dep, install_dep ~project_root name dep)) fresh in
     let next_wave = List.concat_map (fun (name, dep, result) ->
         match result with
         | Error _ -> []

@@ -348,6 +348,49 @@ let test_flat_install_is_detected () =
        Alcotest.(check bool) "a container of coordinates is not a flat install"
          false (Cmd_deps.looks_like_flat_install container))
 
+(* ── forge.lock: a path dep's source must be machine-independent ──────────
+   `forge.lock` is committed and shared, but a path dep's source was recorded
+   in whatever spelling forge.toml used, so an absolute declaration leaked the
+   author's home directory into version control and made two checkouts of one
+   project at different filesystem locations produce different lockfiles -- and
+   different manifest_hashes, since content_hash takes the source string.
+   specs/progress/2026-09-17-lockfile-path-dep-source-relative.md *)
+
+let test_relativize_absolute_under_root () =
+  Alcotest.(check string) "sibling dir becomes ../conduit"
+    "../conduit"
+    (Cmd_deps.relativize_to_root ~root:"/Users/alice/code/app"
+       "/Users/alice/code/conduit")
+
+let test_relativize_nested_under_root () =
+  Alcotest.(check string) "a dir inside the root loses the prefix"
+    "vendor/lib"
+    (Cmd_deps.relativize_to_root ~root:"/Users/alice/code/app"
+       "/Users/alice/code/app/vendor/lib")
+
+let test_relativize_leaves_relative_alone () =
+  Alcotest.(check string) "an already-relative declaration is untouched"
+    "../conduit"
+    (Cmd_deps.relativize_to_root ~root:"/Users/alice/code/app" "../conduit")
+
+let test_relativize_is_location_independent () =
+  (* The acceptance criterion: one project checked out at two different
+     locations records the same source for the same dep. *)
+  let a =
+    Cmd_deps.relativize_to_root ~root:"/Users/alice/code/app"
+      "/Users/alice/code/conduit" in
+  let b =
+    Cmd_deps.relativize_to_root ~root:"/home/bob/src/app"
+      "/home/bob/src/conduit" in
+  Alcotest.(check string) "two machines agree" a b
+
+let test_relativize_unrelated_root_walks_out () =
+  (* No common prefix: walking out of the root is the only relative spelling,
+     and the result must still name the target. *)
+  Alcotest.(check string) "walks out of the root"
+    "../../x/y"
+    (Cmd_deps.relativize_to_root ~root:"/a/b" "/x/y")
+
 (* ------------------------------------------------------------------ *)
 (*  Suite                                                              *)
 (* ------------------------------------------------------------------ *)
@@ -369,6 +412,18 @@ let () =
         test_archive_lib_paths_include_registry_dep;
       Alcotest.test_case "archive task still sees a git dep's lib dir" `Quick
         test_archive_lib_paths_include_git_dep;
+    ];
+    "lockfile path-dep source", [
+      Alcotest.test_case "absolute sibling becomes relative" `Quick
+        test_relativize_absolute_under_root;
+      Alcotest.test_case "absolute nested becomes relative" `Quick
+        test_relativize_nested_under_root;
+      Alcotest.test_case "relative declaration is untouched" `Quick
+        test_relativize_leaves_relative_alone;
+      Alcotest.test_case "two checkout locations agree" `Quick
+        test_relativize_is_location_independent;
+      Alcotest.test_case "unrelated root walks out" `Quick
+        test_relativize_unrelated_root_walks_out;
     ];
     "coordinate-keyed install", [
       Alcotest.test_case "git and registry coordinates never collide" `Quick

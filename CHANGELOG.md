@@ -417,7 +417,27 @@ git log is authoritative for exact commits.
   force the supervisor restart race by construction. Unset in production; does
   nothing when unset.
 
+### Added
+- **`march --pin-main` pins `main` to the process main thread.** Bakes into the
+  binary what `MARCH_PIN_MAIN=1` did at run time, so a double-clickable GUI app
+  (Cocoa, GLFW) no longer depends on being launched with the variable set. The
+  environment variable still works, and can only turn pinning on, never off a
+  build that asked for it.
+
 ### Fixed
+- **`DataFrame.col_z_score` and `col_normalize` no longer panic on a zero-row
+  column.** Both reached `Stats.mean` / `std_dev` / `min_val` / `max_val` with
+  an empty list. They now return a zero-row `FloatCol` — the `n = 0` case of
+  the zero-variance/zero-range branch each already had. A zero-row frame is
+  ordinary: `head(df, 0)` makes one, and so does a filter that matches nothing.
+
+- **A path dep's `source` in `forge.lock` is recorded relative to the project
+  root.** It was stored in whatever spelling `forge.toml` used, so an absolute
+  declaration leaked a home directory into a committed file and made two
+  checkouts of one project produce different lockfiles and different
+  `manifest_hash`es. Existing lockfiles take a one-line diff per absolute path
+  dep, once.
+
 - **`NativeArray.fold_float` no longer leaks two Float boxes per call
   (compiled).** A fold boxed its initial accumulator at the call site and
   returned a boxed result, and neither was released — two live objects per

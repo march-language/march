@@ -46,6 +46,18 @@ type target_config =
   | Wasm32Unknown   (** wasm32-unknown-unknown — browser, no WASI *)
   | Js              (** ES module output — no LLVM, no clang *)
 
+(** [--pin-main]: emit `march_spawn_main_pinned` instead of `march_spawn_main`,
+    so the compiled program pins `main` to scheduler 0 (the process main
+    thread) on its own account rather than depending on MARCH_PIN_MAIN being
+    set in the environment -- which a double-clickable GUI app cannot rely on.
+
+    A ref rather than a [ctx] field because the entry point is emitted from a
+    module-level buffer walk that does not carry one, and because bin/main.ml
+    must also read it for the CAS tag: the choice changes the emitted binary,
+    so a non-pinned cached artifact must never satisfy a --pin-main build.
+    Same shape, and the same reason, as [March_tir.Trmc.enabled]. *)
+let pin_main = ref false
+
 let is_wasm_target = function
   | Native | LinuxGnu _ | Js -> false
   | Wasm64Wasi | Wasm32Wasi | Wasm32Unknown -> true
@@ -1441,15 +1453,17 @@ let emit_module ~emit_expr
           in
           Buffer.add_string out
             (Printf.sprintf "\ndeclare void @march_process_argv_init(i32 %%argc, ptr %%argv_ptr)\n\
-             declare void @march_spawn_main(ptr %%fn)\n\
+             declare void @march_spawn_main%s(ptr %%fn)\n\
              %s\
              define i32 @main(i32 %%argc, ptr %%argv_ptr) {\nentry:\n\
                call void @march_process_argv_init(i32 %%argc, ptr %%argv_ptr)\n\
                call void @march_remote_init()\n\
              %s%s\
-               call void @march_spawn_main(ptr %s)\n\
+               call void @march_spawn_main%s(ptr %s)\n\
                call void @march_run_scheduler()\n\
-               ret i32 0\n}\n" thunk_def hr_setup stub_setup spawn_target)
+               ret i32 0\n}\n" (if !pin_main then "_pinned" else "")
+                thunk_def hr_setup stub_setup
+                (if !pin_main then "_pinned" else "") spawn_target)
         | None ->
           (* Library module with no user-defined main: emit a stub @main so
              clang can link a valid binary (forge build type-checks libraries). *)

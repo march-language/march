@@ -2612,7 +2612,7 @@ void march_sandbox_install(void) { /* not built with --cap-sandbox */ }
  * function's own definition for why a single call site is not enough. */
 static void march_register_sched_callbacks(void);
 
-void march_spawn_main(void (*fn)(void)) {
+static void spawn_main_impl(void (*fn)(void), int force_pin) {
     /* Drop privileges before the scheduler starts and before any user code
      * runs.  No-op unless built with --cap-sandbox. */
     march_sandbox_install();
@@ -2648,11 +2648,31 @@ void march_spawn_main(void (*fn)(void)) {
      * lets the yielded-main / steal-from-others fairness logic stay as is.
      * Tasks spawned by main are not pinned (see march_sched_spawn_pinned). */
     const char *pin = getenv("MARCH_PIN_MAIN");
-    if (pin && *pin && strcmp(pin, "0") != 0)
+    int want_pin = force_pin
+                   || (pin && *pin && strcmp(pin, "0") != 0);
+    /* The env var can only turn pinning ON, never off a build that asked for
+       it: a program compiled --pin-main needs the main thread to run at all
+       (Cocoa/GLFW), so honouring MARCH_PIN_MAIN=0 there would break it in a
+       way the user cannot diagnose from the message they would not get. */
+    if (want_pin)
         march_sched_spawn_pinned(main_fn_green_thread, (void *)(uintptr_t)fn);
     else
         march_sched_spawn(main_fn_green_thread, (void *)(uintptr_t)fn);
 }
+
+/* The ordinary entry: `main` may be dispatched by any worker, which is the
+   right default for servers and keeps the yielded-main / steal-from-others
+   fairness logic as is. MARCH_PIN_MAIN=1 still opts in at run time. */
+void march_spawn_main(void (*fn)(void)) { spawn_main_impl(fn, 0); }
+
+/* The --pin-main entry: the compiled program itself carries the requirement,
+   so a GUI binary that must own the process main thread no longer depends on
+   being launched with an environment variable set -- which a double-clickable
+   app cannot rely on. The runtime is compiled once into a cached .so, so a
+   per-program -D define does not work; the choice has to live in the emitted
+   entry point, which is why this is a second symbol rather than a flag.
+   specs/progress/2026-09-17-pin-main-compiler-switch.md */
+void march_spawn_main_pinned(void (*fn)(void)) { spawn_main_impl(fn, 1); }
 
 /* Forward declarations */
 int64_t march_monitor(void *watcher, void *target);

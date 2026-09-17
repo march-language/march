@@ -2692,53 +2692,82 @@ mod DataFrame do
     end
   end
 
-  doc "Z-score normalize an IntCol or FloatCol. Returns FloatCol."
+  doc """
+  Z-score normalize an IntCol or FloatCol. Returns FloatCol.
+
+  A zero-row column returns a zero-row FloatCol rather than an error: it is the
+  `n = 0` instance of the zero-variance case just below, which already returns a
+  same-length all-zeros column, and `head(df, 0)` or a filter that matches
+  nothing produces one in ordinary use. The guard is on the list actually passed
+  to `Stats.*`, which declare `{List(Float) | len(_) > 0}` and panic otherwise.
+  """
   fn col_z_score(col : Column) : Result(Column, String) do
     match col do
     FloatCol(name, data) -> do
       let lst = native_float_arr_to_list(data)
-      let m = Stats.mean(lst)
-      let s = Stats.std_dev(lst)
       let n = native_float_arr_length(data)
-      if s == 0.0 do Ok(FloatCol(name, native_float_arr_make(n, 0.0)))
-      else Ok(FloatCol(name, native_float_arr_from_list(List.map(lst, fn x -> (x -. m) /. s))))
-      end
+      if List.length(lst) == 0 do
+        Ok(FloatCol(name, native_float_arr_make(n, 0.0)))
+      else do
+        let m = Stats.mean(lst)
+        let s = Stats.std_dev(lst)
+        if s == 0.0 do Ok(FloatCol(name, native_float_arr_make(n, 0.0)))
+        else Ok(FloatCol(name, native_float_arr_from_list(List.map(lst, fn x -> (x -. m) /. s))))
+        end
+      end end
       end
     IntCol(name, data) -> do
       let xs = List.map(native_int_arr_to_list(data), fn x -> int_to_float(x))
-      let m = Stats.mean(xs)
-      let s = Stats.std_dev(xs)
       let n = native_int_arr_length(data)
-      if s == 0.0 do Ok(FloatCol(name, native_float_arr_make(n, 0.0)))
-      else Ok(FloatCol(name, native_float_arr_from_list(List.map(xs, fn x -> (x -. m) /. s))))
-      end
+      if List.length(xs) == 0 do
+        Ok(FloatCol(name, native_float_arr_make(n, 0.0)))
+      else do
+        let m = Stats.mean(xs)
+        let s = Stats.std_dev(xs)
+        if s == 0.0 do Ok(FloatCol(name, native_float_arr_make(n, 0.0)))
+        else Ok(FloatCol(name, native_float_arr_from_list(List.map(xs, fn x -> (x -. m) /. s))))
+        end
+      end end
       end
     _ -> Err("col_z_score: column must be IntCol or FloatCol")
     end
   end
 
-  doc "Min-max normalize a column to [0, 1]. Returns FloatCol."
+  doc """
+  Min-max normalize a column to [0, 1]. Returns FloatCol.
+
+  A zero-row column returns a zero-row FloatCol, for the same reason as
+  `col_z_score` above: it is the `n = 0` instance of the zero-range case below.
+  """
   fn col_normalize(col : Column) : Result(Column, String) do
     match col do
     FloatCol(name, data) -> do
       let lst = native_float_arr_to_list(data)
-      let mn = Stats.min_val(lst)
-      let mx = Stats.max_val(lst)
-      let range_ = mx -. mn
       let n = native_float_arr_length(data)
-      if range_ == 0.0 do Ok(FloatCol(name, native_float_arr_make(n, 0.0)))
-      else Ok(FloatCol(name, native_float_arr_from_list(List.map(lst, fn x -> (x -. mn) /. range_))))
-      end
+      if List.length(lst) == 0 do
+        Ok(FloatCol(name, native_float_arr_make(n, 0.0)))
+      else do
+        let mn = Stats.min_val(lst)
+        let mx = Stats.max_val(lst)
+        let range_ = mx -. mn
+        if range_ == 0.0 do Ok(FloatCol(name, native_float_arr_make(n, 0.0)))
+        else Ok(FloatCol(name, native_float_arr_from_list(List.map(lst, fn x -> (x -. mn) /. range_))))
+        end
+      end end
       end
     IntCol(name, data) -> do
       let xs = List.map(native_int_arr_to_list(data), fn x -> int_to_float(x))
-      let mn = Stats.min_val(xs)
-      let mx = Stats.max_val(xs)
-      let range_ = mx -. mn
       let n = native_int_arr_length(data)
-      if range_ == 0.0 do Ok(FloatCol(name, native_float_arr_make(n, 0.0)))
-      else Ok(FloatCol(name, native_float_arr_from_list(List.map(xs, fn x -> (x -. mn) /. range_))))
-      end
+      if List.length(xs) == 0 do
+        Ok(FloatCol(name, native_float_arr_make(n, 0.0)))
+      else do
+        let mn = Stats.min_val(xs)
+        let mx = Stats.max_val(xs)
+        let range_ = mx -. mn
+        if range_ == 0.0 do Ok(FloatCol(name, native_float_arr_make(n, 0.0)))
+        else Ok(FloatCol(name, native_float_arr_from_list(List.map(xs, fn x -> (x -. mn) /. range_))))
+        end
+      end end
       end
     _ -> Err("col_normalize: column must be IntCol or FloatCol")
     end

@@ -642,6 +642,9 @@ void    registry_retire_actor(void *actor);
  * MARCH_CAP_PROFILE was defined at build time. See runtime/march_sandbox.c. */
 void    march_sandbox_install(void);
 void    march_spawn_main(void (*fn)(void));
+/* --pin-main: run `main` only on scheduler 0 (the process main thread),
+   without depending on MARCH_PIN_MAIN being set in the environment. */
+void march_spawn_main_pinned(void (*fn)(void));
 /* Signal.watch (stdlib/signal.march): register/remove a deferred OS-signal
  * watcher (closure passed OWNED), send a signal to self, and drain pending
  * watchers from a scheduler / event-loop body (never from signal context). */

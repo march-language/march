@@ -429,26 +429,47 @@ end|}
 
 let test_accept_trmc_with_flag () = accepts "trmc" ~flags:"--trmc" trmc_src "9\n"
 
-(* KNOWN VACUOUS since TRMC became the default (2026-09-09), and deliberately
-   left that way rather than papered over.
+(* The note's reachability, settled 2026-09-17
+   (specs/progress/2026-09-17-trmc-note-is-reachable.md).
 
    [Alloc_contract.trmc_note] is guarded on `(not trmc) && trmc_eligible name`.
-   With TRMC on by default the guard is false on every ordinary build, so this
-   assertion now holds for a reason that has nothing to do with the flag it
-   passes -- it would pass if `--trmc` did nothing at all.
+   Since TRMC became the default on 2026-09-09 the first conjunct is false on
+   every ordinary build, which made the absence assertion below vacuous -- it
+   would have passed if `--trmc` did nothing at all. Two probes had failed to
+   produce the note and the suspicion was that it was structurally unreachable:
 
-   The obvious repair, asserting the note DOES fire under `--no-trmc`, was
-   tried and does not work: on this fixture `--no-trmc` produces no `no_alloc`
-   diagnostic at all, because FBIP already reuses the scrutinee cell without
-   the transform, so there is no allocation to complain about. A second
-   fixture with no cell to reuse (`upto(n) = Cons(n, upto(n-1))`) does produce
-   a `no_alloc` diagnostic in both modes but still carries no note.
+     - [trmc_src]'s `inc_all` produces no `no_alloc` diagnostic under
+       `--no-trmc` at all, because FBIP already reuses the scrutinee cell
+       without the transform, so there is nothing to complain about;
+     - `upto(n) = Cons(n, upto(n-1))` does allocate in both modes but is
+       `non-trmc` (`tail=0 modcons=0 other=1` in MARCH_TRMC_REPORT), because
+       generating a list from an Int is not a modulo-cons shape, so the SECOND
+       conjunct is what fails there.
 
-   So the note may be unreachable in practice, which is a question about the
-   note rather than about TRMC's default. Filed as
-   specs/todos/2026-09-09-trmc-note-in-alloc-contract-may-be-unreachable.md;
-   this case stays as a regression guard on the absence, with its vacuity
-   documented so nobody reads it as coverage. *)
+   Both conjuncts can hold at once, and [trmc_note_src] below is the shape:
+   modulo-cons over a list (so TRMC-eligible, `List.Cons@1`) that ALSO
+   allocates something FBIP cannot elide -- a tuple per element. The reported
+   allocation is the base case's `Nil`, which TRMC does not remove either, so
+   the fixture reports `no_alloc` in BOTH modes and differs only in the note.
+   That is what makes it a clean witness for the guard: nothing varies across
+   the two runs except `trmc`.
+
+   This case now asserts BOTH directions, so it fails if either the guard or
+   the note goes away. *)
+let trmc_note_src = {|mod Main do
+needs IO
+@[no_alloc]
+fn pairs(xs : List(Int)) : List((Int, Int)) do
+  match xs do
+    Nil -> Nil
+    Cons(h, t) -> Cons((h, h), pairs(t))
+  end
+end
+fn main(cap : Cap(IO)) : Unit do
+  println(int_to_string(List.length(pairs([1, 2, 3]))))
+end
+end|}
+
 let test_trmc_hint_absent_when_on () =
   let (rc, out) = compile ~flags:"--trmc" trmc_src in
   Alcotest.(check int) "rc" 0 rc;
@@ -457,6 +478,33 @@ let test_trmc_hint_absent_when_on () =
   Alcotest.(check int) "rc (default)" 0 rc_d;
   Alcotest.(check bool) "no hint on the default build" false
     (contains "TRMC-eligible" out_d)
+
+(* The other direction: an eligible function that still allocates, with the
+   transform off, MUST carry the note. Without this the guard could be deleted
+   and every assertion above would still pass. *)
+let test_trmc_hint_present_when_off () =
+  let (_, out) = compile ~flags:"--no-trmc" trmc_note_src in
+  Alcotest.(check bool) "no_alloc fires under --no-trmc" true
+    (contains "marked @[no_alloc] but allocates" out);
+  Alcotest.(check bool) "and carries the TRMC hint" true
+    (contains "TRMC-eligible" out);
+  (* Control, and the sharper half: the SAME fixture with TRMC ON still
+     reports no_alloc -- TRMC makes the `Cons` an in-place write but the base
+     case's `Nil` is allocated either way, which is the constructor the
+     diagnostic names -- and carries NO note. Same fixture, same diagnostic,
+     note present iff the transform is off: that is exactly the guard
+     `(not trmc) && trmc_eligible name`, with nothing else varying.
+
+     `--trmc` EXPLICITLY, not the ambient default: ci.yml's `trmc-suite` job
+     runs the whole suite under `MARCH_NO_TRMC=1`, where `flags:""` means TRMC
+     is OFF and this assertion inverts. The env forms are seeded before
+     Arg.parse precisely so an explicit flag wins, which is what makes this
+     case configuration-independent. *)
+  let (_, out_on) = compile ~flags:"--trmc" trmc_note_src in
+  Alcotest.(check bool) "no_alloc still fires with TRMC on" true
+    (contains "marked @[no_alloc] but allocates" out_on);
+  Alcotest.(check bool) "but carries no TRMC hint" false
+    (contains "TRMC-eligible" out_on)
 
 let scalar_src = {|mod Main do
 needs IO
@@ -606,6 +654,7 @@ let accept_tests = [
   Alcotest.test_case "accept: accumulator reuses Cons"    `Quick test_accept_accumulator_reuse;
   Alcotest.test_case "accept: TRMC producer with --trmc"  `Quick test_accept_trmc_with_flag;
   Alcotest.test_case "TRMC hint absent when --trmc is on" `Quick test_trmc_hint_absent_when_on;
+  Alcotest.test_case "TRMC hint present when --no-trmc" `Quick test_trmc_hint_present_when_off;
   Alcotest.test_case "accept: scalars and nullary ctors"  `Quick test_accept_scalars_and_nullary_ctors;
   Alcotest.test_case "accept: assume and its caller"      `Quick test_accept_assume_and_its_caller;
   Alcotest.test_case "accept: Option(Int) reuse"          `Quick test_accept_int_option;
