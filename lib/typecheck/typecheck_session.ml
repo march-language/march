@@ -104,6 +104,7 @@ and subst_svar x replacement s =
   | SRecv (t, s')  -> SRecv (t, subst_svar x replacement s')
   | SChoose bs     -> SChoose (List.map (fun (l, s') -> (l, subst_svar x replacement s')) bs)
   | SOffer bs      -> SOffer  (List.map (fun (l, s') -> (l, subst_svar x replacement s')) bs)
+  | SOfferPending bs -> SOfferPending (List.map (fun (l, s') -> (l, subst_svar x replacement s')) bs)
   | SMSend (r, t, s') -> SMSend (r, t, subst_svar x replacement s')
   | SMRecv (r, t, s') -> SMRecv (r, t, subst_svar x replacement s')
   | SRec (y, s') when y <> x -> SRec (y, subst_svar x replacement s')
@@ -116,6 +117,7 @@ let rec dual_session_ty = function
   | SRecv (t, s)  -> SSend (t, dual_session_ty s)
   | SChoose bs    -> SOffer  (List.map (fun (l, s) -> (l, dual_session_ty s)) bs)
   | SOffer  bs    -> SChoose (List.map (fun (l, s) -> (l, dual_session_ty s)) bs)
+  | SOfferPending bs -> SChoose (List.map (fun (l, s) -> (l, dual_session_ty s)) bs)
   | SEnd          -> SEnd
   | SRec (x, s)   -> SRec (x, dual_session_ty s)
   | SVar x        -> SVar x
@@ -192,7 +194,7 @@ let project_protocol env ~span ~proto_name (pdef : Ast.protocol_def) =
              (r = receiver && session_ty_equal (SSend (t, SEnd)) (SSend (msg_ty, SEnd)))
              || has_msend cont
            | SMRecv (_, _, cont) -> has_msend cont
-           | SChoose bs | SOffer bs ->
+           | SChoose bs | SOffer bs | SOfferPending bs ->
              List.exists (fun (_, s') -> has_msend s') bs
            | SRec (_, s') -> has_msend s'
            | _ -> false
@@ -203,7 +205,7 @@ let project_protocol env ~span ~proto_name (pdef : Ast.protocol_def) =
              (r = sender && session_ty_equal (SSend (t, SEnd)) (SSend (msg_ty, SEnd)))
              || has_mrecv cont
            | SMSend (_, _, cont) -> has_mrecv cont
-           | SChoose bs | SOffer bs ->
+           | SChoose bs | SOffer bs | SOfferPending bs ->
              List.exists (fun (_, s') -> has_mrecv s') bs
            | SRec (_, s') -> has_mrecv s'
            | _ -> false

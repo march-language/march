@@ -15,6 +15,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/socket.h>
+#include <netdb.h>
+#include <stdlib.h>
 
 static int g_sv[2];
 static _Atomic int     g_result   = -99;
@@ -83,6 +85,27 @@ static void late_writer_second(void *arg) {
     nap(60);
     char c = 'z';
     (void)write(g_sv2[1], &c, 1);
+}
+
+/* 7. march_sched_getaddrinfo parks: with the helper delayed 150 ms (test
+ * hook), a sibling green thread that naps 30 ms finishes FIRST -- on one
+ * scheduler thread that is only possible if the resolver parked. */
+static _Atomic int64_t g_resolve_done_at = 0, g_sibling_done_at = 0;
+static _Atomic int     g_resolve_rc = -99;
+static void resolver(void *arg) {
+    (void)arg;
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_INET; hints.ai_socktype = SOCK_STREAM; hints.ai_flags = AI_NUMERICHOST;
+    int rc = march_sched_getaddrinfo("127.0.0.1", "80", &hints, &res);
+    atomic_store(&g_resolve_rc, rc == 0 && res ? 0 : (rc ? rc : -1));
+    if (res) freeaddrinfo(res);
+    atomic_store(&g_resolve_done_at, march_now_ms());
+}
+static void sibling(void *arg) {
+    (void)arg;
+    nap(30);
+    atomic_store(&g_sibling_done_at, march_now_ms());
 }
 
 /* 4. Two waiters on one fd are both woken by one write. */
@@ -184,6 +207,18 @@ int main(void) {
     march_sched_run();
     assert(atomic_load(&g_which) == 2);    /* index 1, reported as index + 1 */
     drain(g_sv2[0]); close(g_sv[0]); close(g_sv[1]); close(g_sv2[0]); close(g_sv2[1]);
+
+    /* 7 */
+    setenv("MARCH_TEST_RESOLVE_DELAY_MS", "150", 1);
+    march_sched_init();
+    march_sched_spawn(resolver, NULL);
+    march_sched_spawn(sibling, NULL);
+    march_sched_request_shutdown();
+    march_sched_run();
+    unsetenv("MARCH_TEST_RESOLVE_DELAY_MS");
+    assert(atomic_load(&g_resolve_rc) == 0);
+    assert(atomic_load(&g_sibling_done_at) > 0);
+    assert(atomic_load(&g_sibling_done_at) < atomic_load(&g_resolve_done_at));   /* the resolver parked */
 
     printf("test_scheduler_fdwait: all passed\n");
     return 0;

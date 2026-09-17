@@ -623,17 +623,6 @@ type env = {
       typing ([infer_match] / the [check_expr] EMatch arm): when the scrutinee
       is such a [lbl] and an arm matches label `:L`, the shared ref is
       transiently set to [branches[L]] while that arm body is checked. *)
-  offer_unrefined : session_ty ref list ref;
-  (** Offer continuations awaiting per-arm refinement (F5 residual, 2026-07-24).
-      [Chan.offer] registers the session ref it hands back here IFF the offer's
-      branch continuations are not all identical — in that case the returned
-      channel's real state depends on which label the peer chose at runtime, so
-      operating on it before a `match` on the paired label refines it would type
-      the channel at the FIRST branch (silent type confusion: compiled, a
-      String payload gets read as an Int).  [with_offer_refinement] transiently
-      removes the ref while checking a refined arm; the [Chan.*] operation arms
-      reject any channel still listed here.  A shared mutable ref for the same
-      reason [offer_conts] is one. *)
 }
 
 let make_env errors type_map = {
@@ -688,7 +677,6 @@ let make_env errors type_map = {
   local_mods = StrMap.empty;
   offer_conts = ref [];
   offer_labels = [];
-  offer_unrefined = ref [];
 }
 
 let enter_level env = { env with level = env.level + 1 }
@@ -713,14 +701,13 @@ let with_no_caller (env : env) (f : unit -> 'a) : 'a =
   env.current_decl := "";
   Fun.protect ~finally:(fun () -> env.current_decl := saved) f
 
-(** Is [r] an [offer] continuation still awaiting per-arm refinement?
-    Physical identity on purpose: [env.offer_unrefined] tracks the exact ref
-    [Chan.offer] minted, and the ref cell IS the channel's identity for the
-    duration of the session (every [Chan.*] op mints a FRESH ref for its
-    continuation, so a marked ref can never be confused with a later state of
-    the same channel). *)
-let offer_ref_unrefined env (r : session_ty ref) =
-  List.exists (fun r' -> r' == r) !(env.offer_unrefined)
+(** Is [s] an [offer] continuation still awaiting per-arm refinement?  That
+    is a session STATE, [SOfferPending] (2026-09-17; it was a side table of
+    refs, [env.offer_unrefined], compared by physical identity): the state
+    travels with the ref through unification, annotations and function
+    boundaries, and [with_offer_refinement] replaces it with one branch for
+    the duration of a refined `match` arm. *)
+let session_pending = function SOfferPending _ -> true | _ -> false
 
 (** Depth of enclosing `match` arms that are a CATCH-ALL over an offer label
     (`_ ->` / a variable pattern, where [with_offer_refinement] cannot refine
@@ -1494,7 +1481,7 @@ let suggest_ctors (name : string) (env : env) : (string * string) list =
    would leave the OLD entry reachable by `List.assoc_opt "lbl"`, and
    `with_offer_refinement` would refine (and un-mark) an unrelated channel
    based on a label the peer never actually returned: the exact `Chan.offer`
-   soundness hole this file's [offer_unrefined] field exists to close, just
+   soundness hole the [SOfferPending] session state exists to close, just
    reached through a shadowed name instead of a bare missing `match`. *)
 (* [local_fns] shadowing discipline (mirrors the [fn_arities]/[plain_let_names]
    removals above): [local_fns] marks a name as "genuinely the current

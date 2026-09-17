@@ -110,6 +110,7 @@ and session_ty =
   | SRecv of ty * session_ty
   | SChoose of (string * session_ty) list
   | SOffer of (string * session_ty) list
+  | SOfferPending of (string * session_ty) list
   | SEnd
   | SRec of string * session_ty
   | SVar of string
@@ -297,7 +298,6 @@ type env = {
   offer_conts : (session_ty ref * (string * session_ty) list) list ref;
   offer_labels :
     (string * (session_ty ref * (string * session_ty) list)) list;
-  offer_unrefined : session_ty ref list ref;
 }
 val make_env : Err.ctx -> (Ast.span, ty) Hashtbl.t -> env
 val lookup_ctor : StrMap.key -> env -> ctor_info option

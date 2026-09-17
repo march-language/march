@@ -105,6 +105,15 @@ and session_ty =
   | SRecv   of ty * session_ty           (** Receive a value of type T, then follow S (binary) *)
   | SChoose of (string * session_ty) list (** Actively select a branch label *)
   | SOffer  of (string * session_ty) list (** Passively wait for the other side to pick *)
+  | SOfferPending of (string * session_ty) list
+      (** The continuation `Chan.offer` handed back when its branches continue
+          DIFFERENTLY: the channel's real state depends on which label the
+          peer chose at runtime, so no [Chan.*] operation may use it until a
+          `match` on the paired label refines it to one branch
+          ([with_offer_refinement]).  A session STATE rather than a side
+          table, so it survives unification, annotations and function
+          boundaries by construction.  Never written by a user; never the
+          state of a projection. *)
   | SEnd                                 (** Session complete — channel must be closed *)
   | SRec    of string * session_ty       (** Recursive binding: Rec(X, S) *)
   | SVar    of string                    (** Back-reference to a recursive binder *)
@@ -385,6 +394,9 @@ and pp_session_ty = function
   | SOffer bs           ->
     let arms = List.map (fun (l, s) -> l ^ ": " ^ pp_session_ty s) bs in
     "Offer{" ^ String.concat ", " arms ^ "}"
+  | SOfferPending bs    ->
+    let arms = List.map (fun (l, s) -> l ^ ": " ^ pp_session_ty s) bs in
+    "Offer{" ^ String.concat ", " arms ^ "} (branch not yet known)"
   | SEnd                -> "End"
   | SRec (x, s)         -> Printf.sprintf "Rec(%s, %s)" x (pp_session_ty s)
   | SVar x              -> x

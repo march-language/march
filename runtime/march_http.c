@@ -850,19 +850,22 @@ void *march_tcp_connect(void *host_ptr, int64_t port) {
     memset(&hints, 0, sizeof(hints));
     hints.ai_family   = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
-    /* Mask preemption (SIGUSR1) across getaddrinfo()/connect(): see
-     * march_block_preempt().  getaddrinfo on macOS is not async-signal-safe
-     * and a preemption signal landing inside it crashes the process (SIGILL). */
-    sigset_t saved;
-    march_block_preempt(&saved);
-    if (getaddrinfo(host, port_str, &hints, &res) != 0 || !res) {
-        march_unblock_preempt(&saved);
+    /* The lookup runs on a helper thread and parks this green thread
+     * (march_sched_getaddrinfo): a slow resolver no longer holds the
+     * scheduler thread, and the preemption signal never reaches the call
+     * (it is not async-signal-safe on macOS -- the helper is not a scheduler
+     * thread, so it is never signalled).  Unmasked, as every park must be. */
+    if (march_sched_getaddrinfo(host, port_str, &hints, &res) != 0 || !res) {
         void *s = march_string_lit("tcp_connect: getaddrinfo failed", 31);
         void *r = march_alloc(24);
         ((march_hdr *)r)->tag = 1; /* Err */
         *(void **)((char *)r + 16) = s;
         return r;
     }
+    /* Mask preemption (SIGUSR1) across socket()/connect(): see
+     * march_block_preempt(). */
+    sigset_t saved;
+    march_block_preempt(&saved);
     int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
     if (fd < 0) {
         march_unblock_preempt(&saved);

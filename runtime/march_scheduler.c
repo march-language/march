@@ -3559,6 +3559,74 @@ int march_sched_wait_fds(const int *fds, int n, int64_t deadline_ms) {
     return result;
 }
 
+/* ── getaddrinfo on a helper thread ─────────────────────────────────────── */
+
+#include <netdb.h>
+
+typedef struct {
+    const char            *host, *port;
+    const struct addrinfo *hints;
+    struct addrinfo       *res;
+    int                    rc;
+    march_proc            *proc;
+    _Atomic int            done;    /* result is in; the caller may read it */
+    _Atomic int            woke;    /* the wake has been issued; the caller may leave */
+} resolve_req;
+
+static void *resolve_thread(void *arg) {
+    resolve_req *q = (resolve_req *)arg;
+    const char *delay = getenv("MARCH_TEST_RESOLVE_DELAY_MS");   /* test hook */
+    if (delay && atoi(delay) > 0) {
+        struct timespec ts = { atoi(delay) / 1000, (long)(atoi(delay) % 1000) * 1000000L };
+        nanosleep(&ts, NULL);
+    }
+    q->rc = getaddrinfo(q->host, q->port, q->hints, &q->res);
+    /* The request lives on the caller's green-thread stack.  After `done`
+     * the caller may read the result, but it must not LEAVE (and let the
+     * frame and, later, the proc go) until the wake has been issued: `proc`
+     * is copied out first and `woke` is the caller's permission to go. */
+    march_proc *p = q->proc;
+    atomic_store_explicit(&q->done, 1, memory_order_release);
+    march_sched_wake(p);
+    atomic_store_explicit(&q->woke, 1, memory_order_release);
+    return NULL;
+}
+
+int march_sched_getaddrinfo(const char *host, const char *port,
+                            const struct addrinfo *hints, struct addrinfo **res) {
+    march_proc *p = tl_sched ? tl_sched->current : NULL;
+    if (p && atomic_load_explicit(&g_preempt_active, memory_order_acquire)) {
+        resolve_req q;
+        q.host = host; q.port = port; q.hints = hints; q.res = NULL; q.rc = 0; q.proc = p;
+        atomic_store(&q.done, 0); atomic_store(&q.woke, 0);
+        pthread_t t;
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+        int created = pthread_create(&t, &attr, resolve_thread, &q) == 0;
+        pthread_attr_destroy(&attr);
+        if (created) {
+            /* Park until the result is in (the wake permit covers a wake that
+             * lands before the park), then until the wake has been issued. */
+            while (!atomic_load_explicit(&q.done, memory_order_acquire))
+                (void)march_sched_park_self_until(march_now_ms() + 1000);
+            while (!atomic_load_explicit(&q.woke, memory_order_acquire))
+                march_sched_yield();
+            *res = q.res;
+            return q.rc;
+        }
+    }
+    /* No scheduler (or no helper): the plain call, with the preemption
+     * signal masked -- getaddrinfo is not async-signal-safe on macOS. */
+    sigset_t block, saved;
+    sigemptyset(&block);
+    sigaddset(&block, SIGUSR1);
+    pthread_sigmask(SIG_BLOCK, &block, &saved);
+    int rc = getaddrinfo(host, port, hints, res);
+    pthread_sigmask(SIG_SETMASK, &saved, NULL);
+    return rc;
+}
+
 static void *preempt_daemon(void *arg) {
     (void)arg;
     struct timespec ts;
