@@ -1210,6 +1210,8 @@ let builtin_bindings : (string * scheme) list =
              TArrow (t_int, TArrow (t_int, TCon ("NativeIntArr", []))))));
     ("native_int_arr_sum",
        Mono (TArrow (TCon ("NativeIntArr", []), t_int)));
+    ("native_int_arr_sort",
+       Mono (TArrow (TCon ("NativeIntArr", []), TCon ("NativeIntArr", []))));
     ("native_int_arr_min",
        Mono (TArrow (TCon ("NativeIntArr", []), t_int)));
     ("native_int_arr_max",

@@ -1,0 +1,11 @@
+sorted: 13
+reversed: 13
+equal: 13
+dist10: 13
+sawtooth: 13
+organ: 13
+random: 13
+nearly: 13
+alias original intact: true
+alias result sorted: true
+idempotent: true

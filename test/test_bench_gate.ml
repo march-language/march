@@ -132,6 +132,16 @@ let gated : (string * string * compare_mode) list = [
    already produced one misdiagnosis in this repo ("bind failed" /
    "malformed hello" from a 34-hour-old zombie holding port 29850). *)
 let excluded : (string * string) list = [
+  (* Not "cannot run in CI" like the rest of this list, but "gating it here
+     would add nothing": every value array_sort prints is either a wall-clock
+     microsecond count (free to vary) or a `first=` element that
+     test/native/native_arr_sort.march already pins against List.sort_by at 13
+     sizes and 8 input patterns. It also spends several seconds in List.sort_by
+     at n = 1e6 by design, which is a poor fit for a gate. Its timings are
+     recorded in specs/benchmarks.md. Note that IgnoreTiming could not mask it
+     as-is anyway: strip_timings masks digits before `ms`, and this bench
+     reports `us`. *)
+  "array_sort",         "timing benchmark; values pinned by test/native/native_arr_sort.march";
   "http_get",           "network client: connects to an external HTTP server";
   "http_get_close",     "network client: connects to an external HTTP server";
   "http_get_keepalive", "network client: connects to an external HTTP server";

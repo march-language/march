@@ -28,6 +28,14 @@ git log is authoritative for exact commits.
 - The two-node harness (`scripts/two-node.sh`) accepts an optional third node, each node
   with its own listen port (`MARCH_PORT_A`/`_B`/`_C`); the `fan` scenario runs a
   three-role session protocol as three processes.
+- **`NativeArray.sort_int` — a flat numeric array can now be sorted.** Unstable
+  and in place when the array is uniquely owned, so a threaded
+  `let a = NativeArray.sort_int(a)` allocates nothing; a shared array is copied
+  instead of mutated. Implemented in the C runtime with no comparator crossing
+  the closure boundary: 5–30x faster than libc `qsort` at 5 million elements,
+  with already-sorted and reversed input handled in a single linear pass and
+  low-cardinality input close to linear. The other element widths (f64, f32,
+  i32, u8) are not done yet.
 - **`SessionNode` routes by role, so an `@[endpoints]` protocol can run its roles on
   three or more nodes.** `SessionNode.party(my_role, node_id, on_close)` plus
   `accept_from` / `connect_to` per peer; `emit` picks the connection from the message's
