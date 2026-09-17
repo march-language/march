@@ -25,8 +25,18 @@ let stdlib = lazy
     load_stdlib_file_for_test "json.march";
     load_stdlib_file_for_test "session.march" ]
 
+(* The stdlib here has no `SessionNode`, so the generated `<P>_Run` (whose
+   every function calls `SessionNode.run`) cannot typecheck against it: turn
+   its emission off for these cases.  Its shape is asserted below with it on,
+   and the native/two-node fixtures typecheck and run it for real. *)
+let without_runner f =
+  let r = March_desugar.Desugar_endpoints.emit_runner in
+  let saved = !r in
+  r := false;
+  Fun.protect ~finally:(fun () -> r := saved) f
+
 let typecheck_with_stdlib src =
-  let m = parse_and_desugar src in
+  let m = without_runner (fun () -> parse_and_desugar src) in
   let m = { m with mod_decls = Lazy.force stdlib @ m.mod_decls } in
   let (errors, _type_map) = March_typecheck.Typecheck.check_module m in
   errors
@@ -113,7 +123,8 @@ let stream_shape =
     (fun () ->
        let mods = generated (wrap stream) in
        let names = List.map fst mods in
-       Alcotest.(check (list string)) "modules, generated first" [ "Stream_Msg"; "Stream_Prod"; "Stream_Cons" ] names;
+       Alcotest.(check (list string)) "modules, generated first"
+         [ "Stream_Msg"; "Stream_Prod"; "Stream_Cons"; "Stream_Run" ] names;
        List.iter
          (fun (m, f) -> Alcotest.(check bool) (m ^ "." ^ f) true (has_fn mods m f))
          [ ("Stream_Msg", "encode"); ("Stream_Msg", "decode");
@@ -125,14 +136,17 @@ let stream_shape =
            (* the event API, beside the callback one, in the same modules *)
            ("Stream_Prod", "idle"); ("Stream_Prod", "take_idle"); ("Stream_Prod", "await_more_done");
            ("Stream_Prod", "finish"); ("Stream_Prod", "resume");
-           ("Stream_Cons", "await_Msg_Prod_Cons_1"); ("Stream_Cons", "finish"); ("Stream_Cons", "resume") ])
+           ("Stream_Cons", "await_Msg_Prod_Cons_1"); ("Stream_Cons", "finish"); ("Stream_Cons", "resume");
+           (* the role runner's typed front, one per role, and its address table *)
+           ("Stream_Msg", "role_names");
+           ("Stream_Run", "run_Prod"); ("Stream_Run", "run_Cons"); ("Stream_Run", "addrs_from_env") ])
 
 let relay_shape =
   Alcotest.test_case "Relay: three roles, each with exactly its own send/recv" `Quick
     (fun () ->
        let mods = generated (wrap relay) in
        Alcotest.(check (list string)) "modules"
-         [ "Relay_Msg"; "Relay_Client"; "Relay_Server"; "Relay_Logger" ] (List.map fst mods);
+         [ "Relay_Msg"; "Relay_Client"; "Relay_Server"; "Relay_Logger"; "Relay_Run" ] (List.map fst mods);
        List.iter
          (fun (m, f, expect) -> Alcotest.(check bool) (m ^ "." ^ f) expect (has_fn mods m f))
          [ ("Relay_Client", "send_Msg_Client_Server_1", true);

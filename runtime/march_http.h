@@ -44,6 +44,9 @@ void *march_tcp_send_all(int64_t fd, void *data);
 /* Close a file descriptor. */
 void march_tcp_close(int64_t fd);
 
+/* shutdown(fd, SHUT_RDWR) without close: wakes a reader parked on fd. */
+void march_tcp_shutdown(int64_t fd);
+
 /* Connect to host:port as a TCP client.
  * Returns Ok(fd:i64) or Err(reason:String). Ok=tag0, Err=tag1. */
 void *march_tcp_connect(void *host, int64_t port);

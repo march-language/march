@@ -964,6 +964,10 @@ let builtin_bindings : (string * scheme) list =
     ("tcp_send_all",            Mono (TArrow (t_int, TArrow (t_string, t_result t_unit t_string))));
     ("tcp_recv_all",            Mono (TArrow (t_int, TArrow (t_int, TArrow (t_int, t_result t_string t_string)))));
     ("tcp_close",               Mono (TArrow (t_int, t_unit)));
+    (* tcp_shutdown(fd): shutdown(SHUT_RDWR) without close -- wakes a reader parked on fd *)
+    ("tcp_shutdown",            Mono (TArrow (t_int, t_unit)));
+    (* sleep_ms(ms): park this green thread for ms, holding no scheduler thread *)
+    ("sleep_ms",                Mono (TArrow (t_int, t_unit)));
     (* tcp_peer_addr(fd): numeric IP of the connected peer; "" when unavailable *)
     ("tcp_peer_addr",           Mono (TArrow (t_int, t_string)));
     ("dns_resolve",             Mono (TArrow (t_string, t_result (t_list t_string) t_string)));

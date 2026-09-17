@@ -1902,6 +1902,16 @@ let base_env : env =
           (try Unix.close (Obj.magic fd : Unix.file_descr) with _ -> ());
           VUnit
         | _ -> eval_error "tcp_close(fd)"))
+  ; ("tcp_shutdown", VBuiltin ("tcp_shutdown", function
+        | [VInt fd] ->
+          (try Unix.shutdown (Obj.magic fd : Unix.file_descr) Unix.SHUTDOWN_ALL with _ -> ());
+          VUnit
+        | _ -> eval_error "tcp_shutdown(fd)"))
+  ; ("sleep_ms", VBuiltin ("sleep_ms", function
+        | [VInt ms] ->
+          if ms > 0 then Unix.sleepf (float_of_int ms /. 1000.0);
+          VUnit
+        | _ -> eval_error "sleep_ms(ms)"))
   ; ("tcp_listen", VBuiltin ("tcp_listen", function
         | [VInt port] ->
           (try

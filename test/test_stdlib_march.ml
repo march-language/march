@@ -175,6 +175,7 @@ let all_stdlib_decls =
     "peer_reader.march";
     "actor.march";
     "node_queue.march";
+    "session_node.march";
     "node.march";
     "cluster_load.march";
     "work_dispatch.march";
@@ -600,6 +601,8 @@ let () =
         `Quick (run_stdlib_test "test_peer_reader.march" "TestPeerReader");
       Alcotest.test_case "node_queue: CREDIT frames and the budget"
         `Quick (run_stdlib_test "test_node_queue.march" "TestNodeQueue");
+      Alcotest.test_case "session_node: the role runner's topology and address table"
+        `Quick (run_stdlib_test "test_session_node.march" "TestSessionNode");
       Alcotest.test_case "node: the typed remote send, interpreter half"
         `Quick (run_stdlib_test "test_node.march" "TestNode");
     ]);

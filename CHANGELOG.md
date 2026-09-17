@@ -12,6 +12,16 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **The role runner.** `SessionNode.run` starts a role of an `@[endpoints]` protocol from
+  its peer set and a role→address table — listen, connect to every lower role, accept every
+  higher one, check, attach, serve, tear down — in the order that cannot deadlock, and the
+  generator emits its typed front `<P>_Run.run_<Role>(io, node_id, secret, addrs, body)`
+  with `<P>_Run.addrs_from_env()` (reads `<P>_<ROLE>_ADDR = host:port`). A node is its role's
+  body plus a match on the result. A peer that dies mid-session ends it for everyone:
+  survivors get `Err(PeerGone(role, _))` back from `run` instead of hanging.
+- **`tcp_shutdown(fd)`** (`shutdown(2)` without close: the one way to wake a reader another
+  green thread has parked on that socket) and **`sleep_ms(ms)`** (a parking sleep; programs
+  used to shell out to `sleep`, holding a scheduler thread).
 - **`SessionNode.require(party, peers)`** checks a multiparty session has a connection to
   every role it will exchange messages with — the generated `<P>_Msg.peers_<Role>()` — and
   names the missing ones at startup rather than failing at the first message.

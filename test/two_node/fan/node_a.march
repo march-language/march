@@ -7,16 +7,20 @@
 -- green thread, so node-c's four readers cost no thread each (they used to,
 -- and this scenario stalled at fewer than 4 threads).
 -- Roles number A = 1, C = 2, B = 3 (first appearance), so under "i < j: i
--- listens, j connects" A listens on MARCH_PORT_A for C.
--- Design: specs/progress/2026-09-16-session-node-multiparty-routing.md.
+-- listens, j connects" A listens (FAN_A_ADDR) for C.
+--
+-- Every node is the generated role runner: `Fan_Run.run_<Role>` does the
+-- listen/connect/accept wiring from the address table, in the order that
+-- cannot deadlock, and hands the body its entry state. What a node writes
+-- is its role's line and the four-line match on the result.
+-- Design: specs/progress/2026-09-16-session-node-multiparty-routing.md and
+-- specs/progress/2026-09-16-role-runner.md.
 mod FanNodeA do
   needs IO
   needs IO.Console
   needs IO.Mut
   needs IO.NetConnect
   needs IO.NetListen
-  needs IO.Process
-  needs IO.Random
   needs IO.Spawn
   needs Session.Live
 
@@ -27,53 +31,22 @@ mod FanNodeA do
     C -> A : Bool
   end
 
-  pfn secret() do "fan-secret" end
-  pfn identity(name : String) do NodeIdentity.make(name, "pk-" ++ name, 1) end
-
-  pfn connect_retry(port : Int, name : String, attempts : Int) : Peer do
-    match ClusterConn.connect_split(PeerRegistry.empty(), "127.0.0.1", port, identity(name), secret()) do
-      Ok((_reg, p)) -> p
-      Err(e) ->
-        if attempts <= 1 do
-          panic(name ++ " connect: " ++ e)
-        else
-          let _ = Process.run("sleep", Cons("0.1", Nil))
-          connect_retry(port, name, attempts - 1)
-        end
-    end
-  end
-
-  pfn accept_on(listen_fd : Int, name : String) : Peer do
-    match ClusterConn.accept_split(PeerRegistry.empty(), listen_fd, identity(name), secret()) do
-      Ok((_reg, p)) -> p
-      Err(e) -> panic(name ++ " accept: " ++ e)
-    end
-  end
-
-  pfn listen_on(port : Int) : Int do
-    match tcp_listen(port) do
-      Ok(fd) -> fd
-      Err(e) -> panic("listen: " ++ e)
-    end
+  pfn role_a(s : Cap(Session.Live), st : Fan_A.S_send_Msg_A_C_1) : Fan_A.Yield do
+    -- The delay that makes the race deterministic: B's message reaches C
+    -- while C is still waiting for this one.
+    sleep_ms(300)
+    println("A: sends 7")
+    let st1 = Fan_A.send_Msg_A_C_1(s, st, 7)
+    Fan_A.recv_Msg_C_A_1(s, st1, fn (ok, st2) ->
+      println("A: got " ++ bool_to_string(ok))
+      Fan_A.close(s, st2))
   end
 
   fn main(c : Cap(IO)) do
-    let listen_fd = listen_on(Env.require_int("MARCH_PORT_A"))
     println("node-a: up")
-    let conn = accept_on(listen_fd, "node-a")
-    let p0 = SessionNode.party(Fan_Msg.role_A(), "node-a", fn _ep -> println("A: closed"))
-    let p = SessionNode.require(SessionNode.accept_from(p0, conn), Fan_Msg.peers_A())
-    let s = Session.attach(c, SessionNode.ops(p))
-    -- The delay that makes the race deterministic: B's message reaches C
-    -- while C is still waiting for this one.
-    let _ = Process.run("sleep", Cons("0.3", Nil))
-    println("A: sends 7")
-    let st1 = Fan_A.send_Msg_A_C_1(s, Fan_A.register(s, 0), 7)
-    let _ = Fan_A.recv_Msg_C_A_1(s, st1, fn (ok, st2) ->
-      println("A: got " ++ bool_to_string(ok))
-      Fan_A.close(s, st2))
-    SessionNode.serve(p)
-    SessionNode.finish(p)
-    tcp_close(listen_fd)
+    match Fan_Run.run_A(c, "node-a", "fan-secret", Fan_Run.addrs_from_env(), fn (s, st) -> role_a(s, st)) do
+      Ok(_) -> println("A: closed")
+      Err(e) -> panic(SessionNode.run_error_message(e))
+    end
   end
 end

@@ -1,0 +1,33 @@
+-- Two-node harness scenario "gone": node-b hosts role B, which receives A's
+-- message and then stalls; the scenario SIGKILLs it there (see node_a.march).
+mod GoneNodeB do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs Session.Live
+
+  @[endpoints]
+  protocol Gone do
+    A -> B : Int
+    B -> A : Int
+  end
+
+  pfn role_b(s : Cap(Session.Live), st : Gone_B.S_recv_Msg_A_B_1) : Gone_B.Yield do
+    Gone_B.recv_Msg_A_B_1(s, st, fn (n, st1) ->
+      println("B: got " ++ int_to_string(n))
+      -- The stall the scenario kills us in: the reply never goes out.
+      sleep_ms(600000)
+      Gone_B.close(s, Gone_B.send_Msg_B_A_1(s, st1, n + 1)))
+  end
+
+  fn main(c : Cap(IO)) do
+    println("node-b: up")
+    match Gone_Run.run_B(c, "node-b", "gone-secret", Gone_Run.addrs_from_env(), fn (s, st) -> role_b(s, st)) do
+      Ok(_) -> println("B: closed")
+      Err(e) -> panic(SessionNode.run_error_message(e))
+    end
+  end
+end

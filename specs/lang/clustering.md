@@ -492,6 +492,32 @@ not ordered against each other — so a delivery that arrives before the continu
 wants it is parked and replayed when that continuation is installed. The generated code
 tells the transport which role each receive expects, so this needs nothing from you.
 
+**The role runner.** `SessionNode.run` does all of the above from a role, its peer set and
+a role→address table, in the one order that cannot deadlock (connect to every lower role,
+ascending, then accept every higher one), and the generator emits its typed front,
+`<P>_Run.run_<Role>(io, node_id, secret, addrs, body)`, where `body` takes the session
+capability and the role's entry state — a body written for another role, or for another
+point of this one, is a type error. A node is then its role's line and a match on the
+result:
+
+```march
+fn main(c : Cap(IO)) do
+  match Relay_Run.run_Server(c, "node-b", secret, Relay_Run.addrs_from_env(), fn (s, st) -> server(s, st)) do
+    Ok(_) -> ()
+    Err(SessionNode.PeerGone(role, _)) -> ...    -- a peer died mid-session; the session is over for everyone
+    Err(e) -> panic(SessionNode.run_error_message(e))
+  end
+end
+```
+
+`Relay_Run.addrs_from_env()` reads `RELAY_<ROLE>_ADDR = host:port` for each role. Addresses
+are a runtime value, but their shape is compile-time knowledge: a role needs its own entry
+iff some peer is above it and an entry for every peer below it, and a missing one panics by
+role at startup, before any socket opens. A session is not resumable: when a peer dies,
+every survivor's `run` returns `Err(PeerGone(role, _))` after tearing its party down (its
+other readers are woken with `tcp_shutdown`, so nothing stays parked), and what to do next
+— `run` again, which is a fresh session — is the caller's decision.
+
 ## Putting It Together
 
 > **This is a layered API-reference skeleton, not a runnable program.** It shows how the pieces connect (identity, listen/connect, handshake, then a `RemoteCall`) but elides two things you must supply for real: (1) the actual byte transport over the socket `fd`, and (2) concrete `sig_hash` / `impl_hash` values, which the compiler bakes into your binary for the specific functions you enroll. The send/recv framing is `NetFrame`'s job (length-prefixed frames); see the *Wiring up the transport* note after the skeleton for how to close the loop.
