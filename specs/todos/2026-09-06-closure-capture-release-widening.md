@@ -51,7 +51,36 @@ real but narrow: `WHICH=5` went 1,073 MB -> 9.5 MB, while `WHICH=4` and
 > `f` is never released. For item 3: a closure header's pad word is now
 > entirely free (`MARCH_CLO_ARG0_BORROWED` was retired).
 
+> **Update 2026-09-16: RE-MEASURED after the `if`/`else` dead-side fix
+> (`specs/progress/2026-09-16-if-else-drops-the-dead-side.md`). Every measured
+> figure below this line predates that fix and several of them are now zero.**
+> The current picture, with the design for what is left, is
+> `specs/2026-09-16-remaining-rc-leaks-design.md`. In short, at `0a4275849`:
+>
+> - **Item 1 is DONE** (it landed 2026-09-13; the section body below was never
+>   updated). An apply fn reading two or three heap captures, applied, is flat:
+>   0.00015 per iteration over 20,000.
+> - **Item 2's measured shapes are now flat.** `List.map(xs, fn s ->
+>   string_length(s) + k)` — the 2026-09-14 note below records it leaking
+>   exactly one object per `map` call — measures 0.00015 per iteration, as do
+>   `List.fold_left` and `List.filter` with a capturing lambda. The per-SITE
+>   verdict is still not built, but it is now wanted only as the gate for item
+>   3, not for a leak of its own.
+> - **Item 3 is LIVE and is the keystone**, narrowed: the leak fires only when
+>   a closure is dropped WITHOUT ever being applied (1.0001 per iteration);
+>   applied once it is flat (0.0001). The environment cell is freed either way
+>   — what leaks is the capture inside it. Three closures over one `String`
+>   leak one object, not three.
+> - **Item 4 is LIVE, and only on the trie path**: 2.997 objects per update
+>   into the trie, 0.0001 into the tail. The tail half went flat when item 1
+>   landed, which is what this file predicted and nobody had re-measured.
+> - **Item 5 is CLOSED** (below).
+
 ## 1. Perceus dups `$clo` at every capture read and nothing undoes it
+
+> **LANDED 2026-09-13** (`specs/progress/2026-09-13-closure-environment-released.md`)
+> and re-confirmed flat 2026-09-16. The account below is kept for its
+> measurements; it is history, not an open item.
 
 `find_inc_vars` at an `EField` treats the source atom as sitting at a consuming
 position and dups it when it is live afterwards. `TTuple` and `TRecord` sources
