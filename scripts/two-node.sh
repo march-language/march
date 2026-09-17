@@ -1,34 +1,40 @@
 #!/usr/bin/env bash
-# Two-node failure-semantics harness: two compiled March programs as two OS
-# processes, a fault script applied from outside, per-node sorted goldens.
+# Two-node failure-semantics harness: two (optionally three) compiled March
+# programs as separate OS processes, a fault script applied from outside,
+# per-node sorted goldens.
 #
 #   scripts/two-node.sh <scenario>          # test/two_node/<scenario>/
 #   scripts/two-node.sh --list
 #
-# A scenario directory holds node_a.march / node_b.march, node_a.expected /
-# node_b.expected (each node's stdout, sorted; a node started twice appends),
-# and scenario.sh, the fault script, sourced with these helpers in scope:
+# A scenario directory holds node_a.march / node_b.march (and node_c.march for
+# a three-node scenario), node_<x>.expected (each node's stdout, sorted; a
+# node started twice appends), and scenario.sh, the fault script, sourced
+# with these helpers in scope:
 #
-#   start_node <a|b> [creation]   compile-once, start node-<x> in the background
-#                                 (node-b gets MARCH_NODE_PORT/MARCH_NODE_CREATION,
-#                                 node-a gets MARCH_PEER_PORT)
-#   kill_node <a|b>               SIGKILL it (a crash, distinct from a close)
-#   stop_node / cont_node <a|b>   SIGSTOP / SIGCONT (a stall, distinct from a crash)
-#   drop_link / heal              drop every TCP packet to or from the scenario
-#                                 port (a partition: nothing is refused, nothing
+#   start_node <a|b|c> [creation] compile-once, start node-<x> in the background.
+#                                 Every node gets MARCH_PORT_A / MARCH_PORT_B /
+#                                 MARCH_PORT_C, one listen port per node, so a
+#                                 scenario chooses who listens and who connects;
+#                                 node-b also gets MARCH_NODE_PORT (= MARCH_PORT_B)
+#                                 and MARCH_NODE_CREATION, node-a MARCH_PEER_PORT
+#                                 (= MARCH_PORT_B), the two-node spelling.
+#   kill_node <a|b|c>             SIGKILL it (a crash, distinct from a close)
+#   stop_node / cont_node <a|b|c> SIGSTOP / SIGCONT (a stall, distinct from a crash)
+#   drop_link / heal              drop every TCP packet to or from node-b's port
+#                                 (a partition: nothing is refused, nothing
 #                                 arrives) / remove the rule. Linux iptables, as
 #                                 root or via passwordless sudo; anywhere else the
 #                                 scenario exits 3, "skipped: needs root", which
 #                                 CI's loop treats as a failure and a local run
 #                                 reads as a skip. Rules are removed on exit.
-#   wait_line <a|b> <text>        block until the node's stdout contains <text>
-#   wait_exit <a|b>               block until the node's process exits
+#   wait_line <a|b|c> <text>      block until the node's stdout contains <text>
+#   wait_exit <a|b|c>             block until the node's process exits
 #   ORDERED=1                     (set by the scenario) diff each node's stdout
 #                                 unsorted: only for a node that prints from one
 #                                 actor, whose order is then the protocol's
 #
 # Every wait has a deadline (TWO_NODE_TIMEOUT, default 60 s) and fails loudly
-# with both nodes' output. Why two processes and not two green threads: see
+# with every node's output. Why two processes and not two green threads: see
 # specs/progress/2026-09-14-two-node-failure-semantics-harness.md.
 set -u
 
@@ -66,16 +72,23 @@ port_hi=$(( $(ephemeral_floor) - 1 ))
 [ "$port_hi" -gt "$port_lo" ] || { port_lo=10000; port_hi=19999; }
 # $$ as well as $RANDOM: two harnesses started in the same second seed $RANDOM
 # identically and would otherwise pick the same "random" port as each other.
-pick_port() { PORT=$(( port_lo + (RANDOM ^ $$) % (port_hi - port_lo + 1) )); }
+pick_port() {
+  PORT=$(( port_lo + (RANDOM ^ $$) % (port_hi - port_lo + 1) ))
+  # node-a's and node-c's own listen ports, next to node-b's and re-derived
+  # with it: a three-node scenario needs more than one listener, and every
+  # node is told all three so it can pick who it listens for and who it dials.
+  PORT_A=$(( PORT + 1 )); [ "$PORT_A" -le "$port_hi" ] || PORT_A=$(( port_lo ))
+  PORT_C=$(( PORT_A + 1 )); [ "$PORT_C" -le "$port_hi" ] || PORT_C=$(( port_lo + 1 ))
+}
 pick_port
 port_settled=0                # see start_node: PORT is only movable before
                               # anything has been told which port to use
-pid_a=""; pid_b=""            # bash 3 (macOS): no associative arrays
+pid_a=""; pid_b=""; pid_c=""  # bash 3 (macOS): no associative arrays
 pid_of() { eval "echo \"\$pid_$1\""; }
 
 link_dropped=0
 cleanup() {
-  for n in a b; do p=$(pid_of "$n"); [ -n "$p" ] && kill -9 "$p" 2>/dev/null; done
+  for n in a b c; do p=$(pid_of "$n"); [ -n "$p" ] && kill -9 "$p" 2>/dev/null; done
   [ "$link_dropped" = 1 ] && heal
   return 0
 }
@@ -84,7 +97,7 @@ trap 'cleanup; exit 1' INT TERM HUP PIPE   # a signal death skips the EXIT trap
 
 fail() {
   echo "two-node[$scenario]: $*" >&2
-  for n in a b; do
+  for n in a b c; do
     [ -f "$work/$n.out" ] && { echo "--- node-$n stdout"; cat "$work/$n.out"; }
     [ -s "$work/$n.err" ] && { echo "--- node-$n stderr"; cat "$work/$n.err"; }
   done >&2
@@ -127,6 +140,7 @@ start_node() {
   if [ "$n" = b ]; then
     local tries=1
     while :; do
+      MARCH_PORT_A=$PORT_A MARCH_PORT_B=$PORT MARCH_PORT_C=$PORT_C \
       MARCH_NODE_PORT=$PORT MARCH_NODE_CREATION=$creation "$work/node_b" >> "$work/b.out" 2>> "$work/b.err" &
       pid_b=$!
       bind_failed || break
@@ -139,7 +153,11 @@ start_node() {
       [ "$tries" -gt 10 ] && fail "node-b found no free port in 10 attempts (last $PORT)"
       pick_port
     done
+  elif [ "$n" = c ]; then
+    MARCH_PORT_A=$PORT_A MARCH_PORT_B=$PORT MARCH_PORT_C=$PORT_C "$work/node_c" >> "$work/c.out" 2>> "$work/c.err" &
+    pid_c=$!
   else
+    MARCH_PORT_A=$PORT_A MARCH_PORT_B=$PORT MARCH_PORT_C=$PORT_C \
     MARCH_PEER_PORT=$PORT "$work/node_a" >> "$work/a.out" 2>> "$work/a.err" &
     pid_a=$!
   fi
@@ -202,7 +220,7 @@ source "$dir/scenario.sh"
 
 status=0
 ORDERED=${ORDERED:-0}
-for n in a b; do
+for n in a b c; do
   [ -f "$dir/node_$n.expected" ] || continue
   if [ "$ORDERED" = 1 ]; then normalise() { cat "$1"; }; else normalise() { LC_ALL=C sort "$1"; }; fi
   if ! normalise "$work/$n.out" | diff -u "$dir/node_$n.expected" - > "$work/$n.diff"; then

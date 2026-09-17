@@ -240,6 +240,30 @@
  (action  (setenv MARCH_NUM_SCHEDULERS ""
            (run ./test_scheduler_timer_runner))))
 
+; ── C scheduler fd-wait test (march_sched_wait_fd) ──────────────────────
+; Built at -DMARCH_NUM_SCHEDULERS=1 ON PURPOSE: every case has one green
+; thread waiting on a socket another has yet to write, so with a single OS
+; thread the writer can only run if the waiter really parked.  A wait that
+; blocked the thread would hang the case (alarm(30) makes that a failure).
+; specs/progress/2026-09-16-park-socket-waits.md.
+(rule
+ (targets test_scheduler_fdwait_runner)
+ (deps    test_scheduler_fdwait.c
+          ../runtime/march_scheduler.c
+          ../runtime/march_scheduler.h
+          ../runtime/march_deque.h)
+ (action  (run %{cc} -std=gnu11 -Wall -Wextra -I../runtime
+               -DMARCH_NUM_SCHEDULERS=1
+               -o %{targets}
+               test_scheduler_fdwait.c ../runtime/march_scheduler.c
+               -lpthread)))
+(rule
+ (alias   runtest)
+ (deps    (file test_scheduler_fdwait_runner))
+ ; MARCH_NUM_SCHEDULERS="" — see test_scheduler_runner above.
+ (action  (setenv MARCH_NUM_SCHEDULERS ""
+           (run ./test_scheduler_fdwait_runner))))
+
 ; ── C scheduler mailbox capacity + drop-policy tests (Task 7) ───────────
 ; Multi-scheduler (pinned at 4, see below), matching the timer rule
 ; above: deterministic by construction (scheduler is never run), so the
@@ -1788,6 +1812,29 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/simd_nontco_leak_probe.expected native_simd_nontco_leak_probe.out)))
+
+; ── Leak guard: a heap value live on ONE side of an `if` and dead on the other
+; is released on the dead side. Perceus's cross-branch dead-variable pass took
+; its "live elsewhere" union over the TAGGED branches of the ECase only, and an
+; `if` is one tagged branch plus a default -- so a value used only on the `else`
+; side was released nowhere. Red before the fix: every leg but the `match`
+; control reads `flat: false`, one leaked object per call over 20,000 calls.
+(rule
+ (targets native_if_branch_dead_value_probe native_if_branch_dead_value_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/if_branch_dead_value_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_if_branch_dead_value_probe
+        native/if_branch_dead_value_probe.march)
+   (with-stdout-to native_if_branch_dead_value_probe.out
+        (system "./native_if_branch_dead_value_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/if_branch_dead_value_probe.expected native_if_branch_dead_value_probe.out)))
 
 ; ── Leak guard: `to_string` of a List (prelude's Show via string_join) and
 ; string_join itself release the list. string_join's list argument was marked
@@ -6011,17 +6058,15 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; loopback accept parks the interpreter).
 ; specs/progress/2026-09-16-session-node-multiparty-routing.md.
 ;
-; MARCH_NUM_SCHEDULERS=8 is load-bearing, not tuning. `tcp_accept` and the
-; socket reads block the OS thread they run on (march_http.c's
-; tcp_accept_raw calls accept() directly; nothing parks the green thread), and
-; this fixture is the unusual case of THREE session roles in ONE process: six
-; readers and handshakes sit in blocking syscalls at once. With the scheduler
-; thread count at or below that, every thread is blocked and no actor turn can
-; run -- the fixture hangs. Measured on this program: 4 threads hang 3/3, 8
-; hang 0/3. A CI runner with 4 usable CPUs resolves "auto" to 4, which is why
-; it hung there and not on a developer laptop. The constraint is the runtime's,
-; not the transport's (a node per process never has more than its own readers):
-; specs/todos/2026-09-16-blocking-accept-starves-the-scheduler.md.
+; MARCH_NUM_SCHEDULERS=1 is the regression test for socket waits PARKING the
+; green thread (march_sched_wait_fd). This fixture is the unusual case of THREE
+; session roles in ONE process -- six readers and handshakes waiting on sockets
+; at once. Before accept/recv parked, each wait held its scheduler thread, so
+; the fixture hung with 4 threads or fewer (3/3, measured) and needed 8; a
+; 4-CPU CI runner resolves "auto" to 4, which is how it was found. At ONE
+; thread the only way it can pass is if every wait parks -- so this is pinned
+; to 1, not left to the machine.
+; specs/progress/2026-09-16-park-socket-waits.md.
 (rule
  (targets native_session_node_fan_loopback native_session_node_fan_loopback.out)
  (deps (file %{exe:../bin/main.exe})
@@ -6032,7 +6077,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
   (progn
    (run %{exe:../bin/main.exe} --compile -o native_session_node_fan_loopback
         native/session_node_fan_loopback.march)
-   (setenv MARCH_NUM_SCHEDULERS 8
+   (setenv MARCH_NUM_SCHEDULERS 1
     (with-stdout-to native_session_node_fan_loopback.out
          ; perl, not `timeout`: coreutils is not on every macOS runner. A
          ; stall here used to burn the whole 30-minute step and report

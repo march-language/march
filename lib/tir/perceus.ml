@@ -271,12 +271,20 @@ let rec dup_field_results (k_table : Kind.table) (e : Tir.expr) : Tir.expr =
     for an [ECase] scrutinee, and a plain PARAMETER whose only uses are
     borrowing [EField] reads is never flagged dead by either mechanism.
 
-    KNOWN RESIDUAL — a self-recursive capturing apply function still leaks
-    one reference per materialization.  Its self-binding
-    [let f = inc_rc $clo; $clo] hands the alias a reference that is consumed
-    only on the recursive path; on the base-case branch nothing drops [f].
-    That is an independent dead-alias gap in the [ECase] branch handling, not
-    something this drop introduces or can fix.
+    The dead-alias gap this pass used to work around — a self-recursive
+    capturing apply function leaking one reference per materialization,
+    because its self-binding [let f = inc_rc $clo; $clo] was consumed only on
+    the recursive path and nothing dropped [f] on the base-case branch — was
+    fixed at its source on 2026-09-16
+    (specs/progress/2026-09-16-if-else-drops-the-dead-side.md): the [ECase]
+    cross-branch pass left the DEFAULT arm out of its "live elsewhere" union,
+    so a base case that is the tagged branch of an `if` never saw the alias as
+    dead-here-live-elsewhere.  [insert_dec_on_dead_paths] below now finds the
+    alias already released at the head of such an arm — its [Dce.free_vars]
+    test sees the new [dec_rc f] and steps aside — so the two mechanisms emit
+    one release between them, not two.  It is kept because it still covers the
+    shapes the cross-branch pass excludes (a [moved_vars] or [closure_fvs]
+    alias, an arm the walk reaches through an [ELet] RHS).
 
     PLACEMENT.  [Defun.lift_lambda] guarantees the bare [$clo] atom is
     referenced only by a leading, uninterrupted prefix of [ELet] bindings —

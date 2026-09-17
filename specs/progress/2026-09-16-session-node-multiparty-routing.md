@@ -243,16 +243,26 @@ The dune rule pins `MARCH_NUM_SCHEDULERS=8` with that reasoning beside it.
 
 Nothing here is specific to sessions or to this transport — a node per process never has
 more readers than its own — so the underlying constraint is filed separately as
-[[2026-09-16-blocking-accept-starves-the-scheduler]], with this fixture named as the
+[[2026-09-16-park-socket-waits]], with this fixture named as the
 regression test: when accepts and reads park, the `setenv` comes out and it should pass at
 `MARCH_NUM_SCHEDULERS=1`.
 
-### Still open
+### Follow-ups, shipped 2026-09-16
 
-- **A three-process scenario.** `scripts/two-node.sh` is two-node by construction
-  (`node_a`/`node_b`, one port); the loopback fixture covers the semantics in one
-  process. Generalising the harness to N nodes stays its own task.
-- **A role's links are supplied by the caller.** The projection knows which roles a role
-  exchanges messages with; `party`/`join` could take the protocol's role set and check
-  that every needed link exists before the session starts, instead of failing at the
-  first `emit` with "no connection to role N".
+- **The generated peer set, and `require`.** `<P>_Msg.peers_<R>()` is the list of role
+  indices `R` exchanges a message with (`peers_of` in the generator, walking loops and
+  choice branches). `SessionNode.require(p, peers)` checks a party has a link to each,
+  before the session starts, and panics naming the missing ones — a single-peer party
+  passes, matching the routing fallback. Control: a party with no links and
+  `peers_C()` panics `role 2 has no connection to role(s) 1, 3`.
+- **A three-process scenario.** `scripts/two-node.sh` takes an optional `node_c`; every
+  node now gets `MARCH_PORT_A` / `MARCH_PORT_B` / `MARCH_PORT_C`, one listen port each,
+  so a scenario decides who listens and who dials (the two-node spellings stay).
+  `test/two_node/fan` runs the Fan protocol's three roles as three processes, with the
+  same delayed send so the cross-peer race happens across real connections; 3/3 locally,
+  and the existing scenarios pass under the generalised harness.
+
+  It still needs `MARCH_NUM_SCHEDULERS=8`, exported by its `scenario.sh`: node-c alone
+  keeps four readers blocked in socket calls, and at 1 or 2 threads it stalls after
+  "up" (4 passes). A process per node lowers the thread floor; only parking accepts and
+  reads removes it ([[2026-09-16-park-socket-waits]]).

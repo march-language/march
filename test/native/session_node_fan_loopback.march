@@ -16,12 +16,12 @@
 -- generated `Fan_Msg.role_*()` are the truth.
 --
 -- The three roles run as three tasks in ONE process over loopback, the way
--- node_send_typed_loopback runs two. That needs MARCH_NUM_SCHEDULERS=8 (set
--- by the dune rule): `tcp_accept` and the socket reads block the OS thread
--- they run on, and three roles in one process keep six of them blocked at
--- once, so a scheduler with fewer threads has none left to run an actor turn
--- (measured: 4 threads hang, 8 do not). A node per process -- the two-node
--- scenarios -- never has more readers than its own. Each records its own lines; main prints
+-- node_send_typed_loopback runs two. The dune rule pins MARCH_NUM_SCHEDULERS=1:
+-- three roles in one process keep six readers waiting on sockets at once,
+-- and at one scheduler thread the fixture can only pass if every one of those
+-- waits parks the green thread (march_sched_wait_fd) instead of holding the
+-- thread -- which is the regression this fixture guards. Before that, it
+-- hung at 4 threads and needed 8. Each records its own lines; main prints
 -- them per role after every task has ended, so the trace is deterministic
 -- although the tasks interleave. Compiled only (the interpreter parks on the
 -- loopback accept, as every socket fixture here does).
@@ -94,7 +94,7 @@ mod SessionNodeFan do
     let conn = accept_on(listen_fd, "node-a")
     phase("A", "accepted C")
     let p0 = SessionNode.party(Fan_Msg.role_A(), "node-a", fn _ep -> note("A", "A: closed"))
-    let p = SessionNode.accept_from(p0, conn)
+    let p = SessionNode.require(SessionNode.accept_from(p0, conn), Fan_Msg.peers_A())
     phase("A", "joined C")
     let s = Session.attach(c, SessionNode.ops(p))
     -- The delay that makes the race deterministic: B's message reaches C
@@ -120,7 +120,7 @@ mod SessionNodeFan do
     let conn = connect_retry(port_c, "node-b", 100)
     phase("B", "connected to C")
     let p0 = SessionNode.party(Fan_Msg.role_B(), "node-b", fn _ep -> note("B", "B: closed"))
-    let p = SessionNode.connect_to(p0, Fan_Msg.role_C(), conn)
+    let p = SessionNode.require(SessionNode.connect_to(p0, Fan_Msg.role_C(), conn), Fan_Msg.peers_B())
     phase("B", "joined C")
     let s = Session.attach(c, SessionNode.ops(p))
     note("B", "B: sends 9")
@@ -140,7 +140,9 @@ mod SessionNodeFan do
     let p0 = SessionNode.party(Fan_Msg.role_C(), "node-c", fn _ep -> note("C", "C: closed"))
     let p1 = SessionNode.connect_to(p0, Fan_Msg.role_A(), conn_a)
     phase("C", "joined A")
-    let p = SessionNode.accept_from(p1, accept_on(listen_fd, "node-c"))
+    -- `require` against the generated peer set: C exchanges messages with A
+    -- and B, and both connections must exist before the session starts.
+    let p = SessionNode.require(SessionNode.accept_from(p1, accept_on(listen_fd, "node-c")), Fan_Msg.peers_C())
     phase("C", "joined B")
     let s = Session.attach(c, SessionNode.ops(p))
     let _ = Fan_C.recv_Msg_A_C_1(s, Fan_C.register(s, 0), fn (a, st1) ->

@@ -21,7 +21,8 @@ dec_rc t;
 let h : Int = inc_rc $f7;
 $f7 in
 case flag of
-  True() -> h
+  True() -> dec_rc xs;
+h
   _ -> case xs of
   Cons($f1, $f2) -> dec_rc xs;
 dec_rc $f2;

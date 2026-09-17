@@ -57,6 +57,15 @@
 #include <time.h>     /* nanosleep */
 #include <unistd.h>   /* sysconf */
 #include <errno.h>    /* errno, ERANGE (MARCH_NUM_SCHEDULERS parsing) */
+#include <poll.h>     /* march_sched_wait_fd's blocking fallback */
+#include <limits.h>   /* INT_MAX, same */
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+#  include <sys/event.h>
+#  define MARCH_FDWAIT_KQUEUE 1
+#elif defined(__linux__)
+#  include <sys/epoll.h>
+#  define MARCH_FDWAIT_EPOLL 1
+#endif
 
 /* macOS spells it MAP_ANON; Linux spells it MAP_ANONYMOUS.  Both platforms
  * define MAP_ANON as well, so we only need the reverse fallback. */
@@ -3262,6 +3271,222 @@ static void march_preempt_signal_handler(int sig) {
     march_tls_reductions  = 0;
 }
 
+/* ── fd readiness: park a green thread on a socket ────────────────────────
+ *
+ * One kqueue/epoll fd for the process (g_fdwait_fd), armed ONE-SHOT per wait,
+ * and a list of waiters (g_fdwait_head) keyed by fd.  The preempt daemon
+ * drains the poller every quantum (fdwait_service) and wakes the waiters
+ * whose fd fired; the waiter itself removes its entry when it returns, for
+ * any reason.
+ *
+ * Two rules keep it correct, and both are about the list mutex:
+ *
+ *   1. The waiter's entry lives on ITS stack and is on the list only while the
+ *      waiter is inside march_sched_wait_fd.  The daemon marks an entry done
+ *      and calls march_sched_wake WITHOUT releasing g_fdwait_mu, so an entry
+ *      (and the proc it names) can never be removed -- and the proc never
+ *      freed -- between the lookup and the wake.  That is the use-after-free
+ *      a late readiness event would otherwise cause once the waiter has
+ *      timed out and gone; the timer heap solves the same problem with
+ *      park_gen, here the lock is enough and simpler.  Holding the mutex
+ *      across march_sched_wake cannot deadlock: the waiter never takes a
+ *      scheduler lock while it holds g_fdwait_mu, and march_sched_wake never
+ *      takes g_fdwait_mu.
+ *
+ *   2. Readiness may arrive BEFORE the waiter parks (the daemon runs on its
+ *      own thread).  march_sched_wake then finds the proc still RUNNING and
+ *      deposits a wake permit, and the waiter's park consumes it instead of
+ *      parking -- the same permit that closes task_wait_done's window.  So
+ *      register first, park second, and no lost wakeup is possible.
+ *
+ * One-shot arming means a registration that fires after the waiter left, or
+ * an fd number reused by a new socket, produces at worst an event for an fd
+ * with no entry, which fdwait_service ignores.  A wait with no deadline parks
+ * in 60 s chunks rather than pushing a never-expiring timer entry: the heap
+ * has no cancellation, and an INT64_MAX entry would leak per call. */
+
+typedef struct fdwait_ent {
+    int                 fd;
+    int                 want_write;
+    march_proc         *proc;
+    int                 done;       /* set by fdwait_service under g_fdwait_mu */
+    struct fdwait_ent  *next;
+} fdwait_ent;
+
+static pthread_mutex_t  g_fdwait_mu   = PTHREAD_MUTEX_INITIALIZER;
+static fdwait_ent      *g_fdwait_head = NULL;
+static int              g_fdwait_fd   = -1;    /* kqueue()/epoll_create1(), lazily */
+
+/* Under g_fdwait_mu. */
+static int fdwait_open(void) {
+    if (g_fdwait_fd >= 0) return 0;
+#if defined(MARCH_FDWAIT_KQUEUE)
+    g_fdwait_fd = kqueue();
+#elif defined(MARCH_FDWAIT_EPOLL)
+    g_fdwait_fd = epoll_create1(EPOLL_CLOEXEC);
+#else
+    errno = ENOSYS;
+    return -1;
+#endif
+    return g_fdwait_fd >= 0 ? 0 : -1;
+}
+
+/* Under g_fdwait_mu.  Arm [fd] one-shot for the direction asked. */
+static int fdwait_arm(int fd, int want_write) {
+#if defined(MARCH_FDWAIT_KQUEUE)
+    struct kevent ev;
+    EV_SET(&ev, (uintptr_t)fd, want_write ? EVFILT_WRITE : EVFILT_READ,
+           EV_ADD | EV_ONESHOT, 0, 0, NULL);
+    return kevent(g_fdwait_fd, &ev, 1, NULL, 0, NULL) < 0 ? -1 : 0;
+#elif defined(MARCH_FDWAIT_EPOLL)
+    struct epoll_event ev;
+    memset(&ev, 0, sizeof ev);
+    ev.events  = (want_write ? EPOLLOUT : EPOLLIN) | EPOLLONESHOT;
+    ev.data.fd = fd;
+    if (epoll_ctl(g_fdwait_fd, EPOLL_CTL_ADD, fd, &ev) == 0) return 0;
+    if (errno != EEXIST) return -1;
+    return epoll_ctl(g_fdwait_fd, EPOLL_CTL_MOD, fd, &ev) < 0 ? -1 : 0;
+#else
+    (void)fd; (void)want_write;
+    return -1;
+#endif
+}
+
+/* Under g_fdwait_mu.  Remove [ent]; then either re-arm the fd for another
+ * waiter still on it, or drop the fd from the poller entirely so a reused
+ * number can never carry a stale registration. */
+static void fdwait_remove(fdwait_ent *ent) {
+    fdwait_ent **pp = &g_fdwait_head;
+    while (*pp && *pp != ent) pp = &(*pp)->next;
+    if (*pp) *pp = ent->next;
+    fdwait_ent *other = g_fdwait_head;
+    while (other && other->fd != ent->fd) other = other->next;
+    if (other) { (void)fdwait_arm(other->fd, other->want_write); return; }
+#if defined(MARCH_FDWAIT_KQUEUE)
+    struct kevent evs[2];
+    EV_SET(&evs[0], (uintptr_t)ent->fd, EVFILT_READ,  EV_DELETE, 0, 0, NULL);
+    EV_SET(&evs[1], (uintptr_t)ent->fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
+    /* Each EV_DELETE fails independently (ENOENT for the filter never armed);
+     * submit one at a time so the first failure does not mask the second. */
+    (void)kevent(g_fdwait_fd, &evs[0], 1, NULL, 0, NULL);
+    (void)kevent(g_fdwait_fd, &evs[1], 1, NULL, 0, NULL);
+#elif defined(MARCH_FDWAIT_EPOLL)
+    (void)epoll_ctl(g_fdwait_fd, EPOLL_CTL_DEL, ent->fd, NULL);
+#endif
+}
+
+/* Called from the preempt daemon every quantum: drain whatever fired and
+ * wake its waiters (rule 1 above: the wake happens under the mutex). */
+static void fdwait_service(void) {
+    if (g_fdwait_fd < 0) return;
+    for (;;) {
+        int fds[64], writes[64], n = 0;
+#if defined(MARCH_FDWAIT_KQUEUE)
+        struct kevent evs[64];
+        struct timespec zero = { 0, 0 };
+        int got = kevent(g_fdwait_fd, NULL, 0, evs, 64, &zero);
+        if (got < 0 && errno == EINTR) continue;
+        if (got <= 0) return;
+        for (int i = 0; i < got; i++) {
+            fds[n] = (int)evs[i].ident;
+            writes[n] = evs[i].filter == EVFILT_WRITE;
+            n++;
+        }
+#elif defined(MARCH_FDWAIT_EPOLL)
+        struct epoll_event evs[64];
+        int got = epoll_wait(g_fdwait_fd, evs, 64, 0);
+        if (got < 0 && errno == EINTR) continue;
+        if (got <= 0) return;
+        for (int i = 0; i < got; i++) {
+            fds[n] = evs[i].data.fd;
+            /* 0 = readers, 1 = writers, -1 = everyone: an error or hangup is
+             * "ready" for anyone waiting on the fd (the syscall reports it). */
+            uint32_t evb = evs[i].events;
+            int has_in = (evb & EPOLLIN) != 0, has_out = (evb & EPOLLOUT) != 0;
+            int err = (evb & (EPOLLERR | EPOLLHUP)) != 0;
+            writes[n] = (err || (has_in && has_out)) ? -1 : (has_out ? 1 : 0);
+            n++;
+        }
+#else
+        return;
+#endif
+        pthread_mutex_lock(&g_fdwait_mu);
+        for (int i = 0; i < n; i++) {
+            for (fdwait_ent *e = g_fdwait_head; e; e = e->next) {
+                if (e->fd != fds[i] || e->done) continue;
+                if (writes[i] >= 0 && e->want_write != writes[i]) continue;
+                e->done = 1;
+                march_sched_wake(e->proc);
+            }
+        }
+        pthread_mutex_unlock(&g_fdwait_mu);
+        if (got < 64) return;
+    }
+}
+
+static int fdwait_blocking(int fd, int want_write, int64_t deadline_ms) {
+    struct pollfd pfd;
+    pfd.fd = fd;
+    pfd.events = want_write ? POLLOUT : POLLIN;
+    pfd.revents = 0;
+    int rc;
+    for (;;) {
+        int ms = -1;
+        if (deadline_ms > 0) {
+            int64_t rem = deadline_ms - march_now_ms();
+            if (rem <= 0) return MARCH_FDWAIT_TIMEOUT;
+            ms = rem > INT_MAX ? INT_MAX : (int)rem;
+        }
+        rc = poll(&pfd, 1, ms);
+        if (rc < 0 && errno == EINTR) continue;
+        break;
+    }
+    if (rc < 0) return MARCH_FDWAIT_ERROR;
+    return rc == 0 ? MARCH_FDWAIT_TIMEOUT : MARCH_FDWAIT_READY;
+}
+
+/* noinline: contains a swapcontext-capable call (march_sched_park_self_until);
+ * see march_sched_yield's migration-barrier rationale. */
+__attribute__((noinline))
+int march_sched_wait_fd(int fd, int want_write, int64_t deadline_ms) {
+    march_proc *p = tl_sched ? tl_sched->current : NULL;
+    if (!p || !atomic_load_explicit(&g_preempt_active, memory_order_acquire))
+        return fdwait_blocking(fd, want_write, deadline_ms);
+
+    fdwait_ent ent;
+    ent.fd = fd; ent.want_write = want_write; ent.proc = p; ent.done = 0;
+
+    pthread_mutex_lock(&g_fdwait_mu);
+    if (fdwait_open() < 0) {
+        pthread_mutex_unlock(&g_fdwait_mu);
+        return fdwait_blocking(fd, want_write, deadline_ms);
+    }
+    ent.next = g_fdwait_head;
+    g_fdwait_head = &ent;
+    if (fdwait_arm(fd, want_write) < 0) {
+        int saved = errno;
+        fdwait_remove(&ent);
+        pthread_mutex_unlock(&g_fdwait_mu);
+        errno = saved;
+        return MARCH_FDWAIT_ERROR;
+    }
+    pthread_mutex_unlock(&g_fdwait_mu);
+
+    int result;
+    for (;;) {
+        int64_t chunk = march_now_ms() + 60000;
+        int64_t until = (deadline_ms > 0 && deadline_ms < chunk) ? deadline_ms : chunk;
+        (void)march_sched_park_self_until(until);
+        pthread_mutex_lock(&g_fdwait_mu);
+        if (ent.done) { result = MARCH_FDWAIT_READY; break; }
+        if (deadline_ms > 0 && march_now_ms() >= deadline_ms) { result = MARCH_FDWAIT_TIMEOUT; break; }
+        pthread_mutex_unlock(&g_fdwait_mu);
+    }
+    fdwait_remove(&ent);           /* still under g_fdwait_mu */
+    pthread_mutex_unlock(&g_fdwait_mu);
+    return result;
+}
+
 static void *preempt_daemon(void *arg) {
     (void)arg;
     struct timespec ts;
@@ -3283,6 +3508,7 @@ static void *preempt_daemon(void *arg) {
         }
 
         timer_service(march_now_ms());
+        fdwait_service();
     }
     return NULL;
 }

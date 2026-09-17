@@ -15,7 +15,10 @@ dec_rc is never in the Some arm; see
 (unused parameters, record-alias lambda parameters, `$clo_wrap` targets) and an
 owned `pid_of_int`; its prediction that the caller-side Float releases must go
 was wrong (`specs/progress/2026-09-14-closure-calls-consume-their-arguments.md`).
-§5 has not landed.
+§5 landed 2026-09-16 (`specs/progress/2026-09-16-simd-vector-box-released.md`).
+**All six sections have landed; this design is CLOSED.** What remains of the RC
+work is re-measured and re-designed in
+`specs/2026-09-16-remaining-rc-leaks-design.md`.
 **Scope:** the six open `specs/todos/` items below. Every `file:line` was read
 on this date at `2b32b130`; where a todo's pointer has moved or its stated
 mechanism does not match the code, this doc says so rather than repeating it.

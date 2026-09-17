@@ -164,6 +164,8 @@ native_hash_cross_backend: coverage audit (user + stdlib): 114 enforced, 0 inert
 native_hash_cross_backend: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_html_safe_raw: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
 native_html_safe_raw: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_if_branch_dead_value_probe: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
+native_if_branch_dead_value_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_iface_collision_ambiguous_call: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
 native_iface_collision_ambiguous_call: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_iface_method_collision: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced

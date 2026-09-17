@@ -2,9 +2,17 @@
 -- scrutinee `xs` is free on only ONE path through the branch body (the
 -- nested if's else side), not every path.  The current path-INSENSITIVE
 -- approximation still treats the scrutinee as borrowed on this branch,
--- keeping br_vars alive on both sub-paths (a bounded, intentional leak on
--- the true side rather than a path-sensitive free that risks a UAF for the
--- genuine single-sub-path case; see specs/perceus-invariants.md §6).
+-- keeping br_vars alive on both sub-paths rather than a path-sensitive free
+-- that risks a UAF for the genuine single-sub-path case; see
+-- specs/perceus-invariants.md §6.  That conservatism is about the br_vars
+-- `h` and `t`, and it is what this fixture pins.  The scrutinee ITSELF is no
+-- longer leaked on the true side: since 2026-09-16 the cross-branch pass
+-- includes the default arm in its "live elsewhere" union, so `xs` -- dead on
+-- the true side, live on the else side, and owned by this arm because
+-- add_scrutinee_free_for handed ownership into the body -- is released there
+-- (specs/progress/2026-09-16-if-else-drops-the-dead-side.md).  `h` carries
+-- its own inc_rc, so that release frees the Cons cell and not the value
+-- returned.
 mod ScrutineeBorrowedConservatism do
   needs IO.Console
   fn first_or_recheck(xs : List(Int), flag : Bool) : Int do
