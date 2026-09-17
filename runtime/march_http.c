@@ -19,6 +19,7 @@
 #include "march_http_internal.h"
 #include "march_http_io.h"
 #include "march_preempt.h"
+#include "march_scheduler.h"   /* march_sched_wait_fd: park a green thread on a socket */
 #include "march_http_parse_simd.h"
 #include "march_http_response.h"
 
@@ -93,29 +94,19 @@ int  base64_encode(const uint8_t *in, size_t len, char *out, size_t out_sz);
 #endif
 
 /* Milliseconds on CLOCK_MONOTONIC, for deadlines spanning several syscalls. */
-static int64_t march_now_ms(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-}
+/* march_now_ms: the scheduler's (march_scheduler.h), CLOCK_MONOTONIC ms --
+ * the same clock march_sched_wait_fd's deadlines are on. */
 
 /* Wait until fd is readable or timeout_ms elapses.
  * Returns 1 = readable, 0 = timed out, -1 = poll error (errno set).
  * timeout_ms <= 0 means "no deadline" and blocks indefinitely. */
 static int march_wait_readable(int fd, int64_t timeout_ms) {
-    struct pollfd pfd;
-    pfd.fd = fd;
-    pfd.events = POLLIN;
-    pfd.revents = 0;
-    int ms = timeout_ms <= 0 ? -1
-           : (timeout_ms > INT_MAX ? INT_MAX : (int)timeout_ms);
-    int rc;
-    /* poll() may itself be interrupted; retrying IT is safe and correct.
-     * Callers that need a deadline across several polls recompute the
-     * remaining budget from a monotonic deadline rather than reusing ms. */
-    do { rc = poll(&pfd, 1, ms); } while (rc < 0 && errno == EINTR);
-    if (rc < 0) return -1;
-    return rc == 0 ? 0 : 1;
+    /* Parks the green thread (march_sched_wait_fd) rather than poll()ing on
+     * the scheduler thread: a waiting reader no longer costs an OS thread.
+     * Callers must NOT hold the preempt mask across this -- see the note on
+     * march_sched_wait_fd; mask around the recv() that follows instead. */
+    int64_t deadline = timeout_ms > 0 ? march_now_ms() + timeout_ms : 0;
+    return march_sched_wait_fd(fd, 0, deadline);
 }
 
 /* ── Helpers ─────────────────────────────────────────────────────────── */
@@ -216,9 +207,27 @@ static int64_t tcp_listen_raw(int64_t port) {
 static int64_t tcp_accept_raw(int64_t listen_fd) {
     struct sockaddr_in client_addr;
     socklen_t len = sizeof(client_addr);
-    int fd = accept((int)listen_fd,
-                    (struct sockaddr *)&client_addr, &len);
-    return (int64_t)fd;
+    /* Park until a connection is pending (readable listener), so a green
+     * thread waiting in accept does not hold its scheduler thread; the accept()
+     * itself then returns at once.  Off a green thread this is a plain poll(),
+     * which is what the HTTP server's select()-gated caller effectively did. */
+    for (;;) {
+        if (march_sched_wait_fd((int)listen_fd, 0, 0) < 0) return -1;
+        /* Readiness is a hint that can be stale; a blocking accept() on a
+         * listener with nothing pending would hold the thread.  Confirm with a
+         * zero-timeout poll and go back to waiting if it was stale. */
+        struct pollfd pfd = { (int)listen_fd, POLLIN, 0 };
+        int rc;
+        do { rc = poll(&pfd, 1, 0); } while (rc < 0 && errno == EINTR);
+        if (rc < 0) return -1;
+        if (rc == 0) continue;
+        int fd;
+        do {
+            fd = accept((int)listen_fd, (struct sockaddr *)&client_addr, &len);
+        } while (fd < 0 && errno == EINTR);
+        if (fd < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+        return (int64_t)fd;
+    }
 }
 
 /* March-callable versions: return Result(Int, String) like tcp_connect.
@@ -477,47 +486,51 @@ void *march_tcp_recv_all(int64_t fd_arg, int64_t max_bytes, int64_t timeout_ms) 
     char chunk[65536];
     char *accum = NULL;
     size_t total = 0;
-    sigset_t saved;
-    march_block_preempt(&saved);
+    /* The wait parks the green thread and must run unmasked; the preempt mask
+     * is taken around each recv() only (see march_sched_wait_fd). */
     while ((int64_t)total < max_bytes) {
         if (deadline) {
             int64_t remaining = deadline - march_now_ms();
             if (remaining <= 0) {
-                march_unblock_preempt(&saved);
                 free(accum);
                 return make_err(MARCH_RECV_TIMEOUT_MSG);
             }
             int ready = march_wait_readable(fd, remaining);
             if (ready == 0) {
-                march_unblock_preempt(&saved);
                 free(accum);
                 return make_err(MARCH_RECV_TIMEOUT_MSG);
             }
             if (ready < 0) {
-                march_unblock_preempt(&saved);
                 free(accum);
                 return make_err("recv failed");
             }
+        } else {
+            /* No deadline: still park rather than block the scheduler thread. */
+            if (march_wait_readable(fd, 0) < 0) { free(accum); return make_err("recv failed"); }
         }
         size_t to_read = sizeof(chunk);
         if ((int64_t)(total + to_read) > max_bytes)
             to_read = (size_t)(max_bytes - (int64_t)total);
-        ssize_t n = recv(fd, chunk, to_read, 0);
+        sigset_t saved;
+        march_block_preempt(&saved);
+        /* MSG_DONTWAIT: the readiness was a hint and may be stale; never let
+         * the syscall itself hold the scheduler thread. */
+        ssize_t n = recv(fd, chunk, to_read, MSG_DONTWAIT);
+        int recv_errno = errno;
+        march_unblock_preempt(&saved);
         if (n < 0) {
-            if (errno == EINTR) continue;   /* preemption signal — retry */
-            int timed_out = (errno == EAGAIN || errno == EWOULDBLOCK);
-            march_unblock_preempt(&saved);
+            if (recv_errno == EINTR) continue;   /* preemption signal — retry */
+            if (recv_errno == EAGAIN || recv_errno == EWOULDBLOCK) continue;  /* stale hint: wait again */
             free(accum);
-            return make_err(timed_out ? MARCH_RECV_TIMEOUT_MSG : "recv failed");
+            return make_err("recv failed");
         }
         if (n == 0) break;  /* connection closed */
         char *tmp = realloc(accum, total + (size_t)n);
-        if (!tmp) { march_unblock_preempt(&saved); free(accum); return make_err("OOM"); }
+        if (!tmp) { free(accum); return make_err("OOM"); }
         accum = tmp;
         memcpy(accum + total, chunk, (size_t)n);
         total += (size_t)n;
     }
-    march_unblock_preempt(&saved);
     void *s = march_string_lit(accum ? accum : "", (int64_t)total);
     free(accum);
     return make_ok(s);
@@ -530,26 +543,36 @@ void *march_tcp_recv_chunk(int64_t fd_arg, int64_t max_bytes) {
     size_t sz = max_bytes < 65536 ? (size_t)max_bytes : 65536;
     char *buf = malloc(sz);
     if (!buf) return make_err("OOM");
-    /* The guard is load-bearing for more than EINTR here: without it SIGUSR1
-     * restarts this recv() every ~1ms under SA_RESTART, restarting the
-     * SO_RCVTIMEO timer with it, so a deadline set by tcp_set_recv_timeout
-     * would be silently defeated and this read would block forever. */
-    sigset_t saved;
-    march_block_preempt(&saved);
+    /* Park until readable rather than block the scheduler thread in recv().
+     * An fd carrying SO_RCVTIMEO (tcp_set_recv_timeout) keeps that deadline:
+     * it is read back and applied to the wait, so the untimed recv still
+     * times out exactly as it did when the kernel enforced it. */
+    int64_t deadline = 0;
+    {
+        struct timeval tv;
+        socklen_t tvlen = sizeof tv;
+        if (getsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, &tvlen) == 0
+                && (tv.tv_sec > 0 || tv.tv_usec > 0))
+            deadline = march_now_ms() + (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+    }
     ssize_t n;
-    do { n = recv(fd, buf, sz, 0); } while (n < 0 && errno == EINTR);
-    /* Capture errno BEFORE unblocking: pthread_sigmask is entitled to set errno
-     * even when it succeeds, and reading it afterwards loses the recv result. */
-    int recv_errno = errno;
-    march_unblock_preempt(&saved);
-    if (n < 0) {
-        /* EAGAIN on a socket that is still in BLOCKING mode means the fd's
-         * SO_RCVTIMEO deadline expired — the same fact tcp_recv_chunk_timeout
-         * reports, so it carries the same sentinel and classifies as a timeout
-         * rather than as a generic read failure. */
-        int timed_out = (recv_errno == EAGAIN || recv_errno == EWOULDBLOCK);
+    for (;;) {
+        int ready = march_sched_wait_fd(fd, 0, deadline);
+        if (ready == MARCH_FDWAIT_TIMEOUT) { free(buf); return make_err(MARCH_RECV_TIMEOUT_MSG); }
+        if (ready < 0) { free(buf); return make_err("recv failed"); }
+        /* The readiness was a hint and may be stale: MSG_DONTWAIT so the
+         * syscall never holds the scheduler thread, and back to the wait on
+         * EAGAIN.  The preempt mask around the syscall stays (SA_RESTART
+         * would otherwise restart it under every SIGUSR1). */
+        sigset_t saved;
+        march_block_preempt(&saved);
+        do { n = recv(fd, buf, sz, MSG_DONTWAIT); } while (n < 0 && errno == EINTR);
+        int recv_errno = errno;
+        march_unblock_preempt(&saved);
+        if (n >= 0) break;
+        if (recv_errno == EAGAIN || recv_errno == EWOULDBLOCK) continue;
         free(buf);
-        return make_err(timed_out ? MARCH_RECV_TIMEOUT_MSG : "recv failed");
+        return make_err("recv failed");
     }
     void *s = march_string_lit(buf, (int64_t)n);
     free(buf);
@@ -571,28 +594,24 @@ void *march_tcp_recv_chunk_timeout(int64_t fd_arg, int64_t max_bytes, int64_t ti
     size_t sz = max_bytes < 65536 ? (size_t)max_bytes : 65536;
     char *buf = malloc(sz);
     if (!buf) return make_err("OOM");
-    sigset_t saved;
-    march_block_preempt(&saved);
-    if (timeout_ms > 0) {
-        int ready = march_wait_readable(fd, timeout_ms);
-        if (ready <= 0) {
-            march_unblock_preempt(&saved);
-            free(buf);
-            return make_err(ready == 0 ? MARCH_RECV_TIMEOUT_MSG : "recv failed");
-        }
-    }
+    int64_t deadline = timeout_ms > 0 ? march_now_ms() + timeout_ms : 0;
     ssize_t n;
-    do { n = recv(fd, buf, sz, 0); } while (n < 0 && errno == EINTR);
-    /* Capture errno BEFORE unblocking: pthread_sigmask is entitled to set errno
-     * even when it succeeds, and reading it afterwards loses the recv result. */
-    int recv_errno = errno;
-    march_unblock_preempt(&saved);
-    if (n < 0) {
-        /* An fd carrying its own SO_RCVTIMEO can expire here too, even though
-         * this call's poll() budget had not run out. */
-        int timed_out = (recv_errno == EAGAIN || recv_errno == EWOULDBLOCK);
+    for (;;) {
+        /* Unmasked: the wait parks this green thread (see march_sched_wait_fd). */
+        int ready = march_sched_wait_fd(fd, 0, deadline);
+        if (ready == MARCH_FDWAIT_TIMEOUT) { free(buf); return make_err(MARCH_RECV_TIMEOUT_MSG); }
+        if (ready < 0) { free(buf); return make_err("recv failed"); }
+        /* Readiness is a hint that may be stale: MSG_DONTWAIT, back to the
+         * wait on EAGAIN, deadline still counting. */
+        sigset_t saved;
+        march_block_preempt(&saved);
+        do { n = recv(fd, buf, sz, MSG_DONTWAIT); } while (n < 0 && errno == EINTR);
+        int recv_errno = errno;
+        march_unblock_preempt(&saved);
+        if (n >= 0) break;
+        if (recv_errno == EAGAIN || recv_errno == EWOULDBLOCK) continue;
         free(buf);
-        return make_err(timed_out ? MARCH_RECV_TIMEOUT_MSG : "recv failed");
+        return make_err("recv failed");
     }
 
     void *s = march_string_lit(buf, (int64_t)n);
@@ -619,24 +638,25 @@ void *march_tcp_recv_timeout(int64_t fd_arg, int64_t max_bytes, int64_t timeout_
     size_t sz = max_bytes < 65536 ? (size_t)max_bytes : 65536;
     char *buf = malloc(sz);
     if (!buf) return make_err("OOM");
-    sigset_t saved;
-    march_block_preempt(&saved);
-    if (timeout_ms > 0) {
-        int ready = march_wait_readable(fd, timeout_ms);
-        if (ready <= 0) {
-            march_unblock_preempt(&saved);
-            free(buf);
-            return ready == 0 ? make_ok(NULL) : make_err("recv failed");
-        }
-    }
+    int64_t deadline = timeout_ms > 0 ? march_now_ms() + timeout_ms : 0;
     ssize_t n;
-    do { n = recv(fd, buf, sz, 0); } while (n < 0 && errno == EINTR);
-    int recv_errno = errno;
-    march_unblock_preempt(&saved);
+    int recv_errno = 0;
+    for (;;) {
+        /* Unmasked: the wait parks this green thread (see march_sched_wait_fd). */
+        int ready = march_sched_wait_fd(fd, 0, deadline);
+        if (ready == MARCH_FDWAIT_TIMEOUT) { free(buf); return make_ok(NULL); }
+        if (ready < 0) { free(buf); return make_err("recv failed"); }
+        sigset_t saved;
+        march_block_preempt(&saved);
+        do { n = recv(fd, buf, sz, MSG_DONTWAIT); } while (n < 0 && errno == EINTR);
+        recv_errno = errno;
+        march_unblock_preempt(&saved);
+        if (n >= 0) break;
+        if (recv_errno == EAGAIN || recv_errno == EWOULDBLOCK) continue;   /* stale hint */
+        break;
+    }
     if (n < 0) {
-        /* An fd carrying its own SO_RCVTIMEO can expire here too, even though
-         * this call's own budget had not run out. */
-        int timed_out = (recv_errno == EAGAIN || recv_errno == EWOULDBLOCK);
+        int timed_out = 0;
         free(buf);
         if (timed_out) return make_ok(NULL);
         return make_err("recv failed");
@@ -686,19 +706,26 @@ void *march_tcp_recv_exact(int64_t fd, int64_t n) {
     uint8_t *buf = (uint8_t *)malloc((size_t)n);
     if (!buf) return make_err("tcp_recv_exact: OOM");
     size_t received = 0;
-    sigset_t saved;
-    march_block_preempt(&saved);
     while ((int64_t)received < n) {
-        ssize_t r = recv((int)fd, buf + received, (size_t)(n - (int64_t)received), 0);
-        if (r < 0 && errno == EINTR) continue;   /* preemption signal — retry */
+        /* Park until readable (unmasked), then read what is there with the
+         * preempt mask held around the syscall only. */
+        if (march_sched_wait_fd((int)fd, 0, 0) < 0) {
+            free(buf);
+            return make_err("tcp_recv_exact: wait failed");
+        }
+        sigset_t saved;
+        march_block_preempt(&saved);
+        ssize_t r = recv((int)fd, buf + received, (size_t)(n - (int64_t)received), MSG_DONTWAIT);
+        int recv_errno = errno;
+        march_unblock_preempt(&saved);
+        if (r < 0 && recv_errno == EINTR) continue;   /* preemption signal — retry */
+        if (r < 0 && (recv_errno == EAGAIN || recv_errno == EWOULDBLOCK)) continue;  /* stale hint */
         if (r <= 0) {
-            march_unblock_preempt(&saved);
             free(buf);
             return make_err("tcp_recv_exact: connection closed");
         }
         received += (size_t)r;
     }
-    march_unblock_preempt(&saved);
     /* The March-side declaration is `tcp_recv_exact : Int -> Int -> Result(Bytes, String)`,
      * where `type Bytes = Bytes(String)`.  Return the Bytes WRAPPER, not a bare
      * march_string: `match Ok(header) -> Bytes.get(header, 0)` destructures the

@@ -400,6 +400,12 @@ git log is authoritative for exact commits.
   nothing when unset.
 
 ### Fixed
+- **A green thread waiting on a socket no longer holds its scheduler thread.** `tcp_accept`,
+  `Socket.recv`, `Socket.recv_timeout`, `tcp_recv_all` and `tcp_recv_exact` now park the
+  green thread until the socket is ready (`march_sched_wait_fd`, a kqueue/epoll poller the
+  scheduler services), so a program with many connections waiting at once no longer needs
+  more scheduler threads than waiters — before, six readers in one process hung a 4-thread
+  scheduler solid. A fd's `SO_RCVTIMEO` still bounds an untimed `Socket.recv`.
 - **An `if` no longer leaks a value that is dead on one side (compiled).**
   Every `if`/`else` whose two sides disagreed about a heap value leaked that
   value, once per evaluation — a String, a list, a record, a closure
@@ -410,7 +416,6 @@ git log is authoritative for exact commits.
   `match` over a variant has all arms tagged and was always correct. The
   vector-in-a-list leak reported against the SIMD fix below was this bug, not a
   gap in the generated drop.
-
 - **A SIMD vector passed to a function that is not tail-recursive, or to a
   closure, no longer leaks (compiled).** Crossing such a parameter boxes the
   vector, and nothing released that box: one 32-byte cell per call. SIMD

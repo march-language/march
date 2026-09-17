@@ -125,9 +125,14 @@ mod TwoNodePartitionB do
   end
 
   -- Phases: 0 before the first ack; 1 connected; 2 the peer is Dead and this
-  -- node has claimed "leader" for itself; 3 the peer is Alive again (healed);
-  -- 4 merged. [clock] is this node's VectorClock.
-  pfn run(fd : Int, s : SwimDriver.State, buf : List(Int), reg : GlobalRegistry.Names, clock : VectorClock, phase : Int) : () do
+  -- node has claimed "leader" for itself. After that two things happen in
+  -- EITHER order -- the peer comes back Alive (SWIM's refutation), and the
+  -- registry sync arrives -- so they are tracked as separate flags, not as
+  -- further phases: a node that merges before its own SWIM view flips would
+  -- otherwise never print "Alive again" (seen once the transport's reads
+  -- parked instead of blocking, which changed the timing). [clock] is this
+  -- node's VectorClock.
+  pfn run(fd : Int, s : SwimDriver.State, buf : List(Int), reg : GlobalRegistry.Names, clock : VectorClock, phase : Int, alive : Bool, merged : Bool) : () do
     let t = tick(fd, s, buf, reg)
     if t.closed do
       println(me() ++ ": peer closed")
@@ -135,25 +140,32 @@ mod TwoNodePartitionB do
       let st = peer_status(t.s)
       if phase == 0 && t.acked do
         println(me() ++ ": first ack from " ++ peer())
-        run(fd, t.s, t.buf, t.reg, clock, 1)
+        run(fd, t.s, t.buf, t.reg, clock, 1, false, false)
       else
         if phase == 1 && st == "Dead" do
           let clock2 = VectorClock.increment(clock, me())
           let reg2 = GlobalRegistry.register(t.reg, "leader", me(), my_pid(), clock2)
           println(me() ++ ": " ++ peer() ++ " Dead; registered leader -> " ++ leader_text(reg2))
-          run(fd, t.s, t.buf, reg2, clock2, 2)
+          run(fd, t.s, t.buf, reg2, clock2, 2, false, false)
         else
-          if phase == 2 && st == "Alive" do
-            println(me() ++ ": " ++ peer() ++ " Alive again")
-            on_healed(fd, t.reg)
-            run(fd, t.s, t.buf, t.reg, clock, 3)
-          else
-            if t.synced && phase >= 2 do
+          if phase == 2 do
+            let alive2 = if alive == false && st == "Alive" do
+              println(me() ++ ": " ++ peer() ++ " Alive again")
+              on_healed(fd, t.reg)
+              true
+            else alive end
+            if merged == false && t.synced do
               println(me() ++ ": leader after merge -> " ++ leader_text(t.reg))
-              if after_merge(fd, t.reg) do () else run(fd, t.s, t.buf, t.reg, clock, 4) end
+              -- node-a is done once merged (it always saw Alive first: its
+              -- merge is a reply to the sync it sent on Alive); node-b keeps
+              -- serving until the peer closes, so its "Alive again" is still
+              -- printed if the sync got here first.
+              if after_merge(fd, t.reg) do () else run(fd, t.s, t.buf, t.reg, clock, 2, alive2, true) end
             else
-              run(fd, t.s, t.buf, t.reg, clock, phase)
+              run(fd, t.s, t.buf, t.reg, clock, 2, alive2, merged)
             end
+          else
+            run(fd, t.s, t.buf, t.reg, clock, phase, alive, merged)
           end
         end
       end
@@ -181,7 +193,7 @@ mod TwoNodePartitionB do
       Ok(fd) -> fd
       Err(e) -> panic("accept: " ++ e)
     end
-    run(fd, initial(), Nil, GlobalRegistry.empty(), VectorClock.new(), 0)
+    run(fd, initial(), Nil, GlobalRegistry.empty(), VectorClock.new(), 0, false, false)
     tcp_close(fd)
     tcp_close(listen_fd)
   end

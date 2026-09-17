@@ -613,6 +613,27 @@ int march_sched_park_self_until(int64_t deadline_ms);
 void *march_sched_recv_until(int64_t deadline_ms);
 void *march_sched_recv_user_until(int64_t deadline_ms);
 
+/* Park the current green thread until [fd] is readable (want_write = 0) or
+ * writable (want_write = 1), or until deadline_ms (march_now_ms clock;
+ * deadline_ms <= 0 means no deadline).  The waiting OS thread runs other
+ * green threads meanwhile: this is what a blocking socket call must go
+ * through so that N green threads waiting on sockets do not need N scheduler
+ * threads (specs/progress/2026-09-16-park-socket-waits.md).
+ *
+ * Returns MARCH_FDWAIT_READY, MARCH_FDWAIT_TIMEOUT, or MARCH_FDWAIT_ERROR with
+ * errno set.  Readiness is a hint, exactly as poll()'s is: the caller makes
+ * the syscall and handles EAGAIN/EOF itself.  Off a green thread, or before the
+ * preempt daemon (which services the poller) is running, it degrades to a
+ * blocking poll(), so every caller keeps working in every mode.
+ *
+ * Do NOT call it with SIGUSR1 masked (march_block_preempt): parking switches
+ * this OS thread to another green thread, which would then run unpreemptable.
+ * Mask around the syscall that follows, not around the wait. */
+#define MARCH_FDWAIT_READY    1
+#define MARCH_FDWAIT_TIMEOUT  0
+#define MARCH_FDWAIT_ERROR   -1
+int march_sched_wait_fd(int fd, int want_write, int64_t deadline_ms);
+
 /* Return the process with the given PID, or NULL if not found.
  * O(1) array lookup by PID. */
 march_proc  *march_sched_find(int64_t pid);

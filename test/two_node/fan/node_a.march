@@ -2,10 +2,10 @@
 -- as its own OS process; node-c hosts C and node-b hosts B (see their files).
 -- The same protocol and the same race as test/native/session_node_fan_loopback
 -- -- A sleeps before its send so B's message reaches C first and must be
--- parked -- but across three processes, each with its own scheduler. A node
--- still needs more scheduler threads than it has readers blocked in socket
--- calls (node-c has four); scenario.sh pins MARCH_NUM_SCHEDULERS=8 and says
--- why.
+-- parked -- but across three processes, each with its own scheduler.
+-- scenario.sh pins every node to ONE scheduler thread: socket waits park the
+-- green thread, so node-c's four readers cost no thread each (they used to,
+-- and this scenario stalled at fewer than 4 threads).
 -- Roles number A = 1, C = 2, B = 3 (first appearance), so under "i < j: i
 -- listens, j connects" A listens on MARCH_PORT_A for C.
 -- Design: specs/progress/2026-09-16-session-node-multiparty-routing.md.
