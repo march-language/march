@@ -56,7 +56,17 @@ type compare_mode =
 
 (* Mask wall-clock numbers so a timing-bearing bench is still value-checked.
    Replaces the DIGITS before an ms suffix, leaving surrounding text intact,
-   so a change in what is printed still fails — only the number is free. *)
+   so a change in what is printed still fails — only the number is free.
+
+   KNOWN LIMITATION, deliberately not fixed: this matches digits BEFORE `ms`,
+   so it does not normalise `ms=326` (json_stream), `TIME_MS 10.118`
+   (the simd family) or a `us` suffix. That is survivable because every
+   timing-bearing bench is pinned by `timing_value_anchors` instead, which is
+   the stronger check — after the anchors run, this function's only remaining
+   job is the non-empty guard. Widening the pattern to eat more digit shapes
+   would risk masking a legitimate value for no benefit; if you ever need it
+   widened, add the anchors first and see whether you still do.
+   See specs/progress/2026-09-16-bench-gate-manifest-and-ci.md. *)
 let strip_timings (s : string) : string =
   Str.global_replace (Str.regexp "[0-9]+\\( *\\)ms") "<T>\\1ms" s
 
@@ -119,11 +129,45 @@ let gated : (string * string * compare_mode) list = [
   "par_map",       "849666",    Exact;
   "parallel",      "16777216",  Exact;
 
-  (* ── timing-bearing: values checked, wall-clock masked ── *)
-  "array_numeric",   "", IgnoreTiming;
-  "dataframe_bench", "", IgnoreTiming;
-  "hash_map_bench",  "", IgnoreTiming;
-  "rrb_bench",       "", IgnoreTiming;
+  (* ── pure checksums: one stable line, no timing ──
+     Captured 2026-09-16 by compiling each with --opt 2 and running it twice,
+     which is also how they were shown to be run-to-run stable. Every one of
+     these had been sitting outside the manifest since it was added. *)
+  "list_producers",     "239988000",         Exact;
+  "string_case",        "checksum=200000000", Exact;
+  "string_scan",        "checksum=135000150", Exact;
+  "string_slice_walk",  "checksum=27000000",  Exact;
+  "string_small_churn", "checksum=17793810",  Exact;
+  "string_split_large", "checksum=39000000",  Exact;
+
+  (* ── timing-bearing: values checked, wall-clock masked ──
+     IgnoreTiming does NOT compare `expected` at all: it requires every anchor
+     in [timing_value_anchors] to appear in the output. An entry here with no
+     anchors therefore checks only that the program printed SOMETHING, which
+     is how array_numeric and dataframe_bench sat here for months with no
+     value coverage at all. [test_ignore_timing_entries_have_anchors] now
+     makes that combination a failure rather than a silent hole. *)
+  "array_numeric",       "", IgnoreTiming;
+  "dataframe_bench",     "", IgnoreTiming;
+  "hash_map_bench",      "", IgnoreTiming;
+  "rrb_bench",           "", IgnoreTiming;
+  "json_stream",         "", IgnoreTiming;
+  "json_stream_strings", "", IgnoreTiming;
+  "scratch_string_memmem", "", IgnoreTiming;
+  "simd_f32",            "", IgnoreTiming;
+  "simd_kernels",        "", IgnoreTiming;
+  "simd_map",            "", IgnoreTiming;
+  "simd_map2",           "", IgnoreTiming;
+  "simd_sum",            "", IgnoreTiming;
+  "steady_state_ring",   "", IgnoreTiming;
+  "string_parallel_scan", "", IgnoreTiming;
+  (* vector_math prints one FRACTIONAL float and no timing at all. It is here
+     rather than in the Exact block on purpose: x86 and arm may contract a
+     multiply-add differently, which moves the last digits, so pinning the
+     whole literal invites a cross-platform flake that reproduces nowhere.
+     The anchor keeps the leading digits, which is what a real regression
+     would move. *)
+  "vector_math",         "", IgnoreTiming;
 ]
 
 (* Benches deliberately NOT gated, each with the reason. These bind fixed TCP
@@ -154,6 +198,37 @@ let excluded : (string * string) list = [
 let timing_value_anchors : (string * string list) list = [
   "hash_map_bench", ["check=14999850000"];
   "rrb_bench",      ["seq_sum=500000500000"; "par_sum=500000500000"];
+
+  (* Added 2026-09-16, captured from a real run, never written from memory.
+     Anchors are chosen to be the values a miscompile would move, and to
+     EXCLUDE anything measured: no *_TIME_MS, no MIN_NS/MAX_NS, no latency
+     BUCKET counts, no per-worker ms. Verified stable by diffing two runs:
+     in every bench below, only the timing lines differed. *)
+  "array_numeric",   ["result: 49500."; "checksum: 99000."; "result: 4999950000"];
+  "dataframe_bench", ["Result rows: 490"; "Groups: 5"; "cat_4 | 200 | 51.5"];
+  "json_stream",     ["checksum=280000"];
+  "json_stream_strings", ["stream_events=8000"; "parse_len=2000000"];
+  "scratch_string_memmem", ["ABSENT_RESULT 0"; "LATE_RESULT 633600000"];
+  "simd_f32",        ["SUM_RESULT 5000000."; "MAP_RESULT 15000000.";
+                      "MAP2_RESULT 15000000."];
+  (* DOT_COMPOSED and PARITY_CHECKSUM are fractional floats; anchored on the
+     integer part only, for the contraction reason given at vector_math. *)
+  "simd_kernels",    ["DOT_SIMD_RESULT 10000001."; "DOT_COMPOSED_RESULT 10000002.";
+                      "SCAN_SIMD_RESULT 12345678"; "SCAN_SCALAR_RESULT 12345678"];
+  "simd_map",        ["RESULT 9950000."];
+  "simd_map2",       ["RESULT 9950000."];
+  "simd_sum",        ["RESULT 2475000."];
+  (* OPS/WORK are the configuration echoed back, CHECKSUM is the work actually
+     done. MIN_NS happened to match across two runs and is still a measurement:
+     not an anchor. *)
+  "steady_state_ring", ["OPS 2000000"; "WORK 512"; "CHECKSUM 2147485486592511"];
+  "string_parallel_scan", ["checksum=16000000"];
+  (* Integer part only. The full value is 6853874.21103 here, but a
+     multiply-add contracted on one target and not the other perturbs an
+     integrator loop by more than the first decimal, so anchoring that digit
+     would buy a cross-platform flake rather than coverage. A real miscompile
+     moves this number grossly, not in the tenths. *)
+  "vector_math",     ["6853874"];
 ]
 
 (* ── Harness ─────────────────────────────────────────────────────────── *)
@@ -264,6 +339,37 @@ let test_manifest_is_exhaustive () =
   Alcotest.(check (list string))
     "no manifest entry names a bench that no longer exists" [] stale
 
+(** An IgnoreTiming entry with no anchors is very nearly no gate at all: the
+    only surviving assertion is "printed something non-empty". That is not
+    hypothetical — array_numeric and dataframe_bench were in exactly that
+    state, gated in name only, until 2026-09-16. Making it a failure here is
+    what stops the mode from being used as an escape hatch. *)
+let test_ignore_timing_entries_have_anchors () =
+  let missing =
+    List.filter_map (fun (name, _, mode) ->
+      match mode with
+      | Exact -> None
+      | IgnoreTiming ->
+        (match List.assoc_opt name timing_value_anchors with
+         | Some (_ :: _) -> None
+         | _ -> Some name)) gated
+    |> List.sort String.compare
+  in
+  Alcotest.(check (list string))
+    "every IgnoreTiming bench has at least one value anchor (otherwise the \
+     gate only checks that output is non-empty — add one to \
+     `timing_value_anchors`, captured from a real run)"
+    [] missing;
+  (* And the reverse: an anchor list for a name that is not gated is dead
+     weight that reads like coverage. *)
+  let gated_names = List.map (fun (n, _, _) -> n) gated in
+  let orphaned =
+    List.filter (fun (n, _) -> not (List.mem n gated_names)) timing_value_anchors
+    |> List.map fst |> List.sort String.compare
+  in
+  Alcotest.(check (list string))
+    "no anchor list names a bench that is not gated" [] orphaned
+
 let () =
   let cases =
     List.map (fun ((name, _, _) as b) ->
@@ -272,6 +378,8 @@ let () =
   Alcotest.run "march-bench-gate" [
     ("manifest", [
        Alcotest.test_case "every bench is gated or explicitly excluded" `Quick
-         test_manifest_is_exhaustive ]);
+         test_manifest_is_exhaustive;
+       Alcotest.test_case "every IgnoreTiming bench has value anchors" `Quick
+         test_ignore_timing_entries_have_anchors ]);
     ("bench-programs", cases);
   ]
