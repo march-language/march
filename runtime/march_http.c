@@ -450,6 +450,17 @@ void march_tcp_close(int64_t fd) {
     close((int)fd);
 }
 
+/* tcp_shutdown(fd): shutdown(SHUT_RDWR) WITHOUT closing.  The one way to end
+ * a read another green thread is parked in: close() silently drops the fd's
+ * kqueue/epoll registration, so a waiter in march_sched_wait_fd is never
+ * woken and the process cannot exit; shutdown makes the fd readable at EOF,
+ * the waiter wakes, its recv returns 0.  SessionNode uses it to end the
+ * survivors' readers once one peer is gone.  Errors (already closed, not a
+ * socket) are deliberately ignored: the caller is tearing down. */
+void march_tcp_shutdown(int64_t fd) {
+    (void)shutdown((int)fd, SHUT_RDWR);
+}
+
 /* tcp_peer_addr(fd) → String: numeric IP of the connected peer.
  * Returns "" when fd is not a connected INET socket.  IPv4-mapped IPv6
  * addresses (::ffff:1.2.3.4) are normalized to plain IPv4 notation. */

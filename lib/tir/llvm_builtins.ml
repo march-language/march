@@ -530,6 +530,10 @@ let builtins : builtin list = [
     in_is_builtin = false; declare_sig = Some "declare ptr  @march_tcp_send_all(i64 %fd, ptr %data)" };
   { march_name = "tcp_close"; c_name = Some "march_tcp_close"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_tcp_close(i64 %fd)" };
+  { march_name = "tcp_shutdown"; c_name = Some "march_tcp_shutdown"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void @march_tcp_shutdown(i64 %fd)" };
+  { march_name = "sleep_ms"; c_name = Some "march_sleep_ms"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void @march_sleep_ms(i64 %ms)" };
   { march_name = "tcp_peer_addr"; c_name = Some "march_tcp_peer_addr"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_tcp_peer_addr(i64 %fd)" };
   { march_name = "http_parse_request"; c_name = Some "march_http_parse_request"; ret_ty = Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TString]));
@@ -1470,6 +1474,8 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_tcp_recv_http";
   PDeclare "march_tcp_send_all";
   PDeclare "march_tcp_close";
+  PDeclare "march_tcp_shutdown";
+  PDeclare "march_sleep_ms";
   PDeclare "march_tcp_peer_addr";
   PDeclare "march_http_parse_request";
   PDeclare "march_http_serialize_response";

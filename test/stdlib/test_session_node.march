@@ -1,0 +1,64 @@
+mod TestSessionNode do
+
+  -- The role runner's pure half (specs/progress/2026-09-16-role-runner.md):
+  -- who dials whom, which addresses a role needs, how an address parses.
+  -- The socket half runs in test/two_node/fan and test/two_node/gone.
+
+  pfn addr(role : Int, s : String) do
+    match SessionNode.parse_addr(role, s) do
+      Ok(a) -> a
+      Err(e) -> panic(e)
+    end
+  end
+
+  describe "SessionNode role runner: topology" do
+
+    test "a role dials the peers below it, ascending, and accepts those above" do
+      assert (SessionNode.dials(3, [1, 4, 2]) == [1, 2])
+      assert (SessionNode.accepts(3, [1, 4, 2]) == [4])
+      assert (SessionNode.dials(1, [2, 3]) == Nil)
+      assert (SessionNode.accepts(3, [1, 2]) == Nil)
+    end
+
+    test "the missing addresses are named: every dialled peer, and itself iff it accepts" do
+      let a1 = addr(1, "127.0.0.1:20001")
+      assert (SessionNode.missing_addrs(3, [1, 2, 4], [a1]) == [3, 2])
+      assert (SessionNode.missing_addrs(4, [1, 2, 3], [a1]) == [2, 3])
+      assert (SessionNode.missing_addrs(1, [2, 3], Nil) == [1])
+      assert (SessionNode.missing_addrs(1, [2, 3], [a1]) == Nil)
+      assert (SessionNode.missing_addrs(2, [1], [a1]) == Nil)
+    end
+
+  end
+
+  describe "SessionNode role runner: addresses" do
+
+    test "host:port parses into the role's entry" do
+      let a = addr(2, "10.0.0.5:8080")
+      assert (a.role == 2)
+      assert (a.host == "10.0.0.5")
+      assert (a.port == 8080)
+    end
+
+    test "anything else is an error, not an entry" do
+      match SessionNode.parse_addr(2, "nope") do
+        Err(_) -> assert true
+        Ok(_) -> assert false
+      end
+      match SessionNode.parse_addr(2, "host:x") do
+        Err(_) -> assert true
+        Ok(_) -> assert false
+      end
+    end
+
+    test "addrs_from_env yields no entry for an unset role" do
+      assert (List.length(SessionNode.addrs_from_env("MARCH_TEST_NEVER_SET", [("A", 1), ("B", 2)])) == 0)
+    end
+
+    test "a run error names its role" do
+      assert (SessionNode.run_error_message(SessionNode.PeerGone(2, "eof")) == "session_node: role 2 is gone: eof")
+      assert (SessionNode.run_error_message(SessionNode.Connect(3, "refused")) == "session_node: connect to role 3: refused")
+    end
+
+  end
+end

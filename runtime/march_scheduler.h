@@ -597,6 +597,11 @@ int64_t march_now_ms(void);
  * possible with either code; callers loop on their own condition. */
 int march_sched_park_self_until(int64_t deadline_ms);
 
+/* sleep_ms(ms): park the calling green thread for at least ms, holding no
+ * scheduler thread.  The March-level sleep (retry backoff, test pacing); a
+ * program used to shell out to `sleep` for this, holding the thread. */
+void march_sleep_ms(int64_t ms);
+
 /* Like march_sched_recv, but bounded by a deadline (march_now_ms clock)
  * instead of blocking forever: holds the mailbox lock across BOTH the
  * emptiness check and the PROC_PARKED store (same discipline as

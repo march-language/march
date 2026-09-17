@@ -1,14 +1,13 @@
 -- Three-node harness scenario "fan": node-b hosts role B, which sends to C
--- at once (see node_a.march for the scenario). B = 3 connects to C = 2 on
--- MARCH_PORT_C.
+-- at once (see node_a.march for the scenario). B = 3 is the highest role, so
+-- it listens for nobody and dials C (FAN_C_ADDR); the runner works that out
+-- from the generated peer set.
 mod FanNodeB do
   needs IO
   needs IO.Console
   needs IO.Mut
   needs IO.NetConnect
   needs IO.NetListen
-  needs IO.Process
-  needs IO.Random
   needs IO.Spawn
   needs Session.Live
 
@@ -19,44 +18,15 @@ mod FanNodeB do
     C -> A : Bool
   end
 
-  pfn secret() do "fan-secret" end
-  pfn identity(name : String) do NodeIdentity.make(name, "pk-" ++ name, 1) end
-
-  pfn connect_retry(port : Int, name : String, attempts : Int) : Peer do
-    match ClusterConn.connect_split(PeerRegistry.empty(), "127.0.0.1", port, identity(name), secret()) do
-      Ok((_reg, p)) -> p
-      Err(e) ->
-        if attempts <= 1 do
-          panic(name ++ " connect: " ++ e)
-        else
-          let _ = Process.run("sleep", Cons("0.1", Nil))
-          connect_retry(port, name, attempts - 1)
-        end
-    end
-  end
-
-  pfn accept_on(listen_fd : Int, name : String) : Peer do
-    match ClusterConn.accept_split(PeerRegistry.empty(), listen_fd, identity(name), secret()) do
-      Ok((_reg, p)) -> p
-      Err(e) -> panic(name ++ " accept: " ++ e)
-    end
-  end
-
-  pfn listen_on(port : Int) : Int do
-    match tcp_listen(port) do
-      Ok(fd) -> fd
-      Err(e) -> panic("listen: " ++ e)
-    end
+  pfn role_b(s : Cap(Session.Live), st : Fan_B.S_send_Msg_B_C_1) : Fan_B.Yield do
+    println("B: sends 9")
+    Fan_B.close(s, Fan_B.send_Msg_B_C_1(s, st, 9))
   end
 
   fn main(c : Cap(IO)) do
-    let conn = connect_retry(Env.require_int("MARCH_PORT_C"), "node-b", 100)
-    let p0 = SessionNode.party(Fan_Msg.role_B(), "node-b", fn _ep -> println("B: closed"))
-    let p = SessionNode.require(SessionNode.connect_to(p0, Fan_Msg.role_C(), conn), Fan_Msg.peers_B())
-    let s = Session.attach(c, SessionNode.ops(p))
-    println("B: sends 9")
-    let _ = Fan_B.close(s, Fan_B.send_Msg_B_C_1(s, Fan_B.register(s, 0), 9))
-    SessionNode.serve(p)
-    SessionNode.finish(p)
+    match Fan_Run.run_B(c, "node-b", "fan-secret", Fan_Run.addrs_from_env(), fn (s, st) -> role_b(s, st)) do
+      Ok(_) -> println("B: closed")
+      Err(e) -> panic(SessionNode.run_error_message(e))
+    end
   end
 end

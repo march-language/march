@@ -1,7 +1,8 @@
-# `[P2]` The role runner: from a protocol and a role→address table to a running node
+# The role runner: from a protocol and a role→address table to a running node
 
 Filed 2026-09-16, after [[2026-09-16-session-node-multiparty-routing]] and its follow-ups
-shipped. This is the piece between "the compiler generates typed endpoints for every
+shipped; **shipped 2026-09-16** (see the last section for what landed and where it
+departs from the plan). This is the piece between "the compiler generates typed endpoints for every
 role" and "write the choreography and the nodes set themselves up": today every node
 hand-writes the same ~15 lines of wiring, and gets the connect direction, the join order
 and the `require` check right by copying the last one.
@@ -70,7 +71,7 @@ end
 ```march
 fn main(c : Cap(IO)) do
   match Fan_Run.run_C(c, "node-c", SessionNode.addrs_from_env("FAN"), fn (s, st) -> cons(s, st)) do
-    Ok(()) -> ()
+    Ok(_) -> ()
     Err(e) -> panic(SessionNode.run_error_message(e))
   end
 end
@@ -146,3 +147,46 @@ without it — `SessionNode`'s own endpoint actor already serializes a node's re
 - Resuming a session, or journaling messages to make that possible.
 - A generated supervisor or any cross-node restart coordination.
 - Hosting the runner's session in a user actor (phase 2, if a caller needs it).
+
+## Shipped (2026-09-16)
+
+Everything in the order of work, with these departures from the text above:
+
+- **`run` takes `secret`** (`run(io, my_role, peers, node_id, secret, addrs, on_close,
+  body)`), the cluster secret `ClusterConn`'s handshake needs; the node's identity is
+  derived from `node_id` the way every fixture already did. The generated wrapper is
+  `run_<Role>(io, node_id, secret, addrs, body)` and `<P>_Run.addrs_from_env()` supplies
+  the protocol's name and `<P>_Msg.role_names()` (new) to `SessionNode.addrs_from_env`.
+  Variables are upper-cased: `FAN_C_ADDR`.
+- **`RunError`** is `PeerGone(role, why) | Protocol(role, why) | Listen(port, why) |
+  Accept(why) | Connect(role, why)`. `Protocol` covers what the TRANSPORT cannot deliver
+  (a bad `Deliver` payload, an unexpected tag); a message the generated code cannot
+  decode still panics, because it runs inside the endpoint actor's turn where there is
+  no caller to return to. Making that an error would need the actor to catch a panic —
+  a different feature.
+- **How a survivor learns a peer is gone.** Readers report to the endpoint actor
+  (`Expect` the link count, one `LinkEnded` per reader) and `serve_outcome` waits on it
+  with a retained reply (`AwaitOutcome`, the NodeQueue `Wait` pattern), answered at the
+  FIRST failure or the last clean end. The survivor's other readers are still parked on
+  peers that are alive: they are ended with the new **`tcp_shutdown(fd)`** builtin
+  (`shutdown(2)` without close). A `close()` would not do: it silently drops the fd's
+  kqueue/epoll registration, so a waiter in `march_sched_wait_fd` never wakes, and a
+  process whose `main` returned with a reader still parked never exits (the scheduler
+  waits for every live proc). `SessionNode.serve` keeps its contract (a panic) on top of
+  `serve_outcome`; `run` maps the outcome.
+- **`sleep_ms(ms)`** (new builtin, `march_sched_park_self_until` in a loop) for the
+  connect-retry backoff (200 × 100 ms): the stdlib cannot shell out to `sleep` the way
+  the fixtures did, and there was no parking sleep at all.
+- **Missing addresses panic by role** before any socket opens, as planned; the check is
+  the pure `missing_addrs(my_role, peers, addrs)`, unit-tested with `dials`, `accepts`
+  and `parse_addr` in `test/stdlib/test_session_node.march` (registered in
+  `test/test_stdlib_march.ml`, which also had to load `session_node.march`).
+- **Witnesses.** `test/two_node/fan` rewritten on the runner, goldens unchanged (each
+  node prints its own "closed" line after `run` returns `Ok`, where `on_close` printed
+  it before); `test/two_node/gone` (new): node-b is SIGKILLed mid-session and node-a's
+  `run_A` returns `Err(PeerGone(2, _))` and the process exits. `Ok(())` is not a
+  pattern; the match is `Ok(_)`.
+- **A test seam.** `Desugar_endpoints.emit_runner` (a ref, on by default) lets
+  `test/test_endpoints.ml` typecheck generated code against its three-file stdlib, which
+  has no `SessionNode`; the `_Run` module's shape is asserted with it on, and the native
+  and two-node fixtures typecheck and run it for real.

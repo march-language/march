@@ -3095,6 +3095,13 @@ static void timer_service(int64_t now_ms) {
 /* Definition of march_sched_park_self_until is below, after g_preempt_active
  * is declared (Phase 5A) — the fallback path needs to read that flag. */
 
+/* See the header.  park_self_until may return early (a stray wake, a
+ * delivery to this proc), so loop on the clock. */
+void march_sleep_ms(int64_t ms) {
+    int64_t until = march_now_ms() + (ms > 0 ? ms : 0);
+    while (march_now_ms() < until) march_sched_park_self_until(until);
+}
+
 /* ── Phase 5A: signal-based preemption ───────────────────────────────── */
 
 /*

@@ -48,9 +48,15 @@
 -- anyone else is parked until the continuation that wants it is installed
 -- (`pending`). `suspend`'s expected role is 0 for "any", which is what a
 -- same-thread transport and a two-party session pass.
+--
+-- The role runner (`run`, at the end of this file) does all of the above
+-- from a role, its peer set and a role->address table, in the order that
+-- cannot deadlock; the generated `<P>_Run.run_<Role>` is its typed front.
+-- Design: specs/progress/2026-09-16-role-runner.md.
 mod SessionNode do
   needs IO.Mut
   needs IO.NetConnect
+  needs IO.NetListen
   needs IO.Spawn
 
   pfn budget() : Int do 4096 end
@@ -60,6 +66,11 @@ mod SessionNode do
   type Link = { role : Int, data_fd : Int, control_fd : Int, peer : GlobalPid.Pid,
                 q : (Pid(NodeQueue.WriterState), Int), control : Task(Int) }
 
+  -- The endpoint actor's state: the delivery count, and the readers'
+  -- outcomes `serve_outcome` waits on (see the actor below).
+  type EndpointState = { n : Int, links : Int, ended : Int, failed : List((Int, String)),
+                         waiters : List(List((Int, String)) -> Unit) }
+
   -- The whole session on this node. `handlers` holds the installed
   -- continuation per local endpoint and `waiting` the role each expects;
   -- `pending` holds deliveries that arrived before their continuation.
@@ -67,7 +78,7 @@ mod SessionNode do
   type Party = { my_role : Int, node_id : String,
                  handlers : Vault(Int -> Bytes -> Int -> Int), waiting : Vault(Int),
                  pending : Vault(List((Int, Bytes))), meta : Vault(Int),
-                 ep : Pid({ n : Int }), links : List(Link), on_close : Int -> Unit }
+                 ep : Pid(EndpointState), links : List(Link), on_close : Int -> Unit }
 
   pfn ekey(ep : Int) : String do "e" ++ int_to_string(ep) end
 
@@ -162,15 +173,60 @@ mod SessionNode do
     end
   end
 
-  -- The endpoint actor: a delivery's continuation runs in its turn.
+  -- The endpoint actor: a delivery's continuation runs in its turn. It also
+  -- collects the readers' outcomes for `serve` (`Expect` the link count,
+  -- then one `LinkEnded` per reader) and answers `AwaitOutcome` at the FIRST
+  -- failure or the last clean end, whichever comes first -- so a party whose
+  -- peer died is not stuck awaiting readers parked on peers still alive.
+  -- `failed` is empty for a clean end, else `(role, why)` per failed reader.
+  pfn settled(st : EndpointState) : Bool do
+    st.links > 0 && (st.ended >= st.links || List.length(st.failed) > 0)
+  end
+
+  pfn ep_state(n : Int, links : Int, ended : Int, failed : List((Int, String)),
+               waiters : List(List((Int, String)) -> Unit)) : EndpointState do
+    { n: n, links: links, ended: ended, failed: failed, waiters: waiters }
+  end
+
+  -- Handler ORDER is load-bearing: `Actor.call` routes a sentinel to the
+  -- handler at the sentinel's constructor index within its own type
+  -- (`EndpointReq`: `DeliverReq` = 0, `OutcomeReq` = 1), as in NodeQueue.
   actor Endpoint do
-    state { n : Int }
-    init  { n: 0 }
+    state { n : Int, links : Int, ended : Int, failed : List((Int, String)),
+            waiters : List(List((Int, String)) -> Unit) }
+    init  { n: 0, links: 0, ended: 0, failed: Nil, waiters: Nil }
     on Deliver(p : Party, ep : Int, from : Int, msg : Bytes) do
       let _ = deliver(p, ep, from, msg)
-      { n: state.n + 1 }
+      ep_state(state.n + 1, state.links, state.ended, state.failed, state.waiters)
+    end
+    on AwaitOutcome(reply_to) do
+      if settled(state) do
+        Actor.reply(reply_to, state.failed)
+        state
+      else
+        -- Held across turns: retained, and as the closure that answers it
+        -- (an Int-typed slot would tag the ref; see NodeQueue.Wait).
+        let r = actor_reply_retain(reply_to)
+        ep_state(state.n, state.links, state.ended, state.failed,
+                 Cons(fn out -> Actor.reply(r, out), state.waiters))
+      end
+    end
+    on Expect(links : Int) do
+      ep_state(state.n, links, state.ended, state.failed, state.waiters)
+    end
+    on LinkEnded(role : Int, why : String) do
+      let failed = if why == "" do state.failed else List.append(state.failed, Cons((role, why), Nil)) end
+      let st = ep_state(state.n, state.links, state.ended + 1, failed, state.waiters)
+      if settled(st) do
+        let _ = List.map(st.waiters, fn w -> w(st.failed))
+        ep_state(st.n, st.links, st.ended, st.failed, Nil)
+      else
+        st
+      end
     end
   end
+
+  type EndpointReq = DeliverReq | OutcomeReq
 
   -- ── hello: role + endpoint pid ──────────────────────────────────────────
 
@@ -428,33 +484,64 @@ mod SessionNode do
     end
   end
 
-  pfn serve_link(p : Party, l : Link) : Unit do
+  -- Read one peer to its end. "" is a clean end; anything else is why the
+  -- reader failed. Once a local endpoint has closed, a peer closing its data
+  -- connection (its Bye may still be in its writer) is a clean end.
+  pfn read_link(p : Party, l : Link) : String do
     match PeerReader.serve(l.data_fd, Nil, fn (tag, frame) -> on_frame(p, l, tag, frame)) do
-      Ok(_) -> ()
-      Err(e) ->
-        -- Once a local endpoint has closed, a peer closing its data
-        -- connection (its Bye may still be in its writer) is a clean end.
-        if Vault.get(p.meta, "closed") != None do () else panic("session_node: reader: " ++ e) end
+      Ok(_) -> ""
+      Err(e) -> if Vault.get(p.meta, "closed") != None do "" else e end
+    end
+  end
+
+  pfn await_outcome(p : Party) : List((Int, String)) do
+    match Actor.call(p.ep, OutcomeReq, 3600000) do
+      Ok(failed) -> failed
+      Err(_) -> await_outcome(p)
     end
   end
 
   doc """
-  Read deliveries from every peer until each one's endpoint closes. Every
-  resumption runs in this node's endpoint actor, so call it after driving the
-  local role to its first suspension.
+  Read deliveries from every peer until each one's endpoint closes, or until
+  the first reader fails before this node's endpoint closed: `Nil` for a
+  clean end, else `(role, why)` for each failed reader. Every resumption runs
+  in this node's endpoint actor, so call it after driving the local role to
+  its first suspension. `serve` is this with a panic on failure; `run` maps
+  the failure to a `RunError`.
+
+  On a failure the other readers are still parked on peers that are alive
+  and waiting; they are ended with `tcp_shutdown` (a close would not wake
+  them), so `finish` can follow at once and the process can exit.
   """
-  fn serve(p : Party) : Unit do
+  fn serve_outcome(p : Party) : List((Int, String)) do
     match p.links do
       -- One peer: read on this green thread, as the two-party transport
       -- always did.
-      Cons(single, Nil) -> serve_link(p, single)
+      Cons(single, Nil) ->
+        let why = read_link(p, single)
+        if why == "" do Nil else Cons((single.role, why), Nil) end
       _ ->
-        let tasks = List.map(p.links, fn l -> task_spawn(fn _ -> do
-          serve_link(p, l)
+        send(p.ep, Expect(List.length(p.links)))
+        let _ = List.map(p.links, fn l -> task_spawn(fn _ -> do
+          send(p.ep, LinkEnded(l.role, read_link(p, l)))
           0
         end))
-        let _ = List.map(tasks, fn t -> task_await(t))
-        ()
+        let failed = await_outcome(p)
+        match failed do
+          Nil -> ()
+          _ ->
+            let _ = List.map(p.links, fn l -> tcp_shutdown(l.data_fd))
+            ()
+        end
+        failed
+    end
+  end
+
+  doc "`serve_outcome`, panicking on a reader failure; the transport's original contract."
+  fn serve(p : Party) : Unit do
+    match serve_outcome(p) do
+      Nil -> ()
+      Cons((_, why), _) -> panic("session_node: reader: " ++ why)
     end
   end
 
@@ -468,5 +555,224 @@ mod SessionNode do
       0
     end)
     ()
+  end
+
+  -- ── the role runner ─────────────────────────────────────────────────────
+  -- Everything above, from a role, its peer set and an address table, in
+  -- the one order that cannot deadlock: connect to every LOWER role
+  -- (ascending), then accept every HIGHER one. Role 1 has nothing to connect
+  -- to, so it is accepting at once; role k connects only to roles below it,
+  -- each of which finished its own connects and is accepting. No node ever
+  -- waits on a node that is waiting on it.
+  --
+  -- Addresses are a runtime value; their SHAPE is checked here from what the
+  -- compiler knows (`peers_<R>()`): a role needs its own entry iff some peer
+  -- is above it, and an entry for every peer below it. A missing one fails
+  -- at startup, by role, before any socket opens.
+
+  -- Where a role listens: its own entry says where; a peer's entry says
+  -- where to dial it.
+  type Addr = { role : Int, host : String, port : Int }
+  type Addrs = List(Addr)
+
+  -- Why `run` ended other than by the protocol reaching its end. A session
+  -- is not resumable: a peer that is gone ends it for everyone, and `run`
+  -- returns rather than hanging on it. What to do next (run again: a fresh
+  -- party and fresh connections) is the caller's decision.
+  --
+  -- - `PeerGone(role, why)`: that peer's connection ended mid-session.
+  -- - `Protocol(role, why)`: that peer sent what this transport cannot
+  --   deliver (a message the generated code cannot decode still panics: it
+  --   runs inside the endpoint actor, where there is no caller to return to).
+  -- - `Listen(port, why)` / `Accept(why)` / `Connect(role, why)`: wiring.
+  type RunError = PeerGone(Int, String) | Protocol(Int, String) | Listen(Int, String) | Accept(String) | Connect(Int, String)
+
+  fn run_error_message(e : RunError) : String do
+    match e do
+      PeerGone(role, why) -> "session_node: role " ++ int_to_string(role) ++ " is gone: " ++ why
+      Protocol(role, why) -> "session_node: role " ++ int_to_string(role) ++ ": " ++ why
+      Listen(port, why) -> "session_node: listen on port " ++ int_to_string(port) ++ ": " ++ why
+      Accept(why) -> "session_node: accept: " ++ why
+      Connect(role, why) -> "session_node: connect to role " ++ int_to_string(role) ++ ": " ++ why
+    end
+  end
+
+  doc "The peers [my_role] dials: those below it, ascending (i < j: i listens, j connects)."
+  fn dials(my_role : Int, peers : List(Int)) : List(Int) do
+    List.sort_by(List.filter(peers, fn r -> r < my_role), fn (a, b) -> a < b)
+  end
+
+  doc "The peers [my_role] accepts: those above it."
+  fn accepts(my_role : Int, peers : List(Int)) : List(Int) do
+    List.filter(peers, fn r -> r > my_role)
+  end
+
+  fn addr_of(addrs : Addrs, role : Int) : Option(Addr) do
+    List.find(addrs, fn a -> a.role == role)
+  end
+
+  pfn has_addr(addrs : Addrs, role : Int) : Bool do
+    match addr_of(addrs, role) do
+      Some(_) -> true
+      None -> false
+    end
+  end
+
+  doc """
+  The roles [my_role] needs an address for and [addrs] lacks: every peer it
+  dials, and itself if it accepts anyone. Empty means `run` can start.
+  """
+  fn missing_addrs(my_role : Int, peers : List(Int), addrs : Addrs) : List(Int) do
+    let need = match accepts(my_role, peers) do
+      Nil -> dials(my_role, peers)
+      _ -> Cons(my_role, dials(my_role, peers))
+    end
+    List.filter(need, fn r -> has_addr(addrs, r) == false)
+  end
+
+  doc "Parse `host:port` into the entry for [role]."
+  fn parse_addr(role : Int, s : String) : Result(Addr, String) do
+    match String.split_first(s, ":") do
+      None -> Err("session_node: address " ++ s ++ " is not host:port")
+      Some((host, port_s)) ->
+        match String.to_int(port_s) do
+          Ok(port) -> Ok({ role: role, host: host, port: port })
+          Err(_) -> Err("session_node: address " ++ s ++ " has a bad port")
+        end
+    end
+  end
+
+  doc """
+  One entry per role from the environment: `<PREFIX>_<ROLE>_ADDR = host:port`
+  (upper-cased) for each `(name, index)` in [roles], the generated
+  `<P>_Msg.role_names()`. An unset variable is no entry, and `run` names the
+  roles it needed; a set one that does not parse panics. The generated
+  `<P>_Run.addrs_from_env()` passes the protocol's name and roles.
+  """
+  fn addrs_from_env(prefix : String, roles : List((String, Int))) : Addrs do
+    List.flat_map(roles, fn r -> match r do
+      (name, idx) ->
+        let key = String.to_uppercase(prefix ++ "_" ++ name ++ "_ADDR")
+        match process_env(key) do
+          None -> Nil
+          Some(v) ->
+            match parse_addr(idx, v) do
+              Ok(a) -> Cons(a, Nil)
+              Err(e) -> panic(e ++ " (" ++ key ++ ")")
+            end
+        end
+    end)
+  end
+
+  -- 200 attempts 100 ms apart: 20 s for a peer that is still starting.
+  pfn dial_retry(a : Addr, me, secret : String, attempts : Int) : Result(Peer, String) do
+    match ClusterConn.connect_split(PeerRegistry.empty(), a.host, a.port, me, secret) do
+      Ok((_reg, conn)) -> Ok(conn)
+      Err(e) ->
+        if attempts <= 1 do
+          Err(e)
+        else
+          sleep_ms(100)
+          dial_retry(a, me, secret, attempts - 1)
+        end
+    end
+  end
+
+  pfn dial_all(p : Party, roles : List(Int), addrs : Addrs, me, secret : String) : Result(Party, RunError) do
+    match roles do
+      Nil -> Ok(p)
+      Cons(r, rest) ->
+        match addr_of(addrs, r) do
+          None -> Err(Connect(r, "no address"))
+          Some(a) ->
+            match dial_retry(a, me, secret, 200) do
+              Err(e) -> Err(Connect(r, e))
+              Ok(conn) -> dial_all(connect_to(p, r, conn), rest, addrs, me, secret)
+            end
+        end
+    end
+  end
+
+  pfn last_role(links : List(Link)) : Int do
+    match links do
+      Nil -> 0
+      Cons(l, Nil) -> l.role
+      Cons(_, rest) -> last_role(rest)
+    end
+  end
+
+  -- Accept one connection per role in [expected], in whatever order they
+  -- arrive: the hello says which role it is. A role not expected, or seen
+  -- twice, is a wiring mistake and fails loudly.
+  pfn accept_all(p : Party, expected : List(Int), listen_fd : Int, me, secret : String) : Result(Party, RunError) do
+    match expected do
+      Nil -> Ok(p)
+      _ ->
+        match ClusterConn.accept_split(PeerRegistry.empty(), listen_fd, me, secret) do
+          Err(e) -> Err(Accept(e))
+          Ok((_reg, conn)) ->
+            let p2 = accept_from(p, conn)
+            let got = last_role(p2.links)
+            if List.member(expected, got) == false do
+              panic("session_node: role " ++ int_to_string(p.my_role) ++ " accepted a connection from role "
+                    ++ int_to_string(got) ++ " but expects role(s) " ++ show_roles(expected))
+            else () end
+            accept_all(p2, List.filter(expected, fn r -> r != got), listen_fd, me, secret)
+        end
+    end
+  end
+
+  pfn open_listener(my_role : Int, higher : List(Int), addrs : Addrs) : Result(Int, RunError) do
+    match higher do
+      Nil -> Ok(-1)
+      _ ->
+        match addr_of(addrs, my_role) do
+          None -> Ok(-1)   -- unreachable: missing_addrs was checked first
+          Some(a) ->
+            match tcp_listen(a.port) do
+              Ok(fd) -> Ok(fd)
+              Err(e) -> Err(Listen(a.port, e))
+            end
+        end
+    end
+  end
+
+  doc """
+  Run role [my_role] of a session on this node: listen if any peer is above
+  it, connect to every peer below it (ascending, with retry), accept every
+  peer above it, check the party against [peers] (`<P>_Msg.peers_<R>()`),
+  attach, run [body] to its first suspension, serve, and tear down. [addrs]
+  must hold this role's own entry iff it accepts anyone and an entry for
+  every peer it dials; a missing one panics by role before any socket opens.
+  [node_id] names this node in the handshake and [secret] is the cluster
+  secret every node shares. The generated `<P>_Run.run_<Role>` supplies the
+  role, its peers and the typed entry state.
+
+  `Ok(())` when every peer's endpoint closed; else the `RunError` that ended
+  the session, after the party has been torn down.
+  """
+  fn run(io : Cap(IO), my_role : Int, peers : List(Int), node_id : String, secret : String,
+         addrs : Addrs, on_close : Int -> Unit, body : Cap(Session.Live) -> Unit) : Result((), RunError) do
+    match missing_addrs(my_role, peers, addrs) do
+      Nil -> ()
+      missing -> panic("session_node: role " ++ int_to_string(my_role) ++ " needs an address for role(s) " ++ show_roles(missing))
+    end
+    let me = NodeIdentity.make(node_id, "pk-" ++ node_id, 1)
+    let higher = accepts(my_role, peers)
+    let? listen_fd = open_listener(my_role, higher, addrs)
+    let p0 = party(my_role, node_id, on_close)
+    let? p1 = dial_all(p0, dials(my_role, peers), addrs, me, secret)
+    let? p2 = accept_all(p1, higher, listen_fd, me, secret)
+    let p = require(p2, peers)
+    let s = Session.attach(io, ops(p))
+    body(s)
+    let failed = serve_outcome(p)
+    finish(p)
+    if listen_fd >= 0 do tcp_close(listen_fd) else () end
+    match failed do
+      Nil -> Ok(())
+      Cons((role, why), _) ->
+        if String.starts_with(why, "session_node:") do Err(Protocol(role, why)) else Err(PeerGone(role, why)) end
+    end
   end
 end

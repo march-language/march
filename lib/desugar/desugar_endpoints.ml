@@ -18,7 +18,11 @@
     - one module `Stream_Msg` holding the message type (one constructor per
       message or label), a `Json` codec over `Bytes`, and the role indices;
     - one module per role, `Stream_Prod`, `Stream_Cons`, …, holding one
-      [always_linear] type PER SESSION STATE and one function per transition.
+      [always_linear] type PER SESSION STATE and one function per transition;
+    - one module `Stream_Run` with `run_<Role>` per role: the typed front of
+      the stdlib role runner (`SessionNode.run`), which takes the role's body
+      from its entry state and does the listen/connect/accept wiring
+      (specs/progress/2026-09-16-role-runner.md).
 
     States as nominal linear types is what makes this cheap: the ORDINARY
     typechecker then enforces protocol order (only the transition taking the
@@ -402,11 +406,22 @@ let msg_module (errors : Err.ctx) ~proto ~span (ctors : (string * ty) list) (rol
   let int_list rs = List.fold_right (fun r acc -> con "Cons" [ lit_int (index_of r); acc ]) rs (con "Nil" []) in
   (* `peers_<R>()`: the role indices [R] exchanges a message with; see [peers_of]. *)
   let peer_fns = List.map (fun (r, ps) -> fn ("peers_" ^ r) [] (tycon "List" [ t_int ]) (int_list ps)) peers in
-  DMod (n mname, Public, (msg_decl :: json_fns) @ [ encode; decode ] @ role_fns @ peer_fns, sp)
+  (* `role_names()`: every role's name with its index, for
+     `SessionNode.addrs_from_env`, which reads `<P>_<ROLE>_ADDR` per role. *)
+  let role_names =
+    fn "role_names" [] (tycon "List" [ TyTuple [ t_string; t_int ] ])
+      (List.fold_right
+         (fun r acc -> con "Cons" [ ETuple ([ lit_str r; lit_int (index_of r) ], sp); acc ])
+         roles (con "Nil" []))
+  in
+  DMod (n mname, Public, (msg_decl :: json_fns) @ [ encode; decode ] @ role_fns @ peer_fns @ [ role_names ], sp)
 
 (** `<P>_<Role>`: one [always_linear] type per state and one function per
-    transition, plus the unforgeable [Yield]. *)
-let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors : int) (role : string) (root : lty) : decl =
+    transition, plus the unforgeable [Yield].  Also returns the name of the
+    role's ENTRY state (what `register` yields), which `<P>_Run` types the
+    role's body by. *)
+let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors : int) (role : string) (root : lty)
+    : decl * string =
   let mname = proto ^ "_" ^ role in
   let msg = proto ^ "_Msg" in
   let names = state_names root in
@@ -627,7 +642,61 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
      the dependency itself rather than leaning on the enclosing module's
      manifest -- the capability checker asks each module for its own. *)
   let needs = DNeeds ([ ([ n "Session"; n "Live" ], None) ], sp) in
-  DMod (n mname, Public, (needs :: secret :: yield_ty :: state_types) @ (register :: transitions) @ event_api, sp)
+  (DMod (n mname, Public, (needs :: secret :: yield_ty :: state_types) @ (register :: transitions) @ event_api, sp), entry)
+
+(** `<P>_Run`: the role runner's typed front.  Per role,
+
+      run_<Role>(io, node_id, secret, addrs, body) : Result((), SessionNode.RunError)
+
+    where [body] takes the session capability and the role's ENTRY state (so
+    a body written for another role, or for another point of this one, is a
+    type error) and `addrs_from_env()` reads `<P>_<ROLE>_ADDR` per role.  The
+    wiring itself -- who listens, who dials, in what order, the `require`
+    check -- is `SessionNode.run`, a stdlib function: it names no protocol
+    constructor, so nothing about it needs generating, only these types.
+    Design: specs/progress/2026-09-16-role-runner.md. *)
+let run_module ~proto ~(roles : (string * string) list) : decl =
+  let mname = proto ^ "_Run" in
+  let msg = proto ^ "_Msg" in
+  let t_unit = TyTuple [] in
+  let unit = ETuple ([], sp) in
+  let t_addrs = tycon "SessionNode.Addrs" [] in
+  let runners =
+    List.map
+      (fun (role, entry) ->
+         let rm = proto ^ "_" ^ role in
+         let t_body = TyArrow (t_cap_session, TyArrow (tycon (rm ^ "." ^ entry) [], tycon (rm ^ ".Yield") [])) in
+         fn ("run_" ^ role)
+           [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node_id", t_string); ("secret", t_string);
+             ("addrs", t_addrs); ("body", t_body) ]
+           (tycon "Result" [ t_unit; tycon "SessionNode.RunError" [] ])
+           (app "SessionNode.run"
+              [ var "io"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) []; var "node_id";
+                var "secret"; var "addrs"; lam [ "_ep" ] unit;
+                lam [ "s" ]
+                  (block [ let_wild (app "body" [ var "s"; app (rm ^ ".register") [ var "s"; lit_int 0 ] ]); unit ]) ]))
+      roles
+  in
+  let addrs =
+    fn "addrs_from_env" [] t_addrs (app "SessionNode.addrs_from_env" [ lit_str proto; app (msg ^ ".role_names") [] ])
+  in
+  (* What `SessionNode.run` needs; declared here so the capability checker,
+     which asks each module for its own, sees them on the generated module. *)
+  let needs =
+    DNeeds
+      ( List.map (fun path -> (List.map n path, None))
+          [ [ "IO" ]; [ "IO"; "Mut" ]; [ "IO"; "NetConnect" ]; [ "IO"; "NetListen" ]; [ "IO"; "Spawn" ];
+            [ "Session"; "Live" ] ],
+        sp )
+  in
+  DMod (n mname, Public, needs :: addrs :: runners, sp)
+
+(** Whether [expand] emits `<P>_Run`.  On for every real compile.  A test that
+    typechecks generated code against a thin stdlib without `SessionNode`
+    turns it off (test/test_endpoints.ml); the module's shape is asserted
+    there with it on, and the native and two-node fixtures typecheck it for
+    real. *)
+let emit_runner = ref true
 
 (** Every generated declaration for the `@[endpoints]` protocols in [decls],
     or [] -- the common case -- when there are none.  Generated functions are
@@ -658,6 +727,10 @@ let expand (errors : Err.ctx) (decls : decl list) : decl list =
                        (project ~proto ~multiparty steps role LEnd))
                   roles
               in
-              List.map respan_mod (msg :: role_mods)))
+              let run =
+                if !emit_runner then [ run_module ~proto ~roles:(List.map2 (fun r (_, e) -> (r, e)) roles role_mods) ]
+                else []
+              in
+              List.map respan_mod ((msg :: List.map fst role_mods) @ run)))
       | _ -> [])
     decls
