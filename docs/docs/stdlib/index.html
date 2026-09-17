@@ -1492,6 +1492,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="NativeArray.html#fn-set_i32"><span class="sb-kind" style="color:var(--fn)">F</span>set_i32</a>
 <a class="sl" href="NativeArray.html#fn-set_int"><span class="sb-kind" style="color:var(--fn)">F</span>set_int</a>
 <a class="sl" href="NativeArray.html#fn-set_u8"><span class="sb-kind" style="color:var(--fn)">F</span>set_u8</a>
+<a class="sl" href="NativeArray.html#fn-sort_int"><span class="sb-kind" style="color:var(--fn)">F</span>sort_int</a>
 <a class="sl" href="NativeArray.html#fn-sum_f32"><span class="sb-kind" style="color:var(--fn)">F</span>sum_f32</a>
 <a class="sl" href="NativeArray.html#fn-sum_float"><span class="sb-kind" style="color:var(--fn)">F</span>sum_float</a>
 <a class="sl" href="NativeArray.html#fn-sum_i32"><span class="sb-kind" style="color:var(--fn)">F</span>sum_i32</a>
@@ -1944,11 +1945,30 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Session.html#fn-register"><span class="sb-kind" style="color:var(--fn)">F</span>register</a>
 <a class="sl" href="Session.html#fn-suspend"><span class="sb-kind" style="color:var(--fn)">F</span>suspend</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="SessionNode.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="SessionNode.html">SessionNode</a></div><div class="sb-sub"><a class="sl" href="SessionNode.html#type-Link"><span class="sb-kind" style="color:var(--ty)">T</span>Link</a>
+<a class="sl" href="SessionNode.html#type-EndpointState"><span class="sb-kind" style="color:var(--ty)">T</span>EndpointState</a>
+<a class="sl" href="SessionNode.html#type-Party"><span class="sb-kind" style="color:var(--ty)">T</span>Party</a>
+<a class="sl" href="SessionNode.html#type-EndpointReq"><span class="sb-kind" style="color:var(--ty)">T</span>EndpointReq</a>
+<a class="sl" href="SessionNode.html#type-Addr"><span class="sb-kind" style="color:var(--ty)">T</span>Addr</a>
+<a class="sl" href="SessionNode.html#type-Addrs"><span class="sb-kind" style="color:var(--ty)">T</span>Addrs</a>
+<a class="sl" href="SessionNode.html#type-RunError"><span class="sb-kind" style="color:var(--ty)">T</span>RunError</a>
+<a class="sl" href="SessionNode.html#fn-accept_from"><span class="sb-kind" style="color:var(--fn)">F</span>accept_from</a>
+<a class="sl" href="SessionNode.html#fn-accepts"><span class="sb-kind" style="color:var(--fn)">F</span>accepts</a>
+<a class="sl" href="SessionNode.html#fn-addr_of"><span class="sb-kind" style="color:var(--fn)">F</span>addr_of</a>
+<a class="sl" href="SessionNode.html#fn-addrs_from_env"><span class="sb-kind" style="color:var(--fn)">F</span>addrs_from_env</a>
+<a class="sl" href="SessionNode.html#fn-connect_to"><span class="sb-kind" style="color:var(--fn)">F</span>connect_to</a>
+<a class="sl" href="SessionNode.html#fn-deliver"><span class="sb-kind" style="color:var(--fn)">F</span>deliver</a>
+<a class="sl" href="SessionNode.html#fn-dials"><span class="sb-kind" style="color:var(--fn)">F</span>dials</a>
 <a class="sl" href="SessionNode.html#fn-finish"><span class="sb-kind" style="color:var(--fn)">F</span>finish</a>
-<a class="sl" href="SessionNode.html#fn-fire"><span class="sb-kind" style="color:var(--fn)">F</span>fire</a>
+<a class="sl" href="SessionNode.html#fn-missing_addrs"><span class="sb-kind" style="color:var(--fn)">F</span>missing_addrs</a>
 <a class="sl" href="SessionNode.html#fn-open"><span class="sb-kind" style="color:var(--fn)">F</span>open</a>
 <a class="sl" href="SessionNode.html#fn-ops"><span class="sb-kind" style="color:var(--fn)">F</span>ops</a>
-<a class="sl" href="SessionNode.html#fn-serve"><span class="sb-kind" style="color:var(--fn)">F</span>serve</a></div></div>
+<a class="sl" href="SessionNode.html#fn-parse_addr"><span class="sb-kind" style="color:var(--fn)">F</span>parse_addr</a>
+<a class="sl" href="SessionNode.html#fn-party"><span class="sb-kind" style="color:var(--fn)">F</span>party</a>
+<a class="sl" href="SessionNode.html#fn-require"><span class="sb-kind" style="color:var(--fn)">F</span>require</a>
+<a class="sl" href="SessionNode.html#fn-run"><span class="sb-kind" style="color:var(--fn)">F</span>run</a>
+<a class="sl" href="SessionNode.html#fn-run_error_message"><span class="sb-kind" style="color:var(--fn)">F</span>run_error_message</a>
+<a class="sl" href="SessionNode.html#fn-serve"><span class="sb-kind" style="color:var(--fn)">F</span>serve</a>
+<a class="sl" href="SessionNode.html#fn-serve_outcome"><span class="sb-kind" style="color:var(--fn)">F</span>serve_outcome</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Set.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Set.html">Set</a></div><div class="sb-sub"><a class="sl" href="Set.html#type-SEntry"><span class="sb-kind" style="color:var(--ty)">T</span>SEntry</a>
 <a class="sl" href="Set.html#type-Set"><span class="sb-kind" style="color:var(--ty)">T</span>Set</a>
 <a class="sl" href="Set.html#fn-contains"><span class="sb-kind" style="color:var(--fn)">F</span>contains</a>
@@ -2489,7 +2509,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a href="Membership.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Membership</h3><p>Membership: SWIM-style cluster membership with a CRDT member view (P1 L3).</p><div class="st"><span>10 functions</span><span>3 types</span></div></div></a>
 <a href="Merkle.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Merkle</h3><p>Merkle: content-addressed hash tree.</p><div class="st"><span>9 functions</span><span>1 types</span></div></div></a>
 <a href="Msgpack.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Msgpack</h3><p>Msgpack module: MessagePack binary serialization.</p><div class="st"><span>10 functions</span><span>1 types</span></div></div></a>
-<a href="NativeArray.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NativeArray</h3><p>NativeArray — flat numeric arrays for high-performance numeric loops.</p><div class="st"><span>59 functions</span><span>0 types</span></div></div></a>
+<a href="NativeArray.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NativeArray</h3><p>NativeArray — flat numeric arrays for high-performance numeric loops.</p><div class="st"><span>60 functions</span><span>0 types</span></div></div></a>
 <a href="NetFrame.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NetFrame</h3><p>NetFrame: length-prefixed framing for the distributed net-kernel transport.</p><div class="st"><span>3 functions</span><span>0 types</span></div></div></a>
 <a href="NetKernel.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NetKernel</h3><p>NetKernel: the socket-level transport for distributed OTP (P1).</p><div class="st"><span>18 functions</span><span>0 types</span></div></div></a>
 <a href="Node.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Node</h3><p>Node: the typed remote send (distributed actors, last piece of 1/4).</p><div class="st"><span>7 functions</span><span>0 types</span></div></div></a>
@@ -2521,7 +2541,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a href="Scheduler.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Scheduler</h3><p>Scheduler: runtime observability for the actor/task scheduler.</p><div class="st"><span>5 functions</span><span>0 types</span></div></div></a>
 <a href="Seq.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Seq</h3><p>Seq module: lazy fold-based sequences (church-encoded).</p><div class="st"><span>27 functions</span><span>2 types</span></div></div></a>
 <a href="Session.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Session</h3><div class="st"><span>5 functions</span><span>1 types</span></div></div></a>
-<a href="SessionNode.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>SessionNode</h3><p>SessionNode: the `Session.Ops` network transport. A protocol's</p><div class="st"><span>5 functions</span><span>1 types</span></div></div></a>
+<a href="SessionNode.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>SessionNode</h3><p>SessionNode: the `Session.Ops` network transport. A protocol's</p><div class="st"><span>18 functions</span><span>7 types</span></div></div></a>
 <a href="Set.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Set</h3><p>Set module: persistent hash-array-mapped-trie set.</p><div class="st"><span>15 functions</span><span>2 types</span></div></div></a>
 <a href="Sigil.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Sigil</h3><p>Sigil module: handlers for sigil expressions (~R, ~J, etc.)</p><div class="st"><span>4 functions</span><span>0 types</span></div></div></a>
 <a href="Signal.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Signal</h3><p>Signal module: register deferred handlers for OS signals.</p><div class="st"><span>3 functions</span><span>1 types</span></div></div></a>

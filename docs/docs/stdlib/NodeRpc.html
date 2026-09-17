@@ -1492,6 +1492,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="NativeArray.html#fn-set_i32"><span class="sb-kind" style="color:var(--fn)">F</span>set_i32</a>
 <a class="sl" href="NativeArray.html#fn-set_int"><span class="sb-kind" style="color:var(--fn)">F</span>set_int</a>
 <a class="sl" href="NativeArray.html#fn-set_u8"><span class="sb-kind" style="color:var(--fn)">F</span>set_u8</a>
+<a class="sl" href="NativeArray.html#fn-sort_int"><span class="sb-kind" style="color:var(--fn)">F</span>sort_int</a>
 <a class="sl" href="NativeArray.html#fn-sum_f32"><span class="sb-kind" style="color:var(--fn)">F</span>sum_f32</a>
 <a class="sl" href="NativeArray.html#fn-sum_float"><span class="sb-kind" style="color:var(--fn)">F</span>sum_float</a>
 <a class="sl" href="NativeArray.html#fn-sum_i32"><span class="sb-kind" style="color:var(--fn)">F</span>sum_i32</a>
@@ -1944,11 +1945,30 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Session.html#fn-register"><span class="sb-kind" style="color:var(--fn)">F</span>register</a>
 <a class="sl" href="Session.html#fn-suspend"><span class="sb-kind" style="color:var(--fn)">F</span>suspend</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="SessionNode.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="SessionNode.html">SessionNode</a></div><div class="sb-sub"><a class="sl" href="SessionNode.html#type-Link"><span class="sb-kind" style="color:var(--ty)">T</span>Link</a>
+<a class="sl" href="SessionNode.html#type-EndpointState"><span class="sb-kind" style="color:var(--ty)">T</span>EndpointState</a>
+<a class="sl" href="SessionNode.html#type-Party"><span class="sb-kind" style="color:var(--ty)">T</span>Party</a>
+<a class="sl" href="SessionNode.html#type-EndpointReq"><span class="sb-kind" style="color:var(--ty)">T</span>EndpointReq</a>
+<a class="sl" href="SessionNode.html#type-Addr"><span class="sb-kind" style="color:var(--ty)">T</span>Addr</a>
+<a class="sl" href="SessionNode.html#type-Addrs"><span class="sb-kind" style="color:var(--ty)">T</span>Addrs</a>
+<a class="sl" href="SessionNode.html#type-RunError"><span class="sb-kind" style="color:var(--ty)">T</span>RunError</a>
+<a class="sl" href="SessionNode.html#fn-accept_from"><span class="sb-kind" style="color:var(--fn)">F</span>accept_from</a>
+<a class="sl" href="SessionNode.html#fn-accepts"><span class="sb-kind" style="color:var(--fn)">F</span>accepts</a>
+<a class="sl" href="SessionNode.html#fn-addr_of"><span class="sb-kind" style="color:var(--fn)">F</span>addr_of</a>
+<a class="sl" href="SessionNode.html#fn-addrs_from_env"><span class="sb-kind" style="color:var(--fn)">F</span>addrs_from_env</a>
+<a class="sl" href="SessionNode.html#fn-connect_to"><span class="sb-kind" style="color:var(--fn)">F</span>connect_to</a>
+<a class="sl" href="SessionNode.html#fn-deliver"><span class="sb-kind" style="color:var(--fn)">F</span>deliver</a>
+<a class="sl" href="SessionNode.html#fn-dials"><span class="sb-kind" style="color:var(--fn)">F</span>dials</a>
 <a class="sl" href="SessionNode.html#fn-finish"><span class="sb-kind" style="color:var(--fn)">F</span>finish</a>
-<a class="sl" href="SessionNode.html#fn-fire"><span class="sb-kind" style="color:var(--fn)">F</span>fire</a>
+<a class="sl" href="SessionNode.html#fn-missing_addrs"><span class="sb-kind" style="color:var(--fn)">F</span>missing_addrs</a>
 <a class="sl" href="SessionNode.html#fn-open"><span class="sb-kind" style="color:var(--fn)">F</span>open</a>
 <a class="sl" href="SessionNode.html#fn-ops"><span class="sb-kind" style="color:var(--fn)">F</span>ops</a>
-<a class="sl" href="SessionNode.html#fn-serve"><span class="sb-kind" style="color:var(--fn)">F</span>serve</a></div></div>
+<a class="sl" href="SessionNode.html#fn-parse_addr"><span class="sb-kind" style="color:var(--fn)">F</span>parse_addr</a>
+<a class="sl" href="SessionNode.html#fn-party"><span class="sb-kind" style="color:var(--fn)">F</span>party</a>
+<a class="sl" href="SessionNode.html#fn-require"><span class="sb-kind" style="color:var(--fn)">F</span>require</a>
+<a class="sl" href="SessionNode.html#fn-run"><span class="sb-kind" style="color:var(--fn)">F</span>run</a>
+<a class="sl" href="SessionNode.html#fn-run_error_message"><span class="sb-kind" style="color:var(--fn)">F</span>run_error_message</a>
+<a class="sl" href="SessionNode.html#fn-serve"><span class="sb-kind" style="color:var(--fn)">F</span>serve</a>
+<a class="sl" href="SessionNode.html#fn-serve_outcome"><span class="sb-kind" style="color:var(--fn)">F</span>serve_outcome</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Set.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Set.html">Set</a></div><div class="sb-sub"><a class="sl" href="Set.html#type-SEntry"><span class="sb-kind" style="color:var(--ty)">T</span>SEntry</a>
 <a class="sl" href="Set.html#type-Set"><span class="sb-kind" style="color:var(--ty)">T</span>Set</a>
 <a class="sl" href="Set.html#fn-contains"><span class="sb-kind" style="color:var(--fn)">F</span>contains</a>
