@@ -148,6 +148,14 @@ tick rather than at `poll()`'s return, which was enough to change the order. The
 events are now separate flags, in either order. Not a runtime bug, but found by this
 change: it reproduced 1/3 in the Linux container.
 
+The same scenario had a second order dependence that only ASAN's slowdown exposed (the
+sanitize gate, 1 of 7 scenarios): node-b replied to the sync at once, node-a ended the
+session on that reply and closed, and node-b then saw the close before its own SWIM view
+had flipped node-a to Alive — so "Alive again" was never printed. node-b now holds its
+reply until it has seen node-a Alive, which makes its print causally precede node-a's
+close. Both of these were hand-written phase machines assuming an order the network never
+promised; the parked reads changed the timing, they did not create the assumption.
+
 ### The measurements that decide it
 
 - **`test/test_scheduler_fdwait.c`**, built at `-DMARCH_NUM_SCHEDULERS=1` on purpose:
