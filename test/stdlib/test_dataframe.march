@@ -1095,4 +1095,101 @@ describe "col_describe on zero-row frames" do
   end
 end
 
+-- ── col_z_score / col_normalize: zero-row columns ──────────────────────────
+-- The same shape as col_describe above, at the two remaining unguarded
+-- Stats.* call sites. Both return a zero-row FloatCol rather than an Err: that
+-- is the n = 0 instance of the zero-variance / zero-range case each function
+-- already had, which returns a same-length all-zeros column.
+-- specs/progress/2026-09-17-dataframe-z-score-normalize-zero-rows.md
+describe "col_z_score and col_normalize on zero-row columns" do
+  test "z-score of a zero-row Int column is a zero-row FloatCol" do
+    let df = DataFrame.make_df([IntCol("x", native_int_arr_from_list([1, 2]))])
+    let empty = DataFrame.head(df, 0)
+    match DataFrame.get_column(empty, "x") do
+    Ok(c) ->
+      match DataFrame.col_z_score(c) do
+      Ok(FloatCol(nm, data)) -> do
+        assert (nm == "x")
+        assert (native_float_arr_length(data) == 0)
+        end
+      _ -> assert false
+      end
+    Err(_) -> assert false
+    end
+  end
+
+  test "z-score of a zero-row Float column is a zero-row FloatCol" do
+    let df = DataFrame.make_df([FloatCol("y", native_float_arr_from_list([1.0, 2.0]))])
+    let empty = DataFrame.head(df, 0)
+    match DataFrame.get_column(empty, "y") do
+    Ok(c) ->
+      match DataFrame.col_z_score(c) do
+      Ok(FloatCol(nm, data)) -> do
+        assert (nm == "y")
+        assert (native_float_arr_length(data) == 0)
+        end
+      _ -> assert false
+      end
+    Err(_) -> assert false
+    end
+  end
+
+  test "normalize of a zero-row Int column is a zero-row FloatCol" do
+    let df = DataFrame.make_df([IntCol("x", native_int_arr_from_list([1, 2]))])
+    let empty = DataFrame.head(df, 0)
+    match DataFrame.get_column(empty, "x") do
+    Ok(c) ->
+      match DataFrame.col_normalize(c) do
+      Ok(FloatCol(nm, data)) -> do
+        assert (nm == "x")
+        assert (native_float_arr_length(data) == 0)
+        end
+      _ -> assert false
+      end
+    Err(_) -> assert false
+    end
+  end
+
+  test "normalize of a zero-row Float column is a zero-row FloatCol" do
+    let df = DataFrame.make_df([FloatCol("y", native_float_arr_from_list([1.0, 2.0]))])
+    let empty = DataFrame.head(df, 0)
+    match DataFrame.get_column(empty, "y") do
+    Ok(c) ->
+      match DataFrame.col_normalize(c) do
+      Ok(FloatCol(nm, data)) -> do
+        assert (nm == "y")
+        assert (native_float_arr_length(data) == 0)
+        end
+      _ -> assert false
+      end
+    Err(_) -> assert false
+    end
+  end
+
+  -- Controls: the guard must not have changed the populated paths.
+  test "non-empty z-score still normalizes" do
+    let c = FloatCol("y", native_float_arr_from_list([1.0, 2.0, 3.0]))
+    match DataFrame.col_z_score(c) do
+    Ok(FloatCol(_, data)) -> do
+      assert (native_float_arr_length(data) == 3)
+      assert (native_float_arr_get(data, 1) == 0.0)
+      end
+    _ -> assert false
+    end
+  end
+
+  test "non-empty normalize still maps to [0, 1]" do
+    let c = FloatCol("y", native_float_arr_from_list([1.0, 3.0]))
+    match DataFrame.col_normalize(c) do
+    Ok(FloatCol(_, data)) -> do
+      assert (native_float_arr_length(data) == 2)
+      assert (native_float_arr_get(data, 0) == 0.0)
+      assert (native_float_arr_get(data, 1) == 1.0)
+      end
+    _ -> assert false
+    end
+  end
+end
+
+
 end -- mod TestDataFrame
