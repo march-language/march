@@ -400,6 +400,13 @@ git log is authoritative for exact commits.
   nothing when unset.
 
 ### Fixed
+- **`NativeArray.fold_float` no longer leaks two Float boxes per call
+  (compiled).** A fold boxed its initial accumulator at the call site and
+  returned a boxed result, and neither was released — two live objects per
+  call, independent of the array's length. The per-element boxing inside the
+  fold loop was already released and is unaffected. `fold_f32` had the same
+  leak; `fold_int` wire-tags instead of boxing and never did.
+
 - **A green thread waiting on a socket no longer holds its scheduler thread.** `tcp_accept`,
   `Socket.recv`, `Socket.recv_timeout`, `tcp_recv_all` and `tcp_recv_exact` now park the
   green thread until the socket is ready (`march_sched_wait_fd`, a kqueue/epoll poller the

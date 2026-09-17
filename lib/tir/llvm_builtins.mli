@@ -63,6 +63,12 @@ val is_builtin_fn : string -> bool
 val builtin_ret_ty : string -> Tir.ty option
 val builtin_boxed_generic_params_tbl : (string, int list) Hashtbl.t
 val builtin_param_is_boxed_generic : string -> int -> bool
+
+(** True iff this builtin's declared `ptr` return is a freshly allocated box
+    the caller owns, so a call site that unboxes it to a scalar must release
+    it. An allowlist — see the table's comment for why the shape alone is not
+    sufficient. *)
+val builtin_owned_boxed_return : string -> bool
 val builtin_param_llvm_tys : string -> string list option
 val reset_called_syms : unit -> unit
 val called_c_symbols : unit -> string list

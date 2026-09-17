@@ -24,7 +24,7 @@ section) and is closed.
 | closure capturing a `String`, **applied once** | 0.0001 | **flat** (control) |
 | closure capturing a `String`, **never applied** | **1.0001** | **LIVE — §A** |
 | `Array.set` into the TRIE | **2.997** | **LIVE — §B** |
-| `NativeArray.fold_float` | **2.0 per call** | **LIVE — §C** |
+| `NativeArray.fold_float` | **2.0 per call** | ~~LIVE~~ **LANDED 2026-09-16 — §C** |
 | fire-and-forget `task_spawn`, drained | 0.0002 | **not a leak — §D** |
 
 Everything in the flat rows is a shape one of these todos names as leaking. They
@@ -166,6 +166,15 @@ walks.
 
 ## §C. `NativeArray.fold_float` leaks exactly 2 objects per call
 
+> **LANDED 2026-09-16** —
+> `specs/progress/2026-09-16-fold-boundary-float-boxes-released.md`.
+> `fold_float` and `fold_f32` measure 0.0005 per call, down from 2.0005, with
+> `fold_int` flat throughout as the control. The design below was followed with
+> one correction: the accumulator half is fixed in the RUNTIME
+> (`fold_release_prev_acc` honouring the owned convention it is declared under)
+> rather than at the call site, because the caller transfers that box; only the
+> RETURN half is a call-site release. Kept as written for the record.
+
 New, found while re-measuring. Not in any todo.
 
 ### Measured
@@ -253,8 +262,7 @@ not retention.
 
 ## Suggested order
 
-1. **§C** — small, self-contained, and the ownership question is already
-   settled by the SIMD fix; good warm-up that exercises the ASAN gate.
+1. ~~**§C**~~ — **done 2026-09-16.**
 2. **§A** — the keystone, and the only one that needs a new analysis. Measure
    the admit rate first and let that decide whether the conservative
    syntactic gate is enough.

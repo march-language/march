@@ -8534,7 +8534,23 @@ void *march_typed_array_filter(void *arr, void *mask) {
  * A boxed Float is the exception: the apply fn unboxes it in its prologue and
  * never releases the box, and every Float coming out of an apply fn is a FRESH
  * box (re-boxed on return by march_alloc_float), so a Float [prev] that is not
- * [result] is still solely ours. [acc] is left alone as before.
+ * [result] is still solely ours.
+ *
+ * [acc] used to be excluded here too, on the intuition that the fold's INITIAL
+ * accumulator belongs to the caller. It does not: every one of these helpers
+ * is classified in [extern_owned_builtins], so the caller TRANSFERS its
+ * reference, and the call site's boxed-generic-param coercion
+ * (Llvm_builtins.builtin_boxed_generic_params_tbl) makes that box FRESH at
+ * every call -- `fold_float(a, 0.0, f)` emits a march_alloc_float whose only
+ * owner is the call. Excluding it leaked exactly one box per call, independent
+ * of length (4/16/64/256 elements all grew by the same amount over 2,000
+ * calls), which is what gave the leak away as a boundary cost rather than a
+ * per-element one. Dropping the exclusion makes the helper honour the owned
+ * convention it is declared under. A zero-length fold never enters the loop,
+ * so [acc] is handed straight back as [result] and the caller releases it
+ * once; the [prev == result] guard covers a closure that returns its
+ * accumulator argument unchanged. See
+ * specs/todos/2026-09-16-native-float-arr-fold-leaks-two-boxes-per-call.md.
  *
  * Pinned by test/native/native_arr_fold_acc_leak_probe.march: the Float and
  * String accumulator legs (leak direction) and the identity + element-alias
@@ -8544,8 +8560,8 @@ static inline int fold_acc_is_float(void *prev) {
 }
 
 static inline void fold_release_prev_acc(void *prev, int prev_is_float,
-                                         void *result, void *acc) {
-    if (!prev_is_float || prev == result || prev == acc) return;
+                                         void *result) {
+    if (!prev_is_float || prev == result) return;
     march_decrc(prev);
 }
 
@@ -8569,7 +8585,7 @@ void *march_typed_array_fold(void *arr, void *acc, void *f) {
          * return a reference this loop owns. */
         march_clo_arg_retain(elem);
         result = call_closure_2(f, prev, elem);
-        fold_release_prev_acc(prev, prev_is_float, result, acc);
+        fold_release_prev_acc(prev, prev_is_float, result);
     }
     march_decrc(f);
     return result;
@@ -8848,7 +8864,7 @@ void *native_int_arr_fold(void *acc, void *arr, void *f) {
         int prev_is_float = fold_acc_is_float(prev);
         march_incrc(f);
         result = call_closure_2(f, prev, elem);
-        fold_release_prev_acc(prev, prev_is_float, result, acc);
+        fold_release_prev_acc(prev, prev_is_float, result);
     }
     march_decrc(f);
     return result;
@@ -9069,7 +9085,7 @@ void *native_float_arr_fold(void *acc, void *arr, void *f) {
         march_incrc(f);
         result = call_closure_2(f, prev, elem);
         march_decrc(elem);
-        fold_release_prev_acc(prev, prev_is_float, result, acc);
+        fold_release_prev_acc(prev, prev_is_float, result);
     }
     march_decrc(f);
     return result;
@@ -9202,7 +9218,7 @@ void *PREFIX##_fold(void *acc, void *arr, void *f) {                         \
         int prev_is_float = fold_acc_is_float(prev);                         \
         march_incrc(f);                                                      \
         result = call_closure_2(f, prev, elem);                              \
-        fold_release_prev_acc(prev, prev_is_float, result, acc);             \
+        fold_release_prev_acc(prev, prev_is_float, result);             \
     }                                                                        \
     march_decrc(f);                                                          \
     return result;                                                           \
@@ -9334,7 +9350,7 @@ void *native_f32_arr_fold(void *acc, void *arr, void *f) {
         march_incrc(f);
         result = call_closure_2(f, prev, elem);
         march_decrc(elem);
-        fold_release_prev_acc(prev, prev_is_float, result, acc);
+        fold_release_prev_acc(prev, prev_is_float, result);
     }
     march_decrc(f);
     return result;

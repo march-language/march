@@ -137,6 +137,10 @@ native_curated=(
   node_discovery
   # NativeArray: narrow widths, fold, map/map2, and the inline-loop lowerings
   native_arr_fold
+  # the two length-independent Float boxes at a fold_float call boundary,
+  # released 2026-09-16; here for the double-free direction, since the release
+  # is new on paths that never had one
+  native_arr_fold_boundary_box_probe
   native_arr_map2
   native_arr_map2_inline
   native_arr_map_closure_abi

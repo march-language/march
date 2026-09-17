@@ -479,7 +479,29 @@ let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
          dispatch branch above deliberately skips this (and the temp-box
          releases): dispatched apply-fn calls keep the old leak rather than
          risk releasing across a version boundary — the safe direction. *)
-      if is_apply_fn resolved_name && llvm_ret_ty ctx ret_tir = "double"
+      (* A builtin on [Llvm_builtins.builtin_owned_boxed_return] has the same
+         shape one representation removed: it DECLARES `ptr` (its March return
+         is a generic 'a) but at this call site the concrete type is Float, so
+         the value coming back is a march_float_box the runtime allocated and
+         nothing else holds.  Without the release the box leaked once per call
+         — half of NativeArray.fold_float's measured 2-per-call, the other half
+         being the initial accumulator box now released in the runtime's
+         fold_release_prev_acc.  The list is an allowlist because the shape
+         alone does not imply ownership: typed_array_get returns an element the
+         array still owns, and releasing THAT here would be a use-after-free. *)
+      (* [ret_tir] for an allowlisted builtin is its DECLARED return, which is
+         the generic ['a] the table exists to describe — never "double". The
+         concrete type for THIS call is the call-site TFn annotation, so read
+         the Float-ness from there; when that annotation is itself unresolved
+         (TVar "_" in JIT mode) the test fails and the box keeps its old leak,
+         which is the safe direction. *)
+      let owned_boxed_scalar_return =
+        Llvm_builtins.builtin_owned_boxed_return resolved_name
+        && ret_ty = "ptr"
+        && llvm_ret_ty ctx (fn_ret_tir f.Tir.v_ty) = "double"
+      in
+      if ((is_apply_fn resolved_name && llvm_ret_ty ctx ret_tir = "double")
+          || owned_boxed_scalar_return)
          && resolved_name <> ctx.cur_emit_fn (* self-tail-call exemption *)
       then begin
         let d = fresh ctx "crf" in
