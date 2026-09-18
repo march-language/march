@@ -156,6 +156,24 @@ type env = {
           = borrowed_field]).  Each ELet scope descends with its own updated
           copy of this field so inner bindings do not contaminate the
           caller's [env] (was: saved/restored via [_borrowed_field_vars]). *)
+  cons_live : StringSet.t;
+      (** Variables that are in [live_after] only CONSERVATIVELY: an
+          [ECase] arm's pattern-bound fields, re-added to the arm's live set
+          because the scrutinee is mentioned somewhere in the arm
+          ([scrutinee_borrowed]'s [name_free_in] disjunct) or is a tuple/record
+          — NOT because the scrutinee provably outlives the arm.
+
+          A nested [ECase] over one of these must not conclude that its
+          scrutinee outlives it, and so must not mark its own fields as
+          borrowed: that is precisely the premise [scrutinee_live_across_case]
+          documents it will not take from [scrutinee_borrowed] ("ownership then
+          transfers into the body, which may consume the scrutinee part-way
+          through and free it while a projected field is still being read").
+          Without this set the premise leaked in one level down, through
+          [live_after], and did exactly that: a list-of-pairs insert released
+          the list cell on one sub-path ahead of dup'ing a field it had borrowed
+          from inside it
+          (specs/2026-09-18-perceus-releases-a-parent-before-its-borrowed-child.md). *)
   var_ctx : Tir.var StringMap.t;
       (** Variable context: maps each in-scope variable name to its
           [Tir.var] record, giving the type needed to emit correct
@@ -194,6 +212,7 @@ let empty_env : env = {
   actor_sent = StringSet.empty;
   moved_vars = StringSet.empty;
   borrowed_field_vars = StringSet.empty;
+  cons_live = StringSet.empty;
   var_ctx = StringMap.empty;
 }
 
@@ -1327,7 +1346,13 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
          Missing those cases only leaves an elidable pair on the table, which
          is the acceptable direction to be wrong in. *)
       let scrutinee_live_across_case = match a with
-        | Tir.AVar v -> StringSet.mem v.Tir.v_name live_after
+        | Tir.AVar v ->
+          StringSet.mem v.Tir.v_name live_after
+          (* ...and live for a reason that is a real guarantee. A scrutinee
+             that is only CONSERVATIVELY live (see [env.cons_live]) was put in
+             [live_after] by an enclosing arm's [scrutinee_borrowed], whose
+             premise this binding has already declined to take. *)
+          && not (StringSet.mem v.Tir.v_name env.cons_live)
         | _ -> false
       in
       let env_for_br =
@@ -1341,7 +1366,16 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
               List.fold_left (fun s (v : Tir.var) ->
                 if needs_rc env v.Tir.v_ty then StringSet.add v.Tir.v_name s else s
               ) env.borrowed_field_vars br.Tir.br_vars
-            else env.borrowed_field_vars }
+            else env.borrowed_field_vars;
+          (* Fields kept live only by [scrutinee_borrowed]'s conservatism, and
+             not by the scrutinee genuinely outliving the arm, are recorded as
+             such so a nested case over one of them does not mistake that for a
+             guarantee. *)
+          cons_live =
+            if scrutinee_borrowed && not scrutinee_live_across_case then
+              List.fold_left (fun s (v : Tir.var) -> StringSet.add v.Tir.v_name s)
+                env.cons_live br.Tir.br_vars
+            else env.cons_live }
       in
       let (body', live_before_br) = insert_rc_expr env_for_br br.Tir.br_body la in
       (* Emit EDecRC for br_vars that are heap-typed but dead in this branch body.

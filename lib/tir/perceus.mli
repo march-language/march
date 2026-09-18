@@ -153,6 +153,7 @@ type env = {
   actor_sent : StringSet.t;
   moved_vars : StringSet.t;
   borrowed_field_vars : StringSet.t;
+  cons_live : StringSet.t;
   var_ctx : Tir.var StringMap.t;
 }
 val empty_env : env

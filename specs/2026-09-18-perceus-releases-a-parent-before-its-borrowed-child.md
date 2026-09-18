@@ -1,8 +1,10 @@
 # Perceus releases a parent before the borrowed child it still has to dup
 
 **Date:** 2026-09-18
-**Status:** design. Root cause established; fix not built.
-**Scope:** `specs/todos/2026-09-17-consistent-hash-get-miscompiles-eagerly-loaded.md`,
+**Status:** **LANDED 2026-09-18** — `specs/progress/2026-09-18-perceus-releases-parent-before-borrowed-child.md`.
+Option A, implemented at the premise that made the child borrowed (§5); kept as
+written for the record.
+**Scope:** `specs/progress/2026-09-18-perceus-releases-parent-before-borrowed-child.md` (filed as `2026-09-17-consistent-hash-get-miscompiles-eagerly-loaded.md`),
 which this reframes. It was filed as a `ConsistentHash` bug. It is a **general
 Perceus use-after-free**, reachable from ordinary user code, and `ConsistentHash`
 is one instance.

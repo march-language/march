@@ -1,0 +1,4 @@
+size = 5
+value = two
+control sorted = true, sum = 1275
+stress sorted = true, len = 400, sum = 79800

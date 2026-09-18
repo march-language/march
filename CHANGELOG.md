@@ -39,6 +39,14 @@ git log is authoritative for exact commits.
   fd (`SO_RCVTIMEO`) still bound the TLS handshake and reads.
 
 ### Fixed
+- **A sorted insert into a list of pairs no longer crashes or returns wrong
+  values when compiled.** Matching a list whose elements are tuples or records,
+  reading a heap field through a comparison, returning the list on one branch
+  and consuming the field on the other, freed the field too early: a
+  use-after-free that crashed on some runs and gave a wrong answer on others,
+  while the interpreter was always right. `ConsistentHash.add` was one instance;
+  the bug was in the compiler, not the library.
+
 - A `receive()` nested inside an actor handler that was still parked when the process
   shut down (or the actor was killed) returned the runtime's no-message sentinel into
   user code, which dropped it: `RC underflow (rc was 0) — aborting`. A stop now ends the
