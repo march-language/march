@@ -1,0 +1,18 @@
+-- EXPECT-ERROR: The linear value `r.slot` is used more than once here
+mod Main do
+  needs IO.Console
+  -- The same rule outside an actor: a field of type `Option(S1)` read twice
+  -- would hand out the one `S1` twice.
+  always_linear type S1 = S1(Int)
+  type R = { slot : Option(S1), n : Int }
+  fn sink(o : Option(S1)) : Int do
+    match o do
+      Some(s) -> match s do S1(e) -> e end
+      None -> 0
+    end
+  end
+  fn main(c : Cap(IO.Console)) do
+    let r : R = { slot: Some(S1(1)), n: 2 }
+    println(int_to_string(sink(r.slot) + sink(r.slot)))
+  end
+end
