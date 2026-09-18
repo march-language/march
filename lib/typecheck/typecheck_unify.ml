@@ -896,15 +896,6 @@ let () = expand_record_ref := (fun env ty ->
   | TCon (name, _) when name_is_variant env name -> None
   | _ -> expand_record env ty)
 
-(** The linearity a record FIELD of type [fty] carries: a [linear]/[affine]
-    qualifier ([TLin]), or an [always_linear] type, which is [Linear] wherever
-    it is stored.  [None] for an ordinary field. *)
-let field_linearity env fty =
-  match repr fty with
-  | TLin (lin, _) when lin <> Ast.Unrestricted -> Some lin
-  | TCon (name, _) when resolves_always_linear name env -> Some Ast.Linear
-  | _ -> None
-
 (** A type whose values must be consumed exactly once: a [TLin Linear] wrapper
     (session channels excluded; they are tracked affine) or an
     [always_linear] type. *)
@@ -915,11 +906,30 @@ let is_linear_ty env t =
   | TCon (name, _) -> resolves_always_linear name env
   | _ -> false
 
+(** The linearity a record FIELD of type [fty] carries: a [linear]/[affine]
+    qualifier ([TLin]); an [always_linear] type, which is [Linear] wherever it
+    is stored; or a type that HOLDS a linear value by ownership -- a tuple
+    component, a list element, a variant payload, as [holds_linear] decides for
+    a binding -- which is [Linear] too (2026-09-19).  Without that last case a
+    field such as `slot : Option(Parked_B)` was an ordinary field: an actor
+    could overwrite it with `None` and drop a live value unchecked, which is
+    exactly the move the per-field rules exist to refuse.  A field whose type
+    is itself a record is not promoted here, for the reason [holds_linear]
+    gives: its own linear fields would need their own sentinels, and promoting
+    the whole nested record would count every read of an ordinary inner field
+    as a use of it.  [None] for an ordinary field. *)
+let rec field_linearity env fty =
+  match repr fty with
+  | TLin (lin, _) when lin <> Ast.Unrestricted -> Some lin
+  | TCon (name, _) when resolves_always_linear name env -> Some Ast.Linear
+  | TTuple _ | TCon _ when contains_linear ~records:false env fty -> Some Ast.Linear
+  | _ -> None
+
 (** A type that is linear or holds a linear value by ownership: a tuple
     component, a list element, an ADT payload, a record field.  Not the type
     argument of an opaque handle ([Pid], [Vault], [Task]), which refers to
     values rather than holding one. *)
-let rec contains_linear ?(records = true) env t =
+and contains_linear ?(records = true) env t =
   is_linear_ty env t
   || (match repr t with
       | TTuple ts -> List.exists (contains_linear ~records env) ts

@@ -18,12 +18,12 @@ checked. With the lambda first, `s`'s type is an unbound variable when the lambd
 body is checked, so it is bound as a pending entry, and the pending entry is not
 reported once the later argument fixes `a` to `S1`.
 
-The same shape appeared in `reject/t251`: `LinearMap.empty(fn a -> fn b -> false)`
+The same shape appeared in `reject/t254`: `LinearMap.empty(fn a -> fn b -> false)`
 under a `let m : LinearMap(S1, Int)` annotation reports nothing about `a` and `b`,
 while `let f : S1 -> S1 -> Bool = fn a -> fn b -> false` does.
 
 `LinearMap.drain(m, acc, f)` is not affected in practice: the map comes first, so
-`v` is known when the callback is checked (`reject/t249`).
+`v` is known when the callback is checked (`reject/t252`).
 
 ## Where to look
 

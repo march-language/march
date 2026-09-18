@@ -42,6 +42,6 @@ payload; `(_, n)` over `(Int, Int)`. `types-oracle` must not move any existing f
 ## What shipped (2026-09-18)
 
 `check_wildcard_discards` tests `contains_linear` (records included). Witness
-`reject/t253` (and `t248`, the LinearMap case); both fail with the check put back to
+`reject/t256` (and `t251`, the LinearMap case); both fail with the check put back to
 `is_linear_ty`. `types-oracle` moved no pre-existing fixture. Landed with
 [[2026-09-18-linear-map]].

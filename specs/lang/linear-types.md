@@ -402,14 +402,14 @@ enforce the rule:
   value that must be consumed, and so does a `_` over something that *holds*
   one (`let (_, n) = (Some(token), 1)`). Discarding a non-linear part
   (`Token(_)`) is fine, and so is a `_` arm that ends in `panic(…)`
-  (`reject/t203`–`t206`, `t253`).
+  (`reject/t203`–`t206`, `t256`).
 - **A container holding one is linear itself.** A tuple, list or ADT value
   with a linear value inside (`(token, 1)`, `Some(token)`, `[token]`) must be
   used exactly once, like the value it holds. Records are the exception: their
   fields are tracked one by one, as above (`reject/t233`–`t234`). Taking the
   container apart consumes it, and each part is then judged by its own type:
   in `let (n, t) = (1, token)`, `t` is linear and `n` is an ordinary `Int`
-  (`accept/t254`).
+  (`accept/t257`).
 - **Generic functions must opt in.** A type variable is unrestricted: a generic
   function may drop or duplicate a value of that type. So passing a linear
   value to one is an error unless the function marks that parameter
@@ -473,11 +473,11 @@ actor Host do
 end
 ```
 
-The checks are at every use site (`accept/t244`–`t245`, `reject/t246`–`t252`).
+The checks are at every use site (`accept/t247`–`t248`, `reject/t249`–`t255`).
 The module's own function bodies are a small reviewed kernel over `Map`: they
 carry `@[trusted_linear(v)]`, which lets callers pass linear values for `v`
 without the body being checked to use each one once. That attribute is
-reserved for the standard library (`reject/t256`); user code opts a parameter
+reserved for the standard library (`reject/t259`); user code opts a parameter
 in with `linear x : a`, whose body is checked.
 
 ---

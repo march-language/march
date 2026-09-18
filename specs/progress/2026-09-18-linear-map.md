@@ -388,7 +388,7 @@ validation.
 ## Corpus witnesses (specs/lang/types/)
 
 Numbers are assigned at landing: accept and reject share one pool, and the next free
-number on `main` today is `t244`. Reject files pin the substring in their
+number on `main` today was `t244` (renumbered to t247-t260 at landing, after #516 took t244-t246). Reject files pin the substring in their
 `-- EXPECT-ERROR:` first line, as in `reject/t229`. New reject fixtures must also be
 mirrored in march-lean (the two-repo rule in `INDEX.md`).
 
@@ -641,19 +641,19 @@ field.
 
 Tests:
 
-- Corpus: `accept/t244` (threaded; prints 63 interpreted and compiled), `t245`
-  (actor sessions); `reject/t246`–`t252` (the witnesses above, R1–R7 in order),
-  `t256` (`@[trusted_linear]` in user code), `t257` (constructors private). The
-  prerequisites' witnesses are `reject/t253`, `accept/t254`, `accept/t255`.
+- Corpus: `accept/t247` (threaded; prints 63 interpreted and compiled), `t248`
+  (actor sessions); `reject/t249`–`t255` (the witnesses above, R1–R7 in order),
+  `t259` (`@[trusted_linear]` in user code), `t260` (constructors private). The
+  prerequisites' witnesses are `reject/t256`, `accept/t257`, `accept/t258`.
 - `test/stdlib/test_linear_map.march` (13 cases, interpreter).
 - `test/native/linear_map.march` + `.expected`, a dune `runtest` golden: compiled
   output equals interpreted, including an `Option(Int)`-valued map (the niche
   `Option` risk) and an actor keeping two sessions.
 - Proved able to fail, each by removing one piece and rebuilding: wildcard check back
-  to `is_linear_ty` (t248, t253 fail); destructure rule off (t244, t254 fail); mark
-  propagation off (t255 fails); `@[trusted_linear]` marking off (t244, t245 fail);
-  gate off (t256 fails); marking every signature variable instead of `v` (t251
-  fails, the linear key is accepted); `LinearMap` constructors public (t257
+  to `is_linear_ty` (t251, t256 fail); destructure rule off (t247, t257 fail); mark
+  propagation off (t258 fails); `@[trusted_linear]` marking off (t247, t248 fail);
+  gate off (t259 fails); marking every signature variable instead of `v` (t254
+  fails, the linear key is accepted); `LinearMap` constructors public (t260
   fails).
 - `types-oracle`: with the new module held out of the manifest, both tiers moved on
   the 15 new fixtures only. With it in, Tier 1 moves on every fixture, as expected

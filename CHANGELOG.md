@@ -35,6 +35,11 @@ git log is authoritative for exact commits.
   private constructors.
 
 ### Fixed
+- **A record or actor-state field that holds a linear value is now tracked like a linear
+  field.** A field such as `slot : Option(Parked_B)` used to be an ordinary field: an actor
+  could overwrite it with `None` and silently drop the value inside, and a record's field
+  could be read twice. Both are now errors, as they already were for a field whose own type
+  is linear.
 - Linearity: a `_` over a value that holds a linear value (`let (_, n) = (Some(token), 1)`)
   silently dropped it; it is now rejected like a `_` over the linear value itself.
 - Linearity: taking apart a tuple or variant that holds a linear value no longer makes its

@@ -2,7 +2,7 @@ mod TestLinearMap do
 
   -- Runtime behaviour of LinearMap. The static rules (every map consumed, no
   -- value dropped or copied, keys unrestricted) are pinned by the typing
-  -- corpus: specs/lang/types/accept/t244-t245, reject/t246-t252.
+  -- corpus: specs/lang/types/accept/t247-t248, reject/t249-t255.
 
   fn sum_drain(m) do
     LinearMap.drain(m, 0, fn (acc, k, v) -> acc + v)

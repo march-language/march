@@ -38,7 +38,7 @@ rejected.
 
 The var-to-var arm of `unify` (`typecheck_unify.ml`) moves a `linear_ok_ids` mark to
 the variable it links to, as it already did for `cap_producer_ivars`. Witness
-`accept/t255` (fails with the propagation disabled). `types-oracle` moved no
+`accept/t258` (fails with the propagation disabled). `types-oracle` moved no
 pre-existing fixture. `@[trusted_linear]` marks the final representative directly,
 so it never relied on this.
 

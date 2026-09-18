@@ -49,6 +49,6 @@ linear variable) and by `ELet` when the binding was promoted because of what the
 type holds. When the whole value is linear because of its type, a component inherits
 only if its own type is linear, holds a linear value, or mentions a type variable.
 When the whole was made linear by an explicit qualifier (`linear x : Int`, `linear
-let`), every component still inherits, as before. Witness `accept/t254`, plus the
-`n * n` in `accept/t244`; both fail with the rule off. `types-oracle` moved no
+let`), every component still inherits, as before. Witness `accept/t257`, plus the
+`n * n` in `accept/t247`; both fail with the rule off. `types-oracle` moved no
 pre-existing fixture.
