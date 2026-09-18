@@ -204,6 +204,16 @@ mono, then the accept/reject pair below) remains the real class fix for whoever 
 time; it is defense-in-depth on an already-guarded, non-shippable failure mode, not a
 release blocker.
 
+> **2026-09-18: Step 3 specced, and the recommendation is to NOT build it**
+> — `specs/2026-09-18-lazy-stdlib-step3-design.md`. After Steps 1–2 the only
+> modules that still take the lazy path are the `lazy_niche_probe.march`
+> regression fixture (which works) and the JS-only modules; 2,204
+> unspecializable calls across 316 programs show zero disagreements; and the
+> failure is now a compile error rather than silent garbage. The spec proposes
+> moving this todo to `specs/progress/` with Step 3 recorded as not-built-with-
+> reasons, and describes the cheaper route (eager-on-demand in compiled builds)
+> if a real consumer ever appears. Left open pending that decision.
+>
 > **Update 2026-09-17: STEP 2 LANDED.** The 2026-08-09 blocker above is
 > refuted — `Collision_set.compute` is a pure function of `tm_types`, mono
 > never touches `tm_types`, and the only pass that adds types afterwards

@@ -1,4 +1,25 @@
-`[P1]` # `ConsistentHash.get` miscompiles compiled-only, with the module EAGERLY loaded
+`[P1]` # Perceus releases a parent before the borrowed child it still has to dup
+
+> **Reframed 2026-09-18.** Filed as a `ConsistentHash` bug; it is a **general
+> Perceus use-after-free** reachable from ordinary user code, and
+> `ConsistentHash` is one instance. Root cause established — ASAN, the TIR on
+> both sides, and a bisect to `efb15d8b1` — in
+> **`specs/2026-09-18-perceus-releases-a-parent-before-its-borrowed-child.md`**,
+> which also carries the fix options (recommended: bind a field-borrowed
+> variable owned when its source is released earlier on the same path) and the
+> verification bar. The notes below are the original filing, kept because its
+> repro is still the right starting point.
+>
+> Three hypotheses in the original "Where to start" were measured and are
+> wrong: it is **not** TRMC (fails 20/20 either way), **not** the 2026-09-16
+> `if`/`else` fix, and **not** `3bbfc3ed7`'s tuple deep-drop (passes 20/20). And
+> `efb15d8b1`, the first bad commit, is a correct leak fix that removed an
+> accidental leak which had been masking the use-after-free — **do not revert
+> it.**
+
+(original filing, as `2026-09-17-consistent-hash-get-miscompiles-eagerly-loaded.md`:)
+
+# `ConsistentHash.get` miscompiles compiled-only, with the module EAGERLY loaded
 
 Found 2026-09-17 while building the REJECT witness for
 `specs/progress/2026-09-17-mono-refuses-a-repr-disagreeing-call.md`. **Not** the
