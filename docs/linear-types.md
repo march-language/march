@@ -332,10 +332,12 @@ A linear value has to stay traceable wherever it goes:
   linear value can't be used inside one; pass it in as a parameter. And a
   lambda's own linear parameters must be consumed, just like a function's.
 - **`_` can't discard one.** `let _ = token` or `fn _ -> …` receiving a linear value
-  would drop it. Discarding a non-linear part (`Token(_)`) is fine.
+  would drop it, and so would a `_` over something holding one
+  (`let (_, n) = (Some(token), 1)`). Discarding a non-linear part (`Token(_)`) is fine.
 - **A container holding one is linear itself.** `(token, 1)`, `Some(token)` and
   `[token]` must be used exactly once, like what they hold. Records are the exception:
-  their fields are tracked one by one.
+  their fields are tracked one by one. Taking one apart consumes it, and each part is
+  judged by its own type: in `let (n, t) = (1, token)`, `n` is an ordinary `Int`.
 - **Generic functions must opt in.** A generic function may drop or duplicate a value
   of its type parameter, so it can only receive a linear value if it marks that
   parameter `linear`:
@@ -348,6 +350,39 @@ A linear value has to stay traceable wherever it goes:
   Constructors, operators, and functions that only *return* their type variable need
   nothing. Most stdlib generics haven't opted in, so `List.length([token])` is
   rejected: it would drop the token.
+
+---
+
+## Keyed Collections of Linear Values: `LinearMap`
+
+`Map` can't hold a linear value (`Map.get` copies it, `Map.insert` over a key drops
+the old one). The stdlib's `LinearMap(k, v)` can:
+
+- Every operation consumes the map and hands it back. `put(m, k, v)` returns the value
+  it displaced, if any; `take(m, k)` is the only way a value comes out; `size`,
+  `member` and `keys` return their answer beside the map.
+- The map itself is `always_linear`, so it must end somewhere: `drain(m, acc, f)`
+  passes each value to `f`, which must consume it; `to_list(m)`; or `dispose(m)`,
+  which returns `Ok(())` for an empty map and gives a non-empty one back in `Err`.
+- `take_slot(m, k)` takes a value out and leaves a slot; `fill(slot, v)` puts the
+  next value back and `vacate(slot)` leaves the key empty. That is the shape of an
+  actor turn over one of many sessions:
+
+```march
+actor Host do
+  state { sessions : LinearMap(Int, Session) }
+  init  { sessions: LinearMap.empty_int() }
+  on Step(sid : Int) do
+    match LinearMap.take_slot(state.sessions, sid) do
+      (None, slot) -> { state with sessions: LinearMap.vacate(slot) }
+      (Some(s), slot) -> { state with sessions: LinearMap.fill(slot, advance(s)) }
+    end
+  end
+end
+```
+
+Keys are ordinary values (a linear key type is rejected); `empty_int()`,
+`empty_string()` or `empty(cmp)` give the map its key order.
 
 ---
 

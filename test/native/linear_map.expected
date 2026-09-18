@@ -1,0 +1,10 @@
+size 100
+displaced 21
+taken 1000
+taken again 0
+keys 99
+drained 19773
+option values Some(Some(1)) Some(None)
+disposed empty
+session 1 ended at 2
+session 2 ended at 1

@@ -1,0 +1,86 @@
+mod Main do
+  needs IO.Console
+  -- LinearMap compiled: linear values in, displaced and taken values out,
+  -- slots, an Option(Int)-valued map (the niche-encoded Option that a lazily
+  -- loaded stdlib module used to miscompile), String keys, and an actor that
+  -- keeps one linear session value per id in its state.
+  always_linear type S1 = S1(Int)
+  fn sink(s : S1) : Int do match s do S1(e) -> e end end
+  fn opt_sum(o : Option(S1)) : Int do
+    match o do
+      Some(s) -> sink(s)
+      None -> 0
+    end
+  end
+  fn put_n(m : LinearMap(Int, S1), i : Int, n : Int) : LinearMap(Int, S1) do
+    if i >= n do m
+    else
+      let (d, m2) = LinearMap.put(m, i, S1(i * 3))
+      let z = opt_sum(d)
+      put_n(m2, i + z + 1, n)
+    end
+  end
+  actor Host do
+    state { done : Int, sessions : LinearMap(Int, S1) }
+    init  { done: 0, sessions: LinearMap.empty_int() }
+    on Open(sid : Int) do
+      let (old, m) = LinearMap.put(state.sessions, sid, S1(0))
+      match old do
+        None -> { state with sessions: m }
+        Some(s) -> { state with done: state.done + sink(s), sessions: m }
+      end
+    end
+    on Step(sid : Int, last : Bool) do
+      match LinearMap.take_slot(state.sessions, sid) do
+        (None, slot) -> { state with sessions: LinearMap.vacate(slot) }
+        (Some(s), slot) ->
+          if last do
+            println("session " ++ int_to_string(sid) ++ " ended at " ++ int_to_string(sink(s)))
+            { state with done: state.done + 1, sessions: LinearMap.vacate(slot) }
+          else
+            { state with sessions: LinearMap.fill(slot, S1(sink(s) + 1)) }
+          end
+      end
+    end
+  end
+  fn main(c : Cap(IO.Console)) do
+    let m = put_n(LinearMap.empty_int(), 0, 100)
+    let (n, m1) = LinearMap.size(m)
+    println("size " ++ int_to_string(n))
+    let (d, m2) = LinearMap.put(m1, 7, S1(1000))
+    println("displaced " ++ int_to_string(opt_sum(d)))
+    let (t, m3) = LinearMap.take(m2, 7)
+    println("taken " ++ int_to_string(opt_sum(t)))
+    let (gone, m4) = LinearMap.take(m3, 7)
+    println("taken again " ++ int_to_string(opt_sum(gone)))
+    let (got, slot) = LinearMap.take_slot(m4, 8)
+    let m5 = LinearMap.fill(slot, S1(opt_sum(got) + 1))
+    let (ks, m6) = LinearMap.keys(m5)
+    println("keys " ++ int_to_string(List.length(ks)))
+    println("drained " ++ int_to_string(LinearMap.drain(m6, 0, fn (acc, k, s) -> acc + k + sink(s))))
+    let (_, o1) = LinearMap.put(LinearMap.empty_string(), "a", Some(1))
+    let (_, o2) = LinearMap.put(o1, "b", None)
+    let (oa, o3) = LinearMap.take(o2, "a")
+    let (ob, o4) = LinearMap.take(o3, "b")
+    let show = fn o -> match o do
+      Some(Some(x)) -> "Some(Some(" ++ int_to_string(x) ++ "))"
+      Some(None) -> "Some(None)"
+      None -> "None"
+    end
+    println("option values " ++ show(oa) ++ " " ++ show(ob))
+    match LinearMap.dispose(o4) do
+      Ok(_) -> println("disposed empty")
+      Err(rest) -> println("left " ++ int_to_string(List.length(LinearMap.to_list(rest))))
+    end
+    let h = spawn(Host)
+    send(h, Open(1))
+    send(h, Open(2))
+    send(h, Step(1, false))
+    send(h, Step(2, false))
+    send(h, Step(1, false))
+    send(h, Step(1, true))
+    send(h, Step(2, true))
+    send(h, Step(3, true))
+    ()
+  end
+end

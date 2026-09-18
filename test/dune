@@ -1664,6 +1664,26 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff session/stream_actor_events.expected stream_actor_events.out)))
 
+; LinearMap (stdlib) compiled: linear values in and out, slots, an
+; Option(Int)-valued map (niche Option across an eagerly loaded stdlib module),
+; String keys, and an actor keeping one linear session value per id in state.
+; Design: specs/progress/2026-09-18-linear-map.md.
+(rule
+ (targets linear_map_bin linear_map.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/linear_map.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o linear_map_bin
+        native/linear_map.march)
+   (with-stdout-to linear_map.out (system "./linear_map_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/linear_map.expected linear_map.out)))
+
 ; The callback-API endpoint actors under a real `supervise` block, routed by
 ; NAME (names survive a restart, pids do not): the Cons host is killed after
 ; the first delivery, the supervisor restarts it, and the session continues

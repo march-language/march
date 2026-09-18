@@ -413,6 +413,16 @@ let rec unify env ~span ?(reason = None) t1 t2 =
                 | Link _ -> ())
              | _ -> ())
           | None -> ());
+         (* A [linear x : a] opt-in is keyed on [a]'s id.  If [a] is linked to
+            another unbound variable, that one becomes the representative the
+            scheme will quantify, so the mark moves with it -- else the opt-in
+            is silently lost and an opted-in function is refused at a linear
+            type depending on which way the link happened to point. *)
+         (if Hashtbl.mem env.linear_ok_ids id then
+            match repr t with
+            | TVar { contents = Unbound (id2, _) } ->
+              Hashtbl.replace env.linear_ok_ids id2 ()
+            | _ -> ());
          r := Link t
        end
      | Link _ -> assert false)  (* repr should have resolved links *)

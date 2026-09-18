@@ -92,6 +92,7 @@ let all_stdlib_decls =
     "list.march";
     "hamt.march";
     "map.march";
+    "linear_map.march";
     "math.march";
     "string.march";
     "io.march";
@@ -547,6 +548,10 @@ let () =
     ("deque", [
       Alcotest.test_case "Deque module"
         `Quick (run_stdlib_test "test_deque.march" "TestDeque");
+    ]);
+    ("linear_map", [
+      Alcotest.test_case "LinearMap module"
+        `Quick (run_stdlib_test "test_linear_map.march" "TestLinearMap");
     ]);
     ("sorted_set", [
       Alcotest.test_case "SortedSet module"

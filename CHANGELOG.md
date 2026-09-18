@@ -11,13 +11,6 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
-### Fixed
-- **A record or actor-state field that holds a linear value is now tracked like a linear
-  field.** A field such as `slot : Option(Parked_B)` used to be an ordinary field: an actor
-  could overwrite it with `None` and silently drop the value inside, and a record's field
-  could be read twice. Both are now errors, as they already were for a field whose own type
-  is linear.
-
 ### Changed
 - **A choreography session no longer ends for everyone when one role fails.** Following the
   Maty model (Fowler and Hu, OOPSLA 2026), a failed role is cancelled, and another role is
@@ -46,6 +39,13 @@ git log is authoritative for exact commits.
   cancel handler that learns which role failed and why but holds no session state, so it
   cannot talk in the failed session. Also `leave_<state>` to leave a session on purpose,
   `cancel(parked)` for actor-hosted roles, and `<P>_Run.host_<Role>_or`.
+- **`LinearMap`, a keyed collection for linear values** (`stdlib/linear_map.march`). A
+  `Map` cannot hold a linear value; `LinearMap(k, v)` can, checked statically: every
+  operation consumes the map and hands it back, `put` returns the value it displaced,
+  `take`/`take_slot` are the only ways a value leaves, and the map (itself linear) ends in
+  `drain`, `to_list` or `dispose`. An actor hosting several sessions can keep one parked
+  session per id in its state. Also `always_linear opaque type`, a linear type with
+  private constructors.
 
 ### Fixed
 - **Refinement checker: a polymorphic function no longer lends element refinements it
@@ -58,6 +58,19 @@ git log is authoritative for exact commits.
   refinement for the whole result. The checker now reads the inferred parameter types and
   the callee's body, and requires every argument an element can come from to agree,
   before applying the rule; such calls are skipped instead.
+- **A record or actor-state field that holds a linear value is now tracked like a linear
+  field.** A field such as `slot : Option(Parked_B)` used to be an ordinary field: an actor
+  could overwrite it with `None` and silently drop the value inside, and a record's field
+  could be read twice. Both are now errors, as they already were for a field whose own type
+  is linear.
+- Linearity: a `_` over a value that holds a linear value (`let (_, n) = (Some(token), 1)`)
+  silently dropped it; it is now rejected like a `_` over the linear value itself.
+- Linearity: taking apart a tuple or variant that holds a linear value no longer makes its
+  ordinary parts linear (`let (n, t) = (1, token)` leaves `n` an ordinary `Int`), and a
+  generic function that opted in with `linear x : a` is no longer refused when its body
+  passes `x` on to another generic function that also opted in. Passing it to one that did
+  not (which may drop or duplicate it) is now an error; it was accepted or refused depending
+  on inference order.
 - Writing to a socket whose peer had just gone could kill the process with SIGPIPE; the
   shared send path now suppresses the signal.
 - A dead green thread's execution context (880 of its bookkeeping struct's 1136 bytes on

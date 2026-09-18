@@ -1,0 +1,17 @@
+-- EXPECT-ERROR: `@[trusted_linear]` is reserved for the standard library
+mod Main do
+  needs IO.Console
+  -- `@[trusted_linear(v)]` lets callers pass linear values for `v` while the
+  -- body is trusted, not checked, to use each one once. That is the stdlib
+  -- LinearMap kernel's opt-in; in user code it would let `dup` duplicate a
+  -- linear value unchecked, so it is refused. User code opts a parameter in
+  -- with `linear x : a`, whose body IS checked.
+  always_linear type S1 = S1(Int)
+  fn sink(s : S1) : Int do match s do S1(e) -> e end end
+  @[trusted_linear(v)]
+  fn dup(x : v) : (v, v) do (x, x) end
+  fn main(c : Cap(IO.Console)) do
+    let (a, b) = dup(S1(1))
+    println(int_to_string(sink(a) + sink(b)))
+  end
+end
