@@ -1,0 +1,31 @@
+-- A field projected three records deep and passed to a CONSUMING callee
+-- must be dup'd first. `st.mid.inner.bag` lowers to
+-- `let t2 = (let t1 = (let t0 = st.mid in t0.inner) in t1.bag)`; Perceus's
+-- borrowed-field lookahead followed one nested let but not two, so the
+-- projection looked owned, `vals` consumed it with no dup, and the drop of
+-- `st` at the end of `get_vals` freed the Bag a second time: the second call
+-- read freed memory ("non-exhaustive pattern match" / RC underflow).
+-- Depths 1 and 2 were fine. Found by the cluster node service, whose state
+-- reads its member view at `st.driver.swim.members`.
+mod PerceusThreeDeep do
+  needs IO.Console
+
+  type Bag = Bag(Map(String, Int))
+  type Inner = { me : String, bag : Bag }
+  type Mid = { inner : Inner, period : Int }
+  type Outer = { me : String, mid : Mid }
+
+  pfn vals(b : Bag) : List(Int) do
+    match b do Bag(m) -> Map.values(m) end
+  end
+
+  pfn get_vals(st : Outer) : List(Int) do vals(st.mid.inner.bag) end
+
+  fn main(_c : Cap(IO.Console)) do
+    let b = Bag(Map.insert(Map.empty(), "k" ++ int_to_string(1), 1, Map.str_cmp))
+    let st = { me: "me", mid: { inner: { me: "me", bag: b }, period: 5 } }
+    println("a " ++ int_to_string(List.length(get_vals(st))))
+    println("b " ++ int_to_string(List.length(get_vals(st))))
+    println("c " ++ int_to_string(List.length(get_vals(st))))
+  end
+end

@@ -2671,6 +2671,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/nested_record_field_capture.expected native_nested_record_field_capture.out)))
 
+;; A three-deep field projection passed to a consuming callee got no dup
+;; (Perceus's borrowed-field lookahead stopped one nested let short): the
+;; second call read a freed Map. Pre-fix: "panic: non-exhaustive pattern
+;; match" after the first line. Uses the stdlib (Map), hence its source_tree.
+(rule
+ (targets native_perceus_three_deep_field_borrow native_perceus_three_deep_field_borrow.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/perceus_three_deep_field_borrow.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_perceus_three_deep_field_borrow
+        native/perceus_three_deep_field_borrow.march)
+   (with-stdout-to native_perceus_three_deep_field_borrow.out
+        (system "./native_perceus_three_deep_field_borrow")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/perceus_three_deep_field_borrow.expected native_perceus_three_deep_field_borrow.out)))
+
 ; A compiled `println` must be ONE write, not two.  Two assertions, because the
 ; runtime half and the structural half fail differently: `intact` counts how
 ; many of the 1200 concurrently-printed lines survived unsplit (the observable

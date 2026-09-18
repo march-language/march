@@ -28,6 +28,9 @@ git log is authoritative for exact commits.
   `cancel(parked)` for actor-hosted roles, and `<P>_Run.host_<Role>_or`.
 
 ### Fixed
+- **A compiled program could double-free a field read three records deep** (`st.a.b.c`)
+  and passed to a function that consumes it: the second such read crashed or read freed
+  memory. Two levels deep was fine.
 - Writing to a socket whose peer had just gone could kill the process with SIGPIPE; the
   shared send path now suppresses the signal.
 - A dead green thread's execution context (880 of its bookkeeping struct's 1136 bytes on
