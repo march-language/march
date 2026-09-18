@@ -278,6 +278,30 @@ let test_rebind_keeps_decision () =
   Alcotest.(check bool) "but Late's shape IS visible to find_variant" true
     (Kind.find_variant t1 "Late" <> None)
 
+(* Non-vacuity guard for Mono's repr-disagreement check.
+
+   [Mono.check_repr_disagreement] rejects an unspecializable call whose caller
+   and callee disagree about the return representation -- the lazy-stdlib
+   miscompile class (specs/progress/2026-09-17-mono-refuses-a-repr-disagreeing-call.md).
+   Its entire force rests on this pair classifying DIFFERENTLY: a concrete
+   `Option(Int)`, which the caller compiles as a niche, against the generic
+   `Option('a)` the unspecialized callee returns, which is boxed.
+
+   If that ever stops holding -- Option made unconditionally boxed, niche
+   eligibility narrowed, the tvar arm reclassified -- the check keeps passing
+   and silently stops catching anything. This asserts the premise directly so
+   that change fails a test instead. *)
+let test_option_int_and_option_tvar_disagree () =
+  let t = table fixture_defs in
+  let concrete = Kind.repr_of t (Tir.TCon ("Option", [ Tir.TInt ])) in
+  let generic  = Kind.repr_of t (Tir.TCon ("Option", [ Tir.TVar "a" ])) in
+  Alcotest.(check bool) "Option(Int) is a niche" true
+    (match concrete with Kind.Niche _ -> true | _ -> false);
+  Alcotest.(check bool) "Option('a) is boxed" true
+    (match generic with Kind.Boxed -> true | _ -> false);
+  Alcotest.(check bool) "so the two disagree -- the check has something to fire on"
+    true (concrete <> generic)
+
 let suites = [
   ( "kind", [
       Alcotest.test_case "needs_rc/borrowable truth table"        `Quick test_truth_table;
@@ -292,5 +316,7 @@ let suites = [
       Alcotest.test_case "build is deterministic"                 `Quick test_build_is_deterministic;
       Alcotest.test_case "tables do not leak between modules"     `Quick test_tables_do_not_leak_between_modules;
       Alcotest.test_case "rebind keeps the unboxed decision"      `Quick test_rebind_keeps_decision;
+      Alcotest.test_case "Option(Int) and Option('a) disagree (mono's check)" `Quick
+        test_option_int_and_option_tvar_disagree;
     ] );
 ]

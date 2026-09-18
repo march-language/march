@@ -1,3 +1,8 @@
+(** Raised when a call could not be specialized AND the caller's expected
+    return representation differs from the generic callee's -- the lazy-stdlib
+    miscompile class. Carries a fully-rendered, user-facing message. *)
+exception Repr_disagreement of string
+
 (** Monomorphization of the typed IR: specialize generic functions per
     instantiated type, and mangle the specialized names.
 

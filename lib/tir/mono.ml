@@ -18,6 +18,93 @@
     to handle qualified type names registered under bare names.
     The sentinel ["$single_impl$"] selects the sole impl when the call-site
     type is erased (TVar "_" or opaque placeholder). *)
+(* ── Representation disagreement at an unspecialized call ─────────────────
+   MARCH_MONO_REPR_REPORT=1 prints one line per call that takes the
+   `subst = []` fallback below, saying whether the CALLER's expected return
+   representation differs from the generic CALLEE's.
+
+   That difference is the lazy-stdlib miscompile
+   (specs/todos/2026-08-01-lazy-stdlib-loading-boxed-vs-niche-representation-mismatch.md):
+   a module outside the eager manifest is loaded for export shapes only, so
+   mono reaches its call site with the callee's return still an unresolved
+   tvar, cannot specialize, and emits the generic Boxed body -- while the
+   caller, compiled at a concrete niche-eligible type, reads the box's heap
+   address as the payload. Wrong value, no diagnostic, compiled only.
+
+   Instrumentation, not a diagnostic: the todo's Step 2 measured that
+   `args_unresolved` alone is NOT the error condition (a passing golden,
+   g44_crdt_convergence's CRDT.ORSet.union_tags, reports it and is byte-
+   identical to its interpreted output), so the predicate has to be the
+   representation disagreement itself. This prints it so the accept/reject
+   pair can be measured before anything is turned into an error. *)
+let repr_report_enabled =
+  lazy (match Sys.getenv_opt "MARCH_MONO_REPR_REPORT" with
+        | Some v when v <> "" && v <> "0" -> true
+        | _ -> false)
+
+let repr_table : Kind.table option ref = ref None
+
+(* Raised instead of [Failure] so the driver can render it as an ordinary
+   user-facing error. A [Failure] escaping the pipeline reaches bin/main.ml's
+   `| exn ->` handler, which prints "internal compiler error ... This is a
+   compiler bug, not a problem with your program" plus an OCaml backtrace --
+   the opposite of the truth here, where the program (or the stdlib manifest)
+   is exactly what needs changing. *)
+exception Repr_disagreement of string
+
+let repr_name : Kind.repr -> string = function
+  | Kind.Boxed -> "boxed"
+  | Kind.Newtype _ -> "newtype"
+  | Kind.Niche { tagged; _ } -> if tagged then "niche (tagged)" else "niche"
+  | Kind.Unboxed _ -> "unboxed"
+
+(* Fires on the disagreement, not on the failure to specialize. Those are two
+   different things and only the first is a bug: measured 2026-09-17 over 316
+   programs (47 golden, 11 bench, 258 native), the fallback below is taken
+   2,204 times with ZERO disagreements, while the known-broken call --
+   ConsistentHash.get with its module removed from the eager manifest --
+   produces exactly one. The todo's earlier attempt tried `args_unresolved` as
+   the predicate and correctly rejected it: g44_crdt_convergence's
+   CRDT.ORSet.union_tags reports that and is byte-identical to its interpreted
+   output. *)
+let check_repr_disagreement ~(orig_name : string) ~(orig_fn : Tir.fn_def)
+    ~(f_var : Tir.var) : unit =
+  match !repr_table with
+  | None -> ()
+  | Some k ->
+    (match f_var.Tir.v_ty with
+     | Tir.TFn (_, caller_ret) ->
+       let callee_ret = orig_fn.Tir.fn_ret_ty in
+       let rc = Kind.repr_of k caller_ret in
+       let re = Kind.repr_of k callee_ret in
+       if Lazy.force repr_report_enabled then
+         Printf.eprintf
+           "MONOREPR\t%s\tcaller_ret=%s\tcallee_ret=%s\tcaller_repr=%s\tcallee_repr=%s\tdisagree=%b\n"
+           orig_name (Tir.show_ty caller_ret) (Tir.show_ty callee_ret)
+           (repr_name rc) (repr_name re) (rc <> re);
+       if rc <> re then begin
+         let modname =
+           match String.rindex_opt orig_name '.' with
+           | Some i -> String.sub orig_name 0 i
+           | None -> orig_name in
+         raise (Repr_disagreement (Printf.sprintf
+           "`%s` is called here returning `%s`, but its body could not be \
+            specialized -- the callee's return type is still `%s`.\n\
+            \  The caller was compiled expecting the %s representation while the \
+            generic callee body returns the %s one, so the caller would read the \
+            wrong bits as the payload: a wrong VALUE at run time, with no crash \
+            and no further diagnostic.\n\
+            \  This happens when the callee's module is loaded for export SHAPES \
+            only, which is every module outside `Stdlib_manifest.stdlib_file_list`. \
+            If `%s` is a stdlib module, add its file to that list (and to nothing \
+            else -- `lazily_loaded_allowlist` is for modules that have understood \
+            this consequence). See \
+            specs/progress/2026-09-17-mono-refuses-a-repr-disagreeing-call.md"
+           orig_name (Tir.show_ty caller_ret) (Tir.show_ty callee_ret)
+           (repr_name rc) (repr_name re) modname))
+       end
+     | _ -> ())
+
 let resolve_impl_by_type (impls : (string * string) list) (type_name : string) : string option =
   if type_name = "$single_impl$" then
     (match impls with [(_, m)] -> Some m | _ -> None)
@@ -858,6 +945,7 @@ let rec rewrite_calls
          (* No specialization needed (monomorphic or unresolved TVar args) —
             but still enqueue to ensure the function is emitted.  Matches the
             ECallPtr branch below which already handles this case correctly. *)
+         check_repr_disagreement ~orig_name ~orig_fn ~f_var;
          if not (Hashtbl.mem done_set orig_name) then
            Queue.add (orig_name, orig_fn, []) worklist;
          expr
@@ -1194,6 +1282,12 @@ let monomorphize ?(iface_methods = Hashtbl.create 0) (m : Tir.tir_module) : Tir.
   (* Fresh collision-dispatch state per compilation (REPL / test driver reuse
      the process); populated by [try_collision_dispatch] during rewrite. *)
   Dispatch_registry.reset ();
+  (* The collision set is a pure function of [tm_types], and mono returns
+     `{ m with tm_fns }` -- it never touches [tm_types] -- so this table agrees
+     with the one every later pass builds. (Defun DOES append types afterwards,
+     but only `$Clo_*` closure structs, whose names cannot collide with a user
+     or builtin type and cannot make two existing names collide.) *)
+  repr_table := Some (Kind.of_module m);
   (* Build lookup table for original fn_defs *)
   let fn_table : (string, Tir.fn_def) Hashtbl.t = Hashtbl.create 32 in
   List.iter (fun fn -> Hashtbl.replace fn_table fn.Tir.fn_name fn) m.Tir.tm_fns;

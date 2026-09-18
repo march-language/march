@@ -2561,6 +2561,7 @@ let compile filename =
     in
     let contract_decls = March_tir.Alloc_contract.collect desugared in
     let pipe =
+      try
       March_tir.Contract_pipeline.run
         ~snap:snap_tir ~stamp
         ~opt_snap:(fun label m ->
@@ -2579,6 +2580,12 @@ let compile filename =
                           d.March_tir.Alloc_contract.d_name) contract_decls
                       else [])
         ~opt:!opt_enabled ~trmc:!March_tir.Trmc.enabled tir
+      with March_tir.Mono.Repr_disagreement msg ->
+        (* A real defect in the program or the stdlib manifest, not a compiler
+           bug: render it as one clean error rather than letting it reach the
+           `| exn ->` internal-compiler-error handler with a backtrace. *)
+        Printf.eprintf "march: error: %s\n%!" msg;
+        exit 1
     in
     let pre_opt_tir = pipe.March_tir.Contract_pipeline.pre_opt in
     let tir = pipe.March_tir.Contract_pipeline.final in
