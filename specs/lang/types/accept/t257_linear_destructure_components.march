@@ -1,0 +1,22 @@
+mod Main do
+  needs IO.Console
+  -- Destructuring a value that is linear because of what its type holds
+  -- consumes it once, and each component is its own value: an Int beside an
+  -- S1 is an ordinary Int and may be used twice, whether bound by `let` or by
+  -- matching a linear variable. Rejected before 2026-09-18 ("`n` is used more
+  -- than once"): every binder inherited the whole value's linearity. The S1
+  -- component stays linear (reject/t229 and friends are unmoved).
+  always_linear type S1 = S1(Int)
+  always_linear type T = T(Int, S1)
+  fn sink(s : S1) : Int do match s do S1(e) -> e end end
+  fn pair() : (Int, S1) do (5, S1(1)) end
+  fn open(t : T) : Int do
+    match t do
+      T(n, s) -> n + n + sink(s)
+    end
+  end
+  fn main(c : Cap(IO.Console)) do
+    let (n, s) = pair()
+    println(int_to_string(n + n + sink(s) + open(T(2, S1(3)))))
+  end
+end

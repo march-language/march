@@ -281,6 +281,35 @@ let bind_vars_with_linearity (bindings : (string * scheme) list) env =
       | _ -> bind_var name sch acc_env
     ) env bindings
 
+(** True iff [t] mentions an unbound type variable. *)
+let rec mentions_tvar t =
+  match repr t with
+  | TVar { contents = Unbound _ } -> true
+  | TArrow (a, b) -> mentions_tvar a || mentions_tvar b
+  | TCon (_, ts) | TTuple ts -> List.exists mentions_tvar ts
+  | TRecord flds -> List.exists (fun (_, t) -> mentions_tvar t) flds
+  | TLin (_, t) -> mentions_tvar t
+  | _ -> false
+
+(** Whether a component bound by destructuring a linear value of type
+    [scrut_ty] inherits the whole value's linearity.  When the whole is linear
+    because of what its TYPE holds (an [always_linear] type, or a tuple/list/
+    variant holding one), destructuring consumes it once and each component is
+    its own value: a component whose type is ground and holds nothing linear
+    ([Int], [List(k)], a comparator) can be copied freely, so `let (n, m2) =
+    LinearMap.size(m)` leaves [n] an ordinary [Int].  A component that mentions
+    a type variable keeps the inherited linearity, since the variable may be
+    one an opted-in function received as linear.  When the whole was made
+    linear by an explicit qualifier ([linear x : Int]), every component
+    inherits, as before: the qualifier is about the value, not its type. *)
+let inherits_linearity env ~scrut_ty t =
+  match scrut_ty with
+  | Some st when holds_linear env st ->
+    (match repr t with
+     | TLin (lin, _) when lin <> Ast.Unrestricted -> true
+     | t -> contains_linear env t || mentions_tvar t)
+  | _ -> true
+
 (** [bind_pattern_bindings scrut_expr bindings env] adds [bindings] to [env].
     Linearity is propagated in two ways:
     1. If a binding's type (after unification) is [TLin], it is registered as
@@ -296,6 +325,17 @@ let bind_pattern_bindings scrut_expr (bindings : (string * scheme) list) env =
     | Ast.EVar sname ->
       (match List.find_opt (fun le -> le.le_name = sname.txt) env.lin with
        | Some le when le.le_lin <> Ast.Unrestricted -> Some le.le_lin
+       | _ -> None)
+    | _ -> None
+  in
+  (* Inside a [@[trusted_linear]] kernel, a binding takes its linearity from
+     its own type only (see [trusted_linear_body]). *)
+  let inherited_lin = if env.trusted_linear_body then None else inherited_lin in
+  let scrut_ty =
+    match scrut_expr with
+    | Ast.EVar sname ->
+      (match StrMap.find_opt sname.txt env.vars with
+       | Some (Mono t) -> Some t
        | _ -> None)
     | _ -> None
   in
@@ -326,10 +366,10 @@ let bind_pattern_bindings scrut_expr (bindings : (string * scheme) list) env =
            bind_linear name lin inner acc_env
          | t' ->
            (match inherited_lin with
-            | Some lin ->
+            | Some lin when inherits_linearity env ~scrut_ty t' ->
               (* Scrutinee was linear: the bound variable inherits its linearity. *)
               bind_linear name lin t' acc_env
-            | None ->
+            | _ ->
               (match always_linear_of t' with
                | Some lin -> bind_linear name lin t' acc_env
                | None ->
@@ -1051,34 +1091,64 @@ let check_linear_instantiations env =
     name <> "" && not (Char.equal name.[0] '_' ||
                        (Char.lowercase_ascii name.[0] <> Char.uppercase_ascii name.[0]))
   in
-  Hashtbl.iter (fun sp (name, ids, tys, scheme_ty) ->
+  (* A type variable an enclosing function opted in ([linear x : a]) stands
+     for a value that may be linear at that function's call sites, so inside
+     its body it is treated as linear here: `fn w(linear v : a) do dup(v) end`
+     would otherwise launder a linear value through a [dup] that never opted
+     in.  Not inside a [@[trusted_linear]] kernel, whose calls are reviewed. *)
+  let rec mentions_linear_ok t =
+    match repr t with
+    | TVar { contents = Unbound (id, _) } -> Hashtbl.mem env.linear_ok_ids id
+    | TArrow (a, b) -> mentions_linear_ok a || mentions_linear_ok b
+    | TCon ("Pid", _) -> false
+    | TCon (_, ts) | TTuple ts -> List.exists mentions_linear_ok ts
+    | TRecord flds -> List.exists (fun (_, t) -> mentions_linear_ok t) flds
+    | TLin (_, t) -> mentions_linear_ok t
+    | _ -> false
+  in
+  Hashtbl.iter (fun sp (name, ids, tys, scheme_ty, trusted) ->
     if not (is_operator name) then
       let consumed = consumed_var_ids scheme_ty in
       let reported = ref false in
       List.iter2 (fun id t ->
           if not !reported && List.mem id consumed
-             && not (Hashtbl.mem env.linear_ok_ids id)
-             && contains_linear env t then begin
-            reported := true;
-            Err.error env.errors ~span:sp
-              (Printf.sprintf
-                 "`%s` is linear, but `%s` is generic in a parameter of that type, \
-                  so it may drop or duplicate the value.\n\
-                  Consume the value here instead, or, if `%s` uses that parameter \
-                  exactly once, mark it `linear` where `%s` is defined \
-                  (`linear x : a`)."
-                 (pp_ty (repr t)) name name name)
+             && not (Hashtbl.mem env.linear_ok_ids id) then begin
+            if contains_linear env t then begin
+              reported := true;
+              Err.error env.errors ~span:sp
+                (Printf.sprintf
+                   "`%s` is linear, but `%s` is generic in a parameter of that type, \
+                    so it may drop or duplicate the value.\n\
+                    Consume the value here instead, or, if `%s` uses that parameter \
+                    exactly once, mark it `linear` where `%s` is defined \
+                    (`linear x : a`)."
+                   (pp_ty (repr t)) name name name)
+            end else if not trusted && mentions_linear_ok t then begin
+              reported := true;
+              Err.error env.errors ~span:sp
+                (Printf.sprintf
+                   "This passes `%s` a value that may be linear: the enclosing \
+                    function opted in to linear values of its type \
+                    (`linear x : ...`), but `%s` is generic in a parameter of that \
+                    type, so it may drop or duplicate the value.\n\
+                    Consume the value here instead, or, if `%s` uses that parameter \
+                    exactly once, mark it `linear` where `%s` is defined."
+                   name name name name)
+            end
           end)
         ids tys)
     env.linear_generic_uses
 
 (** Report every wildcard in [wilds] (from [with_wildcards], after the pattern
-    has been unified) whose own type is linear: [_] drops the value, and March
-    has no destructor to run.  Judged on the wildcard's type, never the
-    scrutinee's, so [S1(_)] discarding an [Int] payload is fine. *)
+    has been unified) whose own type is linear or holds a linear value: [_]
+    drops the value, and March has no destructor to run.  Judged on the
+    wildcard's type, never the scrutinee's, so [S1(_)] discarding an [Int]
+    payload is fine, while [(_, n)] over [(Option(S1), Int)] drops the [S1]
+    inside the [Option] ([contains_linear], not [is_linear_ty]: the wildcard
+    check predates the containment rule). *)
 let check_wildcard_discards env (wilds : (Ast.span * ty) list) =
   List.iter (fun (sp, t) ->
-      if is_linear_ty env t then report_wildcard_discard env ~span:sp t)
+      if contains_linear env t then report_wildcard_discard env ~span:sp t)
     (List.rev wilds)
 
 (** [infer_expr env e] synthesises the type of [e], accumulating any
@@ -3315,11 +3385,26 @@ and infer_block env exprs =
         (* For linear/affine bindings, extract the underlying type from Poly schemes
            too — phantom type params cause gen_binding to generalize, but the binding
            is still a single concrete value that must be consumed exactly once. *)
+        (* A destructuring pattern over a value that is linear only because of
+           what its type holds binds each component by its own type
+           ([inherits_linearity]): `let (n, m2) = LinearMap.size(m)` leaves
+           [n] an ordinary Int.  An explicit `linear let` keeps every binder
+           linear. *)
+        let by_own_type =
+          b.bind_lin = Ast.Unrestricted
+          && (match b.bind_pat with Ast.PatVar _ -> false | _ -> true)
+        in
         List.fold_left (fun acc_env (bname, sch) ->
             let t = match sch with
               | Mono t | Poly (_, _, t) -> t
             in
-            bind_linear bname lin t acc_env
+            if by_own_type
+               && not (inherits_linearity env ~scrut_ty:(Some rhs_ty) t) then
+              (* A non-variable scrutinee: nothing to inherit, so the
+                 binding is linear only if its own type makes it so. *)
+              bind_pattern_bindings (Ast.ELit (Ast.LitInt 0, sp)) [ (bname, sch) ] acc_env
+            else
+              bind_linear bname lin t acc_env
           ) env bindings'
     in
     (* Mark a simple, unrestricted `let name = expr` binding as a genuine
@@ -3613,6 +3698,42 @@ let warn_unused_params env (params : Ast.fn_param list) (body : Ast.expr) _fn_sp
       if not (is_cap_ty p.param_ty) then check_name p.param_name.txt p.param_name.span
   ) params
 
+(** Apply a function's [@[trusted_linear(v)]] attributes: each [v] must name
+    a type variable of the annotated signature that is still generic, and is
+    added to [linear_ok_ids] at its FINAL representative, the id [generalize]
+    is about to quantify (marking the annotation's id while the body is checked
+    would lose the mark if unification linked it elsewhere).  Reserved for the
+    standard library: its bodies are a trusted base, so it is kept small.  The
+    gate is enforced when the driver has registered the stdlib's files
+    ([stdlib_source_files]); a harness that has not (LSP, unit tests) is left
+    permissive rather than risk a false error inside the stdlib itself. *)
+let mark_trusted_linear_vars env (def : Ast.fn_def) ~fn_span ~fn_tvars vars =
+  if vars <> [] && !stdlib_source_files <> [] && not (span_is_stdlib fn_span) then
+    Err.error env.errors ~span:def.fn_name.span
+      "`@[trusted_linear]` is reserved for the standard library.\n\
+       Its function bodies are trusted, not checked, to use each value once. \
+       To let a generic function accept a linear value, mark the parameter \
+       instead: `linear x : a`."
+  else
+    List.iter (fun v ->
+        match List.assoc_opt v fn_tvars with
+        | None ->
+          Err.error env.errors ~span:def.fn_name.span
+            (Printf.sprintf
+               "`@[trusted_linear(%s)]` names no type variable of `%s`'s signature."
+               v def.fn_name.txt)
+        | Some t ->
+          (match repr t with
+           | TVar { contents = Unbound (id, _) } ->
+             Hashtbl.replace env.linear_ok_ids id ()
+           | t' ->
+             Err.error env.errors ~span:def.fn_name.span
+               (Printf.sprintf
+                  "`@[trusted_linear(%s)]`: `%s` is not generic in `%s`; the body \
+                   fixed it to `%s`."
+                  v v def.fn_name.txt (pp_ty t'))))
+      vars
+
 (** Check a function definition.
 
     Strategy:
@@ -3816,6 +3937,24 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
          own check_fn. *)
       let body_env = { body_env with cur_fn_public = (def.fn_vis = Ast.Public) } in
 
+      (* `@[trusted_linear(v)]` (specs/progress/2026-09-18-linear-map.md): the
+         stdlib's LinearMap kernel.  Callers may instantiate the signature's
+         type variable [v] with a linear type (marked below, once the scheme's
+         variable is final); the body's pattern bindings take linearity from
+         their own types only, and its moving each [v] exactly once is reviewed,
+         not checked. *)
+      let trusted_vars =
+        List.filter_map (fun a ->
+            let pre = "trusted_linear:" in
+            let n = String.length pre in
+            if String.length a > n && String.sub a 0 n = pre
+            then Some (String.sub a n (String.length a - n)) else None)
+          def.fn_attrs
+      in
+      let body_env =
+        if trusted_vars = [] then body_env
+        else { body_env with trusted_linear_body = true } in
+
       (* ── A set-valued `@[measure]` body is LOGIC, not code ──────────────────
          (specs/2026-09-13-set-refinements-design.md §4.4, plan §2.1 option 1.)
          Its body may use the refinement checker's set vocabulary — `union`,
@@ -3980,6 +4119,7 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
 
       (* Generalize; attach bound constraints and any when-clause class constraints *)
       let all_constraints = bound_constraints @ class_constraints in
+      mark_trusted_linear_vars env def ~fn_span ~fn_tvars:!fn_tvars trusted_vars;
       let base_sch = generalize env.level fn_ty in
       (match all_constraints with
        | [] -> base_sch

@@ -1875,6 +1875,7 @@ type_decl ::= "opaque"? "type" upper_name type_params? "=" variant ("|" variant)
             | "ptype" upper_name type_params? "=" "{" ty_record_field,* "}"
             | "alwayslinear" "type" upper_name type_params? "=" variant ("|" variant)*
             | "alwayslinear" "type" upper_name type_params? "=" "{" ty_record_field,* "}"
+            | "alwayslinear" "opaque" "type" upper_name type_params? "=" variant ("|" variant)*
             | "tag" upper_name                                (* sugar: type Foo = Foo *)
 
 type_params ::= "(" lower_name,+ ")"
@@ -1911,6 +1912,10 @@ visibility/linearity prefixes × {variant body, record body}), plus the
   type with values that must always be used exactly once; grammar-wise it is
   the same variant/record body shapes, just tagged into a different
   top-level constructor.
+- **`alwayslinear opaque type`** (variant body only, added 2026-09-18 for the
+  stdlib's `LinearMap`) is `DAlwaysLinearType` with the same variant-visibility
+  remapping `opaque type` performs: linear at every binding, constructors
+  private to the module.
 - **`tag Foo`** (`parser.mly:469–473`) is pure sugar: it builds
   `DType (Public, Foo, [], TDVariant [{ var_name = Foo; var_args = []; … }],
   …)` directly in the parser action, exactly equivalent to writing `type

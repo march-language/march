@@ -206,6 +206,8 @@ native_let_tuple_destructure: coverage audit (user + stdlib): 114 enforced, 0 in
 native_let_tuple_destructure: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_let_tuple_nested: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
 native_let_tuple_nested: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_linear_map: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
+native_linear_map: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_mailbox_bounded: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
 native_mailbox_bounded: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_mailbox_decl: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
@@ -586,6 +588,8 @@ stdlib_json_stream: coverage audit (user + stdlib): 114 enforced, 0 inert (warne
 stdlib_json_stream: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_lazy_niche_probe: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
 stdlib_lazy_niche_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_linear_map: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
+stdlib_linear_map: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_list: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
 stdlib_list: coverage audit (user code): 16 enforced, 0 inert (warned), 0 unenforced
 stdlib_logger: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced

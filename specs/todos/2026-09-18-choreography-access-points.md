@@ -51,3 +51,6 @@ nodes, the lowest-numbered role's node is the natural matchmaker, since it alrea
 under the connect rule. What it must decide: how it pairs registrations, what a client
 waits for, and what happens to a registration whose node dies before its session forms.
 Settle that here before building.
+
+Several sessions per hosting actor need a map from session id to the linear
+`Parked_<Role>`; that collection is designed in [[2026-09-18-linear-map]].
