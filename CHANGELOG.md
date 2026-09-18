@@ -12,6 +12,11 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Changed
+- A dead green thread's execution context (880 of its bookkeeping struct's 1136 bytes on
+  macOS/arm64) is freed when it dies, instead of being retained for the life of the
+  process: memory held after a burst of concurrency drops 4.4× per task and 2.7× per actor
+  (measured: −28% peak RSS on the actor-churn load scenario). `Scheduler.stat(7)` counts
+  releases.
 - `tcp_connect`'s name lookup (`getaddrinfo`) runs on a helper thread and parks the
   green thread: a slow resolver no longer stalls a scheduler thread. That was the last
   blocking call on the dial path.

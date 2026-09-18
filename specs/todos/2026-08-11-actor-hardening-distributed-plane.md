@@ -38,7 +38,9 @@ reclamation) is single-node and stays here.
 
 ## Status 2026-09-17
 
-Validated against what shipped: **only item 5 is still open.** Items 1–3 landed with the
+Validated against what shipped: **only item 5 is still open**, and it is now specced as
+[[2026-09-17-proc-struct-reclamation]] (survey-first, as this file asked; the survey found
+that "epoch-based" is the wrong shape and proposes shrinking the struct, then pid handles). Items 1–3 landed with the
 distributed plane -- 1 as `NodeQueue`'s credit-based flow control
 ([[2026-09-15-credit-based-flow-control]]), 2 as the control/data connection split
 (`ClusterConn.connect_split` / `accept_split`,

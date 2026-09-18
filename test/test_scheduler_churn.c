@@ -8,6 +8,10 @@
  * MARCH_STAT_STACKS_RECYCLED] (index 5, via march_sched_stat(5)) climbs
  * roughly 1:1 with deaths. Asserted via the counter, not VA directly — VA
  * accounting is OS-specific and not portable to assert on here.
+ *
+ * Also the execution context: freed at every death (march_sched_stat(7),
+ * MARCH_STAT_CTX_RELEASED), exactly one per proc -- see
+ * specs/progress/2026-09-17-proc-ctx-released-at-death.md.
  */
 #include "march_scheduler.h"
 #include <assert.h>
@@ -61,6 +65,14 @@ int main(void) {
     int64_t recycled = march_sched_stat(5);   /* MARCH_STAT_STACKS_RECYCLED */
     fprintf(stderr, "recycled=%lld\n", (long long)recycled);
     assert(recycled >= 2900);   /* nearly every death fed the free-list */
+
+    /* Every death also releases its execution context (the 880-byte
+     * ucontext_t that used to live inside the never-freed proc struct).
+     * EXACTLY one per death, and not approximately: the release is on the
+     * reap path every dead proc takes, in every build. */
+    int64_t released = march_sched_stat(7);   /* MARCH_STAT_CTX_RELEASED */
+    fprintf(stderr, "ctx released=%lld\n", (long long)released);
+    assert(released == 3000);
 
     /* Reuse: a fresh batch must consume the free-list, not grow it 1:1.
      * (march_sched_init() deliberately keeps g_stack_free across re-init —

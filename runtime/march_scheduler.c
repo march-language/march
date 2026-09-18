@@ -372,7 +372,7 @@ int64_t march_sched_stat(int64_t which) {
     case 0: return atomic_load_explicit(&g_live_procs, memory_order_relaxed);
     case 1: return atomic_load_explicit(&g_next_pid,   memory_order_relaxed);
     case 2: return atomic_load_explicit(&g_runq_len,   memory_order_relaxed);
-    case 3: case 4: case 5:
+    case 3: case 4: case 5: case 7:
         return atomic_load_explicit(&march_stat_counters[which],
                                     memory_order_relaxed);
     case 6: {
@@ -1184,7 +1184,7 @@ static void proc_trampoline(int arg_hi, int arg_lo) {
     atomic_store_explicit(&proc->status, PROC_DEAD, memory_order_release);
     MARCH_ASAN_SWITCH_TO_SCHED(proc);
     MARCH_TSAN_SWITCH_TO_SCHED(proc->owner_sched);
-    swapcontext(&proc->ctx, &proc->owner_sched->sched_ctx);
+    swapcontext(proc->ctx, &proc->owner_sched->sched_ctx);
     /* If we ever return here the OS context is gone — abort defensively. */
     abort();
 }
@@ -1455,24 +1455,28 @@ static march_proc *sched_spawn_common(void (*fn)(void *), void *arg,
         return NULL;
     }
 
-    /* Build the execution context. */
-    if (getcontext(&p->ctx) != 0) {
-        fputs("march_sched: getcontext failed\n", stderr);
+    /* Build the execution context -- in its own allocation, freed at the
+     * reap (see the ctx field comment in march_scheduler.h). */
+    p->ctx = (ucontext_t *)calloc(1, sizeof(ucontext_t));
+    if (!p->ctx || getcontext(p->ctx) != 0) {
+        fputs(p->ctx ? "march_sched: getcontext failed\n"
+                     : "march_sched: out of memory (context alloc)\n", stderr);
         atomic_fetch_add_explicit(&march_stat_counters[MARCH_STAT_STACK_FAIL],
                                    1, memory_order_relaxed);
+        free(p->ctx);
         munmap(p->stack_mmap_base, p->stack_alloc);
         free(p);
         return NULL;
     }
-    p->ctx.uc_stack.ss_sp   = p->stack_base;
-    p->ctx.uc_stack.ss_size = MARCH_STACK_INITIAL;
-    p->ctx.uc_link          = NULL; /* Trampoline manages the return explicitly. */
+    p->ctx->uc_stack.ss_sp   = p->stack_base;
+    p->ctx->uc_stack.ss_size = MARCH_STACK_INITIAL;
+    p->ctx->uc_link          = NULL; /* Trampoline manages the return explicitly. */
 
     /* Pass the proc pointer as two 32-bit ints (makecontext portability). */
     uintptr_t addr  = (uintptr_t)(void *)p;
     int       arg_hi = (int)(uint32_t)(addr >> 32);
     int       arg_lo = (int)(uint32_t)(addr & 0xFFFFFFFFu);
-    makecontext(&p->ctx, (void (*)(void))proc_trampoline, 2, arg_hi, arg_lo);
+    makecontext(p->ctx, (void (*)(void))proc_trampoline, 2, arg_hi, arg_lo);
 
     registry_add(p);
     atomic_fetch_add_explicit(&g_live_procs, 1, memory_order_relaxed);
@@ -1756,9 +1760,17 @@ static void sched_loop(march_scheduler *sched) {
         sched->current  = p;
 
         dbg_mark_dispatched(p, sched->id);
+        /* A dispatched proc must have a context: NULL means it was reaped,
+         * and resuming it would jump into freed memory.  Crash here, at the
+         * cause, rather than in a corrupt context switch. */
+        if (!p->ctx) {
+            fprintf(stderr, "march_sched[BUG]: dispatch of reaped pid %lld (no context)\n",
+                    (long long)p->pid);
+            abort();
+        }
         MARCH_ASAN_SWITCH_TO_PROC(sched, p);
         MARCH_TSAN_SWITCH_TO_PROC(p);
-        swapcontext(&sched->sched_ctx, &p->ctx);
+        swapcontext(&sched->sched_ctx, p->ctx);
         MARCH_ASAN_SWITCH_DONE(sched);
         dbg_mark_undispatched(p);
 
@@ -1862,8 +1874,9 @@ static void sched_loop(march_scheduler *sched) {
                     drained = next;
                 }
             }
-            /* Recycle the STACK reservation (Task 12) — the proc STRUCT
-             * itself still leaks; see the "Deliberately NOT munmap ...
+            /* Recycle the STACK reservation (Task 12) and free the execution
+             * context (below) — the rest of the proc STRUCT, 256 bytes on
+             * macOS/arm64, still leaks; see the "Deliberately NOT munmap ...
              * / free(p)" comment immediately below for why that part is
              * unchanged (Task 2's timers and cross-thread actor-meta
              * readers depend on `p` staying valid forever). The stack
@@ -1888,6 +1901,24 @@ static void sched_loop(march_scheduler *sched) {
                     memory_order_relaxed);
             }
 #endif
+            /* The execution context goes with the stack, by the same
+             * argument (the stack free-list comment above): this proc never
+             * runs again, and nothing else ever reads its context -- the
+             * stale cross-thread readers the comment below is about touch
+             * status, pid and mailbox fields only.  Its final swapcontext
+             * saved into it BEFORE control reached this thread, so nothing
+             * is writing it either.  Freed in EVERY build, unlike the stack:
+             * under ASAN a stale reader of a dead proc's context is then a
+             * reported use-after-free rather than a silent read.  This is
+             * 880 of the struct's 1136 bytes on macOS/arm64
+             * (specs/progress/2026-09-17-proc-ctx-released-at-death.md). */
+            if (p->ctx) {
+                free(p->ctx);
+                p->ctx = NULL;
+                atomic_fetch_add_explicit(
+                    &march_stat_counters[MARCH_STAT_CTX_RELEASED], 1,
+                    memory_order_relaxed);
+            }
             /* Deliberately NOT munmap(p->stack_mmap_base, ...) / free(p) here.
              *
              * march_actor_meta.green_thread (march_runtime.c) holds a
@@ -2045,7 +2076,7 @@ void march_sched_yield(void) {
     }
     MARCH_ASAN_SWITCH_TO_SCHED(p);
     MARCH_TSAN_SWITCH_TO_SCHED(tl_sched);
-    swapcontext(&p->ctx, &tl_sched->sched_ctx);
+    swapcontext(p->ctx, &tl_sched->sched_ctx);
     MARCH_ASAN_SWITCH_DONE(p);
     /* Execution resumes here after the scheduler re-schedules us — possibly
      * on a different OS thread than the one that called this function. */
@@ -2190,7 +2221,7 @@ void march_sched_exit(void) {
      * MARCH_ASAN_SWITCH_DONE call. */
     MARCH_ASAN_SWITCH_TO_SCHED(p);
     MARCH_TSAN_SWITCH_TO_SCHED(tl_sched);
-    swapcontext(&p->ctx, &tl_sched->sched_ctx);
+    swapcontext(p->ctx, &tl_sched->sched_ctx);
     abort(); /* Should never be reached. */
 }
 
@@ -2654,7 +2685,7 @@ static void mbox_recv_park_once(march_proc *p) {
     march_scheduler *s = tl_sched;
     MARCH_ASAN_SWITCH_TO_SCHED(p);
     MARCH_TSAN_SWITCH_TO_SCHED(s);
-    swapcontext(&p->ctx, &s->sched_ctx);
+    swapcontext(p->ctx, &s->sched_ctx);
     MARCH_ASAN_SWITCH_DONE(p);
 }
 
@@ -2939,7 +2970,7 @@ void march_sched_park_self(void) {
 
     MARCH_ASAN_SWITCH_TO_SCHED(p);
     MARCH_TSAN_SWITCH_TO_SCHED(tl_sched);
-    swapcontext(&p->ctx, &tl_sched->sched_ctx);
+    swapcontext(p->ctx, &tl_sched->sched_ctx);
     MARCH_ASAN_SWITCH_DONE(p);
     /* Resumed: some waker called march_sched_wake(p), which CAS'd us
      * WAITING->RUNNABLE; sched_loop's dispatch CAS'd RUNNABLE->RUNNING
@@ -3234,7 +3265,7 @@ static void *march_sched_recv_until_mode(int64_t deadline_ms, int user_only) {
 
     MARCH_ASAN_SWITCH_TO_SCHED(p);
     MARCH_TSAN_SWITCH_TO_SCHED(tl_sched);
-    swapcontext(&p->ctx, &tl_sched->sched_ctx);
+    swapcontext(p->ctx, &tl_sched->sched_ctx);
     MARCH_ASAN_SWITCH_DONE(p);
     atomic_fetch_add_explicit(&p->park_gen, 1, memory_order_relaxed);
     /* Context is now saved.  The scheduler (sched_loop) transitions us from
