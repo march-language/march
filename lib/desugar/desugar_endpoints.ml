@@ -494,10 +494,52 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
                ( pcon "Err" [ pvar "e" ],
                  fail_with (string_concat (lit_str (Printf.sprintf "%s, role %s: " proto role)) (var "e")) ) ]) ]
   in
+  (* ── failure (specs/todos/2026-09-18-choreography-failure-handling.md) ──
+     A cancel handler receives the role this receive was waiting on, why it
+     is gone, and a [Cancelled_<Role>] token -- and NO session state.  Its
+     only way to produce the [Yield] it must return is `cancelled(s, c)`,
+     which consumes the token.  So a cancel handler cannot communicate in the
+     failed session: it holds nothing any step function accepts.  That is
+     Maty's typing of a failure callback, `end -> end`, from the linearity
+     the callback API already has. *)
+  let cancelled_name = "Cancelled_" ^ role in
+  let t_cancelled = tycon cancelled_name [] in
+  let cancelled_ty = DType (Public, n cancelled_name, [], TDVariant [ variant cancelled_name [ tycon "Secret" [] ] ], sp) in
+  let cancelled_fn =
+    fn "cancelled" [ ("s", t_cap_session); ("c", t_cancelled) ] t_yield
+      (match_ (var "c") [ (pcon cancelled_name [ PatWild sp ], block [ let_wild (var "s"); yield ]) ])
+  in
+  let t_on_cancel = TyArrow (t_int, TyArrow (t_string, TyArrow (t_cancelled, t_yield))) in
+  (* `Session.on_cancel(s, ep, h)` installs the cancel handler with the
+     continuation that `suspend` installs next, and returns [ep] -- threaded
+     through, because [ep] is bound from a linear state and may be used once. *)
+  let with_cancel ep =
+    app "Session.on_cancel"
+      [ var "s"; ep;
+        lam [ "c_role"; "c_cause"; "c_ep" ]
+          (block
+             [ let_wild (app "on_cancel" [ var "c_role"; var "c_cause"; con cancelled_name [ con "Secret" [] ] ]);
+               var "c_ep" ]) ]
+  in
   let transitions =
     List.concat_map
       (fun (node, this) ->
          let on_ep body = match_ (var "st") [ (pcon this [ pvar "ep" ], body) ] in
+         (* `leave_<state>(s, st, why)`: exit the session from this state on
+            purpose (Maty's `leave`).  The endpoint is cancelled with cause
+            "left: why" and the peers are told. *)
+         let leave_fn =
+           match node with
+           | LEnd | LRec _ | LVar _ -> []
+           | _ ->
+             let short =
+               if String.length this > 2 && String.sub this 0 2 = "S_" then String.sub this 2 (String.length this - 2)
+               else this
+             in
+             [ fn ("leave_" ^ short) [ ("s", t_cap_session); ("st", sty this); ("why", t_string) ] t_yield
+                 (on_ep (block [ let_wild (app "Session.leave" [ var "s"; var "ep"; var "why" ]); yield ])) ]
+         in
+         leave_fn @
          match node with
          | LSend (to_, ctor, payload, next) ->
            let nx = state_of next in
@@ -521,17 +563,27 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
            [ fn ("recv_" ^ ctor)
                [ ("s", t_cap_session); ("st", sty this); ("k", TyArrow (payload, TyArrow (sty nx, t_yield))) ]
                t_yield
-               (on_ep (block [ let_wild (suspend_with from (var "ep") [ (ctor, "k", nx) ]); yield ])) ]
+               (on_ep (block [ let_wild (suspend_with from (var "ep") [ (ctor, "k", nx) ]); yield ]));
+             (* the same receive, with a cancel handler *)
+             fn ("recv_" ^ ctor ^ "_or")
+               [ ("s", t_cap_session); ("st", sty this); ("k", TyArrow (payload, TyArrow (sty nx, t_yield)));
+                 ("on_cancel", t_on_cancel) ]
+               t_yield
+               (on_ep (block [ let_wild (suspend_with from (with_cancel (var "ep")) [ (ctor, "k", nx) ]); yield ])) ]
          | LOffer (from, brs) ->
            let cbs = List.map (fun (lbl, ctor, payload, next) -> (lbl, ctor, payload, state_of next)) brs in
-           [ fn ("offer_" ^ String.concat "_" (List.map (fun (l, _, _, _) -> l) brs))
-               ([ ("s", t_cap_session); ("st", sty this) ]
-                @ List.map (fun (lbl, _, payload, nx) -> ("on_" ^ lbl, TyArrow (payload, TyArrow (sty nx, t_yield)))) cbs)
+           let offer_name = "offer_" ^ String.concat "_" (List.map (fun (l, _, _, _) -> l) brs) in
+           let branch_params =
+             List.map (fun (lbl, _, payload, nx) -> ("on_" ^ lbl, TyArrow (payload, TyArrow (sty nx, t_yield)))) cbs
+           in
+           let arms = List.map (fun (lbl, ctor, _, nx) -> (ctor, "on_" ^ lbl, nx)) cbs in
+           [ fn offer_name ([ ("s", t_cap_session); ("st", sty this) ] @ branch_params) t_yield
+               (on_ep (block [ let_wild (suspend_with from (var "ep") arms); yield ]));
+             (* the same offer, with a cancel handler *)
+             fn (offer_name ^ "_or")
+               ([ ("s", t_cap_session); ("st", sty this) ] @ branch_params @ [ ("on_cancel", t_on_cancel) ])
                t_yield
-               (on_ep
-                  (block
-                     [ let_wild (suspend_with from (var "ep") (List.map (fun (lbl, ctor, _, nx) -> (ctor, "on_" ^ lbl, nx)) cbs));
-                       yield ])) ]
+               (on_ep (block [ let_wild (suspend_with from (with_cancel (var "ep")) arms); yield ])) ]
          | LEnd ->
            [ fn "close" [ ("s", t_cap_session); ("st", sty this) ] t_yield
                (on_ep (block [ let_wild (app "Session.close" [ var "s"; var "ep" ]); yield ])) ]
@@ -658,7 +710,21 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
                   @ [ (pcon idle_c [ PatWild sp ], panic (where ^ ": delivery before the endpoint was started"));
                       (pcon closed_c [ PatWild sp ], panic (where ^ ": delivery to a closed endpoint")) ]) ]) ]
   in
-  let event_api = (parked_ty :: event_ty) @ (idle :: take_idle :: awaits) @ resume in
+  (* `cancel(p)`: the hosted endpoint was cancelled (its runner said so,
+     through `host_<Role>_or`'s cancel function).  Consumes the parked value
+     and returns [Closed]: the actor must store it, as for any other step,
+     and nothing can resume a closed endpoint. *)
+  let cancel_parked =
+    (* One arm per constructor, never a top-level `_`: a wildcard over the
+       whole value would DISCARD a linear [Parked], which the checker
+       rejects; matching the constructor consumes it. *)
+    fn "cancel" [ ("p", t_parked) ] t_parked
+      (match_ (var "p")
+         ((pcon idle_c [ PatWild sp ], con closed_c [ secret_v ])
+          :: List.map (fun (this, _) -> (pcon ("Awaiting_" ^ this) [ PatWild sp; PatWild sp ], con closed_c [ secret_v ])) receiving
+          @ [ (pcon closed_c [ PatWild sp ], con closed_c [ secret_v ]) ]))
+  in
+  let event_api = (parked_ty :: event_ty) @ (idle :: take_idle :: cancel_parked :: awaits) @ resume in
   let entry = state_of root in
   let register =
     fn "register" [ ("s", t_cap_session); ("ap", t_int) ] (sty entry)
@@ -669,7 +735,9 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
      the dependency itself rather than leaning on the enclosing module's
      manifest -- the capability checker asks each module for its own. *)
   let needs = DNeeds ([ ([ n "Session"; n "Live" ], None) ], sp) in
-  (DMod (n mname, Public, (needs :: secret :: yield_ty :: state_types) @ (register :: transitions) @ event_api, sp), entry)
+  (DMod (n mname, Public,
+         (needs :: secret :: yield_ty :: cancelled_ty :: state_types) @ (register :: cancelled_fn :: transitions) @ event_api, sp),
+   entry)
 
 (** `<P>_Run`: the role runner's typed front.  Per role,
 
@@ -729,6 +797,25 @@ let run_module ~proto ~(roles : (string * string) list) : decl =
                 var "deliver" ]))
       roles
   in
+  (* `host_<Role>_or(…, start, deliver, cancel)`: the same, and the actor is
+     told when its endpoint is cancelled: `cancel(s, role, cause, ep)`. *)
+  let hosters_or =
+    List.map
+      (fun (role, _entry) ->
+         let t_start = TyArrow (t_cap_session, t_unit) in
+         let t_deliver = TyArrow (t_cap_session, TyArrow (t_int, TyArrow (t_bytes, TyArrow (t_int, t_unit)))) in
+         let t_cancel = TyArrow (t_cap_session, TyArrow (t_int, TyArrow (t_string, TyArrow (t_int, t_unit)))) in
+         fn ("host_" ^ role ^ "_or")
+           [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node_id", t_string); ("secret", t_string);
+             ("addrs", t_addrs); ("host", tycon "Pid" [ TyVar (n "a") ]); ("start", t_start); ("deliver", t_deliver);
+             ("cancel", t_cancel) ]
+           (tycon "Result" [ t_unit; tycon "SessionNode.RunError" [] ])
+           (app "SessionNode.run_hosted_or"
+              [ var "io"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) []; var "node_id";
+                var "secret"; var "addrs"; lam [ "_ep" ] unit; app "pid_to_int" [ var "host" ]; var "start";
+                var "deliver"; var "cancel" ]))
+      roles
+  in
   let addrs =
     fn "addrs_from_env" [] t_addrs (app "SessionNode.addrs_from_env" [ lit_str proto; app (msg ^ ".role_names") [] ])
   in
@@ -741,7 +828,7 @@ let run_module ~proto ~(roles : (string * string) list) : decl =
             [ "Session"; "Live" ] ],
         sp )
   in
-  DMod (n mname, Public, (needs :: addrs :: runners) @ hosters, sp)
+  DMod (n mname, Public, (needs :: addrs :: runners) @ hosters @ hosters_or, sp)
 
 (** Whether [expand] emits `<P>_Run`.  On for every real compile.  A test that
     typechecks generated code against a thin stdlib without `SessionNode`

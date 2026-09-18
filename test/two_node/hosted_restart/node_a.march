@@ -43,7 +43,7 @@ mod HostedRestartNodeA do
     println("node-a: up")
     match Stream_Run.run_Prod(c, "node-a", "stream-secret", Stream_Run.addrs_from_env(), fn (s, st) -> prod(s, st, 1)) do
       Ok(_) -> println("Prod: closed")
-      Err(SessionNode.PeerGone(role, _)) -> println("Prod: role " ++ int_to_string(role) ++ " gone")
+      Err(SessionNode.Cancelled(role, _)) -> println("Prod: role " ++ int_to_string(role) ++ " gone")
       Err(e) -> panic(SessionNode.run_error_message(e))
     end
   end

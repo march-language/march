@@ -234,7 +234,7 @@ let replayed = bad "sending twice on one state is a linearity error (replay)" "i
 
 let abandoned = bad "registering and never driving the session is a linearity error (abandon)" "was never used" (wrap (stream ^ {|
   fn go(c : Cap(IO)) do
-    let s = Session.attach(c, { register: fn (_a, r) -> r, emit: fn (e, _t, _m) -> e, suspend: fn (e, _f, _h) -> e, close: fn _e -> (), fail: fn (_e, w) -> panic(w) })
+    let s = Session.attach(c, { register: fn (_a, r) -> r, emit: fn (e, _t, _m) -> e, suspend: fn (e, _f, _h) -> e, close: fn _e -> (), fail: fn (_e, w) -> panic(w), on_cancel: fn (e, _h) -> e, leave: fn (_e, _w) -> () })
     let st = Stream_Prod.register(s, 0)
     ()
   end
@@ -357,6 +357,62 @@ let event_pid_handle = ok "a pid of an actor holding a Parked can be passed to a
    module function: `monitor(target)` used to typecheck as a `Pid(a) -> Int`
    VALUE (a partial application March does not have) that `let _ =` then
    discarded, so no monitor was ever set and no Down ever came. *)
+(* ── failure handlers (specs/todos/2026-09-18-choreography-failure-handling.md)
+   A cancel handler gets the role, the cause and an unforgeable
+   [Cancelled_<Role>] token, and no session state: it cannot communicate in
+   the failed session (Maty's `end -> end` failure callback).  These pin
+   that from both sides. *)
+
+let cancel_handler_ok = ok "a cancel handler that records the failure and ends the endpoint" (wrap (stream ^ {|
+  pfn cons(s : Cap(Session.Live), st : Stream_Cons.S_recv_Msg_Prod_Cons_1) : Stream_Cons.Yield do
+    Stream_Cons.recv_Msg_Prod_Cons_1_or(s, st,
+      fn (_n, st1) -> Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true)),
+      fn (_role, _cause, c) -> Stream_Cons.cancelled(s, c))
+  end
+|}))
+
+(* The state a receive consumed is gone for its cancel handler too: reusing
+   it there is the linearity error it is anywhere else.  If this were
+   accepted, a handler could keep talking in the failed session. *)
+let cancel_handler_reuses_state = bad "a cancel handler cannot use the state its receive consumed"
+    "`st` is used more than once" (wrap (stream ^ {|
+  pfn cons(s : Cap(Session.Live), st : Stream_Cons.S_recv_Msg_Prod_Cons_1) : Stream_Cons.Yield do
+    Stream_Cons.recv_Msg_Prod_Cons_1_or(s, st,
+      fn (_n, st1) -> Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true)),
+      fn (_role, _cause, _c) -> Stream_Cons.close(s, Stream_Cons.choose_done(s, st, true)))
+  end
+|}))
+
+let cancel_handler_must_end = bad "a cancel handler must end the endpoint: it has to return Yield"
+    "Yield" (wrap (stream ^ {|
+  pfn cons(s : Cap(Session.Live), st : Stream_Cons.S_recv_Msg_Prod_Cons_1) : Stream_Cons.Yield do
+    Stream_Cons.recv_Msg_Prod_Cons_1_or(s, st,
+      fn (_n, st1) -> Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true)),
+      fn (_role, _cause, _c) -> ())
+  end
+|}))
+
+let cancelled_forge = bad "a Cancelled token cannot be forged: its constructor takes the private Secret"
+    "Stream_Cons.Secret" (wrap (stream ^ {|
+  pfn early(s : Cap(Session.Live)) : Stream_Cons.Yield do
+    Stream_Cons.cancelled(s, Stream_Cons.Cancelled_Cons(Stream_Cons.Secret))
+  end
+|}))
+
+let hosted_cancel_ok = ok "a hosted actor stores the Closed value `cancel` returns" (cons_actor {|
+    on CancelC() do
+      { state with parked: Stream_Cons.cancel(state.parked) }
+    end
+|})
+
+let hosted_cancel_retained = bad "a hosted actor cannot cancel its Parked value and keep it too"
+    "`state.parked` is used more than once" (cons_actor {|
+    on CancelC() do
+      let _closed = Stream_Cons.cancel(state.parked)
+      state
+    end
+|})
+
 let builtin_under_application = bad "a builtin given fewer arguments than it takes is an error, not a silent partial application"
     "Function `monitor` expects 2 arguments, but got 1" (wrap {|
   actor W do
@@ -470,4 +526,6 @@ end
 let tests =
   [ stream_shape; cli_pid_one_arg; cli_no_unreachable_catch_all; cli_derive_eq_single_ctor; relay_shape; no_attr_no_generation; bad_branch_head; same_label_two_payloads;
     prod_ok; wrong_order; replayed; abandoned; callback_forge; relay_ok; payload_declared_later;
-    event_ok; event_retained; event_not_reparked; event_idle_dropped; event_forge; event_pid_handle; builtin_under_application ]
+    event_ok; event_retained; event_not_reparked; event_idle_dropped; event_forge; event_pid_handle; builtin_under_application;
+    cancel_handler_ok; cancel_handler_reuses_state; cancel_handler_must_end; cancelled_forge;
+    hosted_cancel_ok; hosted_cancel_retained ]

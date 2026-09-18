@@ -56,7 +56,7 @@ mod TestSessionNode do
     end
 
     test "a run error names its role" do
-      assert (SessionNode.run_error_message(SessionNode.PeerGone(2, "eof")) == "session_node: role 2 is gone: eof")
+      assert (SessionNode.run_error_message(SessionNode.Cancelled(2, "role 3: connection lost")) == "session_node: cancelled while waiting on role 2: role 3: connection lost")
       assert (SessionNode.run_error_message(SessionNode.Connect(3, "refused")) == "session_node: connect to role 3: refused")
     end
 

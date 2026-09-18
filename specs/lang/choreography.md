@@ -210,21 +210,71 @@ for.
 
 | Result | Meaning |
 |---|---|
-| `Ok(_)` | Every role reached the end of the protocol. |
-| `Err(PeerGone(role, why))` | The connection to that role dropped before the protocol finished. |
+| `Ok(_)` | This role reached the end of the protocol. |
+| `Err(Cancelled(role, cause))` | This role was waiting on `role`, that role failed, and nothing it had sent was still waiting to be read. `cause` says what went wrong: `"connection lost"`, `"no heartbeat"`, or a chain such as `"role 3: connection lost"` when the failure reached this role through another one. |
 | `Err(Protocol(role, why))` | That role sent something this role cannot accept: a message that does not decode, or one the protocol does not allow at this point. |
 | `Err(HostGone(ep))` | Only for a role hosted in an actor (below): the actor died. |
+| `Err(Left(why))` | This role left the session on purpose (below). |
 | `Err(Listen(port, why))`, `Err(Accept(why))`, `Err(Connect(role, why))` | Startup failed: the port was taken, a handshake was refused, a peer never came up. |
 
-A session cannot be resumed. When one role fails, the session is over for every role. The
-failure spreads along the connections: a role that loses a peer ends its own session and
-disconnects, so its other peers see that connection drop in turn. Each surviving role gets
-`PeerGone` naming the peer it lost, and none of them waits forever. To try
-again, call `run_<Role>` again on every node. That starts a new session with new
-connections. Deciding when to retry, and making sure every node does, is up to whatever
-started the nodes; the runner does not restart anything by itself.
-
 `SessionNode.run_error_message(e)` turns any of these into a readable line.
+
+## When a role fails
+
+A role that crashes, is killed, or stops responding is *cancelled*. Three rules decide what
+happens to the others:
+
+- **A role fails only if it needs the failed role.** If it is waiting for a message from the
+  failed role, and nothing that role sent is still waiting to be read, it is cancelled too.
+  Messages the failed role sent before it went are always delivered first.
+- **A role that no longer needs the failed role carries on.** In `Fan`, if B sends its
+  number and then crashes, C already has B's number, so C answers A and the session
+  finishes: A and C both return `Ok`.
+- **Messages sent to a cancelled role are dropped.**
+
+A cancelled role tells its own peers, so a failure goes only as far as it has to. In `Fan`,
+if B crashes before it sends, C is cancelled because it was waiting on B, and then A is
+cancelled because it was waiting on C, even though A never talks to B. A gets
+`Cancelled(2, "role 3: connection lost")`.
+
+A crashed process is noticed when its connection closes. A process that is still running
+but has stopped answering (hung, paused, or cut off by the network) is noticed by a
+heartbeat: each connection is pinged every second, and a peer that sends nothing for 10
+seconds is treated as failed. `MARCH_SESSION_HEARTBEAT_MS` and `MARCH_SESSION_TIMEOUT_MS`
+change the two numbers. The heartbeat can mistake a very slow peer for a dead one. That
+cancels a session that could have finished, which costs a retry but never corrupts
+anything.
+
+### Handling a failure
+
+Every receive has a second form, ending in `_or`, that takes a cancel handler. Offers have
+the same (`offer_more_done_or`):
+
+```march
+Fan_C.recv_Msg_B_C_1_or(s, st1,
+  fn (b, st2) ->
+    Fan_C.close(s, Fan_C.send_Msg_C_A_1(s, st2, b > 0)),
+  fn (role, cause, cancel) ->
+    println("gave up on role " ++ int_to_string(role) ++ ": " ++ cause)
+    Fan_C.cancelled(s, cancel))
+```
+
+The handler runs if this receive's sender fails with nothing queued. It gets the failed
+role, the cause and a token, but no session state, so it cannot send or receive in the
+failed session. The only way for it to finish is `Fan_C.cancelled(s, cancel)`. Use it to
+record the failure, release a resource, or report what happened somewhere else. A receive
+without `_or` behaves the same way, with no handler.
+
+To leave a session on purpose, call the `leave_` function for the state you are in:
+`Fan_C.leave_recv_Msg_A_C_1(s, st, "shutting down")` for C before it has heard from A. The
+other roles are told, and `run` returns `Err(Left(why))`.
+
+### Starting again
+
+A session cannot be resumed. To try again, call `run_<Role>` again on every node, which
+starts a new session with new connections. Deciding when to do that, and making sure every
+node does, is up to whatever runs the nodes, for example a supervisor around
+`run_<Role>`. The runner does not restart anything by itself.
 
 ## Hosting a role in an actor
 
@@ -288,9 +338,15 @@ The actor gets one delivery at a time. A message that arrives while it is still 
 the previous one waits until it has parked again.
 
 The runner watches the actor. If it crashes, or is killed, or its supervisor restarts it,
-the session ends: `host_<Role>` returns `Err(HostGone(ep))` and the other roles get
-`PeerGone`. A restarted actor starts idle and cannot pick up the old conversation; start a
-new session instead. This is the cost of keeping the session in the actor's state. The
+its role is cancelled: `host_<Role>` returns `Err(HostGone(ep))`, and the other roles are
+cancelled or carry on by the rules in [When a role fails](#when-a-role-fails). A restarted
+actor starts idle and cannot pick up the old conversation; start a new session instead.
+
+For the actor to hear that its role was cancelled, use `host_<Role>_or`, which takes a
+fourth function after `deliver`. It is called with the session, the failed role, the cause
+and the endpoint. Send those to the actor; its handler stores
+`Stream_Cons.cancel(state.parked)`, which gives back a closed value, and can update the rest
+of its state. Like a cancel handler, it cannot send in the failed session. This is the cost of keeping the session in the actor's state. The
 callback style does not have it, because there the session state lives in the runner.
 
 Different nodes can make different choices. In `test/two_node/hosted`, Prod is a plain body
@@ -306,7 +362,9 @@ page shows how. The same role functions then run unchanged on the network.
 ## Limits
 
 - The network runner is compiled-only for now.
-- Sessions do not survive a failure of any role, and nothing restarts them for you.
+- A session cannot be resumed after a failure, and nothing restarts it for you.
+- A cancel handler cannot keep the conversation going. A protocol that must keep talking
+  after a role fails (to send a partial result, say) cannot be written yet.
 - Every role that exchanges messages with another needs a direct connection to it. There is
   no relaying.
 - Messages are encoded as JSON, so every payload type needs a JSON codec. Built-in types

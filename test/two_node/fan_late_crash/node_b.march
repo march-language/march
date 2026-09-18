@@ -1,0 +1,33 @@
+-- Two-node harness scenario "fan_late_crash": node-b hosts role B. It sends C
+-- its 9 and then stalls before closing; the scenario SIGKILLs it there.
+mod FanLateCrashNodeB do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs Session.Live
+
+  @[endpoints]
+  protocol Fan do
+    A -> C : Int
+    B -> C : Int
+    C -> A : Bool
+  end
+
+  pfn role_b(s : Cap(Session.Live), st : Fan_B.S_send_Msg_B_C_1) : Fan_B.Yield do
+    let st1 = Fan_B.send_Msg_B_C_1(s, st, 9)
+    println("B: sent 9")
+    sleep_ms(600000)           -- the scenario kills us here, before the close
+    Fan_B.close(s, st1)
+  end
+
+  fn main(c : Cap(IO)) do
+    println("node-b: up")
+    match Fan_Run.run_B(c, "node-b", "fan-secret", Fan_Run.addrs_from_env(), fn (s, st) -> role_b(s, st)) do
+      Ok(_) -> println("B: closed")
+      Err(e) -> panic(SessionNode.run_error_message(e))
+    end
+  end
+end

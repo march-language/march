@@ -1,0 +1,42 @@
+-- Two-node harness scenario "fan_early_crash": node-c hosts role C, and
+-- receives from B with a cancel handler (`recv_Msg_B_C_1_or`). B is gone
+-- with nothing sent, so the handler runs; it holds no session state, so
+-- all it can do is record what happened and end the endpoint.
+mod FanEarlyCrashNodeC do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs Session.Live
+
+  @[endpoints]
+  protocol Fan do
+    A -> C : Int
+    B -> C : Int
+    C -> A : Bool
+  end
+
+  pfn role_c(s : Cap(Session.Live), st : Fan_C.S_recv_Msg_A_C_1) : Fan_C.Yield do
+    Fan_C.recv_Msg_A_C_1(s, st, fn (a, st1) ->
+      println("C: got " ++ int_to_string(a) ++ " from A")
+      Fan_C.recv_Msg_B_C_1_or(s, st1,
+        fn (b, st2) ->
+          println("C: got " ++ int_to_string(b) ++ " from B")
+          Fan_C.close(s, Fan_C.send_Msg_C_A_1(s, st2, a + b == 16)),
+        fn (role, cause, cancel) ->
+          println("C: role " ++ int_to_string(role) ++ " is gone: " ++ cause)
+          Fan_C.cancelled(s, cancel)))
+  end
+
+  fn main(c : Cap(IO)) do
+    println("node-c: up")
+    match Fan_Run.run_C(c, "node-c", "fan-secret", Fan_Run.addrs_from_env(), fn (s, st) -> role_c(s, st)) do
+      Ok(_) -> println("C: closed")
+      Err(SessionNode.Cancelled(role, cause)) ->
+        println("C: cancelled waiting on role " ++ int_to_string(role) ++ ": " ++ cause)
+      Err(e) -> panic(SessionNode.run_error_message(e))
+    end
+  end
+end

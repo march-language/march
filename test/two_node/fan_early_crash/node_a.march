@@ -1,0 +1,38 @@
+-- Two-node harness scenario "fan_early_crash": node-a hosts role A of Fan (see
+-- scenario.sh). A waits 300 ms before sending, so whatever happens to B has
+-- happened before C gets to B.
+mod FanEarlyCrashNodeA do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs Session.Live
+
+  @[endpoints]
+  protocol Fan do
+    A -> C : Int
+    B -> C : Int
+    C -> A : Bool
+  end
+
+  pfn role_a(s : Cap(Session.Live), st : Fan_A.S_send_Msg_A_C_1) : Fan_A.Yield do
+    sleep_ms(300)
+    println("A: sends 7")
+    let st1 = Fan_A.send_Msg_A_C_1(s, st, 7)
+    Fan_A.recv_Msg_C_A_1(s, st1, fn (ok, st2) ->
+      println("A: got " ++ bool_to_string(ok))
+      Fan_A.close(s, st2))
+  end
+
+  fn main(c : Cap(IO)) do
+    println("node-a: up")
+    match Fan_Run.run_A(c, "node-a", "fan-secret", Fan_Run.addrs_from_env(), fn (s, st) -> role_a(s, st)) do
+      Ok(_) -> println("A: closed")
+      Err(SessionNode.Cancelled(role, cause)) ->
+        println("A: cancelled waiting on role " ++ int_to_string(role) ++ ": " ++ cause)
+      Err(e) -> panic(SessionNode.run_error_message(e))
+    end
+  end
+end

@@ -1,0 +1,31 @@
+-- Two-node harness scenario "silent": node-b hosts role B = 2 and dials A.
+-- The scenario SIGSTOPs it right after it connects.
+mod SilentNodeB do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs Session.Live
+
+  @[endpoints]
+  protocol Silent do
+    A -> B : Int
+    B -> A : Int
+  end
+
+  pfn role_b(s : Cap(Session.Live), st : Silent_B.S_recv_Msg_A_B_1) : Silent_B.Yield do
+    println("B: connected")
+    Silent_B.recv_Msg_A_B_1(s, st, fn (n, st1) ->
+      Silent_B.close(s, Silent_B.send_Msg_B_A_1(s, st1, n + 1)))
+  end
+
+  fn main(c : Cap(IO)) do
+    println("node-b: up")
+    match Silent_Run.run_B(c, "node-b", "silent-secret", Silent_Run.addrs_from_env(), fn (s, st) -> role_b(s, st)) do
+      Ok(_) -> println("B: closed")
+      Err(e) -> panic(SessionNode.run_error_message(e))
+    end
+  end
+end

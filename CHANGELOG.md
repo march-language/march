@@ -12,6 +12,24 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Changed
+- **A choreography session no longer ends for everyone when one role fails.** Following the
+  Maty model (Fowler and Hu, OOPSLA 2026), a failed role is cancelled, and another role is
+  cancelled only if it was waiting on it with nothing from it still queued; a role that no
+  longer needs it carries on and can finish. Cancellation spreads to exactly the roles that
+  depend on it. `SessionNode.RunError.PeerGone` is replaced by `Cancelled(role, cause)`,
+  where `cause` traces the failure back to where it began, and `Left(why)` is new.
+- A peer that stops answering without closing its connection (hung, paused, partitioned) is
+  detected by a heartbeat (`MARCH_SESSION_HEARTBEAT_MS`, `MARCH_SESSION_TIMEOUT_MS`).
+
+### Added
+- **Failure handlers in the generated session API:** `recv_<Msg>_or` and `offer_<…>_or` take a
+  cancel handler that learns which role failed and why but holds no session state, so it
+  cannot talk in the failed session. Also `leave_<state>` to leave a session on purpose,
+  `cancel(parked)` for actor-hosted roles, and `<P>_Run.host_<Role>_or`.
+
+### Fixed
+- Writing to a socket whose peer had just gone could kill the process with SIGPIPE; the
+  shared send path now suppresses the signal.
 - A dead green thread's execution context (880 of its bookkeeping struct's 1136 bytes on
   macOS/arm64) is freed when it dies, instead of being retained for the life of the
   process: memory held after a burst of concurrency drops 4.4× per task and 2.7× per actor

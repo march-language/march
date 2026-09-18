@@ -49,6 +49,19 @@
 -- (`pending`). `suspend`'s expected role is 0 for "any", which is what a
 -- same-thread transport and a two-party session pass.
 --
+-- Failure (specs/todos/2026-09-18-choreography-failure-handling.md, after
+-- Maty's affine sessions): a role that fails is CANCELLED. Its node sends a
+-- `SessionNode.Cancel` frame on each data connection, behind everything
+-- it already sent, and a dropped connection counts as one at that point in
+-- the stream. Messages to a cancelled role are discarded. A local endpoint
+-- fails only when its continuation waits on a role that can send nothing
+-- more and nothing from that role is still queued; its cancel handler then
+-- runs and it is cancelled in turn, which is how failure cascades. Every
+-- one of these events goes through the endpoint actor's mailbox, behind the
+-- deliveries that preceded it, so the "handle what was already sent" rule
+-- holds by construction. A heartbeat on each data connection catches a
+-- peer that stops without closing.
+--
 -- The role runner (`run`, at the end of this file) does all of the above
 -- from a role, its peer set and a role->address table, in the order that
 -- cannot deadlock; the generated `<P>_Run.run_<Role>` is its typed front.
@@ -82,10 +95,21 @@ mod SessionNode do
   -- delivery for an awaiting endpoint then goes to the user's actor through
   -- it, instead of the installed handler running here, and the actor
   -- resumes the endpoint itself (the generated event API).
+  --
+  -- Failure state: `gone` maps a peer role that can send nothing more to
+  -- why ("closed" for a normal close, else the cancellation cause);
+  -- `cancel_hs` holds the cancel handler installed with the current
+  -- continuation (`Session.on_cancel`); `forward_cancel` (key "c") is the
+  -- hosted party's way to tell its actor; `heard` counts heartbeat ticks
+  -- since a peer's last frame. Our own endpoint's end is in `meta`: "done"
+  -- once it closed or was cancelled, and for a cancellation "kind"
+  -- (see `cancel_endpoint`), "cancel_role", and `why`'s "cancel_cause".
   type Party = { my_role : Int, node_id : String,
                  handlers : Vault(Int -> Bytes -> Int -> Int), waiting : Vault(Int),
                  pending : Vault(List((Int, Bytes))), meta : Vault(Int),
                  forward : Vault(Int -> Bytes -> Int -> Unit), why : Vault(String),
+                 gone : Vault(String), cancel_hs : Vault(Int -> String -> Int -> Int),
+                 forward_cancel : Vault(Int -> String -> Int -> Unit), heard : Vault(Int),
                  ep : Pid(EndpointState), links : List(Link), on_close : Int -> Unit }
 
   pfn ekey(ep : Int) : String do "e" ++ int_to_string(ep) end
@@ -140,36 +164,138 @@ mod SessionNode do
     Vault.set(pending, ekey(ep), List.append(Vault.get_or(pending, ekey(ep), Nil), Cons((from, msg), Nil)))
   end
 
-  -- The endpoint's host is gone (restarted: its parked session state died
-  -- with it). The session cannot continue and must not look as if it ended
-  -- cleanly: no Bye goes out, every reader is ended (peers then see the
-  -- connection drop and get `PeerGone`), and `run_hosted` reports `HostGone`.
-  -- A host that exits after closing its endpoint is not this.
-  pfn host_gone(p : Party, ep : Int) : Int do
-    match Vault.get(p.meta, "closed") do
-      Some(_) -> ep
+  -- ── cancellation ────────────────────────────────────────────────────────
+
+  pfn rkey(role : Int) : String do "r" ++ int_to_string(role) end
+
+  pfn ep_done(p : Party) : Bool do Vault.get(p.meta, "done") != None end
+
+  pfn encode_cancel(role : Int, cause : String) : List(Int) do
+    Msgpack.encode(Msgpack.array(Cons(Msgpack.int(role), Cons(Msgpack.str(cause), Nil))))
+  end
+
+  pfn decode_cancel(payload : List(Int)) : Result((Int, String), String) do
+    match Msgpack.decode(payload) do
+      Ok(Msgpack.Array(Cons(Msgpack.Int(role), Cons(Msgpack.Str(cause), Nil)))) -> Ok((role, cause))
+      _ -> Err("session_node: bad Cancel payload")
+    end
+  end
+
+  -- Kinds of our own endpoint's cancellation, for `run`'s result.
+  pfn kind_cancelled() : Int do 1 end
+  pfn kind_protocol() : Int do 2 end
+  pfn kind_host_gone() : Int do 3 end
+  pfn kind_left() : Int do 4 end
+
+  -- Cancel our endpoint [ep]: record why, run the cancel handler installed
+  -- with the continuation it was waiting in (or tell the hosting actor),
+  -- and send `Cancel(my_role, outward)` on every data connection, behind
+  -- everything this role already sent. [role] is the peer this failure is
+  -- attributed to, [cause] why, [outward] what the peers are told. Runs in
+  -- the endpoint actor's turn (every caller is one of its handlers, or the
+  -- generated handler it is running), and is idempotent: an endpoint that
+  -- already closed or was cancelled is left alone.
+  pfn cancel_endpoint(p : Party, ep : Int, role : Int, cause : String, outward : String, kind : Int) : () do
+    if ep_done(p) do ()
+    else
+      Vault.set(p.meta, "done", 1)
+      Vault.set(p.meta, "kind", kind)
+      Vault.set(p.meta, "cancel_role", role)
+      Vault.set(p.why, "cancel_cause", cause)
+      let _ = Vault.delete(p.handlers, ekey(ep))
+      let handler = match Vault.get(p.cancel_hs, ekey(ep)) do
+        Some(h) -> Some(h)
+        None -> Vault.get(p.cancel_hs, "cur" ++ ekey(ep))
+      end
+      let _ = Vault.delete(p.cancel_hs, ekey(ep))
+      let _ = Vault.delete(p.cancel_hs, "cur" ++ ekey(ep))
+      match handler do
+        Some(h) ->
+          let _ = h(role, cause, ep)
+          ()
+        None -> ()
+      end
+      match Vault.get(p.forward_cancel, "c") do
+        Some(f) -> f(role, cause, ep)
+        None -> ()
+      end
+      let meta = p.meta
+      let _ = List.map(p.links, fn l ->
+        NodeQueue.cast(l.q, next_seq(meta), l.peer, "SessionNode.Cancel", encode_cancel(p.my_role, outward), NodeQueue.DropNew))
+      ()
+    end
+  end
+
+  -- Can [want] (0 = any peer) send us nothing more? `Some((role, why))` if
+  -- so. For 0: every connected peer is gone.
+  pfn blocked_on(p : Party, want : Int) : Option((Int, String)) do
+    if want != 0 do
+      match Vault.get(p.gone, rkey(want)) do
+        Some(why) -> Some((want, why))
+        None -> None
+      end
+    else
+      match p.links do
+        Nil -> None
+        Cons(first, _) ->
+          if List.all(p.links, fn l -> Vault.get(p.gone, rkey(l.role)) != None) do
+            Some((first.role, Vault.get_or(p.gone, rkey(first.role), "gone")))
+          else None end
+      end
+    end
+  end
+
+  -- Maty's E-CancelH: our endpoint's continuation waits on a role that can
+  -- send nothing more, and nothing from that role is queued. Called after
+  -- every drain (which consumed anything that WAS queued) and whenever a
+  -- peer goes. A role that closed normally counts too: waiting on it with
+  -- nothing queued means waiting forever.
+  pfn check_waiting(p : Party, ep : Int) : () do
+    if ep_done(p) do ()
+    else
+      match Vault.get(p.handlers, ekey(ep)) do
+        None -> ()
+        Some(_) ->
+          let want = Vault.get_or(p.waiting, ekey(ep), 0)
+          match blocked_on(p, want) do
+            None -> ()
+            Some(found) ->
+              match found do
+                (role, why) ->
+                  let cause = if why == "closed" do "role " ++ int_to_string(role) ++ " closed without sending" else why end
+                  cancel_endpoint(p, ep, role, cause, "role " ++ int_to_string(role) ++ ": " ++ cause, kind_cancelled())
+              end
+          end
+      end
+    end
+  end
+
+  -- A peer can send nothing more: it closed ([why] = "closed") or was
+  -- cancelled. The first report wins; a later one (the reader's end of file
+  -- after a Cancel frame, say) is ignored.
+  pfn peer_gone(p : Party, role : Int, why : String) : () do
+    match Vault.get(p.gone, rkey(role)) do
+      Some(_) -> ()
       None ->
-        Vault.set(p.meta, "host_gone", ep)
-        let _ = List.map(p.links, fn l -> tcp_shutdown(l.data_fd))
-        ep
+        Vault.set(p.gone, rkey(role), why)
+        match Vault.get(p.meta, "ep") do
+          Some(ep) -> check_waiting(p, ep)
+          None -> ()
+        end
     end
   end
 
   -- The generated code could not deliver a message to [ep]'s continuation
-  -- (`Session.fail`): the peer that sent it is not speaking the protocol,
-  -- and the session is abandoned the way a dead host's is -- no Bye, readers
-  -- ended, `run` reports `Protocol(from, why)`.  `from` is the sender of the
-  -- delivery being resumed (recorded by `resume_with`).
+  -- (`Session.fail`): the peer that sent it is not speaking the protocol.
+  -- That peer is treated as failed: our endpoint is cancelled (with the
+  -- cancel handler of the receive that got the message) and `run` reports
+  -- `Protocol(from, why)`. `from` is the sender of the delivery being
+  -- resumed (recorded by `resume_with`). Runs inside that delivery, in the
+  -- endpoint actor's turn.
   pfn protocol_failed(p : Party, ep : Int, why : String) : () do
-    match Vault.get(p.meta, "closed") do
-      Some(_) -> ()
-      None ->
-        Vault.set(p.why, "protocol", why)
-        Vault.set(p.meta, "protocol", Vault.get_or(p.meta, "from", 0))
-        let _ = List.map(p.links, fn l -> tcp_shutdown(l.data_fd))
-        let _ = ep
-        ()
-    end
+    let from = Vault.get_or(p.meta, "from", 0)
+    Vault.set(p.gone, rkey(from), "protocol: " ++ why)
+    cancel_endpoint(p, ep, from, why, "role " ++ int_to_string(from) ++ ": protocol: " ++ why, kind_protocol())
   end
 
   -- Watches a hosted party's actor: its `Down` -- a crash, a kill, a
@@ -186,9 +312,7 @@ mod SessionNode do
     init  { n: 0 }
     on Watch(p : Party, ep : Int) do
       match receive() do
-        Down.Down(_, _, _) ->
-          let _ = host_gone(p, ep)
-          ()
+        Down.Down(_, _, _) -> send(p.ep, HostDown(p, ep))
         _ -> ()
       end
       { n: state.n + 1 }
@@ -205,12 +329,25 @@ mod SessionNode do
     -- Who this delivery is from, for `fail`: a message the continuation
     -- cannot take is reported against its sender (RunError.Protocol).
     Vault.set(p.meta, "from", from)
+    -- The cancel handler belongs to the continuation just consumed. It
+    -- stays reachable ("cur") while that continuation runs, because `fail`
+    -- inside it cancels with THIS receive's handler; the next suspend
+    -- installs its own.
+    match Vault.get(p.cancel_hs, ekey(ep)) do
+      Some(h) ->
+        Vault.set(p.cancel_hs, "cur" ++ ekey(ep), h)
+        let _ = Vault.delete(p.cancel_hs, ekey(ep))
+        ()
+      None -> ()
+    end
     match Vault.get(p.forward, "f") do
       None ->
         let _ = k(from, msg, ep)
+        let _ = Vault.delete(p.cancel_hs, "cur" ++ ekey(ep))
         drain(p, ep)
       Some(f) ->
         f(from, msg, ep)
+        let _ = Vault.delete(p.cancel_hs, "cur" ++ ekey(ep))
         ep
     end
   end
@@ -220,6 +357,8 @@ mod SessionNode do
   -- expects yet is parked, not dropped.
   fn deliver(p : Party, ep : Int, from : Int, msg : Bytes) : Int do
     let want = Vault.get_or(p.waiting, ekey(ep), 0)
+    if ep_done(p) do ep   -- our endpoint closed or was cancelled: discard
+    else
     match Vault.get(p.handlers, ekey(ep)) do
       None ->
         park(p.pending, ep, from, msg)
@@ -234,6 +373,7 @@ mod SessionNode do
           ep
         end
     end
+    end
   end
 
   pfn drain(p : Party, ep : Int) : Int do
@@ -242,7 +382,11 @@ mod SessionNode do
       None -> ep
       Some(k) ->
         match take_pending(p.pending, ep, want) do
-          None -> ep
+          None ->
+            -- Nothing queued from the role this continuation wants: if that
+            -- role can send nothing more, this is where we fail.
+            check_waiting(p, ep)
+            ep
           Some(entry) ->
             match entry do
               (from, msg) -> resume_with(p, k, ep, from, msg)
@@ -258,7 +402,7 @@ mod SessionNode do
   -- peer died is not stuck awaiting readers parked on peers still alive.
   -- `failed` is empty for a clean end, else `(role, why)` per failed reader.
   pfn settled(st : EndpointState) : Bool do
-    st.links > 0 && (st.ended >= st.links || List.length(st.failed) > 0)
+    st.links > 0 && st.ended >= st.links
   end
 
   pfn ep_state(n : Int, links : Int, ended : Int, failed : List((Int, String)),
@@ -307,6 +451,21 @@ mod SessionNode do
     -- look-then-act on `handlers`/`pending` happens in one mailbox order.
     on Drain(p : Party, ep : Int) do
       let _ = drain(p, ep)
+      state
+    end
+    -- A peer can send nothing more. Queued behind every delivery from it.
+    on PeerGone(p : Party, role : Int, why : String) do
+      peer_gone(p, role, why)
+      state
+    end
+    -- The hosting actor died: our endpoint's session state died with it.
+    on HostDown(p : Party, ep : Int) do
+      cancel_endpoint(p, ep, p.my_role, "host gone", "host gone", kind_host_gone())
+      state
+    end
+    -- `Session.leave`: this role exits the session on purpose.
+    on Leave(p : Party, ep : Int, why : String) do
+      cancel_endpoint(p, ep, p.my_role, "left: " ++ why, "left: " ++ why, kind_left())
       state
     end
   end
@@ -407,12 +566,17 @@ mod SessionNode do
       meta: Vault.new("session_node_meta_" ++ tag),
       forward: Vault.new("session_node_forward_" ++ tag),
       why: Vault.new("session_node_why_" ++ tag),
+      gone: Vault.new("session_node_gone_" ++ tag),
+      cancel_hs: Vault.new("session_node_cancel_" ++ tag),
+      forward_cancel: Vault.new("session_node_fwdcancel_" ++ tag),
+      heard: Vault.new("session_node_heard_" ++ tag),
       ep: ep, links: Nil, on_close: on_close }
   end
 
   pfn with_link(p : Party, l : Link) : Party do
     { my_role: p.my_role, node_id: p.node_id, handlers: p.handlers, waiting: p.waiting,
-      pending: p.pending, meta: p.meta, forward: p.forward, why: p.why, ep: p.ep,
+      pending: p.pending, meta: p.meta, forward: p.forward, why: p.why, gone: p.gone,
+      cancel_hs: p.cancel_hs, forward_cancel: p.forward_cancel, heard: p.heard, ep: p.ep,
       links: List.append(p.links, Cons(l, Nil)), on_close: p.on_close }
   end
 
@@ -524,11 +688,21 @@ mod SessionNode do
     let ep_actor = p.ep
     let party = p
     {
-      register: fn (_ap, role) -> role,
+      register: fn (_ap, role) -> do
+        Vault.set(meta, "ep", role)
+        role
+      end,
       emit: fn (ep, to, msg) -> do
-        let l = link_for(links, to)
-        let _ = NodeQueue.cast(l.q, next_seq(meta), l.peer, "SessionNode.Deliver", encode_deliver(to, ep, msg), NodeQueue.DropNew)
-        ep
+        -- Maty's E-CancelMsg: a message to a role that can take no more, or
+        -- from an endpoint that is itself done, is discarded.
+        if Vault.get(meta, "done") != None || Vault.get(party.gone, rkey(to)) != None do
+          let _ = Vault.incr(meta, "discarded", 1)
+          ep
+        else
+          let l = link_for(links, to)
+          let _ = NodeQueue.cast(l.q, next_seq(meta), l.peer, "SessionNode.Deliver", encode_deliver(to, ep, msg), NodeQueue.DropNew)
+          ep
+        end
       end,
       suspend: fn (ep, from, handler) -> do
         Vault.set(waiting, ekey(ep), from)
@@ -545,35 +719,59 @@ mod SessionNode do
       close: fn ep -> do
         on_close(ep)
         Vault.set(meta, "closed", 1)
+        Vault.set(meta, "done", 1)
         -- Every peer's reader has to learn this endpoint is done.
         let _ = List.map(links, fn l ->
           NodeQueue.cast(l.q, next_seq(meta), l.peer, "SessionNode.Bye", Nil, NodeQueue.DropNew))
         ()
       end,
-      fail: fn (ep, why) -> protocol_failed(party, ep, why)
+      fail: fn (ep, why) -> protocol_failed(party, ep, why),
+      on_cancel: fn (ep, h) -> do
+        Vault.set(party.cancel_hs, ekey(ep), h)
+        ep
+      end,
+      leave: fn (ep, why) -> send(ep_actor, Leave(party, ep, why))
     }
   end
 
   -- ── reading ─────────────────────────────────────────────────────────────
 
+  -- Every frame on a data connection is proof of life (the heartbeat's
+  -- counter restarts), and every one is sent to the endpoint actor in the
+  -- order read, so a peer's Bye or Cancel lands behind its deliveries.
   pfn on_frame(p : Party, l : Link, tag : Int, frame : List(Int)) : Result(Bool, String) do
+    Vault.set(p.heard, rkey(l.role), 0)
     if tag == NodeSend.tag_actor_msg() do
       match NodeSend.decode_msg(frame) do
         Err(e) -> Err(e)
         Ok(d) ->
+          let _ = NodeQueue.consumed(l.control_fd, budget(), List.length(frame) + 4)
           if d.type_tag == "SessionNode.Bye" do
+            send(p.ep, PeerGone(p, l.role, "closed"))
             Ok(false)
           else
-            if d.type_tag == "SessionNode.Deliver" do
-              match decode_deliver(d.payload) do
+            if d.type_tag == "SessionNode.Cancel" do
+              match decode_cancel(d.payload) do
+                Ok((role, cause)) ->
+                  send(p.ep, PeerGone(p, role, cause))
+                  Ok(false)
                 Err(e) -> Err(e)
-                Ok((to, from, msg)) ->
-                  send(p.ep, Deliver(p, to, from, msg))
-                  let _ = NodeQueue.consumed(l.control_fd, budget(), List.length(frame) + 4)
-                  Ok(true)
               end
             else
-              Err("session_node: unexpected type " ++ d.type_tag)
+              if d.type_tag == "SessionNode.Ping" do
+                Ok(true)
+              else
+                if d.type_tag == "SessionNode.Deliver" do
+                  match decode_deliver(d.payload) do
+                    Err(e) -> Err(e)
+                    Ok((to, from, msg)) ->
+                      send(p.ep, Deliver(p, to, from, msg))
+                      Ok(true)
+                  end
+                else
+                  Err("session_node: unexpected type " ++ d.type_tag)
+                end
+              end
             end
           end
       end
@@ -582,19 +780,47 @@ mod SessionNode do
     end
   end
 
-  -- Read one peer to its end. "" is a clean end; anything else is why the
-  -- reader failed. Once a local endpoint has closed, a peer closing its data
-  -- connection (its Bye may still be in its writer) is a clean end.
+  -- Read one peer to its end: its Bye, its Cancel, or the connection
+  -- ending. The last counts as that peer's cancellation at this point in
+  -- the stream ("connection lost"); if a Bye or Cancel already arrived, the
+  -- endpoint actor ignores the repeat. "" or why the reader stopped.
   pfn read_link(p : Party, l : Link) : String do
     match PeerReader.serve(l.data_fd, Nil, fn (tag, frame) -> on_frame(p, l, tag, frame)) do
       Ok(_) -> ""
       Err(e) ->
-        if Vault.get(p.meta, "closed") != None do ""
-        else
-          -- The party ended this reader itself (host gone): still a failure,
-          -- so the outcome settles, but `run_hosted` reports HostGone.
-          e
-        end
+        send(p.ep, PeerGone(p, l.role, "connection lost"))
+        e
+    end
+  end
+
+  -- The heartbeat, one per connection: every interval, ping the peer on the
+  -- data connection (through its NodeQueue writer, which serialises every
+  -- write to that socket) and count one tick since its last frame. Past the
+  -- limit the peer is taken for dead: it is reported gone ("no heartbeat")
+  -- and BOTH its connections are shut down -- the data one ends the reader,
+  -- the control one ends the control reader, which `finish` awaits and which
+  -- would otherwise wait for a Bye a dead peer never sends. A peer that is
+  -- stopped, hung or behind a partition sends no end of file, so without
+  -- this the reader would wait forever. Stops once the reader has.
+  -- MARCH_SESSION_HEARTBEAT_MS (default 1000) and MARCH_SESSION_TIMEOUT_MS
+  -- (default 10000) tune it.
+  pfn heartbeat(p : Party, l : Link, interval : Int, limit : Int) : Int do
+    sleep_ms(interval)
+    if Vault.get(p.meta, "link_done" ++ rkey(l.role)) != None do 0
+    else
+      if Vault.get(p.meta, "done") == None do
+        let _ = NodeQueue.cast(l.q, next_seq(p.meta), l.peer, "SessionNode.Ping", Nil, NodeQueue.DropNew)
+        ()
+      else () end
+      let ticks = Vault.incr(p.heard, rkey(l.role), 1)
+      if ticks > limit do
+        send(p.ep, PeerGone(p, l.role, "no heartbeat"))
+        tcp_shutdown(l.data_fd)
+        tcp_shutdown(l.control_fd)
+        0
+      else
+        heartbeat(p, l, interval, limit)
+      end
     end
   end
 
@@ -606,46 +832,50 @@ mod SessionNode do
   end
 
   doc """
-  Read deliveries from every peer until each one's endpoint closes, or until
-  the first reader fails before this node's endpoint closed: `Nil` for a
-  clean end, else `(role, why)` for each failed reader. Every resumption runs
-  in this node's endpoint actor, so call it after driving the local role to
-  its first suspension. `serve` is this with a panic on failure; `run` maps
-  the failure to a `RunError`.
-
-  On a failure the other readers are still parked on peers that are alive
-  and waiting; they are ended with `tcp_shutdown` (a close would not wake
-  them), so `finish` can follow at once and the process can exit.
+  Read deliveries from every peer until each connection has ended: the
+  peer closed, was cancelled, or went away. A peer's failure no longer ends
+  the session for this node at once: it cancels our endpoint only if our
+  endpoint is waiting on that peer with nothing from it queued (Maty's
+  rule; see the module comment), and cancellation then spreads to our other
+  peers as a Cancel frame. `Nil` if our endpoint ended normally, else
+  `(role, cause)` for its cancellation. Every resumption runs in this
+  node's endpoint actor, so call it after driving the local role to its
+  first suspension. `serve` panics on a cancellation; `run` returns it.
   """
   fn serve_outcome(p : Party) : List((Int, String)) do
-    match p.links do
-      -- One peer: read on this green thread, as the two-party transport
-      -- always did.
-      Cons(single, Nil) ->
-        let why = read_link(p, single)
-        if why == "" do Nil else Cons((single.role, why), Nil) end
-      _ ->
-        send(p.ep, Expect(List.length(p.links)))
-        let _ = List.map(p.links, fn l -> task_spawn(fn _ -> do
-          send(p.ep, LinkEnded(l.role, read_link(p, l)))
-          0
-        end))
-        let failed = await_outcome(p)
-        match failed do
-          Nil -> ()
-          _ ->
-            let _ = List.map(p.links, fn l -> tcp_shutdown(l.data_fd))
-            ()
-        end
-        failed
+    let interval = Env.get_int("MARCH_SESSION_HEARTBEAT_MS", 1000)
+    let timeout = Env.get_int("MARCH_SESSION_TIMEOUT_MS", 10000)
+    let limit = if interval > 0 do timeout / interval else 0 end
+    send(p.ep, Expect(List.length(p.links)))
+    let _ = List.map(p.links, fn l -> task_spawn(fn _ -> do
+      let why = read_link(p, l)
+      Vault.set(p.meta, "link_done" ++ rkey(l.role), 1)
+      send(p.ep, LinkEnded(l.role, why))
+      0
+    end))
+    let _ = if interval > 0 do
+      List.map(p.links, fn l -> task_spawn(fn _ -> heartbeat(p, l, interval, limit)))
+    else Nil end
+    let _ = await_outcome(p)
+    -- Every connection has ended. An endpoint still waiting now waits on
+    -- nobody: that is a cancellation too.
+    if ep_done(p) do () else
+      match Vault.get(p.meta, "ep") do
+        Some(ep) -> cancel_endpoint(p, ep, 0, "every peer is gone", "every peer is gone", kind_cancelled())
+        None -> Vault.set(p.meta, "done", 1)
+      end
+    end
+    match Vault.get(p.meta, "kind") do
+      None -> Nil
+      Some(_) -> Cons((Vault.get_or(p.meta, "cancel_role", 0), Vault.get_or(p.why, "cancel_cause", "")), Nil)
     end
   end
 
-  doc "`serve_outcome`, panicking on a reader failure; the transport's original contract."
+  doc "`serve_outcome`, panicking if our endpoint was cancelled; the transport's original contract."
   fn serve(p : Party) : Unit do
     match serve_outcome(p) do
       Nil -> ()
-      Cons((_, why), _) -> panic("session_node: reader: " ++ why)
+      Cons((role, why), _) -> panic("session_node: cancelled (role " ++ int_to_string(role) ++ "): " ++ why)
     end
   end
 
@@ -687,19 +917,26 @@ mod SessionNode do
   -- returns rather than hanging on it. What to do next (run again: a fresh
   -- party and fresh connections) is the caller's decision.
   --
-  -- - `PeerGone(role, why)`: that peer's connection ended mid-session.
+  -- - `Cancelled(role, cause)`: this role's endpoint was cancelled because
+  --   it was waiting on `role`, which can send nothing more, and nothing
+  --   from it was queued. `cause` is the chain back to where the failure
+  --   began ("role 3: connection lost"). A peer that fails AFTER this role
+  --   no longer needs it does not cancel it: `run` returns `Ok`.
   -- - `Protocol(role, why)`: that peer sent what cannot be delivered -- a
   --   message the generated code could not decode or one its state cannot
-  --   receive (`Session.fail`), or a frame this transport cannot read.
-  -- - `HostGone(ep)`: a hosted party's actor is gone (restarted); its parked
-  --   session state died with it, so the session is abandoned, and the peers
-  --   see the connection drop (`PeerGone`).
+  --   receive (`Session.fail`). Our endpoint is cancelled and the peers are
+  --   told.
+  -- - `HostGone(ep)`: a hosted party's actor is gone (crashed or
+  --   restarted); its parked session state died with it. The peers are sent
+  --   a Cancel.
+  -- - `Left(why)`: this role called `leave`.
   -- - `Listen(port, why)` / `Accept(why)` / `Connect(role, why)`: wiring.
-  type RunError = PeerGone(Int, String) | Protocol(Int, String) | HostGone(Int) | Listen(Int, String) | Accept(String) | Connect(Int, String)
+  type RunError = Cancelled(Int, String) | Protocol(Int, String) | HostGone(Int) | Left(String) | Listen(Int, String) | Accept(String) | Connect(Int, String)
 
   fn run_error_message(e : RunError) : String do
     match e do
-      PeerGone(role, why) -> "session_node: role " ++ int_to_string(role) ++ " is gone: " ++ why
+      Cancelled(role, why) -> "session_node: cancelled while waiting on role " ++ int_to_string(role) ++ ": " ++ why
+      Left(why) -> "session_node: left the session: " ++ why
       Protocol(role, why) -> "session_node: role " ++ int_to_string(role) ++ ": " ++ why
       HostGone(ep) -> "session_node: endpoint " ++ int_to_string(ep) ++ ": its host actor is gone and the parked session state with it; session abandoned"
       Listen(port, why) -> "session_node: listen on port " ++ int_to_string(port) ++ ": " ++ why
@@ -878,16 +1115,33 @@ mod SessionNode do
   order, and one that arrives before the host has re-parked is held for it.
 
   The host is monitored: its `Down` (a crash, a kill, a supervisor's restart)
-  ends the session with `Err(HostGone(ep))`, no Bye sent, so the peers see
-  the connection drop (`PeerGone`). A restarted actor starts `Idle` and
-  cannot continue a session its predecessor parked; run again for a new one.
-  The generated `<P>_Run.host_<Role>` supplies the role and its peers.
+  cancels its role with `Err(HostGone(ep))`, and the peers are sent a Cancel
+  (they are cancelled in turn only if they were waiting on it). A restarted
+  actor starts `Idle` and cannot continue a session its predecessor parked;
+  run again for a new one. `run_hosted_or` also tells the actor itself. The
+  generated `<P>_Run.host_<Role>` supplies the role and its peers.
   """
   fn run_hosted(io : Cap(IO), my_role : Int, peers : List(Int), node_id : String, secret : String,
                 addrs : List(Addr), on_close : Int -> Unit, host : Int, start : Cap(Session.Live) -> Unit,
                 deliver : Cap(Session.Live) -> Int -> Bytes -> Int -> Unit) : Result((), RunError) do
+    run_hosted_or(io, my_role, peers, node_id, secret, addrs, on_close, host, start, deliver,
+                  fn (_s, _role, _cause, _ep) -> ())
+  end
+
+  doc """
+  `run_hosted`, telling the actor when its endpoint is cancelled: [cancel]
+  gets `(s, role, cause, ep)` -- the role it was waiting on and why that
+  role is gone. Send it to the actor, whose handler stores the generated
+  `<P>_<Role>.cancel(state.parked)` (a `Closed` parked value) and may update
+  the rest of its state; it cannot communicate in the cancelled session.
+  """
+  fn run_hosted_or(io : Cap(IO), my_role : Int, peers : List(Int), node_id : String, secret : String,
+                   addrs : List(Addr), on_close : Int -> Unit, host : Int, start : Cap(Session.Live) -> Unit,
+                   deliver : Cap(Session.Live) -> Int -> Bytes -> Int -> Unit,
+                   cancel : Cap(Session.Live) -> Int -> String -> Int -> Unit) : Result((), RunError) do
     run_party(io, my_role, peers, node_id, secret, addrs, on_close, fn (p, s) -> do
       Vault.set(p.forward, "f", fn (from, msg, ep) -> deliver(s, from, msg, ep))
+      Vault.set(p.forward_cancel, "c", fn (role, cause, ep) -> cancel(s, role, cause, ep))
       let w = spawn(HostWatch)
       send(w, Watch(p, my_role))
       let _ = monitor(w, pid_of_int(host))
@@ -911,25 +1165,22 @@ mod SessionNode do
     let p = require(p2, peers)
     let s = Session.attach(io, ops(p))
     drive(p, s)
-    let failed = serve_outcome(p)
+    let _ = serve_outcome(p)
     finish(p)
     if listen_fd >= 0 do tcp_close(listen_fd) else () end
     match Vault.get(p.meta, "watch") do
       Some(w) -> send(pid_of_int(w), Stop)
       None -> ()
     end
-    match Vault.get(p.meta, "protocol") do
-      Some(from) -> Err(Protocol(from, Vault.get_or(p.why, "protocol", "protocol error")))
-      None ->
-        match Vault.get(p.meta, "host_gone") do
-          Some(ep) -> Err(HostGone(ep))
-          None ->
-            match failed do
-              Nil -> Ok(())
-              Cons((role, why), _) ->
-                if String.starts_with(why, "session_node:") do Err(Protocol(role, why)) else Err(PeerGone(role, why)) end
-            end
-        end
+    let role = Vault.get_or(p.meta, "cancel_role", 0)
+    let cause = Vault.get_or(p.why, "cancel_cause", "")
+    match Vault.get(p.meta, "kind") do
+      None -> Ok(())
+      Some(kind) ->
+        if kind == kind_protocol() do Err(Protocol(role, cause))
+        else if kind == kind_host_gone() do Err(HostGone(Vault.get_or(p.meta, "ep", my_role)))
+        else if kind == kind_left() do Err(Left(cause))
+        else Err(Cancelled(role, cause)) end end end
     end
   end
 end

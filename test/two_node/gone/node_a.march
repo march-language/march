@@ -1,5 +1,5 @@
 -- Two-node harness scenario "gone": a peer dies mid-session and the survivor's
--- `run` RETURNS `Err(PeerGone(role, _))` instead of hanging on it. A sends B
+-- `run` RETURNS `Err(Cancelled(role, _))` instead of hanging on it. A sends B
 -- one message and waits for the reply; B is SIGKILLed before it answers.
 -- A = 1 listens (GONE_A_ADDR); B = 2 dials.
 -- Design: specs/progress/2026-09-16-role-runner.md, decision 2.
@@ -29,7 +29,7 @@ mod GoneNodeA do
     println("node-a: up")
     match Gone_Run.run_A(c, "node-a", "gone-secret", Gone_Run.addrs_from_env(), fn (s, st) -> role_a(s, st)) do
       Ok(_) -> println("A: clean end")
-      Err(SessionNode.PeerGone(role, _)) -> println("A: role " ++ int_to_string(role) ++ " gone")
+      Err(SessionNode.Cancelled(role, _)) -> println("A: role " ++ int_to_string(role) ++ " gone")
       Err(e) -> panic(SessionNode.run_error_message(e))
     end
   end
