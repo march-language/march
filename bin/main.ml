@@ -2403,7 +2403,28 @@ let compile filename =
              (`MyMod.println`) see-through. *)
           not (String.contains n '.') && Hashtbl.mem prelude_fns (stem n))
         (March_tir.Dce.prune_unreachable
-           ~extra_root:(fun n -> Hashtbl.mem user_fns (stem n))
+           ~extra_root:(fun n ->
+             (* The stem comparison strips the module prefix, so on its own
+                it also matched every STDLIB function sharing a user
+                function's bare name: a main-less module declaring `add`
+                rooted `BigInt.add`, `Decimal.add`, `DateTime.add`,
+                `Forge.add`, `PeerRegistry.add` and `CRDT.GCounter.add`, whose
+                172 reachable functions include console IO — and the ceiling
+                then charged `IO.Console` to a module that never mentions it.
+                The discriminator was the NAME, not the signature: a scalar
+                helper that collides with nothing compiled clean, and a heap
+                helper renamed to `add` did not
+                (specs/progress/2026-09-18-cap-ceiling-rooted-stdlib-namesakes.md).
+                A prefixed name is the user's own only if the prefix is not a
+                stdlib module; the entry module's own functions are bare. *)
+             Hashtbl.mem user_fns (stem n)
+             && (let pre_mono =
+                   match String.index_opt n '$' with
+                   | Some i -> String.sub n 0 i
+                   | None -> n in
+                 match String.rindex_opt pre_mono '.' with
+                 | None -> true
+                 | Some i -> not (List.mem (String.sub pre_mono 0 i) stdlib_mods)))
            ~fail_open:false pre_opt_tir)
     in
     (* --cap-strict: `needs` as a hard ceiling.  Deliberately checked here,

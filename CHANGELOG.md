@@ -12,6 +12,18 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
+- **A library module without a `main` is no longer charged `IO.Console` for a
+  function name it shares with the stdlib.** `march --compile` on a three-line
+  module declaring `fn add` failed with "uses `IO.Console` but does not declare
+  `needs IO.Console`", because the capability check treated `BigInt.add`,
+  `Set.add` and the other stdlib functions named `add` as the module's own.
+  `forge fix --contracts` no longer needs to switch the check off to work around it.
+
+- **`MARCH_STDLIB` now applies to every stdlib lookup.** A `march` run through a
+  symlink with `MARCH_STDLIB` set could fail to build a hello-world program with
+  an error about a stdlib module the program never used (`ConsistentHash.get`).
+  Part of the compiler ignored the override.
+
 - **The REPL no longer runs on another checkout's parsed stdlib.** The
   parsed-stdlib cache in `~/.cache/march` was keyed on the stdlib's text and the
   compiler build but not its location, so two checkouts of March with the same

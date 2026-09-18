@@ -57,23 +57,22 @@ let collect_all_fixes ?(contracts = false) ?(scope_globs = []) ~lib_path_env fil
   List.iter (fun file ->
     let cmd =
       if contracts then
-        (* --no-cap-strict: this mode writes no binary — it stops before code
-           generation — and the capability ceiling exists to gate EMITTED code,
-           which the real build still checks.  Without it the command cannot
-           run on a library at all: compiling a module with no `main` charges
-           that module with the prelude's own `IO.Console` and fails the
-           ceiling, so `forge fix --contracts` would report nothing for every
-           lib project.  See
-           specs/todos/2026-09-09-cap-ceiling-charges-prelude-io-to-mainless-module.md
+        (* No --no-cap-strict.  This command used to carry one because
+           compiling a module with no `main` charged it the prelude's
+           `IO.Console` and failed the ceiling, so `forge fix --contracts`
+           reported nothing for any lib project.  That was a DCE rooting bug:
+           the main-less module's own functions were matched by BARE name, so
+           a user `add` also rooted `BigInt.add`, `Forge.add` and every other
+           stdlib namesake, whose reachable code includes console IO.  Fixed at
+           the root in bin/main.ml; this command now runs the ceiling like any
+           other compile.
+           (specs/progress/2026-09-18-cap-ceiling-rooted-stdlib-namesakes.md)
 
-           This workaround was removed once already, on the strength of a
-           repro that used `ptype Box = Box(Int, Int)`.  That shape does now
-           compile cleanly — but the shape forge/test/test_build_check.ml
-           actually exercises, `Box(Int, String)`, still fails the ceiling on
-           both macOS and Linux.  Do not remove this again without re-running
-           `@forge/test/runtest`; the bug is String-dependent, so a narrower
-           hand-repro will say it is gone when it is not. *)
-        Printf.sprintf "%smarch --compile --no-cap-strict --report-contracts%s %s 2>/dev/null"
+           The two earlier "it is String-dependent" / "it is platform-
+           dependent" readings were artifacts of hand-repros that happened to
+           drop or rename the colliding `add`.  If this ever regresses, check
+           the NAMES of the module's functions before anything else. *)
+        Printf.sprintf "%smarch --compile --report-contracts%s %s 2>/dev/null"
           lib_path_env
           (if scope_globs = [] then ""
            else " --contract-scope " ^ Filename.quote (String.concat "," scope_globs))

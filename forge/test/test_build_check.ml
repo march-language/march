@@ -146,11 +146,15 @@ let contracts_module ~mod_name =
 let report_contracts_output file =
   let tmp = Filename.temp_file "report_contracts" ".out" in
   let rc =
-    (* The SAME command shape Cmd_fix issues, --no-cap-strict included: a
-       module with no `main` is charged the prelude's IO.Console and fails the
-       ceiling otherwise (see the todo referenced in cmd_fix.ml). *)
+    (* The SAME command shape Cmd_fix issues -- and, since 2026-09-18, that
+       shape carries NO --no-cap-strict, so this exercises the capability
+       ceiling for real on a main-less module.  The fixture below declares
+       `fn add`, a stdlib namesake: that is exactly what used to root
+       `BigInt.add` & co. and charge `IO.Console` to the module
+       (specs/progress/2026-09-18-cap-ceiling-rooted-stdlib-namesakes.md).
+       Keep the `add`; it is what makes this test a regression guard. *)
     Sys.command
-      (Printf.sprintf "march --compile --no-cap-strict --report-contracts %s > %s 2>&1"
+      (Printf.sprintf "march --compile --report-contracts %s > %s 2>&1"
          (Filename.quote file) (Filename.quote tmp)) in
   let ic = open_in tmp in
   let out = really_input_string ic (in_channel_length ic) in
