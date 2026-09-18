@@ -204,6 +204,25 @@ mono, then the accept/reject pair below) remains the real class fix for whoever 
 time; it is defense-in-depth on an already-guarded, non-shippable failure mode, not a
 release blocker.
 
+> **Update 2026-09-17: STEP 2 LANDED.** The 2026-08-09 blocker above is
+> refuted — `Collision_set.compute` is a pure function of `tm_types`, mono
+> never touches `tm_types`, and the only pass that adds types afterwards
+> (`defun`) appends `$Clo_*` structs that cannot collide with anything. Four
+> passes already compute the set that way, and the 2026-09-10 type-kinds
+> refactor made it one `Kind.of_module` call. Measured before landing: 2,204
+> fallback calls across 316 programs with ZERO disagreements, against exactly
+> one on the known-broken call. See
+> `specs/progress/2026-09-17-mono-refuses-a-repr-disagreeing-call.md`.
+> **Step 3 remains open** — this makes the failure visible, not absent.
+>
+> Also found while building the witness, and filed separately as
+> `specs/todos/2026-09-17-consistent-hash-get-miscompiles-eagerly-loaded.md`:
+> this file's own repro miscompiles on `origin/main` TODAY with
+> `consistent_hash.march` eagerly loaded (interpreted `SOME 42`, compiled
+> SIGBUS) and with zero repr disagreements reported. A different mechanism
+> sharing the same repro, and a regression against this file's 2026-08-01
+> "post-fix: `SOME 42` consistently" note.
+
 ## Step 3 — give lazy modules real inference (option 1, only if step 2 proves too coarse)
 
 Option 2 from the original analysis, and the one to take: **monomorphization refuses to

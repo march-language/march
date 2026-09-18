@@ -471,6 +471,15 @@ git log is authoritative for exact commits.
   build that asked for it.
 
 ### Fixed
+- **A call that could not be specialized is now a compile error when the caller
+  and callee disagree about the return representation, instead of silently
+  producing a wrong value.** A stdlib module outside the eager load manifest is
+  read for export shapes only, so monomorphization reaches its call sites with
+  the return type unresolved and emits the generic boxed body — while a caller
+  at a concrete niche-eligible type reads the wrong bits as the payload. The
+  error names the call, both representations, and the fix. Measured across 316
+  programs and 2,204 unspecialized calls before landing: zero false positives.
+
 - **`DataFrame.col_z_score` and `col_normalize` no longer panic on a zero-row
   column.** Both reached `Stats.mean` / `std_dev` / `min_val` / `max_val` with
   an empty list. They now return a zero-row `FloatCol` — the `n = 0` case of
