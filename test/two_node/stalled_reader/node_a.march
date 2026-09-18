@@ -1,0 +1,49 @@
+-- Two-node scenario "stalled_reader": node-a waits for node-b's go-ahead,
+-- then streams 20000 messages of 500 bytes to it (node_b.march), and node-b
+-- is frozen mid-stream; see scenario.sh. The stream runs in the go-ahead's
+-- continuation, so inside the endpoint actor's turn, where no send may
+-- block.
+mod StalledReaderA do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs Session.Live
+
+  @[endpoints]
+  protocol Stall do
+    B -> A : Int
+    loop do
+      choose by A:
+        more -> A -> B : String
+        done -> A -> B : Int
+                stop
+      end
+    end
+  end
+
+  pfn pad(n : Int, acc : String) : String do
+    if n <= 0 do acc else pad(n - 1, acc ++ "x") end
+  end
+
+  pfn stream(s : Cap(Session.Live), st : Stall_A.S_choose_more_done, i : Int, n : Int, body : String) : Stall_A.Yield do
+    if i >= n do
+      let st2 = Stall_A.choose_done(s, st, n)
+      Stall_A.close(s, st2)
+    else
+      let st2 = Stall_A.choose_more(s, st, body)
+      stream(s, st2, i + 1, n, body)
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    println("node-a: up")
+    match Stall_Run.run_A(c, "node-a", "stall-secret", Stall_Run.addrs_from_env(), fn (s, st) ->
+      Stall_A.recv_Msg_B_A_1(s, st, fn (_go, st1) -> stream(s, st1, 0, 20000, pad(500, "")))) do
+      Ok(_) -> println("A: closed")
+      Err(e) -> panic(SessionNode.run_error_message(e))
+    end
+  end
+end

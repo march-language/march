@@ -1,0 +1,52 @@
+-- Two-node scenario "bulk": node-b runs role B; see node_a.march.
+mod BulkNodeB do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs Session.Live
+
+  @[endpoints]
+  protocol Bulk do
+    A -> B : String
+    A -> B : String
+    A -> B : String
+    B -> A : Int
+    loop do
+      choose by A:
+        more -> A -> B : String
+        done -> A -> B : Int
+                stop
+      end
+    end
+  end
+
+  pfn pad(n : Int, acc : String) : String do
+    if n <= 0 do acc else pad(n - 1, acc ++ "x") end
+  end
+
+  pfn drain(s : Cap(Session.Live), st : Bulk_B.S_offer_more_done, got : Int) : Bulk_B.Yield do
+    Bulk_B.offer_more_done(s, st,
+      fn (_m, st2) -> drain(s, st2, got + 1),
+      fn (n, st2) ->
+        println("B: got " ++ int_to_string(got) ++ " of " ++ int_to_string(n))
+        Bulk_B.close(s, st2))
+  end
+
+  pfn role_b(s : Cap(Session.Live), st : Bulk_B.S_recv_Msg_A_B_1) : Bulk_B.Yield do
+    Bulk_B.recv_Msg_A_B_1(s, st, fn (m1, st1) ->
+      Bulk_B.recv_Msg_A_B_2(s, st1, fn (m2, st2) ->
+        Bulk_B.recv_Msg_A_B_3(s, st2, fn (m3, st3) ->
+          let st4 = Bulk_B.send_Msg_B_A_1(s, st3, string_length(m1) + string_length(m2) + string_length(m3))
+          drain(s, st4, 0))))
+  end
+
+  fn main(c : Cap(IO)) do
+    match Bulk_Run.run_B(c, "node-b", "bulk-secret", Bulk_Run.addrs_from_env(), fn (s, st) -> role_b(s, st)) do
+      Ok(_) -> println("B: closed")
+      Err(e) -> panic(SessionNode.run_error_message(e))
+    end
+  end
+end

@@ -1,0 +1,38 @@
+-- Two-node scenario "stalled_reader": node-b takes role B and is frozen by
+-- the scenario once it prints that it is receiving; see scenario.sh.
+mod StalledReaderB do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs Session.Live
+
+  @[endpoints]
+  protocol Stall do
+    B -> A : Int
+    loop do
+      choose by A:
+        more -> A -> B : String
+        done -> A -> B : Int
+                stop
+      end
+    end
+  end
+
+  pfn take(s : Cap(Session.Live), st : Stall_B.S_offer_more_done, got : Int) : Stall_B.Yield do
+    Stall_B.offer_more_done(s, st,
+      fn (_m, st2) ->
+        if got == 0 do println("B: receiving") else () end
+        take(s, st2, got + 1),
+      fn (_n, st2) -> Stall_B.close(s, st2))
+  end
+
+  fn main(c : Cap(IO)) do
+    match Stall_Run.run_B(c, "node-b", "stall-secret", Stall_Run.addrs_from_env(), fn (s, st) -> take(s, Stall_B.send_Msg_B_A_1(s, st, 1), 0)) do
+      Ok(_) -> println("B: closed")
+      Err(e) -> panic(SessionNode.run_error_message(e))
+    end
+  end
+end

@@ -1,0 +1,60 @@
+-- Two-node scenario "bulk": node-a runs role A of the Bulk protocol, node-b
+-- role B (node_b.march). A sends three messages sized against the 4096-byte
+-- credit budget (900, 3400, 20000 bytes), waits for B's count of what
+-- arrived, then sends a burst of 500 messages without waiting. See
+-- scenario.sh for the two hangs and the silent loss these catch.
+mod BulkNodeA do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs Session.Live
+
+  @[endpoints]
+  protocol Bulk do
+    A -> B : String
+    A -> B : String
+    A -> B : String
+    B -> A : Int
+    loop do
+      choose by A:
+        more -> A -> B : String
+        done -> A -> B : Int
+                stop
+      end
+    end
+  end
+
+  pfn pad(n : Int, acc : String) : String do
+    if n <= 0 do acc else pad(n - 1, acc ++ "x") end
+  end
+
+  pfn burst(s : Cap(Session.Live), st : Bulk_A.S_choose_more_done, i : Int, n : Int, body : String) : Bulk_A.Yield do
+    if i >= n do
+      let st2 = Bulk_A.choose_done(s, st, n)
+      Bulk_A.close(s, st2)
+    else
+      let st2 = Bulk_A.choose_more(s, st, body)
+      burst(s, st2, i + 1, n, body)
+    end
+  end
+
+  pfn role_a(s : Cap(Session.Live), st : Bulk_A.S_send_Msg_A_B_1) : Bulk_A.Yield do
+    let st1 = Bulk_A.send_Msg_A_B_1(s, st, pad(900, ""))
+    let st2 = Bulk_A.send_Msg_A_B_2(s, st1, pad(3400, ""))
+    let st3 = Bulk_A.send_Msg_A_B_3(s, st2, pad(20000, ""))
+    Bulk_A.recv_Msg_B_A_1(s, st3, fn (k, st4) ->
+      println("A: B got " ++ int_to_string(k) ++ " bytes")
+      burst(s, st4, 0, 500, pad(500, "")))
+  end
+
+  fn main(c : Cap(IO)) do
+    println("node-a: up")
+    match Bulk_Run.run_A(c, "node-a", "bulk-secret", Bulk_Run.addrs_from_env(), fn (s, st) -> role_a(s, st)) do
+      Ok(_) -> println("A: closed")
+      Err(e) -> panic(SessionNode.run_error_message(e))
+    end
+  end
+end
