@@ -12,6 +12,10 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Changed
+- Cluster membership records a node's creation, name and advertised address: a restarted
+  node outranks every verdict about its previous life, and `GlobalRegistry` bindings carry
+  the holder's creation (a binding from before a restart no longer names whatever process
+  now has that pid). `GlobalRegistry.unregister_own` removes a binding only if it is yours.
 - **A choreography session no longer ends for everyone when one role fails.** Following the
   Maty model (Fowler and Hu, OOPSLA 2026), a failed role is cancelled, and another role is
   cancelled only if it was waiting on it with nothing from it still queued; a role that no

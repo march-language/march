@@ -116,7 +116,7 @@ mod Swim do
         if p.acked do
           ({ s with probe: None }, Nil)
         else
-          let m = Membership.suspect(p.target, incarnation_of(s, p.target))
+          let m = Membership.verdict(s.members, p.target, Suspect, incarnation_of(s, p.target))
           let members2 = Membership.observe(s.members, m)
           let deadline = now + s.config.suspect_timeout_ms
           let dl2 = Map.insert(s.suspect_deadlines, p.target, deadline, Map.str_cmp)
@@ -138,7 +138,7 @@ mod Swim do
         (st, acts) ->
           match kv do
             (id, _deadline) ->
-              let m = Membership.dead(id, incarnation_of(st, id))
+              let m = Membership.verdict(st.members, id, Dead, incarnation_of(st, id))
               let members2 = Membership.observe(st.members, m)
               let dl2 = Map.remove(st.suspect_deadlines, id, Map.str_cmp)
               let out = ({ st with members: members2, suspect_deadlines: dl2 },
@@ -164,6 +164,30 @@ mod Swim do
     end
   end
 
+  -- Suspect [id] now, at its current incarnation, and arm its suspect timer:
+  -- what a closed connection means to the node service (a hint, not a
+  -- verdict -- specs/todos/2026-09-18-cluster-node-service.md). A member
+  -- that is already Suspect or Dead, or unknown, or ourselves, is left alone.
+  fn suspect_member(s : State, now : Int, id : String) : (State, List(Action)) do
+    if id == s.me do
+      (s, Nil)
+    else
+      match Membership.get(s.members, id) do
+        None -> (s, Nil)
+        Some(m) ->
+          match m.status do
+            Alive ->
+              let v = Membership.with_status(m, Suspect, m.incarnation)
+              let dl = Map.insert(s.suspect_deadlines, id, now + s.config.suspect_timeout_ms, Map.str_cmp)
+              let out = ({ s with members: Membership.observe(s.members, v), suspect_deadlines: dl },
+                         Cons(Gossip(v), Nil))
+              out
+            _ -> (s, Nil)
+          end
+      end
+    end
+  end
+
   -- If we have been suspected or declared dead in our own view, refute by
   -- bumping our incarnation above the accusation and re-announcing Alive.
   fn refute(s : State) : (State, Option(Action)) do
@@ -174,7 +198,7 @@ mod Swim do
           Alive -> (s, None)
           _ ->
             let next = (if m.incarnation > s.incarnation do m.incarnation else s.incarnation end) + 1
-            let alive_me = Membership.alive(s.me, next)
+            let alive_me = Membership.verdict(s.members, s.me, Alive, next)
             let out = ({ s with incarnation: next, members: Membership.observe(s.members, alive_me) },
                        Some(Gossip(alive_me)))
             out

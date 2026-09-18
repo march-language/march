@@ -151,4 +151,51 @@ mod TestGlobalRegistry do
 
   end
 
+
+  describe "GlobalRegistry for the node service" do
+
+    test "unregister_own refuses another holder's binding" do
+      let r = GlobalRegistry.register_at(GlobalRegistry.empty(), "ap", "n2", 1, 5, clk("n2", 1))
+      assert (GlobalRegistry.unregister_own(r, "ap", "n1", 1, 7, clk("n1", 1)) == None)
+    end
+
+    test "unregister_own tombstones our own binding" do
+      let r = GlobalRegistry.register_at(GlobalRegistry.empty(), "ap", "n1", 1, 7, clk("n1", 1))
+      match GlobalRegistry.unregister_own(r, "ap", "n1", 1, 7, GlobalRegistry.next_clock(r, "ap", "n1")) do
+        Some(r2) -> assert (GlobalRegistry.lookup(r2, "ap") == None)
+        None -> assert false
+      end
+    end
+
+    test "a stale unregister by the loser cannot erase the winner" do
+      -- n1 and n2 claim concurrently; n2 wins the tiebreak (higher node_id).
+      let a = GlobalRegistry.register_at(GlobalRegistry.empty(), "ap", "n1", 1, 7, clk("n1", 1))
+      let b = GlobalRegistry.register_at(GlobalRegistry.empty(), "ap", "n2", 1, 5, clk("n2", 1))
+      -- n1, still seeing only its own binding, unregisters it.
+      let a2 = match GlobalRegistry.unregister_own(a, "ap", "n1", 1, 7, GlobalRegistry.next_clock(a, "ap", "n1")) do
+        Some(r) -> r
+        None -> a
+      end
+      assert (GlobalRegistry.lookup(GlobalRegistry.merge(a2, b), "ap") == Some(("n2", 5)))
+      assert (GlobalRegistry.lookup(GlobalRegistry.merge(b, a2), "ap") == Some(("n2", 5)))
+    end
+
+    test "a takeover after seeing the old binding is causally newer" do
+      -- n9 (higher node_id) holds; n1 sees it and takes over: n1 must win
+      -- although the tiebreak alone would pick n9.
+      let old = GlobalRegistry.register_at(GlobalRegistry.empty(), "ap", "n9", 1, 5, clk("n9", 1))
+      let taken = GlobalRegistry.register_at(old, "ap", "n1", 1, 7, GlobalRegistry.next_clock(old, "ap", "n1"))
+      assert (GlobalRegistry.lookup(GlobalRegistry.merge(old, taken), "ap") == Some(("n1", 7)))
+    end
+
+    test "the root hash covers creation and clock" do
+      let a = GlobalRegistry.register_at(GlobalRegistry.empty(), "ap", "n1", 1, 7, clk("n1", 1))
+      let b = GlobalRegistry.register_at(GlobalRegistry.empty(), "ap", "n1", 2, 7, clk("n1", 1))
+      let c = GlobalRegistry.register_at(GlobalRegistry.empty(), "ap", "n1", 1, 7, clk("n1", 2))
+      assert (GlobalRegistry.root_hash(a) != GlobalRegistry.root_hash(b))
+      assert (GlobalRegistry.root_hash(a) != GlobalRegistry.root_hash(c))
+    end
+
+  end
+
 end
