@@ -20,9 +20,15 @@
     lines are captured for free — a line scanner cannot see any of those.
 
     Change classification follows the plan's rules:
-      MAJOR: remove a public fn or type, change a fn signature
+      MAJOR: remove a public fn or type, change a fn signature, or change the
+             body of a public fn that has no return-type annotation (the
+             diff cannot see its return type, so it cannot certify less)
       MINOR: add a new public fn or type
       PATCH: no API change
+
+    Signatures are still compared as rendered text, so renaming a parameter
+    reads as MAJOR although no caller breaks.  Comparing inferred types
+    instead is specs/todos/2026-07-31-forge-semantic-semver.md.
 
     Pre-1.0.0 packages skip enforcement entirely.
 *)
@@ -42,6 +48,10 @@ type fn_sig = {
                               " | ", each parenthesized, so a change to any
                               head shows up in the diff. *)
   return_raw : string;   (** rendered return type annotation (empty if absent) *)
+  clauses_raw : string;  (** the whole definition, formatter-rendered without
+                              its doc string or comments, so layout and doc
+                              edits do not register.  Compared only when
+                              [return_raw] is empty; see [UnverifiableFn]. *)
 }
 
 (** A public type declaration. *)
@@ -77,6 +87,11 @@ let render_return (fn : Ast.fn_def) =
   match fn.Ast.fn_ret_ty with
   | None    -> ""
   | Some ty -> Fmt.fmt_ty ty
+
+let render_clauses (fn : Ast.fn_def) =
+  let ctx = Fmt.make_ctx [] in
+  Fmt.emit_fn ctx { fn with Ast.fn_doc = None };
+  Buffer.contents ctx.Fmt.buf
 
 let render_type_def (tdef : Ast.type_def) =
   match tdef with
@@ -147,7 +162,8 @@ and extract_one surf (d : Ast.decl) =
      | Ast.Public ->
        let s = { name       = fn.Ast.fn_name.Ast.txt;
                  params_raw = render_fn_params fn;
-                 return_raw = render_return fn } in
+                 return_raw = render_return fn;
+                 clauses_raw = render_clauses fn } in
        { surf with fns = surf.fns @ [s] })
   | Ast.DType (Ast.Private, _, _, _, _) -> surf
   | Ast.DType (Ast.Public, name, _params, tdef, _) ->
@@ -247,6 +263,7 @@ type change_kind =
 type change =
   | RemovedFn    of fn_sig             (* Major *)
   | ChangedFn    of fn_sig * fn_sig    (* Major: old, new *)
+  | UnverifiableFn of fn_sig * fn_sig  (* Major: see below *)
   | AddedFn      of fn_sig             (* Minor *)
   | RemovedType  of type_decl          (* Major *)
   | ChangedType  of type_decl * type_decl  (* Major: old, new *)
@@ -255,6 +272,14 @@ type change =
 let change_kind_of = function
   | RemovedFn _    -> Major
   | ChangedFn _    -> Major
+  (* No return annotation, and the body changed.  The signature text is the
+     same on both sides, but without an annotation it does not include the
+     return type, and a changed body can return something else: a function
+     that returned an Int and now returns a String diffed as no change and
+     published as a PATCH.  The diff cannot rule that out, so, as with an
+     unparseable file, it refuses to certify anything short of MAJOR rather
+     than certify wrongly. *)
+  | UnverifiableFn _ -> Major
   | RemovedType _  -> Major
   | ChangedType _  -> Major
   | AddedFn _      -> Minor
@@ -278,6 +303,9 @@ let diff ~old_ ~new_ =
         if old_fn.params_raw <> new_fn.params_raw ||
            old_fn.return_raw <> new_fn.return_raw then
           changes := ChangedFn (old_fn, new_fn) :: !changes
+        else if new_fn.return_raw = ""
+             && old_fn.clauses_raw <> new_fn.clauses_raw then
+          changes := UnverifiableFn (old_fn, new_fn) :: !changes
     ) old_.fns;
   (* Check for added functions *)
   List.iter (fun new_fn ->
@@ -360,6 +388,12 @@ let string_of_change = function
       (if old_f.return_raw = "" then "" else " : " ^ old_f.return_raw)
       new_f.name new_f.params_raw
       (if new_f.return_raw = "" then "" else " : " ^ new_f.return_raw)
+  | UnverifiableFn (_, f) ->
+    Printf.sprintf "  • Function `%s` changed, and it has no return-type annotation,\n\
+                    \      so forge cannot tell whether what it returns changed.\n\
+                    \      Add a return-type annotation to get a precise verdict\n\
+                    \      on later releases."
+      f.name
   | AddedFn f ->
     Printf.sprintf "  • Added function `%s`" f.name
   | RemovedType t ->

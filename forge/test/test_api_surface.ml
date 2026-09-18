@@ -294,7 +294,7 @@ let test_extract_from_directory_reports_parse_failures () =
 (* ------------------------------------------------------------------ *)
 
 let make_fn name params ret =
-  Resolver_api_surface.{ name; params_raw = params; return_raw = ret }
+  Resolver_api_surface.{ name; params_raw = params; return_raw = ret; clauses_raw = "" }
 
 let make_ty name body =
   Resolver_api_surface.{ type_name = name; body_raw = body }
@@ -428,6 +428,70 @@ let test_semver_skip_pre_100 () =
   Alcotest.(check bool) "Ok for pre-1.0.0" true (r = Resolver_api_surface.Ok)
 
 (* ------------------------------------------------------------------ *)
+(*  Unannotated return types: the false PATCH                          *)
+(* ------------------------------------------------------------------ *)
+
+(* A public fn with no return annotation renders `return_raw = ""` on both
+   sides, so a text diff of the signature cannot see its return type change.
+   `size` below goes from returning an Int to returning a String: every caller
+   breaks, and the string diff certified it as a PATCH.  The diff cannot rule
+   that out for ANY body change to an unannotated fn, so it must refuse to
+   certify less than MAJOR, and say which fn and why.
+   (specs/progress/2026-09-18-forge-publish-refuses-unannotated-body-changes.md) *)
+let publish_verdict ~old_src ~new_src =
+  (* Wrapped in a module: a bare `fn` does not parse, and an unparsed source
+     extracts to an EMPTY surface, which diffs as no change and would make both
+     "still a PATCH" cases below pass without looking at anything. *)
+  let surface src =
+    let s = Resolver_api_surface.extract_from_string
+        ("mod Pkg do\n" ^ src ^ "\nend\n") in
+    Alcotest.(check (list string)) "the fixture parsed and `size` was extracted"
+      ["size"] (List.map (fun f -> f.Resolver_api_surface.name) s.Resolver_api_surface.fns);
+    s in
+  let old_ = surface old_src in
+  let new_ = surface new_src in
+  let changes = Resolver_api_surface.diff ~old_ ~new_ in
+  (changes,
+   Resolver_api_surface.check_semver_bump
+     ~old_version:"1.0.0" ~new_version:"1.0.1" ~changes)
+
+let test_unannotated_return_change_is_not_a_patch () =
+  let changes, verdict = publish_verdict
+      ~old_src:"fn size(xs : List(Int)) do List.length(xs) end"
+      ~new_src:"fn size(xs : List(Int)) do \"many\" end" in
+  (match verdict with
+   | Resolver_api_surface.UnderBumped { required; _ } ->
+     Alcotest.(check string) "requires MAJOR" "MAJOR"
+       (Resolver_api_surface.string_of_change_kind required)
+   | Resolver_api_surface.Ok ->
+     Alcotest.fail "a return-type change on an unannotated fn certified as PATCH");
+  let msg = String.concat "\n"
+      (List.map Resolver_api_surface.string_of_change changes) in
+  let mentions sub =
+    try ignore (Str.search_forward (Str.regexp_string sub) msg 0); true
+    with Not_found -> false in
+  Alcotest.(check bool) "names the function" true (mentions "`size`");
+  Alcotest.(check bool) "says how to get a precise verdict" true
+    (mentions "return-type annotation")
+
+(* The guard must not fire where the diff CAN see the return type. *)
+let test_annotated_body_change_is_still_a_patch () =
+  let _, verdict = publish_verdict
+      ~old_src:"fn size(xs : List(Int)) : Int do List.length(xs) end"
+      ~new_src:"fn size(xs : List(Int)) : Int do List.length(xs) + 0 end" in
+  Alcotest.(check bool) "annotated body change is a PATCH" true
+    (verdict = Resolver_api_surface.Ok)
+
+(* Nor where nothing a caller could observe changed: layout, comments and the
+   doc string are not part of the comparison. *)
+let test_unannotated_reformat_is_still_a_patch () =
+  let _, verdict = publish_verdict
+      ~old_src:"fn size(xs : List(Int)) do List.length(xs) end"
+      ~new_src:"doc \"Counts.\"\nfn size(xs : List(Int)) do\n  -- same\n  List.length(xs)\nend" in
+  Alcotest.(check bool) "reformat + doc + comment is a PATCH" true
+    (verdict = Resolver_api_surface.Ok)
+
+(* ------------------------------------------------------------------ *)
 (*  Suite                                                              *)
 (* ------------------------------------------------------------------ *)
 
@@ -482,5 +546,13 @@ let () =
       Alcotest.test_case "UnderBumped: patch for removal"    `Quick test_semver_underbumped_patch_for_removal;
       Alcotest.test_case "UnderBumped: patch for addition"   `Quick test_semver_underbumped_minor_for_addition;
       Alcotest.test_case "pre-1.0.0 skips enforcement"       `Quick test_semver_skip_pre_100;
+    ];
+    "unannotated-return", [
+      Alcotest.test_case "unannotated return change is not a PATCH" `Quick
+        test_unannotated_return_change_is_not_a_patch;
+      Alcotest.test_case "annotated body change is still a PATCH"   `Quick
+        test_annotated_body_change_is_still_a_patch;
+      Alcotest.test_case "unannotated reformat is still a PATCH"    `Quick
+        test_unannotated_reformat_is_still_a_patch;
     ];
   ]
