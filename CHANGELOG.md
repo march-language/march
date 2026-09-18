@@ -46,6 +46,12 @@ git log is authoritative for exact commits.
   `cancel(parked)` for actor-hosted roles, and `<P>_Run.host_<Role>_or`.
 
 ### Fixed
+- **A compiled list-building loop could corrupt a list it did not own.** A function of the
+  shape `Cons(h, f(t, ys))` (compiled to a loop, "tail recursion modulo cons") walking a list
+  whose cells were shared with another holder reused those cells in place. The smallest case
+  is appending onto the result of an earlier append twice; in the standard library,
+  `Msgpack.encode` of the same `Msgpack.bin` payload twice. It crashed or returned garbage;
+  `--no-trmc` was correct.
 - **A compiled program could double-free a field read three records deep** (`st.a.b.c`)
   and passed to a function that consumes it: the second such read crashed or read freed
   memory. Two levels deep was fine.
