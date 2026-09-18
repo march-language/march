@@ -11,17 +11,30 @@
 -- Budget: bytes queued but not yet written, bounded by the queue's budget.
 -- The check is made by the SENDER, synchronously, through an atomic
 -- Vault.incr, so drop_new can refuse at once; the writer actor only ever
--- sees frames that fit. Credit: bytes the receiver has CONSUMED (handed to a
--- mailbox, or answered with DELIVERY_FAILED) and announced with a CREDIT
--- frame on the control connection; the writer holds a frame until credit
--- covers it.
+-- sees frames that fit, or that `Unbounded` admits past it. Credit: bytes
+-- the receiver has CONSUMED (handed to a mailbox, or answered with
+-- DELIVERY_FAILED) and announced with a CREDIT frame on the control
+-- connection; the writer holds a frame until credit covers it.
 --
--- Policies at the budget, the three the local bounded mailbox has:
+-- A frame larger than the whole budget could never fit, so it is admitted
+-- when the queue is empty and goes out alone (see `fits` and `drain`); every
+-- policy below applies only while something is already queued.
+--
+-- Policies at the budget: the three the local bounded mailbox has, and one
+-- that never refuses:
 --   drop_new     refuse the new frame (Err(Backpressure))
 --   drop_old     admit it, evicting the oldest queued frames until it fits;
 --                the evicted seqs are reported through `take_evicted`
 --   block_sender the caller blocks until the frame is admitted or its
 --                timeout passes (`BlockSender(timeout_ms)`, below)
+--   unbounded    admit it past the budget: nothing is dropped and the caller
+--                never waits; the frame still goes out only under credit.
+--                For a stream that must not lose frames and whose sender
+--                must not block (SessionNode: its sends run in an actor's
+--                turn, where a blocked `Actor.call` would take the actor's
+--                own messages as its reply). The queue then grows while the
+--                peer is slow; its owner bounds that by closing the queue
+--                (`close`) when it gives the peer up.
 mod NodeQueue do
   needs IO.Mut
   needs IO.NetConnect
@@ -41,7 +54,7 @@ mod NodeQueue do
   -- across later credit, so a blocking send that cannot be admitted at once
   -- returns `Err(Backpressure)` there (as `Actor.set_queue_limit` policy 3 is
   -- refused); the compiled backend blocks for real.
-  type Policy = DropNew | DropOld | BlockSender(Int)
+  type Policy = DropNew | DropOld | BlockSender(Int) | Unbounded
   type EnqueueError = Backpressure | NoConnection
 
   -- ── wire ────────────────────────────────────────────────────────────────
@@ -62,7 +75,8 @@ mod NodeQueue do
   -- ── the writer ──────────────────────────────────────────────────────────
   -- `sent` is a total; `granted` = the receiver's last announced consumed
   -- total + the budget, so at most one budget of bytes is ever in flight
-  -- (written but not yet consumed). A frame may go when sent + len <= granted.
+  -- (written but not yet consumed). A frame may go when sent + len <= granted,
+  -- with one exception for a frame the window can never cover (`may_write`).
   -- `dead`: a write failed (the connection is gone). Nothing further is
   -- written and nothing already queued is charged off the budget: a failed
   -- write is not a sent frame.
@@ -126,6 +140,13 @@ mod NodeQueue do
     on Withdraw(key : Int) do
       withdraw(state, key)
     end
+    -- The connection was torn down from outside (`close`): nothing more is
+    -- written, what was queued is let go, and every blocked caller is
+    -- answered `false` now rather than at its timeout.
+    on Close() do
+      let st = with_dead(state)
+      admit_waiting(rebuild(st, Deque.empty(), st.evicted, st.waiting, st.waiters))
+    end
   end
 
   -- The handlers delegate to annotated helpers: a `{ state with .. }` built
@@ -171,8 +192,13 @@ mod NodeQueue do
     keep_lines(keep_dead(mk(fd, budget, st.sent, st.pending, st.evicted, budget), st.dead), st)
   end
 
+  -- A frame for a dead connection is let go: it can never be written, and
+  -- under `Unbounded` keeping it would grow the queue for nothing.
   pfn admit(st : WriterState, seq : Int, frame : Bytes) : WriterState do
-    admit_waiting(keep_lines(drain(keep_dead(mk(st.fd, st.granted, st.sent, Deque.push_back(st.pending, (seq, frame)), st.evicted, st.budget), st.dead)), st))
+    if st.dead do st
+    else
+      admit_waiting(keep_lines(drain(keep_dead(mk(st.fd, st.granted, st.sent, Deque.push_back(st.pending, (seq, frame)), st.evicted, st.budget), st.dead)), st))
+    end
   end
 
   pfn admit_evicting(st : WriterState, seq : Int, frame : Bytes) : WriterState do
@@ -210,7 +236,7 @@ mod NodeQueue do
         (None, _) -> st
         (Some((_key, seq, frame)), waiting2) ->
           let len = Bytes.length(frame)
-          if queued + len <= st.budget do
+          if fits(queued, len, st.budget) do
             let _ = Vault.incr(t, qk, len)
             let waiters2 = match Deque.pop_front(st.waiters) do
               (Some(answer), rest) ->
@@ -283,6 +309,24 @@ mod NodeQueue do
   -- inside a handler, so the fd doubles as the key (one writer per fd).
   pfn st_pid(st : WriterState) : Int do st.fd end
 
+  -- Admission: [len] more bytes fit when the queue stays within [budget], or
+  -- when the queue is empty -- a frame larger than the budget goes alone.
+  pfn fits(queued : Int, len : Int, budget : Int) : Bool do
+    queued + len <= budget || queued == 0
+  end
+
+  -- May the head frame ([len] bytes) be written? When credit covers it, or
+  -- when the receiver may already have consumed everything written. The
+  -- receiver announces its total only every budget/4 bytes (`consumed`), so
+  -- up to budget/4 - 1 consumed bytes can stay unannounced for good; a frame
+  -- needing more of the window than that remainder leaves (one over 3/4 of
+  -- the budget, or over the whole budget) would otherwise wait on credit
+  -- that never comes. At most one such frame plus budget/4 bytes is then
+  -- in flight.
+  pfn may_write(st : WriterState, len : Int) : Bool do
+    st.sent + len <= st.granted || st.sent - (st.granted - st.budget) < st.budget / 4
+  end
+
   -- Write while credit covers the head of the queue.
   pfn drain(st : WriterState) : WriterState do
     if st.dead do st
@@ -291,7 +335,7 @@ mod NodeQueue do
         None -> st
         Some((_seq, frame)) ->
           let len = Bytes.length(frame)
-          if st.sent + len <= st.granted do
+          if may_write(st, len) do
             match Socket.write(st.fd, Bytes.to_string(frame)) do
               Err(_) -> with_dead(st)
               Ok(_) ->
@@ -326,7 +370,7 @@ mod NodeQueue do
         let t = table()
         let budget = Vault.get_or(t, "b" ++ int_to_string(fd), 0)
         let now = Vault.incr(t, "q" ++ int_to_string(fd), len)
-        if now <= budget do
+        if fits(now - len, len, budget) do
           let _ = send(w, Enqueue(seq, frame))
           Ok(())
         else
@@ -336,6 +380,10 @@ mod NodeQueue do
               Err(Backpressure)
             DropOld ->
               let _ = send(w, EnqueueEvicting(seq, frame))
+              Ok(())
+            Unbounded ->
+              -- Charged like any queued frame, so `depth` shows the backlog.
+              let _ = send(w, Enqueue(seq, frame))
               Ok(())
             BlockSender(timeout_ms) ->
               -- Not charged yet: the writer charges it on admission.
@@ -371,6 +419,16 @@ mod NodeQueue do
     match q do
       (w, _) ->
         let _ = send(w, Credit(total_consumed))
+        ()
+    end
+  end
+
+  -- The connection is gone (its owner shut it down): stop writing, and
+  -- answer every caller blocked in `BlockSender` with `NoConnection` now.
+  fn close(q) : () do
+    match q do
+      (w, _) ->
+        let _ = send(w, Close)
         ()
     end
   end

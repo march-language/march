@@ -12,6 +12,13 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
+- **Choreography sessions no longer lose messages or hang on large ones.** A message over
+  4 KB was silently refused, which left both nodes waiting on each other forever, and a
+  burst of messages lost most of them while both sides still reported success. A message
+  just over 3 KB following a small one could also hang. Messages of any size and any burst
+  now arrive; a sender never waits, and a peer that stops reading is dropped by the
+  heartbeat. `NodeQueue` gains an `Unbounded` policy and accepts a message larger than its
+  whole budget when the queue is empty.
 - **A record or actor-state field that holds a linear value is now tracked like a linear
   field.** A field such as `slot : Option(Parked_B)` used to be an ordinary field: an actor
   could overwrite it with `None` and silently drop the value inside, and a record's field
