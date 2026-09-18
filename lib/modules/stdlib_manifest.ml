@@ -175,7 +175,11 @@ let stdlib_file_list = [
   "session.march";
   (* the Session.Ops network transport over a split peer connection: after
      session (Ops), node_queue, node_send, peer_reader and global_pid. *)
-  "session_node.march"
+  "session_node.march";
+  (* the cluster node service: one running node over SWIM, the per-peer
+     connection pairs and the registry replica; after swim_driver,
+     net_kernel, peer_reader, global_registry and socket, which it uses. *)
+  "cluster_node.march"
 ]
 
 let js_only_stdlib_file_list = ["dom.march"; "canvas.march"; "audio.march"]

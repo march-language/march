@@ -1,0 +1,276 @@
+mod TestClusterNode do
+
+  -- The pure core of the cluster node service (ClusterNode.core_*): every
+  -- rule the actor relies on, without sockets.
+
+  pfn cfg(name : String, seeds : List(String)) : ClusterNode.CnConfig do
+    ClusterNode.config(name, 7000, "", seeds, "s", 1)
+  end
+
+  pfn dials(effs : List(ClusterNode.CnEffect)) : List(String) do
+    List.filter_map(effs, fn e -> match e do ClusterNode.Dial(a) -> Some(a) | _ -> None end)
+  end
+
+  pfn sends_to(effs : List(ClusterNode.CnEffect), id : String) : List(List(Int)) do
+    List.filter_map(effs, fn e -> match e do ClusterNode.Send(d, b) -> if d == id do Some(b) else None end | _ -> None end)
+  end
+
+  pfn drops(effs : List(ClusterNode.CnEffect)) : List(Int) do
+    List.filter_map(effs, fn e -> match e do ClusterNode.Drop(l) -> Some(l.gen) | _ -> None end)
+  end
+
+  pfn installs(effs : List(ClusterNode.CnEffect)) : List(Int) do
+    List.filter_map(effs, fn e -> match e do ClusterNode.Install(l) -> Some(l.gen) | _ -> None end)
+  end
+
+  pfn event_texts(effs : List(ClusterNode.CnEffect)) : List(String) do
+    List.filter_map(effs, fn e -> match e do ClusterNode.Emit(ev) -> Some(ClusterNode.event_text(ev)) | _ -> None end)
+  end
+
+  pfn status_of(st : ClusterNode.CnState, id : String) : String do
+    match ClusterNode.core_member(st, id) do
+      None -> "unknown"
+      Some(m) ->
+        match m.status do
+          Alive -> "alive"
+          Suspect -> "suspect"
+          Dead -> "dead"
+        end
+    end
+  end
+
+  -- node "a" (me) linked to "b": b's id, the state and the effects.
+  pfn linked_ab() : (String, ClusterNode.CnState, List(ClusterNode.CnEffect)) do
+    let st = ClusterNode.core_new(cfg("a", Nil), 1)
+    let b = ClusterNode.node_id_of("b")
+    match ClusterNode.core_linked(st, b, "b", "127.0.0.1:7001", 1, 10, 11, b, 99) do
+      (st2, effs) ->
+        match ClusterNode.core_tick(st2, 1000) do
+          (st3, effs2) ->
+            let out = (b, st3, List.append(effs, effs2))
+            out
+        end
+    end
+  end
+
+  describe "joining" do
+
+    test "a node with a seed and no links dials the seed" do
+      let st = ClusterNode.core_new(cfg("a", Cons("127.0.0.1:7001", Nil)), 1)
+      match ClusterNode.core_tick(st, 1000) do
+        (_, effs) -> assert (dials(effs) == Cons("127.0.0.1:7001", Nil))
+      end
+    end
+
+    test "an in-flight dial is not repeated on the next tick" do
+      let st = ClusterNode.core_new(cfg("a", Cons("127.0.0.1:7001", Nil)), 1)
+      match ClusterNode.core_tick(st, 1000) do
+        (st2, _) ->
+          match ClusterNode.core_tick(st2, 1100) do
+            (_, effs) -> assert (dials(effs) == Nil)
+          end
+      end
+    end
+
+    test "a failed dial backs off, then retries" do
+      let st = ClusterNode.core_new(cfg("a", Cons("127.0.0.1:7001", Nil)), 1)
+      match ClusterNode.core_tick(st, 1000) do
+        (st2, _) ->
+          let st3 = ClusterNode.core_dial_failed(st2, 1050, "127.0.0.1:7001", false)
+          match ClusterNode.core_tick(st3, 1100) do
+            (st4, effs) ->
+              assert (dials(effs) == Nil)
+              match ClusterNode.core_tick(st4, 1300) do
+                (_, effs2) -> assert (dials(effs2) == Cons("127.0.0.1:7001", Nil))
+              end
+          end
+      end
+    end
+
+    test "a new link is installed, told our member view, and reported up" do
+      match linked_ab() do
+        (b, st, effs) ->
+          assert (installs(effs) == Cons(1, Nil))
+          assert (List.length(sends_to(effs, b)) >= 1)
+          assert (status_of(st, b) == "alive")
+          assert (List.member(event_texts(effs), "b up"))
+      end
+    end
+
+    test "an Alive member learned by gossip, with an address, is dialled (the full mesh)" do
+      match linked_ab() do
+        (b, st, _) ->
+          let c = Membership.member(ClusterNode.node_id_of("c"), "c", "127.0.0.1:7002", 1, Alive, 1)
+          let frame = SwimDriver.encode_member_gossip(c)
+          match ClusterNode.core_frame(st, b, 13, frame) do
+            (st2, _) ->
+              match ClusterNode.core_tick(st2, 1100) do
+                (_, effs) -> assert (dials(effs) == Cons("127.0.0.1:7002", Nil))
+              end
+          end
+      end
+    end
+
+  end
+
+  describe "the duplicate rule" do
+
+    test "two pairs dialled by different nodes: both sides keep the lower node_id's" do
+      let a = ClusterNode.node_id_of("a")
+      let b = ClusterNode.node_id_of("b")
+      let lower = if a < b do a else b end
+      match linked_ab() do
+        (_, st, _) ->
+          -- The existing pair was dialled by b; now a's own dial lands too.
+          match ClusterNode.core_linked(st, b, "b", "127.0.0.1:7001", 1, 20, 21, a, 98) do
+            (_, effs) ->
+              if lower == a do
+                assert (drops(effs) == Cons(1, Nil))
+                assert (installs(effs) == Cons(2, Nil))
+              else
+                assert (drops(effs) == Cons(2, Nil))
+                assert (installs(effs) == Nil)
+              end
+          end
+      end
+    end
+
+    test "a second pair from the same dialler replaces the first" do
+      match linked_ab() do
+        (b, st, _) ->
+          match ClusterNode.core_linked(st, b, "b", "127.0.0.1:7001", 1, 20, 21, b, 98) do
+            (_, effs) ->
+              assert (drops(effs) == Cons(1, Nil))
+              assert (installs(effs) == Cons(2, Nil))
+          end
+      end
+    end
+
+  end
+
+  describe "connection loss and failure" do
+
+    test "a close from a replaced generation is ignored" do
+      match linked_ab() do
+        (b, st, _) ->
+          match ClusterNode.core_link_closed(st, b, 7) do
+            (st2, effs) ->
+              assert (effs == Nil)
+              assert (status_of(st2, b) == "alive")
+          end
+      end
+    end
+
+    test "a closed connection is a hint: Suspect, and a redial at once" do
+      match linked_ab() do
+        (b, st, _) ->
+          match ClusterNode.core_link_closed(st, b, 1) do
+            (st2, effs) ->
+              assert (drops(effs) == Cons(1, Nil))
+              match ClusterNode.core_tick(st2, 1100) do
+                (st3, effs2) ->
+                  assert (status_of(st3, b) == "suspect")
+                  assert (List.member(event_texts(effs2), "b suspect"))
+                  assert (dials(effs2) == Cons("127.0.0.1:7001", Nil))
+              end
+          end
+      end
+    end
+
+    test "a refused redial is definite: Dead, with that cause" do
+      match linked_ab() do
+        (b, st, _) ->
+          match ClusterNode.core_link_closed(st, b, 1) do
+            (st2, _) ->
+              match ClusterNode.core_tick(st2, 1100) do
+                (st3, _) ->
+                  let st4 = ClusterNode.core_dial_failed(st3, 1150, "127.0.0.1:7001", true)
+                  match ClusterNode.core_tick(st4, 1200) do
+                    (st5, effs) ->
+                      assert (status_of(st5, b) == "dead")
+                      assert (List.member(event_texts(effs), "b dead: connection refused"))
+                  end
+              end
+          end
+      end
+    end
+
+    test "Dead drops the link; a refutation at a higher incarnation is a rejoin" do
+      match linked_ab() do
+        (b, st, _) ->
+          let dead_b = Membership.member(b, "b", "127.0.0.1:7001", 1, Dead, 5)
+          match ClusterNode.core_frame(st, b, 13, SwimDriver.encode_member_gossip(dead_b)) do
+            (st2, _) ->
+              match ClusterNode.core_tick(st2, 1100) do
+                (st3, effs) ->
+                  assert (drops(effs) == Cons(1, Nil))
+                  assert (List.member(event_texts(effs), "b dead: gossip"))
+                  let back = Membership.member(b, "b", "127.0.0.1:7001", 1, Alive, 6)
+                  match ClusterNode.core_frame(st3, b, 13, SwimDriver.encode_member_gossip(back)) do
+                    (st4, _) ->
+                      match ClusterNode.core_tick(st4, 1200) do
+                        (_, effs2) -> assert (List.member(event_texts(effs2), "b rejoined"))
+                      end
+                  end
+              end
+          end
+      end
+    end
+
+    test "a restart (new creation) reports the old life dead and the new one rejoined" do
+      match linked_ab() do
+        (b, st, _) ->
+          let reborn = Membership.member(b, "b", "127.0.0.1:7001", 2, Alive, 1)
+          match ClusterNode.core_frame(st, b, 13, SwimDriver.encode_member_gossip(reborn)) do
+            (st2, _) ->
+              match ClusterNode.core_tick(st2, 1100) do
+                (_, effs) ->
+                  assert (List.member(event_texts(effs), "b dead: restarted as creation 2"))
+                  assert (List.member(event_texts(effs), "b rejoined"))
+              end
+          end
+      end
+    end
+
+  end
+
+  describe "SWIM frames" do
+
+    test "a ping is answered with an ack on the same peer" do
+      match linked_ab() do
+        (b, st, _) ->
+          match ClusterNode.core_frame(st, b, 0, SwimDriver.encode_msg(SwimDriver.SwimPing(b))) do
+            (_, effs) ->
+              match sends_to(effs, b) do
+                Cons(bytes, Nil) -> assert (PeerReader.tag_of(bytes) == 1)
+                _ -> assert false
+              end
+          end
+      end
+    end
+
+    test "a ping-req is relayed: ping the target, and pass its ack back" do
+      match linked_ab() do
+        (b, st, _) ->
+          let c = ClusterNode.node_id_of("c")
+          match ClusterNode.core_linked(st, c, "c", "127.0.0.1:7002", 1, 30, 31, c, 97) do
+            (st2, _) ->
+              match ClusterNode.core_frame(st2, b, 2, SwimDriver.encode_msg(SwimDriver.SwimPingReq(b, c))) do
+                (st3, effs) ->
+                  assert (List.length(sends_to(effs, c)) == 1)
+                  match ClusterNode.core_frame(st3, c, 1, SwimDriver.encode_msg(SwimDriver.SwimPingAck(c))) do
+                    (_, effs2) ->
+                      match sends_to(effs2, b) do
+                        Cons(bytes, Nil) ->
+                          assert (SwimDriver.decode_msg(bytes) == Ok(SwimDriver.SwimPingAck(c)))
+                        _ -> assert false
+                      end
+                  end
+              end
+          end
+      end
+    end
+
+  end
+
+end

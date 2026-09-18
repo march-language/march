@@ -1,0 +1,892 @@
+-- ClusterNode: one running cluster node -- it joins from seed addresses, runs
+-- SWIM continuously over one persistent authenticated connection pair per
+-- peer, and tells subscribers when a peer is suspected, dead or back.
+--
+-- Design: specs/todos/2026-09-18-cluster-node-service.md. The parts it
+-- assembles were already here (Membership/Swim/SwimDriver, NetKernel's
+-- handshake, PeerReader, NodeQueue); what was missing was a node that stays
+-- up and uses them together.
+--
+-- Shape: a PURE core (`core_*`, `CnState -> ... -> (CnState, List(CnEffect))`,
+-- unit-tested under the eval harness, which cannot run sockets) inside ONE
+-- actor (`Node`) that owns the state and performs the effects, plus a few
+-- tasks around it:
+--
+--   acceptor   blocking tcp_accept loop; each connection is handshaked in its
+--              own task (deadline-bounded) and reported as `Accepted`
+--   dialer     one task per attempt: connect_timeout + handshake, control
+--              then data, reported as `Dialed` / `DialFailed`
+--   readers    one per connection (PeerReader.serve): control frames go to
+--              the actor as `CtlFrame`; end of stream is `LinkClosed(id, gen)`
+--   ticker     `Tick` every tick_ms; the SWIM period, the redial backoff and
+--              the stale-dial expiry all run off it
+--   CtlWriter  one per peer: EVERY write to a control socket goes through it
+--              (two writers on one socket interleave frames)
+--
+-- Connections. One control + one data connection per peer, reused by
+-- everything. Two nodes dialling each other at once each end up with two
+-- pairs; both keep the pair dialled by the LOWER node_id (a symmetric rule,
+-- no message needed). Each pair has a generation; a close from a replaced
+-- generation is ignored. A closed connection is a HINT: the member goes
+-- Suspect and is redialled at once; a redial REFUSED (nothing listening) is
+-- definite and makes it Dead. When SWIM declares a node Dead the node shuts
+-- both its connections. Healing: SWIM never probes a Dead member, so the
+-- node redials every Dead member's advertised address on a backoff; when a
+-- redial lands, MEMBERS_SYNC in both directions lets each side refute what
+-- the other believed.
+--
+-- Everything the node knows about members is also mirrored into a Vault
+-- (`members`, `addr_of`), so readers need no round trip to the actor.
+mod ClusterNode do
+  needs IO.NetListen
+  needs IO.NetConnect
+  needs IO.Spawn
+  needs IO.Mut
+  needs IO.Clock
+
+  -- ── configuration ───────────────────────────────────────────────────────
+
+  -- `advertise` is the "host:port" peers dial; `seeds` are "host:port" too.
+  -- `creation` must grow across restarts of the same node (the default is
+  -- the start time in ms). Durations in ms.
+  type CnConfig = { name : String, listen_port : Int, advertise : String, seeds : List(String),
+                    secret : String, creation : Int, swim : Swim.Config, period_ms : Int,
+                    tick_ms : Int, redial_min_ms : Int, redial_max_ms : Int,
+                    dial_timeout_ms : Int, handshake_timeout_ms : Int }
+
+  doc """
+  A configuration with the defaults: SWIM period 500 ms, ack timeout 300 ms,
+  suspect timeout 1500 ms, 2 indirect helpers, tick 100 ms, redial backoff
+  200 ms doubling to 5 s, dial and handshake timeouts 2 s. [advertise] ""
+  means `127.0.0.1:<listen_port>`.
+  """
+  fn config(name : String, listen_port : Int, advertise : String, seeds : List(String),
+            secret : String, creation : Int) : CnConfig do
+    let adv = if String.is_empty(advertise) do "127.0.0.1:" ++ int_to_string(listen_port) else advertise end
+    { name: name, listen_port: listen_port, advertise: adv, seeds: seeds, secret: secret,
+      creation: creation, swim: Swim.config(300, 1500, 2), period_ms: 500, tick_ms: 100,
+      redial_min_ms: 200, redial_max_ms: 5000, dial_timeout_ms: 2000, handshake_timeout_ms: 2000 }
+  end
+
+  pfn env_or(name : String, dflt : String) : String do
+    match System.env(name) do
+      Some(v) -> if String.is_empty(v) do dflt else v end
+      None -> dflt
+    end
+  end
+
+  doc """
+  Configuration from the environment: MARCH_NODE_NAME, MARCH_NODE_PORT,
+  MARCH_NODE_ADVERTISE (default 127.0.0.1:<port>), MARCH_CLUSTER_NODES
+  (seeds, host:port,...), MARCH_CLUSTER_SECRET, MARCH_NODE_CREATION (default:
+  the current time in ms, which grows across restarts on one host).
+  """
+  fn config_from_env() : Result(CnConfig, String) do
+    match System.env("MARCH_NODE_NAME") do
+      None -> Err("cluster_node: MARCH_NODE_NAME is not set")
+      Some(name) ->
+        match String.to_int(env_or("MARCH_NODE_PORT", "")) do
+          Err(_) -> Err("cluster_node: MARCH_NODE_PORT is not a port number")
+          Ok(port) ->
+            let seeds = List.filter(List.map(String.split(env_or("MARCH_CLUSTER_NODES", ""), ","), String.trim),
+                                    fn s -> not(String.is_empty(s)))
+            let creation = match String.to_int(env_or("MARCH_NODE_CREATION", "")) do
+              Ok(c) -> c
+              Err(_) -> unix_time_ms()
+            end
+            Ok(config(name, port, env_or("MARCH_NODE_ADVERTISE", ""), seeds,
+                      env_or("MARCH_CLUSTER_SECRET", "march-cluster"), creation))
+        end
+    end
+  end
+
+  -- A node's id: the hash of its public key (NodeIdentity.derive_id). Every
+  -- caller in the stdlib still passes "pk-" ++ name for the key; real keys
+  -- are an open question of the design.
+  fn node_id_of(name : String) : String do NodeIdentity.derive_id("pk-" ++ name) end
+
+  -- ── what subscribers see ────────────────────────────────────────────────
+
+  type NodeInfo = { node_id : String, name : String, addr : String, creation : Int, incarnation : Int }
+
+  type NodeEvent = NodeUp(NodeInfo) | NodeSuspect(NodeInfo) | NodeDead(NodeInfo, String) | NodeRejoined(NodeInfo)
+
+  fn info_of(m : Member) : NodeInfo do
+    { node_id: m.node_id, name: m.name, addr: m.addr, creation: m.creation, incarnation: m.incarnation }
+  end
+
+  fn event_text(ev : NodeEvent) : String do
+    match ev do
+      NodeUp(i) -> i.name ++ " up"
+      NodeSuspect(i) -> i.name ++ " suspect"
+      NodeDead(i, why) -> i.name ++ " dead: " ++ why
+      NodeRejoined(i) -> i.name ++ " rejoined"
+    end
+  end
+
+  -- ── the pure core ───────────────────────────────────────────────────────
+
+  -- One peer's connection pair. `dialer` is the node_id that opened it; `cw`
+  -- is its control writer's pid (as an Int: opaque to the core).
+  type CnLink = { node_id : String, gen : Int, cfd : Int, dfd : Int, dialer : String, cw : Int }
+
+  -- A half-assembled inbound pair: the control and data connections of one
+  -- peer arrive as two accepts, in either order (each is handshaked in its
+  -- own task). -1 for the half not yet here.
+  type CnHalf = { cfd : Int, dfd : Int, name : String, addr : String, creation : Int }
+
+  type CnState = {
+    cfg : CnConfig,
+    me : String,
+    driver : SwimDriver.State,
+    links : Map(String, CnLink),
+    halves : Map(String, CnHalf),
+    gen : Int,
+    dialing : Map(String, Int),          -- addr -> when an in-flight attempt is given up
+    backoff : Map(String, (Int, Int)),   -- addr -> (next try at, current delay)
+    pending : List(SwimDriver.Event),    -- folded into SWIM at the next tick
+    relays : Map(String, List(String)),  -- ping-req target -> requesters awaiting its ack
+    refused : List(String),              -- node_ids refused since the last tick
+    stopped : Bool
+  }
+
+  -- What the I/O layer must do after a core transition.
+  type CnEffect =
+      Send(String, List(Int))    -- a control frame to this node_id (dropped if no link)
+    | Dial(String)               -- open a pair to this "host:port"
+    | Install(CnLink)            -- a new link is current: start its readers
+    | Drop(CnLink)               -- shut this link's sockets and stop its writer
+    | Emit(NodeEvent)            -- tell every subscriber
+
+  fn core_new(cfg : CnConfig, seed : Int) : CnState do
+    let me = node_id_of(cfg.name)
+    let self_m = Membership.member(me, cfg.name, cfg.advertise, cfg.creation, Alive, 1)
+    let ms = Membership.observe(Membership.empty(), self_m)
+    { cfg: cfg, me: me, driver: SwimDriver.make(me, 1, ms, cfg.swim, cfg.period_ms, seed),
+      links: Map.empty(), halves: Map.empty(), gen: 0, dialing: Map.empty(), backoff: Map.empty(),
+      pending: Nil, relays: Map.empty(), refused: Nil, stopped: false }
+  end
+
+  fn core_members(st : CnState) : List(Member) do Membership.members(st.driver.swim.members) end
+
+  fn core_member(st : CnState, id : String) : Option(Member) do Membership.get(st.driver.swim.members, id) end
+
+  pfn linked_ids(st : CnState) : List(String) do Map.keys(st.links) end
+
+  pfn is_linked(st : CnState, id : String) : Bool do Map.contains_key(st.links, id, Map.str_cmp) end
+
+  pfn queue(st : CnState, ev : SwimDriver.Event) : CnState do
+    { st with pending: Cons(ev, st.pending) }
+  end
+
+  -- ── events: what changed between two member views ──────────────────────
+
+  -- [dead_cause] names why a node that went Dead in this step did.
+  pfn member_events(before : Members, after : Members, me : String, dead_cause : String -> String) : List(NodeEvent) do
+    List.flat_map(Membership.members(after), fn m ->
+      if m.node_id == me do
+        Nil
+      else
+        match Membership.get(before, m.node_id) do
+          None ->
+            match m.status do
+              Alive -> Cons(NodeUp(info_of(m)), Nil)
+              _ -> Nil
+            end
+          Some(o) ->
+            if o.creation != m.creation do
+              let gone = match o.status do
+                Dead -> Nil
+                _ -> Cons(NodeDead(info_of(o), "restarted as creation " ++ int_to_string(m.creation)), Nil)
+              end
+              let now_ev = match m.status do
+                Alive -> Cons(NodeRejoined(info_of(m)), Nil)
+                _ -> Nil
+              end
+              List.append(gone, now_ev)
+            else
+              match (o.status, m.status) do
+                (Alive, Suspect) -> Cons(NodeSuspect(info_of(m)), Nil)
+                (Alive, Dead) -> Cons(NodeDead(info_of(m), dead_cause(m.node_id)), Nil)
+                (Suspect, Dead) -> Cons(NodeDead(info_of(m), dead_cause(m.node_id)), Nil)
+                (Suspect, Alive) -> Cons(NodeUp(info_of(m)), Nil)
+                (Dead, Alive) -> Cons(NodeRejoined(info_of(m)), Nil)
+                _ -> Nil
+              end
+            end
+        end
+      end)
+  end
+
+  -- The effects of a set of events: emit each, and drop the links of every
+  -- node that just went Dead (the edge, not the level: a node still Dead
+  -- after a heal redial keeps its fresh link until it refutes).
+  pfn event_effects(st : CnState, evs : List(NodeEvent)) : (CnState, List(CnEffect)) do
+    event_effects_acc(st, evs, Nil)
+  end
+
+  -- Plain recursion, not a fold with a lambda: the lambda form made the
+  -- compiled backend emit a call to an undefined global named after a
+  -- let-binding inside it (see the progress record).
+  pfn event_effects_acc(st : CnState, evs : List(NodeEvent), acc : List(CnEffect)) : (CnState, List(CnEffect)) do
+    match evs do
+      Nil -> (st, List.reverse(acc))
+      Cons(ev, rest) ->
+        match ev do
+          NodeDead(i, _) ->
+            match Map.get(st.links, i.node_id, Map.str_cmp) do
+              Some(l) ->
+                let without = { st with links: Map.remove(st.links, i.node_id, Map.str_cmp) }
+                event_effects_acc(without, rest, Cons(Emit(ev), Cons(Drop(l), acc)))
+              None -> event_effects_acc(st, rest, Cons(Emit(ev), acc))
+            end
+          _ -> event_effects_acc(st, rest, Cons(Emit(ev), acc))
+        end
+    end
+  end
+
+  -- ── ticks ──────────────────────────────────────────────────────────────
+
+  -- The member whose advertised address is [addr], if any.
+  pfn member_at(st : CnState, addr : String) : Option(Member) do
+    List.find(core_members(st), fn m -> m.addr == addr && m.node_id != st.me)
+  end
+
+  -- Every address worth a dial right now: members with a known address and
+  -- no link (Alive ones from gossip: the full mesh; Suspect and Dead ones:
+  -- the heal path), and seeds no linked member advertises. Never ourselves,
+  -- never an address with an attempt in flight or still backing off.
+  pfn dial_targets(st : CnState, now : Int) : List(String) do
+    let from_members = List.filter_map(core_members(st), fn m ->
+      if m.node_id == st.me || String.is_empty(m.addr) || is_linked(st, m.node_id) do None else Some(m.addr) end)
+    let linked_addrs = List.filter_map(core_members(st), fn m ->
+      if is_linked(st, m.node_id) do Some(m.addr) else None end)
+    let from_seeds = List.filter(st.cfg.seeds, fn a -> not(List.member(linked_addrs, a)))
+    let all = List.dedup(List.append(from_members, from_seeds))
+    List.filter(all, fn a ->
+      a != st.cfg.advertise &&
+      not(Map.contains_key(st.dialing, a, Map.str_cmp)) &&
+      (match Map.get(st.backoff, a, Map.str_cmp) do
+         None -> true
+         Some((at, _)) -> at <= now
+       end))
+  end
+
+  -- Forget attempts past their deadline (a dial task that is still parked
+  -- in a connect will report later; a late success is still a link).
+  pfn expire_dials(st : CnState, now : Int) : CnState do
+    let live = Map.filter(st.dialing, fn _a -> fn until -> until > now, Map.str_cmp)
+    { st with dialing: live }
+  end
+
+  pfn plan_dials(st : CnState, now : Int) : (CnState, List(CnEffect)) do
+    let st1 = expire_dials(st, now)
+    let targets = dial_targets(st1, now)
+    let until = now + st1.cfg.dial_timeout_ms * 2 + st1.cfg.handshake_timeout_ms * 2
+    let dialing = List.fold_left(targets, st1.dialing, fn (m, a) -> Map.insert(m, a, until, Map.str_cmp))
+    let out = ({ st1 with dialing: dialing }, List.map(targets, fn a -> Dial(a)))
+    out
+  end
+
+  pfn swim_frames(st : CnState, acts : List(Swim.Action)) : List(CnEffect) do
+    let ids = linked_ids(st)
+    List.flat_map(acts, fn a ->
+      List.map(SwimDriver.action_frames(a, st.me, ids), fn pair ->
+        match pair do (dest, bytes) -> Send(dest, bytes) end))
+  end
+
+  doc """
+  One tick at [now]: fold the queued SWIM events and step the driver (its
+  actions become control frames to linked peers), derive the member events,
+  and plan the dials this tick allows.
+  """
+  fn core_tick(st : CnState, now : Int) : (CnState, List(CnEffect)) do
+    let before = st.driver.swim.members
+    let timed_out = List.filter_map(Map.entries(st.driver.swim.suspect_deadlines), fn kv ->
+      match kv do (id, dl) -> if dl <= now do Some(id) else None end end)
+    let refused = st.refused
+    let evs_in = List.reverse(st.pending)
+    match SwimDriver.step(st.driver, now, evs_in) do
+      (d2, acts) ->
+        let st2 = { st with driver: d2, pending: Nil, refused: Nil }
+        let frames = swim_frames(st2, acts)
+        let cause = fn id ->
+          if List.member(refused, id) do "connection refused"
+          else if List.member(timed_out, id) do "suspect timeout"
+          else "gossip" end end
+        let evs = member_events(before, d2.swim.members, st.me, cause)
+        match event_effects(st2, evs) do
+          (st3, ev_effs) ->
+            match plan_dials(st3, now) do
+              (st4, dials) -> (st4, List.append(frames, List.append(ev_effs, dials)))
+            end
+        end
+    end
+  end
+
+  -- ── links ──────────────────────────────────────────────────────────────
+
+  -- The pair two nodes both keep when each dialled the other: the one
+  -- dialled by the lower node_id.
+  pfn keeps_new(st : CnState, old : CnLink, new_l : CnLink) : Bool do
+    if old.dialer == new_l.dialer do
+      true
+    else
+      let lower = if st.me < new_l.node_id do st.me else new_l.node_id end
+      new_l.dialer == lower
+    end
+  end
+
+  doc """
+  A pair to [id] is up ([cfd]/[dfd], opened by [dialer], its control writer
+  [cw]). Applies the duplicate rule, gives it a generation, records what the
+  handshake said about the peer (name, advertised address, creation) as an
+  Alive observation at incarnation 0 -- which outranks nothing it already
+  knows about that creation -- and sends it our whole member view.
+  """
+  fn core_linked(st : CnState, id : String, name : String, addr : String, creation : Int,
+                 cfd : Int, dfd : Int, dialer : String, cw : Int) : (CnState, List(CnEffect)) do
+    let gen = st.gen + 1
+    let l = { node_id: id, gen: gen, cfd: cfd, dfd: dfd, dialer: dialer, cw: cw }
+    let st1 = { st with gen: gen }
+    let (st2, drops) = match Map.get(st1.links, id, Map.str_cmp) do
+      None -> (st1, Nil)
+      Some(old) ->
+        if keeps_new(st1, old, l) do
+          (st1, Cons(Drop(old), Nil))
+        else
+          (st1, Cons(Drop(l), Nil))
+        end
+    end
+    let kept_new = match drops do
+      Cons(Drop(d), Nil) -> d.gen != gen
+      _ -> true
+    end
+    if kept_new do
+      let obs = Membership.member(id, name, addr, creation, Alive, 0)
+      let st3 = queue({ st2 with links: Map.insert(st2.links, id, l, Map.str_cmp),
+                                 backoff: Map.remove(st2.backoff, addr, Map.str_cmp),
+                                 dialing: Map.remove(st2.dialing, addr, Map.str_cmp) },
+                      SwimDriver.GossipFrame(obs))
+      let sync = SwimDriver.encode_members_sync(List.append(core_members(st3), Cons(obs, Nil)))
+      let out = (st3, List.append(drops, Cons(Install(l), Cons(Send(id, sync), Nil))))
+      out
+    else
+      (st2, drops)
+    end
+  end
+
+  doc """
+  A connection of the current pair to [id], generation [gen], ended. A close
+  from a replaced generation is ignored. Otherwise the link is gone, the
+  member is suspected (a hint, not a verdict) and redialled at once.
+  """
+  fn core_link_closed(st : CnState, id : String, gen : Int) : (CnState, List(CnEffect)) do
+    match Map.get(st.links, id, Map.str_cmp) do
+      None -> (st, Nil)
+      Some(l) ->
+        if l.gen != gen do
+          (st, Nil)
+        else
+          let st1 = { st with links: Map.remove(st.links, id, Map.str_cmp) }
+          let addr = match core_member(st1, id) do
+            Some(m) -> m.addr
+            None -> ""
+          end
+          let st2 = { st1 with backoff: Map.remove(st1.backoff, addr, Map.str_cmp) }
+          let out = (queue(st2, SwimDriver.ConnLost(id)), Cons(Drop(l), Nil))
+          out
+        end
+    end
+  end
+
+  doc """
+  A dial to [addr] failed. [refused]: nothing listens there -- for a member
+  we know at that address that is not already Dead, that is definite
+  (PeerDown: Dead at the next tick, cause "connection refused"). Either way
+  the address backs off, doubling to redial_max_ms.
+  """
+  fn core_dial_failed(st : CnState, now : Int, addr : String, refused : Bool) : CnState do
+    let delay = match Map.get(st.backoff, addr, Map.str_cmp) do
+      None -> st.cfg.redial_min_ms
+      Some((_, d)) -> if d * 2 > st.cfg.redial_max_ms do st.cfg.redial_max_ms else d * 2 end
+    end
+    let st1 = { st with dialing: Map.remove(st.dialing, addr, Map.str_cmp),
+                        backoff: Map.insert(st.backoff, addr, (now + delay, delay), Map.str_cmp) }
+    if refused do
+      match member_at(st1, addr) do
+        Some(m) ->
+          match m.status do
+            Dead -> st1
+            _ -> queue({ st1 with refused: Cons(m.node_id, st1.refused) }, SwimDriver.PeerDown(m.node_id))
+          end
+        None -> st1
+      end
+    else
+      st1
+    end
+  end
+
+  -- ── control frames ─────────────────────────────────────────────────────
+
+  pfn relay_ack(st : CnState, target : String) : (CnState, List(CnEffect)) do
+    match Map.get(st.relays, target, Map.str_cmp) do
+      None -> (st, Nil)
+      Some(reqs) ->
+        let ack = SwimDriver.encode_msg(SwimDriver.SwimPingAck(target))
+        let out = ({ st with relays: Map.remove(st.relays, target, Map.str_cmp) },
+                   List.map(reqs, fn r -> Send(r, ack)))
+        out
+    end
+  end
+
+  doc """
+  A control frame from [from] (tag [tag]). SWIM pings are answered at once;
+  acks, gossip and member syncs are queued for the next tick; a ping-req is
+  relayed (we ping the target, and pass its ack back to the requester).
+  Frames of other families are ignored here (the registry and the data
+  plane handle theirs).
+  """
+  fn core_frame(st : CnState, from : String, tag : Int, frame : List(Int)) : (CnState, List(CnEffect)) do
+    if tag == 13 do
+      match SwimDriver.decode_member_gossip(frame) do
+        Ok(m) -> (queue(st, SwimDriver.GossipFrame(m)), Nil)
+        Err(_) -> (st, Nil)
+      end
+    else if tag == 14 do
+      match SwimDriver.decode_members_sync(frame) do
+        Ok(ms) -> (List.fold_left(ms, st, fn (s, m) -> queue(s, SwimDriver.GossipFrame(m))), Nil)
+        Err(_) -> (st, Nil)
+      end
+    else if tag >= 0 && tag <= 3 do
+      match SwimDriver.decode_msg(frame) do
+        Err(_) -> (st, Nil)
+        Ok(msg) ->
+          match msg do
+            SwimDriver.SwimPing(_) ->
+              (st, Cons(Send(from, SwimDriver.encode_msg(SwimDriver.SwimPingAck(st.me))), Nil))
+            SwimDriver.SwimPingAck(sender) ->
+              relay_ack(queue(st, SwimDriver.PingAck(sender)), sender)
+            SwimDriver.SwimPingReq(requester, target) ->
+              if is_linked(st, target) do
+                let reqs = match Map.get(st.relays, target, Map.str_cmp) do
+                  None -> Cons(requester, Nil)
+                  Some(rs) -> Cons(requester, rs)
+                end
+                ({ st with relays: Map.insert(st.relays, target, reqs, Map.str_cmp) },
+                 Cons(Send(target, SwimDriver.encode_msg(SwimDriver.SwimPing(st.me))), Nil))
+              else
+                (st, Nil)
+              end
+            _ ->
+              match SwimDriver.msg_to_event(msg) do
+                Some(ev) -> (queue(st, ev), Nil)
+                None -> (st, Nil)
+              end
+          end
+      end
+    else
+      (st, Nil)
+    end end end
+  end
+
+  -- ── the I/O layer ───────────────────────────────────────────────────────
+
+  -- One peer's control writer: every control frame to that peer is written
+  -- here, in mailbox order. A failed write marks it dead (the reader will
+  -- see the connection end and report it).
+  actor CtlWriter do
+    state { fd : Int, dead : Bool }
+    init  { fd: -1, dead: false }
+    on CtlUse(fd : Int) do
+      { fd: fd, dead: false }
+    end
+    on CtlWrite(bytes : List(Int)) do
+      if state.dead || state.fd < 0 do
+        state
+      else
+        match NetKernel.send_frame(state.fd, bytes) do
+          Ok(_) -> state
+          Err(_) -> { fd: state.fd, dead: true }
+        end
+      end
+    end
+    on CtlStop() do
+      { fd: -1, dead: true }
+    end
+  end
+
+  -- The node's handle: what `start` returns and every API call takes.
+  -- `pid` is the Node actor's pid as an Int; the Vaults are its mirrors.
+  type ClusterHandle = { pid : Int, name : String, node_id : String, advertise : String,
+                  members : Vault(Member), subs : Vault(NodeEvent -> Unit), meta : Vault(Int) }
+
+  actor Node do
+    state { st : CnState, h : ClusterHandle, started : Bool }
+    init  { st: core_new(config("", 0, "", Nil, "", 0), 0),
+            h: { pid: 0, name: "", node_id: "", advertise: "",
+                 members: Vault.new("cluster_node_unset_members"),
+                 subs: Vault.new("cluster_node_unset_subs"),
+                 meta: Vault.new("cluster_node_unset_meta") },
+            started: false }
+    on Boot(st0 : CnState, h0 : ClusterHandle) do
+      { st: st0, h: h0, started: true }
+    end
+    on Tick(now : Int) do
+      if state.started do step_io(state.st, state.h, core_tick(state.st, now), state.started) else state end
+    end
+    on Accepted(fd : Int, id : String, name : String, role : String, addr : String, creation : Int) do
+      on_accepted(state.st, state.h, fd, id, name, role, addr, creation)
+    end
+    on Dialed(addr : String, id : String, name : String, peer_addr : String, creation : Int, cfd : Int, dfd : Int) do
+      let a = if String.is_empty(peer_addr) do addr else peer_addr end
+      let cw = start_writer(cfd)
+      step_io(state.st, state.h, core_linked(state.st, id, name, a, creation, cfd, dfd, state.st.me, cw), state.started)
+    end
+    on DialFailed(addr : String, now : Int, refused : Bool) do
+      { st: core_dial_failed(state.st, now, addr, refused), h: state.h, started: state.started }
+    end
+    on CtlFrame(from : String, gen : Int, tag : Int, frame : List(Int)) do
+      if current_gen(state.st, from, gen) do
+        step_io(state.st, state.h, core_frame(state.st, from, tag, frame), state.started)
+      else
+        state
+      end
+    end
+    on LinkClosed(id : String, gen : Int) do
+      step_io(state.st, state.h, core_link_closed(state.st, id, gen), state.started)
+    end
+    on Shutdown() do
+      let _ = List.map(Map.values(state.st.links), fn l -> drop_link(l))
+      { st: { state.st with stopped: true, links: Map.empty() }, h: state.h, started: false }
+    end
+  end
+
+  type NodeActorState = { st : CnState, h : ClusterHandle, started : Bool }
+
+  pfn node_pid(h : ClusterHandle) do pid_of_int(h.pid) end
+
+  -- Evaluate for effect. (`let _ = x` followed by a `()` line parses as the
+  -- application `x()`: the let-then-paren trap.)
+  pfn discard(_x) : () do () end
+
+  pfn current_gen(st : CnState, id : String, gen : Int) : Bool do
+    match Map.get(st.links, id, Map.str_cmp) do
+      Some(l) -> l.gen == gen
+      None -> false
+    end
+  end
+
+  pfn start_writer(fd : Int) : Int do
+    let w = spawn(CtlWriter)
+    send(w, CtlUse(fd))
+    pid_to_int(w)
+  end
+
+  pfn drop_link(l : CnLink) : () do
+    send(pid_of_int(l.cw), CtlStop())
+    tcp_shutdown(l.cfd)
+    if l.dfd >= 0 do tcp_shutdown(l.dfd) else () end
+  end
+
+  -- Pair up an accepted connection with its other half; a complete pair is
+  -- a link (dialled by the peer).
+  pfn on_accepted(st : CnState, h : ClusterHandle, fd : Int, id : String, name : String, role : String,
+                  addr : String, creation : Int) : NodeActorState do
+    let old = match Map.get(st.halves, id, Map.str_cmp) do
+      Some(hf) -> if hf.creation == creation do hf else { cfd: -1, dfd: -1, name: name, addr: addr, creation: creation } end
+      None -> { cfd: -1, dfd: -1, name: name, addr: addr, creation: creation }
+    end
+    let hf = if role == Handshake.role_data() do { old with dfd: fd } else { old with cfd: fd } end
+    if hf.cfd >= 0 && hf.dfd >= 0 do
+      let st1 = { st with halves: Map.remove(st.halves, id, Map.str_cmp) }
+      let cw = start_writer(hf.cfd)
+      step_io(st1, h, core_linked(st1, id, hf.name, hf.addr, hf.creation, hf.cfd, hf.dfd, id, cw), true)
+    else
+      { st: { st with halves: Map.insert(st.halves, id, hf, Map.str_cmp) }, h: h, started: true }
+    end
+  end
+
+  -- Perform a core transition's effects and mirror the member view.
+  pfn step_io(st0 : CnState, h : ClusterHandle, out : (CnState, List(CnEffect)), started : Bool) : NodeActorState do
+    match out do
+      (st, effs) ->
+        let _ = List.map(effs, fn e -> perform(st, h, e))
+        mirror(st, h)
+        { st: st, h: h, started: started }
+    end
+  end
+
+  pfn perform(st : CnState, h : ClusterHandle, e : CnEffect) : () do
+    match e do
+      Send(id, bytes) ->
+        match Map.get(st.links, id, Map.str_cmp) do
+          Some(l) -> send(pid_of_int(l.cw), CtlWrite(bytes))
+          None -> ()
+        end
+      Dial(addr) ->
+        let me = NodeIdentity.make(st.cfg.name, "pk-" ++ st.cfg.name, st.cfg.creation)
+        let node = pid_of_int(h.pid)
+        let cfg = st.cfg
+        discard(task_spawn(fn _ -> dial(node, cfg, me, addr)))
+      Install(l) ->
+        let node = pid_of_int(h.pid)
+        let _ = task_spawn(fn _ -> read_control(node, l))
+        discard(task_spawn(fn _ -> read_data(node, l)))
+      Drop(l) -> drop_link(l)
+      Emit(ev) ->
+        discard(List.map(Vault.all(h.subs), fn kv -> match kv do (_k, f) -> f(ev) end))
+    end
+  end
+
+  pfn mirror(st : CnState, h : ClusterHandle) : () do
+    let _ = List.map(core_members(st), fn m -> Vault.set(h.members, m.node_id, m))
+    discard(Vault.set(h.meta, "links", Map.size(st.links)))
+  end
+
+  -- ── tasks ──────────────────────────────────────────────────────────────
+
+  pfn split_addr(addr : String) : Option((String, Int)) do
+    match String.split_first(addr, ":") do
+      None -> None
+      Some((host, p)) ->
+        match String.to_int(p) do
+          Ok(port) -> Some((host, port))
+          Err(_) -> None
+        end
+    end
+  end
+
+  pfn refused_msg(e : String) : Bool do
+    String.contains(e, "refused")
+  end
+
+  pfn dial_one(cfg : CnConfig, me : NodeIdentity.Identity, host : String, port : Int, role : String)
+      : Result((Int, NodeIdentity.Identity, String), (String, Bool)) do
+    match Socket.connect_timeout(host, port, cfg.dial_timeout_ms) do
+      Err(e) ->
+        let msg = Socket.error_message(e)
+        Err((msg, refused_msg(msg)))
+      Ok(fd) ->
+        match NetKernel.handshake_addr(fd, me, cfg.secret, NetKernel.fresh_nonce(), role,
+                                       cfg.advertise, cfg.handshake_timeout_ms) do
+          Err(e) ->
+            tcp_close(fd)
+            Err((e, false))
+          Ok((peer, _role, peer_addr)) -> Ok((fd, peer, peer_addr))
+        end
+    end
+  end
+
+  -- Open a pair to [addr]: control, then data (the order the acceptor's
+  -- pairing does not depend on, but a pre-split peer would).
+  pfn dial(node, cfg : CnConfig, me : NodeIdentity.Identity, addr : String) : Int do
+    match split_addr(addr) do
+      None ->
+        send(node, DialFailed(addr, unix_time_ms(), false))
+        0
+      Some((host, port)) ->
+        match dial_one(cfg, me, host, port, Handshake.role_control()) do
+          Err((_, refused)) ->
+            send(node, DialFailed(addr, unix_time_ms(), refused))
+            0
+          Ok((cfd, peer, peer_addr)) ->
+            match dial_one(cfg, me, host, port, Handshake.role_data()) do
+              Err((_, refused)) ->
+                tcp_close(cfd)
+                send(node, DialFailed(addr, unix_time_ms(), refused))
+                0
+              Ok((dfd, _, _)) ->
+                if peer.node_id == node_id_of(cfg.name) do
+                  -- We dialled ourselves (a seed list naming this node).
+                  tcp_close(cfd)
+                  tcp_close(dfd)
+                  send(node, DialFailed(addr, unix_time_ms(), false))
+                  0
+                else
+                  send(node, Dialed(addr, peer.node_id, peer.name, peer_addr, peer.incarnation, cfd, dfd))
+                  1
+                end
+            end
+        end
+    end
+  end
+
+  pfn read_control(node, l : CnLink) : Int do
+    let _ = PeerReader.serve(l.cfd, Nil, fn (tag, frame) -> do
+      send(node, CtlFrame(l.node_id, l.gen, tag, frame))
+      Ok(true)
+    end)
+    send(node, LinkClosed(l.node_id, l.gen))
+    0
+  end
+
+  -- The data connection carries nothing the node itself consumes yet (actor
+  -- messages route through it in the data-plane phase); reading it is what
+  -- notices the peer closing it.
+  pfn read_data(node, l : CnLink) : Int do
+    let _ = PeerReader.serve(l.dfd, Nil, fn (_tag, _frame) -> Ok(true))
+    send(node, LinkClosed(l.node_id, l.gen))
+    0
+  end
+
+  pfn handshake_in(node, cfg : CnConfig, me : NodeIdentity.Identity, fd : Int) : Int do
+    match NetKernel.handshake_addr(fd, me, cfg.secret, NetKernel.fresh_nonce(), Handshake.role_control(),
+                                   cfg.advertise, cfg.handshake_timeout_ms) do
+      Err(_) ->
+        tcp_close(fd)
+        0
+      Ok((peer, role, addr)) ->
+        send(node, Accepted(fd, peer.node_id, peer.name, role, addr, peer.incarnation))
+        1
+    end
+  end
+
+  pfn accept_loop(node, cfg : CnConfig, me : NodeIdentity.Identity, listen_fd : Int, meta : Vault(Int)) : Int do
+    match tcp_accept(listen_fd) do
+      Err(_) -> 0
+      Ok(fd) ->
+        if Vault.get(meta, "stopped") != None do
+          tcp_close(fd)
+          0
+        else
+          let _ = task_spawn(fn _ -> handshake_in(node, cfg, me, fd))
+          accept_loop(node, cfg, me, listen_fd, meta)
+        end
+    end
+  end
+
+  pfn tick_loop(node, tick_ms : Int, meta : Vault(Int)) : Int do
+    sleep_ms(tick_ms)
+    if Vault.get(meta, "stopped") != None do
+      0
+    else
+      send(node, Tick(unix_time_ms()))
+      tick_loop(node, tick_ms, meta)
+    end
+  end
+
+  -- ── the API ────────────────────────────────────────────────────────────
+
+  doc """
+  Start a node: listen on `cfg.listen_port`, begin SWIM, dial the seeds.
+  Returns at once -- a node that reaches no seed runs as a cluster of one
+  and keeps redialling them (use `subscribe` or `await_members` to wait for
+  peers). Err only if the listen socket cannot be opened.
+  """
+  fn start(cfg : CnConfig) : Result(ClusterHandle, String) do
+    match tcp_listen(cfg.listen_port) do
+      Err(e) -> Err("cluster_node: listen on " ++ int_to_string(cfg.listen_port) ++ ": " ++ e)
+      Ok(listen_fd) ->
+        let node = spawn(Node)
+        let tag = cfg.name ++ "." ++ int_to_string(pid_to_int(node))
+        let h = { pid: pid_to_int(node), name: cfg.name, node_id: node_id_of(cfg.name), advertise: cfg.advertise,
+                  members: Vault.new("cluster_node_members_" ++ tag),
+                  subs: Vault.new("cluster_node_subs_" ++ tag),
+                  meta: Vault.new("cluster_node_meta_" ++ tag) }
+        Vault.set(h.meta, "listen_fd", listen_fd)
+        let st0 = core_new(cfg, cfg.creation)
+        mirror(st0, h)
+        send(node, Boot(st0, h))
+        let me = NodeIdentity.make(cfg.name, "pk-" ++ cfg.name, cfg.creation)
+        let meta = h.meta
+        let _ = task_spawn(fn _ -> accept_loop(node, cfg, me, listen_fd, meta))
+        let _ = task_spawn(fn _ -> tick_loop(node, cfg.tick_ms, meta))
+        Ok(h)
+    end
+  end
+
+  doc "Stop the node: close every link and the listener, stop the ticker."
+  fn stop(h : ClusterHandle) : () do
+    Vault.set(h.meta, "stopped", 1)
+    send(node_pid(h), Shutdown())
+    -- Wake the acceptor, parked in tcp_accept, with a connection of our
+    -- own: it sees the stop flag and returns. (Closing the listen socket
+    -- under a parked accept does not wake it on every platform.)
+    match split_addr(h.advertise) do
+      Some((_host, port)) ->
+        match Socket.connect_timeout("127.0.0.1", port, 500) do
+          Ok(fd) -> tcp_close(fd)
+          Err(_) -> ()
+        end
+      None -> ()
+    end
+    match Vault.get(h.meta, "listen_fd") do
+      Some(fd) -> tcp_close(fd)
+      None -> ()
+    end
+  end
+
+  doc """
+  Call [on_event] (in the node actor's turn: it must only `send`) for every
+  membership change. A subscriber added late gets `NodeUp` at once for
+  every member currently Alive. Returns an id for `unsubscribe`.
+  """
+  fn subscribe(h : ClusterHandle, on_event : NodeEvent -> Unit) : Int do
+    let id = Vault.incr(h.meta, "next_sub", 1)
+    Vault.set(h.subs, int_to_string(id), on_event)
+    let _ = List.map(members(h), fn i -> on_event(NodeUp(i)))
+    id
+  end
+
+  fn unsubscribe(h : ClusterHandle, id : Int) : () do
+    Vault.drop(h.subs, int_to_string(id))
+  end
+
+  doc "Every other node this node knows as Alive."
+  fn members(h : ClusterHandle) : List(NodeInfo) do
+    List.filter_map(Vault.all(h.members), fn kv ->
+      match kv do
+        (_k, m) ->
+          if m.node_id == h.node_id do None
+          else
+            match m.status do
+              Alive -> Some(info_of(m))
+              _ -> None
+            end
+          end
+      end)
+  end
+
+  doc "Every member this node knows of, in any status, itself included."
+  fn all_members(h : ClusterHandle) : List(Member) do
+    List.map(Vault.all(h.members), fn kv -> match kv do (_k, m) -> m end)
+  end
+
+  doc "The advertised address of [node_id], if this node has heard it."
+  fn addr_of(h : ClusterHandle, node_id : String) : Option(String) do
+    match Vault.get(h.members, node_id) do
+      Some(m) -> if String.is_empty(m.addr) do None else Some(m.addr) end
+      None -> None
+    end
+  end
+
+  doc "The name of [node_id], if known."
+  fn name_of(h : ClusterHandle, node_id : String) : Option(String) do
+    match Vault.get(h.members, node_id) do
+      Some(m) -> Some(m.name)
+      None -> None
+    end
+  end
+
+  doc "How many peers this node currently has a connection pair to."
+  fn link_count(h : ClusterHandle) : Int do Vault.get_or(h.meta, "links", 0) end
+
+  doc """
+  Wait (polling every 50 ms) until at least [n] other nodes are Alive, or
+  [timeout_ms] passes. True if they are.
+  """
+  fn await_members(h : ClusterHandle, n : Int, timeout_ms : Int) : Bool do
+    if List.length(members(h)) >= n do
+      true
+    else
+      if timeout_ms <= 0 do
+        false
+      else
+        sleep_ms(50)
+        await_members(h, n, timeout_ms - 50)
+      end
+    end
+  end
+
+end

@@ -1,0 +1,34 @@
+-- Two-node harness, scenario "cluster_stall": node-b. Joins node-a (its one seed)
+-- and runs until the scenario's stop file appears (or it is killed).
+-- See node_a.march.
+mod ClusterStallB do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+
+  pfn wait_file(path : String) : () do
+    if File.exists(path) do () else
+      sleep_ms(50)
+      wait_file(path)
+    end
+  end
+
+  fn main(_c : Cap(IO)) do
+    let port = Env.require_int("MARCH_PORT_B")
+    let seed = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A"))
+    let cfg = ClusterNode.config("node-b", port, "", Cons(seed, Nil), "stall-secret", Env.require_int("MARCH_NODE_CREATION"))
+    match ClusterNode.start(cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        if ClusterNode.await_members(h, 1, 30000) do println("node-b: joined") else println("node-b: never joined") end
+        wait_file(Env.require("CLUSTER_STOP_FILE"))
+        ClusterNode.stop(h)
+        println("node-b: done")
+    end
+  end
+end
