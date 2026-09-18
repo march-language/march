@@ -4,6 +4,10 @@ Filed 2026-09-18 as phase 4 of [[2026-09-18-choreography-failure-handling]], who
 to 3 shipped. That design sequenced this one "design note first", because it has an open
 question the others did not; this file is that note's starting point.
 
+**Depends on [[2026-09-18-cluster-node-service]]** (filed the same day): access points are
+found by name through `GlobalRegistry`, and in cluster mode sessions multiplex over that
+service's peer connections, with SWIM as the failure detector.
+
 ## What it is for
 
 Maty's recovery story (Fowler and Hu, *Speak Now*, section 5): a failed session is cancelled
