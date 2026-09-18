@@ -1,3 +1,39 @@
+# CLOSED 2026-09-18 — lazy stdlib loading miscompiled niche-eligible generics
+
+**Disposition.** Closed with Steps 1 and 2 as the fix, and Step 3 deliberately
+**not built**, per `specs/2026-09-18-lazy-stdlib-step3-design.md`.
+
+| step | what it does | status |
+|---|---|---|
+| 1 | a test fails the build if any `stdlib/*.march` is outside the eager manifest, bar an explicit allowlist | landed 2026-08-03 |
+| 2 | mono refuses an unspecializable call whose caller and callee disagree about the return representation | landed 2026-09-18 (#511) |
+| 3 | give lazily-loaded modules real inference | **not built** |
+
+The class bug can no longer ship silently. The only realistic way to reintroduce
+it is adding a stdlib module without adding it to the manifest, and Step 1 fails
+the build. Anything else becomes a compile error at Step 2, which names the call
+and the fix, in every compiled path (native and REPL/JIT share mono).
+
+**Why Step 3 was not built:** after Steps 1–2 the lazy parse runs only for the
+`lazy_niche_probe.march` regression fixture — which works, `42 / 99` — and the
+JS-only modules. 2,204 unspecializable calls across 316 programs show zero
+representation disagreements. Step 3 would make a lazily-loaded module work
+rather than fail loudly, and no module needs it. Doing inference inside the
+lazy loader also works against the reason lazy loading exists, as the Step 3
+text below already says.
+
+**If a consumer appears** — a module that must load lazily AND be called from
+compiled code at a niche-eligible type — the design doc's §4 describes the
+cheaper route (promote to a full load on demand in compiled builds only) ahead
+of inference in `ensure_loaded`. Reopen as a new todo scoped to that module.
+
+`lazy_niche_probe.march` and `test/native/lazy_niche.march` stay: they prove the
+lazy path still works.
+
+The full history of the item follows unchanged.
+
+---
+
 # Lazy stdlib loading silently miscompiles niche-eligible generics (class bug, confirmed live 2026-08-01)
 
 `[P1]` - [ ] **Any stdlib module NOT in `bin/main.ml`'s `stdlib_file_list` can silently
@@ -226,7 +262,7 @@ release blocker.
 > **Step 3 remains open** — this makes the failure visible, not absent.
 >
 > Also found while building the witness, and filed separately as
-> `specs/todos/2026-09-17-consistent-hash-get-miscompiles-eagerly-loaded.md`:
+> `specs/progress/2026-09-18-perceus-releases-parent-before-borrowed-child.md` (filed as `2026-09-17-consistent-hash-get-miscompiles-eagerly-loaded.md`, now fixed):
 > this file's own repro miscompiles on `origin/main` TODAY with
 > `consistent_hash.march` eagerly loaded (interpreted `SOME 42`, compiled
 > SIGBUS) and with zero repr disagreements reported. A different mechanism

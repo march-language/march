@@ -22,7 +22,7 @@ on containers verifiably works). Every claim below is a *behavioural* probe,
 not a line count.
 
 - [x] **CLASS BUG behind the deque case — confirmed live and split out
-  2026-08-01, see `specs/todos/2026-08-01-lazy-stdlib-loading-boxed-vs-niche-representation-mismatch.md`.**
+  2026-08-01, see `specs/progress/2026-09-18-lazy-stdlib-niche-miscompile-closed.md`.**
   Reproduced fresh via `ConsistentHash.get` (compiled returns a garbage
   pointer instead of the stored `Int`); point-fixed 6 more affected modules
   by adding them to `stdlib_file_list`, same as the original `deque.march`

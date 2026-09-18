@@ -3,7 +3,7 @@
 **Date:** 2026-09-18
 **Status:** design / recommendation.
 **Scope:** Step 3 of
-`specs/todos/2026-08-01-lazy-stdlib-loading-boxed-vs-niche-representation-mismatch.md`
+`specs/progress/2026-09-18-lazy-stdlib-niche-miscompile-closed.md`
 — *"give lazy modules real inference"* — the last open part of that `[P1]`.
 
 **Recommendation: close Step 3, and with it the todo.** Steps 1 and 2 have

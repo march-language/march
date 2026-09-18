@@ -15,7 +15,7 @@
     list being exhaustive is the invariant those fixes were each restoring by
     hand; [Stdlib_manifest_test] in test/test_compiler.ml now holds it.
 
-    See specs/todos/2026-08-01-lazy-stdlib-loading-boxed-vs-niche-representation-mismatch.md *)
+    See specs/progress/2026-09-18-lazy-stdlib-niche-miscompile-closed.md *)
 
 (** The ordered list of stdlib file names. *)
 let stdlib_file_list = [
