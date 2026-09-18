@@ -1,4 +1,7 @@
-# `[P1]` Choreography failure handling, after Maty
+# Choreography failure handling, after Maty
+
+Filed and phases 1 to 3 shipped 2026-09-18 (see "Shipped" at the end). Phase 4, access points
+and repeated sessions, is its own item: [[2026-09-18-choreography-access-points]].
 
 Filed 2026-09-18. The design for what happens to a session when one of its roles fails,
 taken from Fowler and Hu, *Speak Now: Safe Actor Programming with Multiparty Session
@@ -291,3 +294,65 @@ mailbox. It must never be a side channel such as a vault flag the endpoint actor
 If it becomes one, a fast cancellation overtakes a slow delivery, and `fan_late_crash`
 fails intermittently rather than every time. That makes it a flake instead of a bug, and
 that is the reason it is named here.
+
+## Shipped (2026-09-18): phases 1 to 3
+
+**Phase 1, cancellation** (`stdlib/session_node.march`). A `SessionNode.Cancel [role, cause]`
+data frame, sent behind everything the role already sent; a peer's Bye, Cancel or end of
+file reaches the endpoint actor as `PeerGone(role, why)` through the same mailbox as its
+deliveries. `check_waiting` is the E-CancelH rule: run after every drain and on every
+`PeerGone`, it cancels our endpoint only if its continuation waits on a role that can send
+nothing more with nothing from it queued. `cancel_endpoint` records the cause, runs the
+cancel handler, and sends `Cancel(my_role, "role R: cause")` to every peer, which is the
+cascade. `emit` to a gone role, or from a done endpoint, is discarded and counted. The
+session on a node ends when every connection has ended, not at the first failure. Host
+death and protocol violations are now cancellations too (`HostDown` is handled in the
+endpoint actor's turn, not the watcher's). `RunError.PeerGone` is replaced by
+`Cancelled(role, cause)`, and `Left(why)` is new.
+
+**Phase 2, failure handlers.** `Session.Ops` gained `on_cancel` and `leave`; the
+same-thread transports implement both trivially. The generator emits `recv_<Msg>_or`,
+`offer_<labels>_or`, `cancelled(s, c)`, the unforgeable `Cancelled_<Role>` token,
+`leave_<state>` for every non-final state, the event API's `cancel(parked)`, and
+`<P>_Run.host_<Role>_or` with a cancel function (`SessionNode.run_hosted_or`). The design
+said `leave(s, st)`; states are distinct nominal types with no common supertype, so it is one
+function per state, named after it.
+
+**Phase 3, heartbeat.** One task per connection pings through the connection's
+`NodeQueue` writer (which serialises every write to that socket; a separate writer on the
+control connection could interleave frames with CREDIT) and counts ticks since the peer's
+last frame, instead of reading a clock, so the runner needs no `IO.Clock` capability. Past
+the limit the peer is reported gone ("no heartbeat") and *both* its connections are shut
+down: the control one too, because `finish` awaits the control reader, which would
+otherwise wait for a Bye a stopped peer never sends. Defaults 1 s / 10 s;
+`MARCH_SESSION_HEARTBEAT_MS` and `MARCH_SESSION_TIMEOUT_MS`.
+
+**A runtime fix found on the way.** The first `silent` run died with SIGPIPE (exit 141):
+the heartbeat shut the dead peer's socket and the Cancel frame written to it raised the
+signal. The shared send path (`send_all_parked`, `runtime/march_http.c`) now suppresses it,
+`MSG_NOSIGNAL` on Linux and `SO_NOSIGPIPE` on macOS, as `march_monitor_registry.c` already
+did for its own writes. Any write to a peer that has just died could have killed the node.
+
+### Witnesses
+
+| Scenario | What it pins | New runner | Old runner |
+|---|---|---|---|
+| `fan_late_crash` | the drain rule: B crashes after its send and the session completes | ok, 3/3 | **fails** (C and A abort with `PeerGone`) |
+| `fan_early_crash` | the cascade, and a real `_or` handler running: A is cancelled with `role 3: connection lost` though it has no link to B | ok | (does not compile: new API) |
+| `silent` | the heartbeat: a SIGSTOPped peer is taken for dead | ok, 3/3 | (would hang) |
+| `gone`, `hosted_restart`, `protocol` | existing failures, now as cancellations; goldens unchanged | ok | — |
+
+`test/test_endpoints.ml` adds six cases: a handler that calls `cancelled` (accept); one that
+reuses the state its receive consumed ("`st` is used more than once": this is what backs
+"a handler cannot talk in the failed session"); one that does not return `Yield`; a forged
+token; and the hosted `cancel` stored and retained.
+
+**The first `fan_late_crash` was vacuous, and the old-runner run is what caught it.** It
+delayed A's send by a fixed 1.5 s. The harness compiles each node as it starts it, so the
+delay expired before node-b existed, and the protocol finished before B was killed: it
+passed on the old runner too. Traced (node-c's fd waits and deliveries, instrumented in a
+throwaway worktree built at `main`): C had closed normally before B died. A now sends only
+when the scenario creates a go-file after B is dead, and the old runner fails as the design
+predicted. The detour also showed the old runner does detect a killed peer promptly (a C
+probe: a green thread parked on a TCP socket wakes 201 ms after its peer is SIGKILLed); the
+"missed death" it first looked like was the timing, not the runtime.

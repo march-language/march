@@ -6,7 +6,7 @@
 -- monitor: Cons dies here BEFORE re-parking, so no handler is installed,
 -- the next delivery is held, and a check at delivery time would never run.
 -- `host_Cons` abandons the session -- no Bye, readers ended -- and returns
--- `Err(HostGone(2))`, and node-a sees the connection drop: `PeerGone(2)`.
+-- `Err(HostGone(2))`, its node sends node-a a Cancel, and node-a gets `Cancelled(2, "host gone")`.
 -- The in-process twin is test/session/stream_actor_events_supervised.
 -- Design: specs/progress/2026-09-17-actor-hosted-runner.md.
 mod HostedRestartNodeB do

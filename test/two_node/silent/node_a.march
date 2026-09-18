@@ -1,0 +1,38 @@
+-- Two-node harness scenario "silent": node-a hosts role A = 1 and listens
+-- (SILENT_A_ADDR). It sends B a number and waits for the reply, but node-b
+-- has been SIGSTOPped: it sends nothing and never closes its connection.
+-- Only the heartbeat can tell; node-a's run must return Cancelled with
+-- "no heartbeat" rather than wait forever.
+mod SilentNodeA do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs Session.Live
+
+  @[endpoints]
+  protocol Silent do
+    A -> B : Int
+    B -> A : Int
+  end
+
+  pfn role_a(s : Cap(Session.Live), st : Silent_A.S_send_Msg_A_B_1) : Silent_A.Yield do
+    sleep_ms(1000)             -- by now the scenario has stopped node-b
+    println("A: sends 1")
+    Silent_A.recv_Msg_B_A_1(s, Silent_A.send_Msg_A_B_1(s, st, 1), fn (n, st1) ->
+      println("A: got " ++ int_to_string(n))
+      Silent_A.close(s, st1))
+  end
+
+  fn main(c : Cap(IO)) do
+    println("node-a: up")
+    match Silent_Run.run_A(c, "node-a", "silent-secret", Silent_Run.addrs_from_env(), fn (s, st) -> role_a(s, st)) do
+      Ok(_) -> println("A: closed")
+      Err(SessionNode.Cancelled(role, cause)) ->
+        println("A: cancelled waiting on role " ++ int_to_string(role) ++ ": " ++ cause)
+      Err(e) -> panic(SessionNode.run_error_message(e))
+    end
+  end
+end

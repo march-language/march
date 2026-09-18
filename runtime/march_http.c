@@ -424,10 +424,22 @@ void *march_tcp_recv_http(int64_t fd, int64_t max_bytes) {
  * scheduler thread until the peer drains it.  0 on success; on failure -1
  * with errno, or -2 for a peer that closed. */
 static int send_all_parked(int fd, const char *buf, size_t remaining) {
+    /* A write to a peer that has gone -- or to a socket this process shut
+     * down itself, as a session does when its heartbeat gives up on a peer --
+     * must fail with EPIPE, not raise SIGPIPE and kill the process.  Linux
+     * suppresses the signal per call (MSG_NOSIGNAL); macOS/BSD per socket
+     * (SO_NOSIGPIPE), set on every call so an fd from anywhere is covered.
+     * The same approach as write_nosigpipe in march_monitor_registry.c. */
+    int flags = MSG_DONTWAIT;
+#if defined(MSG_NOSIGNAL)
+    flags |= MSG_NOSIGNAL;
+#elif defined(SO_NOSIGPIPE)
+    { int one = 1; (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one); }
+#endif
     while (remaining > 0) {
         sigset_t saved;
         march_block_preempt(&saved);
-        ssize_t sent = send(fd, buf, remaining, MSG_DONTWAIT);
+        ssize_t sent = send(fd, buf, remaining, flags);
         int send_errno = errno;
         march_unblock_preempt(&saved);
         if (sent < 0) {

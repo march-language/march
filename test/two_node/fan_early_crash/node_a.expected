@@ -1,0 +1,3 @@
+node-a: up
+A: sends 7
+A: cancelled waiting on role 2: role 3: connection lost

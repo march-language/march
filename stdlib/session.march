@@ -33,12 +33,20 @@ mod Session do
   -- receive.  The transport decides what that means: the same-thread ones
   -- panic (the message is a bug in the program that sent it); a network one
   -- ends the session and reports it (`SessionNode`: `RunError.Protocol`).
+  -- `on_cancel(ep, h)`: install `h` as the cancel handler for the
+  -- continuation `suspend` installs next on `ep`; returns `ep`. The transport
+  -- calls `h(role, cause, ep)` if that continuation's sender can send nothing
+  -- more (a transport where nothing fails may ignore it). `leave(ep, why)`:
+  -- this endpoint exits its session on purpose; the transport tells the
+  -- peers. Both: specs/todos/2026-09-18-choreography-failure-handling.md.
   type Ops = {
-    register : Int -> Int -> Int,
-    emit     : Int -> Int -> Bytes -> Int,
-    suspend  : Int -> Int -> (Int -> Bytes -> Int -> Int) -> Int,
-    close    : Int -> (),
-    fail     : Int -> String -> ()
+    register  : Int -> Int -> Int,
+    emit      : Int -> Int -> Bytes -> Int,
+    suspend   : Int -> Int -> (Int -> Bytes -> Int -> Int) -> Int,
+    close     : Int -> (),
+    fail      : Int -> String -> (),
+    on_cancel : Int -> (Int -> String -> Int -> Int) -> Int,
+    leave     : Int -> String -> ()
   }
 
   proof cap Live with Ops
@@ -87,6 +95,28 @@ mod Session do
   fn close(c : Cap(Session.Live), ep : Int) : () do
     match cap_dict(c) do
       Some(d) -> d.close(ep)
+      None    -> no_transport()
+    end
+  end
+
+  doc """
+  Install `handler` as the cancel handler for the continuation that the next
+  `suspend` on `ep` installs, and return `ep`. It runs as
+  `handler(role, cause, ep)` if the role that continuation waits on can send
+  nothing more and nothing from it is queued. The generated `recv_…_or` and
+  `offer_…_or` call this.
+  """
+  fn on_cancel(c : Cap(Session.Live), ep : Int, handler : Int -> String -> Int -> Int) : Int do
+    match cap_dict(c) do
+      Some(d) -> d.on_cancel(ep, handler)
+      None    -> no_transport()
+    end
+  end
+
+  doc "Leave the session from endpoint `ep` on purpose, with a reason the peers are told."
+  fn leave(c : Cap(Session.Live), ep : Int, why : String) : () do
+    match cap_dict(c) do
+      Some(d) -> d.leave(ep, why)
       None    -> no_transport()
     end
   end

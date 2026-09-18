@@ -1,0 +1,4 @@
+node-c: up
+C: got 7 from A
+C: got 9 from B
+C: closed

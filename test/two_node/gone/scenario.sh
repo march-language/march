@@ -1,5 +1,5 @@
 # Scenario "gone": SIGKILL node-b while node-a is mid-session waiting for its
-# reply. node-a's `Gone_Run.run_A` must return `Err(PeerGone(2, _))` -- the
+# reply. node-a's `Gone_Run.run_A` must return `Err(Cancelled(2, _))` -- the
 # survivor learns a peer is gone and decides what to do, where a dead peer
 # used to be a hang -- and the process must exit (its readers ended, none
 # left parked). Both nodes are the generated role runner.

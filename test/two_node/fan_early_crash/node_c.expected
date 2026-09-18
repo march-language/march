@@ -1,0 +1,4 @@
+node-c: up
+C: got 7 from A
+C: role 3 is gone: connection lost
+C: cancelled waiting on role 3: connection lost
