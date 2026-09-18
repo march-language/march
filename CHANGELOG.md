@@ -12,6 +12,13 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
+- **The REPL no longer runs on another checkout's parsed stdlib.** The
+  parsed-stdlib cache in `~/.cache/march` was keyed on the stdlib's text and the
+  compiler build but not its location, so two checkouts of March with the same
+  stdlib shared one cache entry, and the second ran on the first's parse. Under
+  the REPL/JIT this gave wrong answers — `Path.is_absolute("/etc")` returned
+  `false` on macOS — that appeared and disappeared with unrelated edits.
+
 - **A record or actor-state field that holds a linear value is now tracked like a linear
   field.** A field such as `slot : Option(Parked_B)` used to be an ordinary field: an actor
   could overwrite it with `None` and silently drop the value inside, and a record's field
