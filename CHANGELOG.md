@@ -22,6 +22,9 @@ git log is authoritative for exact commits.
   detected by a heartbeat (`MARCH_SESSION_HEARTBEAT_MS`, `MARCH_SESSION_TIMEOUT_MS`).
 
 ### Added
+- `Socket.connect_timeout(host, port, ms)` (builtin `tcp_connect_timeout`): a connect that
+  gives up after `ms` when the peer never answers, instead of waiting out the kernel's SYN
+  retries (a minute or more behind a dropped-packet partition).
 - **Failure handlers in the generated session API:** `recv_<Msg>_or` and `offer_<…>_or` take a
   cancel handler that learns which role failed and why but holds no session state, so it
   cannot talk in the failed session. Also `leave_<state>` to leave a session on purpose,
