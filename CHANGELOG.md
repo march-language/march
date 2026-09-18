@@ -11,6 +11,13 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+- **A record or actor-state field that holds a linear value is now tracked like a linear
+  field.** A field such as `slot : Option(Parked_B)` used to be an ordinary field: an actor
+  could overwrite it with `None` and silently drop the value inside, and a record's field
+  could be read twice. Both are now errors, as they already were for a field whose own type
+  is linear.
+
 ### Changed
 - **A choreography session no longer ends for everyone when one role fails.** Following the
   Maty model (Fowler and Hu, OOPSLA 2026), a failed role is cancelled, and another role is

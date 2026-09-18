@@ -24,6 +24,25 @@ means every node calling `run` again, arranged by whoever runs the nodes.
   session forms. The surviving roles, cancelled out of the failed session by phases 1 to 3,
   register again themselves.
 
+## Decisions (2026-09-19)
+
+- **Access points are found by name through `GlobalRegistry`, and that comes first.** The
+  registry is a CRDT data type with a sync wire format, but nothing runs it: there is no
+  live node that assembles SWIM, the peer connections and a registry replica, and SWIM
+  members carry no addresses. So step 0 of this item is a **cluster node service** (joining
+  from seeds, SWIM with advertised addresses, one persistent connection per peer, a synced
+  registry replica, `register`/`lookup`/watch). It is specced separately.
+- **Sessions multiplex over the node's peer connections**, carrying a session id, and SWIM
+  is the failure detector for cluster sessions: a node declared dead cancels all its roles
+  in every session.
+- **Several sessions per hosting actor are checked statically**, not with a runtime
+  use-once flag. That needs two pieces of type-system work: record fields holding a linear
+  value tracked like linear fields (shipped 2026-09-19,
+  [[2026-09-19-record-field-holding-linear-value]]) and a keyed collection that can hold
+  linear values (a `LinearMap`, specced separately).
+- **The standalone runner stays** (environment addresses, per-connection heartbeat) as the
+  no-cluster mode.
+
 ## The open question
 
 **Forming sessions when a role has many instances** (one server, many clients). Maty's

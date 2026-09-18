@@ -1,0 +1,32 @@
+mod Main do
+  needs IO
+  needs IO.Console
+  -- Record fields holding linear values, each consumed exactly once: an
+  -- actor takes the `S1` out of its `Option(S1)` field, consumes it, and
+  -- stores a fresh value; a plain record's `Option(S1)` field is read once
+  -- alongside its ordinary fields, which stay freely readable. The companion
+  -- rejects are t244 (dropped) and t246 (read twice).
+  always_linear type S1 = S1(Int)
+  type R = { slot : Option(S1), n : Int }
+  fn sink(s : S1) : Int do match s do S1(e) -> e end end
+  fn sink_opt(o : Option(S1)) : Int do
+    match o do
+      Some(s) -> sink(s)
+      None -> 0
+    end
+  end
+  actor Holder do
+    state { n : Int, slot : Option(S1) }
+    init  { n: 0, slot: None }
+    on Swap(v : Int) do
+      let old = sink_opt(state.slot)
+      { n: state.n + old, slot: Some(S1(v)) }
+    end
+  end
+  fn main(c : Cap(IO)) do
+    let r : R = { slot: Some(S1(1)), n: 2 }
+    let k = r.n + r.n + sink_opt(r.slot)
+    let _ = spawn(Holder)
+    println(int_to_string(k))
+  end
+end
