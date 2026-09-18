@@ -63,7 +63,22 @@ let rec register_types (decls : A.decl list) : unit =
       | _ -> ())
     decls
 
+(* An inline lambda a pass-site codomain check is verifying (2026-09-18 plan,
+   Phase 2): its synthetic function name and the lambda expression itself.  A
+   lambda has no binding in the module environment for [lookup_fn] to find,
+   so without this a refuted codomain on one could never be confirmed and was
+   reported as undecided.  Set only around that one check, and only for a
+   CLOSED lambda — one naming no local of the enclosing function — so
+   evaluating it in the module environment means what the program means. *)
+let active_lambda : (string * A.expr) option ref = ref None
+
+let with_lambda (name : string) (lam : A.expr) (f : unit -> 'a) : 'a =
+  let saved = !active_lambda in
+  active_lambda := Some (name, lam);
+  Fun.protect ~finally:(fun () -> active_lambda := saved) f
+
 let set_module (m : A.module_) : unit =
+  active_lambda := None;
   (match !current_module with
    | Some m' when m' == m -> ()   (* same run (check_module then division_safety) *)
    | _ ->
@@ -572,6 +587,12 @@ let call_fn ~(name : string) ~(args : V.value list) : exec_result =
   match module_env () with
   | None -> Unconfirmable
   | Some env ->
+    match !active_lambda with
+    | Some (n, lam) when n = name ->
+      (match with_harness (fun () -> March_eval.Eval.apply (March_eval.Eval.eval_expr env lam) args) with
+       | Ok v -> Ret v
+       | Error e -> e)
+    | _ ->
     (match lookup_fn env name with
      | None -> Unconfirmable
      | Some f ->

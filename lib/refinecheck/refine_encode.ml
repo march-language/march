@@ -1325,6 +1325,16 @@ type field_role = Param of int | Self | Other
 
 let ctor_param_fields : (string, field_role list) Hashtbl.t = Hashtbl.create 32
 
+(* Per variant type (keyed by [adt_sort_name], as [is_container_type]
+   resolves it): the type parameters that occur somewhere OTHER than as a direct
+   [Param] field — inside a function, tuple, record or other type in an
+   [Other] field (`type Box(b) = Box(Int -> b)`), or in a self-reference whose
+   arguments are not exactly the parameters.  The element model's "slot [j]"
+   is the [Param j] fields only, so a value of parameter [j] can sit in such a
+   container outside every slot; [Refine_param.container_paths] refuses to
+   treat slot [j] as covering them (2026-09-18 plan). *)
+let ctor_hidden_params : (string, int list) Hashtbl.t = Hashtbl.create 32
+
 (* The ADT sort a constructor belongs to, or [None]. *)
 let sort_of_ctor (ctor : string) : string option =
   Hashtbl.fold
@@ -1669,6 +1679,35 @@ let rec register_field_sorts (decls : A.decl list) : unit =
           | A.TyCon (c, _) when c.A.txt = tname.A.txt -> Self
           | _ -> Other
         in
+        let rec tvars acc (t : A.ty) =
+          match t with
+          | A.TyVar v -> v.A.txt :: acc
+          | A.TyCon (_, ts) | A.TyTuple ts -> List.fold_left tvars acc ts
+          | A.TyArrow (a, b) | A.TyNatOp (_, a, b) -> tvars (tvars acc a) b
+          | A.TyRecord fs -> List.fold_left (fun acc (_, t) -> tvars acc t) acc fs
+          | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> tvars acc b
+          | A.TyNat _ | A.TyChan _ -> acc
+        in
+        let hidden =
+          List.concat_map
+            (fun (v : A.variant) ->
+              List.concat_map
+                (fun (t : A.ty) ->
+                  match role_of t, t with
+                  | Param _, _ -> []
+                  | Self, A.TyCon (_, args)
+                    when List.length args = List.length pnames
+                         && List.for_all2
+                              (fun a n -> match a with A.TyVar v -> v.A.txt = n | _ -> false)
+                              args pnames ->
+                    []
+                  | _ -> tvars [] t)
+                v.A.var_args)
+            variants
+          |> List.filter_map (fun n -> List.find_index (( = ) n) pnames)
+          |> List.sort_uniq compare
+        in
+        Hashtbl.replace ctor_hidden_params (adt_sort_name tname.A.txt) hidden;
         List.iter
           (fun (v : A.variant) ->
             set_ctor_fields (adt_sort_name tname.A.txt) v.A.var_name.A.txt

@@ -22,12 +22,35 @@ git log is authoritative for exact commits.
   detected by a heartbeat (`MARCH_SESSION_HEARTBEAT_MS`, `MARCH_SESSION_TIMEOUT_MS`).
 
 ### Added
+- **Element refinements flow through expressions, callbacks and polymorphic combinators.**
+  A `List({Int | _ > 0})` (or `Option`, `Result`, user variant) contract is now met by
+  `sum_pos(List.take(xs, 2))` without a `let`, by `match List.head_opt(xs) do Some(h) ->`,
+  by a call to a function whose declared container return was proved, by a return tail
+  that names a local `let`, and by `List.map(ys, f)` / `flat_map` / `filter_map` /
+  `Option.map` when every way an element can enter the call meets the demand (a lambda
+  passed where the element type is taken also gets its source's element refinement as a
+  fact). A hand-written refined `map` proves through its callback's codomain and its
+  structurally recursive self-call, and a lambda that breaks a declared refined codomain
+  (`fn y -> y - 1` where `(Int) -> {Int | _ > 0}` is expected) is now reported with a
+  witness instead of skipped. A call whose sources do not all meet the demand is a skip
+  with the new `--refine-report` reason `parametric-source-unproved`, never an error
+  outside `cap verified`.
 - **Failure handlers in the generated session API:** `recv_<Msg>_or` and `offer_<…>_or` take a
   cancel handler that learns which role failed and why but holds no session state, so it
   cannot talk in the failed session. Also `leave_<state>` to leave a session on purpose,
   `cancel(parked)` for actor-hosted roles, and `<P>_Run.host_<Role>_or`.
 
 ### Fixed
+- **Refinement checker: a polymorphic function no longer lends element refinements it
+  cannot justify.** A function whose signature says `List(a) -> List(a)` but whose body
+  fixed `a` (type variables in signatures are not rigid), merged it with another variable,
+  took it through an unannotated parameter, or can create one through a builtin such as
+  `from_json`, was trusted to preserve its argument's element refinement: `let ys =
+  bad(xs)` then `sum_pos(ys)` was reported proved on a list holding `-5`, and `cap
+  verified` accepted it. Likewise `append(pos, neg)` took the first list's element
+  refinement for the whole result. The checker now reads the inferred parameter types and
+  the callee's body, and requires every argument an element can come from to agree,
+  before applying the rule; such calls are skipped instead.
 - Writing to a socket whose peer had just gone could kill the process with SIGPIPE; the
   shared send path now suppresses the signal.
 - A dead green thread's execution context (880 of its bookkeeping struct's 1136 bytes on
