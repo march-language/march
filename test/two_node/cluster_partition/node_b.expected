@@ -1,0 +1,7 @@
+node-b: done
+node-b: leader after heal -> node-b
+node-b: node-a dead: suspect timeout
+node-b: node-a rejoined
+node-b: node-a up
+node-b: registered leader
+node-b: up

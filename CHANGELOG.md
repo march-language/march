@@ -31,7 +31,10 @@ git log is authoritative for exact commits.
   continuously, learns every peer's advertised address from gossip (so a node reaches peers
   it was never configured with), and reports peers up / suspect / dead / rejoined to
   `subscribe`rs. A connection that closes is a hint; a refused reconnect or SWIM's timeout
-  is a death; a dead peer that comes back is reconnected and rejoins.
+  is a death; a dead peer that comes back is reconnected and rejoins. Names:
+  `ClusterNode.register / unregister / lookup / watch` keep a live cluster-wide registry;
+  a dead or restarted holder's binding is hidden, and after a partition heals one binding
+  wins everywhere and the loser's watchers hear `Lost`. A global name is not a lock.
 - `Socket.connect_timeout(host, port, ms)` (builtin `tcp_connect_timeout`): a connect that
   gives up after `ms` when the peer never answers, instead of waiting out the kernel's SYN
   retries (a minute or more behind a dropped-packet partition).

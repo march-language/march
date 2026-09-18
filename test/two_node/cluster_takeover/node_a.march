@@ -1,0 +1,82 @@
+-- Two-node harness, scenario "cluster_takeover": node-a. Watches "leader";
+-- when node-b (its holder) is SIGKILLed the binding is hidden here (its
+-- holder is Dead), so node-a may take the name over, and does. When node-b
+-- comes back as a NEW creation it must resolve "leader" to node-a: node-a's
+-- claim was made after seeing node-b's, so it is causally newer and wins
+-- without the tiebreak. No root needed (unlike cluster_partition).
+-- Design: specs/todos/2026-09-18-cluster-node-service.md (phase 2).
+mod ClusterTakeoverA do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+
+  actor Holder do
+    state { n : Int }
+    init { n: 0 }
+    on Poke() do state end
+  end
+
+  pfn wait_flag(flags : Vault(Int), key : String, left : Int) : Bool do
+    if Vault.get(flags, key) != None do true
+    else if left <= 0 do false
+    else
+      sleep_ms(50)
+      wait_flag(flags, key, left - 50)
+    end end
+  end
+
+  pfn wait_file(path : String) : () do
+    if File.exists(path) do () else
+      sleep_ms(50)
+      wait_file(path)
+    end
+  end
+
+  fn main(_c : Cap(IO)) do
+    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "takeover-secret", 1)
+    match ClusterNode.start(cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        let flags = Vault.new("scenario_flags")
+        let _ = ClusterNode.subscribe(h, fn ev ->
+          match ev do
+            ClusterNode.NodeRejoined(i) ->
+              if i.name == "node-b" do
+                println("node-a: node-b rejoined")
+                Vault.set(flags, "rejoined", 1)
+              else () end
+            _ -> ()
+          end)
+        let _ = ClusterNode.watch(h, "leader", fn ev ->
+          match ev do
+            ClusterNode.Bound(_, p) ->
+              let who = match ClusterNode.name_of(h, p.node_id) do
+                Some(n) -> n
+                None -> "?"
+              end
+              println("node-a: leader bound to " ++ who)
+              Vault.set(flags, "bound_" ++ who, 1)
+            ClusterNode.Unbound(_) ->
+              println("node-a: leader unbound")
+              Vault.set(flags, "unbound", 1)
+            ClusterNode.Lost(_, _) -> println("node-a: leader lost")
+          end)
+        println("node-a: up")
+        if wait_flag(flags, "unbound", 60000) do
+          let holder = spawn(Holder)
+          match ClusterNode.register(h, "leader", holder) do
+            Ok(_) -> ()
+            Err(_) -> println("node-a: register refused")
+          end
+        else println("node-a: leader never unbound") end
+        wait_file(Env.require("CLUSTER_STOP_FILE"))
+        ClusterNode.stop(h)
+        println("node-a: done")
+    end
+  end
+end

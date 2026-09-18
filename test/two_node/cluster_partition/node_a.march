@@ -1,0 +1,106 @@
+-- Two-node harness, scenario "cluster_partition": node-a. The partition
+-- scenario, rebuilt on the cluster node service
+-- (specs/todos/2026-09-18-cluster-node-service.md, phase 2).
+-- The harness drops every packet to or from BOTH nodes' listen ports until
+-- each has marked the other Dead; each then claims "leader" in its own half
+-- of the split. Unlike the old `partition` (one raw socket kept open across
+-- the drop), the service shuts a Dead peer's connections, so the heal has to
+-- come from redialling a Dead member's advertised address -- through the
+-- drop, where a SYN gets no answer and only Socket.connect_timeout bounds
+-- the wait. After the heal both sides must agree on one winner, and the
+-- loser's watch must report Lost. The claims are concurrent (neither saw the
+-- other's), so the winner is the tiebreak's: the higher node_id, node-b's.
+mod ClusterPartitionA do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+
+  actor Holder do
+    state { n : Int }
+    init { n: 0 }
+    on Poke() do state end
+  end
+
+  pfn me() : String do "node-a" end
+
+  pfn wait_flag(flags : Vault(Int), key : String, left : Int) : Bool do
+    if Vault.get(flags, key) != None do true
+    else if left <= 0 do false
+    else
+      sleep_ms(50)
+      wait_flag(flags, key, left - 50)
+    end end
+  end
+
+  pfn wait_file(path : String) : () do
+    if File.exists(path) do () else
+      sleep_ms(50)
+      wait_file(path)
+    end
+  end
+
+  pfn holder_name(h : ClusterNode.ClusterHandle, p : GlobalPid.Pid) : String do
+    match ClusterNode.name_of(h, p.node_id) do
+      Some(n) -> n
+      None -> "?"
+    end
+  end
+
+  fn main(_c : Cap(IO)) do
+    let cfg = ClusterNode.config(me(), Env.require_int("MARCH_PORT_A"), "", Nil, "partition-secret", 1)
+    match ClusterNode.start(cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        let flags = Vault.new("scenario_flags")
+        let _ = ClusterNode.subscribe(h, fn ev ->
+          match ev do
+            ClusterNode.NodeUp(i) ->
+              if Vault.get(flags, "up") == None do
+                println(me() ++ ": node-b up")
+                Vault.set(flags, "up", 1)
+              else () end
+            ClusterNode.NodeDead(_, why) ->
+              if Vault.get(flags, "dead") == None do
+                println(me() ++ ": node-b dead: " ++ why)
+                Vault.set(flags, "dead", 1)
+              else () end
+            ClusterNode.NodeRejoined(_) ->
+              if Vault.get(flags, "rejoined") == None do
+                println(me() ++ ": node-b rejoined")
+                Vault.set(flags, "rejoined", 1)
+              else () end
+            _ -> ()
+          end)
+        let _ = ClusterNode.watch(h, "leader", fn ev ->
+          match ev do
+            ClusterNode.Lost(_, p) -> println(me() ++ ": lost leader to " ++ holder_name(h, p))
+            _ -> ()
+          end)
+        println(me() ++ ": up")
+        if wait_flag(flags, "dead", 60000) do
+          let holder = spawn(Holder)
+          match ClusterNode.register(h, "leader", holder) do
+            Ok(_) -> println(me() ++ ": registered leader")
+            Err(_) -> println(me() ++ ": register refused")
+          end
+        else println(me() ++ ": never saw node-b dead") end
+        if wait_flag(flags, "rejoined", 60000) do
+          -- The registries are exchanged when the link comes back, before
+          -- the refutation that reports the rejoin; a second is margin.
+          sleep_ms(1000)
+          match ClusterNode.lookup(h, "leader") do
+            Some(p) -> println(me() ++ ": leader after heal -> " ++ holder_name(h, p))
+            None -> println(me() ++ ": leader after heal -> none")
+          end
+        else println(me() ++ ": never saw node-b rejoin") end
+        wait_file(Env.require("CLUSTER_STOP_FILE"))
+        ClusterNode.stop(h)
+        println(me() ++ ": done")
+    end
+  end
+end

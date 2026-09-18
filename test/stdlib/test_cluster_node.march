@@ -273,4 +273,158 @@ mod TestClusterNode do
 
   end
 
+
+  -- ── names (phase 2) ────────────────────────────────────────────────────
+
+  pfn name_events(effs : List(ClusterNode.CnEffect)) : List(String) do
+    List.filter_map(effs, fn e -> match e do ClusterNode.Named(_, ev) -> Some(ClusterNode.name_event_text(ev)) | _ -> None end)
+  end
+
+  pfn lookup_node(st : ClusterNode.CnState, name : String) : String do
+    match ClusterNode.core_lookup(st, name) do
+      Some(p) -> p.node_id
+      None -> "none"
+    end
+  end
+
+  -- The whole registry of [st] as a REGISTRY_SYNC_RESP frame.
+  pfn reg_frame(st : ClusterNode.CnState) : List(Int) do
+    NetKernel.encode_registry_sync_resp(GlobalRegistry.root_hash(st.reg), GlobalRegistry.all_entries(st.reg))
+  end
+
+  describe "names" do
+
+    test "a registration is visible here, pushed to peers and reported Bound" do
+      match linked_ab() do
+        (b, st, _) ->
+          match ClusterNode.core_register(st, "ap", 42, 0) do
+            (st2, effs) ->
+              assert (lookup_node(st2, "ap") == st2.me)
+              assert (List.any(sends_to(effs, b), fn bytes -> PeerReader.tag_of(bytes) == 6))
+              assert (List.member(name_events(effs), "ap bound to " ++ st2.me))
+          end
+      end
+    end
+
+    test "a name another holder has visibly bound is refused" do
+      match linked_ab() do
+        (b, st, _) ->
+          let theirs = GlobalRegistry.register_at(GlobalRegistry.empty(), "ap", b, 1, 7, VectorClock.increment(VectorClock.new(), b))
+          let frame = NetKernel.encode_registry_sync_resp(GlobalRegistry.root_hash(theirs), GlobalRegistry.all_entries(theirs))
+          match ClusterNode.core_frame(st, b, 6, frame) do
+            (st2, _) ->
+              assert (lookup_node(st2, "ap") == b)
+              match ClusterNode.core_register(st2, "ap", 42, 0) do
+                (st3, _) -> assert (lookup_node(st3, "ap") == b)
+              end
+          end
+      end
+    end
+
+    test "a Dead holder's binding is hidden (Unbound), and may then be taken over" do
+      match linked_ab() do
+        (b, st, _) ->
+          let theirs = GlobalRegistry.register_at(GlobalRegistry.empty(), "ap", b, 1, 7, VectorClock.increment(VectorClock.new(), b))
+          let frame = NetKernel.encode_registry_sync_resp(GlobalRegistry.root_hash(theirs), GlobalRegistry.all_entries(theirs))
+          match ClusterNode.core_frame(st, b, 6, frame) do
+            (st2, _) ->
+              let dead_b = Membership.member(b, "b", "127.0.0.1:7001", 1, Dead, 1)
+              match ClusterNode.core_frame(st2, b, 13, SwimDriver.encode_member_gossip(dead_b)) do
+                (st3, _) ->
+                  match ClusterNode.core_tick(st3, 1100) do
+                    (st4, effs) ->
+                      assert (lookup_node(st4, "ap") == "none")
+                      assert (List.member(name_events(effs), "ap unbound"))
+                      match ClusterNode.core_register(st4, "ap", 42, 0) do
+                        (st5, _) ->
+                          -- b comes back and merges our registry: ours is causally newer.
+                          let b_side = GlobalRegistry.merge(theirs, st5.reg)
+                          match GlobalRegistry.lookup(b_side, "ap") do
+                            Some((holder, _)) -> assert (holder == st5.me)
+                            None -> assert false
+                          end
+                      end
+                  end
+              end
+          end
+      end
+    end
+
+    test "concurrent claims: the loser hears Lost, both sides agree" do
+      let a0 = ClusterNode.core_new(cfg("a", Nil), 1)
+      let b0 = ClusterNode.core_new(cfg("b", Nil), 2)
+      match ClusterNode.core_register(a0, "ap", 1, 0) do
+        (a1, _) ->
+          match ClusterNode.core_register(b0, "ap", 2, 0) do
+            (b1, _) ->
+              match ClusterNode.core_frame(a1, b1.me, 6, reg_frame(b1)) do
+                (a2, a_effs) ->
+                  match ClusterNode.core_frame(b1, a1.me, 6, reg_frame(a1)) do
+                    (b2, b_effs) ->
+                      assert (lookup_node(a2, "ap") == lookup_node(b2, "ap"))
+                      let winner = lookup_node(a2, "ap")
+                      if winner == b1.me do
+                        assert (List.member(name_events(a_effs), "ap lost to " ++ b1.me))
+                        assert (not(List.any(name_events(b_effs), fn t -> String.contains(t, "lost"))))
+                      else
+                        assert (List.member(name_events(b_effs), "ap lost to " ++ a1.me))
+                      end
+                  end
+              end
+          end
+      end
+    end
+
+    test "a restart retires its own stale-creation binding and pushes the tombstone" do
+      let me_id = ClusterNode.node_id_of("a")
+      let old = GlobalRegistry.register_at(GlobalRegistry.empty(), "cfg", me_id, 1, 9, VectorClock.increment(VectorClock.new(), me_id))
+      let frame = NetKernel.encode_registry_sync_resp(GlobalRegistry.root_hash(old), GlobalRegistry.all_entries(old))
+      let st = ClusterNode.core_new(ClusterNode.config("a", 7000, "", Nil, "s", 2), 1)
+      let b = ClusterNode.node_id_of("b")
+      match ClusterNode.core_linked(st, b, "b", "127.0.0.1:7001", 1, 10, 11, b, 99) do
+        (st1, _) ->
+          match ClusterNode.core_frame(st1, b, 6, frame) do
+            (st2, effs) ->
+              assert (lookup_node(st2, "cfg") == "none")
+              match GlobalRegistry.entry(st2.reg, "cfg") do
+                Some(e) -> assert (e.present == false)
+                None -> assert false
+              end
+              assert (List.length(sends_to(effs, b)) >= 1)
+          end
+      end
+    end
+
+    test "unregister leaves another holder's binding alone" do
+      match linked_ab() do
+        (b, st, _) ->
+          let theirs = GlobalRegistry.register_at(GlobalRegistry.empty(), "ap", b, 1, 7, VectorClock.increment(VectorClock.new(), b))
+          let frame = NetKernel.encode_registry_sync_resp(GlobalRegistry.root_hash(theirs), GlobalRegistry.all_entries(theirs))
+          match ClusterNode.core_frame(st, b, 6, frame) do
+            (st2, _) ->
+              match ClusterNode.core_unregister(st2, "ap") do
+                (st3, _) -> assert (lookup_node(st3, "ap") == b)
+              end
+          end
+      end
+    end
+
+    test "an anti-entropy request with a different root is answered with everything" do
+      match linked_ab() do
+        (b, st, _) ->
+          match ClusterNode.core_register(st, "ap", 42, 0) do
+            (st2, _) ->
+              match ClusterNode.core_frame(st2, b, 5, NetKernel.encode_registry_sync_req("")) do
+                (_, effs) ->
+                  match sends_to(effs, b) do
+                    Cons(bytes, Nil) -> assert (PeerReader.tag_of(bytes) == 6)
+                    _ -> assert false
+                  end
+              end
+          end
+      end
+    end
+
+  end
+
 end

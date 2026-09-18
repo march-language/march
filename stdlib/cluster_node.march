@@ -35,8 +35,23 @@
 -- redial lands, MEMBERS_SYNC in both directions lets each side refute what
 -- the other believed.
 --
--- Everything the node knows about members is also mirrored into a Vault
--- (`members`, `addr_of`), so readers need no round trip to the actor.
+-- Names (the registry replica). The node holds a GlobalRegistry replica: a
+-- local `register` is pushed at once to every linked peer (REGISTRY_SYNC_RESP
+-- with the changed leaves), every new link exchanges the whole registry, and
+-- a 30 s anti-entropy round (REGISTRY_SYNC_REQ with the root hash) repairs
+-- what a push missed. A registration's clock is the name's current clock
+-- with our slot bumped, so a takeover after seeing a binding is causally
+-- newer and never falls to the tiebreak. `lookup` sees only VISIBLE
+-- bindings: one whose holder is Dead here, or whose holder has restarted
+-- since (a stale creation), is hidden -- not tombstoned; it reappears if the
+-- holder rejoins with the same creation. The owner tombstones its own
+-- stale-creation bindings when it learns of them. A global name is AP, not a
+-- lock: during a partition both sides can hold one; after the heal the CRDT
+-- picks one winner everywhere, and the loser's watchers get `Lost`.
+--
+-- Everything the node knows about members and names is also mirrored into
+-- Vaults (`members`, `addr_of`, `lookup`), so readers need no round trip to
+-- the actor.
 mod ClusterNode do
   needs IO.NetListen
   needs IO.NetConnect
@@ -147,8 +162,17 @@ mod ClusterNode do
     pending : List(SwimDriver.Event),    -- folded into SWIM at the next tick
     relays : Map(String, List(String)),  -- ping-req target -> requesters awaiting its ack
     refused : List(String),              -- node_ids refused since the last tick
-    stopped : Bool
+    stopped : Bool,
+    reg : GlobalRegistry.Names,          -- the registry replica
+    regs : Map(String, (Int, Int)),      -- names registered HERE: name -> (pid, watcher pid)
+    vis : Map(String, GlobalPid.Pid)     -- the visible binding of every name, as last reported
   }
+
+  -- What a watcher of a name sees. `Lost` goes to watchers on the node that
+  -- held the name when a binding made HERE is superseded by another holder's.
+  type NameEvent = Bound(String, GlobalPid.Pid) | Unbound(String) | Lost(String, GlobalPid.Pid)
+
+  type RegisterError = Taken(GlobalPid.Pid) | Stopped
 
   -- What the I/O layer must do after a core transition.
   type CnEffect =
@@ -157,6 +181,8 @@ mod ClusterNode do
     | Install(CnLink)            -- a new link is current: start its readers
     | Drop(CnLink)               -- shut this link's sockets and stop its writer
     | Emit(NodeEvent)            -- tell every subscriber
+    | Named(String, NameEvent)   -- tell every watcher of this name
+    | Unwatch(Int)               -- stop the Down-watcher with this pid
 
   fn core_new(cfg : CnConfig, seed : Int) : CnState do
     let me = node_id_of(cfg.name)
@@ -164,7 +190,8 @@ mod ClusterNode do
     let ms = Membership.observe(Membership.empty(), self_m)
     { cfg: cfg, me: me, driver: SwimDriver.make(me, 1, ms, cfg.swim, cfg.period_ms, seed),
       links: Map.empty(), halves: Map.empty(), gen: 0, dialing: Map.empty(), backoff: Map.empty(),
-      pending: Nil, relays: Map.empty(), refused: Nil, stopped: false }
+      pending: Nil, relays: Map.empty(), refused: Nil, stopped: false,
+      reg: GlobalRegistry.empty(), regs: Map.empty(), vis: Map.empty() }
   end
 
   fn core_members(st : CnState) : List(Member) do Membership.members(st.driver.swim.members) end
@@ -318,7 +345,16 @@ mod ClusterNode do
         match event_effects(st2, evs) do
           (st3, ev_effs) ->
             match plan_dials(st3, now) do
-              (st4, dials) -> (st4, List.append(frames, List.append(ev_effs, dials)))
+              (st4, dials) ->
+                let ae_peers = List.filter(SwimDriver.anti_entropy_peers(st4.driver, now), fn id -> is_linked(st4, id))
+                let st5 = if List.is_empty(ae_peers) do st4 else { st4 with driver: SwimDriver.bump_anti_entropy(st4.driver, now) } end
+                let req = NetKernel.encode_registry_sync_req(GlobalRegistry.root_hash(st5.reg))
+                let ae = List.map(ae_peers, fn id -> Send(id, req))
+                match refresh_names(st5) do
+                  (st6, name_effs) ->
+                    let out = (st6, List.append(frames, List.append(ev_effs, List.append(dials, List.append(ae, name_effs)))))
+                    out
+                end
             end
         end
     end
@@ -369,7 +405,8 @@ mod ClusterNode do
                                  dialing: Map.remove(st2.dialing, addr, Map.str_cmp) },
                       SwimDriver.GossipFrame(obs))
       let sync = SwimDriver.encode_members_sync(List.append(core_members(st3), Cons(obs, Nil)))
-      let out = (st3, List.append(drops, Cons(Install(l), Cons(Send(id, sync), Nil))))
+      let regsync = NetKernel.encode_registry_sync_resp(GlobalRegistry.root_hash(st3.reg), GlobalRegistry.all_entries(st3.reg))
+      let out = (st3, List.append(drops, Cons(Install(l), Cons(Send(id, sync), Cons(Send(id, regsync), Nil)))))
       out
     else
       (st2, drops)
@@ -458,6 +495,8 @@ mod ClusterNode do
         Ok(ms) -> (List.fold_left(ms, st, fn (s, m) -> queue(s, SwimDriver.GossipFrame(m))), Nil)
         Err(_) -> (st, Nil)
       end
+    else if tag == 5 || tag == 6 do
+      registry_frame(st, from, tag, frame)
     else if tag >= 0 && tag <= 3 do
       match SwimDriver.decode_msg(frame) do
         Err(_) -> (st, Nil)
@@ -487,7 +526,253 @@ mod ClusterNode do
       end
     else
       (st, Nil)
-    end end end
+    end end end end
+  end
+
+  -- ── names ──────────────────────────────────────────────────────────────
+
+  fn core_lookup(st : CnState, name : String) : Option(GlobalPid.Pid) do
+    Map.get(st.vis, name, Map.str_cmp)
+  end
+
+  -- Is binding [e] visible here: held by a node that is not Dead in our view
+  -- and has not restarted since it registered? A holder we have not heard of
+  -- yet is visible (the binding came from someone who has).
+  pfn visible(st : CnState, e : GlobalRegistry.Entry) : Bool do
+    if not(e.present) do false
+    else if e.node_id == st.me do e.creation == st.cfg.creation
+    else
+      match core_member(st, e.node_id) do
+        None -> true
+        Some(m) ->
+          let live = match m.status do
+            Dead -> false
+            _ -> true
+          end
+          live && m.creation == e.creation
+      end
+    end end
+  end
+
+  pfn visible_map(st : CnState) : Map(String, GlobalPid.Pid) do
+    List.fold_left(GlobalRegistry.all_entries(st.reg), Map.empty(), fn (acc, kv) ->
+      match kv do
+        (name, e) ->
+          if visible(st, e) do
+            Map.insert(acc, name, GlobalPid.make(e.node_id, e.pid, e.creation), Map.str_cmp)
+          else acc end
+      end)
+  end
+
+  pfn is_ours(st : CnState, name : String, p : GlobalPid.Pid) : Bool do
+    let mine = match Map.get(st.regs, name, Map.str_cmp) do
+      Some((pid, _)) -> pid == p.local_pid
+      None -> false
+    end
+    mine && p.node_id == st.me
+  end
+
+  -- The current winner of [name] in the replica, visible or not.
+  pfn winner_of(st : CnState, name : String) : Option(GlobalPid.Pid) do
+    match GlobalRegistry.entry(st.reg, name) do
+      Some(e) -> if e.present do Some(GlobalPid.make(e.node_id, e.pid, e.creation)) else None end
+      None -> None
+    end
+  end
+
+  -- Recompute visibility and report every change: to watchers (Named), and
+  -- by forgetting local registrations another holder has taken (Lost).
+  pfn refresh_names(st : CnState) : (CnState, List(CnEffect)) do
+    let new_vis = visible_map(st)
+    let names = List.dedup(List.append(Map.keys(st.vis), Map.keys(new_vis)))
+    let out = List.fold_left(names, (st, Nil), fn (acc, name) ->
+      match acc do
+        (s, effs) ->
+          let before = Map.get(s.vis, name, Map.str_cmp)
+          let after = Map.get(new_vis, name, Map.str_cmp)
+          name_change(s, effs, name, before, after)
+      end)
+    match out do
+      (st2, effs) ->
+        let done = ({ st2 with vis: new_vis }, effs)
+        done
+    end
+  end
+
+  pfn name_change(s : CnState, effs : List(CnEffect), name : String, before : Option(GlobalPid.Pid),
+                  after : Option(GlobalPid.Pid)) : (CnState, List(CnEffect)) do
+    match (before, after) do
+      (None, None) -> (s, effs)
+      (None, Some(p)) -> (s, List.append(effs, Cons(Named(name, Bound(name, p)), Nil)))
+      (Some(o), _) ->
+        let changed = match after do
+          None -> true
+          Some(p) -> not(GlobalPid.eq(o, p))
+        end
+        if not(changed) do
+          (s, effs)
+        else if is_ours(s, name, o) do
+          -- A binding made here lost to another holder's (visible or not).
+          let winner = match after do
+            Some(p) -> Some(p)
+            None -> winner_of(s, name)
+          end
+          match winner do
+            Some(w) ->
+              if GlobalPid.eq(w, o) do
+                (s, List.append(effs, Cons(Named(name, Unbound(name)), Nil)))
+              else
+                let watcher = match Map.get(s.regs, name, Map.str_cmp) do
+                  Some((_, wp)) -> Cons(Unwatch(wp), Nil)
+                  None -> Nil
+                end
+                let s2 = { s with regs: Map.remove(s.regs, name, Map.str_cmp) }
+                let out = (s2, List.append(effs, Cons(Named(name, Lost(name, w)), watcher)))
+                out
+              end
+            None -> (s, List.append(effs, Cons(Named(name, Unbound(name)), Nil)))
+          end
+        else
+          match after do
+            Some(p) -> (s, List.append(effs, Cons(Named(name, Bound(name, p)), Nil)))
+            None -> (s, List.append(effs, Cons(Named(name, Unbound(name)), Nil)))
+          end
+        end end
+    end
+  end
+
+  -- Frames carrying registry leaves to every linked peer.
+  pfn push_leaves(st : CnState, leaves : List((String, GlobalRegistry.Entry))) : List(CnEffect) do
+    let bytes = NetKernel.encode_registry_sync_resp(GlobalRegistry.root_hash(st.reg), leaves)
+    List.map(linked_ids(st), fn id -> Send(id, bytes))
+  end
+
+  pfn leaf(st : CnState, name : String) : List((String, GlobalRegistry.Entry)) do
+    match GlobalRegistry.entry(st.reg, name) do
+      Some(e) -> Cons((name, e), Nil)
+      None -> Nil
+    end
+  end
+
+  -- Tombstone our own bindings from an earlier creation (a restart reuses
+  -- local pids, so they name whatever process has that pid now).
+  pfn retire_stale(st : CnState) : (CnState, List(String)) do
+    let stale = List.filter(GlobalRegistry.all_entries(st.reg), fn kv ->
+      match kv do (_n, e) -> e.present && e.node_id == st.me && e.creation != st.cfg.creation end)
+    List.fold_left(stale, (st, Nil), fn (acc, kv) ->
+      match acc do
+        (s, names) ->
+          match kv do
+            (name, e) ->
+              let clock = GlobalRegistry.next_clock(s.reg, name, s.me)
+              match GlobalRegistry.unregister_own(s.reg, name, s.me, e.creation, e.pid, clock) do
+                Some(r) ->
+                  let out = ({ s with reg: r }, Cons(name, names))
+                  out
+                None -> (s, names)
+              end
+          end
+      end)
+  end
+
+  doc """
+  Register [name] -> local pid [pid] (its Down-watcher is [watcher]). Refused
+  (no effect but the watcher's retirement) if another holder's binding is
+  visible here: the API checked the mirror first, so that is a race lost.
+  """
+  fn core_register(st : CnState, name : String, pid : Int, watcher : Int) : (CnState, List(CnEffect)) do
+    let taken = match core_lookup(st, name) do
+      Some(p) -> not(p.node_id == st.me && p.local_pid == pid)
+      None -> false
+    end
+    if taken do
+      (st, Cons(Unwatch(watcher), Nil))
+    else
+      let clock = GlobalRegistry.next_clock(st.reg, name, st.me)
+      let old_watch = match Map.get(st.regs, name, Map.str_cmp) do
+        Some((_, w)) -> if w != watcher do Cons(Unwatch(w), Nil) else Nil end
+        None -> Nil
+      end
+      let st2 = { st with reg: GlobalRegistry.register_at(st.reg, name, st.me, st.cfg.creation, pid, clock),
+                          regs: Map.insert(st.regs, name, (pid, watcher), Map.str_cmp) }
+      match refresh_names(st2) do
+        (st3, effs) ->
+          let out = (st3, List.append(old_watch, List.append(push_leaves(st3, leaf(st3, name)), effs)))
+          out
+      end
+    end
+  end
+
+  doc "Unregister [name] if this node holds it (compare-and-delete)."
+  fn core_unregister(st : CnState, name : String) : (CnState, List(CnEffect)) do
+    match Map.get(st.regs, name, Map.str_cmp) do
+      None -> (st, Nil)
+      Some((pid, w)) ->
+        let st1 = { st with regs: Map.remove(st.regs, name, Map.str_cmp) }
+        let clock = GlobalRegistry.next_clock(st1.reg, name, st1.me)
+        match GlobalRegistry.unregister_own(st1.reg, name, st1.me, st1.cfg.creation, pid, clock) do
+          None -> (st1, Cons(Unwatch(w), Nil))
+          Some(r) ->
+            let st2 = { st1 with reg: r }
+            match refresh_names(st2) do
+              (st3, effs) ->
+                let out = (st3, Cons(Unwatch(w), List.append(push_leaves(st3, leaf(st3, name)), effs)))
+                out
+            end
+        end
+    end
+  end
+
+  doc "A locally registered process died: unregister every name it held."
+  fn core_local_down(st : CnState, pid : Int) : (CnState, List(CnEffect)) do
+    let names = List.filter_map(Map.entries(st.regs), fn kv ->
+      match kv do (name, (p, _)) -> if p == pid do Some(name) else None end end)
+    List.fold_left(names, (st, Nil), fn (acc, name) ->
+      match acc do
+        (s, effs) ->
+          match core_unregister(s, name) do
+            (s2, e2) ->
+              let out = (s2, List.append(effs, e2))
+              out
+          end
+      end)
+  end
+
+  -- A REGISTRY_SYNC_REQ / RESP from [from].
+  pfn registry_frame(st : CnState, from : String, tag : Int, frame : List(Int)) : (CnState, List(CnEffect)) do
+    if tag == 5 do
+      match NetKernel.decode_registry_sync_req(frame) do
+        Err(_) -> (st, Nil)
+        Ok(rh) ->
+          if rh == GlobalRegistry.root_hash(st.reg) do (st, Nil)
+          else
+            let bytes = NetKernel.encode_registry_sync_resp(GlobalRegistry.root_hash(st.reg), GlobalRegistry.all_entries(st.reg))
+            (st, Cons(Send(from, bytes), Nil))
+          end
+      end
+    else
+      match NetKernel.decode_registry_sync_resp(frame) do
+        Err(_) -> (st, Nil)
+        Ok((rh, leaves)) ->
+          let merged = GlobalRegistry.diff_entries(st.reg, rh, leaves)
+          match retire_stale({ st with reg: merged }) do
+            (st2, retired) ->
+              let mine = GlobalRegistry.root_hash(st2.reg)
+              -- Answer with everything when the sender's state (its root) is
+              -- not what we now hold, so it can merge ours: two rounds at most,
+              -- since after merging both hold the join.
+              let reply = if mine != rh do
+                Cons(Send(from, NetKernel.encode_registry_sync_resp(mine, GlobalRegistry.all_entries(st2.reg))), Nil)
+              else Nil end
+              let retire_push = List.flat_map(retired, fn n -> push_leaves(st2, leaf(st2, n)))
+              match refresh_names(st2) do
+                (st3, effs) ->
+                  let out = (st3, List.append(reply, List.append(retire_push, effs)))
+                  out
+              end
+          end
+      end
+    end
   end
 
   -- ── the I/O layer ───────────────────────────────────────────────────────
@@ -519,7 +804,23 @@ mod ClusterNode do
   -- The node's handle: what `start` returns and every API call takes.
   -- `pid` is the Node actor's pid as an Int; the Vaults are its mirrors.
   type ClusterHandle = { pid : Int, name : String, node_id : String, advertise : String,
-                  members : Vault(Member), subs : Vault(NodeEvent -> Unit), meta : Vault(Int) }
+                  members : Vault(Member), subs : Vault(NodeEvent -> Unit), meta : Vault(Int),
+                  names : Vault(GlobalPid.Pid), watches : Vault(NameEvent -> Unit) }
+
+  -- Watches one registered process: its `Down` unregisters its names. `Down`
+  -- is a raw mailbox message, so the watcher reads it with `receive` (the
+  -- SessionNode.HostWatch pattern); `register` sets the monitor from outside.
+  actor RegWatch do
+    state { n : Int }
+    init  { n: 0 }
+    on WatchPid(node : Int, pid : Int) do
+      match receive() do
+        Down.Down(_, _, _) -> send(pid_of_int(node), LocalDown(pid))
+        _ -> ()
+      end
+      { n: state.n + 1 }
+    end
+  end
 
   actor Node do
     state { st : CnState, h : ClusterHandle, started : Bool }
@@ -527,7 +828,9 @@ mod ClusterNode do
             h: { pid: 0, name: "", node_id: "", advertise: "",
                  members: Vault.new("cluster_node_unset_members"),
                  subs: Vault.new("cluster_node_unset_subs"),
-                 meta: Vault.new("cluster_node_unset_meta") },
+                 meta: Vault.new("cluster_node_unset_meta"),
+                 names: Vault.new("cluster_node_unset_names"),
+                 watches: Vault.new("cluster_node_unset_watches") },
             started: false }
     on Boot(st0 : CnState, h0 : ClusterHandle) do
       { st: st0, h: h0, started: true }
@@ -555,6 +858,15 @@ mod ClusterNode do
     end
     on LinkClosed(id : String, gen : Int) do
       step_io(state.st, state.h, core_link_closed(state.st, id, gen), state.started)
+    end
+    on Register(name : String, pid : Int, watcher : Int) do
+      step_io(state.st, state.h, core_register(state.st, name, pid, watcher), state.started)
+    end
+    on Unregister(name : String) do
+      step_io(state.st, state.h, core_unregister(state.st, name), state.started)
+    end
+    on LocalDown(pid : Int) do
+      step_io(state.st, state.h, core_local_down(state.st, pid), state.started)
     end
     on Shutdown() do
       let _ = List.map(Map.values(state.st.links), fn l -> drop_link(l))
@@ -634,14 +946,34 @@ mod ClusterNode do
         let _ = task_spawn(fn _ -> read_control(node, l))
         discard(task_spawn(fn _ -> read_data(node, l)))
       Drop(l) -> drop_link(l)
+      Named(name, ev) -> tell_watchers(h, name ++ watch_sep(), ev)
+      Unwatch(w) -> if w > 0 do kill(pid_of_int(w)) else () end
       Emit(ev) ->
         discard(List.map(Vault.all(h.subs), fn kv -> match kv do (_k, f) -> f(ev) end))
     end
   end
 
+  pfn tell_watchers(h : ClusterHandle, prefix : String, ev : NameEvent) : () do
+    discard(List.map(Vault.all(h.watches), fn kv -> tell_watcher(kv, prefix, ev)))
+  end
+
+  pfn tell_watcher(kv : (String, NameEvent -> Unit), prefix : String, ev : NameEvent) : () do
+    match kv do
+      (k, f) -> if String.starts_with(k, prefix) do f(ev) else () end
+    end
+  end
+
   pfn mirror(st : CnState, h : ClusterHandle) : () do
     let _ = List.map(core_members(st), fn m -> Vault.set(h.members, m.node_id, m))
-    discard(Vault.set(h.meta, "links", Map.size(st.links)))
+    let _ = Vault.set(h.meta, "links", Map.size(st.links))
+    -- Our own present bindings from an earlier creation: retire_stale keeps
+    -- this at 0 once the registry has synced (observable for tests).
+    let stale = List.length(List.filter(GlobalRegistry.all_entries(st.reg), fn kv ->
+      match kv do (_n, e) -> e.present && e.node_id == st.me && e.creation != st.cfg.creation end))
+    let _ = Vault.set(h.meta, "stale_bindings", stale)
+    let _ = List.map(Vault.keys(h.names), fn k ->
+      if Map.contains_key(st.vis, k, Map.str_cmp) do () else Vault.drop(h.names, k) end)
+    discard(List.map(Map.entries(st.vis), fn kv -> match kv do (k, p) -> Vault.set(h.names, k, p) end))
   end
 
   -- ── tasks ──────────────────────────────────────────────────────────────
@@ -748,6 +1080,7 @@ mod ClusterNode do
       Ok(fd) ->
         if Vault.get(meta, "stopped") != None do
           tcp_close(fd)
+          tcp_close(listen_fd)
           0
         else
           let _ = task_spawn(fn _ -> handshake_in(node, cfg, me, fd))
@@ -782,6 +1115,8 @@ mod ClusterNode do
         let tag = cfg.name ++ "." ++ int_to_string(pid_to_int(node))
         let h = { pid: pid_to_int(node), name: cfg.name, node_id: node_id_of(cfg.name), advertise: cfg.advertise,
                   members: Vault.new("cluster_node_members_" ++ tag),
+                  names: Vault.new("cluster_node_names_" ++ tag),
+                  watches: Vault.new("cluster_node_watches_" ++ tag),
                   subs: Vault.new("cluster_node_subs_" ++ tag),
                   meta: Vault.new("cluster_node_meta_" ++ tag) }
         Vault.set(h.meta, "listen_fd", listen_fd)
@@ -811,10 +1146,11 @@ mod ClusterNode do
         end
       None -> ()
     end
-    match Vault.get(h.meta, "listen_fd") do
-      Some(fd) -> tcp_close(fd)
-      None -> ()
-    end
+    -- The acceptor closes the listen socket itself once it sees the flag:
+    -- closing it here could land between the wake-up connection and the
+    -- scheduler delivering the acceptor's readiness, and a close drops the
+    -- fd's kqueue/epoll registration -- the acceptor then never wakes and
+    -- the process never exits (seen 2 in 8 runs of cluster_stall).
   end
 
   doc """
@@ -871,6 +1207,86 @@ mod ClusterNode do
 
   doc "How many peers this node currently has a connection pair to."
   fn link_count(h : ClusterHandle) : Int do Vault.get_or(h.meta, "links", 0) end
+
+  -- ── names ──────────────────────────────────────────────────────────────
+
+  pfn watch_sep() : String do "#watch#" end
+
+  doc """
+  Register [name] -> [pid] (a process on this node) cluster-wide. Refused
+  with `Taken(holder)` if another holder's binding is visible here. `Ok`
+  means the binding is made here and pushed to every peer; it is not a lock
+  -- a node on the far side of a partition can hold the same name, and after
+  the heal one binding wins everywhere (watch the name to hear `Lost`). The
+  process is monitored: its death unregisters the name.
+  """
+  fn register(h : ClusterHandle, name : String, pid) : Result((), RegisterError) do
+    if Vault.get(h.meta, "stopped") != None do
+      Err(Stopped)
+    else
+      let p = pid_to_int(pid)
+      let taken = match Vault.get(h.names, name) do
+        Some(holder) -> if holder.node_id == h.node_id && holder.local_pid == p do None else Some(holder) end
+        None -> None
+      end
+      match taken do
+        Some(holder) -> Err(Taken(holder))
+        None ->
+          let w = spawn(RegWatch)
+          send(w, WatchPid(h.pid, p))
+          let _ = monitor(w, pid)
+          send(node_pid(h), Register(name, p, pid_to_int(w)))
+          Ok(())
+      end
+    end
+  end
+
+  doc "Unregister [name], if this node holds it. A name another node holds is left alone."
+  fn unregister(h : ClusterHandle, name : String) : () do
+    send(node_pid(h), Unregister(name))
+  end
+
+  doc "The process bound to [name] cluster-wide, as this node sees it (a Vault read)."
+  fn lookup(h : ClusterHandle, name : String) : Option(GlobalPid.Pid) do
+    Vault.get(h.names, name)
+  end
+
+  doc "Every name with a visible binding here."
+  fn names(h : ClusterHandle) : List(String) do Vault.keys(h.names) end
+
+  doc """
+  Call [on_event] (in the node actor's turn: it must only `send`) on every
+  change to [name]'s visible binding: `Bound(name, pid)`, `Unbound(name)`,
+  or `Lost(name, winner)` when a binding made on THIS node is superseded by
+  another holder's (after a partition heals, say). A watcher added while the
+  name is bound gets `Bound` at once. Returns an id for `unwatch`.
+  """
+  fn watch(h : ClusterHandle, name : String, on_event : NameEvent -> Unit) : Int do
+    let id = Vault.incr(h.meta, "next_watch", 1)
+    Vault.set(h.watches, name ++ watch_sep() ++ int_to_string(id), on_event)
+    match Vault.get(h.names, name) do
+      Some(p) -> on_event(Bound(name, p))
+      None -> ()
+    end
+    id
+  end
+
+  fn unwatch(h : ClusterHandle, id : Int) : () do
+    let suffix = watch_sep() ++ int_to_string(id)
+    discard(List.map(Vault.keys(h.watches), fn k ->
+      if String.ends_with(k, suffix) do Vault.drop(h.watches, k) else () end))
+  end
+
+  doc "How many present bindings of this node's from an earlier creation the replica holds (0 once retired)."
+  fn stale_bindings(h : ClusterHandle) : Int do Vault.get_or(h.meta, "stale_bindings", 0) end
+
+  fn name_event_text(ev : NameEvent) : String do
+    match ev do
+      Bound(n, p) -> n ++ " bound to " ++ p.node_id
+      Unbound(n) -> n ++ " unbound"
+      Lost(n, p) -> n ++ " lost to " ++ p.node_id
+    end
+  end
 
   doc """
   Wait (polling every 50 ms) until at least [n] other nodes are Alive, or

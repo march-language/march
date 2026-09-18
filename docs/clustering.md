@@ -65,6 +65,61 @@ The rest of this page is the infrastructure that makes those two snippets safe: 
 
 ---
 
+## A running node: `ClusterNode`
+
+Everything below this section is the layer cake: pure modules and socket glue you can
+assemble by hand. `ClusterNode` is the assembled node, and most programs should start with it:
+
+```march
+-- MARCH_NODE_NAME=a MARCH_NODE_PORT=4001 MARCH_CLUSTER_NODES=10.0.0.2:4001 \
+-- MARCH_CLUSTER_SECRET=... MARCH_NODE_ADVERTISE=10.0.0.1:4001
+match ClusterNode.config_from_env() do
+  Err(e) -> panic(e)
+  Ok(cfg) ->
+    match ClusterNode.start(cfg) do
+      Err(e) -> panic(e)
+      Ok(node) ->
+        let _ = ClusterNode.subscribe(node, fn ev -> println(ClusterNode.event_text(ev)))
+        let _ = ClusterNode.register(node, "image-resizer", worker)   -- a local Pid
+        match ClusterNode.lookup(node, "image-resizer") do
+          Some(gpid) -> ()          -- a GlobalPid: node_id, local pid, creation
+          None -> ()
+        end
+    end
+end
+```
+
+What `start` gives you:
+
+- **Joining.** The node listens, dials its seeds, and exchanges member lists with every
+  peer it links to. Each member carries its *advertised* address, so a node reaches peers it
+  was never configured with. Set `MARCH_NODE_ADVERTISE` to an address other machines can
+  reach; it defaults to `127.0.0.1:<port>`. A node that reaches no seed runs alone and keeps
+  retrying.
+- **One connection pair per peer.** Everything (failure detection, the registry, remote
+  monitors, actor messages) shares one authenticated control connection and one data
+  connection per peer.
+- **Failure detection.** SWIM runs continuously. `subscribe` reports `NodeUp`,
+  `NodeSuspect`, `NodeDead(info, cause)` and `NodeRejoined`. A connection that closes only
+  makes a peer *suspect* and triggers a reconnect; a refused reconnect (nothing listening)
+  or SWIM's timeout makes it *dead*. A dead peer is reconnected on a backoff and rejoins when
+  it proves it is alive. A peer that restarted is a new *creation*: the old one is reported
+  dead and the new one as rejoined.
+- **Names.** `register(node, name, pid)`, `unregister`, `lookup`, and `watch(node, name, f)`,
+  which reports `Bound`, `Unbound` and `Lost`. A registration is pushed to every peer at
+  once and repaired by periodic anti-entropy. `lookup` hides a binding whose holder is dead,
+  or has restarted since it registered. The registered process is monitored, and its death
+  unregisters the name.
+
+**A global name is not a lock.** During a network partition, each side can register the same
+name. When the partition heals, one binding wins everywhere: a registration made after seeing
+the other is causally newer and wins; otherwise a deterministic tiebreak picks. The node
+whose binding lost gets `Lost(name, winner)` on its watchers. It should stop acting as the
+holder and must not unregister (the name is not its own any more). Use a global name for
+discovery, where a brief duplicate is harmless, and never for mutual exclusion.
+
+---
+
 ## Overview
 
 A March cluster is a set of named nodes connected by authenticated TCP links. The stack is organized in layers:
