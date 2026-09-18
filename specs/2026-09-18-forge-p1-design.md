@@ -2,12 +2,16 @@
 
 **Date:** 2026-09-18
 **Status:** design / triage.
-**Scope:** `specs/todos/2026-07-31-p1-tooling-forge-build-tool.md`, whose three
+**Scope:** what was `specs/todos/2026-07-31-p1-tooling-forge-build-tool.md` —
+**split on 2026-09-18** into `2026-07-31-forge-offline-mode.md`,
+`2026-07-31-forge-feature-flags.md` and `2026-07-31-forge-semantic-semver.md` —
+whose three
 bullets are unrelated features filed together under one priority. This document
 takes them one at a time, because they are not the same kind of work and
 should not share a priority.
 
 **Recommendation up front:** split the todo into three files and re-prioritise.
+**Executed 2026-09-18** with the priorities in the table below.
 None of the three is a defect. Sitting at `[P1]` beside a live miscompile, they
 misstate the order work should happen in.
 
@@ -131,9 +135,27 @@ verdict gates publishing, and a string comparison is doing the gating.
 
 ### Design
 
-Compare **resolved types**, not rendered text. The compiler can already emit
-them: `march --emit-core-ast <file>` prints the desugared core AST plus its
-verdict and diagnostics as JSON. So:
+> **Correction, 2026-09-18 — found while executing this section.** The
+> paragraph below originally said *"the compiler can already emit them:
+> `march --emit-core-ast`"*. **It cannot.** Checked against a module with an
+> unannotated public function: the JSON's `module.decls[].fn.ret_ty` is `null`
+> for exactly the functions this gap is about — it is the desugared SURFACE AST,
+> not the inferred one — and its `schemes` section covers polymorphic
+> instantiations, not every public binding. There is no per-binding inferred
+> type in any output the compiler has today.
+>
+> A second gap the original missed: `cmd_publish` gets the OLD surface by
+> **parsing** the previous version, which needs no dependencies. Typechecking it
+> does — the old version's whole dependency tree, at the versions it was
+> published against. That is the expensive part of this design, and it was not
+> in the estimate.
+>
+> So Step 1 needs a new compiler output (the inferred type of every public
+> binding, e.g. a `bindings` section on `--emit-core-ast` read out of the
+> typecheck env) and a way to typecheck an old version with its own deps. See
+> "A cheaper guard" below for what can ship without either.
+
+Compare **resolved types**, not rendered text. So:
 
 1. For each of the old and new trees, run the typechecker and take every public
    binding's **inferred** type — which fills the missing return annotations —
@@ -148,6 +170,26 @@ verdict and diagnostics as JSON. So:
    matches in callers), which the string diff happens to get right today and
    the structural one must keep.
 
+### A cheaper guard for the dangerous direction
+
+The false PATCH is the one that matters, and it can be closed without a
+typechecker by treating it the way `extract_from_directory_checked` already
+treats an unparseable file: **as a surface the diff cannot see, and therefore
+cannot certify.** If a public function has no return-type annotation in the
+old or the new version, and its clauses changed between them, the string diff
+cannot rule out a return-type change, so `cmd_publish` refuses to certify a
+PATCH or MINOR bump for it and says which function and why. Annotating the
+return type gets a precise verdict back, which is also good API hygiene.
+
+- Sound: it only ever refuses, never certifies wrongly.
+- Cheap: the parser already has the clauses; this is a comparison and a message.
+- Noisy in proportion to how much public API is unannotated. That noise is the
+  real cost, and whether it is acceptable is a product call — hence this is an
+  option, not a decision.
+
+This does nothing for the false MAJOR direction, which is annoying rather than
+dangerous and can wait for the full design.
+
 ### Verification bar
 
 A fixture pair per row of "wrong in both directions" above, each asserting the
@@ -157,6 +199,7 @@ flip from PATCH to MAJOR.
 
 ### Effort
 
-M. Most of the parts exist — the parser walk, the diff/classification
-skeleton, `--emit-core-ast`. The new work is normalising a resolved type and
-calling the typechecker from forge.
+**Revised: L**, up from M. The parser walk and the diff/classification skeleton
+exist; a per-binding inferred-type output does not, and typechecking the OLD
+version needs its dependency tree resolved. The cheaper guard above is **S** and
+closes the dangerous direction on its own.

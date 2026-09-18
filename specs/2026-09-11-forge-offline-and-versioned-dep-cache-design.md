@@ -5,8 +5,9 @@
 2026-09-12** — see `specs/progress/2026-09-12-version-aware-dep-cache.md` and
 `specs/progress/2026-09-12-lockfile-hash-domains-aligned.md`. §3 (`--offline`),
 §4's verification and §2.4's tarball cache remain proposed.
-**Closes part of:** `specs/todos/2026-07-31-p1-tooling-forge-build-tool.md`, first
-bullet ("Vendoring / explicit offline mode … partly mitigated by the CAS cache;
+**Closes part of:** what was `specs/todos/2026-07-31-p1-tooling-forge-build-tool.md`'s
+first bullet (split on 2026-09-18 into three todos; this one is now
+`specs/todos/2026-07-31-forge-offline-mode.md`) ("Vendoring / explicit offline mode … partly mitigated by the CAS cache;
 no explicit story"). Vendoring proper (`forge vendor`, an in-tree committed
 `vendor/`) is deliberately **out of scope** — see §7.
 
