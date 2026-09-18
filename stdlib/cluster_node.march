@@ -2,7 +2,7 @@
 -- SWIM continuously over one persistent authenticated connection pair per
 -- peer, and tells subscribers when a peer is suspected, dead or back.
 --
--- Design: specs/todos/2026-09-18-cluster-node-service.md. The parts it
+-- Design: specs/progress/2026-09-18-cluster-node-service.md. The parts it
 -- assembles were already here (Membership/Swim/SwimDriver, NetKernel's
 -- handshake, PeerReader, NodeQueue); what was missing was a node that stays
 -- up and uses them together.

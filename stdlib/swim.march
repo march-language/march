@@ -166,7 +166,7 @@ mod Swim do
 
   -- Suspect [id] now, at its current incarnation, and arm its suspect timer:
   -- what a closed connection means to the node service (a hint, not a
-  -- verdict -- specs/todos/2026-09-18-cluster-node-service.md). A member
+  -- verdict -- specs/progress/2026-09-18-cluster-node-service.md). A member
   -- that is already Suspect or Dead, or unknown, or ourselves, is left alone.
   fn suspect_member(s : State, now : Int, id : String) : (State, List(Action)) do
     if id == s.me do

@@ -1,0 +1,40 @@
+-- Two-node harness, scenario "cluster_session_silent": node-b hosts role B.
+-- It joins, finds A, and is SIGSTOPped before A's message arrives. See
+-- node_a.march.
+mod ClusterSessionSilentB do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+
+  @[endpoints]
+  protocol Silent do
+    A -> B : Int
+    B -> A : Int
+  end
+
+  pfn role_b(s : Cap(Session.Live), st : Silent_B.S_recv_Msg_A_B_1) : Silent_B.Yield do
+    println("B: connected")
+    Silent_B.recv_Msg_A_B_1(s, st, fn (n, st1) ->
+      Silent_B.close(s, Silent_B.send_Msg_B_A_1(s, st1, n + 1)))
+  end
+
+  fn main(c : Cap(IO)) do
+    let seed = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A"))
+    let cfg = ClusterNode.config("node-b", Env.require_int("MARCH_PORT_B"), "", Cons(seed, Nil), "silent-secret", 1)
+    match ClusterNode.start(cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        println("node-b: up")
+        if ClusterNode.await_members(h, 1, 30000) do () else panic("node-b: never joined") end
+        match Silent_Run.cluster_B(c, h, "silent-1", fn (s, st) -> role_b(s, st)) do
+          Ok(_) -> println("B: closed")
+          Err(e) -> println("B: " ++ SessionNode.run_error_message(e))
+        end
+    end
+  end
+end

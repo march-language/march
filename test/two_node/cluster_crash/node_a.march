@@ -5,7 +5,7 @@
 -- SWIM's suspect timeout would have fired.
 -- node-a prints every membership event it gets about node-b (the
 -- cluster node service's subscribe), until "dead".
--- Design: specs/todos/2026-09-18-cluster-node-service.md (phase 1).
+-- Design: specs/progress/2026-09-18-cluster-node-service.md (phase 1).
 mod ClusterCrashA do
   needs IO
   needs IO.Console

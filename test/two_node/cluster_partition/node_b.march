@@ -1,6 +1,6 @@
 -- Two-node harness, scenario "cluster_partition": node-b. The partition
 -- scenario, rebuilt on the cluster node service
--- (specs/todos/2026-09-18-cluster-node-service.md, phase 2).
+-- (specs/progress/2026-09-18-cluster-node-service.md, phase 2).
 -- The harness drops every packet to or from BOTH nodes' listen ports until
 -- each has marked the other Dead; each then claims "leader" in its own half
 -- of the split. Unlike the old `partition` (one raw socket kept open across

@@ -175,9 +175,9 @@ let all_stdlib_decls =
     "peer_reader.march";
     "actor.march";
     "node_queue.march";
+    "cluster_node.march";
     "session_node.march";
     "node.march";
-    "cluster_node.march";
     "cluster_load.march";
     "work_dispatch.march";
     "dist_link.march";

@@ -8,7 +8,7 @@
 -- open throughout, the heal here has to go through the redial path.
 -- node-a prints every membership event it gets about node-b (the
 -- cluster node service's subscribe), until "rejoined".
--- Design: specs/todos/2026-09-18-cluster-node-service.md (phase 1).
+-- Design: specs/progress/2026-09-18-cluster-node-service.md (phase 1).
 mod ClusterStallA do
   needs IO
   needs IO.Console

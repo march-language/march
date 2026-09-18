@@ -773,6 +773,27 @@ let run_module ~proto ~(roles : (string * string) list) : decl =
                   (block [ let_wild (app "body" [ var "s"; app (rm ^ ".register") [ var "s"; lit_int 0 ] ]); unit ]) ]))
       roles
   in
+  (* `cluster_<Role>(io, node, session, body)`: the same role over a running
+     cluster node (`ClusterNode.start`) instead of connections of its own --
+     `SessionNode.run_cluster`: peers found by name under the session id,
+     frames over the node's shared connections, SWIM as the failure
+     detector. Design: specs/progress/2026-09-18-cluster-node-service.md. *)
+  let clusters =
+    List.map
+      (fun (role, entry) ->
+         let rm = proto ^ "_" ^ role in
+         let t_body = TyArrow (t_cap_session, TyArrow (tycon (rm ^ "." ^ entry) [], tycon (rm ^ ".Yield") [])) in
+         fn ("cluster_" ^ role)
+           [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", tycon "ClusterNode.ClusterHandle" []);
+             ("session", t_string); ("body", t_body) ]
+           (tycon "Result" [ t_unit; tycon "SessionNode.RunError" [] ])
+           (app "SessionNode.run_cluster"
+              [ var "io"; var "node"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) [];
+                var "session"; lam [ "_ep" ] unit;
+                lam [ "s" ]
+                  (block [ let_wild (app "body" [ var "s"; app (rm ^ ".register") [ var "s"; lit_int 0 ] ]); unit ]) ]))
+      roles
+  in
   (* `host_<Role>(io, node_id, secret, addrs, host, start, deliver)`: the
      same party, the role hosted in the actor [host] through the event API.
      Nothing here is typed by the protocol beyond the role and its peers --
@@ -828,7 +849,7 @@ let run_module ~proto ~(roles : (string * string) list) : decl =
             [ "Session"; "Live" ] ],
         sp )
   in
-  DMod (n mname, Public, (needs :: addrs :: runners) @ hosters @ hosters_or, sp)
+  DMod (n mname, Public, (needs :: addrs :: runners) @ clusters @ hosters @ hosters_or, sp)
 
 (** Whether [expand] emits `<P>_Run`.  On for every real compile.  A test that
     typechecks generated code against a thin stdlib without `SessionNode`

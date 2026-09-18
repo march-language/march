@@ -4,7 +4,7 @@
 -- comes back as a NEW creation it must resolve "leader" to node-a: node-a's
 -- claim was made after seeing node-b's, so it is causally newer and wins
 -- without the tiebreak. No root needed (unlike cluster_partition).
--- Design: specs/todos/2026-09-18-cluster-node-service.md (phase 2).
+-- Design: specs/progress/2026-09-18-cluster-node-service.md (phase 2).
 mod ClusterTakeoverA do
   needs IO
   needs IO.Console

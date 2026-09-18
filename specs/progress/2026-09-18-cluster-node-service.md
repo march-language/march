@@ -1,3 +1,25 @@
+# DONE 2026-09-18 — Cluster node service (the design; all four phases shipped)
+
+**Shipped 2026-09-18**, one progress record per phase:
+[[2026-09-18-cluster-node-service-phase-0]] (the data model),
+[[2026-09-18-cluster-node-service-phase-1]] (a running node: joining, SWIM,
+failure notifications), [[2026-09-18-cluster-node-service-phase-2]] (the
+registry), [[2026-09-18-cluster-node-service-phase-3]] (the shared data plane),
+[[2026-09-18-cluster-node-service-phase-4]] (sessions over the node). Three
+compiler bugs were found and fixed on the way:
+[[2026-09-18-perceus-three-deep-field-projection]],
+[[2026-09-18-trmc-reuse-hole-shared-scrutinee]], and the stdlib-diagnostic trap
+recorded in phase 3. What is left, including the open questions below, is
+[[2026-09-18-cluster-node-service-follow-ups]]. Deviations from the design as
+written here are recorded in the phase files (notably: no `peer()`; `monitor`
+is `monitor_remote`; the C monitor registry needed no runtime change, since
+watchers register with fd -1 and fires are resent through the control writer;
+cluster session frames use `DropNew`, not `BlockSender`).
+
+The design as filed follows.
+
+---
+
 # `[P1]` Cluster node service: one running node that joins, detects failure, and names things
 
 Filed 2026-09-18. A design spec, not an implementation. It is the prerequisite for phase 4 of

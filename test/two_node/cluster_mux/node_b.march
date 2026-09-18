@@ -7,7 +7,7 @@
 -- "Die" message arrives; node-a has a remote monitor on it, whose fire must
 -- come back through the control writer (the C registry never writes a
 -- service node's socket itself).
--- Design: specs/todos/2026-09-18-cluster-node-service.md (phase 3).
+-- Design: specs/progress/2026-09-18-cluster-node-service.md (phase 3).
 mod ClusterMuxB do
   needs IO
   needs IO.Console

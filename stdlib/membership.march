@@ -12,7 +12,7 @@
 -- (direct/indirect ping, suspicion timers) drives it from the runtime layer.
 --
 -- Origin fields (the cluster node service,
--- specs/todos/2026-09-18-cluster-node-service.md): a member also carries its
+-- specs/progress/2026-09-18-cluster-node-service.md): a member also carries its
 -- human `name`, its advertised listen address `addr` ("host:port", "" when
 -- unknown) and its `creation` (bumped each time the node process restarts).
 -- The merge order is lexicographic over (creation, incarnation, severity): a

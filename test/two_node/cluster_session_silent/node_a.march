@@ -1,0 +1,49 @@
+-- Two-node harness, scenario "cluster_session_silent": the `silent`
+-- scenario over the cluster node service. node-a hosts role A of a two-role
+-- session run by Silent_Run.cluster_A; it sends B a number and waits for the
+-- reply, but node-b has been SIGSTOPped: alive, connections open, silent.
+-- No session heartbeat runs in cluster mode -- SWIM is the failure detector:
+-- node-a's node must declare node-b dead (the suspect timeout), shut its
+-- connections, and the session is cancelled with that cause.
+-- Design: specs/progress/2026-09-18-cluster-node-service.md (phase 4).
+mod ClusterSessionSilentA do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+
+  @[endpoints]
+  protocol Silent do
+    A -> B : Int
+    B -> A : Int
+  end
+
+  pfn role_a(s : Cap(Session.Live), st : Silent_A.S_send_Msg_A_B_1) : Silent_A.Yield do
+    sleep_ms(1000)             -- by now the scenario has stopped node-b
+    println("A: sends 1")
+    Silent_A.recv_Msg_B_A_1(s, Silent_A.send_Msg_A_B_1(s, st, 1), fn (n, st1) ->
+      println("A: got " ++ int_to_string(n))
+      Silent_A.close(s, st1))
+  end
+
+  fn main(c : Cap(IO)) do
+    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "silent-secret", 1)
+    match ClusterNode.start(cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        println("node-a: up")
+        if ClusterNode.await_members(h, 1, 30000) do () else panic("node-a: never joined") end
+        match Silent_Run.cluster_A(c, h, "silent-1", fn (s, st) -> role_a(s, st)) do
+          Ok(_) -> println("A: closed")
+          Err(SessionNode.Cancelled(role, cause)) ->
+            println("A: cancelled waiting on role " ++ int_to_string(role) ++ ": " ++ cause)
+          Err(e) -> println("A: " ++ SessionNode.run_error_message(e))
+        end
+        ClusterNode.stop(h)
+    end
+  end
+end

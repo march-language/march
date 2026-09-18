@@ -3,7 +3,7 @@
 -- must end with a direct connection pair to BOTH others, so node-c learns
 -- node-b's address from gossip (MEMBERS_SYNC / MEMBER_GOSSIP), not from its
 -- configuration: the node_id -> address mapping the cluster node service
--- adds (specs/todos/2026-09-18-cluster-node-service.md, phase 1).
+-- adds (specs/progress/2026-09-18-cluster-node-service.md, phase 1).
 -- Each node prints one report once it has converged, then waits for the
 -- scenario's stop file and exits, so nothing prints while the others stop.
 mod ClusterJoinB do

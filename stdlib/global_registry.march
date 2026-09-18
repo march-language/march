@@ -18,7 +18,7 @@ mod GlobalRegistry do
   -- `creation` is the holder node's creation when it registered: a node that
   -- restarts reuses local pids, so a binding from an earlier creation names
   -- whatever process now has that pid -- the node service hides it and its
-  -- owner tombstones it (specs/todos/2026-09-18-cluster-node-service.md).
+  -- owner tombstones it (specs/progress/2026-09-18-cluster-node-service.md).
   -- 0 for every caller that predates the service.
   type Entry = { node_id : String, pid : Int, clock : VectorClock, present : Bool, creation : Int }
 

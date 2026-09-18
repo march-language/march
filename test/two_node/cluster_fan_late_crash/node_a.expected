@@ -1,0 +1,4 @@
+node-a: up
+A: sends 7
+A: got true
+A: closed

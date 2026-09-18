@@ -37,6 +37,9 @@ git log is authoritative for exact commits.
   wins everywhere and the loser's watchers hear `Lost`. A global name is not a lock.
   Messages: `ClusterNode.route / send_msg / queue_for / monitor_remote / on_peer_closed`
   carry actor messages, remote monitors and flow control over the same connection pair.
+  Choreographies: `<P>_Run.cluster_<Role>(io, node, session, body)` runs a role over the node,
+  finding its peers by name, sharing the node's connections, and using the node's failure
+  detector instead of a per-session heartbeat.
 - `Socket.connect_timeout(host, port, ms)` (builtin `tcp_connect_timeout`): a connect that
   gives up after `ms` when the peer never answers, instead of waiting out the kernel's SYN
   retries (a minute or more behind a dropped-packet partition).
