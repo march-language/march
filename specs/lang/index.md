@@ -79,6 +79,7 @@ document outside `specs/lang/` and linked from here rather than duplicated.
 | Linear types | [`linear-types.md`](linear-types.md) | canonical |
 | Refinement types | [`refinement-types.md`](refinement-types.md) | canonical |
 | Session types | [`session-types.md`](session-types.md) | canonical |
+| Choreography | [`choreography.md`](choreography.md) | canonical |
 | Capabilities | [`capabilities.md`](capabilities.md) | canonical |
 | Memory model (Perceus/FBIP, user-facing) | [`memory-model.md`](memory-model.md) | canonical |
 | Safety by construction | [`safety-by-construction.md`](safety-by-construction.md) | canonical |

@@ -244,6 +244,7 @@ Prefer to poke at it live? [Try It Out](playground.md) runs March in your browse
 | [Supervision](supervision.md) | Supervision trees, restart strategies |
 | [Parallelism](parallelism.md) | Tasks, `pmap`, the M:N work-stealing scheduler |
 | [Session Types](session-types.md) | Typed two-party protocols; deadlocks caught at compile time |
+| [Choreography](choreography.md) | One protocol, many roles, each role its own program on its own node |
 | [Flow](flow.md) | Backpressure pipelines for streaming work |
 | [Overload & Resilience](overload-resilience.md) | Bounded mailboxes, load shedding, and backoff, withstanding thundering herds |
 | [Clustering](clustering.md) | Distributed actors: SWIM, CRDTs, RPC across nodes |
