@@ -270,8 +270,9 @@ type env = {
   no_panic_mod : bool;
   no_panic_modules : string list;
   nonexhaustive_match_spans : Ast.span list ref;
+  trusted_linear_body : bool;
   linear_ok_ids : (int, unit) Hashtbl.t;
-  linear_generic_uses : (Ast.span, string * int list * ty list * ty) Hashtbl.t;
+  linear_generic_uses : (Ast.span, string * int list * ty list * ty * bool) Hashtbl.t;
   cap_producer_ivars : (int, Ast.span) Hashtbl.t;
   cap_narrow_factory_fns : (string, Ast.span) Hashtbl.t;
   cap_dicts : (string * string) list;

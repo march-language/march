@@ -706,6 +706,14 @@ type_decl:
     variants = separated_nonempty_list(PIPE, variant)
     { let tps = match tparams with Some ps -> ps | None -> [] in
       DAlwaysLinearType (Public, name, tps, TDVariant variants, mk_span ($loc)) }
+  (* always_linear opaque type: every binding must be consumed, and the
+     constructors are private to the module, as for `opaque type`.  The
+     representation of a linear container (stdlib LinearMap) stays hidden. *)
+  | ALWAYSLINEAR; OPAQUE; TYPE; name = upper_name; tparams = option(type_params); EQUALS;
+    variants = separated_nonempty_list(PIPE, variant)
+    { let tps = match tparams with Some ps -> ps | None -> [] in
+      let private_variants = List.map (fun v -> { v with var_vis = Private }) variants in
+      DAlwaysLinearType (Public, name, tps, TDVariant private_variants, mk_span ($loc)) }
   | ALWAYSLINEAR; TYPE; name = upper_name; tparams = option(type_params); EQUALS;
     LBRACE; fields = separated_list(COMMA, field); RBRACE
     { let tps = match tparams with Some ps -> ps | None -> [] in
