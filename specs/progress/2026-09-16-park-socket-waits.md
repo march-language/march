@@ -123,10 +123,11 @@ from the poller, so a reused fd number never carries a stale registration. On ep
   loop is untouched in behaviour.
 - `tcp_recv_exact` (`NetKernel.recv_frame_exact`) — parks before each `recv`.
 
-Not converted: `tcp_connect` (loopback connects are immediate; a real remote connect still
-holds its thread for the handshake), `Socket.write`/`send`, the WebSocket reads, and
-anything through OpenSSL. Each is the same mechanical change; none was on the path that
-hung.
+Not converted here: `tcp_connect` (loopback connects are immediate; a real remote connect
+still held its thread for the handshake), `Socket.write`/`send`, the WebSocket reads, and
+anything through OpenSSL. Each was the same mechanical change; none was on the path that
+hung. **All converted 2026-09-17** in
+[[2026-09-17-protocol-errors-and-parked-socket-waits]].
 
 ### Readiness is a hint, so no syscall after a wait may block
 

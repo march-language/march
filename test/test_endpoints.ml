@@ -127,7 +127,7 @@ let stream_shape =
          [ "Stream_Msg"; "Stream_Prod"; "Stream_Cons"; "Stream_Run" ] names;
        List.iter
          (fun (m, f) -> Alcotest.(check bool) (m ^ "." ^ f) true (has_fn mods m f))
-         [ ("Stream_Msg", "encode"); ("Stream_Msg", "decode");
+         [ ("Stream_Msg", "encode"); ("Stream_Msg", "decode"); ("Stream_Msg", "try_decode");
            ("Stream_Msg", "role_Prod"); ("Stream_Msg", "role_Cons");
            ("Stream_Prod", "register"); ("Stream_Prod", "send_Msg_Prod_Cons_1");
            ("Stream_Prod", "offer_more_done"); ("Stream_Prod", "close");
@@ -139,7 +139,8 @@ let stream_shape =
            ("Stream_Cons", "await_Msg_Prod_Cons_1"); ("Stream_Cons", "finish"); ("Stream_Cons", "resume");
            (* the role runner's typed front, one per role, and its address table *)
            ("Stream_Msg", "role_names");
-           ("Stream_Run", "run_Prod"); ("Stream_Run", "run_Cons"); ("Stream_Run", "addrs_from_env") ])
+           ("Stream_Run", "run_Prod"); ("Stream_Run", "run_Cons"); ("Stream_Run", "addrs_from_env");
+           ("Stream_Run", "host_Prod"); ("Stream_Run", "host_Cons") ])
 
 let relay_shape =
   Alcotest.test_case "Relay: three roles, each with exactly its own send/recv" `Quick
@@ -233,7 +234,7 @@ let replayed = bad "sending twice on one state is a linearity error (replay)" "i
 
 let abandoned = bad "registering and never driving the session is a linearity error (abandon)" "was never used" (wrap (stream ^ {|
   fn go(c : Cap(IO)) do
-    let s = Session.attach(c, { register: fn (_a, r) -> r, emit: fn (e, _t, _m) -> e, suspend: fn (e, _f, _h) -> e, close: fn _e -> () })
+    let s = Session.attach(c, { register: fn (_a, r) -> r, emit: fn (e, _t, _m) -> e, suspend: fn (e, _f, _h) -> e, close: fn _e -> (), fail: fn (_e, w) -> panic(w) })
     let st = Stream_Prod.register(s, 0)
     ()
   end
@@ -332,6 +333,42 @@ let event_idle_dropped = bad "a Start that parks without consuming the Idle plac
     end
 |})
 
+(* `Pid(a)`'s parameter is phantom to the linearity check (typecheck.ml,
+   [consumed_var_ids]): a pid of an actor whose state holds a `Parked` can be
+   handed to a generic function.  Before that rule, `tag`'s call was refused
+   ("is linear, but `tag` is generic in a parameter of that type"), which is
+   what made the generated `<P>_Run.host_<Role>(…, host : Pid(a), …)`
+   uncallable from exactly the actors it exists for. *)
+let event_pid_handle = ok "a pid of an actor holding a Parked can be passed to a generic function" (wrap (stream ^ {|
+  actor ConsActor do
+    state { budget : Int, parked : Stream_Cons.Parked_Cons }
+    init  { budget: 2, parked: Stream_Cons.idle() }
+    on DeliverC(s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
+      match Stream_Cons.resume(state.parked, from, msg, ep) do
+        Got_Msg_Prod_Cons_1(_n, st) -> { state with parked: Stream_Cons.finish(s, Stream_Cons.choose_done(s, st, true)) }
+      end
+    end
+  end
+  fn tag(p : Pid(a)) : Int do pid_to_int(p) end
+  fn tag_cons(p : Pid({ budget : Int, parked : Stream_Cons.Parked_Cons })) : Int do tag(p) end
+|}))
+
+(* A builtin given fewer arguments than it takes is an arity error, like a
+   module function: `monitor(target)` used to typecheck as a `Pid(a) -> Int`
+   VALUE (a partial application March does not have) that `let _ =` then
+   discarded, so no monitor was ever set and no Down ever came. *)
+let builtin_under_application = bad "a builtin given fewer arguments than it takes is an error, not a silent partial application"
+    "Function `monitor` expects 2 arguments, but got 1" (wrap {|
+  actor W do
+    state { n : Int }
+    init { n: 0 }
+    on Watch(target : Pid({ n : Int })) do
+      let _r = monitor(target)
+      state
+    end
+  end
+|})
+
 let event_forge = bad "a Parked cannot be forged: its constructors take the private Secret" "Stream_Cons.Secret" (cons_actor {|
     on StartC(s : Cap(Session.Live)) do
       Stream_Cons.take_idle(state.parked)
@@ -384,7 +421,7 @@ let cli_pid_one_arg =
     state { seen : Int }
     init { seen: 0 }
     on Watch(target : Pid({ n : Int })) do
-      let _r = monitor(target)
+      let _r = monitor(self, target)
       match receive() do
         Down.Down(_ref, _t, DownReason.Crash(_m)) -> { state with seen: state.seen + 1 }
         _ -> state
@@ -433,4 +470,4 @@ end
 let tests =
   [ stream_shape; cli_pid_one_arg; cli_no_unreachable_catch_all; cli_derive_eq_single_ctor; relay_shape; no_attr_no_generation; bad_branch_head; same_label_two_payloads;
     prod_ok; wrong_order; replayed; abandoned; callback_forge; relay_ok; payload_declared_later;
-    event_ok; event_retained; event_not_reparked; event_idle_dropped; event_forge ]
+    event_ok; event_retained; event_not_reparked; event_idle_dropped; event_forge; event_pid_handle; builtin_under_application ]

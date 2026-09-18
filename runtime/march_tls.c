@@ -22,6 +22,10 @@
 #include "march_runtime.h"
 #include "march_preempt.h"
 #include "march_http.h"   /* MARCH_RECV_TIMEOUT_MSG — one spelling of an expired deadline */
+#include "march_scheduler.h"   /* march_sched_wait_fd: park instead of blocking */
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <sys/time.h>
 
 #include <errno.h>
 #include <openssl/ssl.h>
@@ -279,6 +283,68 @@ void *march_tls_server_ctx(void *cert_file, void *key_file, void *ca_file,
 
 /* ── Handshake ────────────────────────────────────────────────────────── */
 
+/* ── Driving OpenSSL without holding the thread ───────────────────────────
+ * Every SSL_* call below runs on a NON-BLOCKING fd, and WANT_READ /
+ * WANT_WRITE sends this green thread to march_sched_wait_fd for the
+ * direction OpenSSL asked for -- so a handshake with a remote host, a read
+ * on a silent peer or a write into a full buffer parks the green thread
+ * instead of its scheduler thread.  The fd's flags are restored on every
+ * exit: the fd may be shared with plain-socket code that assumes blocking.
+ *
+ * The preempt mask covers each SSL call only, never the wait (which parks).
+ * A deadline of 0 is "no deadline"; on expiry *timed_out is set and the
+ * last SSL return is handed back.  [op] chooses the call. */
+enum tls_op { TLS_OP_CONNECT, TLS_OP_ACCEPT, TLS_OP_READ, TLS_OP_WRITE };
+
+static int tls_drive(SSL *ssl, int fd, enum tls_op op, void *buf, int len,
+                     int64_t deadline_ms, int *timed_out, int *last_err, int *saved_errno) {
+    *timed_out = 0; *last_err = SSL_ERROR_NONE; *saved_errno = 0;
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0 && !(flags & O_NONBLOCK)) (void)fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    int rc;
+    for (;;) {
+        sigset_t saved;
+        march_block_preempt(&saved);
+        errno = 0;
+        switch (op) {
+            case TLS_OP_CONNECT: rc = SSL_connect(ssl); break;
+            case TLS_OP_ACCEPT:  rc = SSL_accept(ssl);  break;
+            case TLS_OP_READ:    rc = SSL_read(ssl, buf, len); break;
+            default:             rc = SSL_write(ssl, buf, len); break;
+        }
+        *saved_errno = errno;
+        int err = rc > 0 ? SSL_ERROR_NONE : SSL_get_error(ssl, rc);
+        march_unblock_preempt(&saved);
+        *last_err = err;
+        if (rc > 0) break;
+        if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE) break;
+        int w = march_sched_wait_fd(fd, err == SSL_ERROR_WANT_WRITE, deadline_ms);
+        if (w == MARCH_FDWAIT_TIMEOUT) { *timed_out = 1; break; }
+        if (w < 0) { *saved_errno = errno ? errno : EIO; *last_err = SSL_ERROR_SYSCALL; break; }
+    }
+    if (flags >= 0 && !(flags & O_NONBLOCK)) (void)fcntl(fd, F_SETFL, flags);
+    return rc;
+}
+
+/* The fd's own SO_RCVTIMEO as an absolute deadline, 0 when unset: what an
+ * untimed TLS read honours, as the plain recv path does. */
+static int64_t tls_rcvtimeo_deadline(int fd) {
+    struct timeval tv;
+    socklen_t tvlen = sizeof tv;
+    if (getsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, &tvlen) == 0 && (tv.tv_sec > 0 || tv.tv_usec > 0))
+        return march_now_ms() + (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+    return 0;
+}
+
+static void *tls_ssl_error(SSL *ssl, int rc, const char *what) {
+    (void)ssl;
+    char buf[512];
+    unsigned long e = ERR_get_error();
+    if (e) ERR_error_string_n(e, buf, sizeof buf);
+    else   snprintf(buf, sizeof buf, "%s (SSL error %d)", what, rc);
+    return make_err(buf);
+}
+
 void *march_tls_connect(int64_t fd, int64_t ctx_handle, void *hostname) {
     SSL_CTX *ctx = (SSL_CTX *)(uintptr_t)ctx_handle;
     SSL *ssl = SSL_new(ctx);
@@ -298,24 +364,14 @@ void *march_tls_connect(int64_t fd, int64_t ctx_handle, void *hostname) {
         return make_err(e);
     }
 
-    /* Guarded for the same reason as SSL_read: the handshake blocks reading
-     * the peer's response, and an unguarded restart loop defeats any
-     * SO_RCVTIMEO deadline set on the fd.  See march_preempt.h. */
-    sigset_t saved;
-    march_block_preempt(&saved);
-    int rc = SSL_connect(ssl);
-    march_unblock_preempt(&saved);
+    /* The handshake parks on the peer's response (tls_drive); a deadline
+     * set on the fd (SO_RCVTIMEO) bounds it, as it always did. */
+    int timed_out, err, en;
+    int rc = tls_drive(ssl, (int)fd, TLS_OP_CONNECT, NULL, 0, tls_rcvtimeo_deadline((int)fd), &timed_out, &err, &en);
     if (rc != 1) {
-        char buf[512];
-        int err = SSL_get_error(ssl, rc);
-        unsigned long e = ERR_get_error();
-        if (e) {
-            ERR_error_string_n(e, buf, sizeof buf);
-        } else {
-            snprintf(buf, sizeof buf, "SSL_connect failed (SSL error %d)", err);
-        }
+        void *r = timed_out ? make_err(MARCH_RECV_TIMEOUT_MSG) : tls_ssl_error(ssl, err, "SSL_connect failed");
         SSL_free(ssl);
-        return make_err(buf);
+        return r;
     }
 
     return make_ok_int((int64_t)(uintptr_t)ssl);
@@ -332,24 +388,12 @@ void *march_tls_accept(int64_t fd, int64_t ctx_handle) {
         return make_err(e);
     }
 
-    /* Guarded for the same reason as SSL_read: the handshake blocks reading
-     * the peer's response, and an unguarded restart loop defeats any
-     * SO_RCVTIMEO deadline set on the fd.  See march_preempt.h. */
-    sigset_t saved;
-    march_block_preempt(&saved);
-    int rc = SSL_accept(ssl);
-    march_unblock_preempt(&saved);
+    int timed_out, err, en;
+    int rc = tls_drive(ssl, (int)fd, TLS_OP_ACCEPT, NULL, 0, tls_rcvtimeo_deadline((int)fd), &timed_out, &err, &en);
     if (rc != 1) {
-        char buf[512];
-        int err = SSL_get_error(ssl, rc);
-        unsigned long e = ERR_get_error();
-        if (e) {
-            ERR_error_string_n(e, buf, sizeof buf);
-        } else {
-            snprintf(buf, sizeof buf, "SSL_accept failed (SSL error %d)", err);
-        }
+        void *r = timed_out ? make_err(MARCH_RECV_TIMEOUT_MSG) : tls_ssl_error(ssl, err, "SSL_accept failed");
         SSL_free(ssl);
-        return make_err(buf);
+        return r;
     }
 
     return make_ok_int((int64_t)(uintptr_t)ssl);
@@ -365,56 +409,31 @@ void *march_tls_read(int64_t ssl_handle, int64_t max_bytes) {
     char *buf = (char *)malloc((size_t)cap);
     if (!buf) return make_err("tls_read: out of memory");
 
-    /* Masking SIGUSR1 is what makes an SO_RCVTIMEO deadline on the underlying
-     * fd actually reach this read: unguarded, the preemption signal restarts
-     * the socket recv() beneath OpenSSL every ~1ms under SA_RESTART, restarting
-     * the receive timer with it, and a peer that goes silent wedges the caller
-     * forever.  See march_preempt.h. */
-    sigset_t saved;
-    march_block_preempt(&saved);
-    errno = 0;
-    int n = SSL_read(ssl, buf, (int)cap);
-    /* Captured HERE, before march_unblock_preempt(), ERR_get_error() or any
-     * other call can overwrite it: the errno is the only thing distinguishing
-     * an expired SO_RCVTIMEO from a connection reset, and both arrive as
-     * SSL_ERROR_SYSCALL. */
-    int read_errno = errno;
-    march_unblock_preempt(&saved);
+    /* The read parks on a silent peer (tls_drive); the fd's SO_RCVTIMEO,
+     * set by set_recv_timeout before the handshake, is its deadline, and an
+     * expiry gets the same sentinel the plain-recv path uses -- a caller
+     * that cannot tell a silent peer from a broken one cannot say why a
+     * stream ended. */
+    int fd = SSL_get_fd(ssl);
+    int timed_out, err, read_errno;
+    int n = tls_drive(ssl, fd, TLS_OP_READ, buf, (int)cap, tls_rcvtimeo_deadline(fd), &timed_out, &err, &read_errno);
     if (n > 0) {
         void *s = march_string_lit(buf, (int64_t)n);
         free(buf);
         return make_ok_str(s);
     }
     free(buf);
-
-    int err = SSL_get_error(ssl, n);
+    if (timed_out) return make_err(MARCH_RECV_TIMEOUT_MSG);
     if (err == SSL_ERROR_ZERO_RETURN) {
         /* Clean shutdown */
         void *s = march_string_lit("", 0);
         return make_ok_str(s);
     }
-    /* An SO_RCVTIMEO set on the fd before the handshake reaches this read (that
-     * is the whole reason set_recv_timeout exists).  OpenSSL reports its expiry
-     * as SSL_ERROR_WANT_READ on a BLOCKING socket — measured, not assumed: with
-     * the mapping removed, a peer that completed a handshake and then went
-     * silent produced "SSL_read error 2".  SSL_ERROR_SYSCALL with EAGAIN is the
-     * other shape the same event can take, so both are matched, and both are
-     * qualified by errno because SSL_ERROR_SYSCALL is equally what a connection
-     * reset looks like.  A caller that cannot tell a silent peer from a broken
-     * one cannot say why a stream ended, so an expired deadline gets the same
-     * sentinel the plain-recv path already uses. */
-    if ((err == SSL_ERROR_SYSCALL || err == SSL_ERROR_WANT_READ) &&
+    if (err == SSL_ERROR_SYSCALL &&
         (read_errno == EAGAIN || read_errno == EWOULDBLOCK || read_errno == ETIMEDOUT)) {
         return make_err(MARCH_RECV_TIMEOUT_MSG);
     }
-    char errbuf[256];
-    unsigned long e = ERR_get_error();
-    if (e) {
-        ERR_error_string_n(e, errbuf, sizeof errbuf);
-    } else {
-        snprintf(errbuf, sizeof errbuf, "SSL_read error %d", err);
-    }
-    return make_err(errbuf);
+    return tls_ssl_error(ssl, err, "SSL_read error");
 }
 
 /* tls_read_timeout(ssl_handle, max_bytes, timeout_ms)
@@ -453,82 +472,27 @@ void *march_tls_read_timeout(int64_t ssl_handle, int64_t max_bytes, int64_t time
     int fd = SSL_get_fd(ssl);
     if (fd < 0) return make_err("tls_read_timeout: no file descriptor");
 
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0) return make_err("tls_read_timeout: F_GETFL failed");
-    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
-        return make_err("tls_read_timeout: F_SETFL failed");
-
     int64_t cap = (max_bytes <= 0 || max_bytes > 1048576) ? 65536 : max_bytes;
     char *buf = (char *)malloc((size_t)cap);
-    if (!buf) {
-        fcntl(fd, F_SETFL, flags);
-        return make_err("tls_read_timeout: out of memory");
-    }
+    if (!buf) return make_err("tls_read_timeout: out of memory");
 
-    /* EINTR and partial records must not restart the cap, so the deadline is
-     * absolute. */
-    struct timespec start;
-    clock_gettime(CLOCK_MONOTONIC, &start);
-
-    sigset_t saved;
-    march_block_preempt(&saved);
-
-    void *result = NULL;
-    for (;;) {
-        int n = SSL_read(ssl, buf, (int)cap);
-        if (n > 0) {
-            result = make_ok_str(march_string_lit(buf, (int64_t)n));
-            break;
-        }
-
-        int err = SSL_get_error(ssl, n);
-        if (err == SSL_ERROR_ZERO_RETURN) {
-            /* Clean shutdown: Ok(Some("")), as tls_read has always said it. */
-            result = make_ok_str(march_string_lit("", 0));
-            break;
-        }
-        if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE) {
-            if (err == SSL_ERROR_SYSCALL && n == 0) {
-                /* Peer vanished without a close_notify. Still an end, not a
-                 * timeout. */
-                result = make_ok_str(march_string_lit("", 0));
-                break;
-            }
-            char errbuf[256];
-            unsigned long e = ERR_get_error();
-            if (e) {
-                ERR_error_string_n(e, errbuf, sizeof errbuf);
-            } else {
-                snprintf(errbuf, sizeof errbuf, "SSL_read error %d", err);
-            }
-            result = make_err(errbuf);
-            break;
-        }
-
-        struct timespec now;
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        int64_t spent = (now.tv_sec - start.tv_sec) * 1000
-                      + (now.tv_nsec - start.tv_nsec) / 1000000;
-        int64_t remaining = timeout_ms - spent;
-        if (remaining <= 0) { result = make_ok_str(NULL); break; }  /* None */
-
-        struct pollfd pfd;
-        pfd.fd = fd;
-        pfd.events = (err == SSL_ERROR_WANT_WRITE) ? POLLOUT : POLLIN;
-        pfd.revents = 0;
-
-        int r = poll(&pfd, 1, (int)remaining);
-        if (r == 0) { result = make_ok_str(NULL); break; }          /* None */
-        if (r < 0) {
-            if (errno == EINTR) continue;
-            result = make_err("tls_read_timeout: poll failed");
-            break;
-        }
-    }
-
-    march_unblock_preempt(&saved);
+    /* SSL_read drives the loop and WANT_READ/WANT_WRITE is what parks us
+     * (tls_drive): readable bytes are not application data (session tickets
+     * after a TLS 1.3 handshake), and one record can need several reads, so
+     * polling the fd and THEN reading was never right.  The deadline is
+     * absolute: EINTR and partial records do not restart it. */
+    int64_t deadline = timeout_ms > 0 ? march_now_ms() + timeout_ms : 0;
+    int timed_out, err, en;
+    int n = tls_drive(ssl, fd, TLS_OP_READ, buf, (int)cap, deadline, &timed_out, &err, &en);
+    void *result;
+    if (n > 0) result = make_ok_str(march_string_lit(buf, (int64_t)n));
+    else if (timed_out) result = make_ok_str(NULL);                        /* None */
+    else if (err == SSL_ERROR_ZERO_RETURN) result = make_ok_str(march_string_lit("", 0));
+    else if (err == SSL_ERROR_SYSCALL && n == 0)
+        /* Peer vanished without a close_notify. Still an end, not a timeout. */
+        result = make_ok_str(march_string_lit("", 0));
+    else result = tls_ssl_error(ssl, err, "SSL_read error");
     free(buf);
-    fcntl(fd, F_SETFL, flags);
     return result;
 }
 
@@ -541,22 +505,11 @@ void *march_tls_write(int64_t ssl_handle, void *data) {
     int64_t total = s->len;
     int64_t written = 0;
 
+    int fd = SSL_get_fd(ssl);
     while (written < total) {
-        sigset_t saved;
-        march_block_preempt(&saved);
-        int n = SSL_write(ssl, src + written, (int)(total - written));
-        march_unblock_preempt(&saved);
-        if (n <= 0) {
-            int err = SSL_get_error(ssl, n);
-            char errbuf[256];
-            unsigned long e = ERR_get_error();
-            if (e) {
-                ERR_error_string_n(e, errbuf, sizeof errbuf);
-            } else {
-                snprintf(errbuf, sizeof errbuf, "SSL_write error %d", err);
-            }
-            return make_err(errbuf);
-        }
+        int timed_out, err, en;
+        int n = tls_drive(ssl, fd, TLS_OP_WRITE, (void *)(src + written), (int)(total - written), 0, &timed_out, &err, &en);
+        if (n <= 0) return tls_ssl_error(ssl, err, "SSL_write error");
         written += n;
     }
 

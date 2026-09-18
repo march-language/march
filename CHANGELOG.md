@@ -11,7 +11,48 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Changed
+- `tcp_connect`'s name lookup (`getaddrinfo`) runs on a helper thread and parks the
+  green thread: a slow resolver no longer stalls a scheduler thread. That was the last
+  blocking call on the dial path.
+- An unrefined `Chan.offer` continuation is a session state (`SOfferPending`) rather than
+  a checker side table; diagnostics and accepted programs are unchanged.
+
 ### Added
+- **`Session.fail(s, ep, why)`** and the `fail` op on `Session.Ops`: a delivery the
+  generated endpoint code cannot take (undecodable, or a message the state does not
+  receive) is handed to the transport instead of panicking in whatever turn it ran in.
+  `SessionNode` ends the session and `run` returns `Err(Protocol(role, why))`; the
+  same-thread transports panic as before. `<P>_Msg.try_decode` is the non-panicking
+  decoder the handlers now use.
+
+### Changed
+- Every remaining blocking socket wait parks the green thread instead of holding its
+  scheduler thread: `tcp_connect` (the handshake with a remote host), `Socket.write`/`send`
+  into a full buffer, the WebSocket reads and `select`, and all of OpenSSL (`SSL_connect`,
+  `SSL_accept`, `SSL_read`, `SSL_write`, driven on a non-blocking fd). Deadlines set on the
+  fd (`SO_RCVTIMEO`) still bound the TLS handshake and reads.
+
+### Fixed
+- A `receive()` nested inside an actor handler that was still parked when the process
+  shut down (or the actor was killed) returned the runtime's no-message sentinel into
+  user code, which dropped it: `RC underflow (rc was 0) — aborting`. A stop now ends the
+  actor on its normal death path instead.
+- Calling a builtin with fewer arguments than it takes (`monitor(pid)` for the
+  two-parameter `monitor`) typechecked as a function value — a partial application March
+  does not have — which a `let _ =` then discarded silently. It is now the same arity
+  error module functions already got.
+
+### Added
+- **A session role hosted in an actor, across nodes.** `SessionNode.run_hosted` and the
+  generated `<P>_Run.host_<Role>(io, node_id, secret, addrs, host, start, deliver)` drive
+  the event API (`Parked_<Role>` in the actor's state, `await_*`/`resume`) from a real
+  network party: deliveries go to the actor one per suspension, in mailbox order, and the
+  host is monitored — its crash or restart ends the session with `Err(HostGone(ep))`, and
+  the peers see `PeerGone`.
+- `Pid(a)`'s parameter is phantom to the linearity checker: a pid of an actor whose state
+  holds a linear value can be passed to a generic function (`pid_to_int`, a `Pid(a)`
+  parameter) — previously refused as "generic in a parameter of that type".
 - **The role runner.** `SessionNode.run` starts a role of an `@[endpoints]` protocol from
   its peer set and a role→address table — listen, connect to every lower role, accept every
   higher one, check, attach, serve, tear down — in the order that cannot deadlock, and the

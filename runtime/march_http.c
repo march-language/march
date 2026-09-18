@@ -419,30 +419,43 @@ void *march_tcp_recv_http(int64_t fd, int64_t max_bytes) {
 
 /* Send all bytes of a march_string to fd.
  * Returns Ok(Unit) on success, Err(String) on failure. */
+/* Write all of [buf]: MSG_DONTWAIT sends, parking (march_sched_wait_fd,
+ * writable) when the socket's send buffer is full instead of holding the
+ * scheduler thread until the peer drains it.  0 on success; on failure -1
+ * with errno, or -2 for a peer that closed. */
+static int send_all_parked(int fd, const char *buf, size_t remaining) {
+    while (remaining > 0) {
+        sigset_t saved;
+        march_block_preempt(&saved);
+        ssize_t sent = send(fd, buf, remaining, MSG_DONTWAIT);
+        int send_errno = errno;
+        march_unblock_preempt(&saved);
+        if (sent < 0) {
+            if (send_errno == EINTR) continue;
+            if (send_errno == EAGAIN || send_errno == EWOULDBLOCK) {
+                if (march_sched_wait_fd(fd, 1, 0) < 0) { errno = EIO; return -1; }
+                continue;
+            }
+            errno = send_errno;
+            return -1;
+        }
+        if (sent == 0) return -2;
+        buf += sent;
+        remaining -= (size_t)sent;
+    }
+    return 0;
+}
+
 void *march_tcp_send_all(int64_t fd, void *data) {
     if (!data) return make_err("null data");
     march_string *s = (march_string *)data;
-    const char *buf = s->data;
-    int64_t remaining = s->len;
-    sigset_t saved;
-    march_block_preempt(&saved);
-    while (remaining > 0) {
-        ssize_t sent = send((int)fd, buf, (size_t)remaining, 0);
-        if (sent < 0) {
-            if (errno == EINTR) continue;   /* preemption signal — retry */
-            char errbuf[64];
-            snprintf(errbuf, sizeof(errbuf), "send: %s", strerror(errno));
-            march_unblock_preempt(&saved);
-            return make_err(errbuf);
-        }
-        if (sent == 0) {
-            march_unblock_preempt(&saved);
-            return make_err("send: connection closed");
-        }
-        buf += sent;
-        remaining -= sent;
+    int rc = send_all_parked((int)fd, s->data, (size_t)s->len);
+    if (rc == -2) return make_err("send: connection closed");
+    if (rc < 0) {
+        char errbuf[64];
+        snprintf(errbuf, sizeof(errbuf), "send: %s", strerror(errno));
+        return make_err(errbuf);
     }
-    march_unblock_preempt(&saved);
     return make_ok(make_unit());
 }
 
@@ -837,19 +850,22 @@ void *march_tcp_connect(void *host_ptr, int64_t port) {
     memset(&hints, 0, sizeof(hints));
     hints.ai_family   = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
-    /* Mask preemption (SIGUSR1) across getaddrinfo()/connect(): see
-     * march_block_preempt().  getaddrinfo on macOS is not async-signal-safe
-     * and a preemption signal landing inside it crashes the process (SIGILL). */
-    sigset_t saved;
-    march_block_preempt(&saved);
-    if (getaddrinfo(host, port_str, &hints, &res) != 0 || !res) {
-        march_unblock_preempt(&saved);
+    /* The lookup runs on a helper thread and parks this green thread
+     * (march_sched_getaddrinfo): a slow resolver no longer holds the
+     * scheduler thread, and the preemption signal never reaches the call
+     * (it is not async-signal-safe on macOS -- the helper is not a scheduler
+     * thread, so it is never signalled).  Unmasked, as every park must be. */
+    if (march_sched_getaddrinfo(host, port_str, &hints, &res) != 0 || !res) {
         void *s = march_string_lit("tcp_connect: getaddrinfo failed", 31);
         void *r = march_alloc(24);
         ((march_hdr *)r)->tag = 1; /* Err */
         *(void **)((char *)r + 16) = s;
         return r;
     }
+    /* Mask preemption (SIGUSR1) across socket()/connect(): see
+     * march_block_preempt(). */
+    sigset_t saved;
+    march_block_preempt(&saved);
     int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
     if (fd < 0) {
         march_unblock_preempt(&saved);
@@ -860,6 +876,13 @@ void *march_tcp_connect(void *host_ptr, int64_t port) {
         *(void **)((char *)r + 16) = s;
         return r;
     }
+    /* Non-blocking for the connect itself, so the handshake with a remote
+     * host parks this green thread (march_sched_wait_fd, below) instead of
+     * holding its scheduler thread; the flags are restored before the fd is
+     * handed out, every reader and writer assumes a blocking socket.
+     * (getaddrinfo above still blocks: there is no async resolver.) */
+    int fl = fcntl(fd, F_GETFL, 0);
+    if (fl >= 0) (void)fcntl(fd, F_SETFL, fl | O_NONBLOCK);
     /* connect() is the one blocking call here that must NOT simply be
      * re-issued on EINTR.  Unlike recv()/send(), an interrupted connect()
      * leaves the handshake running in the KERNEL: POSIX says the connection
@@ -885,25 +908,34 @@ void *march_tcp_connect(void *host_ptr, int64_t port) {
      * writable and read the true outcome out of SO_ERROR. */
     int crc = connect(fd, res->ai_addr, res->ai_addrlen);
     if (crc < 0 && (errno == EINTR || errno == EINPROGRESS)) {
-        struct pollfd pfd;
-        pfd.fd     = fd;
-        pfd.events = POLLOUT;
-        int prc;
-        /* poll() may itself be interrupted; retrying IT is safe and correct. */
-        do { prc = poll(&pfd, 1, -1); } while (prc < 0 && errno == EINTR);
-        if (prc > 0) {
-            int       so_err = 0;
+        /* The wait parks the green thread: it must run UNMASKED (see
+         * march_sched_wait_fd's contract), and the readiness it reports is a
+         * hint, so the outcome is read from SO_ERROR after a zero-timeout
+         * poll confirms writability. */
+        march_unblock_preempt(&saved);
+        int so_err = 0;
+        for (;;) {
+            int w = march_sched_wait_fd(fd, 1, 0);
+            if (w < 0) { so_err = errno ? errno : EIO; break; }
+            struct pollfd pfd = { fd, POLLOUT, 0 };
+            int prc;
+            do { prc = poll(&pfd, 1, 0); } while (prc < 0 && errno == EINTR);
+            if (prc < 0) { so_err = errno; break; }
+            if (prc == 0) continue;                       /* stale hint */
             socklen_t so_len = sizeof(so_err);
-            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_err, &so_len) == 0) {
-                if (so_err == 0) { crc = 0; }
-                else             { crc = -1; errno = so_err; }
-            }
+            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_err, &so_len) != 0) so_err = errno;
+            break;
         }
+        march_block_preempt(&saved);
+        if (so_err == 0) { crc = 0; }
+        else             { crc = -1; errno = so_err; }
     } else if (crc < 0 && errno == EISCONN) {
         /* Belt and braces: an EISCONN here means the handshake we asked for
          * completed, which is success, not failure. */
         crc = 0;
     }
+    /* Back to blocking: readers and writers of this fd assume it. */
+    if (fl >= 0) (void)fcntl(fd, F_SETFL, fl);
     if (crc < 0) {
         int saved_errno = errno;
         march_unblock_preempt(&saved);
@@ -2508,11 +2540,19 @@ void march_ws_handshake(int64_t fd, void *key_string) {
         send((int)fd, resp, (size_t)n, 0);
 }
 
-/* recv_all_bytes: read exactly `n` bytes from fd into buf. Returns 0 on success, -1 on error. */
+/* recv_all_bytes: read exactly `n` bytes from fd into buf. Returns 0 on
+ * success, -1 on error or close.  Parks (march_sched_wait_fd) between
+ * chunks; the syscall itself never blocks (readiness is a hint). */
 static int recv_exact(int fd, uint8_t *buf, size_t n) {
     size_t got = 0;
     while (got < n) {
-        ssize_t r = recv(fd, buf + got, n - got, 0);
+        if (march_sched_wait_fd(fd, 0, 0) < 0) return -1;
+        sigset_t saved;
+        march_block_preempt(&saved);
+        ssize_t r = recv(fd, buf + got, n - got, MSG_DONTWAIT);
+        int recv_errno = errno;
+        march_unblock_preempt(&saved);
+        if (r < 0 && (recv_errno == EINTR || recv_errno == EAGAIN || recv_errno == EWOULDBLOCK)) continue;
         if (r <= 0) return -1;
         got += (size_t)r;
     }
@@ -2725,9 +2765,9 @@ void march_ws_send(int64_t fd, void *frame) {
         hdr_len = 10;
     }
 
-    send(sock, frame_hdr, (size_t)hdr_len, 0);
+    (void)send_all_parked(sock, (const char *)frame_hdr, (size_t)hdr_len);
     if (payload_len > 0)
-        send(sock, payload, payload_len, 0);
+        (void)send_all_parked(sock, (const char *)payload, payload_len);
 
     (void)close_hdr;
 }
@@ -2750,45 +2790,36 @@ void *march_ws_select(int64_t socket_fd, void *pipe_rd, int64_t timeout_ms) {
         pipe_fd = (int)(*(int64_t *)((char *)pipe_rd + 16));
     }
 
-    int max_fd = ws_fd;
-    if (pipe_fd > max_fd) max_fd = pipe_fd;
-
-    fd_set rfds;
-    FD_ZERO(&rfds);
-    FD_SET(ws_fd, &rfds);
-    if (pipe_fd >= 0) FD_SET(pipe_fd, &rfds);
-
-    struct timeval tv;
-    struct timeval *tvp = NULL;
-    if (timeout_ms > 0) {
-        tv.tv_sec  = timeout_ms / 1000;
-        tv.tv_usec = (timeout_ms % 1000) * 1000;
-        tvp = &tv;
-    }
-
-    int r = select(max_fd + 1, &rfds, NULL, NULL, tvp);
-    if (r < 0) {
-        if (errno == EINTR) {
-            /* Return Timeout on signal */
+    /* Park until either fd is readable (march_sched_wait_fds) instead of
+     * holding the scheduler thread in select(); the readiness is a hint, so
+     * which fd actually has data is then confirmed with a zero-timeout poll. */
+    int fds[2] = { ws_fd, pipe_fd >= 0 ? pipe_fd : ws_fd };
+    int64_t deadline = timeout_ms > 0 ? march_now_ms() + timeout_ms : 0;
+    int pipe_ready = 0, ws_ready = 0;
+    for (;;) {
+        int w = march_sched_wait_fds(fds, pipe_fd >= 0 ? 2 : 1, deadline);
+        if (w <= 0) {
+            /* Timeout, or an error: both were "Timeout" before. */
             void *t = march_alloc(16);
             *(int32_t *)((char *)t + 8) = 2;
             return t;
         }
-        /* Error → return Timeout */
-        void *t = march_alloc(16);
-        *(int32_t *)((char *)t + 8) = 2;
-        return t;
-    }
-
-    if (r == 0) {
-        /* Timeout */
-        void *t = march_alloc(16);
-        *(int32_t *)((char *)t + 8) = 2;
-        return t;
+        struct pollfd pfds[2] = { { ws_fd, POLLIN, 0 }, { pipe_fd, POLLIN, 0 } };
+        int prc;
+        do { prc = poll(pfds, pipe_fd >= 0 ? 2 : 1, 0); } while (prc < 0 && errno == EINTR);
+        ws_ready   = prc > 0 && pfds[0].revents != 0;
+        pipe_ready = prc > 0 && pipe_fd >= 0 && pfds[1].revents != 0;
+        if (ws_ready || pipe_ready) break;
+        if (deadline > 0 && march_now_ms() >= deadline) {
+            void *t = march_alloc(16);
+            *(int32_t *)((char *)t + 8) = 2;
+            return t;
+        }
+        /* stale hint: wait again */
     }
 
     /* Check actor pipe first (prioritise actor messages) */
-    if (pipe_fd >= 0 && FD_ISSET(pipe_fd, &rfds)) {
+    if (pipe_ready) {
         /* Drain one byte from the notification pipe */
         uint8_t dummy;
         recv(pipe_fd, &dummy, 1, 0);
@@ -2802,7 +2833,7 @@ void *march_ws_select(int64_t socket_fd, void *pipe_rd, int64_t timeout_ms) {
     }
 
     /* WebSocket data available */
-    if (FD_ISSET(ws_fd, &rfds)) {
+    if (ws_ready) {
         void *ws_frame = march_ws_recv(socket_fd);
         void *res = march_alloc(16 + 8);
         /* tag = 0 (WsData) */

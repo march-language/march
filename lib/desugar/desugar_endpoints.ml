@@ -281,16 +281,18 @@ let pcon c ps = PatCon (n c, ps)
 let pvar s = PatVar (n s)
 let lam names body =
   ELam (List.map (fun s -> { param_name = n s; param_ty = None; param_lin = Unrestricted }) names, body, sp)
-let param name ty = FPNamed { param_name = n name; param_ty = Some ty; param_lin = Unrestricted }
+let param ?(lin = Unrestricted) name ty = FPNamed { param_name = n name; param_ty = Some ty; param_lin = lin }
 
-(** A public single-clause function with typed parameters and a return type. *)
-let fn name params ret body : decl =
+(** A public single-clause function with typed parameters and a return type.
+    [linear] names the parameters declared `linear` (used exactly once). *)
+let fn ?(linear = []) name params ret body : decl =
   DFn
     ( { fn_name = n name; fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = Some ret;
         fn_bounds = [];
         fn_clauses =
-          [ { fc_params = List.map (fun (p, t) -> param p t) params; fc_guard = None; fc_body = body;
-              fc_span = sp; fc_params_span = sp } ] },
+          [ { fc_params =
+                List.map (fun (p, t) -> param ~lin:(if List.mem p linear then Linear else Unrestricted) p t) params;
+              fc_guard = None; fc_body = body; fc_span = sp; fc_params_span = sp } ] },
       sp )
 
 let variant name args : variant = { var_name = n name; var_args = args; var_vis = Public }
@@ -400,6 +402,21 @@ let msg_module (errors : Err.ctx) ~proto ~span (ctors : (string * ty) list) (rol
            ( pcon "Err" [ pvar "e" ],
              app "panic" [ string_concat (lit_str (proto ^ ": message is not JSON: ")) (var "e") ] ) ])
   in
+  (* `try_decode`: what the generated receive handlers use, so an
+     undecodable message is the transport's to report (`Session.fail`) rather
+     than a panic in whatever turn the delivery runs in.  `decode` stays for
+     callers that want the panic. *)
+  let try_decode =
+    fn "try_decode" [ ("b", t_bytes) ] (tycon "Result" [ tycon "Msg" []; t_string ])
+      (match_ (app "Json.parse" [ app "Bytes.to_string" [ var "b" ] ])
+         [ ( pcon "Ok" [ pvar "jv" ],
+             block
+               [ let_ ~ty:(tycon "Result" [ tycon "Msg" []; t_string ]) "r" (app "from_json" [ var "jv" ]);
+                 match_ (var "r")
+                   [ (pcon "Ok" [ pvar "m" ], con "Ok" [ var "m" ]);
+                     (pcon "Err" [ pvar "e" ], con "Err" [ string_concat (lit_str "undecodable message: ") (var "e") ]) ] ] );
+           (pcon "Err" [ pvar "e" ], con "Err" [ string_concat (lit_str "message is not JSON: ") (var "e") ]) ])
+  in
   (* 1-based, in order of first appearance; see [roles_of]. *)
   let role_fns = List.mapi (fun i r -> fn ("role_" ^ r) [] t_int (lit_int (i + 1))) roles in
   let index_of r = 1 + Option.get (List.find_index (fun x -> x = r) roles) in
@@ -414,7 +431,7 @@ let msg_module (errors : Err.ctx) ~proto ~span (ctors : (string * ty) list) (rol
          (fun r acc -> con "Cons" [ ETuple ([ lit_str r; lit_int (index_of r) ], sp); acc ])
          roles (con "Nil" []))
   in
-  DMod (n mname, Public, (msg_decl :: json_fns) @ [ encode; decode ] @ role_fns @ peer_fns @ [ role_names ], sp)
+  DMod (n mname, Public, (msg_decl :: json_fns) @ [ encode; decode; try_decode ] @ role_fns @ peer_fns @ [ role_names ], sp)
 
 (** `<P>_<Role>`: one [always_linear] type per state and one function per
     transition, plus the unforgeable [Yield].  Also returns the name of the
@@ -449,6 +466,12 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
      listed arms already cover every constructor of `<P>_Msg`: it would be
      unreachable, and a warning the user can neither see nor fix. *)
   let unexpected_arm covered body = if covered >= nctors then [] else [ (PatWild sp, body) ] in
+  (* A delivery the continuation cannot take -- undecodable, or a message
+     this state does not receive -- is handed to the transport
+     (`Session.fail`), which decides: the same-thread transports panic as the
+     handler itself used to, `SessionNode` ends the session and reports
+     `Protocol`.  The handler then returns its endpoint, as any handler does. *)
+  let fail_with why = block [ let_wild (app "Session.fail" [ var "s"; var "ep1"; why ]); var "ep1" ] in
   (* `from` is the role this state receives from, which the projection carries
      (LRecv/LOffer).  A transport with several peers parks a delivery from
      anyone else until the continuation that wants it is installed; a
@@ -458,14 +481,18 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
     app "Session.suspend"
       [ var "s"; ep; role_idx from;
         lam [ "_from"; "msg"; "ep1" ]
-          (match_ (app (msg ^ ".decode") [ var "msg" ])
-             (List.map
-                (fun (ctor, cb, next_nm) ->
-                   ( pcon (msg ^ "." ^ ctor) [ pvar "v" ],
-                     block [ let_wild (app cb [ var "v"; con next_nm [ var "ep1" ] ]); var "ep1" ] ))
-                arms
-              @ unexpected_arm (List.length arms)
-                  (panic (Printf.sprintf "%s, role %s: unexpected message" proto role)))) ]
+          (match_ (app (msg ^ ".try_decode") [ var "msg" ])
+             [ ( pcon "Ok" [ pvar "m" ],
+                 match_ (var "m")
+                   (List.map
+                      (fun (ctor, cb, next_nm) ->
+                         ( pcon (msg ^ "." ^ ctor) [ pvar "v" ],
+                           block [ let_wild (app cb [ var "v"; con next_nm [ var "ep1" ] ]); var "ep1" ] ))
+                      arms
+                    @ unexpected_arm (List.length arms)
+                        (fail_with (lit_str (Printf.sprintf "%s, role %s: unexpected message" proto role)))) );
+               ( pcon "Err" [ pvar "e" ],
+                 fail_with (string_concat (lit_str (Printf.sprintf "%s, role %s: " proto role)) (var "e")) ) ]) ]
   in
   let transitions =
     List.concat_map
@@ -647,6 +674,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
 (** `<P>_Run`: the role runner's typed front.  Per role,
 
       run_<Role>(io, node_id, secret, addrs, body) : Result((), SessionNode.RunError)
+      host_<Role>(io, node_id, secret, addrs, host, start, deliver) : the same, hosted in actor [host]
 
     where [body] takes the session capability and the role's ENTRY state (so
     a body written for another role, or for another point of this one, is a
@@ -660,7 +688,7 @@ let run_module ~proto ~(roles : (string * string) list) : decl =
   let msg = proto ^ "_Msg" in
   let t_unit = TyTuple [] in
   let unit = ETuple ([], sp) in
-  let t_addrs = tycon "SessionNode.Addrs" [] in
+  let t_addrs = tycon "List" [ tycon "SessionNode.Addr" [] ] in
   let runners =
     List.map
       (fun (role, entry) ->
@@ -677,6 +705,30 @@ let run_module ~proto ~(roles : (string * string) list) : decl =
                   (block [ let_wild (app "body" [ var "s"; app (rm ^ ".register") [ var "s"; lit_int 0 ] ]); unit ]) ]))
       roles
   in
+  (* `host_<Role>(io, node_id, secret, addrs, host, start, deliver)`: the
+     same party, the role hosted in the actor [host] through the event API.
+     Nothing here is typed by the protocol beyond the role and its peers --
+     the actor registers and parks itself (`take_idle`, `register`,
+     `await_*`) and its resume handler takes `(s, from, msg, ep)` as
+     `deliver` hands them on -- so the front adds only the role and peer set.
+     [host] is the actor's pid; `Pid(a)`'s parameter is phantom to the
+     linearity checker (typecheck.ml, [consumed_var_ids]), which is what lets
+     an actor whose state holds the linear `Parked_<Role>` be passed here. *)
+  let hosters =
+    List.map
+      (fun (role, _entry) ->
+         let t_start = TyArrow (t_cap_session, t_unit) in
+         let t_deliver = TyArrow (t_cap_session, TyArrow (t_int, TyArrow (t_bytes, TyArrow (t_int, t_unit)))) in
+         fn ("host_" ^ role)
+           [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node_id", t_string); ("secret", t_string);
+             ("addrs", t_addrs); ("host", tycon "Pid" [ TyVar (n "a") ]); ("start", t_start); ("deliver", t_deliver) ]
+           (tycon "Result" [ t_unit; tycon "SessionNode.RunError" [] ])
+           (app "SessionNode.run_hosted"
+              [ var "io"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) []; var "node_id";
+                var "secret"; var "addrs"; lam [ "_ep" ] unit; app "pid_to_int" [ var "host" ]; var "start";
+                var "deliver" ]))
+      roles
+  in
   let addrs =
     fn "addrs_from_env" [] t_addrs (app "SessionNode.addrs_from_env" [ lit_str proto; app (msg ^ ".role_names") [] ])
   in
@@ -689,7 +741,7 @@ let run_module ~proto ~(roles : (string * string) list) : decl =
             [ "Session"; "Live" ] ],
         sp )
   in
-  DMod (n mname, Public, needs :: addrs :: runners, sp)
+  DMod (n mname, Public, (needs :: addrs :: runners) @ hosters, sp)
 
 (** Whether [expand] emits `<P>_Run`.  On for every real compile.  A test that
     typechecks generated code against a thin stdlib without `SessionNode`

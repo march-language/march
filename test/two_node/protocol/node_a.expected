@@ -1,0 +1,3 @@
+node-a: up
+A: sends 1
+A: protocol error from role 2: Bad, role A: message is not JSON: expected 'true' but found 'h'

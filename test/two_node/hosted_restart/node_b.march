@@ -1,0 +1,87 @@
+-- Two-node harness scenario "hosted_restart": Cons is hosted in an actor
+-- UNDER A SUPERVISOR on node-b, and crashes after it has answered Item(1)
+-- with `more`. The supervisor restarts it `Idle`: the parked session state
+-- died with the host, so the session cannot continue. The party monitors
+-- the host, so its Down ends the session at once -- and it has to be the
+-- monitor: Cons dies here BEFORE re-parking, so no handler is installed,
+-- the next delivery is held, and a check at delivery time would never run.
+-- `host_Cons` abandons the session -- no Bye, readers ended -- and returns
+-- `Err(HostGone(2))`, and node-a sees the connection drop: `PeerGone(2)`.
+-- The in-process twin is test/session/stream_actor_events_supervised.
+-- Design: specs/progress/2026-09-17-actor-hosted-runner.md.
+mod HostedRestartNodeB do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs Session.Live
+
+  @[endpoints]
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+
+  actor ConsActor do
+    state { budget : Int, parked : Stream_Cons.Parked_Cons }
+    init  { budget: 2, parked: Stream_Cons.idle() }
+    on StartC(s : Cap(Session.Live)) do
+      Stream_Cons.take_idle(state.parked)
+      { state with parked: Stream_Cons.await_Msg_Prod_Cons_1(s, Stream_Cons.register(s, 0)) }
+    end
+    on DeliverC(s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
+      match Stream_Cons.resume(state.parked, from, msg, ep) do
+        Got_Msg_Prod_Cons_1(n, st) ->
+          println("Cons got Item(" ++ int_to_string(n) ++ ")")
+          let st2 = Stream_Cons.choose_more(s, st, true)
+          -- `more` has gone out; now the host dies, and its parked state
+          -- with it. The supervisor's replacement starts Idle.
+          panic("cons: simulated crash after answering Item(" ++ int_to_string(n) ++ ")")
+          { state with budget: state.budget - 1,
+                       parked: Stream_Cons.await_Msg_Prod_Cons_1(s, st2) }
+      end
+    end
+  end
+
+  actor ConsSup do
+    state { cons : Int }
+    init  { cons: 0 }
+    supervise do
+      strategy one_for_one
+      max_restarts 5 within 60
+      ConsActor cons
+    end
+  end
+
+  pfn child(sup, field : String) do
+    match get_actor_field(sup, field) do
+      Some(n) -> pid_of_int(n)
+      None    -> panic("hosted_restart: no child " ++ field)
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    println("node-b: up")
+    let sup = spawn(ConsSup)
+    let pc = child(sup, "cons")
+    let start = fn s ->
+      let _ = send(pc, StartC(s))
+      ()
+    let deliver = fn (s, from, msg, ep) ->
+      let _ = send(pc, DeliverC(s, from, msg, ep))
+      ()
+    match Stream_Run.host_Cons(c, "node-b", "stream-secret", Stream_Run.addrs_from_env(), pc, start, deliver) do
+      Ok(_) -> println("Cons: closed")
+      Err(SessionNode.HostGone(ep)) -> println("Cons: host of endpoint " ++ int_to_string(ep) ++ " gone; session abandoned")
+      Err(e) -> panic(SessionNode.run_error_message(e))
+    end
+  end
+end

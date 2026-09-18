@@ -505,10 +505,16 @@ fn main(c : Cap(IO)) do
   match Relay_Run.run_Server(c, "node-b", secret, Relay_Run.addrs_from_env(), fn (s, st) -> server(s, st)) do
     Ok(_) -> ()
     Err(SessionNode.PeerGone(role, _)) -> ...    -- a peer died mid-session; the session is over for everyone
+    Err(SessionNode.Protocol(role, why)) -> ...  -- a peer sent what the protocol cannot receive
     Err(e) -> panic(SessionNode.run_error_message(e))
   end
 end
 ```
+
+A message the generated code cannot decode, or one the current state does not receive, is
+not a panic: the handler hands it to the transport (`Session.fail`), `SessionNode` ends the
+session without a Bye, and `run` returns `Err(Protocol(role, why))` naming the sender. (A
+same-thread transport panics there, as the handler itself used to.)
 
 `Relay_Run.addrs_from_env()` reads `RELAY_<ROLE>_ADDR = host:port` for each role. Addresses
 are a runtime value, but their shape is compile-time knowledge: a role needs its own entry
@@ -517,6 +523,28 @@ role at startup, before any socket opens. A session is not resumable: when a pee
 every survivor's `run` returns `Err(PeerGone(role, _))` after tearing its party down (its
 other readers are woken with `tcp_shutdown`, so nothing stays parked), and what to do next
 — `run` again, which is a fresh session — is the caller's decision.
+
+**A role hosted in an actor.** The same party can drive the event API instead of a body —
+the session state in an actor's own state (`Parked_<Role>`), every step in a handler with
+`state` in scope — through `<P>_Run.host_<Role>(io, node_id, secret, addrs, host, start,
+deliver)`: `start` gets the session capability once the party is connected (send it to the
+actor, whose start handler registers and parks), and `deliver` gets every delivery the
+parked endpoint awaits, `(s, from, msg, ep)`, which is what its resume handler takes:
+
+```march
+let pc = spawn(ConsActor)
+Stream_Run.host_Cons(c, "node-b", secret, Stream_Run.addrs_from_env(), pc,
+  fn s -> send(pc, StartC(s)),
+  fn (s, from, msg, ep) -> send(pc, DeliverC(s, from, msg, ep)))
+```
+
+Deliveries are one per suspension, in mailbox order; one that arrives before the actor has
+re-parked is held for it. The host is monitored: its `Down` — a crash, a kill, a supervisor's
+restart — ends the session with `Err(HostGone(ep))` and no Bye, so the peers see the
+connection drop and get `PeerGone`. A restarted actor starts `Idle` and cannot continue a
+session its predecessor parked; run again for a new one. (That is the event API's trade,
+the same as in-process: the step can read the actor's state because the session state *is*
+actor state, and actor state does not survive a restart.)
 
 ## Putting It Together
 

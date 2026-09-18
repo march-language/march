@@ -270,7 +270,7 @@ let rec session_ty_equal s1 s2 =
   | SError, SError -> true
   | SSend (_, s1'), SSend (_, s2') -> session_ty_equal s1' s2'
   | SRecv (_, s1'), SRecv (_, s2') -> session_ty_equal s1' s2'
-  | SChoose bs1, SChoose bs2 | SOffer bs1, SOffer bs2 ->
+  | SChoose bs1, SChoose bs2 | SOffer bs1, SOffer bs2 | SOfferPending bs1, SOfferPending bs2 ->
     List.length bs1 = List.length bs2 &&
     List.for_all2 (fun (l1, s1') (l2, s2') ->
         l1 = l2 && session_ty_equal s1' s2') bs1 bs2
@@ -291,7 +291,7 @@ let rec session_ty_exact_equal s1 s2 =
     pp_ty t1 = pp_ty t2 && session_ty_exact_equal s1' s2'
   | SRecv (t1, s1'), SRecv (t2, s2') ->
     pp_ty t1 = pp_ty t2 && session_ty_exact_equal s1' s2'
-  | SChoose bs1, SChoose bs2 | SOffer bs1, SOffer bs2 ->
+  | SChoose bs1, SChoose bs2 | SOffer bs1, SOffer bs2 | SOfferPending bs1, SOfferPending bs2 ->
     List.length bs1 = List.length bs2 &&
     List.for_all2 (fun (l1, s1') (l2, s2') ->
         l1 = l2 && session_ty_exact_equal s1' s2') bs1 bs2
@@ -489,22 +489,13 @@ let rec unify env ~span ?(reason = None) t1 t2 =
 
   (* Session-typed channels unify by checking their current session states match. *)
   | TChan r1, TChan r2 ->
-    (* LAUNDERING GUARD (F5 residual, 2026-07-27).  The [Chan.*] operation arms
-       reject an unrefined `offer` continuation by PHYSICAL identity against
-       [env.offer_unrefined] — but unification does not alias refs, it only
-       compares states.  So any construct that mints a fresh [TChan] ref and
-       unifies it with the marked one (a `Chan(R, P)` type annotation, an
-       `if`/`match` join with another channel, a record field, an annotated
-       function parameter at a CALL SITE) would hand back a different, unmarked
-       ref carrying the same state — and the physical-identity guard would never
-       fire again.  Every such route goes through THIS arm, so reject here: an
-       unrefined offer continuation may not be unified with any other channel
-       type at all, only refined by a `match` on its paired label.  (Reporting
-       rather than propagating the mark is deliberate — propagation cannot help
-       across a function boundary, where the callee's body was already checked
-       against its own ref.) *)
-    if (not (r1 == r2))
-       && (offer_ref_unrefined env r1 || offer_ref_unrefined env r2) then
+    (* An unrefined `offer` continuation is a session STATE now
+       ([SOfferPending]), so it would survive being unified into a fresh ref
+       by itself; the guard stays because the diagnostic is the useful one:
+       a `Chan(R, P)` annotation, an `if`/`match` join or a call-site parameter
+       that meets it is told to match on the label, not that two session
+       types mismatch.  (F5 residual, 2026-07-27; state form 2026-09-17.) *)
+    if (not (r1 == r2)) && (session_pending !r1 || session_pending !r2) then
       Err.error env.errors ~span (offer_unrefined_message "This channel")
     else if not (session_ty_equal !r1 !r2) then
       Err.error env.errors ~span

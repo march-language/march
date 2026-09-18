@@ -36,6 +36,17 @@ items 1–3 below, with designs),
 the torn-stdout race that quarantines `node_discovery`). Item 5 (epoch proc
 reclamation) is single-node and stays here.
 
+## Status 2026-09-17
+
+Validated against what shipped: **only item 5 is still open.** Items 1–3 landed with the
+distributed plane -- 1 as `NodeQueue`'s credit-based flow control
+([[2026-09-15-credit-based-flow-control]]), 2 as the control/data connection split
+(`ClusterConn.connect_split` / `accept_split`,
+[[2026-09-14-distributed-plane-flow-control-and-control-channel]]), 3 as
+[[2026-09-15-monitor-fire-at-least-once]]; item 4 shipped 2026-09-14 and item 6 was
+resolved the same day (both already noted inline). Item 5, epoch-based proc reclamation,
+is single-node and has no design yet; this file is now that one item.
+
 ## Items
 
 1. **Per-peer flow control.** Cross-node sends currently have no
