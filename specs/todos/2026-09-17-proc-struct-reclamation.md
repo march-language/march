@@ -5,12 +5,17 @@ Filed 2026-09-17 as the design for item 5 of
 replacing leak-don't-free"), the last open item in that file. Written survey-first, as the
 parent asked.
 
+**Phase 1 shipped 2026-09-17** ([[2026-09-17-proc-ctx-released-at-death]]): the
+execution context is freed at proc death. What remains below is Phase 2 and the decision
+in front of it, with the measurements now taken.
+
 **The survey changed the item.** Three findings, each of which moves the design:
 
-1. **Procs are not the only thing retained per actor.** `march_actor_meta` and the
-   `pid_index` side-table entry are leak-don't-free too, for the *same* reason and with
-   the same comment. Reclaiming procs alone does not give a churning node its memory back;
-   it removes one of three terms.
+1. **Procs are not the only thing retained per actor.** `march_actor_meta` is
+   leak-don't-free too, for the *same* reason and with the same comment. (The `pid_index`
+   table is chained *through* the meta — its `pididx_next` field — so it is not a third
+   allocation, as the first draft of this file assumed.) Reclaiming procs alone does not
+   give a churning node its memory back; it removes one of two terms.
 2. **The hot readers rule out a lock.** `march_send` and `march_actor_call` — the two
    hottest paths in the actor runtime — read `meta->green_thread` to find the proc. Any
    design that makes proc lookup take a mutex puts a global lock on every actor send.
@@ -28,15 +33,23 @@ point where the next decision is measurable.
 macOS/arm64, today:
 
 ```
-sizeof(march_proc)  = 1136 B     of which ucontext_t = 880 B (77%)     residue = 256 B
-registry slot       =    8 B
-sizeof(march_actor_meta)  = NOT MEASURED — ~53 fields; it is file-static in
-                            march_runtime.c, so the measurement wants a temporary
-                            printf or a dwarfdump of a built object
+sizeof(march_proc)        = 1136 B   of which ucontext_t = 880 B (77%)   residue = 256 B
+sizeof(march_actor_meta)  =  272 B   (the pid_index chain lives inside it)
+registry slot             =    8 B
 sizeof(ucontext_t) on ubuntu-24.04 / alpine-aarch64 = NOT MEASURED (Docker was down)
 ```
 
-Take the two missing numbers first; they decide how much of this file is worth doing.
+Retained per dead proc, before and after Phase 1:
+
+| | before | after Phase 1 |
+|---|---|---|
+| task / main proc | 1136 B | **256 B** (4.4×) |
+| actor (proc + meta) | 1408 B | **528 B** (2.7×) |
+
+After Phase 1 the two remaining terms are about equal (256 B proc residue, 272 B meta),
+so neither alone is worth a reclamation scheme. The meta size was read from a compile-time
+diagnostic (`char (*)[sizeof(march_actor_meta)] = 1` against `march_runtime.c`), which
+needs no link and no build-tree change.
 glibc's `ucontext_t` embeds an extended FP-state reservation on aarch64, so the ctx share
 on the Linux legs is expected to be *higher* than 77%, which would make Phase 1 alone
 close to sufficient for procs.
@@ -83,7 +96,17 @@ is currently maintained for the `MARCH_DEBUG` signal-context walker alone; and t
 "never unlinked or freed" discipline governs `g_actor_tbl` and the `pid_index` table, so
 finding 1 above is not an inference — it is those files' own comments.
 
-## Phase 1: move the `ucontext_t` out of the struct (independent, no discipline change)
+## Phase 1: move the `ucontext_t` out of the struct — SHIPPED 2026-09-17
+
+What landed differs from the text below in one respect: the context is a plain
+`calloc`/`free`, not a slab free-list. The stack free-list exists because mmap/munmap and
+VMA churn were the cost being avoided; an 880-byte malloc has no such cost next to the rest
+of a spawn (`getcontext`, `makecontext`, a stack re-arm), and *freeing* is what actually
+returns peak memory to the allocator, where a free-list would have kept holding it. It is
+freed in every build, ASAN included — there, a stale reader of a dead proc's context
+becomes a reported use-after-free.
+
+The design as written:
 
 77% of the proc struct is a `ucontext_t`, and it is meaningful only while the proc can be
 dispatched: `swapcontext` touches it when the proc suspends or resumes, both of which
@@ -153,14 +176,11 @@ the need:
 
 ## Order of work
 
-1. Measure: `sizeof(march_actor_meta)`; `sizeof(ucontext_t)` on ubuntu-24.04 and
-   alpine/aarch64. Record all three here. One command each.
-2. Phase 1 (`ctx` into a slab). Witness: a C unit test that spawns and reaps 100 000 procs
-   and asserts RSS growth under a bound — `march_stat_counters` already counts
-   `STACKS_RECYCLED`; add `CTX_RECYCLED` beside it. `scripts/actor-load.sh`'s four
-   scenarios unmoved.
-3. **Decide from that number whether to continue, and record the decision here either
-   way.** A closed item with a measurement is a better outcome than an epoch nobody needed.
+1. ~~Measure `sizeof(march_actor_meta)`~~ (272 B, above). Still open: `sizeof(ucontext_t)`
+   on ubuntu-24.04 and alpine/aarch64 — one command each, once Docker is up.
+2. ~~Phase 1~~ — **shipped 2026-09-17**: [[2026-09-17-proc-ctx-released-at-death]].
+3. **Decide whether to continue, and record the decision here either way.** A closed item
+   with a measurement is a better outcome than an epoch nobody needed.
 4. If continuing: cost question 2 above (mailbox reachable without the proc). It is a
    read of `march_send` / `march_actor_call` / `march_sched_send`, not a change.
 5. Only then the epoch scheme, and only for whichever holders question 4 leaves hot.

@@ -279,7 +279,17 @@ typedef struct march_proc {
      * still make run_until_idle() block for the full 5000ms. calloc
      * zero-inits this to 0, matching "never parked yet." */
     _Atomic int64_t             park_gen;
-    ucontext_t                 ctx;          /* Saved execution context (makecontext/swap) */
+    ucontext_t                *ctx;          /* Saved execution context (makecontext/swap).
+                                              * Its own allocation, not embedded: it is 880 of
+                                              * this struct's 1136 bytes (macOS/arm64), it is
+                                              * meaningful only while the proc can be
+                                              * dispatched, and the struct itself is never freed
+                                              * (see the PROC_DEAD reap branch).  Allocated in
+                                              * sched_spawn_common, freed and NULLed at the reap
+                                              * beside the stack retire, under the same argument:
+                                              * a DEAD proc is never dispatched again, and the
+                                              * stale cross-thread readers of a dead proc touch
+                                              * status/pid/mailbox, never this.  NULL = dead. */
     void                     (*fn)(void *);  /* Entry function */
     void                      *arg;          /* Argument passed to fn */
     struct march_proc         *next;         /* Intrusive link for the global run queue (mutex FIFO);
@@ -533,7 +543,7 @@ void         march_sched_set_msg_dtor(void (*fn)(void *));
  * mbox_lock. Returns 0 if p is NULL. */
 int64_t      march_sched_mbox_count(march_proc *p);
 
-/* ── Cross-file stat counters (indices 3-5 of march_sched_stat) ─────────
+/* ── Cross-file stat counters (indices 3-5 and 7 of march_sched_stat) ───
  * Reserved slots bumped from outside march_scheduler.c (march_runtime.c and
  * later scheduler features) — exposed as a raw array so new counters don't
  * need new symbols, just a new reserved index. */
@@ -541,6 +551,9 @@ extern _Atomic int64_t march_stat_counters[8];
 #define MARCH_STAT_STACK_FAIL       3
 #define MARCH_STAT_MSGS_DROPPED     4
 #define MARCH_STAT_STACKS_RECYCLED  5
+/* Index 6 of march_sched_stat is pending timers, read from the timer heap,
+ * not from this array. */
+#define MARCH_STAT_CTX_RELEASED     7   /* execution contexts freed at proc death */
 
 /* Observability: a single raw stat read by index. See the index contract in
  * march_stat_counters' comment above and stdlib/scheduler.march's `stat`
