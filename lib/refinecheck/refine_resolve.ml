@@ -131,8 +131,7 @@ let modpath_prefixes (mp : string) : string list =
      None            -> unresolved / external (skip)
    Only Some (Some sig) leads to a check, so a wrong resolution can at worst
    *skip* — it can never check against the wrong predicate. *)
-let resolve_call (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (fname : string)
-  : fn_sig option option =
+let resolve_call_gen (ctx : rctx) (defs : (string, 'a) Hashtbl.t) (fname : string) : 'a option =
   let lookup k = Hashtbl.find_opt defs k in
   let qualify p n = if p = "" then n else p ^ "." ^ n in
   (* 0. A name an enclosing binder introduced is a LOCAL, not this module's
@@ -187,6 +186,12 @@ let resolve_call (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (fname 
       | None -> None
     in
     aliased
+
+(* The same resolution rule over any table keyed like [defs]:
+   [Refine_param.resolve_key] asks it WHICH definition a call reaches. *)
+let resolve_call (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (fname : string)
+  : fn_sig option option =
+  resolve_call_gen ctx defs fname
 
 (* [resolve_call], then the DEFAULT-ARGUMENT arity variant.  A function with
    a defaulted parameter, `fn f(a : Int, b : {Int | b > 0} \\ 1)`, does not
