@@ -1,7 +1,7 @@
 # Mono refuses a call whose caller and callee disagree about the representation
 
 Landed 2026-09-17. Step 2 of
-`specs/todos/2026-08-01-lazy-stdlib-loading-boxed-vs-niche-representation-mismatch.md`,
+`specs/progress/2026-09-18-lazy-stdlib-niche-miscompile-closed.md`,
 which had been **deferred on 2026-08-09 with a stated architectural blocker**.
 The blocker is refuted; see below.
 

@@ -1836,6 +1836,33 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/if_branch_dead_value_probe.expected native_if_branch_dead_value_probe.out)))
 
+; ── Regression: Perceus released a parent before the borrowed child it still had
+; to dup. A sorted insert into a list of pairs marked the tuple's fields borrowed
+; on a liveness that was only conservative, so the else arm freed the list cell
+; ahead of dup'ing a string borrowed from inside it -- a use-after-free, compiled
+; only and non-deterministic (crash or wrong value). Red before the fix: 0/10
+; runs match, and the runtime aborts with "RC underflow (rc was 0)".
+; specs/2026-09-18-perceus-releases-a-parent-before-its-borrowed-child.md
+(rule
+ (targets native_perceus_borrowed_child_release
+          native_perceus_borrowed_child_release.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/perceus_borrowed_child_release.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile
+        -o native_perceus_borrowed_child_release
+        native/perceus_borrowed_child_release.march)
+   (with-stdout-to native_perceus_borrowed_child_release.out
+        (system "./native_perceus_borrowed_child_release")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/perceus_borrowed_child_release.expected
+               native_perceus_borrowed_child_release.out)))
+
 ; ── Leak guard: the two Float boxes that cross the March/C boundary at a
 ; `fold_float` call -- the initial accumulator box the call site allocates and
 ; the box the helper returns -- are released. NOT the per-element boxing, which

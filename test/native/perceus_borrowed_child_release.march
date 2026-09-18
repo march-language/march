@@ -1,0 +1,103 @@
+-- Regression: Perceus released a parent before the borrowed child it still had
+-- to dup (specs/2026-09-18-perceus-releases-a-parent-before-its-borrowed-child.md).
+--
+-- The shape is a sorted insert into a list of pairs:
+--
+--   match lst do
+--   Cons((hd, nd), rest) ->
+--     if h < hd do Cons((h, node), lst)                 -- returns lst intact
+--     else Cons((hd, nd), insert(rest, h, node))        -- consumes hd
+--
+-- The tuple's fields were marked BORROWED because the tuple looked live across
+-- its match -- but it was live only conservatively, because the enclosing Cons
+-- arm mentions `lst`. So `hd` got no reference of its own, the else arm released
+-- `lst` at its head, the deep drop freed the string, and the `(hd, nd)` that
+-- followed dup'd freed memory. Compiled only; non-deterministic (a crash on one
+-- run, a WRONG VALUE on another); interpreted was always right.
+--
+-- It surfaced when `efb15d8b1` correctly stopped classifying `<` as owned: the
+-- owned `<` had inc'd `hd` on the way in and never released it, and that
+-- leaked reference was what kept the string alive.
+--
+-- Legs:
+--   size      Int payloads -- the SIGBUS mode.
+--   value     String payloads, asserting the VALUE -- the wrong-value mode a
+--             crash-only test would miss.
+--   control   keys inserted descending, so every insert takes the TRUE arm and
+--             returns `lst` intact: nothing borrowed out of it may be released.
+--   stress    400 inserts through both arms, then every element read back.
+mod Main do
+  needs IO.Console
+
+  pfn insert(lst : List((String, a)), h : String, node : a) : List((String, a)) do
+    match lst do
+    Nil -> Cons((h, node), Nil)
+    Cons((hd, nd), rest) ->
+      if h < hd do Cons((h, node), lst)
+      else Cons((hd, nd), insert(rest, h, node))
+      end
+    end
+  end
+
+  pfn key(i : Int) : String do
+    "k" ++ int_to_string(1000 + i)
+  end
+
+  -- Insert `n` keys in the order `order(i)` produces.
+  pfn fill(lst : List((String, Int)), i : Int, n : Int, stride : Int) : List((String, Int)) do
+    if i >= n do lst
+    else fill(insert(lst, key((i * stride) % n), i), i + 1, n, stride)
+    end
+  end
+
+  pfn first_payload(lst : List((String, String))) : String do
+    match lst do
+    Nil -> "empty"
+    Cons((_, p), _) -> p
+    end
+  end
+
+  pfn sum_payloads(lst : List((String, Int)), acc : Int) : Int do
+    match lst do
+    Nil -> acc
+    Cons((_, p), rest) -> sum_payloads(rest, acc + p)
+    end
+  end
+
+  pfn is_sorted(lst : List((String, Int))) : Bool do
+    match lst do
+    Nil -> true
+    Cons((a, _), rest) ->
+      match rest do
+      Nil -> true
+      Cons((b, _), _) -> if a < b do is_sorted(rest) else false end
+      end
+    end
+  end
+
+  pfn build_desc(lst : List((String, Int)), i : Int) : List((String, Int)) do
+    if i <= 0 do lst else build_desc(insert(lst, key(i), i), i - 1) end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    -- size: two rounds of inserts with Int payloads
+    let a = insert(insert(insert(Nil, key(3), 30), key(1), 10), key(2), 20)
+    let b = insert(insert(a, key(6), 60), key(4), 40)
+    println("size = " ++ int_to_string(List.length(b)))
+
+    -- value: String payloads; the head after sorting must be the smallest key's
+    let s = insert(insert(insert(Nil, key(9), "nine"), key(2), "two"), key(5), "five")
+    println("value = " ++ first_payload(s))
+
+    -- control: descending keys, every insert takes the TRUE arm
+    let c = build_desc(Nil, 50)
+    println("control sorted = " ++ bool_to_string(is_sorted(c))
+            ++ ", sum = " ++ int_to_string(sum_payloads(c, 0)))
+
+    -- stress: a stride that interleaves both arms
+    let d = fill(Nil, 0, 400, 7)
+    println("stress sorted = " ++ bool_to_string(is_sorted(d))
+            ++ ", len = " ++ int_to_string(List.length(d))
+            ++ ", sum = " ++ int_to_string(sum_payloads(d, 0)))
+  end
+end

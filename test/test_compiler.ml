@@ -14102,7 +14102,7 @@ let assert_stdlib_file_typechecks_cleanly name =
 
    Reads the directory at test time on purpose — a hardcoded count is the thing
    that goes stale.  See
-   specs/todos/2026-08-01-lazy-stdlib-loading-boxed-vs-niche-representation-mismatch.md *)
+   specs/progress/2026-09-18-lazy-stdlib-niche-miscompile-closed.md *)
 let stdlib_dir_for_test () =
   let candidates = [ "stdlib"; "../../../stdlib"; "../../stdlib" ] in
   (* A candidate must contain a real stdlib module, not just any directory

@@ -132,6 +132,11 @@ native_curated=(
   # still owned elsewhere is a use-after-free, and detect_leaks=0 means the
   # probe's own flat assertions are what cover the leak half.
   if_branch_dead_value_probe
+  # a sorted insert into a list of pairs: the else arm released the list cell
+  # ahead of dup'ing a string borrowed from inside it. ASAN is what named this
+  # use-after-free, so it is the gate the fix has to keep passing
+  # (specs/2026-09-18-perceus-releases-a-parent-before-its-borrowed-child.md).
+  perceus_borrowed_child_release
   # the Msgpack/actor/socket program whose guard-page crash is why the
   # closure deep-drop gate exists at all
   node_discovery

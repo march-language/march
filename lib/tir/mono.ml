@@ -24,7 +24,7 @@
    representation differs from the generic CALLEE's.
 
    That difference is the lazy-stdlib miscompile
-   (specs/todos/2026-08-01-lazy-stdlib-loading-boxed-vs-niche-representation-mismatch.md):
+   (specs/progress/2026-09-18-lazy-stdlib-niche-miscompile-closed.md):
    a module outside the eager manifest is loaded for export shapes only, so
    mono reaches its call site with the callee's return still an unresolved
    tvar, cannot specialize, and emits the generic Boxed body -- while the
