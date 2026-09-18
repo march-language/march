@@ -176,6 +176,7 @@ type env = {
   no_panic_modules : string list;
   nonexhaustive_match_spans :
     Typecheck_types.Ast.span list ref;
+  trusted_linear_body : bool;
   linear_ok_ids : (int, unit) Hashtbl.t;
   linear_generic_uses :
     (Typecheck_types.Ast.span,

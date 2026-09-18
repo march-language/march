@@ -1,0 +1,11 @@
+-- EXPECT-ERROR: I don't know a constructor called `LinearMapRep`
+mod Main do
+  needs IO.Console
+  -- LinearMap is `always_linear opaque type`: its constructors are private to
+  -- the stdlib module, so user code can neither forge a map (with a count that
+  -- lies) nor open one and reach the trie underneath.
+  fn main(c : Cap(IO.Console)) do
+    let m : LinearMap(Int, Int) = LinearMapRep(0, Map.int_cmp, Map.empty())
+    println(int_to_string(LinearMap.drain(m, 0, fn (acc, k, v) -> acc + v)))
+  end
+end

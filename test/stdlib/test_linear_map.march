@@ -1,0 +1,153 @@
+mod TestLinearMap do
+
+  -- Runtime behaviour of LinearMap. The static rules (every map consumed, no
+  -- value dropped or copied, keys unrestricted) are pinned by the typing
+  -- corpus: specs/lang/types/accept/t244-t245, reject/t246-t252.
+
+  fn sum_drain(m) do
+    LinearMap.drain(m, 0, fn (acc, k, v) -> acc + v)
+  end
+
+  fn put_all(m, kvs) do
+    match kvs do
+    Nil -> m
+    Cons((k, v), rest) ->
+      let (_, m2) = LinearMap.put(m, k, v)
+      put_all(m2, rest)
+    end
+  end
+
+  fn range(i, n) do
+    fn go(j, acc) do
+      if j < i do acc else go(j - 1, Cons(j, acc)) end
+    end
+    go(n - 1, Nil)
+  end
+
+  describe "put and take" do
+
+    test "put into an empty map displaces nothing" do
+      let (old, m) = LinearMap.put(LinearMap.empty_int(), 1, 10)
+      assert (old == None)
+      assert (sum_drain(m) == 10)
+    end
+
+    test "put over a key returns the displaced value" do
+      let (_, m1) = LinearMap.put(LinearMap.empty_int(), 1, 10)
+      let (old, m2) = LinearMap.put(m1, 1, 20)
+      assert (old == Some(10))
+      let (n, m3) = LinearMap.size(m2)
+      assert (n == 1)
+      assert (sum_drain(m3) == 20)
+    end
+
+    test "take returns the value and removes the key" do
+      let (_, m1) = LinearMap.put(LinearMap.empty_int(), 7, 70)
+      let (got, m2) = LinearMap.take(m1, 7)
+      assert (got == Some(70))
+      let (again, m3) = LinearMap.take(m2, 7)
+      assert (again == None)
+      let (n, m4) = LinearMap.size(m3)
+      assert (n == 0)
+      assert (LinearMap.dispose(m4) == Ok(()))
+    end
+
+    test "take of an absent key leaves the map unchanged" do
+      let (_, m1) = LinearMap.put(LinearMap.empty_int(), 1, 5)
+      let (got, m2) = LinearMap.take(m1, 2)
+      assert (got == None)
+      let (n, m3) = LinearMap.size(m2)
+      assert (n == 1)
+      assert (sum_drain(m3) == 5)
+    end
+
+    test "String keys" do
+      let (_, m1) = LinearMap.put(LinearMap.empty_string(), "a", 1)
+      let (_, m2) = LinearMap.put(m1, "b", 2)
+      let (got, m3) = LinearMap.take(m2, "b")
+      assert (got == Some(2))
+      assert (sum_drain(m3) == 1)
+    end
+
+  end
+
+  describe "slots" do
+
+    test "take_slot then fill puts the value back" do
+      let (_, m1) = LinearMap.put(LinearMap.empty_int(), 3, 30)
+      let (got, slot) = LinearMap.take_slot(m1, 3)
+      assert (got == Some(30))
+      let m2 = LinearMap.fill(slot, 31)
+      let (n, m3) = LinearMap.size(m2)
+      assert (n == 1)
+      let (again, m4) = LinearMap.take(m3, 3)
+      assert (again == Some(31))
+      assert (LinearMap.dispose(m4) == Ok(()))
+    end
+
+    test "take_slot then vacate removes the key" do
+      let (_, m1) = LinearMap.put(LinearMap.empty_int(), 3, 30)
+      let (_, slot) = LinearMap.take_slot(m1, 3)
+      let m2 = LinearMap.vacate(slot)
+      let (n, m3) = LinearMap.size(m2)
+      assert (n == 0)
+      assert (LinearMap.dispose(m3) == Ok(()))
+    end
+
+    test "take_slot of an absent key, then fill, adds it" do
+      let (got, slot) = LinearMap.take_slot(LinearMap.empty_int(), 9)
+      assert (got == None)
+      let m = LinearMap.fill(slot, 90)
+      let (present, m2) = LinearMap.member(m, 9)
+      assert present
+      let (n, m3) = LinearMap.size(m2)
+      assert (n == 1)
+      assert (sum_drain(m3) == 90)
+    end
+
+  end
+
+  describe "reads and endings" do
+
+    test "size counts distinct keys over many puts" do
+      let ks = range(0, 200)
+      let m = put_all(LinearMap.empty_int(), List.map(ks, fn k -> (k, k * 2)))
+      let (n, m2) = LinearMap.size(m)
+      assert (n == 200)
+      let (keys, m3) = LinearMap.keys(m2)
+      assert (List.length(keys) == 200)
+      assert (sum_drain(m3) == 39800)
+    end
+
+    test "member" do
+      let (_, m1) = LinearMap.put(LinearMap.empty_int(), 4, 1)
+      let (yes, m2) = LinearMap.member(m1, 4)
+      let (no, m3) = LinearMap.member(m2, 5)
+      assert yes
+      assert (not(no))
+      assert (sum_drain(m3) == 1)
+    end
+
+    test "drain sees every key and value once" do
+      let m = put_all(LinearMap.empty_int(), [(1, 10), (2, 20), (3, 30)])
+      assert (LinearMap.drain(m, 0, fn (acc, k, v) -> acc + k * 100 + v) == 660)
+    end
+
+    test "to_list returns every pair" do
+      let m = put_all(LinearMap.empty_int(), [(1, 10), (2, 20)])
+      let pairs = LinearMap.to_list(m)
+      assert (List.length(pairs) == 2)
+      assert (List.fold_left(pairs, 0, fn (acc, kv) -> match kv do (k, v) -> acc + k + v end) == 33)
+    end
+
+    test "dispose of a non-empty map hands it back" do
+      let (_, m1) = LinearMap.put(LinearMap.empty_int(), 1, 10)
+      match LinearMap.dispose(m1) do
+      Ok(_) -> assert false
+      Err(m2) -> assert (sum_drain(m2) == 10)
+      end
+    end
+
+  end
+
+end

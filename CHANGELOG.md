@@ -26,8 +26,21 @@ git log is authoritative for exact commits.
   cancel handler that learns which role failed and why but holds no session state, so it
   cannot talk in the failed session. Also `leave_<state>` to leave a session on purpose,
   `cancel(parked)` for actor-hosted roles, and `<P>_Run.host_<Role>_or`.
+- **`LinearMap`, a keyed collection for linear values** (`stdlib/linear_map.march`). A
+  `Map` cannot hold a linear value; `LinearMap(k, v)` can, checked statically: every
+  operation consumes the map and hands it back, `put` returns the value it displaced,
+  `take`/`take_slot` are the only ways a value leaves, and the map (itself linear) ends in
+  `drain`, `to_list` or `dispose`. An actor hosting several sessions can keep one parked
+  session per id in its state. Also `always_linear opaque type`, a linear type with
+  private constructors.
 
 ### Fixed
+- Linearity: a `_` over a value that holds a linear value (`let (_, n) = (Some(token), 1)`)
+  silently dropped it; it is now rejected like a `_` over the linear value itself.
+- Linearity: taking apart a tuple or variant that holds a linear value no longer makes its
+  ordinary parts linear (`let (n, t) = (1, token)` leaves `n` an ordinary `Int`), and a
+  generic function that opted in with `linear x : a` is no longer refused when its body
+  passes `x` on to another generic function.
 - Writing to a socket whose peer had just gone could kill the process with SIGPIPE; the
   shared send path now suppresses the signal.
 - A dead green thread's execution context (880 of its bookkeeping struct's 1136 bytes on

@@ -368,6 +368,13 @@ type env = {
       is gated inside [check_no_panic_module], which only runs for
       `cap no_panic` modules, so a PLAIN module's non-exhaustive match stays a
       Warning and is never promoted to an error. *)
+  trusted_linear_body : bool;
+  (** True while checking the body of a [@[trusted_linear(v)]] stdlib function
+      (the [LinearMap] kernel).  Pattern bindings then take their linearity from
+      their own type only, never from a linear scrutinee: the kernel reads its
+      map's count, comparator and trie freely, and its moving each value exactly
+      once is reviewed, not checked.  Callers of the function are fully
+      checked. *)
   linear_ok_ids : (int, unit) Hashtbl.t;
   (** Type-variable ids a generic function has opted in to accepting a linear
       type for, by marking a parameter of that type [linear] or [affine]
@@ -650,6 +657,7 @@ let make_env errors type_map = {
   no_panic_mod = false;
   no_panic_modules = [];
   nonexhaustive_match_spans = ref [];
+  trusted_linear_body = false;
   linear_ok_ids = Hashtbl.create 16;
   linear_generic_uses = Hashtbl.create 256;
   cap_producer_ivars = Hashtbl.create 16;

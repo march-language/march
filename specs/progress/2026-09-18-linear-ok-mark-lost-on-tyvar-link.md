@@ -31,3 +31,18 @@ mark at generalisation by resolving the annotated parameter types through `repr`
 
 Accept: the two rejected rows above. Keep `reject/t229`-`t231` (unmarked functions)
 rejected.
+
+---
+
+## What shipped (2026-09-18)
+
+The var-to-var arm of `unify` (`typecheck_unify.ml`) moves a `linear_ok_ids` mark to
+the variable it links to, as it already did for `cap_producer_ivars`. Witness
+`accept/t255` (fails with the propagation disabled). `types-oracle` moved no
+pre-existing fixture. `@[trusted_linear]` marks the final representative directly,
+so it never relied on this.
+
+Following the mark exposed a related, older gap, filed as
+[[2026-09-18-linear-shared-opt-in-tyvar-unchecked-param]]: any parameter whose type
+is the opted-in variable can be passed a linear value, but only the one declared
+`linear` is checked in the body.

@@ -399,12 +399,17 @@ enforce the rule:
   a top-level function's (`reject/t198`–`t201`, `t208`–`t210`).
 - **`_` can't discard one.** `let _ = token`, `let (a, _) = pair_of_tokens`,
   a `_ ->` arm on a linear value, or `fn _ -> …` receiving one all drop a
-  value that must be consumed. Discarding a non-linear part (`Token(_)`) is
-  fine, and so is a `_` arm that ends in `panic(…)` (`reject/t203`–`t206`).
+  value that must be consumed, and so does a `_` over something that *holds*
+  one (`let (_, n) = (Some(token), 1)`). Discarding a non-linear part
+  (`Token(_)`) is fine, and so is a `_` arm that ends in `panic(…)`
+  (`reject/t203`–`t206`, `t253`).
 - **A container holding one is linear itself.** A tuple, list or ADT value
   with a linear value inside (`(token, 1)`, `Some(token)`, `[token]`) must be
   used exactly once, like the value it holds. Records are the exception: their
-  fields are tracked one by one, as above (`reject/t233`–`t234`).
+  fields are tracked one by one, as above (`reject/t233`–`t234`). Taking the
+  container apart consumes it, and each part is then judged by its own type:
+  in `let (n, t) = (1, token)`, `t` is linear and `n` is an ordinary `Int`
+  (`accept/t254`).
 - **Generic functions must opt in.** A type variable is unrestricted: a generic
   function may drop or duplicate a value of that type. So passing a linear
   value to one is an error unless the function marks that parameter
@@ -427,6 +432,56 @@ annotated form (`reject/t212`–`t214`).
 
 ---
 
+## Keyed Collections of Linear Values: `LinearMap`
+
+`Map` can't hold a linear value: `Map.get` copies the value out while the map
+keeps it, and `Map.insert` over an existing key drops the old one, so
+`Map.insert(m, k, token)` is rejected. The stdlib's `LinearMap(k, v)` is the
+map for values that must be used exactly once, such as the per-session state an
+actor hosting several sessions keeps (one `Parked_<Role>` per session id).
+
+- **Every operation consumes the map and hands it back.** `put(m, k, v)`
+  returns `(Option(v), LinearMap)`, where the option is the value it displaced
+  (the caller must consume it); `take(m, k)` is the only way a value comes out;
+  `size`, `member` and `keys` return their answer beside the map.
+- **`LinearMap` is `always_linear`.** Every binding must be consumed, even an
+  empty map's. It ends in `drain(m, acc, f)` (each value goes through `f`,
+  which must consume it), `to_list(m)`, or `dispose(m)`, which returns `Ok(())`
+  for an empty map and hands a non-empty one back in `Err`. Nothing is lost and
+  nothing panics.
+- **Slots for the take-and-put-back turn.** `take_slot(m, k)` returns the
+  value and a `LinearSlot`: the map with a hole at `k`. `fill(slot, v)` puts a
+  value back (it cannot displace one) and `vacate(slot)` leaves the key empty.
+- **Keys are ordinary values.** They are hashed, compared and copied, so a
+  linear key type is rejected. Equality comes from the comparator given to
+  `empty(cmp)` (`empty_int()` and `empty_string()` supply one), stored in the
+  map.
+
+In actor state the map is a linear field, so every handler that reads it must
+store one back:
+
+```march
+actor Host do
+  state { sessions : LinearMap(Int, Session) }
+  init  { sessions: LinearMap.empty_int() }
+  on Step(sid : Int) do
+    match LinearMap.take_slot(state.sessions, sid) do
+      (None, slot) -> { state with sessions: LinearMap.vacate(slot) }
+      (Some(s), slot) -> { state with sessions: LinearMap.fill(slot, advance(s)) }
+    end
+  end
+end
+```
+
+The checks are at every use site (`accept/t244`–`t245`, `reject/t246`–`t252`).
+The module's own function bodies are a small reviewed kernel over `Map`: they
+carry `@[trusted_linear(v)]`, which lets callers pass linear values for `v`
+without the body being checked to use each one once. That attribute is
+reserved for the standard library (`reject/t256`); user code opts a parameter
+in with `linear x : a`, whose body is checked.
+
+---
+
 ## Practical Rules
 
 1. **Use `linear` for resources with mandatory cleanup**: file handles, database connections, exclusive locks, capabilities you must return.
@@ -440,6 +495,8 @@ annotated form (`reject/t212`–`t214`).
 5. **Linear fields in records are owned by the record**: accessing one moves it out, using the record whole moves them all, `{ r with … }` keeps the ones it doesn't replace, and each must be consumed by the end of the record's scope.
 
 6. **Closures, wildcards and generic code don't get a pass**: a closure can't capture a linear value, `_` can't discard one, a tuple/list/ADT holding one is linear too, and a generic function receives one only through a parameter marked `linear`.
+
+7. **Keep many linear values in a `LinearMap`**, not a `Map`: take a value out, use it, put the next one back.
 
 ---
 

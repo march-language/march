@@ -610,3 +610,58 @@ Also, unchanged: `Map.insert` at a linear value stays rejected with today's mess
   a `LinearMap` be threaded through them.
 - **A `LinearMap` surviving actor restart.** It lives in actor state, so a restarted
   actor starts with an empty map, as `Parked` starts `Idle`.
+
+---
+
+## What shipped (2026-09-18)
+
+Built as designed, in one change with prerequisites 1–3. Prerequisite 4 (a state
+field holding a linear value inside another type) is still the concurrent session's;
+nothing here depends on it, since `sessions : LinearMap(…)` is an `always_linear`
+field.
+
+- **Grammar:** `always_linear opaque type` (variant form), mirroring `opaque type`.
+  Menhir conflicts unchanged at 11.
+- **`@[trusted_linear(v)]`** (`mark_trusted_linear_vars` and `check_fn`,
+  `lib/typecheck/typecheck.ml`): marks the signature's `v` at its final
+  representative just before `generalize`; the body runs with
+  `env.trusted_linear_body`, under which `bind_pattern_bindings` never inherits a
+  scrutinee's linearity. Errors: `v` not a type variable of the signature, `v` fixed
+  to a concrete type by the body, and use outside the stdlib. The stdlib gate is
+  enforced when the driver has registered the stdlib's files
+  (`stdlib_source_files`, set by `bin/main.ml`); harnesses that don't (LSP, unit
+  tests) are permissive rather than risk a false error inside the stdlib.
+- **`stdlib/linear_map.march`**, loaded eagerly (`stdlib_manifest.ml`, after
+  `map.march`; also in `test/test_stdlib_march.ml`'s list). The API is Decision 3's
+  with one rename: **`Slot` is `LinearSlot`**, because type names share one flat
+  namespace and a user `type Slot` is likely. Constructors are `LinearMapRep` and
+  `LinearSlotRep`, private. `put` is `Map.get` then `Map.insert` over the key: at
+  runtime the insert releases the trie's reference to the old value, so the caller
+  holds the only one, and no `Map.remove` is needed.
+
+Tests:
+
+- Corpus: `accept/t244` (threaded; prints 63 interpreted and compiled), `t245`
+  (actor sessions); `reject/t246`–`t252` (the witnesses above, R1–R7 in order),
+  `t256` (`@[trusted_linear]` in user code), `t257` (constructors private). The
+  prerequisites' witnesses are `reject/t253`, `accept/t254`, `accept/t255`.
+- `test/stdlib/test_linear_map.march` (13 cases, interpreter).
+- `test/native/linear_map.march` + `.expected`, a dune `runtest` golden: compiled
+  output equals interpreted, including an `Option(Int)`-valued map (the niche
+  `Option` risk) and an actor keeping two sessions.
+- Proved able to fail, each by removing one piece and rebuilding: wildcard check back
+  to `is_linear_ty` (t248, t253 fail); destructure rule off (t244, t254 fail); mark
+  propagation off (t255 fails); `@[trusted_linear]` marking off (t244, t245 fail);
+  gate off (t256 fails); marking every signature variable instead of `v` (t251
+  fails, the linear key is accepted); `LinearMap` constructors public (t257
+  fails).
+- `types-oracle`: with the new module held out of the manifest, both tiers moved on
+  the 15 new fixtures only. With it in, Tier 1 moves on every fixture, as expected
+  for a new eagerly loaded stdlib module (fresh type-variable numbering); Tier 2
+  still moves on new fixtures only.
+
+Found on the way and filed, not fixed:
+[[2026-09-18-linear-lambda-arg-checked-before-type-known]] (a lambda argument
+checked before its parameter's type is known can drop a linear value) and
+[[2026-09-18-linear-shared-opt-in-tyvar-unchecked-param]] (a parameter sharing an
+opted-in type variable is not checked).
