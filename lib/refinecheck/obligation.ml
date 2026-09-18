@@ -96,6 +96,16 @@ type reason =
      does not" are both load-bearing — the first tells the reader their guard
      worked and stops them rewriting it. *)
   | Partial_conjunct of { held : string list; missing : string list }
+  (* An element obligation on a polymorphic call's result (`sum_pos(List.map(ys,
+     f))`), discharged by checking every way a value of the demanded type
+     variable can ENTER the callee (2026-09-18 plan, Phase 3): at least one of
+     those sources was not proved to meet the demanded refinement.  Payload is
+     the user-facing account of which one, and, when a source was refuted
+     outright, what can go wrong there — rendered in the detail, not the slug,
+     like [Unconstrained_subject].  Never a violation: whether the failing
+     source ever runs depends on the caller's data (`List.map([], f)` is
+     fine). *)
+  | Parametric_source_unproved of string
 
 (* [Trusted]: the obligation was [Skipped] for some ordinary reason, but the
    enclosing function carries `@[trusted]`, so under `cap verified` it is
@@ -265,6 +275,7 @@ let reason_name = function
   | Nonlinear_goal -> "nonlinear-goal"
   | Opaque_application _ -> "opaque-application"
   | Partial_conjunct _ -> "partial-conjunct"
+  | Parametric_source_unproved _ -> "parametric-source-unproved"
 
 (* One clause of plain English per reason, for the `cap verified` error text.
    [reason_name] alone is a debug-report slug; once a reason reaches a USER it
@@ -300,6 +311,7 @@ let reason_detail = function
     Printf.sprintf "%s established here; %s not"
       (String.concat " and " (List.map (Printf.sprintf "`%s`") held))
       (String.concat " and " (List.map (Printf.sprintf "`%s`") missing))
+  | Parametric_source_unproved what -> what
 
 (* Deliberately still a 3-tuple: (proved, violated, skips-by-reason).  Every
    existing caller destructures it that way, and [Trusted] does not belong in

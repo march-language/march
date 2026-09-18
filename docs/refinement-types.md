@@ -1150,6 +1150,163 @@ still abstains on a `len > 1` requirement, which is the accurate answer.
 
 ---
 
+## Element Refinements: Refining What a Container Holds
+
+A refinement may sit inside a type argument, where it constrains every element
+the container holds:
+
+```march
+fn sum_pos(xs : List({Int | _ > 0})) : Int do
+  match xs do
+    Nil -> 0
+    Cons(h, t) -> need_pos(h) + sum_pos(t)   -- h is known > 0; t is still List({Int | _ > 0})
+  end
+end
+
+sum_pos([1, 2, 3])     -- proved
+sum_pos([1, -2, 3])    -- refinement violation, pointing at -2
+```
+
+This works for `List`, `Option`, `Result`, and every user variant type
+(`Tree({Int | _ > 0})`), and nests one level deeper (`List(List({Int | p}))`).
+
+**Where a container value owes the element obligation:** at a call argument, a
+function's return (every tail, with the facts of the block's `let`s in scope),
+an annotated `let`, and a record field. A literal is checked element by
+element. A value whose element refinement is known must *imply* the expected one
+(`List({Int | _ > 1})` passes where `List({Int | _ > 0})` is expected; the
+reverse is reported with a witness element). A value's element refinement is
+known when it is:
+
+- a parameter, or a proved annotated `let`;
+- a call to a function whose declared container return
+  (`: List({Int | _ > 0})`) was **proved** at its definition (every tail);
+- a call through a callback parameter typed `… -> List({Int | p})`, which every
+  caller was obliged to meet;
+- a call to a polymorphic function, as described next.
+
+Anything else is a recorded skip. Every element a `match` takes out of such a
+value carries the fact, whether the scrutinee is a variable or a call
+(`match List.head_opt(xs) do Some(h) -> …`).
+
+### Through a polymorphic call
+
+A function that is generic in its element type cannot invent an element, so its
+result keeps its argument's element refinement:
+
+```march
+fn t(xs : List({Int | _ > 0})) : Int do
+  sum_pos(List.drop(List.take(xs, 2), 1))   -- proved, by parametricity
+end
+```
+
+The checker reads where a value of the element type can **enter** the callee
+(its *sources*): an element of a container argument, the argument itself, or the
+result of a function argument. Here every source is an element of `xs`. When
+sources disagree, the result carries nothing:
+`List.append(pos, neg)` holds elements from both lists. A type variable that only
+appears in a function argument's *parameters* (`sort_by`'s `cmp : a -> a -> Bool`)
+is handed out, not received, so it is not a source.
+
+The rule reads the callee's declared signature, so the checker first confirms
+that the signature tells the truth about the callee:
+
+- **The type variable must really be generic.** A type variable in a March
+  signature is not rigid: `fn bad(xs : List(a)) : List(a) do [0 - 5] end`
+  typechecks, with `a` fixed to `Int` by the body. The checker reads the
+  *inferred* parameter types. A variable the body fixed, merged with
+  another, or let in through an unannotated parameter carries nothing.
+- **The body must not be able to create one.** A function that reaches a builtin
+  returning a type variable it was not given (a decoder such as `from_json`, a
+  typed global lookup, an actor call), an FFI extern, or an interface method of
+  that shape, directly or through another function, carries nothing. The
+  builtin classification is computed from the typechecker's own builtin table.
+- **A callee with a bound on the variable carries nothing.**
+
+When any of these fails, the call's element obligation is a recorded skip:
+silent by default, an error under `cap verified`.
+
+### `map`, `flat_map` and friends: meeting a demand
+
+A call whose result carries no element refinement of its own can still meet the
+one its position *demands*. The checker matches the callee's return type
+against the demand, then requires every source of the demanded type variable to
+meet it:
+
+```march
+fn a(ys : List(Int)) : Int do
+  sum_pos(List.map(ys, fn y -> if y > 0 do y else 1 end))   -- proved: every tail of the lambda is > 0
+end
+
+fn b(pos : List({Int | _ > 0})) : Int do
+  sum_pos(List.map(pos, fn y -> y + 1))   -- proved: y comes from pos, so y > 0
+end
+
+fn c(ys : List(Int)) : Int do
+  sum_pos(List.flat_map(ys, fn y -> [1, 2]))   -- proved
+end
+```
+
+As `b` shows, a one-parameter lambda passed where the callee's function
+argument takes the element type receives its source's element refinement as a
+fact, both for this check and for every obligation inside the lambda body.
+
+A source that does not meet the demand gives a **skip**, never a violation, with
+the reason `parametric-source-unproved`. `sum_pos(List.map(ys, fn y -> 0))` is
+fine when `ys` is empty, and whether it is empty is the caller's data. Under
+`cap verified` the skip is an error, as always.
+
+### Callbacks and user-written combinators
+
+A callback's refined codomain is a fact wherever its result lands, including in
+an element position, and a structurally recursive self-call carries the
+function's own element return (the same induction rule as
+[Tier 2](#limitations)). Together these prove a hand-written refined `map`:
+
+```march
+fn map_pos(xs : List(Int), g : (Int) -> {Int | _ > 0}) : List({Int | _ > 0}) do
+  match xs do
+    Nil -> Nil
+    Cons(h, t) -> Cons(g(h), map_pos(t, g))   -- proved
+  end
+end
+```
+
+The contract is enforced where the callback is passed. A lambda whose return
+can break a declared codomain refinement is reported with a witness input,
+exactly like a named function:
+
+```march
+map_pos(ys, fn y -> y - 1)    -- error: the lambda returns 0 for y = 1
+```
+
+A lambda that names a local variable of its enclosing function cannot be run on
+its own, so for it the check stays a skip.
+
+### What element refinements do not do
+
+- **`filter` does not produce a refinement it was not given.**
+  `sum_pos(List.filter(ys, fn y -> y > 0))` is a skip: stating "the predicate
+  held for every element kept" needs a predicate parameterised by another
+  predicate (Liquid Haskell's abstract refinements).
+- **Only a container demand is traced.** A single element flowing into a scalar
+  position (`need_pos(Option.unwrap_or(o, 1))`, the result of `fold_left`) is
+  not checked through the callee's sources.
+- **Only a one-parameter lambda receives a domain fact.** `fold_left`'s
+  two-parameter callback does not.
+- **An argument using non-linear arithmetic is not translated** in any argument
+  position, so a lambda returning `y * y + 1` does not prove the demand even
+  though the value is always positive.
+- **A local `fn` with a container return** has its tails checked by nothing and
+  lends no element fact at its call sites.
+- **An element refinement that names a parameter** (`: List({Int | _ < n})`) is
+  not a fact at the call site of the function that returns it.
+- **A predicate relating elements to each other** (sortedness, distinctness)
+  cannot be written; see [Set Refinements](#set-refinements) for what a
+  predicate can say about a collection's elements as a set.
+
+---
+
 ## Seeing What Got Checked: `--refine-report`
 
 Because March stays quiet about anything it can't decide, silence has two very

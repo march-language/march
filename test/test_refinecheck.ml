@@ -15444,7 +15444,9 @@ let arrow_codomain_suite =
    §2a: any registered container (`Result`, a user `Tree(a)`) through the
    constructor field-role registry; §2b: two layers; §2c: the parametric
    rule through a polymorphic call's DECLARED signature (a user `first` and
-   the stdlib `List.head`), with an unrefined control for each. *)
+   the stdlib `List.head`), with an unrefined control for each.  The §2c
+   cases run TYPED: the rule consults the typechecker's inferred parameter
+   types (P1, [Refine_param]), and without a type table it answers "no". *)
 let container2_suite =
   let m body =
     "mod C2 do\n  cap verified\n  fn need(k : {Int | k > 0}) : Int do k end\n\
@@ -15489,9 +15491,9 @@ let container2_suite =
             refined
         in
         Alcotest.(check bool) "first(xs) with xs : List({Int | _ > 0}): need(v) proves" false
-          (has_refine_error_d (m (body "{Int | _ > 0}")));
+          (has_refine_error_typed (m (body "{Int | _ > 0}")));
         Alcotest.(check bool) "control: xs : List(Int) gives v no fact" true
-          (has_refine_error_d (m (body "Int"))));
+          (has_refine_error_typed (m (body "Int"))));
 
     gated "§2c soundness: a callee that can MANUFACTURE the element passes nothing through" (fun () ->
         (* `put(xs : List(a), v : a) : List(a)` has `a` bare as `v`; its
@@ -15499,11 +15501,11 @@ let container2_suite =
            assumed `> 0`.  Pinned by the obligation on the result being a
            SKIP (escalated under cap verified), never a proof. *)
         Alcotest.(check bool) "f(put(xs, 0 - 1)) via let: not proved" true
-          (has_refine_error_d
+          (has_refine_error_typed
              (m "  fn put(xs : List(a), v : a) : List(a) do Cons(v, xs) end\n\
                 \  fn g(xs : List({Int | _ > 0})) : Int do\n    let ys = put(xs, 0 - 1)\n    f(ys)\n  end\n"));
         Alcotest.(check bool) "control: first(xs) (no bare `a` input) does pass through" false
-          (has_refine_error_d
+          (has_refine_error_typed
              (m "  fn g(xs : List({Int | _ > 0})) : Int do\n    let h = first(xs)\n\
                 \    match h do\n      Some(v) -> need(v)\n      None -> 0\n    end\n  end\n")));
 
@@ -15522,9 +15524,351 @@ let container2_suite =
             refined
         in
         Alcotest.(check bool) "xs : List({Int | _ > 0}): need(x) proves" false
-          (has_refine_error_d (m (body "{Int | _ > 0}")));
+          (has_refine_error_typed (m (body "{Int | _ > 0}")));
         Alcotest.(check bool) "control: xs : List(Int) gives x no fact" true
-          (has_refine_error_d (m (body "Int")))) ]
+          (has_refine_error_typed (m (body "Int")))) ]
+
+(* ── Parametric soundness (2026-09-18, design §1, Phase 0) ──────────────
+   The §2c rule trusts a callee's DECLARED type variables.  Each case here is
+   a callee whose declaration says `List(a) -> List(a)` (or similar) while
+   its real type or body lets it return an element the argument never held;
+   every one was reported PROVED before [Refine_param] and must now be a
+   SKIP.  A generic control beside them must still prove.  Typed harness
+   throughout: P1 reads the typechecker's parameter types. *)
+let param_soundness_suite =
+  let m ?(verified = false) body =
+    "mod P do\n" ^ (if verified then "  cap verified\n" else "")
+    ^ "  fn f(xs : List({Int | _ > 0})) : Int do 0 end\n" ^ body ^ "end\n"
+  in
+  let through ?verified callee_decl call =
+    m ?verified (callee_decl
+       ^ "  fn g(xs : List({Int | _ > 0}), us : List(Int)) : Int do\n    let ys = " ^ call
+       ^ "\n    f(ys)\n  end\n")
+  in
+  let ledger3 src = let (p, v, s, _) = typed_ledger src in (p, v, s) in
+  [ gated "control: a truly generic callee still carries the element refinement" (fun () ->
+        Alcotest.(check (triple int int int)) "keep(xs) proves" (1, 0, 0)
+          (ledger3 (through "  fn keep(xs : List(a)) : List(a) do xs end\n" "keep(xs)")));
+
+    gated "a type variable the body fixed to Int lends nothing (row z)" (fun () ->
+        Alcotest.(check (triple int int int)) "bad(xs) is skipped, not proved" (0, 0, 1)
+          (ledger3 (through "  fn bad(xs : List(a)) : List(a) do [0 - 5] end\n" "bad(xs)"));
+        Alcotest.(check bool) "cap verified rejects it" true
+          (has_refine_error_typed
+             (through ~verified:true "  fn bad(xs : List(a)) : List(a) do [0 - 5] end\n" "bad(xs)")));
+
+    gated "two declared variables the body unified share no slot" (fun () ->
+        Alcotest.(check (triple int int int)) "sw(us, xs) is skipped" (0, 0, 1)
+          (ledger3 (through "  fn sw(xs : List(a), ys : List(b)) : List(b) do xs end\n" "sw(us, xs)")));
+
+    gated "an unannotated parameter carrying the variable is a source the declaration hides" (fun () ->
+        Alcotest.(check (triple int int int)) "ins(xs, 0 - 1) is skipped" (0, 0, 1)
+          (ledger3 (through "  fn ins(xs : List(a), y) : List(a) do Cons(y, xs) end\n" "ins(xs, 0 - 1)")));
+
+    gated "a body that creates the element through a builtin lends nothing" (fun () ->
+        (* `from_json : a -> b` hands back a `b` it was never given: a generic
+           body can return any element through it.  Directly, and through a
+           helper, both must be skipped. *)
+        Alcotest.(check (triple int int int)) "direct: mk(xs) is skipped" (0, 0, 1)
+          (ledger3
+             (through "  fn mk(xs : List(a)) : List(a) do Cons(from_json(0), xs) end\n" "mk(xs)"));
+        Alcotest.(check (triple int int int)) "via helper: wrap(xs) is skipped" (0, 0, 1)
+          (ledger3
+             (through
+                "  fn mk(xs : List(a)) : List(a) do Cons(from_json(0), xs) end\n\
+                \  fn wrap(xs : List(a)) : List(a) do mk(xs) end\n"
+                "wrap(xs)")));
+
+    gated "sources that disagree lend nothing: append(pos, neg)" (fun () ->
+        (* Every element of the result comes from ONE of the two lists; the
+           rule used to take the first source's slot and prove the whole
+           result positive. *)
+        let cat =
+          "  fn cat(xs : List(a), ys : List(a)) : List(a) do\n\
+          \    match xs do\n      Nil -> ys\n      Cons(h, t) -> Cons(h, cat(t, ys))\n    end\n  end\n"
+        in
+        let g ys_ty =
+          m (cat
+             ^ Printf.sprintf
+                 "  fn g(xs : List({Int | _ > 0}), ys : List(%s)) : Int do\n    let zs = cat(xs, ys)\n    f(zs)\n  end\n"
+                 ys_ty)
+        in
+        Alcotest.(check (triple int int int)) "cat(pos, neg) is skipped" (0, 0, 1)
+          (ledger3 (g "{Int | _ < 0}"));
+        Alcotest.(check (triple int int int)) "control: cat(pos, pos) proves" (1, 0, 0)
+          (ledger3 (g "{Int | _ > 0}")));
+
+    gated "a type parameter hidden outside a direct field is not a slot" (fun () ->
+        (* `MkBox(k)` holds its `b` inside a FUNCTION: the element model's slot
+           0 covers only direct fields, so `bx : Box({Int | _ > 0})` promises
+           nothing about what `k` returns, and a construction never obliges
+           it.  The rule must not read slot 0 as "every b in the box". *)
+        Alcotest.(check (triple int int int)) "unbox(bx) is skipped" (0, 0, 1)
+          (ledger3
+             (m "  type Box(b) = MkBox(Int -> b)\n\
+                 \  fn unbox(bx : Box(b)) : List(b) do\n    match bx do\n      MkBox(k) -> [k(0)]\n    end\n  end\n\
+                 \  fn g(bx : Box({Int | _ > 0})) : Int do\n    let ys = unbox(bx)\n    f(ys)\n  end\n")));
+
+    gated "no type table: the rule answers no" (fun () ->
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d (through "  fn keep(xs : List(a)) : List(a) do xs end\n" "keep(xs)"));
+        let p, _, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "keep(xs) not proved untyped" 0 p) ]
+
+(* ── Element facts through expressions (2026-09-18 plan, Phase 1) ────────
+   Before Phase 1 an element refinement flowed only through a variable or a
+   `match` on one.  Each ACCEPT below was a skip then (RED on the old code),
+   and each sits beside a control whose source is unrefined, which must stay
+   a skip: an accept alone cannot tell a working rule from one that checks
+   nothing.  Ledgers are (proved, violated, skipped), typed harness. *)
+let element_flow_suite =
+  let m body =
+    "mod E do\n\
+    \  fn need(k : {Int | k > 0}) : Int do k end\n\
+    \  fn f(xs : List({Int | _ > 0})) : Int do 0 end\n\
+    \  fn keep(xs : List(a)) : List(a) do xs end\n\
+    \  fn first(xs : List(a)) : Option(a) do\n\
+    \    match xs do\n      Cons(h, _) -> Some(h)\n      Nil -> None\n    end\n  end\n"
+    ^ body ^ "end\n"
+  in
+  let ledger3 src = let (p, v, s, _) = typed_ledger src in (p, v, s) in
+  let pos = "{Int | _ > 0}" in
+  [ gated "a polymorphic call as an argument (row d)" (fun () ->
+        let g t = Printf.sprintf "  fn g(xs : List(%s)) : Int do f(keep(xs)) end\n" t in
+        Alcotest.(check (triple int int int)) "f(keep(xs)) proves" (1, 0, 0) (ledger3 (m (g pos)));
+        Alcotest.(check (triple int int int)) "control: unrefined xs" (0, 0, 1) (ledger3 (m (g "Int"))));
+
+    gated "nested polymorphic calls resolve their actuals recursively" (fun () ->
+        Alcotest.(check (triple int int int)) "f(keep(keep(xs))) proves" (1, 0, 0)
+          (ledger3 (m (Printf.sprintf "  fn g(xs : List(%s)) : Int do f(keep(keep(xs))) end\n" pos))));
+
+    gated "a match on a call hands its binders the element facts (row e)" (fun () ->
+        let g t =
+          Printf.sprintf
+            "  fn g(xs : List(%s)) : Int do\n    match first(xs) do\n      Some(v) -> need(v)\n      None -> 0\n    end\n  end\n"
+            t
+        in
+        Alcotest.(check (triple int int int)) "need(v) proves" (1, 0, 0) (ledger3 (m (g pos)));
+        Alcotest.(check (triple int int int)) "control: unrefined xs" (0, 0, 1) (ledger3 (m (g "Int"))));
+
+    gated "a proved declared container return is a fact at the call (row g)" (fun () ->
+        Alcotest.(check (triple int int int)) "f(pos()) proves" (3, 0, 0)
+          (ledger3
+             (m "  fn pos() : List({Int | _ > 0}) do [1, 2] end\n  fn g() : Int do f(pos()) end\n"));
+        Alcotest.(check (triple int int int)) "control: an unproved return lends nothing" (0, 0, 2)
+          (ledger3
+             (m "  fn pos(ys : List(Int)) : List({Int | _ > 0}) do ys end\n\
+                \  fn g(us : List(Int)) : Int do f(pos(us)) end\n")));
+
+    gated "proved returns reach a fixpoint across declaration order" (fun () ->
+        Alcotest.(check (triple int int int)) "f(a1()) proves through b1" (3, 0, 0)
+          (ledger3
+             (m "  fn a1() : List({Int | _ > 0}) do b1() end\n\
+                \  fn b1() : List({Int | _ > 0}) do [3] end\n\
+                \  fn g() : Int do f(a1()) end\n")));
+
+    gated "a return tail sees the facts of the block's lets (row f)" (fun () ->
+        let r t =
+          Printf.sprintf
+            "  fn r(xs : List(%s)) : List({Int | _ > 0}) do\n    let ys = keep(xs)\n    ys\n  end\n" t
+        in
+        Alcotest.(check (triple int int int)) "the tail ys proves" (1, 0, 0) (ledger3 (m (r pos)));
+        Alcotest.(check (triple int int int)) "control: unrefined xs" (0, 0, 1) (ledger3 (m (r "Int"))));
+
+    gated "a violating return tail under a let is reported exactly once" (fun () ->
+        Alcotest.(check (triple int int int)) "one violation" (0, 1, 0)
+          (ledger3 (m "  fn bad() : List({Int | _ > 0}) do\n    let z = 1\n    [z - 1]\n  end\n"))) ]
+
+(* ── Callback results and self-calls as element sources (2026-09-18, Phase 2)
+   A user-written refined `map` is the target: its tail `Cons(f(h),
+   map_pos(t, f))` needs the callback's codomain in an element position and
+   the structural self-call's own element return.  Each accept has a control
+   that must stay a skip. *)
+let callback_elements_suite =
+  let m body =
+    "mod C do\n\
+    \  fn f(xs : List({Int | _ > 0})) : Int do 0 end\n" ^ body ^ "end\n"
+  in
+  let ledger3 src = let (p, v, s, _) = typed_ledger src in (p, v, s) in
+  let map_pos ~cod ~rec_arg =
+    Printf.sprintf
+      "  fn map_pos(xs : List(Int), g : (Int) -> %s) : List({Int | _ > 0}) do\n\
+      \    match xs do\n      Nil -> Nil\n      Cons(h, t) -> Cons(g(h), map_pos(%s, g))\n    end\n  end\n"
+      cod rec_arg
+  in
+  [ gated "a refined map proves: callback codomain + structural self-call (rows i, j)" (fun () ->
+        (* Obligations: the element `g(h)` and the tail `map_pos(t, g)` of
+           the return, then `f(map_pos(ys, …))` at the caller, whose lambda
+           owes the codomain too. *)
+        let src =
+          m (map_pos ~cod:"{Int | _ > 0}" ~rec_arg:"t"
+             ^ "  fn use_it(ys : List(Int)) : Int do f(map_pos(ys, fn y -> y * y + 1)) end\n")
+        in
+        let (p, v, s) = ledger3 src in
+        Alcotest.(check int) "nothing violated" 0 v;
+        Alcotest.(check int) "nothing skipped" 0 s;
+        Alcotest.(check bool) "something proved" true (p >= 3));
+
+    gated "control: an unrefined callback codomain gives the element nothing" (fun () ->
+        let (_, v, s) = ledger3 (m (map_pos ~cod:"Int" ~rec_arg:"t")) in
+        Alcotest.(check int) "nothing violated" 0 v;
+        Alcotest.(check bool) "the g(h) element is skipped" true (s >= 1));
+
+    gated "control: a non-structural self-call carries no hypothesis" (fun () ->
+        let (_, v, s) = ledger3 (m (map_pos ~cod:"{Int | _ > 0}" ~rec_arg:"xs")) in
+        Alcotest.(check int) "nothing violated" 0 v;
+        Alcotest.(check bool) "the self-call tail is skipped" true (s >= 1));
+
+    gated "a component name rebound by a later match is not the component" (fun () ->
+        (* `t` from `Cons(h, t)` on `xs` is structural; the `t` bound by the
+           inner `match zs` is zs's tail and must not inherit that trust, nor
+           may a parameter spelled like a component.  Found in review. *)
+        let (_, v, s) =
+          ledger3
+            (m "  fn h(xs : List(Int), zs : List(Int)) : List({Int | _ > 0}) do\n\
+                \    match xs do\n\
+                \      Cons(_, t) ->\n\
+                \        match zs do\n\
+                \          Cons(_, t) -> h(t, t)\n\
+                \          Nil -> Nil\n\
+                \        end\n\
+                \      Nil -> Nil\n\
+                \    end\n\
+                \  end\n")
+        in
+        Alcotest.(check int) "nothing violated" 0 v;
+        Alcotest.(check bool) "the self-call through a rebound name is skipped" true (s >= 1));
+
+    gated "a lambda violating a declared codomain is reported with a witness (row k)" (fun () ->
+        let apply =
+          "  fn need_pos(n : {Int | _ > 0}) : Int do n end\n\
+          \  fn apply(x : Int, g : (Int) -> {Int | _ > 0}) : Int do need_pos(g(x)) end\n"
+        in
+        Alcotest.(check bool) "fn y -> y - 1 rejected" true
+          (has_refine_error_typed (m (apply ^ "  fn bad(x : Int) : Int do apply(x, fn y -> y - 1) end\n")));
+        Alcotest.(check bool) "fn y -> y * y + 1 accepted" false
+          (has_refine_error_typed (m (apply ^ "  fn ok(x : Int) : Int do apply(x, fn y -> y * y + 1) end\n")));
+        (* A lambda naming a local of its enclosing function has no closed
+           meaning to run: declined, never guessed. *)
+        Alcotest.(check bool) "a capturing lambda stays silent" false
+          (has_refine_error_typed
+             (m (apply ^ "  fn cap(x : Int, k : Int) : Int do apply(x, fn y -> y - k) end\n"))));
+
+    gated "a container codomain is obliged at the pass site and assumed through the parameter" (fun () ->
+        let hof =
+          "  fn hof(x : Int, g : (Int) -> List({Int | _ > 0})) : Int do f(g(x)) end\n"
+        in
+        Alcotest.(check bool) "a lambda returning [0] is rejected" true
+          (has_refine_error_typed (m (hof ^ "  fn bad(x : Int) : Int do hof(x, fn y -> [0]) end\n")));
+        let (_, v, s) =
+          ledger3 (m (hof ^ "  fn ok(x : Int) : Int do hof(x, fn y -> [1, 2]) end\n"))
+        in
+        Alcotest.(check (pair int int)) "a lambda returning [1, 2] passes, and f(g(x)) proves" (0, 0) (v, s);
+        let (_, v, s) =
+          ledger3
+            (m (hof ^ "  fn pos(y : Int) : List({Int | _ > 0}) do [3] end\n\
+                      \  fn ok(x : Int) : Int do hof(x, pos) end\n"))
+        in
+        Alcotest.(check (pair int int)) "a named callable with a proved element return passes" (0, 0) (v, s);
+        let (_, v, s) =
+          ledger3
+            (m (hof ^ "  fn raw(y : Int) : List(Int) do [y] end\n\
+                      \  fn ok(x : Int) : Int do hof(x, raw) end\n"))
+        in
+        Alcotest.(check (pair int bool)) "an unrefined named callable is a recorded skip" (0, true) (v, s >= 1)) ]
+
+(* ── Demand-driven instantiation: the `map` rule (2026-09-18 plan, Phase 3)
+   The position a polymorphic call's result flows into demands an element
+   refinement; the call meets it when every SOURCE of the demanded type
+   variable does.  The combinators are user copies of the stdlib's shapes
+   (this harness loads no stdlib), written with real bodies so P2 can read
+   them.  Each accept sits beside a control that must stay a SKIP with reason
+   `parametric-source-unproved` — never a violation (design §4.3). *)
+let demand_flow_suite =
+  let m ?(verified = false) body =
+    "mod D do\n" ^ (if verified then "  cap verified\n" else "")
+    ^ "  fn need(k : {Int | k > 0}) : Int do k end\n\
+      \  fn f(xs : List({Int | _ > 0})) : Int do 0 end\n\
+      \  fn fo(o : Option({Int | _ > 0})) : Int do 0 end\n\
+      \  fn mapl(xs : List(a), g : a -> b) : List(b) do\n\
+      \    match xs do\n      Nil -> Nil\n      Cons(h, t) -> Cons(g(h), mapl(t, g))\n    end\n  end\n\
+      \  fn omap(o : Option(a), g : a -> b) : Option(b) do\n\
+      \    match o do\n      Some(x) -> Some(g(x))\n      None -> None\n    end\n  end\n\
+      \  fn cat(xs : List(a), ys : List(a)) : List(a) do\n\
+      \    match xs do\n      Nil -> ys\n      Cons(h, t) -> Cons(h, cat(t, ys))\n    end\n  end\n\
+      \  fn fmap(xs : List(a), g : a -> List(b)) : List(b) do\n\
+      \    match xs do\n      Nil -> Nil\n      Cons(h, t) -> cat(g(h), fmap(t, g))\n    end\n  end\n\
+      \  fn sortl(xs : List(a), lt : a -> a -> Bool) : List(a) do xs end\n\
+      \  fn put(xs : List(a), v : a) : List(a) do Cons(v, xs) end\n"
+    ^ body ^ "end\n"
+  in
+  let ledger src = typed_ledger src in
+  let only_param_skips (_, _, _, rs) = List.for_all (( = ) "parametric-source-unproved") rs in
+  [ gated "map with a lambda whose every tail meets the demand (row l)" (fun () ->
+        let (p, v, s, _) as l =
+          ledger (m "  fn g(ys : List(Int)) : Int do f(mapl(ys, fn y -> if y > 0 do y else 1 end)) end\n")
+        in
+        Alcotest.(check (triple int int int)) "proved" (1, 0, 0) (p, v, s);
+        ignore l;
+        let (p, v, s, _) as l = ledger (m "  fn g(ys : List(Int)) : Int do f(mapl(ys, fn y -> y)) end\n") in
+        Alcotest.(check (triple int int int)) "control: fn y -> y is skipped" (0, 0, 1) (p, v, s);
+        Alcotest.(check bool) "with the parametric reason" true (only_param_skips l));
+
+    gated "the lambda's parameter carries its source's element fact (row m)" (fun () ->
+        Alcotest.(check (triple int int int)) "mapl(pos, fn y -> y + 1) proves" (1, 0, 0)
+          (let (p, v, s, _) =
+             ledger (m "  fn g(pos : List({Int | _ > 0})) : Int do f(mapl(pos, fn y -> y + 1)) end\n")
+           in (p, v, s));
+        Alcotest.(check (triple int int int)) "control: unrefined ys" (0, 0, 1)
+          (let (p, v, s, _) = ledger (m "  fn g(ys : List(Int)) : Int do f(mapl(ys, fn y -> y + 1)) end\n") in
+           (p, v, s));
+        (* The same fact inside the lambda's own body. *)
+        Alcotest.(check (triple int int int)) "need(y) inside the lambda proves" (1, 0, 0)
+          (let (p, v, s, _) =
+             ledger (m "  fn g(pos : List({Int | _ > 0})) : List(Int) do mapl(pos, fn y -> need(y)) end\n")
+           in (p, v, s)));
+
+    gated "a codomain with the variable inside a container (flat_map), and Option" (fun () ->
+        Alcotest.(check (triple int int int)) "fmap(ys, fn y -> [1, 2]) proves" (1, 0, 0)
+          (let (p, v, s, _) = ledger (m "  fn g(ys : List(Int)) : Int do f(fmap(ys, fn y -> [1, 2])) end\n") in
+           (p, v, s));
+        Alcotest.(check (triple int int int)) "control: fn y -> [y]" (0, 0, 1)
+          (let (p, v, s, _) = ledger (m "  fn g(ys : List(Int)) : Int do f(fmap(ys, fn y -> [y])) end\n") in
+           (p, v, s));
+        Alcotest.(check (triple int int int)) "omap(o, fn y -> 3) meets an Option demand" (1, 0, 0)
+          (let (p, v, s, _) = ledger (m "  fn g(o : Option(Int)) : Int do fo(omap(o, fn y -> 3)) end\n") in
+           (p, v, s)));
+
+    gated "a refuted source is a skip, not a violation; cap verified escalates it" (fun () ->
+        let body = "  fn g(ys : List(Int)) : Int do f(mapl(ys, fn y -> 0)) end\n" in
+        let (p, v, s, _) as l = ledger (m body) in
+        Alcotest.(check (triple int int int)) "skipped" (0, 0, 1) (p, v, s);
+        Alcotest.(check bool) "with the parametric reason" true (only_param_skips l);
+        Alcotest.(check bool) "no error outside cap verified" false (has_refine_error_typed (m body));
+        Alcotest.(check bool) "an error under cap verified" true
+          (has_refine_error_typed (m ~verified:true body)));
+
+    gated "a bare source is checked against the demand" (fun () ->
+        Alcotest.(check (triple int int int)) "put(pos, 5) proves" (1, 0, 0)
+          (let (p, v, s, _) =
+             ledger (m "  fn g(pos : List({Int | _ > 0})) : Int do f(put(pos, 5)) end\n") in (p, v, s));
+        Alcotest.(check (triple int int int)) "control: put(pos, 0 - 1) is skipped" (0, 0, 1)
+          (let (p, v, s, _) =
+             ledger (m "  fn g(pos : List({Int | _ > 0})) : Int do f(put(pos, 0 - 1)) end\n") in (p, v, s)));
+
+    gated "a variable in a callback's domain is not a source: sortl keeps its argument's refinement" (fun () ->
+        Alcotest.(check (triple int int int)) "sortl(pos, …) proves" (1, 0, 0)
+          (let (p, v, s, _) =
+             ledger (m "  fn g(pos : List({Int | _ > 0})) : Int do f(sortl(pos, fn a -> fn b -> a < b)) end\n")
+           in (p, v, s)));
+
+    gated "a variable inside a tuple cannot be traced" (fun () ->
+        Alcotest.(check (triple int int int)) "skipped" (0, 0, 1)
+          (let (p, v, s, _) =
+             ledger
+               (m "  fn two(p : (a, a)) : List(a) do\n    match p do\n      (x, y) -> [x, y]\n    end\n  end\n\
+                   \  fn g(k : Int) : Int do f(two((1, 2))) end\n")
+           in (p, v, s))) ]
 
 (* ── Datatype instances from declared types (plan steps 1.3 + 1.4) ──────
    Each datatype instance is declared as its own monomorphic datatype; a term's instance
@@ -16981,6 +17325,10 @@ let () =
       ("scalar-field-measure", scalar_field_measure_suite);
       ("arrow-codomain", arrow_codomain_suite);
       ("container-subtyping-2", container2_suite);
+      ("parametric-soundness", param_soundness_suite);
+      ("element-flow", element_flow_suite);
+      ("callback-elements", callback_elements_suite);
+      ("demand-flow", demand_flow_suite);
       ("set-refinements", set_suite);
       ("typed-instances", typed_instances_suite);
       ("single-element-type", single_element_type_suite);

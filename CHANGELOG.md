@@ -11,6 +11,20 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+- **Choreography sessions no longer lose messages or hang on large ones.** A message over
+  4 KB was silently refused, which left both nodes waiting on each other forever, and a
+  burst of messages lost most of them while both sides still reported success. A message
+  just over 3 KB following a small one could also hang. Messages of any size and any burst
+  now arrive; a sender never waits, and a peer that stops reading is dropped by the
+  heartbeat. `NodeQueue` gains an `Unbounded` policy and accepts a message larger than its
+  whole budget when the queue is empty.
+- **A record or actor-state field that holds a linear value is now tracked like a linear
+  field.** A field such as `slot : Option(Parked_B)` used to be an ordinary field: an actor
+  could overwrite it with `None` and silently drop the value inside, and a record's field
+  could be read twice. Both are now errors, as they already were for a field whose own type
+  is linear.
+
 ### Changed
 - **A choreography session no longer ends for everyone when one role fails.** Following the
   Maty model (Fowler and Hu, OOPSLA 2026), a failed role is cancelled, and another role is
@@ -22,6 +36,19 @@ git log is authoritative for exact commits.
   detected by a heartbeat (`MARCH_SESSION_HEARTBEAT_MS`, `MARCH_SESSION_TIMEOUT_MS`).
 
 ### Added
+- **Element refinements flow through expressions, callbacks and polymorphic combinators.**
+  A `List({Int | _ > 0})` (or `Option`, `Result`, user variant) contract is now met by
+  `sum_pos(List.take(xs, 2))` without a `let`, by `match List.head_opt(xs) do Some(h) ->`,
+  by a call to a function whose declared container return was proved, by a return tail
+  that names a local `let`, and by `List.map(ys, f)` / `flat_map` / `filter_map` /
+  `Option.map` when every way an element can enter the call meets the demand (a lambda
+  passed where the element type is taken also gets its source's element refinement as a
+  fact). A hand-written refined `map` proves through its callback's codomain and its
+  structurally recursive self-call, and a lambda that breaks a declared refined codomain
+  (`fn y -> y - 1` where `(Int) -> {Int | _ > 0}` is expected) is now reported with a
+  witness instead of skipped. A call whose sources do not all meet the demand is a skip
+  with the new `--refine-report` reason `parametric-source-unproved`, never an error
+  outside `cap verified`.
 - **Failure handlers in the generated session API:** `recv_<Msg>_or` and `offer_<…>_or` take a
   cancel handler that learns which role failed and why but holds no session state, so it
   cannot talk in the failed session. Also `leave_<state>` to leave a session on purpose,
@@ -61,6 +88,16 @@ git log is authoritative for exact commits.
   the REPL/JIT this gave wrong answers — `Path.is_absolute("/etc")` returned
   `false` on macOS — that appeared and disappeared with unrelated edits.
 
+- **Refinement checker: a polymorphic function no longer lends element refinements it
+  cannot justify.** A function whose signature says `List(a) -> List(a)` but whose body
+  fixed `a` (type variables in signatures are not rigid), merged it with another variable,
+  took it through an unannotated parameter, or can create one through a builtin such as
+  `from_json`, was trusted to preserve its argument's element refinement: `let ys =
+  bad(xs)` then `sum_pos(ys)` was reported proved on a list holding `-5`, and `cap
+  verified` accepted it. Likewise `append(pos, neg)` took the first list's element
+  refinement for the whole result. The checker now reads the inferred parameter types and
+  the callee's body, and requires every argument an element can come from to agree,
+  before applying the rule; such calls are skipped instead.
 - **A record or actor-state field that holds a linear value is now tracked like a linear
   field.** A field such as `slot : Option(Parked_B)` used to be an ordinary field: an actor
   could overwrite it with `None` and silently drop the value inside, and a record's field

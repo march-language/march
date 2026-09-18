@@ -38,6 +38,21 @@ mod TestNodeQueue do
       assert (NodeQueue.depth(q) == 40)
     end
 
+    -- It could never fit, so refusing it would refuse it forever.
+    test "a frame larger than the whole budget is admitted into an empty queue, alone" do
+      let q = NodeQueue.start(-4, 30)
+      assert (NodeQueue.enqueue(q, 1, frame40(), NodeQueue.DropNew) == Ok(()))
+      assert (NodeQueue.enqueue(q, 2, frame40(), NodeQueue.DropNew) == Err(NodeQueue.Backpressure))
+    end
+
+    test "unbounded admits past the budget and charges every frame" do
+      let q = NodeQueue.start(-5, 50)
+      assert (NodeQueue.enqueue(q, 1, frame40(), NodeQueue.Unbounded) == Ok(()))
+      assert (NodeQueue.enqueue(q, 2, frame40(), NodeQueue.Unbounded) == Ok(()))
+      assert (NodeQueue.enqueue(q, 3, frame40(), NodeQueue.Unbounded) == Ok(()))
+      assert (NodeQueue.depth(q) == 120)
+    end
+
     test "drop_old admits the frame" do
       let q = NodeQueue.start(-3, 50)
       assert (NodeQueue.enqueue(q, 1, frame40(), NodeQueue.DropOld) == Ok(()))

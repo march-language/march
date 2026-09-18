@@ -850,6 +850,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                | Obligation.Unconstrained_subject _
                | Obligation.Opaque_application _
                | Obligation.Partial_conjunct _
+               | Obligation.Parametric_source_unproved _
                | Obligation.Unreflectable_subject _
                (* Now that this reason carries a payload naming the specific
                   failing sub-expression (Task 3), it is a specific, actionable
@@ -874,6 +875,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
        | Obligation.Unconstrained_subject _
        | Obligation.Opaque_application _
        | Obligation.Partial_conjunct _
+       | Obligation.Parametric_source_unproved _
        | Obligation.Unreflectable_subject _
        | Obligation.Unreflectable_predicate _
        | Obligation.Alias_withdrawn _ -> ());
@@ -882,6 +884,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
         | Obligation.Unconstrained_subject _
         | Obligation.Opaque_application _
         | Obligation.Partial_conjunct _
+        | Obligation.Parametric_source_unproved _
         | Obligation.Unreflectable_subject _
         | Obligation.Unreflectable_predicate _ ->
           Printf.sprintf "%s `%s` on `%s` was NOT verified here.\n%s"
@@ -2761,6 +2764,11 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                 alone does not identify it. *)
              let param_label =
                match subject, List.nth_opt sg.param_names rp.idx with
+               (* An element of a container checked against an element
+                  refinement ([Refine_check.check_elements]): the parameter
+                  is the synthetic `$elem`, which names nothing the user
+                  wrote. *)
+               | Argument, Some "$elem" -> Printf.sprintf "an element passed to `%s`" callee
                | Argument, Some pname when pname <> "" ->
                  Printf.sprintf "argument `%s` of `%s`" pname callee
                | Argument, _ -> Printf.sprintf "argument %d of `%s`" (rp.idx + 1) callee

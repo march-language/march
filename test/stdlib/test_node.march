@@ -45,9 +45,13 @@ mod TestNode do
       end
     end
 
+    -- The first frame is larger than this whole budget, and an empty queue
+    -- admits it alone (it could never fit otherwise); the second finds the
+    -- queue occupied and is refused.
     test "a typed enqueue past the budget under DropNew is Err(Backpressure)" do
       let q = NodeQueue.start(-1, 10)
       let p : Ping = { n: 5, who: "x" }
+      let _ = Node.enqueue(q, GlobalPid.make("nobody", 7, 1), p, NodeQueue.DropNew)
       match Node.enqueue(q, GlobalPid.make("nobody", 7, 1), p, NodeQueue.DropNew) do
         Err(NodeQueue.Backpressure) -> assert (true)
         _ -> assert (false)
