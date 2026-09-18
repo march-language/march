@@ -35,6 +35,8 @@ git log is authoritative for exact commits.
   `ClusterNode.register / unregister / lookup / watch` keep a live cluster-wide registry;
   a dead or restarted holder's binding is hidden, and after a partition heals one binding
   wins everywhere and the loser's watchers hear `Lost`. A global name is not a lock.
+  Messages: `ClusterNode.route / send_msg / queue_for / monitor_remote / on_peer_closed`
+  carry actor messages, remote monitors and flow control over the same connection pair.
 - `Socket.connect_timeout(host, port, ms)` (builtin `tcp_connect_timeout`): a connect that
   gives up after `ms` when the peer never answers, instead of waiting out the kernel's SYN
   retries (a minute or more behind a dropped-packet partition).

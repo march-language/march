@@ -111,6 +111,27 @@ What `start` gives you:
   or has restarted since it registered. The registered process is monitored, and its death
   unregisters the name.
 
+**Messages and monitors over the node.** Every actor message, remote monitor and flow-control
+frame between two nodes shares the node's one connection pair.
+
+```march
+-- receiving side: deliveries for a local process arrive through a route
+let _ = ClusterNode.route(node, pid_to_int(worker), fn d -> do
+  send(worker, Job(Node.payload(d)))
+  Ok(())
+end)
+-- sending side: through the peer's data queue (credit flow control)
+let _ = ClusterNode.send_msg(node, gpid, "Jobs.Job", bytes, NodeQueue.BlockSender(5000))
+-- or typed: Node.enqueue(q, gpid, msg, policy) with q = ClusterNode.queue_for(node, gpid.node_id)
+let _ = ClusterNode.monitor_remote(node, gpid, fn reason -> send(me, WorkerDown(reason)))
+```
+
+`on_peer_closed(node, f)` tells you when a peer's data connection ends, after its last
+delivery, and says why (`"node b dead: suspect timeout"`, `"connection lost"`).
+`on_delivery_failed` reports messages the peer refused. Use `send_msg` or `Node.enqueue`,
+never `Node.send(peer, ...)`, on a node's connections: `Node.send` writes the socket directly
+and would interleave with the queue.
+
 **A global name is not a lock.** During a network partition, each side can register the same
 name. When the partition heals, one binding wins everywhere: a registration made after seeing
 the other is causally newer and wins; otherwise a deterministic tiebreak picks. The node

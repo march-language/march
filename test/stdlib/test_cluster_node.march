@@ -16,7 +16,7 @@ mod TestClusterNode do
   end
 
   pfn drops(effs : List(ClusterNode.CnEffect)) : List(Int) do
-    List.filter_map(effs, fn e -> match e do ClusterNode.Drop(l) -> Some(l.gen) | _ -> None end)
+    List.filter_map(effs, fn e -> match e do ClusterNode.Drop(l, _) -> Some(l.gen) | _ -> None end)
   end
 
   pfn installs(effs : List(ClusterNode.CnEffect)) : List(Int) do
@@ -172,6 +172,21 @@ mod TestClusterNode do
                   assert (status_of(st3, b) == "suspect")
                   assert (List.member(event_texts(effs2), "b suspect"))
                   assert (dials(effs2) == Cons("127.0.0.1:7001", Nil))
+              end
+          end
+      end
+    end
+
+    test "a Dead member is redialled at its advertised address (the heal path)" do
+      match linked_ab() do
+        (b, st, _) ->
+          let dead_b = Membership.member(b, "b", "127.0.0.1:7001", 1, Dead, 5)
+          match ClusterNode.core_frame(st, b, 13, SwimDriver.encode_member_gossip(dead_b)) do
+            (st2, _) ->
+              -- The verdict drops the link, and the same tick's dial plan
+              -- already redials the Dead member.
+              match ClusterNode.core_tick(st2, 1100) do
+                (_, effs) -> assert (dials(effs) == Cons("127.0.0.1:7001", Nil))
               end
           end
       end
@@ -421,6 +436,36 @@ mod TestClusterNode do
                     _ -> assert false
                   end
               end
+          end
+      end
+    end
+
+  end
+
+  describe "the data plane (phase 3)" do
+
+    test "a Dead peer's link is dropped with the cause the routes are told" do
+      match linked_ab() do
+        (b, st, _) ->
+          let dead_b = Membership.member(b, "b", "127.0.0.1:7001", 1, Dead, 5)
+          match ClusterNode.core_frame(st, b, 13, SwimDriver.encode_member_gossip(dead_b)) do
+            (st2, _) ->
+              match ClusterNode.core_tick(st2, 1100) do
+                (_, effs) ->
+                  let whys = List.filter_map(effs, fn e -> match e do ClusterNode.Drop(_, w) -> Some(w) | _ -> None end)
+                  assert (whys == Cons("node b dead: gossip", Nil))
+              end
+          end
+      end
+    end
+
+    test "a lost connection is dropped as connection lost" do
+      match linked_ab() do
+        (b, st, _) ->
+          match ClusterNode.core_link_closed(st, b, 1) do
+            (_, effs) ->
+              let whys = List.filter_map(effs, fn e -> match e do ClusterNode.Drop(_, w) -> Some(w) | _ -> None end)
+              assert (whys == Cons("connection lost", Nil))
           end
       end
     end

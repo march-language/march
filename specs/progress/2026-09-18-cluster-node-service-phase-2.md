@@ -50,7 +50,7 @@ A multi-line `a &&` newline `(match ...)` inside a match arm, and a one-line
 | Scenario | Pins | Red check |
 |---|---|---|
 | `cluster_takeover` (no root) | node-b holds "leader", SIGKILL, node-a sees Unbound and takes it over; node-b restarts as creation 2, resolves "leader" to node-a, and retires its own stale "cfg" binding | retire_stale disabled: `my stale bindings: 1`; a fresh clock instead of `next_clock`: node-a's claim loses to node-b's stale one at once (timeout) |
-| `cluster_partition` (root, iptables) | both listen ports dropped until each marks the other Dead; each claims "leader"; after heal both print node-b (the tiebreak's winner, higher node_id) and node-a's watch prints `Lost` | see the phase-2 commit notes / CI: needs Linux root, run via scripts/two-node-docker.sh |
+| `cluster_partition` (root, iptables) | both listen ports dropped until each marks the other Dead; each claims "leader"; after heal both print node-b (the tiebreak's winner, higher node_id) and node-a's watch prints `Lost` | ok through `scripts/two-node-docker.sh` at this commit (the legacy `partition` too). Disabling the redial of Dead members did NOT turn it red: node-b's seed is node-a, and seeds are redialled while no linked member advertises them, so the heal comes from that side. The Dead-member redial is pinned by a core test instead ("a Dead member is redialled at its advertised address", added with phase 3), which that perturbation does turn red. |
 
 `scripts/two-node.sh`'s `drop_link` takes a list of ports (default node-b's):
 in the service both nodes listen and either may redial the other, so dropping

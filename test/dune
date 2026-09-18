@@ -2671,6 +2671,23 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/nested_record_field_capture.expected native_nested_record_field_capture.out)))
 
+;; stdlib/cluster_node.march must typecheck CLEAN when checked as the entry.
+;; A diagnostic inside a stdlib module is never printed when a program merely
+;; loads it (bin/main.ml filters stdlib spans), and one such hidden error --
+;; an unqualified `monitor(w, pid)` resolved to the module's own 3-argument
+;; `monitor` -- compiled to a call of the wrong function (SIGSEGV). Empty
+;; output, errors AND warnings, is the contract.
+(rule
+ (targets cluster_node_check.out)
+ (deps (file %{exe:../bin/main.exe}) (source_tree ../stdlib))
+ (action
+  (with-outputs-to cluster_node_check.out
+   (run %{exe:../bin/main.exe} --check ../stdlib/cluster_node.march))))
+
+(rule
+ (alias runtest)
+ (action (diff empty.expected cluster_node_check.out)))
+
 ;; A three-deep field projection passed to a consuming callee got no dup
 ;; (Perceus's borrowed-field lookahead stopped one nested let short): the
 ;; second call read a freed Map. Pre-fix: "panic: non-exhaustive pattern
