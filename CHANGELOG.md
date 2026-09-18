@@ -45,7 +45,9 @@ git log is authoritative for exact commits.
 - Linearity: taking apart a tuple or variant that holds a linear value no longer makes its
   ordinary parts linear (`let (n, t) = (1, token)` leaves `n` an ordinary `Int`), and a
   generic function that opted in with `linear x : a` is no longer refused when its body
-  passes `x` on to another generic function.
+  passes `x` on to another generic function that also opted in. Passing it to one that did
+  not (which may drop or duplicate it) is now an error; it was accepted or refused depending
+  on inference order.
 - Writing to a socket whose peer had just gone could kill the process with SIGPIPE; the
   shared send path now suppresses the signal.
 - A dead green thread's execution context (880 of its bookkeeping struct's 1136 bytes on

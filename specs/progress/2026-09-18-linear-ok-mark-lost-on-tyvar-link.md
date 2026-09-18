@@ -46,3 +46,13 @@ Following the mark exposed a related, older gap, filed as
 [[2026-09-18-linear-shared-opt-in-tyvar-unchecked-param]]: any parameter whose type
 is the opted-in variable can be passed a linear value, but only the one declared
 `linear` is checked in the body.
+
+**Review follow-up (same change).** Following the mark made a laundering hole
+permanent: `fn w(linear val : v) do g(val) end` with a `g` that never opted in (and
+duplicates its argument) was accepted, where before it was rejected or accepted
+depending on the link's direction. `check_linear_instantiations` now also rejects a
+use, outside a `@[trusted_linear]` kernel, that instantiates a consumed, non-opted-in
+variable with a type mentioning an opted-in variable (each use records whether it was
+inside a kernel). Witness `reject/t261`; `types-oracle` against the same tree with only
+this check disabled: identical on all 740 fixtures.
+

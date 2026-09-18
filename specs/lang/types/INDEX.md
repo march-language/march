@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t258 accept, t01–t260 reject) <!-- doc-lint:ignore-count: accept/reject share one numbering pool, so the highest id on each side is NOT that side's file count (162 accept, 217 reject; see the Result line below) -->
+# Typing corpus index (t01–t258 accept, t01–t261 reject) <!-- doc-lint:ignore-count: accept/reject share one numbering pool, so the highest id on each side is NOT that side's file count (162 accept, 218 reject; see the Result line below) -->
 
 **Two-repo rule.** This corpus is also checked by
 [march-language/march-lean](https://github.com/march-language/march-lean), an
@@ -248,7 +248,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 379/379: 162 accept, 217
+Exit 0 iff every program behaves as declared (currently 380/380: 162 accept, 218
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -603,7 +603,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t178_letstar_no_flat_map` | **`let*` (generalized monadic bind, 2026-08-14, `specs/lang/let-star-generalized-bind.md`): no matching `flat_map`.** `let*` resolves `<Type>.flat_map` from the RHS's inferred type; a type with no `flat_map` in a same-named module (here a bare `Widget`) is a clear, actionable error naming exactly what to define, not a crash or a generic "unbound variable" | ``let*` needs `Widget.flat_map`, but it doesn't exist.` |
 | `t179_letstar_last_expr` | **`let*`: trailing binder rejected, mirrors `let?`'s `t67`/`r05`.** A `let*` with an empty continuation can never unify against `M(b)`, so it is caught with the same "cannot be the last expression in a block" shape `let?` already has, generalized to name the RHS's own type instead of hardcoding `Result` | ``let*` cannot be the last expression in a block.` |
 
-**Result: 379 / 379 (162 accept, 217 reject).** `reject/t169`–`t170`
+**Result: 380 / 380 (162 accept, 218 reject).** `reject/t169`–`t170`
 (`NativeF32Arr`/`NativeU8Arr` non-sendable in actor messages, added
 2026-08-09 alongside the narrow-element-width work) are not yet written up
 as their own table entries; they mirror the existing `t164`/`t165` pattern
@@ -686,6 +686,7 @@ their own table entries.
 | `t256_linear_wildcard_container` | **`_` over a container holding a linear value (2026-09-18):** `let (_, n) = (Some(S1(1)), 2)` drops the `S1`. The wildcard check tested `is_linear_ty` and predates the containment rule; accepted before | ``This `_` discards a linear value of type `Option(S1)` `` |
 | `t259_trusted_linear_user_code` | **`@[trusted_linear]` is stdlib-only (2026-09-18):** its bodies are trusted, not checked; in user code it would let `dup` duplicate a linear value | ``` `@[trusted_linear]` is reserved for the standard library ``` |
 | `t260_linear_map_rep_is_private` | **`LinearMap` is `always_linear opaque type`:** user code cannot build one directly (or open one) through its constructor | ``I don't know a constructor called `LinearMapRep` `` |
+| `t261_linear_opt_in_laundered` | **An opted-in body cannot launder its linear value through a generic function that never opted in (2026-09-18):** `w(linear val : v)` passing `val` to a duplicating `g` counts `v` as linear for the generic rule. Found in review of the LinearMap change: once the opt-in mark followed unification links, this was always accepted | ``This passes `g` a value that may be linear`` |
 
 ## Coverage notes (intentionally absent programs, and why)
 

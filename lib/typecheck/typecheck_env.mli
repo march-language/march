@@ -180,7 +180,7 @@ type env = {
   linear_ok_ids : (int, unit) Hashtbl.t;
   linear_generic_uses :
     (Typecheck_types.Ast.span,
-     string * int list * Typecheck_types.ty list * Typecheck_types.ty) Hashtbl.t;
+     string * int list * Typecheck_types.ty list * Typecheck_types.ty * bool) Hashtbl.t;
   cap_producer_ivars :
     (int, Typecheck_types.Ast.span) Hashtbl.t;
   cap_narrow_factory_fns :

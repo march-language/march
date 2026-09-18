@@ -382,7 +382,7 @@ type env = {
       scheme's quantifier list holds, so this is consulted per instantiation.
       Every other type variable is unrestricted: instantiating it with a linear
       type in a position the function consumes is an error. *)
-  linear_generic_uses : (Ast.span, string * int list * ty list * ty) Hashtbl.t;
+  linear_generic_uses : (Ast.span, string * int list * ty list * ty * bool) Hashtbl.t;
   (** Every named polymorphic use: the name, the scheme's quantified ids, their
       fresh instantiations, and the scheme body.  Swept once the module is
       solved ([check_linear_instantiations]), when the instantiations are
@@ -1660,6 +1660,7 @@ let instantiate ?use_span ?use_name level env = function
      | None -> ());
     (match use_span, use_name with
      | Some sp, Some name ->
-       Hashtbl.replace env.linear_generic_uses sp (name, ids, List.map snd subst, ty)
+       Hashtbl.replace env.linear_generic_uses sp
+         (name, ids, List.map snd subst, ty, env.trusted_linear_body)
      | _ -> ());
     inst ty

@@ -1091,23 +1091,50 @@ let check_linear_instantiations env =
     name <> "" && not (Char.equal name.[0] '_' ||
                        (Char.lowercase_ascii name.[0] <> Char.uppercase_ascii name.[0]))
   in
-  Hashtbl.iter (fun sp (name, ids, tys, scheme_ty) ->
+  (* A type variable an enclosing function opted in ([linear x : a]) stands
+     for a value that may be linear at that function's call sites, so inside
+     its body it is treated as linear here: `fn w(linear v : a) do dup(v) end`
+     would otherwise launder a linear value through a [dup] that never opted
+     in.  Not inside a [@[trusted_linear]] kernel, whose calls are reviewed. *)
+  let rec mentions_linear_ok t =
+    match repr t with
+    | TVar { contents = Unbound (id, _) } -> Hashtbl.mem env.linear_ok_ids id
+    | TArrow (a, b) -> mentions_linear_ok a || mentions_linear_ok b
+    | TCon ("Pid", _) -> false
+    | TCon (_, ts) | TTuple ts -> List.exists mentions_linear_ok ts
+    | TRecord flds -> List.exists (fun (_, t) -> mentions_linear_ok t) flds
+    | TLin (_, t) -> mentions_linear_ok t
+    | _ -> false
+  in
+  Hashtbl.iter (fun sp (name, ids, tys, scheme_ty, trusted) ->
     if not (is_operator name) then
       let consumed = consumed_var_ids scheme_ty in
       let reported = ref false in
       List.iter2 (fun id t ->
           if not !reported && List.mem id consumed
-             && not (Hashtbl.mem env.linear_ok_ids id)
-             && contains_linear env t then begin
-            reported := true;
-            Err.error env.errors ~span:sp
-              (Printf.sprintf
-                 "`%s` is linear, but `%s` is generic in a parameter of that type, \
-                  so it may drop or duplicate the value.\n\
-                  Consume the value here instead, or, if `%s` uses that parameter \
-                  exactly once, mark it `linear` where `%s` is defined \
-                  (`linear x : a`)."
-                 (pp_ty (repr t)) name name name)
+             && not (Hashtbl.mem env.linear_ok_ids id) then begin
+            if contains_linear env t then begin
+              reported := true;
+              Err.error env.errors ~span:sp
+                (Printf.sprintf
+                   "`%s` is linear, but `%s` is generic in a parameter of that type, \
+                    so it may drop or duplicate the value.\n\
+                    Consume the value here instead, or, if `%s` uses that parameter \
+                    exactly once, mark it `linear` where `%s` is defined \
+                    (`linear x : a`)."
+                   (pp_ty (repr t)) name name name)
+            end else if not trusted && mentions_linear_ok t then begin
+              reported := true;
+              Err.error env.errors ~span:sp
+                (Printf.sprintf
+                   "This passes `%s` a value that may be linear: the enclosing \
+                    function opted in to linear values of its type \
+                    (`linear x : ...`), but `%s` is generic in a parameter of that \
+                    type, so it may drop or duplicate the value.\n\
+                    Consume the value here instead, or, if `%s` uses that parameter \
+                    exactly once, mark it `linear` where `%s` is defined."
+                   name name name name)
+            end
           end)
         ids tys)
     env.linear_generic_uses
