@@ -449,6 +449,12 @@ Two consequences of the tag-selects-the-handler rule:
 There is no `Call` wrapper constructor, and the call handler takes exactly one argument
 (the reply channel).
 
+**Calling from inside a handler.** A handler may itself `Actor.call` another actor. While
+it waits, the calling actor handles nothing else: messages sent to it in the meantime
+stay in its mailbox, in arrival order, and are handled after the current handler returns.
+Only the reply ends the wait (both backends; pinned by
+`test/native/actor_call_in_handler_keeps_messages`).
+
 > **Two notes (both resolved 2026-07-13).** (1) `timeout_ms` **is enforced in the
 > compiled runtime** via a deadline-bounded park (`march_actor_call`,
 > `runtime/march_runtime.c`); the caller's green thread parks on the scheduler rather

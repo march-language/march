@@ -2,9 +2,10 @@
 # waiting, and B is frozen (SIGSTOP) once the stream is flowing. A streams
 # inside its endpoint actor's turn (the go-ahead's continuation), so this is
 # where a send that waits for B's credit could hang A: a blocking send rides
-# `Actor.call`, which takes the actor's own queued messages (the reader's
-# LinkEnded, the heartbeat's PeerGone) as its reply, and A then waited
-# forever in serve. Session frames are queued without limit instead
+# `Actor.call`, and while it waits the endpoint actor handles none of its
+# queued messages (the reader's LinkEnded, the heartbeat's PeerGone). (Before
+# 2026-09-18 that call even took those messages as its reply, and A waited
+# forever in serve.) Session frames are queued without limit instead
 # (`NodeQueue.Unbounded`), so A finishes its stream at once; its heartbeat
 # then declares B dead and lets the queue go. A never waits on B, so under
 # the failure rules its role completes: "A: closed".
