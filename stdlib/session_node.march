@@ -189,9 +189,9 @@ mod SessionNode do
   -- its receiver waiting forever while both nodes kept heartbeating, and a
   -- lost Bye or Cancel ended the session later with the wrong cause. The
   -- sender must not block instead: it runs in the endpoint actor's turn (or
-  -- the host actor's), where an `Actor.call` waiting for credit takes the
-  -- actor's own queued messages as its reply, and a wait on one slow peer
-  -- would hold up every other. The queue grows only while the peer is slow,
+  -- the host actor's), which handles none of its other messages while it
+  -- waits for credit, so a wait on one slow peer would hold up every other
+  -- (and the reader's `LinkEnded`). The queue grows only while the peer is slow,
   -- and a peer that stays silent is dropped by the heartbeat, whose
   -- `drop_link` lets the queue go.
   pfn send_frame(p : Party, l : Link, type_tag : String, payload : List(Int)) : () do

@@ -1020,6 +1020,15 @@ static void *mbox_pop_any(march_proc *p) {
     return mbox_pop_user(p);
 }
 
+/* Pop for a receive: user-only or any plane.  When seq_out is non-NULL and a
+ * USER message is popped, its enqueue_seq is written there so the message can
+ * later be put back exactly where it was (march_sched_requeue_user_front). */
+static void *mbox_pop_for_recv(march_proc *p, int user_only, uint64_t *seq_out) {
+    if (seq_out && user_only && p->mailbox)
+        *seq_out = p->mailbox->enqueue_seq;
+    return user_only ? mbox_pop_user(p) : mbox_pop_any(p);
+}
+
 static int64_t mbox_user_count(march_proc *p) {
     return atomic_load_explicit(&p->user_mbox_count, memory_order_relaxed);
 }
@@ -2695,7 +2704,7 @@ static void mbox_recv_park_once(march_proc *p) {
  * guarantees no future same-TU caller can hoist those TLS reads across the
  * switch. */
 __attribute__((noinline))
-static void *march_sched_recv_mode(int user_only) {
+static void *march_sched_recv_mode(int user_only, uint64_t *seq_out) {
     march_proc *p = tl_sched ? tl_sched->current : NULL;
     if (!p) return MARCH_RECV_NO_MSG;
 
@@ -2750,7 +2759,7 @@ static void *march_sched_recv_mode(int user_only) {
         mbox_lock_acquire(p);
         if (user_only ? p->mailbox != NULL
                       : (p->control_mailbox != NULL || p->mailbox != NULL)) {
-            void *msg = user_only ? mbox_pop_user(p) : mbox_pop_any(p);
+            void *msg = mbox_pop_for_recv(p, user_only, seq_out);
             mbox_wake_send_waiters_if_low(p);
             atomic_store_explicit(&p->mbox_wait_mode, 0, memory_order_relaxed);
             mbox_lock_release(p);
@@ -2785,12 +2794,12 @@ static void *march_sched_recv_mode(int user_only) {
 
 __attribute__((noinline))
 void *march_sched_recv(void) {
-    return march_sched_recv_mode(0);
+    return march_sched_recv_mode(0, NULL);
 }
 
 __attribute__((noinline))
 void *march_sched_recv_user(void) {
-    return march_sched_recv_mode(1);
+    return march_sched_recv_mode(1, NULL);
 }
 
 void *march_sched_try_recv(void) {
@@ -3199,7 +3208,8 @@ int march_sched_park_self_until(int64_t deadline_ms) {
  * swapcontext-capable call, so no caller may have its TLS reads hoisted
  * across the switch. */
 __attribute__((noinline))
-static void *march_sched_recv_until_mode(int64_t deadline_ms, int user_only) {
+static void *march_sched_recv_until_mode(int64_t deadline_ms, int user_only,
+                                         uint64_t *seq_out) {
     march_proc *p = tl_sched ? tl_sched->current : NULL;
     if (!p) return MARCH_RECV_NO_MSG;
 
@@ -3218,7 +3228,7 @@ static void *march_sched_recv_until_mode(int64_t deadline_ms, int user_only) {
     mbox_lock_acquire(p);
     if (user_only ? p->mailbox != NULL
                   : (p->control_mailbox != NULL || p->mailbox != NULL)) {
-        void *msg = user_only ? mbox_pop_user(p) : mbox_pop_any(p);
+        void *msg = mbox_pop_for_recv(p, user_only, seq_out);
         mbox_wake_send_waiters_if_low(p);
         mbox_lock_release(p);
         return msg;
@@ -3277,7 +3287,7 @@ static void *march_sched_recv_until_mode(int64_t deadline_ms, int user_only) {
     void *msg;
     if (user_only ? p->mailbox != NULL
                   : (p->control_mailbox != NULL || p->mailbox != NULL)) {
-        msg = user_only ? mbox_pop_user(p) : mbox_pop_any(p);
+        msg = mbox_pop_for_recv(p, user_only, seq_out);
         mbox_wake_send_waiters_if_low(p);
     } else {
         msg = MARCH_RECV_NO_MSG;
@@ -3288,12 +3298,49 @@ static void *march_sched_recv_until_mode(int64_t deadline_ms, int user_only) {
 
 __attribute__((noinline))
 void *march_sched_recv_until(int64_t deadline_ms) {
-    return march_sched_recv_until_mode(deadline_ms, 0);
+    return march_sched_recv_until_mode(deadline_ms, 0, NULL);
 }
 
 __attribute__((noinline))
 void *march_sched_recv_user_until(int64_t deadline_ms) {
-    return march_sched_recv_until_mode(deadline_ms, 1);
+    return march_sched_recv_until_mode(deadline_ms, 1, NULL);
+}
+
+__attribute__((noinline))
+void *march_sched_recv_user_seq(uint64_t *seq_out) {
+    return march_sched_recv_mode(1, seq_out);
+}
+
+__attribute__((noinline))
+void *march_sched_recv_user_until_seq(int64_t deadline_ms, uint64_t *seq_out) {
+    return march_sched_recv_until_mode(deadline_ms, 1, seq_out);
+}
+
+/* Put n user messages, received by the CURRENT proc through the _seq receives
+ * above, back at the front of its user mailbox: msgs[0] becomes the head, in
+ * order, each with its original enqueue_seq so the user/control interleaving
+ * that mbox_pop_any sees is also what it was.  This is the second half of a
+ * selective receive (march_actor_call keeps the messages it is not waiting
+ * for).  No wake: the owner is the caller, and it is running.  The mailbox
+ * limit is not enforced: these messages were already admitted once. */
+void march_sched_requeue_user_front(void *const *msgs, const uint64_t *seqs,
+                                    int64_t n) {
+    march_proc *p = tl_sched ? tl_sched->current : NULL;
+    if (!p || n <= 0) return;
+    march_mbox_node *first = NULL, *last = NULL;
+    for (int64_t i = 0; i < n; i++) {
+        march_mbox_node *node = mbox_node_new(msgs[i]);
+        node->enqueue_seq = seqs[i];
+        if (last) last->next = node; else first = node;
+        last = node;
+    }
+    mbox_lock_acquire(p);
+    last->next = p->mailbox;
+    if (!p->mailbox) p->mbox_tail = last;
+    p->mailbox = first;
+    atomic_fetch_add_explicit(&p->mbox_count, n, memory_order_relaxed);
+    atomic_fetch_add_explicit(&p->user_mbox_count, n, memory_order_relaxed);
+    mbox_lock_release(p);
 }
 
 /* SIGUSR1 handler: zero the local reduction counter.  The handler is

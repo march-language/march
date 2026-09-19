@@ -31,8 +31,8 @@
 --                never waits; the frame still goes out only under credit.
 --                For a stream that must not lose frames and whose sender
 --                must not block (SessionNode: its sends run in an actor's
---                turn, where a blocked `Actor.call` would take the actor's
---                own messages as its reply). The queue then grows while the
+--                turn, and an actor blocked on one slow peer handles none
+--                of its other messages meanwhile). The queue then grows while the
 --                peer is slow; its owner bounds that by closing the queue
 --                (`close`) when it gives the peer up.
 mod NodeQueue do

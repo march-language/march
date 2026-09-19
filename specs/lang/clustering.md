@@ -435,9 +435,9 @@ peer's credit-based `NodeQueue`. Both return `Ok(seq)`; a later `DELIVERY_FAILED
 that seq. The queue's policy decides what happens when the peer's budget is full:
 - `DropNew` refuses the new message with `Err(Backpressure)`.
 - `DropOld` evicts the oldest queued messages to make room.
-- `BlockSender(timeout_ms)` makes the caller wait for credit. Do not use it inside an
-  actor's handler for now: while the caller waits, a message sent to that actor can be taken
-  as the reply and lost (specs/todos/2026-09-18-actor-call-in-handler-takes-own-messages.md).
+- `BlockSender(timeout_ms)` makes the caller wait for credit. Inside an actor's handler
+  this is safe, but the actor handles nothing else while it waits: messages sent to it in
+  the meantime stay in its mailbox, in order, and are handled after the handler returns.
 - `Unbounded` never refuses and never waits: the message queues past the budget and goes out
   as credit arrives. The choreography runner sends this way.
 
