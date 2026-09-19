@@ -1,0 +1,44 @@
+-- `ClusterConn.accept_split_within`: a client that connects and then says
+-- nothing fails the handshake once the timeout passes, instead of holding
+-- the listener for ever. The handshake reads through `tcp_recv_exact`, which
+-- honours the receive timeout the bounded handshake sets on the socket.
+-- (specs/progress/2026-09-18-session-accept-deadline.md)
+mod ClusterAcceptSilentPeer do
+  needs IO
+  needs IO.Console
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+
+  fn main(c : Cap(IO)) do
+    let listen_fd = match tcp_listen(0) do
+      Ok(fd) -> fd
+      Err(e) -> panic("listen: " ++ e)
+    end
+    let port = match tcp_local_port(listen_fd) do
+      Ok(p) -> p
+      Err(e) -> panic("port: " ++ e)
+    end
+    -- Connects, then holds the connection open without a word.
+    let silent = task_spawn(fn _ -> do
+      match tcp_connect("127.0.0.1", port) do
+        Ok(fd) ->
+          sleep_ms(3000)
+          tcp_close(fd)
+          1
+        Err(_) -> 0
+      end
+    end)
+    let me = NodeIdentity.make("listener", "pk-listener", 1)
+    match ClusterConn.accept_split_within(PeerRegistry.empty(), listen_fd, me, "silent-secret", 500) do
+      Ok(_) -> println("a silent peer completed a handshake")
+      Err(e) -> println("silent peer refused: " ++ e)
+    end
+    match ClusterConn.accept_split_within(PeerRegistry.empty(), listen_fd, me, "silent-secret", 300) do
+      Ok(_) -> println("nobody dialed, yet accepted")
+      Err(e) -> println("nobody else: " ++ e)
+    end
+    println("silent client connected: " ++ int_to_string(task_await_unwrap(silent)))
+    tcp_close(listen_fd)
+  end
+end

@@ -1969,6 +1969,25 @@ let base_env : env =
            with Unix.Unix_error (err, _, _) ->
              VCon ("Err", [VString (Unix.error_message err)]))
         | _ -> eval_error "tcp_accept(listen_fd)"))
+  ; ("tcp_accept_timeout", VBuiltin ("tcp_accept_timeout", function
+        | [VInt listen_fd; VInt timeout_ms] ->
+          (* tcp_accept, giving up once timeout_ms passes with nothing pending
+             (<= 0 waits for ever); the same readiness wait as tcp_recv_timeout. *)
+          let sock = (Obj.magic listen_fd : Unix.file_descr) in
+          let deadline =
+            if timeout_ms > 0 then Some (Unix.gettimeofday () +. float_of_int timeout_ms /. 1000.)
+            else None
+          in
+          (match tcp_wait_readable sock deadline with
+           | `Timeout -> VCon ("Err", [VString "tcp_accept: timed out"])
+           | `Error e -> VCon ("Err", [VString e])
+           | `Ready ->
+             (try
+                let (client_fd, _addr) = Unix.accept sock in
+                VCon ("Ok", [VInt (Obj.magic client_fd : int)])
+              with Unix.Unix_error (err, _, _) ->
+                VCon ("Err", [VString (Unix.error_message err)])))
+        | _ -> eval_error "tcp_accept_timeout(listen_fd, timeout_ms)"))
   ; ("tcp_local_port", VBuiltin ("tcp_local_port", function
         | [VInt fd] ->
           (try
@@ -2038,7 +2057,13 @@ let base_env : env =
                  let got = Unix.recv sock buf off (n - off) [] in
                  if got = 0 then VCon ("Err", [VString "connection closed"])
                  else loop (off + got)
-               with Unix.Unix_error (err, _, _) ->
+               with
+               (* A receive timeout (tcp_set_recv_timeout) expiring: the
+                  kernel enforces it here, and the compiled backend reports it
+                  in the same words. *)
+               | Unix.Unix_error ((Unix.EAGAIN | Unix.EWOULDBLOCK), _, _) ->
+                 VCon ("Err", [VString "tcp_recv_exact: timed out"])
+               | Unix.Unix_error (err, _, _) ->
                  VCon ("Err", [VString (Unix.error_message err)]))
           in
           loop 0

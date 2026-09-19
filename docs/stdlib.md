@@ -958,6 +958,17 @@ ClusterConn.connect_to_peer(reg, host, port, my_id, secret)
 
 ClusterConn.accept_one(reg, listen_fd, my_id, secret)
 -- Result((PeerRegistry.Registry, PeerRegistry.Peer), String)
+
+-- The control/data split: two connections per peer.
+ClusterConn.connect_split(reg, host, port, my_id, secret)
+ClusterConn.accept_split(reg, listen_fd, my_id, secret)
+-- Result((PeerRegistry.Registry, PeerRegistry.Peer), String)
+
+-- The same, giving up after timeout_ms (<= 0: no limit) with no connection
+-- pending or a handshake unfinished; a peer that connects and says nothing
+-- is refused instead of holding the caller.
+ClusterConn.connect_split_within(reg, host, port, my_id, secret, timeout_ms)
+ClusterConn.accept_split_within(reg, listen_fd, my_id, secret, timeout_ms)
 ```
 
 `tcp_listen` and `tcp_accept` are builtins in the `IO.NetListen` capability group:
@@ -965,7 +976,13 @@ ClusterConn.accept_one(reg, listen_fd, my_id, secret)
 ```march
 tcp_listen(port)       : Result(Int, String)  -- bind + listen, return fd
 tcp_accept(listen_fd)  : Result(Int, String)  -- block until client, return fd
+tcp_accept_timeout(listen_fd, timeout_ms) : Result(Int, String)
+                       -- as tcp_accept; Err("tcp_accept: timed out") if no client
+                       -- connects within timeout_ms (<= 0 waits for ever)
 ```
+
+`tcp_recv_exact` honours a receive timeout set with `tcp_set_recv_timeout`: the whole read
+fails with `Err("tcp_recv_exact: timed out")` once it passes.
 
 ---
 

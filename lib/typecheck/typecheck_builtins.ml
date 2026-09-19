@@ -143,6 +143,7 @@ let builtin_cap_table : (string * string) list = [
   (* IO.NetListen *)
   ("tcp_listen",            "IO.NetListen");
   ("tcp_accept",            "IO.NetListen");
+  ("tcp_accept_timeout",    "IO.NetListen");
   ("tcp_local_port",        "IO.NetListen");
   ("http_server_listen",    "IO.NetListen");
   ("http_server_spawn_n",   "IO.NetListen");
@@ -955,6 +956,9 @@ let builtin_bindings : (string * scheme) list =
     ("tcp_listen",              Mono (TArrow (t_int, t_result t_int t_string)));
     (* tcp_accept(listen_fd): blocks until a client connects, returns Ok(client_fd) or Err *)
     ("tcp_accept",              Mono (TArrow (t_int, t_result t_int t_string)));
+    (* tcp_accept_timeout(listen_fd, timeout_ms): tcp_accept, or Err("tcp_accept: timed out")
+       when no client connects within timeout_ms (<= 0 waits for ever) *)
+    ("tcp_accept_timeout",      Mono (TArrow (t_int, TArrow (t_int, t_result t_int t_string))));
     (* tcp_local_port(fd): the local (bound) port of a socket — the OS-assigned
        one when listened on port 0. Returns Ok(port) or Err(reason). *)
     ("tcp_local_port",          Mono (TArrow (t_int, t_result t_int t_string)));

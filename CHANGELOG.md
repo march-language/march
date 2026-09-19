@@ -12,6 +12,15 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
+- **A choreography role no longer waits for ever for a peer that never connects.** The
+  role runner's accept had no deadline, so a listening role whose peer never started, or
+  failed its own setup, waited indefinitely, and with three or more roles one failed
+  node could hold the rest. Setup now gives up after 20 seconds
+  (`MARCH_SESSION_CONNECT_MS`) with an error naming the missing roles, and a role that
+  fails setup closes the connections it already made so its peers fail promptly too. A
+  peer that connects and then says nothing is refused the same way. New builtin
+  `tcp_accept_timeout`, new `ClusterConn.accept_split_within` /
+  `connect_split_within`, and `tcp_recv_exact` now honours `tcp_set_recv_timeout`.
 - **`Actor.call` from inside an actor's handler no longer steals the actor's messages.**
   A message sent to the calling actor while it waited for the reply was returned as the
   call's answer (a meaningless number) and never reached its handler. Such messages now

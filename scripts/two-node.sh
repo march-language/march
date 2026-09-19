@@ -18,6 +18,9 @@
 #                                 node-b also gets MARCH_NODE_PORT (= MARCH_PORT_B)
 #                                 and MARCH_NODE_CREATION, node-a MARCH_PEER_PORT
 #                                 (= MARCH_PORT_B), the two-node spelling.
+#   compile <a|b|c>               compile the node now rather than in its first
+#                                 start_node, for a scenario whose timing must
+#                                 not include a compile (a setup deadline)
 #   kill_node <a|b|c>             SIGKILL it (a crash, distinct from a close)
 #   stop_node / cont_node <a|b|c> SIGSTOP / SIGCONT (a stall, distinct from a crash)
 #   drop_link [port...] / heal    drop every TCP packet to or from node-b's port

@@ -1,0 +1,44 @@
+-- `tcp_accept_timeout`: a listener that nobody dials gives up with
+-- Err("tcp_accept: timed out") once the timeout passes, instead of waiting
+-- for ever as `tcp_accept` does; one that is dialed accepts as usual. The
+-- session role runner's accept deadline stands on it
+-- (specs/progress/2026-09-18-session-accept-deadline.md).
+mod TcpAcceptTimeout do
+  needs IO
+  needs IO.Console
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+
+  fn main(c : Cap(IO)) do
+    let listen_fd = match tcp_listen(0) do
+      Ok(fd) -> fd
+      Err(e) -> panic("listen: " ++ e)
+    end
+    let port = match tcp_local_port(listen_fd) do
+      Ok(p) -> p
+      Err(e) -> panic("port: " ++ e)
+    end
+    match tcp_accept_timeout(listen_fd, 300) do
+      Ok(_) -> println("nobody dialed, yet accepted")
+      Err(e) -> println("no client: " ++ e)
+    end
+    let dialer = task_spawn(fn _ -> do
+      sleep_ms(100)
+      match tcp_connect("127.0.0.1", port) do
+        Ok(fd) ->
+          tcp_close(fd)
+          1
+        Err(_) -> 0
+      end
+    end)
+    match tcp_accept_timeout(listen_fd, 5000) do
+      Ok(fd) ->
+        println("client accepted")
+        tcp_close(fd)
+      Err(e) -> println("dialed, yet: " ++ e)
+    end
+    println("dialer connected: " ++ int_to_string(task_await_unwrap(dialer)))
+    tcp_close(listen_fd)
+  end
+end

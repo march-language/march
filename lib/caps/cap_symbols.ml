@@ -71,6 +71,7 @@ let table : (string * string) list = [
   (* IO.NetListen *)
   ("march_tcp_listen",             "IO.NetListen");
   ("march_tcp_accept",             "IO.NetListen");
+  ("march_tcp_accept_timeout",     "IO.NetListen");
   ("march_tcp_local_port",         "IO.NetListen");
   ("march_http_server_listen",     "IO.NetListen");
   ("march_http_server_spawn_n",    "IO.NetListen");
