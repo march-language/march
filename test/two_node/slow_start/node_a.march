@@ -1,0 +1,40 @@
+-- Two-node scenario "slow_start": node-a runs role A, which spins the CPU
+-- for 4 s before its first send; node-b runs B. See scenario.sh.
+mod SlowStartA do
+  needs IO
+  needs IO.Clock
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs Session.Live
+
+  @[endpoints]
+  protocol Slow do
+    A -> B : Int
+    B -> A : Int
+  end
+
+  -- Busy, not parked: the heartbeat has to get its turn by preemption.
+  pfn spin(until : Int, n : Int) : Int do
+    if n % 10000 == 0 && unix_time_ms() >= until do n else spin(until, n + 1) end
+  end
+
+  pfn role_a(s : Cap(Session.Live), st : Slow_A.S_send_Msg_A_B_1) : Slow_A.Yield do
+    let _ = spin(unix_time_ms() + 4000, 1)
+    println("A: sends 21")
+    let st1 = Slow_A.send_Msg_A_B_1(s, st, 21)
+    Slow_A.recv_Msg_B_A_1(s, st1, fn (n, st2) ->
+      println("A: got " ++ int_to_string(n))
+      Slow_A.close(s, st2))
+  end
+
+  fn main(c : Cap(IO)) do
+    println("node-a: up")
+    match Slow_Run.run_A(c, "node-a", "slow-secret", Slow_Run.addrs_from_env(), fn (s, st) -> role_a(s, st)) do
+      Ok(_) -> println("A: closed")
+      Err(e) -> println("A: " ++ SessionNode.run_error_message(e))
+    end
+  end
+end

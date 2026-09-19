@@ -1,0 +1,4 @@
+node-a: up
+A: sends 21
+A: got 42
+A: closed
