@@ -1,0 +1,65 @@
+-- Two-node harness, scenario "cluster_fan_late_crash" (three nodes): the
+-- drain rule of test/two_node/fan_late_crash, with the session run over the
+-- cluster node service (Fan_Run.cluster_A: peers found by name under the
+-- session id, frames over the node's shared connections, SWIM and refused
+-- redials as the failure detector). B sends C its 9 and is SIGKILLed before
+-- it closes; node-c learns node-b is dead from its node, told behind B's 9 by
+-- the data reader, so the session still completes on A and C.
+-- Design: specs/progress/2026-09-18-cluster-node-service.md (phase 4).
+-- node-a hosts role A; it sends only once FAN_GO_FILE exists.
+mod ClusterFanLateCrashA do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+
+  @[endpoints]
+  protocol Fan do
+    A -> C : Int
+    B -> C : Int
+    C -> A : Bool
+  end
+
+
+  pfn join() : ClusterNode.ClusterHandle do
+    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "fan-secret", 1)
+    match ClusterNode.start(cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        if ClusterNode.await_members(h, 2, 120000) do h else panic("node-a: never joined") end
+    end
+  end
+
+  pfn wait_for(path : String) : () do
+    if File.exists(path) do () else
+      sleep_ms(50)
+      wait_for(path)
+    end
+  end
+
+  pfn role_a(s : Cap(Session.Live), st : Fan_A.S_send_Msg_A_C_1) : Fan_A.Yield do
+    wait_for(Env.require("FAN_GO_FILE"))
+    println("A: sends 7")
+    let st1 = Fan_A.send_Msg_A_C_1(s, st, 7)
+    Fan_A.recv_Msg_C_A_1(s, st1, fn (ok, st2) ->
+      println("A: got " ++ bool_to_string(ok))
+      Fan_A.close(s, st2))
+  end
+
+  fn main(c : Cap(IO)) do
+    let h = join()
+    println("node-a: up")
+    match Fan_Run.cluster_A(c, h, "fan-1", fn (s, st) -> role_a(s, st)) do
+      Ok(_) -> println("A: closed")
+      Err(SessionNode.Cancelled(role, cause)) ->
+        println("A: cancelled waiting on role " ++ int_to_string(role) ++ ": " ++ cause)
+      Err(e) -> println("A: " ++ SessionNode.run_error_message(e))
+    end
+    ClusterNode.stop(h)
+  end
+end

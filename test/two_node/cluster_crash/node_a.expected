@@ -1,0 +1,5 @@
+node-a: done
+node-a: node-b dead: connection refused
+node-a: node-b suspect
+node-a: node-b up
+node-a: up

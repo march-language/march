@@ -1,0 +1,89 @@
+-- Two-node harness, scenario "cluster_mux": node-b, the receiving side.
+-- Hosts two stream receivers and a target process, each reachable by name
+-- (ClusterNode.register) and by route (ClusterNode.route): every actor
+-- message node-a sends arrives on the ONE data connection of the pair and is
+-- routed by destination pid from the data reader. Each receiver checks that
+-- its stream arrives complete and in order. The target is killed when a
+-- "Die" message arrives; node-a has a remote monitor on it, whose fire must
+-- come back through the control writer (the C registry never writes a
+-- service node's socket itself).
+-- Design: specs/progress/2026-09-18-cluster-node-service.md (phase 3).
+mod ClusterMuxB do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+
+  pfn total() : Int do 2000 end
+
+  actor Receiver do
+    state { name : String, next : Int, in_order : Bool }
+    init { name: "", next: 1, in_order: true }
+    on Name(n : String) do { name: n, next: state.next, in_order: state.in_order } end
+    on Got(k : Int) do
+      let ok = state.in_order && k == state.next
+      if k == total() do
+        println("node-b: " ++ state.name ++ " got " ++ int_to_string(total()) ++ " in order: " ++ bool_to_string(ok))
+      else () end
+      { name: state.name, next: state.next + 1, in_order: ok }
+    end
+  end
+
+  actor Target do
+    state { n : Int }
+    init { n: 0 }
+    on Poke() do state end
+  end
+
+  pfn int_of(d : NodeSend.Delivery) : Int do
+    match String.to_int(Bytes.to_string(Bytes.from_list(d.payload))) do
+      Ok(k) -> k
+      Err(_) -> -1
+    end
+  end
+
+  pfn wait_file(path : String) : () do
+    if File.exists(path) do () else
+      sleep_ms(50)
+      wait_file(path)
+    end
+  end
+
+  fn main(_c : Cap(IO)) do
+    let seed = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A"))
+    let cfg = ClusterNode.config("node-b", Env.require_int("MARCH_PORT_B"), "", Cons(seed, Nil), "mux-secret", 1)
+    match ClusterNode.start(cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        let sx = spawn(Receiver)
+        send(sx, Name("sx"))
+        let sy = spawn(Receiver)
+        send(sy, Name("sy"))
+        let target = spawn(Target)
+        let _ = ClusterNode.route(h, pid_to_int(sx), fn d -> do
+          send(sx, Got(int_of(d)))
+          Ok(())
+        end)
+        let _ = ClusterNode.route(h, pid_to_int(sy), fn d -> do
+          send(sy, Got(int_of(d)))
+          Ok(())
+        end)
+        let _ = ClusterNode.route(h, pid_to_int(target), fn d -> do
+          if d.type_tag == "Mux.Die" do kill(target) else () end
+          Ok(())
+        end)
+        if ClusterNode.await_members(h, 1, 120000) do () else println("node-b: never joined") end
+        let r1 = ClusterNode.register(h, "sx", sx)
+        let r2 = ClusterNode.register(h, "sy", sy)
+        let r3 = ClusterNode.register(h, "target", target)
+        if Result.is_ok(r1) && Result.is_ok(r2) && Result.is_ok(r3) do println("node-b: ready") else println("node-b: register refused") end
+        wait_file(Env.require("CLUSTER_STOP_FILE"))
+        ClusterNode.stop(h)
+        println("node-b: done")
+    end
+  end
+end

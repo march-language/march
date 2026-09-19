@@ -1,0 +1,65 @@
+-- Two-node harness, scenario "cluster_join" (three nodes): node-a.
+-- node-a has no seeds; node-b and node-c each name only node-a. Every node
+-- must end with a direct connection pair to BOTH others, so node-c learns
+-- node-b's address from gossip (MEMBERS_SYNC / MEMBER_GOSSIP), not from its
+-- configuration: the node_id -> address mapping the cluster node service
+-- adds (specs/progress/2026-09-18-cluster-node-service.md, phase 1).
+-- Each node prints one report once it has converged, then waits for the
+-- scenario's stop file and exits, so nothing prints while the others stop.
+mod ClusterJoinA do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+
+  pfn me() : String do "node-a" end
+
+  pfn port_of(name : String) : Int do
+    if name == "node-a" do Env.require_int("MARCH_PORT_A")
+    else if name == "node-b" do Env.require_int("MARCH_PORT_B")
+    else Env.require_int("MARCH_PORT_C") end end
+  end
+
+  pfn wait_for(path : String) : () do
+    if File.exists(path) do () else
+      sleep_ms(50)
+      wait_for(path)
+    end
+  end
+
+  pfn converged(h : ClusterNode.ClusterHandle, left : Int) : Bool do
+    if List.length(ClusterNode.members(h)) >= 2 && ClusterNode.link_count(h) >= 2 do true
+    else if left <= 0 do false
+    else
+      sleep_ms(50)
+      converged(h, left - 50)
+    end end
+  end
+
+  fn main(_c : Cap(IO)) do
+    let port = port_of(me())
+    let cfg = ClusterNode.config(me(), port, "", Nil, "join-secret", 1)
+    match ClusterNode.start(cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        println(me() ++ ": up")
+        if converged(h, 120000) do
+          let infos = List.sort_by(ClusterNode.members(h), fn (a, b) -> a.name < b.name)
+          let _ = List.map(infos, fn i ->
+            println(me() ++ ": sees " ++ i.name ++ " at its own port: " ++
+                    bool_to_string(i.addr == "127.0.0.1:" ++ int_to_string(port_of(i.name)))))
+          println(me() ++ ": linked to both")
+        else
+          println(me() ++ ": did not converge (" ++ int_to_string(List.length(ClusterNode.members(h))) ++
+                  " members, " ++ int_to_string(ClusterNode.link_count(h)) ++ " links)")
+        end
+        wait_for(Env.require("CLUSTER_STOP_FILE"))
+        ClusterNode.stop(h)
+        println(me() ++ ": done")
+    end
+  end
+end

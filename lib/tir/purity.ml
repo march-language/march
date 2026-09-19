@@ -18,7 +18,7 @@ let impure_builtins = [
   "file_read_line"; "file_open"; "file_close";
   "file_read"; "file_write"; "file_write_line";
   (* Network / TLS *)
-  "tcp_connect"; "tcp_send_all"; "tcp_recv_all"; "tcp_recv_exact"; "tcp_close"; "tcp_shutdown"; "tcp_local_port";
+  "tcp_connect"; "tcp_connect_timeout"; "tcp_send_all"; "tcp_recv_all"; "tcp_recv_exact"; "tcp_close"; "tcp_shutdown"; "tcp_local_port";
   "sleep_ms";
   "tcp_recv_chunk_timeout"; "tcp_set_recv_timeout"; "tcp_recv_timeout";
   "tls_connect"; "tls_read"; "tls_read_timeout"; "tls_write"; "tls_close";

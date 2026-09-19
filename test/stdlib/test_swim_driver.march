@@ -191,7 +191,7 @@ mod TestSwimDriver do
       assert (SwimDriver.msg_to_event(SwimPing("a@h"))    == None)
       assert (SwimDriver.msg_to_event(SwimPingReq("r@h", "t@h")) == None)
       assert (SwimDriver.msg_to_event(SwimGossip("b@h", Suspect, 5)) ==
-              Some(GossipFrame({ node_id: "b@h", status: Suspect, incarnation: 5 })))
+              Some(GossipFrame(Membership.member("b@h", "b@h", "", 0, Suspect, 5))))
     end
 
     test "SwimGossipLoad round-trips with piggybacked NodeLoad" do
@@ -239,7 +239,7 @@ mod TestSwimDriver do
       let s = driver_a()
       let nl = { node_id: "b@h", cpu_count: 4, cpu_load_milli: 2000,
                  mem_total_mb: 8192, mem_avail_mb: 4096, sampled_at: 5000 }
-      let events = Cons(GossipWithLoad({ node_id: "b@h", status: Alive, incarnation: 1 }, nl), Nil)
+      let events = Cons(GossipWithLoad(Membership.member("b@h", "b@h", "", 0, Alive, 1), nl), Nil)
       let result = SwimDriver.step(s, 500, events)
       let s2 = match result do (st, _) -> st end
       let load = SwimDriver.peer_load(s2, "b@h", 5500)
@@ -253,7 +253,7 @@ mod TestSwimDriver do
       let s = driver_a()
       let nl = { node_id: "b@h", cpu_count: 4, cpu_load_milli: 2000,
                  mem_total_mb: 8192, mem_avail_mb: 4096, sampled_at: 100 }
-      let events = Cons(GossipWithLoad({ node_id: "b@h", status: Alive, incarnation: 1 }, nl), Nil)
+      let events = Cons(GossipWithLoad(Membership.member("b@h", "b@h", "", 0, Alive, 1), nl), Nil)
       let result = SwimDriver.step(s, 500, events)
       let s2 = match result do (st, _) -> st end
       -- Aged from receipt (500), not the sender's stamp (100): fresh at
@@ -266,7 +266,7 @@ mod TestSwimDriver do
       let s = driver_a()
       let nl = { node_id: "b@h", cpu_count: 4, cpu_load_milli: 2000,
                  mem_total_mb: 8192, mem_avail_mb: 4096, sampled_at: 30500 }
-      let result = SwimDriver.step(s, 500, Cons(GossipWithLoad({ node_id: "b@h", status: Alive, incarnation: 1 }, nl), Nil))
+      let result = SwimDriver.step(s, 500, Cons(GossipWithLoad(Membership.member("b@h", "b@h", "", 0, Alive, 1), nl), Nil))
       let s2 = match result do (st, _) -> st end
       assert (SwimDriver.peer_load(s2, "b@h", 10501) == None)
       assert (List.length(SwimDriver.fresh_peer_loads(s2, 10501)) == 0)
@@ -276,7 +276,7 @@ mod TestSwimDriver do
       let s = driver_a()
       let nl = { node_id: "b@h", cpu_count: 4, cpu_load_milli: 2000,
                  mem_total_mb: 8192, mem_avail_mb: 4096, sampled_at: 0 - 29500 }
-      let result = SwimDriver.step(s, 500, Cons(GossipWithLoad({ node_id: "b@h", status: Alive, incarnation: 1 }, nl), Nil))
+      let result = SwimDriver.step(s, 500, Cons(GossipWithLoad(Membership.member("b@h", "b@h", "", 0, Alive, 1), nl), Nil))
       let s2 = match result do (st, _) -> st end
       assert (SwimDriver.peer_load(s2, "b@h", 600) != None)
     end
@@ -303,6 +303,54 @@ mod TestSwimDriver do
       -- now = 500 + 30001 > anti_entropy_next
       let peers = SwimDriver.anti_entropy_peers(s2, 30501)
       assert (List.length(peers) >= 1)
+    end
+
+  end
+
+
+  describe "SwimDriver full-member frames (the node service)" do
+
+    test "MEMBER_GOSSIP round-trips every field" do
+      let m = Membership.member("id1", "node-a", "127.0.0.1:9", 5, Suspect, 3)
+      match SwimDriver.decode_member_gossip(SwimDriver.encode_member_gossip(m)) do
+        Ok(d) -> assert (d == m)
+        Err(_) -> assert false
+      end
+    end
+
+    test "MEMBERS_SYNC round-trips a view" do
+      let a = Membership.member("id1", "node-a", "127.0.0.1:9", 5, Alive, 3)
+      let b = Membership.member("id2", "node-b", "127.0.0.1:10", 1, Dead, 2)
+      match SwimDriver.decode_members_sync(SwimDriver.encode_members_sync(Cons(a, Cons(b, Nil)))) do
+        Ok(ms) -> assert (List.length(ms) == 2 && List.head(ms) == a)
+        Err(_) -> assert false
+      end
+    end
+
+    test "ConnLost suspects the peer, and the suspect timer promotes it" do
+      let cfg = Swim.config(100, 1000, 0)
+      let ms = Membership.observe(Membership.observe(Membership.empty(), Membership.alive("a", 1)), Membership.alive("b", 1))
+      let s0 = SwimDriver.make("a", 1, ms, cfg, 500, 1)
+      let (s1, _) = SwimDriver.step(s0, 1000, Cons(ConnLost("b"), Nil))
+      match Membership.get(s1.swim.members, "b") do
+        Some(m) -> assert (m.status == Suspect)
+        None -> assert false
+      end
+      let (s2, _) = SwimDriver.step(s1, 1600, Nil)
+      let (s3, _) = SwimDriver.step(s2, 2200, Nil)
+      match Membership.get(s3.swim.members, "b") do
+        Some(m) -> assert (m.status == Dead)
+        None -> assert false
+      end
+    end
+
+    test "action_frames sends a gossip to every peer as MEMBER_GOSSIP" do
+      let fs = SwimDriver.action_frames(Swim.Gossip(Membership.alive("x", 1)), "a", Cons("b", Cons("c", Nil)))
+      assert (List.length(fs) == 2)
+      match fs do
+        Cons((dest, bytes), _) -> assert (dest == "b" && PeerReader.tag_of(bytes) == 13)
+        Nil -> assert false
+      end
     end
 
   end

@@ -1,0 +1,5 @@
+node-a: done
+node-a: linked to both
+node-a: sees node-b at its own port: true
+node-a: sees node-c at its own port: true
+node-a: up

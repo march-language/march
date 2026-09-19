@@ -47,6 +47,7 @@ let table : (string * string) list = [
   ("march_file_copy",              "IO.FileSystem");
   (* IO.NetConnect *)
   ("march_tcp_connect",            "IO.NetConnect");
+  ("march_tcp_connect_timeout",    "IO.NetConnect");
   ("march_tcp_send_all",           "IO.NetConnect");
   ("march_tcp_recv_all",           "IO.NetConnect");
   ("march_tcp_recv_exact",         "IO.NetConnect");

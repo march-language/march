@@ -76,4 +76,26 @@ mod TestHandshake do
 
   end
 
+
+  describe "Handshake hello advertised address" do
+
+    test "an address round-trips" do
+      let id = NodeIdentity.make("n", "pk-n", 3)
+      let h = Handshake.make_hello_addr(id, "nonce", Handshake.role_data(), "10.0.0.1:4000")
+      match Handshake.decode_hello(Handshake.encode_hello(h)) do
+        Ok(d) -> assert (d.addr == "10.0.0.1:4000" && d.role == "data")
+        Err(_) -> assert false
+      end
+    end
+
+    test "a hello without an address decodes with an empty one" do
+      let id = NodeIdentity.make("n", "pk-n", 3)
+      match Handshake.decode_hello(Handshake.encode_hello(Handshake.make_hello_role(id, "nonce", "data"))) do
+        Ok(d) -> assert (d.addr == "" && d.role == "data")
+        Err(_) -> assert false
+      end
+    end
+
+  end
+
 end

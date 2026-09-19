@@ -4,6 +4,16 @@ Filed 2026-09-18 as phase 4 of [[2026-09-18-choreography-failure-handling]], who
 to 3 shipped. That design sequenced this one "design note first", because it has an open
 question the others did not; this file is that note's starting point.
 
+**Built on [[2026-09-18-cluster-node-service]]** (shipped the same day): access points are
+found by name through the node's `GlobalRegistry` replica, and cluster-mode sessions
+multiplex over the node's peer connections, with SWIM as the failure detector. What is there
+to build on: `ClusterNode.register / lookup / watch` (a `Lost(name, winner)` tells an access
+point it no longer holds its name after a partition heals), and
+`SessionNode.run_cluster` / `<P>_Run.cluster_<Role>(io, node, session, body)`, which forms
+a session by registering each role's endpoint under `"session:<sid>/<role>"` and finding
+the others by name. What an access point adds is choosing `<sid>` and pairing registrations
+(the open question below).
+
 ## What it is for
 
 Maty's recovery story (Fowler and Hu, *Speak Now*, section 5): a failed session is cancelled

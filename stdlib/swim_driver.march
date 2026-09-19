@@ -52,7 +52,8 @@ mod SwimDriver do
       PingAck(String)                    -- received a PingAck from this node_id
     | GossipFrame(Member)                -- received and decoded a gossip member update
     | GossipWithLoad(Member, NodeLoad)   -- gossip + piggybacked load sample
-    | PeerDown(String)                   -- transport confirmed this peer's socket closed
+    | PeerDown(String)                   -- transport confirmed this peer is gone (definitive: Dead)
+    | ConnLost(String)                   -- a connection to this peer closed (a hint: Suspect)
 
   -- Wire messages.
   type WireMsg =
@@ -108,7 +109,7 @@ mod SwimDriver do
 
   -- ── event processing ──────────────────────────────────────────────────────
 
-  pfn apply_event(swim : Swim.State, ev : Event) : (Swim.State, List(Swim.Action)) do
+  pfn apply_event(swim : Swim.State, now : Int, ev : Event) : (Swim.State, List(Swim.Action)) do
     match ev do
       PingAck(node_id) ->
         (Swim.on_ack(swim, node_id), Nil)
@@ -124,10 +125,11 @@ mod SwimDriver do
           Some(m) -> m.incarnation
           None    -> 0
         end
-        let dead_m = Membership.dead(node_id, current_inc)
+        let dead_m = Membership.verdict(swim.members, node_id, Dead, current_inc)
         let swim2 = Swim.on_gossip(swim, dead_m)
         let out = (swim2, Cons(Gossip(dead_m), Nil))
         out
+      ConnLost(node_id) -> Swim.suspect_member(swim, now, node_id)
     end
   end
 
@@ -148,11 +150,11 @@ mod SwimDriver do
       end)
   end
 
-  pfn apply_events(swim : Swim.State, evs : List(Event)) : (Swim.State, List(Swim.Action)) do
+  pfn apply_events(swim : Swim.State, now : Int, evs : List(Event)) : (Swim.State, List(Swim.Action)) do
     List.fold_left(evs, (swim, Nil), fn (acc, ev) ->
       match acc do
         (sw, acts) ->
-          match apply_event(sw, ev) do
+          match apply_event(sw, now, ev) do
             (sw2, new_acts) -> (sw2, List.append(acts, new_acts))
           end
       end)
@@ -166,7 +168,7 @@ mod SwimDriver do
   -- Returns the updated state and the list of Actions to execute.
   fn step(s : State, now : Int, events : List(Event)) : (State, List(Swim.Action)) do
     -- 1. Fold in transport events.
-    let ev_out = apply_events(s.swim, events)
+    let ev_out = apply_events(s.swim, now, events)
     let swim1 = match ev_out do (sw, _) -> sw end
     let ev_acts = match ev_out do (_, a) -> a end
 
@@ -382,15 +384,96 @@ mod SwimDriver do
     end
   end
 
+  -- ── full-member frames (the cluster node service) ────────────────────────
+  -- Tag 3 is already overloaded by element count, so a member with its
+  -- origin fields travels under its own tags:
+  --   13 MEMBER_GOSSIP  [13, node_id, name, addr, creation, status_int, incarnation]
+  --   14 MEMBERS_SYNC   [14, [[node_id, name, addr, creation, status_int, incarnation], ...]]
+  -- MEMBERS_SYNC is the whole view, exchanged both ways on every new
+  -- connection: SWIM's push-pull join, and the heal path.
+
+  fn tag_member_gossip() : Int do 13 end
+  fn tag_members_sync() : Int do 14 end
+
+  pfn member_fields(m : Member) do
+    Cons(Msgpack.str(m.node_id),
+    Cons(Msgpack.str(m.name),
+    Cons(Msgpack.str(m.addr),
+    Cons(Msgpack.int(m.creation),
+    Cons(Msgpack.int(status_to_int(m.status)),
+    Cons(Msgpack.int(m.incarnation), Nil))))))
+  end
+
+  pfn member_of_fields(fields) : Result(Member, String) do
+    match fields do
+      Cons(Msgpack.Str(nid), Cons(Msgpack.Str(name), Cons(Msgpack.Str(addr),
+        Cons(Msgpack.Int(cr), Cons(Msgpack.Int(st), Cons(Msgpack.Int(inc), Nil)))))) ->
+          match int_to_status(st) do
+            Err(e) -> Err(e)
+            Ok(status) -> Ok(Membership.member(nid, name, addr, cr, status, inc))
+          end
+      _ -> Err("swim_driver: bad member record")
+    end
+  end
+
+  fn encode_member_gossip(m : Member) : List(Int) do
+    Msgpack.encode(Msgpack.array(Cons(Msgpack.int(tag_member_gossip()), member_fields(m))))
+  end
+
+  fn decode_member_gossip(bytes : List(Int)) : Result(Member, String) do
+    match Msgpack.decode(bytes) do
+      Err(e) -> Err(e)
+      Ok(Msgpack.Array(Cons(Msgpack.Int(13), fields))) -> member_of_fields(fields)
+      Ok(_) -> Err("swim_driver: not a MEMBER_GOSSIP frame")
+    end
+  end
+
+  fn encode_members_sync(ms : List(Member)) : List(Int) do
+    let recs = List.map(ms, fn m -> Msgpack.array(member_fields(m)))
+    Msgpack.encode(Msgpack.array(Cons(Msgpack.int(tag_members_sync()), Cons(Msgpack.array(recs), Nil))))
+  end
+
+  -- A malformed record is skipped, not fatal: the rest of the view still merges.
+  fn decode_members_sync(bytes : List(Int)) : Result(List(Member), String) do
+    match Msgpack.decode(bytes) do
+      Err(e) -> Err(e)
+      Ok(Msgpack.Array(Cons(Msgpack.Int(14), Cons(Msgpack.Array(recs), Nil)))) ->
+        Ok(List.filter_map(recs, fn r ->
+          match r do
+            Msgpack.Array(fields) ->
+              match member_of_fields(fields) do
+                Ok(m) -> Some(m)
+                Err(_) -> None
+              end
+            _ -> None
+          end))
+      Ok(_) -> Err("swim_driver: not a MEMBERS_SYNC frame")
+    end
+  end
+
+  -- The frames one Swim.Action turns into, as (destination node_id, payload)
+  -- pairs, for a transport that writes through its own per-peer writers
+  -- instead of `dispatch`'s direct fd writes. Gossip goes to every id in
+  -- [peer_ids] as a full-member MEMBER_GOSSIP frame.
+  fn action_frames(action : Swim.Action, my_id : String, peer_ids : List(String)) : List((String, List(Int))) do
+    match action do
+      SendPing(target) -> Cons((target, encode_msg(SwimPing(my_id))), Nil)
+      SendPingReq(helper, target) -> Cons((helper, encode_msg(SwimPingReq(my_id, target))), Nil)
+      Gossip(m) ->
+        let bytes = encode_member_gossip(m)
+        List.map(peer_ids, fn id -> (id, bytes))
+    end
+  end
+
   -- Decode a wire message into a driver Event (None for messages the transport
   -- responder handles directly, e.g. SwimPing → send SwimPingAck back).
   fn msg_to_event(msg : WireMsg) : Option(Event) do
     match msg do
       SwimPingAck(sender)            -> Some(PingAck(sender))
       SwimGossip(node_id, status, incarnation) ->
-        Some(GossipFrame({ node_id: node_id, status: status, incarnation: incarnation }))
+        Some(GossipFrame(Membership.member(node_id, node_id, "", 0, status, incarnation)))
       SwimGossipLoad(node_id, status, incarnation, nl) ->
-        Some(GossipWithLoad({ node_id: node_id, status: status, incarnation: incarnation }, nl))
+        Some(GossipWithLoad(Membership.member(node_id, node_id, "", 0, status, incarnation), nl))
       _ -> None
     end
   end

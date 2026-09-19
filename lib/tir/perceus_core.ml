@@ -949,6 +949,20 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
         (* [iv] is a borrowed field var inside this sub-scope; check the body
            with that knowledge. *)
         result_is_borrowed_field (StringSet.add iv.Tir.v_name bfv) ibody
+      | Tir.ELet (iv, rhs, ibody)
+        when needs_rc env iv.Tir.v_ty && result_is_borrowed_field bfv rhs ->
+        (* [iv] is bound to a nested projection chain that is itself a
+           borrowed field reference -- a three-deep read [st.a.b.c] lowers to
+           [let t2 = (let t1 = (let t0 = st.a in t0.b) in t1.c)], so the
+           middle binding's RHS is an ELet, not an EField, and the arm above
+           never fired. Falling through to the arm below dropped [iv] from
+           [bfv], the chain's last projection then looked owned, and a
+           consuming call on it got no dup: the record's drop freed the field
+           a second time (RC underflow; cluster_node's
+           [st.driver.swim.members]). The binding's own classification (its
+           ELet processed below) already treats [iv] as borrowed; this keeps
+           the lookahead consistent with it. *)
+        result_is_borrowed_field (StringSet.add iv.Tir.v_name bfv) ibody
       | Tir.ELet (_, _, ibody) -> result_is_borrowed_field bfv ibody
       | Tir.EField (Tir.AVar src, _)
         when (match src.Tir.v_ty with Tir.TPtr _ -> false | _ -> true)

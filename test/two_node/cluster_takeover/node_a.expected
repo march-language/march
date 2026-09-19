@@ -1,0 +1,6 @@
+node-a: done
+node-a: leader bound to node-a
+node-a: leader bound to node-b
+node-a: leader unbound
+node-a: node-b rejoined
+node-a: up

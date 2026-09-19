@@ -12,9 +12,10 @@
 --
 -- P5 frame types (tag byte prepended before the msgpack payload):
 --   0x05 REGISTRY_SYNC_REQ  [tag=5, root_hash:Str]
---   0x06 REGISTRY_SYNC_RESP [tag=6, root_hash:Str, leaves:[[name,nid,pid,present,clock],...]]
+--   0x06 REGISTRY_SYNC_RESP [tag=6, root_hash:Str, leaves:[[name,nid,pid,present,clock,creation],...]]
 --     clock: [[actor_id:Str, ts:Int],...]; a 4-element leaf (no clock, the
---     original encoding) still decodes, with an empty clock
+--     original encoding) still decodes, with an empty clock, and a
+--     5-element one (no creation) with creation 0
 --   0x07 MONITOR_REQ        [tag=7, watcher_node:Str, watcher_pid:Int, target_pid:Int]
 --   0x08 MONITOR_FIRE       [tag=8, target_pid:Int, reason_tag:Int, reason_msg:Str]
 --     reason_tag: 0=Normal, 1=Killed, 2=Crash, 3=NodeDown
@@ -146,6 +147,80 @@ mod NetKernel do
     end
   end
 
+  -- ── handshake with a deadline (the cluster node service) ─────────────────
+  -- A peer that is SIGSTOPped still completes the TCP connect (its kernel
+  -- answers from the listen backlog) and then never sends its hello, so an
+  -- unbounded read would park the dialer for as long as the stop lasts.
+  -- Every read below is bounded by one absolute deadline, and asks for at
+  -- most the bytes still missing, so it never over-reads past the frame
+  -- (the recv_frame_exact rule).
+
+  pfn recv_exact_until(fd : Int, need : Int, deadline : Int, acc : List(Int)) : Result(List(Int), String) do
+    if need <= 0 do
+      Ok(acc)
+    else
+      let left = deadline - unix_time_ms()
+      if left <= 0 do
+        Err("net-kernel: handshake timed out")
+      else
+        match Socket.recv_timeout(fd, need, left) do
+          Err(Socket.RecvTimeout(_)) -> Err("net-kernel: handshake timed out")
+          Err(e) -> Err("net-kernel: " ++ Socket.error_message(e))
+          Ok(chunk) ->
+            if String.is_empty(chunk) do
+              Err("net-kernel: connection closed during handshake")
+            else
+              let got = str_to_bytes(chunk)
+              recv_exact_until(fd, need - List.length(got), deadline, List.append(acc, got))
+            end
+        end
+      end
+    end
+  end
+
+  -- One frame, exactly, before [deadline] (unix ms).
+  fn recv_frame_until(fd : Int, deadline : Int) : Result(List(Int), String) do
+    match recv_exact_until(fd, 4, deadline, Nil) do
+      Err(e) -> Err(e)
+      Ok(hdr) -> recv_exact_until(fd, NetFrame.body_length(hdr), deadline, Nil)
+    end
+  end
+
+  -- The symmetric handshake of `handshake_role`, sending [addr] (this node's
+  -- advertised listen address) in the hello and bounded by [timeout_ms].
+  -- Returns the peer's identity, the role it announced and the address it
+  -- advertised ("" from a peer that sends none).
+  fn handshake_addr(fd : Int, my_id : NodeIdentity.Identity, secret : String, my_nonce : String,
+                    role : String, addr : String, timeout_ms : Int)
+      : Result((NodeIdentity.Identity, String, String), String) do
+    let deadline = unix_time_ms() + timeout_ms
+    let hello = Handshake.encode_hello(Handshake.make_hello_addr(my_id, my_nonce, role, addr))
+    match send_frame(fd, hello) do
+      Err(e) -> Err(e)
+      Ok(_) ->
+        match recv_frame_until(fd, deadline) do
+          Err(e) -> Err(e)
+          Ok(hbytes) ->
+            match Handshake.decode_hello(hbytes) do
+              Err(e) -> Err(e)
+              Ok(peer) ->
+                match send_frame(fd, str_to_bytes(ClusterAuth.prove(secret, peer.nonce))) do
+                  Err(e) -> Err(e)
+                  Ok(_) ->
+                    match recv_frame_until(fd, deadline) do
+                      Err(e) -> Err(e)
+                      Ok(pbytes) ->
+                        match Handshake.authenticate(secret, my_nonce, peer, bytes_to_str(pbytes)) do
+                          Err(e) -> Err(e)
+                          Ok(id) -> Ok((id, peer.role, peer.addr))
+                        end
+                    end
+                end
+            end
+        end
+    end
+  end
+
   -- ── P5 frame codecs ──────────────────────────────────────────────────────────
 
   -- REGISTRY_SYNC_REQ: send our root hash, ask peer to diff.
@@ -172,7 +247,8 @@ mod NetKernel do
             Cons(Msgpack.str(e.node_id),
             Cons(Msgpack.int(e.pid),
             Cons(Msgpack.int(if e.present do 1 else 0 end),
-            Cons(clock, Nil))))))
+            Cons(clock,
+            Cons(Msgpack.int(e.creation), Nil)))))))
       end)
     Msgpack.encode(Msgpack.array(Cons(Msgpack.int(6),
       Cons(Msgpack.str(root_hash),
@@ -214,12 +290,17 @@ mod NetKernel do
                     Cons(Msgpack.Int(pid),
                     Cons(Msgpack.Int(present_int), more))))) ->
                       let clock = match more do
-                        Cons(Msgpack.Array(pairs), Nil) -> decode_clock(pairs)
+                        Cons(Msgpack.Array(pairs), _) -> decode_clock(pairs)
                         _ -> VectorClock.new()
+                      end
+                      let creation = match more do
+                        Cons(_, Cons(Msgpack.Int(cr), Nil)) -> cr
+                        _ -> 0
                       end
                       let entry = { node_id: nid, pid: pid,
                                     clock: clock,
-                                    present: present_int != 0 }
+                                    present: present_int != 0,
+                                    creation: creation }
                       Some((name, entry))
                   _ -> None
                 end)

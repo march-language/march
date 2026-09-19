@@ -1,0 +1,59 @@
+-- Two-node harness, scenario "cluster_stall": node-a, the observer.
+-- node-b is SIGSTOPped past SWIM's suspect timeout, then SIGCONTed. A stall
+-- is not a crash: nothing refuses a redial, so node-a must reach Dead on the
+-- suspect timer alone, and it then shuts the connection. On resume node-b
+-- finds the connection gone, redials node-a, learns from node-a's member sync
+-- that it is Dead there, and refutes with a higher incarnation: node-a must
+-- report it rejoined. Unlike the old `stall` scenario, whose socket stayed
+-- open throughout, the heal here has to go through the redial path.
+-- node-a prints every membership event it gets about node-b (the
+-- cluster node service's subscribe), until "rejoined".
+-- Design: specs/progress/2026-09-18-cluster-node-service.md (phase 1).
+mod ClusterStallA do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+
+  pfn wait_for(flags : Vault(Int), key : String, left : Int) : Bool do
+    if Vault.get(flags, key) != None do true
+    else if left <= 0 do false
+    else
+      sleep_ms(50)
+      wait_for(flags, key, left - 50)
+    end end
+  end
+
+  fn main(_c : Cap(IO)) do
+    let port = Env.require_int("MARCH_PORT_A")
+    let cfg = ClusterNode.config("node-a", port, "", Nil, "stall-secret", 1)
+    match ClusterNode.start(cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        let flags = Vault.new("scenario_flags")
+        let _ = ClusterNode.subscribe(h, fn ev ->
+          match ev do
+            ClusterNode.NodeUp(i) -> if i.name == "node-b" do println("node-a: node-b up") else () end
+            ClusterNode.NodeSuspect(i) -> if i.name == "node-b" do println("node-a: node-b suspect") else () end
+            ClusterNode.NodeDead(i, why) ->
+              if i.name == "node-b" do
+                println("node-a: node-b dead: " ++ why)
+                Vault.set(flags, "dead", 1)
+              else () end
+            ClusterNode.NodeRejoined(i) ->
+              if i.name == "node-b" do
+                println("node-a: node-b rejoined")
+                Vault.set(flags, "rejoined", 1)
+              else () end
+          end)
+        println("node-a: up")
+        if wait_for(flags, "rejoined", 60000) do () else println("node-a: never saw rejoined") end
+        ClusterNode.stop(h)
+        println("node-a: done")
+    end
+  end
+end

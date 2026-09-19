@@ -15,7 +15,12 @@
 mod GlobalRegistry do
 
   -- A name binding. `present = false` is a tombstone left by `unregister`.
-  type Entry = { node_id : String, pid : Int, clock : VectorClock, present : Bool }
+  -- `creation` is the holder node's creation when it registered: a node that
+  -- restarts reuses local pids, so a binding from an earlier creation names
+  -- whatever process now has that pid -- the node service hides it and its
+  -- owner tombstones it (specs/progress/2026-09-18-cluster-node-service.md).
+  -- 0 for every caller that predates the service.
+  type Entry = { node_id : String, pid : Int, clock : VectorClock, present : Bool, creation : Int }
 
   -- name -> Entry.
   type Names = Names(Map(String, Entry))
@@ -24,10 +29,12 @@ mod GlobalRegistry do
 
   -- Concurrent-update tiebreak: a total, deterministic order on bindings so
   -- replicas that saw the updates in different orders still converge. Higher
-  -- node_id wins; ties broken by higher pid (>= keeps it idempotent on equals).
+  -- node_id wins; then higher creation; then higher pid (>= keeps it
+  -- idempotent on equals). Presence plays no part, so a stale tombstone from
+  -- a loser loses to the winner exactly as its binding did.
   pfn tiebreak(b : Entry, a : Entry) : Bool do
     if b.node_id == a.node_id do
-      b.pid >= a.pid
+      if b.creation == a.creation do b.pid >= a.pid else b.creation > a.creation end
     else
       b.node_id > a.node_id
     end
@@ -58,7 +65,47 @@ mod GlobalRegistry do
   -- Register [name] -> (node_id, pid) at [clock] (the registrant's VectorClock
   -- after bumping its own entry). Wins only if causally newer / tiebreak.
   fn register(reg : Names, name : String, node_id : String, pid : Int, clock : VectorClock) : Names do
-    observe(reg, name, { node_id: node_id, pid: pid, clock: clock, present: true })
+    register_at(reg, name, node_id, 0, pid, clock)
+  end
+
+  -- `register` for a holder at node creation [creation].
+  fn register_at(reg : Names, name : String, node_id : String, creation : Int, pid : Int, clock : VectorClock) : Names do
+    observe(reg, name, { node_id: node_id, pid: pid, clock: clock, present: true, creation: creation })
+  end
+
+  -- The entry for [name], tombstone or not.
+  fn entry(reg : Names, name : String) : Option(Entry) do
+    match reg do
+      Names(m) -> Map.get(m, name, Map.str_cmp)
+    end
+  end
+
+  -- The clock a new update to [name] by [node_id] should carry: the name's
+  -- current clock (if any) with [node_id]'s slot bumped. An update made
+  -- after seeing a binding is then causally After it, and wins over it
+  -- without falling to the tiebreak.
+  fn next_clock(reg : Names, name : String, node_id : String) : VectorClock do
+    match entry(reg, name) do
+      None -> VectorClock.increment(VectorClock.new(), node_id)
+      Some(e) -> VectorClock.increment(e.clock, node_id)
+    end
+  end
+
+  -- Compare-and-delete: tombstone [name] only if its current winner is the
+  -- present binding (node_id, creation, pid). None when it is not ours --
+  -- `unregister` itself tombstones whatever is present, which must never be
+  -- done to another holder's binding.
+  fn unregister_own(reg : Names, name : String, node_id : String, creation : Int, pid : Int,
+                    clock : VectorClock) : Option(Names) do
+    match entry(reg, name) do
+      None -> None
+      Some(e) ->
+        if e.present && e.node_id == node_id && e.creation == creation && e.pid == pid do
+          Some(observe(reg, name, { e with clock: clock, present: false }))
+        else
+          None
+        end
+    end
   end
 
   -- Unregister [name] at [clock]: a tombstone update carrying the prior binding
@@ -119,12 +166,20 @@ mod GlobalRegistry do
 
   -- ── Merkle anti-entropy (P5a) ────────────────────────────────────────────
 
+  pfn clock_to_string(vc : VectorClock) : String do
+    List.fold_left(VectorClock.entries(vc), "", fn (acc, kv) ->
+      match kv do (aid, ts) -> acc ++ aid ++ "=" ++ String.from_int(ts) ++ ";" end)
+  end
+
   -- Serialize one registry entry to a stable byte string for Merkle hashing.
+  -- The clock and creation are part of it: replicas that differ only there
+  -- must still compare unequal, or they never exchange them.
   pfn entry_to_bytes(pair : (String, Entry)) : String do
     match pair do
       (name, e) ->
         name ++ "|" ++ e.node_id ++ "|" ++ String.from_int(e.pid) ++ "|" ++
-        (if e.present do "1" else "0" end)
+        (if e.present do "1" else "0" end) ++ "|" ++ String.from_int(e.creation) ++ "|" ++
+        clock_to_string(e.clock)
     end
   end
 

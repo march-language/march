@@ -1,0 +1,74 @@
+-- Two-node harness, scenario "cluster_takeover": node-b. Creation 1
+-- registers "leader" and "cfg" and is then SIGKILLed. Creation 2 (restarted
+-- by the scenario) registers nothing: it must resolve "leader" to node-a,
+-- and it must retire its own creation-1 "cfg" binding, which names a pid of
+-- a process that no longer exists (a restart reuses local pids).
+-- See node_a.march.
+mod ClusterTakeoverB do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+
+  actor Holder do
+    state { n : Int }
+    init { n: 0 }
+    on Poke() do state end
+  end
+
+  pfn wait_file(path : String) : () do
+    if File.exists(path) do () else
+      sleep_ms(50)
+      wait_file(path)
+    end
+  end
+
+  pfn wait_leader(h : ClusterNode.ClusterHandle, left : Int) : Option(GlobalPid.Pid) do
+    match ClusterNode.lookup(h, "leader") do
+      Some(p) -> Some(p)
+      None ->
+        if left <= 0 do None else
+          sleep_ms(50)
+          wait_leader(h, left - 50)
+        end
+    end
+  end
+
+  fn main(_c : Cap(IO)) do
+    let creation = Env.require_int("MARCH_NODE_CREATION")
+    let seed = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A"))
+    let cfg = ClusterNode.config("node-b", Env.require_int("MARCH_PORT_B"), "", Cons(seed, Nil), "takeover-secret", creation)
+    match ClusterNode.start(cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        println("node-b: up (creation " ++ int_to_string(creation) ++ ")")
+        if ClusterNode.await_members(h, 1, 120000) do () else println("node-b: never joined") end
+        if creation == 1 do
+          let holder = spawn(Holder)
+          let r1 = ClusterNode.register(h, "leader", holder)
+          let r2 = ClusterNode.register(h, "cfg", holder)
+          if Result.is_ok(r1) && Result.is_ok(r2) do println("node-b: registered leader and cfg") else println("node-b: register refused") end
+          wait_file(Env.require("CLUSTER_STOP_FILE"))
+        else
+          match wait_leader(h, 120000) do
+            Some(p) ->
+              let who = match ClusterNode.name_of(h, p.node_id) do
+                Some(n) -> n
+                None -> "?"
+              end
+              println("node-b: leader held by " ++ who)
+            None -> println("node-b: leader not found")
+          end
+          println("node-b: my stale bindings: " ++ int_to_string(ClusterNode.stale_bindings(h)))
+          println("node-b: cfg visible: " ++ bool_to_string(ClusterNode.lookup(h, "cfg") != None))
+          wait_file(Env.require("CLUSTER_STOP_FILE"))
+          ClusterNode.stop(h)
+          println("node-b: done")
+        end
+    end
+  end
+end

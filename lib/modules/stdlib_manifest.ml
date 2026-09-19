@@ -174,6 +174,12 @@ let stdlib_file_list = [
   (* Session transport capability (proof cap + dictionary). References
      Bytes, so it must sit after bytes.march. *)
   "session.march";
+  (* the cluster node service: one running node over SWIM, the per-peer
+     connection pairs and the registry replica; after swim_driver,
+     net_kernel, peer_reader, global_registry, node_queue, dist_link and
+     socket, which it uses, and BEFORE session_node, whose cluster runner
+     (run_cluster) uses it. *)
+  "cluster_node.march";
   (* the Session.Ops network transport over a split peer connection: after
      session (Ops), node_queue, node_send, peer_reader and global_pid. *)
   "session_node.march"

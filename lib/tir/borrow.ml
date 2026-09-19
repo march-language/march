@@ -353,7 +353,7 @@ let extern_owned_builtins : string list = [
     "native_float_to_f32_arr"; "native_f32_to_float_arr";
     "native_int_to_i32_arr"; "native_i32_to_int_arr"; "native_int_to_u8_arr";
     "native_u8_to_int_arr"; "native_i32_to_f32_arr"; "native_u8_to_f32_arr";
-    "tcp_connect"; "http_serialize_request"; "http_parse_response";
+    "tcp_connect"; "tcp_connect_timeout"; "http_serialize_request"; "http_parse_response";
     "csv_open"; "csv_next_row"; "csv_close"; "own"; "cap_narrow"; "mint_cap";
     "cap_impl"; "cap_dict"; "set_actor_caps"; "actor_caps"; "monitor";
     "actor_set_mailbox_limit"; "register_resource";

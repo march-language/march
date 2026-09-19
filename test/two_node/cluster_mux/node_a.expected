@@ -1,0 +1,5 @@
+node-a: done
+node-a: sent both streams, refused 0
+node-a: target down: Killed
+node-a: undeliverable message refused
+node-a: up

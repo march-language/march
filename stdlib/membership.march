@@ -10,11 +10,23 @@
 --
 -- This is the pure membership state + merge + transitions; the SWIM probe loop
 -- (direct/indirect ping, suspicion timers) drives it from the runtime layer.
+--
+-- Origin fields (the cluster node service,
+-- specs/progress/2026-09-18-cluster-node-service.md): a member also carries its
+-- human `name`, its advertised listen address `addr` ("host:port", "" when
+-- unknown) and its `creation` (bumped each time the node process restarts).
+-- The merge order is lexicographic over (creation, incarnation, severity): a
+-- restarted node outranks every verdict about its previous life, whatever
+-- that verdict's incarnation, and name/addr travel with the winning
+-- observation. Still a max, so still a join. The two-argument constructors
+-- (`alive(id, inc)` ...) build creation 0 / name = id / addr "" -- the shape
+-- every pre-service caller and the legacy tag-3 gossip frame produce.
 mod Membership do
 
   type MemberStatus = Alive | Suspect | Dead
 
-  type Member = { node_id : String, status : MemberStatus, incarnation : Int }
+  type Member = { node_id : String, status : MemberStatus, incarnation : Int,
+                  creation : Int, name : String, addr : String }
 
   type Members = Members(Map(String, Member))
 
@@ -26,15 +38,37 @@ mod Membership do
     end
   end
 
-  -- Observation constructors.
+  -- Observation constructors (origin-less: creation 0, name = id, addr "").
   fn alive(node_id : String, incarnation : Int) : Member do
-    { node_id: node_id, status: Alive, incarnation: incarnation }
+    { node_id: node_id, status: Alive, incarnation: incarnation, creation: 0, name: node_id, addr: "" }
   end
   fn suspect(node_id : String, incarnation : Int) : Member do
-    { node_id: node_id, status: Suspect, incarnation: incarnation }
+    { node_id: node_id, status: Suspect, incarnation: incarnation, creation: 0, name: node_id, addr: "" }
   end
   fn dead(node_id : String, incarnation : Int) : Member do
-    { node_id: node_id, status: Dead, incarnation: incarnation }
+    { node_id: node_id, status: Dead, incarnation: incarnation, creation: 0, name: node_id, addr: "" }
+  end
+
+  -- A member with every field given.
+  fn member(node_id : String, name : String, addr : String, creation : Int,
+            status : MemberStatus, incarnation : Int) : Member do
+    { node_id: node_id, status: status, incarnation: incarnation, creation: creation, name: name, addr: addr }
+  end
+
+  -- [m] with a new status and incarnation, keeping its origin fields.
+  fn with_status(m : Member, status : MemberStatus, incarnation : Int) : Member do
+    member(m.node_id, m.name, m.addr, m.creation, status, incarnation)
+  end
+
+  -- A verdict about [node_id] at [incarnation], carrying the origin fields
+  -- this view already holds for it (so a Suspect/Dead about creation 5 is
+  -- about creation 5, not a creation-0 observation the known member
+  -- outranks). An unknown node gets the origin-less shape.
+  fn verdict(ms : Members, node_id : String, status : MemberStatus, incarnation : Int) : Member do
+    match get(ms, node_id) do
+      Some(m) -> with_status(m, status, incarnation)
+      None -> member(node_id, node_id, "", 0, status, incarnation)
+    end
   end
 
   fn empty() : Members do Members(Map.empty()) end
@@ -47,14 +81,19 @@ mod Membership do
   end
 
   -- Does observation [b] win over [a] for the same node? Lexicographic max
-  -- over (incarnation, severity): higher incarnation wins; ties broken by the
-  -- more-severe status (Dead > Suspect > Alive). >= on a tie keeps the merge
-  -- idempotent (b == a still "wins", harmlessly).
+  -- over (creation, incarnation, severity): a later creation wins outright;
+  -- then higher incarnation; ties broken by the more-severe status
+  -- (Dead > Suspect > Alive). >= on a tie keeps the merge idempotent
+  -- (b == a still "wins", harmlessly).
   pfn supersedes(b : Member, a : Member) : Bool do
-    if b.incarnation == a.incarnation do
-      severity(b.status) >= severity(a.status)
+    if b.creation != a.creation do
+      b.creation > a.creation
     else
-      b.incarnation > a.incarnation
+      if b.incarnation == a.incarnation do
+        severity(b.status) >= severity(a.status)
+      else
+        b.incarnation > a.incarnation
+      end
     end
   end
 

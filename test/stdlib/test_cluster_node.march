@@ -1,0 +1,577 @@
+mod TestClusterNode do
+
+  -- The pure core of the cluster node service (ClusterNode.core_*): every
+  -- rule the actor relies on, without sockets.
+
+  pfn cfg(name : String, seeds : List(String)) : ClusterNode.CnConfig do
+    ClusterNode.config(name, 7000, "", seeds, "s", 1)
+  end
+
+  pfn dials(effs : List(ClusterNode.CnEffect)) : List(String) do
+    List.filter_map(effs, fn e -> match e do ClusterNode.Dial(a) -> Some(a) | _ -> None end)
+  end
+
+  pfn sends_to(effs : List(ClusterNode.CnEffect), id : String) : List(List(Int)) do
+    List.filter_map(effs, fn e -> match e do ClusterNode.Send(d, b) -> if d == id do Some(b) else None end | _ -> None end)
+  end
+
+  pfn drops(effs : List(ClusterNode.CnEffect)) : List(Int) do
+    List.filter_map(effs, fn e -> match e do ClusterNode.Drop(l, _) -> Some(l.gen) | _ -> None end)
+  end
+
+  pfn discards(effs : List(ClusterNode.CnEffect)) : List(Int) do
+    List.filter_map(effs, fn e -> match e do ClusterNode.Discard(l) -> Some(l.gen) | _ -> None end)
+  end
+
+  pfn installs(effs : List(ClusterNode.CnEffect)) : List(Int) do
+    List.filter_map(effs, fn e -> match e do ClusterNode.Install(l) -> Some(l.gen) | _ -> None end)
+  end
+
+  pfn event_texts(effs : List(ClusterNode.CnEffect)) : List(String) do
+    List.filter_map(effs, fn e -> match e do ClusterNode.Emit(ev) -> Some(ClusterNode.event_text(ev)) | _ -> None end)
+  end
+
+  pfn status_of(st : ClusterNode.CnState, id : String) : String do
+    match ClusterNode.core_member(st, id) do
+      None -> "unknown"
+      Some(m) ->
+        match m.status do
+          Alive -> "alive"
+          Suspect -> "suspect"
+          Dead -> "dead"
+        end
+    end
+  end
+
+  -- node "a" (me) linked to "b": b's id, the state and the effects.
+  pfn linked_ab() : (String, ClusterNode.CnState, List(ClusterNode.CnEffect)) do
+    let st = ClusterNode.core_new(cfg("a", Nil), 1)
+    let b = ClusterNode.node_id_of("b")
+    match ClusterNode.core_linked(st, b, "b", "127.0.0.1:7001", 1, 10, 11, b, 99) do
+      (st2, effs) ->
+        match ClusterNode.core_tick(st2, 1000) do
+          (st3, effs2) ->
+            let out = (b, st3, List.append(effs, effs2))
+            out
+        end
+    end
+  end
+
+  describe "joining" do
+
+    test "a node with a seed and no links dials the seed" do
+      let st = ClusterNode.core_new(cfg("a", Cons("127.0.0.1:7001", Nil)), 1)
+      match ClusterNode.core_tick(st, 1000) do
+        (_, effs) -> assert (dials(effs) == Cons("127.0.0.1:7001", Nil))
+      end
+    end
+
+    test "an in-flight dial is not repeated on the next tick" do
+      let st = ClusterNode.core_new(cfg("a", Cons("127.0.0.1:7001", Nil)), 1)
+      match ClusterNode.core_tick(st, 1000) do
+        (st2, _) ->
+          match ClusterNode.core_tick(st2, 1100) do
+            (_, effs) -> assert (dials(effs) == Nil)
+          end
+      end
+    end
+
+    test "a failed dial backs off, then retries" do
+      let st = ClusterNode.core_new(cfg("a", Cons("127.0.0.1:7001", Nil)), 1)
+      match ClusterNode.core_tick(st, 1000) do
+        (st2, _) ->
+          let st3 = ClusterNode.core_dial_failed(st2, 1050, "127.0.0.1:7001", false)
+          match ClusterNode.core_tick(st3, 1100) do
+            (st4, effs) ->
+              assert (dials(effs) == Nil)
+              match ClusterNode.core_tick(st4, 1300) do
+                (_, effs2) -> assert (dials(effs2) == Cons("127.0.0.1:7001", Nil))
+              end
+          end
+      end
+    end
+
+    test "a new link is installed, told our member view, and reported up" do
+      match linked_ab() do
+        (b, st, effs) ->
+          assert (installs(effs) == Cons(1, Nil))
+          assert (List.length(sends_to(effs, b)) >= 1)
+          assert (status_of(st, b) == "alive")
+          assert (List.member(event_texts(effs), "b up"))
+      end
+    end
+
+    test "an Alive member learned by gossip, with an address, is dialled (the full mesh)" do
+      match linked_ab() do
+        (b, st, _) ->
+          let c = Membership.member(ClusterNode.node_id_of("c"), "c", "127.0.0.1:7002", 1, Alive, 1)
+          let frame = SwimDriver.encode_member_gossip(c)
+          match ClusterNode.core_frame(st, b, 13, frame) do
+            (st2, _) ->
+              match ClusterNode.core_tick(st2, 1100) do
+                (_, effs) -> assert (dials(effs) == Cons("127.0.0.1:7002", Nil))
+              end
+          end
+      end
+    end
+
+  end
+
+  describe "the duplicate rule" do
+
+    test "two pairs dialled by different nodes: both sides keep the lower node_id's" do
+      let a = ClusterNode.node_id_of("a")
+      let b = ClusterNode.node_id_of("b")
+      let lower = if a < b do a else b end
+      match linked_ab() do
+        (_, st, _) ->
+          -- The existing pair was dialled by b; now a's own dial lands too.
+          match ClusterNode.core_linked(st, b, "b", "127.0.0.1:7001", 1, 20, 21, a, 98) do
+            (_, effs) ->
+              if lower == a do
+                assert (drops(effs) == Cons(1, Nil))
+                assert (installs(effs) == Cons(2, Nil))
+              else
+                assert (discards(effs) == Cons(2, Nil))
+                assert (drops(effs) == Nil)
+                assert (installs(effs) == Nil)
+              end
+          end
+      end
+    end
+
+    test "a second pair from the same dialler replaces the first" do
+      match linked_ab() do
+        (b, st, _) ->
+          match ClusterNode.core_linked(st, b, "b", "127.0.0.1:7001", 1, 20, 21, b, 98) do
+            (_, effs) ->
+              assert (drops(effs) == Cons(1, Nil))
+              assert (installs(effs) == Cons(2, Nil))
+          end
+      end
+    end
+
+  end
+
+  describe "review fixes" do
+
+    test "a seed spelled differently from its node's advertised address is not redialled once linked" do
+      let st = ClusterNode.core_new(cfg("a", Cons("localhost:7001", Nil)), 1)
+      let b = ClusterNode.node_id_of("b")
+      match ClusterNode.core_tick(st, 1000) do
+        (st1, effs) ->
+          assert (dials(effs) == Cons("localhost:7001", Nil))
+          match ClusterNode.core_dialed(st1, "localhost:7001", b, "b", "127.0.0.1:7001", 1, 10, 11, 99) do
+            (st2, _) ->
+              -- long past the dial deadline: still no redial of the seed
+              match ClusterNode.core_tick(st2, 60000) do
+                (_, effs2) -> assert (dials(effs2) == Nil)
+              end
+          end
+      end
+    end
+
+    test "a seed that reaches this node itself is never dialled again" do
+      let st = ClusterNode.core_new(cfg("a", Cons("localhost:7000", Nil)), 1)
+      match ClusterNode.core_tick(st, 1000) do
+        (st1, _) ->
+          let st2 = ClusterNode.core_seed_self(st1, "localhost:7000")
+          match ClusterNode.core_tick(st2, 60000) do
+            (_, effs) -> assert (dials(effs) == Nil)
+          end
+      end
+    end
+
+    test "a pair from a newer creation of the peer replaces the old one whoever dialled" do
+      let a = ClusterNode.node_id_of("a")
+      let b = ClusterNode.node_id_of("b")
+      let st = ClusterNode.core_new(cfg("a", Nil), 1)
+      -- the old pair was dialled by a (the lower id, when a < b)...
+      let lower = if a < b do a else b end
+      let higher = if a < b do b else a end
+      match ClusterNode.core_linked(st, b, "b", "127.0.0.1:7001", 1, 10, 11, lower, 99) do
+        (st1, _) ->
+          -- ...and the restarted peer (creation 2) dials from the other side
+          match ClusterNode.core_linked(st1, b, "b", "127.0.0.1:7001", 2, 20, 21, higher, 98) do
+            (_, effs) ->
+              assert (drops(effs) == Cons(1, Nil))
+              assert (installs(effs) == Cons(2, Nil))
+          end
+      end
+    end
+
+    test "a registration that lost a race tells the name's watchers who holds it" do
+      match linked_ab() do
+        (b, st, _) ->
+          let theirs = GlobalRegistry.register_at(GlobalRegistry.empty(), "ap", b, 1, 7, VectorClock.increment(VectorClock.new(), b))
+          let frame = NetKernel.encode_registry_sync_resp(GlobalRegistry.root_hash(theirs), GlobalRegistry.all_entries(theirs))
+          match ClusterNode.core_frame(st, b, 6, frame) do
+            (st2, _) ->
+              match ClusterNode.core_register(st2, "ap", 42, 0) do
+                (_, effs) -> assert (List.member(name_events(effs), "ap lost to " ++ b))
+              end
+          end
+      end
+    end
+
+  end
+
+  describe "rejoin reporting" do
+
+    test "a restarted node first seen Suspect at its new creation is reported rejoined, not up" do
+      match linked_ab() do
+        (b, st, _) ->
+          let dead_b = Membership.member(b, "b", "127.0.0.1:7001", 1, Dead, 1)
+          match ClusterNode.core_frame(st, b, 13, SwimDriver.encode_member_gossip(dead_b)) do
+            (st1, _) ->
+              match ClusterNode.core_tick(st1, 1100) do
+                (st2, _) ->
+                  let sus2 = Membership.member(b, "b", "127.0.0.1:7001", 2, Suspect, 0)
+                  match ClusterNode.core_frame(st2, b, 13, SwimDriver.encode_member_gossip(sus2)) do
+                    (st3, _) ->
+                      match ClusterNode.core_tick(st3, 1200) do
+                        (st4, e4) ->
+                          assert (not(List.any(event_texts(e4), fn t -> String.contains(t, "b up"))))
+                          let alive2 = Membership.member(b, "b", "127.0.0.1:7001", 2, Alive, 1)
+                          match ClusterNode.core_frame(st4, b, 13, SwimDriver.encode_member_gossip(alive2)) do
+                            (st5, _) ->
+                              match ClusterNode.core_tick(st5, 1300) do
+                                (_, e6) ->
+                                  assert (List.member(event_texts(e6), "b rejoined"))
+                                  assert (not(List.member(event_texts(e6), "b up")))
+                              end
+                          end
+                      end
+                  end
+              end
+          end
+      end
+    end
+
+  end
+
+  describe "connection loss and failure" do
+
+    test "a close from a replaced generation is ignored" do
+      match linked_ab() do
+        (b, st, _) ->
+          match ClusterNode.core_link_closed(st, b, 7) do
+            (st2, effs) ->
+              assert (effs == Nil)
+              assert (status_of(st2, b) == "alive")
+          end
+      end
+    end
+
+    test "a closed connection is a hint: Suspect, and a redial at once" do
+      match linked_ab() do
+        (b, st, _) ->
+          match ClusterNode.core_link_closed(st, b, 1) do
+            (st2, effs) ->
+              assert (drops(effs) == Cons(1, Nil))
+              match ClusterNode.core_tick(st2, 1100) do
+                (st3, effs2) ->
+                  assert (status_of(st3, b) == "suspect")
+                  assert (List.member(event_texts(effs2), "b suspect"))
+                  assert (dials(effs2) == Cons("127.0.0.1:7001", Nil))
+              end
+          end
+      end
+    end
+
+    test "a Dead member is redialled at its advertised address (the heal path)" do
+      match linked_ab() do
+        (b, st, _) ->
+          let dead_b = Membership.member(b, "b", "127.0.0.1:7001", 1, Dead, 5)
+          match ClusterNode.core_frame(st, b, 13, SwimDriver.encode_member_gossip(dead_b)) do
+            (st2, _) ->
+              -- The verdict drops the link, and the same tick's dial plan
+              -- already redials the Dead member.
+              match ClusterNode.core_tick(st2, 1100) do
+                (_, effs) -> assert (dials(effs) == Cons("127.0.0.1:7001", Nil))
+              end
+          end
+      end
+    end
+
+    test "a refused redial is definite: Dead, with that cause" do
+      match linked_ab() do
+        (b, st, _) ->
+          match ClusterNode.core_link_closed(st, b, 1) do
+            (st2, _) ->
+              match ClusterNode.core_tick(st2, 1100) do
+                (st3, _) ->
+                  let st4 = ClusterNode.core_dial_failed(st3, 1150, "127.0.0.1:7001", true)
+                  match ClusterNode.core_tick(st4, 1200) do
+                    (st5, effs) ->
+                      assert (status_of(st5, b) == "dead")
+                      assert (List.member(event_texts(effs), "b dead: connection refused"))
+                  end
+              end
+          end
+      end
+    end
+
+    test "Dead drops the link; a refutation at a higher incarnation is a rejoin" do
+      match linked_ab() do
+        (b, st, _) ->
+          let dead_b = Membership.member(b, "b", "127.0.0.1:7001", 1, Dead, 5)
+          match ClusterNode.core_frame(st, b, 13, SwimDriver.encode_member_gossip(dead_b)) do
+            (st2, _) ->
+              match ClusterNode.core_tick(st2, 1100) do
+                (st3, effs) ->
+                  assert (drops(effs) == Cons(1, Nil))
+                  assert (List.member(event_texts(effs), "b dead: gossip"))
+                  let back = Membership.member(b, "b", "127.0.0.1:7001", 1, Alive, 6)
+                  match ClusterNode.core_frame(st3, b, 13, SwimDriver.encode_member_gossip(back)) do
+                    (st4, _) ->
+                      match ClusterNode.core_tick(st4, 1200) do
+                        (_, effs2) -> assert (List.member(event_texts(effs2), "b rejoined"))
+                      end
+                  end
+              end
+          end
+      end
+    end
+
+    test "a restart (new creation) reports the old life dead and the new one rejoined" do
+      match linked_ab() do
+        (b, st, _) ->
+          let reborn = Membership.member(b, "b", "127.0.0.1:7001", 2, Alive, 1)
+          match ClusterNode.core_frame(st, b, 13, SwimDriver.encode_member_gossip(reborn)) do
+            (st2, _) ->
+              match ClusterNode.core_tick(st2, 1100) do
+                (_, effs) ->
+                  assert (List.member(event_texts(effs), "b dead: restarted as creation 2"))
+                  assert (List.member(event_texts(effs), "b rejoined"))
+              end
+          end
+      end
+    end
+
+  end
+
+  describe "SWIM frames" do
+
+    test "a ping is answered with an ack on the same peer" do
+      match linked_ab() do
+        (b, st, _) ->
+          match ClusterNode.core_frame(st, b, 0, SwimDriver.encode_msg(SwimDriver.SwimPing(b))) do
+            (_, effs) ->
+              match sends_to(effs, b) do
+                Cons(bytes, Nil) -> assert (PeerReader.tag_of(bytes) == 1)
+                _ -> assert false
+              end
+          end
+      end
+    end
+
+    test "a ping-req is relayed: ping the target, and pass its ack back" do
+      match linked_ab() do
+        (b, st, _) ->
+          let c = ClusterNode.node_id_of("c")
+          match ClusterNode.core_linked(st, c, "c", "127.0.0.1:7002", 1, 30, 31, c, 97) do
+            (st2, _) ->
+              match ClusterNode.core_frame(st2, b, 2, SwimDriver.encode_msg(SwimDriver.SwimPingReq(b, c))) do
+                (st3, effs) ->
+                  assert (List.length(sends_to(effs, c)) == 1)
+                  match ClusterNode.core_frame(st3, c, 1, SwimDriver.encode_msg(SwimDriver.SwimPingAck(c))) do
+                    (_, effs2) ->
+                      match sends_to(effs2, b) do
+                        Cons(bytes, Nil) ->
+                          assert (SwimDriver.decode_msg(bytes) == Ok(SwimDriver.SwimPingAck(c)))
+                        _ -> assert false
+                      end
+                  end
+              end
+          end
+      end
+    end
+
+  end
+
+
+  -- ── names (phase 2) ────────────────────────────────────────────────────
+
+  pfn name_events(effs : List(ClusterNode.CnEffect)) : List(String) do
+    List.filter_map(effs, fn e -> match e do ClusterNode.Named(_, ev) -> Some(ClusterNode.name_event_text(ev)) | _ -> None end)
+  end
+
+  pfn lookup_node(st : ClusterNode.CnState, name : String) : String do
+    match ClusterNode.core_lookup(st, name) do
+      Some(p) -> p.node_id
+      None -> "none"
+    end
+  end
+
+  -- The whole registry of [st] as a REGISTRY_SYNC_RESP frame.
+  pfn reg_frame(st : ClusterNode.CnState) : List(Int) do
+    NetKernel.encode_registry_sync_resp(GlobalRegistry.root_hash(st.reg), GlobalRegistry.all_entries(st.reg))
+  end
+
+  describe "names" do
+
+    test "a registration is visible here, pushed to peers and reported Bound" do
+      match linked_ab() do
+        (b, st, _) ->
+          match ClusterNode.core_register(st, "ap", 42, 0) do
+            (st2, effs) ->
+              assert (lookup_node(st2, "ap") == st2.me)
+              assert (List.any(sends_to(effs, b), fn bytes -> PeerReader.tag_of(bytes) == 6))
+              assert (List.member(name_events(effs), "ap bound to " ++ st2.me))
+          end
+      end
+    end
+
+    test "a name another holder has visibly bound is refused" do
+      match linked_ab() do
+        (b, st, _) ->
+          let theirs = GlobalRegistry.register_at(GlobalRegistry.empty(), "ap", b, 1, 7, VectorClock.increment(VectorClock.new(), b))
+          let frame = NetKernel.encode_registry_sync_resp(GlobalRegistry.root_hash(theirs), GlobalRegistry.all_entries(theirs))
+          match ClusterNode.core_frame(st, b, 6, frame) do
+            (st2, _) ->
+              assert (lookup_node(st2, "ap") == b)
+              match ClusterNode.core_register(st2, "ap", 42, 0) do
+                (st3, _) -> assert (lookup_node(st3, "ap") == b)
+              end
+          end
+      end
+    end
+
+    test "a Dead holder's binding is hidden (Unbound), and may then be taken over" do
+      match linked_ab() do
+        (b, st, _) ->
+          let theirs = GlobalRegistry.register_at(GlobalRegistry.empty(), "ap", b, 1, 7, VectorClock.increment(VectorClock.new(), b))
+          let frame = NetKernel.encode_registry_sync_resp(GlobalRegistry.root_hash(theirs), GlobalRegistry.all_entries(theirs))
+          match ClusterNode.core_frame(st, b, 6, frame) do
+            (st2, _) ->
+              let dead_b = Membership.member(b, "b", "127.0.0.1:7001", 1, Dead, 1)
+              match ClusterNode.core_frame(st2, b, 13, SwimDriver.encode_member_gossip(dead_b)) do
+                (st3, _) ->
+                  match ClusterNode.core_tick(st3, 1100) do
+                    (st4, effs) ->
+                      assert (lookup_node(st4, "ap") == "none")
+                      assert (List.member(name_events(effs), "ap unbound"))
+                      match ClusterNode.core_register(st4, "ap", 42, 0) do
+                        (st5, _) ->
+                          -- b comes back and merges our registry: ours is causally newer.
+                          let b_side = GlobalRegistry.merge(theirs, st5.reg)
+                          match GlobalRegistry.lookup(b_side, "ap") do
+                            Some((holder, _)) -> assert (holder == st5.me)
+                            None -> assert false
+                          end
+                      end
+                  end
+              end
+          end
+      end
+    end
+
+    test "concurrent claims: the loser hears Lost, both sides agree" do
+      let a0 = ClusterNode.core_new(cfg("a", Nil), 1)
+      let b0 = ClusterNode.core_new(cfg("b", Nil), 2)
+      match ClusterNode.core_register(a0, "ap", 1, 0) do
+        (a1, _) ->
+          match ClusterNode.core_register(b0, "ap", 2, 0) do
+            (b1, _) ->
+              match ClusterNode.core_frame(a1, b1.me, 6, reg_frame(b1)) do
+                (a2, a_effs) ->
+                  match ClusterNode.core_frame(b1, a1.me, 6, reg_frame(a1)) do
+                    (b2, b_effs) ->
+                      assert (lookup_node(a2, "ap") == lookup_node(b2, "ap"))
+                      let winner = lookup_node(a2, "ap")
+                      if winner == b1.me do
+                        assert (List.member(name_events(a_effs), "ap lost to " ++ b1.me))
+                        assert (not(List.any(name_events(b_effs), fn t -> String.contains(t, "lost"))))
+                      else
+                        assert (List.member(name_events(b_effs), "ap lost to " ++ a1.me))
+                      end
+                  end
+              end
+          end
+      end
+    end
+
+    test "a restart retires its own stale-creation binding and pushes the tombstone" do
+      let me_id = ClusterNode.node_id_of("a")
+      let old = GlobalRegistry.register_at(GlobalRegistry.empty(), "cfg", me_id, 1, 9, VectorClock.increment(VectorClock.new(), me_id))
+      let frame = NetKernel.encode_registry_sync_resp(GlobalRegistry.root_hash(old), GlobalRegistry.all_entries(old))
+      let st = ClusterNode.core_new(ClusterNode.config("a", 7000, "", Nil, "s", 2), 1)
+      let b = ClusterNode.node_id_of("b")
+      match ClusterNode.core_linked(st, b, "b", "127.0.0.1:7001", 1, 10, 11, b, 99) do
+        (st1, _) ->
+          match ClusterNode.core_frame(st1, b, 6, frame) do
+            (st2, effs) ->
+              assert (lookup_node(st2, "cfg") == "none")
+              match GlobalRegistry.entry(st2.reg, "cfg") do
+                Some(e) -> assert (e.present == false)
+                None -> assert false
+              end
+              assert (List.length(sends_to(effs, b)) >= 1)
+          end
+      end
+    end
+
+    test "unregister leaves another holder's binding alone" do
+      match linked_ab() do
+        (b, st, _) ->
+          let theirs = GlobalRegistry.register_at(GlobalRegistry.empty(), "ap", b, 1, 7, VectorClock.increment(VectorClock.new(), b))
+          let frame = NetKernel.encode_registry_sync_resp(GlobalRegistry.root_hash(theirs), GlobalRegistry.all_entries(theirs))
+          match ClusterNode.core_frame(st, b, 6, frame) do
+            (st2, _) ->
+              match ClusterNode.core_unregister(st2, "ap") do
+                (st3, _) -> assert (lookup_node(st3, "ap") == b)
+              end
+          end
+      end
+    end
+
+    test "an anti-entropy request with a different root is answered with everything" do
+      match linked_ab() do
+        (b, st, _) ->
+          match ClusterNode.core_register(st, "ap", 42, 0) do
+            (st2, _) ->
+              match ClusterNode.core_frame(st2, b, 5, NetKernel.encode_registry_sync_req("")) do
+                (_, effs) ->
+                  match sends_to(effs, b) do
+                    Cons(bytes, Nil) -> assert (PeerReader.tag_of(bytes) == 6)
+                    _ -> assert false
+                  end
+              end
+          end
+      end
+    end
+
+  end
+
+  describe "the data plane (phase 3)" do
+
+    test "a Dead peer's link is dropped with the cause the routes are told" do
+      match linked_ab() do
+        (b, st, _) ->
+          let dead_b = Membership.member(b, "b", "127.0.0.1:7001", 1, Dead, 5)
+          match ClusterNode.core_frame(st, b, 13, SwimDriver.encode_member_gossip(dead_b)) do
+            (st2, _) ->
+              match ClusterNode.core_tick(st2, 1100) do
+                (_, effs) ->
+                  let whys = List.filter_map(effs, fn e -> match e do ClusterNode.Drop(_, w) -> Some(w) | _ -> None end)
+                  assert (whys == Cons("node b dead: gossip", Nil))
+              end
+          end
+      end
+    end
+
+    test "a lost connection is dropped as connection lost" do
+      match linked_ab() do
+        (b, st, _) ->
+          match ClusterNode.core_link_closed(st, b, 1) do
+            (_, effs) ->
+              let whys = List.filter_map(effs, fn e -> match e do ClusterNode.Drop(_, w) -> Some(w) | _ -> None end)
+              assert (whys == Cons("connection lost", Nil))
+          end
+      end
+    end
+
+  end
+
+end
