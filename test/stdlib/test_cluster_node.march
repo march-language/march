@@ -216,6 +216,40 @@ mod TestClusterNode do
 
   end
 
+  describe "rejoin reporting" do
+
+    test "a restarted node first seen Suspect at its new creation is reported rejoined, not up" do
+      match linked_ab() do
+        (b, st, _) ->
+          let dead_b = Membership.member(b, "b", "127.0.0.1:7001", 1, Dead, 1)
+          match ClusterNode.core_frame(st, b, 13, SwimDriver.encode_member_gossip(dead_b)) do
+            (st1, _) ->
+              match ClusterNode.core_tick(st1, 1100) do
+                (st2, _) ->
+                  let sus2 = Membership.member(b, "b", "127.0.0.1:7001", 2, Suspect, 0)
+                  match ClusterNode.core_frame(st2, b, 13, SwimDriver.encode_member_gossip(sus2)) do
+                    (st3, _) ->
+                      match ClusterNode.core_tick(st3, 1200) do
+                        (st4, e4) ->
+                          assert (not(List.any(event_texts(e4), fn t -> String.contains(t, "b up"))))
+                          let alive2 = Membership.member(b, "b", "127.0.0.1:7001", 2, Alive, 1)
+                          match ClusterNode.core_frame(st4, b, 13, SwimDriver.encode_member_gossip(alive2)) do
+                            (st5, _) ->
+                              match ClusterNode.core_tick(st5, 1300) do
+                                (_, e6) ->
+                                  assert (List.member(event_texts(e6), "b rejoined"))
+                                  assert (not(List.member(event_texts(e6), "b up")))
+                              end
+                          end
+                      end
+                  end
+              end
+          end
+      end
+    end
+
+  end
+
   describe "connection loss and failure" do
 
     test "a close from a replaced generation is ignored" do

@@ -1,7 +1,7 @@
 # DONE 2026-09-18 — cluster node service: review fixes
 
 A review of the branch that shipped [[2026-09-18-cluster-node-service]]
-(phases 0-4) found seven defects, all fixed here.
+(phases 0-4) found seven defects, all fixed here, and re-verifying after merging main found an eighth.
 
 | # | Defect | Fix | Witness |
 |---|---|---|---|
@@ -12,6 +12,8 @@ A review of the branch that shipped [[2026-09-18-cluster-node-service]]
 | 5 | `register` of a pid that had just died could leave a permanent binding to a dead process (its watcher's `LocalDown` raced the `Register`). | The node actor checks `is_alive` in the `Register` turn; a death after that is queued behind it. | -- |
 | 6 | A registration refused by a race (register() had returned Ok) told nobody. | The name's watchers get `Lost(name, holder)`; the doc says so. | core test "a registration that lost a race tells the name's watchers" |
 | 7 | The duplicate-pair rule ignored creation: a restarted peer's new pair could lose to a stale pair to its previous life until SWIM timed that out. | `CnLink.creation`; a newer creation's pair always wins. | core test "a pair from a newer creation of the peer replaces the old one" (red without the fix) |
+
+| 8 | Found while re-verifying: when a restarted node and its peer dial each other at once, the peer can shut its duplicate pair just as this node installs it; the install then reads EOF, the restarted node is Suspect at its new creation, and its refutation was reported as `NodeUp` instead of `NodeRejoined` (1 run in 5 of `cluster_takeover`). | `rejoining`: a node whose new creation first appears non-Alive has its first Alive reported as a rejoin. | core test "a restarted node first seen Suspect at its new creation is reported rejoined, not up" (red without the fix); `cluster_takeover` 8/8 |
 
 All 22 root-free two-node scenarios, `run_stdlib` (885), `test_stdlib_march`
 (69; `test_cluster_node` now 28 cases) green; `cluster_node` still checks

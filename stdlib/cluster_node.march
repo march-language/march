@@ -166,6 +166,7 @@ mod ClusterNode do
     relays : Map(String, List(String)),  -- ping-req target -> requesters awaiting its ack
     refused : List(String),              -- node_ids refused since the last tick
     seed_ids : Map(String, String),      -- dialled seed "host:port" -> the node it reached
+    rejoining : List(String),            -- restarted nodes not yet seen Alive at their new creation
     stopped : Bool,
     reg : GlobalRegistry.Names,          -- the registry replica
     regs : Map(String, (Int, Int)),      -- names registered HERE: name -> (pid, watcher pid)
@@ -196,7 +197,7 @@ mod ClusterNode do
     let ms = Membership.observe(Membership.empty(), self_m)
     { cfg: cfg, me: me, driver: SwimDriver.make(me, 1, ms, cfg.swim, cfg.period_ms, seed),
       links: Map.empty(), halves: Map.empty(), gen: 0, dialing: Map.empty(), backoff: Map.empty(),
-      pending: Nil, relays: Map.empty(), refused: Nil, seed_ids: Map.empty(), stopped: false,
+      pending: Nil, relays: Map.empty(), refused: Nil, seed_ids: Map.empty(), rejoining: Nil, stopped: false,
       reg: GlobalRegistry.empty(), regs: Map.empty(), vis: Map.empty() }
   end
 
@@ -215,7 +216,12 @@ mod ClusterNode do
   -- ── events: what changed between two member views ──────────────────────
 
   -- [dead_cause] names why a node that went Dead in this step did.
-  pfn member_events(before : Members, after : Members, me : String, dead_cause : String -> String) : List(NodeEvent) do
+  -- [rejoining]: nodes whose new creation first appeared NOT Alive (a
+  -- duplicate pair shut by the peer just as it was installed reads as a lost
+  -- connection, so the restarted node is Suspect at its new creation until it
+  -- refutes); their first Alive is reported as the rejoin it is, not as `up`.
+  pfn member_events(before : Members, after : Members, me : String, dead_cause : String -> String,
+                    rejoining : List(String)) : List(NodeEvent) do
     List.flat_map(Membership.members(after), fn m ->
       if m.node_id == me do
         Nil
@@ -242,13 +248,32 @@ mod ClusterNode do
                 (Alive, Suspect) -> Cons(NodeSuspect(info_of(m)), Nil)
                 (Alive, Dead) -> Cons(NodeDead(info_of(m), dead_cause(m.node_id)), Nil)
                 (Suspect, Dead) -> Cons(NodeDead(info_of(m), dead_cause(m.node_id)), Nil)
-                (Suspect, Alive) -> Cons(NodeUp(info_of(m)), Nil)
+                (Suspect, Alive) ->
+                  if List.member(rejoining, m.node_id) do Cons(NodeRejoined(info_of(m)), Nil)
+                  else Cons(NodeUp(info_of(m)), Nil) end
                 (Dead, Alive) -> Cons(NodeRejoined(info_of(m)), Nil)
                 _ -> Nil
               end
             end
         end
       end)
+  end
+
+  -- The rejoin set after a step: add a node whose creation changed to a
+  -- non-Alive status; drop one that is Alive now (its rejoin was reported).
+  pfn next_rejoining(before : Members, after : Members, rejoining : List(String)) : List(String) do
+    List.filter_map(Membership.members(after), fn m ->
+      let was = match Membership.get(before, m.node_id) do
+        Some(o) -> o.creation != m.creation
+        None -> false
+      end
+      let alive = match m.status do
+        Alive -> true
+        _ -> false
+      end
+      if alive do None
+      else if was || List.member(rejoining, m.node_id) do Some(m.node_id)
+      else None end end)
   end
 
   -- The effects of a set of events: emit each, and drop the links of every
@@ -360,8 +385,9 @@ mod ClusterNode do
           if List.member(refused, id) do "connection refused"
           else if List.member(timed_out, id) do "suspect timeout"
           else "gossip" end end
-        let evs = member_events(before, d2.swim.members, st.me, cause)
-        match event_effects(st2, evs) do
+        let evs = member_events(before, d2.swim.members, st.me, cause, st.rejoining)
+        let rejoining = next_rejoining(before, d2.swim.members, st.rejoining)
+        match event_effects({ st2 with rejoining: rejoining }, evs) do
           (st3, ev_effs) ->
             match plan_dials(st3, now) do
               (st4, dials) ->
