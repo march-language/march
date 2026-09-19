@@ -1,0 +1,56 @@
+-- Scenario "cluster_ap_retry": node-a offers role Server of Echo with
+-- capacity 2; see scenario.sh. Requests for 98 and 99 are held 3 s before
+-- the answer, which keeps the offer full meanwhile. Stops after six
+-- sessions.
+mod ClusterApRetryA do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+
+  @[endpoints]
+  protocol Echo do
+    Client -> Server : Int
+    Server -> Client : Int
+  end
+
+  pfn serve_one(s : Cap(Session.Live), st : Echo_Server.S_recv_Msg_Client_Server_1, served : Vault(Int)) : Echo_Server.Yield do
+    Echo_Server.recv_Msg_Client_Server_1(s, st, fn (n, st1) ->
+      println("Server: got " ++ int_to_string(n))
+      if n >= 98 do sleep_ms(3000) else () end
+      let _ = Vault.incr(served, "n", 1)
+      Echo_Server.close(s, Echo_Server.send_Msg_Server_Client_1(s, st1, n * 10)))
+  end
+
+  pfn wait_served(served : Vault(Int), want : Int, left : Int) : Bool do
+    if Vault.get_or(served, "n", 0) >= want do true
+    else if left <= 0 do false else
+      sleep_ms(50)
+      wait_served(served, want, left - 50)
+    end end
+  end
+
+  fn main(c : Cap(IO)) do
+    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "ap-secret", 1)
+    match ClusterNode.start(cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        let served = Vault.new("served")
+        -- Printed BEFORE the offer: it is live as soon as `offer_Server`
+        -- registers it (see cluster_ap_restart).
+        println("node-a: offering")
+        match Echo_Run.offer_Server(c, h, 2, fn (s, st) -> serve_one(s, st, served)) do
+          Err(e) -> panic(e)
+          Ok(o) ->
+            if wait_served(served, 6, 120000) do () else panic("node-a: never served six sessions") end
+            sleep_ms(3000)
+            SessionNode.close_offer(o)
+            ClusterNode.stop(h)
+        end
+    end
+  end
+end

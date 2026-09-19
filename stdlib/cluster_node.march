@@ -1495,6 +1495,7 @@ mod ClusterNode do
                   subs: Vault.new("cluster_node_subs_" ++ tag),
                   meta: Vault.new("cluster_node_meta_" ++ tag) }
         Vault.set(h.meta, "listen_fd", listen_fd)
+        Vault.set(h.meta, "creation", cfg.creation)
         let st0 = core_new(cfg, cfg.creation)
         mirror(st0, h)
         send(node, Boot(st0, h))
@@ -1617,6 +1618,14 @@ mod ClusterNode do
           Ok(())
       end
     end
+  end
+
+  doc "This node's creation (its incarnation number, part of every global pid it issues)."
+  fn creation(h : ClusterHandle) : Int do Vault.get_or(h.meta, "creation", 0) end
+
+  doc "A global pid for the local actor [pid] on this node (to hand to a peer as a reply address)."
+  fn global_pid(h : ClusterHandle, pid : Int) : GlobalPid.Pid do
+    GlobalPid.make(h.node_id, pid, creation(h))
   end
 
   doc "Unregister [name], if this node holds it. A name another node holds is left alone."

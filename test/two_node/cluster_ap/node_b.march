@@ -1,0 +1,45 @@
+-- Two-node scenario "cluster_ap": node-b initiates two Echo sessions as
+-- Client, one after the other, each filled from node-a's access point.
+mod ClusterApB do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+
+  @[endpoints]
+  protocol Echo do
+    Client -> Server : Int
+    Server -> Client : Int
+  end
+
+  pfn ask(s : Cap(Session.Live), st : Echo_Client.S_send_Msg_Client_Server_1, n : Int) : Echo_Client.Yield do
+    let st1 = Echo_Client.send_Msg_Client_Server_1(s, st, n)
+    Echo_Client.recv_Msg_Server_Client_1(s, st1, fn (m, st2) ->
+      println("Client: got " ++ int_to_string(m))
+      Echo_Client.close(s, st2))
+  end
+
+  fn session(c : Cap(IO), h : ClusterNode.ClusterHandle, n : Int) : () do
+    match Echo_Run.initiate_Client(c, h, fn (s, st) -> ask(s, st, n)) do
+      Ok(_) -> println("Client: session " ++ int_to_string(n) ++ " done")
+      Err(e) -> println("Client: " ++ SessionNode.run_error_message(e))
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let seed = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A"))
+    let cfg = ClusterNode.config("node-b", Env.require_int("MARCH_PORT_B"), "", Cons(seed, Nil), "ap-secret", 1)
+    match ClusterNode.start(cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        if ClusterNode.await_members(h, 1, 120000) do () else panic("node-b: never joined") end
+        session(c, h, 1)
+        session(c, h, 2)
+        ClusterNode.stop(h)
+    end
+  end
+end

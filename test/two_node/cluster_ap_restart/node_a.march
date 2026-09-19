@@ -1,0 +1,54 @@
+-- Scenario "cluster_ap_restart": node-a initiates as Client; its second
+-- session waits for node-b's offer to come back. See scenario.sh.
+mod ClusterApRestartA do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+
+  @[endpoints]
+  protocol Echo do
+    Client -> Server : Int
+    Server -> Client : Int
+  end
+
+  pfn ask(s : Cap(Session.Live), st : Echo_Client.S_send_Msg_Client_Server_1, n : Int) : Echo_Client.Yield do
+    let st1 = Echo_Client.send_Msg_Client_Server_1(s, st, n)
+    Echo_Client.recv_Msg_Server_Client_1(s, st1, fn (m, st2) ->
+      println("Client: got " ++ int_to_string(m))
+      Echo_Client.close(s, st2))
+  end
+
+  pfn session(c : Cap(IO), h : ClusterNode.ClusterHandle, n : Int) : Bool do
+    match Echo_Run.initiate_Client(c, h, fn (s, st) -> ask(s, st, n)) do
+      Ok(_) -> true
+      Err(_) -> false
+    end
+  end
+
+  -- The offer comes back when the restarted node-b registers it again.
+  pfn session_retry(c : Cap(IO), h : ClusterNode.ClusterHandle, n : Int, left : Int) : Bool do
+    if session(c, h, n) do true
+    else if left <= 0 do false else
+      sleep_ms(500)
+      session_retry(c, h, n, left - 500)
+    end end
+  end
+
+  fn main(c : Cap(IO)) do
+    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "apr-secret", 1)
+    match ClusterNode.start(cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        println("node-a: up")
+        if ClusterNode.await_members(h, 1, 120000) do () else panic("node-a: nobody joined") end
+        if session_retry(c, h, 1, 60000) do println("Client: session 1 done") else panic("node-a: first session never formed") end
+        if session_retry(c, h, 2, 120000) do println("Client: session 2 done after the restart") else panic("node-a: no session after the restart") end
+        ClusterNode.stop(h)
+    end
+  end
+end

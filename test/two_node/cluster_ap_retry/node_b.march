@@ -1,0 +1,69 @@
+-- Scenario "cluster_ap_retry": node-b initiates as Client; see scenario.sh.
+mod ClusterApRetryB do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+
+  @[endpoints]
+  protocol Echo do
+    Client -> Server : Int
+    Server -> Client : Int
+  end
+
+  pfn ask(s : Cap(Session.Live), st : Echo_Client.S_send_Msg_Client_Server_1, n : Int) : Echo_Client.Yield do
+    let st1 = Echo_Client.send_Msg_Client_Server_1(s, st, n)
+    Echo_Client.recv_Msg_Server_Client_1(s, st1, fn (m, st2) ->
+      println("Client: got " ++ int_to_string(m))
+      Echo_Client.close(s, st2))
+  end
+
+  fn session(c : Cap(IO), h : ClusterNode.ClusterHandle, n : Int) : Int do
+    match Echo_Run.initiate_Client(c, h, fn (s, st) -> ask(s, st, n)) do
+      Ok(_) -> 1
+      Err(SessionNode.NoOffer(role, _)) ->
+        println("Client: no access point would take role " ++ int_to_string(role))
+        0
+      Err(e) ->
+        println("Client: " ++ SessionNode.run_error_message(e))
+        0
+    end
+  end
+
+  -- Both offers visible in this node's registry replica, and this node
+  -- connected to both offering nodes (an initiator only invites offers on
+  -- nodes it is connected to), before starting.
+  pfn await_offers(h : ClusterNode.ClusterHandle, left : Int) : Bool do
+    let n = List.length(List.filter(ClusterNode.names(h), fn nm -> String.starts_with(nm, "ap:Echo/2/")))
+    if n >= 2 && ClusterNode.link_count(h) >= 2 do true else if left <= 0 do false else
+      sleep_ms(50)
+      await_offers(h, left - 50)
+    end end
+  end
+
+  fn main(c : Cap(IO)) do
+    let seed = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A"))
+    let cfg = ClusterNode.config("node-b", Env.require_int("MARCH_PORT_B"), "", Cons(seed, Nil), "ap-secret", 1)
+    match ClusterNode.start(cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        if ClusterNode.await_members(h, 2, 120000) do () else panic("node-b: never joined") end
+        if await_offers(h, 60000) do () else panic("node-b: never saw both offers") end
+        let ok = session(c, h, 1) + session(c, h, 2) + session(c, h, 3) + session(c, h, 4)
+        println("Client: " ++ int_to_string(ok) ++ " of 4 sessions served")
+        -- The two slots of node-a's offer held, node-a is full; node-c
+        -- still refuses: nowhere to go.
+        let held1 = task_spawn(fn _ -> session(c, h, 98))
+        sleep_ms(500)
+        let held2 = task_spawn(fn _ -> session(c, h, 99))
+        sleep_ms(1000)
+        let _ = session(c, h, 5)
+        let _ = task_await_unwrap(held1) + task_await_unwrap(held2)
+        ClusterNode.stop(h)
+    end
+  end
+end

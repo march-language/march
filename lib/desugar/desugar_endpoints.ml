@@ -376,10 +376,45 @@ let collect_ctors (errors : Err.ctx) ~proto ~span (steps : astep list) : (string
   go steps;
   if !ok then Some (List.rev !acc) else None
 
+(** A protocol's fingerprint: a digest of its roles and steps (every message
+    with its sender, receiver, constructor and payload type; loops, choices
+    and stops), so two nodes built from different versions of a protocol can
+    tell before they exchange a message.  An access point refuses an
+    invitation whose fingerprint is not its own
+    (specs/2026-09-19-choreography-access-points-and-crash-branches-design.md). *)
+let rec ty_key (t : ty) : string =
+  match t with
+  | TyCon (c, []) -> c.txt
+  | TyCon (c, args) -> c.txt ^ "(" ^ String.concat "," (List.map ty_key args) ^ ")"
+  | TyVar v -> "'" ^ v.txt
+  | TyArrow (a, b) -> "(" ^ ty_key a ^ "->" ^ ty_key b ^ ")"
+  | TyTuple ts -> "(" ^ String.concat "," (List.map ty_key ts) ^ ")"
+  | TyRecord fs -> "{" ^ String.concat "," (List.map (fun (f, t) -> f.txt ^ ":" ^ ty_key t) fs) ^ "}"
+  | TyLinear (_, t) -> "lin " ^ ty_key t
+  | TyNat k -> string_of_int k
+  | _ -> "?"
+
+let fingerprint_of ~proto (roles : string list) (steps : astep list) : string =
+  let b = Buffer.create 256 in
+  let rec go = function
+    | [] -> ()
+    | AMsg (f, t, ty, c) :: rest ->
+      Buffer.add_string b (Printf.sprintf "%s>%s:%s(%s);" f t c (ty_key ty)); go rest
+    | ALoop inner :: rest -> Buffer.add_string b "loop{"; go inner; Buffer.add_string b "}"; go rest
+    | AChoice (by, brs) :: rest ->
+      Buffer.add_string b ("choose " ^ by ^ "{");
+      List.iter (fun (l, arm) -> Buffer.add_string b (l ^ "->"); go arm; Buffer.add_string b "|") brs;
+      Buffer.add_string b "}"; go rest
+    | AStop :: rest -> Buffer.add_string b "stop;"; go rest
+  in
+  Buffer.add_string b (proto ^ "[" ^ String.concat "," roles ^ "]");
+  go steps;
+  Digest.to_hex (Digest.string (Buffer.contents b))
+
 (** `<P>_Msg`: the message type, its `Json` codec over `Bytes`, and the role
     indices.  The derive is expanded HERE, inside the generated module, so it
     rebinds nobody's bare `to_json`/`from_json` in the user's module. *)
-let msg_module (errors : Err.ctx) ~proto ~span (ctors : (string * ty) list) (roles : string list)
+let msg_module (errors : Err.ctx) ~proto ~span ~fingerprint (ctors : (string * ty) list) (roles : string list)
     (peers : (string * string list) list) : decl =
   let mname = proto ^ "_Msg" in
   let msg_td = TDVariant (List.map (fun (c, t) -> variant c [ t ]) ctors) in
@@ -431,7 +466,14 @@ let msg_module (errors : Err.ctx) ~proto ~span (ctors : (string * ty) list) (rol
          (fun r acc -> con "Cons" [ ETuple ([ lit_str r; lit_int (index_of r) ], sp); acc ])
          roles (con "Nil" []))
   in
-  DMod (n mname, Public, (msg_decl :: json_fns) @ [ encode; decode; try_decode ] @ role_fns @ peer_fns @ [ role_names ], sp)
+  (* `others_<R>()`: every role but [R], ascending -- the roles an initiator
+     fills from access points (it needs all of them, not only its peers). *)
+  let other_fns =
+    List.map (fun r -> fn ("others_" ^ r) [] (tycon "List" [ t_int ]) (int_list (List.filter (fun x -> x <> r) roles))) roles
+  in
+  let fp = fn "fingerprint" [] t_string (lit_str fingerprint) in
+  DMod (n mname, Public, (msg_decl :: json_fns) @ [ encode; decode; try_decode ] @ role_fns @ peer_fns @ other_fns
+                         @ [ role_names; fp ], sp)
 
 (** `<P>_<Role>`: one [always_linear] type per state and one function per
     transition, plus the unforgeable [Yield].  Also returns the name of the
@@ -794,6 +836,45 @@ let run_module ~proto ~(roles : (string * string) list) : decl =
                   (block [ let_wild (app "body" [ var "s"; app (rm ^ ".register") [ var "s"; lit_int 0 ] ]); unit ]) ]))
       roles
   in
+  (* `offer_<Role>(io, node, capacity, body)`: an ACCESS POINT -- this node
+     plays [Role] in up to [capacity] sessions at once, each formed when an
+     initiator invites it, each run by [body] in its own task.  And
+     `initiate_<Role>(io, node, body)`: start one session in [Role], filling
+     every other role from the access points that offer it.  Both are
+     `SessionNode.offer_role` / `initiate`; the front supplies the protocol's name
+     and fingerprint, the role, its peers and the other roles.  Design:
+     specs/2026-09-19-choreography-access-points-and-crash-branches-design.md. *)
+  let offers =
+    List.map
+      (fun (role, entry) ->
+         let rm = proto ^ "_" ^ role in
+         let t_body = TyArrow (t_cap_session, TyArrow (tycon (rm ^ "." ^ entry) [], tycon (rm ^ ".Yield") [])) in
+         fn ("offer_" ^ role)
+           [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", tycon "ClusterNode.ClusterHandle" []);
+             ("capacity", t_int); ("body", t_body) ]
+           (tycon "Result" [ tycon "SessionNode.Offer" []; t_string ])
+           (app "SessionNode.offer_role"
+              [ var "io"; var "node"; lit_str proto; app (msg ^ ".fingerprint") []; app (msg ^ ".role_" ^ role) [];
+                app (msg ^ ".peers_" ^ role) []; var "capacity"; lam [ "_ep" ] unit;
+                lam [ "s" ]
+                  (block [ let_wild (app "body" [ var "s"; app (rm ^ ".register") [ var "s"; lit_int 0 ] ]); unit ]) ]))
+      roles
+  in
+  let initiators =
+    List.map
+      (fun (role, entry) ->
+         let rm = proto ^ "_" ^ role in
+         let t_body = TyArrow (t_cap_session, TyArrow (tycon (rm ^ "." ^ entry) [], tycon (rm ^ ".Yield") [])) in
+         fn ("initiate_" ^ role)
+           [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", tycon "ClusterNode.ClusterHandle" []); ("body", t_body) ]
+           (tycon "Result" [ t_unit; tycon "SessionNode.RunError" [] ])
+           (app "SessionNode.initiate"
+              [ var "io"; var "node"; lit_str proto; app (msg ^ ".fingerprint") []; app (msg ^ ".role_" ^ role) [];
+                app (msg ^ ".peers_" ^ role) []; app (msg ^ ".others_" ^ role) []; lam [ "_ep" ] unit;
+                lam [ "s" ]
+                  (block [ let_wild (app "body" [ var "s"; app (rm ^ ".register") [ var "s"; lit_int 0 ] ]); unit ]) ]))
+      roles
+  in
   (* `host_<Role>(io, node_id, secret, addrs, host, start, deliver)`: the
      same party, the role hosted in the actor [host] through the event API.
      Nothing here is typed by the protocol beyond the role and its peers --
@@ -849,7 +930,7 @@ let run_module ~proto ~(roles : (string * string) list) : decl =
             [ "Session"; "Live" ] ],
         sp )
   in
-  DMod (n mname, Public, (needs :: addrs :: runners) @ clusters @ hosters @ hosters_or, sp)
+  DMod (n mname, Public, (needs :: addrs :: runners) @ clusters @ offers @ initiators @ hosters @ hosters_or, sp)
 
 (** Whether [expand] emits `<P>_Run`.  On for every real compile.  A test that
     typechecks generated code against a thin stdlib without `SessionNode`
@@ -879,7 +960,8 @@ let expand (errors : Err.ctx) (decls : decl list) : decl list =
                 | d -> d
               in
               let peers = List.map (fun r -> (r, peers_of steps roles r)) roles in
-              let msg = msg_module errors ~proto ~span ctors roles peers in
+              let fingerprint = fingerprint_of ~proto roles steps in
+              let msg = msg_module errors ~proto ~span ~fingerprint ctors roles peers in
               let role_mods =
                 List.map
                   (fun role ->

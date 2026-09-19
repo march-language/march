@@ -1140,7 +1140,9 @@ mod SessionNode do
   --   a Cancel.
   -- - `Left(why)`: this role called `leave`.
   -- - `Listen(port, why)` / `Accept(why)` / `Connect(role, why)`: wiring.
-  type RunError = Cancelled(Int, String) | Protocol(Int, String) | HostGone(Int) | Left(String) | Listen(Int, String) | Accept(String) | Connect(Int, String)
+  -- - `NoOffer(role, why)`: `initiate` found no access point that would
+  --   take [role] (none registered, all full, all refused, or no answer).
+  type RunError = Cancelled(Int, String) | Protocol(Int, String) | HostGone(Int) | Left(String) | Listen(Int, String) | Accept(String) | Connect(Int, String) | NoOffer(Int, String)
 
   fn run_error_message(e : RunError) : String do
     match e do
@@ -1151,6 +1153,7 @@ mod SessionNode do
       Listen(port, why) -> "session_node: listen on port " ++ int_to_string(port) ++ ": " ++ why
       RunError.Accept(why) -> "session_node: accept: " ++ why
       RunError.Connect(role, why) -> "session_node: connect to role " ++ int_to_string(role) ++ ": " ++ why
+      NoOffer(role, why) -> "session_node: no access point for role " ++ int_to_string(role) ++ ": " ++ why
     end
   end
 
@@ -1603,9 +1606,11 @@ mod SessionNode do
     ()
   end
 
-  -- Each peer role's endpoint, by name; waits up to [left] ms for all of them.
-  pfn find_peers(node : ClusterNode.ClusterHandle, session : String, peers : List(Int), left : Int)
-      : Result(List((Int, GlobalPid.Pid)), Int) do
+  -- Each peer role's endpoint, by name; waits up to [left] ms for all of them,
+  -- or until [abandoned] says the session was withdrawn (an access point's
+  -- session whose initiator gave up on it): Err(0) then.
+  pfn find_peers(node : ClusterNode.ClusterHandle, session : String, peers : List(Int), left : Int,
+                 abandoned : Int -> Bool) : Result(List((Int, GlobalPid.Pid)), Int) do
     let found = List.map(peers, fn r -> (r, ClusterNode.lookup(node, role_name(session, r))))
     match List.find(found, fn rp -> match rp do (_r, o) -> o == None end) do
       None ->
@@ -1615,10 +1620,11 @@ mod SessionNode do
             (_, None) -> None
           end))
       Some((missing, _)) ->
-        if left <= 0 do Err(missing) else
+        if abandoned(0) do Err(0)
+        else if left <= 0 do Err(missing) else
           sleep_ms(50)
-          find_peers(node, session, peers, left - 50)
-        end
+          find_peers(node, session, peers, left - 50, abandoned)
+        end end
     end
   end
 
@@ -1681,6 +1687,13 @@ mod SessionNode do
   """
   fn run_cluster(io : Cap(IO), node : ClusterNode.ClusterHandle, my_role : Int, peers : List(Int), session : String,
                  on_close : Int -> Unit, body : Cap(Session.Live) -> Unit) : Result((), RunError) do
+    run_cluster_with(io, node, my_role, peers, session, on_close, body, fn _ -> false)
+  end
+
+  -- `run_cluster`, abandoned while still finding its peers once [abandoned]
+  -- says so (an access point's session the initiator withdrew).
+  pfn run_cluster_with(io : Cap(IO), node : ClusterNode.ClusterHandle, my_role : Int, peers : List(Int), session : String,
+                       on_close : Int -> Unit, body : Cap(Session.Live) -> Unit, abandoned : Int -> Bool) : Result((), RunError) do
     let p0 = party(my_role, node.node_id, on_close)
     Vault.set(p0.why, "sid", session)
     let slot = Vault.new("session_node_slot_" ++ session ++ "." ++ int_to_string(pid_to_int(p0.ep)))
@@ -1691,11 +1704,12 @@ mod SessionNode do
         ClusterNode.unroute(node, route_key)
         Err(Listen(my_role, "session " ++ session ++ ": role " ++ int_to_string(my_role) ++ " is already registered"))
       Ok(_) ->
-        match find_peers(node, session, peers, 30000) do
+        match find_peers(node, session, peers, 30000, abandoned) do
           Err(missing) ->
             ClusterNode.unroute(node, route_key)
             ClusterNode.unregister(node, me)
-            Err(RunError.Connect(missing, "session " ++ session ++ ": no endpoint registered for role " ++ int_to_string(missing)))
+            if missing == 0 do Err(RunError.Connect(0, "session " ++ session ++ ": withdrawn by its initiator"))
+            else Err(RunError.Connect(missing, "session " ++ session ++ ": no endpoint registered for role " ++ int_to_string(missing))) end
           Ok(found) ->
             match cluster_links(node, found, 30000) do
               Err(missing) ->
@@ -1728,6 +1742,314 @@ mod SessionNode do
                 run_result(p, my_role)
             end
         end
+    end
+  end
+
+  -- ── access points ───────────────────────────────────────────────────────
+  -- A node OFFERS a role of a protocol for many sessions; a session forms when
+  -- an INITIATOR invites one offer of each other role, found by name, and
+  -- every member runs the cluster session under a fresh id. Design:
+  -- specs/2026-09-19-choreography-access-points-and-crash-branches-design.md
+  -- (Part A). Wire, over the cluster node (routed by the offer's / the
+  -- initiator's inbox pid):
+  --   SessionAP.Invite    [sid, fingerprint, reply pid]   initiator -> offer
+  --   SessionAP.Withdraw  [sid]                           initiator -> offer
+  --   SessionAP.Answer    [sid, node_id, verdict]         offer -> initiator
+  -- where verdict "" accepts and anything else is why it refused.
+
+  -- An offer's name: one per protocol, role and node.
+  pfn ap_prefix(proto : String, role : Int) : String do
+    "ap:" ++ proto ++ "/" ++ int_to_string(role) ++ "/"
+  end
+
+  type OfferCount = { active : Int }
+
+  -- An offer: what an invitation needs to be answered and its session run.
+  -- [start] runs one session under a sid, abandoned while still forming
+  -- once its argument says so. [flags]: "closing", and "w<sid>" for a
+  -- session its initiator withdrew.
+  type Offer = { node : ClusterNode.ClusterHandle, proto : String, fingerprint : String, my_role : Int,
+                 capacity : Int, name : String, flags : Vault(Int), strs : Vault(String),
+                 start : String -> (Int -> Bool) -> Result((), RunError), worker : Pid(OfferCount) }
+
+  pfn offer_verdict(o : Offer, active : Int, fp : String) : String do
+    if Vault.get(o.flags, "closing") != None do "closing"
+    else if fp != o.fingerprint do "protocol differs"
+    else if active >= o.capacity do "full"
+    else "" end end end
+  end
+
+  -- Invitations are answered in the offer actor's turn, so the count of
+  -- running sessions is exact; each accepted session runs in its own task
+  -- and reports back when it ends.
+  actor OfferActor do
+    state { active : Int }
+    init  { active: 0 }
+    on Invite(o : Offer, sid : String, fp : String, reply : GlobalPid.Pid) do
+      let verdict = offer_verdict(o, state.active, fp)
+      let _ = ClusterNode.send_msg(o.node, reply, "SessionAP.Answer",
+                encode_answer(sid, o.node.node_id, verdict), NodeQueue.Unbounded)
+      if verdict == "" do
+        let flags = o.flags
+        let start = o.start
+        let me = o.worker
+        let _ = task_spawn(fn _ -> do
+          let _ = start(sid, fn _ -> Vault.get(flags, "w" ++ sid) != None)
+          let _ = Vault.delete(flags, "w" ++ sid)
+          let _ = send(me, Ended(sid))
+          0
+        end)
+        { active: state.active + 1 }
+      else state end
+    end
+    on Withdraw(o : Offer, sid : String) do
+      Vault.set(o.flags, "w" ++ sid, 1)
+      state
+    end
+    on Ended(sid : String) do
+      { active: state.active - 1 }
+    end
+  end
+
+  pfn encode_invite(sid : String, fp : String, reply : GlobalPid.Pid) : List(Int) do
+    Msgpack.encode(Msgpack.array(Cons(Msgpack.str(sid), Cons(Msgpack.str(fp),
+      Cons(Msgpack.bin(GlobalPid.encode(reply)), Nil)))))
+  end
+
+  pfn encode_answer(sid : String, node_id : String, verdict : String) : List(Int) do
+    Msgpack.encode(Msgpack.array(Cons(Msgpack.str(sid), Cons(Msgpack.str(node_id), Cons(Msgpack.str(verdict), Nil)))))
+  end
+
+  pfn encode_sid(sid : String) : List(Int) do
+    Msgpack.encode(Msgpack.array(Cons(Msgpack.str(sid), Nil)))
+  end
+
+  -- An invitation or withdrawal for [o], from the node's data reader (its
+  -- turn must only send): handed to the offer actor.
+  pfn offer_frame(o : Offer, d : NodeSend.Delivery) : Result((), String) do
+    if d.type_tag == "SessionAP.Invite" do
+      match Msgpack.decode(d.payload) do
+        Ok(Msgpack.Array(Cons(Msgpack.Str(sid), Cons(Msgpack.Str(fp), Cons(Msgpack.Bin(rb), Nil))))) ->
+          match GlobalPid.decode(rb) do
+            Ok(reply) ->
+              let _ = send(o.worker, Invite(o, sid, fp, reply))
+              Ok(())
+            Err(e) -> Err("session_ap: invite reply pid: " ++ e)
+          end
+        _ -> Err("session_ap: bad Invite payload")
+      end
+    else if d.type_tag == "SessionAP.Withdraw" do
+      match Msgpack.decode(d.payload) do
+        Ok(Msgpack.Array(Cons(Msgpack.Str(sid), Nil))) ->
+          let _ = send(o.worker, Withdraw(o, sid))
+          Ok(())
+        _ -> Err("session_ap: bad Withdraw payload")
+      end
+    else Err("session_ap: unexpected type " ++ d.type_tag) end end
+  end
+
+  doc """
+  Offer role [my_role] of protocol [proto] (fingerprint [fingerprint], the
+  generated `<P>_Msg.fingerprint()`) on the cluster node [node], for up to
+  [capacity] sessions at once. Each session forms when an initiator
+  (`initiate`) invites this node; it then runs [body] in its own task, as
+  `run_cluster` would, under the session id the initiator minted. An
+  invitation is refused when the offer is full, closing, or built from a
+  different version of the protocol. One offer per role per node: a second
+  is `Err`. The generated `<P>_Run.offer_<Role>` supplies the protocol, role
+  and peers. The offer's name is bound to an actor of this node; if the
+  node stops, or a supervisor restarts the program that made it, it is
+  gone from the registry and an initiator no longer picks it -- offer again
+  to be found again.
+  """
+  fn offer_role(io : Cap(IO), node : ClusterNode.ClusterHandle, proto : String, fingerprint : String, my_role : Int,
+           peers : List(Int), capacity : Int, on_close : Int -> Unit, body : Cap(Session.Live) -> Unit) : Result(Offer, String) do
+    let a = spawn(OfferActor)
+    let tag = proto ++ "." ++ int_to_string(my_role) ++ "." ++ int_to_string(pid_to_int(a))
+    let o = { node: node, proto: proto, fingerprint: fingerprint, my_role: my_role, capacity: capacity,
+              name: ap_prefix(proto, my_role) ++ node.node_id,
+              flags: Vault.new("session_ap_flags_" ++ tag), strs: Vault.new("session_ap_strs_" ++ tag),
+              start: fn (sid, abandoned) -> run_cluster_with(io, node, my_role, peers, sid, on_close, body, abandoned),
+              worker: a }
+    let key = ClusterNode.route(node, pid_to_int(a), fn d -> offer_frame(o, d))
+    Vault.set(o.strs, "route", key)
+    match ClusterNode.register(node, o.name, a) do
+      Ok(_) -> Ok(o)
+      Err(_) ->
+        ClusterNode.unroute(node, key)
+        Err("session_node: role " ++ int_to_string(my_role) ++ " of " ++ proto ++ " is already offered on this node")
+    end
+  end
+
+  doc "Stop offering: new invitations are refused and the name is released. Sessions already running finish."
+  fn close_offer(o : Offer) : () do
+    Vault.set(o.flags, "closing", 1)
+    ClusterNode.unregister(o.node, o.name)
+    match Vault.get(o.strs, "route") do
+      Some(k) -> ClusterNode.unroute(o.node, k)
+      None -> ()
+    end
+  end
+
+  -- The initiator's reply address: an actor that exists only to have a pid
+  -- the node can route answers by.
+  actor ApInbox do
+    state { n : Int }
+    init  { n: 0 }
+    on Nop() do state end
+  end
+
+  pfn inbox_frame(answers : Vault(String), sid : String, d : NodeSend.Delivery) : Result((), String) do
+    if d.type_tag != "SessionAP.Answer" do Err("session_ap: unexpected type " ++ d.type_tag)
+    else
+      match Msgpack.decode(d.payload) do
+        Ok(Msgpack.Array(Cons(Msgpack.Str(asid), Cons(Msgpack.Str(nid), Cons(Msgpack.Str(verdict), Nil))))) ->
+          if asid == sid do
+            Vault.set(answers, nid, verdict)
+            Ok(())
+          else Ok(()) end
+        _ -> Err("session_ap: bad Answer payload")
+      end
+    end
+  end
+
+  -- The offers of [role], other than on the nodes in [used], rotated by [n]
+  -- so successive sessions of one initiator spread over them. Only offers on
+  -- nodes this node is connected to: the registry can show a name (learnt
+  -- through a third node) before the two nodes have a connection, and a
+  -- session between them needs one.
+  pfn candidates(node : ClusterNode.ClusterHandle, proto : String, role : Int, used : List(String), n : Int)
+      : List(GlobalPid.Pid) do
+    let prefix = ap_prefix(proto, role)
+    let found = List.filter_map(ClusterNode.names(node), fn name ->
+      if String.starts_with(name, prefix) do ClusterNode.lookup(node, name) else None end)
+    let fresh = List.filter(found, fn g ->
+      List.member(used, g.node_id) == false && ClusterNode.queue_for(node, g.node_id) != None)
+    let k = List.length(fresh)
+    if k == 0 do fresh else
+      let r = n % k
+      List.append(List.drop(fresh, r), List.take(fresh, r))
+    end
+  end
+
+  -- Wait up to [left] ms for [nid]'s answer: Some(verdict), or None.
+  -- [budget] holds the setup time left, shared by every invitation.
+  pfn await_answer(answers : Vault(String), nid : String, budget : Vault(Int)) : Option(String) do
+    match Vault.get(answers, nid) do
+      Some(v) -> Some(v)
+      None ->
+        if Vault.get_or(budget, "left", 0) <= 0 do None else
+          sleep_ms(20)
+          let _ = Vault.incr(budget, "left", -20)
+          await_answer(answers, nid, budget)
+        end
+    end
+  end
+
+  -- A node's name for messages, falling back to its id.
+  pfn node_label(node : ClusterNode.ClusterHandle, node_id : String) : String do
+    match ClusterNode.name_of(node, node_id) do
+      Some(nm) -> nm
+      None -> node_id
+    end
+  end
+
+  -- [why] so far, and one more reason.
+  pfn and_why(why : String, more : String) : String do
+    if why == "" do more else why ++ "; " ++ more end
+  end
+
+  -- Invite the candidates for [role] in turn until one accepts: Ok(its pid),
+  -- or Err(every refusal, "; "-separated, or why there was none). A candidate that does not answer in
+  -- time is withdrawn from, in case it accepts late.
+  pfn invite_role(node : ClusterNode.ClusterHandle, sid : String, fp : String, reply : GlobalPid.Pid,
+                  answers : Vault(String), budget : Vault(Int), cands : List(GlobalPid.Pid), why : String)
+      : Result(GlobalPid.Pid, String) do
+    match cands do
+      Nil -> Err(if why == "" do "no access point is registered" else why end)
+      Cons(g, rest) ->
+        if Vault.get_or(budget, "left", 0) <= 0 do Err(and_why(why, "no answer within the setup time")) else
+          match ClusterNode.send_msg(node, g, "SessionAP.Invite", encode_invite(sid, fp, reply), NodeQueue.Unbounded) do
+            Err(_) -> invite_role(node, sid, fp, reply, answers, budget, rest,
+                                  and_why(why, node_label(node, g.node_id) ++ " is unreachable"))
+            Ok(_) -> answer_or_next(node, sid, fp, reply, answers, budget, g, rest, why)
+          end
+        end
+    end
+  end
+
+  -- [g]'s answer, or the next candidate after a refusal or no answer.
+  pfn answer_or_next(node : ClusterNode.ClusterHandle, sid : String, fp : String, reply : GlobalPid.Pid,
+                     answers : Vault(String), budget : Vault(Int), g : GlobalPid.Pid, rest : List(GlobalPid.Pid),
+                     why : String) : Result(GlobalPid.Pid, String) do
+    match await_answer(answers, g.node_id, budget) do
+      Some(v) ->
+        if v == "" do Ok(g)
+        else invite_role(node, sid, fp, reply, answers, budget, rest,
+                         and_why(why, node_label(node, g.node_id) ++ " refused: " ++ v)) end
+      None ->
+        let _ = ClusterNode.send_msg(node, g, "SessionAP.Withdraw", encode_sid(sid), NodeQueue.Unbounded)
+        invite_role(node, sid, fp, reply, answers, budget, rest,
+                    and_why(why, node_label(node, g.node_id) ++ " did not answer"))
+    end
+  end
+
+  pfn withdraw_all(node : ClusterNode.ClusterHandle, sid : String, accepted : List(GlobalPid.Pid)) : () do
+    let _ = List.map(accepted, fn g ->
+      ClusterNode.send_msg(node, g, "SessionAP.Withdraw", encode_sid(sid), NodeQueue.Unbounded))
+    ()
+  end
+
+  -- Fill every role in [roles] from its offers, each on a node not yet in
+  -- the session: Ok(the accepted offers), or Err((role, why, accepted so
+  -- far)).
+  pfn fill_roles(node : ClusterNode.ClusterHandle, proto : String, sid : String, fp : String, reply : GlobalPid.Pid,
+                 answers : Vault(String), budget : Vault(Int), roles : List(Int), n : Int,
+                 used : List(String), accepted : List(GlobalPid.Pid))
+      : Result(List(GlobalPid.Pid), (Int, String, List(GlobalPid.Pid))) do
+    match roles do
+      Nil -> Ok(accepted)
+      Cons(r, rest) ->
+        match invite_role(node, sid, fp, reply, answers, budget, candidates(node, proto, r, used, n), "") do
+          Err(why) -> Err((r, why, accepted))
+          Ok(g) -> fill_roles(node, proto, sid, fp, reply, answers, budget, rest, n,
+                              Cons(g.node_id, used), Cons(g, accepted))
+        end
+    end
+  end
+
+  doc """
+  Start one session of protocol [proto] in role [my_role] on the cluster
+  node [node], filling every role in [others] (all the other roles) from the
+  access points that offer it (`offer_role`). Mints a fresh session id (this
+  node, its creation, a counter: never reused, so a restarted or partitioned
+  node cannot be addressed by an old session), invites one offer per role --
+  each on a different node, as cluster sessions need -- moving to the next
+  offer on a refusal or no answer, all within the setup time
+  (MARCH_SESSION_CONNECT_MS, 20 s). Then runs [body] as `run_cluster` does.
+  `Err(NoOffer(role, why))` if a role could not be filled; the offers that
+  had accepted are withdrawn. The generated `<P>_Run.initiate_<Role>`
+  supplies the protocol, role, peers and other roles.
+  """
+  fn initiate(io : Cap(IO), node : ClusterNode.ClusterHandle, proto : String, fingerprint : String, my_role : Int,
+              peers : List(Int), others : List(Int), on_close : Int -> Unit, body : Cap(Session.Live) -> Unit)
+      : Result((), RunError) do
+    let n = Vault.incr(node.meta, "ap_sessions", 1)
+    let sid = node.node_id ++ "." ++ int_to_string(ClusterNode.creation(node)) ++ "." ++ int_to_string(n)
+    let inbox = spawn(ApInbox)
+    let answers = Vault.new("session_ap_answers_" ++ sid)
+    let budget = Vault.new("session_ap_budget_" ++ sid)
+    let t = connect_ms()
+    Vault.set(budget, "left", if t > 0 do t else 3600000 end)
+    let key = ClusterNode.route(node, pid_to_int(inbox), fn d -> inbox_frame(answers, sid, d))
+    let reply = ClusterNode.global_pid(node, pid_to_int(inbox))
+    let filled = fill_roles(node, proto, sid, fingerprint, reply, answers, budget, others, n, Cons(node.node_id, Nil), Nil)
+    ClusterNode.unroute(node, key)
+    match filled do
+      Err((role, why, accepted)) ->
+        withdraw_all(node, sid, accepted)
+        Err(NoOffer(role, why))
+      Ok(_) -> run_cluster(io, node, my_role, peers, sid, on_close, body)
     end
   end
 end
