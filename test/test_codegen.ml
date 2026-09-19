@@ -3664,6 +3664,23 @@ let test_purity_kill () =
   Alcotest.(check bool) "kill is impure" false
     (March_tir.Purity.is_pure (app "kill" [ilit 0]))
 
+(* 2026-09-19: builtins missing from the impure list were treated as pure,
+   and `let _ = task_await_unwrap(t)` compiled to no wait at all.  The
+   family rules (Purity.impure_prefixes / impure_suffixes / impure_named)
+   cover the await family and the other effectful builtins found missing;
+   see test/native/task_await_discarded for the end-to-end witness. *)
+let test_purity_effect_families () =
+  let v = March_tir.Tir.AVar (mk_var "x" March_tir.Tir.TInt) in
+  let impure name = Alcotest.(check bool) (name ^ " is impure") false
+      (March_tir.Purity.is_pure (app name [v])) in
+  List.iter impure
+    [ "task_await"; "task_await_unwrap"; "task_cancel"; "file_delete"; "dir_rm_rf";
+      "tcp_accept"; "process_kill_proc"; "vault_ns_set"; "ws_send"; "logger_write";
+      "ring_buf_push"; "native_int_arr_set"; "simd_f32x4_store"; "panic"; "uuid_v7"; "self" ];
+  let pure name = Alcotest.(check bool) (name ^ " stays pure") true
+      (March_tir.Purity.is_pure (app name [v])) in
+  List.iter pure [ "http_parse_response"; "string_length"; "int_to_string"; "math_sqrt" ]
+
 let test_purity_incrc () =
   let v = March_tir.Tir.AVar (mk_var "x" March_tir.Tir.TInt) in
   Alcotest.(check bool) "EIncRC is impure" false
@@ -15108,6 +15125,7 @@ let codegen_suites =
         Alcotest.test_case "let_impure"   `Quick test_purity_let_impure;
         Alcotest.test_case "callptr"    `Quick test_purity_callptr;
         Alcotest.test_case "kill"       `Quick test_purity_kill;
+        Alcotest.test_case "effect families" `Quick test_purity_effect_families;
         Alcotest.test_case "incrc"      `Quick test_purity_incrc;
         Alcotest.test_case "free"       `Quick test_purity_free;
       ]);

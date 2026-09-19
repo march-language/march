@@ -12,6 +12,12 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
+- **A discarded `task_await` now waits in compiled code.** `let _ = task_await_unwrap(t)`,
+  an unused `let x = task_await(t)` and similar were deleted by the optimizer, which
+  wrongly took the await builtins for pure: compiled programs ran on without waiting,
+  while the interpreter waited. Other effectful builtins (file and directory writes,
+  sockets, task cancellation, process control, in-place array writes, `panic`) were
+  also treated as pure and are now protected by family-wide rules.
 - **A choreography role that works for a long time before its first message is no longer
   taken for dead.** Heartbeats used to start only once a role reached its first send or
   receive, so one that computed past the heartbeat timeout (10 s by default) before then
