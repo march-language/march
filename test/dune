@@ -2749,6 +2749,23 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff empty.expected cluster_node_check.out)))
 
+;; stdlib/session_node.march, likewise: no error and no warning when checked
+;; as the entry. It had 17 hidden errors (arms mixing `send`'s `Option(())`
+;; with `()`, missing `needs`) that no program ever saw, and an ambiguous
+;; `Stop` sent to an untyped pid. Hints are allowed: the runners take
+;; `Cap(IO)` because `Session.attach` does, and the checker hints at every
+;; such function.
+(rule
+ (targets session_node_check.out)
+ (deps (file %{exe:../bin/main.exe}) (source_tree ../stdlib))
+ (action
+  (with-outputs-to session_node_check.out
+   (system "%{exe:../bin/main.exe} --check ../stdlib/session_node.march 2>&1 | grep -A6 -E '^-- (ERROR|WARNING)' || true"))))
+
+(rule
+ (alias runtest)
+ (action (diff empty.expected session_node_check.out)))
+
 ;; TRMC's reuse_hole on a SHARED scrutinee moved the cell's fields out with
 ;; no dup (the case arm's rb_shared path recognised only EReuse): the next
 ;; iteration reused a cell another holder still had. Pre-fix: RC underflow;

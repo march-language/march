@@ -1,0 +1,49 @@
+-- Scenario "cluster_queue_limit": node-a plays Client; see scenario.sh.
+mod ClusterQueueLimitA do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+
+  @[endpoints]
+  protocol Bulk do
+    Server -> Client : Int
+    Client -> Server : String
+    Client -> Server : String
+    Client -> Server : String
+    Server -> Client : Int
+  end
+
+  pfn pad(n : Int, acc : String) : String do
+    if n <= 0 do acc else pad(n - 1, acc ++ "x") end
+  end
+
+  pfn role_client(s : Cap(Session.Live), st : Bulk_Client.S_recv_Msg_Server_Client_1) : Bulk_Client.Yield do
+    Bulk_Client.recv_Msg_Server_Client_1(s, st, fn (_go, st1) ->
+      -- Give the harness time to freeze node-b.
+      sleep_ms(1000)
+      let st2 = Bulk_Client.send_Msg_Client_Server_1(s, st1, pad(200000, ""))
+      let st3 = Bulk_Client.send_Msg_Client_Server_2(s, st2, pad(200000, ""))
+      let st4 = Bulk_Client.send_Msg_Client_Server_3(s, st3, pad(200000, ""))
+      Bulk_Client.recv_Msg_Server_Client_2(s, st4, fn (_n, st5) -> Bulk_Client.close(s, st5)))
+  end
+
+  fn main(c : Cap(IO)) do
+    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "ql-secret", 1)
+    match ClusterNode.start(cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        println("node-a: up")
+        if ClusterNode.await_members(h, 1, 120000) do () else panic("node-a: nobody joined") end
+        match Bulk_Run.cluster_Client(c, h, "q1", fn (s, st) -> role_client(s, st)) do
+          Ok(_) -> println("A: closed")
+          Err(e) -> println("A: " ++ SessionNode.run_error_message(e))
+        end
+        ClusterNode.stop(h)
+    end
+  end
+end
