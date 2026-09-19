@@ -27,7 +27,11 @@ mod ClusterCrashA do
 
   fn main(_c : Cap(IO)) do
     let port = Env.require_int("MARCH_PORT_A")
-    let cfg = ClusterNode.config("node-a", port, "", Nil, "stall-secret", 1)
+    -- A long suspect timeout: this scenario pins the REFUSED path, and a
+    -- false suspicion shortly before the kill (a slow ack on a loaded host)
+    -- would otherwise let the suspect timer race the refused redial.
+    let base = ClusterNode.config("node-a", port, "", Nil, "stall-secret", 1)
+    let cfg = { base with swim: Swim.config(500, 10000, 2) }
     match ClusterNode.start(cfg) do
       Err(e) -> panic(e)
       Ok(h) ->

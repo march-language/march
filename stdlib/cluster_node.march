@@ -72,16 +72,19 @@ mod ClusterNode do
                     dial_timeout_ms : Int, handshake_timeout_ms : Int }
 
   doc """
-  A configuration with the defaults: SWIM period 500 ms, ack timeout 300 ms,
-  suspect timeout 1500 ms, 2 indirect helpers, tick 100 ms, redial backoff
+  A configuration with the defaults: SWIM period 1 s, ack timeout 500 ms,
+  suspect timeout 3 s, 2 indirect helpers, tick 100 ms, redial backoff
   200 ms doubling to 5 s, dial and handshake timeouts 2 s. [advertise] ""
-  means `127.0.0.1:<listen_port>`.
+  means `127.0.0.1:<listen_port>`. The SWIM timings trade detection speed
+  for false suspicions on a loaded host (a 300 ms ack timeout suspected
+  healthy peers on a busy CI runner); override `swim` / `period_ms` with a
+  record update to tune them.
   """
   fn config(name : String, listen_port : Int, advertise : String, seeds : List(String),
             secret : String, creation : Int) : CnConfig do
     let adv = if String.is_empty(advertise) do "127.0.0.1:" ++ int_to_string(listen_port) else advertise end
     { name: name, listen_port: listen_port, advertise: adv, seeds: seeds, secret: secret,
-      creation: creation, swim: Swim.config(300, 1500, 2), period_ms: 500, tick_ms: 100,
+      creation: creation, swim: Swim.config(500, 3000, 2), period_ms: 1000, tick_ms: 100,
       redial_min_ms: 200, redial_max_ms: 5000, dial_timeout_ms: 2000, handshake_timeout_ms: 2000 }
   end
 
