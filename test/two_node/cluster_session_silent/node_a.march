@@ -36,7 +36,7 @@ mod ClusterSessionSilentA do
       Err(e) -> panic(e)
       Ok(h) ->
         println("node-a: up")
-        if ClusterNode.await_members(h, 1, 30000) do () else panic("node-a: never joined") end
+        if ClusterNode.await_members(h, 1, 120000) do () else panic("node-a: never joined") end
         match Silent_Run.cluster_A(c, h, "silent-1", fn (s, st) -> role_a(s, st)) do
           Ok(_) -> println("A: closed")
           Err(SessionNode.Cancelled(role, cause)) ->

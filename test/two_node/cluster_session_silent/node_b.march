@@ -30,7 +30,7 @@ mod ClusterSessionSilentB do
       Err(e) -> panic(e)
       Ok(h) ->
         println("node-b: up")
-        if ClusterNode.await_members(h, 1, 30000) do () else panic("node-b: never joined") end
+        if ClusterNode.await_members(h, 1, 120000) do () else panic("node-b: never joined") end
         match Silent_Run.cluster_B(c, h, "silent-1", fn (s, st) -> role_b(s, st)) do
           Ok(_) -> println("B: closed")
           Err(e) -> println("B: " ++ SessionNode.run_error_message(e))

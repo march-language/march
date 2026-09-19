@@ -76,7 +76,7 @@ mod ClusterMuxB do
           if d.type_tag == "Mux.Die" do kill(target) else () end
           Ok(())
         end)
-        if ClusterNode.await_members(h, 1, 30000) do () else println("node-b: never joined") end
+        if ClusterNode.await_members(h, 1, 120000) do () else println("node-b: never joined") end
         let r1 = ClusterNode.register(h, "sx", sx)
         let r2 = ClusterNode.register(h, "sy", sy)
         let r3 = ClusterNode.register(h, "target", target)

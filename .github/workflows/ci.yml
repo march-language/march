@@ -101,7 +101,7 @@ jobs:
       matrix:
         os: [macos-15, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 80
     steps:
       - uses: actions/checkout@v4
 
@@ -134,7 +134,10 @@ jobs:
           dune build bin/main.exe
 
       - name: Test
-        timeout-minutes: 30
+        # 30 was already the edge on main (27 min on the last green run in
+        # September 2026); the cluster node service's suites and native rules
+        # pushed a run past it. The job cap moves with it.
+        timeout-minutes: 45
         run: |
           eval $(opam env)
           dune runtest
@@ -170,7 +173,7 @@ jobs:
       # is test/two_node/<name>/; see specs/progress/2026-09-14-two-node-failure-semantics-harness.md.
       - name: Two-node scenarios
         if: matrix.os == 'ubuntu-24.04'
-        timeout-minutes: 10
+        timeout-minutes: 25
         run: |
           eval $(opam env)
           dune build bin/main.exe
@@ -563,7 +566,7 @@ jobs:
   # syscall interception hangs ASAN's shadow-memory setup.
   sanitize-gate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
 
@@ -572,7 +575,10 @@ jobs:
         uses: ./.github/actions/march-setup
 
       - name: AddressSanitizer gate (RC/UAF guard) — golden + curated SIMD/NativeArray
-        timeout-minutes: 15
+        # The two-node sweep runs every scenario under ASan; the cluster node
+        # service added eleven (each compiles 2-3 ASan binaries). 15 minutes
+        # covered the golden + native corpora and the first 14 scenarios.
+        timeout-minutes: 35
         run: |
           eval $(opam env)
           dune shutdown 2>/dev/null || true
@@ -593,7 +599,7 @@ jobs:
   # exhaustion with the TRMC variable itself and made failures non-reproducible.
   trmc-suite:
     runs-on: ubuntu-24.04
-    timeout-minutes: 70
+    timeout-minutes: 85
     steps:
       - uses: actions/checkout@v4
 
@@ -612,7 +618,10 @@ jobs:
           dune build bin/main.exe
 
       - name: Test suite with TRMC disabled
-        timeout-minutes: 45
+        # 45 -> 60 (2026-09-18): main itself timed out here on consecutive
+        # runs (44:53 on the last green one) before the cluster node service
+        # added its suites.
+        timeout-minutes: 60
         # Cold build + full test suite with TRMC turned off. 35 minutes stopped
         # being enough in September 2026: the run on main at 16e27ab1, and
         # PR #449's, printed "All suites passed." in the same second the step

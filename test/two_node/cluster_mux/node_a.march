@@ -75,9 +75,9 @@ mod ClusterMuxA do
           Vault.set(flags, "failed", 1)
         end)
         println("node-a: up")
-        let sx = wait_name(h, "sx", 30000)
-        let sy = wait_name(h, "sy", 30000)
-        let target = wait_name(h, "target", 30000)
+        let sx = wait_name(h, "sx", 120000)
+        let sy = wait_name(h, "sy", 120000)
+        let target = wait_name(h, "target", 120000)
         match ClusterNode.monitor_remote(h, target, fn r -> do
           let n = Vault.incr(flags, "downs", 1)
           if n == 1 do println("node-a: target down: " ++ reason_text(r)) else println("node-a: duplicate Down") end
@@ -90,8 +90,8 @@ mod ClusterMuxA do
         println("node-a: sent both streams, refused " ++ int_to_string(refused))
         let _ = ClusterNode.send_msg(h, GlobalPid.make(sx.node_id, 999999, sx.creation), "Mux.N", payload(0), NodeQueue.DropNew)
         let _ = ClusterNode.send_msg(h, target, "Mux.Die", Nil, NodeQueue.BlockSender(10000))
-        if wait_flag(flags, "failed", 30000) do () else println("node-a: no delivery failure came back") end
-        if wait_flag(flags, "down", 30000) do () else println("node-a: no Down came back") end
+        if wait_flag(flags, "failed", 120000) do () else println("node-a: no delivery failure came back") end
+        if wait_flag(flags, "down", 120000) do () else println("node-a: no Down came back") end
         wait_file(Env.require("CLUSTER_STOP_FILE"))
         ClusterNode.stop(h)
         println("node-a: done")

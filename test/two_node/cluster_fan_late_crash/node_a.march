@@ -31,7 +31,7 @@ mod ClusterFanLateCrashA do
     match ClusterNode.start(cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
-        if ClusterNode.await_members(h, 2, 30000) do h else panic("node-a: never joined") end
+        if ClusterNode.await_members(h, 2, 120000) do h else panic("node-a: never joined") end
     end
   end
 

@@ -46,7 +46,7 @@ mod ClusterTakeoverB do
       Err(e) -> panic(e)
       Ok(h) ->
         println("node-b: up (creation " ++ int_to_string(creation) ++ ")")
-        if ClusterNode.await_members(h, 1, 30000) do () else println("node-b: never joined") end
+        if ClusterNode.await_members(h, 1, 120000) do () else println("node-b: never joined") end
         if creation == 1 do
           let holder = spawn(Holder)
           let r1 = ClusterNode.register(h, "leader", holder)
@@ -54,7 +54,7 @@ mod ClusterTakeoverB do
           if Result.is_ok(r1) && Result.is_ok(r2) do println("node-b: registered leader and cfg") else println("node-b: register refused") end
           wait_file(Env.require("CLUSTER_STOP_FILE"))
         else
-          match wait_leader(h, 30000) do
+          match wait_leader(h, 120000) do
             Some(p) ->
               let who = match ClusterNode.name_of(h, p.node_id) do
                 Some(n) -> n

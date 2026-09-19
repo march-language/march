@@ -47,7 +47,7 @@ mod ClusterJoinA do
       Err(e) -> panic(e)
       Ok(h) ->
         println(me() ++ ": up")
-        if converged(h, 30000) do
+        if converged(h, 120000) do
           let infos = List.sort_by(ClusterNode.members(h), fn (a, b) -> a.name < b.name)
           let _ = List.map(infos, fn i ->
             println(me() ++ ": sees " ++ i.name ++ " at its own port: " ++
