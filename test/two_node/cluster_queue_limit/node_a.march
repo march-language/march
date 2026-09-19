@@ -18,23 +18,27 @@ mod ClusterQueueLimitA do
     Server -> Client : Int
   end
 
-  pfn pad(n : Int, acc : String) : String do
-    if n <= 0 do acc else pad(n - 1, acc ++ "x") end
-  end
+  -- String.repeat, not a concat loop: the loop is quadratic and, under the
+  -- sanitizer, took longer than SWIM's suspect timeout, so node-b was
+  -- declared dead before the queue ever filled.
+  pfn pad(n : Int) : String do String.repeat("x", n) end
 
   pfn role_client(s : Cap(Session.Live), st : Bulk_Client.S_recv_Msg_Server_Client_1) : Bulk_Client.Yield do
     Bulk_Client.recv_Msg_Server_Client_1(s, st, fn (_go, st1) ->
       -- Give the harness time to freeze node-b.
-      sleep_ms(1000)
-      let st2 = Bulk_Client.send_Msg_Client_Server_1(s, st1, pad(200000, ""))
-      let st3 = Bulk_Client.send_Msg_Client_Server_2(s, st2, pad(200000, ""))
-      let st4 = Bulk_Client.send_Msg_Client_Server_3(s, st3, pad(200000, ""))
+      sleep_ms(700)
+      let st2 = Bulk_Client.send_Msg_Client_Server_1(s, st1, pad(200000))
+      let st3 = Bulk_Client.send_Msg_Client_Server_2(s, st2, pad(200000))
+      let st4 = Bulk_Client.send_Msg_Client_Server_3(s, st3, pad(200000))
       Bulk_Client.recv_Msg_Server_Client_2(s, st4, fn (_n, st5) -> Bulk_Client.close(s, st5)))
   end
 
   fn main(c : Cap(IO)) do
     let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "ql-secret", 1)
-    match ClusterNode.start(cfg) do
+    -- SWIM's suspect timeout is raised to 15 s here: this scenario is about
+    -- the queue limit giving up on a peer that stops reading, and under the
+    -- sanitizer the default 3 s could declare node-b dead first.
+    match ClusterNode.start({ cfg with swim: Swim.config(500, 15000, 2) }) do
       Err(e) -> panic(e)
       Ok(h) ->
         println("node-a: up")
