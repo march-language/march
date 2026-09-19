@@ -1,0 +1,15 @@
+-- EXPECT-ERROR: `y` has type `a`, which holds a type variable that a `linear` parameter of `f` opts in to linear values
+mod Main do
+  needs IO.Console
+  -- `linear x : a` opts `a` in, so callers may pass a linear value for `y` as
+  -- well; but only `x` was tracked, and the body duplicates `y`: one S1 became
+  -- two. A parameter holding an opted-in type variable must be marked too.
+  -- Accepted before 2026-09-19.
+  always_linear type S1 = S1(Int)
+  fn sink(s : S1) : Int do match s do S1(e) -> e end end
+  fn f(linear x : a, y : a) : (a, a, a) do (x, y, y) end
+  fn main(c : Cap(IO.Console)) do
+    let (p, q, r) = f(S1(1), S1(2))
+    println(int_to_string(sink(p) + sink(q) + sink(r)))
+  end
+end

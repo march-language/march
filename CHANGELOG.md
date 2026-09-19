@@ -12,12 +12,25 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
+- **A lambda passed before the value it receives can no longer drop a linear value.**
+  `ap2(fn s -> 0, S1(1))` was accepted while the same call with the arguments the
+  other way round was rejected: the lambda was checked before its parameter's type
+  was known and then never checked again. It is now rejected ("The linear value `s`
+  was never used").
+
+- **`linear x : a` now requires every parameter holding an `a` to be marked.** In
+  `fn f(linear x : a, y : a)`, callers could pass a linear value for `y` too, but
+  only `x` was checked, so the body could drop or duplicate `y`. Such a parameter is
+  now an error that says to mark it `linear`. A function-typed parameter such as
+  `k : a -> Int` needs no mark.
+
 - **A choreography role that works for a long time before its first message is no longer
   taken for dead.** Heartbeats used to start only once a role reached its first send or
   receive, so one that computed past the heartbeat timeout (10 s by default) before then
   had its peers cancel the session. They now start as soon as the nodes connect. The
   choreography guide also now says that callbacks and cancel handlers must return, and
   that `host_<Role>` must not be called from inside the host actor's own handlers.
+
 - **A choreography role no longer waits for ever for a peer that never connects.** The
   role runner's accept had no deadline, so a listening role whose peer never started, or
   failed its own setup, waited indefinitely, and with three or more roles one failed
