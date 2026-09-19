@@ -12,6 +12,12 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
+- **On Linux, a refused `tcp_connect` / `Socket.connect_timeout` now says it was refused.**
+  After a connect that had to wait, the error often read `Interrupted system call` (or
+  `Success`) instead of `Connection refused`, because the outcome was read back from the
+  wrong thread's `errno` once the waiting task resumed on another scheduler thread. A
+  cluster node relies on that text, so a crashed peer was declared dead only by SWIM's
+  suspect timeout, seconds later, instead of at once by the refused redial.
 - **A choreography role no longer waits for ever for a peer that never connects.** The
   role runner's accept had no deadline, so a listening role whose peer never started, or
   failed its own setup, waited indefinitely, and with three or more roles one failed
