@@ -232,6 +232,14 @@ The runner holds it until C has received from A and asked for B. You do not need
 anything for this; the generated code tells the runner which role each receive is waiting
 for.
 
+## Large messages and slow peers
+
+A message can be any size, and a role can send as many messages in a row as it likes without
+waiting for the receiver. Whatever the receiving node has not taken yet waits on the sending
+node and goes out as the receiver catches up. Nothing is dropped. A peer that stops reading
+altogether is caught by the heartbeat (see [When a role fails](#when-a-role-fails)), and
+whatever was waiting for it is thrown away.
+
 ## How a session ends
 
 `run_<Role>` returns one of these:

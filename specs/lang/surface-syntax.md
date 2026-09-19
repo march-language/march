@@ -280,6 +280,13 @@ end
 -- Outside: can call Token.make/Token.value, cannot use Token(_) directly
 ```
 
+The two combine: `always_linear opaque type` is linear at every binding and keeps
+its constructors private (the stdlib's `LinearMap` is declared this way):
+
+```march
+always_linear opaque type Pool(a) = Pool(Int, List(a))
+```
+
 ---
 
 ## Type Syntax

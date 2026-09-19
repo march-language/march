@@ -368,6 +368,13 @@ type env = {
       is gated inside [check_no_panic_module], which only runs for
       `cap no_panic` modules, so a PLAIN module's non-exhaustive match stays a
       Warning and is never promoted to an error. *)
+  trusted_linear_body : bool;
+  (** True while checking the body of a [@[trusted_linear(v)]] stdlib function
+      (the [LinearMap] kernel).  Pattern bindings then take their linearity from
+      their own type only, never from a linear scrutinee: the kernel reads its
+      map's count, comparator and trie freely, and its moving each value exactly
+      once is reviewed, not checked.  Callers of the function are fully
+      checked. *)
   linear_ok_ids : (int, unit) Hashtbl.t;
   (** Type-variable ids a generic function has opted in to accepting a linear
       type for, by marking a parameter of that type [linear] or [affine]
@@ -375,7 +382,7 @@ type env = {
       scheme's quantifier list holds, so this is consulted per instantiation.
       Every other type variable is unrestricted: instantiating it with a linear
       type in a position the function consumes is an error. *)
-  linear_generic_uses : (Ast.span, string * int list * ty list * ty) Hashtbl.t;
+  linear_generic_uses : (Ast.span, string * int list * ty list * ty * bool) Hashtbl.t;
   (** Every named polymorphic use: the name, the scheme's quantified ids, their
       fresh instantiations, and the scheme body.  Swept once the module is
       solved ([check_linear_instantiations]), when the instantiations are
@@ -650,6 +657,7 @@ let make_env errors type_map = {
   no_panic_mod = false;
   no_panic_modules = [];
   nonexhaustive_match_spans = ref [];
+  trusted_linear_body = false;
   linear_ok_ids = Hashtbl.create 16;
   linear_generic_uses = Hashtbl.create 256;
   cap_producer_ivars = Hashtbl.create 16;
@@ -1652,6 +1660,7 @@ let instantiate ?use_span ?use_name level env = function
      | None -> ());
     (match use_span, use_name with
      | Some sp, Some name ->
-       Hashtbl.replace env.linear_generic_uses sp (name, ids, List.map snd subst, ty)
+       Hashtbl.replace env.linear_generic_uses sp
+         (name, ids, List.map snd subst, ty, env.trusted_linear_body)
      | _ -> ());
     inst ty

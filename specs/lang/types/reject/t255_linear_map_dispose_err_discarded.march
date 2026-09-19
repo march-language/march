@@ -1,0 +1,20 @@
+-- EXPECT-ERROR: This `_` discards a linear value of type `LinearMap(Int, S1)`
+mod Main do
+  needs IO.Console
+  -- dispose hands a non-empty map back in Err; discarding it drops the values
+  -- inside.
+  always_linear type S1 = S1(Int)
+  fn sink(s : S1) : Int do match s do S1(e) -> e end end
+  fn main(c : Cap(IO.Console)) do
+    let (d, m) = LinearMap.put(LinearMap.empty_int(), 1, S1(1))
+    let n = match d do
+      Some(s) -> sink(s)
+      None -> 0
+    end
+    let e = match LinearMap.dispose(m) do
+      Ok(_) -> 0
+      Err(_) -> 1
+    end
+    println(int_to_string(n + e))
+  end
+end

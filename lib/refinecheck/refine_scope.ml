@@ -615,9 +615,12 @@ let callback_sig_of_ty (t : A.ty) : fn_sig option =
          ; ret_sort
          ; ret_ty = Some cod
          }
-     | None when ret <> None ->
+     | None when ret <> None || (match cod with A.TyRefine _ -> false | _ -> ty_has_refinement cod) ->
        (* An unrefined domain with a refined codomain still carries a
-          contract: no call through it is obliged, but its RESULT is known. *)
+          contract: no call through it is obliged, but its RESULT is known.
+          A refinement INSIDE the codomain (`Int -> List({Int | p})`) is an
+          element contract on the result, read from [ret_ty] (2026-09-18
+          plan, Phase 2). *)
        Some
          { param_names = [ callback_param_name ]
          ; param_str = [ false ]

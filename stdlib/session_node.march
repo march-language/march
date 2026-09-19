@@ -204,6 +204,36 @@ mod SessionNode do
     end
   end
 
+  -- Send one session frame (Deliver, Bye, Cancel) to [l]'s peer. These are
+  -- never dropped and the sender never waits (`NodeQueue.Unbounded`): the
+  -- frame is queued past the budget if need be and goes out as the peer's
+  -- credit allows. Under `DropNew`, a message over the 4096-byte budget, or
+  -- most of a burst, was refused and the result ignored: a lost Deliver left
+  -- its receiver waiting forever while both nodes kept heartbeating, and a
+  -- lost Bye or Cancel ended the session later with the wrong cause. The
+  -- sender must not block instead: it runs in the endpoint actor's turn (or
+  -- the host actor's), which handles none of its other messages while it
+  -- waits for credit, so a wait on one slow peer would hold up every other
+  -- (and the reader's `LinkEnded`). The queue grows only while the peer is slow,
+  -- and a peer that stays silent is dropped by the heartbeat, whose
+  -- `drop_link` lets the queue go.
+  pfn send_frame(p : Party, l : Link, type_tag : String, payload : List(Int)) : () do
+    -- `Unbounded` never refuses; a dead connection's reader reports it.
+    let _ = NodeQueue.cast(l.q, next_seq(p.meta), l.peer, wire_tag(p, type_tag), payload, NodeQueue.Unbounded)
+    ()
+  end
+
+  -- Give up on [l]'s peer: report it gone, let its queue go, and shut BOTH
+  -- connections down -- the data one ends the reader, the control one ends
+  -- the control reader, which `finish` awaits and which would otherwise
+  -- wait for a Bye the peer may never send.
+  pfn drop_link(p : Party, l : Link, why : String) : () do
+    send(p.ep, PeerGone(p, l.role, why))
+    NodeQueue.close(l.q)
+    tcp_shutdown(l.data_fd)
+    tcp_shutdown(l.control_fd)
+  end
+
   -- Kinds of our own endpoint's cancellation, for `run`'s result.
   pfn kind_cancelled() : Int do 1 end
   pfn kind_protocol() : Int do 2 end
@@ -242,10 +272,7 @@ mod SessionNode do
         Some(f) -> f(role, cause, ep)
         None -> ()
       end
-      let meta = p.meta
-      let tag = wire_tag(p, "SessionNode.Cancel")
-      let _ = List.map(p.links, fn l ->
-        NodeQueue.cast(l.q, next_seq(meta), l.peer, tag, encode_cancel(p.my_role, outward), NodeQueue.DropNew))
+      let _ = List.map(p.links, fn l -> send_frame(p, l, "SessionNode.Cancel", encode_cancel(p.my_role, outward)))
       ()
     end
   end
@@ -723,8 +750,7 @@ mod SessionNode do
           let _ = Vault.incr(meta, "discarded", 1)
           ep
         else
-          let l = link_for(links, to)
-          let _ = NodeQueue.cast(l.q, next_seq(meta), l.peer, wire_tag(party, "SessionNode.Deliver"), encode_deliver(to, ep, msg), NodeQueue.DropNew)
+          send_frame(party, link_for(links, to), "SessionNode.Deliver", encode_deliver(to, ep, msg))
           ep
         end
       end,
@@ -745,8 +771,7 @@ mod SessionNode do
         Vault.set(meta, "closed", 1)
         Vault.set(meta, "done", 1)
         -- Every peer's reader has to learn this endpoint is done.
-        let _ = List.map(links, fn l ->
-          NodeQueue.cast(l.q, next_seq(meta), l.peer, wire_tag(party, "SessionNode.Bye"), bye_payload(party), NodeQueue.DropNew))
+        let _ = List.map(links, fn l -> send_frame(party, l, "SessionNode.Bye", bye_payload(party)))
         ()
       end,
       fail: fn (ep, why) -> protocol_failed(party, ep, why),
@@ -820,12 +845,11 @@ mod SessionNode do
   -- The heartbeat, one per connection: every interval, ping the peer on the
   -- data connection (through its NodeQueue writer, which serialises every
   -- write to that socket) and count one tick since its last frame. Past the
-  -- limit the peer is taken for dead: it is reported gone ("no heartbeat")
-  -- and BOTH its connections are shut down -- the data one ends the reader,
-  -- the control one ends the control reader, which `finish` awaits and which
-  -- would otherwise wait for a Bye a dead peer never sends. A peer that is
-  -- stopped, hung or behind a partition sends no end of file, so without
-  -- this the reader would wait forever. Stops once the reader has.
+  -- limit the peer is taken for dead (`drop_link`, "no heartbeat"). A peer
+  -- that is stopped, hung or behind a partition sends no end of file, so
+  -- without this the reader would wait forever. Stops once the reader has.
+  -- A ping is the one frame that may be dropped (`DropNew`): when the queue
+  -- is full, data frames are already telling the peer we are alive.
   -- MARCH_SESSION_HEARTBEAT_MS (default 1000) and MARCH_SESSION_TIMEOUT_MS
   -- (default 10000) tune it.
   pfn heartbeat(p : Party, l : Link, interval : Int, limit : Int) : Int do
@@ -838,9 +862,7 @@ mod SessionNode do
       else () end
       let ticks = Vault.incr(p.heard, rkey(l.role), 1)
       if ticks > limit do
-        send(p.ep, PeerGone(p, l.role, "no heartbeat"))
-        tcp_shutdown(l.data_fd)
-        tcp_shutdown(l.control_fd)
+        drop_link(p, l, "no heartbeat")
         0
       else
         heartbeat(p, l, interval, limit)

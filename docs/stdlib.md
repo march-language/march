@@ -274,6 +274,27 @@ Map.to_list(m3)   -- [("a", 1), ("b", 2), ("c", 3)]
 
 ---
 
+
+## LinearMap
+
+A map for **linear** values, which `Map` cannot hold (see
+[Linear Types](linear-types.md)). Every operation consumes the map and returns
+it; `take` is the only way a value comes out, and `put` returns the value it
+displaced. The map is itself linear, so it ends in `drain`, `to_list` or
+`dispose`.
+
+```march
+let (old, m1) = LinearMap.put(LinearMap.empty_int(), 1, token)   -- old : Option(Token)
+let (got, m2) = LinearMap.take(m1, 1)                              -- got : Option(Token)
+let (n, m3)   = LinearMap.size(m2)
+let (got2, slot) = LinearMap.take_slot(m3, 2)   -- value out, hole at key 2
+let m4 = LinearMap.vacate(slot)                 -- or LinearMap.fill(slot, next)
+LinearMap.drain(m4, 0, fn (acc, k, t) -> acc + close(t))
+```
+
+`LinearMap.empty(cmp)` takes a curried less-than comparator for the keys and
+stores it; `empty_int()` and `empty_string()` supply one. Keys must not be linear.
+
 ## HashMap
 
 `hash_map.march`: HAMT-backed persistent map using structural `==` for key

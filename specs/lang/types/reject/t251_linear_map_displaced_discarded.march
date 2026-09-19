@@ -1,0 +1,19 @@
+-- EXPECT-ERROR: This `_` discards a linear value of type `Option(S1)`
+mod Main do
+  needs IO.Console
+  -- The second put displaces S1(1). A `_` over the returned Option drops it:
+  -- the wildcard's own type is Option(S1), which holds a linear value.
+  -- Accepted before 2026-09-18 (the wildcard check tested `is_linear_ty`,
+  -- which is false for a container).
+  always_linear type S1 = S1(Int)
+  fn sink(s : S1) : Int do match s do S1(e) -> e end end
+  fn main(c : Cap(IO.Console)) do
+    let (d, m1) = LinearMap.put(LinearMap.empty_int(), 1, S1(1))
+    let (_, m2) = LinearMap.put(m1, 1, S1(2))
+    let n = match d do
+      Some(s) -> sink(s)
+      None -> 0
+    end
+    println(int_to_string(n + LinearMap.drain(m2, 0, fn (acc, k, s) -> acc + sink(s))))
+  end
+end

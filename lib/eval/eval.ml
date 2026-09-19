@@ -2560,6 +2560,18 @@ let timer_service_tick () =
       ) due
   end
 
+(** Actors whose handler is running right now.  A handler that calls
+    [Actor.call] pumps the scheduler from inside itself (actor_call's
+    [run_scheduler_hook]), and that nested pass used to run the SAME actor's
+    next messages re-entrantly, in the middle of the handler: their output
+    came before the call's, and the in-flight handler's result then
+    overwrote the state they had produced.  An actor handles one message at
+    a time, as the compiled runtime does (its call holds the actor's other
+    messages until the reply comes); a nested pass skips a busy actor and
+    its messages wait in its mailbox.
+    specs/progress/2026-09-18-actor-call-in-handler-takes-own-messages.md *)
+let busy_actors : (int, unit) Hashtbl.t = Hashtbl.create 8
+
 (** Drain all actor mailboxes cooperatively.
     Each pass iterates over all live actors; for each with a non-empty mailbox
     it pops one message, finds the matching [on Msg] handler, and runs it.
@@ -2596,6 +2608,7 @@ let run_scheduler () =
       | None -> ()
       | Some inst when not inst.ai_alive -> ()
       | Some inst when Queue.is_empty inst.ai_mailbox -> ()
+      | Some _ when Hashtbl.mem busy_actors pid -> ()
       | Some inst ->
         let msg = Queue.pop inst.ai_mailbox in
         let (msg_tag, msg_args) = match msg with
@@ -2639,7 +2652,11 @@ let run_scheduler () =
                  [("state", inst.ai_state)] @ param_bindings
                  @ [("self", VPid pid)] @ !(inst.ai_env_ref)
                in
-               (match !eval_expr_hook handler_env handler.ah_body with
+               Hashtbl.replace busy_actors pid ();
+               (match Fun.protect
+                        ~finally:(fun () -> Hashtbl.remove busy_actors pid)
+                        (fun () -> !eval_expr_hook handler_env handler.ah_body)
+                with
                 | new_state ->
                   inst.ai_state <- new_state;
                   changed := true   (* mark progress only on success *)

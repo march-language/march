@@ -25,6 +25,7 @@ let stdlib_file_list = [
   "list.march";
   "hamt.march";
   "map.march";
+  "linear_map.march";
   "math.march";
   "string.march";
   "iolist.march";

@@ -1,0 +1,40 @@
+mod Main do
+  needs IO.Console
+  -- LinearMap (stdlib, 2026-09-18) holding linear values, threaded through
+  -- every operation: each call consumes the map and hands it back, a displaced
+  -- value comes back to the caller, `take` is the only way a value leaves, and
+  -- the map ends in `drain` or `dispose`. Keys are ordinary Ints, and the Int
+  -- `size` returns beside the map is an ordinary Int too. Prints 63.
+  always_linear type S1 = S1(Int)
+  fn sink(s : S1) : Int do match s do S1(e) -> e end end
+  fn main(c : Cap(IO.Console)) do
+    let m0 = LinearMap.empty_int()
+    let (d1, m1) = LinearMap.put(m0, 1, S1(10))
+    let (d2, m2) = LinearMap.put(m1, 1, S1(20))
+    let first = match d1 do
+      Some(s) -> sink(s)
+      None -> 0
+    end
+    let displaced = match d2 do
+      Some(s) -> sink(s)
+      None -> 0
+    end
+    let (n, m3) = LinearMap.size(m2)
+    let (got, m4) = LinearMap.take(m3, 1)
+    let taken = match got do
+      Some(s) -> sink(s)
+      None -> 0
+    end
+    let (d3, m5) = LinearMap.put(m4, 2, S1(30))
+    let none = match d3 do
+      Some(s) -> sink(s)
+      None -> 0
+    end
+    let total = LinearMap.drain(m5, 0, fn (acc, k, s) -> acc + k + sink(s))
+    let rest = match LinearMap.dispose(LinearMap.empty_int()) do
+      Ok(_) -> 0
+      Err(m) -> LinearMap.drain(m, 0, fn (acc, k, s) -> acc + sink(s))
+    end
+    println(int_to_string(first + displaced + n * n + taken + none + total + rest))
+  end
+end

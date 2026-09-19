@@ -1,0 +1,234 @@
+-- LinearMap: a keyed collection that can hold LINEAR values.
+--
+-- A `Map` cannot hold a linear value: `Map.get` copies the value out while the
+-- map keeps it, and `Map.insert` over an existing key drops the old one.
+-- `LinearMap(k, v)` is the collection for values that must be used exactly
+-- once, such as the parked session state an actor keeps per session
+-- (`Parked_<Role>`, from `@[endpoints]`).
+--
+-- The rules, all checked statically at the caller:
+--
+--   * `LinearMap` is `always_linear`: every binding of one must be consumed,
+--     whatever it holds.  A map in actor state is a linear field, so every
+--     handler turn that reads it must store one back.
+--   * Every operation consumes the map and returns it.  `take` (or
+--     `take_slot`) is the only way a value leaves; `put` returns the value it
+--     displaced instead of dropping it.
+--   * A map ends in `drain` (every value goes through a callback that must
+--     consume it), `to_list`, or `dispose`, which hands a non-empty map back in
+--     `Err` rather than losing what is inside.
+--   * Keys are ordinary values: they are hashed, compared and copied, so a
+--     linear key type is rejected.  Equality comes from the less-than
+--     comparator given to `empty`, stored in the map (as for `Map`, it must be
+--     a strict total order consistent with `==` on the key type).
+--
+-- Implementation: a count, the comparator, and a `Map` underneath.  The
+-- functions below carry `@[trusted_linear(v)]`: callers may instantiate `v`
+-- with a linear type, and each body is REVIEWED, not checked, to move every
+-- value exactly once.  The invariants, per function:
+--
+--   put        Map.get the old value out, then Map.insert over it: the trie's
+--              reference to the old value is released and the caller holds the
+--              only one.
+--   take       Map.get + Map.remove of the same key.
+--   take_slot  as take; the slot remembers the key, now absent.
+--   fill       Map.insert into the slot's key, which take_slot removed.
+--   drain      Map.fold hands each value to the callback once; the trie is
+--              not used again.
+--   to_list    Map.to_list of a trie that is not used again.
+--   size, member, keys, vacate, dispose
+--              move no value.
+--
+-- Values are reference-counted at runtime like any other; linearity is a
+-- discipline over the references March code can see, and the kernel keeps it
+-- by never keeping a value it has handed out.
+--
+-- Performance: put/take/take_slot/fill O(log32 n) (a get plus an insert or a
+-- remove); size O(1); keys/drain/to_list O(n), in hash order.
+
+mod LinearMap do
+
+  -- count, comparator, entries
+  always_linear opaque type LinearMap(k, v) = LinearMapRep(Int, k -> k -> Bool, Map(k, v))
+
+  -- A map with a hole at one key: the key taken, and the rest of the map.
+  always_linear opaque type LinearSlot(k, v) = LinearSlotRep(k, Int, k -> k -> Bool, Map(k, v))
+
+  -- ---- Construction ----
+
+  doc """
+  An empty map whose keys are ordered by the curried less-than comparator
+  `cmp` (`cmp(a)(b)` is true when `a < b`).  The comparator is stored, so no
+  later call takes one.
+  """
+  fn empty(cmp : k -> k -> Bool) : LinearMap(k, v) do
+    LinearMapRep(0, cmp, Map.empty())
+  end
+
+  doc "An empty map keyed by Int."
+  fn empty_int() : LinearMap(Int, v) do
+    empty(Map.int_cmp)
+  end
+
+  doc "An empty map keyed by String."
+  fn empty_string() : LinearMap(String, v) do
+    empty(Map.str_cmp)
+  end
+
+  -- ---- Moving values in and out ----
+
+  doc """
+  Store `val` under `key`.  Returns the value that was there before, if any,
+  and the map.  The displaced value is the caller's to consume.
+
+      march> let (old, m) = LinearMap.put(LinearMap.empty_int(), 1, 10)
+      march> LinearMap.drain(m, 0, fn (acc, k, v) -> acc + k + v) + Option.unwrap_or(old, 0)
+      11
+  """
+  @[trusted_linear(v)]
+  fn put(m : LinearMap(k, v), key : k, val : v) : (Option(v), LinearMap(k, v)) do
+    match m do
+    LinearMapRep(n, cmp, inner) ->
+      let old = Map.get(inner, key, cmp)
+      let n2 = match old do
+        Some(_) -> n
+        None -> n + 1
+      end
+      (old, LinearMapRep(n2, cmp, Map.insert(inner, key, val, cmp)))
+    end
+  end
+
+  doc """
+  Remove the value under `key` and return it with the rest of the map.  This
+  is the only way a value leaves a `LinearMap` (besides the terminal
+  operations).  `None` when the key is absent; the map is unchanged then.
+  """
+  @[trusted_linear(v)]
+  fn take(m : LinearMap(k, v), key : k) : (Option(v), LinearMap(k, v)) do
+    match m do
+    LinearMapRep(n, cmp, inner) ->
+      match Map.get(inner, key, cmp) do
+      None -> (None, LinearMapRep(n, cmp, inner))
+      Some(x) -> (Some(x), LinearMapRep(n - 1, cmp, Map.remove(inner, key, cmp)))
+      end
+    end
+  end
+
+  doc """
+  Take the value under `key` out, leaving a slot: a map with a hole at `key`.
+  The slot is linear and ends in `fill` (put a value back under the same key,
+  which cannot displace anything) or `vacate` (leave the key absent).  This is
+  the shape of an actor turn that resumes one session and parks its next state:
+
+      match LinearMap.take_slot(state.sessions, sid) do
+        (None, slot) -> { state with sessions: LinearMap.vacate(slot) }
+        (Some(p), slot) -> { state with sessions: LinearMap.fill(slot, step(p)) }
+      end
+  """
+  @[trusted_linear(v)]
+  fn take_slot(m : LinearMap(k, v), key : k) : (Option(v), LinearSlot(k, v)) do
+    match m do
+    LinearMapRep(n, cmp, inner) ->
+      match Map.get(inner, key, cmp) do
+      None -> (None, LinearSlotRep(key, n, cmp, inner))
+      Some(x) -> (Some(x), LinearSlotRep(key, n - 1, cmp, Map.remove(inner, key, cmp)))
+      end
+    end
+  end
+
+  doc "Put `val` into the slot's key and return the whole map."
+  @[trusted_linear(v)]
+  fn fill(s : LinearSlot(k, v), val : v) : LinearMap(k, v) do
+    match s do
+    LinearSlotRep(key, n, cmp, inner) ->
+      LinearMapRep(n + 1, cmp, Map.insert(inner, key, val, cmp))
+    end
+  end
+
+  doc "Close the slot with its key absent and return the map."
+  @[trusted_linear(v)]
+  fn vacate(s : LinearSlot(k, v)) : LinearMap(k, v) do
+    match s do
+    LinearSlotRep(_, n, cmp, inner) -> LinearMapRep(n, cmp, inner)
+    end
+  end
+
+  -- ---- Reads: the answer, and the map back ----
+
+  doc """
+  The number of entries, and the map.  O(1).
+
+      march> let (n, m) = LinearMap.size(LinearMap.empty_int())
+      march> n + LinearMap.drain(m, 0, fn (acc, k, v) -> acc + v)
+      0
+  """
+  @[trusted_linear(v)]
+  fn size(m : LinearMap(k, v)) : (Int, LinearMap(k, v)) do
+    match m do
+    LinearMapRep(n, cmp, inner) -> (n, LinearMapRep(n, cmp, inner))
+    end
+  end
+
+  doc "Whether `key` is present, and the map."
+  @[trusted_linear(v)]
+  fn member(m : LinearMap(k, v), key : k) : (Bool, LinearMap(k, v)) do
+    match m do
+    LinearMapRep(n, cmp, inner) ->
+      (Map.contains_key(inner, key, cmp), LinearMapRep(n, cmp, inner))
+    end
+  end
+
+  doc """
+  The keys (hash order), and the map.  Keys are ordinary values, so the list
+  can be used freely; to visit each value, `take_slot` it by key and `fill` it
+  back, recursing over the list.
+  """
+  @[trusted_linear(v)]
+  fn keys(m : LinearMap(k, v)) : (List(k), LinearMap(k, v)) do
+    match m do
+    LinearMapRep(n, cmp, inner) -> (Map.keys(inner), LinearMapRep(n, cmp, inner))
+    end
+  end
+
+  -- ---- Ending a map ----
+
+  doc """
+  Consume the map, folding every entry into `acc` with `f(acc, key, value)`.
+  `f` receives each value once and must consume it.  Hash order.
+  """
+  @[trusted_linear(v)]
+  fn drain(m : LinearMap(k, v), acc : a, f : a -> k -> v -> a) : a do
+    match m do
+    LinearMapRep(_, _, inner) -> Map.fold(inner, acc, f)
+    end
+  end
+
+  doc """
+  Consume the map into its `(key, value)` pairs (hash order).  The list holds
+  the values, so it must be consumed in turn.
+  """
+  @[trusted_linear(v)]
+  fn to_list(m : LinearMap(k, v)) : List((k, v)) do
+    match m do
+    LinearMapRep(_, _, inner) -> Map.to_list(inner)
+    end
+  end
+
+  doc """
+  Consume an empty map: `Ok(())`.  A map that still holds values comes back
+  unchanged in `Err`, to be drained; nothing is lost and nothing panics:
+
+      match LinearMap.dispose(m) do
+        Ok(_) -> ()
+        Err(m2) -> LinearMap.drain(m2, (), fn (u, k, p) -> retire(p))
+      end
+  """
+  @[trusted_linear(v)]
+  fn dispose(m : LinearMap(k, v)) : Result((), LinearMap(k, v)) do
+    match m do
+    LinearMapRep(n, cmp, inner) ->
+      if n == 0 do Ok(()) else Err(LinearMapRep(n, cmp, inner)) end
+    end
+  end
+
+end

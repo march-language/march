@@ -39,13 +39,9 @@ phases). None of these blocks choreography access points.
   directly and cannot be used on a node's connections; `Node.enqueue(q, ...)`
   with `ClusterNode.queue_for` works. A `ClusterNode.send(node, to, msg)` that
   the compiler rewrites like `Node.send` would read better.
-- **Cluster session frames use `DropNew` and ignore its result**, as the standalone runner
-  does: a frame larger than the queue budget (256 KiB here, 4 KiB standalone) or a burst
-  past it is dropped silently and the session hangs or loses messages while both sides
-  report Ok. A separate deadlock review of the standalone runner (decision graph node 2181,
-  2026-09-18) found exactly that there. The fix belongs to both modes: an `emit` whose
-  frame is refused should cancel the endpoint (a hole in the session is a failure), and
-  frames bigger than the budget need a path (chunking, or a budget floor per frame).
+- ~~Cluster session frames used `DropNew`~~: resolved by #518 (choreography frames are never
+  dropped, `NodeQueue.Unbounded`), which applies to cluster mode too: its frames go through
+  the same `SessionNode.send_frame`.
 - **Cluster sessions with two roles on one node** (a node has no connection
   to itself; they would need a local route).
 - `SwimDriver.dispatch` / `dispatch_all` still write a peer's fd directly;

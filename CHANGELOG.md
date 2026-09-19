@@ -11,6 +11,27 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+- **`Actor.call` from inside an actor's handler no longer steals the actor's messages.**
+  A message sent to the calling actor while it waited for the reply was returned as the
+  call's answer (a meaningless number) and never reached its handler. Such messages now
+  wait in the mailbox, in order, and are handled once the handler returns. The
+  interpreter, which instead ran them in the middle of the waiting handler and lost their
+  state changes, behaves the same way now. `NodeQueue.BlockSender` is safe to use in a
+  handler.
+- **Choreography sessions no longer lose messages or hang on large ones.** A message over
+  4 KB was silently refused, which left both nodes waiting on each other forever, and a
+  burst of messages lost most of them while both sides still reported success. A message
+  just over 3 KB following a small one could also hang. Messages of any size and any burst
+  now arrive; a sender never waits, and a peer that stops reading is dropped by the
+  heartbeat. `NodeQueue` gains an `Unbounded` policy and accepts a message larger than its
+  whole budget when the queue is empty.
+- **A record or actor-state field that holds a linear value is now tracked like a linear
+  field.** A field such as `slot : Option(Parked_B)` used to be an ordinary field: an actor
+  could overwrite it with `None` and silently drop the value inside, and a record's field
+  could be read twice. Both are now errors, as they already were for a field whose own type
+  is linear.
+
 ### Changed
 - Cluster membership records a node's creation, name and advertised address: a restarted
   node outranks every verdict about its previous life, and `GlobalRegistry` bindings carry
@@ -43,10 +64,30 @@ git log is authoritative for exact commits.
 - `Socket.connect_timeout(host, port, ms)` (builtin `tcp_connect_timeout`): a connect that
   gives up after `ms` when the peer never answers, instead of waiting out the kernel's SYN
   retries (a minute or more behind a dropped-packet partition).
+- **Element refinements flow through expressions, callbacks and polymorphic combinators.**
+  A `List({Int | _ > 0})` (or `Option`, `Result`, user variant) contract is now met by
+  `sum_pos(List.take(xs, 2))` without a `let`, by `match List.head_opt(xs) do Some(h) ->`,
+  by a call to a function whose declared container return was proved, by a return tail
+  that names a local `let`, and by `List.map(ys, f)` / `flat_map` / `filter_map` /
+  `Option.map` when every way an element can enter the call meets the demand (a lambda
+  passed where the element type is taken also gets its source's element refinement as a
+  fact). A hand-written refined `map` proves through its callback's codomain and its
+  structurally recursive self-call, and a lambda that breaks a declared refined codomain
+  (`fn y -> y - 1` where `(Int) -> {Int | _ > 0}` is expected) is now reported with a
+  witness instead of skipped. A call whose sources do not all meet the demand is a skip
+  with the new `--refine-report` reason `parametric-source-unproved`, never an error
+  outside `cap verified`.
 - **Failure handlers in the generated session API:** `recv_<Msg>_or` and `offer_<…>_or` take a
   cancel handler that learns which role failed and why but holds no session state, so it
   cannot talk in the failed session. Also `leave_<state>` to leave a session on purpose,
   `cancel(parked)` for actor-hosted roles, and `<P>_Run.host_<Role>_or`.
+- **`LinearMap`, a keyed collection for linear values** (`stdlib/linear_map.march`). A
+  `Map` cannot hold a linear value; `LinearMap(k, v)` can, checked statically: every
+  operation consumes the map and hands it back, `put` returns the value it displaced,
+  `take`/`take_slot` are the only ways a value leaves, and the map (itself linear) ends in
+  `drain`, `to_list` or `dispose`. An actor hosting several sessions can keep one parked
+  session per id in its state. Also `always_linear opaque type`, a linear type with
+  private constructors.
 
 ### Fixed
 - **A compiled list-building loop could corrupt a list it did not own.** A function of the
@@ -58,6 +99,55 @@ git log is authoritative for exact commits.
 - **A compiled program could double-free a field read three records deep** (`st.a.b.c`)
   and passed to a function that consumes it: the second such read crashed or read freed
   memory. Two levels deep was fine.
+- **A library module without a `main` is no longer charged `IO.Console` for a
+  function name it shares with the stdlib.** `march --compile` on a three-line
+  module declaring `fn add` failed with "uses `IO.Console` but does not declare
+  `needs IO.Console`", because the capability check treated `BigInt.add`,
+  `Set.add` and the other stdlib functions named `add` as the module's own.
+  `forge fix --contracts` no longer needs to switch the check off to work around it.
+
+- **`forge publish` no longer lets a breaking change ship as a patch when a
+  function has no return-type annotation.** Changing what such a function
+  returns was invisible to the semver check, so it certified the release as a
+  PATCH. A body change to an unannotated public function now requires a major
+  version (for packages at 1.0.0 or later), and the error names the function.
+  Annotate the return type to get a precise verdict instead.
+
+- **`MARCH_STDLIB` now applies to every stdlib lookup.** A `march` run through a
+  symlink with `MARCH_STDLIB` set could fail to build a hello-world program with
+  an error about a stdlib module the program never used (`ConsistentHash.get`).
+  Part of the compiler ignored the override.
+
+- **The REPL no longer runs on another checkout's parsed stdlib.** The
+  parsed-stdlib cache in `~/.cache/march` was keyed on the stdlib's text and the
+  compiler build but not its location, so two checkouts of March with the same
+  stdlib shared one cache entry, and the second ran on the first's parse. Under
+  the REPL/JIT this gave wrong answers — `Path.is_absolute("/etc")` returned
+  `false` on macOS — that appeared and disappeared with unrelated edits.
+
+- **Refinement checker: a polymorphic function no longer lends element refinements it
+  cannot justify.** A function whose signature says `List(a) -> List(a)` but whose body
+  fixed `a` (type variables in signatures are not rigid), merged it with another variable,
+  took it through an unannotated parameter, or can create one through a builtin such as
+  `from_json`, was trusted to preserve its argument's element refinement: `let ys =
+  bad(xs)` then `sum_pos(ys)` was reported proved on a list holding `-5`, and `cap
+  verified` accepted it. Likewise `append(pos, neg)` took the first list's element
+  refinement for the whole result. The checker now reads the inferred parameter types and
+  the callee's body, and requires every argument an element can come from to agree,
+  before applying the rule; such calls are skipped instead.
+- **A record or actor-state field that holds a linear value is now tracked like a linear
+  field.** A field such as `slot : Option(Parked_B)` used to be an ordinary field: an actor
+  could overwrite it with `None` and silently drop the value inside, and a record's field
+  could be read twice. Both are now errors, as they already were for a field whose own type
+  is linear.
+- Linearity: a `_` over a value that holds a linear value (`let (_, n) = (Some(token), 1)`)
+  silently dropped it; it is now rejected like a `_` over the linear value itself.
+- Linearity: taking apart a tuple or variant that holds a linear value no longer makes its
+  ordinary parts linear (`let (n, t) = (1, token)` leaves `n` an ordinary `Int`), and a
+  generic function that opted in with `linear x : a` is no longer refused when its body
+  passes `x` on to another generic function that also opted in. Passing it to one that did
+  not (which may drop or duplicate it) is now an error; it was accepted or refused depending
+  on inference order.
 - Writing to a socket whose peer had just gone could kill the process with SIGPIPE; the
   shared send path now suppresses the signal.
 - A dead green thread's execution context (880 of its bookkeeping struct's 1136 bytes on

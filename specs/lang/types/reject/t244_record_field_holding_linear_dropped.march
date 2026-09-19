@@ -1,0 +1,23 @@
+-- EXPECT-ERROR: The linear value `state.slot` was never used
+mod Main do
+  needs IO
+  needs IO.Console
+  -- A record field whose type HOLDS a linear value (here `Option(S1)`) is
+  -- tracked like a field that is linear itself. This handler overwrites the
+  -- field with `None` without ever reading it, so the `S1` inside would be
+  -- dropped. Before 2026-09-19 only a field whose OWN type was linear had
+  -- this protection, and an actor holding `Option(Parked_<Role>)` could lose
+  -- a live session this way.
+  always_linear type S1 = S1(Int)
+  actor Holder do
+    state { n : Int, slot : Option(S1) }
+    init  { n: 0, slot: Some(S1(1)) }
+    on Forget() do
+      { n: state.n + 1, slot: None }
+    end
+  end
+  fn main(c : Cap(IO)) do
+    let _ = spawn(Holder)
+    ()
+  end
+end

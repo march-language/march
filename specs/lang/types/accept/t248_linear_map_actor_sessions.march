@@ -1,0 +1,41 @@
+mod Main do
+  needs IO.Console
+  -- The choreography phase-4 shape: an actor hosts several sessions, one
+  -- linear value per session id, in a LinearMap in its state. A turn takes the
+  -- session the message is for out through a LinearSlot, then fills the slot
+  -- (the session goes on) or vacates it (the session ended, or the id was
+  -- stale). LinearMap is always_linear, so the state field is a linear field
+  -- and every returning branch must store a map back (R1-R5).
+  always_linear type S1 = S1(Int)
+  fn step(s : S1) : S1 do match s do S1(e) -> S1(e + 1) end end
+  fn retire(s : S1) : Int do match s do S1(e) -> e end end
+  actor Host do
+    state { done : Int, sessions : LinearMap(Int, S1) }
+    init  { done: 0, sessions: LinearMap.empty_int() }
+    on Open(sid : Int) do
+      let (old, m) = LinearMap.put(state.sessions, sid, S1(0))
+      match old do
+        None -> { state with sessions: m }
+        Some(s) -> { state with done: state.done + retire(s), sessions: m }
+      end
+    end
+    on Step(sid : Int, last : Bool) do
+      match LinearMap.take_slot(state.sessions, sid) do
+        (None, slot) -> { state with sessions: LinearMap.vacate(slot) }
+        (Some(s), slot) ->
+          if last do
+            { state with done: state.done + retire(s), sessions: LinearMap.vacate(slot) }
+          else
+            { state with sessions: LinearMap.fill(slot, step(s)) }
+          end
+      end
+    end
+  end
+  fn main(c : Cap(IO.Console)) do
+    let h = spawn(Host)
+    send(h, Open(1))
+    send(h, Step(1, false))
+    send(h, Step(1, true))
+    println("ok")
+  end
+end

@@ -1804,6 +1804,43 @@ let test_repl_jit_cross_line_let () =
      with exn ->
        March_jit.Repl_jit.cleanup jit; raise exn)
 
+(** Two ORC sessions ALIVE AT ONCE in one process.  Under the original
+    process-global LLJIT, the second session's first fragment re-defined the
+    prelude-synthesized `Eq$Int.eq` in the shared JITDylib and failed with
+    "duplicate definition of symbol".  Each session now owns its LLJIT (#341);
+    `1 == 1` pulls in exactly that symbol, and the a/b/a order keeps both
+    sessions live across each other's fragments.  The sequential sessions of
+    the rest of this group never overlap, so they could not catch a regression
+    back to a shared instance.
+    (specs/progress/2026-09-18-orc-sessions-own-their-lljit.md) *)
+let test_repl_jit_two_live_orc_sessions () =
+  match setup_jit_runtime () with
+  | None -> ()
+  | Some runtime_so ->
+    if not (March_jit.Jit_orc.available ()) then
+      record_jit_skip "two live ORC sessions: libLLVM not loadable"
+    else
+      with_jit_backend `Orc (fun () ->
+        let eval jit =
+          let type_map = Hashtbl.create 16 in
+          let tc_env = March_typecheck.Typecheck.base_env
+              (March_errors.Errors.create ()) type_map in
+          match parse_repl "1 == 1" with
+          | March_ast.Ast.ReplExpr e ->
+            let m = make_jit_test_module (March_desugar.Desugar.desugar_expr e) in
+            snd (March_jit.Repl_jit.run_expr jit ~tc_env m)
+          | _ -> failwith "expected ReplExpr"
+        in
+        let a = March_jit.Repl_jit.create ~runtime_so () in
+        let b = March_jit.Repl_jit.create ~runtime_so () in
+        Fun.protect
+          ~finally:(fun () ->
+            March_jit.Repl_jit.cleanup a; March_jit.Repl_jit.cleanup b)
+          (fun () ->
+            Alcotest.(check string) "session a" "true" (eval a);
+            Alcotest.(check string) "session b, a still live" "true" (eval b);
+            Alcotest.(check string) "session a again" "true" (eval a)))
+
 (** Test: `let f = fn x -> x * 2` (DFn) on line 1,
     then `f(21)` on line 2 should give 42 (cross-line function reference). *)
 let test_repl_jit_cross_line_fn () =
@@ -14989,6 +15026,7 @@ let codegen_suites =
       "repl_jit_cross_line", [
         Alcotest.test_case "W2.0 canary: setup_jit_runtime gate is live" `Quick test_setup_jit_runtime_gate_is_live;
         Alcotest.test_case "let binding cross-line" `Quick test_repl_jit_cross_line_let;
+        Alcotest.test_case "two live ORC sessions in one process" `Quick test_repl_jit_two_live_orc_sessions;
         Alcotest.test_case "fn reference cross-line" `Quick test_repl_jit_cross_line_fn;
         Alcotest.test_case "hof with fn and let cross-line" `Quick test_repl_jit_cross_line_hof;
         Alcotest.test_case "B11: stored closure returns untagged Int" `Quick test_repl_jit_stored_closure_returns_untagged_int;

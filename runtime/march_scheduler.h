@@ -639,6 +639,17 @@ void march_sleep_ms(int64_t ms);
 void *march_sched_recv_until(int64_t deadline_ms);
 void *march_sched_recv_user_until(int64_t deadline_ms);
 
+/* Selective receive, for a wait that must not consume messages it is not
+ * waiting for (march_actor_call).  The _seq receives are the user-only ones
+ * above, also reporting the popped message's enqueue_seq; a message the
+ * caller does not want goes back with march_sched_requeue_user_front, which
+ * puts msgs[0..n) at the head of the CURRENT proc's user mailbox, in order,
+ * with their original sequence numbers. */
+void *march_sched_recv_user_seq(uint64_t *seq_out);
+void *march_sched_recv_user_until_seq(int64_t deadline_ms, uint64_t *seq_out);
+void  march_sched_requeue_user_front(void *const *msgs, const uint64_t *seqs,
+                                     int64_t n);
+
 /* Park the current green thread until [fd] is readable (want_write = 0) or
  * writable (want_write = 1), or until deadline_ms (march_now_ms clock;
  * deadline_ms <= 0 means no deadline).  The waiting OS thread runs other

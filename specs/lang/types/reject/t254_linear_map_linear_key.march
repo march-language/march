@@ -1,0 +1,19 @@
+-- EXPECT-ERROR: `S1` is linear, but `LinearMap.put` is generic in a parameter of that type
+mod Main do
+  needs IO.Console
+  -- Keys are hashed, compared and copied, so they must be unrestricted.
+  -- `@[trusted_linear(v)]` opts in the value type only; the key type is still
+  -- protected by the generic rule. (No comparator over a linear key can be
+  -- written without errors of its own, so `empty` gets one that never looks.)
+  always_linear type S1 = S1(Int)
+  fn sink(s : S1) : Int do match s do S1(e) -> e end end
+  fn main(c : Cap(IO.Console)) do
+    let m : LinearMap(S1, Int) = LinearMap.empty(fn a -> fn b -> false)
+    let (d, m2) = LinearMap.put(m, S1(1), 5)
+    let n = match d do
+      Some(x) -> x
+      None -> 0
+    end
+    println(int_to_string(n + LinearMap.drain(m2, 0, fn (acc, k, x) -> acc + x + sink(k))))
+  end
+end
