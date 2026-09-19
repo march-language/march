@@ -1,0 +1,68 @@
+-- Actor.call from INSIDE a handler must not take the actor's own messages
+-- as its reply.  The compiled call waits on the caller's mailbox, which for
+-- an actor is also where its ordinary messages arrive; a Note sent while
+-- Caller's Work handler waited on Slow used to come back as the call's
+-- answer ("call answered: 4395975664", the Note's pointer) and its handler
+-- never ran.  The wait now holds such messages and puts them back at the
+-- front of the mailbox, in order, when the call returns.
+-- specs/progress/2026-09-18-actor-call-in-handler-takes-own-messages.md
+mod ActorCallInHandlerKeepsMessages do
+  needs IO
+  needs IO.Console
+  needs IO.Spawn
+
+  type AskReq = AskReq
+  type CountReq = CountReq
+
+  -- Pid(T)'s parameter is the actor's STATE type.
+  type SlowState = { n : Int }
+
+  actor Slow do
+    state { n : Int }
+    init  { n: 0 }
+
+    on Ask(reply_to) do
+      sleep_ms(300)
+      Actor.reply(reply_to, 42)
+      { n: state.n + 1 }
+    end
+  end
+
+  actor Caller do
+    state { notes : Int }
+    init  { notes: 0 }
+
+    -- First handler: CountReq routes here by index.
+    on Count(reply_to) do
+      Actor.reply(reply_to, state.notes)
+      state
+    end
+
+    on Work(slow : Pid(SlowState)) do
+      match Actor.call(slow, AskReq, 2000) do
+        Ok(v)  -> println("call answered: " ++ int_to_string(v))
+        Err(e) -> println("call failed: " ++ e)
+      end
+      state
+    end
+
+    on Note(k) do
+      println("note " ++ int_to_string(k) ++ " handled")
+      { notes: state.notes + k }
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let slow = spawn(Slow)
+    let caller = spawn(Caller)
+    send(caller, Work(slow))
+    sleep_ms(100)
+    -- Both arrive while Work is still waiting on Slow's reply.
+    send(caller, Note(1))
+    send(caller, Note(2))
+    match Actor.call(caller, CountReq, 5000) do
+      Ok(n)  -> println("notes seen: " ++ int_to_string(n))
+      Err(e) -> println("count failed: " ++ e)
+    end
+  end
+end

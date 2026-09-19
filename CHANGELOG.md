@@ -12,6 +12,13 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
+- **`Actor.call` from inside an actor's handler no longer steals the actor's messages.**
+  A message sent to the calling actor while it waited for the reply was returned as the
+  call's answer (a meaningless number) and never reached its handler. Such messages now
+  wait in the mailbox, in order, and are handled once the handler returns. The
+  interpreter, which instead ran them in the middle of the waiting handler and lost their
+  state changes, behaves the same way now. `NodeQueue.BlockSender` is safe to use in a
+  handler.
 - **Choreography sessions no longer lose messages or hang on large ones.** A message over
   4 KB was silently refused, which left both nodes waiting on each other forever, and a
   burst of messages lost most of them while both sides still reported success. A message

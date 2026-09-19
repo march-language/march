@@ -2474,6 +2474,47 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/actor_call_late_reply.expected native_actor_call_late_reply.out)))
 
+; ── Regression: Actor.call inside a handler keeps the actor's own messages ──
+; The compiled call waits on the caller's mailbox; an actor's ordinary
+; messages sent during the wait were returned as the call's reply and never
+; reached their handlers. The interpreter ran them re-entrantly inside the
+; waiting handler instead. Both backends now hold them until the handler
+; returns. specs/progress/2026-09-18-actor-call-in-handler-takes-own-messages.md
+(rule
+ (targets native_actor_call_in_handler_keeps_messages
+          native_actor_call_in_handler_keeps_messages.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/actor_call_in_handler_keeps_messages.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile
+        -o native_actor_call_in_handler_keeps_messages
+        native/actor_call_in_handler_keeps_messages.march)
+   (with-stdout-to native_actor_call_in_handler_keeps_messages.out
+        (system "./native_actor_call_in_handler_keeps_messages")))))
+
+(rule
+ (targets interp_actor_call_in_handler_keeps_messages.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/actor_call_in_handler_keeps_messages.march))
+ (action
+  (with-stdout-to interp_actor_call_in_handler_keeps_messages.out
+    (run %{exe:../bin/main.exe}
+         native/actor_call_in_handler_keeps_messages.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_call_in_handler_keeps_messages.expected
+               interp_actor_call_in_handler_keeps_messages.out)))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_call_in_handler_keeps_messages.expected
+               native_actor_call_in_handler_keeps_messages.out)))
+
 ; ── Regression: burst-of-task_spawn must not race the Task object ──
 ; march_task_spawn_thunk initialised the Task's proc-handle/result/done-flag
 ; AFTER march_sched_spawn published the proc, so a work-stealing scheduler

@@ -1,5 +1,7 @@
 native_actor_call_canonical: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
 native_actor_call_canonical: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_call_in_handler_keeps_messages: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
+native_actor_call_in_handler_keeps_messages: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_call_late_reply: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
 native_actor_call_late_reply: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_call_timeout: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced

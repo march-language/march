@@ -5531,8 +5531,9 @@ static _Atomic int64_t g_next_call_corr = 1;
  * and the deadline-bounded path funnel through here). Returns:
  *   1  -> matched envelope; *out_payload holds the (ref-owned) reply value
  *   0  -> stale/mismatched envelope, already discarded — caller should retry
- *  -1  -> msg was not one of our envelopes (legacy/raw send) — pass through
- * raw via *out_payload unchanged. */
+ *  -1  -> msg is not a reply envelope: an ordinary message to the caller.
+ *         It is not this call's answer; the caller keeps it (see
+ *         call_held below) and puts it back when the call returns. */
 static int march_actor_call_unwrap(void *msg, int64_t corr, void **out_payload) {
     if (IS_HEAP_PTR(msg) && ((march_hdr *)msg)->tag == MARCH_CALL_REPLY_TAG) {
         int64_t got_corr = MARCH_FIELD(msg, 0);
@@ -5545,8 +5546,46 @@ static int march_actor_call_unwrap(void *msg, int64_t corr, void **out_payload) 
         *out_payload = payload;
         return 1;
     }
-    *out_payload = msg;
     return -1;
+}
+
+/* Messages an Actor.call's wait received that are not its reply, in arrival
+ * order, with their mailbox sequence numbers.  The caller's mailbox is also
+ * where its ordinary messages arrive: an actor calling from inside a handler
+ * gets its own traffic there while it waits.  Those messages used to be
+ * returned as the call's answer (and never reached their handler); now the
+ * wait holds them and call_held_restore puts them back at the front of the
+ * mailbox, in order, before the call returns — a selective receive. */
+typedef struct {
+    void    **msgs;
+    uint64_t *seqs;
+    int64_t   n, cap;
+} call_held;
+
+static void call_held_push(call_held *h, void *msg, uint64_t seq) {
+    if (h->n == h->cap) {
+        int64_t cap = h->cap ? h->cap * 2 : 4;
+        void **msgs = realloc(h->msgs, (size_t)cap * sizeof *msgs);
+        uint64_t *seqs = realloc(h->seqs, (size_t)cap * sizeof *seqs);
+        if (!msgs || !seqs) {
+            fputs("march: OOM (actor_call held messages)\n", stderr);
+            abort();
+        }
+        h->msgs = msgs;
+        h->seqs = seqs;
+        h->cap = cap;
+    }
+    h->msgs[h->n] = msg;
+    h->seqs[h->n] = seq;
+    h->n++;
+}
+
+/* Put the held messages back and return ret (every exit of the wait). */
+static void *call_held_restore(call_held *h, void *ret) {
+    march_sched_requeue_user_front(h->msgs, h->seqs, h->n);
+    free(h->msgs);
+    free(h->seqs);
+    return ret;
 }
 
 /*
@@ -5563,11 +5602,13 @@ static int march_actor_call_unwrap(void *msg, int64_t corr, void **out_payload) 
  *      `on GetCount(reply_to)`) and hands it back verbatim to Actor.reply.
  *   3. Send the augmented message to the actor's green thread.
  *   4. Wait for the reply: timeout_ms <= 0 blocks forever via
- *      march_sched_recv_user(); a positive timeout_ms does a deadline-bounded
- *      park-with-timeout and returns Err("no reply (timeout or unhandled
- *      Call)") past the deadline. Any reply whose correlation id doesn't
- *      match this call's is discarded (see march_actor_call_unwrap above)
- *      instead of being handed back as this call's answer.
+ *      march_sched_recv_user_seq(); a positive timeout_ms does a
+ *      deadline-bounded park-with-timeout and returns Err("no reply (timeout
+ *      or unhandled Call)") past the deadline. Any reply whose correlation
+ *      id doesn't match this call's is discarded (see march_actor_call_unwrap
+ *      above) instead of being handed back as this call's answer, and any
+ *      other message is held and put back at the front of the mailbox when
+ *      the call returns (call_held above).
  *   5. Return Ok(reply_value).
  *
  * RC contract: we consume one reference to inner_msg (via march_decrc after
@@ -5648,20 +5689,26 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
 
     march_sched_send(gt, call_msg);
 
+    call_held held = {0};
+    uint64_t seq = 0;
+
     if (timeout_ms <= 0) {
         /* Preserve wait-forever semantics for callers that opt out. Still
          * loop on a mismatched correlation: a wait-forever call can also
          * receive a stale envelope left over from an EARLIER timed-out call
          * on the same green thread. */
         for (;;) {
-            void *result = march_sched_recv_user();
+            void *result = march_sched_recv_user_seq(&seq);
             if (result == MARCH_RECV_NO_MSG)
-                return mk_err_cstr("no reply (timeout or unhandled Call)");
+                return call_held_restore(&held,
+                    mk_err_cstr("no reply (timeout or unhandled Call)"));
             void *payload;
             int rc = march_actor_call_unwrap(result, corr, &payload);
-            if (rc == 0)
-                continue;             /* stale envelope: discarded, keep waiting */
-            return mk_ok(payload);    /* matched envelope, or non-envelope passthrough */
+            if (rc == 1)
+                return call_held_restore(&held, mk_ok(payload));
+            if (rc < 0)
+                call_held_push(&held, result, seq);
+            /* stale envelope (discarded) or held message: keep waiting */
         }
     }
 
@@ -5695,21 +5742,24 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
      * server. Two branches, one shared unwrap helper, is the right split.) */
     int64_t deadline_ms = march_now_ms() + timeout_ms;
     for (;;) {
-        void *msg = march_sched_recv_user_until(deadline_ms);
+        void *msg = march_sched_recv_user_until_seq(deadline_ms, &seq);
         if (msg != MARCH_RECV_NO_MSG) {
             void *payload;
             int rc = march_actor_call_unwrap(msg, corr, &payload);
-            if (rc == 0) {
-                /* stale envelope discarded; deadline may have passed while
-                 * we were draining it, so re-check before looping. */
-                if (march_now_ms() >= deadline_ms)
-                    return mk_err_cstr("no reply (timeout or unhandled Call)");
-                continue;
-            }
-            return mk_ok(payload);
+            if (rc == 1)
+                return call_held_restore(&held, mk_ok(payload));
+            if (rc < 0)
+                call_held_push(&held, msg, seq);
+            /* stale envelope discarded or message held; the deadline may
+             * have passed while we were draining, so re-check before looping. */
+            if (march_now_ms() >= deadline_ms)
+                return call_held_restore(&held,
+                    mk_err_cstr("no reply (timeout or unhandled Call)"));
+            continue;
         }
         if (march_now_ms() >= deadline_ms)
-            return mk_err_cstr("no reply (timeout or unhandled Call)");
+            return call_held_restore(&held,
+                mk_err_cstr("no reply (timeout or unhandled Call)"));
         /* Woken with an empty mailbox but time remains (spurious, or the
          * no-preempt-daemon degrade-to-yield path) — loop and try again. */
     }
@@ -5727,10 +5777,11 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
  * The caller's unwrap (march_actor_call_unwrap) compares corr against the
  * one it is waiting on and discards the envelope if they don't match.
  *
- * Legacy path: if ref_ptr isn't one of our envelope-tagged reply-refs (e.g.
- * a raw proc pointer from an older caller, or interpreter-parity code that
- * still hands march_actor_reply a bare proc), send result directly with no
- * envelope — preserves old (uncorrelated) behavior for that caller.
+ * Legacy path: if ref_ptr isn't one of our envelope-tagged reply-refs (a
+ * bare proc pointer), send result directly with no envelope.  Compiled code
+ * never takes it (every handler's reply ref is the one march_actor_call
+ * built), and a bare value is NOT accepted as a call's answer: a caller
+ * waiting in march_actor_call keeps it as an ordinary message.
  *
  * RC contract: march_actor_reply does NOT incrc result; it transfers the
  * caller's reference (the handler's Perceus instrumentation already owns
