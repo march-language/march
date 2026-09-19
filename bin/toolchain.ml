@@ -576,8 +576,28 @@ let load_stdlib ?(for_js=false) () =
        unmarshalling a stale blob into the new type is undefined behaviour —
        observed as a SIGSEGV on every input, with no diagnostic. *)
     let build_id = String.sub (Lazy.force March_cas.Cas.compiler_identity) 0 12 in
+    (* The stdlib DIRECTORY is part of the key too.  The blob is a Marshal of
+       parsed declarations, and every span in it carries the ABSOLUTE path of
+       the file it came from.  Keyed on source bytes and compiler alone, two
+       checkouts with the same stdlib text and the same compiler build -- two
+       worktrees, which the shared dune cache makes byte-identical -- shared
+       ONE blob, and whichever populated it first stamped its own paths into
+       the other's AST.
+
+       That was not cosmetic.  Everything downstream is keyed on these
+       declarations (the tcenv caches and the JIT's stdlib prelude digest the
+       marshaled decls), so the foreign paths propagated faithfully into a
+       prelude compiled from them, and under the REPL/JIT on macOS
+       `Path.is_absolute("/etc")` returned false.  Swapping ONLY this blob into
+       an otherwise clean cache reproduced it; a fresh parse did not
+       (specs/progress/2026-09-18-stdlib-ast-cache-keyed-on-its-directory.md).
+       Deterministic while the shared cache held the wrong blob, and invisible
+       once it did not, which is why the bug looked like it came and went with
+       unrelated edits. *)
+    let dir_tag =
+      String.sub (Digest.to_hex (Digest.string stdlib_dir)) 0 8 in
     let cache_path = Filename.concat cache_dir
-      ("stdlib_ast_" ^ build_id ^ "_" ^ short_hash ^ ".bin") in
+      ("stdlib_ast_" ^ build_id ^ "_" ^ dir_tag ^ "_" ^ short_hash ^ ".bin") in
     (* Cache hit: unmarshal parsed ASTs *)
     match (try
       if Sys.file_exists cache_path then begin

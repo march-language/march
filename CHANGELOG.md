@@ -69,6 +69,32 @@ git log is authoritative for exact commits.
   private constructors.
 
 ### Fixed
+- **A library module without a `main` is no longer charged `IO.Console` for a
+  function name it shares with the stdlib.** `march --compile` on a three-line
+  module declaring `fn add` failed with "uses `IO.Console` but does not declare
+  `needs IO.Console`", because the capability check treated `BigInt.add`,
+  `Set.add` and the other stdlib functions named `add` as the module's own.
+  `forge fix --contracts` no longer needs to switch the check off to work around it.
+
+- **`forge publish` no longer lets a breaking change ship as a patch when a
+  function has no return-type annotation.** Changing what such a function
+  returns was invisible to the semver check, so it certified the release as a
+  PATCH. A body change to an unannotated public function now requires a major
+  version (for packages at 1.0.0 or later), and the error names the function.
+  Annotate the return type to get a precise verdict instead.
+
+- **`MARCH_STDLIB` now applies to every stdlib lookup.** A `march` run through a
+  symlink with `MARCH_STDLIB` set could fail to build a hello-world program with
+  an error about a stdlib module the program never used (`ConsistentHash.get`).
+  Part of the compiler ignored the override.
+
+- **The REPL no longer runs on another checkout's parsed stdlib.** The
+  parsed-stdlib cache in `~/.cache/march` was keyed on the stdlib's text and the
+  compiler build but not its location, so two checkouts of March with the same
+  stdlib shared one cache entry, and the second ran on the first's parse. Under
+  the REPL/JIT this gave wrong answers — `Path.is_absolute("/etc")` returned
+  `false` on macOS — that appeared and disappeared with unrelated edits.
+
 - **Refinement checker: a polymorphic function no longer lends element refinements it
   cannot justify.** A function whose signature says `List(a) -> List(a)` but whose body
   fixed `a` (type variables in signatures are not rigid), merged it with another variable,

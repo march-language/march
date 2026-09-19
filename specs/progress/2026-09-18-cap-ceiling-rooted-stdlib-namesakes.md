@@ -1,3 +1,53 @@
+# FIXED 2026-09-18: the ceiling rooted stdlib functions that share a name with the file's own
+
+The discriminator was the function's **name**, not its signature.
+
+## The mechanism
+
+For a module with no `main`, the capability ceiling gives
+`Dce.prune_unreachable` an `~extra_root`: the functions this file declares, so
+their capability use is still charged. `bin/main.ml` built that predicate as
+"the TIR name's stem is in `user_fns`". A stem is not an identity. `add` is the
+file's own function, and it is also `BigInt.add`, `Set.add`, `Map.add`, and so
+on. Every one of them was rooted, their bodies reach the prelude's console IO,
+and attribution charged `IO.Console` to the only non-stdlib module there was:
+the entry file.
+
+That also explains the table below. `bump(b : Box) : Box` compiled clean because
+no stdlib module defines `bump`, not because of its heap-typed signature.
+`add(a : Int, b : Int) : Int` failed because of its name. Renaming the
+functions, with their signatures unchanged, moved the failure with the name.
+
+## The fix
+
+`extra_root` now also requires that the pre-mono name is not prefixed by a
+stdlib module (`stdlib_mods`, the same list attribution already uses). The entry
+module's own declarations are unprefixed after `Lower`, so they stay rooted.
+
+## Verification
+
+- `test/test_cap_ceiling.ml`: a main-less `fn add` compiles clean (RED on the
+  old `bin/main.ml`, GREEN with the fix). A main-less `fn write` that calls
+  `File.write` is still charged `IO.FileWrite`, which proves that excluding the
+  namesakes did not unroot the file's own function. It passes both ways.
+- The `forge fix --contracts` workaround is gone. `forge/lib/cmd_fix.ml` no
+  longer passes `--no-cap-strict`, and `forge/test/test_build_check.ml` runs
+  `--report-contracts` without it. `@forge/test/runtest` is green on macOS and
+  on Linux (the `march-sbx-test-ubuntu` Docker image, 16 of 16 suites), as the
+  original filing required before this workaround could come out.
+- Negative control: a main-less module that really calls `println` without
+  `needs IO.Console` is still rejected.
+
+## The failure that surfaced while verifying this
+
+`cap_sandbox 11` ("scaffolded app builds clean") failed locally, and it failed
+identically with `origin/main`'s sources. That was a different bug, fixed
+alongside this one: `specs/progress/2026-09-18-module-registry-honours-march-stdlib.md`.
+
+---
+
+The original filing follows.
+
 # `[P2]` The capability ceiling charges the prelude's `IO.Console` to a module with no `main`
 
 Reopened 2026-09-09. Originally filed 2026-09-03 and closed 2026-09-08; that

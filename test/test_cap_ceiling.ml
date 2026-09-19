@@ -519,6 +519,41 @@ mod CeilNoMainUses do
 end
 |}
 
+(* The roots above are the file's own function NAMES, and a name is not an
+   identity: `add` is this file's function and also `BigInt.add`, `Set.add`,
+   `Map.add`, ...  Matching the root set against every TIR function whose stem
+   was `add` rooted those stdlib namesakes too, and their bodies reach the
+   prelude's console IO -- so a three-line module declaring `fn add` was
+   charged `IO.Console`.  It looked like a scalar-vs-heap signature effect only
+   because the heap-typed function in the original repro happened to have a
+   name no stdlib module uses.
+   (specs/progress/2026-09-18-cap-ceiling-rooted-stdlib-namesakes.md)
+
+   The pair: a namesake must not be rooted, and the file's OWN function of that
+   name still must be -- `write` is also `File.write`, and excluding stdlib
+   namesakes must not unroot the user's `write` along with it. *)
+let test_no_main_module_is_not_charged_for_a_stdlib_namesake () =
+  accepts "main-less module declaring `add`"
+    {|
+mod CeilNamesake do
+  fn add(a : Int, b : Int) : Int do a + b end
+end
+|}
+
+let test_no_main_namesake_still_charged_for_its_own_use () =
+  rejects_naming "main-less module whose `write` writes a file"
+    ~expect:"does not declare `needs IO.FileWrite`"
+    {|
+mod CeilNamesakeUses do
+  fn write(p : String, d : String) : Bool do
+    match File.write(p, d) do
+      Ok(_)  -> true
+      Err(_) -> false
+    end
+  end
+end
+|}
+
 (* The degenerate end of the same case: a file with NO declarations at all,
    only a `test` block. `--compile` does not compile test bodies into the
    binary, so it has no roots by any route — not even the file's own
@@ -833,6 +868,10 @@ let tests =
         test_test_only_file_reports_nothing;
       Alcotest.test_case "main-less module still charged for its own use" `Slow
         test_no_main_module_still_charged_for_its_own_use;
+      Alcotest.test_case "main-less `add` is not charged for BigInt.add" `Slow
+        test_no_main_module_is_not_charged_for_a_stdlib_namesake;
+      Alcotest.test_case "main-less `write` still charged for its own use" `Slow
+        test_no_main_namesake_still_charged_for_its_own_use;
       Alcotest.test_case "route: direct builtin call" `Slow
         test_direct_builtin_route;
       Alcotest.test_case "route: stdlib wrapper (was silent)" `Slow

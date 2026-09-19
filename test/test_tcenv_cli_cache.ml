@@ -186,9 +186,78 @@ let test_shadowed_run_bypasses_cli_cache () =
     List.iter (fun f -> try Sys.remove f with Sys_error _ -> ())
       [entry; ll_path_of entry; json_shadow])
 
+(* ── Test 3: two stdlib checkouts never share a parsed-AST blob ───────────
+   The parsed-stdlib cache (bin/toolchain.ml [load_stdlib],
+   `stdlib_ast_*.bin`) is a Marshal of declarations whose spans carry the
+   ABSOLUTE path of each stdlib file.  It was keyed on source bytes and compiler
+   identity only, so two checkouts with the same stdlib text and the same
+   compiler -- two worktrees, which the shared dune cache makes byte-identical
+   -- shared one blob, and the first to populate it stamped its paths into the
+   other's AST.  Everything downstream digests those declarations, so the
+   foreign paths reached the JIT's stdlib prelude, and on macOS
+   `Path.is_absolute("/etc")` returned false in the REPL.
+   specs/progress/2026-09-18-stdlib-ast-cache-keyed-on-its-directory.md
+
+   Two byte-identical copies of the stdlib, one HOME: each must get its OWN
+   blob, and each blob must name its OWN directory.  Before the fix there was
+   exactly one blob, naming whichever copy ran first. *)
+let test_stdlib_ast_cache_is_per_directory () =
+  let main_exe = Test_helpers.find_main_exe () in
+  let src_stdlib =
+    Filename.concat (Filename.dirname (Filename.dirname main_exe)) "stdlib" in
+  if not (Sys.file_exists src_stdlib) then
+    Alcotest.failf "stdlib not found next to the compiler at %s" src_stdlib;
+  with_temp_home (fun home ->
+    let copy name =
+      let d = Filename.concat home name in
+      let rc = Sys.command (Printf.sprintf "cp -R %s %s"
+                              (Filename.quote src_stdlib) (Filename.quote d)) in
+      Alcotest.(check int) ("copy stdlib to " ^ name) 0 rc;
+      d in
+    let dir_a = copy "stdlib_copy_a" and dir_b = copy "stdlib_copy_b" in
+    let prog = Filename.concat home "prog.march" in
+    let oc = open_out prog in
+    output_string oc stdlib_heavy_src; close_out oc;
+    let run dir =
+      let cmd =
+        Printf.sprintf "MARCH_STDLIB=%s HOME=%s %s --emit-llvm %s > /dev/null 2>&1"
+          (Filename.quote dir) (Filename.quote home)
+          (Filename.quote main_exe) (Filename.quote prog) in
+      ignore (Sys.command cmd) in
+    run dir_a;
+    run dir_b;
+    let blobs =
+      try Sys.readdir (cache_dir home) |> Array.to_list
+          |> List.filter (fun f ->
+              String.length f > 11 && String.sub f 0 11 = "stdlib_ast_"
+              && Filename.check_suffix f ".bin")
+      with Sys_error _ -> [] in
+    Alcotest.(check int)
+      "one parsed-stdlib blob per stdlib directory, not one shared by both" 2
+      (List.length blobs);
+    (* ...and each blob carries its own directory, not the other's. *)
+    let names_dir blob d =
+      let s = read_file (Filename.concat (cache_dir home) blob) in
+      let needle = d ^ "/" in
+      let n = String.length needle and len = String.length s in
+      let rec go i = i + n <= len && (String.sub s i n = needle || go (i + 1)) in
+      go 0 in
+    List.iter (fun d ->
+      Alcotest.(check bool)
+        (Printf.sprintf "some blob names %s" (Filename.basename d)) true
+        (List.exists (fun b -> names_dir b d) blobs))
+      [dir_a; dir_b];
+    List.iter (fun b ->
+      Alcotest.(check bool)
+        (Printf.sprintf "%s does not name BOTH directories" b) false
+        (names_dir b dir_a && names_dir b dir_b))
+      blobs)
+
 let tests = [
   Alcotest.test_case "cold/warm cli tcenv cache: IR byte-identical" `Quick
     test_ir_identical_cold_vs_warm_cache;
+  Alcotest.test_case "two stdlib checkouts never share a parsed-AST blob" `Quick
+    test_stdlib_ast_cache_is_per_directory;
   Alcotest.test_case "shadowed stdlib module bypasses the cli tcenv cache" `Quick
     test_shadowed_run_bypasses_cli_cache;
 ]

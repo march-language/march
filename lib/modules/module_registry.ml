@@ -98,10 +98,21 @@ let looks_like_stdlib_dir d =
   Sys.file_exists d && Sys.is_directory d
   && Sys.file_exists (Filename.concat d "prelude.march")
 
+(* MARCH_STDLIB comes first, exactly as in [Toolchain.find_stdlib_dir].
+   Without it the two resolvers disagreed whenever the override was the only
+   way to find the stdlib -- `march` invoked through a PATH symlink, whose
+   [Sys.executable_name] is the link's directory (forge's hermetic test
+   toolchain does exactly this).  The eager stdlib then loaded from the
+   override while this registry found none, and a scaffolded app failed to
+   build with a repr-disagreement error on a stdlib module it never called
+   (specs/progress/2026-09-18-module-registry-honours-march-stdlib.md). *)
 let find_stdlib_dir () =
   match !_stdlib_dir with
   | Some d -> Some d
   | None ->
+    match Sys.getenv_opt "MARCH_STDLIB" with
+    | Some p when looks_like_stdlib_dir p -> Some p
+    | _ ->
     let candidates = [
       (* Exe-relative candidates first — unambiguous regardless of CWD. *)
       Filename.concat (Filename.dirname Sys.executable_name) "../stdlib";
