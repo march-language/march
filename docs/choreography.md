@@ -185,8 +185,13 @@ FAN_A_ADDR=10.0.0.1:7001 FAN_C_ADDR=10.0.0.2:7002 ./node_c
 FAN_C_ADDR=10.0.0.2:7002 ./node_b
 ```
 
-The nodes can start in any order. A node that connects before its peer is listening retries
-for up to 20 seconds. If a required variable is missing, the node stops at startup with a
+The nodes can start in any order, but they all have to be up within 20 seconds of each
+other. A node that connects before its peer is listening retries for up to 20 seconds, and
+a listening node waits up to 20 seconds for the next role to connect. If one never does,
+setup fails instead of waiting for ever: `run_<Role>` returns `Err(Accept(...))` or
+`Err(Connect(...))` naming the missing roles, and closes the connections it already made,
+so the roles it did reach fail too instead of waiting on it. Set
+`MARCH_SESSION_CONNECT_MS` to change the 20 seconds; 0 waits for ever. If a required variable is missing, the node stops at startup with a
 message that names the role, for example
 `session_node: role 2 needs an address for role(s) 1`, before it opens any socket.
 

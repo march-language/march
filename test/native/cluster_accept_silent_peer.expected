@@ -1,0 +1,3 @@
+silent peer refused: net-kernel: tcp_recv_exact: timed out
+nobody else: tcp_accept: timed out
+silent client connected: 1

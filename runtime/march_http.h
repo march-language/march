@@ -31,6 +31,7 @@ void *march_tcp_listen(int64_t port);
 /* Accept one incoming connection from a listening fd.
  * Blocks until a client connects.  Returns Ok(fd) or Err(reason). */
 void *march_tcp_accept(int64_t listen_fd);
+void *march_tcp_accept_timeout(int64_t listen_fd, int64_t timeout_ms);
 
 /* Read an HTTP request from fd: headers until \r\n\r\n, then Content-Length
  * body bytes (or until close if no Content-Length).  max_bytes caps total.

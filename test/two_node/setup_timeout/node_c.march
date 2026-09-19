@@ -1,0 +1,39 @@
+-- Two-node scenario "setup_timeout": node-c runs role C of Tri with a dead
+-- address for B; see scenario.sh. The connect error's text is the OS's, so
+-- only the failed role is printed. It stays alive afterwards (the scenario
+-- kills it).
+mod SetupTimeoutC do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs Session.Live
+
+  @[endpoints]
+  protocol Tri do
+    A -> B : Int
+    A -> C : Int
+    B -> C : Int
+    C -> A : Bool
+  end
+
+  pfn role_c(s : Cap(Session.Live), st : Tri_C.S_recv_Msg_A_C_1) : Tri_C.Yield do
+    Tri_C.recv_Msg_A_C_1(s, st, fn (a, st1) ->
+      Tri_C.recv_Msg_B_C_1(s, st1, fn (b, st2) ->
+        Tri_C.close(s, Tri_C.send_Msg_C_A_1(s, st2, a + b == 3))))
+  end
+
+  fn main(c : Cap(IO)) do
+    match Tri_Run.run_C(c, "node-c", "tri-secret", Tri_Run.addrs_from_env(), fn (s, st) -> role_c(s, st)) do
+      Ok(_) -> println("C: closed")
+      Err(SessionNode.Connect(role, _)) ->
+        println("C: could not connect to role " ++ int_to_string(role))
+        -- Carry on, as a program that handles the error would: whatever A
+        -- learns about C now comes from C's setup teardown, not its exit.
+        sleep_ms(30000)
+      Err(e) -> println("C: " ++ SessionNode.run_error_message(e))
+    end
+  end
+end

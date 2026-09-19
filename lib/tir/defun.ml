@@ -77,7 +77,7 @@ let builtin_names : StringSet.t =
       "process_pid"; "process_spawn_sync"; "process_spawn_lines";
       "process_spawn_async"; "process_read_line"; "process_write"; "process_kill_proc"; "process_wait_proc";
       (* TCP/network builtins *)
-      "tcp_connect"; "tcp_close"; "tcp_shutdown"; "sleep_ms"; "tcp_listen"; "tcp_accept"; "tcp_local_port";
+      "tcp_connect"; "tcp_close"; "tcp_shutdown"; "sleep_ms"; "tcp_listen"; "tcp_accept"; "tcp_accept_timeout"; "tcp_local_port";
       "tcp_send_all"; "tcp_recv_all"; "tcp_recv_exact"; "tcp_recv_http"; "tcp_recv_http_headers";
       "tcp_recv_chunk"; "tcp_recv_chunked_frame";
       "tcp_recv_chunk_timeout"; "tcp_set_recv_timeout"; "tcp_recv_timeout";

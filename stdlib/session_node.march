@@ -523,20 +523,34 @@ mod SessionNode do
     ()
   end
 
-  pfn await_hello(fd : Int) : (Int, GlobalPid.Pid) do
+  pfn read_hello(fd : Int) : Result((Int, GlobalPid.Pid), String) do
     match NetKernel.recv_frame_exact(fd) do
-      Err(e) -> panic("session_node: hello: " ++ e)
+      Err(e) -> Err("session_node: hello: " ++ e)
       Ok(frame) ->
         match NodeSend.decode_msg(frame) do
           Ok(d) ->
-            if d.type_tag != "SessionNode.Hello" do panic("session_node: expected a Hello, got " ++ d.type_tag) else () end
-            match decode_hello(d.payload) do
-              Ok(pair) -> pair
-              Err(e) -> panic(e)
-            end
-          Err(e) -> panic("session_node: hello frame: " ++ e)
+            if d.type_tag != "SessionNode.Hello" do Err("session_node: expected a Hello, got " ++ d.type_tag)
+            else decode_hello(d.payload) end
+          Err(e) -> Err("session_node: hello frame: " ++ e)
         end
     end
+  end
+
+  pfn await_hello(fd : Int) : (Int, GlobalPid.Pid) do
+    match read_hello(fd) do
+      Ok(pair) -> pair
+      Err(e) -> panic(e)
+    end
+  end
+
+  -- `read_hello` bounded by [timeout_ms] (> 0): the control socket's receive
+  -- timeout covers the read and is cleared again before the control reader
+  -- takes the socket over.
+  pfn read_hello_within(fd : Int, timeout_ms : Int) : Result((Int, GlobalPid.Pid), String) do
+    let _ = if timeout_ms > 0 do tcp_set_recv_timeout(fd, timeout_ms) else Ok(()) end
+    let r = read_hello(fd)
+    let _ = if timeout_ms > 0 do tcp_set_recv_timeout(fd, 0) else Ok(()) end
+    r
   end
 
   -- ── control connection ──────────────────────────────────────────────────
@@ -651,6 +665,57 @@ mod SessionNode do
   fn open(conn : Peer, node_id : String, accepted : Bool, on_close : Int -> Unit) : Party do
     let p = party(0, node_id, on_close)
     if accepted do accept_from(p, conn) else connect_to(p, 0, conn) end
+  end
+
+  -- The role runner's joins: `accept_from` / `connect_to` with the hello
+  -- bounded by [timeout_ms] and an `Err` instead of a panic when the peer
+  -- goes quiet or sends something else, so `run` can report it. A role that
+  -- announces the wrong number is still a wiring mistake and panics. The
+  -- connection is closed on `Err`.
+  pfn join_accepted(p : Party, conn : Peer, timeout_ms : Int) : Result(Party, String) do
+    announce(conn.fd, p.my_role, GlobalPid.make(p.node_id, pid_to_int(p.ep), 1))
+    match read_hello_within(conn.fd, timeout_ms) do
+      Err(e) ->
+        close_peer(conn)
+        Err(e)
+      Ok((their_role, peer_pid)) -> Ok(start_link(p, their_role, conn, peer_pid))
+    end
+  end
+
+  pfn join_dialed(p : Party, their_role : Int, conn : Peer, timeout_ms : Int) : Result(Party, String) do
+    match read_hello_within(conn.fd, timeout_ms) do
+      Err(e) ->
+        close_peer(conn)
+        Err(e)
+      Ok((announced, peer_pid)) ->
+        if announced != their_role && announced != 0 && their_role != 0 do
+          panic("session_node: connected to role " ++ int_to_string(their_role) ++ " but it announced role " ++ int_to_string(announced))
+        else () end
+        announce(conn.fd, p.my_role, GlobalPid.make(p.node_id, pid_to_int(p.ep), 1))
+        Ok(start_link(p, their_role, conn, peer_pid))
+    end
+  end
+
+  pfn close_peer(conn : Peer) : () do
+    tcp_close(conn.fd)
+    tcp_close(conn.data_fd)
+  end
+
+  -- Setup failed: tear down every connection made so far, so each peer's
+  -- side sees it end now (and fails its own setup, or is cancelled) rather
+  -- than waiting out its own timeout. Shutdown before close: it wakes the
+  -- control reader parked on the socket, which close alone may not.
+  pfn abort_links(p : Party) : () do
+    let _ = List.map(p.links, fn l -> do
+      NodeQueue.close(l.q)
+      tcp_shutdown(l.data_fd)
+      tcp_shutdown(l.control_fd)
+      let _ = task_await(l.control)
+      tcp_close(l.data_fd)
+      tcp_close(l.control_fd)
+      0
+    end)
+    ()
   end
 
   -- ── routing ─────────────────────────────────────────────────────────────
@@ -920,7 +985,12 @@ mod SessionNode do
   -- (ascending), then accept every HIGHER one. Role 1 has nothing to connect
   -- to, so it is accepting at once; role k connects only to roles below it,
   -- each of which finished its own connects and is accepting. No node ever
-  -- waits on a node that is waiting on it.
+  -- waits on a node that is waiting on it. No wait is unbounded either: a
+  -- dial retries, an accept waits, and each handshake and hello reads, for
+  -- at most MARCH_SESSION_CONNECT_MS (`connect_ms`), and a setup that fails
+  -- tears down what it built (`abort_links`), so a role that never starts,
+  -- or fails its own setup, fails the others' setup too instead of holding
+  -- them for ever (specs/progress/2026-09-18-session-accept-deadline.md).
   --
   -- Addresses are a runtime value; their SHAPE is checked here from what the
   -- compiler knows (`peers_<R>()`): a role needs its own entry iff some peer
@@ -1035,30 +1105,52 @@ mod SessionNode do
     end)
   end
 
-  -- 200 attempts 100 ms apart: 20 s for a peer that is still starting.
-  pfn dial_retry(a : Addr, me, secret : String, attempts : Int) : Result(Peer, String) do
-    match ClusterConn.connect_split(PeerRegistry.empty(), a.host, a.port, me, secret) do
+  -- How long setup waits on a peer: to dial a role that is still starting,
+  -- for a role to connect, and for each handshake and hello once it has.
+  -- MARCH_SESSION_CONNECT_MS (default 20000); <= 0 waits for ever.
+  pfn connect_ms() : Int do
+    Env.get_int("MARCH_SESSION_CONNECT_MS", 20000)
+  end
+
+  -- Dial [a] every 100 ms until it answers or [attempts] run out (connect_ms
+  -- worth), each handshake bounded by [timeout_ms].
+  pfn dial_retry(a : Addr, me, secret : String, attempts : Int, timeout_ms : Int) : Result(Peer, String) do
+    match ClusterConn.connect_split_within(PeerRegistry.empty(), a.host, a.port, me, secret, timeout_ms) do
       Ok((_reg, conn)) -> Ok(conn)
       Err(e) ->
         if attempts <= 1 do
           Err(e)
         else
           sleep_ms(100)
-          dial_retry(a, me, secret, attempts - 1)
+          dial_retry(a, me, secret, attempts - 1, timeout_ms)
         end
     end
   end
 
+  -- Every setup failure below tears down the connections made so far
+  -- (`abort_links`), so the peers already reached learn of it at once.
   pfn dial_all(p : Party, roles : List(Int), addrs : List(Addr), me, secret : String) : Result(Party, RunError) do
     match roles do
       Nil -> Ok(p)
       Cons(r, rest) ->
         match addr_of(addrs, r) do
-          None -> Err(Connect(r, "no address"))
+          None ->
+            abort_links(p)
+            Err(Connect(r, "no address"))
           Some(a) ->
-            match dial_retry(a, me, secret, 200) do
-              Err(e) -> Err(Connect(r, e))
-              Ok(conn) -> dial_all(connect_to(p, r, conn), rest, addrs, me, secret)
+            let t = connect_ms()
+            let attempts = if t > 0 do if t / 100 > 1 do t / 100 else 1 end else 1000000000 end
+            match dial_retry(a, me, secret, attempts, t) do
+              Err(e) ->
+                abort_links(p)
+                Err(Connect(r, e))
+              Ok(conn) ->
+                match join_dialed(p, r, conn, t) do
+                  Err(e) ->
+                    abort_links(p)
+                    Err(Connect(r, e))
+                  Ok(p2) -> dial_all(p2, rest, addrs, me, secret)
+                end
             end
         end
     end
@@ -1074,21 +1166,34 @@ mod SessionNode do
 
   -- Accept one connection per role in [expected], in whatever order they
   -- arrive: the hello says which role it is. A role not expected, or seen
-  -- twice, is a wiring mistake and fails loudly.
+  -- twice, is a wiring mistake and fails loudly. Gives up when no expected
+  -- role connects within connect_ms (each accept waits that long, so a
+  -- cluster whose roles keep arriving is never cut off): a role that never
+  -- starts, or failed its own setup, no longer holds this one for ever.
   pfn accept_all(p : Party, expected : List(Int), listen_fd : Int, me, secret : String) : Result(Party, RunError) do
     match expected do
       Nil -> Ok(p)
       _ ->
-        match ClusterConn.accept_split(PeerRegistry.empty(), listen_fd, me, secret) do
-          Err(e) -> Err(Accept(e))
+        let t = connect_ms()
+        match ClusterConn.accept_split_within(PeerRegistry.empty(), listen_fd, me, secret, t) do
+          Err(e) ->
+            abort_links(p)
+            if e == "tcp_accept: timed out" do
+              Err(Accept("no connection from role(s) " ++ show_roles(expected) ++ " within " ++ int_to_string(t) ++ " ms"))
+            else Err(Accept(e)) end
           Ok((_reg, conn)) ->
-            let p2 = accept_from(p, conn)
-            let got = last_role(p2.links)
-            if List.member(expected, got) == false do
-              panic("session_node: role " ++ int_to_string(p.my_role) ++ " accepted a connection from role "
-                    ++ int_to_string(got) ++ " but expects role(s) " ++ show_roles(expected))
-            else () end
-            accept_all(p2, List.filter(expected, fn r -> r != got), listen_fd, me, secret)
+            match join_accepted(p, conn, t) do
+              Err(e) ->
+                abort_links(p)
+                Err(Accept(e))
+              Ok(p2) ->
+                let got = last_role(p2.links)
+                if List.member(expected, got) == false do
+                  panic("session_node: role " ++ int_to_string(p.my_role) ++ " accepted a connection from role "
+                        ++ int_to_string(got) ++ " but expects role(s) " ++ show_roles(expected))
+                else () end
+                accept_all(p2, List.filter(expected, fn r -> r != got), listen_fd, me, secret)
+            end
         end
     end
   end
@@ -1183,8 +1288,20 @@ mod SessionNode do
     let higher = accepts(my_role, peers)
     let? listen_fd = open_listener(my_role, higher, addrs)
     let p0 = party(my_role, node_id, on_close)
-    let? p1 = dial_all(p0, dials(my_role, peers), addrs, me, secret)
-    let? p2 = accept_all(p1, higher, listen_fd, me, secret)
+    let joined = match dial_all(p0, dials(my_role, peers), addrs, me, secret) do
+      Err(e) -> Err(e)
+      Ok(p1) -> accept_all(p1, higher, listen_fd, me, secret)
+    end
+    match joined do
+      Err(e) ->
+        if listen_fd >= 0 do tcp_close(listen_fd) else () end
+        Err(e)
+      Ok(p2) -> serve_party(p2, io, my_role, peers, listen_fd, drive)
+    end
+  end
+
+  pfn serve_party(p2 : Party, io : Cap(IO), my_role : Int, peers : List(Int), listen_fd : Int,
+                  drive : Party -> Cap(Session.Live) -> Unit) : Result((), RunError) do
     let p = require(p2, peers)
     let s = Session.attach(io, ops(p))
     drive(p, s)

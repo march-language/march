@@ -1,0 +1,33 @@
+-- Two-node scenario "setup_timeout": node-a runs role A of Tri; node-b runs
+-- B and node-c runs C, which cannot reach B. See scenario.sh.
+mod SetupTimeoutA do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs Session.Live
+
+  @[endpoints]
+  protocol Tri do
+    A -> B : Int
+    A -> C : Int
+    B -> C : Int
+    C -> A : Bool
+  end
+
+  pfn role_a(s : Cap(Session.Live), st : Tri_A.S_send_Msg_A_B_1) : Tri_A.Yield do
+    let st1 = Tri_A.send_Msg_A_B_1(s, st, 1)
+    let st2 = Tri_A.send_Msg_A_C_1(s, st1, 2)
+    Tri_A.recv_Msg_C_A_1(s, st2, fn (_ok, st3) -> Tri_A.close(s, st3))
+  end
+
+  fn main(c : Cap(IO)) do
+    println("node-a: up")
+    match Tri_Run.run_A(c, "node-a", "tri-secret", Tri_Run.addrs_from_env(), fn (s, st) -> role_a(s, st)) do
+      Ok(_) -> println("A: closed")
+      Err(e) -> println("A: " ++ SessionNode.run_error_message(e))
+    end
+  end
+end

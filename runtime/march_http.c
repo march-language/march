@@ -204,15 +204,22 @@ static int64_t tcp_listen_raw(int64_t port) {
     return (int64_t)fd;
 }
 
-static int64_t tcp_accept_raw(int64_t listen_fd) {
+/* tcp_accept_raw's result when [deadline_ms] passed with nothing pending. */
+#define TCP_ACCEPT_TIMED_OUT (-2)
+
+static int64_t tcp_accept_raw_until(int64_t listen_fd, int64_t deadline_ms) {
     struct sockaddr_in client_addr;
     socklen_t len = sizeof(client_addr);
     /* Park until a connection is pending (readable listener), so a green
      * thread waiting in accept does not hold its scheduler thread; the accept()
      * itself then returns at once.  Off a green thread this is a plain poll(),
-     * which is what the HTTP server's select()-gated caller effectively did. */
+     * which is what the HTTP server's select()-gated caller effectively did.
+     * deadline_ms 0 waits for ever; otherwise TCP_ACCEPT_TIMED_OUT once it
+     * passes (march_now_ms clock). */
     for (;;) {
-        if (march_sched_wait_fd((int)listen_fd, 0, 0) < 0) return -1;
+        int ready = march_sched_wait_fd((int)listen_fd, 0, deadline_ms);
+        if (ready == MARCH_FDWAIT_TIMEOUT) return TCP_ACCEPT_TIMED_OUT;
+        if (ready < 0) return -1;
         /* Readiness is a hint that can be stale; a blocking accept() on a
          * listener with nothing pending would hold the thread.  Confirm with a
          * zero-timeout poll and go back to waiting if it was stale. */
@@ -228,6 +235,10 @@ static int64_t tcp_accept_raw(int64_t listen_fd) {
         if (fd < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
         return (int64_t)fd;
     }
+}
+
+static int64_t tcp_accept_raw(int64_t listen_fd) {
+    return tcp_accept_raw_until(listen_fd, 0);
 }
 
 /* March-callable versions: return Result(Int, String) like tcp_connect.
@@ -251,6 +262,29 @@ void *march_tcp_accept(int64_t listen_fd) {
     int64_t fd = tcp_accept_raw(listen_fd);
     if (fd < 0) {
         void *s = march_string_lit("tcp_accept: accept failed", 25);
+        void *r = march_alloc(24);
+        ((march_hdr *)r)->tag = 1; /* Err */
+        *(void **)((char *)r + 16) = s;
+        return r;
+    }
+    void *ok_obj = march_alloc(24);
+    /* tag stays 0 = Ok */
+    *(int64_t *)((char *)ok_obj + 16) = (fd << 1) | 1;
+    return ok_obj;
+}
+
+/* tcp_accept_timeout(listen_fd, timeout_ms): tcp_accept, giving up after
+ * [timeout_ms] with nothing pending -- Err("tcp_accept: timed out"). A
+ * timeout_ms <= 0 waits for ever, as tcp_accept does. The session role runner
+ * uses it so a listening role does not wait for ever on a peer that never
+ * starts (specs/progress/2026-09-18-session-accept-deadline.md). */
+void *march_tcp_accept_timeout(int64_t listen_fd, int64_t timeout_ms) {
+    int64_t deadline = timeout_ms > 0 ? march_now_ms() + timeout_ms : 0;
+    int64_t fd = tcp_accept_raw_until(listen_fd, deadline);
+    if (fd < 0) {
+        void *s = fd == TCP_ACCEPT_TIMED_OUT
+            ? march_string_lit("tcp_accept: timed out", 21)
+            : march_string_lit("tcp_accept: accept failed", 25);
         void *r = march_alloc(24);
         ((march_hdr *)r)->tag = 1; /* Err */
         *(void **)((char *)r + 16) = s;
@@ -733,11 +767,23 @@ void *march_tcp_set_recv_timeout(int64_t fd_arg, int64_t timeout_ms) {
 }
 
 /* tcp_recv_exact(fd, n) → Result(Bytes, String)
- * Reads exactly n bytes from the socket, blocking until all are received. */
+ * Reads exactly n bytes from the socket, blocking until all are received.
+ * A socket with a receive timeout (tcp_set_recv_timeout / SO_RCVTIMEO) bounds
+ * the whole read by it, as tcp_recv does: the parked wait never sees the
+ * kernel's timer, so the timeout is read back here and turned into a
+ * scheduler deadline. Err("tcp_recv_exact: timed out") once it passes. */
 void *march_tcp_recv_exact(int64_t fd, int64_t n) {
     if (n <= 0) {
         /* Ok(Bytes("")) — an empty Bytes wrapper, not a bare empty String. */
         return make_ok(make_bytes_from_raw(NULL, 0));
+    }
+    int64_t deadline = 0;
+    {
+        struct timeval tv;
+        socklen_t tvlen = sizeof tv;
+        if (getsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO, &tv, &tvlen) == 0
+                && (tv.tv_sec > 0 || tv.tv_usec > 0))
+            deadline = march_now_ms() + (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
     }
     uint8_t *buf = (uint8_t *)malloc((size_t)n);
     if (!buf) return make_err("tcp_recv_exact: OOM");
@@ -745,7 +791,12 @@ void *march_tcp_recv_exact(int64_t fd, int64_t n) {
     while ((int64_t)received < n) {
         /* Park until readable (unmasked), then read what is there with the
          * preempt mask held around the syscall only. */
-        if (march_sched_wait_fd((int)fd, 0, 0) < 0) {
+        int ready = march_sched_wait_fd((int)fd, 0, deadline);
+        if (ready == MARCH_FDWAIT_TIMEOUT) {
+            free(buf);
+            return make_err("tcp_recv_exact: timed out");
+        }
+        if (ready < 0) {
             free(buf);
             return make_err("tcp_recv_exact: wait failed");
         }

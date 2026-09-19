@@ -43,11 +43,29 @@ mod ClusterConn do
   -- can. The single-connection `connect_to_peer` / `accept_one` stay for
   -- pre-split peers and fixtures.
 
-  pfn dial(host, port, my_id, secret, role) do
+  -- Run the handshake on [fd], bounded by [timeout_ms] when it is > 0: the
+  -- socket's receive timeout is set for the handshake's reads (tcp_recv_exact
+  -- honours it) and cleared again, so later readers of the connection wait
+  -- as long as they like. A peer that connects and then says nothing fails
+  -- here instead of holding the caller for ever. The socket is closed on
+  -- failure.
+  pfn handshake_within(fd, my_id, secret, role, timeout_ms) do
+    let _ = if timeout_ms > 0 do tcp_set_recv_timeout(fd, timeout_ms) else Ok(()) end
+    let result = NetKernel.handshake_role(fd, my_id, secret, NetKernel.fresh_nonce(), role)
+    let _ = if timeout_ms > 0 do tcp_set_recv_timeout(fd, 0) else Ok(()) end
+    match result do
+      Err(e) ->
+        tcp_close(fd)
+        Err(e)
+      Ok(pair) -> Ok(pair)
+    end
+  end
+
+  pfn dial(host, port, my_id, secret, role, timeout_ms) do
     match Socket.connect(host, port) do
       Err(e) -> Err(Socket.error_message(e))
       Ok(fd) ->
-        match NetKernel.handshake_role(fd, my_id, secret, NetKernel.fresh_nonce(), role) do
+        match handshake_within(fd, my_id, secret, role, timeout_ms) do
           Err(e) -> Err(e)
           Ok((peer_id, _)) -> Ok((fd, peer_id))
         end
@@ -57,11 +75,18 @@ mod ClusterConn do
   -- Dial [host]:[port] twice -- control first, then data -- and register the
   -- peer with both.
   fn connect_split(reg, host, port, my_id, secret) do
-    match dial(host, port, my_id, secret, Handshake.role_control()) do
+    connect_split_within(reg, host, port, my_id, secret, 0)
+  end
+
+  -- `connect_split`, each handshake bounded by [timeout_ms] (<= 0: no bound).
+  fn connect_split_within(reg, host, port, my_id, secret, timeout_ms) do
+    match dial(host, port, my_id, secret, Handshake.role_control(), timeout_ms) do
       Err(e) -> Err(e)
       Ok((cfd, peer_id)) ->
-        match dial(host, port, my_id, secret, Handshake.role_data()) do
-          Err(e) -> Err(e)
+        match dial(host, port, my_id, secret, Handshake.role_data(), timeout_ms) do
+          Err(e) ->
+            tcp_close(cfd)
+            Err(e)
           Ok((dfd, _)) ->
             let peer = { node_id: peer_id.node_id, identity: peer_id, fd: cfd, data_fd: dfd }
             Ok((PeerRegistry.add(reg, peer), peer))
@@ -69,11 +94,11 @@ mod ClusterConn do
     end
   end
 
-  pfn take(listen_fd, my_id, secret) do
-    match tcp_accept(listen_fd) do
+  pfn take(listen_fd, my_id, secret, timeout_ms) do
+    match tcp_accept_timeout(listen_fd, timeout_ms) do
       Err(e) -> Err(e)
       Ok(fd) ->
-        match NetKernel.handshake_role(fd, my_id, secret, NetKernel.fresh_nonce(), Handshake.role_control()) do
+        match handshake_within(fd, my_id, secret, Handshake.role_control(), timeout_ms) do
           Err(e) -> Err(e)
           Ok((peer_id, role)) -> Ok((fd, peer_id, role))
         end
@@ -83,14 +108,24 @@ mod ClusterConn do
   -- Accept one peer's TWO connections (in the order the peer dials them:
   -- control, then data) and register it with both.
   fn accept_split(reg, listen_fd, my_id, secret) do
-    match take(listen_fd, my_id, secret) do
+    accept_split_within(reg, listen_fd, my_id, secret, 0)
+  end
+
+  -- `accept_split`, giving up when [timeout_ms] (<= 0: no bound) passes
+  -- with no connection pending, or with a handshake unfinished:
+  -- Err("tcp_accept: timed out") for the first, the handshake's own error
+  -- for the second.
+  fn accept_split_within(reg, listen_fd, my_id, secret, timeout_ms) do
+    match take(listen_fd, my_id, secret, timeout_ms) do
       Err(e) -> Err(e)
       Ok((cfd, peer_id, role1)) ->
         if role1 != Handshake.role_control() do
           Err("ClusterConn: expected the control connection first, got " ++ role1)
         else
-          match take(listen_fd, my_id, secret) do
-            Err(e) -> Err(e)
+          match take(listen_fd, my_id, secret, timeout_ms) do
+            Err(e) ->
+              tcp_close(cfd)
+              Err(e)
             Ok((dfd, peer_id2, role2)) ->
               if role2 != Handshake.role_data() || peer_id2.node_id != peer_id.node_id do
                 Err("ClusterConn: expected " ++ peer_id.node_id ++ "'s data connection, got " ++ role2 ++ " from " ++ peer_id2.node_id)
