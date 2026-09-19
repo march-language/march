@@ -23,7 +23,8 @@
 #                                 not include a compile (a setup deadline)
 #   kill_node <a|b|c>             SIGKILL it (a crash, distinct from a close)
 #   stop_node / cont_node <a|b|c> SIGSTOP / SIGCONT (a stall, distinct from a crash)
-#   drop_link / heal              drop every TCP packet to or from node-b's port
+#   drop_link [port...] / heal    drop every TCP packet to or from node-b's port
+#                                 (or each port named)
 #                                 (a partition: nothing is refused, nothing
 #                                 arrives) / remove the rule. Linux iptables, as
 #                                 root or via passwordless sudo; anywhere else the
@@ -185,17 +186,29 @@ iptables_cmd() {
 # Both directions on loopback: a packet to the port and one from it. TCP keeps
 # the connection (retransmitting) through the drop, so heal delivers what was
 # queued -- a partition, not a close.
+# `drop_link` with no argument drops node-b's port, the two-node spelling. A
+# scenario whose nodes each listen AND dial (the cluster node service: either
+# side may redial the other) names every listen port instead, e.g.
+# `drop_link "$PORT" "$PORT_A"`, or new connections route around the fault.
+dropped_ports=""
 drop_link() {
-  local ipt; ipt=$(iptables_cmd) || { echo "two-node[$scenario]: skipped: needs root (Linux iptables) to drop packets" >&2; exit 3; }
-  $ipt -I INPUT -i lo -p tcp --dport "$PORT" -j DROP || fail "iptables: could not add the drop rule (dport)"
-  $ipt -I INPUT -i lo -p tcp --sport "$PORT" -j DROP || fail "iptables: could not add the drop rule (sport)"
+  local ipt p; ipt=$(iptables_cmd) || { echo "two-node[$scenario]: skipped: needs root (Linux iptables) to drop packets" >&2; exit 3; }
+  [ $# -gt 0 ] || set -- "$PORT"
+  for p in "$@"; do
+    $ipt -I INPUT -i lo -p tcp --dport "$p" -j DROP || fail "iptables: could not add the drop rule (dport $p)"
+    $ipt -I INPUT -i lo -p tcp --sport "$p" -j DROP || fail "iptables: could not add the drop rule (sport $p)"
+  done
+  dropped_ports="$dropped_ports $*"
   link_dropped=1
 }
 
 heal() {
-  local ipt; ipt=$(iptables_cmd) || return 0
-  $ipt -D INPUT -i lo -p tcp --dport "$PORT" -j DROP 2> /dev/null
-  $ipt -D INPUT -i lo -p tcp --sport "$PORT" -j DROP 2> /dev/null
+  local ipt p; ipt=$(iptables_cmd) || return 0
+  for p in ${dropped_ports:-$PORT}; do
+    $ipt -D INPUT -i lo -p tcp --dport "$p" -j DROP 2> /dev/null
+    $ipt -D INPUT -i lo -p tcp --sport "$p" -j DROP 2> /dev/null
+  done
+  dropped_ports=""
   link_dropped=0
 }
 

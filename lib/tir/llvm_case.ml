@@ -915,6 +915,16 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
   let rec body_reuses_scrut scrut_name e =
     match e with
     | Tir.EReuse (Tir.AVar v, _, _) -> String.equal v.Tir.v_name scrut_name
+    (* TRMC's hole allocation with a reuse token is the same take-over-or-
+       release as EReuse (Llvm_emit_alloc.emit_alloc_hole: rc = 1 reuses the
+       cell, otherwise ONE box-level march_decrc and a fresh cell), so a
+       shared scrutinee needs the same dup of its extracted fields. Without
+       this arm the fields moved out of a SHARED cell with no increment: the
+       tail passed on to the next iteration then looked unique and was reused
+       in place, mutating a list someone else still held (an append whose
+       first argument shares its tail -- Msgpack.encode of a Bin inside an
+       Array, reused payload -- RC underflow / garbage). *)
+    | Tir.EAllocHole (Some (Tir.AVar v), _, _, _) -> String.equal v.Tir.v_name scrut_name
     | Tir.ELet (v, e1, e2) ->
       body_reuses_scrut scrut_name e1
       || (not (String.equal v.Tir.v_name scrut_name)

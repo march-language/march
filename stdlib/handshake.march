@@ -14,27 +14,39 @@ mod Handshake do
   -- (specs/progress/2026-09-14-distributed-plane-flow-control-and-control-channel.md,
   -- step 2). A hello without the field -- every node before the split -- is
   -- a control connection, so the two wire shapes interoperate.
-  type Hello = { identity : NodeIdentity.Identity, nonce : String, role : String }
+  --
+  -- `addr` is the sender's ADVERTISED listen address ("host:port"), so an
+  -- acceptor learns where to dial the peer back before any gossip arrives
+  -- (the cluster node service). "" when not sent: a hello without it (every
+  -- node before the service) decodes as before.
+  type Hello = { identity : NodeIdentity.Identity, nonce : String, role : String, addr : String }
 
   fn role_control() : String do "control" end
   fn role_data() : String do "data" end
 
   fn make_hello(identity : NodeIdentity.Identity, nonce : String) : Hello do
-    { identity: identity, nonce: nonce, role: role_control() }
+    { identity: identity, nonce: nonce, role: role_control(), addr: "" }
   end
 
   fn make_hello_role(identity : NodeIdentity.Identity, nonce : String, role : String) : Hello do
-    { identity: identity, nonce: nonce, role: role }
+    { identity: identity, nonce: nonce, role: role, addr: "" }
   end
 
-  -- Serialize a Hello to MessagePack bytes: [name, node_id, incarnation, nonce, role].
+  fn make_hello_addr(identity : NodeIdentity.Identity, nonce : String, role : String, addr : String) : Hello do
+    { identity: identity, nonce: nonce, role: role, addr: addr }
+  end
+
+  -- Serialize a Hello to MessagePack bytes: [name, node_id, incarnation,
+  -- nonce, role] plus [addr] when one is set (so a hello without an address
+  -- is byte-identical to the pre-service shape).
   fn encode_hello(h : Hello) : List(Int) do
+    let tail = if String.is_empty(h.addr) do Nil else Cons(Msgpack.str(h.addr), Nil) end
     Msgpack.encode(Msgpack.array(
       Cons(Msgpack.str(h.identity.name),
       Cons(Msgpack.str(h.identity.node_id),
       Cons(Msgpack.int(h.identity.incarnation),
       Cons(Msgpack.str(h.nonce),
-      Cons(Msgpack.str(h.role), Nil)))))))
+      Cons(Msgpack.str(h.role), tail)))))))
   end
 
   fn decode_hello(bytes : List(Int)) : Result(Hello, String) do
@@ -46,15 +58,23 @@ mod Handshake do
                         Cons(Msgpack.Str(nid),
                         Cons(Msgpack.Int(inc),
                         Cons(Msgpack.Str(nonce),
+                        Cons(Msgpack.Str(role),
+                        Cons(Msgpack.Str(addr), Nil))))))) ->
+            Ok({ identity: { name: name, node_id: nid, incarnation: inc },
+                 nonce: nonce, role: role, addr: addr })
+          Msgpack.Array(Cons(Msgpack.Str(name),
+                        Cons(Msgpack.Str(nid),
+                        Cons(Msgpack.Int(inc),
+                        Cons(Msgpack.Str(nonce),
                         Cons(Msgpack.Str(role), Nil)))))) ->
             Ok({ identity: { name: name, node_id: nid, incarnation: inc },
-                 nonce: nonce, role: role })
+                 nonce: nonce, role: role, addr: "" })
           Msgpack.Array(Cons(Msgpack.Str(name),
                         Cons(Msgpack.Str(nid),
                         Cons(Msgpack.Int(inc),
                         Cons(Msgpack.Str(nonce), Nil))))) ->
             Ok({ identity: { name: name, node_id: nid, incarnation: inc },
-                 nonce: nonce, role: role_control() })
+                 nonce: nonce, role: role_control(), addr: "" })
           _ -> Err("Handshake: malformed hello")
         end
     end

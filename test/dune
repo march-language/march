@@ -2732,6 +2732,65 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/nested_record_field_capture.expected native_nested_record_field_capture.out)))
 
+;; stdlib/cluster_node.march must typecheck CLEAN when checked as the entry.
+;; A diagnostic inside a stdlib module is never printed when a program merely
+;; loads it (bin/main.ml filters stdlib spans), and one such hidden error --
+;; an unqualified `monitor(w, pid)` resolved to the module's own 3-argument
+;; `monitor` -- compiled to a call of the wrong function (SIGSEGV). Empty
+;; output, errors AND warnings, is the contract.
+(rule
+ (targets cluster_node_check.out)
+ (deps (file %{exe:../bin/main.exe}) (source_tree ../stdlib))
+ (action
+  (with-outputs-to cluster_node_check.out
+   (run %{exe:../bin/main.exe} --check ../stdlib/cluster_node.march))))
+
+(rule
+ (alias runtest)
+ (action (diff empty.expected cluster_node_check.out)))
+
+;; TRMC's reuse_hole on a SHARED scrutinee moved the cell's fields out with
+;; no dup (the case arm's rb_shared path recognised only EReuse): the next
+;; iteration reused a cell another holder still had. Pre-fix: RC underflow;
+;; --no-trmc was fine. Expected output is the interpreter's.
+(rule
+ (targets native_trmc_shared_tail_reuse native_trmc_shared_tail_reuse.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/trmc_shared_tail_reuse.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_trmc_shared_tail_reuse
+        native/trmc_shared_tail_reuse.march)
+   (with-stdout-to native_trmc_shared_tail_reuse.out
+        (system "./native_trmc_shared_tail_reuse")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/trmc_shared_tail_reuse.expected native_trmc_shared_tail_reuse.out)))
+
+;; A three-deep field projection passed to a consuming callee got no dup
+;; (Perceus's borrowed-field lookahead stopped one nested let short): the
+;; second call read a freed Map. Pre-fix: "panic: non-exhaustive pattern
+;; match" after the first line. Uses the stdlib (Map), hence its source_tree.
+(rule
+ (targets native_perceus_three_deep_field_borrow native_perceus_three_deep_field_borrow.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/perceus_three_deep_field_borrow.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_perceus_three_deep_field_borrow
+        native/perceus_three_deep_field_borrow.march)
+   (with-stdout-to native_perceus_three_deep_field_borrow.out
+        (system "./native_perceus_three_deep_field_borrow")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/perceus_three_deep_field_borrow.expected native_perceus_three_deep_field_borrow.out)))
+
 ; A compiled `println` must be ONE write, not two.  Two assertions, because the
 ; runtime half and the structural half fail differently: `intact` counts how
 ; many of the 1200 concurrently-printed lines survived unsplit (the observable

@@ -1,0 +1,34 @@
+-- TRMC's hole allocation reuses the scrutinee's cell when it is unique and
+-- falls back to a fresh cell when it is shared. On the shared path the case
+-- arm must dup the fields it moves out of the cell (the rb_shared path
+-- EReuse gets); it did not, so the tail handed to the next iteration looked
+-- unique and was reused in place -- the loop MUTATED a list another holder
+-- still had. An append whose first argument shares its tail, walked twice,
+-- is the smallest trigger; Msgpack.encode of a Bin inside an Array with a
+-- reused payload is where it was found (the cluster node service's session
+-- frames). Pre-fix: RC underflow / non-exhaustive match; --no-trmc was fine.
+mod TrmcSharedTailReuse do
+  needs IO.Console
+
+  pfn lapp(xs, ys) do
+    match xs do
+      Nil -> ys
+      Cons(h, t) -> Cons(h, lapp(t, ys))
+    end
+  end
+
+  pfn sum(xs : List(Int)) : Int do List.fold_left(xs, 0, fn (a, b) -> a + b) end
+
+  fn main(_c : Cap(IO.Console)) do
+    let shared = List.map(List.range(0, 4), fn i -> i * 5)
+    let front = lapp(Cons(1, Cons(2, Nil)), shared)
+    let again = lapp(front, Cons(9, Nil))
+    let again2 = lapp(front, Cons(8, Nil))
+    println("appends " ++ int_to_string(sum(again)) ++ " " ++ int_to_string(sum(again2)))
+    println("shared intact " ++ int_to_string(sum(shared)) ++ " " ++ int_to_string(sum(front)))
+    let payload = Msgpack.encode(Msgpack.int(3 + List.length(List.range(0, 2))))
+    let enc = fn k -> Msgpack.encode(Msgpack.array(Cons(Msgpack.int(k), Cons(Msgpack.bin(payload), Nil))))
+    let lens = List.map(List.range(0, 4), fn k -> List.length(enc(k)))
+    println("encodes " ++ int_to_string(sum(lens)) ++ " payload " ++ int_to_string(List.length(payload)))
+  end
+end

@@ -89,4 +89,28 @@ mod TestNetKernel do
 
   end
 
+
+  describe "NetKernel REGISTRY_SYNC_RESP carries each entry's creation" do
+
+    test "creation round-trips" do
+      let r = GlobalRegistry.register_at(GlobalRegistry.empty(), "ap", "n1", 42, 7, VectorClock.increment(VectorClock.new(), "n1"))
+      let bytes = NetKernel.encode_registry_sync_resp("h", GlobalRegistry.all_entries(r))
+      match NetKernel.decode_registry_sync_resp(bytes) do
+        Ok((_, Cons((_, e), Nil))) -> assert (e.creation == 42)
+        _ -> assert false
+      end
+    end
+
+    test "a 5-element leaf (no creation) decodes with creation 0" do
+      let leaf = Msgpack.array(Cons(Msgpack.str("ap"), Cons(Msgpack.str("n1"), Cons(Msgpack.int(7),
+                   Cons(Msgpack.int(1), Cons(Msgpack.array(Nil), Nil))))))
+      let bytes = Msgpack.encode(Msgpack.array(Cons(Msgpack.int(6), Cons(Msgpack.str("h"), Cons(Msgpack.array(Cons(leaf, Nil)), Nil)))))
+      match NetKernel.decode_registry_sync_resp(bytes) do
+        Ok((_, Cons((_, e), Nil))) -> assert (e.creation == 0 && e.pid == 7)
+        _ -> assert false
+      end
+    end
+
+  end
+
 end

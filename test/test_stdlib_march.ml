@@ -176,6 +176,7 @@ let all_stdlib_decls =
     "peer_reader.march";
     "actor.march";
     "node_queue.march";
+    "cluster_node.march";
     "session_node.march";
     "node.march";
     "cluster_load.march";
@@ -592,6 +593,10 @@ let () =
     ("swim_driver", [
       Alcotest.test_case "SwimDriver module"
         `Quick (run_stdlib_test "test_swim_driver.march" "TestSwimDriver");
+    ]);
+    ("cluster_node", [
+      Alcotest.test_case "ClusterNode core"
+        `Quick (run_stdlib_test "test_cluster_node.march" "TestClusterNode");
     ]);
     ("global_registry", [
       Alcotest.test_case "GlobalRegistry module"

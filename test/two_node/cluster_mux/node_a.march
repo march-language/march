@@ -1,0 +1,100 @@
+-- Two-node harness, scenario "cluster_mux": node-a, the sending side. Looks
+-- node-b's receivers up by name, interleaves two streams of messages to them
+-- through the pair's ONE data queue (ClusterNode.send_msg, credit flow
+-- control, BlockSender), sends one message to a pid nobody routes (it must
+-- come back as DELIVERY_FAILED), monitors node-b's target and has it killed
+-- (the Down must come back, once). See node_b.march.
+mod ClusterMuxA do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+
+  pfn total() : Int do 2000 end
+
+  pfn wait_name(h : ClusterNode.ClusterHandle, name : String, left : Int) : GlobalPid.Pid do
+    match ClusterNode.lookup(h, name) do
+      Some(p) -> p
+      None ->
+        if left <= 0 do panic("node-a: " ++ name ++ " never registered") else
+          sleep_ms(50)
+          wait_name(h, name, left - 50)
+        end
+    end
+  end
+
+  pfn wait_flag(flags : Vault(Int), key : String, left : Int) : Bool do
+    if Vault.get(flags, key) != None do true
+    else if left <= 0 do false
+    else
+      sleep_ms(50)
+      wait_flag(flags, key, left - 50)
+    end end
+  end
+
+  pfn wait_file(path : String) : () do
+    if File.exists(path) do () else
+      sleep_ms(50)
+      wait_file(path)
+    end
+  end
+
+  pfn payload(k : Int) : List(Int) do Bytes.to_list(Bytes.from_string(int_to_string(k))) end
+
+  pfn stream(h : ClusterNode.ClusterHandle, sx : GlobalPid.Pid, sy : GlobalPid.Pid, k : Int, refused : Int) : Int do
+    if k > total() do refused else
+      let pol = NodeQueue.BlockSender(10000)
+      let a = ClusterNode.send_msg(h, sx, "Mux.N", payload(k), pol)
+      let b = ClusterNode.send_msg(h, sy, "Mux.N", payload(k), pol)
+      let bad = (if Result.is_ok(a) do 0 else 1 end) + (if Result.is_ok(b) do 0 else 1 end)
+      stream(h, sx, sy, k + 1, refused + bad)
+    end
+  end
+
+  pfn reason_text(r : DistLink.DownReason) : String do
+    match r do
+      DistLink.Normal -> "Normal"
+      DistLink.Killed -> "Killed"
+      DistLink.Crash(_) -> "Crash"
+      DistLink.NodeDown -> "NodeDown"
+    end
+  end
+
+  fn main(_c : Cap(IO)) do
+    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "mux-secret", 1)
+    match ClusterNode.start(cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        let flags = Vault.new("scenario_flags")
+        ClusterNode.on_delivery_failed(h, fn (_seq, reason) -> do
+          if String.contains(reason, "no route") do println("node-a: undeliverable message refused") else println("node-a: delivery failed: " ++ reason) end
+          Vault.set(flags, "failed", 1)
+        end)
+        println("node-a: up")
+        let sx = wait_name(h, "sx", 120000)
+        let sy = wait_name(h, "sy", 120000)
+        let target = wait_name(h, "target", 120000)
+        match ClusterNode.monitor_remote(h, target, fn r -> do
+          let n = Vault.incr(flags, "downs", 1)
+          if n == 1 do println("node-a: target down: " ++ reason_text(r)) else println("node-a: duplicate Down") end
+          Vault.set(flags, "down", 1)
+        end) do
+          Ok(_) -> ()
+          Err(e) -> println("node-a: monitor refused: " ++ e)
+        end
+        let refused = stream(h, sx, sy, 1, 0)
+        println("node-a: sent both streams, refused " ++ int_to_string(refused))
+        let _ = ClusterNode.send_msg(h, GlobalPid.make(sx.node_id, 999999, sx.creation), "Mux.N", payload(0), NodeQueue.DropNew)
+        let _ = ClusterNode.send_msg(h, target, "Mux.Die", Nil, NodeQueue.BlockSender(10000))
+        if wait_flag(flags, "failed", 120000) do () else println("node-a: no delivery failure came back") end
+        if wait_flag(flags, "down", 120000) do () else println("node-a: no Down came back") end
+        wait_file(Env.require("CLUSTER_STOP_FILE"))
+        ClusterNode.stop(h)
+        println("node-a: done")
+    end
+  end
+end

@@ -147,6 +147,15 @@ mod NodeQueue do
       let st = with_dead(state)
       admit_waiting(rebuild(st, Deque.empty(), st.evicted, st.waiting, st.waiters))
     end
+    -- `close`, and the writer also CLOSES the fd -- here, in mailbox order,
+    -- so no queued write can land after the close (and so on a fd number the
+    -- OS has reused). The cluster node service owns its sockets through the
+    -- writer this way (`close_fd`). Appended last: the first two handlers'
+    -- order is load-bearing.
+    on CloseFd() do
+      let st = close_fd_state(state)
+      admit_waiting(rebuild(st, Deque.empty(), st.evicted, st.waiting, st.waiters))
+    end
   end
 
   -- The handlers delegate to annotated helpers: a `{ state with .. }` built
@@ -182,6 +191,11 @@ mod NodeQueue do
 
   pfn with_dead(st : WriterState) : WriterState do
     mk2(st.fd, st.granted, st.sent, st.pending, st.evicted, st.budget, true, st.waiting, st.waiters)
+  end
+
+  pfn close_fd_state(st : WriterState) : WriterState do
+    if st.fd >= 0 do tcp_close(st.fd) else () end
+    with_dead(mk2(-1, st.granted, st.sent, st.pending, st.evicted, st.budget, true, st.waiting, st.waiters))
   end
 
   pfn keep_dead(st : WriterState, dead : Bool) : WriterState do
@@ -353,6 +367,7 @@ mod NodeQueue do
 
   -- ── sender API ──────────────────────────────────────────────────────────
   -- Start a writer for the data connection [fd] with a byte [budget].
+  -- (`close_fd(q)` later closes the fd through the writer.)
   fn start(fd : Int, budget : Int) do
     let w = spawn(Writer)
     let _ = send(w, Configure(fd, budget))
@@ -407,6 +422,16 @@ mod NodeQueue do
   -- queue for the peer; NodeSend.cast writes straight to a socket.
   fn cast(q, seq : Int, to : Pid, type_tag : String, payload : List(Int), policy : Policy) : Result((), EnqueueError) do
     enqueue(q, seq, Bytes.from_list(NetFrame.encode(NodeSend.encode_msg(seq, to, type_tag, payload))), policy)
+  end
+
+  -- `close`, and close the connection's fd through its writer (after every
+  -- write queued before this call).
+  fn close_fd(q) : () do
+    match q do
+      (w, _) ->
+        let _ = send(w, CloseFd())
+        ()
+    end
   end
 
   -- Bytes queued and not yet written (the monitoring probe).

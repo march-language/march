@@ -1,0 +1,56 @@
+-- Two-node harness, scenario "cluster_sessions": two sessions of the same
+-- protocol, "s1" and "s2", run CONCURRENTLY between the same two nodes. In
+-- cluster mode both ride the ONE connection pair of the node service, told
+-- apart by their endpoints' routes and the session id in every frame's tag;
+-- each must complete with its own values. node-a hosts role A of both.
+-- Design: specs/progress/2026-09-18-cluster-node-service.md (phase 4).
+mod ClusterSessionsA do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+
+  @[endpoints]
+  protocol Echo do
+    A -> B : Int
+    B -> A : Int
+  end
+
+  pfn role_a(s : Cap(Session.Live), st : Echo_A.S_send_Msg_A_B_1, n : Int, out : Vault(Int), key : String) : Echo_A.Yield do
+    Echo_A.recv_Msg_B_A_1(s, Echo_A.send_Msg_A_B_1(s, st, n), fn (m, st1) ->
+      Vault.set(out, key, m)
+      Echo_A.close(s, st1))
+  end
+
+  pfn session(c : Cap(IO), h : ClusterNode.ClusterHandle, sid : String, n : Int, out : Vault(Int)) : Int do
+    match Echo_Run.cluster_A(c, h, sid, fn (s, st) -> role_a(s, st, n, out, sid)) do
+      Ok(_) -> 1
+      Err(e) ->
+        Vault.set(out, sid ++ "_err", 1)
+        0
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "echo-secret", 1)
+    match ClusterNode.start(cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        println("node-a: up")
+        if ClusterNode.await_members(h, 1, 120000) do () else panic("node-a: never joined") end
+        let out = Vault.new("echo_out")
+        let t1 = task_spawn(fn _ -> session(c, h, "s1", 10, out))
+        let t2 = task_spawn(fn _ -> session(c, h, "s2", 20, out))
+        let ok = task_await_unwrap(t1) + task_await_unwrap(t2)
+        println("A: sessions completed " ++ int_to_string(ok))
+        println("A: s1 got " ++ int_to_string(Vault.get_or(out, "s1", -1)))
+        println("A: s2 got " ++ int_to_string(Vault.get_or(out, "s2", -1)))
+        println("A: links " ++ int_to_string(ClusterNode.link_count(h)))
+        ClusterNode.stop(h)
+    end
+  end
+end

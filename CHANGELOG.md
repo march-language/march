@@ -42,6 +42,10 @@ git log is authoritative for exact commits.
   is linear.
 
 ### Changed
+- Cluster membership records a node's creation, name and advertised address: a restarted
+  node outranks every verdict about its previous life, and `GlobalRegistry` bindings carry
+  the holder's creation (a binding from before a restart no longer names whatever process
+  now has that pid). `GlobalRegistry.unregister_own` removes a binding only if it is yours.
 - **A choreography session no longer ends for everyone when one role fails.** Following the
   Maty model (Fowler and Hu, OOPSLA 2026), a failed role is cancelled, and another role is
   cancelled only if it was waiting on it with nothing from it still queued; a role that no
@@ -52,6 +56,23 @@ git log is authoritative for exact commits.
   detected by a heartbeat (`MARCH_SESSION_HEARTBEAT_MS`, `MARCH_SESSION_TIMEOUT_MS`).
 
 ### Added
+- **`ClusterNode`, a running cluster node**: `ClusterNode.start(config)` joins from seed
+  addresses, keeps one authenticated connection pair per peer, runs SWIM failure detection
+  continuously, learns every peer's advertised address from gossip (so a node reaches peers
+  it was never configured with), and reports peers up / suspect / dead / rejoined to
+  `subscribe`rs. A connection that closes is a hint; a refused reconnect or SWIM's timeout
+  is a death; a dead peer that comes back is reconnected and rejoins. Names:
+  `ClusterNode.register / unregister / lookup / watch` keep a live cluster-wide registry;
+  a dead or restarted holder's binding is hidden, and after a partition heals one binding
+  wins everywhere and the loser's watchers hear `Lost`. A global name is not a lock.
+  Messages: `ClusterNode.route / send_msg / queue_for / monitor_remote / on_peer_closed`
+  carry actor messages, remote monitors and flow control over the same connection pair.
+  Choreographies: `<P>_Run.cluster_<Role>(io, node, session, body)` runs a role over the node,
+  finding its peers by name, sharing the node's connections, and using the node's failure
+  detector instead of a per-session heartbeat.
+- `Socket.connect_timeout(host, port, ms)` (builtin `tcp_connect_timeout`): a connect that
+  gives up after `ms` when the peer never answers, instead of waiting out the kernel's SYN
+  retries (a minute or more behind a dropped-packet partition).
 - **Element refinements flow through expressions, callbacks and polymorphic combinators.**
   A `List({Int | _ > 0})` (or `Option`, `Result`, user variant) contract is now met by
   `sum_pos(List.take(xs, 2))` without a `let`, by `match List.head_opt(xs) do Some(h) ->`,
@@ -78,6 +99,15 @@ git log is authoritative for exact commits.
   private constructors.
 
 ### Fixed
+- **A compiled list-building loop could corrupt a list it did not own.** A function of the
+  shape `Cons(h, f(t, ys))` (compiled to a loop, "tail recursion modulo cons") walking a list
+  whose cells were shared with another holder reused those cells in place. The smallest case
+  is appending onto the result of an earlier append twice; in the standard library,
+  `Msgpack.encode` of the same `Msgpack.bin` payload twice. It crashed or returned garbage;
+  `--no-trmc` was correct.
+- **A compiled program could double-free a field read three records deep** (`st.a.b.c`)
+  and passed to a function that consumes it: the second such read crashed or read freed
+  memory. Two levels deep was fine.
 - **A library module without a `main` is no longer charged `IO.Console` for a
   function name it shares with the stdlib.** `march --compile` on a three-line
   module declaring `fn add` failed with "uses `IO.Console` but does not declare

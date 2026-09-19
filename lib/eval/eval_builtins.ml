@@ -1848,6 +1848,41 @@ let base_env : env =
            | exn ->
              VCon ("Err", [VString (Printexc.to_string exn)]))
         | _ -> eval_error "tcp_connect(host, port)"))
+  ; ("tcp_connect_timeout", VBuiltin ("tcp_connect_timeout", function
+        | [VString host; VInt port; VInt timeout_ms] ->
+          (* Mirrors march_tcp_connect_timeout: a non-blocking connect whose
+             completion is awaited for at most timeout_ms (<= 0: no bound). *)
+          (try
+             let open Unix in
+             let addrs = getaddrinfo host (string_of_int port)
+               [AI_FAMILY PF_INET; AI_SOCKTYPE SOCK_STREAM] in
+             (match addrs with
+              | [] -> VCon ("Err", [VString ("cannot resolve " ^ host)])
+              | ai :: _ ->
+                let fd = socket ai.ai_family ai.ai_socktype ai.ai_protocol in
+                (try
+                   set_nonblock fd;
+                   (try connect fd ai.ai_addr
+                    with Unix_error ((EINPROGRESS | EINTR | EAGAIN), _, _) ->
+                      let t = if timeout_ms <= 0 then (-1.0)
+                              else float_of_int timeout_ms /. 1000.0 in
+                      (match select [] [fd] [] t with
+                       | (_, [], _) -> raise (Unix_error (ETIMEDOUT, "connect", ""))
+                       | _ ->
+                         (match getsockopt_error fd with
+                          | None -> ()
+                          | Some e -> raise (Unix_error (e, "connect", "")))));
+                   clear_nonblock fd;
+                   VCon ("Ok", [VInt (Obj.magic fd : int)])
+                 with Unix_error (err, _, _) ->
+                   close fd;
+                   VCon ("Err", [VString ("tcp_connect: " ^ error_message err)])))
+           with
+           | Unix.Unix_error (err, _, _) ->
+             VCon ("Err", [VString (Unix.error_message err)])
+           | exn ->
+             VCon ("Err", [VString (Printexc.to_string exn)]))
+        | _ -> eval_error "tcp_connect_timeout(host, port, timeout_ms)"))
   ; ("tcp_send_all", VBuiltin ("tcp_send_all", function
         | [VInt fd; VString data] ->
           let sock = (Obj.magic fd : Unix.file_descr) in

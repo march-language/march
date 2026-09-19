@@ -117,6 +117,7 @@ let builtin_cap_table : (string * string) list = [
   ("file_copy",             "IO.FileSystem");
   (* IO.NetConnect *)
   ("tcp_connect",           "IO.NetConnect");
+  ("tcp_connect_timeout",   "IO.NetConnect");
   ("tcp_send_all",          "IO.NetConnect");
   ("tcp_recv_all",          "IO.NetConnect");
   ("tcp_recv_exact",        "IO.NetConnect");
@@ -965,6 +966,9 @@ let builtin_bindings : (string * scheme) list =
        eval.ml and runtime/march_http.c) — Mono, matching tcp_listen/tcp_accept
        above rather than leaving the error type unconstrained. *)
     ("tcp_connect",             Mono (TArrow (t_string, TArrow (t_int, t_result t_int t_string))));
+    (* tcp_connect_timeout(host, port, timeout_ms): the handshake bounded by
+       timeout_ms (<= 0: unbounded); Err on a peer that never answers. *)
+    ("tcp_connect_timeout",     Mono (TArrow (t_string, TArrow (t_int, TArrow (t_int, t_result t_int t_string)))));
     ("tcp_send_all",            Mono (TArrow (t_int, TArrow (t_string, t_result t_unit t_string))));
     ("tcp_recv_all",            Mono (TArrow (t_int, TArrow (t_int, TArrow (t_int, t_result t_string t_string)))));
     ("tcp_close",               Mono (TArrow (t_int, t_unit)));

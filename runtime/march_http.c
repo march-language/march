@@ -896,7 +896,25 @@ void *march_tcp_recv_http_headers(int64_t fd_arg) {
 /* Connect to host:port as a TCP client.
  * Returns Ok(fd:i64) on success, Err(reason:string) on failure.
  * Tag convention: Ok=tag0, Err=tag1 (matches march_runtime.c mk_ok/mk_err). */
+static void *tcp_connect_impl(void *host_ptr, int64_t port, int64_t timeout_ms);
+
 void *march_tcp_connect(void *host_ptr, int64_t port) {
+    return tcp_connect_impl(host_ptr, port, 0);
+}
+
+/* tcp_connect_timeout(host, port, timeout_ms) -> Result(Int, String)
+ * As tcp_connect, but the TCP handshake is bounded: a peer behind a
+ * partition that drops SYNs (no RST, no answer) fails with
+ * "tcp_connect: Operation timed out" after timeout_ms instead of waiting out
+ * the kernel's SYN retries (~75 s macOS, ~127 s Linux).  timeout_ms <= 0 means
+ * no bound.  The cluster node service's redial loop needs this
+ * (specs/todos/2026-09-18-cluster-node-service.md).  The name lookup is not
+ * covered: getaddrinfo has no deadline. */
+void *march_tcp_connect_timeout(void *host_ptr, int64_t port, int64_t timeout_ms) {
+    return tcp_connect_impl(host_ptr, port, timeout_ms);
+}
+
+static void *tcp_connect_impl(void *host_ptr, int64_t port, int64_t timeout_ms) {
     if (!host_ptr) {
         void *s = march_string_lit("tcp_connect: null host", 22);
         void *r = march_alloc(24);
@@ -977,8 +995,10 @@ void *march_tcp_connect(void *host_ptr, int64_t port) {
          * poll confirms writability. */
         march_unblock_preempt(&saved);
         int so_err = 0;
+        int64_t deadline = timeout_ms > 0 ? march_now_ms() + timeout_ms : 0;
         for (;;) {
-            int w = march_sched_wait_fd(fd, 1, 0);
+            int w = march_sched_wait_fd(fd, 1, deadline);
+            if (w == MARCH_FDWAIT_TIMEOUT) { so_err = ETIMEDOUT; break; }
             if (w < 0) { so_err = errno ? errno : EIO; break; }
             struct pollfd pfd = { fd, POLLOUT, 0 };
             int prc;

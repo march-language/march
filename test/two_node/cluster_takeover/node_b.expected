@@ -1,0 +1,7 @@
+node-b: cfg visible: false
+node-b: done
+node-b: leader held by node-a
+node-b: my stale bindings: 0
+node-b: registered leader and cfg
+node-b: up (creation 1)
+node-b: up (creation 2)

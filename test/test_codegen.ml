@@ -13601,6 +13601,7 @@ declare i64    @march_unix_time_ms()
 declare i64  @march_peak_rss_bytes()
 declare i64  @march_live_allocs()
 declare ptr  @march_tcp_connect(ptr %host, i64 %port)
+declare ptr  @march_tcp_connect_timeout(ptr %host, i64 %port, i64 %timeout_ms)
 ; HTTP client builtins
 declare ptr  @march_http_serialize_request(ptr %method, ptr %host, ptr %path, ptr %query, ptr %headers, ptr %body)
 declare ptr  @march_http_parse_response(ptr %raw)

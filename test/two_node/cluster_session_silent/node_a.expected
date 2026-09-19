@@ -1,0 +1,3 @@
+node-a: up
+A: sends 1
+A: cancelled waiting on role 2: node node-b dead: suspect timeout

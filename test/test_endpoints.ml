@@ -140,7 +140,9 @@ let stream_shape =
            (* the role runner's typed front, one per role, and its address table *)
            ("Stream_Msg", "role_names");
            ("Stream_Run", "run_Prod"); ("Stream_Run", "run_Cons"); ("Stream_Run", "addrs_from_env");
-           ("Stream_Run", "host_Prod"); ("Stream_Run", "host_Cons") ])
+           ("Stream_Run", "host_Prod"); ("Stream_Run", "host_Cons");
+           (* the same roles over a running cluster node *)
+           ("Stream_Run", "cluster_Prod"); ("Stream_Run", "cluster_Cons") ])
 
 let relay_shape =
   Alcotest.test_case "Relay: three roles, each with exactly its own send/recv" `Quick

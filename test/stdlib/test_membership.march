@@ -100,4 +100,34 @@ mod TestMembership do
 
   end
 
+
+  describe "Membership origin fields (the node service)" do
+
+    test "a later creation outranks any verdict about the previous life" do
+      let dead_old = Membership.member("a", "node-a", "h:1", 1, Membership.Dead, 9)
+      let alive_new = Membership.member("a", "node-a", "h:2", 2, Membership.Alive, 1)
+      let ms1 = Membership.observe(Membership.observe(Membership.empty(), dead_old), alive_new)
+      let ms2 = Membership.observe(Membership.observe(Membership.empty(), alive_new), dead_old)
+      assert (status_of(ms1, "a") == Alive)
+      assert (status_of(ms2, "a") == Alive)
+      match Membership.get(ms2, "a") do
+        Some(m) -> assert (m.addr == "h:2" && m.creation == 2)
+        None -> assert false
+      end
+    end
+
+    test "a verdict carries the origin the view holds" do
+      let ms = Membership.observe(Membership.empty(), Membership.member("a", "node-a", "h:1", 3, Membership.Alive, 4))
+      let v = Membership.verdict(ms, "a", Membership.Suspect, 4)
+      assert (v.creation == 3 && v.addr == "h:1" && v.name == "node-a")
+      assert (status_of(Membership.observe(ms, v), "a") == Suspect)
+    end
+
+    test "an origin-less verdict does not outrank a known later creation" do
+      let ms = Membership.observe(Membership.empty(), Membership.member("a", "node-a", "h:1", 3, Membership.Alive, 1))
+      assert (status_of(Membership.observe(ms, Membership.dead("a", 50)), "a") == Alive)
+    end
+
+  end
+
 end

@@ -1,0 +1,52 @@
+-- Two-node harness, scenario "cluster_fan_late_crash": node-c hosts role C.
+-- B's 9 arrives first and is parked; node-b then dies. C is waiting on A at
+-- that point, so nothing fails; when C reaches its receive from B, the 9 is
+-- still queued and is delivered: the protocol completes. See node_a.march.
+mod ClusterFanLateCrashC do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+
+  @[endpoints]
+  protocol Fan do
+    A -> C : Int
+    B -> C : Int
+    C -> A : Bool
+  end
+
+
+  pfn join() : ClusterNode.ClusterHandle do
+    let cfg = ClusterNode.config("node-c", Env.require_int("MARCH_PORT_C"), "", Cons("127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A")), Nil), "fan-secret", 1)
+    match ClusterNode.start(cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        if ClusterNode.await_members(h, 2, 120000) do h else panic("node-c: never joined") end
+    end
+  end
+
+  pfn role_c(s : Cap(Session.Live), st : Fan_C.S_recv_Msg_A_C_1) : Fan_C.Yield do
+    Fan_C.recv_Msg_A_C_1(s, st, fn (a, st1) ->
+      println("C: got " ++ int_to_string(a) ++ " from A")
+      Fan_C.recv_Msg_B_C_1(s, st1, fn (b, st2) ->
+        println("C: got " ++ int_to_string(b) ++ " from B")
+        Fan_C.close(s, Fan_C.send_Msg_C_A_1(s, st2, a + b == 16))))
+  end
+
+  fn main(c : Cap(IO)) do
+    let h = join()
+    println("node-c: up")
+    match Fan_Run.cluster_C(c, h, "fan-1", fn (s, st) -> role_c(s, st)) do
+      Ok(_) -> println("C: closed")
+      Err(SessionNode.Cancelled(role, cause)) ->
+        println("C: cancelled waiting on role " ++ int_to_string(role) ++ ": " ++ cause)
+      Err(e) -> println("C: " ++ SessionNode.run_error_message(e))
+    end
+    ClusterNode.stop(h)
+  end
+end

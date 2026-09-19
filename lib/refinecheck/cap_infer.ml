@@ -59,6 +59,7 @@ let cap_table : (string * string) list = [
   ("file_copy",             "IO.FileSystem");
   (* IO.NetConnect *)
   ("tcp_connect",           "IO.NetConnect");
+  ("tcp_connect_timeout",   "IO.NetConnect");
   ("tcp_send_all",          "IO.NetConnect");
   ("tcp_recv_all",          "IO.NetConnect");
   ("tcp_recv_exact",        "IO.NetConnect");

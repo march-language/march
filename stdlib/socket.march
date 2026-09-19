@@ -9,6 +9,7 @@
 --
 -- Public API:
 --   Socket.connect(host, port)             : Result(Int, SocketError)
+--   Socket.connect_timeout(host, port, ms) : Result(Int, SocketError)
 --   Socket.write(fd, data)                 : Result((), SocketError)
 --   Socket.recv(fd, max_bytes)             : Result(String, SocketError)
 --   Socket.recv_timeout(fd, max, ms)       : Result(String, SocketError)
@@ -41,6 +42,19 @@ mod Socket do
   doc "Open a TCP connection to host:port. Returns Ok(fd) or Err."
   fn connect(host : String, port : Int) : Result(Int, SocketError) do
     match tcp_connect(host, port) do
+    Ok(fd)   -> Ok(fd)
+    Err(msg) -> Err(ConnectionFailed(msg))
+    end
+  end
+
+  doc """
+  Open a TCP connection to host:port, giving up after timeout_ms if the
+  peer never answers (a SYN dropped by a partition gets no RST, so a plain
+  `connect` waits out the kernel's SYN retries, a minute or two).
+  timeout_ms <= 0 means no bound. A refused connection still fails at once.
+  """
+  fn connect_timeout(host : String, port : Int, timeout_ms : Int) : Result(Int, SocketError) do
+    match tcp_connect_timeout(host, port, timeout_ms) do
     Ok(fd)   -> Ok(fd)
     Err(msg) -> Err(ConnectionFailed(msg))
     end

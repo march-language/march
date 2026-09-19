@@ -127,6 +127,29 @@ mod SessionNode do
     end
   end
 
+  -- ── cluster mode ─────────────────────────────────────────────────────────
+  -- A party run by `run_cluster` has no connections of its own: it rides the
+  -- cluster node's (ClusterNode), shared by every session between the two
+  -- nodes. Its frames carry the session id in the type tag
+  -- ("SessionNode.Deliver#<sid>"), so a frame for another session -- an
+  -- old one whose endpoint pid was reused -- is refused, not delivered.
+
+  pfn is_cluster(p : Party) : Bool do Vault.get(p.why, "sid") != None end
+
+  pfn wire_tag(p : Party, kind : String) : String do
+    match Vault.get(p.why, "sid") do
+      Some(sid) -> kind ++ "#" ++ sid
+      None -> kind
+    end
+  end
+
+  -- Bye names its sender in cluster mode (one route serves every peer, so
+  -- the connection no longer says who it is from); empty otherwise, as
+  -- before.
+  pfn bye_payload(p : Party) : List(Int) do
+    if is_cluster(p) do Msgpack.encode(Msgpack.int(p.my_role)) else Nil end
+  end
+
   pfn next_seq(meta : Vault(Int)) : Int do
     Vault.incr(meta, "seq", 1)
   end
@@ -196,7 +219,7 @@ mod SessionNode do
   -- `drop_link` lets the queue go.
   pfn send_frame(p : Party, l : Link, type_tag : String, payload : List(Int)) : () do
     -- `Unbounded` never refuses; a dead connection's reader reports it.
-    let _ = NodeQueue.cast(l.q, next_seq(p.meta), l.peer, type_tag, payload, NodeQueue.Unbounded)
+    let _ = NodeQueue.cast(l.q, next_seq(p.meta), l.peer, wire_tag(p, type_tag), payload, NodeQueue.Unbounded)
     ()
   end
 
@@ -813,7 +836,7 @@ mod SessionNode do
         Vault.set(meta, "closed", 1)
         Vault.set(meta, "done", 1)
         -- Every peer's reader has to learn this endpoint is done.
-        let _ = List.map(links, fn l -> send_frame(party, l, "SessionNode.Bye", Nil))
+        let _ = List.map(links, fn l -> send_frame(party, l, "SessionNode.Bye", bye_payload(party)))
         ()
       end,
       fail: fn (ep, why) -> protocol_failed(party, ep, why),
@@ -967,15 +990,15 @@ mod SessionNode do
     end
   end
 
-  doc "Tear every connection down: close data, Bye on control, await the control reader, close control."
+  doc "Tear every connection down: close data, Bye on control, await the control reader, close control. (A cluster-mode party owns no connection: nothing to do.)"
   fn finish(p : Party) : Unit do
-    let _ = List.map(p.links, fn l -> do
+    let _ = if is_cluster(p) do Nil else List.map(p.links, fn l -> do
       tcp_close(l.data_fd)
       let _ = NodeSend.cast(l.control_fd, 0, GlobalPid.make("peer", 0, 0), "SessionNode.Bye", Nil)
       let _ = task_await(l.control)
       tcp_close(l.control_fd)
       0
-    end)
+    end) end
     ()
   end
 
@@ -1321,6 +1344,241 @@ mod SessionNode do
         else if kind == kind_host_gone() do Err(HostGone(Vault.get_or(p.meta, "ep", my_role)))
         else if kind == kind_left() do Err(Left(cause))
         else Err(Cancelled(role, cause)) end end end
+    end
+  end
+
+  -- ── the cluster runner ──────────────────────────────────────────────────
+  -- `run`, over a running cluster node instead of per-session connections
+  -- (specs/progress/2026-09-18-cluster-node-service.md, phase 4). Each role
+  -- registers its endpoint under "session:<sid>/<role>" and finds its peers'
+  -- by name; frames ride the node's data queues and reach the endpoint
+  -- through a route on its pid; a peer whose node's data connection ends --
+  -- SWIM declared the node dead, or the connection was lost -- is gone, told
+  -- from that connection's reader after its last delivery (the drain rule's
+  -- ordering). No heartbeat: SWIM is the failure detector. Every role must
+  -- be on a different node (a node has no connection to itself).
+
+  pfn role_name(session : String, role : Int) : String do
+    "session:" ++ session ++ "/" ++ int_to_string(role)
+  end
+
+  pfn await_party(slot : Vault(Party), tries : Int) : Option(Party) do
+    match Vault.get(slot, "p") do
+      Some(p) -> Some(p)
+      None ->
+        if tries <= 0 do None else
+          sleep_ms(50)
+          await_party(slot, tries - 1)
+        end
+    end
+  end
+
+  -- Report [role] ended to the endpoint actor, once.
+  pfn link_ended(p : Party, role : Int, why : String) : () do
+    let key = "link_done" ++ rkey(role)
+    if Vault.get(p.meta, key) != None do () else
+      Vault.set(p.meta, key, 1)
+      let _ = send(p.ep, LinkEnded(role, why))
+      ()
+    end
+  end
+
+  pfn cluster_kind(p : Party, kind : String, payload : List(Int)) : Result((), String) do
+    if kind == "SessionNode.Deliver" do
+      match decode_deliver(payload) do
+        Err(e) -> Err(e)
+        Ok((to, from, msg)) ->
+          let _ = send(p.ep, Deliver(p, to, from, msg))
+          Ok(())
+      end
+    else if kind == "SessionNode.Bye" do
+      match Msgpack.decode(payload) do
+        Ok(Msgpack.Int(role)) ->
+          let _ = send(p.ep, PeerGone(p, role, "closed"))
+          link_ended(p, role, "")
+          Ok(())
+        _ -> Err("session_node: bad Bye payload")
+      end
+    else if kind == "SessionNode.Cancel" do
+      match decode_cancel(payload) do
+        Err(e) -> Err(e)
+        Ok((role, cause)) ->
+          let _ = send(p.ep, PeerGone(p, role, cause))
+          link_ended(p, role, "")
+          Ok(())
+      end
+    else if kind == "SessionNode.Ping" do
+      Ok(())
+    else
+      Err("session_node: unexpected type " ++ kind)
+    end end end end
+  end
+
+  -- A frame for this party, from the node's data reader. The party comes
+  -- from [slot], set once every peer is found; a peer can send only after
+  -- finding US, which is moments before, so the reader waits for it (10 s)
+  -- rather than refuse the frame.
+  pfn cluster_frame(slot : Vault(Party), sid : String, d : NodeSend.Delivery) : Result((), String) do
+    match String.split_first(d.type_tag, "#") do
+      None -> Err("session_node: untagged frame " ++ d.type_tag ++ " for cluster session " ++ sid)
+      Some((kind, fsid)) ->
+        if fsid != sid do
+          Err("session_node: frame for session " ++ fsid ++ ", this endpoint is in session " ++ sid)
+        else
+          match await_party(slot, 200) do
+            None -> Err("session_node: session " ++ sid ++ " is not ready")
+            Some(p) -> cluster_kind(p, kind, d.payload)
+          end
+        end
+    end
+  end
+
+  -- The node of every role on [node_id] ended its data connection: each is
+  -- gone for [why] ("node <name> dead: <cause>", "connection lost", ...).
+  pfn peer_node_closed(p : Party, node_id : String, why : String) : () do
+    let _ = List.map(p.links, fn l ->
+      if l.peer.node_id == node_id do
+        let _ = send(p.ep, PeerGone(p, l.role, why))
+        link_ended(p, l.role, why)
+      else () end)
+    ()
+  end
+
+  pfn slot_peer_closed(slot : Vault(Party), node_id : String, why : String) : () do
+    match Vault.get(slot, "p") do
+      Some(p) -> peer_node_closed(p, node_id, why)
+      None -> ()
+    end
+  end
+
+  pfn recheck_links(node : ClusterNode.ClusterHandle, p : Party) : () do
+    let _ = List.map(p.links, fn l -> do
+      let current = match ClusterNode.queue_for(node, l.peer.node_id) do
+        Some((w, _)) -> match l.q do (lw, _) -> pid_to_int(w) == pid_to_int(lw) end
+        None -> false
+      end
+      if current do () else peer_node_closed(p, l.peer.node_id, "connection lost before the session formed") end
+    end)
+    ()
+  end
+
+  -- Each peer role's endpoint, by name; waits up to [left] ms for all of them.
+  pfn find_peers(node : ClusterNode.ClusterHandle, session : String, peers : List(Int), left : Int)
+      : Result(List((Int, GlobalPid.Pid)), Int) do
+    let found = List.map(peers, fn r -> (r, ClusterNode.lookup(node, role_name(session, r))))
+    match List.find(found, fn rp -> match rp do (_r, o) -> o == None end) do
+      None ->
+        Ok(List.filter_map(found, fn rp ->
+          match rp do
+            (r, Some(g)) -> Some((r, g))
+            (_, None) -> None
+          end))
+      Some((missing, _)) ->
+        if left <= 0 do Err(missing) else
+          sleep_ms(50)
+          find_peers(node, session, peers, left - 50)
+        end
+    end
+  end
+
+  -- A Link per peer over the node's data queue to that peer's node; waits
+  -- up to [left] ms for each node to be linked.
+  pfn cluster_links(node : ClusterNode.ClusterHandle, found : List((Int, GlobalPid.Pid)), left : Int)
+      : Result(List(Link), Int) do
+    let qs = List.map(found, fn rg ->
+      match rg do (r, g) -> (r, g, ClusterNode.queue_for(node, g.node_id)) end)
+    match List.find(qs, fn t -> match t do (_r, _g, q) -> q == None end) do
+      None ->
+        Ok(List.filter_map(qs, fn t ->
+          match t do
+            (r, g, Some(q)) -> Some({ role: r, data_fd: -1, control_fd: -1, peer: g, q: q,
+                                      control: task_spawn(fn _ -> 0) })
+            _ -> None
+          end))
+      Some((missing, _, _)) ->
+        if left <= 0 do Err(missing) else
+          sleep_ms(50)
+          cluster_links(node, found, left - 50)
+        end
+    end
+  end
+
+  pfn serve_cluster_outcome(p : Party) : () do
+    let _ = send(p.ep, Expect(List.length(p.links)))
+    let _ = await_outcome(p)
+    if ep_done(p) do () else
+      match Vault.get(p.meta, "ep") do
+        Some(ep) -> cancel_endpoint(p, ep, 0, "every peer is gone", "every peer is gone", kind_cancelled())
+        None -> Vault.set(p.meta, "done", 1)
+      end
+    end
+  end
+
+  pfn run_result(p : Party, my_role : Int) : Result((), RunError) do
+    let role = Vault.get_or(p.meta, "cancel_role", 0)
+    let cause = Vault.get_or(p.why, "cancel_cause", "")
+    match Vault.get(p.meta, "kind") do
+      None -> Ok(())
+      Some(kind) ->
+        if kind == kind_protocol() do Err(Protocol(role, cause))
+        else if kind == kind_host_gone() do Err(HostGone(Vault.get_or(p.meta, "ep", my_role)))
+        else if kind == kind_left() do Err(Left(cause))
+        else Err(Cancelled(role, cause)) end end end
+    end
+  end
+
+  doc """
+  `run`, over the running cluster node [node] (ClusterNode.start) instead of
+  connections of its own: role [my_role] of session [session] (any string
+  the roles agree on -- a fresh one per session). Each role registers its
+  endpoint under the session's name and finds its peers' by name (waiting up
+  to 30 s), then [body] drives it exactly as for `run`. A peer is gone when
+  it closes or is cancelled, or when its node's data connection ends --
+  SWIM declared the node dead ("node <name> dead: <cause>") or the
+  connection was lost. Every role must be on a different node. The generated
+  `<P>_Run.cluster_<Role>` supplies the role and its peers.
+  """
+  fn run_cluster(io : Cap(IO), node : ClusterNode.ClusterHandle, my_role : Int, peers : List(Int), session : String,
+                 on_close : Int -> Unit, body : Cap(Session.Live) -> Unit) : Result((), RunError) do
+    let p0 = party(my_role, node.node_id, on_close)
+    Vault.set(p0.why, "sid", session)
+    let slot = Vault.new("session_node_slot_" ++ session ++ "." ++ int_to_string(pid_to_int(p0.ep)))
+    let route_key = ClusterNode.route(node, pid_to_int(p0.ep), fn d -> cluster_frame(slot, session, d))
+    let me = role_name(session, my_role)
+    match ClusterNode.register(node, me, p0.ep) do
+      Err(_) ->
+        ClusterNode.unroute(node, route_key)
+        Err(Listen(my_role, "session " ++ session ++ ": role " ++ int_to_string(my_role) ++ " is already registered"))
+      Ok(_) ->
+        match find_peers(node, session, peers, 30000) do
+          Err(missing) ->
+            ClusterNode.unroute(node, route_key)
+            ClusterNode.unregister(node, me)
+            Err(Connect(missing, "session " ++ session ++ ": no endpoint registered for role " ++ int_to_string(missing)))
+          Ok(found) ->
+            match cluster_links(node, found, 30000) do
+              Err(missing) ->
+                ClusterNode.unroute(node, route_key)
+                ClusterNode.unregister(node, me)
+                Err(Connect(missing, "session " ++ session ++ ": no link to role " ++ int_to_string(missing) ++ "'s node"))
+              Ok(links) ->
+                let p = List.fold_left(links, p0, fn (acc, l) -> with_link(acc, l))
+                Vault.set(slot, "p", p)
+                let closer = ClusterNode.on_peer_closed(node, fn (nid, why) -> slot_peer_closed(slot, nid, why))
+                -- A peer's node whose connection ended between finding it and
+                -- installing the handler above was told to nobody: check now
+                -- that every link is still the node's current one. (Reported
+                -- twice is harmless: the first PeerGone wins, LinkEnded is once.)
+                recheck_links(node, p)
+                let s = Session.attach(io, ops(p))
+                body(s)
+                serve_cluster_outcome(p)
+                ClusterNode.off_peer_closed(node, closer)
+                ClusterNode.unroute(node, route_key)
+                ClusterNode.unregister(node, me)
+                run_result(p, my_role)
+            end
+        end
     end
   end
 end

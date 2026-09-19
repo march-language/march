@@ -201,6 +201,34 @@ You can also build the list yourself instead of reading the environment. It is a
 `List(SessionNode.Addr)`, one `{ role, host, port }` per role.
 `SessionNode.parse_addr(role, "host:port")` parses one entry and returns a `Result`.
 
+## Running over a cluster node
+
+If your nodes already run a [`ClusterNode`]({{ site.baseurl }}/docs/clustering/#a-running-node-clusternode),
+a role can use it instead of opening connections of its own. The generated
+`<P>_Run.cluster_<Role>(io, node, session, body)` takes the running node and a session id,
+which is any string the roles agree on, fresh for each session:
+
+```march
+match Fan_Run.cluster_C(c, node, "fan-" ++ int_to_string(round), fn (s, st) -> role_c(s, st)) do
+  Ok(_) -> println("C: closed")
+  Err(SessionNode.Cancelled(role, cause)) -> println("C: cancelled: " ++ cause)
+  Err(e) -> println(SessionNode.run_error_message(e))
+end
+```
+
+- **No addresses.** Each role registers its endpoint under the session's name and finds the
+  others by name (waiting up to 30 seconds), so there are no `<P>_<ROLE>_ADDR` variables and
+  no listen/connect rule.
+- **Shared connections.** Frames ride the node's one connection pair to each peer node,
+  alongside every other session between those nodes. Every frame carries the session id, so
+  a frame from another session is refused rather than delivered.
+- **The node is the failure detector.** There is no session heartbeat. A peer is gone when it
+  closes or is cancelled, or when its node's connection ends: the node declared it dead
+  (`node node-b dead: suspect timeout`, `... connection refused`), or the connection was
+  lost. The drain rule still holds: the node reports the death only after the last message
+  that arrived from that peer.
+- Every role must run on a different node.
+
 ## Messages from different peers
 
 Each connection delivers its messages in order, but two connections are not ordered against
@@ -380,6 +408,10 @@ page shows how. The same role functions then run unchanged on the network.
   after a role fails (to send a partial result, say) cannot be written yet.
 - Every role that exchanges messages with another needs a direct connection to it. There is
   no relaying.
+- Over a cluster node (`cluster_<Role>`), every role must be on a different node, and a
+  connection lost for any reason cancels the sessions using it, even if the peer node
+  reconnects at once. Frames in flight on the old connection may be gone, so the session
+  cannot safely continue.
 - Messages are encoded as JSON, so every payload type needs a JSON codec. Built-in types
   have one; for your own types, add `derive Json for YourType`.
 
