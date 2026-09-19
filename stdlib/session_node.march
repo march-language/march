@@ -1312,6 +1312,17 @@ mod SessionNode do
     end
   end
 
+  pfn recheck_links(node : ClusterNode.ClusterHandle, p : Party) : () do
+    let _ = List.map(p.links, fn l -> do
+      let current = match ClusterNode.queue_for(node, l.peer.node_id) do
+        Some((w, _)) -> match l.q do (lw, _) -> pid_to_int(w) == pid_to_int(lw) end
+        None -> false
+      end
+      if current do () else peer_node_closed(p, l.peer.node_id, "connection lost before the session formed") end
+    end)
+    ()
+  end
+
   -- Each peer role's endpoint, by name; waits up to [left] ms for all of them.
   pfn find_peers(node : ClusterNode.ClusterHandle, session : String, peers : List(Int), left : Int)
       : Result(List((Int, GlobalPid.Pid)), Int) do
@@ -1415,6 +1426,11 @@ mod SessionNode do
                 let p = List.fold_left(links, p0, fn (acc, l) -> with_link(acc, l))
                 Vault.set(slot, "p", p)
                 let closer = ClusterNode.on_peer_closed(node, fn (nid, why) -> slot_peer_closed(slot, nid, why))
+                -- A peer's node whose connection ended between finding it and
+                -- installing the handler above was told to nobody: check now
+                -- that every link is still the node's current one. (Reported
+                -- twice is harmless: the first PeerGone wins, LinkEnded is once.)
+                recheck_links(node, p)
                 let s = Session.attach(io, ops(p))
                 body(s)
                 serve_cluster_outcome(p)

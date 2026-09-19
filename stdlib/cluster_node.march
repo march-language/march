@@ -144,8 +144,9 @@ mod ClusterNode do
   -- ── the pure core ───────────────────────────────────────────────────────
 
   -- One peer's connection pair. `dialer` is the node_id that opened it; `cw`
-  -- is its control writer's pid (as an Int: opaque to the core).
-  type CnLink = { node_id : String, gen : Int, cfd : Int, dfd : Int, dialer : String, cw : Int }
+  -- is its control writer's pid (as an Int: opaque to the core); `creation`
+  -- the peer's creation, from its hello.
+  type CnLink = { node_id : String, gen : Int, cfd : Int, dfd : Int, dialer : String, cw : Int, creation : Int }
 
   -- A half-assembled inbound pair: the control and data connections of one
   -- peer arrive as two accepts, in either order (each is handshaked in its
@@ -164,6 +165,7 @@ mod ClusterNode do
     pending : List(SwimDriver.Event),    -- folded into SWIM at the next tick
     relays : Map(String, List(String)),  -- ping-req target -> requesters awaiting its ack
     refused : List(String),              -- node_ids refused since the last tick
+    seed_ids : Map(String, String),      -- dialled seed "host:port" -> the node it reached
     stopped : Bool,
     reg : GlobalRegistry.Names,          -- the registry replica
     regs : Map(String, (Int, Int)),      -- names registered HERE: name -> (pid, watcher pid)
@@ -183,6 +185,7 @@ mod ClusterNode do
     | Install(CnLink)            -- a new link is current: start its readers
     | Drop(CnLink, String)       -- shut this link's sockets and stop its writers; the
                                  -- string is why, for the routes told of the close
+    | Discard(CnLink)            -- a pair never installed (a rejected duplicate): close it
     | Emit(NodeEvent)            -- tell every subscriber
     | Named(String, NameEvent)   -- tell every watcher of this name
     | Unwatch(Int)               -- stop the Down-watcher with this pid
@@ -193,7 +196,7 @@ mod ClusterNode do
     let ms = Membership.observe(Membership.empty(), self_m)
     { cfg: cfg, me: me, driver: SwimDriver.make(me, 1, ms, cfg.swim, cfg.period_ms, seed),
       links: Map.empty(), halves: Map.empty(), gen: 0, dialing: Map.empty(), backoff: Map.empty(),
-      pending: Nil, relays: Map.empty(), refused: Nil, stopped: false,
+      pending: Nil, relays: Map.empty(), refused: Nil, seed_ids: Map.empty(), stopped: false,
       reg: GlobalRegistry.empty(), regs: Map.empty(), vis: Map.empty() }
   end
 
@@ -292,7 +295,12 @@ mod ClusterNode do
       if m.node_id == st.me || String.is_empty(m.addr) || is_linked(st, m.node_id) do None else Some(m.addr) end)
     let linked_addrs = List.filter_map(core_members(st), fn m ->
       if is_linked(st, m.node_id) do Some(m.addr) else None end)
-    let from_seeds = List.filter(st.cfg.seeds, fn a -> not(List.member(linked_addrs, a)))
+    -- A seed is satisfied when a linked member advertises it, or when a dial
+    -- of it reached a node that is linked or is us: a seed can be spelled
+    -- differently from the address its node advertises (a hostname, another
+    -- interface), and redialling it would replace the live pair every time.
+    let from_seeds = List.filter(st.cfg.seeds, fn a ->
+      not(List.member(linked_addrs, a)) && not(seed_reached(st, a)))
     let all = List.dedup(List.append(from_members, from_seeds))
     List.filter(all, fn a ->
       a != st.cfg.advertise &&
@@ -301,6 +309,13 @@ mod ClusterNode do
          None -> true
          Some((at, _)) -> at <= now
        end))
+  end
+
+  pfn seed_reached(st : CnState, a : String) : Bool do
+    match Map.get(st.seed_ids, a, Map.str_cmp) do
+      Some(id) -> id == st.me || is_linked(st, id)
+      None -> false
+    end
   end
 
   -- Forget attempts past their deadline (a dial task that is still parked
@@ -368,13 +383,17 @@ mod ClusterNode do
 
   -- The pair two nodes both keep when each dialled the other: the one
   -- dialled by the lower node_id.
+  -- A pair from a newer creation of the peer always wins: the old one is to
+  -- a process that is gone, even if no RST has told us yet.
   pfn keeps_new(st : CnState, old : CnLink, new_l : CnLink) : Bool do
-    if old.dialer == new_l.dialer do
+    if new_l.creation != old.creation do
+      new_l.creation > old.creation
+    else if old.dialer == new_l.dialer do
       true
     else
       let lower = if st.me < new_l.node_id do st.me else new_l.node_id end
       new_l.dialer == lower
-    end
+    end end
   end
 
   doc """
@@ -387,7 +406,7 @@ mod ClusterNode do
   fn core_linked(st : CnState, id : String, name : String, addr : String, creation : Int,
                  cfd : Int, dfd : Int, dialer : String, cw : Int) : (CnState, List(CnEffect)) do
     let gen = st.gen + 1
-    let l = { node_id: id, gen: gen, cfd: cfd, dfd: dfd, dialer: dialer, cw: cw }
+    let l = { node_id: id, gen: gen, cfd: cfd, dfd: dfd, dialer: dialer, cw: cw, creation: creation }
     let st1 = { st with gen: gen }
     let (st2, drops) = match Map.get(st1.links, id, Map.str_cmp) do
       None -> (st1, Nil)
@@ -395,11 +414,11 @@ mod ClusterNode do
         if keeps_new(st1, old, l) do
           (st1, Cons(Drop(old, "replaced"), Nil))
         else
-          (st1, Cons(Drop(l, "replaced"), Nil))
+          (st1, Cons(Discard(l), Nil))
         end
     end
     let kept_new = match drops do
-      Cons(Drop(d, _), Nil) -> d.gen != gen
+      Cons(Discard(_), Nil) -> false
       _ -> true
     end
     if kept_new do
@@ -415,6 +434,26 @@ mod ClusterNode do
     else
       (st2, drops)
     end
+  end
+
+  doc """
+  A pair WE dialled to [dialed] ("host:port" as dialled -- a seed may be
+  spelled differently from the peer's advertised [peer_addr]) is up: record
+  which node that address reaches, clear its dial state, and link it.
+  """
+  fn core_dialed(st : CnState, dialed : String, id : String, name : String, peer_addr : String,
+                 creation : Int, cfd : Int, dfd : Int, cw : Int) : (CnState, List(CnEffect)) do
+    let a = if String.is_empty(peer_addr) do dialed else peer_addr end
+    let st1 = { st with seed_ids: Map.insert(st.seed_ids, dialed, id, Map.str_cmp),
+                        dialing: Map.remove(st.dialing, dialed, Map.str_cmp),
+                        backoff: Map.remove(st.backoff, dialed, Map.str_cmp) }
+    core_linked(st1, id, name, a, creation, cfd, dfd, st1.me, cw)
+  end
+
+  doc "A dial of [addr] reached this node itself (a seed list naming us): never dial it again."
+  fn core_seed_self(st : CnState, addr : String) : CnState do
+    { st with seed_ids: Map.insert(st.seed_ids, addr, st.me, Map.str_cmp),
+              dialing: Map.remove(st.dialing, addr, Map.str_cmp) }
   end
 
   doc """
@@ -681,29 +720,37 @@ mod ClusterNode do
 
   doc """
   Register [name] -> local pid [pid] (its Down-watcher is [watcher]). Refused
-  (no effect but the watcher's retirement) if another holder's binding is
-  visible here: the API checked the mirror first, so that is a race lost.
+  if another holder's binding is visible here -- the API checked the mirror
+  first, so that is a race lost: the watcher is retired and the name's
+  watchers get `Lost(name, holder)`.
   """
   fn core_register(st : CnState, name : String, pid : Int, watcher : Int) : (CnState, List(CnEffect)) do
-    let taken = match core_lookup(st, name) do
-      Some(p) -> not(p.node_id == st.me && p.local_pid == pid)
-      None -> false
-    end
-    if taken do
-      (st, Cons(Unwatch(watcher), Nil))
-    else
-      let clock = GlobalRegistry.next_clock(st.reg, name, st.me)
-      let old_watch = match Map.get(st.regs, name, Map.str_cmp) do
-        Some((_, w)) -> if w != watcher do Cons(Unwatch(w), Nil) else Nil end
-        None -> Nil
-      end
-      let st2 = { st with reg: GlobalRegistry.register_at(st.reg, name, st.me, st.cfg.creation, pid, clock),
-                          regs: Map.insert(st.regs, name, (pid, watcher), Map.str_cmp) }
-      match refresh_names(st2) do
-        (st3, effs) ->
-          let out = (st3, List.append(old_watch, List.append(push_leaves(st3, leaf(st3, name)), effs)))
+    match core_lookup(st, name) do
+      Some(p) ->
+        if p.node_id == st.me && p.local_pid == pid do
+          core_register_ok(st, name, pid, watcher)
+        else
+          -- register() checked the mirror and returned Ok; another binding got
+          -- here first. Tell the name's watchers who holds it.
+          let out = (st, Cons(Unwatch(watcher), Cons(Named(name, Lost(name, p)), Nil)))
           out
-      end
+        end
+      None -> core_register_ok(st, name, pid, watcher)
+    end
+  end
+
+  pfn core_register_ok(st : CnState, name : String, pid : Int, watcher : Int) : (CnState, List(CnEffect)) do
+    let clock = GlobalRegistry.next_clock(st.reg, name, st.me)
+    let old_watch = match Map.get(st.regs, name, Map.str_cmp) do
+      Some((_, w)) -> if w != watcher do Cons(Unwatch(w), Nil) else Nil end
+      None -> Nil
+    end
+    let st2 = { st with reg: GlobalRegistry.register_at(st.reg, name, st.me, st.cfg.creation, pid, clock),
+                        regs: Map.insert(st.regs, name, (pid, watcher), Map.str_cmp) }
+    match refresh_names(st2) do
+      (st3, effs) ->
+        let out = (st3, List.append(old_watch, List.append(push_leaves(st3, leaf(st3, name)), effs)))
+        out
     end
   end
 
@@ -801,6 +848,13 @@ mod ClusterNode do
       end
     end
     on CtlStop() do
+      { fd: state.fd, dead: true }
+    end
+    -- Close the socket here, after every write queued before it (see
+    -- release_link): a close from anywhere else could race a queued write
+    -- onto a reused fd number.
+    on CtlClose() do
+      if state.fd >= 0 do tcp_close(state.fd) else () end
       { fd: -1, dead: true }
     end
   end
@@ -858,12 +912,26 @@ mod ClusterNode do
       else state end
     end
     on Accepted(fd : Int, id : String, name : String, role : String, addr : String, creation : Int) do
-      on_accepted(state.st, state.h, fd, id, name, role, addr, creation)
+      if state.started do
+        on_accepted(state.st, state.h, fd, id, name, role, addr, creation)
+      else
+        -- A handshake that finished after stop(): nothing may be installed.
+        tcp_close(fd)
+        state
+      end
     end
     on Dialed(addr : String, id : String, name : String, peer_addr : String, creation : Int, cfd : Int, dfd : Int) do
-      let a = if String.is_empty(peer_addr) do addr else peer_addr end
-      let cw = start_writers(state.h, cfd, dfd)
-      step_io(state.st, state.h, core_linked(state.st, id, name, a, creation, cfd, dfd, state.st.me, cw), state.started)
+      if state.started do
+        let cw = start_writers(state.h, cfd, dfd)
+        step_io(state.st, state.h, core_dialed(state.st, addr, id, name, peer_addr, creation, cfd, dfd, cw), state.started)
+      else
+        tcp_close(cfd)
+        tcp_close(dfd)
+        state
+      end
+    end
+    on SeedIsSelf(addr : String) do
+      { st: core_seed_self(state.st, addr), h: state.h, started: state.started }
     end
     on DialFailed(addr : String, now : Int, refused : Bool) do
       { st: core_dial_failed(state.st, now, addr, refused), h: state.h, started: state.started }
@@ -879,7 +947,16 @@ mod ClusterNode do
       step_io(state.st, state.h, core_link_closed(state.st, id, gen), state.started)
     end
     on Register(name : String, pid : Int, watcher : Int) do
-      step_io(state.st, state.h, core_register(state.st, name, pid, watcher), state.started)
+      -- Checked HERE, in the actor's turn: a pid that died before this turn
+      -- has had its Down (and the watcher's LocalDown) race this message, so
+      -- registering it would leave a binding to a dead process forever. One
+      -- that dies after this check is unregistered by the LocalDown that is
+      -- then queued behind this turn.
+      if is_alive(pid_of_int(pid)) do
+        step_io(state.st, state.h, core_register(state.st, name, pid, watcher), state.started)
+      else
+        step_io(state.st, state.h, (state.st, Cons(Unwatch(watcher), Nil)), state.started)
+      end
     end
     on Unregister(name : String) do
       step_io(state.st, state.h, core_unregister(state.st, name), state.started)
@@ -888,8 +965,14 @@ mod ClusterNode do
       step_io(state.st, state.h, core_local_down(state.st, pid), state.started)
     end
     on Shutdown() do
-      let _ = List.map(Map.values(state.st.links), fn l -> drop_link(l))
-      { st: { state.st with stopped: true, links: Map.empty() }, h: state.h, started: false }
+      let h = state.h
+      let _ = List.map(Map.values(state.st.links), fn l -> do
+        drop_link(l)
+        release_link(h, l, 3)
+      end)
+      -- Half-assembled inbound pairs own their fds outright.
+      let _ = List.map(Map.values(state.st.halves), fn hf -> close_half(hf))
+      { st: { state.st with stopped: true, links: Map.empty(), halves: Map.empty() }, h: state.h, started: false }
     end
   end
 
@@ -931,6 +1014,35 @@ mod ClusterNode do
     send(pid_of_int(l.cw), CtlStop())
     tcp_shutdown(l.cfd)
     if l.dfd >= 0 do tcp_shutdown(l.dfd) else () end
+  end
+
+  -- A link's fds are closed once EVERY party that may touch them is done:
+  -- the node's drop (after which nothing new is queued to its writers) and
+  -- both readers (a close under a parked reader drops its kqueue/epoll
+  -- registration and it never wakes). Closing earlier would also let a
+  -- later shutdown -- or a queued write -- land on the fd number after the OS
+  -- reused it for another connection. The close itself goes through each
+  -- writer's mailbox, behind any write already queued. [need] is 3 for an
+  -- installed link (drop + two readers), 1 for one never installed.
+  pfn release_link(h : ClusterHandle, l : CnLink, need : Int) : () do
+    let key = "rel" ++ int_to_string(l.gen)
+    let n = Vault.incr(h.meta, key, 1)
+    if n == need do
+      Vault.drop(h.meta, key)
+      discard(send(pid_of_int(l.cw), CtlClose()))
+      let qk = "q" ++ int_to_string(l.cfd)
+      match Vault.get(h.qs, qk) do
+        Some(w) ->
+          Vault.drop(h.qs, qk)
+          NodeQueue.close((pid_of_int(w), l.dfd))
+        None -> tcp_close(l.dfd)
+      end
+    else () end
+  end
+
+  pfn close_half(hf : CnHalf) : () do
+    if hf.cfd >= 0 do tcp_close(hf.cfd) else () end
+    if hf.dfd >= 0 do tcp_close(hf.dfd) else () end
   end
 
   -- Pair up an accepted connection with its other half; a complete pair is
@@ -981,8 +1093,12 @@ mod ClusterNode do
         -- The data reader reads the cause when its connection ends, and
         -- tells the routes; set before the sockets are shut.
         Vault.set(h.causes, "c" ++ int_to_string(l.cfd), why)
-        Vault.drop(h.qs, "q" ++ int_to_string(l.cfd))
         drop_link(l)
+        release_link(h, l, 3)
+      Discard(l) ->
+        -- Never installed: no reader will ever release it.
+        drop_link(l)
+        release_link(h, l, 1)
       Named(name, ev) -> tell_watchers(h, name ++ watch_sep(), ev)
       Unwatch(w) -> if w > 0 do kill(pid_of_int(w)) else () end
       Emit(NodeDead(i, why)) ->
@@ -1086,7 +1202,7 @@ mod ClusterNode do
                   -- We dialled ourselves (a seed list naming this node).
                   tcp_close(cfd)
                   tcp_close(dfd)
-                  send(node, DialFailed(addr, unix_time_ms(), false))
+                  send(node, SeedIsSelf(addr))
                   0
                 else
                   send(node, Dialed(addr, peer.node_id, peer.name, peer_addr, peer.incarnation, cfd, dfd))
@@ -1148,6 +1264,7 @@ mod ClusterNode do
       Ok(true)
     end)
     send(node, LinkClosed(l.node_id, l.gen))
+    release_link(h, l, 3)
     0
   end
 
@@ -1185,6 +1302,7 @@ mod ClusterNode do
     Vault.drop(h.causes, "c" ++ int_to_string(l.cfd))
     discard(List.map(Vault.all(h.closes), fn kv -> match kv do (_k, f) -> f(l.node_id, why) end))
     send(node, LinkClosed(l.node_id, l.gen))
+    release_link(h, l, 3)
     0
   end
 
@@ -1446,7 +1564,10 @@ mod ClusterNode do
   means the binding is made here and pushed to every peer; it is not a lock
   -- a node on the far side of a partition can hold the same name, and after
   the heal one binding wins everywhere (watch the name to hear `Lost`). The
-  process is monitored: its death unregisters the name.
+  check is against this node's view; if another binding reaches the node
+  first, the registration is refused there and the name's watchers get
+  `Lost(name, holder)`. A process already dead by then is not registered.
+  The process is monitored: its death unregisters the name.
   """
   fn register(h : ClusterHandle, name : String, pid) : Result((), RegisterError) do
     if Vault.get(h.meta, "stopped") != None do

@@ -19,6 +19,10 @@ mod TestClusterNode do
     List.filter_map(effs, fn e -> match e do ClusterNode.Drop(l, _) -> Some(l.gen) | _ -> None end)
   end
 
+  pfn discards(effs : List(ClusterNode.CnEffect)) : List(Int) do
+    List.filter_map(effs, fn e -> match e do ClusterNode.Discard(l) -> Some(l.gen) | _ -> None end)
+  end
+
   pfn installs(effs : List(ClusterNode.CnEffect)) : List(Int) do
     List.filter_map(effs, fn e -> match e do ClusterNode.Install(l) -> Some(l.gen) | _ -> None end)
   end
@@ -128,7 +132,8 @@ mod TestClusterNode do
                 assert (drops(effs) == Cons(1, Nil))
                 assert (installs(effs) == Cons(2, Nil))
               else
-                assert (drops(effs) == Cons(2, Nil))
+                assert (discards(effs) == Cons(2, Nil))
+                assert (drops(effs) == Nil)
                 assert (installs(effs) == Nil)
               end
           end
@@ -142,6 +147,69 @@ mod TestClusterNode do
             (_, effs) ->
               assert (drops(effs) == Cons(1, Nil))
               assert (installs(effs) == Cons(2, Nil))
+          end
+      end
+    end
+
+  end
+
+  describe "review fixes" do
+
+    test "a seed spelled differently from its node's advertised address is not redialled once linked" do
+      let st = ClusterNode.core_new(cfg("a", Cons("localhost:7001", Nil)), 1)
+      let b = ClusterNode.node_id_of("b")
+      match ClusterNode.core_tick(st, 1000) do
+        (st1, effs) ->
+          assert (dials(effs) == Cons("localhost:7001", Nil))
+          match ClusterNode.core_dialed(st1, "localhost:7001", b, "b", "127.0.0.1:7001", 1, 10, 11, 99) do
+            (st2, _) ->
+              -- long past the dial deadline: still no redial of the seed
+              match ClusterNode.core_tick(st2, 60000) do
+                (_, effs2) -> assert (dials(effs2) == Nil)
+              end
+          end
+      end
+    end
+
+    test "a seed that reaches this node itself is never dialled again" do
+      let st = ClusterNode.core_new(cfg("a", Cons("localhost:7000", Nil)), 1)
+      match ClusterNode.core_tick(st, 1000) do
+        (st1, _) ->
+          let st2 = ClusterNode.core_seed_self(st1, "localhost:7000")
+          match ClusterNode.core_tick(st2, 60000) do
+            (_, effs) -> assert (dials(effs) == Nil)
+          end
+      end
+    end
+
+    test "a pair from a newer creation of the peer replaces the old one whoever dialled" do
+      let a = ClusterNode.node_id_of("a")
+      let b = ClusterNode.node_id_of("b")
+      let st = ClusterNode.core_new(cfg("a", Nil), 1)
+      -- the old pair was dialled by a (the lower id, when a < b)...
+      let lower = if a < b do a else b end
+      let higher = if a < b do b else a end
+      match ClusterNode.core_linked(st, b, "b", "127.0.0.1:7001", 1, 10, 11, lower, 99) do
+        (st1, _) ->
+          -- ...and the restarted peer (creation 2) dials from the other side
+          match ClusterNode.core_linked(st1, b, "b", "127.0.0.1:7001", 2, 20, 21, higher, 98) do
+            (_, effs) ->
+              assert (drops(effs) == Cons(1, Nil))
+              assert (installs(effs) == Cons(2, Nil))
+          end
+      end
+    end
+
+    test "a registration that lost a race tells the name's watchers who holds it" do
+      match linked_ab() do
+        (b, st, _) ->
+          let theirs = GlobalRegistry.register_at(GlobalRegistry.empty(), "ap", b, 1, 7, VectorClock.increment(VectorClock.new(), b))
+          let frame = NetKernel.encode_registry_sync_resp(GlobalRegistry.root_hash(theirs), GlobalRegistry.all_entries(theirs))
+          match ClusterNode.core_frame(st, b, 6, frame) do
+            (st2, _) ->
+              match ClusterNode.core_register(st2, "ap", 42, 0) do
+                (_, effs) -> assert (List.member(name_events(effs), "ap lost to " ++ b))
+              end
           end
       end
     end

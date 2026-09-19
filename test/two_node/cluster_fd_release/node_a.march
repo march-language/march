@@ -1,0 +1,56 @@
+-- Two-node harness, scenario "cluster_fd_release": one process, two cluster
+-- nodes. node-a stays up; a second node on MARCH_PORT_B joins it and stops,
+-- 15 times over. Every link node-a drops must close its sockets: before the
+-- fix a dropped pair was only shut down, never closed (4 fds per cycle,
+-- both sides), so a flapping peer exhausted a long-running node's fds.
+-- Counted through /dev/fd (the same count on macOS and Linux).
+-- Design: specs/progress/2026-09-18-cluster-node-service.md (review fixes).
+mod ClusterFdRelease do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs IO.FileRead
+
+  pfn fds() : Int do
+    match Dir.list("/dev/fd") do
+      Ok(xs) -> List.length(xs)
+      Err(_) -> -1
+    end
+  end
+
+  pfn cycle(seed : String, port : Int, i : Int, n : Int, acc : Int) : Int do
+    if i >= n do acc else
+      match ClusterNode.start(ClusterNode.config("flap-" ++ int_to_string(i), port, "", Cons(seed, Nil), "fd-secret", i + 1)) do
+        Err(e) ->
+          -- the port may still be closing from the previous cycle
+          sleep_ms(200)
+          cycle(seed, port, i, n, acc)
+        Ok(hb) ->
+          let joined = ClusterNode.await_members(hb, 1, 10000)
+          ClusterNode.stop(hb)
+          sleep_ms(500)
+          cycle(seed, port, i + 1, n, acc + (if joined do 1 else 0 end))
+      end
+    end
+  end
+
+  fn main(_c : Cap(IO)) do
+    let pa = Env.require_int("MARCH_PORT_A")
+    match ClusterNode.start(ClusterNode.config("node-a", pa, "", Nil, "fd-secret", 1)) do
+      Err(e) -> panic(e)
+      Ok(ha) ->
+        sleep_ms(300)
+        let before = fds()
+        let joined = cycle("127.0.0.1:" ++ int_to_string(pa), Env.require_int("MARCH_PORT_B"), 0, 15, 0)
+        sleep_ms(3000)
+        let after = fds()
+        println("node-a: joins " ++ int_to_string(joined))
+        println("node-a: fds grew by at most 2: " ++ bool_to_string(after - before <= 2))
+        ClusterNode.stop(ha)
+    end
+  end
+end
