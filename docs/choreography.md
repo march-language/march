@@ -130,6 +130,14 @@ pfn role_a(s : Cap(Session.Live), st : Fan_A.S_send_Msg_A_C_1) : Fan_A.Yield do
 end
 ```
 
+Every callback has to return. The runner calls it when its message arrives, and until it
+returns, that node handles nothing else for the session: no other message, no failure, not
+even the end of the session. A callback can compute for as long as it needs to. What it must
+not do is wait on something that only the session can bring about, such as a reply the peer
+sends only after it hears from this role, or a task that is itself waiting on the session.
+That would stop the conversation for good. The same holds for cancel handlers. The promise
+that a correct protocol cannot deadlock assumes every callback returns.
+
 ## Running a role on a node
 
 Each role becomes a program whose `main` calls its runner:
@@ -280,7 +288,9 @@ A crashed process is noticed when its connection closes. A process that is still
 but has stopped answering (hung, paused, or cut off by the network) is noticed by a
 heartbeat: each connection is pinged every second, and a peer that sends nothing for 10
 seconds is treated as failed. `MARCH_SESSION_HEARTBEAT_MS` and `MARCH_SESSION_TIMEOUT_MS`
-change the two numbers. The heartbeat can mistake a very slow peer for a dead one. That
+change the two numbers. The heartbeat runs from the moment two nodes connect, so a role can
+work for as long as it likes before its first send or receive. The heartbeat can mistake a
+very slow peer for a dead one. That
 cancels a session that could have finished, which costs a retry but never corrupts
 anything.
 
@@ -375,6 +385,11 @@ end
 
 The actor gets one delivery at a time. A message that arrives while it is still handling
 the previous one waits until it has parked again.
+
+Call `host_<Role>` from `main` or a task, as above, and never from one of the actor's own
+handlers. It returns only when the session is over, and every delivery for the role goes to
+the actor's mailbox, where it would wait behind the handler that is still inside
+`host_<Role>`. The session would never move.
 
 The runner watches the actor. If it crashes, or is killed, or its supervisor restarts it,
 its role is cancelled: `host_<Role>` returns `Err(HostGone(ep))`, and the other roles are
