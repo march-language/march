@@ -645,11 +645,23 @@ mod SessionNode do
       links: List.append(p.links, Cons(l, Nil)), on_close: p.on_close }
   end
 
+  -- The heartbeat starts with the connection, not with `serve`: a role
+  -- that works past the timeout before its first send or receive (driving
+  -- to its first suspension runs before `serve`) is pinging its peers all
+  -- the while, so it is not taken for dead. See `heartbeat`.
   pfn start_link(p : Party, their_role : Int, conn : Peer, peer_pid : GlobalPid.Pid) : Party do
     let q = NodeQueue.start(conn.data_fd, budget())
     let control = task_spawn(fn _ -> serve_control(conn.fd, q))
-    with_link(p, { role: their_role, data_fd: conn.data_fd, control_fd: conn.fd,
-                   peer: peer_pid, q: q, control: control })
+    let l = { role: their_role, data_fd: conn.data_fd, control_fd: conn.fd,
+              peer: peer_pid, q: q, control: control }
+    match heartbeat_config() do
+      (interval, limit) ->
+        if interval > 0 do
+          let _ = task_spawn(fn _ -> heartbeat(p, l, interval, limit))
+          ()
+        else () end
+    end
+    with_link(p, l)
   end
 
   doc """
@@ -730,6 +742,8 @@ mod SessionNode do
   -- control reader parked on the socket, which close alone may not.
   pfn abort_links(p : Party) : () do
     let _ = List.map(p.links, fn l -> do
+      -- Stops its heartbeat, which started with the connection.
+      Vault.set(p.meta, "link_done" ++ rkey(l.role), 1)
       NodeQueue.close(l.q)
       tcp_shutdown(l.data_fd)
       tcp_shutdown(l.control_fd)
@@ -907,16 +921,30 @@ mod SessionNode do
     end
   end
 
-  -- The heartbeat, one per connection: every interval, ping the peer on the
-  -- data connection (through its NodeQueue writer, which serialises every
-  -- write to that socket) and count one tick since its last frame. Past the
-  -- limit the peer is taken for dead (`drop_link`, "no heartbeat"). A peer
-  -- that is stopped, hung or behind a partition sends no end of file, so
-  -- without this the reader would wait forever. Stops once the reader has.
+  -- The heartbeat, one per connection, from the moment it is made
+  -- (`start_link`): every interval, ping the peer on the data connection
+  -- (through its NodeQueue writer, which serialises every write to that
+  -- socket) and, once this side reads the connection (`serve`), count one
+  -- tick since the peer's last frame. Past the limit the peer is taken for
+  -- dead (`drop_link`, "no heartbeat"). A peer that is stopped, hung or
+  -- behind a partition sends no end of file, so without this the reader
+  -- would wait forever. Ticks are not counted before the reader runs: the
+  -- peer's frames, pings included, are not read yet, so nothing could
+  -- reset the count, and a role driving to its first suspension would take
+  -- its peers for dead. Stops once the reader has, or setup was abandoned.
   -- A ping is the one frame that may be dropped (`DropNew`): when the queue
   -- is full, data frames are already telling the peer we are alive.
   -- MARCH_SESSION_HEARTBEAT_MS (default 1000) and MARCH_SESSION_TIMEOUT_MS
   -- (default 10000) tune it.
+  -- (interval, limit in ticks): MARCH_SESSION_HEARTBEAT_MS (default 1000;
+  -- <= 0 turns the heartbeat off) and MARCH_SESSION_TIMEOUT_MS (default
+  -- 10000).
+  pfn heartbeat_config() : (Int, Int) do
+    let interval = Env.get_int("MARCH_SESSION_HEARTBEAT_MS", 1000)
+    let timeout = Env.get_int("MARCH_SESSION_TIMEOUT_MS", 10000)
+    (interval, if interval > 0 do timeout / interval else 0 end)
+  end
+
   pfn heartbeat(p : Party, l : Link, interval : Int, limit : Int) : Int do
     sleep_ms(interval)
     if Vault.get(p.meta, "link_done" ++ rkey(l.role)) != None do 0
@@ -925,7 +953,8 @@ mod SessionNode do
         let _ = NodeQueue.cast(l.q, next_seq(p.meta), l.peer, "SessionNode.Ping", Nil, NodeQueue.DropNew)
         ()
       else () end
-      let ticks = Vault.incr(p.heard, rkey(l.role), 1)
+      let ticks = if Vault.get(p.meta, "reading" ++ rkey(l.role)) == None do 0
+                  else Vault.incr(p.heard, rkey(l.role), 1) end
       if ticks > limit do
         drop_link(p, l, "no heartbeat")
         0
@@ -954,19 +983,16 @@ mod SessionNode do
   first suspension. `serve` panics on a cancellation; `run` returns it.
   """
   fn serve_outcome(p : Party) : List((Int, String)) do
-    let interval = Env.get_int("MARCH_SESSION_HEARTBEAT_MS", 1000)
-    let timeout = Env.get_int("MARCH_SESSION_TIMEOUT_MS", 10000)
-    let limit = if interval > 0 do timeout / interval else 0 end
     send(p.ep, Expect(List.length(p.links)))
+    -- The heartbeats are already running (`start_link`); from here they
+    -- also count the silence on each connection.
+    let _ = List.map(p.links, fn l -> Vault.set(p.meta, "reading" ++ rkey(l.role), 1))
     let _ = List.map(p.links, fn l -> task_spawn(fn _ -> do
       let why = read_link(p, l)
       Vault.set(p.meta, "link_done" ++ rkey(l.role), 1)
       send(p.ep, LinkEnded(l.role, why))
       0
     end))
-    let _ = if interval > 0 do
-      List.map(p.links, fn l -> task_spawn(fn _ -> heartbeat(p, l, interval, limit)))
-    else Nil end
     let _ = await_outcome(p)
     -- Every connection has ended. An endpoint still waiting now waits on
     -- nobody: that is a cancellation too.
@@ -993,6 +1019,9 @@ mod SessionNode do
   doc "Tear every connection down: close data, Bye on control, await the control reader, close control. (A cluster-mode party owns no connection: nothing to do.)"
   fn finish(p : Party) : Unit do
     let _ = if is_cluster(p) do Nil else List.map(p.links, fn l -> do
+      -- Its reader has ended, which stopped its heartbeat; a party that
+      -- never served stops it here.
+      Vault.set(p.meta, "link_done" ++ rkey(l.role), 1)
       tcp_close(l.data_fd)
       let _ = NodeSend.cast(l.control_fd, 0, GlobalPid.make("peer", 0, 0), "SessionNode.Bye", Nil)
       let _ = task_await(l.control)
