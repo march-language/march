@@ -1127,7 +1127,22 @@ let test_mutual_tco_self_tco_unaffected () =
     and is dead after that call, so Perceus emits the ELet-wrapped dec-chain
     around the mutual tail call. Assert the DecRC executes on the live
     back-edge path (before the branch to mutual_loop), not only in the
-    unreachable continuation block after it. *)
+    unreachable continuation block after it.
+
+    FLIPPED 2026-09-20 (specs/progress/2026-09-20-mutual-tco-safety.md): the
+    live-path DecRC this test demanded is a use-after-free.  [prefix] is the
+    value being stored into the next iteration's parameter slot, so running
+    its DecRC on the back edge frees it one instruction before the loop
+    reads it again (test/native/mutual_tco_forwarded_arg.march shows the
+    freed text reused).  Skipping it, as the self-TCO arms do, is the leak
+    this test was written against.  Neither is right, so the group filter
+    ([Llvm_tco.group_back_edges_safe]) now refuses to flatten a group whose
+    dec chain drops a forwarded, non-dup-bound argument: this fixture IS that
+    shape, and the correct assertion is that NO mutual loop is emitted for it
+    and the DecRC survives as an ordinary post-call drop (the shape it had
+    under real recursion).  Keeping the loop by deferring the drop to loop
+    exit is option 2 of specs/todos/2026-09-20-mutual-tco-borrowed-forwarded-arg.md,
+    still open; when it lands this test flips back. *)
 let test_mutual_tco_borrowed_arg_decref_on_live_path () =
   let ir = emit_mutual_tco_ir {|mod Test do
   needs IO.Console
@@ -1148,40 +1163,71 @@ let test_mutual_tco_borrowed_arg_decref_on_live_path () =
     end
     fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(build_loop("z", 1000))) end
   end|} in
-  Alcotest.(check bool) "mutual-tco borrowed-arg: mutual_loop emitted" true
-    (ir_contains ir "mutual_loop");
-  (* For each "br label %mutual_loop..." back-edge, find the LLVM basic block
-     that contains it (the text since the nearest preceding "label:") and
-     require a live "march_decrc" call inside that same block — i.e. on the
-     reachable path, executed before the branch. Before the fix, the
-     mutual-tail-call back-edge block has NO decrc (it is stranded in the
-     unreachable "mutco_cont" block emitted just after the branch instead). *)
-  let re_label = Str.regexp "\n[A-Za-z_][A-Za-z0-9_.]*:" in
-  let re_backedge = Str.regexp "br label %mutual_loop[0-9]*" in
-  let block_start_before pos =
-    let rec find_last start acc =
-      match Str.search_forward re_label ir start with
-      | exception Not_found -> acc
-      | i when i >= pos -> acc
-      | i -> find_last (i + 1) (Str.match_end ())
-    in
-    find_last 0 0
-  in
-  let rec scan_backedges start acc =
-    match Str.search_forward re_backedge ir start with
-    | exception Not_found -> acc
-    | i ->
-      let block_start = block_start_before i in
-      let block = String.sub ir block_start (i - block_start) in
-      scan_backedges (Str.match_end ()) (block :: acc)
-  in
-  let backedge_blocks = scan_backedges 0 [] in
-  Alcotest.(check bool) "mutual-tco borrowed-arg: at least one back-edge found" true
-    (List.length backedge_blocks > 0);
-  let live_decrefs = List.filter (fun b -> ir_contains b "march_decrc") backedge_blocks in
   Alcotest.(check bool)
-    "mutual-tco borrowed-arg: DecRC executes in the back-edge's own block (live path), not only in the dead mutco_cont block after it"
-    true (List.length live_decrefs > 0)
+    "mutual-tco borrowed-arg: the group is NOT flattened (its back edge would free the forwarded `prefix` early)"
+    false (ir_contains ir "mutual_loop");
+  Alcotest.(check bool)
+    "mutual-tco borrowed-arg: no combined __mutco_ function for this pair"
+    false (ir_contains ir "__mutco_");
+  (* The members are ordinary functions: the mutual tail call is a real call
+     and `prefix`'s release is the ordinary post-call drop, exactly as under
+     real recursion (not stranded, not skipped). *)
+  let build_loop_ir =
+    let start = Str.search_forward (Str.regexp "define [^\n]*@build_loop(") ir 0 in
+    let stop = Str.search_forward (Str.regexp "\n}") ir start in
+    String.sub ir start (stop - start)
+  in
+  Alcotest.(check bool)
+    "mutual-tco borrowed-arg: build_loop really calls consume_loop"
+    true (ir_contains build_loop_ir "call i64 @consume_loop(");
+  Alcotest.(check bool)
+    "mutual-tco borrowed-arg: `prefix` is still dropped after the call (no leak)"
+    true (ir_contains build_loop_ir "march_decrc")
+
+(** Companion to the flipped B7 above: the safety filter must refuse ONLY the
+    unsafe shape.  Two groups that are safe and must keep their loop:
+    - even/odd over ints: no heap argument, no dec chain at all;
+    - a `Cons(x, rest)` walk that hands the tail to the other member: every
+      forwarded value is a field of a borrowed scrutinee (or dup-bound), so
+      nothing in the chain releases a forwarded, non-dup-bound argument.  This
+      is the second half of test/native/mutual_tco_forwarded_arg.march, whose
+      live-allocation check pins that it does not leak either. *)
+let test_mutual_tco_safe_group_still_flattened () =
+  let ir_ints = emit_mutual_tco_ir {|mod Test do
+  needs IO.Console
+    @[no_warn_recursion]
+    fn ev(n : Int) : Bool do
+      if n == 0 do true else od(n - 1) end
+    end
+    @[no_warn_recursion]
+    fn od(n : Int) : Bool do
+      if n == 0 do false else ev(n - 1) end
+    end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do println(to_string(ev(1000000))) end
+  end|} in
+  Alcotest.(check bool) "safe mutual group (ints): mutual_loop emitted" true
+    (ir_contains ir_ints "mutual_loop");
+  Alcotest.(check bool) "safe mutual group (ints): combined fn declared" true
+    (ir_contains ir_ints "__mutco_");
+  let ir_list = emit_mutual_tco_ir {|mod Test do
+  needs IO.Console
+    @[no_warn_recursion]
+    fn walk(xs : List(String), seen : Int) : Int do
+      match xs do
+        Nil -> seen
+        Cons(x, rest) -> step(x, rest, seen)
+      end
+    end
+    @[no_warn_recursion]
+    fn step(x : String, rest : List(String), seen : Int) : Int do
+      if String.starts_with(x, "no") do walk(rest, seen + 1) else walk(rest, seen) end
+    end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(walk(["no-a", "b"], 0))) end
+  end|} in
+  Alcotest.(check bool) "safe mutual group (owned list walk): mutual_loop emitted" true
+    (ir_contains ir_list "mutual_loop");
+  Alcotest.(check bool) "safe mutual group (owned list walk): back-edge branch emitted" true
+    (ir_contains ir_list "br label %mutual_loop")
 
 (** Regression: a hand-written tail-recursive list walk leaked every cons cell.
 
@@ -15016,6 +15062,8 @@ let codegen_suites =
           Alcotest.test_case "self TCO unaffected"      `Quick test_mutual_tco_self_tco_unaffected;
           Alcotest.test_case "B7: borrowed-arg decref on live path (not dead mutco_cont)"
             `Quick test_mutual_tco_borrowed_arg_decref_on_live_path;
+          Alcotest.test_case "safety filter: safe groups (ints, owned list walk) keep their loop"
+            `Quick test_mutual_tco_safe_group_still_flattened;
           Alcotest.test_case "self TCO: dup'd forwarded arg is decref'd on live path"
             `Quick test_tco_self_dup_arg_decref_on_live_path;
           Alcotest.test_case "deep drop: never-destructured container releases its children"
