@@ -130,17 +130,29 @@ static void test_request_above_default_is_honoured(void) {
 #define N_REQUESTED   7
 #define N_WORKERS     224          /* 32 green threads per scheduler thread  */
 
-/* How long the workers keep circulating while waiting for the last scheduler
- * thread to dispatch one of them.  Only a build where a requested thread never
- * dispatches at all ever reaches this; a healthy run observes all seven within
- * milliseconds and leaves the wait immediately. */
-#define SEEN_WAIT_S   10.0
+/* Rounds of real work every worker does before it may finish, so the run is
+ * not over before the last scheduler thread has even been created. */
+#define FLOOR_ROUNDS  4
+
+/* How long the workers stay runnable waiting for the last scheduler thread to
+ * dispatch one of them.  This is a bound on a HANG, not a timing expectation:
+ * a healthy run observes all seven within ~100 ms even with the machine
+ * oversubscribed six times over, and leaves the wait the moment it does, so
+ * the value costs nothing until something is really wrong.  It is wall-clock
+ * and starts when the schedulers start, so it must dwarf any stall a shared
+ * CI runner can impose on one thread; see the comment on worker_fn for the
+ * 10-second version of this that did not.  Overridable so the negative
+ * control (a runtime built one thread short) does not take two minutes. */
+#ifndef SEEN_WAIT_S
+#  define SEEN_WAIT_S 120.0
+#endif
 
 static pthread_t     g_seen[N_REQUESTED * 8];
 static _Atomic int   g_seen_len   = 0;
 static _Atomic int   g_seen_lock  = 0;
 static _Atomic int   g_work_done  = 0;
-static double        g_seen_deadline = 0.0;   /* set before the spawn loop, read-only after */
+static _Atomic int   g_gave_up    = 0;        /* workers that left the wait by deadline */
+static double        g_seen_deadline = 0.0;   /* set before march_sched_run, read-only after */
 
 static double mono_now(void) {
     struct timespec ts;
@@ -165,33 +177,56 @@ static void seen_record(pthread_t t) {
     atomic_store_explicit(&g_seen_lock, 0, memory_order_release);
 }
 
-/* Hold every scheduler busy until each requested thread has been observed
- * dispatching a green thread.
+/* Hold every worker runnable until each requested scheduler thread has been
+ * observed dispatching a green thread.
  *
- * The fixed round count alone was a race, not a test: whether a scheduler
- * thread ever dispatched anything depended on whether the OS scheduled it
- * before the last worker finished, so on a loaded 4-CPU runner two of the
- * seven threads could exist, spin up, and find the run queue already drained
- * -- "distinct dispatching OS threads: 5, requested 7" with nothing wrong in
- * the runtime.  (The old comment claimed workers refused to finish until
- * their peers were resident; the g_spinning counter that was supposed to
- * enforce it was incremented and decremented but never read.)
+ * History, because this test has been wrong twice:
  *
- * So after a floor of real work, every worker stays RUNNABLE -- yielding, so
- * the procs keep circulating through the global run queue that all schedulers
- * pop -- until either all N_REQUESTED threads have dispatched one, or the
- * deadline passes.  A thread that exists therefore cannot avoid being
- * observed, and a count that is genuinely short still fails (after the
- * wait), which is the property this test is here for. */
+ *  1. A fixed round count alone was a race, not a test: whether a scheduler
+ *     thread ever dispatched anything depended on whether the OS scheduled it
+ *     before the last worker finished ("distinct ... 5, requested 7").
+ *
+ *  2. The fix held the workers runnable until all seven were seen OR a 10 s
+ *     deadline passed.  It still failed on the 4-CPU CI runner, twice in three
+ *     days, reruns green ("... 6, requested 7").  That deadline was armed
+ *     BEFORE the spawn loop and ran concurrently with a floor of
+ *     224 x 40 x burn(200000) in an unoptimised build -- 2.3 s of wall clock
+ *     on 4 fast CPUs with six copies contending, more on a slower runner that
+ *     dune is sharing between test binaries -- so how much of the 10 s was
+ *     ever spent WAITING was unknown, and the failure message's claim that
+ *     the workers had waited SEEN_WAIT_S was not something the test could
+ *     know.
+ *
+ * The CI failure itself was never reproduced: 0 failures in about 500 runs of
+ * the old test on 4 CPUs, most under 6x contention.  What those runs did
+ * establish is that it is not work distribution.  The last thread is first
+ * seen within 90 ms in 180/180 runs, and the seven threads' dispatch counts
+ * stay within ~25% of each other: a scheduler that just ran a yielder steals
+ * before it pops its own deque, so procs keep migrating and a thread that is
+ * running cannot go without.  Nor did a thread fail to start --
+ * pthread_create's result is unchecked in march_sched_run, but on glibc a
+ * failed create would have crashed in pthread_join(0), not reported 6.  What
+ * is left is one OS thread that a shared runner did not run for seconds,
+ * which only a long bound that measures the wait alone can absorb, and which
+ * the failure line now reports well enough to confirm or refute next time.
+ *
+ * So: a small floor, then every worker stays RUNNABLE -- yielding, so it
+ * stays stealable -- until all N_REQUESTED threads have dispatched one, or a
+ * deadline that is long and that counts only this wait.  A thread that exists
+ * cannot avoid being observed; a count that is genuinely short still fails
+ * (after the wait), and the failure says how long was really waited. */
 static void worker_fn(void *arg) {
     (void)arg;
-    for (int round = 0; round < 40; round++) {
+    for (int round = 0; round < FLOOR_ROUNDS; round++) {
         seen_record(pthread_self());
         burn(200000);
         march_sched_yield();
     }
-    while (atomic_load_explicit(&g_seen_len, memory_order_relaxed) < N_REQUESTED
-           && mono_now() < g_seen_deadline) {
+    while (atomic_load_explicit(&g_seen_len, memory_order_relaxed) < N_REQUESTED) {
+        if (mono_now() >= g_seen_deadline) {
+            atomic_fetch_add(&g_gave_up, 1);
+            break;
+        }
         seen_record(pthread_self());
         burn(20000);
         march_sched_yield();
@@ -206,20 +241,28 @@ static void test_live_scheduler_threads_match_request(void) {
     TEST_ASSERT(n == N_REQUESTED, "setup: 7 schedulers requested");
     atomic_store(&g_seen_len, 0);
     atomic_store(&g_work_done, 0);
-    g_seen_deadline = mono_now() + SEEN_WAIT_S;
+    atomic_store(&g_gave_up, 0);
     for (int i = 0; i < N_WORKERS; i++) march_sched_spawn(worker_fn, NULL);
     march_sched_request_shutdown();
+    /* Armed here, not before the spawn loop: nothing runs until
+     * march_sched_run, so this is when the wait can first begin. */
+    double t0 = mono_now();
+    g_seen_deadline = t0 + SEEN_WAIT_S;
     march_sched_run();
+    double elapsed = mono_now() - t0;
     TEST_ASSERT(atomic_load(&g_work_done) == N_WORKERS, "all workers finished");
     int distinct = atomic_load(&g_seen_len);
     if (distinct != N_REQUESTED)
-        fprintf(stderr, "  (distinct dispatching OS threads: %d, requested %d)\n",
-                distinct, N_REQUESTED);
+        fprintf(stderr, "  (distinct dispatching OS threads: %d, requested %d; "
+                        "ran %.1f s of a %.0f s wait; %d/%d workers left by deadline; "
+                        "usable CPUs %d)\n",
+                distinct, N_REQUESTED, elapsed, (double)SEEN_WAIT_S,
+                atomic_load(&g_gave_up), N_WORKERS, march_sched_usable_cpus());
     TEST_ASSERT(distinct == N_REQUESTED,
                 "green threads must be dispatched by exactly as many OS threads as "
-                "requested -- the workers stayed runnable for up to SEEN_WAIT_S "
-                "waiting for the missing thread, so this is a real shortfall, not "
-                "a thread that merely started late");
+                "requested -- every worker stayed runnable for the whole of "
+                "SEEN_WAIT_S waiting for the missing thread (see the line above), "
+                "so this is a real shortfall, not a thread that merely started late");
     TEST_PASS();
 }
 
