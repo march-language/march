@@ -379,7 +379,9 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="ClusterAuth.html#fn-verify"><span class="sb-kind" style="color:var(--fn)">F</span>verify</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="ClusterConn.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="ClusterConn.html">ClusterConn</a></div><div class="sb-sub"><a class="sl" href="ClusterConn.html#fn-accept_one"><span class="sb-kind" style="color:var(--fn)">F</span>accept_one</a>
 <a class="sl" href="ClusterConn.html#fn-accept_split"><span class="sb-kind" style="color:var(--fn)">F</span>accept_split</a>
+<a class="sl" href="ClusterConn.html#fn-accept_split_within"><span class="sb-kind" style="color:var(--fn)">F</span>accept_split_within</a>
 <a class="sl" href="ClusterConn.html#fn-connect_split"><span class="sb-kind" style="color:var(--fn)">F</span>connect_split</a>
+<a class="sl" href="ClusterConn.html#fn-connect_split_within"><span class="sb-kind" style="color:var(--fn)">F</span>connect_split_within</a>
 <a class="sl" href="ClusterConn.html#fn-connect_to_peer"><span class="sb-kind" style="color:var(--fn)">F</span>connect_to_peer</a>
 <a class="sl" href="ClusterConn.html#fn-listen"><span class="sb-kind" style="color:var(--fn)">F</span>listen</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="ClusterLoad.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="ClusterLoad.html">ClusterLoad</a></div><div class="sb-sub"><a class="sl" href="ClusterLoad.html#type-NodeLoad"><span class="sb-kind" style="color:var(--ty)">T</span>NodeLoad</a>
@@ -389,6 +391,64 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="ClusterLoad.html#fn-spare_cpu_milli"><span class="sb-kind" style="color:var(--fn)">F</span>spare_cpu_milli</a>
 <a class="sl" href="ClusterLoad.html#fn-spare_mem_mb"><span class="sb-kind" style="color:var(--fn)">F</span>spare_mem_mb</a>
 <a class="sl" href="ClusterLoad.html#fn-to_ints"><span class="sb-kind" style="color:var(--fn)">F</span>to_ints</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="ClusterNode.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="ClusterNode.html">ClusterNode</a></div><div class="sb-sub"><a class="sl" href="ClusterNode.html#type-CnConfig"><span class="sb-kind" style="color:var(--ty)">T</span>CnConfig</a>
+<a class="sl" href="ClusterNode.html#type-NodeInfo"><span class="sb-kind" style="color:var(--ty)">T</span>NodeInfo</a>
+<a class="sl" href="ClusterNode.html#type-NodeEvent"><span class="sb-kind" style="color:var(--ty)">T</span>NodeEvent</a>
+<a class="sl" href="ClusterNode.html#type-CnLink"><span class="sb-kind" style="color:var(--ty)">T</span>CnLink</a>
+<a class="sl" href="ClusterNode.html#type-CnHalf"><span class="sb-kind" style="color:var(--ty)">T</span>CnHalf</a>
+<a class="sl" href="ClusterNode.html#type-CnState"><span class="sb-kind" style="color:var(--ty)">T</span>CnState</a>
+<a class="sl" href="ClusterNode.html#type-NameEvent"><span class="sb-kind" style="color:var(--ty)">T</span>NameEvent</a>
+<a class="sl" href="ClusterNode.html#type-RegisterError"><span class="sb-kind" style="color:var(--ty)">T</span>RegisterError</a>
+<a class="sl" href="ClusterNode.html#type-CnEffect"><span class="sb-kind" style="color:var(--ty)">T</span>CnEffect</a>
+<a class="sl" href="ClusterNode.html#type-ClusterHandle"><span class="sb-kind" style="color:var(--ty)">T</span>ClusterHandle</a>
+<a class="sl" href="ClusterNode.html#type-NodeActorState"><span class="sb-kind" style="color:var(--ty)">T</span>NodeActorState</a>
+<a class="sl" href="ClusterNode.html#fn-addr_of"><span class="sb-kind" style="color:var(--fn)">F</span>addr_of</a>
+<a class="sl" href="ClusterNode.html#fn-all_members"><span class="sb-kind" style="color:var(--fn)">F</span>all_members</a>
+<a class="sl" href="ClusterNode.html#fn-await_members"><span class="sb-kind" style="color:var(--fn)">F</span>await_members</a>
+<a class="sl" href="ClusterNode.html#fn-config"><span class="sb-kind" style="color:var(--fn)">F</span>config</a>
+<a class="sl" href="ClusterNode.html#fn-config_from_env"><span class="sb-kind" style="color:var(--fn)">F</span>config_from_env</a>
+<a class="sl" href="ClusterNode.html#fn-core_dial_failed"><span class="sb-kind" style="color:var(--fn)">F</span>core_dial_failed</a>
+<a class="sl" href="ClusterNode.html#fn-core_dialed"><span class="sb-kind" style="color:var(--fn)">F</span>core_dialed</a>
+<a class="sl" href="ClusterNode.html#fn-core_frame"><span class="sb-kind" style="color:var(--fn)">F</span>core_frame</a>
+<a class="sl" href="ClusterNode.html#fn-core_link_closed"><span class="sb-kind" style="color:var(--fn)">F</span>core_link_closed</a>
+<a class="sl" href="ClusterNode.html#fn-core_linked"><span class="sb-kind" style="color:var(--fn)">F</span>core_linked</a>
+<a class="sl" href="ClusterNode.html#fn-core_local_down"><span class="sb-kind" style="color:var(--fn)">F</span>core_local_down</a>
+<a class="sl" href="ClusterNode.html#fn-core_lookup"><span class="sb-kind" style="color:var(--fn)">F</span>core_lookup</a>
+<a class="sl" href="ClusterNode.html#fn-core_member"><span class="sb-kind" style="color:var(--fn)">F</span>core_member</a>
+<a class="sl" href="ClusterNode.html#fn-core_members"><span class="sb-kind" style="color:var(--fn)">F</span>core_members</a>
+<a class="sl" href="ClusterNode.html#fn-core_new"><span class="sb-kind" style="color:var(--fn)">F</span>core_new</a>
+<a class="sl" href="ClusterNode.html#fn-core_register"><span class="sb-kind" style="color:var(--fn)">F</span>core_register</a>
+<a class="sl" href="ClusterNode.html#fn-core_seed_self"><span class="sb-kind" style="color:var(--fn)">F</span>core_seed_self</a>
+<a class="sl" href="ClusterNode.html#fn-core_tick"><span class="sb-kind" style="color:var(--fn)">F</span>core_tick</a>
+<a class="sl" href="ClusterNode.html#fn-core_unregister"><span class="sb-kind" style="color:var(--fn)">F</span>core_unregister</a>
+<a class="sl" href="ClusterNode.html#fn-demonitor_remote"><span class="sb-kind" style="color:var(--fn)">F</span>demonitor_remote</a>
+<a class="sl" href="ClusterNode.html#fn-event_text"><span class="sb-kind" style="color:var(--fn)">F</span>event_text</a>
+<a class="sl" href="ClusterNode.html#fn-info_of"><span class="sb-kind" style="color:var(--fn)">F</span>info_of</a>
+<a class="sl" href="ClusterNode.html#fn-link_count"><span class="sb-kind" style="color:var(--fn)">F</span>link_count</a>
+<a class="sl" href="ClusterNode.html#fn-lookup"><span class="sb-kind" style="color:var(--fn)">F</span>lookup</a>
+<a class="sl" href="ClusterNode.html#fn-members"><span class="sb-kind" style="color:var(--fn)">F</span>members</a>
+<a class="sl" href="ClusterNode.html#fn-monitor_remote"><span class="sb-kind" style="color:var(--fn)">F</span>monitor_remote</a>
+<a class="sl" href="ClusterNode.html#fn-name_event_text"><span class="sb-kind" style="color:var(--fn)">F</span>name_event_text</a>
+<a class="sl" href="ClusterNode.html#fn-name_of"><span class="sb-kind" style="color:var(--fn)">F</span>name_of</a>
+<a class="sl" href="ClusterNode.html#fn-names"><span class="sb-kind" style="color:var(--fn)">F</span>names</a>
+<a class="sl" href="ClusterNode.html#fn-node_id_of"><span class="sb-kind" style="color:var(--fn)">F</span>node_id_of</a>
+<a class="sl" href="ClusterNode.html#fn-off_peer_closed"><span class="sb-kind" style="color:var(--fn)">F</span>off_peer_closed</a>
+<a class="sl" href="ClusterNode.html#fn-on_delivery_failed"><span class="sb-kind" style="color:var(--fn)">F</span>on_delivery_failed</a>
+<a class="sl" href="ClusterNode.html#fn-on_peer_closed"><span class="sb-kind" style="color:var(--fn)">F</span>on_peer_closed</a>
+<a class="sl" href="ClusterNode.html#fn-queue_for"><span class="sb-kind" style="color:var(--fn)">F</span>queue_for</a>
+<a class="sl" href="ClusterNode.html#fn-register"><span class="sb-kind" style="color:var(--fn)">F</span>register</a>
+<a class="sl" href="ClusterNode.html#fn-route"><span class="sb-kind" style="color:var(--fn)">F</span>route</a>
+<a class="sl" href="ClusterNode.html#fn-route_type"><span class="sb-kind" style="color:var(--fn)">F</span>route_type</a>
+<a class="sl" href="ClusterNode.html#fn-send_msg"><span class="sb-kind" style="color:var(--fn)">F</span>send_msg</a>
+<a class="sl" href="ClusterNode.html#fn-stale_bindings"><span class="sb-kind" style="color:var(--fn)">F</span>stale_bindings</a>
+<a class="sl" href="ClusterNode.html#fn-start"><span class="sb-kind" style="color:var(--fn)">F</span>start</a>
+<a class="sl" href="ClusterNode.html#fn-stop"><span class="sb-kind" style="color:var(--fn)">F</span>stop</a>
+<a class="sl" href="ClusterNode.html#fn-subscribe"><span class="sb-kind" style="color:var(--fn)">F</span>subscribe</a>
+<a class="sl" href="ClusterNode.html#fn-unregister"><span class="sb-kind" style="color:var(--fn)">F</span>unregister</a>
+<a class="sl" href="ClusterNode.html#fn-unroute"><span class="sb-kind" style="color:var(--fn)">F</span>unroute</a>
+<a class="sl" href="ClusterNode.html#fn-unsubscribe"><span class="sb-kind" style="color:var(--fn)">F</span>unsubscribe</a>
+<a class="sl" href="ClusterNode.html#fn-unwatch"><span class="sb-kind" style="color:var(--fn)">F</span>unwatch</a>
+<a class="sl" href="ClusterNode.html#fn-watch"><span class="sb-kind" style="color:var(--fn)">F</span>watch</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Compress.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Compress.html">Compress</a></div><div class="sb-sub"><a class="sl" href="Compress.html#type-Error"><span class="sb-kind" style="color:var(--ty)">T</span>Error</a>
 <a class="sl" href="Compress.html#type-Level"><span class="sb-kind" style="color:var(--ty)">T</span>Level</a>
 <a class="sl" href="Compress.html#type-Level"><span class="sb-kind" style="color:var(--ty)">T</span>Level</a>
@@ -862,14 +922,18 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="GlobalRegistry.html#fn-contains"><span class="sb-kind" style="color:var(--fn)">F</span>contains</a>
 <a class="sl" href="GlobalRegistry.html#fn-diff_entries"><span class="sb-kind" style="color:var(--fn)">F</span>diff_entries</a>
 <a class="sl" href="GlobalRegistry.html#fn-empty"><span class="sb-kind" style="color:var(--fn)">F</span>empty</a>
+<a class="sl" href="GlobalRegistry.html#fn-entry"><span class="sb-kind" style="color:var(--fn)">F</span>entry</a>
 <a class="sl" href="GlobalRegistry.html#fn-lookup"><span class="sb-kind" style="color:var(--fn)">F</span>lookup</a>
 <a class="sl" href="GlobalRegistry.html#fn-merge"><span class="sb-kind" style="color:var(--fn)">F</span>merge</a>
 <a class="sl" href="GlobalRegistry.html#fn-names"><span class="sb-kind" style="color:var(--fn)">F</span>names</a>
+<a class="sl" href="GlobalRegistry.html#fn-next_clock"><span class="sb-kind" style="color:var(--fn)">F</span>next_clock</a>
 <a class="sl" href="GlobalRegistry.html#fn-observe"><span class="sb-kind" style="color:var(--fn)">F</span>observe</a>
 <a class="sl" href="GlobalRegistry.html#fn-register"><span class="sb-kind" style="color:var(--fn)">F</span>register</a>
+<a class="sl" href="GlobalRegistry.html#fn-register_at"><span class="sb-kind" style="color:var(--fn)">F</span>register_at</a>
 <a class="sl" href="GlobalRegistry.html#fn-root_hash"><span class="sb-kind" style="color:var(--fn)">F</span>root_hash</a>
 <a class="sl" href="GlobalRegistry.html#fn-size"><span class="sb-kind" style="color:var(--fn)">F</span>size</a>
-<a class="sl" href="GlobalRegistry.html#fn-unregister"><span class="sb-kind" style="color:var(--fn)">F</span>unregister</a></div></div>
+<a class="sl" href="GlobalRegistry.html#fn-unregister"><span class="sb-kind" style="color:var(--fn)">F</span>unregister</a>
+<a class="sl" href="GlobalRegistry.html#fn-unregister_own"><span class="sb-kind" style="color:var(--fn)">F</span>unregister_own</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Hamt.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Hamt.html">Hamt</a></div><div class="sb-sub"><a class="sl" href="Hamt.html#type-HEntry"><span class="sb-kind" style="color:var(--ty)">T</span>HEntry</a>
 <a class="sl" href="Hamt.html#fn-empty"><span class="sb-kind" style="color:var(--fn)">F</span>empty</a>
 <a class="sl" href="Hamt.html#fn-fold"><span class="sb-kind" style="color:var(--fn)">F</span>fold</a>
@@ -883,6 +947,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Handshake.html#fn-decode_hello"><span class="sb-kind" style="color:var(--fn)">F</span>decode_hello</a>
 <a class="sl" href="Handshake.html#fn-encode_hello"><span class="sb-kind" style="color:var(--fn)">F</span>encode_hello</a>
 <a class="sl" href="Handshake.html#fn-make_hello"><span class="sb-kind" style="color:var(--fn)">F</span>make_hello</a>
+<a class="sl" href="Handshake.html#fn-make_hello_addr"><span class="sb-kind" style="color:var(--fn)">F</span>make_hello_addr</a>
 <a class="sl" href="Handshake.html#fn-make_hello_role"><span class="sb-kind" style="color:var(--fn)">F</span>make_hello_role</a>
 <a class="sl" href="Handshake.html#fn-role_control"><span class="sb-kind" style="color:var(--fn)">F</span>role_control</a>
 <a class="sl" href="Handshake.html#fn-role_data"><span class="sb-kind" style="color:var(--fn)">F</span>role_data</a></div></div>
@@ -1240,6 +1305,20 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="JsonStream.html#fn-start_with"><span class="sb-kind" style="color:var(--fn)">F</span>start_with</a>
 <a class="sl" href="JsonStream.html#fn-with_raw_numbers"><span class="sb-kind" style="color:var(--fn)">F</span>with_raw_numbers</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="LazyNicheProbe.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="LazyNicheProbe.html">LazyNicheProbe</a></div><div class="sb-sub"><a class="sl" href="LazyNicheProbe.html#fn-first_or"><span class="sb-kind" style="color:var(--fn)">F</span>first_or</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="LinearMap.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="LinearMap.html">LinearMap</a></div><div class="sb-sub"><a class="sl" href="LinearMap.html#fn-dispose"><span class="sb-kind" style="color:var(--fn)">F</span>dispose</a>
+<a class="sl" href="LinearMap.html#fn-drain"><span class="sb-kind" style="color:var(--fn)">F</span>drain</a>
+<a class="sl" href="LinearMap.html#fn-empty"><span class="sb-kind" style="color:var(--fn)">F</span>empty</a>
+<a class="sl" href="LinearMap.html#fn-empty_int"><span class="sb-kind" style="color:var(--fn)">F</span>empty_int</a>
+<a class="sl" href="LinearMap.html#fn-empty_string"><span class="sb-kind" style="color:var(--fn)">F</span>empty_string</a>
+<a class="sl" href="LinearMap.html#fn-fill"><span class="sb-kind" style="color:var(--fn)">F</span>fill</a>
+<a class="sl" href="LinearMap.html#fn-keys"><span class="sb-kind" style="color:var(--fn)">F</span>keys</a>
+<a class="sl" href="LinearMap.html#fn-member"><span class="sb-kind" style="color:var(--fn)">F</span>member</a>
+<a class="sl" href="LinearMap.html#fn-put"><span class="sb-kind" style="color:var(--fn)">F</span>put</a>
+<a class="sl" href="LinearMap.html#fn-size"><span class="sb-kind" style="color:var(--fn)">F</span>size</a>
+<a class="sl" href="LinearMap.html#fn-take"><span class="sb-kind" style="color:var(--fn)">F</span>take</a>
+<a class="sl" href="LinearMap.html#fn-take_slot"><span class="sb-kind" style="color:var(--fn)">F</span>take_slot</a>
+<a class="sl" href="LinearMap.html#fn-to_list"><span class="sb-kind" style="color:var(--fn)">F</span>to_list</a>
+<a class="sl" href="LinearMap.html#fn-vacate"><span class="sb-kind" style="color:var(--fn)">F</span>vacate</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="List.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="List.html">List</a></div><div class="sb-sub"><a class="sl" href="List.html#fn-all"><span class="sb-kind" style="color:var(--fn)">F</span>all</a>
 <a class="sl" href="List.html#fn-any"><span class="sb-kind" style="color:var(--fn)">F</span>any</a>
 <a class="sl" href="List.html#fn-append"><span class="sb-kind" style="color:var(--fn)">F</span>append</a>
@@ -1420,11 +1499,14 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Membership.html#fn-dead"><span class="sb-kind" style="color:var(--fn)">F</span>dead</a>
 <a class="sl" href="Membership.html#fn-empty"><span class="sb-kind" style="color:var(--fn)">F</span>empty</a>
 <a class="sl" href="Membership.html#fn-get"><span class="sb-kind" style="color:var(--fn)">F</span>get</a>
+<a class="sl" href="Membership.html#fn-member"><span class="sb-kind" style="color:var(--fn)">F</span>member</a>
 <a class="sl" href="Membership.html#fn-members"><span class="sb-kind" style="color:var(--fn)">F</span>members</a>
 <a class="sl" href="Membership.html#fn-merge"><span class="sb-kind" style="color:var(--fn)">F</span>merge</a>
 <a class="sl" href="Membership.html#fn-observe"><span class="sb-kind" style="color:var(--fn)">F</span>observe</a>
 <a class="sl" href="Membership.html#fn-size"><span class="sb-kind" style="color:var(--fn)">F</span>size</a>
-<a class="sl" href="Membership.html#fn-suspect"><span class="sb-kind" style="color:var(--fn)">F</span>suspect</a></div></div>
+<a class="sl" href="Membership.html#fn-suspect"><span class="sb-kind" style="color:var(--fn)">F</span>suspect</a>
+<a class="sl" href="Membership.html#fn-verdict"><span class="sb-kind" style="color:var(--fn)">F</span>verdict</a>
+<a class="sl" href="Membership.html#fn-with_status"><span class="sb-kind" style="color:var(--fn)">F</span>with_status</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Merkle.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Merkle.html">Merkle</a></div><div class="sb-sub"><a class="sl" href="Merkle.html#type-MerkleTree"><span class="sb-kind" style="color:var(--ty)">T</span>MerkleTree</a>
 <a class="sl" href="Merkle.html#fn-branch"><span class="sb-kind" style="color:var(--fn)">F</span>branch</a>
 <a class="sl" href="Merkle.html#fn-build"><span class="sb-kind" style="color:var(--fn)">F</span>build</a>
@@ -1521,9 +1603,11 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="NetKernel.html#fn-frame_tag"><span class="sb-kind" style="color:var(--fn)">F</span>frame_tag</a>
 <a class="sl" href="NetKernel.html#fn-fresh_nonce"><span class="sb-kind" style="color:var(--fn)">F</span>fresh_nonce</a>
 <a class="sl" href="NetKernel.html#fn-handshake"><span class="sb-kind" style="color:var(--fn)">F</span>handshake</a>
+<a class="sl" href="NetKernel.html#fn-handshake_addr"><span class="sb-kind" style="color:var(--fn)">F</span>handshake_addr</a>
 <a class="sl" href="NetKernel.html#fn-handshake_role"><span class="sb-kind" style="color:var(--fn)">F</span>handshake_role</a>
 <a class="sl" href="NetKernel.html#fn-recv_frame"><span class="sb-kind" style="color:var(--fn)">F</span>recv_frame</a>
 <a class="sl" href="NetKernel.html#fn-recv_frame_exact"><span class="sb-kind" style="color:var(--fn)">F</span>recv_frame_exact</a>
+<a class="sl" href="NetKernel.html#fn-recv_frame_until"><span class="sb-kind" style="color:var(--fn)">F</span>recv_frame_until</a>
 <a class="sl" href="NetKernel.html#fn-send_frame"><span class="sb-kind" style="color:var(--fn)">F</span>send_frame</a>
 <a class="sl" href="NetKernel.html#fn-str_to_bytes"><span class="sb-kind" style="color:var(--fn)">F</span>str_to_bytes</a>
 <a class="sl" href="NetKernel.html#fn-to_wire"><span class="sb-kind" style="color:var(--fn)">F</span>to_wire</a></div></div>
@@ -1547,6 +1631,8 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="NodeQueue.html#type-WriterState"><span class="sb-kind" style="color:var(--ty)">T</span>WriterState</a>
 <a class="sl" href="NodeQueue.html#type-WriterReq"><span class="sb-kind" style="color:var(--ty)">T</span>WriterReq</a>
 <a class="sl" href="NodeQueue.html#fn-cast"><span class="sb-kind" style="color:var(--fn)">F</span>cast</a>
+<a class="sl" href="NodeQueue.html#fn-close"><span class="sb-kind" style="color:var(--fn)">F</span>close</a>
+<a class="sl" href="NodeQueue.html#fn-close_fd"><span class="sb-kind" style="color:var(--fn)">F</span>close_fd</a>
 <a class="sl" href="NodeQueue.html#fn-consumed"><span class="sb-kind" style="color:var(--fn)">F</span>consumed</a>
 <a class="sl" href="NodeQueue.html#fn-credit"><span class="sb-kind" style="color:var(--fn)">F</span>credit</a>
 <a class="sl" href="NodeQueue.html#fn-decode_credit"><span class="sb-kind" style="color:var(--fn)">F</span>decode_credit</a>
@@ -1942,6 +2028,9 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Session.html#fn-attach"><span class="sb-kind" style="color:var(--fn)">F</span>attach</a>
 <a class="sl" href="Session.html#fn-close"><span class="sb-kind" style="color:var(--fn)">F</span>close</a>
 <a class="sl" href="Session.html#fn-emit"><span class="sb-kind" style="color:var(--fn)">F</span>emit</a>
+<a class="sl" href="Session.html#fn-fail"><span class="sb-kind" style="color:var(--fn)">F</span>fail</a>
+<a class="sl" href="Session.html#fn-leave"><span class="sb-kind" style="color:var(--fn)">F</span>leave</a>
+<a class="sl" href="Session.html#fn-on_cancel"><span class="sb-kind" style="color:var(--fn)">F</span>on_cancel</a>
 <a class="sl" href="Session.html#fn-register"><span class="sb-kind" style="color:var(--fn)">F</span>register</a>
 <a class="sl" href="Session.html#fn-suspend"><span class="sb-kind" style="color:var(--fn)">F</span>suspend</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="SessionNode.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="SessionNode.html">SessionNode</a></div><div class="sb-sub"><a class="sl" href="SessionNode.html#type-Link"><span class="sb-kind" style="color:var(--ty)">T</span>Link</a>
@@ -1966,7 +2055,10 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="SessionNode.html#fn-party"><span class="sb-kind" style="color:var(--fn)">F</span>party</a>
 <a class="sl" href="SessionNode.html#fn-require"><span class="sb-kind" style="color:var(--fn)">F</span>require</a>
 <a class="sl" href="SessionNode.html#fn-run"><span class="sb-kind" style="color:var(--fn)">F</span>run</a>
+<a class="sl" href="SessionNode.html#fn-run_cluster"><span class="sb-kind" style="color:var(--fn)">F</span>run_cluster</a>
 <a class="sl" href="SessionNode.html#fn-run_error_message"><span class="sb-kind" style="color:var(--fn)">F</span>run_error_message</a>
+<a class="sl" href="SessionNode.html#fn-run_hosted"><span class="sb-kind" style="color:var(--fn)">F</span>run_hosted</a>
+<a class="sl" href="SessionNode.html#fn-run_hosted_or"><span class="sb-kind" style="color:var(--fn)">F</span>run_hosted_or</a>
 <a class="sl" href="SessionNode.html#fn-serve"><span class="sb-kind" style="color:var(--fn)">F</span>serve</a>
 <a class="sl" href="SessionNode.html#fn-serve_outcome"><span class="sb-kind" style="color:var(--fn)">F</span>serve_outcome</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Set.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Set.html">Set</a></div><div class="sb-sub"><a class="sl" href="Set.html#type-SEntry"><span class="sb-kind" style="color:var(--ty)">T</span>SEntry</a>
@@ -2124,6 +2216,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="sb-group"><div class="sb-group-hdr" data-href="Socket.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Socket.html">Socket</a></div><div class="sb-sub"><a class="sl" href="Socket.html#type-SocketError"><span class="sb-kind" style="color:var(--ty)">T</span>SocketError</a>
 <a class="sl" href="Socket.html#fn-close"><span class="sb-kind" style="color:var(--fn)">F</span>close</a>
 <a class="sl" href="Socket.html#fn-connect"><span class="sb-kind" style="color:var(--fn)">F</span>connect</a>
+<a class="sl" href="Socket.html#fn-connect_timeout"><span class="sb-kind" style="color:var(--fn)">F</span>connect_timeout</a>
 <a class="sl" href="Socket.html#fn-error_message"><span class="sb-kind" style="color:var(--fn)">F</span>error_message</a>
 <a class="sl" href="Socket.html#fn-recv"><span class="sb-kind" style="color:var(--fn)">F</span>recv</a>
 <a class="sl" href="Socket.html#fn-recv_deadline"><span class="sb-kind" style="color:var(--fn)">F</span>recv_deadline</a>
@@ -2229,23 +2322,31 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Swim.html#fn-make"><span class="sb-kind" style="color:var(--fn)">F</span>make</a>
 <a class="sl" href="Swim.html#fn-on_ack"><span class="sb-kind" style="color:var(--fn)">F</span>on_ack</a>
 <a class="sl" href="Swim.html#fn-on_gossip"><span class="sb-kind" style="color:var(--fn)">F</span>on_gossip</a>
-<a class="sl" href="Swim.html#fn-refute"><span class="sb-kind" style="color:var(--fn)">F</span>refute</a></div></div>
+<a class="sl" href="Swim.html#fn-refute"><span class="sb-kind" style="color:var(--fn)">F</span>refute</a>
+<a class="sl" href="Swim.html#fn-suspect_member"><span class="sb-kind" style="color:var(--fn)">F</span>suspect_member</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="SwimDriver.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="SwimDriver.html">SwimDriver</a></div><div class="sb-sub"><a class="sl" href="SwimDriver.html#type-State"><span class="sb-kind" style="color:var(--ty)">T</span>State</a>
 <a class="sl" href="SwimDriver.html#type-Event"><span class="sb-kind" style="color:var(--ty)">T</span>Event</a>
 <a class="sl" href="SwimDriver.html#type-WireMsg"><span class="sb-kind" style="color:var(--ty)">T</span>WireMsg</a>
+<a class="sl" href="SwimDriver.html#fn-action_frames"><span class="sb-kind" style="color:var(--fn)">F</span>action_frames</a>
 <a class="sl" href="SwimDriver.html#fn-anti_entropy_peers"><span class="sb-kind" style="color:var(--fn)">F</span>anti_entropy_peers</a>
 <a class="sl" href="SwimDriver.html#fn-bump_anti_entropy"><span class="sb-kind" style="color:var(--fn)">F</span>bump_anti_entropy</a>
+<a class="sl" href="SwimDriver.html#fn-decode_member_gossip"><span class="sb-kind" style="color:var(--fn)">F</span>decode_member_gossip</a>
+<a class="sl" href="SwimDriver.html#fn-decode_members_sync"><span class="sb-kind" style="color:var(--fn)">F</span>decode_members_sync</a>
 <a class="sl" href="SwimDriver.html#fn-decode_msg"><span class="sb-kind" style="color:var(--fn)">F</span>decode_msg</a>
 <a class="sl" href="SwimDriver.html#fn-dispatch"><span class="sb-kind" style="color:var(--fn)">F</span>dispatch</a>
 <a class="sl" href="SwimDriver.html#fn-dispatch_all"><span class="sb-kind" style="color:var(--fn)">F</span>dispatch_all</a>
 <a class="sl" href="SwimDriver.html#fn-dispatch_all_with_load"><span class="sb-kind" style="color:var(--fn)">F</span>dispatch_all_with_load</a>
 <a class="sl" href="SwimDriver.html#fn-dispatch_with_load"><span class="sb-kind" style="color:var(--fn)">F</span>dispatch_with_load</a>
+<a class="sl" href="SwimDriver.html#fn-encode_member_gossip"><span class="sb-kind" style="color:var(--fn)">F</span>encode_member_gossip</a>
+<a class="sl" href="SwimDriver.html#fn-encode_members_sync"><span class="sb-kind" style="color:var(--fn)">F</span>encode_members_sync</a>
 <a class="sl" href="SwimDriver.html#fn-encode_msg"><span class="sb-kind" style="color:var(--fn)">F</span>encode_msg</a>
 <a class="sl" href="SwimDriver.html#fn-fresh_peer_loads"><span class="sb-kind" style="color:var(--fn)">F</span>fresh_peer_loads</a>
 <a class="sl" href="SwimDriver.html#fn-make"><span class="sb-kind" style="color:var(--fn)">F</span>make</a>
 <a class="sl" href="SwimDriver.html#fn-msg_to_event"><span class="sb-kind" style="color:var(--fn)">F</span>msg_to_event</a>
 <a class="sl" href="SwimDriver.html#fn-peer_load"><span class="sb-kind" style="color:var(--fn)">F</span>peer_load</a>
-<a class="sl" href="SwimDriver.html#fn-step"><span class="sb-kind" style="color:var(--fn)">F</span>step</a></div></div>
+<a class="sl" href="SwimDriver.html#fn-step"><span class="sb-kind" style="color:var(--fn)">F</span>step</a>
+<a class="sl" href="SwimDriver.html#fn-tag_member_gossip"><span class="sb-kind" style="color:var(--fn)">F</span>tag_member_gossip</a>
+<a class="sl" href="SwimDriver.html#fn-tag_members_sync"><span class="sb-kind" style="color:var(--fn)">F</span>tag_members_sync</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="System.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="System.html">System</a></div><div class="sb-sub"><a class="sl" href="System.html#fn-arch"><span class="sb-kind" style="color:var(--fn)">F</span>arch</a>
 <a class="sl" href="System.html#fn-argv"><span class="sb-kind" style="color:var(--fn)">F</span>argv</a>
 <a class="sl" href="System.html#fn-cmd"><span class="sb-kind" style="color:var(--fn)">F</span>cmd</a>
@@ -2451,21 +2552,21 @@ let s = Session.attach(io, SessionNode.ops(p))
 SessionNode.serve(p)          -- deliveries, until every peer's endpoint closes
 SessionNode.finish(p)</code></pre><p>Three or more: one <code>party</code>, then one join per peer. The side that ACCEPTS learns the peer's role from its hello (a listener does not know which role will connect next); the side that connects names it.</p><pre><code>let p0 = SessionNode.party(Relay_Msg.role_B(), &quot;node-b&quot;, fn ep -&gt; ())
 let p1 = SessionNode.accept_from(p0, conn_from_a)
-let p  = SessionNode.connect_to(p1, Relay_Msg.role_C(), conn_to_c)</code></pre><p>Connect rule, so no configuration and no deadlock: for roles i &lt; j, i listens and j connects.</p><p>On the wire, per peer connection (the control/data split): data     ACTOR_MSG &quot;SessionNode.Deliver&quot; [to, from, msg], through a NodeQueue (credit-based flow control); &quot;SessionNode.Bye&quot; when an endpoint closes. control  &quot;SessionNode.Hello&quot; [role, pid] (the ACCEPTING side announces first), CREDIT, and a final Bye.</p><p>Receiving: a delivery is sent to this node's endpoint actor, whose turn runs the continuation <code>suspend</code> installed. ONE actor per party, whatever the number of peers, so a node's resumptions (and prints) run in mailbox order. &quot;Consumed&quot; for credit is &quot;in the mailbox&quot;.</p><p>Ordering: each connection is FIFO, but messages from DIFFERENT peers race. A role that receives from A and then from B can see B's delivery first, so <code>suspend</code> takes the role the continuation expects and a delivery from anyone else is parked until the continuation that wants it is installed (<code>pending</code>). <code>suspend</code>'s expected role is 0 for &quot;any&quot;, which is what a same-thread transport and a two-party session pass.</p><p>The role runner (<code>run</code>, at the end of this file) does all of the above from a role, its peer set and a role-&gt;address table, in the order that cannot deadlock; the generated <code>&lt;P&gt;_Run.run_&lt;Role&gt;</code> is its typed front. Design: specs/progress/2026-09-16-role-runner.md.</p></div><h2>Types</h2><div class="item" id="type-Link"><div class="ih"><span class="badge bty">type</span><span class="name">Link</span><span class="sig"><a href="#type-Link">Link</a> = { role : Int, data_fd : Int, control_fd : Int, peer : GlobalPid.Pid,</span><a class="anchor-link" href="#type-Link" title="Link">#</a></div><div class="ib"></div></div>
+let p  = SessionNode.connect_to(p1, Relay_Msg.role_C(), conn_to_c)</code></pre><p>Connect rule, so no configuration and no deadlock: for roles i &lt; j, i listens and j connects.</p><p>On the wire, per peer connection (the control/data split): data     ACTOR_MSG &quot;SessionNode.Deliver&quot; [to, from, msg], through a NodeQueue (credit-based flow control); &quot;SessionNode.Bye&quot; when an endpoint closes. control  &quot;SessionNode.Hello&quot; [role, pid] (the ACCEPTING side announces first), CREDIT, and a final Bye.</p><p>Receiving: a delivery is sent to this node's endpoint actor, whose turn runs the continuation <code>suspend</code> installed. ONE actor per party, whatever the number of peers, so a node's resumptions (and prints) run in mailbox order. &quot;Consumed&quot; for credit is &quot;in the mailbox&quot;.</p><p>Ordering: each connection is FIFO, but messages from DIFFERENT peers race. A role that receives from A and then from B can see B's delivery first, so <code>suspend</code> takes the role the continuation expects and a delivery from anyone else is parked until the continuation that wants it is installed (<code>pending</code>). <code>suspend</code>'s expected role is 0 for &quot;any&quot;, which is what a same-thread transport and a two-party session pass.</p><p>Failure (specs/todos/2026-09-18-choreography-failure-handling.md, after Maty's affine sessions): a role that fails is CANCELLED. Its node sends a <code>SessionNode.Cancel</code> frame on each data connection, behind everything it already sent, and a dropped connection counts as one at that point in the stream. Messages to a cancelled role are discarded. A local endpoint fails only when its continuation waits on a role that can send nothing more and nothing from that role is still queued; its cancel handler then runs and it is cancelled in turn, which is how failure cascades. Every one of these events goes through the endpoint actor's mailbox, behind the deliveries that preceded it, so the &quot;handle what was already sent&quot; rule holds by construction. A heartbeat on each data connection catches a peer that stops without closing.</p><p>The role runner (<code>run</code>, at the end of this file) does all of the above from a role, its peer set and a role-&gt;address table, in the order that cannot deadlock; the generated <code>&lt;P&gt;_Run.run_&lt;Role&gt;</code> is its typed front. <code>run_hosted</code> is the same party driving a role hosted in an actor (the generated event API) -- <code>&lt;P&gt;_Run.host_&lt;Role&gt;</code>. Design: specs/progress/2026-09-16-role-runner.md and specs/progress/2026-09-17-actor-hosted-runner.md.</p></div><h2>Types</h2><div class="item" id="type-Link"><div class="ih"><span class="badge bty">type</span><span class="name">Link</span><span class="sig"><a href="#type-Link">Link</a> = { role : Int, data_fd : Int, control_fd : Int, peer : GlobalPid.Pid,</span><a class="anchor-link" href="#type-Link" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="type-EndpointState"><div class="ih"><span class="badge bty">type</span><span class="name">EndpointState</span><span class="sig"><a href="#type-EndpointState">EndpointState</a> = { n : Int, links : Int, ended : Int, failed : List((Int, String)),</span><a class="anchor-link" href="#type-EndpointState" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="type-Party"><div class="ih"><span class="badge bty">type</span><span class="name">Party</span><span class="sig"><a href="#type-Party">Party</a> = { my_role : Int, node_id : String,</span><a class="anchor-link" href="#type-Party" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="type-EndpointReq"><div class="ih"><span class="badge bty">type</span><span class="name">EndpointReq</span><span class="sig"><a href="#type-EndpointReq">EndpointReq</a> = DeliverReq | OutcomeReq</span><a class="anchor-link" href="#type-EndpointReq" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="type-Addr"><div class="ih"><span class="badge bty">type</span><span class="name">Addr</span><span class="sig"><a href="#type-Addr">Addr</a> = { role : Int, host : String, port : Int }</span><a class="anchor-link" href="#type-Addr" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="type-Addrs"><div class="ih"><span class="badge bty">type</span><span class="name">Addrs</span><span class="sig"><a href="#type-Addrs">Addrs</a> = List(<a href="#type-Addr">Addr</a>)</span><a class="anchor-link" href="#type-Addrs" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="type-RunError"><div class="ih"><span class="badge bty">type</span><span class="name">RunError</span><span class="sig"><a href="#type-RunError">RunError</a> = PeerGone(Int, String) | Protocol(Int, String) | Listen(Int, String) | Accept(String) | Connect(Int, String)</span><a class="anchor-link" href="#type-RunError" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-accept_from"><div class="ih"><span class="badge bfn">fn</span><span class="name">accept_from</span><span class="sig">accept_from(p : <a href="#type-Party">Party</a>, conn : <a href="PeerRegistry.html#type-Peer">Peer</a>) : <a href="#type-Party">Party</a></span><a class="anchor-link" href="#fn-accept_from" title="Link">#</a></div><div class="ib"><p>Add the peer on a connection this node ACCEPTED. The accepting side announces first, then learns the peer's role from its hello -- a listener does not know which role connects next.</p></div></div>
+<div class="item" id="type-RunError"><div class="ih"><span class="badge bty">type</span><span class="name">RunError</span><span class="sig"><a href="#type-RunError">RunError</a> = Cancelled(Int, String) | Protocol(Int, String) | HostGone(Int) | Left(String) | Listen(Int, String) | Accept(String) | Connect(Int, String)</span><a class="anchor-link" href="#type-RunError" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-accept_from"><div class="ih"><span class="badge bfn">fn</span><span class="name">accept_from</span><span class="sig">accept_from(p : <a href="#type-Party">Party</a>, conn : <a href="PeerRegistry.html#type-Peer">Peer</a>) : <a href="#type-Party">Party</a></span><a class="anchor-link" href="#fn-accept_from" title="Link">#</a></div><div class="ib"><p>Add the peer on a connection this node ACCEPTED. The accepting side announces first, then learns the peer's role from its hello -- a listener does not know which role connects next.</p></div></div>
 <div class="item" id="fn-accepts"><div class="ih"><span class="badge bfn">fn</span><span class="name">accepts</span><span class="sig">accepts(my_role : Int, peers : List(Int)) : List(Int)</span><a class="anchor-link" href="#fn-accepts" title="Link">#</a></div><div class="ib"><p>The peers [my_role] accepts: those above it.</p></div></div>
-<div class="item" id="fn-addr_of"><div class="ih"><span class="badge bfn">fn</span><span class="name">addr_of</span><span class="sig">addr_of(addrs : <a href="#type-Addrs">Addrs</a>, role : Int) : Option(<a href="#type-Addr">Addr</a>)</span><a class="anchor-link" href="#fn-addr_of" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="fn-addrs_from_env"><div class="ih"><span class="badge bfn">fn</span><span class="name">addrs_from_env</span><span class="sig">addrs_from_env(prefix : String, roles : List((String, Int))) : <a href="#type-Addrs">Addrs</a></span><a class="anchor-link" href="#fn-addrs_from_env" title="Link">#</a></div><div class="ib"><p>One entry per role from the environment: <code>&lt;PREFIX&gt;_&lt;ROLE&gt;_ADDR = host:port</code> (upper-cased) for each <code>(name, index)</code> in [roles], the generated <code>&lt;P&gt;_Msg.role_names()</code>. An unset variable is no entry, and <code>run</code> names the roles it needed; a set one that does not parse panics. The generated <code>&lt;P&gt;_Run.addrs_from_env()</code> passes the protocol's name and roles.</p></div></div>
+<div class="item" id="fn-addr_of"><div class="ih"><span class="badge bfn">fn</span><span class="name">addr_of</span><span class="sig">addr_of(addrs : List(<a href="#type-Addr">Addr</a>), role : Int) : Option(<a href="#type-Addr">Addr</a>)</span><a class="anchor-link" href="#fn-addr_of" title="Link">#</a></div><div class="ib"></div></div>
+<div class="item" id="fn-addrs_from_env"><div class="ih"><span class="badge bfn">fn</span><span class="name">addrs_from_env</span><span class="sig">addrs_from_env(prefix : String, roles : List((String, Int))) : List(<a href="#type-Addr">Addr</a>)</span><a class="anchor-link" href="#fn-addrs_from_env" title="Link">#</a></div><div class="ib"><p>One entry per role from the environment: <code>&lt;PREFIX&gt;_&lt;ROLE&gt;_ADDR = host:port</code> (upper-cased) for each <code>(name, index)</code> in [roles], the generated <code>&lt;P&gt;_Msg.role_names()</code>. An unset variable is no entry, and <code>run</code> names the roles it needed; a set one that does not parse panics. The generated <code>&lt;P&gt;_Run.addrs_from_env()</code> passes the protocol's name and roles.</p></div></div>
 <div class="item" id="fn-connect_to"><div class="ih"><span class="badge bfn">fn</span><span class="name">connect_to</span><span class="sig">connect_to(p : <a href="#type-Party">Party</a>, their_role : Int, conn : <a href="PeerRegistry.html#type-Peer">Peer</a>) : <a href="#type-Party">Party</a></span><a class="anchor-link" href="#fn-connect_to" title="Link">#</a></div><div class="ib"><p>Add the peer in role [their_role] on a connection this node OPENED. The peer announces first; a role in its hello that is not [their_role] is a wiring mistake and fails loudly.</p></div></div>
 <div class="item" id="fn-deliver"><div class="ih"><span class="badge bfn">fn</span><span class="name">deliver</span><span class="sig">deliver(p : <a href="#type-Party">Party</a>, ep : Int, from : Int, msg : <a href="Bytes.html#type-Bytes">Bytes</a>) : Int</span><a class="anchor-link" href="#fn-deliver" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="fn-dials"><div class="ih"><span class="badge bfn">fn</span><span class="name">dials</span><span class="sig">dials(my_role : Int, peers : List(Int)) : List(Int)</span><a class="anchor-link" href="#fn-dials" title="Link">#</a></div><div class="ib"><p>The peers [my_role] dials: those below it, ascending (i &lt; j: i listens, j connects).</p></div></div>
-<div class="item" id="fn-finish"><div class="ih"><span class="badge bfn">fn</span><span class="name">finish</span><span class="sig">finish(p : <a href="#type-Party">Party</a>) : Unit</span><a class="anchor-link" href="#fn-finish" title="Link">#</a></div><div class="ib"><p>Tear every connection down: close data, Bye on control, await the control reader, close control.</p></div></div>
-<div class="item" id="fn-missing_addrs"><div class="ih"><span class="badge bfn">fn</span><span class="name">missing_addrs</span><span class="sig">missing_addrs(my_role : Int, peers : List(Int), addrs : <a href="#type-Addrs">Addrs</a>) : List(Int)</span><a class="anchor-link" href="#fn-missing_addrs" title="Link">#</a></div><div class="ib"><p>The roles [my_role] needs an address for and [addrs] lacks: every peer it dials, and itself if it accepts anyone. Empty means <code>run</code> can start.</p></div></div>
+<div class="item" id="fn-finish"><div class="ih"><span class="badge bfn">fn</span><span class="name">finish</span><span class="sig">finish(p : <a href="#type-Party">Party</a>) : Unit</span><a class="anchor-link" href="#fn-finish" title="Link">#</a></div><div class="ib"><p>Tear every connection down: close data, Bye on control, await the control reader, close control. (A cluster-mode party owns no connection: nothing to do.)</p></div></div>
+<div class="item" id="fn-missing_addrs"><div class="ih"><span class="badge bfn">fn</span><span class="name">missing_addrs</span><span class="sig">missing_addrs(my_role : Int, peers : List(Int), addrs : List(<a href="#type-Addr">Addr</a>)) : List(Int)</span><a class="anchor-link" href="#fn-missing_addrs" title="Link">#</a></div><div class="ib"><p>The roles [my_role] needs an address for and [addrs] lacks: every peer it dials, and itself if it accepts anyone. Empty means <code>run</code> can start.</p></div></div>
 <div class="item" id="fn-open"><div class="ih"><span class="badge bfn">fn</span><span class="name">open</span><span class="sig">open(conn : <a href="PeerRegistry.html#type-Peer">Peer</a>, node_id : String, accepted : Bool, on_close : Int -&gt; Unit) : <a href="#type-Party">Party</a></span><a class="anchor-link" href="#fn-open" title="Link">#</a></div><div class="ib"><p>The two-party case in one call: a party of one peer over [conn], with role numbers left at 0 (a single-peer party routes every message to its one connection). [accepted] says which side of the connection this is.</p></div></div>
 <div class="item" id="fn-ops"><div class="ih"><span class="badge bfn">fn</span><span class="name">ops</span><span class="sig">ops(p : <a href="#type-Party">Party</a>) : Session.Ops</span><a class="anchor-link" href="#fn-ops" title="Link">#</a></div><div class="ib"><p>The <code>Session.Ops</code> for [p]: hand it to <code>Session.attach</code>.</p></div></div>
 <div class="item" id="fn-parse_addr"><div class="ih"><span class="badge bfn">fn</span><span class="name">parse_addr</span><span class="sig">parse_addr(role : Int, s : String) : Result(<a href="#type-Addr">Addr</a>, String)</span><a class="anchor-link" href="#fn-parse_addr" title="Link">#</a></div><div class="ib"><p>Parse <code>host:port</code> into the entry for [role].</p></div></div>
@@ -2473,11 +2574,17 @@ let p  = SessionNode.connect_to(p1, Relay_Msg.role_C(), conn_to_c)</code></pre><
 <div class="item" id="fn-require"><div class="ih"><span class="badge bfn">fn</span><span class="name">require</span><span class="sig">require(p : <a href="#type-Party">Party</a>, peers : List(Int)) : <a href="#type-Party">Party</a></span><a class="anchor-link" href="#fn-require" title="Link">#</a></div><div class="ib"><p>Check that [p] has a connection to every role in [peers] -- the generated <code>&lt;P&gt;_Msg.peers_&lt;R&gt;()</code>, every role [R] exchanges a message with -- and panic naming the missing ones. Call it before <code>serve</code>, so a wiring mistake fails at startup rather than at the first <code>emit</code> to an unreachable role. A party with exactly one peer passes: it routes everything to that connection whatever the role numbers say (the two-party case, where <code>open</code> never asked for them).</p></div></div>
 <div class="item" id="fn-run"><div class="ih"><span class="badge bfn">fn</span><span class="name">run</span><span class="sig">run(io : Cap(IO), my_role : Int, peers : List(Int), node_id : String, secret : String,</span><a class="anchor-link" href="#fn-run" title="Link">#</a></div><div class="ib"><p>Run role [my_role] of a session on this node: listen if any peer is above it, connect to every peer below it (ascending, with retry), accept every peer above it, check the party against [peers] (<code>&lt;P&gt;_Msg.peers_&lt;R&gt;()</code>), attach, run [body] to its first suspension, serve, and tear down. [addrs] must hold this role's own entry iff it accepts anyone and an entry for every peer it dials; a missing one panics by role before any socket opens. [node_id] names this node in the handshake and [secret] is the cluster secret every node shares. The generated <code>&lt;P&gt;_Run.run_&lt;Role&gt;</code> supplies the role, its peers and the typed entry state.</p><pre><code>`Ok(())` when every peer's endpoint closed; else the `RunError` that ended
 the session, after the party has been torn down.</code></pre></div></div>
+<div class="item" id="fn-run_cluster"><div class="ih"><span class="badge bfn">fn</span><span class="name">run_cluster</span><span class="sig">run_cluster(io : Cap(IO), node : ClusterNode.ClusterHandle, my_role : Int, peers : List(Int), session : String,</span><a class="anchor-link" href="#fn-run_cluster" title="Link">#</a></div><div class="ib"><p><code>run</code>, over the running cluster node [node] (ClusterNode.start) instead of connections of its own: role [my_role] of session [session] (any string the roles agree on -- a fresh one per session). Each role registers its endpoint under the session's name and finds its peers' by name (waiting up to 30 s), then [body] drives it exactly as for <code>run</code>. A peer is gone when it closes or is cancelled, or when its node's data connection ends -- SWIM declared the node dead (&quot;node &lt;name&gt; dead: &lt;cause&gt;&quot;) or the connection was lost. Every role must be on a different node. The generated <code>&lt;P&gt;_Run.cluster_&lt;Role&gt;</code> supplies the role and its peers.</p></div></div>
 <div class="item" id="fn-run_error_message"><div class="ih"><span class="badge bfn">fn</span><span class="name">run_error_message</span><span class="sig">run_error_message(e : <a href="#type-RunError">RunError</a>) : String</span><a class="anchor-link" href="#fn-run_error_message" title="Link">#</a></div><div class="ib"></div></div>
-<div class="item" id="fn-serve"><div class="ih"><span class="badge bfn">fn</span><span class="name">serve</span><span class="sig">serve(p : <a href="#type-Party">Party</a>) : Unit</span><a class="anchor-link" href="#fn-serve" title="Link">#</a></div><div class="ib"><p><code>serve_outcome</code>, panicking on a reader failure; the transport's original contract.</p></div></div>
-<div class="item" id="fn-serve_outcome"><div class="ih"><span class="badge bfn">fn</span><span class="name">serve_outcome</span><span class="sig">serve_outcome(p : <a href="#type-Party">Party</a>) : List((Int, String))</span><a class="anchor-link" href="#fn-serve_outcome" title="Link">#</a></div><div class="ib"><p>Read deliveries from every peer until each one's endpoint closes, or until the first reader fails before this node's endpoint closed: <code>Nil</code> for a clean end, else <code>(role, why)</code> for each failed reader. Every resumption runs in this node's endpoint actor, so call it after driving the local role to its first suspension. <code>serve</code> is this with a panic on failure; <code>run</code> maps the failure to a <code>RunError</code>.</p><pre><code>On a failure the other readers are still parked on peers that are alive
-and waiting; they are ended with `tcp_shutdown` (a close would not wake
-them), so `finish` can follow at once and the process can exit.</code></pre></div></div></main></div><script>
+<div class="item" id="fn-run_hosted"><div class="ih"><span class="badge bfn">fn</span><span class="name">run_hosted</span><span class="sig">run_hosted(io : Cap(IO), my_role : Int, peers : List(Int), node_id : String, secret : String,</span><a class="anchor-link" href="#fn-run_hosted" title="Link">#</a></div><div class="ib"><p><code>run</code>, with the role HOSTED IN AN ACTOR [host] (its pid as an Int, <code>pid_to_int</code>): the generated event API (<code>Parked_&lt;Role&gt;</code> in the actor's state, <code>await_*</code>/<code>resume</code>) instead of a body. [start] runs once the party is connected, with the session capability: send it to the actor, whose start handler registers and parks. [deliver] is called for every delivery the actor's parked endpoint awaits -- <code>(s, from, msg, ep)</code>, what its resume handler takes: send them on. Deliveries are one per suspension, in mailbox order, and one that arrives before the host has re-parked is held for it.</p><pre><code>The host is monitored: its `Down` (a crash, a kill, a supervisor's restart)
+cancels its role with `Err(HostGone(ep))`, and the peers are sent a Cancel
+(they are cancelled in turn only if they were waiting on it). A restarted
+actor starts `Idle` and cannot continue a session its predecessor parked;
+run again for a new one. `run_hosted_or` also tells the actor itself. The
+generated `&lt;P&gt;_Run.host_&lt;Role&gt;` supplies the role and its peers.</code></pre></div></div>
+<div class="item" id="fn-run_hosted_or"><div class="ih"><span class="badge bfn">fn</span><span class="name">run_hosted_or</span><span class="sig">run_hosted_or(io : Cap(IO), my_role : Int, peers : List(Int), node_id : String, secret : String,</span><a class="anchor-link" href="#fn-run_hosted_or" title="Link">#</a></div><div class="ib"><p><code>run_hosted</code>, telling the actor when its endpoint is cancelled: [cancel] gets <code>(s, role, cause, ep)</code> -- the role it was waiting on and why that role is gone. Send it to the actor, whose handler stores the generated <code>&lt;P&gt;_&lt;Role&gt;.cancel(state.parked)</code> (a <code>Closed</code> parked value) and may update the rest of its state; it cannot communicate in the cancelled session.</p></div></div>
+<div class="item" id="fn-serve"><div class="ih"><span class="badge bfn">fn</span><span class="name">serve</span><span class="sig">serve(p : <a href="#type-Party">Party</a>) : Unit</span><a class="anchor-link" href="#fn-serve" title="Link">#</a></div><div class="ib"><p><code>serve_outcome</code>, panicking if our endpoint was cancelled; the transport's original contract.</p></div></div>
+<div class="item" id="fn-serve_outcome"><div class="ih"><span class="badge bfn">fn</span><span class="name">serve_outcome</span><span class="sig">serve_outcome(p : <a href="#type-Party">Party</a>) : List((Int, String))</span><a class="anchor-link" href="#fn-serve_outcome" title="Link">#</a></div><div class="ib"><p>Read deliveries from every peer until each connection has ended: the peer closed, was cancelled, or went away. A peer's failure no longer ends the session for this node at once: it cancels our endpoint only if our endpoint is waiting on that peer with nothing from it queued (Maty's rule; see the module comment), and cancellation then spreads to our other peers as a Cancel frame. <code>Nil</code> if our endpoint ended normally, else <code>(role, cause)</code> for its cancellation. Every resumption runs in this node's endpoint actor, so call it after driving the local role to its first suspension. <code>serve</code> panics on a cancellation; <code>run</code> returns it.</p></div></div></main></div><script>
 /* Theme toggle */
 function getTheme(){var t=localStorage.getItem('march-doc-theme');
 if(t)return t;return window.matchMedia('(prefers-color-scheme:light)').matches?'light':'dark';}
