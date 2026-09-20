@@ -8,6 +8,12 @@ export MARCH_SESSION_CONNECT_MS=8000
 export SECRET_A=first
 export SECRET_B=second
 
+# Compile both nodes first: A's accept window (8 s) must not include B's
+# compile, which on a CI runner can be longer than that -- A then gave up
+# and B's dials were refused for a different reason than the one tested.
+compile a
+compile b
+
 ORDERED=1
 start_node a
 wait_line a "node-a: up"
