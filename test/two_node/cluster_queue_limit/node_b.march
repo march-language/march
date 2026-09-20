@@ -1,0 +1,50 @@
+-- Scenario "cluster_queue_limit": node-b plays Server, sends the go-ahead,
+-- and is then frozen by the scenario; see scenario.sh.
+mod ClusterQueueLimitB do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+
+  @[endpoints]
+  protocol Bulk do
+    Server -> Client : Int
+    Client -> Server : String
+    Client -> Server : String
+    Client -> Server : String
+    Server -> Client : Int
+  end
+
+  -- String.repeat, not a concat loop: the loop is quadratic and, under the
+  -- sanitizer, took longer than SWIM's suspect timeout, so node-b was
+  -- declared dead before the queue ever filled.
+  pfn pad(n : Int) : String do String.repeat("x", n) end
+
+  pfn role_server(s : Cap(Session.Live), st : Bulk_Server.S_send_Msg_Server_Client_1) : Bulk_Server.Yield do
+    let st1 = Bulk_Server.send_Msg_Server_Client_1(s, st, 1)
+    println("Server: sent go")
+    Bulk_Server.recv_Msg_Client_Server_1(s, st1, fn (_m1, st2) ->
+      Bulk_Server.recv_Msg_Client_Server_2(s, st2, fn (_m2, st3) ->
+        Bulk_Server.recv_Msg_Client_Server_3(s, st3, fn (_m3, st4) ->
+          Bulk_Server.close(s, Bulk_Server.send_Msg_Server_Client_2(s, st4, 2)))))
+  end
+
+  fn main(c : Cap(IO)) do
+    let seed = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A"))
+    let cfg = ClusterNode.config("node-b", Env.require_int("MARCH_PORT_B"), "", Cons(seed, Nil), "ql-secret", 1)
+    -- SWIM's suspect timeout is raised to 15 s here: this scenario is about
+    -- the queue limit giving up on a peer that stops reading, and under the
+    -- sanitizer the default 3 s could declare node-b dead first.
+    match ClusterNode.start({ cfg with swim: Swim.config(500, 15000, 2) }) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        if ClusterNode.await_members(h, 1, 120000) do () else panic("node-b: never joined") end
+        let _ = Bulk_Run.cluster_Server(c, h, "q1", fn (s, st) -> role_server(s, st))
+        ClusterNode.stop(h)
+    end
+  end
+end

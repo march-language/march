@@ -12,6 +12,15 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
+- **One slow choreography session no longer holds up the others between two nodes.** A
+  frame for a session that was not set up yet made the node's shared reader poll for it,
+  up to 10 seconds, while every other session's frames waited. Such a frame is now held
+  by its own session. This also fixes a session whose first message arrived before its
+  handler and was never delivered.
+- **A cluster session gives up on a peer that stops reading.** Session frames queue
+  without limit so none is dropped, and cluster mode has no heartbeat to notice a peer
+  that is alive but not reading. Past `MARCH_SESSION_QUEUE_MAX_BYTES` (64 MiB by
+  default) queued for a peer, the session treats it as gone.
 - **On Linux, a refused `tcp_connect` / `Socket.connect_timeout` now says it was refused.**
   After a connect that had to wait, the error often read `Interrupted system call` (or
   `Success`) instead of `Connection refused`, because the outcome was read back from the

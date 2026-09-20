@@ -70,10 +70,13 @@
 -- Design: specs/progress/2026-09-16-role-runner.md and
 -- specs/progress/2026-09-17-actor-hosted-runner.md.
 mod SessionNode do
+  needs IO
   needs IO.Mut
   needs IO.NetConnect
   needs IO.NetListen
+  needs IO.Process
   needs IO.Spawn
+  needs Session.Live
 
   pfn budget() : Int do 4096 end
 
@@ -217,10 +220,42 @@ mod SessionNode do
   -- (and the reader's `LinkEnded`). The queue grows only while the peer is slow,
   -- and a peer that stays silent is dropped by the heartbeat, whose
   -- `drop_link` lets the queue go.
+  --
+  -- Bounded all the same: past MARCH_SESSION_QUEUE_MAX_BYTES (default 64 MiB)
+  -- queued and unread for the peer, it has stopped reading (`over_limit`).
   pfn send_frame(p : Party, l : Link, type_tag : String, payload : List(Int)) : () do
-    -- `Unbounded` never refuses; a dead connection's reader reports it.
-    let _ = NodeQueue.cast(l.q, next_seq(p.meta), l.peer, wire_tag(p, type_tag), payload, NodeQueue.Unbounded)
-    ()
+    if Vault.get(p.meta, "over" ++ rkey(l.role)) != None do ()   -- given up on: discard
+    else
+      let limit = queue_limit()
+      if limit > 0 && NodeQueue.depth(l.q) > limit do over_limit(p, l, limit)
+      else
+        -- `Unbounded` never refuses; a dead connection's reader reports it.
+        let _ = NodeQueue.cast(l.q, next_seq(p.meta), l.peer, wire_tag(p, type_tag), payload, NodeQueue.Unbounded)
+        ()
+      end
+    end
+  end
+
+  pfn queue_limit() : Int do Env.get_int("MARCH_SESSION_QUEUE_MAX_BYTES", 67108864) end
+
+  -- More than [limit] bytes are queued for [l]'s peer and unread: it has
+  -- stopped reading, and it is given up on, once. Standalone, the
+  -- connection is this session's own and is torn down (`drop_link`, as the
+  -- heartbeat does for a silent peer). In cluster mode the connection and
+  -- its queue are the node's, shared with every other session to that
+  -- node, so only this session gives up: the peer is gone for it and its
+  -- frames to that peer are discarded from now on. Cluster sessions have no
+  -- heartbeat (SWIM watches the node, not whether it reads its data), so
+  -- without this a peer node that stopped reading would let the queue grow
+  -- without bound.
+  pfn over_limit(p : Party, l : Link, limit : Int) : () do
+    if Vault.incr(p.meta, "over" ++ rkey(l.role), 1) == 1 do
+      let why = "stopped reading (over " ++ int_to_string(limit) ++ " bytes queued)"
+      if is_cluster(p) do
+        let _ = send(p.ep, PeerGone(p, l.role, why))
+        link_ended(p, l.role, why)
+      else drop_link(p, l, why) end
+    else () end
   end
 
   -- Give up on [l]'s peer: report it gone, let its queue go, and shut BOTH
@@ -356,19 +391,22 @@ mod SessionNode do
   -- the next delivery is parked and nothing would ever look.) `Down` is a
   -- raw mailbox message, so a dedicated actor reads it with `receive`;
   -- `run_hosted` sets the monitor (`monitor(watcher, host)`, from outside
-  -- the actor, as the monitor fixture does) and sends `Stop` when the
-  -- session ends, so the watcher is not left parked in `receive`.
+  -- the actor, as the monitor fixture does) and kills the watcher when the
+  -- session ends, so it is not left parked in `receive`.
   actor HostWatch do
     state { n : Int }
     init  { n: 0 }
     on Watch(p : Party, ep : Int) do
+      -- Only a `Down` ever arrives: the session's end kills this actor
+      -- rather than messaging it (a message would be read here as a
+      -- `Down`, `receive()` being typed by this pattern).
       match receive() do
-        Down.Down(_, _, _) -> send(p.ep, HostDown(p, ep))
-        _ -> ()
+        Down.Down(_, _, _) ->
+          let _ = send(p.ep, HostDown(p, ep))
+          ()
       end
       { n: state.n + 1 }
     end
-    on Stop() do state end
   end
 
   -- Hand [msg] to the continuation that awaits on [ep]: the installed handler
@@ -517,6 +555,31 @@ mod SessionNode do
     -- `Session.leave`: this role exits the session on purpose.
     on Leave(p : Party, ep : Int, why : String) do
       cancel_endpoint(p, ep, p.my_role, "left: " ++ why, "left: " ++ why, kind_left())
+      state
+    end
+    -- Cluster mode: a frame that arrived before this session was ready
+    -- (its peers found, its party complete). Held here, in this actor's
+    -- mailbox order, rather than by the node's data reader, which every
+    -- other session and route on that connection shares; replayed on
+    -- `Ready`. A frame after `Ready` is handled at once.
+    on Early(slot : Vault(Party), p0 : Party, kind : Int, payload : Bytes) do
+      match Vault.get(slot, "p") do
+        Some(p) ->
+          if Vault.get(p.meta, "ready") != None do
+            let _ = cluster_kind_here(p, early_kind_name(kind), Bytes.to_list(payload))
+            ()
+          else park(p0.pending, -1, kind, payload) end
+        None -> park(p0.pending, -1, kind, payload)
+      end
+      state
+    end
+    on Ready(p : Party) do
+      Vault.set(p.meta, "ready", 1)
+      let held = Vault.get_or(p.pending, ekey(-1), Nil)
+      let _ = Vault.delete(p.pending, ekey(-1))
+      let _ = List.map(held, fn e -> match e do
+        (kind, payload) -> cluster_kind_here(p, early_kind_name(kind), Bytes.to_list(payload))
+      end)
       state
     end
   end
@@ -765,11 +828,7 @@ mod SessionNode do
   end
 
   pfn show_roles(rs : List(Int)) : String do
-    match rs do
-      Nil -> ""
-      Cons(r, Nil) -> int_to_string(r)
-      Cons(r, rest) -> int_to_string(r) ++ ", " ++ show_roles(rest)
-    end
+    String.join(List.map(rs, fn r -> int_to_string(r)), ", ")
   end
 
   doc """
@@ -841,7 +900,9 @@ mod SessionNode do
         -- turn, never here (see `Drain`).
         match Vault.get(forward, "f") do
           None -> ()
-          Some(_) -> send(ep_actor, Drain(party, ep))
+          Some(_) ->
+            let _ = send(ep_actor, Drain(party, ep))
+            ()
         end
         ep
       end,
@@ -858,7 +919,10 @@ mod SessionNode do
         Vault.set(party.cancel_hs, ekey(ep), h)
         ep
       end,
-      leave: fn (ep, why) -> send(ep_actor, Leave(party, ep, why))
+      leave: fn (ep, why) -> do
+        let _ = send(ep_actor, Leave(party, ep, why))
+        ()
+      end
     }
   end
 
@@ -1081,12 +1145,12 @@ mod SessionNode do
   fn run_error_message(e : RunError) : String do
     match e do
       Cancelled(role, why) -> "session_node: cancelled while waiting on role " ++ int_to_string(role) ++ ": " ++ why
-      Left(why) -> "session_node: left the session: " ++ why
+      RunError.Left(why) -> "session_node: left the session: " ++ why
       Protocol(role, why) -> "session_node: role " ++ int_to_string(role) ++ ": " ++ why
       HostGone(ep) -> "session_node: endpoint " ++ int_to_string(ep) ++ ": its host actor is gone and the parked session state with it; session abandoned"
       Listen(port, why) -> "session_node: listen on port " ++ int_to_string(port) ++ ": " ++ why
-      Accept(why) -> "session_node: accept: " ++ why
-      Connect(role, why) -> "session_node: connect to role " ++ int_to_string(role) ++ ": " ++ why
+      RunError.Accept(why) -> "session_node: accept: " ++ why
+      RunError.Connect(role, why) -> "session_node: connect to role " ++ int_to_string(role) ++ ": " ++ why
     end
   end
 
@@ -1188,19 +1252,19 @@ mod SessionNode do
         match addr_of(addrs, r) do
           None ->
             abort_links(p)
-            Err(Connect(r, "no address"))
+            Err(RunError.Connect(r, "no address"))
           Some(a) ->
             let t = connect_ms()
             let attempts = if t > 0 do if t / 100 > 1 do t / 100 else 1 end else 1000000000 end
             match dial_retry(a, me, secret, attempts, t) do
               Err(e) ->
                 abort_links(p)
-                Err(Connect(r, e))
+                Err(RunError.Connect(r, e))
               Ok(conn) ->
                 match join_dialed(p, r, conn, t) do
                   Err(e) ->
                     abort_links(p)
-                    Err(Connect(r, e))
+                    Err(RunError.Connect(r, e))
                   Ok(p2) -> dial_all(p2, rest, addrs, me, secret)
                 end
             end
@@ -1231,13 +1295,13 @@ mod SessionNode do
           Err(e) ->
             abort_links(p)
             if e == "tcp_accept: timed out" do
-              Err(Accept("no connection from role(s) " ++ show_roles(expected) ++ " within " ++ int_to_string(t) ++ " ms"))
-            else Err(Accept(e)) end
+              Err(RunError.Accept("no connection from role(s) " ++ show_roles(expected) ++ " within " ++ int_to_string(t) ++ " ms"))
+            else Err(RunError.Accept(e)) end
           Ok((_reg, conn)) ->
             match join_accepted(p, conn, t) do
               Err(e) ->
                 abort_links(p)
-                Err(Accept(e))
+                Err(RunError.Accept(e))
               Ok(p2) ->
                 let got = last_role(p2.links)
                 if List.member(expected, got) == false do
@@ -1361,7 +1425,7 @@ mod SessionNode do
     finish(p)
     if listen_fd >= 0 do tcp_close(listen_fd) else () end
     match Vault.get(p.meta, "watch") do
-      Some(w) -> send(pid_of_int(w), Stop)
+      Some(w) -> kill(pid_of_int(w))
       None -> ()
     end
     let role = Vault.get_or(p.meta, "cancel_role", 0)
@@ -1371,7 +1435,7 @@ mod SessionNode do
       Some(kind) ->
         if kind == kind_protocol() do Err(Protocol(role, cause))
         else if kind == kind_host_gone() do Err(HostGone(Vault.get_or(p.meta, "ep", my_role)))
-        else if kind == kind_left() do Err(Left(cause))
+        else if kind == kind_left() do Err(RunError.Left(cause))
         else Err(Cancelled(role, cause)) end end end
     end
   end
@@ -1389,17 +1453,6 @@ mod SessionNode do
 
   pfn role_name(session : String, role : Int) : String do
     "session:" ++ session ++ "/" ++ int_to_string(role)
-  end
-
-  pfn await_party(slot : Vault(Party), tries : Int) : Option(Party) do
-    match Vault.get(slot, "p") do
-      Some(p) -> Some(p)
-      None ->
-        if tries <= 0 do None else
-          sleep_ms(50)
-          await_party(slot, tries - 1)
-        end
-    end
   end
 
   -- Report [role] ended to the endpoint actor, once.
@@ -1443,22 +1496,81 @@ mod SessionNode do
     end end end end
   end
 
-  -- A frame for this party, from the node's data reader. The party comes
-  -- from [slot], set once every peer is found; a peer can send only after
-  -- finding US, which is moments before, so the reader waits for it (10 s)
-  -- rather than refuse the frame.
-  pfn cluster_frame(slot : Vault(Party), sid : String, d : NodeSend.Delivery) : Result((), String) do
+  -- `cluster_kind`, run in the endpoint actor's own turn (`Early`, `Ready`):
+  -- a held frame is handled HERE rather than re-sent to this mailbox, where
+  -- it would land behind frames the reader forwarded after it.
+  pfn cluster_kind_here(p : Party, kind : String, payload : List(Int)) : Result((), String) do
+    if kind == "SessionNode.Deliver" do
+      match decode_deliver(payload) do
+        Err(e) -> Err(e)
+        Ok((to, from, msg)) ->
+          let _ = deliver(p, to, from, msg)
+          Ok(())
+      end
+    else if kind == "SessionNode.Bye" do
+      match Msgpack.decode(payload) do
+        Ok(Msgpack.Int(role)) ->
+          peer_gone(p, role, "closed")
+          link_ended(p, role, "")
+          Ok(())
+        _ -> Err("session_node: bad Bye payload")
+      end
+    else if kind == "SessionNode.Cancel" do
+      match decode_cancel(payload) do
+        Err(e) -> Err(e)
+        Ok((role, cause)) ->
+          peer_gone(p, role, cause)
+          link_ended(p, role, "")
+          Ok(())
+      end
+    else Ok(()) end end end
+  end
+
+  -- The frame kinds a session receives, as a small number to hold an early
+  -- frame by (`Early`), and back.
+  pfn early_kind(kind : String) : Int do
+    if kind == "SessionNode.Deliver" do 1
+    else if kind == "SessionNode.Bye" do 2
+    else if kind == "SessionNode.Cancel" do 3
+    else if kind == "SessionNode.Ping" do 4
+    else 0 end end end end
+  end
+
+  pfn early_kind_name(k : Int) : String do
+    if k == 1 do "SessionNode.Deliver"
+    else if k == 2 do "SessionNode.Bye"
+    else if k == 3 do "SessionNode.Cancel"
+    else "SessionNode.Ping" end end end
+  end
+
+  -- A frame for this session, from the node's data reader -- a task every
+  -- session and route on that peer connection shares, so it must never
+  -- wait. Before the session is ready (a peer can send as soon as it has
+  -- found us, which may be before we have found it), the frame goes to the
+  -- session's endpoint actor, which holds it until `Ready` (see `Early`).
+  -- Until 2026-09-19 the reader polled for the session instead, up to 10 s,
+  -- holding up every other session's frames on that connection meanwhile.
+  pfn cluster_frame(slot : Vault(Party), p0 : Party, sid : String, d : NodeSend.Delivery) : Result((), String) do
     match String.split_first(d.type_tag, "#") do
       None -> Err("session_node: untagged frame " ++ d.type_tag ++ " for cluster session " ++ sid)
       Some((kind, fsid)) ->
         if fsid != sid do
           Err("session_node: frame for session " ++ fsid ++ ", this endpoint is in session " ++ sid)
+        else if early_kind(kind) == 0 do
+          Err("session_node: unexpected type " ++ kind)
         else
-          match await_party(slot, 200) do
-            None -> Err("session_node: session " ++ sid ++ " is not ready")
-            Some(p) -> cluster_kind(p, kind, d.payload)
+          match Vault.get(slot, "p") do
+            Some(p) ->
+              if Vault.get(p.meta, "ready") != None do cluster_kind(p, kind, d.payload)
+              else
+                let _ = send(p0.ep, Early(slot, p0, early_kind(kind), Bytes.from_list(d.payload)))
+                Ok(())
+              end
+            None ->
+              let _ = send(p0.ep, Early(slot, p0, early_kind(kind), Bytes.from_list(d.payload)))
+              Ok(())
           end
-        end
+        end end
     end
   end
 
@@ -1551,7 +1663,7 @@ mod SessionNode do
       Some(kind) ->
         if kind == kind_protocol() do Err(Protocol(role, cause))
         else if kind == kind_host_gone() do Err(HostGone(Vault.get_or(p.meta, "ep", my_role)))
-        else if kind == kind_left() do Err(Left(cause))
+        else if kind == kind_left() do Err(RunError.Left(cause))
         else Err(Cancelled(role, cause)) end end end
     end
   end
@@ -1572,7 +1684,7 @@ mod SessionNode do
     let p0 = party(my_role, node.node_id, on_close)
     Vault.set(p0.why, "sid", session)
     let slot = Vault.new("session_node_slot_" ++ session ++ "." ++ int_to_string(pid_to_int(p0.ep)))
-    let route_key = ClusterNode.route(node, pid_to_int(p0.ep), fn d -> cluster_frame(slot, session, d))
+    let route_key = ClusterNode.route(node, pid_to_int(p0.ep), fn d -> cluster_frame(slot, p0, session, d))
     let me = role_name(session, my_role)
     match ClusterNode.register(node, me, p0.ep) do
       Err(_) ->
@@ -1583,13 +1695,13 @@ mod SessionNode do
           Err(missing) ->
             ClusterNode.unroute(node, route_key)
             ClusterNode.unregister(node, me)
-            Err(Connect(missing, "session " ++ session ++ ": no endpoint registered for role " ++ int_to_string(missing)))
+            Err(RunError.Connect(missing, "session " ++ session ++ ": no endpoint registered for role " ++ int_to_string(missing)))
           Ok(found) ->
             match cluster_links(node, found, 30000) do
               Err(missing) ->
                 ClusterNode.unroute(node, route_key)
                 ClusterNode.unregister(node, me)
-                Err(Connect(missing, "session " ++ session ++ ": no link to role " ++ int_to_string(missing) ++ "'s node"))
+                Err(RunError.Connect(missing, "session " ++ session ++ ": no link to role " ++ int_to_string(missing) ++ "'s node"))
               Ok(links) ->
                 let p = List.fold_left(links, p0, fn (acc, l) -> with_link(acc, l))
                 Vault.set(slot, "p", p)
@@ -1601,6 +1713,14 @@ mod SessionNode do
                 recheck_links(node, p)
                 let s = Session.attach(io, ops(p))
                 body(s)
+                -- Only now, with the role driven to its first suspension and
+                -- its first handler installed, are held frames replayed (and
+                -- later ones handled as they come): one handled earlier would
+                -- find no handler and be parked where, in the callback API,
+                -- nothing drains it -- the session would wait for ever (the
+                -- standalone runner starts its readers after the drive for
+                -- the same reason).
+                let _ = send(p.ep, Ready(p))
                 serve_cluster_outcome(p)
                 ClusterNode.off_peer_closed(node, closer)
                 ClusterNode.unroute(node, route_key)
