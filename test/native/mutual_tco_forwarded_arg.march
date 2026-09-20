@@ -1,0 +1,56 @@
+-- Mutual tail recursion that forwards a heap argument. The two functions
+-- become one loop (__mutco_...), and the back edge used to emit the whole
+-- Perceus dec chain, including the DecRC of a value being stored into the
+-- next iteration's parameter slot: that freed a freshly-owned string one
+-- instruction before its reuse. ASAN called it a heap-use-after-free in
+-- march_string_eq; without ASAN the previous element's text reappeared in
+-- the accumulator ("refused: no-y; refused: no-y" for "no-x", "no-y").
+-- The self-TCO arms had this rule (commit eafbd71a); the mutual twins did
+-- not. A dup-bound argument must still be dropped, or the loop leaks one
+-- cell per iteration -- the second half of this fixture.
+-- specs/progress/2026-09-20-mutual-tco-forwarded-args.md
+mod MutualTcoForwardedArg do
+  needs IO
+  needs IO.Console
+
+  pfn take_next(xs : List(String), why : String) : String do
+    match xs do
+      Nil -> why
+      Cons(x, rest) -> inspect(x, rest, why)
+    end
+  end
+
+  pfn inspect(x : String, rest : List(String), why : String) : String do
+    let verdict = if String.starts_with(x, "ok") do "" else "refused: " ++ x end
+    if verdict == "" do "accepted " ++ x
+    else take_next(rest, if why == "" do verdict else why ++ "; " ++ verdict end) end
+  end
+
+  -- The leak half: walk a long list, dropping every element, and watch the
+  -- live-allocation count. A back edge that skipped a DUP-BOUND argument's
+  -- DecRC would strand one cell per element here.
+  pfn build(n : Int, acc : List(String)) : List(String) do
+    if n <= 0 do acc else build(n - 1, Cons("no-" ++ int_to_string(n), acc)) end
+  end
+
+  pfn walk(xs : List(String), seen : Int) : Int do
+    match xs do
+      Nil -> seen
+      Cons(x, rest) -> step(x, rest, seen)
+    end
+  end
+
+  pfn step(x : String, rest : List(String), seen : Int) : Int do
+    if String.starts_with(x, "no") do walk(rest, seen + 1) else walk(rest, seen) end
+  end
+
+  fn main(c : Cap(IO)) do
+    println(take_next(Cons("no-a", Cons("no-b", Cons("ok-c", Nil))), ""))
+    println(take_next(Cons("no-x", Cons("no-y", Nil)), ""))
+    let before = live_allocs()
+    let n = walk(build(20000, Nil), 0)
+    println("walked " ++ int_to_string(n))
+    let delta = live_allocs() - before
+    println("live allocations held after the walk under 1000: " ++ bool_to_string(delta < 1000))
+  end
+end

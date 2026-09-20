@@ -45,6 +45,12 @@ session it accepts starts at once and can be abandoned while still finding its p
   The offer is live as soon as it registers. Three scenarios printed "offering" after the
   call and raced their own sessions; they print before it now.
 
+- **A mutually recursive pair is miscompiled.** `invite_role` / `answer_or_next`
+  were written as a pair; the ASAN gate caught a use-after-free on the accumulated
+  `why` string inside their flattened loop, and it reproduces without the sanitizer as
+  a wrong value. The invite loop is ONE self-recursive function until that is fixed:
+  [[2026-09-20-mutual-tco-borrowed-forwarded-arg]].
+
 ## Tests
 
 - `test/two_node/cluster_ap`: one offer, two sessions in a row, distinct session ids.

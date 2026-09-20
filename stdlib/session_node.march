@@ -1960,37 +1960,39 @@ mod SessionNode do
   end
 
   -- Invite the candidates for [role] in turn until one accepts: Ok(its pid),
-  -- or Err(every refusal, "; "-separated, or why there was none). A candidate that does not answer in
-  -- time is withdrawn from, in case it accepts late.
+  -- or Err(every refusal, "; "-separated, or why there was none).
+  --
+  -- ONE recursive function, not a mutually recursive pair: a mutual pair is
+  -- flattened into a shared loop that frees an argument it is about to
+  -- forward, which ASAN caught here as a use-after-free on `why`
+  -- (specs/todos/2026-09-20-mutual-tco-borrowed-forwarded-arg.md). Keep it
+  -- self-recursive until that is fixed.
   pfn invite_role(node : ClusterNode.ClusterHandle, sid : String, fp : String, reply : GlobalPid.Pid,
                   answers : Vault(String), budget : Vault(Int), cands : List(GlobalPid.Pid), why : String)
       : Result(GlobalPid.Pid, String) do
     match cands do
       Nil -> Err(if why == "" do "no access point is registered" else why end)
       Cons(g, rest) ->
-        if Vault.get_or(budget, "left", 0) <= 0 do Err(and_why(why, "no answer within the setup time")) else
-          match ClusterNode.send_msg(node, g, "SessionAP.Invite", encode_invite(sid, fp, reply), NodeQueue.Unbounded) do
-            Err(_) -> invite_role(node, sid, fp, reply, answers, budget, rest,
-                                  and_why(why, node_label(node, g.node_id) ++ " is unreachable"))
-            Ok(_) -> answer_or_next(node, sid, fp, reply, answers, budget, g, rest, why)
+        if Vault.get_or(budget, "left", 0) <= 0 do Err(and_why(why, "no answer within the setup time"))
+        else
+          -- Ok(None) accepts; Ok(Some(reason)) moves on to the next candidate.
+          let outcome = match ClusterNode.send_msg(node, g, "SessionAP.Invite", encode_invite(sid, fp, reply), NodeQueue.Unbounded) do
+            Err(_) -> Some(node_label(node, g.node_id) ++ " is unreachable")
+            Ok(_) ->
+              match await_answer(answers, g.node_id, budget) do
+                Some(v) ->
+                  if v == "" do None
+                  else Some(node_label(node, g.node_id) ++ " refused: " ++ v) end
+                None ->
+                  let _ = ClusterNode.send_msg(node, g, "SessionAP.Withdraw", encode_sid(sid), NodeQueue.Unbounded)
+                  Some(node_label(node, g.node_id) ++ " did not answer")
+              end
+          end
+          match outcome do
+            None -> Ok(g)
+            Some(reason) -> invite_role(node, sid, fp, reply, answers, budget, rest, and_why(why, reason))
           end
         end
-    end
-  end
-
-  -- [g]'s answer, or the next candidate after a refusal or no answer.
-  pfn answer_or_next(node : ClusterNode.ClusterHandle, sid : String, fp : String, reply : GlobalPid.Pid,
-                     answers : Vault(String), budget : Vault(Int), g : GlobalPid.Pid, rest : List(GlobalPid.Pid),
-                     why : String) : Result(GlobalPid.Pid, String) do
-    match await_answer(answers, g.node_id, budget) do
-      Some(v) ->
-        if v == "" do Ok(g)
-        else invite_role(node, sid, fp, reply, answers, budget, rest,
-                         and_why(why, node_label(node, g.node_id) ++ " refused: " ++ v)) end
-      None ->
-        let _ = ClusterNode.send_msg(node, g, "SessionAP.Withdraw", encode_sid(sid), NodeQueue.Unbounded)
-        invite_role(node, sid, fp, reply, answers, budget, rest,
-                    and_why(why, node_label(node, g.node_id) ++ " did not answer"))
     end
   end
 

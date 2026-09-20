@@ -1,0 +1,4 @@
+accepted ok-c
+refused: no-x; refused: no-y
+walked 20000
+live allocations held after the walk under 1000: true

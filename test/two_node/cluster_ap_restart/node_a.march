@@ -39,6 +39,28 @@ mod ClusterApRestartA do
     end end
   end
 
+  -- The creation of whoever currently offers the Server role, or 0.
+  pfn offer_creation(h : ClusterNode.ClusterHandle) : Int do
+    match List.filter_map(ClusterNode.names(h), fn nm ->
+      if String.starts_with(nm, "ap:Echo/2/") do ClusterNode.lookup(h, nm) else None end) do
+      Cons(g, _) -> g.creation
+      Nil -> 0
+    end
+  end
+
+  -- Wait for an offer from a DIFFERENT incarnation than [old]: the restarted
+  -- node-b, not the one about to be killed. Without this wait the next
+  -- session can still be served by the old node-b, which is racing the
+  -- harness's kill.
+  pfn wait_new_offer(h : ClusterNode.ClusterHandle, old : Int, left : Int) : Bool do
+    let now = offer_creation(h)
+    if now > 0 && now != old do true
+    else if left <= 0 do false else
+      sleep_ms(200)
+      wait_new_offer(h, old, left - 200)
+    end end
+  end
+
   fn main(c : Cap(IO)) do
     let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "apr-secret", 1)
     match ClusterNode.start(cfg) do
@@ -47,6 +69,8 @@ mod ClusterApRestartA do
         println("node-a: up")
         if ClusterNode.await_members(h, 1, 120000) do () else panic("node-a: nobody joined") end
         if session_retry(c, h, 1, 60000) do println("Client: session 1 done") else panic("node-a: first session never formed") end
+        let first = offer_creation(h)
+        if wait_new_offer(h, first, 120000) do () else panic("node-a: the restarted offer never appeared") end
         if session_retry(c, h, 2, 120000) do println("Client: session 2 done after the restart") else panic("node-a: no session after the restart") end
         ClusterNode.stop(h)
     end
