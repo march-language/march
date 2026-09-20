@@ -196,8 +196,9 @@ says why it did not.
 | `cluster_<Role>(io, node, session, body)` | a running `ClusterNode`, one session under a given id | callbacks | `Result((), RunError)` |
 | `offer_<Role>(io, node, capacity, body)` | a running `ClusterNode`, any number of sessions | callbacks | `Result(Offer, RunError)` |
 | `initiate_<Role>(io, node, body)` | a running `ClusterNode`, one session it starts | callbacks | `Result((), RunError)` |
+| `offer_hosted_<Role>(io, node, capacity, actor, start, deliver, cancel)` | a running `ClusterNode`, any number of sessions | one actor for all of them (see [Many sessions in one actor](#many-sessions-in-one-actor)) | `Result(Offer, RunError)` |
+| `cluster_hosted_<Role>(io, node, session, actor, start, deliver, cancel)` | a running `ClusterNode`, one session under a given id | an actor, with the same callbacks | `Result((), RunError)` |
 
-Hosting a role in an actor is only available over the runner's own connections for now.
 `<P>_Run.error_message(e)` turns any `RunError` into a line that names the roles.
 
 ## Telling the nodes where to find each other
@@ -513,6 +514,102 @@ callback style does not have it, because there the session state lives in the ru
 
 Different nodes can make different choices. In `test/two_node/hosted`, Prod is a plain body
 on one node and Cons is an actor on the other.
+
+### Many sessions in one actor
+
+An [access point](#access-points-many-sessions-and-starting-again) hosted in an actor
+serves every session it accepts from that one actor, so the actor keeps one parked
+endpoint per session. `Parked_<Role>` is linear and a `Map` cannot hold a linear value,
+so the sessions live in a `LinearMap` keyed by the session id, and every callback carries
+the session id: `start(sid, s)`, `deliver(sid, s, from, msg, ep)` and
+`cancel(sid, s, role, cause, ep)`. Here is a server for a protocol `Echo` in which the
+client sends twice and the server answers each time:
+
+```march
+actor ServerActor do
+  state { done : Int, sessions : LinearMap(String, Echo_Server.Parked_Server) }
+  init  { done: 0, sessions: LinearMap.empty_string() }
+  on Start(sid : String, s : Cap(Session.Live)) do
+    let parked = Echo_Server.await_Msg_Client_Server_1(s, Echo_Server.register(s, 0))
+    match LinearMap.put(state.sessions, sid, parked) do
+      (None, m) -> { state with sessions: m }
+      (Some(old), m) ->
+        retire(old)
+        panic("session " ++ sid ++ " is already hosted")
+    end
+  end
+  on Deliver(sid : String, s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
+    match LinearMap.take_slot(state.sessions, sid) do
+      (None, slot) -> { state with sessions: LinearMap.vacate(slot) }
+      (Some(parked), slot) ->
+        match Echo_Server.resume(parked, from, msg, ep) do
+          Got_Msg_Client_Server_1(n, st) ->
+            let st2 = Echo_Server.send_Msg_Server_Client_1(s, st, n * 10)
+            { state with sessions: LinearMap.fill(slot, Echo_Server.await_Msg_Client_Server_2(s, st2)) }
+          Got_Msg_Client_Server_2(n, st) ->
+            retire(Echo_Server.finish(s, Echo_Server.send_Msg_Server_Client_2(s, st, n * 10)))
+            { state with done: state.done + 1, sessions: LinearMap.vacate(slot) }
+        end
+    end
+  end
+  on Cancel(sid : String, _s : Cap(Session.Live), _role : Int, _cause : String, _ep : Int) do
+    match LinearMap.take(state.sessions, sid) do
+      (None, m) -> { state with sessions: m }
+      (Some(parked), m) ->
+        retire(Echo_Server.cancel(parked))
+        { state with sessions: m }
+    end
+  end
+end
+```
+
+Each handler takes the session's parked value out of the map by its id, resumes it,
+and puts the next parked value back with `fill`, or `vacate`s the slot once the
+session is over. A delivery for an id that is no longer in the map (a session that was
+cancelled while it had a message in flight) is dropped. The `Cancel` handler is the
+`host_<Role>_or` cancel function with the id in front, and runs for that one session.
+Any other state the actor keeps per session, such as a counter, goes in an ordinary
+`Map` keyed by the same id.
+
+A finished or cancelled session leaves a `Closed_Server` value, which nothing can
+resume. The role module has no function that consumes one yet, and its payload type is
+private, so a one-line function with a `linear` parameter drops it:
+
+```march
+pfn retire(linear p : a) : () do
+  let _ = p
+  ()
+end
+```
+
+To offer the role, spawn the actor and pass it with the three callbacks:
+
+```march
+let srv = spawn(ServerActor)
+let start = fn (sid, s) ->
+  let _ = send(srv, Start(sid, s))
+  ()
+let deliver = fn (sid, s, from, msg, ep) ->
+  let _ = send(srv, Deliver(sid, s, from, msg, ep))
+  ()
+let cancel = fn (sid, s, role, cause, ep) ->
+  let _ = send(srv, Cancel(sid, s, role, cause, ep))
+  ()
+match Echo_Run.offer_hosted_Server(c, node, 64, srv, start, deliver, cancel) do
+  Ok(offer) -> ...        -- offering now; every session goes to srv
+  Err(e) -> panic(Echo_Run.error_message(e))
+end
+```
+
+The runner watches the actor once per session (one small watcher actor each). If the
+actor crashes or is restarted, every session it hosts ends with `HostGone`, as for
+`host_<Role>`. `cluster_hosted_<Role>(io, node, session, actor, start, deliver, cancel)`
+is the same for one session under an id the nodes agreed on, with the same callbacks,
+so one actor can serve both.
+
+`test/two_node/cluster_ap_hosted` runs three sessions at once through one actor, then a
+fourth; `test/two_node/cluster_ap_hosted_cancel` kills one of three clients half way
+through its session, and only that session is cancelled.
 
 ## Testing without a network
 

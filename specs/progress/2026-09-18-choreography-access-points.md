@@ -1,5 +1,9 @@
 # `[P2]` Choreography access points: repeated sessions and local restart
 
+**Status (2026-09-20): A2 shipped** ([[2026-09-20-choreography-access-points-a2]]), so
+every phase of this item is done; crash branches are the separate item
+([[2026-09-20-crash-branches-implementation]]).
+
 Filed 2026-09-18 as phase 4 of [[2026-09-18-choreography-failure-handling]], whose phases 1
 to 3 shipped. That design sequenced this one "design note first", because it has an open
 question the others did not; this file is that note's starting point.

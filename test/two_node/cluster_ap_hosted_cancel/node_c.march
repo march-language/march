@@ -1,0 +1,50 @@
+-- Three-node scenario "cluster_ap_hosted_cancel": node-c initiates one Echo
+-- session as Client, sends its first message, gets the answer, and then
+-- STALLS before its second message. The scenario kills it there: node-a
+-- declares it dead, and the hosted Server's actor is told to cancel that
+-- one session, while node-b's two go on.
+mod ClusterApHostedCancelC do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+
+  @[endpoints]
+  protocol Echo do
+    Client -> Server : Int
+    Server -> Client : Int
+    Client -> Server : Int
+    Server -> Client : Int
+  end
+
+  pfn ask(s : Cap(Session.Live), st : Echo_Client.S_send_Msg_Client_Server_1, n : Int) : Echo_Client.Yield do
+    let st1 = Echo_Client.send_Msg_Client_Server_1(s, st, n)
+    Echo_Client.recv_Msg_Server_Client_1(s, st1, fn (m, st2) ->
+      println("Client: got " ++ int_to_string(m))
+      -- Half done: the scenario kills this node here.
+      sleep_ms(600000)
+      let st3 = Echo_Client.send_Msg_Client_Server_2(s, st2, n + 100)
+      Echo_Client.recv_Msg_Server_Client_2(s, st3, fn (m2, st4) ->
+        println("Client: got " ++ int_to_string(m2))
+        Echo_Client.close(s, st4)))
+  end
+
+  fn main(c : Cap(IO)) do
+    let seed = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A"))
+    let cfg = ClusterNode.config("node-c", Env.require_int("MARCH_PORT_C"), "", Cons(seed, Nil), "aphc-secret", 1)
+    match ClusterNode.start(cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        if ClusterNode.await_members(h, 1, 120000) do () else panic("node-c: never joined") end
+        match Echo_Run.initiate_Client(c, h, fn (s, st) -> ask(s, st, 1)) do
+          Ok(_) -> println("Client: session 1 done")
+          Err(e) -> println("Client: " ++ SessionNode.run_error_message(e))
+        end
+        ClusterNode.stop(h)
+    end
+  end
+end
