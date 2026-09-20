@@ -1,0 +1,97 @@
+-- A recv that finds nothing behind a stale readiness hint must go back to
+-- waiting, from any green thread.
+--
+-- The readiness march_sched_wait_fd reports is a HINT: when several green
+-- threads park on one socket and a byte arrives, they all wake and only one
+-- of them gets it -- the rest see recv() return -1/EAGAIN and must loop back
+-- to the wait. The wait parked, so the green thread may have resumed on a
+-- different scheduler thread, and glibc declares __errno_location() const:
+-- clang reused the errno ADDRESS it computed before the park, so `errno`
+-- after the recv was the OLD thread's. An EAGAIN read as something else
+-- turns a stale hint into Err("recv failed") -- a read that invents a broken
+-- connection out of a socket that is perfectly healthy. (The converse, a real
+-- error read back as EAGAIN, is a busy retry loop on a dead fd.)
+--
+-- Many readers on one fd is what both forces the EAGAIN and makes the park
+-- resume elsewhere. macOS's __error() is not const, so this passed there all
+-- along; see specs/progress/2026-09-19-errno-after-park-audit.md.
+mod TcpRecvEagainAfterPark do
+  needs IO
+  needs IO.Console
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+
+  -- One reader: take single bytes off [fd] until the peer goes quiet.
+  -- Returns (bytes read, reads that failed). A stale hint is neither: the
+  -- runtime retries it and we never see it.
+  pfn drain(fd : Int, budget : Int, got : Int, bad : Int) : (Int, Int) do
+    if budget <= 0 do (got, bad)
+    else
+      match Socket.recv_deadline(fd, 1, 1500) do
+        Ok(None) -> (got, bad)                 -- quiet: the sender is done
+        Ok(Some(s)) ->
+          if s == "" do (got, bad)   -- clean EOF
+          else drain(fd, budget - 1, got + 1, bad) end
+        Err(_) -> drain(fd, budget - 1, got, bad + 1)
+      end
+    end
+  end
+
+  -- Send [n] single-byte messages, each its own wakeup for the readers.
+  pfn dribble(fd : Int, n : Int) : Int do
+    if n <= 0 do 0
+    else
+      match Socket.write(fd, "x") do
+        Ok(_) ->
+          -- A pause per byte, so every reader is parked when it lands and
+          -- all of them wake for it.
+          sleep_ms(2)
+          dribble(fd, n - 1)
+        Err(_) -> n
+      end
+    end
+  end
+
+  fn main(_c : Cap(IO)) do
+    let listen_fd = match tcp_listen(0) do
+      Ok(fd) -> fd
+      Err(e) -> panic("listen: " ++ e)
+    end
+    let port = match tcp_local_port(listen_fd) do
+      Ok(p) -> p
+      Err(e) -> panic("port: " ++ e)
+    end
+
+    let server = task_spawn(fn _ -> do
+      let c = match tcp_accept(listen_fd) do
+        Ok(fd) -> fd
+        Err(e) -> panic("accept: " ++ e)
+      end
+      let unsent = dribble(c, 60)
+      sleep_ms(300)
+      tcp_close(c)
+      unsent
+    end)
+
+    let fd = match Socket.connect("127.0.0.1", port) do
+      Ok(f) -> f
+      Err(e) -> panic("connect: " ++ Socket.error_message(e))
+    end
+
+    -- Eight readers on ONE socket: every byte wakes all of them, seven find
+    -- nothing there, and each of those seven is a post-park EAGAIN.
+    let readers = List.map(List.range(0, 8), fn _ -> task_spawn(fn _ -> drain(fd, 80, 0, 0)))
+    let tally = List.fold_left(readers, (0, 0), fn (acc, t) ->
+      let (g, b) = task_await_unwrap(t)
+      let (ag, ab) = acc
+      (ag + g, ab + b))
+    let unsent = task_await_unwrap(server)
+    let (bytes, failures) = tally
+    Socket.close(fd)
+    tcp_close(listen_fd)
+    println("unsent: " ++ int_to_string(unsent))
+    println("bytes: " ++ int_to_string(bytes) ++ "/60")
+    println("failures: " ++ int_to_string(failures))
+  end
+end

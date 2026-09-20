@@ -6224,6 +6224,25 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/tcp_connect_refused_after_park.expected native_tcp_connect_refused_after_park.out)))
 
+; ── A stale readiness hint's EAGAIN stays a retry after the park resumed on
+; another scheduler thread (glibc errno address reused across the park) ──
+(rule
+ (targets native_tcp_recv_eagain_after_park native_tcp_recv_eagain_after_park.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/tcp_recv_eagain_after_park.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_tcp_recv_eagain_after_park
+        native/tcp_recv_eagain_after_park.march)
+   (with-stdout-to native_tcp_recv_eagain_after_park.out
+        (system "./native_tcp_recv_eagain_after_park")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/tcp_recv_eagain_after_park.expected native_tcp_recv_eagain_after_park.out)))
+
 ; ── Bounded accept: a client that connects and says nothing is refused ──
 (rule
  (targets native_cluster_accept_silent_peer native_cluster_accept_silent_peer.out)
