@@ -1,0 +1,53 @@
+-- A refused `tcp_connect_timeout` must SAY refused, from any green thread.
+--
+-- On Linux a non-blocking loopback connect returns EINPROGRESS and the refusal
+-- arrives later, so the dialing green thread parks (march_sched_wait_fd) and
+-- reads the outcome from SO_ERROR. It can resume on a different scheduler
+-- thread. glibc declares __errno_location() const, so clang reused the errno
+-- ADDRESS it had computed before the park: the outcome was written to, and read
+-- back from, the old thread's errno, and the error said "Interrupted system
+-- call" or "Success" instead of "Connection refused". The cluster node service
+-- classifies a dial as refused by that text, so a SIGKILLed peer was declared
+-- dead by suspect timeout instead of by the refusal
+-- (test/two_node/cluster_crash; specs/progress/2026-09-19-tcp-connect-errno-after-park.md).
+--
+-- Many tasks dialling at once is what makes a park resume elsewhere: this
+-- missed 14 of 20 scenario runs on Linux before the fix. macOS's __error() is
+-- not const, so it passed there all along.
+mod TcpConnectRefusedAfterPark do
+  needs IO
+  needs IO.Console
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+
+  -- How many of [n] dials of [port] failed with a message saying "refused".
+  pfn refusals(port : Int, n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else
+      let ok = match Socket.connect_timeout("127.0.0.1", port, 2000) do
+        Ok(fd) ->
+          tcp_close(fd)
+          0
+        Err(e) -> if String.contains(Socket.error_message(e), "refused") do 1 else 0 end
+      end
+      refusals(port, n - 1, acc + ok)
+    end
+  end
+
+  fn main(_c : Cap(IO)) do
+    -- A port nothing listens on: bind one, learn its number, close it.
+    let listen_fd = match tcp_listen(0) do
+      Ok(fd) -> fd
+      Err(e) -> panic("listen: " ++ e)
+    end
+    let port = match tcp_local_port(listen_fd) do
+      Ok(p) -> p
+      Err(e) -> panic("port: " ++ e)
+    end
+    tcp_close(listen_fd)
+    let tasks = List.map(List.range(0, 8), fn _ -> task_spawn(fn _ -> refusals(port, 40, 0)))
+    let total = List.fold_left(tasks, 0, fn (acc, t) -> acc + task_await_unwrap(t))
+    println("refused: " ++ int_to_string(total) ++ "/320")
+  end
+end

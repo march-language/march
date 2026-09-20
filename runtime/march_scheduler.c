@@ -3572,6 +3572,19 @@ int march_sched_wait_fd(int fd, int want_write, int64_t deadline_ms) {
     return result;
 }
 
+/* noinline is the point: see the declaration in march_scheduler.h. */
+__attribute__((noinline))
+int march_errno_now(void) {
+    return errno;
+}
+
+/* noinline for the same reason as march_errno_now: the write must resolve the
+ * errno address on the thread running now, not on the one that parked. */
+__attribute__((noinline))
+void march_errno_set(int e) {
+    errno = e;
+}
+
 /* march_sched_wait_fd over up to four fds: one entry per fd, one park.
  * Returns index+1 of a ready fd, 0 on timeout, -1 on error. */
 __attribute__((noinline))

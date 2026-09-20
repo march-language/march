@@ -1,6 +1,6 @@
 mod Main do
   needs IO.Console
-  -- The accepting counterpart of reject/t262: a lambda checked before the
+  -- The accepting counterpart of reject/t269: a lambda checked before the
   -- argument that fixes its parameter to a linear type, which consumes it.
   -- The judgement deferred to `main`'s close finds it used exactly once.
   always_linear type S1 = S1(Int)

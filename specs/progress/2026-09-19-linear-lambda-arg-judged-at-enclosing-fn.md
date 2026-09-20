@@ -35,7 +35,7 @@ the other declaration bodies were covered in the same change
 
 ## Verification
 
-- `specs/lang/types/reject/t262_linear_lambda_arg_before_value`: accepted by
+- `specs/lang/types/reject/t269_linear_lambda_arg_before_value`: accepted by
   the pre-fix compiler, now rejected with "The linear value `s` was never used".
   `accept/t265_linear_lambda_arg_consumed` is the consuming counterpart; it
   passes both before and after.

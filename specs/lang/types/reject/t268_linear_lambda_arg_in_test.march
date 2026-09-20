@@ -1,6 +1,6 @@
 -- EXPECT-ERROR: The linear value `s` was never used
 mod Main do
-  -- reject/t262 in a `test` body, which has no enclosing named function: the
+  -- reject/t269 in a `test` body, which has no enclosing named function: the
   -- deferred judgement is installed there too (and in `setup`, `setup_all` and
   -- top-level `let`). Found in review of the 2026-09-19 fix.
   always_linear type S1 = S1(Int)

@@ -1,0 +1,2 @@
+node-a: up
+A: session_node: cancelled while waiting on role 1: stopped reading (over 65536 bytes queued)

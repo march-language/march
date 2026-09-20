@@ -225,14 +225,19 @@ static int64_t tcp_accept_raw_until(int64_t listen_fd, int64_t deadline_ms) {
          * zero-timeout poll and go back to waiting if it was stale. */
         struct pollfd pfd = { (int)listen_fd, POLLIN, 0 };
         int rc;
-        do { rc = poll(&pfd, 1, 0); } while (rc < 0 && errno == EINTR);
+        /* Every errno below goes through march_errno_now(): the wait above
+         * parked, so on glibc a direct `errno` here can be the errno of the
+         * scheduler thread this green thread left (see march_scheduler.h). */
+        do { rc = poll(&pfd, 1, 0); } while (rc < 0 && march_errno_now() == EINTR);
         if (rc < 0) return -1;
         if (rc == 0) continue;
         int fd;
+        int aerr = 0;
         do {
             fd = accept((int)listen_fd, (struct sockaddr *)&client_addr, &len);
-        } while (fd < 0 && errno == EINTR);
-        if (fd < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+            aerr = fd < 0 ? march_errno_now() : 0;
+        } while (fd < 0 && aerr == EINTR);
+        if (fd < 0 && (aerr == EAGAIN || aerr == EWOULDBLOCK)) continue;
         return (int64_t)fd;
     }
 }
@@ -456,8 +461,18 @@ void *march_tcp_recv_http(int64_t fd, int64_t max_bytes) {
 /* Write all of [buf]: MSG_DONTWAIT sends, parking (march_sched_wait_fd,
  * writable) when the socket's send buffer is full instead of holding the
  * scheduler thread until the peer drains it.  0 on success; on failure -1
- * with errno, or -2 for a peer that closed. */
-static int send_all_parked(int fd, const char *buf, size_t remaining) {
+ * with the errno in *out_errno (NULL if the caller does not want it), or -2
+ * for a peer that closed.
+ *
+ * The outcome travels in *out_errno, never through errno: this function parks
+ * (march_sched_wait_fd), the green thread can resume on another scheduler
+ * thread, and on glibc both a later `errno` read and a later `errno =` write
+ * land on the OLD thread's errno (see march_errno_now in march_scheduler.h). */
+static int send_all_parked(int fd, const char *buf, size_t remaining,
+                           int *out_errno) {
+    int dummy_errno;
+    if (!out_errno) out_errno = &dummy_errno;
+    *out_errno = 0;
     /* A write to a peer that has gone -- or to a socket this process shut
      * down itself, as a session does when its heartbeat gives up on a peer --
      * must fail with EPIPE, not raise SIGPIPE and kill the process.  Linux
@@ -474,15 +489,15 @@ static int send_all_parked(int fd, const char *buf, size_t remaining) {
         sigset_t saved;
         march_block_preempt(&saved);
         ssize_t sent = send(fd, buf, remaining, flags);
-        int send_errno = errno;
+        int send_errno = sent < 0 ? march_errno_now() : 0;
         march_unblock_preempt(&saved);
         if (sent < 0) {
             if (send_errno == EINTR) continue;
             if (send_errno == EAGAIN || send_errno == EWOULDBLOCK) {
-                if (march_sched_wait_fd(fd, 1, 0) < 0) { errno = EIO; return -1; }
+                if (march_sched_wait_fd(fd, 1, 0) < 0) { *out_errno = EIO; return -1; }
                 continue;
             }
-            errno = send_errno;
+            *out_errno = send_errno;
             return -1;
         }
         if (sent == 0) return -2;
@@ -495,11 +510,12 @@ static int send_all_parked(int fd, const char *buf, size_t remaining) {
 void *march_tcp_send_all(int64_t fd, void *data) {
     if (!data) return make_err("null data");
     march_string *s = (march_string *)data;
-    int rc = send_all_parked((int)fd, s->data, (size_t)s->len);
+    int send_errno = 0;
+    int rc = send_all_parked((int)fd, s->data, (size_t)s->len, &send_errno);
     if (rc == -2) return make_err("send: connection closed");
     if (rc < 0) {
         char errbuf[64];
-        snprintf(errbuf, sizeof(errbuf), "send: %s", strerror(errno));
+        snprintf(errbuf, sizeof(errbuf), "send: %s", strerror(send_errno));
         return make_err(errbuf);
     }
     return make_ok(make_unit());
@@ -586,7 +602,12 @@ void *march_tcp_recv_all(int64_t fd_arg, int64_t max_bytes, int64_t timeout_ms) 
         /* MSG_DONTWAIT: the readiness was a hint and may be stale; never let
          * the syscall itself hold the scheduler thread. */
         ssize_t n = recv(fd, chunk, to_read, MSG_DONTWAIT);
-        int recv_errno = errno;
+        /* march_errno_now(), not a direct `errno`: the wait above parked, so
+         * on glibc the errno address clang computed before the park belongs
+         * to the scheduler thread this green thread left (march_scheduler.h).
+         * A real error read back as EAGAIN/EINTR is a busy retry loop; a
+         * stale EAGAIN read as a real error is a spurious "recv failed". */
+        int recv_errno = n < 0 ? march_errno_now() : 0;
         march_unblock_preempt(&saved);
         if (n < 0) {
             if (recv_errno == EINTR) continue;   /* preemption signal — retry */
@@ -636,8 +657,15 @@ void *march_tcp_recv_chunk(int64_t fd_arg, int64_t max_bytes) {
          * would otherwise restart it under every SIGUSR1). */
         sigset_t saved;
         march_block_preempt(&saved);
-        do { n = recv(fd, buf, sz, MSG_DONTWAIT); } while (n < 0 && errno == EINTR);
-        int recv_errno = errno;
+        /* march_errno_now(), not a direct `errno`: the wait above parked, so
+         * on glibc the errno address clang computed before the park belongs
+         * to the scheduler thread this green thread left (march_scheduler.h).
+         * A real error read back as EAGAIN/EINTR is a busy retry loop; a
+         * stale EAGAIN read as a real error is a spurious "recv failed". */
+        int recv_errno;
+        do { n = recv(fd, buf, sz, MSG_DONTWAIT);
+             recv_errno = n < 0 ? march_errno_now() : 0;
+        } while (n < 0 && recv_errno == EINTR);
         march_unblock_preempt(&saved);
         if (n >= 0) break;
         if (recv_errno == EAGAIN || recv_errno == EWOULDBLOCK) continue;
@@ -675,8 +703,15 @@ void *march_tcp_recv_chunk_timeout(int64_t fd_arg, int64_t max_bytes, int64_t ti
          * wait on EAGAIN, deadline still counting. */
         sigset_t saved;
         march_block_preempt(&saved);
-        do { n = recv(fd, buf, sz, MSG_DONTWAIT); } while (n < 0 && errno == EINTR);
-        int recv_errno = errno;
+        /* march_errno_now(), not a direct `errno`: the wait above parked, so
+         * on glibc the errno address clang computed before the park belongs
+         * to the scheduler thread this green thread left (march_scheduler.h).
+         * A real error read back as EAGAIN/EINTR is a busy retry loop; a
+         * stale EAGAIN read as a real error is a spurious "recv failed". */
+        int recv_errno;
+        do { n = recv(fd, buf, sz, MSG_DONTWAIT);
+             recv_errno = n < 0 ? march_errno_now() : 0;
+        } while (n < 0 && recv_errno == EINTR);
         march_unblock_preempt(&saved);
         if (n >= 0) break;
         if (recv_errno == EAGAIN || recv_errno == EWOULDBLOCK) continue;
@@ -718,8 +753,14 @@ void *march_tcp_recv_timeout(int64_t fd_arg, int64_t max_bytes, int64_t timeout_
         if (ready < 0) { free(buf); return make_err("recv failed"); }
         sigset_t saved;
         march_block_preempt(&saved);
-        do { n = recv(fd, buf, sz, MSG_DONTWAIT); } while (n < 0 && errno == EINTR);
-        recv_errno = errno;
+        /* march_errno_now(), not a direct `errno`: the wait above parked, so
+         * on glibc the errno address clang computed before the park belongs
+         * to the scheduler thread this green thread left (march_scheduler.h).
+         * A real error read back as EAGAIN/EINTR is a busy retry loop; a
+         * stale EAGAIN read as a real error is a spurious "recv failed". */
+        do { n = recv(fd, buf, sz, MSG_DONTWAIT);
+             recv_errno = n < 0 ? march_errno_now() : 0;
+        } while (n < 0 && recv_errno == EINTR);
         march_unblock_preempt(&saved);
         if (n >= 0) break;
         if (recv_errno == EAGAIN || recv_errno == EWOULDBLOCK) continue;   /* stale hint */
@@ -803,7 +844,12 @@ void *march_tcp_recv_exact(int64_t fd, int64_t n) {
         sigset_t saved;
         march_block_preempt(&saved);
         ssize_t r = recv((int)fd, buf + received, (size_t)(n - (int64_t)received), MSG_DONTWAIT);
-        int recv_errno = errno;
+        /* march_errno_now(), not a direct `errno`: the wait above parked, so
+         * on glibc the errno address clang computed before the park belongs
+         * to the scheduler thread this green thread left (march_scheduler.h).
+         * A real error read back as EAGAIN/EINTR is a busy retry loop; a
+         * stale EAGAIN read as a real error is a spurious "recv failed". */
+        int recv_errno = r < 0 ? march_errno_now() : 0;
         march_unblock_preempt(&saved);
         if (r < 0 && recv_errno == EINTR) continue;   /* preemption signal — retry */
         if (r < 0 && (recv_errno == EAGAIN || recv_errno == EWOULDBLOCK)) continue;  /* stale hint */
@@ -986,9 +1032,19 @@ static void *tcp_connect_impl(void *host_ptr, int64_t port, int64_t timeout_ms) 
      *
      * The correct recovery from EINTR (and from EINPROGRESS, should the fd
      * ever arrive non-blocking) is to wait for the socket to become
-     * writable and read the true outcome out of SO_ERROR. */
+     * writable and read the true outcome out of SO_ERROR.
+     *
+     * The outcome travels in `cerr`, never through errno: the wait below
+     * parks, the green thread can resume on another scheduler thread, and on
+     * glibc a direct `errno` after that is the OLD thread's (see
+     * march_errno_now).  Writing SO_ERROR's ECONNREFUSED into errno and
+     * reading it back reported "Interrupted system call" or "Success"
+     * instead, and the cluster node service, which classifies a dial as
+     * refused by that text, never saw the refusal
+     * (test/native/tcp_connect_refused_after_park.march). */
     int crc = connect(fd, res->ai_addr, res->ai_addrlen);
-    if (crc < 0 && (errno == EINTR || errno == EINPROGRESS)) {
+    int cerr = crc < 0 ? errno : 0;
+    if (crc < 0 && (cerr == EINTR || cerr == EINPROGRESS)) {
         /* The wait parks the green thread: it must run UNMASKED (see
          * march_sched_wait_fd's contract), and the readiness it reports is a
          * hint, so the outcome is read from SO_ERROR after a zero-timeout
@@ -999,28 +1055,29 @@ static void *tcp_connect_impl(void *host_ptr, int64_t port, int64_t timeout_ms) 
         for (;;) {
             int w = march_sched_wait_fd(fd, 1, deadline);
             if (w == MARCH_FDWAIT_TIMEOUT) { so_err = ETIMEDOUT; break; }
-            if (w < 0) { so_err = errno ? errno : EIO; break; }
+            if (w < 0) { so_err = march_errno_now(); if (!so_err) so_err = EIO; break; }
             struct pollfd pfd = { fd, POLLOUT, 0 };
             int prc;
-            do { prc = poll(&pfd, 1, 0); } while (prc < 0 && errno == EINTR);
-            if (prc < 0) { so_err = errno; break; }
+            do { prc = poll(&pfd, 1, 0); } while (prc < 0 && march_errno_now() == EINTR);
+            if (prc < 0) { so_err = march_errno_now(); break; }
             if (prc == 0) continue;                       /* stale hint */
             socklen_t so_len = sizeof(so_err);
-            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_err, &so_len) != 0) so_err = errno;
+            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_err, &so_len) != 0) so_err = march_errno_now();
             break;
         }
         march_block_preempt(&saved);
-        if (so_err == 0) { crc = 0; }
-        else             { crc = -1; errno = so_err; }
-    } else if (crc < 0 && errno == EISCONN) {
+        cerr = so_err;
+        crc = so_err == 0 ? 0 : -1;
+    } else if (crc < 0 && cerr == EISCONN) {
         /* Belt and braces: an EISCONN here means the handshake we asked for
          * completed, which is success, not failure. */
         crc = 0;
+        cerr = 0;
     }
     /* Back to blocking: readers and writers of this fd assume it. */
     if (fl >= 0) (void)fcntl(fd, F_SETFL, fl);
     if (crc < 0) {
-        int saved_errno = errno;
+        int saved_errno = cerr;
         march_unblock_preempt(&saved);
         close(fd);
         freeaddrinfo(res);
@@ -2478,8 +2535,11 @@ void march_http_server_listen(int64_t port, int64_t max_conns,
         FD_SET((int)listen_fd, &rfds);
         struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
         int r = select((int)listen_fd + 1, &rfds, NULL, NULL, &tv);
+        /* march_errno_now(): tcp_accept_raw below parks, so on a later
+         * iteration of this loop a direct `errno` can be the errno of the
+         * scheduler thread this green thread left (march_scheduler.h). */
         if (r < 0) {
-            if (errno == EINTR) continue;
+            if (march_errno_now() == EINTR) continue;
             break;
         }
         if (r == 0) continue;   /* timeout — check g_http_shutdown and loop */
@@ -2633,7 +2693,12 @@ static int recv_exact(int fd, uint8_t *buf, size_t n) {
         sigset_t saved;
         march_block_preempt(&saved);
         ssize_t r = recv(fd, buf + got, n - got, MSG_DONTWAIT);
-        int recv_errno = errno;
+        /* march_errno_now(), not a direct `errno`: the wait above parked, so
+         * on glibc the errno address clang computed before the park belongs
+         * to the scheduler thread this green thread left (march_scheduler.h).
+         * A real error read back as EAGAIN/EINTR is a busy retry loop; a
+         * stale EAGAIN read as a real error is a spurious "recv failed". */
+        int recv_errno = r < 0 ? march_errno_now() : 0;
         march_unblock_preempt(&saved);
         if (r < 0 && (recv_errno == EINTR || recv_errno == EAGAIN || recv_errno == EWOULDBLOCK)) continue;
         if (r <= 0) return -1;
@@ -2848,9 +2913,9 @@ void march_ws_send(int64_t fd, void *frame) {
         hdr_len = 10;
     }
 
-    (void)send_all_parked(sock, (const char *)frame_hdr, (size_t)hdr_len);
+    (void)send_all_parked(sock, (const char *)frame_hdr, (size_t)hdr_len, NULL);
     if (payload_len > 0)
-        (void)send_all_parked(sock, (const char *)payload, payload_len);
+        (void)send_all_parked(sock, (const char *)payload, payload_len, NULL);
 
     (void)close_hdr;
 }
@@ -2889,7 +2954,8 @@ void *march_ws_select(int64_t socket_fd, void *pipe_rd, int64_t timeout_ms) {
         }
         struct pollfd pfds[2] = { { ws_fd, POLLIN, 0 }, { pipe_fd, POLLIN, 0 } };
         int prc;
-        do { prc = poll(pfds, pipe_fd >= 0 ? 2 : 1, 0); } while (prc < 0 && errno == EINTR);
+        /* march_errno_now(): the wait above parked (march_scheduler.h). */
+        do { prc = poll(pfds, pipe_fd >= 0 ? 2 : 1, 0); } while (prc < 0 && march_errno_now() == EINTR);
         ws_ready   = prc > 0 && pfds[0].revents != 0;
         pipe_ready = prc > 0 && pipe_fd >= 0 && pfds[1].revents != 0;
         if (ws_ready || pipe_ready) break;
