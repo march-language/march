@@ -219,6 +219,60 @@ let prod_ok = ok "both roles written against the generated API typecheck" (wrap 
   end
 |}))
 
+(** [bad_desugar name needle src]: like [bad], for an error the GENERATOR
+    reports at desugar time -- [typecheck_with_stdlib] discards those (see
+    Test_helpers.desugar_has_errors). *)
+let bad_desugar name needle src =
+  Alcotest.test_case name `Quick (fun () ->
+      let errors = March_errors.Errors.create () in
+      ignore (without_runner (fun () -> March_desugar.Desugar.desugar_module ~errors (parse_module src)));
+      let msgs = error_messages errors in
+      let contains m =
+        let n = String.length needle in
+        let rec go i = i + n <= String.length m && (String.sub m i n = needle || go (i + 1)) in
+        go 0
+      in
+      Alcotest.(check bool)
+        (name ^ ": an error mentions " ^ needle ^ " (got: " ^ String.concat " | " msgs ^ ")")
+        true (List.exists contains msgs))
+
+(* A payload type declared in the module without `derive Json`: the generated
+   codec assumes every nested type has one, so this used to pass `--check`,
+   fail the compile with codegen's "ambiguous interface-method call", and
+   panic the interpreter at the first `encode`. The generator checks up
+   front now, names the step and the type, and still generates the modules
+   (so no cascade of "Unknown module"). *)
+let payload_no_codec = bad_desugar "a payload type without derive Json is refused up front" "has no JSON codec"
+  (wrap {|
+  type Thing = { x : Int }
+  @[endpoints]
+  protocol P do
+    A -> B : Thing
+    B -> A : Int
+  end
+|})
+
+(* A variant, not a record, for the reason payload_declared_later gives. *)
+let payload_with_codec = ok "a payload type with derive Json is fine" (wrap {|
+  type Thing = Mark(Int)
+  derive Json for Thing
+  @[endpoints]
+  protocol P do
+    A -> B : Thing
+    B -> A : List(Thing)
+  end
+|})
+
+let payload_nested_no_codec = bad_desugar "a payload type nested in a List still needs its codec" "has no JSON codec"
+  (wrap {|
+  type Thing = { x : Int }
+  @[endpoints]
+  protocol P do
+    A -> B : List(Thing)
+    B -> A : Int
+  end
+|})
+
 let wrong_order = bad "closing at the loop head is a type error (order)" "expected `S_end` but got `S_send_Msg_Prod_Cons_1`" (wrap (stream ^ {|
   pfn prod(s : Cap(Session.Live), st : Stream_Prod.S_send_Msg_Prod_Cons_1) : Stream_Prod.Yield do
     Stream_Prod.close(s, st)
@@ -528,6 +582,7 @@ end
 let tests =
   [ stream_shape; cli_pid_one_arg; cli_no_unreachable_catch_all; cli_derive_eq_single_ctor; relay_shape; no_attr_no_generation; bad_branch_head; same_label_two_payloads;
     prod_ok; wrong_order; replayed; abandoned; callback_forge; relay_ok; payload_declared_later;
+    payload_no_codec; payload_with_codec; payload_nested_no_codec;
     event_ok; event_retained; event_not_reparked; event_idle_dropped; event_forge; event_pid_handle; builtin_under_application;
     cancel_handler_ok; cancel_handler_reuses_state; cancel_handler_must_end; cancelled_forge;
     hosted_cancel_ok; hosted_cancel_retained ]

@@ -36,7 +36,7 @@ mod ClusterApRestartB do
         -- after the call would run.
         println("node-b: offering (creation " ++ int_to_string(creation) ++ ")")
         match Echo_Run.offer_Server(c, h, 4, fn (s, st) -> serve_one(s, st)) do
-          Err(e) -> panic(e)
+          Err(e) -> panic(Echo_Run.error_message(e))
           Ok(_) -> sleep_ms(600000)
         end
     end

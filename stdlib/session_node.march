@@ -1142,18 +1142,28 @@ mod SessionNode do
   -- - `Listen(port, why)` / `Accept(why)` / `Connect(role, why)`: wiring.
   -- - `NoOffer(role, why)`: `initiate` found no access point that would
   --   take [role] (none registered, all full, all refused, or no answer).
-  type RunError = Cancelled(Int, String) | Protocol(Int, String) | HostGone(Int) | Left(String) | Listen(Int, String) | Accept(String) | Connect(Int, String) | NoOffer(Int, String)
+  -- - `AlreadyOffered(role)`: this node already offers [role] of that protocol.
+  type RunError = Cancelled(Int, String) | Protocol(Int, String) | HostGone(Int) | Left(String) | Listen(Int, String) | Accept(String) | Connect(Int, String) | NoOffer(Int, String) | AlreadyOffered(Int)
 
   fn run_error_message(e : RunError) : String do
+    run_error_message_named(e, fn i -> int_to_string(i))
+  end
+
+  doc """
+  `run_error_message` with roles shown by [name] (the generated
+  `<P>_Msg.role_name`): what `<P>_Run.error_message` is.
+  """
+  fn run_error_message_named(e : RunError, name : Int -> String) : String do
     match e do
-      Cancelled(role, why) -> "session_node: cancelled while waiting on role " ++ int_to_string(role) ++ ": " ++ why
+      Cancelled(role, why) -> "session_node: cancelled while waiting on role " ++ name(role) ++ ": " ++ why
       RunError.Left(why) -> "session_node: left the session: " ++ why
-      Protocol(role, why) -> "session_node: role " ++ int_to_string(role) ++ ": " ++ why
+      Protocol(role, why) -> "session_node: role " ++ name(role) ++ ": " ++ why
       HostGone(ep) -> "session_node: endpoint " ++ int_to_string(ep) ++ ": its host actor is gone and the parked session state with it; session abandoned"
       Listen(port, why) -> "session_node: listen on port " ++ int_to_string(port) ++ ": " ++ why
       RunError.Accept(why) -> "session_node: accept: " ++ why
-      RunError.Connect(role, why) -> "session_node: connect to role " ++ int_to_string(role) ++ ": " ++ why
-      NoOffer(role, why) -> "session_node: no access point for role " ++ int_to_string(role) ++ ": " ++ why
+      RunError.Connect(role, why) -> "session_node: connect to role " ++ name(role) ++ ": " ++ why
+      NoOffer(role, why) -> "session_node: no access point for role " ++ name(role) ++ ": " ++ why
+      AlreadyOffered(role) -> "session_node: role " ++ name(role) ++ " is already offered on this node"
     end
   end
 
@@ -1237,12 +1247,17 @@ mod SessionNode do
     match ClusterConn.connect_split_within(PeerRegistry.empty(), a.host, a.port, me, secret, timeout_ms) do
       Ok((_reg, conn)) -> Ok(conn)
       Err(e) ->
-        if attempts <= 1 do
+        -- The peer answered and rejected the handshake: retrying cannot
+        -- help, and the peer has given up on this node, so a retry would
+        -- only be refused and hide the real reason.
+        if String.starts_with(e, "Handshake:") do
+          Err(e ++ " (do both nodes run with the same secret?)")
+        else if attempts <= 1 do
           Err(e)
         else
           sleep_ms(100)
           dial_retry(a, me, secret, attempts - 1, timeout_ms)
-        end
+        end end
     end
   end
 
@@ -1863,7 +1878,7 @@ mod SessionNode do
   to be found again.
   """
   fn offer_role(io : Cap(IO), node : ClusterNode.ClusterHandle, proto : String, fingerprint : String, my_role : Int,
-           peers : List(Int), capacity : Int, on_close : Int -> Unit, body : Cap(Session.Live) -> Unit) : Result(Offer, String) do
+           peers : List(Int), capacity : Int, on_close : Int -> Unit, body : Cap(Session.Live) -> Unit) : Result(Offer, RunError) do
     let a = spawn(OfferActor)
     let tag = proto ++ "." ++ int_to_string(my_role) ++ "." ++ int_to_string(pid_to_int(a))
     let o = { node: node, proto: proto, fingerprint: fingerprint, my_role: my_role, capacity: capacity,
@@ -1877,7 +1892,7 @@ mod SessionNode do
       Ok(_) -> Ok(o)
       Err(_) ->
         ClusterNode.unroute(node, key)
-        Err("session_node: role " ++ int_to_string(my_role) ++ " of " ++ proto ++ " is already offered on this node")
+        Err(AlreadyOffered(my_role))
     end
   end
 

@@ -73,9 +73,9 @@ module that runs roles on the network. For `Fan`:
 
 | Module | Contents |
 |---|---|
-| `Fan_Msg` | The message type, its JSON codec (`encode`, `decode`, `try_decode`), and the role numbers `role_A()`, `role_C()`, `role_B()` |
+| `Fan_Msg` | The message type and its JSON codec (`encode`, `decode`, `try_decode`); the role numbers `role_A()`, `role_C()`, `role_B()` and `role_name(n)` back; `peers_A()` and `others_A()` (the roles A talks to, and every role but A); `role_names()`; `fingerprint()`, a digest of the protocol |
 | `Fan_A`, `Fan_B`, `Fan_C` | One type per point in the conversation, and one function per step that role takes |
-| `Fan_Run` | `run_A`, `run_B`, `run_C` to run a role on a node, and `addrs_from_env()` |
+| `Fan_Run` | The entry points that run a role on a node (see [Running a role on a node](#running-a-role-on-a-node)), `addrs_from_env()`, and `error_message(e)`, which spells a `RunError` with role names |
 
 Roles are numbered in the order they first appear in the protocol. In `Fan` that is A = 1,
 C = 2, B = 3. You never need to write these numbers; use the generated functions.
@@ -112,6 +112,9 @@ pfn role_c(s : Cap(Session.Live), st : Fan_C.S_recv_Msg_A_C_1) : Fan_C.Yield do
 end
 ```
 
+`Yield` is the type of a finished role. Only `close` (and, later, `cancelled`) produce one,
+so a callback cannot return without either finishing the conversation or handing it on.
+
 The state types are what make this safe. Each one is linear: you must use it exactly once.
 `recv_Msg_A_C_1` accepts only the state C is in before hearing from A, and it hands the
 callback the only value that lets C take the next step. So the compiler rejects a program
@@ -129,6 +132,25 @@ pfn role_a(s : Cap(Session.Live), st : Fan_A.S_send_Msg_A_C_1) : Fan_A.Yield do
     Fan_A.close(s, st2))
 end
 ```
+
+Sends, choices and `close` are ordinary calls that return the next state, so only a receive
+nests. A role with several receives reads better as one function per receive than as one
+pyramid of closures:
+
+```march
+pfn role_c(s : Cap(Session.Live), st : Fan_C.S_recv_Msg_A_C_1) : Fan_C.Yield do
+  Fan_C.recv_Msg_A_C_1(s, st, fn (a, st1) -> after_a(s, a, st1))
+end
+
+pfn after_a(s : Cap(Session.Live), a : Int, st : Fan_C.S_recv_Msg_B_C_1) : Fan_C.Yield do
+  Fan_C.recv_Msg_B_C_1(s, st, fn (b, st2) ->
+    Fan_C.close(s, Fan_C.send_Msg_C_A_1(s, st2, a + b == 16)))
+end
+```
+
+If a step is called in the wrong state, the error names both states and says so: the
+state types are `S_` followed by the step the role takes next, so `S_recv_Msg_A_C_1` is
+"about to receive `Msg_A_C_1`".
 
 Every callback has to return. The runner calls it when its message arrives, and until it
 returns, that node handles nothing else for the session: no other message, no failure, not
@@ -165,6 +187,19 @@ The arguments are:
 closed, and disconnects. It returns `Ok` when the conversation finished, or an `Err` that
 says why it did not.
 
+### The entry points
+
+| Function | Transport | Body | Returns |
+|---|---|---|---|
+| `run_<Role>(io, node_id, secret, addrs, body)` | its own connections, from an address table | callbacks | `Result((), RunError)` |
+| `host_<Role>(io, node_id, secret, addrs, actor, start, deliver)` and `host_<Role>_or(…, cancel)` | its own connections | an actor (see [Hosting a role in an actor](#hosting-a-role-in-an-actor)) | `Result((), RunError)` |
+| `cluster_<Role>(io, node, session, body)` | a running `ClusterNode`, one session under a given id | callbacks | `Result((), RunError)` |
+| `offer_<Role>(io, node, capacity, body)` | a running `ClusterNode`, any number of sessions | callbacks | `Result(Offer, RunError)` |
+| `initiate_<Role>(io, node, body)` | a running `ClusterNode`, one session it starts | callbacks | `Result((), RunError)` |
+
+Hosting a role in an actor is only available over the runner's own connections for now.
+`<P>_Run.error_message(e)` turns any `RunError` into a line that names the roles.
+
 ## Telling the nodes where to find each other
 
 Every pair of roles that exchange a message needs a connection, and one side of each pair
@@ -196,12 +231,19 @@ FAN_C_ADDR=10.0.0.2:7002 ./node_b
 The nodes can start in any order, but they all have to be up within 20 seconds of each
 other. A node that connects before its peer is listening retries for up to 20 seconds, and
 a listening node waits up to 20 seconds for the next role to connect. If one never does,
-setup fails instead of waiting for ever: `run_<Role>` returns `Err(Accept(...))` or
-`Err(Connect(...))` naming the missing roles, and closes the connections it already made,
+setup fails instead of waiting for ever: `run_<Role>` returns `Err(Accept(why))`, whose text
+names the roles still missing, or `Err(Connect(role, why))`, and closes the connections it already made,
 so the roles it did reach fail too instead of waiting on it. Set
 `MARCH_SESSION_CONNECT_MS` to change the 20 seconds; 0 waits for ever. If a required variable is missing, the node stops at startup with a
 message that names the role, for example
 `session_node: role 2 needs an address for role(s) 1`, before it opens any socket.
+`addrs_from_env()` itself does not fail on a missing variable: it leaves that role out, and
+the runner reports it.
+
+Two nodes that run with different secrets do not connect: the listening side reports
+`accept: Handshake: peer failed authentication` and the dialing side
+`connect to role A: Handshake: peer failed authentication (do both nodes run with the same
+secret?)`, at once rather than after the setup time.
 
 You can also build the list yourself instead of reading the environment. It is a
 `List(SessionNode.Addr)`, one `{ role, host, port }` per role.
@@ -223,8 +265,8 @@ end
 ```
 
 - **No addresses.** Each role registers its endpoint under the session's name and finds the
-  others by name (waiting up to 30 seconds), so there are no `<P>_<ROLE>_ADDR` variables and
-  no listen/connect rule.
+  others by name (waiting up to 30 seconds, a fixed limit), so there are no
+  `<P>_<ROLE>_ADDR` variables and no listen/connect rule.
 - **Shared connections.** Frames ride the node's one connection pair to each peer node,
   alongside every other session between those nodes. Every frame carries the session id, so
   a frame from another session is refused rather than delivered.
@@ -302,9 +344,11 @@ for.
 
 A message can be any size, and a role can send as many messages in a row as it likes without
 waiting for the receiver. Whatever the receiving node has not taken yet waits on the sending
-node and goes out as the receiver catches up. Nothing is dropped. A peer that stops reading
-altogether is caught by the heartbeat (see [When a role fails](#when-a-role-fails)), and
-whatever was waiting for it is thrown away.
+node and goes out as the receiver catches up. Nothing is dropped while the peer keeps
+reading. A peer that stops reading altogether is caught by the heartbeat (see [When a role
+fails](#when-a-role-fails)), or, over a cluster node, once `MARCH_SESSION_QUEUE_MAX_BYTES`
+(64 MiB) is queued for it unread; either way it is treated as gone and whatever was waiting
+for it is thrown away.
 
 ## How a session ends
 
@@ -372,6 +416,15 @@ without `_or` behaves the same way, with no handler.
 To leave a session on purpose, call the `leave_` function for the state you are in:
 `Fan_C.leave_recv_Msg_A_C_1(s, st, "shutting down")` for C before it has heard from A. The
 other roles are told, and `run` returns `Err(Left(why))`.
+
+The names, in one place:
+
+| | |
+|---|---|
+| `recv_<Msg>_or(s, st, on_msg, on_cancel)` | a receive with a cancel handler; `offer_<labels>_or` likewise |
+| `on_cancel : (Int, String, Cancelled_<Role>) -> Yield` | the failed role's number, the cause, and the token |
+| `<Role>.cancelled(s, token)` | the only way a cancel handler can finish |
+| `leave_<state>(s, st, why)` | leave on purpose from that state (`leave_recv_Msg_A_C_1` from `S_recv_Msg_A_C_1`) |
 
 ### Starting again
 
@@ -466,7 +519,22 @@ on one node and Cons is an actor on the other.
 The generated role modules do not know about sockets. They talk to whatever transport the
 session was created with. For unit tests, attach an in-process transport with
 `Session.attach` and run every role in one program; the [Session Types]({{ site.baseurl }}/docs/session-types/#swapping-the-transport-session)
-page shows how. The same role functions then run unchanged on the network.
+page shows how, and `test/session/stream_actor_events.march` in the compiler repository has a
+complete in-process transport in about sixty lines. The same role functions then run
+unchanged on the network.
+
+## Configuration
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `<PROTOCOL>_<ROLE>_ADDR` | unset | `host:port` of a role that listens, for `addrs_from_env()` |
+| `MARCH_SESSION_CONNECT_MS` | 20000 | how long setup waits to dial, accept and handshake; 0 waits for ever |
+| `MARCH_SESSION_HEARTBEAT_MS` | 1000 | the heartbeat interval; 0 turns the heartbeat off |
+| `MARCH_SESSION_TIMEOUT_MS` | 10000 | silence after which a peer is taken for dead |
+| `MARCH_SESSION_QUEUE_MAX_BYTES` | 67108864 | bytes queued unread for one peer before it is given up on; 0 for no limit |
+
+These apply to the runner's own connections. Over a cluster node, failure detection is the
+node's (SWIM) and the heartbeat settings do not apply.
 
 ## Limits
 

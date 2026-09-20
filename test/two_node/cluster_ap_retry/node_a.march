@@ -44,7 +44,7 @@ mod ClusterApRetryA do
         -- registers it (see cluster_ap_restart).
         println("node-a: offering")
         match Echo_Run.offer_Server(c, h, 2, fn (s, st) -> serve_one(s, st, served)) do
-          Err(e) -> panic(e)
+          Err(e) -> panic(Echo_Run.error_message(e))
           Ok(o) ->
             if wait_served(served, 6, 120000) do () else panic("node-a: never served six sessions") end
             sleep_ms(3000)

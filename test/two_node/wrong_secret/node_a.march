@@ -1,0 +1,26 @@
+-- Scenario "wrong_secret": node-a listens with one secret, node-b dials with
+-- another; see scenario.sh.
+mod WrongSecretA do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs Session.Live
+
+  @[endpoints]
+  protocol Q do
+    A -> B : Int
+    B -> A : Int
+  end
+
+  fn main(c : Cap(IO)) do
+    println("node-a: up")
+    match Q_Run.run_A(c, "node-a", Env.get("SECRET_A", "first"), Q_Run.addrs_from_env(), fn (s, st) ->
+      Q_A.recv_Msg_B_A_1(s, Q_A.send_Msg_A_B_1(s, st, 1), fn (_n, st2) -> Q_A.close(s, st2))) do
+      Ok(_) -> println("A: ok")
+      Err(e) -> println("A: " ++ Q_Run.error_message(e))
+    end
+  end
+end

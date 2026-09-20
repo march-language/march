@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t258 accept, t01–t262 reject) <!-- doc-lint:ignore-count: accept/reject share one numbering pool, so the highest id on each side is NOT that side's file count (162 accept, 219 reject; see the Result line below) -->
+# Typing corpus index (t01–t258 accept, t01–t263 reject) <!-- doc-lint:ignore-count: accept/reject share one numbering pool, so the highest id on each side is NOT that side's file count (162 accept, 220 reject; see the Result line below) -->
 
 **Two-repo rule.** This corpus is also checked by
 [march-language/march-lean](https://github.com/march-language/march-lean), an
@@ -248,7 +248,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 381/381: 162 accept, 219
+Exit 0 iff every program behaves as declared (currently 382/382: 162 accept, 220
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -603,7 +603,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t178_letstar_no_flat_map` | **`let*` (generalized monadic bind, 2026-08-14, `specs/lang/let-star-generalized-bind.md`): no matching `flat_map`.** `let*` resolves `<Type>.flat_map` from the RHS's inferred type; a type with no `flat_map` in a same-named module (here a bare `Widget`) is a clear, actionable error naming exactly what to define, not a crash or a generic "unbound variable" | ``let*` needs `Widget.flat_map`, but it doesn't exist.` |
 | `t179_letstar_last_expr` | **`let*`: trailing binder rejected, mirrors `let?`'s `t67`/`r05`.** A `let*` with an empty continuation can never unify against `M(b)`, so it is caught with the same "cannot be the last expression in a block" shape `let?` already has, generalized to name the RHS's own type instead of hardcoding `Result` | ``let*` cannot be the last expression in a block.` |
 
-**Result: 381 / 381 (162 accept, 219 reject).** `reject/t169`–`t170`
+**Result: 382 / 382 (162 accept, 220 reject).** `reject/t169`–`t170`
 (`NativeF32Arr`/`NativeU8Arr` non-sendable in actor messages, added
 2026-08-09 alongside the narrow-element-width work) are not yet written up
 as their own table entries; they mirror the existing `t164`/`t165` pattern
@@ -688,6 +688,7 @@ their own table entries.
 | `t260_linear_map_rep_is_private` | **`LinearMap` is `always_linear opaque type`:** user code cannot build one directly (or open one) through its constructor | ``I don't know a constructor called `LinearMapRep` `` |
 | `t261_linear_opt_in_laundered` | **An opted-in body cannot launder its linear value through a generic function that never opted in (2026-09-18):** `w(linear val : v)` passing `val` to a duplicating `g` counts `v` as linear for the generic rule. Found in review of the LinearMap change: once the opt-in mark followed unification links, this was always accepted | ``This passes `g` a value that may be linear`` |
 | `t262_toplevel_let_annotation_mismatch` | **A module-level `let` annotation is checked (2026-09-19):** `let x : Int = "hello"` at module level. The block-`let` path checked `: T` against the right-hand side; the module-level (`DLet`) path inferred the RHS and ignored the annotation, so this was accepted | ``expected `Int` but got `String` `` |
+| `t263_endpoints_payload_without_json_codec` | **An `@[endpoints]` payload type without `derive Json` is refused up front (2026-09-20):** the generated codec assumes every nested type has one, so `type Thing = { x : Int }` as a payload passed `--check`, failed the compile with codegen's "ambiguous interface-method call", and panicked the interpreter at the first `encode`. The generator now names the step and the type, and still generates the modules so the one error is not followed by a cascade of `Unknown module` | ``has no JSON codec`` |
 
 ## Coverage notes (intentionally absent programs, and why)
 

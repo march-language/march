@@ -1,0 +1,21 @@
+-- EXPECT-ERROR: has no JSON codec
+-- A payload type declared in the module without `derive Json`: every payload
+-- crosses the network as JSON, and the generated codec assumes each nested
+-- type has one. Until 2026-09-20 this passed `--check`, failed the compile
+-- with codegen's "ambiguous interface-method call", and panicked the
+-- interpreter at the first `encode`; the generator now names the step and
+-- the type up front.
+mod Main do
+  needs IO
+  needs Session.Live
+
+  type Thing = { x : Int }
+
+  @[endpoints]
+  protocol P do
+    A -> B : Thing
+    B -> A : Int
+  end
+
+  fn main(c : Cap(IO)) do () end
+end
