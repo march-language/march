@@ -1,0 +1,14 @@
+mod Main do
+  needs IO.Console
+  -- The accepting counterpart of reject/t263: every parameter holding the
+  -- opted-in `a` is marked `linear`, and a function-typed parameter (`k : a ->
+  -- Int`) holds no `a`, so it needs no mark.
+  always_linear type S1 = S1(Int)
+  fn sink(s : S1) : Int do match s do S1(e) -> e end end
+  fn f(linear x : a, linear y : a) : (a, a) do (x, y) end
+  fn g(linear x : a, k : a -> Int) : Int do k(x) end
+  fn main(c : Cap(IO.Console)) do
+    let (p, q) = f(S1(1), S1(2))
+    println(int_to_string(sink(p) + g(q, fn s -> sink(s))))
+  end
+end
