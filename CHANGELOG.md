@@ -18,6 +18,11 @@ git log is authoritative for exact commits.
   while the interpreter waited. Other effectful builtins (file and directory writes,
   sockets, task cancellation, process control, in-place array writes, `panic`) were
   also treated as pure and are now protected by family-wide rules.
+- **A type annotation on a module-level `let` is now checked.** `let x : Int = "hello"`
+  directly inside a `mod` used to be accepted, because the annotation was ignored there
+  (a `let` inside a function body was always checked). It is now an error
+  (``expected `Int` but got `String` ``), so code with a wrong module-level annotation
+  will stop compiling.
 - **A choreography role that works for a long time before its first message is no longer
   taken for dead.** Heartbeats used to start only once a role reached its first send or
   receive, so one that computed past the heartbeat timeout (10 s by default) before then
