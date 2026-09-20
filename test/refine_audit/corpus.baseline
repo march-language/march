@@ -444,6 +444,8 @@ native_tco_fresh_arg_decrc: coverage audit (user + stdlib): 114 enforced, 0 iner
 native_tco_fresh_arg_decrc: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_tcp_accept_timeout: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
 native_tcp_accept_timeout: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_tcp_connect_refused_after_park: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
+native_tcp_connect_refused_after_park: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_timer_leak_probe: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
 native_timer_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_timer_send_after: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
