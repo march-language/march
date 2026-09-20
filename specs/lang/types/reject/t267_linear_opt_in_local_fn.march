@@ -1,0 +1,14 @@
+-- EXPECT-ERROR: `y` has type `a`, which holds a type variable that a `linear` parameter of `go` opts in to linear values
+mod Main do
+  needs IO.Console
+  -- reject/t263 inside a local `fn ... end`, which is typed apart from
+  -- top-level functions. Its return annotation links `y`'s `a` to `x`'s. Found
+  -- in review of the 2026-09-19 fix, which first covered top-level functions only.
+  always_linear type S1 = S1(Int)
+  fn sink(s : S1) : Int do match s do S1(e) -> e end end
+  fn main(c : Cap(IO.Console)) do
+    fn go(linear x : a, y : a) : (a, a, a) do (x, y, y) end
+    let (p, q, r) = go(S1(1), S1(2))
+    println(int_to_string(sink(p) + sink(q) + sink(r)))
+  end
+end

@@ -453,17 +453,43 @@ let report_wildcard_discard env ~span t =
         Linear values must be consumed exactly once. Bind it to a name \
         and pass it to something that consumes it." (pp_ty (repr t)))
 
+(** Does [t] still contain an unresolved type variable? *)
+let rec has_unbound t =
+  match t with
+  | TVar r -> (match !r with Unbound _ -> true | Link t -> has_unbound t)
+  | TCon (_, ts) | TTuple ts -> List.exists has_unbound ts
+  | TArrow (a, b) | TNatOp (_, a, b) -> has_unbound a || has_unbound b
+  | TRecord flds -> List.exists (fun (_, t) -> has_unbound t) flds
+  | TLin (_, t) | TRefine (t, _, _) -> has_unbound t
+  | TChan _ | TNat _ | TError -> false
+
+(** Pending entries a lambda closed on while their type was still open,
+    collected for the enclosing named function (or actor handler) to judge
+    again at its own close.  A lambda passed as an argument is checked before
+    the arguments after it, so in `ap2(fn s -> 0, S1(1))` the lambda's `s` is
+    still an unbound variable when its scope closes, and only the later
+    argument fixes it to the linear `S1`.  Judged at the lambda's close alone,
+    it read as polymorphic and the dropped value went unreported
+    (specs/progress/2026-09-19-linear-lambda-arg-judged-at-enclosing-fn.md).
+    [None] where no named function encloses the lambda: judged once, as before. *)
+let deferred_pending : (Ast.span * lin_entry) list ref option ref = ref None
+
 (** Judge the pending entries among [entries] at their scope's close: a
     parameter bound before its type was known, whose type the body has since
     fixed to a linear one, gets exactly the checks it would have had if it had
-    been annotated.  One still unresolved is polymorphic, and is left alone. *)
-let judge_pending env ~scope_span entries =
+    been annotated.  One still unresolved is polymorphic, and is left alone,
+    unless [defer] and a named function encloses this scope: then it is judged
+    again at that function's close ([deferred_pending]). *)
+let rec judge_pending ?(defer = true) env ~scope_span entries =
   List.iter (fun le ->
       match le.le_pending with
       | None -> ()
       | Some t ->
         (match effective_lin env le with
-         | Ast.Unrestricted -> ()
+         | Ast.Unrestricted ->
+           (match !deferred_pending with
+            | Some q when defer && has_unbound t -> q := (scope_span, le) :: !q
+            | _ -> ())
          | lin ->
            (match !(le.le_dup) with
             | Some span -> report_double_use env ~lin le ~span
@@ -476,6 +502,20 @@ let judge_pending env ~scope_span entries =
              if le.le_name = "_" then report_wildcard_discard env ~span:scope_span t
              else report_linear_never_used env ~scope_span le))
     entries
+
+(** Run [f] (a named function's or handler's body check) with a fresh
+    [deferred_pending] collector, then judge what its lambdas deferred, now
+    that the whole body has been solved.  Judged with [~defer:false]: a type
+    still open here is genuinely polymorphic. *)
+and with_deferred_pending env f =
+  let saved = !deferred_pending in
+  let q = ref [] in
+  deferred_pending := Some q;
+  let r = Fun.protect ~finally:(fun () -> deferred_pending := saved) f in
+  List.iter (fun (scope_span, le) ->
+      judge_pending ~defer:false env ~scope_span [le])
+    (List.rev !q);
+  r
 
 (** Must-use at the close of a scope that has enclosing linear binders (a
     lambda, a local [fn ... end], a block [let]): every [Linear] entry it
@@ -1053,6 +1093,47 @@ let mark_linear_ok env t =
     | _ -> ()
   in
   go t
+
+(** Does a value of type [t] hold a value of an opted-in type variable, as
+    data rather than behind a function arrow?  [a], [List(a)], [(a, Int)]
+    do; [a -> Int] and the phantom [Pid(a)] do not.  A [TLin] parameter is
+    already tracked by its own wrapper. *)
+let holds_linear_ok_var env t =
+  let rec go t = match repr t with
+    | TVar { contents = Unbound (id, _) } -> Hashtbl.mem env.linear_ok_ids id
+    | TArrow _ | TLin _ -> false
+    | TCon ("Pid", _) -> false
+    | TCon (_, args) | TTuple args -> List.exists go args
+    | TRecord flds -> List.exists (fun (_, t) -> go t) flds
+    | _ -> false
+  in
+  go t
+
+(** `linear x : a` opts [a] in, so callers may pass a linear value for EVERY
+    parameter of type [a]; but only [x] is tracked in the body.  A second
+    parameter holding an [a] (`y : a`, `ys : List(a)`) could be dropped or
+    duplicated, so it must be marked too.  Called once the body (and any
+    return annotation) is solved, so an [a] the body unified another variable
+    with is seen as well.  [params] pairs each named parameter with its type.
+    (specs/progress/2026-09-19-linear-opt-in-covers-every-parameter.md) *)
+let check_opt_in_params env ~fn_name (params : (Ast.param * ty) list) =
+  List.iter (fun ((p : Ast.param), t) ->
+      if p.param_lin = Ast.Unrestricted && holds_linear_ok_var env t then
+        Err.error env.errors ~span:p.param_name.span
+          (Printf.sprintf
+             "`%s` has type `%s`, which holds a type variable that a \
+              `linear` parameter of `%s` opts in to linear values, so a \
+              caller may pass a linear value here too.  Mark it `linear %s` \
+              (or `affine %s`) so the body is checked to use it once."
+             p.param_name.txt
+             (* The type as written: a local [fn]'s annotation variables are
+                fresh per parameter, so the solved type prints an internal
+                name (`s2`) where the source says `a`. *)
+             (match p.param_ty with
+              | Some ann -> Ast.show_ty ann
+              | None -> pp_ty (repr t))
+             fn_name p.param_name.txt p.param_name.txt))
+    params
 
 (** Ids of the type variables in a NEGATIVE position of [ty]: the ones the
     function receives rather than produces.  [id : a -> a] consumes [a];
@@ -2743,6 +2824,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
           unify env ~span:sp ~reason:None body_ty expected;
           expected
       in
+      check_opt_in_params env ~fn_name:name.txt (List.combine params param_tys);
       let arrow_ty = List.fold_right (fun pt acc -> TArrow (pt, acc)) param_tys ret_ty in
       unify env ~span:sp ~reason:None fn_ty arrow_ty;
       arrow_ty
@@ -3549,6 +3631,7 @@ and infer_block env exprs =
     let ret_annot_reported =
       List.length env.errors.March_errors.Errors.diagnostics > errs_before_ret
     in
+    check_opt_in_params env ~fn_name:name.txt (List.combine params param_tys);
     let arrow_ty = List.fold_right (fun pt acc -> TArrow (pt, acc)) param_tys ret_ty in
     if ret_annot_reported then
       (* The return-annotation unify already reported this mismatch; run the
@@ -4049,8 +4132,10 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
           []
       in
 
-      (* Check or infer the body, sharing fn_tvars with the return annotation *)
-      let body_ty = match def.fn_ret_ty with
+      (* Check or infer the body, sharing fn_tvars with the return annotation.
+         Under [with_deferred_pending]: a lambda argument whose parameter type
+         a later argument fixes is judged once the body is solved. *)
+      let body_ty = with_deferred_pending body_env @@ fun () -> match def.fn_ret_ty with
         | Some ann ->
           let expected = surface_ty env' ~tvars:fn_tvars ann in
           check_expr body_env clause.fc_body expected
@@ -4083,9 +4168,20 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
       let pat_var_names = List.filter_map (function
           | Ast.FPPat (Ast.PatVar n) -> Some n.txt
           | _ -> None) clause.fc_params in
-      judge_pending body_env ~scope_span:fn_span
+      judge_pending ~defer:false body_env ~scope_span:fn_span
         (List.filter (fun le -> List.mem le.le_name (param_names @ pat_var_names))
            body_env.lin);
+
+      (* Every parameter holding an opted-in type variable must be marked
+         ([check_opt_in_params]).  A function-typed parameter (`f : a -> Int`)
+         holds no [a]; a [@[trusted_linear]] body is reviewed, not checked. *)
+      if trusted_vars = [] then
+        check_opt_in_params body_env ~fn_name:def.fn_name.txt
+          (List.concat (List.map2 (fun fp t ->
+               match fp with
+               | Ast.FPNamed p | Ast.FPDefault (p, _) -> [(p, t)]
+               | Ast.FPPat _ -> [])
+               clause.fc_params param_tys));
 
       (* Warn about unrestricted params not referenced in the body *)
       warn_unused_params env clause.fc_params clause.fc_body fn_span;
@@ -4808,12 +4904,19 @@ let rec check_decl env (d : Ast.decl) : env =
        multi-file compilation).
        A `let x : T = e` annotation is checked exactly as the block-[let]
        path checks it ([infer_let_annotated]); it used to be ignored here, so
-       `let x : Int = "hello"` at module level was silently accepted. *)
-    let rhs_ty = with_no_caller env' (fun () ->
-      infer_let_annotated env' sp b.bind_ty b.bind_expr) in
-    Hashtbl.replace env.type_map sp (repr rhs_ty);
-    let bindings, pat_ty = infer_pattern ~expected:rhs_ty env' b.bind_pat in
-    unify env' ~span:sp ~reason:(Some (RLetBind sp)) rhs_ty pat_ty;
+       `let x : Int = "hello"` at module level was silently accepted.
+       All of it under [with_deferred_pending], through the unification with
+       the pattern, so a lambda argument in the RHS whose parameter type a
+       later argument or the annotation fixes (`let r = ap2(fn s -> 0,
+       S1(1))`) is judged once the binding is solved. *)
+    let rhs_ty, bindings =
+      with_deferred_pending env' @@ fun () ->
+      let rhs_ty = with_no_caller env' (fun () ->
+        infer_let_annotated env' sp b.bind_ty b.bind_expr) in
+      Hashtbl.replace env.type_map sp (repr rhs_ty);
+      let bindings, pat_ty = infer_pattern ~expected:rhs_ty env' b.bind_pat in
+      unify env' ~span:sp ~reason:(Some (RLetBind sp)) rhs_ty pat_ty;
+      (rhs_ty, bindings) in
     discharge_constraints env sp;
     ignore (leave_level env');
     (* Same Vault value restriction as the block-[let] path above. *)
@@ -5010,7 +5113,9 @@ let rec check_decl env (d : Ast.decl) : env =
         in
         (* Handler body must return the state record type — emit rich
            diagnostic. No enclosing function — see [with_no_caller]. *)
-        let inferred = with_no_caller handler_env (fun () -> infer_expr handler_env h.ah_body) in
+        let inferred =
+          with_deferred_pending handler_env (fun () ->
+              with_no_caller handler_env (fun () -> infer_expr handler_env h.ah_body)) in
         (* A linear parameter must be consumed by the time the handler returns.
            Storing it into the returned state counts: `{ state with st: s }`
            references `s`, which marks it used. *)
@@ -5022,7 +5127,7 @@ let rec check_decl env (d : Ast.decl) : env =
               then Some le.le_name else None) handler_env.lin in
         check_linear_all_consumed handler_env ~scope_span:h.ah_msg.Ast.span
           (handler_param_names @ state_sentinels);
-        judge_pending handler_env ~scope_span:h.ah_msg.Ast.span
+        judge_pending ~defer:false handler_env ~scope_span:h.ah_msg.Ast.span
           (List.filter (fun le -> List.mem le.le_name handler_param_names)
              handler_env.lin);
         let shadow_env = { handler_env with errors = Err.create () } in
@@ -5884,9 +5989,9 @@ let rec check_decl env (d : Ast.decl) : env =
     (* R2 exemption: a test body has no [main] to be granted the root from, so
        [root_cap] stays nameable here (see [env.root_cap_allowed]). *)
     let env = { env with root_cap_allowed = true } in
-    with_no_caller env (fun () ->
+    with_deferred_pending env (fun () -> with_no_caller env (fun () ->
       check_expr env tdef.test_body t_unit
-        ~reason:(Some (RBuiltin (Printf.sprintf "test body of \"%s\" must produce Unit" tdef.test_name))));
+        ~reason:(Some (RBuiltin (Printf.sprintf "test body of \"%s\" must produce Unit" tdef.test_name)))));
     Hashtbl.replace env.type_map sp t_unit;
     env
 
@@ -5899,8 +6004,8 @@ let rec check_decl env (d : Ast.decl) : env =
     (* No enclosing function — see [with_no_caller]. *)
     (* R2 exemption, same rationale as [DTest]. *)
     let env = { env with root_cap_allowed = true } in
-    with_no_caller env (fun () ->
-      check_expr env body t_unit ~reason:(Some (RBuiltin "setup body must produce Unit")));
+    with_deferred_pending env (fun () -> with_no_caller env (fun () ->
+      check_expr env body t_unit ~reason:(Some (RBuiltin "setup body must produce Unit"))));
     Hashtbl.replace env.type_map sp t_unit;
     env
 
@@ -5908,8 +6013,8 @@ let rec check_decl env (d : Ast.decl) : env =
     (* No enclosing function — see [with_no_caller]. *)
     (* R2 exemption, same rationale as [DTest]. *)
     let env = { env with root_cap_allowed = true } in
-    with_no_caller env (fun () ->
-      check_expr env body t_unit ~reason:(Some (RBuiltin "setup_all body must produce Unit")));
+    with_deferred_pending env (fun () -> with_no_caller env (fun () ->
+      check_expr env body t_unit ~reason:(Some (RBuiltin "setup_all body must produce Unit"))));
     Hashtbl.replace env.type_map sp t_unit;
     env
 
