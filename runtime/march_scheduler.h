@@ -689,6 +689,16 @@ int march_sched_getaddrinfo(const char *host, const char *port,
 int march_sched_wait_fds(const int *fds, int n, int64_t deadline_ms);
 int march_sched_wait_fd(int fd, int want_write, int64_t deadline_ms);
 
+/* errno of the OS thread running the caller NOW.  Read errno through this,
+ * never directly, in a function that parked earlier in the same activation
+ * (march_sched_wait_fd and friends): the green thread may resume on another
+ * scheduler thread, and glibc declares __errno_location() const, so clang
+ * reuses the errno ADDRESS it computed before the park -- the old thread's.
+ * Same hazard as the tl_sched hoisting described at march_sched_send's
+ * migration barrier.  Not an issue before the first park, or on macOS
+ * (__error() is not const), but a helper call costs nothing. */
+int march_errno_now(void);
+
 /* Return the process with the given PID, or NULL if not found.
  * O(1) array lookup by PID. */
 march_proc  *march_sched_find(int64_t pid);
