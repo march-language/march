@@ -951,13 +951,15 @@ and protocol_def_to_json (pd : protocol_def) : string =
 
 and protocol_step_to_json (ps : protocol_step) : string =
   match ps with
-  | ProtoMsg (from_, to_, ty) ->
-    Dump.json_obj [
+  | ProtoMsg (from_, to_, ty, label) ->
+    (* The label field appears only on a labelled step, so an unlabelled
+       protocol's JSON is unchanged. *)
+    Dump.json_obj ([
       ("kind", Dump.json_string "ProtoMsg");
       ("from", name_to_json from_);
       ("to", name_to_json to_);
       ("msg_ty", ty_to_json ty);
-    ]
+    ] @ (match label with Some l -> [ ("label", name_to_json l) ] | None -> []))
   | ProtoLoop steps ->
     Dump.json_obj [
       ("kind", Dump.json_string "ProtoLoop");

@@ -1,0 +1,60 @@
+-- Two-node harness, scenario "stream_labelled": node-b hosts the Cons endpoint
+-- of the labelled Stream protocol (`item: Prod -> Cons : Int`); see
+-- node_a.march for the transport and the design pointer. This node's trace
+-- is the Cons projection of stream_endpoints.expected, in order.
+mod StreamOverNodesB do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Process
+  needs IO.Random
+  needs IO.Spawn
+  needs Session.Live
+
+  @[endpoints]
+  protocol Stream do
+    loop do
+      item: Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+
+  -- ── the Cons endpoint, identical to the in-process fixtures ──────────
+  pfn cons(s : Cap(Session.Live), st : Stream_Cons.S_recv_Item, budget : Int) : Stream_Cons.Yield do
+    Stream_Cons.recv_Item(s, st, fn (n, st1) ->
+      print_line("Cons got Item(" ++ int_to_string(n) ++ ")")
+      if budget > 1 do
+        let st2 = Stream_Cons.choose_more(s, st1, true)
+        cons(s, st2, budget - 1)
+      else
+        let st2 = Stream_Cons.choose_done(s, st1, true)
+        Stream_Cons.close(s, st2)
+      end)
+  end
+
+  fn main(c : Cap(IO)) do
+    let listen_fd = match tcp_listen(Env.require_int("MARCH_NODE_PORT")) do
+      Ok(fd) -> fd
+      Err(e) -> panic("listen: " ++ e)
+    end
+    print_line("node-b: up")
+    let conn = match ClusterConn.accept_split(PeerRegistry.empty(), listen_fd, NodeIdentity.make("node-b", "pk-b", 1), "stream-secret") do
+      Ok((_reg, p)) -> p
+      Err(e) -> panic("accept: " ++ e)
+    end
+    let link = SessionNode.open(conn, "node-b", true, fn ep -> print_line("close " ++ int_to_string(ep)))
+    let s = Session.attach(c, SessionNode.ops(link))
+    -- Drive Cons to its first suspension (its recv handler is installed)
+    -- BEFORE reading the first frame; Prod's Item(1) waits in the socket.
+    let _ = cons(s, Stream_Cons.register(s, 0), 2)
+    SessionNode.serve(link)
+    SessionNode.finish(link)
+    tcp_close(listen_fd)
+  end
+end

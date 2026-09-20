@@ -5399,7 +5399,7 @@ let rec check_decl env (d : Ast.decl) : env =
        whether we're nested (directly, or via a `choose` branch) inside a
        `loop` block — `stop` is only meaningful there. *)
     let rec validate_step ~in_loop = function
-      | Ast.ProtoMsg (sender, receiver, msg_ty) ->
+      | Ast.ProtoMsg (sender, receiver, msg_ty, _) ->
         if sender.txt = receiver.txt then
           Err.error env.errors ~span:sender.span
             (Printf.sprintf

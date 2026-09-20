@@ -1260,8 +1260,9 @@ and emit_fn ctx fn =
     ) clauses
 
 and emit_proto_step ctx = function
-  | ProtoMsg (s, r, t) ->
-    line ctx (Printf.sprintf "%s -> %s : %s" s.txt r.txt (fmt_ty t))
+  | ProtoMsg (s, r, t, label) ->
+    let prefix = match label with Some l -> l.txt ^ ": " | None -> "" in
+    line ctx (Printf.sprintf "%s%s -> %s : %s" prefix s.txt r.txt (fmt_ty t))
   | ProtoLoop steps ->
     line ctx "loop do";
     indented ctx (fun () -> List.iter (emit_proto_step ctx) steps);
