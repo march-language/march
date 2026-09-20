@@ -699,6 +699,12 @@ int march_sched_wait_fd(int fd, int want_write, int64_t deadline_ms);
  * (__error() is not const), but a helper call costs nothing. */
 int march_errno_now(void);
 
+/* errno = [e] on the OS thread running the caller NOW.  The write side of the
+ * same hazard: after a park, a direct `errno = ...` lands on the old thread's
+ * errno -- both losing the value the caller meant to set and corrupting a
+ * scheduler thread that is running something else. */
+void march_errno_set(int e);
+
 /* Return the process with the given PID, or NULL if not found.
  * O(1) array lookup by PID. */
 march_proc  *march_sched_find(int64_t pid);
