@@ -1,0 +1,7 @@
+task 1 finished
+after a discarded await
+task 2 finished
+after an unused binding
+task 3 finished
+task 4 finished
+after a discarded sum of awaits

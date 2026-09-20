@@ -1,0 +1,31 @@
+-- A discarded await still waits. `task_await` / `task_await_unwrap` were
+-- missing from the optimizer's list of effectful builtins, so dead-code
+-- elimination deleted `let _ = task_await_unwrap(t)` (and an unused named
+-- binding, and a discarded sum of awaits): compiled, main went on at once
+-- while the interpreter waited. Expected output is the interpreter's.
+-- Found as cluster sessions whose node stopped under them
+-- (specs/progress/2026-09-19-purity-effectful-builtins.md).
+mod TaskAwaitDiscarded do
+  needs IO
+  needs IO.Console
+  needs IO.Spawn
+
+  pfn work(ms : Int, v : Int) : Int do
+    sleep_ms(ms)
+    println("task " ++ int_to_string(v) ++ " finished")
+    v
+  end
+
+  fn main(c : Cap(IO)) do
+    let t1 = task_spawn(fn _ -> work(100, 1))
+    let _ = task_await_unwrap(t1)
+    println("after a discarded await")
+    let t2 = task_spawn(fn _ -> work(100, 2))
+    let unused = task_await_unwrap(t2)
+    println("after an unused binding")
+    let t3 = task_spawn(fn _ -> work(100, 3))
+    let t4 = task_spawn(fn _ -> work(200, 4))
+    let _ = task_await_unwrap(t3) + task_await_unwrap(t4)
+    println("after a discarded sum of awaits")
+  end
+end

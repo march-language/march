@@ -53,6 +53,56 @@ let impure_builtins = [
   "/"; "%";
 ]
 
+(** Builtins not on [impure_builtins] were assumed pure, so a missing entry
+    let DCE delete a discarded effect.  [task_await] / [task_await_unwrap]
+    were missing: `let _ = task_await(t)` compiled to NO wait at all (the
+    interpreter waited), and 74 more effectful builtins -- file and
+    directory writes, sockets, task cancellation, process control, vault
+    namespaces -- were treated as pure too (found 2026-09-19).  So besides the
+    list, a builtin is impure when its FAMILY is effectful ([impure_prefixes]),
+    when it writes in place ([impure_suffixes]), or when it is one of
+    [impure_named] (diverging, random, capability minting, reads of mutable
+    runtime state).  A pure builtin wrongly caught here only loses an
+    optimisation; the reverse miscompiles, so the families err wide.
+    [pure_exceptions] are the few family members that are plain functions of
+    their arguments. *)
+let impure_prefixes = [
+  "task_"; "tcp_"; "tls_"; "http_"; "file_"; "dir_"; "process_"; "actor_";
+  "vault_"; "dist_"; "signal_"; "ws_"; "logger_"; "ring_buf_"; "remote_";
+  "csv_"; "dns_"; "socket_"; "udp_";
+]
+
+let impure_suffixes = [ "_set"; "_store" ]
+
+let impure_named = [
+  (* diverging *)
+  "panic"; "panic_"; "todo_"; "unreachable_";
+  (* random / time-derived *)
+  "uuid_v7"; "uuid_v7_at";
+  (* actors, monitors, supervision, capabilities *)
+  "monitor"; "demonitor"; "send_checked"; "dynamic_supervisor"; "register_resource";
+  "respond"; "mint_cap"; "revoke_cap"; "run_until_idle"; "worker"; "get_work_pool";
+  (* reads of mutable runtime state: not to be CSE'd or reordered *)
+  "self"; "is_alive"; "mailbox_size"; "get_actor_field"; "live_allocs"; "peak_rss_bytes";
+  "sched_stat";
+  (* control constructs over effectful thunks *)
+  "try_finally"; "__try_call"; "__try_call_val"; "tap";
+]
+
+let pure_exceptions = [ "http_parse_response"; "http_serialize_request" ]
+
+let has_prefix p s = String.length s >= String.length p && String.sub s 0 (String.length p) = p
+let has_suffix x s =
+  let n = String.length s and k = String.length x in
+  n >= k && String.sub s (n - k) k = x
+
+let is_impure_builtin (base : string) : bool =
+  List.mem base impure_builtins
+  || List.mem base impure_named
+  || (not (List.mem base pure_exceptions)
+      && (List.exists (fun p -> has_prefix p base) impure_prefixes
+          || List.exists (fun x -> has_suffix x base) impure_suffixes))
+
 module StringSet = Set.Make (String)
 
 (** Core purity check, parameterized by a set of *user-defined* function names
@@ -88,7 +138,7 @@ let rec is_pure_ext (impure_fns : StringSet.t) : Tir.expr -> bool = function
        call-site name — an exact match here would silently reclassify every
        specialized impure builtin as pure. *)
     let base = Tir_names.strip_specialization_suffix f.Tir.v_name in
-    not (List.mem base impure_builtins)
+    not (is_impure_builtin base)
     && not (StringSet.mem f.Tir.v_name impure_fns)
     && not (StringSet.mem base impure_fns)
   | Tir.ECallPtr _             -> false  (* indirect call — unknown target *)

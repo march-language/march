@@ -12,6 +12,12 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
+- **A discarded `task_await` now waits in compiled code.** `let _ = task_await_unwrap(t)`,
+  an unused `let x = task_await(t)` and similar were deleted by the optimizer, which
+  wrongly took the await builtins for pure: compiled programs ran on without waiting,
+  while the interpreter waited. Other effectful builtins (file and directory writes,
+  sockets, task cancellation, process control, in-place array writes, `panic`) were
+  also treated as pure and are now protected by family-wide rules.
 - **A type annotation on a module-level `let` is now checked.** `let x : Int = "hello"`
   directly inside a `mod` used to be accepted, because the annotation was ignored there
   (a `let` inside a function body was always checked). It is now an error
