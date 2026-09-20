@@ -87,7 +87,7 @@ with a lower-case label, so an upper-case token continues the branch
   the third party's offer, nothing for C), all three roles typechecking, the crash callback
   holding the branch's state (sending the normal step from it is a type error), one test per
   rule plus the twice-listed case, the `choose` form, and the `Chan` refusal.
-- `specs/lang/types/accept/t270_crash_branches_logging.march`, `reject/t271`-`t276`
+- `specs/lang/types/accept/t273_crash_branches_logging.march`, `reject/t271`-`t276`
   (INDEX.md's three count sites updated from `ls`). Mirror the rejects in march-lean after
   merge.
 - `test/session/logging_crash.march` (+ dune rule): the logging protocol in one process on a
