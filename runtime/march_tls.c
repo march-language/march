@@ -305,14 +305,23 @@ static int tls_drive(SSL *ssl, int fd, enum tls_op op, void *buf, int len,
     for (;;) {
         sigset_t saved;
         march_block_preempt(&saved);
-        errno = 0;
+        /* errno through march_errno_set/march_errno_now, never directly: the
+         * wait at the bottom of this loop parks, and on a later iteration the
+         * green thread may be running on another scheduler thread.  glibc
+         * declares __errno_location() const, so clang would reuse the address
+         * it computed before the park -- clearing and then reading the OLD
+         * thread's errno, which both loses this SSL call's errno (an
+         * SSL_ERROR_SYSCALL misreported as EAGAIN, or the reverse) and
+         * clobbers a thread that is running something else.  See
+         * march_errno_now in march_scheduler.h. */
+        march_errno_set(0);
         switch (op) {
             case TLS_OP_CONNECT: rc = SSL_connect(ssl); break;
             case TLS_OP_ACCEPT:  rc = SSL_accept(ssl);  break;
             case TLS_OP_READ:    rc = SSL_read(ssl, buf, len); break;
             default:             rc = SSL_write(ssl, buf, len); break;
         }
-        *saved_errno = errno;
+        *saved_errno = march_errno_now();
         int err = rc > 0 ? SSL_ERROR_NONE : SSL_get_error(ssl, rc);
         march_unblock_preempt(&saved);
         *last_err = err;
@@ -320,7 +329,12 @@ static int tls_drive(SSL *ssl, int fd, enum tls_op op, void *buf, int len,
         if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE) break;
         int w = march_sched_wait_fd(fd, err == SSL_ERROR_WANT_WRITE, deadline_ms);
         if (w == MARCH_FDWAIT_TIMEOUT) { *timed_out = 1; break; }
-        if (w < 0) { *saved_errno = errno ? errno : EIO; *last_err = SSL_ERROR_SYSCALL; break; }
+        if (w < 0) {
+            int e = march_errno_now();
+            *saved_errno = e ? e : EIO;
+            *last_err = SSL_ERROR_SYSCALL;
+            break;
+        }
     }
     if (flags >= 0 && !(flags & O_NONBLOCK)) (void)fcntl(fd, F_SETFL, flags);
     return rc;
