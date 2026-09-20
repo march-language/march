@@ -2732,6 +2732,25 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/nested_record_field_capture.expected native_nested_record_field_capture.out)))
 
+;; A discarded await still waits: `let _ = task_await_unwrap(t)` was deleted
+;; by DCE (task_await was missing from lib/tir/purity.ml's effect list).
+(rule
+ (targets native_task_await_discarded native_task_await_discarded.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/task_await_discarded.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_task_await_discarded
+        native/task_await_discarded.march)
+   (with-stdout-to native_task_await_discarded.out
+        (system "./native_task_await_discarded")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/task_await_discarded.expected native_task_await_discarded.out)))
+
 ;; stdlib/cluster_node.march must typecheck CLEAN when checked as the entry.
 ;; A diagnostic inside a stdlib module is never printed when a program merely
 ;; loads it (bin/main.ml filters stdlib spans), and one such hidden error --
