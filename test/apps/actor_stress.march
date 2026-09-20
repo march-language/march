@@ -2,9 +2,15 @@
 -- Multi-actor (Counter/Stack/Collector/Waiter/Relay), receive()-in-handler,
 -- FIFO message ordering, and Task combinators (async/await/await_many/
 -- async_stream).  Pinned by test/dune as a native compiled-run golden
--- (native_actor_stress).  The fire-and-forget `send` output is deferred to
--- scheduler drain, so the golden captures the scheduler's deterministic
--- dispatch order, not source order.
+-- (native_actor_stress).  Every section's sends are fire-and-forget, and each
+-- actor section ends with `run_until_idle()`, so its actors' output lands
+-- under its own header, before the next section starts.  The golden used to
+-- pin the scheduler's drain order instead (every section's header first, the
+-- actor output after), which is NOT deterministic: the preempt daemon's
+-- time quantum can cut an actor's mailbox drain anywhere and requeue it
+-- behind the other actors (CI, 2026-09-19: the Stack's last two replies
+-- printed after the next sections' output).  Sections that print from
+-- several actors drain between them for the same reason.
 --
 -- The golden is captured under MARCH_NUM_SCHEDULERS=1 (single OS scheduler
 -- thread).  With multiple scheduler threads the actor/task `println`s run
@@ -166,6 +172,7 @@ mod ActorStress do
     send(c, Clear())
     send(c, Dec(7))
     let _ = send(c, Print())        -- expect -7
+    run_until_idle()
   end
 
   -- ── Test: Stack edge cases ─────────────────────────────────────────────
@@ -192,6 +199,7 @@ mod ActorStress do
     -- Repush after drain
     send(s, Push(42))
     let _ = send(s, Top())          -- expect 42
+    run_until_idle()
   end
 
   -- ── Test: Many actors, interleaved sends ──────────────────────────────
@@ -207,9 +215,13 @@ mod ActorStress do
     send(c1, Inc(10))
     send(c2, Inc(20))
     send(c3, Inc(30))
+    -- Three actors print; drain after each so their order is the source's.
     send(c1, Print())       -- expect 11
+    run_until_idle()
     send(c2, Print())       -- expect 22
+    run_until_idle()
     let _ = send(c3, Print())       -- expect 33
+    run_until_idle()
   end
 
   -- ── Test: Relay actor echo burst ──────────────────────────────────────
@@ -221,6 +233,7 @@ mod ActorStress do
     send(r, Say("world"))
     send(r, Say("foo"))
     let _ = send(r, Stats())        -- expect hops=3
+    run_until_idle()
   end
 
   -- ── Test: Collector fed from task results ─────────────────────────────
@@ -236,6 +249,7 @@ mod ActorStress do
       end
     )
     let _ = send(col, Summary())    -- expect count=5 total=55
+    run_until_idle()
   end
 
   -- ── Test: Task.async + Task.await ─────────────────────────────────────
@@ -306,6 +320,7 @@ mod ActorStress do
     send(s, Pop())
     send(s, Top())          -- expect 3
     let _ = send(s, Len())          -- expect 3
+    run_until_idle()
   end
 
   -- ── Test: receive() inside a handler ──────────────────────────────────
@@ -319,6 +334,7 @@ mod ActorStress do
     send(w, Query(3))
     let _ = send(w, Answer(9))
     -- expect "query+answer=12"
+    run_until_idle()
   end
 
   -- NOTE: cancel-token coverage (task_cancel_token_new / task_spawn_with_cancel
@@ -338,6 +354,7 @@ mod ActorStress do
     let ns = List.range(0, 100)
     List.each(ns, fn _ -> send(c, Inc(1)))
     let _ = send(c, Print())        -- expect 100
+    run_until_idle()
   end
 
   -- ── Entry point ───────────────────────────────────────────────────────

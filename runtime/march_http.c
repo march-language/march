@@ -986,9 +986,19 @@ static void *tcp_connect_impl(void *host_ptr, int64_t port, int64_t timeout_ms) 
      *
      * The correct recovery from EINTR (and from EINPROGRESS, should the fd
      * ever arrive non-blocking) is to wait for the socket to become
-     * writable and read the true outcome out of SO_ERROR. */
+     * writable and read the true outcome out of SO_ERROR.
+     *
+     * The outcome travels in `cerr`, never through errno: the wait below
+     * parks, the green thread can resume on another scheduler thread, and on
+     * glibc a direct `errno` after that is the OLD thread's (see
+     * march_errno_now).  Writing SO_ERROR's ECONNREFUSED into errno and
+     * reading it back reported "Interrupted system call" or "Success"
+     * instead, and the cluster node service, which classifies a dial as
+     * refused by that text, never saw the refusal
+     * (test/native/tcp_connect_refused_after_park.march). */
     int crc = connect(fd, res->ai_addr, res->ai_addrlen);
-    if (crc < 0 && (errno == EINTR || errno == EINPROGRESS)) {
+    int cerr = crc < 0 ? errno : 0;
+    if (crc < 0 && (cerr == EINTR || cerr == EINPROGRESS)) {
         /* The wait parks the green thread: it must run UNMASKED (see
          * march_sched_wait_fd's contract), and the readiness it reports is a
          * hint, so the outcome is read from SO_ERROR after a zero-timeout
@@ -999,28 +1009,29 @@ static void *tcp_connect_impl(void *host_ptr, int64_t port, int64_t timeout_ms) 
         for (;;) {
             int w = march_sched_wait_fd(fd, 1, deadline);
             if (w == MARCH_FDWAIT_TIMEOUT) { so_err = ETIMEDOUT; break; }
-            if (w < 0) { so_err = errno ? errno : EIO; break; }
+            if (w < 0) { so_err = march_errno_now(); if (!so_err) so_err = EIO; break; }
             struct pollfd pfd = { fd, POLLOUT, 0 };
             int prc;
-            do { prc = poll(&pfd, 1, 0); } while (prc < 0 && errno == EINTR);
-            if (prc < 0) { so_err = errno; break; }
+            do { prc = poll(&pfd, 1, 0); } while (prc < 0 && march_errno_now() == EINTR);
+            if (prc < 0) { so_err = march_errno_now(); break; }
             if (prc == 0) continue;                       /* stale hint */
             socklen_t so_len = sizeof(so_err);
-            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_err, &so_len) != 0) so_err = errno;
+            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_err, &so_len) != 0) so_err = march_errno_now();
             break;
         }
         march_block_preempt(&saved);
-        if (so_err == 0) { crc = 0; }
-        else             { crc = -1; errno = so_err; }
-    } else if (crc < 0 && errno == EISCONN) {
+        cerr = so_err;
+        crc = so_err == 0 ? 0 : -1;
+    } else if (crc < 0 && cerr == EISCONN) {
         /* Belt and braces: an EISCONN here means the handshake we asked for
          * completed, which is success, not failure. */
         crc = 0;
+        cerr = 0;
     }
     /* Back to blocking: readers and writers of this fd assume it. */
     if (fl >= 0) (void)fcntl(fd, F_SETFL, fl);
     if (crc < 0) {
-        int saved_errno = errno;
+        int saved_errno = cerr;
         march_unblock_preempt(&saved);
         close(fd);
         freeaddrinfo(res);

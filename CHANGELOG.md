@@ -21,12 +21,23 @@ git log is authoritative for exact commits.
   without limit so none is dropped, and cluster mode has no heartbeat to notice a peer
   that is alive but not reading. Past `MARCH_SESSION_QUEUE_MAX_BYTES` (64 MiB by
   default) queued for a peer, the session treats it as gone.
+- **On Linux, a refused `tcp_connect` / `Socket.connect_timeout` now says it was refused.**
+  After a connect that had to wait, the error often read `Interrupted system call` (or
+  `Success`) instead of `Connection refused`, because the outcome was read back from the
+  wrong thread's `errno` once the waiting task resumed on another scheduler thread. A
+  cluster node relies on that text, so a crashed peer was declared dead only by SWIM's
+  suspect timeout, seconds later, instead of at once by the refused redial.
 - **A discarded `task_await` now waits in compiled code.** `let _ = task_await_unwrap(t)`,
   an unused `let x = task_await(t)` and similar were deleted by the optimizer, which
   wrongly took the await builtins for pure: compiled programs ran on without waiting,
   while the interpreter waited. Other effectful builtins (file and directory writes,
   sockets, task cancellation, process control, in-place array writes, `panic`) were
   also treated as pure and are now protected by family-wide rules.
+- **A type annotation on a module-level `let` is now checked.** `let x : Int = "hello"`
+  directly inside a `mod` used to be accepted, because the annotation was ignored there
+  (a `let` inside a function body was always checked). It is now an error
+  (``expected `Int` but got `String` ``), so code with a wrong module-level annotation
+  will stop compiling.
 - **A choreography role that works for a long time before its first message is no longer
   taken for dead.** Heartbeats used to start only once a role reached its first send or
   receive, so one that computed past the heartbeat timeout (10 s by default) before then

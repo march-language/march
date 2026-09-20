@@ -4805,8 +4805,12 @@ let rec check_decl env (d : Ast.decl) : env =
        [with_no_caller]. Without this, any Call/Ctor reference in the RHS
        gets misattributed to whatever [DFn] [check_decl] happened to check
        last in module order (or a stale caller from an earlier file in a
-       multi-file compilation). *)
-    let rhs_ty = with_no_caller env' (fun () -> infer_expr env' b.bind_expr) in
+       multi-file compilation).
+       A `let x : T = e` annotation is checked exactly as the block-[let]
+       path checks it ([infer_let_annotated]); it used to be ignored here, so
+       `let x : Int = "hello"` at module level was silently accepted. *)
+    let rhs_ty = with_no_caller env' (fun () ->
+      infer_let_annotated env' sp b.bind_ty b.bind_expr) in
     Hashtbl.replace env.type_map sp (repr rhs_ty);
     let bindings, pat_ty = infer_pattern ~expected:rhs_ty env' b.bind_pat in
     unify env' ~span:sp ~reason:(Some (RLetBind sp)) rhs_ty pat_ty;
