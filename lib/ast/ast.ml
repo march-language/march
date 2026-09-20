@@ -382,6 +382,10 @@ and protocol_step =
   | ProtoLoop of protocol_step list                       (** loop do ... end *)
   | ProtoChoice of name * (name * protocol_step list) list  (** choose by Role: label -> steps *)
   | ProtoStop of span                                     (** stop — exits an enclosing loop *)
+  | ProtoMayCrash of name list * span                     (** may crash A, B: the roles that may crash *)
+  | ProtoCrashOr of protocol_step * protocol_step list * span
+      (** A -> B : T or crash do ... end: a [ProtoMsg] with the steps that follow
+          if its sender crashes before sending (2026-09-20 crash branches) *)
 
 (** Interface (typeclass) definition:
     interface Eq(a) do ... end *)

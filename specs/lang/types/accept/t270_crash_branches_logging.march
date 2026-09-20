@@ -1,0 +1,48 @@
+-- Crash branches (2026-09-20, design Part B): the ECOOP 2023 logging
+-- protocol. C may crash; I detects it at `C -> I : Read`, whose crash branch
+-- tells L (`Fatal`) instead of the normal `Read`/`Report` round. All three
+-- roles are written against the generated API: I's `recv_Msg_C_I_1` takes a
+-- crash callback with a LIVE state (the crash branch's first), L offers
+-- over the two messages I can send it, C has no crash branch at all.
+mod Main do
+  needs IO
+  needs Session.Live
+
+  @[endpoints]
+  protocol Logging do
+    may crash C
+    L -> I : Int
+    C -> I : String
+      or crash do
+        I -> L : String
+      end
+    I -> L : String
+    L -> I : Bool
+    I -> C : Bool
+  end
+
+  pfn role_l(s : Cap(Session.Live), st : Logging_L.S_send_Msg_L_I_1) : Logging_L.Yield do
+    let st1 = Logging_L.send_Msg_L_I_1(s, st, 1)
+    Logging_L.offer_Msg_I_L_2_Msg_I_L_1(s, st1,
+      fn (_read, st2) -> Logging_L.close(s, Logging_L.send_Msg_L_I_2(s, st2, true)),
+      fn (_fatal, st2) -> Logging_L.close(s, st2))
+  end
+
+  pfn role_i(s : Cap(Session.Live), st : Logging_I.S_recv_Msg_L_I_1) : Logging_I.Yield do
+    Logging_I.recv_Msg_L_I_1(s, st, fn (_trigger, st1) ->
+      Logging_I.recv_Msg_C_I_1(s, st1,
+        fn (read, st2) ->
+          let st3 = Logging_I.send_Msg_I_L_2(s, st2, read)
+          Logging_I.recv_Msg_L_I_2(s, st3, fn (report, st4) ->
+            Logging_I.close(s, Logging_I.send_Msg_I_C_1(s, st4, report))),
+        fn (crashed, st2) ->
+          Logging_I.close(s, Logging_I.send_Msg_I_L_1(s, st2, "fatal: " ++ crashed.cause))))
+  end
+
+  pfn role_c(s : Cap(Session.Live), st : Logging_C.S_send_Msg_C_I_1) : Logging_C.Yield do
+    let st1 = Logging_C.send_Msg_C_I_1(s, st, "read")
+    Logging_C.recv_Msg_I_C_1(s, st1, fn (_report, st2) -> Logging_C.close(s, st2))
+  end
+
+  fn main(c : Cap(IO)) do () end
+end

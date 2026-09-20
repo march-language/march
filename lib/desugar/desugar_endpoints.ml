@@ -66,6 +66,12 @@ type lty =
   | LRecv   of string * string * ty * lty                (** from, ctor, payload, next *)
   | LChoose of (string * string * string * ty * lty) list   (** (label, to, ctor, payload, next): each branch names its own receiver *)
   | LOffer  of string * (string * string * ty * lty) list   (** from, … *)
+  | LRecvCrash of string * (string * string * ty * lty) list * lty
+      (** from (a role that may crash), the messages it may send (as [LOffer]'s
+          branches: one for `A -> B : T or crash`, one per label for a
+          `choose by A` with a `crash` branch), and the crash continuation:
+          what this role, the DETECTOR, does if [from] crashes before sending
+          (2026-09-20 crash branches, design Part B). *)
   | LRec    of string * lty
   | LVar    of string
   | LEnd
@@ -101,6 +107,7 @@ let rec lty_equal (a : lty) (b : lty) : bool =
             l1 = l2 && r1 = r2 && c1 = c2 && ty_equal t1 t2 && lty_equal n1 n2)
          b1 b2
   | LOffer (r1, b1), LOffer (r2, b2) -> r1 = r2 && brs b1 b2
+  | LRecvCrash (r1, b1, c1), LRecvCrash (r2, b2, c2) -> r1 = r2 && brs b1 b2 && lty_equal c1 c2
   | LRec (x, s), LRec (y, t) -> x = y && lty_equal s t
   | LVar x, LVar y -> x = y
   | LEnd, LEnd -> true
@@ -111,8 +118,9 @@ let rec lty_equal (a : lty) (b : lty) : bool =
 type astep =
   | AMsg    of string * string * ty * string        (** sender, receiver, payload, ctor *)
   | ALoop   of astep list
-  | AChoice of string * (string * astep list) list  (** chooser, (label, steps) *)
+  | AChoice of string * (string * astep list) list  (** chooser, (label, steps); a branch labelled `crash` is the chooser's crash branch *)
   | AStop
+  | ACrashOr of astep * astep list                  (** an [AMsg] with its sender's crash branch *)
 
 let capitalize s =
   if s = "" then s else String.capitalize_ascii s
@@ -133,19 +141,33 @@ let annotate (errors : Err.ctx) ~(proto : string) ~(span : span)
     Printf.sprintf "Msg_%s_%s_%d" s r k
   in
   let rec go (steps : protocol_step list) : astep list =
-    List.map
+    List.concat_map
       (function
-        | ProtoMsg (s, r, t) -> AMsg (s.txt, r.txt, t, synth s.txt r.txt)
-        | ProtoLoop inner -> ALoop (go inner)
-        | ProtoStop _ -> AStop
+        | ProtoMsg (s, r, t) -> [ AMsg (s.txt, r.txt, t, synth s.txt r.txt) ]
+        | ProtoLoop inner -> [ ALoop (go inner) ]
+        | ProtoStop _ -> [ AStop ]
+        (* `may crash` is a declaration, checked by the typechecker (rule 6);
+           the roles it names reach [project] through [crashers_of]. *)
+        | ProtoMayCrash _ -> []
+        (* The message is named first, its crash branch after it, in reading
+           order. *)
+        | ProtoCrashOr (inner, crash, _) ->
+          (match go [ inner ] with
+           | [ (AMsg _ as m) ] -> [ ACrashOr (m, go crash) ]
+           | other -> other @ go crash)
         | ProtoChoice (chooser, branches) ->
-          AChoice
+          [ AChoice
             (chooser.txt,
              List.map
                (fun (lbl, arm) ->
                   match arm with
                   | ProtoMsg (s, r, t) :: rest when s.txt = chooser.txt ->
                     (lbl.txt, AMsg (s.txt, r.txt, t, capitalize lbl.txt) :: go rest)
+                  | ProtoCrashOr (ProtoMsg (s, r, t), crash, _) :: rest when s.txt = chooser.txt ->
+                    (lbl.txt, ACrashOr (AMsg (s.txt, r.txt, t, capitalize lbl.txt), go crash) :: go rest)
+                  (* The chooser's crash branch has no head message: the
+                     detector takes it when the chooser is gone. *)
+                  | _ when lbl.txt = "crash" -> (lbl.txt, go arm)
                   | _ ->
                     ok := false;
                     Err.error errors ~span:lbl.span
@@ -155,12 +177,16 @@ let annotate (errors : Err.ctx) ~(proto : string) ~(span : span)
                           on that message. Branch `%s` does not."
                          proto chooser.txt chooser.txt lbl.txt);
                     (lbl.txt, go arm))
-               branches))
+               branches) ])
       steps
   in
   let annotated = go steps in
   ignore span;
   if !ok then Some annotated else None
+
+(** The roles a protocol declares `may crash`. *)
+let crashers_of (steps : protocol_step list) : string list =
+  List.concat_map (function ProtoMayCrash (rs, _) -> List.map (fun (r : name) -> r.txt) rs | _ -> []) steps
 
 (** All roles, in order of FIRST APPEARANCE.  The typechecker sorts them, but
     the order here is user-visible -- it is the role index a transport is
@@ -175,6 +201,7 @@ let roles_of (steps : astep list) : string list =
     | ALoop inner :: rest -> go inner; go rest
     | AChoice (c, brs) :: rest -> add c; List.iter (fun (_, arm) -> go arm) brs; go rest
     | AStop :: rest -> go rest
+    | ACrashOr (m, crash) :: rest -> go [ m ]; go crash; go rest
   in
   go steps;
   List.rev !seen
@@ -191,6 +218,7 @@ let peers_of (steps : astep list) (roles : string list) (role : string) : string
     | ALoop inner :: rest -> go inner; go rest
     | AChoice (_, brs) :: rest -> List.iter (fun (_, arm) -> go arm) brs; go rest
     | AStop :: rest -> go rest
+    | ACrashOr (m, crash) :: rest -> go [ m ]; go crash; go rest
   in
   go steps;
   List.filter
@@ -199,10 +227,51 @@ let peers_of (steps : astep list) (roles : string list) (role : string) : string
        && List.exists (fun (s, r) -> (s = role && r = other) || (s = other && r = role)) !pairs)
     roles
 
+(** The multiparty merge of a non-chooser's branch projections.  Every arm
+    identical: that arm (the role never learns the label).  Else the role
+    must RECEIVE every arm's first message from one role, and offers over
+    those heads.  [strict] (an ordinary `choose`): every head is a receive
+    from [chooser], as [annotate] guarantees every branch begins with the
+    chooser's message.  Lenient (a crash branch, whose arms the DETECTOR
+    heads, not the chooser): the heads may come from any one role, and an
+    arm that is itself an offer from that role is spliced in -- the ECOOP
+    full merge, as far as the well-formedness rules (typecheck.ml,
+    [check_crash_branches], rule 4) let a protocol reach here.  A merge that
+    fails yields an offer the typechecker reports against, as before. *)
+let merge ~multiparty ~strict ~chooser (arms : (string * lty) list) : lty =
+  match arms with
+  | (_, first) :: more when multiparty && List.for_all (fun (_, a) -> lty_equal a first) more -> first
+  | _ ->
+    let heads =
+      List.map
+        (fun (lbl, arm) ->
+           match arm with
+           | LRecv (from, ctor, t, next) when strict && from = chooser -> Some (from, [ (lbl, ctor, t, next) ])
+           (* Told by the detector's messages, not the chooser's labels: name
+              each arm after the message this role receives. *)
+           | LRecv (from, ctor, t, next) when not strict -> Some (from, [ (ctor, ctor, t, next) ])
+           | LOffer (from, brs) when not strict -> Some (from, brs)
+           | _ -> None)
+        arms
+    in
+    let from =
+      match heads with
+      | Some (f, _) :: _ when List.for_all (function Some (g, _) -> g = f | None -> false) heads -> Some f
+      | _ -> None
+    in
+    (match from with
+     | Some f -> LOffer (f, List.concat_map (function Some (_, brs) -> brs | None -> []) heads)
+     | None ->
+       (* A bystander whose branches differ but who never learns the label:
+          not projectable.  Mirror the typechecker's answer (an offer it
+          cannot run) so the fault is reported there. *)
+       LOffer (chooser, List.map (fun (lbl, arm) -> (lbl, capitalize lbl, TyTuple [], arm)) arms))
+
 (** Project onto [role].  Same rules as [project_steps]: a loop is a binder
     whose back-edge is the loop's own variable, `stop` is [LEnd] outright, and
     a non-chooser merges a choice only in a multiparty protocol and only when
-    every branch projects identically. *)
+    every branch projects identically.  A crash branch ends the protocol (or
+    the loop): its continuation is [LEnd], never the enclosing one. *)
 let rec project ~proto ~multiparty (steps : astep list) (role : string) (cont : lty) : lty =
   match steps with
   | [] -> cont
@@ -213,6 +282,18 @@ let rec project ~proto ~multiparty (steps : astep list) (role : string) (cont : 
        if s = role then LSend (r, ctor, t, rest_ty ())
        else if r = role then LRecv (s, ctor, t, rest_ty ())
        else rest_ty ()
+     | ACrashOr (AMsg (s, r, t, ctor), crash) ->
+       let crash_ty () = project ~proto ~multiparty crash role LEnd in
+       if s = role then
+         (* A crashed role does nothing: the crash branch does not exist for it. *)
+         LSend (r, ctor, t, rest_ty ())
+       else if r = role then LRecvCrash (s, [ (ctor, ctor, t, rest_ty ()) ], crash_ty ())
+       else
+         (* A third party: told by the detector [r] which way it went. *)
+         merge ~multiparty ~strict:false ~chooser:r [ (ctor, rest_ty ()); ("crash", crash_ty ()) ]
+     | ACrashOr (other, crash) ->
+       (* Not a message (cannot be built by [annotate]); project what is there. *)
+       project ~proto ~multiparty (other :: crash @ rest) role cont
      | ALoop inner ->
        let x = proto ^ "_loop" in
        (match project ~proto ~multiparty inner role (LVar x) with
@@ -221,13 +302,17 @@ let rec project ~proto ~multiparty (steps : astep list) (role : string) (cont : 
      | AStop -> LEnd
      | AChoice (chooser, branches) ->
        let after = rest_ty () in
+       let crash_arm = List.find_opt (fun (lbl, _) -> lbl = "crash") branches in
+       let normal = List.filter (fun (lbl, _) -> lbl <> "crash") branches in
        let arms =
-         List.map (fun (lbl, arm) -> (lbl, project ~proto ~multiparty arm role after)) branches
+         List.map (fun (lbl, arm) -> (lbl, project ~proto ~multiparty arm role after)) normal
        in
+       let crash_ty = Option.map (fun (_, arm) -> project ~proto ~multiparty arm role LEnd) crash_arm in
        if chooser = role then
          (* The branch head is this role's own send (checked in [annotate]), so
             its receiver is the branch's destination -- per branch, since a
-            multiparty choice may tell a different role on each label. *)
+            multiparty choice may tell a different role on each label.  The
+            crash branch, if any, is not this role's: it has crashed. *)
          LChoose
            (List.map
               (fun (lbl, arm) ->
@@ -236,12 +321,14 @@ let rec project ~proto ~multiparty (steps : astep list) (role : string) (cont : 
                  | _ -> (lbl, chooser, capitalize lbl, TyTuple [], arm))
               arms)
        else
-         (match arms with
-          | (_, first) :: more when multiparty && List.for_all (fun (_, a) -> lty_equal a first) more ->
-            first
-          | _ ->
+         (match crash_ty with
+          | None -> merge ~multiparty ~strict:true ~chooser arms
+          | Some crash ->
             (* Every branch head is a message from the chooser (checked in
-               [annotate]); this role offers only if it RECEIVES those heads. *)
+               [annotate]); the role that RECEIVES all of them is the
+               detector, and takes the crash branch if the chooser is gone
+               (rule 5: there is one such role).  Anyone else merges the
+               branches with the crash branch, told apart by the detector. *)
             let heads =
               List.map
                 (fun (lbl, arm) ->
@@ -250,13 +337,10 @@ let rec project ~proto ~multiparty (steps : astep list) (role : string) (cont : 
                    | _ -> None)
                 arms
             in
-            if List.for_all Option.is_some heads then
-              LOffer (chooser, List.map Option.get heads)
+            if heads <> [] && List.for_all Option.is_some heads then
+              LRecvCrash (chooser, List.map Option.get heads, crash)
             else
-              (* A bystander whose branches differ but who never learns the
-                 label: not projectable.  Mirror the typechecker's answer
-                 (an offer it cannot run) so the fault is reported there. *)
-              LOffer (chooser, List.map (fun (lbl, arm) -> (lbl, capitalize lbl, TyTuple [], arm)) arms)))
+              merge ~multiparty ~strict:false ~chooser (arms @ [ ("crash", crash) ])))
 
 (* ── AST helpers ──────────────────────────────────────────────────────── *)
 
@@ -327,6 +411,14 @@ let state_names (root : lty) : (lty * string) list =
       acc := (t, fresh ("S_choose_" ^ String.concat "_" (List.map (fun (l, _, _, _, _) -> l) brs))) :: !acc;
       List.iter (fun (_, _, _, _, nx) -> go nx) brs
     | LOffer (_, brs) -> acc := (t, fresh ("S_offer_" ^ labels brs)) :: !acc; List.iter (fun (_, _, _, nx) -> go nx) brs
+    | LRecvCrash (_, brs, crash) ->
+      (* From the detector's side one message with a crash branch is still
+         one receive: `S_recv_<Ctor>`, as without the branch.  A `choose`
+         with a `crash` branch is an offer over its labels, `crash` included. *)
+      let base = match brs with [ (_, ctor, _, _) ] -> "S_recv_" ^ ctor | _ -> "S_offer_" ^ labels brs ^ "_crash" in
+      acc := (t, fresh base) :: !acc;
+      List.iter (fun (_, _, _, nx) -> go nx) brs;
+      go crash
   in
   go root;
   List.rev !acc
@@ -345,6 +437,7 @@ let rec binders_of (t : lty) acc =
   | LSend (_, _, _, nx) | LRecv (_, _, _, nx) -> binders_of nx acc
   | LChoose brs -> List.fold_left (fun a (_, _, _, _, nx) -> binders_of nx a) acc brs
   | LOffer (_, brs) -> List.fold_left (fun a (_, _, _, nx) -> binders_of nx a) acc brs
+  | LRecvCrash (_, brs, crash) -> binders_of crash (List.fold_left (fun a (_, _, _, nx) -> binders_of nx a) acc brs)
   | LVar _ | LEnd -> acc
 
 (* ── generation ───────────────────────────────────────────────────────── *)
@@ -372,6 +465,7 @@ let collect_ctors (errors : Err.ctx) ~proto ~span (steps : astep list) : (string
     | ALoop inner :: rest -> go inner; go rest
     | AChoice (_, brs) :: rest -> List.iter (fun (_, arm) -> go arm) brs; go rest
     | AStop :: rest -> go rest
+    | ACrashOr (m, crash) :: rest -> go [ m ]; go crash; go rest
   in
   go steps;
   if !ok then Some (List.rev !acc) else None
@@ -406,6 +500,8 @@ let fingerprint_of ~proto (roles : string list) (steps : astep list) : string =
       List.iter (fun (l, arm) -> Buffer.add_string b (l ^ "->"); go arm; Buffer.add_string b "|") brs;
       Buffer.add_string b "}"; go rest
     | AStop :: rest -> Buffer.add_string b "stop;"; go rest
+    | ACrashOr (m, crash) :: rest ->
+      go [ m ]; Buffer.add_string b "crash{"; go crash; Buffer.add_string b "}"; go rest
   in
   Buffer.add_string b (proto ^ "[" ^ String.concat "," roles ^ "]");
   go steps;
@@ -560,6 +656,36 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
       (match_ (var "c") [ (pcon cancelled_name [ PatWild sp ], block [ let_wild (var "s"); yield ]) ])
   in
   let t_on_cancel = TyArrow (t_int, TyArrow (t_string, TyArrow (t_cancelled, t_yield))) in
+  (* ── crash branches (design Part B, 2026-09-20) ──
+     A receive from a role that `may crash` takes a second callback: what to
+     do if that role crashes before sending.  Unlike a cancel handler it gets
+     a LIVE state, the crash branch's first, and the conversation goes on
+     without the crashed role.  [Crashed_<Role>] carries what the transport
+     knows: the role and the cause. *)
+  let crashed_name = "Crashed_" ^ role in
+  let t_crashed = tycon crashed_name [] in
+  let crashed_ty =
+    DType
+      ( Public, n crashed_name, [],
+        TDRecord
+          [ { fld_name = n "role"; fld_ty = t_int; fld_lin = Unrestricted };
+            { fld_name = n "cause"; fld_ty = t_string; fld_lin = Unrestricted } ],
+        sp )
+  in
+  (* `Session.on_crash(s, ep, role, h)` installs the crash continuation for
+     [role] with the continuation that `suspend` installs next, and returns
+     [ep] (threaded through, as `on_cancel` is). *)
+  let with_crash from ep crash_nm =
+    app "Session.on_crash"
+      [ var "s"; ep; role_idx from;
+        lam [ "c_role"; "c_cause"; "c_ep" ]
+          (block
+             [ let_wild
+                 (app "on_crash"
+                    [ ERecord ([ (n "role", var "c_role"); (n "cause", var "c_cause") ], sp);
+                      con crash_nm [ var "c_ep" ] ]);
+               var "c_ep" ]) ]
+  in
   (* `Session.on_cancel(s, ep, h)` installs the cancel handler with the
      continuation that `suspend` installs next, and returns [ep] -- threaded
      through, because [ep] is bound from a linear state and may be used once. *)
@@ -634,6 +760,28 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
                ([ ("s", t_cap_session); ("st", sty this) ] @ branch_params @ [ ("on_cancel", t_on_cancel) ])
                t_yield
                (on_ep (block [ let_wild (suspend_with from (with_cancel (var "ep")) arms); yield ])) ]
+         | LRecvCrash (from, brs, crash) ->
+           let cbs = List.map (fun (lbl, ctor, payload, next) -> (lbl, ctor, payload, state_of next)) brs in
+           let crash_nx = state_of crash in
+           let t_on_crash = TyArrow (t_crashed, TyArrow (sty crash_nx, t_yield)) in
+           let arms = List.map (fun (lbl, ctor, _, nx) -> (ctor, "on_" ^ lbl, nx)) cbs in
+           (match cbs with
+            | [ (_, ctor, payload, nx) ] ->
+              (* `recv_<Ctor>(s, st, k, on_crash)`: the receive, with what to
+                 do if the sender crashes instead.  No `_or` form: the sender
+                 may crash, and that is what the second callback is for. *)
+              [ fn ("recv_" ^ ctor)
+                  [ ("s", t_cap_session); ("st", sty this); ("k", TyArrow (payload, TyArrow (sty nx, t_yield)));
+                    ("on_crash", t_on_crash) ]
+                  t_yield
+                  (on_ep (block [ let_wild (suspend_with from (with_crash from (var "ep") crash_nx) [ (ctor, "k", nx) ]); yield ])) ]
+            | _ ->
+              let offer_name = "offer_" ^ String.concat "_" (List.map (fun (l, _, _, _) -> l) brs) ^ "_crash" in
+              let branch_params =
+                List.map (fun (lbl, _, payload, nx) -> ("on_" ^ lbl, TyArrow (payload, TyArrow (sty nx, t_yield)))) cbs
+              in
+              [ fn offer_name ([ ("s", t_cap_session); ("st", sty this) ] @ branch_params @ [ ("on_crash", t_on_crash) ]) t_yield
+                  (on_ep (block [ let_wild (suspend_with from (with_crash from (var "ep") crash_nx) arms); yield ])) ])
          | LEnd ->
            [ fn "close" [ ("s", t_cap_session); ("st", sty this) ] t_yield
                (on_ep (block [ let_wild (app "Session.close" [ var "s"; var "ep" ]); yield ])) ]
@@ -661,6 +809,9 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
          match node with
          | LRecv (_, ctor, payload, next) -> Some (this, [ (ctor, payload, state_of next) ])
          | LOffer (_, brs) -> Some (this, List.map (fun (_, ctor, payload, next) -> (ctor, payload, state_of next)) brs)
+         (* The messages only: a crash reaching a hosted endpoint is phase B2
+            (specs/progress/2026-09-20-crash-branches-b1.md). *)
+         | LRecvCrash (_, brs, _) -> Some (this, List.map (fun (_, ctor, payload, next) -> (ctor, payload, state_of next)) brs)
          | _ -> None)
       names
   in
@@ -727,6 +878,9 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
          match node with
          | LRecv (from, ctor, _, _) -> [ await_fn ~from ("await_" ^ ctor) this ]
          | LOffer (from, brs) -> [ await_fn ~from ("await_" ^ String.concat "_" (List.map (fun (l, _, _, _) -> l) brs)) this ]
+         | LRecvCrash (from, brs, _) ->
+           let nm = match brs with [ (_, ctor, _, _) ] -> ctor | _ -> String.concat "_" (List.map (fun (l, _, _, _) -> l) brs) ^ "_crash" in
+           [ await_fn ~from ("await_" ^ nm) this ]
          | LEnd ->
            [ fn "finish" [ ("s", t_cap_session); ("st", sty this) ] t_parked
                (match_ (var "st")
@@ -786,7 +940,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
      manifest -- the capability checker asks each module for its own. *)
   let needs = DNeeds ([ ([ n "Session"; n "Live" ], None) ], sp) in
   (DMod (n mname, Public,
-         (needs :: secret :: yield_ty :: cancelled_ty :: state_types) @ (register :: cancelled_fn :: transitions) @ event_api, sp),
+         (needs :: secret :: yield_ty :: cancelled_ty :: crashed_ty :: state_types) @ (register :: cancelled_fn :: transitions) @ event_api, sp),
    entry)
 
 (** `<P>_Run`: the role runner's typed front.  Per role,
@@ -998,6 +1152,7 @@ let check_payload_codecs (errors : Err.ctx) ~proto ~span (decls : decl list) (st
     | ALoop inner :: rest -> go inner; go rest
     | AChoice (_, brs) :: rest -> List.iter (fun (_, arm) -> go arm) brs; go rest
     | AStop :: rest -> go rest
+    | ACrashOr (m, crash) :: rest -> go [ m ]; go crash; go rest
   in
   go steps;
   !ok

@@ -102,7 +102,9 @@ mod SessionNode do
   -- Failure state: `gone` maps a peer role that can send nothing more to
   -- why ("closed" for a normal close, else the cancellation cause);
   -- `cancel_hs` holds the cancel handler installed with the current
-  -- continuation (`Session.on_cancel`); `forward_cancel` (key "c") is the
+  -- continuation (`Session.on_cancel`); `crash_hs` the crash continuation
+  -- installed with it (`Session.on_crash`), under the endpoint AND the role
+  -- it is for (`crash_key`); `forward_cancel` (key "c") is the
   -- hosted party's way to tell its actor; `heard` counts heartbeat ticks
   -- since a peer's last frame. Our own endpoint's end is in `meta`: "done"
   -- once it closed or was cancelled, and for a cancellation "kind"
@@ -112,10 +114,12 @@ mod SessionNode do
                  pending : Vault(List((Int, Bytes))), meta : Vault(Int),
                  forward : Vault(Int -> Bytes -> Int -> Unit), why : Vault(String),
                  gone : Vault(String), cancel_hs : Vault(Int -> String -> Int -> Int),
+                 crash_hs : Vault(Int -> String -> Int -> Int),
                  forward_cancel : Vault(Int -> String -> Int -> Unit), heard : Vault(Int),
                  ep : Pid(EndpointState), links : List(Link), on_close : Int -> Unit }
 
   pfn ekey(ep : Int) : String do "e" ++ int_to_string(ep) end
+  pfn crash_key(ep : Int, role : Int) : String do ekey(ep) ++ "/r" ++ int_to_string(role) end
 
   pfn encode_deliver(to : Int, from : Int, msg : Bytes) : List(Int) do
     Msgpack.encode(Msgpack.array(
@@ -336,6 +340,17 @@ mod SessionNode do
   -- every drain (which consumed anything that WAS queued) and whenever a
   -- peer goes. A role that closed normally counts too: waiting on it with
   -- nothing queued means waiting forever.
+  --
+  -- Crash branches (the protocol declared the role `may crash`, and the
+  -- receive installed a crash continuation for it, `Session.on_crash`): the
+  -- continuation waiting on it is replaced by the crash branch, run here as
+  -- a delivery would be -- in the endpoint actor's turn, then `drain` for
+  -- whatever the branch installs next. The endpoint stays live and no Cancel
+  -- frame goes out; messages to the crashed role are discarded by `emit`.
+  -- The `drain` here recurses into `check_waiting` only if the branch's own
+  -- first receive waits on another role that is gone: bounded by the
+  -- protocol's nesting of crash branches, hence the annotation.
+  @[no_warn_recursion]
   pfn check_waiting(p : Party, ep : Int) : () do
     if ep_done(p) do ()
     else
@@ -349,7 +364,17 @@ mod SessionNode do
               match found do
                 (role, why) ->
                   let cause = if why == "closed" do "role " ++ int_to_string(role) ++ " closed without sending" else why end
-                  cancel_endpoint(p, ep, role, cause, "role " ++ int_to_string(role) ++ ": " ++ cause, kind_cancelled())
+                  match Vault.get(p.crash_hs, crash_key(ep, role)) do
+                    Some(h) ->
+                      let _ = Vault.delete(p.handlers, ekey(ep))
+                      let _ = Vault.delete(p.crash_hs, crash_key(ep, role))
+                      let _ = Vault.delete(p.cancel_hs, ekey(ep))
+                      let _ = h(role, cause, ep)
+                      let _ = drain(p, ep)
+                      ()
+                    None ->
+                      cancel_endpoint(p, ep, role, cause, "role " ++ int_to_string(role) ++ ": " ++ cause, kind_cancelled())
+                  end
               end
           end
       end
@@ -429,6 +454,9 @@ mod SessionNode do
         ()
       None -> ()
     end
+    -- So does the crash continuation: the message arrived, so the sender
+    -- did not crash before sending it.
+    let _ = Vault.delete(p.crash_hs, crash_key(ep, from))
     match Vault.get(p.forward, "f") do
       None ->
         let _ = k(from, msg, ep)
@@ -465,6 +493,9 @@ mod SessionNode do
     end
   end
 
+  -- `check_waiting` below may run a crash branch and drain again: the
+  -- recursion is bounded by the protocol's nesting of crash branches.
+  @[no_warn_recursion]
   pfn drain(p : Party, ep : Int) : Int do
     let want = Vault.get_or(p.waiting, ekey(ep), 0)
     match Vault.get(p.handlers, ekey(ep)) do
@@ -696,6 +727,7 @@ mod SessionNode do
       why: Vault.new("session_node_why_" ++ tag),
       gone: Vault.new("session_node_gone_" ++ tag),
       cancel_hs: Vault.new("session_node_cancel_" ++ tag),
+      crash_hs: Vault.new("session_node_crash_" ++ tag),
       forward_cancel: Vault.new("session_node_fwdcancel_" ++ tag),
       heard: Vault.new("session_node_heard_" ++ tag),
       ep: ep, links: Nil, on_close: on_close }
@@ -704,7 +736,7 @@ mod SessionNode do
   pfn with_link(p : Party, l : Link) : Party do
     { my_role: p.my_role, node_id: p.node_id, handlers: p.handlers, waiting: p.waiting,
       pending: p.pending, meta: p.meta, forward: p.forward, why: p.why, gone: p.gone,
-      cancel_hs: p.cancel_hs, forward_cancel: p.forward_cancel, heard: p.heard, ep: p.ep,
+      cancel_hs: p.cancel_hs, crash_hs: p.crash_hs, forward_cancel: p.forward_cancel, heard: p.heard, ep: p.ep,
       links: List.append(p.links, Cons(l, Nil)), on_close: p.on_close }
   end
 
@@ -922,6 +954,10 @@ mod SessionNode do
       leave: fn (ep, why) -> do
         let _ = send(ep_actor, Leave(party, ep, why))
         ()
+      end,
+      on_crash: fn (ep, role, h) -> do
+        Vault.set(party.crash_hs, crash_key(ep, role), h)
+        ep
       end
     }
   end

@@ -1602,6 +1602,28 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff session/stream_endpoints.expected stream_endpoints.out)))
 
+; Crash branches in one process (design Part B, 2026-09-20): the logging
+; protocol with `may crash C`, run twice on a transport that can mark a role
+; gone -- once with C alive, once with C "crashed", where I takes its crash
+; callback with a live state and tells L.  The trace is the proof that the
+; generated detector installs the crash continuation and that a transport
+; honouring `on_crash` continues the session rather than cancelling it.
+(rule
+ (targets logging_crash_bin logging_crash.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file session/logging_crash.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o logging_crash_bin
+        session/logging_crash.march)
+   (with-stdout-to logging_crash.out (system "./logging_crash_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff session/logging_crash.expected logging_crash.out)))
+
 ; The actor-hosted endpoint: the same protocol and the same generated API as
 ; stream_endpoints, but both roles live in actors and every resumption is
 ; driven by a mailbox delivery.  Its expected output is stream_endpoints' own

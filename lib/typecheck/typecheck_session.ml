@@ -94,7 +94,15 @@ let rec project_steps env ~proto_name ~multiparty steps role cont =
           `SEnd` unconditionally, discarding both the surrounding [cont] and
           any steps that follow it (those are rejected as unreachable at
           protocol-declaration time — see [check_unreachable_after_loop]). *)
-       SEnd)
+       SEnd
+     | Ast.ProtoMayCrash _ -> rest_ty ()
+     | Ast.ProtoCrashOr (inner, _crash, _) ->
+       (* This projection serves the `Chan(Role, Proto)` API, which refuses a
+          protocol with crash branches ([has_crash_branches]); the
+          `@[endpoints]` generator projects them itself.  Here the message
+          projects as if it had no crash branch, so the usual duality and
+          consistency checks still cover the normal path. *)
+       project_steps env ~proto_name ~multiparty (inner :: rest) role cont)
 
 (** Substitute occurrences of [SVar x] with [replacement] inside [s]. *)
 and subst_svar x replacement s =
@@ -143,6 +151,8 @@ let project_protocol env ~span ~proto_name (pdef : Ast.protocol_def) =
       List.concat_map (fun (_, steps) -> roles_of_steps steps) branches @
       roles_of_steps rest
     | Ast.ProtoStop _ :: rest -> roles_of_steps rest
+    | Ast.ProtoMayCrash (_, _) :: rest -> roles_of_steps rest
+    | Ast.ProtoCrashOr (inner, crash, _) :: rest -> roles_of_steps (inner :: crash @ rest)
   in
   let roles = List.sort_uniq String.compare (roles_of_steps pdef.proto_steps) in
   let multiparty = List.length roles > 2 in
@@ -184,6 +194,10 @@ let project_protocol env ~span ~proto_name (pdef : Ast.protocol_def) =
              gather_msgs [] steps) branches in
          gather_msgs (branch_msgs @ acc) rest
        | Ast.ProtoStop _ :: rest -> gather_msgs acc rest
+       | Ast.ProtoMayCrash _ :: rest -> gather_msgs acc rest
+       (* The crash branch is not projected here (see [project_steps]), so
+          its messages are not gathered either: they are the generator's. *)
+       | Ast.ProtoCrashOr (inner, _crash, _) :: rest -> gather_msgs acc (inner :: rest)
      in
      let msgs = gather_msgs [] pdef.proto_steps in
      List.iter (fun (sender, receiver, msg_ty) ->

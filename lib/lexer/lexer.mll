@@ -80,6 +80,11 @@ let () =
       ("restart",   RESTART);
       ("backoff",   BACKOFF);
       ("shutdown",  SHUTDOWN);
+      (* `may` and `or` are SOFT keywords: Token_filter demotes them back to
+         identifiers unless `crash` follows on the same line (`may crash C`,
+         `... : T or crash do`), the two crash-branch forms of a protocol step. *)
+      ("may",       MAY);
+      ("or",        ORWORD);
       ("permanent", PERMANENT);
       ("transient", TRANSIENT);
       ("temporary", TEMPORARY);

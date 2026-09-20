@@ -1268,6 +1268,15 @@ and emit_proto_step ctx = function
     line ctx "end"
   | ProtoStop _ ->
     line ctx "stop"
+  | ProtoMayCrash (roles, _) ->
+    line ctx (Printf.sprintf "may crash %s" (String.concat ", " (List.map (fun r -> r.txt) roles)))
+  | ProtoCrashOr (inner, crash, _) ->
+    (match inner with
+     | ProtoMsg (s, r, t) ->
+       line ctx (Printf.sprintf "%s -> %s : %s or crash do" s.txt r.txt (fmt_ty t))
+     | _ -> emit_proto_step ctx inner; line ctx "or crash do");
+    indented ctx (fun () -> List.iter (emit_proto_step ctx) crash);
+    line ctx "end"
   | ProtoChoice (role, choices) ->
     line ctx (Printf.sprintf "choose by %s:" role.txt);
     indented ctx (fun () ->

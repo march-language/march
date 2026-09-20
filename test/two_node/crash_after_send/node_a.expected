@@ -1,0 +1,4 @@
+node-a: up
+L: sends Trigger
+L: got Read(disk 42%)
+L: closed
