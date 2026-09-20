@@ -472,8 +472,16 @@ let msg_module (errors : Err.ctx) ~proto ~span ~fingerprint (ctors : (string * t
     List.map (fun r -> fn ("others_" ^ r) [] (tycon "List" [ t_int ]) (int_list (List.filter (fun x -> x <> r) roles))) roles
   in
   let fp = fn "fingerprint" [] t_string (lit_str fingerprint) in
+  (* `role_name(i)`: a role's name from its number, for messages -- every
+     `RunError` carries role numbers, and a user never writes those. *)
+  let role_name =
+    fn "role_name" [ ("i", t_int) ] t_string
+      (List.fold_right
+         (fun r acc -> EIf (app "==" [ var "i"; lit_int (index_of r) ], lit_str r, acc, sp))
+         roles (app "int_to_string" [ var "i" ]))
+  in
   DMod (n mname, Public, (msg_decl :: json_fns) @ [ encode; decode; try_decode ] @ role_fns @ peer_fns @ other_fns
-                         @ [ role_names; fp ], sp)
+                         @ [ role_names; fp; role_name ], sp)
 
 (** `<P>_<Role>`: one [always_linear] type per state and one function per
     transition, plus the unforgeable [Yield].  Also returns the name of the
@@ -852,7 +860,7 @@ let run_module ~proto ~(roles : (string * string) list) : decl =
          fn ("offer_" ^ role)
            [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", tycon "ClusterNode.ClusterHandle" []);
              ("capacity", t_int); ("body", t_body) ]
-           (tycon "Result" [ tycon "SessionNode.Offer" []; t_string ])
+           (tycon "Result" [ tycon "SessionNode.Offer" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.offer_role"
               [ var "io"; var "node"; lit_str proto; app (msg ^ ".fingerprint") []; app (msg ^ ".role_" ^ role) [];
                 app (msg ^ ".peers_" ^ role) []; var "capacity"; lam [ "_ep" ] unit;
@@ -921,6 +929,12 @@ let run_module ~proto ~(roles : (string * string) list) : decl =
   let addrs =
     fn "addrs_from_env" [] t_addrs (app "SessionNode.addrs_from_env" [ lit_str proto; app (msg ^ ".role_names") [] ])
   in
+  (* `error_message(e)`: `SessionNode.run_error_message` with this protocol's
+     role NAMES in place of the numbers. *)
+  let error_message =
+    fn "error_message" [ ("e", tycon "SessionNode.RunError" []) ] t_string
+      (app "SessionNode.run_error_message_named" [ var "e"; lam [ "i" ] (app (msg ^ ".role_name") [ var "i" ]) ])
+  in
   (* What `SessionNode.run` needs; declared here so the capability checker,
      which asks each module for its own, sees them on the generated module. *)
   let needs =
@@ -930,7 +944,7 @@ let run_module ~proto ~(roles : (string * string) list) : decl =
             [ "Session"; "Live" ] ],
         sp )
   in
-  DMod (n mname, Public, (needs :: addrs :: runners) @ clusters @ offers @ initiators @ hosters @ hosters_or, sp)
+  DMod (n mname, Public, (needs :: addrs :: error_message :: runners) @ clusters @ offers @ initiators @ hosters @ hosters_or, sp)
 
 (** Whether [expand] emits `<P>_Run`.  On for every real compile.  A test that
     typechecks generated code against a thin stdlib without `SessionNode`
@@ -938,6 +952,55 @@ let run_module ~proto ~(roles : (string * string) list) : decl =
     there with it on, and the native and two-node fixtures typecheck it for
     real. *)
 let emit_runner = ref true
+
+(** Every payload type declared in THIS module must derive `Json`: the
+    generated `<P>_Msg` codec assumes every nested type has one, and without
+    it `--check` said nothing, the compile failed with an "ambiguous
+    interface-method call" from codegen, and the interpreter panicked at the
+    first `encode`. Types from other modules are not checked here (their
+    derives are not in [decls]); builtins need no derive. Reports one error
+    per offending step; the result is informational (generation goes on). *)
+let check_payload_codecs (errors : Err.ctx) ~proto ~span (decls : decl list) (steps : astep list) : bool =
+  let declared =
+    List.filter_map (function
+      | DType (_, nm, _, _, _) | DAlwaysLinearType (_, nm, _, _, _) -> Some nm.txt
+      | _ -> None) decls
+  in
+  let derives_json =
+    List.filter_map (function
+      | DDeriving (nm, ifaces, _) when List.exists (fun i -> i.txt = "Json") ifaces -> Some nm.txt
+      | _ -> None) decls
+  in
+  let rec missing (t : ty) : string list =
+    match t with
+    | TyCon (c, args) ->
+      let here = if List.mem c.txt declared && not (List.mem c.txt derives_json) then [ c.txt ] else [] in
+      here @ List.concat_map missing args
+    | TyTuple ts -> List.concat_map missing ts
+    | TyLinear (_, t) -> missing t
+    | _ -> []
+  in
+  let ok = ref true in
+  let rec go = function
+    | [] -> ()
+    | AMsg (f, t, ty, _) :: rest ->
+      (match missing ty with
+       | [] -> ()
+       | names ->
+         ok := false;
+         List.iter (fun nm ->
+           Err.error errors ~span
+             (Printf.sprintf
+                "Protocol `%s`: the message `%s -> %s : %s` carries `%s`, which has no JSON codec. \
+                 Every payload crosses the network as JSON: add `derive Json for %s`."
+                proto f t (ty_key ty) nm nm)) names);
+      go rest
+    | ALoop inner :: rest -> go inner; go rest
+    | AChoice (_, brs) :: rest -> List.iter (fun (_, arm) -> go arm) brs; go rest
+    | AStop :: rest -> go rest
+  in
+  go steps;
+  !ok
 
 (** Every generated declaration for the `@[endpoints]` protocols in [decls],
     or [] -- the common case -- when there are none.  Generated functions are
@@ -950,6 +1013,10 @@ let expand (errors : Err.ctx) (decls : decl list) : decl list =
         (match annotate errors ~proto ~span pdef.proto_steps with
          | None -> []
          | Some steps ->
+           (* Reported, not fatal: the modules are still generated, so the
+              user's code sees one error about the payload rather than a
+              cascade of "Unknown module `P_Msg`". *)
+           ignore (check_payload_codecs errors ~proto ~span decls steps);
            (match collect_ctors errors ~proto ~span steps with
             | None -> []
             | Some ctors ->

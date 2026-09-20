@@ -164,6 +164,34 @@ let report_mismatch env ~span ?(occurs_violation = false) ~reason expected found
      NOTE: `expected` here = the inferred type of the expression (what was provided);
            `found`    here = the required type from context (what was needed).
      Matches are on (provided, required) order. *)
+  (* Generated session states (`@[endpoints]`): `S_<step>` is the state a
+     role is in before it takes <step>, and `Yield` is what a finished role
+     body produces. A mismatch between two of them, or between `S_end` and
+     `Yield`, is a protocol-order or a wrong-role mistake, and the type names
+     alone do not say so. *)
+  let short name = match String.rindex_opt name '.' with
+    | Some i -> String.sub name (i + 1) (String.length name - i - 1)
+    | None -> name in
+  let is_state name = String.length (short name) > 2 && String.sub (short name) 0 2 = "S_" in
+  let session_hint =
+    match repr expected, repr found with
+    | TCon (p, []), TCon (r, []) when is_state p && is_state r ->
+      [ Printf.sprintf
+          "Both are states of a generated protocol role: `%s` is the state the role is in \
+           before that step, and this call is a different step. Either the protocol takes \
+           the steps in another order, or this body is written for a different role than \
+           the one it is run as (`run_<Role>` and `<Role>.register` decide which)."
+          (short p) ]
+    | TCon (p, []), TCon (r, []) when short p = "S_end" && short r = "Yield" ->
+      [ "A role body ends by closing the conversation: `<Role>.close(s, st)` on the final \
+         state produces the `Yield` the callback must return." ]
+    | TCon (p, []), TCon (r, []) when is_state p && short r = "Yield" ->
+      [ Printf.sprintf
+          "The callback must finish the conversation: keep taking the protocol's steps from \
+           `%s` until `<Role>.close(s, st)`, which produces the `Yield`."
+          (short p) ]
+    | _ -> []
+  in
   let common_hint =
     match repr expected, repr found with
     | TCon ("Int", []), TCon ("Float", []) ->
@@ -259,7 +287,7 @@ let report_mismatch env ~span ?(occurs_violation = false) ~reason expected found
   Err.report env.errors
     { Err.severity = Error; span; message = headline;
       labels;
-      notes = occurs_note @ why_note @ mismatch_note @ common_hint @ same_name_note;
+      notes = occurs_note @ why_note @ mismatch_note @ session_hint @ common_hint @ same_name_note;
       code = None; fix = None }
 
 (** Structural equality for session types (used by [unify] for [TChan] cases).

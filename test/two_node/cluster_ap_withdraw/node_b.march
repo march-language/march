@@ -32,7 +32,7 @@ mod ClusterApWithdrawB do
         if ClusterNode.await_members(h, 1, 120000) do () else panic("node-b: never joined") end
         println("node-b: offering")
         match Ring_Run.offer_B(c, h, 1, fn (s, st) -> role_b(s, st)) do
-          Err(e) -> panic(e)
+          Err(e) -> panic(Ring_Run.error_message(e))
           Ok(_) -> sleep_ms(600000)
         end
     end

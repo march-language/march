@@ -12,6 +12,19 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
+- **A choreography payload type without a JSON codec is a check-time error.** A type
+  declared in the module and used as a message payload without `derive Json` used to pass
+  `march --check`, fail the compile with an internal "ambiguous interface-method call", and
+  panic the interpreter at the first message. The error now names the step and the type.
+- **Session-state type errors explain themselves.** A step called in the wrong state
+  (`expected `S_recv_...` but got `S_send_...``) now says both are states of a generated
+  role, what `S_<step>` means, and that the cause is either the protocol's order or a body
+  run as the wrong role; a callback that returns a state instead of `Yield` is told to
+  `close`.
+- **Two choreography nodes with different secrets fail at once, and say so.** The dialing
+  side kept retrying after the listener rejected its handshake and reported "Connection
+  refused" at the end of the setup time; it now stops on the rejection and asks whether
+  both nodes run with the same secret.
 - **A lambda passed before the value it receives can no longer drop a linear value.**
   `ap2(fn s -> 0, S1(1))` was accepted while the same call with the arguments the
   other way round was rejected: the lambda was checked before its parameter's type
@@ -101,6 +114,9 @@ git log is authoritative for exact commits.
   detected by a heartbeat (`MARCH_SESSION_HEARTBEAT_MS`, `MARCH_SESSION_TIMEOUT_MS`).
 
 ### Added
+- **`<P>_Run.error_message(e)` and `<P>_Msg.role_name(n)`**: a `RunError` spelled with the
+  protocol's role names instead of numbers. `offer_<Role>` now returns `RunError` like the
+  other entry points (`AlreadyOffered(role)` when the node already offers that role).
 - **Choreography access points: a node can offer a role for many sessions.**
   `<P>_Run.offer_<Role>(io, node, capacity, body)` offers a role on a cluster node, and
   `<P>_Run.initiate_<Role>(io, node, body)` starts one session, minting a fresh session id
