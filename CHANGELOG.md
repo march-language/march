@@ -88,6 +88,14 @@ git log is authoritative for exact commits.
   detected by a heartbeat (`MARCH_SESSION_HEARTBEAT_MS`, `MARCH_SESSION_TIMEOUT_MS`).
 
 ### Added
+- **Choreography access points: a node can offer a role for many sessions.**
+  `<P>_Run.offer_<Role>(io, node, capacity, body)` offers a role on a cluster node, and
+  `<P>_Run.initiate_<Role>(io, node, body)` starts one session, minting a fresh session id
+  and inviting one offer of each other role. An offer refuses when it is full, closing, or
+  built from a different version of the protocol (protocols now carry a fingerprint); the
+  initiator then tries the next one, and reports `NoOffer(role, why)` if a role cannot be
+  filled. After a failure a supervisor restarts the program, it offers again, and the next
+  session forms with no cross-node coordination.
 - **`ClusterNode`, a running cluster node**: `ClusterNode.start(config)` joins from seed
   addresses, keeps one authenticated connection pair per peer, runs SWIM failure detection
   continuously, learns every peer's advertised address from gossip (so a node reaches peers

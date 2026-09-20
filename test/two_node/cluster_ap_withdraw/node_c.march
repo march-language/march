@@ -1,0 +1,39 @@
+-- Scenario "cluster_ap_withdraw": node-c offers role C, and starts late.
+mod ClusterApWithdrawC do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+
+  @[endpoints]
+  protocol Ring do
+    A -> B : Int
+    B -> C : Int
+    C -> A : Int
+  end
+
+  pfn role_c(s : Cap(Session.Live), st : Ring_C.S_recv_Msg_B_C_1) : Ring_C.Yield do
+    Ring_C.recv_Msg_B_C_1(s, st, fn (n, st1) ->
+      println("C: closing the ring with " ++ int_to_string(n))
+      Ring_C.close(s, Ring_C.send_Msg_C_A_1(s, st1, n + 1)))
+  end
+
+  fn main(c : Cap(IO)) do
+    let seed = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A"))
+    let cfg = ClusterNode.config("node-c", Env.require_int("MARCH_PORT_C"), "", Cons(seed, Nil), "apw-secret", 1)
+    match ClusterNode.start(cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        if ClusterNode.await_members(h, 2, 120000) do () else panic("node-c: never joined") end
+        println("node-c: offering")
+        match Ring_Run.offer_C(c, h, 4, fn (s, st) -> role_c(s, st)) do
+          Err(e) -> panic(e)
+          Ok(_) -> sleep_ms(600000)
+        end
+    end
+  end
+end

@@ -237,6 +237,61 @@ end
   that arrived from that peer.
 - Every role must run on a different node.
 
+## Access points: many sessions, and starting again
+
+`cluster_<Role>` runs one session whose id the nodes agree on beforehand. An **access
+point** is the other way round: a node offers a role for any number of sessions, and a
+session forms when some other node invites it.
+
+A node that plays a role for others **offers** it:
+
+```march
+match Echo_Run.offer_Server(c, node, 64, fn (s, st) -> serve_one(s, st)) do
+  Ok(offer) -> ...        -- offering now; each session runs in its own task
+  Err(why)  -> panic(why) -- this role of this protocol is already offered on this node
+end
+```
+
+A node that wants a conversation **initiates** one:
+
+```march
+match Echo_Run.initiate_Client(c, node, fn (s, st) -> ask(s, st)) do
+  Ok(_) -> println("done")
+  Err(SessionNode.NoOffer(role, why)) -> println("nobody would take role " ++ int_to_string(role) ++ ": " ++ why)
+  Err(e) -> println(SessionNode.run_error_message(e))
+end
+```
+
+Every role gets both functions, so a protocol needs no annotation saying which side
+starts: the client initiates and the server offers, and a pipeline's first stage can
+initiate just as well.
+
+**How a session forms.** The initiator mints a fresh session id (its node, that node's
+incarnation, a counter: never reused, so a restarted or partitioned node can never be
+addressed by an old session), then invites one offer of each other role, each on a
+different node. An offer refuses when it is full, when it is closing, or when it was
+built from a different version of the protocol: each protocol has a fingerprint, so two
+nodes built from different versions refuse each other instead of exchanging messages the
+other cannot read. On a refusal, or no answer, the initiator tries the next offer, all
+within the setup time (`MARCH_SESSION_CONNECT_MS`, 20 seconds). If a role cannot be
+filled, `Err(NoOffer(role, why))` says what each offer said, and the offers that had
+already accepted are released.
+
+**Capacity** is the second argument to `offer_<Role>`: how many sessions it will run at
+once. Past that it answers "full" and the initiator looks elsewhere.
+
+**Starting again after a failure.** A failed session is cancelled and discarded (see
+[When a role fails](#when-a-role-fails)); nothing resumes it. What the access point adds
+is that the next session forms by itself: a supervisor restarts the actor or the program,
+it offers again, and the next invitation finds it. No node coordinates the restart with
+any other.
+
+`SessionNode.close_offer(offer)` stops offering: new invitations are refused and the name
+is released, while sessions already running finish.
+
+The [cluster limits](#running-over-a-cluster-node) still apply: every role on a different
+node, and one offer per role per node.
+
 ## Messages from different peers
 
 Each connection delivers its messages in order, but two connections are not ordered against

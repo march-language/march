@@ -1,0 +1,40 @@
+-- Scenario "cluster_ap_retry": node-c offers role Server of a different
+-- version of Echo (the Client sends a String), so every invitation from
+-- node-b is refused as "protocol differs". It must never serve a session.
+mod ClusterApRetryC do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+
+  @[endpoints]
+  protocol Echo do
+    Client -> Server : String
+    Server -> Client : Int
+  end
+
+  pfn serve_one(s : Cap(Session.Live), st : Echo_Server.S_recv_Msg_Client_Server_1) : Echo_Server.Yield do
+    Echo_Server.recv_Msg_Client_Server_1(s, st, fn (m, st1) ->
+      println("Server (other version): got " ++ m)
+      Echo_Server.close(s, Echo_Server.send_Msg_Server_Client_1(s, st1, 0)))
+  end
+
+  fn main(c : Cap(IO)) do
+    let seed = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A"))
+    let cfg = ClusterNode.config("node-c", Env.require_int("MARCH_PORT_C"), "", Cons(seed, Nil), "ap-secret", 1)
+    match ClusterNode.start(cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        if ClusterNode.await_members(h, 1, 120000) do () else panic("node-c: never joined") end
+        println("node-c: offering")
+        match Echo_Run.offer_Server(c, h, 4, fn (s, st) -> serve_one(s, st)) do
+          Err(e) -> panic(e)
+          Ok(_) -> sleep_ms(600000)
+        end
+    end
+  end
+end

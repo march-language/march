@@ -53,7 +53,19 @@ means every node calling `run` again, arranged by whoever runs the nodes.
 - **The standalone runner stays** (environment addresses, per-connection heartbeat) as the
   no-cluster mode.
 
-## The open question
+## Status (2026-09-20)
+
+**Phase A1 shipped**: [[2026-09-20-choreography-access-points-a1]] -- `offer_<Role>` /
+`initiate_<Role>`, the initiator invites one offer per role, protocol fingerprints,
+`NoOffer`, withdrawal, and four two-node scenarios (including local restart). The design
+is [[2026-09-19-choreography-access-points-and-crash-branches-design]], where the open
+question below was settled: **the initiator invites** (no central matchmaker).
+
+**Still open here**: phase A2, hosted offers -- an actor holding one `Parked_<Role>` per
+session id in a `LinearMap`, which needs a hosted `run_cluster` (only the standalone
+runner has `run_hosted`). Part B of that design, crash branches, is a separate item.
+
+## The open question (settled: the initiator invites)
 
 **Forming sessions when a role has many instances** (one server, many clients). Maty's
 access point establishes a session as soon as one registration per role is present. Across

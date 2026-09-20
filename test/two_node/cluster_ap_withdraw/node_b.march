@@ -1,0 +1,40 @@
+-- Scenario "cluster_ap_withdraw": node-b offers role B with capacity 1, so
+-- the withdrawal of the abandoned session is what frees it. See scenario.sh.
+mod ClusterApWithdrawB do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+
+  @[endpoints]
+  protocol Ring do
+    A -> B : Int
+    B -> C : Int
+    C -> A : Int
+  end
+
+  pfn role_b(s : Cap(Session.Live), st : Ring_B.S_recv_Msg_A_B_1) : Ring_B.Yield do
+    Ring_B.recv_Msg_A_B_1(s, st, fn (n, st1) ->
+      println("B: relaying " ++ int_to_string(n))
+      Ring_B.close(s, Ring_B.send_Msg_B_C_1(s, st1, n + 1)))
+  end
+
+  fn main(c : Cap(IO)) do
+    let seed = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A"))
+    let cfg = ClusterNode.config("node-b", Env.require_int("MARCH_PORT_B"), "", Cons(seed, Nil), "apw-secret", 1)
+    match ClusterNode.start(cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        if ClusterNode.await_members(h, 1, 120000) do () else panic("node-b: never joined") end
+        println("node-b: offering")
+        match Ring_Run.offer_B(c, h, 1, fn (s, st) -> role_b(s, st)) do
+          Err(e) -> panic(e)
+          Ok(_) -> sleep_ms(600000)
+        end
+    end
+  end
+end
