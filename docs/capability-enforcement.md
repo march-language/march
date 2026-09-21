@@ -75,6 +75,8 @@ $ march --compile --cap-sandbox -o build/myapp app.march
 
 Installation **fails closed**: if the sandbox cannot be installed, the program will not run rather than continue unconfined.
 
+**Path scopes.** A filesystem capability can be narrowed to a directory subtree: `needs IO.FileWrite("/var/lib/myapp")`. A literal path outside every declared scope is a compile error, and `--cap-sandbox` narrows its write grant to the declared subtrees. Two scopes are compile errors rather than being silently ignored: a scope on a capability that is not `IO.FileRead`, `IO.FileWrite` or `IO.FileSystem` (for example `needs IO.Network("/etc")`, or `needs IO("/srv")`; scope the filesystem capability you mean instead), and a relative scope (`"etc/myapp"`, `"./out"`), which would name a different directory depending on the working directory at run time.
+
 `--cap-sandbox` is **opt-in defense-in-depth**, not a guarantee against a hostile *publisher*. The party building the binary chooses whether to compile it in, so a malicious author simply omits it. Its purpose is a binary *you* built and trust, deployed somewhere `forge` is not the launcher: under systemd, a supervisor, a container entrypoint. That's the exact case `forge cap run` cannot reach. When you control the launcher, prefer `forge cap run`.
 
 Because both mechanisms confine the **whole process**, they bound even the code the compiler cannot see: `extern` C, `dlopen`, raw syscalls. They are the enforcement complement to [`forge cap inspect`]({{ site.baseurl }}/docs/capability-audit/#auditing-a-compiled-binary). `inspect` *reads* what a binary possesses; these *enforce* what it may do.
