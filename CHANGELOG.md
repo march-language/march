@@ -12,6 +12,15 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **A signature may declare an abstract refinement** — a predicate it is
+  polymorphic in, Liquid Haskell style: `fn filt(xs : List(a), keep : ({x : a |
+  true}) -> {Bool | _ == p(x)}) : List({a | p(_)})`. This release checks such a
+  signature's well-formedness (applied to the binder in scope, one type per
+  name, no nesting, and a warning when nothing consumes it) and stops reporting
+  the declared name as unknown predicate vocabulary. It does not yet prove
+  anything with it: `List.filter`'s result still carries no refinement, which
+  is the next phase. See `specs/2026-09-20-abstract-refinements-design.md`.
+
 - **Crash branches in choreographies.** A protocol can declare the roles that `may crash`,
   and a receive from such a role carries `or crash do ... end` (or a `crash` branch of the
   `choose` it heads): what the receiver does if that role crashes before sending. The

@@ -16401,6 +16401,104 @@ let refine_errors src =
       then Some d.March_errors.Errors.message else None)
     ctx.March_errors.Errors.diagnostics
 
+(* Every diagnostic message [Refine_check] produced, any severity: the
+   abstract-refinement rules are errors AND warnings, and one of the things
+   phase 1 must prove is that a declared name no longer draws the
+   "not a measure" warning. *)
+let refine_diagnostics (src : string) : string list =
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module ctx
+    (March_desugar.Desugar.desugar_module (parse src));
+  List.map
+    (fun (d : March_errors.Errors.diagnostic) -> d.March_errors.Errors.message)
+    ctx.March_errors.Errors.diagnostics
+
+(* Abstract refinements, phase 1 (specs/2026-09-20-abstract-refinements-design.md
+   §1): the surface rules only.  Phase 1 is INERT — no obligation changes
+   verdict — so the cases below assert diagnostics and the ledger's silence,
+   never a proof. *)
+let abstract_refinements_suite =
+  let m body = "mod AR do\n" ^ body ^ "end\n" in
+  let definer = "({x : a | true}) -> {Bool | _ == p(x)}" in
+  let wellformed =
+    m (Printf.sprintf
+         "  fn filt(xs : List(a), keep : %s) : List({a | p(_)}) do\n    xs\n  end\n" definer)
+  in
+  let says needle msgs = List.exists (fun msg -> contains msg needle) msgs in
+  [ Alcotest.test_case "a well-formed signature is accepted and exempt from the vocabulary warning"
+      `Quick (fun () ->
+        let msgs = refine_diagnostics wellformed in
+        Alcotest.(check bool) "no abstract-refinement diagnostic" false
+          (says "abstract refinement" msgs);
+        (* The exemption: without it `p` reads as an unknown predicate name. *)
+        Alcotest.(check bool) "no `not a measure` warning for p" false
+          (says "`p` is not a measure" msgs));
+
+    Alcotest.test_case "a name with no definer keeps its unknown-vocabulary warning" `Quick
+      (fun () ->
+        (* INERTNESS: this is the shape every typo in a refinement has, and it
+           must behave exactly as it did before abstract refinements existed. *)
+        let msgs = refine_diagnostics (m "  fn g(xs : List(a)) : List({a | bogus(_)}) do xs end\n") in
+        Alcotest.(check bool) "warned as unknown vocabulary" true
+          (says "`bogus` is not a measure" msgs);
+        Alcotest.(check bool) "not treated as an abstract refinement" false
+          (says "abstract refinement" msgs));
+
+    Alcotest.test_case "applied to a name that is not the binder in scope" `Quick (fun () ->
+        let msgs =
+          refine_diagnostics
+            (m (Printf.sprintf
+                  "  fn g(xs : List({a | p(zz)}), keep : %s) : Int do 0 end\n" definer))
+        in
+        Alcotest.(check bool) "reported" true (says "is applied to `zz`" msgs));
+
+    Alcotest.test_case "applied to an expression" `Quick (fun () ->
+        let msgs =
+          refine_diagnostics
+            (m (Printf.sprintf
+                  "  fn g(xs : List(a), keep : %s) : List({a | p(q(_))}) do xs end\n" definer))
+        in
+        Alcotest.(check bool) "reported" true (says "is applied to an expression" msgs));
+
+    Alcotest.test_case "used at two different types" `Quick (fun () ->
+        let msgs =
+          refine_diagnostics
+            (m (Printf.sprintf
+                  "  fn g(ns : List({Int | p(_)}), keep : %s) : List({a | p(_)}) do ns end\n"
+                  definer))
+        in
+        Alcotest.(check bool) "reported" true (says "used at more than one type" msgs));
+
+    Alcotest.test_case "a definer nobody consumes is vacuous" `Quick (fun () ->
+        let msgs =
+          refine_diagnostics (m (Printf.sprintf "  fn g(keep : %s) : Int do 0 end\n" definer))
+        in
+        Alcotest.(check bool) "warned" true (says "never used in the signature" msgs));
+
+    Alcotest.test_case "a negative occurrence counts as a use" `Quick (fun () ->
+        let msgs =
+          refine_diagnostics
+            (m (Printf.sprintf "  fn g(xs : List({a | p(_)}), keep : %s) : Int do 0 end\n" definer))
+        in
+        Alcotest.(check bool) "not called vacuous" false (says "never used in the signature" msgs);
+        Alcotest.(check bool) "no error" false (says "abstract refinement `p` is applied" msgs));
+
+    gated "phase 1 is inert: row n still skips, nothing proves" (fun () ->
+        (* The motivating case (design row n).  Phase 2 turns this into a
+           proof; until then the ledger must be unchanged, and this case is
+           what will show that happening. *)
+        let src =
+          m (String.concat "\n"
+               [ Printf.sprintf "  fn filt(xs : List(a), keep : %s) : List({a | p(_)}) do xs end" definer;
+                 "  fn sum_pos(ys : List({Int | _ > 0})) : Int do 0 end";
+                 "  fn run(zs : List(Int), k : (Int) -> Bool) : Int do sum_pos(filt(zs, k)) end";
+                 "" ])
+        in
+        let (proved, violated, _skipped) = ledger_counts3 src in
+        Alcotest.(check int) "nothing proved" 0 proved;
+        Alcotest.(check int) "nothing violated" 0 violated);
+  ]
+
 let single_element_type_suite =
   let m body = "mod M do\n" ^ body ^ "\nend\n" in
   let mixes msgs =
@@ -17332,6 +17430,7 @@ let () =
       ("set-refinements", set_suite);
       ("typed-instances", typed_instances_suite);
       ("single-element-type", single_element_type_suite);
+      ("abstract-refinements", abstract_refinements_suite);
       ("list-structure", list_structure_suite);
       ("cardinality", card_suite);
       ("avl-induction", avl_suite);
