@@ -25,4 +25,7 @@ not do"; remove the bullet there when closing one.
    work: `match zs do Cons(_, t) -> h(t, t)` inside `match xs do Cons(_, t)`);
    Tier 2 should apply the same filter, or track components per lexical scope.
 6. **Abstract refinements**, so `filter` can produce `List({Int | p})` from a
-   predicate. A new mechanism in the logic, not plumbing; its own design.
+   predicate. A new mechanism in the logic, not plumbing; its own design —
+   written 2026-09-20: `specs/2026-09-20-abstract-refinements-design.md`
+   (four phases, one PR each; phase 2 is the one that closes this item and the
+   "`filter` does not produce a refinement it was not given" bullet).
