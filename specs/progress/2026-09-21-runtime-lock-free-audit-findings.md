@@ -38,9 +38,15 @@ Test seam: `march_dispatch_set_close_hook` makes reclaim call a hook instead of
   hook, i.e. while "dlclose" is in flight, an `enter_gen` aimed at the closing
   version's epoch must not be handed its fn_ptr.
 - `test_reclaim_race_threads` — 4 reader threads aim `enter_gen` at the next
-  reclaim candidate and hold the pin briefly; the publisher cycles 50k publishes;
+  reclaim candidate and hold the pin briefly; the publisher cycles publishes;
   a pin that overlaps its version's close is counted. Also asserts the race was
-  exercised (pins > 0, some publishes blocked).
+  exercised (>= 10k pins, some publishes blocked). First CI run (macos-15)
+  caught that guard firing: a fixed 50k publishes finished before any reader
+  was scheduled (`pins=0`). Readers now signal they are running before the
+  publisher starts, and the publisher runs until the race has been exercised
+  (>= 20k publishes, capped at 1M or 10 s). The guards are skipped, with a
+  printed SKIP, when only one CPU is online: there the race cannot be
+  exercised at all (measured in Docker pinned to one core: `blocked=0`).
 
 Red control (scratch copy with only the reclaim order reverted to
 dlclose -> live=0):
@@ -48,6 +54,7 @@ dlclose -> live=0):
 | build | where | result |
 |---|---|---|
 | red | macOS arm64 | both new cases FAIL; `overlap=13049` |
+| red | Docker ubuntu arm64, 3 CPUs (reworked test) | both FAIL; `overlap=5172` |
 | red | Docker ubuntu arm64, TSAN | both FAIL; `overlap=28692`; 1 TSAN data race (reclaim rewrite vs pinned reader) |
 | fix | macOS arm64, x3 | PASS, `overlap=0` |
 | fix | Docker ubuntu arm64, TSAN | PASS, `overlap=0`, 0 TSAN warnings |

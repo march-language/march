@@ -21,6 +21,9 @@
 #include <stdint.h>
 #include <string.h>
 #include <pthread.h>
+#include <sched.h>
+#include <unistd.h>
+#include <time.h>
 #include <stdatomic.h>
 
 static int g_failed = 0;
@@ -306,13 +309,23 @@ static void test_reclaim_retires_before_dlclose(void) {
  * epoch k-1: the non-current version, i.e. the NEXT one to be reclaimed.  The
  * close hook marks handle k closed; a reader that is still pinned to fn k when
  * it re-checks that flag has held a pin across the close = the bug. */
-#define RECL_READERS 4
-#define RECL_PUBS    50000
-static _Atomic uint32_t g_recl_k     = 0;
-static _Atomic int      g_recl_stop  = 0;
-static _Atomic long     g_recl_bad   = 0;
-static _Atomic long     g_recl_pins  = 0;
-static _Atomic uint8_t  g_recl_closed[RECL_PUBS + 2];
+/* Not a fixed publish count: on CI's macos-15 runner a fixed 50k publishes
+ * finished before any reader was scheduled (pins=0, blocked=0; the vacuity
+ * guards below caught it).  Readers now signal they are running before the
+ * publisher starts, and the publisher runs until the race has demonstrably
+ * been exercised (MIN_PUBS publishes, MIN_PINS pins, at least one blocked
+ * publish), capped by MAX_PUBS and a wall-clock deadline. */
+#define RECL_READERS   4
+#define RECL_MIN_PUBS  20000
+#define RECL_MAX_PUBS  1000000
+#define RECL_MIN_PINS  10000
+#define RECL_DEADLINE_S 10
+static _Atomic uint32_t g_recl_k       = 0;
+static _Atomic int      g_recl_stop    = 0;
+static _Atomic int      g_recl_started = 0;
+static _Atomic long     g_recl_bad     = 0;
+static _Atomic long     g_recl_pins    = 0;
+static _Atomic uint8_t  g_recl_closed[RECL_MAX_PUBS + 2];
 
 static void *recl_fn(uint32_t k)     { return (void *)(uintptr_t)(0x100000u + 16u * k); }
 static void *recl_handle(uint32_t k) { return (void *)(uintptr_t)(0x900000u + 16u * k); }
@@ -324,7 +337,10 @@ static void recl_close_hook(void *handle) {
 
 static void *recl_reader(void *arg) {
     (void)arg;
+    atomic_fetch_add_explicit(&g_recl_started, 1, memory_order_release);
+    unsigned iter = 0;
     while (!atomic_load_explicit(&g_recl_stop, memory_order_acquire)) {
+        if ((++iter & 63) == 0) sched_yield();   /* don't starve the publisher */
         uint32_t k = atomic_load_explicit(&g_recl_k, memory_order_acquire);
         if (k < 2) continue;
         uint32_t v;
@@ -346,10 +362,25 @@ static void test_reclaim_race_threads(void) {
     pthread_t th[RECL_READERS];
     for (int i = 0; i < RECL_READERS; i++) pthread_create(&th[i], NULL, recl_reader, NULL);
 
+    while (atomic_load_explicit(&g_recl_started, memory_order_acquire) < RECL_READERS)
+        sched_yield();
+
+    struct timespec t0, now;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
     long blocked = 0;
-    for (uint32_t k = 1; k <= RECL_PUBS; ) {
+    uint32_t k = 1;
+    for (;;) {
+        if (k > RECL_MAX_PUBS) break;
+        if (k > RECL_MIN_PUBS && blocked > 0
+            && atomic_load_explicit(&g_recl_pins, memory_order_relaxed) >= RECL_MIN_PINS)
+            break;
+        if ((k & 1023) == 0) {
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            if (now.tv_sec - t0.tv_sec >= RECL_DEADLINE_S) break;
+            sched_yield();                  /* let readers in on a small runner */
+        }
         int idx = march_dispatch_publish_epoch(0, recl_fn(k), H1, NULL, MARCH_NATIVE, k);
-        if (idx < 0) { blocked++; continue; }   /* a reader holds the old version */
+        if (idx < 0) { blocked++; sched_yield(); continue; }  /* a reader holds the old version */
         march_dispatch_set_handle(0, (uint32_t)idx, recl_handle(k));
         atomic_store_explicit(&g_recl_k, k, memory_order_release);
         k++;
@@ -359,13 +390,20 @@ static void test_reclaim_race_threads(void) {
 
     long bad = atomic_load(&g_recl_bad), pins = atomic_load(&g_recl_pins);
     CHECK(bad == 0, "no reader held a pin across its version's dlclose");
-    CHECK(pins > 0, "readers actually pinned reclaim candidates (else vacuous)");
-    CHECK(blocked > 0, "some publishes found the candidate pinned (else no race exercised)");
+    /* The vacuity guards need parallelism: on one CPU a reader is almost never
+       preempted while pinned, so no publish is ever blocked.  Skip them there,
+       loudly; the deterministic case above still covers the ordering. */
+    if (sysconf(_SC_NPROCESSORS_ONLN) >= 2) {
+        CHECK(pins >= RECL_MIN_PINS, "readers actually pinned reclaim candidates (else vacuous)");
+        CHECK(blocked > 0, "some publishes found the candidate pinned (else no race exercised)");
+    } else {
+        printf("SKIP: test_reclaim_race_threads vacuity guards (single CPU online)\n");
+    }
     march_dispatch_set_close_hook(NULL);
     for (uint32_t i = 0; i < MARCH_MAX_LIVE_VERSIONS; i++) march_dispatch_set_handle(0, i, NULL);
     march_dispatch_shutdown();
-    printf("%s: test_reclaim_race_threads (pins=%ld blocked_publishes=%ld overlap=%ld)\n",
-           bad == 0 ? "PASS" : "FAIL", pins, blocked, bad);
+    printf("%s: test_reclaim_race_threads (publishes=%u pins=%ld blocked_publishes=%ld overlap=%ld)\n",
+           bad == 0 ? "PASS" : "FAIL", k - 1, pins, blocked, bad);
 }
 
 int main(void) {
