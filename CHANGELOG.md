@@ -31,6 +31,11 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **`march --emit-core-ast` now reports the same verdict as `march --check`.** A program
+  rejected only by an allocation contract (`cap no_alloc`) or by the stdlib-mediated
+  capability ceiling was emitted as `"verdict":"accept"` with exit 0, and without the
+  diagnostic, while `--check` rejected it. Both are now folded into the JSON's verdict and
+  `"diagnostics"`.
 - **Two mutually tail-recursive functions passing a string or list along no longer read
   freed memory.** The compiled mutual-tail-call loop released a forwarded argument on the
   back edge, one iteration before its next read (`refused: no-y; refused: no-y` for an
