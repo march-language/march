@@ -1,0 +1,28 @@
+-- A protocol message step may carry a label (`item: Prod -> Cons : Int`),
+-- a `lower_name COLON` before the step (2026-09-20). The label names the
+-- message for `@[endpoints]` (`send_Item` instead of `send_Msg_Prod_Cons_1`);
+-- here it is only parsed. `stop` is still the bare `lower_name` step, told
+-- apart from a label by the COLON that follows a label.
+mod P38ProtocolLabelledMessageStep do
+  needs IO.Console
+  protocol Stream do
+    loop do
+      item: Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+
+  protocol Relay do
+    request: Client -> Server : String
+    Server -> Logger : String
+    reply: Logger -> Client : String
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    println(1)
+  end
+end

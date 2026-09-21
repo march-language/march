@@ -122,6 +122,14 @@ git log is authoritative for exact commits.
   `cluster_hosted_<Role>(io, node, session, actor, ...)` is the same for one session under
   an agreed id. `SessionNode.offer_hosted` and `run_cluster_hosted` underneath. The guide's
   "Many sessions in one actor" shows the actor shape.
+- **A protocol step can name its message.** `item: Prod -> Cons : Int` makes every
+  generated name say `Item` (`send_Item`, `recv_Item`, `S_recv_Item`, `await_Item`,
+  `Got_Item`, `Stream_Msg.Item`) instead of `Msg_Prod_Cons_1`. Unlabelled steps keep their
+  names exactly. A label on a `choose` branch's head message (the branch label already
+  names it) and a label spelling a synthesised `Msg_` name are errors; two steps may share a
+  name when their payloads agree and no single role takes both, and a role that would get
+  two functions of one name is now told so instead of the second silently shadowing the
+  first. Renaming a step changes the protocol's fingerprint.
 - **`<P>_Run.error_message(e)` and `<P>_Msg.role_name(n)`**: a `RunError` spelled with the
   protocol's role names instead of numbers. `offer_<Role>` now returns `RunError` like the
   other entry points (`AlreadyOffered(role)` when the node already offers that role).

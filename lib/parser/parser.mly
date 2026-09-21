@@ -947,7 +947,14 @@ protocol_decl:
 
 protocol_step:
   | sender = upper_name; ARROW; receiver = upper_name; COLON; t = ty
-    { ProtoMsg (sender, receiver, t) }
+    { ProtoMsg (sender, receiver, t, None) }
+  (* A labelled message step, `item: Prod -> Cons : Int`: the label names the
+     message (`@[endpoints]` generates `send_Item`/`recv_Item`/`Got_Item`
+     instead of `send_Msg_Prod_Cons_1`).  Lowercase like a branch label; the
+     constructor is its capitalisation.  Distinct from the bare `lower_name`
+     alternative below (`stop`) by the COLON that follows it. *)
+  | label = lower_name; COLON; sender = upper_name; ARROW; receiver = upper_name; COLON; t = ty
+    { ProtoMsg (sender, receiver, t, Some label) }
   | LOOP; DO; steps = list(protocol_step); END
     { ProtoLoop steps }
   | CHOOSE; BY; chooser = upper_name; COLON; option(arm_sep); branches = separated_nonempty_list(arm_sep, choose_branch); END

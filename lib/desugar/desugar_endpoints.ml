@@ -117,12 +117,18 @@ type astep =
 let capitalize s =
   if s = "" then s else String.capitalize_ascii s
 
-(** Name every message.  A `choose` branch's head message is named after its
-    label (`more` -> `More`); any other message after its endpoints, numbered
-    among the messages between the same pair so an unrelated edit elsewhere
-    does not rename it (`Msg_Prod_Cons_1`).  Returns [None], having reported,
-    when a branch does not begin with a message from the chooser -- the rule
-    the offer/receive fusion needs and the language does not check. *)
+(** Name every message.  A labelled step (`item: Prod -> Cons : Int`) is
+    named after its label (`Item`), and a `choose` branch's head message
+    after the branch label (`more` -> `More`); any other message after its
+    endpoints, numbered among the messages between the same pair so an
+    unrelated edit elsewhere does not rename it (`Msg_Prod_Cons_1`).  Two
+    steps with one name share a constructor when their payloads agree
+    ([collect_ctors] rejects them when they differ, as it does two branch
+    heads with one label).  Returns [None], having reported, when a branch
+    does not begin with a message from the chooser -- the rule the
+    offer/receive fusion needs and the language does not check -- or when a
+    label is where it cannot mean anything: on a branch head, which the
+    branch label already names, or spelling a synthesised `Msg_` name. *)
 let annotate (errors : Err.ctx) ~(proto : string) ~(span : span)
     (steps : protocol_step list) : astep list option =
   let counts : (string * string, int) Hashtbl.t = Hashtbl.create 8 in
@@ -132,10 +138,25 @@ let annotate (errors : Err.ctx) ~(proto : string) ~(span : span)
     Hashtbl.replace counts (s, r) k;
     Printf.sprintf "Msg_%s_%s_%d" s r k
   in
+  let ctor_of s r = function
+    | None -> synth s r
+    | Some (label : name) ->
+      let c = capitalize label.txt in
+      if String.length c >= 4 && String.sub c 0 4 = "Msg_" then begin
+        ok := false;
+        Err.error errors ~span:label.span
+          (Printf.sprintf
+             "Protocol `%s`: the label `%s` would name the message `%s`, which is the shape \
+              of the names `@[endpoints]` makes up for unlabelled steps (`Msg_<From>_<To>_<k>`), \
+              so it could collide with one. Pick a label that does not start with `msg_`."
+             proto label.txt c)
+      end;
+      c
+  in
   let rec go (steps : protocol_step list) : astep list =
     List.map
       (function
-        | ProtoMsg (s, r, t) -> AMsg (s.txt, r.txt, t, synth s.txt r.txt)
+        | ProtoMsg (s, r, t, label) -> AMsg (s.txt, r.txt, t, ctor_of s.txt r.txt label)
         | ProtoLoop inner -> ALoop (go inner)
         | ProtoStop _ -> AStop
         | ProtoChoice (chooser, branches) ->
@@ -144,7 +165,16 @@ let annotate (errors : Err.ctx) ~(proto : string) ~(span : span)
              List.map
                (fun (lbl, arm) ->
                   match arm with
-                  | ProtoMsg (s, r, t) :: rest when s.txt = chooser.txt ->
+                  | ProtoMsg (s, r, t, label) :: rest when s.txt = chooser.txt ->
+                    (match label with
+                     | None -> ()
+                     | Some l ->
+                       ok := false;
+                       Err.error errors ~span:l.span
+                         (Printf.sprintf
+                            "Protocol `%s`: the branch label `%s` already names this message \
+                             (`%s`), so the step cannot carry a label of its own. Remove `%s:`."
+                            proto lbl.txt (capitalize lbl.txt) l.txt));
                     (lbl.txt, AMsg (s.txt, r.txt, t, capitalize lbl.txt) :: go rest)
                   | _ ->
                     ok := false;
@@ -639,6 +669,28 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
                (on_ep (block [ let_wild (app "Session.close" [ var "s"; var "ep" ]); yield ])) ]
          | LRec _ | LVar _ -> [])
       names
+  in
+  (* Transitions are named after the message (`send_Item`, `recv_Item`), and
+     a message name may be shared by two steps when their payloads agree (one
+     constructor in `<P>_Msg`); but a role that takes BOTH steps would get two
+     functions of one name, the second silently shadowing the first.  Report
+     it, the way the event API below reports one name received in two states. *)
+  let () =
+    let seen = Hashtbl.create 16 in
+    List.iter
+      (function
+        | DFn (fd, _) ->
+          let f = fd.fn_name.txt in
+          if Hashtbl.mem seen f then
+            Err.error errors ~span
+              (Printf.sprintf
+                 "Protocol `%s`, role %s: two steps %s takes are named alike, so the role module \
+                  would define `%s` twice. A message name can be shared only by steps no single \
+                  role takes both of. Rename one of them."
+                 proto role role f)
+          else Hashtbl.replace seen f ()
+        | _ -> ())
+      transitions
   in
   (* ── the event API: the same states, driven from an actor's own handler ──
      `await_*` parks an endpoint (a linear [Parked] the actor keeps in its
