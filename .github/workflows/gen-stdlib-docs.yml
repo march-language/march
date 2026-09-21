@@ -12,7 +12,7 @@ name: Regenerate Stdlib Docs
 # /docs/stdlib/) on every stdlib change and commits the result, so the committed HTML
 # can never drift from the stdlib source.
 #
-# It must also regenerate docs/pagefind/ in the same commit. ci.yml's doc-lint job runs
+# It must also regenerate docs/pagefind/ in the same commit. doc-lint.yml runs
 # scripts/gen-docs-search-index.sh --check, whose digest is computed over every tracked
 # file under docs/ (git ls-files -- docs) — that includes docs/docs/stdlib/**, so any
 # bot-authored change to the stdlib pages invalidates the committed index digest. Without

@@ -17,7 +17,8 @@ suite unsharded. Be most careful with macOS: 5 slots for the whole org.
 
 | Workflow | Trigger | Purpose |
 |---|---|---|
-| [`ci.yml`](ci.yml) | every PR; push to `main` | The merge gate: tests, corpora, sanitizers, property/oracle checks. |
+| [`ci.yml`](ci.yml) | every PR and push to `main`, **except Markdown-only changes** | The merge gate: tests, corpora, sanitizers, property/oracle checks. |
+| [`doc-lint.yml`](doc-lint.yml) | every PR and push to `main` | Seconds-long doc and source-level checks, including on Markdown-only changes. |
 | [`nightly.yml`](nightly.yml) | 00:00 UTC; manual | Publishes a `nightly-YYYYMMDD` prerelease when `main` is green and has moved. |
 | [`release.yml`](release.yml) | push of a `v*` tag | Builds and publishes a versioned release. |
 | [`build.yml`](build.yml) | called by nightly/release | Builds the three distributable archives. Not triggered on its own. |
@@ -35,16 +36,20 @@ linux/amd64 cross sysroot) and [`../actions/opam-deps`](../actions/opam-deps/act
 
 ## `ci.yml`: the merge gate
 
+A change whose files are all `*.md` skips `ci.yml` entirely (`paths-ignore`);
+nothing in it reads the repo's Markdown. Mix in any other file and it all runs.
+`doc-lint.yml` still runs on those changes, since its checks are the ones that
+read Markdown.
+
 A newer push to a PR cancels that PR's older run (`concurrency`,
 `cancel-in-progress`). Pushes to `main` never cancel each other, so every
 `main` commit gets a verdict; the nightly gate reads those verdicts.
 
 Every check is its own job so the critical path is the slowest job, not the
 sum. There is no required-check list in branch protection; "green" means every
-job below passed.
+job below, plus `doc-lint`, passed.
 
 ```
-doc-lint                                    seconds, no toolchain
 test (ubuntu) × codegen | refinecheck | compiler | rest
 test (macos, all)
 two-node (ubuntu)
@@ -59,7 +64,7 @@ ocaml-build (ubuntu, macos) ─┬─ property-tests (per OS) × soundness | tir
 
 | Job | What it checks | If it's red |
 |---|---|---|
-| `doc-lint` | `scripts/check-docs.sh` (dead source pointers, stale stdlib counts, corpus INDEX counts, quarantine inventory); `scripts/test-run-tests.sh` (the test runner's own failure reporting); PRs must not touch the bot-owned `docs/pagefind/`; `runtime/sources.list` agrees with every C link list; no plain store to an actor's refcount word. | Almost always a doc/manifest edit you forgot. The error names the file. |
+| `doc-lint` (in `doc-lint.yml`) | `scripts/check-docs.sh` (dead source pointers, stale stdlib counts, corpus INDEX counts, quarantine inventory); `scripts/test-run-tests.sh` (the test runner's own failure reporting); PRs must not touch the bot-owned `docs/pagefind/`; `runtime/sources.list` agrees with every C link list; no plain store to an actor's refcount word. | Almost always a doc/manifest edit you forgot. The error names the file. |
 | `test (macos-15, all)` | Plain `dune runtest`: all four ubuntu shards' work in one job on macOS. | Whatever suite failed; reproduce as for the matching ubuntu shard. |
 | `test (ubuntu, codegen)` | `dune build @test/runtest-run_codegen`: the LLVM codegen suite (`test/test_codegen.ml` and friends), including native compile-and-run cases. | A codegen or runtime regression; reproduce with `scripts/run-tests.sh codegen`. |
 | `test (ubuntu, refinecheck)` | `@test/runtest-test_refinecheck`: the z3-backed refinement checker corpus. | `scripts/run-tests.sh refinecheck` (needs z3 on PATH). |

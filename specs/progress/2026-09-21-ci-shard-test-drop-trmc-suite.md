@@ -55,6 +55,15 @@ so the split cost the 5-slot macOS pool for no wall-time gain. macOS is back to
 one `test (macos-15, all)` job; only ubuntu is sharded. Per run: 29 jobs
 (23 Linux, 6 macOS).
 
+## Markdown-only changes skip CI
+
+`ci.yml` now has `paths-ignore: ['**.md']` on both triggers. Nothing in it reads
+the repo's Markdown (checked: forge's tests read a README.md they generate in a
+temp project; the other hits are comments). `doc-lint`, whose checks do read
+Markdown, moved to its own always-on `doc-lint.yml`. A Markdown-only commit on
+main gets no CI run, which the nightly gate handles: it builds the newest
+commit with a green run.
+
 ## Not verified locally
 
 CI wall-clock after the change: the new numbers come from the first runs on

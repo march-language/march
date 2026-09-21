@@ -10,7 +10,7 @@
 # Now every independent check is its own job, so the critical path is the
 # single slowest one rather than their sum:
 #
-#   doc-lint                            (standalone, ~10s)
+#   (doc-lint lives in doc-lint.yml so it runs on Markdown-only changes too)
 #   test          (ubuntu) × 4          `dune runtest`, sharded: codegen, refinecheck,
 #                                       compiler, rest (see the job's comment)
 #                 (macos)               `dune runtest`, unsharded
@@ -37,10 +37,17 @@
 
 name: CI
 
+# A change that touches ONLY Markdown skips this workflow: nothing here reads
+# the repo's .md files (forge's tests read a README.md they generate in a temp
+# project). The checks that do read them -- stale source pointers, stdlib and
+# corpus counts -- are doc-lint.yml, which runs on every change. A change that
+# mixes .md with anything else runs everything.
 on:
   push:
     branches: [main]
+    paths-ignore: ['**.md']
   pull_request:
+    paths-ignore: ['**.md']
 
 # One live run per pull request: a newer push cancels the older run instead of
 # letting both hold runner slots. The org is on GitHub's free plan (20 concurrent
@@ -52,62 +59,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  doc-lint:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - name: Lint docs for stale source pointers and stdlib counts
-        run: scripts/check-docs.sh
-
-      # scripts/run-tests.sh is what CLAUDE.md tells everyone to run, so a bug in
-      # how IT reports failures is invisible by construction -- the aggregate says
-      # "FAILED" and nothing says which suite or why. This drives it against fake
-      # runners (no dune, no real suites, well under a second) and asserts the
-      # attribution, including the case that motivated it: a runner that prints
-      # "Test Successful" and still exits non-zero.
-      - name: Test the test runner's failure attribution
-        run: scripts/test-run-tests.sh
-
-      # docs/pagefind/ is a COMMITTED build artifact — march-lang.org is served by
-      # GitHub's own Jekyll over docs/, which has no post-build hook, so the search index
-      # can only reach production by being in git. It is BOT-OWNED: sync-docs-search-index.yml
-      # and gen-stdlib-docs.yml regenerate and push it after a merge. A pull request must
-      # not carry it — two PRs that each regenerated the index conflict on every
-      # hash-named file plus pagefind-entry.json, and the index is not reproducible, so
-      # the conflict has no textual resolution. Running `--check` as a PR gate is what
-      # used to recruit humans into writing that file; on PRs we now gate the inverse.
-      # (specs/2026-09-11-ci-tooling-fixes-design.md §2.)
-      - name: Reject pull requests that carry the bot-owned search index
-        if: github.event_name == 'pull_request'
-        run: |
-          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
-          if git diff --name-only "origin/${{ github.base_ref }}...HEAD" -- docs/pagefind | grep -q .; then
-            echo "::error::docs/pagefind/ is bot-owned; drop it from this PR:  git checkout origin/${{ github.base_ref }} -- docs/pagefind && git commit"
-            git diff --name-only "origin/${{ github.base_ref }}...HEAD" -- docs/pagefind | head -20
-            exit 1
-          fi
-          echo "ok — this PR does not touch docs/pagefind/"
-
-      # Off-PR (push to main, dispatch): report staleness, but do not fail the run —
-      # the bot lands its regeneration a minute or three after the merge, and its own
-      # 3-attempt failure is the real red for a stale index.
-      - name: Check the committed search index is not stale
-        if: github.event_name != 'pull_request'
-        continue-on-error: true
-        run: scripts/gen-docs-search-index.sh --check || echo "::warning::search index stale; sync-docs-search-index.yml should land shortly"
-
-      # Every runtime .c must be classified in runtime/sources.list and every
-      # hand-maintained link list (drivers, JIT .so, dune rules) must agree with it.
-      - name: Check runtime C source lists against runtime/sources.list
-        run: scripts/check-runtime-sources.sh
-
-      # An actor record's word 0 is its refcount, shared with every thread.
-      # A plain store to it (the old `a[0] = 1` dispatch clobber) freed live
-      # actors; this forbids the pattern at the source level.
-      - name: Check no plain store to an actor record's refcount word
-        run: scripts/check-actor-rc-stores.sh
-
   # The long pole, sharded. One `dune runtest` here took ~36 min on ubuntu
   # (September 2026), and it was ~9 min of build followed by three suites
   # running side by side on a 4-vCPU runner: march-codegen ~24 min,
