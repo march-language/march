@@ -60,6 +60,12 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **On macOS, `--cap-sandbox` now stops a program without `IO.Process` from
+  executing another program.** The embedded sandbox profile allowed `exec`
+  unconditionally and only gated `fork`, so such a program could still replace
+  itself with an arbitrary binary (directly, or through `extern` C). `exec` is
+  now granted only with `IO.Process`, as it already was on Linux. `forge cap
+  run` is unchanged: its wrapper has to exec the target, so it still allows it.
 - **A hot-code-reload publish could unload a version while a caller was entering
   it.** Reclaiming an old version's ring slot closed its shared object before
   marking the slot retired, so a caller that had just passed the liveness check
