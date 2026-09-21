@@ -46,12 +46,7 @@ literal check, and scoped WRITE grants in the self-imposed sandbox.
   `path_arg_builtins` and no scope check applies. Worth confirming whether it
   resolves a path internally; if so it needs a scope check of its own shape.
 
-- [ ] **Relative and non-absolute scopes are not rejected yet.** The design
-  says a relative scope should be a compile error, since it would denote
-  different directories depending on the working directory at run time.
-  `Cap_scope.is_absolute` exists for this; the check is not wired.
-
-- [ ] **A scope on a non-filesystem capability is not rejected yet.**
-  `Cap_scope.is_scopable` exists and is tested, but nothing calls it, so
-  `needs IO.Network("/etc")` currently parses and is silently ignored. An
-  ignored scope reads as enforcement that is not there.
+- [x] **Relative scopes and scopes on non-filesystem capabilities are now
+  rejected** (DONE 2026-09-21, see
+  `specs/progress/2026-09-21-path-scope-declaration-checks.md`, which keeps the
+  two original bullets).
