@@ -114,6 +114,14 @@ git log is authoritative for exact commits.
   detected by a heartbeat (`MARCH_SESSION_HEARTBEAT_MS`, `MARCH_SESSION_TIMEOUT_MS`).
 
 ### Added
+- **A protocol step can name its message.** `item: Prod -> Cons : Int` makes every
+  generated name say `Item` (`send_Item`, `recv_Item`, `S_recv_Item`, `await_Item`,
+  `Got_Item`, `Stream_Msg.Item`) instead of `Msg_Prod_Cons_1`. Unlabelled steps keep their
+  names exactly. A label on a `choose` branch's head message (the branch label already
+  names it) and a label spelling a synthesised `Msg_` name are errors; two steps may share a
+  name when their payloads agree and no single role takes both, and a role that would get
+  two functions of one name is now told so instead of the second silently shadowing the
+  first. Renaming a step changes the protocol's fingerprint.
 - **`<P>_Run.error_message(e)` and `<P>_Msg.role_name(n)`**: a `RunError` spelled with the
   protocol's role names instead of numbers. `offer_<Role>` now returns `RunError` like the
   other entry points (`AlreadyOffered(role)` when the node already offers that role).

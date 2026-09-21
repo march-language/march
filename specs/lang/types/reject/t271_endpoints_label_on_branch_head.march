@@ -1,0 +1,18 @@
+-- EXPECT-ERROR: already names this message
+-- A `choose` branch's head message is named by the branch label (`go` ->
+-- `Go`), so a message label on that step has nothing to name and is refused
+-- (2026-09-20) rather than silently ignored or silently winning.
+mod Main do
+  needs IO
+  needs Session.Live
+
+  @[endpoints]
+  protocol P do
+    choose by A:
+      go -> item: A -> B : Int
+      no -> A -> B : Bool
+    end
+  end
+
+  fn main(c : Cap(IO)) do () end
+end

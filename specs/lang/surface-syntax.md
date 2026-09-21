@@ -1035,9 +1035,13 @@ end
 
 -- `stop` exits an enclosing `loop` instead of repeating it; legal only
 -- inside a `loop` body, directly or inside a `choose` branch nested in one.
+-- A message step may carry a label (`item:`), lowercase like a branch
+-- label: `@[endpoints]` then names the message `Item` (`send_Item`,
+-- `recv_Item`) instead of `Msg_Prod_Cons_1`. A branch's head message is
+-- named by the branch label and takes no label of its own.
 protocol Stream do
   loop do
-    Prod -> Cons : Int
+    item: Prod -> Cons : Int
     choose by Cons:
       more -> Cons -> Prod : Bool
       done -> Cons -> Prod : Bool
