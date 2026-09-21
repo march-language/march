@@ -378,7 +378,10 @@ and protocol_def = {
 }
 
 and protocol_step =
-  | ProtoMsg of name * name * ty                          (** Sender -> Receiver : MsgType *)
+  | ProtoMsg of name * name * ty * name option            (** [label:] Sender -> Receiver : MsgType;
+                                                              the label, when present, names the
+                                                              message ([@[endpoints]] uses it
+                                                              instead of [Msg_<S>_<R>_<k>]) *)
   | ProtoLoop of protocol_step list                       (** loop do ... end *)
   | ProtoChoice of name * (name * protocol_step list) list  (** choose by Role: label -> steps *)
   | ProtoStop of span                                     (** stop — exits an enclosing loop *)

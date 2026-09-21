@@ -4845,7 +4845,7 @@ let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
   let rec roles_in (steps : Ast.protocol_step list) : string list =
     List.concat_map
       (function
-        | Ast.ProtoMsg (s, r, _) -> [ s.Ast.txt; r.Ast.txt ]
+        | Ast.ProtoMsg (s, r, _, _) -> [ s.Ast.txt; r.Ast.txt ]
         | Ast.ProtoLoop inner -> roles_in inner
         | Ast.ProtoChoice (c, brs) -> c.Ast.txt :: List.concat_map (fun (_, arm) -> roles_in arm) brs
         | Ast.ProtoStop _ | Ast.ProtoMayCrash _ -> []
@@ -4895,7 +4895,7 @@ let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
   let rec first_interaction (p : string) (steps : Ast.protocol_step list) =
     match steps with
     | [] -> None
-    | Ast.ProtoMsg (s, r, _) :: rest ->
+    | Ast.ProtoMsg (s, r, _, _) :: rest ->
       if s.Ast.txt = p then Some (`Send r.Ast.txt, None)
       else if r.Ast.txt = p then Some (`Recv s.Ast.txt, None)
       else first_interaction p rest
@@ -4911,7 +4911,7 @@ let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
           List.find_map
             (fun ((lbl : Ast.name), arm) ->
                match arm with
-               | Ast.ProtoMsg (s, r, _) :: _ when r.Ast.txt = p && s.Ast.txt = c.Ast.txt ->
+               | Ast.ProtoMsg (s, r, _, _) :: _ when r.Ast.txt = p && s.Ast.txt = c.Ast.txt ->
                  Some (`Recv s.Ast.txt, Some lbl.txt)
                | _ -> first_interaction p arm)
             brs
@@ -4963,7 +4963,7 @@ let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
     | Ast.ProtoMayCrash _ :: rest -> walk ~tail ~dead rest
     | Ast.ProtoStop _ :: rest -> walk ~tail ~dead rest
     | Ast.ProtoLoop inner :: rest -> walk ~tail:inner ~dead inner; walk ~tail ~dead rest
-    | Ast.ProtoMsg (s, r, _) :: rest ->
+    | Ast.ProtoMsg (s, r, _, _) :: rest ->
       List.iter
         (fun (x : Ast.name) ->
            if List.mem x.txt dead then
@@ -4977,7 +4977,7 @@ let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
       walk ~tail ~dead rest
     | Ast.ProtoCrashOr (inner, crash, csp) :: rest ->
       (match inner with
-       | Ast.ProtoMsg (s, r, _) ->
+       | Ast.ProtoMsg (s, r, _, _) ->
          List.iter
            (fun (x : Ast.name) ->
               if List.mem x.txt dead then
@@ -5019,8 +5019,8 @@ let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
              List.filter_map
                (fun ((l : Ast.name), arm) ->
                   match arm with
-                  | Ast.ProtoMsg (s, r, _) :: _ when s.Ast.txt = chooser.txt -> Some (l.txt, r.Ast.txt)
-                  | Ast.ProtoCrashOr (Ast.ProtoMsg (s, r, _), _, _) :: _ when s.Ast.txt = chooser.txt -> Some (l.txt, r.Ast.txt)
+                  | Ast.ProtoMsg (s, r, _, _) :: _ when s.Ast.txt = chooser.txt -> Some (l.txt, r.Ast.txt)
+                  | Ast.ProtoCrashOr (Ast.ProtoMsg (s, r, _, _), _, _) :: _ when s.Ast.txt = chooser.txt -> Some (l.txt, r.Ast.txt)
                   | _ -> None)
                normals
            in
@@ -5044,7 +5044,7 @@ let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
                chooser may crash is judged at the `choose` (a `crash`
                branch), not at the head, so rule 1 skips it. *)
             match arm with
-            | Ast.ProtoMsg (s, r, _) :: arm_rest when s.Ast.txt = chooser.txt ->
+            | Ast.ProtoMsg (s, r, _, _) :: arm_rest when s.Ast.txt = chooser.txt ->
               List.iter
                 (fun (x : Ast.name) ->
                    if List.mem x.txt dead then
@@ -5637,7 +5637,7 @@ let rec check_decl env (d : Ast.decl) : env =
        whether we're nested (directly, or via a `choose` branch) inside a
        `loop` block — `stop` is only meaningful there. *)
     let rec validate_step ~in_loop = function
-      | Ast.ProtoMsg (sender, receiver, msg_ty) ->
+      | Ast.ProtoMsg (sender, receiver, msg_ty, _) ->
         if sender.txt = receiver.txt then
           Err.error env.errors ~span:sender.span
             (Printf.sprintf

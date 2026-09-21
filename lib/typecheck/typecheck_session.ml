@@ -34,7 +34,7 @@ let rec project_steps env ~proto_name ~multiparty steps role cont =
   | step :: rest ->
     let rest_ty () = project_steps env ~proto_name ~multiparty rest role cont in
     (match step with
-     | Ast.ProtoMsg (sender, receiver, msg_ty) ->
+     | Ast.ProtoMsg (sender, receiver, msg_ty, _) ->
        let tvars = ref [] in
        let t = surface_ty env ~tvars msg_ty in
        if sender.Ast.txt = role then
@@ -142,7 +142,7 @@ let project_protocol env ~span ~proto_name (pdef : Ast.protocol_def) =
   (* Collect all roles *)
   let rec roles_of_steps = function
     | [] -> []
-    | Ast.ProtoMsg (s, r, _) :: rest ->
+    | Ast.ProtoMsg (s, r, _, _) :: rest ->
       s.Ast.txt :: r.Ast.txt :: roles_of_steps rest
     | Ast.ProtoLoop steps :: rest ->
       roles_of_steps steps @ roles_of_steps rest
@@ -183,7 +183,7 @@ let project_protocol env ~span ~proto_name (pdef : Ast.protocol_def) =
         from the global steps and comparing against the projections. *)
      let rec gather_msgs acc = function
        | [] -> acc
-       | Ast.ProtoMsg (s, r, t) :: rest ->
+       | Ast.ProtoMsg (s, r, t, _) :: rest ->
          let tvars = ref [] in
          let ty = surface_ty env ~tvars t in
          gather_msgs ((s.Ast.txt, r.Ast.txt, ty) :: acc) rest

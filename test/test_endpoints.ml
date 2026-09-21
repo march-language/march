@@ -200,17 +200,97 @@ let same_label_two_payloads =
 |} in
        Alcotest.(check bool) "reported" true (desugar_has_errors src))
 
-(* ── guarantees ─────────────────────────────────────────────────────────── *)
+(* ── message labels ─────────────────────────────────────────────────────── *)
 
-let prod_ok = ok "both roles written against the generated API typecheck" (wrap (stream ^ {|
-  pfn prod(s : Cap(Session.Live), st : Stream_Prod.S_send_Msg_Prod_Cons_1, next : Int) : Stream_Prod.Yield do
-    let st1 = Stream_Prod.send_Msg_Prod_Cons_1(s, st, next)
+(** [stream] with its one plain step labelled `item:`, so every generated name
+    that said `Msg_Prod_Cons_1` says `Item`. *)
+let stream_labelled = {|
+  @[endpoints]
+  protocol Stream do
+    loop do
+      item: Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+|}
+
+(** The unlabelled [stream]'s generated function names, pinned: a label must
+    change nothing for a protocol that has none, and this list is the oracle
+    the labelled twin is compared against (below). *)
+let stream_prod_fns =
+  [ "register"; "cancelled"; "leave_send_Msg_Prod_Cons_1"; "send_Msg_Prod_Cons_1";
+    "leave_offer_more_done"; "offer_more_done"; "offer_more_done_or"; "close";
+    "idle"; "take_idle"; "cancel"; "await_more_done"; "finish"; "resume" ]
+
+let stream_cons_fns =
+  [ "register"; "cancelled"; "leave_recv_Msg_Prod_Cons_1"; "recv_Msg_Prod_Cons_1";
+    "recv_Msg_Prod_Cons_1_or"; "leave_choose_more_done"; "choose_more"; "choose_done"; "close";
+    "idle"; "take_idle"; "cancel"; "await_Msg_Prod_Cons_1"; "finish"; "resume" ]
+
+let unlabelled_names_pinned =
+  Alcotest.test_case "an unlabelled protocol's generated names are exactly what they were" `Quick
+    (fun () ->
+       let mods = generated (wrap stream) in
+       Alcotest.(check (list string)) "Stream_Prod" stream_prod_fns (List.assoc "Stream_Prod" mods);
+       Alcotest.(check (list string)) "Stream_Cons" stream_cons_fns (List.assoc "Stream_Cons" mods))
+
+(** Replace every occurrence of [needle] in [s] by [by]. *)
+let replace_all ~needle ~by s =
+  let n = String.length needle in
+  let b = Buffer.create (String.length s) in
+  let rec go i =
+    if i + n <= String.length s && String.sub s i n = needle then (Buffer.add_string b by; go (i + n))
+    else if i < String.length s then (Buffer.add_char b s.[i]; go (i + 1))
+  in
+  go 0;
+  Buffer.contents b
+
+let labelled_shape =
+  Alcotest.test_case "a labelled step renames exactly the names that carried the synthesised one" `Quick
+    (fun () ->
+       let mods = generated (wrap stream_labelled) in
+       let rename = List.map (replace_all ~needle:"Msg_Prod_Cons_1" ~by:"Item") in
+       Alcotest.(check (list string)) "modules" [ "Stream_Msg"; "Stream_Prod"; "Stream_Cons"; "Stream_Run" ]
+         (List.map fst mods);
+       Alcotest.(check (list string)) "Stream_Prod" (rename stream_prod_fns) (List.assoc "Stream_Prod" mods);
+       Alcotest.(check (list string)) "Stream_Cons" (rename stream_cons_fns) (List.assoc "Stream_Cons" mods);
+       List.iter
+         (fun (m, f) -> Alcotest.(check bool) (m ^ "." ^ f) true (has_fn mods m f))
+         [ ("Stream_Prod", "send_Item"); ("Stream_Cons", "recv_Item"); ("Stream_Cons", "recv_Item_or");
+           ("Stream_Cons", "await_Item"); ("Stream_Cons", "leave_recv_Item") ])
+
+(** The fingerprint keys on the constructor, so labelling a step changes it:
+    two nodes built before and after the rename refuse each other. *)
+let label_changes_fingerprint =
+  Alcotest.test_case "labelling a step changes the protocol's fingerprint" `Quick
+    (fun () ->
+       let fingerprint src =
+         let m = parse_module (wrap src) in
+         let steps =
+           List.find_map (function DProtocol (_, pd, _) -> Some pd.proto_steps | _ -> None) m.mod_decls
+           |> Option.get
+         in
+         let errors = March_errors.Errors.create () in
+         let open March_desugar.Desugar_endpoints in
+         let annotated = Option.get (annotate errors ~proto:"Stream" ~span:dummy_span steps) in
+         fingerprint_of ~proto:"Stream" (roles_of annotated) annotated
+       in
+       Alcotest.(check bool) "differs" true (fingerprint stream <> fingerprint stream_labelled);
+       Alcotest.(check string) "stable" (fingerprint stream) (fingerprint stream))
+
+let labelled_roles_ok = ok "both roles written against the labelled names typecheck" (wrap (stream_labelled ^ {|
+  pfn prod(s : Cap(Session.Live), st : Stream_Prod.S_send_Item, next : Int) : Stream_Prod.Yield do
+    let st1 = Stream_Prod.send_Item(s, st, next)
     Stream_Prod.offer_more_done(s, st1,
       fn (_b, st2) -> prod(s, st2, next + 1),
       fn (_b, st2) -> Stream_Prod.close(s, st2))
   end
-  pfn cons(s : Cap(Session.Live), st : Stream_Cons.S_recv_Msg_Prod_Cons_1, budget : Int) : Stream_Cons.Yield do
-    Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (_n, st1) ->
+  pfn cons(s : Cap(Session.Live), st : Stream_Cons.S_recv_Item, budget : Int) : Stream_Cons.Yield do
+    Stream_Cons.recv_Item(s, st, fn (_n, st1) ->
       if budget > 1 do
         cons(s, Stream_Cons.choose_more(s, st1, true), budget - 1)
       else
@@ -235,6 +315,88 @@ let bad_desugar name needle src =
       Alcotest.(check bool)
         (name ^ ": an error mentions " ^ needle ^ " (got: " ^ String.concat " | " msgs ^ ")")
         true (List.exists contains msgs))
+
+let label_on_branch_head = bad_desugar "a label on a choose branch's head message is refused: the branch label names it"
+    "already names this message" (wrap {|
+  @[endpoints]
+  protocol P do
+    choose by A:
+      go -> item: A -> B : Int
+      no -> A -> B : Bool
+    end
+  end
+|})
+
+let label_msg_prefix = bad_desugar "a label spelling a synthesised Msg_ name is refused"
+    "could collide" (wrap {|
+  @[endpoints]
+  protocol P do
+    msg_A_B_1: A -> B : Int
+    B -> A : Bool
+  end
+|})
+
+(* One name on two steps: allowed when the payloads agree and no single role
+   takes both (one `Ping(Int)` constructor; A sends one and receives the
+   other, B and C each take one). *)
+let shared_label_ok = ok "two steps may share a label when their payloads agree and no role takes both" (wrap {|
+  @[endpoints]
+  protocol P do
+    ping: A -> B : Int
+    ping: C -> A : Int
+  end
+  pfn a(s : Cap(Session.Live), st : P_A.S_send_Ping) : P_A.Yield do
+    let st1 = P_A.send_Ping(s, st, 1)
+    P_A.recv_Ping(s, st1, fn (_n, st2) -> P_A.close(s, st2))
+  end
+  pfn b(s : Cap(Session.Live), st : P_B.S_recv_Ping) : P_B.Yield do
+    P_B.recv_Ping(s, st, fn (_n, st1) -> P_B.close(s, st1))
+  end
+  pfn c(s : Cap(Session.Live), st : P_C.S_send_Ping) : P_C.Yield do
+    P_C.close(s, P_C.send_Ping(s, st, 2))
+  end
+|})
+
+let shared_label_two_payloads = bad_desugar "a shared label with two payload types is the existing label error"
+    "used for two messages with different payload" (wrap {|
+  @[endpoints]
+  protocol P do
+    ping: A -> B : Int
+    ping: C -> A : String
+  end
+|})
+
+(* Before this check the role module defined `send_Ping` twice and the second
+   silently shadowed the first; two branch heads with one label across two
+   `choose`s did the same. *)
+let shared_label_one_role = bad_desugar "one role taking two steps of one name is refused, not silently shadowed"
+    "would define `send_Ping` twice" (wrap {|
+  @[endpoints]
+  protocol P do
+    ping: A -> B : Int
+    ping: A -> C : Int
+    C -> A : Bool
+  end
+|})
+
+(* ── guarantees ─────────────────────────────────────────────────────────── *)
+
+let prod_ok = ok "both roles written against the generated API typecheck" (wrap (stream ^ {|
+  pfn prod(s : Cap(Session.Live), st : Stream_Prod.S_send_Msg_Prod_Cons_1, next : Int) : Stream_Prod.Yield do
+    let st1 = Stream_Prod.send_Msg_Prod_Cons_1(s, st, next)
+    Stream_Prod.offer_more_done(s, st1,
+      fn (_b, st2) -> prod(s, st2, next + 1),
+      fn (_b, st2) -> Stream_Prod.close(s, st2))
+  end
+  pfn cons(s : Cap(Session.Live), st : Stream_Cons.S_recv_Msg_Prod_Cons_1, budget : Int) : Stream_Cons.Yield do
+    Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (_n, st1) ->
+      if budget > 1 do
+        cons(s, Stream_Cons.choose_more(s, st1, true), budget - 1)
+      else
+        Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true))
+      end)
+  end
+|}))
 
 (* A payload type declared in the module without `derive Json`: the generated
    codec assumes every nested type has one, so this used to pass `--check`,
@@ -819,6 +981,8 @@ let crash_chan_refused = bad "Chan(Role, Proto) refuses a protocol with crash br
 
 let tests =
   [ stream_shape; cli_pid_one_arg; cli_no_unreachable_catch_all; cli_derive_eq_single_ctor; relay_shape; no_attr_no_generation; bad_branch_head; same_label_two_payloads;
+    unlabelled_names_pinned; labelled_shape; label_changes_fingerprint; labelled_roles_ok;
+    label_on_branch_head; label_msg_prefix; shared_label_ok; shared_label_two_payloads; shared_label_one_role;
     prod_ok; wrong_order; replayed; abandoned; callback_forge; relay_ok; payload_declared_later;
     payload_no_codec; payload_with_codec; payload_nested_no_codec;
     event_ok; event_retained; event_not_reparked; event_idle_dropped; event_forge; event_pid_handle; builtin_under_application;

@@ -1260,8 +1260,9 @@ and emit_fn ctx fn =
     ) clauses
 
 and emit_proto_step ctx = function
-  | ProtoMsg (s, r, t) ->
-    line ctx (Printf.sprintf "%s -> %s : %s" s.txt r.txt (fmt_ty t))
+  | ProtoMsg (s, r, t, label) ->
+    let prefix = match label with Some l -> l.txt ^ ": " | None -> "" in
+    line ctx (Printf.sprintf "%s%s -> %s : %s" prefix s.txt r.txt (fmt_ty t))
   | ProtoLoop steps ->
     line ctx "loop do";
     indented ctx (fun () -> List.iter (emit_proto_step ctx) steps);
@@ -1272,8 +1273,9 @@ and emit_proto_step ctx = function
     line ctx (Printf.sprintf "may crash %s" (String.concat ", " (List.map (fun r -> r.txt) roles)))
   | ProtoCrashOr (inner, crash, _) ->
     (match inner with
-     | ProtoMsg (s, r, t) ->
-       line ctx (Printf.sprintf "%s -> %s : %s or crash do" s.txt r.txt (fmt_ty t))
+     | ProtoMsg (s, r, t, label) ->
+       let prefix = match label with Some l -> l.txt ^ ": " | None -> "" in
+       line ctx (Printf.sprintf "%s%s -> %s : %s or crash do" prefix s.txt r.txt (fmt_ty t))
      | _ -> emit_proto_step ctx inner; line ctx "or crash do");
     indented ctx (fun () -> List.iter (emit_proto_step ctx) crash);
     line ctx "end"

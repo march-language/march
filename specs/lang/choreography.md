@@ -31,30 +31,38 @@ Three roles. A and B each send a number to C. C adds them and tells A whether th
 ```march
 @[endpoints]
 protocol Fan do
-  A -> C : Int
-  B -> C : Int
-  C -> A : Bool
+  number: A -> C : Int
+  second: B -> C : Int
+  verdict: C -> A : Bool
 end
 ```
 
-This is the whole protocol. Nothing else in the program says who talks to whom. The same
-example runs in CI as `test/two_node/fan`, with each role in its own OS process.
+This is the whole protocol. Nothing else in the program says who talks to whom. The word
+before each step is the message's name; the functions the compiler generates are called
+after it. The same example runs in CI as `test/two_node/fan`, with each role in its own OS
+process.
 
 ## Writing a protocol
 
 A protocol is a list of steps. There are three kinds.
 
-A message step names the sender, the receiver and the type of the value:
+A message step names the sender, the receiver and the type of the value, and may name the
+message itself with a lowercase label in front:
 
 ```march
-A -> C : Int
+number: A -> C : Int
 ```
+
+The label is what the generated functions are called after (`send_Number`, `recv_Number`).
+A step without one gets a name made up from its endpoints; see the table in the next
+section. Two steps may share a label when they carry the same type and no single role takes
+both of them.
 
 A loop repeats its body until a branch says `stop`:
 
 ```march
 loop do
-  Prod -> Cons : Int
+  item: Prod -> Cons : Int
   choose by Cons:
     more -> Cons -> Prod : Bool
     done -> Cons -> Prod : Bool
@@ -82,10 +90,18 @@ module that runs roles on the network. For `Fan`:
 Roles are numbered in the order they first appear in the protocol. In `Fan` that is A = 1,
 C = 2, B = 3. You never need to write these numbers; use the generated functions.
 
-Protocol steps have no names of their own, so each message is named after its sender, its
-receiver and its position: the first message from A to C is `Msg_A_C_1`, the second would
-be `Msg_A_C_2`. The first message of a `choose` branch takes the branch label instead, so
-the `more` branch above sends `More`.
+Every message has a name, and every generated function and state carries it. Where the
+name comes from:
+
+| Step in the protocol | Message name |
+|---|---|
+| a labelled step, `number: A -> C : Int` | `Number`, the label capitalised |
+| an unlabelled step, `A -> C : Int` | `Msg_A_C_1`: sender, receiver, and its position among the messages from A to C (`Msg_A_C_2` for the second) |
+| the first message of a `choose` branch, `more -> Cons -> Prod : Bool` | `More`, the branch label; the step takes no label of its own |
+
+A label that would spell a made-up name (`msg_a_c_1`) is an error, so the two cannot
+collide. Two steps may share a label when their types agree and no single role takes both
+steps; the message type then has one constructor for both.
 
 Each role module has a type for every state the role can be in, and a function for every
 step out of that state:
@@ -105,12 +121,12 @@ step out of that state:
 A role is a function from its first state to `Yield`. Here is C:
 
 ```march
-pfn role_c(s : Cap(Session.Live), st : Fan_C.S_recv_Msg_A_C_1) : Fan_C.Yield do
-  Fan_C.recv_Msg_A_C_1(s, st, fn (a, st1) ->
+pfn role_c(s : Cap(Session.Live), st : Fan_C.S_recv_Number) : Fan_C.Yield do
+  Fan_C.recv_Number(s, st, fn (a, st1) ->
     println("C: got " ++ int_to_string(a) ++ " from A")
-    Fan_C.recv_Msg_B_C_1(s, st1, fn (b, st2) ->
+    Fan_C.recv_Second(s, st1, fn (b, st2) ->
       println("C: got " ++ int_to_string(b) ++ " from B")
-      Fan_C.close(s, Fan_C.send_Msg_C_A_1(s, st2, a + b == 16))))
+      Fan_C.close(s, Fan_C.send_Verdict(s, st2, a + b == 16))))
 end
 ```
 
@@ -118,7 +134,7 @@ end
 so a callback cannot return without either finishing the conversation or handing it on.
 
 The state types are what make this safe. Each one is linear: you must use it exactly once.
-`recv_Msg_A_C_1` accepts only the state C is in before hearing from A, and it hands the
+`recv_Number` accepts only the state C is in before hearing from A, and it hands the
 callback the only value that lets C take the next step. So the compiler rejects a program
 that sends before it has received, receives twice, sends a `String` where the protocol says
 `Int`, or stops halfway through. The return type `Yield` can only be produced by a generated
@@ -127,9 +143,9 @@ step function, so a callback cannot quietly drop the conversation either.
 And A:
 
 ```march
-pfn role_a(s : Cap(Session.Live), st : Fan_A.S_send_Msg_A_C_1) : Fan_A.Yield do
-  let st1 = Fan_A.send_Msg_A_C_1(s, st, 7)
-  Fan_A.recv_Msg_C_A_1(s, st1, fn (ok, st2) ->
+pfn role_a(s : Cap(Session.Live), st : Fan_A.S_send_Number) : Fan_A.Yield do
+  let st1 = Fan_A.send_Number(s, st, 7)
+  Fan_A.recv_Verdict(s, st1, fn (ok, st2) ->
     println("A: got " ++ bool_to_string(ok))
     Fan_A.close(s, st2))
 end
@@ -140,19 +156,19 @@ nests. A role with several receives reads better as one function per receive tha
 pyramid of closures:
 
 ```march
-pfn role_c(s : Cap(Session.Live), st : Fan_C.S_recv_Msg_A_C_1) : Fan_C.Yield do
-  Fan_C.recv_Msg_A_C_1(s, st, fn (a, st1) -> after_a(s, a, st1))
+pfn role_c(s : Cap(Session.Live), st : Fan_C.S_recv_Number) : Fan_C.Yield do
+  Fan_C.recv_Number(s, st, fn (a, st1) -> after_a(s, a, st1))
 end
 
-pfn after_a(s : Cap(Session.Live), a : Int, st : Fan_C.S_recv_Msg_B_C_1) : Fan_C.Yield do
-  Fan_C.recv_Msg_B_C_1(s, st, fn (b, st2) ->
-    Fan_C.close(s, Fan_C.send_Msg_C_A_1(s, st2, a + b == 16)))
+pfn after_a(s : Cap(Session.Live), a : Int, st : Fan_C.S_recv_Second) : Fan_C.Yield do
+  Fan_C.recv_Second(s, st, fn (b, st2) ->
+    Fan_C.close(s, Fan_C.send_Verdict(s, st2, a + b == 16)))
 end
 ```
 
 If a step is called in the wrong state, the error names both states and says so: the
-state types are `S_` followed by the step the role takes next, so `S_recv_Msg_A_C_1` is
-"about to receive `Msg_A_C_1`".
+state types are `S_` followed by the step the role takes next, so `S_recv_Number` is
+"about to receive `Number`".
 
 Every callback has to return. The runner calls it when its message arrives, and until it
 returns, that node handles nothing else for the session: no other message, no failure, not
@@ -401,9 +417,9 @@ Every receive has a second form, ending in `_or`, that takes a cancel handler. O
 the same (`offer_more_done_or`):
 
 ```march
-Fan_C.recv_Msg_B_C_1_or(s, st1,
+Fan_C.recv_Second_or(s, st1,
   fn (b, st2) ->
-    Fan_C.close(s, Fan_C.send_Msg_C_A_1(s, st2, b > 0)),
+    Fan_C.close(s, Fan_C.send_Verdict(s, st2, b > 0)),
   fn (role, cause, cancel) ->
     println("gave up on role " ++ int_to_string(role) ++ ": " ++ cause)
     Fan_C.cancelled(s, cancel))
@@ -416,7 +432,7 @@ record the failure, release a resource, or report what happened somewhere else. 
 without `_or` behaves the same way, with no handler.
 
 To leave a session on purpose, call the `leave_` function for the state you are in:
-`Fan_C.leave_recv_Msg_A_C_1(s, st, "shutting down")` for C before it has heard from A. The
+`Fan_C.leave_recv_Number(s, st, "shutting down")` for C before it has heard from A. The
 other roles are told, and `run` returns `Err(Left(why))`.
 
 The names, in one place:
@@ -426,7 +442,7 @@ The names, in one place:
 | `recv_<Msg>_or(s, st, on_msg, on_cancel)` | a receive with a cancel handler; `offer_<labels>_or` likewise |
 | `on_cancel : (Int, String, Cancelled_<Role>) -> Yield` | the failed role's number, the cause, and the token |
 | `<Role>.cancelled(s, token)` | the only way a cancel handler can finish |
-| `leave_<state>(s, st, why)` | leave on purpose from that state (`leave_recv_Msg_A_C_1` from `S_recv_Msg_A_C_1`) |
+| `leave_<state>(s, st, why)` | leave on purpose from that state (`leave_recv_Number` from `S_recv_Number`) |
 
 ### Starting again
 
@@ -529,15 +545,15 @@ actor ConsActor do
   init  { budget: 2, parked: Stream_Cons.idle() }
   on StartC(s : Cap(Session.Live)) do
     Stream_Cons.take_idle(state.parked)
-    { state with parked: Stream_Cons.await_Msg_Prod_Cons_1(s, Stream_Cons.register(s, 0)) }
+    { state with parked: Stream_Cons.await_Item(s, Stream_Cons.register(s, 0)) }
   end
   on DeliverC(s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
     match Stream_Cons.resume(state.parked, from, msg, ep) do
-      Got_Msg_Prod_Cons_1(n, st) ->
+      Got_Item(n, st) ->
         if state.budget > 1 do
           let st2 = Stream_Cons.choose_more(s, st, true)
           { state with budget: state.budget - 1,
-                       parked: Stream_Cons.await_Msg_Prod_Cons_1(s, st2) }
+                       parked: Stream_Cons.await_Item(s, st2) }
         else
           let st2 = Stream_Cons.choose_done(s, st, true)
           { state with parked: Stream_Cons.finish(s, st2) }

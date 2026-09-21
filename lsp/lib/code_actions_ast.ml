@@ -504,9 +504,10 @@ let ast_code_actions (a : t) ~line ~character : Lsp.Types.CodeAction.t list =
       let rec steps_text indent ss =
         String.concat ""
           (List.map (fun (st : Ast.protocol_step) -> match st with
-               | Ast.ProtoMsg (from, _to, ty) ->
-                 Printf.sprintf "%s-- %s sends %s\n%ssend(ch, ?)\n%slet _ = receive(ch)\n"
-                   indent from.Ast.txt (surface_ty ty) indent indent
+               | Ast.ProtoMsg (from, _to, ty, label) ->
+                 let named = match label with Some l -> l.Ast.txt ^ " : " | None -> "" in
+                 Printf.sprintf "%s-- %s sends %s%s\n%ssend(ch, ?)\n%slet _ = receive(ch)\n"
+                   indent from.Ast.txt named (surface_ty ty) indent indent
                | Ast.ProtoLoop inner ->
                  Printf.sprintf "%sloop do\n%s%send\n" indent
                    (steps_text (indent ^ "  ") inner) indent

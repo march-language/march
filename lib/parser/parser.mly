@@ -948,7 +948,7 @@ protocol_decl:
 
 protocol_step:
   | sender = upper_name; ARROW; receiver = upper_name; COLON; t = ty
-    { ProtoMsg (sender, receiver, t) }
+    { ProtoMsg (sender, receiver, t, None) }
   (* A message step with a crash branch: `A -> B : T or crash do ... end`.
      `or` (ORWORD) is a soft keyword that Token_filter keeps only when `crash`
      follows it, so after `ty` the lookahead is either ORWORD (shift) or a
@@ -960,7 +960,15 @@ protocol_step:
         error_raise
           (Printf.sprintf "I don't recognize `or %s` here — a message step can only be followed by `or crash do ... end`." c.txt)
           None $startpos(c)
-      else ProtoCrashOr (ProtoMsg (sender, receiver, t), crash, mk_span $loc) }
+      else ProtoCrashOr (ProtoMsg (sender, receiver, t, None), crash, mk_span $loc) }
+  (* The labelled form of the same: `item: A -> B : T or crash do ... end`. *)
+  | label = lower_name; COLON; sender = upper_name; ARROW; receiver = upper_name; COLON; t = ty;
+    ORWORD; c = lower_name; DO; crash = list(protocol_step); END
+    { if c.txt <> "crash" then
+        error_raise
+          (Printf.sprintf "I don't recognize `or %s` here — a message step can only be followed by `or crash do ... end`." c.txt)
+          None $startpos(c)
+      else ProtoCrashOr (ProtoMsg (sender, receiver, t, Some label), crash, mk_span $loc) }
   (* `may crash A, B`: the roles that may crash (MAY likewise soft). *)
   | MAY; c = lower_name; roles = separated_nonempty_list(COMMA, upper_name)
     { if c.txt <> "crash" then
@@ -968,6 +976,13 @@ protocol_step:
           (Printf.sprintf "I don't recognize `may %s` here — the only declaration step is `may crash Role, ...`." c.txt)
           None $startpos(c)
       else ProtoMayCrash (roles, mk_span $loc) }
+  (* A labelled message step, `item: Prod -> Cons : Int`: the label names the
+     message (`@[endpoints]` generates `send_Item`/`recv_Item`/`Got_Item`
+     instead of `send_Msg_Prod_Cons_1`).  Lowercase like a branch label; the
+     constructor is its capitalisation.  Distinct from the bare `lower_name`
+     alternative below (`stop`) by the COLON that follows it. *)
+  | label = lower_name; COLON; sender = upper_name; ARROW; receiver = upper_name; COLON; t = ty
+    { ProtoMsg (sender, receiver, t, Some label) }
   | LOOP; DO; steps = list(protocol_step); END
     { ProtoLoop steps }
   | CHOOSE; BY; chooser = upper_name; COLON; option(arm_sep); branches = separated_nonempty_list(arm_sep, choose_branch); END
