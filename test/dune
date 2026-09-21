@@ -376,6 +376,41 @@
  (deps    (file test_dispatch_runner))
  (action  (run ./test_dispatch_runner)))
 
+; ── Signal.watch registration-window unit test ───────────────────────────
+; A delivery landing between publishing a watcher and clearing its pending flag
+; must not be erased.  Lands the signal in that window through the runtime's
+; march_signal_watch_test_hook.  Same full-runtime link set as
+; test_float_box_runner below (march_runtime.c is the god-object).
+(rule
+ (targets test_signal_watch_runner)
+ (deps    test_signal_watch.c
+          ../runtime/march_runtime.c ../runtime/march_runtime.h
+          ../runtime/march_scheduler.c ../runtime/march_scheduler.h
+          ../runtime/march_heap.c ../runtime/march_heap.h
+          ../runtime/march_gc.c ../runtime/march_gc.h
+          ../runtime/march_message.c ../runtime/march_message.h
+          ../runtime/march_deque.h
+          ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+          ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
+          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+          ../runtime/march_remote_registry.c)
+ (action  (run %{cc}
+               -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
+               -o %{targets}
+               test_signal_watch.c ../runtime/march_runtime.c
+               ../runtime/march_scheduler.c ../runtime/march_heap.c
+               ../runtime/march_gc.c ../runtime/march_message.c
+               ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+               ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
+               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+               ../runtime/march_remote_registry.c
+               -lpthread -lz -lm)))
+
+(rule
+ (alias   runtest)
+ (deps    (file test_signal_watch_runner))
+ (action  (run ./test_signal_watch_runner)))
+
 ; ── Boxed-Float runtime API unit test (float-boxing design, stage 1) ──────
 ; march_alloc_float / march_unbox_float / march_poly_eq / march_poly_compare
 ; live in march_runtime.c (the god-object), so this harness links the same

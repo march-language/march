@@ -8452,6 +8452,12 @@ void march_signal_drain(void) {
     }
 }
 
+/* Test seam (test/test_signal_watch.c): when non-NULL, called by
+ * march_signal_watch immediately after the new watcher is published, i.e. at
+ * the point where a concurrent delivery would be deferred to it.  Lets a test
+ * land a signal exactly in the registration window.  Never set in programs. */
+void (*march_signal_watch_test_hook)(int64_t code) = NULL;
+
 /* Register a watcher.  The closure is passed OWNED (Perceus: the borrow pass
  * marks this call site as consuming), so we keep its reference in the table
  * and release it on replace / unwatch. */
@@ -8465,11 +8471,20 @@ void march_signal_watch(int64_t code, void *clo) {
         if (clo) march_decrc(clo);
         return;
     }
-    void *old = atomic_exchange_explicit(&g_signal_handlers[code], clo,
-                                         memory_order_acq_rel);
-    if (old) march_decrc(old);
+    /* Reset the per-signal state BEFORE publishing the watcher.  Once the
+     * exchange below makes the slot non-NULL, march_signal_dispatch (already
+     * the OS handler on a re-watch) defers deliveries to `pending`; a clear
+     * AFTER that point would wipe a delivery that landed in between, silently
+     * dropping it.  Clearing first means only deliveries that precede this
+     * registration are discarded.  Relaxed is enough: the acq_rel exchange
+     * orders these stores before the watcher becomes visible, and the handler
+     * interrupting this thread observes program order anyway. */
     atomic_store_explicit(&g_signal_seen[code], 0, memory_order_relaxed);
     atomic_store_explicit(&g_signal_pending[code], 0, memory_order_relaxed);
+    void *old = atomic_exchange_explicit(&g_signal_handlers[code], clo,
+                                         memory_order_acq_rel);
+    if (march_signal_watch_test_hook) march_signal_watch_test_hook(code);
+    if (old) march_decrc(old);
     /* Install a plain handler (no SA_ONSTACK), mirroring http_signal_handler;
      * overrides any prior Term/Int shutdown handler with the watcher-aware one. */
     signal(march_signal_os_of_code((int)code), march_signal_dispatch);

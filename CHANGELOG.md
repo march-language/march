@@ -60,6 +60,14 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **A hot-code-reload publish could unload a version while a caller was entering
+  it.** Reclaiming an old version's ring slot closed its shared object before
+  marking the slot retired, so a caller that had just passed the liveness check
+  could pin it and call into code being unmapped. The slot is now retired first,
+  and the object is closed only if no caller pinned it in the meantime.
+- **Re-registering a `Signal.watch` watcher could lose a signal delivered during
+  the call.** The pending flag was cleared after the new watcher was installed,
+  so a delivery in between was erased. It is now cleared first.
 - **A false postcondition could be proved when a `match` reused a name.**
   Structural induction trusted a variable as a component of the matched value
   by its name alone, so `Cons(_, t)` in a `match` on a *different* list was
