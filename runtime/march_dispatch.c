@@ -14,11 +14,20 @@
 #define MARCH_HAS_DLCLOSE 0
 #endif
 
+/* Test seam: when set, slot_dlclose calls this INSTEAD of dlclose, so a unit
+ * test can observe the exact moment a handle is released (and what a reader
+ * can still reach at that moment) without loading real shared objects. */
+static void (*g_close_hook)(void *handle) = NULL;
+
+void march_dispatch_set_close_hook(void (*hook)(void *handle)) {
+    g_close_hook = hook;
+}
+
 static void slot_dlclose(void *handle) {
+    if (!handle) return;
+    if (g_close_hook) { g_close_hook(handle); return; }
 #if MARCH_HAS_DLCLOSE
-    if (handle) dlclose(handle);
-#else
-    (void)handle;
+    dlclose(handle);
 #endif
 }
 
@@ -34,7 +43,12 @@ typedef struct {
                                            acquire-loads it before trusting the slot,
                                            so a concurrent reader never observes a
                                            zeroed/half-written slot. */
-    uint32_t           epoch;           /* Phase 9: deploy epoch; 0 = pre-Phase-9 */
+    _Atomic(uint32_t)  epoch;           /* Phase 9: deploy epoch; 0 = pre-Phase-9.
+                                           Written before the `live` release-store
+                                           (relaxed; the release orders it), read
+                                           by enter_gen's scan after acquiring
+                                           `live`.  Atomic because the scan can
+                                           read a slot a reclaim is rewriting. */
     void              *handle;          /* dlopen handle for this .so; NULL for baseline */
 } MarchFnVersion;
 
@@ -160,9 +174,10 @@ void march_dispatch_shutdown(void) {
     }
 }
 
-int march_dispatch_publish(uint32_t name_id, void *fn_ptr,
-                           const char *impl_hash, const char *sig_hash,
-                           uint8_t kind) {
+/* epoch == NULL: leave the ring slot's epoch as it is (plain publish). */
+static int publish_impl(uint32_t name_id, void *fn_ptr,
+                        const char *impl_hash, const char *sig_hash,
+                        uint8_t kind, const uint32_t *epoch) {
     if (name_id >= g_n_slots) return -1;
     MarchDispatchSlot *s = &g_slots[name_id];
     uint32_t cur = atomic_load_explicit(&s->current, memory_order_acquire);
@@ -195,23 +210,46 @@ int march_dispatch_publish(uint32_t name_id, void *fn_ptr,
             }
         }
         if (idx < 0) return -1;
-        /* Release the old .so before overwriting the slot.  The refs check above
-         * guarantees no caller is currently inside enter/leave for this slot;
-         * enter_gen may theoretically read the slot concurrently (see Phase 9
-         * TOCTOU note in march_dispatch_enter_gen), but this risk is the same as
-         * the existing fn_ptr overwrite race and is acceptable under March's
-         * cooperative green-thread scheduler. */
-        slot_dlclose(s->ring[idx].handle);
-        s->ring[idx].handle = NULL;
+        MarchFnVersion *old = &s->ring[idx];
+        /* Retire, THEN re-check refs, THEN dlclose.  The refs==0 test above is
+         * only a filter: a reader (enter/enter_gen) that passed its live-check
+         * just before it can still pin afterwards, and its post-pin re-validation
+         * would pass as long as `live` is still 1 — handing it a fn_ptr into a
+         * .so we are about to unload.  So store live=0 first; after that, any
+         * reader that pins either shows up in the refs re-check below or sees
+         * live==0 on re-validation and backs out without touching fn_ptr.
+         *
+         * This is a store-buffering (Dekker) pair: we store `live` then load
+         * `refs`; the reader RMWs `refs` then loads `live`.  Release/acquire does
+         * NOT forbid both sides reading the stale value (each load may be
+         * satisfied before the other thread's store is visible), so all four
+         * accesses are seq_cst; the single total order then guarantees at least
+         * one side observes the other.  The reader-side seq_cst costs nothing
+         * extra on x86 (lock xadd / plain mov) or AArch64 (ldaddal / ldar).
+         *
+         * If a reader did pin in the window, leave the handle open: the version
+         * is retired (no new reader can select it), and the next publish reclaims
+         * it once those pins drain.  This keeps one .so mapped a little longer in
+         * the racing case, which beats unmapping code under a caller.  The full
+         * fix — epoch/grace reclamation, so the reclaimer never needs a racing
+         * reader to back out — is not built yet. */
+        atomic_store_explicit(&old->live, 0, memory_order_seq_cst);
+        if (atomic_load_explicit(&old->refs, memory_order_seq_cst) != 0)
+            return -1;
+        slot_dlclose(old->handle);
+        old->handle = NULL;
     }
 
     MarchFnVersion *v = &s->ring[idx];
-    /* Reclaim case: if this ring slot was previously live, retire it FIRST so a
-       concurrent enter_gen (which scans every live slot) cannot select it while
-       we are mid-overwrite.  On a fresh slot this is already 0. */
+    /* Reclaim case: already retired above.  Fresh slot: already 0.  The store is
+       kept so the slot is provably not live while its fields are rewritten. */
     atomic_store_explicit(&v->live, 0, memory_order_release);
     v->fn_ptr = fn_ptr;
-    atomic_store_explicit(&v->refs, 0, memory_order_relaxed);
+    /* Do NOT reset `refs` here.  It is already 0 on a fresh (calloc'd) slot and
+       was verified 0 on reclaim — but a reader can still be mid-back-out (pinned,
+       about to see live==0 and fetch_sub).  A plain store of 0 would erase its
+       increment and its decrement would then wrap refs to UINT64_MAX, pinning
+       the slot forever. */
     v->kind = kind;
     if (impl_hash) {
         strncpy(v->impl_hash, impl_hash, 64);
@@ -225,6 +263,10 @@ int march_dispatch_publish(uint32_t name_id, void *fn_ptr,
     } else {
         v->sig_hash[0] = '\0';
     }
+    /* Stamp the epoch BEFORE the publication store, so enter_gen never selects
+       this slot by its previous occupant's epoch. */
+    if (epoch)
+        atomic_store_explicit(&v->epoch, *epoch, memory_order_relaxed);
     /* Mark the slot live with a release store AFTER every field (fn_ptr, kind,
        hashes) is written.  This is the slot-level publication point: enter/
        enter_gen acquire-load `live` and only trust the slot once they observe
@@ -234,6 +276,12 @@ int march_dispatch_publish(uint32_t name_id, void *fn_ptr,
        initialised version. */
     atomic_store_explicit(&s->current, (uint32_t)idx, memory_order_release);
     return idx;
+}
+
+int march_dispatch_publish(uint32_t name_id, void *fn_ptr,
+                           const char *impl_hash, const char *sig_hash,
+                           uint8_t kind) {
+    return publish_impl(name_id, fn_ptr, impl_hash, sig_hash, kind, NULL);
 }
 
 void *march_dispatch_enter(uint32_t name_id, uint32_t *out_version) {
@@ -259,14 +307,14 @@ void *march_dispatch_enter(uint32_t name_id, uint32_t *out_version) {
         if (out_version) *out_version = 0;
         return NULL;
     }
-    /* Pin before use. The publish path only reclaims a slot with refs == 0, so
-       a fully-safe reclaim against this read needs epoch/grace reclamation
-       (a later phase); single-version steady state and the test path are
-       correct as-is. */
-    atomic_fetch_add_explicit(&s->ring[v].refs, 1, memory_order_acq_rel);
-    /* Re-validate after pinning: if a concurrent reclaim retired this slot
-       between the live check and the pin, back out and fall back. */
-    if (!atomic_load_explicit(&s->ring[v].live, memory_order_acquire)) {
+    /* Pin before use, then re-validate: if a concurrent reclaim retired this
+       slot between the live check and the pin, back out and fall back.  The
+       pin and the re-validation are seq_cst because they form a Dekker pair
+       with the reclaimer's retire-store/refs-load (see march_dispatch_publish):
+       either the reclaimer sees our pin and keeps the .so open, or we see
+       live==0 here and never read fn_ptr. */
+    atomic_fetch_add_explicit(&s->ring[v].refs, 1, memory_order_seq_cst);
+    if (!atomic_load_explicit(&s->ring[v].live, memory_order_seq_cst)) {
         atomic_fetch_sub_explicit(&s->ring[v].refs, 1, memory_order_acq_rel);
         if (out_version) *out_version = 0;
         return NULL;
@@ -284,9 +332,10 @@ void *march_dispatch_enter_version(uint32_t name_id, uint32_t version,
     MarchDispatchSlot *slots = atomic_load_explicit(&g_slots, memory_order_acquire);
     MarchFnVersion *v = &slots[name_id].ring[version];
     if (!atomic_load_explicit(&v->live, memory_order_acquire)) return NULL;
-    /* Pin, then re-validate: same reclaim race as march_dispatch_enter. */
-    atomic_fetch_add_explicit(&v->refs, 1, memory_order_acq_rel);
-    if (!atomic_load_explicit(&v->live, memory_order_acquire)) {
+    /* Pin, then re-validate: the same seq_cst Dekker pair with the
+       reclaimer's retire-store/refs-load as march_dispatch_enter. */
+    atomic_fetch_add_explicit(&v->refs, 1, memory_order_seq_cst);
+    if (!atomic_load_explicit(&v->live, memory_order_seq_cst)) {
         atomic_fetch_sub_explicit(&v->refs, 1, memory_order_acq_rel);
         return NULL;
     }
@@ -380,17 +429,15 @@ void march_dispatch_set_handle(uint32_t name_id, uint32_t version, void *handle)
 int march_dispatch_publish_epoch(uint32_t name_id, void *fn_ptr,
                                  const char *impl_hash, const char *sig_hash,
                                  uint8_t kind, uint32_t epoch) {
-    int idx = march_dispatch_publish(name_id, fn_ptr, impl_hash, sig_hash, kind);
-    if (idx >= 0)
-        g_slots[name_id].ring[idx].epoch = epoch;
-    return idx;
+    return publish_impl(name_id, fn_ptr, impl_hash, sig_hash, kind, &epoch);
 }
 
 /* Phase 9: read the deploy epoch stored in a ring slot version.
  * Used by VERSIONS_DETAIL to include the epoch in the server response. */
 uint32_t march_dispatch_epoch(uint32_t name_id, uint32_t version) {
     if (name_id >= g_n_slots || version >= MARCH_MAX_LIVE_VERSIONS) return 0;
-    return g_slots[name_id].ring[version].epoch;
+    return atomic_load_explicit(&g_slots[name_id].ring[version].epoch,
+                                memory_order_relaxed);
 }
 
 /* Phase 9: epoch-aware enter.
@@ -417,7 +464,7 @@ void *march_dispatch_enter_gen(uint32_t name_id, uint32_t caller_epoch,
            a slot's epoch/fn_ptr are only read once the publishing release-store
            of `live` is visible. */
         if (!atomic_load_explicit(&s->ring[i].live, memory_order_acquire)) continue;
-        uint32_t ep = s->ring[i].epoch;
+        uint32_t ep = atomic_load_explicit(&s->ring[i].epoch, memory_order_relaxed);
         if (ep <= caller_epoch && (best_idx < 0 || ep > best_ep)) {
             best_idx = (int)i;
             best_ep  = ep;
@@ -427,10 +474,11 @@ void *march_dispatch_enter_gen(uint32_t name_id, uint32_t caller_epoch,
         return march_dispatch_enter(name_id, out_version);  /* no match: use current */
 
     uint32_t v = (uint32_t)best_idx;
-    atomic_fetch_add_explicit(&s->ring[v].refs, 1, memory_order_acq_rel);
-    /* Re-validate after pinning (mirror of march_dispatch_enter): a concurrent
-       reclaim that retired this slot means we must back out and fall back. */
-    if (!atomic_load_explicit(&s->ring[v].live, memory_order_acquire)) {
+    /* Pin, then re-validate (mirror of march_dispatch_enter, including the
+       seq_cst Dekker pairing with the reclaimer): a concurrent reclaim that
+       retired this slot means we must back out and fall back. */
+    atomic_fetch_add_explicit(&s->ring[v].refs, 1, memory_order_seq_cst);
+    if (!atomic_load_explicit(&s->ring[v].live, memory_order_seq_cst)) {
         atomic_fetch_sub_explicit(&s->ring[v].refs, 1, memory_order_acq_rel);
         if (out_version) *out_version = 0;
         return NULL;
