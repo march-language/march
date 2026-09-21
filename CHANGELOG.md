@@ -104,6 +104,12 @@ git log is authoritative for exact commits.
   own, narrower rule — only a `Chan` that reached `End` must be closed, so a
   mid-protocol drop is still legal. See `docs/linear-types.md`.
 
+- **A watched signal no longer crashes a compiled program on Linux/aarch64.**
+  Any signal handled by the runtime (`Signal.watch`, or SIGTERM/SIGINT while an
+  HTTP server is listening) could arrive on a green thread's small stack, and
+  an arm64 Linux signal frame does not fit there. `Signal.raise` of a watched
+  signal died every time with `fatal SIGSEGV si_code=128 addr=0x0`. The
+  handlers now run on the scheduler thread's alternate signal stack.
 - **March no longer takes over a host process's SIGUSR1.** Preemption replaced any
   existing SIGUSR1 handler for good, so March embedded in another program (the
   Erlang VM uses SIGUSR1 for crash dumps) silently disabled the host's handler.

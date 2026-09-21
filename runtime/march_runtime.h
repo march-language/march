@@ -697,6 +697,9 @@ void    march_signal_watch(int64_t code, void *clo);
 void    march_signal_unwatch(int64_t code);
 void    march_signal_raise_self(int64_t code);
 void    march_signal_drain(void);
+/* sigaction(SA_ONSTACK|SA_RESTART) for a handler that may fire on a green
+ * thread's small stack — never plain signal(); see its definition. */
+void    march_install_async_signal(int sig, void (*handler)(int));
 /* Spawn a March thunk closure (fn () -> T) as an async green thread.
  * Returns a boxed Task handle (32 bytes: header + proc ptr + result ptr). */
 void   *march_task_spawn_thunk(void *clo_ptr);
