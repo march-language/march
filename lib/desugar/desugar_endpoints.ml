@@ -909,6 +909,16 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
          [ (pcon idle_c [ PatWild sp ], ETuple ([], sp));
            (PatWild sp, panic (where ^ ": take_idle on an endpoint that was already started")) ])
   in
+  (* `take_closed(p)`: retire a finished or cancelled endpoint.  Without it the
+     only way to be rid of a [Closed] value was a hand-written function with a
+     `linear` parameter, which, being generic, would swallow any other linear
+     value just as happily. *)
+  let take_closed =
+    fn "take_closed" [ ("p", t_parked) ] (TyTuple [])
+      (match_ (var "p")
+         [ (pcon closed_c [ PatWild sp ], ETuple ([], sp));
+           (PatWild sp, panic (where ^ ": take_closed on an endpoint that has not finished")) ])
+  in
   let await_fn ~from name this =
     (* Suspend so the transport knows the endpoint awaits; the handler must
        never run -- the actor resumes the endpoint itself.  `ep` is bound from
@@ -980,7 +990,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
           :: List.map (fun (this, _) -> (pcon ("Awaiting_" ^ this) [ PatWild sp; PatWild sp ], con closed_c [ secret_v ])) receiving
           @ [ (pcon closed_c [ PatWild sp ], con closed_c [ secret_v ]) ]))
   in
-  let event_api = (parked_ty :: event_ty) @ (idle :: take_idle :: cancel_parked :: awaits) @ resume in
+  let event_api = (parked_ty :: event_ty) @ (idle :: take_idle :: take_closed :: cancel_parked :: awaits) @ resume in
   let entry = state_of root in
   let register =
     fn "register" [ ("s", t_cap_session); ("ap", t_int) ] (sty entry)
