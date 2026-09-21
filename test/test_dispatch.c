@@ -349,6 +349,12 @@ static void *recl_reader(void *arg) {
         uint32_t got = (uint32_t)(((uintptr_t)fn - 0x100000u) / 16u);
         atomic_fetch_add_explicit(&g_recl_pins, 1, memory_order_relaxed);
         for (volatile int i = 0; i < 50; i++) { }       /* "call" into the .so */
+        /* Now and then give the CPU away WHILE PINNED.  Without this the pin
+         * window is so short that on CI's ubuntu runner 1M publishes never
+         * once met a pinned candidate (blocked=0, pins=249860): the readers and
+         * the publisher simply never overlapped.  Yielding inside the window
+         * makes the overlap happen by construction on a busy or small box. */
+        if ((iter & 7) == 0) sched_yield();
         if (atomic_load_explicit(&g_recl_closed[got], memory_order_seq_cst))
             atomic_fetch_add_explicit(&g_recl_bad, 1, memory_order_relaxed);
         march_dispatch_leave(0, v);

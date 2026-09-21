@@ -47,6 +47,11 @@ Test seam: `march_dispatch_set_close_hook` makes reclaim call a hook instead of
   (>= 20k publishes, capped at 1M or 10 s). The guards are skipped, with a
   printed SKIP, when only one CPU is online: there the race cannot be
   exercised at all (measured in Docker pinned to one core: `blocked=0`).
+  The second CI run then showed the same `blocked=0` on the ubuntu runner
+  (1M publishes, 250k pins, never overlapping), so readers now also
+  `sched_yield()` now and then WHILE PINNED, which makes the overlap happen by
+  construction: blocked publishes appear even on one core (157), and at 2 and
+  4 CPUs in Docker the red control fails both new cases.
 
 Red control (scratch copy with only the reclaim order reverted to
 dlclose -> live=0):
