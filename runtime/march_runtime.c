@@ -7254,10 +7254,20 @@ void *march_file_open(void *path_ptr) {
     return mk_ok(handle);
 }
 
-void *march_file_close(void *handle_ptr) {
+/* file_close / csv_close return the `:ok` atom (an i64), matching the
+ * typechecker's `Int -> Atom` and the interpreter.  They used to return a
+ * heap `Ok(())` Result cell, so a compiled `csv_close(h) == :ok` compared a
+ * pointer against an atom (false) and rendered as `:<atom>`.  The "Int"
+ * handle is really the heap cell file_open / csv_open built (field 0 is the
+ * FILE*); it is an opaque pointer at the March level.  file_close now zeroes
+ * field 0 as csv_close always did, so a second close is a no-op, not a
+ * double fclose. */
+static int64_t march_atom_of_name(const char *name);
+
+int64_t march_file_close(void *handle_ptr) {
     FILE *f = (FILE *)(uintptr_t)MARCH_FIELD(handle_ptr, 0);
-    if (f) fclose(f);
-    return mk_ok_unit();
+    if (f) { fclose(f); MARCH_FIELD(handle_ptr, 0) = 0; }
+    return march_atom_of_name("ok");
 }
 
 /* file_read_line / file_read_chunk : Int -> Option(String).
@@ -7779,10 +7789,10 @@ void *march_csv_open(void *path_ptr, void *delim_ptr, void *mode_ptr) {
     return mk_ok(h);
 }
 
-void *march_csv_close(void *handle_ptr) {
+int64_t march_csv_close(void *handle_ptr) {
     FILE *f = (FILE *)(uintptr_t)MARCH_FIELD(handle_ptr, 0);
     if (f) { fclose(f); MARCH_FIELD(handle_ptr, 0) = 0; }
-    return mk_ok_unit();
+    return march_atom_of_name("ok");
 }
 
 /* Returns Row(List(String)) or :eof (null) */
