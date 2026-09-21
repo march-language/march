@@ -3653,10 +3653,33 @@ let rec iter_all (f : A.expr -> unit) (e : A.expr) : unit =
 
 (* Variables structurally smaller than [param]: bound by a constructor pattern
    when matching [param] (or an already-structural variable, so a nested
-   `match l do …` contributes l's components too).  Accumulated top-down. *)
-let structural_subvars (param : string) (body : A.expr) : (string, unit) Hashtbl.t =
-  let set = Hashtbl.create 16 in
-  let is_struct v = v = param || Hashtbl.mem set v in
+   `match l do …` contributes l's components too).  Accumulated top-down.
+
+   TRUSTED BY NAME, SO EVERY BINDING OF THE NAME MUST BE STRUCTURAL.  The set
+   is keyed by spelling over the whole body, and its consumers (Tier 2's
+   induction hypothesis, the element-return hypothesis, the `@[measure]`
+   termination gate) test a recursive call's argument with [Hashtbl.mem].  A
+   name bound structurally in one place and non-structurally in another is
+   therefore trusted at BOTH, and the second is not a component at all:
+
+     match xs do
+     Cons(h, t) ->
+       match ys do
+       Cons(_, t) -> Cons(h, copy(t, t))   -- this `t` is ys's tail
+
+   proved `len(copy(xs, ys)) == len(xs)`, which is false (`copy([1], [5,6,7])`
+   has length 3).  Found by probe 2026-09-21, backlog plan item 1.
+
+   So a name stays in the set only if EVERY binder occurrence of it in the
+   body is one of the structural ones, and it is not also a parameter
+   ([params]).  Sibling arms of one structural match that reuse a spelling
+   (`Leaf(k) -> … | Node(l, k, r) -> …`) are all structural and are kept;
+   that is the case a flat "bound more than once" filter would have thrown
+   away.  Iterated to a fixpoint: dropping a name must also drop the
+   components of any `match` on it, which were admitted while it was still
+   trusted. *)
+let structural_subvars ?(params : string list = []) (param : string) (body : A.expr) :
+    (string, unit) Hashtbl.t =
   let rec pat_vars = function
     | A.PatVar n -> [ n.A.txt ]
     | A.PatCon (_, ps) | A.PatAtom (_, ps, _) | A.PatTuple (ps, _) -> List.concat_map pat_vars ps
@@ -3665,20 +3688,64 @@ let structural_subvars (param : string) (body : A.expr) : (string, unit) Hashtbl
     | A.PatOr (ps, _) -> List.concat_map pat_vars ps
     | A.PatWild _ | A.PatLit _ -> []
   in
-  iter_all
-    (fun e ->
-      match e with
-      | A.EMatch (A.EVar s, brs, _) when is_struct s.A.txt ->
-        List.iter
-          (fun (br : A.branch) ->
-            match br.A.branch_pat with
-            | A.PatCon (_, pats) ->
-              List.iter (fun v -> Hashtbl.replace set v ()) (List.concat_map pat_vars pats)
-            | _ -> ())
-          brs
-      | _ -> ())
-    body;
-  set
+  (* Every binder occurrence in the body, duplicates kept. *)
+  let all_binders =
+    let acc = ref [] in
+    let add l = acc := l @ !acc in
+    iter_all
+      (fun e ->
+        match e with
+        | A.ELet (b, _) -> add (pat_vars b.A.bind_pat)
+        | A.ELetFn (n, ps, _, _, _) ->
+          add (n.A.txt :: List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps)
+        | A.ELam (ps, _, _) -> add (List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps)
+        | A.ELetQ (p, _, _, _) | A.ELetStar (p, _, _, _) -> add (pat_vars p)
+        | A.EMatch (_, brs, _) ->
+          List.iter (fun (br : A.branch) -> add (pat_vars br.A.branch_pat)) brs
+        | _ -> ())
+      body;
+    !acc
+  in
+  let count n l = List.length (List.filter (( = ) n) l) in
+  (* One pass: the structural set and the structural binder occurrences
+     (duplicates kept), never admitting a name in [excluded]. *)
+  let pass (excluded : string list) =
+    let set = Hashtbl.create 16 in
+    let occ = ref [] in
+    let is_struct v = v = param || (Hashtbl.mem set v && not (List.mem v excluded)) in
+    iter_all
+      (fun e ->
+        match e with
+        | A.EMatch (A.EVar s, brs, _) when is_struct s.A.txt ->
+          List.iter
+            (fun (br : A.branch) ->
+              match br.A.branch_pat with
+              | A.PatCon (_, pats) ->
+                let vs = List.concat_map pat_vars pats in
+                occ := vs @ !occ;
+                List.iter (fun v -> Hashtbl.replace set v ()) vs
+              | _ -> ())
+            brs
+        | _ -> ())
+      body;
+    (set, !occ)
+  in
+  let rec fix excluded =
+    let set, occ = pass excluded in
+    let untrusted =
+      Hashtbl.fold
+        (fun v () acc ->
+          if List.mem v params || count v all_binders > count v occ then v :: acc else acc)
+        set []
+    in
+    let excluded' = List.sort_uniq compare (excluded @ untrusted) in
+    if excluded' = List.sort_uniq compare excluded then begin
+      List.iter (Hashtbl.remove set) excluded';
+      set
+    end
+    else fix excluded'
+  in
+  fix []
 
 (* Every name a function binds: its parameters, and every `let` / `let fn` /
    `let?` / `let*` / lambda / match binder anywhere in its bodies (a union
@@ -3748,7 +3815,14 @@ let measure_gate_errors (fd : A.fn_def) : string list =
       (* (2) Termination via structural recursion. *)
       (match clause_param_name c with
        | Some param ->
-         let sset = structural_subvars param body in
+         let params =
+           List.filter_map
+             (function
+               | A.FPNamed p | A.FPDefault (p, _) -> Some p.A.param_name.A.txt
+               | A.FPPat _ -> None)
+             c.A.fc_params
+         in
+         let sset = structural_subvars ~params param body in
          iter_all
            (fun e ->
              match e with
