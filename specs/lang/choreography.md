@@ -114,14 +114,16 @@ step out of that state:
 | another role picks | `offer_l1_l2(s, state, on_l1, on_l2)`, one callback per branch |
 | the conversation ends | `close(s, state)` |
 
-`register(s, 0)` gives a role its first state.
+`register(s, 0)` gives a role its first state. Each role module names that state
+`Entry`, so `Fan_C.Entry` is C's first state and you never have to work out which
+`S_` name it is.
 
 ## Writing a role
 
 A role is a function from its first state to `Yield`. Here is C:
 
 ```march
-pfn role_c(s : Cap(Session.Live), st : Fan_C.S_recv_Number) : Fan_C.Yield do
+pfn role_c(s : Cap(Session.Live), st : Fan_C.Entry) : Fan_C.Yield do
   Fan_C.recv_Number(s, st, fn (a, st1) ->
     println("C: got " ++ int_to_string(a) ++ " from A")
     Fan_C.recv_Second(s, st1, fn (b, st2) ->
@@ -143,7 +145,7 @@ step function, so a callback cannot quietly drop the conversation either.
 And A:
 
 ```march
-pfn role_a(s : Cap(Session.Live), st : Fan_A.S_send_Number) : Fan_A.Yield do
+pfn role_a(s : Cap(Session.Live), st : Fan_A.Entry) : Fan_A.Yield do
   let st1 = Fan_A.send_Number(s, st, 7)
   Fan_A.recv_Verdict(s, st1, fn (ok, st2) ->
     println("A: got " ++ bool_to_string(ok))
@@ -156,7 +158,7 @@ nests. A role with several receives reads better as one function per receive tha
 pyramid of closures:
 
 ```march
-pfn role_c(s : Cap(Session.Live), st : Fan_C.S_recv_Number) : Fan_C.Yield do
+pfn role_c(s : Cap(Session.Live), st : Fan_C.Entry) : Fan_C.Yield do
   Fan_C.recv_Number(s, st, fn (a, st1) -> after_a(s, a, st1))
 end
 
@@ -168,7 +170,8 @@ end
 
 If a step is called in the wrong state, the error names both states and says so: the
 state types are `S_` followed by the step the role takes next, so `S_recv_Number` is
-"about to receive `Number`".
+"about to receive `Number`". `Entry` is the same type as whichever of them a role
+starts in, so an error about one may name the `S_` spelling where you wrote `Entry`.
 
 Every callback has to return. The runner calls it when its message arrives, and until it
 returns, that node handles nothing else for the session: no other message, no failure, not

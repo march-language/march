@@ -307,6 +307,112 @@ let labelled_roles_ok = ok "both roles written against the labelled names typech
   end
 |}))
 
+(* ── `Entry`: the alias for a role's first state ────────────────────────── *)
+
+(** The right-hand side of a generated module's [Entry] alias, if it has one. *)
+let entry_alias mods_src m =
+  let md = parse_and_desugar mods_src in
+  let decls =
+    List.find_map (function DMod (name, _, decls, _) when name.txt = m -> Some decls | _ -> None) md.mod_decls
+  in
+  match decls with
+  | None -> None
+  | Some decls ->
+    List.find_map
+      (function
+        | DType (_, name, [], TDAlias (TyCon (rhs, [])), _) when name.txt = "Entry" -> Some rhs.txt
+        | _ -> None)
+      decls
+
+let entry_alias_shape =
+  Alcotest.test_case "each role module aliases `Entry` to that role's FIRST state" `Quick
+    (fun () ->
+       Alcotest.(check (option string)) "Stream_Prod.Entry" (Some "S_send_Msg_Prod_Cons_1")
+         (entry_alias (wrap stream) "Stream_Prod");
+       Alcotest.(check (option string)) "Stream_Cons.Entry" (Some "S_recv_Msg_Prod_Cons_1")
+         (entry_alias (wrap stream) "Stream_Cons");
+       (* A role whose first step is a receive from a third party: the alias
+          follows the projection, not the protocol's first line. *)
+       Alcotest.(check (option string)) "Relay_Logger.Entry" (Some "S_recv_Msg_Server_Logger_1")
+         (entry_alias (wrap relay) "Relay_Logger");
+       (* `Entry` is not a state name: states are all `S_`-prefixed, so the
+          alias cannot shadow one. *)
+       Alcotest.(check bool) "no generated fn is called Entry" false
+         (has_fn (generated (wrap stream)) "Stream_Prod" "Entry"))
+
+(** A protocol whose ROLE is literally named `Entry`: role names appear only as
+    a suffix (`Gate_Entry`, `Parked_Entry`, `Cancelled_Entry`), so the alias
+    named `Entry` inside `Gate_Entry` collides with nothing. *)
+let role_named_entry = {|
+  @[endpoints]
+  protocol Gate do
+    Entry -> Exit : Int
+    Exit -> Entry : Bool
+  end
+|}
+
+let role_named_entry_shape =
+  Alcotest.test_case "a role named `Entry` still gets its own `Entry` alias, with no collision" `Quick
+    (fun () ->
+       Alcotest.(check (option string)) "Gate_Entry.Entry" (Some "S_send_Msg_Entry_Exit_1")
+         (entry_alias (wrap role_named_entry) "Gate_Entry");
+       Alcotest.(check (option string)) "Gate_Exit.Entry" (Some "S_recv_Msg_Entry_Exit_1")
+         (entry_alias (wrap role_named_entry) "Gate_Exit"))
+
+let role_named_entry_ok =
+  ok "a role named `Entry` writes its body against `Gate_Entry.Entry`" (wrap (role_named_entry ^ {|
+  pfn ent(s : Cap(Session.Live), st : Gate_Entry.Entry) : Gate_Entry.Yield do
+    let st1 = Gate_Entry.send_Msg_Entry_Exit_1(s, st, 1)
+    Gate_Entry.recv_Msg_Exit_Entry_1(s, st1, fn (_b, st2) -> Gate_Entry.close(s, st2))
+  end
+|}))
+
+let entry_roles_ok = ok "both roles written against `Entry` typecheck" (wrap (stream ^ {|
+  pfn prod(s : Cap(Session.Live), st : Stream_Prod.Entry, next : Int) : Stream_Prod.Yield do
+    let st1 = Stream_Prod.send_Msg_Prod_Cons_1(s, st, next)
+    Stream_Prod.offer_more_done(s, st1,
+      fn (_b, st2) -> prod(s, st2, next + 1),
+      fn (_b, st2) -> Stream_Prod.close(s, st2))
+  end
+  pfn cons(s : Cap(Session.Live), st : Stream_Cons.Entry, budget : Int) : Stream_Cons.Yield do
+    Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (_n, st1) ->
+      if budget > 1 do
+        cons(s, Stream_Cons.choose_more(s, st1, true), budget - 1)
+      else
+        Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true))
+      end)
+  end
+|}))
+
+(** The alias is transparent, so it is the other role's state that a body
+    annotated with the wrong role's `Entry` is measured against -- `Entry`
+    does not become one nominal type shared by every role. *)
+let entry_wrong_role =
+  bad "a body annotated with the OTHER role's `Entry` is rejected" "S_send_Msg_Prod_Cons_1"
+    (wrap (stream ^ {|
+  pfn cons(s : Cap(Session.Live), st : Stream_Prod.Entry, budget : Int) : Stream_Cons.Yield do
+    Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (_n, st1) ->
+      if budget > 1 do
+        cons(s, Stream_Cons.choose_more(s, st1, true), budget - 1)
+      else
+        Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true))
+      end)
+  end
+|}))
+
+(** The state type is `always_linear`; the alias must not launder that away. *)
+let entry_keeps_linearity =
+  bad "a state reached through `Entry` is still linear" "used more than once"
+    (wrap (stream ^ {|
+  pfn prod(s : Cap(Session.Live), st : Stream_Prod.Entry, next : Int) : Stream_Prod.Yield do
+    let st1 = Stream_Prod.send_Msg_Prod_Cons_1(s, st, next)
+    let _st2 = Stream_Prod.send_Msg_Prod_Cons_1(s, st, next)
+    Stream_Prod.offer_more_done(s, st1,
+      fn (_b, st2) -> prod(s, st2, next + 1),
+      fn (_b, st2) -> Stream_Prod.close(s, st2))
+  end
+|}))
+
 (** [bad_desugar name needle src]: like [bad], for an error the GENERATOR
     reports at desugar time -- [typecheck_with_stdlib] discards those (see
     Test_helpers.desugar_has_errors). *)
@@ -1111,6 +1217,8 @@ let crash_chan_refused = bad "Chan(Role, Proto) refuses a protocol with crash br
 let tests =
   [ stream_shape; cli_pid_one_arg; cli_no_unreachable_catch_all; cli_derive_eq_single_ctor; relay_shape; no_attr_no_generation; bad_branch_head; same_label_two_payloads;
     unlabelled_names_pinned; labelled_shape; label_changes_fingerprint; labelled_roles_ok;
+    entry_alias_shape; entry_roles_ok; entry_wrong_role; entry_keeps_linearity;
+    role_named_entry_shape; role_named_entry_ok;
     label_on_branch_head; label_msg_prefix; shared_label_ok; shared_label_two_payloads; shared_label_one_role;
     prod_ok; wrong_order; replayed; abandoned; callback_forge; relay_ok; payload_declared_later;
     payload_no_codec; payload_with_codec; payload_nested_no_codec;
