@@ -79,6 +79,14 @@
  (enabled_if (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1))
  (modules run_codegen)
  (libraries march_test_codegen alcotest)
+ ; The repl_jit_* groups build the JIT runtime from the STAGED runtime/ tree
+ ; (setup_jit_runtime looks for _build/default/runtime/march_runtime.c) and
+ ; several cases shell out to bin/main.exe. Undeclared, these passed under a
+ ; full `dune runtest` only because some other rule happened to stage runtime/
+ ; first; run alone (`dune build @test/runtest-run_codegen`, the CI codegen
+ ; shard) every repl_jit case failed with "could not find
+ ; runtime/march_runtime.c".
+ (deps %{exe:../bin/main.exe} (source_tree ../runtime) (source_tree ../stdlib))
  (action (run %{test} -e)))
 
 (test

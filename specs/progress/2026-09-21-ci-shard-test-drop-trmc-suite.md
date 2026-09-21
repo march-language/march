@@ -36,6 +36,16 @@ contention. The wall time was set by two jobs:
 - **`two-node` job**: the node_discovery soak and the two-node scenarios moved
   out of the ubuntu `test` leg onto their own runner.
 
+## A missing dep the split exposed
+
+The first CI run on this change failed `test (*, codegen)` on both OSes: every
+`repl_jit_*` case said "could not find runtime/march_runtime.c". The
+`run_codegen` stanza never declared the staged `runtime/` tree (or
+`bin/main.exe`, which some cases shell out to); a full `dune runtest` only
+passed because another rule staged `runtime/` first. Declared now, the same way
+`run_compiler` does. Same run, the other shards and jobs were green, and wall
+time was 30 min against a 67 min median before.
+
 ## Not verified locally
 
 CI wall-clock after the change: the new numbers come from the first runs on

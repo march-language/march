@@ -28,6 +28,8 @@
 #     the whole ~20-file runtime per invocation — which is most of what the
 #     Test step and the ASAN gate were actually spending their time on.
 #
+# What every job checks, in one table: .github/workflows/README.md.
+#
 # Every job carries timeout-minutes: a dune build/runtest can wedge on its RPC
 # daemon (see CLAUDE.md/scripts/run-tests.sh), and before these were added a
 # single wedged step silently ate the full 6h GitHub Actions job ceiling.
