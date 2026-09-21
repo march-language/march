@@ -55,6 +55,17 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **A linear value can no longer be discarded with `let _ = …`.** A `_` binding
+  counted as the value's one use whenever the value was linear because of how it
+  was *bound* rather than what its type says — a `linear x : a` parameter or a
+  `linear let` local, whose type stays a plain type variable or `Int`. One generic
+  `fn launder(linear v : a) : () do let _ = v  () end` was therefore enough to drop
+  any linear value in the program, silently. A wildcard is not a use: such a `let`
+  is now rejected, naming the value and pointing at how to consume it (for a session
+  endpoint, the generated `take_closed` / `take_idle`). Session endpoints keep their
+  own, narrower rule — only a `Chan` that reached `End` must be closed, so a
+  mid-protocol drop is still legal. See `docs/linear-types.md`.
+
 - **A false postcondition could be proved when a `match` reused a name.**
   Structural induction trusted a variable as a component of the matched value
   by its name alone, so `Cons(_, t)` in a `match` on a *different* list was
