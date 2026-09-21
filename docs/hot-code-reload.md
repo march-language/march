@@ -30,7 +30,7 @@ When you run `forge deploy hot`, the build tool:
 5. The server activates the new functions atomically: new calls immediately use the
    new code, and no function is left partially updated at any point
 
-Actors that have a state schema change receive a `migrate_state` call before they handle any new messages, so they are never left in an inconsistent state.
+Actors that have a state schema change are migrated in mailbox order: messages already queued when the deploy lands finish on the old code against the old state, then the actor runs `migrate_state` and handles everything after that on the new code. New code never sees an old-shaped state. See [Messages queued during a deploy](#messages-queued-during-a-deploy).
 
 Deploys are also **capability-gated**: each changed function brings its own IO capabilities, and both the deploy tool and the receiving node can refuse a patch that reaches for more authority than the running version (or the node's policy) allows. See [Capability-safe deploys](#capability-safe-deploys) below.
 
@@ -146,7 +146,21 @@ mod MyApp do
 end
 ```
 
-The naming convention is `<actor_name_lowercase>_migrate_state`. The parameter type is the **old** state shape; the return type is the **new** state shape. Every live actor is migrated before it processes any further messages.
+The naming convention is `<actor_name_lowercase>_migrate_state`. The parameter type is the **old** state shape; the return type is the **new** state shape. Every live actor of the type is migrated, however many there are.
+
+### Messages queued during a deploy
+
+A deploy can land while an actor still has messages waiting in its mailbox. Those messages were sent to the old code, and the actor's state still has the old shape, so they are handled by the **old** code:
+
+1. When the deploy activates, each live actor is held on the code version it was running, and a migration marker is appended to its mailbox.
+2. The actor works through the messages ahead of the marker using the old handlers, against the old state.
+3. When it reaches the marker, it runs `migrate_state` on its state and switches to the new code. Every later message is handled by the new handlers, against the new state.
+
+Each actor switches independently, at its own marker, so for a short while some actors of a type run the old code and others the new.
+
+**Drain deadline.** Old messages are honoured for a bounded time: 5 seconds by default, or `MARCH_HCR_DRAIN_MS` milliseconds if that is set in the server's environment (`0` turns the deadline off). If an actor has not reached its marker by then, it drops each remaining pre-deploy message instead of handling it, and reports how many it dropped on stderr (`[hcr] migrate: actor on dispatch slot N missed the drain deadline; K pre-migration message(s) dropped`). A handler that is already running is never interrupted.
+
+**One migration at a time.** The old code stays loaded until every actor has passed its marker. A second deploy that changes the same actor's state before then is refused (the server answers `ERR publish_failed`, or `ERR commit_partial_failure` for a multi-function commit); deploy it again once the first migration has finished.
 
 ---
 
@@ -314,7 +328,7 @@ The grant only relaxes the client-side monotonicity gate. It does **not** overri
 
 ### `migrate_state` must be IO-free
 
-A `migrate_state` function runs in the migration window, ahead of any pending user messages, a moment where doing IO (or panicking) has dangerous ordering and partial-failure semantics. The compiler enforces this: a `*_migrate_state` function with a body that performs any IO builtin or `extern` call is a compile error.
+A `migrate_state` function runs in the migration window, between the last message sent to the old code and the first handled by the new code, a moment where doing IO (or panicking) has dangerous ordering and partial-failure semantics. The compiler enforces this: a `*_migrate_state` function with a body that performs any IO builtin or `extern` call is a compile error.
 
 ```
 migrate_state must be IO-free

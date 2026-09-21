@@ -288,6 +288,66 @@ static void write_audit_log(const char *fn, const char *impl_hash,
 #define RTLD_DEEPBIND 0
 #endif
 
+/* Actor migration symbol: __migrate_<Actor>, from the ACTIVATE name
+ * "<Actor>_dispatch" (dots in a module-qualified name become '_'). NULL if
+ * the .so exports none (e.g. @compat(any) with schema changes and no
+ * migrate_state fn): the actors still switch at their markers, unmigrated. */
+typedef void *(*migrate_fn_t)(void *);
+static migrate_fn_t resolve_migrate_fn(void *handle, const char *name,
+                                       uint32_t slot_id) {
+    char migrate_sym[320];
+    const char *dispatch_sfx = "_dispatch";
+    size_t name_len = strlen(name);
+    size_t dsfx_len = strlen(dispatch_sfx);
+    char actor_short[256];
+    if (name_len > dsfx_len &&
+        strcmp(name + name_len - dsfx_len, dispatch_sfx) == 0) {
+        size_t alen = name_len - dsfx_len;
+        if (alen >= sizeof(actor_short)) alen = sizeof(actor_short) - 1;
+        strncpy(actor_short, name, alen);
+        actor_short[alen] = '\0';
+    } else {
+        strncpy(actor_short, name, sizeof(actor_short) - 1);
+        actor_short[sizeof(actor_short) - 1] = '\0';
+    }
+    snprintf(migrate_sym, sizeof(migrate_sym), "__migrate_%s", actor_short);
+    for (char *p = migrate_sym + 10; *p; p++) {
+        if (*p == '.') *p = '_';
+    }
+    void *raw_sym = dlsym(handle, migrate_sym);
+    migrate_fn_t migrate_fn = NULL;
+    if (raw_sym) {
+        memcpy(&migrate_fn, &raw_sym, sizeof(migrate_fn));
+        fprintf(stderr, "[hcr] migrate: found %s, migrating slot %u\n",
+                migrate_sym, slot_id);
+    } else {
+        /* Log to stderr only — writing WARN before OK would desync the
+         * client's response parser. */
+        fprintf(stderr, "[hcr] migrate: symbol not found: %s (proceeding without migration)\n",
+                migrate_sym);
+    }
+    return migrate_fn;
+}
+
+/* Publish [fn_ptr] as slot_id's new version. A migrating activation goes
+ * through march_actor_publish_migrating, which pins every live actor of
+ * the type to the old code BEFORE publishing and switches each one at its
+ * migrate marker, so messages already queued never run the new code against
+ * the old state. Returns the ring index, or -1 (nothing changed). */
+static int publish_activation(void *handle, const char *name, uint32_t slot_id,
+                              void *fn_ptr, const char *impl_hash,
+                              int migrate_required, uint32_t activate_epoch) {
+    if (migrate_required)
+        return march_actor_publish_migrating(
+            slot_id, fn_ptr, impl_hash, NULL, (uint8_t)MARCH_NATIVE,
+            activate_epoch, resolve_migrate_fn(handle, name, slot_id), -1);
+    return (activate_epoch > 0)
+        ? march_dispatch_publish_epoch(slot_id, fn_ptr, impl_hash, NULL,
+                                       (uint8_t)MARCH_NATIVE, activate_epoch)
+        : march_dispatch_publish(slot_id, fn_ptr, impl_hash, NULL,
+                                (uint8_t)MARCH_NATIVE);
+}
+
 /* Shared activation body: dlopen, dlsym, publish, set metadata, run migration.
  * Returns 0 on success, -1 on error (does NOT write to fd).
  * On error, handle (if non-NULL) has already been dlclosed. */
@@ -329,11 +389,8 @@ static int do_activate_inner(const char *name, const char *impl_hash,
         if (init_fn) init_fn(activate_epoch);
     }
 
-    int idx = (activate_epoch > 0)
-        ? march_dispatch_publish_epoch(slot_id, fn_ptr, impl_hash, NULL,
-                                       (uint8_t)MARCH_NATIVE, activate_epoch)
-        : march_dispatch_publish(slot_id, fn_ptr, impl_hash, NULL,
-                                (uint8_t)MARCH_NATIVE);
+    int idx = publish_activation(handle, name, slot_id, fn_ptr, impl_hash,
+                                 migrate_required, activate_epoch);
     if (idx < 0) {
         dlclose(handle);
         return -1;
@@ -346,43 +403,6 @@ static int do_activate_inner(const char *name, const char *impl_hash,
         long long ats = (long long)atv.tv_sec * 1000LL + (long long)atv.tv_usec / 1000;
         char asigner[65]; pubkey_to_hex(asigner);
         march_dispatch_set_activation(slot_id, ats, asigner);
-    }
-
-    /* Optional actor migration: dlsym __migrate_<Actor> and broadcast. */
-    if (migrate_required) {
-        char migrate_sym[320];
-        const char *dispatch_sfx = "_dispatch";
-        size_t name_len = strlen(name);
-        size_t dsfx_len = strlen(dispatch_sfx);
-        char actor_short[256];
-        if (name_len > dsfx_len &&
-            strcmp(name + name_len - dsfx_len, dispatch_sfx) == 0) {
-            size_t alen = name_len - dsfx_len;
-            if (alen >= sizeof(actor_short)) alen = sizeof(actor_short) - 1;
-            strncpy(actor_short, name, alen);
-            actor_short[alen] = '\0';
-        } else {
-            strncpy(actor_short, name, sizeof(actor_short) - 1);
-            actor_short[sizeof(actor_short) - 1] = '\0';
-        }
-        snprintf(migrate_sym, sizeof(migrate_sym), "__migrate_%s", actor_short);
-        for (char *p = migrate_sym + 10; *p; p++) {
-            if (*p == '.') *p = '_';
-        }
-        void *raw_sym = dlsym(handle, migrate_sym);
-        void *(*migrate_fn)(void *) = NULL;
-        if (raw_sym) {
-            memcpy(&migrate_fn, &raw_sym, sizeof(migrate_fn));
-            fprintf(stderr, "[hcr] migrate: found %s, broadcasting to slot %u\n",
-                    migrate_sym, slot_id);
-        } else {
-            /* Symbol absent but migrate_required=1 (e.g. @compat(any) with schema
-             * changes and no migrate_state fn).  Log to stderr only — writing WARN
-             * before OK would desync the client's response parser. */
-            fprintf(stderr, "[hcr] migrate: symbol not found: %s (proceeding without migration)\n",
-                    migrate_sym);
-        }
-        march_actor_broadcast_migrate(slot_id, migrate_fn);
     }
 
     march_dispatch_set_callers(slot_id, callers_csv && callers_csv[0] ? callers_csv : NULL);
@@ -436,11 +456,8 @@ static void do_activate(int fd, const char *name, const char *impl_hash,
         if (init_fn) init_fn(activate_epoch);
     }
 
-    int idx = (activate_epoch > 0)
-        ? march_dispatch_publish_epoch(slot_id, fn_ptr, impl_hash, NULL,
-                                       (uint8_t)MARCH_NATIVE, activate_epoch)
-        : march_dispatch_publish(slot_id, fn_ptr, impl_hash, NULL,
-                                (uint8_t)MARCH_NATIVE);
+    int idx = publish_activation(handle, name, slot_id, fn_ptr, impl_hash,
+                                 migrate_required, activate_epoch);
     if (idx < 0) {
         wresp(fd, "ERR publish_failed all_slots_pinned\n");
         dlclose(handle);
@@ -455,43 +472,6 @@ static void do_activate(int fd, const char *name, const char *impl_hash,
         long long ats = (long long)atv.tv_sec * 1000LL + (long long)atv.tv_usec / 1000;
         char asigner[65]; pubkey_to_hex(asigner);
         march_dispatch_set_activation(slot_id, ats, asigner);
-    }
-
-    /* Optional actor migration: dlsym __migrate_<Actor> and broadcast. */
-    if (migrate_required) {
-        char migrate_sym[320];
-        const char *dispatch_sfx = "_dispatch";
-        size_t name_len = strlen(name);
-        size_t dsfx_len = strlen(dispatch_sfx);
-        char actor_short[256];
-        if (name_len > dsfx_len &&
-            strcmp(name + name_len - dsfx_len, dispatch_sfx) == 0) {
-            size_t alen = name_len - dsfx_len;
-            if (alen >= sizeof(actor_short)) alen = sizeof(actor_short) - 1;
-            strncpy(actor_short, name, alen);
-            actor_short[alen] = '\0';
-        } else {
-            strncpy(actor_short, name, sizeof(actor_short) - 1);
-            actor_short[sizeof(actor_short) - 1] = '\0';
-        }
-        snprintf(migrate_sym, sizeof(migrate_sym), "__migrate_%s", actor_short);
-        for (char *p = migrate_sym + 10; *p; p++) {
-            if (*p == '.') *p = '_';
-        }
-        void *raw_sym = dlsym(handle, migrate_sym);
-        void *(*migrate_fn)(void *) = NULL;
-        if (raw_sym) {
-            memcpy(&migrate_fn, &raw_sym, sizeof(migrate_fn));
-            fprintf(stderr, "[hcr] migrate: found %s, broadcasting to slot %u\n",
-                    migrate_sym, slot_id);
-        } else {
-            /* Symbol absent but migrate_required=1 (e.g. @compat(any) with schema
-             * changes and no migrate_state fn).  Log to stderr only — writing WARN
-             * before OK would desync the client's response parser. */
-            fprintf(stderr, "[hcr] migrate: symbol not found: %s (proceeding without migration)\n",
-                    migrate_sym);
-        }
-        march_actor_broadcast_migrate(slot_id, migrate_fn);
     }
 
     march_dispatch_set_callers(slot_id, callers_csv && callers_csv[0] ? callers_csv : NULL);
