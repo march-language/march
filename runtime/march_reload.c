@@ -40,6 +40,9 @@
  *
  * Audit log: every ACTIVATE appends a JSON line to $MARCH_AUDIT_LOG
  *   (default: ${XDG_DATA_HOME:-$HOME/.local/share}/march/audit.jsonl).
+ *   Fields: ts, type, fn, impl_hash, signer, cas_hash, caps, cap_root, result
+ *   (caps/cap_root: ACTIVATE4 only, null for older protocols; see
+ *   write_audit_log).
  */
 #if defined(__linux__) || defined(__APPLE__)
 
@@ -240,10 +243,40 @@ static void pubkey_to_hex(char out[65]) {
 #endif
 }
 
+/* Capability data for one audit line.  Only ACTIVATE4 carries any; every
+ * older protocol passes NULL, which the log records as "caps":null,
+ * "cap_root":null, distinct from an ACTIVATE4 with an empty cap set ([]).
+ * Borrowed pointers: the log copies nothing past the call. */
+typedef struct {
+    const char *caps;       /* comma-separated, as received on the wire */
+    const char *cap_root;   /* signed 64-hex root */
+} audit_caps_t;
+
+/* Write s as a JSON string literal (quotes included). */
+static void json_write_str(FILE *f, const char *s, size_t n) {
+    fputc('"', f);
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '"' || c == '\\') { fputc('\\', f); fputc(c, f); }
+        else if (c < 0x20)          fprintf(f, "\\u%04x", c);
+        else                        fputc(c, f);
+    }
+    fputc('"', f);
+}
+
 /* Append one JSON line to the audit log. Path is $MARCH_AUDIT_LOG, or
- * ${XDG_DATA_HOME:-$HOME/.local/share}/march/audit.jsonl by default. */
+ * ${XDG_DATA_HOME:-$HOME/.local/share}/march/audit.jsonl by default.
+ *
+ * "caps"/"cap_root" record the capability set the deploy carried, so an
+ * operator can answer "when did this system gain capability X" from the log
+ * alone (a --grant-cap widening is part of that signed set).  They are the
+ * values AS RECEIVED: verified against the signed cap_root only when result
+ * is "ok", "err_cap_policy", or a post-admission error (err_cas_miss,
+ * err_dlopen, ...); on "err_sig"/"err_cap_tamper" they are exactly what the
+ * rejected request claimed. */
 static void write_audit_log(const char *fn, const char *impl_hash,
-                             const char *cas_hash, const char *result) {
+                             const char *cas_hash, const audit_caps_t *ac,
+                             const char *result) {
     const char *log_path = getenv("MARCH_AUDIT_LOG");
     char default_path[512];
     if (!log_path || !log_path[0]) {
@@ -275,9 +308,32 @@ static void write_audit_log(const char *fn, const char *impl_hash,
     fprintf(f,
         "{\"ts\":%lld,\"type\":\"activate\",\"fn\":\"%s\","
         "\"impl_hash\":\"%s\",\"signer\":\"%s\","
-        "\"cas_hash\":\"%s\",\"result\":\"%s\"}\n",
+        "\"cas_hash\":\"%s\",",
         ts_ms, fn ? fn : "", impl_hash ? impl_hash : "",
-        signer, cas_hash ? cas_hash : "", result);
+        signer, cas_hash ? cas_hash : "");
+    if (ac && ac->caps) {
+        fputs("\"caps\":[", f);
+        const char *p = ac->caps;
+        int first = 1;
+        while (*p) {
+            const char *comma = strchr(p, ',');
+            size_t n = comma ? (size_t)(comma - p) : strlen(p);
+            if (n > 0) {
+                if (!first) fputc(',', f);
+                json_write_str(f, p, n);
+                first = 0;
+            }
+            if (!comma) break;
+            p = comma + 1;
+        }
+        fputs("],\"cap_root\":", f);
+        json_write_str(f, ac->cap_root ? ac->cap_root : "",
+                       ac->cap_root ? strlen(ac->cap_root) : 0);
+        fputc(',', f);
+    } else {
+        fputs("\"caps\":null,\"cap_root\":null,", f);
+    }
+    fprintf(f, "\"result\":\"%s\"}\n", result);
     fclose(f);
 }
 
@@ -294,30 +350,30 @@ static void write_audit_log(const char *fn, const char *impl_hash,
 static int do_activate_inner(const char *name, const char *impl_hash,
                              const char *cas_hash, int migrate_required,
                              uint32_t activate_epoch, const char *callers_csv,
-                             void **out_handle) {
+                             const audit_caps_t *ac, void **out_handle) {
     if (out_handle) *out_handle = NULL;
 
     uint32_t slot_id;
     if (!march_dispatch_name_to_id(name, &slot_id)) {
-        write_audit_log(name, impl_hash, cas_hash, "err_abi");
+        write_audit_log(name, impl_hash, cas_hash, ac, "err_abi");
         return -1;
     }
 
     char path[640]; cas_artifact_path(path, sizeof(path), cas_hash);
     if (access(path, F_OK) != 0) {
-        write_audit_log(name, impl_hash, cas_hash, "err_cas_miss");
+        write_audit_log(name, impl_hash, cas_hash, ac, "err_cas_miss");
         return -1;
     }
 
     void *handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL | RTLD_DEEPBIND);
     if (!handle) {
-        write_audit_log(name, impl_hash, cas_hash, "err_dlopen");
+        write_audit_log(name, impl_hash, cas_hash, ac, "err_dlopen");
         return -1;
     }
 
     void *fn_ptr = dlsym(handle, name);
     if (!fn_ptr) {
-        write_audit_log(name, impl_hash, cas_hash, "err_dlsym");
+        write_audit_log(name, impl_hash, cas_hash, ac, "err_dlsym");
         dlclose(handle);
         return -1;
     }
@@ -386,7 +442,7 @@ static int do_activate_inner(const char *name, const char *impl_hash,
     }
 
     march_dispatch_set_callers(slot_id, callers_csv && callers_csv[0] ? callers_csv : NULL);
-    write_audit_log(name, impl_hash, cas_hash, "ok");
+    write_audit_log(name, impl_hash, cas_hash, ac, "ok");
     return 0;
 }
 
@@ -395,10 +451,11 @@ static int do_activate_inner(const char *name, const char *impl_hash,
  *              or NULL if absent. */
 static void do_activate(int fd, const char *name, const char *impl_hash,
                         const char *cas_hash, int migrate_required,
-                        uint32_t activate_epoch, const char *callers_csv) {
+                        uint32_t activate_epoch, const char *callers_csv,
+                        const audit_caps_t *ac) {
     uint32_t slot_id;
     if (!march_dispatch_name_to_id(name, &slot_id)) {
-        write_audit_log(name, impl_hash, cas_hash, "err_abi");
+        write_audit_log(name, impl_hash, cas_hash, ac, "err_abi");
         char resp[512];
         int n = snprintf(resp, sizeof(resp), "ERR unknown_name %s\n", name);
         write_safe(fd, resp, n, sizeof(resp));
@@ -407,13 +464,13 @@ static void do_activate(int fd, const char *name, const char *impl_hash,
 
     char path[640]; cas_artifact_path(path, sizeof(path), cas_hash);
     if (access(path, F_OK) != 0) {
-        write_audit_log(name, impl_hash, cas_hash, "err_cas_miss");
+        write_audit_log(name, impl_hash, cas_hash, ac, "err_cas_miss");
         wresp(fd, "ERR missing_artifact\n"); return;
     }
 
     void *handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL | RTLD_DEEPBIND);
     if (!handle) {
-        write_audit_log(name, impl_hash, cas_hash, "err_dlopen");
+        write_audit_log(name, impl_hash, cas_hash, ac, "err_dlopen");
         char resp[512];
         int n = snprintf(resp, sizeof(resp), "ERR dlopen_failed %s\n", dlerror());
         write_safe(fd, resp, n, sizeof(resp));
@@ -495,7 +552,7 @@ static void do_activate(int fd, const char *name, const char *impl_hash,
     }
 
     march_dispatch_set_callers(slot_id, callers_csv && callers_csv[0] ? callers_csv : NULL);
-    write_audit_log(name, impl_hash, cas_hash, "ok");
+    write_audit_log(name, impl_hash, cas_hash, ac, "ok");
     char resp[256];
     int n = snprintf(resp, sizeof(resp), "OK %s\n", impl_hash);
     write_safe(fd, resp, n, sizeof(resp));
@@ -647,6 +704,8 @@ static void handle_client(int fd) {
         char     callers[1024];
         uint32_t epoch;
         int      migrate_required;
+        char    *caps;       /* ACTIVATE4 only (heap, may be ""); NULL otherwise */
+        char    *cap_root;   /* ACTIVATE4 only (heap); NULL otherwise */
     } staged[MARCH_MAX_BATCH];
     int n_staged  = 0;
     int in_batch  = 0;
@@ -819,12 +878,12 @@ static void handle_client(int fd) {
             int vrc = crypto_sign_open(m_out, &m_out_len, sm, (unsigned long long)(smlen + 64), g_pubkey);
             free(sm); free(m_out);
             if (vrc != 0) {
-                write_audit_log(name, impl_hash, cas_hash, "err_sig");
+                write_audit_log(name, impl_hash, cas_hash, NULL, "err_sig");
                 wresp(fd, "ERR bad_signature\n"); continue;
             }
 #else
             (void)sig_b64;
-            write_audit_log(name, impl_hash, cas_hash, "err_sig");
+            write_audit_log(name, impl_hash, cas_hash, NULL, "err_sig");
             wresp(fd, "ERR signing_not_configured\n"); continue;
 #endif
             {
@@ -833,7 +892,7 @@ static void handle_client(int fd) {
                 if (ep_ptr) activate_epoch = (uint32_t)atoi(ep_ptr + 7);
                 const char *callers_ptr = strstr(line, " callers:");
                 do_activate(fd, name, impl_hash, cas_hash, migrate_required,
-                            activate_epoch, callers_ptr ? callers_ptr + 9 : NULL);
+                            activate_epoch, callers_ptr ? callers_ptr + 9 : NULL, NULL);
             }
 
         /* ── ACTIVATE2 ─────────────────────────────────────────────────── */
@@ -926,16 +985,16 @@ static void handle_client(int fd) {
                                        (unsigned long long)(smlen + 64), g_pubkey);
             free(sm); free(m_out);
             if (vrc != 0) {
-                write_audit_log(name, impl_hash, cas_hash, "err_sig");
+                write_audit_log(name, impl_hash, cas_hash, NULL, "err_sig");
                 wresp(fd, "ERR bad_signature\n"); continue;
             }
 #else
             (void)sig_b64;
-            write_audit_log(name, impl_hash, cas_hash, "err_sig");
+            write_audit_log(name, impl_hash, cas_hash, NULL, "err_sig");
             wresp(fd, "ERR signing_not_configured\n"); continue;
 #endif
             do_activate(fd, name, impl_hash, cas_hash, migrate_required,
-                        activate_epoch, callers_sorted);
+                        activate_epoch, callers_sorted, NULL);
 
         /* ── ACTIVATE3 ─────────────────────────────────────────────────── */
         /* Protocol v3: migrate_required is now included in the signed payload,
@@ -1031,12 +1090,12 @@ static void handle_client(int fd) {
                                        (unsigned long long)(smlen + 64), g_pubkey);
             free(sm); free(m_out);
             if (vrc != 0) {
-                write_audit_log(name, impl_hash, cas_hash, "err_sig");
+                write_audit_log(name, impl_hash, cas_hash, NULL, "err_sig");
                 wresp(fd, "ERR bad_signature\n"); continue;
             }
 #else
             (void)sig_b64;
-            write_audit_log(name, impl_hash, cas_hash, "err_sig");
+            write_audit_log(name, impl_hash, cas_hash, NULL, "err_sig");
             wresp(fd, "ERR signing_not_configured\n"); continue;
 #endif
             if (in_batch) {
@@ -1054,13 +1113,15 @@ static void handle_client(int fd) {
                 staged[n_staged].impl_hash[127] = '\0';
                 staged[n_staged].cas_hash[127]  = '\0';
                 staged[n_staged].callers[1023]  = '\0';
+                staged[n_staged].caps     = NULL;   /* no cap data pre-ACTIVATE4 */
+                staged[n_staged].cap_root = NULL;
                 n_staged++;
                 char resp[256];
                 int n = snprintf(resp, sizeof(resp), "OK %s\n", impl_hash);
                 write_safe(fd, resp, n, sizeof(resp));
             } else {
                 do_activate(fd, name, impl_hash, cas_hash, migrate_required,
-                            activate_epoch, callers_sorted);
+                            activate_epoch, callers_sorted, NULL);
             }
 
         /* ── ACTIVATE4 ─────────────────────────────────────────────────── */
@@ -1129,6 +1190,10 @@ static void handle_client(int fd) {
                     caps_buf[bound] = '\0';
                 }
             }
+
+            /* Audit context for every log line from here on (see
+             * write_audit_log for when these values are verified). */
+            audit_caps_t ac4 = { caps_buf, cap_root };
 
             /* Parse mandatory callers:<csv>, then sort for canonical form. */
             char callers_sorted[1024] = {0};
@@ -1201,12 +1266,12 @@ static void handle_client(int fd) {
                                        (unsigned long long)(smlen + 64), g_pubkey);
             free(sm); free(m_out);
             if (vrc != 0) {
-                write_audit_log(name, impl_hash, cas_hash, "err_sig");
+                write_audit_log(name, impl_hash, cas_hash, &ac4, "err_sig");
                 wresp(fd, "ERR bad_signature\n"); continue;
             }
 #else
             (void)sig_b64;
-            write_audit_log(name, impl_hash, cas_hash, "err_sig");
+            write_audit_log(name, impl_hash, cas_hash, &ac4, "err_sig");
             wresp(fd, "ERR signing_not_configured\n"); continue;
 #endif
 
@@ -1232,7 +1297,7 @@ static void handle_client(int fd) {
                     wresp(fd, "ERR bad_format bad_caps\n"); continue;
                 }
                 if (strcmp(recomputed_root, cap_root) != 0) {
-                    write_audit_log(name, impl_hash, cas_hash, "err_cap_tamper");
+                    write_audit_log(name, impl_hash, cas_hash, &ac4, "err_cap_tamper");
                     wresp(fd, "ERR cap_tamper\n"); continue;
                 }
             }
@@ -1251,7 +1316,7 @@ static void handle_client(int fd) {
                 }
                 const char *violation = check_cap_policy(ptokens, pntok);
                 if (violation) {
-                    write_audit_log(name, impl_hash, cas_hash, "err_cap_policy");
+                    write_audit_log(name, impl_hash, cas_hash, &ac4, "err_cap_policy");
                     char resp[256];
                     int n = snprintf(resp, sizeof(resp), "ERR cap_policy %s\n", violation);
                     write_safe(fd, resp, n, sizeof(resp));
@@ -1273,13 +1338,19 @@ static void handle_client(int fd) {
                 staged[n_staged].impl_hash[127] = '\0';
                 staged[n_staged].cas_hash[127]  = '\0';
                 staged[n_staged].callers[1023]  = '\0';
+                /* Heap-owned: the staged array lives on this thread's stack
+                 * (256 entries); inline 1 KB caps buffers would overflow a
+                 * 512 KB macOS secondary-thread stack.  Freed on commit,
+                 * rollback and disconnect. */
+                staged[n_staged].caps     = strdup(caps_buf);
+                staged[n_staged].cap_root = strdup(cap_root);
                 n_staged++;
                 char resp[256];
                 int n = snprintf(resp, sizeof(resp), "OK %s\n", impl_hash);
                 write_safe(fd, resp, n, sizeof(resp));
             } else {
                 do_activate(fd, name, impl_hash, cas_hash, migrate_required,
-                            activate_epoch, callers_sorted);
+                            activate_epoch, callers_sorted, &ac4);
             }
 
         /* ── GET_EPOCH ────────────────────────────────────────────────── */
@@ -1303,17 +1374,22 @@ static void handle_client(int fd) {
             int committed = 0;
             int commit_ok = 1;
             for (int i = 0; i < n_staged; i++) {
+                audit_caps_t ac = { staged[i].caps, staged[i].cap_root };
                 if (do_activate_inner(staged[i].name, staged[i].impl_hash,
                                       staged[i].cas_hash,
                                       staged[i].migrate_required,
                                       staged[i].epoch,
                                       staged[i].callers[0] ? staged[i].callers : NULL,
+                                      staged[i].caps ? &ac : NULL,
                                       NULL) == 0) {
                     committed++;
                 } else {
                     commit_ok = 0;
                     break;
                 }
+            }
+            for (int k = 0; k < n_staged; k++) {
+                free(staged[k].caps); free(staged[k].cap_root);
             }
             in_batch = 0; n_staged = 0;
             if (commit_ok) {
@@ -1326,6 +1402,9 @@ static void handle_client(int fd) {
 
         /* ── ROLLBACK_BATCH ───────────────────────────────────────────── */
         } else if (strcmp(line, "ROLLBACK_BATCH") == 0) {
+            for (int k = 0; k < n_staged; k++) {
+                free(staged[k].caps); free(staged[k].cap_root);
+            }
             in_batch = 0; n_staged = 0;
             wresp(fd, "OK\n");
 
@@ -1334,6 +1413,9 @@ static void handle_client(int fd) {
         }
     }
     /* Discard any uncommitted staged activations (connection dropped mid-batch) */
+    for (int k = 0; k < n_staged; k++) {
+        free(staged[k].caps); free(staged[k].cap_root);
+    }
     close(fd);
 }
 
