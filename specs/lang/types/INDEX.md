@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t273 accept, t01–t279 reject) <!-- doc-lint:ignore-count: accept/reject share one numbering pool, so the highest id on each side is NOT that side's file count (165 accept, 231 reject; see the Result line below) -->
+# Typing corpus index (t01–t273 accept, t01–t279 reject) <!-- doc-lint:ignore-count: accept/reject share one numbering pool, so the highest id on each side is NOT that side's file count (166 accept, 233 reject; see the Result line below) -->
 
 **Two-repo rule.** This corpus is also checked by
 [march-language/march-lean](https://github.com/march-language/march-lean), an
