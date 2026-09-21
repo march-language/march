@@ -626,7 +626,7 @@ actor ServerActor do
     match LinearMap.put(state.sessions, sid, parked) do
       (None, m) -> { state with sessions: m }
       (Some(old), m) ->
-        retire(old)
+        Echo_Server.take_closed(Echo_Server.cancel(old))
         panic("session " ++ sid ++ " is already hosted")
     end
   end
@@ -639,7 +639,7 @@ actor ServerActor do
             let st2 = Echo_Server.send_Msg_Server_Client_1(s, st, n * 10)
             { state with sessions: LinearMap.fill(slot, Echo_Server.await_Msg_Client_Server_2(s, st2)) }
           Got_Msg_Client_Server_2(n, st) ->
-            retire(Echo_Server.finish(s, Echo_Server.send_Msg_Server_Client_2(s, st, n * 10)))
+            Echo_Server.take_closed(Echo_Server.finish(s, Echo_Server.send_Msg_Server_Client_2(s, st, n * 10)))
             { state with done: state.done + 1, sessions: LinearMap.vacate(slot) }
         end
     end
@@ -648,7 +648,7 @@ actor ServerActor do
     match LinearMap.take(state.sessions, sid) do
       (None, m) -> { state with sessions: m }
       (Some(parked), m) ->
-        retire(Echo_Server.cancel(parked))
+        Echo_Server.take_closed(Echo_Server.cancel(parked))
         { state with sessions: m }
     end
   end
@@ -664,15 +664,9 @@ Any other state the actor keeps per session, such as a counter, goes in an ordin
 `Map` keyed by the same id.
 
 A finished or cancelled session leaves a `Closed_Server` value, which nothing can
-resume. The role module has no function that consumes one yet, and its payload type is
-private, so a one-line function with a `linear` parameter drops it:
-
-```march
-pfn retire(linear p : a) : () do
-  let _ = p
-  ()
-end
-```
+resume. `Echo_Server.take_closed(p)` is what consumes one: it takes the closed value and
+returns `()`. It panics on an endpoint that has not finished, so it cannot be used to drop
+a session that is still live.
 
 To offer the role, spawn the actor and pass it with the three callbacks:
 

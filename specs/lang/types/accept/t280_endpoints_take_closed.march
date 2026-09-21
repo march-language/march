@@ -1,0 +1,51 @@
+mod Main do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs Session.Live
+  @[endpoints]
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+  -- Retiring a hosted role's finished session. `finish` and `cancel` both
+  -- hand back a `Closed_Cons`, which nothing can resume and which the actor
+  -- must still consume: `take_closed` is the generated function that does
+  -- it, taking exactly this role's `Parked_Cons` and nothing else. Before it
+  -- existed the only way out was a hand-written `linear` parameter generic
+  -- over its argument, which would swallow a live endpoint just as happily.
+  actor ConsActor do
+    state { budget : Int, parked : Stream_Cons.Parked_Cons }
+    init  { budget: 2, parked: Stream_Cons.idle() }
+    on StartC(s : Cap(Session.Live)) do
+      Stream_Cons.take_idle(state.parked)
+      { state with parked: Stream_Cons.await_Msg_Prod_Cons_1(s, Stream_Cons.register(s, 0)) }
+    end
+    on DeliverC(s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
+      match Stream_Cons.resume(state.parked, from, msg, ep) do
+        Got_Msg_Prod_Cons_1(_n, st) ->
+          if state.budget > 1 do
+            { state with budget: state.budget - 1,
+                         parked: Stream_Cons.await_Msg_Prod_Cons_1(s, Stream_Cons.choose_more(s, st, true)) }
+          else
+            Stream_Cons.take_closed(Stream_Cons.finish(s, Stream_Cons.choose_done(s, st, true)))
+            { state with budget: 0, parked: Stream_Cons.idle() }
+          end
+      end
+    end
+    on CancelC(_s : Cap(Session.Live), _role : Int, _cause : String, _ep : Int) do
+      Stream_Cons.take_closed(Stream_Cons.cancel(state.parked))
+      { state with budget: 0, parked: Stream_Cons.idle() }
+    end
+  end
+  fn main(c : Cap(IO)) do
+    let _ = spawn(ConsActor)
+    ()
+  end
+end

@@ -134,7 +134,8 @@ let stream_shape =
            ("Stream_Cons", "register"); ("Stream_Cons", "recv_Msg_Prod_Cons_1");
            ("Stream_Cons", "choose_more"); ("Stream_Cons", "choose_done"); ("Stream_Cons", "close");
            (* the event API, beside the callback one, in the same modules *)
-           ("Stream_Prod", "idle"); ("Stream_Prod", "take_idle"); ("Stream_Prod", "await_more_done");
+           ("Stream_Prod", "idle"); ("Stream_Prod", "take_idle"); ("Stream_Prod", "take_closed");
+           ("Stream_Prod", "await_more_done");
            ("Stream_Prod", "finish"); ("Stream_Prod", "resume");
            ("Stream_Cons", "await_Msg_Prod_Cons_1"); ("Stream_Cons", "finish"); ("Stream_Cons", "resume");
            (* the role runner's typed front, one per role, and its address table *)
@@ -228,12 +229,12 @@ let stream_labelled = {|
 let stream_prod_fns =
   [ "register"; "cancelled"; "leave_send_Msg_Prod_Cons_1"; "send_Msg_Prod_Cons_1";
     "leave_offer_more_done"; "offer_more_done"; "offer_more_done_or"; "close";
-    "idle"; "take_idle"; "cancel"; "await_more_done"; "finish"; "resume" ]
+    "idle"; "take_idle"; "take_closed"; "cancel"; "await_more_done"; "finish"; "resume" ]
 
 let stream_cons_fns =
   [ "register"; "cancelled"; "leave_recv_Msg_Prod_Cons_1"; "recv_Msg_Prod_Cons_1";
     "recv_Msg_Prod_Cons_1_or"; "leave_choose_more_done"; "choose_more"; "choose_done"; "close";
-    "idle"; "take_idle"; "cancel"; "await_Msg_Prod_Cons_1"; "finish"; "resume" ]
+    "idle"; "take_idle"; "take_closed"; "cancel"; "await_Msg_Prod_Cons_1"; "finish"; "resume" ]
 
 let unlabelled_names_pinned =
   Alcotest.test_case "an unlabelled protocol's generated names are exactly what they were" `Quick
@@ -526,6 +527,27 @@ let event_ok = ok "an actor holding a Parked endpoint in its state, resuming and
             { state with parked: Stream_Cons.finish(s, Stream_Cons.choose_done(s, st, true)) }
           end
       end
+    end
+|})
+
+let event_take_closed = ok "an actor retiring a finished session with the generated take_closed" (cons_actor {|
+    on DeliverC(s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
+      match Stream_Cons.resume(state.parked, from, msg, ep) do
+        Got_Msg_Prod_Cons_1(_n, st) ->
+          Stream_Cons.take_closed(Stream_Cons.finish(s, Stream_Cons.choose_done(s, st, true)))
+          { state with budget: 0, parked: Stream_Cons.idle() }
+      end
+    end
+|})
+
+(* The hole `take_closed` closes: a still-parked endpoint is not retirable.
+   The panic is at run time, so what the checker can show here is that the
+   call type-checks only against a `Parked`, and that the value it consumes
+   cannot be used again. *)
+let event_take_closed_consumes = bad "retiring a parked endpoint and then re-parking the same value" "`state.parked` is used more than once" (cons_actor {|
+    on DeliverC(_s : Cap(Session.Live), _from : Int, _msg : Bytes, _ep : Int) do
+      Stream_Cons.take_closed(state.parked)
+      { state with budget: state.budget - 1 }
     end
 |})
 
@@ -989,7 +1011,7 @@ let tests =
     label_on_branch_head; label_msg_prefix; shared_label_ok; shared_label_two_payloads; shared_label_one_role;
     prod_ok; wrong_order; replayed; abandoned; callback_forge; relay_ok; payload_declared_later;
     payload_no_codec; payload_with_codec; payload_nested_no_codec;
-    event_ok; event_retained; event_not_reparked; event_idle_dropped; event_forge; event_pid_handle; builtin_under_application;
+    event_ok; event_take_closed; event_take_closed_consumes; event_retained; event_not_reparked; event_idle_dropped; event_forge; event_pid_handle; builtin_under_application;
     cancel_handler_ok; cancel_handler_reuses_state; cancel_handler_must_end; cancelled_forge;
     hosted_cancel_ok; hosted_cancel_retained;
     crash_shape; crash_roles_ok; crash_state_is_the_branch;

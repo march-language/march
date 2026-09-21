@@ -19,6 +19,12 @@ git log is authoritative for exact commits.
   about 18 KB more, and `Vault.size`/`Vault.keys` walk shard by shard, so their result
   is a recent count rather than a single instant's snapshot of the whole table.
 ### Added
+- **`take_closed` on every `@[endpoints]` role module.** A session that has finished or
+  been cancelled leaves a linear `Closed_<Role>` value that the actor hosting it still has
+  to consume. The role module now generates `take_closed`, which takes that role's own
+  `Parked_<Role>` and returns `()`, and panics if the endpoint has not finished. The guide
+  previously told readers to write a one-line function with a `linear` parameter instead;
+  being generic, it would drop any linear value, including a live endpoint.
 - **Crash branches in choreographies.** A protocol can declare the roles that `may crash`,
   and a receive from such a role carries `or crash do ... end` (or a `crash` branch of the
   `choose` it heads): what the receiver does if that role crashes before sending. The
