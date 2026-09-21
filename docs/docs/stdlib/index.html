@@ -421,8 +421,10 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="ClusterNode.html#fn-core_seed_self"><span class="sb-kind" style="color:var(--fn)">F</span>core_seed_self</a>
 <a class="sl" href="ClusterNode.html#fn-core_tick"><span class="sb-kind" style="color:var(--fn)">F</span>core_tick</a>
 <a class="sl" href="ClusterNode.html#fn-core_unregister"><span class="sb-kind" style="color:var(--fn)">F</span>core_unregister</a>
+<a class="sl" href="ClusterNode.html#fn-creation"><span class="sb-kind" style="color:var(--fn)">F</span>creation</a>
 <a class="sl" href="ClusterNode.html#fn-demonitor_remote"><span class="sb-kind" style="color:var(--fn)">F</span>demonitor_remote</a>
 <a class="sl" href="ClusterNode.html#fn-event_text"><span class="sb-kind" style="color:var(--fn)">F</span>event_text</a>
+<a class="sl" href="ClusterNode.html#fn-global_pid"><span class="sb-kind" style="color:var(--fn)">F</span>global_pid</a>
 <a class="sl" href="ClusterNode.html#fn-info_of"><span class="sb-kind" style="color:var(--fn)">F</span>info_of</a>
 <a class="sl" href="ClusterNode.html#fn-link_count"><span class="sb-kind" style="color:var(--fn)">F</span>link_count</a>
 <a class="sl" href="ClusterNode.html#fn-lookup"><span class="sb-kind" style="color:var(--fn)">F</span>lookup</a>
@@ -2031,6 +2033,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Session.html#fn-fail"><span class="sb-kind" style="color:var(--fn)">F</span>fail</a>
 <a class="sl" href="Session.html#fn-leave"><span class="sb-kind" style="color:var(--fn)">F</span>leave</a>
 <a class="sl" href="Session.html#fn-on_cancel"><span class="sb-kind" style="color:var(--fn)">F</span>on_cancel</a>
+<a class="sl" href="Session.html#fn-on_crash"><span class="sb-kind" style="color:var(--fn)">F</span>on_crash</a>
 <a class="sl" href="Session.html#fn-register"><span class="sb-kind" style="color:var(--fn)">F</span>register</a>
 <a class="sl" href="Session.html#fn-suspend"><span class="sb-kind" style="color:var(--fn)">F</span>suspend</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="SessionNode.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="SessionNode.html">SessionNode</a></div><div class="sb-sub"><a class="sl" href="SessionNode.html#type-Link"><span class="sb-kind" style="color:var(--ty)">T</span>Link</a>
@@ -2040,15 +2043,21 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="SessionNode.html#type-Addr"><span class="sb-kind" style="color:var(--ty)">T</span>Addr</a>
 <a class="sl" href="SessionNode.html#type-Addrs"><span class="sb-kind" style="color:var(--ty)">T</span>Addrs</a>
 <a class="sl" href="SessionNode.html#type-RunError"><span class="sb-kind" style="color:var(--ty)">T</span>RunError</a>
+<a class="sl" href="SessionNode.html#type-OfferCount"><span class="sb-kind" style="color:var(--ty)">T</span>OfferCount</a>
+<a class="sl" href="SessionNode.html#type-Offer"><span class="sb-kind" style="color:var(--ty)">T</span>Offer</a>
 <a class="sl" href="SessionNode.html#fn-accept_from"><span class="sb-kind" style="color:var(--fn)">F</span>accept_from</a>
 <a class="sl" href="SessionNode.html#fn-accepts"><span class="sb-kind" style="color:var(--fn)">F</span>accepts</a>
 <a class="sl" href="SessionNode.html#fn-addr_of"><span class="sb-kind" style="color:var(--fn)">F</span>addr_of</a>
 <a class="sl" href="SessionNode.html#fn-addrs_from_env"><span class="sb-kind" style="color:var(--fn)">F</span>addrs_from_env</a>
+<a class="sl" href="SessionNode.html#fn-close_offer"><span class="sb-kind" style="color:var(--fn)">F</span>close_offer</a>
 <a class="sl" href="SessionNode.html#fn-connect_to"><span class="sb-kind" style="color:var(--fn)">F</span>connect_to</a>
 <a class="sl" href="SessionNode.html#fn-deliver"><span class="sb-kind" style="color:var(--fn)">F</span>deliver</a>
 <a class="sl" href="SessionNode.html#fn-dials"><span class="sb-kind" style="color:var(--fn)">F</span>dials</a>
 <a class="sl" href="SessionNode.html#fn-finish"><span class="sb-kind" style="color:var(--fn)">F</span>finish</a>
+<a class="sl" href="SessionNode.html#fn-initiate"><span class="sb-kind" style="color:var(--fn)">F</span>initiate</a>
 <a class="sl" href="SessionNode.html#fn-missing_addrs"><span class="sb-kind" style="color:var(--fn)">F</span>missing_addrs</a>
+<a class="sl" href="SessionNode.html#fn-offer_hosted"><span class="sb-kind" style="color:var(--fn)">F</span>offer_hosted</a>
+<a class="sl" href="SessionNode.html#fn-offer_role"><span class="sb-kind" style="color:var(--fn)">F</span>offer_role</a>
 <a class="sl" href="SessionNode.html#fn-open"><span class="sb-kind" style="color:var(--fn)">F</span>open</a>
 <a class="sl" href="SessionNode.html#fn-ops"><span class="sb-kind" style="color:var(--fn)">F</span>ops</a>
 <a class="sl" href="SessionNode.html#fn-parse_addr"><span class="sb-kind" style="color:var(--fn)">F</span>parse_addr</a>
@@ -2056,7 +2065,9 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="SessionNode.html#fn-require"><span class="sb-kind" style="color:var(--fn)">F</span>require</a>
 <a class="sl" href="SessionNode.html#fn-run"><span class="sb-kind" style="color:var(--fn)">F</span>run</a>
 <a class="sl" href="SessionNode.html#fn-run_cluster"><span class="sb-kind" style="color:var(--fn)">F</span>run_cluster</a>
+<a class="sl" href="SessionNode.html#fn-run_cluster_hosted"><span class="sb-kind" style="color:var(--fn)">F</span>run_cluster_hosted</a>
 <a class="sl" href="SessionNode.html#fn-run_error_message"><span class="sb-kind" style="color:var(--fn)">F</span>run_error_message</a>
+<a class="sl" href="SessionNode.html#fn-run_error_message_named"><span class="sb-kind" style="color:var(--fn)">F</span>run_error_message_named</a>
 <a class="sl" href="SessionNode.html#fn-run_hosted"><span class="sb-kind" style="color:var(--fn)">F</span>run_hosted</a>
 <a class="sl" href="SessionNode.html#fn-run_hosted_or"><span class="sb-kind" style="color:var(--fn)">F</span>run_hosted_or</a>
 <a class="sl" href="SessionNode.html#fn-serve"><span class="sb-kind" style="color:var(--fn)">F</span>serve</a>
@@ -2563,7 +2574,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a href="ClusterAuth.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>ClusterAuth</h3><p>ClusterAuth: shared-secret challenge/response for the net-kernel handshake.</p><div class="st"><span>2 functions</span><span>0 types</span></div></div></a>
 <a href="ClusterConn.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>ClusterConn</h3><p>ClusterConn: the net-kernel connection lifecycle (distributed P1, L2).</p><div class="st"><span>7 functions</span><span>0 types</span></div></div></a>
 <a href="ClusterLoad.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>ClusterLoad</h3><p>ClusterLoad: per-node CPU/memory headroom for capacity-aware RPC routing.</p><div class="st"><span>6 functions</span><span>1 types</span></div></div></a>
-<a href="ClusterNode.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>ClusterNode</h3><p>ClusterNode: one running cluster node -- it joins from seed addresses, runs</p><div class="st"><span>47 functions</span><span>11 types</span></div></div></a>
+<a href="ClusterNode.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>ClusterNode</h3><p>ClusterNode: one running cluster node -- it joins from seed addresses, runs</p><div class="st"><span>49 functions</span><span>11 types</span></div></div></a>
 <a href="Compress.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Compress</h3><p>Compress module: gzip, deflate, zstd, and brotli compression.</p><div class="st"><span>2 functions</span><span>5 types</span></div></div></a>
 <a href="Config.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Config</h3><p>Config module: layered application configuration backed by Vault.</p><div class="st"><span>26 functions</span><span>0 types</span></div></div></a>
 <a href="ConsistentHash.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>ConsistentHash</h3><p>ConsistentHash: consistent hashing ring for distributed load balancing.</p><div class="st"><span>8 functions</span><span>1 types</span></div></div></a>
@@ -2643,8 +2654,8 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a href="RingBuf.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>RingBuf</h3><p>RingBuf: mutable fixed-capacity circular buffer.</p><div class="st"><span>12 functions</span><span>0 types</span></div></div></a>
 <a href="Scheduler.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Scheduler</h3><p>Scheduler: runtime observability for the actor/task scheduler.</p><div class="st"><span>5 functions</span><span>0 types</span></div></div></a>
 <a href="Seq.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Seq</h3><p>Seq module: lazy fold-based sequences (church-encoded).</p><div class="st"><span>27 functions</span><span>2 types</span></div></div></a>
-<a href="Session.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Session</h3><div class="st"><span>8 functions</span><span>1 types</span></div></div></a>
-<a href="SessionNode.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>SessionNode</h3><p>SessionNode: the `Session.Ops` network transport. A protocol's</p><div class="st"><span>21 functions</span><span>7 types</span></div></div></a>
+<a href="Session.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Session</h3><div class="st"><span>9 functions</span><span>1 types</span></div></div></a>
+<a href="SessionNode.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>SessionNode</h3><p>SessionNode: the `Session.Ops` network transport. A protocol's</p><div class="st"><span>27 functions</span><span>9 types</span></div></div></a>
 <a href="Set.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Set</h3><p>Set module: persistent hash-array-mapped-trie set.</p><div class="st"><span>15 functions</span><span>2 types</span></div></div></a>
 <a href="Sigil.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Sigil</h3><p>Sigil module: handlers for sigil expressions (~R, ~J, etc.)</p><div class="st"><span>4 functions</span><span>0 types</span></div></div></a>
 <a href="Signal.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Signal</h3><p>Signal module: register deferred handlers for OS signals.</p><div class="st"><span>3 functions</span><span>1 types</span></div></div></a>

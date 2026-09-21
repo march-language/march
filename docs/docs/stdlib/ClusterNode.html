@@ -421,8 +421,10 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="ClusterNode.html#fn-core_seed_self"><span class="sb-kind" style="color:var(--fn)">F</span>core_seed_self</a>
 <a class="sl" href="ClusterNode.html#fn-core_tick"><span class="sb-kind" style="color:var(--fn)">F</span>core_tick</a>
 <a class="sl" href="ClusterNode.html#fn-core_unregister"><span class="sb-kind" style="color:var(--fn)">F</span>core_unregister</a>
+<a class="sl" href="ClusterNode.html#fn-creation"><span class="sb-kind" style="color:var(--fn)">F</span>creation</a>
 <a class="sl" href="ClusterNode.html#fn-demonitor_remote"><span class="sb-kind" style="color:var(--fn)">F</span>demonitor_remote</a>
 <a class="sl" href="ClusterNode.html#fn-event_text"><span class="sb-kind" style="color:var(--fn)">F</span>event_text</a>
+<a class="sl" href="ClusterNode.html#fn-global_pid"><span class="sb-kind" style="color:var(--fn)">F</span>global_pid</a>
 <a class="sl" href="ClusterNode.html#fn-info_of"><span class="sb-kind" style="color:var(--fn)">F</span>info_of</a>
 <a class="sl" href="ClusterNode.html#fn-link_count"><span class="sb-kind" style="color:var(--fn)">F</span>link_count</a>
 <a class="sl" href="ClusterNode.html#fn-lookup"><span class="sb-kind" style="color:var(--fn)">F</span>lookup</a>
@@ -2031,6 +2033,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Session.html#fn-fail"><span class="sb-kind" style="color:var(--fn)">F</span>fail</a>
 <a class="sl" href="Session.html#fn-leave"><span class="sb-kind" style="color:var(--fn)">F</span>leave</a>
 <a class="sl" href="Session.html#fn-on_cancel"><span class="sb-kind" style="color:var(--fn)">F</span>on_cancel</a>
+<a class="sl" href="Session.html#fn-on_crash"><span class="sb-kind" style="color:var(--fn)">F</span>on_crash</a>
 <a class="sl" href="Session.html#fn-register"><span class="sb-kind" style="color:var(--fn)">F</span>register</a>
 <a class="sl" href="Session.html#fn-suspend"><span class="sb-kind" style="color:var(--fn)">F</span>suspend</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="SessionNode.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="SessionNode.html">SessionNode</a></div><div class="sb-sub"><a class="sl" href="SessionNode.html#type-Link"><span class="sb-kind" style="color:var(--ty)">T</span>Link</a>
@@ -2040,15 +2043,21 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="SessionNode.html#type-Addr"><span class="sb-kind" style="color:var(--ty)">T</span>Addr</a>
 <a class="sl" href="SessionNode.html#type-Addrs"><span class="sb-kind" style="color:var(--ty)">T</span>Addrs</a>
 <a class="sl" href="SessionNode.html#type-RunError"><span class="sb-kind" style="color:var(--ty)">T</span>RunError</a>
+<a class="sl" href="SessionNode.html#type-OfferCount"><span class="sb-kind" style="color:var(--ty)">T</span>OfferCount</a>
+<a class="sl" href="SessionNode.html#type-Offer"><span class="sb-kind" style="color:var(--ty)">T</span>Offer</a>
 <a class="sl" href="SessionNode.html#fn-accept_from"><span class="sb-kind" style="color:var(--fn)">F</span>accept_from</a>
 <a class="sl" href="SessionNode.html#fn-accepts"><span class="sb-kind" style="color:var(--fn)">F</span>accepts</a>
 <a class="sl" href="SessionNode.html#fn-addr_of"><span class="sb-kind" style="color:var(--fn)">F</span>addr_of</a>
 <a class="sl" href="SessionNode.html#fn-addrs_from_env"><span class="sb-kind" style="color:var(--fn)">F</span>addrs_from_env</a>
+<a class="sl" href="SessionNode.html#fn-close_offer"><span class="sb-kind" style="color:var(--fn)">F</span>close_offer</a>
 <a class="sl" href="SessionNode.html#fn-connect_to"><span class="sb-kind" style="color:var(--fn)">F</span>connect_to</a>
 <a class="sl" href="SessionNode.html#fn-deliver"><span class="sb-kind" style="color:var(--fn)">F</span>deliver</a>
 <a class="sl" href="SessionNode.html#fn-dials"><span class="sb-kind" style="color:var(--fn)">F</span>dials</a>
 <a class="sl" href="SessionNode.html#fn-finish"><span class="sb-kind" style="color:var(--fn)">F</span>finish</a>
+<a class="sl" href="SessionNode.html#fn-initiate"><span class="sb-kind" style="color:var(--fn)">F</span>initiate</a>
 <a class="sl" href="SessionNode.html#fn-missing_addrs"><span class="sb-kind" style="color:var(--fn)">F</span>missing_addrs</a>
+<a class="sl" href="SessionNode.html#fn-offer_hosted"><span class="sb-kind" style="color:var(--fn)">F</span>offer_hosted</a>
+<a class="sl" href="SessionNode.html#fn-offer_role"><span class="sb-kind" style="color:var(--fn)">F</span>offer_role</a>
 <a class="sl" href="SessionNode.html#fn-open"><span class="sb-kind" style="color:var(--fn)">F</span>open</a>
 <a class="sl" href="SessionNode.html#fn-ops"><span class="sb-kind" style="color:var(--fn)">F</span>ops</a>
 <a class="sl" href="SessionNode.html#fn-parse_addr"><span class="sb-kind" style="color:var(--fn)">F</span>parse_addr</a>
@@ -2056,7 +2065,9 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="SessionNode.html#fn-require"><span class="sb-kind" style="color:var(--fn)">F</span>require</a>
 <a class="sl" href="SessionNode.html#fn-run"><span class="sb-kind" style="color:var(--fn)">F</span>run</a>
 <a class="sl" href="SessionNode.html#fn-run_cluster"><span class="sb-kind" style="color:var(--fn)">F</span>run_cluster</a>
+<a class="sl" href="SessionNode.html#fn-run_cluster_hosted"><span class="sb-kind" style="color:var(--fn)">F</span>run_cluster_hosted</a>
 <a class="sl" href="SessionNode.html#fn-run_error_message"><span class="sb-kind" style="color:var(--fn)">F</span>run_error_message</a>
+<a class="sl" href="SessionNode.html#fn-run_error_message_named"><span class="sb-kind" style="color:var(--fn)">F</span>run_error_message_named</a>
 <a class="sl" href="SessionNode.html#fn-run_hosted"><span class="sb-kind" style="color:var(--fn)">F</span>run_hosted</a>
 <a class="sl" href="SessionNode.html#fn-run_hosted_or"><span class="sb-kind" style="color:var(--fn)">F</span>run_hosted_or</a>
 <a class="sl" href="SessionNode.html#fn-serve"><span class="sb-kind" style="color:var(--fn)">F</span>serve</a>
@@ -2587,8 +2598,10 @@ record update to tune them.</code></pre></div></div>
 <div class="item" id="fn-core_seed_self"><div class="ih"><span class="badge bfn">fn</span><span class="name">core_seed_self</span><span class="sig">core_seed_self(st : <a href="#type-CnState">CnState</a>, addr : String) : <a href="#type-CnState">CnState</a></span><a class="anchor-link" href="#fn-core_seed_self" title="Link">#</a></div><div class="ib"><p>A dial of [addr] reached this node itself (a seed list naming us): never dial it again.</p></div></div>
 <div class="item" id="fn-core_tick"><div class="ih"><span class="badge bfn">fn</span><span class="name">core_tick</span><span class="sig">core_tick(st : <a href="#type-CnState">CnState</a>, now : Int) : (<a href="#type-CnState">CnState</a>, List(<a href="#type-CnEffect">CnEffect</a>))</span><a class="anchor-link" href="#fn-core_tick" title="Link">#</a></div><div class="ib"><p>One tick at [now]: fold the queued SWIM events and step the driver (its actions become control frames to linked peers), derive the member events, and plan the dials this tick allows.</p></div></div>
 <div class="item" id="fn-core_unregister"><div class="ih"><span class="badge bfn">fn</span><span class="name">core_unregister</span><span class="sig">core_unregister(st : <a href="#type-CnState">CnState</a>, name : String) : (<a href="#type-CnState">CnState</a>, List(<a href="#type-CnEffect">CnEffect</a>))</span><a class="anchor-link" href="#fn-core_unregister" title="Link">#</a></div><div class="ib"><p>Unregister [name] if this node holds it (compare-and-delete).</p></div></div>
+<div class="item" id="fn-creation"><div class="ih"><span class="badge bfn">fn</span><span class="name">creation</span><span class="sig">creation(h : <a href="#type-ClusterHandle">ClusterHandle</a>) : Int do Vault.get_or(h.meta, &quot;creation&quot;, 0) end</span><a class="anchor-link" href="#fn-creation" title="Link">#</a></div><div class="ib"><p>This node's creation (its incarnation number, part of every global pid it issues).</p></div></div>
 <div class="item" id="fn-demonitor_remote"><div class="ih"><span class="badge bfn">fn</span><span class="name">demonitor_remote</span><span class="sig">demonitor_remote(h : <a href="#type-ClusterHandle">ClusterHandle</a>, target : GlobalPid.Pid, r : Int) : ()</span><a class="anchor-link" href="#fn-demonitor_remote" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="fn-event_text"><div class="ih"><span class="badge bfn">fn</span><span class="name">event_text</span><span class="sig">event_text(ev : <a href="#type-NodeEvent">NodeEvent</a>) : String</span><a class="anchor-link" href="#fn-event_text" title="Link">#</a></div><div class="ib"></div></div>
+<div class="item" id="fn-global_pid"><div class="ih"><span class="badge bfn">fn</span><span class="name">global_pid</span><span class="sig">global_pid(h : <a href="#type-ClusterHandle">ClusterHandle</a>, pid : Int) : GlobalPid.Pid</span><a class="anchor-link" href="#fn-global_pid" title="Link">#</a></div><div class="ib"><p>A global pid for the local actor [pid] on this node (to hand to a peer as a reply address).</p></div></div>
 <div class="item" id="fn-info_of"><div class="ih"><span class="badge bfn">fn</span><span class="name">info_of</span><span class="sig">info_of(m : <a href="Membership.html#type-Member">Member</a>) : <a href="#type-NodeInfo">NodeInfo</a></span><a class="anchor-link" href="#fn-info_of" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="fn-link_count"><div class="ih"><span class="badge bfn">fn</span><span class="name">link_count</span><span class="sig">link_count(h : <a href="#type-ClusterHandle">ClusterHandle</a>) : Int do Vault.get_or(h.meta, &quot;links&quot;, 0) end</span><a class="anchor-link" href="#fn-link_count" title="Link">#</a></div><div class="ib"><p>How many peers this node currently has a connection pair to.</p></div></div>
 <div class="item" id="fn-lookup"><div class="ih"><span class="badge bfn">fn</span><span class="name">lookup</span><span class="sig">lookup(h : <a href="#type-ClusterHandle">ClusterHandle</a>, name : String) : Option(GlobalPid.Pid)</span><a class="anchor-link" href="#fn-lookup" title="Link">#</a></div><div class="ib"><p>The process bound to [name] cluster-wide, as this node sees it (a Vault read).</p></div></div>
